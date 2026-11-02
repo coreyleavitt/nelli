@@ -437,4 +437,4 @@ suite "S8bz (7): {.global.} and {.noinit.} locals":
 suite "S8bz: walker version":
 
   test "the walker version is at least S8bz's":
-    check parseInt(symexWalkerVersion) >= 241
+    check parseInt(symexWalkerVersion) >= 249

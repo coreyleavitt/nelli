@@ -411,8 +411,11 @@ suite "S8bh (1): var writes through an indirect call":
     declines(sutUnknown, "uk_moved", ceClosureUnknownCallee, "`f`")
     declines(sutUnknownHeap, "ukh_moved", ceClosureUnknownCallee, "`f`")
 
-  test "a heap actual the body reaches through a capture declines":
-    declines(sutHeapCapture, "hc_dead", feUnsupportedOp, "outside its formals")
+  test "a heap actual the body reaches through a capture (RFC-0005 S8ca)":
+    # S8bh declined it ("outside its formals"). RFC-0005 S8ca: the field is
+    # passed by reference (`bindVarLocs`' `ref` mode), so the body's write
+    # through its capture lands on the formal's location: Nim's 5.
+    discard clean(sutHeapCapture, "hc_dead", sxUnsat)
     discard clean(sutHeapCaptureOther, "hco_dead", sxUnsat)
     discard clean(sutHeapCaptureOther, "hco", sxSat)
 

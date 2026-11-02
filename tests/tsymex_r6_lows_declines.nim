@@ -68,6 +68,8 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/types
+import nelli/smt/runtime
 
 # =============================================================================
 # N15 -- field-sourced placeholder: index vs .len must report the SAME kind.
@@ -221,6 +223,15 @@ proc n41ClosureValidTableParamBlock(n: int) =
       let f = proc(t: Table[string, int]): int = n
       symexTarget("n41_closure_validtable_param_block")
 
+proc n41ClosureProcParam(n: int) =
+  ## RFC-0005 S8ca: a closure parameter of a proc type still has no
+  ## single-leaf sort (a seq, table, set or array has its leaves', and a
+  ## case object is held otherwise).
+  for i in 0 ..< 1:
+    block:
+      let f = proc(g: proc(x: int): int {.nimcall.}): int = n
+      symexTarget("n41_closure_proc_param")
+
 proc n41HeapReadBlock() =
   let p = n41MkHeap()
   if p != nil:
@@ -229,18 +240,15 @@ proc n41HeapReadBlock() =
 
 suite "symex round-6 N41 -- compound-value sort derivation: classified decline, not a whole-run crash":
 
-  test "N41-1 RED->GREEN: a VALID Table[string,int] closure PARAM reports seUnsupportedCompoundSortLeaf (not weInternalWalkerFault)":
+  test "N41-1 RED->GREEN: a VALID Table[string,int] closure PARAM is not a whole-run crash (RFC-0005 S8ca: modelled, sxSat)":
+    # RFC-0005 S8ca: a table contributes the sort of each of its leaves
+    # (`sortOfTuple`); the closure is built and the target, reached
+    # unconditionally, is sxSat. It was `seUnsupportedCompoundSortLeaf`.
     let r = symexFind(n41ClosureValidTableParamBlock, tLabel("n41_closure_validtable_param_block"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
-    check r.status == sxUnknown
-    var sawFault = false
-    var sawClassified = false
-    for e in r.errors:
-      if e.kind == weInternalWalkerFault: sawFault = true
-      if e.kind == seUnsupportedCompoundSortLeaf: sawClassified = true
-    check not sawFault
-    check sawClassified
+    check r.status == sxSat
+    for e in r.errors: check e.kind != weInternalWalkerFault
 
   test "N41-2 RED->GREEN: a heap-deref READ of a tuple field (a Table[string,int] one until RFC-0005 S8ap) is a classified decline (not weInternalWalkerFault) -- the family N40 flagged and masked":
     # RFC-0005 S8ar: a tuple with a part that is not a heap cell value has a
@@ -261,16 +269,19 @@ suite "symex round-6 N41 -- compound-value sort derivation: classified decline, 
     check not sawFault
     check sawClassified
 
-  test "N41-6: the compound-sort-leaf message renders plain language, not the bare SymValKind identifier \"svTable\" (N12 SymValKind follow-up, plainEnglishSymValKind)":
-    let r = symexFind(n41ClosureValidTableParamBlock, tLabel("n41_closure_validtable_param_block"))
+  test "N41-6: the compound-sort-leaf message renders plain language, not a bare SymValKind identifier (N12 SymValKind follow-up, plainEnglishSymValKind)":
+    # RFC-0005 S8ca: a closure's table parameter is modelled (N41-1), and
+    # no walked shape is known to reach `seUnsupportedCompoundSortLeaf` any
+    # more (a proc-typed parameter declines another way, N41-4); the
+    # message's kind goes through `plainEnglishSymValKind`, pinned here.
+    check plainEnglishSymValKind(svTable) == "table value"
+    check plainEnglishSymValKind(svClosure) == "closure value"
+    let r = symexFind(n41ClosureProcParam, tLabel("n41_closure_proc_param"))
     check r.status == sxUnknown
-    var sawKind = false
     for e in r.errors:
-      if e.kind == seUnsupportedCompoundSortLeaf:
-        sawKind = true
-        check "svTable" notin e.msg
-        check "table value" in e.msg   ## the plain-language replacement
-    check sawKind
+      checkpoint $e.kind & ": " & e.msg
+      check "svClosure" notin e.msg
+      check "svTable" notin e.msg
 
 suite "symex round-6 N41 -- SOUNDNESS: unmasking the compound family never lets a tainted path report sxSat":
 
@@ -279,8 +290,11 @@ suite "symex round-6 N41 -- SOUNDNESS: unmasking the compound family never lets 
     check r.status != sxSat
     check r.status == sxUnknown
 
-  test "N41-4 SOUNDNESS: closure construction over a compound VALID Table param, target reached UNCONDITIONALLY, is NEVER sxSat":
-    let r = symexFind(n41ClosureValidTableParamBlock, tLabel("n41_closure_validtable_param_block"))
+  test "N41-4 SOUNDNESS: a compound VALID Table param whose sort is not derived, target reached UNCONDITIONALLY, is NEVER sxSat":
+    # RFC-0005 S8ca: the closure's table parameter is modelled now (N41-1,
+    # sxSat, which Nim reaches); a proc-typed parameter is the shape that
+    # still has no single-leaf sort.
+    let r = symexFind(n41ClosureProcParam, tLabel("n41_closure_proc_param"))
     check r.status != sxSat
     check r.status == sxUnknown
 

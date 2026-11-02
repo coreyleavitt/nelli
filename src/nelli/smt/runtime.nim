@@ -32,10 +32,12 @@ import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
+import ./pcre_engine   ## RFC-0005 S8bt: the engine of unanchored calls
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
 import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
+import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
   ## lives in this Z3-free leaf module so `fuzz.nim` can share it directly
@@ -201,6 +203,16 @@ type
     ## + ADR-0020). This carrier exists for the pre-classified-degrade case.
     kind*: SymexErrorKind
 
+  StrBuf* = enum
+    ## RFC-0005 S8ca. Whose memory a string value holds, as Nim's strings
+    ## have it: a literal's (shared, read-only: the first write copies it,
+    ## `prepareMutation`), or its own (written in place). A by-value copy
+    ## of an address-taken string shares that memory, so a write through
+    ## the pointer is seen through the copy only in the second case
+    ## (`bindVarLocs`). A value of unknown provenance (a parameter, a heap
+    ## read, a merge) is `sbUnknown`.
+    sbUnknown, sbLiteral, sbOwned
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -317,6 +329,7 @@ type
       arrElemTy*: IRType
     of svString:
       str*: Z3String
+      strBuf*: StrBuf   ## RFC-0005 S8ca: whose memory it is (Nim's)
     of svSeq:
       seqLen*:     Z3Int
       seqDataRaw*: Z3AnyAst       ## erased Z3Array[Z3Int, sortOf(T)]
@@ -509,6 +522,29 @@ type
     ptrAst, val: Z3AnyAst
     reached: seq[int64]   ## the candidates' codes it has been applied to
 
+  HeapTerm = tuple[ast: Z3AnyAst; input: string]
+    ## RFC-0005 S8ca. A heap array's term on a path: the array the path
+    ## holds (`Path.heaps`), or, while it holds none, the name of the free
+    ## input constant it reads (`heapInputName`), which an opaque call's
+    ## havoc renames.
+
+  ViewMark = object
+    ## RFC-0005 S8ca. A by-value seq formal sharing the memory of an
+    ## address-taken variable (a `view` cell entry, `bindVarLocs`): the
+    ## heap arrays its value is read from (`keys`) and their terms when the
+    ## formal last took the cell's value (`at`). It follows the cell only
+    ## while every change of those arrays since is an in-place step
+    ## (`Path.inPlaceSteps`, `viewInPlace`).
+    local: string
+    frame: int
+    keys:  seq[string]
+    at:    seq[HeapTerm]
+
+  InPlaceStep = tuple[key: string; before, after: HeapTerm]
+    ## RFC-0005 S8ca. One store into the heap array `key` that wrote a
+    ## seq's element in its memory (`dwInPlace`, or a `view`'s sync of an
+    ## element written by name): the array's term before and after it.
+
   Path = ref object
     ptrStores: seq[PtrStore]
       ## RFC-0005 S8bz. Every store through a pointer on this path, in order.
@@ -593,6 +629,13 @@ type
       ## loop's forks (`atIteration`), inherited by every fork below.
       ## `solveTargetHit` compares it with the depth of a tainted hit that
       ## ran out of budget (`WalkCtx.budgetOutDepths`).
+    viewMarks: seq[ViewMark]
+      ## RFC-0005 S8ca. The by-value seq formals on this path that share an
+      ## address-taken variable's memory. Inherited by every fork, and by
+      ## the caller on a return; a returned frame's are dropped as read.
+    inPlaceSteps: seq[InPlaceStep]
+      ## RFC-0005 S8ca. The in-place element writes this path made while it
+      ## had a `viewMarks` entry, in order. Inherited as `viewMarks` is.
 
   Degrade = object
     ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). The token a
@@ -817,6 +860,13 @@ proc deepCopyHeapState(src: Path):
   # isolation that gives disjoint-path counter restart for free.
   result.liveRefs = src.liveRefs
 
+func sameHeapTerm(a, b: HeapTerm): bool =
+  ## RFC-0005 S8ca. The same array term (`HeapTerm`).
+  let x = cast[pointer](a.ast.raw)
+  let y = cast[pointer](b.ast.raw)
+  if x == nil or y == nil: x == nil and y == nil and a.input == b.input
+  else: x == y
+
 template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                                 taintExpr: Taint): Path =
   ## Phase 15 H1 / R3 hardening / RFC-0005 S1: construct a CHILD `Path` from
@@ -844,7 +894,9 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        addrOwners: parent.addrOwners,                    ## RFC-0005 S8ax
        elemCells: parent.elemCells,                      ## RFC-0005 S8be
        ptrStores: parent.ptrStores,                      ## RFC-0005 S8bz
-       loopIters: parent.loopIters)                      ## RFC-0005 S8y
+       loopIters: parent.loopIters,                      ## RFC-0005 S8y
+       viewMarks: parent.viewMarks,                      ## RFC-0005 S8ca
+       inPlaceSteps: parent.inPlaceSteps)                ## RFC-0005 S8ca
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## R3 hardening: the ONLY spelling ordinary fork sites use to derive a
@@ -904,6 +956,20 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
            cast[pointer](e.refAst.raw) == cast[pointer](o.refAst.raw):
           seen = true
       if not seen: merged.elemCells.add o
+    # RFC-0005 S8ca: and its views and in-place steps (a closure body's
+    # descent starts from a fresh root).
+    for o in caller.viewMarks:
+      var seen = false
+      for e in merged.viewMarks:
+        if e.frame == o.frame and e.local == o.local: seen = true
+      if not seen: merged.viewMarks.add o
+    for o in caller.inPlaceSteps:
+      var seen = false
+      for e in merged.inPlaceSteps:
+        if e.key == o.key and sameHeapTerm(e.before, o.before) and
+           sameHeapTerm(e.after, o.after):
+          seen = true
+      if not seen: merged.inPlaceSteps.add o
     merged
 
 proc atIteration(p: Path; loop, n: int) =
@@ -1762,6 +1828,47 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
   ## so a raise the C backend loses still reaches `runSymex`.
   if z3ApiErrorCount == 0: z3ApiFirstError = $e
   inc z3ApiErrorCount
+
+# ---- RFC-0005 S8ce: a raise survives every destroy on its way out -----------
+#
+# The mechanism behind every "goto-exception hazard" note in this file (N31,
+# N36, ADR-0023, S8m). Nim 2.2.10's C code generator (goto exceptions) runs a
+# destructor on the raise path with the error flag still set, unless it takes
+# that destructor as able to raise: a call's result temporary (`T = f(); if
+# (*nimErr_) { =destroy(T); goto exit; }`, `walkBlock`'s `seq[Path]`) and a
+# local at its scope's merge label alike. nim-z3's hooks wrapped their bodies
+# in `try: ... except CatchableError: discard`, and a `try` entered with the
+# flag set takes the IN-FLIGHT exception as its own: its first checked call
+# jumps to its handler, which clears the flag and pops it. The frame returned
+# as if nothing was raised, and the walk went on to a false verdict. C++
+# exceptions are native and were unaffected.
+#
+# S8ce fixes the hooks at the root (nim-z3 `rfc-0005-s8ce`: raise-free by
+# construction, no `try`, `quirky`), so every raise in the walk, witness
+# extraction's and an own-context solve's among them, reaches
+# `runSymexCaught` on both backends. This module has no lifecycle hook of its
+# own. The in-band sinks those notes describe predate the fix and remain the
+# walker's way to report a decline; they are no longer the only sound one.
+
+when defined(symexTestInjectWalkerFault):
+  # RFC-0005 S8ce fault injection (compiled out of every normal build;
+  # `-d:symexTestInjectWalkerFault` is set for its dedicated test files only,
+  # by their `.nim.cfg`). A raise unwinding through the walk crosses destroys
+  # of Z3-term-holding temporaries (`walkBlock`'s reassigned `seq[Path]`,
+  # `walk`'s `states` / `next`, a term-building helper's local `seq[Z3Bool]`);
+  # on the C backend nim-z3's hooks used to swallow it there. Dispatch
+  # reaching the sentinel label `__inject_s8ce_<shape>__` arms one shape; the
+  # next operation of that shape raises out of the walker's own code with
+  # that operation's Z3 temporaries live (`injectShapeFault`'s call sites
+  # name them). The `dispatch` shape fires at the sentinel statement itself.
+  var injectedShape {.threadvar.}: string
+    ## The armed shape; cleared when it fires and by `resetSymexRunState`.
+
+  proc injectShapeFault(shape: string) =
+    if injectedShape == shape:
+      injectedShape = ""
+      raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8ce raise-shape test)]
+        "S8ce synthetic " & shape & " fault (symexTestInjectWalkerFault)")
 
 proc sortFault(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
   ## RFC-0005 S8m. True, after recording the walker fault, when `got` is not
@@ -2941,11 +3048,21 @@ proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
   ## contributes one sort via `Z3_get_sort`. Consumed by the C2b application
   ## path (raw `Z3_mk_func_decl` / `Z3_mk_app`, D4). Non-tuple input is treated
   ## as a single leaf (the degenerate one-element env).
+  ## RFC-0005 S8ca: a seq, table or set (a capture, or a parameter of a
+  ## proc value, `paramSorts`) contributes the sort of each of its leaves
+  ## (`svLeafAsts`), as a nested tuple does, and an array its elements'. It had no single-leaf sort, and
+  ## a proc value taking a seq declined (`seUnsupportedCompoundSortLeaf`).
   let ctx = requireCurrentContext()
   case sv.kind
   of svTuple:
     for f in sv.fields:
       for s in sortOfTuple(f): result.add s
+  of svSeq, svTable, svSet:
+    for leaf in svLeafAsts(sv):
+      result.add ctx.checkErr Z3_get_sort(ctx.raw, leaf)
+  of svArray:   # RFC-0005 S8ca: its elements, as a tuple's fields
+    for e in sv.arrElems:
+      for s in sortOfTuple(e): result.add s
   else:
     result.add ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(sv))
 
@@ -3989,6 +4106,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekIntToStr, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
      iekStrCaptureRe,   # RFC-0005 S8bb: a capture group, a string
+     iekStrSetAt, iekStrFromChars,   # RFC-0005 S8ca
      iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
     # Phase 15 S5/S8/S10a: replace/join/concat/`$int` all produce a
     # Z3String. svString sentinel so `s.replace(...) == "lit"` / `xs.join(sep) ==
@@ -4011,7 +4129,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
-                   iekStrCaptureRe,
+                   iekStrCaptureRe, iekStrSetAt, iekStrFromChars,
                    iekIntToStr, iekStrToInt,
                    iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
@@ -4019,7 +4137,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # consumed only via `.len`/index — never a direct `==` — so it needs no
     # comparison proto here.)
     none(SymVal)
-  of iekContains:
+  of iekContains, iekTabRemovedSince:   # S8bx: a Bool
     none(SymVal)
   of iekGetCurrentExnMsg:
     # Phase 15 E8: `getCurrentExceptionMsg()` → Z3String. svString sentinel so a
@@ -4150,6 +4268,15 @@ var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
   ## superset of the real ones, so its UNSAT is the query's own; Z3's
   ## unfolding of the recursive term never reaches the facts' conflict
   ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
+
+var regexRecFactConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8bt. The facts of the `replace` values in `regexRecDefConds`
+  ## (`regex_parser.replaceLemmas`): each over one occurrence's own `r`,
+  ## its receiver and `by`, and fresh Ints (the match count, the bytes
+  ## removed), and true of every receiver, so they prune no real model.
+  ## `checkCapped` asserts them where it leaves the definitions out, and
+  ## leaves both out of the steps after it (each `r` replaced by its term).
+  ## S8bj put them in `stripDecompConds`.
 
 var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## Round-4 Slice B (ADR-0026). Decomposition constraints emitted by the
@@ -5909,6 +6036,8 @@ proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
     # value, so `rangeCondsIfNeeded` is not the applicable helper]
     conds = bvRangeConds(sv, lo, hi, sgn)  # [range-invariant: range-defect-check]
   if conds.len > 0:
+    when defined(symexTestInjectWalkerFault):
+      injectShapeFault("conds")  # RFC-0005 S8ce: a local seq[Z3Bool] held
     var inRange = conds[0]
     for i in 1 ..< conds.len: inRange = inRange and conds[i]
     rangeDefectConds.add(not inRange)              # threadvar fallback
@@ -6464,6 +6593,46 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       SymVal(kind: svRef, refAst: nilAst, refPointee: pointee)
 
 func defaultZeroTotal(t: IRType): bool
+
+proc presenceRemoved(cur, base: Z3AnyAst): bool =
+  ## RFC-0005 S8bx (item 4). The presence array `cur` is NOT `base` under
+  ## stores of `true` alone (through `ite` merges): some store between them
+  ## writes `false` (a removal), or `cur` is reached otherwise (a fresh
+  ## array, a callee's havoc). Conservative: only `true` stores down to
+  ## `base` on every branch is "no removal".
+  let ctx = cur.ctx
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  # The decl kinds of a store and an `ite`, read off well-sorted probes (as
+  # `seqCapKinds` reads its kinds).
+  let probeArr = mkArrayVar[Z3Bool, Z3Bool](ctx, "__s8bx_kind_probe_arr")
+  let probeC = mkBoolVar(ctx, "__s8bx_kind_probe_c")
+  let probeStore = wrap[Z3AnyAst](ctx, checkedStore(ctx, probeArr.raw,
+    probeC.raw, probeC.raw))
+  let probeIte = wrap[Z3AnyAst](ctx, checkedIte(ctx, probeC.raw,
+    probeArr.raw, probeStore.raw))
+  let storeKind = kindOf(probeStore.raw)
+  let iteKind = kindOf(probeIte.raw)
+  var stack = @[cur.raw]
+  var steps = 0
+  while stack.len > 0:
+    let t = stack.pop()
+    if t == base.raw: continue
+    inc steps
+    if steps > 100_000 or Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST:
+      return true
+    let app = Z3_to_app(ctx.raw, t)
+    let k = kindOf(t)
+    if k == storeKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      let v = Z3_get_app_arg(ctx.raw, app, 2)
+      if $wrap[Z3Bool](ctx, v) != "true": return true
+      stack.add Z3_get_app_arg(ctx.raw, app, 0)
+    elif k == iteKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      stack.add Z3_get_app_arg(ctx.raw, app, 1)
+      stack.add Z3_get_app_arg(ctx.raw, app, 2)
+    else:
+      return true
+  false
 
 proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
   ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
@@ -8375,6 +8544,9 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     allocateSym(tBool(), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrSplit:
     allocateSym(tSeq(tString()), freshDegradeName("__strArmDegrade"), fresh)
+  of iekStrChars:   # RFC-0005 S8ca: a seq of chars
+    allocateSym(tSeq(tInt(8, signed = false)),
+                freshDegradeName("__strArmDegrade"), fresh)
   of iekStrUnsupported:
     # S10b adjudication (walker v116) + fix-slice item 5 (round-6 re-review):
     # `iekStrUnsupported`'s callers span string/int/float/bool-ish contexts
@@ -9111,15 +9283,28 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     # slice (`L == 0`, `d[3 .. ^1]`, `d[5 .. 4]`) never raises. Every one
     # of those was an `IndexDefect` (`not (lo >= 0 and hi < len and
     # lo <= hi + 1)`), including the empty slice past the end.
+    #
+    # RFC-0005 S8ca: a `toOpenArray` view (`ssView`) is checked otherwise
+    # (probed on the pinned toolchain, a 4-element seq): `IndexDefect` iff
+    # its length is not 0 and either bound is outside `0 ..< len` -- (2, -1),
+    # (4, 1), (1, -2) raise; (2, 0) and (3, 0) do not, and make a view of
+    # negative length (-1, -2) that no index reaches (every `a[i]` raises,
+    # as the walk's index check does for a negative length) and no loop
+    # enters. Nothing raises `RangeDefect`. S8bu declined a negative length.
     let lenZ = recv.seqLen # [placeholder-audited]
     let sliceLen = (hi - lo) + mkInt(1)
-    let idxOob = (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
+    let idxOob =
+      if e.ssView:
+        (sliceLen != mkInt(0)) and
+          ((lo < mkInt(0)) or (lo >= lenZ) or (hi < mkInt(0)) or (hi >= lenZ))
+      else: (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
     let negLen = sliceLen < mkInt(0)
     when not defined(symexSliceNoOobFork):
       strIndexOobConds.add idxOob
       syncStrIndexOobCond(idxOob)
-      rangeDefectConds.add negLen
-      syncRangeDefectCond(negLen)
+      if not e.ssView:
+        rangeDefectConds.add negLen
+        syncRangeDefectCond(negLen)
     inc sliceViewCounter
     let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
     let iVar = mkIntVar("__sliceview_i" & $sliceViewCounter)
@@ -9627,6 +9812,18 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
            "follow-up (feUnsupportedOp)")
     return recv
+  of iekTabRemovedSince:
+    # RFC-0005 S8bx (item 4). Whether a key was removed from the table since
+    # it was `trBase`, read off the term: the presence array is `trBase`'s
+    # under a chain of stores (`[]=` stores `true`, `del` / `pop` / `take`
+    # store `false`, `clear` is a fresh array), so a `false` store, or any
+    # other shape between the two, is a removal -- or one this cannot rule
+    # out, which is the same answer (the slot walk is then declined).
+    let cur = lower(env, e.trCur)
+    let base = lower(env, e.trBase)
+    SymVal(kind: svBool, bo: mkBool(
+      cur.kind != svTable or base.kind != svTable or
+      presenceRemoved(cur.tabPresentRaw, base.tabPresentRaw)))
   of iekContains:
     let recv = lower(env, e.container)
     case recv.kind
@@ -9994,6 +10191,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let pp = probeProto(env, e)
       let l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
       let r = ejectBase(lower(env, e.rhs, pp))
+      when defined(symexTestInjectWalkerFault):
+        injectShapeFault("term")   # RFC-0005 S8ce: both operands built
       lowerArith(l, r, e.bop)
   of iekBorrowOp:
     # Phase 15 G5. A `{.borrow.}` operator on a `distinct T`: EJECT both operands
@@ -10174,6 +10373,8 @@ proc evalStrBytes(m: Z3Model, a: Z3String): string =
   ## Nim byte — the `raise` below is an assertion on that standing
   ## invariant, not a real runtime path.
   let ev = m.eval(a, modelCompletion = true)
+  when defined(symexTestInjectWalkerFault):
+    injectShapeFault("eval")   # RFC-0005 S8ce: the evaluated term live
   let codepoints = getStringContents(ev)
   result = newString(codepoints.len)
   for i, cp in codepoints:
@@ -10182,6 +10383,14 @@ proc evalStrBytes(m: Z3Model, a: Z3String): string =
         "evalStrBytes: model codepoint " & $cp & " at index " & $i &
         " outside nelli's byte-string invariant [0, 255]")
     result[i] = char(cp)
+
+when defined(symexTestInjectWalkerFault):
+  proc injectedExtractionFaultTerms(s: Z3String): seq[Z3String] =
+    ## RFC-0005 S8bx fault injection (see `extractLeaf`): raises with a Z3
+    ## term in its result, which the caller destroys on the raise path.
+    result = @[s]
+    raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+      "S8bx synthetic swallowed extraction fault (symexTestInjectWalkerFault)")
 
 proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
@@ -10261,12 +10470,28 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     # whichever reader path the emitter picks finds the value.
     if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
+    when defined(symexTestInjectWalkerFault):
+      # RFC-0005 S8bx fault injection (compiled out of every normal build;
+      # `-d:symexTestInjectWalkerFault` is set for its dedicated test files
+      # only, by their `.nim.cfg`): witness extraction fails on a string
+      # parameter named for the shape. `injectExtractionFault` raises
+      # straight out of extraction; `injectSwallowedExtractionFault` raises
+      # in a callee whose result -- holding a Z3 term -- the C backend
+      # destroys on the raise path, which loses the raise inside extraction
+      # itself at base (S8ce's nim-z3 fix keeps it).
+      if path == "injectExtractionFault":
+        raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+          "S8bx synthetic extraction fault (symexTestInjectWalkerFault)")
+      if path == "injectSwallowedExtractionFault":
+        var held = @[sv.str]   # reassigned, as `walkBlock` reassigns
+        held = injectedExtractionFaultTerms(sv.str)
+        discard held
     w.strVals[path] = m.evalStrBytes(sv.str)
   of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
      svDistinct, svClosure, svRef, svPtr, svBitSet:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —
     ## the heap-snapshot witness format lands R11b/R12).
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction -- reached only from extractWitness, called once after walk/walkBlock has fully returned a SAT path's frontier (per-path Z3 check happens outside walk's own recursive call stack, not nested inside any walkBlock/loop frame)]
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction -- runs inside the walk since S1c (trySolve); it reaches runSymexCaught as weInternalWalkerFault on both backends (RFC-0005 S8ce)]
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
 proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
@@ -10592,7 +10817,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
         if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
-      raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
+      raise newException(ValueError,  # [raise-audited: category-c: witness extraction (RFC-0005 S8ce; see extractLeaf above)]
         "extractSeqElements: unsupported int width " & $cellTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
@@ -10632,7 +10857,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     # reader uses defaults so it never KeyErrors.
     discard
   else:
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction (RFC-0005 S8ce; see extractLeaf above)]
       "extractSeqElements: unsupported element kind " & $cellTy.kind)
 
 proc bitSetModelMembers(m: Z3Model; sv: SymVal): seq[int64] =
@@ -12782,10 +13007,12 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
         result.add guarded(g, v.v == ite(f.n >= zero, f.n, minusOne))
 
 var byteDomainKinds {.threadvar.}: tuple[ready: bool, concat, extract, andK,
-                                         eq, notK: int]
+                                         eq, notK, orK, impliesK, iteK: int]
   ## RFC-0005 S8y. The decl kinds `dropImpliedByteDomains` matches, read off
   ## terms built once per thread (as `seqCapKinds`: by kind, never by name).
-  ## RFC-0005 S8bp: and `not`, for `mergeMemberships`.
+  ## RFC-0005 S8bp: and `not`, for `mergeMemberships`. RFC-0005 S8by: and
+  ## `or`, `=>` and `ite`, the polarity `mergeMemberships` reads below the
+  ## top level.
 
 proc ensureByteDomainKinds() =
   if byteDomainKinds.ready: return
@@ -12800,7 +13027,11 @@ proc ensureByteDomainKinds() =
                            mkIntVar(ctx, "__s8y_kind_probe_n")).raw),
     andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
     eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw),
-    notK: kindOf((not b).raw))
+    notK: kindOf((not b).raw),
+    orK: kindOf((b or mkBoolVar(ctx, "__s8by_kind_probe_d")).raw),
+    impliesK: kindOf(implies(b, mkBoolVar(ctx, "__s8by_kind_probe_e")).raw),
+    iteK: kindOf(ite(b, mkBoolVar(ctx, "__s8by_kind_probe_f"),
+                     mkBoolVar(ctx, "__s8by_kind_probe_g")).raw))
 
 proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
     seq[Z3Bool] =
@@ -12917,6 +13148,23 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
   ## 6.7M to refute under the length cap, with the cap in step 2's core
   ## (`sxUnknown`); as one membership of the intersection it is UNSAT in
   ## 1,392 units (a fresh context; 5.1 as well).
+  ##
+  ## RFC-0005 S8by: and below the top level, where a membership sits under
+  ## a disjunction, an `ite`, a negation or an implication (`a or not
+  ## s.contains(re"b")`). There a membership literal of `x` is merged with
+  ## those of the same `x` that hold wherever it is evaluated: the other
+  ## conjuncts of each `and` above it, the roots' top-level ones included
+  ## (their intersection `I`). Where those and the literals of `x` in its
+  ## own conjunction number two or more, one of them negated as it is
+  ## read, the conjunction's literals (their intersection `A`) become one:
+  ## `x in (A & I)` where they are asserted, `not (x in (comp(A) & I))`
+  ## where they are denied (under a `not`, or left of a `=>`), so that
+  ## either way Z3 meets one membership of an intersection. Where `x` lies
+  ## in `I`, both terms are true exactly when the literals are, and each
+  ## `and` above is false wherever a conjunct of it is: every root keeps
+  ## its value under every assignment, so the models are the same. A
+  ## literal read both ways (an `ite` condition, an argument of `=`) is
+  ## left as it is.
   ensureByteDomainKinds()
   let bk = byteDomainKinds
   let kinds = seqCapKinds()
@@ -12925,45 +13173,187 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     else: -1
   let byteReId = astId(ctx, star(range(mkString(ctx, "\x00"),
                                        mkString(ctx, "\xff"))).raw)
-  type Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
-  var groups: OrderedTable[int, tuple[x: Z3AnyAst, lits: seq[Lit]]]
+  type
+    Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
+    Held = seq[tuple[re: Z3AnyAst, neg: bool]]
+      ## RFC-0005 S8by. The membership literals of one `x` that hold in a
+      ## context: `re` the set they put `x` in (complemented for a negated
+      ## one), `neg` whether the literal was negated.
+    Pol = enum polPos, polNeg, polBoth
+      ## RFC-0005 S8by. How a term is read: asserted, denied, or both.
   proc conjuncts(r: Z3AnyAst): seq[Z3AnyAst] =
     ## `r`'s top-level conjuncts, in order.
     if kindOf(r) == bk.andK:
       for a in unpackApp(r).args: result.add conjuncts(a)
     else: result.add r
+  proc literal(t: Z3AnyAst): tuple[ok: bool, x, re: Z3AnyAst, neg: bool] =
+    ## `t` as a membership literal `x in re` or `not (x in re)`; a
+    ## byte-domain constraint is none.
+    let neg = kindOf(t) == bk.notK
+    let m = if neg: unpackApp(t).args[0] else: t
+    if kindOf(m) != kinds.inRe: return
+    let args = unpackApp(m).args
+    if not neg and astId(ctx, args[1].raw) == byteReId: return
+    (true, args[0], args[1], neg)
+  # Every term made here is wrapped (and so referenced) at once: Z3 keeps
+  # an unreferenced result only until its next call.
+  proc mk(raw: RawZ3Ast): Z3AnyAst = wrap[Z3AnyAst](ctx, ctx.checkErr raw)
+  proc comp(re: Z3AnyAst): Z3AnyAst =
+    mk Z3_mk_re_complement(ctx.raw, re.raw)
+  proc inter(res: seq[Z3AnyAst]): Z3AnyAst =
+    if res.len == 1: return res[0]
+    var rs = newSeq[RawZ3Ast](res.len)
+    for i, r in res: rs[i] = r.raw
+    mk Z3_mk_re_intersect(ctx.raw, cuint(rs.len),
+                          cast[ptr UncheckedArray[RawZ3Ast]](rs[0].addr))
+  proc member(x, re: Z3AnyAst): Z3AnyAst =
+    mk Z3_mk_seq_in_re(ctx.raw, x.raw, re.raw)
+  proc held(re: Z3AnyAst; neg: bool): tuple[re: Z3AnyAst, neg: bool] =
+    result = (re: re, neg: neg)
+    if neg: result.re = comp(re)
+  proc andOf(outs: seq[Z3AnyAst]): Z3AnyAst =
+    if outs.len == 1: return outs[0]
+    var rs = newSeq[RawZ3Ast](outs.len)
+    for i, r in outs: rs[i] = r.raw
+    mk Z3_mk_and(ctx.raw, cuint(rs.len),
+                 cast[ptr UncheckedArray[RawZ3Ast]](rs[0].addr))
+  var groups: OrderedTable[int, tuple[x: Z3AnyAst, lits: seq[Lit]]]
   for i, r in roots:
     for t in conjuncts(toAnyAst(r)):
-      let neg = kindOf(t) == bk.notK
-      let m = if neg: unpackApp(t).args[0] else: t
-      if kindOf(m) != kinds.inRe: continue
-      let args = unpackApp(m).args
-      if not neg and astId(ctx, args[1].raw) == byteReId: continue
-      groups.mgetOrPut(astId(ctx, args[0].raw), (x: args[0], lits: @[])).lits.add(
-        (root: i, id: astId(ctx, t.raw), re: args[1], neg: neg))
+      let l = literal(t)
+      if not l.ok: continue
+      groups.mgetOrPut(astId(ctx, l.x.raw), (x: l.x, lits: @[])).lits.add(
+        (root: i, id: astId(ctx, t.raw), re: l.re, neg: l.neg))
   var merged: seq[Z3Bool]
   var gone, touched: HashSet[int]
-  for g in groups.values:
+  var top: Table[int, Held]   # RFC-0005 S8by: what holds everywhere
+  for xId, g in groups:
     var anyNeg = false
     for l in g.lits: anyNeg = anyNeg or l.neg
-    if g.lits.len < 2 or not anyNeg: continue
-    var res = newSeq[RawZ3Ast](g.lits.len)
+    if g.lits.len < 2 or not anyNeg:
+      for l in g.lits: top.mgetOrPut(xId, @[]).add held(l.re, l.neg)
+      continue
+    var res = newSeq[Z3AnyAst](g.lits.len)
     for i, l in g.lits:
-      res[i] = if l.neg: ctx.checkErr Z3_mk_re_complement(ctx.raw, l.re.raw)
-               else: l.re.raw
+      res[i] = held(l.re, l.neg).re
       gone.incl l.id
       touched.incl l.root
-    let inter = ctx.checkErr Z3_mk_re_intersect(ctx.raw, cuint(res.len),
-      cast[ptr UncheckedArray[RawZ3Ast]](res[0].addr))
-    merged.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_seq_in_re(ctx.raw,
-                                                              g.x.raw, inter))
-  if merged.len == 0: return @roots
-  for i, r in roots:
-    if i notin touched: result.add r
-    else:
-      for t in conjuncts(toAnyAst(r)):
-        if astId(ctx, t.raw) notin gone: result.add wrap[Z3Bool](ctx, t.raw)
-  result.add merged
+    let one = inter(res)
+    top[xId] = @[(re: one, neg: true)]
+    merged.add wrap[Z3Bool](ctx, member(g.x, one).raw)
+  var flat: seq[Z3Bool]
+  if merged.len == 0: flat = @roots
+  else:
+    for i, r in roots:
+      if i notin touched: flat.add r
+      else:
+        for t in conjuncts(toAnyAst(r)):
+          if astId(ctx, t.raw) notin gone: flat.add wrap[Z3Bool](ctx, t.raw)
+    flat.add merged
+  # RFC-0005 S8by: below the top level. Only a term holding a membership
+  # literal is rebuilt (`holds`), each once per context and reading.
+  var hasLit: Table[int, bool]
+  proc holds(t: Z3AnyAst): bool =
+    let id = astId(ctx, t.raw)
+    if id in hasLit: return hasLit[id]
+    result = literal(t).ok
+    if not result and getAstKind(t) == akApp:
+      for a in unpackApp(t).args:
+        if holds(a):
+          result = true
+          break
+    hasLit[id] = result
+  var memo: Table[(int, int, Pol, bool), Z3AnyAst]
+  var serial = 0
+  proc flip(p: Pol): Pol =
+    case p
+    of polPos: polNeg
+    of polNeg: polPos
+    of polBoth: polBoth
+  proc rewrite(t: Z3AnyAst; env: Table[int, Held]; envId: int; pol: Pol;
+               conj: bool): Z3AnyAst =
+    ## `t` read as `pol` where `env` holds. `conj`: `t` (a Bool term) as a
+    ## conjunction -- its own membership literals merged with `env`, the
+    ## rest rewritten with those literals held too; otherwise each of its
+    ## arguments rewritten, read as its operator reads it.
+    if pol == polBoth or getAstKind(t) != akApp or not holds(t): return t
+    let key = (astId(ctx, t.raw), envId, pol, conj)
+    if key in memo: return memo[key]
+    if not conj:
+      let (decl, args) = unpackApp(t)
+      let k = kindOf(t)
+      var raws = newSeq[RawZ3Ast](args.len)
+      var keep = newSeq[Z3AnyAst](args.len)
+      var changed = false
+      for i, a in args:
+        let p =
+          if k == bk.notK: flip(pol)
+          elif k == bk.andK or k == bk.orK: pol
+          elif k == bk.impliesK: (if i == 0: flip(pol) else: pol)
+          elif k == bk.iteK: (if i == 0: polBoth else: pol)
+          else: polBoth
+        let b = rewrite(a, env, envId, p, getSortKind(a) == skBool)
+        keep[i] = b
+        raws[i] = b.raw
+        changed = changed or b.raw != a.raw
+      result = if not changed: t
+               else: mk(Z3_mk_app(ctx.raw, decl, cuint(raws.len),
+                                  cast[ptr UncheckedArray[RawZ3Ast]](raws[0].addr)))
+      memo[key] = result
+      return
+    let cs = conjuncts(t)
+    var own: OrderedTable[int, tuple[x: Z3AnyAst, lits: Held, ids: seq[int]]]
+    for c in cs:
+      let l = literal(c)
+      if l.ok:
+        let xId = astId(ctx, l.x.raw)
+        if xId notin own: own[xId] = (x: l.x, lits: @[], ids: @[])
+        own[xId].lits.add held(l.re, l.neg)
+        own[xId].ids.add astId(ctx, c.raw)
+    var inner = env
+    var innerId = envId
+    if own.len > 0:
+      inc serial
+      innerId = serial
+      for xId, g in own:
+        for h in g.lits: inner.mgetOrPut(xId, @[]).add h
+    var drop: HashSet[int]
+    var add: seq[Z3AnyAst]
+    for xId, g in own:
+      let above = env.getOrDefault(xId)
+      # Negated as read: a negated literal asserted, or a plain one denied.
+      var anyNeg = false
+      for h in above: anyNeg = anyNeg or h.neg
+      for h in g.lits: anyNeg = anyNeg or (h.neg != (pol == polNeg))
+      if above.len + g.lits.len < 2 or not anyNeg: continue
+      var a, i: seq[Z3AnyAst]
+      for h in g.lits: a.add h.re
+      for h in above: i.add h.re
+      for id in g.ids: drop.incl id
+      add.add(
+        if pol == polPos: member(g.x, inter(a & i))
+        else: mk(Z3_mk_not(ctx.raw,
+                           member(g.x, inter(@[comp(inter(a))] & i)).raw)))
+    var outs: seq[Z3AnyAst]
+    var changed = add.len > 0
+    for c in cs:
+      if astId(ctx, c.raw) in drop: continue
+      let b = if literal(c).ok: c else: rewrite(c, inner, innerId, pol, false)
+      changed = changed or b.raw != c.raw
+      outs.add b
+    outs.add add
+    result = if not changed: t else: andOf(outs)
+    memo[key] = result
+  for r in flat:
+    # A root's top-level literals are the top level's (above); the rest of
+    # it is rewritten with them held.
+    var outs: seq[Z3AnyAst]
+    var changed = false
+    for c in conjuncts(toAnyAst(r)):
+      let b = if literal(c).ok: c else: rewrite(c, top, 0, polPos, false)
+      changed = changed or b.raw != c.raw
+      outs.add b
+    result.add(if not changed: r else: wrap[Z3Bool](ctx, andOf(outs).raw))
 
 var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
@@ -12999,6 +13389,18 @@ var queryTimeoutMsCur {.threadvar.}: uint
   ## RFC-0005 S8bu. The run's `queryTimeoutMs`, set by `resetSymexRunState`:
   ## every solver `querySolver` builds runs under it. `0` (none) outside a
   ## run.
+var nativeStackCutFlag {.threadvar.}: bool
+  ## RFC-0005 S8ca. Some call of the current run declined because the
+  ## native stack left was under the walk's reserve (`nativeStackShort`);
+  ## reset by `resetSymexRunState`.
+
+proc symexNativeStackCut*(): bool =
+  ## RFC-0005 S8ca. Whether a call of the last run on this thread declined
+  ## for want of native stack. Like a clock cut-off its verdict is the
+  ## machine's (the thread's stack), not only the program's, so
+  ## `saveSymexVerdictImpl` does not cache it.
+  nativeStackCutFlag
+
 var queryTimedOutFlag {.threadvar.}: bool
   ## RFC-0005 S8bu. Some solve of the current run was cut off by the clock
   ## (`solveBounded`); reset by `resetSymexRunState`.
@@ -13052,6 +13454,33 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   result.setParams(solverParams)
   for c in roots: result.add(c)
 
+proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
+    seq[Z3AnyAst] =
+  ## RFC-0005 S8by. Every term of `roots`, each once, children before
+  ## parents: the roots in order, each term's arguments last to first.
+  ## `ownContextSolver` makes a query's terms in its context in this
+  ## order. Z3's units on a query were a function of the query alone
+  ## since S8bp, but not the wall time a unit costs: the search a unit
+  ## pays for follows the context's term ids (`r4_strip`'s budget-out step
+  ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
+  ## walk's, S8bp). The order moves the search, so units as well as wall
+  ## time. `r4_strip`'s binary, CPU seconds side by side under one load
+  ## (Z3 5.1): 133 and 122 against 143 and 129 in Z3's own translation
+  ## order, root by root.
+  var done: HashSet[int]
+  var stack: seq[tuple[t: Z3AnyAst, expanded: bool]]
+  for i in countdown(roots.len - 1, 0): stack.add (toAnyAst(roots[i]), false)
+  while stack.len > 0:
+    let (t, expanded) = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in done: continue
+    if expanded or getAstKind(t) != akApp:
+      done.incl id
+      result.add t
+      continue
+    stack.add (t, true)
+    for a in unpackApp(t).args: stack.add (a, false)
+
 proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
                       rlimit: uint; seqTheory = true): Z3Solver =
   ## RFC-0005 S8bm. `querySolver`'s solver for `roots`, in a fresh Z3
@@ -13062,12 +13491,34 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   ## `newContext` makes the new context the thread's current one; the
   ## walk's is restored. RFC-0005 S8bp: every `checkCapped` step's solver,
   ## the theory-free ones (`seqTheory = false`) included.
+  ##
+  ## RFC-0005 S8by: the query's terms are made in the new context in one
+  ## order, a function of the query alone (`queryTermOrder`), and so are
+  ## their ids, which Z3's search reads. Its units were already the
+  ## query's (S8bp); the wall time a unit costs follows the order too.
   let prev = currentContext()
   let own = newContext()
   setCurrentContext(prev)
+  let order = queryTermOrder(ctx, roots)
+  var at: Table[int, int]
+  let terms = newAstVector(ctx)
+  for i, t in order:
+    at[astId(ctx, t.raw)] = i
+    terms.add t
+  # One translation (one cache), in that order: each term made once, its
+  # arguments before it.
+  let made = translate(terms, own)
   var inOwn = newSeq[Z3Bool](roots.len)
-  for i, c in roots: inOwn[i] = translate(c, own)
+  for i, c in roots: inOwn[i] = wrap[Z3Bool](own, made[at[astId(ctx, c.raw)]])
   querySolver(own, inOwn, rlimit, seqTheory)
+
+when defined(symexTestInjectWalkerFault):
+  proc injectedSolveFaultTerms(s: Z3Solver): seq[Z3Bool] =
+    ## RFC-0005 batch 8 fault injection (see `ownContextCheck`): raises with a
+    ## Z3 term in its result, which the caller destroys on the raise path.
+    result = @[mkBool(s.ctx, true)]
+    raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the batch 8 own-context solve test)]
+      "batch 8 synthetic swallowed solve fault (symexTestInjectWalkerFault)")
 
 proc ownContextCheck(s: Z3Solver;
                      assumptions: openArray[Z3Bool] = []): Z3Status =
@@ -13076,6 +13527,19 @@ proc ownContextCheck(s: Z3Solver;
   ## context's whole step count (nothing else ran there) added to
   ## `ownContextUnits`. RFC-0005 batch 7: the check is S8bu's
   ## `solveBounded`, so a solve the clock cut off is noted here too.
+  when defined(symexTestInjectWalkerFault):
+    # RFC-0005 batch 8 fault injection (compiled out of every normal build):
+    # a query over a parameter named for the shape raises, as `extractLeaf`'s
+    # for extraction: straight out of the solve, or in a callee whose result
+    # the C backend destroys on the raise path, which loses it here.
+    let shown = $s
+    if "injectSolveFault" in shown:
+      raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the batch 8 own-context solve test)]
+        "batch 8 synthetic solve fault (symexTestInjectWalkerFault)")
+    if "injectSwallowedSolveFault" in shown:
+      var held = @[mkBool(s.ctx, false)]
+      held = injectedSolveFaultTerms(s)
+      discard held
   result = solveBounded(s, assumptions)
   let st = s.getStatistics()
   if st.contains("rlimit count"):
@@ -13484,6 +13948,13 @@ proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let eq = checkedEq(ctx, views[i].x.raw, views[j].x.raw)
     result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, t.raw, eq))
 
+const recFactsRLimit* = 100_000'u
+  ## RFC-0005 S8bt. The budget of `checkCapped`'s check without the
+  ## recursive `replace` definitions (S8bj ran it under `factsFirstRLimit`).
+  ## The facts' refutations take at most a few thousand units (2,060 for the
+  ## slowest S8bt pin, Z3 5.1); a query they do not refute ran the larger
+  ## budget out for nothing (`s8bb_replace`'s `a|ab` pin: 0.4 s became 7 s).
+
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -13503,7 +13974,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##   0. (RFC-0005 S8ay) step 1c's uncapped half -- the query with no
   ##      sequence theory plus `seqRangeFacts` -- under `factsFirstRLimit`.
   ##      An UNSAT is the query's own and returns at once; anything else
-  ##      goes on to (1), with (1b) and (1c) below unchanged.
+  ##      goes on to (1). After a SAT here (RFC-0005 S8by), (1b) and (1c)'s
+  ##      uncapped half are known SAT and do not run, nor does (1c)'s
+  ##      capped half when the model makes the caps true as well.
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
   ##   1b. after (1) is NOT `zsSat` (`zsUnsat`, or `zsUnknown` -- RFC-0005
@@ -13617,7 +14090,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # negated, as one (`mergeMemberships`; the same models).
   # RFC-0005 S8bu: and with each signed Int view's inverse,
   # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
-  let rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
+  var rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
     bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query))
   let qto = settings.budget.queryTimeoutMs   # RFC-0005 S8bu
   # RFC-0005 S8bq: a query that counts a builtin set's members runs under
@@ -13630,20 +14103,59 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8bj: the query without the recursive `replace` definitions
   # (`regexRecDefConds`), under the small budget of step 0: a superset of
   # the real models, so an UNSAT is the query's own.
+  # RFC-0005 S8bt: the values' facts (`regexRecFactConds`) are asserted
+  # there only. Every step after it decides the query with each value `r`
+  # replaced by its term (`r == term` read off its definition) and the
+  # definitions and facts left out: the same models (the facts are true of
+  # every term's value), and exactly the query S8bb / S8bj's run and step
+  # tables put to Z3, whose model search the indirection through `r` and
+  # the facts slowed (`tsymex_rfc0005_s8bb_replace`'s symbolic receivers:
+  # 1.3 s became 11 s).
   if regexRecDefConds.len > 0:
     var defIds = initHashSet[int]()
     for d in regexRecDefConds: defIds.incl astId(ctx, d.raw)
-    var abstracted: seq[Z3Bool]
+    var factIds = initHashSet[int]()
+    for f in regexRecFactConds: factIds.incl astId(ctx, f.raw)
+    var abstracted, rest: seq[Z3Bool]
     for r in rootsIn:
-      if astId(ctx, r.raw) notin defIds: abstracted.add r
+      let id = astId(ctx, r.raw)
+      if id notin defIds:
+        abstracted.add r
+        if id notin factIds: rest.add r
     if abstracted.len < rootsIn.len:
-      let pre = if rlimit == 0: factsFirstRLimit else: min(rlimit, factsFirstRLimit)
-      let sAbs = ownContextSolver(ctx, abstracted, pre)   # RFC-0005 S8bp
+      let pre = if rlimit == 0: recFactsRLimit else: min(rlimit, recFactsRLimit)
+      # RFC-0005 S8bp, S8bt: in a context of its own, as every step: a check
+      # leaves state in its context that changes how later checks there
+      # search (this one, however short, took `s8bb_replace`'s `x*` pin from
+      # 4 s to 20 s in the walk's). A translated query keeps its recursive
+      # functions' definitions (probed on both pinned Z3s).
+      let sAbs = ownContextSolver(ctx, abstracted, pre)
       if counted("regexDefsFree", ownContextCheck(sAbs)) == zsUnsat:
         return (zsUnsat, sAbs, nil, "")
+      # A nested replace's term mentions the inner value: definitions are
+      # added inner first, so each term is resolved against the earlier
+      # ones before it stands in.
+      var froms, tos: seq[RawZ3Ast]
+      for d in regexRecDefConds:
+        let app = Z3_to_app(ctx.raw, d.raw)
+        var t = Z3_get_app_arg(ctx.raw, app, 1)
+        if froms.len > 0:
+          t = ctx.checkErr Z3_substitute(ctx.raw, t, cuint(froms.len),
+            cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+            cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr))
+        froms.add Z3_get_app_arg(ctx.raw, app, 0)
+        tos.add t
+      rootsIn = @[]
+      for r in rest:
+        rootsIn.add wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw,
+          r.raw, cuint(froms.len),
+          cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+          cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
   template plain(): untyped =
     let s = ownContextSolver(ctx, rootsIn, rlimit)
     let r = counted("plain", ownContextCheck(s))
+    when defined(symexTestInjectWalkerFault):
+      injectShapeFault("solver")   # RFC-0005 S8ce: the solver live
     return (r, s, (if r == zsSat: translate(s.model(), ctx) else: nil),
             (if r == zsUnknown:
                undefReason(s, qto) &
@@ -13697,18 +14209,39 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # 1's full-theory search to its half budget first: S8aw's join walks
   # spent 10,000,930 units (about 20 s on Z3 5.1) before step 1c answered
   # in a few thousand. Anything else (SAT, or unknown in the small budget)
-  # falls through to the unchanged order below, (1b) and (1c) included
-  # with their full budget, so no verdict is lost.
+  # falls through to the unchanged order below; unknown runs (1b) and (1c)
+  # with their full budget, so no verdict is lost, and SAT skips what it
+  # already answers (RFC-0005 S8by, below).
   # RFC-0005 S8ba: with each length at most `high(int)` (`nimLenFacts`):
   # true of every real input, so an UNSAT is still the query's own.
   let facts = seqRangeFacts(ctx, roots) & nimLenFacts(ctx, lens)
+  # RFC-0005 S8by: a facts-first SAT is (1c)'s uncapped answer, and so
+  # (1b)'s: (1c) is the same query under a larger budget, (1b) a subset of
+  # it, and a budget never turns a SAT into an UNSAT. Neither is run after
+  # one (in a context of its own each is the same search to the same SAT:
+  # 295,900 + 311,463 of `lastNl`'s 1,106,184 units on Z3 5.1). Where the
+  # facts-first model makes every cap true as well (`capsHold`), it is a
+  # model of (1c)'s capped half too, which is then not run either.
+  var factsSat, capsHold = false
   block factsFirst:
     when defined(symexQueryStats):
       if symexFactsFirstOff: break factsFirst   # RFC-0005 S8bm
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
     let sPre = ownContextSolver(ctx, roots & facts, pre, seqTheory = false)
-    if counted("factsFirst", ownContextCheck(sPre)) == zsUnsat:
+    let rPre = counted("factsFirst", ownContextCheck(sPre))
+    if rPre == zsUnsat:
       return (zsUnsat, sPre, nil, "")
+    if rPre == zsSat:
+      factsSat = true
+      # Every assertion of the capped half, evaluated under the model in
+      # its own context: all true, whichever way the evaluator reads a
+      # string operation, means that query has a model.
+      let m = sPre.model()
+      capsHold = true
+      for c in roots & facts & caps:
+        if m.eval(translate(c, sPre.ctx)).toBoolOpt != some(true):
+          capsHold = false
+          break
   # Step 1: the caps asserted, one-shot, in a context of its own
   # (RFC-0005 S8bm, `ownContextSolver`): its search is the query's, the
   # same whether or not the facts-first check (or anything else) ran in
@@ -13741,7 +14274,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # decide. (`tsymex_rfc0005_s8aq_remainder.nim`, S8ai's own two
   # not-pinned-end-to-end cases: `s[7] == ':' and rfind < 7` and `':' in s
   # and rfind == -1`, both cancelled at step 1 under the tight budget.)
-  if r1 != zsSat:
+  if r1 != zsSat and not factsSat:   # RFC-0005 S8by: else known SAT
     let (tfUnsat, s1b) = theoryFreeUnsat()
     if tfUnsat: return (zsUnsat, s1b, nil, "")
   if r1 != zsSat:
@@ -13779,20 +14312,34 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
     # (`facts` is computed above, for the facts-first check; RFC-0005 S8ba:
     # with each length at most `high(int)`, `nimLenFacts`.)
-    if facts.len > 0:
+    # (RFC-0005 S8by: neither half after a facts-first SAT whose model
+    # satisfies the caps, nor the uncapped half after any facts-first SAT.)
+    if facts.len > 0 and not factsSat:
       let sTr = ownContextSolver(ctx, roots & facts, rl, seqTheory = false)
       if counted("1c", ownContextCheck(sTr)) == zsUnsat:
         return (zsUnsat, sTr, nil, "")
-    if not lastIndex:
+    if not lastIndex and not capsHold:
       let sTc = ownContextSolver(ctx, roots & facts & caps, rl,
                                  seqTheory = false)
       if counted("1c-capped", ownContextCheck(sTc)) == zsUnsat:
         return (zsUnknown, s1, nil, capText)
+  var all = caps[0]
+  for i in 1 ..< caps.len: all = all and caps[i]
   if r1 == zsUnsat and not lastIndex:
+    # Step 1d (RFC-0005 batch 8): the caps are implied. If the query with no
+    # sequence theory, plus the facts (a superset of the real models), has no
+    # model breaking a cap, every real model keeps to the caps, so step 1's
+    # UNSAT is the query's own. Step 2 cannot say so: its core is not minimal,
+    # and may name the cap though the query bounds every length itself (S8bx's
+    # `setLen` pin, `len(s) <= 8` and `n <= 12`, on Z3 4.13.4 in S8bp's own
+    # context).
+    let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
+    let sIm = ownContextSolver(ctx, roots & facts & @[not all], pre,
+                               seqTheory = false)
+    if counted("1d", ownContextCheck(sIm)) == zsUnsat:
+      return (zsUnsat, s1, nil, "")
     # Step 2: is the UNSAT the query's own?
     let s2 = ownContextSolver(ctx, roots, rl)
-    var all = caps[0]
-    for i in 1 ..< caps.len: all = all and caps[i]
     let capLit = mkBoolVar(s2.ctx, "__s8k_seq_len_cap")
     s2.add implies(capLit, translate(all, s2.ctx))
     let r2 = counted("2", ownContextCheck(s2, [capLit]))
@@ -13819,6 +14366,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     if r1 == zsUnsat:
       (zsUnknown, s3, nil, capText & "; the uncapped query (it holds a " &
                            "seq.last_indexof) was not decided: " & z3Why(s3))
+    elif factsSat:
+      (zsUnknown, s3, nil, z3Why(s3))   # RFC-0005 S8by: (1b) known SAT
     else:
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
@@ -13865,6 +14414,9 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   # RFC-0005 S8bj: the recursive `replace` values' definitions.
   for c in regexRecDefConds:
     roots.add c
+  # RFC-0005 S8bt: and their facts.
+  for c in regexRecFactConds:
+    roots.add c
   # RFC-0005 S8f: every allocated table's / set's size is at least its
   # number of distinct present key terms (`ContainerCardRegistry`). True of
   # every real table for any values of the terms, so it prunes only
@@ -13901,6 +14453,8 @@ proc pathRoots(path: Path; extra: openArray[Z3Bool] = []): seq[Z3Bool] =
     roots.add c
   roots.add extra
   roots.add globalRoots(roots)
+  when defined(symexTestInjectWalkerFault):
+    injectShapeFault("roots")  # RFC-0005 S8ce: the query's roots held
   roots
 
 proc trySolve(ctx: Z3Context,
@@ -13940,8 +14494,8 @@ proc trySolve(ctx: Z3Context,
     currentWinningGlobals = @[]                     ## RFC-0005 S8bn
     for k in path.env.keys:
       if isGlobalEnvName(k): currentWinningGlobals.add k
-    (status: sxSat,
-     witness: extractWitness(m, envForExtract, params), undefWhy: "")
+    (status: sxSat, witness: extractWitness(m, envForExtract, params),
+     undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
   of zsUnknown:
@@ -14169,6 +14723,10 @@ type
       ## RFC-0005 S8bn (item 3). The other `var` formals: their actual is
       ## no pointer's target. A call in the body passing one on whole
       ## (code 2) inherits that.
+    sp:            uint
+      ## RFC-0005 S8ca. The native stack pointer when the frame was pushed:
+      ## the next call's depth check reads one level's stack cost from it
+      ## (`nativeStackShort`).
 
   HandlerFrame = object
     ## Phase 15 E1. One active `try`'s except-arms + finally, pushed onto the
@@ -14302,7 +14860,7 @@ type
 
   AddrCellEntry = tuple[local, cell: string; ty: IRType;
                         path: seq[string]; ixs: seq[SymVal]; bound: bool;
-                        view: bool]
+                        view: bool; slot: string]
     ## RFC-0005 S8ax. An address-taken variable of a frame
     ## (`CallFrameCtx.addrCells`): `local`, the env name of its pointer
     ## (`cell`) and the pointee type `ty`. RFC-0005 S8bs: a `bound` entry is
@@ -14316,6 +14874,11 @@ type
   ## it follows the cell while the cell's elements are written in place, and
   ## its path is tainted once the cell's seq is assigned whole or resized
   ## (`syncAddrCells`).
+  ## RFC-0005 S8bx (item 3): a `slot` entry is a `var` formal that IS the slot
+  ## of the callee's Table formal `slot` at the key `ixs[0]` (an `mpairs` view
+  ## passed with its Table, `bindViewAliases`). A Table has no heap cell (`addr
+  ## t` declines), so it has no `cell`: the location is the Table's value in
+  ## `Env`, and it never leaves the call.
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
@@ -14531,6 +15094,8 @@ type
                        ## RFC-0005 S8ax: declines at the hard call-depth
                        ## budget so far; an extension that sees this move
                        ## is abandoned at its root (`depthBail`).
+    levelStack: int    ## RFC-0005 S8ca: the most native stack one call
+                       ## level has cost so far (`nativeStackShort`).
     extHardMark: int   ## RFC-0005 S8ax: `depthHardHits` when the current
                        ## extension's root began, -1 outside one; once it
                        ## moves, no call under the root extends again.
@@ -16074,7 +16639,7 @@ proc inheritAddrCells(calleeEnv: var Env; callerEnv: Env;
         let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
         calleeEnv[cell] = callerEnv[c.cell]
         result.add (local: formal, cell: cell, ty: c.ty, path: c.path,
-                    ixs: c.ixs, bound: c.bound, view: c.view)
+                    ixs: c.ixs, bound: c.bound, view: c.view, slot: "")
 
 proc inheritElemCells(calleePath: Path; callerFrame, calleeFrame: int;
                       varArgs: seq[(string, string)];
@@ -16177,7 +16742,7 @@ proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
         if k.local == to and not k.bound: known = true
       if not known:
         w.frame.addrCells.add (local: to, cell: addrCellName(to), ty: c.ty,
-                               path: @[], ixs: @[], bound: false, view: false)
+                               path: @[], ixs: @[], bound: false, view: false, slot: "")
       result.moved.add exitEnv[c.cell].ptrAst
     elif isVarFormal or to.len > 0:
       result.lost.add displayName(c.local)
@@ -16634,12 +17199,67 @@ proc freshCallRet(stmt: IRStmt; env: Env; z3Name: string;
       return
   freshRetSym(ty, z3Name, pcOut)
 
+const
+  nativeStackReserve = 256 * 1024
+    ## RFC-0005 S8ca. The native stack a call keeps below it beyond two
+    ## levels' cost (`nativeStackShort`): the solves, the lowering and the
+    ## bail of the deepest level, and C++ unwinding.
+  nativeLevelFloor = 192 * 1024
+    ## RFC-0005 S8ca. The least one level is taken to cost, before (or
+    ## while) the walk has measured less. Measured on the Linux/podman
+    ## debug build (`tsymex_rfc0005_s8ca_stack`): one level of linear
+    ## recursion costs about 158 KB on c and 186 KB on cpp, so the first
+    ## call, with nothing measured, is covered too.
+
+  nimFrameReserve = 400
+    ## RFC-0005 batch 9. The Nim frames a call keeps below it
+    ## (`nativeStackShort`): one level is 9 (`walk`, `walkStmt`, `walkBlock`
+    ## twice over, `walkCallArm`), and the lowering and the solves of the
+    ## deepest level take the rest.
+
+proc levelNeed(w: WalkCtx): int =
+  ## RFC-0005 S8ca. The native stack a call needs left to be inlined.
+  nativeStackReserve + 2 * max(w.levelStack, nativeLevelFloor)
+
+proc nativeStackShort(w: var WalkCtx): int =
+  ## RFC-0005 S8ca. The native stack left below this call when it is under
+  ## what inlining one more level needs, else -1. `walk` recurses natively
+  ## once per inlined call, and `maxCallDepth` counts levels, not bytes: a
+  ## cpp level costs more than a c one, and the stack may hold 8 MB (a Linux
+  ## main thread), 2 MB (a Nim thread) or 16 MB (a Windows solve's fiber,
+  ## `runSymexWithBigStack`), or what is left below a caller's frames.
+  ## `tsymex_configdefaults`' crash pin, 50 levels sized on c, ran off an
+  ## 8 MB stack on cpp (SIGSEGV), and the default budget's adaptive depth
+  ## (`maxRecursionDepth`, 24) ran off a 2 MB thread's on both. One
+  ## level's cost is read from the frame pushed one level up (`CallFrame.sp`),
+  ## the most so far kept in `WalkCtx.levelStack`; the need is twice that
+  ## (at least `nativeLevelFloor`) plus `nativeStackReserve` (`levelNeed`):
+  ## about 3 levels on a 1 MB stack, 45 (c) or 39 (cpp) on 8 MB.
+  ## RFC-0005 batch 9: a build with stack traces also ends the process at
+  ## Nim's call depth limit (`nimFramesLeft`), which a level costing under
+  ## 16 MB / 222 reaches before a Windows fiber's stack runs out. That is a
+  ## shortage of the same recursion, so the call declines the same way.
+  let left = nativeStackLeft()
+  if nimFramesLeft() < nimFrameReserve: return left
+  if left == high(int): return -1   # not measured on this platform
+  if w.callStack.len > 0:
+    let top = w.callStack[^1].sp
+    let here = nativeStackPointer()
+    if top > here: w.levelStack = max(w.levelStack, int(top - here))
+  if left < levelNeed(w): left else: -1
+
+type DepthCut = enum
+  ## RFC-0005 S8ca. Why `depthBail` declines a call.
+  dcutFrontier   ## the frontier was growing: the budget was not extended
+  dcutHard       ## the hard budget was reached (here or under an abandoned
+                 ## extension)
+  dcutStack      ## the native stack left is under the walk's reserve
+
 proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
-               atHard: bool): seq[Path] =
+               cut: DepthCut; stackLeft = 0): seq[Path] =
   ## RFC-0005 S8ax. The call-depth decline: each live path continues past
-  ## the call with a fresh return value, tainted. `atHard`: the hard budget
-  ## was reached (here or under an abandoned extension); otherwise the
-  ## frontier was growing and the budget was not extended.
+  ## the call with a fresh return value, tainted. `cut` says why (S8ca:
+  ## `dcutStack`, with the `stackLeft` bytes it measured).
   ##
   ## (Before S8ax, inline in `walk`'s `isCall` arm.) Bail: continue with a
   ## fresh unconstrained retSym; flag unknown. The surviving paths are marked
@@ -16666,16 +17286,38 @@ proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
   ## RFC-0005 S8an: a path that reaches the bail but that no execution can
   ## take is dropped (by the caller), not bailed: it has no behaviour to
   ## lose.
+  let framesShort = cut == dcutStack and nimFramesLeft() < nimFrameReserve
   let why =
-    if atHard:
+    case cut
+    of dcutHard:
       "the call stack reached the hard budget (maxRecursionDepth=" &
         $w.settings.budget.maxRecursionDepth & ")"
-    else:
+    of dcutFrontier:
       "the walks at the next depth would outnumber those at this " &
         "one, so the budget was not extended (maxRecursionDepth=" &
         $w.settings.budget.maxRecursionDepth & " bounds an extension)"
+    of dcutStack:
+      if framesShort:
+        "the " & $nimFramesLeft() & " frames left at depth " &
+          $w.callStack.len & " before Nim's call depth limit are under the " &
+          $nimFrameReserve & " the walk keeps, so the call is not inlined " &
+          "whatever the depth budget"
+      else:
+        "the native stack left (" & $(stackLeft div 1024) & " KB at depth " &
+          $w.callStack.len & ") is under what one more level needs (" &
+          $(levelNeed(w) div 1024) &
+          " KB), so the call is not inlined whatever the depth budget"
   let d = w.degrade(beBudgetExhaustedUnmodelled,
-    "call-inlining depth budget exhausted (maxCallDepth=" &
+    if cut == dcutStack:
+      "call-inlining stopped by the native stack while inlining `" &
+        stmt.callee & "` — " & why & "; " &
+        (if framesShort:
+           "raise -d:nimCallDepthLimit or build without stack traces"
+         else:
+           "run the analysis on a thread with a larger stack") &
+        " to reach deeper (beBudgetExhaustedUnmodelled)"
+    else:
+      "call-inlining depth budget exhausted (maxCallDepth=" &
          $w.settings.budget.maxCallDepth & ") while inlining `" &
          stmt.callee & "` — " & why & "; raise " &
          "settings.budget.maxCallDepth or maxRecursionDepth if " &
@@ -16737,6 +17379,13 @@ proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool;
     w.ifSites[site] = st
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
+proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
+proc liveViewMarks(p: Path; w: WalkCtx)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
+proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
+                after: Path)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
@@ -17736,7 +18385,24 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
-proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
+proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
+                          settings: SymexSettings): Z3Status =
+  ## RFC-0005 S8by. One of concolic collection's scratch solves
+  ## (`concreteBranchOutcome`, `concretelyInfeasible`,
+  ## `runConcolicCollectImpl`'s concrete-inputs check): `roots` under
+  ## `concreteBranchRLimit(settings)` and `random_seed = 0`, in a context
+  ## of its own (`ownContextSolver`, RFC-0005 S8bm), its units added to
+  ## `ownContextUnits`. They checked in the walk's context, where what the
+  ## context already held moved their search, as S8bm and S8bp measured
+  ## for the walker's own: a factoring branch condition took 876,296 units
+  ## in one context and 5,854,996 in one that made the query's constants
+  ## the other way round (Z3 5.1; 23,956 and 911,593 on 4.13.4), and under
+  ## a bound between them it was decided in the first and not in the second
+  ## (`tsymex_rfc0005_s8by_remainder`). Now what the context holds moves
+  ## neither its spend nor whether it decides within its bound.
+  ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
+
+proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,
                            facts: seq[Z3Bool] = @[]): Option[bool] =
   ## Determine whether `cond` (a branch predicate, already lowered against
@@ -17779,41 +18445,20 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## under the pins, and an `if` on a closure that returned normally was
   ## always ambiguous. The pools are definitional (or true of every real
   ## input), so they prune no execution the draws describe.
-  let rlimit = concreteBranchRLimit(settings)
   var reach = concreteEq
   reach.add facts
   reach.add cond
   let pools = globalRoots(reach)
-  let sTrue = newSolver(ctx)
-  let spTrue = newParams(ctx)
-  spTrue.set("rlimit", rlimit)
-  spTrue.set("random_seed", 0'u)
-  # RFC-0005 S8bu: and the wall-clock backstop (`queryTimeoutMs`).
-  if settings.budget.queryTimeoutMs > 0'u:
-    spTrue.set("timeout", settings.budget.queryTimeoutMs)
-  sTrue.setParams(spTrue)
-  for c in concreteEq: sTrue.add(c)
-  for c in pools: sTrue.add(c)
-  for c in facts: sTrue.add(c)
-  sTrue.add(cond)
-  let rTrue = solveBounded(sTrue)
-  let sFalse = newSolver(ctx)
-  let spFalse = newParams(ctx)
-  spFalse.set("rlimit", rlimit)
-  spFalse.set("random_seed", 0'u)
-  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
-    spFalse.set("timeout", settings.budget.queryTimeoutMs)
-  sFalse.setParams(spFalse)
-  for c in concreteEq: sFalse.add(c)
-  for c in pools: sFalse.add(c)
-  for c in facts: sFalse.add(c)
-  sFalse.add(not cond)
-  let rFalse = solveBounded(sFalse)
+  # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
+  let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
+                                   settings)
+  let rFalse = concreteScratchCheck(ctx,
+    concreteEq & pools & facts & @[not cond], settings)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
 
-proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
+proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                           conds: seq[Z3Bool], settings: SymexSettings): bool =
   ## RFC-0005 S8i. True iff `conds` (a path's `pc` and defect-survivor
   ## facts) is UNSAT under the concrete pins: the replayed execution cannot
@@ -17821,17 +18466,9 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## `concreteBranchOutcome`'s; an exhausted bound is `zsUnknown`, never
   ## `zsUnsat`, so it can only keep a path, never drop one wrongly.
   ## RFC-0005 S8n: with the same `globalRoots()` pools.
-  let sv = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
-    sp.set("timeout", settings.budget.queryTimeoutMs)
-  sv.setParams(sp)
-  for c in concreteEq: sv.add(c)
-  for c in globalRoots(concreteEq & conds): sv.add(c)
-  for c in conds: sv.add(c)
-  solveBounded(sv) == zsUnsat
+  ## RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
+  concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
+                            conds, settings) == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -18905,6 +19542,43 @@ proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   if p.env.hasKey(name): return (p.env[name], p)
   lowerInExpr(p, mkVar(name), w)
 
+proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
+                     w: var WalkCtx): string =
+  ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
+  ## frame (just pushed), as `slot` address entries (`AddrCellEntry`,
+  ## `syncAddrCells`). Returns why the call declines, or "": the view's
+  ## formal is by value and not a scalar (Nim may pass it by address, so it
+  ## would see the table's writes: not modelled), or the key is unbound.
+  ## A by-value scalar view is a copy, and nothing relates it to the table.
+  ## A call made inside such a callee that passes both formals on carries
+  ## the pair into its own callee (Nim passes the one location on).
+  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal]]
+  for a in stmt.cViewAliases:
+    if a.viewArg >= sig.params.len or a.tabArg >= sig.params.len or
+       not callerEnv.hasKey(a.keyName):
+      return "and the walk does not bind the two"
+    pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
+               key: callerEnv[a.keyName])
+  if w.frameStack.len > 0:
+    for a in w.frameStack[^1].addrCells:
+      if a.slot.len == 0: continue
+      var vi, ti = -1
+      for i, arg in stmt.cargs:
+        if arg.kind == iekVar:
+          if arg.vname == a.local: vi = i
+          elif arg.vname == a.slot: ti = i
+      if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
+        pairs.add (viewArg: vi, tabArg: ti, key: a.ixs[0])
+  for a in pairs:
+    let vf = sig.params[a.viewArg]
+    if not vf.isVar:
+      if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
+      return "the view by value (not modelled for a " & $vf.ty.kind & ")"
+    w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: @[],
+                           ixs: @[a.key], bound: true, view: false,
+                           slot: sig.params[a.tabArg].name)
+  ""
+
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
@@ -19008,6 +19682,37 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
   ## seen through the copy, an assignment of the whole is not).
   let ctx = w.z3
   for loc in locs:
+    if loc.mode == "ref":
+      # RFC-0005 S8ca: a `var` actual in a field of an object behind a ref
+      # (`grb.x`, the ref read into `root` at the call) is passed by
+      # reference: the formal is a `bound` entry on the object's cell at
+      # the field path, the heaps `grb.x` reads and writes (`addrCellValue`),
+      # so the body's direct access to the object and its writes through the
+      # formal are one location. S8bh declined it (`touchMeetsOuter`).
+      var formal = ""
+      for (f, callerName) in varArgs:
+        if callerName == loc.temp: formal = f
+      if formal.len == 0 or not callerEnv.hasKey(loc.root) or
+         callerEnv[loc.root].kind notin {svRef, svPtr}:
+        return "a `var` argument in an object behind a ref is passed in a " &
+               "shape the walk does not bind to the object's cell"
+      let rv = callerEnv[loc.root]
+      let (refAst, pointee) =
+        if rv.kind == svRef: (rv.refAst, rv.refPointee)
+        else: (rv.ptrAst, rv.ptrPointee)
+      let cellName = varLocCellName(formal)
+      let e: AddrCellEntry = (local: formal, cell: cellName, ty: pointee,
+                              path: loc.path, ixs: @[], bound: true,
+                              view: false, slot: "")
+      if addrEntryValue(ctx, calleePath, e, refAst).isNone:
+        return "a `var` argument in an object behind a ref is a part of " &
+               "it the walk does not follow"
+      var env2 = calleePath.env
+      env2[cellName] = SymVal(kind: svPtr, ptrAst: refAst, ptrFamily: false,
+                              ptrPointee: pointee)
+      calleePath.env = env2
+      cells.add e
+      continue
     var rootCells: seq[AddrCellEntry]
     for c in callerCells:
       if c.local == loc.root and callerEnv.hasKey(c.cell) and
@@ -19044,7 +19749,7 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         let cellName = varLocCellName(formal)
         let e: AddrCellEntry = (local: formal, cell: cellName, ty: c.ty,
                                 path: c.path & loc.path, ixs: c.ixs,
-                                bound: true, view: true)
+                                bound: true, view: true, slot: "")
         let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
         if v.isSome and v.get.kind == svSeq:
           var env2 = calleePath.env
@@ -19053,11 +19758,33 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
           cells.add e
           continue
         if v.isSome and v.get.kind == svString:
+          # RFC-0005 S8ca: a by-value string shares the memory of the
+          # variable. Nim writes a character in place unless that memory
+          # is a literal's, which the first write copies (`StrBuf`): of a
+          # literal's, the formal is a plain copy (no write through the
+          # pointer reaches it); of the string's own, it is a `view` (an
+          # in-place character write is seen, any other declines). S8bu
+          # declined both, character writes being unmodelled.
+          let byName =
+            if c.path.len == 0 and loc.path.len == 0 and
+               callerEnv.hasKey(c.local) and
+               callerEnv[c.local].kind == svString and
+               sameSymVal(callerEnv[c.local], v.get):
+              callerEnv[c.local].strBuf
+            else: sbUnknown
+          if byName == sbLiteral: continue
+          if byName == sbOwned and calleePath.env.hasKey(formal) and
+             calleePath.env[formal].kind == svString:
+            var env2 = calleePath.env
+            env2[cellName] = callerEnv[c.cell]
+            calleePath.env = env2
+            cells.add e
+            continue
           return "a by-value string shares the memory of " & what &
-                 ", whose address is taken: a write through the pointer " &
-                 "to a character, which Nim makes in place unless the " &
-                 "memory is a literal's, is not modelled (the walk's " &
-                 "strings are immutable values)"
+                 ", whose address is taken, and the walk does not know " &
+                 "whether that memory is a literal's (which a write " &
+                 "through the pointer copies first) or the string's own " &
+                 "(which it writes in place)"
       if rootCells.len > 0:
         return "a by-value argument shares the memory of " & what &
                ", whose address is taken: a write through the pointer to " &
@@ -19100,12 +19827,12 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
                               env2[local])
         env2[addrCellName(local)] = ptrV
         cells.add (local: local, cell: addrCellName(local), ty: ptrV.ptrPointee,
-                   path: @[], ixs: @[], bound: false, view: false)
+                   path: @[], ixs: @[], bound: false, view: false, slot: "")
     if rootCells.len == 1:
       let c = rootCells[0]
       let e: AddrCellEntry = (local: local, cell: cellName, ty: c.ty,
                               path: c.path & path, ixs: c.ixs & ixs,
-                              bound: true, view: false)
+                              bound: true, view: false, slot: "")
       let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
       if v.isNone:
         return "the `var` argument is a part of " & what & ", whose " &
@@ -19141,7 +19868,7 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
     env2[cellName] = SymVal(kind: svPtr, ptrAst: addrAst, ptrFamily: true,
                             ptrPointee: ty)
     cells.add (local: local, cell: cellName, ty: ty, path: @[], ixs: @[],
-               bound: true, view: false)
+               bound: true, view: false, slot: "")
     calleePath.env = env2
   ""
 
@@ -19941,16 +20668,32 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
       # plain term (a `str.at` over an `ite` of strings ran Z3 out of
       # `seqQueryRLimit`). The grow appends a fresh pad of the added
       # length in `("\0")*`, a fact of the path (no quantifier).
+      #
+      # RFC-0005 S8bx (item 5): the result is a fresh string LEAF `r`
+      # with the byte-domain fact every string input carries
+      # (`allocateSym`), bound to the prefix / extension by an equation.
+      # A byte read of the result, `int2bv[8](str.to_code(str.at(r, i)))
+      # == n`, is then a byte test on a byte leaf, which `seqLenCaps`
+      # rewrites to the character form `str.at(r, i) == "\xNN"`: Z3
+      # decides that, where the code form over a `str.at` of the concat
+      # (or substr) was left undecided by both pinned Z3s within
+      # `seqQueryRLimit`.
+      var leafShrink: seq[Z3Bool]
+      let rShrink = allocateSym(tString(),
+        freshDegradeName("__setLenStr"), leafShrink)
       var envShrink = env2
-      envShrink[stmt.slRetName] = SymVal(kind: svString,
-        str: substr(baseSV.str, mkInt(0), newLen))
-      survivors.add forkPath(p, p.pc & @[not grows], envShrink)
+      envShrink[stmt.slRetName] = rShrink
+      survivors.add forkPath(p, p.pc & leafShrink & @[not grows,
+        rShrink.str == substr(baseSV.str, mkInt(0), newLen)], envShrink)
+      var leafGrow: seq[Z3Bool]
+      let rGrow = allocateSym(tString(),
+        freshDegradeName("__setLenStr"), leafGrow)
       let pad = mkStringVar(freshDegradeName("__setLenPad"))
-      env2[stmt.slRetName] = SymVal(kind: svString,
-        str: concat(baseSV.str, pad))
-      survivors.add forkPath(p, p.pc & @[grows,
+      env2[stmt.slRetName] = rGrow
+      survivors.add forkPath(p, p.pc & leafGrow & @[grows,
         len(pad) == newLen - oldLen,
-        matches(pad, star(mkRegex(mkString("\x00"))))], env2)
+        matches(pad, star(mkRegex(mkString("\x00")))),
+        rGrow.str == concat(baseSV.str, pad)], env2)
     else:
       let d = w.degrade(feUnsupportedOp,
         locPrefix & "setLen: the argument lowered to " &
@@ -20757,27 +21500,37 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
   # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
   # on the very first call, by design; a caller wanting deep analysis
   # writes an explicit bound sized to the SUT's real max call depth
-  # instead. Do not assume a "large-looking" round number is automatically
-  # safe -- measured directly (this engine's Linux/podman debug build, 8MB
-  # `ulimit -s`) unconstrained linear recursion is safe through a cap of
-  # 85 and SIGSEGVs by 88, so even `maxCallDepth: 1000` itself crashes;
-  # the safe ceiling is build/platform-dependent, not a fixed constant.
+  # instead. RFC-0005 S8ca: a count cannot know what a level costs (more
+  # on cpp than on c) or what the thread's stack holds, so a call is also
+  # not inlined when the native stack left is under one more level's need
+  # (`nativeStackShort`, below).
   # RFC-0005 S8ax: past `maxCallDepth` the walk goes one level deeper
   # while the frontier is not growing (`depthMayExtend`) and the stack is
   # under the hard budget (`maxRecursionDepth`). A path no execution can
   # take is dropped first either way (S8an, below).
-  let overDepth = w.callStack.len >= w.settings.budget.maxCallDepth
+  # RFC-0005 S8ca: and, whatever the depth budget, not past the native
+  # stack the walk needs (`nativeStackShort`); the decline is in-band, a
+  # hard-budget decline the extension's root reads as one.
+  let stackLeft = nativeStackShort(w)
+  let overDepth = stackLeft >= 0 or
+    w.callStack.len >= w.settings.budget.maxCallDepth
   var depthLive: seq[Path]
   var extendDepth = false
   if overDepth:
     for p in paths:
       if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
     if depthLive.len == 0: return depthLive
-    extendDepth = depthMayExtend(w, depthLive.len)
+    extendDepth = stackLeft < 0 and depthMayExtend(w, depthLive.len)
   if overDepth and not extendDepth:
     # The decline, and its history: `depthBail`.
-    if w.callStack.len >= hardCallDepth(w.settings): inc w.depthHardHits
-    depthBail(w, stmt, depthLive, w.callStack.len >= hardCallDepth(w.settings))
+    let atHard = stackLeft >= 0 or
+      w.callStack.len >= hardCallDepth(w.settings)
+    if atHard: inc w.depthHardHits
+    if stackLeft >= 0: nativeStackCutFlag = true
+    depthBail(w, stmt, depthLive,
+      (if stackLeft >= 0: dcutStack
+       elif atHard: dcutHard
+       else: dcutFrontier), stackLeft)
   else:
     let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
     # RFC-0005 S8ax: the first extended level is the extension's root. A
@@ -20989,7 +21742,8 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           retName: stmt.retName,
           retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
           returnedPaths: @[], ptrRiskFormals: ptrRisk.risk,
-          ptrSafeFormals: ptrRisk.safe)
+          ptrSafeFormals: ptrRisk.safe,
+          sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
         w.callStats[stmt.callee] = CallStat(
           name: stmt.callee,
           walked: w.callStats[stmt.callee].walked + 1,
@@ -21033,10 +21787,20 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           w.frame.frameId, varArgs & elemShares, sig.captures, guarded)
         let calleeFrameId = w.frame.frameId
         w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
+        anchorViews(calleePath, entryCells, calleeFrameId)   ## RFC-0005 S8ca
         w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
+        # RFC-0005 S8bx (item 3): an `mpairs` view passed with its table.
+        let viewWhy = bindViewAliases(stmt, sig, p.env, w)
+        let calleeIn =
+          if viewWhy.len == 0: calleePath
+          else:
+            forkPathTainted(calleePath, calleePath.pc, calleePath.env,
+              w.degrade(feUnsupportedOp,
+                "`" & stmt.callee & "` receives an `mpairs` view and its " &
+                "Table, " & viewWhy & " (RFC-0005 S8bx; feUnsupportedOp)"))
         let guardMark = callGuardedNames.len   ## RFC-0005 S8an
         for g in guarded: callGuardedNames.add g
-        let fallThroughRaw = walk(sig.body, @[calleePath], w)
+        let fallThroughRaw = walk(sig.body, @[calleeIn], w)
         callGuardedNames.setLen(guardMark)
         # Round-6 A6-rider (walker v86): a callee whose body reaches the end
         # via IMPLICIT fallthrough (no explicit `return`) after a
@@ -21300,7 +22064,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           survivors.add merged
     w.extHardMark = outerExtMark
     if extRoot and w.depthHardHits > hardMark:
-      return depthBail(w, stmt, paths, true)
+      return depthBail(w, stmt, paths, dcutHard)
     survivors
 
 proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -21808,6 +22572,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if stmt.tname == "__inject_walker_defect__":
         raise newException(AssertionDefect,  # [raise-audited: category-c: test-injection-only (see above)]
           "round-3 synthetic defect (symexTestInjectWalkerFault)")
+      # RFC-0005 S8ce: arm a raise shape (`injectShapeFault`); `dispatch`
+      # fires here and now.
+      const s8cePrefix = "__inject_s8ce_"
+      if stmt.tname.startsWith(s8cePrefix) and stmt.tname.endsWith("__"):
+        injectedShape = stmt.tname[s8cePrefix.len ..< stmt.tname.len - 2]
+        injectShapeFault("dispatch")
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
         if w.shouldStop: return
@@ -22042,7 +22812,24 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Stage 7 (CR-7) Cluster R: heap read, allocation, and heap write arms
     # extracted into `walkHeapArm` (defined above, before this proc body).
     # `isIndex` is left inline (handles Table/seq/array/ref — multi-theory).
-    walkHeapArm(stmt, paths, w)
+    # RFC-0005 S8ca: an element's write-back (`dwInPlace`) on a path with a
+    # live view is logged as in-place steps, path by path.
+    var viewed = false
+    if stmt.kind == isDerefWrite and stmt.dwInPlace:
+      for p in paths:
+        liveViewMarks(p, w)
+        if p.viewMarks.len > 0: viewed = true
+    if not viewed:
+      walkHeapArm(stmt, paths, w)
+    else:
+      var outs: seq[Path]
+      for p in paths:
+        if w.shouldStop: break
+        let heapsBefore = p.heaps
+        for q in walkHeapArm(stmt, @[p], w):
+          if q != p: logInPlace(p, heapsBefore, q)
+          outs.add q
+      outs
   of isUnsupported:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -22168,29 +22955,139 @@ const viewFreedPrefix = "__viewFreed#"
   ## cell was assigned whole or resized while a raise unwound
   ## (`syncAddrCellsFromHeap`); the next `syncAddrCells` taints the path.
 
-proc viewFollows(ctx: Z3Context; old, cur: SymVal): bool =
-  ## RFC-0005 S8bu. A by-value seq formal sharing a cell's memory (`view`)
-  ## sees the cell's new value `cur` only when the old one's elements were
-  ## written in place: the same length term, and each data array the old
-  ## one's under a chain of stores. Any other change (an assignment of the
-  ## whole, a resize) gave the variable other memory; Nim's copy still
-  ## points at the old, which it may have freed. A cell's value read back
-  ## is a `select` over the `store` that wrote it (`peelSelect`); a term is
-  ## never simplified, which would fold an assignment of the whole that
-  ## agrees with a store chain into one.
-  if old.kind != svSeq or cur.kind != svSeq: return false
-  if old.isUnsupportedFieldPlaceholder or # [placeholder-audited]
-     cur.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-    return false
-  if cast[pointer](peelSelect(ctx, old.seqLen.raw)) != # [placeholder-audited]
-     cast[pointer](peelSelect(ctx, cur.seqLen.raw)): # [placeholder-audited]
-    return false
-  let a = seqArrs(old)
-  let b = seqArrs(cur)
-  if a.len != b.len: return false
-  for k in 0 ..< a.len:
-    if not storeChainOver(ctx, b[k].raw, a[k].raw): return false
-  true
+proc heapTermOf(p: Path; key: string): HeapTerm =
+  ## RFC-0005 S8ca. The term of heap array `key` on `p` (`HeapTerm`).
+  if p.heaps.hasKey(key): (ast: p.heaps[key], input: "")
+  else: (ast: Z3AnyAst(), input: heapInputName(p, key))
+
+proc viewHeapKeys(c: AddrCellEntry): Option[seq[string]] =
+  ## RFC-0005 S8ca. The heap arrays a `view` entry's value is read from
+  ## (`addrEntryValue`): the cell's own leaves, or, in an object held field
+  ## by field (`fieldSplitPointee`), the leaves of the field its path
+  ## starts with. none for a cell held another way (a case object's).
+  var keys: seq[string]
+  if c.path.len == 0 and c.ty.kind != itVariant and
+     not fieldSplitPointee(c.ty):
+    for suf in heapLeafSuffixes(c.ty): keys.add refPointeeTypeId(c.ty) & suf
+  elif c.path.len > 0 and fieldSplitPointee(c.ty):
+    let i = c.ty.fieldNames.find(c.path[0])
+    if i < 0: return none(seq[string])
+    for suf in heapLeafSuffixes(c.ty.fields[i]):
+      keys.add fieldHeapKey(c.ty, c.path[0]) & suf
+  else:
+    return none(seq[string])
+  some(keys)
+
+proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int) =
+  ## RFC-0005 S8ca. `p` enters `frame`, whose `view` entries (`bindVarLocs`)
+  ## take the cell's value now: each is marked with its heap arrays' terms
+  ## (`ViewMark`).
+  for c in cells:
+    if not c.view: continue
+    let keys = viewHeapKeys(c)
+    if keys.isNone: continue
+    var at: seq[HeapTerm]
+    for k in keys.get: at.add heapTermOf(p, k)
+    p.viewMarks.add ViewMark(local: c.local, frame: frame, keys: keys.get,
+                             at: at)
+
+proc liveViewMarks(p: Path; w: WalkCtx) =
+  ## RFC-0005 S8ca. Drop `p`'s marks of returned frames, and its in-place
+  ## steps once no mark is left.
+  var kept: seq[ViewMark]
+  for m in p.viewMarks:
+    if liveFrame(w, m.frame): kept.add m
+  if kept.len != p.viewMarks.len: p.viewMarks = kept
+  if p.viewMarks.len == 0 and p.inPlaceSteps.len > 0: p.inPlaceSteps = @[]
+
+proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
+                after: Path) =
+  ## RFC-0005 S8ca. Record on `after` each heap array an in-place element
+  ## write changed from `before` (whose arrays were `heapsBefore`) as an
+  ## in-place step. Only while a view is live: no one reads them otherwise.
+  if after.viewMarks.len == 0: return
+  for k, arr in after.heaps:
+    let was: HeapTerm =
+      if heapsBefore.hasKey(k): (ast: heapsBefore[k], input: "")
+      else: (ast: Z3AnyAst(), input: heapInputName(before, k))
+    let now: HeapTerm = (ast: arr, input: "")
+    if not sameHeapTerm(was, now):
+      after.inPlaceSteps.add (key: k, before: was, after: now)
+
+proc viewMarkOf(p: Path; local: string; w: WalkCtx): int =
+  ## RFC-0005 S8ca. The position in `p.viewMarks` of the `view` entry
+  ## `local` of the current frame (or of the live frame it was inherited
+  ## from: a capture), -1 when it has none.
+  result = -1
+  for i, m in p.viewMarks:
+    if m.local == local and m.frame == w.frame.frameId: return i
+  for i, m in p.viewMarks:
+    if m.local == local and liveFrame(w, m.frame): result = i
+
+proc viewInPlace(p: Path; mi: int): tuple[moved, inPlace: bool] =
+  ## RFC-0005 S8ca. Whether the heap arrays of mark `mi` changed since it
+  ## was taken, and whether every change is a chain of in-place steps
+  ## (`Path.inPlaceSteps`) from its terms to the current ones. Identity is
+  ## tracked by the write, not by the term's shape: an assignment of the
+  ## whole that rebuilds an equal term, or one whose data happens to be a
+  ## store chain over the old, is not an in-place step, so the copy no
+  ## longer follows (Nim gave the variable other memory).
+  let m = p.viewMarks[mi]
+  for i, k in m.keys:
+    var cur = m.at[i]
+    let now = heapTermOf(p, k)
+    var hops = 0
+    while not sameHeapTerm(cur, now):
+      result.moved = true
+      var found = false
+      for st in p.inPlaceSteps:
+        if st.key == k and sameHeapTerm(st.before, cur):
+          cur = st.after
+          found = true
+          break
+      inc hops
+      if not found or hops > p.inPlaceSteps.len: return (true, false)
+  result.inPlace = true
+
+proc reanchorView(p: Path; mi: int) =
+  ## RFC-0005 S8ca. Mark `mi` takes the current terms of its arrays.
+  for i, k in p.viewMarks[mi].keys:
+    p.viewMarks[mi].at[i] = heapTermOf(p, k)
+
+func capCellOf(w: WalkCtx; local: string): string =
+  ## RFC-0005 S8ca. The env cell of `local` when the current frame keeps
+  ## one (`CallFrameCtx.capCells`), else "".
+  for (cl, cell) in w.frame.capCells:
+    if cl == local: return cell
+  ""
+
+proc linkCapAddrCells(paths: seq[Path]; w: WalkCtx): seq[Path] =
+  ## RFC-0005 S8ca. After a statement, each by-reference capture of the
+  ## frame whose variable's address is taken: its address cell's pointer
+  ## is threaded beside its env cell (`capAddrName`), the env cell takes
+  ## the variable's value (`syncAddrCells` may just have read it from the
+  ## cell), and the closure-body mark (`capBoundName`) is spent. Before
+  ## S8ca the three copies (the local, the env cell, the address cell)
+  ## declined every statement of the frame.
+  for p in paths:
+    var env2 = p.env
+    var changed = false
+    for (local, cell) in w.frame.capCells:
+      if env2.hasKey(capBoundName(cell)):
+        env2.del capBoundName(cell)
+        changed = true
+      for c in w.frame.addrCells:
+        if c.local != local or c.bound or c.view or not env2.hasKey(c.cell) or
+           env2[c.cell].kind != svPtr or not env2.hasKey(local):
+          continue
+        let an = capAddrName(cell)
+        if not env2.hasKey(an) or not sameSymVal(env2[an], env2[c.cell]):
+          env2[an] = env2[c.cell]
+          changed = true
+        if env2.hasKey(cell) and not sameSymVal(env2[cell], env2[local]):
+          env2[cell] = env2[local]
+          changed = true
+    result.add(if changed: forkPath(p, p.pc, env2) else: p)
 
 proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =
@@ -22204,6 +23101,10 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## statement's last effect is the write by name (`lastWriteTo`):
   ## declined (`feUnsupportedOp`), the variable's value winning. So is a
   ## variable a closure also captures (its env cell is a third copy).
+  ## RFC-0005 S8bx (item 3): a `slot` entry the same, with the Table's value
+  ## at the key for the heap at the cell; a table write that may have removed
+  ## the key leaves the view on a slot Nim's `del` refills from another
+  ## entry, and declines too.
   let ctx = w.z3
   # RFC-0005 S8bu: a local with two entries (an `addr` actual's local,
   # `addrPartName`: a part of a variable's cell, and the call's cell) takes
@@ -22219,6 +23120,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
     var clash: seq[string]
     var lost: seq[string]   ## RFC-0005 S8bs
     var freed: seq[string]   ## RFC-0005 S8bu
+    var viewWhy = ""         ## RFC-0005 S8bx
     for c in w.frame.addrCells:
       if c.view and env2.hasKey(viewFreedPrefix & c.local):
         env2.del(viewFreedPrefix & c.local)
@@ -22226,12 +23128,45 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         freed.add displayName(c.local)
     for pass in 0 ..< passes:
       for c in w.frame.addrCells:
+        if c.slot.len > 0:
+          # RFC-0005 S8bx (item 3): the location is the Table's value at the
+          # key. A statement nested in this one has synced already, and left
+          # the view the same term as the table's value at the key.
+          if not env2.hasKey(c.local) or not env2.hasKey(c.slot): continue
+          let tabV = env2[c.slot]
+          let keyO = if tabV.kind == svTable: tabKeyTerm(c.ixs[0], tabV.tabKeyTy)
+                     else: none(Z3AnyAst)
+          if keyO.isNone:
+            viewWhy = "the table is not a modelled Table value"
+            continue
+          let xv = env2[c.local]
+          if sameSymVal(xv, tabValAt(ctx, tabV, keyO.get.raw)): continue
+          let snapV = addrSnapName(depth, c.local)
+          let snapT = addrSnapName(depth, c.slot)
+          let vCh = env2.hasKey(snapV) and not sameSymVal(xv, env2[snapV])
+          let tCh = env2.hasKey(snapT) and not sameSymVal(tabV, env2[snapT])
+          if not vCh and not tCh: continue
+          if q == nil: q = forkPath(p, p.pc, p.env)
+          if vCh and tCh and not lastWriteTo(stmt, c.local):
+            viewWhy = "the view and the table were both written in one statement"
+          elif vCh:
+            var e2 = env2
+            e2[addrSnapPrefix & "key"] = c.ixs[0]
+            let t2 = lower(e2, mkTableSet(mkVar(c.slot),
+              mkVar(addrSnapPrefix & "key"), mkVar(c.local)))
+            env2[c.slot] = t2
+            env2[c.local] = tabValAt(ctx, t2, keyO.get.raw)
+          else:
+            let present = wrap[Z3Bool](ctx,
+              checkedSelect(ctx, tabV.tabPresentRaw.raw, keyO.get.raw))
+            if guardLiteral(present) != glTrue:
+              viewWhy = "the table write may have removed the view's key"
+            else:
+              env2[c.local] = tabValAt(ctx, tabV, keyO.get.raw)
+          continue
         if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
            env2[c.cell].kind != svPtr:
           continue
-        for (cl, _) in w.frame.capCells:
-          if cl == c.local and displayName(cl) notin clash:
-            clash.add displayName(cl)
         let refAst = env2[c.cell].ptrAst
         # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
         let curO = addrEntryValue(ctx, (if q == nil: p else: q), c, refAst)
@@ -22240,30 +23175,64 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
           continue
         let cur = curO.get
         let xv = env2[c.local]
+        if c.view:
+          # RFC-0005 S8bu: a `view` follows only an in-place write. S8ca:
+          # an in-place write is a logged step (`viewInPlace`), not a term
+          # of the right shape; Nim's by-value formal is never written by
+          # name.
+          let mi = viewMarkOf((if q == nil: p else: q), c.local, w)
+          if mi < 0:
+            if not sameSymVal(xv, cur) and displayName(c.local) notin freed:
+              freed.add displayName(c.local)
+            continue
+          let (moved, inPlace) = viewInPlace((if q == nil: p else: q), mi)
+          if not moved: continue
+          if q == nil: q = forkPath(p, p.pc, p.env)
+          reanchorView(q, mi)
+          if inPlace: env2[c.local] = cur
+          elif displayName(c.local) notin freed: freed.add displayName(c.local)
+          continue
         if sameSymVal(xv, cur): continue
         if q == nil: q = forkPath(p, p.pc, p.env)
         let snap = addrSnapName(depth, c.local)
         let hasSnap = env2.hasKey(snap)
         if hasSnap and sameSymVal(xv, env2[snap]):
-          # RFC-0005 S8bu: a `view` follows only an in-place write.
-          if c.view and not viewFollows(ctx, xv, cur):
-            if displayName(c.local) notin freed: freed.add displayName(c.local)
-            continue
+          env2[c.local] = cur
+          continue
+        # RFC-0005 S8ca: a closure body that ran with this capture bound to
+        # the cell (`capBoundName`) kept the two equal at each exit, so the
+        # write it carried back by name is the cell's value.
+        let capCell = capCellOf(w, c.local)
+        if capCell.len > 0 and env2.hasKey(capBoundName(capCell)) and
+           hasSnap and not sameSymVal(cur, env2[snap]) and
+           not lastWriteTo(stmt, c.local):
           env2[c.local] = cur
           continue
         if not (hasSnap and sameSymVal(cur, env2[snap])) and
            not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
           clash.add displayName(c.local)
+        # RFC-0005 S8ca: an element of the variable written by name is
+        # written in its memory; its store is an in-place step.
+        let heapsBefore = q.heaps
         let st = addrEntryStore(ctx, q, c, refAst, xv)
-        if st.isSome: env2[c.local] = st.get
+        if (stmt.kind == isIndexAssign and stmt.iaRecvName == c.local) or
+           (stmt.kind == isAssign and stmt.aname == c.local and
+            stmt.avalue.kind == iekStrSetAt):   # a character, by name
+          logInPlace(q, heapsBefore, q)
+        if st.isSome: env2[c.local] = keepStrBuf(st.get, xv)   # S8ca
         elif displayName(c.local) notin lost: lost.add displayName(c.local)
     let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
     if q == nil and not dropped and clash.len == 0 and lost.len == 0 and
-       freed.len == 0:
+       freed.len == 0 and viewWhy.len == 0:
       result.add p
       continue
     if q == nil: q = forkPath(p, p.pc, env2)
     else: q.env = env2
+    if viewWhy.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "an `mpairs` view and its Table passed to one call: " & viewWhy &
+             "; the two are one location in Nim, and the order of the " &
+             "writes is not modelled (RFC-0005 S8bx; feUnsupportedOp)"))
     if clash.len > 0:
       taintInPlace(q, w.degrade(feUnsupportedOp,
         "RFC-0005 S8ax: the address-taken variable(s) " & clash.join(", ") &
@@ -22295,20 +23264,32 @@ proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =
   ## value.
   var env2 = p.env
   var changed = false
+  var reanchor: seq[int]   ## RFC-0005 S8ca
   for c in w.frame.addrCells:
     if env2.hasKey(c.local) and env2.hasKey(c.cell) and
        env2[c.cell].kind == svPtr:
       # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
       let cur = addrEntryValue(w.z3, p, c, env2[c.cell].ptrAst)
-      if cur.isSome and not sameSymVal(env2[c.local], cur.get):
-        # RFC-0005 S8bu: a `view` follows only an in-place write; any other
-        # is marked for the next statement's sync to taint.
-        if c.view and not viewFollows(w.z3, env2[c.local], cur.get):
-          env2[viewFreedPrefix & c.local] = cur.get
-        else:
-          env2[c.local] = cur.get
+      if cur.isNone: continue
+      if c.view:
+        # RFC-0005 S8bu: a `view` follows only an in-place write (S8ca:
+        # a logged step, `viewInPlace`); any other is marked for the next
+        # statement's sync to taint.
+        let mi = viewMarkOf(p, c.local, w)
+        let (moved, inPlace) =
+          if mi >= 0: viewInPlace(p, mi)
+          else: (not sameSymVal(env2[c.local], cur.get), false)
+        if not moved: continue
+        if mi >= 0: reanchor.add mi
+        if inPlace: env2[c.local] = cur.get
+        else: env2[viewFreedPrefix & c.local] = cur.get
         changed = true
-  if changed: forkPath(p, p.pc, env2) else: p
+      elif not sameSymVal(env2[c.local], cur.get):
+        env2[c.local] = cur.get
+        changed = true
+  if not changed: return p
+  result = forkPath(p, p.pc, env2)
+  for mi in reanchor: reanchorView(result, mi)
 
 const elemSnapPrefix = "__elemsnap#"
   ## RFC-0005 S8be. As `addrSnapPrefix`, for a seq with element cells as a
@@ -22359,6 +23340,41 @@ proc sameSeqLen(a, b: SymVal): bool =
     not a.isUnsupportedFieldPlaceholder and # [placeholder-audited]
     not b.isUnsupportedFieldPlaceholder and # [placeholder-audited]
     cast[pointer](a.seqLen.raw) == cast[pointer](b.seqLen.raw) # [placeholder-audited]
+
+proc shadowedElem(p: Path; ks: seq[int]; k: int): Option[Z3Bool] =
+  ## RFC-0005 S8ca. When element cell `k` (of `ks`, the frame's live cells)
+  ## is shadowed: an older live cell of its seq has an equal index, and
+  ## `walkElemCell` handed that one out, so no pointer writes `k`'s. A
+  ## store at an address `walkElemCell` built (`ite(i == j, old, new)`)
+  ## leaves `k`'s heap read a different term though its value is
+  ## unchanged; read back after the older cell's, it clobbered the
+  ## element (an `addr s[i]` actual of a seq with element cells, S8bu's
+  ## "in the element's own heap"). none when no older cell may shadow it.
+  let e = p.elemCells[k]
+  var conds: seq[Z3Bool]
+  for j in ks:
+    if j >= k: break
+    let o = p.elemCells[j]
+    if o.root == e.root and not o.dead:
+      let c = o.idx == e.idx
+      let f = foldedBool(e.idx.ctx, c)
+      if f.isNone: conds.add c
+      elif f.get: return some(c)   # shadowed outright
+  if conds.len == 0: return none(Z3Bool)
+  var c = conds[0]
+  for i in 1 ..< conds.len: c = c or conds[i]
+  some(c)
+
+proc withCellElem(p: Path; ks: seq[int]; k: int; sv: SymVal;
+                  cur: SymVal): SymVal =
+  ## RFC-0005 S8ca. `sv` with element cell `k`'s value `cur` read into its
+  ## element, unless an older cell shadows it (`shadowedElem`).
+  let e = p.elemCells[k]
+  let sh = shadowedElem(p, ks, k)
+  if sh.isNone: return withElem(sv, e.idx, cur)
+  let f = foldedBool(e.idx.ctx, sh.get)
+  if f.isSome and f.get: return sv
+  withElem(sv, e.idx, iteSV(sh.get, seqElemAt(sv, e.idx), cur))
 
 proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =
@@ -22471,7 +23487,8 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
       else:
         for k in written:
           let e = q.elemCells[k]
-          sNew = withElem(sNew, e.idx, addrCellValue(ctx, q, e.ty, e.refAst))
+          sNew = withCellElem(q, ks, k, sNew,
+                              addrCellValue(ctx, q, e.ty, e.refAst))   # S8ca
         env2[root] = sNew
       # Only the side that changed is copied: a cell another cell of the
       # same index shadows is never one a pointer holds (`walkElemCell`
@@ -22540,7 +23557,7 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
       continue
     let cur = addrCellValue(w.z3, q, e.ty, e.refAst)
     if not sameSymVal(seqElemAt(env2[e.root], e.idx), cur):
-      env2[e.root] = withElem(env2[e.root], e.idx, cur)
+      env2[e.root] = withCellElem(q, ks, k, env2[e.root], cur)   # S8ca
   q.env = env2
   drainPendingLowerEffects(q)
 
@@ -22595,6 +23612,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for c in w.frame.addrCells:
       if env2.hasKey(c.local) and env2.hasKey(c.cell):
         env2[addrSnapName(depth, c.local)] = env2[c.local]
+        changed = true
+      elif c.slot.len > 0 and env2.hasKey(c.local) and env2.hasKey(c.slot):
+        env2[addrSnapName(depth, c.local)] = env2[c.local]   # RFC-0005 S8bx
+        env2[addrSnapName(depth, c.slot)] = env2[c.slot]
         changed = true
     ins.add(if changed: forkPath(p, p.pc, env2) else: p)
   let outs0 = walkStmt(stmt, ins, w)
@@ -22655,6 +23676,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     result.add q
   if w.frame.addrCells.len > 0:
     result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
+    result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =
@@ -23183,7 +24205,8 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   # cannot outlive the call (`ptrLocal`); otherwise the call declines.
   var bodyOverride: IRStmt = nil
   var outs: seq[tuple[name: string, param: int]]
-  if e.ccVarTys.len > 0 or e.ccAddrArgs.len > 0:
+  # RFC-0005 batch 9: and a by-value seq, table, set or array (`byValueTouch`).
+  if e.ccVarTys.len > 0 or e.ccAddrArgs.len > 0 or e.ccTouch.len > 0:
     let siteKey = (clo.closureSite.siteHash, clo.closureSite.declOrder)
     let bodies =
       if currentWalkCtxPtr != nil:
@@ -23196,8 +24219,8 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
         let what = if met.startsWith("n:"): "`" & displayName(met[2 .. ^1]) & "`"
                    elif met == "*": "a location"
                    else: "a heap cell of that type"
-        let msg = "closure call through `" & e.ccCallee & "`: a `var`/`addr` " &
-               "argument's location, " & what & ", can also be reached by " &
+        let msg = "closure call through `" & e.ccCallee & "`: an argument's " &
+               "location, " & what & ", can also be reached by " &
                "the body outside its formals (a capture, a global or a proc " &
                "value it calls): the body's accesses through the two are " &
                "not one location in the walk (RFC-0005 S8bh)"
@@ -23479,7 +24502,8 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     retTy: cb.retTy,
     # RFC-0005 S8bn (item 3): the lambda's `var` formals a pointer may
     # address (all of them for a call that carries no codes).
-    ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe)
+    ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe,
+        sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
   let frameIx = w.callStack.high
   # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
   # to them below.
@@ -23557,7 +24581,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
           let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
           descentBase.env[cell] = callerEnv[c.cell]
           entryCells.add (local: formal, cell: cell, ty: c.ty, path: c.path,
-                          ixs: c.ixs, bound: c.bound, view: c.view)
+                          ixs: c.ixs, bound: c.bound, view: c.view, slot: "")
           if callerName notin boundOuts: boundOuts.add callerName
     if locs.len > 0:
       descentBase.elemCells = w.callerElemCells
@@ -23582,6 +24606,21 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       inheritElemCells(descentBase, callerFrameId, w.frame.frameId,
                        elemShares, @[], @[])
     w.frame.addrCells = entryCells
+    anchorViews(descentBase, entryCells, w.frame.frameId)   ## RFC-0005 S8ca
+  # RFC-0005 S8ca: a by-reference capture whose variable's address is taken
+  # (its pointer threaded beside its env cell, `capAddrName`) is bound to
+  # the address cell, as a named callee's capture is (`inheritAddrCells`):
+  # the body keeps the two equal, and the calling path is marked
+  # (`capBoundName`) so the owning frame reads the cell's value.
+  var boundCaps: seq[tuple[cell: string; p: SymVal]]
+  for nm, cell in cellOf:
+    let an = capAddrName(cell)
+    if not descentBase.env.hasKey(an) or descentBase.env[an].kind != svPtr:
+      continue
+    w.frame.addrCells.add (local: nm, cell: an,
+                           ty: descentBase.env[an].ptrPointee, path: @[],
+                           ixs: @[], bound: false, view: false, slot: "")
+    boundCaps.add (cell: cell, p: descentBase.env[an])
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
   let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
                          @[descentBase], w)
@@ -23593,6 +24632,8 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   popFrame(w)
   w.callStack.setLen(frameIx)
   restorePendingLowerEffects(w, pending)
+  for b in boundCaps:   # RFC-0005 S8ca: the mark (`capBoundName`)
+    closureEnvWrites.add (capBoundName(b.cell), b.p)
   # RFC-0005 S9 (capture by reference). A body that WRITES a by-reference
   # capture writes the caller's variable; the descent env is the body's own,
   # and nothing carries the write back. Any exit -- a value exit or an
@@ -25323,10 +26364,13 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   setCurrentContext(ctx)
   queryTimeoutMsCur = settings.budget.queryTimeoutMs   ## RFC-0005 S8bu
   queryTimedOutFlag = false                            ## RFC-0005 S8bu
+  nativeStackCutFlag = false                           ## RFC-0005 S8ca
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
   z3ApiFirstError = ""
+  when defined(symexTestInjectWalkerFault):
+    injectedShape = ""     ## RFC-0005 S8ce: a prior run's unfired shape
   callGuardedNames = @[]   ## RFC-0005 S8an: a run that raised mid-callee
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the
@@ -25352,6 +26396,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
+  regexRecFactConds = @[]                ## RFC-0005 S8bt: and their facts
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms
@@ -26800,20 +27845,13 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # (`concreteBranchRLimit`), with their `random_seed`. It had no bound at
   # all. An exhausted bound is `zsUnknown`, reported `false`: not proven,
   # never a claim.
-  let s = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
-    sp.set("timeout", settings.budget.queryTimeoutMs)
-  s.setParams(sp)
+  # RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
   var pinned = initialPC & concreteEq
   for p in resultPaths:
     for c in p.pc: pinned.add c
-  for c in pinned: s.add(c)
   # RFC-0005 S8ag: a split's Int is free without its axioms.
-  for c in indexSplitRoots(ctx, pinned): s.add(c)
-  result.pcSatByConcreteInputs = solveBounded(s) == zsSat
+  result.pcSatByConcreteInputs = concreteScratchCheck(ctx,
+    pinned & indexSplitRoots(ctx, pinned), settings) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars

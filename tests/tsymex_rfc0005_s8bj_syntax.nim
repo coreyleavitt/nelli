@@ -173,9 +173,10 @@ suite "S8bj: the reader against re()":
           "chars@[(lo: 0, hi: 96), (lo: 98, hi: 1114111)]"
     check read("(*UTF)\\D") ==
           "chars@[(lo: 0, hi: 47), (lo: 58, hi: 1114111)]"
-    # Unicode case folding stays unmodelled in UTF mode.
+    # RFC-0005 S8bt: Unicode case folding, properties, (*UCP) and (*ANY)
+    # are modelled in UTF mode (`tsymex_rfc0005_s8bt_utf`).
     for p in ["(*UTF8)(?i)k", "(*UTF8)(?i)[r-t]", "(*UTF8)(?i)\xC3\xA9",
               "(*UTF8)\\p{L}", "(*UTF8)(*UCP)\\w", "(*UTF8)(*ANY)a"]:
       checkpoint escape(p)
-      check parsePcre(p).status == psUnmodelled
+      check parsePcre(p).status == psOk
     check parsePcre("(*UTF8)(?i)a").status == psOk

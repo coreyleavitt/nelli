@@ -122,13 +122,12 @@ suite "S8bj: walker verdicts":
       check r.witness[0].matchLen(re"(*LIMIT_MATCH=0)ab") == -8
 
   test "the CRLF start skip: modelled on the interpreter":
+    # RFC-0005 S8bt: and on PCRE 8.37's JIT (`pcre_jit.nim`), which the
+    # walker now models rather than declining.
     let r = verdict(crlfSkip, "bj_crlf_skip")
-    if jitEngine():
-      check r.status == sxUnknown
-    else:
-      check r.status == sxSat
-      if r.status == sxSat:
-        check r.witness[0].find(re"(*CRLF)[\x09-\x0b]\z") == 1
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0].find(re"(*CRLF)[\x09-\x0b]\z") == 1
 
   test "replace with a verb: sxUnsat":
     check verdict(replaceVerb, "bj_replace_commit").status == sxUnsat

@@ -860,25 +860,6 @@ proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast =
     if v.isNone: return
     result = v.get
 
-proc storeChainOver(ctx: Z3Context; arr, base: RawZ3Ast): bool =
-  ## RFC-0005 S8bu. `arr` is `base` under a chain of `store`s (`store(...
-  ## store(base, i1, v1)..., in, vn)`), `base` itself included, each read
-  ## back through a cell's `select` (`peelSelect`).
-  if storeDeclKind == 0:
-    discard storedAt(ctx, arr, arr)   # reads `storeDeclKind`
-  let base = peelSelect(ctx, base)
-  var t = arr
-  for _ in 0 ..< 100_000:
-    t = peelSelect(ctx, t)
-    if cast[pointer](t) == cast[pointer](base): return true
-    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
-    let app = Z3_to_app(ctx.raw, t)
-    if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
-       storeDeclKind or Z3_get_app_num_args(ctx.raw, app) != 3:
-      return false
-    t = Z3_get_app_arg(ctx.raw, app, 0)
-  false
-
 var constArrayDeclKind {.threadvar.}: int
   ## RFC-0005 batch 4. The `Z3_decl_kind` ordinal (+ 1) of a constant array
   ## (`(as const ...)`), read off a probe term as `storeDeclKind` is.
@@ -1617,6 +1598,14 @@ proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
                             ty)
   heapCellSelect(ctx, cell, refAst, ty)
 
+func keepStrBuf*(stored, v: SymVal): SymVal =
+  ## RFC-0005 S8ca. `stored`, the value of a cell `v` was just stored into
+  ## and read back from, with `v`'s `StrBuf`: the heap holds the string's
+  ## bytes, not whose memory they are, and the variable is still `v`.
+  result = stored
+  if result.kind == svString and v.kind == svString:
+    result.strBuf = v.strBuf
+
 proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                    v: SymVal): SymVal =
   ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
@@ -1872,11 +1861,20 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
         if c.local == local and not c.bound: known = true   # RFC-0005 S8bs
       if not known:
         w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
-                               path: @[], ixs: @[], bound: false, view: false)
+                               path: @[], ixs: @[], bound: false, view: false, slot: "")
     child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
-    env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
+    env2[local] = keepStrBuf(addrCellStore(ctx, child, ty, newRef,
+                                           env2[local]), env2[local])
     child.env = env2
     result.add drainPendingLowerEffects(child)
+
+proc foldedBool(ctx: Z3Context; b: Z3Bool): Option[bool] =
+  ## RFC-0005 S8ca. `b` simplified, when that is `true` or `false`.
+  let s = simplify(b)
+  case Z3_get_bool_value(ctx.raw, s.raw)
+  of Z3_L_TRUE: some(true)
+  of Z3_L_FALSE: some(false)
+  else: none(bool)
 
 proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8be. `addr s[i]` (`isNew` with `nAddrOf = s`, `nAddrIdx = i`;
@@ -1929,6 +1927,13 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
          e.field.len > 0:
         continue
       let same = idx == e.idx
+      # RFC-0005 S8ca: an index equal (or unequal) by its terms picks the
+      # older cell (or not) outright: the pointer is then the cell's own
+      # ref, which `ptrTargets` knows, and no store builds an `ite` address.
+      let f = foldedBool(ctx, same)
+      if f.isSome:
+        if f.get: addrAst = e.refAst
+        continue
       addrAst = wrap[Z3AnyAst](ctx,
         checkedIte(ctx, same.raw, e.refAst.raw, addrAst.raw))
     child.elemCells.add ElemCell(refAst: newRef, frame: w.frame.frameId,

@@ -37,3 +37,8 @@ state = "pending"
 - Run on Z3 5.1, 4.13.4 and cpp. All three Windows legs green.
 - Run the whole tree on Linux once before DONE. S8cb's first Windows run failed on four stale pins that its 94-suite list omitted.
 - Report DONE to `worker-reports/s8cp.md`, with per-file Windows times.
+
+## Changed after the release sort (coordinator)
+- **Item 3 (replay reaching `quit`) moves to slice S8ct, running locally.** Skip it. S8ct also takes nil deref, unbounded recursion and raw `exit` during replay.
+- **Items 1 and 2 are required for batch 10.** Item 2 is confirmed worse than main (`ua2_*`, `ua3_same` in the sort: main is correct, the channel gives a false sxRaised). Probes: `git show origin/worker-jobs:sort-probes/p_cp.nim`.
+- `=destroy` writing a global during a walked or opaque path (not replay footprint) is slice S8cs, running locally. Item 1 stays about the replay footprint only.

@@ -31,3 +31,6 @@ state = "pending"
 - Run on Z3 5.1, 4.13.4 and cpp, then the whole tree on Linux once before DONE. All three Windows legs green.
 - Report DONE to `worker-reports/s8cq.md`, with per-file Windows times.
 - Report anything that also affects main at 6cbfe8f, using a native-checked probe, so it can be sorted for the release.
+
+## Changed after the release sort (coordinator)
+**S8cq is required for batch 10.** The three-way table is done, so skip that step: `gWrite(gs)`, `gWriteBig(gBig)`, `inner(s)`, `outerR(gs)`, `inc`, `dec`, `swap`, `+=` on `getR()[]` and `getSeqR()[].setLen(1)` are false on e497dcf with main at sxUnknown (blockers B3-B8). Probe: `git show origin/worker-jobs:sort-probes/p_cq.nim`. S8cq item 2 did not reproduce in one shape; keep it, but it is not known to be a blocker. Item 4 (precision) can move to RFC-0016 if it would delay batch 10.

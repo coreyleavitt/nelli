@@ -457,6 +457,11 @@ title = "S8bk's remainder: index call inside a var actual's lvalue (evaluate onc
 state = "done"
 
 [[slice]]
+id = "S8cd"
+title = "Batch-6 integration findings: iekSeqLen on unsupported receiver kinds, ptrTargets on the global entry fallback, case-object globals, isEagerIR bit sets, recvValue observing only the touched part, literal-haystack rfind under a tight cap"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

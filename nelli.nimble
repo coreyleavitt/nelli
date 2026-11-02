@@ -1330,5 +1330,6 @@ task test, "Run the test suite":
             # depends on the hashes).
             "tsymex_rfc0005_s8bx_iterchange",
             # S8bx item 5: a string's setLen over a symbolic string decides.
-            "tsymex_rfc0005_s8bx_setlenstr"]:
+            "tsymex_rfc0005_s8bx_setlenstr",
+            "tsymex_rfc0005_s8cn_step1d"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

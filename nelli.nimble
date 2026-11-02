@@ -1330,5 +1330,8 @@ task test, "Run the test suite":
             # depends on the hashes).
             "tsymex_rfc0005_s8bx_iterchange",
             # S8bx item 5: a string's setLen over a symbolic string decides.
-            "tsymex_rfc0005_s8bx_setlenstr"]:
+            "tsymex_rfc0005_s8bx_setlenstr",
+            # RFC-0005 S8ce: nim-z3's hooks no longer swallow an in-flight raise
+            "tsymex_rfc0005_s8ce_hookraise",
+            "tsymex_rfc0005_s8ce_raiseshapes"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

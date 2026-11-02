@@ -1042,6 +1042,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 batch 8: S8bx and S8bt stacked on batch 7, one location for
     ## an `mpairs` view, a table write seen through it, a raise in an
     ## own-context solve a fault. 237->241.
+    ## RFC-0005 S8ce (S8bx's remainder: nim-z3's lifecycle hooks swallowed an
+    ## in-flight raise on the C backend, fixed in nim-z3; S8bx's raise hook
+    ## removed). 228->238 (provisional).
     check symexWalkerVersion == "241"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

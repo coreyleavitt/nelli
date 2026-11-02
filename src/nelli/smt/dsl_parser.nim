@@ -895,7 +895,7 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isSetLen:    # RFC-0005 S8bl (item 1)
     newCall(bindSym"mkSetLenStmt",
             newLit(s.slRetName), emitExpr(s.slBase), emitExpr(s.slLen),
-            emitIRType(s.slTy), newLit(s.slLoc))
+            emitIRType(s.slTy), newLit(s.slLoc), newLit(s.slFresh))
   of isVariantField:
     var tagsLit = newTree(nnkBracket)
     for t in s.vfMatchingTags: tagsLit.add newLit(t)
@@ -2474,6 +2474,10 @@ proc parseStmtInner(n: NimNode,
 proc parseMoveExpr(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                    ctx: ParseCtx): IRExpr
   ## RFC-0005 S8bl fwd decl (defined beside `parseVarMagicStmt`).
+proc parseNewStringExpr(n: NimNode; preamble: var seq[IRStmt];
+                        ctx: ParseCtx): IRExpr
+  ## RFC-0005 S8cl fwd decl (defined beside `parseMoveExpr`).
+
 
 proc parseLoopBody(bodyNode: NimNode; ctx: ParseCtx; unrolled = false):
     tuple[body: IRStmt, brkLabel: string] =
@@ -3728,11 +3732,14 @@ proc magicBodyEmpty(impl: NimNode): bool =
 
 proc formalsReadable(impl: NimNode): bool =
   ## RFC-0005 S8cl (item 2). Every formal of the routine declaration `impl`
-  ## is an `nnkIdentDefs`, as `parseCalleeImpl` reads them. A hook the
-  ## compiler generates holds an `nnkArgList` (`isGeneratedHook`).
+  ## is an `nnkIdentDefs` with a type, as `parseCalleeImpl` reads them. A hook
+  ## the compiler generates holds an `nnkArgList` (`isGeneratedHook`); the
+  ## instance of a generic can keep a formal typed only by its default
+  ## (`create`'s `size = 1.Positive`).
   let formal = impl.params
   for i in 1 ..< formal.len:
-    if formal[i].kind != nnkIdentDefs: return false
+    if formal[i].kind != nnkIdentDefs or formal[i][^2].kind == nnkEmpty:
+      return false
   true
 
 proc isGeneratedHook(sym: NimNode): bool =
@@ -10905,6 +10912,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # RFC-0005 S8bl (item 1): `move(x)`.
       let mvIR = parseMoveExpr(n, calleeSym, preamble, ctx)
       if mvIR != nil: return mvIR
+    block:
+      # RFC-0005 S8cl (item 4): `newString`, `newStringOfCap`.
+      let nsIR = parseNewStringExpr(n, preamble, ctx)
+      if nsIR != nil: return nsIR
     # RFC-0005 S8bc: `getOrDefault(t, k[, d])` on a Table is the present
     # value, else `d` (or `default(V)`). It walked the stdlib body before,
     # whose `hashes.Hash` locals the model does not classify (a decline, and
@@ -15800,6 +15811,23 @@ proc parseMoveExpr(n, calleeSym: NimNode; preamble: var seq[IRStmt];
   preamble.add writeBack(target, zero, preamble, ctx)
   mkVar(tmp)
 
+
+proc parseNewStringExpr(n: NimNode; preamble: var seq[IRStmt];
+                        ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8cl (item 4). `newString(len)`: `len` NUL bytes, `Natural`'s
+  ## check and the modelled bound as `newSeq`'s (`parseNewSeqLen`).
+  ## `newStringOfCap(cap)`: empty, under the same guard on `cap`. Each is a
+  ## new allocation, so its memory is the string's own (`slFresh`, `sbOwned`)
+  ## and a by-value copy of its address-taken result can be placed. It was an
+  ## opaque call: every path through it declined. nil for any other call.
+  let magic = callMagic(n)
+  if n.len != 2 or magic notin ["NewString", "NewStringOfCap"]: return nil
+  let lenIR = parseNewSeqLen(n[1], n[0].strVal, preamble, ctx)
+  let tmp = freshSynth(ctx, "newStr")
+  preamble.add mkSetLenStmt(tmp, mkStrLit(""),
+    (if magic == "NewString": lenIR else: mkIntLit(0)), tString(), siteLoc(n),
+    fresh = true)
+  mkVar(tmp)
 proc dottedFieldMutate(fieldNode: NimNode, op: DottedOp, args: seq[IRExpr],
                        preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt
   ## RFC-0005 S8bl fwd decl (defined below), for `parseTableForLoop`.
@@ -18754,7 +18782,8 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     # `parseCalleeImpl`'s `expectKind` never fails the build on one.
     if not formalsReadable(impl):
       return ctx.declineCallee(feUnsupportedOp,
-        "compiler-generated routine `" & name & "` is not modelled here " &
+        "routine `" & name & "`, whose formals cannot be read (a " &
+        "compiler-generated hook, a formal typed by its default), is not modelled " &
         "-- path degraded to sxUnknown (feUnsupportedOp)",
         name & "#hook")
   # Phase 15 G5. `geDistinctBarrier` (Invariant 3 — never a silent fallback). A

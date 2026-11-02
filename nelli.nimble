@@ -1353,5 +1353,8 @@ task test, "Run the test suite":
             # item 7: a negative-length toOpenArray; a resizing mitems body.
             "tsymex_rfc0005_s8ca_resize",
             # item 8: a mutation through a pointer to the whole value.
-            "tsymex_rfc0005_s8ca_derefmut"]:
+            "tsymex_rfc0005_s8ca_derefmut",
+            # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
+            "tsymex_rfc0005_s8cl_magics",
+            "tsymex_rfc0005_s8cl_strings"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

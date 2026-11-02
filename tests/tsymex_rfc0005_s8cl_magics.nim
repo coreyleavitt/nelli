@@ -11,7 +11,9 @@
 ##        `ensureMove` and `procCall` returned the zero value, a clean false
 ##        sxUnsat (`ensureMove`) and a clean false sxSat (`procCall`).
 ##   (1c) the lifetime magics S8bl models, pinned against Nim.
-##   (2)  a compiler-generated routine whose formals are not `nnkIdentDefs`
+##   (2)  a routine whose formals cannot be read (a compiler-generated hook, a
+##        generic instance's formal typed by its default), or an object member
+##        the type bridge cannot read (`when`),
 ##        declines instead of failing the build; `wasMoved` is modelled.
 ##   (3)  `setLen`: its length is evaluated before the old value is read, so a
 ##        call there that writes the seq is seen (a false sxUnsat before); a
@@ -208,6 +210,43 @@ proc sutNewFinalizer(k: int) =
   b.v = k
   if b.v == 3: symexTarget("nf")
 
+type ObjRef = ref object of RootObj
+  v: int
+proc sutNewObject(k: int) =
+  var p: ObjRef
+  new(p)
+  p.v = k
+  if p.v == 3: symexTarget("no")
+  if p == nil: symexTarget("no_dead")
+
+type HasSeq = object
+  a: int
+  s: seq[int]
+proc sutResetField(k: int) =
+  var o = HasSeq(a: k, s: @[k])
+  reset(o.s)
+  if o.a == 3 and o.s.len == 0: symexTarget("rf")
+  if o.s.len == 1: symexTarget("rf_dead")
+
+proc sutMoveElem(k: int) =
+  var s = [@[k], @[2]]
+  let b = move(s[0])
+  if b[0] == 3 and s[0].len == 0: symexTarget("me")
+  if s[0].len == 1: symexTarget("me_dead")
+
+proc sutCopyHook(k: int) =
+  var a = @[k]
+  var b: seq[int]
+  `=copy`(b, a)
+  if b[0] == 3: symexTarget("ch")
+  if b.len == 0: symexTarget("ch_dead")
+
+proc sutSinkHook(k: int) =
+  var a = @[k]
+  var b: seq[int]
+  `=sink`(b, a)
+  if b[0] == 3: symexTarget("sh")
+
 # --- (2) wasMoved; the generated hooks.
 proc sutWasMoved(k: int) =
   var s = @[k]
@@ -238,6 +277,35 @@ proc sutDestroy(k: int) =
   var s = @[k]
   `=destroy`(s)
   if k == 3: symexTarget("ds")
+
+proc sutCreate(k: int) =
+  ## A generic instance's formal typed only by its default (`size = 1.Positive`)
+  ## stopped the compile: "node has no type".
+  let p = create(int)
+  p[] = k
+  if p[] == 3: symexTarget("cr")
+  dealloc(p)
+
+proc sutGcRef(k: int) =
+  ## `GC_ref` reaches `RefHeader`, an object with a `when` member, which
+  ## stopped the compile: "Expected nnkIdentDefs, got nnkRecWhen".
+  var p: ref int
+  new(p)
+  GC_ref(p)
+  p[] = k
+  if p[] == 3: symexTarget("gr")
+  GC_unref(p)
+
+type WhenMember = object
+  a: int
+  when defined(nelliNeverDefined):
+    b: int
+  else:
+    c: int
+proc sutWhenMember(k: int) =
+  var o: WhenMember
+  o.a = k
+  if o.a == 3: symexTarget("wn")
 
 # --- (3) setLen.
 proc sutSetLen(k: int) =
@@ -336,8 +404,10 @@ suite "S8cl (1c): the audit of the lifetime magics":
   test "nim":
     let h = nativeHits(sutReset, ks) + nativeHits(sutMove, ks) +
             nativeHits(sutNew, ks) + nativeHits(sutNewExpr, ks) +
-            nativeHits(sutNewFinalizer, ks)
-    for l in ["rs", "mv", "nw", "ne", "nf"]:
+            nativeHits(sutNewFinalizer, ks) + nativeHits(sutNewObject, ks) +
+            nativeHits(sutResetField, ks) + nativeHits(sutMoveElem, ks) +
+            nativeHits(sutCopyHook, ks) + nativeHits(sutSinkHook, ks)
+    for l in ["rs", "mv", "nw", "ne", "nf", "no", "rf", "me", "ch", "sh"]:
       checkpoint l
       check l in h
       check (l & "_dead") notin h
@@ -352,6 +422,17 @@ suite "S8cl (1c): the audit of the lifetime magics":
     clean(sutNewExpr, "ne", sxSat)
     clean(sutNewExpr, "ne_dead", sxUnsat)
     declines(sutNewFinalizer, "nf", "magic \"NewFinalize\"")
+
+  test "a field, an element, an object, the hooks called by name":
+    clean(sutNewObject, "no", sxSat)
+    clean(sutNewObject, "no_dead", sxUnsat)
+    clean(sutResetField, "rf", sxSat)
+    clean(sutResetField, "rf_dead", sxUnsat)
+    clean(sutMoveElem, "me", sxSat)
+    clean(sutMoveElem, "me_dead", sxUnsat)
+    clean(sutCopyHook, "ch", sxSat)
+    clean(sutCopyHook, "ch_dead", sxUnsat)
+    declines(sutSinkHook, "sh", "nnkSinkAsgn")
 
 suite "S8cl (2): wasMoved, and what cannot be read declines":
   test "nim":
@@ -373,6 +454,16 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
   test "a generated hook's formals are not read: this file compiles":
     declines(sutDup, "du", "=dup")
     declines(sutDestroy, "ds", "=destroy")
+
+  test "what stopped the compile declines: create, GC_ref, a when member":
+    let h = nativeHits(sutCreate, ks) + nativeHits(sutGcRef, ks) +
+            nativeHits(sutWhenMember, ks)
+    for l in ["cr", "gr", "wn"]:
+      checkpoint l
+      check l in h
+    declines(sutCreate, "cr", "create")
+    declines(sutGcRef, "gr", "nnkCast")
+    declines(sutWhenMember, "wn", "WhenMember")
 
 suite "S8cl (3): setLen":
   test "nim":

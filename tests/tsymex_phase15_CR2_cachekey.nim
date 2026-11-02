@@ -1044,6 +1044,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## own-context solve a fault. 237->241.
     ## RFC-0005 S8ca (a call declines in-band when the native stack left
     ## is under one more level's need). 225->233.
+    ## RFC-0005 S8cl (a bodiless magic is modelled or declines, `unsafeNew`
+    ## and `newString` allocate, `setLen` reads after its length). 246.
     check symexWalkerVersion == "246"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

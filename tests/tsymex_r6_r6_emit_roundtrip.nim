@@ -425,7 +425,7 @@ proc fieldwiseEq(a, b: IRStmt): bool =
     # RFC-0005 S8bl (item 1).
     a.slRetName == b.slRetName and fieldwiseEq(a.slBase, b.slBase) and
       fieldwiseEq(a.slLen, b.slLen) and fieldwiseEq(a.slTy, b.slTy) and
-      a.slLoc == b.slLoc
+      a.slLoc == b.slLoc and a.slFresh == b.slFresh
   of isSeqPop:
     # Item 2 (round-6 fix round 3): see isIndexAssign's comment immediately
     # above -- same missing-arm gap, same N14 (9dbc3df) origin.

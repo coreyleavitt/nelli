@@ -20337,16 +20337,19 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
       # (or substr) was left undecided by both pinned Z3s within
       # `seqQueryRLimit`.
       var leafShrink: seq[Z3Bool]
-      let rShrink = allocateSym(tString(),
+      var rShrink = allocateSym(tString(),
         freshDegradeName("__setLenStr"), leafShrink)
+      # RFC-0005 S8cl (item 4): a `newString`'s memory is its own.
+      if stmt.slFresh: rShrink.strBuf = sbOwned
       var envShrink = env2
       envShrink[stmt.slRetName] = rShrink
       survivors.add forkPath(p, p.pc & leafShrink & @[not grows,
         rShrink.str == substr(baseSV.str, mkInt(0), newLen)], envShrink)
       var leafGrow: seq[Z3Bool]
-      let rGrow = allocateSym(tString(),
+      var rGrow = allocateSym(tString(),
         freshDegradeName("__setLenStr"), leafGrow)
       let pad = mkStringVar(freshDegradeName("__setLenPad"))
+      if stmt.slFresh: rGrow.strBuf = sbOwned
       env2[stmt.slRetName] = rGrow
       survivors.add forkPath(p, p.pc & leafGrow & @[grows,
         len(pad) == newLen - oldLen,
@@ -27911,6 +27914,27 @@ proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
     nil
 {.pop.}
 
+proc storeOrdinal[F](f: var F; v: int64) =
+  ## RFC-0005 S8cl (item 5; factored out of S8s's `validDefault`). `f = F(v)`,
+  ## range-checked, written through its bytes: `F` can be an imported type whose
+  ## C++ assignment is deleted. `std/atomics`' `Atomic[T]` on cpp holds `value:
+  ## AtomicInt8`, an ordinal alias imported as `std::atomic<NI8>`, and an
+  ## assignment there emitted a use of the deleted `std::atomic::operator=` (a
+  ## cpp compile error in every SUT whose cell holds an `Atomic`,
+  ## `tsymex_r6_n43_parity`).
+  if v < int64(ord(low(F))) or v > int64(ord(high(F))):
+    raise newException(RangeDefect, "value out of range: " & $v)
+  when sizeof(F) == 1:
+    var lo = int8(v)
+  elif sizeof(F) == 2:
+    var lo = int16(v)
+  elif sizeof(F) == 4:
+    var lo = int32(v)
+  else:
+    var lo = v
+  static: doAssert sizeof(lo) == sizeof(F)
+  copyMem(addr f, addr lo, sizeof(F))
+
 proc readCellField[F](c: RefWitness; path: string; f: var F)
 
 proc validDefault[F](f: var F) =
@@ -27929,22 +27953,7 @@ proc validDefault[F](f: var F) =
     discard
   elif F is Ordinal:
     if ord(f) < ord(low(F)) or ord(f) > ord(high(F)):
-      # RFC-0005 S8s. Written through its bytes, not `f = low(F)`: `F` can be
-      # an imported type whose C++ assignment is deleted. `std/atomics`'
-      # `Atomic[T]` on cpp holds `value: AtomicInt8`, an ordinal alias
-      # imported as `std::atomic<NI8>`, and `f = low(F)` there emitted a
-      # use of the deleted `std::atomic::operator=` (a cpp compile error in
-      # every SUT whose cell holds an `Atomic`, `tsymex_r6_n43_parity`).
-      when sizeof(F) == 1:
-        var lo = int8(ord(low(F)))
-      elif sizeof(F) == 2:
-        var lo = int16(ord(low(F)))
-      elif sizeof(F) == 4:
-        var lo = int32(ord(low(F)))
-      else:
-        var lo = int64(ord(low(F)))
-      static: doAssert sizeof(lo) == sizeof(F)
-      copyMem(addr f, addr lo, sizeof(F))
+      storeOrdinal(f, int64(ord(low(F))))   # RFC-0005 S8s: not `f = low(F)`
   else:
     discard
 
@@ -28080,8 +28089,8 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
   elif F is Ordinal:
     var i: int64
     var u: uint64
-    if cellInt(c, path, i): f = F(i)
-    elif cellUInt(c, path, u): f = F(int64(u))
+    if cellInt(c, path, i): storeOrdinal(f, i)   # RFC-0005 S8cl
+    elif cellUInt(c, path, u): storeOrdinal(f, int64(u))
   elif F is string:
     # RFC-0005 S8ap: a string field is read from the heap and rendered.
     var x: string

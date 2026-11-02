@@ -204,6 +204,16 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "246"
+  ## RFC-0005 S8cl (2026-11-02, provisional) -- S8ca's remainder. A bodiless
+  ## magic is modelled or declines, never a no-op. `unsafeNew` allocates
+  ## (S8bl declined it, before that it was dropped: `p != nil` a clean false
+  ## sxUnsat). `ensureMove` and `procCall`, whose bodies are empty and which
+  ## returned the zero value, decline. `setLen` evaluates its length before
+  ## it reads the old value, and declines when that length's call writes
+  ## what the place reads. `newString` and `newStringOfCap` are modelled as
+  ## fresh memory (`slFresh`, a string the path owns), where they were
+  ## opaque calls. Shares S8ca's provisional 246 on this branch.
+  ##
   ## RFC-0005 S8ca (2026-10-03, provisional) — S8bu's remainder. A call is
   ## not inlined when the native stack left below it is under what one more
   ## level needs (`nativeStackShort`): it declines in-band
@@ -5898,7 +5908,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # fresh name (`bindLocal`), the operands content-addressed.
     let slSlot = "$" & $bindLocal(env, s.slRetName)
     "St<SL:" & slSlot & "=" & canonicalize(s.slBase, env) & "," &
-      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) & ">"
+      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) &
+      (if s.slFresh: ";fresh" else: "") & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`

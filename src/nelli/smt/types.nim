@@ -1681,6 +1681,8 @@ type
       slLen*:     IRExpr         ## the new length (already range-guarded).
       slTy*:      IRType         ## the argument's type (a seq or a string).
       slLoc*:     string         ## siteLoc idiom, for the walk-time decline.
+      slFresh*:   bool           ## RFC-0005 S8cl: `newString`: the result is
+                                 ## a new allocation, memory of its own.
     of isUnsafeCast:
       ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
                                  ## pattern was routed (`"cast[ptr T]"`, `"addr"`).
@@ -5807,10 +5809,10 @@ proc mkTabKeysStmt*(retName: string, recv: IRExpr, keyTy: IRType,
          tkLoc: loc)
 
 proc mkSetLenStmt*(retName: string, base, newLen: IRExpr, ty: IRType,
-                   loc: string = ""): IRStmt =
+                   loc: string = ""; fresh = false): IRStmt =
   ## RFC-0005 S8bl (item 1). `retName := setLen(base, newLen)`.
   IRStmt(kind: isSetLen, slRetName: retName, slBase: base, slLen: newLen,
-         slTy: ty, slLoc: loc)
+         slTy: ty, slLoc: loc, slFresh: fresh)
 
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)

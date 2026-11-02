@@ -1099,6 +1099,7 @@ task test, "Run the test suite":
             # writes declines (was a false sxUnsat); a global seq indexed by
             # a call; S8br's slow addr cell terminates. Walker 237.
             "tsymex_rfc0005_b7_integration",
+            "tsymex_rfc0005_b8_integration",
             "tsymex_rfc0005_s8bt_libversion",
             "tsymex_rfc0005_s8bt_jit",
             "tsymex_rfc0005_s8bt_jit_langs",

@@ -1478,7 +1478,8 @@ type
                          ## two formals. `keyName` names the loop's key in the
                          ## caller. The walker keeps the two formals equal
                          ## statement by statement in the callee
-                         ## (`syncViewAliases`). Empty for every other call.
+                         ## (`AddrCellEntry.slot`, `syncAddrCells`). Empty for
+                         ## every other call.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr

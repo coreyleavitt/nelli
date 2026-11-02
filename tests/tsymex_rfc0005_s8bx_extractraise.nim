@@ -76,7 +76,53 @@ proc clean(s: string, n: int) =
   if i == 3 and s.len == 2:
     symexTarget("clean")
 
+# RFC-0005 batch 8: the same raise from an own-context solve (S8bp's
+# `solveBounded`, S8bu's bounds). The solve sits at the same place in the walk
+# as extraction, so the same destructor could lose it, and the query's status
+# was whatever the frame held. A parameter's name in the query triggers it.
+proc solveAfterLoop(injectSolveFault: int) =
+  var i = 0
+  while i < injectSolveFault and i < 4:
+    inc i
+  if i == 3: symexTarget("solve_after_loop")
+
+proc solveFlat(injectSolveFault: int) =
+  if injectSolveFault == 7: symexTarget("solve_flat")
+
+proc solveSwallowed(injectSwallowedSolveFault: int) =
+  var i = 0
+  while i < injectSwallowedSolveFault and i < 4:
+    inc i
+  if i == 3: symexTarget("solve_swallowed")
+
+# Only the target's query names the parameter: the raise leaves the target
+# solve, past the loop's paths, as `afterLoop`'s extraction raise does.
+proc solveAtTarget(n, injectSolveFault: int) =
+  var i = 0
+  while i < n and i < 4:
+    inc i
+  if i == 3 and n > 1 and injectSolveFault == 1:
+    symexTarget("solve_at_target")
+
+proc solveAtTargetTable(t: Table[string, int], injectSolveFault: int) =
+  if t.len > 2: return
+  for k, v in t:
+    if v < -100 or v > 100: return
+  var s = 0
+  for k, v in t.pairs:
+    s += v
+  if "a" in t and t["a"] == 4 and t.len == 1 and injectSolveFault == 1:
+    symexTarget("solve_at_table")
+
+proc solveSwallowedAtTarget(n, injectSwallowedSolveFault: int) =
+  var i = 0
+  while i < n and i < 4:
+    inc i
+  if i == 3 and n > 1 and injectSwallowedSolveFault == 1:
+    symexTarget("solve_swallowed_target")
+
 const injected = "S8bx synthetic extraction fault"
+const injectedSolve = "batch 8 synthetic solve fault"
 
 suite "S8bx (1): a raise from in-walk witness extraction":
 
@@ -113,6 +159,50 @@ suite "S8bx (1): a raise from in-walk witness extraction":
 
   test "a later run is not declined by an earlier run's fault":
     discard symexFind(afterLoop, tLabel("after_loop"))
+    let r = symexFind(clean, tLabel("clean"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+
+suite "batch 8: a raise from an own-context solve":
+
+  test "after a loop: a named decline":
+    let r = symexFind(solveAfterLoop, tLabel("solve_after_loop"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check namedFault(r, injectedSolve)
+
+  test "no loop: a named decline":
+    let r = symexFind(solveFlat, tLabel("solve_flat"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check namedFault(r, injectedSolve)
+
+  test "lost inside the solve: a named decline":
+    let r = symexFind(solveSwallowed, tLabel("solve_swallowed"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check namedFault(r, "batch 8 synthetic swallowed solve fault")
+
+  test "the target's solve, past a loop: a named decline":
+    let r = symexFind(solveAtTarget, tLabel("solve_at_target"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check namedFault(r, injectedSolve)
+
+  test "the target's solve, past two iterations of a table: a named decline":
+    let r = symexFind(solveAtTargetTable, tLabel("solve_at_table"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check namedFault(r, injectedSolve)
+
+  test "lost inside the target's solve: a named decline":
+    let r = symexFind(solveSwallowedAtTarget, tLabel("solve_swallowed_target"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check namedFault(r, "batch 8 synthetic swallowed solve fault")
+
+  test "a later run is not declined by an earlier run's fault":
+    discard symexFind(solveFlat, tLabel("solve_flat"))
     let r = symexFind(clean, tLabel("clean"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat

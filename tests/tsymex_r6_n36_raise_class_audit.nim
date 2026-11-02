@@ -460,7 +460,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## witness-extraction raises `-d:symexTestInjectWalkerFault` injects
     ## (`extractLeaf`'s `injectExtractionFault` and
     ## `injectedExtractionFaultTerms`).
-    check runtimeCount == 77
+    ## 77 -> 79 (RFC-0005 batch 8, walker 241). The same for an own-context
+    ## solve (`ownContextCheck`, `injectedSolveFaultTerms`).
+    check runtimeCount == 79
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
@@ -493,7 +495,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 79 -> 78: the same `isIndex` array-arm site removed above (RFC-0005
     ## S8z).
     ## 78 -> 80: the same two S8bx test-injection-only sites added above.
-    check cCount == 80
+    ## 80 -> 82: the same two batch 8 test-injection-only sites added above.
+    check cCount == 82
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

@@ -1805,7 +1805,7 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
         if c.local == local and not c.bound: known = true   # RFC-0005 S8bs
       if not known:
         w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
-                               path: @[], ixs: @[], bound: false, view: false)
+                               path: @[], ixs: @[], bound: false, view: false, slot: "")
     child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
     env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
     child.env = env2

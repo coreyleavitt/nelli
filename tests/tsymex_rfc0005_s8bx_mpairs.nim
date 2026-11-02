@@ -11,13 +11,10 @@
 ## `sxSat`): SOUNDNESS, not the PRECISION gap S8bl reported.
 ##
 ## The parser marks such a call (`IRStmt.cViewAliases`), and the walker keeps
-## the two formals equal statement by statement in the callee
-## (`syncViewAliases`), carrying the pair into a callee they are passed on
-## to. Every live / dead pair below was checked against a native run (the
-## values in each SUT's comment). This is the local model of what S8bs's
-## address cells do for `addr`-taken variables (`bindVarLocs`), which this
-## base does not have; see the RFC's "As landed (S8bx)" for the
-## reconciliation.
+## the two formals equal statement by statement in the callee (`syncAddrCells`
+## on a `slot` entry, since batch 8), carrying the pair into a callee they are
+## passed on to. Every live / dead pair below was checked against a native run
+## (the values in each SUT's comment).
 import std/[unittest, strutils, tables]
 import nelli
 import nelli/symex

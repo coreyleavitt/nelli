@@ -9007,7 +9007,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # `n` (or `wrapped`) is ever handed to `classifyType` — sidesteps the
       # crash entirely rather than trying to enumerate every unresolvable
       # `NimTypeKind` a generic/concept instantiation might produce.
-      if isIntLiteralNode(wrapped):
+      #
+      # RFC-0005 batch 8: an address-of changes no width either, and the one
+      # `substByRefBody` builds (S8ba, S8bu's `mitems` / `mpairs` element
+      # passed on to a `var` formal) is a new node with no type at all:
+      # `classifyType` on it aborted the compile.
+      if isIntLiteralNode(wrapped) or n.kind == nnkHiddenAddr:
         parseExpr(wrapped, preamble, ctx)
       else:
         let outerCls = classifyType(n)
@@ -15624,35 +15629,61 @@ proc writesName(s: IRStmt; name: string): bool =
     any
   else: false
 
-proc mutViewWriteBack(s: IRStmt; name: string;
-                      writeBack: proc(): IRStmt): IRStmt =
+proc hasClosureCall(e: IRExpr): bool =
+  ## RFC-0005 batch 8. `e` calls through a proc value (a lambda's captures
+  ## are written by name there).
+  if e == nil: return false
+  if e.kind == iekClosureCall: return true
+  for k in irKids(e):
+    if hasClosureCall(k): return true
+  false
+
+proc mutViewWriteBack(s: IRStmt; name, tabRoot: string;
+                      writeBack, reload: proc(): IRStmt): IRStmt =
   ## RFC-0005 S8bl (item 4). `s` with `writeBack()` placed right after every
   ## statement that writes `name` (`writesName`), at any nesting.
+  ##
+  ## RFC-0005 batch 8. The other direction: `reload()` right after every
+  ## statement that may write the Table (rooted at `tabRoot`), and on entry to
+  ## a handler or a `finally`, which a raise reaches from any point of its
+  ## `try`. A call may write it through a formal, a capture or by a global's
+  ## name. The view stayed the value read at the head of the iteration:
+  ## `t[k] = 50; if v == 50` was a false `sxSat` on its negation.
   if s == nil: return nil
+  proc recur(c: IRStmt): IRStmt =
+    mutViewWriteBack(c, name, tabRoot, writeBack, reload)
+  proc onEntry(c: IRStmt): IRStmt =
+    if c == nil: nil else: mkBlock(@[reload(), recur(c)])
   case s.kind
   of isBlock:
     var stmtsOut: seq[IRStmt]
-    for c in s.stmts: stmtsOut.add mutViewWriteBack(c, name, writeBack)
+    for c in s.stmts: stmtsOut.add recur(c)
     result = s
     result.stmts = stmtsOut
   of isIf:
     result = s
     for i in 0 ..< result.branches.len:
-      result.branches[i].body =
-        mutViewWriteBack(result.branches[i].body, name, writeBack)
-    result.elseBody = mutViewWriteBack(s.elseBody, name, writeBack)
+      result.branches[i].body = recur(result.branches[i].body)
+    result.elseBody = recur(s.elseBody)
   of isWhile:
     result = s
-    result.wbody = mutViewWriteBack(s.wbody, name, writeBack)
+    result.wbody = recur(s.wbody)
   of isTry:
     result = s
-    result.tryBody = mutViewWriteBack(s.tryBody, name, writeBack)
+    result.tryBody = recur(s.tryBody)
     for i in 0 ..< result.tryHandlers.len:
-      result.tryHandlers[i].body =
-        mutViewWriteBack(result.tryHandlers[i].body, name, writeBack)
-    result.tryFinally = mutViewWriteBack(s.tryFinally, name, writeBack)
+      result.tryHandlers[i].body = onEntry(result.tryHandlers[i].body)
+    result.tryFinally = onEntry(s.tryFinally)
   else:
-    result = if writesName(s, name): mkBlock(@[s, writeBack()]) else: s
+    var seqOut = @[s]
+    if writesName(s, name): seqOut.add writeBack()
+    let closureCall =
+      (s.kind == isLet and hasClosureCall(s.lvalue)) or
+      (s.kind == isAssign and hasClosureCall(s.avalue))
+    if (s.kind == isCall and not s.opaque) or closureCall or
+       writesName(s, tabRoot):
+      seqOut.add reload()
+    result = if seqOut.len == 1: s else: mkBlock(seqOut)
 
 func irLocPath(e: IRExpr): string =
   ## RFC-0005 S8bx (item 3). `e` as a location path (`t`, `o.tab`), or ""
@@ -15665,7 +15696,16 @@ func irLocPath(e: IRExpr): string =
     if r.len == 0: "" else: r & "." & e.fieldName
   else: ""
 
-proc markViewAliases(s: IRStmt; vName, tabPath, keyName: string;
+func irLocRoot(e: IRExpr): string =
+  ## RFC-0005 batch 8. The variable the location path `e` starts at (a
+  ## global's IR name may itself hold a `.`).
+  if e == nil: return ""
+  case e.kind
+  of iekVar: e.vname
+  of iekField: irLocRoot(e.obj)
+  else: ""
+
+proc markViewAliases(s: IRStmt; vName, tabPath, tabRoot, keyName: string;
                      n: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bx (item 3). In an `mpairs` / `mvalues` body, a call that
   ## receives the loop variable `vName` and the table (the location
@@ -15681,23 +15721,23 @@ proc markViewAliases(s: IRStmt; vName, tabPath, keyName: string;
   case s.kind
   of isBlock:
     for i in 0 ..< s.stmts.len:
-      s.stmts[i] = markViewAliases(s.stmts[i], vName, tabPath, keyName, n, ctx)
+      s.stmts[i] = markViewAliases(s.stmts[i], vName, tabPath, tabRoot, keyName, n, ctx)
     s
   of isIf:
     for i in 0 ..< s.branches.len:
       s.branches[i].body =
-        markViewAliases(s.branches[i].body, vName, tabPath, keyName, n, ctx)
-    s.elseBody = markViewAliases(s.elseBody, vName, tabPath, keyName, n, ctx)
+        markViewAliases(s.branches[i].body, vName, tabPath, tabRoot, keyName, n, ctx)
+    s.elseBody = markViewAliases(s.elseBody, vName, tabPath, tabRoot, keyName, n, ctx)
     s
   of isWhile:
-    s.wbody = markViewAliases(s.wbody, vName, tabPath, keyName, n, ctx)
+    s.wbody = markViewAliases(s.wbody, vName, tabPath, tabRoot, keyName, n, ctx)
     s
   of isTry:
-    s.tryBody = markViewAliases(s.tryBody, vName, tabPath, keyName, n, ctx)
+    s.tryBody = markViewAliases(s.tryBody, vName, tabPath, tabRoot, keyName, n, ctx)
     for i in 0 ..< s.tryHandlers.len:
       s.tryHandlers[i].body =
-        markViewAliases(s.tryHandlers[i].body, vName, tabPath, keyName, n, ctx)
-    s.tryFinally = markViewAliases(s.tryFinally, vName, tabPath, keyName, n,
+        markViewAliases(s.tryHandlers[i].body, vName, tabPath, tabRoot, keyName, n, ctx)
+    s.tryFinally = markViewAliases(s.tryFinally, vName, tabPath, tabRoot, keyName, n,
                                    ctx)
     s
   of isCall:
@@ -15711,6 +15751,12 @@ proc markViewAliases(s: IRStmt; vName, tabPath, keyName: string;
       elif lp.len > 0 and (lp.startsWith(vName & ".") or
                            tabPath.startsWith(lp & ".")):
         partial = true
+    # RFC-0005 batch 8: a callee holding the view that reaches the Table by a
+    # global's name or a capture has the two as separate copies (a false
+    # `sxUnsat` on its read of the view's write): the name is withheld from
+    # it, and its access declines (`callGuardedNames`).
+    if viewIx >= 0 and tabRoot.len > 0 and tabRoot notin s.cGuardRoots:
+      s.cGuardRoots.add tabRoot
     if viewIx < 0 or (tabIx < 0 and not partial): return s
     if partial:
       return mkBlock(@[ctx.declineAtSite(feUnsupportedOp,
@@ -15861,10 +15907,27 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
       if wbPre.len == 0: st else: mkBlock(wbPre & @[st])
     # RFC-0005 S8bx (item 3): a call receiving both the view and the table.
     var scratch: seq[IRStmt]
-    body = markViewAliases(body, vName,
-                           irLocPath(parseExpr(container, scratch, ctx)),
+    let tabLoc = parseExpr(container, scratch, ctx)
+    body = markViewAliases(body, vName, irLocPath(tabLoc), irLocRoot(tabLoc),
                            kSynth, n, ctx)
-    body = mutViewWriteBack(body, vName, writeBack)
+    # RFC-0005 batch 8: a key removed declines where it is removed, as a read
+    # of the view past it would read the slot Nim's `del` refills.
+    proc reload(): IRStmt =
+      var rlPre: seq[IRStmt]
+      let tabNow = parseExpr(container, rlPre, ctx)
+      rlPre.add mkIf(@[mkBranch(mkTabRemovedSince(tabNow, mkVar(snapIter)),
+        ctx.declineAtSite(feUnsupportedOp,
+          siteMsg(n, "a key was removed from the Table while iterating over " &
+                  "it, and the loop variable views a slot Nim's `del` may " &
+                  "refill from another entry -- path degraded to sxUnknown"),
+          "a key removed from the Table under an `mpairs` view"))])
+      let recv = liftIndexContainer(parseExpr(container, rlPre, ctx),
+                                    tabCls.ty, rlPre, ctx)
+      let rl = freshSynth(ctx, "tkr")
+      rlPre.add mkIndexStmt(rl, recv, mkVar(kSynth), valTy)
+      rlPre.add mkAssign(vName, mkVar(rl))
+      mkBlock(rlPre)
+    body = mutViewWriteBack(body, vName, irLocRoot(tabLoc), writeBack, reload)
   case iterName
   of "mpairs", "mvalues": discard
   of "keys": loopStmts.add mkLet(vars[0].strVal, keyTy, mkVar(kSynth))

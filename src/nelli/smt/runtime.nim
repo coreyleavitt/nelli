@@ -1777,12 +1777,15 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
 # `runSymex` turns a run that recorded one into `sxUnknown` +
 # `weInternalWalkerFault`, whether or not the raise survived. The walk stops
 # at the first such record (`shouldStop`), and the hit it struck is not
-# admitted (`trySolve`).
+# admitted (`trySolve`). RFC-0005 batch 8: the same for the solve itself
+# (`solveRaiseHook`, `checkCapped`). The root fix is nim-z3's `termDestroy`.
 
 var extractionFault* {.threadvar.}: string
   ## RFC-0005 S8bx. `<name>: <msg>` of the first exception raised inside
   ## witness extraction in this thread's current run (reset by
   ## `resetSymexRunState`). Recorded by `extractionRaiseHook`.
+var extractionFaultSite {.threadvar.}: string
+  ## RFC-0005 batch 8. Where `extractionFault` was raised.
 var extractionSavedRaiseHook {.threadvar.}:
     proc (e: ref Exception): bool {.nimcall, gcsafe.}
   ## RFC-0005 S8bx. The `localRaiseHook` extraction displaced.
@@ -1795,12 +1798,25 @@ proc extractionRaiseHook(e: ref Exception): bool {.nimcall, gcsafe.} =
   ## counted by `nelliZ3ErrorHandler`. Every other raise is a fault.
   if extractionFault.len == 0 and not (e of Z3InvalidUsageError):
     extractionFault = $e.name & ": " & e.msg
+    extractionFaultSite = "witness extraction at a target hit"
+  true
+
+proc solveRaiseHook(e: ref Exception): bool {.nimcall, gcsafe.} =
+  ## RFC-0005 batch 8. `localRaiseHook` while `checkCapped` solves: the same
+  ## place in the walk as extraction, and the same loss (a raise there was a
+  ## false `sxUnsat` with no error on C). A `Z3Error` is not a fault here: the
+  ## API errors are counted by `nelliZ3ErrorHandler` and reported under their
+  ## own kinds (S8m).
+  if extractionFault.len == 0 and not (e of Z3Error):
+    extractionFault = $e.name & ": " & e.msg
+    extractionFaultSite = "an own-context solve"
   true
 
 proc releaseExtractionHook() =
   ## RFC-0005 S8bx. Restore the displaced hook when an extraction raise left
   ## `extractionRaiseHook` installed (its `trySolve` frame never resumed).
-  if localRaiseHook == extractionRaiseHook:
+  ## RFC-0005 batch 8: or a solve's.
+  if localRaiseHook == extractionRaiseHook or localRaiseHook == solveRaiseHook:
     localRaiseHook = extractionSavedRaiseHook
 
 proc sortFault(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
@@ -13111,6 +13127,14 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   for i, c in roots: inOwn[i] = translate(c, own)
   querySolver(own, inOwn, rlimit, seqTheory)
 
+when defined(symexTestInjectWalkerFault):
+  proc injectedSolveFaultTerms(s: Z3Solver): seq[Z3Bool] =
+    ## RFC-0005 batch 8 fault injection (see `ownContextCheck`): raises with a
+    ## Z3 term in its result, which the caller destroys on the raise path.
+    result = @[mkBool(s.ctx, true)]
+    raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the batch 8 own-context solve test)]
+      "batch 8 synthetic swallowed solve fault (symexTestInjectWalkerFault)")
+
 proc ownContextCheck(s: Z3Solver;
                      assumptions: openArray[Z3Bool] = []): Z3Status =
   ## RFC-0005 S8bm. `s.check()` (RFC-0005 S8bp: under `assumptions`, terms
@@ -13118,6 +13142,19 @@ proc ownContextCheck(s: Z3Solver;
   ## context's whole step count (nothing else ran there) added to
   ## `ownContextUnits`. RFC-0005 batch 7: the check is S8bu's
   ## `solveBounded`, so a solve the clock cut off is noted here too.
+  when defined(symexTestInjectWalkerFault):
+    # RFC-0005 batch 8 fault injection (compiled out of every normal build):
+    # a query over a parameter named for the shape raises, as `extractLeaf`'s
+    # for extraction: straight out of the solve, or in a callee whose result
+    # the C backend destroys on the raise path, which loses it here.
+    let shown = $s
+    if "injectSolveFault" in shown:
+      raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the batch 8 own-context solve test)]
+        "batch 8 synthetic solve fault (symexTestInjectWalkerFault)")
+    if "injectSwallowedSolveFault" in shown:
+      var held = @[mkBool(s.ctx, false)]
+      held = injectedSolveFaultTerms(s)
+      discard held
   result = solveBounded(s, assumptions)
   let st = s.getStatistics()
   if st.contains("rlimit count"):
@@ -13533,7 +13570,7 @@ const recFactsRLimit* = 100_000'u
   ## slowest S8bt pin, Z3 5.1); a query they do not refute ran the larger
   ## budget out for nothing (`s8bb_replace`'s `a|ab` pin: 0.4 s became 7 s).
 
-proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
+proc checkCappedSteps(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
                        why: string] =
@@ -13909,6 +13946,27 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
       else: (zsUnknown, s3, nil, z3Why(s3))
+
+proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
+                 settings: SymexSettings; rlimit: uint):
+                 tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
+                       why: string] =
+  ## RFC-0005 batch 8. `checkCappedSteps`, with any raise inside it recorded
+  ## as it is raised (`solveRaiseHook`): the walk stops at the record
+  ## (`shouldStop`), and `runSymex` reports the fault whether or not the raise
+  ## survives the way there. One the C backend loses here leaves the frame
+  ## with no answer: nothing may prune or conclude on it. An escaping raise
+  ## leaves the hook installed until `runSymex` releases it, as extraction's.
+  let saved = localRaiseHook
+  let inWindow = saved == solveRaiseHook or saved == extractionRaiseHook
+  if not inWindow:
+    extractionSavedRaiseHook = saved
+    localRaiseHook = solveRaiseHook
+  result = checkCappedSteps(ctx, query, settings, rlimit)
+  if not inWindow: localRaiseHook = saved
+  if extractionFault.len > 0:
+    result.status = zsUnknown
+    result.why = "the solve raised " & extractionFault & " (RFC-0005 batch 8)"
 
 proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   ## The run-wide pools every walker query asserts beside its path's own
@@ -14356,7 +14414,7 @@ type
 
   AddrCellEntry = tuple[local, cell: string; ty: IRType;
                         path: seq[string]; ixs: seq[SymVal]; bound: bool;
-                        view: bool]
+                        view: bool; slot: string]
     ## RFC-0005 S8ax. An address-taken variable of a frame
     ## (`CallFrameCtx.addrCells`): `local`, the env name of its pointer
     ## (`cell`) and the pointee type `ty`. RFC-0005 S8bs: a `bound` entry is
@@ -14370,6 +14428,11 @@ type
   ## it follows the cell while the cell's elements are written in place, and
   ## its path is tainted once the cell's seq is assigned whole or resized
   ## (`syncAddrCells`).
+  ## RFC-0005 S8bx (item 3): a `slot` entry is a `var` formal that IS the slot
+  ## of the callee's Table formal `slot` at the key `ixs[0]` (an `mpairs` view
+  ## passed with its Table, `bindViewAliases`). A Table has no heap cell (`addr
+  ## t` declines), so it has no `cell`: the location is the Table's value in
+  ## `Env`, and it never leaves the call.
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
@@ -14464,13 +14527,6 @@ type
                                       ## walking its body, runs the finally on each,
                                       ## and sends the fall-through on (`exitJump`):
                                       ## the jump twin of `pendingReturn`.
-    viewAliases: seq[tuple[view, tab: string; key: SymVal]]
-                                      ## RFC-0005 S8bx (item 3): this callee's
-                                      ## formal `view` is the slot of its formal
-                                      ## `tab` at `key` (an `mpairs` view passed
-                                      ## with its table, `IRStmt.cViewAliases`).
-                                      ## `walkBlock` keeps the two equal after
-                                      ## every statement (`syncViewAliases`).
 
   WalkMode = enum
     ## RFC-fuzzer-nextgen G1a: the concolic-bridge mode discriminant, threaded
@@ -16138,7 +16194,7 @@ proc inheritAddrCells(calleeEnv: var Env; callerEnv: Env;
         let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
         calleeEnv[cell] = callerEnv[c.cell]
         result.add (local: formal, cell: cell, ty: c.ty, path: c.path,
-                    ixs: c.ixs, bound: c.bound, view: c.view)
+                    ixs: c.ixs, bound: c.bound, view: c.view, slot: "")
 
 proc inheritElemCells(calleePath: Path; callerFrame, calleeFrame: int;
                       varArgs: seq[(string, string)];
@@ -16241,7 +16297,7 @@ proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
         if k.local == to and not k.bound: known = true
       if not known:
         w.frame.addrCells.add (local: to, cell: addrCellName(to), ty: c.ty,
-                               path: @[], ixs: @[], bound: false, view: false)
+                               path: @[], ixs: @[], bound: false, view: false, slot: "")
       result.moved.add exitEnv[c.cell].ptrAst
     elif isVarFormal or to.len > 0:
       result.lost.add displayName(c.local)
@@ -18969,14 +19025,11 @@ proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   if p.env.hasKey(name): return (p.env[name], p)
   lowerInExpr(p, mkVar(name), w)
 
-const viewSnapPrefix = "__s8bx_viewsnap#"
-  ## RFC-0005 S8bx (item 3). The env names holding a view-aliased formal's
-  ## value as the statement began (`snapViewAliases`).
-
 proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
                      w: var WalkCtx): string =
   ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
-  ## frame (just pushed). Returns why the call declines, or "": the view's
+  ## frame (just pushed), as `slot` address entries (`AddrCellEntry`,
+  ## `syncAddrCells`). Returns why the call declines, or "": the view's
   ## formal is by value and not a scalar (Nim may pass it by address, so it
   ## would see the table's writes: not modelled), or the key is unbound.
   ## A by-value scalar view is a copy, and nothing relates it to the table.
@@ -18990,100 +19043,30 @@ proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
     pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
                key: callerEnv[a.keyName])
   if w.frameStack.len > 0:
-    for a in w.frameStack[^1].viewAliases:
+    for a in w.frameStack[^1].addrCells:
+      if a.slot.len == 0: continue
       var vi, ti = -1
       for i, arg in stmt.cargs:
         if arg.kind == iekVar:
-          if arg.vname == a.view: vi = i
-          elif arg.vname == a.tab: ti = i
+          if arg.vname == a.local: vi = i
+          elif arg.vname == a.slot: ti = i
       if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
-        pairs.add (viewArg: vi, tabArg: ti, key: a.key)
+        pairs.add (viewArg: vi, tabArg: ti, key: a.ixs[0])
   for a in pairs:
     let vf = sig.params[a.viewArg]
     if not vf.isVar:
       if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
       return "the view by value (not modelled for a " & $vf.ty.kind & ")"
-    w.frame.viewAliases.add (view: vf.name, tab: sig.params[a.tabArg].name,
-                             key: a.key)
+    w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: @[],
+                           ixs: @[a.key], bound: true, view: false,
+                           slot: sig.params[a.tabArg].name)
   ""
-
-proc snapViewAliases(paths: seq[Path]; w: WalkCtx): seq[Path] =
-  ## RFC-0005 S8bx (item 3). Each path with each view-aliased formal's value
-  ## (and its table's) recorded as the statement begins.
-  for p in paths:
-    var env2 = p.env
-    for a in w.frame.viewAliases:
-      if env2.hasKey(a.view) and env2.hasKey(a.tab):
-        env2[viewSnapPrefix & a.view] = env2[a.view]
-        env2[viewSnapPrefix & a.tab] = env2[a.tab]
-    result.add forkPath(p, p.pc, env2)
-
-proc syncViewAliases(outs: seq[Path]; w: var WalkCtx): seq[Path] =
-  ## RFC-0005 S8bx (item 3). After a statement of a callee whose formal
-  ## `view` is the slot of its formal `tab` at `key`: the side the
-  ## statement wrote is carried to the other -- the view's value stored
-  ## into the table at the key, or the table's value at the key read into
-  ## the view. Both written to different values is two writes the walk
-  ## cannot order, and a table write that may have removed the key leaves
-  ## the view on a slot Nim's `del` refills from another entry: both
-  ## decline (`feUnsupportedOp`). A statement nested in this one has
-  ## already synced and dropped the snapshot, which then leaves the pair
-  ## alone.
-  let ctx = w.z3
-  for p in outs:
-    var env2 = p.env
-    var why = ""
-    var changed = false
-    for a in w.frame.viewAliases:
-      let sv = viewSnapPrefix & a.view
-      let st = viewSnapPrefix & a.tab
-      if not (env2.hasKey(sv) and env2.hasKey(st) and env2.hasKey(a.view) and
-              env2.hasKey(a.tab)):
-        continue
-      let tabV = env2[a.tab]
-      let keyO = if tabV.kind == svTable: tabKeyTerm(a.key, tabV.tabKeyTy)
-                 else: none(Z3AnyAst)
-      if keyO.isNone:
-        why = "the table is not a modelled Table value"
-        continue
-      let k = keyO.get
-      let vCh = not sameSymVal(env2[a.view], env2[sv])
-      let tCh = not sameSymVal(tabV, env2[st])
-      if vCh and tCh:
-        why = "the view and the table were both written in one statement"
-      elif vCh:
-        var e2 = env2
-        e2[viewSnapPrefix & "key"] = a.key
-        env2[a.tab] = lower(e2, mkTableSet(mkVar(a.tab),
-          mkVar(viewSnapPrefix & "key"), mkVar(a.view)))
-        changed = true
-      elif tCh:
-        let present = wrap[Z3Bool](ctx,
-          checkedSelect(ctx, tabV.tabPresentRaw.raw, k.raw))
-        if guardLiteral(present) != glTrue:
-          why = "the table write may have removed the view's key"
-        else:
-          env2[a.view] = tabValAt(ctx, tabV, k.raw)
-          changed = true
-    for a in w.frame.viewAliases:
-      env2.del(viewSnapPrefix & a.view)
-      env2.del(viewSnapPrefix & a.tab)
-    var q = forkPath(p, p.pc, env2)
-    if why.len > 0:
-      taintInPlace(q, w.degrade(feUnsupportedOp,
-        "an `mpairs` view and its Table passed to one call: " & why &
-             "; the two are one location in Nim, and the order of the " &
-             "writes is not modelled (RFC-0005 S8bx; feUnsupportedOp)"))
-    result.add(if changed: drainPendingLowerEffects(q) else: q)
 
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
     if w.shouldStop: return
-    if w.frame.viewAliases.len > 0:   # RFC-0005 S8bx (item 3)
-      result = syncViewAliases(walk(s, snapViewAliases(result, w), w), w)
-    else:
-      result = walk(s, result, w)
+    result = walk(s, result, w)
     if result.len == 0: return
     # Phase 14 cycle C3 (ADR-0004). Post-step frontier prune. A
     # `maxFrontierSize` of 0 keeps the unbounded baseline; any
@@ -19218,7 +19201,7 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         let cellName = varLocCellName(formal)
         let e: AddrCellEntry = (local: formal, cell: cellName, ty: c.ty,
                                 path: c.path & loc.path, ixs: c.ixs,
-                                bound: true, view: true)
+                                bound: true, view: true, slot: "")
         let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
         if v.isSome and v.get.kind == svSeq:
           var env2 = calleePath.env
@@ -19274,12 +19257,12 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
                               env2[local])
         env2[addrCellName(local)] = ptrV
         cells.add (local: local, cell: addrCellName(local), ty: ptrV.ptrPointee,
-                   path: @[], ixs: @[], bound: false, view: false)
+                   path: @[], ixs: @[], bound: false, view: false, slot: "")
     if rootCells.len == 1:
       let c = rootCells[0]
       let e: AddrCellEntry = (local: local, cell: cellName, ty: c.ty,
                               path: c.path & path, ixs: c.ixs & ixs,
-                              bound: true, view: false)
+                              bound: true, view: false, slot: "")
       let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
       if v.isNone:
         return "the `var` argument is a part of " & what & ", whose " &
@@ -19315,7 +19298,7 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
     env2[cellName] = SymVal(kind: svPtr, ptrAst: addrAst, ptrFamily: true,
                             ptrPointee: ty)
     cells.add (local: local, cell: cellName, ty: ty, path: @[], ixs: @[],
-               bound: true, view: false)
+               bound: true, view: false, slot: "")
     calleePath.env = env2
   ""
 
@@ -22384,6 +22367,10 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## statement's last effect is the write by name (`lastWriteTo`):
   ## declined (`feUnsupportedOp`), the variable's value winning. So is a
   ## variable a closure also captures (its env cell is a third copy).
+  ## RFC-0005 S8bx (item 3): a `slot` entry the same, with the Table's value
+  ## at the key for the heap at the cell; a table write that may have removed
+  ## the key leaves the view on a slot Nim's `del` refills from another
+  ## entry, and declines too.
   let ctx = w.z3
   # RFC-0005 S8bu: a local with two entries (an `addr` actual's local,
   # `addrPartName`: a part of a variable's cell, and the call's cell) takes
@@ -22399,6 +22386,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
     var clash: seq[string]
     var lost: seq[string]   ## RFC-0005 S8bs
     var freed: seq[string]   ## RFC-0005 S8bu
+    var viewWhy = ""         ## RFC-0005 S8bx
     for c in w.frame.addrCells:
       if c.view and env2.hasKey(viewFreedPrefix & c.local):
         env2.del(viewFreedPrefix & c.local)
@@ -22406,6 +22394,42 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         freed.add displayName(c.local)
     for pass in 0 ..< passes:
       for c in w.frame.addrCells:
+        if c.slot.len > 0:
+          # RFC-0005 S8bx (item 3): the location is the Table's value at the
+          # key. A statement nested in this one has synced already, and left
+          # the view the same term as the table's value at the key.
+          if not env2.hasKey(c.local) or not env2.hasKey(c.slot): continue
+          let tabV = env2[c.slot]
+          let keyO = if tabV.kind == svTable: tabKeyTerm(c.ixs[0], tabV.tabKeyTy)
+                     else: none(Z3AnyAst)
+          if keyO.isNone:
+            viewWhy = "the table is not a modelled Table value"
+            continue
+          let xv = env2[c.local]
+          if sameSymVal(xv, tabValAt(ctx, tabV, keyO.get.raw)): continue
+          let snapV = addrSnapName(depth, c.local)
+          let snapT = addrSnapName(depth, c.slot)
+          let vCh = env2.hasKey(snapV) and not sameSymVal(xv, env2[snapV])
+          let tCh = env2.hasKey(snapT) and not sameSymVal(tabV, env2[snapT])
+          if not vCh and not tCh: continue
+          if q == nil: q = forkPath(p, p.pc, p.env)
+          if vCh and tCh and not lastWriteTo(stmt, c.local):
+            viewWhy = "the view and the table were both written in one statement"
+          elif vCh:
+            var e2 = env2
+            e2[addrSnapPrefix & "key"] = c.ixs[0]
+            let t2 = lower(e2, mkTableSet(mkVar(c.slot),
+              mkVar(addrSnapPrefix & "key"), mkVar(c.local)))
+            env2[c.slot] = t2
+            env2[c.local] = tabValAt(ctx, t2, keyO.get.raw)
+          else:
+            let present = wrap[Z3Bool](ctx,
+              checkedSelect(ctx, tabV.tabPresentRaw.raw, keyO.get.raw))
+            if guardLiteral(present) != glTrue:
+              viewWhy = "the table write may have removed the view's key"
+            else:
+              env2[c.local] = tabValAt(ctx, tabV, keyO.get.raw)
+          continue
         if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
            env2[c.cell].kind != svPtr:
           continue
@@ -22439,11 +22463,16 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         elif displayName(c.local) notin lost: lost.add displayName(c.local)
     let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
     if q == nil and not dropped and clash.len == 0 and lost.len == 0 and
-       freed.len == 0:
+       freed.len == 0 and viewWhy.len == 0:
       result.add p
       continue
     if q == nil: q = forkPath(p, p.pc, env2)
     else: q.env = env2
+    if viewWhy.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "an `mpairs` view and its Table passed to one call: " & viewWhy &
+             "; the two are one location in Nim, and the order of the " &
+             "writes is not modelled (RFC-0005 S8bx; feUnsupportedOp)"))
     if clash.len > 0:
       taintInPlace(q, w.degrade(feUnsupportedOp,
         "RFC-0005 S8ax: the address-taken variable(s) " & clash.join(", ") &
@@ -22704,6 +22733,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for c in w.frame.addrCells:
       if env2.hasKey(c.local) and env2.hasKey(c.cell):
         env2[addrSnapName(depth, c.local)] = env2[c.local]
+        changed = true
+      elif c.slot.len > 0 and env2.hasKey(c.local) and env2.hasKey(c.slot):
+        env2[addrSnapName(depth, c.local)] = env2[c.local]   # RFC-0005 S8bx
+        env2[addrSnapName(depth, c.slot)] = env2[c.slot]
         changed = true
     ins.add(if changed: forkPath(p, p.pc, env2) else: p)
   let outs0 = walkStmt(stmt, ins, w)
@@ -23654,7 +23687,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
           let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
           descentBase.env[cell] = callerEnv[c.cell]
           entryCells.add (local: formal, cell: cell, ty: c.ty, path: c.path,
-                          ixs: c.ixs, bound: c.bound, view: c.view)
+                          ixs: c.ixs, bound: c.bound, view: c.view, slot: "")
           if callerName notin boundOuts: boundOuts.add callerName
     if locs.len > 0:
       descentBase.elemCells = w.callerElemCells
@@ -25338,8 +25371,8 @@ proc runSymex*(prog: SymexProgram,
     if not recorded or result.status != sxUnknown:
       result = RawResult(status: sxUnknown, errors: result.errors &
         @[SymexErrorInfo(kind: weInternalWalkerFault, severity: sevError,
-          msg: extractionFault & " -- raised inside witness extraction at " &
-               "a target hit and lost on the way to the run boundary; no " &
+          msg: extractionFault & " -- raised inside " & extractionFaultSite &
+               " and lost on the way to the run boundary; no " &
                "verdict stands behind the run (RFC-0005 S8bx; " &
                "weInternalWalkerFault)",
           scope: abortScope())])
@@ -25443,6 +25476,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   z3ApiFirstError = ""
   releaseExtractionHook()  ## RFC-0005 S8bx: a prior run's leaked window
   extractionFault = ""     ## RFC-0005 S8bx
+  extractionFaultSite = "" ## RFC-0005 batch 8
   callGuardedNames = @[]   ## RFC-0005 S8an: a run that raised mid-callee
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the

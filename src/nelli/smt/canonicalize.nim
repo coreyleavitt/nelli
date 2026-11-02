@@ -382,7 +382,7 @@ const symexWalkerVersion* = "237"
   ## reader reads crashed the compile. SOUNDNESS: an `mpairs` / `mvalues`
   ## view passed to a call with its Table was two copies of one location
   ## (swapped verdicts); the walker keeps the two formals equal in the
-  ## callee (`cViewAliases`, `syncViewAliases`). SOUNDNESS: a key removed
+  ## callee (`cViewAliases`, `syncAddrCells`). SOUNDNESS: a key removed
   ## from a Table while iterating it, the length kept, followed the
   ## enumeration taken at loop entry (a false sxUnsat / sxSat for one entry;
   ## Nim's slot walk depends on the hashes): the path declines

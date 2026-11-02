@@ -472,6 +472,11 @@ title = "S8bu's remainder: cpp segfault in configdefaults' maxCallDepth crash pi
 state = "done"
 
 [[slice]]
+id = "S8cl"
+title = "S8ca's remainder: unsafeNew is dropped, wasMoved stops the compile, setLen declines on its when statement, a by-value copy of a string of unknown provenance, n43_parity on cpp"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

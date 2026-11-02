@@ -1,6 +1,6 @@
 # Job: S8cm -- new slice (corpus compile time on Windows)
 
-**HELD: do not start until the coordinator releases it after batch 9 lands.** The files it splits are moving until then.
+**RELEASED: batch 9 landed. Base: origin/rfc-0005-soundness-channels at e497dcf.**
 
 ## Setup
 - Branch: `rfc-0005-s8cm`, from the base the coordinator names on release.

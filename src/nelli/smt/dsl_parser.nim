@@ -400,6 +400,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     if gty != nil:   # RFC-0005 S8bw
       newCall(bindSym"mkGlobalVar", newLit(e.vname), emitIRType(gty),
               newLit(e.vCopy))
+    elif e.vCopy:   # RFC-0005 S8bz (item 3)
+      newCall(bindSym"mkVarCopy", newLit(e.vname))
     else:
       newCall(bindSym"mkVar", newLit(e.vname))
   of iekBinop:
@@ -2775,6 +2777,17 @@ proc collectBoundLocals(n: NimNode, into: var HashSet[string]) =
       if n[i].kind in {nnkSym, nnkIdent}: into.incl n[i].strVal
   else: discard
   for c in n: collectBoundLocals(c, into)
+
+proc markCopyRead(ir: IRExpr; preamble: seq[IRStmt]; lo: int) =
+  ## RFC-0005 S8bz (item 3). The read `ir`, whose element reads are
+  ## `preamble[lo ..]`, only carries the location's value on (a rebuild, a
+  ## `var` or `addr` actual's copy-in): it observes no unwritten part.
+  var root = ir
+  while root != nil and root.kind in {iekField, iekIndex}:
+    root = if root.kind == iekField: root.obj else: root.arr
+  if root != nil and root.kind == iekVar: root.vCopy = true
+  for i in lo ..< preamble.len:
+    if preamble[i].kind == isIndex: preamble[i].ixCheckOnly = true
 
 proc isNestedRoutine(sym: NimNode): bool  ## RFC-0005 S8an fwd decl
 proc nestedCaptureSyms(impl: NimNode): seq[NimNode]  ## RFC-0005 S8an fwd decl
@@ -6882,6 +6895,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       varLocOf(addrLv, cell, "addr", preamble, ctx, locs)   ## RFC-0005 S8bs
       let lvLo = preamble.len
       let lvIR = parseExpr(addrLv, preamble, ctx)
+      markCopyRead(lvIR, preamble, lvLo)   ## RFC-0005 S8bz (item 3)
       let lvHi = preamble.len
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
@@ -7020,6 +7034,9 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     let irLo = preamble.len
     var ir = parseExpr(n[i], preamble, ctx)
     let irHi = preamble.len
+    # RFC-0005 S8bz (item 3): a `var` actual's copy-in observes nothing; the
+    # callee's read of its formal does (`glWatched`).
+    if n[i].kind == nnkHiddenAddr: markCopyRead(ir, preamble, irLo)
     # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
     # memory it shares, is a path the walk may keep equal to a cell.
     byValueLoc(n[i], i - 1, preamble, ctx, locs)
@@ -7581,6 +7598,7 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
       varLocOf(lv, cell, "addr", preamble, ctx, locs)   ## RFC-0005 S8bu
       let lvLo = preamble.len
       let lvIR = parseExpr(lv, preamble, ctx)
+      markCopyRead(lvIR, preamble, lvLo)   ## RFC-0005 S8bz (item 3)
       let lvHi = preamble.len
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
@@ -15226,15 +15244,14 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   ## `isVariantField` forks the out-of-arm `FieldDefect` before any write.
   var step: FieldStep
   discard fieldStep(lhs, step)
+  let recvLo = preamble.len
   let recvIR = parseExpr(step.recv, preamble, ctx)
   # RFC-0005 S8bw (item 2): every use of `recvIR` below copies the old
   # parts back into the same root, so a global root's unwritten parts are
   # not observed by it.
-  block:
-    var root = recvIR
-    while root != nil and root.kind in {iekField, iekIndex}:
-      root = if root.kind == iekField: root.obj else: root.arr
-    if root != nil and root.kind == iekVar: root.vCopy = true
+  # RFC-0005 S8bz (item 3): nor by an element read of its chain
+  # (`gA[k].x = v`).
+  markCopyRead(recvIR, preamble, recvLo)
   let rebuilt =
     if step.recvTy.kind == itArray and step.idx != nil:
       # RFC-0005 S8z: a symbolic index. The old array is copied into a
@@ -16320,13 +16337,14 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
     # `FieldDefect` out of the arm, before it evaluates the value. The
     # read of `lhs` is that check (its `isVariantField` fork).
     if valueFieldChecked(lhs):
+      let checkLo = preamble.len
       let checkRead = parseExpr(lhs, preamble, ctx)
       # RFC-0005 S8bw (item 2): the read only checks the index; its value
       # is never used (`ixCheckOnly`).
-      if checkRead.kind == iekVar:
-        for st in preamble:
-          if st.kind == isIndex and st.ixRetName == checkRead.vname:
-            st.ixCheckOnly = true
+      # RFC-0005 S8bz (item 3): every element read of its chain
+      # (`gA[k].x = v`). A branch's own check reads its discriminator
+      # (`isVariantField`), which does observe.
+      markCopyRead(checkRead, preamble, checkLo)
     let val = asgnRhs()
     if not (fieldTy.kind == itInt and fieldTy.hasRange and
             not carriesRangeCheck(val, fieldTy)):
@@ -16994,7 +17012,7 @@ proc parseStmtInner(n: NimNode,
       # declaration is no statement of the walk, and every use of it reads
       # the global. Any other pragma leaves an ordinary local, under its
       # symbol; `{.noinit.}` without an initialiser has no defined value
-      # and declines.
+      # (RFC-0005 S8bz, item 7: an unwritten one).
       var id = id0
       var hasPragma = false
       for j in 0 ..< id0.len - 2:
@@ -17013,9 +17031,18 @@ proc parseStmtInner(n: NimNode,
               if p.kind in {nnkIdent, nnkSym} and p.strVal == "noinit":
                 noInit = true
           if noInit and id0[^1].kind == nnkEmpty:
-            stmts.add ctx.declineMarker(feUnsupportedStmtKind,
-              "`{.noinit.}` variable `" & d[0].strVal & "` with no " &
-              "initialiser: its value is undefined")
+            # RFC-0005 S8bz (item 7): unwritten until written; a read of a
+            # part no write reached taints the path. A managed part declines
+            # (`noinitPlain`).
+            let nty = classifyType(d[0]).ty
+            if noinitPlain(nty):
+              stmts.add mkLet(d[0].strVal, nty,
+                              mkGlobalVar(noinitReadPrefix & d[0].strVal, nty))
+            else:
+              stmts.add ctx.declineMarker(feUnsupportedStmtKind,
+                "`{.noinit.}` variable `" & d[0].strVal & "` of a managed " &
+                "type with no initialiser: Nim destroys and reads the " &
+                "garbage it holds")
             continue
           id.add d[0]
         if id.len == 0: continue

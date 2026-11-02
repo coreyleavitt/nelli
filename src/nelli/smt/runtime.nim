@@ -2827,6 +2827,22 @@ proc stampHeapSteps(sv: var SymVal; steps: int) =
         for f in fs.mitems: stampHeapSteps(f, steps)
   else: discard
 
+proc svWithRaw(ctx: Z3Context; sv: SymVal; raw: Z3AnyAst): SymVal =
+  ## RFC-0005 S8bz (item 3). The scalar or string `sv` holding the term `raw`,
+  ## of its own sort: `rawAnyAstOf`'s inverse.
+  result = sv
+  case sv.kind
+  of svBV8: result.bv8 = wrap[Z3BitVec[8]](ctx, raw.raw)
+  of svBV16: result.bv16 = wrap[Z3BitVec[16]](ctx, raw.raw)
+  of svBV32: result.bv32 = wrap[Z3BitVec[32]](ctx, raw.raw)
+  of svBV64: result.bv64 = wrap[Z3BitVec[64]](ctx, raw.raw)
+  of svInt: result.zi = wrap[Z3Int](ctx, raw.raw)
+  of svBool: result.bo = wrap[Z3Bool](ctx, raw.raw)
+  of svFloat32: result.fp32 = wrap[Z3Float32](ctx, raw.raw)
+  of svFloat64: result.fp64 = wrap[Z3Float64](ctx, raw.raw)
+  of svString: result.str = wrap[Z3String](ctx, raw.raw)
+  else: discard
+
 proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   ## The raw ast of ANY base SymVal that may underlie a distinct type — used
   ## only to derive the base sort for the inject/eject func-decl signatures
@@ -8428,6 +8444,11 @@ var glPartHavoc {.threadvar.}: Table[string, bool]
   ## value is modelled (S8as, `programGlobal`): observing it then taints
   ## the path `feGlobalHavoc` (a SAT is replayed, an UNSAT stands); any
   ## other global's part declines (`feGlobalReadUnmodelled`, S8bw).
+var glWatched {.threadvar.}: HashSet[string]
+  ## RFC-0005 S8bz (item 3). The names that are no global but may hold an
+  ## unwritten part, whose reads therefore observe: a `var` formal whose
+  ## actual holds one, an element read's temporary (the access on it picks
+  ## the part), a `{.noinit.}` local.
 var glUnwrittenAsts {.threadvar.}: seq[Z3AnyAst]
   ## The unwritten leaves themselves (`unwrittenIndependent` renames them).
 var lowerAsReceiver {.threadvar.}: bool
@@ -8442,6 +8463,7 @@ proc glUnwrittenFresh(ctx: Z3Context) =
     glUnwritten = initTable[int, string]()
     glPartHavoc = initTable[string, bool]()
     glUnwrittenAsts = @[]
+    glWatched = initHashSet[string]()
 
 proc svAsts(sv: SymVal; acc: var seq[RawZ3Ast]) =
   ## Every Z3 term a value holds, compound or not.
@@ -8498,7 +8520,11 @@ proc registerUnwritten(ctx: Z3Context; sv: SymVal; part: string;
     for i, f in sv.arrElems:
       registerUnwritten(ctx, f, part & "[" & $i & "]", havoc)
   else:
-    glPartHavoc[part] = havoc
+    # RFC-0005 S8bz (items 3, 4): written-ness per part. A scalar part of a
+    # global whose whole entry value is not modelled (an object holding a
+    # `ref` beside it) still holds some value of its type.
+    glPartHavoc[part] = havoc or sv.kind in {svBV8, svBV16, svBV32, svBV64,
+      svInt, svBool, svFloat32, svFloat64, svString}
     var acc: seq[RawZ3Ast]
     svAsts(sv, acc)
     for a in acc:
@@ -8528,6 +8554,27 @@ proc globalInitValue(name: string; ty: IRType): SymVal =
   result = allocateSym(ty, "__glInit_" & displayName(name), facts)
   globalEntryVals[name] = result
   registerUnwritten(ctx, result, displayName(name), havoc = false)
+
+var noinitSerial {.threadvar.}: int
+  ## RFC-0005 S8bz (item 7). Numbers the initial values of `{.noinit.}`
+  ## locals: every evaluation of the declaration is its own.
+
+proc noinitValue(e: IRExpr): SymVal =
+  ## RFC-0005 S8bz (item 7). The initial value of a `{.noinit.}` local: one
+  ## fresh constant per leaf, each unwritten. Nim leaves the local's bytes as
+  ## they were, so any value of the type is possible, and a read of a part no
+  ## write reached taints the path (`feGlobalHavoc`: a SAT is replayed, and an
+  ## UNSAT holds for every value). A rebuild's copy observes nothing.
+  let ctx = requireCurrentContext()
+  glUnwrittenFresh(ctx)
+  let local = e.vname[noinitReadPrefix.len .. ^1]
+  inc noinitSerial
+  var facts: seq[Z3Bool]
+  result = allocateSym(e.vGlobalTy, "__noinit_" & local & "_" & $noinitSerial,
+                       facts)
+  for f in facts: globalEntryFacts.add f
+  registerUnwritten(ctx, result, noinitReadPrefix & local, havoc = true)
+  glWatched.incl local
 
 proc unwrittenIn(sv: SymVal; simplified = false): string =
   ## The part an unwritten leaf `sv` mentions stands for, or "" when it
@@ -8579,7 +8626,11 @@ proc unwrittenKind(part: string): SymexErrorKind =
 
 proc unwrittenMsg(part: string): string =
   ## RFC-0005 batch 6. `unwrittenKind`'s message.
-  if glPartHavoc.getOrDefault(part, false):
+  if part.startsWith(noinitReadPrefix):
+    "`{.noinit.}` variable '" & part[noinitReadPrefix.len .. ^1] & "' is " &
+      "read before it is written: it may hold any value of its type, so a " &
+      "hit through it is replayed (feGlobalHavoc)"
+  elif glPartHavoc.getOrDefault(part, false):
     "module-level variable '" & part & "' is read before the walk writes " &
       "it: it may hold any value of its type when the property runs, so a " &
       "hit through it is replayed (feGlobalHavoc)"
@@ -8601,7 +8652,9 @@ proc globalReadPart(e: IRExpr; v: SymVal; simplified = false): string =
   ## chain over a global (not a rebuild's copy), mentions, or "".
   if glUnwritten.len == 0: return ""
   let root = globalChainRoot(e)
-  if root == nil or root.vCopy or not isGlobalEnvName(root.vname): return ""
+  if root == nil or root.vCopy or
+     not (isGlobalEnvName(root.vname) or root.vname in glWatched):
+    return ""
   unwrittenIn(v, simplified)
 
 proc observeGlobalRead(e: IRExpr; v: SymVal; simplified = false) =
@@ -8668,6 +8721,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # RFC-0005 S8n: a callee's `result` read before its first write is
       # the zero value Nim initialised it to (was `feGlobalReadUnmodelled`).
       unwrittenResultZero().get
+    elif e.vname.startsWith(noinitReadPrefix):
+      noinitValue(e)   ## RFC-0005 S8bz (item 7)
     elif not isFollowConcreteWalk() and e.vname notin callGuardedNames and
          isGlobalEnvName(e.vname) and programGlobal(e.vname).isSome:
       # RFC-0005 S8as: a global read before the walk wrote it holds its
@@ -13977,6 +14032,54 @@ proc unwrittenIndependent(ctx: Z3Context; path: Path; v: SymVal;
   var arm = differs
   for c in extra: arm = arm and c
   loopArmInfeasible(ctx, path, arm, settings)
+
+proc unwrittenLeafSplit(ctx: Z3Context; path: Path; v: SymVal;
+                        extra: openArray[Z3Bool];
+                        settings: SymexSettings): SymVal =
+  ## RFC-0005 S8bz (item 3). The aggregate `v`, an element read, with each
+  ## scalar leaf that mentions an unwritten part but is the same whatever
+  ## those parts hold (`unwrittenIndependent`'s query) over fresh stand-ins of
+  ## them: the read of that leaf observes nothing. Any other leaf keeps its
+  ## mention. Each leaf is asked in the sort the value holds it, not a heap
+  ## cell's (`svLeafTerms`): the `Int` view's `ubv_to_int` is past the budget
+  ## of this bounded query.
+  var froms, tos: seq[RawZ3Ast]
+  var keep: seq[Z3AnyAst]
+  for a in glUnwrittenAsts:
+    froms.add a.raw
+    keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fresh_const(ctx.raw,
+      "__glUnwrittenAlt", ctx.checkErr Z3_get_sort(ctx.raw, a.raw)))
+    tos.add keep[^1].raw
+  if froms.len == 0: return v
+  var inRange = mkBool(true)
+  for c in extra: inRange = inRange and c
+  proc go(sv: SymVal): SymVal =
+    result = sv
+    case sv.kind
+    of svTuple:
+      for i in 0 ..< sv.fields.len: result.fields[i] = go(sv.fields[i])
+    of svArray:
+      for i in 0 ..< sv.arrElems.len: result.arrElems[i] = go(sv.arrElems[i])
+    of svVariant:
+      for i in 0 ..< sv.vPlainFields.len:
+        result.vPlainFields[i] = go(sv.vPlainFields[i])
+      for t, fs in sv.vArmFields:
+        for i in 0 ..< fs.len: result.vArmFields[t][i] = go(fs[i])
+      result.vDisc = new(SymVal)
+      result.vDisc[] = go(sv.vDisc[])
+    of svBV8, svBV16, svBV32, svBV64, svInt, svBool, svFloat32, svFloat64,
+       svString:
+      if unwrittenIn(sv).len == 0: return
+      let l = rawAnyAstOf(sv)
+      let alt = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute(ctx.raw, l,
+        cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+        cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+      let differs = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_not(ctx.raw,
+        checkedEq(ctx, l, alt.raw)))
+      if loopArmInfeasible(ctx, path, differs and inRange, settings):
+        result = svWithRaw(ctx, sv, alt)
+    else: discard
+  go(v)
 
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
@@ -19352,10 +19455,19 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
       maybeForkDefect(cp, not (inLoCond and inHiCond),
                       "IndexDefect", none(string), w)
       # In-bounds path continues with binding; build the value via ite.
-      let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
-      let unwrittenPart =
+      var indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
+      var unwrittenPart =
         if stmt.ixCheckOnly: ""
         else: globalReadPart(stmt.ixArr, indexed, simplified = true)
+      # RFC-0005 S8bz (item 3): an aggregate element is not read by itself;
+      # the access on its temporary picks the part (`glWatched`). A part
+      # the solver shows independent of every unwritten leaf is that part.
+      if unwrittenPart.len > 0 and heapTreeTy(tyOf(indexed)) and
+         heapCompoundTy(tyOf(indexed)):
+        indexed = unwrittenLeafSplit(w.z3, cp, indexed,
+                                     [inLoCond, inHiCond], w.settings)
+        glWatched.incl stmt.ixRetName
+        unwrittenPart = ""
       # RFC-0005 S6b: `iteSV` is called here DIRECTLY (no `lower()`
       # wrapper), so a merge degrade's pending taint (`allocDegrade` /
       # `degradeAlloc`) would otherwise be drained by whatever `lower()`
@@ -20770,6 +20882,10 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           calleeEnv[formal.name] = argVals[i]
           if formal.isVar and stmt.cargs[i].kind == iekVar:
             varArgs.add (formal.name, stmt.cargs[i].vname)
+          # RFC-0005 S8bz (item 3): the copy-in observed nothing; a read of
+          # the formal does.
+          if formal.isVar and unwrittenIn(argVals[i]).len > 0:
+            glWatched.incl formal.name
         # RFC-0005 S8an: the callee also reaches every module-level global
         # and, for a routine declared inside another, the enclosing
         # variables it captures. Nim shares those locations with the
@@ -25132,6 +25248,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   glUnwritten = initTable[int, string]()   ## RFC-0005 batch 6: their
   glPartHavoc = initTable[string, bool]()  ## unwritten leaves with them
   glUnwrittenAsts = @[]
+  glWatched = initHashSet[string]()   ## RFC-0005 S8bz
+  noinitSerial = 0                    ## RFC-0005 S8bz
   globalEntryFacts = @[]                         ## RFC-0005 S8as
   ctxPruneLog = @[]                              ## RFC-0005 S8ax
   currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel

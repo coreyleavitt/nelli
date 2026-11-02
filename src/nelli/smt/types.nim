@@ -5655,7 +5655,51 @@ func irTypeRefFree*(t: IRType): bool =
     for f in t.fields:
       if not irTypeRefFree(f): return false
     true
+  of itVariant:
+    # RFC-0005 S8bz (item 3): a case object of such fields too.
+    for f in t.vPlainFieldTypes:
+      if not irTypeRefFree(f): return false
+    for arm in t.vArms:
+      for f in arm.fieldTypes:
+        if not irTypeRefFree(f): return false
+    true
+  of itMultiVariant:
+    for f in t.mvPlainFieldTypes:
+      if not irTypeRefFree(f): return false
+    for ax in t.mvAxes:
+      for arm in ax.arms:
+        for f in arm.fieldTypes:
+          if not irTypeRefFree(f): return false
+    true
   else: false
+
+func noinitPlain*(t: IRType): bool =
+  ## RFC-0005 S8bz (item 7). A `{.noinit.}` local of `t` is modelled as
+  ## unwritten: scalars, and arrays and tuples or objects of them. A managed
+  ## part (a string, a seq) is left holding garbage Nim destroys at its first
+  ## assignment and dereferences at its first read, which no value of the
+  ## type stands for, so it stays a decline.
+  if t == nil: return false
+  case t.kind
+  of itInt, itBool, itFloat32, itFloat64: true
+  of itArray: noinitPlain(t.elemTy)
+  of itDistinct: noinitPlain(t.distinctBase)
+  of itTuple:
+    if t.isPlaceholder: return false
+    for f in t.fields:
+      if not noinitPlain(f): return false
+    true
+  else: false
+
+const noinitReadPrefix* = "__noinit:"
+  ## RFC-0005 S8bz (item 7). The initial value of the `{.noinit.}` local `c`
+  ## is the read of the name `__noinit:c`, typed (`iekVar.vGlobalTy`): no
+  ## statement binds it, and each evaluation is a fresh value.
+
+proc mkVarCopy*(name: string): IRExpr =
+  ## RFC-0005 S8bz (item 3). A read of a variable that only carries its value
+  ## on (`iekVar.vCopy`).
+  IRExpr(kind: iekVar, vname: name, vCopy: true)
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
                          fieldTy: IRType, matchingTags: seq[int]): IRStmt =

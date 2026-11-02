@@ -2194,6 +2194,14 @@ proc svAtPath(sv: SymVal; path: seq[int]; i = 0): SymVal =
                      result)
   else: return sv
 
+proc ptrInputOf(w: WalkCtx; vnm: string; path: seq[int]): SymVal =
+  ## RFC-0005 S8bz (item 1). The container at `path` of the variable `vnm` when
+  ## the run began: a parameter's input, or a global's entry value (S8as). A
+  ## `svBool` stand-in for a variable with neither.
+  if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], path)
+  elif globalEntryVals.hasKey(vnm): svAtPath(globalEntryVals[vnm], path)
+  else: SymVal(kind: svBool)
+
 proc svWithPath(sv: SymVal; path: seq[int]; v: SymVal; i = 0): SymVal =
   ## RFC-0005 S8bn (item 4). `sv` with its part at `path[i ..]` replaced.
   ## RFC-0005 S8bw (item 3): a case object's branch field in every tag's
@@ -2420,8 +2428,7 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         # entries stay where they are only while the path has not changed
         # which keys are present (a resize or a deletion may move them).
         let cur = svAtPath(vsv, lf.path)
-        let ini = if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], lf.path)
-                  else: SymVal(kind: svBool)
+        let ini = ptrInputOf(w, vnm, lf.path)
         if ini.kind != svTable or cur.kind != svTable or
            not sameTerm(ctx, w, p, cur.tabPresentRaw, ini.tabPresentRaw) or
            not tabNoDeletion(ctx, cur.tabPresentRaw) or
@@ -2437,8 +2444,7 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                                          ini.tabPresentRaw.raw, t.idx.raw)))
       if lf.seqIdx:
         let cur = svAtPath(vsv, lf.path)
-        let ini = if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], lf.path)
-                  else: SymVal(kind: svBool)
+        let ini = ptrInputOf(w, vnm, lf.path)
         if ini.kind != svSeq or cur.kind != svSeq or
            cur.seqLen.raw != ini.seqLen.raw:
           result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
@@ -2810,12 +2816,19 @@ proc ptrInactive(ctx: Z3Context; sel: Z3AnyAst;
 proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                    pointee: IRType; refSort: RawZ3Sort; typeId: string;
                    own: SymVal): tuple[val: SymVal; decline: string;
-                                       inactive: Option[Z3Bool]] =
+                                       inactive: Option[Z3Bool];
+                                       written: SymVal;
+                                       unwritten: Option[Z3Bool];
+                                       part: string] =
   ## RFC-0005 S8bh. `P[]` over the candidate targets: `own` (the own cell's
   ## value) unless `sel(P)` names a candidate. RFC-0005 S8bw (item 3):
   ## `inactive`, when some candidate is a case object's branch field, holds
   ## when `sel(P)` names one whose branch is not active.
+  ## RFC-0005 S8bz (item 4): `unwritten` holds when `sel(P)` names a target
+  ## holding a part no write reached (`part` names one), and `written` is the
+  ## value on every other execution: only that sub-path observes the part.
   result.val = own
+  result.written = own
   let tg = ptrTargets(ctx, w, p, ptrAst, pointee, refSort, typeId)
   if tg.decline.len > 0:
     result.decline = tg.decline
@@ -2843,7 +2856,16 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         tabValueOf(ctx, checkedSelect(ctx, tb.tabDataRaw.raw, t.idx.raw),
                    pointee)   # RFC-0005 S8bw: through its 64-bit cell
       else: svAtPath(p.env[t.envName], t.path)
-    result.val = ptrIteSV(ctx, ptrSelIs(ctx, tg.sel, t.code), tv, result.val)
+    let isT = ptrSelIs(ctx, tg.sel, t.code)
+    result.val = ptrIteSV(ctx, isT, tv, result.val)
+    let part = unwrittenIn(tv)
+    if part.len > 0:
+      result.part = part
+      result.unwritten = some(if result.unwritten.isSome:
+                                result.unwritten.get or isT
+                              else: isT)
+    else:
+      result.written = ptrIteSV(ctx, isT, tv, result.written)
 
 proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                     pointee: IRType; refSort: RawZ3Sort; typeId: string;
@@ -3519,7 +3541,20 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # observes it, as a direct read does.
           # RFC-0005 batch 6: an S8as global's part is its entry value,
           # any of its type -- read on, the path tainted (`unwrittenKind`).
-          let unwritten = unwrittenIn(tr.val)
+          # RFC-0005 S8bz (item 4): only the sub-path whose `sel` names such
+          # a part is tainted; the rest read written memory.
+          valSV = tr.written
+          if tr.unwritten.isSome:
+            if not loopArmInfeasible(ctx, cp2, tr.unwritten.get, w.settings):
+              var hitEnv = newEnv
+              hitEnv[stmt.dRetName] = tr.val
+              let hit = forkPath(cp2, cp2.pc & @[tr.unwritten.get], hitEnv)
+              taintInPlace(hit, w.degrade(unwrittenKind(tr.part),
+                                          unwrittenMsg(tr.part)))
+              survivors.add hit
+            cp2.pc.add not tr.unwritten.get
+          # The pointer's own cell may hold one (an `addr` actual's copy).
+          let unwritten = unwrittenIn(valSV)
           if unwritten.len > 0 and unwrittenKind(unwritten) == feGlobalHavoc:
             taintInPlace(cp2, w.degrade(feGlobalHavoc, unwrittenMsg(unwritten)))
           elif unwritten.len > 0:
@@ -3528,7 +3563,6 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               heapArmDegrade(feGlobalReadUnmodelled,
                              unwrittenReadMsg(unwritten)))
             continue
-          valSV = tr.val
         newEnv[stmt.dRetName] = valSV
         # ADR-0013 D4.5: assert the disc-range disjunction on EVERY disc read
         # (per address — NOT gated on first heap materialisation, so a second

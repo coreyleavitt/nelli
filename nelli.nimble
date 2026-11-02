@@ -1243,6 +1243,7 @@ task test, "Run the test suite":
             # aggregate globals, pointers into case objects and aggregate
             # containers. Walker 227 (provisional).
             "tsymex_rfc0005_s8bw_remainder",
+            "tsymex_rfc0005_s8bz_written",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
             # kind probes in contexts of their own (no step's cost moves
             # with the walk's state; a thread's first walk searches as its

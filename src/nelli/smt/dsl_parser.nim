@@ -3709,6 +3709,32 @@ proc hasVarFormal(impl: NimNode): bool =
       return true
   false
 
+proc magicBodyEmpty(impl: NimNode): bool =
+  ## RFC-0005 S8cl (item 1). A magic's declaration has no statement to walk:
+  ## no body, or only documentation (`discard "implemented in ..."`, a
+  ## comment, `runnableExamples`).
+  proc inert(s: NimNode): bool =
+    case s.kind
+    of nnkEmpty, nnkCommentStmt, nnkDiscardStmt: true
+    of nnkStmtList, nnkStmtListExpr:
+      for c in s:
+        if not inert(c): return false
+      true
+    of nnkCall, nnkCommand:
+      s.len >= 1 and s[0].kind in {nnkIdent, nnkSym} and
+        s[0].strVal == "runnableExamples"
+    else: false
+  impl.len > 6 and inert(impl[6])
+
+proc formalsReadable(impl: NimNode): bool =
+  ## RFC-0005 S8cl (item 2). Every formal of the routine declaration `impl`
+  ## is an `nnkIdentDefs`, as `parseCalleeImpl` reads them. A hook the
+  ## compiler generates holds an `nnkArgList` (`isGeneratedHook`).
+  let formal = impl.params
+  for i in 1 ..< formal.len:
+    if formal[i].kind != nnkIdentDefs: return false
+  true
+
 proc isGeneratedHook(sym: NimNode): bool =
   ## RFC-0005 S8bl (item 1). `sym` is a lifetime hook the compiler
   ## synthesised for a type (`=wasMoved`, `=destroy`, `=copy`, `=sink`,
@@ -3757,8 +3783,8 @@ const varParamMagics*: seq[tuple[magic: string; model: VarMagicModel;
   ("Inc", vmModelled, "`inc(x[, y])` / `x += y` (the R8 and S8bc arms)"),
   ("Dec", vmModelled, "`dec(x[, y])` / `x -= y` (the R8 and S8bc arms)"),
   ("New", vmModelled,
-   "`new(x)`: a fresh zeroed cell; `unsafeNew(x, size)` declines (an " &
-   "uninitialised allocation of a given size)"),
+   "`new(x)`: a fresh zeroed cell; `unsafeNew(x, size)` too, when `size` " &
+   "holds the pointee (`parseUnsafeNew`)"),
   ("NewSeq", vmModelled, "`newSeq(s, n)` (S8bc; batch 5's `iekSeqNew`)"),
   ("Asgn", vmModelled, "`=`(d, s) / `=copy` / `=sink`: the assignment `d = s`"),
   ("Incl", vmModelled,
@@ -15595,6 +15621,22 @@ proc parseZeroWrite(n: NimNode; magic: string; preamble: var seq[IRStmt];
     return varMagicShapeDecline(n, magic, ctx)
   writeBack(target, zero, preamble, ctx)
 
+proc laterArgDecline(n: NimNode; magic: string; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8cl (item 3). The decline of a magic whose second argument's
+  ## call may write what its lvalue reads, or nil. Nim reads the lvalue's
+  ## index at the call, after that argument (probed: `setLen(a[gi], bump())`
+  ## with `bump` writing `gi` resizes the new `a[gi]`), but checks it where
+  ## it stands, and the model has one read: S8br's frame condition decides.
+  ## A bare variable has no check, and its value is read after the argument.
+  let lv = unwrapHidden(n[1])
+  if lv.kind == nnkSym or laterLeavesLvalue(lv, @[n[2]]): return nil
+  ctx.declineAtSite(feEvalOrderUnmodelled,
+    siteMsg(n, "`" & n[0].strVal & "` (magic \"" & magic & "\"): a call in " &
+            "its second argument may write what `" & n[1].repr & "` reads " &
+            "(feEvalOrderUnmodelled)"),
+    "`" & n[0].strVal & "`'s second argument may write its lvalue " &
+    "(feEvalOrderUnmodelled)")
+
 proc parseSetLen(n: NimNode; magic: string; preamble: var seq[IRStmt];
                  ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bl (item 1). `setLen(s, n)` on a seq or a string: the old
@@ -15603,13 +15645,25 @@ proc parseSetLen(n: NimNode; magic: string; preamble: var seq[IRStmt];
   ## declines), the resized value bound (`isSetLen`) and written back.
   ## `setLenUninit` leaves a grown slot uninitialised -- memory no model
   ## can name -- so a grow declines on its path; its shrink is `setLen`'s.
+  ##
+  ## RFC-0005 S8cl (item 3). SOUNDNESS: the old value of a variable is read
+  ## after the length, as Nim resizes what the length's call left. It was
+  ## read first, so `gs.setLen(growG())` lost what `growG` added: a false
+  ## sxUnsat. Any other lvalue keeps its read first, for the checks where it
+  ## stands, under `laterArgDecline`'s frame condition.
   let target = pureLvalueTarget(n[1])
   let ty = classifyType(n[1]).ty
   if target == nil or n.len != 3 or ty.kind notin {itSeq, itString}:
     return varMagicShapeDecline(n, magic, ctx)
+  let orderDecline = laterArgDecline(n, magic, ctx)
+  if orderDecline != nil: return orderDecline
   let oldTmp = freshSynth(ctx, "setLenOld")
-  preamble.add mkLet(oldTmp, ty, parseExpr(n[1], preamble, ctx))
+  let lenFirst = unwrapHidden(n[1]).kind == nnkSym
+  if not lenFirst:
+    preamble.add mkLet(oldTmp, ty, parseExpr(n[1], preamble, ctx))
   let lenIR = parseNewSeqLen(n[2], n[0].strVal, preamble, ctx)
+  if lenFirst:
+    preamble.add mkLet(oldTmp, ty, parseExpr(n[1], preamble, ctx))
   if magic == "SetLengthSeqUninit":
     preamble.add mkIf(@[mkBranch(
       mkBinop(bGt, lenIR, mkSeqLen(mkVar(oldTmp), siteLoc(n))),
@@ -15620,6 +15674,41 @@ proc parseSetLen(n: NimNode; magic: string; preamble: var seq[IRStmt];
   let newTmp = freshSynth(ctx, "setLenNew")
   preamble.add mkSetLenStmt(newTmp, mkVar(oldTmp), lenIR, ty, siteLoc(n))
   writeBack(target, mkVar(newTmp), preamble, ctx)
+
+proc parseUnsafeNew(n: NimNode; preamble: var seq[IRStmt];
+                    ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8cl (item 1). `unsafeNew(p, size)`: a fresh zeroed cell
+  ## (`isNew`), written back through the lvalue. S8bl declined it; before
+  ## S8bl it was a silent no-op and `p` stayed nil, so a deref raised and a
+  ## `p != nil` target was a false sxUnsat. Nim zeroes the allocation
+  ## (probed), and its size is a `Natural` (`parseNewSeqLen`'s guards). Room
+  ## beyond the pointee is unobservable without an unsafe cast, which
+  ## declines on its own. A size under the pointee's leaves part of it
+  ## outside the allocation, undefined natively, so that path declines.
+  let target = pureLvalueTarget(n[1])
+  let ty = classifyType(n[1]).ty
+  if target == nil or ty.kind != itRef:
+    return varMagicShapeDecline(n, "New", ctx)
+  let refTy = n[1].getTypeImpl
+  let pointeeSize =
+    if refTy.kind == nnkRefTy and refTy.len == 1: getSize(refTy[0]) else: -1
+  if pointeeSize < 0:
+    return varMagicShapeDecline(n, "New", ctx)
+  let orderDecline = laterArgDecline(n, "New", ctx)
+  if orderDecline != nil: return orderDecline
+  if unwrapHidden(n[1]).kind != nnkSym:
+    preamble.add mkLet(freshSynth(ctx, "unsafeNewAt"), ty,
+                       parseExpr(n[1], preamble, ctx))
+  let sizeIR = parseNewSeqLen(n[2], "unsafeNew", preamble, ctx)
+  preamble.add mkIf(@[mkBranch(
+    mkBinop(bLt, sizeIR, mkIntLit(pointeeSize)),
+    ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "`unsafeNew` with a size under its pointee's (" &
+              $pointeeSize & " bytes) -- path degraded to sxUnknown"),
+      "`unsafeNew` with a size under its pointee's"))])
+  let cell = freshSynth(ctx, "newCell")
+  preamble.add mkNewT(cell, ty)
+  writeBack(target, mkVar(cell), preamble, ctx)
 
 proc parseVarMagicStmt(n: NimNode; preamble: var seq[IRStmt];
                        ctx: ParseCtx): IRStmt =
@@ -15638,6 +15727,7 @@ proc parseVarMagicStmt(n: NimNode; preamble: var seq[IRStmt];
   ##   * `setLen` / `setLenUninit`: `parseSetLen`;
   ##   * `=`(d, s) / `=copy(d, s)` / `=sink(d, s)`: the assignment `d = s`;
   ##   * `+=`(x, y) / `-=`(x, y) spelled as a call: the operator's own arm;
+  ##   * `unsafeNew(x, size)`: `parseUnsafeNew`;
   ##   * `new(x)` on an lvalue other than a variable (whose `new(x)` arm
   ##     S8u wrote): a fresh cell bound (`isNew`), then written back.
   if n.kind notin {nnkCall, nnkCommand} or n.len < 2 or n[0].kind != nnkSym:
@@ -15678,9 +15768,11 @@ proc parseVarMagicStmt(n: NimNode; preamble: var seq[IRStmt];
       return parseStmtInner(nnkInfix.newTree(n[0], n[1], n[2]), preamble, ctx)
     nil
   of "New":
+    if n[0].strVal == "unsafeNew" and n.len == 3:
+      return parseUnsafeNew(n, preamble, ctx)
     if n[0].strVal != "new" or n.len != 2 or
        unwrapHidden(n[1]).kind == nnkSym:
-      return nil   # S8u's `new(x)` arm; `unsafeNew` declines at registration
+      return nil   # S8u's `new(x)` arm
     let target = pureLvalueTarget(n[1])
     let ty = classifyType(n[1]).ty
     if target == nil or ty.kind != itRef:
@@ -18647,10 +18739,23 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     let magic = implMagic(impl)
     if magic.len > 0 and hasVarFormal(impl):
       return ctx.varMagicDecline(name, magic, name & "#varMagic")
-    if isGeneratedHook(calleeSym):
+    # RFC-0005 S8cl (item 1). SOUNDNESS: nor is a magic with nothing to walk a
+    # no-op when it has no `var` parameter. `ensureMove(a)` and `procCall(f(k))`
+    # returned their type's zero: `b.len == 1` was a clean false sxUnsat,
+    # `r == 3 and k != 3` a clean false sxSat. It declines, naming the magic. A magic
+    # with a body of statements (`min`, a VM fallback) is walked, as before.
+    if magic.len > 0 and magicBodyEmpty(impl):
       return ctx.declineCallee(feUnsupportedOp,
-        "compiler-generated lifetime hook `" & name & "` is not modelled " &
-        "here -- path degraded to sxUnknown (feUnsupportedOp)",
+        "system magic `" & name & "` (magic \"" & magic & "\") has no body " &
+        "to walk and no model here -- path degraded to sxUnknown " &
+        "(feUnsupportedOp)", name & "#magic")
+    # RFC-0005 S8cl (item 2). A routine whose formals are not `nnkIdentDefs`
+    # (the compiler's generated hooks) cannot be read: it declines, so
+    # `parseCalleeImpl`'s `expectKind` never fails the build on one.
+    if not formalsReadable(impl):
+      return ctx.declineCallee(feUnsupportedOp,
+        "compiler-generated routine `" & name & "` is not modelled here " &
+        "-- path degraded to sxUnknown (feUnsupportedOp)",
         name & "#hook")
   # Phase 15 G5. `geDistinctBarrier` (Invariant 3 — never a silent fallback). A
   # NON-borrowed proc taking a `distinct T` param whose body is NOT parseable

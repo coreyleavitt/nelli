@@ -1469,7 +1469,7 @@ type
                          ## target), 2 the caller's own `var` formal passed
                          ## on (whatever its own actual is). Empty when the
                          ## call has no `var` actual.
-      cViewAliases*: seq[tuple[viewArg, tabArg: int; keyName: string]]
+      cViewAliases*: seq[tuple[viewArg, tabArg: int; keyName, tabField: string]]
                          ## RFC-0005 S8bx (item 3). In the body of a `for`
                          ## over a Table's `mpairs` / `mvalues`, a call that
                          ## receives both the loop variable (`viewArg`, a
@@ -1479,7 +1479,9 @@ type
                          ## caller. The walker keeps the two formals equal
                          ## statement by statement in the callee
                          ## (`AddrCellEntry.slot`, `syncAddrCells`). Empty for
-                         ## every other call.
+                         ## every other call. RFC-0005 S8cn: `tabField`, the
+                         ## dotted field path from a `tabArg` that holds the
+                         ## Table to the Table ("" for the Table itself).
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -5656,7 +5658,7 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
             guardRoots: seq[string] = @[];
             varLocs: seq[VarLoc] = @[];
             varPtrSafe: seq[int] = @[];
-            viewAliases: seq[tuple[viewArg, tabArg: int; keyName: string]] =
+            viewAliases: seq[tuple[viewArg, tabArg: int; keyName, tabField: string]] =
               @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,

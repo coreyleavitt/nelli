@@ -15332,9 +15332,12 @@ proc dottedFieldShape(fieldNode: NimNode): bool =
                 fieldNode[0]
               else: fieldNode
   if lhsFW.kind == nnkDotExpr and lhsFW.len == 2 and
-     lhsFW[0].kind in {nnkHiddenDeref, nnkDerefExpr} and lhsFW[0].len >= 1:
-    classifyType(lhsFW[0][0]).ty.kind in {itRef, itPtr}
+     lhsFW[0].kind in {nnkHiddenDeref, nnkDerefExpr} and lhsFW[0].len >= 1 and
+     classifyType(lhsFW[0][0]).ty.kind in {itRef, itPtr}:
+    true
   else:
+    # RFC-0005 S8cn: a `var` formal's field (`b.tab[k] = v`, a hidden deref of
+    # no ref or ptr) is a value chain too: the formal is a local of the callee.
     valueFieldTy(fieldNode) != nil
 
 type DottedOp = enum
@@ -15638,7 +15641,7 @@ proc hasClosureCall(e: IRExpr): bool =
     if hasClosureCall(k): return true
   false
 
-proc mutViewWriteBack(s: IRStmt; name, tabRoot: string;
+proc mutViewWriteBack(s: IRStmt; name, tabRoot: string; viewAddr: bool;
                       writeBack, reload: proc(): IRStmt): IRStmt =
   ## RFC-0005 S8bl (item 4). `s` with `writeBack()` placed right after every
   ## statement that writes `name` (`writesName`), at any nesting.
@@ -15649,9 +15652,13 @@ proc mutViewWriteBack(s: IRStmt; name, tabRoot: string;
   ## `try`. A call may write it through a formal, a capture or by a global's
   ## name. The view stayed the value read at the head of the iteration:
   ## `t[k] = 50; if v == 50` was a false `sxSat` on its negation.
+  ##
+  ## RFC-0005 S8cn. `viewAddr`, the body takes the view's address: any statement
+  ## may write the view through the pointer (`syncAddrCells` reads that into
+  ## `name` at the statement's end), so each is followed by the write-back.
   if s == nil: return nil
   proc recur(c: IRStmt): IRStmt =
-    mutViewWriteBack(c, name, tabRoot, writeBack, reload)
+    mutViewWriteBack(c, name, tabRoot, viewAddr, writeBack, reload)
   proc onEntry(c: IRStmt): IRStmt =
     if c == nil: nil else: mkBlock(@[reload(), recur(c)])
   case s.kind
@@ -15676,13 +15683,16 @@ proc mutViewWriteBack(s: IRStmt; name, tabRoot: string;
     result.tryFinally = onEntry(s.tryFinally)
   else:
     var seqOut = @[s]
-    if writesName(s, name): seqOut.add writeBack()
+    let byName = writesName(s, name)
+    if byName: seqOut.add writeBack()
     let closureCall =
       (s.kind == isLet and hasClosureCall(s.lvalue)) or
       (s.kind == isAssign and hasClosureCall(s.avalue))
     if (s.kind == isCall and not s.opaque) or closureCall or
        writesName(s, tabRoot):
       seqOut.add reload()
+    # After the reload: a table write this statement made is the later one.
+    if viewAddr and not byName: seqOut.add writeBack()
     result = if seqOut.len == 1: s else: mkBlock(seqOut)
 
 func irLocPath(e: IRExpr): string =
@@ -15706,7 +15716,7 @@ func irLocRoot(e: IRExpr): string =
   else: ""
 
 proc markViewAliases(s: IRStmt; vName, tabPath, tabRoot, keyName: string;
-                     n: NimNode; ctx: ParseCtx): IRStmt =
+                     viewAddr: bool; n: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bx (item 3). In an `mpairs` / `mvalues` body, a call that
   ## receives the loop variable `vName` and the table (the location
   ## `tabPath`) gets one `cViewAliases` entry: in Nim the two formals are
@@ -15714,59 +15724,78 @@ proc markViewAliases(s: IRStmt; vName, tabPath, tabRoot, keyName: string;
   ## through the other inside the callee. Copy-in/copy-out of the two
   ## separately had the callee read the table without the view's write
   ## (and the view without the table's): verdicts swapped against native
-  ## runs. A call that also receives a location HOLDING the table (`o` for
-  ## `o.tab`), or a part of the view, declines: the two formals are not
-  ## one location there, and no entry relates them.
+  ## runs. RFC-0005 S8cn: a call receiving the location HOLDING the table (`o`
+  ## for `o.tab`) gets the entry with the field path to the Table; one that
+  ## receives a part of the view, or the table twice over, declines. So does
+  ## a call reaching the table in a body that takes the view's address
+  ## (`viewAddr`): a pointer can carry the view into it unseen, and the walk
+  ## syncs the two only through formals it can name.
   if s == nil: return nil
   case s.kind
   of isBlock:
     for i in 0 ..< s.stmts.len:
-      s.stmts[i] = markViewAliases(s.stmts[i], vName, tabPath, tabRoot, keyName, n, ctx)
+      s.stmts[i] = markViewAliases(s.stmts[i], vName, tabPath, tabRoot, keyName, viewAddr, n, ctx)
     s
   of isIf:
     for i in 0 ..< s.branches.len:
       s.branches[i].body =
-        markViewAliases(s.branches[i].body, vName, tabPath, tabRoot, keyName, n, ctx)
-    s.elseBody = markViewAliases(s.elseBody, vName, tabPath, tabRoot, keyName, n, ctx)
+        markViewAliases(s.branches[i].body, vName, tabPath, tabRoot, keyName, viewAddr, n, ctx)
+    s.elseBody = markViewAliases(s.elseBody, vName, tabPath, tabRoot, keyName, viewAddr, n, ctx)
     s
   of isWhile:
-    s.wbody = markViewAliases(s.wbody, vName, tabPath, tabRoot, keyName, n, ctx)
+    s.wbody = markViewAliases(s.wbody, vName, tabPath, tabRoot, keyName, viewAddr, n, ctx)
     s
   of isTry:
-    s.tryBody = markViewAliases(s.tryBody, vName, tabPath, tabRoot, keyName, n, ctx)
+    s.tryBody = markViewAliases(s.tryBody, vName, tabPath, tabRoot, keyName, viewAddr, n, ctx)
     for i in 0 ..< s.tryHandlers.len:
       s.tryHandlers[i].body =
-        markViewAliases(s.tryHandlers[i].body, vName, tabPath, tabRoot, keyName, n, ctx)
-    s.tryFinally = markViewAliases(s.tryFinally, vName, tabPath, tabRoot, keyName, n,
+        markViewAliases(s.tryHandlers[i].body, vName, tabPath, tabRoot, keyName, viewAddr, n, ctx)
+    s.tryFinally = markViewAliases(s.tryFinally, vName, tabPath, tabRoot, keyName, viewAddr, n,
                                    ctx)
     s
   of isCall:
     if s.opaque: return s
     var viewIx, tabIx = -1
+    var tabField = ""
     var partial = false
     for i, a in s.cargs:
       let lp = irLocPath(a)
       if lp == vName: viewIx = i
-      elif lp == tabPath: tabIx = i
-      elif lp.len > 0 and (lp.startsWith(vName & ".") or
-                           tabPath.startsWith(lp & ".")):
+      elif lp == tabPath:
+        if tabIx >= 0: partial = true
+        tabIx = i
+      elif lp.len > 0 and tabPath.startsWith(lp & "."):
+        if tabIx >= 0: partial = true
+        tabIx = i
+        tabField = tabPath[lp.len + 1 .. ^1]
+      elif lp.len > 0 and lp.startsWith(vName & "."):
         partial = true
     # RFC-0005 batch 8: a callee holding the view that reaches the Table by a
     # global's name or a capture has the two as separate copies (a false
     # `sxUnsat` on its read of the view's write): the name is withheld from
-    # it, and its access declines (`callGuardedNames`).
-    if viewIx >= 0 and tabRoot.len > 0 and tabRoot notin s.cGuardRoots:
+    # it, and its access declines (`callGuardedNames`). RFC-0005 S8cn: and any
+    # call, where a pointer may be holding the view.
+    if (viewIx >= 0 or viewAddr) and tabRoot.len > 0 and
+       tabRoot notin s.cGuardRoots:
       s.cGuardRoots.add tabRoot
-    if viewIx < 0 or (tabIx < 0 and not partial): return s
+    if viewAddr and tabIx >= 0:
+      return mkBlock(@[ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "a call in the body of this `for` receives the Table, and " &
+                "the body takes a pointer to the loop variable: the pointer " &
+                "and the Table are one location in Nim, which is not modelled " &
+                "-- path degraded to sxUnknown"),
+        "a call receives the Table of an `mpairs` view with a pointer to it"),
+        s])
+    if viewIx < 0 or tabIx < 0 and not partial: return s
     if partial:
       return mkBlock(@[ctx.declineAtSite(feUnsupportedOp,
         siteMsg(n, "a call in the body of this `for` receives the loop " &
-                "variable and a location holding the Table, or a part of " &
-                "the loop variable: the two are one location in Nim, which " &
-                "is not modelled -- path degraded to sxUnknown"),
-        "a call receives an `mpairs` view and a location holding its " &
-        "Table"), s])
-    s.cViewAliases.add (viewArg: viewIx, tabArg: tabIx, keyName: keyName)
+                "variable and either a part of it or the Table by two " &
+                "routes: they are one location in Nim, which is not modelled " &
+                "-- path degraded to sxUnknown"),
+        "a call receives a part of an `mpairs` view, or its Table twice"), s])
+    s.cViewAliases.add (viewArg: viewIx, tabArg: tabIx, keyName: keyName,
+                        tabField: tabField)
     s
   else: s
 
@@ -15895,6 +15924,15 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
     loopStmts.add mkLet(vName, valTy, vIR)
     if vars.len == 2:
       loopStmts.add mkLet(vars[0].strVal, keyTy, mkVar(kSynth))
+    # RFC-0005 S8cn (item 4): the slot's state past a removal. A one-entry
+    # table's only entry is at its home slot (`delImplIdx` backshifts the
+    # cluster), so its removal empties the slot the view is on, and its key
+    # put back lands there again. Past any other removal the slot depends on
+    # the hashes (`rb_hash`, `r2_zero` in `tsymex_rfc0005_s8cn_views`): the
+    # path declines. `gone` says the view is on the emptied slot: it reads
+    # what was last written there, and a write leaves the table alone.
+    let goneName = freshSynth(ctx, "tkg")
+    loopStmts.add mkLet(goneName, tBool(), mkBoolLit(false))
     proc writeBack(): IRStmt =
       var wbPre: seq[IRStmt]
       let st =
@@ -15904,30 +15942,57 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
         else:
           dottedFieldMutate(bare, doTabSet, @[mkVar(kSynth), mkVar(vName)],
                             wbPre, ctx)
-      if wbPre.len == 0: st else: mkBlock(wbPre & @[st])
+      let store = if wbPre.len == 0: st else: mkBlock(wbPre & @[st])
+      var guardPre: seq[IRStmt]
+      let tabNow = parseExpr(container, guardPre, ctx)
+      guardPre.add mkIf(@[mkBranch(mkBinop(bAnd,
+        mkTabRemovedSince(tabNow, mkVar(snapIter)),
+        mkUnop(uNot, mkContains(tabNow, mkVar(kSynth)))), mkBlock(@[]))], store)
+      mkBlock(guardPre)
     # RFC-0005 S8bx (item 3): a call receiving both the view and the table.
     var scratch: seq[IRStmt]
     let tabLoc = parseExpr(container, scratch, ctx)
+    let viewAddr = addrTakenIn(n[^1], vars[^1])
     body = markViewAliases(body, vName, irLocPath(tabLoc), irLocRoot(tabLoc),
-                           kSynth, n, ctx)
+                           kSynth, viewAddr, n, ctx)
     # RFC-0005 batch 8: a key removed declines where it is removed, as a read
-    # of the view past it would read the slot Nim's `del` refills.
+    # of the view past it would read the slot Nim's `del` refills. RFC-0005
+    # S8cn (item 4): where the walk knows the slot, it reads it.
     proc reload(): IRStmt =
       var rlPre: seq[IRStmt]
       let tabNow = parseExpr(container, rlPre, ctx)
-      rlPre.add mkIf(@[mkBranch(mkTabRemovedSince(tabNow, mkVar(snapIter)),
-        ctx.declineAtSite(feUnsupportedOp,
-          siteMsg(n, "a key was removed from the Table while iterating over " &
-                  "it, and the loop variable views a slot Nim's `del` may " &
-                  "refill from another entry -- path degraded to sxUnknown"),
-          "a key removed from the Table under an `mpairs` view"))])
       let recv = liftIndexContainer(parseExpr(container, rlPre, ctx),
                                     tabCls.ty, rlPre, ctx)
       let rl = freshSynth(ctx, "tkr")
-      rlPre.add mkIndexStmt(rl, recv, mkVar(kSynth), valTy)
-      rlPre.add mkAssign(vName, mkVar(rl))
+      let readNow = mkBlock(@[mkIndexStmt(rl, recv, mkVar(kSynth), valTy),
+                              mkAssign(vName, mkVar(rl))])
+      let oneEntry = mkBinop(bEq, mkVar(lenName), mkIntLit(1))
+      let emptied = mkBinop(bAnd, oneEntry,
+                            mkBinop(bEq, mkSeqLen(tabNow), mkIntLit(0)))
+      let putBack = mkBinop(bAnd, oneEntry,
+        mkBinop(bAnd, mkBinop(bEq, mkSeqLen(tabNow), mkIntLit(1)),
+                mkContains(tabNow, mkVar(kSynth))))
+      let zero = zeroValueForType(valTy)
+      let onSlot = if zero == nil: nil else: mkIf(@[
+        mkBranch(mkUnop(uNot, mkVar(goneName)),
+                 mkBlock(@[mkAssign(vName, zero),
+                           mkAssign(goneName, mkBoolLit(true))]))])
+      let declined = ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "a key was removed from the Table while iterating over " &
+                "it, and the loop variable views a slot Nim's `del` may " &
+                "refill from another entry -- path degraded to sxUnknown"),
+        "a key removed from the Table under an `mpairs` view")
+      var arms: seq[IRBranch]
+      if onSlot != nil: arms.add mkBranch(emptied, onSlot)
+      let again = mkBlock(@[mkIndexStmt(rl, recv, mkVar(kSynth), valTy),
+                            mkAssign(vName, mkVar(rl)),
+                            mkAssign(goneName, mkBoolLit(false))])
+      arms.add mkBranch(putBack, again)
+      rlPre.add mkIf(@[mkBranch(mkTabRemovedSince(tabNow, mkVar(snapIter)),
+                                mkIf(arms, declined))], readNow)
       mkBlock(rlPre)
-    body = mutViewWriteBack(body, vName, irLocRoot(tabLoc), writeBack, reload)
+    body = mutViewWriteBack(body, vName, irLocRoot(tabLoc), viewAddr, writeBack,
+                            reload)
   case iterName
   of "mpairs", "mvalues": discard
   of "keys": loopStmts.add mkLet(vars[0].strVal, keyTy, mkVar(kSynth))
@@ -15967,11 +16032,16 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
     # later entry into the hole (a key visited twice, another skipped;
     # native runs in `tsymex_rfc0005_s8bx_iterchange`). Not modelled: the
     # path declines (it followed the enumeration taken at loop entry, which
-    # was a false `sxUnsat` / `sxSat` for a one-entry table).
+    # was a false `sxUnsat` / `sxSat` for a one-entry table). RFC-0005 S8cn:
+    # but for a one-entry table's own key put back, on the slot the walk is
+    # already past: nothing is left to visit (`rr_once`).
     var inner3: seq[IRStmt]
     let tabNow = parseExpr(container, inner3, ctx)
     loopStmts.add inner3
-    loopStmts.add mkIf(@[mkBranch(mkTabRemovedSince(tabNow, mkVar(snapIter)),
+    let ownBack = mkBinop(bAnd, mkBinop(bEq, mkVar(lenName), mkIntLit(1)),
+                          mkContains(tabNow, mkVar(kSynth)))
+    loopStmts.add mkIf(@[mkBranch(mkBinop(bAnd,
+      mkTabRemovedSince(tabNow, mkVar(snapIter)), mkUnop(uNot, ownBack)),
       ctx.declineAtSite(feUnsupportedOp,
         siteMsg(n, "a key was removed from the Table while iterating over " &
                 "it, and its length kept: the rest of Nim's walk over the " &

@@ -141,7 +141,8 @@ proc sValues(t0: Table[string, int]) =
     if r == x + 1: symexTarget("values_live")
     if r == x: symexTarget("values_dead")
 
-# The object holding the Table, passed with the view: declines.
+# The object holding the Table, passed with the view: one location too
+# (RFC-0005 S8cn).
 proc sHolder(t0: Table[string, int]) =
   if t0.len != 1 or "a" notin t0: return
   let x = t0["a"]
@@ -216,8 +217,7 @@ suite "S8bx (3): an mpairs view and its Table in one call":
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnsat
 
-  test "the object holding the Table, passed with the view, declines":
+  test "the object holding the Table, passed with the view":
     let d = symexFind(sHolder, tLabel("holder_dead"))
     checkpoint $d.status & " " & show(d.errors)
-    check d.status == sxUnknown
-    check hasKind(d.errors, feUnsupportedOp)
+    check d.status == sxUnsat

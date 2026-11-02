@@ -5830,7 +5830,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # callee changes what the callee reads, so it keys the call.
     var views: seq[string]
     for a in s.cViewAliases:
-      views.add $a.viewArg & ":" & $a.tabArg & ":" & lookupLocal(env, a.keyName)
+      views.add $a.viewArg & ":" & $a.tabArg & ":" & lookupLocal(env, a.keyName) &
+        ":" & a.tabField
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &

@@ -1333,5 +1333,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bx_setlenstr",
             "tsymex_rfc0005_s8cn_step1d",
             # S8cn item 2: step 1e, a bounded concrete search.
-            "tsymex_rfc0005_s8cn_probe"]:
+            "tsymex_rfc0005_s8cn_probe",
+            # S8cn items 3 and 4: an mpairs view and its Table.
+            "tsymex_rfc0005_s8cn_views"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

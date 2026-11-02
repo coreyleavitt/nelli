@@ -6514,12 +6514,29 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
 
 func defaultZeroTotal(t: IRType): bool
 
-proc presenceRemoved(cur, base: Z3AnyAst): bool =
-  ## RFC-0005 S8bx (item 4). The presence array `cur` is NOT `base` under
-  ## stores of `true` alone (through `ite` merges): some store between them
-  ## writes `false` (a removal), or `cur` is reached otherwise (a fresh
-  ## array, a callee's havoc). Conservative: only `true` stores down to
-  ## `base` on every branch is "no removal".
+type GuardLiteral = enum glOpen, glTrue, glFalse
+
+proc guardLiteral(cond: Z3Bool): GuardLiteral =
+  ## RFC-0005 S8bl. `cond` simplified to a literal, decided without the
+  ## solver as `loopArmInfeasible` decides a loop guard. With a ground scan
+  ## (a pinned input, a callee's ground result) most `if` guards fold, and
+  ## walking the side a literal rules out forked every `if` in two: five
+  ## folded guards in a loop body were 32 copies of one path per iteration.
+  ## Sound: the side dropped carries a `false` conjunct, so no query on it
+  ## is satisfiable.
+  let lit = $simplify(cond)
+  if lit == "true": glTrue
+  elif lit == "false": glFalse
+  else: glOpen
+
+proc presenceRemoved(cur, base: Z3AnyAst): Z3Bool =
+  ## RFC-0005 S8bx (item 4). Whether a key present at `base` was taken out on
+  ## the way to the presence array `cur`, through `ite` merges. RFC-0005 S8cn:
+  ## as a term: a store of `false` removes a key only if the array under it
+  ## holds it (Nim's `del` of an absent key is a no-op, `ra_live`); `true` when
+  ## `cur` is reached otherwise (a fresh array, a callee's havoc), so the
+  ## caller's "not removed" arm holds only on an all-`true` chain. Literally
+  ## `false` when every store is `true`.
   let ctx = cur.ctx
   proc kindOf(a: RawZ3Ast): int =
     ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
@@ -6533,26 +6550,37 @@ proc presenceRemoved(cur, base: Z3AnyAst): bool =
     probeArr.raw, probeStore.raw))
   let storeKind = kindOf(probeStore.raw)
   let iteKind = kindOf(probeIte.raw)
-  var stack = @[cur.raw]
   var steps = 0
-  while stack.len > 0:
-    let t = stack.pop()
-    if t == base.raw: continue
+  var memo: Table[RawZ3Ast, Z3Bool]
+  proc go(t: RawZ3Ast): Z3Bool =
+    if t == base.raw: return mkBool(ctx, false)
+    if memo.hasKey(t): return memo[t]
     inc steps
     if steps > 100_000 or Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST:
-      return true
+      return mkBool(ctx, true)
     let app = Z3_to_app(ctx.raw, t)
     let k = kindOf(t)
     if k == storeKind and Z3_get_app_num_args(ctx.raw, app) == 3:
-      let v = Z3_get_app_arg(ctx.raw, app, 2)
-      if $wrap[Z3Bool](ctx, v) != "true": return true
-      stack.add Z3_get_app_arg(ctx.raw, app, 0)
+      let below = Z3_get_app_arg(ctx.raw, app, 0)
+      let lit = guardLiteral(wrap[Z3Bool](ctx, Z3_get_app_arg(ctx.raw, app, 2)))
+      let under = go(below)
+      if lit == glTrue: result = under
+      elif lit == glFalse:
+        let held = wrap[Z3Bool](ctx, checkedSelect(ctx, below,
+          Z3_get_app_arg(ctx.raw, app, 1)))
+        result = if guardLiteral(under) == glFalse: held else: under or held
+      else: result = mkBool(ctx, true)
     elif k == iteKind and Z3_get_app_num_args(ctx.raw, app) == 3:
-      stack.add Z3_get_app_arg(ctx.raw, app, 1)
-      stack.add Z3_get_app_arg(ctx.raw, app, 2)
+      let a = go(Z3_get_app_arg(ctx.raw, app, 1))
+      let b = go(Z3_get_app_arg(ctx.raw, app, 2))
+      if guardLiteral(a) == glFalse and guardLiteral(b) == glFalse: result = a
+      else:
+        result = wrap[Z3Bool](ctx, checkedIte(ctx, Z3_get_app_arg(ctx.raw, app, 0),
+                                              a.raw, b.raw))
     else:
-      return true
-  false
+      result = mkBool(ctx, true)
+    memo[t] = result
+  go(cur.raw)
 
 proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
   ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
@@ -9680,14 +9708,17 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     # RFC-0005 S8bx (item 4). Whether a key was removed from the table since
     # it was `trBase`, read off the term: the presence array is `trBase`'s
     # under a chain of stores (`[]=` stores `true`, `del` / `pop` / `take`
-    # store `false`, `clear` is a fresh array), so a `false` store, or any
-    # other shape between the two, is a removal -- or one this cannot rule
-    # out, which is the same answer (the slot walk is then declined).
+    # store `false`, `clear` is a fresh array), so a `false` store of a key
+    # held there, or any other shape between the two, is a removal -- or one
+    # this cannot rule out, which is the same answer (the slot walk is then
+    # declined). RFC-0005 S8cn: a term (`presenceRemoved`).
     let cur = lower(env, e.trCur)
     let base = lower(env, e.trBase)
-    SymVal(kind: svBool, bo: mkBool(
-      cur.kind != svTable or base.kind != svTable or
-      presenceRemoved(cur.tabPresentRaw, base.tabPresentRaw)))
+    if cur.kind != svTable or base.kind != svTable:
+      SymVal(kind: svBool, bo: mkBool(true))
+    else:
+      SymVal(kind: svBool, bo: presenceRemoved(cur.tabPresentRaw,
+                                               base.tabPresentRaw))
   of iekContains:
     let recv = lower(env, e.container)
     case recv.kind
@@ -14326,21 +14357,6 @@ func loopPruneRLimit*(settings: SymexSettings): uint =
   ## when that is set and smaller (a caller's budget is never exceeded).
   let q = settings.budget.queryRLimit
   if q != 0 and q < defaultLoopPruneRLimit: q else: defaultLoopPruneRLimit
-
-type GuardLiteral = enum glOpen, glTrue, glFalse
-
-proc guardLiteral(cond: Z3Bool): GuardLiteral =
-  ## RFC-0005 S8bl. `cond` simplified to a literal, decided without the
-  ## solver as `loopArmInfeasible` decides a loop guard. With a ground scan
-  ## (a pinned input, a callee's ground result) most `if` guards fold, and
-  ## walking the side a literal rules out forked every `if` in two: five
-  ## folded guards in a loop body were 32 copies of one path per iteration.
-  ## Sound: the side dropped carries a `false` conjunct, so no query on it
-  ## is satisfiable.
-  let lit = $simplify(cond)
-  if lit == "true": glTrue
-  elif lit == "false": glFalse
-  else: glOpen
 
 proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
                        settings: SymexSettings): bool =
@@ -19201,6 +19217,20 @@ proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   if p.env.hasKey(name): return (p.env[name], p)
   lowerInExpr(p, mkVar(name), w)
 
+const viewGonePrefix = "__viewGone#"
+  ## RFC-0005 S8cn. Set on a callee's path where the key of a `slot` entry was
+  ## removed and the slot is empty (`syncAddrCells`).
+
+func irFieldPath(e: IRExpr): string =
+  ## RFC-0005 S8cn. `e` as a location path (`t`, `o.tab`), or "".
+  if e == nil: return ""
+  case e.kind
+  of iekVar: e.vname
+  of iekField:
+    let r = irFieldPath(e.obj)
+    if r.len == 0: "" else: r & "." & e.fieldName
+  else: ""
+
 proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
                      w: var WalkCtx): string =
   ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
@@ -19211,29 +19241,49 @@ proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
   ## A by-value scalar view is a copy, and nothing relates it to the table.
   ## A call made inside such a callee that passes both formals on carries
   ## the pair into its own callee (Nim passes the one location on).
-  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal]]
+  ## RFC-0005 S8cn: the entry's `path` is the field path from the Table's
+  ## formal to the Table, when an object holding it came. A call made on a
+  ## slot the key has left declines (`viewGonePrefix`: the callee would need
+  ## that state, and nothing passes it).
+  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal; path: seq[string]]]
   for a in stmt.cViewAliases:
     if a.viewArg >= sig.params.len or a.tabArg >= sig.params.len or
        not callerEnv.hasKey(a.keyName):
       return "and the walk does not bind the two"
     pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
-               key: callerEnv[a.keyName])
+               key: callerEnv[a.keyName],
+               path: (if a.tabField.len > 0: a.tabField.split('.')
+                      else: newSeq[string]()))
   if w.frameStack.len > 0:
     for a in w.frameStack[^1].addrCells:
       if a.slot.len == 0: continue
       var vi, ti = -1
+      var path = a.path
       for i, arg in stmt.cargs:
-        if arg.kind == iekVar:
-          if arg.vname == a.local: vi = i
-          elif arg.vname == a.slot: ti = i
+        if arg.kind == iekVar and arg.vname == a.local: vi = i
+        elif irFieldPath(arg) == a.slot:
+          ti = i
+        elif a.path.len > 0:
+          # The holder's Table passed on: a field `var` actual comes through
+          # a temporary (`cVarLocs`).
+          for l in stmt.cVarLocs:
+            if l.mode == "var" and l.root == a.slot and l.path == a.path and
+               arg.kind == iekVar and arg.vname == l.temp:
+              ti = i
+              path = @[]
+          if irFieldPath(arg) == a.slot & "." & a.path.join("."):
+            ti = i
+            path = @[]
       if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
-        pairs.add (viewArg: vi, tabArg: ti, key: a.ixs[0])
+        if callerEnv.hasKey(viewGonePrefix & a.local):
+          return "on a slot its key has left"
+        pairs.add (viewArg: vi, tabArg: ti, key: a.ixs[0], path: path)
   for a in pairs:
     let vf = sig.params[a.viewArg]
     if not vf.isVar:
       if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
       return "the view by value (not modelled for a " & $vf.ty.kind & ")"
-    w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: @[],
+    w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: a.path,
                            ixs: @[a.key], bound: true, view: false,
                            slot: sig.params[a.tabArg].name)
   ""
@@ -22563,6 +22613,9 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
     var lost: seq[string]   ## RFC-0005 S8bs
     var freed: seq[string]   ## RFC-0005 S8bu
     var viewWhy = ""         ## RFC-0005 S8bx
+    ## RFC-0005 S8cn: a `slot` entry whose key may have left, for the fork below.
+    var removal: seq[tuple[local: string; ty: IRType; tab, snap: SymVal;
+                           key: RawZ3Ast; rm: Z3Bool; gone: bool]]
     for c in w.frame.addrCells:
       if c.view and env2.hasKey(viewFreedPrefix & c.local):
         env2.del(viewFreedPrefix & c.local)
@@ -22574,37 +22627,77 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
           # RFC-0005 S8bx (item 3): the location is the Table's value at the
           # key. A statement nested in this one has synced already, and left
           # the view the same term as the table's value at the key.
+          # RFC-0005 S8cn: the Table is the part of `c.slot` at `c.path` when
+          # an object holding it came.
           if not env2.hasKey(c.local) or not env2.hasKey(c.slot): continue
-          let tabV = env2[c.slot]
+          # The holder's Table went to this call through a temporary: the
+          # callee kept the view and it equal, and the write-back that follows
+          # brings the Table here.
+          if stmt.kind == isCall and c.path.len > 0:
+            var pending = false
+            for l in stmt.cVarLocs:
+              if l.mode == "var" and l.root == c.slot and l.path == c.path:
+                pending = true
+            if pending: continue
+          let tabO = locGet(env2[c.slot], c.path, @[])
+          let tabV = if tabO.isSome: tabO.get else: env2[c.slot]
           let keyO = if tabV.kind == svTable: tabKeyTerm(c.ixs[0], tabV.tabKeyTy)
                      else: none(Z3AnyAst)
           if keyO.isNone:
             viewWhy = "the table is not a modelled Table value"
             continue
+          let gone = env2.hasKey(viewGonePrefix & c.local)
           let xv = env2[c.local]
-          if sameSymVal(xv, tabValAt(ctx, tabV, keyO.get.raw)): continue
           let snapV = addrSnapName(depth, c.local)
           let snapT = addrSnapName(depth, c.slot)
+          let snapO = if env2.hasKey(snapT): locGet(env2[snapT], c.path, @[])
+                      else: none(SymVal)
+          # `del` stores only presence: the value at the key is still equal.
+          let rm =
+            if snapO.isSome and snapO.get.kind == svTable:
+              presenceRemoved(tabV.tabPresentRaw, snapO.get.tabPresentRaw)
+            else: mkBool(ctx, false)
+          if not gone and guardLiteral(rm) == glFalse and
+             sameSymVal(xv, tabValAt(ctx, tabV, keyO.get.raw)):
+            continue
           let vCh = env2.hasKey(snapV) and not sameSymVal(xv, env2[snapV])
-          let tCh = env2.hasKey(snapT) and not sameSymVal(tabV, env2[snapT])
+          let tCh = snapO.isSome and not sameSymVal(tabV, snapO.get)
           if not vCh and not tCh: continue
           if q == nil: q = forkPath(p, p.pc, p.env)
-          if vCh and tCh and not lastWriteTo(stmt, c.local):
+          # RFC-0005 S8cn: the statement's last effect orders the two: `v =
+          # f(t)` the view's write, `t[k] = f(v)` the table's store (a call's
+          # argument is evaluated first). Two calls in one expression are not
+          # two statements here, and stay declined (`twoCalls`).
+          let tabLast = lastWriteTo(stmt, c.slot) or
+            stmt.kind == isIndexAssign and stmt.iaRecvName == c.slot
+          if vCh and tCh and not lastWriteTo(stmt, c.local) and not tabLast:
             viewWhy = "the view and the table were both written in one statement"
-          elif vCh:
+          elif vCh and not tabLast:
+            # On the emptied slot a write stays in the slot: the key is not
+            # back (`rw_live`).
+            if gone: continue
             var e2 = env2
+            const tabTmp = addrSnapPrefix & "tab"
             e2[addrSnapPrefix & "key"] = c.ixs[0]
-            let t2 = lower(e2, mkTableSet(mkVar(c.slot),
+            e2[tabTmp] = tabV
+            let t2 = lower(e2, mkTableSet(mkVar(tabTmp),
               mkVar(addrSnapPrefix & "key"), mkVar(c.local)))
-            env2[c.slot] = t2
+            let holder = locSet(env2[c.slot], c.path, @[], t2)
+            if holder.isNone:
+              viewWhy = "the walk does not find the Table in its holder"
+              continue
+            env2[c.slot] = holder.get
             env2[c.local] = tabValAt(ctx, t2, keyO.get.raw)
-          else:
-            let present = wrap[Z3Bool](ctx,
-              checkedSelect(ctx, tabV.tabPresentRaw.raw, keyO.get.raw))
-            if guardLiteral(present) != glTrue:
-              viewWhy = "the table write may have removed the view's key"
-            else:
+          elif snapO.isSome:
+            # S8bx declined every presence that was not literally true. Only
+            # an all-`true` chain since the statement began (`presenceRemoved`)
+            # keeps the key, whatever its stores' keys are; a removal goes to
+            # the fork below.
+            if not gone and guardLiteral(rm) == glFalse:
               env2[c.local] = tabValAt(ctx, tabV, keyO.get.raw)
+            else:
+              removal.add (local: c.local, ty: c.ty, tab: tabV, snap: snapO.get,
+                           key: keyO.get.raw, rm: rm, gone: gone)
           continue
         if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
            env2[c.cell].kind != svPtr:
@@ -22639,7 +22732,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         elif displayName(c.local) notin lost: lost.add displayName(c.local)
     let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
     if q == nil and not dropped and clash.len == 0 and lost.len == 0 and
-       freed.len == 0 and viewWhy.len == 0:
+       freed.len == 0 and viewWhy.len == 0 and removal.len == 0:
       result.add p
       continue
     if q == nil: q = forkPath(p, p.pc, env2)
@@ -22667,6 +22760,50 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
              "assigned whole or resized through a pointer: Nim's copy still " &
              "points at the old memory, which it may have freed; the walk " &
              "does not model freed memory (feUnsupportedOp)"))
+    if removal.len > 1:
+      viewWhy = "two views' keys may have been removed in one statement"
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "an `mpairs` view and its Table passed to one call: " & viewWhy &
+             " (RFC-0005 S8cn; feUnsupportedOp)"))
+    elif removal.len == 1:
+      # RFC-0005 S8cn (item 4): as `parseTableForLoop`'s `reload`, for the
+      # callee's own reads. The key is kept; or it left a one-entry table and
+      # the slot is empty (reading zero until written); or it was put back on
+      # that slot; else the slot depends on the hashes.
+      let r = removal[0]
+      let lenNow = r.tab.tabSize
+      let held = wrap[Z3Bool](ctx, checkedSelect(ctx, r.tab.tabPresentRaw.raw, r.key))
+      let empty = lenNow == mkInt(ctx, 0)
+      let back = lenNow == mkInt(ctx, 1) and held
+      let one = r.snap.tabSize == mkInt(ctx, 1)
+      let goneName = viewGonePrefix & r.local
+      let onSlot = if r.gone: empty else: r.rm and one and empty
+      let putBack = if r.gone: back else: r.rm and one and back
+      var keep = env2
+      keep[r.local] = tabValAt(ctx, r.tab, r.key)
+      keep.del(goneName)
+      var slotEnv = env2
+      if not r.gone: slotEnv[r.local] = defaultZero(r.ty, "__viewGoneZero")
+      slotEnv[goneName] = SymVal(kind: svBool, bo: mkBool(ctx, true))
+      var arms: seq[Z3Bool]
+      arms.add onSlot
+      arms.add putBack
+      if not r.gone: arms.add(not r.rm)
+      result.add drainPendingLowerEffects(forkPath(q, q.pc & @[onSlot], slotEnv))
+      result.add drainPendingLowerEffects(forkPath(q, q.pc & @[putBack], keep))
+      if not r.gone:
+        result.add drainPendingLowerEffects(forkPath(q, q.pc & @[not r.rm], keep))
+      var none = mkBool(ctx, true)
+      for a in arms: none = none and not a
+      # `degrade` reports at once, so the arm is taken only if it can happen.
+      if not loopArmInfeasible(ctx, q, none, w.settings):
+        let dq = forkPath(q, q.pc & @[none], env2)
+        taintInPlace(dq, w.degrade(feUnsupportedOp,
+          "a key was removed from the Table a callee holds with its `mpairs` " &
+               "view: the view's slot depends on the keys' hashes, which are " &
+               "not modelled (RFC-0005 S8cn; feUnsupportedOp)"))
+        result.add drainPendingLowerEffects(dq)
+      continue
     result.add drainPendingLowerEffects(q)
 
 proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =

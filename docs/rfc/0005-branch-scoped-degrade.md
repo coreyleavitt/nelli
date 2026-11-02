@@ -9523,6 +9523,13 @@ Where slices met:
   before step 2, so S8by's pin names 1d. The S8bp isolation suite still reaches
   every step: `ownCoreNl` reaches step 2 and `preSufNl` with the facts-first check
   off reaches (1b), (1c) and (1c)'s capped half.
+- *S8by's term order on Z3 4.13.4.* `queryTermOrder` moved `tiTuple`'s SAT search
+  in `tsymex_rfc0005_s8bc_remainder_c` from 79,811,644 units to 411,783,288, past
+  the pin's 300M budget, so it declined. The walk's UNSAT queries fell (142,112 to
+  68,137; 521,055 to 315,601). The pin's budget is now 600M, with the same exact
+  `sxSat` and `a == 6` replayed natively, at about 100 s more on Linux. The default
+  budget's answer does not move: a tainted path's 20M declined before and after.
+  S8ci owns term order.
 - *S8by's timeout.* `concreteScratchCheck` reads `queryTimeoutMsCur`. It equals
   `settings.budget.queryTimeoutMs` at every concolic site, since
   `runConcolicCollectImpl` resets the run state with the settings it passes down,

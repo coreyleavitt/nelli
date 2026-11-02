@@ -1055,6 +1055,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8; a
     ## proc-value call's aliasing shapes decline where S8ca's sort lifted
     ## their decline. 241->245.
+    ## RFC-0005 S8cb (S8bo onto batch 7, and S8bo's remainder). Provisional
+    ## 243 (S8bz holds 241, S8cf 242). 237->243.
     check symexWalkerVersion == "245"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

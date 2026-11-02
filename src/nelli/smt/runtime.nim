@@ -23219,9 +23219,12 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   for i, c in w.frame.addrCells:
     for j in 0 ..< i:
       if w.frame.addrCells[j].local == c.local: passes = 2
+      # RFC-0005 S8cn: two views into one seq or Table may be one location.
+      if c.slot.len > 0 and w.frame.addrCells[j].slot == c.slot: passes = 2
   for p in outs:
     var env2 = p.env
     var q: Path = nil
+    var writtenThrough: seq[string]   ## RFC-0005 S8cn: seqs a view wrote into
     var clash: seq[string]
     var lost: seq[string]   ## RFC-0005 S8bs
     var freed: seq[string]   ## RFC-0005 S8bu
@@ -23274,7 +23277,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
               pairedCall = hasV and hasS
             if snapQ.isSome and not sameSymVal(tabV, snapQ.get) and
                stmt.kind notin {isBlock, isIf, isWhile, isTry} and
-               not pairedCall and
+               not pairedCall and c.slot notin writtenThrough and
                not (stmt.kind == isIndexAssign and stmt.iaRecvName == c.slot):
               if q == nil: q = forkPath(p, p.pc, p.env)
               viewWhy = "the seq was resized or assigned whole while its " &
@@ -23304,6 +23307,9 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                 continue
               env2[c.slot] = holder.get
               env2[c.local] = locGet(nv.get, @["["], c.ixs).get
+              # A sibling view of this seq (`f(s[0], s[1], s)`) sees an element
+              # store, not a resize.
+              writtenThrough.add c.slot
             else:
               env2[c.local] = elemO.get
             continue

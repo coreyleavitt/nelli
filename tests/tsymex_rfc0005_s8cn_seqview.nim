@@ -195,6 +195,13 @@ proc sTwo(n: int) =
   var s = @[n, n]
   if sq2(s[0], s[1], s) == 12: symexTarget("two_live")
   else: symexTarget("two_dead")
+proc sq2s(a, b: var int; s: seq[int]): int =
+  a = 1
+  b + s[0] * 10
+proc sTwoSame(n: int) =
+  var s = @[n]
+  if sq2s(s[0], s[0], s) == 11: symexTarget("ts_live")
+  else: symexTarget("ts_dead")
 proc sSymIx(n: int) =
   guardN()
   let i = if n > 0: 1 else: 0
@@ -454,6 +461,8 @@ suite "S8cn item 5: a seq's element with its seq":
   test "two elements, a computed index":
     decidedN(sTwo, "two_live", sxSat)
     decidedN(sTwo, "two_dead", sxUnsat)
+    declined(sTwoSame, "ts_live", "may reach it another way")
+    declined(sTwoSame, "ts_dead", "may reach it another way")
     decidedN(sSymIx, "si_same_live", sxSat)
     decidedN(sSymIx, "si_other_live", sxSat)
     decidedN(sSymIx, "si_same_dead", sxUnsat)
@@ -473,7 +482,7 @@ suite "S8cn item 5: a seq's element with its seq":
   test "resized or assigned whole while held: declines":
     declined(sGrow, "gw_any", "resized or assigned whole")
     declined(sAssign, "as_any", "resized or assigned whole")
-    declined(sChain, "ch_any", "resized or assigned whole")
+    declined(sChain, "ch_any", "holding the whole of one")
   test "reached by a global's name: declines":
     declined(sGloD, "gd_live", "reached by a callee both through")
 

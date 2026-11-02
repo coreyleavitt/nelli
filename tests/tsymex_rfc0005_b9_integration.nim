@@ -313,27 +313,27 @@ suite "batch 9: the native runs":
     check nativeHits(sUnsafeNil(5)) == ["un_live"].toHashSet
     check nativeHits(sUnsafeWrite(3)) == ["uw_live"].toHashSet
 
-suite "batch 9: a view and its Table through a proc value declines":
+suite "batch 9: a view and its Table through a proc value":
 
-  test "the Table by value and by var":
-    verdict(sVal, "val_live", sxUnknown)
-    verdict(sVal, "val_dead", sxUnknown)
-    verdict(sVar, "var_live", sxUnknown)
-    verdict(sVar, "var_dead", sxUnknown)
+  test "the Table by value and by var: decided, as the direct call (S8cn)":
+    verdict(sVal, "val_live", sxSat)
+    verdict(sVal, "val_dead", sxUnsat)
+    verdict(sVar, "var_live", sxSat)
+    verdict(sVar, "var_dead", sxUnsat)
 
   test "a lambda":
     verdict(sLambda, "lam_live", sxUnknown)
     verdict(sLambda, "lam_dead", sxUnknown)
 
-  test "the Table in a field, of a local and of a global":
-    verdict(sHolder, "hold_live", sxUnknown)
-    verdict(sHolder, "hold_dead", sxUnknown)
-    verdict(sGlobalHolder, "ghold_live", sxUnknown)
-    verdict(sGlobalHolder, "ghold_dead", sxUnknown)
+  test "the Table in a field, of a local and of a global: decided (S8cn)":
+    verdict(sHolder, "hold_live", sxSat)
+    verdict(sHolder, "hold_dead", sxUnsat)
+    verdict(sGlobalHolder, "ghold_live", sxSat)
+    verdict(sGlobalHolder, "ghold_dead", sxUnsat)
 
-  test "a void call":
-    verdict(sVoid, "void_live", sxUnknown)
-    verdict(sVoid, "void_dead", sxUnknown)
+  test "a void call: decided (S8cn)":
+    verdict(sVoid, "void_live", sxSat)
+    verdict(sVoid, "void_dead", sxUnsat)
 
 suite "batch 9: a by-value location the body also reaches declines":
 
@@ -342,14 +342,14 @@ suite "batch 9: a by-value location the body also reaches declines":
     declines(sCapture, "cap_dead", ceCaptureByRefUnmodelled)
 
   test "a global seq and a global Table":
-    declines(sGlobalSeq, "gseq_live", ceCaptureByRefUnmodelled)
-    declines(sGlobalSeq, "gseq_dead", ceCaptureByRefUnmodelled)
-    declines(sGlobalTable, "gtab_live", ceCaptureByRefUnmodelled)
-    declines(sGlobalTable, "gtab_dead", ceCaptureByRefUnmodelled)
+    declines(sGlobalSeq, "gseq_live", feUnsupportedOp)
+    declines(sGlobalSeq, "gseq_dead", feUnsupportedOp)
+    declines(sGlobalTable, "gtab_live", feUnsupportedOp)
+    declines(sGlobalTable, "gtab_dead", feUnsupportedOp)
 
   test "a body that only reads":
-    declines(sReadOnly, "ro_live", ceCaptureByRefUnmodelled)
-    declines(sReadOnly, "ro_dead", ceCaptureByRefUnmodelled)
+    declines(sReadOnly, "ro_live", feUnsupportedOp)
+    declines(sReadOnly, "ro_dead", feUnsupportedOp)
 
 suite "batch 9: a call returning var as a var actual declines":
 

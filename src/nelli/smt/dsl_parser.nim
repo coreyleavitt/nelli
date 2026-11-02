@@ -6931,6 +6931,48 @@ proc plainActual(a: NimNode): bool =
     true
   else: false
 
+func holdsCompoundLeaf(t: IRType): bool =
+  ## RFC-0005 batch 9. `t` is, or a tuple of, what S8ca's `sortOfTuple` admits
+  ## to a proc value's domain: a seq, a table, a set or an array.
+  if t == nil: return false
+  case t.kind
+  of itSeq, itTable, itSet, itArray: true
+  of itTuple:
+    for f in t.fields:
+      if holdsCompoundLeaf(f): return true
+    false
+  else: false
+
+proc byValueTouch(a: NimNode; touch: var seq[string]) =
+  ## RFC-0005 batch 9. A by-value actual of such a type shares its memory
+  ## with the variable it names (Nim passes it by address, or copies a header
+  ## over one buffer), while the walk binds the formal to a copy. A body that
+  ## also reaches that variable (`touchMeetsOuter`) reads through the formal
+  ## what it wrote by name: `f(gs)` with `gs[0] = 50; a[0]` is 50 natively. It
+  ## declined through S8ca's item 5 for want of a sort, and was a false
+  ## `sxUnsat` after it.
+  if a.kind == nnkHiddenAddr or a.typeKind == ntyNone or
+     not holdsCompoundLeaf(classifyType(a).ty):
+    return
+  var syms: seq[NimNode]
+  lvalueVarSyms(a, syms)
+  for s in syms:
+    let nm = "n:" & s.strVal
+    if nm notin touch: touch.add nm
+
+proc formalIsVar(calleeSym: NimNode; k: int): bool =
+  ## RFC-0005 S8cn. The `k`th formal of `calleeSym` is a `var` formal.
+  let impl = resolveRoutineImpl(calleeSym)
+  if impl == nil or impl.len < 4 or impl[3].kind != nnkFormalParams: return false
+  var pos = 0
+  for j in 1 ..< impl[3].len:
+    let d = impl[3][j]
+    if d.kind != nnkIdentDefs: continue
+    for _ in 0 ..< d.len - 2:
+      if pos == k: return d[^2].kind == nnkVarTy
+      inc pos
+  false
+
 proc seqViewPeer(n: NimNode; i: int; lv: NimNode;
                  heapSteps: seq[NimNode]): tuple[arg: int; field: string] =
   ## RFC-0005 S8cn (item 5). The actual that hands the callee the seq whose
@@ -7342,6 +7384,32 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
     # memory it shares, is a path the walk may keep equal to a cell.
     byValueLoc(n[i], i - 1, preamble, ctx, locs)
+    # RFC-0005 S8cn: a call returning `var T` as a `var` actual (`t["a"]`) has
+    # no location the walk can write back to: the callee's write was lost, a
+    # false verdict on main too (batch 9 declines the closure call's form).
+    if n[i].kind != nnkHiddenAddr and not plainActual(n[i]) and
+       formalIsVar(calleeSym, i - 1):
+      writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "`var` argument `" & n[i].repr & "` of `" & calleeSym.strVal &
+                "` is not a location the walk can write back to (feUnsupportedOp)"),
+        "var argument write-back not modelled (feUnsupportedOp)")
+    # RFC-0005 S8cn: one the callee also reaches by name: `gWrite(gs)` with
+    # `gs[0] = 50; a[0]` is 50 natively, and the walk binds the formal to a
+    # copy. A false `sxUnsat`, clean, on the channel (batch 9's `byValueTouch`
+    # declines the closure call's form).
+    block:
+      var touch: seq[string]
+      byValueTouch(n[i], touch)
+      if touch.len > 0:
+        for g in outerOf():
+          if ("n:" & g.strVal) in touch:
+            writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+              siteMsg(n, "by-value argument `" & n[i].repr & "` of `" &
+                      calleeSym.strVal & "` shares its memory with `" &
+                      g.strVal & "`, which the callee also reaches by name: " &
+                      "the walk binds the formal to a copy (feUnsupportedOp)"),
+              "by-value argument the callee also reaches (feUnsupportedOp)")
+            break
     if n[i].kind == nnkSym and varActualPtrSafety(n[i]) == 2:
       # RFC-0005 S8bn: the caller's own `var` formal passed on to a `var`
       # formal (Nim drops the `addr`); read only for a `var` formal.
@@ -7664,35 +7732,6 @@ proc simpleRefExpr(e: NimNode): bool =
   of nnkHiddenDeref, nnkDerefExpr, nnkHiddenStdConv, nnkHiddenSubConv:
     e.len >= 1 and simpleRefExpr(e[^1])
   else: false
-
-func holdsCompoundLeaf(t: IRType): bool =
-  ## RFC-0005 batch 9. `t` is, or a tuple of, what S8ca's `sortOfTuple` admits
-  ## to a proc value's domain: a seq, a table, a set or an array.
-  if t == nil: return false
-  case t.kind
-  of itSeq, itTable, itSet, itArray: true
-  of itTuple:
-    for f in t.fields:
-      if holdsCompoundLeaf(f): return true
-    false
-  else: false
-
-proc byValueTouch(a: NimNode; touch: var seq[string]) =
-  ## RFC-0005 batch 9. A by-value actual of such a type shares its memory
-  ## with the variable it names (Nim passes it by address, or copies a header
-  ## over one buffer), while the walk binds the formal to a copy. A body that
-  ## also reaches that variable (`touchMeetsOuter`) reads through the formal
-  ## what it wrote by name: `f(gs)` with `gs[0] = 50; a[0]` is 50 natively. It
-  ## declined through S8ca's item 5 for want of a sort, and was a false
-  ## `sxUnsat` after it.
-  if a.kind == nnkHiddenAddr or a.typeKind == ntyNone or
-     not holdsCompoundLeaf(classifyType(a).ty):
-    return
-  var syms: seq[NimNode]
-  lvalueVarSyms(a, syms)
-  for s in syms:
-    let nm = "n:" & s.strVal
-    if nm notin touch: touch.add nm
 
 proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
                    preamble: var seq[IRStmt]; ctx: ParseCtx;

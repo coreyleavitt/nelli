@@ -417,6 +417,41 @@ title = "S8bb's remainder B: PCRE backtracking verbs and start-optimiser parity,
 state = "done"
 
 [[slice]]
+id = "S8bs"
+title = "addr-of-local cell aliased through a global ptr across a frame boundary: var actual copy-in/out clobbers the callee's write through the alias (swapped verdicts)"
+state = "done"
+
+[[slice]]
+id = "S8bn"
+title = "S8bh's remainder: ptr alias witnesses (parameter order, global/var-param targets), var-formal ptr declines, ptrs into heap-held containers and by-value aggregates, diverging void closures, proc fields and methods, unknown-target global havoc, `of` operator and nil literals, generic/inheritable/case-object hierarchies, run-time type tags tied to static types"
+state = "done"
+
+[[slice]]
+id = "S8bl"
+title = "S8bc's remainder: var-param magics beyond inc/dec (swap etc.), non-terminating unrecognized pair loop, unbacked-element add fault, type aliases, inc borrow arity, borrow-view coverage, for-in array literal, mpairs/mvalues, table length change during iteration, ref-part seq element witnesses, long nested seqs in witnesses"
+state = "done"
+
+[[slice]]
+id = "S8bq"
+title = "S8bi's remainder: huge newSeq n modelled as succeeding, set-typed values/params and builtin incl/excl, re\"(ab\" literal raise, newSeqUninit path taint, set literals with non-constant elements"
+state = "done"
+
+[[slice]]
+id = "S8bw"
+title = "S8bn's remainder: walker fault reading an array-global element, aggregate global reads (tuple/object/array globals), pointers into case objects / seqs of aggregates / tables of non-int values, generic case objects"
+state = "pending"
+
+[[slice]]
+id = "S8bp"
+title = "S8bm's remainder: isolate the post-step-1 solver steps from walk-context state, move per-thread kind probes out of the first walk's context, unbounded endsWith/contains regex query on Z3 4.13.4"
+state = "done"
+
+[[slice]]
+id = "S8bu"
+title = "S8bs's remainder: non-terminating Int-heap/BV-local UNSAT queries under unlimited queryRLimit, closure/proc-value calls and addr of a field of an address-taken local, openArray/var openArray/mitems, array index on an address-taken path, whole-address-taken by-value seq/string"
+state = "done"
+
+[[slice]]
 id = "S8br"
 title = "S8bk's remainder: index call inside a var actual's lvalue (evaluate once, read late), checks no snapshot carries (frame-condition the later call), S8bk suite compile time"
 state = "done"
@@ -8202,6 +8237,189 @@ against Nim 2.2.10, floor `>= 205`.
   starts at its default there, not at the calling thread's value, and the
   stack is Nim's thread stack (2 MiB on 64-bit).
 
+**As landed (S8bl, walker 213, provisional) — S8bc's remainder.** Pins:
+`tests/tsymex_rfc0005_s8bl_{magics,setlen,seqops,magicscan,gaps,borrow,pairloop}.nim`,
+and the S8bc suite split in three
+(`tests/tsymex_rfc0005_s8bc_remainder_{a,b,c}.nim`). Every item was probed at
+the base (22b67c7) before it was changed. Wrong verdicts and crashes, each
+pinned RED first:
+- **SOUNDNESS: a system magic with a `var` parameter was a silent no-op.**
+  `ensureProcRegistered` registered a bodiless magic with an EMPTY body, so
+  its write was dropped: `swap(a[0], a[2])`, `swap(a, b)`, a string's
+  `setLen` and `t[0].add 'x'` on a `seq[string]` were each a false `sxSat`.
+  `wasMoved(a)` and `move(a)` crashed the compile: semcheck rewrites them to
+  a call of the compiler-generated `=wasMoved` hook, whose formal list holds
+  an `nnkArgList`. `reset` declined at its `when`, and a seq's `setLen`
+  walked into the `seqs_v2` payload cast.
+- **SOUNDNESS: two iterations of one input Table were a false `sxUnsat`**
+  on the C backend (a walker fault on C++). Each `isTabKeys` enumeration
+  registers its key terms with the run; a key term of ANOTHER path's
+  enumeration is free on this one, and unconstrained it took a codepoint
+  above 255 in the model. The table extractor renders every present key
+  term, so `evalStrBytes` raised inside the walk -- and the C backend lost
+  the exception (see below). Every string key term is now a byte string in
+  every query (`containerCardConds`), true of every real key.
+- `delete(s, i)` on a seq declined at its body's `high(x)` (an honest
+  decline, now modelled: `iekSeqDel` with `delShift`, each data array
+  `lambda j. ite(j < i, a[j], a[j + 1])`, `del`'s defects). `del`,
+  `insert`, `add` on a string, `inc`/`dec` by `n` and an explicit `=copy`
+  were already exact; `tsymex_rfc0005_s8bl_seqops` pins them.
+- `for x in [a, b]` was a walker fault (`lowerLeafInExpr` met an
+  `iekArrayLit`); a borrowed `find` whose base has a default-only formal
+  (`last = -1`) crashed the compile ("node has no type"); `add` to a local
+  seq of an unbacked element filed `weInternalWalkerFault`.
+
+*(1) The system magics with a `var` parameter* are classified in one table,
+`varParamMagics` (`dsl_parser.nim`), each modelled or declined:
+- modelled: `swap` (both operands read into lets, then both written back
+  through the assignment's lvalue arms), `wasMoved` / `reset` and the
+  generated `=wasMoved` hook (the type's zero), `move` (`let tmp = x; x =
+  zero; tmp`), `setLen` on a seq and a string (`isSetLen`), the
+  `add` family on an element lvalue (`s[0].add c`, `p[].add c`), `inc` /
+  `dec`, `new` on a field, `newSeq`, `=copy` / `=sink` (`Asgn`), and
+  `+=` / `-=` spelled as calls;
+- declined, naming the routine and the magic (`varMagicDecline`): `incl` /
+  `excl` (a builtin `set`), `=destroy`, `=trace`, `shallowCopy` (not
+  declared under ORC, the default memory manager), and any
+  shape of a modelled one the model does not reach (an impure index of
+  `swap`, `unsafeNew`'s size argument);
+- every other `var`-parameter magic declines the same way in
+  `ensureProcRegistered`, and a compiler-generated hook not modelled
+  declines as one; no magic is registered with an empty body.
+`tsymex_rfc0005_s8bl_magicscan` scans the toolchain's `system.nim` and
+`system/*.nim` for `var`-parameter magics and fails on one `varParamMagics`
+does not classify.
+
+`setLen(s, n)` (`isSetLen`): a negative `n` raises `RangeDefect`, a length
+above 2^20 declines (as `newSeq`'s), and the value is:
+- a seq: length `n`, each data array `lambda i. ite(i < len, a[i], zero)`
+  (Nim zero-fills, a shrink-then-grow included; probed);
+- a string: the prefix on a shrink, and on a grow the string followed by a
+  fresh pad of `n - len` bytes in `("\0")*` (Nim pads with NUL; probed),
+  the two on separate paths (a `str.at` over an `ite` of strings ran Z3 out
+  of `seqQueryRLimit`). The suite pins the kept prefix and the NUL pad on
+  ground strings: over a symbolic one, `t[n - 1]` is a `str.at` of a
+  concat (or `substr`) neither pinned Z3 decides within `seqQueryRLimit`
+  (PRECISION: an honest `sxUnknown`, `beSolverUndef`);
+- `setLenUninit`: a shrink is exact, a grow declines (the slots are
+  uninitialised).
+
+*(2) The non-recognised pair loop.* It did terminate, slowly: every
+iteration's infeasible loop exit was walked (its loop-arm prune ran out of
+`loopPruneRLimit`), and the target hit behind it was a clean query Z3 could
+not refute within `seqQueryRLimit` (20M units, about 100 s). The pinned
+string (`symexAssume(s == "...")`) was only an equation in the pc: each
+`readCString` read went through the S8ag index-split word equations, and
+each call's result through a fresh return symbol, so no term was ground.
+Measured on Z3 5.1: a 5-pair literal 640-750 s, the B6 9-iteration shape
+past 900 s. Now:
+- an assumed `s == "lit"` binds `s` to the literal on that path (the pc
+  keeps the equation);
+- a one-character `indexof` whose haystack and start fold to literals is
+  the folded numeral, not a split;
+- a clean callee result whose leaves Z3's rewriter folds to literals is
+  bound as them in the caller (the pc keeps `retSym == result`).
+- a loop path still active at the unroll bound whose pc is itself
+  contradictory is dropped, not recorded as `beBudgetExhausted`: with the
+  scan ground its guard folds to `true`, which `loopArmInfeasible` decides
+  without the solver, so a refuted path had run to the bound and turned
+  N21's and R5's `sxUnsat` into `sxUnknown`;
+- an `if` guard that folds to a literal takes one side only
+  (`guardLiteral`). With the scan ground, most guards in a loop body fold,
+  and walking the side a literal rules out kept both sides of each: five
+  folded guards in the pair loop's body were 32 copies of one path per
+  iteration, and a target inside that body ran past 900 s (the base
+  answered `sxUnknown` in 87 s). `rfc0005_s8bl_pairloop` pins it, exact
+  in 64-72 s.
+The same loops run in under a second, and `r6_b6_optionregion` in about
+50 s (it was 361 s in this tree before item 2, and 741 s at the base, both
+under a load average near 10 on 8 cores). B6-1-red and B6-6 return to the
+real `seq[(string, string)]` accumulator. A symbolic input (`s.len <= 40`,
+three pairs) runs in 3.5 s.
+
+*(3) `add` to a seq of an unbacked element* is the placeholder decline
+`seNestedSeqUnsupported`, the result a `tUnsupportedFieldSeq` placeholder.
+
+*(4) The smaller gaps.*
+- A plain alias (`Hash = int`, `Meters = int`) classifies as its target.
+- A borrow declaring fewer formals than its base (`proc inc(m: var M)
+  {.borrow.}`) is the base with the base's literal defaults appended. Nim
+  2.2.10's code generator crashes on a CALL of such a borrow (an
+  `IndexDefect` in the compiler; `nim check` passes), so no program running
+  one compiles; the parse is pinned at IR level.
+- Borrow views reach every type query of the parser: `dsl_typebridge`'s
+  `viewTypeKind` / `viewTypeInst` / `viewTypeImpl` read a viewed node at its
+  base type, and `dsl_parser` calls them as `typeKind` / `getTypeInst` /
+  `getTypeImpl`. A formal with only a default reads its symbol's type.
+- `for x in [a, b]` binds the literal once and indexes it.
+- `mpairs` / `mvalues` bind the loop variable to the value and store `t[k] =
+  v` right after every statement of the body that writes it
+  (`mutViewWriteBack`), so a read in the body, after a `break` or past a
+  raise sees the write. A receiver other than a variable or a field path
+  declines.
+- A Table length change while iterating raises `AssertionDefect` (the
+  iterator's `assert(len(t) == L)`) when assertions are on; with them off
+  it declines, as S8bc's did.
+- A seq element with a ref part is witness-renderable: its ref positions
+  are collected through the heap cell layout (`collectTreeRefPositions`),
+  and the reader resolves them (`readSeqAs[T](RefWitness, name)`).
+- A nested seq renders up to 2^20 elements (`maxWitnessSeqLen`), the walker's
+  own length bound, in `extractTreeValue` and `renderHeapValue`.
+
+*(5) Compile time.* The S8bc suite (82 s on symex-mingw, 77 s of it
+compile) is split into three files of 37-43 `symexFind` calls each.
+
+Pins that moved, because they pinned a gap S8bl closes:
+- **`r6_b6_optionregion` B6-1-red and B6-6**: the real accumulator again,
+  and `sxSat` where they were `sxUnknown` (the base reached the same
+  `sxSat` with that accumulator, in 741 s).
+- **`rfc0005_s8d_typeheads`**: a user alias `Natural = int` and a
+  `distinct` over `RuneImpl = int32` classify as their targets, so both
+  labels are exact `sxSat` (were the alias decline).
+- **`CR2c_witnessreader_catchall`, `tot1_totality_corpus`,
+  `r6_n43_parity`**: their unrenderable seq element (a ref part) renders
+  now; each holds a ref inside a Table instead (`treeRefPartInContainer`),
+  and CR-2c's untouched variant arm keeps the ref-part element.
+- **`r6_n27_placeholder_read_audit`**: 97 runtime markers (was 91), six
+  guarded reads in `isSetLen` and the ref-position collectors.
+- **`rfc0005_s8bc_remainder_c`'s length change** raises `AssertionDefect`
+  and the label is an exact `sxSat` at `a == 0`.
+- **`r6_r6_emit_roundtrip`** covers `isSetLen` and `iekSeqDel`'s
+  `delShift`.
+- **`rfc0005_s11_surface` walkthrough 3** reads its opaque sensor before
+  the loop: behind `i == 8 and`, it was reached only on paths whose `i` is
+  a literal other than 8, so its `dcSubstituted` decided nothing and the
+  run taint is `{scIncomplete}` alone (was ⊤ from a dead arm).
+- **`phase13_layer1_wire`'s cold UNSAT** guards its target with `x > 5`
+  then `x < 3`: `x != x` folds to `false`, its target is never reached, and
+  Z3 is never called.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: an exception raised by witness extraction inside the walk is
+  lost on the C backend.** Since S1c the target solve (`solveTargetHit`) and
+  so `extractWitness` run inside the walk, nested in loop and block frames;
+  `extractLeaf`'s raise sites still carry the pre-S1c audit note ("called
+  once after walk ... has fully returned"). A `ValueError` from
+  `evalStrBytes` there vanished on the C backend: the walk went on, the
+  clean SAT was never admitted, and the verdict was a false `sxUnsat`
+  (C++: `weInternalWalkerFault`). S8bl removed the one trigger it found
+  (the unconstrained table key); the mechanism stands for any other raise
+  in extraction.
+- **A variant arm's untouched seq of an element with a ref inside a Table
+  crashes the compile** ("seq witness reader ... not yet implemented"):
+  the witness reader is emitted for every arm, and the arm's placeholder
+  does not stop it; `isRenderableWitnessTy` and the reader drift there.
+- **PRECISION: `mpairs` aliasing.** A body statement that passes the loop
+  variable AND the table itself to one call sees the table without the
+  pending write.
+- **PRECISION: a length-preserving key change while iterating a Table** (a
+  `del` and an insert in one body) is not the slot walk Nim does: the
+  remaining iterations follow the enumeration taken when the loop began.
+  Only a table of two or more entries reaches a later iteration, and that
+  path is `feTableIterOrder`-tainted, so a candidate is replay-gated.
+- **Integration: `iekSeqNewZero` (S8bc) and `iekSeqNew` (S8bi)** model the
+  same `newSeq` family; not reconciled here.
+
 ### §2.6 The raise-routing recovery — *corrected*
 
 `routeRaise` (`runtime.nim:11380-11384`) kills any tainted path
@@ -8873,6 +9091,172 @@ the walker-223 commit, keeping 223. Where slices met:
 - *B1-1 under S8bm's own context* uses 46,529 units on Z3 5.1 (ceiling
   100k) and 79,510 on 4.13.4 (ceiling 160k), with batch 4's `isTabKeys`
   facts in the translated query.
+
+**Batch 6 (2026-10-03) — one walker number for five slices.** S8bs, S8bn,
+S8bl, S8bq and S8bw (each provisional: 222, 215, 213, 220, 227) land
+stacked on batch 5, in that order: `symexWalkerVersion` 223 -> **230**, the
+CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
+`pending` (its two blocked bullets, as landed). Where slices met:
+- *Late addresses.* S8bn's `placeLateAddrs` duplicated S8bk's
+  `placeLateAddr`; S8bk's is kept, with its decline kind
+  `feEvalOrderUnmodelled`. S8bn's `lim` pin moved to that kind.
+- *Infeasible declines.* S8bn added `ifFeasible` to `mkUnsupported` so its
+  late-address and proc-field declines were dropped on a dead path. S8bc's
+  `isUnsupported` arm (batch 4) already drops every decline a path that no
+  execution takes reaches, so the flag and its `unIfFeasible` field are
+  removed; the arm's comment names S8bn's declines as relying on the rule.
+- *Element identity (S8bn item 4).* S8bn's `ptrTargets` covers a pointer
+  of unknown origin; a pointer the walk made (`addr s[i]`) is S8ax's
+  `elemAddrNode` and S8be's element cells. The origins are disjoint, so
+  each has one mechanism. Its element reads and writes convert to the
+  data array's sort (`elemTermIn`, `elemValueOf`): S8ax's int heaps are
+  Int-sorted, a by-value seq's data array is BV.
+- *Replay thread.* S8bn's `@aim:` pointer witnesses were refuted on
+  replay: S8be replays on another thread, where the threadvar holding the
+  aims is empty. `ptrAimsSnapshot` / `ptrAimsAdopt` carry it over.
+- *Discriminant tags.* S8bn folds a `bool`-typed 0/1 literal to
+  `iekBoolLit`; a static case-object tag is such a literal in the typed
+  AST, and S8bs's `va` / `van` regressed to an A3 decline. `discTagLit`
+  maps it back to an int at every tag site. S8bn's `vfh` gains a dead
+  label (`vfh_dead`, `sxUnsat`) beside S8bs's by-reference pin.
+- *Magics.* S8be's `routineMagic(sym)` and S8bl's `routineMagic(impl)`
+  are one reader, `implMagic`. S8bl's seq ops (`setLen`, the
+  unbacked-element `add`) use batch 5's `iekSeqNew` and its leaf-split
+  arrays (`seqNewZeroArrs`). S8bq's `parseBitSetInclExcl` models builtin
+  `incl` / `excl`, so S8bl's `varParamMagics` lists them `vmModelled`.
+- *S8bq on batch 5.* Its own `maxModelledInitialSize` and `parseSeqNew`
+  guard are dropped for `parseNewSeqLen`. Its `newSeqUninit` tracking runs
+  in `lowerSeqNew`: a single-leaf element registers its data array, so only
+  a read of an unwritten element taints; a tree element (one array per
+  leaf, which the tracking cannot follow) keeps S8bi's whole-path taint,
+  the fifteenth `feUnsupportedOpHavoc` site in S6b's audit. S8bq had
+  bounded S8bi's unbounded `newSeq` procs, which made them copies of batch
+  5's bounded controls; batch 5's unbounded programs and `sxUnknown` pins
+  are restored. N27: 110 marked `runtime.nim` lines.
+- *SOUNDNESS (found integrating, present on batch 5).* `isIndexAssign`,
+  `isSeqPop` and the two discriminator-reassignment arms read their
+  receiver from `Env`, where a global is only once written. `gS[1] = k` on
+  an unwritten global raised `KeyError` and dropped the path (a reachable
+  target was a false `sxUnsat`, no decline); `gS.pop()` was a walker
+  fault; `gV.kind = k` was skipped (a false `sxUnsat` on its
+  `FieldDefect`). `recvValue` reads an unbound receiver as `lower` reads
+  the name: S8as's entry value, or an in-band decline. Pinned with native
+  runs in `tsymex_rfc0005_b6_globalrecv`. S8bw found the same class on its
+  base (S8as not in it) and declined each unbound receiver; on this stack
+  `recvValue` is the one mechanism, and S8bw's `sqp` pin is a candidate.
+- *S8bw's globals on S8as.* S8bw gave a global read before any write an
+  INITIAL value whose observation declines (`globalInitValue`,
+  `glUnwritten`); S8as already gives it an ENTRY value, any of its type
+  (`entryValueOf`, `feGlobalHavoc` at every read). One store holds both
+  (`globalEntryVals`), and S8bw's observation tracking decides when the
+  path pays: a rebuild's copy (`vCopy`) or a receiver observes nothing; an
+  observing read of a part no write reached taints `feGlobalHavoc` when
+  S8as models the global's type and declines otherwise (`unwrittenKind`,
+  `unwrittenMsg`). S8as tainted the partial write's own rebuild, so
+  `g.a = v` then `g.a` is now exact (S8bw's `confirmed` pins hold); an
+  unwritten discriminator or a pointer's read of an S8as global's part is
+  modelled and tainted rather than declined. S8bw's unwritten-part pins
+  (`tf_unwritten`, `tw`, `nf_unwritten`, `ac_unwritten`, `as_unwritten`,
+  `vu`, `sc`, `pu`, and item 1's `sqw`, `sqp`, `sqd`, `sqa`, `map`, `join`,
+  `gb`) are S8as candidates: `feGlobalHavoc`, never `sxUnsat`, the replay
+  deciding a hit (`sqw` / `sqp` / `sqd` are `sxRaised`: Nim raises
+  `IndexDefect` on the empty seq the process holds, as the "nim" test
+  shows). `svAsts` covers the stack's values (S8bq's bit sets, S8bc's
+  leaf-split seqs through `seqArrs`, S8at's container table values); N27
+  counts 111.
+- *S8bw's `{.global.}` and branch-field addresses on S8be.* S8be's
+  `isRoutineGlobal` models a `{.global.}` local, so S8bw's parse-time
+  decline is dropped (S8be's `{.noinit.}` decline without an initialiser
+  stays); `lg` is a replay-confirmed hit. S8be's `elemAddrNode` arm root
+  with `mayRearm` is the branch-field mechanism, so S8bw's `checked` /
+  `rootMutatedIn` duplicate is dropped; its `var`-parameter root joins S8an's
+  alias and S8be's arm path (`addrRootSym`). `pab` / `pai` hold on it.
+- *S8bw's table cells on S8ax.* A table value through a `ptr` is S8bw's
+  64-bit cell, read and written in the data array's own sort
+  (`tabValueOf` / `tabTermIn` over `elemValueOf` / `elemTermIn`).
+  `ptrAimInto` stays S8bn's one replay aim, its `f<name>` step S8bw's
+  (`ptrAimByName`, `src/nelli/smt/ptraim.nim`).
+- *S8bl's ground fold on S8au's `rfind`.* S8bl folds a split whose term
+  Z3 rewrites to a numeral (`lowerIndexSplit`), but folded `str.indexof`
+  for every split, `rfind`'s (`last`) included: `s.rfind("")` became `0`
+  for any `s`, a false `sxUnsat` on `s.rfind("") == 2` (S8au's `re`, red
+  on the S8bl merge). The fold now takes the split's own term
+  (`seq.last_indexof` for `last`). SOUNDNESS, caught by S8au's pins. The
+  fold also leaves S8o (4)'s literal-haystack `rfind` with no split, so its
+  query is an ordinary capped one and declines on the cap (`t.len > 10`
+  under 8); S8o (4)'s `lastIndex` pin moves to a non-literal haystack
+  (`lastIdxFree`, `sxSat`; probed: `sxUnknown` without the split's mark).
+- *S8bn's typed `nil`.* `touchPtr(nil)` (a `ptr int` formal) no longer
+  declines its argument, so #163's ptr-argument pin decides the raise
+  after the summarised call (`sxRaised`, as Nim raises); the untyped
+  `pointer` `nil` still declines.
+
+**Batch 7 (2026-10-04) — one walker number for three slices.** S8bp, S8bu
+and S8br (each provisional: 219, 225, 229) land stacked on batch 6, in
+that order: `symexWalkerVersion` 230 -> **237**, the CR2 `==` pin 237, each
+slice's `>=` floor unchanged. Where slices met:
+- *One isolated, bounded solve.* S8bp's `ownContextCheck` (a fresh
+  context per `checkCapped` step) and S8bu's `solveBounded` (the
+  wall-clock bound and its `undefReason`) were two wrappers round one
+  check; `ownContextCheck` calls `solveBounded`, so every step is both.
+  S8bj's step 0 (`regexDefsFree`), which batch 5 added after S8bp's base,
+  takes `ownContextSolver` too, as does the plain query; S8bq's seq
+  `queryRLimit` note and S8bu's timeout reason join on the plain query's
+  decline. S8bu's `bvIntInverseFacts` are part of the query S8bp's
+  `mergeMemberships` rewrites.
+- *Kind probes.* S8bp moved the per-thread kind probes into a context of
+  their own (`probeContext`). Batch 6 and S8bu added more (S8bq's
+  `uninitKinds`, S8ax's `storeDeclKind` / `iteDeclKind`, batch 4's
+  `constArrayDeclKind`, S8bu's `selectDeclKind` and its `int2bv` / `eq`
+  probes); each builds in `probeContext`, so no probe's terms depend on
+  the walk's context.
+- *Calls.* S8bu's `varSeqViews` and S8br's hoisted index calls normalise
+  one call node (views first, then `hoistIndexCalls`) in `userCallStmt`
+  and `closureCallIR`; S8br's `actualLv` keeps S8bu's rule that a view is
+  no lvalue. S8bn's `varPtrSafe` and S8bu's `ccVarLocs` both ride
+  `mkClosureCall` (`locs` before `varPtrSafe`) and the closure key. S8br's
+  module-level `procValueSymKinds` (a call head that is a proc value)
+  shadowed batch 6's exported `dsl_typebridge.procValueSymKinds` (the
+  routines a proc value names) inside `dsl_parser`, where S8bn's
+  `pfProcSym` reads it; S8br's is renamed `procValueHeadKinds`.
+- *S8bp's isolation on S8bc's `ti_tuple`.* S8bp's base predates batches
+  5 and 6; their suites first ran under it here. `ti_tuple`'s label query
+  (`for (k, v) in t.pairs: s += k * v`) carries Nim's overflow checks on a
+  product of two symbolic 64-bit terms (`bvsmul_noovfl` / `noudfl`), a
+  hard bit-vector search from the query's own text: 120,971,633 units on
+  Z3 5.1 and 79,811,624 on 4.13.4 in a context of its own, against 40,490
+  in the walk's context at batch 6 (the same 57 assertions; without the
+  four overflow checks the text alone takes 632,702). The path is tainted
+  (`feTableIterOrder`), so its solve has `taintedSolveRLimit`'s 20M and
+  declines (`beSolverUndef`). The pin keeps `sxSat` and Nim's witness under
+  an explicit 300M budget and admits that decline, never `sxUnsat`, under
+  the defaults. PRECISION candidate: a product whose operand has a small
+  literal domain (a table's keys) split on it before the overflow check.
+  S8bb's `bb_rep_sym_empty_hit` (`s.replace(re"$", "-") == "q-"`) is the
+  same shape on Z3 4.13.4 alone: 18,801,883 units in its own context
+  (12,755,004 in the walk's at batch 6; 198,718 on Z3 5.1), past step 1's
+  half of `seqQueryRLimit`. Pinned the same way, under a 100M sequence
+  budget for the witness.
+- *One size bound.* `maxModelledInitialSize` moved to `types`;
+  `runtime.maxWitnessSeqLen`, defined by S8bl as that bound, is it rather
+  than a second `1 shl 20`.
+- *SOUNDNESS (found integrating, present at S8bu's tip).* A `var
+  openArray` view of an array or a slice is copied into a temporary where
+  the argument stands, but Nim passes the storage's address, so the callee
+  sees a later argument's call's writes, and the walk's write-back
+  overwrote them with the stale copy: `fill(gArr, bump())` with `bump`
+  writing `gArr[0]` was a false `sxUnsat` (and a refuted `sxSat` on its
+  dead twin), direct, through a slice and through a proc value. The view
+  now declines (`feEvalOrderUnmodelled`) unless S8br's frame condition
+  shows no later argument may write its storage (`laterLeavesLvalue`).
+  Moving the copy-in to the call, as S8bk's `placeLateAddr` does for an
+  lvalue, is the precision candidate. Pinned with native runs in
+  `tsymex_rfc0005_b7_integration`, beside a module-level seq indexed by a
+  call (S8br's hoist with batch 6's entry values and S8bl's guard fold; a
+  false `sxUnsat` at S8bu's tip, fixed by S8br) and S8br's slow `addr` cell
+  at a non-literal index, which on this stack terminates (an exact
+  `sxUnsat` in well under a second on Z3 5.1); its pin allows a bounded
+  decline, never `sxSat`. S8cc owns its cost.
 
 ## §8 — Consumer surface and migration
 
@@ -11818,6 +12202,813 @@ s8bj suite takes under 60 s (the slowest is `s8bj_entries_multiline` at
   the length relation only for a numeral `len(by)`, and the image only for
   one-set patterns. Other unbounded replace queries can still surface as
   `beSolverUndef`.
+
+
+**As landed (S8bs, walker 222 provisional) — an address cell reached
+through a global `ptr` across a frame.** Base 8165899 (batch 4, walker
+217). Suites `tsymex_rfc0005_s8bs_addrglobal` (exhibit and family),
+`_byref` (paths by name, heap lvalues by reference, inheritance
+conversions), `_iterparams` (other by-address parameters, inlined
+iterators) and `_byvalue` (by-value parameters), sharing their SUTs
+through `tests/s8bs_suts.nim`: 98 verdict queries, each SUT with a live
+and a dead target and a native run confirming which one Nim hits. One
+file compiled in ~160 s; the four each compile in the CPU time of a
+typical slice suite (~56-59 s user, against `s8i_models`' 54 s).
+
+*Root cause (verified).* Two defects, not one. (1) An object local's
+address cell was stored and read in the whole-pointee heap
+(`<T>__@.f`), while every `p[].f` dereference uses the field heaps
+(`<T>__f`): a write through any pointer to the object, in its own frame
+too, never reached the variable. `gphb = addr h; gphb[].bg.x = k; h.bg.x`
+was swapped in one frame at the base. The cell now lives in the field
+heaps (`objectCellValue` / `objectCellStore`). (2) A `var` actual that is
+a path into an address-taken local was copied in and written back, so
+the stale copy landed over the callee's write through the alias (the
+S8bg exhibit: "ac" `sxUnsat`, "ac_dead" `sxSat`). The parser now records
+where each copied argument came from (`IRStmt.cVarLocs`, canonicalized);
+when the root has an address cell the walker binds the formal to the
+cell along that path (a bound `AddrCellEntry`, kept equal per statement
+by `syncAddrCells`, which reads the frames' cells through
+`addrEntryValue`), and an element of a seq with element cells to the
+`ite` over the cells its index may select (S8be's mechanism).
+
+- *The family* (each pinned live/dead with a native check): the write
+  through the alias before or after `v = k`, the actual by name and by
+  path, a scalar cell, a read-only callee, two levels deep, a separate
+  `ptr` parameter, the alias held in a global ref, a heap field or a
+  closure capture, an element address `addr s[i]`, a variant arm field,
+  nested `o.inner.x`. A closure call reaching a capture whose address is
+  taken declines (`closureDegrade`, S7's count 19 -> 20), as does a
+  proc-value call into one (S8bh's decline).
+- *Item A: heap lvalues by reference.* `pb[].x`, `pb[].inner.x`, `r[].x`
+  of a ref go by reference (S8ba's `byRefSub`) whatever else reaches
+  the cell; a pointer to it passed by value beside it no longer blocks
+  that. A variant arm on the way is checked where the caller takes the
+  address. S8ac's `setAl(h.n, h, v)` and S8an's `mixP(addr x, x)`,
+  pinned as declines, are now decided (repinned with native checks).
+- *Item B: inheritance conversions.* On S8bh's shared hierarchy sort the
+  up- and down-conversions of a by-reference actual are well-sorted with
+  no change to `byRefSub`; the downcast keeps its
+  `ObjectConversionDefect` (pinned natively in both directions, and a
+  bad downcast caught). Nothing here touches the conversion at the head
+  of the chain that S8bg's `convReprPreserving` / `reprBase` /
+  `lvalueCastBlocks` strip.
+- *Item 4: the audit beyond `var`.* A by-value argument Nim passes by
+  address (an inheritable object, one larger than three words, an
+  array: `VarLoc` mode `ptr`) is bound to the cell like a `var` formal;
+  one whose seq or string memory the copy shares (`copy`) shares the
+  caller's element cells, and declines when the whole is address-taken.
+  `sink` is the by-value case. An inlined iterator bound every formal
+  with a `let`: a `var` formal's writes were lost (`for x in itx(v, k)`
+  left `v` unchanged) and a by-value formal missed writes through other
+  names. Formals are now bound as Nim's `transformFor` binds them: a
+  `var` formal is the actual, re-read at each use; a by-value formal
+  whose actual is a location is that location, an element's index read
+  and checked once at loop entry (`bindIterArg`); an expression is still
+  a copy. `var openArray`, `openArray` and `mitems` decline (pinned).
+
+*Soundness bugs found:* the object address cell's heap (1), the copy-in/
+copy-out over an alias (2), by-pointer and payload-sharing by-value
+arguments, and inlined iterators' `var` and by-value formals: each
+swapped verdicts against native Nim.
+
+*Suites* (`ok/failed`, c, identical on Z3 5.1 and 4.13.4): the four S8bs
+suites 14/0, 7/0, 4/0, 3/0 (cpp 5.1 the same); `phase15_CR2_cachekey`
+6/0, `s7_closure` 37/0, `s8ab_letaudit` 28/0, `s8ac_remainder` 19/0,
+`s8an_remainder` 25/0, `s8as_remainder` 33/0, `s8ax_remainder` 53/0,
+`s8ba_remainder` 32/0, `s8bc_remainder` 74/0, `s8bd_remainder` 23/0,
+`s8be_remainder` 34/0, `s8bf_alias` 13/0, `s8bh_remainder` 35/0,
+`s8i_models` 39/0, `s8x_vm_alias` 7/0, `h_stepC_heapidentity` 10/0,
+`phase15_H1_path_heap_fields` 2/0, `phase15_g4_distinct_sort` 4/0,
+`phase15_g5_distinct_borrow` 3/0; with every `tsymex_rfc0005_*` suite
+naming `addr`/`ptr` and every suite defining an iterator, 41 suites
+green on both versions, and 18 more using stdlib iterators green on 5.1.
+The skip list is empty, so there is no skipped-suite diff.
+
+*Windows:* at 1b51ee4 all three legs green: fuzzer-mingw 37119258202,
+fuzzer-msvc 37119258201, symex-mingw 37119258226.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION (termination): an `int` read from an Int-sorted heap and
+  linked by `bv2int` to a bit-vector return or local** (`r = rdBigH(...)`
+  reading an `int` field through a cell; a `seq[int]` element cell read
+  in a callee) gives Z3 an unsatisfiable query it does not decide; with
+  the default unlimited `queryRLimit` the run does not terminate. Present
+  at the base (the `seq[int]` form hangs there). The suites use `bool`
+  fields and elements for those SUTs.
+- **PRECISION: a closure or proc-value call into a variable whose
+  address is taken declines** (`bindVarLocs` is the direct call's).
+- **PRECISION: `addr b.x` of an address-taken `b` declines** (the cell
+  for the call would be a second copy of a location the callee reaches
+  through the pointer).
+- **PRECISION: `openArray` and `var openArray` parameters are not
+  modelled; `mitems` expands to an unsupported pragma statement.**
+- **PRECISION: an array index on a path into an address-taken local is
+  `?`** and declines.
+- **PRECISION: a by-value seq or string whose whole address is taken
+  declines** (an element write through the pointer is seen through the
+  copy, an assignment of the whole is not).
+
+**As landed (S8bn, walker 215 provisional) — S8bh's remainder.** Suite
+`tsymex_rfc0005_s8bn_remainder` (36 tests; c on both Z3 versions,
+cpp 5.1). The base is a28c9c3 (S8bh). Neither S8ax nor S8bk is in the
+base: item 4 builds S8ax's element-alias identity on S8bh's `ptrsel`
+model, and S8bk's late-address rule is ported (item 6b), not
+cherry-picked.
+
+- *Items 1-2: a `ptr` alias witness replays.* The typed witness now
+  builds the parameters in rank order (no pointer, a pointer inside, a
+  top-level pointer) and the tuple in parameter order, so a pointer
+  whose target object's parameter follows it is resolved after the
+  object (`s(pi: ptr int; q: Q)`). A pointer whose input target is a
+  global or a SUT `var` parameter is aimed at it by name
+  (`aliasRef = "@aim:<name>"`); the replay's splat hands it that
+  variable's address once the arguments are bound (`ptrAimsAt`). A
+  `ptr string` target merges as one string `ite` (`ptrIteSV`). Every
+  alias witness, both parameter orders, int and string, global and `var`
+  parameter, replays `roConfirmed` (pinned).
+- *Item 3: a `var` formal whose actual no pointer can address.* The
+  parser records, per `var` / `addr` actual, whether its location is a
+  local whose address the routine never takes, or a `var` parameter
+  passed on whole (`cVarPtrSafe` / `ccVarPtrSafe`); only the other
+  formals are a pointer's possible targets while the callee runs
+  (`CallFrame.ptrRiskFormals`). A pointer that may address one still
+  declines (pinned).
+- *Item 4: a pointer into an aggregate.* A field or element of a
+  by-value aggregate `var` parameter or global (tuple, object, array,
+  seq, `Table[string, int]`), and an element of a seq or a value of a
+  table held in a heap field family, is a candidate target, named by
+  S8ax's identity (root, path, snapshot index): a constant path below the
+  variable, and for a seq element the pointer's own index
+  (`<T>__@ptridx[P]`, an input array) within the seq's input length, for
+  a table value the pointer's own key (`<T>__@ptrkey[P]`) present in the
+  input table. A container the path resized declines ("may dangle": a
+  resize may move the elements), also when its length or key set came
+  back to the input's (`add` then `pop`, a deletion: `lenUntouched`,
+  `tabNoDeletion` read the term's stores). A set's members have no
+  address in Nim (no `var` accessor), so a set holds no target and no
+  longer declines. The snapshot aims such a pointer at
+  `@aim:<name>/<step>/...` (a key as `k<hex>`) or
+  `&<cell>.<field>.<index|key>`, and the replay resolves the steps
+  (`ptrAimInto`); witnesses replay `roConfirmed`. A case object, a seq of
+  aggregates and a table of another value type keep the decline.
+- *Item 5: an always-raising void closure is a raise.* The closure
+  body's divergence degrade (`ceClosureBodyDiverged`) applies only when
+  no raise escapes it.
+- *Item 6: proc fields, methods, unknown targets.* A call through a proc
+  field of a by-value object is a call through the proc value the field
+  holds (S8bh's path). A heap object's proc field is held as a shadow
+  code (`@pf_<f>`): every assignment and constructor stores the code of
+  the proc it names, among the procs the entry's routines assign to the
+  field (`procFieldAssigns`, scanned before the parse), `new` stores 0
+  (nil), any other value -1; the call dispatches over the candidates, and
+  any other code takes the unknown-target path, declined only on a path
+  an execution takes (`unIfFeasible`). A method call dispatches over the
+  overrides visible at the entry, deepest first on the run-type tag; an
+  entry macro whose SUT calls a method first emits, into the caller's
+  scope, `symexRegisterMethods(<name>, <name>)` (the overloads resolve
+  there) and expands again. An unknown target also havocs every global.
+  The S8bh pins `pfld_dead` and `m_dead` move from a decline to
+  `sxUnsat`.
+- *Item 6b: S8bk's late address on S8bh's indirect-call path.* A `var` /
+  `addr` actual of a call through a proc value is addressed at the
+  call, after every later argument, and copied out through that address;
+  index and length checks stay where Nim makes them; a later argument
+  that changes what a check read declines (`feUnsupportedOp` here,
+  `feEvalOrderUnmodelled` on S8bk's base), reached only on a feasible
+  path. Its own commit, for the batch integration to drop or merge.
+- *Item 7: `of` and `nil`.* `x of T` over a hierarchy ref is a test of
+  the run-type tag (false for nil, the levels below the static type
+  compared with `T`'s chain); Nim's folded `of` (a bool-typed int
+  literal) parses as a bool. `nil` parses in every typed position whose
+  type is a ref or ptr.
+- *Item 8: generic, `{.inheritable.}`, `of RootRef` and case-object
+  hierarchies* join S8bh's address space (one case level in the chain;
+  its plain fields owned as any level's). A generic object type was not
+  classified at all (`G[int]` was `feUnsupportedParamType`): an instance
+  is now classified with its arguments substituted into the body
+  (`classifyGenericInstance`, `genericFrames`), keyed on the instance and
+  named in a witness by its head symbol applied to the arguments; a
+  generic parent (`of GBase[T]`) joins the chain as a plain parent does,
+  and a recursive field (`next: GNode[T]`) takes the named placeholder.
+  A field the classified type does not list now declines where it
+  failed the build.
+- *Item 9: a parameter's run-type tags* are its static type's chain at
+  the depths down to that type; the depths below stay free.
+
+*Repins.* S8bh's `pfld_dead` / `m_dead` (now `sxUnsat`), `psg` (a
+resized seq global declines "may dangle") and `pvf` (clean `sxSat`);
+S8ab's macro count (22 to 24, the two method-registry macros); S8ao /
+S8ap's unrecognised-generic example (now a generic case object); S8d's
+user generic `Option` (now `sxSat`); S2's unexecutable `ptr` witness (a
+`ptr string` now runs, so the example is `ptr seq[int]`); the CR2 walker
+pin. The routine-kind gates the item-6 scans add route through
+`isUserRoutine` / `procValueSymKinds` (the N2 kindgate audit).
+
+*Sweep.* 101 suites (the S8 remainders, the closure, ptr, witness,
+hierarchy and 163-audit families, and every source-reading audit),
+1448 tests, 0 failed on Z3 5.1 and on 4.13.4 (c); the S8bn suite on cpp
+(5.1) 36/36. Windows at 2f16ac9: symex-mingw 37120957833, fuzzer-mingw
+37120957825, fuzzer-msvc 37120957845, all green.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a pointer into a case object, a seq of aggregates or a
+  table of a non-`int` value** keeps the decline (no element identity in
+  this model), as does a generic case object.
+- **PRECISION: an aggregate global read** (`var g: tuple[...]`, an
+  array global) is `feGlobalReadUnmodelled` / a walker fault on this
+  base, before any pointer is involved; item 4's global path is pinned
+  through `var` parameters.
+
+**As landed (S8bq, walker 220 provisional) — S8bi's remainder.** All five
+items are done, and nothing is deferred. The branch is `rfc-0005-s8bq`, on
+S8bi's `e5df207`. The items are the soundness item and the four precision
+items that S8bi listed under "Different mechanisms, reported and not fixed
+here".
+
+*Wrong or degraded verdicts at e5df207, each pinned RED first*
+(`tests/tsymex_rfc0005_s8bq_remainder.nim`; at base the suite was run with
+the fixtures that stop it compiling removed, as noted).
+- **A length above 2^20 was an allocation that succeeds** (item 1,
+  SOUNDNESS). `newSeq[int](n)` with `n > 2_000_000 and xs.len == n`
+  reached the target as a clean `sxSat`, in five forms: `newSeq` (symbolic
+  and literal length), the statement `newSeq(s, n)`, `newSeqOfCap` and
+  `newSeqUninit`. A real run raises `OutOfMemDefect`, or not, depending on
+  the host.
+- **`re"(ab"` outside a regex call** (item 3). `let r = re"(ab"` was
+  `feUnsupportedExprKind` (`nnkCallStrLit`), and the call forms
+  (`re("(ab")`, `re(p)`, `rex"..."`) aborted the compile ("node has no
+  type", `dsl_typebridge.nim:838`). The RED was taken from a probe,
+  because the crash stops the suite compiling at base.
+- **Builtin `set[T]` values** (item 2). Every set-typed parameter, local,
+  field, result and array element was unclassified: 20 pins (members,
+  `incl`, `excl`, `+ - *`, `<= <`, `card`/`len`, enum / bool / `int8` /
+  `uint8` sets, range checks, merges, a call result, an array element) were
+  `sxUnknown`. An object parameter with a `set[char]` field did not compile
+  its witness at base, so that pin was removed from the base run.
+- **Set literals with non-constant elements** (item 5). All six pins
+  declined (`feUnsupportedExprKind`).
+- **`newSeqUninit` tainted the whole path** (item 4). A program reading no
+  element, or only written ones, was tainted (`feUnsupportedOpHavoc` at
+  the call). Seven pins were RED. Six of them were tainted where they
+  should be clean. The seventh, an unwritten read, was already
+  `sxUnknown`, but carried the whole-path message.
+
+*1. A length above 2^20 (`dsl_parser.parseSeqNew`).* The three
+constructors and the statement form put a guard in the preamble after the
+length is evaluated: `if n > maxModelledInitialSize:` a scoped Class-A
+decline (`feUnsupportedOp`), with S8bc's message and reason text and its
+constant (`maxModelledInitialSize = 1 shl 20`, the same name and value). A
+literal length within the bound needs no guard. The negative-length
+`RangeDefect` is unchanged and comes first. The `isUnsupported` walk arm
+now drops a path that reaches a decline but that no execution can take
+(`pathInfeasible`). This is S8bc's item 5 rule, ported verbatim: without
+it the guard was reached on every path, because `if` arms are forked
+without a feasibility check, and every bounded-length dead label became
+`sxUnknown` (S8bi's newSeq pins went RED on this). The S0 exhibit's pin 2
+takes S8bc's repin: its decline sits on an infeasible branch, so the run
+drains no `sevError`.
+
+*3. Regex constructor calls (`dsl_parser.parseRegexCtor`).* `re`/`rex` in
+both the call and the call-string-literal form, typed `Regex`, outside a
+regex call, are constructor calls:
+- a pattern PCRE rejects raises `RegexError`, so nothing after it runs;
+- an accepted pattern is a fresh non-nil `Regex`;
+- an undecided pattern, or one that is not a literal, declines
+  (`seUnsupportedRegex`), scoped.
+A `let r = re"lit"` is recorded (`regexLetLiterals`), so a regex call
+through `r` reads the literal as if it were written in place.
+
+*2. Builtin `set[T]` (`itBitSet`, `iekBitSet`, `svBitSet`).* A set is one
+Z3 bit-vector with a bit per value of `T`'s domain (`bitSetDomain`: `bool`,
+a ranged int or enum, or an 8- or 16-bit integer; at most `2^16` bits).
+Bit `i` is the value `lo + i`.
+- Exact: membership, `incl`, `excl`, `+`, `-`, `*`, `<=`, `<`, `==` (and
+  `>=`, `>`, `!=`), `card`/`len`, constant and non-constant literals.
+- Nim's checks are kept: `x in s` on a set value, `incl` and `excl`
+  range-check the element (`RangeDefect`); membership in a literal does
+  not check the key; `{lo..hi}` with `hi < lo` is empty.
+- `incl`/`excl` on a variable, a field or an array element with a stable
+  index store back through the lvalue; any other location declines
+  (`feUnsupportedOp`).
+- Sets are classified everywhere a type is: parameters (a fresh
+  bit-vector), fields, results, merges, call-result binding, the zero
+  value and the witness (`readBitSetAs`, read off the model in 64-bit
+  chunks).
+- The IR kind is wired through every IR-kind site, the emit round-trip
+  gate included (two fixtures and a type round-trip in
+  `tsymex_r6_r6_emit_roundtrip`).
+- A query that mentions a `card` term runs under `seqQueryRLimit` (20M by
+  default). `queryRLimit` is unbounded by default, and a 256-bit
+  pigeonhole card query ran for more than 280 s; bounded, it is
+  `sxUnknown` in about 20 s.
+- **For the integrator:** this supersedes S8bl's `Incl`/`Excl`
+  `vmDeclined` entries ("a built-in `set[T]` is not a modelled type"). On
+  a builtin set, `incl`/`excl` are intercepted before the var-param magic
+  table.
+
+*5. Non-constant set literals (`parseSetLitMember`, `nnkCurly`).* In
+membership, the key is read first, then every element or range bound is
+evaluated in order through `parseAtomicOperand` and converted
+(range-checked) to the base type, with no short circuit after a match. The
+membership is the disjunction of the element equalities and range tests.
+As a value, the literal is the bit-vector with each element's bit set (a
+range sets bits `lo..hi`, so an empty range adds nothing). It works in a
+`while` guard too.
+
+*4. `newSeqUninit`'s unwritten elements (`runtime.nim`).* The call no
+longer taints. Its data array is registered as a `newSeqUninit` base.
+- **Reads.** A read (`isIndex`, `isSeqPop`) of element `k` asks whether
+  `k` is unwritten (`uninitAt`). The answer is read off the data term: the
+  base itself, a `store` (the slot written, or a value moved verbatim from
+  an unwritten slot, as `del`'s swap does), or an `ite` (a merge). Any
+  other term that mentions a base counts as unwritten, conservatively (a
+  slice's lambda, a heap cell, a mapped array).
+- **Forking a read.** The read forks in two. Where the element was
+  written, the path is clean and exact. Where it was not, the path is
+  tainted `feUnsupportedOpHavoc` (`uninitReadKind`, a fresh value per
+  evaluation, `dcFreshSymbol`). The facts ride in `defectSurvivorPc`, as
+  `drainConvFloatToIntFresh`'s do. A read that is unwritten everywhere does
+  not fork a written half.
+- **Bounds checks.** An element assignment's bounds check (the discarded
+  `isIndex` S8am emits before the value, now named with
+  `boundsCheckSynthWord`) reads nothing. `s[i] += v` does read.
+- **Call results.** A seq returned by a call is bound with an alias
+  (`noteUninitReturn`): `retSym`'s data is unwritten at `k` where the
+  returned data is, under the return path's branch conditions. A seq
+  nested in a composite result declines (`feUnsupportedOpHavoc`, the
+  result left free). A closure's result holding one is treated as
+  uncertain.
+- **Inline `map`/`filter`/`fold`.** A read that may be unwritten taints
+  the path in-band.
+
+*Verification.* 145 suites were run on the head, c backend, 900 s bound
+each, at most three at a time:
+- the 142 files that `command grep -l 'set\[\|incl\|excl\|newSeq\|re"'
+  tests/tsymex_*.nim` lists (they include `s8bq`, `s8bi`, `s6b_ops`,
+  `emit_roundtrip`, `CR2`, `letaudit` and both `n27` files);
+- every `tsymex_rfc0005_s8bb_*` file.
+
+| Z3 | Suites | Checks |
+|---|---|---|
+| 5.1 | 145 / 145 | 2,087 / 2,087 |
+| 4.13.4 | 145 / 145 | 2,087 / 2,087 |
+
+- Two suites failed on the first Z3 5.1 pass and are repinned (below):
+  `tsymex_r6_n27_placeholder_read_audit` and `tsymex_rfc0005_s0_exhibit`.
+  Both were rerun green on 5.1. The 4.13.4 pass ran with the repins.
+- Nothing hung.
+- `tsymex_rfc0005_s8bq_remainder` was also run on cpp (Z3 5.1): 62 / 62.
+- The first symex-mingw run on the final head (37120766220) failed
+  `tsymex_phase1_dsl`, which is outside the grep list: an untyped
+  `x + y * 2` (the parser's isolation entry point) reached the set-operator
+  intercept, and `classifyType` aborted the compile ("node has no type").
+  The infix and `contains` intercepts now require a typed (symbol) operator.
+  `tsymex_phase1_dsl` (18 / 18) and the S8bq suite (62 / 62) were rerun on
+  both Z3 versions.
+
+Its run times, without compilation, on a shared host:
+
+| Backend | Real | User |
+|---|---|---|
+| c | 3.9 s | 3.7 s |
+| cpp | 11.9 s | 5.4 s |
+
+The compile-and-run wall times were 140 s (c) and 176 s (cpp).
+
+*Re-pinned elsewhere.*
+- **`tsymex_phase15_CR2_cachekey`:** `== "220"`.
+- **`tsymex_rfc0005_s8bi_remainder`:**
+  - `nsUninit` reads no element, so it is a clean `sxSat`;
+  - a set-typed value is modelled (`sxSat`, no errors);
+  - six `newSeq` fixtures bound `n` to at most 2^20, because a larger
+    length now declines on its own path;
+  - `nsLen` checks for no `sevError`, since the guard's never-reached
+    decline remains as a hint.
+- **`tsymex_rfc0005_s6b_ops`:** the `feUnsupportedOpHavoc` site count stays
+  14. S8bi's `newSeqUninit` site moved to the one `uninitReadKind`
+  constant that every unwritten read records.
+- **`tsymex_r6_n27_placeholder_read_audit`:** 94 runtime markers (85 + 9).
+  The nine new lines read `seqDataRaw` only to ask whether its term
+  mentions a base. A placeholder's inert array mentions none.
+- **`tsymex_rfc0005_s0_exhibit`:** pin 2's drained `sevError` set is empty
+  (S8bc's repin).
+- **`tsymex_r6_r6_emit_roundtrip`:** `itBitSet` and `iekBitSet` in the
+  gates.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: iterating a builtin set (`for x in s`) declines,**
+  classified.
+- **PRECISION: a set conversion between two different domains** (a
+  hidden conversion such as `set[range[0..3]]` to `set[int8]`) declines
+  (`feUnsupportedExprKind`).
+- **PRECISION: a `card` query can be `sxUnknown`.** A pigeonhole-hard one
+  (comparing the cardinalities of two large symbolic sets) does not finish
+  within `seqQueryRLimit`.
+- **PRECISION: some `newSeqUninit` reads taint more than the elements
+  they read:**
+  - inline `map`/`filter`/`fold` over a seq with a possibly unwritten
+    element taint the whole path;
+  - a seq nested in a composite call result declines its binding;
+  - a slice, a heap cell or a mapped array that mentions a base counts as
+    unwritten everywhere.
+
+**As landed (S8bw, walker 227 provisional) — S8bn's remainder.** Suite
+`tsymex_rfc0005_s8bw_remainder` (22 tests; c on both Z3 versions,
+cpp 5.1). The base is 22361d7 (S8bn, on a28c9c3). Neither batch 2
+(S8ar, S8at), batch 4 (S8bc, S8be) nor S8ax is in the base; item 3's
+seq-of-aggregates and non-integer table-value bullets name their
+substrate, and stay open (below).
+
+- *Item 1 (SOUNDNESS, crash class): a global's receiver never faults
+  the walker.* A module-level global read before any write lowered to an
+  `int` stand-in whatever its type, and the receiver checks it reached
+  were `doAssert`s or direct env lookups: `gArr[2] = k` then `gArr[2]`
+  (`iekIndex`), `gSeq.map(f)` (`lowerHofCall`), `gStrs.join(",")`
+  (`iekStrJoin`), `if gB` (`binBV`) were `weInternalWalkerFault`;
+  `gSeq.pop()` a `KeyError`; `gSeq[0] = k` leaked its lowering taint to
+  the walk end. A discriminator reassignment of an unbound object was
+  dropped with no decline (a clean false `sxSat` where Nim raises from
+  the zero value's branch). A local declared with a pragma
+  (`var a {.global.}`) failed the build. The emitter now gives each
+  global read its declared type (`iekVar.vGlobalTy`); the audit of every
+  receiver-kind assert a global, a capture or a heap read can reach:
+  `iekIndex`, `lowerHofCall` (receiver and closure) and `iekStrJoin`
+  decline in-band (`degradeAlloc`); `isIndexAssign` and `isSeqPop`
+  decline an unbound receiver; both reassignment arms decline an unbound
+  object, and a multi-variant (`doAssert`) goes to
+  `degradeUnmodelledReassign`; `lowerLeafInExpr` drains its taint onto
+  the path it returns. `joinStrSeq`, `seqElemAt`, `applyClosureGround`,
+  the three table key asserts and `svTupleEq` keep their asserts (every
+  caller checks the kind first); `binBV` / `cmpBV` / `eqBV`, and the
+  walker-fault-kinded `iekSeqAdd` / `iekSeqDel` / `uNot` declines, were
+  reached only through the untyped stand-in, now typed. A
+  pragma-declared local declines (`feUnsupportedStmtKind`).
+- *Item 2: tuple, object and array globals.* A global's read before any
+  write gives its INITIAL value: one constant per leaf of its declared
+  type, the same for every read of the run (`globalInitValue`), each an
+  UNWRITTEN leaf (`glUnwritten`). A partial write (`g.a = v`,
+  `g[i] = v`) rebuilds `g` from copies of its other parts
+  (`iekVar.vCopy`), which observe nothing; every other read -- the
+  outermost access of a chain over a global, an element read, a
+  pointer's dereference, a discriminator's reassignment, a `var` / `addr`
+  actual's copy-in -- declines (`feGlobalReadUnmodelled`, as a scalar
+  global's does) when its value mentions an unwritten leaf. A symbolic
+  element read declines only when the solver cannot show the index
+  misses every unwritten element (`unwrittenIndependent`); the index
+  check of a partial write reads nothing (`isIndex.ixCheckOnly`). Field
+  and element reads and writes, writes through a `var` parameter, through
+  `addr` and in a callee replay `roConfirmed`; S8bn item 4's pointer
+  targets are re-pinned on globals directly.
+- *Item 3: pointers into case objects.* A case object (a global, a `var`
+  parameter, `svVariant` / `svMultiVariant`) holds its plain fields and
+  each branch's fields as pointer targets (`ptrVarLeaves`; a branch field
+  is the step `ptrArmStep`, every tag's copy written at once); a heap
+  case object's `else` branch field (`<O>__@-1__<f>`) is a target too.
+  A branch field is a target only while its branch is active
+  (`svPathArmCond`, `ptrHeapArmCond` over the discriminator heap): a
+  dereference whose `sel` may name one whose branch is inactive declines
+  that sub-path (`feUnsupportedOp`, `ptrInactive`) and continues on the
+  rest. The replay aims such a pointer by the field's name
+  (`f<name>` steps, `ptrAimByName`, field checks off: the branch may
+  become active only when the SUT runs). `let q = addr v.b` of a branch
+  field over a variable or a `var` parameter is S8an's alias, after a
+  check read that raises `FieldDefect` out of the branch, while nothing
+  in its scope assigns the object or takes its address
+  (`rootMutatedIn`); it was `heUnsafeCast`.
+  **Deviation from the slice's wording, by probe:** Nim 2.2.10 raises no
+  `FieldDefect` at a pointer's dereference -- a `ptr` into an inactive
+  branch reads the active branch's bytes (probe: 2 printed). `FieldDefect`
+  is raised where Nim raises it, at the `addr`; the dereference declines.
+- *Item 3: generic case objects* are classified per instance as a
+  non-generic case object is (`classifyGenericInstance` calls
+  `classifyObjectRecordFields` in the instance's frame), keyed and named
+  as S8bn's generic objects; a plain parent's fields join the plain ones,
+  and a generic object below a generic case object is a variant. A ref
+  witness names the instance (`refWitnessTypeNode`).
+- *Item 3: table values.* A `ptr` target in a `Table[string, V]` is any
+  value type the base's table holds (`isContainerIntLeaf`: every integer
+  width, `char`, an enum, `bool`), read and written through its 64-bit
+  cell (`cellValue` / `cellOf`); was `int64` only.
+
+*Repins.* The CR2 walker pin; N27's marker inventory (84 to 86:
+`svAsts`'s two seq lines collect terms, lowering nothing); S8ao / S8ap's
+unrecognised-generic example (a generic case object is classified now, so
+the example is one below another, a case part at two levels). The S8bn
+section's "different mechanisms" (aggregate global reads, case-object
+pointers, generic case objects) are closed here except as listed below.
+
+*Sweep.* 119 suites (the suite, S8bn, S8bh, S8bf, S8bd, S7 closure, S8i,
+H step C, CR2, every `command grep -l '^var g\|case kind\|of RootObj'`
+hit, every S8 remainder and every source-reading audit; S8be and S8ax
+have no suite on this base), 1997 tests, 0 failed on Z3 5.1 and on
+4.13.4 (c); the first nine on cpp (5.1) 218/218. The suite runs in about
+1 s per backend and Z3 version (its build excluded).
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION (blocked on substrate): a pointer into a seq of
+  aggregates.** The slice says to reuse S8be's per-element cells; S8be
+  (and S8bc's tree-seq backing, `isTreeSeqElemTy`) landed in batch 4,
+  which is not in this base: here a seq of tuples or objects is an
+  unbacked length-0 placeholder (`isBackedSeqElemTy`, types.nim), so it
+  has no element to address. Reported as a BLOCKER for that bullet.
+- **PRECISION (blocked on substrate): a pointer into a table of
+  `string`, `float` or aggregate values.** This base backs only
+  integer-leaf table values (`isBackedTableTy`); `string` / `float`
+  values are S8ar's and container values S8at's (batch 2, not in this
+  base), and an aggregate value is a scoped decline even there
+  (`isTableValTy`). Reported as a BLOCKER for that bullet.
+- **PRECISION: a partial write into an unwritten part.** A symbolic
+  index write into an array-of-aggregates global element with unwritten
+  parts, a partial write of a variant global, and a `var` / `addr`
+  actual whose part is unwritten decline (the scalar global's rule).
+- **PRECISION: `addr` of an array element in a `let`** (`addr gArr[1]`)
+  stays `heUnsafeCast` (S8an's alias takes no index).
+- **PRECISION: a dereference that may reach an inactive branch
+  declines** that sub-path (Nim reads the active branch's bytes there).
+- **PRECISION: `{.global.}` / `{.noinit.}` locals decline** (S8be
+  models `{.global.}` on its own base; the integration supersedes this
+  decline).
+
+**As landed (S8bp, walker 219) — every search in a context of its own.**
+Suite `tsymex_rfc0005_s8bp_isolation` (8 tests; c on both Z3 versions,
+cpp 5.1). Built on S8bm (14d7e81, based on 621af8f).
+
+- *The theory-free steps were not small.* S8bm left the facts-first
+  check, (1b) and (1c) in the walk's context as "theory-free and small",
+  and (2), (3) and the no-string query (`plain`) because they run less
+  often. All of them moved with the walk's context. With thirty Int
+  constants that no query mentions made before each query
+  (`symexPerturbConsts`, S8bm's probe), a walk whose query holds a
+  factoring search (`x * y == 1022117` beside its strings) cost:
+
+  | Step (query) | Z3 5.1 as is / perturbed | Z3 4.13.4 as is / perturbed |
+  |---|---|---|
+  | facts-first (`preSufNl`) | 369,908 / 327,761 | 242,158 / 202,281 |
+  | (1b) (`preSufNl`) | 191,428 / 43,221 | 397,981 / 221,844 |
+  | (1c) (`preSufNl`) | 114,891 / 350,726 | 398,245 / 202,116 |
+  | (1c) capped (`preSufNl`) | 412,527 / 199,445 | 398,240 / 202,103 |
+  | (2) (`preSufNl`) | 401,123 / 231,590 | 238,219 / 327,223 |
+  | (3) (`lastNl`, cap 8) | 85,882 / 322,405 | 207,893 / 464,636 |
+  | `plain` (`plainNl`) | 124,550 / 92,799 | 74,780 / 94,956 |
+  | step 1 (S8bm) | 372,262 / 372,262 | 250,672 / 250,672 |
+
+  A theory-free step holds the query's arithmetic, so it is as large as
+  that search. `x * x * x == 1030301 * s.len` under a cap of 8 took
+  4,712,338 units in (1b) as is, and ran out of 20M perturbed (4.13.4):
+  a verdict, not only a cost.
+- *Every step in a context of its own.* `ownContextSolver` now builds
+  every `checkCapped` solver: `querySolver`'s solver (theory-free ones on
+  the simple solver where `theoryFreeSimple` says so) over the query
+  translated into a fresh context. Step 2's assumption literal is made in
+  its solver's context and the caps translated there; a model is
+  translated back. Each step's cost is a function of the query alone:
+  every step above is identical with and without the perturbation, on
+  both Z3 versions, as is every step of a thread's first and second walk.
+- *Spend is the own contexts' units.* `ownContextCheck` adds each
+  context's whole count to `ownContextUnits`, and no search is left in the
+  walk's context, so a target hit's spend (`solveTargetHit`) is what that
+  total grew by. S8y's `rlimitCountNow` (the walk context's counter, read
+  through a solver it built there, plus `ownContextUnits`) is gone, as is
+  S8ac's first-solver read in the instrumented build (`queryRLimitBefore`).
+  Pinned: a walk's per-step units, per-query `rlimitDelta`s and target-hit
+  units are equal (5.1: 1,106,184 each). Before, with only step 1 isolated,
+  they were 839,015, 840,025 and 840,388.
+- *The per-thread kind probes in a context of their own.* `seqCapKinds`,
+  `byteDomainKinds`, `intDivDeclKinds`, `heapChainKinds` (S8bd; the job
+  named four, this is a fifth) and `theoryFreeSimple`'s check build their
+  terms in `probeContext()`: a decl kind is the linked Z3's, the same in
+  every context. Before, on Z3 5.1, `lastNl`'s step 3 took 482,126 units in
+  a thread's first walk and 85,882 in its second (facts-first 146,229
+  against 222,919); now the two walks are identical (4.13.4 was equal
+  before too). Pinned on a fresh thread.
+- *The unbounded endsWith run.* Z3 decides each regex membership on its
+  own. `s.endsWith(re"b+") and not s.contains(re"b")` is empty (a string
+  ending in `b` contains one), but on Z3 4.13.4 its query ran out of 20M
+  units with no length cap and took 6.7M to refute under the 128 cap, with
+  the cap in step 2's core (`sxUnknown`, 11,234,660 units in all). The same
+  query as one membership of the intersection with the complement, `s in
+  (B*(b+ & B+)) & comp(B* b B*)`, is UNSAT in 1,392 units (a fresh
+  context). Two changes give the walker that form:
+  - `lowerRegexEntry` reads `s` itself from a literal start 0 (`contains`
+    and `match` without a start): no `str.substr(s, 0, len(s) - 0)` and no
+    range test, so the negated `contains` is a membership of `s`;
+  - `mergeMemberships` (every query, in `checkCapped`'s `rootsIn`) replaces
+    a string term's memberships among the roots' top-level conjuncts, two
+    or more with one negated, by the one membership of the intersection
+    (`not (x in R)` is `x in comp(R)`; the same models). Byte-domain
+    constraints are left as they are.
+
+  The pin is UNSAT in 4,733 units on 4.13.4 and 4,785 on 5.1 (ceiling
+  20,000 on both). S8ay's `endsWithRun` pin drops its `s.len <= 8` bound.
+
+*RED and GREEN.* (1) Per step with and without the perturbation, three
+walks covering all eight steps: RED on both versions (table above), then
+identical. Spend: RED at the commit with step 1 alone isolated (839,015 /
+840,025 / 840,388), then equal. (2) A thread's first and second walk:
+RED on 5.1 (482,126 against 85,882 in step 3), then identical. (3) The
+unbounded endsWith run: RED on 4.13.4 (`sxUnknown`, 11,234,812 units), then
+UNSAT in 4,733. The walker floor `>= 219`.
+
+*Cost.* A fresh context, its solver and the translation take about
+8-10 ms under load (300-iteration probe, both Z3 versions); most walker
+queries open two (facts-first, then step 1). Wall time, the test binary
+alone, side by side with the S8bm head (14d7e81) under the same load:
+`r4_strip` (5.1) 190 and 193 s at S8bm against 244 and 247 s, and
+`s8ae_remainder` (4.13.4, compile included) 229 against 225 s. `r4_strip`
+is one 20M-unit budget-out (strip idempotence; every other walk is under
+0.3 s), and its units are the same (20,031,338 against 20,031,194): Z3's
+wall time per unit follows term order as its units do. Its step 3 (10M
+units) took 135 s in its own context and 58.5 s with a local toggle that
+ran it in the (now otherwise unsearched) walk context; the walk alone ran
+177 and 152 s at S8bm against 168 and 143 s. The suite's binary runs in
+4.5 s (5.1 c), 6.4 s (4.13.4 c) and 4.7 s (cpp).
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4): `s8bp_isolation`
+8/0 (cpp 8/0), `phase15_CR2_cachekey` (219) 6/0, `s8bm_stability` 4/0,
+`s8ba_remainder` 32/0, `s8ay_remainder` 40/0 (its `endsWithRun` unbounded),
+`s8aw_remainder` 31/0, `s8au_remainder` 35/0, `s8ag_indexsplit` 15/0,
+`s8aj_remainder` 21/0, `s1c_verdict` 24/0, `s8y_budget_decline` 8/0, and
+every other suite asserting units or an rlimit: `g1b_concolic` 15/0,
+`g2_flip` 8/0, `phase13_rlimit` 1/0, `r4_strip` 5/0, `r6_b5_chained` 9/0,
+`r6_n36_raise_degrade` 8/0, `s1b_kinds` 18/0, `s8ac_remainder` 19/0,
+`s8ad_remainder` 13/0, `s8ae_remainder` 16/0, `s8aq_remainder` 13/0,
+`s8av_remainder` 19/0, `s8ax_remainder` 52/0, `s8bd_remainder` 23/0,
+`s8k_bounds` 19/0, `s8o_termination` 14/0, `s8q_termination` 10/0,
+`s8r_theoryfree` 3/0, `s8t_termination` 20/0, `s8v_termination` 7/0,
+`snd3_6_equality_loop` 3/0, `snd3_loopdegrade` 7/0; and, for the regex
+lowering and the query shapes, `phase15_S6b_regex` 5/0,
+`phase15_S7b_smoke` 8/0, `s5_str` 35/0, `s8w2_hotfix` 4/0. Every query's
+model may move, so the other 392 `tsymex_*` suites were run on 5.1 too
+(all pass, 3,676 tests); Windows `symex-mingw` runs them all on 4.13.4.
+One pin moved there: `s8ar_remainder`'s `iMid` read the witness's index
+as 1, but `v = 10` at index 0 and `v = 20` at index 2 reach its label as
+well, and Z3 4.13.4 now returns the first (a genuine witness). The SUT
+excludes those two values, so the middle insertion is the only way in
+(50/0 on both versions).
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: the concolic scratch solves still check in the walk's
+  context** (`concreteBranchOutcome`, `concretelyInfeasible`,
+  `runConcolicCollectImpl`'s concrete-inputs check). They are concolic
+  collection's, not the walker's search, and run under
+  `concreteBranchRLimit`; one that runs out degrades to "not determined",
+  and how much it spends can follow what the context holds.
+- **PRECISION: after a facts-first SAT, steps (1b) and (1c) repeat a
+  decided check.** (1c) is the facts-first query under a larger budget,
+  so in a fresh context it is the same search to the same SAT; (1b) has a
+  subset of its assertions, so it is SAT too. When step 1 then fails they
+  cost as much again: `lastNl` (5.1) spends 295,900 + 311,463 of its
+  1,106,184 units there.
+- **PRECISION: Z3's wall time per unit follows term order.** Units are
+  now a function of the query; wall time per unit is too, but a
+  translated context's order is not the walk's: `r4_strip`'s budget-out
+  step 3 took 135 s here and 58.5 s in the walk's context, for the same
+  10M units (the binary 190-193 s at S8bm against 244-247 s).
+- **PRECISION: `mergeMemberships` reads top-level conjuncts only.** A
+  negated membership under a disjunction or an `ite` (`a or not
+  s.contains(re"b")`) is still decided one membership at a time.
+
+**As landed (S8bu, walker 225 provisional) — S8bs's remainder.** Base
+e7965d0 (S8bs, walker 222). Suites `tsymex_rfc0005_s8bu_term` (item 1),
+`_calls` (items 2 and 3), `_views`, `_varviews` and `_mitems` (item 4),
+`_paths` (items 5 and 6): every SUT has a live and a dead target and a
+native run confirming which one Nim hits. S8bs's `_iterparams` (`oa`,
+`or`, `mi`, which pinned declines) and `_byvalue` (`sw`) are repinned
+to the decided verdicts.
+
+*Item 1, root cause (verified).* An `int` read from an Int-sorted heap
+(an `int` field reached through a cell, a `seq[int]` element cell) is
+linked to a bit-vector return or local through the signed view
+`sbv2int`, which Z3 5.1 and 4.13.4 both expand to an `ite` over the
+unsigned one. The resulting UNSAT queries (`sbv2int(r) ==
+select(store(h, c, sbv2int(k)), c) and r != k`, or `r ==
+int2bv(sbv2int(k)) and r != k`) are refuted only through the
+injectivity of that `ite`, which neither version found within 3M units;
+under the then-unbounded default `queryRLimit` the walk never ended. A
+second shape, `v * 2` on a value read back out of the heap, lowered as
+`2 * sbv2int(k)` and met the caller's bit-vector across the bridge in a
+query whose step count Z3 stopped advancing (12.4M units at 10 s, 12.47M
+at 60 s), so no step bound could end it either.
+
+*Item 1, fix.* (a) `bvIntInverseFacts` asserts, beside every query, the
+inverse of each signed view the query holds: an `int2bv(t)` whose `t`
+is `sbv2int(x)` equals `x`, and an equality whose sides are `sbv2int(x)`
+and `sbv2int(y)` implies `x == y`, a side counting as a view once each
+`select(store(h, i, v), i)` in it is read as `v` (`peelSelect`). Each
+fact is a theorem of two's complement and of arrays (checked at width 8
+in the suite), so no model changes; each shape now decides in a few
+hundred units. Only terms the query holds are related: asserting
+`int2bv(sbv2int(x)) == x` for every view brought `int2bv` into queries
+that had none and made Z3 bit-blast S8ad's Int quotients
+(`tsymex_rfc0005_s8ad_remainder` was killed on Windows), and relating
+every pair of views took 4.13.4 to 11.8M steps on S8ad (pinned at 3M).
+(b) `probeProto` lowers a literal beside a value read back out of an
+Int heap as that value's bit-vector, so `v * 2` is `bvmul(2, k)`. (c)
+No query is unbounded under the defaults: `queryRLimit` defaults to
+250M (not 20M: Z3 4.13.4 needs 100M-150M units for
+`tsymex_augmented_assign`'s 64-bit `acc * x == 12`), and the new
+`queryTimeoutMs` (default 600 000) bounds every solve by the clock, the
+backstop for a search whose step count stops. Either cut-off is
+`sxUnknown` with `beSolverUndef` naming the budget; a clock cut-off is
+the machine's, not the program's, and is not written to the verdict
+cache. The concrete-branch and tainted target-hit solves keep
+`defaultConcreteBranchRLimit` (20M): `queryRLimit`'s default is not read
+as the caller's budget there.
+
+- *Item 2: closure and proc-value calls.* A closure or proc-value call
+  records where each copied argument came from (`ccVarLocs`, as S8bs's
+  `cVarLocs` for a direct call) and binds a formal whose actual is an
+  address-taken variable, or a path into one, to the variable's cell
+  (`bindVarLocs` in `applyClosureGround`): a `var` actual by name or by
+  path, and a by-value argument Nim passes by address. A formal bound to
+  the whole variable is not written back over it.
+- *Item 3: `addr b.x` of an address-taken `b`* is a sub-cell of `b`'s
+  cell at `.x` (a local named by the path with two cell entries kept
+  equal by `syncAddrCells`' second pass), for a direct and a proc-value
+  call, nested (`addr o.inner.x`) and whole (`addr x`) alike.
+- *Item 4: `openArray`.* An `openArray[T]` is the seq it views:
+  `classifyType` maps it to the seq sort; an array's elements are a seq
+  literal of its elements; `toOpenArray(x, first, last)` is a slice
+  flagged `ssView`, whose symbolic bounds take the signed Int bridge
+  (a plain slice keeps ADR-0027's decline). Nim's check is modelled as
+  it runs natively (probed): `IndexDefect` iff the view is not empty by
+  `last == first - 1` and a bound is out of range; a negative length
+  (`last < first - 1`, which Nim does not check) declines on its paths.
+  A `var openArray` of a whole seq is the seq passed by address; one of
+  an array or a slice is a temporary written back over what it views in
+  a `finally` (`iekSeqSplice`, a new IR kind lowered as an array lambda),
+  for a direct call, a closure call and an inlined iterator. `mitems` /
+  `mpairs` over a seq or an array substitute the element (`c[k]`, typed
+  from the instantiated iterator's `yield`) for the loop variable, as
+  Nim's inline expansion does; a seq resized in the body declines.
+- *Item 5: an array index on a path into an address-taken local*
+  (`b.v[i]`, `b.v[i].x`) is followed to the cell, by a constant index or
+  a symbolic one (an `ite` over the elements, as a read is): `varLocOf`
+  accepts array steps (less the array's low bound), `locGet` / `locSet`
+  handle array values.
+- *Item 6: a by-value seq whose whole address is taken* shares the
+  cell's memory (a `view` cell entry): it follows the cell while the
+  cell's elements are written in place (same length term, each data
+  array a store chain over the old one: `viewFollows`), and the path is
+  declined once the cell is assigned whole or resized, where Nim's copy
+  points at memory it may have freed. `p[][i] = v` through a pointer to a
+  seq, an "unsupported nnkAsgn shape" before, is modelled. A string
+  declines (a write to a character is not modelled).
+
+*Soundness bugs found.* (1) A by-value `Big` argument through a proc
+value was passed as a copy: the callee's write through the alias was
+lost (swapped verdicts, `pg` / `pg_dead`). (2) A string passed to an
+`openArray[char]` formal was an opaque value: `cnt(st) == 2`, reachable
+natively, was a false `sxUnsat`; it now declines. Both are pinned.
+
+*Suites* (`ok/failed`; c on Z3 5.1 and 4.13.4, cpp on 5.1): the six
+S8bu suites 10/0, 8/0, 5/0, 5/0, 5/0, 8/0 on all three; the four S8bs
+suites, `s8be`, `s8ax`, `s8bh`, `s8bc`, `s8ac`, `s8an`, `s8as`, `s8ba`,
+`s8bd`, `s8bf_alias`, `s8i_models`, `s7_closure`, `s8ab_letaudit`,
+`s8x_vm_alias`, `h_stepC_heapidentity`, H1, g4, g5 and CR2, with every
+suite naming `iterator`, `openArray`, `mitems` or `addr` and the
+corpus suites Windows caught (below): 62 suites, 1186/0 on c 5.1 and
+c 4.13.4, 1185/0 on cpp 5.1, where `tsymex_configdefaults` segfaults in
+its round-2 `maxCallDepth` crash pin exactly as at the base (cpp only).
+The skip list is empty. Compile CPU on a loaded host (load ~16 on 8
+cores): the S8bu suites 67-108 s user, against `s8i_models`' 111-124 s
+in the same run (54 s unloaded), so each is under the 60 s budget by
+that ratio.
+
+*Windows.* symex-mingw at 3c6a564 failed six corpus suites the slice
+had not run: `s8ad_remainder` killed at 240 s and `augmented_assign`
+`beSolverUndef` on 4.13.4 (item 1's facts and budget, above),
+`configdefaults` (the new budget field), `r6_r6_emit_roundtrip`
+(`iekSeqSplice`), `r6_n27_placeholder_read_audit` and `s8m_exits` (two
+unguarded reads and a raw `select`). Fixed in d875c95 and 8815a81; at
+8815a81 all three legs green: fuzzer-mingw 37147844319, fuzzer-msvc
+37147844268, symex-mingw 37147844306.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: `addr s[i]` of a seq with element cells passed to a
+  call declines** ("in the element's own heap"): the call's cell would
+  share the element's heap with the element cell.
+- **PRECISION: a closure capturing an address-taken variable declines**
+  (S8ax's capture cells and the address cell are two copies).
+- **PRECISION: a heap lvalue `pb[].x` reached by a closure body
+  declines** (S8bh's `touchMeetsOuter`; a direct call goes by reference
+  through `byRefSub`).
+- **PRECISION: a seq argument to a proc value declines**
+  (`seUnsupportedCompoundSortLeaf`), a `var openArray` through a proc
+  value included.
+- **PRECISION: a string viewed as `openArray[char]`, and a by-value
+  string of an address-taken string, decline** (a write to a character
+  is not modelled).
+- **PRECISION: `toOpenArray` of negative length declines on its paths;
+  a `mitems` body that resizes the seq declines.**
+- **PRECISION: `gps[].add` through a pointer to a seq is
+  `heUnsafeCast`** (present at the base).
+- **SOUNDNESS (latent, not reached by any pinned SUT): an assignment of
+  the whole over a constant-array base** whose new data array happens to
+  be a store chain over the old one would be read as an in-place write
+  by `viewFollows`; under ORC that copy is use-after-free, so no defined
+  program observes it, but the check is structural, not semantic.
 
 **As landed (S8br, walker 229) — S8bk's remainder.** Suites
 `tsymex_rfc0005_s8br_remainder` (item 1: 5 tests, 14 labels) and

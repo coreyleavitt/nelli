@@ -131,10 +131,15 @@ proc s1bTryBodyReraise(x: int) =
   symexTarget("s1b_after_try")
 
 # Diverged closure body: the closure never produces a value (every path
-# raises), so the call has no value-bearing continuation.
+# halts), so the call has no value-bearing continuation. RFC-0005 S8bn: the
+# body halts at an unmodelled bare re-raise (`eeHandlerReraiseUnmodelled`);
+# an always-RAISING body is a raise, routed to the caller, not a divergence.
 proc s1bClosureDiverge(x: int) =
   let f = proc(y: int): int =
-    raise newException(ValueError, "s1b never returns")
+    try:
+      raise
+    except ValueError:
+      discard
   if f(x) > 0:
     symexTarget("s1b_closure_hit")
 

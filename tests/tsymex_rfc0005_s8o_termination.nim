@@ -200,25 +200,53 @@ suite "S8o (3): pcSatByConcreteInputs runs under the concolic budget":
 # decline (probed).
 #
 # Probe: `lastIdx("abc", repeat('x', 11))` reaches its label.
+#
+# RFC-0005 batch 6: S8bl folds a split whose haystack is pinned to a
+# literal (`symexAssume(s == "abc")`) to its numeral, so `lastIdx`'s query
+# holds no split and is an ordinary capped query: `t.len > 10` under a cap
+# of 8 declines, as any query SAT only past the cap does (sound: never a
+# definite verdict). `lastIdxFree` keeps the regime this pins -- its
+# haystack is not a literal, so its `rfind` is a split, marked `lastIndex`.
+# Probe: `lastIdxFree("abc", repeat('x', 11))` reaches its label.
 
 proc lastIdx(s, t: string) =
   symexAssume(s == "abc")
   if t.len > 10 and s.rfind("bc") == 1:
     symexTarget("s8o_rfind")
 
+proc lastIdxFree(s, t: string) =
+  if t.len > 10 and s.len == 3 and s.rfind("bc") == 1:
+    symexTarget("s8o_rfind_free")
+
 suite "S8o (4): seq.last_indexof never reaches the incremental core":
 
   test "oracle: \"abc\".rfind(\"bc\") == 1":
     check "abc".rfind("bc") == 1
 
+  test "oracle: lastIdxFree's condition holds in Nim":
+    let (s, t) = ("abc", repeat('x', 11))
+    check t.len > 10 and s.len == 3 and s.rfind("bc") == 1
+
   test "a capped-out rfind query is decided by the one-shot solver":
     const smallCap = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
-    let r = symexFind(lastIdx, tLabel("s8o_rfind"), smallCap)
+    let r = symexFind(lastIdxFree, tLabel("s8o_rfind_free"), smallCap)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
       let (s, t) = r.witness
-      check s == "abc" and t.len > 10 and s.rfind("bc") == 1
+      check t.len > 10 and s.len == 3 and s.rfind("bc") == 1
+
+  test "a literal haystack's rfind folds, and the cap declines the query":
+    # RFC-0005 batch 6 (S8bl's fold): no split, so the cap's own regime --
+    # an in-band decline, never sxUnsat.
+    const smallCap = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
+    let r = symexFind(lastIdx, tLabel("s8o_rfind"), smallCap)
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    var capDecline = false
+    for e in r.errors:
+      if e.kind == beSolverUndef and "maxSeqLen" in e.msg: capDecline = true
+    check capDecline
 
 suite "S8o: walker version floor":
 

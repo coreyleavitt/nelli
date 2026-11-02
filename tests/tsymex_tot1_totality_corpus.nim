@@ -197,8 +197,10 @@ proc corpusCstringParam(s: cstring, y: int) =
 type
   Widget = object
     a: int
-    b: ref int   # RFC-0005 S8bc: a seq of a plain object is renderable since
-                 # S8bc; a seq element holding a ref is not
+    b: Table[string, ref int]
+      # RFC-0005 S8bc: a seq of a plain object is renderable since S8bc.
+      # RFC-0005 S8bl: so is a seq element holding a ref; one holding a
+      # ref inside a Table is not (`treeRefPartInContainer`).
 
 # `seq[Widget]` — a non-scalar/non-ref seq element — hits
 # `emitTyAndReader`'s `itSeq` catch-all (CR-2c).

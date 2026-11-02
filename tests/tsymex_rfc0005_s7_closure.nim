@@ -465,8 +465,11 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
   test "the call cache admits only a clean callee path":
     var gated = false
     # RFC-0005 S8ax: the statement dispatcher is `walkStmt`; `walk` is the
-    # capture-cell sync wrapper around it.
-    for t in routineBody(smtDir / "runtime.nim", "walkStmt"):
+    # capture-cell sync wrapper around it. RFC-0005 batch 6: its `isCall`
+    # arm is `walkCallArm`, which `walkStmt` calls.
+    check "walkCallArm(stmt, paths, w)" in
+      routineBody(smtDir / "runtime.nim", "walkStmt").join("\n")
+    for t in routineBody(smtDir / "runtime.nim", "walkCallArm"):
       if "cp.taint != {}" in t: gated = true  # RFC-0005 S8ax: every exit
     check gated
 
@@ -500,8 +503,11 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## body reaches outside its formals, as a capture or otherwise; an
     ## escaping `addr` pointer; more than two actuals on one location; no
     ## specialised body for an aliased pair; a var actual naming no
-    ## variable).
-    check degradeSites == 19
+    ## variable). RFC-0005 S8bs adds the decline of a capture whose address
+    ## is taken (a cell the body may also reach through the pointer);
+    ## RFC-0005 S8bu replaces it with the decline of an actual the closure
+    ## descent cannot bind to such a cell (`bindVarLocs`).
+    check degradeSites == 20
 
   test "every closure-sink site's kind is a classified S7 kind, never a ⊤ default":
     for f in runtimeFiles():

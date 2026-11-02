@@ -468,6 +468,7 @@ proc sutAddrMix(v: int) =
   var x = v
   mixP(addr x, x)
   if x == 2: symexTarget("amix")
+  if x != 2: symexTarget("amix_dead")
 
 suite "S8an (2): the address of a local passed as a ptr":
 
@@ -513,9 +514,16 @@ suite "S8an (2): the address of a local passed as a ptr":
     let r = symexFind(sutAddrEscape, tLabel("aesc"))
     if r.status == sxSat: check r.witness[0] == 2
 
-  test "an addr actual the callee also reaches as a var declines, scoped":
-    ## Probe: `mixP(addr x, x)` leaves `x == 2` (the later write).
-    declines(sutAddrMix, "amix", feUnsupportedOp, "addr")
+  test "an addr actual the callee also reaches as a var is one location":
+    ## Probe: `mixP(addr x, x)` leaves `x == 2` (the later write). S8an
+    ## declined it; RFC-0005 S8bs binds the `var` formal to the cell the
+    ## `addr` actual is for the call, so both writes land on `x` in the
+    ## callee's order.
+    var x = 7
+    mixP(addr x, x)
+    check x == 2
+    verdict(sutAddrMix, "amix", sxSat)
+    verdict(sutAddrMix, "amix_dead", sxUnsat)
 
 # ---- (3) a module-level var reached from a callee ----------------------------
 

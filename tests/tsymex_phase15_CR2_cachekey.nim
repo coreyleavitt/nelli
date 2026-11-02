@@ -1004,11 +1004,36 @@ suite "Phase 15 CR-2 — version bumps":
     ## and CRLF start skip, the limit start options, UTF mode, `(?m)` and
     ## `(?X)`; replace over the agenda's step table; the libpcre engine in
     ## the cache key). Provisional 211.
+    ## RFC-0005 S8bs (a var, addr or by-pointer actual whose variable has
+    ## an address cell is bound to that cell; by-value seqs share element
+    ## cells). 217->222.
+    ## RFC-0005 S8bn (S8bh's remainder: ptr witnesses and targets, proc
+    ## fields and methods, `of` / `nil`, hierarchies, parameter tags).
+    ## Provisional 215.
+    ## RFC-0005 S8bl (S8bc's remainder: var-parameter system magics, the
+    ## unbacked-element add, type aliases, mpairs / mvalues, Table length
+    ## change, seq-element ref parts and long nested seqs in witnesses).
+    ## 203->213 (provisional).
+    ## RFC-0005 S8bq (S8bi's remainder: huge newSeq lengths declined, set
+    ## values, `re"..."` literals, newSeqUninit read taint, set literals
+    ## with non-constant elements). Provisional 220.
+    ## RFC-0005 S8bw (S8bn's remainder: typed global reads, in-band
+    ## receiver declines, aggregate globals, pointers into case objects and
+    ## aggregate containers). Provisional 227.
+    ## RFC-0005 batch 6: S8bs, S8bn, S8bl, S8bq and S8bw stacked on batch
+    ## 5, and an unbound global receiver read as its entry value. 223->230.
+    ## RFC-0005 S8bp (every checkCapped search and the per-thread kind
+    ## probes in contexts of their own; a regex membership and a negated
+    ## one on one string decided as one). Provisional 219. 214->219.
+    ## RFC-0005 S8bu (the signed bv2int bridge's inverse facts and a finite
+    ## default queryRLimit). 222->225.
     ## RFC-0005 S8br (S8bk's remainder: a call in a by-address actual's
     ## index is evaluated once, where the argument stands; a check no
     ## snapshot carries declines only when a later argument may write what
     ## the lvalue reads). Provisional 229 (224-228 held). 223->229.
-    check symexWalkerVersion == "229"
+    ## RFC-0005 batch 7: S8bp, S8bu and S8br stacked on batch 6, and a
+    ## `var openArray` view a later argument writes declined. 230->237.
+    check symexWalkerVersion == "237"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

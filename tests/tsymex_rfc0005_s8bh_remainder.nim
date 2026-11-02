@@ -419,9 +419,11 @@ suite "S8bh (1): var writes through an indirect call":
   test "an addr actual whose pointer may escape declines":
     declines(sutAddrEscape, "ae_dead", feUnsupportedOp, "escape the call")
 
-  test "a proc field and a method call decline":
-    declines(sutProcField, "pfld_dead", feUnsupportedStmtKind, "o.f")
-    declines(sutMethod, "m_dead", feUnsupportedOp, "setM")
+  test "a proc field and a method call are walked (S8bn)":
+    ## They declined at S8bh; S8bn (item 6) walks a call through a proc
+    ## field and dispatches a method call on the run-type tag.
+    discard clean(sutProcField, "pfld_dead", sxUnsat)
+    discard clean(sutMethod, "m_dead", sxUnsat)
 
 # ---- 2. a ptr of unknown origin --------------------------------------------
 #
@@ -564,8 +566,12 @@ suite "S8bh (2): a ptr of unknown origin":
     discard clean(sutPVar, "pv2_dead", sxUnsat)
 
   test "a by-value aggregate global declines":
-    declines(sutPSeqGlobal, "psg", feUnsupportedOp, "RFC-0005 S8bh")
-    declines(sutPVarFormal, "pvf", feUnsupportedOp, "RFC-0005 S8bh")
+    ## S8bn (item 4): a seq element is a target now, but `gPS = @[1]`
+    ## replaced the seq the pointer may have addressed: it may dangle.
+    declines(sutPSeqGlobal, "psg", feUnsupportedOp, "may dangle")
+    ## S8bn (item 3): `x` is a local whose address is never taken, so the
+    ## pointer cannot address the formal's actual.
+    discard clean(sutPVarFormal, "pvf", sxSat)
 
 # ---- 3. a ref converted along its inheritance chain -------------------------
 #

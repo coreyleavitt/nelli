@@ -203,19 +203,54 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "229"
-  ## RFC-0005 S8br (provisional 229; 224-228 held by slices still running)
-  ## — S8bk's remainder. A call in a by-address actual's index
-  ## (`touch(gArr[nextI()], f())`) is evaluated once, where the argument
-  ## stands, into a `let` the lvalue then names (`hoistIndexCalls`): the
-  ## copy-in, the copy-out and S8an's cell reach the element through it.
-  ## Before, the copy-out re-parsed the call: an array element declined
-  ## (`unsupported nnkAsgn shape`), and a seq element called it twice (a
-  ## false `sxSat` and a false `sxUnsat`). A by-address argument whose index
-  ## check no snapshot carries (`gH.s[gi]`) declines only when a later
-  ## argument may write a location its lvalue reads (`laterLeavesLvalue`,
-  ## S8as/S8ax's write summary); S8bk declined it whenever a later argument
-  ## may write anything. 223 -> 229.
+const symexWalkerVersion* = "237"
+  ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
+  ## batch 6 as one integration branch under ONE walker number; their
+  ## bullets follow, each naming its provisional number. The stack's own
+  ## changes: S8bp's own-context search is the one `checkCapped` solve
+  ## (`ownContextCheck`), and S8bu's bounded solve (`solveBounded`, the
+  ## timeout reason) runs inside it, so every step -- S8bj's step 0, the
+  ## facts-first steps, (1) to (3) and the plain query -- is isolated and
+  ## bounded; S8bu's inverse facts join S8bp's merged memberships. Every
+  ## per-thread kind probe (batch 4's const-array, S8ax's store / ite,
+  ## S8bq's uninitialized kinds, S8bu's select / int2bv / eq) builds in
+  ## S8bp's `probeContext`. S8bu's openArray view and S8br's index-call
+  ## hoist share one normalised call (`varSeqViews`, then
+  ## `hoistIndexCalls`). SOUNDNESS: a `var openArray` view of an array or
+  ## a slice is copied where the argument stands, while Nim passes the
+  ## storage; a later argument's call that wrote it (`fill(a, bump())`) was
+  ## overwritten by the write-back -- a false `sxUnsat` at S8bu's tip. It
+  ## declines on S8br's frame condition (`laterLeavesLvalue`). 230 -> 237.
+  ##
+  ## RFC-0005 batch 6 (2026-10-03) — S8bs, S8bn, S8bl, S8bq and S8bw land
+  ## stacked on batch 5 as one integration branch under ONE walker number; their
+  ## bullets follow, each naming its provisional number. The stack's own
+  ## changes: S8bn's `placeLateAddrs` is S8bk's `placeLateAddr`
+  ## (`feEvalOrderUnmodelled`), and S8bn's per-site `ifFeasible` is S8bc's
+  ## infeasible-path drop, which every decline already gets. A `ptr` into a
+  ## seq element reads and writes the data array in its own sort
+  ## (`elemTermIn` / `elemValueOf`: S8ax's Int-sorted int heaps beside the
+  ## by-value BV arrays). S8bn's `@aim:` targets reach the replay thread
+  ## (`ptrAimsSnapshot` / `ptrAimsAdopt`). A static discriminant tag that
+  ## S8bn's literal folding made `bool` is an int again (`discTagLit`).
+  ## S8bl's magic reader and S8be's are one (`implMagic`), its seq ops sit
+  ## on batch 5's `iekSeqNew`, and S8bq's `incl` / `excl` model the builtin
+  ## set magics S8bl declined. S8bq's length guard is batch 5's
+  ## (`parseNewSeqLen`); its `newSeqUninit` tracking runs in `lowerSeqNew`
+  ## for a single-leaf element (a tree element keeps the whole-path taint).
+  ## S8bw's initial value of a global and S8as's entry value are one store
+  ## (`globalEntryVals`): a read taints only when it OBSERVES a part no
+  ## write reached -- `feGlobalHavoc` for a global S8as models, a decline
+  ## otherwise (`unwrittenKind`) -- so `g.a = v` then `g.a` is exact. S8be's
+  ## `{.global.}` model, arm-field addresses and `elemAddrNode` stand over
+  ## S8bw's parse-time decline and `rootMutatedIn`; S8bw's `var`-parameter
+  ## root joins them (`addrRootSym`). A table value through a `ptr` is its
+  ## 64-bit cell in the data array's sort (`tabValueOf` / `tabTermIn`).
+  ## SOUNDNESS: an index assignment, pop or discriminator reassignment on a
+  ## global the walk has not written reads its entry value (`recvValue`);
+  ## it raised `KeyError` (a dropped path: a false `sxUnsat`) or skipped
+  ## the statement (no `FieldDefect` fork). S8bw declined the same
+  ## receivers on its own base. 223 -> 230.
   ##
   ## RFC-0005 batch 5 (2026-10-03) — S8bm, S8bk, S8bg, S8bi and S8bj land
   ## stacked on batch 4 as one integration branch under ONE walker number;
@@ -242,6 +277,129 @@ const symexWalkerVersion* = "229"
   ## closure call in it was applied by each guard branch and by the result
   ## (a false `sxSat` and a false `sxUnsat` on what it writes). S8bj's
   ## step-table `run` (`__regexStep`) carries S8bi's fuel. 217 -> 223.
+  ##
+  ## RFC-0005 S8bp (2026-10-03) — no walker search depends on what the
+  ## walk, or an earlier walk on the thread, left in Z3's context. Every
+  ## `checkCapped` step (not only S8bm's step 1) searches in a fresh
+  ## context of its own: with thirty unrelated constants made before each
+  ## query, the theory-free steps, (2), (3) and the no-string query all
+  ## moved (Z3 5.1: (2) 401,123 units against 231,590). The per-thread
+  ## kind probes build their terms in a context of their own, so a
+  ## thread's first walk searches as its later ones do (Z3 5.1: a step-3
+  ## search took 482,126 units in the first walk and 85,882 in the
+  ## second). Both change which search decides a query under a budget.
+  ## And a string's regex memberships, one of them negated, are decided as
+  ## one membership of the intersection with the complement
+  ## (`mergeMemberships`), with `contains` / `match` from a literal 0
+  ## reading the string itself: S8ay's unbounded `s.endsWith(re"b+") and
+  ## not s.contains(re"b")` was `sxUnknown` on Z3 4.13.4 (11.2M units) and
+  ## is UNSAT in 4,733. Provisional 219 (215 to 218 are held by slices
+  ## still running). 214 -> 219.
+  ##
+  ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
+  ## query is decided beside the inverse of each signed Int view it holds
+  ## (`int2bv(sbv2int(x)) == x` for an `int2bv` of a view, `sbv2int(x) ==
+  ## sbv2int(y)` implies `x == y`; `bvIntInverseFacts`): an `int` read
+  ## across the Int-heap / bit-vector bridge gave Z3 UNSAT queries it never
+  ## decided, and `queryRLimit` now defaults to 250M and `queryTimeoutMs`
+  ## to 10 minutes, so no query is unbounded under the defaults (an
+  ## exhausted one declines). 222 -> 225.
+  ## An `openArray[T]` is the seq it views (a seq, an array's elements, a
+  ## `toOpenArray` slice, `iekSeqSlice.ssView`, whose bounds take the
+  ## signed Int bridge); a `var` one is written back over what it views
+  ## (`iekSeqSplice`).
+  ## `mitems` / `mpairs` make the loop variable the element itself.
+  ## A path into an address-taken variable steps through an array element,
+  ## at a constant or a symbolic index.
+  ## A by-value seq of an address-taken seq is a `view` of its cell, which
+  ## declines once the cell is assigned whole or resized; `p[][i] = v` is
+  ## modelled.
+  ##
+  ## RFC-0005 S8br (provisional 229; 224-228 held by slices still running)
+  ## — S8bk's remainder. A call in a by-address actual's index
+  ## (`touch(gArr[nextI()], f())`) is evaluated once, where the argument
+  ## stands, into a `let` the lvalue then names (`hoistIndexCalls`): the
+  ## copy-in, the copy-out and S8an's cell reach the element through it.
+  ## Before, the copy-out re-parsed the call: an array element declined
+  ## (`unsupported nnkAsgn shape`), and a seq element called it twice (a
+  ## false `sxSat` and a false `sxUnsat`). A by-address argument whose index
+  ## check no snapshot carries (`gH.s[gi]`) declines only when a later
+  ## argument may write a location its lvalue reads (`laterLeavesLvalue`,
+  ## S8as/S8ax's write summary); S8bk declined it whenever a later argument
+  ## may write anything. 223 -> 229.
+  ##
+  ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
+  ## variable has an address cell was copied in and written back, so a
+  ## callee's write through the pointer was clobbered; an object's address
+  ## cell lived in its whole-pointee heap, not the field heaps its writes
+  ## use. A call's `cVarLocs` (canonicalized) name where each copied,
+  ## `addr`, by-pointer or memory-sharing argument came from; the callee's
+  ## formal is bound to the variable's cell along that path, element cells
+  ## are shared with a by-value seq, and anything the walk cannot bind
+  ## declines. An inlined iterator's formals name the caller's locations as
+  ## Nim's expansion does (they were copies). 217 -> 222.
+  ##
+  ## RFC-0005 S8bw (2026-10-03) -- S8bn's remainder. Provisional 227. A
+  ## module-level global read before any write is a value of its declared
+  ## type (`iekVar.vGlobalTy`), never an `int` stand-in, and every receiver
+  ## a global, a capture or a heap read reaches declines in-band where it
+  ## was a walker fault (`gArr[2] = k`, `gSeq.pop()`, `gSeq.map(f)`); a
+  ## discriminator reassignment of an unbound object declines where it was
+  ## dropped (a false `sxSat`). Verdicts move and the IR gains a field, so
+  ## cached entries rotate.
+  ##
+  ## RFC-0005 S8bn (2026-10-03) -- S8bh's remainder, all precision.
+  ## Provisional 215. A `ptr` witness replays whatever the parameter order
+  ## and when aimed at a global or a `var` parameter (`@aim:`); a `var`
+  ## formal whose actual is a local never addressed is no pointer's target;
+  ## a `ptr` may address a field or element of a by-value aggregate `var`
+  ## parameter or global, or an element of a seq held in the heap (S8ax's
+  ## identity: root, path, snapshot index), declining once the path
+  ## resized the seq; an always-raising void closure is a raise; a call
+  ## through a proc field (by value, or a heap field's shadow code over the
+  ## procs assigned to it) and a method call (dispatched on the run-type
+  ## tag) are walked, and an unknown target havocs the globals; `of` is a
+  ## tag test and `nil` parses in every typed position; `{.inheritable.}`,
+  ## `of RootRef` and case-object hierarchies share S8bh's address space;
+  ## a parameter's run-type tags lie in its static type's subtree; S8bk's
+  ## late address on S8bh's indirect-call path. Verdicts move (sxUnknown
+  ## to sxSat / sxUnsat) and the IR gains fields (`cVarPtrSafe`,
+  ## `ccVarPtrSafe`, the variant hierarchy fields), so
+  ## cached entries rotate.
+  ##
+  ## RFC-0005 S8bl (2026-10-02) — S8bc's remainder; provisional number (the
+  ## channel assigns the final one at merge). 203->213. SOUNDNESS: a system
+  ## magic with a `var` parameter was registered with an empty body, so its
+  ## write was dropped (`swap`, a string's `setLen`, `s[i].add c`: false
+  ## sxSat) or its parse crashed the compile (`wasMoved`, `move`); each is
+  ## modelled (`isSetLen` for `setLen`) or declines naming the magic
+  ## (`varParamMagics`). `add` to a seq of an unbacked element is a
+  ## placeholder decline (was a walker fault); a plain type alias is its
+  ## target; `mpairs` / `mvalues` write the table; a Table length change
+  ## while iterating raises `AssertionDefect`; a seq element's ref parts
+  ## are witness positions, and a nested seq renders up to 2^20 elements.
+  ## Every string table key term is a byte string (an unconstrained key of
+  ## another path's enumeration crashed witness extraction: a false sxUnsat
+  ## on the C backend). An assumed `s == "lit"` binds `s` as the literal, a
+  ## ground one-character `indexof` folds, and a clean call result that
+  ## folds to literals is bound as them (the unrecognised pair loop over a
+  ## pinned string: 640-750 s to under a second). A loop path still active
+  ## at the unroll bound whose pc is contradictory is dropped, and an `if`
+  ## guard that folds to a literal takes one side only. `seq.delete`
+  ## shifts the tail down; `for x in [a, b]` binds the literal; borrow
+  ## views reach every parser type query.
+  ##
+  ## RFC-0005 S8bq (2026-10-03) — S8bi's remainder. A `newSeq` /
+  ## `newSeqOfCap` / `newSeqUninit` length above 2^20 is declined, scoped
+  ## to its path, as S8bc declines `newSeq`'s (it was modelled as an
+  ## allocation that succeeds: a false sxSat); a decline reached only on a
+  ## path no execution takes is dropped (S8bc's rule, ported). A `Regex`
+  ## built by `re`/`rex` outside a regex call is a constructor call (a
+  ## rejected pattern raises `RegexError`). Builtin `set[T]` values are one
+  ## bit-vector (`itBitSet` / `iekBitSet`): membership, `incl`, `excl`,
+  ## `+ - * <= < ==`, `card` and literals, the literals' elements
+  ## non-constant too. `newSeqUninit` taints only a read of an element no
+  ## write reached. Provisional 220.
   ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
@@ -5233,6 +5391,8 @@ proc canonicalize*(t: IRType): string =
     "Ty<Tb:" & canonicalize(t.tabKeyTy) & ";" & canonicalize(t.tabValTy) & ">"
   of itSet:
     "Ty<Se:" & canonicalize(t.setElemTy) & ">"
+  of itBitSet:   ## RFC-0005 S8bq: Nim's builtin `set[T]`
+    "Ty<BS:" & canonicalize(t.bsElemTy) & ">"
   of itVariant:
     var plainParts: seq[string]
     for i in 0 ..< t.vPlainFieldNames.len:
@@ -5254,7 +5414,13 @@ proc canonicalize*(t: IRType): string =
       ";plain=[" & plainParts.join(";") & "]" &
       ";disc=" & t.vDiscName & "=" & canonicalize(t.vDiscTy) &
       ";dtags=[" & ordParts.join(",") & "]" &
-      ";[" & armParts.join(",") & "]>"
+      ";[" & armParts.join(",") & "]" &
+      # RFC-0005 S8bn (item 8): a case-object hierarchy's chain and owners
+      # key its sort and heaps; absent for a variant without `of`.
+      (if t.vInheritChain.len == 0: ""
+       else: ";inh=[" & t.vInheritChain.join(",") & "];own=[" &
+             t.vOwnedFieldNames.join(",") & "|" &
+             t.vOwnedFieldIds.join(",") & "]") & ">"
   of itMultiVariant:
     # Phase 14 (ADR-0003 D1). Distinct prefix `MVr:` and distinct
     # axis-grouped format `;axes=[...]` ensure cache keys do not
@@ -5309,6 +5475,19 @@ proc lookupLocal(env: LocalEnv, name: string): string =
     "$" & $env.slots[name]
   else:
     name  # free — encode by original name
+
+proc varLocKeys(locs: seq[VarLoc]; env: LocalEnv): seq[string] =
+  ## RFC-0005 S8bs. Where each copy-in/copy-out argument came from
+  ## (`IRStmt.cVarLocs`; RFC-0005 S8bu: `IRExpr.ccVarLocs` too) decides
+  ## whether the walk binds its formal to an address cell, so it keys the
+  ## call.
+  for l in locs:
+    var steps: seq[string]
+    for st in l.path:
+      steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
+                else: st)
+    result.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
+               "/" & steps.join("/") & ":" & l.mode
 
 # ---- IRExpr -----------------------------------------------------------------
 
@@ -5371,7 +5550,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for a in e.mathArgs: parts.add canonicalize(a, env)
     "Ex<MC:" & e.mathOp & ":" & parts.join(",") & ">"
   of iekBoolLit:   "Ex<BL:" & $e.bval & ">"
-  of iekVar:       "Ex<V:" & lookupLocal(env, e.vname) & ">"
+  of iekVar:
+    # RFC-0005 S8bw: a global's declared type decides the value its unwritten
+    # parts hold, so it is part of the program's form.
+    if e.vGlobalTy == nil: "Ex<V:" & lookupLocal(env, e.vname) & ">"
+    else: "Ex<V:" & lookupLocal(env, e.vname) & ":" &
+            canonicalize(e.vGlobalTy) & (if e.vCopy: ":copy" else: "") & ">"
   of iekBinop:
     "Ex<Bn:" & binopTag(e.bop) & ";" &
       canonicalize(e.lhs, env) & ";" & canonicalize(e.rhs, env) & ">"
@@ -5430,7 +5614,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &
-                   canonicalize(e.ssHi, env) & ">"   ## v67: seq-slice view
+                   canonicalize(e.ssHi, env) &
+                   (if e.ssView: ":view" else: "") & ">"   ## v67; S8bu
+  of iekSeqSplice: "Ex<SSP:" & canonicalize(e.spBase, env) & ":" &
+                   canonicalize(e.spAt, env) & ":" &
+                   canonicalize(e.spPart, env) & ">"   ## RFC-0005 S8bu
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &
@@ -5439,7 +5627,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<" & $e.kind & ":" & canonicalize(e.mutRecv, env) & ";" &
       canonicalize(e.mutArg, env) & ">"
   of iekSeqDel:
-    "Ex<SqD:" & canonicalize(e.delSeq, env) & ";" &
+    (if e.delShift: "Ex<SqDs:" else: "Ex<SqD:") &
+      canonicalize(e.delSeq, env) & ";" &
       canonicalize(e.delIdx, env) & ">"
   of iekSeqInsert:
     "Ex<SqI" & (if e.insGrow: "g:" else: ":") &
@@ -5486,9 +5675,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     # RFC-0005 S8bh: the call's `var`/`addr` effects.
     var vts: seq[string]
     for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
+    # RFC-0005 S8bu: and where its arguments came from (`ccVarLocs`).
     "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
-      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]>"
+      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
+      (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") &
+      ";locs=[" & varLocKeys(e.ccVarLocs, env).join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)
@@ -5506,6 +5698,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<SeqNew:" & canonicalize(e.snElemTy) & ":" &
       (if e.snZeroed: "zero" else: "uninit") &
       (if e.snOfCap: ":cap:" else: ":len:") & canonicalize(e.snArg, env) & ">"
+  of iekBitSet:                          ## RFC-0005 S8bq
+    var parts: seq[string]
+    for a in e.bsArgs: parts.add canonicalize(a, env)
+    "Ex<BitSet:" & $e.bsOp & ":" & canonicalize(e.bsSetTy) & ":" &
+      parts.join(",") & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 
@@ -5567,10 +5764,14 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # touches one declines), so they key the call.
     var guards: seq[string]
     for g in s.cGuardRoots: guards.add lookupLocal(env, g)
+    # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
+    # whether the walk binds its formal to an address cell.
+    let locs = varLocKeys(s.cVarLocs, env)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
       (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") &
+      (if locs.len > 0: ";locs=[" & locs.join(",") & "]" else: "") &
       # RFC-0005 S8as: an inert opaque call's effect summary rebinds the
       # names it lists, so it changes the verdict.
       (if s.opaqueHavoc.len > 0: ";havoc=[" & s.opaqueHavoc.join(",") & "]"
@@ -5589,7 +5790,10 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       (if s.opaqueDefects.len > 0:   # RFC-0005 S8be
          ";defects=[" & s.opaqueDefects.join(",") & "]"
        else: "") &
-      (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") & ">"
+      (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") &
+      # RFC-0005 S8bn: whether a `var` actual may be a pointer's target
+      # changes the verdict (a deref in the callee declines or not).
+      (if s.cVarPtrSafe.len > 0: ";vps=" & $s.cVarPtrSafe else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read
@@ -5598,7 +5802,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Ix:" & retSlot & "=" & canonicalize(s.ixArr, env) &
       "[" & canonicalize(s.ixIdx, env) & "];ety=" &
       canonicalize(s.ixElemTy) &
-      (if s.ixLo != 0: ";lo=" & $s.ixLo else: "") & ">"
+      (if s.ixLo != 0: ";lo=" & $s.ixLo else: "") &
+      (if s.ixCheckOnly: ";check" else: "") & ">"   # RFC-0005 S8bw
   of isIndexAssign:
     # N14 (RFC-chapulin-hardening bucket-2). Distinct `IxA:` prefix (never
     # collides with `Ix:`'s read-side content-address) — `xs[i] = v` and
@@ -5616,6 +5821,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     let retSlot = "$" & $bindLocal(env, s.tkRetName)
     "St<TK:" & retSlot & "=" & canonicalize(s.tkRecv, env) & ";kty=" &
       canonicalize(s.tkKeyTy) & ">"
+  of isSetLen:
+    # RFC-0005 S8bl (item 1). Distinct `SL:` prefix; the resized value is a
+    # fresh name (`bindLocal`), the operands content-addressed.
+    let slSlot = "$" & $bindLocal(env, s.slRetName)
+    "St<SL:" & slSlot & "=" & canonicalize(s.slBase, env) & "," &
+      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`
@@ -5835,6 +6046,9 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        a string / seq; a query it cuts off is
   ##                        sxUnknown. Rendered `;sqr=` only when not the
   ##                        default 20M (default keys unchanged).
+  ##   queryTimeoutMs     — RFC-0005 S8bu: the wall-clock bound of every
+  ##                        solve; one it cuts off is sxUnknown. Rendered
+  ##                        `;qto=` only when not the default 600000.
   ##   maxRecursionDepth  — RFC-0005 S8ax: the hard budget the adaptive call
   ##                        depth extends to past `maxCallDepth`; a call
   ##                        past it declines, so it changes the verdict.
@@ -5900,6 +6114,8 @@ proc canonicalize*(s: SymexSettings): string =
      else: ";msl=" & $s.budget.maxSeqLen) &   ## RFC-0005 S8k, same rule
     (if s.budget.seqQueryRLimit == ResourceBudget().seqQueryRLimit: ""
      else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
+    (if s.budget.queryTimeoutMs == ResourceBudget().queryTimeoutMs: ""
+     else: ";qto=" & $s.budget.queryTimeoutMs) &   ## RFC-0005 S8bu, same rule
     (if s.budget.maxRecursionDepth == ResourceBudget().maxRecursionDepth: ""
      else: ";mrd=" & $s.budget.maxRecursionDepth) &   ## RFC-0005 S8ax, same rule
     (if s.replayTimeoutMs == SymexSettings().replayTimeoutMs: ""

@@ -183,6 +183,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekStrToLower, iekStrToUpper, iekRuneToStr, ## Phase 16 A9/A7-S2: svString result, not int.
      iekStrStrip,                             ## ADR-0026: svString result, not int.
      iekSeqSlice,                             ## v67: seq-view result, not int.
+     iekSeqSplice,                            ## RFC-0005 S8bu: a seq, not int.
      iekGetCurrentExn, iekGetCurrentExnMsg,   ## Phase 15 E8: no integer interval.
      iekBorrowOp,                             ## Phase 15 G5: distinct borrow —
                                               ## no integer-interval shape.
@@ -201,7 +202,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekVariantFieldSet,                      ## RFC-0005 S8s: likewise.
      iekNil,                                  ## Phase 15 R5: a ref/ptr nil literal
      iekZeroValue,                            ## RFC-0005 S8u: a container zero
-     iekSeqNew:                               ## RFC-0005 S8bc/S8bi: a seq, not an int
+     iekSeqNew,                               ## RFC-0005 S8bc/S8bi: a seq, not an int
+     iekBitSet:                               ## RFC-0005 S8bq: a builtin set,
+                                              ## or a bool / card of sets
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
     # / iekStrToInt do produce a Z3Int, but S1 does not yet model them; their
     # interval is unknown → none, keeping the var in BV.)
@@ -252,6 +255,7 @@ const BitTwiddlingOps* = {bShl, bShr, bAnd, bOr, bXor}
 
 proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
   ## RFC-0005 S8be: exported (the walker's `freshCallRet`).
+  ## RFC-0005 S8bl: and for the parser's `writesName`.
   if e == nil: return
   case e.kind
   of iekVar:
@@ -275,6 +279,10 @@ proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
     collectVarRefs(e.ssBase, into)
     collectVarRefs(e.ssLo, into)
     collectVarRefs(e.ssHi, into)
+  of iekSeqSplice:   ## RFC-0005 S8bu
+    collectVarRefs(e.spBase, into)
+    collectVarRefs(e.spAt, into)
+    collectVarRefs(e.spPart, into)
   of iekStrLit:
     discard
   of iekContains:
@@ -345,6 +353,8 @@ proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
     discard
   of iekSeqNew:        ## RFC-0005 S8bc, S8bi: the length references vars.
     collectVarRefs(e.snArg, into)
+  of iekBitSet:        ## RFC-0005 S8bq: so do the operands.
+    for a in e.bsArgs: collectVarRefs(a, into)
 
 type
   BanPolicy* = object
@@ -522,6 +532,9 @@ proc collectBan*(s: IRStmt, pol: BanPolicy): HashSet[string] =
     discard  ## no expr operands — nothing to ban-scan
   of isTabKeys:
     collectBanFromExpr(s.tkRecv, pol, result)   ## RFC-0005 S8bc
+  of isSetLen:                                  ## RFC-0005 S8bl
+    collectBanFromExpr(s.slBase, pol, result)
+    collectBanFromExpr(s.slLen, pol, result)
   of isVariantField:
     collectBanFromExpr(s.vfRecv, pol, result)
   of isVariantReassign:

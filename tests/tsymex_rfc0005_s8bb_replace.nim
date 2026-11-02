@@ -8,7 +8,7 @@
 ## Nim's loop takes PCRE's chosen match at the leftmost position, and
 ## after an empty match retries at the same position with
 ## NOTEMPTY_ATSTART.
-import std/[unittest, strutils, re, times]
+import std/[unittest, strutils, re, times, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -21,6 +21,9 @@ proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
+
+const seqBudget = SymexSettings(budget: ResourceBudget(
+  seqQueryRLimit: 100_000_000'u))
 
 template verdict(sut: untyped; label: string): SymexResult =
   let t0 = epochTime()
@@ -119,10 +122,26 @@ suite "S8bb (6): replace takes PCRE's chosen match, Nim's empty-match retry":
     if alt.status == sxSat:
       check alt.witness[0] == "ab"
     check verdict(symbolicEmpty, "bb_rep_sym_empty").status == sxUnsat
+    # RFC-0005 batch 7: since S8bp solves this label query in a context
+    # of its own, its cost is the query text's alone. Z3 5.1 decides it
+    # in 198,718 units; Z3 4.13.4 needs 18,801,883 (12,755,004 in the
+    # walk's context at batch 6), and step 1 has half of
+    # `seqQueryRLimit`'s 20M, so on 4.13.4 the default walk declines.
+    # Under the defaults the pin is sxSat or that decline, never sxUnsat;
+    # under an explicit 100M sequence budget it is Nim's witness on both
+    # Z3s.
     let hit = verdict(symbolicEmptyHit, "bb_rep_sym_empty_hit")
-    check hit.status == sxSat
+    check hit.status in {sxSat, sxUnknown}
     if hit.status == sxSat:
       check hit.witness[0] == "q"
+    else:
+      check hit.errors.anyIt(it.kind == beSolverUndef)
+    let wide = symexFind(symbolicEmptyHit, tLabel("bb_rep_sym_empty_hit"),
+                         seqBudget)
+    check wide.status == sxSat
+    if wide.status == sxSat:
+      check wide.witness[0] == "q"
+      check "q".replace(re"$", "-") == "q-"
 
 # ---- the step table against std/re, exhaustively ------------------------------
 #

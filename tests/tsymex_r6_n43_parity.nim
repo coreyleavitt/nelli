@@ -390,9 +390,10 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
 type
   N43WitnessObj = object
     # RFC-0005 S8bc: a ref part. A seq of a plain object is a leaf-split,
-    # renderable seq since S8bc; a seq element holding a ref is still not
-    # renderable (no position is collected inside a seq element).
-    a: ref int
+    # renderable seq since S8bc. RFC-0005 S8bl: a seq element holding a ref
+    # is renderable too (its positions are collected through the heap cell
+    # layout); one holding a ref inside a Table is not.
+    a: Table[string, ref int]
 
 proc n43ParamUnsupported(x: cstring, y: int) =
   if y == 42:

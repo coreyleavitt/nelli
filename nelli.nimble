@@ -1084,6 +1084,19 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bj_replace",
             "tsymex_rfc0005_s8bj_replace_lemmas",
             "tsymex_rfc0005_s8bj_walker",
+            # RFC-0005 S8bq -- S8bi's remainder: a length above 2^20
+            # declines, Regex constructor calls, builtin set[T] values,
+            # non-constant set literals, newSeqUninit's unwritten reads.
+            # Walker 220.
+            "tsymex_rfc0005_s8bq_remainder",
+            # RFC-0005 batch 6 -- an index assignment, pop or discriminator
+            # reassignment on a global the walk has not written reads its
+            # entry value (was a false sxUnsat). Walker 230.
+            "tsymex_rfc0005_b6_globalrecv",
+            # RFC-0005 batch 7 -- a var openArray view a later argument
+            # writes declines (was a false sxUnsat); a global seq indexed by
+            # a call; S8br's slow addr cell terminates. Walker 237.
+            "tsymex_rfc0005_b7_integration",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the
@@ -1164,7 +1177,11 @@ task test, "Run the test suite":
             # newSeq, Table iteration, mgetOrPut, inlined-iterator
             # parameter conversions, seq[char] / seq[enum] witnesses;
             # walker 209->217 (batch 4).
-            "tsymex_rfc0005_s8bc_remainder",
+            # RFC-0005 S8bl (item 5): split in three (a / b / c), the
+            # single file's compile having taken 77 s on Windows.
+            "tsymex_rfc0005_s8bc_remainder_a",
+            "tsymex_rfc0005_s8bc_remainder_b",
+            "tsymex_rfc0005_s8bc_remainder_c",
             # RFC-0005 S8be -- S8ax's remainder: opaque implicit Defects
             # and raise subtypes; a bounded replay; `{.global.}`; int32
             # widening; Int-sorted call returns; tuples of closures; a
@@ -1195,6 +1212,59 @@ task test, "Run the test suite":
             # distinct chain before judging non-decidability. Walker
             # 209->218.
             "tsymex_rfc0005_s8bg_remainder",
+            # RFC-0005 S8bs -- a var, addr or by-pointer actual whose
+            # variable is address-taken is bound to its cell; heap lvalues
+            # go by reference; by-value seqs share element cells; inlined
+            # iterator formals name the caller's locations; walker 222.
+            # Split in four by theme (shared SUTs in s8bs_suts.nim).
+            "tsymex_rfc0005_s8bs_addrglobal",
+            "tsymex_rfc0005_s8bs_byref",
+            "tsymex_rfc0005_s8bs_iterparams",
+            "tsymex_rfc0005_s8bs_byvalue",
+            # RFC-0005 S8bn: S8bh's remainder -- ptr witnesses and targets,
+            # proc fields and methods, `of` / `nil`, hierarchies, parameter
+            # tags, S8bk's late address. Walker 215 (provisional).
+            "tsymex_rfc0005_s8bn_remainder",
+            # RFC-0005 S8bl -- S8bc's remainder: the system magics with a
+            # `var` parameter (swap, wasMoved, move, reset, setLen, add on
+            # an element, new on a field) and the guard scan over them,
+            # add to a seq of an unbacked element, plain type aliases,
+            # mpairs / mvalues, a Table length change while iterating,
+            # ref parts and long nested seqs in witnesses; walker
+            # 203->213 (provisional).
+            "tsymex_rfc0005_s8bl_magics",
+            "tsymex_rfc0005_s8bl_setlen",
+            "tsymex_rfc0005_s8bl_magicscan",
+            "tsymex_rfc0005_s8bl_gaps",
+            "tsymex_rfc0005_s8bl_borrow",
+            "tsymex_rfc0005_s8bl_seqops",
+            "tsymex_rfc0005_s8bl_pairloop",
+            # RFC-0005 S8bw: S8bn's remainder -- in-band receiver declines,
+            # aggregate globals, pointers into case objects and aggregate
+            # containers. Walker 227 (provisional).
+            "tsymex_rfc0005_s8bw_remainder",
+            # RFC-0005 S8bp: every checkCapped search and the per-thread
+            # kind probes in contexts of their own (no step's cost moves
+            # with the walk's state; a thread's first walk searches as its
+            # second); a membership and a negated one on one string
+            # decided as one (the unbounded endsWith run on Z3 4.13.4).
+            # Walker 214->219.
+            "tsymex_rfc0005_s8bp_isolation",
+            # RFC-0005 S8bu -- S8bs's remainder: the signed bv2int bridge's
+            # inverse facts and a finite default queryRLimit (no walk runs
+            # forever); walker 225.
+            "tsymex_rfc0005_s8bu_term",
+            # items 2-3: closure and proc-value calls into an address-taken
+            # variable, and `addr` of a part of one.
+            "tsymex_rfc0005_s8bu_calls",
+            # item 4: openArray views (read, `var`).
+            "tsymex_rfc0005_s8bu_views",
+            "tsymex_rfc0005_s8bu_varviews",
+            # item 4: mitems / mpairs.
+            "tsymex_rfc0005_s8bu_mitems",
+            # items 5-6: an array element on a path into an address-taken
+            # variable; a by-value seq whose whole address is taken.
+            "tsymex_rfc0005_s8bu_paths",
             # RFC-0005 S8br -- S8bk's remainder: a call in a by-address
             # actual's index is evaluated once, where the argument stands;
             # a check no snapshot carries declines only when a later

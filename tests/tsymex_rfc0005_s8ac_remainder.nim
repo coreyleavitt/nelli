@@ -210,6 +210,10 @@ proc sutAlias(h: Box, v: int) =
   if h.n == 5:
     symexTarget("al")
 
+proc sutAliasNative(h: Box, v: int) =
+  ## `sutAlias`'s call, natively (RFC-0005 S8bs).
+  setAl(h.n, h, v)
+
 suite "S8ac (1): writes through a var parameter":
 
   template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
@@ -258,14 +262,20 @@ suite "S8ac (1): writes through a var parameter":
     ## target.
     verdict(sutFinallyOuter, "fo", sxSat)
 
-  test "a var actual that the callee may also reach declines, scoped":
+  test "a var actual that the callee may also reach goes by reference":
     ## `setAl(h.n, h, v)` writes `h.n` through both the parameter and `h`;
-    ## a copy-in / copy-out write-back would pick one order.
+    ## a copy-in / copy-out write-back would pick one order, so S8ac
+    ## declined it. RFC-0005 S8bs passes a heap lvalue by reference in
+    ## general (S8ba's `byRefSub`): both writes land on the one cell in the
+    ## callee's order, as in Nim (`h.n = 5` last, so the label is reached).
     let r = symexFind(sutAlias, tLabel("al"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedOp)
     check not r.errors.hasKind(weInternalWalkerFault)
+    let h = Box(n: 0)
+    sutAliasNative(h, 3)
+    check h.n == 5
 
 # ---- (2) exact `start div y` ------------------------------------------------
 

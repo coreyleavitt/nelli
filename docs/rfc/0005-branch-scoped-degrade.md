@@ -14277,6 +14277,16 @@ refc with `-d:danger`).
   batch 9's closure form), a read too. A call returning `var T` as a `var` actual
   (`rab(t["a"], t, "a")`) lost the callee's write, on main too; it declines.
 
+A target in a callee's body, reached ahead of the call's own decline. `userCallStmt`
+put its aliasing declines among the write-backs, after the body: `f(s[0], s[0])` with
+`a = 99` and a read of `b` was a false `sxSat` on main too. They now stand before the
+call. A closure call's did stand before it, but a closure body starts from a fresh path
+with no taint and an empty pc, so neither the decline nor the caller's branches reached
+a target in it: `gw(gs)` through a `var` proc value and `if n != 77: f(n)` with
+`a == 77` in the body were false `sxSat`s, on main too. The body now starts tainted
+with the call's pending decline and the calling path's taint, and a hit in it is
+solved under the calling path's pc (`closureBodyCallerPc`).
+
 `feTableIterOrder` does not protect these, by observation at `e497dcf`: a one-entry
 table is clean (`rsNotNeeded`, no path taint) and gave `one_copy` `sxSat` and
 `one_shared` `sxUnsat`, both false; a two-entry table replays a witness

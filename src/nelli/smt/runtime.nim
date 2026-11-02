@@ -2517,6 +2517,17 @@ var lastDrainedClosureExitPc {.threadvar.}: seq[Z3Bool]
   ## evaluation order (`rskClosureExit`), so a raise evaluated before a
   ## closure call does not carry the facts that the call completed.
 
+var currentCallerTaint {.threadvar.}: Taint
+  ## RFC-0005 S8cn. The taint of the path a closure call is lowered on: a target
+  ## in the body is reached on it (`applyClosureGround`).
+
+var currentCallerPc {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8cn. The branch conditions of that path. The body descends from an
+  ## empty pc, since its axioms guard on its own branches.
+var closureBodyCallerPc {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8cn. What a target in the body being walked must also hold: the
+  ## conditions on every calling path out to the routine (`isTargetLabel`).
+
 proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   ## Phase 15 R1b / CR-5. Mirror a path's logical-heap state (and liveRefs)
   ## into the caller-heap threadvars so a CLOSURE call lowered out of `p.env`
@@ -2532,6 +2543,8 @@ proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   currentCallerHeapDepth = p.heapDepth
   currentCallerAllocCounters = p.allocCounters
   currentCallerLiveRefs = p.liveRefs                     ## Phase 15 CR-5
+  currentCallerTaint = p.taint                           ## RFC-0005 S8cn
+  currentCallerPc = p.pc                                 ## RFC-0005 S8cn
   # Reset the exit-heap threadvars so a non-heap-writing closure doesn't
   # carry the PREVIOUS call's exit heap forward to the next call.
   currentClosureDidMutateHeap = false                     ## Phase 15 CR-1
@@ -22693,7 +22706,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # `scSpurious`-tainted path is a CANDIDATE (`admitSolvedHit`): the
         # enlarged program reaches the label, reality is unknown until S10's
         # replay, and it blocks `sxUnsat` without ever halting the walk.
-        let (st, wit, candErrs, why) = solveTargetHit(w, p)
+        # RFC-0005 S8cn: in a closure body, the calling path's branches too. Its
+        # pc starts empty: `if n != 77: f(n)` with `a == 77` in the body was a
+        # false `sxSat` (a named callee keeps the pc).
+        let solveOn = if closureBodyCallerPc.len == 0: p
+                      else: forkPath(p, closureBodyCallerPc & p.pc, p.env)
+        let (st, wit, candErrs, why) = solveTargetHit(w, solveOn)
         case st
         # RFC-0005 S1: `pathTaint` is PRODUCED here -- the hitting path's
         # taint, which `admitSolvedHit` routes on.
@@ -24807,9 +24825,23 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                            ty: descentBase.env[an].ptrPointee, path: @[],
                            ixs: @[], bound: false, view: false, slot: "")
     boundCaps.add (cell: cell, p: descentBase.env[an])
+  # RFC-0005 S8cn: a decline this call has already made (`closureDegrade`) waits,
+  # in `pending`, for the path consuming the call's value, and a target in the
+  # body was reached before that, clean, on what the decline says is not modelled:
+  # `gw(gs)` through a `var` proc value, a false `sxSat`. The body starts with it
+  # too, and the consuming path still gets its own (`restorePendingLowerEffects`).
+  # So with a decline the calling path has already passed (`f(t["a"], t)`'s marker).
+  let bodyEntry =
+    if pending.pendingTaint + currentCallerTaint != {}:
+      forkPathTainted(descentBase, descentBase.pc, descentBase.env,
+                      Degrade(path: pending.pendingTaint + currentCallerTaint))
+    else: descentBase
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
+  let outerBodyPc = closureBodyCallerPc
+  closureBodyCallerPc = outerBodyPc & currentCallerPc
   let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
-                         @[descentBase], w)
+                         @[bodyEntry], w)
+  closureBodyCallerPc = outerBodyPc
   let frame = w.callStack[frameIx]
   # RFC-0005 S7: capture the raises that escaped the body's own handlers
   # BEFORE `popFrame` discards the closure frame (as the `isCall` arm does);
@@ -26578,6 +26610,9 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
   newFieldZeroErrors = @[]               ## Cluster H Step C: reset isNew-zero-write sink
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
+  closureBodyCallerPc = @[]              ## RFC-0005 S8cn
+  currentCallerTaint = {}                ## RFC-0005 S8cn
+  currentCallerPc = @[]                  ## RFC-0005 S8cn
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink

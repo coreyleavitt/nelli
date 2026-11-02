@@ -186,6 +186,46 @@ proc iTwoInBody(n: int) =
   guardN()
   var s = @[n]
   twoInBody(s[0], s[0])
+# A closure call's decline, with the target in the body.
+proc gwBody(a: seq[int]) =
+  gs[0] = 99
+  if a[0] == 99: symexTarget("cg_new")
+  else: symexTarget("cg_old")
+proc cGlobal(n: int) =
+  guardN()
+  gs = @[n]
+  var f = gwBody
+  f(gs)
+proc cLambda(n: int) =
+  guardN()
+  var s = @[n]
+  let f = proc (a: seq[int]) =
+    s[0] = 99
+    if a[0] == 99: symexTarget("cl_new")
+    else: symexTarget("cl_old")
+  f(s)
+proc tvBody(v: var int; t: Table[string, int]) =
+  v = 99
+  if t["a"] == 99: symexTarget("cv_new")
+  else: symexTarget("cv_old")
+proc cVarCall(t0: Table[string, int]) =
+  guardT()
+  var t = t0
+  var f = tvBody
+  f(t["a"], t)
+# The calling path's branches hold in the body.
+proc pcBody(a: int) =
+  if a == 77: symexTarget("cp_never")
+proc cPcVar(n: int) =
+  var f = pcBody
+  if n != 77: f(n)
+proc cPcLambda(n: int) =
+  let f = proc (a: int) =
+    if a == 77: symexTarget("cp_never")
+  if n != 77: f(n)
+proc cPcLive(n: int) =
+  var f = pcBody
+  if n > 70: f(n)
 proc iNoWrite(n: int) =
   guardN()
   var s = @[n]
@@ -466,6 +506,22 @@ suite "S8cn: seq `items` with a write in the body":
     nativeSees(iTwoInBody, "tb_new", "tb_old")
     check symexFind(iTwoInBody, tLabel("tb_new")).status == sxUnknown
     check symexFind(iTwoInBody, tLabel("tb_old")).status == sxUnknown
+  test "a target in the body of a declined closure call: never a false sxSat":
+    nativeSees(cGlobal, "cg_new", "cg_old")
+    nativeSees(cLambda, "cl_new", "cl_old")
+    nativeSeesT(cVarCall, "cv_new", "cv_old")
+    for r in [symexFind(cGlobal, tLabel("cg_old")),
+              symexFind(cLambda, tLabel("cl_old")),
+              symexFind(cVarCall, tLabel("cv_old"))]:
+      check r.status == sxUnknown
+  test "a target in a closure body: the calling path's branches hold":
+    for n in [-1, 0, 76, 77, 78, 177]:
+      check "cp_never" notin hits(cPcVar(n))
+      check "cp_never" notin hits(cPcLambda(n))
+    check "cp_never" in hits(cPcLive(77))
+    check symexFind(cPcVar, tLabel("cp_never")).status == sxUnsat
+    check symexFind(cPcLambda, tLabel("cp_never")).status == sxUnsat
+    check symexFind(cPcLive, tLabel("cp_never")).status == sxSat
   test "no write to the container: decided":
     decided(iNoWrite, "nw_live", sxSat); decided(iNoWrite, "nw_dead", sxUnsat)
     decided(iOther, "io_live", sxSat); decided(iOther, "io_dead", sxUnsat)

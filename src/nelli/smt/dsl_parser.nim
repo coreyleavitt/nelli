@@ -14608,18 +14608,40 @@ proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
         ix = ix[^1]
       if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: computed = true
       if t[0].typeKind == ntySequence:
-        if t[0].kind != nnkSym or seqStep: return
+        # RFC-0005 S8bz (item 1): a `var` parameter's seq too.
+        if addrRootSym(t[0]) == nil or seqStep: return
         seqStep = true
       t = t[0]
     else: break
   # RFC-0005 S8bw (item 3): a `var` parameter's arm field too.
+  # RFC-0005 S8bz (item 5): a module-level root too. Its seq or arm can also
+  # change under a call the statement makes (`mayResizeSeq`, `mayRearm`).
   let root = addrRootSym(t)
-  if root == nil or isModuleGlobal(root): return
+  if root == nil: return
   if not seqStep and not computed and not armStep: return
   # RFC-0005 S8be: one root at a time (an arm field under a seq element
   # is two ways to go stale).
   if seqStep and armStep: return
   (a, (if seqStep: root else: nil), (if armStep: root else: nil))
+
+proc isRootOf(n, o: NimNode): bool =
+  ## RFC-0005 S8bz (item 1). `n` names the variable `o`, through a `var`
+  ## parameter's implicit dereference.
+  isSymOf(n, o) or
+    (n.kind == nnkHiddenDeref and n.len == 1 and isSymOf(n[0], o))
+
+proc callMayReachGlobal(n: NimNode): bool =
+  ## RFC-0005 S8bz (item 5). Statement `n` calls a user routine or a proc
+  ## value, which may reach a module-level variable by name.
+  if n.kind in {nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix} and
+     n.len > 0 and n[0].kind == nnkSym:
+    if isUserCallee(n[0]): return true
+    if symKind(n[0]) in {nskVar, nskLet, nskParam}: return true
+  elif n.kind in {nnkCall, nnkCommand}:
+    return true
+  for c in n:
+    if callMayReachGlobal(c): return true
+  false
 
 proc mayRearm(n, o: NimNode): bool =
   ## RFC-0005 S8be. Statement `n` may change the arm of the case object
@@ -14635,10 +14657,10 @@ proc mayRearm(n, o: NimNode): bool =
       return true
     return false
   of nnkDotExpr:
-    if n.len == 2 and isSymOf(n[0], o): return false
+    if n.len == 2 and isRootOf(n[0], o): return false
   of nnkCheckedFieldExpr:
     if n.len >= 1 and n[0].kind == nnkDotExpr and n[0].len == 2 and
-       isSymOf(n[0][0], o):
+       isRootOf(n[0][0], o):
       return false
   of RoutineNodes:
     return mentionsSym(n, o)
@@ -14662,7 +14684,7 @@ proc mayResizeSeq(n, s: NimNode): bool =
       return true
     return false
   of nnkBracketExpr:
-    if n.len == 2 and isSymOf(n[0], s):
+    if n.len == 2 and isRootOf(n[0], s):
       return mayResizeSeq(n[1], s)
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
     if n.len >= 2 and n[0].kind == nnkSym and not isUserCallee(n[0]) and
@@ -14670,7 +14692,7 @@ proc mayResizeSeq(n, s: NimNode): bool =
                                "mitems", "mpairs", "contains", "find", "$",
                                "==", "!="]:
       for j in 1 ..< n.len:
-        if not isSymOf(n[j], s) and mayResizeSeq(n[j], s): return true
+        if not isRootOf(n[j], s) and mayResizeSeq(n[j], s): return true
       return false
   of RoutineNodes:
     return mentionsSym(n, s)
@@ -14703,6 +14725,15 @@ proc substAddrAlias(n, p, addrNode: NimNode): NimNode =
   if n.len == 0: return n
   result = copyNimNode(n)
   for c in n: result.add substAddrAlias(c, p, addrNode)
+
+proc markCheckOnly(st: IRStmt): IRStmt =
+  ## RFC-0005 S8bz (item 5). `st` is the read Nim's index check makes where
+  ## `addr` evaluates its operand: its value is never used.
+  result = st
+  if st.kind == isBlock:
+    for c in st.stmts: discard markCheckOnly(c)
+  elif st.kind == isIndex:
+    st.ixCheckOnly = true
 
 proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8l. Parse the statements `items[start ..^ 1]` of one statement
@@ -14771,7 +14802,9 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
         var rest: seq[NimNode]
         var cur = al.addrNode
         if checkAt:
-          rest.add newTree(nnkDiscardStmt, copyNimTree(al.addrNode[0]))
+          # RFC-0005 S8bz (item 5): the check reads no value (`ixCheckOnly`).
+          stmts.add markCheckOnly(parseStmt(newTree(nnkDiscardStmt,
+                                    copyNimTree(al.addrNode[0])), ctx))
         var stale = false
         for r in items[k + 1 ..< items.len]:
           let rp = addrRepoint(r, al.p)
@@ -14781,8 +14814,11 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
             armRoot = nil
             stale = false
             continue
+          let globalRoot = (seqRoot != nil and isModuleGlobal(seqRoot)) or
+                           (armRoot != nil and isModuleGlobal(armRoot))
           let resizes = seqRoot != nil and mayResizeSeq(r, seqRoot) or
-                        armRoot != nil and mayRearm(r, armRoot)
+                        armRoot != nil and mayRearm(r, armRoot) or
+                        (globalRoot and callMayReachGlobal(r))
           if (stale or resizes) and mentionsSym(r, al.p):
             if armRoot != nil:
               # RFC-0005 S8be: an arm field's pointer after its object may

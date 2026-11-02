@@ -1033,7 +1033,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## the lvalue reads). Provisional 229 (224-228 held). 223->229.
     ## RFC-0005 batch 7: S8bp, S8bu and S8br stacked on batch 6, and a
     ## `var openArray` view a later argument writes declined. 230->237.
-    check symexWalkerVersion == "237"
+    check symexWalkerVersion == "241"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

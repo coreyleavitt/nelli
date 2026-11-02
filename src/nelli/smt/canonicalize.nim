@@ -203,7 +203,11 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "237"
+const symexWalkerVersion* = "241"
+  ## RFC-0005 S8bz (provisional 241) -- S8bw's remainder. See the "As landed
+  ## (S8bz)" notes in the RFC. A computed index into a module-level array, or
+  ## a module-level or `var` parameter seq, is S8ax's alias (item 5).
+  ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their
   ## bullets follow, each naming its provisional number. The stack's own

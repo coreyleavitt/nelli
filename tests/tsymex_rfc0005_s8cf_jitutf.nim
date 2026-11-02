@@ -5,8 +5,8 @@
 ## that starts inside a multi-byte newline; the search's languages decline it
 ## and the walker reads the call at points. Each is compared with the library,
 ## and each language with the concrete reference. Parts 1 to 4 (the `_b` to `_e`
-## files) split the concrete comparison so each file runs under 60 s on the
-## Windows legs; part 0 holds the languages and the walker.
+## files) split both comparisons by head so each file runs under 60 s on the
+## Windows legs; part 0 holds the walker.
 when not declared(s8cfJuPart):
   const s8cfJuPart = 0
 import std/[unittest, re, strutils]
@@ -54,7 +54,7 @@ proc anyNo(s: string) =
     symexTarget("cf_ju_any_no")
 
 when s8cfJuPart != 0:
-  suite "S8cf: UTF mode under the JIT's scan, concrete":
+  suite "S8cf: UTF mode under the JIT's scan, by head":
     test "concrete calls against native":
       if pcreSearchEngine() != peJit837:
         skip()
@@ -90,14 +90,13 @@ when s8cfJuPart != 0:
         check bad.len == 0
         check scanned > 10
 
-else:
-  suite "S8cf: UTF mode under the JIT's scan":
     test "search languages against the concrete reference":
       var runs, jitOn = 0
       var bad: seq[string]
       let ws = words(2)
       for cv in ["(*UTF)", "(*UTF)(*CRLF)"]:
-        for h in heads:
+        for hi, h in heads:
+          if hi mod 4 != s8cfJuPart - 1: continue
           for t in ["", "(*SKIP)"]:
             let p = cv & h & t
             let pr = parsePcre(p)
@@ -131,7 +130,10 @@ else:
       for b in bad: echo "  ", b
       check bad.len == 0
       check jitOn > 0
-      # Stated by name, and the walker's route below decides the calls.
+
+else:
+  suite "S8cf: UTF mode under the JIT's scan":
+    test "the language declines (*ANY) under the scan":
       let an = buildNfa(parsePcre("(*UTF)(*ANY)\\sb(*SKIP)"), peJit837)
       let al = searchLangV(an, "cfju:any", skFirst, pcOther)
       check not al.ok and "multi-byte newline" in al.why

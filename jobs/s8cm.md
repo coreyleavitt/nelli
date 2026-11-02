@@ -27,3 +27,6 @@ state = "pending"
 
 ## Added by batch 9
 Take the full table of suites over 60 s (compile + run) from symex-mingw run 41516396577 at e497dcf. Over 100 s: `configdefaults_depth` 178, `s8bc_remainder_c` 157, `s8ab_letaudit` 131, `s8ax_remainder` 130, `s8ar_remainder` 118, `s8bn_remainder` 117, `s8bh_remainder` 113, `s8s_precision` 108. Shard 0 is at 37.3 min and shard 10 at 36.7 against the 40-minute limit, so the shards are close to their budget: report the headroom and rebalance as well as splitting.
+
+## Added by S8cd
+`s8cd_setorder_small` 88 s, `s8cd_setorder_large` 68 s, `s8cd_globals` 64 s, on Windows at 1ca792d. Bring them under 60 s once batch 10 has landed.

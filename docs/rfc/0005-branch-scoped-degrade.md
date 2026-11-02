@@ -492,6 +492,11 @@ title = "Batch 8's remainder: step 1d's adversarial pins, bt_limit_replace on Z3
 state = "done"
 
 [[slice]]
+id = "S8cq"
+title = "Batch 9's findings: by-value sharing on direct calls, direct var-returning actuals, a call evaluated twice under inc and swap, and the declines beside them"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

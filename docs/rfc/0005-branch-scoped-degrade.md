@@ -9380,6 +9380,46 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   after the summarised call (`sxRaised`, as Nim raises); the untyped
   `pointer` `nil` still declines.
 
+**Batch 8 (2026-11-02) — one walker number for two slices.** S8bx and S8bt
+(each provisional: 228, 224) land stacked on batch 7, in that order:
+`symexWalkerVersion` 237 -> **241**, the CR2 `==` pin 241, each slice's `>=`
+floor unchanged, the batch's floor in `tsymex_rfc0005_b8_integration`. Where
+slices met:
+- *One location mechanism.* S8bx's `cViewAliases` was the local model of S8bs's
+  address cells, with the reconciliation left for this meeting. A view is a
+  `slot` entry of `CallFrameCtx.addrCells` (the callee's Table formal and the
+  key), synced by `syncAddrCells` with snapshots from the `walk` wrapper; a
+  Table has no heap cell (`addr t` declines), so the location is its value in
+  `Env`. `snapViewAliases`, `syncViewAliases`, `viewSnapPrefix` and
+  `CallFrameCtx.viewAliases` are gone, `cViewAliases` and `bindViewAliases`
+  stay as the binding. S8bx's sync ran between a block's statements, so a callee of
+  one statement was never synced: SOUNDNESS, `only_dead` a false `sxSat`.
+- *The view after a Table write.* S8bl stored view writes into the table and
+  nothing carried the reverse: `t[k] = 50; if v == 50` read the head-of-loop
+  value by name, through a `var` formal, a capture or a global's name (a false
+  `sxSat` on the negation in all four, native 50). `mutViewWriteBack` now
+  places a reload after each such statement and on entry to a handler, and a
+  removed key declines there.
+- *A global or captured Table.* A callee holding the view that reaches the
+  Table by name was a false `sxUnsat` (S8an's guard looked at the actual's root,
+  `v`). The Table's root joins `cGuardRoots` and the access declines.
+- *One isolated, bounded solve.* S8bt's step 0 built a second isolated context
+  for queries without a recursive application and ran in place for the others,
+  on the reasoning that a translated query loses the definition. A probe on
+  both pinned Z3s refutes that: a translated query keeps it. Step 0 is one
+  `ownContextSolver` / `ownContextCheck` under S8bt's `recFactsRLimit`, and
+  `hasRecursiveApp` is gone.
+- *A raise in a solve.* S8bx's hook covered extraction. A raise from
+  `ownContextCheck` at the target's solve, past a loop, was the same loss on C:
+  a false `sxUnsat` with no error. `solveRaiseHook` spans `checkCapped`; a lost
+  raise answers `zsUnknown`, so nothing prunes on it; `Z3Error`s keep S8m's
+  kinds. The root (`termDestroy`) is S8ce's.
+- *S8bu's elements.* An `mitems` / `mpairs` element passed on to a `var` formal
+  aborted the compile (`classifyType` of S8ba's untyped `nnkHiddenAddr`).
+  Passing the element with its seq declines, on a local seq and a global.
+- *`seqWitnessReader`.* S8bd's `distinct` seq elements (batch 5's) are one more
+  arm of S8bx's classifier, `swrDistinct`, rather than the predicate S8bx removed.
+
 **Batch 7 (2026-10-04) — one walker number for three slices.** S8bp, S8bu
 and S8br (each provisional: 219, 225, 229) land stacked on batch 6, in
 that order: `symexWalkerVersion` 230 -> **237**, the CR2 `==` pin 237, each

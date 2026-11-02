@@ -1039,7 +1039,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## string). 213->228 (provisional).
     ## RFC-0005 S8bt (an unverified libpcre declines every regex call; the
     ## rest of S8bj's remainder). Provisional 224.
-    check symexWalkerVersion == "237"
+    ## RFC-0005 batch 8: S8bx and S8bt stacked on batch 7, one location for
+    ## an `mpairs` view, a table write seen through it, a raise in an
+    ## own-context solve a fault. 237->241.
+    check symexWalkerVersion == "241"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

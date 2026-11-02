@@ -203,7 +203,21 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "237"
+const symexWalkerVersion* = "241"
+  ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
+  ## one integration branch under ONE walker number; their bullets follow the
+  ## batch 7 block, each naming its provisional number. The stack's own
+  ## changes: S8bx's view / Table sync is S8bs's (`AddrCellEntry.slot`,
+  ## `syncAddrCells`), so it runs after every statement. S8bt's step 0 is one
+  ## `ownContextSolver`, as every `checkCapped` step: a translated query keeps
+  ## its recursive definitions. SOUNDNESS: a callee of one statement holding
+  ## the view and its Table was never synced; a write through the Table was
+  ## not seen through the view (`mutViewWriteBack`'s reload); a callee holding
+  ## the view and reaching the Table by a global's name or a capture had two
+  ## copies (`cGuardRoots`); a raise in an own-context solve was lost on C, a
+  ## false sxUnsat (`solveRaiseHook`). An element of `mitems` passed on to a
+  ## `var` formal no longer aborts the compile. 237 -> 241.
+  ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their
   ## bullets follow, each naming its provisional number. The stack's own

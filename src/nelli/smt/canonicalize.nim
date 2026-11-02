@@ -203,7 +203,12 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "249"
+const symexWalkerVersion* = "260"
+  ## RFC-0005 S8cs (260, local until the merge renumbers it) -- the stores the walk
+  ## does not see. A program's globals carry `hiddenRoute` from the macro-time
+  ## route analysis (lifetime hooks, code it cannot list), and a read of such a
+  ## global declines (`feGlobalRouteUnproved`). `!hidden` is in the global's key.
+  ##
   ## RFC-0005 S8cd (249; batch 9's 245 before it) -- precision over proc-value results and
   ## globals, and one soundness fix. A call through a proc value with no
   ## resolved target carries its return type (`ccRetTy`, in the key as
@@ -6164,7 +6169,8 @@ proc canonicalize*(prog: SymexProgram): string =
   var glParts: seq[string]
   for g in prog.globals:
     glParts.add g.name & ":" & canonicalize(g.ty) & "=" &
-      (if g.init == nil: "free" else: canonicalize(g.init))
+      (if g.init == nil: "free" else: canonicalize(g.init)) &
+      (if g.hiddenRoute.len > 0: "!hidden" else: "")   ## RFC-0005 S8cs
   let glPart = if glParts.len == 0: "" else: ";gl=[" & glParts.join(",") & "]"
   "Pg<params=[" & paramParts.join(",") & "];body=" &
     canonicalize(prog.body, env) &

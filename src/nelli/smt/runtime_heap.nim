@@ -2611,6 +2611,19 @@ proc ptrHeapArmCond(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
       if not arm.isElse:
         result.cond = result.cond and not variantDiscEq(disc, int64(arm.tagOrdinal))
 
+proc ptrRouteDecline(p: Path; ptrAst: Z3AnyAst; what: string): string =
+  ## RFC-0005 S8cs. A dereference of a pointer the walk did not allocate on this
+  ## path reads whatever it addresses, as a read of its name does (`lower`'s
+  ## `iekVar` arm): a variable a store the walk does not see may reach, one the
+  ## program does not name included. The decline message, or "".
+  let hidden = globalHiddenRoute(routeAnyStore)
+  if hidden.len == 0: return ""
+  for rs in p.liveRefs.values:
+    for r in rs:
+      if r.raw == ptrAst.raw: return ""
+  "a `ptr " & what & "` of unknown origin may address a variable a store the " &
+    "walk does not see may reach: " & hidden & " (feGlobalRouteUnproved)"
+
 proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                 pointee: IRType; refSort: RawZ3Sort; typeId: string):
     tuple[sel: Z3AnyAst; targets: seq[PtrTarget]; decline: string] =
@@ -2619,13 +2632,15 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   ## it reads into `p.heaps` and asserts each field target's freshness
   ## facts into `p.pc` (`p` is the caller's own fork). `decline` names a
   ## location the model has no cell for.
-  if not ptrScalarPointee(pointee): return
   # A pointer the walk allocated on this path (a `new`, an `addr` cell) is
   # its own cell (`ptrSelOwnAtAlloc`): no candidates, nothing to decline.
   # Hash-consing makes the allocation's constant the same AST wherever the
   # pointer flowed (a callee's formal, a closure's argument).
   for r in p.liveRefs.getOrDefault(typeId, @[]):
     if r.raw == ptrAst.raw: return
+  result.decline = ptrRouteDecline(p, ptrAst, $pointee)   # RFC-0005 S8cs
+  if result.decline.len > 0: return
+  if not ptrScalarPointee(pointee): return
   var scratch: seq[Z3Bool]
   let proto = allocateSym(pointee, "__ptrTargetProto", scratch)
   let valSort = heapValueSort(ctx, proto, pointee)
@@ -3440,6 +3455,11 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             msg: "witness involves unmanaged ptr")
           ptrFamilyHints.add ptrHint
           w.ptrFamilyHints.add ptrHint
+          let routeWhy = ptrRouteDecline(p, refAst, $objTy)   # RFC-0005 S8cs
+          if routeWhy.len > 0:
+            survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+              "__ptrRouteRead", heapArmDegrade(feGlobalRouteUnproved, routeWhy))
+            continue
         for cp0 in nilDerefFork(p, refAst, objTy, w):
           if w.shouldStop: return survivors
           # Materialise the disc heap (D1 `__@disc`, value sort = vDiscTy) and
@@ -3650,6 +3670,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           msg: "witness involves unmanaged ptr")
         ptrFamilyHints.add ptrHint   # threadvar: fallback
         w.ptrFamilyHints.add ptrHint # CR-9 Stage 5: LIVE WalkCtx field
+        # RFC-0005 S8cs: a scalar pointee or a field, a whole object: all of them.
+        if not stmt.dCell:
+          let routeWhy = ptrRouteDecline(p, refAst, $sortTy)
+          if routeWhy.len > 0:
+            survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+              "__ptrRouteRead", heapArmDegrade(feGlobalRouteUnproved, routeWhy))
+            continue
       # Phase 15 R5: fork the nil path (the defect) off; continue on non-nil.
       # The nil-fork keys on the OBJECT ref sort (`sortTy`) so a field access
       # through a possibly-nil object ref forks correctly (R5 composition).

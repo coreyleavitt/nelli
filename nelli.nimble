@@ -1302,6 +1302,12 @@ task test, "Run the test suite":
             # containers. Walker 227 (provisional).
             "tsymex_rfc0005_s8bw_remainder",
             "tsymex_rfc0005_s8cd_globals",
+            # RFC-0005 S8cs: the stores to a variable the walk does not see
+            # (lifetime hooks, code it cannot list) decline a read of it, and
+            # an opaque's summary aims a pointer store at every global.
+            # Walker 260 (provisional).
+            "tsymex_rfc0005_s8cs_routes",
+            "tsymex_rfc0005_s8cs_routes2",
             "tsymex_rfc0005_s8cd_ops",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
             # kind probes in contexts of their own (no step's cost moves

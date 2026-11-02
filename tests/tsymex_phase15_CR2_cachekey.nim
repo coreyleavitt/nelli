@@ -1060,7 +1060,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## a leaf pinned to a literal. 245->249.
     ## RFC-0005 S8cb (S8bo onto batch 7, and S8bo's remainder). Provisional
     ## 243 (S8bz holds 241, S8cf 242). 237->243.
-    check symexWalkerVersion == "249"
+    ## RFC-0005 S8cs: the stores the walk does not see decline a read. 249->260.
+    check symexWalkerVersion == "260"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

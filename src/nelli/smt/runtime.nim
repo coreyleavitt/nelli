@@ -13874,12 +13874,12 @@ proc limitWorldRefuted(ctx: Z3Context; query: openArray[Z3Bool];
       if j == k: continue
       let other = regexLimitSites[j]
       let ab = mkBoolVar(ctx, regexFreshName("__regexLimitHit"))
-      let v = ctx.checkErr Z3_mk_ite(ctx.raw, ab.raw, other.err.raw,
-                                     other.exact.raw)
+      let v = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, ab.raw,
+        other.err.raw, other.exact.raw))
       var next: seq[Z3Bool]
       for r in roots:
         next.add(if astId(ctx, r.raw) in other.guarded: ab or r
-                 else: swap(r, other.exact.raw, v))
+                 else: swap(r, other.exact.raw, v.raw))
       roots = next
       for c in other.errConds: roots.add c
       roots.add (not ab) or (len(other.subject) > mkInt(other.safe))

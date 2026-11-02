@@ -209,8 +209,8 @@ proc sutWrByVal(k: int) =
 
 # ---- 2. a statement-position opaque call that only reads keeps the global ----
 
-proc showI() =
-  ## An inert opaque call shape: it names `gi` and only reads it.
+proc showI() {.symexOpaque.} =
+  ## An inert opaque call: it names `gi` and only reads it.
   if gi > 100: discard
 
 proc sutOpaqueRead(k: int) =
@@ -219,6 +219,36 @@ proc sutOpaqueRead(k: int) =
   showI()
   if gi == 11: symexTarget("or")
   if gi != k: symexTarget("or_dead")
+
+proc opAsg() {.symexOpaque.} = discard wrAsg()
+proc opInc() {.symexOpaque.} = discard wrInc()
+proc opVar() {.symexOpaque.} = discard wrVar()
+proc opAddr() {.symexOpaque.} = discard wrAddr()
+proc opRet() {.symexOpaque.} = discard wrRet()
+proc opSwap() {.symexOpaque.} = discard wrSwap()
+proc opByVal() {.symexOpaque.} = discard wrByVal(gBig)
+
+template sutOpaqueWrite(name, callee, lbl: untyped) =
+  proc name(k: int) =
+    ## Natively reached: the callee writes `gi` to 1 (or swaps it with 1).
+    if k < 0 or k > 1000: return
+    gi = 0
+    callee()
+    if gi == 1: symexTarget(lbl)
+
+sutOpaqueWrite(sutOpAsg, opAsg, "oa")
+sutOpaqueWrite(sutOpInc, opInc, "oi")
+sutOpaqueWrite(sutOpVar, opVar, "ov")
+sutOpaqueWrite(sutOpAddr, opAddr, "op")
+sutOpaqueWrite(sutOpRet, opRet, "ot")
+sutOpaqueWrite(sutOpSwap, opSwap, "os")
+
+proc sutOpByVal(k: int) =
+  ## The write lands in `gBig` through a by-value formal's address.
+  if k < 0 or k > 1000: return
+  gBig[1] = 2
+  opByVal()
+  if gBig[1] == 1: symexTarget("ob")
 
 # ---- 3. an index call the walk has no symbol for ----------------------------
 
@@ -407,8 +437,30 @@ suite "S8cc: a later argument that only reads":
     declines(sutWrByVal, "wb_dead")
 
   test "an opaque call that only reads a global keeps its value":
+    ## RED: `gi` was rebound to a fresh value (`feGlobalHavoc`).
     replays(sutOpaqueRead, "or")
     discard verdict(sutOpaqueRead, "or_dead", sxUnsat)
+
+suite "S8cc: an opaque call that writes a global, however it spells it":
+
+  test "nim":
+    for f in [sutOpAsg, sutOpInc, sutOpVar, sutOpAddr, sutOpRet, sutOpSwap,
+              sutOpByVal]:
+      f(0)
+    check gBig[1] == 1
+    gi = 0
+    opSwap()
+    check gi == 1
+
+  test "the target stays reachable":
+    ## Any of these read as no write is a false `sxUnsat`.
+    check symexFind(sutOpAsg, tLabel("oa")).status != sxUnsat
+    check symexFind(sutOpInc, tLabel("oi")).status != sxUnsat
+    check symexFind(sutOpVar, tLabel("ov")).status != sxUnsat
+    check symexFind(sutOpAddr, tLabel("op")).status != sxUnsat
+    check symexFind(sutOpRet, tLabel("ot")).status != sxUnsat
+    check symexFind(sutOpSwap, tLabel("os")).status != sxUnsat
+    check symexFind(sutOpByVal, tLabel("ob")).status != sxUnsat
 
 suite "S8cc: an index call with no symbol to mark":
 

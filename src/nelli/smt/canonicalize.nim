@@ -204,6 +204,10 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "238"
+  ## RFC-0005 S8cc (237->238): S8as's write summary counts a callee's global
+  ## only where the callee may write it, and an index call with no `result`
+  ## symbol is bound once. Verdicts change from a decline to exact.
+  ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their
   ## bullets follow, each naming its provisional number. The stack's own

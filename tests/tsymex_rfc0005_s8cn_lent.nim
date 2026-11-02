@@ -178,6 +178,14 @@ proc iOpenArray(n: int) =
   guardN()
   gs = @[n]
   oaLoop(gs, n)
+proc twoInBody(a, b: var int) =
+  a = 99
+  if b == 99: symexTarget("tb_new")
+  else: symexTarget("tb_old")
+proc iTwoInBody(n: int) =
+  guardN()
+  var s = @[n]
+  twoInBody(s[0], s[0])
 proc iNoWrite(n: int) =
   guardN()
   var s = @[n]
@@ -454,6 +462,10 @@ suite "S8cn: seq `items` with a write in the body":
     declined(iElemPtr, "ie_new"); declined(iElemPtr, "ie_old")
     declined(iFormalCall, "if_new"); declined(iFormalCall, "if_old")
     declined(iOpenArray, "oa_new"); declined(iOpenArray, "oa_old")
+  test "a target in the body of a declined call declines":
+    nativeSees(iTwoInBody, "tb_new", "tb_old")
+    check symexFind(iTwoInBody, tLabel("tb_new")).status == sxUnknown
+    check symexFind(iTwoInBody, tLabel("tb_old")).status == sxUnknown
   test "no write to the container: decided":
     decided(iNoWrite, "nw_live", sxSat); decided(iNoWrite, "nw_dead", sxUnsat)
     decided(iOther, "io_live", sxSat); decided(iOther, "io_dead", sxUnsat)

@@ -7144,7 +7144,9 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       if touch.len > 0:
         for g in outerOf():
           if ("n:" & g.strVal) in touch:
-            writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+            # Before the call: a target in the body would otherwise be reached
+            # on the copy, ahead of a marker placed after it.
+            preamble.add ctx.declineAtSite(feUnsupportedOp,
               siteMsg(n, "by-value argument `" & n[i].repr & "` of `" &
                       calleeSym.strVal & "` shares its memory with `" &
                       g.strVal & "`, which the callee also reaches by name: " &
@@ -7306,7 +7308,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         # sees what a later argument's call wrote there, and the write-back
         # would overwrite that write with the stale copy (a false `sxUnsat`
         # before batch 7). S8br's frame condition decides it.
-        writeBacks.add ctx.declineAtSite(feEvalOrderUnmodelled,
+        preamble.add ctx.declineAtSite(feEvalOrderUnmodelled,
           siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
                   calleeSym.strVal & "` is copied where it stands, and a " &
                   "later argument's call may write its storage before the " &
@@ -7315,14 +7317,14 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       elif root.isNil or
          varActualMayAlias(n, i, lv, root, heapSteps, aliasConds,
                            cellsBound = true):
-        writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+        preamble.add ctx.declineAtSite(feUnsupportedOp,
           siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
                   calleeSym.strVal & "` views a location the callee may " &
                   "reach another way (or it has no root variable): the " &
                   "callee's writes to it are not modelled (feUnsupportedOp)"),
           "var openArray write-back not modelled (feUnsupportedOp)")
       elif (let g = outerReachesCell(outerOf(), heapSteps); g != nil):
-        writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+        preamble.add ctx.declineAtSite(feUnsupportedOp,
           siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
                   calleeSym.strVal & "` views a heap location the callee " &
                   "can also reach through `" & macros.strVal(g) & "`: the " &
@@ -7394,7 +7396,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
           byRefTaken = true
     if byRefTaken: continue
     if castBlocked:
-      writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+      preamble.add ctx.declineAtSite(feUnsupportedOp,
         siteMsg(n, "`var` argument `" & castLv.repr & "` of `" &
                 calleeSym.strVal & "` is reached through a `cast`, which " &
                 "may reinterpret the memory at that address: the callee's " &
@@ -7415,7 +7417,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     # false verdict on main too (batch 9 declines the closure call's form).
     if n[i].kind != nnkHiddenAddr and not plainActual(n[i]) and
        formalIsVar(calleeSym, i - 1):
-      writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+      preamble.add ctx.declineAtSite(feUnsupportedOp,
         siteMsg(n, "`var` argument `" & n[i].repr & "` of `" & calleeSym.strVal &
                 "` is not a location the walk can write back to (feUnsupportedOp)"),
         "var argument write-back not modelled (feUnsupportedOp)")
@@ -7440,7 +7442,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         if varActualMayAlias(n, i, lv, lv, @[], aliasConds,
                              seqViewElems(n, i),   ## RFC-0005 S8cn
                              cellsBound = true):   ## RFC-0005 S8bs
-          writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+          preamble.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is also reached through another " &
                     "argument: the callee's writes through the two are " &
@@ -7458,7 +7460,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         if root.isNil or
            varActualMayAlias(n, i, lv, root, heapSteps, aliasConds, peerSkip,
                              cellsBound = true):   ## RFC-0005 S8bs
-          writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+          preamble.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is not a variable and the callee " &
                     "may reach it another way (or it has no root " &
@@ -7470,7 +7472,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
           # global or a capture (`gBox.x = 5` while `p.x` is the actual and
           # `gBox == p`). Nim writes one cell in the callee's order; the
           # write-back after the call would land over the direct write.
-          writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+          preamble.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is a heap location the callee " &
                     "can also reach through `" & macros.strVal(g) & "` (a " &

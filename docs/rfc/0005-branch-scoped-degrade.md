@@ -364,7 +364,7 @@ state = "done"
 [[slice]]
 id = "S8bv"
 title = "S8bq's remainder: iterating a builtin set, set conversion across domains, pigeonhole-hard card queries, newSeqUninit taint precision (inline map/filter/fold, composite results, slices/heap cells/mapped arrays)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -9272,7 +9272,8 @@ between two domains exists in Nim). The coordinator approved replacing it
 with the precision gap the probes found: enum subranges.
 
 *Wrong or degraded verdicts at d8c3b6d, each pinned RED first*
-(`tests/tsymex_rfc0005_s8bv_remainder.nim` for items 1 and 2,
+(`tests/tsymex_rfc0005_s8bv_iter_{order,char,int8,forms}.nim` for item 1,
+`tests/tsymex_rfc0005_s8bv_subrange{,_sets}.nim` for item 2,
 `tests/tsymex_rfc0005_s8bv_card_uninit.nim` for items 3 and 4; each
 fixture is also run natively under `symexCaptureBegin`, and the verdicts
 agree with the targets a real run hits).
@@ -9325,7 +9326,7 @@ ascending order: step `i` is `if lo + i in a: (let x = lo + i; body)`.
   `bvsub` that cannot wrap, the hull of an `ite`, sign and zero extension;
   memoised per call; 4096 subterms at most) fit the width. This is the
   bit-vector sibling of `tryDischargeOverflowInt`. Measured on Z3 5.1
-  (shared host):
+  (2026-10-03, 8-core shared host; not re-measured since):
   - `inc k` over `set[range[0..127]]`: 30.3 s before (2.0 s with
     arithmetic checks off, so the forks were the cost);
   - the first-member loop over `set[char]`: killed at 600 s before, 1.2 s
@@ -9380,32 +9381,36 @@ search does not finish. With the parts named, the difference is a count of
 of a query are related pairwise. `card` itself is unchanged
 (`bsPopcount`, the balanced adder tree). A pure-LIA count and Z3
 pseudo-boolean constraints were measured too: both left all six
-pigeonhole queries undecided at 60 s.
+pigeonhole queries undecided on both versions (`unknown` at `rlimit` 20M,
+except that p4 did not finish in 60 s: pseudo-boolean on both versions,
+pure-LIA on 5.1).
 
-Measured (walker, default `seqQueryRLimit` = 20M; `set[char]` operands):
+Measured 2026-11-02 (12-core host, the pause flag absent, this job at 2
+runs, other agents' runs alongside). Walker, default `seqQueryRLimit` = 20M,
+`set[char]` operands; "before" is d8c3b6d:
 
 | Query | 5.1 before | 5.1 after | 4.13.4 before | 4.13.4 after |
 |---|---|---|---|---|
-| `card(s + {c}) > card(s) + 1` | sxUnknown, 37.9 s | sxUnsat, 2.3 s | sxUnknown, 10.2 s | sxUnsat, 1.0 s |
-| `card(s) + card(t) < card(s + t)` | sxUnknown, 28.7 s | sxUnsat, 2.7 s | sxUnknown, 12.5 s | sxUnsat, 1.4 s |
-| `card(s * t) > card(s)` | sxUnknown, 24.6 s | sxUnsat, 1.0 s | sxUnsat, 30.1 s | sxUnsat, 0.3 s |
-| `card(s - t) + card(s * t) != card(s)` | sxUnknown, 48.3 s | sxUnsat, 1.4 s | sxUnknown, 31.7 s | sxUnsat, 1.0 s |
-| `s <= t and card(s) > card(t)` | sxUnsat, 16.2 s | sxUnsat, 1.3 s | sxUnknown, 18.4 s | sxUnsat, 0.4 s |
-| `c in s and card(s - {c}) != card(s) - 1` | sxUnknown, 22.7 s | sxUnsat, 1.1 s | sxUnknown, 24.0 s | sxUnsat, 0.5 s |
-| sat control: cards 100, 100, intersection 50 | sxSat, 0.3 s | sxSat, 4.5 s | sxSat, 0.9 s | sxSat, 1.1 s |
-| sat control: `card(s) == 3` | sxSat, 0.1 s | sxSat, 0.7 s | sxSat, 0.3 s | sxSat, 0.3 s |
+| `card(s + {c}) > card(s) + 1` | sxUnknown, 10.8 s | sxUnsat, 0.3 s | sxUnknown, 11.4 s | sxUnsat, 0.3 s |
+| `card(s) + card(t) < card(s + t)` | sxUnknown, 12.7 s | sxUnsat, 0.4 s | sxUnknown, 11.5 s | sxUnsat, 0.3 s |
+| `card(s * t) > card(s)` | sxUnknown, 10.5 s | sxUnsat, 0.1 s | sxUnsat, 11.3 s | sxUnsat, 0.1 s |
+| `card(s - t) + card(s * t) != card(s)` | sxUnknown, 9.8 s | sxUnsat, 0.2 s | sxUnknown, 10.9 s | sxUnsat, 0.2 s |
+| `s <= t and card(s) > card(t)` | sxUnsat, 7.3 s | sxUnsat, 0.2 s | sxUnknown, 9.5 s | sxUnsat, 0.3 s |
+| `c in s and card(s - {c}) != card(s) - 1` | sxUnknown, 9.1 s | sxUnsat, 0.2 s | sxUnknown, 8.6 s | sxUnsat, 0.2 s |
+| sat control: cards 100, 100, intersection 50 | sxSat, 0.16 s | sxSat, 0.75 s | sxSat, 0.15 s | sxSat, 0.60 s |
+| sat control: `card(s) == 3` | sxSat, 0.05 s | sxSat, 0.09 s | sxSat, 0.04 s | sxSat, 0.08 s |
 
 In Z3 units (the same six queries as SMT-LIB, a fresh context each,
 `rlimit` 20M, `random_seed` 0), before and after:
 
 | Query | 5.1 before | 5.1 after | 4.13.4 before | 4.13.4 after |
 |---|---|---|---|---|
-| p1 `card(s + {c})` | not decided in 60 s | 1,232,887 | not decided in 60 s | 405,128 |
-| p2 union | unknown, 20,009,722 | 673,324 | not decided in 60 s | 482,239 |
-| p3 intersection | not decided in 60 s | 173,715 | not decided in 60 s | 171,280 |
-| p4 split | unknown, 20,015,884 | 296,841 | not decided in 60 s | 299,912 |
-| p5 subset | unsat, 16,569,213 | 933,043 | not decided in 60 s | 568,097 |
-| p6 `excl` | not decided in 60 s | 693,610 | unknown, 20,009,254 | 502,947 |
+| p1 `card(s + {c})` | unknown, 20,007,174 | 1,232,887 | unknown, 20,007,174 | 405,128 |
+| p2 union | unknown, 20,009,722 | 673,324 | unknown, 20,009,722 | 482,239 |
+| p3 intersection | unknown, 20,010,246 | 173,715 | unsat, 19,885,311 | 171,280 |
+| p4 split | unknown, 20,015,884 | 296,841 | unknown, 20,015,884 | 299,912 |
+| p5 subset | unsat, 16,569,213 | 933,043 | unknown, 20,006,158 | 568,097 |
+| p6 `excl` | unknown, 20,009,254 | 693,610 | unknown, 20,009,254 | 502,947 |
 | q1 (sat) | sat, 1,320,449 | 9,390,340 | sat, 1,370,499 | 2,905,611 |
 
 The satisfiable three-count control pays for its three pairs of

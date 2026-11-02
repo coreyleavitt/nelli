@@ -1062,6 +1062,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8cd: proc-value results, global entry cells (a false sxUnsat),
     ## case-object globals, set order (false verdicts both ways), receivers,
     ## a leaf pinned to a literal. 245->249.
+    ## RFC-0005 S8cl (a bodiless magic is modelled or declines, `unsafeNew`
+    ## and `newString` allocate, `setLen` reads after its length). 245->248.
     check symexWalkerVersion == "252"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

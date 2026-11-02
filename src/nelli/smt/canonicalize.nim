@@ -239,6 +239,16 @@ const symexWalkerVersion* = "252"
   ## Table in one call (`closureTakesView`, a false sxSat), a by-value location
   ## the body also reaches (`byValueTouch`, a false sxUnsat), a call returning
   ## `var T` as a `var` actual (a false sxSat). Each declines. 241 -> 245.
+  ## RFC-0005 S8cl (2026-11-02, provisional) -- S8ca's remainder. A bodiless
+  ## magic is modelled or declines, never a no-op. `unsafeNew` allocates
+  ## (S8bl declined it, before that it was dropped: `p != nil` a clean false
+  ## sxUnsat). `ensureMove` and `procCall`, whose bodies are empty and which
+  ## returned the zero value, decline. `setLen` evaluates its length before
+  ## it reads the old value, and declines when that length's call writes
+  ## what the place reads. `newString` and `newStringOfCap` are modelled as
+  ## fresh memory (`slFresh`, a string the path owns), where they were
+  ## opaque calls. Stacked on batch 9. 245 -> 248 (246 and 247 are taken).
+  ##
   ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
   ## one integration branch under ONE walker number; their bullets follow the
   ## batch 7 block, each naming its provisional number. The stack's own
@@ -6005,7 +6015,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # fresh name (`bindLocal`), the operands content-addressed.
     let slSlot = "$" & $bindLocal(env, s.slRetName)
     "St<SL:" & slSlot & "=" & canonicalize(s.slBase, env) & "," &
-      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) & ">"
+      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) &
+      (if s.slFresh: ";fresh" else: "") & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`

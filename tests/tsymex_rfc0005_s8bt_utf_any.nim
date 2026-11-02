@@ -59,10 +59,6 @@ suite "S8bt: (*ANY) in UTF mode":
         # Anchored calls run on the interpreter (PCRE_ANCHORED is no JIT
         # option).
         let na = buildNfa(pr)
-        if not n.ok and pcreSearchEngine() == peJit837 and
-           "U+0080..U+00BF" in n.why:
-          # The JIT's scan can start inside a character: declined there.
-          continue
         check n.ok
         if not n.ok:
           bad.add escape(p) & ": " & n.why

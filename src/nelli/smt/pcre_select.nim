@@ -1057,14 +1057,12 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
   if engine == peJit837 and not (pr.noStartOpt or so.anchored):
     # RFC-0005 S8bt: the JIT's own scan comes first.
     result.jit = jitScan(compileCode(pr), pr.utf)
-    if pr.utf and result.jit.on and result.firstBytes().contains('\xC2'):
-      # The scan steps a byte at a time and can stop inside a character,
-      # where the JIT reads a continuation byte as the code point of its
-      # value: modelled only where no first character is one of those.
-      result.ok = false
-      result.why = "UTF mode under the JIT's prefix scan, with a first " &
-        "character in U+0080..U+00BF (the JIT can start an attempt inside " &
-        "a character and read a continuation byte as that code point)"
+    # RFC-0005 S8cf (item 6): in UTF mode the scan runs only where the first
+    # items are literals and `\d \s \w` (`pcre_jit.scanPrefix`: a class, `.`
+    # and a negated type stop it). At a continuation byte a literal compares
+    # bytes (`byte_sequence_compare`) and the types read no such byte, so an
+    # attempt the scan makes inside a character fails at its first read, as
+    # the automaton's does.
 
 proc filterBytes*(n: Nfa): set[char] =
   ## RFC-0005 S8bj. The bytes the start-of-match scan stops at (`fkFirst`,
@@ -2890,7 +2888,10 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
     # RFC-0005 S8bt: the scan can stop inside a multi-byte newline, where
     # the attempt's start class (`pcU1` .. `pcU3`) has no verifier: the
     # concrete reading (`pcreExec`) is modelled, the search's languages
-    # are not.
+    # are not. RFC-0005 S8cf (item 6): the walker reads such a call at points
+    # (`regex_parser.pointNfa`). Without this decline the languages differ
+    # from the reference, and many are past the regex cap
+    # (`tsymex_rfc0005_s8cf_jitutf`).
     result.ok = false
     result.why = "UTF mode with (*ANY) under the JIT's prefix scan (an " &
       "attempt can start inside a multi-byte newline)"

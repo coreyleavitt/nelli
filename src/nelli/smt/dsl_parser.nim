@@ -15214,6 +15214,9 @@ proc nodeWritesHeap(n: NimNode; seen: var seq[NimNode]): bool =
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix:
     if n.len > 0:
       if n[0].kind != nnkSym: return true
+      # The markers' runtime side touches only its own capture state.
+      if n[0].strVal in ["symexTarget", "symexAssert", "symexAssume"]:
+        return false
       if symKind(n[0]) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
         return true
       if isUserRoutine(n[0]):

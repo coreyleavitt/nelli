@@ -411,6 +411,13 @@ proc lBefore(n: int) =
   let c = s
   if c[0] == n + 1: symexTarget("lb_live")
   else: symexTarget("lb_dead")
+proc lFormal(s0: seq[int]) =
+  # A formal, so a pointer may reach it; nothing here writes through one, and
+  # the target's own runtime call is not a write.
+  if s0.len != 1 or s0[0] > 1000 or s0[0] < -1000: return
+  let c = s0
+  if c[0] == s0[0]: symexTarget("lc_live")
+  else: symexTarget("lc_dead")
 proc lVar(n: int) =
   guardN()
   var s = @[n]
@@ -513,4 +520,6 @@ suite "S8cn: `let` over a container with a write in its life":
   test "no write after it, a `var`, an array: decided":
     decided(lBefore, "lb_live", sxSat); decided(lBefore, "lb_dead", sxUnsat)
     decided(lVar, "va_live", sxSat); decided(lVar, "va_dead", sxUnsat)
+    check symexFind(lFormal, tLabel("lc_live")).status == sxSat
+    check symexFind(lFormal, tLabel("lc_dead")).status == sxUnsat
     decided(lArr, "ar_live", sxSat); decided(lArr, "ar_dead", sxUnsat)

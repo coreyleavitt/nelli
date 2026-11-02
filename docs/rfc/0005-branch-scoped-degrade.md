@@ -9263,3 +9263,180 @@ The compile-and-run wall times were 140 s (c) and 176 s (cpp).
   - a seq nested in a composite call result declines its binding;
   - a slice, a heap cell or a mapped array that mentions a base counts as
     unwritten everywhere.
+
+
+**As landed (S8bv, walker 226 provisional) — S8bq's remainder.** The
+branch is `rfc-0005-s8bv`, on S8bq's `d8c3b6d`. All four items are done,
+and nothing is deferred. Item 2's premise was wrong (no set conversion
+between two domains exists in Nim). The coordinator approved replacing it
+with the precision gap the probes found: enum subranges.
+
+*Wrong or degraded verdicts at d8c3b6d, each pinned RED first*
+(`tests/tsymex_rfc0005_s8bv_remainder.nim` for items 1 and 2,
+`tests/tsymex_rfc0005_s8bv_card_uninit.nim` for items 3 and 4; each
+fixture is also run natively under `symexCaptureBegin`, and the verdicts
+agree with the targets a real run hits).
+- **`for x in s` over a builtin set** (item 1) declined ("unsupported
+  for-loop container kind: itBitSet") on all 21 targets.
+- **A `set[range[lo..hi]]` parameter did not compile its witness**
+  (found by item 1): it rendered as `set[int]` ("set is too large").
+- **Enum subranges** (item 2's replacement, `SE = range[a1..a2]`):
+  - a `SE` parameter and a `set[SE]` parameter were `feUnsupportedParamType`;
+  - an object with an `SE` field did not compile its witness;
+  - a `set[SE]` literal was `feUnsupportedExprKind` (`nnkCurly`);
+  - **SOUNDNESS:** an assignment, a conversion or an argument from the
+    enum into `SE` was not range-checked. `var x: SE = e1; x = e` reached
+    `ord(x) == 0` as a clean `sxSat` (witness `e0`), and the three
+    `RangeDefect` targets were false `sxUnsat`s.
+- **Pigeonhole-hard `card` queries** (item 3) ran out of `seqQueryRLimit`
+  (four `sxUnknown` pins).
+- **`newSeqUninit`** (item 4): seven pins, each tainted or declined where
+  the element read was written.
+
+*1. `for x in s` over a builtin set (`dsl_parser`, the `for` arm).*
+`system.items(set[T])` is `var i = low(T); while i <= high(T): (if T(i) in
+a: yield T(i)); inc i`. The loop is unrolled over `T`'s domain in
+ascending order: step `i` is `if lo + i in a: (let x = lo + i; body)`.
+- Each step's guard is a join (`ifJoin`). The body's survivors and the
+  skip path merge back into one path where that is exact
+  (`mergeJoinPaths`), so a 256-value domain walks 256 steps, not 2^256
+  paths. `break` leaves a block around the whole unroll; `continue`
+  leaves the body's block.
+- The argument is re-read at every step when Nim maps it directly
+  (`itemsArgDirect`, after `transf.putArgInto`: a symbol, a field or
+  deref of one, or a literal of such). So a member the body adds ahead is
+  visited, and one it removes ahead is not. Any other argument is
+  evaluated once into a temporary, before the loop. Both are pinned
+  natively.
+- A bool set binds `false` then `true`; a signed set starts at its low
+  bound.
+- **The cap.** The unroll covers a domain of at most `maxBitSetIterDomain
+  = 256` values (`char`, `int8`, `uint8`, `bool`, and any enum or range of
+  at most 256 values). A larger one (`set[int16]`) declines, scoped to
+  its path (`feUnsupportedStmtKind`, naming the cap).
+- **The witness.** A `set[range[lo..hi]]` names its range:
+  `set[range[T(lo)..T(hi)]]`.
+- **Overflow obligations (`bvOverflowDischarged`).** A counter the body
+  increments (`inc k`) is `ite(g, k + 1, k)` after each joined step. Its
+  `OverflowDefect` forks were all infeasible, but each one's boundary query
+  re-solved the whole chain, so a `set[char]` loop ran for minutes. A
+  signed bit-vector add, sub or mul now forks no obligation when its
+  operands' structural intervals (`bvSignedInterval`: numerals, `bvadd` /
+  `bvsub` that cannot wrap, the hull of an `ite`, sign and zero extension;
+  memoised per call; 4096 subterms at most) fit the width. This is the
+  bit-vector sibling of `tryDischargeOverflowInt`. Measured on Z3 5.1
+  (shared host):
+  - `inc k` over `set[range[0..127]]`: 30.3 s before (2.0 s with
+    arithmetic checks off, so the forks were the cost);
+  - the first-member loop over `set[char]`: killed at 600 s before, 1.2 s
+    after;
+  - a count over `set[char]` (`k == 2`): 17 s after, most of it the final
+    count query.
+
+*2. No set conversion between two domains; enum subranges.*
+- **Spec-assumption finding.** S8bq's remainder listed "a set conversion
+  between two different domains (a hidden conversion such as
+  `set[range[0..3]]` to `set[int8]`)". Nim has none. On the pinned
+  toolchain (Nim 2.2.10), every explicit or implicit conversion between
+  two set domains is a type mismatch: `set[int8](r)`, `set[char](rc)`,
+  `set[uint8](cs)`, `set[E](es)`, `set[SE](ef)`, `set[RJ](ri)`, the
+  arguments, assignments and operators across them. A set literal,
+  constant or constructor with differently typed elements is typed as its
+  target (`getTypeInst` of the `nnkCurly` is the target), and Nim converts
+  and range-checks each ELEMENT (S8bq item 5 models that). A typed-AST
+  walk found no set-typed `nnkHiddenStdConv`, `nnkHiddenSubConv` or
+  `nnkConv` in any shape. The only cross-domain set node is `cast`, which
+  declines as an unsafe cast. All of this is pinned natively (`compiles`,
+  a conversion-node counter, the literal's type), so a toolchain that adds
+  such a conversion trips the pins. **S8bq's decline arm for it** (the
+  hidden-conversion arm's `itBitSet` / `itBitSet` branch) was unreachable,
+  so it is removed.
+- **Enum subranges (`IRType.enumRange`, `classifyEnumSubrange`).** A
+  `range[a1..a2]` over an enum is the enum's `itInt` narrowed to the
+  subrange's ordinals and marked `enumRange`. That holds for the inline
+  spelling (whose bounds are ordinal literals typed with the enum; it
+  classified as an `int` range before) and for an alias (read off its
+  typed `getTypeImpl`; it was unsupported). With the range on the type,
+  the existing range machinery checks an assignment, a conversion and an
+  argument into it (`RangeDefect`). A member typed as the subrange
+  resolves to the enum's member (`subrangeMemberEnum`). The witness is
+  `range[E(lo)..E(hi)]`, filled through `witnessIntAs`. `enumRange` is
+  provenance only, as `isChar` is: not part of `IRType.==`, rendered by
+  `canonicalize` (`:er`), and round-tripped by `emitIRType`. Set
+  operators, `card`, membership and iteration over `set[SE]` are pinned.
+
+*3. Pigeonhole-hard `card` queries (`bitSetCardFacts`).* A query that
+relates two `card` terms of one width, `card(a)` and `card(b)`, carries
+their part identities:
+
+    card(a) == card(a and b) + card(a and not b)
+    card(b) == card(a and b) + card(b and not a)
+
+They are valid for every `a` and `b`, so the models are the query's own,
+as `divRangeFacts`' are. Bit-blasted, `card(s + {c}) > card(s) + 1`
+compares two adder trees over 256 related bits, a pigeonhole the SAT
+search does not finish. With the parts named, the difference is a count of
+`{c} - s`, which is bit-local, and Z3 refutes it at once. At most 12 terms
+of a query are related pairwise. `card` itself is unchanged
+(`bsPopcount`, the balanced adder tree). A pure-LIA count and Z3
+pseudo-boolean constraints were measured too: both left all six
+pigeonhole queries undecided at 60 s.
+
+Measured (walker, default `seqQueryRLimit` = 20M; `set[char]` operands):
+
+| Query | 5.1 before | 5.1 after | 4.13.4 before | 4.13.4 after |
+|---|---|---|---|---|
+| `card(s + {c}) > card(s) + 1` | sxUnknown, 37.9 s | sxUnsat, 2.3 s | sxUnknown, 10.2 s | sxUnsat, 1.0 s |
+| `card(s) + card(t) < card(s + t)` | sxUnknown, 28.7 s | sxUnsat, 2.7 s | sxUnknown, 12.5 s | sxUnsat, 1.4 s |
+| `card(s * t) > card(s)` | sxUnknown, 24.6 s | sxUnsat, 1.0 s | sxUnsat, 30.1 s | sxUnsat, 0.3 s |
+| `card(s - t) + card(s * t) != card(s)` | sxUnknown, 48.3 s | sxUnsat, 1.4 s | sxUnknown, 31.7 s | sxUnsat, 1.0 s |
+| `s <= t and card(s) > card(t)` | sxUnsat, 16.2 s | sxUnsat, 1.3 s | sxUnknown, 18.4 s | sxUnsat, 0.4 s |
+| `c in s and card(s - {c}) != card(s) - 1` | sxUnknown, 22.7 s | sxUnsat, 1.1 s | sxUnknown, 24.0 s | sxUnsat, 0.5 s |
+| sat control: cards 100, 100, intersection 50 | sxSat, 0.3 s | sxSat, 4.5 s | sxSat, 0.9 s | sxSat, 1.1 s |
+| sat control: `card(s) == 3` | sxSat, 0.1 s | sxSat, 0.7 s | sxSat, 0.3 s | sxSat, 0.3 s |
+
+In Z3 units (the same six queries as SMT-LIB, a fresh context each,
+`rlimit` 20M, `random_seed` 0), before and after:
+
+| Query | 5.1 before | 5.1 after | 4.13.4 before | 4.13.4 after |
+|---|---|---|---|---|
+| p1 `card(s + {c})` | not decided in 60 s | 1,232,887 | not decided in 60 s | 405,128 |
+| p2 union | unknown, 20,009,722 | 673,324 | not decided in 60 s | 482,239 |
+| p3 intersection | not decided in 60 s | 173,715 | not decided in 60 s | 171,280 |
+| p4 split | unknown, 20,015,884 | 296,841 | not decided in 60 s | 299,912 |
+| p5 subset | unsat, 16,569,213 | 933,043 | not decided in 60 s | 568,097 |
+| p6 `excl` | not decided in 60 s | 693,610 | unknown, 20,009,254 | 502,947 |
+| q1 (sat) | sat, 1,320,449 | 9,390,340 | sat, 1,370,499 | 2,905,611 |
+
+The satisfiable three-count control pays for its three pairs of
+identities: in units, 7x on 5.1 and 2x on 4.13.4. It is still decided.
+
+*4. `newSeqUninit`'s written-ness, per element (`runtime.nim`).*
+- **Inline `map` / `filter`.** A read of a possibly-unwritten element
+  deposits its condition (`uninitReadConds`). A new stage of
+  `drainScalarRaiseForks` (`drainUninitReads`, `rskUninitRead`, in
+  evaluation order) forks the continuation:
+  - clean where no read was unwritten;
+  - tainted `uninitReadKind` where one was.
+  S8bq tainted the whole path in-band (`lowerDegrade`). Only `map` and
+  `filter` reach the HOF path from Nim: `std/sequtils` has no `fold` proc,
+  and `foldl` / `foldr` are templates that expand to a loop, whose reads
+  are already per element.
+- **Composite call results.** `noteUninitReturn` pairs the result's seqs
+  with the returned value's through tuples, objects, arrays, variants and
+  distinct types, and aliases each one. S8bq aliased a seq result only and
+  declined one nested in a composite. Only a multi-axis variant is still
+  declined.
+- **Slices, heap cells, mapped arrays.** `uninitAt` reads each of them off
+  its term:
+  - a slice (`lambda j. select(base, j + lo)`) is the body at `j = k`;
+  - an array map (the axiom-path `map`) is unwritten where an operand is;
+  - a heap cell (`select(H, r)` over a ref field's heap array) follows
+    `H`'s stores and merges to the data stored for `r`.
+  Each of them counted as unwritten everywhere before.
+
+*Verification.* TBD
+
+*Re-pinned elsewhere.* TBD
+
+*Different mechanisms, reported and not fixed here.* TBD

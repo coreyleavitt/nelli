@@ -489,7 +489,7 @@ state = "done"
 [[slice]]
 id = "S8cd"
 title = "Batch-6 integration findings: iekSeqLen on unsupported receiver kinds, ptrTargets on the global entry fallback, case-object globals, isEagerIR bit sets, recvValue observing only the touched part, literal-haystack rfind under a tight cap"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -14172,3 +14172,73 @@ pin is 238, and both suites carry the `>= 238` floor.
 - **PRECISION: `unsafeAddr` of a by-value array formal in a walked callee
   declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
   `wb_dead`).
+
+**As landed (S8cd, walker 249) — batch 6's integration findings.** Suites
+`tsymex_rfc0005_s8cd_globals` (items 2, 3, 5) and `tsymex_rfc0005_s8cd_ops`
+(items 1, 4, 6). The base is 136ad60 (batch 7, walker 237), with batch 9 (e497dcf, walker
+245) merged; 249 is the next number free. The job names all
+six items PRECISION; pinning items 2 and 4 found SOUNDNESS bugs (below), and
+items 1, 4, 5 and 6 did not hold as the job stated them.
+
+- *Item 1: `len` over a receiver kind.* A `ptr`/`ref` dereference and a heap
+  field were already decided at the base; the job's S8bn shapes were not found
+  under those names. The error reproduced only for a proc value with no
+  target (a parameter, a heap field, a global): `f(k).len`, and the string
+  form. A closure call now carries its return type (`ccRetTy`, in the key as
+  `;ret=`), so the unknown-callee arm of `lowerClosureCall` binds a stand-in
+  of that type and the path declines as `ceClosureUnknownCallee`, which names
+  the reason. Two neighbours fall with it: a `for` over a call was a
+  `weInternalWalkerFault` and now binds the result once, as Nim does (it ran
+  the call per iteration otherwise); and a known proc value returning a
+  `Table`, `HashSet` or `set` resolves (`closureRetStructured`).
+- *Item 2: a global's entry cell.* `ptrTargets` reads the input through
+  `ptrInputOf`, which falls back to the entry value. SOUNDNESS: it also scanned
+  only the globals bound on the path, so a global only read was no target:
+  `let a = g; p[] = 7; if g != a` was a false `sxUnsat`, with `p` addressing
+  `g`, for a scalar, a tuple field, an array element and a seq element (Nim
+  reaches all of them). Every `var` global that may hold the pointee is now
+  bound to its entry value there, unless a callee holds it withheld.
+- *Item 3: case-object globals.* `irTypeRefFree` covers a variant and a
+  multi-variant, so such a global has an entry value: a fresh discriminator
+  and arm fields, each read and each `FieldDefect` fork through S8bw's
+  machinery, tainted `feGlobalHavoc`. A case object reaching a heap cell has
+  no entry-value model and declines (`recvValue` reads it at its type).
+- *Item 4: the order of a set expression.* The job's "add `iekBitSet` to
+  `isEagerIR`" is wrong as a blanket: measured natively (c and cpp), a `{..}`
+  naming a variable is built where it stands at every size; `+ - * <= <` are
+  inline for a set of at most 64 values and run into a temporary above that
+  (65 values is the first array); `==`, `in` and `card` are inline at every
+  size, over an operand which may have been built eagerly; `x in {k, y}`
+  compares inline. `isEagerIR` encodes that, and the set operators' operands
+  go through `parseOperandPair`, so a nested small operand moves past a later
+  call. SOUNDNESS: the base's order was wrong in both directions, with no
+  decline. For a small set `(s + {x}) + f()` gave a false `sxSat` on the early
+  value and a false `sxUnsat` on the late one; for a large one `<=` and
+  `card(s + {x})` did the same; `f2({k}, g())` at any size did.
+- *Item 5: a receiver.* `recvValue` reads its receiver as a receiver, and each
+  arm observes what it reads (`observeRecvPart`): a seq index assignment the
+  length, a `pop` the length and the last element. A reassignment reads the
+  discriminator unless one branch holds every tag (`reassignReadsDisc`), which
+  no assignment can leave. An array store already observed nothing. So the job's
+  taint from an untouched part was reachable only through the reassignment
+  arms and through the elements of a seq; the length remains a genuine read.
+- *Item 6: `rfind` over a literal under a tight cap.* The moved S8o pin
+  (`lastIdx`) declines on `t.len > 10` under a cap of 8, not on `rfind`: that
+  query has no model within the cap, and it keeps S8k's decline. The rfind
+  shape that did decline was a leaf pinned to a literal longer than the cap
+  (`symexAssume(s == "abcdefghijkl")`): `seqLenCaps` now leaves a leaf a root
+  conjunct equates to a string literal uncapped, since it has one value and no
+  search. A symbolic needle over it was already decided under the cap.
+
+Different mechanisms, reported and not fixed here:
+
+- **PRECISION: `len` of a nested seq.** A `seq[seq[int]]` heap field, or a
+  proc value's result of that type, still declines on the unsupported
+  nested element representation.
+- **PRECISION: `HashSet[string]`** behind a pointer or in a heap field declines.
+- **PRECISION: `f != nil` on a proc value** with no lambda the walker built is
+  `ceUnsupportedHof`.
+- **PRECISION: `addr o.xs` bound by a `let`** is `heUnsafeCast`.
+- **PRECISION: a query SAT only past the cap** declines (S8k), rfind or not
+  (`lastIdx`); a leaf equal to a leaf equal to a literal still takes the cap.
+- **PRECISION: a case object reaching a heap cell, as a global,** declines.

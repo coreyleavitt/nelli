@@ -685,6 +685,18 @@ type
                      ## `tryRecognizePairLoopIdiom`'s closed-form replacement
                      ## of the `readOptions` pair-loop shape; never reachable
                      ## from ordinary Nim surface syntax.
+    iekStrSetAt      ## RFC-0005 S8ca: `s[i] = c`, the string `s` with byte
+                     ## `i` replaced by the char `c` (`strArgs = [s, i, c]`):
+                     ## `s[0, i) & c & s[i + 1, len)`. The index is checked
+                     ## by a read before (`s[i]`, its IndexDefect fork), so
+                     ## this forks nothing. S11 declined every character
+                     ## write (`iekStrUnsupported`).
+    iekStrChars      ## RFC-0005 S8ca: the `openArray[char]` view of a string
+                     ## (`strArgs = [s]`): the walk's openArray is a seq, of
+                     ## `s.len` chars, element `i` the byte `s[i]`.
+    iekStrFromChars  ## RFC-0005 S8ca: the string `s` (`strArgs = [s, a]`)
+                     ## after its `var openArray[char]` view `a` (a seq of
+                     ## the same length) was written: byte `i` is `a[i]`.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -928,7 +940,7 @@ type
        iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
        iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-       iekStrInOptionRegion:
+       iekStrInOptionRegion, iekStrSetAt, iekStrChars, iekStrFromChars:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1253,7 +1265,11 @@ type
     ##     passes by address (an array, an inheritable object, an object or
     ##     tuple larger than three words);
     ##   * `copy`: likewise, one Nim copies but whose seq or string memory
-    ##     the copy shares (a seq, a string, an object or tuple holding one).
+    ##     the copy shares (a seq, a string, an object or tuple holding one);
+    ##   * `ref` (RFC-0005 S8ca): `temp` is the copy-in/copy-out temporary of
+    ##     a `var` actual in a field of an object behind a ref (`grb.x`), and
+    ##     `root` the temporary holding that ref (read once, at the call):
+    ##     the formal is bound to the object's cell along `path`.
     ## The location is the variable `root` along `path`: a field step is
     ## the field's name, an index step `[` and the IR name of a `let`
     ## holding the index, and `?` a step the walk cannot follow.
@@ -1630,6 +1646,12 @@ type
                              ## value into its cell before the call -- not a
                              ## program dereference, so not counted by
                              ## `heapDepth`.
+      dwInPlace*:  bool      ## RFC-0005 S8ca: the write-back of a seq one of
+                             ## whose elements was just written (`p[][i] = v`,
+                             ## `p.s[i] = v`): Nim writes the element in the
+                             ## seq's memory, so the store is logged as an
+                             ## in-place step (`Path.inPlaceSteps`), which a
+                             ## by-value copy sharing that memory follows.
     of isUnsupported:
       unKind*: SymexErrorKind    ## RFC-0005 S1b: the classified kind the
                                  ## walker's `isUnsupported` arm records via
@@ -3268,14 +3290,15 @@ type
       ## here exhausts on the very first call, same as any other
       ## implausibly-tight budget. A caller who wants deep analysis should
       ## write an explicit bound sized to the SUT's real maximum call depth
-      ## instead. Do not assume a "large-looking" round number is
-      ## automatically safe: this cap bounds NATIVE recursion depth, and
-      ## measured directly (this engine's Linux/podman debug build, 8MB
-      ## `ulimit -s`) unconstrained linear recursion is safe through a cap
-      ## of 85 and SIGSEGVs by 88 — `maxCallDepth: 1000` itself crashes.
-      ## Pick a bound close to the depth actually needed and verify
-      ## empirically before raising it substantially; the exact ceiling is
-      ## build/platform-dependent, not a fixed constant.
+      ## instead. This cap bounds NATIVE recursion depth, and what one
+      ## level costs is build- and backend-dependent; RFC-0005 S8ca: the
+      ## walk no longer trusts the count alone. A call is not inlined when
+      ## the native stack left below it is under what one more level needs
+      ## (`nativeStackShort` in `runtime.nim`): it declines in-band
+      ## (`beBudgetExhaustedUnmodelled`, naming the native stack) at any
+      ## `maxCallDepth`, about 48 levels on an 8 MB stack on c, 40 on cpp,
+      ## 3 on 1 MB. Before S8ca a large cap overflowed the stack (SIGSEGV):
+      ## 50 levels on cpp, 88 on c.
     maxRecursionDepth*: int = 24
       ## RFC-0005 S8ax. The hard budget on the call-inlining depth. Past
       ## `maxCallDepth` the walk keeps inlining while the frontier is not
@@ -3285,8 +3308,9 @@ type
       ## arguments decide is then followed to its base case; one that fans
       ## out declines at `maxCallDepth` as before. Default `24`. Past it the
       ## call declines (`beBudgetExhaustedUnmodelled`), naming both budgets.
-      ## `0` turns the extension off. The same native-stack ceiling as
-      ## `maxCallDepth` applies (safe through 85 on the Linux debug build).
+      ## `0` turns the extension off. The same native-stack check as
+      ## `maxCallDepth`'s applies (RFC-0005 S8ca): on a 2 MB thread the
+      ## extension's 24 levels overflowed the stack before it.
     maxLoopUnwind*: int = 5
       ## Phase-6 loop unrolling cap; >= 1 — one of the ResourceBudget fields
       ## `0` does NOT mean unlimited for (RFC-0010 B4; see the type's own
@@ -4307,7 +4331,8 @@ const StrOpKinds* = {
   iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-  iekStrInOptionRegion}
+  iekStrInOptionRegion,
+  iekStrSetAt, iekStrChars, iekStrFromChars}   ## RFC-0005 S8ca
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[],
@@ -5855,23 +5880,27 @@ proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
          nAddrIdx: addrIdx)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
-                   ptrFamily = false, cell = false): IRStmt =
+                   ptrFamily = false, cell = false, inPlace = false): IRStmt =
   ## Phase 15 R3 (ADR-0010). `p[] = value` — a heap WRITE through a `ref T`/
   ## `ptr T` deref. Structural at R3 (walker no-ops it); the real `store` lands
   ## R4.
   ## RFC-0005 S8an: `cell` marks an `addr` cell's store (`dwCell`).
+  ## RFC-0005 S8ca: `inPlace` an element's write-back (`dwInPlace`).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: elemTy,
-         dwPtrFamily: ptrFamily, dwCell: cell)
+         dwPtrFamily: ptrFamily, dwCell: cell, dwInPlace: inPlace)
 
 proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
                         objTy: IRType, field: string,
-                        ptrFamily = false; init = false): IRStmt =
+                        ptrFamily = false; init = false;
+                        inPlace = false): IRStmt =
   ## Phase 15 R6 (ADR-0010). `p.field = value` — a FIELD WRITE through a
   ## `ref object`/`ptr object`. Stores `value` into the per-(type,field) heap
   ## array `refPointeeTypeId(objTy) & "__" & field` at `p`'s address (only that
   ## field's array changes; an aliased read of the same field sees the write).
+  ## RFC-0005 S8ca: `inPlace` an element's write-back (`dwInPlace`).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: fieldTy,
-         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init)
+         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init,
+         dwInPlace: inPlace)
 
 proc mkUnsupported*(kind: SymexErrorKind; reason: string;
                     marker: int): IRStmt =
@@ -6185,6 +6214,21 @@ func capCellName*(frame: int; local: string): string =
   ## call threads it as it threads a global, under no module (`@cap<frame>`
   ## is not a Nim identifier). `displayName` gives back `local`.
   globalEnvPrefix & "@cap" & $frame & "." & local
+
+func capAddrName*(cell: string): string =
+  ## RFC-0005 S8ca. Beside the env cell `cell` (`capCellName`) of a
+  ## by-reference capture whose variable's address is taken: the pointer to
+  ## the variable's address cell, threaded as the env cell is, so a closure
+  ## applied in any frame binds the capture to that cell
+  ## (`applyClosureGround`).
+  cell & "#addr"
+
+func capBoundName*(cell: string): string =
+  ## RFC-0005 S8ca. Set on the calling path when a closure body ran with
+  ## the capture of `cell` bound to its address cell: the body kept the
+  ## two equal, so the frame owning the variable reads the cell's value
+  ## (`syncAddrCells`).
+  cell & "#bound"
 
 func addrCellName*(local: string): string =
   ## RFC-0005 S8ax. The env name of the address cell of the variable

@@ -260,6 +260,15 @@ proc sAssign(n: int) =
   var s = @[n]
   sqAssign(s[0], s)
   if s[0] == 2: symexTarget("as_any")
+proc sqChain(v: var int; s: var seq[int]) =
+  var c = s
+  c[0] = 2
+  s = c      # other memory, though its term is a store over the old
+  v = 3
+proc sChain(n: int) =
+  var s = @[n]
+  sqChain(s[0], s)
+  if s[0] == 2: symexTarget("ch_any")
 # By a global's name the walk passes a copy, and the name is withheld.
 proc sqG(v: var int; i: int): int =
   v += 1
@@ -419,9 +428,9 @@ suite "S8cn item 5: a proc value":
     decidedT(sPVChain, "pc_dead", sxUnsat)
     decidedT(sPVTable, "pt_live", sxSat)
     decidedT(sPVTable, "pt_dead", sxUnsat)
-  test "a var or a parameter: the closure path, which has no Table formal":
-    declined(sPVVar, "pv2_live", "seUnsupportedCompoundSortLeaf")
-    declined(sPVParam, "pv3_live", "seUnsupportedCompoundSortLeaf")
+  test "a var or a parameter: the closure path declines a view and its Table":
+    declined(sPVVar, "pv2_live", "feUnsupportedOp")
+    declined(sPVParam, "pv3_live", "feUnsupportedOp")
 
 suite "S8cn item 5: a seq's element with its seq":
   test "local, mitems and mpairs and direct":
@@ -464,6 +473,7 @@ suite "S8cn item 5: a seq's element with its seq":
   test "resized or assigned whole while held: declines":
     declined(sGrow, "gw_any", "resized or assigned whole")
     declined(sAssign, "as_any", "resized or assigned whole")
+    declined(sChain, "ch_any", "resized or assigned whole")
   test "reached by a global's name: declines":
     declined(sGloD, "gd_live", "reached by a callee both through")
 
@@ -509,4 +519,4 @@ suite "S8cn: a key added under the view":
 
 suite "S8cn: walker version":
   test "the floor":
-    check parseInt(symexWalkerVersion) >= 247
+    check parseInt(symexWalkerVersion) >= 249

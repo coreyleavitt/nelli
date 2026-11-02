@@ -13,6 +13,10 @@
 ##   (4d) a string viewed as `openArray[char]` declines (it was a false
 ##        `sxUnsat`: the formal was an opaque value).
 ##
+## RFC-0005 S8ca repinned `vn` (a view of negative length) and `vc` (a
+## string's chars) to the decided verdicts (`tsymex_rfc0005_s8ca_resize`,
+## `tsymex_rfc0005_s8ca_strings`).
+##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
 import std/[unittest, strutils, sets]
@@ -141,10 +145,12 @@ suite "S8bu (4a): an openArray is a view of its storage":
     clean(sutSliceBounds, "vb", sxSat)
     clean(sutSliceBounds, "vb2", sxSat)
     clean(sutSliceBounds, "vb_dead", sxUnsat)
-    declines(sutSliceNegative, "vn", "toOpenArray of negative length")
+    # RFC-0005 S8ca: a view of negative length is modelled (S8bu declined).
+    clean(sutSliceNegative, "vn", sxSat)
 
-  test "a string's view declines":
-    declines(sutStringView, "vc", "openArray view of an unmodelled storage")
+  test "a string's view (RFC-0005 S8ca)":
+    # S8bu declined it. RFC-0005 S8ca: the string's chars (`iekStrChars`).
+    clean(sutStringView, "vc", sxSat)
 
 suite "S8bu: walker version":
   test "symexWalkerVersion >= 225":

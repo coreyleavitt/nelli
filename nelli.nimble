@@ -1336,5 +1336,47 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cn_probe",
             # S8cn items 3 and 4: an mpairs view and its Table.
             "tsymex_rfc0005_s8cn_views",
-            "tsymex_rfc0005_s8cn_seqview"]:
+            "tsymex_rfc0005_s8cn_seqview",
+            # RFC-0005 S8ce: nim-z3's hooks no longer swallow an in-flight raise
+            "tsymex_rfc0005_s8ce_hookraise",
+            "tsymex_rfc0005_s8ce_raiseshapes",
+            # S8bu's item 6, split out by RFC-0005 S8ca item 9.
+            "tsymex_rfc0005_s8bu_byvalseq",
+            # RFC-0005 S8ca -- S8bu's remainder; walker 233. Item 1: a call
+            # declines in-band when the native stack left is under one more
+            # level's need.
+            "tsymex_rfc0005_s8ca_stack",
+            # item 2: a view follows logged in-place writes, not term
+            # shapes; `swap` is modelled.
+            "tsymex_rfc0005_s8ca_views",
+            # item 3: an `addr s[i]` actual of a seq with element cells.
+            "tsymex_rfc0005_s8ca_calls",
+            # item 4: closures over address-taken variables and heap lvalues.
+            "tsymex_rfc0005_s8ca_closures",
+            "tsymex_rfc0005_s8ca_closures_heap",
+            # item 5: a seq argument of a proc value or a closure.
+            "tsymex_rfc0005_s8ca_procvals",
+            # item 6: strings (character writes, openArray[char], views).
+            "tsymex_rfc0005_s8ca_strings",
+            "tsymex_rfc0005_s8ca_strings_byvalue",
+            # item 7: a negative-length toOpenArray; a resizing mitems body.
+            "tsymex_rfc0005_s8ca_resize",
+            # item 8: a mutation through a pointer to the whole value.
+            "tsymex_rfc0005_s8ca_derefmut",
+            # RFC-0005 S8by: no (1b)/(1c) after a facts-first SAT; concolic
+            # scratch solves in contexts of their own; a regex membership
+            # under a disjunction or an ite merged with those that hold
+            # where it is read. Walker 219->231.
+            "tsymex_rfc0005_s8by_remainder",
+            # RFC-0005 S8cc -- S8br's remainder: the address cell's query at
+            # a non-literal index is pinned to a step budget; a callee's
+            # global counts as written only where it may be; an index call
+            # with no symbol is bound once. Walker 237->238.
+            "tsymex_rfc0005_s8cc_cellquery",
+            "tsymex_rfc0005_s8cc_remainder",
+            # RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8.
+            # A proc value's aliasing shapes decline; walker 241->245.
+            "tsymex_rfc0005_b9_integration",
+            # A call declines before Nim's call depth limit ends the process.
+            "tsymex_rfc0005_b9_calldepth"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

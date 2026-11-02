@@ -50,15 +50,6 @@ template declines(fn: typed, lbl, why: string) =
     check why in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
-template declinesOp(fn: typed, lbl, why: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
-    check why in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
-
 var gArr: array[3, int]
 var gs: seq[int]
 var gi: int

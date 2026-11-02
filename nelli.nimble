@@ -1137,6 +1137,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_caps_c",
             "tsymex_rfc0005_s8bt_replace_lemmas",
             "tsymex_rfc0005_s8bt_replace_facts",
+            # RFC-0005 S8cf -- S8bt's remainder.
+            "tsymex_rfc0005_s8cf_reach",
+            "tsymex_rfc0005_s8cf_limits",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

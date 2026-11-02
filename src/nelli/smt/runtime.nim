@@ -4120,6 +4120,24 @@ var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
   ## unfolding of the recursive term never reaches the facts' conflict
   ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
 
+type RegexLimitSite* = object
+  ## RFC-0005 S8cf. One `std/re` call whose subject can be long enough to
+  ## reach one of PCRE's own limits (`pcre_select.LimitReach`): its value as
+  ## the model reads it (`exact`), what std/re surfaces if the limit is hit
+  ## (`err`, with `errConds`), the subject and the length up to which no
+  ## limit can be hit (`safe`), and the assertions true only of `exact`
+  ## (`guarded`: a recursive `replace` value's definition and facts).
+  exact*, err*: Z3AnyAst
+  errConds*: seq[Z3Bool]
+  subject*: Z3String
+  safe*: int
+  guarded*: seq[int]
+  what*: string
+
+var regexLimitSites* {.threadvar.}: seq[RegexLimitSite]
+  ## RFC-0005 S8cf. Every such call of the walk (`checkCapped`). Reset per
+  ## run.
+
 var regexRecFactConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S8bt. The facts of the `replace` values in `regexRecDefConds`
   ## (`regex_parser.replaceLemmas`): each over one occurrence's own `r`,
@@ -13402,10 +13420,10 @@ const recFactsRLimit* = 100_000'u
   ## slowest S8bt pin, Z3 5.1); a query they do not refute ran the larger
   ## budget out for nothing (`s8bb_replace`'s `a|ab` pin: 0.4 s became 7 s).
 
-proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
-                 settings: SymexSettings; rlimit: uint):
-                 tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
-                       why: string] =
+proc checkExact(ctx: Z3Context; query: openArray[Z3Bool];
+                settings: SymexSettings; rlimit: uint):
+                tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
+                      why: string] =
   ## RFC-0005 S8k. Decide `query` (every assertion of one walker query)
   ## with each string / seq leaf capped at `maxSeqLen` elements. `s` is the
   ## solver that answered (for its statistics), `m` its model in `ctx` for
@@ -13778,6 +13796,118 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
       else: (zsUnknown, s3, nil, z3Why(s3))
+
+const limitWorldRLimit* = 1_000_000'u
+  ## RFC-0005 S8cf. The budget of `checkCapped`'s check of the calls that
+  ## stop at a limit. It refutes on the error value alone (a few thousand
+  ## units); a query it does not refute has a model with a long subject,
+  ## which Z3 need not find: running out reads the same.
+
+proc limitSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
+  ## RFC-0005 S8cf. The `regexLimitSites` whose value `query` reads.
+  if regexLimitSites.len == 0: return
+  var byId = initTable[int, seq[int]]()
+  for i, st in regexLimitSites:
+    byId.mgetOrPut(astId(ctx, st.exact.raw), @[]).add i
+  var seen: HashSet[int]
+  var hit: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in query: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if id in byId:
+      for i in byId[id]: hit.incl i
+    if getAstKind(t) != akApp: continue
+    let (_, args) = unpackApp(t)
+    for a in args: stack.add a
+  for i in 0 ..< regexLimitSites.len:
+    if i in hit: result.add i
+
+proc limitReason(ctx: Z3Context; sites: seq[int]): string =
+  var xs: seq[string]
+  for i in sites:
+    let st = regexLimitSites[i]
+    xs.add st.what & " past " & $st.safe & " bytes"
+  "a regex call can stop at one of PCRE's own limits (PCRE_ERROR_MATCHLIMIT," &
+    " PCRE_ERROR_RECURSIONLIMIT, PCRE_ERROR_JIT_STACKLIMIT, or match() off " &
+    "the machine stack), which the query does not exclude: " & xs.join("; ")
+
+proc limitWorldRefuted(ctx: Z3Context; query: openArray[Z3Bool];
+                       sites: seq[int]): bool =
+  ## RFC-0005 S8cf. True when `query`, already UNSAT with every call read
+  ## exactly, is UNSAT with some call past its safe length stopped at a
+  ## limit too. A superset of the real runs: such a call has its error value
+  ## or its exact one, independently of the others.
+  var roots = @query
+  var abs: seq[Z3Bool]
+  for k in countdown(sites.high, 0):
+    let st = regexLimitSites[sites[k]]
+    let ab = mkBoolVar(ctx, regexFreshName("__regexLimitHit"))
+    abs.add ab
+    let v = ctx.checkErr Z3_mk_ite(ctx.raw, ab.raw, st.err.raw, st.exact.raw)
+    var froms = [st.exact.raw]
+    var tos = [v]
+    for r in roots.mitems:
+      let id = astId(ctx, r.raw)
+      if id in st.guarded:
+        r = ab or r
+      else:
+        r = wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw, 1,
+          cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+          cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+    roots.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, ab.raw,
+      (len(st.subject) > mkInt(st.safe)).raw))
+    for c in st.errConds: roots.add c
+  var some = abs[0]
+  for k in 1 ..< abs.len: some = some or abs[k]
+  roots.add some
+  let s = ownContextSolver(ctx, roots, limitWorldRLimit)
+  ownContextCheck(s) == zsUnsat
+
+proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
+                 settings: SymexSettings; rlimit: uint):
+                 tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
+                       why: string] =
+  ## RFC-0005 S8cf (SOUNDNESS). `checkExact` reads every regex call as a
+  ## match or a miss. A call past its safe length may instead stop at one of
+  ## PCRE's own limits (`RegexLimitSite`), so:
+  ##   * a model whose subjects are all within their safe lengths stands; one
+  ##     past them is searched again with the lengths asserted, and without
+  ##     such a model the query is `zsUnknown`;
+  ##   * an UNSAT stands only if the query stays UNSAT with those calls
+  ##     stopped at a limit (`limitWorldRefuted`), else `zsUnknown`.
+  ## A query with no such call is `checkExact` alone.
+  let sites = limitSitesIn(ctx, query)
+  result = checkExact(ctx, query, settings, rlimit)
+  if sites.len == 0: return
+  case result.status
+  of zsSat:
+    var over = false
+    for i in sites:
+      let st = regexLimitSites[i]
+      let l = result.m.eval(len(st.subject))
+      if not isNumeralAst(ctx, l.raw) or
+         parseBiggestInt(getNumeralString(l)) > st.safe:
+        over = true
+    if not over: return
+    var guarded = @query
+    for i in sites:
+      let st = regexLimitSites[i]
+      guarded.add len(st.subject) <= mkInt(st.safe)
+    let r2 = checkExact(ctx, guarded, settings, rlimit)
+    if r2.status == zsSat: return r2
+    result = r2
+    result.status = zsUnknown
+    result.m = nil
+    result.why = limitReason(ctx, sites)
+  of zsUnsat:
+    if not limitWorldRefuted(ctx, query, sites):
+      result.status = zsUnknown
+      result.why = limitReason(ctx, sites)
+  else: discard
 
 proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   ## The run-wide pools every walker query asserts beside its path's own
@@ -25161,6 +25291,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
   regexRecFactConds = @[]                ## RFC-0005 S8bt: and their facts
+  regexLimitSites = @[]                  ## RFC-0005 S8cf: calls past PCRE's limits
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms

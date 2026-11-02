@@ -356,6 +356,68 @@ proc regexOutcomeGate(sp: RegexSpec; pr: PcreParse) =
            "value is a fresh one, replay-gated)")
   else: discard
 
+var regexReachCache {.threadvar.}: Table[string, LimitReach]
+
+proc regexReach(sp: RegexSpec; pr: PcreParse): LimitReach =
+  ## RFC-0005 S8cf. `pcre_select.limitReach` of the call's pattern, per thread.
+  let key = sp.flag & ":" & sp.pattern
+  if key in regexReachCache: return regexReachCache[key]
+  result = limitReach(pr)
+  regexReachCache[key] = result
+
+proc regexLimitSite[T](sp: RegexSpec; pr: PcreParse; subject: Z3String;
+                       exact, err: T; errConds: seq[Z3Bool] = @[];
+                       guarded: seq[int] = @[]) =
+  ## RFC-0005 S8cf. Records a call that can reach a limit (`checkCapped`).
+  let reach = regexReach(sp, pr)
+  if reach.never: return
+  let lenS = simplify(len(subject))
+  if isNumeralAst(lenS.ctx, lenS.raw) and
+     parseBiggestInt(getNumeralString(lenS)) <= reach.safe:
+    return
+  regexLimitSites.add RegexLimitSite(exact: toAnyAst(exact), err: toAnyAst(err),
+    errConds: errConds, subject: subject, safe: reach.safe, guarded: guarded,
+    what: sp.entry & "(s, " & sp.flag & "\"" & sp.pattern & "\")")
+
+proc regexLimitInt(): tuple[v: Z3Int; c: seq[Z3Bool]] =
+  ## RFC-0005 S8cf. The `int` result a call stopped at a limit returns:
+  ## PCRE_ERROR_MATCHLIMIT, _RECURSIONLIMIT or _JIT_STACKLIMIT, as is.
+  let v = mkIntVar(regexFreshName("__regexLimitCode"))
+  (v, @[(v == mkInt(pcreErrMatchLimit)) or (v == mkInt(pcreErrRecursionLimit)) or
+        (v == mkInt(pcreErrJitStackLimit))])
+
+proc regexLimitOfCall(sp: RegexSpec; pr: PcreParse; subject: Z3String;
+                      r: RxResult; kind: SVKind; old: Z3String;
+                      oldI: Z3Int) =
+  ## RFC-0005 S8cf. std/re's value when `pcre_exec` stops at a limit
+  ## (lib/impure/re.nim, Nim 2.2.10, probed): nothing is written to `matches`;
+  ## `contains` and `startsWith` are false; `match` is true (`matchLen != -1`);
+  ## `find`, `matchLen` and `findBounds`' first return the code. `endsWith` is
+  ## many calls, so either value.
+  let capture = sp.entry.startsWith("capture")
+  case kind
+  of svBool:
+    case sp.entry
+    of "contains", "startsWith":
+      regexLimitSite(sp, pr, subject, r.b, mkBool(false))
+    of "match":
+      regexLimitSite(sp, pr, subject, r.b, mkBool(true))
+    else:
+      regexLimitSite(sp, pr, subject, r.b,
+                     mkBoolVar(regexFreshName("__regexLimitValue")))
+  of svString:
+    regexLimitSite(sp, pr, subject, r.s, old)
+  else:
+    if capture:
+      regexLimitSite(sp, pr, subject, r.i, oldI)
+    elif sp.entry == "findBoundsLast":
+      regexLimitSite(sp, pr, subject, r.i, mkInt(0))
+    elif sp.entry == "findBoundsFirstCap":
+      regexLimitSite(sp, pr, subject, r.i, mkInt(-1))
+    else:
+      let (v, c) = regexLimitInt()
+      regexLimitSite(sp, pr, subject, r.i, v, c)
+
 proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
   ## RFC-0005 S8ay. `match` / `contains` / `startsWith` / `endsWith`
   ## (`iekStrMatch`, svBool) and `find` / `matchLen` / `findBounds`'s two
@@ -411,6 +473,7 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
   case r.outcome
   of roValue:
     for d in r.defs: stripDecompConds.add d
+    regexLimitOfCall(sp, pr, recv.str, r, kind, old, oldI)
     case kind
     of svBool: SymVal(kind: svBool, bo: r.b)
     of svString: SymVal(kind: svString, str: r.s)
@@ -863,13 +926,18 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
         term = replaceStepZ3(recv.str, repl.str, n, t, regexFreshName)
       # A receiver of known length: the term alone (Z3 unfolds it to the
       # end; RFC-0005 S8bt keeps these as S8bb / S8bj lowered them).
-      if known: return SymVal(kind: svString, str: term)
+      if known:
+        regexLimitSite(sp, pr, recv.str, term,
+                       mkStringVar(regexFreshName("__regexLimitValue")))
+        return SymVal(kind: svString, str: term)
     else:
       if known:
         let ln = parseInt(getNumeralString(lenS))
         if ln <= regexReplaceMaxKnown:
-          return SymVal(kind: svString,
-                        str: regexReplaceUnrolled(recv.str, repl.str, sh, ln))
+          let unrolled = regexReplaceUnrolled(recv.str, repl.str, sh, ln)
+          regexLimitSite(sp, pr, recv.str, unrolled,
+                         mkStringVar(regexFreshName("__regexLimitValue")))
+          return SymVal(kind: svString, str: unrolled)
       # RFC-0005 S8ay (item 5): length not a known numeral -- the exact
       # value by structural recursion over the receiver's suffixes
       # (`regexReplaceRec`), untainted. S8aw unrolled 16 positions and gave
@@ -890,10 +958,18 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # (`regexRecFactConds`, RFC-0005 S8bt: S8bj's were in
     # `stripDecompConds`).
     let r = mkStringVar(regexFreshName("__regexReplaceValue"))
-    regexRecDefConds.add r == term
+    let rDef = r == term
+    regexRecDefConds.add rDef
+    var guarded = @[astId(rDef.ctx, rDef.raw)]
     for d in replaceLemmas(recv.str, repl.str, r, replaceFacts(n, pr.root),
                            regexFreshName):
       regexRecFactConds.add d
+      guarded.add astId(d.ctx, d.raw)
+    # RFC-0005 S8cf: a call that stops at a limit ends `replace` as a miss:
+    # some prefix replaced, the rest kept.
+    regexLimitSite(sp, pr, recv.str, r,
+                   mkStringVar(regexFreshName("__regexLimitValue")),
+                   guarded = guarded)
     SymVal(kind: svString, str: r)
   of iekStrConcat:
     # Phase 15 S8. `a & b` → Z3 `(seq.++ a b)` (`Z3_mk_seq_concat`), exposed by

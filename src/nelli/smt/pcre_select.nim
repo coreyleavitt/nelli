@@ -918,13 +918,17 @@ proc firstBytes(n: Nfa): set[char] =
       work.add st.out2
     else: work.add st.out1
 
-proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
+proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
+               boundOnly = false): Nfa =
   ## RFC-0005 S8bb, S8bj. The priority NFA of a `psOk` reading, with PCRE's
   ## start-of-match data; `ok == false` past the size caps or for a
   ## declined construct (`why` says which). RFC-0005 S8bt: `engine` is the
   ## one an unanchored call runs on (anchored calls: always `peInterp`);
   ## `limitRoom` >= 0: the automaton counts `match()`'s calls (`costs`) for
-  ## a call whose ovector has room for that many groups.
+  ## a call whose ovector has room for that many groups. RFC-0005 S8cf:
+  ## `boundOnly`, the automaton is read only for an upper bound on those
+  ## calls (`limitReach`): what the exact accounting declines is kept, since
+  ## a repeat it reads as not possessive only costs more.
   var b = Build()
   b.n.engine = engine
   if limitRoom >= 0:
@@ -969,7 +973,7 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
                   "an extended class"
     if engine != peInterp:
       b.costWhy = "the JIT's match limit accounting"
-    if b.costWhy.len > 0:
+    if b.costWhy.len > 0 and not boundOnly:
       result.ok = false
       result.why = "match()'s call accounting is not modelled for " &
                    b.costWhy
@@ -3620,6 +3624,7 @@ const
   pcreErrBadUtf8Offset* = -11
   pcreErrMatchLimit* = -8
   pcreErrRecursionLimit* = -21
+  pcreErrJitStackLimit* = -27
   reqByteMax* = 1000   ## pcre_internal.h's REQ_BYTE_MAX
 
 type LimitEffect* = enum
@@ -3788,6 +3793,96 @@ proc pcreReplace*(n: Nfa; s, by: string): string =
   var unmodelled = false
   result = pcreReplace(n, s, by, unmodelled)
   doAssert not unmodelled, "pcreReplace: a call the model does not read"
+
+# ---- RFC-0005 S8cf: how far a subject is from PCRE's own resource limits ------
+
+const
+  reachLenCap* = 4096
+    ## RFC-0005 S8cf: the largest subject length `limitReach` proves safe
+    ## (a lower bound is all it states; the rows are linear in this)
+  reachCallBudget = 5_000_000'i64
+    ## half of pcre_exec.c's default `match_limit`, so the constants the
+    ## bound leaves out (NOTEMPTY_ATSTART's extra exit) stay below it
+  reachDepthBudget* = 900'i64
+    ## RFC-0005 S8cf: the deep frames the row may nest. Probed on PCRE 8.45
+    ## (Linux, 8 MB stack): `(a)*c` runs off the stack near 16 000 bytes, one
+    ## deep frame each, so a frame is about 512 bytes, and 900 of them are
+    ## under half of the smallest stack std/re's callers have (1 MB). On 8.37's
+    ## JIT, whose stack is MACHINE_STACK_SIZE 32 KiB (4096 words), the probes
+    ## cost at most 4 words per deep frame ((a|b)*c: 2 frames, 4 words a byte,
+    ## -27 at 1025 bytes), so 900 is 3600 words of the 4096.
+
+type LimitReach* = object
+  ## RFC-0005 S8cf. Where a call of a pattern can stop being a match or a
+  ## miss: PCRE_ERROR_MATCHLIMIT, PCRE_ERROR_RECURSIONLIMIT, the JIT's
+  ## PCRE_ERROR_JIT_STACKLIMIT, or the interpreter's `match()` running off
+  ## the machine stack (a SIGSEGV: 8.45 is built with stack recursion).
+  never*: bool   ## no subject length reaches any of them
+  safe*: int     ## otherwise no subject of at most this many bytes does
+
+proc limitReachAuto(n: Nfa): LimitReach =
+  ## The bound on one attempt, row by row of the bytes left. F and S are the
+  ## most `match()` calls over the runs from a state that end in failure and
+  ## in a match (-1: it has no such run), D its deepest frame on any path:
+  ## a split's first branch fails before the second runs, and nothing after
+  ## a match runs, so a repeat whose every exit matches (`a*`, `[ab]+`)
+  ## costs the same at every length. Subjects are chosen per state, so this
+  ## is an upper bound: pcre_exec.c resets the count per attempt.
+  type V = tuple[f, s, d: int64]
+  let cap = reachCallBudget * 4
+  proc addSat(a, b: int64): int64 = min(a + b, cap)
+  var entry = initHashSet[int32]()
+  entry.incl int32(n.start)
+  for st in n.states:
+    if st.kind == nkByte: entry.incl int32(st.out1)
+  var prev, cur: Table[int32, V]
+  for k in 0 .. reachLenCap:
+    var memo = initTable[(int32, uint64), V]()
+    proc go(st: int32; mask: uint64): V =
+      let key = (st, mask)
+      if key in memo: return memo[key]
+      let s = n.states[st]
+      proc passF(v: V): V = (max(0'i64, v.f), v.s, v.d)
+      case s.kind
+      of nkMatch: result = (-1'i64, 0'i64, 0'i64)
+      of nkByte:
+        if k == 0: result = (0'i64, -1'i64, 0'i64)
+        else: result = passF(prev[int32(s.out1)])
+      of nkSplit:
+        let a = go(int32(s.out1), mask)
+        let b = go(int32(s.out2), mask)
+        result.f = (if a.f < 0 or b.f < 0: -1'i64 else: addSat(a.f, b.f))
+        result.s = max(a.s, (if a.f >= 0 and b.s >= 0: addSat(a.f, b.s)
+                             else: -1'i64))
+        result.d = max(a.d, b.d)
+      of nkCost:
+        let a = go(int32(s.out1), mask)
+        result.f = (if a.f >= 0: addSat(a.f, 1) else: -1'i64)
+        result.s = (if a.s >= 0: addSat(a.s, 1) else: -1'i64)
+        result.d = min(a.d + (if s.deep: 1'i64 else: 0'i64), cap)
+      of nkEnter:
+        result = go(int32(s.out1), mask or (1'u64 shl s.loop))
+      of nkBack:
+        if (mask and (1'u64 shl s.loop)) != 0: result = go(int32(s.out2), mask)
+        else: result = go(int32(s.out1), mask)
+      of nkSave, nkAlt: result = go(int32(s.out1), mask)
+      of nkBol, nkEol, nkEolAbs, nkPoss, nkVerb:
+        result = passF(go(int32(s.out1), mask))
+      memo[key] = result
+    cur = initTable[int32, V]()
+    for e in entry: cur[e] = go(e, 0'u64)
+    let v = cur[int32(n.start)]
+    if max(v.f, v.s) > reachCallBudget or v.d > reachDepthBudget:
+      return LimitReach(safe: max(k - 1, 0))
+    if k > 0 and cur == prev: return LimitReach(never: true)
+    prev = cur
+  LimitReach(safe: reachLenCap)
+
+proc limitReach*(pr: PcreParse): LimitReach =
+  ## RFC-0005 S8cf. The bound on the interpreter's own limits.
+  let n = buildNfa(pr, peInterp, limitRoom = pr.groups, boundOnly = true)
+  if not n.ok: return LimitReach(safe: 0)
+  limitReachAuto(n)
 
 # ---- RFC-0005 S8bt (item 7): facts of every `replace` value -------------------
 

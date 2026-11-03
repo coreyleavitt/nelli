@@ -208,7 +208,12 @@ const renderAsChoicesVersion* = "12"
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
 
-const symexWalkerVersion* = "252"
+const symexWalkerVersion* = "260"
+  ## RFC-0005 S8cs (260 on batch 10's 252, local until the merge renumbers it) -- the stores the walk
+  ## does not see. A program's globals carry `hiddenRoute` from the macro-time
+  ## route analysis (lifetime hooks, code it cannot list), and a read of such a
+  ## global declines (`feGlobalRouteUnproved`). `!hidden` is in the global's key.
+  ##
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite
   ## verdict unless the query holds with it stopped at a limit too.
@@ -6190,7 +6195,8 @@ proc canonicalize*(prog: SymexProgram): string =
   var glParts: seq[string]
   for g in prog.globals:
     glParts.add g.name & ":" & canonicalize(g.ty) & "=" &
-      (if g.init == nil: "free" else: canonicalize(g.init))
+      (if g.init == nil: "free" else: canonicalize(g.init)) &
+      (if g.hiddenRoute.len > 0: "!hidden" else: "")   ## RFC-0005 S8cs
   let glPart = if glParts.len == 0: "" else: ";gl=[" & glParts.join(",") & "]"
   "Pg<params=[" & paramParts.join(",") & "];body=" &
     canonicalize(prog.body, env) &

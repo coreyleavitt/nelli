@@ -73,7 +73,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feTableIterOrder,   # RFC-0005 S8bc
                         # RFC-0005 S8be: a replay abandoned past
                         # `replayTimeoutMs`.
-                        feReplayTimedOut}
+                        feReplayTimedOut,
+                        # RFC-0005 S8cs: a read of a global a store the walk
+                        # does not see may reach.
+                        feGlobalRouteUnproved}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

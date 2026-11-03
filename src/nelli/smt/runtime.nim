@@ -2344,6 +2344,7 @@ proc isFollowConcreteWalk*(): bool
   ## above. Defined after `WalkCtx` (needs the cast).
 
 proc programGlobal(name: string): Option[IRGlobal]  ## RFC-0005 S8as fwd decl
+proc globalHiddenRoute(name: string): string  ## RFC-0005 S8cs fwd decl
 proc entryValueOf(name: string): SymVal  ## RFC-0005 S8as fwd decl
 
 proc pendingEnvWriteIx(name: string): int =
@@ -8878,6 +8879,20 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     ofBool(mkBool(e.bval))
   of iekVar:
     loweringReadNames.add e.vname      ## RFC-0005 S8as
+    # RFC-0005 S8cs: THE point where a global's value enters a verdict. A store
+    # the walk does not see may reach it, so whatever the walk holds for it may
+    # be stale: an entry value, a value the walk wrote, an opaque call's fresh
+    # one. A rebuild's copy (`vCopy`) carries the value back and observes nothing.
+    if not e.vCopy and not isFollowConcreteWalk():
+      let anyValue = globalHiddenRoute(routeAnyValue)
+      let hidden = if anyValue.len > 0: anyValue
+                   elif isGlobalEnvName(e.vname): globalHiddenRoute(e.vname)
+                   else: ""
+      if hidden.len > 0:
+        lowerDegrade(feGlobalRouteUnproved,
+          "variable '" & displayName(e.vname) & "' is read, and a store the " &
+          "walk does not see may reach it: " & hidden &
+          " (feGlobalRouteUnproved)")
     if pendingEnvWriteIx(e.vname) >= 0:
       # RFC-0005 S8as: a closure call earlier in this same expression wrote
       # the name. Nim reads the variable after every call of the
@@ -16350,6 +16365,14 @@ proc programGlobal(name: string): Option[IRGlobal] =
   let g = wp.statics.globals[name]
   if not irTypeRefFree(g.ty): return none(IRGlobal)
   some(g)
+
+proc globalHiddenRoute(name: string): string =
+  ## RFC-0005 S8cs. Why a store the walk does not see may reach the global
+  ## `name` (`IRGlobal.hiddenRoute`), or "".
+  if currentWalkCtxPtr == nil: return ""
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  if not wp.statics.globals.hasKey(name): return ""
+  wp.statics.globals[name].hiddenRoute
 
 proc unwrittenResultZero(): Option[SymVal] =
   ## RFC-0005 S8n. See fwd-decl above. `lower`'s `iekVar` arm asks this when

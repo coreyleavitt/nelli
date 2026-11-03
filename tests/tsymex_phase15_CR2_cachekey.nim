@@ -1065,7 +1065,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8cl (a bodiless magic is modelled or declines, `unsafeNew`
     ## and `newString` allocate, `setLen` reads after its length). 245->248.
     ## RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked. 245->252.
-    check symexWalkerVersion == "252"
+    ## RFC-0005 S8cs: the stores the walk does not see decline a read. 252->260.
+    check symexWalkerVersion == "260"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

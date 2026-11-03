@@ -517,6 +517,11 @@ title = "The definition-of-done audit's gaps: introduction and coverage pins, fl
 state = "done"
 
 [[slice]]
+id = "S8cs"
+title = "Stores the walk does not see: lifetime hooks, opaque writes through a pointer read from a global or received as an argument, {.emit.}, and any routine, type or hook with no proof decline a read of the global"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -14742,3 +14747,105 @@ false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
   (`heUnsafeCast`), `ensureMove` and `procCall` (sound, unmodelled), `create`,
   `new(p, finalizer)`, `GC_ref`, an object with a `when` member, a `type` section
   inside a SUT, a nested `s[gi]` of a seq of seqs.
+
+**As landed (S8cs, walker 260, provisional) — the stores the walk does not see.**
+Suites `tests/tsymex_rfc0005_s8cs_routes.nim` and `..._routes2.nim`, fixture
+`tests/s8cs_hooks_fixture.nim`. Base e497dcf with S8cd and S8cb merged, then batch 10
+(67f0b622, walker 252). Blockers
+B22 to B26 of the sort: clean false verdicts on the channel where main gave
+`sxUnknown`.
+
+*The invariant.* A verdict may rest on the value of a module-level `var` only if
+every store that can reach it, in the code the routine may run, is one the walk
+models at the point it happens (a statement it walks, or an opaque call's summary
+it havocs at the call), or the store is proved absent. Otherwise a read of that
+global declines (`feGlobalRouteUnproved`), and an `sxUnsat`, an `sxSat` or an
+`sxRaised` that needs the read does not stand. Where the store may reach what no
+global's row stands for (a heap cell, a local a pointer addresses, the copy a
+value hook makes), a read of any variable declines. The analysis is an allowlist:
+a type shape, symbol kind, routine or probe result it does not recognise has no
+proof.
+
+*Root cause, from the code.* `lower`'s `iekVar` arm reads the entry value or the
+env, and neither knows about a call the compiler inserts after semantic checking:
+such a call is in no typed AST a macro reads. So a hook's store was simply absent
+(B22, B23, B25). `scanOpaqueEffects` kept a store through a `ptr` to the pointee
+type's heap cells, so `let p = gPtr; p[] = 9` left `gI` as it was (B24), and had
+no arm for `{.emit.}` (B26).
+
+*The rule, and why not the other one.* Option (b), reclassifying `feGlobalHavoc`
+to void `sxUnsat`, would void every entry-value `sxUnsat` in the tree, and would
+still miss B23: no havoc attaches on a path that wrote the global first, and the
+false verdict there is a clean `sxSat` too. Option (a) keeps every verdict whose
+routine has no route: `symexGlobalRoutes` reads the bodies of the hooks of every
+type a value of which the routine may hold, and `withGlobalRoutes` lays the result
+over `SymexProgram.globals` as `IRGlobal.hiddenRoute`; the decline is at the read,
+which is where the value enters a verdict. So it attaches to the path, whatever
+the verdict. `dcSubstituted`, as no class has a spurious path and an incomplete
+run, and the lattice does not gain a point for this.
+
+*Which hook a type has.* Semchecking `` `=destroy`(x) `` resolves to the type's
+bound operation, so a staged macro (`symexHookProbe`, `symexRouteResume`) gets the
+compiler's own answer. `=destroy` goes by the type; `=copy`, `=sink`, `=dup`,
+`=wasMoved` and `=trace` go by overload at the probe, so a hook the type's module
+does not export is invisible from another module, and the probe reads as "none".
+A type declared in another module therefore counts as having none only when
+`supportsCopyMem` holds. A pin found this: a false `sxUnsat` on a non-exported
+`=copy`. "Another module" is decided by the symbols' owners, not by file: an
+`include`d file is its includer's module, a symbol's position may be where a macro
+used it, and Windows paths use `\`. The probe's module is the owner of a variable
+the entry macro declares where the probes expand (`routeSiteMarker`).
+
+*Opaque summaries.* A store through a `ptr` outside a read position, `{.emit.}`, a
+store through a `cstring`, and a stdlib routine given a value that holds an address
+each may write any variable (`mayWriteAnyVariable`).
+
+*Pointers.* A dereference of a pointer the walk did not allocate on the path
+declines when any route exists: it may address a variable the store reaches, one
+the program never names included (`routeAnyStore`).
+
+*Precision cost.* Seven pins moved to a decline. Two are in
+`tests/tsymex_rfc0005_s8bg_remainder.nim`: `cvm` (`sxSat`) and `cvm_dead`
+(`sxUnsat`) of `sutConvDistinctMid`. `Farm` is a `ref object of RootObj`, the routine
+reads the global `gFarmBox` holding one, and a subtype's hook could write it. The
+old verdicts were not luck: the suite's native loop runs the routine over five
+inputs and hits `cvm` and never `cvm_dead`. The pins now assert the decline by kind,
+and an exact twin (`sutConvDistinctMid3`, labels `cvm3`, `cvm3_dead`, a `Farm3` that
+cannot have a subtype) keeps the chain's `sxSat`, replay and `sxUnsat`. Five are in
+`tests/tsymex_rfc0005_s8bs_byref.nim`, "an inheritance conversion on a by-reference
+actual": `uc`, `dc` (`sxSat`) and `uc_dead`, `dc_dead`, `dx_dead` (`sxUnsat`). The
+SUTs read a global of `BaseR` or `DerR`, which inherit. The suite's "nim" test runs
+each SUT natively and hits `uc`, `dc` and `dx`, never a `_dead` label. `dx` stays
+an `sxSat` (its path reads no global), and the other path's decline is reported
+beside it. No twin keeps them exact: the conversion is the point of the pins.
+Measured on the whole `tsymex_*` corpus, on Windows (`symex-mingw`, Z3 4.13.4), and
+on 85 suites on Linux (Z3 5.1): those that name `feGlobalHavoc`,
+`feGlobalReadUnmodelled`, a user hook, a method, `ref object of`, `importc`, a
+thread or `{.emit.}`, and the audits.
+
+*For RFC-0016: what declines, and an exact model would keep.* Every one is a read
+in a routine with the route; a routine without one keeps its verdict.
+
+- A global a lifetime hook writes: model the inserted call at its point.
+- Any variable, when a reached hook stores through a `ref` or a `ptr`, writes any
+  variable, or is a `=copy`, `=sink`, `=dup` or `=wasMoved` that is not the plain
+  field copy.
+- Any global, when the routine may hold a `ref` of an inheriting non-exception
+  type, may hold a closure in a global or a `ref`, may dispatch a method, reaches a
+  routine with no body (`importc`), or may start a thread.
+- Any global, when it may hold a type from another module that is not plain bits.
+- A pointer of unknown origin, when the program has any route.
+- `tsymex_rfc0005_s8bg_remainder`: `cvm` and `cvm_dead`, the pins above.
+- `tsymex_rfc0005_s8bs_byref`: `uc`, `uc_dead`, `dc`, `dc_dead` and `dx_dead`.
+
+*Not covered.*
+
+- A thread or signal handler started before the routine runs, or by foreign code.
+- A hook of a dynamic subtype of an exception (`ref Exception` is not treated as an
+  open hierarchy), of a `ref Base`, of a stored closure: these open every global's
+  read, but a store such a hook makes through a `ref` or to a local is not seen.
+- The ORC cycle collector running a hook of garbage from outside the reach.
+- A hook that quits or does not return, on an `sxSat`.
+- A `=copy`, `=sink` or `=dup` probe that does not compile is taken for `{.error.}`:
+  semchecking a plain assignment cannot tell them apart, because that refusal comes
+  after semantic checking. An inserted copy of such a type is a compile error.

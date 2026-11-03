@@ -1782,6 +1782,10 @@ type
                        ## a `var` (other code may have written it) and for
                        ## a `let` with any other initialiser (one value per
                        ## run, unknown): the entry value is then free.
+    hiddenRoute*: string
+                       ## RFC-0005 S8cs. Why a store the walk does not see may
+                       ## reach this global (`symexGlobalRoutes`); "" when
+                       ## every store is walked, havocked or proved absent.
 
   ProcSig* = object
     name*:    string
@@ -2755,6 +2759,14 @@ type
                           ## and a store of a value whose depth does not
                           ## match the slot's, declines. `classOf` is
                           ## `dcNoAnswer`, as `seNestedSeqUnsupported`.
+    feGlobalRouteUnproved ## RFC-0005 S8cs. A read of a module-level `var`
+                          ## that a store the walk does not see may reach (a
+                          ## lifetime hook the compiler inserts, code the
+                          ## macro-time analysis cannot read):
+                          ## `IRGlobal.hiddenRoute`. The value the walk holds
+                          ## may be stale, in either direction, whether it
+                          ## came from an entry value or from the walk's own
+                          ## write. `classOf` is `dcSubstituted`. sevError.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3880,6 +3892,9 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # A free enumeration of the present keys: every real iteration order is
     # a model, nothing is forked away or dropped, and a candidate is
     # replay-gated (see the enum member).
+  of feGlobalRouteUnproved: dcSubstituted
+    # RFC-0005 S8cs: a possibly stale value: modelled neither superset nor
+    # subset of the real one, on the path and across the run.
   of seRecursiveValueDepth: dcNoAnswer
     # A scoped decline, as `seNestedSeqUnsupported` (the read of a seq
     # past the depth bound is not modelled; see the enum member).
@@ -5719,6 +5734,35 @@ proc mkIRGlobal*(name: string, ty: IRType, isVar: bool,
                  init: IRExpr): IRGlobal =
   ## RFC-0005 S8as. See `IRGlobal`.
   IRGlobal(name: name, ty: ty, isVar: isVar, init: init)
+
+const
+  routeAnyStore* = "!routeAnyStore"
+    ## RFC-0005 S8cs. A row of `SymexProgram.globals`, never a variable: some store
+    ## the walk does not see exists. A pointer of unknown origin may address what
+    ## it writes, a global the program does not name included.
+  routeAnyValue* = "!routeAnyValue"
+    ## RFC-0005 S8cs. A row, as `routeAnyStore`: the store may reach what no
+    ## global's row can stand for (a heap cell, a local whose address was taken,
+    ## the copy a hook makes), so a read of any variable declines.
+
+proc withGlobalRoutes*(gs: seq[IRGlobal]; routes: seq[string]): seq[IRGlobal] =
+  ## RFC-0005 S8cs. `gs` with `symexGlobalRoutes`' list laid over it. Each entry
+  ## is `name|why`; the name `*` is every writable global, the name `!` every
+  ## variable.
+  result = gs
+  for r in routes:
+    let bar = r.find('|')
+    let name = r[0 ..< bar]
+    let why = r[bar + 1 .. ^1]
+    for g in result.mitems:
+      if g.isVar and g.hiddenRoute.len == 0 and (name == "*" or name == g.name):
+        g.hiddenRoute = why
+    if name == "!":
+      result.add IRGlobal(name: routeAnyValue, ty: tInt(), hiddenRoute: why)
+  if routes.len > 0:
+    var r = routes[0]    # a copy: the VM aliases a let (S8ab)
+    result.add IRGlobal(name: routeAnyStore, ty: tInt(),
+                        hiddenRoute: r[r.find('|') + 1 .. ^1])
 
 func irTypeRefFree*(t: IRType): bool =
   ## RFC-0005 S8as. A value of `t` reaches no heap cell: scalars, strings,

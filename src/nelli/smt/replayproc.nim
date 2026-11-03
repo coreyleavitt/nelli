@@ -112,6 +112,24 @@ proc refusedNotMarshallable*(why: string): ReplayChild =
           "runs in a re-executed child, which must be handed what the SUT " &
           "reaches; a Linux or macOS run forks and replays it)")
 
+proc hostRuntimeHook*(): string =
+  ## RFC-0005 batch 11. A runtime hook of the stdlib's that the program set,
+  ## named for a decline, or "". The hook is a proc value the host installed at
+  ## run time, and it changes what the SUT does (a `raise` runs it, an
+  ## allocation failure, an exception nothing catches). A re-executed child runs
+  ## none of the host's top-level code, so it starts without it, and no wire can
+  ## hand a proc value over: a replay there would run a different program.
+  template check(h: untyped) =
+    when declared(h):
+      if h != nil: return "`" & astToStr(h) & "`, a runtime hook the host set"
+  check globalRaiseHook
+  check localRaiseHook
+  check outOfMemHook
+  check unhandledExceptionHook
+  check onUnhandledException
+  check errorMessageWriter
+  ""
+
 var hitLabel: string
 var hitDepth: int
 var hitOut: proc (b: char) {.nimcall, gcsafe.}

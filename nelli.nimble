@@ -1663,6 +1663,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ct_reexec_c",
             "tsymex_rfc0005_s8ct_reexec_d",
             "tsymex_rfc0005_s8ct_reexec_e",
+            "tsymex_rfc0005_b11_hoststate",
+            "tsymex_rfc0005_b11_hoststate_reexec",
             "tsymex_rfc0005_s8ct_deepterm",
             "tsymex_rfc0005_s8ct_deepterm_b",
             # Batch 11: row B19's exact SUT, split out of deepterm (86 s of its

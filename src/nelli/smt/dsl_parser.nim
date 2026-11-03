@@ -3468,6 +3468,11 @@ proc distinctParamOf(impl: NimNode): string =
     for i in 1 ..< formal.len:
       let id = formal[i]
       if id.kind == nnkIdentDefs:
+        # RFC-0005 batch 11. A formal whose type is inferred from its default
+        # (`x = 1`) spells no type node to classify: `classifyType` stopped
+        # the compile on it ("node has no type"), reached through S8cs's
+        # lifetime-hook summary.
+        if id[id.len - 2].kind == nnkEmpty: continue
         let pc = classifyType(id[id.len - 2])
         if pc.ty.kind == itDistinct:
           return pc.ty.distinctName

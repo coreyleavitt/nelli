@@ -1,6 +1,8 @@
 # RFC-0005 S8cm: seconds to compile and run each suite on symex-mingw
 # (mean over runs 1 saved log(s)). Written by scripts/ci-suite-times.py;
 # read by scripts/derive-ci-suites.ps1 to place the corpus shards.
+# tsymex_rfc0005_b11_hoststate (45) and its _reexec twin (55) are estimates
+# from the s8ct isolation and re-exec parts, until a run measures them.
 tsymex_161_overflow_obligation	53.6
 tsymex_162_range_base_width	56.6
 tsymex_163_opaque_transparent	47.3
@@ -355,6 +357,8 @@ tsymex_retest_pred_succ	35.7
 tsymex_rfc0005_b10_integration	89.2
 tsymex_rfc0005_b10_integration_b	49.0
 tsymex_rfc0005_b10_integration_c	48.1
+tsymex_rfc0005_b11_hoststate	45.0
+tsymex_rfc0005_b11_hoststate_reexec	55.0
 tsymex_rfc0005_b6_globalrecv	29.4
 tsymex_rfc0005_b7_integration	55.6
 tsymex_rfc0005_b8_integration	57.1

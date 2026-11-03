@@ -27,6 +27,7 @@ git-add order: three docs were authored earlier and committed late.
 | 0013 | coverage-guided-cost | core |
 | 0014 | integer-range-provenance | symex |
 | 0015 | audit-remainder | core |
+| 0016 | native-parity-hardening | symex |
 
 0006–0012 were composed together on 2026-09-03 from a post-0005 architecture
 survey rather than authored one at a time. They are grouped by shared
@@ -57,6 +58,13 @@ says so in its own §0 rather than inventing a mechanism to justify itself:
 three findings share a defect class (a contract documented at an entry point and
 honoured on a subset of the paths behind it) and two are hygiene. Each carries
 one open fork for Corey.
+
+**0016** was opened 2026-11-02, when Corey split RFC-0005. 0005 ends at the
+0.9.0 tag once its soundness items worse than `main` are fixed; everything
+else it had found (same-severity soundness, precision, crashes and hangs that
+match `main`, CI time, and exact models for its new declines) moved to 0016.
+0016 is open-ended: it has no fixed slice list and is tracked by the rate of
+new findings, with an exit criterion proposed for Corey.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the

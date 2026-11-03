@@ -20367,8 +20367,10 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
         acc.open = "it may dispatch `" & macros.strVal(n) & "`, whose overrides " &
                    "cannot be listed"
       elif isUserRoutine(n):
-        # `symexTarget`'s capture is the library's own, and no user's type.
-        if "engine/markers.nim" notin n.getImpl.lineInfo:
+        # `symexTarget`'s capture is the library's own, and no user's type. The
+        # path is normalised as `isMarkerCall` does: on Windows it has `\`.
+        if not n.getImpl.lineInfoObj.filename.replace('\\', '/').endsWith(
+            markersModuleSuffix):
           acc.callees.add n
       elif macros.strVal(n) in threadStartRoutines:
         acc.open = "it may start a thread with `" & macros.strVal(n) & "`"
@@ -20699,7 +20701,7 @@ proc routeContinue(id: int; resume: NimNode): NimNode =
 
 macro symexRouteResume*(id: static int): untyped =
   ## RFC-0005 S8cs. Reads the hooks of the types just probed.
-  let waiting = routeRuns[id].waiting
+  var waiting = routeRuns[id].waiting    # a copy: the VM aliases a let (S8ab)
   routeRuns[id].waiting = @[]
   for (k, t) in waiting:
     routeProbeRead(routeRuns[id], k, t)

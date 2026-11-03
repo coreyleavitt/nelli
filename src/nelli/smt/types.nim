@@ -5757,7 +5757,7 @@ proc withGlobalRoutes*(gs: seq[IRGlobal]; routes: seq[string]): seq[IRGlobal] =
     if name == "!":
       result.add IRGlobal(name: routeAnyValue, ty: tInt(), hiddenRoute: why)
   if routes.len > 0:
-    let r = routes[0]
+    var r = routes[0]    # a copy: the VM aliases a let (S8ab)
     result.add IRGlobal(name: routeAnyStore, ty: tInt(),
                         hiddenRoute: r[r.find('|') + 1 .. ^1])
 

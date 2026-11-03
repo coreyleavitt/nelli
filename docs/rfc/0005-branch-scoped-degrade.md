@@ -15059,6 +15059,27 @@ handler runs with `std/segfaults`, the walk declines a dereference under an
 finding. On cpp the same file pins `--exceptions:cpp`, where `std/segfaults`
 leaves the defect unhandled natively and the walk reports the crash.
 
+The crash leaves each frame by the channel an escaping raise takes (the
+callee's `escaped`, a closure body's `closureRaises`), marked `crash` so each
+drain re-routes it through `crashRaise` rather than the caller's handlers. The
+first version surfaced it from inside the callee, on the callee's or closure
+body's path alone, without the caller's facts that each drain joins: a deref of
+the global `gpb` that the caller had just pointed at a local read as possibly
+nil, and fourteen suites through proc values and closures (`s8bu_calls`,
+`s8bs_*`, `s8ca_*`, `s8bg`/`s8bh`/`s8bn` remainders, `s8bk_argtiming_checks`,
+`s8cr_intro`, `CR1_CR5_closure_heap`, `rereview_drains`) gave a false
+`sxRaised` on symex-mingw (run 41593977643). `tsymex_phase15_r13_ptr_finally`
+is re-pinned: `f(nil)` is a SIGSEGV at `p[] = 7`, which surfaces under any target
+(E6) and is now found before the `finally`'s `ValueError` (which the walk used to
+reach by routing the nil edge into the `finally`); the composition it pins is
+checked with `dkOther` excluded.
+
+On Windows the walk runs on a 16 MB fiber, and with `std/segfaults` imported
+and `--exceptions:setjmp`, `runSymexCaught` re-raised a `NilAccessDefect` from
+it before any walk, which suggests a fault the process otherwise survives.
+Not investigated here: the setjmp suite does not import `std/segfaults` on
+Windows, so its native row is a Linux fact there.
+
 | form (label in the handler) | native | main | channel | S8cu |
 |---|---|---|---|---|
 | nil literal, field read | SIGSEGV | unknown (`heUnresolvedRef`) | **sat** | raised `NilAccessDefect` |

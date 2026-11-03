@@ -15231,6 +15231,8 @@ type
     path:   Path
     typeId: string
     msg:    Option[string]
+    crash:  bool          ## RFC-0005 S8cu: a nil dereference (`crashRaise`),
+                          ## re-routed past every handler and `finally`
 
   RaiseSinkKind = enum
     ## RFC-0005 S8bb. Which raise sink a deposit went to, in the order
@@ -18288,7 +18290,8 @@ proc drainClosureRaises(p: Path; exitFactsPlaced: bool;
     for o in cr.varOuts: rp.env[o.name] = o.val
     rp.defectSurvivorPc = p.defectSurvivorPc & er.path.defectSurvivorPc
     rp.heapDepth = p.heapDepth
-    discard routeRaise(rp, er.typeId, er.msg, w)
+    if er.crash: crashRaise(rp, er.typeId, w)       # RFC-0005 S8cu
+    else: discard routeRaise(rp, er.typeId, er.msg, w)
     if w.shouldStop: break
   @[p]
 
@@ -22383,7 +22386,8 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           if touched.len > 0:
             raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
                                         guardDegrade(w, stmt.callee, touched))
-          survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
+          if er.crash: crashRaise(raisePath, er.typeId, w)   # RFC-0005 S8cu
+          else: survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
           if w.shouldStop:
             w.extHardMark = outerExtMark   # RFC-0005 S8ax
             return survivors
@@ -24369,14 +24373,13 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
   ## in a release build), nor with `--exceptions:cpp`; with
   ## `--exceptions:setjmp` it makes the raise catchable and runs the `finally`.
   ## So in a setjmp build a dereference under any `try` declines
-  ## (`heNilDerefMayBeCaught`), and in every other build the path ends here as
-  ## a finding at the SUT boundary, in every caller frame at once. Before
-  ## S8cu it was routed as an ordinary raise: a label in `except
-  ## NilAccessDefect` was a false sxSat and `tNilAccess` a false sxUnsat.
-  if w.mode == wmFollowConcrete and
-     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
-                          w.settings):
-    return
+  ## (`heNilDerefMayBeCaught`). In every other build the crash leaves each
+  ## frame by the channel an escaping raise takes (`escaped`, marked `crash`,
+  ## so the caller's drain re-routes it here), since the callee's or closure
+  ## body's path holds only its own facts and the drain joins the caller's;
+  ## it ends as a finding at the SUT boundary. Before S8cu it was routed as an
+  ## ordinary raise: a label in `except NilAccessDefect` was a false sxSat and
+  ## `tNilAccess` a false sxUnsat.
   when compileOption("exceptions", "setjmp"):
     var guarded = w.frame.handlerStack.len > 0
     for f in w.frameStack:
@@ -24389,6 +24392,14 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
           "catchable `" & typeId & "` and run the `finally`: what follows is " &
           "not known -- path degraded to sxUnknown (heNilDerefMayBeCaught)")
       return
+  if w.frameStack.len > 0:
+    w.frame.escaped.add EscapedRaise(path: p, typeId: typeId,
+                                     msg: none(string), crash: true)
+    return
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                          w.settings):
+    return
   if typeIdToDefectKind(typeId) in w.settings.defectExclusions: return
   let (st, wit, candErrs, why) = solveTargetHit(w, p)
   case st

@@ -9,7 +9,15 @@
 ## The cpp backend cannot build `--exceptions:setjmp`, so the `.nim.cfg` applies
 ## it to c only. On cpp (`--exceptions:cpp`) `std/segfaults` leaves the defect
 ## unhandled natively, and the suite pins the crash finding there instead.
-import std/[unittest, os, osproc, strutils, sets, segfaults]
+##
+## On Windows the walk runs on a 16 MB fiber, and with `std/segfaults` imported
+## a fault there that the process otherwise survives is re-raised from
+## `runSymexCaught` as a `NilAccessDefect`, before any walk: so on Windows the
+## file does not import it and the native row (a Linux fact) is skipped. The
+## walker's decline does not read the import, and is checked everywhere.
+import std/[unittest, os, osproc, strutils, sets]
+when not defined(windows):
+  import std/segfaults
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -49,10 +57,11 @@ suite "S8cu: a nil dereference with --exceptions:setjmp":
 
   when compileOption("exceptions", "setjmp"):
    test "with std/segfaults the handler runs natively, so the walk declines":
-    let (output, rc) = execCmdEx(quoteShell(getAppFilename()) & " native:param")
-    checkpoint "rc=" & $rc & " " & output
-    check rc == 0
-    check "RAN hit" in output
+    when not defined(windows):
+      let (output, rc) = execCmdEx(quoteShell(getAppFilename()) & " native:param")
+      checkpoint "rc=" & $rc & " " & output
+      check rc == 0
+      check "RAN hit" in output
     declines(param, heNilDerefMayBeCaught)
 
    test "a `finally` in the caller guards a callee's dereference too":

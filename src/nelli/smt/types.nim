@@ -581,6 +581,7 @@ type
     iekStrFind       ## `s.find(sub[,start])` → Z3 `indexOf[, start]`, −1 absent
                      ## strArgs = [recv,sub] or [recv,sub,start] (S4; RFC Q1 ADR-0025)
     iekStrRfind      ## `s.rfind(sub)`     → Z3 `lastIndexOf`, −1 absent (RFC M3)
+    iekStrCount      ## RFC-0005 S8cf: `s.count(sub)`, non-overlapping
     iekStrContains   ## `sub in s`         → Z3 `(seq.contains s sub)`  (S4)
     iekStrStartsWith ## `s.startsWith(p)`  → Z3 `(seq.prefixof p s)`    (S4)
     iekStrEndsWith   ## `s.endsWith(q)`    → Z3 `(seq.suffixof q s)`    (S4)
@@ -933,7 +934,7 @@ type
       tabRecv*: IRExpr
       tabKey*:  IRExpr
       tabVal*:  IRExpr
-    of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
+    of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount, iekStrContains,
        iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrCaptureRe,
@@ -1054,6 +1055,9 @@ type
                                      ## formal whose actual is a path into
                                      ## an address-taken variable to its
                                      ## cell (`bindVarLocs`).
+      ccRetTy*:   IRType             ## RFC-0005 S8cd: the call's declared
+                                     ## result type (nil for `void`): a callee
+                                     ## with no target stands in a value of it.
     of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
       seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
       seqLitElemTy*: IRType          ## the element IRType
@@ -1700,6 +1704,8 @@ type
       slLen*:     IRExpr         ## the new length (already range-guarded).
       slTy*:      IRType         ## the argument's type (a seq or a string).
       slLoc*:     string         ## siteLoc idiom, for the walk-time decline.
+      slFresh*:   bool           ## RFC-0005 S8cl: `newString`: the result is
+                                 ## a new allocation, memory of its own.
     of isUnsafeCast:
       ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
                                  ## pattern was routed (`"cast[ptr T]"`, `"addr"`).
@@ -4182,15 +4188,17 @@ proc mkClosureCall*(callee: string, args: seq[IRExpr];
                     addrArgs: seq[int] = @[];
                     touch: seq[string] = @[];
                     locs: seq[VarLoc] = @[];
-                    varPtrSafe: seq[int] = @[]): IRExpr =
+                    varPtrSafe: seq[int] = @[];
+                    retTy: IRType = nil): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
   ## variable. A-normalised like `isCall`. RFC-0005 S8bh: `varTys`,
   ## `alias`, `addrArgs` and `touch` carry the call's `var`/`addr` effects
   ## (see `ccVarTys`); RFC-0005 S8bu: `locs` where its arguments came from
-  ## (`ccVarLocs`).
+  ## (`ccVarLocs`); RFC-0005 S8cd: `retTy` its declared result (`ccRetTy`).
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args,
          ccVarTys: varTys, ccAlias: alias, ccAddrArgs: addrArgs,
-         ccTouch: touch, ccVarLocs: locs, ccVarPtrSafe: varPtrSafe)
+         ccTouch: touch, ccVarLocs: locs, ccVarPtrSafe: varPtrSafe,
+         ccRetTy: retTy)
 
 proc withLambdaEffects*(e: IRExpr; aliasPairs: seq[tuple[keep, gone: int]];
                         aliasBodies: seq[IRStmt]; ptrLocal: seq[bool];
@@ -4351,7 +4359,7 @@ proc zeroIRExprForType*(ty: IRType): IRExpr =
                ## zero this cycle; caller degrades (SND-1), never guesses.
 
 const StrOpKinds* = {
-  iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
+  iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount, iekStrContains,
   iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrCaptureRe,
@@ -5754,6 +5762,22 @@ func irTypeRefFree*(t: IRType): bool =
     for f in t.fields:
       if not irTypeRefFree(f): return false
     true
+  of itVariant:
+    # RFC-0005 S8bz (item 3): a case object of such fields too.
+    for f in t.vPlainFieldTypes:
+      if not irTypeRefFree(f): return false
+    for arm in t.vArms:
+      for f in arm.fieldTypes:
+        if not irTypeRefFree(f): return false
+    true
+  of itMultiVariant:
+    for f in t.mvPlainFieldTypes:
+      if not irTypeRefFree(f): return false
+    for ax in t.mvAxes:
+      for arm in ax.arms:
+        for f in arm.fieldTypes:
+          if not irTypeRefFree(f): return false
+    true
   else: false
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
@@ -5840,10 +5864,10 @@ proc mkTabKeysStmt*(retName: string, recv: IRExpr, keyTy: IRType,
          tkLoc: loc)
 
 proc mkSetLenStmt*(retName: string, base, newLen: IRExpr, ty: IRType,
-                   loc: string = ""): IRStmt =
+                   loc: string = ""; fresh = false): IRStmt =
   ## RFC-0005 S8bl (item 1). `retName := setLen(base, newLen)`.
   IRStmt(kind: isSetLen, slRetName: retName, slBase: base, slLen: newLen,
-         slTy: ty, slLoc: loc)
+         slTy: ty, slLoc: loc, slFresh: fresh)
 
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)

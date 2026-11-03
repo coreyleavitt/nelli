@@ -339,6 +339,9 @@ type
     address: int    ## nkVerb THEN: its code address
     grp, alt: int   ## nkAlt
     deep: bool      ## RFC-0005 S8bt: nkCost: RMATCH (one frame deeper)
+    possCps: CpSet  ## RFC-0005 S8cf: nkPoss of a concrete call: the run's set
+    possWhole: bool ## nkPoss reads `possCps` (a whole next character)
+    possCrlf: bool  ## nkPoss goes on only before a CRLF: a (*CRLF) dot's run
 
   FilterKind* = enum
     ## RFC-0005 S8bj. The start-of-match optimisation of an unanchored call.
@@ -382,6 +385,12 @@ type
     jit*: JitScan
       ## RFC-0005 S8bt: peJit837's prefix scan, when it applies
     costs*: bool
+    concrete*: bool
+      ## RFC-0005 S8cf: built for `pcreExec` alone (`regex_parser.concreteEntry`):
+      ## its automaton reads what no language holds, a whole next character
+    jitCountUnread*: bool
+      ## RFC-0005 S8cf: a repeat whose `count_match` calls 8.37's JIT folds
+      ## (`detect_repeat`)
       ## RFC-0005 S8bt: the automaton counts pcre_exec.c's `match()` calls
       ## (`nkCost`; `buildNfa`'s `limitRoom`), its threads are kept apart
     capRoom*: int
@@ -395,11 +404,17 @@ type
 proc matchLimit*(n: Nfa): int =
   ## RFC-0005 S8bt. The `(*LIMIT_MATCH=)` pcre_exec.c applies (below its
   ## default), -1 none.
-  if n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit: int(n.limitMatch)
-  else: -1
+  ## RFC-0005 S8cf: on 8.37's JIT the count runs down from the limit and fails
+  ## on reaching 0, one call earlier than `match()`'s test, and from 0 never.
+  if n.limitMatch < 0 or n.limitMatch >= pcreDefaultLimit: return -1
+  if n.engine == peJit837:
+    return (if n.limitMatch == 0: -1 else: int(n.limitMatch) - 1)
+  int(n.limitMatch)
 
 proc recLimit(n: Nfa): int =
-  ## RFC-0005 S8bt. The `(*LIMIT_RECURSION=)` pcre_exec.c applies.
+  ## RFC-0005 S8bt. The `(*LIMIT_RECURSION=)` pcre_exec.c applies (the JIT
+  ## ignores it).
+  if n.engine == peJit837: return high(int)
   if n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit:
     int(n.limitRecursion)
   else: high(int)
@@ -448,6 +463,7 @@ type Build = object
   costWhy: string  ## RFC-0005 S8bt: why the call accounting is not modelled
 
 proc cost(b: var Build; deep: bool; next: int): int
+proc jitCost(b: var Build; next: int): int
 
 proc add(b: var Build; s: NState): int =
   if b.n.states.len >= maxNfaStates:
@@ -681,7 +697,10 @@ proc compLoopCost(b: var Build; sub: Rx; lazy, once, sGrp: bool;
       return 0
     id = b.n.loops
     inc b.n.loops
-    bodyEnd = b.add NState(kind: nkBack, loop: id, out1: headK, out2: next)
+    bodyEnd = b.add NState(kind: nkBack, loop: id, out1: headK, 
+                        out2: (if lazy: next else: b.jitCost(next)))
+  # RFC-0005 S8cf: OP_KETRMIN counts on the JIT, unless OP_BRAMINZERO opens it.
+  if lazy and once: bodyEnd = b.jitCost(bodyEnd)
   var bodyIn = b.compGroup(sub, bodyEnd, base, sGrp)
   if b.overflow: return 0
   if nullable: bodyIn = b.add NState(kind: nkEnter, loop: id, out1: bodyIn)
@@ -691,13 +710,16 @@ proc compLoopCost(b: var Build; sub: Rx; lazy, once, sGrp: bool;
     b.n.states[headK].out1 = o1
     b.n.states[headK].out2 = o2
   else:
+    # RFC-0005 S8cf: on the JIT OP_KETRMAX's `count_match` is where a failed
+    # iteration resumes: every try of the rest counts, no iteration does.
     let o1 = b.cost(true, bodyIn)
-    let o2 = b.cost(false, next)
+    let o2 = b.jitCost(b.cost(false, next))
     b.n.states[headK].out1 = o1
     b.n.states[headK].out2 = o2
   if once: return bodyIn
   if lazy: b.add NState(kind: nkSplit, out1: b.cost(true, next), out2: bodyIn)
-  else: b.add NState(kind: nkSplit, out1: b.cost(true, bodyIn), out2: next)
+  else: b.add NState(kind: nkSplit, out1: b.cost(true, bodyIn),
+                     out2: b.jitCost(next))   # OP_BRAZERO's way past counts too
 
 proc compRepCost(b: var Build; x: Rx; next, base: int): int =
   ## RFC-0005 S8bt. A repeat with pcre_exec.c's `match()` calls (`costs`).
@@ -715,12 +737,14 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     let poss = base in b.n.possess.addrs
     let lazy = x.lazy and not poss
     var guard: set[char]
+    var wideRun = false
     if poss:
       if sub.crlfDot:
         b.costWhy = "a possessive (*CRLF) dot repeat"
       if sub.kind == rxChars:
         for (lo, hi) in sub.cps:
           if hi >= 128:
+            wideRun = true
             b.costWhy = "a possessive repeat of a non-ASCII character class " &
                         "in UTF mode"
           for c in max(lo, 0) .. min(hi, 127): guard.incl char(c)
@@ -731,7 +755,15 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     # by RMATCH at its minimum too.
     let cls = sub.op in {aoClass, aoNClass, aoXClass}
     proc exitAt(b: var Build; first: bool): int =
-      if poss: b.add NState(kind: nkPoss, bytes: guard, out1: next)
+      # RFC-0005 S8cf: on the JIT the iterator's backtrack re-enters at its
+      # `count_match`: every try of the rest counts.
+      if poss and b.n.concrete and sub.crlfDot:
+        b.add NState(kind: nkPoss, possCrlf: true, out1: next)
+      elif poss and b.n.concrete and wideRun:
+        b.add NState(kind: nkPoss, possWhole: true, possCps: sub.cps,
+                     out1: next)
+      elif poss: b.add NState(kind: nkPoss, bytes: guard, out1: b.jitCost(next))
+      elif b.n.engine == peJit837: b.jitCost(next)
       elif lazy: b.cost(true, next)
       else: b.cost(cls or not first, next)
     if x.hi < 0:
@@ -754,14 +786,22 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     else:
       var o = next
       if x.hi > x.lo and not poss: o = b.cost(true, next)
+      if b.n.engine == peJit837: o = b.jitCost(next)   # OP_EXACT, or the longest
       for i in countdown(x.hi - 1, x.lo):
         let skip = b.exitAt(i == x.lo)
         o = b.split(b.atomTo(o), skip, lazy)
       result = o
+    # RFC-0005 S8cf: `a{2,}` compiles to OP_EXACT and a repeat: its own count.
+    if x.lo >= 2 and x.hi != x.lo and not cls: result = b.jitCost(result)
     for i in 0 ..< x.lo: result = b.atomTo(result)
     return
   let sz = codeSize(sub)
   let b0 = base + 1
+  if b.n.engine == peJit837 and x.hi >= 0 and
+     (x.lo >= 3 or x.hi - x.lo >= 2):
+    # RFC-0005 S8cf: detect_repeat folds these copies into OP_EXACT / OP_UPTO
+    # loops with counts of their own: not read (`limitEffect`).
+    b.n.jitCountUnread = true
   if x.hi < 0:
     let copies = max(x.lo, 1)
     result = b.compLoopCost(sub, x.lazy, x.lo >= 1, couldBeEmpty(sub), next,
@@ -771,12 +811,15 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
   else:
     var o = next
     for i in countdown(x.hi - 1, x.lo):
-      var take = b.compGroup(sub, o, b0 + i * sz)
+      # RFC-0005 S8cf: the JIT counts at the end of a copy behind OP_BRAZERO.
+      var take = b.compGroup(sub, (if x.lazy: o else: b.jitCost(o)),
+                             b0 + i * sz)
       if i != x.hi - 1: take = b.cost(b.catchers, take)   # the wrapper
       if x.lazy:
         o = b.add NState(kind: nkSplit, out1: b.cost(true, next), out2: take)
       else:
-        o = b.add NState(kind: nkSplit, out1: b.cost(true, take), out2: next)
+        o = b.add NState(kind: nkSplit, out1: b.cost(true, take),
+                         out2: b.jitCost(next))
     result = o
     for i in countdown(x.lo - 1, 0):
       result = b.compGroup(sub, result, b0 + i * sz)
@@ -786,8 +829,19 @@ proc nameIndex(b: var Build; name: string): int =
     b.n.nameIdx[name] = b.n.nameIdx.len
   b.n.nameIdx[name]
 
+proc jitCost(b: var Build; next: int): int =
+  ## RFC-0005 S8cf (item 3). One `count_match` of 8.37's JIT before `next`,
+  ## when the automaton counts them (pcre_jit_compile.c: at the end of every
+  ## single-character iterator, of every group copy OP_BRAZERO enters or a
+  ## repeating ket closes, and at OP_BRAMINZERO).
+  if b.n.costs and b.n.engine == peJit837:
+    b.add NState(kind: nkCost, out1: next)
+  else: next
+
 proc cost(b: var Build; deep: bool; next: int): int =
   ## RFC-0005 S8bt. A `match()` call before `next`.
+  if b.n.engine == peJit837:
+    return next   # RFC-0005 S8cf: `match()`'s calls are not the JIT's (`jitCost`)
   b.add NState(kind: nkCost, deep: deep, out1: next)
 
 proc compItem(b: var Build; x: Rx; next, base: int): int =
@@ -918,15 +972,20 @@ proc firstBytes(n: Nfa): set[char] =
       work.add st.out2
     else: work.add st.out1
 
-proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
+proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
+               boundOnly = false; concrete = false): Nfa =
   ## RFC-0005 S8bb, S8bj. The priority NFA of a `psOk` reading, with PCRE's
   ## start-of-match data; `ok == false` past the size caps or for a
   ## declined construct (`why` says which). RFC-0005 S8bt: `engine` is the
   ## one an unanchored call runs on (anchored calls: always `peInterp`);
   ## `limitRoom` >= 0: the automaton counts `match()`'s calls (`costs`) for
-  ## a call whose ovector has room for that many groups.
+  ## a call whose ovector has room for that many groups. RFC-0005 S8cf:
+  ## `boundOnly`, the automaton is read only for an upper bound on those
+  ## calls (`limitReach`): what the exact accounting declines is kept, since
+  ## a repeat it reads as not possessive only costs more.
   var b = Build()
   b.n.engine = engine
+  b.n.concrete = concrete
   if limitRoom >= 0:
     b.n.costs = true
     b.n.capRoom = limitRoom
@@ -964,12 +1023,11 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
   if result.costs:
     # A SKIP:NAME without its MARK re-runs the attempt from a fresh count,
     # ignoring the SKIP:NAMEs it passed (no RMATCH for them).
-    if result.possess.unknown:
+    if result.possess.unknown and engine == peInterp:
       b.costWhy = "auto-possessification next to a character property or " &
                   "an extended class"
-    if engine != peInterp:
-      b.costWhy = "the JIT's match limit accounting"
-    if b.costWhy.len > 0:
+    if b.costWhy.len > 0 and not boundOnly and
+       not (concrete and not result.possess.unknown):
       result.ok = false
       result.why = "match()'s call accounting is not modelled for " &
                    b.costWhy
@@ -999,14 +1057,12 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
   if engine == peJit837 and not (pr.noStartOpt or so.anchored):
     # RFC-0005 S8bt: the JIT's own scan comes first.
     result.jit = jitScan(compileCode(pr), pr.utf)
-    if pr.utf and result.jit.on and result.firstBytes().contains('\xC2'):
-      # The scan steps a byte at a time and can stop inside a character,
-      # where the JIT reads a continuation byte as the code point of its
-      # value: modelled only where no first character is one of those.
-      result.ok = false
-      result.why = "UTF mode under the JIT's prefix scan, with a first " &
-        "character in U+0080..U+00BF (the JIT can start an attempt inside " &
-        "a character and read a continuation byte as that code point)"
+    # RFC-0005 S8cf (item 6): in UTF mode the scan runs only where the first
+    # items are literals and `\d \s \w` (`pcre_jit.scanPrefix`: a class, `.`
+    # and a negated type stop it). At a continuation byte a literal compares
+    # bytes (`byte_sequence_compare`) and the types read no such byte, so an
+    # attempt the scan makes inside a character fails at its first read, as
+    # the automaton's does.
 
 proc filterBytes*(n: Nfa): set[char] =
   ## RFC-0005 S8bj. The bytes the start-of-match scan stops at (`fkFirst`,
@@ -1086,6 +1142,8 @@ type
   StepCtx = object
     ctx: Ctx          ## the rest of the subject
     nb: int           ## the byte here, -1 at the end
+    nextCp: int32     ## RFC-0005 S8cf: a concrete call's whole next character
+    nb2: int          ## RFC-0005 S8cf: a concrete call's byte after `nb`
     nls: bool         ## RFC-0005 S8bt: a newline starts here (`(?m)$`;
                       ## `nlStartsAt`)
     finCRLF: bool     ## the bytes here are a final CRLF (symR2)
@@ -1110,6 +1168,10 @@ type
 const argCap* = 7
   ## RFC-0005 S8bt: the SKIP:NAME run count the agenda keeps exactly
 
+const execArgCap = 100
+  ## RFC-0005 S8cf (item 5): the run count a concrete call keeps (`int8`); the
+  ## languages and tables hold `argCap`, and past it the call is read at points
+
 const costStaleWhy* = "match()'s call accounting where pcre_exec.c's " &
   "ignore_skip_arg outlives an attempt (a SKIP:NAME's provisional run " &
   "number decides whether it calls match()), or past " & $argCap &
@@ -1131,7 +1193,25 @@ proc decidesAtFront[T](it: Item[T]): bool =
   decided(it) or
     it.kind == ikTerm and it.cond == cdNone and it.term == tmArgSkip
 
-proc sat(x: int): int8 = int8(min(x, argCap + 1))
+proc cpIn(cs: CpSet; c: int32): bool =
+  for (lo, hi) in cs:
+    if c >= lo and c <= hi: return true
+
+proc cpAt(s: string; j: int; utf: bool): int32 =
+  ## RFC-0005 S8cf. The character at `j` of a subject PCRE has validated.
+  let b0 = int32(ord(s[j]))
+  if not utf or b0 < 0xC0: return b0
+  let extra = (if b0 >= 0xF0: 3 elif b0 >= 0xE0: 2 else: 1)
+  result = b0 and (0x3F'i32 shr extra)
+  for k in 1 .. extra:
+    if j + k < s.len: result = (result shl 6) or (int32(ord(s[j + k])) and 0x3F)
+
+var concreteCall {.threadvar.}: bool
+  ## RFC-0005 S8cf: `execCore` holds the SKIP:NAME count exactly (`execArgCap`)
+
+proc curArgCap(): int = (if concreteCall: execArgCap else: argCap)
+
+proc sat(x: int): int8 = int8(min(x, curArgCap() + 1))
 
 proc then(a, b: Cost): Cost =
   ## RFC-0005 S8bt. The calls of `a`, then those of `b`.
@@ -1148,7 +1228,7 @@ proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond, int32,
 proc exempt(n: Nfa; st: int32; ac: int8): bool =
   ## RFC-0005 S8bt. A thread kept beside an identical one: pcre_exec.c runs
   ## both, and the SKIP:NAMEs the second runs count (`countArgs`).
-  n.countArgs and n.reachArg[st] and ac <= argCap
+  n.countArgs and n.reachArg[st] and ac <= curArgCap()
 
 proc withFrame(fs: seq[Frame]; f: Frame): seq[Frame] =
   for x in fs:
@@ -1283,7 +1363,14 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
         coNext.cc = e.co.cc + 1
         go(s.out1)
       of nkPoss:
-        if sc.nb < 0 or char(sc.nb) notin s.bytes: go(s.out1)
+        if s.possCrlf:
+          if sc.nb < 0 or (sc.nb == ord('\r') and sc.nb2 == ord('\n')):
+            go(s.out1)
+          else: dead()
+        elif s.possWhole:
+          if sc.nb < 0 or not cpIn(s.possCps, sc.nextCp): go(s.out1)
+          else: dead()
+        elif sc.nb < 0 or char(sc.nb) notin s.bytes: go(s.out1)
         else: dead()
       of nkBol:
         if not s.multi:
@@ -1512,8 +1599,8 @@ proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
     return true
   of tmArgSkip, tmBarrier:
     let counted = f.ac > 0     # 0: not counted, never ignored
-    if counted and f.ac > argCap and f.stl > argCap or
-       costs and f.ac > argCap:
+    if counted and f.ac > curArgCap() and f.stl > curArgCap() or
+       costs and f.ac > curArgCap():
       cur = @[Item[T](kind: ikTerm, term: tmStale)]
       return true
     if counted and f.ac <= f.stl:
@@ -1737,6 +1824,8 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
     let nextLF = (not atEnd) and s[j] == '\n'
     items = resolve(items, nextLF)
     let sc = StepCtx(ctx: ctxAt(n, s, j), nb: (if atEnd: -1 else: ord(s[j])),
+                     nb2: (if j + 1 < s.len: ord(s[j + 1]) else: -1),
+                     nextCp: (if atEnd: -1'i32 else: cpAt(s, j, n.utf)),
                      nls: nlStartsAt(n, s, j),
                      finCRLF: n.nl == nlCRLF and j == s.len - 2 and
                               s[j] == '\r' and s[j + 1] == '\n',
@@ -2799,7 +2888,10 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
     # RFC-0005 S8bt: the scan can stop inside a multi-byte newline, where
     # the attempt's start class (`pcU1` .. `pcU3`) has no verifier: the
     # concrete reading (`pcreExec`) is modelled, the search's languages
-    # are not.
+    # are not. RFC-0005 S8cf (item 6): the walker reads such a call at points
+    # (`regex_parser.pointNfa`). Without this decline the languages differ
+    # from the reference, and many are past the regex cap
+    # (`tsymex_rfc0005_s8cf_jitutf`).
     result.ok = false
     result.why = "UTF mode with (*ANY) under the JIT's prefix scan (an " &
       "attempt can start inside a multi-byte newline)"
@@ -3620,6 +3712,7 @@ const
   pcreErrBadUtf8Offset* = -11
   pcreErrMatchLimit* = -8
   pcreErrRecursionLimit* = -21
+  pcreErrJitStackLimit* = -27
   reqByteMax* = 1000   ## pcre_internal.h's REQ_BYTE_MAX
 
 type LimitEffect* = enum
@@ -3637,6 +3730,7 @@ proc limitEffect*(n: Nfa): (LimitEffect, int) =
   ## against LIMIT_RECURSION, so LIMIT_MATCH=0 wins over LIMIT_RECURSION=0.
   let m = n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit
   let r = n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit
+  if n.jitCountUnread: return (leUnknown, 0)
   if countsLimits(n): return (leCounted, 0)
   if n.engine == peJit837:
     # RFC-0005 S8bt: the JIT ignores LIMIT_RECURSION, and counts
@@ -3692,6 +3786,8 @@ proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
   # automaton is `buildNfa(.., peInterp)`'s).
   doAssert not (anchoredCall and n.engine != peInterp),
     "pcreExec: an anchored call on a JIT automaton"
+  concreteCall = true
+  defer: concreteCall = false
   let jit = n.engine == peJit837
   let (le, code) = limitEffect(n)
   doAssert le != leUnknown, "pcreExec: a limit whose effect is not computed"
@@ -3725,9 +3821,10 @@ proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
     else:
       next = n.nextChar(s, x, jit)
     # RFC-0005 S8bt: pcre_exec.c's `ignore_skip_arg` for the next attempt
-    # (`nextIgn`); past `argCap` it is not modelled.
+    # (`nextIgn`). RFC-0005 S8cf: `argCap` bounds the automata; a concrete
+    # call keeps counting, to `execArgCap`.
     ign = r.ign
-    if ign > argCap: return ((pcreUnmodelled, 0, 0), 0)
+    if ign > execArgCap: return ((pcreUnmodelled, 0, 0), 0)
     if anchored or next > s.len: return ((-1, 0, 0), 0)
     x = next
     # RFC-0005 S8bt: the JIT resumes at a SKIP's landing without the CRLF
@@ -3789,6 +3886,96 @@ proc pcreReplace*(n: Nfa; s, by: string): string =
   result = pcreReplace(n, s, by, unmodelled)
   doAssert not unmodelled, "pcreReplace: a call the model does not read"
 
+# ---- RFC-0005 S8cf: how far a subject is from PCRE's own resource limits ------
+
+const
+  reachLenCap* = 4096
+    ## RFC-0005 S8cf: the largest subject length `limitReach` proves safe
+    ## (a lower bound is all it states; the rows are linear in this)
+  reachCallBudget = 5_000_000'i64
+    ## half of pcre_exec.c's default `match_limit`, so the constants the
+    ## bound leaves out (NOTEMPTY_ATSTART's extra exit) stay below it
+  reachDepthBudget* = 900'i64
+    ## RFC-0005 S8cf: the deep frames the row may nest. Probed on PCRE 8.45
+    ## (Linux, 8 MB stack): `(a)*c` runs off the stack near 16 000 bytes, one
+    ## deep frame each, so a frame is about 512 bytes, and 900 of them are
+    ## under half of the smallest stack std/re's callers have (1 MB). On 8.37's
+    ## JIT, whose stack is MACHINE_STACK_SIZE 32 KiB (4096 words), the probes
+    ## cost at most 4 words per deep frame ((a|b)*c: 2 frames, 4 words a byte,
+    ## -27 at 1025 bytes), so 900 is 3600 words of the 4096.
+
+type LimitReach* = object
+  ## RFC-0005 S8cf. Where a call of a pattern can stop being a match or a
+  ## miss: PCRE_ERROR_MATCHLIMIT, PCRE_ERROR_RECURSIONLIMIT, the JIT's
+  ## PCRE_ERROR_JIT_STACKLIMIT, or the interpreter's `match()` running off
+  ## the machine stack (a SIGSEGV: 8.45 is built with stack recursion).
+  never*: bool   ## no subject length reaches any of them
+  safe*: int     ## otherwise no subject of at most this many bytes does
+
+proc limitReachAuto(n: Nfa): LimitReach =
+  ## The bound on one attempt, row by row of the bytes left. F and S are the
+  ## most `match()` calls over the runs from a state that end in failure and
+  ## in a match (-1: it has no such run), D its deepest frame on any path:
+  ## a split's first branch fails before the second runs, and nothing after
+  ## a match runs, so a repeat whose every exit matches (`a*`, `[ab]+`)
+  ## costs the same at every length. Subjects are chosen per state, so this
+  ## is an upper bound: pcre_exec.c resets the count per attempt.
+  type V = tuple[f, s, d: int64]
+  let cap = reachCallBudget * 4
+  proc addSat(a, b: int64): int64 = min(a + b, cap)
+  var entry = initHashSet[int32]()
+  entry.incl int32(n.start)
+  for st in n.states:
+    if st.kind == nkByte: entry.incl int32(st.out1)
+  var prev, cur: Table[int32, V]
+  for k in 0 .. reachLenCap:
+    var memo = initTable[(int32, uint64), V]()
+    proc go(st: int32; mask: uint64): V =
+      let key = (st, mask)
+      if key in memo: return memo[key]
+      let s = n.states[st]
+      proc passF(v: V): V = (max(0'i64, v.f), v.s, v.d)
+      case s.kind
+      of nkMatch: result = (-1'i64, 0'i64, 0'i64)
+      of nkByte:
+        if k == 0: result = (0'i64, -1'i64, 0'i64)
+        else: result = passF(prev[int32(s.out1)])
+      of nkSplit:
+        let a = go(int32(s.out1), mask)
+        let b = go(int32(s.out2), mask)
+        result.f = (if a.f < 0 or b.f < 0: -1'i64 else: addSat(a.f, b.f))
+        result.s = max(a.s, (if a.f >= 0 and b.s >= 0: addSat(a.f, b.s)
+                             else: -1'i64))
+        result.d = max(a.d, b.d)
+      of nkCost:
+        let a = go(int32(s.out1), mask)
+        result.f = (if a.f >= 0: addSat(a.f, 1) else: -1'i64)
+        result.s = (if a.s >= 0: addSat(a.s, 1) else: -1'i64)
+        result.d = min(a.d + (if s.deep: 1'i64 else: 0'i64), cap)
+      of nkEnter:
+        result = go(int32(s.out1), mask or (1'u64 shl s.loop))
+      of nkBack:
+        if (mask and (1'u64 shl s.loop)) != 0: result = go(int32(s.out2), mask)
+        else: result = go(int32(s.out1), mask)
+      of nkSave, nkAlt: result = go(int32(s.out1), mask)
+      of nkBol, nkEol, nkEolAbs, nkPoss, nkVerb:
+        result = passF(go(int32(s.out1), mask))
+      memo[key] = result
+    cur = initTable[int32, V]()
+    for e in entry: cur[e] = go(e, 0'u64)
+    let v = cur[int32(n.start)]
+    if max(v.f, v.s) > reachCallBudget or v.d > reachDepthBudget:
+      return LimitReach(safe: max(k - 1, 0))
+    if k > 0 and cur == prev: return LimitReach(never: true)
+    prev = cur
+  LimitReach(safe: reachLenCap)
+
+proc limitReach*(pr: PcreParse): LimitReach =
+  ## RFC-0005 S8cf. The bound on the interpreter's own limits.
+  let n = buildNfa(pr, peInterp, limitRoom = pr.groups, boundOnly = true)
+  if not n.ok: return LimitReach(safe: 0)
+  limitReachAuto(n)
+
 # ---- RFC-0005 S8bt (item 7): facts of every `replace` value -------------------
 
 type ReplaceFacts* = object
@@ -3801,6 +3988,13 @@ type ReplaceFacts* = object
     ## an attempt at a position holding one matches, whatever follows it
   first*: set[char]
     ## every match's first byte is one of these (all 256 when not computed)
+  pairs*: seq[(char, char)]
+    ## RFC-0005 S8cf (item 11): two bytes, neither `sure`, an attempt at which
+    ## matches whatever follows them: never next to each other between two
+    ## matches (`maxPairs` at most, else none)
+  utf*: bool
+    ## RFC-0005 S8cf: `sure` and `pairs` hold of a valid subject: an invalid one
+    ## is an error and kept whole
 
 proc hasAcceptRx(x: Rx): bool =
   case x.kind
@@ -3811,6 +4005,34 @@ proc hasAcceptRx(x: Rx): bool =
     false
   of rxRep: hasAcceptRx(x.sub)
   else: false
+
+const maxPairs = 64
+
+proc nonEmptyAttempt(n: Nfa; spec: AttemptSpec): bool =
+  let d = buildAttempt(n, spec)
+  if not d.ok: return true
+  minimizeMap(d)[2][0] >= 0
+
+proc searchMoves(n: Nfa): bool =
+  ## RFC-0005 S8cf (item 11). Whether some attempt ends the search or moves it
+  ## past positions: a COMMIT, a SKIP past its start, or a limit stops it.
+  case limitEffect(n)[0]
+  of leNone: discard
+  of leUnknown, leZero: return true
+  of leCounted:
+    for pc in startClasses(n):
+      for acc in [acErrM, acErrR]:
+        if nonEmptyAttempt(n, AttemptSpec(acc: acc, anchored: true, pc0: pc)):
+          return true
+  if not (n.hasCommit or n.hasSkip): return false
+  for pc in startClasses(n):
+    for ne in [false, true]:
+      if n.hasCommit and
+         nonEmptyAttempt(n, AttemptSpec(acc: acCommit, noEmpty: ne, pc0: pc)):
+        return true
+      if n.hasSkip and
+         nonEmptyAttempt(n, AttemptSpec(acc: acSkipT, noEmpty: ne, pc0: pc)):
+        return true
 
 proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
   ## RFC-0005 S8bt. The facts of `n` (read from `root`).
@@ -3825,11 +4047,13 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
   ##     and the search attempts there -- the start-of-match scan and the
   ##     minimum-length and required-character checks skip only positions
   ##     where no match starts. Stated only where nothing else moves the
-  ##     search: no COMMIT, PRUNE, SKIP or THEN (a SKIP jumps past
-  ##     positions, a COMMIT ends the search), no UTF mode (an invalid
-  ##     subject is an error and kept whole) and no limit below PCRE's
-  ##     default (an error keeps the rest); an LF is not sure where the
-  ##     bumpalong's CRLF skip can pass over it (`skipActive`).
+  ##     search. RFC-0005 S8cf (item 11): no attempt on any subject ends in a
+  ##     COMMIT or a SKIP past its start, or at a limit below PCRE's default
+  ##     (`searchMoves`; each keeps the rest, and PRUNE and THEN do not move
+  ##     the search); a continuation byte is not sure in UTF mode and the fact
+  ##     holds of a valid subject (`utf`). A SKIP:NAME without a MARK keeps a
+  ##     count across attempts, whose runs differ: not computed. An LF is not
+  ##     sure where the bumpalong's CRLF skip can pass over it (`skipActive`).
   ##   * A byte is outside `first` when no attempt at a position holding
   ##     it matches, whatever follows: for every class of what precedes the
   ##     start, the no-match verifier (`buildVerifier`, the attempt as the
@@ -3855,10 +4079,10 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
         if t < 0 or univIdx(nls, 0) notin v.univ[t]:
           first.incl symByte(sym)
     if fine: result.first = first
-  if not n.ok or n.utf or limitEffect(n)[0] != leNone or n.hasCommit or
-     n.hasSkip or n.hasThen or n.hasPrune or n.hasNeverSkip:
-    return
+  result.utf = n.utf
+  if not n.ok or n.hasNeverSkip or searchMoves(n): return
   var sure: set[char] = {'\x00' .. '\xFF'}
+  var alive: array[256, set[char]]
   for pc in startClasses(n):
     for ne in [false, true]:
       let d = buildAttempt(n, AttemptSpec(acc: acNone, anchored: true,
@@ -3868,6 +4092,24 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
       let st = mapped[0]
       if st < 0: continue          # no subject fails the attempt
       for sym in 0 ..< symMark:
-        if trans[st][sym] >= 0: sure.excl symByte(sym)
+        let t = trans[st][sym]
+        if t < 0: continue
+        sure.excl symByte(sym)
+        # RFC-0005 S8cf: `sure`'s reading one byte further.
+        for sym2 in 0 ..< symMark:
+          if trans[t][sym2] >= 0:
+            alive[ord(symByte(sym))].incl symByte(sym2)
   if n.skipActive: sure.excl '\n'
+  if n.utf: sure = sure - {'\x80' .. '\xBF'}
   result.sure = sure
+  # RFC-0005 S8cf: a byte of a gap is one Nim's loop searched from only when
+  # no match is empty (an empty match's next byte is copied, not searched).
+  if result.mn >= 1:
+    for x in '\x00' .. '\xFF':
+      if x in sure or (x == '\n' and n.skipActive) or
+         (n.utf and x in {'\x80' .. '\xBF'}):
+        continue
+      for y in '\x00' .. '\xFF':
+        if y in sure or y in alive[ord(x)]: continue
+        result.pairs.add (x, y)
+    if result.pairs.len > maxPairs: result.pairs = @[]

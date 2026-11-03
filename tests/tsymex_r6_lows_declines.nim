@@ -65,7 +65,7 @@
 ## Verdict-affecting for N15/N30/N41 (a previously-crashing shape now reports
 ## its correct classified decline kind instead of the generic internal-fault
 ## one); N12 is message-rendering only. symexWalkerVersion 107->108.
-import std/[unittest, strutils, tables]
+import std/[unittest, strutils, tables, sets]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
@@ -179,16 +179,17 @@ suite "symex round-6 N30 -- closure string-return type: classified decline (feUn
     for e in r.errors:
       check e.kind != weInternalWalkerFault
 
-  test "N30-2: a closure return type with no wrap still declines classified (feUnsupportedOp), never a fault":
+  test "N30-2: a Table closure result is MODELLED since RFC-0005 S8cd (`closureRetStructured`; was a classified decline), never a fault":
+    ## Real Nim: `f` returns `t`, so a `t` of 4 entries reaches the label.
+    symexCaptureBegin()
+    var t4: Table[string, int]
+    for key in ["a", "b", "c", "d"]: t4[key] = 1
+    n30ClosureArrayDeclines(t4, 0)
+    check "n30_closure_array" in symexCaptureEnd()
     let r = symexFind(n30ClosureArrayDeclines, tLabel("n30_closure_array"))
-    check r.status == sxUnknown
-    var sawFault = false
-    var sawClassified = false
+    check r.status == sxSat
     for e in r.errors:
-      if e.kind == weInternalWalkerFault: sawFault = true
-      if e.kind == feUnsupportedOp and "symValFromRawAst" in e.msg: sawClassified = true
-    check not sawFault
-    check sawClassified
+      check e.kind != weInternalWalkerFault
 
 # =============================================================================
 # N41 -- compound sv-kind (svTable/svSet) sort derivation: classified decline

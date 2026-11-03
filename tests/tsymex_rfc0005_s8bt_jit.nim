@@ -175,14 +175,11 @@ suite "S8bt: PCRE 8.37's JIT, concretely":
     check t.bad.len == 0
     check t.patterns >= 40
 
-  test "UTF: a first character in U+0080..U+00BF under the scan declines":
-    # `\s` at a continuation byte (the scan's first position takes any
-    # byte) reads it as a code point; one that the first item may match is
-    # not modelled.
+  test "UTF: a first character in U+0080..U+00BF under the scan":
+    # RFC-0005 S8cf (item 6): what the scan reaches at a continuation byte
+    # fails at its first read (`tsymex_rfc0005_s8cf_jitutf`).
     for p in [r"(*UTF)(?:\sb|\x{a9})c", r"(*UTF)(?:\d|\x{80})ab"]:
-      let n = buildNfa(parsePcre(p), peJit837)
-      check not n.ok
-      check "U+0080..U+00BF" in n.why
+      check buildNfa(parsePcre(p), peJit837).ok
       check buildNfa(parsePcre(p)).ok
     # A first character elsewhere: modelled.
     check buildNfa(parsePcre(r"(*UTF)\s\x{20ac}a"), peJit837).ok

@@ -25,9 +25,10 @@
 ## `tsymex_rfc0005_s8by_remainder`, S8ce's fallback beside S8bx's pins in
 ## `tsymex_rfc0005_s8bx_extractraise`.
 ##
-## `unsafeNew` declines. S8ca's report has it as a defect (a no-op, so `p` stays
+## `unsafeNew`. S8ca's report has it as a defect (a no-op, so `p` stays
 ## nil), true at S8ca's own head (8cef160: `p != nil` a false `sxUnsat`, `p == nil`
-## a false `sxSat`), whose base has no S8bl. S8bl's decline holds on this stack.
+## a false `sxSat`), whose base has no S8bl. S8bl's decline held on this stack
+## until S8cl modelled the allocation, so it is decided here.
 ##
 ## Every SUT's native run is checked here, on the input the comment names.
 import std/[unittest, strutils, tables, sets]
@@ -376,13 +377,13 @@ suite "batch 9: what the lifted limit is for stays exact":
     verdict(sIndexOnce, "once_dead", sxUnsat)
     verdict(sIndexOnce, "once_dead2", sxUnsat)
 
-suite "batch 9: unsafeNew declines":
+suite "batch 9: unsafeNew allocates (S8cl; it declined here)":
 
   test "a nil check and a write through it":
-    declines(sUnsafeNil, "un_live", feUnsupportedOp)
-    declines(sUnsafeNil, "un_dead", feUnsupportedOp)
-    declines(sUnsafeWrite, "uw_live", feUnsupportedOp)
-    declines(sUnsafeWrite, "uw_dead", feUnsupportedOp)
+    verdict(sUnsafeNil, "un_live", sxSat)
+    verdict(sUnsafeNil, "un_dead", sxUnsat)
+    verdict(sUnsafeWrite, "uw_live", sxSat)
+    verdict(sUnsafeWrite, "uw_dead", sxUnsat)
 
 suite "batch 9: walker version":
 

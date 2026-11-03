@@ -470,10 +470,10 @@ when replayReexecs:
         while not (p[i] == 0 and p[i + 1] == 0):
           result.add p[i]
           inc i
-        result.add p[i]
-        result.add 0'u16
+        # The last variable's terminator. A second one would end the block here,
+        # and the child would not see the variable added below.
+        if i > 0: result.add 0'u16
         discard freeEnvironmentStringsWR(base)
-      if result.len == 2 and result[0] == 0: result.setLen(0)
       let added = newWideCString(name & "=" & value)
       var j = 0
       while added[j].uint16 != 0:

@@ -98,7 +98,10 @@ proc nilDeref(k: int) =
   symexTarget("t")
 
 proc recur(n: int): int =
-  var pad: array[4096, int]
+  # The sort's probe holds `array[4096, int]`. That makes terms past
+  # `termWalkMaxDepth` (`tsymex_rfc0005_s8ct_deepterm` pins those) and takes the
+  # analysis about 5 minutes, which this suite's budget has no room for.
+  var pad: array[64, int]
   pad[n and 7] = n
   recur(n + 1) + pad[n and 7]
 
@@ -366,8 +369,8 @@ suite "S8ct: a replay cannot end the host":
     check not n.hit
 
   test "B19: unbounded recursion":
-    # Not a replay's death: the analysis itself ended the process, in S8by's
-    # `holds`, on the depth of the zeroed `pad`. The replay of input 0 then
+    # With the sort's `array[4096, int]` this was not a replay's death: the
+    # analysis ended the process, in S8by's `holds`. Here the replay of input 0
     # crashes, and input `high(int)` really does raise, at `n + 1`.
     let r = symexFind(unboundedRecursion, tLabel("t"))
     checkpoint(show(r.errors))

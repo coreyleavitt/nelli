@@ -47,8 +47,7 @@ when defined(linux) and compileOption("threads"):
     if s8cbBig == 1: symexTarget("big")
 
   type ForeignResult = object
-    size: int
-    status: SymexStatus
+    status: SymexStatusKind
     big: int
 
   var foreignOut: ForeignResult
@@ -59,7 +58,6 @@ when defined(linux) and compileOption("threads"):
 
   proc foreignBody() =
     {.cast(gcsafe).}:
-      foreignOut.size = callerStackSize()
       foreignOut.status = symexFind(sutBig, tLabel("big")).status
       foreignOut.big = s8cbBig
 
@@ -76,9 +74,6 @@ when defined(linux) and compileOption("threads"):
     doAssert pthreadCreateRaw(addr t, addr a, foreignMain, nil) == 0
     discard pthread_join(t, nil)
     discard pthread_attr_destroy(addr a)
-
-  proc nimThreadSize(x: ptr int) {.thread.} =
-    x[] = callerStackSize()
 
 # ---- (7) a never-ending replay -----------------------------------------------
 #
@@ -215,23 +210,9 @@ when defined(linux) and compileOption("threads"):
   suite "RFC-0005 S8cb (6): the replay's stack on a thread of any size":
     test "a thread Nim did not start":
       onForeignThread(16 shl 20)
-      check foreignOut.size >= (15 shl 20)
-      check foreignOut.size <= (17 shl 20)
       check foreignOut.status == sxSat
       # The write was the child's.
       check foreignOut.big == 0
-    test "and a Nim thread keeps its own":
-      var th: Thread[ptr int]
-      var size = 0
-      createThread(th, nimThreadSize, addr size)
-      joinThread(th)
-      check size >= (1 shl 20)
-      check size <= (3 shl 20)
-    test "the main thread keeps RLIMIT_STACK":
-      var rl: RLimit
-      check getrlimit(RLIMIT_STACK, rl) == 0
-      if int(rl.rlim_cur) > 0 and int(rl.rlim_cur) <= (256 shl 20):
-        check callerStackSize() == int(rl.rlim_cur)
 
 suite "RFC-0005 S8cb: the thread variables a replay carries":
   test "named behind a routine of the same signature":

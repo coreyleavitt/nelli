@@ -159,9 +159,6 @@ suite "RFC-0005 S8bo (7): the calling thread's `{.threadvar.}`s":
 
 suite "RFC-0005 S8bo (7): the calling thread's stack":
   test "a frame the calling thread holds does not overflow the replay":
-    if callerStackSize() < 6 shl 20:
-      skip()
-    else:
-      let r = symexFind(sutBigFrame, tLabel("big"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status == sxSat or r.errors.hasKind(feReplayDeclined)
+    let r = symexFind(sutBigFrame, tLabel("big"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat or r.errors.hasKind(feReplayDeclined)

@@ -3480,13 +3480,10 @@ type
       ## RFC-0005 S8be. The wall time one replay of a candidate's witness may
       ## take. A witness can drive the real `fn` into a loop the model never
       ## saw (a foreign or opaque routine's own), and a replay that does not
-      ## end hung the entry macro with it. The replay runs on a thread of its
-      ## own; past this bound it is abandoned (`roTimedOut`: the candidate
-      ## stays `sxUnknown`, with a `feReplayTimedOut` hint) and the thread
-      ## is left to finish, or not, on its own -- nothing can stop it safely.
-      ## `<= 0` runs the replay on the calling thread with no bound, as
-      ## before S8be; so does a build without `--threads:on`. In the cache
-      ## key when not the default.
+      ## end hung the entry macro with it. RFC-0005 S8ct: the replay runs in a
+      ## child process, killed past this bound (`roTimedOut`: the candidate
+      ## stays `sxUnknown`, with a `feReplayTimedOut` hint). `<= 0` leaves the
+      ## child unbounded. In the cache key when not the default.
 
 # ---- RFC-0005 S1: the channel algebra (§2.2) -------------------------------
 

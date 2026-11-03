@@ -41,7 +41,7 @@ import ./smt/scan
 import ./smt/replayproc   ## RFC-0005 S8ct
 import ./smt/replaywire   ## RFC-0005 S8ct
 export replayExecutions
-from ./smt/scoped_names import isModuleGlobal, globalIRName   ## RFC-0005 S8bn
+from ./smt/scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
        engineTypes.FindingGap, engineTypes.trusted   ## RFC-0005 S11
@@ -2488,6 +2488,10 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
           # A C variable holds what no marshalling can see. The stdlib's are the
           # C library's (`stdout`), which the child has its own of.
           if user: acc.markOpen("`" & n.strVal & "`, a C variable")
+        elif isRoutineGlobal(n):
+          # Naming a routine's `{.global.}` from outside that routine does not
+          # link: a C `extern` emitted first takes the place of its definition.
+          acc.markOpen("`" & n.strVal & "`, a routine's `{.global.}`")
         elif user or symKind(n) == nskVar:
           acc.globals.add n
       # A proc value the program holds, so may hand to the stdlib: code this
@@ -2697,7 +2701,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   # the child's half on whichever side declares it. §4.2 "Capture reentrancy":
   # a nested frame, so an enclosing user capture (`assertCoveredBy`) keeps its
   # hits and does not see ours.
-  proc runBody(childWitId: NimNode): NimNode =
+  proc runBody(childWitId, childTgtId: NimNode): NimNode =
     let splat = emitWitnessSplat(fn, params.len, childWitId, paramTys,
                                  newAssignment(boundId, newLit(true)),
                                  params, globals)
@@ -2705,13 +2709,13 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       var `escId`: ref Exception = nil
       var `boundId` = false
       symexCaptureBegin()
-      armReplayHit(targetLabelOf(`tgtId`))
+      armReplayHit(targetLabelOf(`childTgtId`))
       try:
         `splat`
       except Exception as e:
         `escId` = e
       let `hitsId` = symexCaptureEnd()
-      ReplayReport(reached: replayReached(`tgtId`, `hitsId`, `escId`),
+      ReplayReport(reached: replayReached(`childTgtId`, `hitsId`, `escId`),
                    bound: `boundId`)
   let lossy = newLit(fidelity == wfLossy)
   # RFC-0005 S10. The rendered witness type is not always the parameter
@@ -2734,7 +2738,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   var preamble = newStmtList()
   var runChild: NimNode
   when replayForks:
-    let body = runBody(witId)
+    let body = runBody(witId, tgtId)
     runChild = quote do:
       runReplayForked(proc (): ReplayReport {.closure, gcsafe.} =
         {.cast(gcsafe).}:
@@ -2777,14 +2781,19 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       let stackId = genSym(nskVar, "replayStack")
       let blobId = if child.blobId != nil: child.blobId
                    else: genSym(nskVar, "replayBlob")
-      let wid = if child.witId != nil: child.witId else: witId
+      # The child's own symbols, never the host side's: a genSym'd symbol declared
+      # twice has one owner, and a child proc nested in a routine would then be
+      # capturing the routine's local.
+      let wid = if child.witId != nil: child.witId
+                else: genSym(nskLet, "childWitness")
+      let childTgt = genSym(nskLet, "childTarget")
       let decl =
         if child.decl != nil: child.decl
         else:
           let b = blobId
           quote do:
             let `wid` {.used.} = `b`
-      let body = runBody(wid)
+      let body = runBody(wid, childTgt)
       var getGlobals = newStmtList()
       var putGlobals = newStmtList()
       for g in fp.globals:
@@ -2798,7 +2807,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           var `rd` = initWireReader(`payload`)
           var `stackId`: int64
           wireGet(`rd`, `stackId`)
-          let `tgtId` = readTarget(`rd`)
+          let `childTgt` = readTarget(`rd`)
           var `blobId`: `blobTy`
           wireGet(`rd`, `blobId`)
           `getGlobals`
@@ -2930,9 +2939,6 @@ proc candidateInput(c: SatCandidate): auto =
   ## RFC-0005 S10. The candidate's model, for the replay codegen to render
   ## into `fn`'s parameter tuple. Private: see the section comment.
   c.input
-
-type CandidateInput = typeof(candidateInput(default(SatCandidate)))
-  ## RFC-0005 S8ct. The model's type, by a name a child's half can spell.
 
 func candidateLossy*(c: SatCandidate): bool =
   ## RFC-0005 S10. True when the candidate's own extraction substituted a
@@ -3086,7 +3092,7 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
     let childRaw = genSym(nskVar, "childRaw")
     let childWit = genSym(nskLet, "childWitness")
     let (childTy, childTup) = emitWitnessTuple(params, childRaw)
-    child = ChildWitness(blob: witId, blobTy: bindSym"CandidateInput",
+    child = ChildWitness(blob: witId, blobTy: newCall(bindSym"typeof", witId),
                          blobId: childRaw, witId: childWit,
                          decl:
                            if params.len == 0:

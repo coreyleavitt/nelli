@@ -76,7 +76,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feReplayTimedOut,
                         # RFC-0005 S8cs: a read of a global a store the walk
                         # does not see may reach.
-                        feGlobalRouteUnproved}
+                        feGlobalRouteUnproved,
+                        # RFC-0005 S8ct: a replay whose child ended, and one
+                        # that did not run.
+                        feReplayCrashed, feReplayDeclined}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

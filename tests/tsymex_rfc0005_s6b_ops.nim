@@ -703,8 +703,12 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     ## RFC-0005 S8cb removed bool ordering's: the walker models the order.
+    ## RFC-0005 S8ct added one, fresh: `isIndex` on an array whose index's
+    ## type may name more than `termWalkMaxDepth` positions reads a fresh
+    ## value of the element type (`arrayAccessTooWide`), a superset of the
+    ## element Nim reads; the IndexDefect fork comes first, as before.
     checkpoint($sites)
-    check sites.len == 14
+    check sites.len == 15
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

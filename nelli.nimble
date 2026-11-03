@@ -1427,5 +1427,10 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cr_intro",
             "tsymex_rfc0005_s8cr_pins",
             "tsymex_rfc0005_s8cr_flips",
-            "tsymex_rfc0005_s8cr_flips_str"]:
+            "tsymex_rfc0005_s8cr_flips_str",
+            # RFC-0005 S8ct: no replay runs in the host process, and a term too
+            # deep for a recursive walk leaves the process alive; walker 252->261.
+            "tsymex_rfc0005_s8ct_isolation",
+            "tsymex_rfc0005_s8ct_reexec",
+            "tsymex_rfc0005_s8ct_deepterm"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

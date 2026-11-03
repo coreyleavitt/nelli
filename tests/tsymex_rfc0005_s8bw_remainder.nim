@@ -12,6 +12,7 @@ import std/[unittest, strutils, tables, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -33,7 +34,7 @@ template confirmed(fn: typed, lbl: string): untyped =
     let r = clean(fn, lbl, sxSat)
     if r.status == sxSat:
       checkpoint $r.heapSnapshot
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
 template inBand(fn: typed, lbl: string, ek: SymexErrorKind,
                 needle: string): untyped =
@@ -459,7 +460,7 @@ template confirmedWithInactive(fn: typed, lbl: string): untyped =
     check named
     if r.status == sxSat:
       checkpoint $r.heapSnapshot
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
 type
   PK3 = enum pkA, pkB

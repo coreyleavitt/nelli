@@ -207,12 +207,26 @@ const renderAsChoicesVersion* = "12"
   ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
+  ## - RFC-0005 batch 11 (252->262): S8cs (provisional 260), S8ct (261) on batch 10.
 
-const symexWalkerVersion* = "260"
-  ## RFC-0005 S8cs (260 on batch 10's 252, local until the merge renumbers it) -- the stores the walk
+const symexWalkerVersion* = "262"
+  ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
   ## does not see. A program's globals carry `hiddenRoute` from the macro-time
   ## route analysis (lifetime hooks, code it cannot list), and a read of such a
   ## global declines (`feGlobalRouteUnproved`). `!hidden` is in the global's key.
+  ##
+  ## RFC-0005 S8ct (2026-11-02) -- no replay runs in the host process.
+  ## Provisional 261 (S8cs and S8cu held 260), renumbered 262 by batch 11;
+  ## batch 10 (252) merged under it.
+  ## A replay that reaches `quit`, a raw C `exit`, a nil dereference or unbounded
+  ## recursion ended the host's whole run (it declined on main). Each replay now
+  ## runs in a child: `fork` on POSIX, a re-execution of the program on Windows,
+  ## which is handed the witness and the variables the SUT reaches and declines
+  ## the replay when it cannot be (`feReplayDeclined`). A child that ends before
+  ## reaching the target is `sxUnknown` with `feReplayCrashed`, not a refutation;
+  ## a label hit before it ended is a confirmed `sxSat`. A child's writes do not
+  ## reach the host. A symbolic array access that may name more than
+  ## `termWalkMaxDepth` positions declines. 252 -> 261.
   ##
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite
@@ -241,8 +255,9 @@ const symexWalkerVersion* = "260"
   ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
   ## batch 8 as one integration branch under ONE walker number; their bullets
   ## follow, each naming its provisional number. The stack's own changes: S8ce
-  ## removes batch 8's `solveRaiseHook` with S8bx's hook (`checkCappedSteps` is
-  ## `checkCapped` again; a lifecycle hook no longer loses a raise). S8ca's
+  ## removes batch 8's `solveRaiseHook` with S8bx's hook (batch 8's
+  ## `checkCappedSteps` was removed; its steps are `checkCapped` again; a
+  ## lifecycle hook no longer loses a raise). S8ca's
   ## `parseSwap` is dropped for S8bl's `parseVarMagicStmt`. SOUNDNESS: S8ca item
   ## 5 gives a proc value's domain a sort for a seq, table, set or array, which
   ## lifted the only decline in front of three aliasing shapes: a view and its

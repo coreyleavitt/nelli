@@ -141,10 +141,10 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
     check r.soundness.replay == rsNotNeeded
 
   test "a replay-confirmed sxSat: pathTaint keeps scSpurious, replay rsConfirmed":
-    let before = sideEffects
+    let before = replayExecutions()
     let r = symexFind(s11Confirm, tLabel("s11_confirm"))
     check r.status == sxSat
-    check sideEffects > before                    # the replay really ran fn
+    check replayExecutions() > before                    # the replay really ran fn
     check scSpurious in r.soundness.pathTaint
     check r.soundness.replay == rsConfirmed
 
@@ -309,11 +309,11 @@ suite "RFC-0005 S11 (e) -- SymexFinding carries soundness, gaps, violations; the
     check cold.soundness.replay == rsConfirmed
     check scSpurious in cold.soundness.pathTaint
     check trusted(cold)
-    let before = sideEffects
+    let before = replayExecutions()
     let warm = findingFor(symexFindAllWitnesses(s11Confirm, db),
                           "label(\"s11_confirm\")")
     check warm.fromCache
-    check sideEffects == before                 # a served entry never replays
+    check replayExecutions() == before                 # a served entry never replays
     check warm.soundness == cold.soundness      # served unchanged
     # RFC-0005 S8az: the `:sat` witness cache slot now carries gaps() too --
     # `s11Confirm`'s winning path goes through a `dcFreshSymbol` decline

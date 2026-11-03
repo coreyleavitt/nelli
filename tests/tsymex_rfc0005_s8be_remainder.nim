@@ -11,6 +11,7 @@ import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -26,7 +27,7 @@ template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
   block:
     let r = symexFind(fn, tgt)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == want
+    check decidedOrNotMarshallable(r, want)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
@@ -34,7 +35,7 @@ template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
   block:
     let r = symexFind(fn, tgt, s)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == want
+    check decidedOrNotMarshallable(r, want)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 template declines(fn: typed, tgt: SymexTarget, kind: SymexErrorKind,
@@ -249,16 +250,15 @@ suite "RFC-0005 S8be (1): an opaque routine's implicit Defects":
     verdict(sutDefFin, tLabel("fin"), sxSat)
 
 suite "RFC-0005 S8be (2): a replay that does not end":
-  test "is abandoned, never confirmed":
+  test "is ended at its bound, never confirmed":
     let r = symexFind(sutSpin, tLabel("big"),
                       SymexSettings(replayTimeoutMs: 300))
     checkpoint $r.status & " " & show(r.errors)
     check r.status != sxSat
     check r.errors.hasKind(feReplayTimedOut)
   test "a replay that ends is confirmed as before":
-    # RFC-0005 S8bo: a replay started while the one abandoned above still
-    # runs is not confirmed (`roContended`); its 3 s sleep ends first.
-    while replayAbandonedLive() > 0: sleep(1)
+    # RFC-0005 S8ct: the replay above was killed at its bound, so nothing of it
+    # runs on.
     let r = symexFind(sutSpinOk, tLabel("three"),
                       SymexSettings(replayTimeoutMs: 300))
     checkpoint $r.status & " " & show(r.errors)

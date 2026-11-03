@@ -5822,7 +5822,50 @@ proc uninitKinds(): tuple[store, ite, select: int] =
                       kindOf(ctx, sel.raw))
   (uninitArrKinds.store, uninitArrKinds.ite, uninitArrKinds.select)
 
+const termWalkMaxDepth* = 256
+  ## RFC-0005 S8ct. The deepest term a recursive walk of a Z3 term takes. A term
+  ## can be far deeper than the stack or Nim's call depth limit allow, and either
+  ## ends the process. Each walk gives the answer that claims nothing past this.
+  ## 256 levels is under the `nimFrameReserve` a solve keeps, at 1 or 2 frames a
+  ## level.
+
+proc termDepth*(ctx: Z3Context; t: RawZ3Ast; cap = termWalkMaxDepth): int =
+  ## RFC-0005 S8ct. The levels of applications in `t` (a leaf is 0), or `cap + 1`
+  ## as soon as a path is known to pass `cap`. Takes no stack: this is what tells
+  ## a recursive walk whether it can run.
+  type Open = tuple[a: RawZ3Ast; id: int; next, height: int]
+  proc numArgs(a: RawZ3Ast): int =
+    if Z3_get_ast_kind(ctx.raw, a) == Z3_APP_AST:
+      int(Z3_get_app_num_args(ctx.raw, Z3_to_app(ctx.raw, a)))
+    else: 0
+  var heights: Table[int, int]
+  var open: seq[Open] = @[(a: t, id: astId(ctx, t), next: 0, height: 0)]
+  while open.len > 0:
+    if open.len > cap + 1: return cap + 1
+    let i = open.high
+    if open[i].next < numArgs(open[i].a):
+      let arg = Z3_get_app_arg(ctx.raw, Z3_to_app(ctx.raw, open[i].a),
+                               cuint(open[i].next))
+      inc open[i].next
+      let id = astId(ctx, arg)
+      if id in heights:
+        open[i].height = max(open[i].height, heights[id] + 1)
+      else:
+        open.add (a: arg, id: id, next: 0, height: 0)
+    else:
+      let done = open.pop()
+      heights[done.id] = done.height
+      if open.len > 0:
+        open[^1].height = max(open[^1].height, done.height + 1)
+      else:
+        result = done.height
+
+proc termTooDeep*(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0005 S8ct. `t` is past what a recursive walk may take.
+  termDepth(ctx, t) > termWalkMaxDepth
+
 type UninitScan = object
+  depth: int   ## RFC-0005 S8ct. The levels of `uninitAt` open.
   ## One `uninitReadCond` query's memo: whether a term mentions a base, and
   ## the condition already built per (array, index) pair (a loop's merges
   ## share their store chains, which a plain recursion would revisit once
@@ -5885,6 +5928,10 @@ proc uninitAt(sc: var UninitScan; arr: RawZ3Ast; k: Z3Int): Z3Bool =
   let key = (astId(ctx, arr), astId(ctx, k.raw))
   if key in sc.at: return sc.at[key]
   result = mkBool(ctx, true)
+  # RFC-0005 S8ct: a chain past the limit may hold an unwritten element.
+  if sc.depth >= termWalkMaxDepth: return
+  inc sc.depth
+  defer: dec sc.depth
   if key[0] in uninitSeqAliases:
     var acc = mkBool(ctx, false)
     for (g, d) in uninitSeqAliases[key[0]]:
@@ -7379,6 +7426,55 @@ proc arrayIndexConds(idx: SymVal; lo: int64; n: int): tuple[inLo, inHi: Z3Bool] 
   else:
     raise newException(ValueError, "isIndex: non-int index kind")  # [raise-audited: category-c: index-must-be-int invariant (Nim array/seq indexing typing rules)]
 
+proc literalPosition(idx: SymVal; lo: int64; n: int): int =
+  ## RFC-0005 S8ct. The position (`0 ..< n`) a literal index names, or -1 when
+  ## the index does not fold to a numeral or names no position. Finding it by
+  ## asking each position whether it is the one cost a simplify per element:
+  ## a store into `array[4096, int]` at `pad[3]`, in a recursion inlined 24
+  ## deep, took three minutes of walking.
+  if idx.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}: return -1
+  let ctx = requireCurrentContext()
+  let folded = ctx.checkErr Z3_simplify(ctx.raw, rawAstOf(idx))
+  if not Z3_is_numeral_ast(ctx.raw, folded): return -1
+  var v: int64
+  if idx.kind == svInt:
+    if not Z3_get_numeral_int64(ctx.raw, folded, addr v): return -1
+  else:
+    var u: uint64
+    if not Z3_get_numeral_uint64(ctx.raw, folded, addr u): return -1
+    let w = case idx.kind
+      of svBV8: 8
+      of svBV16: 16
+      of svBV32: 32
+      else: 64
+    if idx.signed and w < 64 and u >= (1'u64 shl (w - 1)):
+      v = int64(u) - (1'i64 shl w)
+    else:
+      v = cast[int64](u)
+  if v < lo or v - lo >= int64(n): return -1
+  int(v - lo)
+
+proc symbolicPositions*(idx: SymVal; lo: int64; n: int): int =
+  ## RFC-0005 S8ct. How many positions an access at `idx` merges: 0 for a
+  ## literal index, else those of `0 ..< n` the index's type can hold. Past
+  ## `termWalkMaxDepth` the access declines (`arrayAccessTooWide`).
+  if literalPosition(idx, lo, n) >= 0: return 0
+  let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
+                   bvIndexWindow(idx)
+                 else: (low(int64), high(int64))
+  for k in 0 ..< n:
+    let v = lo + int64(k)
+    if v >= mn and v <= mx: inc result
+
+proc arrayAccessTooWide*(idx: SymVal; lo: int64; n: int): bool =
+  ## RFC-0005 S8ct. An access at a symbolic index merges every position its
+  ## index may name: a term as deep as the array is long, built a position at a
+  ## time. Past `termWalkMaxDepth` positions it is deeper than the term walks
+  ## take, and the walk itself is unbounded by any budget (`array[4096, int]`
+  ## behind a recursion inlined 24 deep walked for seven minutes), so the
+  ## access declines instead: a read is a fresh value, a write is dropped.
+  symbolicPositions(idx, lo, n) > termWalkMaxDepth
+
 proc arraySelect(elems: seq[SymVal]; idx: SymVal; lo: int64): SymVal =
   ## RFC-0005 S8z. Element `idx` of an array whose first index is `lo`, as
   ## an ite chain over the positions (element `k` is Nim's index `lo + k`),
@@ -7390,6 +7486,8 @@ proc arraySelect(elems: seq[SymVal]; idx: SymVal; lo: int64): SymVal =
   ## element, and a merge of two seq values is `iteSV`'s havoc
   ## (`feUnsupportedOpHavoc`), so `a[1].len` of an `array[N, seq[T]]` read
   ## a fresh seq even at a constant index.
+  let at = literalPosition(idx, lo, elems.len)   # RFC-0005 S8ct
+  if at >= 0: return elems[at]
   let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
                    bvIndexWindow(idx)
                  else: (low(int64), high(int64))
@@ -7408,6 +7506,11 @@ proc arrayStore(elems: seq[SymVal]; idx: SymVal; lo: int64;
   ## RFC-0005 S8z. The array `elems` with element `idx` replaced by `val`:
   ## each position becomes `ite(idx == lo + k, val, old[k])`. Under the
   ## caller's in-bounds conditions exactly one position is written.
+  let at = literalPosition(idx, lo, elems.len)   # RFC-0005 S8ct
+  if at >= 0:
+    result = elems
+    result[at] = val
+    return
   let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
                    bvIndexWindow(idx)
                  else: (low(int64), high(int64))
@@ -12638,10 +12741,15 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     of "false": 0
     else: -1
   proc flatten(a: Z3AnyAst; into: var seq[Z3AnyAst]) =
-    if getAstKind(a) == akApp and
-       ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl)) == kinds.strConcat:
-      for p in unpackApp(a).args: flatten(p, into)
-    else: into.add a
+    # RFC-0005 S8ct: takes no stack, however long the concatenation.
+    var open = @[a]
+    while open.len > 0:
+      let t = open.pop()
+      if getAstKind(t) == akApp and
+         ord(Z3_get_decl_kind(ctx.raw, unpackApp(t).decl)) == kinds.strConcat:
+        let args = unpackApp(t).args
+        for i in countdown(args.high, 0): open.add args[i]
+      else: into.add t
   proc pow10(d: int): Z3Int =
     var txt = "1"
     for _ in 1 .. d: txt.add '0'
@@ -12775,7 +12883,9 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       fromInts.add (n: n, x: t)
     elif k == kinds.inRe and args.len == 2:
       # RFC-0005 S8ai: a member of `R` is as long as some word of `R`.
-      let b = regexLenBounds(ctx, kinds, args[1])
+      # RFC-0005 S8ct: `0..` claims nothing.
+      let b = if termTooDeep(ctx, args[1].raw): (lo: 0, hi: -1)
+              else: regexLenBounds(ctx, kinds, args[1])
       let m = wrap[Z3Bool](ctx, t.raw)
       if b.lo > 0: result.add implies(m, lenOf(ctx, args[0]) >= mkInt(ctx, b.lo))
       if b.hi >= 0: result.add implies(m, lenOf(ctx, args[0]) <= mkInt(ctx, b.hi))
@@ -13115,7 +13225,8 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
     if x in pinned: continue
     for t in defs.getOrDefault(x):
       var acc: seq[int]
-      if not leaves(t, acc): continue
+      # RFC-0005 S8ct: too deep reads as any other shape, which keeps the root.
+      if termTooDeep(ctx, t.raw) or not leaves(t, acc): continue
       var ok = true
       for y in acc:
         if y == x or y notin constrained or y in dropped:
@@ -13128,6 +13239,10 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
         break
   for i, r in roots:
     if i notin dropRoot: result.add r
+
+var deepTermsLeftAlone* {.threadvar.}: seq[int]
+  ## RFC-0005 S8ct. The depth of each conjunct `mergeMemberships` left as it is
+  ## because a recursive walk could not take it.
 
 proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     seq[Z3Bool] =
@@ -13179,10 +13294,15 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     Pol = enum polPos, polNeg, polBoth
       ## RFC-0005 S8by. How a term is read: asserted, denied, or both.
   proc conjuncts(r: Z3AnyAst): seq[Z3AnyAst] =
-    ## `r`'s top-level conjuncts, in order.
-    if kindOf(r) == bk.andK:
-      for a in unpackApp(r).args: result.add conjuncts(a)
-    else: result.add r
+    ## `r`'s top-level conjuncts, in order. RFC-0005 S8ct: takes no stack, so a
+    ## nest of `and`s as deep as a term gets is read.
+    var open = @[r]
+    while open.len > 0:
+      let t = open.pop()
+      if kindOf(t) == bk.andK:
+        let args = unpackApp(t).args
+        for i in countdown(args.high, 0): open.add args[i]
+      else: result.add t
   proc literal(t: Z3AnyAst): tuple[ok: bool, x, re: Z3AnyAst, neg: bool] =
     ## `t` as a membership literal `x in re` or `not (x in re)`; a
     ## byte-domain constraint is none.
@@ -13347,7 +13467,15 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     var outs: seq[Z3AnyAst]
     var changed = false
     for c in conjuncts(toAnyAst(r)):
-      let b = if literal(c).ok: c else: rewrite(c, top, 0, polPos, false)
+      # RFC-0005 S8ct: `holds` and `rewrite` recurse a level at a time, and a
+      # conjunct left as it is has the same models. Only the merge is lost, so
+      # at worst Z3 meets the memberships separately and answers unknown.
+      var b = c
+      if not literal(c).ok:
+        if termTooDeep(ctx, c.raw):
+          deepTermsLeftAlone.add termDepth(ctx, c.raw, cap = 100_000_000)
+        else:
+          b = rewrite(c, top, 0, polPos, false)
       changed = changed or b.raw != c.raw
       outs.add b
     result.add(if not changed: r else: wrap[Z3Bool](ctx, andOf(outs).raw))
@@ -20681,6 +20809,18 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
       # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
       maybeForkDefect(cp, not (inLoCond and inHiCond),
                       "IndexDefect", none(string), w)
+      # RFC-0005 S8ct: an index that may name more positions than a term walk
+      # takes reads a fresh value instead (`arrayAccessTooWide`).
+      if arrayAccessTooWide(idxSV, stmt.ixLo, n):
+        let locPrefix = if stmt.ixLoc.len > 0: stmt.ixLoc & ": " else: ""
+        let dw = w.degrade(feUnsupportedOpHavoc,
+          locPrefix & "isIndex: an array of " & $n & " elements at a " &
+          "symbolic index that may name more than termWalkMaxDepth (" &
+          $termWalkMaxDepth & ") of them; the element read is a fresh value " &
+          "(feUnsupportedOpHavoc)")
+        survivors.add forkPathTainted(cp, cp.pc & @[inLoCond, inHiCond],
+          declinedIndexEnv(cp.env, stmt, stmt.ixElemTy), dw)
+        continue
       # In-bounds path continues with binding; build the value via ite.
       let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
       let unwrittenPart =
@@ -20749,6 +20889,17 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
                                         seqElemLitProto(elemTy))
         for vp in drainScalarRaiseForks(valP, w):
           let aligned = alignIntKind(valSV, recvSV.arrElems[0].kind)
+          if aligned.isSome and arrayAccessTooWide(idxSV, stmt.iaLo, n):
+            # RFC-0005 S8ct: see `arrayAccessTooWide`. The write is dropped, as
+            # below: a stale env (`feUnsupportedStmtKind`), never an sxUnsat.
+            let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+            let dw = w.degrade(feUnsupportedStmtKind,
+              locPrefix & "isIndexAssign: an array of " & $n & " elements at " &
+              "a symbolic index that may name more than termWalkMaxDepth (" &
+              $termWalkMaxDepth & ") of them; the write is dropped")
+            survivors.add forkPathTainted(vp, vp.pc & @[inLoCond, inHiCond],
+                                          vp.env, dw)
+            continue
           if aligned.isNone:
             # The write is dropped (the array keeps its old element): a
             # stale env, so `feUnsupportedStmtKind` (dcSubstituted), which
@@ -28729,19 +28880,6 @@ var ptrAims {.threadvar.}: Table[pointer, string]
 
 proc ptrAimRecord(cell: string; p: pointer) =
   if cell.startsWith(ptrAimPrefix): ptrAims[p] = cell[ptrAimPrefix.len .. ^1]
-
-proc ptrAimsSnapshot*(): Table[pointer, string] =
-  ## RFC-0005 batch 6 (S8bn on S8be). The calling thread's aimed cells. The
-  ## witness is built on the calling thread, and S8be's bounded replay runs
-  ## the splat on a thread of its own, whose `ptrAims` starts empty: every
-  ## aimed pointer then missed its variable (`ptrAimsAt` false) and the
-  ## replay was refuted. The replay hands this copy to its thread
-  ## (`ptrAimsAdopt`).
-  ptrAims
-
-proc ptrAimsAdopt*(aims: Table[pointer, string]) =
-  ## RFC-0005 batch 6. See `ptrAimsSnapshot`.
-  for p, name in aims: ptrAims[p] = name
 
 proc ptrAimsAt*(p: pointer; name: string): bool =
   ## RFC-0005 S8bn (item 2). The witness pointer `p` was aimed at the

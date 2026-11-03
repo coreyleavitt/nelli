@@ -27,6 +27,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -208,8 +209,8 @@ suite "S8bg (2): a representation-preserving conversion lvalue is modeled":
 
   test "distinct, through a deeper ref chain: reachable twin replays, dead label is unsat":
     let r = clean(sutConvDistinctMid3, "cvm3", sxSat)
-    check replayWitness(sutConvDistinctMid3, r.witness, tLabel("cvm3"), {}) ==
-          roConfirmed
+    check replayedOrNotMarshallable(replayWitness(sutConvDistinctMid3,
+          r.witness, tLabel("cvm3"), {}), roConfirmed)
     discard clean(sutConvDistinctMid3, "cvm3_dead", sxUnsat)
 
   test "the chain through a type with an open hierarchy declines (RFC-0016)":

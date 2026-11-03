@@ -20,6 +20,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -549,8 +550,7 @@ suite "S8bh (2): a ptr of unknown origin":
       for e in r.heapSnapshot:
         if e.name == "pi" and e.aliasRef == some("&q.x"): aimed = true
       check aimed
-      check replayWitness(sutPField, r.witness, tLabel("pfi"), {}) ==
-        roConfirmed
+      check replayedOrNotMarshallable(replayWitness(sutPField, r.witness, tLabel("pfi"), {}), roConfirmed)
     discard clean(sutPField, "pfi_dead", sxUnsat)
     discard clean(sutPFieldRead, "pfr", sxSat)
     discard clean(sutPString, "pfs", sxSat)
@@ -741,7 +741,7 @@ suite "S8bh (3): a ref converted along its inheritance chain":
     ## RED: `weInternalWalkerFault` (an ill-sorted term).
     let r = clean(sutCvEq, "cv", sxSat)
     if r.status == sxSat:
-      check replayWitness(sutCvEq, r.witness, tLabel("cv"), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(sutCvEq, r.witness, tLabel("cv"), {}), roConfirmed)
     discard clean(sutCvLocal, "cvl", sxSat)
     discard clean(sutCvLocal, "cvl_dead", sxUnsat)
 
@@ -756,8 +756,7 @@ suite "S8bh (3): a ref converted along its inheritance chain":
     ## RED: `sxUnsat` (a false one) -- two sorts never meet.
     let r = clean(sutAliasParams, "apar", sxSat)
     if r.status == sxSat:
-      check replayWitness(sutAliasParams, r.witness, tLabel("apar"), {}) ==
-        roConfirmed
+      check replayedOrNotMarshallable(replayWitness(sutAliasParams, r.witness, tLabel("apar"), {}), roConfirmed)
     discard clean(sutAliasParams, "apar_dead", sxUnsat)
     discard clean(sutAliasDisjoint, "adis_dead", sxUnsat)
 
@@ -783,8 +782,7 @@ suite "S8bh (3): a ref converted along its inheritance chain":
   test "the `ref Obj` spelling of a hierarchy":
     let r = clean(sutObjStyle, "os", sxSat)
     if r.status == sxSat:
-      check replayWitness(sutObjStyle, r.witness, tLabel("os"), {}) ==
-        roConfirmed
+      check replayedOrNotMarshallable(replayWitness(sutObjStyle, r.witness, tLabel("os"), {}), roConfirmed)
     discard clean(sutObjStyle, "os_dead", sxUnsat)
     discard clean(sutObjStyle, "os_zero_dead", sxUnsat)
     discard clean(sutObjStyle, "os_down_dead", sxUnsat)
@@ -792,8 +790,7 @@ suite "S8bh (3): a ref converted along its inheritance chain":
   test "a parameter's down-conversion may go either way":
     let r = clean(sutParamDown, "pdn_raise", sxSat)
     if r.status == sxSat:
-      check replayWitness(sutParamDown, r.witness, tLabel("pdn_raise"), {}) ==
-        roConfirmed
+      check replayedOrNotMarshallable(replayWitness(sutParamDown, r.witness, tLabel("pdn_raise"), {}), roConfirmed)
     discard clean(sutParamDown, "pdn", sxSat)
 
 # ---- RFC-0005 batch 4: S8bh stacked on S8ax and S8be ----------------------

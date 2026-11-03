@@ -6,6 +6,7 @@
 ## global set up as the walker's candidate needs it, and the walker's verdict
 ## must not contradict the labels that run reached.
 import std/[unittest, strutils, sets]
+import s8ct_platform   ## RFC-0005 S8ct
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/engine/markers
@@ -51,7 +52,8 @@ template confirmed(fn: typed, lbl: string) =
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxSat
+    # RFC-0005 S8ct: a re-executed replay cannot carry a case-object global.
+    check decidedOrNotMarshallable(r, sxSat)
     check not r.errors.hasKind(feReplayRefuted)
 
 # --- item 2: a ptr of unknown origin over a global's entry cell -------------

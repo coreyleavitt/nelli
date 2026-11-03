@@ -15,6 +15,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -39,7 +40,7 @@ template replays(fn: typed, lbl: string) =
   block:
     let r = verdict(fn, lbl, sxSat)
     if r.status == sxSat:
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
 template declines(fn: typed, lbl, why: string) =
   block:

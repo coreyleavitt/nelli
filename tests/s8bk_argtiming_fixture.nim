@@ -25,7 +25,7 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind): untyped =
 template replays(fn: typed, lbl: string) =
   block:
     let r = verdict(fn, lbl, sxSat)
-    check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+    check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
 template declines(fn: typed, lbl: string) =
   block:

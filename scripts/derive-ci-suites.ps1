@@ -242,7 +242,12 @@ if ($accountedFor -ne $allTsymex.Count) {
 # (cecbe04) had 48 suites a shard, its corpus jobs took 27-41 min, and
 # shard 3 failed the 40-min check at 40.2 min, every suite run. 14 shards
 # take that to about 41 suites each, ~32 min for the jobs that took 37.
-$shardCount = 14
+#
+# RFC-0005 batch 11: 17 shards, was 14. S8cq and S8cn add 38 suites; symex-mingw
+# run 41662148312 (4ccf94e) had 47 suites a shard, and shards 3 and 10 failed
+# the 40-min check at 41.1 min, every suite run. 17 shards take that to about
+# 39 suites each, ~34 min for those jobs.
+$shardCount = 17
 $shards = @()
 for ($i = 0; $i -lt $shardCount; $i++) {
   $shards += ,(New-Object 'System.Collections.Generic.List[string]')

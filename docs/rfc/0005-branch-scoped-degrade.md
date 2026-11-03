@@ -14173,9 +14173,9 @@ pin is 238, and both suites carry the `>= 238` floor.
   declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
   `wb_dead`).
 
-**As landed (S8bv, walker 226 provisional) — S8bq's remainder.** The
-branch is `rfc-0005-s8bv`, on S8bq's `d8c3b6d`. All four items are done,
-and nothing is deferred. Item 2's premise was wrong (no set conversion
+**As landed (S8bv, walker 250 provisional) — S8bq's remainder.** The
+branch is `rfc-0005-s8bv`, cut from S8bq's `d8c3b6d` with batch 9
+(`e497dcf`) merged in. All four items are done, and nothing is deferred. Item 2's premise was wrong (no set conversion
 between two domains exists in Nim). The coordinator approved replacing it
 with the precision gap the probes found: enum subranges.
 
@@ -14348,8 +14348,40 @@ identities: in units, 7x on 5.1 and 2x on 4.13.4. It is still decided.
     `H`'s stores and merges to the data stored for `r`.
   Each of them counted as unwritten everywhere before.
 
-*Verification.* TBD
+*Test files.* The pins are split by feature into eight files so that each
+stays near the 60 s convention on Windows. Verdicts over a 256-value domain
+cost compile time: the first single file took 136.1 s on symex-mingw, and
+`iter_order` took 60.2 s until its `set[char]` pins moved out.
 
-*Re-pinned elsewhere.* TBD
+*Verification.* On the merged tree, with Z3 reading 5.1.0.0 and 4.13.4.0
+through `z3FullVersion`, 189 suites ran on each version under the C backend.
+Each version passed 2478 tests with 0 failed and no nonzero exit. The cpp
+backend ran the eight S8bv files, `CR2_cachekey` and `s8bq_remainder` on Z3
+5.1: 117 tests, 0 failed. Those runs were at `14266a8` and at two later
+commits that change only S8bv's test files and `nelli.nimble`; the S8bv rows
+are from the later commits. The card tables above predate the merge;
+re-running the walker's probe on the merged tree decided all eight queries on
+both versions, in under 1 s each. The slice report has the Windows runs and
+per-file times.
 
-*Different mechanisms, reported and not fixed here.* TBD
+*Re-pinned elsewhere.*
+- **`tsymex_phase15_CR2_cachekey`:** `== "250"`.
+- **`tsymex_rfc0005_s8bq_remainder`:** `bsIter` (iterating a set) is `sxSat`
+  with no errors; it was a classified decline.
+- **`tsymex_r6_n27_placeholder_read_audit`:** 115 `runtime.nim` markers, 119
+  in all. `noteUninitReturn`'s five marked lines are four.
+
+*A guard's literal (`guardLiteral`).* On the merged tree a guard over a
+set's unrolled counter hung: S8bl's `guardLiteral` printed the simplified
+guard, and printing that `ite` chain did not finish in 400 s. It reads
+`Z3_get_bool_value` instead, as does `loopArmInfeasible`.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a multi-axis variant call result holding a `newSeqUninit`
+  seq** is not paired by `noteUninitReturn`, so its binding declines.
+- **PRECISION: `for x in s` over a domain above `maxBitSetIterDomain`**
+  (`set[int16]`) declines, scoped to its path. This is the stated cap.
+- **PRECISION: `cast` between two set types** declines as an unsafe cast.
+- **PRECISION: other `$simplify(..)` literal tests in the walker** print
+  their term as `guardLiteral` did (`runtime.nim`, `runtime_heap.nim`). None
+  was seen to hang here; a term as large as an unrolled counter's would.

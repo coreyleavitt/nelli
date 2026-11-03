@@ -1239,6 +1239,10 @@ type
                                    ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
+    assertsOff*: seq[bool]
+                                   ## RFC-0005 S8cu. Per routine being parsed,
+                                   ## innermost last: may its module compile
+                                   ## an `assert` out (`assertsMaybeOff`)?
     seqIndexRets*: HashSet[string]
                                    ## RFC-0005 S8be. The result names of the
                                    ## `isIndex` statements that read a `seq`
@@ -1430,6 +1434,11 @@ proc declineCallee(ctx: ParseCtx; kind: SymexErrorKind; msg,
   ctx.parseErrors.add SymexErrorInfo(kind: kind, severity: sevError, msg: msg,
                                      scope: calleeKeyed(k))
   k
+
+proc assertsMayBeOff(ctx: ParseCtx): bool =
+  ## RFC-0005 S8cu. Whether a stdlib iterator's `assert` the walker models may be
+  ## compiled out in the routine being parsed. The command line is read apart.
+  ctx.assertsOff.len > 0 and ctx.assertsOff[^1]
 
 proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
                        body: IRStmt): IRStmt =
@@ -3048,7 +3057,10 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
     collectBoundLocals(bodyNode, bound)
     var seen: HashSet[string]
     collectFreeVarRefs(bodyNode, bound, captures, seen, mutCaptures)
-  let bodyIR = withCheckDeclines(ctx, n, checkOpts, parseStmt(bodyNode, ctx))
+  ctx.assertsOff.add checkOpts.assertsMaybeOff
+  let bodyParsed = parseStmt(bodyNode, ctx)
+  discard ctx.assertsOff.pop()
+  let bodyIR = withCheckDeclines(ctx, n, checkOpts, bodyParsed)
   # RFC-0005 S8bh: with the summary a call through it needs to apply its
   # `var`/`addr` effects (`lambdaEffects`).
   lambdaEffects(n, ctx,
@@ -16756,8 +16768,18 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
     # or `-d:danger`) it raises `AssertionDefect` there, which is modelled;
     # with them off Nim walks the changed table's slots, an order this does
     # not model, and the path declines as S8bc's did.
+    # RFC-0005 S8cu: the instance's options are its first instantiation's,
+    # so a module that may compile `assert` out declines (`assertsMaybeOff`).
     let lenChanged =
-      when compileOption("assertions"): mkRaise("AssertionDefect", nil)
+      if compileOption("assertions") and not ctx.assertsMayBeOff:
+        mkRaise("AssertionDefect", nil)
+      elif compileOption("assertions"):
+        ctx.declineAtSite(feCheckOption,
+          siteMsg(n, "the Table's length changed while iterating over it, " &
+                  "and this module may compile the iterator's `assert` out " &
+                  "(`assertions: off`): its check is not known -- path " &
+                  "degraded to sxUnknown (RFC-0005 S8cu)"),
+          "the Table's length changed while iterating over it")
       else:
         ctx.declineAtSite(feUnsupportedOp,
           siteMsg(n, "the Table's length changed while iterating over it " &
@@ -17424,8 +17446,19 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
   # (`system.mitems`): an `AssertionDefect` (S8bu declined it). Compiled
   # out under `--assertions:off`, where the loop goes on to the old length
   # and `yield a[i]` checks the index: still declined there.
+  # RFC-0005 S8cu: `mitems[T]`'s options are its first instantiation's, so a
+  # module that may compile `assert` out declines (`assertsMaybeOff`).
   loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
-    (if compileOption("assertions"): mkRaise("AssertionDefect", nil)
+    (if compileOption("assertions") and not ctx.assertsMayBeOff:
+       mkRaise("AssertionDefect", nil)
+     elif compileOption("assertions"):
+       ctx.declineAtSite(feCheckOption,
+         siteMsg(n, "the length of `" & c.repr & "` changed during an " &
+                 "iteration of `" & iterExpr[0].strVal & "`, and this module " &
+                 "may compile the iterator's `assert` out (`assertions: " &
+                 "off`): its check is not known -- path degraded to " &
+                 "sxUnknown (RFC-0005 S8cu)"),
+         "mitems over a seq whose length changed (feCheckOption)")
      else:
        ctx.declineAtSite(feUnsupportedOp,
          siteMsg(n, "RFC-0005 S8bu: the length of `" & c.repr & "` changed " &
@@ -19644,6 +19677,8 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ## membership-only assertion, so it routes onto `walkableRoutineKinds`.
   impl.expectKind walkableRoutineKinds
   let checkOpts = routineChecks(impl)   ## RFC-0005 S8cu: at the definition
+  ctx.assertsOff.add checkOpts.assertsMaybeOff
+  defer: discard ctx.assertsOff.pop()
   var monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
   # RFC-0005 S8bd: a generic callee is specialised to its by-reference
@@ -20206,7 +20241,9 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # top-level statement stream. Without this, single-statement
   # bodies (e.g. one outer `if`) dispatch straight to `walk(isIf)`
   # and bypass the prune entirely.
+  ctx.assertsOff.add checkOpts.assertsMaybeOff
   let parsed = parseStmt(procDef[6], ctx)
+  discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, procDef, checkOpts,
     if parsed != nil and parsed.kind == isBlock: parsed
     else: mkBlock(@[parsed]))

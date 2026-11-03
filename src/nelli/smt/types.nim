@@ -2767,6 +2767,14 @@ type
                           ## out of `arithChecks` the walker models the wrap
                           ## and the trap (S8w, S8aa), and the marker is passed
                           ## through. sevError.
+    heNilDerefMayBeCaught ## RFC-0005 S8cu. A nil dereference under a `try`
+                          ## (an `except` or a `finally`) in a build with
+                          ## `--exceptions:setjmp`, where `std/segfaults` makes
+                          ## it a catchable `NilAccessDefect` and runs the
+                          ## `finally`. Whether the program imports it is not
+                          ## read, so the path declines. Every other build
+                          ## crashes there (SIGSEGV) and no handler runs.
+                          ## sevError.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3808,6 +3816,9 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   # RFC-0005 S8cu: the routine's unchecked behaviour is not walked, and the
   # walk that follows stands for the checked one.
   of feCheckOption, feOverflowCheckOption: dcSubstituted
+  # RFC-0005 S8cu: what runs past a nil dereference in a setjmp build is not
+  # known; the path stops, so nothing is substituted for it.
+  of heNilDerefMayBeCaught: dcNoAnswer
   of feUnsupportedStmtKind: dcSubstituted
     # S6b: every site is a parse-time Class-B `mkUnsupported` -- the
     # statement is dropped (the walker's `isUnsupported` arm forks the path

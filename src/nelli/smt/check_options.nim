@@ -33,10 +33,16 @@
 ## Fails closed: an unread file, an undecided `when`, a value that is not a
 ## literal, and a position that cannot be placed all read as the check being off.
 ##
-## Not visible to any of this (`docs/migration/0.9.0.md`): a check pragma built by
-## a macro from strings, a pushing template or macro from another module, an
-## importer that nothing in the walk reads.
-import std/[macros, os, strutils, tables]
+## A push the text does not show (a macro building the pragma, a pushing template
+## or macro from another module) is caught by its `{.pop.}`: a pop with no push
+## the scan read. Every call statement before it then reads as possibly pushing
+## every check off, up to that pop; such a pop with no call before it makes the
+## module unknown. An importer is read wherever the import graph from the
+## routine's module or the project file reaches it.
+##
+## Not visible to any of this (`docs/migration/0.9.0.md`): a hidden push whose pop
+## is hidden too (or that never pops), and an importer outside that graph.
+import std/[macros, os, strutils, tables, compilesettings]
 
 {.warning[Deprecated]: off.}   # `NimNode.owner`: no replacement in 2.2.10
 
@@ -49,6 +55,9 @@ type
     coObj = "objChecks"
     coNan = "nanChecks"
     coInf = "infChecks"
+    coAssert = "assertions"
+      ## Never a deviation: it is read only where the walker models an assert of
+      ## its own (`assertsMaybeOff`). `checks` turns it with the rest.
 
   CheckState* = object
     ## Per option, whether it may be off and whether it may be on at a position.
@@ -71,6 +80,9 @@ type
     everything: CheckState    ## the union over every position
     importLeak: seq[tuple[name: string, opts: set[CheckOption]]]
       ## what an `import` under a push hands the module it names
+    imports: seq[string]      ## user modules it imports, as found on disk
+    hiddenPops: seq[tuple[file: string, line: int]]
+      ## a `{.pop.}` with no push the scan read: something unseen pushed
 
   Scanner = object
     res: ModuleScan
@@ -83,11 +95,16 @@ type
     users: Table[string, seq[NimNode]]
     visit: int
     including: seq[string]
+    knownPops: seq[tuple[file: string, line: int]]
+      ## the first reading's `hiddenPops`, read again with them in view
+    candOpen: bool            ## a call before a hidden pop may have pushed
+    candSaved: CheckState
 
 const
   defaultOn* = {coField, coOverflow, coRange, coBound, coObj}
   defaultOff* = {coNan, coInf}
   allChecks = defaultOn + defaultOff
+  everyOption = allChecks + {coAssert}
 
 const commandLineChecks*: CheckState = block:
   ## Read at this module's compilation, when no user `push` is open unless the
@@ -100,7 +117,8 @@ const commandLineChecks*: CheckState = block:
   when compileOption("objChecks"): on.incl coObj
   when compileOption("nanChecks"): on.incl coNan
   when compileOption("infChecks"): on.incl coInf
-  CheckState(maybeOn: on, maybeOff: allChecks - on)
+  when compileOption("assertions"): on.incl coAssert
+  CheckState(maybeOn: on, maybeOff: everyOption - on)
 
 proc deviation*(st: CheckState): set[CheckOption] =
   ## The options on which the code differs from what the walker models.
@@ -116,7 +134,8 @@ proc merge(a, b: CheckState): CheckState =
 
 proc checksNamed(name: string): set[CheckOption] =
   case name.toLowerAscii.replace("_", "")
-  of "checks": allChecks
+  of "checks": everyOption   # natively, `{.push checks: off.}` drops `assert` too
+  of "assertions": {coAssert}
   of "floatchecks": {coNan, coInf}
   of "nanchecks": {coNan}
   of "infchecks": {coInf}
@@ -170,7 +189,16 @@ proc applyPragma(sc: var Scanner; n: NimNode; depth = 0) =
       if name.toLowerAscii == "push":
         sc.stack.add sc.cur
       elif name.toLowerAscii == "pop":
-        if sc.stack.len > 0:
+        if sc.stack.len == 0:
+          let here = (file: sc.res.visits[sc.visit].file, line: it.lineInfoObj.line)
+          sc.res.hiddenPops.add here
+          if sc.candOpen:
+            sc.cur = sc.candSaved
+            sc.candOpen = false
+          elif here in sc.knownPops and sc.res.unknown.len == 0:
+            sc.res.unknown = "a `{.pop.}` at " & here.file.extractFilename & ":" &
+              $here.line & " pops a push the scan cannot see"
+        elif sc.stack.len > 0:
           let wasAmbiguous = sc.stack.len <= sc.ambiguous
           let top = sc.stack.pop()
           sc.cur = if wasAmbiguous: merge(sc.cur, top) else: top
@@ -355,6 +383,62 @@ proc noteImport(sc: var Scanner; n: NimNode) =
     importedNames(n[0], names)
   for nm in names: sc.res.importLeak.add (name: nm, opts: opts)
 
+proc isOwnSource(path: string): bool =
+  ## Nelli itself: `src/nelli.nim` and everything under `src/nelli/`.
+  const src = normalPath(currentSourcePath().parentDir.parentDir.parentDir)
+  let p = normalPath(path)
+  p == src & "/nelli.nim" or p.startsWith(src & "/nelli/")
+
+proc isLibraryFile(path: string): bool =
+  ## The stdlib and installed packages: not the program's own modules.
+  let p = normalPath(path)
+  "/lib/pure/" in p or "/lib/std/" in p or "/lib/core/" in p or
+    "/lib/impure/" in p or "/lib/system" in p or "/lib/packages/" in p or
+    "/lib/deprecated/" in p or "/lib/posix/" in p or "/lib/windows/" in p or
+    "/lib/js/" in p or "/lib/wrappers/" in p or "/.nimble/" in p or
+    "/_deps/" in p or "/pkgs2/" in p or "/pkgs/" in p or isOwnSource(p)
+
+proc importPathOf(n: NimNode): string =
+  ## `a`, `./a`, `../a`, `a/b`, `"a.nim"`; "" for a bracket or an `as`.
+  case n.kind
+  of nnkInfix:
+    if n.len == 3 and nameOf(n[0]) == "as": importPathOf(n[1])
+    else: includePathOf(n)
+  of nnkPrefix:
+    if n.len == 2 and nameOf(n[0]) == "../":
+      let b = includePathOf(n[1])
+      if b.len > 0: "../" & b else: ""
+    else: includePathOf(n)
+  else: includePathOf(n)
+
+proc recordImports(sc: var Scanner; n: NimNode) =
+  ## The user modules this file imports, for the import graph.
+  var rels: seq[string]
+  if n.kind == nnkImportStmt:
+    for c in n:
+      if c.kind == nnkInfix and c.len == 3 and c[2].kind == nnkBracket:
+        let head = importPathOf(c[1])
+        for b in c[2]:
+          let tail = includePathOf(b)
+          if head.len > 0 and tail.len > 0: rels.add head & "/" & tail
+      else:
+        rels.add importPathOf(c)
+  elif n.len > 0:
+    rels.add importPathOf(n[0])
+  let dir = sc.including[^1].parentDir
+  for rel in rels:
+    if rel.len == 0 or rel.startsWith("std/") or rel.startsWith("system/"): continue
+    let name = if rel.endsWith(".nim"): rel else: rel & ".nim"
+    var found = ""
+    if fileExists(dir / name): found = dir / name
+    else:
+      for sp in querySettingSeq(searchPaths):
+        if fileExists(sp / name):
+          found = sp / name
+          break
+    if found.len > 0 and not isLibraryFile(found) and found notin sc.res.imports:
+      sc.res.imports.add found
+
 proc walkWhen(sc: var Scanner; n: NimNode) =
   var alts: seq[NimNode]
   var exhaustive = false
@@ -417,6 +501,19 @@ proc walk(sc: var Scanner; n: NimNode) =
     for c in n: scanInclude(sc, c)
   of nnkImportStmt, nnkImportExceptStmt, nnkFromStmt:
     noteImport(sc, n)
+    recordImports(sc, n)
+  of nnkCall, nnkCommand, nnkCallStrLit:
+    # A call statement before a pop the scan cannot match may be what pushed.
+    if not sc.candOpen:
+      let li = n.lineInfoObj
+      let file = sc.res.visits[sc.visit].file
+      for p in sc.knownPops:
+        if p.file == file and p.line > li.line:
+          sc.candSaved = sc.cur
+          sc.candOpen = true
+          sc.cur = merge(sc.cur, CheckState(maybeOff: everyOption))
+          sc.pending = true
+          break
   of nnkTemplateDef, nnkMacroDef:
     sc.res.visits[sc.visit].regions.add (first: n.lineInfoObj.line, last: lastLine(n))
     let before = sc.hidden
@@ -435,9 +532,15 @@ const maxForkConds = 4
   ## join in one reading, where a pop below them leaves both states.
 
 proc scanWorld(path, text: string; assume: Table[string, bool]): Scanner =
+  ## Read twice where a pop matched no push: the second reading knows where.
   result = Scanner(cur: commandLineChecks, assume: assume)
   result.res.everything = commandLineChecks
   scanFile(result, path, text)
+  if result.res.hiddenPops.len > 0:
+    let pops = result.res.hiddenPops
+    result = Scanner(cur: commandLineChecks, assume: assume, knownPops: pops)
+    result.res.everything = commandLineChecks
+    scanFile(result, path, text)
 
 proc scanModuleText*(path, text: string): ModuleScan =
   ## The scan of a module whose text is at hand. An `include` is read from disk.
@@ -452,6 +555,8 @@ proc scanModuleText*(path, text: string): ModuleScan =
     result.visits.add w.res.visits
     result.everything = merge(result.everything, w.res.everything)
     result.importLeak.add w.res.importLeak
+    for i in w.res.imports:
+      if i notin result.imports: result.imports.add i
     if result.unknown.len == 0: result.unknown = w.res.unknown
 
 proc scanModule*(path: string): ModuleScan =
@@ -537,13 +642,61 @@ proc touchesFloat(n: NimNode): bool =
 
 var moduleScans {.compileTime.}: Table[string, ModuleScan]
 var runLeaks {.compileTime.}: seq[tuple[root, name: string; opts: set[CheckOption]]]
+var runReach {.compileTime.}: Table[string, seq[string]]
+  ## Per user importer and name: the modules the named one reaches by import,
+  ## itself included. Absent where it was not found on disk.
+var runSeen {.compileTime.}: seq[string]
+var runUnknown {.compileTime.}: string
 
 proc beginCheckOptionRun*() =
   ## Each entry macro's parse: what one program's importers leak is its own.
   runLeaks.setLen 0
+  runSeen.setLen 0
+  runUnknown = ""
+  runReach.clear()
+
+proc reachOf(start: string): seq[string] =
+  ## `start` and the user modules its imports reach.
+  var queue = @[start]
+  while queue.len > 0:
+    let raw = queue.pop()
+    let key = normalPath(raw)
+    if key in result: continue
+    result.add key
+    if key notin moduleScans: moduleScans[key] = scanModule(raw)
+    for i in moduleScans[key].imports: queue.add i
+
+proc enterGraph(startRaw: string) =
+  ## Every user module the import graph from `startRaw` reaches hands on what it
+  ## imports under a push, whether or not the walk enters it. One that cannot be
+  ## read may import under one: every routine then declines (`runUnknown`).
+  var queue = @[startRaw]
+  while queue.len > 0:
+    let raw = queue.pop()
+    let key = normalPath(raw)
+    if key in runSeen or isOwnRuntime(key) or isOwnSource(key): continue
+    runSeen.add key
+    if key notin moduleScans: moduleScans[key] = scanModule(raw)
+    let m = moduleScans[key]
+    if m.unknown.len > 0:
+      if runUnknown.len == 0:
+        runUnknown = "`" & raw.extractFilename & "`, which the program imports: " & m.unknown
+      continue
+    for l in m.importLeak:
+      runLeaks.add (root: key, name: l.name, opts: l.opts)
+      for i in m.imports:
+        if i.extractFilename.changeFileExt("") == l.name:
+          runReach[key & "|" & l.name] = reachOf(i)
+          break
+    for i in m.imports: queue.add i
 
 type RoutineChecks* = object
   checks*: set[CheckOption]
+  assertsMaybeOff*: bool
+    ## The routine's module may compile an `assert` out: at the routine's
+    ## position, or anywhere else in it, where an iterator's instance it shares
+    ## may have been compiled first (`mitems[T]` takes the options of its first
+    ## instantiation). Read where the walker models a stdlib iterator's assert.
   why*: string                ## set where the position could not be read at all
 
 proc routinePlace*(impl: NimNode): string =
@@ -561,17 +714,33 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if isOwnRuntime(root): return
   if root notin moduleScans: moduleScans[root] = scanModule(rootRaw)
   if moduleScans[root].unknown.len > 0:
-    return RoutineChecks(checks: allChecks, why: moduleScans[root].unknown)
-  result.checks = deviation(stateAt(moduleScans[root], file, li.line, li.column))
+    return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
+                         why: moduleScans[root].unknown)
+  let st = stateAt(moduleScans[root], file, li.line, li.column)
+  result.checks = deviation(st)
+  result.assertsMaybeOff = coAssert in st.maybeOff or
+    coAssert in moduleScans[root].everything.maybeOff
   # A user's importer hands on what it pushed to any module this walk reaches: the
   # chain from what it names is not read. `system.nim` and `math.nim` import under
   # their own pushes, so a stdlib importer hands it on to what it names alone.
+  # Importers are found by the import graph from this module and the project file.
   for l in moduleScans[root].importLeak:
     runLeaks.add (root: root, name: l.name, opts: l.opts)
+  if not isStdlibFile(root):
+    enterGraph(rootRaw)
+    enterGraph(querySetting(projectFull))
+    if runUnknown.len > 0:
+      return RoutineChecks(checks: allChecks, assertsMaybeOff: true, why: runUnknown)
   let moduleName = root.extractFilename.changeFileExt("")
   for l in runLeaks:
     if l.root == root: continue
-    if l.name == moduleName or (not isStdlibFile(l.root) and not isSystemFile(root)):
+    let rk = l.root & "|" & l.name
+    let reaches =
+      if l.name == moduleName: true
+      elif isStdlibFile(l.root) or isSystemFile(root): false
+      elif rk in runReach: root in runReach[rk] or isStdlibFile(root)
+      else: true          # the named module was not found: any may be under it
+    if reaches:
       result.checks = result.checks + l.opts
   if result.checks * defaultOff != {} and not touchesFloat(impl[6]):
     result.checks = result.checks - defaultOff

@@ -212,7 +212,12 @@ const symexWalkerVersion* = "260"
   ## RFC-0005 S8cu (provisional). A routine compiled without a check the walker
   ## models, or with a float check it does not, declines by name
   ## (`check_options.nim`, `feCheckOption`, `feOverflowCheckOption`) where the
-  ## walk reported a raise that never happens. SOUNDNESS. 252 -> 260 (245 -> 260 before batch 10).
+  ## walk reported a raise that never happens. SOUNDNESS. 252 -> 260 (245 -> 260
+  ## before batch 10). The follow-ups, still at 260: `mitems` and `Table` length
+  ## checks decline in a module that may compile `assert` out, a pop with no seen
+  ## push marks the calls before it, the import graph finds an importer the
+  ## walk never enters, and a nil dereference is a crash no handler or
+  ## `finally` sees (`crashRaise`).
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite
   ## verdict unless the query holds with it stopped at a limit too.

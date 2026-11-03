@@ -17794,6 +17794,8 @@ proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
+proc crashRaise(p: Path, typeId: string, w: var WalkCtx)
+  ## RFC-0005 S8cu fwd decl (defined beside `routeRaise`).
 
 proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
                                                    unknown: seq[string]] =
@@ -24356,6 +24358,55 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     of sxUnsat:   discard
     of sxRaised:  discard   ## trySolve never returns sxRaised
   @[]
+
+proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
+  ## RFC-0005 S8cu. A raise no handler and no `finally` sees: a nil dereference,
+  ## which natively is a SIGSEGV (rc 139) that ends the process on the pinned Nim
+  ## 2.2.10, by default, with `--panics:on`, `-d:danger`, clang and the cpp
+  ## backend, under `except NilAccessDefect`, `except Defect` and a bare
+  ## `finally`. `std/segfaults` does not change that with the default goto
+  ## exceptions (its handler recurses to the call depth limit, rc 1, or hangs
+  ## in a release build), nor with `--exceptions:cpp`; with
+  ## `--exceptions:setjmp` it makes the raise catchable and runs the `finally`.
+  ## So in a setjmp build a dereference under any `try` declines
+  ## (`heNilDerefMayBeCaught`), and in every other build the path ends here as
+  ## a finding at the SUT boundary, in every caller frame at once. Before
+  ## S8cu it was routed as an ordinary raise: a label in `except
+  ## NilAccessDefect` was a false sxSat and `tNilAccess` a false sxUnsat.
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                          w.settings):
+    return
+  when compileOption("exceptions", "setjmp"):
+    var guarded = w.frame.handlerStack.len > 0
+    for f in w.frameStack:
+      if f.handlerStack.len > 0: guarded = true
+    if guarded:
+      if not pathInfeasible(w.z3, p, w.settings):
+        discard w.degrade(heNilDerefMayBeCaught,
+          "a nil dereference under a `try` in a build with " &
+          "`--exceptions:setjmp`, where `std/segfaults` would make it a " &
+          "catchable `" & typeId & "` and run the `finally`: what follows is " &
+          "not known -- path degraded to sxUnknown (heNilDerefMayBeCaught)")
+      return
+  if typeIdToDefectKind(typeId) in w.settings.defectExclusions: return
+  let (st, wit, candErrs, why) = solveTargetHit(w, p)
+  case st
+  of sxSat:
+    let iv = InternalVerdict(kind: ivRaised, raisedTypeId: typeId,
+                             raisedMsg: none(string), raisedWitness: wit,
+                             raisedIsDefect: true)
+    var r = toPublic(iv)
+    r.soundness.pathTaint = p.taint
+    r.nilDerefOnPath = p.nilDeref
+    r.errors.add candErrs
+    w.admitSolvedHit(r)
+  of sxUnknown:
+    discard w.degrade(beSolverUndef,
+      "solver returned unknown on a path raising `" & typeId &
+           "` (queryRLimit=" & $w.settings.budget.queryRLimit &
+           "): " & why & " (beSolverUndef)")
+  of sxUnsat, sxRaised: discard
 
 # ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------
 

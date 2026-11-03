@@ -24,8 +24,11 @@
       the tsymex_* set to get the shard-eligible corpus
     - asserts a corpus floor (150) and full accounting (matrix + skip +
       corpus == total tsymex_* count)
-    - round-robins the sorted corpus into $shardCount deterministic shards
-      (8 since RFC-0005 S8aj; it was 3)
+    - places the corpus into deterministic shards by measured time
+      (scripts/ci-suite-seconds.tsv), longest suite first into the
+      least-loaded shard, with as many shards as keep each near
+      $targetShardMin (RFC-0005 S8cm; before it, a round-robin by name into
+      a fixed $shardCount)
     - emits `shards_json`, and `shard_ids` (the corpus job's matrix, so the
       count is written in this script alone), via $env:GITHUB_OUTPUT when
       running under GitHub Actions (the env var is set), or prints them to
@@ -242,13 +245,61 @@ if ($accountedFor -ne $allTsymex.Count) {
 # (cecbe04) had 48 suites a shard, its corpus jobs took 27-41 min, and
 # shard 3 failed the 40-min check at 40.2 min, every suite run. 14 shards
 # take that to about 41 suites each, ~32 min for the jobs that took 37.
-$shardCount = 14
+#
+# RFC-0005 S8cm: shards are placed by measured time, and their number
+# follows from it. A round-robin by name evens out the suite count, not the
+# time: on runs 41627471335 and 41647143526 the 14 shards took 24.5 to 37.9
+# min. scripts/ci-suite-seconds.tsv holds each suite's measured compile plus
+# run time on this leg (refreshed by scripts/ci-suite-times.py); a suite it
+# does not list counts at the table's median. The suites go longest first,
+# each into the shard with the least time so far, and there are as many
+# shards as it takes to keep each one near $targetShardMin. Runs of the same
+# shard vary by up to ~1.3x, so the target sits below the 30-minute typical
+# time the shards aim for, and further below the corpus job's 40-minute
+# check. $minShardCount keeps the count from falling when the table is short.
+$targetShardMin = 25
+$minShardCount = 14
+$timesPath = Join-Path $RepoRoot 'scripts/ci-suite-seconds.tsv'
+$measured = @{}
+if (Test-Path $timesPath) {
+  foreach ($line in Get-Content $timesPath) {
+    if ($line -match '^\s*#' -or -not $line.Trim()) { continue }
+    $f = $line -split "`t"
+    $measured[$f[0]] = [double]::Parse($f[1], [System.Globalization.CultureInfo]::InvariantCulture)
+  }
+}
+$known = @($corpus | Where-Object { $measured.ContainsKey($_) } | ForEach-Object { $measured[$_] } | Sort-Object)
+$defaultSec = if ($known.Count -gt 0) { $known[[int][math]::Floor($known.Count / 2)] } else { 45.0 }
+$estSec = @{}
+foreach ($s in $corpus) {
+  $estSec[$s] = if ($measured.ContainsKey($s)) { $measured[$s] } else { $defaultSec }
+}
+$totalSec = ($corpus | ForEach-Object { $estSec[$_] } | Measure-Object -Sum).Sum
+$shardCount = [math]::Max($minShardCount, [int][math]::Ceiling($totalSec / 60.0 / $targetShardMin))
+$untimed = @($corpus | Where-Object { -not $measured.ContainsKey($_) })
+Write-Host ("corpus: {0:N1} measured min over {1} suites ({2} untimed, counted at the median {3:N1} s): {4} shards for a {5}-min target" -f `
+  ($totalSec / 60.0), $corpus.Count, $untimed.Count, $defaultSec, $shardCount, $targetShardMin)
+
 $shards = @()
+$loads = New-Object 'double[]' $shardCount
 for ($i = 0; $i -lt $shardCount; $i++) {
   $shards += ,(New-Object 'System.Collections.Generic.List[string]')
 }
-for ($i = 0; $i -lt $corpus.Count; $i++) {
-  $shards[$i % $shardCount].Add($corpus[$i])
+# Longest first; ties by name, so the placement is deterministic.
+$ordered = $corpus | Sort-Object -Property @{ Expression = { $estSec[$_] }; Descending = $true }, @{ Expression = { $_ }; Ascending = $true }
+foreach ($s in $ordered) {
+  $best = 0
+  for ($i = 1; $i -lt $shardCount; $i++) {
+    if ($loads[$i] -lt $loads[$best]) { $best = $i }
+  }
+  $shards[$best].Add($s)
+  $loads[$best] += $estSec[$s]
+}
+# Each shard runs its suites in name order.
+for ($i = 0; $i -lt $shardCount; $i++) {
+  $sorted = @($shards[$i] | Sort-Object)
+  $shards[$i] = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($s in $sorted) { $shards[$i].Add($s) }
 }
 
 Write-Host "=== derive-suites accounting ==="
@@ -257,7 +308,7 @@ Write-Host "scan-tail matrix (explicit)           : $($matrixSuites.Count)"
 Write-Host "skip list (annotated)                 : $($skipReasons.Count)"
 Write-Host "derived corpus (shard-eligible)       : $($corpus.Count)"
 for ($i = 0; $i -lt $shardCount; $i++) {
-  Write-Host "  shard $i : $($shards[$i].Count) suites"
+  Write-Host ("  shard {0} : {1} suites, {2:N1} min measured" -f $i, $shards[$i].Count, ($loads[$i] / 60.0))
 }
 Write-Host ""
 Write-Host "skip list:"

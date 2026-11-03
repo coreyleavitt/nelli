@@ -265,6 +265,26 @@ jobs:
             throw 'expected deps z3 + softlink not resolved from milpa.lock'
           }
 
+      - name: Per-suite compile floor experiment (RFC-0005 S8cm, temporary)
+        shell: pwsh
+        env:
+          SHARD_IDX: ${{ matrix.shard }}
+        run: |
+          $mode = [int]$env:SHARD_IDX % 4
+          $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
+          Write-Host "defender realtime: $($status.RealTimeProtectionEnabled) antivirus: $($status.AntivirusEnabled)"
+          if ($mode -band 1) {
+            try {
+              Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, "$env:USERPROFILE\nimcache", 'C:\mingw64', 'C:\z3'
+              Add-MpPreference -ExclusionProcess 'gcc.exe', 'cc1.exe', 'as.exe', 'ld.exe', 'collect2.exe', 'nim.exe'
+              Write-Host "S8cm floor experiment: defender exclusions on"
+            } catch { Write-Host "S8cm floor experiment: defender exclusions failed: $_" }
+          }
+          if ($mode -band 2) {
+            "S8CM_NIMCACHE=$env:RUNNER_TEMP\nimcache-shared" >> $env:GITHUB_ENV
+            Write-Host "S8cm floor experiment: shared nimcache on"
+          }
+
       - name: Run shard ${{ matrix.shard }} of the derived corpus
         shell: pwsh
         env:
@@ -325,6 +345,9 @@ jobs:
             }
             if ($LASTEXITCODE -ne 0) { $failed += $t }
             $times += [pscustomobject]@{ Suite = $t; Sec = [math]::Round($suiteClock.Elapsed.TotalSeconds, 1) }
+            # RFC-0005 S8cm: one line per suite for scripts/ci-suite-times.py,
+            # which refreshes the measured times the shards are placed by.
+            Write-Host "suite-seconds $t $([math]::Round($suiteClock.Elapsed.TotalSeconds, 1))"
           }
           $shardMin = [math]::Round($shardClock.Elapsed.TotalMinutes, 1)
           $top = $times | Sort-Object Sec -Descending | Select-Object -First 10

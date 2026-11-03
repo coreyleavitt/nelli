@@ -41,6 +41,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 Write-Host "==> $Suite"
+if ($env:S8CM_NIMCACHE) { $ExtraNimArgs = @("--nimcache:$env:S8CM_NIMCACHE") + $ExtraNimArgs }
 # -Wl,--stack: link an 8 MB main-thread stack (Linux parity). Windows
 # defaults to 1 MB, and deep walker/Z3 recursion intermittently overflowed it
 # as a silent crash (catalog #11 class).

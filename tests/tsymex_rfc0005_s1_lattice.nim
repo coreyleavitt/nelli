@@ -82,7 +82,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feReplayCrashed, feReplayDeclined,
                         # RFC-0005 S8cu: a routine compiled with other
                         # checks (`dcSubstituted`).
-                        feCheckOption, feOverflowCheckOption}
+                        feCheckOption, feOverflowCheckOption,
+                        # RFC-0005 S8cp: a discriminator written under
+                        # `{.cast(uncheckedAssign).}`, its bytes unknown.
+                        feUncheckedDiscBytes}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

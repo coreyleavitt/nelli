@@ -207,7 +207,9 @@ const renderAsChoicesVersion* = "12"
   ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
-  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260), S8bv (253), S8bz (249) on batch 10.
+  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260),
+  ##   S8bv (253), S8bz (249) and S8cp items 1 and 2 (253) on batch 10. S8cp's
+  ##   item 1 code is dropped for S8ct's replay child (nothing is abandoned).
 
 const symexWalkerVersion* = "262"
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
@@ -333,6 +335,15 @@ const symexWalkerVersion* = "262"
   ## RFC-0005 S8cc (237->238): S8as's write summary counts a callee's global
   ## only where the callee may write it, and an index call with no `result`
   ## symbol is bound once. Verdicts change from a decline to exact.
+  ##
+  ## RFC-0005 S8cp (2026-11-02) — S8cb's remainder, items 1 and 2. Provisional
+  ## 253. A discriminator written under `{.cast(uncheckedAssign).}` raises
+  ## nothing (a false `sxRaised`), zeroes the case on an object known to have a
+  ## destructor (a false `sxUnsat` of the kept field) and holds fresh bytes
+  ## (`feUncheckedDiscBytes`) on any other; the key of a reassign carries the mode.
+  ## Its item 1 (an abandoned replay's footprint) is not in batch 11: S8ct's
+  ## replay child leaves nothing running for a later replay to meet.
+  ## (S8cp provisional 253, renumbered 262 by batch 11.)
   ##
   ## RFC-0005 S8cb (2026-11-02) — S8bo onto batch 7, and S8bo's remainder.
   ## Provisional (S8bz holds 241, S8cf 242). S8bo's items, each as landed on
@@ -6099,13 +6110,15 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";tags=[" & tags & "]>"
   of isVariantReassign:
     "St<VR:" & lookupLocal(env, s.vrObjName) & ".kind=" &
-      $s.vrNewTag & ":" & s.vrTagName & ";br=" & $s.vrBranches & ">"
+      $s.vrNewTag & ":" & s.vrTagName & ";br=" & $s.vrBranches &
+      ";m=" & $s.vrMode & ">"
   of isVariantReassignSymbolic:
     # Phase 14 A4a: distinct prefix `VRS:` so cache keys can't
     # collide with static-tag `VR:` entries.
     "St<VRS:" & lookupLocal(env, s.vrsObjName) & "." &
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
-      "=" & canonicalize(s.vrsRhs, env) & ";br=" & $s.vrsBranches & ">"
+      "=" & canonicalize(s.vrsRhs, env) & ";br=" & $s.vrsBranches &
+      ";m=" & $s.vrsMode & ">"
   of isVariantConstructSym:
     # Round-6 A3 (ADR-0029). Distinct `VCS:` prefix (never collides with
     # `VRS:`/`VL:`). `vcsLoc` is DELIBERATELY excluded — it is pure

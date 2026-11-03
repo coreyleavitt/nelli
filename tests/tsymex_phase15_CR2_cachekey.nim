@@ -1074,8 +1074,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bv (S8bq's remainder: set iteration, enum subranges, card,
     ## newSeqUninit). Provisional 253.
     ## RFC-0005 S8bz (S8bw's remainder, on S8cb and batch 9). Provisional 249.
-    ## RFC-0005 batch 11: S8cs, S8ct, S8cu, S8bv and S8bz stacked on batch 10.
-    ## 252->262.
+    ## RFC-0005 S8cp item 2 (`{.cast(uncheckedAssign).}` keeps a
+    ## discriminator write unchecked; item 1 superseded by S8ct).
+    ## Provisional 253.
+    ## RFC-0005 batch 11: S8cs, S8ct, S8cu, S8bv, S8bz and S8cp stacked on
+    ## batch 10. 252->262.
     check symexWalkerVersion == "262"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

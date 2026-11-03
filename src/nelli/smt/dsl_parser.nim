@@ -917,11 +917,11 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isVariantReassign:
     newCall(bindSym"mkVariantReassign",
             newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName),
-            newLit(s.vrBranches))
+            newLit(s.vrBranches), newLit(s.vrMode))
   of isVariantReassignSymbolic:
     newCall(bindSym"mkVariantReassignSymbolic",
             newLit(s.vrsObjName), newLit(s.vrsDiscName),
-            emitExpr(s.vrsRhs), newLit(s.vrsBranches))
+            emitExpr(s.vrsRhs), newLit(s.vrsBranches), newLit(s.vrsMode))
   of isVariantConstructSym:
     var tagsLit = newTree(nnkBracket)
     for t in s.vcsTagSet: tagsLit.add newLit(t)
@@ -1037,6 +1037,12 @@ type
     ## touchpoints nothing enforced staying in sync) so a NEW proc-scoped
     ## collector joins the save/restore the moment it becomes a field HERE:
     ## there is no separate save/restore line for it to omit.
+    uncheckedAssign*: int
+                                   ## RFC-0005 S8cp (item 2). How many
+                                   ## `{.cast(uncheckedAssign).}` blocks enclose
+                                   ## the statement being parsed, in this
+                                   ## routine: it is lexical, a callee's own
+                                   ## assignment stays checked.
     jumpTargets*: seq[JumpTarget]
                                    ## RFC-0005 S8m. LEXICAL stack of the
                                    ## loops and blocks enclosing the
@@ -15450,12 +15456,24 @@ proc callMayReachGlobal(n: NimNode): bool =
     if callMayReachGlobal(c): return true
   false
 
+proc isUncheckedAssignBlock(n: NimNode): bool =
+  ## RFC-0005 S8cp (item 2). The pragma block `n` has `cast(uncheckedAssign)`.
+  if n.len < 2 or n[0].kind != nnkPragma: return false
+  for p in n[0]:
+    if p.kind == nnkCast and p.len >= 1 and p[p.len - 1].kind in {nnkIdent, nnkSym} and
+       eqIdent(p[p.len - 1], "uncheckedAssign"):
+      return true
+
 proc mayRearm(n, o: NimNode): bool =
   ## RFC-0005 S8be. Statement `n` may change the arm of the case object
   ## variable `o`: `o` occurs anywhere but as the object of a field access
   ## (`o.f`, read or written in place); or `n` calls a nested routine or a
   ## proc value, which may reach `o` by name.
+  ## RFC-0005 S8cp (item 2): or `o` occurs under `{.cast(uncheckedAssign).}`,
+  ## where `o.k = v` changes arm rather than raise.
   case n.kind
+  of nnkPragmaBlock:
+    if isUncheckedAssignBlock(n) and mentionsSym(n, o): return true
   of nnkSym:
     if containsSym(@[o], n): return true
     if isNestedRoutine(n): return true
@@ -16143,6 +16161,103 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   else:
     valueFieldWrite(step.recv, rebuilt, preamble, ctx)
 
+proc holdsManagedOrNominal(t: IRType; managed, nominal: var bool) =
+  ## RFC-0005 S8cp (item 2). `managed`: a field of `t` makes Nim give the object
+  ## a destructor. `nominal`: a field's type could carry a hook of its own, which
+  ## a macro cannot read.
+  if t == nil:
+    nominal = true
+    return
+  case t.kind
+  of itString, itSeq, itRef, itTable, itSet:
+    managed = true
+  of itInt, itBool, itFloat32, itFloat64, itPtr, itBitSet:
+    discard
+  of itArray:
+    holdsManagedOrNominal(t.elemTy, managed, nominal)
+  of itTuple:
+    if t.objectName.len > 0: nominal = true
+    else:
+      for f in t.fields: holdsManagedOrNominal(f, managed, nominal)
+  else:
+    nominal = true
+
+proc discWriteMode(ty: IRType; ctx: ParseCtx): DiscWriteMode =
+  ## RFC-0005 S8cp (item 2). What an assignment to a discriminator of the case
+  ## object `ty` does here (`DiscWriteMode`). Outside the pragma, it is checked.
+  ## Inside it, Nim zeroes the case on an object with a destructor
+  ## (`injectdestructors`' `genDiscriminantAsgn`, ARC and ORC only) and otherwise
+  ## leaves the bytes; a hook on the object itself gives it a destructor too,
+  ## and neither that nor a hook on a nominal field can be read by a macro. So
+  ## only a field that certainly gives it a destructor, with no field that could
+  ## also run a hook, is exact.
+  if ctx.procScoped.uncheckedAssign == 0: return dwmChecked
+  var managed, nominal: bool
+  case ty.kind
+  of itVariant:
+    for f in ty.vPlainFieldTypes: holdsManagedOrNominal(f, managed, nominal)
+    for arm in ty.vArms:
+      for f in arm.fieldTypes: holdsManagedOrNominal(f, managed, nominal)
+    if ty.vInheritChain.len > 0: nominal = true
+  of itMultiVariant:
+    for f in ty.mvPlainFieldTypes: holdsManagedOrNominal(f, managed, nominal)
+    for ax in ty.mvAxes:
+      for arm in ax.arms:
+        for f in arm.fieldTypes: holdsManagedOrNominal(f, managed, nominal)
+  else:
+    nominal = true
+  when defined(gcOrc) or defined(gcArc) or defined(gcAtomicArc):
+    if managed and not nominal: return dwmZeroing
+  dwmHavoc
+
+proc caseObjectOf(t: IRType): IRType =
+  ## RFC-0005 S8cp (item 2). `t`, or what a ref or ptr `t` points at.
+  case t.kind
+  of itRef: t.refPointeeTy
+  of itPtr: t.ptrPointeeTy
+  else: t
+
+proc namesDiscriminator(ty: IRType; field: string): bool =
+  ## RFC-0005 S8cp (item 2). `field` is a discriminator of `ty`.
+  if ty == nil: return false
+  case ty.kind
+  of itVariant: ty.vDiscName == field
+  of itMultiVariant:
+    for ax in ty.mvAxes:
+      if ax.discName == field: return true
+    false
+  else: false
+
+proc isDiscriminatorField(n: NimNode): bool =
+  ## RFC-0005 S8cp (item 2). `n` is `recv.<discriminator>`, through a ref or not.
+  if n.kind != nnkDotExpr or n.len != 2 or n[1].kind notin {nnkIdent, nnkSym}:
+    return false
+  var recv = n[0]
+  while recv.kind in {nnkHiddenDeref, nnkDerefExpr} and recv.len >= 1:
+    recv = recv[0]
+  if recv.typeKind == ntyNone: return false
+  namesDiscriminator(caseObjectOf(classifyType(recv).ty), n[1].strVal)
+
+proc isHeapDiscriminator(n: NimNode): bool =
+  ## RFC-0005 S8cp (item 2). `n` is a discriminator of what a ref or ptr names.
+  if not isDiscriminatorField(n): return false
+  var recv = n[0]
+  while recv.kind in {nnkHiddenDeref, nnkDerefExpr} and recv.len >= 1:
+    recv = recv[0]
+  classifyType(recv).ty.kind in {itRef, itPtr}
+
+proc takesDiscriminatorAddr(n: NimNode): bool =
+  ## RFC-0005 S8cp (item 2). Code in `n` takes a discriminator's address, which
+  ## only the pragma allows: `addr o.k`, or passing it to a `var` parameter.
+  if n.kind in {nnkAddr, nnkHiddenAddr} and n.len >= 1 and
+     isDiscriminatorField(n[n.len - 1]):
+    return true
+  if n.kind in {nnkCall, nnkCommand} and n.len == 2 and n[0].kind == nnkSym and
+     n[0].strVal in ["addr", "unsafeAddr"] and isDiscriminatorField(n[1]):
+    return true
+  for c in n:
+    if takesDiscriminatorAddr(c): return true
+
 proc discReassignStmt(recvName: string; ty: IRType; discName: string;
                       rhsNode: NimNode; preamble: var seq[IRStmt];
                       ctx: ParseCtx): IRStmt =
@@ -16152,6 +16267,7 @@ proc discReassignStmt(recvName: string; ty: IRType; discName: string;
   ## a multi-variant axis), factored for a field chain's copy.
   let rhs = unwrapHidden(rhsNode)
   let tagIR = discTagLit(parseExpr(rhs, preamble, ctx))
+  let mode = discWriteMode(ty, ctx)
   if ty.kind == itVariant:
     if tagIR.kind == iekIntLit:
       var tagName = if rhs.kind == nnkSym: rhs.strVal else: ""
@@ -16159,12 +16275,13 @@ proc discReassignStmt(recvName: string; ty: IRType; discName: string;
         if arm.tagOrdinal == int(tagIR.ival):
           tagName = arm.tagName; break
       return mkVariantReassign(recvName, int(tagIR.ival), tagName,
-                               branchGroups(ty.vArms))
-    return mkVariantReassignSymbolic(recvName, "", tagIR, branchGroups(ty.vArms))
+                               branchGroups(ty.vArms), mode)
+    return mkVariantReassignSymbolic(recvName, "", tagIR, branchGroups(ty.vArms),
+                                     mode)
   for ax in ty.mvAxes:
     if ax.discName == discName:
       return mkVariantReassignSymbolic(recvName, ax.discName, tagIR,
-                                       branchGroups(ax.arms))
+                                       branchGroups(ax.arms), mode)
   ctx.declineMarker(feUnsupportedStmtKind,
     "RFC-0005 S8at: discriminator `" & discName & "` names no axis of `" &
     $ty & "`")
@@ -17135,6 +17252,12 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
   ## is).
   template asgnRhs(): IRExpr =
     (if rhsOverride != nil: rhsOverride else: parseExpr(n[1], preamble, ctx))
+  # RFC-0005 S8cp (item 2): the heap model's discriminator store checks its
+  # branch and keeps its one array per tag (S8l); unchecked, it declines.
+  if ctx.procScoped.uncheckedAssign > 0 and isHeapDiscriminator(n[0]):
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      "a discriminator written through a ref or ptr under " &
+      "`{.cast(uncheckedAssign).}` is not modelled (feUnsupportedStmtKind)")
   # RFC-0005 S8bc (item 7): `t.mgetOrPut(k, d) = v`. Nim runs the call (the
   # insert of an absent key, with `d` evaluated) before the right-hand side,
   # then stores through the reference: the call's read is parsed for its
@@ -17465,10 +17588,12 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
             if arm.tagOrdinal == int(tagIR.ival):
               tagName = arm.tagName; break
           return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName,
-                                   branchGroups(recvCls.ty.vArms))
+                                   branchGroups(recvCls.ty.vArms),
+                                   discWriteMode(recvCls.ty, ctx))
         # Symbolic RHS: A4 fork path.
         return mkVariantReassignSymbolic(recv.strVal, "", tagIR,
-                                         branchGroups(recvCls.ty.vArms))
+                                         branchGroups(recvCls.ty.vArms),
+                                         discWriteMode(recvCls.ty, ctx))
       if recvCls.ty.kind == itMultiVariant:
         # Identify which axis owns `fieldNode.strVal` as discName.
         for ax in recvCls.ty.mvAxes:
@@ -17479,7 +17604,8 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
             # go through the A4 symbolic IR for now (no Phase 11
             # static path was ever implemented for multi-axis).
             return mkVariantReassignSymbolic(
-              recv.strVal, ax.discName, tagIR, branchGroups(ax.arms))
+              recv.strVal, ax.discName, tagIR, branchGroups(ax.arms),
+              discWriteMode(recvCls.ty, ctx))
   # RFC-0005 S8p: `o.a = v` on a value tuple / object (see
   # `valueFieldWrite`). A ranged int field keeps the decline unless `v` is
   # itself the range-checked conversion: the rebuilt root assignment has no
@@ -17697,6 +17823,18 @@ proc parseStmtInner(n: NimNode,
     if failsCond != nil:
       let condIR = parseExpr(failsCond, preamble, ctx)
       return mkIf(@[mkBranch(condIR, mkRaise("AssertionDefect", nil))])
+    # RFC-0005 S8cp (item 2): the one pragma of a block that changes what its
+    # body means, `{.cast(uncheckedAssign).}`, stays through the parse
+    # (`discWriteMode`). It was dropped: a false `sxRaised`.
+    if isUncheckedAssignBlock(n):
+      if takesDiscriminatorAddr(n[n.len - 1]):
+        return ctx.declineMarker(feUnsupportedStmtKind,
+          "the address of a discriminator under `{.cast(uncheckedAssign).}` " &
+          "(a `var` argument, `addr`) is not modelled (feUnsupportedStmtKind)")
+      inc ctx.procScoped.uncheckedAssign
+      let body = parseStmt(n[n.len - 1], ctx)
+      dec ctx.procScoped.uncheckedAssign
+      return body
     # Fallthrough: a PragmaBlock that is NOT an assert expansion — treat as
     # a transparent wrapper around its body (the last child).
     parseStmt(n[n.len - 1], ctx)

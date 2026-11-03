@@ -1101,6 +1101,19 @@ type
       bsArgs*:  seq[IRExpr]          ## see `BitSetOp`
       bsSetTy*: IRType               ## the `itBitSet` of the set operand(s)
 
+  DiscWriteMode* = enum
+    ## RFC-0005 S8cp (item 2). What an assignment to a discriminator does.
+    dwmChecked   ## outside `{.cast(uncheckedAssign).}`: `FieldDefect` when the new
+                 ## value selects another branch, and the branch's fields kept
+    dwmZeroing   ## inside it, on an object Nim knows has a destructor and with no
+                 ## nominal field type that could hold a hook: no raise; a value
+                 ## different from the old one destroys the case's active fields
+                 ## and zeroes its memory, same branch or not (probed natively)
+    dwmHavoc     ## inside it, any other object: no raise, and a different value
+                 ## either keeps the bytes or zeroes them, by whether the object
+                 ## has a hook, which a macro cannot read. The new arm holds any
+                 ## value (`feUncheckedDiscBytes`)
+
   IRStmtKind* = enum
     isBlock
     isIf
@@ -1573,6 +1586,7 @@ type
         ## belongs to the `else:` branch. The walker forks `FieldDefect` when
         ## the old discriminator's branch differs from the new tag's, as Nim
         ## does at runtime, and keeps the fields otherwise.
+      vrMode*:          DiscWriteMode  ## RFC-0005 S8cp (item 2)
     of isVariantReassignSymbolic:
       vrsObjName*:      string    ## the variant variable in env
       vrsDiscName*:     string    ## which axis (itMultiVariant); ""
@@ -1580,6 +1594,7 @@ type
       vrsRhs*:          IRExpr    ## the symbolic RHS expression
       vrsBranches*:     seq[seq[int]]
         ## RFC-0005 S8f. As `vrBranches`, for the reassigned axis.
+      vrsMode*:         DiscWriteMode  ## RFC-0005 S8cp (item 2)
     of isVariantConstructSym:
       vcsResultVar*:    string    ## fresh temp the constructed value binds to
       vcsVariantTy*:    IRType    ## the full itVariant IRType (vArms,
@@ -2752,6 +2767,13 @@ type
                           ## does there, nothing is dropped: `classOf` is
                           ## `dcFreshSymbol`, a hit is replayed, and an
                           ## `sxUnsat` stands. sevError.
+    feUncheckedDiscBytes  ## RFC-0005 S8cp (item 2). A discriminator written under
+                          ## `{.cast(uncheckedAssign).}` to a different value on
+                          ## an object that may or may not have a hook (`dwmHavoc`):
+                          ## the new arm reads the old bytes or zero, so it holds a
+                          ## fresh value of its type. Every real value is a model
+                          ## and nothing is dropped: `classOf` is `dcFreshSymbol`,
+                          ## a hit is replayed, an `sxUnsat` stands. sevError.
     feEvalOrderUnmodelled ## RFC-0005 S8ax. An operand Nim checks where it
                           ## stands but reads after a later operand's call
                           ## (`a[i] + f()`, `-x + f()`, `x div 2 + f()`),
@@ -3930,6 +3952,9 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # RFC-0005 S8ax: fresh heap contents after an opaque call, a raise the
     # call may make, or the return past one: each a superset, nothing
     # dropped.
+  of feUncheckedDiscBytes: dcFreshSymbol
+    # RFC-0005 S8cp: a fresh value of the arm field's type, with no range fact,
+    # for bytes Nim leaves or zeroes; nothing is forked away or dropped.
   of feEvalOrderUnmodelled: dcNoAnswer
     # RFC-0005 S8ax: a decline; the conservative default.
     # A HALT: the path whose `break` / `continue` leaves a `finally` during a
@@ -5919,20 +5944,24 @@ func branchGroups*(arms: seq[VariantArm]): seq[seq[int]] =
 
 proc mkVariantReassign*(objName: string, newTag: int,
                         tagName: string;
-                        branches: seq[seq[int]]): IRStmt =
+                        branches: seq[seq[int]];
+                        mode = dwmChecked): IRStmt =
   IRStmt(kind: isVariantReassign, vrObjName: objName,
-         vrNewTag: newTag, vrTagName: tagName, vrBranches: branches)
+         vrNewTag: newTag, vrTagName: tagName, vrBranches: branches,
+         vrMode: mode)
 
 proc mkVariantReassignSymbolic*(objName, discName: string,
                                 rhs: IRExpr;
-                                branches: seq[seq[int]]): IRStmt =
+                                branches: seq[seq[int]];
+                                mode = dwmChecked): IRStmt =
   ## Phase 14 cycle A4a (ADR-0003 D4). Symbolic-RHS variant disc
   ## reassignment: `discName == ""` selects the only axis on a
   ## single-axis itVariant; non-empty names a specific axis on an
   ## itMultiVariant.
   IRStmt(kind: isVariantReassignSymbolic,
          vrsObjName: objName, vrsDiscName: discName, vrsRhs: rhs,
-         vrsBranches: branches)
+         vrsBranches: branches,
+         vrsMode: mode)
 
 proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
                             discExpr: IRExpr, tagSet: seq[int],

@@ -145,6 +145,27 @@ proc sutConvDistinctMid(k: int) =
   if int(fb.f.m) == 5 and int(gFarmBox.f.m) == 5 and k == 1: symexTarget("cvm")
   if int(fb.f.m) == k and k != 5: symexTarget("cvm_dead")
 
+# RFC-0005 S8cs: `Farm` inherits, and a subtype's lifetime hook could write the
+# global the path reads: `cvm` declines. The same chain with a type that cannot have
+# a subtype stays exact, which is what this pin is about.
+type Farm3 = ref object
+  m: Meters2
+type FarmBox3 = ref object
+  f: Farm3
+
+var gFarmBox3: FarmBox3
+
+proc setFM3(v: var int, k: int) =
+  v = k
+  gFarmBox3.f.m = Meters2(5)
+
+proc sutConvDistinctMid3(k: int) =
+  let fb = FarmBox3(f: Farm3(m: Meters2(0)))
+  gFarmBox3 = fb
+  setFM3(int(fb.f.m), k)
+  if int(fb.f.m) == 5 and int(gFarmBox3.f.m) == 5 and k == 1: symexTarget("cvm3")
+  if int(fb.f.m) == k and k != 5: symexTarget("cvm3_dead")
+
 suite "S8bg (2): a representation-preserving conversion lvalue is modeled":
 
   test "nim":
@@ -163,6 +184,15 @@ suite "S8bg (2): a representation-preserving conversion lvalue is modeled":
       gFarmBox = fb
       setFM(int(fb.f.m), 1)
       check int(fb.f.m) == 5 and int(gFarmBox.f.m) == 5
+    # RFC-0005 S8cs: the verdicts `cvm` gave were not luck: every `k` here runs as
+    # they said.
+    symexCaptureBegin()
+    for k in [0, 1, 2, 5, 7]:
+      sutConvDistinctMid(k)
+      sutConvDistinctMid3(k)
+    let hit = symexCaptureEnd()
+    check "cvm" in hit and "cvm3" in hit
+    check "cvm_dead" notin hit and "cvm3_dead" notin hit
 
   test "distinct, whole lvalue: reachable twin replays, dead label is unsat":
     let r = clean(sutConvDistinctWhole, "cvd", sxSat)
@@ -177,10 +207,23 @@ suite "S8bg (2): a representation-preserving conversion lvalue is modeled":
     discard clean(sutConvRangeWhole, "cvr_dead", sxUnsat)
 
   test "distinct, through a deeper ref chain: reachable twin replays, dead label is unsat":
-    let r = clean(sutConvDistinctMid, "cvm", sxSat)
-    check replayWitness(sutConvDistinctMid, r.witness, tLabel("cvm"), {}) ==
+    let r = clean(sutConvDistinctMid3, "cvm3", sxSat)
+    check replayWitness(sutConvDistinctMid3, r.witness, tLabel("cvm3"), {}) ==
           roConfirmed
-    discard clean(sutConvDistinctMid, "cvm_dead", sxUnsat)
+    discard clean(sutConvDistinctMid3, "cvm3_dead", sxUnsat)
+
+  test "the chain through a type with an open hierarchy declines (RFC-0016)":
+    template declines(lbl: static string) =
+      block:
+        let r = symexFind(sutConvDistinctMid, tLabel(lbl))
+        checkpoint lbl & " " & $r.status & " " & show(r.errors)
+        check r.status == sxUnknown
+        var found = false
+        for e in r.errors:
+          if e.kind == feGlobalRouteUnproved: found = true
+        check found
+    declines("cvm")
+    declines("cvm_dead")
 
 # ---- (2) cast: a scoped decline naming the cast, not a crash -----------------
 

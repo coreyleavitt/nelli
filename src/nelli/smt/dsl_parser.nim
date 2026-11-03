@@ -29,6 +29,7 @@
 # RFC-0005 S8bl: `dsl_typebridge`'s `typeKind` / `getTypeInst` /
 # `getTypeImpl` read a borrowed routine's argument at its base type.
 import std/macros except strVal, typeKind, getTypeInst, getTypeImpl
+from std/typetraits import supportsCopyMem   ## RFC-0005 S8cs: a type with no copy hook to hide
 import std/effecttraits   ## RFC-0005 S8ax: an opaque routine's inferred `raises`
 import std/options    ## RFC-chapulin-hardening Q1: tryRecognizeScanIdiom's Option[IRStmt]
 import std/strformat
@@ -3360,6 +3361,18 @@ proc isNoReturnRoutine(sym: NimNode): bool =
     if name == "noreturn": return true
   false
 
+proc scanArgHoldsPtr(t: NimNode): bool =
+  ## RFC-0005 S8cs. A value of type `t` may hold an address a store could use: a
+  ## `ptr`, `pointer` or `cstring`, in any part of it, or a shape not recognised.
+  ## A `ref` addresses only heap cells, which the summary takes where it is
+  ## named.
+  var acc: OpaqueEffects
+  var seen: seq[string]
+  reachPointees(t, acc, seen)
+  if acc.heapAll: return true
+  for h in acc.heapTys:
+    if h.getTypeImpl.kind == nnkPtrTy: return true
+
 proc mayWriteAnyVariable(acc: var OpaqueEffects) =
   ## RFC-0005 S8cs. A store a summary cannot aim: any module-level variable and
   ## any heap cell. A `ref` addresses only heap cells; a `ptr` may address a
@@ -3411,7 +3424,7 @@ proc scanCall(n: NimNode; acc: var OpaqueEffects;
      macros.strVal(n[0]) notin ["==", "!=", "isNil"]:
     for i in 1 ..< n.len:
       if n[i].kind notin {nnkEmpty, nnkNilLit} and
-         n[i].typeKind in {ntyPtr, ntyPointer, ntyCString}:
+         scanArgHoldsPtr(n[i].getTypeInst):
         mayWriteAnyVariable(acc)
   var byValue: seq[bool]
   # A routine's declared formals (a magic's `var` is on its declaration); a
@@ -20117,7 +20130,13 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
 # at the point it happens (a statement it walks, or an opaque call's summary it
 # havocs at the call), or the store is proved absent. Otherwise a read of that
 # global declines (`feGlobalRouteUnproved`), and an `sxUnsat`, an `sxSat` or an
-# `sxRaised` that needs the read does not stand.
+# `sxRaised` that needs the read does not stand. Where the store may reach what no
+# global's row stands for (a heap cell, a local a pointer addresses, the copy a value
+# hook makes), a read of any variable declines (`routeAnyValue`).
+#
+# This is an allowlist. A type shape, symbol kind, routine or probe result this
+# section does not recognise has no proof, so a new route declines by default
+# rather than waiting to be listed.
 #
 # The walk never sees a lifetime hook: the compiler inserts those calls after
 # semantic checking, so they are in no typed AST a macro reads. So a hook's body
@@ -20148,12 +20167,17 @@ type
     seenRoutines, seenTypes: seq[string]
     waiting: seq[tuple[key: string; t: NimNode]]  ## probed, not yet read
     routes: seq[string]                           ## `name|why`, or `*|why`
+    siteFile: string       ## where the probes are semchecked (`symexHookMayHide`)
 
 var routeBodies {.compileTime.}: Table[string, RouteBody]
   ## Per routine, so a file's entry macros read each routine once.
 var typeHooks {.compileTime.}: Table[string, seq[NimNode]]
   ## Per nominal type (`routeTypeKey`): its user hooks (`symexHookProbe`).
 var routeRuns {.compileTime.}: seq[RouteRun]
+var unprovedTypes {.compileTime.}: HashSet[string]
+  ## Per nominal type: a probe that says nothing about which hook runs.
+var mayHideTypes {.compileTime.}: HashSet[string]
+  ## Per nominal type: a copy hook a probe elsewhere cannot rule out.
 
 proc symexHookCell*[T](): ptr T = nil
   ## RFC-0005 S8cs. Never called: a probe's lvalue of type `T` (`hookProbes`),
@@ -20202,6 +20226,7 @@ proc isExceptionObject(t: NimNode): bool =
   false
 
 proc routeType(run: var RouteRun; t: NimNode; storage: bool)
+proc readHooks(run: var RouteRun; hooks: seq[NimNode])
 
 proc routeRecFields(run: var RouteRun; rec: NimNode; storage: bool) =
   case rec.kind
@@ -20213,8 +20238,6 @@ proc routeRecFields(run: var RouteRun; rec: NimNode; storage: bool) =
         routeRecFields(run, c, storage)
   else: discard
 
-proc readHooks(run: var RouteRun; hooks: seq[NimNode])
-
 proc routeUninstantiated(t: NimNode): bool =
   ## `t` is a generic type as written, with no instance: no value has it, and a
   ## probe of it stops the compiler. The instances are the types of the values.
@@ -20223,24 +20246,49 @@ proc routeUninstantiated(t: NimNode): bool =
     if t.typeKind == ntyGenericParam: return true
     if symKind(t) == nskType:
       let d = t.getImpl
-      return d.kind == nnkTypeDef and d.len > 1 and d[1].kind == nnkGenericParams
+      if d.kind != nnkTypeDef or d.len < 2: return false
+      return d[1].kind != nnkEmpty    # a type's parameters, the one place it has them
   of nnkBracketExpr:
     for i in 1 ..< t.len:
       if routeUninstantiated(t[i]): return true
     # `Gen[int]`: the head alone is generic, the instance is not.
   else: discard
 
+proc routeProbeRead(run: var RouteRun; k: string; t: NimNode) =
+  ## What a type's probe, already semchecked, leaves without a proof.
+  readHooks(run, typeHooks.getOrDefault(k))
+  if k in unprovedTypes:
+    addRoute(run, routeOpenAll, "which lifetime hooks the type `" & t.repr &
+             "` has cannot be resolved")
+  if k in mayHideTypes:
+    let head = if t.kind == nnkBracketExpr and t.len > 0: t[0] else: t
+    if head.kind == nnkSym and not isStdlibDecl(head) and
+       head.getImpl.lineInfoObj.filename != run.siteFile:
+      addRoute(run, routeOpenAll, "the type `" & t.repr & "` is declared in " &
+               "another module, and a copy hook it does not export cannot be " &
+               "ruled out from here")
+
 proc routeType(run: var RouteRun; t: NimNode; storage: bool) =
   ## A value of type `t` may exist in the code `fn` may run: its hooks and those
   ## of every value it holds may run, with no call in the source. `storage`: `t`
   ## is reached through a global or a `ref`, so overwriting it may drop the last
   ## reference to whatever it holds.
-  if t.isNil or t.kind notin {nnkSym, nnkBracketExpr, nnkRefTy, nnkPtrTy,
-                              nnkTupleTy, nnkTupleConstr, nnkObjectTy, nnkVarTy,
-                              nnkOutTy, nnkDistinctTy, nnkProcTy}:
+  template unlisted(what: string) =
+    addRoute(run, routeOpenAll, "the type `" & what & "` may hold a value whose " &
+             "lifetime hooks cannot be listed")
+  if t.isNil:
+    unlisted("(no type)")
     return
-  if t.kind == nnkSym and symKind(t) != nskType: return
+  if t.kind in {nnkEnumTy, nnkRange}: return    # holds nothing
+  if t.kind notin {nnkSym, nnkBracketExpr, nnkRefTy, nnkPtrTy, nnkTupleTy,
+                   nnkTupleConstr, nnkObjectTy, nnkVarTy, nnkOutTy, nnkDistinctTy,
+                   nnkProcTy}:
+    unlisted(t.repr)
+    return
   if routeUninstantiated(t): return
+  if t.kind == nnkSym and symKind(t) != nskType:
+    unlisted(t.repr)
+    return
   let key = routeTypeKey(t) & (if storage: "!" else: "")
   if key in run.seenTypes: return
   run.seenTypes.add key
@@ -20249,7 +20297,7 @@ proc routeType(run: var RouteRun; t: NimNode; storage: bool) =
      impl.kind in {nnkObjectTy, nnkDistinctTy}:
     let k = routeTypeKey(t)
     if k in typeHooks:
-      readHooks(run, typeHooks[k])
+      routeProbeRead(run, k, t)
     else:
       var queued = false
       for w in run.waiting:
@@ -20279,12 +20327,18 @@ proc routeType(run: var RouteRun; t: NimNode; storage: bool) =
     for f in impl:
       routeType(run, (if f.kind == nnkIdentDefs: f[^2] else: f), storage)
   of nnkBracketExpr:
-    for i in 1 ..< impl.len: routeType(run, impl[i], storage)
+    # A container's elements. An index range or a size is no value.
+    for i in 1 ..< impl.len:
+      if impl[i].kind notin {nnkCharLit .. nnkUInt64Lit, nnkInfix, nnkRange}:
+        routeType(run, impl[i], storage)
   of nnkProcTy:
     if storage and isClosureProcTy(impl):
       addRoute(run, routeOpenAll, "the closure stored in `" & t.repr &
                "` may hold an environment whose hooks cannot be listed")
-  else: discard
+  of nnkEnumTy, nnkRange, nnkIteratorTy:
+    discard
+  else:
+    unlisted(t.repr)
 
 const threadStartRoutines = ["createThread", "spawn", "spawnX", "pinnedSpawn"]
   ## The stdlib's ways to start a thread: a write it makes lands at no point of
@@ -20308,22 +20362,27 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
       acc.types.add (n.getTypeInst, false)
     of nskType:
       acc.types.add (n, false)
-    of nskMethod:
-      acc.open = "it may dispatch `" & macros.strVal(n) & "`, whose overrides " &
-                 "cannot be listed"
-    of nskProc, nskFunc, nskConverter, nskIterator:
-      if isUserRoutine(n):
+    of userRoutineSymKinds:
+      if symKind(n) == nskMethod:
+        acc.open = "it may dispatch `" & macros.strVal(n) & "`, whose overrides " &
+                   "cannot be listed"
+      elif isUserRoutine(n):
         # `symexTarget`'s capture is the library's own, and no user's type.
         if "engine/markers.nim" notin n.getImpl.lineInfo:
           acc.callees.add n
       elif macros.strVal(n) in threadStartRoutines:
         acc.open = "it may start a thread with `" & macros.strVal(n) & "`"
-    else: discard
+    of nskEnumField, nskField, nskLabel, nskModule, nskGenericParam, nskTemplate,
+       nskMacro:
+      discard    # names no value and runs nothing
+    else:
+      acc.open = "it names `" & macros.strVal(n) & "`, a " & $symKind(n) &
+                 " this analysis does not know"
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
      nnkHiddenCallConv:
     # The result: a temporary, destroyed by a hook, that nothing names.
     if n.len > 0 and n[0].kind == nnkSym and
-       symKind(n[0]) in {nskProc, nskFunc, nskConverter, nskMethod}:
+       symKind(n[0]) in userRoutineSymKinds:
       let pt = n[0].getTypeInst
       if pt.kind == nnkProcTy and pt.len > 0 and pt[0].kind == nnkFormalParams and
          pt[0].len > 0 and pt[0][0].kind != nnkEmpty:
@@ -20332,14 +20391,23 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
   else:
     for c in n: routeScan(c, acc)
 
+proc routeHasPragma(impl: NimNode; name: string): bool =
+  if impl.len <= 4 or impl[4].kind != nnkPragma: return false
+  for p in impl[4]:
+    let h = if p.kind in {nnkExprColonExpr, nnkCall} and p.len > 0: p[0] else: p
+    if h.kind in {nnkIdent, nnkSym} and macros.strVal(h) == name: return true
+
 proc routeBodyOf(r: NimNode): RouteBody =
   let key = routeRoutineKey(r)
   if key in routeBodies: return routeBodies[key]
   # Not `resolveRoutineImpl`, whose walkable routines leave out an iterator and
   # a converter: they run all the same.
   let impl = r.getImpl
-  if impl.kind notin RoutineNodes or impl.len <= 6:
+  if impl.kind notin RoutineNodes or impl.len <= 6 or
+     (impl[6].kind == nnkEmpty and not routeHasPragma(impl, "borrow")):
     result.open = "`" & macros.strVal(r) & "` has no body to read"
+  elif routeHasPragma(impl, "thread"):
+    result.open = "`" & macros.strVal(r) & "` is a thread's entry"
   else:
     # The formals from the symbol's type: a generic instance's `impl` still
     # writes them with its `T`.
@@ -20365,27 +20433,49 @@ proc routeWalk(run: var RouteRun; root: NimNode) =
     for c in b.callees: stack.add c
 
 proc routeThroughDeref(lv: NimNode): bool =
-  ## The location `lv` is reached through a `ref` or a `ptr`. A `var` formal's
-  ## hidden dereference is the formal itself: its caller's actual says the rest.
+  ## The location `lv` is not proved to lie outside every `ref` and `ptr`. A `var`
+  ## formal's hidden dereference is the formal itself: its caller's actual says
+  ## the rest.
   case lv.kind
-  of nnkDerefExpr, nnkHiddenDeref:
-    lv.len > 0 and lv[0].typeKind != ntyVar
+  of nnkSym: false
+  of nnkHiddenDeref, nnkDerefExpr:
+    lv.len < 1 or lv[0].typeKind != ntyVar or routeThroughDeref(lv[0])
   of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkObjDownConv, nnkObjUpConv:
-    lv.len > 0 and (lv[0].typeKind in {ntyRef, ntyPtr} or routeThroughDeref(lv[0]))
+    lv.len < 1 or lv[0].typeKind in {ntyRef, ntyPtr, ntyPointer, ntyCString} or
+      routeThroughDeref(lv[0])
   of nnkHiddenStdConv, nnkConv:
-    lv.len > 1 and routeThroughDeref(lv[1])
-  else: false
+    lv.len < 2 or routeThroughDeref(lv[1])
+  else: true
+
+proc routeHoldsPointer(t: NimNode): bool =
+  ## A value of type `t` may address a cell, or nothing shows that it cannot.
+  var acc: OpaqueEffects
+  var seen: seq[string]
+  reachPointees(t, acc, seen)
+  acc.heapAll or acc.heapTys.len > 0
 
 proc routeStoresThroughDeref(n: NimNode; seen: var seq[string]): bool =
-  ## `n`, or a routine it names, may store through a `ref` or a `ptr`.
+  ## `n`, or a routine it names, may store through a `ref` or a `ptr`. A call
+  ## through a value, and a stdlib routine given something that addresses a cell,
+  ## may store anywhere.
   case n.kind
   of nnkAsgn, nnkFastAsgn:
     if routeThroughDeref(n[0]): return true
   of nnkHiddenAddr, nnkAddr:
     if n.len > 0 and routeThroughDeref(n[0]): return true
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    if n.len < 1 or n[0].kind != nnkSym or
+       symKind(n[0]) notin userRoutineSymKinds:
+      return true
+    let head = macros.strVal(n[0])
+    if not isUserRoutine(n[0]) and not head.startsWith("=") and
+       head notin ["==", "!=", "isNil"]:
+      for i in 1 ..< n.len:
+        if n[i].kind notin {nnkEmpty, nnkNilLit} and routeHoldsPointer(n[i].getTypeInst):
+          return true
   of nnkSym:
-    if symKind(n) in {nskProc, nskFunc, nskConverter, nskIterator} and
-       isUserRoutine(n):
+    if symKind(n) in userRoutineSymKinds and isUserRoutine(n):
       let key = routeRoutineKey(n)
       if key in seen: return false
       seen.add key
@@ -20515,6 +20605,36 @@ proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
                  "call the compiler inserts")
     routeWalk(run, h)
 
+proc symexHookUnproved*() = discard
+  ## RFC-0005 S8cs. Never called: names a probe that could not resolve the hook.
+proc symexHookMayHide*() = discard
+  ## RFC-0005 S8cs. Never called: names a type that is not plain bits, so it may
+  ## have a copy hook. `=copy`, `=sink`, `=dup`, `=wasMoved` and `=trace` resolve
+  ## by overload at the probe (only `=destroy` goes by the type), and a hook need
+  ## not be exported, so a probe outside the type's module may not see one.
+
+proc probeShapeKnown(n: NimNode): bool =
+  ## A probe's statement as semchecked says which hook runs: a call of one, or a
+  ## plain assignment (`=copy`, `=sink` of a type with no user hook). Anything
+  ## else says nothing.
+  case n.kind
+  of nnkEmpty, nnkAsgn, nnkFastAsgn, nnkSinkAsgn: true
+  of nnkDiscardStmt: n.len == 1 and probeShapeKnown(n[0])
+  of nnkStmtList, nnkStmtListExpr:
+    for c in n:
+      if not probeShapeKnown(c): return false
+    true
+  of nnkCall, nnkCommand:
+    n.len > 0 and n[0].kind == nnkSym and macros.strVal(n[0]) != "symexHookUnproved"
+  of nnkWhenStmt, nnkIfStmt, nnkElifBranch, nnkElse:
+    true
+  else: false
+
+proc probeNames(n: NimNode; name: string): bool =
+  if n.kind == nnkSym and macros.strVal(n) == name: return true
+  for c in n:
+    if probeNames(c, name): return true
+
 proc collectUserHooks(n: NimNode; acc: var seq[NimNode]) =
   ## The user hooks a probe's semcheck resolved. `system`'s generic magics stand
   ## for "no user hook"; a hook the compiler generated runs only its fields'.
@@ -20536,23 +20656,33 @@ macro symexHookProbe*(key: static string; probes: typed): untyped =
   var hooks: seq[NimNode]
   collectUserHooks(probes, hooks)
   typeHooks[key] = hooks
+  if not probeShapeKnown(probes): unprovedTypes.incl key
+  if probeNames(probes, "symexHookMayHide"): mayHideTypes.incl key
   newEmptyNode()
 
 proc hookProbes(t: NimNode): NimNode =
   ## Each hook of `t`, each under a `compiles`: a hook declared `{.error.}` is one
   ## that never runs.
   result = newStmtList()
-  proc guarded(c: NimNode): NimNode =
-    nnkWhenStmt.newTree(nnkElifBranch.newTree(
+  proc guarded(c: NimNode; refusable = false): NimNode =
+    # A copy hook declared `{.error.}` refuses the probe as it refuses the program:
+    # that hook never runs. No other hook is expected to refuse.
+    result = nnkWhenStmt.newTree(nnkElifBranch.newTree(
       newCall(bindSym"compiles", copyNimTree(c)), c))
+    if not refusable:
+      result.add nnkElse.newTree(newCall(bindSym"symexHookUnproved"))
   proc lv(): NimNode =
     nnkDerefExpr.newTree(newCall(nnkBracketExpr.newTree(bindSym"symexHookCell", t)))
   result.add guarded(newCall(ident"=destroy", lv()))
-  result.add guarded(newCall(ident"=copy", lv(), lv()))
-  result.add guarded(newCall(ident"=sink", lv(), lv()))
+  result.add guarded(newCall(ident"=copy", lv(), lv()), true)
+  result.add guarded(newCall(ident"=sink", lv(), lv()), true)
   result.add guarded(newCall(ident"=wasMoved", lv()))
-  result.add guarded(nnkDiscardStmt.newTree(newCall(ident"=dup", lv())))
+  result.add guarded(nnkDiscardStmt.newTree(newCall(ident"=dup", lv())), true)
   result.add guarded(newCall(ident"=trace", lv(), newNilLit()))
+  result.add nnkWhenStmt.newTree(
+    nnkElifBranch.newTree(newCall(bindSym"supportsCopyMem", newCall(bindSym"typeof", lv())),
+                          nnkDiscardStmt.newTree(newEmptyNode())),
+    nnkElse.newTree(newCall(bindSym"symexHookMayHide")))
 
 proc routeContinue(id: int; resume: NimNode): NimNode =
   ## The next stage: the literal, or the probes the run is waiting for.
@@ -20572,13 +20702,13 @@ macro symexRouteResume*(id: static int): untyped =
   let waiting = routeRuns[id].waiting
   routeRuns[id].waiting = @[]
   for (k, t) in waiting:
-    readHooks(routeRuns[id], typeHooks.getOrDefault(k))
+    routeProbeRead(routeRuns[id], k, t)
   routeContinue(id, bindSym"symexRouteResume")
 
 macro symexGlobalRoutes*(fn: typed): untyped =
   ## RFC-0005 S8cs. The list `withGlobalRoutes` takes: every global a store the
   ## walk does not see may reach, with the reason, for the routine `fn`.
-  routeRuns.add RouteRun()
+  routeRuns.add RouteRun(siteFile: fn.lineInfoObj.filename)
   let id = routeRuns.high
   if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds:
     addRoute(routeRuns[id], routeOpenAll, "the entry routine cannot be read")

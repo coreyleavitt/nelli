@@ -3,6 +3,7 @@
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/engine/markers
+import s8cs_hooks_fixture
 
 var nh: HashSet[string]
 template nat(call: untyped) =
@@ -246,6 +247,58 @@ proc x8(k: int) = # an iterator's body is read, and it holds no hook
     if gX2 == v: symexTarget("x8_live")
     if gX2 != v: symexTarget("x8_dead")
 
+# --- hooks another module does not export ---------------------------------------------
+
+proc hid1(k: int) =
+  let a = gM
+  block:
+    var o = mkPrivD(k)
+    o.v = 1
+  if gM != a: symexTarget("hid1")
+proc hid2(k: int) =
+  let a = gM
+  var x = PrivC(v: k)
+  var y: PrivC
+  y = x
+  x.v = 0
+  y.v = y.v
+  if gM != a: symexTarget("hid2")
+proc hid3(k: int) =
+  let a = gM
+  block:
+    var o = mkShown(k)
+    discard addr o
+  if gM != a: symexTarget("hid3")
+proc hid4(k: int) =
+  let a = gM
+  var x = mkPrivS(1)
+  if useS(x) == 1:
+    x = mkPrivS(k)
+  x.v = 1
+  if gM != a: symexTarget("hid4")
+proc hid5(k: int) =
+  let a = gM
+  let x = PrivU(v: k)
+  eatU(x)
+  if x.v == k and gM != a: symexTarget("hid5")
+proc hid6(k: int) = # `=wasMoved` and `=trace`: their declarations alone
+  let a = gM
+  var x = PrivW(v: k)
+  x.v = 1
+  var y = PrivT(v: k)
+  y.v = 1
+  if gM != a: symexTarget("hid6")
+proc hid7(k: int) = # plain bits from another module: nothing to hide
+  let a = gX1
+  var o = PlainB(v: k)
+  o.v = 1
+  if gX1 != a: symexTarget("hid7_dead")
+proc hid8(k: int) = # not plain bits, another module: no proof that nothing hides
+  let a = gX1
+  var o = WithSeq(s: @[k])
+  o.s.setLen(1)
+  if gX1 != a: symexTarget("hid8_dead")
+
 suite "RFC-0005 S8cs: Nim runs each route":
   setup:
     if nh.len == 0:
@@ -269,17 +322,20 @@ suite "RFC-0005 S8cs: Nim runs each route":
         nat(n6(k)); nat(n7(k)); nat(n11(k)); nat(asm1(k))
         nat(x1(k)); nat(x2(k)); nat(x3(k)); nat(x4(k)); nat(x5(k)); nat(x6(k))
         nat(x7(k)); nat(x8(k))
+        nat(hid1(k)); nat(hid2(k)); nat(hid3(k)); nat(hid4(k)); nat(hid5(k))
+        nat(hid7(k)); nat(hid8(k))
 
   test "the labels the old verdicts denied are reached":
     for l in ["n1_live", "n2_live", "n3_live", "n4_live", "n5_live", "n13_live",
               "mem1", "mem2", "mem3", "n6_live", "n7_live", "n11_live", "asm1_same",
-              "x6_live", "x7_live", "x8_live"]:
+              "x6_live", "x7_live", "x8_live",
+              "hid1", "hid2", "hid3", "hid4", "hid5"]:
       checkpoint l
       check l in nh
 
   test "the exact sxUnsat pins agree":
     for l in ["n1_dead", "x1_dead", "x2_dead", "x3_dead", "x4_dead", "x5_dead",
-              "x6_dead", "x7_dead", "x8_dead"]:
+              "x6_dead", "x7_dead", "x8_dead", "hid7_dead", "hid8_dead"]:
       checkpoint l
       check l notin nh
 
@@ -309,6 +365,18 @@ suite "RFC-0005 S8cs: B26, foreign code inline":
     check r.errors.hasKind(feOpaqueEffectHavoc)
   test "asm":
     exactSat(asm1, "asm1_same")
+
+suite "RFC-0005 S8cs: hooks another module does not export":
+  test "each kind declines":
+    declined(hid1, "hid1")
+    declined(hid2, "hid2")
+    declined(hid3, "hid3")
+    declined(hid4, "hid4")
+    declined(hid5, "hid5")
+    declined(hid6, "hid6")
+  test "plain bits stay exact; a type with no proof declines":
+    exactUnsat(hid7, "hid7_dead")
+    declined(hid8, "hid8_dead")
 
 suite "RFC-0005 S8cs: what stays exact":
   test "a hook that writes nothing":

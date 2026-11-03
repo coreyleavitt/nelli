@@ -13,6 +13,9 @@
 ## measured past the limit on a query with a known SAT and a known UNSAT answer,
 ## each checked natively. Without the merge an empty query may come back unknown.
 ## It may not come back SAT.
+##
+## Row B19's exact SUT is its own file, `tsymex_rfc0005_s8ct_b19` (batch 11): it
+## was 86 s of this suite's 186 s on Windows, against the leg's 240 s kill.
 
 import std/[unittest, strutils, re, macros, locks]
 import nelli/symex
@@ -55,19 +58,6 @@ proc wideWrite(k: int) =
   pad[k and 7] = 1
   if k == 3:
     symexTarget("t")
-
-var gG: int
-
-proc recurB19(n: int): int =
-  ## The sort's row B19, exactly: a 4096-int frame in an unbounded recursion.
-  var pad: array[4096, int]
-  pad[n and 7] = n
-  recurB19(n + 1) + pad[n and 7]
-
-proc sutB19(k: int) =
-  if gG == 0:
-    discard recurB19(k)
-  symexTarget("t")
 
 proc narrowRead(k: int) =
   var pad: array[8, int]
@@ -190,22 +180,6 @@ suite "S8ct: an array access wider than a term walk declines":
     for e in r.errors: check "termWalkMaxDepth" notin e.msg
     if r.status == sxSat:
       check reproduces(narrowRead(r.witness[0]), "t")
-
-suite "S8ct: row B19's exact SUT":
-  test "it ends, with a confirmed raise or a named decline":
-    # It walked for seven minutes before the bound, and ended the process
-    # before S8ct. Natively, input `high(int)` raises OverflowDefect at
-    # `n + 1`, and input 0 overflows the stack.
-    let r = symexFind(sutB19, tLabel("t"))
-    for e in r.errors: checkpoint $e.kind & ": " & e.msg
-    if r.status == sxRaised:
-      check r.soundness.replay == rsConfirmed
-    else:
-      check r.status == sxUnknown
-      var named = false
-      for e in r.errors:
-        if "termWalkMaxDepth" in e.msg: named = true
-      check named
 
 # One context for both: a second context made after one holding the 20,000-level
 # chains below was destroyed built terms 800 times slower (200 `or`s, 119 s

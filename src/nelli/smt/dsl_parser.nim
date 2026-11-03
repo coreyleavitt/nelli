@@ -7138,14 +7138,17 @@ proc localOwnedActual(bare: NimNode): bool =
     else: return false
 
 proc formalAddressTaken(impl: NimNode): bool =
-  ## RFC-0005 S8cq. The routine `impl` takes the address of a formal.
+  ## RFC-0005 S8cq. The routine `impl` takes the address of a by-value formal. A
+  ## `var` formal's `nnkHiddenAddr` hands on what the call already passed.
   proc walk(n: NimNode): bool =
     if n.kind in {nnkAddr, nnkHiddenAddr} or
        (n.kind == nnkCall and n.len > 1 and n[0].kind == nnkSym and
         n[0].strVal in ["addr", "unsafeAddr"]):
       var steps: seq[NimNode]
       let r = lvalueRoot(n[^1], steps)
-      if r != nil and r.kind == nnkSym and symKind(r) == nskParam: return true
+      if r != nil and r.kind == nnkSym and symKind(r) == nskParam and
+         r.typeKind != ntyVar:
+        return true
     for c in n:
       if walk(c): return true
     false

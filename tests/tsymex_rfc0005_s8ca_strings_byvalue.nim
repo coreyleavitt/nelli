@@ -86,13 +86,17 @@ proc sutMaybeEmptyAdd(k: int) =
   if r == 'z' and k == 3: symexTarget("be")
   if r != 'z': symexTarget("be_dead")
 
+proc opaqueStr(k: int): string {.symexOpaque.} =
+  if k == 3: "ab" else: "cd" & "e"
+
 proc sutUnknownView(k: int) =
-  ## A string of unknown provenance (`newString`, an opaque call): declined.
+  ## A string of unknown provenance (an opaque call): declined. (`newString`
+  ## was this suite's source until S8cl modelled it: tsymex_rfc0005_s8cl_strings.)
   ## (`$k` declined alike, after 26 s of modelling the conversion.)
-  var st = newString(2)
+  var st = opaqueStr(k)
   gpstr = addr st
   let r = rdStr(st)
-  if r == 'z' and k == 3: symexTarget("bu")
+  if r == 'a' and k == 3: symexTarget("bu")
 
 suite "S8ca (6c): a by-value copy of an address-taken string":
 

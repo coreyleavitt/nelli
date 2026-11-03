@@ -1140,6 +1140,21 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_caps_c",
             "tsymex_rfc0005_s8bt_replace_lemmas",
             "tsymex_rfc0005_s8bt_replace_facts",
+            # RFC-0005 S8cf -- S8bt's remainder.
+            "tsymex_rfc0005_s8cf_reach",
+            "tsymex_rfc0005_s8cf_limits",
+            "tsymex_rfc0005_s8cf_point",
+            "tsymex_rfc0005_s8cf_jitlimit",
+            "tsymex_rfc0005_s8cf_skipcount",
+            "tsymex_rfc0005_s8cf_limitgaps",
+            "tsymex_rfc0005_s8cf_classes",
+            "tsymex_rfc0005_s8cf_jitutf",
+            "tsymex_rfc0005_s8cf_jitutf_b",
+            "tsymex_rfc0005_s8cf_jitutf_c",
+            "tsymex_rfc0005_s8cf_jitutf_d",
+            "tsymex_rfc0005_s8cf_jitutf_e",
+            "tsymex_rfc0005_s8cf_jitutf_f",
+            "tsymex_rfc0005_s8cf_replace",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the
@@ -1231,6 +1246,21 @@ task test, "Run the test suite":
             # capture-keyed call cache; element and case-object `addr`
             # cells; walker 209->217 (batch 4).
             "tsymex_rfc0005_s8be_remainder",
+            # Split in three by S8bo.
+            "tsymex_rfc0005_s8be_remainder_b",
+            "tsymex_rfc0005_s8be_remainder_c",
+            # RFC-0005 S8bo -- S8be's remainder: isNil and unlowered
+            # magics; plain-object, arm-field and seq-of-object address
+            # cells, whole seq assignment as a resize; abandoned and
+            # threaded replay fidelity.
+            "tsymex_rfc0005_s8bo_nil",
+            "tsymex_rfc0005_s8bo_cells",
+            "tsymex_rfc0005_s8bo_replay",
+            "tsymex_rfc0005_s8cb_magics",
+            "tsymex_rfc0005_s8cb_tostr",
+            "tsymex_rfc0005_s8cb_order",
+            "tsymex_rfc0005_s8cb_cells",
+            "tsymex_rfc0005_s8cb_replay",
             # RFC-0005 S8bh -- S8bf's remainder: var / addr effects of a
             # call through a proc value; a ptr of unknown origin may address
             # a ref field, a global or a var parameter; ref conversions along
@@ -1286,6 +1316,10 @@ task test, "Run the test suite":
             # aggregate globals, pointers into case objects and aggregate
             # containers. Walker 227 (provisional).
             "tsymex_rfc0005_s8bw_remainder",
+            "tsymex_rfc0005_s8cd_globals",
+            "tsymex_rfc0005_s8cd_ops",
+            "tsymex_rfc0005_s8cd_setorder_small",
+            "tsymex_rfc0005_s8cd_setorder_large",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
             # kind probes in contexts of their own (no step's cost moves
             # with the walk's state; a thread's first walk searches as its
@@ -1373,8 +1407,23 @@ task test, "Run the test suite":
             "tsymex_rfc0005_b9_integration",
             # A call declines before Nim's call depth limit ends the process.
             "tsymex_rfc0005_b9_calldepth",
+            # RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked on
+            # batch 9. walker 245->252.
+            "tsymex_rfc0005_b10_integration",
+            # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
+            "tsymex_rfc0005_s8cl_magics",
+            "tsymex_rfc0005_s8cl_lifetime",
+            "tsymex_rfc0005_s8cl_strings",
+            # RFC-0005 S8cr: the definition-of-done audit's gaps. The six
+            # unpinned fresh-symbol kinds and the coverage invariant; a live
+            # sevError beside a clean witness and symexForAll's own pins; a
+            # helper check for each to-unsat flip. No bump.
+            "tsymex_rfc0005_s8cr_intro",
+            "tsymex_rfc0005_s8cr_pins",
+            "tsymex_rfc0005_s8cr_flips",
+            "tsymex_rfc0005_s8cr_flips_str",
             # RFC-0005 S8cu -- a routine compiled under a disabled check declines
-            # by name. Walker 245->260.
+            # by name. Walker 252->260.
             "tsymex_rfc0005_s8cu_push",
             "tsymex_rfc0005_s8cu_forms",
             "tsymex_rfc0005_s8cu_kinds",

@@ -14397,12 +14397,12 @@ Every pin was run RED on the merge of S8bo first, except where noted.
    The scan cannot see (residual, SOUNDNESS): a hook the compiler inserts
    (a program's `=destroy` naming a variable); state shared behind two different
    C routines (`srand`, `rand`); a hook variable of Nim's runtime the program sets
-   and the runtime reads.
+   and the runtime reads. S8cp closed all three.
 
 *Different mechanisms, reported and not fixed here.*
 - **SOUNDNESS: `{.cast(uncheckedAssign).}: o.k = v` is a false `sxRaised`.** The
   block's pragma is dropped, so the walker forks the `FieldDefect` a checked
-  discriminator assignment raises; the native run does not raise.
+  discriminator assignment raises; the native run does not raise. S8cp fixed it.
 - **SOUNDNESS: a replay of an unmodelled path calling the real `quit` ends the
   process.** It was so before this slice; item 5's model covers the modelled path.
 - **PRECISION: `s[1].b = 7` and `s[1][0] = x`, a field of a seq's element by
@@ -14420,3 +14420,73 @@ Every pin was run RED on the merge of S8bo first, except where noted.
   compile on cpp** (`readCellField`'s `f = F(i)` on `Atomic[T]`'s
   `std::atomic<NI8>`, whose assignment is deleted). They fail the same way at
   136ad60, before this slice. S8s fixed the same shape in `validDefault`.
+
+**As landed (S8cp, walker 253 provisional) — S8cb's remainder, items 1 and 2.**
+Base: S8cb (`28ab1a7`) merged onto the channel at `e497dcf`. Item 3 moved to S8ct,
+a `=destroy` writing a global on a walked or opaque path to S8cs, n42 on cpp to
+S8cl; items 4, 6, 7 and 8 follow batch 10. Pins:
+`tsymex_rfc0005_s8cp_unchecked`, `tsymex_rfc0005_s8cp_footprint`.
+
+1. An abandoned replay's footprint, the three gaps S8cb recorded, each RED against
+   the compiled program first (a reader's label is reachable only through a mark the
+   hanging replay left, the native run does not reach it, and the replay said
+   `sxSat`). All three close from the safe side.
+   - A hook the compiler inserts. A macro cannot ask whether a type has one, so a
+     value of any object or distinct type the program declares opens the footprint,
+     however it is reached: a `seq`, a tuple, an alias, a generic argument, a routine
+     signature (`mayRunCode`). A stdlib type counts only if it holds a proc value
+     (`Task`, a `Stream`). The stdlib's own hooks free what they own, read from
+     `lib/pure`, `lib/std` and `lib/core`, not observed.
+   - C routines. `setenv` and `getenv` have different names and one environment, so
+     every C routine and `emit` of the stdlib shares one token (`foreignToken`), but
+     for those known to touch only their arguments (`isPureForeign`: `math` less
+     `lgamma` and `gamma`, C's memory and string routines). `lib/system/io.nim` is
+     runtime code the scan used to drop: files and stdin are state, so it has the
+     token too. A stdlib `var` that may hold a proc opens the footprint.
+   - A hook variable the runtime calls through (`globalRaiseHook`, `localRaiseHook`,
+     `outOfMemHook`, `unhandledExceptionHook`, `errorMessageWriter`,
+     `onUnhandledException`). Set when a replay starts, its footprint is open; set
+     when a later one starts, every live abandoned replay contends it
+     (`runtimeHooksSet`). Code that sets one names it, which S8cb already opened.
+2. `{.cast(uncheckedAssign).}: o.k = v` is a false `sxRaised` no longer: the section
+   is parsed, and a discriminator written in it carries a `DiscWriteMode`. Measured
+   natively (Linux, c, ORC): no `FieldDefect` under the pragma, in nested control flow
+   of it, or through a `var` formal whose own routine has the section; it stays for a
+   callee's write, after the block and for a field of another arm. The same value
+   changes nothing. Another value, on an object with a destructor, zeroes the case's
+   memory, one branch or two, and only that axis's; plain fields stay. On one with
+   none the bytes stay, and the new arm reads the old arm's. Any hook on the object
+   itself (`=copy`, `=sink`, `=dup`, `=trace`, `=wasMoved`) zeroes as well.
+   - `dwmZeroing`, exact: a leaf type that is managed (string, seq, ref anywhere in
+     it), has no nominal field, under ARC or ORC. This also closed a false `sxUnsat`
+     that was not on the sort's list: the fields of the kept branch were kept where a
+     managed object zeroes them, on the same branch.
+   - `dwmHavoc`, otherwise: `supportsCopyMem` is true for an object with a hooked
+     nested field, so a macro cannot tell a plain object from a zeroing one. The arm
+     holds a fresh value with no range facts, taint `feUncheckedDiscBytes`
+     (`dcFreshSymbol`): `sxSat` is replayed and `sxUnsat` stands, which the kept tag
+     and plain fields make exact and the arm reads make a decline.
+   - Declines (`sxUnknown`), each pinned or recorded in the sort below.
+
+*Declines, for RFC-0016.*
+- A plain object's arm bytes under the pragma (`dwmHavoc`): exact needs the hooks of
+  the type at macro time, so `ua3_diff` of a plain object is `sxUnknown` where the
+  compiled program answers. It was a false `sxRaised` here and a false `sxSat` on main
+  by the sort.
+- A discriminator under the pragma through a `ref` or `ptr` receiver, an `addr`, a
+  `var` argument (`inc o.k`), an element of a seq.
+- A constructor with a runtime discriminator and an arm field.
+- A local alias (`let p = addr o.x`) read after a rearm of `o` in the section.
+- A `seq` or `ref` arm read after `dwmHavoc`, and any non-scalar arm.
+- A footprint is open on a plain user object that has no hook (only under an abandoned
+  replay, where the cost is `sxUnknown` for later replays): deciding needs the
+  compiler's own hook table, which a macro cannot reach. C routines of the stdlib meet
+  each other across unrelated state (`getenv` and `clock_gettime`).
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a replay of a routine with no taint is skipped, so a body that blocks
+  forever is `sxSat` of the label after it** (an opaque routine whose only reachable
+  effect is a blocking receive in a hook). Termination is not a verdict: nothing here
+  claims it.
+- **Not tested: `--mm:refc`.** The zeroing mode is chosen only under ARC or ORC, so
+  refc takes `dwmHavoc`; the native bytes under refc were not measured.

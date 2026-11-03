@@ -2755,6 +2755,15 @@ const foreignToken = "c:foreign"
   ## `setenv` and `getenv` share the environment, `fwrite` and `fread` a file, and
   ## a name says nothing about that.
 
+proc isRuntimeCode(impl: NimNode): bool =
+  ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
+  ## nelli's replay markers, whose state is per-thread, or synchronised, or of
+  ## no consequence to what the program computes. A variable of it the program
+  ## names is still the program's footprint (`scanFootprint`).
+  let f = impl.lineInfoObj.filename.replace('\\', '/')
+  "/lib/system/" in f or f.endsWith("/lib/system.nim") or
+    f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
+
 var typeRunsCode {.compileTime.}: Table[string, bool]
   ## RFC-0005 S8cp. `mayRunCode`, per type a walk starts from.
 
@@ -2768,6 +2777,9 @@ proc walkTypeRunsCode(t: NimNode; user: bool; seen: var seq[string]): bool =
     if symKind(t) != nskType: return false
     let impl = t.getImpl
     if impl.kind != nnkTypeDef or impl.len < 3: return false
+    # The runtime's own types hold only the runtime's procs (`Channel` reaches
+    # `TNimType`); what a program puts in one is a generic argument at its use.
+    if isRuntimeCode(impl): return false
     let key = t.strVal & "@" & impl.lineInfo
     if key in seen: return false
     seen.add key
@@ -2874,15 +2886,6 @@ proc hasPragmaNamed(impl: NimNode; name: string): bool =
   for p in impl[4]:
     let head = if p.kind == nnkExprColonExpr: p[0] else: p
     if head.kind in {nnkIdent, nnkSym} and head.strVal == name: return true
-
-proc isRuntimeCode(impl: NimNode): bool =
-  ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
-  ## nelli's replay markers, whose state is per-thread, or synchronised, or of
-  ## no consequence to what the program computes. A variable of it the program
-  ## names is still the program's footprint (`scanFootprint`).
-  let f = impl.lineInfoObj.filename.replace('\\', '/')
-  "/lib/system/" in f or f.endsWith("/lib/system.nim") or
-    f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
 
 proc isPureForeign(impl: NimNode; name: string): bool =
   ## RFC-0005 S8cp. A C routine of the stdlib that reads only its arguments and

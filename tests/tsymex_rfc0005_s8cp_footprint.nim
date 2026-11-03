@@ -52,15 +52,16 @@ proc sutReadsEnv(v: int) =
   readsEnv(v)
   if envOut == 1: symexTarget("e")
 
-var sqrtOut = 0.0
+var sqrtOut = 0
 
 proc pureSqrt(v: int) {.symexOpaque.} =
-  sqrtOut = sqrt(float(v))
+  sqrtOut = int(sqrt(float(v)))
 
 proc sutPureForeign(v: int) =
   symexAssume(v == 3)
   pureSqrt(v)
-  symexTarget("p")
+  # Through the global, so that the hit is replayed.
+  if sqrtOut == 1: symexTarget("p")
 
 # ---- a runtime hook variable the program sets ------------------------------
 
@@ -204,6 +205,7 @@ when compileOption("threads"):
       let r = symexFind(sutPureForeign, tLabel("p"))
       checkpoint $r.status & " " & show(r.errors)
       check r.status == sxSat
+      check r.errors.hasKind(feGlobalHavoc)
     test "released":
       check released(neverC)
 
@@ -271,6 +273,7 @@ when compileOption("threads"):
       let r = symexFind(sutPureForeign, tLabel("p"))
       checkpoint $r.status & " " & show(r.errors)
       check r.status == sxSat
+      check r.errors.hasKind(feGlobalHavoc)
       check released(neverP)
 
   suite "RFC-0005 S8cp (1): walker version":

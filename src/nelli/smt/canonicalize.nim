@@ -234,6 +234,15 @@ const symexWalkerVersion* = "253"
   ## only where the callee may write it, and an index call with no `result`
   ## symbol is bound once. Verdicts change from a decline to exact.
   ##
+  ## RFC-0005 S8cp (2026-11-02) — S8cb's remainder, items 1 and 2. Provisional
+  ## 253. A discriminator written under `{.cast(uncheckedAssign).}` raises
+  ## nothing (a false `sxRaised`), zeroes the case on an object known to have a
+  ## destructor (a false `sxUnsat` of the kept field) and holds fresh bytes
+  ## (`feUncheckedDiscBytes`) on any other; the key of a reassign carries the mode.
+  ## An abandoned replay's footprint opens on any value that may have a hook,
+  ## shares one token across the stdlib's C routines and opens while a runtime
+  ## hook variable is set (a false `sxSat` in each).
+  ##
   ## RFC-0005 S8cb (2026-11-02) — S8bo onto batch 7, and S8bo's remainder.
   ## Provisional (S8bz holds 241, S8cf 242). S8bo's items, each as landed on
   ## this base: S8bs's `objectCellValue` is the object's cell (S8bo's second

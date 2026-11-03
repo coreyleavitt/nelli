@@ -314,6 +314,11 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## steps, not the shape of its terms). 120 - 4 = 116. In
     ## runtime_strings.nim, `iekStrFromChars` guards its view (one line):
     ## 3 + 1 = 4.
+    ## RFC-0005 S8cb (S8bo on batch 7): an element cell's store of `addr s[i]`
+    ## now writes every leaf through `withElem`, whose array accesses are
+    ## audited there, so `storeSeqElem`'s marked line is gone. 116 - 1 = 115.
+    ## RFC-0005 S8cd: `isIndexAssign`'s seq arm reads the length after its
+    ## placeholder guard, to observe it (`observeRecvPart`). 115 + 1 = 116.
     ##
     ## RFC-0005 S8bv rewrote `noteUninitReturn` to pair the seqs of a
     ## composite result: its five lines are four (the `mentionsUninitBase`

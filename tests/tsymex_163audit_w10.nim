@@ -65,9 +65,10 @@ proc coveredGate(x: int) {.cover.} =
 # its contents are never READ back into the counter afterward. -------------
 
 proc strOrderGate(x: int) =
-  let a = "apple"
-  let b = "banana"
-  if a < b:                     ## degrades via loweringDegradeErrors (cmpString)
+  ## RFC-0005 S8cb modelled string ordering (`cmpString`'s degrade, this gate's
+  ## until then); `$` of a float still degrades there.
+  let s = $float(x)
+  if s.len >= 0:                ## degrades via loweringDegradeErrors
     if x > 5:
       symexTarget("hi")
     else:
@@ -114,7 +115,7 @@ suite "163 audit W10 -- the concolic collect path reads w.walkDegradeErrors":
   test "#163 review R9 -- a lowering-site (threadvar sink) degrade also reports nonzero":
     ## Before the fix: `runConcolicCollectImpl` reads only `w.walkDegradeErrors`
     ## (the WalkCtx-field sink), never `loweringDegradeErrors` (the threadvar
-    ## sink `cmpString`'s string-ordering degrade writes to) -- so this SUT's
+    ## sink this SUT's degrade writes to) -- so this SUT's
     ## degrade was silently discarded and `walkDegradeCount` read 0,
     ## indistinguishable from `cleanGate`'s genuinely clean collect above.
     let trace = @[integerChoice(7, 0, 10, 0)]

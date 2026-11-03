@@ -337,9 +337,8 @@ proc autoPossess*(code: seq[Code]; utf: bool): Possess =
       base.empty = code[i + 1].rep in {rpStar, rpPlus, rpQuery, rpUpto}
       cand = after >= 0
     if not cand: continue
-    if base.kind in {pkProp, pkXClass}:
-      result.unknown = true
-      continue
+    # RFC-0005 S8cf: `compareOpcodes` sets `unknown` where a comparison reads
+    # one; the pattern's end reads neither (`[\\x{e9}\\x{100}]*` possesses).
     var recLimit = 1000
     if compareOpcodes(code, after, utf, base, recLimit, result):
       result.addrs.incl c.address

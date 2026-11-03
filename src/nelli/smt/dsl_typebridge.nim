@@ -62,7 +62,7 @@ proc isStdlibDecl*(sym: NimNode): bool =
   impl.lineInfoObj.filename.replace('\\', '/').toLowerAscii.startsWith(
     nimLibDirForCmp)
 
-const userRoutineSymKinds = {nskProc, nskFunc, nskMethod, nskConverter,
+const userRoutineSymKinds* = {nskProc, nskFunc, nskMethod, nskConverter,
                              nskIterator}
 
 const procValueSymKinds* = {nskProc, nskFunc}
@@ -611,6 +611,12 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       nominalId = nominalId(nameSym), nameIsRefAlias = isRefWrapped).keyedBySym(nameSym)
   recList.expectKind nnkRecList
   let s = if nameSym.kind in {nnkSym, nnkIdent}: nameSym.strVal else: nameSym.repr
+  # RFC-0005 S8cl (item 2). A member the walk cannot read (`when` in an object,
+  # as the runtime's `RefHeader`) leaves the type unsupported: its use declines,
+  # and it stopped the compile before.
+  for member in recList:
+    if member.kind notin {nnkIdentDefs, nnkRecCase}:
+      return tUninterp("__unsupported:" & s)
   # First pass: detect whether this object has any `nnkRecCase`
   # member. If it does, we build an `itVariant` (Phase 11);
   # otherwise the plain-tuple path stays.
@@ -619,6 +625,13 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
     if member.kind == nnkRecCase:
       hasRecCase = true
       break
+  # RFC-0005 S8bo. A record holding a `when` (system's `Channel`, whose
+  # fields depend on the build) has no one field list: it is an
+  # uninterpreted type. It failed the whole compile here (an opaque
+  # routine's effect summary classifies every global it names).
+  for member in recList:
+    if member.kind == nnkRecWhen:
+      return tUninterp("__unsupported:" & s)
   if hasRecCase:
     # ---- Phase 11 single-axis + Phase 14 multi-axis lowering --
     # Each `nnkRecCase` in `recList` becomes one VariantAxis.

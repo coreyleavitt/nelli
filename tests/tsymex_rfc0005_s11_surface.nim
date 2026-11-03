@@ -37,12 +37,17 @@ proc s11Dead(x: int) =
   if x > 5 and x < 3:
     symexTarget("s11_dead")
 
+# RFC-0005 S8cb: `a < a` was a fresh symbol until the walker modelled the order
+# on bool. A module-level `var` no one writes is one at its read (`feGlobalHavoc`,
+# `dcFreshSymbol`), and really holds false.
+var freshGlobal = false
+
 proc s11Confirm(a: bool; x: int) =
-  ## `a < a` on a bool is modelled as a FRESH symbol (`dcFreshSymbol`), so
+  ## `freshGlobal` is a FRESH symbol to the walker (`dcFreshSymbol`), so
   ## the only path to the target is `scSpurious`-tainted and replay decides.
-  ## Reality: `a < a` is false, so `not o` holds and the replay confirms.
+  ## Reality: it is false, so `not o` holds and the replay confirms.
   tick()
-  let o = a < a
+  let o = freshGlobal and (a or not a)
   if not o:
     if x == 42:
       symexTarget("s11_confirm")
@@ -312,7 +317,7 @@ suite "RFC-0005 S11 (e) -- SymexFinding carries soundness, gaps, violations; the
     check warm.soundness == cold.soundness      # served unchanged
     # RFC-0005 S8az: the `:sat` witness cache slot now carries gaps() too --
     # `s11Confirm`'s winning path goes through a `dcFreshSymbol` decline
-    # (`a < a`), so even this confirmed-SAT cold run has a non-empty view,
+    # (`freshGlobal`), so even this confirmed-SAT cold run has a non-empty view,
     # and the warm hit reports the SAME one (was: always `@[]`, "errors are
     # not cached").
     check cold.gaps.len > 0

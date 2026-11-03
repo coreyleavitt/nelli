@@ -2,7 +2,7 @@
 type    = "rfc"
 id      = "0005"
 title   = "RFC — soundness channels: separating over- from under-approximation"
-state   = "ready"
+state   = "in-progress"
 wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"

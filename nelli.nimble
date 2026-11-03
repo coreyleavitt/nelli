@@ -1372,5 +1372,19 @@ task test, "Run the test suite":
             # A proc value's aliasing shapes decline; walker 241->245.
             "tsymex_rfc0005_b9_integration",
             # A call declines before Nim's call depth limit ends the process.
-            "tsymex_rfc0005_b9_calldepth"]:
+            "tsymex_rfc0005_b9_calldepth",
+            # RFC-0005 S8cu -- a routine compiled under a disabled check declines
+            # by name. Walker 245->260.
+            "tsymex_rfc0005_s8cu_push",
+            "tsymex_rfc0005_s8cu_forms",
+            "tsymex_rfc0005_s8cu_kinds",
+            "tsymex_rfc0005_s8cu_modules",
+            "tsymex_rfc0005_s8cu_import",
+            "tsymex_rfc0005_s8cu_scan",
+            "tsymex_rfc0005_s8cu_cl_field",
+            "tsymex_rfc0005_s8cu_cl_over",
+            "tsymex_rfc0005_s8cu_cl_rbo",
+            "tsymex_rfc0005_s8cu_cl_checks",
+            "tsymex_rfc0005_s8cu_cl_danger",
+            "tsymex_rfc0005_s8cu_cl_float"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

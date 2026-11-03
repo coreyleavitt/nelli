@@ -73,7 +73,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feTableIterOrder,   # RFC-0005 S8bc
                         # RFC-0005 S8be: a replay abandoned past
                         # `replayTimeoutMs`.
-                        feReplayTimedOut}
+                        feReplayTimedOut,
+                        # RFC-0005 S8cu: a routine compiled with other
+                        # checks (`dcSubstituted`).
+                        feCheckOption, feOverflowCheckOption}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

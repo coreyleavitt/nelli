@@ -203,7 +203,11 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "245"
+const symexWalkerVersion* = "260"
+  ## RFC-0005 S8cu (provisional). A routine compiled without a check the walker
+  ## models, or with a float check it does not, declines by name
+  ## (`check_options.nim`, `feCheckOption`, `feOverflowCheckOption`) where the
+  ## walk reported a raise that never happens. SOUNDNESS. 245 -> 260.
   ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
   ## batch 8 as one integration branch under ONE walker number; their bullets
   ## follow, each naming its provisional number. The stack's own changes: S8ce

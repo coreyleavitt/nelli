@@ -14167,3 +14167,157 @@ pin is 238, and both suites carry the `>= 238` floor.
 - **PRECISION: `unsafeAddr` of a by-value array formal in a walked callee
   declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
   `wb_dead`).
+
+**As landed (S8cu, walker 260 provisional) — a routine compiled with other
+checks.** Base e497dcf (batch 9 and the call depth fix, walker 245). A routine
+compiled without a check the walker models runs without it, but the walk modelled
+the check and reported a raise that never happens (`zz_pushoff.nim` from the
+worker's S8cp blocker: `{.push fieldChecks: off.}` around a wrong-branch write,
+`sxRaised FieldDefect` where the native run reaches the label). Overflow was wrong
+the same way on main. Suites `tsymex_rfc0005_s8cu_push`, `_forms`, `_kinds`,
+`_modules`, `_import`, `_scan` and six command-line suites (`_cl_field`,
+`_cl_over`, `_cl_rbo`, `_cl_checks`, `_cl_danger`, `_cl_float`, each with a
+`.nim.cfg`), all registered. CR2's `==` pin is 260; `_push` carries the `>= 260`
+floor. Every row runs the routine natively on the same build beside the verdict.
+
+- *Fail closed, per routine.* `check_options.nim` reads the check options at a
+  routine's definition, and `withCheckDeclines` puts a Class-B marker before its
+  body: the SUT (`parseProc`), every walked callee (`parseCalleeImpl`, read from
+  the original definition so a generic answers at its own), a lambda
+  (`parseRoutineToLambda`) and a closure iterator. The kinds are `feCheckOption`
+  and `feOverflowCheckOption`, both `dcSubstituted`, so a path reaching one is
+  `{scSpurious, scIncomplete}`: no `sxUnsat` and no trusted verdict, including a
+  routine whose modelled raise was caught before the label. The walker's
+  `isUnsupported` arm passes `feOverflowCheckOption` when `acOverflow` is out of
+  `arithChecks`, where the wrap (S8w) and the trap (S8aa) are modelled and proved:
+  existing `arithChecks` handling is unchanged. `acRange` out is not credited:
+  `rangeOff` with `{acOverflow, acDivByZero}` still declines on the conversion.
+- *What reads as a deviation.* `fieldChecks`, `overflowChecks`, `rangeChecks`,
+  `boundChecks`, `objChecks` off; `nanChecks`, `infChecks` (and `floatChecks`,
+  which is both) on, but only for a body that touches a float. `floatChecks: on` was
+  a false `sxSat` on main and the channel (the walker has no float raise).
+  `nilChecks` is not read: `{.nilChecks: off.}` does not compile and
+  `{.push nilChecks: off.}` changes nothing natively. `assertions` guards nothing
+  the walker models as a check.
+- *Why a source scan.* The options live on `PSym.options`. On the pinned compiler,
+  the typed AST of a routine under `{.push checks: off.}` is identical to the
+  checked one (`nnkCheckedFieldExpr`, conversions and infix nodes all present, the
+  same `symBodyHash`, an empty pragma slot). `compileOption` through a template
+  reports the expansion site, which follows the `{.pop.}` in a `symexFind` call;
+  `compileOption` in a macro body depends on where that macro was compiled. So the
+  claim that "a macro cannot see a top-level push" holds for every macro API
+  tried, and the source scan answers every textual form. The scan is position
+  aware: the push/pop stack at the routine's line, in its module's file, with
+  `include`s read in place (a push in the includer reaches the included file, and
+  its own `push on` holds), user pragmas expanded, bare `{.x: off.}` statements, and
+  `{.push checks: on.}` re-enabling over a command line that turned them off. The
+  command line is read once through `compileOption` at nelli's module scope.
+- *Native facts the suites pin.* A pragma cannot sit on a routine: `proc f()
+  {.checks: off.}`, `{.fieldChecks: off.}` on a routine, and `{.pragma: x,
+  checks: off.}` used as `proc f() {.x.}` or `{.push x.}` are compile errors, so
+  there is no per-routine form. `{.x.}` as a statement compiles, and `{.pragma: x,
+  push, checks: off.}` then `{.x.}` pushes. A generic answers at its definition
+  (defined under a push and instantiated elsewhere: unchecked; defined clean and
+  instantiated under one: checked). A template and an inline iterator answer from
+  the routine they land in; a closure iterator, a func, a method, a converter, an
+  inline proc and a lambda at their own definition; a forward-declared routine at
+  its body. A routine a template generates has the template's line info and the
+  expansion's options; one a macro generates (`quote`, `newProc`) has the macro
+  call's line info. A pushing template expanded at the top level does push. An
+  `import` under a push compiles the module it first reaches, and what that
+  imports, under it; a module compiled earlier keeps its checks. `-d:danger` turns
+  off field, overflow, range, bound and object checks; `-d:release` keeps them.
+- *What reads as off.* An unreadable or unparsable file, a source filter, an
+  `include` that cannot be placed, a check value that is no literal, an undecided
+  `when` around a stack or check pragma (each distinct condition text, up to four,
+  is read as its own world and the position takes the union, so `when c: push` and
+  `when c: pop` balance; past four the rest join and a pop below them leaves both
+  states), a routine inside a template or macro body (the module's union), and a
+  routine under an importer's leak. `defined(x)` is undecided: a macro cannot
+  evaluate it for a name it holds as text. `hostOS` and `hostCPU` comparisons are
+  decided, which keeps `system.nim` readable.
+- *Nelli's own engine is excluded* (`/nelli/smt/`, `nelli/engine/markers.nim`):
+  it pushes for its own reasons and is not the program. Paths are compared
+  normalised to `/` and read as the compiler reported them, since Windows reports
+  `\`; `_scan` pins the exclusion on `ptrAimInto`, which sits under the runtime's
+  own `{.push fieldChecks: off.}`, so a Windows leg fails if a comparison is not
+  normalised. Parses are cached by path: hashing a `system.nim`-sized key on
+  every lookup spent the VM's 10M iteration budget within fifteen modules.
+- *The stdlib.* Walked routines inside `math.nim`'s `{.push checks: off.}`
+  (157-1116) now decline: `floorDiv`, `floorMod`, `euclMod`, `isPowerOfTwo`,
+  `nextPowerOfTwo`; also `digitsutils.addInt`. Natively they are unchecked, so the
+  old verdicts were not proven either way. Models and unpushed routines still
+  decide: `strip`, `delete`, `cmp`, `$int`, `abs`, `min`, `sqrt`, `isNaN`,
+  `classify`, `copySign`, `round`, `toLowerAscii`, `startsWith`, `find`,
+  `contains`, `strutils.parseInt`, a `Table`. The scan reads `system`, `strutils`,
+  `math`, `parseutils`, `tables`, `strimpl`, `digitsutils`, `options`, `hashes`,
+  `algorithm`, `sequtils`, `sets`, `unicode`, `os` and `times` with no unknown.
+- *Precision cost.* The rule is per routine, not per construct: under
+  `--fieldChecks:off` or `-d:danger` every routine the walk enters declines,
+  including one with no field access, which is correct (nothing it answers is a
+  false verdict) but leaves those builds with no definite verdicts. On an ordinary
+  build the cost is the pushed stdlib regions above and user code under a push.
+  Existing suites run on c with no move: `tsymex_161_overflow_obligation`,
+  `tsymex_163rev_concolic_modes`, `tsymex_163rev_inert_exclusions`, the `s8aa`,
+  `s8ac`, `s8ad`, `s8aj` and `s8w` remainders (whose pushed SUTs run with
+  `acOverflow` out), `s1b_kinds`, `s1c_verdict`, `s3_monotonicity`, `s8_scope`,
+  `tsymex_phase15_z3_infra`, `tsymex_inv_structured_kinds`,
+  `tsymex_163rev_degrade_classification`, `tsymex_phase2_overflow`,
+  `tsymex_phase15_F6_float_math`, `tsymex_phase15_F8_smoke`, `tsymex_r2_scanbound`.
+  `tsymex_rfc0005_s1_lattice` lists the two kinds among the reclassified.
+
+The table (Z3 5.1, c; native, main 6cbfe8f, channel e497dcf, this slice):
+
+| row | native | main | channel | S8cu |
+|---|---|---|---|---|
+| checked field write | FieldDefect | unknown (walker fault) | raised | raised |
+| `fieldChecks: off` | reached | unknown (walker fault) | raised | `feCheckOption` |
+| `overflowChecks: off` | reached | raised | raised | `feOverflowCheckOption` |
+| same, `acOverflow` out | reached | sat | sat | sat |
+| `rangeChecks: off` | reached | unknown (`feUnsupportedExprKind`) | raised | `feCheckOption` |
+| `boundChecks: off` | reached | raised | raised | `feCheckOption` |
+| `objChecks: off` | reached | unknown (`ekZ3Error`) | raised | `feCheckOption` |
+| `checks: off` | reached | raised / walker fault | raised | both kinds |
+| `floatChecks: on` | FloatOverflowDefect | sat | sat | `feCheckOption` |
+| float, default | reached | sat | sat | sat |
+| callee under push | reached | unknown (walker fault) | raised | `feCheckOption` |
+| generic defined under push | reached | raised | raised | `feOverflowCheckOption` |
+| `push` in a body | reached | walker fault | `feUnsupportedStmtKind` | same |
+
+Under `--fieldChecks:off`, `--overflowChecks:off`, `--checks:off`, `-d:danger`
+and `--floatChecks:on` the same probe gives main and the channel their default
+verdicts (a false raise or a false `sat` on each row the flag concerns), and this
+slice declines every such row; `--overflowChecks:off` with `acOverflow` out still
+decides. Main's walker fault on the checked row is a separate variant-write fault
+already fixed on the channel.
+
+*Known limits (in `docs/migration/0.9.0.md`).* Not seen by any mechanism here: a
+check pragma a macro builds from strings or `parseStmt`, or emits at the top level;
+a pushing template or macro from another module; an `import` under a push in a
+module nothing the walk reads. A user importer the walk reads leaks to every other
+non-system module and a leaked module's inner `push on` is not credited (an
+over-decline); a stdlib importer's push reaches only the module it names, so a
+chain through one is not followed. `nelli` imported under a user push reads its
+base as that push.
+
+*Different mechanisms, reported and not fixed here.*
+- **RFC-0016: model unchecked semantics exactly** (a wrong-branch field write, a
+  wrapped conversion, an unchecked index or downcast), and decline per construct
+  rather than per routine.
+- **PRECISION: `acRange` out is not credited** for a routine under `rangeChecks:
+  off`; the conversion's wrapped value is not modelled.
+- **ABORT: `s.sort()` on a `seq[int]` aborts the compile** on the channel and here
+  (`dsl_typebridge.nim(1261,20) Error: node has no type`).
+- **HANG: `cmpIgnoreStyle`** ran past 200 s on the channel; `parseutils.parseInt`
+  past 25 s here (the channel not measured).
+- **UNVERIFIED: a nil dereference** under `nilChecks` either way is SIGSEGV
+  natively (rc 139); the walker's `NilAccessDefect` against that was not
+  compared.
+- **SOUNDNESS (C): an inline `(v + 1) < 0` at `high(int)` under overflow off** is
+  signed-overflow UB that gcc folds to false at `-O0`; S8w's wrap presumes C
+  wraps. The suites bind the sum with `let` first.
+- **USER-ASSERTED: `arithChecks` without `acOverflow`** on checked code is the
+  caller's claim and stays unchecked against the build.
+- **`compileOption("assertions")` in `dsl_parser`** reads nelli's option, not the
+  routine's.
+- **Not probed:** a global's initialiser under a push.

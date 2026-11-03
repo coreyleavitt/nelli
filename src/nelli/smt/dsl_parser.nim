@@ -45,6 +45,7 @@ import ./stdlib_models
 import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
 import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
 import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejected `re"..."` is a raise site
+import ./check_options   ## RFC-0005 S8cu: a routine compiled with other checks
 
 template typeKind(n: NimNode): NimTypeKind = viewTypeKind(n)
   ## RFC-0005 S8bl: every type query of the parser reads a borrowed
@@ -1422,6 +1423,28 @@ proc declineCallee(ctx: ParseCtx; kind: SymexErrorKind; msg,
   ctx.parseErrors.add SymexErrorInfo(kind: kind, severity: sevError, msg: msg,
                                      scope: calleeKeyed(k))
   k
+
+proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
+                       body: IRStmt): IRStmt =
+  ## RFC-0005 S8cu. `body` behind the markers for what `c` says of the routine
+  ## (`routineChecks`, read before its body is parsed). Overflow has a marker of
+  ## its own: the walker passes it where the settings model the wrap.
+  if c.checks == {}: return body
+  let where = routinePlace(impl)
+  var decl: seq[IRStmt]
+  let others = c.checks - {coOverflow}
+  if c.why.len > 0:
+    decl.add ctx.declineMarker(feCheckOption, where &
+      ": its check options cannot be read (" & c.why & ") -- path degraded to sxUnknown")
+  elif others != {}:
+    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " & $others &
+      " other than the walker models -- path degraded to sxUnknown")
+  if coOverflow in c.checks and c.why.len == 0:
+    decl.add ctx.declineMarker(feOverflowCheckOption, where &
+      " is compiled with overflowChecks off, and the settings model them on " &
+      "(`acOverflow` in `arithChecks`) -- path degraded to sxUnknown")
+  if body != nil: decl.add body
+  mkBlock(decl)
 
 proc annotationViolation(ctx: ParseCtx; n: NimNode;
                          kind: AnnotationViolationKind; callee, msg: string) =
@@ -2967,6 +2990,7 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
   # before reading any. A no-op for a lambda its enclosing routine already
   # claimed; for an expression-position `nnkProcDef` it is the claim.
   claimRoutine(n)
+  let checkOpts = routineChecks(n)   ## RFC-0005 S8cu
   let formal = n[3]
   formal.expectKind nnkFormalParams
   var params: seq[IRParam]
@@ -2996,7 +3020,7 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
     collectBoundLocals(bodyNode, bound)
     var seen: HashSet[string]
     collectFreeVarRefs(bodyNode, bound, captures, seen, mutCaptures)
-  let bodyIR = parseStmt(bodyNode, ctx)
+  let bodyIR = withCheckDeclines(ctx, n, checkOpts, parseStmt(bodyNode, ctx))
   # RFC-0005 S8bh: with the summary a call through it needs to apply its
   # `var`/`addr` effects (`lambdaEffects`).
   lambdaEffects(n, ctx,
@@ -17341,6 +17365,13 @@ proc parseStmtInner(n: NimNode,
       except CatchableError: discard
       if impl != nil and impl.kind == nnkIteratorDef:
         let implBody = body(impl)
+        # RFC-0005 S8cu: an inline iterator takes the checks of the routine it
+        # lands in; a closure iterator is compiled at its definition's.
+        if impl[4].kind == nnkPragma and impl[4].findChild(
+             it.kind in {nnkIdent, nnkSym} and it.strVal == "closure") != nil:
+          let c = routineChecks(impl)
+          if c.checks != {}:
+            return withCheckDeclines(ctx, impl, c, nil)
         # ---- Step 0: soundness pre-scans — ALL must pass; any failure → degrade
         # (a) Require ≥1 surface yield (catches post-transf state-machine lowering)
         if not hasYieldShallow(implBody):
@@ -19090,6 +19121,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ## sole caller (`ensureProcRegistered`, via `resolveRoutineImpl`) — a
   ## membership-only assertion, so it routes onto `walkableRoutineKinds`.
   impl.expectKind walkableRoutineKinds
+  let checkOpts = routineChecks(impl)   ## RFC-0005 S8cu: at the definition
   var monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
   # RFC-0005 S8bd: a generic callee is specialised to its by-reference
@@ -19246,7 +19278,8 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
     else:
       parseStmt(bodyNode, ctx)
   let nameStr = monoImpl.name.strVal
-  ProcSig(name: nameStr, params: params, body: body,
+  ProcSig(name: nameStr, params: params,
+          body: withCheckDeclines(ctx, impl, checkOpts, body),
           retTy: retTy, isVoid: isVoid,
           conceptConstraints: conceptConstraints)   ## Phase 15 G6
 
@@ -19587,6 +19620,10 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   let formalParams = procDef[3]
   formalParams.expectKind nnkFormalParams
   let ctx = newParseCtx(maxInstantiationsPerProc)
+  # RFC-0005 S8cu: before the body is parsed, so its callees see this module's
+  # importers.
+  beginCheckOptionRun()
+  let checkOpts = routineChecks(procDef)
   # RFC-0005 S8e: claim every declaration's IR name by SYMBOL before any
   # pre-pass or IR build reads a name (`scoped_names`): a shadowing local
   # gets its own env slot. Params claim first, so the witness keeps them.
@@ -19648,8 +19685,9 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # bodies (e.g. one outer `if`) dispatch straight to `walk(isIf)`
   # and bypass the prune entirely.
   let parsed = parseStmt(procDef[6], ctx)
-  let bodyIR = if parsed != nil and parsed.kind == isBlock: parsed
-               else: mkBlock(@[parsed])
+  let bodyIR = withCheckDeclines(ctx, procDef, checkOpts,
+    if parsed != nil and parsed.kind == isBlock: parsed
+    else: mkBlock(@[parsed]))
   # RFC-0005 S8p: the SUT's return type, so a read of `result` before the
   # body writes it takes that type's zero value, as in a callee (S8n).
   # Classified as `parseCalleeImpl` classifies a callee's.

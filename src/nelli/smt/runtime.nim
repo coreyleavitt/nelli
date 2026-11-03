@@ -22696,6 +22696,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # constraints); an undecided query keeps the path, tainted as before.
     # RFC-0005 S8bn's late-address and proc-field declines rely on this:
     # they sit under forks the walk makes without a feasibility check.
+    # RFC-0005 S8cu: a routine without overflow checks, where the settings model
+    # that (the wrap, S8w; the trap, S8aa).
+    if stmt.unKind == feOverflowCheckOption and
+       acOverflow notin w.settings.arithChecks:
+      return paths
     var live: seq[Path]
     for p in paths:
       if not pathInfeasible(w.z3, p, w.settings): live.add p

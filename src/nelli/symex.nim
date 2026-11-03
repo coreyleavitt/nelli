@@ -2538,9 +2538,31 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
           acc.markOpen("`" & n.strVal & "`, of a type whose module declares a hook")
     of nskMethod:
       acc.markOpen("a method: any override may run")
+    of nskType:
+      # RFC-0005 batch 11. A value no variable holds still has its hooks run: a
+      # constructor's or a conversion's temporary, passed on to a callee that
+      # consumes it, is destroyed at a call the compiler inserts.
+      if user:
+        var seen: seq[string]
+        if typeMayHaveHook(n, seen):
+          acc.markOpen("`" & n.strVal & "`, a type whose module declares a hook")
     else:
       if symKind(n) in userRoutineSymKinds: acc.callees.add n
   of nnkCall, nnkCommand:
+    if user and n.len > 0 and n[0].kind == nnkSym and
+       symKind(n[0]) in userRoutineSymKinds:
+      # RFC-0005 batch 11. A call's result is a value no variable need hold.
+      # The callee's own type, the instance's for a generic: a node of the
+      # body need not carry one.
+      let pt = n[0].getTypeImpl
+      let t =
+        if pt.kind == nnkProcTy and pt.len > 0 and pt[0].kind == nnkFormalParams:
+          pt[0][0]
+        else: newEmptyNode()
+      var seen: seq[string]
+      if t.kind != nnkEmpty and typeMayHaveHook(t, seen):
+        acc.markOpen("a call in `" & owner & "` whose result is of a type " &
+                     "whose module declares a hook")
     if n.len > 0:
       # A proc value: code this scan does not see. The stdlib's generic bodies
       # spell an instantiation as a call head, and it calls a proc parameter
@@ -2597,6 +2619,17 @@ proc routineFootprint(r: NimNode): RoutineFootprint =
     if user: result.markOpen("`" & r.strVal & "`, a foreign routine")
   else:
     scanFootprint(impl[6], user, r.strVal, result)
+    # RFC-0005 batch 11. A parameter the body never names, or a result it never
+    # spells, is still destroyed at the routine's end.
+    if user and impl[3].kind == nnkFormalParams and not result.open:
+      var seen: seq[string]
+      for i in 0 ..< impl[3].len:
+        let d = impl[3][i]
+        let t = if i == 0: d elif d.len >= 2: d[^2] else: newEmptyNode()
+        if t.kind != nnkEmpty and typeMayHaveHook(t, seen):
+          result.markOpen("`" & r.strVal & "`, whose signature holds a type " &
+                          "whose module declares a hook")
+          break
   routineFootprints[key] = result
 
 proc replayFootprint(fn: NimNode): ReplayFootprint =
@@ -2872,6 +2905,9 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
             `putGlobals`
           except WireError as e:
             refused = e.msg
+          # RFC-0005 batch 11: what the host installed at run time, which the
+          # child would start without (`hostRuntimeHook`).
+          if refused.len == 0: refused = hostRuntimeHook()
           if refused.len > 0: refusedNotMarshallable(refused)
           else: runReplayReexec(`site`, `wr`.data, `timeoutMs`)
   else:

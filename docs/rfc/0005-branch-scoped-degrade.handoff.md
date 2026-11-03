@@ -269,9 +269,10 @@ onward is in the RFC's "As landed" notes and the merge commits, not here.
 - **Final walker version: 264** (`canonicalize.nim`; CR2's `==` pin 264).
 - **Release gate:** pending; see the coordinator. A whole-suite gate was
   running against `8177eb27` when this entry was written.
-- **Fence.** Every `[[slice]]` row is `done` except **S8cp**, left `pending`
-  on purpose: only item 2 landed here, item 3 landed in S8ct, item 1 was
-  superseded by S8ct, and items 4–8 are RFC-0016's slice `S8cp-r`.
+- **Fence.** Every `[[slice]]` row is `done`. S8cp is `done` for its narrowed
+  RFC-0005 scope (the slice lifecycle has no narrowing state): item 2 landed,
+  item 1 was superseded by S8ct's child replay, item 3 moved to S8ct, and
+  items 4–8 are RFC-0016's slice `S8cp-r`.
 - **Forks.** i1, i2 and i3 are resolved. i2 was resolved at the release:
   `blocked_by = ["0001"]` dropped, RFC-0001 kept as a builds-on reference
   (RFC §13.2).

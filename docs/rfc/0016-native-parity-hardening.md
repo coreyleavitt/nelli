@@ -568,18 +568,18 @@ PND-07, PND-08, UPS-01) and are not repeated.
 | AUD-01 | `isLoose` leaves an `isIntOffset` parameter unstamped. By design (ADR-0001: `isLoose` is opt-in unsound and carries its banner on `main`); needs a "stays by design" record, not a slice | S8w | soundness, opt-in and documented; not worse than `main` | |
 | AUD-02 | `acDivByZero` off with `acOverflow` on leaves the continuation unconstrained at a zero divisor. A nelli setting with no Nim counterpart (Nim's zero check rides on `overflowChecks`); a witness relying on it would trap on replay, which S8ct's child contains | S8aa | unclear (policy); not worse than `main` | |
 | AUD-03 | No clean no-zero type remains for the free-`retSym` guard pins; they are now `sxUnknown` on a `HashSet[string]` arm field, so the guard's coverage is weaker. No verdict defect | S8z | test-harness | |
-| AUD-04 | Macro-VM closure capture: a nested proc capturing a loop `var` kept one closure environment across iterations (seen as a duplicate case label, fixed in S8z by making `tagOrdOf` top level). The VM-alias guard (S8x, S8ab, S8af, S8ah) audits `let` and parameter aliasing only; nothing audits closure capture, and a silent instance cannot be ruled out | S8z | unclear (latent front-end hazard); worse than `main`: unknown | |
+| AUD-04 | Macro-VM closure capture: a nested proc capturing a loop `var` kept one closure environment across iterations (seen as a duplicate case label). **Probed, no instance** at `main` 6cbfe8f and the channel at 67f0b622; the one known instance was fixed in S8z (`tagOrdOf` top-level). No other RFC-0016 item audits this class (AUD-06 and AUD-07 are the `let`/parameter alias guard's coverage) | S8z; coordinator probe, 2026-11-03 | unclear at audit; probed, no instance | closed |
 | AUD-05 | Step 1c's equality classes are syntactic over the roots: an equality the query implies without stating it is not seen. Shown, not closed (`tsymex_rfc0005_s8aq_remainder` (4)); the uncapped steps still decide these queries | S8ai; S8aq item 4 | precision | |
 | AUD-06 | The build-time VM-alias gate runs on one suite per CI leg, not the whole corpus (deliberate: about 15–18 s per compile). Carried unchanged through S8ak and S8al | S8ah, S8ak, S8al | test-harness | |
 | AUD-07 | A generic never instantiated in the scope's compilation unit gives the VM-alias guard an un-instantiated `getImpl()` tree | S8al | test-harness | |
 | AUD-08 | Non-integer `HashSet` elements (`HashSet[string]`, float, tuple) decline as a parameter or local; PRC-12 covers only a `HashSet[string]` behind a pointer or in a heap field | S8am | precision | with PRC-12 |
 | AUD-09 | A `var` global initialised by a literal is not read at its initialiser: its entry value is fresh. A deliberate sound choice (S8as item 3) | S8as | precision | |
-| AUD-10 | The nil-dereference check of a lazily read operand happens where the read moved (S8ax's `orderOperands`), not where Nim checks it. S8be item 7 restored Nim's position for seq and string index checks only. Could be a false `sxRaised NilAccessDefect` or a missed one when the intervening call changes the ref | S8ax; S8be item 7 | unclear (possible soundness); worse than `main`: unknown (`main` read operands in parser order, also wrong) | |
+| AUD-10 | The nil-dereference check of a lazily read operand happened where the read moved (S8ax's `orderOperands`), not where Nim checks it. The S8ax probe turned this into two blockers, both fixed: S8cq makes argument reads follow the C backend's temporaries (`nimArgTemps`; `tests/tsymex_rfc0005_s8cq_argorder.nim`), and S8cu makes a nil dereference an uncatchable crash routed through frame exits (`tests/tsymex_rfc0005_s8cu_nil.nim`, `_nil_native`, `_nil_setjmp`) | S8ax; S8be item 7; S8cq; S8cu | soundness at audit; fixed | closed by S8cq and S8cu |
 | AUD-11 | S8aw's `L`-against-`indexof` link now covers native terms only; the walker no longer emits `seq.last_indexof` or `str.indexof` for `rfind`/`find`. A coverage note, no wrong verdict or decline described | S8au | precision | |
 
-AUD-04 and AUD-10 are the two rows whose standing against `main` the audit
-could not settle. Under §2.4 each needs a three-way row before it can be read
-as a precision item; until then they are pending in the §5.7 sense.
+AUD-04 and AUD-10 were the two rows whose standing against `main` the audit
+could not settle. Both are closed: AUD-04 by a probe at both shas that found
+no instance, AUD-10 by S8cq and S8cu.
 
 ## §6 — Slice procedure
 

@@ -549,7 +549,8 @@ state = "done"
 [[slice]]
 id = "S8cp"
 title = "S8cb's remainder: replay footprint gaps, the dropped uncheckedAssign pragma, replay reaching quit, the unexplained rc=139, n42 on cpp, stack size off Linux, declined shapes and magics"
-state = "pending"
+state = "done"
+reason = "Scope narrowed for RFC-0005: item 2 (uncheckedAssign) landed in batch 11; item 1 superseded by S8ct's child replay; item 3 moved to and landed in S8ct; items 4-8 are RFC-0016 slice S8cp-r. The slice lifecycle has no narrowing state, so done records the RFC-0005 scope"
 
 [[slice]]
 id = "S8cm"
@@ -567,9 +568,10 @@ state = "done"
 - **Status:** implemented — **released as nelli 0.9.0 (2026-11-03).**
   Batch 11 closed the RFC at `8177eb27` (walker 264); every soundness item
   worse than `main` (6cbfe8f) is fixed, and the remaining findings moved to
-  RFC-0016 (see the successor paragraph below). One fence row, S8cp, stays
-  `pending`: only its item 2 landed here, item 3 landed in S8ct, item 1 was
-  superseded by S8ct, and items 4–8 are RFC-0016's slice `S8cp-r`. Upgrade
+  RFC-0016 (see the successor paragraph below). Every fence row is `done`.
+  S8cp's RFC-0005 scope narrowed: its item 2 landed here, item 1 was
+  superseded by S8ct's child replay, item 3 moved to S8ct, and items 4–8 are
+  RFC-0016's slice `S8cp-r`. Upgrade
   notes: `docs/migration/0.9.0.md`. All three round-2 forks are resolved (§13).
   History: repurposed 2026-09-01; round 1 reviewed 2026-09-20; round 2
   reviewed 2026-09-20.
@@ -15919,6 +15921,11 @@ global on a walked or opaque path to S8cs, n42 on cpp to S8cl (landed in batch 1
 items 4, 6, 7 and 8 follow batch 10. Pins:
 `tsymex_rfc0005_s8cp_unchecked`, `tsymex_rfc0005_s8cp_unchecked_zero`,
 `tsymex_rfc0005_s8cp_unchecked_decline` (split for the Windows per-file budget), `tsymex_rfc0005_s8cp_footprint`.
+
+*Scope at the close (2026-11-03).* The fence row is `done` for RFC-0005's
+narrowed scope: item 2 landed (below), item 1 was superseded by S8ct's child
+replay, item 3 moved to S8ct and landed there, and items 4–8 are RFC-0016's
+slice `S8cp-r`.
 
 *Batch 11.* Only item 2 is merged. Item 1's code (`mayRunCode`, `foreignToken`,
 `isPureForeign`, `runtimeHooksSet`) and its pin `tsymex_rfc0005_s8cp_footprint`

@@ -1440,5 +1440,6 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cu_cl_assert",
             "tsymex_rfc0005_s8cu_hidden",
             "tsymex_rfc0005_s8cu_nil",
-            "tsymex_rfc0005_s8cu_nil_setjmp"]:
+            "tsymex_rfc0005_s8cu_nil_setjmp",
+            "tsymex_rfc0005_s8cu_nil_native"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

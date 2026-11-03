@@ -15085,6 +15085,20 @@ pre-existing incompatibility of nelli with `--exceptions:setjmp` on Windows,
 not of the nil rule, and is not fixed here. The setjmp suite's `.nims` applies
 setjmp on c off Windows only; on Windows and cpp it pins the default crash.
 
+What replaces those rows on Windows is `tsymex_rfc0005_s8cu_nil_native`
+(registered, unskipped). It builds a nelli-free probe (`s8cu_nil_probe.nim`: a
+nil read under `except NilAccessDefect` and a `finally`) with the host's `nim`
+in each mode, runs it under a 20 s limit, prints a `NATIVE` line per mode, and
+fails if any mode without setjmp catches the read or runs the `finally`. Linux:
+
+| mode | outcome |
+|---|---|
+| goto (default), no `std/segfaults` | SIGSEGV rc 139 (`tsymex_rfc0005_s8cu_nil`) |
+| goto + `std/segfaults` | rc 1, not caught, no `finally` |
+| goto + `std/segfaults`, `-d:release` | rc 137, not caught, no `finally` |
+| setjmp | SIGSEGV rc 139, not caught |
+| setjmp + `std/segfaults` | **caught**, `finally` runs, rc 0 (the walker declines under a `try`) |
+
 | form (label in the handler) | native | main | channel | S8cu |
 |---|---|---|---|---|
 | nil literal, field read | SIGSEGV | unknown (`heUnresolvedRef`) | **sat** | raised `NilAccessDefect` |

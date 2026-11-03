@@ -14,6 +14,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/replayproc
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -26,13 +27,10 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
   false
 
 template satOrDeclined(r: untyped) =
-  ## Where a replay can carry the calling thread's state, a confirmed hit;
-  ## elsewhere it does not run.
-  when replayForks:
-    check r.status == sxSat
-  else:
-    check r.status == sxUnknown
-    check r.errors.hasKind(feReplayDeclined)
+  ## A confirmed hit: a forked child copies the calling thread's state, and a
+  ## re-executed one is handed its thread variables (RFC-0005 S8ct). Where the
+  ## SUT reaches what a re-executed child cannot be handed, a decline naming it.
+  check decidedOrNotMarshallable(r, sxSat)
 
 # ---- (6) an abandoned replay's late write ------------------------------------
 #
@@ -127,7 +125,9 @@ suite "RFC-0005 S8bo (6): an abandoned replay's late write":
                       SymexSettings(replayTimeoutMs: 200))
     checkpoint "writer " & $a.status & " " & show(a.errors)
     check a.status != sxSat
-    check a.errors.hasKind(feReplayTimedOut)
+    # A re-executed child cannot be handed the channel the writer waits on.
+    check a.errors.hasKind(feReplayTimedOut) or
+          (replayReexecs and declinedNotMarshallable(a.errors))
     check s8boFlag == 0
     let b = symexFind(sutLateReader, tLabel("late"),
                       SymexSettings(replayTimeoutMs: 200))

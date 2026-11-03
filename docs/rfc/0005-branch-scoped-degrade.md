@@ -519,7 +519,7 @@ state = "done"
 [[slice]]
 id = "S8ct"
 title = "No replay can end or corrupt the host: every replay in a child (fork on POSIX, a re-execution on Windows), rows B17, B18, B19, W1, W2 and S8cp item 3, and a term walk past its depth"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -9386,6 +9386,7 @@ into `runtime.nim`** — "the runtime unit" below means all six, ~17.6k lines.
 | S8 | **Decline-scope representation**: `DeclineScope` on `SymexErrorInfo`; Class-A/Class-B unification so every site-anchored decline mints a marker; callee-key anchoring; the structural totality pin + the bucket-4 count. **Vetoes retained — no verdict change.** | `dsl_parser.nim` (39 `parseErrors.add` sites), `types.nim`, runtime unit, 1 test file | the totality pin, initially red with an enumerated bucket-4 list |
 | S9 | **Delete both blanket vetoes.** Verdict-changing; own bump; own flip audit. | runtime unit | S0's veto companion flips to `sxSat` |
 | S10 | **SAT relaxation**: replay wired into the verdict across **both** `runSymex` consumers, candidacy made unspellable-as-sat, `routeRaise`'s spurious raises replay-gated (§2.6). Windows-only verifiable. | runtime unit, `types.nim`, `symex.nim` (both entry macros + cache helpers) | DoD §6.2's trio |
+| S8ct | **No replay can end or corrupt the host.** Every replay runs in a child: `fork` on POSIX, a re-execution of the program on Windows (and on Linux under `-d:nelliReplayReexec`), handed the witness and what the SUT reaches; what cannot be handed over declines, named (`replay not marshallable: ...`). Rows B17, B18, B19, W1, W2, S8cp item 3. A term walk past `termWalkMaxDepth`, and an array access wider than it, decline instead of ending the process or the budget. **Done** (walker 261 provisional). | `replayproc.nim`, `replaywire.nim`, `symex.nim`, `runtime.nim`, `dsl_typebridge.nim`, 3 test files + `s8ct_platform.nim` | `tsymex_rfc0005_s8ct_isolation` (and its re-exec twin `_reexec`), `_deepterm` |
 | S11 | **Public surface** (§8.1): the `Soundness` object, `gaps()`, `SymexFinding` + render layer, cache value schema, docs. | `types.nim`, `symex.nim`, `engine/types.nim`, `engine/render.nim`, examples | a `forcedBy`-shape assertion through `symexFind` |
 
 **Totality of the totality claim.** The audit sweep round 1 scheduled as "S6"
@@ -14747,3 +14748,104 @@ false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
   (`heUnsafeCast`), `ensureMove` and `procCall` (sound, unmodelled), `create`,
   `new(p, finalizer)`, `GC_ref`, an object with a `when` member, a `type` section
   inside a SUT, a nested `s[gi]` of a seq of seqs.
+
+**As landed (S8ct, walker 261 provisional) — no replay can end or corrupt
+the host.** Suites `tsymex_rfc0005_s8ct_isolation`, `_reexec` (the same suite
+under `-d:nelliReplayReexec`), `_deepterm`; helper `tests/s8ct_platform.nim`.
+Batch 10 (67f0b622, walker 252) merged under it; S8cs and S8cu hold 260.
+
+*Design.* Replay ran on a thread of the host, so a SUT reaching `quit`, a raw C
+`exit`, a nil dereference or unbounded recursion ended the whole test run. Each
+replay now runs in a child process (`replayproc.nim`):
+- *POSIX: `fork`.* The child is the host at the replay, on a stack of the
+  calling thread's size, with `RLIMIT_AS` 2 GiB past the host's mappings and
+  default signal dispositions; hits stream over a pipe, so a label hit before
+  the child ends is a confirmed `sxSat`. A child that ends first is `sxUnknown`
+  with `feReplayCrashed` naming how and on what input, never a refutation.
+- *Windows: re-execution.* The same binary runs with `NELLI_REPLAY_CHILD`
+  naming a call site; a `{.global.}` initialiser at each site picks the child
+  up before any top-level code. The witness, the target and every module
+  variable, routine `{.global.}` and thread variable the SUT reaches
+  (`replayFootprint`) are marshalled (`replaywire.nim`); a Job Object bounds
+  memory and kills on timeout; a fiber gives the calling thread's stack size.
+  What cannot be handed over declines (`feReplayDeclined`), and the message
+  starts `replay not marshallable:` and says a Linux or macOS run forks and
+  replays it. Linux runs this path under `-d:nelliReplayReexec`.
+- Why not a static admission scan instead (admit only SUTs that provably cannot
+  end the process): it admitted 210 of 492 replay sites (42.7%), against 403
+  (81.9%) for re-execution and all of them for `fork`.
+
+*Measured.* Replay sites over the 19 replay-pinning suites, sem-only under
+`-d:nelliReplayReexec`: 492 sites; 89 refused at compile time (81.9%
+replayable). By reason: a proc value 33, a type the wire cannot carry 36, a
+foreign routine 7, a method 5, a routine `{.global.}` 5 (two of them the
+nested replay's own registration), a call through a proc value 3. A witness the
+wire cannot carry at run time (a live `ptr`) declines on top of that. Wall time,
+median of a replayed `symexFind` against a clean one: 29.2 ms at e497dcf
+(threaded replay), 38.1 ms forked (+8.9 ms), 38.7 ms re-executed on Linux.
+
+*Rows, verdict before and after, and native Nim.*
+| Row | Before | After, fork | After, re-exec | Native |
+|---|---|---|---|---|
+| B17 `quit` direct / via callee (`p_q5`, `p_q7`) | process ended | `sxUnknown`, `feReplayCrashed` "code 7" | `sxUnknown`, crashed or declined | exit 7, no hit |
+| B17 `quit` on one input (`p_q10`) | process ended | confirmed `sxSat` on another input, or crashed naming input 3 | same | input 3 exits 7; 4 hits |
+| B18 nil deref (`p_q8`) | process ended | `sxUnknown`, crashed by signal | crashed or declined | SIGSEGV, no hit |
+| B19 unbounded recursion, sort's 4096 frame (`p_q9`) | 7 min walk, then process ended | `sxUnknown`, decline names `termWalkMaxDepth` (23 s) | same | input 0 overflows the stack; `high(int)` raises OverflowDefect |
+| B19, small frame | process ended | `sxUnknown`/`sxRaised` OverflowDefect, crashed | same | as above |
+| W1 raw C `exit` (`p_q4`) | process ended | `sxUnknown`, crashed | declined: a foreign routine | exit 7 |
+| W2 `quit` via proc value (`p_q6`) | process ended | `sxUnknown`, crashed | declined: a proc value | exit 7 |
+| S8cp 3 `addExitProc` + `quit` | host exit procs ran in the replay | none runs, in host or child | same | the SUT's exit proc runs |
+| allocation loop / one huge allocation | host OOM | crashed in the child | same | not run (takes the machine) |
+"Crashed or declined" on re-exec: whichever applies to what the SUT reaches.
+
+*Found and fixed on the way.*
+- **A term too deep for a recursive walk ended the process** (Nim's call depth
+  limit). The walks share `termWalkMaxDepth` (256), iterative `termDepth`;
+  `holds` and `rewrite` leave deeper conjuncts alone, which keeps every model.
+- **B19's frame walked outside every budget.** A symbolic index into
+  `array[4096, int]` built a 4096-deep ite per access, re-simplified per
+  inlined call: 420 s wall, 35 s of it in solver steps. An access whose index's
+  type may name more than `termWalkMaxDepth` positions now declines
+  (`arrayAccessTooWide`: a read is a fresh value, `feUnsupportedOpHavoc`; a write
+  is dropped, `feUnsupportedStmtKind`); the count is of positions, so it is
+  deterministic. A literal index takes a fast path (`literalPosition`).
+- **An alias chain resolving back to itself looped `classifyType`** (`Lock =
+  SysLock`: Nim's typed right side of `Lock`'s impl is `Lock`). Each alias is
+  followed once per chain (`aliasTrail`); a `Lock` global builds and decides.
+- **The POSIX re-exec child had no memory limit**: `RLIMIT_AS` was an `importc`
+  var declared in a proc, emitted as an uninitialised C local shadowing the
+  constant. Moved to module scope.
+- **A type imported from C was put on the wire** field by field (`pthread_mutex_t`
+  has no `abi` member): an `importc` type, or an alias to one, is not wireable.
+- **Windows-only, from CI:** the child's environment block ended early; a child
+  proc captured the host's genSym'd target; a routine `{.global.}` was linked
+  before its definition; every non-hit replay ended 0xC0000005 because Nim's
+  frame chain pointed into the freed fiber stack (`fiberMain` has no stack
+  trace); `typeMayHaveHook` read the entry macro's own file for every type.
+
+*What still declines replay.* On Windows, the table in
+`docs/migration/0.9.0.md` §5a: a proc value or a call through one, a method, a
+routine `{.global.}`, a foreign routine, `emit`, `asm`, a C variable, a type
+whose module declares a hook, a module variable of a type the wire cannot carry
+(case object, `importc` type, inheritable object), a direct `replayWitness` of a
+case-object, `ptr`, `ref` or proc witness. On any platform, a replay inside a
+replay's child. Pins that a fork decides accept that named decline under
+re-execution (`replayedOrNotMarshallable`, `decidedOrNotMarshallable`).
+
+*For RFC-0016, in this order.*
+1. **PRECISION (first): marshal case-object and `ptr`/`ref` witnesses** for a
+   direct `replayWitness` and as globals. Windows is a consumer's main platform,
+   and these are the bulk of its declines.
+2. **An out-of-memory kill in the ref-merge walk** (`iteDeep`'s exact SUT):
+   8.36 GB peak under an 8 GB limit, killed at 124-135 s, the same at 6cbfe8f
+   and on this branch, with and without tracing.
+3. A regex literal of about 2600 groups.
+4. `tsymex_rfc0005_s8by`'s units check is not deterministic under concurrent
+   load (18.2M and 18.3M units against 5.85M alone; green three times alone at
+   e497dcf and on this branch). The test is unchanged.
+5. An object field of a two-alias type stops the compile (`expected 'O =
+   Alias'`), at main and on this branch.
+6. PRECISION: the array-width decline, for an `int` index the path confines
+   (`a[n and 7]`): the count reads the index's type, not the path.
+7. A `for` over `readFile(...).splitLines` in a SUT stops the compile ("node has
+   no type", `classifyType` from `parseStmtInner`); not checked at main.

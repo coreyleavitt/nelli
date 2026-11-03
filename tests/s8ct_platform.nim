@@ -28,7 +28,7 @@ proc declinedNotMarshallable*(errs: seq[SymexErrorInfo]): bool =
     if e.kind == feReplayDeclined and notMarshallable in e.msg: return true
   false
 
-template decidedOrNotMarshallable*(r: untyped; want: SymexFindingStatus): bool =
+template decidedOrNotMarshallable*(r, want: untyped): bool =
   ## `r.status` is `want`, or (re-exec only) `sxUnknown` with a decline naming
   ## why the replay that would have decided it did not run.
   when replayReexecs:

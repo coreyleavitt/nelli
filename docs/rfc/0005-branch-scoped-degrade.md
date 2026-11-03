@@ -527,6 +527,11 @@ title = "No replay can end or corrupt the host: every replay in a child (fork on
 state = "done"
 
 [[slice]]
+id = "S8bv"
+title = "S8bq's remainder: iterating a builtin set, set conversion across domains, pigeonhole-hard card queries, newSeqUninit taint precision (inline map/filter/fold, composite results, slices/heap cells/mapped arrays)"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -15352,3 +15357,214 @@ fails if any mode without setjmp catches the read or runs the `finally`. Linux:
 matched (literal and captured: main unknown), this slice `sxRaised` on each, and
 unknown on the global. The `finally` row's `tNilAccess` was already `sxRaised` on
 every tree.
+
+**As landed (S8bv, walker 253 provisional) — S8bq's remainder.** The
+branch is `rfc-0005-s8bv`, cut from S8bq's `d8c3b6d` with batch 9
+(`e497dcf`) and batch 10 (`67f0b622`) merged in. All four items are done, and nothing is deferred. Item 2's premise was wrong (no set conversion
+between two domains exists in Nim). The coordinator approved replacing it
+with the precision gap the probes found: enum subranges.
+
+*Wrong or degraded verdicts at d8c3b6d, each pinned RED first*
+(`tests/tsymex_rfc0005_s8bv_iter_{order,char,int8,forms}.nim` for item 1,
+`tests/tsymex_rfc0005_s8bv_subrange{,_sets}.nim` for item 2,
+`tests/tsymex_rfc0005_s8bv_card_uninit.nim` for items 3 and 4; each
+fixture is also run natively under `symexCaptureBegin`, and the verdicts
+agree with the targets a real run hits).
+- **`for x in s` over a builtin set** (item 1) declined ("unsupported
+  for-loop container kind: itBitSet") on all 21 targets.
+- **A `set[range[lo..hi]]` parameter did not compile its witness**
+  (found by item 1): it rendered as `set[int]` ("set is too large").
+- **Enum subranges** (item 2's replacement, `SE = range[a1..a2]`):
+  - a `SE` parameter and a `set[SE]` parameter were `feUnsupportedParamType`;
+  - an object with an `SE` field did not compile its witness;
+  - a `set[SE]` literal was `feUnsupportedExprKind` (`nnkCurly`);
+  - **SOUNDNESS:** an assignment, a conversion or an argument from the
+    enum into `SE` was not range-checked. `var x: SE = e1; x = e` reached
+    `ord(x) == 0` as a clean `sxSat` (witness `e0`), and the three
+    `RangeDefect` targets were false `sxUnsat`s.
+- **Pigeonhole-hard `card` queries** (item 3) ran out of `seqQueryRLimit`
+  (four `sxUnknown` pins).
+- **`newSeqUninit`** (item 4): seven pins, each tainted or declined where
+  the element read was written.
+
+*1. `for x in s` over a builtin set (`dsl_parser`, the `for` arm).*
+`system.items(set[T])` is `var i = low(T); while i <= high(T): (if T(i) in
+a: yield T(i)); inc i`. The loop is unrolled over `T`'s domain in
+ascending order: step `i` is `if lo + i in a: (let x = lo + i; body)`.
+- Each step's guard is a join (`ifJoin`). The body's survivors and the
+  skip path merge back into one path where that is exact
+  (`mergeJoinPaths`), so a 256-value domain walks 256 steps, not 2^256
+  paths. `break` leaves a block around the whole unroll; `continue`
+  leaves the body's block.
+- The argument is re-read at every step when Nim maps it directly
+  (`itemsArgDirect`, after `transf.putArgInto`: a symbol, a field or
+  deref of one, or a literal of such). So a member the body adds ahead is
+  visited, and one it removes ahead is not. Any other argument is
+  evaluated once into a temporary, before the loop. Both are pinned
+  natively.
+- A bool set binds `false` then `true`; a signed set starts at its low
+  bound.
+- **The cap.** The unroll covers a domain of at most `maxBitSetIterDomain
+  = 256` values (`char`, `int8`, `uint8`, `bool`, and any enum or range of
+  at most 256 values). A larger one (`set[int16]`) declines, scoped to
+  its path (`feUnsupportedStmtKind`, naming the cap).
+- **The witness.** A `set[range[lo..hi]]` names its range:
+  `set[range[T(lo)..T(hi)]]`.
+- **Overflow obligations (`bvOverflowDischarged`).** A counter the body
+  increments (`inc k`) is `ite(g, k + 1, k)` after each joined step. Its
+  `OverflowDefect` forks were all infeasible, but each one's boundary query
+  re-solved the whole chain, so a `set[char]` loop ran for minutes. A
+  signed bit-vector add, sub or mul now forks no obligation when its
+  operands' structural intervals (`bvSignedInterval`: numerals, `bvadd` /
+  `bvsub` that cannot wrap, the hull of an `ite`, sign and zero extension;
+  memoised per call; 4096 subterms at most) fit the width. This is the
+  bit-vector sibling of `tryDischargeOverflowInt`. Measured on Z3 5.1
+  (2026-10-03, 8-core shared host; not re-measured since):
+  - `inc k` over `set[range[0..127]]`: 30.3 s before (2.0 s with
+    arithmetic checks off, so the forks were the cost);
+  - the first-member loop over `set[char]`: killed at 600 s before, 1.2 s
+    after;
+  - a count over `set[char]` (`k == 2`): 17 s after, most of it the final
+    count query.
+
+*2. No set conversion between two domains; enum subranges.*
+- **Spec-assumption finding.** S8bq's remainder listed "a set conversion
+  between two different domains (a hidden conversion such as
+  `set[range[0..3]]` to `set[int8]`)". Nim has none. On the pinned
+  toolchain (Nim 2.2.10), every explicit or implicit conversion between
+  two set domains is a type mismatch: `set[int8](r)`, `set[char](rc)`,
+  `set[uint8](cs)`, `set[E](es)`, `set[SE](ef)`, `set[RJ](ri)`, the
+  arguments, assignments and operators across them. A set literal,
+  constant or constructor with differently typed elements is typed as its
+  target (`getTypeInst` of the `nnkCurly` is the target), and Nim converts
+  and range-checks each ELEMENT (S8bq item 5 models that). A typed-AST
+  walk found no set-typed `nnkHiddenStdConv`, `nnkHiddenSubConv` or
+  `nnkConv` in any shape. The only cross-domain set node is `cast`, which
+  declines as an unsafe cast. All of this is pinned natively (`compiles`,
+  a conversion-node counter, the literal's type), so a toolchain that adds
+  such a conversion trips the pins. **S8bq's decline arm for it** (the
+  hidden-conversion arm's `itBitSet` / `itBitSet` branch) was unreachable,
+  so it is removed.
+- **Enum subranges (`IRType.enumRange`, `classifyEnumSubrange`).** A
+  `range[a1..a2]` over an enum is the enum's `itInt` narrowed to the
+  subrange's ordinals and marked `enumRange`. That holds for the inline
+  spelling (whose bounds are ordinal literals typed with the enum; it
+  classified as an `int` range before) and for an alias (read off its
+  typed `getTypeImpl`; it was unsupported). With the range on the type,
+  the existing range machinery checks an assignment, a conversion and an
+  argument into it (`RangeDefect`). A member typed as the subrange
+  resolves to the enum's member (`subrangeMemberEnum`). The witness is
+  `range[E(lo)..E(hi)]`, filled through `witnessIntAs`. `enumRange` is
+  provenance only, as `isChar` is: not part of `IRType.==`, rendered by
+  `canonicalize` (`:er`), and round-tripped by `emitIRType`. Set
+  operators, `card`, membership and iteration over `set[SE]` are pinned.
+
+*3. Pigeonhole-hard `card` queries (`bitSetCardFacts`).* A query that
+relates two `card` terms of one width, `card(a)` and `card(b)`, carries
+their part identities:
+
+    card(a) == card(a and b) + card(a and not b)
+    card(b) == card(a and b) + card(b and not a)
+
+They are valid for every `a` and `b`, so the models are the query's own,
+as `divRangeFacts`' are. Bit-blasted, `card(s + {c}) > card(s) + 1`
+compares two adder trees over 256 related bits, a pigeonhole the SAT
+search does not finish. With the parts named, the difference is a count of
+`{c} - s`, which is bit-local, and Z3 refutes it at once. At most 12 terms
+of a query are related pairwise. `card` itself is unchanged
+(`bsPopcount`, the balanced adder tree). A pure-LIA count and Z3
+pseudo-boolean constraints were measured too: both left all six
+pigeonhole queries undecided on both versions (`unknown` at `rlimit` 20M,
+except that p4 did not finish in 60 s: pseudo-boolean on both versions,
+pure-LIA on 5.1).
+
+Measured 2026-11-02 (12-core host, the pause flag absent, this job at 2
+runs, other agents' runs alongside). Walker, default `seqQueryRLimit` = 20M,
+`set[char]` operands; "before" is d8c3b6d:
+
+| Query | 5.1 before | 5.1 after | 4.13.4 before | 4.13.4 after |
+|---|---|---|---|---|
+| `card(s + {c}) > card(s) + 1` | sxUnknown, 10.8 s | sxUnsat, 0.3 s | sxUnknown, 11.4 s | sxUnsat, 0.3 s |
+| `card(s) + card(t) < card(s + t)` | sxUnknown, 12.7 s | sxUnsat, 0.4 s | sxUnknown, 11.5 s | sxUnsat, 0.3 s |
+| `card(s * t) > card(s)` | sxUnknown, 10.5 s | sxUnsat, 0.1 s | sxUnsat, 11.3 s | sxUnsat, 0.1 s |
+| `card(s - t) + card(s * t) != card(s)` | sxUnknown, 9.8 s | sxUnsat, 0.2 s | sxUnknown, 10.9 s | sxUnsat, 0.2 s |
+| `s <= t and card(s) > card(t)` | sxUnsat, 7.3 s | sxUnsat, 0.2 s | sxUnknown, 9.5 s | sxUnsat, 0.3 s |
+| `c in s and card(s - {c}) != card(s) - 1` | sxUnknown, 9.1 s | sxUnsat, 0.2 s | sxUnknown, 8.6 s | sxUnsat, 0.2 s |
+| sat control: cards 100, 100, intersection 50 | sxSat, 0.16 s | sxSat, 0.75 s | sxSat, 0.15 s | sxSat, 0.60 s |
+| sat control: `card(s) == 3` | sxSat, 0.05 s | sxSat, 0.09 s | sxSat, 0.04 s | sxSat, 0.08 s |
+
+In Z3 units (the same six queries as SMT-LIB, a fresh context each,
+`rlimit` 20M, `random_seed` 0), before and after:
+
+| Query | 5.1 before | 5.1 after | 4.13.4 before | 4.13.4 after |
+|---|---|---|---|---|
+| p1 `card(s + {c})` | unknown, 20,007,174 | 1,232,887 | unknown, 20,007,174 | 405,128 |
+| p2 union | unknown, 20,009,722 | 673,324 | unknown, 20,009,722 | 482,239 |
+| p3 intersection | unknown, 20,010,246 | 173,715 | unsat, 19,885,311 | 171,280 |
+| p4 split | unknown, 20,015,884 | 296,841 | unknown, 20,015,884 | 299,912 |
+| p5 subset | unsat, 16,569,213 | 933,043 | unknown, 20,006,158 | 568,097 |
+| p6 `excl` | unknown, 20,009,254 | 693,610 | unknown, 20,009,254 | 502,947 |
+| q1 (sat) | sat, 1,320,449 | 9,390,340 | sat, 1,370,499 | 2,905,611 |
+
+The satisfiable three-count control pays for its three pairs of
+identities: in units, 7x on 5.1 and 2x on 4.13.4. It is still decided.
+
+*4. `newSeqUninit`'s written-ness, per element (`runtime.nim`).*
+- **Inline `map` / `filter`.** A read of a possibly-unwritten element
+  deposits its condition (`uninitReadConds`). A new stage of
+  `drainScalarRaiseForks` (`drainUninitReads`, `rskUninitRead`, in
+  evaluation order) forks the continuation:
+  - clean where no read was unwritten;
+  - tainted `uninitReadKind` where one was.
+  S8bq tainted the whole path in-band (`lowerDegrade`). Only `map` and
+  `filter` reach the HOF path from Nim: `std/sequtils` has no `fold` proc,
+  and `foldl` / `foldr` are templates that expand to a loop, whose reads
+  are already per element.
+- **Composite call results.** `noteUninitReturn` pairs the result's seqs
+  with the returned value's through tuples, objects, arrays, variants and
+  distinct types, and aliases each one. S8bq aliased a seq result only and
+  declined one nested in a composite. Only a multi-axis variant is still
+  declined.
+- **Slices, heap cells, mapped arrays.** `uninitAt` reads each of them off
+  its term:
+  - a slice (`lambda j. select(base, j + lo)`) is the body at `j = k`;
+  - an array map (the axiom-path `map`) is unwritten where an operand is;
+  - a heap cell (`select(H, r)` over a ref field's heap array) follows
+    `H`'s stores and merges to the data stored for `r`.
+  Each of them counted as unwritten everywhere before.
+
+*Test files.* The pins are split by feature into eight files so that each
+stays near the 60 s convention on Windows. Verdicts over a 256-value domain
+cost compile time: the first single file took 136.1 s on symex-mingw, and
+`iter_order` took 60.2 s until its `set[char]` pins moved out.
+
+*Verification.* On the tree with batch 10 merged (`9834c29e`), with Z3
+reading 5.1.0.0 and 4.13.4.0 through `z3FullVersion`, 238 suites ran on each
+version under the C backend. Each version passed 3039 tests with 0 failed and
+no nonzero exit. The cpp backend ran the eight S8bv files, `CR2_cachekey`,
+`s8bq_remainder` and the three `s8cl` suites on Z3 5.1: 143 tests, 0 failed.
+The card tables above predate the merges. Re-running the walker's probe on
+the batch-9 merge decided all eight queries on both versions, in under 1 s
+each. The slice report has the Windows runs and per-file times.
+
+*Re-pinned elsewhere.*
+- **`tsymex_phase15_CR2_cachekey`:** `== "253"`.
+- **`tsymex_rfc0005_s8bq_remainder`:** `bsIter` (iterating a set) is `sxSat`
+  with no errors; it was a classified decline.
+- **`tsymex_r6_n27_placeholder_read_audit`:** 115 `runtime.nim` markers, 119
+  in all. `noteUninitReturn`'s five marked lines are four.
+
+*A guard's literal (`guardLiteral`).* On the merged tree a guard over a
+set's unrolled counter hung: S8bl's `guardLiteral` printed the simplified
+guard, and printing that `ite` chain did not finish in 400 s. It reads
+`Z3_get_bool_value` instead, as does `loopArmInfeasible`.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a multi-axis variant call result holding a `newSeqUninit`
+  seq** is not paired by `noteUninitReturn`, so its binding declines.
+- **PRECISION: `for x in s` over a domain above `maxBitSetIterDomain`**
+  (`set[int16]`) declines, scoped to its path. This is the stated cap.
+- **PRECISION: `cast` between two set types** declines as an unsafe cast.
+- **PRECISION: other `$simplify(..)` literal tests in the walker** print
+  their term as `guardLiteral` did (`runtime.nim`, `runtime_heap.nim`). None
+  was seen to hang here; a term as large as an unrolled counter's would.

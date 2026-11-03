@@ -232,6 +232,15 @@ type
                                ## one structural shape to every walker arm),
                                ## IS rendered by `canonicalize` (same
                                ## "cheap, forecloses future doubt" default).
+      enumRange*: bool        ## RFC-0005 S8bv. True iff this `itInt` is an
+                               ## enum SUBRANGE (`range[a1..a2]`): the enum
+                               ## `enumName` narrowed to `[rangeLo, rangeHi]`.
+                               ## Its witness is `range[E(lo)..E(hi)]`, not
+                               ## `E` (a `set[E]` or `seq[E]` does not fit a
+                               ## `set[SE]` / `seq[SE]` slot). Same
+                               ## provenance-only contract as `isChar`: NOT
+                               ## part of `IRType.==`, IS rendered by
+                               ## `canonicalize`.
     of itBool:
       discard
     of itTuple:
@@ -4508,6 +4517,16 @@ proc withEnumName*(ty: IRType, name: string): IRType =
          hasRange: ty.hasRange, rangeLo: ty.rangeLo, rangeHi: ty.rangeHi,
          enumName: name, typeKey: ty.typeKey)
 
+proc withEnumRange*(ty: IRType, lo, hi: int64): IRType =
+  ## RFC-0005 S8bv. The enum subrange `range[lo..hi]` of the lifted enum
+  ## `ty` (`enumRange`): the enum's width, signedness, name and key, with
+  ## the subrange's bounds.
+  doAssert ty.kind == itInt and ty.enumName.len > 0,
+    "withEnumRange: not a lifted enum"
+  IRType(kind: itInt, width: ty.width, signed: ty.signed,
+         hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName,
+         enumRange: true, typeKey: ty.typeKey)
+
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              objectName: string = "", nominalId: string = "",
              isPlaceholder: bool = false, nameIsRefAlias: bool = false,
@@ -4619,6 +4638,12 @@ const maxModelledInitialSize* = 1'i64 shl 20
 const maxBitSetDomain* = 1 shl 16
   ## RFC-0005 S8bq. Nim's own limit on a set's base type: at most 2^16
   ## values.
+
+const maxBitSetIterDomain* = 256
+  ## RFC-0005 S8bv. The largest base-type domain `for x in s` over a builtin
+  ## set is unrolled over (one guarded step per value of `T`): `char`,
+  ## `int8`, `uint8`, `bool` and any enum or range of at most 256 values. A
+  ## larger domain (`set[int16]`) declines, scoped to its path.
 
 proc bitSetDomain*(elemTy: IRType): tuple[ok: bool, lo: int64, size: int] =
   ## RFC-0005 S8bq. The values of a `set[elemTy]` base type: `lo` and the

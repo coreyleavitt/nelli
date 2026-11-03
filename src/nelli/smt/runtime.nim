@@ -2024,6 +2024,17 @@ var regexRaiseMsgs* {.threadvar.}: seq[string]
   ## `WalkCtx.regexRaiseMsgs` when in a walk. Reset alongside
   ## `arithTrapConds` at every reset site.
 
+var uninitReadConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8bv (item 4). The conditions under which an inline `map` /
+  ## `filter` / `fold` read an unwritten `newSeqUninit` element (`hofElemAt`,
+  ## one per element read that may be unwritten). `lower` has no path to
+  ## fork, so they wait here; `drainUninitReads` (a stage of
+  ## `drainScalarRaiseForks`) forks the continuation: clean where no read was
+  ## unwritten, tainted `uninitReadKind` where one was. Before S8bv such a
+  ## read tainted the whole path in-band. `syncUninitReadCond` appends to
+  ## `WalkCtx.uninitReadConds` when in a walk. Reset alongside
+  ## `arithTrapConds` at every reset site.
+
 var arithTrapConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
   ## generated C rather than raising: signed `mod` of `low(T)` by `-1` at 32
@@ -2275,6 +2286,10 @@ proc syncRegexRaiseMsg*(msg: string)
   ## RFC-0005 S8ay fwd-decl. If `currentWalkCtxPtr != nil` (a walk is
   ## active), appends `msg` to `WalkCtx.regexRaiseMsgs`. No-op when no
   ## active walk. Defined after `WalkCtx`.
+
+proc syncUninitReadCond*(cond: Z3Bool)
+  ## RFC-0005 S8bv fwd-decl. Appends `cond` to `WalkCtx.uninitReadConds`
+  ## when a walk is active. Defined after `WalkCtx`.
 
 proc syncArithTrapCond*(cond: Z3Bool)
   ## RFC-0005 S8i fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -5603,6 +5618,9 @@ var bitSetCardTerms {.threadvar.}: seq[Z3BitVec[64]]
   ## s), so `checkCapped` bounds it (`queryMentionsBitSetCard`). Reset at
   ## `runSymexImpl` entry.
 var bitSetCardIds {.threadvar.}: HashSet[int]
+var bitSetCardSets {.threadvar.}: Table[int, tuple[s: Z3AnyAst, n: int]]
+  ## RFC-0005 S8bv. Each `card` term's set and width, by the term's id (the
+  ## set held, so its id stays live), for `bitSetCardFacts`.
 
 proc queryMentionsBitSetCard(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
   ## RFC-0005 S8bq. Some term of `roots` is a builtin set's `card`.
@@ -5622,7 +5640,7 @@ proc queryMentionsBitSetCard(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
       stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
   false
 
-proc bsCard(s: Z3AnyAst; n: int): Z3BitVec[64] =
+proc bsPopcount(s: Z3AnyAst; n: int): Z3BitVec[64] =
   ## The number of set bits of the `n`-bit `s`, zero-extended to 64 bits: a
   ## balanced adder tree whose width grows by one bit per level (a sum of
   ## `2^k` bits fits in `k + 1`), so a 256-bit set costs a few hundred
@@ -5647,13 +5665,63 @@ proc bsCard(s: Z3AnyAst; n: int): Z3BitVec[64] =
       i += 2
     terms = next
     inc w
-  result =
-    if terms.len == 0: mkBitVec[64](0'i64)
-    elif w >= 64: wrap[Z3BitVec[64]](c, terms[0].raw)
-    else: wrap[Z3BitVec[64]](c, c.checkErr Z3_mk_zero_ext(c.raw, cuint(64 - w),
-                                                          terms[0].raw))
+  if terms.len == 0: mkBitVec[64](0'i64)
+  elif w >= 64: wrap[Z3BitVec[64]](c, terms[0].raw)
+  else: wrap[Z3BitVec[64]](c, c.checkErr Z3_mk_zero_ext(c.raw, cuint(64 - w),
+                                                       terms[0].raw))
+
+proc bsCard(s: Z3AnyAst; n: int): Z3BitVec[64] =
+  ## `card(s)`: `bsPopcount`, registered (`bitSetCardIds`) with its set
+  ## (`bitSetCardSets`, RFC-0005 S8bv) for `checkCapped`.
+  result = bsPopcount(s, n)
+  let c = s.ctx
   bitSetCardTerms.add result
   bitSetCardIds.incl astId(c, result.raw)
+  bitSetCardSets[astId(c, result.raw)] = (s, n)
+
+const maxCardSplitTerms = 12
+  ## RFC-0005 S8bv. The most `card` terms of one query `bitSetCardFacts`
+  ## relates pairwise (66 pairs); a query with more relates its first 12.
+
+proc bitSetCardFacts(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8bv (item 3). For every two `card` terms `card(a)`,
+  ## `card(b)` of one width in `roots`, the identities
+  ##   card(a) == card(a and b) + card(a and not b)
+  ##   card(b) == card(a and b) + card(b and not a)
+  ## Valid for every `a`, `b` (each bit of `a` is in exactly one part), so
+  ## the models are the query's own, as `divRangeFacts`'. They are what a
+  ## bit-blasted comparison of two counts lacks: `card(s + {c}) > card(s) +
+  ## 1` compares two adder trees over 256 related bits, a pigeonhole the
+  ## SAT search does not finish (S8bq bounded it by `seqQueryRLimit`, so it
+  ## was `sxUnknown`); with the parts named, the difference is a count of
+  ## `{c} - s`, bit-local, and Z3 refutes it at once. Measured on Z3 5.1
+  ## and 4.13.4 (RFC "As landed (S8bv)").
+  if bitSetCardIds.len == 0: return
+  var seen: HashSet[int]
+  var stack: seq[RawZ3Ast]
+  var found: seq[tuple[k: Z3BitVec[64], s: Z3AnyAst, n: int]]
+  for r in roots: stack.add r.raw
+  while stack.len > 0 and found.len < maxCardSplitTerms:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    if id in bitSetCardIds:
+      let (sv, n) = bitSetCardSets[id]
+      found.add (wrap[Z3BitVec[64]](ctx, t), sv, n)
+      continue
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let app = Z3_to_app(ctx.raw, t)
+    for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+      stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+  for i in 0 ..< found.len:
+    for j in i + 1 ..< found.len:
+      let (ka, a, n) = found[i]
+      let (kb, b, m) = found[j]
+      if n != m: continue
+      let both = bsPopcount(bsBin(Z3_mk_bvand, a, b), n)
+      result.add ka == both + bsPopcount(bsBin(Z3_mk_bvand, a, bsNot(b)), n)
+      result.add kb == both + bsPopcount(bsBin(Z3_mk_bvand, b, bsNot(a)), n)
 
 proc bitSetSV(raw: Z3AnyAst; elemTy: IRType): SymVal =
   SymVal(kind: svBitSet, bsRaw: raw, bsElemTy: elemTy)
@@ -5788,7 +5856,7 @@ proc probeContext(): Z3Context =
   result = newContext()
   setCurrentContext(prev)
 
-var uninitArrKinds {.threadvar.}: tuple[ready: bool, store, ite, select: int]
+var uninitArrKinds {.threadvar.}: tuple[ready: bool, store, ite, select, map: int]
   ## The linked Z3's decl kinds of `store`, `ite` and `select` (probed once
   ## per thread, as `seqCapKinds` does: the wrapper's enum binds only a
   ## subset).
@@ -5799,15 +5867,15 @@ const uninitReadKind = feUnsupportedOpHavoc
   ## the allocation held; nothing is dropped (`dcFreshSymbol`).
 const uninitReadMsg = "newSeqUninit element read before it is written: " &
   "its value is unspecified — degraded to sxUnknown on that path"
-const uninitReturnMsg = "a call result holding a newSeqUninit seq inside a composite is not " &
-  "bound (its unwritten elements would read as written) — path degraded " &
-  "to sxUnknown"
+const uninitReturnMsg = "a call result holding a newSeqUninit seq in a shape the " &
+  "walker does not match (a multi-axis variant) is not bound (its " &
+  "unwritten elements would read as written) — path degraded to sxUnknown"
 
 proc noteUninitSeqBase(a: Z3AnyAst) =
   uninitSeqBases.add a
   uninitSeqBaseIds.incl astId(a.ctx, a.raw)
 
-proc uninitKinds(): tuple[store, ite, select: int] =
+proc uninitKinds(): tuple[store, ite, select, map: int] =
   if not uninitArrKinds.ready:
     let ctx = probeContext()   # RFC-0005 S8bp (batch 7)
     proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
@@ -5818,9 +5886,18 @@ proc uninitKinds(): tuple[store, ite, select: int] =
     let st = store(arr, i, i)
     let sel = select(arr, i)
     let it = ite(b, i, i)
+    # RFC-0005 S8bv: an array map (`mapArray`, the axiom-path `map`).
+    var intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+    let f = ctx.checkErr Z3_mk_func_decl(ctx.raw,
+      Z3_mk_string_symbol(ctx.raw, "__s8bv_kind_probe_f"), 1,
+      cast[ptr UncheckedArray[RawZ3Sort]](addr intSort), intSort)
+    var arrRaw = arr.raw
+    let mp = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_map(ctx.raw, f, 1,
+      cast[ptr UncheckedArray[RawZ3Ast]](addr arrRaw)))
     uninitArrKinds = (true, kindOf(ctx, st.raw), kindOf(ctx, it.raw),
-                      kindOf(ctx, sel.raw))
-  (uninitArrKinds.store, uninitArrKinds.ite, uninitArrKinds.select)
+                      kindOf(ctx, sel.raw), kindOf(ctx, mp.raw))
+  (uninitArrKinds.store, uninitArrKinds.ite, uninitArrKinds.select,
+   uninitArrKinds.map)
 
 const termWalkMaxDepth* = 256
   ## RFC-0005 S8ct. The deepest term a recursive walk of a Z3 term takes. A term
@@ -5873,6 +5950,8 @@ type UninitScan = object
   ctx: Z3Context
   mentions: Table[int, bool]
   at: Table[(int, int), Z3Bool]
+  held: seq[Z3AnyAst]   ## RFC-0005 S8bv: the terms built here, kept live
+                        ## so no memo key's id is reused within the scan
 
 proc mentionsUninitBase(sc: var UninitScan; root: RawZ3Ast): bool =
   ## Some subterm of `root` (a quantifier's body included: a slice is a
@@ -5951,6 +6030,47 @@ proc uninitAt(sc: var UninitScan; arr: RawZ3Ast; k: Z3Int): Z3Bool =
         let c = wrap[Z3Bool](ctx, Z3_get_app_arg(ctx.raw, app, 0))
         result = ite(c, sc.uninitAt(Z3_get_app_arg(ctx.raw, app, 1), k),
                      sc.uninitAt(Z3_get_app_arg(ctx.raw, app, 2), k))
+    elif kind == kinds.map:
+      # RFC-0005 S8bv: an array map (the axiom-path `map`): element `k` is
+      # `f` of element `k` of each operand, unwritten where one is.
+      var acc = mkBool(ctx, false)
+      for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+        acc = acc or sc.uninitAt(Z3_get_app_arg(ctx.raw, app, cuint(i)), k)
+      result = acc
+    elif kind == kinds.select and Z3_get_app_num_args(ctx.raw, app) == 2:
+      # RFC-0005 S8bv: a heap cell (a ref object's seq field): `select(H,
+      # r)` over the field's heap array, read through its stores and merges
+      # to the data array stored for `r`.
+      let h = Z3_get_app_arg(ctx.raw, app, 0)
+      let r = Z3_get_app_arg(ctx.raw, app, 1)
+      if Z3_get_ast_kind(ctx.raw, h) == Z3_APP_AST:
+        let happ = Z3_to_app(ctx.raw, h)
+        let hk = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, happ)))
+        template cell(hh: RawZ3Ast): RawZ3Ast =
+          let t = wrap[Z3AnyAst](ctx, checkedSelect(ctx, hh, r))
+          sc.held.add t
+          t.raw
+        if hk == kinds.store and Z3_get_app_num_args(ctx.raw, happ) == 3:
+          let r1 = Z3_get_app_arg(ctx.raw, happ, 1)
+          let same = wrap[Z3Bool](ctx, checkedEq(ctx, r, r1))
+          result = ite(same,
+                       sc.uninitAt(Z3_get_app_arg(ctx.raw, happ, 2), k),
+                       sc.uninitAt(cell(Z3_get_app_arg(ctx.raw, happ, 0)), k))
+        elif hk == kinds.ite and Z3_get_app_num_args(ctx.raw, happ) == 3:
+          let c = wrap[Z3Bool](ctx, Z3_get_app_arg(ctx.raw, happ, 0))
+          result = ite(c, sc.uninitAt(cell(Z3_get_app_arg(ctx.raw, happ, 1)), k),
+                       sc.uninitAt(cell(Z3_get_app_arg(ctx.raw, happ, 2)), k))
+  elif key[0] notin uninitSeqBaseIds and
+       Z3_get_ast_kind(ctx.raw, arr) == Z3_QUANTIFIER_AST and
+       Z3_is_lambda(ctx.raw, arr):
+    # RFC-0005 S8bv: a slice, `lambda j. select(base, j + lo)`: element `k`
+    # is the body at `j = k`, an element of the base moved verbatim.
+    var kRaw = k.raw
+    let body = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute_vars(ctx.raw,
+      Z3_get_quantifier_body(ctx.raw, arr), 1,
+      cast[ptr UncheckedArray[RawZ3Ast]](addr kRaw)))
+    sc.held.add body
+    result = sc.uninitVal(body.raw)
   sc.at[key] = result
 
 proc uninitReadCond(seqSV: SymVal; idx: Z3Int): Option[Z3Bool] =
@@ -5964,24 +6084,65 @@ proc uninitReadCond(seqSV: SymVal; idx: Z3Int): Option[Z3Bool] =
   let u = sc.uninitAt(seqSV.seqDataRaw.raw, idx) # [placeholder-audited]
   if $simplify(u) == "false": none(Z3Bool) else: some(u)
 
+proc svMentionsUninit(sv: SymVal): bool
+
 proc noteUninitReturn(retSym, retVal: SymVal; pc: seq[Z3Bool]): bool =
   ## RFC-0005 S8bq. Binding the call result `retSym` to the returned
-  ## `retVal` by equality: when `retVal` is a seq whose data mentions a
-  ## `newSeqUninit` base, record `retSym`'s data as its alias on this return
-  ## path (`uninitSeqAliases`) and return true. False (nothing recorded)
-  ## for any other value.
-  if uninitSeqBaseIds.len == 0 or retSym.kind != svSeq or
-     retVal.kind != svSeq:
-    return false
-  var sc = UninitScan(ctx: retVal.seqDataRaw.ctx) # [placeholder-audited]
-  if not sc.mentionsUninitBase(retVal.seqDataRaw.raw): return false # [placeholder-audited]
-  let ctx = sc.ctx
+  ## `retVal` by equality: for each seq in `retVal` whose data mentions a
+  ## `newSeqUninit` base, record the matching seq of `retSym` as its alias
+  ## on this return path (`uninitSeqAliases`). RFC-0005 S8bv: the seqs are
+  ## matched through tuples, objects, arrays, variants and distinct types
+  ## (S8bq matched a seq result only, and declined one nested in a
+  ## composite). True when every such seq was matched (and at least one
+  ## was); false when none mentions a base, or one has no counterpart in
+  ## `retSym` (the caller declines that binding).
+  if uninitSeqBaseIds.len == 0: return false
+  let ctx = requireCurrentContext()
+  var sc = UninitScan(ctx: ctx)
   var g = mkBool(ctx, true)
   for c in pc: g = g and c
-  let id = astId(ctx, retSym.seqDataRaw.raw) # [placeholder-audited]
-  uninitAliasHeld.add retSym.seqDataRaw # [placeholder-audited]
-  uninitSeqAliases.mgetOrPut(id, @[]).add (g, retVal.seqDataRaw) # [placeholder-audited]
-  true
+  var noted = false
+  proc pairUp(a, b: SymVal): bool =
+    ## `a` (of `retSym`) and `b` (of `retVal`): every base-mentioning seq
+    ## of `b` aliased by its counterpart in `a`.
+    case b.kind
+    of svSeq:
+      if not sc.mentionsUninitBase(b.seqDataRaw.raw): return true # [placeholder-audited]
+      if a.kind != svSeq: return false
+      let id = astId(ctx, a.seqDataRaw.raw) # [placeholder-audited]
+      uninitAliasHeld.add a.seqDataRaw # [placeholder-audited]
+      uninitSeqAliases.mgetOrPut(id, @[]).add (g, b.seqDataRaw) # [placeholder-audited]
+      noted = true
+      true
+    of svTuple:
+      if a.kind != svTuple or a.fields.len != b.fields.len: return false
+      for i in 0 ..< b.fields.len:
+        if not pairUp(a.fields[i], b.fields[i]): return false
+      true
+    of svArray:
+      if a.kind != svArray or a.arrElems.len != b.arrElems.len: return false
+      for i in 0 ..< b.arrElems.len:
+        if not pairUp(a.arrElems[i], b.arrElems[i]): return false
+      true
+    of svVariant:
+      if a.kind != svVariant or a.vPlainFields.len != b.vPlainFields.len:
+        return false
+      for i in 0 ..< b.vPlainFields.len:
+        if not pairUp(a.vPlainFields[i], b.vPlainFields[i]): return false
+      for tag, fs in b.vArmFields:
+        if not a.vArmFields.hasKey(tag) or a.vArmFields[tag].len != fs.len:
+          return false
+        for i in 0 ..< fs.len:
+          if not pairUp(a.vArmFields[tag][i], fs[i]): return false
+      true
+    of svDistinct:
+      if b.distinctBaseSym == nil: return true
+      if a.kind != svDistinct or a.distinctBaseSym == nil: return false
+      pairUp(a.distinctBaseSym[], b.distinctBaseSym[])
+    else:
+      # A multi-axis variant (or anything else) holding one: not matched.
+      not svMentionsUninit(b)
+  pairUp(retSym, retVal) and noted
 
 proc svMentionsUninit(sv: SymVal): bool =
   ## RFC-0005 S8bq. Some data array of `sv` (a seq, or one inside a
@@ -8282,6 +8443,113 @@ proc intBounds(width: int): (int64, int64) =
   else:
     raise newException(ValueError, "intBounds: unsupported width " & $width)  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always 8/16/32/64)]
 
+var bvIvlDeclKinds {.threadvar.}:
+    tuple[ready: bool, add, sub, ite, sext, zext: int]
+  ## RFC-0005 S8bv. The decl kinds `bvSignedInterval` reads, taken from the
+  ## linked Z3 (as `seqCapKinds` does): the wrapper binds only part of the
+  ## C enum.
+
+const bvIvlNodeBudget = 4096
+  ## RFC-0005 S8bv. The most distinct subterms one `bvSignedInterval` call
+  ## visits before it answers "any value of the width".
+
+proc bvSignedInterval(ctx: Z3Context; t: RawZ3Ast): Interval =
+  ## RFC-0005 S8bv. An over-approximation of the values the signed
+  ## bit-vector term `t` (at most 64 bits) can take, read off its
+  ## structure: a numeral is itself, `bvadd` / `bvsub` the interval sum /
+  ## difference when it cannot wrap, `ite` the hull of its arms, a sign
+  ## extension its operand, a zero extension its operand's unsigned range;
+  ## anything else is the whole width. Sound by construction: every rule
+  ## contains every value the term takes. Memoised per call only (an AST id
+  ## outlives no call here, so it is never reused for another term).
+  if not bvIvlDeclKinds.ready:
+    proc kindOf(a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+    let v = mkBitVecVar[8](ctx, "__s8bv_ivl_probe")
+    let c = mkBoolVar(ctx, "__s8bv_ivl_probe_c")
+    bvIvlDeclKinds = (ready: true, add: kindOf((v + v).raw),
+      sub: kindOf((v - v).raw), ite: kindOf(ite(c, v, v).raw),
+      sext: kindOf(ctx.checkErr Z3_mk_sign_ext(ctx.raw, 8, v.raw)),
+      zext: kindOf(ctx.checkErr Z3_mk_zero_ext(ctx.raw, 8, v.raw)))
+  let kinds = bvIvlDeclKinds
+  var memo: Table[int, Interval]
+  var budget = bvIvlNodeBudget
+  proc widthOf(a: RawZ3Ast): int =
+    int(Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, a)))
+  proc full(w: int): Interval =
+    if w >= 64: interval(low(int64), high(int64))
+    else: interval(-(1'i64 shl (w - 1)), (1'i64 shl (w - 1)) - 1)
+  proc fits(r: Option[Interval]; w: int): bool =
+    r.isSome and r.get.lo >= full(w).lo and r.get.hi <= full(w).hi
+  proc go(a: RawZ3Ast): Interval =
+    let w = widthOf(a)
+    if w < 1 or w > 64: return interval(low(int64), high(int64))
+    let id = astId(ctx, a)
+    if id in memo: return memo[id]
+    if budget <= 0: return full(w)
+    dec budget
+    result = full(w)
+    case Z3_get_ast_kind(ctx.raw, a)
+    of Z3_NUMERAL_AST:
+      var u: uint64
+      if Z3_get_numeral_uint64(ctx.raw, a, addr u):
+        let v = if w >= 64: cast[int64](u)
+                elif u >= (1'u64 shl (w - 1)): int64(u) - (1'i64 shl w)
+                else: int64(u)
+        result = interval(v, v)
+    of Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, a)
+      let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
+      let n = int(Z3_get_app_num_args(ctx.raw, app))
+      template arg(i: int): RawZ3Ast = Z3_get_app_arg(ctx.raw, app, cuint(i))
+      if k == kinds.ite and n == 3:
+        let x = go(arg(1))
+        let y = go(arg(2))
+        result = interval(min(x.lo, y.lo), max(x.hi, y.hi))
+      elif k == kinds.add and n >= 1:
+        var acc = some(go(arg(0)))
+        for i in 1 ..< n:
+          if acc.isNone: break
+          acc = add(acc.get, go(arg(i)))
+        if fits(acc, w): result = acc.get
+      elif k == kinds.sub and n == 2:
+        let r = sub(go(arg(0)), go(arg(1)))
+        if fits(r, w): result = r.get
+      elif k == kinds.sext and n == 1:
+        result = go(arg(0))
+      elif k == kinds.zext and n == 1:
+        let aw = widthOf(arg(0))
+        let x = go(arg(0))
+        if x.lo >= 0: result = x
+        elif aw < 63: result = interval(0, (1'i64 shl aw) - 1)
+    else: discard
+    memo[id] = result
+  go(t)
+
+proc bvOverflowDischarged(a, b: SymVal, op: IRBinop): bool =
+  ## RFC-0005 S8bv. `overflowCond(a, b, op)` is unsatisfiable on structural
+  ## grounds: the operands' `bvSignedInterval`s combine to an interval that
+  ## fits the width. `lowerArith` then pushes no `OverflowDefect` fork for
+  ## the op. A counter a joined loop step increments (`k = ite(g, k + 1,
+  ## k)`, `for x in s: inc k` over a builtin set) is bounded by its step
+  ## count, so its forks were all infeasible, and each one's boundary query
+  ## re-solved the whole chain: a `set[char]` loop ran for minutes.
+  let ctx = requireCurrentContext()
+  let w = case a.kind
+          of svBV8: 8
+          of svBV16: 16
+          of svBV32: 32
+          else: 64
+  let x = bvSignedInterval(ctx, rawAnyAstOf(a))
+  let y = bvSignedInterval(ctx, rawAnyAstOf(b))
+  let r = case op
+          of bAdd: add(x, y)
+          of bSub: sub(x, y)
+          of bMul: mul(x, y)
+          else: none(Interval)
+  let (lo, hi) = intBounds(w)
+  r.isSome and r.get.lo >= lo and r.get.hi <= hi
+
 proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
   ## R3 (S2, walker v91): the Int-sort counterpart to `overflowCond`, for a
   ## WIDTH-TYPED `svInt` operand (`a.ziWidth != 0 and a.ziSigned`). For
@@ -8483,7 +8751,8 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     else:
       divByZeroConds.add c
       syncDivByZeroCond(c)
-  if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and a.signed:
+  if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and
+     a.signed and not bvOverflowDischarged(a, b, op):   # RFC-0005 S8bv
     let oc = overflowCond(a, b, op)
     overflowConds.add oc
     syncOverflowCond(oc)
@@ -14215,8 +14484,11 @@ proc checkExact(ctx: Z3Context; query: openArray[Z3Bool];
   # negated, as one (`mergeMemberships`; the same models).
   # RFC-0005 S8bu: and with each signed Int view's inverse,
   # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
+  # RFC-0005 S8bv: and the part identities of its `card` terms
+  # (`bitSetCardFacts`), theorems too.
   var rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
-    bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query))
+    bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query) &
+    bitSetCardFacts(ctx, query))
   let qto = settings.budget.queryTimeoutMs   # RFC-0005 S8bu
   # RFC-0005 S8bq: a query that counts a builtin set's members runs under
   # `seqQueryRLimit` too, when that is the smaller bound: its bit count can
@@ -15151,9 +15423,13 @@ proc guardLiteral(cond: Z3Bool): GuardLiteral =
   ## folded guards in a loop body were 32 copies of one path per iteration.
   ## Sound: the side dropped carries a `false` conjunct, so no query on it
   ## is satisfiable.
-  let lit = $simplify(cond)
-  if lit == "true": glTrue
-  elif lit == "false": glFalse
+  ## RFC-0005 S8bv: read off the term, not its printed form: printing a guard
+  ## over a builtin set's unrolled counter (an `ite` chain sharing each step
+  ## twice) did not finish in 400 s.
+  let s = simplify(cond)
+  case Z3_get_bool_value(s.ctx.raw, s.raw)
+  of Z3_L_TRUE: glTrue
+  of Z3_L_FALSE: glFalse
   else: glOpen
 
 proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
@@ -15166,9 +15442,10 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   ## arm's every later query would carry the same UNSAT constraints, so no
   ## finding and no model is lost; what is lost are declines an infeasible
   ## arm would have recorded, which is the precision S8k is after.
-  let lit = $simplify(arm)
-  if lit == "false": return true
-  if lit == "true": return false
+  case guardLiteral(arm)   # RFC-0005 S8bv: not its printed form
+  of glFalse: return true
+  of glTrue: return false
+  of glOpen: discard
   result = checkCapped(ctx, pathRoots(path, [arm]), settings,
                        loopPruneRLimit(settings)).status == zsUnsat
   if result: logPrune(path, [arm])   # RFC-0005 S8as/S8ax
@@ -15383,6 +15660,7 @@ type
     ## `WalkCtx.raiseOrder`).
     rskClosure, rskConvBound, rskParseInt, rskDivByZero, rskOverflow,
     rskArithTrap, rskStrIndex, rskSeqOob, rskRange, rskRegex,
+    rskUninitRead,   ## RFC-0005 S8bv: not a raise, a taint fork
     rskClosureExit
       ## RFC-0005 S8bi. Not a raise: one closure exit fact
       ## (`currentClosureExitPc`, one entry per fact), logged where the call
@@ -15799,6 +16077,11 @@ type
                       ## RFC-0005 S8ay. LIVE accumulator for the `RegexError`
                       ## messages of rejected patterns (see the threadvar's
                       ## doc). Drained by `drainRegexRaises`.
+    uninitReadConds: seq[Z3Bool]
+                      ## RFC-0005 S8bv. LIVE accumulator for the conditions
+                      ## under which an inline HOF read an unwritten
+                      ## `newSeqUninit` element (see the threadvar's doc).
+                      ## Drained by `drainUninitReads`.
     arithTrapConds: seq[Z3Bool]
                       ## RFC-0005 S8i. LIVE accumulator for the survivor-only
                       ## arithmetic-trap predicates `lowerArith` deposits (see
@@ -16331,6 +16614,14 @@ proc syncRegexRaiseMsg*(msg: string) =
     wp[].regexRaiseMsgs.add msg
     wp[].raiseOrder.add rskRegex   # RFC-0005 S8bb
 
+proc syncUninitReadCond*(cond: Z3Bool) =
+  ## RFC-0005 S8bv. An inline HOF's unwritten-element read condition. See
+  ## syncParseIntRaiseCond.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].uninitReadConds.add cond
+    wp[].raiseOrder.add rskUninitRead
+
 proc syncArithTrapCond*(cond: Z3Bool) =
   ## RFC-0005 S8i. Survivor-only arithmetic-trap predicates. See
   ## syncParseIntRaiseCond.
@@ -16385,6 +16676,7 @@ type
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound, rangeDefect: seq[Z3Bool]
     arithTrap: seq[Z3Bool]                    ## RFC-0005 S8i
+    uninitRead: seq[Z3Bool]                   ## RFC-0005 S8bv
     regexRaise: seq[string]                   ## RFC-0005 S8ay
     raiseOrder: seq[RaiseSinkKind]            ## RFC-0005 S8bb
     closureRaises: seq[ClosureRaise]
@@ -16412,6 +16704,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
     rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
+    uninitRead: w.uninitReadConds,
     regexRaise: w.regexRaiseMsgs, raiseOrder: w.raiseOrder,
     closureRaises: w.closureRaises, closureVarOuts: w.closureVarOuts,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
@@ -16431,6 +16724,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
   w.rangeDefectConds = @[]; rangeDefectConds = @[]
   w.arithTrapConds = @[]; arithTrapConds = @[]
+  w.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
   w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
   w.raiseOrder = @[]
   w.closureRaises = @[]
@@ -16452,6 +16746,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.rangeDefectConds = s.rangeDefect
   rangeDefectConds = s.rangeDefect
   w.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
+  w.uninitReadConds = s.uninitRead; uninitReadConds = s.uninitRead
   w.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
   w.raiseOrder = s.raiseOrder
   w.closureRaises = s.closureRaises
@@ -18346,6 +18641,38 @@ genRaiseForkDrain(drainSeqOobRaises, seqOobConds, none(ArithCheck),
 genRaiseForkDrain(drainRangeRaises, rangeDefectConds, some(acRange),
                    "RangeDefect", "value out of range")
 
+proc drainUninitReads(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8bv (item 4). Fork the continuation of an expression whose
+  ## inline `map` / `filter` / `fold` may have read an unwritten
+  ## `newSeqUninit` element (the `uninitReadConds` sink, one condition per
+  ## such read): where none did, `p` with the negated disjunction among its
+  ## defect-survivor facts -- clean and exact; where one did, `p` with the
+  ## disjunction, tainted `uninitReadKind` (the read value is a superset of
+  ## what the allocation held). As `drainConvFloatToIntFresh`'s split, the
+  ## facts select between two models of one execution, not a program branch.
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].uninitReadConds
+      wp[].uninitReadConds = @[]
+      uninitReadConds = @[]   # keep threadvar reset in sync
+      c
+    else:
+      let c = uninitReadConds
+      uninitReadConds = @[]
+      c
+  if conds.len == 0:
+    return @[p]
+  var anyRead = conds[0]
+  for i in 1 ..< conds.len: anyRead = anyRead or conds[i]
+  let surv = forkPath(p, p.pc, p.env)
+  surv.defectSurvivorPc.add(not anyRead)
+  result = @[surv]
+  let tok = w.degrade(uninitReadKind, uninitReadMsg)
+  let alt = forkPathTainted(p, p.pc, p.env, tok)
+  alt.defectSurvivorPc.add anyRead
+  result.add alt
+
 proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8i. Drain the survivor-only arithmetic-trap sink (see the
   ## `arithTrapConds` threadvar): the continuation `p` gains each trap
@@ -18497,6 +18824,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let seqSnap = w.seqOobConds
   let rangeSnap = w.rangeDefectConds
   let trapSnap = w.arithTrapConds
+  let uninitSnap = w.uninitReadConds
   let regexSnap = w.regexRaiseMsgs
   let order = w.raiseOrder
   w.raiseOrder = @[]
@@ -18528,6 +18856,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   w.seqOobConds = @[]; seqOobConds = @[]
   w.rangeDefectConds = @[]; rangeDefectConds = @[]
   w.arithTrapConds = @[]; arithTrapConds = @[]
+  w.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
   w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
   var total: array[RaiseSinkKind, int]
   total[rskClosure] = closureSnap.len
@@ -18540,6 +18869,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   total[rskSeqOob] = seqSnap.len
   total[rskRange] = rangeSnap.len
   total[rskRegex] = regexSnap.len
+  total[rskUninitRead] = uninitSnap.len
   total[rskClosureExit] = (if exitFactsPlaced: exitSnap.len else: 0)
   var used: array[RaiseSinkKind, int]
   var runs: seq[tuple[k: RaiseSinkKind, lo, hi: int]]
@@ -18609,6 +18939,9 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
     of rskRegex:
       cur = stage(cur, regexRaiseMsgs, regexRaiseMsgs, regexSnap, lo, hi,
                   drainRegexRaises)
+    of rskUninitRead:
+      cur = stage(cur, uninitReadConds, uninitReadConds, uninitSnap, lo, hi,
+                  drainUninitReads)
   cur
 
 proc drainClosureExitHeap(p: Path): Path =
@@ -18852,7 +19185,9 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   seqOobConds = @[]
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
+  uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  w.uninitReadConds = @[]                ## RFC-0005 S8bv
   regexRaiseMsgs = @[]
   w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
@@ -18889,7 +19224,9 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   seqOobConds = @[]
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
+  uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  w.uninitReadConds = @[]                ## RFC-0005 S8bv
   regexRaiseMsgs = @[]
   w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
@@ -22010,7 +22347,9 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         seqOobConds = @[]
         w.seqOobConds = @[]
         arithTrapConds = @[]
+        uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
         w.arithTrapConds = @[]
+        w.uninitReadConds = @[]                ## RFC-0005 S8bv
         regexRaiseMsgs = @[]
         w.regexRaiseMsgs = @[]
         w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
@@ -22206,7 +22545,9 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
       w.seqOobConds = @[]                ## N14: WalkCtx field
       arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
+      uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
       w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
+      w.uninitReadConds = @[]                ## RFC-0005 S8bv
       regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
       w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
       w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
@@ -26311,13 +26652,15 @@ proc concreteSeqLen(seqSV: SymVal): Option[int] =
     none(int)
 
 proc hofElemAt(seqSV: SymVal; i: int): SymVal =
-  ## RFC-0005 S8bq. An inline higher-order call's read of element `i`: a
-  ## read that may see an unwritten `newSeqUninit` element taints the path
-  ## (in-band: `lower` has no path to fork, so the taint is not confined to
-  ## the executions that read one -- a precision loss, never a wrong
-  ## verdict).
-  if uninitReadCond(seqSV, mkInt(i)).isSome:
-    lowerDegrade(uninitReadKind, uninitReadMsg)
+  ## RFC-0005 S8bq. An inline higher-order call's read of element `i`.
+  ## RFC-0005 S8bv: a read that may see an unwritten `newSeqUninit` element
+  ## deposits its condition (`uninitReadConds`); the statement's drain forks
+  ## the continuation on it, so only the executions that read one are
+  ## tainted. S8bq tainted the whole path in-band.
+  let u = uninitReadCond(seqSV, mkInt(i))
+  if u.isSome:
+    uninitReadConds.add u.get
+    syncUninitReadCond(u.get)
   seqElemAt(seqSV, mkInt(i))
 
 proc lowerHofCall(env: Env, e: IRExpr): SymVal =
@@ -27095,6 +27438,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms
   bitSetCardIds.clear()
+  bitSetCardSets.clear()                 ## RFC-0005 S8bv
   uninitSeqBases = @[]                   ## RFC-0005 S8bq: newSeqUninit bases
   uninitSeqBaseIds.clear()
   uninitSeqAliases.clear()
@@ -27111,6 +27455,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
   seqOobConds = @[]                      ## N14: reset seq del-OOB raise-fork sink
   arithTrapConds = @[]                   ## RFC-0005 S8i: reset arithmetic-trap sink
+  uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
   regexRaiseMsgs = @[]                   ## RFC-0005 S8ay: reset RegexError sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map

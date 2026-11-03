@@ -1071,7 +1071,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## Provisional 261 (S8cs and S8cu held 260).
     ## RFC-0005 S8cu (a routine compiled with other checks declines by
     ## name). Provisional 260.
-    ## RFC-0005 batch 11: S8cs, S8ct and S8cu stacked on batch 10. 252->262.
+    ## RFC-0005 S8bv (S8bq's remainder: set iteration, enum subranges, card, newSeqUninit). Provisional 253.
+    ## RFC-0005 batch 11: S8cs, S8ct, S8cu and S8bv stacked on batch 10. 252->262.
     check symexWalkerVersion == "262"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

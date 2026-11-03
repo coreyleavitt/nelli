@@ -935,6 +935,8 @@ proc stdName(name: string): NimNode =
   of "readSeqAs": bindSym"readSeqAs"                   # RFC-0005 S8bc
   of "set": bindSym"set"                               # RFC-0005 S8bq
   of "readBitSetAs": bindSym"readBitSetAs"             # RFC-0005 S8bq
+  of "range": bindSym"range"                           # RFC-0005 S8bv
+  of "witnessIntAs": bindSym"witnessIntAs"             # RFC-0005 S8bv
   of "readSeqLen": bindSym"readSeqLen"
   of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
   of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
@@ -1207,8 +1209,20 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # ordinal-convertible value, sound regardless of signedness or a
       # negative/sparse ordinal domain (R2/R18's fixes already put the
       # correct width/signed/range on `ty` before this ever runs).
-      (userTypeName(ty, ty.enumName),
-       newCall(userTypeName(ty, ty.enumName), rawReader))
+      if ty.enumRange:
+        # RFC-0005 S8bv: an enum subrange is `range[E(lo)..E(hi)]` (a
+        # `set[E]` / `seq[E]` does not fit a `set[SE]` / `seq[SE]` slot),
+        # its value the ordinal converted to it.
+        let e = userTypeName(ty, ty.enumName)
+        let rng = newTree(nnkBracketExpr, stdName("range"),
+          infix(newCall(e, newLit(ty.rangeLo)), "..",
+                newCall(copyNimTree(e), newLit(ty.rangeHi))))
+        (rng, newCall(newTree(nnkBracketExpr, stdName("witnessIntAs"),
+                              copyNimTree(rng)),
+                      newCall(stdName("int64"), rawReader)))
+      else:
+        (userTypeName(ty, ty.enumName),
+         newCall(userTypeName(ty, ty.enumName), rawReader))
     else:
       (stdName(tyName), rawReader)
   of itTuple:
@@ -1487,7 +1501,14 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
   of itBitSet:
     # RFC-0005 S8bq: a builtin `set[T]`, from the members the runtime
     # extracted (`bitSetModelMembers`); `T`'s own reader names the type.
-    let (elemTyNode, _) = emitTyAndReader(ty.bsElemTy, path, witId)
+    var (elemTyNode, _) = emitTyAndReader(ty.bsElemTy, path, witId)
+    let et = ty.bsElemTy
+    if et.kind == itInt and et.hasRange and et.enumName.len == 0:
+      # RFC-0005 S8bv: a `set[range[lo..hi]]` names its range, not the
+      # range's base (`set[int]` does not compile: too large).
+      elemTyNode = newTree(nnkBracketExpr, stdName("range"),
+        infix(newCall(elemTyNode, newLit(et.rangeLo)), "..",
+              newCall(copyNimTree(elemTyNode), newLit(et.rangeHi))))
     let setTy = newTree(nnkBracketExpr, stdName("set"), elemTyNode)
     (setTy, newCall(newTree(nnkBracketExpr, stdName("readBitSetAs"),
                             copyNimTree(elemTyNode)),

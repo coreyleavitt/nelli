@@ -1140,6 +1140,17 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_caps_c",
             "tsymex_rfc0005_s8bt_replace_lemmas",
             "tsymex_rfc0005_s8bt_replace_facts",
+            # RFC-0005 S8bv -- S8bq's remainder: iterating a builtin set, enum
+            # subranges (no set conversion across domains exists), pigeonhole-
+            # hard card queries and newSeqUninit taint precision. Walker 253.
+            "tsymex_rfc0005_s8bv_iter_order",
+            "tsymex_rfc0005_s8bv_iter_char",
+            "tsymex_rfc0005_s8bv_iter_char_count",
+            "tsymex_rfc0005_s8bv_iter_int8",
+            "tsymex_rfc0005_s8bv_iter_forms",
+            "tsymex_rfc0005_s8bv_subrange",
+            "tsymex_rfc0005_s8bv_subrange_sets",
+            "tsymex_rfc0005_s8bv_card_uninit",
             # RFC-0005 S8cf -- S8bt's remainder.
             "tsymex_rfc0005_s8cf_reach",
             "tsymex_rfc0005_s8cf_limits",

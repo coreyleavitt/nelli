@@ -207,7 +207,7 @@ const renderAsChoicesVersion* = "12"
   ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
-  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260) on batch 10.
+  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260), S8bv (253) on batch 10.
 
 const symexWalkerVersion* = "262"
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
@@ -237,6 +237,21 @@ const symexWalkerVersion* = "262"
   ## push marks the calls before it, the import graph finds an importer the
   ## walk never enters, and a nil dereference is a crash no handler or
   ## `finally` sees (`crashRaise`).
+  ##
+  ## RFC-0005 S8bv (2026-10-03) — S8bq's remainder. `for x in s` over a
+  ## builtin set is unrolled over the base type's domain in ascending order
+  ## (it declined). An enum subrange (`range[a1..a2]`) is the enum narrowed
+  ## to its bounds (`IRType.enumRange`): as a parameter, field or set base it
+  ## was unsupported, and an assignment / conversion / argument out of the
+  ## subrange went unchecked (a false sxSat and false sxUnsats). The
+  ## unreachable cross-domain set conversion arm is gone (Nim has none). A
+  ## query relating two `card` terms carries their part identities, so a
+  ## pigeonhole count decides; a signed bit-vector overflow obligation its
+  ## operands' structural intervals rule out is not forked. `newSeqUninit`:
+  ## an inline map/filter forks on its unwritten reads, a composite call
+  ## result keeps its seqs' written-ness, and a slice, heap cell or mapped
+  ## array reads its base's. Provisional 253 (250 on batch 9). 252 -> 253.
+  ## (S8bv provisional 253, renumbered 262 by batch 11.)
   ##
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite
@@ -5557,7 +5572,8 @@ proc canonicalize*(t: IRType): string =
     "Ty<I:" & $t.width & ":" & (if t.signed: "s" else: "u") &
       (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") &
       (if t.enumName.len > 0: ":e[" & t.enumName & "]" else: "") &
-      (if t.isChar: ":c" else: "") & ">"
+      (if t.isChar: ":c" else: "") &
+      (if t.enumRange: ":er" else: "") & ">"   # RFC-0005 S8bv: as `isChar`
   of itBool:
     "Ty<B>"
   of itString:

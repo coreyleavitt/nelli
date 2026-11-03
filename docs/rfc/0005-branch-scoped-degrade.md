@@ -487,6 +487,11 @@ title = "S8br's remainder: address cell at a non-literal array index with an inp
 state = "done"
 
 [[slice]]
+id = "S8cm"
+title = "Corpus files over 60 s compile plus run on Windows, and shard budgets"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

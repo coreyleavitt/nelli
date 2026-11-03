@@ -35,7 +35,13 @@ state = "open"
 - Category: core
 - Size: S
 - Value: high
-- **Depends on:** none.
+- **Depends on:**
+  - RFC-0005 (branch-scoped-degrade / soundness channels) — soft, builds on.
+    §4's fairness question asks for the same over/under-approximation
+    discipline RFC-0005 built for symex. RFC-0005 is implemented (nelli
+    0.9.0), and its lattice (`SoundnessChannel`, `Taint`, `DegradeClass`)
+    lives in the leaf module `nelli/smt/soundness`, which imports no Z3, so
+    a trace engine can share it. Nothing here waits on it.
 
 ## §0 — Thesis
 
@@ -120,8 +126,8 @@ one that impresses.
   only ever "not yet violated." Does a bounded run report `eventually` as
   inconclusive, or does BMC's exhaustiveness let it be a real verdict up to
   depth d? These are different claims and the report must not conflate them —
-  the same over/under-approximation discipline RFC-0005 is building for symex
-  applies here, in a different engine.
+  the same over/under-approximation discipline RFC-0005 built for symex
+  (implemented, 0.9.0) applies here, in a different engine.
 - **Trace size.** A long stateful run holds every intermediate state. Does
   `Trace` retain states, or replay to reconstruct them on demand?
 - **Does `LinEvent` survive** as its own type, or become a `Trace` with

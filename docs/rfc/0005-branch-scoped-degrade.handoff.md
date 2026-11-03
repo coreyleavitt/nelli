@@ -1,7 +1,9 @@
 # RFC-0005 branch-scoped-degrade (soundness channels) — handoff
 
-- **Stage:** 3 (implementation, `/tdd` under `/loop`), started 2026-09-25.
-  Design rounds 1–2 done 2026-09-20 (see below).
+- **Stage:** closed 2026-11-03 — `implemented`, released as nelli 0.9.0; see
+  the final entry at the end of "Current position". Implementation (`/tdd`
+  under `/loop`) started 2026-09-25; design rounds 1–2 done 2026-09-20 (see
+  below).
 - **Branch:** `rfc-0005-soundness-channels` (the `rfc-*` name triggers the
   three Windows legs). Base `6cbfe8f`. Rounds 1–2 committed at `c59d7ea`.
 - **Scope:** fork i1 **resolved by Corey 2026-09-25** — "til done, do not defer
@@ -251,6 +253,36 @@
   the sha they certify, never the live checkout. After the queue drains: S11
   -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
+
+### 2026-11-03 — final entry: batch 11 closed the RFC
+
+This entry supersedes the "Remaining", "Open forks" and "Resume" lines above,
+which date from the 2026-10-01 pause. The slice-by-slice record from S8ac
+onward is in the RFC's "As landed" notes and the merge commits, not here.
+
+- **Closed by batch 11.** Head `8177eb27` (branch `rfc-0005-s8cm-local`:
+  batch 11 at `3c82b512` merged into S8cm). Batch 11 merged S8cs, S8ct, S8cu,
+  S8bv, S8bz, S8cp (item 2), S8cq with S8cn, and RFC-0016's opening document,
+  then the re-exec host-state and lifetime-hook compile fixes; S8cm closed at
+  `9ebe2a46` (its shard placement merged with batch 11).
+  Every soundness item worse than `main` (6cbfe8f) is fixed.
+- **Final walker version: 264** (`canonicalize.nim`; CR2's `==` pin 264).
+- **Release gate:** pending; see the coordinator. A whole-suite gate was
+  running against `8177eb27` when this entry was written.
+- **Fence.** Every `[[slice]]` row is `done` except **S8cp**, left `pending`
+  on purpose: only item 2 landed here, item 3 landed in S8ct, item 1 was
+  superseded by S8ct, and items 4–8 are RFC-0016's slice `S8cp-r`.
+- **Forks.** i1, i2 and i3 are resolved. i2 was resolved at the release:
+  `blocked_by = ["0001"]` dropped, RFC-0001 kept as a builds-on reference
+  (RFC §13.2).
+- **Open work went to RFC-0016** (`docs/rfc/0016-native-parity-hardening.md`),
+  per Corey's split of 2026-11-02. The findings batch 11 and the release left,
+  and the unowned rows of the INF-05 owner audit, are its §5.8 (INT-01 to
+  INT-17, AUD-01 to AUD-11).
+- **Release docs:** version 0.9.0 in `nelli.nimble`, `milpa.kdl` and
+  `nelliVersion`; `CHANGELOG.md` 0.9.0 entry; `docs/migration/0.9.0.md` §7
+  "Known gaps"; RFC Status and frontmatter `implemented`.
+- **Next:** on a green gate, fast-forward `main` and tag `v0.9.0` (no PR).
 
 ## Implementation plan — model allocation
 

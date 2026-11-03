@@ -2,11 +2,10 @@
 type    = "rfc"
 id      = "0005"
 title   = "RFC — soundness channels: separating over- from under-approximation"
-state   = "in-progress"
+state   = "implemented"
 wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
-blocked_by = ["0001"]
 size = "l"
 value = "high"
 
@@ -21,8 +20,9 @@ reason = "Corey 2026-09-25: /tdd rfc-0005 til done, do not defer anything -- ful
 [[item]]
 id    = "i2"
 title = "Soften blocked_by 0001 to a builds-on edge (every 0001 dependency is landed)"
-state = "open"
+state = "resolved"
 owner = "corey"
+reason = "Resolved at the 0.9.0 release (2026-11-03): blocked_by removed from the frontmatter; RFC-0001 stays in the Depends-on block as a builds-on reference (RFC-0001 is complete, so the edge blocks nothing); recorded in §13.2"
 
 [[item]]
 id    = "i3"
@@ -564,8 +564,15 @@ state = "done"
 
 # RFC — soundness channels: separating over- from under-approximation
 
-- **Status:** draft — **repurposed 2026-09-01; round 1 reviewed 2026-09-20;
-  round 2 reviewed 2026-09-20.**
+- **Status:** implemented — **released as nelli 0.9.0 (2026-11-03).**
+  Batch 11 closed the RFC at `8177eb27` (walker 264); every soundness item
+  worse than `main` (6cbfe8f) is fixed, and the remaining findings moved to
+  RFC-0016 (see the successor paragraph below). One fence row, S8cp, stays
+  `pending`: only its item 2 landed here, item 3 landed in S8ct, item 1 was
+  superseded by S8ct, and items 4–8 are RFC-0016's slice `S8cp-r`. Upgrade
+  notes: `docs/migration/0.9.0.md`. All three round-2 forks are resolved (§13).
+  History: repurposed 2026-09-01; round 1 reviewed 2026-09-20; round 2
+  reviewed 2026-09-20.
   This RFC was opened to carry RFC-0001's BLOCKER B7-2 ("case/else-raise
   sibling poisoning") on the premise that it needed a branch-scoped
   classified-degrade architecture. **That premise was wrong and B7-2 is fixed**
@@ -577,25 +584,29 @@ state = "done"
   (§2.3's missing candidate protocol, §2.5's closure-veto argument, §2.2's
   classification premise, and the S7/S8 slice boundary) and restructured the
   slice plan so a verdict flip lands at slice 6 instead of slice 10.
-  **Round-1 forks are resolved in §12; round-2 forks are open in §13.**
+  **Round-1 forks are resolved in §12; round-2 forks are resolved in §13.**
 - Category: symex
 - Size: L
 - Value: high
 - **Depends on:**
-  - RFC-0001 (chapulin-hardening) — the SND-1 taint machinery, the three-way
-    carrier taxonomy, and the N36/N37/N39/N40 raise-to-in-band migration are
-    all prior art this builds directly on. **Every item §1 names is landed;
-    §13.2 asks whether the `blocked_by` edge should therefore become soft.**
+  - RFC-0001 (chapulin-hardening) — builds on, does not block. The SND-1 taint
+    machinery, the three-way carrier taxonomy, and the N36/N37/N39/N40
+    raise-to-in-band migration are all prior art this builds directly on.
+    Every item §1 names is landed and RFC-0001 is complete; the hard
+    `blocked_by` edge was dropped at the 0.9.0 release (§13.2).
 
 **Successor: RFC-0016 (2026-11-02).** Corey split this RFC on 2026-11-02.
-RFC-0005 ends at the 0.9.0 tag, once every open soundness item that is worse
-than `main` (6cbfe8f) is fixed. All remaining non-blocking work moved to
-`docs/rfc/0016-native-parity-hardening.md`: soundness items with the same
-severity as `main`, precision gaps, crashes and hangs that match `main`, CI and
-test-time work, and the exact models behind the declines this RFC added.
-Nothing was dropped. RFC-0016 is open-ended and tracked by the rate of new
-findings. This RFC's Status and frontmatter are updated at the release, not
-here.
+RFC-0005 ended at the 0.9.0 tag (2026-11-03), with every open soundness item
+that was worse than `main` (6cbfe8f) fixed. **All remaining findings moved to
+`docs/rfc/0016-native-parity-hardening.md`:** soundness items with the same
+severity as `main`, precision gaps, crashes, compile stops and hangs that match
+`main`, CI and test-time work, and the exact models behind the declines this
+RFC added. The findings batch 11 and the release left (S8ct, S8cs, S8cu, S8cm,
+batch 11's re-exec fixes and the owner audit of the older not-fixed lists) are
+filed there in §5.8. Nothing was dropped. RFC-0016 is open-ended and tracked
+by the rate of new findings. The "For RFC-0016" and "Different mechanisms"
+lists in this document are kept as the record of where each item came from;
+RFC-0016 owns them.
 
 **Path convention.** Bare `runtime.nim`, `types.nim`, `canonicalize.nim`,
 `dsl_parser.nim`, `runtime_heap.nim`, `runtime_strings.nim` mean
@@ -10484,7 +10495,8 @@ relaxation stay in the plan, the SAT rule is symmetric with the UNSAT one, and
 is a *verdict mechanism* (§4.2), so the engine gains a new execution step.
 
 *Round 2 note: this resolution is re-opened by §13.1, not because the decision
-was wrong, but because round 2 changed the facts it was made on.*
+was wrong, but because round 2 changed the facts it was made on. §13.1 was
+resolved the same way on 2026-09-25, and both halves shipped in 0.9.0.*
 
 ### §12.2 The two blanket vetoes — **resolved by redesign, not by choosing**
 
@@ -10505,9 +10517,25 @@ is required for totality, the scope needs a carrier on `SymexErrorInfo`, the
 closure veto has a hard precondition, and the whole thing is three slices
 (S7/S8/S9), not one.*
 
-## §13 — Round-2 forks — **open**
+## §13 — Round-2 forks — **resolved; all three landed**
 
-### §13.1 Does §12.1 still stand, given round 2's cost? — **for Corey**
+### §13.1 Does §12.1 still stand, given round 2's cost? — **resolved 2026-09-25 (Corey): yes, full scope in one RFC; landed**
+
+**Resolution.** Corey, 2026-09-25: "til done, do not defer anything" — full
+scope, the SAT replay half included, one RFC (fence item `i1`). S0b measured
+the payoff before any product code (the handoff's "S0b result": the payoff
+is real, and gated on S1c). **As
+landed:** the UNSAT channel and the veto deletion in S1–S9 (S0's exhibit flips
+at S4; both vetoes deleted in S9), the replay substrate in S2, the SAT
+relaxation in S10 (replay wired into both `runSymex` consumers, with the
+link-and-load contract and the `SymexSettings.replay` opt-out), host-isolated
+replay in S8ct (a child per replay: `fork` on POSIX, a re-execution on
+Windows), and the public surface in S11. The one later change to scope was
+Corey's split of 2026-11-02, which kept every soundness item worse than `main`
+here and moved the rest to RFC-0016; it narrowed what "done" means for the
+remainder chain, not the design, and both halves shipped in 0.9.0.
+
+The original question, kept for the record:
 
 §12.1 chose full scope on the understanding that the SAT half cost a replay
 substrate. Round 2 changed three facts underneath that decision:
@@ -10536,7 +10564,17 @@ population comes back near zero, the UNSAT half's value becomes purely
 prospective (RFC-0011's), and the scope question should be re-answered with the
 number in hand. S0b runs before any product code for exactly that reason.
 
-### §13.2 Should `blocked_by = ["0001"]` become a soft edge? — **for Corey**
+### §13.2 Should `blocked_by = ["0001"]` become a soft edge? — **resolved at the 0.9.0 release (2026-11-03): yes; landed in the frontmatter**
+
+**Resolution.** The frontmatter's `blocked_by = ["0001"]` is removed, and
+fence item `i2` is `resolved`. RFC-0001 stays in the Depends-on block, in the
+multi-line shape `docs/rfc/README.md` requires, reworded as a builds-on
+reference: RFC-0001 is complete, so the edge blocks nothing in the tracker,
+and RFC-0011 no longer inherits a delay through it. No 0001 item ever blocked
+a slice here: S0 through S11 and the S8 remainder chain all built on what §1
+lists as landed.
+
+The original question, kept for the record:
 
 §1 documents every 0001 dependency as **landed** (B7-2 at `cac15e6`, the SND-1
 machinery, the N36–N40 migration), and the Depends-on prose calls 0001 prior
@@ -10546,7 +10584,7 @@ drop to a soft "builds on", or the specific still-pending 0001 item that blocks
 S0 should be named. I have **not** changed the frontmatter — 0001 round 6 is
 live, and the tracker graph is yours to move.
 
-### §13.3 `feTransparentResultUsed` / `feTransparentArgNotInert` — warning or companion-anchored? — **resolved 2026-09-26 (Corey): neither — a separate channel; landed in S8**
+### §13.3 `feTransparentResultUsed` / `feTransparentArgNotInert` — warning or companion-anchored? — **resolved 2026-09-26 (Corey): neither — a separate channel; landed in S8, rendered in S11**
 
 **Resolution.** Both options assumed the two are declines that need a place in
 the decline lattice. They are not: nothing is approximated *because of* them —

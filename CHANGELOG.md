@@ -12,22 +12,61 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
-## [Unreleased] — 0.9.0
+## [0.9.0] — 2026-11-03
+
+RFC-0005, soundness channels. Each symex result now says how far to trust it:
+a decline costs only the paths that reach it, an answer the analysis could not
+model is checked by running the SUT, and what remains untrusted names its
+cause.
 
 Upgrading: `docs/migration/0.9.0.md`. **Read its §1 before you upgrade.** The
 symex entry points can now execute your SUT, and that SUT must link and load.
-Neither change produces a compile error.
+Neither change produces a compile error. Open gaps, including where Windows
+answers less than Linux and macOS, are in its §7.
 
 ### Changed
 
 - **`fn` is executed at verdict time** (RFC-0005 S10). A witness on a path
   through something the analysis could not model is replayed by calling `fn`
   on it, and it is reported `sxSat`/`sxRaised` only if the real run reaches
-  the target. The SUT's side effects happen for real.
+  the target. The SUT's side effects happen for real, in a child process
+  (below): effects outside it, such as files and sockets, are not undone.
 - **`fn` must link and load** into the calling binary when replay is on. An
   undefined `importc` fails the link, and a missing `dynlib` (e.g. PCRE1 for
   `std/re`) fails at start-up. To opt out, set `SymexSettings.replay = false`
   (cache key `;rp=off`).
+- **Every replay runs in a child process** (RFC-0005 S8ct), so nothing a
+  replay does can end or corrupt the calling process: a `quit`, a raw C
+  `exit`, a nil dereference, unbounded recursion or a runaway allocation used
+  to end the whole test binary.
+  - POSIX forks the child. Windows re-executes the program and hands the child
+    the witness and the variables the SUT reaches; what cannot be handed over
+    declines (`feReplayDeclined`, message `replay not marshallable: ...`), so
+    the same SUT can be `sxUnknown` on Windows and decided on Linux or macOS.
+    The shapes are listed in the migration note, §5a.
+  - A replay's effects, stdout and stderr stay in the child. Use
+    `replayExecutions()` to observe whether a replay ran.
+  - A child that ends before reaching the target is `feReplayCrashed`, a hint
+    on an `sxUnknown`, never a refutation. `replayTimeoutMs` kills the child.
+  - `runReplayBounded`, `replayStackSize`, `replayAbandonedLive`, `ReplayRun`,
+    `rrEnded`, `rrContended`, `roContended`, `ptrAimsSnapshot` and
+    `ptrAimsAdopt` are removed.
+- **Routines compiled with other runtime checks decline** (RFC-0005 S8cu). A
+  routine compiled with `fieldChecks`, `overflowChecks`, `rangeChecks`,
+  `boundChecks`, `objChecks` or `checks` off, or with `floatChecks`,
+  `nanChecks` or `infChecks` on (by `push`, a pragma statement, the command
+  line or `-d:danger`), gives `sxUnknown` with `feCheckOption` or
+  `feOverflowCheckOption` on the paths that reach it. 0.8.0 gave the checked
+  verdict, including raises that never happen. The rule, its spellings and its
+  limits are in the migration note, §5.
+- **A nil dereference is a crash finding** (RFC-0005 S8cu): an
+  `sxRaised NilAccessDefect` at the SUT boundary, whatever `except` or
+  `finally` encloses it, as Nim 2.2.10 runs it. In a `--exceptions:setjmp`
+  build it declines under a `try` (`heNilDerefMayBeCaught`).
+- **Declines are kinded and scoped.** 37 `SymexErrorKind` members are new
+  since 0.8.0, each with the `DegradeClass` that names its lever; they are
+  listed by class in the migration note, §3.3. A `SymexErrorInfo` built by
+  hand needs a `scope` (§1.4).
 - **Verdicts are more precise** (RFC-0005).
   - An over-taint-only run proves `sxUnsat`.
   - The blanket decline vetoes are gone, and unreached declines are

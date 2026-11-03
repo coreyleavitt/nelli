@@ -491,7 +491,7 @@ does not settle them, they move here.
 | INF-02 | Fork (c): a gated clean replay as a safety net, which would catch a false `sxSat` on a clean path. **Awaiting Corey** (item `fork-c-clean-replay`) | RFC-0005 "the open fork (c) below" (line 1667 at 67f0b622; the DoD audit cited it at 1615); DoD audit fork 2 | the fork was never written down in RFC-0005; this is its first record | |
 | INF-03 | The findings ledger and a weekly rate report (§3.2) | this RFC | none yet | |
 | INF-04 | S8ck after item 1 (slice S8ck-r): items 2 (`Z3FuncDeclOwn`, `Z3FuncInterpOwn`, `Z3RcfNum` hooks never release `ctx`), 3 (`Z3Ast[S: static]` hooks unused for `Z3Int`/`Z3Bool`), 4's version half (`tffi`, `tversion`, `tmultiversion` assert a 4.x runtime), 5 (`injectShapeFault` comment), 6's first half (ADR-0023's "a lowering-time degrade must never raise", keep or simplify), 7 (`s8s_precision` run wall 13.2 to 19.1 s on Windows), 8 (`examples/properties.nim:30`, examples in nim-z3 CI on c and cpp), 9 (a leak gate that fails on invalid reads, writes and frees, shown RED on a planted bad `dec_ref`), 10 (record and reduce the spacer read; do not file), 11 (generated seq hooks on the raise path release every element), 12 (separate real leaks from live globals, `trcf`'s 26 `Z3ContextOwn` blocks). Item 4's hang half and item 6's second half are in §5.7 | `jobs/s8ck.md`; `worker-reports/s8ck-item1.md` | item 1 closed: cc5ffc9 identical to ae509f0 on invalid accesses and leaks | |
-| INF-05 | Audit the older "Different mechanisms, reported and not fixed here" lists against the remainder chain. This document took the lists of slices landed through batch 10 whose remainder has no later slice (S8ca, S8by, S8cc, S8cf, S8cb, S8cd, S8cl, S8cn) item by item. The earlier lists were each carried into a remainder slice whose job said "defer nothing", but no one has checked that every item reached one | RFC-0005, about 80 such lists | not done | |
+| INF-05 | Audit the older "Different mechanisms, reported and not fixed here" lists against the remainder chain. This document took the lists of slices landed through batch 10 whose remainder has no later slice (S8ca, S8by, S8cc, S8cf, S8cb, S8cd, S8cl, S8cn) item by item. The earlier lists were each carried into a remainder slice whose job said "defer nothing", but no one has checked that every item reached one | RFC-0005, about 80 such lists | **done 2026-11-03** (owner audit of the lists of 72 slices, S8c, S8e/S9 and S8g through S8bt, plus the inline not-fixed notes in S8y, S8ah, S8ao and S8bk): 318 rows fixed, 17 owned by RFC-0005, 9 already owned here. The 13 unowned rows (11 distinct items) are filed in §5.8 as AUD-01 to AUD-11 | |
 
 ### §5.6 Upstream reports — awaiting Corey
 
@@ -525,6 +525,61 @@ disposition shows it is not worse than `main`, or stays with RFC-0005 if it is.
 | PND-11 | S8cu's known limits: macro-built pragmas, a pushing template from another module, an import under a push in a module the scan does not read | S8cu | if the scan misses a check-off region, the walker assumes checks are on, which is the false `sxRaised` S8cu fixed; `main` faulted on these routines, so a miss may be worse than `main` | |
 | PND-12 | S8cu's resumed rows without a `main` column yet: `push assertions:off` (`compileOption` reads nelli's own option), a global initialiser under a push, the `cmpIgnoreStyle` hang, a nil deref with SIGSEGV against a caught `NilAccessDefect`, the cross-module rows | S8cu (resumed 2026-11-02) | S8cu is producing the three-way table | |
 | PND-13 | Z3's own internal recursion depth, not audited when S8ct bounded the walker's term walks | S8ct (B19 disposition) | to be checked at disposition | |
+
+### §5.8 Intake at RFC-0005's close (2026-11-03)
+
+The findings batch 11 and the 0.9.0 release left, with the unowned rows of
+the INF-05 owner audit. RFC-0005 closed at `8177eb27` (walker 264). None of
+these is worse than `main` 6cbfe8f as recorded at intake; a row whose class
+says "unclear" carries the reason. Where a row restates an item already listed
+above, it names that item and adds what intake learned, and the item above
+stays the one to work. Classes: **precision**, **crash** (a crash or compile
+stop, with its standing against `main`), **performance**, **test-harness**,
+and, for audit rows only, the audit's own class.
+
+**From batch 11 and the release.**
+
+| ID | Item | Source | Class | Owner |
+|---|---|---|---|---|
+| INT-01 | Windows re-exec replay: marshal case-object and `ptr`/`ref` witnesses (a direct `replayWitness`, and as globals) instead of declining. The first precision item | S8ct, "For RFC-0016" 1 | precision | is PRC-01 |
+| INT-02 | The ref-merge walk (`iteDeep`'s SUT) peaks at 8.36 GB under an 8 GB limit and is killed at 124–135 s, the same at `main` and on the channel, with and without tracing | S8ct, "For RFC-0016" 2 | crash, same as `main` | is CRH-03 |
+| INT-03 | A regex literal of about 2600 groups | S8ct, "For RFC-0016" 3 | crash | is CRH-04 |
+| INT-04 | `tsymex_rfc0005_s8by`'s units check is not deterministic under concurrent load (18.2M and 18.3M units against 5.85M alone) | S8ct, "For RFC-0016" 4 | test-harness | is CI-03 |
+| INT-05 | An object field of a two-alias type stops the compile (`expected 'O = Alias'`), at `main` and on the channel; pinned "declines as main does" in `tsymex_rfc0005_s8ct_deepterm` | S8ct, "For RFC-0016" 5 | crash (compile stop), same as `main` | |
+| INT-06 | The array-width decline (`termWalkMaxDepth`) catches an `int` index the path confines (`a[n and 7]`): the count reads the index's type, not the path | S8ct, "For RFC-0016" 6 | precision | |
+| INT-07 | On Z3 4.13.4, a nim-z3 context made after one holding 80,000 `or` terms was destroyed builds terms about 800 times slower (20,000 `or`s: 0.14 s, then 119 s); a `symexFind` in between restores it. Not chased | S8ct, "For RFC-0016" 8 | performance | |
+| INT-08 | `tsymex_rfc0005_s8ct_deepterm`'s teardown takes 78 s on Windows | S8ct (coordinator, release intake) | test-harness | with CI-01 |
+| INT-09 | A `for` over a `splitLines` iterator (`readFile(...).splitLines`) in a SUT stops the compile: "node has no type" in `classifyType`, from `parseStmtInner`. The same family as CRH-01's `s.sort()` compile stop. The S8ct note says it was not checked at `main`; the coordinator's intake records it as the same as `main` | S8ct, "For RFC-0016" 7 | crash (compile stop), same as `main` | with CRH-01 |
+| INT-10 | Seven pins moved from a verdict to a decline (`feGlobalRouteUnproved`): `cvm`, `cvm_dead` in `tsymex_rfc0005_s8bg_remainder` and `uc`, `uc_dead`, `dc`, `dc_dead`, `dx_dead` in `tsymex_rfc0005_s8bs_byref`. Each is a read in a routine with a route an exact model of the hook would close | S8cs, "Precision cost" and "For RFC-0016" | precision | with PRC-04 |
+| INT-11 | The `trace1` row of `tsymex_rfc0005_s8cs_routes` (a `=trace` hook only the cycle collector runs) is a walker fault, `coerceIntLit` on an `svPtr`; `main` stops the compile on it | S8cs (coordinator, release intake) | crash (walker fault), better than `main` | |
+| INT-12 | Under `--exceptions:setjmp` on Windows, the walker crashes entering its 16 MB fiber (SIGSEGV in `runSymexCaught`, before any walk). The same fiber and the same crash as `main`; the setjmp suite pins the default crash on Windows and cpp | S8cu, "Windows" | crash, same as `main` | |
+| INT-13 | A re-executed replay declines while the host has set a runtime hook (`globalRaiseHook`, `localRaiseHook`, `outOfMemHook`, `unhandledExceptionHook`, `onUnhandledException`, `errorMessageWriter`), so a Windows run loses verdicts a fork confirms. A proc value cannot be marshalled, so the replay declines as not marshallable, naming the hook | batch 11 (`7b2ab1e5`, `tsymex_rfc0005_b11_hoststate`) | precision | with PRC-02 |
+| INT-14 | The re-exec footprint now also reads the type symbols a body names, a call's result type and each user routine's signature, so more SUTs reach a type whose module declares a hook and decline on Windows | batch 11 (`7b2ab1e5`) | precision | with PRC-01 |
+| INT-15 | `setControlCHook` is not among the runtime hooks `hostRuntimeHook` checks, so a re-executed replay does not decline when the host set one, and the child runs without it. Not classified: needs a three-way row | batch 11 (`replayproc.nim`) | unclassified (§5.7 rule) | |
+| INT-16 | The 0.9.0 migration note's counts recounted against v0.8.0 (37 new `SymexErrorKind` members, the ordinal table). **Done** in batch 11 (`8f00b736`); recorded so the item is not reopened | batch 11 | test-harness (docs) | closed |
+| INT-17 | 30 corpus suites still take over 60 s of compile plus run on Windows (`scripts/ci-suite-seconds.tsv`, run 41671937922). Each is a single long test or compile-bound. The longest in that table is 127.4 s (`tsymex_rfc0005_s8ab_letaudit`); the coordinator's intake reports up to 157 s | S8cm (done; `9ebe2a46`) | test-harness | with CI-01 |
+
+**From the INF-05 owner audit (rows marked UNOWNED).** The rows the audit
+marked OWNED-0016 were already in this document (PRC-31, PRC-32, INF-04,
+PND-07, PND-08, UPS-01) and are not repeated.
+
+| ID | Item | Source | Class | Owner |
+|---|---|---|---|---|
+| AUD-01 | `isLoose` leaves an `isIntOffset` parameter unstamped. By design (ADR-0001: `isLoose` is opt-in unsound and carries its banner on `main`); needs a "stays by design" record, not a slice | S8w | soundness, opt-in and documented; not worse than `main` | |
+| AUD-02 | `acDivByZero` off with `acOverflow` on leaves the continuation unconstrained at a zero divisor. A nelli setting with no Nim counterpart (Nim's zero check rides on `overflowChecks`); a witness relying on it would trap on replay, which S8ct's child contains | S8aa | unclear (policy); not worse than `main` | |
+| AUD-03 | No clean no-zero type remains for the free-`retSym` guard pins; they are now `sxUnknown` on a `HashSet[string]` arm field, so the guard's coverage is weaker. No verdict defect | S8z | test-harness | |
+| AUD-04 | Macro-VM closure capture: a nested proc capturing a loop `var` kept one closure environment across iterations (seen as a duplicate case label, fixed in S8z by making `tagOrdOf` top level). The VM-alias guard (S8x, S8ab, S8af, S8ah) audits `let` and parameter aliasing only; nothing audits closure capture, and a silent instance cannot be ruled out | S8z | unclear (latent front-end hazard); worse than `main`: unknown | |
+| AUD-05 | Step 1c's equality classes are syntactic over the roots: an equality the query implies without stating it is not seen. Shown, not closed (`tsymex_rfc0005_s8aq_remainder` (4)); the uncapped steps still decide these queries | S8ai; S8aq item 4 | precision | |
+| AUD-06 | The build-time VM-alias gate runs on one suite per CI leg, not the whole corpus (deliberate: about 15–18 s per compile). Carried unchanged through S8ak and S8al | S8ah, S8ak, S8al | test-harness | |
+| AUD-07 | A generic never instantiated in the scope's compilation unit gives the VM-alias guard an un-instantiated `getImpl()` tree | S8al | test-harness | |
+| AUD-08 | Non-integer `HashSet` elements (`HashSet[string]`, float, tuple) decline as a parameter or local; PRC-12 covers only a `HashSet[string]` behind a pointer or in a heap field | S8am | precision | with PRC-12 |
+| AUD-09 | A `var` global initialised by a literal is not read at its initialiser: its entry value is fresh. A deliberate sound choice (S8as item 3) | S8as | precision | |
+| AUD-10 | The nil-dereference check of a lazily read operand happens where the read moved (S8ax's `orderOperands`), not where Nim checks it. S8be item 7 restored Nim's position for seq and string index checks only. Could be a false `sxRaised NilAccessDefect` or a missed one when the intervening call changes the ref | S8ax; S8be item 7 | unclear (possible soundness); worse than `main`: unknown (`main` read operands in parser order, also wrong) | |
+| AUD-11 | S8aw's `L`-against-`indexof` link now covers native terms only; the walker no longer emits `seq.last_indexof` or `str.indexof` for `rfind`/`find`. A coverage note, no wrong verdict or decline described | S8au | precision | |
+
+AUD-04 and AUD-10 are the two rows whose standing against `main` the audit
+could not settle. Under §2.4 each needs a three-way row before it can be read
+as a precision item; until then they are pending in the §5.7 sense.
 
 ## §6 — Slice procedure
 

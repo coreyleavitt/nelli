@@ -281,11 +281,28 @@ proc movesState(n: NimNode): bool =
     false
   else: false
 
+proc anchored(p: string): string =
+  ## `p`, absolute. A search path given on the command line (`--path:src`, as
+  ## the Windows legs pass it) stays relative to the compiler's working
+  ## directory, which `fileExists` resolves against but `staticRead` does not
+  ## (it reads beside this file), and which the VM cannot query. A relative
+  ## path is taken under the nearest directory at or above the project that
+  ## holds it; "" when none does.
+  if p.len == 0 or p.isAbsolute: return p
+  var dir = querySetting(projectPath)
+  while dir.len > 0:
+    if fileExists(dir / p): return dir / p
+    let up = dir.parentDir
+    if up == dir: break
+    dir = up
+  ""
+
 proc readSource(path: string; text: var string): string =
   ## "" and `text`, or why not. `staticRead` of a missing file ends the compile,
   ## and a file with a source filter is not the text the compiler parsed.
-  if not fileExists(path): return "cannot read `" & path & "`"
-  text = staticRead(path)
+  let at = anchored(path)
+  if at.len == 0 or not fileExists(at): return "cannot read `" & path & "`"
+  text = staticRead(at)
   if text.startsWith("#?"): return "`" & path & "` has a source filter"
   ""
 
@@ -391,7 +408,7 @@ proc isOwnSource(path: string): bool =
 
 proc isLibraryFile(path: string): bool =
   ## The stdlib and installed packages: not the program's own modules.
-  let p = normalPath(path)
+  let p = "/" & normalPath(path)     # a relative `_deps/...` as well
   "/lib/pure/" in p or "/lib/std/" in p or "/lib/core/" in p or
     "/lib/impure/" in p or "/lib/system" in p or "/lib/packages/" in p or
     "/lib/deprecated/" in p or "/lib/posix/" in p or "/lib/windows/" in p or
@@ -436,6 +453,8 @@ proc recordImports(sc: var Scanner; n: NimNode) =
         if fileExists(sp / name):
           found = sp / name
           break
+    # Kept as found if it cannot be anchored: reading it then fails closed.
+    if found.len > 0 and anchored(found).len > 0: found = anchored(found)
     if found.len > 0 and not isLibraryFile(found) and found notin sc.res.imports:
       sc.res.imports.add found
 
@@ -659,7 +678,7 @@ proc reachOf(start: string): seq[string] =
   ## `start` and the user modules its imports reach.
   var queue = @[start]
   while queue.len > 0:
-    let raw = queue.pop()
+    let raw = anchored(queue.pop())
     let key = normalPath(raw)
     if key in result: continue
     result.add key
@@ -672,7 +691,7 @@ proc enterGraph(startRaw: string) =
   ## read may import under one: every routine then declines (`runUnknown`).
   var queue = @[startRaw]
   while queue.len > 0:
-    let raw = queue.pop()
+    let raw = anchored(queue.pop())
     let key = normalPath(raw)
     if key in runSeen or isOwnRuntime(key) or isOwnSource(key): continue
     runSeen.add key
@@ -707,9 +726,11 @@ proc routinePlace*(impl: NimNode): string =
 proc routineChecks*(impl: NimNode): RoutineChecks =
   ## How `impl` (a typed routine definition) differs from the model.
   let li = impl.lineInfoObj
-  let file = normalPath(li.filename)
+  let fileRaw = anchored(li.filename)
+  let file = normalPath(if fileRaw.len > 0: fileRaw else: li.filename)
   if isOwnRuntime(file): return
-  let rootRaw = moduleFileOf(impl[0], li.filename)
+  let rootAt = anchored(moduleFileOf(impl[0], li.filename))
+  let rootRaw = if rootAt.len > 0: rootAt else: moduleFileOf(impl[0], li.filename)
   let root = normalPath(rootRaw)
   if isOwnRuntime(root): return
   if root notin moduleScans: moduleScans[root] = scanModule(rootRaw)

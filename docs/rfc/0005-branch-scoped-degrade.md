@@ -15007,7 +15007,15 @@ them, neither global:
   or nelli). A user importer's push now reaches the module it names, the user
   modules that one imports, and the stdlib. Before, it reached every non-system
   module, which now that more importers are read would have declined the importer's
-  own routines. An importer that cannot be read declines every routine.
+  own routines. An importer that cannot be read declines every routine. A
+  search path given on the command line (`--path:src`, as every Windows leg
+  passes it) stays relative to the compiler's working directory, which the VM
+  cannot query and `staticRead` does not resolve against (it reads beside
+  `check_options.nim`): the first push of these follow-ups (`9e1e944b`) ended
+  the compile there on all three legs. A relative path is now anchored at the
+  nearest directory at or above the project that holds it, and one that cannot
+  be anchored reads as unreadable (declines). Reproduced on Linux with
+  `--skipParentCfg --path:src`.
 
 | row (field, range, obj each) | native | main | channel | S8cu before | S8cu |
 |---|---|---|---|---|---|

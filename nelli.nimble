@@ -1339,6 +1339,21 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cn_seqview",
             "tsymex_rfc0005_s8cn_lent",
             "tsymex_rfc0005_s8cn_lentnative",
+            # RFC-0005 S8cq: by-value sharing, var-returning actuals, a call in
+            # a location lowered twice.
+            "tsymex_rfc0005_s8cq_native",
+            "tsymex_rfc0005_s8cq_stops",
+            "tsymex_rfc0005_s8cq_byvalue",
+            "tsymex_rfc0005_s8cq_byvalue2",
+            "tsymex_rfc0005_s8cq_byvalue3",
+            "tsymex_rfc0005_s8cq_byvalue4",
+            "tsymex_rfc0005_s8cq_byvalue5",
+            "tsymex_rfc0005_s8cq_twice",
+            "tsymex_rfc0005_s8cq_twice2",
+            "tsymex_rfc0005_s8cq_twice3",
+            "tsymex_rfc0005_s8cq_twice4",
+            "tsymex_rfc0005_s8cq_twice5",
+            "tsymex_rfc0005_s8cq_varret",
             # RFC-0005 S8ce: nim-z3's hooks no longer swallow an in-flight raise
             "tsymex_rfc0005_s8ce_hookraise",
             "tsymex_rfc0005_s8ce_raiseshapes",

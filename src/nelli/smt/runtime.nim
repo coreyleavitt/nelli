@@ -24354,9 +24354,6 @@ proc touchMeetsOuter(touch, outer: seq[string]): string =
   ## `t:?` on either side meets every object type on the other.
   if touch.len == 0: return ""
   if "*" in outer: return touch[0]
-  # RFC-0005 S8cq: a by-value actual whose memory the formal may share meets a
-  # body that reaches anything outside its formals (`byValueTouch`).
-  if sharedTouch in touch and outer.len > 0: return sharedTouch
   var anyOuterT = false
   for o in outer:
     if o.startsWith("t:"): anyOuterT = true
@@ -24364,6 +24361,9 @@ proc touchMeetsOuter(touch, outer: seq[string]): string =
     if t in outer: return t
     if t == "t:?" and anyOuterT: return t
     if t.startsWith("t:") and "t:?" in outer: return t
+  # RFC-0005 S8cq: a by-value actual whose memory the formal may share meets a
+  # body that reaches anything outside its formals (`byValueTouch`).
+  if sharedTouch in touch and outer.len > 0: return sharedTouch
   ""
 
 proc lowerClosureCall(env: Env, e: IRExpr): SymVal =

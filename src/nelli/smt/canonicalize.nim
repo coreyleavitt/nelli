@@ -202,10 +202,15 @@ const renderAsChoicesVersion* = "12"
   ##   (`array[1..3, int]`, via `IRType.lo`), not `array[0..2, int]` — the
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
+  ## - RFC-0005 batch 10 (245->252): S8cf, S8cb, S8cd, S8cl and S8cr stacked on
+  ##   batch 9 (their bullets above give provisional numbers: S8cf 242, S8cb 243,
+  ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
+  ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
+  ##   A statement `procCall f(x)` declines without reading its untyped actual.
 
-const symexWalkerVersion* = "256"
+const symexWalkerVersion* = "261"
   ## RFC-0005 S8ct (2026-11-02) -- no replay runs in the host process.
-  ## Provisional (S8bz holds 247, S8cs 249, and the coordinator's own above 251).
+  ## Provisional (S8cs and S8cu hold 260); batch 10 (252) merged under it.
   ## A replay that reaches `quit`, a raw C `exit`, a nil dereference or unbounded
   ## recursion ended the host's whole run (it declined on main). Each replay now
   ## runs in a child: `fork` on POSIX, a re-execution of the program on Windows,
@@ -213,7 +218,32 @@ const symexWalkerVersion* = "256"
   ## the replay when it cannot be (`feReplayDeclined`). A child that ends before
   ## reaching the target is `sxUnknown` with `feReplayCrashed`, not a refutation;
   ## a label hit before it ended is a confirmed `sxSat`. A child's writes do not
-  ## reach the host. 245 -> 256, S8cb's stack included (243).
+  ## reach the host. A symbolic array access that may name more than
+  ## `termWalkMaxDepth` positions declines. 252 -> 261.
+  ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
+  ## call past `pcre_select.limitReach`'s safe length no longer has a definite
+  ## verdict unless the query holds with it stopped at a limit too.
+  ## Also S8bt's remainder: the JIT's LIMIT count is modelled (`jitCost`), the
+  ## interpreter's limit gaps closed (`buildNfa`'s `concrete`), SKIP:NAME reads
+  ## past 7 by concrete calls (`execArgCap`), the JIT's UTF scan and POSIX
+  ## classes on 8.37 follow the library, a call Z3 cannot search and a pattern
+  ## past the regex cap are read at points (`pointCheck`), `replace`'s facts
+  ## cover verbs, limits, UTF and two bytes, and `strutils.count` lowers
+  ## (`iekStrCount`). Provisional 242.
+  ## RFC-0005 S8cd (249; batch 9's 245 before it) -- precision over proc-value results and
+  ## globals, and one soundness fix. A call through a proc value with no
+  ## resolved target carries its return type (`ccRetTy`, in the key as
+  ## `;ret=`), so `f(k).len` lowers over a stand-in of that type and the path
+  ## declines on the unknown callee rather than on the receiver's kind; a
+  ## `for` over a call binds it once. A `Table`, `HashSet` or `set` result is
+  ## structured. A variable of a case-object type is entry-modelled
+  ## (`irTypeRefFree`). SOUNDNESS: `ptrTargets` binds a global the path has
+  ## only read to its entry value, so `let a = g; p[] = 7; if g != a` is no
+  ## longer a false `sxUnsat`. `isEagerIR` covers `iekBitSet`, by size as
+  ## measured, and a set operator's operands are ordered (`parseOperandPair`).
+  ## `recvValue` reads a receiver as one; each arm observes what it reads.
+  ## `seqLenCaps` leaves a leaf equated to a literal uncapped.
+  ##
   ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
   ## batch 8 as one integration branch under ONE walker number; their bullets
   ## follow, each naming its provisional number. The stack's own changes: S8ce
@@ -225,6 +255,16 @@ const symexWalkerVersion* = "256"
   ## Table in one call (`closureTakesView`, a false sxSat), a by-value location
   ## the body also reaches (`byValueTouch`, a false sxUnsat), a call returning
   ## `var T` as a `var` actual (a false sxSat). Each declines. 241 -> 245.
+  ## RFC-0005 S8cl (2026-11-02, provisional) -- S8ca's remainder. A bodiless
+  ## magic is modelled or declines, never a no-op. `unsafeNew` allocates
+  ## (S8bl declined it, before that it was dropped: `p != nil` a clean false
+  ## sxUnsat). `ensureMove` and `procCall`, whose bodies are empty and which
+  ## returned the zero value, decline. `setLen` evaluates its length before
+  ## it reads the old value, and declines when that length's call writes
+  ## what the place reads. `newString` and `newStringOfCap` are modelled as
+  ## fresh memory (`slFresh`, a string the path owns), where they were
+  ## opaque calls. Stacked on batch 9. 245 -> 248 (246 and 247 are taken).
+  ##
   ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
   ## one integration branch under ONE walker number; their bullets follow the
   ## batch 7 block, each naming its provisional number. The stack's own
@@ -5838,6 +5878,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
       ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
       (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") &
+      (if e.ccRetTy.isNil: "" else: ";ret=" & canonicalize(e.ccRetTy)) &
       ";locs=[" & varLocKeys(e.ccVarLocs, env).join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
@@ -5990,7 +6031,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # fresh name (`bindLocal`), the operands content-addressed.
     let slSlot = "$" & $bindLocal(env, s.slRetName)
     "St<SL:" & slSlot & "=" & canonicalize(s.slBase, env) & "," &
-      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) & ">"
+      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) &
+      (if s.slFresh: ";fresh" else: "") & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`

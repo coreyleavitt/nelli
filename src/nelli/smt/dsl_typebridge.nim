@@ -610,6 +610,12 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       nominalId = nominalId(nameSym), nameIsRefAlias = isRefWrapped).keyedBySym(nameSym)
   recList.expectKind nnkRecList
   let s = if nameSym.kind in {nnkSym, nnkIdent}: nameSym.strVal else: nameSym.repr
+  # RFC-0005 S8cl (item 2). A member the walk cannot read (`when` in an object,
+  # as the runtime's `RefHeader`) leaves the type unsupported: its use declines,
+  # and it stopped the compile before.
+  for member in recList:
+    if member.kind notin {nnkIdentDefs, nnkRecCase}:
+      return tUninterp("__unsupported:" & s)
   # First pass: detect whether this object has any `nnkRecCase`
   # member. If it does, we build an `itVariant` (Phase 11);
   # otherwise the plain-tuple path stays.

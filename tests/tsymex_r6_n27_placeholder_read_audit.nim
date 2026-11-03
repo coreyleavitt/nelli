@@ -202,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 113 marked lines (110 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 120 marked lines (116 runtime.nim + 4 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -316,15 +316,16 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## 3 + 1 = 4.
     ## RFC-0005 S8cb (S8bo on batch 7): an element cell's store of `addr s[i]`
     ## now writes every leaf through `withElem`, whose array accesses are
-    ## audited there, so `storeSeqElem`'s marked line is gone. 120 - 1 = 119.
-    ## Both on one stack: 116 - 1 = 115.
+    ## audited there, so `storeSeqElem`'s marked line is gone. 116 - 1 = 115.
+    ## RFC-0005 S8cd: `isIndexAssign`'s seq arm reads the length after its
+    ## placeholder guard, to observe it (`observeRecvPart`). 115 + 1 = 116.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 115
+    check runtimeCount == 116
     check runtimeStringsCount == 4
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

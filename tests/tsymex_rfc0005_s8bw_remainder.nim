@@ -198,8 +198,10 @@ suite "S8bw (1): a global's receiver never faults the walker":
   test "a discriminator reassignment of an unwritten global":
     ## RED: a clean `sxSat` -- the reassignment was dropped, and Nim raises
     ## `FieldDefect` on it from the zero value's branch.
-    inBand(sutReassign, "vr", feGlobalReadUnmodelled, "gV1")
-    inBand(sutReassignSym, "vrs", feGlobalReadUnmodelled, "gV1")
+    ## RFC-0005 S8cd: a case-object global is entry-modelled (this was a
+    ## `feGlobalReadUnmodelled` decline), and Nim raises on the replay's value.
+    candidate(sutReassign, "vr", {sxRaised})
+    candidate(sutReassignSym, "vrs", {sxRaised})
 
 # ---- 2. aggregate globals ------------------------------------------------------
 #

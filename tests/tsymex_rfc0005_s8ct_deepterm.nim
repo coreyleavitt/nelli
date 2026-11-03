@@ -265,4 +265,4 @@ suite "S8ct: other deep walks":
     check kept.len == 1
 
   test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 256
+    check parseInt(symexWalkerVersion) >= 261

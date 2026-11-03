@@ -2430,6 +2430,14 @@ proc svAtPath(sv: SymVal; path: seq[int]; i = 0): SymVal =
                      result)
   else: return sv
 
+proc ptrInputOf(w: WalkCtx; vnm: string; path: seq[int]): SymVal =
+  ## RFC-0005 S8bz (item 1). The container at `path` of the variable `vnm` when
+  ## the run began: a parameter's input, or a global's entry value (S8as). A
+  ## `svBool` stand-in for a variable with neither.
+  if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], path)
+  elif globalEntryVals.hasKey(vnm): svAtPath(globalEntryVals[vnm], path)
+  else: SymVal(kind: svBool)
+
 proc svWithPath(sv: SymVal; path: seq[int]; v: SymVal; i = 0): SymVal =
   ## RFC-0005 S8bn (item 4). `sv` with its part at `path[i ..]` replaced.
   ## RFC-0005 S8bw (item 3): a case object's branch field in every tag's
@@ -2656,8 +2664,7 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         # entries stay where they are only while the path has not changed
         # which keys are present (a resize or a deletion may move them).
         let cur = svAtPath(vsv, lf.path)
-        let ini = if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], lf.path)
-                  else: SymVal(kind: svBool)
+        let ini = ptrInputOf(w, vnm, lf.path)
         if ini.kind != svTable or cur.kind != svTable or
            not sameTerm(ctx, w, p, cur.tabPresentRaw, ini.tabPresentRaw) or
            not tabNoDeletion(ctx, cur.tabPresentRaw) or
@@ -2673,8 +2680,7 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                                          ini.tabPresentRaw.raw, t.idx.raw)))
       if lf.seqIdx:
         let cur = svAtPath(vsv, lf.path)
-        let ini = if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], lf.path)
-                  else: SymVal(kind: svBool)
+        let ini = ptrInputOf(w, vnm, lf.path)
         if ini.kind != svSeq or cur.kind != svSeq or
            cur.seqLen.raw != ini.seqLen.raw:
           result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
@@ -2691,6 +2697,22 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                                      typeId: typeId)
       result.targets.add t
   var idxFacts: seq[tuple[code: int64; inRange: Z3Bool]]
+  # RFC-0005 S8cd: a global the walk has only read (or not met yet) is a
+  # target too: its cell holds its entry value, which is what `env` gets
+  # here, shared with every read (`entryValueOf`). Scanning only the bound
+  # ones lost the alias: `let a = g; p[] = 7; if g != a` came back `sxUnsat`
+  # for the `p` that addresses `g`. A name a callee holds withheld for its
+  # own copy-in/copy-out stays withheld (`callGuardedNames`).
+  if not isFollowConcreteWalk():
+    var unbound: seq[string]
+    for name, g in w.statics.globals.pairs:
+      if g.isVar and not p.env.hasKey(name) and name notin callGuardedNames and
+         tyMayHold(g.ty, pointee):
+        unbound.add name
+    unbound.sort()
+    for name in unbound:
+      p.env[name] = if programGlobal(name).isSome: entryValueOf(name)
+                    else: globalInitValue(name, w.statics.globals[name].ty)
   for name, sv in p.env.pairs:
     if not isGlobalEnvName(name): continue
     addVarLeaves(name, sv, "the global `" & displayName(name) & "`")

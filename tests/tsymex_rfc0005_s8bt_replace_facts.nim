@@ -12,7 +12,7 @@
 ##   * a `sure` byte is in `r` only when it is in `by`;
 ##   * no match leaves `r == s`, and with no empty match (`mn >= 1`) a
 ##     match needs a byte of `first` in `s`.
-import std/[unittest, strutils, re]
+import std/[unittest, strutils, re, unicode]
 import nelli/smt/[pcre_syntax, pcre_select]
 
 proc words(alpha: string; maxLen: int): seq[string] =
@@ -74,7 +74,8 @@ suite "S8bt (7): replace facts against std/re":
           for ch in s:
             if ch in f.first: hit = true
           if not hit: why = "a match, no first byte in s"
-        for b in f.sure:
+        # RFC-0005 S8cf: in UTF mode `sure` holds of a valid subject.
+        for b in (if f.utf and validateUtf8(s) >= 0: {} else: f.sure):
           if b in r0 or (b in r3 and b != 'Q') or (b in ra and b != 'a'):
             why = "sure byte " & escape($b) & " left"
         if why.len > 0:
@@ -97,12 +98,13 @@ suite "S8bt (7): replace facts against std/re":
     check {'a'..'z'} <= sureOf("[a-z]")
     check '\xe9' in sureOf("\\xe9+")
     check '\n' in sureOf("\\s")
-    # None where a match needs what follows, an anchor, a verb or UTF.
+    # None where a match needs what follows, an anchor, or a verb that moves
+    # the search. RFC-0005 S8cf: UTF mode states them of a valid subject.
     check sureOf("ab") == {}
     check sureOf("^a") == {}
     check sureOf("a$") == {}
     check sureOf("a(*COMMIT)b|a") == {}
-    check sureOf("(*UTF)a") == {}
+    check sureOf("(*UTF)a") == {'a'}
     # The CRLF skip can pass over an LF.
     check '\n' notin sureOf("(*CRLF)\\s")
 

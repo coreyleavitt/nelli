@@ -2611,9 +2611,11 @@ func closureRetStructured(t: IRType): bool =
   ## `applyClosureGround` never reads it. RFC-0005 S8p widens it to every
   ## return type the funcSym range cannot carry or `symValFromRawAst` cannot
   ## wrap: a multi-variant, a tuple/object, a `string` and a `seq`. RFC-0005
-  ## S8s adds an `array` (`retBindEq` binds it element-wise).
+  ## S8s adds an `array` (`retBindEq` binds it element-wise). RFC-0005 S8cd
+  ## adds a `Table`, `HashSet` and `set` (`retBindEq`'s arms), so `f(k).len`
+  ## over a proc value of each resolves as a seq result's does.
   t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq,
-                          itArray}
+                          itArray, itTable, itSet, itBitSet}
 
 var currentClosureBodies* {.threadvar.}: Table[
     tuple[siteHash: int64, declOrder: int], ClosureBody]
@@ -4070,7 +4072,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # (`s.match(re"…")`/`s.contains(re"…")`) produce a Z3Bool. svBool sentinel so
     # a surrounding boolean context is lowered correctly.
     some(SymVal(kind: svBool, bo: mkBool(true)))
-  of iekStrFind, iekStrRfind, iekStrFindRe, iekStrToInt:
+  of iekStrFind, iekStrRfind, iekStrCount, iekStrFindRe, iekStrToInt:
     # Phase 15 S4/S6b/S10a: `s.find(sub)` / `s.find(re"…")` / `parseInt(s)` → Z3Int.
     # RFC M3: `s.rfind(sub)` → Z3Int too (same shape, `lastIndexOf` instead of
     # `indexOf`). svInt sentinel so a surrounding comparison (e.g.
@@ -4101,7 +4103,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrRfind, iekStrReplaceAll, iekStrJoin,
+                   iekStrFind, iekStrRfind, iekStrCount, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
                    iekStrCaptureRe, iekStrSetAt, iekStrFromChars,
                    iekIntToStr, iekStrToInt,
@@ -4242,6 +4244,54 @@ var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
   ## superset of the real ones, so its UNSAT is the query's own; Z3's
   ## unfolding of the recursive term never reaches the facts' conflict
   ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
+
+proc literalStringBytes*(z: Z3String): tuple[ok: bool, s: string] =
+  ## RFC-0005 S8cf. `z`'s bytes when it folds to a literal.
+  let v = simplify(z)
+  if not Z3_is_string(v.ctx.raw, v.raw): return
+  for cp in getStringContents(v):
+    if cp notin 0 .. 255: return
+    result.s.add char(cp)
+  result.ok = true
+
+type RegexPointSite* = object
+  ## RFC-0005 S8cf. A `std/re` call `checkCapped` reads at the points the
+  ## search proposes before it tries Z3's encoding (`pointCheck`): its value
+  ## as the query reads it (`exact`), the assertions that only define it
+  ## (`defs`, their ids) and its operands. `declined`: the encoding is past
+  ## its size cap, so `exact` is a fresh value with nothing else defining it.
+  ## `light`: Z3 reads this encoding well, so a query only takes its value at
+  ## a subject pinned beside a call that is not (`pointCheck`'s pinned round).
+  exact*: Z3AnyAst
+  defs*: seq[int]
+  subject*, by*: Z3String
+  start*: Z3Int
+  sp*: RegexSpec
+  pr*: PcreParse
+  safe*: int       ## `limitReach`'s safe length (`high(int)`: no limit)
+  declined*: bool
+  light*: bool
+
+var regexPointSites* {.threadvar.}: seq[RegexPointSite]
+  ## RFC-0005 S8cf. Every such call of the walk. Reset per run.
+
+type RegexLimitSite* = object
+  ## RFC-0005 S8cf. One `std/re` call whose subject can be long enough to
+  ## reach one of PCRE's own limits (`pcre_select.LimitReach`): its value as
+  ## the model reads it (`exact`), what std/re surfaces if the limit is hit
+  ## (`err`, with `errConds`), the subject and the length up to which no
+  ## limit can be hit (`safe`), and the assertions true only of `exact`
+  ## (`guarded`: a recursive `replace` value's definition and facts).
+  exact*, err*: Z3AnyAst
+  errConds*: seq[Z3Bool]
+  subject*: Z3String
+  safe*: int
+  guarded*: seq[int]
+  what*: string
+
+var regexLimitSites* {.threadvar.}: seq[RegexLimitSite]
+  ## RFC-0005 S8cf. Every such call of the walk (`checkCapped`). Reset per
+  ## run.
 
 var regexRecFactConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S8bt. The facts of the `replace` values in `regexRecDefConds`
@@ -8606,7 +8656,7 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
   lowerDegrade(kind, msg)
   var fresh: seq[Z3Bool]
   case e.kind
-  of iekStrLen, iekStrFind, iekStrRfind, iekStrToInt, iekStrFindRe:
+  of iekStrLen, iekStrFind, iekStrRfind, iekStrCount, iekStrToInt, iekStrFindRe:
     # Successful-path result is svInt (Z3Int) — e.g. `s.len`/`s.find(...)`
     # build `SymVal(kind: svInt, ...)` directly. Force `allocateSym(itInt)`'s
     # bare (non-tuple) svInt allocation via `intOffsetPositions = @[0]`
@@ -12264,6 +12314,12 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## facts (`nimLenFacts`). Only the terms: the facts are built where they
   ## are asserted, so they reach the walk's shared context only on that
   ## path (see `seqRangeFacts`' note on context cost).
+  ##
+  ## RFC-0005 S8cd: a leaf a root conjunct equates to a string literal
+  ## (`symexAssume(s == "abcdefghijkl")`) takes no cap. The cap bounds a
+  ## search, and that leaf has one value: every model holds it at the
+  ## literal's length, so its cap could only refute the query, reading as
+  ## a cap decline however the literal compares with `maxSeqLen`.
   let kinds = seqCapKinds()
   let capInt = mkInt(ctx, cap)
   proc kindOf(ctx: Z3Context; a: Z3AnyAst): int =
@@ -12291,6 +12347,23 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     while kindOf(ctx, src) == kinds.strExtract: src = unpackApp(src).args[0]
     if astId(ctx, src.raw) notin byteLeaves: return
     (true, ch)
+  var literalLeaves: HashSet[int]   # RFC-0005 S8cd
+  block:
+    var conjuncts: seq[Z3AnyAst]
+    for r in roots: conjuncts.add toAnyAst(r)
+    while conjuncts.len > 0:
+      let c = conjuncts.pop()
+      if getAstKind(c) != akApp: continue
+      let (decl, args) = unpackApp(c)
+      let name = declName(ctx, decl)
+      if name == "and":
+        for a in args: conjuncts.add a
+      elif name == "=" and args.len == 2:
+        for (leaf, other) in [(args[0], args[1]), (args[1], args[0])]:
+          if getSortKind(leaf) == skSeq and
+             Z3_is_string(ctx.raw, other.raw) and
+             kindOf(ctx, leaf) in [kinds.uninterp, kinds.select]:
+            literalLeaves.incl astId(ctx, leaf.raw)
   var seen: HashSet[int]
   var stack: seq[Z3AnyAst]
   for r in roots: stack.add toAnyAst(r)
@@ -12306,7 +12379,8 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       result.lens.add wrap[Z3Int](ctx, t.raw)
     if getSortKind(t) == skSeq and (k == kinds.uninterp or k == kinds.select):
       let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
-      result.caps.add lenT <= capInt
+      if id notin literalLeaves:   # RFC-0005 S8cd
+        result.caps.add lenT <= capInt
       result.lens.add lenT   # RFC-0005 S8ba
     elif byteLeaves.len > 0 and args.len == 2 and declName(ctx, decl) == "=":
       let empty = mkString(ctx, "")
@@ -13991,10 +14065,10 @@ const recFactsRLimit* = 100_000'u
   ## slowest S8bt pin, Z3 5.1); a query they do not refute ran the larger
   ## budget out for nothing (`s8bb_replace`'s `a|ab` pin: 0.4 s became 7 s).
 
-proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
-                 settings: SymexSettings; rlimit: uint):
-                 tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
-                       why: string] =
+proc checkExact(ctx: Z3Context; query: openArray[Z3Bool];
+                settings: SymexSettings; rlimit: uint):
+                tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
+                      why: string] =
   ## RFC-0005 S8k. Decide `query` (every assertion of one walker query)
   ## with each string / seq leaf capped at `maxSeqLen` elements. `s` is the
   ## solver that answered (for its statistics), `m` its model in `ctx` for
@@ -14408,6 +14482,477 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
       else: (zsUnknown, s3, nil, z3Why(s3))
+
+const
+  limitWorldRLimit* = 1_000_000'u
+    ## RFC-0005 S8cf. The budget of one `limitWorldRefuted` check. It refutes
+    ## on the error value alone (a few thousand units); a query it does not
+    ## refute has a model with a long subject, which Z3 need not find, and
+    ## running out reads the same.
+  limitWorldTimeoutMs = 3000'u
+    ## RFC-0005 S8cf. Its clock: Z3's sequence solver can stop advancing the
+    ## step count on `(a|a)*[bc]` against a long literal (probed), so the
+    ## step bound alone need not end the check. The cut only makes the query
+    ## `zsUnknown`.
+  limitWorldSites = 8
+    ## RFC-0005 S8cf. The most calls `limitWorldRefuted` splits on, one check
+    ## each; a query reading more is `zsUnknown` past their safe lengths.
+
+const
+  pointRounds = 8
+    ## RFC-0005 S8cf. The candidates `pointCheck` tries one at a time.
+  pointRLimit = 2_000_000'u
+    ## RFC-0005 S8cf. One round's budget: its query holds no automaton, so a
+    ## round that needs more is one the exact encoding should have a go at.
+  pointTimeoutMs = 5000'u
+  pointTableLen = 4
+    ## RFC-0005 S8cf. The longest subject of `pointTable`'s candidates.
+  pointTableBytes = 5
+    ## RFC-0005 S8cf. Its alphabet's size: at most 781 subjects.
+
+proc stringConstants(ctx: Z3Context; query: openArray[Z3Bool]): seq[string] =
+  ## RFC-0005 S8cf. The string literals `query` holds.
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in query: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if Z3_is_string(ctx.raw, t.raw):
+      var b = ""
+      for cp in getStringContents(wrap[Z3String](ctx, t.raw)):
+        if cp in 0 .. 255: b.add char(cp)
+      result.add b
+    elif getAstKind(t) == akApp:
+      let (_, args) = unpackApp(t)
+      for a in args: stack.add a
+
+proc holdsIn(m: Z3Model; b: Z3Bool): bool =
+  ## RFC-0005 S8cf. `b` is true in `m`.
+  let ev = m.eval(b, modelCompletion = true)
+  Z3_get_bool_value(ev.ctx.raw, ev.raw) == Z3_L_TRUE
+
+proc pointValue(st: RegexPointSite; subject, by: string; start: int): RegexPoint =
+  ## RFC-0005 S8cf. `concreteEntry`, within the safe length: past it the real
+  ## call can stop at a limit, and the point has no value of its own.
+  if subject.len > st.safe: return RegexPoint()
+  concreteEntry(st.sp, st.pr, subject, start, by)
+
+proc pointLit(st: RegexPointSite; p: RegexPoint): Z3AnyAst =
+  ## RFC-0005 S8cf. The value `p` as a term.
+  if st.sp.entry == "replace": toAnyAst(mkString(p.s))
+  elif st.sp.entry in ["match", "contains", "startsWith", "endsWith"]:
+    toAnyAst(mkBool(p.b))
+  else: toAnyAst(mkInt(p.i))
+
+proc pointEq(st: RegexPointSite; v: Z3AnyAst; p: RegexPoint): Z3Bool =
+  ## RFC-0005 S8cf. `v` is the value `p`.
+  wrap[Z3Bool](v.ctx, checkedEq(v.ctx, v.raw, pointLit(st, p).raw))
+
+proc pointSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
+  ## RFC-0005 S8cf. The `regexPointSites` whose value `query` reads.
+  if regexPointSites.len == 0: return
+  var byId = initTable[int, seq[int]]()
+  for i, st in regexPointSites:
+    if not st.light: byId.mgetOrPut(astId(ctx, st.exact.raw), @[]).add i
+  var seen, hit: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in query: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if id in byId:
+      for i in byId[id]: hit.incl i
+    if getAstKind(t) != akApp: continue
+    let (_, args) = unpackApp(t)
+    for a in args: stack.add a
+  for i in 0 ..< regexPointSites.len:
+    if i in hit: result.add i
+
+proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
+                sites: seq[int]; decided: var bool):
+                tuple[status: Z3Status, s: Z3Solver, m: Z3Model, why: string] =
+  ## RFC-0005 S8cf (items 8, 9, 10). `query` with each call's value a fresh
+  ## `v` and its definition gone: a superset of the real runs. So:
+  ##   * UNSAT is the query's own;
+  ##   * a model whose every call's `v` is what `concreteEntry` computes at
+  ##     the model's operands is a model of the query;
+  ##   * otherwise the point is a valid lemma, `operands == c -> v == value`,
+  ##     and the search goes on, `pointRounds` times.
+  ## Past those rounds `pointTable` asks once for a subject among short
+  ## strings over the query's and the pattern's own bytes, all their values
+  ## stated at once: a search for a value (`r == "x-"`) has no other way to
+  ## one. Not `decided` leaves the query to `checkExact`, unless a call's
+  ## encoding was declined: then the verdict is `zsUnknown`.
+  decided = false
+  var vs: seq[Z3AnyAst]
+  var froms, tos: seq[RawZ3Ast]
+  var dropped: HashSet[int]
+  var declined = false
+  for i in sites:
+    let st = regexPointSites[i]
+    declined = declined or st.declined
+    for d in st.defs: dropped.incl d
+    let sort = Z3_get_sort(ctx.raw, st.exact.raw)
+    let name = regexFreshName("__regexPointValue")
+    let sym = Z3_mk_string_symbol(ctx.raw, name.cstring)
+    let v = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, sort))
+    vs.add v
+    froms.add st.exact.raw
+    tos.add v.raw
+  var roots: seq[Z3Bool]
+  for r in query:
+    if astId(ctx, r.raw) in dropped: continue
+    roots.add wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw,
+      cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+  let savedTimeout = queryTimeoutMsCur
+  defer: queryTimeoutMsCur = savedTimeout
+  if queryTimeoutMsCur == 0'u or queryTimeoutMsCur > pointTimeoutMs:
+    queryTimeoutMsCur = pointTimeoutMs
+  var stopWhy = "the search found no point whose value the query accepts"
+  proc operands(st: RegexPointSite; m: Z3Model):
+      tuple[ok: bool, s, by: string, start: int] =
+    result.s = evalStrBytes(m, st.subject)
+    if st.sp.entry == "replace": result.by = evalStrBytes(m, st.by)
+    let ev = m.eval(st.start, modelCompletion = true)
+    if not isNumeralAst(ctx, ev.raw): return
+    result.start = int(parseBiggestInt(getNumeralString(ev)))
+    result.ok = true
+  proc atPoint(st: RegexPointSite; s, by: string; start: int): Z3Bool =
+    result = st.subject == mkString(s) and st.start == mkInt(start)
+    if st.sp.entry == "replace": result = result and st.by == mkString(by)
+  # A subject the query pins to a literal has its values now, and folds the
+  # facts over it: Z3 4.13.4 ran out of its budget on those memberships.
+  block pinned:
+    ensureByteDomainKinds()
+    let bk = byteDomainKinds
+    var lits = initTable[int, RawZ3Ast]()
+    var stack: seq[Z3AnyAst]
+    for r in roots: stack.add toAnyAst(r)
+    while stack.len > 0:
+      let t = stack.pop()
+      if getAstKind(t) != akApp: continue
+      let (decl, args) = unpackApp(t)
+      let dk = ord(Z3_get_decl_kind(ctx.raw, decl))
+      if dk == bk.andK:
+        for a in args: stack.add a
+      elif dk == bk.eq and args.len == 2:
+        if Z3_is_string(ctx.raw, args[1].raw):
+          lits[astId(ctx, args[0].raw)] = args[1].raw
+        elif Z3_is_string(ctx.raw, args[0].raw):
+          lits[astId(ctx, args[1].raw)] = args[0].raw
+    var pins = roots
+    var ff, tt: seq[RawZ3Ast]
+    var eqs: seq[Z3Bool]
+    for k, i in sites:
+      let st = regexPointSites[i]
+      let id = astId(ctx, st.subject.raw)
+      if id notin lits: break pinned
+      let lit = literalStringBytes(wrap[Z3String](ctx, lits[id]))
+      let startS = simplify(st.start)
+      if not lit.ok or not isNumeralAst(ctx, startS.raw): break pinned
+      var by = ""
+      if st.sp.entry == "replace":
+        let b = literalStringBytes(st.by)
+        if not b.ok: break pinned
+        by = b.s
+      let p = pointValue(st, lit.s, by,
+                         int(parseBiggestInt(getNumeralString(startS))))
+      if not p.ok: break pinned
+      eqs.add pointEq(st, vs[k], p)
+      eqs.add st.subject == mkString(lit.s)
+      ff.add st.subject.raw
+      tt.add lits[id]
+    # Every other call on a pinned subject has its value here too, so what
+    # defines it need not be searched: a call whose fresh terms the rest of
+    # the query still names keeps its encoding, or a model of the rest need
+    # not extend to it. The search reads the rest of `query` as it stands.
+    var queryIds: HashSet[int]
+    for r in query: queryIds.incl astId(ctx, r.raw)
+    type Lifted = tuple[exact, value: RawZ3Ast, defs: seq[int]]
+    var lifted: seq[Lifted]
+    for i, st in regexPointSites:
+      if i in sites: continue
+      var onPath = false
+      for d in st.defs: onPath = onPath or d in queryIds
+      if not onPath: continue
+      let id = astId(ctx, st.subject.raw)
+      if id notin lits: continue
+      let lit = literalStringBytes(wrap[Z3String](ctx, lits[id]))
+      let startS = simplify(st.start)
+      if not lit.ok or not isNumeralAst(ctx, startS.raw): continue
+      let p = pointValue(st, lit.s, "",
+                         int(parseBiggestInt(getNumeralString(startS))))
+      if not p.ok: continue
+      lifted.add (st.exact.raw, pointLit(st, p).raw, st.defs)
+      ff.add st.subject.raw
+      tt.add lits[id]
+    let kinds = seqCapKinds()
+    proc constsOf(r: Z3AnyAst): HashSet[string] =
+      var seen: HashSet[int]
+      var work = @[r]
+      while work.len > 0:
+        let t = work.pop()
+        let id = astId(ctx, t.raw)
+        if id in seen or getAstKind(t) != akApp: continue
+        seen.incl id
+        let (decl, args) = unpackApp(t)
+        if args.len == 0:
+          if ord(Z3_get_decl_kind(ctx.raw, decl)) == kinds.uninterp:
+            result.incl $Z3_get_symbol_string(ctx.raw,
+                                              Z3_get_decl_name(ctx.raw, decl))
+        for a in args: work.add a
+    proc subst(r: RawZ3Ast; a, b: var seq[RawZ3Ast]): RawZ3Ast =
+      if a.len == 0: return r
+      ctx.checkErr Z3_substitute(ctx.raw, r, cuint(a.len),
+        cast[ptr UncheckedArray[RawZ3Ast]](a[0].addr),
+        cast[ptr UncheckedArray[RawZ3Ast]](b[0].addr))
+    while true:
+      var gone = dropped
+      var fs = froms
+      var ts = tos
+      for l in lifted:
+        for d in l.defs: gone.incl d
+        fs.add l.exact
+        ts.add l.value
+      pins = @[]
+      for r in query:
+        if astId(ctx, r.raw) in gone: continue
+        pins.add simplify(wrap[Z3Bool](ctx, subst(subst(r.raw, fs, ts), ff, tt)))
+      var live: HashSet[string]
+      for r in pins: live = live + constsOf(toAnyAst(r))
+      var keep: seq[Lifted]
+      for l in lifted:
+        var shared = false
+        for r in query:
+          if astId(ctx, r.raw) in l.defs:
+            let c = constsOf(toAnyAst(wrap[Z3Bool](ctx, subst(r.raw, ff, tt))))
+            for n in c:
+              if n in live: shared = true
+        if not shared: keep.add l
+      if keep.len == lifted.len: break
+      lifted = keep
+    let sv = ownContextSolver(ctx, pins & eqs, pointRLimit)
+    case ownContextCheck(sv)
+    of zsUnsat:
+      decided = true
+      return (zsUnsat, sv, nil, "")
+    of zsSat:
+      decided = true
+      return (zsSat, sv, translate(sv.model(), ctx), "")
+    of zsUnknown: discard
+  block rounds:
+    for round in 0 ..< pointRounds:
+      let sv = ownContextSolver(ctx, roots, pointRLimit)
+      case ownContextCheck(sv)
+      of zsUnsat:
+        decided = true
+        return (zsUnsat, sv, nil, "")
+      of zsUnknown:
+        stopWhy = "Z3: " & sv.reasonUnknown()
+        break rounds
+      of zsSat: discard
+      let m = translate(sv.model(), ctx)
+      var all = true
+      for k, i in sites:
+        let st = regexPointSites[i]
+        let o = operands(st, m)
+        if not o.ok: break rounds
+        let p = pointValue(st, o.s, o.by, o.start)
+        if not p.ok:
+          stopWhy = "the automaton does not read the point"
+          break rounds
+        let want = pointEq(st, vs[k], p)
+        if not holdsIn(m, want):
+          all = false
+          roots.add implies(atPoint(st, o.s, o.by, o.start), want)
+      if all:
+        decided = true
+        return (zsSat, sv, m, "")
+  # The table: one call's subject over short strings.
+  let k0 = 0
+  let st0 = regexPointSites[sites[k0]]
+  var bytes: seq[char]
+  proc addByte(c: char) =
+    if c notin bytes and bytes.len < pointTableBytes: bytes.add c
+  # The query's own text first: the facts' UTF-8 ranges hold bytes too.
+  let lits = stringConstants(ctx, query)
+  for lit in lits:
+    for c in lit:
+      if c in {' '..'~'}: addByte(c)
+  var body = st0.sp.pattern          # past its start options: `(*UTF8)`
+  while body.startsWith("(*") and ')' in body:
+    body = body[body.find(')') + 1 .. ^1]
+  for c in body:
+    if c in {'a'..'z', 'A'..'Z', '0'..'9'}: addByte(c)
+  for lit in lits:
+    for c in lit: addByte(c)
+  addByte('a')
+  var words = @[""]
+  var at = 0
+  while at < words.len:
+    let w = words[at]
+    inc at
+    if w.len < pointTableLen:
+      for c in bytes: words.add w & c
+  var opts: seq[Z3Bool]
+  let isReplace = st0.sp.entry == "replace"
+  let byLit = literalStringBytes(st0.by)
+  let startSimp = simplify(st0.start)
+  if isNumeralAst(ctx, startSimp.raw) and (byLit.ok or not isReplace):
+    let start = int(parseBiggestInt(getNumeralString(startSimp)))
+    for w in words:
+      let p = pointValue(st0, w, byLit.s, start)
+      if p.ok:
+        opts.add st0.subject == mkString(w) and pointEq(st0, vs[k0], p)
+  if opts.len > 0:
+    var any = opts[0]
+    for i in 1 ..< opts.len: any = any or opts[i]
+    let sv = ownContextSolver(ctx, roots & @[any], pointRLimit * 2)
+    if ownContextCheck(sv) == zsSat:
+      let m = translate(sv.model(), ctx)
+      var all = true
+      for k, i in sites:
+        let st = regexPointSites[i]
+        let o = operands(st, m)
+        if not o.ok: all = false; break
+        let p = pointValue(st, o.s, o.by, o.start)
+        if not p.ok or not holdsIn(m, pointEq(st, vs[k], p)):
+          all = false
+          break
+      if all:
+        decided = true
+        return (zsSat, sv, m, "")
+  if declined:
+    decided = true
+    result.status = zsUnknown
+    result.why = "a regex call whose encoding is past its size cap, read at " &
+      "points: " & stopWhy
+
+proc limitSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
+  ## RFC-0005 S8cf. The `regexLimitSites` whose value `query` reads.
+  if regexLimitSites.len == 0: return
+  var byId = initTable[int, seq[int]]()
+  for i, st in regexLimitSites:
+    byId.mgetOrPut(astId(ctx, st.exact.raw), @[]).add i
+  var seen: HashSet[int]
+  var hit: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in query: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if id in byId:
+      for i in byId[id]: hit.incl i
+    if getAstKind(t) != akApp: continue
+    let (_, args) = unpackApp(t)
+    for a in args: stack.add a
+  for i in 0 ..< regexLimitSites.len:
+    if i in hit: result.add i
+
+proc limitReason(ctx: Z3Context; sites: seq[int]): string =
+  var xs: seq[string]
+  for i in sites:
+    let st = regexLimitSites[i]
+    xs.add st.what & " past " & $st.safe & " bytes"
+  "a regex call can stop at one of PCRE's own limits (PCRE_ERROR_MATCHLIMIT," &
+    " PCRE_ERROR_RECURSIONLIMIT, PCRE_ERROR_JIT_STACKLIMIT, or match() off " &
+    "the machine stack), which the query does not exclude: " & xs.join("; ")
+
+proc limitWorldRefuted(ctx: Z3Context; query: openArray[Z3Bool];
+                       sites: seq[int]): bool =
+  ## RFC-0005 S8cf. True when `query`, already UNSAT with every call read
+  ## exactly, is UNSAT with each call in turn stopped at a limit. That call's
+  ## value is gone from its check, which keeps it clear of the exact term's
+  ## search; the other calls are their error value or their exact one, a
+  ## superset of the real runs.
+  if sites.len > limitWorldSites: return false
+  proc swap(r: Z3Bool; a, b: RawZ3Ast): Z3Bool =
+    var froms = [a]
+    var tos = [b]
+    wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw, 1,
+      cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+  let savedTimeout = queryTimeoutMsCur
+  defer: queryTimeoutMsCur = savedTimeout
+  if queryTimeoutMsCur == 0'u or queryTimeoutMsCur > limitWorldTimeoutMs:
+    queryTimeoutMsCur = limitWorldTimeoutMs
+  for k in sites:
+    let stopped = regexLimitSites[k]
+    var roots: seq[Z3Bool]
+    for r in query:
+      if astId(ctx, r.raw) notin stopped.guarded:
+        roots.add swap(r, stopped.exact.raw, stopped.err.raw)
+    for c in stopped.errConds: roots.add c
+    roots.add len(stopped.subject) > mkInt(stopped.safe)
+    for j in sites:
+      if j == k: continue
+      let other = regexLimitSites[j]
+      let ab = mkBoolVar(ctx, regexFreshName("__regexLimitHit"))
+      let v = wrap[Z3AnyAst](ctx, checkedIte(ctx, ab.raw, other.err.raw,
+                                             other.exact.raw))
+      var next: seq[Z3Bool]
+      for r in roots:
+        next.add(if astId(ctx, r.raw) in other.guarded: ab or r
+                 else: swap(r, other.exact.raw, v.raw))
+      roots = next
+      for c in other.errConds: roots.add c
+      roots.add (not ab) or (len(other.subject) > mkInt(other.safe))
+    let s = ownContextSolver(ctx, roots, limitWorldRLimit)
+    if ownContextCheck(s) != zsUnsat: return false
+  true
+
+proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
+                 settings: SymexSettings; rlimit: uint):
+                 tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
+                       why: string] =
+  ## RFC-0005 S8cf (SOUNDNESS). `checkExact` reads every regex call as a
+  ## match or a miss. A call past its safe length may instead stop at one of
+  ## PCRE's own limits (`RegexLimitSite`), so:
+  ##   * a model whose subjects are all within their safe lengths stands; one
+  ##     past them is searched again with the lengths asserted, and without
+  ##     such a model the query is `zsUnknown`;
+  ##   * an UNSAT stands only if the query stays UNSAT with those calls
+  ##     stopped at a limit (`limitWorldRefuted`), else `zsUnknown`.
+  ## A query with no such call is `checkExact` alone.
+  let sites = limitSitesIn(ctx, query)
+  let points = pointSitesIn(ctx, query)
+  var decided = false
+  if points.len > 0: result = pointCheck(ctx, query, points, decided)
+  if not decided: result = checkExact(ctx, query, settings, rlimit)
+  if sites.len == 0: return
+  case result.status
+  of zsSat:
+    var over = false
+    for i in sites:
+      let st = regexLimitSites[i]
+      let l = result.m.eval(len(st.subject))
+      if not isNumeralAst(ctx, l.raw) or
+         parseBiggestInt(getNumeralString(l)) > st.safe:
+        over = true
+    if not over: return
+    var guarded = @query
+    for i in sites:
+      let st = regexLimitSites[i]
+      guarded.add len(st.subject) <= mkInt(st.safe)
+    let r2 = checkExact(ctx, guarded, settings, rlimit)
+    if r2.status == zsSat: return r2
+    result = r2
+    result.status = zsUnknown
+    result.m = nil
+    result.why = limitReason(ctx, sites)
+  of zsUnsat:
+    if not limitWorldRefuted(ctx, query, sites):
+      result.status = zsUnknown
+      result.why = limitReason(ctx, sites)
+  else: discard
 
 proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   ## The run-wide pools every walker query asserts beside its path's own
@@ -18660,6 +19205,24 @@ proc unwrittenDisc(sv: SymVal): string =
     ""
   else: ""
 
+proc observeRecvPart(p: Path; part: SymVal; w: var WalkCtx): Option[Degrade] =
+  ## RFC-0005 S8cd. A receiver arm reads `part` of its receiver (`recvValue`
+  ## observes none of it). An unwritten part taints `p` when its global's
+  ## entry value is modelled (`feGlobalHavoc`); any other is returned for the
+  ## arm to decline on.
+  let unwritten = unwrittenIn(part, simplified = true)
+  if unwritten.len == 0: return none(Degrade)
+  let d = w.degrade(unwrittenKind(unwritten), unwrittenMsg(unwritten))
+  if unwrittenKind(unwritten) != feGlobalHavoc: return some(d)
+  taintInPlace(p, d)
+  none(Degrade)
+
+func reassignReadsDisc(sv: SymVal; branches: seq[seq[int]]): bool =
+  ## RFC-0005 S8cd. Whether a discriminator assignment's branch-change check
+  ## depends on the old discriminator: not when one branch holds every tag
+  ## (one explicit group and no `else`), which no assignment can leave.
+  sv.kind != svVariant or branches.len != 1 or sv.vArmFields.hasKey(-1)
+
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
   ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
@@ -19527,8 +20090,18 @@ proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   ## read `Env` directly before, so a global receiver not yet written
   ## raised `KeyError` (the path was dropped: a false `sxUnsat`) or skipped
   ## the statement (its `FieldDefect` was never forked).
+  ##
+  ## RFC-0005 S8cd: the receiver is read as one, not observed. An untouched
+  ## unwritten part (a field the statement does not reach, an element it
+  ## overwrites) does not taint the path; each arm observes the parts it
+  ## reads (`observeRecvPart`, `unwrittenDisc`). And a global of a known type
+  ## is read at that type (`vGlobalTy`, as a parsed read carries).
   if p.env.hasKey(name): return (p.env[name], p)
-  lowerInExpr(p, mkVar(name), w)
+  let recv = mkVar(name)
+  if w.statics.globals.hasKey(name):
+    recv.vGlobalTy = w.statics.globals[name].ty
+  lowerAsReceiver = true
+  lowerInExpr(p, recv, w)
 
 proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
                      w: var WalkCtx): string =
@@ -20356,6 +20929,12 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
         placeholderReadDeclineMsg(recvSV, stmt.iaLoc, "mutation (index assign)"))
       survivors.add forkPathTainted(p, p.pc, p.env, d)
       continue
+    # RFC-0005 S8cd: the bounds check reads the length; the elements are
+    # untouched (`recvValue`).
+    let lenDecline = observeRecvPart(p, SymVal(kind: svInt, zi: recvSV.seqLen), w) # [placeholder-audited]
+    if lenDecline.isSome:
+      survivors.add forkPathTainted(p, p.pc, p.env, lenDecline.get)
+      continue
     let intProto = SymVal(kind: svInt, zi: mkInt(0))
     let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w, some(intProto))
     for cp in drainScalarRaiseForks(idxP, w):
@@ -20455,10 +21034,22 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
       survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
       continue
     let lenZi = recvSV.seqLen # [placeholder-audited]
+    # RFC-0005 S8cd: `pop` reads the length and the last element, no other
+    # (`recvValue`).
+    let lenDecline = observeRecvPart(p, SymVal(kind: svInt, zi: lenZi), w)
+    if lenDecline.isSome:
+      survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt),
+                                    lenDecline.get)
+      continue
     let emptyCond = not (lenZi > mkInt(0))
     discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
     let newLenZi = lenZi - mkInt(1)
     let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
+    let elemDecline = observeRecvPart(p, popped, w)
+    if elemDecline.isSome:
+      survivors.add forkPathTainted(p, p.pc & @[not emptyCond],
+                                    declinedPopEnv(p.env, stmt), elemDecline.get)
+      continue
     # N27 audit (item 1, round-6 fix round 3): rebinding the receiver after
     # a successful pop. `recvSV` was already declined above (this arm's own
     # `isUnsupportedFieldPlaceholder` check at the top of the `for p in
@@ -20681,16 +21272,19 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
       # (or substr) was left undecided by both pinned Z3s within
       # `seqQueryRLimit`.
       var leafShrink: seq[Z3Bool]
-      let rShrink = allocateSym(tString(),
+      var rShrink = allocateSym(tString(),
         freshDegradeName("__setLenStr"), leafShrink)
+      # RFC-0005 S8cl (item 4): a `newString`'s memory is its own.
+      if stmt.slFresh: rShrink.strBuf = sbOwned
       var envShrink = env2
       envShrink[stmt.slRetName] = rShrink
       survivors.add forkPath(p, p.pc & leafShrink & @[not grows,
         rShrink.str == substr(baseSV.str, mkInt(0), newLen)], envShrink)
       var leafGrow: seq[Z3Bool]
-      let rGrow = allocateSym(tString(),
+      var rGrow = allocateSym(tString(),
         freshDegradeName("__setLenStr"), leafGrow)
       let pad = mkStringVar(freshDegradeName("__setLenPad"))
+      if stmt.slFresh: rGrow.strBuf = sbOwned
       env2[stmt.slRetName] = rGrow
       survivors.add forkPath(p, p.pc & leafGrow & @[grows,
         len(pad) == newLen - oldLen,
@@ -20742,7 +21336,8 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
     # (`recvValue`). The arm skipped it, so its `FieldDefect` was never
     # forked (a false `sxUnsat` on the raise).
     let (oldSV, p) = recvValue(p0, stmt.vrObjName, w)
-    if unwrittenDisc(oldSV).len > 0:
+    if unwrittenDisc(oldSV).len > 0 and   # RFC-0005 S8cd
+       reassignReadsDisc(oldSV, stmt.vrBranches):
       # RFC-0005 S8bw (item 2): a global whose discriminator no write
       # reached (another field was written first).
       # RFC-0005 batch 6: an S8as global's discriminator is its entry
@@ -20832,7 +21427,8 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
   for p0 in paths:
     # RFC-0005 batch 6: as `isVariantReassign`'s receiver (`recvValue`).
     let (oldSV, p) = recvValue(p0, stmt.vrsObjName, w)
-    if unwrittenDisc(oldSV).len > 0:
+    if unwrittenDisc(oldSV).len > 0 and   # RFC-0005 S8cd
+       reassignReadsDisc(oldSV, stmt.vrsBranches):
       # RFC-0005 S8bw (item 2): as `isVariantReassign` above.
       # RFC-0005 batch 6: an S8as global's discriminator is its entry
       # value, any of its type: the path is tainted and the reassignment
@@ -24174,18 +24770,26 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   let ctx = requireCurrentContext()
   # ---- 1. Resolve the callee to an svClosure (Invariant 3 on failure). ----
   if not env.hasKey(e.ccCallee) or env[e.ccCallee].kind != svClosure:
-    # RFC-0005 S7: `dcSubstituted` -- a fixed-name `int64` stand-in whatever
-    # the closure's return type, returned before the call's arguments are
-    # lowered (their raises are dropped). `closureDegrade` puts ⊤ on the
-    # consuming path, not only in the closure sink.
+    # RFC-0005 S7: `dcSubstituted` -- a stand-in returned before the call's
+    # arguments are lowered (their raises are dropped). `closureDegrade` puts
+    # ⊤ on the consuming path, not only in the closure sink.
     closureDegrade(ceClosureUnknownCallee,
       "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
     havocUnknownClosureEffects(e, env)   ## RFC-0005 S8bh, S8bn
-    # No semantics: a well-sorted-for-int stand-in so a downstream read does
-    # not crash.
-    var fresh: seq[Z3Bool]
-    return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
+    # No semantics: a stand-in of the declared result type (RFC-0005 S8cd; it
+    # was an `int64` whatever that type was, so `f(k).len` over a proc value
+    # with no target declined as `iekSeqLen: unsupported receiver kind` and
+    # `for x in f(k)` leaked its taint). Its allocation facts hold of every
+    # value of the type, so they join the closure axioms, which constrain
+    # nothing but this occurrence's own leaves.
+    var facts: seq[Z3Bool]
+    result = allocateSym((if e.ccRetTy.isNil: tInt(64, true) else: e.ccRetTy),
+                         freshDegradeName("__closureUnknownCallee"), facts)
+    for f in facts:
+      currentClosureCallAxioms.add f
+      currentClosureCallAxiomStrs.add $f
+    return result
   # RFC-0005 S9: the by-reference captures as they stand at THIS call.
   let clo = refreshByRefCaptures(env[e.ccCallee], env)
   # RFC-0005 S8as: the names this expression read before the call (its own
@@ -26395,6 +26999,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
   regexRecFactConds = @[]                ## RFC-0005 S8bt: and their facts
+  regexLimitSites = @[]                  ## RFC-0005 S8cf: calls past PCRE's limits
+  regexPointSites = @[]                  ## RFC-0005 S8cf: calls read at points
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms
@@ -28314,6 +28920,27 @@ proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
     nil
 {.pop.}
 
+proc storeOrdinal[F](f: var F; v: int64) =
+  ## RFC-0005 S8cl (item 5; factored out of S8s's `validDefault`). `f = F(v)`,
+  ## range-checked, written through its bytes: `F` can be an imported type whose
+  ## C++ assignment is deleted. `std/atomics`' `Atomic[T]` on cpp holds `value:
+  ## AtomicInt8`, an ordinal alias imported as `std::atomic<NI8>`, and an
+  ## assignment there emitted a use of the deleted `std::atomic::operator=` (a
+  ## cpp compile error in every SUT whose cell holds an `Atomic`,
+  ## `tsymex_r6_n43_parity`).
+  if v < int64(ord(low(F))) or v > int64(ord(high(F))):
+    raise newException(RangeDefect, "value out of range: " & $v)  # [raise-audited: category-c: the check `F(v)` made implicitly, in reading a witness back, outside the walk]
+  when sizeof(F) == 1:
+    var lo = int8(v)
+  elif sizeof(F) == 2:
+    var lo = int16(v)
+  elif sizeof(F) == 4:
+    var lo = int32(v)
+  else:
+    var lo = v
+  static: doAssert sizeof(lo) == sizeof(F)
+  copyMem(addr f, addr lo, sizeof(F))
+
 proc readCellField[F](c: RefWitness; path: string; f: var F)
 
 proc validDefault[F](f: var F) =
@@ -28332,22 +28959,7 @@ proc validDefault[F](f: var F) =
     discard
   elif F is Ordinal:
     if ord(f) < ord(low(F)) or ord(f) > ord(high(F)):
-      # RFC-0005 S8s. Written through its bytes, not `f = low(F)`: `F` can be
-      # an imported type whose C++ assignment is deleted. `std/atomics`'
-      # `Atomic[T]` on cpp holds `value: AtomicInt8`, an ordinal alias
-      # imported as `std::atomic<NI8>`, and `f = low(F)` there emitted a
-      # use of the deleted `std::atomic::operator=` (a cpp compile error in
-      # every SUT whose cell holds an `Atomic`, `tsymex_r6_n43_parity`).
-      when sizeof(F) == 1:
-        var lo = int8(ord(low(F)))
-      elif sizeof(F) == 2:
-        var lo = int16(ord(low(F)))
-      elif sizeof(F) == 4:
-        var lo = int32(ord(low(F)))
-      else:
-        var lo = int64(ord(low(F)))
-      static: doAssert sizeof(lo) == sizeof(F)
-      copyMem(addr f, addr lo, sizeof(F))
+      storeOrdinal(f, int64(ord(low(F))))   # RFC-0005 S8s: not `f = low(F)`
   else:
     discard
 
@@ -28483,8 +29095,8 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
   elif F is Ordinal:
     var i: int64
     var u: uint64
-    if cellInt(c, path, i): f = F(i)
-    elif cellUInt(c, path, u): f = F(int64(u))
+    if cellInt(c, path, i): storeOrdinal(f, i)   # RFC-0005 S8cl
+    elif cellUInt(c, path, u): storeOrdinal(f, int64(u))
   elif F is string:
     # RFC-0005 S8ap: a string field is read from the heap and rendered.
     var x: string

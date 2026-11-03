@@ -520,7 +520,7 @@ suite "S8ct: §2.3 rule 3 still holds":
     check nativeRun("routineGlobal", 3).hit
 
   test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 256
+    check parseInt(symexWalkerVersion) >= 261
 
 when replayForks:
   type Worker = object

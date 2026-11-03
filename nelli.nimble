@@ -1140,6 +1140,21 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_caps_c",
             "tsymex_rfc0005_s8bt_replace_lemmas",
             "tsymex_rfc0005_s8bt_replace_facts",
+            # RFC-0005 S8cf -- S8bt's remainder.
+            "tsymex_rfc0005_s8cf_reach",
+            "tsymex_rfc0005_s8cf_limits",
+            "tsymex_rfc0005_s8cf_point",
+            "tsymex_rfc0005_s8cf_jitlimit",
+            "tsymex_rfc0005_s8cf_skipcount",
+            "tsymex_rfc0005_s8cf_limitgaps",
+            "tsymex_rfc0005_s8cf_classes",
+            "tsymex_rfc0005_s8cf_jitutf",
+            "tsymex_rfc0005_s8cf_jitutf_b",
+            "tsymex_rfc0005_s8cf_jitutf_c",
+            "tsymex_rfc0005_s8cf_jitutf_d",
+            "tsymex_rfc0005_s8cf_jitutf_e",
+            "tsymex_rfc0005_s8cf_jitutf_f",
+            "tsymex_rfc0005_s8cf_replace",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the
@@ -1301,6 +1316,10 @@ task test, "Run the test suite":
             # aggregate globals, pointers into case objects and aggregate
             # containers. Walker 227 (provisional).
             "tsymex_rfc0005_s8bw_remainder",
+            "tsymex_rfc0005_s8cd_globals",
+            "tsymex_rfc0005_s8cd_ops",
+            "tsymex_rfc0005_s8cd_setorder_small",
+            "tsymex_rfc0005_s8cd_setorder_large",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
             # kind probes in contexts of their own (no step's cost moves
             # with the walk's state; a thread's first walk searches as its
@@ -1388,8 +1407,23 @@ task test, "Run the test suite":
             "tsymex_rfc0005_b9_integration",
             # A call declines before Nim's call depth limit ends the process.
             "tsymex_rfc0005_b9_calldepth",
+            # RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked on
+            # batch 9. walker 245->252.
+            "tsymex_rfc0005_b10_integration",
+            # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
+            "tsymex_rfc0005_s8cl_magics",
+            "tsymex_rfc0005_s8cl_lifetime",
+            "tsymex_rfc0005_s8cl_strings",
+            # RFC-0005 S8cr: the definition-of-done audit's gaps. The six
+            # unpinned fresh-symbol kinds and the coverage invariant; a live
+            # sevError beside a clean witness and symexForAll's own pins; a
+            # helper check for each to-unsat flip. No bump.
+            "tsymex_rfc0005_s8cr_intro",
+            "tsymex_rfc0005_s8cr_pins",
+            "tsymex_rfc0005_s8cr_flips",
+            "tsymex_rfc0005_s8cr_flips_str",
             # RFC-0005 S8ct: no replay runs in the host process, and a term too
-            # deep for a recursive walk leaves the process alive; walker 245->256.
+            # deep for a recursive walk leaves the process alive; walker 252->261.
             "tsymex_rfc0005_s8ct_isolation",
             "tsymex_rfc0005_s8ct_reexec",
             "tsymex_rfc0005_s8ct_deepterm"]:

@@ -1055,11 +1055,19 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8; a
     ## proc-value call's aliasing shapes decline where S8ca's sort lifted
     ## their decline. 241->245.
+    ## RFC-0005 S8cf (PCRE's limits read; the rest of S8bt's remainder).
+    ## Provisional 242.
     ## RFC-0005 S8cb (S8bo onto batch 7, and S8bo's remainder). Provisional
     ## 243 (S8bz holds 241, S8cf 242). 237->243.
-    ## RFC-0005 S8ct (no replay runs in the host process; S8cb stacked on the
-    ## channel). Provisional 256. 245->256.
-    check symexWalkerVersion == "256"
+    ## RFC-0005 S8cd: proc-value results, global entry cells (a false sxUnsat),
+    ## case-object globals, set order (false verdicts both ways), receivers,
+    ## a leaf pinned to a literal. 245->249.
+    ## RFC-0005 S8cl (a bodiless magic is modelled or declines, `unsafeNew`
+    ## and `newString` allocate, `setLen` reads after its length). 245->248.
+    ## RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked. 245->252.
+    ## RFC-0005 S8ct (no replay runs in the host process; batch 10 merged).
+    ## Provisional 261 (S8cs and S8cu hold 260). 252->261.
+    check symexWalkerVersion == "261"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

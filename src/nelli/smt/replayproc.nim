@@ -104,6 +104,14 @@ proc refusedStatically*(why: string): ReplayChild =
   ## SUT's state cannot be handed to one.
   refused(why)
 
+proc refusedNotMarshallable*(why: string): ReplayChild =
+  ## RFC-0005 S8ct. A re-executed child (Windows) must be handed what the SUT
+  ## reaches, and `why` names what cannot be. A forked child copies everything,
+  ## so a Linux or macOS run replays the same SUT; the message says so.
+  refused("replay not marshallable: " & why & " (on this platform replay " &
+          "runs in a re-executed child, which must be handed what the SUT " &
+          "reaches; a Linux or macOS run forks and replays it)")
+
 var hitLabel: string
 var hitDepth: int
 var hitOut: proc (b: char) {.nimcall, gcsafe.}
@@ -563,7 +571,10 @@ when replayReexecs:
       body: proc () {.closure.}
       mainFiber: pointer
 
-    proc fiberMain(param: pointer) {.stdcall.} =
+    proc fiberMain(param: pointer) {.stdcall, stackTrace: off, lineTrace: off.} =
+      # Never returns: it switches away, and its stack is then freed. With a stack
+      # trace frame of its own, Nim's frame chain would be left pointing into
+      # that freed stack, and the next call read it (0xC0000005 on Windows).
       let f = cast[ptr FiberRun](param)
       f.body()
       switchToFiberR(f.mainFiber)
@@ -602,6 +613,10 @@ when replayReexecs:
     import std/posix
 
     proc c_exit_now(code: cint) {.importc: "_exit", header: "<unistd.h>".}
+    # At module scope: an `importc` var declared in a proc is emitted as a C
+    # local of that name, which shadows the enum constant with an
+    # uninitialised one, and `setrlimit` then fails without a word.
+    var rlimitAsReexec {.importc: "RLIMIT_AS", header: "<sys/resource.h>".}: cint
 
     proc spawnAndWait(spec: string; timeoutMs: int; c: var ReplayChild): bool =
       let exe = getAppFilename()
@@ -654,11 +669,10 @@ when replayReexecs:
         var sa: Sigaction
         sa.sa_handler = SIG_DFL
         discard sigaction(s, sa, nil)
-      var rlimitAs {.importc: "RLIMIT_AS", header: "<sys/resource.h>".}: cint
       var r: RLimit
-      if getrlimit(rlimitAs, r) == 0:
+      if getrlimit(rlimitAsReexec, r) == 0:
         r.rlim_cur = replayMemoryLimit
-        discard setrlimit(rlimitAs, r)
+        discard setrlimit(rlimitAsReexec, r)
 
     proc endChild(code: int) =
       c_exit_now(cint(code))

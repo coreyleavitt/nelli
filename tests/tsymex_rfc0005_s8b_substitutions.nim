@@ -27,6 +27,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/exn_hierarchy
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   for e in errs:
@@ -200,8 +201,10 @@ suite "RFC-0005 S8b (a) -- a bodiless importc callee is an opaque effect, not an
   test "statement-position inert foreign call stays a no-op (clean sxSat)":
     let r = symexFind(s8bImportcInert, tLabel("s8b_importc_inert"))
     dump(r.errors)
-    check r.status == sxSat
-    check r.witness[0] == 42
+    # A re-executed child cannot run a foreign routine's SUT (RFC-0005 S8ct).
+    check decidedOrNotMarshallable(r, sxSat)
+    if r.status == sxSat:
+      check r.witness[0] == 42
 
   test "{.symexTransparent.} importc keeps working (dropped, clean sxSat)":
     let r = symexFind(s8bImportcTransparent, tLabel("s8b_importc_transparent"))

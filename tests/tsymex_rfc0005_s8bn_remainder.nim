@@ -11,6 +11,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
+import s8ct_platform   ## RFC-0005 S8ct
 
 macro progOf(fn: typed): untyped =
   ## The `SymexProgram` `symexFind` would build for `fn`, so a test can read
@@ -58,7 +59,7 @@ template confirmed(fn: typed, lbl: string): untyped =
     let r = clean(fn, lbl, sxSat)
     if r.status == sxSat:
       checkpoint $r.heapSnapshot
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
 # ---- 1-2. ptr alias witnesses ------------------------------------------------
 #

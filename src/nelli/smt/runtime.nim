@@ -7375,6 +7375,55 @@ proc arrayIndexConds(idx: SymVal; lo: int64; n: int): tuple[inLo, inHi: Z3Bool] 
   else:
     raise newException(ValueError, "isIndex: non-int index kind")  # [raise-audited: category-c: index-must-be-int invariant (Nim array/seq indexing typing rules)]
 
+proc literalPosition(idx: SymVal; lo: int64; n: int): int =
+  ## RFC-0005 S8ct. The position (`0 ..< n`) a literal index names, or -1 when
+  ## the index does not fold to a numeral or names no position. Finding it by
+  ## asking each position whether it is the one cost a simplify per element:
+  ## a store into `array[4096, int]` at `pad[3]`, in a recursion inlined 24
+  ## deep, took three minutes of walking.
+  if idx.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}: return -1
+  let ctx = requireCurrentContext()
+  let folded = ctx.checkErr Z3_simplify(ctx.raw, rawAstOf(idx))
+  if not Z3_is_numeral_ast(ctx.raw, folded): return -1
+  var v: int64
+  if idx.kind == svInt:
+    if not Z3_get_numeral_int64(ctx.raw, folded, addr v): return -1
+  else:
+    var u: uint64
+    if not Z3_get_numeral_uint64(ctx.raw, folded, addr u): return -1
+    let w = case idx.kind
+      of svBV8: 8
+      of svBV16: 16
+      of svBV32: 32
+      else: 64
+    if idx.signed and w < 64 and u >= (1'u64 shl (w - 1)):
+      v = int64(u) - (1'i64 shl w)
+    else:
+      v = cast[int64](u)
+  if v < lo or v - lo >= int64(n): return -1
+  int(v - lo)
+
+proc symbolicPositions*(idx: SymVal; lo: int64; n: int): int =
+  ## RFC-0005 S8ct. How many positions an access at `idx` merges: 0 for a
+  ## literal index, else those of `0 ..< n` the index's type can hold. Past
+  ## `termWalkMaxDepth` the access declines (`arrayAccessTooWide`).
+  if literalPosition(idx, lo, n) >= 0: return 0
+  let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
+                   bvIndexWindow(idx)
+                 else: (low(int64), high(int64))
+  for k in 0 ..< n:
+    let v = lo + int64(k)
+    if v >= mn and v <= mx: inc result
+
+proc arrayAccessTooWide*(idx: SymVal; lo: int64; n: int): bool =
+  ## RFC-0005 S8ct. An access at a symbolic index merges every position its
+  ## index may name: a term as deep as the array is long, built a position at a
+  ## time. Past `termWalkMaxDepth` positions it is deeper than the term walks
+  ## take, and the walk itself is unbounded by any budget (`array[4096, int]`
+  ## behind a recursion inlined 24 deep walked for seven minutes), so the
+  ## access declines instead: a read is a fresh value, a write is dropped.
+  symbolicPositions(idx, lo, n) > termWalkMaxDepth
+
 proc arraySelect(elems: seq[SymVal]; idx: SymVal; lo: int64): SymVal =
   ## RFC-0005 S8z. Element `idx` of an array whose first index is `lo`, as
   ## an ite chain over the positions (element `k` is Nim's index `lo + k`),
@@ -7386,6 +7435,8 @@ proc arraySelect(elems: seq[SymVal]; idx: SymVal; lo: int64): SymVal =
   ## element, and a merge of two seq values is `iteSV`'s havoc
   ## (`feUnsupportedOpHavoc`), so `a[1].len` of an `array[N, seq[T]]` read
   ## a fresh seq even at a constant index.
+  let at = literalPosition(idx, lo, elems.len)   # RFC-0005 S8ct
+  if at >= 0: return elems[at]
   let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
                    bvIndexWindow(idx)
                  else: (low(int64), high(int64))
@@ -7404,6 +7455,11 @@ proc arrayStore(elems: seq[SymVal]; idx: SymVal; lo: int64;
   ## RFC-0005 S8z. The array `elems` with element `idx` replaced by `val`:
   ## each position becomes `ite(idx == lo + k, val, old[k])`. Under the
   ## caller's in-bounds conditions exactly one position is written.
+  let at = literalPosition(idx, lo, elems.len)   # RFC-0005 S8ct
+  if at >= 0:
+    result = elems
+    result[at] = val
+    return
   let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
                    bvIndexWindow(idx)
                  else: (low(int64), high(int64))
@@ -20157,6 +20213,18 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
       # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
       maybeForkDefect(cp, not (inLoCond and inHiCond),
                       "IndexDefect", none(string), w)
+      # RFC-0005 S8ct: an index that may name more positions than a term walk
+      # takes reads a fresh value instead (`arrayAccessTooWide`).
+      if arrayAccessTooWide(idxSV, stmt.ixLo, n):
+        let locPrefix = if stmt.ixLoc.len > 0: stmt.ixLoc & ": " else: ""
+        let dw = w.degrade(feUnsupportedOpHavoc,
+          locPrefix & "isIndex: an array of " & $n & " elements at a " &
+          "symbolic index that may name more than termWalkMaxDepth (" &
+          $termWalkMaxDepth & ") of them; the element read is a fresh value " &
+          "(feUnsupportedOpHavoc)")
+        survivors.add forkPathTainted(cp, cp.pc & @[inLoCond, inHiCond],
+          declinedIndexEnv(cp.env, stmt, stmt.ixElemTy), dw)
+        continue
       # In-bounds path continues with binding; build the value via ite.
       let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
       let unwrittenPart =
@@ -20225,6 +20293,17 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
                                         seqElemLitProto(elemTy))
         for vp in drainScalarRaiseForks(valP, w):
           let aligned = alignIntKind(valSV, recvSV.arrElems[0].kind)
+          if aligned.isSome and arrayAccessTooWide(idxSV, stmt.iaLo, n):
+            # RFC-0005 S8ct: see `arrayAccessTooWide`. The write is dropped, as
+            # below: a stale env (`feUnsupportedStmtKind`), never an sxUnsat.
+            let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+            let dw = w.degrade(feUnsupportedStmtKind,
+              locPrefix & "isIndexAssign: an array of " & $n & " elements at " &
+              "a symbolic index that may name more than termWalkMaxDepth (" &
+              $termWalkMaxDepth & ") of them; the write is dropped")
+            survivors.add forkPathTainted(vp, vp.pc & @[inLoCond, inHiCond],
+                                          vp.env, dw)
+            continue
           if aligned.isNone:
             # The write is dropped (the array keeps its old element): a
             # stale env, so `feUnsupportedStmtKind` (dcSubstituted), which

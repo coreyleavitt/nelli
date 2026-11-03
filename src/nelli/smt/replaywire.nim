@@ -140,7 +140,21 @@ proc wireableImpl(t: NimNode; seen: var seq[NimNode]): bool =
       return true
     else:
       discard
+    # A type imported from C (`SysLockObj` is `pthread_mutex_t`): its Nim
+    # fields are a stand-in for the C layout, not the C layout.
+    let def = t.getImpl
+    if def.kind == nnkTypeDef and def[0].kind == nnkPragmaExpr:
+      for p in def[0][1]:
+        let name = (if p.kind in {nnkExprColonExpr, nnkCall}: p[0] else: p)
+        if name.kind in {nnkIdent, nnkSym} and
+           name.strVal in ["importc", "importcpp", "importjs", "importobjc",
+                           "incompleteStruct"]:
+          return false
     seen.add t
+    # An alias (`Lock = SysLock = SysLockObj`): the named type, so its pragmas
+    # are read, not the object it ends at.
+    if def.kind == nnkTypeDef and def[2].kind == nnkSym and def[2] != t:
+      return wireableImpl(def[2], seen)
     wireableImpl(t.getTypeImpl, seen)
   of nnkBracketExpr:
     case t[0].strVal
@@ -157,7 +171,14 @@ proc wireableImpl(t: NimNode; seen: var seq[NimNode]): bool =
       true
     else:
       # An instance of a generic object: its fields, with its arguments bound.
-      wireableImpl(t.getTypeImpl, seen)
+      # A recursive instance (`next: Node[T]`) is met again on the way down;
+      # an instance whose implementation is itself again makes no progress.
+      for s in seen:
+        if s.kind == nnkBracketExpr and s.repr == t.repr: return true
+      let impl = t.getTypeImpl
+      if impl.kind == nnkBracketExpr and impl.repr == t.repr: return false
+      seen.add t
+      wireableImpl(impl, seen)
   of nnkRefTy:
     wireableRef(t[0], seen)
   of nnkPtrTy, nnkProcTy, nnkEnumTy, nnkDistinctTy:

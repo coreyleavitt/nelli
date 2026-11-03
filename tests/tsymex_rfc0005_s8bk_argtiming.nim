@@ -22,6 +22,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import s8ct_platform   ## RFC-0005 S8ct
 
 include s8bk_argtiming_fixture
 

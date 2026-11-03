@@ -98,9 +98,9 @@ proc nilDeref(k: int) =
   symexTarget("t")
 
 proc recur(n: int): int =
-  # The sort's probe holds `array[4096, int]`. That makes terms past
-  # `termWalkMaxDepth` (`tsymex_rfc0005_s8ct_deepterm` pins those) and takes the
-  # analysis about 5 minutes, which this suite's budget has no room for.
+  # The sort's probe holds `array[4096, int]`, whose access at `n and 7` now
+  # declines (`arrayAccessTooWide`); `tsymex_rfc0005_s8ct_deepterm` pins that
+  # SUT. This frame is modelled, so the row still decides.
   var pad: array[64, int]
   pad[n and 7] = n
   recur(n + 1) + pad[n and 7]
@@ -205,6 +205,12 @@ proc refuted(k: int) =
   if gG != 0 and k == 42:
     symexTarget("t")
 
+# State the re-executed child cannot be handed: a routine's `{.global.}`.
+proc routineGlobal(k: int) =
+  var calls {.global.} = 0
+  if gG == 0 and calls == 0 and k == 3:
+    symexTarget("t")
+
 # Threads at the fork. Another thread would end the wait, and in the child that
 # thread does not exist.
 var gHeld: int
@@ -247,6 +253,7 @@ proc nativeMain(row: string; k: int) =
     of "writesThenLabel": writesThenLabel(k)
     of "confirmed": confirmed(k)
     of "refuted": refuted(k)
+    of "routineGlobal": routineGlobal(k)
     else: quit(250)
   except Exception as e:
     stdout.writeLine "RAISED|" & $e.name
@@ -498,6 +505,19 @@ suite "S8ct: §2.3 rule 3 still holds":
     check r.status == sxUnknown
     check hasKind(r.errors, feReplayRefuted)
     check not nativeRun("refuted", 42).hit
+
+  test "state the wire cannot carry: Linux decides, re-exec names why not":
+    let r = symexFind(routineGlobal, tLabel("t"))
+    checkpoint(show(r.errors))
+    when replayReexecs:
+      check r.status == sxUnknown
+      check hasKind(r.errors, feReplayDeclined)
+      check "replay not marshallable" in show(r.errors)
+      check "a Linux or macOS run forks and replays it" in show(r.errors)
+    else:
+      check r.status == sxSat
+      check r.soundness.replay == rsConfirmed
+    check nativeRun("routineGlobal", 3).hit
 
   test "the walker's version floor":
     check parseInt(symexWalkerVersion) >= 256

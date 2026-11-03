@@ -923,9 +923,12 @@ proc arrayIndexLow*(n: NimNode): int64 =
 
 proc namedRefPlaceholder(objSym: NimNode): IRType   ## fwd decl (RFC-0005 S8ar)
 
-const maxAliasesFollowed = 32
-  ## RFC-0005 S8ct. The plain aliases `classifyType` follows in a row.
-var aliasesFollowed {.compileTime.} = 0
+const maxAliasesFollowed = 256
+  ## RFC-0005 S8ct. Keeps a chain written out by hand short of the VM's call depth.
+  ## Past it the type is unsupported, so the run declines.
+
+var aliasTrail {.compileTime.}: seq[NimNode]
+  ## RFC-0005 S8ct. The alias symbols `classifyType` is inside of.
 
 var objectsInClassification {.compileTime.}: seq[string]
   ## RFC-0005 S8ar. The `nominalId`s of the named object types whose record
@@ -1764,13 +1767,17 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let aliasImpl = resolved.getImpl
       if aliasImpl.kind == nnkTypeDef and aliasImpl.len >= 3 and
          aliasImpl[2].kind in {nnkSym, nnkBracketExpr} and
-         aliasImpl[2] != resolved and aliasesFollowed < maxAliasesFollowed:
-        # RFC-0005 S8ct: on `Lock` (std/locks) this walk does not end, and the
-        # VM's call depth stopped the build of a program 6cbfe8f builds. Past the
-        # limit the type is unsupported, as it was before S8bl.
-        inc aliasesFollowed
+         aliasImpl[2] != resolved and resolved notin aliasTrail and
+         aliasTrail.len < maxAliasesFollowed:
+        # RFC-0005 S8ct: the typed node on an alias's right can name the alias.
+        # With `Lock = SysLock; SysLock = SysLockObj`, and any chain of two
+        # aliases to an object, `getTypeInst` of the `SysLock` in `Lock`'s
+        # definition is `Lock`, so this step came back to where it began until
+        # the VM's call depth stopped the build. A symbol already on the trail
+        # is that return: the type is unsupported, as it was before S8bl.
+        aliasTrail.add resolved
         result = classifyType(aliasImpl[2])
-        dec aliasesFollowed
+        discard aliasTrail.pop()
         return
     # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
     # Option 2). This text-match catch-all used to `error()` at MACRO-

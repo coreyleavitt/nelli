@@ -18,6 +18,7 @@
 import std/[unittest, sets]
 import nelli/symex
 import nelli/smt/types
+import s8ct_platform   ## RFC-0005 S8ct
 
 var runsAtStart = 0
 proc runsSince(): int =
@@ -212,18 +213,18 @@ suite "RFC-0005 S2 -- replayWitness":
     ## RFC-0005 S8h: a `ptr` to a scalar `alloc0` can hold is faithful.
     var cellVal = 3
     runsAtStart = replayExecutions()
-    check replayWitness(ptrSut, (addr cellVal,), tLabel("ptrHit"), {}) ==
-          roConfirmed
-    check runsSince() == 1
+    check replayedOrNotMarshallable(replayWitness(ptrSut, (addr cellVal,), tLabel("ptrHit"), {}), roConfirmed)
+    # A re-executed child cannot be handed a `ptr` witness; nothing runs.
+    check runsSince() == (if replayReexecs: 0 else: 1)
 
   test "witness fidelity: a ptr string witness is a real cell and runs":
     ## RFC-0005 S8bn (item 2): a `ptr string` renders through `resolveRef`
     ## (it was the unexecutable example below until S8bn).
     var strVal = "abc"
     runsAtStart = replayExecutions()
-    check replayWitness(ptrStrSut, (addr strVal,), tLabel("ptrStrHit"), {}) ==
-          roConfirmed
-    check runsSince() == 1
+    check replayedOrNotMarshallable(replayWitness(ptrStrSut, (addr strVal,), tLabel("ptrStrHit"), {}), roConfirmed)
+    # A re-executed child cannot be handed a `ptr` witness; nothing runs.
+    check runsSince() == (if replayReexecs: 0 else: 1)
 
   test "witness fidelity: an unexecutable ptr witness is never run":
     ## `ptr seq[int]` does not render through `resolveRef`: running its
@@ -316,6 +317,5 @@ suite "RFC-0005 S2 -- stackable capture context":
       ## The inner replay reaches "magic"; the outer frame must not see it.
       doAssert replayWitness(magicSut, (42,), tLabel("magic"), {}) ==
                roConfirmed
-    check replayWitness(outerSut, (0,), tLabel("outerLabel"), {}) ==
-          roConfirmed
-    check replayWitness(outerSut, (0,), tLabel("magic"), {}) == roRefuted
+    check replayedOrNotMarshallable(replayWitness(outerSut, (0,), tLabel("outerLabel"), {}), roConfirmed)
+    check replayedOrNotMarshallable(replayWitness(outerSut, (0,), tLabel("magic"), {}), roRefuted)

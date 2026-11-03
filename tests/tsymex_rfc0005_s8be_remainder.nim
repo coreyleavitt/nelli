@@ -11,6 +11,7 @@ import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import s8ct_platform   ## RFC-0005 S8ct
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -26,7 +27,7 @@ template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
   block:
     let r = symexFind(fn, tgt)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == want
+    check decidedOrNotMarshallable(r, want)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
@@ -34,7 +35,7 @@ template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
   block:
     let r = symexFind(fn, tgt, s)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == want
+    check decidedOrNotMarshallable(r, want)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 template declines(fn: typed, tgt: SymexTarget, kind: SymexErrorKind,

@@ -1,10 +1,11 @@
 ## RFC-0005 (soundness channels) slice S8ar -- S8ap's "Different mechanisms,
 ## reported and not fixed here" remainder.
 ##
-## RFC-0005 S8cm: part 6 of 6 of this suite, with
+## RFC-0005 S8cm: part 8 of 8 of this suite, with
 ## `tsymex_rfc0005_s8ar_remainder`, `tsymex_rfc0005_s8ar_remainder_b`,
 ## `tsymex_rfc0005_s8ar_remainder_c`, `tsymex_rfc0005_s8ar_remainder_d`,
-## `tsymex_rfc0005_s8ar_remainder_e`. Split so that each part compiles and runs
+## `tsymex_rfc0005_s8ar_remainder_g`, `tsymex_rfc0005_s8ar_remainder_e`,
+## `tsymex_rfc0005_s8ar_remainder_h`. Split so that each part compiles and runs
 ## in under 60 s on the Windows legs (the whole file took 120 s).
 
 import std/[unittest, strutils, sequtils, tables, sets]

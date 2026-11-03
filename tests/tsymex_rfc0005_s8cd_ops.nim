@@ -3,6 +3,11 @@
 ## `tsymex_rfc0005_s8cd_setorder_small` and `_large`.
 ##
 ## The "nim" tests run each SUT natively.
+##
+## RFC-0005 S8cm: part 1 of 2 of this suite, with `tsymex_rfc0005_s8cd_ops_b`.
+## Split so that each part compiles and runs in under 60 s on the Windows legs
+## (the whole file took 62 s).
+
 import std/[unittest, strutils, sets, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -156,87 +161,3 @@ suite "S8cd item 1: len over each receiver kind":
     dead(knownTab, "k_tab_dead")
     reached(knownSet, "k_set")
     reached(knownBits, "k_bits")
-
-  test "a called proc value whose Table key has no model: a decline, never sxUnsat":
-    let r = symexFind(badKeyCalled, tLabel("k_badkey"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-  test "a for over a call runs the call once":
-    reached(knownFor, "k_for")
-    dead(knownFor, "k_for_dead")
-
-# --- item 6: a pinned long literal under a tight cap ----------------------------
-
-const cap8 = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
-const cap2 = SymexSettings(budget: ResourceBudget(maxSeqLen: 2))
-
-proc longPinned(s: string) =
-  symexAssume(s == "abcdefghijkl")
-  if s.rfind("kl") == 10: symexTarget("c_long")
-  if s.rfind("kl") == 3: symexTarget("c_long_dead")
-
-proc longPinnedNeedle(s, n: string) =
-  symexAssume(s == "abcabcabcabc")
-  if s.rfind(n) == 9 and n.len == 3: symexTarget("c_needle")
-  if s.rfind(n) >= 0 and n.len > 12: symexTarget("c_needle_dead")
-
-proc longPinnedLen(s, t: string) =
-  symexAssume(s == "abcdefghijkl")
-  if s.len == 12 and t.len == 1: symexTarget("c_len")
-  if t.len == 9 and s.len == 12: symexTarget("c_other_past")
-
-proc pastCap(s, t: string) =
-  symexAssume(s == "abc")
-  if t.len > 10 and s.rfind("bc") == 1: symexTarget("c_past")
-
-proc withinCap(s, t: string) =
-  symexAssume(s == "abc")
-  if t.len > 2 and s.rfind("bc") == 1: symexTarget("c_within")
-
-proc pinnedThenLen(s, t: string) =
-  symexAssume(s == "abcdefghij" and t.len == 2)
-  if s.len == t.len + 8: symexTarget("c_and")
-
-suite "S8cd item 6: a string pinned to a literal under a cap":
-
-  test "nim":
-    symexCaptureBegin()
-    longPinned("abcdefghijkl")
-    longPinnedNeedle("abcabcabcabc", "abc")
-    longPinnedLen("abcdefghijkl", "x")
-    withinCap("abc", "xyz")
-    pinnedThenLen("abcdefghij", "xy")
-    check symexCaptureEnd() ==
-      toHashSet(["c_long", "c_needle", "c_len", "c_within", "c_and"])
-
-  test "the literal itself is past the cap: decided, not declined":
-    reached(longPinned, "c_long", cap8)
-    dead(longPinned, "c_long_dead", cap8)
-    reached(longPinned, "c_long", cap2)
-
-  test "a symbolic needle over a pinned haystack":
-    reached(longPinnedNeedle, "c_needle", cap8)
-    dead(longPinnedNeedle, "c_needle_dead", cap8)
-
-  test "a conjunct of the assumption pins it too":
-    reached(pinnedThenLen, "c_and", cap8)
-
-  test "another string still takes the cap":
-    reached(longPinnedLen, "c_len", cap8)
-    let r = symexFind(longPinnedLen, tLabel("c_other_past"), cap2)
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check "maxSeqLen" in show(r.errors)
-
-  test "SAT within the cap, and SAT only past it":
-    reached(withinCap, "c_within", cap8)
-    let r = symexFind(pastCap, tLabel("c_past"), cap8)
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check "maxSeqLen" in show(r.errors)
-
-suite "S8cd":
-  test "walker floor":
-    check parseInt(symexWalkerVersion) >= 249

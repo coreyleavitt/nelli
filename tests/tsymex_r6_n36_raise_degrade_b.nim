@@ -90,10 +90,10 @@
 ## exercised above) is relied on instead, per the class description's own
 ## allowance.
 ##
-## RFC-0005 S8cm: part 2 of 3 of this suite, with
-## `tsymex_r6_n36_raise_degrade`, `tsymex_r6_n36_raise_degrade_c`. Split so
-## that each part compiles and runs in under 60 s on the Windows legs (the
-## whole file took 66 s).
+## RFC-0005 S8cm: part 3 of 4 of this suite, with
+## `tsymex_r6_n36_raise_degrade`, `tsymex_r6_n36_raise_degrade_d`,
+## `tsymex_r6_n36_raise_degrade_c`. Split so that each part compiles and runs
+## in under 60 s on the Windows legs (the whole file took 66 s).
 
 import std/[unittest, strutils, tables]
 import nelli/symex

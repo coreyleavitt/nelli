@@ -90,11 +90,10 @@
 ## exercised above) is relied on instead, per the class description's own
 ## allowance.
 ##
-## RFC-0005 S8cm: part 1 of 3 of this suite, with
-## `tsymex_r6_n36_raise_degrade_b`, `tsymex_r6_n36_raise_degrade_c`. Split so
-## that each part compiles and runs in under 60 s on the Windows legs (the
-## whole file took 66 s).
-
+## RFC-0005 S8cm: part 1 of 4 of this suite, with
+## `tsymex_r6_n36_raise_degrade_d`, `tsymex_r6_n36_raise_degrade_b`,
+## `tsymex_r6_n36_raise_degrade_c`. Split so that each part compiles and runs
+## in under 60 s on the Windows legs (the whole file took 66 s).
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -159,50 +158,6 @@ suite "symex N36 -- iekStrInOptionRegion BV-bound decline inside a block:":
     ## silent completion).
     symexTargetSolveStats = default(typeof(symexTargetSolveStats))
     let r = symexFind(sutOptionRegionBlockAfter, tLabel("n36_optregion_block_after"))
-    # RFC-0005 S8y: the suite's runtime floor, by count (never wall time).
-    checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
-               " declined=" & $symexTargetSolveStats.declined &
-               " slowSat=" & $symexTargetSolveStats.slowSat &
-               " units=" & $symexTargetSolveStats.units
-    # RFC-0005 S8ag: the one-character `str.indexof` split finds a model for
-    # every exit hit S8y saw run out (N36-1's five-iteration solves), and a
-    # tainted SAT after half its budget bounds later hits as a budget-out
-    # does: no target-hit solve runs out of budget, at most one is slow,
-    # and the walk's target solves stay under two 20M budgets (measured
-    # 24-27M on Z3 5.1, 3.6-4.7M on 4.13.4; 31-33M with a budget-out
-    # before).
-    check symexTargetSolveStats.budgetOut == 0
-    check symexTargetSolveStats.slowSat <= 1
-    check symexTargetSolveStats.units < 40_000_000
-    var sawOptRegionKind = false
-    for e in r.errors:
-      checkpoint($e.kind & ": " & e.msg)
-      if e.kind == seUnsupportedStringOp and "iekStrInOptionRegion" in e.msg:
-        sawOptRegionKind = true
-    check r.status == sxUnknown
-    check sawOptRegionKind
-
-# --- non-block companion: same shape, no `block:` wrapper -- must already be
-#     an honest classified decline, unaffected by this slice's fix. ----------
-
-proc sutOptionRegionNoBlockAfter(s: string) =
-  var localOffset = 0
-  var i = localOffset
-  var pairs: seq[(string, string)] = @[]
-  while i < s.len:
-    let (key, p1) = readCStringOptN36(s, i)
-    if key.len == 0:
-      break
-    let (val, p2) = readCStringOptN36(s, p1)
-    pairs.add((key, val))
-    i = p2
-  symexTarget("n36_optregion_noblock_after")
-
-suite "symex N36 -- regression: iekStrInOptionRegion no-block companion stays correct":
-
-  test "N36-1-noblock: same shape without the block -- honest sxUnknown, same kind pre- and post-fix":
-    symexTargetSolveStats = default(typeof(symexTargetSolveStats))
-    let r = symexFind(sutOptionRegionNoBlockAfter, tLabel("n36_optregion_noblock_after"))
     # RFC-0005 S8y: the suite's runtime floor, by count (never wall time).
     checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
                " declined=" & $symexTargetSolveStats.declined &

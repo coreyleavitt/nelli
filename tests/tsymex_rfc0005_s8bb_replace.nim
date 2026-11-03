@@ -9,10 +9,10 @@
 ## after an empty match retries at the same position with
 ## NOTEMPTY_ATSTART.
 ##
-## RFC-0005 S8cm: part 1 of 3 of this suite, with
-## `tsymex_rfc0005_s8bb_replace_b`, `tsymex_rfc0005_s8bb_replace_c`. Split so
-## that each part compiles and runs in under 60 s on the Windows legs (the
-## whole file took 90 s).
+## RFC-0005 S8cm: part 1 of 4 of this suite, with
+## `tsymex_rfc0005_s8bb_replace_b`, `tsymex_rfc0005_s8bb_replace_d`,
+## `tsymex_rfc0005_s8bb_replace_c`. Split so that each part compiles and runs
+## in under 60 s on the Windows legs (the whole file took 90 s).
 
 import std/[unittest, strutils, re, times, sequtils]
 import nelli/symex

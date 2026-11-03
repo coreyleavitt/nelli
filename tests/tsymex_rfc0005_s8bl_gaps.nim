@@ -4,9 +4,10 @@
 ## while iterating, a witness seq element with a ref part, and an element's
 ## nested seq longer than 1024.
 ##
-## RFC-0005 S8cm: part 1 of 3 of this suite, with `tsymex_rfc0005_s8bl_gaps_b`,
-## `tsymex_rfc0005_s8bl_gaps_c`. Split so that each part compiles and runs in
-## under 60 s on the Windows legs (the whole file took 71 s).
+## RFC-0005 S8cm: part 1 of 4 of this suite, with `tsymex_rfc0005_s8bl_gaps_b`,
+## `tsymex_rfc0005_s8bl_gaps_d`, `tsymex_rfc0005_s8bl_gaps_c`. Split so that
+## each part compiles and runs in under 60 s on the Windows legs (the whole
+## file took 71 s).
 
 import std/[unittest, strutils, tables, hashes]
 import nelli

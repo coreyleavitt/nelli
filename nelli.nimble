@@ -220,6 +220,7 @@ task test, "Run the test suite":
             "tsymex_r6_n36_raise_degrade",
             "tsymex_r6_n36_raise_degrade_b",
             "tsymex_r6_n36_raise_degrade_c",
+            "tsymex_r6_n36_raise_degrade_d",
             "tsymex_r6_n36_raise_class_audit",
             "tsymex_r6_n37_raise_residue",
             "tsymex_r6_n29_seqlit_sortmismatch",
@@ -921,6 +922,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8s_precision_e",
             "tsymex_rfc0005_s8s_precision_f",
             "tsymex_rfc0005_s8s_precision_g",
+            "tsymex_rfc0005_s8s_precision_h",
             # RFC-0005 S8r -- the symex-mingw shard 2 runner loss: the
             # theory-free check really has no sequence theory on Z3 4.13.4,
             # and a cap-only refutation declines without a string search.
@@ -1004,6 +1006,7 @@ task test, "Run the test suite":
             # state; walker 177->178. Reads per-query step
             # counts via its `.nim.cfg` (`-d:symexQueryStats`).
             "tsymex_rfc0005_s8ac_remainder",
+            "tsymex_rfc0005_s8ac_remainder_b",
             # RFC-0005 S8aj -- S8ad's remainder: uninitialised local
             # arrays, objects, variants and seqs take Nim's zero value (an
             # element write then a read faulted the walker), and an Int
@@ -1025,6 +1028,7 @@ task test, "Run the test suite":
             # nonzero-start indexof / word-equation facts; seq.last_indexof
             # queries take step 1c; walker 181->182.
             "tsymex_rfc0005_s8ai_semantic",
+            "tsymex_rfc0005_s8ai_semantic_c",
             "tsymex_rfc0005_s8ai_semantic_b",
             "tsymex_rfc0005_s8ai_semantic_b2",
             "tsymex_rfc0005_s8ai_semantic_b3",
@@ -1089,6 +1093,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ay_remainder_c",
             "tsymex_rfc0005_s8ay_remainder_d",
             "tsymex_rfc0005_s8bb_remainder",
+            "tsymex_rfc0005_s8bb_remainder_b",
             "tsymex_rfc0005_s8bb_exhaustive",
             "tsymex_rfc0005_s8bb_selection",
             "tsymex_rfc0005_s8bb_selection_b",
@@ -1105,6 +1110,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bb_replace",
             "tsymex_rfc0005_s8bb_replace_b",
             "tsymex_rfc0005_s8bb_replace_c",
+            "tsymex_rfc0005_s8bb_replace_d",
             # RFC-0005 S8bi -- S8bb's remainder A: closure/HOF/borrow/regex
             # nodes as raise sites, closure exit facts placed in evaluation
             # order, newSeq / newSeqOfCap / newSeqUninit, set literals in
@@ -1181,6 +1187,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_caps_b",
             "tsymex_rfc0005_s8bt_caps_c",
             "tsymex_rfc0005_s8bt_replace_lemmas",
+            "tsymex_rfc0005_s8bt_replace_lemmas_b",
             "tsymex_rfc0005_s8bt_replace_facts",
             # RFC-0005 S8cf -- S8bt's remainder.
             "tsymex_rfc0005_s8cf_reach",
@@ -1188,9 +1195,11 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cf_point",
             "tsymex_rfc0005_s8cf_point_b",
             "tsymex_rfc0005_s8cf_jitlimit",
+            "tsymex_rfc0005_s8cf_jitlimit_b",
             "tsymex_rfc0005_s8cf_skipcount",
             "tsymex_rfc0005_s8cf_limitgaps",
             "tsymex_rfc0005_s8cf_classes",
+            "tsymex_rfc0005_s8cf_classes_b",
             "tsymex_rfc0005_s8cf_jitutf",
             "tsymex_rfc0005_s8cf_jitutf_b",
             "tsymex_rfc0005_s8cf_jitutf_c",
@@ -1216,6 +1225,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ar_remainder_d",
             "tsymex_rfc0005_s8ar_remainder_e",
             "tsymex_rfc0005_s8ar_remainder_f",
+            "tsymex_rfc0005_s8ar_remainder_g",
+            "tsymex_rfc0005_s8ar_remainder_h",
             # RFC-0005 S8at -- S8ar's remainder: a ref to an anonymous
             # tuple, initTable in a SUT, a symbolic index into an array of
             # seqs, by-value case-object fields, distinct over a composite
@@ -1392,6 +1403,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bl_gaps",
             "tsymex_rfc0005_s8bl_gaps_b",
             "tsymex_rfc0005_s8bl_gaps_c",
+            "tsymex_rfc0005_s8bl_gaps_d",
             "tsymex_rfc0005_s8bl_borrow",
             "tsymex_rfc0005_s8bl_seqops",
             "tsymex_rfc0005_s8bl_pairloop",
@@ -1400,7 +1412,9 @@ task test, "Run the test suite":
             # containers. Walker 227 (provisional).
             "tsymex_rfc0005_s8bw_remainder",
             "tsymex_rfc0005_s8cd_globals",
+            "tsymex_rfc0005_s8cd_globals_b",
             "tsymex_rfc0005_s8cd_ops",
+            "tsymex_rfc0005_s8cd_ops_b",
             "tsymex_rfc0005_s8cd_setorder_small",
             "tsymex_rfc0005_s8cd_setorder_md",
             "tsymex_rfc0005_s8cd_setorder_large",
@@ -1505,6 +1519,7 @@ task test, "Run the test suite":
             # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
             "tsymex_rfc0005_s8cl_magics",
             "tsymex_rfc0005_s8cl_lifetime",
+            "tsymex_rfc0005_s8cl_lifetime_b",
             "tsymex_rfc0005_s8cl_strings",
             # RFC-0005 S8cr: the definition-of-done audit's gaps. The six
             # unpinned fresh-symbol kinds and the coverage invariant; a live

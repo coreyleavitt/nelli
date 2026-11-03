@@ -15,12 +15,12 @@
 ## The cpp compile failure of `tsymex_r6_n43_parity` (a deleted
 ## `std::atomic::operator=`) is pinned by that suite compiling on cpp.
 ##
-## RFC-0005 S8cm: part 6 of 7 of this suite, with
+## RFC-0005 S8cm: part 7 of 8 of this suite, with
 ## `tsymex_rfc0005_s8s_precision`, `tsymex_rfc0005_s8s_precision_b`,
-## `tsymex_rfc0005_s8s_precision_c`, `tsymex_rfc0005_s8s_precision_d`,
-## `tsymex_rfc0005_s8s_precision_e`, `tsymex_rfc0005_s8s_precision_g`. Split so
-## that each part compiles and runs in under 60 s on the Windows legs (the
-## whole file took 134 s).
+## `tsymex_rfc0005_s8s_precision_h`, `tsymex_rfc0005_s8s_precision_c`,
+## `tsymex_rfc0005_s8s_precision_d`, `tsymex_rfc0005_s8s_precision_e`,
+## `tsymex_rfc0005_s8s_precision_g`. Split so that each part compiles and runs
+## in under 60 s on the Windows legs (the whole file took 134 s).
 
 import std/[unittest, strutils]
 import nelli

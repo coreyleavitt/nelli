@@ -208,7 +208,17 @@ const renderAsChoicesVersion* = "12"
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
 
-const symexWalkerVersion* = "252"
+const symexWalkerVersion* = "263"
+  ## RFC-0005 S8cq, argument order (2026-11-03), 252->263 (provisional, above
+  ## the 253..262 queued slices hold). SOUNDNESS: a call's argument is read
+  ## where the C backend reads it (`nimArgTemps`, after `ccgcalls.genParams`):
+  ## one naming a root a later argument may write (under `addr`, a `var`
+  ## actual, a mutating magic) is copied where it stands, so `k(r.x, set(r.x))`
+  ## reads `r.x` before `set` writes it (a false `sxUnsat` and a false `sxSat`
+  ## before); any other is read at the call. A temporary of a type whose bits
+  ## are not its value, two captured variables (one environment after lambda
+  ## lifting), a later `sink` formal, and a `var` actual whose cell a later
+  ## argument may move decline (`feEvalOrderUnmodelled`).
   ## RFC-0005 S8cq (2026-11-02), 251->252: a by-value call is decided only when
   ## the type is on an allowlist Nim copies or the callee is proved to write
   ## nothing the actual could be; a lowering that evaluates a target twice

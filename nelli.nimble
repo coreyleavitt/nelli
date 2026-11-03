@@ -1377,6 +1377,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cn_lentnative",
             # RFC-0005 S8cq: by-value sharing, var-returning actuals, a call in
             # a location lowered twice.
+            "tsymex_rfc0005_s8cq_argorder",
             "tsymex_rfc0005_s8cq_byvalue",
             "tsymex_rfc0005_s8cq_byvalue10",
             "tsymex_rfc0005_s8cq_byvalue11",

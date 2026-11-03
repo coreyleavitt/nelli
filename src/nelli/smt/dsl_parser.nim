@@ -2086,6 +2086,15 @@ type OrderMode = enum
   omOperands      ## an operator's operands or a call's arguments
   omElements      ## a constructor's elements, filled in order
 
+type ArgTemp = enum
+  ## RFC-0005 S8cq. Where the C backend reads a call's argument
+  ## (`nimArgTemps`, after `ccgcalls.genParams`).
+  atNone          ## in the call expression, after every later argument's
+                  ## hoisted call: late
+  atTemp          ## copied into a temporary where it stands: early
+  atUnknown       ## on something the walk does not see (a lowering after
+                  ## the typed AST, a bit copy that is not the value)
+
 func plainIR(e: IRExpr): bool =
   ## RFC-0005 S8be. A variable or a literal: reading it checks nothing.
   e != nil and (e.kind == iekVar or isLiteralIR(e))
@@ -2324,10 +2333,29 @@ proc placeLateAddr(seg: seq[IRStmt]; la: LateAddr; base: int;
   tail.add seg[hi ..< be]
   tail.add seg[be ..< seg.len]
 
+proc lvalueAddrStatic(lv: NimNode): bool =
+  ## RFC-0005 S8cq. The address `lv` names is fixed for its root's life: a
+  ## variable, or a field path into one, through no index and no dereference
+  ## (a variant field's check is not static either).
+  if lv.isNil: return false
+  var e = lv
+  while true:
+    case e.kind
+    of nnkSym:
+      return e.symKind in {nskVar, nskLet, nskResult, nskForVar, nskTemp} or
+        (e.symKind == nskParam and e.getTypeInst.kind != nnkVarTy)
+    of nnkDotExpr:
+      if e.len != 2: return false
+      e = e[0]
+    of nnkHiddenStdConv, nnkHiddenSubConv:
+      if e.len != 2: return false
+      e = e[1]
+    else: return false
+
 proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
                    irs: var seq[IRExpr]; tys: seq[IRType]; mode: OrderMode;
                    ctx: ParseCtx; fixed: seq[bool] = @[];
-                   late: seq[LateAddr] = @[]) =
+                   late: seq[LateAddr] = @[]; temps: seq[ArgTemp] = @[]) =
   ## RFC-0005 S8ax. Operand `k` of an expression was parsed into
   ## `irs[k]`, its statements into `preamble[marks[k] ..< marks[k+1]]` (the
   ## last up to the end). Where a later operand's statements may write
@@ -2350,6 +2378,13 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
   ## address) is left as it is, unless `late[k]` says where its lvalue was
   ## lowered: RFC-0005 S8bk, its address is taken at the call
   ## (`placeLateAddr`).
+  ##
+  ## RFC-0005 S8cq: `temps[k]` is where the C backend reads argument `k` of a
+  ## call (`nimArgTemps`). `atTemp` is read where it stands, into a temporary
+  ## (`withTmpIfNeeded`), whatever the later arguments write; a by-address one
+  ## has its address taken there, so it declines when a later argument may
+  ## change the cell its lvalue names (`laterLeavesLvalue`). `atUnknown`
+  ## declines (`feEvalOrderUnmodelled`). `atNone` is the order above.
   let n = irs.len
   if n < 2: return
   var segs = newSeq[seq[IRStmt]](n)
@@ -2370,6 +2405,20 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
   var outPre = preamble[0 ..< marks[0]]
   var tail: seq[IRStmt]
   for k in 0 ..< n:
+    let tk = if k < temps.len: temps[k] else: atNone
+    if later[k] and tk == atUnknown and not isLiteralIR(irs[k]):
+      tail.add ctx.declineMarker(feEvalOrderUnmodelled,
+        "an argument the C backend may read where it stands or at the call, " &
+        "after a later argument that may write it: which one rests on a " &
+        "lowering the walk does not see (lambda lifting, a `sink` move) or " &
+        "on a copy that is not the value (feEvalOrderUnmodelled)")
+    if later[k] and tk == atTemp and k < fixed.len and fixed[k] and
+       k < late.len and late[k].ok and not lvalueAddrStatic(late[k].lv) and
+       not laterLeavesLvalue(late[k].lv, late[k].later):
+      tail.add ctx.declineMarker(feEvalOrderUnmodelled,
+        "a by-address argument whose address Nim takes where it stands " &
+        "(a later argument names its root), before a later argument that " &
+        "may change the cell its lvalue names (feEvalOrderUnmodelled)")
     if not later[k] or (k < fixed.len and fixed[k]):
       # RFC-0005 S8bk: a by-address argument a later argument's call may
       # write past has its address taken at the call (`placeLateAddr`).
@@ -2396,9 +2445,12 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
           irs[k] = mkVar(tmp)
       continue
     var seg = segs[k]   # a copy: a VM `let` of an element aliases it (S8ab)
-    if mode == omElements or isEagerIR(irs[k]) or irHasCall(irs[k]):
+    if mode == omElements or isEagerIR(irs[k]) or irHasCall(irs[k]) or
+       tk == atTemp:
       outPre.add seg
-      if mode == omElements and not isLiteralIR(irs[k]) or
+      # RFC-0005 S8cq: a temporary Nim makes is bound even for a variable,
+      # which a later argument may write before the call.
+      if (mode == omElements or tk == atTemp) and not isLiteralIR(irs[k]) or
          irs[k].kind != iekVar and not isLiteralIR(irs[k]):
         let tmp = freshSynth(ctx, "ord")
         outPre.add mkLet(tmp, tys[k], irs[k])
@@ -4868,6 +4920,238 @@ proc parseOperandPair(a, b: NimNode; preamble: var seq[IRStmt];
                 ctx)
   (ops[0], ops[1])
 
+proc cgSkipTrivialIndirections(n: NimNode): NimNode =
+  ## RFC-0005 S8cq. `ccgcalls.skipTrivialIndirections`.
+  result = n
+  while true:
+    case result.kind
+    of nnkDerefExpr, nnkHiddenDeref, nnkAddr, nnkHiddenAddr, nnkObjDownConv,
+       nnkObjUpConv:
+      if result.len < 1: return
+      result = result[0]
+    of nnkHiddenStdConv, nnkHiddenSubConv:
+      if result.len < 2: return
+      result = result[1]
+    else: return
+
+const cgMutatingMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
+  "AppendStrStr", "AppendSeqElem", "Addr", "New", "NewFinalize", "WasMoved",
+  "Destroy"]
+  ## RFC-0005 S8cq. The magics `ccgcalls.getPotentialWrites` reads as writing
+  ## their first argument (`mSwap` writes both).
+
+proc cgPotentialWrites(n: NimNode; mutate: bool; acc: var seq[NimNode]) =
+  ## RFC-0005 S8cq. `ccgcalls.getPotentialWrites`: the symbols at the root of
+  ## a location `n` may write -- under `addr`, a `var` actual (`nkHiddenAddr`),
+  ## an assignment's left side, a mutating magic's first argument. A call's
+  ## body is not read: what it writes through a global is not here.
+  case n.kind
+  of nnkCharLit .. nnkNilLit, nnkIdent, nnkFormalParams, nnkEmpty:
+    discard
+  of nnkSym:
+    if mutate and not containsSym(acc, n): acc.add n
+  of nnkAsgn, nnkFastAsgn:
+    cgPotentialWrites(n[0], true, acc)
+    cgPotentialWrites(n[1], mutate, acc)
+  of nnkAddr, nnkHiddenAddr:
+    cgPotentialWrites(n[0], true, acc)
+  of nnkBracketExpr, nnkDotExpr, nnkCheckedFieldExpr:
+    if n.len > 0: cgPotentialWrites(n[0], mutate, acc)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    if n.len == 0: return
+    let m = routineMagic(n[0])
+    if m in cgMutatingMagics and n.len > 1:
+      cgPotentialWrites(n[1], true, acc)
+      for i in 2 ..< n.len: cgPotentialWrites(n[i], mutate, acc)
+    elif m == "Swap":
+      for i in 1 ..< n.len: cgPotentialWrites(n[i], true, acc)
+    else:
+      for i in 1 ..< n.len: cgPotentialWrites(n[i], mutate, acc)
+  else:
+    for c in n: cgPotentialWrites(c, mutate, acc)
+
+proc cgPotentialReads(n: NimNode; acc: var seq[NimNode]) =
+  ## RFC-0005 S8cq. `ccgcalls.getPotentialReads`: every symbol `n` names.
+  case n.kind
+  of nnkCharLit .. nnkNilLit, nnkIdent, nnkFormalParams, nnkEmpty:
+    discard
+  of nnkSym:
+    if not containsSym(acc, n): acc.add n
+  else:
+    for c in n: cgPotentialReads(c, acc)
+
+proc cgMayBeLifted(s: NimNode): bool =
+  ## RFC-0005 S8cq. The variable `s` may live in a closure's environment after
+  ## lambda lifting, which runs before the C backend: it is captured by a
+  ## routine nested in its owner (`nestedCaptureSyms`), or its owner is an
+  ## iterator. Two such variables are then one root (`env`) to `genParams`.
+  ## True when not known.
+  if s.kind != nnkSym or isModuleGlobal(s): return false
+  if s.symKind notin {nskVar, nskLet, nskParam, nskResult, nskForVar, nskTemp}:
+    return false
+  let o = s.owner
+  if o.isNil or o.kind != nnkSym: return true
+  let impl =
+    try: o.getImpl
+    except CatchableError: return true
+  if impl.isNil or impl.kind notin RoutineNodes: return true
+  if impl.kind == nnkIteratorDef: return true
+  var found = false
+  proc scan(m: NimNode; top: bool) =
+    if found: return
+    if not top and m.kind in {nnkLambda, nnkProcDef, nnkFuncDef, nnkIteratorDef,
+                              nnkDo, nnkMethodDef, nnkConverterDef}:
+      if containsSym(nestedCaptureSyms(m), s): found = true
+      return
+    for c in m: scan(c, false)
+  scan(impl, true)
+  found
+
+proc cgBitsAreValue(ty: NimNode; depth = 0): bool =
+  ## RFC-0005 S8cq. A value of type `ty` is its bytes: a bit copy (the C
+  ## backend's temporary, `genAssignment(.., {})`) is a copy of the value the
+  ## walk models. Scalars, pointers, and arrays, objects and tuples of them
+  ## with no record case. A ref, a closure, a seq or a string is a counted or
+  ## shared payload a later write may free or move.
+  if depth > 8 or ty.isNil: return false
+  case ty.typeKind
+  of ntyBool, ntyChar, ntyEnum, ntyRange, ntyPtr, ntyPointer, ntyCString,
+     ntyInt .. ntyInt64, ntyUInt .. ntyUInt64, ntyFloat .. ntyFloat64:
+    true
+  of ntyDistinct, ntyAlias:
+    let base = ty.getTypeImpl
+    base.kind == nnkDistinctTy and base.len == 1 and
+      cgBitsAreValue(base[0], depth + 1)
+  of ntyArray:
+    let impl = ty.getTypeImpl
+    impl.kind == nnkBracketExpr and impl.len == 3 and
+      cgBitsAreValue(impl[2], depth + 1)
+  of ntyObject, ntyTuple, ntyGenericInst:
+    let impl = ty.getTypeImpl
+    case impl.kind
+    of nnkObjectTy:
+      if impl.len < 3 or impl[1].kind != nnkEmpty: return false
+      if impl[2].kind == nnkEmpty: return true
+      for f in impl[2]:
+        if f.kind != nnkIdentDefs or not cgBitsAreValue(f[^2], depth + 1):
+          return false
+      true
+    of nnkTupleTy, nnkTupleConstr:
+      for f in impl:
+        let ft = if f.kind == nnkIdentDefs: f[^2] else: f
+        if not cgBitsAreValue(ft, depth + 1): return false
+      true
+    else: false
+  else: false
+
+proc cgFormalTypes(call: NimNode): seq[NimNode] =
+  ## RFC-0005 S8cq. The formal types of the routine `call` calls, one per
+  ## argument, or empty when its type is not a proc type.
+  if call.len == 0: return
+  let ti =
+    try: call[0].getTypeInst
+    except CatchableError: return
+  if ti.kind != nnkProcTy or ti.len == 0 or ti[0].kind != nnkFormalParams:
+    return
+  for i in 1 ..< ti[0].len:
+    let id = ti[0][i]
+    if id.kind != nnkIdentDefs: return @[]
+    for j in 0 ..< id.len - 2: result.add id[^2]
+
+proc cgIsSink(ty: NimNode): bool =
+  ## RFC-0005 S8cq. `ty` is a `sink T` formal.
+  if ty.isNil: return false
+  ty.kind in {nnkCommand, nnkBracketExpr} and ty.len == 2 and
+    ty[0].kind in {nnkSym, nnkIdent} and macros.strVal(ty[0]) == "sink"
+
+proc nimArgTemps(call: NimNode): seq[ArgTemp] =
+  ## RFC-0005 S8cq (SOUNDNESS). Where the C backend reads each argument of
+  ## the call `call`, by Nim 2.2.10's `ccgcalls.genParams`: walking the
+  ## arguments last to first, argument `i` takes a temporary
+  ## (`withTmpIfNeeded`, "to keep the strict Left-To-Right evaluation") when
+  ## a symbol it names is the root of a location a LATER argument may write
+  ## (`getPotentialWrites`: under `addr` or a `var` actual, an assignment, a
+  ## mutating magic; a call's body is not read). An argument that is a symbol
+  ## after `skipTrivialIndirections` is compared itself and adds no writes.
+  ## `aliasanalysis.aliases` over two bare symbols is their identity. The
+  ## temporary is made only under ARC, atomic ARC and ORC, for a type under
+  ## 1024 bytes, and never for an `openArray`/`varargs` formal
+  ## (`openArrayLoc`). An argument without one is read in the call
+  ## expression, after every later argument's call (a nested call is
+  ## hoisted to a statement on both backends: `fixupCall`, and
+  ## `initLocExprSingleUse`'s bug #8202 for C++).
+  ##
+  ## What the backend sees and the typed AST does not makes `atUnknown`: two
+  ## captured variables are one environment after lambda lifting
+  ## (`cgMayBeLifted`); a later `sink` formal may move its actual
+  ## (injectdestructors' `wasMoved`); a temporary of a type whose bits are not
+  ## its value (`cgBitsAreValue`); a type of no known size.
+  let nArgs = call.len - 1
+  if nArgs <= 0: return
+  result = newSeq[ArgTemp](nArgs)
+  when not (defined(gcArc) or defined(gcOrc) or defined(gcAtomicArc)):
+    return
+  let formals = cgFormalTypes(call)
+  var writes: seq[NimNode]       # `potentialWrites` of the arguments after `i`
+  var lifted: seq[NimNode]       # and the roots lambda lifting may add
+  var laterSink = false
+  var laterAny = false
+  for i in countdown(nArgs, 1):
+    let a = call[i]
+    let k = i - 1
+    let st = cgSkipTrivialIndirections(a)
+    var reads: seq[NimNode]
+    var tmp = false
+    if st.kind == nnkSym:
+      reads.add st
+      tmp = containsSym(writes, st)
+    else:
+      cgPotentialReads(a, reads)
+      for r in reads:
+        if containsSym(writes, r): tmp = true
+    var r = atNone
+    if tmp:
+      var ty = a
+      while ty.kind in {nnkHiddenAddr, nnkAddr} and ty.len > 0: ty = ty[0]
+      let byAddr = a.kind in {nnkHiddenAddr, nnkAddr}
+      let tyK = ty.typeKind
+      if tyK in {ntyOpenArray, ntyVarargs} or
+         (k < formals.len and formals[k].typeKind in {ntyOpenArray, ntyVarargs}):
+        r = atNone
+      elif byAddr:
+        r = atTemp            # the address, a pointer's size
+      else:
+        let sz = getSize(a.getTypeInst)
+        if sz < 0: r = atUnknown
+        elif sz >= 1024: r = atNone
+        elif cgBitsAreValue(a.getTypeInst): r = atTemp
+        else: r = atUnknown
+    elif laterAny:
+      var meetsLift = false
+      block hazard:
+        for s in reads:
+          if not cgMayBeLifted(s): continue
+          for w in writes & lifted:
+            if cgMayBeLifted(w):
+              meetsLift = true
+              break hazard
+      let anyRead = reads.len > 0
+      if meetsLift or (laterSink and anyRead) or
+         (formals.len != nArgs and anyRead):
+        r = atUnknown
+    result[k] = r
+    if st.kind != nnkSym:
+      cgPotentialWrites(a, false, writes)
+    elif a.kind in {nnkHiddenAddr, nnkAddr} and not containsSym(lifted, st):
+      # Lifted, the symbol is a field of its environment and no longer
+      # skips: `getPotentialWrites` then records the environment.
+      lifted.add st
+    if k < formals.len and cgIsSink(formals[k]) and
+       not cgBitsAreValue(a.getTypeInst):
+      laterSink = true
+    laterAny = true
+
 proc parseOrderedArgs(n: NimNode; first: int; preamble: var seq[IRStmt];
                       ctx: ParseCtx; mode = omOperands): seq[IRExpr] =
   ## RFC-0005 S8ax. `parseExpr` of `n[first ..< n.len]` (a call's arguments,
@@ -4883,7 +5167,13 @@ proc parseOrderedArgs(n: NimNode; first: int; preamble: var seq[IRStmt];
     tys.add(if c.typeKind != ntyNone: classifyType(c).ty else: nil)
     fixed.add c.kind == nnkHiddenAddr
     result.add parseExpr(c, preamble, ctx)
-  orderOperands(preamble, marks, result, tys, mode, ctx, fixed)   # S8be: guards too
+  # RFC-0005 S8cq: a call's arguments where the C backend reads them.
+  let temps =
+    if mode == omOperands and first == 1 and n.kind in CallNodes:
+      nimArgTemps(n)
+    else: newSeq[ArgTemp]()
+  orderOperands(preamble, marks, result, tys, mode, ctx, fixed,
+                temps = temps)   # S8be: guards too
 
 proc parseCtorFieldsInOrder(n: NimNode; objTy: IRType;
                             preamble: var seq[IRStmt];
@@ -8049,8 +8339,13 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                                  growable: lvalueIndexGrowable(lv),
                                  lv: lv, later: laterActuals(n, i))
     argIRs.add ir
+  # RFC-0005 S8cq: where the C backend reads each argument (`nimArgTemps`).
+  var argTemps = nimArgTemps(n0)
+  if argTemps.len != argIRs.len:
+    argTemps = newSeq[ArgTemp](argIRs.len)
+    for t in argTemps.mitems: t = atUnknown
   orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
-                argFixed, argLate)   ## RFC-0005 S8ax, S8bk; S8be: in a `while` guard too
+                argFixed, argLate, argTemps)   ## RFC-0005 S8ax, S8bk; S8be: in a `while` guard too
   # RFC-0005 S8ax: the indices are free of side effects (`stableIndex`), so
   # reading them again after the arguments is reading the same values.
   for pairs in aliasConds:
@@ -8360,7 +8655,12 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
   var locs: seq[VarLoc]
   if not anyVar and not anyAddr:
     var argIRs: seq[IRExpr]
-    if ordered:
+    # RFC-0005 S8cq: an argument the C backend copies where it stands is
+    # ordered as a direct call's is (`genClosureCall` runs `genParams`).
+    var needOrder = ordered
+    for t in nimArgTemps(n):
+      if t != atNone: needOrder = true
+    if needOrder:
       argIRs = parseOrderedArgs(n, 1, preamble, ctx)
     else:
       for i in 1 ..< n.len:
@@ -8654,8 +8954,14 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
   # `touch(gP.x, moveP())` does -- and reads a by-value argument where
   # S8ax's order puts it. The lvalues read late (`placeLateAddr`); before,
   # the copy-in read the old object and the write-back wrote the new.
+  # RFC-0005 S8cq: and a by-value one the C backend copies where it stands
+  # is read there (`nimArgTemps`).
+  var argTemps = nimArgTemps(n0)
+  if argTemps.len != argIRs.len:
+    argTemps = newSeq[ArgTemp](argIRs.len)
+    for t in argTemps.mitems: t = atUnknown
   orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
-                argFixed, argLate)
+                argFixed, argLate, argTemps)
   # The peer pairs: each argument at most one, mutual, both `var` or both
   # `addr`, through refs read without effect, along one field path.
   var pair: tuple[a, b: int] = (0, 0)

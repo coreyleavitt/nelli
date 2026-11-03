@@ -108,7 +108,7 @@ proc sRaise(t0: Table[string, int]) =
     if t["a"] == 9: symexTarget("ra_live")
     else: symexTarget("ra_dead2")
 
-# Through a proc value: declines.
+# Through a proc value: RFC-0005 S8cn, the direct call.
 proc sProcVal(t0: Table[string, int]) =
   guardT()
   var t = t0
@@ -339,8 +339,8 @@ suite "batch 8: a view and its Table in one callee":
     verdict(sRaise, "ra_dead", sxUnsat)
     verdict(sRaise, "ra_dead2", sxUnsat)
 
-  test "through a proc value: declines":
-    verdict(sProcVal, "pv_dead", sxUnknown)
+  test "through a proc value: decided (RFC-0005 S8cn)":
+    verdict(sProcVal, "pv_dead", sxUnsat)
 
 suite "batch 8: a table write is seen through the view":
 
@@ -390,8 +390,9 @@ suite "batch 8: module-level containers":
     verdict(sGlobalSeqBump, "gsb_live", sxSat)
     verdict(sGlobalSeqBump, "gsb_dead", sxUnsat)
 
-  test "a global seq with the element and its seq: declines":
-    declines(sSeqPass, "sp_dead")
+  test "a global seq with the element and its seq: decided (RFC-0005 S8cn)":
+    verdict(sSeqPass, "sp_dead", sxUnsat)
+  test "a global seq by its name with the element: declines":
     declines(sSeqDirect, "sd_dead")
     declines(sSeqDirectW, "sw_dead")
 

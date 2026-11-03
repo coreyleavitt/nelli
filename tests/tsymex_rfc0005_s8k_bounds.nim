@@ -75,6 +75,10 @@ proc needs130(s: string) =
   if s.len == 130 and s[129] == 'q':
     symexTarget("s8k_needs130")
 
+proc needs130Mixed(s: string) =
+  if s.len == 130 and s[0] == 'r' and s[129] == 'q':
+    symexTarget("s8k_needs130_mixed")
+
 proc len130(s: string) =
   if s.len == 130:
     symexTarget("s8k_len130")
@@ -146,7 +150,14 @@ suite "S8k (1): every query over strings is bounded":
   test "a within-cap query seqQueryRLimit cuts off is a recorded decline":
     ## The same query takes about 5 s; under a small `seqQueryRLimit` it
     ## is declined at once.
-    let r = symexFind(needs130, tLabel("s8k_needs130"), smallSeqBudget)
+    ## RFC-0005 S8cn: mixed bytes, since step 1e's first candidate (every byte
+    ## the query's `q`) answers `needs130` within this budget, by evaluation.
+    let one = symexFind(needs130, tLabel("s8k_needs130"), smallSeqBudget)
+    checkpoint show(one.errors)
+    check one.status == sxSat
+    if one.status == sxSat:
+      check one.witness[0].len == 130 and one.witness[0][129] == 'q'
+    let r = symexFind(needs130Mixed, tLabel("s8k_needs130_mixed"), smallSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.onlyKinds({beSolverUndef})

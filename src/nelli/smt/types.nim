@@ -1511,7 +1511,7 @@ type
                          ## target), 2 the caller's own `var` formal passed
                          ## on (whatever its own actual is). Empty when the
                          ## call has no `var` actual.
-      cViewAliases*: seq[tuple[viewArg, tabArg: int; keyName: string]]
+      cViewAliases*: seq[tuple[viewArg, tabArg: int; keyName, tabField: string]]
                          ## RFC-0005 S8bx (item 3). In the body of a `for`
                          ## over a Table's `mpairs` / `mvalues`, a call that
                          ## receives both the loop variable (`viewArg`, a
@@ -1521,7 +1521,9 @@ type
                          ## caller. The walker keeps the two formals equal
                          ## statement by statement in the callee
                          ## (`AddrCellEntry.slot`, `syncAddrCells`). Empty for
-                         ## every other call.
+                         ## every other call. RFC-0005 S8cn: `tabField`, the
+                         ## dotted field path from a `tabArg` that holds the
+                         ## Table to the Table ("" for the Table itself).
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -4646,6 +4648,10 @@ proc tBitSet*(elemTy: IRType): IRType =
   ## RFC-0005 S8bq. Nim's builtin `set[elemTy]`.
   IRType(kind: itBitSet, bsElemTy: elemTy)
 
+const sharedTouch* = "s:shared"
+  ## RFC-0005 S8cq. In `ccTouch`: a by-value actual whose memory the formal may
+  ## share, so a body reaching anything outside its formals may write it.
+
 const boundsCheckSynthWord* = "ixck"
   ## RFC-0005 S8bq. The `freshSynth` word of the `isIndex` statement a seq
   ## element ASSIGNMENT emits for its bounds check (Nim checks the index
@@ -5802,7 +5808,7 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
             guardRoots: seq[string] = @[];
             varLocs: seq[VarLoc] = @[];
             varPtrSafe: seq[int] = @[];
-            viewAliases: seq[tuple[viewArg, tabArg: int; keyName: string]] =
+            viewAliases: seq[tuple[viewArg, tabArg: int; keyName, tabField: string]] =
               @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,

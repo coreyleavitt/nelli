@@ -207,11 +207,13 @@ const renderAsChoicesVersion* = "12"
   ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
-  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260),
-  ##   S8bv (253), S8bz (249) and S8cp items 1 and 2 (253) on batch 10. S8cp's
-  ##   item 1 code is dropped for S8ct's replay child (nothing is abandoned).
+  ## - RFC-0005 batch 11 (252->264): S8cs (260), S8ct (261), S8cu (260),
+  ##   S8bv (253), S8bz (249), S8cp items 1 and 2 (253) and S8cq with S8cn (263)
+  ##   on batch 10. S8cp's item 1 code is dropped for S8ct's replay child (nothing
+  ##   is abandoned). A `var` formal over a global keeps S8cs's route check
+  ##   under S8bz's copy-in (`glVarGlobal`). 262 while S8cq was out; 264 with it.
 
-const symexWalkerVersion* = "262"
+const symexWalkerVersion* = "264"
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
   ## does not see. A program's globals carry `hiddenRoute` from the macro-time
   ## route analysis (lifetime hooks, code it cannot list), and a read of such a
@@ -270,6 +272,43 @@ const symexWalkerVersion* = "262"
   ## the first now declines, the second is a target. A store through a pointer
   ## before the path holds its location reaches it (`ptrApplyMissed`; was a
   ## false `sxSat`). Verdicts move, so cached entries rotate.
+  ##
+  ## RFC-0005 S8cq, argument order (2026-11-03), 252->263 (provisional, above
+  ## the 253..262 queued slices hold). SOUNDNESS: a call's argument is read
+  ## where the C backend reads it (`nimArgTemps`, after `ccgcalls.genParams`):
+  ## one naming a root a later argument may write (under `addr`, a `var`
+  ## actual, a mutating magic) is copied where it stands, so `k(r.x, set(r.x))`
+  ## reads `r.x` before `set` writes it (a false `sxUnsat` and a false `sxSat`
+  ## before); any other is read at the call. A temporary of a type whose bits
+  ## are not its value, two captured variables (one environment after lambda
+  ## lifting), a later `sink` formal, and a `var` actual whose cell a later
+  ## argument may move decline (`feEvalOrderUnmodelled`).
+  ## RFC-0005 S8cq (2026-11-02), 251->252: a by-value call is decided only when
+  ## the type is on an allowlist Nim copies or the callee is proved to write
+  ## nothing the actual could be; a lowering that evaluates a target twice
+  ## declines unless the target is proved free of a call. The walk of a shape
+  ## that declined is unchanged, and a shape that was decided may decline.
+  ## RFC-0005 S8cn (2026-11-02), 245->251 (provisional), past the numbers
+  ## queued slices hold. Verdicts change: step 1e (a bounded concrete search
+  ## after 1b, `checkCappedSteps`) answers `sxSat` on queries both searches ran
+  ## out on; an `mpairs` view and its Table in a callee decide a non-literal
+  ## key's presence, a removed key on a one-entry table, and a holder object;
+  ## the view's write past a raise reaches the Table; `let f = proc` is the
+  ## direct call (`devirtProcLets`); `f(s[i], s)` has one location
+  ## (`seqViewPeer`, `cViewAliases`). Newly declined, each a wrong verdict
+  ## before: a pointer to the view with a call receiving the Table; a callee
+  ## holding the container in a local or a loop (`bindsViewWhole`); a write to
+  ## the view past a key added (a rehash the walk cannot see).
+  ## Also newly declined, clean false verdicts on the channel: a `lent` loop
+  ## (`items`, `values`, `keys`) whose body may write the container
+  ## (`lentLoopDecline`); `let` over a seq, string or Table written during its
+  ## life, which varies with the memory manager (`letCursorDecline`); a by-value
+  ## actual the callee reaches by name (`byValueTouch`); a call returning `var T`
+  ## as a `var` actual. A declined call's decline now stands before its body,
+  ## not after it. A closure body starts with the calling path's taint and the
+  ## call's decline, and a hit in it is solved under the calling path's pc: a
+  ## target there was a false sxSat (`closureBodyCallerPc`).
+  ## (S8cq with S8cn, provisional 263, renumbered 264 by batch 11.)
   ##
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite
@@ -6032,7 +6071,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # callee changes what the callee reads, so it keys the call.
     var views: seq[string]
     for a in s.cViewAliases:
-      views.add $a.viewArg & ":" & $a.tabArg & ":" & lookupLocal(env, a.keyName)
+      views.add $a.viewArg & ":" & $a.tabArg & ":" & lookupLocal(env, a.keyName) &
+        ":" & a.tabField
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &

@@ -227,14 +227,14 @@ suite "S8bc (6): Table iteration":
     # RFC-0005 S8bl moved this pin: the iterator's `assert(len(t) == L)` is
     # modelled (an `AssertionDefect`), where S8bc declined the path. The
     # label is reached only without a length change, at `a == 0`.
+    # RFC-0005 S8cn: a `keys` variable holds the slot's memory while the body
+    # writes the Table, so the loop declines first (`lentLoopDecline`).
     let r = symexFind(tiGrow, tLabel("ti_grow"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxSat
-    check not r.errors.anyIt(it.kind == feUnsupportedOp and
-                             "length changed" in it.msg)
-    if r.status == sxSat:
-      check r.witness[0] == 0
-      check reproduces(tiGrow(r.witness[0]), "ti_grow")
+    check r.status == sxUnknown
+    check r.errors.anyIt(it.kind == feUnsupportedOp and
+                         "the memory the body may write" in it.msg)
+    check reproduces(tiGrow(0), "ti_grow")
 
   test "a float key declines":
     let r = symexFind(tiFloat, tLabel("ti_float"))

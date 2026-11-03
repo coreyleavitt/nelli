@@ -334,6 +334,7 @@ suite "RFC-0005 S1b (b) -- structural correspondence: a Degrade token exists onl
     let ss = scanSites("Degrade")
     checkpoint(report(ss))
     check routinesOf(ss) == @[
+      "runtime.nim:carriedDegrade",              # taint recorded where it arose (S8cn)
       "runtime.nim:degrade",                     # records into the site's sink
       "runtime.nim:takeLoweringPendingDegrade",  # drains lowerDegrade's recorded joins
       "runtime_heap.nim:heapArmDegrade",         # records via allocDegrade

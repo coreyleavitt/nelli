@@ -918,7 +918,8 @@ proc sCallWithOffsets(): IRStmt =
   ## RFC-0005 S8bx: and `cViewAliases`.
   mkCall("sentinelCallee", "sentinelRet", @[mkIntLit(1), mkVar("arg2")],
          tInt(64, true), retIntOffsetPositions = @[0, 2],
-         viewAliases = @[(viewArg: 1, tabArg: 0, keyName: "sentKey")])
+         viewAliases = @[(viewArg: 1, tabArg: 0, keyName: "sentKey",
+                         tabField: "sentField")])
 proc sOpaqueCall(): IRStmt =
   mkOpaqueCall("sentinelOpaque", "retOp", @[mkStrLit("s")], tString())
 proc sVariantFieldStmt(): IRStmt =

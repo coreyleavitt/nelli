@@ -1055,6 +1055,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8; a
     ## proc-value call's aliasing shapes decline where S8ca's sort lifted
     ## their decline. 241->245.
+    ## RFC-0005 S8cn: step 1e, an `mpairs` view and its Table, a seq's element
+    ## with its seq, a `let` proc value. 245->251 (provisional, with batch 9 merged).
+    ## RFC-0005 S8cq: by-value sharing and a call in a twice-lowered location. 251->252.
     ## RFC-0005 S8cf (PCRE's limits read; the rest of S8bt's remainder).
     ## Provisional 242.
     ## RFC-0005 S8cb (S8bo onto batch 7, and S8bo's remainder). Provisional
@@ -1077,9 +1080,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8cp item 2 (`{.cast(uncheckedAssign).}` keeps a
     ## discriminator write unchecked; item 1 superseded by S8ct).
     ## Provisional 253.
-    ## RFC-0005 batch 11: S8cs, S8ct, S8cu, S8bv, S8bz and S8cp stacked on
-    ## batch 10. 252->262.
-    check symexWalkerVersion == "262"
+    ## RFC-0005 S8cq, argument order: a call's argument where the C backend
+    ## reads it (`nimArgTemps`). Provisional 263.
+    ## RFC-0005 batch 11: S8cs, S8ct, S8cu, S8bv, S8bz, S8cp and S8cq (with
+    ## S8cn) stacked on batch 10. 252->264.
+    check symexWalkerVersion == "264"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

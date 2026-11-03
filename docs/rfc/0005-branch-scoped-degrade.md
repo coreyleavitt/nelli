@@ -14849,3 +14849,11 @@ re-execution (`replayedOrNotMarshallable`, `decidedOrNotMarshallable`).
    (`a[n and 7]`): the count reads the index's type, not the path.
 7. A `for` over `readFile(...).splitLines` in a SUT stops the compile ("node has
    no type", `classifyType` from `parseStmtInner`); not checked at main.
+8. A nim-z3 context made after one holding 80,000 `or` terms was destroyed
+   builds terms about 800 times slower (20,000 `or`s: 0.14 s, then 119 s, on Z3
+   4.13.4; a `symexFind` in between restores it). `_deepterm` shares one context
+   to stay inside its budget. Not chased.
+
+*The UNSAT row past the term limit* (`deepUnsat`) is `sxUnsat` on Z3 5.1 and
+`sxUnknown` with `beSolverUndef` on Z3 4.13.4 (the query's rlimit runs out);
+each is pinned by version, and neither is ever `sxSat`.

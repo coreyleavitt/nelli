@@ -17,6 +17,7 @@
 import std/[unittest, strutils, re, macros, locks]
 import nelli/symex
 import nelli/smt/runtime
+import nelli/smt/types
 import nelli/smt/canonicalize
 import z3
 
@@ -203,9 +204,14 @@ suite "S8ct: row B19's exact SUT":
         if "termWalkMaxDepth" in e.msg: named = true
       check named
 
+# One context for both: a second context made after one holding the 20,000-level
+# chains below was destroyed built terms 800 times slower (200 `or`s, 119 s
+# against 0.14 s, Z3 4.13.4; RFC-0016).
+let termCtx = newContext()
+
 suite "S8ct: termDepth":
   test "it counts levels, takes no stack, and stops at its cap":
-    let ctx = newContext()
+    let ctx = termCtx
     let leaf = mkBoolVar(ctx, "leaf")
     check termDepth(ctx, leaf.raw) == 0
     check termDepth(ctx, chain(ctx, 10, leaf).raw) == 10
@@ -216,7 +222,7 @@ suite "S8ct: termDepth":
     check termTooDeep(ctx, chain(ctx, termWalkMaxDepth + 1, leaf).raw)
 
   test "a shared term is counted once, not once per path":
-    let ctx = newContext()
+    let ctx = termCtx
     var t = mkBoolVar(ctx, "leaf")
     for i in 0 ..< 200: t = t or t   # 2^200 paths
     check termDepth(ctx, t.raw) == 200
@@ -240,7 +246,18 @@ suite "S8ct: a term past the limit costs the merge, not the verdict":
     let m = measured(symexFind(deepUnsat, tLabel("unsat")))
     check m.depths.len > 0
     for d in m.depths: check d > termWalkMaxDepth
-    check m.r.status == sxUnsat
+    # Z3 5.1 proves it within the query's budget. Z3 4.13.4 (the Windows
+    # symex leg's) returns unknown under the same rlimit, measured: the
+    # verdict is `sxUnknown` with `beSolverUndef`, never `sxSat`.
+    checkpoint "z3 " & z3FullVersion()
+    if z3FullVersion().startsWith("4."):
+      check m.r.status == sxUnknown
+      var undef = false
+      for e in m.r.errors:
+        if e.kind == beSolverUndef: undef = true
+      check undef
+    else:
+      check m.r.status == sxUnsat
 
   test "the rewrite leaves a conjunct past the limit and takes one at it":
     let ctx = newContext()

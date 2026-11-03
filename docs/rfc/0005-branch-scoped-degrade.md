@@ -14928,16 +14928,14 @@ stays near the 60 s convention on Windows. Verdicts over a 256-value domain
 cost compile time: the first single file took 136.1 s on symex-mingw, and
 `iter_order` took 60.2 s until its `set[char]` pins moved out.
 
-*Verification.* On the merged tree, with Z3 reading 5.1.0.0 and 4.13.4.0
-through `z3FullVersion`, 189 suites ran on each version under the C backend.
-Each version passed 2478 tests with 0 failed and no nonzero exit. The cpp
-backend ran the eight S8bv files, `CR2_cachekey` and `s8bq_remainder` on Z3
-5.1: 117 tests, 0 failed. Those runs were at `14266a8` and at two later
-commits that change only S8bv's test files and `nelli.nimble`; the S8bv rows
-are from the later commits. The card tables above predate the merge;
-re-running the walker's probe on the merged tree decided all eight queries on
-both versions, in under 1 s each. The slice report has the Windows runs and
-per-file times.
+*Verification.* On the tree with batch 10 merged (`9834c29e`), with Z3
+reading 5.1.0.0 and 4.13.4.0 through `z3FullVersion`, 238 suites ran on each
+version under the C backend. Each version passed 3039 tests with 0 failed and
+no nonzero exit. The cpp backend ran the eight S8bv files, `CR2_cachekey`,
+`s8bq_remainder` and the three `s8cl` suites on Z3 5.1: 143 tests, 0 failed.
+The card tables above predate the merges. Re-running the walker's probe on
+the batch-9 merge decided all eight queries on both versions, in under 1 s
+each. The slice report has the Windows runs and per-file times.
 
 *Re-pinned elsewhere.*
 - **`tsymex_phase15_CR2_cachekey`:** `== "253"`.

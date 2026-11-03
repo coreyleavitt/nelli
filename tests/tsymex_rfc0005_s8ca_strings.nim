@@ -17,6 +17,11 @@
 ##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
+##
+## RFC-0005 S8cm: part 1 of 2 of this suite, with
+## `tsymex_rfc0005_s8ca_strings_b`. Split so that each part compiles and runs
+## in under 60 s on the Windows legs (the whole file took 65 s).
+
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types
@@ -165,18 +170,3 @@ suite "S8ca (6): strings":
     clean(sutFieldWrite, "cf_dead", sxUnsat)
     clean(sutPtrWrite, "cp", sxSat)
     clean(sutPtrWrite, "cp_dead", sxUnsat)
-
-  test "openArray[char]":
-    clean(sutStrOpenArray, "oa", sxSat)
-    clean(sutStrOpenArray, "oa_dead", sxUnsat)
-    clean(sutStrSlice, "os", sxSat)
-    clean(sutStrSlice, "os_raise", sxSat)
-    clean(sutStrSlice, "os_dead", sxUnsat)
-    clean(sutVarOA, "ov", sxSat)
-    clean(sutVarOA, "ov_dead", sxUnsat)
-    clean(sutVarOASlice, "ow", sxSat)
-    clean(sutVarOASlice, "ow_dead", sxUnsat)
-
-suite "S8ca: walker version":
-  test "symexWalkerVersion >= 233":
-    check parseInt(symexWalkerVersion) >= 233

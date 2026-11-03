@@ -3605,6 +3605,20 @@ proc mayWriteAnyVariable(acc: var OpaqueEffects) =
   if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
   acc.heapAll = true
 
+const markersModuleSuffix = "/nelli/engine/markers.nim"
+  ## RFC-0005 S8c: where the three DSL markers are declared.
+
+proc inMarkersModule(r: NimNode): bool =
+  ## RFC-0005 batch 11. The routine `r` is nelli's marker runtime, which writes
+  ## only its own capture state and reports a hit to a replay's parent through
+  ## `symexHitSink` (S8ct): no variable of the program, through no proc value
+  ## of the program's.
+  let impl =
+    try: r.getImpl
+    except CatchableError: return false
+  impl.kind != nnkNilLit and
+    impl.lineInfoObj.filename.replace('\\', '/').endsWith(markersModuleSuffix)
+
 proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
                        seen, stack: var seq[NimNode])  ## RFC-0005 S8cc fwd decl
 
@@ -3807,6 +3821,7 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
         return
       if containsSym(seen, n): return
       seen.add n
+      if inMarkersModule(n): return   # RFC-0005 batch 11
       block:
         let impl = resolveRoutineImpl(n)
         if impl == nil:
@@ -4444,9 +4459,6 @@ proc isBuiltinNamed(head: NimNode, names: openArray[string]): bool =
   ## passes on its name alone, as before.
   head.kind in {nnkSym, nnkIdent} and head.strVal in names and
     not isUserCallee(head)
-
-const markersModuleSuffix = "/nelli/engine/markers.nim"
-  ## RFC-0005 S8c: where the three DSL markers are declared.
 
 proc isMarkerCall(n: NimNode, name: string): bool =
   ## RFC-0005 S8c: a resolved (`nnkSym`) head is a marker only when it IS

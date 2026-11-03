@@ -11,6 +11,7 @@
 ## is not a case of the one pin.
 import std/[unittest, re, strutils]
 import nelli/symex
+import nelli/smt/pcre_engine
 
 template hits(call: untyped): untyped =
   block:
@@ -45,32 +46,38 @@ proc noModel(s: string) =
   if s.len == 1 and s.replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == "--":
     symexTarget("no_model")
 
+template checkVerdict(r: untyped) =
+  # An unanchored call on the JIT (the Windows legs) declines: its accounting
+  # is not modelled (S8bt). Never a refutation there.
+  if pcreSearchEngine() == peInterp: check r.status == sxSat
+  else: check r.status != sxUnsat
+
 suite "S8cn (2): step 1e, other subjects":
 
   test "a two-byte subject":
     check "two_bytes" in hits(twoBytes("ac"))
     let r = symexFind(twoBytes, tLabel("two_bytes"))
     checkpoint show(r.errors)
-    check r.status == sxSat
+    checkVerdict(r)
     if r.status == sxSat: check "two_bytes" in hits(twoBytes(r.witness[0]))
 
   test "a byte outside the regex's alphabet":
     let r = symexFind(outsideAlphabet, tLabel("outside_alphabet"))
     checkpoint show(r.errors)
-    check r.status == sxSat
+    checkVerdict(r)
     if r.status == sxSat:
       check "outside_alphabet" in hits(outsideAlphabet(r.witness[0]))
 
   test "a subject with no length of its own":
     let r = symexFind(noLength, tLabel("no_length"))
     checkpoint show(r.errors)
-    check r.status == sxSat
+    checkVerdict(r)
     if r.status == sxSat: check "no_length" in hits(noLength(r.witness[0]))
 
   test "two free strings":
     let r = symexFind(twoLeaves, tLabel("two_leaves"))
     checkpoint show(r.errors)
-    check r.status == sxSat
+    checkVerdict(r)
     if r.status == sxSat:
       check "two_leaves" in hits(twoLeaves(r.witness[0], r.witness[1]))
 

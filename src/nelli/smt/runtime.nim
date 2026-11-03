@@ -14469,7 +14469,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
               if rl != 0 and left <= 0: break
               var pinned = @roots
               for k, x in leaves: pinned.add(x == mkString(ctx, pins[k]))
-              let sC = ownContextSolver(ctx, pinned, probeRLimit)
+              # The caller's budget holds here too: a query it cuts off stays
+              # a decline, however small the budget.
+              let sC = ownContextSolver(ctx, pinned,
+                if rl != 0: min(probeRLimit, uint(left)) else: probeRLimit)
               let rC = counted("1e", ownContextCheck(sC))
               let st = sC.getStatistics()
               if st.contains("rlimit count"):
@@ -15497,6 +15500,11 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
     unknownExnWarnings.add info         # threadvar: fallback
     w.unknownExnWarnings.add info       # CR-9 Stage 5: LIVE WalkCtx field
   Degrade(path: pathTaint(classOf(kind)))
+
+proc carriedDegrade(taint: Taint): Degrade =
+  ## RFC-0005 S8cn. A closure body's start: taint its caller's path already
+  ## holds and its call's pending decline, each recorded where it arose.
+  Degrade(path: taint)
 
 proc takeLoweringPendingDegrade(): Degrade =
   ## RFC-0005 S1. The lowering-sink half of the token discipline: converts the
@@ -24838,7 +24846,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   let bodyEntry =
     if pending.pendingTaint + currentCallerTaint != {}:
       forkPathTainted(descentBase, descentBase.pc, descentBase.env,
-                      Degrade(path: pending.pendingTaint + currentCallerTaint))
+                      carriedDegrade(pending.pendingTaint + currentCallerTaint))
     else: descentBase
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
   let outerBodyPc = closureBodyCallerPc

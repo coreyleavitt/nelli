@@ -14292,6 +14292,10 @@ a target in it: `gw(gs)` through a `var` proc value and `if n != 77: f(n)` with
 with the call's pending decline and the calling path's taint, and a hit in it is
 solved under the calling path's pc (`closureBodyCallerPc`).
 
+Step 1e also runs after a facts-first SAT (S8by), which otherwise returned ahead of it,
+and each probe keeps to the caller's budget, so a query a small `seqQueryRLimit` cuts
+off still declines unless a candidate answers within that budget.
+
 `feTableIterOrder` does not protect these, by observation at `e497dcf`: a one-entry
 table is clean (`rsNotNeeded`, no path taint) and gave `one_copy` `sxSat` and
 `one_shared` `sxUnsat`, both false; a two-entry table replays a witness
@@ -14302,6 +14306,10 @@ the only producer of that statement, so no other user rests on it.
 
 *Different mechanisms, reported and not fixed here.*
 
+- PRECISION: a Table `keys` loop whose body writes the Table declines, even where
+  no key is added (`ti_grow` at `a == 0`, S8bl's pin, now `sxUnknown`).
+- PRECISION: a `let` proc value called with one variable twice stays a closure call,
+  which decides it (S8bh); a direct `f(x, x)` still declines.
 - PRECISION: a proc value that is a `var`, a parameter, or a computed `let`,
   handed a view and its Table: batch 9's `closureTakesView` declines it.
 - PRECISION: a key added under a view with a pointer to it declines where the key

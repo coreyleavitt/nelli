@@ -2864,11 +2864,10 @@ proc procLetTarget(callee: NimNode): NimNode =
   var cur = callee
   for _ in 0 .. 16:
     if cur.kind != nnkSym: return nil
-    case symKind(cur)
-    of nskProc, nskFunc:
+    if resolveRoutineImpl(cur) != nil:
       if namesRoutineDef(cur) and not isNestedRoutine(cur): return cur
       return nil
-    of nskLet:
+    if symKind(cur) == nskLet:
       let impl = cur.getImpl
       if impl.kind != nnkIdentDefs or impl.len != 3: return nil
       cur = impl[2]
@@ -2878,11 +2877,24 @@ proc procLetTarget(callee: NimNode): NimNode =
       return nil
   nil
 
+proc sameActualSym(a, b: NimNode): bool =
+  ## RFC-0005 S8cn. Both actuals name one symbol, `addr`-free or hidden-addr.
+  proc root(x: NimNode): NimNode =
+    if x.kind == nnkHiddenAddr and x.len > 0: x[0] else: x
+  let (ra, rb) = (root(a), root(b))
+  ra.kind == nnkSym and rb.kind == nnkSym and ra == rb
+
 proc rewriteProcLetCalls(n: NimNode): bool =
   ## RFC-0005 S8cn. Respell in place (`procLetTarget`); true if any.
   if n.kind in {nnkCall, nnkCommand} and n.len > 0:
     let target = procLetTarget(n[0])
-    if target != nil:
+    # One variable passed twice is one location, which a closure call writes
+    # in the callee's order (S8bh) and a direct call declines: it stays.
+    var twice = false
+    for i in 1 ..< n.len:
+      for j in i + 1 ..< n.len:
+        if sameActualSym(n[i], n[j]): twice = true
+    if target != nil and not twice:
       n[0] = target
       result = true
   for c in n:

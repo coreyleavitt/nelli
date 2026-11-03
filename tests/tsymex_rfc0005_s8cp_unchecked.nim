@@ -10,6 +10,8 @@
 ## on an object with none (`Plain`) the bytes stay and the new arm reads the old
 ## arm's; a hook of any kind on the object itself zeroes (`Hooked`), and a macro
 ## cannot read that, so the arms of a `Plain` hold any value and a hit is replayed.
+## This file has the plain object; `tsymex_rfc0005_s8cp_unchecked_zero` the zeroing
+## objects and the declines (split for the Windows per-file budget).
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types
@@ -174,136 +176,19 @@ proc boolDisc(v: int) =
   if o.k == false: symexTarget("live")
   if o.k == true: symexTarget("dead")
 
-# ---- an object with a destructor --------------------------------------------
-
-proc zeroesInBranch(v: int) =
-  symexAssume(v != 0)
-  var o = Managed(k: kA, x: v)
-  {.cast(uncheckedAssign).}:
-    o.k = kB
-  if o.x == 0: symexTarget("zero")
-  if o.x == v: symexTarget("kept")
-
-proc zeroesAcross(v: int) =
-  symexAssume(v != 0)
-  var o = Managed(h: v, k: kA, x: v, x2: v)
-  {.cast(uncheckedAssign).}:
-    o.k = kC
-  if o.y == 0 and o.h == v: symexTarget("zero")
-  if o.y != 0: symexTarget("kept")
-  if o.h != v: symexTarget("plainGone")
-
-proc roundTrip(v: int) =
-  symexAssume(v != 0)
-  var o = Managed(k: kA, x: v, x2: v)
-  {.cast(uncheckedAssign).}:
-    o.k = kC
-    o.k = kA
-  if o.x == 0 and o.x2 == 0: symexTarget("zero")
-  if o.x == v: symexTarget("kept")
-
-proc sameValueKeeps(v: int) =
-  var o = Managed(k: kA, x: v)
-  {.cast(uncheckedAssign).}:
-    o.k = kA
-  if o.x == v: symexTarget("kept")
-  if o.x != v: symexTarget("gone")
-
-proc freeManaged(v: int; t: K) =
-  symexAssume(v != 0)
-  var o = Managed(k: kA, x: v)
-  {.cast(uncheckedAssign).}:
-    o.k = t
-  if t == kA and o.x == v: symexTarget("kept")
-  if t == kB and o.x == v: symexTarget("keptOther")
-  if t == kB and o.x == 0: symexTarget("zeroOther")
-
-proc stringArm(v: int) =
-  var o = Managed(k: kD, s: "abc")
-  {.cast(uncheckedAssign).}:
-    o.k = kA
-    o.k = kD
-  if o.s.len == 0: symexTarget("empty")
-  if o.s.len != 0: symexTarget("full")
-
-proc axesManaged(v: int) =
-  symexAssume(v != 0)
-  var o = Axes(a: kA, ax: v, b: m1, bx: v)
-  {.cast(uncheckedAssign).}:
-    o.b = m2
-  if o.by == 0 and o.ax == v: symexTarget("zero")
-  if o.by != 0 or o.ax != v: symexTarget("other")
-
-proc fieldChain(v: int) =
-  symexAssume(v != 0)
-  var o = Holder(w: Managed(k: kA, x: v))
-  {.cast(uncheckedAssign).}:
-    o.w.k = kB
-  if o.w.x == 0: symexTarget("zero")
-  if o.w.x == v: symexTarget("kept")
-
-# ---- a hook the walker cannot see, and what declines ------------------------
-
-proc hookedZeroes(v: int) =
-  symexAssume(v != 0)
-  var o: Hooked
-  o.x = v
-  {.cast(uncheckedAssign).}:
-    o.k = kB
-  if o.x == 0: symexTarget("zero")
-  if o.x == v: symexTarget("kept")
-
-proc passK(t: var K) = t = kC
-
-proc viaVarArg(v: int) =
-  var o = Plain(k: kA, x: v)
-  {.cast(uncheckedAssign).}:
-    passK(o.k)
-  if o.k == kC: symexTarget("live")
-  if o.k != kC: symexTarget("dead")
-
-proc viaAddr(v: int) =
-  var o = Plain(k: kA, x: v)
-  {.cast(uncheckedAssign).}:
-    let p = addr o.k
-    p[] = kC
-  if o.k == kC: symexTarget("live")
-  if o.k != kC: symexTarget("dead")
-
-proc viaRef(v: int) =
-  var o = new Plain
-  o[] = Plain(k: kA, x: v)
-  {.cast(uncheckedAssign).}:
-    o.k = kC
-  if o.k == kC: symexTarget("live")
-  if o.k != kC: symexTarget("dead")
-
-proc pointerIntoArm(v: int) =
-  var o = Plain(k: kA, x: v)
-  let p = addr o.x
-  {.cast(uncheckedAssign).}:
-    o.k = kC
-  p[] = v + 1
-  if o.y == v + 1: symexTarget("live")
-  if o.y == v: symexTarget("dead")
-
 proc raises(body: proc ()): bool =
   try:
     body()
   except FieldDefect:
     result = true
 
-suite "RFC-0005 S8cp (2): the compiled program":
+suite "RFC-0005 S8cp (2): the compiled program, a plain object":
   test "no raise under the pragma, a raise out of it and in a callee":
     check not raises(proc () = changesBranch(3))
     check not raises(proc () = keepsBranch(3))
     check not raises(proc () = freeTag(3, kC))
     check not raises(proc () = viaVarFormal(3))
     check not raises(proc () = multiAxis(3))
-    check not raises(proc () = viaVarArg(3))
-    check not raises(proc () = viaAddr(3))
-    check not raises(proc () = viaRef(3))
-    check not raises(proc () = pointerIntoArm(3))
     check raises(proc () = checkedAfter(3))
     check raises(proc () = calleeChecked(3))
     check raises(proc () = armCheckStays(3))
@@ -318,20 +203,6 @@ suite "RFC-0005 S8cp (2): the compiled program":
     check hits(multiAxis(3)) == ["live"].toHashSet
     check hits(onGlobal(3)) == ["live"].toHashSet
     check hits(boolDisc(3)) == ["live"].toHashSet
-    check hits(zeroesInBranch(3)) == ["zero"].toHashSet
-    check hits(zeroesAcross(3)) == ["zero"].toHashSet
-    check hits(roundTrip(3)) == ["zero"].toHashSet
-    check hits(sameValueKeeps(3)) == ["kept"].toHashSet
-    check hits(freeManaged(3, kA)) == ["kept"].toHashSet
-    check hits(freeManaged(3, kB)) == ["zeroOther"].toHashSet
-    check hits(stringArm(3)) == ["empty"].toHashSet
-    check hits(axesManaged(3)) == ["zero"].toHashSet
-    check hits(fieldChain(3)) == ["zero"].toHashSet
-    check hits(hookedZeroes(3)) == ["zero"].toHashSet
-    check hits(viaVarArg(3)) == ["live"].toHashSet
-    check hits(viaAddr(3)) == ["live"].toHashSet
-    check hits(viaRef(3)) == ["live"].toHashSet
-    check hits(pointerIntoArm(3)) == ["live"].toHashSet
 
 suite "RFC-0005 S8cp (2): a plain object":
   test "keeping the branch: no raise":
@@ -383,54 +254,6 @@ suite "RFC-0005 S8cp (2): a plain object":
   test "a bool discriminator (was a walker fault)":
     verdict(boolDisc, tLabel("live"), sxSat)
     verdict(boolDisc, tLabel("dead"), sxUnsat)
-
-suite "RFC-0005 S8cp (2): an object with a destructor":
-  test "a new value in the branch zeroes it (kept was a false sxUnsat of the live label)":
-    verdict(zeroesInBranch, tLabel("zero"), sxSat)
-    verdict(zeroesInBranch, tLabel("kept"), sxUnsat)
-    verdict(zeroesInBranch, tFieldDefect(), sxUnsat)
-  test "across branches, keeping the plain field":
-    verdict(zeroesAcross, tLabel("zero"), sxSat)
-    verdict(zeroesAcross, tLabel("kept"), sxUnsat)
-    verdict(zeroesAcross, tLabel("plainGone"), sxUnsat)
-  test "there and back":
-    verdict(roundTrip, tLabel("zero"), sxSat)
-    verdict(roundTrip, tLabel("kept"), sxUnsat)
-  test "the same value changes nothing":
-    verdict(sameValueKeeps, tLabel("kept"), sxSat)
-    verdict(sameValueKeeps, tLabel("gone"), sxUnsat)
-  test "a symbolic tag decides by value":
-    verdict(freeManaged, tLabel("kept"), sxSat)
-    verdict(freeManaged, tLabel("keptOther"), sxUnsat)
-    verdict(freeManaged, tLabel("zeroOther"), sxSat)
-  test "a string arm":
-    verdict(stringArm, tLabel("empty"), sxSat)
-    verdict(stringArm, tLabel("full"), sxUnsat)
-  test "one axis of two":
-    verdict(axesManaged, tLabel("zero"), sxSat)
-    verdict(axesManaged, tLabel("other"), sxUnsat)
-  test "a field chain":
-    verdict(fieldChain, tLabel("zero"), sxSat)
-    verdict(fieldChain, tLabel("kept"), sxUnsat)
-
-suite "RFC-0005 S8cp (2): a hook, and the shapes that decline":
-  test "a hook on the object: a plain-looking object zeroes, and no label is wrong":
-    verdict(hookedZeroes, tLabel("zero"), sxSat)
-    let r = symexFind(hookedZeroes, tLabel("kept"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-  test "a var argument":
-    verdict(viaVarArg, tLabel("live"), sxUnknown)
-    verdict(viaVarArg, tLabel("dead"), sxUnknown)
-  test "addr":
-    verdict(viaAddr, tLabel("live"), sxUnknown)
-    verdict(viaAddr, tLabel("dead"), sxUnknown)
-  test "through a ref":
-    verdict(viaRef, tLabel("live"), sxUnknown)
-    verdict(viaRef, tLabel("dead"), sxUnknown)
-  test "a pointer into the old arm":
-    verdict(pointerIntoArm, tLabel("live"), sxUnknown)
-    verdict(pointerIntoArm, tLabel("dead"), sxUnknown)
 
 suite "RFC-0005 S8cp: walker version":
   test "symexWalkerVersion is at least 253":

@@ -94,26 +94,28 @@ suite "RFC-0005 S8cr (a) -- a live sevError cap decline beside a clean witness":
 # (b) symexForAll: a raise, rsConfirmed, and the veto companions, through it
 # =============================================================================
 #
-# `a < a` on a bool is the fresh-symbol site `feUnsupportedOpHavoc`
-# (`dcFreshSymbol`), and in reality it is always false, so each replay outcome
-# is fixed whatever the solver picks.
+# Batch 10: S8cb models the order on bool, so `a < a` is no longer a fresh symbol.
+# A module-level `var` no one writes is one at its read (`feGlobalHavoc`,
+# `dcFreshSymbol`), and really holds false, as in `tsymex_rfc0005_s2_replay`. So
+# each replay outcome is fixed whatever the solver picks.
+var freshGlobal = false
 
 proc faConfirm(a: bool) =
-  let o = a < a
+  let o = freshGlobal and (a or not a)
   if not o:
     symexTarget("s8cr_fa_confirm")
 
 proc faRefute(a: bool) =
-  let o = a < a
+  let o = freshGlobal and (a or not a)
   if o:
     symexTarget("s8cr_fa_refute")
 
 proc faRaiseConfirm(a: bool) =
-  let o = a < a
+  let o = freshGlobal and (a or not a)
   assert o, "s8cr raise"          # fails for real on every input
 
 proc faRaiseRefute(a: bool) =
-  let o = a < a
+  let o = freshGlobal and (a or not a)
   assert not o, "s8cr raise"      # holds for real on every input
 
 proc faCap(x, a, b: int) =

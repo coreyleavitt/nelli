@@ -133,6 +133,7 @@ proc sutSinkHook(k: int) =
   var b: seq[int]
   `=sink`(b, a)
   if b[0] == 3: symexTarget("sh")
+  if b[0] != k: symexTarget("sh_dead")
 
 # --- (2) wasMoved; the generated hooks.
 proc sutWasMoved(k: int) =
@@ -159,6 +160,7 @@ proc sutDup(k: int) =
   var b = `=dup`(a)
   b[0] = 7
   if a[0] == 3: symexTarget("du")
+  if a[0] != k or b[0] != 7: symexTarget("du_dead")
 
 proc sutDestroy(k: int) =
   var s = @[k]
@@ -267,7 +269,10 @@ suite "S8cl (1c): the audit of the lifetime magics":
     clean(sutMoveElem, "me_dead", sxUnsat)
     clean(sutCopyHook, "ch", sxSat)
     clean(sutCopyHook, "ch_dead", sxUnsat)
-    declines(sutSinkHook, "sh", "nnkSinkAsgn")
+    # Batch 10: S8cb models `=sink` on a type with no user hook as the assignment
+    # (`nnkSinkAsgn`), which S8cl declined. The "nim" test above reaches `sh`.
+    clean(sutSinkHook, "sh", sxSat)
+    clean(sutSinkHook, "sh_dead", sxUnsat)
 
 suite "S8cl (2): wasMoved, and what cannot be read declines":
   test "nim":
@@ -287,7 +292,13 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     clean(sutWasMovedPtr, "wp_dead", sxUnsat)
 
   test "a generated hook's formals are not read: this file compiles":
-    declines(sutDup, "du", "=dup")
+    # Batch 10: S8cb models `=dup` of a plain value, a seq among them, which S8cl
+    # declined. The native run below reaches `du`, and the copy is not an alias.
+    let h = nativeHits(sutDup, ks)
+    check "du" in h
+    check "du_dead" notin h
+    clean(sutDup, "du", sxSat)
+    clean(sutDup, "du_dead", sxUnsat)
     declines(sutDestroy, "ds", "=destroy")
 
   test "what stopped the compile declines: create, GC_ref, a when member":

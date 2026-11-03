@@ -202,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 113 marked lines (110 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 120 marked lines (116 runtime.nim + 4 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).

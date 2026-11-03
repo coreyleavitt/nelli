@@ -9718,6 +9718,45 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   after the summarised call (`sxRaised`, as Nim raises); the untyped
   `pointer` `nil` still declines.
 
+**Batch 10 (2026-11-02) — one walker number for five slices.** S8cf, S8cb (carrying
+S8bo), S8cd, S8cl and S8cr (provisional: 242, 243, 249, 248; S8cr bumps nothing)
+land stacked on batch 9, in that order: `symexWalkerVersion` 245 -> **252**, the CR2
+`==` pin 252, each slice's `>=` floor unchanged, the batch's floor in
+`tsymex_rfc0005_b10_integration`. Where slices met:
+- *`checkCapped` around `checkExact`.* S8cf's wrapper took the name of batch 8's
+  function, and that function is now `checkExact`. Step 1d and the facts-first
+  returns sit inside `checkExact`, so the wrapper sees every `zsUnsat` and asks
+  `limitWorldRefuted`. S8by's skip only skips steps inside it, and the facts-first
+  check gives no model unless step 1 finds one. `hasRecursiveApp`, which S8cf's
+  side still named, was gone since batch 8.
+- *`alt_miss`.* `s[s.len - 1] == 'c' and not s.contains(re"(a|a)*b|c$")` is reached
+  natively at 30 `a` bytes, and gives `sxUnknown` with the limit reason (its kind is
+  `beSolverUndef`). The decline is `checkCapped`'s design and not a solver budget:
+  with `queryRLimit` and `seqQueryRLimit` at 8e9, `queryTimeoutMs` at 1.2M, `maxSeqLen`
+  at 128 and 4096, and `limitWorldRLimit` at 8e9 with a 900 s timeout, it never
+  decides `sxUnsat`. The walks take 85 and 603 s at that budget, and neither
+  refutes. Pinned natively in `tsymex_rfc0005_b10_integration`.
+- *One empty-magic helper.* S8bo's and S8cl's helpers are `stubBody`, read after the
+  distinct barrier. S8cb's `ensureMove` model stands over S8cl's decline, and
+  `procCall` declines. S8cl's pins moved with native checks: `ensureMove`, `=sink` and
+  `=dup` (S8cb's models, with dead labels added to the last two).
+- *A statement `procCall f(x)`.* Its formal is `untyped`, so the actual of a void `f`
+  has no type, and `userCallStmt` stopped the compile reading it. The call now
+  declines on its key without reading it.
+- *S8cd's widened results, N40-6 and N30-2.* Both pins' moves from a decline to
+  `sxSat` agree with the native run: N40-6's lambda is never called and its label is
+  unconditional, and N30-2's `f` returns `t`, whose four entries reach the label. An
+  adversarial probe of `Table`, `HashSet` and `set` results (copies, repeat calls,
+  capture writes, raises, a returned closure, `pairs`) found no false verdict.
+- *S8cr's open holes.* `pinOpenHole`'s `skip` branch is gone. The three pins assert
+  `feGlobalHavoc` and `feReplayRefuted` on `sxUnknown` (`pinParamStore`), not `sxSat`:
+  the replay's witness pointer does not address the global, so it misses a label Nim
+  reaches. The false `sxUnsat` is closed; the replay's aim is a PRECISION gap.
+- *`tsymex_r6_n27_placeholder_read_audit`.* 116 marked lines in `runtime.nim`, read
+  from the code: S8cb's `withElem` replaces `storeSeqElem`'s marked line (-1), and
+  S8cd's `observeRecvPart` adds `isIndexAssign`'s seq length after the placeholder
+  guard (+1).
+
 **Batch 9 (2026-11-02) — one walker number for four slices.** S8ce, S8ca, S8by
 and S8cc (each provisional: 238, 233, 231, 238) land stacked on batch 8, in that
 order: `symexWalkerVersion` 241 -> **245**, the CR2 `==` pin 245, each slice's
@@ -14658,8 +14697,9 @@ false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
   to walk now declines, naming the magic. Decided against Nim: `reset` (variable,
   field), `move` (variable, array element), `new` (expression, field, object),
   `wasMoved` (seq, int, through a pointer), `=copy`. Declined: `new(p, finalizer)`,
-  `=sink`, `=dup`, `=destroy`, `newStringUninit`. `shallowCopy` is not declared
-  under ORC and stays `vmDeclined`.
+  `=sink` and `=dup` (S8cb's models replaced those two declines at batch 10),
+  `=destroy`, `newStringUninit`. `shallowCopy` is not declared under ORC and stays
+  `vmDeclined`.
 - *Item 2: what cannot be read declines.* `parseCalleeImpl`'s `expectKind` is
   guarded by `formalsReadable`: a generated hook's `nnkArgList`, and a generic
   instance's formal typed only by its default (`create`'s `size = 1.Positive`,
@@ -14689,10 +14729,10 @@ false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
 
 *Different mechanisms, reported and not fixed here.*
 - **Fixed elsewhere: `$k` on a negative int and `ensureMove`.** Both are false at
-  e497dcf and right at S8cb 28ab1a7, observed. `ensureMove` declines here
-  (`magicBodyEmpty`); S8cb models it, and that model should stand at integration.
-  **SOUNDNESS: `procCall`'s zero result** is old, a false sxSat at main 6cbfe8f too;
-  it declines here.
+  e497dcf and right at S8cb 28ab1a7, observed. `ensureMove` declined on this branch;
+  S8cb's model stands since batch 10, which folded this slice's helper into S8cb's
+  (`stubBody`). **SOUNDNESS: `procCall`'s zero result** is old, a false sxSat at main
+  6cbfe8f too; it declines here.
 - **PRECISION: `zeroMem` and `copyMem` on `addr x`** decline through a walker
   fault, `FieldDefect` reading `ptrPointeeTy` of an `itUninterp`. In-band, but a
   fault rather than a named decline.

@@ -14,8 +14,6 @@
 ##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
-## Every expectation below is Nim's (each "nim" test runs the SUTs natively
-## under a capture frame and checks which labels they hit).
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types

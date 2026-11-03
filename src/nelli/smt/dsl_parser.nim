@@ -8897,6 +8897,11 @@ proc userOrMethodCallStmt(n, calleeSym: NimNode; preamble: var seq[IRStmt];
     let d = methodDispatchStmt(n, calleeSym, "", tBool(), preamble, ctx)
     if d != nil: return d
   let callKey = ensureProcRegistered(ctx, calleeSym, n)
+  # RFC-0005 batch 10: `procCall`'s formal is `untyped`, so the actual of
+  # `procCall f(x)` with a void `f` has no type for `userCallStmt` to read, and
+  # the compile stopped. The call declines on its key; nothing is walked.
+  if routineMagic(calleeSym) == "ProcCall":
+    return mkCall(callKey, "", @[], tBool())
   userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
 
 proc isOfTest(n: NimNode): bool =

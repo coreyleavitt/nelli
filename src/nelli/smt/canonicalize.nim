@@ -202,6 +202,11 @@ const renderAsChoicesVersion* = "12"
   ##   (`array[1..3, int]`, via `IRType.lo`), not `array[0..2, int]` — the
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
+  ## - RFC-0005 batch 10 (245->252): S8cf, S8cb, S8cd, S8cl and S8cr stacked on
+  ##   batch 9 (their bullets above give provisional numbers: S8cf 242, S8cb 243,
+  ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
+  ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
+  ##   A statement `procCall f(x)` declines without reading its untyped actual.
 
 const symexWalkerVersion* = "252"
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a

@@ -1407,6 +1407,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_b9_integration",
             # A call declines before Nim's call depth limit ends the process.
             "tsymex_rfc0005_b9_calldepth",
+            # RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked on
+            # batch 9. walker 245->252.
+            "tsymex_rfc0005_b10_integration",
             # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
             "tsymex_rfc0005_s8cl_magics",
             "tsymex_rfc0005_s8cl_lifetime",

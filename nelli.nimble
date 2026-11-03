@@ -60,6 +60,7 @@ task test, "Run the test suite":
             # Named tsymex_* WITH the underscore so derive-ci-suites.ps1 picks
             # it up into the symex-mingw corpus.
             "tsymex_configdefaults",
+            "tsymex_configdefaults_b",
             "tsymex_configdefaults_depth",
             "tsymex_canonicalize",
             "tsymex_typebridge_variants",
@@ -217,6 +218,9 @@ task test, "Run the test suite":
             "tsymex_r6_d2_recursive_budget",
             "tsymex_r6_n31_block_counter",
             "tsymex_r6_n36_raise_degrade",
+            "tsymex_r6_n36_raise_degrade_b",
+            "tsymex_r6_n36_raise_degrade_c",
+            "tsymex_r6_n36_raise_degrade_d",
             "tsymex_r6_n36_raise_class_audit",
             "tsymex_r6_n37_raise_residue",
             "tsymex_r6_n29_seqlit_sortmismatch",
@@ -716,6 +720,9 @@ task test, "Run the test suite":
             # frames and is swallowed by the C backend's goto-exception
             # model, which is the N31/N36 false-`sxUnsat` class.
             "tsymex_163rev_degrade_classification",
+            "tsymex_163rev_degrade_classification_b",
+            "tsymex_163rev_degrade_classification_c",
+            "tsymex_163rev_degrade_classification_d",
             # Issue #163 review R26 (continued) + the parse-error gap:
             # `runConcolicCollectImpl` built an obligation log and read
             # `prog.parseErrors`' sibling degrade sinks, but discarded both
@@ -878,6 +885,8 @@ task test, "Run the test suite":
             # labelled blocks, sort-checked Z3 construction, ref locals and
             # casts, nil ref locals, a closure's bare return; walker 159->160.
             "tsymex_rfc0005_s8m_exits",
+            "tsymex_rfc0005_s8m_exits_b",
+            "tsymex_rfc0005_s8m_exits_c",
             "tsymex_rfc0005_s8k_bounds",
             # RFC-0005 S8n -- the precision remainder: concolic closure
             # conditions, ref / ptr witnesses in `renderAsChoices`, a callee's
@@ -894,6 +903,8 @@ task test, "Run the test suite":
             # SUT's unwritten `result`, value field writes, char `add`,
             # structured closure results; walker 163->164.
             "tsymex_rfc0005_s8p_precision",
+            "tsymex_rfc0005_s8p_precision_b",
+            "tsymex_rfc0005_s8p_precision_c",
             # RFC-0005 S8q -- S8o's termination remainder: a B3 scan-pair
             # offset param allocated as a stamped Int (no bv2int bridge into
             # the string query), a conjunctive symexAssume split per
@@ -905,6 +916,13 @@ task test, "Run the test suite":
             # tuple-element writes, n43's cpp build; walker 165->167 (166 is
             # S8r's).
             "tsymex_rfc0005_s8s_precision",
+            "tsymex_rfc0005_s8s_precision_b",
+            "tsymex_rfc0005_s8s_precision_c",
+            "tsymex_rfc0005_s8s_precision_d",
+            "tsymex_rfc0005_s8s_precision_e",
+            "tsymex_rfc0005_s8s_precision_f",
+            "tsymex_rfc0005_s8s_precision_g",
+            "tsymex_rfc0005_s8s_precision_h",
             # RFC-0005 S8r -- the symex-mingw shard 2 runner loss: the
             # theory-free check really has no sequence theory on Z3 4.13.4,
             # and a cap-only refutation declines without a string search.
@@ -919,11 +937,14 @@ task test, "Run the test suite":
             # multi-variant axes, distinct / container zero values, array
             # element writes; walker 168->169.
             "tsymex_rfc0005_s8u_precision",
+            "tsymex_rfc0005_s8u_precision_b",
+            "tsymex_rfc0005_s8u_precision_c",
             # RFC-0005 S8w -- S8t's remainder: alternating and/or chains
             # joined (linear paths), Case 2/3 while guards with continue
             # rotated, turned-down B4 offsets stamped and wrapping;
             # walker 169->171.
             "tsymex_rfc0005_s8w_remainder",
+            "tsymex_rfc0005_s8w_remainder_b",
             # RFC-0005 S8x -- S8t2's remainder: the compile-time VM's `let`
             # aliasing pinned, the parser's two latent value-location lets
             # bound by index / `var`; no walker bump.
@@ -958,6 +979,8 @@ task test, "Run the test suite":
             # and range at / substr / to_code / to_int, so a query refuted
             # only through them is UNSAT, not a cap decline; walker 173->174.
             "tsymex_rfc0005_s8ae_remainder",
+            "tsymex_rfc0005_s8ae_remainder_b",
+            "tsymex_rfc0005_s8ae_remainder_c",
             # RFC-0005 S8ad -- S8ac's remainder: a borrowed result of a
             # distinct type no parameter carries allocates its sort, a
             # boxed distinct merges with its bare base; linear bounds on
@@ -983,6 +1006,7 @@ task test, "Run the test suite":
             # state; walker 177->178. Reads per-query step
             # counts via its `.nim.cfg` (`-d:symexQueryStats`).
             "tsymex_rfc0005_s8ac_remainder",
+            "tsymex_rfc0005_s8ac_remainder_b",
             # RFC-0005 S8aj -- S8ad's remainder: uninitialised local
             # arrays, objects, variants and seqs take Nim's zero value (an
             # element write then a read faulted the walker), and an Int
@@ -990,6 +1014,8 @@ task test, "Run the test suite":
             # sum that wraps decides (divRangeFacts' next window); walker
             # 178->179. Reads per-query step counts via its `.nim.cfg`.
             "tsymex_rfc0005_s8aj_remainder",
+            "tsymex_rfc0005_s8aj_remainder_b",
+            "tsymex_rfc0005_s8aj_remainder_c",
             # RFC-0005 S8ao -- S8aj's remainder: `add` on a dotted seq
             # field (`o.s.add v`, nested `a.b.s.add v`, a ref object's
             # `p.s.add v`) is modelled through the field path instead of
@@ -1002,7 +1028,10 @@ task test, "Run the test suite":
             # nonzero-start indexof / word-equation facts; seq.last_indexof
             # queries take step 1c; walker 181->182.
             "tsymex_rfc0005_s8ai_semantic",
+            "tsymex_rfc0005_s8ai_semantic_c",
             "tsymex_rfc0005_s8ai_semantic_b",
+            "tsymex_rfc0005_s8ai_semantic_b2",
+            "tsymex_rfc0005_s8ai_semantic_b3",
             # RFC-0005 S8ag -- S8y's remainder: a one-character literal
             # str.indexof lowers to a fresh Int with split axioms (and
             # chain facts), so N36's five-iteration exits find a model; a
@@ -1024,6 +1053,9 @@ task test, "Run the test suite":
             # threaded through calls; overloads and same-named nested
             # routines keyed apart; walker 182->190 (batch 1).
             "tsymex_rfc0005_s8an_remainder",
+            "tsymex_rfc0005_s8an_remainder_b",
+            "tsymex_rfc0005_s8an_remainder_c",
+            "tsymex_rfc0005_s8an_remainder_d",
             # RFC-0005 S8ap -- S8ao's remainder: a seq / Table / HashSet
             # field of a ref object is a leaf-split heap cell and a string
             # field is read too (aliasing, nil, witness); del / insert /
@@ -1032,6 +1064,9 @@ task test, "Run the test suite":
             # itUninterp `var` declines with its own kind; walker
             # 182->190 (batch 1).
             "tsymex_rfc0005_s8ap_remainder",
+            "tsymex_rfc0005_s8ap_remainder_b",
+            "tsymex_rfc0005_s8ap_remainder_c",
+            "tsymex_rfc0005_s8ap_remainder_d",
             # RFC-0005 S8aq -- S8ai's remainder: step 1c no longer depends
             # on step 1 reaching UNSAT (a cancelled step 1 still gets the
             # facts-based decision); the dropped "L is at least every found
@@ -1054,22 +1089,35 @@ task test, "Run the test suite":
             # past 16 bytes, step 1c's uncapped half first. Walker
             # 190->202 (batch 2).
             "tsymex_rfc0005_s8ay_remainder",
+            "tsymex_rfc0005_s8ay_remainder_b",
+            "tsymex_rfc0005_s8ay_remainder_c",
+            "tsymex_rfc0005_s8ay_remainder_d",
             "tsymex_rfc0005_s8bb_remainder",
+            "tsymex_rfc0005_s8bb_remainder_b",
             "tsymex_rfc0005_s8bb_exhaustive",
             "tsymex_rfc0005_s8bb_selection",
+            "tsymex_rfc0005_s8bb_selection_b",
             "tsymex_rfc0005_s8bb_constructs",
             "tsymex_rfc0005_s8bb_constructs_b",
             "tsymex_rfc0005_s8bb_constructs_c",
             "tsymex_rfc0005_s8bb_captures",
+            "tsymex_rfc0005_s8bb_captures_b",
+            "tsymex_rfc0005_s8bb_captures_c",
+            "tsymex_rfc0005_s8bb_captures_d",
             "tsymex_rfc0005_s8bb_capvalues",
             "tsymex_rfc0005_s8bb_capvalues_plus",
             "tsymex_rfc0005_s8bb_capvalues_lf",
             "tsymex_rfc0005_s8bb_replace",
+            "tsymex_rfc0005_s8bb_replace_b",
+            "tsymex_rfc0005_s8bb_replace_c",
+            "tsymex_rfc0005_s8bb_replace_d",
             # RFC-0005 S8bi -- S8bb's remainder A: closure/HOF/borrow/regex
             # nodes as raise sites, closure exit facts placed in evaluation
             # order, newSeq / newSeqOfCap / newSeqUninit, set literals in
             # `in`/`notin`, and the recursive-definition fuel scan. Walker 210.
             "tsymex_rfc0005_s8bi_remainder",
+            "tsymex_rfc0005_s8bi_remainder_b",
+            "tsymex_rfc0005_s8bi_remainder_c",
             # RFC-0005 S8bj -- the reader on verbs, start options, UTF mode,
             # (?m) and (?X) against re(); PCRE's start-of-match data from the
             # tree against pcre_fullinfo; the agenda attempt and search
@@ -1139,6 +1187,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_caps_b",
             "tsymex_rfc0005_s8bt_caps_c",
             "tsymex_rfc0005_s8bt_replace_lemmas",
+            "tsymex_rfc0005_s8bt_replace_lemmas_b",
             "tsymex_rfc0005_s8bt_replace_facts",
             # RFC-0005 S8bv -- S8bq's remainder: iterating a builtin set, enum
             # subranges (no set conversion across domains exists), pigeonhole-
@@ -1155,10 +1204,13 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cf_reach",
             "tsymex_rfc0005_s8cf_limits",
             "tsymex_rfc0005_s8cf_point",
+            "tsymex_rfc0005_s8cf_point_b",
             "tsymex_rfc0005_s8cf_jitlimit",
+            "tsymex_rfc0005_s8cf_jitlimit_b",
             "tsymex_rfc0005_s8cf_skipcount",
             "tsymex_rfc0005_s8cf_limitgaps",
             "tsymex_rfc0005_s8cf_classes",
+            "tsymex_rfc0005_s8cf_classes_b",
             "tsymex_rfc0005_s8cf_jitutf",
             "tsymex_rfc0005_s8cf_jitutf_b",
             "tsymex_rfc0005_s8cf_jitutf_c",
@@ -1179,18 +1231,32 @@ task test, "Run the test suite":
             # chains rooted at a ref field, ref pointees render by name,
             # heap-step depth budget; walker 190->202 (batch 2).
             "tsymex_rfc0005_s8ar_remainder",
+            "tsymex_rfc0005_s8ar_remainder_b",
+            "tsymex_rfc0005_s8ar_remainder_c",
+            "tsymex_rfc0005_s8ar_remainder_d",
+            "tsymex_rfc0005_s8ar_remainder_e",
+            "tsymex_rfc0005_s8ar_remainder_f",
+            "tsymex_rfc0005_s8ar_remainder_g",
+            "tsymex_rfc0005_s8ar_remainder_h",
             # RFC-0005 S8at -- S8ar's remainder: a ref to an anonymous
             # tuple, initTable in a SUT, a symbolic index into an array of
             # seqs, by-value case-object fields, distinct over a composite
             # base, Table float keys and container values, KeyError,
             # 2^32-cell key domains; walker 190->202 (batch 2).
             "tsymex_rfc0005_s8at_remainder",
+            "tsymex_rfc0005_s8at_remainder_b",
+            "tsymex_rfc0005_s8at_remainder_c",
+            "tsymex_rfc0005_s8at_remainder_d",
+            "tsymex_rfc0005_s8at_remainder_e",
+            "tsymex_rfc0005_s8at_remainder_f",
             # RFC-0005 S8as -- S8an's remainder: if-arm pruning in a
             # recursion; opaque-call effect summaries havoc globals; a
             # global's entry value; closure capture/global write-back;
             # more `addr` forms; a path-based alias check; an Int-sorted
             # `int` heap; walker 190->202 (batch 2).
             "tsymex_rfc0005_s8as_remainder",
+            "tsymex_rfc0005_s8as_remainder_b",
+            "tsymex_rfc0005_s8as_remainder_c",
             # RFC-0005 S8au -- the S8an / S8ag remainder: a var / addr
             # actual reachable through a global or capture declines; var
             # ptr formals modelled; every find / rfind needle splits;
@@ -1198,6 +1264,8 @@ task test, "Run the test suite":
             # Items 1-2 (closed by S8ad) re-pinned. Walker 190->202
             # (batch 2).
             "tsymex_rfc0005_s8au_remainder",
+            "tsymex_rfc0005_s8au_remainder_b",
+            "tsymex_rfc0005_s8au_remainder_c",
             # RFC-0005 S8av -- S8am's and S11's remainder: the public cache
             # macros (saveSymexWitness/loadSymexWitnesses/saveSymexVerdict/
             # loadSymexVerdict) route dbErrors via recordSymexDbError instead
@@ -1226,17 +1294,27 @@ task test, "Run the test suite":
             # order; `addr` forms; alias precision; walker 202->209
             # (batch 3).
             "tsymex_rfc0005_s8ax_remainder",
+            "tsymex_rfc0005_s8ax_remainder_b",
+            "tsymex_rfc0005_s8ax_remainder_c",
+            "tsymex_rfc0005_s8ax_remainder_d",
+            "tsymex_rfc0005_s8ax_remainder_e",
+            "tsymex_rfc0005_s8ax_remainder_f",
+            "tsymex_rfc0005_s8ax_remainder_g",
             # RFC-0005 S8ba -- S8au's remainder: a declining arm binds its
             # temporary (never read as a global); seq[distinct] modelled;
             # len <= high(int) in step 1c; a heap var/addr actual a global
             # or capture also reaches is passed by reference; split axioms
             # built once, in a fixed order. Walker 202->209 (batch 3).
             "tsymex_rfc0005_s8ba_remainder",
+            "tsymex_rfc0005_s8ba_remainder_b",
+            "tsymex_rfc0005_s8ba_remainder_c",
             # RFC-0005 S8bd: bit-vector offset links; seq[distinct]
             # witnesses; maxHeapDepth bounds a chain; by-reference
             # elements, call results and generic callees. Walker 202->209
             # (batch 3).
             "tsymex_rfc0005_s8bd_remainder",
+            "tsymex_rfc0005_s8bd_remainder_b",
+            "tsymex_rfc0005_s8bd_remainder_c",
             # RFC-0005 S8bf: two var / addr heap actuals that may be one
             # cell through different refs are passed by reference. Walker
             # 202->209 (batch 3).
@@ -1249,7 +1327,11 @@ task test, "Run the test suite":
             # RFC-0005 S8bl (item 5): split in three (a / b / c), the
             # single file's compile having taken 77 s on Windows.
             "tsymex_rfc0005_s8bc_remainder_a",
+            "tsymex_rfc0005_s8bc_remainder_a2",
+            "tsymex_rfc0005_s8bc_remainder_a3",
             "tsymex_rfc0005_s8bc_remainder_b",
+            "tsymex_rfc0005_s8bc_remainder_b2",
+            "tsymex_rfc0005_s8bc_remainder_b3",
             "tsymex_rfc0005_s8bc_remainder_c",
             # RFC-0005 S8be -- S8ax's remainder: opaque implicit Defects
             # and raise subtypes; a bounded replay; `{.global.}`; int32
@@ -1283,6 +1365,11 @@ task test, "Run the test suite":
             # a ref field, a global or a var parameter; ref conversions along
             # a hierarchy keep identity; walker 209->217 (batch 4).
             "tsymex_rfc0005_s8bh_remainder",
+            "tsymex_rfc0005_s8bh_remainder_b",
+            "tsymex_rfc0005_s8bh_remainder_c",
+            "tsymex_rfc0005_s8bh_remainder_d",
+            "tsymex_rfc0005_s8bh_remainder_e",
+            "tsymex_rfc0005_s8bh_remainder_f",
             # RFC-0005 S8bm: step 1 searches in a context of its own (the
             # same with and without the facts-first check); a slice
             # element's byte test in character form; B1-1's tight unit
@@ -1315,6 +1402,11 @@ task test, "Run the test suite":
             # proc fields and methods, `of` / `nil`, hierarchies, parameter
             # tags, S8bk's late address. Walker 215 (provisional).
             "tsymex_rfc0005_s8bn_remainder",
+            "tsymex_rfc0005_s8bn_remainder_b",
+            "tsymex_rfc0005_s8bn_remainder_c",
+            "tsymex_rfc0005_s8bn_remainder_d",
+            "tsymex_rfc0005_s8bn_remainder_e",
+            "tsymex_rfc0005_s8bn_remainder_f",
             # RFC-0005 S8bl -- S8bc's remainder: the system magics with a
             # `var` parameter (swap, wasMoved, move, reset, setLen, add on
             # an element, new on a field) and the guard scan over them,
@@ -1326,6 +1418,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bl_setlen",
             "tsymex_rfc0005_s8bl_magicscan",
             "tsymex_rfc0005_s8bl_gaps",
+            "tsymex_rfc0005_s8bl_gaps_b",
+            "tsymex_rfc0005_s8bl_gaps_c",
+            "tsymex_rfc0005_s8bl_gaps_d",
             "tsymex_rfc0005_s8bl_borrow",
             "tsymex_rfc0005_s8bl_seqops",
             "tsymex_rfc0005_s8bl_pairloop",
@@ -1340,13 +1435,17 @@ task test, "Run the test suite":
             # Walker 260 (provisional).
             "tsymex_rfc0005_s8cs_routes",
             "tsymex_rfc0005_s8cs_routes2",
+            "tsymex_rfc0005_s8cd_globals_b",
             "tsymex_rfc0005_s8cd_ops",
+            "tsymex_rfc0005_s8cd_ops_b",
             "tsymex_rfc0005_s8cd_setorder_small",
+            "tsymex_rfc0005_s8cd_setorder_md",
             "tsymex_rfc0005_s8cd_setorder_large",
             # RFC-0005 S8bz: S8bw's remainder. Walker 249 (provisional).
             "tsymex_rfc0005_s8bz_written",
             "tsymex_rfc0005_s8bz_cells",
             "tsymex_rfc0005_s8bz_overlap",
+            "tsymex_rfc0005_s8cd_setorder_by",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
             # kind probes in contexts of their own (no step's cost moves
             # with the walk's state; a thread's first walk searches as its
@@ -1380,6 +1479,7 @@ task test, "Run the test suite":
             # witness extraction (lost on the C backend; fault injection
             # through the file's .nim.cfg); walker 213->228 (provisional).
             "tsymex_rfc0005_s8bx_extractraise",
+            "tsymex_rfc0005_s8bx_extractraise_b",
             # S8bx item 2: one classifier for the seq witness reader and
             # the renderability predicate; a type is always rendered.
             "tsymex_rfc0005_s8bx_witnessdrift",
@@ -1456,6 +1556,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ca_procvals",
             # item 6: strings (character writes, openArray[char], views).
             "tsymex_rfc0005_s8ca_strings",
+            "tsymex_rfc0005_s8ca_strings_b",
             "tsymex_rfc0005_s8ca_strings_byvalue",
             # item 7: a negative-length toOpenArray; a resizing mitems body.
             "tsymex_rfc0005_s8ca_resize",
@@ -1471,7 +1572,10 @@ task test, "Run the test suite":
             # global counts as written only where it may be; an index call
             # with no symbol is bound once. Walker 237->238.
             "tsymex_rfc0005_s8cc_cellquery",
+            "tsymex_rfc0005_s8cc_cellquery_b",
             "tsymex_rfc0005_s8cc_remainder",
+            "tsymex_rfc0005_s8cc_remainder_b",
+            "tsymex_rfc0005_s8cc_remainder_c",
             # RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8.
             # A proc value's aliasing shapes decline; walker 241->245.
             "tsymex_rfc0005_b9_integration",
@@ -1480,15 +1584,19 @@ task test, "Run the test suite":
             # RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked on
             # batch 9. walker 245->252.
             "tsymex_rfc0005_b10_integration",
+            "tsymex_rfc0005_b10_integration_b",
+            "tsymex_rfc0005_b10_integration_c",
             # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
             "tsymex_rfc0005_s8cl_magics",
             "tsymex_rfc0005_s8cl_lifetime",
+            "tsymex_rfc0005_s8cl_lifetime_b",
             "tsymex_rfc0005_s8cl_strings",
             # RFC-0005 S8cr: the definition-of-done audit's gaps. The six
             # unpinned fresh-symbol kinds and the coverage invariant; a live
             # sevError beside a clean witness and symexForAll's own pins; a
             # helper check for each to-unsat flip. No bump.
             "tsymex_rfc0005_s8cr_intro",
+            "tsymex_rfc0005_s8cr_intro_b",
             "tsymex_rfc0005_s8cr_pins",
             "tsymex_rfc0005_s8cr_flips",
             "tsymex_rfc0005_s8cr_flips_str",

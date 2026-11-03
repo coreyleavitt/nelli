@@ -552,6 +552,11 @@ title = "S8cb's remainder: replay footprint gaps, the dropped uncheckedAssign pr
 state = "pending"
 
 [[slice]]
+id = "S8cm"
+title = "Corpus files over 60 s compile plus run on Windows, and shard budgets"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

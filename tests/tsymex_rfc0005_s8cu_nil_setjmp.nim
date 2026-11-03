@@ -6,15 +6,14 @@
 ## This file imports `std/segfaults`, so the native rows catch it. Each runs in a
 ## child process (`native:<form>`), which prints `RAN` and the labels it reached.
 ##
-## The cpp backend cannot build `--exceptions:setjmp`, so the `.nim.cfg` applies
-## it to c only. On cpp (`--exceptions:cpp`) `std/segfaults` leaves the defect
+## The cpp backend cannot build `--exceptions:setjmp`, so the `.nims` applies it
+## to c only. On cpp (`--exceptions:cpp`) `std/segfaults` leaves the defect
 ## unhandled natively, and the suite pins the crash finding there instead.
 ##
-## On Windows the walk runs on a 16 MB fiber, and with `std/segfaults` imported
-## a fault there that the process otherwise survives is re-raised from
-## `runSymexCaught` as a `NilAccessDefect`, before any walk: so on Windows the
-## file does not import it and the native row (a Linux fact) is skipped. The
-## walker's decline does not read the import, and is checked everywhere.
+## Nor is it applied on Windows: there the walk runs on a 16 MB fiber, and a
+## setjmp build crashes entering it (SIGSEGV in `runSymexCaught`, before any
+## walk; a `NilAccessDefect` with `std/segfaults` imported), so the file pins
+## the default exceptions, without `std/segfaults`, like cpp.
 import std/[unittest, os, osproc, strutils, sets]
 when not defined(windows):
   import std/segfaults
@@ -73,7 +72,7 @@ suite "S8cu: a nil dereference with --exceptions:setjmp":
     check r.errors.named(heNilDerefMayBeCaught)
 
   else:
-   test "cpp exceptions: std/segfaults does not catch it, so it is the crash":
+   test "without setjmp exceptions nothing catches it, so it is the crash":
     let (output, rc) = execCmdEx(quoteShell(getAppFilename()) & " native:param")
     checkpoint "rc=" & $rc & " " & output
     check rc != 0

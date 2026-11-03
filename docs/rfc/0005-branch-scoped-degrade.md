@@ -15074,11 +15074,16 @@ is re-pinned: `f(nil)` is a SIGSEGV at `p[] = 7`, which surfaces under any targe
 reach by routing the nil edge into the `finally`); the composition it pins is
 checked with `dkOther` excluded.
 
-On Windows the walk runs on a 16 MB fiber, and with `std/segfaults` imported
-and `--exceptions:setjmp`, `runSymexCaught` re-raised a `NilAccessDefect` from
-it before any walk, which suggests a fault the process otherwise survives.
-Not investigated here: the setjmp suite does not import `std/segfaults` on
-Windows, so its native row is a Linux fact there.
+*Windows.* The native rows of `tsymex_rfc0005_s8cu_nil` ran on symex-mingw
+(41593977643) and passed: under mingw, with default exceptions, a nil read
+crashes the child under each handler form and the `finally`, as on Linux, so
+the rule is not platform-dependent. A setjmp build of the walk itself does
+not run on Windows: it crashes entering the 16 MB fiber (SIGSEGV in
+`runSymexCaught`, before any walk, run 41607282958; with `std/segfaults`
+imported it surfaces as a `NilAccessDefect`, run 41593977643). This is a
+pre-existing incompatibility of nelli with `--exceptions:setjmp` on Windows,
+not of the nil rule, and is not fixed here. The setjmp suite's `.nims` applies
+setjmp on c off Windows only; on Windows and cpp it pins the default crash.
 
 | form (label in the handler) | native | main | channel | S8cu |
 |---|---|---|---|---|

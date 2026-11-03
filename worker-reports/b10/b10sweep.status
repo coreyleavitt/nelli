@@ -1,0 +1,7 @@
+start 2026-11-02T20:35:30-06:00 drain_polls=89 still_running=[]
+sweep rc=0 wall=4926s
+r6b6_51 rc=0 ok=8 failed=0 wall=29.3s
+r6b6_413 rc=0 ok=8 failed=0 wall=27.8s
+s8bb_constructs_51 rc=0 ok=5 failed=0 wall=15.5s
+s8bb_constructs_413 rc=0 ok=5 failed=0 wall=15.3s
+done

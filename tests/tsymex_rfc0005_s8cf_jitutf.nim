@@ -21,6 +21,11 @@ const
     "\\x{85}\\x{85}", "[\\x{a9}]b", "\\x{ac}+b", "\\x{82}\\x{ac}", "(\\x{a9})b",
     "(?:\\x{a9}|a)b", "(?:\\sb|\\x{85})b", "\\s\\x{a9}", "\\d\\x{ac}b",
     "\\w\\x{ac}", "\\sb", "\\d\\db", "\\w{2}b", "(?i)\\x{e0}b"]
+  headPart = [4, 5, 2, 4, 3, 1, 1, 2, 3, 3, 5, 4, 1, 4, 5, 2, 3, 5]
+    ## The part (1 to 5) that compares each head. RFC-0005 S8cm placed them by
+    ## each head's measured cost, so no part carries the two costliest heads
+    ## (`\x{82}\x{ac}` and `\d\x{ac}b`) together, as `hi mod 5` had: that part
+    ## ran 54 s on Windows against 20 to 34 s for the others.
   tails = ["", "(*SKIP)", "(*COMMIT)", "(*SKIP:A)b|."]
   conventions = ["(*UTF)", "(*UTF)(*CRLF)", "(*UTF)(*ANY)"]
   chars = ["a", "b", "\xc3\xa9", "\xe2\x82\xac", "\xc2\x85", "\xc2\xa9",
@@ -64,7 +69,7 @@ when s8cfJuPart != 0:
         let ws = words(3)
         for cv in conventions:
           for hi, h in heads:
-            if hi mod 5 != s8cfJuPart - 1: continue
+            if headPart[hi] != s8cfJuPart: continue
             for t in tails:
               let p = cv & h & t
               let pr = parsePcre(p)
@@ -96,7 +101,7 @@ when s8cfJuPart != 0:
       let ws = words(2)
       for cv in ["(*UTF)", "(*UTF)(*CRLF)"]:
         for hi, h in heads:
-          if hi mod 5 != s8cfJuPart - 1: continue
+          if headPart[hi] != s8cfJuPart: continue
           for t in ["", "(*SKIP)"]:
             let p = cv & h & t
             let pr = parsePcre(p)

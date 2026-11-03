@@ -1603,8 +1603,17 @@ task test, "Run the test suite":
             # RFC-0005 S8ct: no replay runs in the host process, and a term too
             # deep for a recursive walk leaves the process alive; walker 252->261.
             "tsymex_rfc0005_s8ct_isolation",
+            "tsymex_rfc0005_s8ct_isolation_b",
+            "tsymex_rfc0005_s8ct_isolation_c",
+            "tsymex_rfc0005_s8ct_isolation_d",
+            "tsymex_rfc0005_s8ct_isolation_e",
             "tsymex_rfc0005_s8ct_reexec",
+            "tsymex_rfc0005_s8ct_reexec_b",
+            "tsymex_rfc0005_s8ct_reexec_c",
+            "tsymex_rfc0005_s8ct_reexec_d",
+            "tsymex_rfc0005_s8ct_reexec_e",
             "tsymex_rfc0005_s8ct_deepterm",
+            "tsymex_rfc0005_s8ct_deepterm_b",
             # Batch 11: row B19's exact SUT, split out of deepterm (86 s of its
             # 186 s on Windows, against a 240 s kill).
             "tsymex_rfc0005_s8ct_b19",

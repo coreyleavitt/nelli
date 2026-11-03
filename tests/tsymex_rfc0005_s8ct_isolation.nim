@@ -14,6 +14,12 @@
 ## "Declined" is `sxUnknown`. On a re-executing platform a SUT reaching what cannot
 ## be handed to a child does not run at all (`feReplayDeclined`), which the rows
 ## with a foreign routine or a proc value spell out.
+##
+## RFC-0005 S8cm: part 1 of 5 of this suite, with
+## `tsymex_rfc0005_s8ct_isolation_b`, `tsymex_rfc0005_s8ct_isolation_c`,
+## `tsymex_rfc0005_s8ct_isolation_d`, `tsymex_rfc0005_s8ct_isolation_e`. Split
+## so that each part compiles and runs in under 60 s on the Windows legs (the
+## whole file took 89 s).
 import std/[unittest, strutils, os, osproc, streams, strtabs, exitprocs,
             typedthreads, monotimes, times, volatile]
 import nelli
@@ -146,32 +152,11 @@ proc wildWrite(k: int) =
     writesWild(k)
   symexTarget("t")
 
-proc allocationLoop(k: int) =
-  if gG == 0:
-    var hold: seq[seq[byte]]
-    while true:
-      hold.add newSeq[byte](1 shl 24)
-  symexTarget("t")
-
-proc hugeAllocation(k: int) =
-  if gG == 0:
-    let s = newSeq[byte](1 shl 44)
-    gG = s.len
-  symexTarget("t")
-
 proc doubleDealloc(k: int) =
   if gG == 0:
     let p = alloc(64)
     dealloc(p)
     dealloc(p)
-  symexTarget("t")
-
-proc spins(k: int) =
-  if gG == 0:
-    var n = k
-    while true:
-      n = (n xor 1) or 1
-      if n == 0: break
   symexTarget("t")
 
 # The host's state is out of reach, whatever the child does to its copy.
@@ -188,14 +173,6 @@ proc writesThenLabel(k: int) =
   overwritesHost(k)
   symexTarget("t")
 
-# ... and the child sees the host's state as it is now, not as it started.
-var gRuntimeSet = 0
-
-proc readsRuntimeState(k: int) =
-  let v = gRuntimeSet
-  if k == 5 and v == 41:
-    symexTarget("t")
-
 # §2.3 rule 3 still holds: confirmed is `rsConfirmed`, refuted stays unknown.
 proc confirmed(k: int) =
   if gG == 0 and k == 42:
@@ -210,19 +187,6 @@ proc routineGlobal(k: int) =
   var calls {.global.} = 0
   if gG == 0 and calls == 0 and k == 3:
     symexTarget("t")
-
-# Threads at the fork. Another thread would end the wait, and in the child that
-# thread does not exist.
-var gHeld: int
-
-proc waitsForHeldLock(k: int) {.symexTransparent.} =
-  while volatileLoad(addr gHeld) != 0:
-    discard
-
-proc locked(k: int) =
-  if gG == 0:
-    waitsForHeldLock(k)
-  symexTarget("t")
 
 # ---- native runs -------------------------------------------------------------
 
@@ -288,10 +252,6 @@ proc nativeRun(row: string; k: int): Native =
   for line in output.splitLines():
     if line == "HIT|t": result.hit = true
     if line.startsWith("RAISED|"): result.raised = line[7 .. ^1]
-
-# ---- the rows ----------------------------------------------------------------
-
-const noSat = {sxUnknown, sxRaised}
 
 template declinedByCrash(r: untyped; label: string) =
   ## The real fn ended its child: `sxUnknown`, saying so, or on a re-executing
@@ -374,182 +334,3 @@ suite "S8ct: a replay cannot end the host":
     let n = nativeRun("nilDeref", 0)
     check n.rc != 0
     check not n.hit
-
-  test "B19: unbounded recursion":
-    # With the sort's `array[4096, int]` this was not a replay's death: the
-    # analysis ended the process, in S8by's `holds`. Here the replay of input 0
-    # crashes, and input `high(int)` really does raise, at `n + 1`.
-    let r = symexFind(unboundedRecursion, tLabel("t"))
-    checkpoint(show(r.errors))
-    check r.status in noSat
-    when replayForks:
-      check hasKind(r.errors, feReplayCrashed)
-    let n = nativeRun("unboundedRecursion", 0)
-    check n.rc != 0
-    check not n.hit
-    if r.status == sxRaised:
-      check r.raisedTypeId == "OverflowDefect"
-      check nativeRun("unboundedRecursion", high(int)).raised == "OverflowDefect"
-
-  test "W1: a raw C exit behind an opaque":
-    let r = symexFind(rawExit, tLabel("t"))
-    declinedByCrash(r, "rawExit")
-    let n = nativeRun("rawExit", 3)
-    check n.rc == 7
-    check not n.hit
-
-  test "W2: quit behind a proc value behind an opaque":
-    let r = symexFind(quitByProcValue, tLabel("t"))
-    declinedByCrash(r, "quitByProcValue")
-    let n = nativeRun("quitByProcValue", 3)
-    check n.rc == 7
-    check not n.hit
-
-  test "abort":
-    let r = symexFind(abortCall, tLabel("t"))
-    declinedByCrash(r, "abortCall")
-    let n = nativeRun("abortCall", 3)
-    check n.rc != 0
-    check not n.hit
-
-  test "a raised Defect is what it is, not a crash and not unsat":
-    let r = symexFind(raiseDefect, tLabel("t"))
-    checkpoint(show(r.errors))
-    check r.status in noSat
-    check not hasKind(r.errors, feReplayCrashed)
-    let n = nativeRun("raiseDefect", 0)
-    check n.raised == "IndexDefect"
-    check not n.hit
-    if r.status == sxRaised:
-      check r.raisedTypeId == "IndexDefect"
-
-  test "a wild write":
-    let r = symexFind(wildWrite, tLabel("t"))
-    declinedByCrash(r, "wildWrite")
-    let n = nativeRun("wildWrite", 0)
-    check n.rc != 0
-    check not n.hit
-
-  test "an allocation loop fails in the child, which the host outlives":
-    # Not run natively: it would take the machine's memory.
-    let r = symexFind(allocationLoop, tLabel("t"))
-    declinedByCrash(r, "allocationLoop")
-
-  test "one allocation past the limit":
-    let r = symexFind(hugeAllocation, tLabel("t"))
-    declinedByCrash(r, "hugeAllocation")
-
-  test "a double dealloc: whatever it does, it does to the child":
-    let r = symexFind(doubleDealloc, tLabel("t"))
-    checkpoint(show(r.errors))
-    check r.status != sxUnsat
-    check nativeRun("doubleDealloc", 0).rc >= 0
-    # The host's own heap still works.
-    var s = newSeq[int](4096)
-    s[4095] = 1
-    check s[4095] == 1
-
-  test "a replay that never ends is killed at its bound and leaves nothing behind":
-    const lim = SymexSettings(replayTimeoutMs: 300)
-    let t0 = getMonoTime()
-    let r = symexFind(spins, tLabel("t"), lim)
-    checkpoint(show(r.errors))
-    check r.status == sxUnknown
-    check hasKind(r.errors, feReplayTimedOut)
-    check (getMonoTime() - t0).inSeconds < 50
-    # No abandoned thread: the next replay of the same state is not disturbed.
-    check symexFind(confirmed, tLabel("t")).status == sxSat
-
-suite "S8ct: a replay cannot corrupt the host":
-  test "the child's writes do not reach the host":
-    gHostValue = 11
-    gHostSeq = @[1, 2, 3]
-    let r = symexFind(writesThenLabel, tLabel("t"))
-    checkpoint(show(r.errors))
-    when replayForks:
-      check r.status == sxSat
-    check gHostValue == 11
-    check gHostSeq == @[1, 2, 3]
-
-  test "the child runs on the host's state as it is at the replay":
-    gRuntimeSet = 41
-    let r = symexFind(readsRuntimeState, tLabel("t"))
-    checkpoint(show(r.errors))
-    check r.status == sxSat
-    check r.soundness.replay == rsConfirmed
-
-  test "many replays: no descriptor or child is left behind":
-    when defined(linux):
-      proc openFds(): int =
-        for _ in walkDir("/proc/self/fd"): inc result
-      let before = openFds()
-    let runs = replayExecutions()
-    for i in 0 ..< 40:
-      discard symexFind(confirmed, tLabel("t"))
-    check replayExecutions() - runs >= 40
-    when defined(linux):
-      check openFds() == before
-
-suite "S8ct: §2.3 rule 3 still holds":
-  test "a confirmed witness is sxSat with rsConfirmed":
-    let r = symexFind(confirmed, tLabel("t"))
-    checkpoint(show(r.errors))
-    check r.status == sxSat
-    check r.soundness.replay == rsConfirmed
-    check r.witness[0] == 42
-    check nativeRun("confirmed", 42).hit
-
-  test "a refuted witness stays sxUnknown":
-    let r = symexFind(refuted, tLabel("t"))
-    checkpoint(show(r.errors))
-    check r.status == sxUnknown
-    check hasKind(r.errors, feReplayRefuted)
-    check not nativeRun("refuted", 42).hit
-
-  test "state the wire cannot carry: Linux decides, re-exec names why not":
-    let r = symexFind(routineGlobal, tLabel("t"))
-    checkpoint(show(r.errors))
-    when replayReexecs:
-      check r.status == sxUnknown
-      check hasKind(r.errors, feReplayDeclined)
-      check "replay not marshallable" in show(r.errors)
-      check "a Linux or macOS run forks and replays it" in show(r.errors)
-    else:
-      check r.status == sxSat
-      check r.soundness.replay == rsConfirmed
-    check nativeRun("routineGlobal", 3).hit
-
-  test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 261
-
-when replayForks:
-  type Worker = object
-    stop: bool
-
-  var gWorker: Worker
-  var gWorkerThread: Thread[void]
-
-  proc busyWorker() {.thread.} =
-    {.cast(gcsafe).}:
-      volatileStore(addr gHeld, 1)
-      while not volatileLoad(addr gWorker.stop):
-        var s = newSeq[int](1024)
-        s[0] = 1
-      volatileStore(addr gHeld, 0)
-
-  suite "S8ct: fork with other threads alive":
-    test "a running thread does not exist in the child, and is unharmed":
-      createThread(gWorkerThread, busyWorker)
-      sleep(50)
-      let r = symexFind(confirmed, tLabel("t"))
-      check r.status == sxSat
-      check r.soundness.replay == rsConfirmed
-
-    test "what another thread would have ended stays waiting: the bound ends it":
-      const lim = SymexSettings(replayTimeoutMs: 300)
-      let r = symexFind(locked, tLabel("t"), lim)
-      checkpoint(show(r.errors))
-      check r.status == sxUnknown
-      check hasKind(r.errors, feReplayTimedOut)
-      volatileStore(addr gWorker.stop, true)
-      joinThread(gWorkerThread)

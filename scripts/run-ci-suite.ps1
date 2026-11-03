@@ -30,18 +30,22 @@
   Peak working-set limit for the test binary, in MB.
 .PARAMETER ExtraNimArgs
   Additional `nim c` arguments (e.g. -d:symexCiLeanB5).
+.PARAMETER NimCache
+  A nimcache directory to build in, shared by the suites of one shard
+  (RFC-0005 S8cm). Empty: nim's default, one directory per suite.
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Suite,
   [int]$TimeoutSec = 240,
   [int]$MaxWorkingSetMB = 6144,
-  [string[]]$ExtraNimArgs = @()
+  [string[]]$ExtraNimArgs = @(),
+  [string]$NimCache = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
 Write-Host "==> $Suite"
-if ($env:S8CM_NIMCACHE) { $ExtraNimArgs = @("--nimcache:$env:S8CM_NIMCACHE") + $ExtraNimArgs }
+if ($NimCache) { $ExtraNimArgs = @("--nimcache:$NimCache") + $ExtraNimArgs }
 # -Wl,--stack: link an 8 MB main-thread stack (Linux parity). Windows
 # defaults to 1 MB, and deep walker/Z3 recursion intermittently overflowed it
 # as a silent crash (catalog #11 class).

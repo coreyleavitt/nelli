@@ -142,9 +142,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       shards_json: ${{ steps.derive.outputs.shards_json }}
-      # RFC-0005 S8aj: the corpus job's matrix. The shard count is
-      # derive-ci-suites.ps1's `$shardCount` alone (12; it was 3, written
-      # here and there by hand, then 8, then 10).
+      # RFC-0005 S8aj: the corpus job's matrix. RFC-0005 S8cm: its size is
+      # derive-ci-suites.ps1's, from the measured suite times in
+      # scripts/ci-suite-seconds.tsv (at least `$minShardCount`, 14; it was
+      # 3, written here and there by hand, then 8, 10, 12 and 14).
       shard_ids: ${{ steps.derive.outputs.shard_ids }}
     steps:
       - uses: actions/checkout@v6
@@ -265,26 +266,6 @@ jobs:
             throw 'expected deps z3 + softlink not resolved from milpa.lock'
           }
 
-      - name: Per-suite compile floor experiment (RFC-0005 S8cm, temporary)
-        shell: pwsh
-        env:
-          SHARD_IDX: ${{ matrix.shard }}
-        run: |
-          $mode = [int]$env:SHARD_IDX % 4
-          $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
-          Write-Host "defender realtime: $($status.RealTimeProtectionEnabled) antivirus: $($status.AntivirusEnabled)"
-          if ($mode -band 1) {
-            try {
-              Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, "$env:USERPROFILE\nimcache", 'C:\mingw64', 'C:\z3'
-              Add-MpPreference -ExclusionProcess 'gcc.exe', 'cc1.exe', 'as.exe', 'ld.exe', 'collect2.exe', 'nim.exe'
-              Write-Host "S8cm floor experiment: defender exclusions on"
-            } catch { Write-Host "S8cm floor experiment: defender exclusions failed: $_" }
-          }
-          if ($mode -band 2) {
-            "S8CM_NIMCACHE=$env:RUNNER_TEMP\nimcache-shared" >> $env:GITHUB_ENV
-            Write-Host "S8cm floor experiment: shared nimcache on"
-          }
-
       - name: Run shard ${{ matrix.shard }} of the derived corpus
         shell: pwsh
         env:
@@ -311,6 +292,15 @@ jobs:
           $budgetMin = 40
           $stopMin = 48
           $shardClock = [System.Diagnostics.Stopwatch]::StartNew()
+          # RFC-0005 S8cm: the shard's suites share one nimcache. A suite's
+          # generated C differs from another's only where its program does
+          # (hook symbol ids shift with what each program instantiates), and
+          # nim recompiles only the C files whose text changed: about 12%
+          # off each compile here, measured against separate caches at
+          # a8d72b9f (run 41656845305). Excluding the workspace and gcc
+          # from Defender's scan was measured in the same run and saved
+          # nothing.
+          $nimcache = Join-Path $env:RUNNER_TEMP 'nimcache-corpus'
           $times = @()
           $notRun = @()
           $failed = @()
@@ -339,9 +329,9 @@ jobs:
             # coverage (none besides this suite self-audits symex.nim/
             # concolic.nim's OWN routines at build time).
             if ($t -eq 'tsymex_rfc0005_s8ab_letaudit') {
-              ./scripts/run-ci-suite.ps1 -Suite $t -ExtraNimArgs @('-d:nelliVmAliasAudit')
+              ./scripts/run-ci-suite.ps1 -Suite $t -NimCache $nimcache -ExtraNimArgs @('-d:nelliVmAliasAudit')
             } else {
-              ./scripts/run-ci-suite.ps1 -Suite $t
+              ./scripts/run-ci-suite.ps1 -Suite $t -NimCache $nimcache
             }
             if ($LASTEXITCODE -ne 0) { $failed += $t }
             $times += [pscustomobject]@{ Suite = $t; Sec = [math]::Round($suiteClock.Elapsed.TotalSeconds, 1) }

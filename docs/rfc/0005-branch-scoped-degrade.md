@@ -9735,7 +9735,9 @@ land stacked on batch 9, in that order: `symexWalkerVersion` 245 -> **252**, the
   with `queryRLimit` and `seqQueryRLimit` at 8e9, `queryTimeoutMs` at 1.2M, `maxSeqLen`
   at 128 and 4096, and `limitWorldRLimit` at 8e9 with a 900 s timeout, it never
   decides `sxUnsat`. The walks take 85 and 603 s at that budget, and neither
-  refutes. Pinned natively in `tsymex_rfc0005_b10_integration`.
+  refutes. On Z3 4.13.4 the unbounded form runs out of `seqQueryRLimit` first, the
+  same kind on the same `sxUnknown`; the fixed-length form names the limit on both.
+  Pinned natively in `tsymex_rfc0005_b10_integration`.
 - *One empty-magic helper.* S8bo's and S8cl's helpers are `stubBody`, read after the
   distinct barrier. S8cb's `ensureMove` model stands over S8cl's decline, and
   `procCall` declines. S8cl's pins moved with native checks: `ensureMove`, `=sink` and

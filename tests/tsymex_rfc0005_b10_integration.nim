@@ -168,7 +168,17 @@ suite "RFC-0005 batch 10: integration":
     check "alt_short" notin hits
 
   test "alt_miss: declines by the limit reason, never sxUnsat":
-    declines(altMiss, "alt_miss", "PCRE's own limits")
+    # The unbounded subject: on Z3 5.1 the limit reason answers, and 4.13.4 runs out
+    # of `seqQueryRLimit` first. Each is a `beSolverUndef` on an `sxUnknown`. The
+    # fixed length names the limit on both.
+    block:
+      let r = symexFind(altMiss, tLabel("alt_miss"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      var undef = false
+      for e in r.errors:
+        if e.kind == beSolverUndef: undef = true
+      check undef
     declines(altMissLen, "alt_miss_len", "PCRE's own limits")
 
   test "alt_short: inside the safe length the refutation stands":

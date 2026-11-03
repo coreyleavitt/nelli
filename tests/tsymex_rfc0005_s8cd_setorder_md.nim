@@ -4,7 +4,7 @@
 ##
 ## RFC-0005 S8cm: part 2 of 2 of this suite, with
 ## `tsymex_rfc0005_s8cd_setorder_small`. Split so that each part compiles and
-## runs in under 60 s on the Windows legs (the whole file took 100 s): one set
+## runs in under 60 s on the Windows legs (the whole file took 100 s). One set
 ## type a file.
 import std/[unittest, strutils, sets]
 import nelli/symex

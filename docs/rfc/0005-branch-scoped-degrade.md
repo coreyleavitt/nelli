@@ -557,6 +557,16 @@ state = "done"
     all prior art this builds directly on. **Every item §1 names is landed;
     §13.2 asks whether the `blocked_by` edge should therefore become soft.**
 
+**Successor: RFC-0016 (2026-11-02).** Corey split this RFC on 2026-11-02.
+RFC-0005 ends at the 0.9.0 tag, once every open soundness item that is worse
+than `main` (6cbfe8f) is fixed. All remaining non-blocking work moved to
+`docs/rfc/0016-native-parity-hardening.md`: soundness items with the same
+severity as `main`, precision gaps, crashes and hangs that match `main`, CI and
+test-time work, and the exact models behind the declines this RFC added.
+Nothing was dropped. RFC-0016 is open-ended and tracked by the rate of new
+findings. This RFC's Status and frontmatter are updated at the release, not
+here.
+
 **Path convention.** Bare `runtime.nim`, `types.nim`, `canonicalize.nim`,
 `dsl_parser.nim`, `runtime_heap.nim`, `runtime_strings.nim` mean
 `src/nelli/smt/…`; `markers.nim` means `src/nelli/engine/markers.nim`. This

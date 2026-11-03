@@ -9061,6 +9061,11 @@ var glWatched {.threadvar.}: HashSet[string]
   ## unwritten part, whose reads therefore observe: a `var` formal whose
   ## actual holds one, an element read's temporary (the access on it picks
   ## the part), a `{.noinit.}` local.
+var glVarGlobal {.threadvar.}: Table[string, string]
+  ## RFC-0005 batch 11 (S8bz over S8cs). A `var` formal -> the global its actual
+  ## names (through a field or index chain, or another such formal). S8bz reads
+  ## the actual as a copy-in (`vCopy`), which observes nothing; the formal's
+  ## read is where the global's value enters, so S8cs's route check runs there.
 var glUnwrittenAsts {.threadvar.}: seq[Z3AnyAst]
   ## The unwritten leaves themselves (`unwrittenIndependent` renames them).
 var lowerAsReceiver {.threadvar.}: bool
@@ -9076,6 +9081,7 @@ proc glUnwrittenFresh(ctx: Z3Context) =
     glPartHavoc = initTable[string, bool]()
     glUnwrittenAsts = @[]
     glWatched = initHashSet[string]()
+    glVarGlobal = initTable[string, string]()
 
 proc svAsts(sv: SymVal; acc: var seq[RawZ3Ast]) =
   ## Every Z3 term a value holds, compound or not.
@@ -9322,6 +9328,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let anyValue = globalHiddenRoute(routeAnyValue)
       let hidden = if anyValue.len > 0: anyValue
                    elif isGlobalEnvName(e.vname): globalHiddenRoute(e.vname)
+                   elif e.vname in glVarGlobal:
+                     globalHiddenRoute(glVarGlobal[e.vname])
                    else: ""
       if hidden.len > 0:
         lowerDegrade(feGlobalRouteUnproved,
@@ -22897,6 +22905,17 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           # the formal does.
           if formal.isVar and unwrittenIn(argVals[i]).len > 0:
             glWatched.incl formal.name
+          # RFC-0005 batch 11: the global a `var` actual names (`glVarGlobal`).
+          if formal.isVar:
+            var root = stmt.cargs[i]
+            while root != nil and root.kind in {iekField, iekIndex}:
+              root = if root.kind == iekField: root.obj else: root.arr
+            var g = ""
+            if root != nil and root.kind == iekVar:
+              if isGlobalEnvName(root.vname): g = root.vname
+              else: g = glVarGlobal.getOrDefault(root.vname, "")
+            if g.len > 0: glVarGlobal[formal.name] = g
+            else: glVarGlobal.del formal.name
         # RFC-0005 S8an: the callee also reaches every module-level global
         # and, for a routine declared inside another, the enclosing
         # variables it captures. Nim shares those locations with the
@@ -27717,6 +27736,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   glPartHavoc = initTable[string, bool]()  ## unwritten leaves with them
   glUnwrittenAsts = @[]
   glWatched = initHashSet[string]()   ## RFC-0005 S8bz
+  glVarGlobal = initTable[string, string]()   ## RFC-0005 batch 11
   noinitSerial = 0                    ## RFC-0005 S8bz
   globalEntryFacts = @[]                         ## RFC-0005 S8as
   ctxPruneLog = @[]                              ## RFC-0005 S8ax

@@ -9,10 +9,13 @@
 ## nine settings in `tsymex_rfc0005_s8cq_native`), or the callee with everything
 ## it reaches is proved to write nothing the actual could be (`byValueWritten`).
 ## Everything else declines; the exact model belongs to RFC-0016.
+##
+## A local's memory has no other name but a pointer to it, and S8bs keeps that cell
+## and the formal one location, so a local actual stays decided; a formal whose
+## address the callee takes, a routine actual, and a `var` of the same local decline.
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -254,90 +257,6 @@ proc p_byr(x: int) =
   let r = wByR(gByR)
   if r == 50: symexTarget("byr_r50")
   if r == x: symexTarget("byr_rx")
-proc p_byc(x: int) =
-  if x == 50: return
-  gByC = ByC(x: x)
-  let r = wByC(gByC)
-  if r == 50: symexTarget("byc_r50")
-  if r == x: symexTarget("byc_rx")
-proc p_t1(x: int) =
-  if x == 50: return
-  gT1 = (x: x)
-  let r = wT1(gT1)
-  if r == 50: symexTarget("t1_r50")
-  if r == x: symexTarget("t1_rx")
-proc p_t4(x: int) =
-  if x == 50: return
-  gT4 = (x: x, b: 0, c: 0, d: 0)
-  let r = wT4(gT4)
-  if r == 50: symexTarget("t4_r50")
-  if r == x: symexTarget("t4_rx")
-proc p_ts(x: int) =
-  if x == 50: return
-  gTS = (x: x, s: @[x])
-  let r = wTS(gTS)
-  if r == 50: symexTarget("ts_r50")
-  if r == x: symexTarget("ts_rx")
-proc p_a1(x: int) =
-  if x == 50: return
-  gA1 = [x]
-  let r = wA1(gA1)
-  if r == 50: symexTarget("a1_r50")
-  if r == x: symexTarget("a1_rx")
-proc p_asm(x: int) =
-  if x == 50: return
-  gASm = [x, 0]
-  let r = wASm(gASm)
-  if r == 50: symexTarget("asm_r50")
-  if r == x: symexTarget("asm_rx")
-proc p_aseq(x: int) =
-  if x == 50: return
-  gASeq = [@[x]]
-  let r = wASeq(gASeq)
-  if r == 50: symexTarget("aseq_r50")
-  if r == x: symexTarget("aseq_rx")
-proc p_fld(x: int) =
-  if x == 50: return
-  gOS = OS(s: @[x])
-  let r = wFld(gOS.s)
-  if r == 50: symexTarget("fld_r50")
-  if r == x: symexTarget("fld_rx")
-proc p_elem(x: int) =
-  if x == 50: return
-  gss = @[@[x]]
-  let r = wElem(gss[0])
-  if r == 50: symexTarget("elem_r50")
-  if r == x: symexTarget("elem_rx")
-proc p_oa(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let r = wOA(gs)
-  if r == 50: symexTarget("oa_r50")
-  if r == x: symexTarget("oa_rx")
-proc p_ps(x: int) =
-  if x == 50: return
-  gs = @[x]; gPs = addr gs
-  let r = wPs(gs)
-  if r == 50: symexTarget("ps_r50")
-  if r == x: symexTarget("ps_rx")
-proc p_po4(x: int) =
-  if x == 50: return
-  gO4 = O4(x: x); gPO4 = addr gO4
-  let r = wPO4(gO4)
-  if r == 50: symexTarget("po4_r50")
-  if r == x: symexTarget("po4_rx")
-proc p_ro4(x: int) =
-  if x == 50: return
-  new(gRO4); gRO4.x = x
-  let r = wRO4(gRO4[])
-  if r == 50: symexTarget("ro4_r50")
-  if r == x: symexTarget("ro4_rx")
-proc p_rs(x: int) =
-  if x == 50: return
-  new(gRs); gRs[] = @[x]
-  let r = wRs(gRs[])
-  if r == 50: symexTarget("rs_r50")
-  if r == x: symexTarget("rs_rx")
 
 for x in [-3, 0, 3, 5, 7, 49, 51]:
   nat(p_o1(x))
@@ -349,20 +268,6 @@ for x in [-3, 0, 3, 5, 7, 49, 51]:
   nat(p_onest(x))
   nat(p_inh(x))
   nat(p_byr(x))
-  nat(p_byc(x))
-  nat(p_t1(x))
-  nat(p_t4(x))
-  nat(p_ts(x))
-  nat(p_a1(x))
-  nat(p_asm(x))
-  nat(p_aseq(x))
-  nat(p_fld(x))
-  nat(p_elem(x))
-  nat(p_oa(x))
-  nat(p_ps(x))
-  nat(p_po4(x))
-  nat(p_ro4(x))
-  nat(p_rs(x))
 
 suite "tsymex_rfc0005_s8cq_byvalue2":
   test "verdicts against Nim":
@@ -384,31 +289,3 @@ suite "tsymex_rfc0005_s8cq_byvalue2":
     pin(p_inh, "inh_rx", false, sxUnknown)
     pin(p_byr, "byr_r50", true, sxUnknown)
     pin(p_byr, "byr_rx", false, sxUnknown)
-    pin(p_byc, "byc_r50", false, sxUnknown)
-    pin(p_byc, "byc_rx", true, sxUnknown)
-    pin(p_t1, "t1_r50", false, sxUnsat)
-    pin(p_t1, "t1_rx", true, sxSat)
-    pin(p_t4, "t4_r50", true, sxUnknown)
-    pin(p_t4, "t4_rx", false, sxUnknown)
-    pin(p_ts, "ts_r50", true, sxUnknown)
-    pin(p_ts, "ts_rx", false, sxUnknown)
-    pin(p_a1, "a1_r50", true, sxUnknown)
-    pin(p_a1, "a1_rx", false, sxUnknown)
-    pin(p_asm, "asm_r50", true, sxUnknown)
-    pin(p_asm, "asm_rx", false, sxUnknown)
-    pin(p_aseq, "aseq_r50", true, sxUnknown)
-    pin(p_aseq, "aseq_rx", false, sxUnknown)
-    pin(p_fld, "fld_r50", true, sxUnknown)
-    pin(p_fld, "fld_rx", false, sxUnknown)
-    pin(p_elem, "elem_r50", true, sxUnknown)
-    pin(p_elem, "elem_rx", false, sxUnknown)
-    pin(p_oa, "oa_r50", true, sxUnknown)
-    pin(p_oa, "oa_rx", false, sxUnknown)
-    pin(p_ps, "ps_r50", true, sxUnknown)
-    pin(p_ps, "ps_rx", false, sxUnknown)
-    pin(p_po4, "po4_r50", true, sxUnknown)
-    pin(p_po4, "po4_rx", false, sxUnknown)
-    pin(p_ro4, "ro4_r50", true, sxUnknown)
-    pin(p_ro4, "ro4_rx", false, sxUnknown)
-    pin(p_rs, "rs_r50", true, sxUnknown)
-    pin(p_rs, "rs_rx", false, sxUnknown)

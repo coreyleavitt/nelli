@@ -9,7 +9,6 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -206,110 +205,6 @@ proc c09(x: int) =
   getR()[] *= 2
   if gN == 1 and (gR[] == x * 2): symexTarget("c09_ok")
   if gN != 1 or not (gR[] == x * 2): symexTarget("c09_bad")
-proc c10(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gStrR); gStrR[] = "ab"
-  var y = 7
-  getStrR()[] &= "c"
-  if gN == 1 and (gStrR[] == "abc"): symexTarget("c10_ok")
-  if gN != 1 or not (gStrR[] == "abc"): symexTarget("c10_bad")
-proc c11(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gStrR); gStrR[] = "ab"
-  var y = 7
-  getStrR()[].add('c')
-  if gN == 1 and (gStrR[] == "abc"): symexTarget("c11_ok")
-  if gN != 1 or not (gStrR[] == "abc"): symexTarget("c11_bad")
-proc c12(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gAR); gAR[] = [x, 2, 3]
-  var y = 7
-  getAR()[][0] += 1
-  if gN == 1 and (gAR[][0] == x + 1): symexTarget("c12_ok")
-  if gN != 1 or not (gAR[][0] == x + 1): symexTarget("c12_bad")
-proc c13(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gAR); gAR[] = [x, 2, 3]
-  var y = 7
-  inc(getAR()[][0])
-  if gN == 1 and (gAR[][0] == x + 1): symexTarget("c13_ok")
-  if gN != 1 or not (gAR[][0] == x + 1): symexTarget("c13_bad")
-proc c14(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gAR); gAR[] = [x, 2, 3]
-  var y = 7
-  swap(getAR()[][0], y)
-  if gN == 1 and (gAR[][0] == 7 and y == x): symexTarget("c14_ok")
-  if gN != 1 or not (gAR[][0] == 7 and y == x): symexTarget("c14_bad")
-proc c15(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gSR); gSR[] = @[x, 2]
-  var y = 7
-  getSR()[][0] += 1
-  if gN == 1 and (gSR[][0] == x + 1): symexTarget("c15_ok")
-  if gN != 1 or not (gSR[][0] == x + 1): symexTarget("c15_bad")
-proc c16(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gSR); gSR[] = @[x, 2]
-  var y = 7
-  inc(getSR()[][0])
-  if gN == 1 and (gSR[][0] == x + 1): symexTarget("c16_ok")
-  if gN != 1 or not (gSR[][0] == x + 1): symexTarget("c16_bad")
-proc c17(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gSR); gSR[] = @[x, 2]
-  var y = 7
-  swap(getSR()[][0], y)
-  if gN == 1 and (gSR[][0] == 7 and y == x): symexTarget("c17_ok")
-  if gN != 1 or not (gSR[][0] == 7 and y == x): symexTarget("c17_bad")
-proc c18(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gR); gR[] = x
-  var y = 7
-  reset(getR()[])
-  if gN == 1 and (gR[] == 0): symexTarget("c18_ok")
-  if gN != 1 or not (gR[] == 0): symexTarget("c18_bad")
-proc c19(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gR); gR[] = x
-  var y = 7
-  wasMoved(getR()[])
-  if gN == 1 and (gR[] == 0): symexTarget("c19_ok")
-  if gN != 1 or not (gR[] == 0): symexTarget("c19_bad")
-proc c20(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gR); gR[] = x
-  var y = 7
-  let m = move(getR()[]); (if m != x: gN = 9)
-  if gN == 1 and (gR[] == 0 or gR[] == x): symexTarget("c20_ok")
-  if gN != 1 or not (gR[] == 0 or gR[] == x): symexTarget("c20_bad")
-proc c21(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gRR); new(gRR[]); gRR[][] = x
-  var y = 7
-  new(getRR()[])
-  if gN == 1 and (gRR[][] == 0): symexTarget("c21_ok")
-  if gN != 1 or not (gRR[][] == 0): symexTarget("c21_bad")
-proc c22(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gRR); new(gRR[]); gRR[][] = x
-  var y = 7
-  inc(getRR()[][])
-  if gN == 1 and (gRR[][] == x + 1): symexTarget("c22_ok")
-  if gN != 1 or not (gRR[][] == x + 1): symexTarget("c22_bad")
 
 for x in [-3, 0, 3, 5, 7, 49, 51]:
   nat(c01(x))
@@ -321,19 +216,6 @@ for x in [-3, 0, 3, 5, 7, 49, 51]:
   nat(c07(x))
   nat(c08(x))
   nat(c09(x))
-  nat(c10(x))
-  nat(c11(x))
-  nat(c12(x))
-  nat(c13(x))
-  nat(c14(x))
-  nat(c15(x))
-  nat(c16(x))
-  nat(c17(x))
-  nat(c18(x))
-  nat(c19(x))
-  nat(c20(x))
-  nat(c21(x))
-  nat(c22(x))
 
 suite "tsymex_rfc0005_s8cq_twice2":
   test "verdicts against Nim":
@@ -364,42 +246,3 @@ suite "tsymex_rfc0005_s8cq_twice2":
     # c09: getR()[] *= 2
     pin(c09, "c09_ok", true, sxUnknown)
     pin(c09, "c09_bad", false, sxUnknown)
-    # c10: getStrR()[] &= 'c'
-    pin(c10, "c10_ok", true, sxUnknown)
-    pin(c10, "c10_bad", false, sxUnknown)
-    # c11: getStrR()[].add('c')
-    pin(c11, "c11_ok", true, sxSat)
-    pin(c11, "c11_bad", false, sxUnsat)
-    # c12: getAR()[][0] += 1
-    pin(c12, "c12_ok", true, sxUnknown)
-    pin(c12, "c12_bad", false, sxUnknown)
-    # c13: inc(getAR()[][0])
-    pin(c13, "c13_ok", true, sxUnknown)
-    pin(c13, "c13_bad", false, sxUnknown)
-    # c14: swap(getAR()[][0], y)
-    pin(c14, "c14_ok", true, sxUnknown)
-    pin(c14, "c14_bad", false, sxUnknown)
-    # c15: getSR()[][0] += 1
-    pin(c15, "c15_ok", true, sxUnknown)
-    pin(c15, "c15_bad", false, sxUnknown)
-    # c16: inc(getSR()[][0])
-    pin(c16, "c16_ok", true, sxUnknown)
-    pin(c16, "c16_bad", false, sxUnknown)
-    # c17: swap(getSR()[][0], y)
-    pin(c17, "c17_ok", true, sxUnknown)
-    pin(c17, "c17_bad", false, sxUnknown)
-    # c18: reset(getR()[])
-    pin(c18, "c18_ok", true, sxSat)
-    pin(c18, "c18_bad", false, sxUnsat)
-    # c19: wasMoved(getR()[])
-    pin(c19, "c19_ok", true, sxSat)
-    pin(c19, "c19_bad", false, sxUnsat)
-    # c20: let m = move(getR()[]); (if m != x: gN = 9)
-    pin(c20, "c20_ok", true, sxUnknown)
-    pin(c20, "c20_bad", false, sxUnknown)
-    # c21: new(getRR()[])
-    pin(c21, "c21_ok", false, sxUnknown)
-    pin(c21, "c21_bad", true, sxUnknown)
-    # c22: inc(getRR()[][])
-    pin(c22, "c22_ok", true, sxUnknown)
-    pin(c22, "c22_bad", false, sxUnknown)

@@ -16,7 +16,6 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -49,177 +48,243 @@ template pinFree(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status
     check r.status == want
+import std/[tables, strutils]
 type
+  O1 = object
+    x: int
+  O3 = object
+    x, b, c: int
   O4 = object
     x, b, c, d: int
-var gs: seq[int]
-var gO4: O4
-var gPi: ptr int
-var gPs: ptr seq[int]
-var gR: ref seq[int]
-proc pa(a: O4): ptr int = unsafeAddr a.x
-proc keepP(a: O4) = gPi = unsafeAddr a.x
-proc wg(a: seq[int]): int = (gs[0] = 50; a[0])
-proc wvia(a: seq[int]): int = (gPs[][0] = 50; a[0])
-proc wcell(a: seq[int]): int = (gPi[] = 50; a[0])
-proc wcb(cb: proc (); a: seq[int]): int = (cb(); a[0])
-proc wv(v: var seq[int]; a: seq[int]): int = (v[0] = 50; a[0])
-proc wp(p: ptr seq[int]; a: seq[int]): int = (p[][0] = 50; a[0])
-proc inner(a: seq[int]): int = (gPi[] = 50; a[0])
-proc mid(a: seq[int]): int = inner(a)
-proc wrR(a: seq[int]): int = (gR[][0] = 50; a[0])
-proc l01(x: int) =
-  if x == 50: return
-  var o = O4(x: x)
-  pa(o)[] = 50
-  if o.x == 50: symexTarget("l01_w")
-  else: symexTarget("l01_n")
-proc l02(x: int) =
-  if x == 50: return
-  var o = O4(x: x)
-  keepP(o)
-  o.x = 50
-  if gPi[] == 50: symexTarget("l02_w")
-  else: symexTarget("l02_n")
-proc l03(x: int) =
-  if x == 50: return
-  var s = @[x]
-  gs = @[1]
-  let r = wg(s)
-  if r == x: symexTarget("l03_x")
-  else: symexTarget("l03_n")
-proc l04(x: int) =
-  if x == 50: return
-  var s = @[x]
-  gPs = addr s
-  let r = wvia(s)
-  if r == 50: symexTarget("l04_50")
-  else: symexTarget("l04_n")
-proc l05(x: int) =
-  if x == 50: return
-  var s = @[x]
-  gPi = addr s[0]
-  let r = wcell(s)
-  if r == 50: symexTarget("l05_50")
-  else: symexTarget("l05_n")
-proc l06(x: int) =
-  if x == 50: return
-  var s = @[x]
-  let c = proc () = s[0] = 50
-  let r = wcb(c, s)
-  if r == 50: symexTarget("l06_50")
-  else: symexTarget("l06_n")
-proc l07(x: int) =
-  if x == 50: return
-  var s = @[x]
-  let r = wv(s, s)
-  if r == 50: symexTarget("l07_50")
-  else: symexTarget("l07_n")
-proc l08(x: int) =
-  if x == 50: return
-  var s = @[x]
-  let r = wp(addr s, s)
-  if r == 50: symexTarget("l08_50")
-  else: symexTarget("l08_n")
-proc l09(x: int) =
-  if x == 50: return
-  var s = @[x]
-  let p = addr s
-  let r = wp(p, s)
-  if r == 50: symexTarget("l09_50")
-  else: symexTarget("l09_n")
-proc l10(x: int) =
-  if x == 50: return
-  var s = @[x]
-  gPi = addr s[0]
-  let r = mid(s)
-  if r == 50: symexTarget("l10_50")
-  else: symexTarget("l10_n")
-proc l11(x: int) =   # a local seq the local ref holds a copy of
-  if x == 50: return
-  new gR
-  gR[] = @[x]
-  var s = gR[]
-  let r = wrR(s)
-  if r == x: symexTarget("l11_x")
-  else: symexTarget("l11_n")
-proc l12(a0: seq[int]) =   # a by-value formal handed on
-  if a0.len != 1 or a0[0] == 50: return
-  gs = @[1]
-  let r = wg(a0)
-  if r == a0[0]: symexTarget("l12_x")
-  else: symexTarget("l12_n")
-proc l13(x: int) =   # a local object's seq field
-  if x == 50: return
-  type H = object
+  O16 = object
+    x, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15: int
+  OS = object
     s: seq[int]
-  var h = H(s: @[x])
-  gPi = addr h.s[0]
-  let r = wcell(h.s)
-  if r == 50: symexTarget("l13_50")
-  else: symexTarget("l13_n")
-proc l14(x: int) =   # a local's element seq
+  OStr = object
+    st: string
+  OT = object
+    t: Table[string, int]
+  ONest = object
+    o: OS
+  Inh = object of RootObj
+    x: int
+  ByR {.byref.} = object
+    x: int
+  ByC {.bycopy.} = object
+    x, b, c, d, e: int
+  T1 = tuple[x: int]
+  T4 = tuple[x, b, c, d: int]
+  TS = tuple[x: int, s: seq[int]]
+  A1 = array[1, int]
+  ASm = array[2, int]
+  ASeq = array[1, seq[int]]
+  SC = set[char]
+var
+  gO1: O1
+  gO3: O3
+  gO4: O4
+  gO16: O16
+  gOS: OS
+  gOStr: OStr
+  gOT: OT
+  gONest: ONest
+  gInh: Inh
+  gByR: ByR
+  gByC: ByC
+  gT1: T1
+  gT4: T4
+  gTS: TS
+  gA1: A1
+  gASm: ASm
+  gASeq: ASeq
+  gStr: string
+  gSC: SC
+  gs: seq[int]
+  gss: seq[seq[int]]
+  gHolder: tuple[s: seq[int]]
+  gPs: ptr seq[int]
+  gPO4: ptr O4
+  gRO4: ref O4
+  gRs: ref seq[int]
+  gHook: proc () {.nimcall.}
+proc wO1(a: O1): int =
+  gO1.x = 50; a.x
+proc wO3(a: O3): int =
+  gO3.x = 50; a.x
+proc wO4(a: O4): int =
+  gO4.x = 50; a.x
+proc wO16(a: O16): int =
+  gO16.x = 50; a.x
+proc wOS(a: OS): int =
+  gOS.s[0] = 50; a.s[0]
+proc wOStr(a: OStr): char =
+  gOStr.st[0] = 'z'; a.st[0]
+proc wOT(a: OT): int =
+  gOT.t["a"] = 50; a.t["a"]
+proc wONest(a: ONest): int =
+  gONest.o.s[0] = 50; a.o.s[0]
+proc wInh(a: Inh): int =
+  gInh.x = 50; a.x
+proc wByR(a: ByR): int =
+  gByR.x = 50; a.x
+proc wByC(a: ByC): int =
+  gByC.x = 50; a.x
+proc wT1(a: T1): int =
+  gT1.x = 50; a.x
+proc wT4(a: T4): int =
+  gT4.x = 50; a.x
+proc wTS(a: TS): int =
+  gTS.s[0] = 50; a.s[0]
+proc wA1(a: A1): int =
+  gA1[0] = 50; a[0]
+proc wASm(a: ASm): int =
+  gASm[0] = 50; a[0]
+proc wASeq(a: ASeq): int =
+  gASeq[0][0] = 50; a[0][0]
+proc wStr(a: string): char =
+  gStr[0] = 'z'; a[0]
+proc wSC(a: SC): bool =
+  gSC.incl 'z'; 'z' in a
+proc wFld(a: seq[int]): int =
+  gOS.s[0] = 50; a[0]
+proc wElem(a: seq[int]): int =
+  gss[0][0] = 50; a[0]
+proc wOA(a: openArray[int]): int =
+  gs[0] = 50; a[0]
+proc wPs(a: seq[int]): int =
+  gPs[][0] = 50; a[0]
+proc wPO4(a: O4): int =
+  gPO4.x = 50; a.x
+proc wRO4(a: O4): int =
+  gRO4.x = 50; a.x
+proc wRs(a: seq[int]): int =
+  gRs[][0] = 50; a[0]
+proc wVarS(v: var seq[int]; a: seq[int]): int =
+  v[0] = 50; a[0]
+proc wVarO4(v: var O4; a: O4): int =
+  v.x = 50; a.x
+proc wPtrS(p: ptr seq[int]; a: seq[int]): int =
+  p[][0] = 50; a[0]
+proc wPtrO4(p: ptr O4; a: O4): int =
+  p.x = 50; a.x
+proc wRefS(p: ref seq[int]; a: seq[int]): int =
+  p[][0] = 50; a[0]
+proc wRefO4(p: ref O4; a: O4): int =
+  p.x = 50; a.x
+proc wCb(cb: proc (); a: seq[int]): int =
+  cb(); a[0]
+proc wCbO(cb: proc (); a: O4): int =
+  cb(); a.x
+proc wHook(a: seq[int]): int =
+  gHook(); a[0]
+proc wrS() = gs[0] = 50
+iterator itS(a: seq[int]): int =
+  gs[0] = 50
+  yield a[0]
+iterator itO(a: O4): int =
+  gO4.x = 50
+  yield a.x
+type B = ref object of RootObj
+type D = ref object of B
+method m(b: B; a: seq[int]): int {.base.} = a[0]
+method m(b: D; a: seq[int]): int =
+  gs[0] = 50; a[0]
+method mo(b: B; a: O4): int {.base.} = a.x
+method mo(b: D; a: O4): int =
+  gO4.x = 50; a.x
+proc wGen[T](a: seq[T]): T =
+  gs[0] = 50; a[0]
+proc wLent(a: O1): lent int =
+  gO1.x = 50
+  a.x
+proc wSink(a: sink seq[int]): int =
+  gs[0] = 50; a[0]
+proc wRet(a: seq[int]): seq[int] =
+  gs[0] = 50; a
+proc wRetO(a: O4): O4 =
+  gO4.x = 50; a
+proc p_gen(x: int) =
   if x == 50: return
-  var ss = @[@[x]]
-  gPs = addr ss[0]
-  let r = wvia(ss[0])
-  if r == 50: symexTarget("l14_50")
-  else: symexTarget("l14_n")
-proc l15(x: int) =   # a pointer to a pointer
+  gs = @[x]
+  let r = wGen(gs)
+  if r == 50: symexTarget("gen_r50")
+  if r == x: symexTarget("gen_rx")
+proc p_sink(x: int) =
   if x == 50: return
-  var s = @[x]
-  var q = addr s
-  gPs = q
-  let r = wvia(s)
-  if r == 50: symexTarget("l15_50")
-  else: symexTarget("l15_n")
+  gs = @[x]
+  let r = wSink(gs)
+  if r == 50: symexTarget("sink_r50")
+  if r == x: symexTarget("sink_rx")
+proc p_ret(x: int) =
+  if x == 50: return
+  gs = @[x]
+  let r = wRet(gs)[0]
+  if r == 50: symexTarget("ret_r50")
+  if r == x: symexTarget("ret_rx")
+proc p_reto(x: int) =
+  if x == 50: return
+  gO4 = O4(x: x)
+  let r = wRetO(gO4).x
+  if r == 50: symexTarget("reto_r50")
+  if r == x: symexTarget("reto_rx")
+proc p_lent(x: int) =
+  if x == 50: return
+  gO1 = O1(x: x)
+  let r = wLent(gO1)
+  if r == 50: symexTarget("lent_r50")
+  if r == x: symexTarget("lent_rx")
+proc p_str(x: char) =
+  if x == 'z': return
+  gStr = "ab"; gStr[0] = x
+  let r = wStr(gStr)
+  if r == 'z': symexTarget("str_r50")
+  if r == x: symexTarget("str_rx")
+proc p_sc(x: int) =
+  gSC = {'a'}
+  let r = wSC(gSC)
+  if r: symexTarget("sc_r50")
+  if not r: symexTarget("sc_rx")
+proc p_itS(x: int) =
+  if x == 50: return
+  gs = @[x]
+  for r in itS(gs):
+    if r == 50: symexTarget("its_r50")
+    if r == x: symexTarget("its_rx")
+proc p_itO(x: int) =
+  if x == 50: return
+  gO4 = O4(x: x)
+  for r in itO(gO4):
+    if r == 50: symexTarget("ito_r50")
+    if r == x: symexTarget("ito_rx")
 
-for x in [1, 2]:
-  nat(l01(x))
-  nat(l02(x))
-  nat(l03(x))
-  nat(l04(x))
-  nat(l05(x))
-  nat(l06(x))
-  nat(l07(x))
-  nat(l08(x))
-  nat(l09(x))
-  nat(l10(x))
-  nat(l11(x))
-  nat(l12(@[x]))
-  nat(l13(x))
-  nat(l14(x))
-  nat(l15(x))
+for x in [-3, 0, 3, 5, 7, 49, 51]:
+  nat(p_gen(x))
+  nat(p_sink(x))
+  nat(p_ret(x))
+  nat(p_reto(x))
+  nat(p_lent(x))
+  nat(p_itS(x))
+  nat(p_itO(x))
+  nat(p_sc(x))
+  nat(p_str(char(ord('a') + (x + 3) mod 5)))
 
 suite "tsymex_rfc0005_s8cq_byvalue6":
   test "verdicts against Nim":
-    pin(l01, "l01_w", true, sxUnknown)
-    pin(l01, "l01_n", false, sxUnknown)
-    pin(l02, "l02_w", true, sxUnknown)
-    pin(l02, "l02_n", false, sxUnknown)
-    pin(l03, "l03_x", true, sxSat)
-    pin(l03, "l03_n", false, sxUnsat)
-    pin(l04, "l04_50", true, sxSat)
-    pin(l04, "l04_n", false, sxUnsat)
-    pin(l05, "l05_50", true, sxSat)
-    pin(l05, "l05_n", false, sxUnsat)
-    pin(l06, "l06_50", true, sxUnknown)
-    pin(l06, "l06_n", false, sxUnknown)
-    pin(l07, "l07_50", true, sxUnknown)
-    pin(l07, "l07_n", false, sxUnknown)
-    pin(l08, "l08_50", true, sxUnknown)
-    pin(l08, "l08_n", false, sxUnknown)
-    pin(l09, "l09_50", true, sxUnknown)
-    pin(l09, "l09_n", false, sxUnknown)
-    pin(l10, "l10_50", true, sxSat)
-    pin(l10, "l10_n", false, sxUnsat)
-    pin(l11, "l11_x", true, sxSat)
-    pin(l11, "l11_n", false, sxUnsat)
-    pin(l12, "l12_x", true, sxSat)
-    pin(l12, "l12_n", false, sxUnsat)
-    pin(l13, "l13_50", true, sxUnknown)
-    pin(l13, "l13_n", false, sxUnknown)
-    pin(l14, "l14_50", true, sxUnknown)
-    pin(l14, "l14_n", false, sxUnknown)
-    pin(l15, "l15_50", true, sxSat)
-    pin(l15, "l15_n", false, sxUnsat)
+    pin(p_gen, "gen_r50", true, sxUnknown)
+    pin(p_gen, "gen_rx", false, sxUnknown)
+    pin(p_sink, "sink_r50", false, sxUnknown)
+    pin(p_sink, "sink_rx", true, sxUnknown)
+    pin(p_ret, "ret_r50", true, sxUnknown)
+    pin(p_ret, "ret_rx", false, sxUnknown)
+    pin(p_reto, "reto_r50", true, sxUnknown)
+    pin(p_reto, "reto_rx", false, sxUnknown)
+    pin(p_lent, "lent_r50", true, sxUnknown)
+    pin(p_lent, "lent_rx", false, sxUnknown)
+    pin(p_itS, "its_r50", true, sxSat)
+    pin(p_itS, "its_rx", false, sxUnsat)
+    pin(p_itO, "ito_r50", true, sxSat)
+    pin(p_itO, "ito_rx", false, sxUnsat)
+    pin(p_sc, "sc_r50", true, sxUnknown)
+    pin(p_sc, "sc_rx", false, sxUnknown)
+    pin(p_str, "str_r50", true, sxUnknown)
+    pin(p_str, "str_rx", false, sxUnknown)

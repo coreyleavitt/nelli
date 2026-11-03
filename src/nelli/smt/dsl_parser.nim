@@ -7173,9 +7173,14 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
      typeCopiedByValue(bare.getTypeInst):
     if not typeHoldsRef(bare.getTypeInst): return ""
     if refActualHeld(bare, outer):
+      # Another actual may overwrite it: its own address, or any pointer.
       var viaAddr = false
       for j in 1 ..< n.len:
-        if j - 1 != k and n[j].kind in {nnkHiddenAddr, nnkAddr}: viaAddr = true
+        if j - 1 == k: continue
+        if n[j].typeKind in {ntyPtr, ntyPointer}: viaAddr = true
+        elif n[j].kind in {nnkHiddenAddr, nnkAddr}:
+          var hs: seq[NimNode]
+          if lvalueRoot(n[j], hs) == bare: viaAddr = true
       if not viaAddr: return ""
   var syms: seq[NimNode]
   lvalueVarSyms(bare, syms)
@@ -16341,7 +16346,7 @@ proc lvalueHasCall(n: NimNode): bool =
   of nnkSym, nnkEmpty, nnkNilLit, nnkCharLit .. nnkUInt64Lit,
      nnkFloatLit .. nnkFloat64Lit, nnkStrLit .. nnkTripleStrLit:
     return false
-  of nnkDotExpr, nnkBracketExpr, nnkDerefExpr, nnkHiddenDeref, nnkHiddenAddr,
+  of nnkBracket, nnkDotExpr, nnkBracketExpr, nnkDerefExpr, nnkHiddenDeref, nnkHiddenAddr,
      nnkAddr, nnkHiddenStdConv, nnkHiddenSubConv, nnkConv,
      nnkPar, nnkObjDownConv, nnkObjUpConv, nnkChckRange, nnkChckRange64,
      nnkChckRangeF, nnkStringToCString, nnkCStringToString:

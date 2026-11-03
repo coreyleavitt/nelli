@@ -9,10 +9,13 @@
 ## nine settings in `tsymex_rfc0005_s8cq_native`), or the callee with everything
 ## it reaches is proved to write nothing the actual could be (`byValueWritten`).
 ## Everything else declines; the exact model belongs to RFC-0016.
+##
+## A local's memory has no other name but a pointer to it, and S8bs keeps that cell
+## and the formal one location, so a local actual stays decided; a formal whose
+## address the callee takes, a routine actual, and a `var` of the same local decline.
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -45,217 +48,244 @@ template pinFree(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status
     check r.status == want
-import std/[tables]
+import std/[tables, strutils]
 type
-  Box[T] = object
-    a: T
-    b, c, d: int
-  DS = distinct seq[int]
-  BR {.byref.} = object
-    x: int
-  BC {.bycopy.} = object
-    x: int
-  AliasO = O1
   O1 = object
     x: int
+  O3 = object
+    x, b, c: int
   O4 = object
     x, b, c, d: int
-  SetS = set[0..7]
-  SetB = set[0..200]
-  H = object
+  O16 = object
+    x, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15: int
+  OS = object
     s: seq[int]
-  B0 = ref object of RootObj
-  D0 = ref object of B0
-  Hk = object
+  OStr = object
+    st: string
+  OT = object
+    t: Table[string, int]
+  ONest = object
+    o: OS
+  Inh = object of RootObj
     x: int
-    y: seq[int]
-var gBox: Box[int]
-var gDS: DS
-var gBR: BR
-var gBC: BC
-var gAl: AliasO
-var gSetS: SetS
-var gSetB: SetB
-var gs: seq[int]
-var gO4: O4
-var gInt: int
-var gH: H
-var gPtr: ptr int
-var gCb: proc (): int {.nimcall.}
-var gRf: ref int
-proc oneC(): int = 1
-proc twoC(): int = 50
-proc wBox(a: Box[int]): int = (gBox.a = 50; a.a)
-proc wDS(a: DS): int = (seq[int](gDS)[0] = 50; seq[int](a)[0])
-proc wBR(a: BR): int = (gBR.x = 50; a.x)
-proc wBC(a: BC): int = (gBC.x = 50; a.x)
-proc wAl(a: AliasO): int = (gAl.x = 50; a.x)
-proc wSetS(a: SetS): bool = (gSetS = {7}; 7 in a)
-proc wSetB(a: SetB): bool = (gSetB = {7}; 7 in a)
-proc wIntByref(a {.byref.}: int): int = (gInt = 50; a)
-proc wCopyPrg(a {.bycopy.}: O4): int = (gO4.x = 50; a.x)
-proc wPtr2(p: ptr seq[int]; a: seq[int]): int = (p[][0] = 50; a[0])
-proc gw(a: seq[int]): int = (gs[0] = 50; a[0])
-proc vchain(v: var seq[int]): int = gw(v)
-method wr(b: B0) {.base.} = discard
-method wr(b: D0) = gs[0] = 50
-proc wMeth(b: B0; a: seq[int]): int = (b.wr(); a[0])
-proc wrS() {.nimcall.} = gs[0] = 50
-proc wCb2(cb: proc () {.nimcall.}; a: seq[int]): int = (cb(); a[0])
-proc vgs(a: varargs[seq[int]]): int = (gs[0] = 50; a[0][0])
-proc noW(a: seq[int]): int = a[0]
-proc readG(a: seq[int]): int = a[0] + gs[0]
-proc pa(a: O4): ptr int = unsafeAddr a.x
-proc keepP(a: O4) = gPtr = unsafeAddr a.x
-proc vw(h: H): lent seq[int] = h.s
-proc idS(a: seq[int]): seq[int] = a
-proc idO(a: O4): O4 = a
-proc wCbV(a: proc (): int {.nimcall.}): int = (gCb = twoC; a())
-proc wInt(a: int): int = (gInt = 50; a)
-proc wRef(a: ref int): int = (new gRf; gRf[] = 50; a[])
-proc wRefCell(a: ref int): int = (gRf[] = 50; a[])
-proc wEmit(a: seq[int]): int =
-  {.emit: "/*x*/".}
-  a[0]
-proc recW(a: seq[int]; d: int): int =
-  if d > 0: return recW(a, d - 1)
-  a[0]
-proc pBox(x: int) =
+  ByR {.byref.} = object
+    x: int
+  ByC {.bycopy.} = object
+    x, b, c, d, e: int
+  T1 = tuple[x: int]
+  T4 = tuple[x, b, c, d: int]
+  TS = tuple[x: int, s: seq[int]]
+  A1 = array[1, int]
+  ASm = array[2, int]
+  ASeq = array[1, seq[int]]
+  SC = set[char]
+var
+  gO1: O1
+  gO3: O3
+  gO4: O4
+  gO16: O16
+  gOS: OS
+  gOStr: OStr
+  gOT: OT
+  gONest: ONest
+  gInh: Inh
+  gByR: ByR
+  gByC: ByC
+  gT1: T1
+  gT4: T4
+  gTS: TS
+  gA1: A1
+  gASm: ASm
+  gASeq: ASeq
+  gStr: string
+  gSC: SC
+  gs: seq[int]
+  gss: seq[seq[int]]
+  gHolder: tuple[s: seq[int]]
+  gPs: ptr seq[int]
+  gPO4: ptr O4
+  gRO4: ref O4
+  gRs: ref seq[int]
+  gHook: proc () {.nimcall.}
+proc wO1(a: O1): int =
+  gO1.x = 50; a.x
+proc wO3(a: O3): int =
+  gO3.x = 50; a.x
+proc wO4(a: O4): int =
+  gO4.x = 50; a.x
+proc wO16(a: O16): int =
+  gO16.x = 50; a.x
+proc wOS(a: OS): int =
+  gOS.s[0] = 50; a.s[0]
+proc wOStr(a: OStr): char =
+  gOStr.st[0] = 'z'; a.st[0]
+proc wOT(a: OT): int =
+  gOT.t["a"] = 50; a.t["a"]
+proc wONest(a: ONest): int =
+  gONest.o.s[0] = 50; a.o.s[0]
+proc wInh(a: Inh): int =
+  gInh.x = 50; a.x
+proc wByR(a: ByR): int =
+  gByR.x = 50; a.x
+proc wByC(a: ByC): int =
+  gByC.x = 50; a.x
+proc wT1(a: T1): int =
+  gT1.x = 50; a.x
+proc wT4(a: T4): int =
+  gT4.x = 50; a.x
+proc wTS(a: TS): int =
+  gTS.s[0] = 50; a.s[0]
+proc wA1(a: A1): int =
+  gA1[0] = 50; a[0]
+proc wASm(a: ASm): int =
+  gASm[0] = 50; a[0]
+proc wASeq(a: ASeq): int =
+  gASeq[0][0] = 50; a[0][0]
+proc wStr(a: string): char =
+  gStr[0] = 'z'; a[0]
+proc wSC(a: SC): bool =
+  gSC.incl 'z'; 'z' in a
+proc wFld(a: seq[int]): int =
+  gOS.s[0] = 50; a[0]
+proc wElem(a: seq[int]): int =
+  gss[0][0] = 50; a[0]
+proc wOA(a: openArray[int]): int =
+  gs[0] = 50; a[0]
+proc wPs(a: seq[int]): int =
+  gPs[][0] = 50; a[0]
+proc wPO4(a: O4): int =
+  gPO4.x = 50; a.x
+proc wRO4(a: O4): int =
+  gRO4.x = 50; a.x
+proc wRs(a: seq[int]): int =
+  gRs[][0] = 50; a[0]
+proc wVarS(v: var seq[int]; a: seq[int]): int =
+  v[0] = 50; a[0]
+proc wVarO4(v: var O4; a: O4): int =
+  v.x = 50; a.x
+proc wPtrS(p: ptr seq[int]; a: seq[int]): int =
+  p[][0] = 50; a[0]
+proc wPtrO4(p: ptr O4; a: O4): int =
+  p.x = 50; a.x
+proc wRefS(p: ref seq[int]; a: seq[int]): int =
+  p[][0] = 50; a[0]
+proc wRefO4(p: ref O4; a: O4): int =
+  p.x = 50; a.x
+proc wCb(cb: proc (); a: seq[int]): int =
+  cb(); a[0]
+proc wCbO(cb: proc (); a: O4): int =
+  cb(); a.x
+proc wHook(a: seq[int]): int =
+  gHook(); a[0]
+proc wrS() = gs[0] = 50
+iterator itS(a: seq[int]): int =
+  gs[0] = 50
+  yield a[0]
+iterator itO(a: O4): int =
+  gO4.x = 50
+  yield a.x
+type B = ref object of RootObj
+type D = ref object of B
+method m(b: B; a: seq[int]): int {.base.} = a[0]
+method m(b: D; a: seq[int]): int =
+  gs[0] = 50; a[0]
+method mo(b: B; a: O4): int {.base.} = a.x
+method mo(b: D; a: O4): int =
+  gO4.x = 50; a.x
+proc wGen[T](a: seq[T]): T =
+  gs[0] = 50; a[0]
+proc wLent(a: O1): lent int =
+  gO1.x = 50
+  a.x
+proc wSink(a: sink seq[int]): int =
+  gs[0] = 50; a[0]
+proc wRet(a: seq[int]): seq[int] =
+  gs[0] = 50; a
+proc wRetO(a: O4): O4 =
+  gO4.x = 50; a
+proc p_oa(x: int) =
   if x == 50: return
-  gBox.a = x
-  let r = wBox(gBox)
-  if r == 50: symexTarget("box_r50")
-  if r == x: symexTarget("box_rx")
-proc pDS(x: int) =
+  gs = @[x]
+  let r = wOA(gs)
+  if r == 50: symexTarget("oa_r50")
+  if r == x: symexTarget("oa_rx")
+proc p_ps(x: int) =
   if x == 50: return
-  gDS = DS(@[x])
-  let r = wDS(gDS)
-  if r == 50: symexTarget("ds_r50")
-  if r == x: symexTarget("ds_rx")
-proc pBR(x: int) =
+  gs = @[x]; gPs = addr gs
+  let r = wPs(gs)
+  if r == 50: symexTarget("ps_r50")
+  if r == x: symexTarget("ps_rx")
+proc p_po4(x: int) =
   if x == 50: return
-  gBR.x = x
-  let r = wBR(gBR)
-  if r == 50: symexTarget("br_r50")
-  if r == x: symexTarget("br_rx")
-proc pBC(x: int) =
+  gO4 = O4(x: x); gPO4 = addr gO4
+  let r = wPO4(gO4)
+  if r == 50: symexTarget("po4_r50")
+  if r == x: symexTarget("po4_rx")
+proc p_ro4(x: int) =
   if x == 50: return
-  gBC.x = x
-  let r = wBC(gBC)
-  if r == 50: symexTarget("bc_r50")
-  if r == x: symexTarget("bc_rx")
-proc pAl(x: int) =
+  new(gRO4); gRO4.x = x
+  let r = wRO4(gRO4[])
+  if r == 50: symexTarget("ro4_r50")
+  if r == x: symexTarget("ro4_rx")
+proc p_rs(x: int) =
   if x == 50: return
-  gAl.x = x
-  let r = wAl(gAl)
-  if r == 50: symexTarget("al_r50")
-  if r == x: symexTarget("al_rx")
-proc pSetS(x: int) =
+  new(gRs); gRs[] = @[x]
+  let r = wRs(gRs[])
+  if r == 50: symexTarget("rs_r50")
+  if r == x: symexTarget("rs_rx")
+proc p_rs2(x: int) =
   if x == 50: return
-  gSetS = {}
-  let r = wSetS(gSetS)
-  if r: symexTarget("sets_seen")
-  else: symexTarget("sets_not")
-proc pSetB(x: int) =
+  new(gRs); gRs[] = @[x]; let q = gRs
+  let r = wRs(q[])
+  if r == 50: symexTarget("rs2_r50")
+  if r == x: symexTarget("rs2_rx")
+proc p_varsg(x: int) =
   if x == 50: return
-  gSetB = {}
-  let r = wSetB(gSetB)
-  if r: symexTarget("setb_seen")
-  else: symexTarget("setb_not")
-proc pIntByref(x: int) =
-  if x == 50: return
-  gInt = x
-  let r = wIntByref(gInt)
-  if r == 50: symexTarget("ibr_r50")
-  if r == x: symexTarget("ibr_rx")
-proc pCopyPrg(x: int) =
-  if x == 50: return
-  gO4.x = x
-  let r = wCopyPrg(gO4)
-  if r == 50: symexTarget("cp_r50")
-  if r == x: symexTarget("cp_rx")
-proc pPtr2(x: int) =
+  gs = @[x]
+  let r = wVarS(gs, gs)
+  if r == 50: symexTarget("varsg_r50")
+  if r == x: symexTarget("varsg_rx")
+proc p_varsl(x: int) =
   if x == 50: return
   var s = @[x]
-  let p = addr s
-  let r = wPtr2(p, s)
-  if r == 50: symexTarget("ptr2_r50")
-  if r == x: symexTarget("ptr2_rx")
-proc pChain(x: int) =
+  let r = wVarS(s, s)
+  if r == 50: symexTarget("varsl_r50")
+  if r == x: symexTarget("varsl_rx")
+proc p_varo4(x: int) =
   if x == 50: return
-  gs = @[x]
-  let r = vchain(gs)
-  if r == 50: symexTarget("chain_r50")
-  if r == x: symexTarget("chain_rx")
-proc pMeth(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let b: B0 = D0()
-  let r = wMeth(b, gs)
-  if r == 50: symexTarget("meth_r50")
-  if r == x: symexTarget("meth_rx")
-proc pCb2(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let r = wCb2(wrS, gs)
-  if r == 50: symexTarget("cb2_r50")
-  if r == x: symexTarget("cb2_rx")
-proc pVg(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let r = vgs(gs)
-  if r == 50: symexTarget("vg_r50")
-  if r == x: symexTarget("vg_rx")
-proc pNoW(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let r = noW(gs)
-  if r == x: symexTarget("now_rx")
-  else: symexTarget("now_ne")
+  var o = O4(x: x)
+  let r = wVarO4(o, o)
+  if r == 50: symexTarget("varo4_r50")
+  if r == x: symexTarget("varo4_rx")
 
-for x in [1, 2]:
-  nat(pBox(x))
-  nat(pDS(x))
-  nat(pBR(x))
-  nat(pBC(x))
-  nat(pSetS(x))
-  nat(pSetB(x))
-  nat(pIntByref(x))
-  nat(pCopyPrg(x))
-  nat(pPtr2(x))
-  nat(pChain(x))
-  nat(pMeth(x))
-  nat(pCb2(x))
-  nat(pVg(x))
-  nat(pNoW(x))
+for x in [-3, 0, 3, 5, 7, 49, 51]:
+  nat(p_oa(x))
+  nat(p_ps(x))
+  nat(p_po4(x))
+  nat(p_ro4(x))
+  nat(p_rs(x))
+  nat(p_rs2(x))
+  nat(p_varsg(x))
+  nat(p_varsl(x))
+  nat(p_varo4(x))
 
 suite "tsymex_rfc0005_s8cq_byvalue4":
   test "verdicts against Nim":
-    pin(pBox, "box_r50", true, sxUnknown)
-    pin(pBox, "box_rx", false, sxUnknown)
-    pin(pDS, "ds_r50", true, sxUnknown)
-    pin(pDS, "ds_rx", false, sxUnknown)
-    pin(pBR, "br_r50", true, sxUnknown)
-    pin(pBR, "br_rx", false, sxUnknown)
-    pin(pBC, "bc_r50", false, sxUnknown)
-    pin(pBC, "bc_rx", true, sxUnknown)
-    pin(pSetS, "sets_seen", false, sxUnknown)
-    pin(pSetS, "sets_not", true, sxUnknown)
-    pin(pSetB, "setb_seen", true, sxUnknown)
-    pin(pSetB, "setb_not", false, sxUnknown)
-    pin(pIntByref, "ibr_r50", true, sxUnknown)
-    pin(pIntByref, "ibr_rx", false, sxUnknown)
-    pin(pCopyPrg, "cp_r50", false, sxUnknown)
-    pin(pCopyPrg, "cp_rx", true, sxUnknown)
-    pin(pPtr2, "ptr2_r50", true, sxUnknown)
-    pin(pPtr2, "ptr2_rx", false, sxUnknown)
-    pin(pChain, "chain_r50", true, sxUnknown)
-    pin(pChain, "chain_rx", false, sxUnknown)
-    pin(pMeth, "meth_r50", true, sxUnknown)
-    pin(pMeth, "meth_rx", false, sxUnknown)
-    pin(pCb2, "cb2_r50", true, sxUnknown)
-    pin(pCb2, "cb2_rx", false, sxUnknown)
-    pin(pVg, "vg_r50", true, sxUnknown)
-    pin(pVg, "vg_rx", false, sxUnknown)
-    pin(pNoW, "now_rx", true, sxSat)
-    pin(pNoW, "now_ne", false, sxUnsat)
+    pin(p_oa, "oa_r50", true, sxUnknown)
+    pin(p_oa, "oa_rx", false, sxUnknown)
+    pin(p_ps, "ps_r50", true, sxUnknown)
+    pin(p_ps, "ps_rx", false, sxUnknown)
+    pin(p_po4, "po4_r50", true, sxUnknown)
+    pin(p_po4, "po4_rx", false, sxUnknown)
+    pin(p_ro4, "ro4_r50", true, sxUnknown)
+    pin(p_ro4, "ro4_rx", false, sxUnknown)
+    pin(p_rs, "rs_r50", true, sxUnknown)
+    pin(p_rs, "rs_rx", false, sxUnknown)
+    pin(p_rs2, "rs2_r50", true, sxUnknown)
+    pin(p_rs2, "rs2_rx", false, sxUnknown)
+    pin(p_varsg, "varsg_r50", true, sxUnknown)
+    pin(p_varsg, "varsg_rx", false, sxUnknown)
+    pin(p_varsl, "varsl_r50", true, sxUnknown)
+    pin(p_varsl, "varsl_rx", false, sxUnknown)
+    pin(p_varo4, "varo4_r50", true, sxUnknown)
+    pin(p_varo4, "varo4_rx", false, sxUnknown)

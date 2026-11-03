@@ -9,10 +9,13 @@
 ## nine settings in `tsymex_rfc0005_s8cq_native`), or the callee with everything
 ## it reaches is proved to write nothing the actual could be (`byValueWritten`).
 ## Everything else declines; the exact model belongs to RFC-0016.
+##
+## A local's memory has no other name but a pointer to it, and S8bs keeps that cell
+## and the formal one location, so a local actual stays decided; a formal whose
+## address the callee takes, a routine actual, and a `var` of the same local decline.
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -200,214 +203,89 @@ proc wRet(a: seq[int]): seq[int] =
   gs[0] = 50; a
 proc wRetO(a: O4): O4 =
   gO4.x = 50; a
-proc p_rs2(x: int) =
+proc p_byc(x: int) =
   if x == 50: return
-  new(gRs); gRs[] = @[x]; let q = gRs
-  let r = wRs(q[])
-  if r == 50: symexTarget("rs2_r50")
-  if r == x: symexTarget("rs2_rx")
-proc p_varsg(x: int) =
+  gByC = ByC(x: x)
+  let r = wByC(gByC)
+  if r == 50: symexTarget("byc_r50")
+  if r == x: symexTarget("byc_rx")
+proc p_t1(x: int) =
   if x == 50: return
-  gs = @[x]
-  let r = wVarS(gs, gs)
-  if r == 50: symexTarget("varsg_r50")
-  if r == x: symexTarget("varsg_rx")
-proc p_varsl(x: int) =
+  gT1 = (x: x)
+  let r = wT1(gT1)
+  if r == 50: symexTarget("t1_r50")
+  if r == x: symexTarget("t1_rx")
+proc p_t4(x: int) =
   if x == 50: return
-  var s = @[x]
-  let r = wVarS(s, s)
-  if r == 50: symexTarget("varsl_r50")
-  if r == x: symexTarget("varsl_rx")
-proc p_varo4(x: int) =
+  gT4 = (x: x, b: 0, c: 0, d: 0)
+  let r = wT4(gT4)
+  if r == 50: symexTarget("t4_r50")
+  if r == x: symexTarget("t4_rx")
+proc p_ts(x: int) =
   if x == 50: return
-  var o = O4(x: x)
-  let r = wVarO4(o, o)
-  if r == 50: symexTarget("varo4_r50")
-  if r == x: symexTarget("varo4_rx")
-proc p_ptrs(x: int) =
+  gTS = (x: x, s: @[x])
+  let r = wTS(gTS)
+  if r == 50: symexTarget("ts_r50")
+  if r == x: symexTarget("ts_rx")
+proc p_a1(x: int) =
   if x == 50: return
-  var s = @[x]
-  let r = wPtrS(addr s, s)
-  if r == 50: symexTarget("ptrs_r50")
-  if r == x: symexTarget("ptrs_rx")
-proc p_ptro4(x: int) =
+  gA1 = [x]
+  let r = wA1(gA1)
+  if r == 50: symexTarget("a1_r50")
+  if r == x: symexTarget("a1_rx")
+proc p_asm(x: int) =
   if x == 50: return
-  var o = O4(x: x)
-  let r = wPtrO4(addr o, o)
-  if r == 50: symexTarget("ptro4_r50")
-  if r == x: symexTarget("ptro4_rx")
-proc p_refs(x: int) =
+  gASm = [x, 0]
+  let r = wASm(gASm)
+  if r == 50: symexTarget("asm_r50")
+  if r == x: symexTarget("asm_rx")
+proc p_aseq(x: int) =
   if x == 50: return
-  var q = new(seq[int]); q[] = @[x]
-  let r = wRefS(q, q[])
-  if r == 50: symexTarget("refs_r50")
-  if r == x: symexTarget("refs_rx")
-proc p_refo4(x: int) =
+  gASeq = [@[x]]
+  let r = wASeq(gASeq)
+  if r == 50: symexTarget("aseq_r50")
+  if r == x: symexTarget("aseq_rx")
+proc p_fld(x: int) =
   if x == 50: return
-  var q = new(O4); q.x = x
-  let r = wRefO4(q, q[])
-  if r == 50: symexTarget("refo4_r50")
-  if r == x: symexTarget("refo4_rx")
-proc p_cb(x: int) =
+  gOS = OS(s: @[x])
+  let r = wFld(gOS.s)
+  if r == 50: symexTarget("fld_r50")
+  if r == x: symexTarget("fld_rx")
+proc p_elem(x: int) =
   if x == 50: return
-  var s = @[x]
-  let r = wCb(proc () = s[0] = 50, s)
-  if r == 50: symexTarget("cb_r50")
-  if r == x: symexTarget("cb_rx")
-proc p_cbo(x: int) =
-  if x == 50: return
-  var o = O4(x: x)
-  let r = wCbO(proc () = o.x = 50, o)
-  if r == 50: symexTarget("cbo_r50")
-  if r == x: symexTarget("cbo_rx")
-proc p_hook(x: int) =
-  if x == 50: return
-  gs = @[x]; gHook = wrS
-  let r = wHook(gs)
-  if r == 50: symexTarget("hook_r50")
-  if r == x: symexTarget("hook_rx")
-proc p_meth(x: int) =
-  if x == 50: return
-  gs = @[x]; let d: B = D()
-  let r = d.m(gs)
-  if r == 50: symexTarget("meth_r50")
-  if r == x: symexTarget("meth_rx")
-proc p_metho(x: int) =
-  if x == 50: return
-  gO4 = O4(x: x); let d: B = D()
-  let r = d.mo(gO4)
-  if r == 50: symexTarget("metho_r50")
-  if r == x: symexTarget("metho_rx")
-proc p_gen(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let r = wGen(gs)
-  if r == 50: symexTarget("gen_r50")
-  if r == x: symexTarget("gen_rx")
-proc p_sink(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let r = wSink(gs)
-  if r == 50: symexTarget("sink_r50")
-  if r == x: symexTarget("sink_rx")
-proc p_ret(x: int) =
-  if x == 50: return
-  gs = @[x]
-  let r = wRet(gs)[0]
-  if r == 50: symexTarget("ret_r50")
-  if r == x: symexTarget("ret_rx")
-proc p_reto(x: int) =
-  if x == 50: return
-  gO4 = O4(x: x)
-  let r = wRetO(gO4).x
-  if r == 50: symexTarget("reto_r50")
-  if r == x: symexTarget("reto_rx")
-proc p_lent(x: int) =
-  if x == 50: return
-  gO1 = O1(x: x)
-  let r = wLent(gO1)
-  if r == 50: symexTarget("lent_r50")
-  if r == x: symexTarget("lent_rx")
-proc p_str(x: char) =
-  if x == 'z': return
-  gStr = "ab"; gStr[0] = x
-  let r = wStr(gStr)
-  if r == 'z': symexTarget("str_r50")
-  if r == x: symexTarget("str_rx")
-proc p_ostr(x: char) =
-  if x == 'z': return
-  gOStr = OStr(st: "ab"); gOStr.st[0] = x
-  let r = wOStr(gOStr)
-  if r == 'z': symexTarget("ostr_r50")
-  if r == x: symexTarget("ostr_rx")
-proc p_sc(x: int) =
-  gSC = {'a'}
-  let r = wSC(gSC)
-  if r: symexTarget("sc_r50")
-  if not r: symexTarget("sc_rx")
-proc p_itS(x: int) =
-  if x == 50: return
-  gs = @[x]
-  for r in itS(gs):
-    if r == 50: symexTarget("its_r50")
-    if r == x: symexTarget("its_rx")
-proc p_itO(x: int) =
-  if x == 50: return
-  gO4 = O4(x: x)
-  for r in itO(gO4):
-    if r == 50: symexTarget("ito_r50")
-    if r == x: symexTarget("ito_rx")
+  gss = @[@[x]]
+  let r = wElem(gss[0])
+  if r == 50: symexTarget("elem_r50")
+  if r == x: symexTarget("elem_rx")
 
 for x in [-3, 0, 3, 5, 7, 49, 51]:
-  nat(p_rs2(x))
-  nat(p_varsg(x))
-  nat(p_varsl(x))
-  nat(p_varo4(x))
-  nat(p_ptrs(x))
-  nat(p_ptro4(x))
-  nat(p_refs(x))
-  nat(p_refo4(x))
-  nat(p_cb(x))
-  nat(p_cbo(x))
-  nat(p_hook(x))
-  nat(p_meth(x))
-  nat(p_metho(x))
-  nat(p_gen(x))
-  nat(p_sink(x))
-  nat(p_ret(x))
-  nat(p_reto(x))
-  nat(p_lent(x))
-  nat(p_itS(x))
-  nat(p_itO(x))
-  nat(p_sc(x))
-  nat(p_str(char(ord('a') + (x + 3) mod 5)))
-  nat(p_ostr(char(ord('a') + (x + 3) mod 5)))
+  nat(p_byc(x))
+  nat(p_t1(x))
+  nat(p_t4(x))
+  nat(p_ts(x))
+  nat(p_a1(x))
+  nat(p_asm(x))
+  nat(p_aseq(x))
+  nat(p_fld(x))
+  nat(p_elem(x))
 
 suite "tsymex_rfc0005_s8cq_byvalue3":
   test "verdicts against Nim":
-    pin(p_rs2, "rs2_r50", true, sxUnknown)
-    pin(p_rs2, "rs2_rx", false, sxUnknown)
-    pin(p_varsg, "varsg_r50", true, sxUnknown)
-    pin(p_varsg, "varsg_rx", false, sxUnknown)
-    pin(p_varsl, "varsl_r50", true, sxUnknown)
-    pin(p_varsl, "varsl_rx", false, sxUnknown)
-    pin(p_varo4, "varo4_r50", true, sxUnknown)
-    pin(p_varo4, "varo4_rx", false, sxUnknown)
-    pin(p_ptrs, "ptrs_r50", true, sxUnknown)
-    pin(p_ptrs, "ptrs_rx", false, sxUnknown)
-    pin(p_ptro4, "ptro4_r50", true, sxUnknown)
-    pin(p_ptro4, "ptro4_rx", false, sxUnknown)
-    pin(p_refs, "refs_r50", true, sxUnknown)
-    pin(p_refs, "refs_rx", false, sxUnknown)
-    pin(p_refo4, "refo4_r50", true, sxUnknown)
-    pin(p_refo4, "refo4_rx", false, sxUnknown)
-    pin(p_cb, "cb_r50", true, sxUnknown)
-    pin(p_cb, "cb_rx", false, sxUnknown)
-    pin(p_cbo, "cbo_r50", true, sxUnknown)
-    pin(p_cbo, "cbo_rx", false, sxUnknown)
-    pin(p_hook, "hook_r50", true, sxUnknown)
-    pin(p_hook, "hook_rx", false, sxUnknown)
-    pin(p_meth, "meth_r50", true, sxUnknown)
-    pin(p_meth, "meth_rx", false, sxUnknown)
-    pin(p_metho, "metho_r50", true, sxUnknown)
-    pin(p_metho, "metho_rx", false, sxUnknown)
-    pin(p_gen, "gen_r50", true, sxUnknown)
-    pin(p_gen, "gen_rx", false, sxUnknown)
-    pin(p_sink, "sink_r50", false, sxUnknown)
-    pin(p_sink, "sink_rx", true, sxUnknown)
-    pin(p_ret, "ret_r50", true, sxUnknown)
-    pin(p_ret, "ret_rx", false, sxUnknown)
-    pin(p_reto, "reto_r50", true, sxUnknown)
-    pin(p_reto, "reto_rx", false, sxUnknown)
-    pin(p_lent, "lent_r50", true, sxUnknown)
-    pin(p_lent, "lent_rx", false, sxUnknown)
-    pin(p_itS, "its_r50", true, sxSat)
-    pin(p_itS, "its_rx", false, sxUnsat)
-    pin(p_itO, "ito_r50", true, sxSat)
-    pin(p_itO, "ito_rx", false, sxUnsat)
-    pin(p_sc, "sc_r50", true, sxUnknown)
-    pin(p_sc, "sc_rx", false, sxUnknown)
-    pin(p_str, "str_r50", true, sxUnknown)
-    pin(p_str, "str_rx", false, sxUnknown)
-    pin(p_ostr, "ostr_r50", true, sxUnknown)
-    pin(p_ostr, "ostr_rx", false, sxUnknown)
+    pin(p_byc, "byc_r50", false, sxUnknown)
+    pin(p_byc, "byc_rx", true, sxUnknown)
+    pin(p_t1, "t1_r50", false, sxUnsat)
+    pin(p_t1, "t1_rx", true, sxSat)
+    pin(p_t4, "t4_r50", true, sxUnknown)
+    pin(p_t4, "t4_rx", false, sxUnknown)
+    pin(p_ts, "ts_r50", true, sxUnknown)
+    pin(p_ts, "ts_rx", false, sxUnknown)
+    pin(p_a1, "a1_r50", true, sxUnknown)
+    pin(p_a1, "a1_rx", false, sxUnknown)
+    pin(p_asm, "asm_r50", true, sxUnknown)
+    pin(p_asm, "asm_rx", false, sxUnknown)
+    pin(p_aseq, "aseq_r50", true, sxUnknown)
+    pin(p_aseq, "aseq_rx", false, sxUnknown)
+    pin(p_fld, "fld_r50", true, sxUnknown)
+    pin(p_fld, "fld_rx", false, sxUnknown)
+    pin(p_elem, "elem_r50", true, sxUnknown)
+    pin(p_elem, "elem_rx", false, sxUnknown)

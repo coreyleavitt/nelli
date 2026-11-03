@@ -494,7 +494,7 @@ state = "done"
 [[slice]]
 id = "S8cq"
 title = "Batch 9's findings: by-value sharing on direct calls, direct var-returning actuals, a call evaluated twice under inc and swap, and the declines beside them"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -14324,3 +14324,67 @@ the only producer of that statement, so no other user rests on it.
 - PRECISION: `t.clear()` and `t.pop` under a view, pre-existing Table-op declines;
   `Table[string, VObj]`'s value type (`seUnsupportedTableValType`), with no view.
 - PRECISION: the view by value when not a scalar stays declined.
+
+**As landed (S8cq, walker 252) — by-value sharing, var-returning actuals, a call
+in a location lowered twice.** The branch is `rfc-0005-s8cq`, on batch 9 and S8cn's
+tip. The rule of the first and last items is inverted: instead of naming what goes
+wrong, a shape is decided only when it is proved right. Every label is run natively
+as well as walked (`tsymex_rfc0005_s8cq_*`).
+
+*By-value formals (`byValueWritten`).* A direct, method, proc-value, `lent` or
+returned-result call is decided only when one of these holds; anything else declines:
+
+- The type is on the allowlist (`typeCopiedByValue`): a scalar, a pointer, a
+  `distinct` of one, and a final object or tuple of them of at most three words,
+  with no pragma. `tsymex_rfc0005_s8cq_native` pins each on nine settings and both
+  backends. Unknown types, inheritable, `{.byref.}`, `{.bycopy.}`, strings, sets,
+  arrays and larger objects are not on it.
+- The type holds a `ref` or a closure (`typeHoldsRef`), and the actual is a local
+  nothing else reaches by name. The formal is a cursor over the actual's, so under
+  ARC and ORC a callee that overwrites a global actual frees the cell the formal
+  reads: `new gR; gR[] = 50; a[]` reads 50 in `f(gR)`.
+- The callee, with everything it reaches and every other actual, is proved to write
+  no global, heap or ref location (`scanOpaqueEffects`, `writesOnly`).
+- The actual is a path in a local's own value (`localOwnedActual`): its only other
+  name is a pointer to it, and S8bs keeps that cell and the formal one location.
+  S8bs's and S8ca's native pins are why it stays. A routine actual, a formal whose
+  address the callee takes, and a `var` of the same local decline.
+- S8cn's seq element with its seq (`seqViewElems`), whose native pins are S8cn's.
+
+A call through a proc value reports a shared actual in `ccTouch` (`sharedTouch`),
+which meets any body reaching anything outside its formals, and declines beside a
+`var` or `addr` actual. S8cn's reach by name is kept inside `byValueWritten`, its
+`byValueTouch` is rewritten over the allowlist, and `holdsCompoundLeaf` is gone.
+
+*Twice-lowered targets (`lvalueHasCall`).* A target is free of a call only when it
+is built from variables, literals, paths, conversions, system magics and the stdlib
+Table accessors. Otherwise every lowering that evaluates it apart declines:
+`inc dec swap op-assign setLen add del insert move new`, `mgetOrPut`, `newSeq`, a
+dotted-field mutation, a Table or string assignment through a path, and the `var`,
+`addr` and `var openArray` write-backs of a direct or closure call. These stay
+decided, each pinned natively: `reset` and `wasMoved` (one lowering), `bump(getR()[])`
+(by reference), `getSR()[].add/insert` (the pointer read once), a hoisted index, and
+the order of `+=` and `inc`, where Nim evaluates the value before the location.
+
+*Var-returning actuals.* Every form found already declines or is exact on S8cn's
+tip; `tsymex_rfc0005_s8cq_varret*` pin forty-four labels, so no code changed.
+
+*Two compile stops.* A user alias of an object recursed in `classifyType` on this
+stack, not on main: it declines now. A pragma on a formal stopped the compile on main
+too: it reads as its name, and a `{.byref.}` formal declines.
+
+*Different mechanisms, reported and not fixed here.*
+
+- SOUNDNESS: the walk never runs a user `=destroy`. A destructor writing a global is
+  a false `sxUnsat` and a false `sxSat`, with no by-value formal involved and on main
+  too (`block: var z = Hd(x: 1)`, then a read of what it wrote). A macro cannot
+  enumerate a type's hooks, so the summary above cannot see them either.
+- PRECISION, for RFC-0016: a by-value call the rule declines though Nim's answer is
+  known: small sets and arrays, `{.bycopy.}` objects, a global actual with any writing
+  callee (`f(gs)` writing an unrelated global), and `lent`.
+- PRECISION, for RFC-0016: a target with a call under a mutation that was exact before:
+  `getOS().s.add(1)`, `getOStr().st.add('c')`, `gOSeq[nextI()].s.add(1)`,
+  `getOS().s.del(0)`.
+- PRECISION, for RFC-0016: a call in a target under `inc`, `dec`, `swap`, `+=`,
+  `setLen`, `move`, `new`, and `rab(t["a"], t, "a")`'s var-returning actuals, each of
+  which an exact model could decide.

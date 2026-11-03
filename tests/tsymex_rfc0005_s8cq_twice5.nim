@@ -9,7 +9,6 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -42,205 +41,208 @@ template pinFree(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status
     check r.status == want
-import std/[tables]
-type
-  OS = object
-    s: seq[int]
-    n: int
-  OA = object
-    a: array[3, int]
-  UB = object
-    d: seq[int]
-var gOS: OS
-var gOA: OA
-var gs: seq[int]
-var gTb: Table[string, int]
-var gN: int
-var gUB: UB
-var gX: int
-proc getOS(): var OS = (inc gN; gOS)
-proc getS(): var seq[int] = (inc gN; gs)
-proc nextI(): int = (inc gN; 0)
-proc key(): string = (inc gN; "a")
-proc getT(): var Table[string, int] = (inc gN; gTb)
-proc `[]`(u: var UB; i: int): var int = (inc gN; u.d[i])
-proc byV(a: var int) = inc a
-proc byOA(a: var openArray[int]) = a[0] = 9
-proc rd(): seq[int] = (inc gN; gs)
-iterator twice(a: var seq[int]): var int =
-  yield a[0]
-  yield a[0]
-template rst(x: int) =
+import std/[tables, sets, strutils, sequtils]
+type RX = ref object
+  x: int
+type RSq = ref object
+  s: seq[int]
+type RStr = ref object
+  st: string
+type RAr = ref object
+  a: array[3, int]
+type VO = object
+  x: int
+var gN, gM: int
+var gR: ref int
+var gP: ptr int
+var gO: RX
+var gOS: RSq
+var gOStr: RStr
+var gOA: RAr
+var gSR: ref seq[int]
+var gStrR: ref string
+var gAR: ref array[3, int]
+var gTR: ref Table[string, int]
+var gSetR: ref set[char]
+var gRR: ref ref int
+var gV: VO
+var gOxs: seq[RX]
+var gOSeq: seq[RSq]
+var gA2: array[3, int]
+var gPs: seq[ref int]
+proc getR(): ref int =
+  inc gN
+  gR
+proc getO(): RX =
+  inc gN
+  gO
+proc getOS(): RSq =
+  inc gN
+  gOS
+proc getOStr(): RStr =
+  inc gN
+  gOStr
+proc getOA(): RAr =
+  inc gN
+  gOA
+proc getSR(): ref seq[int] =
+  inc gN
+  gSR
+proc getStrR(): ref string =
+  inc gN
+  gStrR
+proc getAR(): ref array[3, int] =
+  inc gN
+  gAR
+proc getTR(): ref Table[string, int] =
+  inc gN
+  gTR
+proc getSetR(): ref set[char] =
+  inc gN
+  gSetR
+proc getRR(): ref ref int =
+  inc gN
+  gRR
+proc getVar(): var VO =
+  inc gN
+  gV
+proc nextI(): int =
+  inc gN
+  0
+proc bump(v: var int) = v += 1
+proc bumpP(p: ptr int) = p[] += 1
+var gR1: ref int
+var gO1: RX
+var gIdx: int
+var gSq: seq[int]
+proc gR2Init() = gR1 = gR
+proc gO2Init() = gO1 = gO
+proc chgR(): int =
+  inc gN
+  new(gR)
+  1
+proc chgO(): int =
+  inc gN
+  new(gO)
+  1
+proc chgI(): int =
+  inc gN
+  gIdx = 1
+  1
+proc chgIv(): int =
+  inc gN
+  gIdx = 1
+  1
+proc c28(x: int) =
+  if x > 1000 or x < -1000: return
   gN = 0
-  gs = @[x, 2]
-  gOS = OS(s: @[x, 2])
-  gOA = OA()
-  gX = x
-proc q01(x: int) =
-  rst(x)
-  getOS().s.insert(5, 0)
-  if gN == 1 and gOS.s[0] == 5: symexTarget("q01_once") else: symexTarget("q01_ne")
-proc q02(x: int) =
-  rst(x)
-  gOA.a[nextI()] = 3
-  if gN == 1 and gOA.a[0] == 3: symexTarget("q02_once") else: symexTarget("q02_ne")
-proc q03(x: int) =
-  rst(x)
-  gUB.d = @[x]
-  gUB[nextI()] = 3
-  if gN == 2 and gUB.d[0] == 3: symexTarget("q03_once") else: symexTarget("q03_ne")
-proc q04(x: int) =
-  rst(x)
-  gUB.d = @[x]
-  inc gUB[0]
-  if gN == 1 and gUB.d[0] == x + 1: symexTarget("q04_once") else: symexTarget("q04_ne")
-proc q05(x: int) =
-  rst(x)
-  for v in mitems(getS()): v = 3
-  if gN != 0 and gs[0] == 3: symexTarget("q05_w") else: symexTarget("q05_ne")
-proc q06(x: int) =
-  rst(x)
-  var t = 0
-  for v in items(rd()): t += v
-  if gN == 1 and t == x + 2: symexTarget("q06_once") else: symexTarget("q06_ne")
-proc q07(x: int) =
-  rst(x)
-  var t = 0
-  for i, v in pairs(rd()): t += v
-  if gN == 1 and t == x + 2: symexTarget("q07_once") else: symexTarget("q07_ne")
-proc q08(x: int) =
-  rst(x)
-  gTb = {"a": x}.toTable
-  inc getT()[key()]
-  if gN == 2: symexTarget("q08_once") else: symexTarget("q08_ne")
-proc q09(x: int) =
-  rst(x)
-  gTb = {"a": x}.toTable
-  gTb[key()] = 3
-  if gN == 1: symexTarget("q09_once") else: symexTarget("q09_ne")
-proc q10(x: int) =
-  rst(x)
-  gTb = {"a": x}.toTable
-  discard gTb.mgetOrPut(key(), 0)
-  if gN == 1: symexTarget("q10_once") else: symexTarget("q10_ne")
-proc q11(x: int) =
-  rst(x)
-  byV(gs[nextI()])
-  if gN == 1 and gs[0] == x + 1: symexTarget("q11_once") else: symexTarget("q11_ne")
-proc q12(x: int) =
-  rst(x)
-  byOA(getS())
-  if gN == 1 and gs[0] == 9: symexTarget("q12_once") else: symexTarget("q12_ne")
-proc q13(x: int) =
-  rst(x)
-  gs[nextI()] = gs[nextI()] + 1
-  if gN == 2: symexTarget("q13_two") else: symexTarget("q13_ne")
-proc q14(x: int) =
-  rst(x)
-  newSeq(getS(), 2)
-  if gN == 1 and gs[0] == 0: symexTarget("q14_once") else: symexTarget("q14_ne")
-proc q15(x: int) =
-  rst(x)
-  gs.setLen(nextI() + 1)
-  if gN == 1 and gs.len == 1: symexTarget("q15_once") else: symexTarget("q15_ne")
-proc q16(x: int) =
-  rst(x)
-  getOS().n = 3
-  if gN == 1 and gOS.n == 3: symexTarget("q16_once") else: symexTarget("q16_ne")
-proc q17(x: int) =
-  rst(x)
-  getS()[0] = 3
-  if gN == 1 and gs[0] == 3: symexTarget("q17_once") else: symexTarget("q17_ne")
-proc q18(x: int) =
-  rst(x)
-  let (a, b) = (getS()[0], getS()[1])
-  if gN == 2 and a == x and b == 2: symexTarget("q18_two") else: symexTarget("q18_ne")
-proc q19(x: int) =
-  rst(x)
-  getS().del(nextI())
-  if gN == 2 and gs.len == 1: symexTarget("q19_two") else: symexTarget("q19_ne")
-proc q20(x: int) =
-  rst(x)
-  getS().add(nextI())
-  if gN == 2 and gs.len == 3: symexTarget("q20_two") else: symexTarget("q20_ne")
-proc q21(x: int) =
-  rst(x)
-  getOS().s[nextI()] += 1
-  if gN == 2: symexTarget("q21_two") else: symexTarget("q21_ne")
-proc q22(x: int) =
-  rst(x)
-  var s2 = @[x]
-  discard s2.pop()
-  discard getS().pop()
-  if gN == 1 and gs.len == 1: symexTarget("q22_once") else: symexTarget("q22_ne")
+  new(gTR); gTR[] = {"a": x}.toTable
+  var y = 7
+  getTR()[].del("a")
+  if gN == 1 and ("a" notin gTR[]): symexTarget("c28_ok")
+  if gN != 1 or not ("a" notin gTR[]): symexTarget("c28_bad")
+proc c29(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gSetR); gSetR[] = {'a'}
+  var y = 7
+  getSetR()[].incl('b')
+  if gN == 1 and ('b' in gSetR[]): symexTarget("c29_ok")
+  if gN != 1 or not ('b' in gSetR[]): symexTarget("c29_bad")
+proc c30(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gTR); gTR[] = {"a": x}.toTable
+  var y = 7
+  inc(getTR()[].mgetOrPut("a", 0))
+  if gN == 1 and (gTR[]["a"] == x + 1): symexTarget("c30_ok")
+  if gN != 1 or not (gTR[]["a"] == x + 1): symexTarget("c30_bad")
+proc c31(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gR); gR[] = x; gPs = @[gR]
+  var y = 7
+  inc(gPs[nextI()][])
+  if gN == 1 and (gR[] == x + 1): symexTarget("c31_ok")
+  if gN != 1 or not (gR[] == x + 1): symexTarget("c31_bad")
+proc c32(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gR); gR[] = x; gPs = @[gR]
+  var y = 7
+  gPs[nextI()][] += 1
+  if gN == 1 and (gR[] == x + 1): symexTarget("c32_ok")
+  if gN != 1 or not (gR[] == x + 1): symexTarget("c32_bad")
+proc c33(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gO); gO.x = x; gOxs = @[gO]
+  var y = 7
+  inc(gOxs[nextI()].x)
+  if gN == 1 and (gO.x == x + 1): symexTarget("c33_ok")
+  if gN != 1 or not (gO.x == x + 1): symexTarget("c33_bad")
+proc c34(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gO); gO.x = x; gOxs = @[gO]
+  var y = 7
+  gOxs[nextI()].x += 1
+  if gN == 1 and (gO.x == x + 1): symexTarget("c34_ok")
+  if gN != 1 or not (gO.x == x + 1): symexTarget("c34_bad")
+proc c35(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gO); gO.x = x; gOxs = @[gO]
+  var y = 7
+  swap(gOxs[nextI()].x, y)
+  if gN == 1 and (gO.x == 7 and y == x): symexTarget("c35_ok")
+  if gN != 1 or not (gO.x == 7 and y == x): symexTarget("c35_bad")
+proc c36(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gOS); gOS.s = @[x, 2]; gOSeq = @[gOS]
+  var y = 7
+  gOSeq[nextI()].s.add(1)
+  if gN == 1 and (gOS.s.len == 3): symexTarget("c36_ok")
+  if gN != 1 or not (gOS.s.len == 3): symexTarget("c36_bad")
 
-for x in [1, 2]:
-  nat(q01(x))
-  nat(q02(x))
-  nat(q03(x))
-  nat(q04(x))
-  nat(q05(x))
-  nat(q06(x))
-  nat(q07(x))
-  nat(q08(x))
-  nat(q09(x))
-  nat(q10(x))
-  nat(q11(x))
-  nat(q12(x))
-  nat(q13(x))
-  nat(q14(x))
-  nat(q15(x))
-  nat(q16(x))
-  nat(q17(x))
-  nat(q18(x))
-  nat(q19(x))
-  nat(q20(x))
-  nat(q21(x))
-  nat(q22(x))
+for x in [-3, 0, 3, 5, 7, 49, 51]:
+  nat(c28(x))
+  nat(c29(x))
+  nat(c30(x))
+  nat(c31(x))
+  nat(c32(x))
+  nat(c33(x))
+  nat(c34(x))
+  nat(c35(x))
+  nat(c36(x))
 
 suite "tsymex_rfc0005_s8cq_twice5":
   test "verdicts against Nim":
-    pin(q01, "q01_once", true, sxUnknown)
-    pin(q01, "q01_ne", false, sxUnknown)
-    pin(q02, "q02_once", true, sxUnknown)
-    pin(q02, "q02_ne", false, sxUnknown)
-    pin(q03, "q03_once", true, sxUnknown)
-    pin(q03, "q03_ne", false, sxUnknown)
-    pin(q04, "q04_once", true, sxUnknown)
-    pin(q04, "q04_ne", false, sxUnknown)
-    pin(q05, "q05_w", true, sxUnknown)
-    pin(q05, "q05_ne", false, sxUnknown)
-    pin(q06, "q06_once", true, sxSat)
-    pin(q06, "q06_ne", false, sxRaised)
-    pin(q07, "q07_once", true, sxSat)
-    pin(q07, "q07_ne", false, sxRaised)
-    pin(q08, "q08_once", true, sxUnknown)
-    pin(q08, "q08_ne", false, sxUnknown)
-    pin(q09, "q09_once", true, sxUnknown)
-    pin(q09, "q09_ne", false, sxUnknown)
-    pin(q10, "q10_once", true, sxUnknown)
-    pin(q10, "q10_ne", false, sxUnknown)
-    pin(q11, "q11_once", true, sxSat)
-    pin(q11, "q11_ne", false, sxRaised)
-    pin(q12, "q12_once", true, sxUnknown)
-    pin(q12, "q12_ne", false, sxUnknown)
-    pin(q13, "q13_two", true, sxSat)
-    pin(q13, "q13_ne", false, sxRaised)
-    pin(q14, "q14_once", true, sxUnknown)
-    pin(q14, "q14_ne", false, sxUnknown)
-    pin(q15, "q15_once", true, sxSat)
-    pin(q15, "q15_ne", false, sxUnsat)
-    pin(q16, "q16_once", true, sxUnknown)
-    pin(q16, "q16_ne", false, sxUnknown)
-    pin(q17, "q17_once", true, sxUnknown)
-    pin(q17, "q17_ne", false, sxUnknown)
-    pin(q18, "q18_two", true, sxSat)
-    pin(q18, "q18_ne", false, sxUnsat)
-    pin(q19, "q19_two", true, sxUnknown)
-    pin(q19, "q19_ne", false, sxUnknown)
-    pin(q20, "q20_two", true, sxUnknown)
-    pin(q20, "q20_ne", false, sxUnknown)
-    pin(q21, "q21_two", true, sxUnknown)
-    pin(q21, "q21_ne", false, sxUnknown)
-    pin(q22, "q22_once", true, sxUnknown)
-    pin(q22, "q22_ne", false, sxUnknown)
+    # c28: getTR()[].del('a')
+    pin(c28, "c28_ok", true, sxUnknown)
+    pin(c28, "c28_bad", false, sxUnknown)
+    # c29: getSetR()[].incl('b')
+    pin(c29, "c29_ok", true, sxUnknown)
+    pin(c29, "c29_bad", false, sxUnknown)
+    # c30: inc(getTR()[].mgetOrPut('a', 0))
+    pin(c30, "c30_ok", true, sxUnknown)
+    pin(c30, "c30_bad", false, sxUnknown)
+    # c31: inc(gPs[nextI()][])
+    pin(c31, "c31_ok", true, sxUnknown)
+    pin(c31, "c31_bad", false, sxUnknown)
+    # c32: gPs[nextI()][] += 1
+    pin(c32, "c32_ok", true, sxUnknown)
+    pin(c32, "c32_bad", false, sxUnknown)
+    # c33: inc(gOxs[nextI()].x)
+    pin(c33, "c33_ok", true, sxUnknown)
+    pin(c33, "c33_bad", false, sxUnknown)
+    # c34: gOxs[nextI()].x += 1
+    pin(c34, "c34_ok", true, sxUnknown)
+    pin(c34, "c34_bad", false, sxUnknown)
+    # c35: swap(gOxs[nextI()].x, y)
+    pin(c35, "c35_ok", true, sxUnknown)
+    pin(c35, "c35_bad", false, sxUnknown)
+    # c36: gOSeq[nextI()].s.add(1)
+    pin(c36, "c36_ok", true, sxUnknown)
+    pin(c36, "c36_bad", false, sxUnknown)

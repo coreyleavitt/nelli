@@ -9,7 +9,6 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -134,272 +133,116 @@ proc chgIv(): int =
   inc gN
   gIdx = 1
   1
-proc c44(x: int) =
+proc c19(x: int) =
   if x > 1000 or x < -1000: return
   gN = 0
   new(gR); gR[] = x
   var y = 7
-  let f: proc (v: var int) {.nimcall.} = (if x == -5000: nil else: bump); f(getR()[])
-  if gN == 1 and (gR[] == x + 1): symexTarget("c44_ok")
-  if gN != 1 or not (gR[] == x + 1): symexTarget("c44_bad")
-proc c45(x: int) =
+  wasMoved(getR()[])
+  if gN == 1 and (gR[] == 0): symexTarget("c19_ok")
+  if gN != 1 or not (gR[] == 0): symexTarget("c19_bad")
+proc c20(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gR); gR[] = x
+  var y = 7
+  let m = move(getR()[]); (if m != x: gN = 9)
+  if gN == 1 and (gR[] == 0 or gR[] == x): symexTarget("c20_ok")
+  if gN != 1 or not (gR[] == 0 or gR[] == x): symexTarget("c20_bad")
+proc c21(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gRR); new(gRR[]); gRR[][] = x
+  var y = 7
+  new(getRR()[])
+  if gN == 1 and (gRR[][] == 0): symexTarget("c21_ok")
+  if gN != 1 or not (gRR[][] == 0): symexTarget("c21_bad")
+proc c22(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gRR); new(gRR[]); gRR[][] = x
+  var y = 7
+  inc(getRR()[][])
+  if gN == 1 and (gRR[][] == x + 1): symexTarget("c22_ok")
+  if gN != 1 or not (gRR[][] == x + 1): symexTarget("c22_bad")
+proc c23(x: int) =
   if x > 1000 or x < -1000: return
   gN = 0
   new(gSR); gSR[] = @[x, 2]
   var y = 7
-  for v in mitems(getSR()[]): v += 1
-  if gN == 1 and (gSR[][0] == x + 1): symexTarget("c45_ok")
-  if gN != 1 or not (gSR[][0] == x + 1): symexTarget("c45_bad")
-proc c46(x: int) =
+  getSR()[].insert(9, 0)
+  if gN == 1 and (gSR[].len == 3 and gSR[][0] == 9): symexTarget("c23_ok")
+  if gN != 1 or not (gSR[].len == 3 and gSR[][0] == 9): symexTarget("c23_bad")
+proc c24(x: int) =
   if x > 1000 or x < -1000: return
   gN = 0
   new(gSR); gSR[] = @[x, 2]
   var y = 7
-  for i, v in mpairs(getSR()[]): v += 1
-  if gN == 1 and (gSR[][0] == x + 1): symexTarget("c46_ok")
-  if gN != 1 or not (gSR[][0] == x + 1): symexTarget("c46_bad")
-proc c47(x: int) =
+  let w = getSR()[].pop(); (if w != 2: gN = 9)
+  if gN == 1 and (gSR[].len == 1): symexTarget("c24_ok")
+  if gN != 1 or not (gSR[].len == 1): symexTarget("c24_bad")
+proc c25(x: int) =
+  if x > 1000 or x < -1000: return
+  gN = 0
+  new(gSR); gSR[] = @[x, 2]
+  var y = 7
+  getSR()[].delete(0)
+  if gN == 1 and (gSR[].len == 1 and gSR[][0] == 2): symexTarget("c25_ok")
+  if gN != 1 or not (gSR[].len == 1 and gSR[][0] == 2): symexTarget("c25_bad")
+proc c26(x: int) =
   if x > 1000 or x < -1000: return
   gN = 0
   new(gTR); gTR[] = {"a": x}.toTable
   var y = 7
-  for k, v in mpairs(getTR()[]): v += 1
-  if gN == 1 and (gTR[]["a"] == x + 1): symexTarget("c47_ok")
-  if gN != 1 or not (gTR[]["a"] == x + 1): symexTarget("c47_bad")
-proc c48(x: int) =
+  getTR()[]["a"] = 3
+  if gN == 1 and (gTR[]["a"] == 3): symexTarget("c26_ok")
+  if gN != 1 or not (gTR[]["a"] == 3): symexTarget("c26_bad")
+proc c27(x: int) =
   if x > 1000 or x < -1000: return
   gN = 0
-  new(gR); gR[] = x
+  new(gTR); gTR[] = {"a": x}.toTable
   var y = 7
-  (getR()[], y) = (3, 4)
-  if gN == 1 and (gR[] == 3): symexTarget("c48_ok")
-  if gN != 1 or not (gR[] == 3): symexTarget("c48_bad")
-proc c49(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gA2 = [x, 2, 3]
-  var y = 7
-  swap(gA2[nextI()], y)
-  if gN == 1 and (gA2[0] == 7 and y == x): symexTarget("c49_ok")
-  if gN != 1 or not (gA2[0] == 7 and y == x): symexTarget("c49_bad")
-proc c50(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gA2 = [x, 2, 3]
-  var y = 7
-  inc(gA2[nextI()])
-  if gN == 1 and (gA2[0] == x + 1): symexTarget("c50_ok")
-  if gN != 1 or not (gA2[0] == x + 1): symexTarget("c50_bad")
-proc c51(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gA2 = [x, 2, 3]
-  var y = 7
-  gA2[nextI()] += 1
-  if gN == 1 and (gA2[0] == x + 1): symexTarget("c51_ok")
-  if gN != 1 or not (gA2[0] == x + 1): symexTarget("c51_bad")
-proc c52(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gOA); gOA.a = [x, 2, 3]
-  var y = 7
-  getOA().a[0] += 1
-  if gN == 1 and (gOA.a[0] == x + 1): symexTarget("c52_ok")
-  if gN != 1 or not (gOA.a[0] == x + 1): symexTarget("c52_bad")
-proc c53(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gOA); gOA.a = [x, 2, 3]
-  var y = 7
-  inc(getOA().a[0])
-  if gN == 1 and (gOA.a[0] == x + 1): symexTarget("c53_ok")
-  if gN != 1 or not (gOA.a[0] == x + 1): symexTarget("c53_bad")
-proc c54(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gOS); gOS.s = @[x, 2]
-  var y = 7
-  getOS().s[0] += 1
-  if gN == 1 and (gOS.s[0] == x + 1): symexTarget("c54_ok")
-  if gN != 1 or not (gOS.s[0] == x + 1): symexTarget("c54_bad")
-proc c55(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gOS); gOS.s = @[x, 2]
-  var y = 7
-  inc(getOS().s[0])
-  if gN == 1 and (gOS.s[0] == x + 1): symexTarget("c55_ok")
-  if gN != 1 or not (gOS.s[0] == x + 1): symexTarget("c55_bad")
-proc c56(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gOS); gOS.s = @[x, 2]
-  var y = 7
-  getOS().s.del(0)
-  if gN == 1 and (gOS.s.len == 1): symexTarget("c56_ok")
-  if gN != 1 or not (gOS.s.len == 1): symexTarget("c56_bad")
-proc c57(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gR); gR[] = x; gR2Init()
-  var y = 7
-  gR[] += chgR()
-  if gN == 1 and (gR1[] == x + 1): symexTarget("c57_ok")
-  if gN != 1 or not (gR1[] == x + 1): symexTarget("c57_bad")
-proc c58(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gR); gR[] = x; gR2Init()
-  var y = 7
-  inc(gR[], chgR())
-  if gN == 1 and (gR1[] == x + 1): symexTarget("c58_ok")
-  if gN != 1 or not (gR1[] == x + 1): symexTarget("c58_bad")
-proc c59(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gO); gO.x = x; gO2Init()
-  var y = 7
-  gO.x += chgO()
-  if gN == 1 and (gO1.x == x + 1): symexTarget("c59_ok")
-  if gN != 1 or not (gO1.x == x + 1): symexTarget("c59_bad")
-proc c60(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  new(gO); gO.x = x; gO2Init()
-  var y = 7
-  inc(gO.x, chgO())
-  if gN == 1 and (gO1.x == x + 1): symexTarget("c60_ok")
-  if gN != 1 or not (gO1.x == x + 1): symexTarget("c60_bad")
-proc c61(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gIdx = 0; gA2 = [x, 2, 3]
-  var y = 7
-  gA2[gIdx] += chgI()
-  if gN == 1 and (gA2[0] == x + 1): symexTarget("c61_ok")
-  if gN != 1 or not (gA2[0] == x + 1): symexTarget("c61_bad")
-proc c62(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gIdx = 0; gA2 = [x, 2, 3]
-  var y = 7
-  inc(gA2[gIdx], chgI())
-  if gN == 1 and (gA2[0] == x + 1): symexTarget("c62_ok")
-  if gN != 1 or not (gA2[0] == x + 1): symexTarget("c62_bad")
-proc c63(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gIdx = 0; gSq = @[x, 2, 3]
-  var y = 7
-  gSq[gIdx] += chgI()
-  if gN == 1 and (gSq[0] == x + 1): symexTarget("c63_ok")
-  if gN != 1 or not (gSq[0] == x + 1): symexTarget("c63_bad")
-proc c64(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gIdx = 0; gSq = @[x, 2, 3]
-  var y = 7
-  inc(gSq[gIdx], chgI())
-  if gN == 1 and (gSq[0] == x + 1): symexTarget("c64_ok")
-  if gN != 1 or not (gSq[0] == x + 1): symexTarget("c64_bad")
-proc c65(x: int) =
-  if x > 1000 or x < -1000: return
-  gN = 0
-  gIdx = 0; gSq = @[x, 2, 3]
-  var y = 7
-  swap(gSq[gIdx], gSq[chgIv()])
-  if gN == 1 and (gSq[0] == 2 and gSq[1] == x): symexTarget("c65_ok")
-  if gN != 1 or not (gSq[0] == 2 and gSq[1] == x): symexTarget("c65_bad")
+  inc(getTR()[]["a"])
+  if gN == 1 and (gTR[]["a"] == x + 1): symexTarget("c27_ok")
+  if gN != 1 or not (gTR[]["a"] == x + 1): symexTarget("c27_bad")
 
 for x in [-3, 0, 3, 5, 7, 49, 51]:
-  nat(c44(x))
-  nat(c45(x))
-  nat(c46(x))
-  nat(c47(x))
-  nat(c48(x))
-  nat(c49(x))
-  nat(c50(x))
-  nat(c51(x))
-  nat(c52(x))
-  nat(c53(x))
-  nat(c54(x))
-  nat(c55(x))
-  nat(c56(x))
-  nat(c57(x))
-  nat(c58(x))
-  nat(c59(x))
-  nat(c60(x))
-  nat(c61(x))
-  nat(c62(x))
-  nat(c63(x))
-  nat(c64(x))
-  nat(c65(x))
+  nat(c19(x))
+  nat(c20(x))
+  nat(c21(x))
+  nat(c22(x))
+  nat(c23(x))
+  nat(c24(x))
+  nat(c25(x))
+  nat(c26(x))
+  nat(c27(x))
 
 suite "tsymex_rfc0005_s8cq_twice4":
   test "verdicts against Nim":
-    # c44: let f: proc (v: var int) {.nimcall.} = (if x == -5000: nil else: bump); f(getR()[])
-    pin(c44, "c44_ok", true, sxUnknown)
-    pin(c44, "c44_bad", false, sxUnknown)
-    # c45: for v in mitems(getSR()[]): v += 1
-    pin(c45, "c45_ok", false, sxUnknown)
-    pin(c45, "c45_bad", true, sxUnknown)
-    # c46: for i, v in mpairs(getSR()[]): v += 1
-    pin(c46, "c46_ok", false, sxUnknown)
-    pin(c46, "c46_bad", true, sxUnknown)
-    # c47: for k, v in mpairs(getTR()[]): v += 1
-    pin(c47, "c47_ok", false, sxUnknown)
-    pin(c47, "c47_bad", true, sxUnknown)
-    # c48: (getR()[], y) = (3, 4)
-    pin(c48, "c48_ok", true, sxSat)
-    pin(c48, "c48_bad", false, sxUnsat)
-    # c49: swap(gA2[nextI()], y)
-    pin(c49, "c49_ok", true, sxUnknown)
-    pin(c49, "c49_bad", false, sxUnknown)
-    # c50: inc(gA2[nextI()])
-    pin(c50, "c50_ok", true, sxUnknown)
-    pin(c50, "c50_bad", false, sxUnknown)
-    # c51: gA2[nextI()] += 1
-    pin(c51, "c51_ok", true, sxUnknown)
-    pin(c51, "c51_bad", false, sxUnknown)
-    # c52: getOA().a[0] += 1
-    pin(c52, "c52_ok", true, sxUnknown)
-    pin(c52, "c52_bad", false, sxUnknown)
-    # c53: inc(getOA().a[0])
-    pin(c53, "c53_ok", true, sxUnknown)
-    pin(c53, "c53_bad", false, sxUnknown)
-    # c54: getOS().s[0] += 1
-    pin(c54, "c54_ok", true, sxUnknown)
-    pin(c54, "c54_bad", false, sxUnknown)
-    # c55: inc(getOS().s[0])
-    pin(c55, "c55_ok", true, sxUnknown)
-    pin(c55, "c55_bad", false, sxUnknown)
-    # c56: getOS().s.del(0)
-    pin(c56, "c56_ok", true, sxUnknown)
-    pin(c56, "c56_bad", false, sxUnknown)
-    # c57: gR[] += chgR()
-    pin(c57, "c57_ok", false, sxUnsat)
-    pin(c57, "c57_bad", true, sxSat)
-    # c58: inc(gR[], chgR())
-    pin(c58, "c58_ok", false, sxUnsat)
-    pin(c58, "c58_bad", true, sxSat)
-    # c59: gO.x += chgO()
-    pin(c59, "c59_ok", false, sxUnknown)
-    pin(c59, "c59_bad", true, sxUnknown)
-    # c60: inc(gO.x, chgO())
-    pin(c60, "c60_ok", false, sxUnsat)
-    pin(c60, "c60_bad", true, sxSat)
-    # c61: gA2[gIdx] += chgI()
-    pin(c61, "c61_ok", false, sxUnsat)
-    pin(c61, "c61_bad", true, sxSat)
-    # c62: inc(gA2[gIdx], chgI())
-    pin(c62, "c62_ok", false, sxUnsat)
-    pin(c62, "c62_bad", true, sxSat)
-    # c63: gSq[gIdx] += chgI()
-    pin(c63, "c63_ok", false, sxUnsat)
-    pin(c63, "c63_bad", true, sxSat)
-    # c64: inc(gSq[gIdx], chgI())
-    pin(c64, "c64_ok", false, sxUnsat)
-    pin(c64, "c64_bad", true, sxSat)
-    # c65: swap(gSq[gIdx], gSq[chgIv()])
-    pin(c65, "c65_ok", false, sxUnknown)
-    pin(c65, "c65_bad", true, sxUnknown)
+    # c19: wasMoved(getR()[])
+    pin(c19, "c19_ok", true, sxSat)
+    pin(c19, "c19_bad", false, sxUnsat)
+    # c20: let m = move(getR()[]); (if m != x: gN = 9)
+    pin(c20, "c20_ok", true, sxUnknown)
+    pin(c20, "c20_bad", false, sxUnknown)
+    # c21: new(getRR()[])
+    pin(c21, "c21_ok", false, sxUnknown)
+    pin(c21, "c21_bad", true, sxUnknown)
+    # c22: inc(getRR()[][])
+    pin(c22, "c22_ok", true, sxUnknown)
+    pin(c22, "c22_bad", false, sxUnknown)
+    # c23: getSR()[].insert(9, 0)
+    pin(c23, "c23_ok", true, sxSat)
+    pin(c23, "c23_bad", false, sxUnsat)
+    # c24: let w = getSR()[].pop(); (if w != 2: gN = 9)
+    pin(c24, "c24_ok", true, sxUnknown)
+    pin(c24, "c24_bad", false, sxUnknown)
+    # c25: getSR()[].delete(0)
+    pin(c25, "c25_ok", true, sxUnknown)
+    pin(c25, "c25_bad", false, sxUnknown)
+    # c26: getTR()[]['a'] = 3
+    pin(c26, "c26_ok", true, sxUnknown)
+    pin(c26, "c26_bad", false, sxUnknown)
+    # c27: inc(getTR()[]['a'])
+    pin(c27, "c27_ok", true, sxUnknown)
+    pin(c27, "c27_bad", false, sxUnknown)

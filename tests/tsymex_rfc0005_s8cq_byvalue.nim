@@ -9,10 +9,13 @@
 ## nine settings in `tsymex_rfc0005_s8cq_native`), or the callee with everything
 ## it reaches is proved to write nothing the actual could be (`byValueWritten`).
 ## Everything else declines; the exact model belongs to RFC-0016.
+##
+## A local's memory has no other name but a pointer to it, and S8bs keeps that cell
+## and the formal one location, so a local actual stays decided; a formal whose
+## address the callee takes, a routine actual, and a `var` of the same local decline.
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -45,6 +48,7 @@ template pinFree(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status
     check r.status == want
+import nelli/smt/canonicalize
 import std/tables
 type Sm = object
   a: int

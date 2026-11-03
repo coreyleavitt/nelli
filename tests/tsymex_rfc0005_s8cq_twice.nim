@@ -9,7 +9,6 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
-import nelli/smt/canonicalize
 
 var natHits: HashSet[string]
 
@@ -42,6 +41,7 @@ template pinFree(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status
     check r.status == want
+import nelli/smt/canonicalize
 import std/tables
 type Sm = object
   a: int
@@ -154,6 +154,9 @@ for x in [-3, 0, 3, 5, 7, 49, 51]:
   nat(sDel(x))
 
 suite "tsymex_rfc0005_s8cq_twice":
+  test "walker version floor":
+    check parseInt(symexWalkerVersion) >= 252
+
   test "verdicts against Nim":
     pin(sInc, "ir_once", true, sxUnknown)
     pin(sInc, "ir_twice", false, sxUnknown)

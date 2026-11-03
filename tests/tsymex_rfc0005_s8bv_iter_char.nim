@@ -1,4 +1,4 @@
-## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (a set[char]: ascending order, its only member, a count).
+## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (a set[char]: ascending order, its only member).
 ##
 ## `for x in s` over a builtin `set[T]` declined. It is unrolled over `T`'s
 ## domain in ascending order, exactly as `system.items` iterates (`T(i) in a`
@@ -46,11 +46,6 @@ proc itCharFirst(s: set[char]) =
   if 'a' in s and 'b' in s and first == 'b': symexTarget("bv_it_char_first")
   if seen and first == 'q' and card(s) == 1: symexTarget("bv_it_char_one")
 
-proc itCharCount(s: set[char]) =
-  var k = 0
-  for c in s: inc k
-  if k == 2: symexTarget("bv_it_char_count")
-
 suite "S8bv: walker version":
   test "the walker version floor":
     check parseInt(symexWalkerVersion) >= 250
@@ -58,9 +53,8 @@ suite "S8bv: walker version":
 suite "S8bv (1): for x in a builtin set":
   test "a set[char] is visited in ascending order":
     check verdict(itCharFirst, "bv_it_char_first").status == sxUnsat
-  test "a set[char]: its only member, and a count":
+  test "a set[char]: its only member":
     let r = verdict(itCharFirst, "bv_it_char_one")
     check r.status == sxSat
     check r.errors.len == 0
     check "bv_it_char_one" in nativeHits(itCharFirst({'q'}))
-    check verdict(itCharCount, "bv_it_char_count").status == sxSat

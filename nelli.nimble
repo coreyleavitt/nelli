@@ -1145,6 +1145,7 @@ task test, "Run the test suite":
             # hard card queries and newSeqUninit taint precision. Walker 250.
             "tsymex_rfc0005_s8bv_iter_order",
             "tsymex_rfc0005_s8bv_iter_char",
+            "tsymex_rfc0005_s8bv_iter_char_count",
             "tsymex_rfc0005_s8bv_iter_int8",
             "tsymex_rfc0005_s8bv_iter_forms",
             "tsymex_rfc0005_s8bv_subrange",

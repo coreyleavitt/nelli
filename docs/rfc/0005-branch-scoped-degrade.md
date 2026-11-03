@@ -554,7 +554,7 @@ state = "pending"
 [[slice]]
 id = "S8cm"
 title = "Corpus files over 60 s compile plus run on Windows, and shard budgets"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"

@@ -85,7 +85,7 @@ proc subSetIncl(e: E4) =
 
 suite "S8bv: walker version":
   test "the walker version floor":
-    check parseInt(symexWalkerVersion) >= 226
+    check parseInt(symexWalkerVersion) >= 250
 
 suite "S8bv (2): enum subranges":
   test "a subrange field":

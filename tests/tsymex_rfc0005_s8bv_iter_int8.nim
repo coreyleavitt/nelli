@@ -48,7 +48,7 @@ proc itInt8First(s: set[int8]) =
 
 suite "S8bv: walker version":
   test "the walker version floor":
-    check parseInt(symexWalkerVersion) >= 226
+    check parseInt(symexWalkerVersion) >= 250
 
 suite "S8bv (1): for x in a builtin set":
   test "a signed set starts at its low bound":

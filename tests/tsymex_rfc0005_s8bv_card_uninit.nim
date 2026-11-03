@@ -149,7 +149,7 @@ proc unMappedUnwritten(n, k: int) =
 
 suite "S8bv: walker version":
   test "the walker version floor":
-    check parseInt(symexWalkerVersion) >= 226
+    check parseInt(symexWalkerVersion) >= 250
 
 suite "S8bv (3): pigeonhole-hard card queries decide":
   test "card(s + {c}) is at most card(s) + 1":

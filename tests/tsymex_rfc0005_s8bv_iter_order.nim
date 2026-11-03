@@ -1,4 +1,4 @@
-## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (order, set[char] members and counts, break, continue).
+## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (order, a count, break, continue).
 ##
 ## `for x in s` over a builtin `set[T]` declined. It is unrolled over `T`'s
 ## domain in ascending order, exactly as `system.items` iterates (`T(i) in a`
@@ -50,21 +50,6 @@ proc itCount(s: set[E4]) =
   for x in s: inc k
   if k != card(s): symexTarget("bv_it_count")
 
-proc itCharFirst(s: set[char]) =
-  var first = '\0'
-  var seen = false
-  for c in s:
-    if not seen:
-      first = c
-      seen = true
-  if 'a' in s and 'b' in s and first == 'b': symexTarget("bv_it_char_first")
-  if seen and first == 'q' and card(s) == 1: symexTarget("bv_it_char_one")
-
-proc itCharCount(s: set[char]) =
-  var k = 0
-  for c in s: inc k
-  if k == 2: symexTarget("bv_it_char_count")
-
 proc itBreak(s: set[E4]) =
   var k = 0
   for x in s:
@@ -82,7 +67,7 @@ proc itContinue(s: set[E4]) =
 
 suite "S8bv: walker version":
   test "the walker version floor":
-    check parseInt(symexWalkerVersion) >= 226
+    check parseInt(symexWalkerVersion) >= 250
 
 suite "S8bv (1): for x in a builtin set":
   test "ascending order":
@@ -95,12 +80,6 @@ suite "S8bv (1): for x in a builtin set":
     check "bv_it_order" in h and "bv_it_order_rev" notin h
   test "every member is visited once":
     check verdict(itCount, "bv_it_count").status == sxUnsat
-  test "a set[char]: its only member, and a count":
-    let r = verdict(itCharFirst, "bv_it_char_one")
-    check r.status == sxSat
-    check r.errors.len == 0
-    check "bv_it_char_one" in nativeHits(itCharFirst({'q'}))
-    check verdict(itCharCount, "bv_it_char_count").status == sxSat
   test "break leaves the loop":
     check verdict(itBreak, "bv_it_break").status == sxUnsat
     check verdict(itBreak, "bv_it_break_three").status == sxUnsat

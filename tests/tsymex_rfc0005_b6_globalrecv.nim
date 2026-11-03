@@ -137,6 +137,7 @@ suite "batch 6: a statement on an unbound global receiver":
     # and the label after it a clean `sxSat` over a write it never made.
     # RFC-0005 S8cd: a case-object global is entry-modelled (it declined,
     # `feGlobalReadUnmodelled`, until then), so these are candidates.
+    # RFC-0005 S8bz (item 3): the discriminator is a part at its entry value.
     candidate(sutReassign, "grs_raise")
     candidate(sutReassign, "grs_after")
   test "a symbolic discriminator reassignment's FieldDefect":

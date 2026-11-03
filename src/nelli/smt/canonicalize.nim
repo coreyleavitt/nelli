@@ -207,7 +207,7 @@ const renderAsChoicesVersion* = "12"
   ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
-  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260), S8bv (253) on batch 10.
+  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260), S8bv (253), S8bz (249) on batch 10.
 
 const symexWalkerVersion* = "262"
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
@@ -252,6 +252,22 @@ const symexWalkerVersion* = "262"
   ## result keeps its seqs' written-ness, and a slice, heap cell or mapped
   ## array reads its base's. Provisional 253 (250 on batch 9). 252 -> 253.
   ## (S8bv provisional 253, renumbered 262 by batch 11.)
+  ##
+  ## RFC-0005 S8bz (provisional 249 on S8cb and batch 9, renumbered 262 by
+  ## batch 11) -- S8bw's remainder. See the "As landed (S8bz)" notes in the RFC.
+  ## A computed index into a module-level array, or a module-level or `var`
+  ## parameter seq, is S8ax's alias (item 5). A `ptr` addresses a part of a
+  ## seq's aggregate element and of a table's string, float or aggregate value,
+  ## which a table now holds and a witness renders (items 1, 2); `xs[i].x = v`
+  ## and `t[k].x = v` store; written-ness is per scalar part, for a partial
+  ## write, a dereference's candidate, and a `{.noinit.}` local (items 3, 4, 7);
+  ## a dereference reaching an inactive branch reads and writes the active
+  ## field's bytes where a same-size scalar overlaps under both layouts (item 6).
+  ## SOUNDNESS: a `ptr` of a whole aggregate, and a `ptr` into a by-value part of
+  ## a `ref object`, addressed nothing the walk held, a clean false `sxUnsat`:
+  ## the first now declines, the second is a target. A store through a pointer
+  ## before the path holds its location reaches it (`ptrApplyMissed`; was a
+  ## false `sxSat`). Verdicts move, so cached entries rotate.
   ##
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite

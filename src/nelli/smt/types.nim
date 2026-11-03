@@ -4982,7 +4982,11 @@ func isTableContainerValTy*(valTy: IRType): bool =
     (valTy.kind == itSeq and valTy.seqUnsupportedFieldReason.len == 0 and
      isBackedSeqElemTy(valTy.seqElemTy)) or
     (valTy.kind == itSet and isContainerIntLeaf(valTy.setElemTy)) or
-    (valTy.kind == itTable and isBackedTableTy(valTy.tabKeyTy, valTy.tabValTy)))
+    (valTy.kind == itTable and isBackedTableTy(valTy.tabKeyTy, valTy.tabValTy)) or
+    # RFC-0005 S8bz (item 2): a by-value tuple, object, array or case object,
+    # one data array per leaf, as a seq holds it (`isTreeSeqElemTy`).
+    (valTy.kind in {itTuple, itArray, itVariant, itMultiVariant} and
+     heapTreeTy(valTy)))
 
 func isTableValTy*(valTy: IRType): bool =
   ## RFC-0005 S8ar. A `Table` value type the model backs: an
@@ -5178,6 +5182,8 @@ proc isRenderableTableTy*(keyTy, valTy: IRType): bool =
       # RFC-0005 S8bc: a seq of a tree element (`readSeqAs`).
       (isTreeSeqElemTy(valTy.seqElemTy) and isRenderableWitnessTy(valTy))
   of itTable: isRenderableTableTy(valTy.tabKeyTy, valTy.tabValTy)
+  # RFC-0005 S8bz (item 2): an aggregate value, part by part.
+  of itTuple, itArray, itVariant, itMultiVariant: isRenderableWitnessTy(valTy)
   else: true
 
 proc isRenderableSetElemTy*(elemTy: IRType): bool =
@@ -5861,6 +5867,34 @@ func irTypeRefFree*(t: IRType): bool =
           if not irTypeRefFree(f): return false
     true
   else: false
+
+func noinitPlain*(t: IRType): bool =
+  ## RFC-0005 S8bz (item 7). A `{.noinit.}` local of `t` is modelled as
+  ## unwritten: scalars, and arrays and tuples or objects of them. A managed
+  ## part (a string, a seq) is left holding garbage Nim destroys at its first
+  ## assignment and dereferences at its first read, which no value of the
+  ## type stands for, so it stays a decline.
+  if t == nil: return false
+  case t.kind
+  of itInt, itBool, itFloat32, itFloat64: true
+  of itArray: noinitPlain(t.elemTy)
+  of itDistinct: noinitPlain(t.distinctBase)
+  of itTuple:
+    if t.isPlaceholder: return false
+    for f in t.fields:
+      if not noinitPlain(f): return false
+    true
+  else: false
+
+const noinitReadPrefix* = "__noinit:"
+  ## RFC-0005 S8bz (item 7). The initial value of the `{.noinit.}` local `c`
+  ## is the read of the name `__noinit:c`, typed (`iekVar.vGlobalTy`): no
+  ## statement binds it, and each evaluation is a fresh value.
+
+proc mkVarCopy*(name: string): IRExpr =
+  ## RFC-0005 S8bz (item 3). A read of a variable that only carries its value
+  ## on (`iekVar.vCopy`).
+  IRExpr(kind: iekVar, vname: name, vCopy: true)
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
                          fieldTy: IRType, matchingTags: seq[int]): IRStmt =

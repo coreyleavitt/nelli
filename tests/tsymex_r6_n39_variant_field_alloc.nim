@@ -85,6 +85,7 @@ import nelli/smt/canonicalize
 # =============================================================================
 
 type
+  S8bzDistinctTup = distinct (int, int)
   VKind = enum vkGood, vkBad
 
   VBadTable = object
@@ -93,8 +94,9 @@ type
     case kind: VKind
     of vkGood: x: int
     ## RFC-0005 S8at backs a container value (this was
-    ## `Table[string, seq[int]]`); the bad value is a tuple now.
-    of vkBad: t: Table[string, (int, int)]
+    ## `Table[string, seq[int]]`), and S8bz a tuple value; the bad value is a
+    ## `distinct` tuple now.
+    of vkBad: t: Table[string, S8bzDistinctTup]
 
   VBadSet = object
     ## `vkBad`'s field classifies to `itSet` with an unsupported element

@@ -439,7 +439,12 @@ state = "done"
 [[slice]]
 id = "S8bw"
 title = "S8bn's remainder: walker fault reading an array-global element, aggregate global reads (tuple/object/array globals), pointers into case objects / seqs of aggregates / tables of non-int values, generic case objects"
-state = "pending"
+state = "done"
+
+[[slice]]
+id = "S8bz"
+title = "S8bw's remainder: pointer into a seq of aggregates, pointer into a Table of string/float/aggregate values (and aggregate Table values themselves), partial writes into unwritten parts, deref onto unwritten candidates, addr of an array element alias, inactive-branch deref, {.global.}/{.noinit.} locals"
+state = "done"
 
 [[slice]]
 id = "S8bp"
@@ -13312,6 +13317,75 @@ The compile-and-run wall times were 140 s (c) and 176 s (cpp).
   - a seq nested in a composite call result declines its binding;
   - a slice, a heap cell or a mapped array that mentions a base counts as
     unwritten everywhere.
+
+**As landed (S8bz, walker 249 provisional) — S8bw's remainder.** Suites
+`tsymex_rfc0005_s8bz_written` (items 3, 4, 5, 7), `tsymex_rfc0005_s8bz_cells`
+(items 1, 2) and `tsymex_rfc0005_s8bz_overlap` (item 6). The base is 136ad60
+(batch 7), merged, not recut, with S8cb (28ab1a7) merged in for its field cells, then batch 9 (e497dcf). Two of the job's assumptions had drifted at that
+base: a constant index in `addr gArr[i]` and a plain `{.global.}` read were
+already clean; the items' remaining cases landed.
+
+- *Item 1: a part of a seq's aggregate element.* `PtrLeaf` and `PtrTarget`
+  carry the element's path; the pointer's index and its path name the part, in
+  a by-value root and in a heap family's leaf heaps. `xs[i].x = v` stores
+  (it was "unsupported nnkAsgn shape"). `witnessFidelity` refused every
+  `seq[aggregate]` replay unrun, so each such witness was `roInconclusive`;
+  it now runs. A container nested in the element keeps the "no element
+  identity" decline.
+- *Item 2: a table's string, float and aggregate value.* A table holds a
+  tuple, object, array or case object by value, a witness renders it, and a
+  pointer addresses the value or its part; `t[k].x = v` stores through
+  `mkTableSet`. Only a string key has a pointer target.
+- *Items 3, 4, 7: written-ness per part.* An unwritten global's or `{.noinit.}`
+  local's scalar parts are asked one by one (`unwrittenLeafSplit`): a partial
+  write leaves the others unwritten, and a dereference forks only the sub-path
+  that names a part no write reached. `{.noinit.}` of a plain type walks; a
+  managed type or a case object declines.
+- *Item 5.* `let p = addr gArr[i]` and `addr v[i]` with a computed index are
+  S8ax's alias, for a module-level array or seq and a `var` parameter seq.
+- *Item 6: an inactive branch's bytes.* Nim 2.2.10 emits a union of one struct
+  per branch, pinned against the native backend. A same-size integer or float
+  at one offset reads and writes the active field's bytes. The IR does not say
+  `{.packed.}`, so an overlap must hold under both the natural and the packed
+  layout. A string, a partial overlap, past the active field, a branch with no
+  field, a NaN read as an integer, and a `bool` against any non-`bool` stay
+  S8bw's scoped decline.
+- *SOUNDNESS, found and fixed.* (a) A `ptr T` of a whole aggregate `T` addressed
+  no target when it aliased a `var` parameter, global, seq element, table value
+  or a heap object's by-value part: a store through it was never seen, a clean
+  false `sxUnsat`. It now declines where it may alias ("no pointer identity"),
+  at read and write, `p[]` and `p.y`. (b) A `ptr int` into a by-value part of a
+  `ref object` (leaf heap `<O>__<f>__@.<part>`) was no target, the same false
+  `sxUnsat`; it is one now, and a witness aims at it. (c) A declining target
+  during lowering leaked pending taint into a `weInternalWalkerFault`; it
+  degrades through the walk's own channel. (d) A store through a pointer before
+  the path held the location it aims at never reached it: `ptrTargets` lists what
+  the path holds so far, so in `p[] = 1; h.n = 4; if p[] != 1 and p[] != 4` the
+  second dereference named `h.n` without the first store, a clean false `sxSat`
+  at 136ad60 for a scalar field that replay refutes, and (b) would have widened
+  it to every by-value part. `Path.ptrStores` logs the stores, and
+  `ptrApplyMissed` states each location's last one in the family's initial
+  constant: every read and write of the family came after it.
+
+Different mechanisms, reported and not fixed here:
+
+- SOUNDNESS: none open from this slice beyond the declines above, which state
+  the gap rather than answer it.
+- PRECISION: a whole aggregate's `ptr` declines (fix (a)) rather than being
+  modelled as a location; `p[].x` through an aliasing `ptr Obj` needs a cell
+  identity for the whole value.
+- PRECISION: such a store into a location other than a plain scalar family (a
+  seq element, a table value, a case object's branch, a variable) declines
+  ("which that store did not reach") rather than reaching it.
+- PRECISION: a clean `sxSat` whose pointer aims at a heap object no parameter
+  reaches has no cell in the witness: no aim, and replay refutes.
+- PRECISION: `var c {.global.} = 3` does not model its initialiser: `sxUnknown`
+  with replay refuted.
+- PRECISION: a pointer into a table with a non-string key, a `distinct` table
+  value, and a container nested in a seq element or table value keep their
+  declines.
+- PRECISION: requiring an overlap under both layouts declines a non-packed pair
+  whose branches differ in padding before the field.
 
 **As landed (S8bw, walker 227 provisional) — S8bn's remainder.** Suite
 `tsymex_rfc0005_s8bw_remainder` (22 tests; c on both Z3 versions,

@@ -200,6 +200,8 @@ suite "S8bw (1): a global's receiver never faults the walker":
     ## `FieldDefect` on it from the zero value's branch.
     ## RFC-0005 S8cd: a case-object global is entry-modelled (this was a
     ## `feGlobalReadUnmodelled` decline), and Nim raises on the replay's value.
+    ## RFC-0005 S8bz (item 3):
+    ## the discriminator is a part read at its entry value, not a decline.
     candidate(sutReassign, "vr", {sxRaised})
     candidate(sutReassignSym, "vrs", {sxRaised})
 
@@ -358,7 +360,9 @@ suite "S8bw (2): aggregate globals":
     candidate(sutNestedUnwritten, "nf_unwritten")
     candidate(sutArrConstUnwritten, "ac_unwritten")
     candidate(sutArrSymUnwritten, "as_unwritten")
-    candidate(sutVarUnwritten, "vu")
+    # RFC-0005 S8bz (item 3): the callee only writes its `var` formal, so the
+    # copy in observes nothing and the hit is Nim's on any entry value.
+    confirmed(sutVarUnwritten, "vu")
     candidate(sutScalar, "sc")
 
   test "writes through a var parameter, addr, and a callee":
@@ -575,15 +579,16 @@ suite "S8bw (3): pointers into case objects":
 
   test "a ptr into a case object global or var parameter":
     ## RED: sxRaised / sxUnknown, `feUnsupportedOp` ("a case object, table,
-    ## set or seq of aggregates") and no witness.
-    confirmedWithInactive(sutPtrCaseGlobal, "pcg")
-    confirmedWithInactive(sutPtrCaseVar, "pcv")
-    confirmedWithInactive(sutPtrCaseVar, "pcn")
+    ## set or seq of aggregates") and no witness. RFC-0005 S8bz (item 6): `a`
+    ## and `b` are the same bytes, so nothing beside these hits declines.
+    confirmed(sutPtrCaseGlobal, "pcg")
+    confirmed(sutPtrCaseVar, "pcv")
+    confirmed(sutPtrCaseVar, "pcn")
     confirmedWithInactive(sutPtrCaseRead, "pcr")
 
   test "a ptr into a heap case object's else branch":
     ## RED: sxRaised, no error: the `else` branch's field was no target.
-    confirmedWithInactive(sutPtrElse, "pce")
+    confirmed(sutPtrElse, "pce")   # RFC-0005 S8bz (item 6): `a` over `e`
     confirmedWithInactive(sutPtrMultiTag, "pcm")
 
   test "addr of a branch field":

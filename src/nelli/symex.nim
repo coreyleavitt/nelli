@@ -2283,7 +2283,11 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
       of itDistinct:   ## RFC-0005 S8bd: the base seq, converted back
         if seqWitnessReader(ty) == swrDistinct: wfFaithful
         else: wfUnexecutable
-      else: wfUnexecutable   ## the reader's defensive `error()` arm
+      else:
+        # RFC-0005 S8bz (item 1): a leaf-split element (S8bc) is rendered part
+        # by part, so it replays; it was refused unrun here.
+        if isTreeSeqElemTy(ty.seqElemTy): wf(ty.seqElemTy)
+        else: wfUnexecutable   ## the reader's defensive `error()` arm
   of itTable:   # RFC-0005 S8z: every renderable shape
     if isRenderableTableTy(ty.tabKeyTy, ty.tabValTy): wfFaithful
     else: wfUnexecutable

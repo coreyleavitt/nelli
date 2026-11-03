@@ -42,3 +42,18 @@ macro ptrAimByName*(x: typed; name: string; body: untyped): untyped =
       if `name` == `nm`:
         template it: untyped {.used.} = `acc`
         `b`
+
+macro ptrAimEachField*(x: typed; body: untyped): untyped =
+  ## RFC-0005 S8bz (item 6). `body` once per field of `x`'s object type, every
+  ## branch's included, with `it` that field and `itName` its name.
+  var names: seq[string]
+  ptrAimFieldNames(x.getTypeImpl, names)
+  result = newStmtList()
+  for nm in names:
+    let acc = newDotExpr(x, ident nm)
+    let b = body.copyNimTree
+    result.add quote do:
+      block:
+        template it: untyped {.used.} = `acc`
+        const itName {.inject, used.} = `nm`
+        `b`

@@ -402,6 +402,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     if gty != nil:   # RFC-0005 S8bw
       newCall(bindSym"mkGlobalVar", newLit(e.vname), emitIRType(gty),
               newLit(e.vCopy))
+    elif e.vCopy:   # RFC-0005 S8bz (item 3)
+      newCall(bindSym"mkVarCopy", newLit(e.vname))
     else:
       newCall(bindSym"mkVar", newLit(e.vname))
   of iekBinop:
@@ -2888,6 +2890,17 @@ proc collectBoundLocals(n: NimNode, into: var HashSet[string]) =
       if n[i].kind in {nnkSym, nnkIdent}: into.incl n[i].strVal
   else: discard
   for c in n: collectBoundLocals(c, into)
+
+proc markCopyRead(ir: IRExpr; preamble: seq[IRStmt]; lo: int) =
+  ## RFC-0005 S8bz (item 3). The read `ir`, whose element reads are
+  ## `preamble[lo ..]`, only carries the location's value on (a rebuild, a
+  ## `var` or `addr` actual's copy-in): it observes no unwritten part.
+  var root = ir
+  while root != nil and root.kind in {iekField, iekIndex}:
+    root = if root.kind == iekField: root.obj else: root.arr
+  if root != nil and root.kind == iekVar: root.vCopy = true
+  for i in lo ..< preamble.len:
+    if preamble[i].kind == isIndex: preamble[i].ixCheckOnly = true
 
 proc isNestedRoutine(sym: NimNode): bool  ## RFC-0005 S8an fwd decl
 proc nestedCaptureSyms(impl: NimNode): seq[NimNode]  ## RFC-0005 S8an fwd decl
@@ -7459,6 +7472,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       varLocOf(addrLv, cell, "addr", preamble, ctx, locs)   ## RFC-0005 S8bs
       let lvLo = preamble.len
       let lvIR = parseExpr(addrLv, preamble, ctx)
+      markCopyRead(lvIR, preamble, lvLo)   ## RFC-0005 S8bz (item 3)
       let lvHi = preamble.len
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
@@ -7597,6 +7611,9 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     let irLo = preamble.len
     var ir = parseExpr(n[i], preamble, ctx)
     let irHi = preamble.len
+    # RFC-0005 S8bz (item 3): a `var` actual's copy-in observes nothing; the
+    # callee's read of its formal does (`glWatched`).
+    if n[i].kind == nnkHiddenAddr: markCopyRead(ir, preamble, irLo)
     # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
     # memory it shares, is a path the walk may keep equal to a cell.
     byValueLoc(n[i], i - 1, preamble, ctx, locs)
@@ -8219,6 +8236,7 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
       varLocOf(lv, cell, "addr", preamble, ctx, locs)   ## RFC-0005 S8bu
       let lvLo = preamble.len
       let lvIR = parseExpr(lv, preamble, ctx)
+      markCopyRead(lvIR, preamble, lvLo)   ## RFC-0005 S8bz (item 3)
       let lvHi = preamble.len
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
@@ -15397,18 +15415,40 @@ proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
         ix = ix[^1]
       if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: computed = true
       if t[0].typeKind == ntySequence:
-        if t[0].kind != nnkSym or seqStep: return
+        # RFC-0005 S8bz (item 1): a `var` parameter's seq too.
+        if addrRootSym(t[0]) == nil or seqStep: return
         seqStep = true
       t = t[0]
     else: break
   # RFC-0005 S8bw (item 3): a `var` parameter's arm field too.
+  # RFC-0005 S8bz (item 5): a module-level root too. Its seq or arm can also
+  # change under a call the statement makes (`mayResizeSeq`, `mayRearm`).
   let root = addrRootSym(t)
-  if root == nil or isModuleGlobal(root): return
+  if root == nil: return
   if not seqStep and not computed and not armStep: return
   # RFC-0005 S8be: one root at a time (an arm field under a seq element
   # is two ways to go stale).
   if seqStep and armStep: return
   (a, (if seqStep: root else: nil), (if armStep: root else: nil))
+
+proc isRootOf(n, o: NimNode): bool =
+  ## RFC-0005 S8bz (item 1). `n` names the variable `o`, through a `var`
+  ## parameter's implicit dereference.
+  isSymOf(n, o) or
+    (n.kind == nnkHiddenDeref and n.len == 1 and isSymOf(n[0], o))
+
+proc callMayReachGlobal(n: NimNode): bool =
+  ## RFC-0005 S8bz (item 5). Statement `n` calls a user routine or a proc
+  ## value, which may reach a module-level variable by name.
+  if n.kind in {nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix} and
+     n.len > 0 and n[0].kind == nnkSym:
+    if isUserCallee(n[0]): return true
+    if symKind(n[0]) in {nskVar, nskLet, nskParam}: return true
+  elif n.kind in {nnkCall, nnkCommand}:
+    return true
+  for c in n:
+    if callMayReachGlobal(c): return true
+  false
 
 proc mayRearm(n, o: NimNode): bool =
   ## RFC-0005 S8be. Statement `n` may change the arm of the case object
@@ -15424,10 +15464,10 @@ proc mayRearm(n, o: NimNode): bool =
       return true
     return false
   of nnkDotExpr:
-    if n.len == 2 and isSymOf(n[0], o): return false
+    if n.len == 2 and isRootOf(n[0], o): return false
   of nnkCheckedFieldExpr:
     if n.len >= 1 and n[0].kind == nnkDotExpr and n[0].len == 2 and
-       isSymOf(n[0][0], o):
+       isRootOf(n[0][0], o):
       return false
   of RoutineNodes:
     return mentionsSym(n, o)
@@ -15451,7 +15491,7 @@ proc mayResizeSeq(n, s: NimNode): bool =
       return true
     return false
   of nnkBracketExpr:
-    if n.len == 2 and isSymOf(n[0], s):
+    if n.len == 2 and isRootOf(n[0], s):
       return mayResizeSeq(n[1], s)
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
     if n.len >= 2 and n[0].kind == nnkSym and not isUserCallee(n[0]) and
@@ -15459,7 +15499,7 @@ proc mayResizeSeq(n, s: NimNode): bool =
                                "mitems", "mpairs", "contains", "find", "$",
                                "==", "!="]:
       for j in 1 ..< n.len:
-        if not isSymOf(n[j], s) and mayResizeSeq(n[j], s): return true
+        if not isRootOf(n[j], s) and mayResizeSeq(n[j], s): return true
       return false
   of RoutineNodes:
     return mentionsSym(n, s)
@@ -15492,6 +15532,15 @@ proc substAddrAlias(n, p, addrNode: NimNode): NimNode =
   if n.len == 0: return n
   result = copyNimNode(n)
   for c in n: result.add substAddrAlias(c, p, addrNode)
+
+proc markCheckOnly(st: IRStmt): IRStmt =
+  ## RFC-0005 S8bz (item 5). `st` is the read Nim's index check makes where
+  ## `addr` evaluates its operand: its value is never used.
+  result = st
+  if st.kind == isBlock:
+    for c in st.stmts: discard markCheckOnly(c)
+  elif st.kind == isIndex:
+    st.ixCheckOnly = true
 
 proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8l. Parse the statements `items[start ..^ 1]` of one statement
@@ -15560,7 +15609,9 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
         var rest: seq[NimNode]
         var cur = al.addrNode
         if checkAt:
-          rest.add newTree(nnkDiscardStmt, copyNimTree(al.addrNode[0]))
+          # RFC-0005 S8bz (item 5): the check reads no value (`ixCheckOnly`).
+          stmts.add markCheckOnly(parseStmt(newTree(nnkDiscardStmt,
+                                    copyNimTree(al.addrNode[0])), ctx))
         var stale = false
         for r in items[k + 1 ..< items.len]:
           let rp = addrRepoint(r, al.p)
@@ -15570,8 +15621,11 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
             armRoot = nil
             stale = false
             continue
+          let globalRoot = (seqRoot != nil and isModuleGlobal(seqRoot)) or
+                           (armRoot != nil and isModuleGlobal(armRoot))
           let resizes = seqRoot != nil and mayResizeSeq(r, seqRoot) or
-                        armRoot != nil and mayRearm(r, armRoot)
+                        armRoot != nil and mayRearm(r, armRoot) or
+                        (globalRoot and callMayReachGlobal(r))
           if (stale or resizes) and mentionsSym(r, al.p):
             if armRoot != nil:
               # RFC-0005 S8be: an arm field's pointer after its object may
@@ -15832,6 +15886,13 @@ proc pureIndexExpr(n: NimNode): bool =
     true
   else: false
 
+proc isTableElemCall(n: NimNode): bool =
+  ## RFC-0005 S8bz (item 2). `n` is `t[k]` on a value `Table` (`std/tables`'
+  ## `[]`, a call in the typed tree).
+  n.kind == nnkCall and n.len == 3 and n[0].kind == nnkSym and
+    n[0].strVal == "[]" and n[1].kind != nnkEmpty and
+    classifyType(unwrapHidden(n[1])).ty.kind == itTable
+
 proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## RFC-0005 S8s. Classifies `lhs` as one step of a value field chain. A
   ## variant arm field's `nnkCheckedFieldExpr` (Nim's discriminant check) is
@@ -15841,13 +15902,33 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## placeholder.
   var t = unwrapHidden(lhs)
   if t.kind == nnkCheckedFieldExpr and t.len >= 1: t = t[0]
+  if isTableElemCall(t):
+    # RFC-0005 S8bz (item 2): a table's aggregate value (`t[k].x = v`), stored
+    # back at its key (`valueFieldWrite`). `[]` raises for a missing key, so
+    # the write's check read is what raises (`valueFieldChecked`). It was the
+    # "unsupported nnkAsgn shape" decline. A key is parsed once per level, as
+    # a symbolic index is, so it must call nothing (`pureIndexExpr`).
+    let tr = unwrapHidden(t[1])
+    let tty = classifyType(tr).ty
+    if not heapTreeTy(tty.tabValTy) or
+       tr.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr}:
+      return false
+    var kn = t[2]
+    while kn.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and kn.len >= 1:
+      kn = kn[kn.len - 1]
+    if kn.kind notin {nnkStrLit .. nnkTripleStrLit} and not pureIndexExpr(kn):
+      return false
+    step = FieldStep(recv: tr, recvTy: tty, ix: -1, idx: t[2],
+                     fieldTy: tty.tabValTy)
+    return true
   if t.len != 2: return false
   var derefOp: NimNode
   # RFC-0005 S8at: `p[]` of a whole-held pointee is a chain root itself
   # (`wholeDerefRoot`); `unwrapHidden` would strip the deref.
   let recv = if wholeDerefRoot(t[0], derefOp): t[0] else: unwrapHidden(t[0])
   if recv.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr,
-                      nnkHiddenDeref, nnkDerefExpr}:   ## RFC-0005 S8at
+                      nnkHiddenDeref, nnkDerefExpr} and   ## RFC-0005 S8at
+     not isTableElemCall(recv):                           ## RFC-0005 S8bz
     return false
   var recvTy: IRType
   if recv.kind in {nnkHiddenDeref, nnkDerefExpr}:
@@ -15887,6 +15968,22 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
     step.fieldTy = recvTy.elemTy
     return step.fieldTy != nil and
            not isUnsupportedFieldPlaceholder(step.fieldTy)
+  if t.kind == nnkBracketExpr and recvTy.kind == itSeq:
+    # RFC-0005 S8bz (item 1): an element of a seq of aggregates (`xs[i].x = v`),
+    # also what `addr xs[i].x`'s store is rewritten to (`elemAddrNode`). It was
+    # the "unsupported nnkAsgn shape" decline. Stored as an array's symbolic
+    # index is (`valueFieldWrite`).
+    if not seqBackedTy(recvTy) or not isTreeSeqElemTy(recvTy.seqElemTy):
+      return false
+    var ixNode = t[1]
+    while ixNode.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ixNode.len >= 1:
+      ixNode = ixNode[ixNode.len - 1]
+    if ixNode.typeKind == ntyNone or classifyType(ixNode).ty.kind != itInt or
+       not pureIndexExpr(ixNode):
+      return false
+    step.idx = t[1]
+    step.fieldTy = recvTy.seqElemTy
+    return true
   if t.kind == nnkBracketExpr:
     if recvTy.kind != itTuple or
        t[1].kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
@@ -15979,17 +16076,19 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   ## `isVariantField` forks the out-of-arm `FieldDefect` before any write.
   var step: FieldStep
   discard fieldStep(lhs, step)
+  let recvLo = preamble.len
   let recvIR = parseExpr(step.recv, preamble, ctx)
   # RFC-0005 S8bw (item 2): every use of `recvIR` below copies the old
   # parts back into the same root, so a global root's unwritten parts are
   # not observed by it.
-  block:
-    var root = recvIR
-    while root != nil and root.kind in {iekField, iekIndex}:
-      root = if root.kind == iekField: root.obj else: root.arr
-    if root != nil and root.kind == iekVar: root.vCopy = true
+  # RFC-0005 S8bz (item 3): nor by an element read of its chain
+  # (`gA[k].x = v`).
+  markCopyRead(recvIR, preamble, recvLo)
   let rebuilt =
-    if step.recvTy.kind == itArray and step.idx != nil:
+    if step.recvTy.kind == itTable:
+      # RFC-0005 S8bz (item 2): the rebuilt value, stored back at its key.
+      mkTableSet(recvIR, parseExpr(step.idx, preamble, ctx), newVal)
+    elif step.recvTy.kind in {itArray, itSeq} and step.idx != nil:
       # RFC-0005 S8z: a symbolic index. The old array is copied into a
       # temporary, `isIndexAssign` forks the `IndexDefect` and stores the one
       # element (`ite` per position), and the temporary is the rebuilt value.
@@ -17392,13 +17491,14 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
     # `FieldDefect` out of the arm, before it evaluates the value. The
     # read of `lhs` is that check (its `isVariantField` fork).
     if valueFieldChecked(lhs):
+      let checkLo = preamble.len
       let checkRead = parseExpr(lhs, preamble, ctx)
       # RFC-0005 S8bw (item 2): the read only checks the index; its value
       # is never used (`ixCheckOnly`).
-      if checkRead.kind == iekVar:
-        for st in preamble:
-          if st.kind == isIndex and st.ixRetName == checkRead.vname:
-            st.ixCheckOnly = true
+      # RFC-0005 S8bz (item 3): every element read of its chain
+      # (`gA[k].x = v`). A branch's own check reads its discriminator
+      # (`isVariantField`), which does observe.
+      markCopyRead(checkRead, preamble, checkLo)
     let val = asgnRhs()
     if not (fieldTy.kind == itInt and fieldTy.hasRange and
             not carriesRangeCheck(val, fieldTy)):
@@ -18161,7 +18261,7 @@ proc parseStmtInner(n: NimNode,
       # declaration is no statement of the walk, and every use of it reads
       # the global. Any other pragma leaves an ordinary local, under its
       # symbol; `{.noinit.}` without an initialiser has no defined value
-      # and declines.
+      # (RFC-0005 S8bz, item 7: an unwritten one).
       var id = id0
       var hasPragma = false
       for j in 0 ..< id0.len - 2:
@@ -18180,9 +18280,18 @@ proc parseStmtInner(n: NimNode,
               if p.kind in {nnkIdent, nnkSym} and p.strVal == "noinit":
                 noInit = true
           if noInit and id0[^1].kind == nnkEmpty:
-            stmts.add ctx.declineMarker(feUnsupportedStmtKind,
-              "`{.noinit.}` variable `" & d[0].strVal & "` with no " &
-              "initialiser: its value is undefined")
+            # RFC-0005 S8bz (item 7): unwritten until written; a read of a
+            # part no write reached taints the path. A managed part declines
+            # (`noinitPlain`).
+            let nty = classifyType(d[0]).ty
+            if noinitPlain(nty):
+              stmts.add mkLet(d[0].strVal, nty,
+                              mkGlobalVar(noinitReadPrefix & d[0].strVal, nty))
+            else:
+              stmts.add ctx.declineMarker(feUnsupportedStmtKind,
+                "`{.noinit.}` variable `" & d[0].strVal & "` of a managed " &
+                "type with no initialiser: Nim destroys and reads the " &
+                "garbage it holds")
             continue
           id.add d[0]
         if id.len == 0: continue

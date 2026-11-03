@@ -515,6 +515,13 @@ type
       ## It dies when the object may have changed arm.
     tags:   seq[int]
 
+  PtrStore = object
+    ## RFC-0005 S8bz. A store through a pointer: what later candidates of the
+    ## pointer, unknown to it then, must still see (`ptrApplyMissed`).
+    typeId: string
+    ptrAst, val: Z3AnyAst
+    reached: seq[int64]   ## the candidates' codes it has been applied to
+
   HeapTerm = tuple[ast: Z3AnyAst; input: string]
     ## RFC-0005 S8ca. A heap array's term on a path: the array the path
     ## holds (`Path.heaps`), or, while it holds none, the name of the free
@@ -539,6 +546,8 @@ type
     ## element written by name): the array's term before and after it.
 
   Path = ref object
+    ptrStores: seq[PtrStore]
+      ## RFC-0005 S8bz. Every store through a pointer on this path, in order.
     pc:        seq[Z3Bool]
     defectSurvivorPc: seq[Z3Bool]
       ## Phase 16 ADR-0012. HARD path constraints that are NOT branch selectors:
@@ -884,6 +893,7 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        nilDeref: parent.nilDeref,                        ## RFC-0005 S8k
        addrOwners: parent.addrOwners,                    ## RFC-0005 S8ax
        elemCells: parent.elemCells,                      ## RFC-0005 S8be
+       ptrStores: parent.ptrStores,                      ## RFC-0005 S8bz
        loopIters: parent.loopIters,                      ## RFC-0005 S8y
        viewMarks: parent.viewMarks,                      ## RFC-0005 S8ca
        inPlaceSteps: parent.inPlaceSteps)                ## RFC-0005 S8ca
@@ -2956,6 +2966,22 @@ proc stampHeapSteps(sv: var SymVal; steps: int) =
     for ax in sv.mvAxes.mitems:
       for _, fs in ax.armFields.mpairs:
         for f in fs.mitems: stampHeapSteps(f, steps)
+  else: discard
+
+proc svWithRaw(ctx: Z3Context; sv: SymVal; raw: Z3AnyAst): SymVal =
+  ## RFC-0005 S8bz (item 3). The scalar or string `sv` holding the term `raw`,
+  ## of its own sort: `rawAnyAstOf`'s inverse.
+  result = sv
+  case sv.kind
+  of svBV8: result.bv8 = wrap[Z3BitVec[8]](ctx, raw.raw)
+  of svBV16: result.bv16 = wrap[Z3BitVec[16]](ctx, raw.raw)
+  of svBV32: result.bv32 = wrap[Z3BitVec[32]](ctx, raw.raw)
+  of svBV64: result.bv64 = wrap[Z3BitVec[64]](ctx, raw.raw)
+  of svInt: result.zi = wrap[Z3Int](ctx, raw.raw)
+  of svBool: result.bo = wrap[Z3Bool](ctx, raw.raw)
+  of svFloat32: result.fp32 = wrap[Z3Float32](ctx, raw.raw)
+  of svFloat64: result.fp64 = wrap[Z3Float64](ctx, raw.raw)
+  of svString: result.str = wrap[Z3String](ctx, raw.raw)
   else: discard
 
 proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
@@ -9030,6 +9056,11 @@ var glPartHavoc {.threadvar.}: Table[string, bool]
   ## value is modelled (S8as, `programGlobal`): observing it then taints
   ## the path `feGlobalHavoc` (a SAT is replayed, an UNSAT stands); any
   ## other global's part declines (`feGlobalReadUnmodelled`, S8bw).
+var glWatched {.threadvar.}: HashSet[string]
+  ## RFC-0005 S8bz (item 3). The names that are no global but may hold an
+  ## unwritten part, whose reads therefore observe: a `var` formal whose
+  ## actual holds one, an element read's temporary (the access on it picks
+  ## the part), a `{.noinit.}` local.
 var glUnwrittenAsts {.threadvar.}: seq[Z3AnyAst]
   ## The unwritten leaves themselves (`unwrittenIndependent` renames them).
 var lowerAsReceiver {.threadvar.}: bool
@@ -9044,6 +9075,7 @@ proc glUnwrittenFresh(ctx: Z3Context) =
     glUnwritten = initTable[int, string]()
     glPartHavoc = initTable[string, bool]()
     glUnwrittenAsts = @[]
+    glWatched = initHashSet[string]()
 
 proc svAsts(sv: SymVal; acc: var seq[RawZ3Ast]) =
   ## Every Z3 term a value holds, compound or not.
@@ -9100,7 +9132,11 @@ proc registerUnwritten(ctx: Z3Context; sv: SymVal; part: string;
     for i, f in sv.arrElems:
       registerUnwritten(ctx, f, part & "[" & $i & "]", havoc)
   else:
-    glPartHavoc[part] = havoc
+    # RFC-0005 S8bz (items 3, 4): written-ness per part. A scalar part of a
+    # global whose whole entry value is not modelled (an object holding a
+    # `ref` beside it) still holds some value of its type.
+    glPartHavoc[part] = havoc or sv.kind in {svBV8, svBV16, svBV32, svBV64,
+      svInt, svBool, svFloat32, svFloat64, svString}
     var acc: seq[RawZ3Ast]
     svAsts(sv, acc)
     for a in acc:
@@ -9130,6 +9166,27 @@ proc globalInitValue(name: string; ty: IRType): SymVal =
   result = allocateSym(ty, "__glInit_" & displayName(name), facts)
   globalEntryVals[name] = result
   registerUnwritten(ctx, result, displayName(name), havoc = false)
+
+var noinitSerial {.threadvar.}: int
+  ## RFC-0005 S8bz (item 7). Numbers the initial values of `{.noinit.}`
+  ## locals: every evaluation of the declaration is its own.
+
+proc noinitValue(e: IRExpr): SymVal =
+  ## RFC-0005 S8bz (item 7). The initial value of a `{.noinit.}` local: one
+  ## fresh constant per leaf, each unwritten. Nim leaves the local's bytes as
+  ## they were, so any value of the type is possible, and a read of a part no
+  ## write reached taints the path (`feGlobalHavoc`: a SAT is replayed, and an
+  ## UNSAT holds for every value). A rebuild's copy observes nothing.
+  let ctx = requireCurrentContext()
+  glUnwrittenFresh(ctx)
+  let local = e.vname[noinitReadPrefix.len .. ^1]
+  inc noinitSerial
+  var facts: seq[Z3Bool]
+  result = allocateSym(e.vGlobalTy, "__noinit_" & local & "_" & $noinitSerial,
+                       facts)
+  for f in facts: globalEntryFacts.add f
+  registerUnwritten(ctx, result, noinitReadPrefix & local, havoc = true)
+  glWatched.incl local
 
 proc unwrittenIn(sv: SymVal; simplified = false): string =
   ## The part an unwritten leaf `sv` mentions stands for, or "" when it
@@ -9181,7 +9238,11 @@ proc unwrittenKind(part: string): SymexErrorKind =
 
 proc unwrittenMsg(part: string): string =
   ## RFC-0005 batch 6. `unwrittenKind`'s message.
-  if glPartHavoc.getOrDefault(part, false):
+  if part.startsWith(noinitReadPrefix):
+    "`{.noinit.}` variable '" & part[noinitReadPrefix.len .. ^1] & "' is " &
+      "read before it is written: it may hold any value of its type, so a " &
+      "hit through it is replayed (feGlobalHavoc)"
+  elif glPartHavoc.getOrDefault(part, false):
     "module-level variable '" & part & "' is read before the walk writes " &
       "it: it may hold any value of its type when the property runs, so a " &
       "hit through it is replayed (feGlobalHavoc)"
@@ -9203,7 +9264,9 @@ proc globalReadPart(e: IRExpr; v: SymVal; simplified = false): string =
   ## chain over a global (not a rebuild's copy), mentions, or "".
   if glUnwritten.len == 0: return ""
   let root = globalChainRoot(e)
-  if root == nil or root.vCopy or not isGlobalEnvName(root.vname): return ""
+  if root == nil or root.vCopy or
+     not (isGlobalEnvName(root.vname) or root.vname in glWatched):
+    return ""
   unwrittenIn(v, simplified)
 
 proc observeGlobalRead(e: IRExpr; v: SymVal; simplified = false) =
@@ -9284,6 +9347,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # RFC-0005 S8n: a callee's `result` read before its first write is
       # the zero value Nim initialised it to (was `feGlobalReadUnmodelled`).
       unwrittenResultZero().get
+    elif e.vname.startsWith(noinitReadPrefix):
+      noinitValue(e)   ## RFC-0005 S8bz (item 7)
     elif not isFollowConcreteWalk() and e.vname notin callGuardedNames and
          isGlobalEnvName(e.vname) and programGlobal(e.vname).isSome:
       # RFC-0005 S8as: a global read before the walk wrote it holds its
@@ -10943,6 +11008,10 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
                        sv: SymVal)
   ## RFC-0005 S8at fwd-decl: a container `Table` value is extracted as one.
 
+proc extractTreeValue(m: Z3Model, w: var RawWitness, path: string,
+                      sv: SymVal, ty: IRType)
+  ## RFC-0005 S8bz fwd-decl (defined below).
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal) =
   ## RFC-0005 S8f (was: the present keys among a static scan of string
@@ -10988,7 +11057,10 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
     of tvTree:
       # RFC-0005 S8at: a container value is written as a by-value param of
       # its type is (`seqLens` + elements, `setMembers`, `tabKeys`).
-      extractFromSymVal(m, w, vpath, v)
+      # RFC-0005 S8bz (item 2): an aggregate as a seq's tree element is, in
+      # the heap's cell layout.
+      if heapTreeTy(vty): extractTreeValue(m, w, vpath, v, vty)
+      else: extractFromSymVal(m, w, vpath, v)
   let present = sv.tabPresentRaw
   if kty.kind == itString:
     var named: HashSet[string]   ## every term's value, present or not
@@ -11668,6 +11740,9 @@ type PtrLeafAim = object
   path: seq[int]
   steps: seq[string]   ## RFC-0005 S8bw (item 3): `path` as the witness
                        ## names it (`ptrAimInto`)
+  elemSteps: seq[string]  ## RFC-0005 S8bz (items 1, 2): the part of the
+                          ## aggregate element or value below the pointer's
+                          ## index or key
   seqIdx: bool
   tabKey: bool
   fam: string
@@ -12151,10 +12226,19 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
     for fam in fams:
       if not currentVariantHeaps.hasKey(fam): continue
       # RFC-0005 S8bn (item 4): an element of a seq held in the family.
-      let seqCode = ptrTargetCode(fam & "/*")
+      var seqCode = ptrTargetCode(fam & "/*")
+      # RFC-0005 S8bz (item 1): or a part of its aggregate element.
+      for code, la in ptrLeafAims:
+        if la.fam == fam and la.seqIdx and la.typeId == typeId and
+           la.elemSteps.len > 0 and ptrSelMatches(selV, code):
+          seqCode = code
       let isSeqFam = ptrSelMatches(selV, seqCode) and
                      ptrLeafAims.hasKey(seqCode)
-      let tabCode = ptrTargetCode(fam & "/#")
+      var tabCode = ptrTargetCode(fam & "/#")
+      for code, la in ptrLeafAims:   # RFC-0005 S8bz (item 2)
+        if la.fam == fam and la.tabKey and la.typeId == typeId and
+           la.elemSteps.len > 0 and ptrSelMatches(selV, code):
+          tabCode = code
       let isTabFam = ptrSelMatches(selV, tabCode) and
                      ptrLeafAims.hasKey(tabCode)
       if not isSeqFam and not isTabFam and
@@ -12167,20 +12251,27 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
       for tid, srt in currentRefSorts:
         if srt == objSort: oid = tid
       let address = oid & "|" & $m.eval(objAddr)
-      let fsep = fam.rfind("__")
+      # RFC-0005 S8bz (item 1): a by-value part's leaf heap
+      # (`<O>__<f>__@.<part>`) is the field, then its parts.
+      let leafAt = fam.find("__@.")
+      let famBase = if leafAt >= 0: fam[0 ..< leafAt] else: fam
+      let fsep = famBase.rfind("__")
       if oid.len > 0 and fsep >= 0 and b.cellOf.hasKey(address):
-        var aim = "&" & b.cellOf[address] & "." & fam[fsep + 2 .. ^1]
+        var aim = "&" & b.cellOf[address] & "." & famBase[fsep + 2 .. ^1]
+        if leafAt >= 0: aim.add fam[leafAt .. ^1].replace("__@.", ".")
         if isSeqFam:
           let ik = ptrIdxKey(typeId)
           if currentVariantHeaps.hasKey(ik):
             aim.add "." & $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx,
               inputHeap(ik).raw, pos.addrAst.raw)))
+            for st in ptrLeafAims[seqCode].elemSteps: aim.add "." & st
           else: aim = ""
         elif isTabFam:
           let kk = ptrKeyKey(typeId)
           if currentVariantHeaps.hasKey(kk):
             aim.add "." & m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(ctx,
               inputHeap(kk).raw, pos.addrAst.raw)))
+            for st in ptrLeafAims[tabCode].elemSteps: aim.add "." & st
           else: aim = ""
         if aim.len > 0:
           b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
@@ -12220,6 +12311,7 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
         if not currentVariantHeaps.hasKey(kk): break
         aim.add "/k" & toHex(m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(
           ctx, inputHeap(kk).raw, pos.addrAst.raw))))
+      aim.add ptrLeafPathStr(la.elemSteps, false)
       b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
       break
   b.entries
@@ -15503,6 +15595,54 @@ proc unwrittenIndependent(ctx: Z3Context; path: Path; v: SymVal;
   var arm = differs
   for c in extra: arm = arm and c
   loopArmInfeasible(ctx, path, arm, settings)
+
+proc unwrittenLeafSplit(ctx: Z3Context; path: Path; v: SymVal;
+                        extra: openArray[Z3Bool];
+                        settings: SymexSettings): SymVal =
+  ## RFC-0005 S8bz (item 3). The aggregate `v`, an element read, with each
+  ## scalar leaf that mentions an unwritten part but is the same whatever
+  ## those parts hold (`unwrittenIndependent`'s query) over fresh stand-ins of
+  ## them: the read of that leaf observes nothing. Any other leaf keeps its
+  ## mention. Each leaf is asked in the sort the value holds it, not a heap
+  ## cell's (`svLeafTerms`): the `Int` view's `ubv_to_int` is past the budget
+  ## of this bounded query.
+  var froms, tos: seq[RawZ3Ast]
+  var keep: seq[Z3AnyAst]
+  for a in glUnwrittenAsts:
+    froms.add a.raw
+    keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fresh_const(ctx.raw,
+      "__glUnwrittenAlt", ctx.checkErr Z3_get_sort(ctx.raw, a.raw)))
+    tos.add keep[^1].raw
+  if froms.len == 0: return v
+  var inRange = mkBool(true)
+  for c in extra: inRange = inRange and c
+  proc go(sv: SymVal): SymVal =
+    result = sv
+    case sv.kind
+    of svTuple:
+      for i in 0 ..< sv.fields.len: result.fields[i] = go(sv.fields[i])
+    of svArray:
+      for i in 0 ..< sv.arrElems.len: result.arrElems[i] = go(sv.arrElems[i])
+    of svVariant:
+      for i in 0 ..< sv.vPlainFields.len:
+        result.vPlainFields[i] = go(sv.vPlainFields[i])
+      for t, fs in sv.vArmFields:
+        for i in 0 ..< fs.len: result.vArmFields[t][i] = go(fs[i])
+      result.vDisc = new(SymVal)
+      result.vDisc[] = go(sv.vDisc[])
+    of svBV8, svBV16, svBV32, svBV64, svInt, svBool, svFloat32, svFloat64,
+       svString:
+      if unwrittenIn(sv).len == 0: return
+      let l = rawAnyAstOf(sv)
+      let alt = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute(ctx.raw, l,
+        cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+        cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+      let differs = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_not(ctx.raw,
+        checkedEq(ctx, l, alt.raw)))
+      if loopArmInfeasible(ctx, path, differs and inRange, settings):
+        result = svWithRaw(ctx, sv, alt)
+    else: discard
+  go(v)
 
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
@@ -21164,10 +21304,19 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
           declinedIndexEnv(cp.env, stmt, stmt.ixElemTy), dw)
         continue
       # In-bounds path continues with binding; build the value via ite.
-      let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
-      let unwrittenPart =
+      var indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
+      var unwrittenPart =
         if stmt.ixCheckOnly: ""
         else: globalReadPart(stmt.ixArr, indexed, simplified = true)
+      # RFC-0005 S8bz (item 3): an aggregate element is not read by itself;
+      # the access on its temporary picks the part (`glWatched`). A part
+      # the solver shows independent of every unwritten leaf is that part.
+      if unwrittenPart.len > 0 and heapTreeTy(tyOf(indexed)) and
+         heapCompoundTy(tyOf(indexed)):
+        indexed = unwrittenLeafSplit(w.z3, cp, indexed,
+                                     [inLoCond, inHiCond], w.settings)
+        glWatched.incl stmt.ixRetName
+        unwrittenPart = ""
       # RFC-0005 S6b: `iteSV` is called here DIRECTLY (no `lower()`
       # wrapper), so a merge degrade's pending taint (`allocDegrade` /
       # `degradeAlloc`) would otherwise be drained by whatever `lower()`
@@ -22646,6 +22795,10 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           calleeEnv[formal.name] = argVals[i]
           if formal.isVar and stmt.cargs[i].kind == iekVar:
             varArgs.add (formal.name, stmt.cargs[i].vname)
+          # RFC-0005 S8bz (item 3): the copy-in observed nothing; a read of
+          # the formal does.
+          if formal.isVar and unwrittenIn(argVals[i]).len > 0:
+            glWatched.incl formal.name
         # RFC-0005 S8an: the callee also reaches every module-level global
         # and, for a routine declared inside another, the enclosing
         # variables it captures. Nim shares those locations with the
@@ -27465,6 +27618,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   glUnwritten = initTable[int, string]()   ## RFC-0005 batch 6: their
   glPartHavoc = initTable[string, bool]()  ## unwritten leaves with them
   glUnwrittenAsts = @[]
+  glWatched = initHashSet[string]()   ## RFC-0005 S8bz
+  noinitSerial = 0                    ## RFC-0005 S8bz
   globalEntryFacts = @[]                         ## RFC-0005 S8as
   ctxPruneLog = @[]                              ## RFC-0005 S8ax
   currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel
@@ -29318,6 +29473,10 @@ proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
   ## key), or nil.
   when T is U:
     if i == path.len: return addr x
+  elif T is SomeInteger and U is SomeInteger and sizeof(T) == sizeof(U):
+    # RFC-0005 S8bz (item 6): the other signedness at the same bytes
+    # (`svMayHold` lists it).
+    if i == path.len: return cast[ptr U](addr x)
   if i >= path.len: return nil
   when T is Table:
     if path[i].len >= 1 and path[i][0] == 'k':
@@ -29378,6 +29537,17 @@ proc storeOrdinal[F](f: var F; v: int64) =
 
 proc readCellField[F](c: RefWitness; path: string; f: var F)
 
+{.push fieldChecks: off.}   # RFC-0005 S8bw (item 3): see `ptrAimByName`
+proc cellRecordBranches[T](c: RefWitness; prefix: string; x: var T) =
+  ## RFC-0005 S8bz (item 6). Each field's address under `prefix`, every
+  ## branch's: a pointer the snapshot aims at a field of an inactive branch
+  ## addresses that field's bytes all the same. `fieldPairs` walks only the
+  ## active one. A discriminator is not addressable (`when compiles`).
+  ptrAimEachField(x):
+    when compiles(addr it):
+      cellRecord(c, prefix & "." & itName, cast[pointer](addr it))
+{.pop.}
+
 proc validDefault[F](f: var F) =
   ## RFC-0005 S8h. A cell comes from `new`/`alloc0`, so every field starts
   ## zeroed, and zero need not lie inside a field's declared range
@@ -29436,6 +29606,8 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
         # RFC-0005 S8bh (item 2): the field's address, for a pointer the
         # snapshot aims at it (`aliasRef = "&<cell>.<field>"`).
         cellRecord(c, "&" & leaves & "." & fname, cast[pointer](addr fv))
+    when compiles(cellRecordBranches(c, "&" & leaves, result[])):
+      cellRecordBranches(c, "&" & leaves, result[])
   else:
     readCellField(c, leaves, result[])
 
@@ -29455,6 +29627,26 @@ proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
       # snapshot aims at it (`aliasRef = "&<cell>.<field>.<index>"`).
       if path.len > 0 and path[0] != '&':
         cellRecord(c, "&" & path & "." & $i, cast[pointer](addr f[i]))
+
+proc cellRecordParts[T](c: RefWitness; prefix: string; x: var T) =
+  ## RFC-0005 S8bz (item 2). The address of each part of the aggregate `x`,
+  ## under `prefix`, by position and by name (`f<name>`), for a pointer the
+  ## snapshot aims at it.
+  when T is object or T is tuple:
+    var k = 0
+    {.cast(uncheckedAssign).}:
+      for fname, fv in fieldPairs(x):
+        cellRecord(c, prefix & "." & $k, cast[pointer](addr fv))
+        cellRecord(c, prefix & ".f" & fname, cast[pointer](addr fv))
+        cellRecordParts(c, prefix & "." & $k, fv)
+        cellRecordParts(c, prefix & ".f" & fname, fv)
+        inc k
+  elif T is array:
+    var k = 0
+    for e in x.mitems:
+      cellRecord(c, prefix & "." & $k, cast[pointer](addr e))
+      cellRecordParts(c, prefix & "." & $k, e)
+      inc k
 
 proc readCellTable[K, V](c: RefWitness; path: string; f: var Table[K, V]) =
   ## RFC-0005 S8ap. A `Table[string, V]` cell field: the keys of
@@ -29479,6 +29671,9 @@ proc readCellTable[K, V](c: RefWitness; path: string; f: var Table[K, V]) =
       when compiles(witnessTabKey[K](k)):
         cellRecord(c, "&" & path & "." & k,
                    cast[pointer](addr f[witnessTabKey[K](k)]))
+        # RFC-0005 S8bz (item 2): and its parts' (`readCellField`'s spelling).
+        when V is object or V is tuple or V is array:
+          cellRecordParts(c, "&" & path & "." & k, f[witnessTabKey[K](k)])
 
 proc readCellSet[E](c: RefWitness; path: string; f: var HashSet[E]) =
   ## RFC-0005 S8ap. A `HashSet[E]` cell field: `setMembers[path]`, whose
@@ -29545,14 +29740,24 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
   elif F is object or F is tuple:
     # RFC-0005 S8ar: a by-value object / tuple field, each part the leaf
     # `<path>.<name>` (`renderHeapValue`; an anonymous tuple's `FieldN`).
+    # RFC-0005 S8bz (item 1): each part's address, for a pointer the snapshot
+    # aims at it by position or name (`&<cell>.<field>.<index>.<step>`).
+    var k = 0
     {.cast(uncheckedAssign).}:
       for fname, fv in fieldPairs(f):
         readCellField(c, path & "." & fname, fv)
+        if path.len > 0 and path[0] != '&':
+          cellRecord(c, "&" & path & "." & $k, cast[pointer](addr fv))
+          cellRecord(c, "&" & path & ".f" & fname, cast[pointer](addr fv))
+          cellRecord(c, "&" & path & "." & fname, cast[pointer](addr fv))
+        inc k
   elif F is array:
     # RFC-0005 S8ar: an array field, element `i` (from 0) the leaf `<path>.<i>`.
     var i = 0
     for x in f.mitems:
       readCellField(c, path & "." & $i, x)
+      if path.len > 0 and path[0] != '&':
+        cellRecord(c, "&" & path & "." & $i, cast[pointer](addr x))
       inc i
   else:
     discard
@@ -29804,6 +30009,10 @@ proc witnessTabVal*[V](w: RawWitness; p: string; v: var V): bool =
     return true
   elif V is Table:
     v = readTableAs[typeof(keys(default(V))), typeof(values(default(V)))](w, p)
+    return true
+  elif V is object or V is tuple or V is array:
+    # RFC-0005 S8bz (item 2): an aggregate value, in the heap's cell layout.
+    readCellField(newRefWitness(w), p, v)
     return true
   elif V is string:
     if w.strVals.hasKey(p): (v = w.strVals[p]; return true)

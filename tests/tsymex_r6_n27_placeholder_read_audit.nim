@@ -324,6 +324,8 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## composite result: its five lines are four (the `mentionsUninitBase`
     ## test, the alias id, the held handle, the alias itself), still only
     ## asking whether a term mentions a base. 116 - 5 + 4 = 115.
+    ## RFC-0005 S8bz (on batch 9) counted the same S8cb and S8ca steps; it
+    ## adds no marked line of its own here.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)

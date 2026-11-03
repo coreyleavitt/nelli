@@ -155,7 +155,8 @@ proc n7(k: int) =
 
 # --- B26: foreign code inline --------------------------------------------------------
 
-{.emit: "extern long gCw;".}
+# `NI`, not `long`: `long` is 32 bits on Windows, and the declarations must agree.
+{.emit: "extern NI gCw;".}
 var gCw {.exportc: "gCw".}: int
 proc o11() {.symexOpaque.} = {.emit: "gCw = gCw + 1;".}
 proc n11(k: int) =

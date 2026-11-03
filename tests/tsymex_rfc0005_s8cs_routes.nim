@@ -247,7 +247,8 @@ proc hookLoop(k: int) =
 
 var gC1: int
 var gCp: ptr int
-{.emit: "extern long gCw2;".}
+# `NI`, not `long`: `long` is 32 bits on Windows, and the declarations must agree.
+{.emit: "extern NI gCw2;".}
 var gCw2 {.exportc: "gCw2".}: int
 type
   PtrH = object

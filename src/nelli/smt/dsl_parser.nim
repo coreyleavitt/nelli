@@ -20167,7 +20167,7 @@ type
     seenRoutines, seenTypes: seq[string]
     waiting: seq[tuple[key: string; t: NimNode]]  ## probed, not yet read
     routes: seq[string]                           ## `name|why`, or `*|why`
-    siteFile: string       ## where the probes are semchecked (`symexHookMayHide`)
+    siteModule: NimNode    ## the module the probes are semchecked in (`symexHookMayHide`)
 
 var routeBodies {.compileTime.}: Table[string, RouteBody]
   ## Per routine, so a file's entry macros read each routine once.
@@ -20178,6 +20178,34 @@ var unprovedTypes {.compileTime.}: HashSet[string]
   ## Per nominal type: a probe that says nothing about which hook runs.
 var mayHideTypes {.compileTime.}: HashSet[string]
   ## Per nominal type: a copy hook a probe elsewhere cannot rule out.
+
+proc routeModuleOf(s: NimNode): NimNode =
+  ## The module `s` is declared in, by its owners; empty when that cannot be told.
+  ## By module, not by file: an `include`d file is the module that includes it,
+  ## and a symbol's position may be where a macro used it, not where it was
+  ## declared.
+  var o = s
+  var steps = 0
+  while o.kind == nnkSym and symKind(o) != nskModule and steps < 64:
+    o = o.owner
+    inc steps
+  if o.kind == nnkSym and symKind(o) == nskModule: o else: newEmptyNode()
+
+proc routeSiteModule(site: NimNode): NimNode =
+  ## The module of the variable `routeSiteMarker` declares, in a semchecked `site`.
+  if site.kind == nnkSym and symKind(site) == nskVar and
+     macros.strVal(site) == "symexRouteSite":
+    return routeModuleOf(site)
+  for c in site:
+    let m = routeSiteModule(c)
+    if m.kind == nnkSym: return m
+  newEmptyNode()
+
+proc routeSiteMarker(): NimNode =
+  ## A block that declares a variable where the probes will be semchecked, so its
+  ## owner names that module.
+  nnkBlockStmt.newTree(newEmptyNode(), newStmtList(
+    newVarStmt(ident"symexRouteSite", newLit(0)), ident"symexRouteSite"))
 
 proc symexHookCell*[T](): ptr T = nil
   ## RFC-0005 S8cs. Never called: a probe's lvalue of type `T` (`hookProbes`),
@@ -20262,8 +20290,10 @@ proc routeProbeRead(run: var RouteRun; k: string; t: NimNode) =
              "` has cannot be resolved")
   if k in mayHideTypes:
     let head = if t.kind == nnkBracketExpr and t.len > 0: t[0] else: t
+    var declModule = routeModuleOf(head)
     if head.kind == nnkSym and not isStdlibDecl(head) and
-       head.getImpl.lineInfoObj.filename != run.siteFile:
+       (declModule.kind != nnkSym or run.siteModule.kind != nnkSym or
+        declModule != run.siteModule):
       addRoute(run, routeOpenAll, "the type `" & t.repr & "` is declared in " &
                "another module, and a copy hook it does not export cannot be " &
                "ruled out from here")
@@ -20707,10 +20737,11 @@ macro symexRouteResume*(id: static int): untyped =
     routeProbeRead(routeRuns[id], k, t)
   routeContinue(id, bindSym"symexRouteResume")
 
-macro symexGlobalRoutes*(fn: typed): untyped =
+macro symexGlobalRoutes*(fn: typed; site: typed): untyped =
   ## RFC-0005 S8cs. The list `withGlobalRoutes` takes: every global a store the
-  ## walk does not see may reach, with the reason, for the routine `fn`.
-  routeRuns.add RouteRun(siteFile: fn.lineInfoObj.filename)
+  ## walk does not see may reach, with the reason, for the routine `fn`. `site` is
+  ## `routeSiteMarker()`, semchecked where this expands.
+  routeRuns.add RouteRun(siteModule: routeSiteModule(site))
   let id = routeRuns.high
   if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds:
     addRoute(routeRuns[id], routeOpenAll, "the entry routine cannot be read")
@@ -20737,4 +20768,5 @@ proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
   # RFC-0005 S8cs: every entry macro's program carries the proof, or its absence,
   # for each global the parse named.
   result.globalsNimNode = newCall(bindSym"withGlobalRoutes", result.globalsNimNode,
-                                  newCall(bindSym"symexGlobalRoutes", fn))
+                                  newCall(bindSym"symexGlobalRoutes", fn,
+                                          routeSiteMarker()))

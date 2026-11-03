@@ -14538,7 +14538,10 @@ compiler's own answer. `=destroy` goes by the type; `=copy`, `=sink`, `=dup`,
 does not export is invisible from another module, and the probe reads as "none".
 A type declared in another module therefore counts as having none only when
 `supportsCopyMem` holds. A pin found this: a false `sxUnsat` on a non-exported
-`=copy`.
+`=copy`. "Another module" is decided by the symbols' owners, not by file: an
+`include`d file is its includer's module, a symbol's position may be where a macro
+used it, and Windows paths use `\`. The probe's module is the owner of a variable
+the entry macro declares where the probes expand (`routeSiteMarker`).
 
 *Opaque summaries.* A store through a `ptr` outside a read position, `{.emit.}`, a
 store through a `cstring`, and a stdlib routine given a value that holds an address
@@ -14548,17 +14551,24 @@ each may write any variable (`mayWriteAnyVariable`).
 declines when any route exists: it may address a variable the store reaches, one
 the program never names included (`routeAnyStore`).
 
-*Precision cost.* Two pins moved to a decline, both in
+*Precision cost.* Seven pins moved to a decline. Two are in
 `tests/tsymex_rfc0005_s8bg_remainder.nim`: `cvm` (`sxSat`) and `cvm_dead`
 (`sxUnsat`) of `sutConvDistinctMid`. `Farm` is a `ref object of RootObj`, the routine
 reads the global `gFarmBox` holding one, and a subtype's hook could write it. The
 old verdicts were not luck: the suite's native loop runs the routine over five
 inputs and hits `cvm` and never `cvm_dead`. The pins now assert the decline by kind,
 and an exact twin (`sutConvDistinctMid3`, labels `cvm3`, `cvm3_dead`, a `Farm3` that
-cannot have a subtype) keeps the chain's `sxSat`, replay and `sxUnsat`. Measured on
-85 suites: those that name `feGlobalHavoc`, `feGlobalReadUnmodelled`, a user hook, a
-method, `ref object of`, `importc`, a thread or `{.emit.}`, and the audits. The whole
-tree was not run; of the suites selected, twenty were not (see the slice's report).
+cannot have a subtype) keeps the chain's `sxSat`, replay and `sxUnsat`. Five are in
+`tests/tsymex_rfc0005_s8bs_byref.nim`, "an inheritance conversion on a by-reference
+actual": `uc`, `dc` (`sxSat`) and `uc_dead`, `dc_dead`, `dx_dead` (`sxUnsat`). The
+SUTs read a global of `BaseR` or `DerR`, which inherit. The suite's "nim" test runs
+each SUT natively and hits `uc`, `dc` and `dx`, never a `_dead` label. `dx` stays
+an `sxSat` (its path reads no global), and the other path's decline is reported
+beside it. No twin keeps them exact: the conversion is the point of the pins.
+Measured on the whole `tsymex_*` corpus, on Windows (`symex-mingw`, Z3 4.13.4), and
+on 85 suites on Linux (Z3 5.1): those that name `feGlobalHavoc`,
+`feGlobalReadUnmodelled`, a user hook, a method, `ref object of`, `importc`, a
+thread or `{.emit.}`, and the audits.
 
 *For RFC-0016: what declines, and an exact model would keep.* Every one is a read
 in a routine with the route; a routine without one keeps its verdict.
@@ -14573,6 +14583,7 @@ in a routine with the route; a routine without one keeps its verdict.
 - Any global, when it may hold a type from another module that is not plain bits.
 - A pointer of unknown origin, when the program has any route.
 - `tsymex_rfc0005_s8bg_remainder`: `cvm` and `cvm_dead`, the pins above.
+- `tsymex_rfc0005_s8bs_byref`: `uc`, `uc_dead`, `dc`, `dc_dead` and `dx_dead`.
 
 *Not covered.*
 

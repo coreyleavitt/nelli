@@ -66,9 +66,29 @@ suite "S8bs: paths by name and by reference":
     clean(sutPtrValueByName, "pq", sxSat)
     clean(sutPtrValueByName, "pq_dead", sxUnsat)
   test "an inheritance conversion on a by-reference actual":
-    clean(sutUpcast, "uc", sxSat)
-    clean(sutUpcast, "uc_dead", sxUnsat)
-    clean(sutDowncast, "dc", sxSat)
-    clean(sutDowncast, "dc_dead", sxUnsat)
-    clean(sutDowncastBad, "dx", sxSat)
-    clean(sutDowncastBad, "dx_dead", sxUnsat)
+    # RFC-0005 S8cs: `BaseR` and `DerR` inherit, and the SUTs read a global of
+    # one: a subtype's lifetime hook could write it, so the reads decline
+    # (RFC-0016). The verdicts these pins held were not luck: the "nim" test
+    # above runs every SUT and hits `uc`, `dc` and `dx`, never a `_dead`.
+    template routeDeclines(fn: typed, lbl: string) =
+      block:
+        let r = symexFind(fn, tLabel(lbl))
+        checkpoint lbl & " " & $r.status & " " & show(r.errors)
+        check r.status == sxUnknown
+        var named = false
+        for e in r.errors:
+          if e.kind == feGlobalRouteUnproved: named = true
+        check named
+    routeDeclines(sutUpcast, "uc")
+    routeDeclines(sutUpcast, "uc_dead")
+    routeDeclines(sutDowncast, "dc")
+    routeDeclines(sutDowncast, "dc_dead")
+    routeDeclines(sutDowncastBad, "dx_dead")
+    # `dx` is reached on a path that does not read `gdr`: it stays an `sxSat`,
+    # and the decline of the other path's read is reported beside it.
+    block:
+      let r = symexFind(sutDowncastBad, tLabel("dx"))
+      checkpoint "dx " & $r.status & " " & show(r.errors)
+      check r.status == sxSat
+      for e in r.errors:
+        check e.severity == sevHint or e.kind == feGlobalRouteUnproved

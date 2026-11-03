@@ -55,6 +55,10 @@ proc altSets(s: string) =
   if s.replace(re"[0-9]|x", "").contains("x"):
     symexTarget("bt_alt_sets")
 
+proc altPlusBounded(s: string) =
+  if s.len <= 16 and s.replace(re"(?:ab|a)+", "-").contains("a"):
+    symexTarget("bt_alt_plus_bounded")
+
 proc altPlus(s: string) =
   # An `a` always starts a match of `(?:ab|a)+`.
   if s.replace(re"(?:ab|a)+", "-").contains("a"):
@@ -167,8 +171,11 @@ suite "S8bt (7): patterns past S8aw's shapes":
   test "[0-9]|x leaves no x: sxUnsat":
     check verdict(altSets, "bt_alt_sets").status == sxUnsat
 
-  test "(?:ab|a)+ leaves no a: sxUnsat":
-    check verdict(altPlus, "bt_alt_plus").status == sxUnsat
+  test "(?:ab|a)+ leaves no a up to its safe length: sxUnsat":
+    # RFC-0005 S8cf: past it `replace` can stop at a limit and keep the rest
+    # (`a` * 100000 on the JIT's stack, -27): an unbounded `s` is not refuted.
+    check verdict(altPlus, "bt_alt_plus").status == sxUnknown
+    check verdict(altPlusBounded, "bt_alt_plus_bounded").status == sxUnsat
 
   test "ab|cd never grows: sxUnsat":
     check verdict(altLen, "bt_alt_len").status == sxUnsat

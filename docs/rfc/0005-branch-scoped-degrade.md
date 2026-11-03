@@ -487,8 +487,8 @@ title = "S8br's remainder: address cell at a non-literal array index with an inp
 state = "done"
 
 [[slice]]
-id = "S8cd"
-title = "Batch-6 integration findings: iekSeqLen on unsupported receiver kinds, ptrTargets on the global entry fallback, case-object globals, isEagerIR bit sets, recvValue observing only the touched part, literal-haystack rfind under a tight cap"
+id = "S8cf"
+title = "S8bt's remainder: PCRE match/recursion limits and the JIT stack limit, JIT LIMIT accounting, limit-accounting gaps, SKIP:NAME past 7, UTF JIT scan residuals, symbolic step-table receiver, UTF priority-route cost, replace-lemma residuals, 8.44/8.39 allowlist"
 state = "done"
 
 [[slice]]
@@ -499,6 +499,21 @@ state = "done"
 [[slice]]
 id = "S8cb"
 title = "S8bo onto batch 6 (item 5 on the leaf-split base) and S8bo's remainder: newSeq[T](n) in a callee, positional-tuple address cells, multi-variant arm field cells, p[] field range facts, unmodelled magics, replay stack fidelity on non-main threads/other OSes, a hung replay poisoning later ones"
+state = "done"
+
+[[slice]]
+id = "S8cd"
+title = "Batch-6 integration findings: iekSeqLen on unsupported receiver kinds, ptrTargets on the global entry fallback, case-object globals, isEagerIR bit sets, recvValue observing only the touched part, literal-haystack rfind under a tight cap"
+state = "done"
+
+[[slice]]
+id = "S8cl"
+title = "S8ca's remainder: unsafeNew is dropped, wasMoved stops the compile, setLen declines on its when statement, a by-value copy of a string of unknown provenance, n43_parity on cpp"
+state = "done"
+
+[[slice]]
+id = "S8cr"
+title = "The definition-of-done audit's gaps: introduction and coverage pins, flip list and checks, live sevError and symexForAll pins, migration note"
 state = "done"
 
 [[slice]]
@@ -783,6 +798,28 @@ aside**: *a `{scSpurious}` site's symbol carries no constraints at
 introduction.* Sites that violate it — `defaultZero`, the typed-zero dummy,
 any forced value — are exactly §0.2's incomparable class, which makes §0.2 a
 corollary of this invariant rather than an independent assertion. §6 pins it.
+
+**The coverage invariant (S8cr).** The premise above speaks only of the moment
+of introduction. A site whose symbol stands for a *location* (`feGlobalHavoc`'s
+global, `feOpaqueEffectHavoc`'s cell) needs a second one, which nothing here
+stated until S8cr:
+
+> A fresh symbol standing for a location stays a superset of reality only while
+> **every later write to that location reaches the model**: by a modelled store,
+> by a fresh havoc of the location, or by a decline that taints the path.
+
+The simulation needs it. A real trace that writes the location after
+introduction has no model trace agreeing with it if the model never saw the
+write, and the failure is the worst kind: a false `sxUnsat` on a run with no
+taint at all, so `trusted()` is true. `feGlobalHavoc`'s doc comment claims that
+"no effect is dropped"; that is true only under this invariant.
+
+The invariant has a known hole at walker 245: a store through a `ptr` parameter
+aimed at a global, directly, in a callee or through a proc value. Its fix is on
+S8cd. `tests/tsymex_rfc0005_s8cr_intro.nim` pins the hole, reporting `[SKIPPED]`
+while the verdict is the false `sxUnsat` and asserting the right verdict once
+S8cd lands, at which point its `skip` branch is to be deleted. The same file pins
+the routes that already hold.
 
 The over/under duality appears **only at consumption** (§2.3): SAT reads the
 winning path's `scSpurious` coordinate, UNSAT reads the run-global
@@ -9246,6 +9283,38 @@ as one slice (S6) positioned *before* any verdict-changing slice — where
    baseline, so the audit is *find the diff, rewrite each line through the
    helper, justify anything the helper cannot express*.
 
+**As landed (S8cr, no bump) — the audit's gaps.** `sweep-diff` compares two runs
+of the same test files, so it cannot see an assertion a slice rewrote: both runs
+pass. The list therefore comes from history instead, through
+`scripts/rfc0005-flips.py`, whose `--check` fails on a to-unsat flip with no
+recorded check. `tests/tsymex_rfc0005_s8cr_flips.nim` and `_flips_str.nim` hold
+those checks, one `# flip: <sha> <file>` marker each, for every flip the slices
+themselves did not justify through the helper.
+
+- **The named candidates.** The n21 pins flipped and are justified there. The
+  SND-3 family did not flip: its labels are reachable in Nim and its pins still
+  read `sxUnknown`, which `_flips_str` asserts, along with the helper's refusal.
+- **What the helper shows.** Most flips are exact-model flips, whose runs drain
+  no decline. Two families do drain one, and the checks name it:
+  `feConvFloatToIntUndefined` and `seParseIntLaxSyntax`.
+- **Live pins (§6 item 2).** S8bc's pruning left no live pin holding a `sevError`
+  cap decline beside a clean witness. `tests/tsymex_rfc0005_s8cr_pins.nim` has
+  one: its branch needs a factor of the prime 2^61 - 1, which `pathInfeasible`'s
+  budget cannot refute. The same file pins `symexForAll` itself: a raise,
+  `rsConfirmed` and both veto companions. A companion's grouped parameters
+  (`proc f(x, a, b: int)`) showed that `symexForAll` counted a group as one
+  parameter and failed to compile, the one product fix in this slice.
+- **Introduction (§6 item 5).** `tests/tsymex_rfc0005_s8cr_intro.nim` pins the six
+  kinds that had no pin, and the coverage invariant (§2.1).
+- **Floors (§7).** None added. Every slice that bumped the walker has a floor in
+  one of its files. The slices with none record no bump, and the five batch
+  numbers with none (190, 202, 209, 217, 223) are integrations, not slices;
+  §7 keeps each slice's floor at its provisional number.
+- **§7's tail-append rule.** Additions to `SymexErrorKind` have kept to it, but
+  removing `heRefVariantUnsupported` moved 19 members, and `IRExprKind` took
+  additions mid-enum. No ordinal of either is persisted in `src`, so the effect
+  is on consumers only, and the migration note says so.
+
 The converse risk raised at round-1 kick-off does **not** exist: no k-unrolled
 run reports `sxUnsat` today (any degrade sets `sawUnknown`, which already voids
 it), so the 283 `== sxUnsat` assertions across 130 files are taint-free runs by
@@ -9653,6 +9722,47 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   declines its argument, so #163's ptr-argument pin decides the raise
   after the summarised call (`sxRaised`, as Nim raises); the untyped
   `pointer` `nil` still declines.
+
+**Batch 10 (2026-11-02) — one walker number for five slices.** S8cf, S8cb (carrying
+S8bo), S8cd, S8cl and S8cr (provisional: 242, 243, 249, 248; S8cr bumps nothing)
+land stacked on batch 9, in that order: `symexWalkerVersion` 245 -> **252**, the CR2
+`==` pin 252, each slice's `>=` floor unchanged, the batch's floor in
+`tsymex_rfc0005_b10_integration`. Where slices met:
+- *`checkCapped` around `checkExact`.* S8cf's wrapper took the name of batch 8's
+  function, and that function is now `checkExact`. Step 1d and the facts-first
+  returns sit inside `checkExact`, so the wrapper sees every `zsUnsat` and asks
+  `limitWorldRefuted`. S8by's skip only skips steps inside it, and the facts-first
+  check gives no model unless step 1 finds one. `hasRecursiveApp`, which S8cf's
+  side still named, was gone since batch 8.
+- *`alt_miss`.* `s[s.len - 1] == 'c' and not s.contains(re"(a|a)*b|c$")` is reached
+  natively at 30 `a` bytes, and gives `sxUnknown` with the limit reason (its kind is
+  `beSolverUndef`). The decline is `checkCapped`'s design and not a solver budget:
+  with `queryRLimit` and `seqQueryRLimit` at 8e9, `queryTimeoutMs` at 1.2M, `maxSeqLen`
+  at 128 and 4096, and `limitWorldRLimit` at 8e9 with a 900 s timeout, it never
+  decides `sxUnsat`. The walks take 85 and 603 s at that budget, and neither
+  refutes. On Z3 4.13.4 the unbounded form runs out of `seqQueryRLimit` first, the
+  same kind on the same `sxUnknown`; the fixed-length form names the limit on both.
+  Pinned natively in `tsymex_rfc0005_b10_integration`.
+- *One empty-magic helper.* S8bo's and S8cl's helpers are `stubBody`, read after the
+  distinct barrier. S8cb's `ensureMove` model stands over S8cl's decline, and
+  `procCall` declines. S8cl's pins moved with native checks: `ensureMove`, `=sink` and
+  `=dup` (S8cb's models, with dead labels added to the last two).
+- *A statement `procCall f(x)`.* Its formal is `untyped`, so the actual of a void `f`
+  has no type, and `userCallStmt` stopped the compile reading it. The call now
+  declines on its key without reading it.
+- *S8cd's widened results, N40-6 and N30-2.* Both pins' moves from a decline to
+  `sxSat` agree with the native run: N40-6's lambda is never called and its label is
+  unconditional, and N30-2's `f` returns `t`, whose four entries reach the label. An
+  adversarial probe of `Table`, `HashSet` and `set` results (copies, repeat calls,
+  capture writes, raises, a returned closure, `pairs`) found no false verdict.
+- *S8cr's open holes.* `pinOpenHole`'s `skip` branch is gone. The three pins assert
+  `feGlobalHavoc` and `feReplayRefuted` on `sxUnknown` (`pinParamStore`), not `sxSat`:
+  the replay's witness pointer does not address the global, so it misses a label Nim
+  reaches. The false `sxUnsat` is closed; the replay's aim is a PRECISION gap.
+- *`tsymex_r6_n27_placeholder_read_audit`.* 116 marked lines in `runtime.nim`, read
+  from the code: S8cb's `withElem` replaces `storeSeqElem`'s marked line (-1), and
+  S8cd's `observeRecvPart` adds `isIndexAssign`'s seq length after the placeholder
+  guard (+1).
 
 **Batch 9 (2026-11-02) — one walker number for four slices.** S8ce, S8ca, S8by
 and S8cc (each provisional: 238, 233, 231, 238) land stacked on batch 8, in that
@@ -14334,75 +14444,76 @@ pin is 238, and both suites carry the `>= 238` floor.
   declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
   `wb_dead`).
 
-**As landed (S8cd, walker 249) — batch 6's integration findings.** Suites
-`tsymex_rfc0005_s8cd_globals` (items 2, 3, 5), `tsymex_rfc0005_s8cd_ops`
-(items 1, 6) and `tsymex_rfc0005_s8cd_setorder_small` / `_large` (item 4). The base is 136ad60 (batch 7, walker 237), with batch 9 (e497dcf, walker
-245) merged; 249 is the next number free. The job names all
-six items PRECISION; pinning items 2 and 4 found SOUNDNESS bugs (below), and
-items 1, 4, 5 and 6 did not hold as the job stated them.
+**As landed (S8cf, walker 242 provisional) — S8bt's remainder.** The branch
+is `rfc-0005-s8cf`, on `136ad60` with S8bt merged. Ground truth stays the
+libpcre `std/re` loads: PCRE 8.45's interpreter on Linux and 8.37 with its JIT
+on the Windows legs. New suites are named `tsymex_rfc0005_s8cf_*`.
 
-- *Item 1: `len` over a receiver kind.* A `ptr`/`ref` dereference and a heap
-  field were already decided at the base; the job's S8bn shapes were not found
-  under those names. The error reproduced only for a proc value with no
-  target (a parameter, a heap field, a global): `f(k).len`, and the string
-  form. A closure call now carries its return type (`ccRetTy`, in the key as
-  `;ret=`), so the unknown-callee arm of `lowerClosureCall` binds a stand-in
-  of that type and the path declines as `ceClosureUnknownCallee`, which names
-  the reason. Two neighbours fall with it: a `for` over a call was a
-  `weInternalWalkerFault` and now binds the result once, as Nim does (it ran
-  the call per iteration otherwise); and a known proc value returning a
-  `Table`, `HashSet` or `set` resolves (`closureRetStructured`).
-- *Item 2: a global's entry cell.* `ptrTargets` reads the input through
-  `ptrInputOf`, which falls back to the entry value. SOUNDNESS: it also scanned
-  only the globals bound on the path, so a global only read was no target:
-  `let a = g; p[] = 7; if g != a` was a false `sxUnsat`, with `p` addressing
-  `g`, for a scalar, a tuple field, an array element and a seq element (Nim
-  reaches all of them). Every `var` global that may hold the pointee is now
-  bound to its entry value there, unless a callee holds it withheld.
-- *Item 3: case-object globals.* `irTypeRefFree` covers a variant and a
-  multi-variant, so such a global has an entry value: a fresh discriminator
-  and arm fields, each read and each `FieldDefect` fork through S8bw's
-  machinery, tainted `feGlobalHavoc`. A case object reaching a heap cell has
-  no entry-value model and declines (`recvValue` reads it at its type).
-- *Item 4: the order of a set expression.* The job's "add `iekBitSet` to
-  `isEagerIR`" is wrong as a blanket: measured natively (c and cpp), a `{..}`
-  naming a variable is built where it stands at every size; `+ - * <= <` are
-  inline for a set of at most 64 values and run into a temporary above that
-  (65 values is the first array); `==`, `in` and `card` are inline at every
-  size, over an operand which may have been built eagerly; `x in {k, y}`
-  compares inline. `isEagerIR` encodes that, and the set operators' operands
-  go through `parseOperandPair`, so a nested small operand moves past a later
-  call. SOUNDNESS: the base's order was wrong in both directions, with no
-  decline. For a small set `(s + {x}) + f()` gave a false `sxSat` on the early
-  value and a false `sxUnsat` on the late one; for a large one `<=` and
-  `card(s + {x})` did the same; `f2({k}, g())` at any size did.
-- *Item 5: a receiver.* `recvValue` reads its receiver as a receiver, and each
-  arm observes what it reads (`observeRecvPart`): a seq index assignment the
-  length, a `pop` the length and the last element. A reassignment reads the
-  discriminator unless one branch holds every tag (`reassignReadsDisc`), which
-  no assignment can leave. An array store already observed nothing. So the job's
-  taint from an untouched part was reachable only through the reassignment
-  arms and through the elements of a seq; the length remains a genuine read.
-- *Item 6: `rfind` over a literal under a tight cap.* The moved S8o pin
-  (`lastIdx`) declines on `t.len > 10` under a cap of 8, not on `rfind`: that
-  query has no model within the cap, and it keeps S8k's decline. The rfind
-  shape that did decline was a leaf pinned to a literal longer than the cap
-  (`symexAssume(s == "abcdefghijkl")`): `seqLenCaps` now leaves a leaf a root
-  conjunct equates to a string literal uncapped, since it has one value and no
-  search. A symbolic needle over it was already decided under the cap.
+*Items 1, 2: PCRE's limits and the JIT stack (SOUNDNESS).*
+- **The bug.** The model read no limit, so `(a|a)*[bc]` at `a^30` gave five
+  false `sxUnsat` (match, find, matchLen, findBounds, replace) and a false
+  `sxSat`, and the JIT's stack limit a false `sxUnsat`.
+- **The fix.** `pcre_select.limitReach` gives each call never or a safe length
+  (`reachLenCap`, `reachCallBudget`, `reachDepthBudget`). `checkCapped` wraps
+  `checkExact`: SAT past safe is solved again with the lengths guarded, else
+  `zsUnknown`; UNSAT must survive `limitWorldRefuted`, the query with each
+  site free to stop (`regexLimitSites`).
+- **Finding.** A third outcome the job did not list: on 8.45 with an 8 MB
+  stack `(a|b)*c` takes SIGSEGV near 8000 bytes, `(a)*c` near 16000. On 8.37's
+  JIT -27 arrives at 1025 and 1376 bytes.
 
-Different mechanisms, reported and not fixed here:
+*Item 3: the JIT's LIMIT count.* `jitCost` sites over 424350 calls, 0 differ;
+`detect_repeat`'s group repeats keep `jitCountUnread` (400 skipped).
 
-- **PRECISION: `len` of a nested seq.** A `seq[seq[int]]` heap field, or a
-  proc value's result of that type, still declines on the unsupported
-  nested element representation.
-- **PRECISION: `HashSet[string]`** behind a pointer or in a heap field declines.
-- **PRECISION: `f != nil` on a proc value** with no lambda the walker built is
-  `ceUnsupportedHof`.
-- **PRECISION: `addr o.xs` bound by a `let`** is `heUnsafeCast`.
-- **PRECISION: a query SAT only past the cap** declines (S8k), rfind or not
-  (`lastIdx`); a leaf equal to a leaf equal to a literal still takes the cap.
-- **PRECISION: a case object reaching a heap cell, as a global,** declines.
+*Item 4: limit gaps.* `buildNfa(..., concrete = true)` reads auto-possession
+and `ignore_skip_arg`'s runs concretely (2380 calls, 0 differ).
+
+*Item 5: SKIP:NAME past 7.* `concreteCall` with `execArgCap` (100 names); the
+languages decline past 7, the walker reads those calls at points.
+
+*Item 6: the JIT's UTF scan.* The U+0080..U+00BF decline was over-cautious: the
+scan starts only with literals and `\d \s \w`, which fail at a continuation
+byte; 239976 calls, 0 differ, decline removed. `(*ANY)` under the scan keeps its
+decline (72 differences or more when lifted); pinned calls read at points.
+
+*Item 7: classes on 8.37.* `parsePcre`'s `pre845` models the Latin-1 symbols in
+`[[:punct:]]` and narrows the decline to `classPre845`; negated escapes showed
+no difference and are lifted.
+
+*Items 8, 9, 10: the point route.* `pointCheck` replaces each heavy call's value
+by a fresh one, and reads it at the points the search proposes
+(`concreteEntry`); UNSAT is the query's own, a model every call agrees with is
+the query's, otherwise the point is a lemma. Then `pointTable` over short
+strings. A pattern past the regex cap (still 40k) gets a declared site and decides by points only. A
+subject pinned to a literal states every value on the path at once.
+- **Soundness of the pinned round.** A call's definition is dropped only with
+  its value stated, and only if no remaining root names its fresh terms.
+  Dropping by fresh names alone gave a false `sxSat` (`cf_branches_no`, RED
+  during this slice, never landed).
+
+*Item 11: `replace`'s facts.* `ReplaceFacts.pairs`, `.utf`, `searchMoves`
+(`acCommit`, `acSkipT`, `acErrM/R`) with `nonEmptyAttempt`; 8895 fact calls, 0
+differ. `strutils.count` over a char or a literal non-empty string lowers
+(`iekStrCount`); it was unlowered for any symbolic string.
+
+*Item 12: more library builds.* Stays declined; 8.44, 8.39 and 8.39's JIT need a
+Windows leg each. The legs take 6 to 38 minutes today; the coordinator decides.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS (held as unknown).** A value past `limitReach`'s safe length is
+  `zsUnknown`, including an unbounded no-match refutation. SIGSEGV past the
+  stack is the library's own behaviour: no verdict models the crash.
+- **PRECISION.**
+  - Auto-possession comparing a property or XCLASS with another item declines.
+  - A kept `ignore_skip_arg` under a limit declines.
+  - `detect_repeat`'s group repeats stay unread on the JIT.
+  - SKIP:NAME's count past 100 is unmodelled, and the languages decline past 7.
+  - Symbolic `(*ANY)` under the JIT's scan stays unknown.
+  - Multi-item POSIX classes on 8.37 decline (`classPre845`).
+  - `replace`'s unmarked `SKIP:NAME` has no sure bytes; `count` of `set[char]`
+    or overlapping counts stay unregistered; `first` is not computed in UTF.
+  - A `v == f` definition on an Int in `regexRecDefConds` crashes at
+    `byteLeafIds`; avoided with an inline term, latent.
 
 **As landed (S8cb, walker 243 provisional) — S8bo onto batch 7, and S8bo's
 remainder.** Suites `tsymex_rfc0005_s8cb_magics`, `_tostr`, `_order`, `_cells`, `_replay`.
@@ -14496,9 +14607,151 @@ Every pin was run RED on the merge of S8bo first, except where noted.
   `std::atomic<NI8>`, whose assignment is deleted). They fail the same way at
   136ad60, before this slice. S8s fixed the same shape in `validDefault`.
 
+**As landed (S8cd, walker 249) — batch 6's integration findings.** Suites
+`tsymex_rfc0005_s8cd_globals` (items 2, 3, 5), `tsymex_rfc0005_s8cd_ops`
+(items 1, 6) and `tsymex_rfc0005_s8cd_setorder_small` / `_large` (item 4). The base is 136ad60 (batch 7, walker 237), with batch 9 (e497dcf, walker
+245) merged; 249 is the next number free. The job names all
+six items PRECISION; pinning items 2 and 4 found SOUNDNESS bugs (below), and
+items 1, 4, 5 and 6 did not hold as the job stated them.
+
+- *Item 1: `len` over a receiver kind.* A `ptr`/`ref` dereference and a heap
+  field were already decided at the base; the job's S8bn shapes were not found
+  under those names. The error reproduced only for a proc value with no
+  target (a parameter, a heap field, a global): `f(k).len`, and the string
+  form. A closure call now carries its return type (`ccRetTy`, in the key as
+  `;ret=`), so the unknown-callee arm of `lowerClosureCall` binds a stand-in
+  of that type and the path declines as `ceClosureUnknownCallee`, which names
+  the reason. Two neighbours fall with it: a `for` over a call was a
+  `weInternalWalkerFault` and now binds the result once, as Nim does (it ran
+  the call per iteration otherwise); and a known proc value returning a
+  `Table`, `HashSet` or `set` resolves (`closureRetStructured`).
+- *Item 2: a global's entry cell.* `ptrTargets` reads the input through
+  `ptrInputOf`, which falls back to the entry value. SOUNDNESS: it also scanned
+  only the globals bound on the path, so a global only read was no target:
+  `let a = g; p[] = 7; if g != a` was a false `sxUnsat`, with `p` addressing
+  `g`, for a scalar, a tuple field, an array element and a seq element (Nim
+  reaches all of them). Every `var` global that may hold the pointee is now
+  bound to its entry value there, unless a callee holds it withheld.
+- *Item 3: case-object globals.* `irTypeRefFree` covers a variant and a
+  multi-variant, so such a global has an entry value: a fresh discriminator
+  and arm fields, each read and each `FieldDefect` fork through S8bw's
+  machinery, tainted `feGlobalHavoc`. A case object reaching a heap cell has
+  no entry-value model and declines (`recvValue` reads it at its type).
+- *Item 4: the order of a set expression.* The job's "add `iekBitSet` to
+  `isEagerIR`" is wrong as a blanket: measured natively (c and cpp), a `{..}`
+  naming a variable is built where it stands at every size; `+ - * <= <` are
+  inline for a set of at most 64 values and run into a temporary above that
+  (65 values is the first array); `==`, `in` and `card` are inline at every
+  size, over an operand which may have been built eagerly; `x in {k, y}`
+  compares inline. `isEagerIR` encodes that, and the set operators' operands
+  go through `parseOperandPair`, so a nested small operand moves past a later
+  call. SOUNDNESS: the base's order was wrong in both directions, with no
+  decline. For a small set `(s + {x}) + f()` gave a false `sxSat` on the early
+  value and a false `sxUnsat` on the late one; for a large one `<=` and
+  `card(s + {x})` did the same; `f2({k}, g())` at any size did.
+- *Item 5: a receiver.* `recvValue` reads its receiver as a receiver, and each
+  arm observes what it reads (`observeRecvPart`): a seq index assignment the
+  length, a `pop` the length and the last element. A reassignment reads the
+  discriminator unless one branch holds every tag (`reassignReadsDisc`), which
+  no assignment can leave. An array store already observed nothing. So the job's
+  taint from an untouched part was reachable only through the reassignment
+  arms and through the elements of a seq; the length remains a genuine read.
+- *Item 6: `rfind` over a literal under a tight cap.* The moved S8o pin
+  (`lastIdx`) declines on `t.len > 10` under a cap of 8, not on `rfind`: that
+  query has no model within the cap, and it keeps S8k's decline. The rfind
+  shape that did decline was a leaf pinned to a literal longer than the cap
+  (`symexAssume(s == "abcdefghijkl")`): `seqLenCaps` now leaves a leaf a root
+  conjunct equates to a string literal uncapped, since it has one value and no
+  search. A symbolic needle over it was already decided under the cap.
+
+Different mechanisms, reported and not fixed here:
+
+- **PRECISION: `len` of a nested seq.** A `seq[seq[int]]` heap field, or a
+  proc value's result of that type, still declines on the unsupported
+  nested element representation.
+- **PRECISION: `HashSet[string]`** behind a pointer or in a heap field declines.
+- **PRECISION: `f != nil` on a proc value** with no lambda the walker built is
+  `ceUnsupportedHof`.
+- **PRECISION: `addr o.xs` bound by a `let`** is `heUnsafeCast`.
+- **PRECISION: a query SAT only past the cap** declines (S8k), rfind or not
+  (`lastIdx`); a leaf equal to a leaf equal to a literal still takes the cap.
+- **PRECISION: a case object reaching a heap cell, as a global,** declines.
+
+**As landed (S8cl, walker 248 provisional) — S8ca's remainder.** Built on batch
+9 (e497dcf, walker 245, which carries S8ca); 246 and 247 are taken. Started on
+batch 8 (afce42a) merged with S8ca 8cef160 (f7779d5, walker 246). Suites
+`tsymex_rfc0005_s8cl_magics` (items 1a, 1b), `_lifetime` (items 1c, 2, 3) and
+`_strings` (item 4): every SUT that can run natively has a
+native run confirming which labels Nim hits.
+
+S8bl, in the base, had already modelled `wasMoved`, `reset`, `setLen`, `move`
+and `swap`, and made `unsafeNew` decline at registration. So at the merged tree
+the first three items were pins, not gaps; their RED is at 8cef160, where
+`unsafeNew(p, 8); if p != nil` was a clean false sxUnsat and `p == nil` a clean
+false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
+`wasMoved` stopped the compile (nnkSym for nnkIdentDefs).
+
+- *Item 1: a magic with no body is modelled or declines.* `unsafeNew(p, n)`, a
+  decline at the merged tree (all its labels sxUnknown, no live false verdict), is
+  now modelled: a fresh zeroed cell written back through a pure lvalue,
+  `RangeDefect` on a negative size, a decline when the size is under the
+  pointee's or above `maxModelledInitialSize`. A size whose call writes what the
+  place reads declines (`feEvalOrderUnmodelled`). This improves a decline. The
+  false verdicts above exist only at 8cef160. The audit found two
+  SOUNDNESS bugs at the merged tree: `ensureMove(a)` and `procCall(f(k))`,
+  whose bodies are empty, returned the zero value (`b.len == 1` a false sxUnsat,
+  `b.len == 0` and `r == 4 and k != 3` false sxSat). Any magic with no statement
+  to walk now declines, naming the magic. Decided against Nim: `reset` (variable,
+  field), `move` (variable, array element), `new` (expression, field, object),
+  `wasMoved` (seq, int, through a pointer), `=copy`. Declined: `new(p, finalizer)`,
+  `=sink` and `=dup` (S8cb's models replaced those two declines at batch 10),
+  `=destroy`, `newStringUninit`. `shallowCopy` is not declared under ORC and stays
+  `vmDeclined`.
+- *Item 2: what cannot be read declines.* `parseCalleeImpl`'s `expectKind` is
+  guarded by `formalsReadable`: a generated hook's `nnkArgList`, and a generic
+  instance's formal typed only by its default (`create`'s `size = 1.Positive`,
+  "node has no type"), decline. The type bridge leaves an object with a `when`
+  member unsupported ("Expected nnkIdentDefs, got nnkRecWhen", which `GC_ref`
+  reached through `RefHeader`).
+- *Item 3: `setLen`.* SOUNDNESS at the merged tree: it read the old value before
+  its length, so `gs.setLen(growG())`, where `growG` writes `gs`, lost that write
+  (a false sxUnsat and a false sxSat). It now reads after the length for a bare
+  variable; `setLen(a[gi], bump())`, where the call writes the index Nim uses
+  after it, declines (`laterArgDecline`): the walk wrote the old `a[0]` into `a[1]`,
+  right lengths and false elements. New since S8bl: main at 6cbfe8f declines both.
+  `setLen` decides. An element of `mitems` used after a resize still declines.
+- *Item 4: `newString`.* `newString` and `newStringOfCap` are modelled through
+  `isSetLen` with `slFresh`: `Natural`'s check, the modelled bound, NUL bytes,
+  and a string the path owns (`sbOwned`), so a by-value copy of the
+  address-taken result decides. An opaque call's result stays a decline, because
+  it may be a literal's memory or its own and a by-value copy shares only the
+  first: no one answer is sound for both. `tsymex_rfc0005_s8ca_strings_byvalue`'s
+  decline pin moved from `newString` to an opaque source.
+- *Item 5: `tsymex_r6_n43_parity` on cpp.* `readCellField`'s ordinal arm assigned
+  an imported `std::atomic`, whose `operator=` is deleted. `storeOrdinal`
+  range-checks and writes through the bytes, as S8s's `validDefault` did, and
+  both use it. `tsymex_r6_n42_deref_taint` had the same cause (S8cp item 5) and
+  passes on cpp too. No CI leg runs cpp; both suites run on cpp in this slice's
+  verification, and in `scripts/psweep.sh`.
+
+*Different mechanisms, reported and not fixed here.*
+- **Fixed elsewhere: `$k` on a negative int and `ensureMove`.** Both are false at
+  e497dcf and right at S8cb 28ab1a7, observed. `ensureMove` declined on this branch;
+  S8cb's model stands since batch 10, which folded this slice's helper into S8cb's
+  (`stubBody`). **SOUNDNESS: `procCall`'s zero result** is old, a false sxSat at main
+  6cbfe8f too; it declines here.
+- **PRECISION: `zeroMem` and `copyMem` on `addr x`** decline through a walker
+  fault, `FieldDefect` reading `ptrPointeeTy` of an `itUninterp`. In-band, but a
+  fault rather than a named decline.
+- **PRECISION: declines left as declines.** `alloc0` behind a cast
+  (`heUnsafeCast`), `ensureMove` and `procCall` (sound, unmodelled), `create`,
+  `new(p, finalizer)`, `GC_ref`, an object with a `when` member, a `type` section
+  inside a SUT, a nested `s[gi]` of a seq of seqs.
+
 **As landed (S8cs, walker 260, provisional) — the stores the walk does not see.**
 Suites `tests/tsymex_rfc0005_s8cs_routes.nim` and `..._routes2.nim`, fixture
-`tests/s8cs_hooks_fixture.nim`. Base e497dcf with S8cd and S8cb merged. Blockers
+`tests/s8cs_hooks_fixture.nim`. Base e497dcf with S8cd and S8cb merged, then batch 10
+(67f0b622, walker 252). Blockers
 B22 to B26 of the sort: clean false verdicts on the channel where main gave
 `sxUnknown`.
 

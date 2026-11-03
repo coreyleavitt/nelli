@@ -762,7 +762,11 @@ macro symexForAll*(s: typed, fn: typed,
           "(witness reconstruction has no type to bind generics to)",
           fn)
   let formalParams = impl[3]
-  let nParams = formalParams.len - 1   # [0] is the return type
+  # [0] is the return type. Count names, not IdentDefs: `x, a, b: int` is one
+  # IdentDefs holding three parameters (a name list, a type, a default).
+  var nParams = 0
+  for i in 1 ..< formalParams.len:
+    nParams += formalParams[i].len - 2
   let prop =
     if nParams <= 1:
       fn      # single-arg: `fn` IS the property

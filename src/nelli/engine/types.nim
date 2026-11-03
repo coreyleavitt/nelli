@@ -79,14 +79,11 @@ type
     gaps*:           seq[FindingGap]
       ## RFC-0005 S11 (§8.1). The per-cause view (`gaps()` on a
       ## `SymexResult`), projected to strings so this record stays free of
-      ## the `smt/types` dependency. RFC-0005 S8av: a `fromCache` sfUnsat /
-      ## sfUnknown verdict carries the SAME `gaps` the cold run that
-      ## produced it had (persisted alongside `soundness` —
-      ## `symex.nim`'s `CachedVerdict`); a `fromCache` sfSat witness or
-      ## sfRaised finding still reports `gaps: @[]` (those cache slots do
-      ## not carry a per-cause view — out of this slice's scope, see
-      ## RFC-0005 S8av's "Different mechanisms, reported and not fixed
-      ## here").
+      ## the `smt/types` dependency. A `fromCache` finding of any status
+      ## carries the `gaps` the cold run that produced it had, persisted
+      ## alongside `soundness` (RFC-0005 S8av for sfUnsat/sfUnknown, S8az for
+      ## sfSat/sfRaised). An entry with `soundness` but no stored gaps is a
+      ## hit with `gaps: @[]`; one with no `soundness` is a miss.
     annotationViolations*: seq[AnnotationViolation]
       ## RFC-0005 S11 (§13.3 i3 rendered). Every call site where a user
       ## annotation's promise was found false. Verdict-neutral and loud: the

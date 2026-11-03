@@ -6,8 +6,8 @@
 ## formal across a write through another name, on every setting. Anything in the
 ## second test is over the line: shared, whatever the setting.
 ##
-## Item 3. Nim evaluates a target once, and an index before the value where the
-## walk stays decided: each shape that stays decided is here.
+## Item 3. Nim evaluates a target once, and the value of `+=` and `inc` before the
+## location: each shape that stays decided is here.
 import std/[unittest, tables]
 
 type
@@ -40,7 +40,7 @@ var gb: bool
 var gc: char
 var ge: En
 var gf: float
-var gr: Rg
+var gRng: Rg
 var gi8: int8
 var gu: uint32
 var gdi: DI
@@ -64,7 +64,7 @@ proc fb(a: bool): bool = (gb = true; a)
 proc fc(a: char): char = (gc = 'z'; a)
 proc fe(a: En): En = (ge = enC; a)
 proc ff(a: float): float = (gf = 50.0; a)
-proc fr(a: Rg): Rg = (gr = 50; a)
+proc fr(a: Rg): Rg = (gRng = 50; a)
 proc fi8(a: int8): int8 = (gi8 = 50; a)
 proc fu(a: uint32): uint32 = (gu = 50; a)
 proc fdi(a: DI): int = (gdi = DI(50); int(a))
@@ -101,7 +101,7 @@ proc ido(a: O4): O4 = a
 var gN: int
 var gR: ref int
 var gRo: ref int
-var gP: ref int
+var gIdx: int
 var gSq: seq[int]
 var gSR: ref seq[int]
 var gStrR: ref string
@@ -111,11 +111,11 @@ proc getStrR(): ref string = (inc gN; gStrR)
 proc nextI(): int = (inc gN; 0)
 proc bump(v: var int) = inc v
 proc chgR(): int =
-  gR = gRo
-  5
+  new(gR)
+  1
 proc chgI(): int =
-  gN = 1
-  5
+  gIdx = 1
+  1
 
 suite "S8cq native":
   test "the allowlist: the formal keeps its value":
@@ -124,7 +124,7 @@ suite "S8cq native":
     gc = 'a'; check fc(gc) == 'a'
     ge = enA; check fe(ge) == enA
     gf = 1.0; check ff(gf) == 1.0
-    gr = 1; check fr(gr) == 1
+    gRng = 1; check fr(gRng) == 1
     gi8 = 1; check fi8(gi8) == 1
     gu = 1; check fu(gu) == 1
     gdi = DI(1); check fdi(gdi) == 1
@@ -145,7 +145,7 @@ suite "S8cq native":
     ginh.x = 1; check finh(ginh) == 50
     gbr.x = 1; check fbr(gbr) == 50
     gs = @[1]; check fs(gs) == 50
-    gstr = "a"; check fstr(gstr) == 'z'
+    gstr = ""; gstr.add('a'); check fstr(gstr) == 'z'
     gset = {}; check fset(gset)
     gar[0] = 1; check far(gar) == 50
 
@@ -189,19 +189,16 @@ suite "S8cq native":
     gSq.setLen(nextI() + 1)
     check gN == 1 and gSq.len == 1
 
-  test "stays decided: the order `+=` and `inc` read the location":
-    new gRo; gRo[] = 100
-    new gR; gR[] = 1
-    let old = gR
+  test "stays decided: the value is evaluated before the location is taken":
+    new gR; gR[] = 1; gRo = gR
     gR[] += chgR()
-    check old[] == 6 and gR[] == 100
-    new gR; gR[] = 1
-    let old2 = gR
+    check gRo[] == 1 and gR[] == 1
+    new gR; gR[] = 1; gRo = gR
     inc(gR[], chgR())
-    check old2[] == 6 and gR[] == 100
-    gSq = @[1, 2]; gN = 0
-    gSq[gN] += chgI()
-    check gSq == @[6, 2]
-    gSq = @[1, 2]; gN = 0
-    inc(gSq[gN], chgI())
-    check gSq == @[6, 2]
+    check gRo[] == 1 and gR[] == 1
+    gIdx = 0; gSq = @[1, 2, 3]
+    gSq[gIdx] += chgI()
+    check gSq[0] == 1 and gSq[1] == 3
+    gIdx = 0; gSq = @[1, 2, 3]
+    inc(gSq[gIdx], chgI())
+    check gSq[0] == 1 and gSq[1] == 3

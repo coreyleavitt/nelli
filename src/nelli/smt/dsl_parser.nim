@@ -7119,6 +7119,38 @@ proc byValueTouch(a: NimNode; touch: var seq[string]) =
   if copied and refActualHeld(bare, @[]): return
   if sharedTouch notin touch: touch.add sharedTouch
 
+proc seqViewElems(n: NimNode; i: int): seq[int]  ## RFC-0005 S8cq fwd decl
+proc formalIsVar(calleeSym: NimNode; k: int): bool  ## RFC-0005 S8cq fwd decl
+
+proc localOwnedActual(bare: NimNode): bool =
+  ## RFC-0005 S8cq. `bare` is a path in a local variable's own value, or a
+  ## by-value formal's: no global, no dereference, no `var` formal.
+  var t = bare
+  while true:
+    case t.kind
+    of nnkSym:
+      return not isModuleGlobal(t) and
+        symKind(t) in {nskVar, nskParam, nskForVar, nskTemp, nskResult} and
+        t.typeKind != ntyVar
+    of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr:
+      if t.len == 0: return false
+      t = t[0]
+    else: return false
+
+proc formalAddressTaken(impl: NimNode): bool =
+  ## RFC-0005 S8cq. The routine `impl` takes the address of a formal.
+  proc walk(n: NimNode): bool =
+    if n.kind in {nnkAddr, nnkHiddenAddr} or
+       (n.kind == nnkCall and n.len > 1 and n[0].kind == nnkSym and
+        n[0].strVal in ["addr", "unsafeAddr"]):
+      var steps: seq[NimNode]
+      let r = lvalueRoot(n[^1], steps)
+      if r != nil and r.kind == nnkSym and symKind(r) == nskParam: return true
+    for c in n:
+      if walk(c): return true
+    false
+  impl.len > 6 and walk(impl[6])
+
 proc byValueWritten(n, a, calleeSym: NimNode; k: int;
                     outer: seq[NimNode]): string =
   ## RFC-0005 S8cq. Why the call `n` is not known to leave alone the memory its
@@ -7130,6 +7162,8 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
   ## (`scanOpaqueEffects`, `opaqueArgEffects`). A method may be any override, and
   ## a `lent` result holds the memory past the call. The exact model is for
   ## RFC-0016.
+  # A `var` formal handed on to a `var` formal has no `nnkHiddenAddr` to mark it.
+  if formalIsVar(calleeSym, k): return ""
   let bare = byValueActual(a)
   if bare.isNil: return ""
   if not formalPassedByAddress(calleeSym, k) and
@@ -7156,15 +7190,28 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
     if n[j].kind notin {nnkHiddenAddr, nnkAddr}:
       scanRead(n[j], acc, seen, stack)
   if not acc.inert: return "memory the callee may write: " & acc.why
-  if acc.havoc.len > 0: return "memory the callee may write: a global or a capture"
+  # A local's memory has no other name but a pointer to it, and S8bs keeps that
+  # cell and the formal one location (`byValueLoc`): what the callee writes is
+  # not this memory, or is modelled as it. The pins are S8bs's and S8ca's. A
+  # routine actual may capture it, and the formal may hand out its own address.
+  let local = localOwnedActual(bare)
+  if local:
+    if formalAddressTaken(impl): return "a formal whose address the callee takes"
+    for j in 1 ..< n.len:
+      if n[j].typeKind == ntyProc: return "a routine passed in the same call"
+    acc = OpaqueEffects(inert: true, writesOnly: true)
+  elif acc.havoc.len > 0:
+    return "memory the callee may write: a global or a capture"
   opaqueArgEffects(n, calleeSym, acc)
   if not acc.inert: return "memory the callee may write: " & acc.why
-  if acc.heapAll or acc.heapTys.len > 0:
+  if not local and (acc.heapAll or acc.heapTys.len > 0):
     return "memory the callee may write through a ref or a pointer"
-  for s in syms:
-    if s.strVal in acc.havoc or
-       (isModuleGlobal(s) and globalIRName(s) in acc.havoc):
-      return "`" & s.strVal & "`, passed by address in the same call"
+  # RFC-0005 S8cn (item 5): `f(s[i], s)` keeps the element and the formal equal.
+  if seqViewElems(n, k + 1).len == 0:
+    for s in syms:
+      if s.strVal in acc.havoc or
+         (isModuleGlobal(s) and globalIRName(s) in acc.havoc):
+        return "`" & s.strVal & "`, passed by address in the same call"
   ""
 
 proc lvalueHasCall(n: NimNode): bool  ## RFC-0005 S8cq fwd decl
@@ -16292,10 +16339,12 @@ proc lvalueHasCall(n: NimNode): bool =
      nnkFloatLit .. nnkFloat64Lit, nnkStrLit .. nnkTripleStrLit:
     return false
   of nnkDotExpr, nnkBracketExpr, nnkDerefExpr, nnkHiddenDeref, nnkHiddenAddr,
-     nnkAddr, nnkCheckedFieldExpr, nnkHiddenStdConv, nnkHiddenSubConv, nnkConv,
+     nnkAddr, nnkHiddenStdConv, nnkHiddenSubConv, nnkConv,
      nnkPar, nnkObjDownConv, nnkObjUpConv, nnkChckRange, nnkChckRange64,
      nnkChckRangeF, nnkStringToCString, nnkCStringToString:
     discard
+  of nnkCheckedFieldExpr:   # its other child is the discriminant's check
+    return n.len > 0 and lvalueHasCall(n[0])
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix:
     if n.len == 0 or n[0].kind != nnkSym: return true
     if symKind(n[0]) != nskType:

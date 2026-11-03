@@ -1350,6 +1350,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cq_byvalue3",
             "tsymex_rfc0005_s8cq_byvalue4",
             "tsymex_rfc0005_s8cq_byvalue5",
+            "tsymex_rfc0005_s8cq_byvalue6",
             "tsymex_rfc0005_s8cq_twice",
             "tsymex_rfc0005_s8cq_twice2",
             "tsymex_rfc0005_s8cq_twice3",

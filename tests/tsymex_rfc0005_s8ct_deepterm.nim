@@ -21,22 +21,25 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import z3
 
-macro deepened(s: string; times: static int): untyped =
-  ## `s & "" & "" ...`, `times` concatenations deep: the value of `s`, as a term
-  ## `times` levels deep.
-  result = s
-  for i in 0 ..< times: result = infix(result, "&", newLit(""))
+macro deepened(t: untyped; s: string; times: static int): untyped =
+  ## `var t = s`, then `t = t & ""` `times` times: the value of `s`, as a term
+  ## `times` levels deep. Flat statements, not one nested expression: a
+  ## 300-deep expression overflowed the compiler's own stack on Windows
+  ## (0xC00000FD).
+  result = newStmtList(newVarStmt(t, s))
+  for i in 0 ..< times:
+    result.add newAssignment(t, infix(t, "&", newLit("")))
 
 proc deepSat(s: string; k: int) =
   ## `k == 5` makes the disjunction true whatever `s` holds, so `"b", 5` hits.
-  let t = deepened(s, 300)
+  deepened(t, s, 300)
   let a = k == 5
   if t.endsWith(re"b+") and (a or not t.contains(re"b")):
     symexTarget("sat")
 
 proc deepUnsat(s: string; k: int) =
   ## `a` is false, so `s` must end in `b` and hold none: no input hits.
-  let t = deepened(s, 300)
+  deepened(t, s, 300)
   let a = k == 5
   if k != 5 and t.endsWith(re"b+") and (a or not t.contains(re"b")):
     symexTarget("unsat")

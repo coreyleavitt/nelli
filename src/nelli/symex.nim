@@ -2811,6 +2811,18 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
         putGlobals.add quote do:
           wirePut(`wr`, `g`)
       let blob = if child.blob != nil: child.blob else: witId
+      # The host runs no child for a witness that does not convert (`convertible`
+      # below); the child's splat must not be compiled for one either.
+      var childConvertible = newLit(true)
+      for i in 0 ..< params.len:
+        let elem = nnkBracketExpr.newTree(wid, newLit(i))
+        childConvertible = infix(childConvertible, "and",
+          newCall(bindSym"compiles", newCall(paramTys[i], elem)))
+      let guarded = quote do:
+        when `childConvertible`:
+          `body`
+        else:
+          ReplayReport()
       preamble = quote do:
         proc `childProc`(`payload`: string): ReplayReport {.nimcall.} =
           var `rd` = initWireReader(`payload`)
@@ -2822,7 +2834,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           `getGlobals`
           `decl`
           result = (block:
-            `body`)
+            `guarded`)
         var `regId` {.global, used.} = replayChildEntry(`site`, `childProc`)
       runChild = quote do:
         block:

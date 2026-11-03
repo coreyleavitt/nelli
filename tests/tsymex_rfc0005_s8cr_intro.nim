@@ -21,6 +21,7 @@
 ## file: does its symbol cover every later write to the global? That is the
 ## §2.1 coverage invariant this slice writes down.
 import std/[unittest, math, strutils, tables]
+import s8ct_platform   ## RFC-0005 S8ct
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -369,7 +370,9 @@ template pinParamStore(sut: untyped; label: string) =
   let r = symexFind(sut, tLabel(label))
   checkpoint $r.status & " " & show(r.errors)
   check r.errors.hasKind(feGlobalHavoc)
-  check r.errors.hasKind(feReplayRefuted)
+  # RFC-0005 S8ct: a re-executed replay names why it cannot run (a proc value).
+  check r.errors.hasKind(feReplayRefuted) or
+        (replayReexecs and declinedNotMarshallable(r.errors))
   check r.status == sxUnknown
 
 suite "coverage invariant: a write the walk models reaches the global":

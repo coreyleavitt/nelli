@@ -14822,6 +14822,11 @@ median of a replayed `symexFind` against a clean one: 29.2 ms at e497dcf
   before its definition; every non-hit replay ended 0xC0000005 because Nim's
   frame chain pointed into the freed fiber stack (`fiberMain` has no stack
   trace); `typeMayHaveHook` read the entry macro's own file for every type.
+  The child's splat was compiled for a witness that does not convert to the
+  parameter (`seq[int]` for `seq[range 0..100]`), which the host never runs; it
+  is now guarded the same way. A 300-deep nested expression in `_deepterm`
+  overflowed the compiler's own 1 MB stack (0xC00000FD); it is now 300 flat
+  assignments, and compiles under `ulimit -s 1024`.
 
 *What still declines replay.* On Windows, the table in
 `docs/migration/0.9.0.md` §5a: a proc value or a call through one, a method, a

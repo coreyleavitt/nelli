@@ -6,6 +6,7 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/types
+import s8ct_platform
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -27,7 +28,7 @@ template confirmed(fn: typed, lbl: string): untyped =
     let r = clean(fn, lbl, sxSat)
     if r.status == sxSat:
       checkpoint $r.heapSnapshot
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
 template inBand(fn: typed, lbl: string, needle: string): untyped =
   ## A stated decline, never `sxUnsat`, never a walker fault.

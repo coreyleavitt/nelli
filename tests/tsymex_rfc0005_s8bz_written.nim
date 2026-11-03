@@ -5,6 +5,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
+import s8ct_platform
 import nelli/smt/canonicalize
 
 proc show(errs: seq[SymexErrorInfo]): string =
@@ -27,7 +28,7 @@ template confirmed(fn: typed, lbl: string): untyped =
     let r = clean(fn, lbl, sxSat)
     if r.status == sxSat:
       checkpoint $r.heapSnapshot
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
 template candidate(fn: typed, lbl: string,
                    raised: set[SymexStatusKind] = {}): untyped =
@@ -313,7 +314,7 @@ suite "S8bz (4): a dereference onto an unwritten candidate":
       let r = symexFind(sutDeref, tLabel("d"))
       checkpoint show(r.errors)
       check r.status == sxSat
-      check replayWitness(sutDeref, r.witness, tLabel("d"), {}) == roConfirmed
+      check replayedOrNotMarshallable(replayWitness(sutDeref, r.witness, tLabel("d"), {}), roConfirmed)
     block:
       let r = symexFind(sutDeref, tLabel("d_dead"))
       checkpoint show(r.errors)

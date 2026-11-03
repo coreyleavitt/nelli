@@ -4,6 +4,7 @@
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types
+import s8ct_platform
 import nelli/smt/canonicalize
 
 proc show(errs: seq[SymexErrorInfo]): string =
@@ -20,7 +21,10 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 template verdict(sut: untyped; target: SymexTarget; want: SymexStatusKind) =
   let r = symexFind(sut, target)
   checkpoint $r.status & " " & show(r.errors)
-  check r.status == want
+  # RFC-0005 S8ct: where replay re-executes, a witness the child cannot be
+  # handed declines the replay that would have decided a hit.
+  if want == sxUnsat: check r.status == want
+  else: check decidedOrNotMarshallable(r, want)
 
 type
   K = enum kA, kB, kC, kD

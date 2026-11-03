@@ -923,6 +923,10 @@ proc arrayIndexLow*(n: NimNode): int64 =
 
 proc namedRefPlaceholder(objSym: NimNode): IRType   ## fwd decl (RFC-0005 S8ar)
 
+const maxAliasesFollowed = 32
+  ## RFC-0005 S8ct. The plain aliases `classifyType` follows in a row.
+var aliasesFollowed {.compileTime.} = 0
+
 var objectsInClassification {.compileTime.}: seq[string]
   ## RFC-0005 S8ar. The `nominalId`s of the named object types whose record
   ## fields `classifyType` is classifying right now, innermost last. A Nim
@@ -1760,8 +1764,14 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let aliasImpl = resolved.getImpl
       if aliasImpl.kind == nnkTypeDef and aliasImpl.len >= 3 and
          aliasImpl[2].kind in {nnkSym, nnkBracketExpr} and
-         aliasImpl[2] != resolved:
-        return classifyType(aliasImpl[2])
+         aliasImpl[2] != resolved and aliasesFollowed < maxAliasesFollowed:
+        # RFC-0005 S8ct: on `Lock` (std/locks) this walk does not end, and the
+        # VM's call depth stopped the build of a program 6cbfe8f builds. Past the
+        # limit the type is unsupported, as it was before S8bl.
+        inc aliasesFollowed
+        result = classifyType(aliasImpl[2])
+        dec aliasesFollowed
+        return
     # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
     # Option 2). This text-match catch-all used to `error()` at MACRO-
     # EXPANSION time, aborting compilation of the whole test file before any

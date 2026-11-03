@@ -1281,7 +1281,10 @@ proc heapChainDepth*(ctx: Z3Context; refAst: Z3AnyAst): int =
                       ite: kindOf(ite(b, x, x + mkInt(ctx, 1)).raw))
   let kinds = heapChainKinds
   var memo: Table[int, int]
-  proc go(a: Z3AnyAst): int =
+  proc go(a: Z3AnyAst; level = 0): int =
+    # RFC-0005 S8ct: past the limit, a chain as deep as the limit, which the
+    # caller's dereference budget declines.
+    if level > termWalkMaxDepth: return termWalkMaxDepth
     if getAstKind(a) != akApp: return 0
     let id = astId(ctx, a.raw)
     if id in memo: return memo[id]
@@ -1290,10 +1293,10 @@ proc heapChainDepth*(ctx: Z3Context; refAst: Z3AnyAst): int =
     var d = 0
     if k == kinds.select and args.len == 2:
       let dom = arrayKey(ctx, ctx.checkErr Z3_get_sort(ctx.raw, args[0].raw))
-      d = if getSortKind(ctx, dom) == skUninterpreted: 1 + go(args[1])
-          else: go(args[0])
+      d = if getSortKind(ctx, dom) == skUninterpreted: 1 + go(args[1], level + 1)
+          else: go(args[0], level + 1)
     elif k == kinds.ite and args.len == 3:
-      d = max(go(args[1]), go(args[2]))
+      d = max(go(args[1], level + 1), go(args[2], level + 1))
     memo[id] = d
     d
   go(refAst)

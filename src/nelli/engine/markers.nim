@@ -95,9 +95,17 @@ proc symexCaptureEnd*(): HashSet[string] =
     symexCapture.active = false
     symexCapture.hits = initHashSet[string]()
 
+var symexHitSink* : proc (name: string; depth: int) {.nimcall, gcsafe.}
+  ## RFC-0005 S8ct. Set only inside a replay's child (`replayproc.nim`), which
+  ## must report a label as it is hit: the process may not live to report it
+  ## later. `depth` is the number of capture frames open around this one.
+
 proc symexCaptureRecord*(name: string) {.inline.} =
   if not symexCapture.isNil and symexCapture.active:
     symexCapture.hits.incl(name)
+    {.cast(gcsafe).}:
+      if symexHitSink != nil:
+        symexHitSink(name, symexCapture.enclosing.len)
 
 # ---- the markers themselves --------------------------------------------------
 

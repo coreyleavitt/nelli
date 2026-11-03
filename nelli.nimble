@@ -1387,5 +1387,10 @@ task test, "Run the test suite":
             # A proc value's aliasing shapes decline; walker 241->245.
             "tsymex_rfc0005_b9_integration",
             # A call declines before Nim's call depth limit ends the process.
-            "tsymex_rfc0005_b9_calldepth"]:
+            "tsymex_rfc0005_b9_calldepth",
+            # RFC-0005 S8ct: no replay runs in the host process, and a term too
+            # deep for a recursive walk leaves the process alive; walker 245->256.
+            "tsymex_rfc0005_s8ct_isolation",
+            "tsymex_rfc0005_s8ct_reexec",
+            "tsymex_rfc0005_s8ct_deepterm"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

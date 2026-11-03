@@ -48,6 +48,12 @@ proc severityOf(errs: seq[SymexErrorInfo]; k: SymexErrorKind): SymexErrorSeverit
     if e.kind == k: return e.severity
   raiseAssert "no " & $k
 
+var runsAtStart = 0
+proc runsSince(): int =
+  ## RFC-0005 S8ct: REAL executions of the SUTs below, counted by the host. A
+  ## replay runs in a child, so a counter in the SUT cannot report them.
+  replayExecutions() - runsAtStart
+
 var sideEffects = 0   ## counts REAL executions of the SUTs below: symex never
                       ## runs `fn`, so every increment during a `symexFind`
                       ## is a verdict-time replay
@@ -216,7 +222,7 @@ const s10NoReplay = block:
 suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
 
   test "a witness on a dcFreshSymbol-tainted path reports sxSat, replay confirmed":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10Confirm, tLabel("s10_confirm"))
     check r.status == sxSat
     check r.witness[1] == 42
@@ -227,47 +233,47 @@ suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
     check classOf(feGlobalHavoc) == dcFreshSymbol
     check rfc0005RawStatus == sxUnknown
     ## ... and the reporting path ran the real fn on the witness, exactly once.
-    check sideEffects == 1
+    check runsSince() == 1
     check not r.errors.hasKind(feReplayRefuted)
 
   test "a companion whose witness the real fn refutes stays sxUnknown":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10Refute, tLabel("s10_refute"))
     check r.status == sxUnknown
-    check sideEffects == 1                       ## replay RAN ...
+    check runsSince() == 1                       ## replay RAN ...
     check r.errors.hasKind(feReplayRefuted)      ## ... and refuted it
     check r.errors.severityOf(feReplayRefuted) == sevHint
     check r.errors.hasKind(feGlobalHavoc)
 
   test "an scSpurious-tainted raise is routed and replay-gated: confirmed -> sxRaised":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10RaiseConfirm, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[1] == 7
     check rfc0005RawStatus == sxUnknown     ## a candidate, not a winner
-    check sideEffects == 1
+    check runsSince() == 1
 
   test "an scSpurious-tainted raise the real fn does not raise stays sxUnknown":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10RaiseRefute, tRaisedExn("ValueError"))
     check r.status == sxUnknown
-    check sideEffects == 1
+    check runsSince() == 1
     check r.errors.hasKind(feReplayRefuted)
 
   test "an ineligible (⊤-tainted) candidate is never executed":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10Ineligible, tLabel("s10_ineligible"))
     check r.status == sxUnknown
     check r.errors.hasKind(feOpaqueCallUnmodelled)
-    check sideEffects == 0
+    check runsSince() == 0
     check not r.errors.hasKind(feReplayRefuted)
 
   test "a clean witness is reported without running fn":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10Clean, tLabel("s10_clean"))
     check r.status == sxSat
-    check sideEffects == 0
+    check runsSince() == 0
 
   test "replay inside a user's active capture leaves that capture intact":
     symexCaptureBegin()
@@ -280,24 +286,24 @@ suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
     check "s10_confirm" notin hits
 
   test "a converted witness (Rune rendered as int) confirms on a hit":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10RuneConfirm, tLabel("s10_rune_confirm"))
     check r.status == sxSat
-    check sideEffects == 1
+    check runsSince() == 1
 
   test "a converted witness's miss is inconclusive, never a refutation":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10RuneRefute, tLabel("s10_rune_refute"))
     check r.status == sxUnknown
-    check sideEffects == 1                       ## it ran ...
+    check runsSince() == 1                       ## it ran ...
     check not r.errors.hasKind(feReplayRefuted)  ## ... but a conversion may round
 
   test "a non-void fn is replayed with its result discarded":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10NonVoid, tLabel("s10_nonvoid"))
     check r.status == sxSat
     check r.witness[1] == 42
-    check sideEffects == 1
+    check runsSince() == 1
 
 suite "RFC-0005 S10 (b) -- parseInt's `+` / `_` over-report, classified by replay":
 
@@ -305,41 +311,41 @@ suite "RFC-0005 S10 (b) -- parseInt's `+` / `_` over-report, classified by repla
     # RFC-0005 S8b: the `+` sign is modelled exactly (`rawParseInt`), so
     # "+5" parses and the ValueError target is unreachable -- a clean
     # verdict with no candidate to replay.
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10ParsePlusDigit, tRaisedExn("ValueError"))
     check r.status == sxUnsat
     check not r.errors.hasKind(feReplayRefuted)
-    check sideEffects == 0
+    check runsSince() == 0
 
   test "\"1_0\": `_` is a digit separator in Nim -- refuted, sxUnknown":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10ParseUnderscore, tRaisedExn("ValueError"))
     check r.status == sxUnknown
     check r.errors.hasKind(feReplayRefuted)
-    check sideEffects == 1
+    check runsSince() == 1
 
   test "\"+x\": Nim raises too -- since S8b an exact, clean sxRaised, no replay":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10ParsePlusAlpha, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] == "+x"
-    check sideEffects == 0
+    check runsSince() == 0
 
   test "\"1_x\": Nim raises too -- the lax raise is confirmed, sxRaised":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10ParseUnderscoreAlpha, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] == "1_x"
-    check sideEffects == 1
+    check runsSince() == 1
 
   test "the exact half stays a clean sxRaised, no replay":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10ParseAlpha, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedWitness[0] == "abc"
-    check sideEffects == 0
+    check runsSince() == 0
 
   test "seParseIntLaxSyntax is dcFreshSymbol: the lax raise is replay-eligible, never voids sxUnsat":
     check classOf(seParseIntLaxSyntax) == dcFreshSymbol
@@ -355,33 +361,33 @@ suite "RFC-0005 S10 (c) -- symexFindAllWitnesses / symexForAll, and the cache":
 
   test "symexFindAllWitnesses: a confirmed candidate is sfSat, and is persisted as one":
     let db = inMemoryDatabase()
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let fs = symexFindAllWitnesses(s10AllConfirm, db)
     let f = fs.findingFor("label(\"s10_all_confirm\")")
     check f.isSome
     check f.get.status == sfSat
     check f.get.witnessChoices.len > 0
     check not f.get.fromCache
-    check sideEffects == 1
+    check runsSince() == 1
     ## Replay precedes persist: the SAT slot holds the replayed witness, and
     ## a second run serves it without replaying again.
     let stored = loadSymexWitnesses(db, s10AllConfirm, tLabel("s10_all_confirm"),
                                     defaultSymexSettings())
     check stored.len == 1
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let again = symexFindAllWitnesses(s10AllConfirm, db).findingFor(
       "label(\"s10_all_confirm\")")
     check again.isSome and again.get.status == sfSat and again.get.fromCache
-    check sideEffects == 0
+    check runsSince() == 0
 
   test "symexFindAllWitnesses: a refuted candidate is sfUnknown, never persisted as sat":
     let db = inMemoryDatabase()
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let f = symexFindAllWitnesses(s10AllRefute, db).findingFor(
       "label(\"s10_all_refute\")")
     check f.isSome
     check f.get.status == sfUnknown
-    check sideEffects == 1
+    check runsSince() == 1
     check loadSymexWitnesses(db, s10AllRefute, tLabel("s10_all_refute"),
                              defaultSymexSettings()).len == 0
     let storedVerdict = loadSymexVerdict(db, s10AllRefute,
@@ -433,17 +439,17 @@ suite "RFC-0005 S10 (e) -- the opt-out: SymexSettings.replay = false":
     check fs.findingFor("label(\"s10_unlinkable\")").isSome
 
   test "a candidate a replay would confirm stays sxUnknown under the opt-out, and fn never runs":
-    sideEffects = 0
+    runsAtStart = replayExecutions()
     let r = symexFind(s10Confirm, tLabel("s10_confirm"), s10NoReplay)
     check r.status == sxUnknown
     check r.errors.hasKind(feGlobalHavoc)
     check not r.errors.hasKind(feReplayRefuted)
-    check sideEffects == 0
+    check runsSince() == 0
     let f = symexFindAllWitnesses(s10AllConfirm, inMemoryDatabase(),
                                   s10NoReplay).findingFor(
       "label(\"s10_all_confirm\")")
     check f.isSome and f.get.status == sfUnknown
-    check sideEffects == 0
+    check runsSince() == 0
 
   test "replay participates in the cache key only when off (default keys unchanged)":
     var on = defaultSymexSettings()

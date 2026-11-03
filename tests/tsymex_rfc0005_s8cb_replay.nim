@@ -1,15 +1,18 @@
 ## RFC-0005 (soundness channels) slice S8cb -- the replay's remainder:
 ## (6) a replay started from a thread with a stack of its own runs on one of
 ## that size, and (7) one abandoned never-ending replay leaves later replays
-## alone unless they may share state with it.
+## alone.
 ##
-## Item 7's replays never end, so no test drains them: the process's exit ends
-## their threads. They block on a channel, and take no CPU from the rest of the
-## run.
+## RFC-0005 S8ct: every replay now runs in a child process, killed at its bound.
+## Item 7's replays leave nothing behind, so no later replay contends with them,
+## including one that S8cb had to refuse for sharing state with them. Where a
+## replay re-executes the program (no `fork`), one that reaches what it cannot
+## hand over declines instead.
 import std/[unittest, strutils, random]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import nelli/smt/replayproc
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -30,7 +33,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 var s8cbBig = 0
 
-proc s8cbBigFrame(v: int) =
+proc s8cbBigFrame(v: int) {.symexOpaque.} =
   var buf: array[3 shl 20, byte]
   buf[v and 1023] = 1
   s8cbBig = int(buf[v and 1023]) + int(buf[(v + 1) and 1023])
@@ -38,9 +41,14 @@ proc s8cbBigFrame(v: int) =
 when defined(linux) and compileOption("threads"):
   import std/posix
 
+  proc sutBig(v: int) =
+    symexAssume(v == 3)
+    s8cbBigFrame(v)
+    if s8cbBig == 1: symexTarget("big")
+
   type ForeignResult = object
     size: int
-    run: ReplayRun
+    status: SymexStatus
     big: int
 
   var foreignOut: ForeignResult
@@ -51,10 +59,8 @@ when defined(linux) and compileOption("threads"):
 
   proc foreignBody() =
     {.cast(gcsafe).}:
-      foreignOut.size = replayStackSize()
-      foreignOut.run = runReplayBounded(proc () {.closure, gcsafe.} =
-        {.cast(gcsafe).}:
-          s8cbBigFrame(3), 30_000)
+      foreignOut.size = callerStackSize()
+      foreignOut.status = symexFind(sutBig, tLabel("big")).status
       foreignOut.big = s8cbBig
 
   proc foreignMain(x: pointer): pointer {.noconv.} =
@@ -72,13 +78,13 @@ when defined(linux) and compileOption("threads"):
     discard pthread_attr_destroy(addr a)
 
   proc nimThreadSize(x: ptr int) {.thread.} =
-    x[] = replayStackSize()
+    x[] = callerStackSize()
 
 # ---- (7) a never-ending replay -----------------------------------------------
 #
 # RED before S8cb: a replay that never ends left every later replay of the
-# process `roContended` (`sxUnknown`), whatever it ran. A replay now contends
-# only with what it may share.
+# process `roContended` (`sxUnknown`), whatever it ran. S8ct: it now contends with
+# nothing, because its child is gone.
 
 var s8cbHangCount = 0
 var s8cbOnlyForLater = 0
@@ -211,8 +217,9 @@ when defined(linux) and compileOption("threads"):
       onForeignThread(16 shl 20)
       check foreignOut.size >= (15 shl 20)
       check foreignOut.size <= (17 shl 20)
-      check foreignOut.run == rrEnded
-      check foreignOut.big == 1
+      check foreignOut.status == sxSat
+      # The write was the child's.
+      check foreignOut.big == 0
     test "and a Nim thread keeps its own":
       var th: Thread[ptr int]
       var size = 0
@@ -224,83 +231,57 @@ when defined(linux) and compileOption("threads"):
       var rl: RLimit
       check getrlimit(RLIMIT_STACK, rl) == 0
       if int(rl.rlim_cur) > 0 and int(rl.rlim_cur) <= (256 shl 20):
-        check replayStackSize() == int(rl.rlim_cur)
+        check callerStackSize() == int(rl.rlim_cur)
 
 suite "RFC-0005 S8cb: the thread variables a replay carries":
   test "named behind a routine of the same signature":
     s8cbTv = 7
     let r = symexFind(sutTvBehind, tLabel("tv"))
     checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat or r.errors.hasKind(feReplayDeclined)
+
+template confirmedOrDeclined(r: untyped) =
+  checkpoint $r.status & " " & show(r.errors)
+  when replayForks:
     check r.status == sxSat
+  else:
+    check r.status == sxSat or r.errors.hasKind(feReplayDeclined)
+  check not r.errors.hasKind(feReplayTimedOut)
 
 when compileOption("threads"):
   suite "RFC-0005 S8cb (7): a never-ending replay":
-    test "it is abandoned":
+    test "it ends at its bound":
       let r = symexFind(sutHang, tLabel("h"),
                         SymexSettings(replayTimeoutMs: 100))
       checkpoint $r.status & " " & show(r.errors)
       check r.status != sxSat
-      check r.errors.hasKind(feReplayTimedOut)
-      check replayAbandonedLive() >= 1
+      check r.errors.hasKind(feReplayTimedOut) or r.errors.hasKind(feReplayDeclined)
     test "a later replay of unrelated code proceeds":
-      let r = symexFind(sutDisjoint, tLabel("d"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status == sxSat
-      check not r.errors.hasKind(feReplayTimedOut)
+      confirmedOrDeclined(symexFind(sutDisjoint, tLabel("d")))
     test "and of code with a global of its own":
-      let r = symexFind(sutDisjointGlobal, tLabel("dg"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status == sxSat
-      check not r.errors.hasKind(feReplayTimedOut)
+      confirmedOrDeclined(symexFind(sutDisjointGlobal, tLabel("dg")))
     test "a second never-ending replay":
       let r = symexFind(sutHangWriting, tLabel("h"),
                         SymexSettings(replayTimeoutMs: 100))
       checkpoint $r.status & " " & show(r.errors)
       check r.status != sxSat
-      check r.errors.hasKind(feReplayTimedOut)
-      check replayAbandonedLive() >= 2
+      check r.errors.hasKind(feReplayTimedOut) or r.errors.hasKind(feReplayDeclined)
+      # Its write stayed in its child.
+      check s8cbHangCount == 0
     test "still leaves unrelated code alone":
-      let r = symexFind(sutDisjointGlobal, tLabel("dg"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status == sxSat
-    test "but a replay reading what it writes stays contended":
-      let r = symexFind(sutSharing, tLabel("s"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
-      check r.errors.hasKind(feReplayTimedOut)
-      check "still running" in show(r.errors)
+      confirmedOrDeclined(symexFind(sutDisjointGlobal, tLabel("dg")))
+    test "and a replay reading what it wrote":
+      confirmedOrDeclined(symexFind(sutSharing, tLabel("s")))
     test "through any depth of calls":
-      let r = symexFind(sutSharingDeep, tLabel("sd"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
-      check "still running" in show(r.errors)
+      confirmedOrDeclined(symexFind(sutSharingDeep, tLabel("sd")))
     test "and through the stdlib's own state":
       let h = symexFind(sutHangRandom, tLabel("h"),
                         SymexSettings(replayTimeoutMs: 100))
-      check h.errors.hasKind(feReplayTimedOut)
-      let r = symexFind(sutRandom, tLabel("r"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
-      check "still running" in show(r.errors)
-    test "a call through a proc value may share anything":
-      let r = symexFind(sutProcValue, tLabel("pv"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
-      check "still running" in show(r.errors)
+      check h.status != sxSat
+      confirmedOrDeclined(symexFind(sutRandom, tLabel("r")))
+    test "a call through a proc value":
+      confirmedOrDeclined(symexFind(sutProcValue, tLabel("pv")))
     test "as may a method":
-      let r = symexFind(sutMethod, tLabel("m"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
-      check "still running" in show(r.errors)
+      confirmedOrDeclined(symexFind(sutMethod, tLabel("m")))
     test "and a foreign routine":
-      let r = symexFind(sutForeign, tLabel("f"))
-      checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
-      check "still running" in show(r.errors)
-    test "a caller not naming a footprint is contended":
-      let r = runReplayBounded(proc () {.closure, gcsafe.} = discard, 5000)
-      check r == rrContended
-    test "nor does a disjoint footprint":
-      let r = runReplayBounded(proc () {.closure, gcsafe.} = discard, 5000,
-                               ReplayFootprint(tokens: @["nothing-shared"]))
-      check r == rrEnded
+      confirmedOrDeclined(symexFind(sutForeign, tLabel("f")))

@@ -1057,7 +1057,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## their decline. 241->245.
     ## RFC-0005 S8cb (S8bo onto batch 7, and S8bo's remainder). Provisional
     ## 243 (S8bz holds 241, S8cf 242). 237->243.
-    check symexWalkerVersion == "245"
+    ## RFC-0005 S8ct (no replay runs in the host process; S8cb stacked on the
+    ## channel). Provisional 256. 245->256.
+    check symexWalkerVersion == "256"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

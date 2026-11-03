@@ -2632,6 +2632,19 @@ type
                           ## `settleCandidate` like `feReplayRefuted`, so it
                           ## never enters `runTaint`; always `sevHint`.
                           ## `classOf` is `dcFreshSymbol`, for the same reason.
+    feReplayCrashed       ## RFC-0005 S8ct (§4.2 `roCrashed`). NOT a degrade:
+                          ## the verdict-time replay of a candidate's witness
+                          ## ended its child process (an exit, a signal, a
+                          ## system exception) before it reached the target.
+                          ## The message says how, and on what input. Recorded
+                          ## by `settleCandidate` like `feReplayRefuted`, so it
+                          ## never enters `runTaint`; always `sevHint`.
+    feReplayDeclined      ## RFC-0005 S8ct (§4.2 `roDeclined`). NOT a degrade:
+                          ## no child could run this replay (it could not be
+                          ## started, or, on a platform where the program is
+                          ## re-executed, the state the SUT may reach cannot be
+                          ## handed to one), so it did not run. As
+                          ## `feReplayRefuted`, always `sevHint`.
     feReplayRefuted       ## RFC-0005 S10 (§4.2 `roRefuted`). NOT a degrade:
                           ## the verdict-time replay of a candidate's witness
                           ## ran the real SUT to completion without reaching
@@ -3845,6 +3858,8 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feReplayTimedOut: dcFreshSymbol
     # RFC-0005 S8be. As `feReplayRefuted`: verdict-time, never in
     # `runTaint`, and only a `dcFreshSymbol`-only path is replayed.
+  of feReplayCrashed, feReplayDeclined: dcFreshSymbol
+    # RFC-0005 S8ct. As `feReplayRefuted`.
   # RFC-0005 S8g.
   of feConvFloatToIntUndefined: dcFreshSymbol
     # The out-of-range float -> int continuation: a fresh value of the

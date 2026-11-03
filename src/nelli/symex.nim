@@ -30,6 +30,7 @@
 ##                            normal-run input domain
 
 import std/[macros, sets, tables, algorithm, options, strutils, importutils]
+from std/os import extractFilename
 import z3
 export z3.z3FullVersion
 import ./choice
@@ -37,6 +38,9 @@ export choice
 import ./smt/dsl
 export dsl
 import ./smt/scan
+import ./smt/replayproc   ## RFC-0005 S8ct
+import ./smt/replaywire   ## RFC-0005 S8ct
+export replayExecutions
 from ./smt/scoped_names import isModuleGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
@@ -1944,351 +1948,39 @@ template symexTransparent*() {.pragma.}
 # "Plumbing"). `emitReplayWitness` is the macro-time half S10 splices into
 # the entry macros, which already hold the parsed `params`.
 #
-# CONTRACT CHANGE (§4.2, for §8.1 / S11's migration note): now that it is wired,
-# `symexFind` EXECUTES `fn` on solver-chosen inputs, where it never ran `fn`
-# before. Replay performs the SUT's side effects FOR REAL, at verdict time, in
-# the caller's process -- and a `scSpurious` path is tainted precisely because
-# it ran through an unmodelled (often effectful: `echo`/`writeFile`, #137) call.
+# CONTRACT (§4.2, for §8.1 / S11's migration note): `symexFind` EXECUTES `fn` on
+# solver-chosen inputs, where it never ran `fn` before. A `scSpurious` path is
+# tainted precisely because it ran through an unmodelled (often effectful:
+# `echo`/`writeFile`, #137) call. Effects outside the process (a file written)
+# happen for real. Effects inside it do not reach the host.
 #
-# NON-TERMINATION (§4.2). Invariant 3 is preserved first by the ELIGIBILITY
-# GATE -- a `dcFabricated` (k-unroll survivor) witness is by §0.3 an input on
-# which the real program may still be looping, and the gate declines it
-# without running it. RFC-0005 S8be: an eligible witness may still drive a
-# routine the model never walked (a foreign or opaque body) into a loop, and
-# the replay then never returned. Each replay now runs on a thread of its own
-# and is abandoned past `SymexSettings.replayTimeoutMs` (`roTimedOut`,
-# `runReplayBounded`). Abandoned, not stopped: no thread can be stopped
-# safely in-process, so it keeps running (and keeps whatever it holds) until
-# it ends or the process does.
-
-# RFC-0005 S8bo. An abandoned replay's thread runs on: it may write what a
-# later replay reads, while that one runs (a confirmation no single-threaded
-# run of the routine makes). A replay that starts while one is still running
-# is therefore neither confirmed nor refuted (`rrContended`, `roContended`).
-# And the replay thread is not the calling thread: it runs the routine on a
-# stack the calling thread's size (`replayStackSize`), with the calling
-# thread's values of the thread variables the routine may reach
-# (`emitReplayWitness`), which it hands back when it ends.
+# RFC-0005 S8ct. No replay runs in the host process. A witness on a path the
+# model may have wrong can reach anything the real program can: `quit`, a raw C
+# `exit`, `abort`, a nil dereference, unbounded recursion, heap exhaustion, a wild
+# write. No in-process interception contains the last few, and a corrupted host
+# is what must not happen. So each replay runs in a child (`replayproc.nim`) and
+# the host keeps only what the child reported: `fork` on POSIX, a re-execution of
+# the program on Windows. A replay that cannot get a child does not run, and the
+# verdict stays declined (`roDeclined`).
 #
-# RFC-0005 S8cb (item 7). One never-ending replay must not take every later
-# replay with it. Nothing can stop the thread, but only state both may reach
-# makes their interleaving observable: each replay carries its footprint
-# (`replayFootprint`, read at macro time), and a replay is contended only by
-# an abandoned one whose footprint meets its own.
+# NON-TERMINATION (§4.2). The eligibility gate declines a `dcFabricated` (k-unroll
+# survivor) witness without running it. Any other witness may still drive a routine
+# the model never walked into a loop: the child is killed past
+# `SymexSettings.replayTimeoutMs` (`roTimedOut`). Nothing is left running, so one
+# replay's state cannot meet another's.
+#
+# Re-execution hands the child what the SUT may reach (`replayFootprint`). A SUT
+# that may reach what cannot be handed over does not run.
 
-type ReplayFootprint* = object
-  ## RFC-0005 S8cb. The state a replay may share with another: the module-level
-  ## variables (and C routines of the stdlib) its code names, transitively.
-  ## `open`: some code it may run cannot be read, so it may share anything.
-  open*: bool
-  tokens*: seq[string]
-
-type ReplayRun* = enum
-  ## RFC-0005 S8bo. How one bounded replay (`runReplayBounded`) ended.
-  rrEnded       ## it ended, and no abandoned replay ran beside it
-  rrAbandoned   ## it ran past its bound and was abandoned (`roTimedOut`)
-  rrContended   ## it ended, but an earlier abandoned replay was still
-                ## running when it started (`roContended`)
-
-when compileOption("threads"):
-  import std/[typedthreads, atomics, monotimes, times, os, locks]
-
-  type ReplayJob = object
-    ## RFC-0005 S8be. One bounded replay, in shared memory: the body and its
-    ## completion flag. Leaked, with its `Thread`, when the replay is
-    ## abandoned -- the thread still reads both.
-    ## RFC-0005 S8bo: and the stack to run the body on (0: the thread's own).
-    body: proc () {.closure, gcsafe.}
-    done: Atomic[bool]
-    stackSize: int
-    footprint: ReplayFootprint   ## RFC-0005 S8cb
-    th: ptr Thread[ptr ReplayJob]
-
-  var abandonedLock: Lock
-  var abandoned: seq[ptr ReplayJob]
-    ## RFC-0005 S8bo. Every replay abandoned so far whose thread has not been
-    ## seen to end (`abandonedLock`).
-  initLock(abandonedLock)
-
-  proc reapAbandoned(fp: ReplayFootprint = ReplayFootprint(open: true)): int =
-    ## RFC-0005 S8bo. Joins and frees the abandoned replays that have ended;
-    ## the number still running. RFC-0005 S8cb: of those a replay of footprint
-    ## `fp` may share state with.
-    withLock abandonedLock:
-      var live: seq[ptr ReplayJob]
-      for j in abandoned:
-        if j.done.load:
-          joinThread(j.th[])
-          `=destroy`(j[])
-          deallocShared(j.th)
-          deallocShared(j)
-        else:
-          live.add j
-      {.cast(gcsafe).}:
-        abandoned = live
-      for j in live:
-        var meets = fp.open or j.footprint.open
-        if not meets:
-          for t in fp.tokens:
-            if t in j.footprint.tokens:
-              meets = true
-              break
-        if meets: inc result
-
-  proc replayAbandonedLive*(): int =
-    ## RFC-0005 S8bo. How many abandoned replays are still running.
-    reapAbandoned()
-
-  when defined(windows):
-    proc getCurrentThreadStackLimits(lo, hi: ptr uint)
-      {.importc: "GetCurrentThreadStackLimits", stdcall, dynlib: "kernel32".}
-    proc convertThreadToFiberR(param: pointer): pointer
-      {.importc: "ConvertThreadToFiber", stdcall, dynlib: "kernel32".}
-    proc convertFiberToThreadR(): int32
-      {.importc: "ConvertFiberToThread", stdcall, dynlib: "kernel32".}
-    proc createFiberExR(stackCommit, stackReserve: csize_t, flags: uint32,
-                        startAddr, param: pointer): pointer
-      {.importc: "CreateFiberEx", stdcall, dynlib: "kernel32".}
-    proc deleteFiberR(f: pointer)
-      {.importc: "DeleteFiber", stdcall, dynlib: "kernel32".}
-    proc switchToFiberR(f: pointer)
-      {.importc: "SwitchToFiber", stdcall, dynlib: "kernel32".}
-
-    type FiberReplay = object
-      job: ptr ReplayJob
-      mainFiber: pointer
-
-    proc replayFiberMain(param: pointer) {.stdcall.} =
-      let f = cast[ptr FiberReplay](param)
-      f.job.body()
-      switchToFiberR(f.mainFiber)
-
-    proc runOnStack(job: ptr ReplayJob) =
-      ## RFC-0005 S8bo. `job.body` on a fiber whose stack reserve is
-      ## `job.stackSize` (the calling thread's). The body catches what it
-      ## raises: nothing unwinds across the switch.
-      let mainFiber = convertThreadToFiberR(nil)
-      if mainFiber == nil:
-        job.body()
-        return
-      var f = FiberReplay(job: job, mainFiber: mainFiber)
-      let fib = createFiberExR(csize_t(64 * 1024), csize_t(job.stackSize), 1,
-                               cast[pointer](replayFiberMain), addr f)
-      if fib == nil:
-        discard convertFiberToThreadR()
-        job.body()
-        return
-      # The fiber's entry never returns through its epilogue: keep the
-      # debug build's frame chain off its (freed) stack, as
-      # `runSymexWithBigStack` does.
-      when declared(getFrameState) and declared(setFrameState):
-        let savedFrames = getFrameState()
-      switchToFiberR(fib)
-      when declared(getFrameState) and declared(setFrameState):
-        setFrameState(savedFrames)
-      deleteFiberR(fib)
-      discard convertFiberToThreadR()
-
-    proc callerStackSize(): int =
-      var lo, hi: uint
-      getCurrentThreadStackLimits(addr lo, addr hi)
-      int(hi - lo)
-
-  elif defined(linux) or defined(macosx) or defined(freebsd) or
-       defined(netbsd) or defined(dragonfly):
-    # RFC-0005 S8cb (item 6): every POSIX system with `makecontext`. OpenBSD
-    # has none, so stays on the thread's own stack (below).
-    import std/posix
-
-    when defined(macosx):
-      # <ucontext.h> refuses to compile otherwise.
-      {.localPassC: "-D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE".}
-
-    type
-      StackT {.importc: "stack_t", header: "<signal.h>", bycopy.} = object
-        ss_sp: pointer
-        ss_flags: cint
-        ss_size: csize_t
-      UContext {.importc: "ucontext_t", header: "<ucontext.h>",
-                 bycopy.} = object
-        uc_link: ptr UContext
-        uc_stack: StackT
-
-    proc getcontext(u: ptr UContext): cint
-      {.importc, header: "<ucontext.h>".}
-    proc makecontext(u: ptr UContext; fn: proc () {.noconv.}; argc: cint)
-      {.importc, header: "<ucontext.h>", varargs.}
-    proc swapcontext(o, u: ptr UContext): cint
-      {.importc, header: "<ucontext.h>".}
-
-    let mainThread = pthread_self()
-      ## The thread that initialised this module: the program's main one.
-
-    var coroJob {.threadvar.}: ptr ReplayJob
-
-    proc coroMain() {.noconv.} =
-      coroJob.body()   # returns to `uc_link`
-
-    proc runOnStack(job: ptr ReplayJob) =
-      ## RFC-0005 S8bo. `job.body` on a stack of `job.stackSize` bytes (the
-      ## calling thread's), with a guard page below it, as the kernel gives
-      ## the main thread: an overflow faults as it would there.
-      let page = int(sysconf(SC_PAGESIZE))
-      let size = (job.stackSize + page - 1) div page * page
-      let mem = mmap(nil, size + page, PROT_READ or PROT_WRITE,
-                     MAP_PRIVATE or MAP_ANONYMOUS, -1, 0)
-      if mem == MAP_FAILED:
-        job.body()
-        return
-      discard mprotect(mem, page, PROT_NONE)
-      var here, there: UContext
-      if getcontext(addr there) != 0:
-        discard munmap(mem, size + page)
-        job.body()
-        return
-      there.uc_stack.ss_sp = cast[pointer](cast[uint](mem) + uint(page))
-      there.uc_stack.ss_size = csize_t(size)
-      there.uc_link = addr here
-      coroJob = job
-      makecontext(addr there, coroMain, 0)
-      discard swapcontext(addr here, addr there)
-      discard munmap(mem, size + page)
-
-    when defined(linux):
-      proc pthread_getattr_np(t: Pthread; a: ptr Pthread_attr): cint
-        {.importc, header: "<pthread.h>".}
-    elif defined(macosx):
-      proc pthread_get_stacksize_np(t: Pthread): csize_t
-        {.importc, header: "<pthread.h>".}
-    elif defined(netbsd):
-      proc pthread_attr_get_np(t: Pthread; a: ptr Pthread_attr): cint
-        {.importc, header: "<pthread.h>".}
-    else:
-      proc pthread_attr_get_np(t: Pthread; a: ptr Pthread_attr): cint
-        {.importc, header: "<pthread_np.h>".}
-
-    proc pthread_attr_getstackRaw(a: ptr Pthread_attr; base: ptr pointer;
-                                  size: ptr csize_t): cint
-      {.importc: "pthread_attr_getstack", header: "<pthread.h>".}
-
-    proc threadStackSize(): int =
-      ## RFC-0005 S8cb (item 6). The size of this thread's stack, as the thread
-      ## library created it; 0 when it does not say.
-      when defined(macosx):
-        result = int(pthread_get_stacksize_np(pthread_self()))
-      else:
-        var a: Pthread_attr
-        when defined(linux):
-          if pthread_getattr_np(pthread_self(), addr a) != 0: return 0
-        else:
-          if pthread_attr_init(addr a) != 0: return 0
-          if pthread_attr_get_np(pthread_self(), addr a) != 0:
-            discard pthread_attr_destroy(addr a)
-            return 0
-        var base: pointer
-        var size: csize_t
-        if pthread_attr_getstackRaw(addr a, addr base, addr size) == 0:
-          result = int(size)
-        discard pthread_attr_destroy(addr a)
-
-    proc callerStackSize(): int =
-      ## The main thread's stack is its `RLIMIT_STACK` (capped; an unlimited
-      ## one at 64 MiB). RFC-0005 S8cb: any other thread's is what the thread
-      ## library created (a thread Nim did not start may have any size).
-      if pthread_equal(pthread_self(), mainThread) == 0:
-        return threadStackSize()
-      var rl: RLimit
-      if getrlimit(RLIMIT_STACK, rl) != 0: return 0
-      let cur = int(rl.rlim_cur)
-      if cur <= 0 or cur > (256 shl 20): 64 shl 20 else: cur
-
-  else:
-    proc runOnStack(job: ptr ReplayJob) = job.body()
-    proc callerStackSize(): int = 0
-
-  proc replayThreadMain(job: ptr ReplayJob) {.thread.} =
-    if job.stackSize > 0: runOnStack(job)
-    else: job.body()
-    # The body hands refs back to the calling thread (the escaped
-    # exception, in the closure's environment). ORC registers a ref whose
-    # count drops above zero as a cycle root in THIS thread's root list;
-    # the calling thread's final decrement would then unregister it from
-    # its own (a SIGSEGV in `unregisterCycle`). A collection here
-    # empties this thread's list and clears each survivor's root index.
-    when defined(gcOrc): GC_runOrc()
-    job.done.store(true)
-
-  proc replayStackSize*(): int =
-    ## RFC-0005 S8bo. The stack a replay started from this thread runs on:
-    ## this thread's own size where it is known, else Nim's thread stack
-    ## (2 MiB on 64-bit). RFC-0005 S8cb: known for every thread on Windows,
-    ## Linux, macOS, FreeBSD, NetBSD and DragonFly.
-    let s = callerStackSize()
-    if s > 0: s else: 256 * 1024 * sizeof(int)
-else:
-  proc replayAbandonedLive*(): int = 0
-    ## RFC-0005 S8bo. A build without threads abandons no replay.
-  proc replayStackSize*(): int = 0
-    ## RFC-0005 S8bo. A build without threads replays on the calling thread.
-
-proc runReplayBounded*(body: proc () {.closure, gcsafe.};
-                       timeoutMs: int;
-                       footprint: ReplayFootprint =
-                         ReplayFootprint(open: true)): ReplayRun =
-  ## RFC-0005 S8be. Run one replay `body`; `rrAbandoned` when it did not end
-  ## within `timeoutMs` and was abandoned. `timeoutMs <= 0`, or a build
-  ## without threads, runs it on the calling thread with no bound.
-  ## RFC-0005 S8bo: `rrContended` when it ended but an earlier abandoned
-  ## replay was still running as it started, so either may have written
-  ## what the other read. The thread runs `body` on a stack the calling
-  ## thread's size (`replayStackSize`); the caller (`emitReplayWitness`)
-  ## carries its thread variables in and out.
-  ## RFC-0005 S8cb: only an abandoned replay whose footprint meets `footprint`
-  ## (`replayFootprint`) contends it; a caller that does not know its body's
-  ## footprint leaves it open, which any of them does.
-  when compileOption("threads"):
-    let contended = reapAbandoned(footprint) > 0
-    if timeoutMs <= 0:
-      body()
-      return (if contended: rrContended else: rrEnded)
-    # RFC-0005 batch 5: the other direction of `replayThreadMain`'s
-    # collection. A ref the calling thread holds may sit in ITS root list
-    # (a cyclic-capable object -- `ref object of RootObj` -- whose count
-    # dropped above zero here: a `var fb = FarmBox(f: Farm(..)); gFB = fb`
-    # left at a block's end). The replay's own final decrement of it
-    # (the SUT overwriting `gFB`) would unregister it from the replay
-    # thread's list instead (a SIGSEGV in `unregisterCycle`,
-    # `tsymex_rfc0005_s8bg_remainder` once S8bg landed on S8be). A
-    # collection here empties the calling thread's list first; the calling
-    # thread only polls until the replay ends.
-    when defined(gcOrc): GC_runOrc()
-    let job = cast[ptr ReplayJob](allocShared0(sizeof(ReplayJob)))
-    job.body = body
-    job.stackSize = callerStackSize()
-    job.footprint = footprint
-    let th = cast[ptr Thread[ptr ReplayJob]](
-      allocShared0(sizeof(Thread[ptr ReplayJob])))
-    job.th = th
-    createThread(th[], replayThreadMain, job)
-    let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
-    var pause = 1
-    while not job.done.load:
-      if getMonoTime() >= deadline:
-        # Abandoned: `job` and `th` stay allocated until it is seen to end.
-        withLock abandonedLock:
-          {.cast(gcsafe).}:
-            abandoned.add job
-        return rrAbandoned
-      sleep(pause)
-      pause = min(pause * 2, 20)
-    joinThread(th[])
-    `=destroy`(job[])
-    deallocShared(job)
-    deallocShared(th)
-    if contended: rrContended else: rrEnded
-  else:
-    body()
-    rrEnded
+type ReplayFootprint = object
+  ## RFC-0005 S8cb. The state a replay may reach beyond its arguments: the
+  ## module-level variables (and C routines of the stdlib) its code names,
+  ## transitively. `open`: some code it may run cannot be read, so it may reach
+  ## anything. RFC-0005 S8ct: `globals` holds the variables' symbols, which a
+  ## re-executed child is handed.
+  open: bool
+  why: string
+  globals: seq[NimNode]
 
 type ReplayOutcome* = enum
   ## RFC-0005 §4.2. The result of executing a witness against the real `fn`.
@@ -2322,11 +2014,28 @@ type ReplayOutcome* = enum
                   ## replay was abandoned -- it may be looping, or only slow.
                   ## Neither confirmed nor refuted: the candidate stays
                   ## sxUnknown, with a `feReplayTimedOut` hint
-  roContended     ## RFC-0005 S8bo: the replay ended, but an earlier
-                  ## abandoned replay was still running when it started and
-                  ## may have written what this one read. Neither confirmed
-                  ## nor refuted: the candidate stays sxUnknown, with a
-                  ## `feReplayTimedOut` hint
+  roCrashed       ## RFC-0005 S8ct: the real fn ended its child process (an
+                  ## exit, a signal, a system exception) on this witness before
+                  ## it reached the target. A real fact about a real input, and
+                  ## neither a confirmation nor a refutation of the target: the
+                  ## candidate stays sxUnknown, with a `feReplayCrashed` hint
+                  ## saying how it ended and on what input
+  roDeclined      ## RFC-0005 S8ct: no child could run this replay, so it did
+                  ## not run: the candidate stays sxUnknown, with a
+                  ## `feReplayDeclined` hint
+
+proc replayOutcomeOf(c: ReplayChild; lossy: bool): ReplayOutcome =
+  ## RFC-0005 S8ct. What one child's ending means. A target reached is reached,
+  ## whatever happened to the process afterwards. `lossy`: the rendered witness
+  ## is not the model's, so a miss proves nothing.
+  if c.ending == reRefused: return roDeclined
+  if c.reached: return roConfirmed
+  case c.ending
+  of reFinished:
+    if not c.bound or lossy: roInconclusive else: roRefuted
+  of reTimedOut: roTimedOut
+  of reExited, reSignalled: roCrashed
+  of reRefused: roDeclined
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -2682,59 +2391,84 @@ proc routineKey(r: NimNode): string =
   ## same parameter types, so a scan keyed by it read only the first of them.
   r.strVal & "#" & r.symBodyHash
 
-proc scanThreadvars(n: NimNode; vars: var seq[NimNode];
-                    seen: var seq[string]; complete: var bool) =
-  ## RFC-0005 S8bo. See `threadvarsReached`.
-  case n.kind
-  of nnkSym:
-    let k = symKind(n)
-    if isThreadvarSym(n):
-      for v in vars:
-        if v == n: return
-      vars.add n
-    elif k == nskMethod:
-      complete = false   # dynamic dispatch: any override may run
-    elif isUserRoutine(n):
-      let key = routineKey(n)   # RFC-0005 S8cb
-      if key in seen: return
-      seen.add key
-      # Through the Cluster N nil-core, as `scanOpaqueEffects` reads a
-      # routine: one it does not resolve has no body this scan can read.
-      let impl = resolveRoutineImpl(n)
-      if impl == nil or impl[6].kind == nnkEmpty:
-        complete = false  # no body to read (a foreign routine)
-        return
-      scanThreadvars(impl[6], vars, seen, complete)
-  of nnkCall, nnkCommand:
-    if n.len > 0 and n[0].kind == nnkSym and
-       symKind(n[0]) in {nskParam, nskLet, nskVar, nskResult, nskForVar}:
-      complete = false   # a proc value: code this scan does not see
-    for c in n: scanThreadvars(c, vars, seen, complete)
-  else:
-    for c in n: scanThreadvars(c, vars, seen, complete)
-
-proc threadvarsReached(fn: NimNode): seq[NimNode] =
-  ## RFC-0005 S8bo. The `{.threadvar.}`s the routine `fn` may read or write:
-  ## named in its body or in the body of a routine it names, transitively
-  ## (a stdlib routine reaches none of the program's). Empty when some code
-  ## it may run cannot be read (a method, a foreign routine, a call through
-  ## a proc value): carrying only some of them in would make the replay's
-  ## thread state one no thread has, whereas none at all is a fresh
-  ## thread's.
-  var seen: seq[string]
-  var complete = true
-  scanThreadvars(fn, result, seen, complete)
-  if not complete: result.setLen(0)
-
 type RoutineFootprint = object
   ## RFC-0005 S8cb. What one routine's own body names (`scanFootprint`).
-  tokens: seq[string]
+  ## RFC-0005 S8ct: `why` names what made it open.
+  globals: seq[NimNode]
   callees: seq[NimNode]
   open: bool
+  why: string
 
 var routineFootprints {.compileTime.}: Table[string, RoutineFootprint]
   ## RFC-0005 S8cb. Per routine (`routineKey`), so that a program's replays
   ## read each of the stdlib routines they share once.
+
+var fileHookMemo {.compileTime.}: Table[string, bool]
+var typeHookMemo {.compileTime.}: Table[string, bool]
+
+proc fileDeclaresHook(path: string): bool =
+  ## RFC-0005 S8ct. A type's hooks must be declared in its module. The macro API
+  ## cannot ask a type for its hooks, so the module's text is what is read; one
+  ## it cannot read counts as declaring them.
+  if path in fileHookMemo: return fileHookMemo[path]
+  result = true
+  try:
+    let text = readFile(path)
+    result = false
+    for h in ["=destroy", "=sink", "=copy", "=dup", "=trace"]:
+      if h in text: result = true
+  except CatchableError:
+    discard
+  fileHookMemo[path] = result
+
+proc typeMayHaveHook(t: NimNode; seen: var seq[string]): bool =
+  ## RFC-0005 S8ct. A program type in `t` (a type, as `getTypeInst` gives it) may
+  ## have a hook the compiler inserts calls to, which code in the routine's body
+  ## does not name. The stdlib's hooks hold no state of the program's.
+  case t.kind
+  of nnkSym:
+    if symKind(t) != nskType: return false
+    if t.typeKind in {ntyBool, ntyChar, ntyString, ntyCstring, ntyPointer,
+                      ntyInt .. ntyInt64, ntyFloat .. ntyFloat128,
+                      ntyUInt .. ntyUInt64}:
+      return false
+    if isStdlibDecl(t): return false
+    let key = t.strVal & "@" & t.lineInfoObj.filename & ":" & $t.lineInfoObj.line
+    if key in typeHookMemo: return typeHookMemo[key]
+    if key in seen: return false
+    seen.add key
+    result = fileDeclaresHook(t.lineInfoObj.filename)
+    if not result:
+      let impl =
+        try: t.getImpl
+        except CatchableError: newEmptyNode()
+      if impl.kind == nnkTypeDef: result = typeMayHaveHook(impl[2], seen)
+    typeHookMemo[key] = result
+  of nnkIdent, nnkEmpty, nnkNilLit, nnkIntLit .. nnkFloat64Lit,
+     nnkStrLit .. nnkTripleStrLit:
+    discard
+  else:
+    for c in t:
+      if typeMayHaveHook(c, seen): return true
+
+proc isImportedVar(n: NimNode): bool =
+  ## RFC-0005 S8ct. `n` is a C variable, as opposed to storage of this program.
+  let impl =
+    try: n.getImpl
+    except CatchableError: return false
+  if impl.kind != nnkIdentDefs or impl.len < 1 or
+     impl[0].kind != nnkPragmaExpr or impl[0].len < 2:
+    return false
+  for p in impl[0][1]:
+    let head = if p.kind == nnkExprColonExpr: p[0] else: p
+    if head.kind in {nnkIdent, nnkSym} and
+       head.strVal in ["importc", "importcpp", "header"]:
+      return true
+  false
+
+proc markOpen(acc: var RoutineFootprint; why: string) =
+  acc.open = true
+  if acc.why.len == 0: acc.why = why
 
 proc scanFootprint(n: NimNode; user: bool; owner: string;
                    acc: var RoutineFootprint) =
@@ -2744,18 +2478,28 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
   of nnkSym:
     case symKind(n)
     of nskVar, nskLet, nskParam, nskForVar, nskResult:
-      # A thread variable is copied into the replay's thread, so is shared by
-      # what it refers to: the program's are (`threadvarsReached`), and the
-      # stdlib's are not carried at all. A stdlib `let` cannot change.
+      # A stdlib `let` cannot change, and its module has initialised by the time
+      # a child reaches the call site. A stdlib thread variable is the child's
+      # own, as it would be any new thread's.
       if symKind(n) in {nskVar, nskLet} and isThreadvarSym(n):
-        if user: acc.tokens.add globalIRName(n)
+        if user: acc.globals.add n
       elif symKind(n) in {nskVar, nskLet} and isModuleGlobal(n):
-        if user or symKind(n) == nskVar: acc.tokens.add globalIRName(n)
+        if isImportedVar(n):
+          # A C variable holds what no marshalling can see. The stdlib's are the
+          # C library's (`stdout`), which the child has its own of.
+          if user: acc.markOpen("`" & n.strVal & "`, a C variable")
+        elif user or symKind(n) == nskVar:
+          acc.globals.add n
       # A proc value the program holds, so may hand to the stdlib: code this
       # scan does not see.
-      if user and n.typeKind == ntyProc: acc.open = true
+      if user and n.typeKind == ntyProc:
+        acc.markOpen("`" & n.strVal & "`, a proc value")
+      if user:
+        var seen: seq[string]
+        if typeMayHaveHook(n.getTypeInst, seen):
+          acc.markOpen("`" & n.strVal & "`, of a type whose module declares a hook")
     of nskMethod:
-      acc.open = true   # dynamic dispatch: any override may run
+      acc.markOpen("a method: any override may run")
     else:
       if symKind(n) in userRoutineSymKinds: acc.callees.add n
   of nnkCall, nnkCommand:
@@ -2767,34 +2511,25 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
       if h.kind == nnkSym:
         if user and
            symKind(h) in {nskParam, nskLet, nskVar, nskResult, nskForVar}:
-          acc.open = true
+          acc.markOpen("a call through `" & h.strVal & "`, a proc value")
       elif h.kind in {nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr,
                       nnkHiddenDeref}:
-        acc.open = true
+        acc.markOpen("a call through a proc value")
       elif user and h.kind notin {nnkIdent, nnkOpenSymChoice,
                                   nnkClosedSymChoice} and
            not (h.kind == nnkBracketExpr and h[0].kind in
                 {nnkOpenSymChoice, nnkClosedSymChoice}):
-        acc.open = true
+        acc.markOpen("a call through a proc value")
     for c in n: scanFootprint(c, user, owner, acc)
   of nnkAsmStmt:
-    if user: acc.open = true
-    else: acc.tokens.add "c:" & owner
+    if user: acc.markOpen("`asm` in `" & owner & "`")
   of nnkPragma:
     for p in n:
       let emits = p.kind == nnkExprColonExpr and
                   p[0].kind in {nnkIdent, nnkSym} and p[0].strVal == "emit"
-      if emits:
-        if user: acc.open = true
-        else: acc.tokens.add "c:" & owner
+      if emits and user: acc.markOpen("`emit` in `" & owner & "`")
   else:
     for c in n: scanFootprint(c, user, owner, acc)
-
-proc hasPragmaNamed(impl: NimNode; name: string): bool =
-  ## RFC-0005 S8cb. The routine definition `impl` carries pragma `name`.
-  for p in impl[4]:
-    let head = if p.kind == nnkExprColonExpr: p[0] else: p
-    if head.kind in {nnkIdent, nnkSym} and head.strVal == name: return true
 
 proc isRuntimeCode(impl: NimNode): bool =
   ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
@@ -2815,35 +2550,31 @@ proc routineFootprint(r: NimNode): RoutineFootprint =
     except CatchableError: newEmptyNode()
   if impl.kind notin RoutineNodes or impl.len <= 6:
     # No definition this scan can read.
-    result.open = user
+    if user: result.markOpen("`" & r.strVal & "`, with no definition to read")
   elif isRuntimeCode(impl):
     discard
   elif impl[6].kind == nnkEmpty:
-    # Foreign code. The program's may do anything; the stdlib's are told apart
-    # by name, with its compiler magics holding no state of their own.
-    if user: result.open = true
-    elif not hasPragmaNamed(impl, "magic"): result.tokens.add "c:" & r.strVal
+    # Foreign code. The program's may do anything; the stdlib's are the C
+    # library's, whose state the host and the child each have their own of.
+    if user: result.markOpen("`" & r.strVal & "`, a foreign routine")
   else:
     scanFootprint(impl[6], user, r.strVal, result)
   routineFootprints[key] = result
 
 proc replayFootprint(fn: NimNode): ReplayFootprint =
-  ## RFC-0005 S8cb. The state a replay of `fn` may share with another one. A
-  ## replay's parameters and locals are its own, and it reaches anything else
-  ## through a module-level variable (or `{.global.}`, or thread variable,
-  ## whose value is copied in) named in code it may run: the routines `fn`
-  ## names, transitively, the stdlib's included. Open when some of that code
-  ## cannot be read: a method, a proc value, a foreign routine or `emit` of the
-  ## program, or a routine that captures its caller's variables (a nested
-  ## routine whose enclosing one the scan never entered).
+  ## RFC-0005 S8cb. The state a replay of `fn` may reach. A replay's parameters
+  ## and locals are its own, and it reaches anything else through a module-level
+  ## variable (or `{.global.}`, or thread variable) named in code it may run: the
+  ## routines `fn` names, transitively, the stdlib's included. Open when some of
+  ## that code cannot be read: a method, a proc value, a foreign routine or `emit`
+  ## of the program, a routine that captures its caller's variables (a nested
+  ## routine whose enclosing one the scan never entered), or a value of a type
+  ## whose module declares a hook, which the compiler calls without naming it.
   ##
-  ## The scan reads the typed AST, so it does not see a hook the compiler
-  ## inserts (a `=destroy` of the program's that names a variable), nor state
-  ## behind two different C routines; `docs/rfc/0005-branch-scoped-degrade.md`
-  ## records both.
+  ## RFC-0005 S8ct: only a re-executed child reads this: `fork` copies everything.
   if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds or
      symKind(fn) == nskMethod:
-    return ReplayFootprint(open: true)
+    return ReplayFootprint(open: true, why: "a routine that is not a plain symbol")
   var seen: seq[string]
   var routines: seq[NimNode]
   var stack = @[fn]
@@ -2854,9 +2585,16 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     seen.add key
     routines.add r
     let f = routineFootprint(r)
-    if f.open: result.open = true
-    for t in f.tokens:
-      if t notin result.tokens: result.tokens.add t
+    if f.open and not result.open:
+      result.open = true
+      result.why = f.why
+    for g in f.globals:
+      var have = false
+      for h in result.globals:
+        if h == g:
+          have = true
+          break
+      if not have: result.globals.add g
     for c in f.callees: stack.add c
   for r in routines:
     let o = owner(r)
@@ -2864,13 +2602,55 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
        symKind(o) in userRoutineSymKinds and
        routineKey(o) notin seen:
       result.open = true
+      if result.why.len == 0:
+        result.why = "`" & r.strVal & "`, nested in a routine it may capture from"
+
+proc wireTarget*(w: var WireWriter; t: SymexTarget) =
+  ## RFC-0005 S8ct. A case object, so outside the generic encoding.
+  wirePut(w, t.kind)
+  case t.kind
+  of stkLabel: wirePut(w, t.label)
+  of stkRaisedExn: wirePut(w, t.typeFilter)
+  else: discard
+
+proc readTarget*(r: var WireReader): SymexTarget =
+  ## RFC-0005 S8ct. See `wireTarget`.
+  var k: SymexTargetKind
+  wireGet(r, k)
+  case k
+  of stkLabel:
+    var s: string
+    wireGet(r, s)
+    SymexTarget(kind: stkLabel, label: s)
+  of stkRaisedExn:
+    var s: string
+    wireGet(r, s)
+    SymexTarget(kind: stkRaisedExn, typeFilter: s)
+  of stkAssertionViolation: SymexTarget(kind: stkAssertionViolation)
+  of stkIndexError: SymexTarget(kind: stkIndexError)
+  of stkFieldDefect: SymexTarget(kind: stkFieldDefect)
+  of stkNilAccess: SymexTarget(kind: stkNilAccess)
+
+func targetLabelOf*(t: SymexTarget): string =
+  ## RFC-0005 S8ct. The label a child reports as it is hit, or none.
+  if t.kind == stkLabel: t.label else: ""
+
+type ChildWitness = object
+  ## RFC-0005 S8ct. How a re-executed child comes by its witness, where it is not
+  ## the rendered tuple itself: the entry macros marshal the solver's model
+  ## (`blob`, of type `blobTy`), and the child renders it as the host does:
+  ## `decl` binds `witId` from `blobId`.
+  blob, blobTy, blobId, decl, witId: NimNode
+
+var replaySiteCounter {.compileTime.}: int
 
 proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;
                         extraLossy: NimNode = newLit(false);
                         nilDeref: NimNode = newLit(false);
                         timeoutMs: NimNode = newLit(
-                          SymexSettings().replayTimeoutMs)): NimNode =
+                          SymexSettings().replayTimeoutMs);
+                        child: ChildWitness = ChildWitness()): NimNode =
   ## RFC-0005 S2: the macro-time half of `replayWitness`, spliced by S10 into
   ## the entry macros' shared replay emitter (`emitRunSymexReplayed`). Emits
   ## an expression of type `ReplayOutcome`. `witness` is the typed witness
@@ -2883,12 +2663,13 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   ## miss from `roRefuted` to `roInconclusive`; a hit still confirms.
   ## `nilDeref` (RFC-0005 S8k) is a runtime `bool`: true when the witness's
   ## path went through the walker's nil-dereference edge
-  ## (`SatCandidate.nilDerefOnPath`), whose real run is a SIGSEGV that would
-  ## kill the process -- declined, never executed. Order of refusal, each
-  ## one WITHOUT executing `fn`: ineligible taint, unexecutable witness
-  ## shape, out-of-scope target kind, a nil-dereference path.
-  ## `timeoutMs` (RFC-0005 S8be) is an `int` expression bounding the run
-  ## (`runReplayBounded`); past it the outcome is `roTimedOut`.
+  ## (`SatCandidate.nilDerefOnPath`). Order of refusal, each one WITHOUT
+  ## executing `fn`: ineligible taint, unexecutable witness shape, out-of-scope
+  ## target kind, a nil-dereference path.
+  ## `timeoutMs` (RFC-0005 S8be) is an `int` expression bounding the run;
+  ## past it the child is killed and the outcome is `roTimedOut`.
+  ## RFC-0005 S8ct: the run itself happens in a child process
+  ## (`replayproc.nim`), never in this one.
   var noms: Table[string, IRType]
   var seenNoms: HashSet[string]
   for p in params: collectNominals(p.ty, noms, seenNoms)
@@ -2905,36 +2686,33 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   let tgtId = genSym(nskLet, "replayTarget")
   let escId = genSym(nskVar, "replayEscaped")
   let boundId = genSym(nskVar, "replayArgsBound")
-  let hitsId = genSym(nskVar, "replayHits")       # RFC-0005 S8be
-  let endedId = genSym(nskLet, "replayEnded")     # RFC-0005 S8be
-  let aimsId = genSym(nskLet, "replayAims")       # RFC-0005 batch 6
-  let footprint = newLit(replayFootprint(fn))     # RFC-0005 S8cb
+  let hitsId = genSym(nskLet, "replayHits")       # RFC-0005 S8be
+  let childRes = genSym(nskLet, "replayChild")    # RFC-0005 S8ct
   # RFC-0005 S8bn (item 2): the module-level `var`s `fn` can reach, which a
   # `ptr` parameter's witness may be aimed at.
   var globals: seq[NimNode]
   for g in calleeOuterSyms(fn):
     if isModuleGlobal(g) and g.symKind == nskVar: globals.add g
-  # RFC-0005 S8bo: the calling thread's thread variables, carried into the
-  # replay thread before the run and back out of it after.
-  var tvSave = newStmtList()
-  var tvIn = newStmtList()
-  var tvOut = newStmtList()
-  var tvBack = newStmtList()
-  for tv in threadvarsReached(fn):
-    let saved = genSym(nskLet, "tvSaved")
-    let outv = genSym(nskVar, "tvOut")
-    tvSave.add quote do:
-      let `saved` = `tv`
-      var `outv` = `saved`
-    tvIn.add quote do:
-      `tv` = `saved`
-    tvOut.add quote do:
-      `outv` = `tv`
-    tvBack.add quote do:
-      `tv` = `outv`
-  let splat = emitWitnessSplat(fn, params.len, witId, paramTys,
-                               newAssignment(boundId, newLit(true)),
-                               params, globals)
+  # The run: a statement list whose value is the `ReplayReport`, spliced into
+  # the child's half on whichever side declares it. §4.2 "Capture reentrancy":
+  # a nested frame, so an enclosing user capture (`assertCoveredBy`) keeps its
+  # hits and does not see ours.
+  proc runBody(childWitId: NimNode): NimNode =
+    let splat = emitWitnessSplat(fn, params.len, childWitId, paramTys,
+                                 newAssignment(boundId, newLit(true)),
+                                 params, globals)
+    result = quote do:
+      var `escId`: ref Exception = nil
+      var `boundId` = false
+      symexCaptureBegin()
+      armReplayHit(targetLabelOf(`tgtId`))
+      try:
+        `splat`
+      except Exception as e:
+        `escId` = e
+      let `hitsId` = symexCaptureEnd()
+      ReplayReport(reached: replayReached(`tgtId`, `hitsId`, `escId`),
+                   bound: `boundId`)
   let lossy = newLit(fidelity == wfLossy)
   # RFC-0005 S10. The rendered witness type is not always the parameter
   # type (a `Rune` renders as `int`, a `distinct` as its base, a table as
@@ -2953,8 +2731,102 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
     convertible = infix(convertible, "and",
                         newCall(bindSym"compiles", newCall(ty, elem)))
     converted = infix(converted, "or", infix(elem, "isnot", ty))
+  var preamble = newStmtList()
+  var runChild: NimNode
+  when replayForks:
+    let body = runBody(witId)
+    runChild = quote do:
+      runReplayForked(proc (): ReplayReport {.closure, gcsafe.} =
+        {.cast(gcsafe).}:
+          result = (block:
+            `body`), `timeoutMs`)
+  elif replayReexecs:
+    # What the SUT may reach must be handed over, or it does not run.
+    var refuse = ""
+    let fp = replayFootprint(fn)
+    if fp.open:
+      refuse = "the SUT may reach state this platform's replay child cannot " &
+               "be handed: " & fp.why
+    else:
+      for g in fp.globals:
+        if not isWireableType(g.getTypeInst):
+          refuse = "the SUT may reach `" & g.strVal & "`, of a type that " &
+                   "cannot be handed to this platform's replay child"
+          break
+    let blobTy =
+      if child.blobTy != nil: child.blobTy
+      else: newCall(bindSym"typeof", witness)
+    if refuse.len == 0 and child.blobTy == nil and
+       not isWireableType(witness.getTypeInst):
+      refuse = "the witness's type cannot be handed to this platform's " &
+               "replay child"
+    if refuse.len > 0:
+      let msg = newLit(refuse)
+      runChild = quote do:
+        refusedStatically(`msg`)
+    else:
+      inc replaySiteCounter
+      let info = lineInfoObj(fn)
+      let site = newLit(info.filename.extractFilename & ":" & $info.line & ":" &
+                        $info.column & "#" & $replaySiteCounter)
+      let rd = genSym(nskVar, "replayReader")
+      let wr = genSym(nskVar, "replayWriter")
+      let payload = genSym(nskParam, "payload")
+      let childProc = genSym(nskProc, "replayChildBody")
+      let regId = genSym(nskVar, "replayChildRegistered")
+      let stackId = genSym(nskVar, "replayStack")
+      let blobId = if child.blobId != nil: child.blobId
+                   else: genSym(nskVar, "replayBlob")
+      let wid = if child.witId != nil: child.witId else: witId
+      let decl =
+        if child.decl != nil: child.decl
+        else:
+          let b = blobId
+          quote do:
+            let `wid` {.used.} = `b`
+      let body = runBody(wid)
+      var getGlobals = newStmtList()
+      var putGlobals = newStmtList()
+      for g in fp.globals:
+        getGlobals.add quote do:
+          wireGet(`rd`, cast[ptr typeof(`g`)](unsafeAddr `g`)[])
+        putGlobals.add quote do:
+          wirePut(`wr`, `g`)
+      let blob = if child.blob != nil: child.blob else: witId
+      preamble = quote do:
+        proc `childProc`(`payload`: string): ReplayReport {.nimcall.} =
+          var `rd` = initWireReader(`payload`)
+          var `stackId`: int64
+          wireGet(`rd`, `stackId`)
+          let `tgtId` = readTarget(`rd`)
+          var `blobId`: `blobTy`
+          wireGet(`rd`, `blobId`)
+          `getGlobals`
+          `decl`
+          result = (block:
+            `body`)
+        var `regId` {.global, used.} = replayChildEntry(`site`, `childProc`)
+      runChild = quote do:
+        block:
+          var `wr`: WireWriter
+          var refused = ""
+          try:
+            wirePut(`wr`, int64(callerStackSize()))
+            wireTarget(`wr`, `tgtId`)
+            wirePut(`wr`, `blob`)
+            `putGlobals`
+          except WireError as e:
+            refused = "the SUT's state cannot be handed to this platform's " &
+                      "replay child: " & e.msg
+          if refused.len > 0: refusedStatically(refused)
+          else: runReplayReexec(`site`, `wr`.data, `timeoutMs`)
+  else:
+    runChild = quote do:
+      refusedStatically("this platform has no way to run a replay outside " &
+                        "the host process")
   result = quote do:
     block:
+      `preamble`
       let `tgtId`: SymexTarget = `target`
       if not replayEligible(`pathTaint`) or not replayInScope(`tgtId`) or
          `nilDeref`:
@@ -2964,37 +2836,9 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
         when not (`convertible`):
           roInconclusive
         else:
-          var `escId`: ref Exception = nil
-          var `boundId` = false
-          var `hitsId`: HashSet[string]
-          # RFC-0005 batch 6: the pointers the witness aimed at a variable
-          # (S8bn), recorded on this thread, for the replay's thread.
-          let `aimsId` = ptrAimsSnapshot()
-          `tvSave`
-          # RFC-0005 S8be: the run is bounded (`runReplayBounded`); it may
-          # run on a thread of its own, which owns the capture frame.
-          let `endedId` = runReplayBounded(proc () {.closure, gcsafe.} =
-            {.cast(gcsafe).}:
-              ptrAimsAdopt(`aimsId`)
-              `tvIn`
-              # §4.2 "Capture reentrancy": a nested frame, so an enclosing
-              # user capture (`assertCoveredBy`) keeps its hits and does not
-              # see ours.
-              symexCaptureBegin()
-              try:
-                `splat`
-              except Exception as e:
-                `escId` = e
-              `hitsId` = symexCaptureEnd()
-              `tvOut`, `timeoutMs`, `footprint`)
-          if `endedId` == rrAbandoned: roTimedOut
-          else:
-            `tvBack`
-            if `endedId` == rrContended: roContended
-            elif not `boundId`: roInconclusive   # a conversion raised: fn never ran
-            elif replayReached(`tgtId`, `hitsId`, `escId`): roConfirmed
-            elif `lossy` or `extraLossy` or `converted`: roInconclusive
-            else: roRefuted
+          # RFC-0005 S8ct: the run is in a child: the host learns how it ended.
+          let `childRes` = `runChild`
+          replayOutcomeOf(`childRes`, `lossy` or `extraLossy` or `converted`)
 
 macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
                      pathTaint: Taint): untyped =
@@ -3054,12 +2898,8 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
 #     Not containable at runtime; `SymexSettings.replay = false` (static)
 #     emits no reference to `fn` at all -- the pre-S10 verdict.
 #   * Non-termination -- bounded by the eligibility gate, which never runs a
-#     `dcFabricated` (k-unroll survivor) witness, and (RFC-0005 S8be) by
-#     `replayTimeoutMs`: a replay runs on its own thread and is abandoned
-#     past it (`roTimedOut`). The abandoned thread is not stopped -- nothing
-#     can stop it safely -- so a replay that loops forever keeps a core and
-#     its memory, and runs concurrently with the caller, until the process
-#     ends.
+#     `dcFabricated` (k-unroll survivor) witness, and by `replayTimeoutMs`: the
+#     replay's child is killed past it (`roTimedOut`).
 #   * Defects -- caught by the replay frame and classified; under
 #     `--panics:on` nothing is replayed (`replayInScope`); a raw-`ptr`
 #     witness is never executed (`witnessFidelity`); a candidate whose path
@@ -3067,9 +2907,9 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
 #     is never executed (RFC-0005 S8k: `nilDerefOnPath`, and a
 #     `NilAccessDefect` raise target is out of `replayInScope`) -- the
 #     walker models that edge as a raise, the default build SIGSEGVs.
-#     Any other crash `fn` would also commit under `forAll` (SIGSEGV, stack
-#     overflow, `quit`) off the modelled path is not containable in-process
-#     and is not contained.
+#   * Crashes -- RFC-0005 S8ct: whatever else the real `fn` does on the witness
+#     (SIGSEGV, stack overflow, `quit`, `abort`, memory corruption) ends its
+#     child and is reported (`roCrashed`, `feReplayCrashed`), never `sxUnsat`.
 #   * Capture reentrancy -- each replay runs in its own nested capture frame
 #     (`engine/markers.nim`), so a user's enclosing `assertCoveredBy`
 #     capture neither loses hits nor sees replay's.
@@ -3091,6 +2931,9 @@ proc candidateInput(c: SatCandidate): auto =
   ## into `fn`'s parameter tuple. Private: see the section comment.
   c.input
 
+type CandidateInput = typeof(candidateInput(default(SatCandidate)))
+  ## RFC-0005 S8ct. The model's type, by a name a child's half can spell.
+
 func candidateLossy*(c: SatCandidate): bool =
   ## RFC-0005 S10. True when the candidate's own extraction substituted a
   ## value (`feExtractionFailed`: a float leaf that did not resolve to a
@@ -3101,7 +2944,7 @@ func candidateLossy*(c: SatCandidate): bool =
   false
 
 proc settleCandidate(raw: RawResult; c: SatCandidate;
-                     outcome: ReplayOutcome): RawResult =
+                     outcome: ReplayOutcome; input: string): RawResult =
   ## RFC-0005 S10 (§2.3 rule 3). Applies ONE candidate's replay outcome to
   ## the `sxUnknown` result `raw`:
   ##   * `roConfirmed` -- the verdict becomes the candidate's claim
@@ -3115,30 +2958,43 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   ##     reaches the target; never `sxUnsat`), plus a `feReplayRefuted`
   ##     `sevHint` naming the witness's confirmed model gap (§4.2).
   ##   * `roInconclusive` -- unchanged.
-  ##   * `roContended` (RFC-0005 S8bo) -- as `roTimedOut`: an abandoned
-  ##     replay was still running beside this one.
+  ##   * `roCrashed` (RFC-0005 S8ct) -- stays `sxUnknown`, plus a
+  ##     `feReplayCrashed` `sevHint`: the real fn ended its process on this
+  ##     input before reaching the target. A real finding about that input, and
+  ##     nothing about the target's reachability on any other.
+  ##   * `roDeclined` (RFC-0005 S8ct) -- stays `sxUnknown`, plus a
+  ##     `feReplayDeclined` `sevHint`: it did not run.
   ##   * `roTimedOut` (RFC-0005 S8be) -- stays `sxUnknown`, plus a
-  ##     `feReplayTimedOut` `sevHint`: the replay was abandoned, so the
-  ##     witness is neither confirmed nor refuted.
+  ##     `feReplayTimedOut` `sevHint`: the replay's child was killed at its
+  ##     bound, so the witness is neither confirmed nor refuted.
   ## Private (the only candidate -> verdict constructor); see the section
   ## comment.
   result = raw
   case outcome
   of roInconclusive: discard
-  of roContended:   # RFC-0005 S8bo
-    result.errors.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
+  of roCrashed:   # RFC-0005 S8ct
+    result.errors.add SymexErrorInfo(kind: feReplayCrashed, severity: sevHint,
       msg: "replay of a " & $c.status & " candidate (" &
            (if c.status == sxRaised: "raise " & c.raisedTypeId
             else: "target hit") &
-           ") ran while an earlier abandoned replay was still running, " &
-           "which may have written what it read; neither confirmed nor " &
-           "refuted (feReplayTimedOut)")
+           ") ended its process before reaching the target: " &
+           lastReplayDetail() &
+           (if input.len > 0: ", on the input " & input else: "") &
+           ". The real fn crashes on that input; this says nothing of the " &
+           "target on any other; neither confirmed nor refuted " &
+           "(feReplayCrashed)")
+  of roDeclined:   # RFC-0005 S8ct
+    result.errors.add SymexErrorInfo(kind: feReplayDeclined, severity: sevHint,
+      msg: "replay of a " & $c.status & " candidate (" &
+           (if c.status == sxRaised: "raise " & c.raisedTypeId
+            else: "target hit") &
+           ") did not run: " & lastReplayDetail() & " (feReplayDeclined)")
   of roTimedOut:
     result.errors.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
       msg: "replay of a " & $c.status & " candidate (" &
            (if c.status == sxRaised: "raise " & c.raisedTypeId
             else: "target hit") &
-           ") was abandoned: the real fn ran past replayTimeoutMs on the " &
+           ") was killed: the real fn ran past replayTimeoutMs on the " &
            "solver's witness -- it may not terminate there, or is only " &
            "slow; neither confirmed nor refuted (feReplayTimedOut)")
   of roRefuted:
@@ -3223,11 +3079,28 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
     else:
       quote do:
         let `typedId` {.used.}: `tupleTy` = `witnessTup`
+  # RFC-0005 S8ct: a re-executed child is handed the solver's model, and renders
+  # it as this process does, with no aliasing to carry across.
+  var child = ChildWitness()
+  when replayReexecs:
+    let childRaw = genSym(nskVar, "childRaw")
+    let childWit = genSym(nskLet, "childWitness")
+    let (childTy, childTup) = emitWitnessTuple(params, childRaw)
+    child = ChildWitness(blob: witId, blobTy: bindSym"CandidateInput",
+                         blobId: childRaw, witId: childWit,
+                         decl:
+                           if params.len == 0:
+                             quote do:
+                               let `childWit` {.used.} = `childTup`
+                           else:
+                             quote do:
+                               let `childWit` {.used.}: `childTy` = `childTup`)
   let replay = emitReplayWitness(fn, params, typedId, replayTgt,
     newDotExpr(candId, ident"pathTaint"),
     newCall(bindSym"candidateLossy", candId),
     newDotExpr(candId, ident"nilDerefOnPath"),
-    newDotExpr(settings, ident"replayTimeoutMs"))   # RFC-0005 S8be
+    newDotExpr(settings, ident"replayTimeoutMs"),   # RFC-0005 S8be
+    child)
   result = quote do:
     block:
       let `rawId` = `runCall`
@@ -3244,7 +3117,8 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
               let `witId` {.used.} = `inputSym`(`candId`)
               `typedDecl`
               let `outcomeId` = `replay`
-              `settledId` = `settleSym`(`settledId`, `candId`, `outcomeId`)
+              `settledId` = `settleSym`(`settledId`, `candId`, `outcomeId`,
+                (when compiles($`typedId`): $`typedId` else: ""))
               if `outcomeId` == roConfirmed: break replayPass
       `settledId`
 

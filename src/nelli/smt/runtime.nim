@@ -5771,7 +5771,50 @@ proc uninitKinds(): tuple[store, ite, select: int] =
                       kindOf(ctx, sel.raw))
   (uninitArrKinds.store, uninitArrKinds.ite, uninitArrKinds.select)
 
+const termWalkMaxDepth* = 256
+  ## RFC-0005 S8ct. The deepest term a recursive walk of a Z3 term takes. A term
+  ## can be far deeper than the stack or Nim's call depth limit allow, and either
+  ## ends the process. Each walk gives the answer that claims nothing past this.
+  ## 256 levels is under the `nimFrameReserve` a solve keeps, at 1 or 2 frames a
+  ## level.
+
+proc termDepth*(ctx: Z3Context; t: RawZ3Ast; cap = termWalkMaxDepth): int =
+  ## RFC-0005 S8ct. The levels of applications in `t` (a leaf is 0), or `cap + 1`
+  ## as soon as a path is known to pass `cap`. Takes no stack: this is what tells
+  ## a recursive walk whether it can run.
+  type Open = tuple[a: RawZ3Ast; id: int; next, height: int]
+  proc numArgs(a: RawZ3Ast): int =
+    if Z3_get_ast_kind(ctx.raw, a) == Z3_APP_AST:
+      int(Z3_get_app_num_args(ctx.raw, Z3_to_app(ctx.raw, a)))
+    else: 0
+  var heights: Table[int, int]
+  var open: seq[Open] = @[(a: t, id: astId(ctx, t), next: 0, height: 0)]
+  while open.len > 0:
+    if open.len > cap + 1: return cap + 1
+    let i = open.high
+    if open[i].next < numArgs(open[i].a):
+      let arg = Z3_get_app_arg(ctx.raw, Z3_to_app(ctx.raw, open[i].a),
+                               cuint(open[i].next))
+      inc open[i].next
+      let id = astId(ctx, arg)
+      if id in heights:
+        open[i].height = max(open[i].height, heights[id] + 1)
+      else:
+        open.add (a: arg, id: id, next: 0, height: 0)
+    else:
+      let done = open.pop()
+      heights[done.id] = done.height
+      if open.len > 0:
+        open[^1].height = max(open[^1].height, done.height + 1)
+      else:
+        result = done.height
+
+proc termTooDeep*(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0005 S8ct. `t` is past what a recursive walk may take.
+  termDepth(ctx, t) > termWalkMaxDepth
+
 type UninitScan = object
+  depth: int   ## RFC-0005 S8ct. The levels of `uninitAt` open.
   ## One `uninitReadCond` query's memo: whether a term mentions a base, and
   ## the condition already built per (array, index) pair (a loop's merges
   ## share their store chains, which a plain recursion would revisit once
@@ -5834,6 +5877,10 @@ proc uninitAt(sc: var UninitScan; arr: RawZ3Ast; k: Z3Int): Z3Bool =
   let key = (astId(ctx, arr), astId(ctx, k.raw))
   if key in sc.at: return sc.at[key]
   result = mkBool(ctx, true)
+  # RFC-0005 S8ct: a chain past the limit may hold an unwritten element.
+  if sc.depth >= termWalkMaxDepth: return
+  inc sc.depth
+  defer: dec sc.depth
   if key[0] in uninitSeqAliases:
     var acc = mkBool(ctx, false)
     for (g, d) in uninitSeqAliases[key[0]]:
@@ -12549,10 +12596,15 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     of "false": 0
     else: -1
   proc flatten(a: Z3AnyAst; into: var seq[Z3AnyAst]) =
-    if getAstKind(a) == akApp and
-       ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl)) == kinds.strConcat:
-      for p in unpackApp(a).args: flatten(p, into)
-    else: into.add a
+    # RFC-0005 S8ct: takes no stack, however long the concatenation.
+    var open = @[a]
+    while open.len > 0:
+      let t = open.pop()
+      if getAstKind(t) == akApp and
+         ord(Z3_get_decl_kind(ctx.raw, unpackApp(t).decl)) == kinds.strConcat:
+        let args = unpackApp(t).args
+        for i in countdown(args.high, 0): open.add args[i]
+      else: into.add t
   proc pow10(d: int): Z3Int =
     var txt = "1"
     for _ in 1 .. d: txt.add '0'
@@ -12686,7 +12738,9 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       fromInts.add (n: n, x: t)
     elif k == kinds.inRe and args.len == 2:
       # RFC-0005 S8ai: a member of `R` is as long as some word of `R`.
-      let b = regexLenBounds(ctx, kinds, args[1])
+      # RFC-0005 S8ct: `0..` claims nothing.
+      let b = if termTooDeep(ctx, args[1].raw): (lo: 0, hi: -1)
+              else: regexLenBounds(ctx, kinds, args[1])
       let m = wrap[Z3Bool](ctx, t.raw)
       if b.lo > 0: result.add implies(m, lenOf(ctx, args[0]) >= mkInt(ctx, b.lo))
       if b.hi >= 0: result.add implies(m, lenOf(ctx, args[0]) <= mkInt(ctx, b.hi))
@@ -13026,7 +13080,8 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
     if x in pinned: continue
     for t in defs.getOrDefault(x):
       var acc: seq[int]
-      if not leaves(t, acc): continue
+      # RFC-0005 S8ct: too deep reads as any other shape, which keeps the root.
+      if termTooDeep(ctx, t.raw) or not leaves(t, acc): continue
       var ok = true
       for y in acc:
         if y == x or y notin constrained or y in dropped:
@@ -13039,6 +13094,10 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
         break
   for i, r in roots:
     if i notin dropRoot: result.add r
+
+var deepTermsLeftAlone* {.threadvar.}: seq[int]
+  ## RFC-0005 S8ct. The depth of each conjunct `mergeMemberships` left as it is
+  ## because a recursive walk could not take it.
 
 proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     seq[Z3Bool] =
@@ -13090,10 +13149,15 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     Pol = enum polPos, polNeg, polBoth
       ## RFC-0005 S8by. How a term is read: asserted, denied, or both.
   proc conjuncts(r: Z3AnyAst): seq[Z3AnyAst] =
-    ## `r`'s top-level conjuncts, in order.
-    if kindOf(r) == bk.andK:
-      for a in unpackApp(r).args: result.add conjuncts(a)
-    else: result.add r
+    ## `r`'s top-level conjuncts, in order. RFC-0005 S8ct: takes no stack, so a
+    ## nest of `and`s as deep as a term gets is read.
+    var open = @[r]
+    while open.len > 0:
+      let t = open.pop()
+      if kindOf(t) == bk.andK:
+        let args = unpackApp(t).args
+        for i in countdown(args.high, 0): open.add args[i]
+      else: result.add t
   proc literal(t: Z3AnyAst): tuple[ok: bool, x, re: Z3AnyAst, neg: bool] =
     ## `t` as a membership literal `x in re` or `not (x in re)`; a
     ## byte-domain constraint is none.
@@ -13258,7 +13322,15 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     var outs: seq[Z3AnyAst]
     var changed = false
     for c in conjuncts(toAnyAst(r)):
-      let b = if literal(c).ok: c else: rewrite(c, top, 0, polPos, false)
+      # RFC-0005 S8ct: `holds` and `rewrite` recurse a level at a time, and a
+      # conjunct left as it is has the same models. Only the merge is lost, so
+      # at worst Z3 meets the memberships separately and answers unknown.
+      var b = c
+      if not literal(c).ok:
+        if termTooDeep(ctx, c.raw):
+          deepTermsLeftAlone.add termDepth(ctx, c.raw, cap = 100_000_000)
+        else:
+          b = rewrite(c, top, 0, polPos, false)
       changed = changed or b.raw != c.raw
       outs.add b
     result.add(if not changed: r else: wrap[Z3Bool](ctx, andOf(outs).raw))
@@ -28100,19 +28172,6 @@ var ptrAims {.threadvar.}: Table[pointer, string]
 
 proc ptrAimRecord(cell: string; p: pointer) =
   if cell.startsWith(ptrAimPrefix): ptrAims[p] = cell[ptrAimPrefix.len .. ^1]
-
-proc ptrAimsSnapshot*(): Table[pointer, string] =
-  ## RFC-0005 batch 6 (S8bn on S8be). The calling thread's aimed cells. The
-  ## witness is built on the calling thread, and S8be's bounded replay runs
-  ## the splat on a thread of its own, whose `ptrAims` starts empty: every
-  ## aimed pointer then missed its variable (`ptrAimsAt` false) and the
-  ## replay was refuted. The replay hands this copy to its thread
-  ## (`ptrAimsAdopt`).
-  ptrAims
-
-proc ptrAimsAdopt*(aims: Table[pointer, string]) =
-  ## RFC-0005 batch 6. See `ptrAimsSnapshot`.
-  for p, name in aims: ptrAims[p] = name
 
 proc ptrAimsAt*(p: pointer; name: string): bool =
   ## RFC-0005 S8bn (item 2). The witness pointer `p` was aimed at the

@@ -203,7 +203,17 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "245"
+const symexWalkerVersion* = "256"
+  ## RFC-0005 S8ct (2026-11-02) -- no replay runs in the host process.
+  ## Provisional (S8bz holds 247, S8cs 249, and the coordinator's own above 251).
+  ## A replay that reaches `quit`, a raw C `exit`, a nil dereference or unbounded
+  ## recursion ended the host's whole run (it declined on main). Each replay now
+  ## runs in a child: `fork` on POSIX, a re-execution of the program on Windows,
+  ## which is handed the witness and the variables the SUT reaches and declines
+  ## the replay when it cannot be (`feReplayDeclined`). A child that ends before
+  ## reaching the target is `sxUnknown` with `feReplayCrashed`, not a refutation;
+  ## a label hit before it ended is a confirmed `sxSat`. A child's writes do not
+  ## reach the host. 245 -> 256, S8cb's stack included (243).
   ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
   ## batch 8 as one integration branch under ONE walker number; their bullets
   ## follow, each naming its provisional number. The stack's own changes: S8ce

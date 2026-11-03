@@ -1,15 +1,19 @@
-## RFC-0005 (soundness channels) slice S8bo -- S8be's remainder: the
-## threaded replay. An abandoned replay's thread running on while a later
-## replay runs, and the replay thread's fidelity to the calling thread (its
-## `{.threadvar.}`s, its stack).
+## RFC-0005 (soundness channels) slice S8bo -- S8be's remainder: an abandoned
+## replay running on while a later replay runs, and the replay's fidelity to the
+## calling thread (its `{.threadvar.}`s, its stack).
+##
+## RFC-0005 S8ct: every replay now runs in a child process, so these hold by
+## construction on a platform that forks, and a replay's writes stay in the child.
+## On a platform that re-executes a replay reaching a thread variable declines.
 ##
 ## Every expected value was probed against the real compiler (Nim 2.2.10,
 ## the debug build the test binary itself is). The interleavings are forced
 ## by handshakes, not by sleeps: no expectation depends on the load.
-import std/[unittest, strutils, os]
+import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import nelli/smt/replayproc
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -21,10 +25,14 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
     if e.kind == k: return true
   false
 
-proc drainAbandoned() =
-  ## Waits, without a time bound of its own, for every abandoned replay
-  ## thread to end: each one below is released by a handshake.
-  while replayAbandonedLive() > 0: sleep(1)
+template satOrDeclined(r: untyped) =
+  ## Where a replay can carry the calling thread's state, a confirmed hit;
+  ## elsewhere it does not run.
+  when replayForks:
+    check r.status == sxSat
+  else:
+    check r.status == sxUnknown
+    check r.errors.hasKind(feReplayDeclined)
 
 # ---- (6) an abandoned replay's late write ------------------------------------
 #
@@ -37,6 +45,10 @@ proc drainAbandoned() =
 # 0, and nothing but the abandoned thread writes it). A replay that starts
 # while an abandoned one still runs is now neither confirmed nor refuted
 # (`feReplayTimedOut`).
+#
+# RFC-0005 S8ct: the first replay's child is killed at its bound, so nothing runs
+# on to write the flag. The second blocks on the answer no one will send, and its
+# own bound ends it.
 
 var s8boFlag = 0
 var s8boGo, s8boDone: Channel[int]
@@ -116,19 +128,19 @@ suite "RFC-0005 S8bo (6): an abandoned replay's late write":
     checkpoint "writer " & $a.status & " " & show(a.errors)
     check a.status != sxSat
     check a.errors.hasKind(feReplayTimedOut)
-    let b = symexFind(sutLateReader, tLabel("late"))
+    check s8boFlag == 0
+    let b = symexFind(sutLateReader, tLabel("late"),
+                      SymexSettings(replayTimeoutMs: 200))
     checkpoint "reader " & $b.status & " " & show(b.errors)
     check b.status != sxSat
-    check b.errors.hasKind(feReplayTimedOut)
-    check "still running" in show(b.errors)
-    drainAbandoned()
-  test "once the abandoned replay has ended, a replay confirms again":
-    drainAbandoned()
+    check b.errors.hasKind(feReplayTimedOut) or b.errors.hasKind(feReplayDeclined)
+    check s8boFlag == 0
+  test "with nothing of the abandoned replay left, a replay confirms":
     s8boFlag = 1
     s8boDone.send(1)      # `s8boRelease`'s handshake, answered in advance
     let c = symexFind(sutLateReader, tLabel("late"))
     checkpoint "reader " & $c.status & " " & show(c.errors)
-    check c.status == sxSat
+    satOrDeclined(c)
     discard s8boGo.tryRecv()
 
 suite "RFC-0005 S8bo (7): the calling thread's `{.threadvar.}`s":
@@ -136,20 +148,20 @@ suite "RFC-0005 S8bo (7): the calling thread's `{.threadvar.}`s":
     s8boTv = 7
     let r = symexFind(sutTv, tLabel("tv"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxSat
-  test "the replay's writes are the calling thread's":
+    satOrDeclined(r)
+  test "the replay's writes stay in its child":
     s8boTv = 7
     s8boTvCount = 0
     let r = symexFind(sutTvWrite, tLabel("tvw"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxSat
-    check s8boTvCount == 1
+    satOrDeclined(r)
+    check s8boTvCount == 0
 
 suite "RFC-0005 S8bo (7): the calling thread's stack":
   test "a frame the calling thread holds does not overflow the replay":
-    if replayStackSize() < 6 shl 20:
+    if callerStackSize() < 6 shl 20:
       skip()
     else:
       let r = symexFind(sutBigFrame, tLabel("big"))
       checkpoint $r.status & " " & show(r.errors)
-      check r.status == sxSat
+      check r.status == sxSat or r.errors.hasKind(feReplayDeclined)

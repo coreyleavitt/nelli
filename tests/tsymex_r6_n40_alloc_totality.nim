@@ -60,7 +60,7 @@
 ## float value, so this file's poison tables (`Table[int, string]`,
 ## `Table[string, string]`) became modelled. Each was swapped for a shape
 ## still unbacked: a `float` key and a `seq[int]` value.
-import std/[unittest, strutils, tables]
+import std/[unittest, strutils, tables, sets]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -267,11 +267,14 @@ suite "symex N40 -- family 4/5: lambda with an unallocatable param/return type":
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
 
-  test "N40-6: lambda construction with an unsupported-KEY Table RETURN type -- still an honest sxUnknown (Invariant 3 holds); status-only, same FINDING as N40-5":
+  test "N40-6: lambda construction with an unsupported-KEY Table RETURN type -- never called, so the label is reached (RFC-0005 S8cd: a Table result is structured, allocated per call; `tsymex_rfc0005_s8cd_ops` pins the called form)":
+    symexCaptureBegin()
+    n40ClosureRetBlock(0)
+    check "n40_closure_ret_block" in symexCaptureEnd()
     let r = symexFind(n40ClosureRetBlock, tLabel("n40_closure_ret_block"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
-    check r.status == sxUnknown
+    check r.status == sxSat
 
 suite "symex N40 -- companion: param-boundary decline unchanged":
 

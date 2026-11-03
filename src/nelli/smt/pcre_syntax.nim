@@ -205,13 +205,12 @@ type
     reason*: string    ## psUnmodelled / psUnknown: the construct
     classPre845*: bool
       ## psOk: RFC-0005 S8bt: a UTF-mode class whose compilation PCRE
-      ## changed after 8.37 (pcre_compile.c, pcre_xclass.c, read on both):
-      ## a POSIX class under `(*UCP)` (8.37's `[:punct:]` takes symbols
-      ## below 256, not 128; a negated ascii / cntrl / xdigit lists no wide
-      ## characters; a class with one and a listed wide character reads
-      ## differently -- probed on the Windows legs), or a negated escape
-      ## (`\S \D \W \H \V`, PCRE's `should_flip_negation`), whose wide
-      ## characters 8.37 neither adds nor flips the same way
+      ## changed after 8.37 (pcre_compile.c, pcre_xclass.c, read on both).
+      ## RFC-0005 S8cf (item 7), probed on 8.37: a `[:graph:]`, `[:print:]`,
+      ## `[:punct:]` or a negated ascii / cntrl / xdigit under `(*UCP)` beside
+      ## another class item. Alone, they read as 8.45's, and `[:punct:]` with
+      ## the symbols below 256 (`parsePcre`'s `pre845`). A negated escape reads
+      ## the same on both.
 
 const
   pcreDigit* = {'0'..'9'}
@@ -479,6 +478,7 @@ type
     multiline: bool      ## `(?m)`
     extra: bool          ## `(?X)` (PCRE_EXTRA)
     classPre845: bool    ## RFC-0005 S8bt: see `PcreParse.classPre845`
+    pre845: bool         ## RFC-0005 S8cf: the library's classes are 8.37's
 
 proc reject(r: var Reader; msg: string; offset: int) {.noreturn.} =
   r.status = psRejected
@@ -875,6 +875,7 @@ proc readClass(r: var Reader): Rx =
   var single = false     ## the last item was one character
   var oneCh = 0'i32      ## ... that character
   var flip = false       ## PCRE's should_flip_negation
+  var posixSpecial = false ## RFC-0005 S8cf: see `classPre845`
   var xclass = false     ## characters above 0xFF listed (UTF mode)
   var hasProp = false    ## a property item (xclass_has_prop)
   var has8 = false       ## an item below 0x100 (class_has_8bitchar)
@@ -932,6 +933,12 @@ proc readClass(r: var Reader): Rx =
             if sub.len > 0:
               uset = ucdSet(sub)[1]
               useU = true
+              # RFC-0005 S8cf (item 7): 8.37's `[:punct:]` takes symbols
+              # below 256, 8.45's below 128 (probed).
+              if name == "punct" and r.pre845:
+                uset = cpUnion(uset, @[(0xA2'i32, 0xA6'i32), (0xA8'i32, 0xA9'i32),
+                  (0xAC'i32, 0xAC'i32), (0xAE'i32, 0xB1'i32), (0xB4'i32, 0xB4'i32),
+                  (0xB8'i32, 0xB8'i32), (0xD7'i32, 0xD7'i32), (0xF7'i32, 0xF7'i32)])
             elif name == "blank":
               uset = uHSpace
               useU = true
@@ -941,7 +948,12 @@ proc readClass(r: var Reader): Rx =
           # RFC-0005 S8bj: `(*UCP)` substitutes a property for these.
           if name notin ["ascii", "cntrl", "xdigit", "blank"]: hasProp = true
         has8 = true
-        if r.utf and r.ucp: r.classPre845 = true
+        # RFC-0005 S8cf (item 7): probed against 8.37: only these read
+        # differently beside another item (`tests/s8cf_harness/class_probe`).
+        if r.utf and r.ucp and
+           (name in ["graph", "print", "punct"] or
+            (neg and name in ["ascii", "cntrl", "xdigit"])):
+          posixSpecial = true
         r.i = t + 2
         isChar = false
         let base = (if useU: uset else: cpOfBytes(ps))
@@ -1005,7 +1017,9 @@ proc readClass(r: var Reader): Rx =
     if r.utf and folded.len > 0 and folded[^1].hi > 255: xclass = true
     cs = cpUnion(cs, folded)
   if hasProp: xclass = true
-  if r.utf and flip: r.classPre845 = true
+  # RFC-0005 S8cf (item 7): a negated escape reads the same on 8.37 (probed on
+  # 5 escapes, in and out of (*UCP), beside ASCII and wide items).
+  if posixSpecial and items > 1: r.classPre845 = true
   let members = (if negated: cpComplement(cs, r.topCp) else: cs)
   if items == 1 and single and not hasProp:
     # PCRE's one-character optimisation: OP_CHAR[I] / OP_NOT[I].
@@ -1379,10 +1393,10 @@ proc readLimit(r: Reader; j: int): (bool, int64, int) =
   if p >= r.pat.len or r.pat[p] != ')': return (false, 0'i64, p)
   (true, c, p + 1)
 
-proc parsePcre*(pattern: string; extended = false): PcreParse =
+proc parsePcre*(pattern: string; extended = false; pre845 = false): PcreParse =
   ## RFC-0005 S8ay. Reads `pattern` as `re(pattern)` (`extended = false`)
   ## or `rex(pattern)` (`extended = true`) compiles it. See the module doc.
-  var r = Reader(pat: pattern, ext: extended)
+  var r = Reader(pat: pattern, ext: extended, pre845: pre845)
   if '\0' in pattern:
     # Nim passes the pattern to PCRE as a cstring: it ends at the NUL.
     return PcreParse(status: psUnknown, reason: "a NUL byte in the pattern")
@@ -1620,7 +1634,7 @@ proc parseSpec*(sp: RegexSpec): PcreParse =
   let unverified = unverifiedLibReason()
   if unverified.len > 0:
     return PcreParse(status: psUnknown, reason: unverified)
-  result = parsePcre(sp.pattern, sp.flag == "rex")
+  result = parsePcre(sp.pattern, sp.flag == "rex", pcreOlderThan(8, 45))
   if result.status == psOk:
     var zero, ci = false
     zeroRepAndCaseless(result.root, zero, ci)
@@ -1631,7 +1645,7 @@ proc parseSpec*(sp: RegexSpec): PcreParse =
                 "data drops the caseless flag there)")
     if result.classPre845 and pcreOlderThan(8, 45):
       return PcreParse(status: psUnmodelled,
-        reason: "a UTF-mode class with a (*UCP) POSIX class or a negated " &
-                "escape, and std/re's libpcre predates 8.45 (its class " &
+        reason: "a UTF-mode class with a (*UCP) POSIX class beside another " &
+                "item, and std/re's libpcre predates 8.45 (its class " &
                 "compilation differs there)")
 

@@ -468,7 +468,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 79 -> 80 (RFC-0005 S8ce). One category-c test-injection-only site,
     ## compiled out of every normal build: the raise-shape fault
     ## `injectShapeFault`.
-    check runtimeCount == 80
+    ## 80 -> 81 (RFC-0005 S8cl). `storeOrdinal`'s range check, the check `F(v)`
+    ## made implicitly: category-c.
+    check runtimeCount == 81
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
@@ -503,7 +505,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 78 -> 80: the same two S8bx test-injection-only sites added above.
     ## 80 -> 82: the same two batch 8 test-injection-only sites added above.
     ## 82 -> 83: the same S8ce `injectShapeFault` site added above.
-    check cCount == 83
+    ## 83 -> 84: the same `storeOrdinal` site added above (RFC-0005 S8cl).
+    check cCount == 84
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

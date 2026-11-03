@@ -1058,6 +1058,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8cn: step 1e, an `mpairs` view and its Table, a seq's element
     ## with its seq, a `let` proc value. 245->251 (provisional, with batch 9 merged).
     ## RFC-0005 S8cq: by-value sharing and a call in a twice-lowered location. 251->252.
+    ## RFC-0005 S8cf (PCRE's limits read; the rest of S8bt's remainder).
+    ## Provisional 242.
+    ## RFC-0005 S8cb (S8bo onto batch 7, and S8bo's remainder). Provisional
+    ## 243 (S8bz holds 241, S8cf 242). 237->243.
+    ## RFC-0005 S8cd: proc-value results, global entry cells (a false sxUnsat),
+    ## case-object globals, set order (false verdicts both ways), receivers,
+    ## a leaf pinned to a literal. 245->249.
+    ## RFC-0005 S8cl (a bodiless magic is modelled or declines, `unsafeNew`
+    ## and `newString` allocate, `setLen` reads after its length). 245->248.
+    ## RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked. 245->252.
     check symexWalkerVersion == "252"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

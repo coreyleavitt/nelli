@@ -217,9 +217,8 @@ suite "S8bt: a limit between, through the walker":
     verdict(matchLenTarget, "bt_limit_matchlen")
     verdict(matchLenNeverTarget, "bt_limit_matchlen_never", sxUnsat)
 
-  # An unanchored call on the JIT (the Windows legs) declines: its
-  # accounting is not modelled.
-  test "unanchored calls: sxSat on the interpreter, never sxUnsat on the JIT":
+  # An unanchored call on the JIT (the Windows legs): its own accounting.
+  test "unanchored calls: on the interpreter, and on the JIT":
     if pcreSearchEngine() == peInterp:
       verdict(findErrTarget, "bt_limit_find_err")
       verdict(findOkTarget, "bt_limit_find_ok")
@@ -231,11 +230,17 @@ suite "S8bt: a limit between, through the walker":
       check "c".replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == "-"
       verdict(replaceErrTarget, "bt_limit_replace_err", sxUnsat)
     else:
-      # Declined: never a refutation (a replayed witness may still be
-      # found -- the JIT's `replace` of "ac" is "-").
-      template notRefuted(sut: untyped; label: string) =
-        let r = symexFind(sut, tLabel(label))
-        echo "  ", label, " (JIT): ", r.status
-        check r.status != sxUnsat
-      notRefuted(findErrTarget, "bt_limit_find_err")
-      notRefuted(replaceErrTarget, "bt_limit_replace_err")
+      # RFC-0005 S8cf (item 3): read off `count_match`'s sites. Up to 4 bytes the
+      # JIT stays under this limit: native says so, and so does the walker.
+      let rx = re"(*LIMIT_MATCH=6)(?:a|b)*c"
+      var stops = 0
+      var fr = @[""]
+      for _ in 0 .. 4:
+        var nx: seq[string]
+        for w in fr:
+          if find(w, rx) == -8: inc stops
+          for c in "abc": nx.add w & c
+        fr = nx
+      check stops == 0
+      verdict(findErrTarget, "bt_limit_find_err", sxUnsat)
+      verdict(replaceErrTarget, "bt_limit_replace_err", sxSat)

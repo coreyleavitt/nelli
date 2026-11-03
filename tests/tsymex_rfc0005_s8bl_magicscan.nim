@@ -51,10 +51,14 @@ proc scanVarParamMagics(file: string): seq[tuple[routine, magic: string]] =
           result.add (routine: head[1], magic: magic)
     inc i
 
+type FinRef = ref object
+  v: int
+proc finRef(x: FinRef) {.nimcall.} = discard
+
 proc pnew(x: int) =
-  var p: ref int
-  unsafeNew(p, 8)
-  if x == 1: symexTarget("unsafe_new")
+  var p: FinRef
+  new(p, finRef)
+  if x == 1: symexTarget("new_finalizer")
 
 proc idx(i: int): int = i + 1
 
@@ -86,11 +90,11 @@ suite "S8bl (1): every system magic with a var parameter is classified":
       check m.magic in classified
 
   test "a declined magic is a decline that names it, never a no-op":
-    let r = symexFind(pnew, tLabel("unsafe_new"))
+    let r = symexFind(pnew, tLabel("new_finalizer"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
-    check r.errors.hasMsg("unsafeNew")
-    check r.errors.hasMsg("magic \"New\"")
+    check r.errors.hasMsg("`new`")
+    check r.errors.hasMsg("magic \"NewFinalize\"")
     let d = symexFind(pswapImpure, tLabel("swap_impure"))
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnknown

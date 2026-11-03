@@ -2780,6 +2780,26 @@ type
                           ## may be stale, in either direction, whether it
                           ## came from an entry value or from the walk's own
                           ## write. `classOf` is `dcSubstituted`. sevError.
+    feCheckOption         ## RFC-0005 S8cu. A routine compiled without a check
+                          ## the walker models (`fieldChecks`, `rangeChecks`,
+                          ## `boundChecks`, `objChecks`), or with a float check
+                          ## it does not (`check_options.nim`). The routine's
+                          ## raises and values are not the model's, so a path
+                          ## reaching it declines. Unchecked semantics are not
+                          ## modelled. sevError.
+    feOverflowCheckOption ## RFC-0005 S8cu. `overflowChecks` off on a routine
+                          ## while the settings model it on. With `acOverflow`
+                          ## out of `arithChecks` the walker models the wrap
+                          ## and the trap (S8w, S8aa), and the marker is passed
+                          ## through. sevError.
+    heNilDerefMayBeCaught ## RFC-0005 S8cu. A nil dereference under a `try`
+                          ## (an `except` or a `finally`) in a build with
+                          ## `--exceptions:setjmp`, where `std/segfaults` makes
+                          ## it a catchable `NilAccessDefect` and runs the
+                          ## `finally`. Whether the program imports it is not
+                          ## read, so the path declines. Every other build
+                          ## crashes there (SIGSEGV) and no handler runs.
+                          ## sevError.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3815,6 +3835,12 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # S6b: `isVariantField` on a receiver whose construction already
     # declined is a HALT (`discard w.degrade(...)` + `continue`).
   # RFC-0005 S1b: the minted kinds (classified by S6b).
+  # RFC-0005 S8cu: the routine's unchecked behaviour is not walked, and the
+  # walk that follows stands for the checked one.
+  of feCheckOption, feOverflowCheckOption: dcSubstituted
+  # RFC-0005 S8cu: what runs past a nil dereference in a setjmp build is not
+  # known; the path stops, so nothing is substituted for it.
+  of heNilDerefMayBeCaught: dcNoAnswer
   of feUnsupportedStmtKind: dcSubstituted
     # S6b: every site is a parse-time Class-B `mkUnsupported` -- the
     # statement is dropped (the walker's `isUnsupported` arm forks the path

@@ -1069,7 +1069,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## Provisional 260.
     ## RFC-0005 S8ct (no replay runs in the host process; batch 10 merged).
     ## Provisional 261 (S8cs and S8cu held 260).
-    ## RFC-0005 batch 11: S8cs and S8ct stacked on batch 10. 252->262.
+    ## RFC-0005 S8cu (a routine compiled with other checks declines by
+    ## name). Provisional 260.
+    ## RFC-0005 batch 11: S8cs, S8ct and S8cu stacked on batch 10. 252->262.
     check symexWalkerVersion == "262"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

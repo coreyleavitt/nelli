@@ -1435,5 +1435,25 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ct_deepterm",
             # Batch 11: row B19's exact SUT, split out of deepterm (86 s of its
             # 186 s on Windows, against a 240 s kill).
-            "tsymex_rfc0005_s8ct_b19"]:
+            "tsymex_rfc0005_s8ct_b19",
+            # RFC-0005 S8cu -- a routine compiled under a disabled check declines
+            # by name. Walker 252->260.
+            "tsymex_rfc0005_s8cu_push",
+            "tsymex_rfc0005_s8cu_forms",
+            "tsymex_rfc0005_s8cu_kinds",
+            "tsymex_rfc0005_s8cu_modules",
+            "tsymex_rfc0005_s8cu_import",
+            "tsymex_rfc0005_s8cu_scan",
+            "tsymex_rfc0005_s8cu_cl_field",
+            "tsymex_rfc0005_s8cu_cl_over",
+            "tsymex_rfc0005_s8cu_cl_rbo",
+            "tsymex_rfc0005_s8cu_cl_checks",
+            "tsymex_rfc0005_s8cu_cl_danger",
+            "tsymex_rfc0005_s8cu_cl_float",
+            "tsymex_rfc0005_s8cu_assert",
+            "tsymex_rfc0005_s8cu_cl_assert",
+            "tsymex_rfc0005_s8cu_hidden",
+            "tsymex_rfc0005_s8cu_nil",
+            "tsymex_rfc0005_s8cu_nil_setjmp",
+            "tsymex_rfc0005_s8cu_nil_native"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

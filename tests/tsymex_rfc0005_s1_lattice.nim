@@ -79,7 +79,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feGlobalRouteUnproved,
                         # RFC-0005 S8ct: a replay whose child ended, and one
                         # that did not run.
-                        feReplayCrashed, feReplayDeclined}
+                        feReplayCrashed, feReplayDeclined,
+                        # RFC-0005 S8cu: a routine compiled with other
+                        # checks (`dcSubstituted`).
+                        feCheckOption, feOverflowCheckOption}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

@@ -14979,3 +14979,376 @@ re-execution (`replayedOrNotMarshallable`, `decidedOrNotMarshallable`).
 *The UNSAT row past the term limit* (`deepUnsat`) is `sxUnsat` on Z3 5.1 and
 `sxUnknown` with `beSolverUndef` on Z3 4.13.4 (the query's rlimit runs out);
 each is pinned by version, and neither is ever `sxSat`.
+
+**As landed (S8cu, walker 260 provisional) — a routine compiled with other
+checks.** Base e497dcf (batch 9 and the call depth fix, walker 245). A routine
+compiled without a check the walker models runs without it, but the walk modelled
+the check and reported a raise that never happens (`zz_pushoff.nim` from the
+worker's S8cp blocker: `{.push fieldChecks: off.}` around a wrong-branch write,
+`sxRaised FieldDefect` where the native run reaches the label). Overflow was wrong
+the same way on main. Suites `tsymex_rfc0005_s8cu_push`, `_forms`, `_kinds`,
+`_modules`, `_import`, `_scan` and six command-line suites (`_cl_field`,
+`_cl_over`, `_cl_rbo`, `_cl_checks`, `_cl_danger`, `_cl_float`, each with a
+`.nim.cfg`), all registered. CR2's `==` pin is 260; `_push` carries the `>= 260`
+floor. Every row runs the routine natively on the same build beside the verdict.
+
+- *Fail closed, per routine.* `check_options.nim` reads the check options at a
+  routine's definition, and `withCheckDeclines` puts a Class-B marker before its
+  body: the SUT (`parseProc`), every walked callee (`parseCalleeImpl`, read from
+  the original definition so a generic answers at its own), a lambda
+  (`parseRoutineToLambda`) and a closure iterator. The kinds are `feCheckOption`
+  and `feOverflowCheckOption`, both `dcSubstituted`, so a path reaching one is
+  `{scSpurious, scIncomplete}`: no `sxUnsat` and no trusted verdict, including a
+  routine whose modelled raise was caught before the label. The walker's
+  `isUnsupported` arm passes `feOverflowCheckOption` when `acOverflow` is out of
+  `arithChecks`, where the wrap (S8w) and the trap (S8aa) are modelled and proved:
+  existing `arithChecks` handling is unchanged. `acRange` out is not credited:
+  `rangeOff` with `{acOverflow, acDivByZero}` still declines on the conversion.
+- *What reads as a deviation.* `fieldChecks`, `overflowChecks`, `rangeChecks`,
+  `boundChecks`, `objChecks` off; `nanChecks`, `infChecks` (and `floatChecks`,
+  which is both) on, but only for a body that touches a float. `floatChecks: on` was
+  a false `sxSat` on main and the channel (the walker has no float raise).
+  `nilChecks` is not read: `{.nilChecks: off.}` does not compile and
+  `{.push nilChecks: off.}` changes nothing natively. `assertions` is read
+  apart, for the walker's own iterator asserts only (see the follow-ups below).
+- *Why a source scan.* The options live on `PSym.options`. On the pinned compiler,
+  the typed AST of a routine under `{.push checks: off.}` is identical to the
+  checked one (`nnkCheckedFieldExpr`, conversions and infix nodes all present, the
+  same `symBodyHash`, an empty pragma slot). `compileOption` through a template
+  reports the expansion site, which follows the `{.pop.}` in a `symexFind` call;
+  `compileOption` in a macro body depends on where that macro was compiled. So the
+  claim that "a macro cannot see a top-level push" holds for every macro API
+  tried, and the source scan answers every textual form. The scan is position
+  aware: the push/pop stack at the routine's line, in its module's file, with
+  `include`s read in place (a push in the includer reaches the included file, and
+  its own `push on` holds), user pragmas expanded, bare `{.x: off.}` statements, and
+  `{.push checks: on.}` re-enabling over a command line that turned them off. The
+  command line is read once through `compileOption` at nelli's module scope.
+- *Native facts the suites pin.* A pragma cannot sit on a routine: `proc f()
+  {.checks: off.}`, `{.fieldChecks: off.}` on a routine, and `{.pragma: x,
+  checks: off.}` used as `proc f() {.x.}` or `{.push x.}` are compile errors, so
+  there is no per-routine form. `{.x.}` as a statement compiles, and `{.pragma: x,
+  push, checks: off.}` then `{.x.}` pushes. A generic answers at its definition
+  (defined under a push and instantiated elsewhere: unchecked; defined clean and
+  instantiated under one: checked). A template and an inline iterator answer from
+  the routine they land in; a closure iterator, a func, a method, a converter, an
+  inline proc and a lambda at their own definition; a forward-declared routine at
+  its body. A routine a template generates has the template's line info and the
+  expansion's options; one a macro generates (`quote`, `newProc`) has the macro
+  call's line info. A pushing template expanded at the top level does push. An
+  `import` under a push compiles the module it first reaches, and what that
+  imports, under it; a module compiled earlier keeps its checks. `-d:danger` turns
+  off field, overflow, range, bound and object checks; `-d:release` keeps them.
+- *What reads as off.* An unreadable or unparsable file, a source filter, an
+  `include` that cannot be placed, a check value that is no literal, an undecided
+  `when` around a stack or check pragma (each distinct condition text, up to four,
+  is read as its own world and the position takes the union, so `when c: push` and
+  `when c: pop` balance; past four the rest join and a pop below them leaves both
+  states), a routine inside a template or macro body (the module's union), and a
+  routine under an importer's leak. `defined(x)` is undecided: a macro cannot
+  evaluate it for a name it holds as text. `hostOS` and `hostCPU` comparisons are
+  decided, which keeps `system.nim` readable.
+- *Nelli's own engine is excluded* (`/nelli/smt/`, `nelli/engine/markers.nim`):
+  it pushes for its own reasons and is not the program. Paths are compared
+  normalised to `/` and read as the compiler reported them, since Windows reports
+  `\`; `_scan` pins the exclusion on `ptrAimInto`, which sits under the runtime's
+  own `{.push fieldChecks: off.}`, so a Windows leg fails if a comparison is not
+  normalised. Parses are cached by path: hashing a `system.nim`-sized key on
+  every lookup spent the VM's 10M iteration budget within fifteen modules.
+- *The stdlib.* Walked routines inside `math.nim`'s `{.push checks: off.}`
+  (157-1116) now decline: `floorDiv`, `floorMod`, `euclMod`, `isPowerOfTwo`,
+  `nextPowerOfTwo`; also `digitsutils.addInt`. Natively they are unchecked, so the
+  old verdicts were not proven either way. Models and unpushed routines still
+  decide: `strip`, `delete`, `cmp`, `$int`, `abs`, `min`, `sqrt`, `isNaN`,
+  `classify`, `copySign`, `round`, `toLowerAscii`, `startsWith`, `find`,
+  `contains`, `strutils.parseInt`, a `Table`. The scan reads `system`, `strutils`,
+  `math`, `parseutils`, `tables`, `strimpl`, `digitsutils`, `options`, `hashes`,
+  `algorithm`, `sequtils`, `sets`, `unicode`, `os` and `times` with no unknown.
+- *Precision cost.* The rule is per routine, not per construct: under
+  `--fieldChecks:off` or `-d:danger` every routine the walk enters declines,
+  including one with no field access, which is correct (nothing it answers is a
+  false verdict) but leaves those builds with no definite verdicts. On an ordinary
+  build the cost is the pushed stdlib regions above and user code under a push.
+  Existing suites run on c with no move: `tsymex_161_overflow_obligation`,
+  `tsymex_163rev_concolic_modes`, `tsymex_163rev_inert_exclusions`, the `s8aa`,
+  `s8ac`, `s8ad`, `s8aj` and `s8w` remainders (whose pushed SUTs run with
+  `acOverflow` out), `s1b_kinds`, `s1c_verdict`, `s3_monotonicity`, `s8_scope`,
+  `tsymex_phase15_z3_infra`, `tsymex_inv_structured_kinds`,
+  `tsymex_163rev_degrade_classification`, `tsymex_phase2_overflow`,
+  `tsymex_phase15_F6_float_math`, `tsymex_phase15_F8_smoke`, `tsymex_r2_scanbound`.
+  `tsymex_rfc0005_s1_lattice` lists the two kinds among the reclassified.
+
+The table (Z3 5.1, c; native, main 6cbfe8f, channel e497dcf, this slice):
+
+| row | native | main | channel | S8cu |
+|---|---|---|---|---|
+| checked field write | FieldDefect | unknown (walker fault) | raised | raised |
+| `fieldChecks: off` | reached | unknown (walker fault) | raised | `feCheckOption` |
+| `overflowChecks: off` | reached | raised | raised | `feOverflowCheckOption` |
+| same, `acOverflow` out | reached | sat | sat | sat |
+| `rangeChecks: off` | reached | unknown (`feUnsupportedExprKind`) | raised | `feCheckOption` |
+| `boundChecks: off` | reached | raised | raised | `feCheckOption` |
+| `objChecks: off` | reached | unknown (`ekZ3Error`) | raised | `feCheckOption` |
+| `checks: off` | reached | raised / walker fault | raised | both kinds |
+| `floatChecks: on` | FloatOverflowDefect | sat | sat | `feCheckOption` |
+| float, default | reached | sat | sat | sat |
+| callee under push | reached | unknown (walker fault) | raised | `feCheckOption` |
+| generic defined under push | reached | raised | raised | `feOverflowCheckOption` |
+| `push` in a body | reached | walker fault | `feUnsupportedStmtKind` | same |
+
+Under `--fieldChecks:off`, `--overflowChecks:off`, `--checks:off`, `-d:danger`
+and `--floatChecks:on` the same probe gives main and the channel their default
+verdicts (a false raise or a false `sat` on each row the flag concerns), and this
+slice declines every such row; `--overflowChecks:off` with `acOverflow` out still
+decides. Main's walker fault on the checked row is a separate variant-write fault
+already fixed on the channel.
+
+*Known limits (in `docs/migration/0.9.0.md`), as first landed; the follow-ups
+below decline the first three forms where their pop is in the text, and narrow
+the importer leak.* Not seen by any mechanism here: a
+check pragma a macro builds from strings or `parseStmt`, or emits at the top level;
+a pushing template or macro from another module; an `import` under a push in a
+module nothing the walk reads. A user importer the walk reads leaks to every other
+non-system module and a leaked module's inner `push on` is not credited (an
+over-decline); a stdlib importer's push reaches only the module it names, so a
+chain through one is not followed. `nelli` imported under a user push reads its
+base as that push.
+
+*Different mechanisms, reported and not fixed here.*
+- **RFC-0016: model unchecked semantics exactly** (a wrong-branch field write, a
+  wrapped conversion, an unchecked index or downcast), and decline per construct
+  rather than per routine.
+- **PRECISION: `acRange` out is not credited** for a routine under `rangeChecks:
+  off`; the conversion's wrapped value is not modelled.
+- **ABORT: `s.sort()` on a `seq[int]` aborts the compile**, the same as main
+  (`dsl_typebridge.nim(1261,20) Error: node has no type` on the channel and here,
+  line 561 on main).
+- **A nil dereference caught by `except NilAccessDefect`** was a false `sxSat`:
+  fixed in the follow-ups below (the coordinator assigned it here).
+- **SOUNDNESS (C): an inline `(v + 1) < 0` at `high(int)` under overflow off** is
+  signed-overflow UB that gcc folds to false at `-O0`; S8w's wrap presumes C
+  wraps. The suites bind the sum with `let` first.
+- **USER-ASSERTED: `arithChecks` without `acOverflow`** on checked code is the
+  caller's claim and stays unchecked against the build.
+
+**S8cu follow-ups (same branch, merged with batch 10 at 67f0b622, walker still
+260 provisional).** Suites `tsymex_rfc0005_s8cu_assert` and `_cl_assert`
+(`--assertions:off` in its `.nim.cfg`), registered.
+
+- *A routine's own `assert` needs nothing.* It is decided when the definition is
+  checked, so the typed AST already has it or lacks it: under `{.push assertions:
+  off.}` it is gone and the walker reaches the label, as natively. A generic
+  follows its instantiation site (defined under the push and instantiated outside:
+  raises; defined clean and first instantiated under it: reaches, and a second
+  instantiation outside reuses that instance and reaches too). A template follows
+  its expansion site. `doAssert` raises under the push and under `--assertions:off`.
+  `{.push assertions: on.}` and `{.push checks: on.}` bring `assert` back under
+  `--assertions:off`. `{.push checks: off.}` drops `assert` too (the scanner's
+  `checks` now covers `assertions`); such a routine already declines.
+- *The walker's own iterator asserts were a false raise.* `mitems`'s and a
+  `Table` iterator's length check (S8ca, S8bl) were modelled whenever nelli's
+  `compileOption("assertions")` was on. That is the command line, which matches
+  `system`'s compile, but an iterator's instance takes the options of its *first*
+  instantiation. `mitems` over a `seq[int16]` first instantiated under `{.push
+  assertions: off.}` reaches the label natively and was `sxRaised` on the channel
+  and before this follow-up. A scanned option `coAssert` (never a deviation by
+  itself) now gives each routine `assertsMaybeOff`: assertions may be off at its
+  position or anywhere in its module. The parser keeps it per routine
+  (`ParseCtx.assertsOff`), and both sites decline with `feCheckOption` where it
+  is set. The model stays where the module has no such push.
+- *A global's initialiser is never evaluated.* The walker reads a module-level
+  global as havoc (`feGlobalHavoc`), so an initialiser under `{.push
+  overflowChecks: off.}` cannot be evaluated under the wrong options: the wrapped
+  global's label is `sxSat` (native reaches it) and its negation `sxUnknown`
+  (native does not). Main read every such global as `feGlobalReadUnmodelled`.
+- *`cmpIgnoreStyle`* declines at once here (`strutils.nim:350` is under a checks
+  push: both kinds). The channel now finishes inside 250 s as `sxSat` with
+  `beBudgetExhausted` (the loop budget); main aborts the compile on the probe
+  (`dsl_typebridge.nim(561,20)`). Better than both.
+
+Assertions (native, main 6cbfe8f, channel e497dcf, this slice). Main aborts the
+compile on any `mitems` row (`dsl_typebridge.nim(561,20)`), so those are `abort`:
+
+| row | native | main | channel | S8cu |
+|---|---|---|---|---|
+| `assert` | AssertionDefect | raised | raised | raised |
+| `assert`, push off | reached | sat | sat | sat |
+| `doAssert`, push off | AssertionDefect | raised | raised | raised |
+| generic defined under off | AssertionDefect | raised | raised | raised |
+| generic first instantiated under off | reached | sat | sat | sat |
+| same instance, called outside | reached | sat | sat | sat |
+| template defined under off | AssertionDefect | raised | raised | raised |
+| template expanded under off | reached | sat | sat | sat |
+| `assert`, push on | AssertionDefect | raised | raised | raised |
+| `mitems` grow | AssertionDefect | abort | raised | `feCheckOption` (module has a push) |
+| `mitems` grow, push off | AssertionDefect | abort | raised | `feCheckOption` |
+| `mitems[int16]` first under off | reached | abort | **raised** | `feCheckOption` |
+| `checks: off`, `assert` | reached | — | — | `feCheckOption` |
+
+Under `--assertions:off`: `assert`, the generic and template rows reach the label
+and every tree says `sat`; `doAssert` and `assert` under `push assertions: on`
+raise and every tree says `raised`; `mitems` grow reaches it and the channel and
+this slice decline (`feUnsupportedOp`, S8bu), main aborts.
+
+Modules (native, main, channel, this slice):
+
+| row | native | main | channel | S8cu |
+|---|---|---|---|---|
+| callee, checked field | FieldDefect | unknown (walker fault) | raised | raised |
+| callee, unchecked field | reached | unknown (walker fault) | **raised** | `feCheckOption` |
+| callee, checked add | OverflowDefect | raised | raised | raised |
+| callee, unchecked add | reached | **raised** | **raised** | `feOverflowCheckOption` |
+| generic defined under push | reached | **raised** | **raised** | `feOverflowCheckOption` |
+| generic instantiated in a pushed caller | OverflowDefect | raised | raised | `feOverflowCheckOption` |
+| generic, clean | OverflowDefect | raised | raised | raised |
+| `include` under push | reached | **raised** | **raised** | `feOverflowCheckOption` |
+| `include`, inner on | OverflowDefect | raised | raised | raised |
+| template from another module | reached | **raised** | **raised** | `feOverflowCheckOption` |
+| template in this file | reached | **raised** | **raised** | `feOverflowCheckOption` |
+| macro-generated under push | reached | **raised** | **raised** | `feOverflowCheckOption` |
+| macro-generated, clean | OverflowDefect | raised | raised | raised |
+| `import` under push | reached | **raised** | **raised** | `feOverflowCheckOption` |
+| `import`, inner on | OverflowDefect | raised | raised | `feOverflowCheckOption` (leak) |
+| importer's own routine | reached | sat | sat | sat |
+| stdlib `floorDiv` | reached | sat | sat | both kinds |
+| stdlib `isPowerOfTwo` | reached | sat | sat | both kinds |
+| stdlib `strip` | reached | sat | sat | sat |
+
+*Merge conflicts with batch 10 (67f0b622).* `nelli.nimble` (both suite lists
+kept), `canonicalize.nim` and the CR2 pin (252 -> 260, batch 10's history bullets
+kept), the migration note's §3.3 enum list (rewritten by batch 10; the two kinds
+added to it) and §5, and this note. The S8cu hooks still cover every routine
+entry: batch 10's `procCall` and magic declines return before `parseCalleeImpl`
+and walk no body, and its new body parses are loop and `case` arms inside a
+routine.
+
+*Known limit (assertions).* A module that never pushes `assertions: off` keeps
+the modelled length check, though another module may have instantiated the same
+`mitems[T]` first under such a push. No macro reads the instantiation order.
+
+*The forms the scan could not see were false verdicts, now declined.* The
+known-limit list above (a pragma a macro builds, a pushing template or macro from
+another module, an importer the walk never enters) was measured with field, range
+and object rows (`zz_lim.nim`). Native reaches every label; main declines every
+row, controls included (its own model faults). The channel and this slice before
+the fix said `sxRaised` on all fifteen: worse than main. Two signals now close
+them, neither global:
+- *A pop with no push the scan read* shows a push it missed. The scanner reads
+  such a module twice. The second time, each call statement before such a pop
+  reads as possibly pushing every check off, up to that pop, where the state
+  before the call comes back. Such a pop with no call before it makes the module
+  unknown. No stdlib module the walk reads has one (31 scanned, all clean).
+- *The import graph.* Each routine's module and the project file
+  (`querySetting(projectFull)`) are followed through their user imports (beside the
+  importer or on `--path`; not the stdlib, packages under `.nimble`/`_deps`/`pkgs2`,
+  or nelli). A user importer's push now reaches the module it names, the user
+  modules that one imports, and the stdlib. Before, it reached every non-system
+  module, which now that more importers are read would have declined the importer's
+  own routines. An importer that cannot be read declines every routine. A
+  search path given on the command line (`--path:src`, as every Windows leg
+  passes it) stays relative to the compiler's working directory, which the VM
+  cannot query and `staticRead` does not resolve against (it reads beside
+  `check_options.nim`): the first push of these follow-ups (`9e1e944b`) ended
+  the compile there on all three legs. A relative path is now anchored at the
+  nearest directory at or above the project that holds it, and one that cannot
+  be anchored reads as unreadable (declines). Reproduced on Linux with
+  `--skipParentCfg --path:src`.
+
+| row (field, range, obj each) | native | main | channel | S8cu before | S8cu |
+|---|---|---|---|---|---|
+| control, checked | raises | unknown (fault, `feUnsupportedExprKind`, `ekZ3Error`) | raised | raised | raised |
+| macro, pragma from `parseStmt` | reached | unknown (same) | **raised** | **raised** | `feCheckOption` |
+| macro, pragma from nodes | reached | unknown (same) | **raised** | **raised** | `feCheckOption` |
+| template from another module | reached | unknown (same) | **raised** | **raised** | `feCheckOption` |
+| macro from another module | reached | unknown (same) | **raised** | **raised** | `feCheckOption` |
+| import under push, importer not walked | reached | unknown (same) | **raised** | **raised** | `feCheckOption` |
+
+Pinned by `tsymex_rfc0005_s8cu_hidden` (registered), with two scan rows for the
+pop signal. Still not seen: a hidden push whose pop is hidden too, or one that
+never pops, and an importer outside the import graph (reached only through an
+installed package).
+
+*A nil dereference is a crash, not a raise (assigned to this slice).* Natively on
+Nim 2.2.10 a nil field read or `r[]` is a SIGSEGV (rc 139) that ends the process:
+by default, with `--panics:on`, under `-d:danger`, with clang and on the cpp
+backend, under `except NilAccessDefect`, `except Defect`, a bare `except` and a
+`finally`, which does not run. Two settings change how it fails, and only one of
+them makes it catchable. `import std/segfaults` with the default goto exceptions
+dies in its handler (rc 1, the call depth limit) and hangs in a release build or
+with `--exceptions:quirky` (rc 124); with `--exceptions:cpp` it is unhandled
+(rc 1). With `--exceptions:setjmp` (debug or release) `except NilAccessDefect`
+catches it and the `finally` runs. The walker routed the nil edge (S8k's
+`nilDerefFork`) through `routeRaise` like any raise, so a handler caught it: a
+label in the handler was a false `sxSat`, and `tNilAccess` a false `sxUnsat`.
+Main did the same for a parameter (its `tParCatchNA`) and declined a nil literal
+(`heUnresolvedRef`), so the channel's literal, captured and `r[]` rows were worse
+than main. `crashRaise` now ends the nil edge at the SUT boundary, past every
+handler, `finally` and caller frame, as an `sxRaised NilAccessDefect` finding (so
+`tNilAccess` finds it, and nothing after the dereference is reachable on that
+path). In a setjmp build, a nil edge under any `try` in any frame declines
+instead (`heNilDerefMayBeCaught`, tail-appended, `dcNoAnswer`): whether the
+program imports `std/segfaults` is not read. Pinned by `tsymex_rfc0005_s8cu_nil`
+(registered), whose native column runs each form in a child process, and by
+`tsymex_rfc0005_s8cu_nil_setjmp` (registered; its `.nims` sets
+`--exceptions:setjmp` on c, which the cpp backend cannot build): natively the
+handler runs with `std/segfaults`, the walk declines a dereference under an
+`except` or under a caller's `finally`, and one under no `try` is still the crash
+finding. On cpp the same file pins `--exceptions:cpp`, where `std/segfaults`
+leaves the defect unhandled natively and the walk reports the crash.
+
+The crash leaves each frame by the channel an escaping raise takes (the
+callee's `escaped`, a closure body's `closureRaises`), marked `crash` so each
+drain re-routes it through `crashRaise` rather than the caller's handlers. The
+first version surfaced it from inside the callee, on the callee's or closure
+body's path alone, without the caller's facts that each drain joins: a deref of
+the global `gpb` that the caller had just pointed at a local read as possibly
+nil, and fourteen suites through proc values and closures (`s8bu_calls`,
+`s8bs_*`, `s8ca_*`, `s8bg`/`s8bh`/`s8bn` remainders, `s8bk_argtiming_checks`,
+`s8cr_intro`, `CR1_CR5_closure_heap`, `rereview_drains`) gave a false
+`sxRaised` on symex-mingw (run 41593977643). `tsymex_phase15_r13_ptr_finally`
+is re-pinned: `f(nil)` is a SIGSEGV at `p[] = 7`, which surfaces under any target
+(E6) and is now found before the `finally`'s `ValueError` (which the walk used to
+reach by routing the nil edge into the `finally`); the composition it pins is
+checked with `dkOther` excluded.
+
+*Windows.* The native rows of `tsymex_rfc0005_s8cu_nil` ran on symex-mingw
+(41593977643) and passed: under mingw, with default exceptions, a nil read
+crashes the child under each handler form and the `finally`, as on Linux, so
+the rule is not platform-dependent. A setjmp build of the walk itself does
+not run on Windows: it crashes entering the 16 MB fiber (SIGSEGV in
+`runSymexCaught`, before any walk, run 41607282958; with `std/segfaults`
+imported it surfaces as a `NilAccessDefect`, run 41593977643). This is a
+pre-existing incompatibility of nelli with `--exceptions:setjmp` on Windows,
+not of the nil rule, and is not fixed here. The setjmp suite's `.nims` applies
+setjmp on c off Windows only; on Windows and cpp it pins the default crash.
+
+What replaces those rows on Windows is `tsymex_rfc0005_s8cu_nil_native`
+(registered, unskipped). It builds a nelli-free probe (`s8cu_nil_probe.nim`: a
+nil read under `except NilAccessDefect` and a `finally`) with the host's `nim`
+in each mode, runs it under a 20 s limit, prints a `NATIVE` line per mode, and
+fails if any mode without setjmp catches the read or runs the `finally`. Linux:
+
+| mode | outcome |
+|---|---|
+| goto (default), no `std/segfaults` | SIGSEGV rc 139 (`tsymex_rfc0005_s8cu_nil`) |
+| goto + `std/segfaults` | rc 1, not caught, no `finally` |
+| goto + `std/segfaults`, `-d:release` | rc 137, not caught, no `finally` |
+| setjmp | SIGSEGV rc 139, not caught |
+| setjmp + `std/segfaults` | **caught**, `finally` runs, rc 0 (the walker declines under a `try`) |
+
+| form (label in the handler) | native | main | channel | S8cu |
+|---|---|---|---|---|
+| nil literal, field read | SIGSEGV | unknown (`heUnresolvedRef`) | **sat** | raised `NilAccessDefect` |
+| parameter, `except NilAccessDefect` | SIGSEGV | **sat** | **sat** | raised |
+| parameter, `except Defect` | SIGSEGV | **sat** | **sat** | raised |
+| parameter, bare `except` | SIGSEGV | **sat** | **sat** | raised |
+| parameter, `finally` (label there) | SIGSEGV on nil | sat (non-nil input) | sat (same) | sat (same) |
+| captured by a closure | SIGSEGV | unknown | **sat** | raised |
+| `r[]` of a nil literal | SIGSEGV | unknown | **sat** | raised |
+| in a callee, handler in the caller | SIGSEGV | **sat** | **sat** | raised |
+| a global ref | SIGSEGV | unknown (`feGlobalReadUnmodelled`) | unknown (same) | unknown (same) |
+
+`tNilAccess` on the same rows: main and the channel `sxUnsat` wherever a handler
+matched (literal and captured: main unknown), this slice `sxRaised` on each, and
+unknown on the global. The `finally` row's `tNilAccess` was already `sxRaised` on
+every tree.

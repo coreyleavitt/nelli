@@ -207,7 +207,7 @@ const renderAsChoicesVersion* = "12"
   ##   S8cd 249, S8cl 248; S8cr bumps nothing). The stack takes S8cb's `ensureMove`
   ##   model over S8cl's decline, and the empty-magic helpers are one (`stubBody`).
   ##   A statement `procCall f(x)` declines without reading its untyped actual.
-  ## - RFC-0005 batch 11 (252->262): S8cs (provisional 260), S8ct (261) on batch 10.
+  ## - RFC-0005 batch 11 (252->262): S8cs (260), S8ct (261), S8cu (260) on batch 10.
 
 const symexWalkerVersion* = "262"
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
@@ -227,6 +227,16 @@ const symexWalkerVersion* = "262"
   ## a label hit before it ended is a confirmed `sxSat`. A child's writes do not
   ## reach the host. A symbolic array access that may name more than
   ## `termWalkMaxDepth` positions declines. 252 -> 261.
+  ##
+  ## RFC-0005 S8cu (provisional 260, renumbered 262 by batch 11). A routine
+  ## compiled without a check the walker models, or with a float check it does not, declines by name
+  ## (`check_options.nim`, `feCheckOption`, `feOverflowCheckOption`) where the
+  ## walk reported a raise that never happens. SOUNDNESS. 252 -> 260 (245 -> 260
+  ## before batch 10). The follow-ups, still at 260: `mitems` and `Table` length
+  ## checks decline in a module that may compile `assert` out, a pop with no seen
+  ## push marks the calls before it, the import graph finds an importer the
+  ## walk never enters, and a nil dereference is a crash no handler or
+  ## `finally` sees (`crashRaise`).
   ##
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite

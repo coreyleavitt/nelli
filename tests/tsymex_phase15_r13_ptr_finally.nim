@@ -37,10 +37,25 @@ proc f(p: ptr int) =
     if p[] == 7:
       raise newException(ValueError, "written")
 
+const noNilCrash = block:
+  # RFC-0005 S8cu: `NilAccessDefect` is a non-family defect (`dkOther`).
+  var s = defaultSymexSettings()
+  s.defectExclusions.incl dkOther
+  s
+
 suite "symex Phase 15 R13-B — ptr T + try/finally composition":
 
-  test "R13-B: ptr T + try/finally composition produces sxRaised(ValueError) with witness p[]==7":
+  test "RFC-0005 S8cu: `p == nil` crashes at `p[] = 7`; the finally never runs":
+    # Natively `f(nil)` is a SIGSEGV. The walk routed the nil edge into the
+    # finally, so the ValueError path was found first; the crash is a reachable
+    # defect, which surfaces under any target (E6), and is now found first.
     let r = symexFind(f, tRaisedExn("ValueError"))
+    check r.status == sxRaised
+    check r.raisedTypeId == "NilAccessDefect"
+
+  test "R13-B: ptr T + try/finally composition produces sxRaised(ValueError) with witness p[]==7":
+    # RFC-0005 S8cu: with the nil crash excluded, the composition this pins.
+    let r = symexFind(f, tRaisedExn("ValueError"), noNilCrash)
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     # The heap state threaded through the try/finally exit continuation: the

@@ -15374,6 +15374,8 @@ type
     path:   Path
     typeId: string
     msg:    Option[string]
+    crash:  bool          ## RFC-0005 S8cu: a nil dereference (`crashRaise`),
+                          ## re-routed past every handler and `finally`
 
   RaiseSinkKind = enum
     ## RFC-0005 S8bb. Which raise sink a deposit went to, in the order
@@ -17945,6 +17947,8 @@ proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
+proc crashRaise(p: Path, typeId: string, w: var WalkCtx)
+  ## RFC-0005 S8cu fwd decl (defined beside `routeRaise`).
 
 proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
                                                    unknown: seq[string]] =
@@ -18437,7 +18441,8 @@ proc drainClosureRaises(p: Path; exitFactsPlaced: bool;
     for o in cr.varOuts: rp.env[o.name] = o.val
     rp.defectSurvivorPc = p.defectSurvivorPc & er.path.defectSurvivorPc
     rp.heapDepth = p.heapDepth
-    discard routeRaise(rp, er.typeId, er.msg, w)
+    if er.crash: crashRaise(rp, er.typeId, w)       # RFC-0005 S8cu
+    else: discard routeRaise(rp, er.typeId, er.msg, w)
     if w.shouldStop: break
   @[p]
 
@@ -22555,7 +22560,8 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           if touched.len > 0:
             raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
                                         guardDegrade(w, stmt.callee, touched))
-          survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
+          if er.crash: crashRaise(raisePath, er.typeId, w)   # RFC-0005 S8cu
+          else: survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
           if w.shouldStop:
             w.extHardMark = outerExtMark   # RFC-0005 S8ax
             return survivors
@@ -23479,6 +23485,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # constraints); an undecided query keeps the path, tainted as before.
     # RFC-0005 S8bn's late-address and proc-field declines rely on this:
     # they sit under forks the walk makes without a feasibility check.
+    # RFC-0005 S8cu: a routine without overflow checks, where the settings model
+    # that (the wrap, S8w; the trap, S8aa).
+    if stmt.unKind == feOverflowCheckOption and
+       acOverflow notin w.settings.arithChecks:
+      return paths
     var live: seq[Path]
     for p in paths:
       if not pathInfeasible(w.z3, p, w.settings): live.add p
@@ -24525,6 +24536,62 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     of sxUnsat:   discard
     of sxRaised:  discard   ## trySolve never returns sxRaised
   @[]
+
+proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
+  ## RFC-0005 S8cu. A raise no handler and no `finally` sees: a nil dereference,
+  ## which natively is a SIGSEGV (rc 139) that ends the process on the pinned Nim
+  ## 2.2.10, by default, with `--panics:on`, `-d:danger`, clang and the cpp
+  ## backend, under `except NilAccessDefect`, `except Defect` and a bare
+  ## `finally`. `std/segfaults` does not change that with the default goto
+  ## exceptions (its handler recurses to the call depth limit, rc 1, or hangs
+  ## in a release build), nor with `--exceptions:cpp`; with
+  ## `--exceptions:setjmp` it makes the raise catchable and runs the `finally`.
+  ## So in a setjmp build a dereference under any `try` declines
+  ## (`heNilDerefMayBeCaught`). In every other build the crash leaves each
+  ## frame by the channel an escaping raise takes (`escaped`, marked `crash`,
+  ## so the caller's drain re-routes it here), since the callee's or closure
+  ## body's path holds only its own facts and the drain joins the caller's;
+  ## it ends as a finding at the SUT boundary. Before S8cu it was routed as an
+  ## ordinary raise: a label in `except NilAccessDefect` was a false sxSat and
+  ## `tNilAccess` a false sxUnsat.
+  when compileOption("exceptions", "setjmp"):
+    var guarded = w.frame.handlerStack.len > 0
+    for f in w.frameStack:
+      if f.handlerStack.len > 0: guarded = true
+    if guarded:
+      if not pathInfeasible(w.z3, p, w.settings):
+        discard w.degrade(heNilDerefMayBeCaught,
+          "a nil dereference under a `try` in a build with " &
+          "`--exceptions:setjmp`, where `std/segfaults` would make it a " &
+          "catchable `" & typeId & "` and run the `finally`: what follows is " &
+          "not known -- path degraded to sxUnknown (heNilDerefMayBeCaught)")
+      return
+  if w.frameStack.len > 0:
+    w.frame.escaped.add EscapedRaise(path: p, typeId: typeId,
+                                     msg: none(string), crash: true)
+    return
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                          w.settings):
+    return
+  if typeIdToDefectKind(typeId) in w.settings.defectExclusions: return
+  let (st, wit, candErrs, why) = solveTargetHit(w, p)
+  case st
+  of sxSat:
+    let iv = InternalVerdict(kind: ivRaised, raisedTypeId: typeId,
+                             raisedMsg: none(string), raisedWitness: wit,
+                             raisedIsDefect: true)
+    var r = toPublic(iv)
+    r.soundness.pathTaint = p.taint
+    r.nilDerefOnPath = p.nilDeref
+    r.errors.add candErrs
+    w.admitSolvedHit(r)
+  of sxUnknown:
+    discard w.degrade(beSolverUndef,
+      "solver returned unknown on a path raising `" & typeId &
+           "` (queryRLimit=" & $w.settings.budget.queryRLimit &
+           "): " & why & " (beSolverUndef)")
+  of sxUnsat, sxRaised: discard
 
 # ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------
 

@@ -261,8 +261,9 @@ if ($accountedFor -ne $allTsymex.Count) {
 # shard vary by up to ~1.3x, so the target sits below the 30-minute typical
 # time the shards aim for, and further below the corpus job's 40-minute
 # check. $minShardCount (batch 11's count) keeps the count from falling when
-# the table is short.
-$targetShardMin = 25
+# the table is short. The target was 25 until run 41679548648 (9ebe2a46),
+# whose 22 shards, predicted at about 24 min each, took up to 29.2.
+$targetShardMin = 23
 $minShardCount = 17
 $timesPath = Join-Path $RepoRoot 'scripts/ci-suite-seconds.tsv'
 $measured = @{}

@@ -5000,8 +5000,9 @@ proc cgMayBeLifted(s: NimNode): bool =
   var found = false
   proc scan(m: NimNode; top: bool) =
     if found: return
-    if not top and m.kind in {nnkLambda, nnkProcDef, nnkFuncDef, nnkIteratorDef,
-                              nnkDo, nnkMethodDef, nnkConverterDef}:
+    # Every routine shape, the macro and template ones too: a capture found
+    # there only widens "may be lifted", which can only add a decline.
+    if not top and m.kind in RoutineNodes:
       if containsSym(nestedCaptureSyms(m), s): found = true
       return
     for c in m: scan(c, false)

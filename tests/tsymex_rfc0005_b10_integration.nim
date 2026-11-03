@@ -18,7 +18,8 @@
 ## RFC-0005 S8cm: part 1 of 3 of this suite, with
 ## `tsymex_rfc0005_b10_integration_b`, `tsymex_rfc0005_b10_integration_c`.
 ## Split so that each part compiles and runs in under 60 s on the Windows legs
-## (the whole file took 99 s).
+## (the whole file took 99 s). The three tests from `cross-slice shapes: nim`
+## on stay together: the last reads `gPr` as the first leaves it.
 
 import std/[unittest, strutils, sets, re, tables]
 import nelli/symex
@@ -62,36 +63,6 @@ proc altShort(s: string) =
   if s == "ac" and not s.contains(re"(a|a)*b|c$"):
     symexTarget("alt_short")
 
-# (2) ---------------------------------------------------------------------
-
-proc setIt(x: var int) = x = 5
-proc idf(x: int): int = x
-
-proc pcStmt(k: int) =
-  var a = k
-  procCall setIt(a)
-  if a == 5 and k == 3: symexTarget("pc_stmt")
-  if a == k and k != 5: symexTarget("pc_stmt_dead")
-
-proc pcValue(k: int) =
-  discard procCall(idf(k))
-  if k == 3: symexTarget("pc_value")
-
-type
-  Bs = ref object of RootObj
-    v: int
-  Dv = ref object of Bs
-
-method m(b: Bs): int {.base.} = 1
-method m(d: Dv): int = procCall(m(Bs(d))) + 1
-
-proc pcMethod(k: int) =
-  let d = Dv(v: k)
-  if m(d) == 2 and k == 3: symexTarget("pc_method")
-  if m(d) == 1: symexTarget("pc_method_dead")
-
-type Pr = object
-  x, y: int
 suite "RFC-0005 batch 10: integration":
   test "walker floor":
     check parseInt(symexWalkerVersion) >= 252
@@ -122,21 +93,3 @@ suite "RFC-0005 batch 10: integration":
 
   test "alt_short: inside the safe length the refutation stands":
     clean(altShort, "alt_short", sxUnsat)
-
-  test "procCall: nim":
-    symexCaptureBegin()
-    for k in [0, 3, 5]:
-      pcStmt(k); pcValue(k); pcMethod(k)
-    let hits = symexCaptureEnd()
-    check "pc_stmt" in hits
-    check "pc_stmt_dead" notin hits
-    check "pc_value" in hits
-    check "pc_method" in hits
-    check "pc_method_dead" notin hits
-
-  test "procCall: every form declines, naming the magic":
-    declines(pcStmt, "pc_stmt", "procCall")
-    declines(pcStmt, "pc_stmt_dead", "procCall")
-    declines(pcValue, "pc_value", "procCall")
-    declines(pcMethod, "pc_method", "procCall")
-    declines(pcMethod, "pc_method_dead", "procCall")

@@ -18519,6 +18519,85 @@ proc declinedPopEnv(env: Env; stmt: IRStmt): Env =
   result[stmt.spRetName] = allocateSym(stmt.spElemTy,
     freshDegradeName("__declinedPop"), scratch)
 
+type DiscOutcome = object
+  ## RFC-0005 S8cp (item 2). One way an assignment to a discriminator goes.
+  cond: Z3Bool                            ## when it goes this way
+  arms: OrderedTable[int, seq[SymVal]]    ## the arm fields after it
+  havoc: bool     ## the arm holds a fresh value (`feUncheckedDiscBytes`)
+  decline: bool   ## a field of the arm has no fresh or zero value here
+
+proc armScalarAfter(sv: SymVal; zero: bool; declined: var bool): SymVal =
+  ## RFC-0005 S8cp (item 2). `sv`'s type's zero, or a fresh value with no range
+  ## fact (the bytes need not be in range), for a scalar arm field.
+  ## `declined` for anything else (`discWriteOutcomes`).
+  var ty: IRType
+  case sv.kind
+  of svBV8:  ty = tInt(8, sv.signed)
+  of svBV16: ty = tInt(16, sv.signed)
+  of svBV32: ty = tInt(32, sv.signed)
+  of svBV64: ty = tInt(64, sv.signed)
+  of svBool: ty = tBool()
+  of svFloat32: ty = tFloat32()
+  of svFloat64: ty = tFloat64()
+  of svString:
+    if not zero:
+      declined = true
+      return sv
+    ty = tString()
+  else:
+    declined = true
+    return sv
+  if zero: return defaultZero(ty, "__uncheckedArm")
+  var scratch: seq[Z3Bool]
+  allocateSym(ty, freshDegradeName("__uncheckedArm"), scratch)
+
+proc discWriteOutcomes(mode: DiscWriteMode;
+                       armFields: OrderedTable[int, seq[SymVal]];
+                       oldDisc: SymVal; newTag: int;
+                       branches: seq[seq[int]];
+                       sameValue: Z3Bool): seq[DiscOutcome] =
+  ## RFC-0005 S8cp (item 2). What an assignment of the tag `newTag` to a
+  ## discriminator leaves in the arm fields (`DiscWriteMode`). Under
+  ## `{.cast(uncheckedAssign).}` nothing raises, and the same value changes
+  ## nothing. Another value: on an object with a destructor (`dwmZeroing`) Nim
+  ## zeroes the memory of this case, of the same branch or not; on any other
+  ## object the bytes stay, so the new arm reads the old arm's, unless the object
+  ## has a hook, which also zeroes them (`dwmHavoc`). Only the new tag's fields
+  ## are reachable until the next assignment, which reads them through its own
+  ## old discriminator, so only they change. Natively checked:
+  ## `tests/tsymex_rfc0005_s8cp_unchecked.nim`.
+  ## May leave a merge-degrade effect pending (`carryBranchFields`): the caller
+  ## drains.
+  if mode == dwmChecked:
+    return @[DiscOutcome(cond: sameBranchCond(oldDisc, newTag, branches),
+                         arms: carryBranchFields(armFields, oldDisc, newTag, branches))]
+  result.add DiscOutcome(cond: sameValue, arms: armFields)
+  var key = -1
+  if newTag >= 0:
+    for g in branches:
+      if newTag in g: key = newTag
+  var changed = DiscOutcome(cond: not sameValue, arms: armFields,
+                            havoc: mode == dwmHavoc)
+  if key in armFields:
+    var after: seq[SymVal]
+    for f in armFields[key]:
+      after.add armScalarAfter(f, mode == dwmZeroing, changed.decline)
+    changed.arms[key] = after
+  result.add changed
+
+proc discOutcomePath(p: Path; o: DiscOutcome; w: var WalkCtx): Path =
+  ## RFC-0005 S8cp (item 2). The child of `p` that goes the way `o` does.
+  if o.decline:
+    return forkPathTainted(p, p.pc & @[o.cond], p.env, w.degrade(feUnsupportedOp,
+      "an arm field of this type after a discriminator write under " &
+      "`{.cast(uncheckedAssign).}` is not modelled (feUnsupportedOp)"))
+  result = forkPath(p, p.pc & @[o.cond], p.env)
+  if o.havoc:
+    taintInPlace(result, w.degrade(feUncheckedDiscBytes,
+      "a discriminator written under `{.cast(uncheckedAssign).}`: the new arm " &
+      "holds the old bytes or zero, by whether the object has a hook, so a hit " &
+      "through it is replayed (feUncheckedDiscBytes)"))
+
 proc unwrittenDisc(sv: SymVal): string =
   ## RFC-0005 S8bw (item 2). The unwritten part a variant's discriminator
   ## (each axis's, for a multi-variant) mentions, or "": a reassignment
@@ -20623,28 +20702,35 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
       of svBV32: liftBV(mkBitVec[32](tagOrd), oldDisc.signed)
       of svBV64: liftBV(mkBitVec[64](tagOrd), oldDisc.signed)
       of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(tagOrd))  # A6
+      of svBool: ofBool(mkBool(tagOrd != 0))   ## RFC-0005 S8cp: a `bool` disc
       else:
         raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassignSymbolic's discriminator is always BV/Z3Int-allocated)]
           "isVariantReassign: disc must be BV or Z3Int kind")
-    let same = sameBranchCond(oldDisc, stmt.vrNewTag, stmt.vrBranches)
-    maybeForkDefect(p, not same, "FieldDefect", none(string), w)
-    if w.shouldStop: return out2
+    if stmt.vrMode == dwmChecked:
+      maybeForkDefect(p, not sameBranchCond(oldDisc, stmt.vrNewTag, stmt.vrBranches),
+                      "FieldDefect", none(string), w)
+      if w.shouldStop: return out2
     let newDiscBoxed = new(SymVal)
     newDiscBoxed[] = newDiscInner
-    let carried = carryBranchFields(oldSV.vArmFields, oldDisc,
-                                    stmt.vrNewTag, stmt.vrBranches)
+    let outcomes = discWriteOutcomes(stmt.vrMode, oldSV.vArmFields, oldDisc,
+                                     stmt.vrNewTag, stmt.vrBranches,
+                                     variantDiscEq(oldDisc, tagOrd))
     let pM = drainPendingLowerEffects(p)
-    let newSV = SymVal(kind: svVariant,
-                       vDisc: newDiscBoxed,
-                       vDiscName: oldSV.vDiscName,
-                       vObjectName: oldSV.vObjectName,
-                       vArmFields: carried,
-                       vArmFieldNames: oldSV.vArmFieldNames,
-                       vPlainFields: oldSV.vPlainFields,       # shared:
-                       vPlainFieldNames: oldSV.vPlainFieldNames) # preserved.
-    var newEnv = pM.env
-    newEnv[stmt.vrObjName] = newSV
-    out2.add forkPath(pM, pM.pc & @[same], newEnv)
+    for o in outcomes:
+      let child = discOutcomePath(pM, o, w)
+      if o.decline:
+        out2.add child
+        continue
+      let newSV = SymVal(kind: svVariant,
+                         vDisc: newDiscBoxed,
+                         vDiscName: oldSV.vDiscName,
+                         vObjectName: oldSV.vObjectName,
+                         vArmFields: o.arms,
+                         vArmFieldNames: oldSV.vArmFieldNames,
+                         vPlainFields: oldSV.vPlainFields,       # shared:
+                         vPlainFieldNames: oldSV.vPlainFieldNames) # preserved.
+      child.env[stmt.vrObjName] = newSV
+      out2.add child
   return out2
 
 proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
@@ -20734,12 +20820,10 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
         for tag in candidateTags:
           if followTag.isSome and tag != followTag.get(): continue
           let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
-          let same = sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches)
-          maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
-          if w.shouldStop: return out2
-          let carried = carryBranchFields(oldSV.vArmFields, oldSV.vDisc[],
-                                          tag, stmt.vrsBranches)
-          let chosenM = drainPendingLowerEffects(chosen)
+          if stmt.vrsMode == dwmChecked:
+            maybeForkDefect(chosen, not sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches),
+                            "FieldDefect", none(string), w)
+            if w.shouldStop: return out2
           let newDiscConst: SymVal =
             case oldSV.vDisc[].kind
             of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
@@ -20755,17 +20839,25 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
             if tag < 0: discFromRhs(rhsSV, oldSV.vDisc[]) else: newDiscConst
           let newDiscBoxed = new(SymVal)
           newDiscBoxed[] = newDiscInner
-          let newSV = SymVal(kind: svVariant,
-                             vDisc: newDiscBoxed,
-                             vDiscName: oldSV.vDiscName,
-                             vObjectName: oldSV.vObjectName,
-                             vArmFields: carried,
-                             vArmFieldNames: oldSV.vArmFieldNames,
-                             vPlainFields: oldSV.vPlainFields,
-                             vPlainFieldNames: oldSV.vPlainFieldNames)
-          var newEnv = chosenM.env
-          newEnv[stmt.vrsObjName] = newSV
-          out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
+          let outcomes = discWriteOutcomes(stmt.vrsMode, oldSV.vArmFields,
+                                           oldSV.vDisc[], tag, stmt.vrsBranches,
+                                           symEq(oldSV.vDisc[], newDiscInner))
+          let chosenM = drainPendingLowerEffects(chosen)
+          for o in outcomes:
+            let child = discOutcomePath(chosenM, o, w)
+            if o.decline:
+              out2.add child
+              continue
+            let newSV = SymVal(kind: svVariant,
+                               vDisc: newDiscBoxed,
+                               vDiscName: oldSV.vDiscName,
+                               vObjectName: oldSV.vObjectName,
+                               vArmFields: o.arms,
+                               vArmFieldNames: oldSV.vArmFieldNames,
+                               vPlainFields: oldSV.vPlainFields,
+                               vPlainFieldNames: oldSV.vPlainFieldNames)
+            child.env[stmt.vrsObjName] = newSV
+            out2.add child
       of svMultiVariant:
         # Locate the named axis (vrsDiscName); other axes preserve
         # their disc + arm state.
@@ -20787,12 +20879,10 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
         for tag in candidateTags:
           if followTag.isSome and tag != followTag.get(): continue
           let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
-          let same = sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches)
-          maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
-          if w.shouldStop: return out2
-          let carried = carryBranchFields(oldAxis.armFields, oldAxis.disc[],
-                                          tag, stmt.vrsBranches)
-          let chosenM = drainPendingLowerEffects(chosen)
+          if stmt.vrsMode == dwmChecked:
+            maybeForkDefect(chosen, not sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches),
+                            "FieldDefect", none(string), w)
+            if w.shouldStop: return out2
           let newDiscConst: SymVal =
             case oldAxis.disc[].kind
             of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
@@ -20808,19 +20898,27 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
             if tag < 0: discFromRhs(rhsSV, oldAxis.disc[]) else: newDiscConst
           let newDiscBoxed = new(SymVal)
           newDiscBoxed[] = newDiscInner
-          var newAxes = oldSV.mvAxes
-          newAxes[axisIx] = VariantAxisSym(
-            discName: oldAxis.discName, disc: newDiscBoxed,
-            armFields: carried,
-            armFieldNames: oldAxis.armFieldNames)
-          let newSV = SymVal(kind: svMultiVariant,
-                             mvObjectName: oldSV.mvObjectName,
-                             mvAxes: newAxes,
-                             mvPlainFields: oldSV.mvPlainFields,
-                             mvPlainFieldNames: oldSV.mvPlainFieldNames)
-          var newEnv = chosenM.env
-          newEnv[stmt.vrsObjName] = newSV
-          out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
+          let outcomes = discWriteOutcomes(stmt.vrsMode, oldAxis.armFields,
+                                           oldAxis.disc[], tag, stmt.vrsBranches,
+                                           symEq(oldAxis.disc[], newDiscInner))
+          let chosenM = drainPendingLowerEffects(chosen)
+          for o in outcomes:
+            let child = discOutcomePath(chosenM, o, w)
+            if o.decline:
+              out2.add child
+              continue
+            var newAxes = oldSV.mvAxes
+            newAxes[axisIx] = VariantAxisSym(
+              discName: oldAxis.discName, disc: newDiscBoxed,
+              armFields: o.arms,
+              armFieldNames: oldAxis.armFieldNames)
+            let newSV = SymVal(kind: svMultiVariant,
+                               mvObjectName: oldSV.mvObjectName,
+                               mvAxes: newAxes,
+                               mvPlainFields: oldSV.mvPlainFields,
+                               mvPlainFieldNames: oldSV.mvPlainFieldNames)
+            child.env[stmt.vrsObjName] = newSV
+            out2.add child
       else:
         # RFC-0005 S8i: a declined construction's placeholder (this was a
         # `doAssert false`, surfacing the decline as an internal fault).

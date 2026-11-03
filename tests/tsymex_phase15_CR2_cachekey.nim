@@ -1057,6 +1057,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## their decline. 241->245.
     ## RFC-0005 S8cb (S8bo onto batch 7, and S8bo's remainder). Provisional
     ## 243 (S8bz holds 241, S8cf 242). 237->243.
+    ## RFC-0005 S8cp (replay footprint gaps; `{.cast(uncheckedAssign).}` keeps
+    ## a discriminator write unchecked). Provisional 253.
     check symexWalkerVersion == "253"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

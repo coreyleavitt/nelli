@@ -497,6 +497,11 @@ title = "S8bo onto batch 6 (item 5 on the leaf-split base) and S8bo's remainder:
 state = "done"
 
 [[slice]]
+id = "S8cp"
+title = "S8cb's remainder: replay footprint gaps, the dropped uncheckedAssign pragma, replay reaching quit, the unexplained rc=139, n42 on cpp, stack size off Linux, declined shapes and magics"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

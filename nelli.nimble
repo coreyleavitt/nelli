@@ -1246,6 +1246,10 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cb_order",
             "tsymex_rfc0005_s8cb_cells",
             "tsymex_rfc0005_s8cb_replay",
+            # RFC-0005 S8cp -- S8cb's remainder: `{.cast(uncheckedAssign).}`
+            # and the footprint of an abandoned replay.
+            "tsymex_rfc0005_s8cp_unchecked",
+            "tsymex_rfc0005_s8cp_footprint",
             # RFC-0005 S8bh -- S8bf's remainder: var / addr effects of a
             # call through a proc value; a ptr of unknown origin may address
             # a ref field, a global or a var parameter; ref conversions along

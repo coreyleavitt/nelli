@@ -5996,13 +5996,15 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";tags=[" & tags & "]>"
   of isVariantReassign:
     "St<VR:" & lookupLocal(env, s.vrObjName) & ".kind=" &
-      $s.vrNewTag & ":" & s.vrTagName & ";br=" & $s.vrBranches & ">"
+      $s.vrNewTag & ":" & s.vrTagName & ";br=" & $s.vrBranches &
+      ";m=" & $s.vrMode & ">"
   of isVariantReassignSymbolic:
     # Phase 14 A4a: distinct prefix `VRS:` so cache keys can't
     # collide with static-tag `VR:` entries.
     "St<VRS:" & lookupLocal(env, s.vrsObjName) & "." &
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
-      "=" & canonicalize(s.vrsRhs, env) & ";br=" & $s.vrsBranches & ">"
+      "=" & canonicalize(s.vrsRhs, env) & ";br=" & $s.vrsBranches &
+      ";m=" & $s.vrsMode & ">"
   of isVariantConstructSym:
     # Round-6 A3 (ADR-0029). Distinct `VCS:` prefix (never collides with
     # `VRS:`/`VL:`). `vcsLoc` is DELIBERATELY excluded — it is pure

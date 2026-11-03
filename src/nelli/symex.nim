@@ -2010,10 +2010,22 @@ when compileOption("threads"):
     ## seen to end (`abandonedLock`).
   initLock(abandonedLock)
 
+  proc runtimeHooksSet(): bool =
+    ## RFC-0005 S8cp. The program has set a variable the runtime calls through
+    ## (on a raise, or out of memory). That code runs in whichever replay raises
+    ## and names nothing a footprint can read, so while one is set any replay may
+    ## share anything with any other. `localRaiseHook` is this thread's: a
+    ## replay's own thread starts with none.
+    {.cast(gcsafe).}:
+      globalRaiseHook != nil or localRaiseHook != nil or
+        outOfMemHook != nil or unhandledExceptionHook != nil or
+        errorMessageWriter != nil or onUnhandledException != nil
+
   proc reapAbandoned(fp: ReplayFootprint = ReplayFootprint(open: true)): int =
     ## RFC-0005 S8bo. Joins and frees the abandoned replays that have ended;
     ## the number still running. RFC-0005 S8cb: of those a replay of footprint
     ## `fp` may share state with.
+    let anyMeets = fp.open or runtimeHooksSet()
     withLock abandonedLock:
       var live: seq[ptr ReplayJob]
       for j in abandoned:
@@ -2027,7 +2039,7 @@ when compileOption("threads"):
       {.cast(gcsafe).}:
         abandoned = live
       for j in live:
-        var meets = fp.open or j.footprint.open
+        var meets = anyMeets or j.footprint.open
         if not meets:
           for t in fp.tokens:
             if t in j.footprint.tokens:
@@ -2265,7 +2277,8 @@ proc runReplayBounded*(body: proc () {.closure, gcsafe.};
     let job = cast[ptr ReplayJob](allocShared0(sizeof(ReplayJob)))
     job.body = body
     job.stackSize = callerStackSize()
-    job.footprint = footprint
+    job.footprint =
+      if runtimeHooksSet(): ReplayFootprint(open: true) else: footprint
     let th = cast[ptr Thread[ptr ReplayJob]](
       allocShared0(sizeof(Thread[ptr ReplayJob])))
     job.th = th
@@ -2736,13 +2749,72 @@ var routineFootprints {.compileTime.}: Table[string, RoutineFootprint]
   ## RFC-0005 S8cb. Per routine (`routineKey`), so that a program's replays
   ## read each of the stdlib routines they share once.
 
-proc scanFootprint(n: NimNode; user: bool; owner: string;
-                   acc: var RoutineFootprint) =
+const foreignToken = "c:foreign"
+  ## RFC-0005 S8cp. The token of every C routine and `emit` of the stdlib that
+  ## is not known pure (`isPureForeign`). They were told apart by name, but
+  ## `setenv` and `getenv` share the environment, `fwrite` and `fread` a file, and
+  ## a name says nothing about that.
+
+var typeRunsCode {.compileTime.}: Table[string, bool]
+  ## RFC-0005 S8cp. `mayRunCode`, per type a walk starts from.
+
+proc walkTypeRunsCode(t: NimNode; user: bool; seen: var seq[string]): bool =
+  ## RFC-0005 S8cp. See `mayRunCode`. `user`: `t` was written in the program, so
+  ## a generic parameter of it is a type the walk cannot read; one of a stdlib
+  ## declaration is reached through the arguments at its use.
+  case t.kind
+  of nnkSym:
+    if symKind(t) == nskGenericParam: return user
+    if symKind(t) != nskType: return false
+    let impl = t.getImpl
+    if impl.kind != nnkTypeDef or impl.len < 3: return false
+    let key = t.strVal & "@" & impl.lineInfo
+    if key in seen: return false
+    seen.add key
+    var core = impl[2]
+    let inUser = not isStdlibDecl(t)
+    if inUser:
+      while core.kind in {nnkRefTy, nnkPtrTy} and core.len == 1: core = core[0]
+      case core.kind
+      of nnkObjectTy, nnkDistinctTy: return true
+      of nnkEnumTy: return false
+      else: discard
+    walkTypeRunsCode(core, inUser, seen)
+  of nnkProcTy, nnkIteratorTy:
+    true
+  else:
+    for c in t:
+      if walkTypeRunsCode(c, user, seen): return true
+    false
+
+proc mayRunCode(t: NimNode): bool =
+  ## RFC-0005 S8cp. A value of type `t` may run code a footprint cannot read: a
+  ## hook the compiler inserts, which is a type's and appears nowhere in the code
+  ## using it, or a proc value it holds. A macro cannot ask whether a type has a
+  ## hook, so any object or distinct type the program declares counts, however
+  ## it is reached (a `seq`, a tuple, a generic argument). The stdlib's own hooks
+  ## free what they own, and its types count only if they hold a proc value
+  ## (`Task`, a `Stream`).
+  if t.kind == nnkSym:
+    let key = t.strVal & "#" & t.lineInfo
+    if key in typeRunsCode: return typeRunsCode[key]
+    var seen: seq[string]
+    result = walkTypeRunsCode(t, true, seen)
+    typeRunsCode[key] = result
+  else:
+    var seen: seq[string]
+    result = walkTypeRunsCode(t, true, seen)
+
+proc scanFootprint(n: NimNode; user: bool; acc: var RoutineFootprint) =
   ## RFC-0005 S8cb. See `replayFootprint`. `user`: `n` is code of the program,
-  ## not of the stdlib; `owner`: the routine's name.
+  ## not of the stdlib.
   case n.kind
   of nnkSym:
     case symKind(n)
+    of nskType, nskGenericParam:
+      if user and mayRunCode(n): acc.open = true
+    of nskField:
+      if user and mayRunCode(getTypeInst(n)): acc.open = true
     of nskVar, nskLet, nskParam, nskForVar, nskResult:
       # A thread variable is copied into the replay's thread, so is shared by
       # what it refers to: the program's are (`threadvarsReached`), and the
@@ -2754,6 +2826,13 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
       # A proc value the program holds, so may hand to the stdlib: code this
       # scan does not see.
       if user and n.typeKind == ntyProc: acc.open = true
+      # RFC-0005 S8cp. A value whose hooks the scan does not see, and a variable
+      # of the stdlib the program may have stored a proc in.
+      if user:
+        if mayRunCode(getTypeInst(n)): acc.open = true
+      elif symKind(n) == nskVar and isModuleGlobal(n) and
+           not isThreadvarSym(n) and mayRunCode(getTypeInst(n)):
+        acc.open = true
     of nskMethod:
       acc.open = true   # dynamic dispatch: any override may run
     else:
@@ -2776,19 +2855,19 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
            not (h.kind == nnkBracketExpr and h[0].kind in
                 {nnkOpenSymChoice, nnkClosedSymChoice}):
         acc.open = true
-    for c in n: scanFootprint(c, user, owner, acc)
+    for c in n: scanFootprint(c, user, acc)
   of nnkAsmStmt:
     if user: acc.open = true
-    else: acc.tokens.add "c:" & owner
+    else: acc.tokens.add foreignToken
   of nnkPragma:
     for p in n:
       let emits = p.kind == nnkExprColonExpr and
                   p[0].kind in {nnkIdent, nnkSym} and p[0].strVal == "emit"
       if emits:
         if user: acc.open = true
-        else: acc.tokens.add "c:" & owner
+        else: acc.tokens.add foreignToken
   else:
-    for c in n: scanFootprint(c, user, owner, acc)
+    for c in n: scanFootprint(c, user, acc)
 
 proc hasPragmaNamed(impl: NimNode; name: string): bool =
   ## RFC-0005 S8cb. The routine definition `impl` carries pragma `name`.
@@ -2805,6 +2884,15 @@ proc isRuntimeCode(impl: NimNode): bool =
   "/lib/system/" in f or f.endsWith("/lib/system.nim") or
     f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
 
+proc isPureForeign(impl: NimNode; name: string): bool =
+  ## RFC-0005 S8cp. A C routine of the stdlib that reads only its arguments and
+  ## writes only what they point to. Every routine of `math` does, except the
+  ## two that write `signgam`; the rest are C's memory and string routines.
+  let f = impl.lineInfoObj.filename.replace('\\', '/')
+  if f.endsWith("/pure/math.nim"): return name notin ["lgamma", "gamma"]
+  name in ["c_strlen", "c_strcmp", "c_memchr", "c_memcmp", "c_memcpy",
+           "c_memmove", "c_memset"]
+
 proc routineFootprint(r: NimNode): RoutineFootprint =
   ## RFC-0005 S8cb. The routine `r`'s own footprint (`routineFootprints`).
   let key = routineKey(r)
@@ -2817,14 +2905,20 @@ proc routineFootprint(r: NimNode): RoutineFootprint =
     # No definition this scan can read.
     result.open = user
   elif isRuntimeCode(impl):
-    discard
+    # Of the runtime, files and stdin are state any process may read back.
+    if impl.lineInfoObj.filename.replace('\\', '/').endsWith("/lib/system/io.nim"):
+      result.tokens.add foreignToken
   elif impl[6].kind == nnkEmpty:
-    # Foreign code. The program's may do anything; the stdlib's are told apart
-    # by name, with its compiler magics holding no state of their own.
+    # Foreign code. The program's may do anything; the stdlib's share one
+    # token, unless pure, with its compiler magics holding no state of their own.
     if user: result.open = true
-    elif not hasPragmaNamed(impl, "magic"): result.tokens.add "c:" & r.strVal
+    elif not hasPragmaNamed(impl, "magic") and not isPureForeign(impl, r.strVal):
+      result.tokens.add foreignToken
   else:
-    scanFootprint(impl[6], user, r.strVal, result)
+    if user:
+      # The signature too: a result never named in the body is still destroyed.
+      scanFootprint(impl[3], user, result)
+    scanFootprint(impl[6], user, result)
   routineFootprints[key] = result
 
 proc replayFootprint(fn: NimNode): ReplayFootprint =
@@ -2837,10 +2931,12 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
   ## program, or a routine that captures its caller's variables (a nested
   ## routine whose enclosing one the scan never entered).
   ##
-  ## The scan reads the typed AST, so it does not see a hook the compiler
-  ## inserts (a `=destroy` of the program's that names a variable), nor state
-  ## behind two different C routines; `docs/rfc/0005-branch-scoped-degrade.md`
-  ## records both.
+  ## RFC-0005 S8cp. What the typed AST does not name is closed from the safe
+  ## side: any value of a type that may have a hook, or hold a proc, opens it
+  ## (`mayRunCode`); C routines of the stdlib meet each other (`foreignToken`);
+  ## and a hook variable the runtime calls through is read when a replay starts
+  ## (`runtimeHooksSet`). Code the stdlib runs on no value the program can name
+  ## is taken not to write the program's state.
   if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds or
      symKind(fn) == nskMethod:
     return ReplayFootprint(open: true)

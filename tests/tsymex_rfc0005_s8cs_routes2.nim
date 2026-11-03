@@ -4,6 +4,7 @@ import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/engine/markers
 import s8cs_hooks_fixture
+import s8ct_platform
 
 var nh: HashSet[string]
 template nat(call: untyped) =
@@ -42,6 +43,16 @@ template exactSat(fn: typed, lbl: string) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxSat
+    check not r.errors.hasKind(feGlobalRouteUnproved)
+
+template exactSatOrNotMarshallable(fn: typed, lbl: string) =
+  ## `exactSat`, except where replay re-executes the binary (Windows): S8ct's
+  ## child cannot be handed an `emit` or `asm` routine, so the candidate's replay
+  ## declines by name and the verdict is `sxUnknown` (batch 11).
+  block:
+    let r = symexFind(fn, tLabel(lbl))
+    checkpoint lbl & " " & $r.status & " " & show(r.errors)
+    check decidedOrNotMarshallable(r, sxSat)
     check not r.errors.hasKind(feGlobalRouteUnproved)
 
 template exactUnsat(fn: typed, lbl: string) =
@@ -361,11 +372,11 @@ suite "RFC-0005 S8cs: B25, an opaque's local holds the hook":
 
 suite "RFC-0005 S8cs: B26, foreign code inline":
   test "emit":
-    exactSat(n11, "n11_live")
+    exactSatOrNotMarshallable(n11, "n11_live")
     let r = symexFind(n11, tLabel("n11_live"))
     check r.errors.hasKind(feOpaqueEffectHavoc)
   test "asm":
-    exactSat(asm1, "asm1_same")
+    exactSatOrNotMarshallable(asm1, "asm1_same")
 
 suite "RFC-0005 S8cs: hooks another module does not export":
   test "each kind declines":

@@ -1186,6 +1186,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cf_reach",
             "tsymex_rfc0005_s8cf_limits",
             "tsymex_rfc0005_s8cf_point",
+            "tsymex_rfc0005_s8cf_point_b",
             "tsymex_rfc0005_s8cf_jitlimit",
             "tsymex_rfc0005_s8cf_skipcount",
             "tsymex_rfc0005_s8cf_limitgaps",
@@ -1401,7 +1402,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cd_globals",
             "tsymex_rfc0005_s8cd_ops",
             "tsymex_rfc0005_s8cd_setorder_small",
+            "tsymex_rfc0005_s8cd_setorder_md",
             "tsymex_rfc0005_s8cd_setorder_large",
+            "tsymex_rfc0005_s8cd_setorder_by",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
             # kind probes in contexts of their own (no step's cost moves
             # with the walk's state; a thread's first walk searches as its
@@ -1485,6 +1488,7 @@ task test, "Run the test suite":
             # global counts as written only where it may be; an index call
             # with no symbol is bound once. Walker 237->238.
             "tsymex_rfc0005_s8cc_cellquery",
+            "tsymex_rfc0005_s8cc_cellquery_b",
             "tsymex_rfc0005_s8cc_remainder",
             "tsymex_rfc0005_s8cc_remainder_b",
             "tsymex_rfc0005_s8cc_remainder_c",

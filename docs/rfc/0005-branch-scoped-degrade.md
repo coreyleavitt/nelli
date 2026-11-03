@@ -14753,8 +14753,8 @@ Base: S8cb (`28ab1a7`) merged onto the channel at `e497dcf`, then batch 10
 (`67f0b622`, walker 252) merged in. Item 3 moved to S8ct, a `=destroy` writing a
 global on a walked or opaque path to S8cs, n42 on cpp to S8cl (landed in batch 10);
 items 4, 6, 7 and 8 follow batch 10. Pins:
-`tsymex_rfc0005_s8cp_unchecked`, `tsymex_rfc0005_s8cp_unchecked_zero` (split for the
-Windows per-file budget), `tsymex_rfc0005_s8cp_footprint`.
+`tsymex_rfc0005_s8cp_unchecked`, `tsymex_rfc0005_s8cp_unchecked_zero`,
+`tsymex_rfc0005_s8cp_unchecked_decline` (split for the Windows per-file budget), `tsymex_rfc0005_s8cp_footprint`.
 
 1. An abandoned replay's footprint, the three gaps S8cb recorded, each RED against
    the compiled program first (a reader's label is reachable only through a mark the

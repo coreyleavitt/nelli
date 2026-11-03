@@ -33,10 +33,11 @@
 ## the debug build the test binary itself is); the probe is quoted beside
 ## the test.
 ##
-## RFC-0005 S8cm: part 3 of 4 of this suite, with
+## RFC-0005 S8cm: part 4 of 5 of this suite, with
 ## `tsymex_rfc0005_s8an_remainder`, `tsymex_rfc0005_s8an_remainder_b`,
-## `tsymex_rfc0005_s8an_remainder_d`. Split so that each part compiles and runs
-## in under 60 s on the Windows legs (the whole file took 100 s).
+## `tsymex_rfc0005_s8an_remainder_b2`, `tsymex_rfc0005_s8an_remainder_d`. Split
+## so that each part compiles and runs in under 60 s on the Windows legs (the
+## whole file took 100 s).
 
 import std/[unittest, strutils]
 import nelli/symex

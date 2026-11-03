@@ -5,6 +5,11 @@
 ## pinned here as a decline is one that native run proved live: the verdict the
 ## walk used to give from its stale value was false, not lucky.
 ## `tsymex_rfc0005_s8cs_routes2` holds the opaque routes and the exact verdicts.
+##
+## RFC-0005 S8cm: part 1 of 3 of this suite, with
+## `tsymex_rfc0005_s8cs_routes_b`, `tsymex_rfc0005_s8cs_routes_c`. Split so
+## that each part compiles and runs in under 60 s on the Windows legs (the
+## whole file took 64 s).
 import std/[unittest, strutils, sets, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -659,56 +664,3 @@ suite "RFC-0005 S8cs: every hook kind":
   test "a store through a pointer, foreign code":
     declined(hookPtr, "hookPtr")
     declined(hookEmit, "hookEmit")
-
-suite "RFC-0005 S8cs: where the store lands, where the read goes":
-  test "a field, an array element, a seq element, a table value":
-    declined(part1, "part1")
-    declined(part2, "part2")
-    declined(part3, "part3")
-    declined(part4, "part4")
-  test "a var formal, an address, a pointer of unknown origin":
-    declined(aliasVar, "alias_var")
-    declined(aliasAddr, "alias_addr")
-    declined(aliasPtr, "alias_ptr")
-    declined(aliasPtrObj, "alias_ptrobj")
-
-suite "RFC-0005 S8cs: the value that holds the hook":
-  test "generic, ref, field, seq, ref value, table value":
-    declined(hold1, "hold1")
-    declined(hold2, "hold2")
-    declined(hold3, "hold3")
-    declined(hold4, "hold4")
-    declined(hold5, "hold5")
-    declined(hold6, "hold6")
-  test "a generic routine, per instance":
-    declined(gen1, "gen1")
-    # Read first, so a later instance sharing its cache entry would miss the hook.
-    check symexFind(gen2first, tLabel("gen2first")).status == sxUnsat
-    declined(gen2, "gen2")
-
-suite "RFC-0005 S8cs: code the analysis cannot list":
-  test "a stored closure, a dynamic subtype, a method":
-    declined(open1, "open1")
-    declined(open2, "open2")
-    declined(open3, "open3")
-
-suite "RFC-0005 S8cs: no global at all":
-  test "a local a pointer addresses":
-    declined(local1, "local1_live")
-    declined(local1, "local1_dead")
-  test "a heap cell":
-    declined(heap1, "heap1_live")
-    declined(heap1, "heap1_dead")
-    declined(heap2, "heap2_live")
-    declined(heap2, "heap2_dead")
-  test "the copy a value hook makes":
-    declined(value1, "value1_live")
-    declined(value1, "value1_dead")
-    declined(value2, "value2_live")
-    declined(value2, "value2_dead")
-    declined(value3, "value3_live")
-    declined(value3, "value3_dead")
-
-suite "RFC-0005 S8cs: version floor":
-  test "the walker's semantics moved":
-    check parseInt(symexWalkerVersion) >= 260

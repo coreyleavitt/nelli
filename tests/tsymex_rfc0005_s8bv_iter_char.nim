@@ -5,6 +5,10 @@
 ## re-read at every step), up to `maxBitSetIterDomain` values. Each fixture is
 ## also run natively (`symexCaptureBegin`): symex's verdict agrees with the
 ## targets a real run hits. Split so each file stays under 60 s on Windows.
+##
+## RFC-0005 S8cm: part 1 of 2 of this suite, with
+## `tsymex_rfc0005_s8bv_iter_char_b`. Split so that each part compiles and runs
+## in under 60 s on the Windows legs (the whole file took 70 s).
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types
@@ -16,26 +20,11 @@ proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
 
-proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
-  for e in errs:
-    if e.kind == k: return true
-  false
-
-proc hasMsg(errs: seq[SymexErrorInfo]; k: SymexErrorKind; sub: string): bool =
-  for e in errs:
-    if e.kind == k and sub in e.msg: return true
-  false
-
 template verdict(sut: untyped; label: string): SymexResult =
   let r = symexFind(sut, tLabel(label))
   checkpoint label & ": " & $r.status & " " & show(r.errors) & " witness=" &
              (if r.status == sxSat: $r.witness else: "-")
   r
-
-template nativeHits(body: untyped): HashSet[string] =
-  symexCaptureBegin()
-  body
-  symexCaptureEnd()
 proc itCharFirst(s: set[char]) =
   var first = '\0'
   var seen = false
@@ -53,8 +42,3 @@ suite "S8bv: walker version":
 suite "S8bv (1): for x in a builtin set":
   test "a set[char] is visited in ascending order":
     check verdict(itCharFirst, "bv_it_char_first").status == sxUnsat
-  test "a set[char]: its only member":
-    let r = verdict(itCharFirst, "bv_it_char_one")
-    check r.status == sxSat
-    check r.errors.len == 0
-    check "bv_it_char_one" in nativeHits(itCharFirst({'q'}))

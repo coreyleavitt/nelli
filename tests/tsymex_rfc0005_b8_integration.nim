@@ -22,6 +22,11 @@
 ## extraction raise it shares a hook with, `tsymex_rfc0005_s8bx_extractraise`.
 ##
 ## Every SUT's native run is checked here, on the input the comment names.
+##
+## RFC-0005 S8cm: part 1 of 4 of this suite, with
+## `tsymex_rfc0005_b8_integration_b`, `tsymex_rfc0005_b8_integration_c`,
+## `tsymex_rfc0005_b8_integration_d`. Split so that each part compiles and runs
+## in under 60 s on the Windows legs (the whole file took 73 s).
 import std/[unittest, strutils, tables]
 import nelli
 import nelli/symex
@@ -31,11 +36,6 @@ proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
-
-proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
-  for e in errs:
-    if e.kind == k: return true
-  false
 
 template nativeHits(call: untyped): untyped =
   block:
@@ -48,13 +48,6 @@ template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
-
-template declines(fn: typed; lbl: static string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, feUnsupportedOp)
 
 template guardT(): untyped {.dirty.} =
   if t0.len != 1 or "a" notin t0: return
@@ -173,16 +166,6 @@ proc sHandler(t0: Table[string, int]) =
     except ValueError:
       if v == 50: symexTarget("hand_live")
       if v == x and x != 50: symexTarget("hand_dead")
-
-# A key removed under the view declines where it is removed: native reads a
-# slot `del` may have refilled.
-proc sRemoved(t0: Table[string, int]) =
-  guardT()
-  var t = t0
-  for k, v in t.mpairs:
-    t.del(k)
-    t["b"] = 1
-    if v == x: symexTarget("rem_dead")
 
 # ---- 3. A callee reaching the Table by another name -------------------------
 
@@ -341,62 +324,3 @@ suite "batch 8: a view and its Table in one callee":
 
   test "through a proc value: decided (RFC-0005 S8cn)":
     verdict(sProcVal, "pv_dead", sxUnsat)
-
-suite "batch 8: a table write is seen through the view":
-
-  test "by name":
-    verdict(sBodyT, "body_live", sxSat)
-    verdict(sBodyT, "body_dead", sxUnsat)
-
-  test "through a var formal":
-    verdict(sCallT, "callt_live", sxSat)
-    verdict(sCallT, "callt_dead", sxUnsat)
-
-  test "by a global's name":
-    verdict(sCallG, "callg_live", sxSat)
-    verdict(sCallG, "callg_dead", sxUnsat)
-
-  test "through a capture":
-    verdict(sCap, "cap_live", sxSat)
-    verdict(sCap, "cap_dead", sxUnsat)
-
-  test "in a handler, past the raise":
-    verdict(sHandler, "hand_live", sxSat)
-    verdict(sHandler, "hand_dead", sxUnsat)
-
-  test "a removed key declines where it is removed":
-    declines(sRemoved, "rem_dead")
-
-suite "batch 8: a callee reaching the Table by another name declines":
-
-  test "a global, read and written":
-    declines(sGlobalDirect, "gd_dead")
-    declines(sGlobalDirectW, "gw_dead")
-
-  test "a capture":
-    verdict(sCaptured, "cp_dead", sxUnknown)
-
-suite "batch 8: module-level containers":
-
-  test "a global Table":
-    verdict(sGlobalPass, "gp_live", sxSat)
-    verdict(sGlobalPass, "gp_dead", sxUnsat)
-    verdict(sGlobalBody, "gb_live", sxSat)
-    verdict(sGlobalBody, "gb_dead", sxUnsat)
-
-  test "an element passed on to a var formal":
-    verdict(sSeqBump, "sb_live", sxSat)
-    verdict(sSeqBump, "sb_dead", sxUnsat)
-    verdict(sGlobalSeqBump, "gsb_live", sxSat)
-    verdict(sGlobalSeqBump, "gsb_dead", sxUnsat)
-
-  test "a global seq with the element and its seq: decided (RFC-0005 S8cn)":
-    verdict(sSeqPass, "sp_dead", sxUnsat)
-  test "a global seq by its name with the element: declines":
-    declines(sSeqDirect, "sd_dead")
-    declines(sSeqDirectW, "sw_dead")
-
-suite "batch 8: walker version":
-
-  test "walker version floor >= 241 (batch 8)":
-    check parseInt(symexWalkerVersion) >= 241

@@ -31,6 +31,11 @@
 ## until S8cl modelled the allocation, so it is decided here.
 ##
 ## Every SUT's native run is checked here, on the input the comment names.
+##
+## RFC-0005 S8cm: part 1 of 3 of this suite, with
+## `tsymex_rfc0005_b9_integration_b`, `tsymex_rfc0005_b9_integration_c`. Split
+## so that each part compiles and runs in under 60 s on the Windows legs (the
+## whole file took 71 s).
 import std/[unittest, strutils, tables, sets]
 import nelli
 import nelli/symex
@@ -40,11 +45,6 @@ proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
-
-proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
-  for e in errs:
-    if e.kind == k: return true
-  false
 
 template nativeHits(call: untyped): untyped =
   block:
@@ -57,13 +57,6 @@ template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
-
-template declines(fn: typed; lbl: static string; kind: SymexErrorKind) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, kind)
 
 template guardT(): untyped {.dirty.} =
   if t0.len != 1 or "a" notin t0: return
@@ -325,67 +318,3 @@ suite "batch 9: a view and its Table through a proc value":
   test "a lambda":
     verdict(sLambda, "lam_live", sxUnknown)
     verdict(sLambda, "lam_dead", sxUnknown)
-
-  test "the Table in a field, of a local and of a global: decided (S8cn)":
-    verdict(sHolder, "hold_live", sxSat)
-    verdict(sHolder, "hold_dead", sxUnsat)
-    verdict(sGlobalHolder, "ghold_live", sxSat)
-    verdict(sGlobalHolder, "ghold_dead", sxUnsat)
-
-  test "a void call: decided (S8cn)":
-    verdict(sVoid, "void_live", sxSat)
-    verdict(sVoid, "void_dead", sxUnsat)
-
-suite "batch 9: a by-value location the body also reaches declines":
-
-  test "a capture":
-    declines(sCapture, "cap_live", ceCaptureByRefUnmodelled)
-    declines(sCapture, "cap_dead", ceCaptureByRefUnmodelled)
-
-  test "a global seq and a global Table":
-    declines(sGlobalSeq, "gseq_live", feUnsupportedOp)
-    declines(sGlobalSeq, "gseq_dead", feUnsupportedOp)
-    declines(sGlobalTable, "gtab_live", feUnsupportedOp)
-    declines(sGlobalTable, "gtab_dead", feUnsupportedOp)
-
-  test "a body that only reads":
-    declines(sReadOnly, "ro_live", feUnsupportedOp)
-    declines(sReadOnly, "ro_dead", feUnsupportedOp)
-
-suite "batch 9: a call returning var as a var actual declines":
-
-  test "f(t[k], t, k)":
-    declines(sVarCall, "vc_live", feUnsupportedOp)
-    declines(sVarCall, "vc_dead", feUnsupportedOp)
-
-suite "batch 9: what the lifted limit is for stays exact":
-
-  test "by value only, beside a view":
-    verdict(sPure, "pure_live", sxSat)
-    verdict(sPure, "pure_dead", sxUnsat)
-
-  test "a var Table, the view read after":
-    verdict(sViewAfter, "after_live", sxSat)
-    verdict(sViewAfter, "after_dead", sxUnsat)
-
-  test "a copy passed: the body's write is not seen":
-    verdict(sCopy, "copy_live", sxSat)
-    verdict(sCopy, "copy_dead", sxUnsat)
-
-  test "an index call evaluated once, beside a seq argument":
-    verdict(sIndexOnce, "once_live", sxSat)
-    verdict(sIndexOnce, "once_dead", sxUnsat)
-    verdict(sIndexOnce, "once_dead2", sxUnsat)
-
-suite "batch 9: unsafeNew allocates (S8cl; it declined here)":
-
-  test "a nil check and a write through it":
-    verdict(sUnsafeNil, "un_live", sxSat)
-    verdict(sUnsafeNil, "un_dead", sxUnsat)
-    verdict(sUnsafeWrite, "uw_live", sxSat)
-    verdict(sUnsafeWrite, "uw_dead", sxUnsat)
-
-suite "batch 9: walker version":
-
-  test "walker version floor >= 245 (batch 9)":
-    check parseInt(symexWalkerVersion) >= 245

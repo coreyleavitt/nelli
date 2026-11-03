@@ -10,6 +10,11 @@
 ##
 ## A one-entry table's only entry is in its home slot: `delImplIdx` empties it
 ## and backshifts the cluster, and an insert probes from the home slot.
+##
+## RFC-0005 S8cm: six parts, by `s8cnViewsPart` (`_b` to `_f` set 1 to 5), so
+## that each file compiles and runs in under 60 s on the Windows legs where it
+## can: part 0 took 123 s there, part 1 84 s. Part 2's first test alone runs
+## 80 to 103 s on Windows.
 import std/[unittest, strutils, tables]
 when not declared(s8cnViewsPart):
   const s8cnViewsPart = 0
@@ -419,16 +424,6 @@ when s8cnViewsPart == 0:
       check "nl_same_dead" notin hits(sOther({"a": 5}.toTable, "a"))
       check "nl_other_dead" notin hits(sOther({"a": 5}.toTable, "q"))
 
-    test "writes both ways":
-      check symexFind(sOther2, tLabel("nl2_same_live")).status == sxSat
-      # A new key, and the view written past it: a rehash may lose the write.
-      check symexFind(sOther2, tLabel("nl2_other_live")).status == sxUnknown
-      # The other arm's decline covers the query too.
-      check symexFind(sOther2, tLabel("nl2_same_dead")).status == sxUnknown
-      check "nl2_same_live" in hits(sOther2({"a": 5}.toTable, "a"))
-      check "nl2_other_live" in hits(sOther2({"a": 5}.toTable, "q"))
-      check "nl2_same_dead" notin hits(sOther2({"a": 5}.toTable, "a"))
-
   suite "S8cn (3): both written in one statement":
     test "the table's store is the statement's last effect":
       decided(sTabLast, "tl_live", sxSat)
@@ -439,32 +434,6 @@ when s8cnViewsPart == 0:
     test "two calls in one expression":
       decided(sTwoCalls, "two_live", sxSat)
       decided(sTwoCalls, "two_dead", sxUnsat)
-
-  suite "S8cn (3): the object holding the Table":
-    test "a read through the holder":
-      decided(sReadBox, "hr_live", sxSat)
-      decided(sReadBox, "hr_dead", sxUnsat)
-    test "a write through the holder":
-      decided(sWriteBox, "hw_live", sxSat)
-      decided(sWriteBox, "hw_dead", sxUnsat)
-    test "the holder passed on":
-      decided(sPassOn, "ho_live", sxSat)
-      decided(sPassOn, "ho_dead", sxUnsat)
-    test "the holder's Table passed on":
-      decided(sPassOnTab, "ht_live", sxSat)
-      decided(sPassOnTab, "ht_dead", sxUnsat)
-
-  suite "S8cn (3): a pointer to the view (was a false verdict both ways)":
-    test "in the body":
-      decided(sBodyPtr, "bp_live", sxSat)
-      decided(sBodyPtr, "bp_dead", sxUnsat)
-      decided(sBodyPtr, "bq_live", sxSat)
-      decided(sBodyPtr, "bq_dead", sxUnsat)
-    test "carried into a callee that reaches the Table":
-      check "hp_live" in hits(sHoldPtr({"a": 5}.toTable))
-      check "hp_dead" notin hits(sHoldPtr({"a": 5}.toTable))
-      declined(sHoldPtr, "hp_live", "pointer")
-      declined(sHoldPtr, "hp_dead", "pointer")
 
 
 when s8cnViewsPart == 1:
@@ -497,20 +466,7 @@ when s8cnViewsPart == 1:
       decided(sWriteAfterDel, "wd2_live", sxSat)
       decided(sWriteAfterDel, "wd_dead", sxUnsat)
       decided(sWriteAfterDel, "wd2_dead", sxUnsat)
-    test "removed by the callee, seen in the body":
-      decided(sRemCallee, "rc_live", sxSat)
-      decided(sRemCallee, "rc_dead", sxUnsat)
-      decided(sRemCallee, "rc_dead2", sxUnsat)
-    test "removed by the callee, seen in the callee":
-      decided(sRemCallee2, "rd_live", sxSat)
-      decided(sRemCallee2, "rd_dead", sxUnsat)
-    test "the callee writes the emptied slot":
-      decided(sRemCallee3, "rw_live", sxSat)
-      decided(sRemCallee3, "rw_dead", sxUnsat)
-      decided(sRemCallee3, "rw_dead2", sxUnsat)
-    test "the callee puts it back":
-      decided(sRemCallee4, "ra2_live", sxSat)
-      decided(sRemCallee4, "ra2_dead", sxUnsat)
+
 
 when s8cnViewsPart == 2:
   suite "S8cn (4): a key removed under a live view":
@@ -533,3 +489,61 @@ when s8cnViewsPart == 2:
       declined(sRemAddCallee, "rb2_hash", "removed")
     test "two entries: `del`'s backshift depends on the hashes, so it declines":
       declined(sRemTwo, "r2_zero", "del")
+
+when s8cnViewsPart == 3:
+  suite "S8cn (3): the callee's table write at a non-literal key":
+    test "writes both ways":
+      check symexFind(sOther2, tLabel("nl2_same_live")).status == sxSat
+      # A new key, and the view written past it: a rehash may lose the write.
+      check symexFind(sOther2, tLabel("nl2_other_live")).status == sxUnknown
+      # The other arm's decline covers the query too.
+      check symexFind(sOther2, tLabel("nl2_same_dead")).status == sxUnknown
+      check "nl2_same_live" in hits(sOther2({"a": 5}.toTable, "a"))
+      check "nl2_other_live" in hits(sOther2({"a": 5}.toTable, "q"))
+      check "nl2_same_dead" notin hits(sOther2({"a": 5}.toTable, "a"))
+
+
+when s8cnViewsPart == 4:
+  suite "S8cn (3): the object holding the Table":
+    test "a read through the holder":
+      decided(sReadBox, "hr_live", sxSat)
+      decided(sReadBox, "hr_dead", sxUnsat)
+    test "a write through the holder":
+      decided(sWriteBox, "hw_live", sxSat)
+      decided(sWriteBox, "hw_dead", sxUnsat)
+    test "the holder passed on":
+      decided(sPassOn, "ho_live", sxSat)
+      decided(sPassOn, "ho_dead", sxUnsat)
+    test "the holder's Table passed on":
+      decided(sPassOnTab, "ht_live", sxSat)
+      decided(sPassOnTab, "ht_dead", sxUnsat)
+
+  suite "S8cn (3): a pointer to the view (was a false verdict both ways)":
+    test "in the body":
+      decided(sBodyPtr, "bp_live", sxSat)
+      decided(sBodyPtr, "bp_dead", sxUnsat)
+      decided(sBodyPtr, "bq_live", sxSat)
+      decided(sBodyPtr, "bq_dead", sxUnsat)
+    test "carried into a callee that reaches the Table":
+      check "hp_live" in hits(sHoldPtr({"a": 5}.toTable))
+      check "hp_dead" notin hits(sHoldPtr({"a": 5}.toTable))
+      declined(sHoldPtr, "hp_live", "pointer")
+      declined(sHoldPtr, "hp_dead", "pointer")
+
+
+when s8cnViewsPart == 5:
+  suite "S8cn (4): a key removed under a live view":
+    test "removed by the callee, seen in the body":
+      decided(sRemCallee, "rc_live", sxSat)
+      decided(sRemCallee, "rc_dead", sxUnsat)
+      decided(sRemCallee, "rc_dead2", sxUnsat)
+    test "removed by the callee, seen in the callee":
+      decided(sRemCallee2, "rd_live", sxSat)
+      decided(sRemCallee2, "rd_dead", sxUnsat)
+    test "the callee writes the emptied slot":
+      decided(sRemCallee3, "rw_live", sxSat)
+      decided(sRemCallee3, "rw_dead", sxUnsat)
+      decided(sRemCallee3, "rw_dead2", sxUnsat)
+    test "the callee puts it back":
+      decided(sRemCallee4, "ra2_live", sxSat)
+      decided(sRemCallee4, "ra2_dead", sxUnsat)

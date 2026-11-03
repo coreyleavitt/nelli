@@ -38,6 +38,11 @@
 ##       under the same scoped decline as a budget-out: the rule itself by
 ##       `classifyTargetSolve`, the walk by which kind of costly hit Z3
 ##       gives (a slow SAT on 5.1, a budget-out on 4.13.4).
+##
+## RFC-0005 S8cm: part 1 of 3 of this suite, with
+## `tsymex_rfc0005_s8ag_indexsplit_b`, `tsymex_rfc0005_s8ag_indexsplit_c`.
+## Split so that each part compiles and runs in under 60 s on the Windows legs
+## (the whole file took 65 s).
 import std/[unittest, strutils, random, options]
 import nelli/symex
 import nelli/smt/types
@@ -279,31 +284,6 @@ suite "S8ag (3): step 1c links a split's Int as its str.indexof":
     check Z3_is_string(ctx.raw, splitNeedle(mkString(ctx, "ab")).raw)
     check not Z3_is_string(ctx.raw, splitNeedle(t).raw)
 
-proc pairLoopS8ag(s: string) =
-  ## N36-1's shape (as `tsymex_rfc0005_s8y_budget_decline`'s pair loop):
-  ## the two-hop local counter makes every hit past the loop tainted.
-  block:
-    var localOffset = 0
-    var i = localOffset
-    var pairs: seq[(string, string)] = @[]
-    while i < s.len:
-      let (key, p1) = b4ReadCString(s, i)
-      if key.len == 0:
-        break
-      let (val, p2) = b4ReadCString(s, p1)
-      pairs.add((key, val))
-      i = p2
-  symexTarget("s8ag_pair_after")
-
-const midTainted = SymexSettings(
-  budget: ResourceBudget(seqQueryRLimit: 400_000))
-  ## At 400k a pair-loop hit is costly on both Z3 versions, and shallow
-  ## enough that deeper hits follow it: on Z3 5.1 it is a slow SAT (step 1
-  ## out, step 3 SAT; 0 budget-outs, 7 declines), on 4.13.4 a budget-out
-  ## (3 declines). Which one depends on the Z3 build and even the
-  ## process's earlier contexts, so the walk is pinned on what both share,
-  ## and the slow-SAT classification itself by `classifyTargetSolve`.
-
 suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
 
   test "classifyTargetSolve: a SAT after half the budget is slow":
@@ -317,42 +297,3 @@ suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
     # An unbounded solve is never costly.
     check classifyTargetSolve(sxSat, 10_000_000, 0) == tscCheap
     check classifyTargetSolve(sxUnknown, 10_000_000, 0) == tscCheap
-
-  test "a costly tainted hit bounds the deeper ones; with no budget-out it was a slow SAT":
-    symexTargetSolveStats = default(typeof(symexTargetSolveStats))
-    let r = symexFind(pairLoopS8ag, tLabel("s8ag_pair_after"), midTainted)
-    let st = symexTargetSolveStats
-    checkpoint show(r.errors)
-    checkpoint "stats=" & $st
-    check st.budgetOut + st.slowSat >= 1
-    check st.declined >= 1
-    # Before S8ag a decline needed a budget-out; now a slow SAT alone
-    # gives one (Z3 5.1 at this budget).
-    if st.budgetOut == 0:
-      check st.slowSat >= 1
-    # RFC-0005 S8bc: until S8bc `pairs.add((key, val))` was an in-band
-    # walker-fault decline (`iekSeqAdd: element lowered to tuple value`),
-    # which made every hit after it cheap. S8bc models the add, and on Z3
-    # 5.1 two hits are slow SATs (3 declined). The second was solved, so
-    # it is not at least as deep as the first in every loop (S8y's rule;
-    # the inner `b4ReadCString` loops count too). The bound still holds
-    # the walk to a handful of costly solves.
-    check st.slowSat + st.budgetOut <= 2
-    # Each target-hit solve is bounded by the budget, so the walk's total
-    # is too, and in practice far below (solved hits) x 400k.
-    check st.units < 8 * 400_000
-    check r.status == sxUnknown
-
-  test "the declines are classified beSolverUndef, never sxUnsat":
-    let r = symexFind(pairLoopS8ag, tLabel("s8ag_pair_after"), midTainted)
-    var declined = false
-    for e in r.errors:
-      if e.kind == beSolverUndef and "not solved (RFC-0005 S8y)" in e.msg:
-        declined = true
-    checkpoint show(r.errors)
-    check declined
-    check r.status != sxUnsat
-
-suite "S8ag: walker version floor":
-  test "symexWalkerVersion >= 183":
-    check parseInt(symexWalkerVersion) >= 183

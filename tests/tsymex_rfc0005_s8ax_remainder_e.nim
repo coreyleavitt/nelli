@@ -4,8 +4,9 @@
 ## Every expected value was probed against the real compiler (Nim 2.2.10,
 ## the debug build the test binary itself is).
 ##
-## RFC-0005 S8cm: part 5 of 7 of this suite, with
-## `tsymex_rfc0005_s8ax_remainder`, `tsymex_rfc0005_s8ax_remainder_b`,
+## RFC-0005 S8cm: part 7 of 9 of this suite, with
+## `tsymex_rfc0005_s8ax_remainder`, `tsymex_rfc0005_s8ax_remainder2`,
+## `tsymex_rfc0005_s8ax_remainder3`, `tsymex_rfc0005_s8ax_remainder_b`,
 ## `tsymex_rfc0005_s8ax_remainder_c`, `tsymex_rfc0005_s8ax_remainder_d`,
 ## `tsymex_rfc0005_s8ax_remainder_f`, `tsymex_rfc0005_s8ax_remainder_g`. Split
 ## so that each part compiles and runs in under 60 s on the Windows legs (the

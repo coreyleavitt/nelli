@@ -881,6 +881,7 @@ task test, "Run the test suite":
             # `defer:`, named ref variants and the heap discriminator write's
             # branch check, an inline ref to a multi-variant; walker 158->159.
             "tsymex_rfc0005_s8l_exits",
+            "tsymex_rfc0005_s8l_exits_b",
             # RFC-0005 S8m -- S8l's remainder: finally on break/continue,
             # labelled blocks, sort-checked Z3 construction, ref locals and
             # casts, nil ref locals, a closure's bare return; walker 159->160.
@@ -999,6 +1000,9 @@ task test, "Run the test suite":
             # discriminators, closure results, narrow container cells;
             # walker 176->177.
             "tsymex_rfc0005_s8z_remainder",
+            "tsymex_rfc0005_s8z_remainder_b",
+            "tsymex_rfc0005_s8z_remainder_c",
+            "tsymex_rfc0005_s8z_remainder_d",
             # RFC-0005 S8ac -- S8aa's remainder: var-parameter write-back
             # (var refs, located actuals, raise / cache / outer-except
             # finally), masked shift counts, the linear unchecked div wrap,
@@ -1038,6 +1042,8 @@ task test, "Run the test suite":
             # tainted SAT after half its budget bounds later hits as a
             # budget-out does; walker 182->190 (batch 1).
             "tsymex_rfc0005_s8ag_indexsplit",
+            "tsymex_rfc0005_s8ag_indexsplit_b",
+            "tsymex_rfc0005_s8ag_indexsplit_c",
             # RFC-0005 S8am -- S8z's remainder: compound assignment on a
             # seq element; a seq element assignment checks the index bound
             # before the RHS; low/high on an array value; array[bool, T];
@@ -1054,6 +1060,7 @@ task test, "Run the test suite":
             # routines keyed apart; walker 182->190 (batch 1).
             "tsymex_rfc0005_s8an_remainder",
             "tsymex_rfc0005_s8an_remainder_b",
+            "tsymex_rfc0005_s8an_remainder_b2",
             "tsymex_rfc0005_s8an_remainder_c",
             "tsymex_rfc0005_s8an_remainder_d",
             # RFC-0005 S8ap -- S8ao's remainder: a seq / Table / HashSet
@@ -1141,6 +1148,8 @@ task test, "Run the test suite":
             # non-constant set literals, newSeqUninit's unwritten reads.
             # Walker 220.
             "tsymex_rfc0005_s8bq_remainder",
+            "tsymex_rfc0005_s8bq_remainder_b",
+            "tsymex_rfc0005_s8bq_remainder_c",
             # RFC-0005 batch 6 -- an index assignment, pop or discriminator
             # reassignment on a global the walk has not written reads its
             # entry value (was a false sxUnsat). Walker 230.
@@ -1150,6 +1159,9 @@ task test, "Run the test suite":
             # a call; S8br's slow addr cell terminates. Walker 237.
             "tsymex_rfc0005_b7_integration",
             "tsymex_rfc0005_b8_integration",
+            "tsymex_rfc0005_b8_integration_b",
+            "tsymex_rfc0005_b8_integration_c",
+            "tsymex_rfc0005_b8_integration_d",
             "tsymex_rfc0005_s8bt_libversion",
             "tsymex_rfc0005_s8bt_jit",
             "tsymex_rfc0005_s8bt_jit_langs",
@@ -1173,6 +1185,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_limit_c",
             "tsymex_rfc0005_s8bt_limit_d",
             "tsymex_rfc0005_s8bt_limit_langs",
+            "tsymex_rfc0005_s8bt_limit_langs_b",
             "tsymex_rfc0005_s8bt_utf",
             "tsymex_rfc0005_s8bt_utf_b",
             "tsymex_rfc0005_s8bt_utf_c",
@@ -1194,6 +1207,7 @@ task test, "Run the test suite":
             # hard card queries and newSeqUninit taint precision. Walker 253.
             "tsymex_rfc0005_s8bv_iter_order",
             "tsymex_rfc0005_s8bv_iter_char",
+            "tsymex_rfc0005_s8bv_iter_char_b",
             "tsymex_rfc0005_s8bv_iter_char_count",
             "tsymex_rfc0005_s8bv_iter_int8",
             "tsymex_rfc0005_s8bv_iter_forms",
@@ -1294,6 +1308,8 @@ task test, "Run the test suite":
             # order; `addr` forms; alias precision; walker 202->209
             # (batch 3).
             "tsymex_rfc0005_s8ax_remainder",
+            "tsymex_rfc0005_s8ax_remainder2",
+            "tsymex_rfc0005_s8ax_remainder3",
             "tsymex_rfc0005_s8ax_remainder_b",
             "tsymex_rfc0005_s8ax_remainder_c",
             "tsymex_rfc0005_s8ax_remainder_d",
@@ -1333,6 +1349,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bc_remainder_b2",
             "tsymex_rfc0005_s8bc_remainder_b3",
             "tsymex_rfc0005_s8bc_remainder_c",
+            "tsymex_rfc0005_s8bc_remainder_c2",
+            "tsymex_rfc0005_s8bc_remainder_c3",
+            "tsymex_rfc0005_s8bc_remainder_c4",
             # RFC-0005 S8be -- S8ax's remainder: opaque implicit Defects
             # and raise subtypes; a bounded replay; `{.global.}`; int32
             # widening; Int-sorted call returns; tuples of closures; a
@@ -1428,12 +1447,17 @@ task test, "Run the test suite":
             # aggregate globals, pointers into case objects and aggregate
             # containers. Walker 227 (provisional).
             "tsymex_rfc0005_s8bw_remainder",
+            "tsymex_rfc0005_s8bw_remainder_b",
+            "tsymex_rfc0005_s8bw_remainder_c",
+            "tsymex_rfc0005_s8bw_remainder_d",
             "tsymex_rfc0005_s8cd_globals",
             # RFC-0005 S8cs: the stores to a variable the walk does not see
             # (lifetime hooks, code it cannot list) decline a read of it, and
             # an opaque's summary aims a pointer store at every global.
             # Walker 260 (provisional).
             "tsymex_rfc0005_s8cs_routes",
+            "tsymex_rfc0005_s8cs_routes_b",
+            "tsymex_rfc0005_s8cs_routes_c",
             "tsymex_rfc0005_s8cs_routes2",
             "tsymex_rfc0005_s8cd_globals_b",
             "tsymex_rfc0005_s8cd_ops",
@@ -1443,7 +1467,14 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cd_setorder_large",
             # RFC-0005 S8bz: S8bw's remainder. Walker 249 (provisional).
             "tsymex_rfc0005_s8bz_written",
+            "tsymex_rfc0005_s8bz_written_b",
+            "tsymex_rfc0005_s8bz_written_c",
             "tsymex_rfc0005_s8bz_cells",
+            "tsymex_rfc0005_s8bz_cells_b",
+            "tsymex_rfc0005_s8bz_cells_c",
+            "tsymex_rfc0005_s8bz_cells_d",
+            "tsymex_rfc0005_s8bz_cells_e",
+            "tsymex_rfc0005_s8bz_cells_f",
             "tsymex_rfc0005_s8bz_overlap",
             "tsymex_rfc0005_s8cd_setorder_by",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
@@ -1493,14 +1524,32 @@ task test, "Run the test suite":
             # S8bx item 5: a string's setLen over a symbolic string decides.
             "tsymex_rfc0005_s8bx_setlenstr",
             "tsymex_rfc0005_s8cn_step1d",
+            "tsymex_rfc0005_s8cn_step1d_b",
+            "tsymex_rfc0005_s8cn_step1d_c",
+            "tsymex_rfc0005_s8cn_step1d_d",
+            "tsymex_rfc0005_s8cn_step1d_e",
+            "tsymex_rfc0005_s8cn_step1d_f",
             # S8cn item 2: step 1e, a bounded concrete search.
             "tsymex_rfc0005_s8cn_probe",
             # S8cn items 3 and 4: an mpairs view and its Table.
             "tsymex_rfc0005_s8cn_views",
             "tsymex_rfc0005_s8cn_views_b",
             "tsymex_rfc0005_s8cn_views_c",
+            "tsymex_rfc0005_s8cn_views_d",
+            "tsymex_rfc0005_s8cn_views_e",
+            "tsymex_rfc0005_s8cn_views_f",
             "tsymex_rfc0005_s8cn_seqview",
+            "tsymex_rfc0005_s8cn_seqview_b",
+            "tsymex_rfc0005_s8cn_seqview_c",
+            "tsymex_rfc0005_s8cn_seqview_d",
+            "tsymex_rfc0005_s8cn_seqview_e",
+            "tsymex_rfc0005_s8cn_seqview_f",
             "tsymex_rfc0005_s8cn_lent",
+            "tsymex_rfc0005_s8cn_lent_b",
+            "tsymex_rfc0005_s8cn_lent_c",
+            "tsymex_rfc0005_s8cn_lent_d",
+            "tsymex_rfc0005_s8cn_lent_e",
+            "tsymex_rfc0005_s8cn_lent_f",
             "tsymex_rfc0005_s8cn_lentnative",
             # RFC-0005 S8cq: by-value sharing, var-returning actuals, a call in
             # a location lowered twice.
@@ -1579,6 +1628,8 @@ task test, "Run the test suite":
             # RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8.
             # A proc value's aliasing shapes decline; walker 241->245.
             "tsymex_rfc0005_b9_integration",
+            "tsymex_rfc0005_b9_integration_b",
+            "tsymex_rfc0005_b9_integration_c",
             # A call declines before Nim's call depth limit ends the process.
             "tsymex_rfc0005_b9_calldepth",
             # RFC-0005 batch 10: S8cf, S8cb, S8cd, S8cl and S8cr stacked on

@@ -14484,6 +14484,12 @@ S8cl; items 4, 6, 7 and 8 follow batch 10. Pins:
   each other across unrelated state (`getenv` and `clock_gettime`).
 
 *Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: a module-level `{.push fieldChecks: off.}` over a write to a field of
+  another arm is a false `sxRaised`** (native: no raise, the label after it reached).
+  A macro cannot see a top-level push: the routine's typed AST carries no check
+  option. Main at `6cbfe8f` says `sxUnknown` only through a bare walker fault, and
+  `{.push overflowChecks: off.}` is a false `sxRaised` on main as well. A `push` in
+  the routine's body declines. Moved to S8cu.
 - **PRECISION: a replay of a routine with no taint is skipped, so a body that blocks
   forever is `sxSat` of the label after it** (an opaque routine whose only reachable
   effect is a blocking receive in a hook). Termination is not a verdict: nothing here

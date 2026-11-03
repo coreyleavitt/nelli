@@ -46,6 +46,23 @@ proc sutTemp(k: int) =
   if gG == 0:
     symexTarget("t")
 
+# ---- a `doAssert` in a hook ----------------------------------------------------
+#
+# Stopped the compile before the fix ("node has no type", S8cs's hook summary
+# classifying a formal whose type is inferred from its default); main 6cbfe8f
+# compiled it and declined.
+
+var gArm5: int
+type H5 = object
+  x: int
+proc `=destroy`(h: H5) =
+  doAssert gArm5 == 0
+proc use5(h: sink H5) = discard
+proc sutAssert(k: int) =
+  use5(H5(x: k))
+  if gG == 0:
+    symexTarget("t")
+
 # ---- a raise hook the host installed ------------------------------------------
 
 var gBlock: int    # only the host's raise hook writes it
@@ -65,6 +82,7 @@ proc blockOnRaise(e: ref Exception): bool {.nimcall, gcsafe.} =
 
 proc hostState() =
   gArm7 = 1
+  gArm5 = 1
   globalRaiseHook = blockOnRaise
 
 # ---- native runs --------------------------------------------------------------
@@ -76,6 +94,7 @@ if existsEnv("B11_NATIVE"):
     case getEnv("B11_NATIVE")
     of "sutTemp": sutTemp(0)
     of "sutRaise": sutRaise(0)
+    of "sutAssert": sutAssert(0)
     else: discard
   except Defect as e:
     echo "RAISED|", e.name
@@ -126,6 +145,18 @@ suite "batch 11: host state a re-executed replay child does not have":
     checkpoint show(r.errors)
     check r.status == sxSat
     check r.soundness.replay == rsConfirmed
+
+  test "a doAssert in a hook compiles, and no confirmation native would not reach":
+    check not nativeHit("sutAssert")
+    gArm5 = 1
+    let r = symexFind(sutAssert, tLabel("t"))
+    gArm5 = 0
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    when replayReexecs:
+      check declinedNotMarshallable(r.errors)
+    else:
+      check "feReplayRefuted" in show(r.errors)
 
   test "walker version floor":
     check parseInt(symexWalkerVersion) >= 264

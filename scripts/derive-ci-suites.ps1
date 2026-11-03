@@ -246,6 +246,10 @@ if ($accountedFor -ne $allTsymex.Count) {
 # shard 3 failed the 40-min check at 40.2 min, every suite run. 14 shards
 # take that to about 41 suites each, ~32 min for the jobs that took 37.
 #
+# RFC-0005 batch 11: 17 shards, was 14. S8cq and S8cn add 38 suites; symex-mingw
+# run 41662148312 (4ccf94e) had 47 suites a shard, and shards 3 and 10 failed
+# the 40-min check at 41.1 min, every suite run.
+#
 # RFC-0005 S8cm: shards are placed by measured time, and their number
 # follows from it. A round-robin by name evens out the suite count, not the
 # time: on runs 41627471335 and 41647143526 the 14 shards took 24.5 to 37.9
@@ -256,9 +260,10 @@ if ($accountedFor -ne $allTsymex.Count) {
 # shards as it takes to keep each one near $targetShardMin. Runs of the same
 # shard vary by up to ~1.3x, so the target sits below the 30-minute typical
 # time the shards aim for, and further below the corpus job's 40-minute
-# check. $minShardCount keeps the count from falling when the table is short.
+# check. $minShardCount (batch 11's count) keeps the count from falling when
+# the table is short.
 $targetShardMin = 25
-$minShardCount = 14
+$minShardCount = 17
 $timesPath = Join-Path $RepoRoot 'scripts/ci-suite-seconds.tsv'
 $measured = @{}
 if (Test-Path $timesPath) {

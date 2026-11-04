@@ -554,3 +554,47 @@ involved):
 - **W3 (front-end probes):** WA-3, WA-4, WA-5. Probe each natively first and
   record whether `main` gives the same verdict.
 - **W4 (docs):** WA-13, after W1–W3.
+
+### 2026-11-04 — Wiring fixes landed and gated (`rfc-0005-wiring-int`)
+
+Slices W1 (`e2157736`), W2 (`6911d6c0`) and W3 (`47b2f327`) are merged at
+`476976d3`, and the docs slice W4 (`ce8f8492`) on top of that. The walker
+version is 268 (W1 265, W2 266, W3 267, stacked on 264). Every finding
+WA-1..WA-13 is fixed. Three were **regressions against 0.8.0**, and 0.9.1
+exists for them:
+- WA-3: seq `items`/`pairs` length change gave a clean false `sxSat`/`sxUnsat`.
+- WA-1: `symexFindAllWitnesses` lost the user exception hierarchy.
+- WA-2: a witness that crashes after its target killed the host.
+
+WA-4, WA-5 and WA-10 were wrong on 0.8.0 too. So was a deleted
+`{.symexTransparent.}` call, which dropped its arguments' checks; W3 found and
+fixed it. WA-11 was settled by correcting the doc: `fromCache` is kept and is
+always false, and whether to remove it is the owned fork `fromcache-field` in
+RFC-0016. The limitations the slices found but did not fix are RFC-0016
+INT-22..INT-27.
+
+**Gate** (each against v0.9.0's own run):
+
+| Gate | Result |
+|---|---|
+| c, local | 975/975; unchanged=969, regressed=0, new-failing=0, new-ok=6 |
+| cpp, eos | 975/975; unchanged=968, regressed=0, new-failing=0, fixed=1, new-ok=6 |
+| Windows | `fuzzer-msvc`, `fuzzer-mingw` and `symex-mingw` green at `476976d3` |
+
+- **cpp fix:** the one cpp fix is `s8by_remainder:189`, INT-04's spend drift.
+  It passed here; why is not yet known, so INT-04 stays open until it is.
+- **The c run:** it was mixed. W4 was fast-forwarded into its worktree
+  mid-run, so later suites compiled from `ce8f8492`. W4 changes comments and
+  docs only (diff-filtered), so the result holds for both shas.
+- **Before the tag:** the release gate is rerun cleanly at the final sha,
+  after `/code-review`.
+
+**Wiring: proven.** The load-bearing property is reached from every entry point:
+- `symexFind`;
+- `symexFindAllWitnesses`, and `symexForAll` through it: the same program
+  (with the hierarchy), the same settle, and hints and diagnostics on
+  `SymexFinding`;
+- `symexCacheKeyForFn`: the key covers the hierarchy and the replay mode.
+
+Each path is pinned by `tsymex_rfc0005_w1_parity`, `_w2_settle(_reexec)` and
+`_w3_*`. Next: `/code-review` on v0.8.0..HEAD.

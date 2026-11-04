@@ -241,8 +241,14 @@ const renderAsChoicesVersion* = "12"
   ##   below the mark), and a `try` claims only what was parked while it ran:
   ##   an inner `try` in an `except` arm no longer re-walks an earlier catch's
   ##   continuation through the rest of the arm (a false `sxSat`).
+  ## - RFC-0005 code review round 4 (271->272): the exit channels are their
+  ##   own module (`exits.nim`), whose only way on is `park`; the serial
+  ##   lives on the channel entry, not on the shared `Path`, and a `try`'s
+  ##   claim filters a channel in place. The walk's initial path is built in
+  ##   one place (`initialWalkPath`). No verdict moves; the bump keeps cache
+  ##   entries of the two claim identities apart.
 
-const symexWalkerVersion* = "271"
+const symexWalkerVersion* = "272"
   ## RFC-0005 code review, round 1 fixes for 0.9.1 (269), on 268:
   ## - R1-01: an `elif` condition's preamble (a bounds fork, a hoisted call)
   ##   runs only on the path that tests that condition, not ahead of the whole

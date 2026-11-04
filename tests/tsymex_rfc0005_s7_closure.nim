@@ -548,7 +548,7 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     let body = routineBody(smtDir / "runtime.nim", "applyClosureGround")
     var capIdx, popIdx = -1
     for i, t in body:
-      if t == "let escapedRaises = w.frame.escaped": capIdx = i
+      if t == "let escapedRaises = w.frame.escaped.contents": capIdx = i
       if t == "popFrame(w)": popIdx = i
     check capIdx >= 0 and popIdx == capIdx + 1
 

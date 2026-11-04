@@ -38,6 +38,7 @@ import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw t
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
 import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
 import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
+import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
   ## lives in this Z3-free leaf module so `fuzz.nim` can share it directly
@@ -574,13 +575,6 @@ type
                       ## (`tests/tsymex_rfc0005_s1_lattice.nim`). S1 reads it
                       ## only as `taint != {}` (any channel ⇒ today's
                       ## "uncertain"); S1c re-derives the reads per channel.
-    exitSerial: int
-      ## The `WalkCtx.exitSerial` this path took when it was last parked on
-      ## an exit channel (`parkExit`); 0 for a path never parked. Bookkeeping
-      ## only, never inherited by a fork: a scope owns the parked entries
-      ## whose serial is past the counter at its start (`stampExitsSince`,
-      ## the `isTry` arm's claims). A parked path is not walked on until it
-      ## is claimed, so re-tagging the ref never moves another entry.
     # ---- Phase 15 H1: logical-heap state (ADR-0010) ----
     # These three fields are PURE SCAFFOLDING for Cluster R. They are
     # empty/zero on every path today and the walker never reads or writes
@@ -15855,8 +15849,8 @@ type
   LoopFrame = object
     ## Phase 6: walker-level loop frame. `break`/`continue` consult
     ## the top entry to dispatch correctly.
-    breakPaths*:    seq[Path]
-    continuePaths*: seq[Path]
+    breakPaths*:    ExitChannel[Path]
+    continuePaths*: ExitChannel[Path]
     label*:         string
       ## RFC-0005 S8m. "" for a loop (`isWhile`); else the `blkLabel` of a
       ## labelled `isBlock`, the target of `break <label>` only.
@@ -15878,7 +15872,7 @@ type
       ## type's zero value (`completeReturn`). RFC-0005 S8m: a closure
       ## descent carries its lambda's `retTy` too (a void lambda's is the
       ## `bool` placeholder its unread `funcApp` is sorted by).
-    returnedPaths: seq[Path]        ## paths that hit `return` inside this call
+    returnedPaths: ExitChannel[Path]  ## paths that hit `return` inside this call
     ptrRiskFormals: seq[IRParam]
       ## RFC-0005 S8bn (item 3). The `var` formals whose actual a `ptr` of
       ## unknown origin may address (`IRStmt.cVarPtrSafe` code 0, or a
@@ -16088,10 +16082,10 @@ type
                                       ## captures; a closure body's
                                       ## captures and globals).
     inFlightExn:  Option[ExnRecord]   ## Phase 15 E1: the exn being propagated.
-    escaped:      seq[EscapedRaise]   ## Phase 15 E3: raises that escaped THIS
+    escaped:      ExitChannel[EscapedRaise]   ## Phase 15 E3: raises that escaped THIS
                                       ## frame's handlers; drained by the caller's
                                       ## isCall arm for inter-proc propagation.
-    caught:       seq[tuple[depth: int, path: Path]]
+    caught:       ExitChannel[tuple[depth: int, path: Path]]
                                       ## Phase 15 E3: handler-body continuation
                                       ## paths from raises CAUGHT in this frame,
                                       ## tagged by the catching try's handler-stack
@@ -16101,8 +16095,8 @@ type
                                       ## fall-through. This is what makes a caught
                                       ## raise EXIT the try rather than resume the
                                       ## try body after the raise site.
-    pendingRaise: seq[tuple[depth: int, path: Path, typeId: string,
-                            msg: Option[string]]]
+    pendingRaise: ExitChannel[tuple[depth: int, path: Path, typeId: string,
+                                    msg: Option[string]]]
                                       ## Phase 15 E5: raises that found NO matching
                                       ## `except` arm but are guarded by an enclosing
                                       ## `finally` at `depth` (the deepest HandlerFrame
@@ -16115,7 +16109,7 @@ type
                                       ## finally-raise replaces it). This intercept is
                                       ## what makes a `finally` run on the RAISED exit
                                       ## path before the raise propagates onward.
-    pendingReturn: seq[tuple[depth: int, path: Path]]
+    pendingReturn: ExitChannel[tuple[depth: int, path: Path]]
                                       ## RFC-0005 S8l: `return` exits guarded by a
                                       ## `finally` at `depth` (the deepest HandlerFrame
                                       ## with a non-nil `finallyBlock`), `result`
@@ -16133,7 +16127,8 @@ type
                                       ## `break` / `continue` that leaves it -- one
                                       ## whose target frame lies below the innermost
                                       ## entry (`eeFinallyJumpOnRaise`).
-    pendingJump: seq[tuple[depth: int, path: Path, target: int, isCont: bool]]
+    pendingJump: ExitChannel[tuple[depth: int, path: Path, target: int,
+                                   isCont: bool]]
                                       ## RFC-0005 S8m: `break` / `continue` exits
                                       ## guarded by a `finally` at `depth` (the deepest
                                       ## HandlerFrame with a `finallyBlock` the jump
@@ -16239,7 +16234,7 @@ type
     settings:  SymexSettings
     procs:     Table[string, ProcSig]
     callStack: seq[CallFrame]
-    topReturnedPaths: seq[Path]
+    topReturnedPaths: ExitChannel[Path]
       ## RFC-0005 S8j. The paths that left the SUT through its OWN `return`
       ## (`isReturn` with an empty `callStack`), each with `result` bound to
       ## the returned value. `walk` never returns them (a `return` ends its
@@ -16453,8 +16448,8 @@ type
                       ## each for the caller variable its actual names
                       ## (`applyClosureGround`); `drainPendingLowerEffects`
                       ## writes them onto the consuming path, in call order.
-    exitSerial: int   ## The last serial `parkExit` handed out. Monotonic for
-                      ## the whole walk: never saved or restored.
+    exits: ExitClock  ## RFC-0005 review R4: the serial clock every exit
+                      ## channel parks on (`exits.nim`).
     closureRaises: seq[ClosureRaise]
                       ## RFC-0005 S7. Raises that escaped a closure body's own
                       ## handlers during `applyClosureGround`'s descent (the
@@ -16648,14 +16643,17 @@ proc takeLoweringPendingDegrade(): Degrade =
   ## recorded `loweringDegradeErrors` entry) into a `Degrade` token and resets
   ## the pending taint to `{}`. Called by the drains that fold the queue onto
   ## the path it was queued for: `drainPendingLowerEffects`, `lowerInExpr`
-  ## and, before the walk, `drainPreWalkPendingTaint`.
+  ## and, before the walk, `initialWalkPath`.
   result = Degrade(path: loweringPendingTaint)
   loweringPendingTaint = {}
 
-proc drainPreWalkPendingTaint(initial: Path): Path =
-  ## RFC-0005 review R3 (leak fix). A walk driver's initial path, joined
-  ## with what the parameter set-up queued before the walk began. Setting
-  ## up the parameters allocates their symbols, and an allocation that
+proc initialWalkPath(pc: seq[Z3Bool]; env: Env): Path =
+  ## RFC-0005 review R3 (leak fix), R4. THE constructor of a walk driver's
+  ## initial path (`runSymexImpl`, `runConcolicCollectImpl`): the parameters'
+  ## path condition and bindings, joined with what the parameter set-up
+  ## queued before the walk began, so no driver can start a walk without
+  ## that drain. Setting up the parameters allocates their symbols, and an
+  ## allocation that
   ## declines (`allocDegrade`, a `proc`-typed parameter has no lambda the
   ## walker built) queues its taint with no drain of its own. That taint
   ## belongs to the initial path, the one the allocation was made for, and
@@ -16664,6 +16662,7 @@ proc drainPreWalkPendingTaint(initial: Path): Path =
   ## caller's (R2 SD1) and puts it back on return, and the driver has no
   ## drain after it, so the walk-end leak pin fired on a taint that had
   ## in fact reached every path.
+  let initial = Path(pc: pc, env: env)
   if loweringPendingTaint == {}: initial
   else: forkPathTainted(initial, initial.pc, initial.env,
                         takeLoweringPendingDegrade())
@@ -20060,15 +20059,6 @@ func reassignReadsDisc(sv: SymVal; branches: seq[seq[int]]): bool =
   ## (one explicit group and no `else`), which no assignment can leave.
   sv.kind != svVariant or branches.len != 1 or sv.vArmFields.hasKey(-1)
 
-proc parkExit(w: var WalkCtx; p: Path): Path {.inline.} =
-  ## The one way a path joins an exit channel (`exitEntries` lists them):
-  ## tag it with the next `exitSerial`, so the scopes it leaves can tell it
-  ## from entries parked before they began. The writer pin in
-  ## `tests/tsymex_rfc0005_r2_walktaint.nim` fails on an append that skips it.
-  inc w.exitSerial
-  p.exitSerial = w.exitSerial
-  p
-
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
   ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
@@ -20084,7 +20074,7 @@ proc completeReturn(p: Path, w: var WalkCtx) =
   ##     `isCall` arm's implicit fall-through does (R2); before S8l it left
   ##     `retSym` free on that path. A void callee's path joins unchanged.
   if w.callStack.len == 0:
-    w.topReturnedPaths.add w.parkExit(p)
+    w.topReturnedPaths.park(w.exits, p)
     return
   let frameIx = w.callStack.high
   let retSym = w.callStack[frameIx].retSym
@@ -20095,12 +20085,12 @@ proc completeReturn(p: Path, w: var WalkCtx) =
     # closure too (it was `ceUnsupportedHof`).
     if p.env.hasKey("result") and
        closureValueBuilt(p.env["result"], w.callStack[frameIx].retTy):
-      w.callStack[frameIx].returnedPaths.add w.parkExit(p)
+      w.callStack[frameIx].returnedPaths.park(w.exits, p)
     else:
       let d = w.degrade(ceUnsupportedHof,
         "a closure-returning callee returns no lambda the walker built " &
         "(an untouched nil proc, or a proc value from elsewhere)")
-      w.callStack[frameIx].returnedPaths.add w.parkExit(
+      w.callStack[frameIx].returnedPaths.park(w.exits,
         forkPathTainted(p, p.pc, p.env, d))
     return
   var retVal: SymVal
@@ -20119,11 +20109,11 @@ proc completeReturn(p: Path, w: var WalkCtx) =
              $w.callStack[frameIx].retTy.kind & ") has no sound zero-default (" &
              getCurrentExceptionMsg() & ") — path degraded to sxUnknown " &
              "(feUnsupportedOp)")
-      w.callStack[frameIx].returnedPaths.add w.parkExit(
+      w.callStack[frameIx].returnedPaths.park(w.exits,
         forkPathTainted(p, p.pc, p.env, d))
       return
   else:
-    w.callStack[frameIx].returnedPaths.add w.parkExit(p)
+    w.callStack[frameIx].returnedPaths.park(w.exits, p)
     return
   # v64 (chapulin catalog #6): a COMPOSITE-typed retSym (svTuple/
   # svArray/…) reaching this binding used to flow into `retBindEq`,
@@ -20162,7 +20152,7 @@ proc completeReturn(p: Path, w: var WalkCtx) =
       "composite-typed proc return (kind " & plainEnglishSymValKind(retSym.kind) &
            ") bound through the scalar-raise drain is not yet " &
            "wired — path degraded to sxUnknown (feUnsupportedOp)")
-    w.callStack[frameIx].returnedPaths.add w.parkExit(forkPathTainted(
+    w.callStack[frameIx].returnedPaths.park(w.exits, forkPathTainted(
       p, p.pc, p.env, d))
     return
   # Reconcile mixed int reps (e.g. callee returns svInt because
@@ -20177,7 +20167,7 @@ proc completeReturn(p: Path, w: var WalkCtx) =
     # come back clean. `retSym` is left free (a superset of the value),
     # nothing is dropped.
     let d = w.degrade(uninitReadKind, uninitReturnMsg)
-    w.callStack[frameIx].returnedPaths.add w.parkExit(
+    w.callStack[frameIx].returnedPaths.park(w.exits,
       forkPathTainted(p, p.pc, p.env, d))
     return
   let (rSym, rVal) = reconcileInt(retSym, retVal)
@@ -20188,7 +20178,7 @@ proc completeReturn(p: Path, w: var WalkCtx) =
   # value-returning generic instantiated at `float64`/`string` to
   # flow its result into the caller.
   let retConstraint = retBindEq(rSym, rVal)
-  w.callStack[frameIx].returnedPaths.add w.parkExit(forkPath(
+  w.callStack[frameIx].returnedPaths.park(w.exits, forkPath(
     p, p.pc & @[retConstraint], p.env))
 
 proc exitReturn(p: Path, w: var WalkCtx) =
@@ -20200,7 +20190,7 @@ proc exitReturn(p: Path, w: var WalkCtx) =
   ## left, the return completes.
   for i in countdown(w.frame.handlerStack.high, 0):
     if w.frame.handlerStack[i].finallyBlock != nil:
-      w.frame.pendingReturn.add (depth: i, path: w.parkExit(p))
+      w.frame.pendingReturn.park(w.exits, (depth: i, path: p))
       return
   completeReturn(p, w)
 
@@ -20228,11 +20218,11 @@ proc exitJump(p: Path; target: int; isCont: bool; w: var WalkCtx) =
     return
   for i in countdown(w.frame.handlerStack.high, w.loopStack[target].hsDepth):
     if w.frame.handlerStack[i].finallyBlock != nil:
-      w.frame.pendingJump.add (depth: i, path: w.parkExit(p), target: target,
-                               isCont: isCont)
+      w.frame.pendingJump.park(w.exits, (depth: i, path: p, target: target,
+                                         isCont: isCont))
       return
-  if isCont: w.loopStack[target].continuePaths.add w.parkExit(p)
-  else:      w.loopStack[target].breakPaths.add w.parkExit(p)
+  if isCont: w.loopStack[target].continuePaths.park(w.exits, p)
+  else:      w.loopStack[target].breakPaths.park(w.exits, p)
 
 proc jumpTarget(w: WalkCtx; label: string): int =
   ## RFC-0005 S8m. The frame a jump leaves: the innermost loop for "" (a
@@ -20898,8 +20888,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
           # set. No cond=false exit fork here — the trace did not exit.
           let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
           let afterBody = walk(stmt.wbody, @[truePath], w)
-          let cps = w.loopStack[frameIx].continuePaths
-          w.loopStack[frameIx].continuePaths = @[]
+          let cps = w.loopStack[frameIx].continuePaths.takeAll()
           for cp in cps: nextActive.add cp
           for ap in afterBody: nextActive.add ap
         else:
@@ -23344,7 +23333,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           callee: stmt.callee, retSym: retSym,
           retName: stmt.retName,
           retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
-          returnedPaths: @[], ptrRiskFormals: ptrRisk.risk,
+          ptrRiskFormals: ptrRisk.risk,
           ptrSafeFormals: ptrRisk.safe,
           sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
         w.callStats[stmt.callee] = CallStat(
@@ -23517,7 +23506,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         # this call site catches the helper's raise. Heap/pc state at the raise
         # point is preserved on `er.path` (R1b merge — structural now, inert until
         # Cluster R). The handler-body continuations join the call's survivors.
-        let calleeEscaped = w.frame.escaped
+        let calleeEscaped = w.frame.escaped.contents
         let calleeCells = w.frame.addrCells   ## RFC-0005 S8ax
         popFrame(w)
         for er in calleeEscaped:
@@ -23576,7 +23565,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         # (`pruneFactsSince`): a hit re-checks them (`pruneFactsHold`).
         # S8as left such a call uncached, which cost `fib` every reuse.
         var pruneFacts: seq[seq[Z3Bool]]
-        let exitPaths = frame.returnedPaths & fallThrough
+        let exitPaths = frame.returnedPaths.contents & fallThrough
         # RFC-0005 S8be: a callee threading globals, capture cells or
         # captures is cached keyed by their values, when no exit wrote
         # one (`exitKeepsOuter`); a withheld one still is not.
@@ -23607,7 +23596,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           if not w.callCache.hasKey(key): w.callCache[key] = @[]
           if w.callCache[key].len < callCacheBucketMax:
             w.callCache[key].add entry
-        for cp in frame.returnedPaths & fallThrough:
+        for cp in frame.returnedPaths.contents & fallThrough:
           var newEnv = p.env
           if stmt.retName.len > 0:
             newEnv[stmt.retName] =
@@ -23688,7 +23677,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                               hsDepth: w.frame.handlerStack.len)
     let frameIx = w.loopStack.high
     var survivors = walkBlock(stmt.stmts, paths, w)
-    survivors.add w.loopStack[frameIx].breakPaths
+    survivors.add w.loopStack[frameIx].breakPaths.contents
     discard w.loopStack.pop()
     survivors
   of isIf:
@@ -23909,8 +23898,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             inc symexLoopIterations
             let afterBody = walk(stmt.wbody, @[truePath], w)
             # Continue-paths from the body merge into next-iter active.
-            let cps = w.loopStack[frameIx].continuePaths
-            w.loopStack[frameIx].continuePaths = @[]
+            let cps = w.loopStack[frameIx].continuePaths.takeAll()
             for cp in cps: nextActive.add cp
             for ap in afterBody: nextActive.add ap
           # cond=false: exit loop (use dp — the drained path with domain
@@ -24306,7 +24294,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # handler stack cut back to the matched frame. Claiming that entry walked
     # an earlier catch's continuation through the rest of the arm a second
     # time.
-    let since = w.exitSerial
+    let since = w.exits.mark
     w.frame.handlerStack.add HandlerFrame(handlers: stmt.tryHandlers,
                                           finallyBlock: stmt.tryFinally,
                                           loopLen: w.loopStack.len)   # RFC-0005 S8m
@@ -24317,44 +24305,24 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Claim the handler-body continuations for raises CAUGHT at our depth (routed
     # by `routeRaise` while walking the body or a callee called from the body).
     # These join the body's normal fall-through; the caught path exits the try.
+    # Each claim leaves every other entry in place, with its serial.
     var continuations = bodyPaths
-    var keptCaught: seq[tuple[depth: int, path: Path]]
-    for c in w.frame.caught:
-      if c.depth == myDepth and c.path.exitSerial > since:
-        continuations.add c.path
-      else: keptCaught.add c
-    w.frame.caught = keptCaught
+    for c in w.frame.caught.claimAt(since, myDepth):
+      continuations.add c.path
     # Phase 15 E5: claim the RAISED exit continuations deferred to this try's
     # finally (recorded by `routeRaise` on `pendingRaise` at our depth when a
     # raise in the body found no matching `except` but is guarded by our
     # `finally`). These run the finally on the RAISED path and re-propagate.
-    var raisedConts: seq[tuple[path: Path, typeId: string, msg: Option[string]]]
-    var keptPending: seq[tuple[depth: int, path: Path, typeId: string,
-                              msg: Option[string]]]
-    for pr in w.frame.pendingRaise:
-      if pr.depth == myDepth and pr.path.exitSerial > since:
-        raisedConts.add (pr.path, pr.typeId, pr.msg)
-      else: keptPending.add pr
-    w.frame.pendingRaise = keptPending
+    let raisedConts = w.frame.pendingRaise.claimAt(since, myDepth)
     # RFC-0005 S8l: claim the RETURN exits deferred to this try's finally
     # (`exitReturn` recorded them at our depth: a `return` in the body or in
     # an `except` arm). Only a try with a `finally` is ever recorded.
     var returnConts: seq[Path]
-    var keptReturn: seq[tuple[depth: int, path: Path]]
-    for pr in w.frame.pendingReturn:
-      if pr.depth == myDepth and pr.path.exitSerial > since:
-        returnConts.add pr.path
-      else: keptReturn.add pr
-    w.frame.pendingReturn = keptReturn
+    for pr in w.frame.pendingReturn.claimAt(since, myDepth):
+      returnConts.add pr.path
     # RFC-0005 S8m: likewise the `break` / `continue` exits deferred to this
     # try's finally (`exitJump`: a jump in the body or an `except` arm).
-    var jumpConts: seq[tuple[path: Path, target: int, isCont: bool]]
-    var keptJump: seq[tuple[depth: int, path: Path, target: int, isCont: bool]]
-    for pj in w.frame.pendingJump:
-      if pj.depth == myDepth and pj.path.exitSerial > since:
-        jumpConts.add (pj.path, pj.target, pj.isCont)
-      else: keptJump.add pj
-    w.frame.pendingJump = keptJump
+    let jumpConts = w.frame.pendingJump.claimAt(since, myDepth)
     if stmt.tryFinally == nil:
       # No finally: normal continuations flow through; any raised continuations
       # re-propagate immediately (re-route through the now-popped outer stack).
@@ -25467,44 +25435,36 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
     result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
 
-iterator exitEntries(w: var WalkCtx): var Path =
-  ## The exit channels, listed once: every path sent past the result of the
-  ## statement that produced it and waiting for a scope to claim it. A
-  ## `return` (`topReturnedPaths`, each call's `returnedPaths`), a `break` or
-  ## `continue` (each loop frame's `breakPaths` / `continuePaths`), and the
-  ## current call frame's raise and `finally` channels (`caught`,
-  ## `pendingRaise`, `pendingReturn`, `pendingJump`, `escaped`). A path joins
-  ## one only through `parkExit`; the writer pin in
-  ## `tests/tsymex_rfc0005_r2_walktaint.nim` fails on a channel appended to
-  ## that this iterator does not list. Saved caller frames (`frameStack`) are
-  ## not listed: a statement parks only on the frame it runs in, and one
-  ## that pushes a frame pops it before it returns.
-  for p in w.topReturnedPaths.mitems: yield p
+proc stampExitsSince(w: var WalkCtx; since: ExitMark; taint: Taint) =
+  ## RFC-0005 review R2 (SD2), R3 (T1), R4. Taint every exit-channel entry
+  ## parked after `since`: the paths a statement sent down an exit channel,
+  ## wherever a claim has left them since. Identified by serial, not by
+  ## position: an `isTry` walked inside the statement may claim entries
+  ## around them. Each path is replaced by a tainted fork, never mutated: a
+  ## sibling may share the ref. The entry keeps its serial (`exits.nim`).
+  ##
+  ## The channels, listed once: a `return` (`topReturnedPaths`, each call's
+  ## `returnedPaths`), a `break` or `continue` (each loop frame's
+  ## `breakPaths` / `continuePaths`), and the current call frame's raise and
+  ## `finally` channels (`caught`, `pendingRaise`, `pendingReturn`,
+  ## `pendingJump`, `escaped`). `stmtExitTaintProbe` parks on each and pins
+  ## that every one is stamped. Saved caller frames (`frameStack`) are not
+  ## listed: a statement parks only on the frame it runs in, and one that
+  ## pushes a frame pops it before it returns.
+  if not w.exits.parkedSince(since): return   # nothing parked
+  template stamp(p: var Path) =
+    p = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint))
+  for p in w.topReturnedPaths.mitemsSince(since): stamp(p)
   for f in w.callStack.mitems:
-    for p in f.returnedPaths.mitems: yield p
+    for p in f.returnedPaths.mitemsSince(since): stamp(p)
   for f in w.loopStack.mitems:
-    for p in f.breakPaths.mitems: yield p
-    for p in f.continuePaths.mitems: yield p
-  for e in w.frame.caught.mitems: yield e.path
-  for e in w.frame.pendingRaise.mitems: yield e.path
-  for e in w.frame.pendingReturn.mitems: yield e.path
-  for e in w.frame.pendingJump.mitems: yield e.path
-  for e in w.frame.escaped.mitems: yield e.path
-
-proc stampExitsSince(w: var WalkCtx; since: int; taint: Taint) =
-  ## RFC-0005 review R2 (SD2), R3 (T1). Taint every exit-channel entry
-  ## parked after `since` (a `w.exitSerial`): the paths a statement sent
-  ## down an exit channel, wherever a claim has moved them since. Identified
-  ## by serial, not by position: an `isTry` walked inside the statement may
-  ## claim entries and re-park them in any order. Each is replaced by a
-  ## tainted fork that keeps its serial, never mutated: a sibling may share
-  ## the ref.
-  if w.exitSerial <= since: return       # nothing parked
-  for p in exitEntries(w):
-    if p.exitSerial > since:
-      let q = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint))
-      q.exitSerial = p.exitSerial
-      p = q
+    for p in f.breakPaths.mitemsSince(since): stamp(p)
+    for p in f.continuePaths.mitemsSince(since): stamp(p)
+  for e in w.frame.caught.mitemsSince(since): stamp(e.path)
+  for e in w.frame.pendingRaise.mitemsSince(since): stamp(e.path)
+  for e in w.frame.pendingReturn.mitemsSince(since): stamp(e.path)
+  for e in w.frame.pendingJump.mitemsSince(since): stamp(e.path)
+  for e in w.frame.escaped.mitemsSince(since): stamp(e.path)
 
 proc taintAll(paths: seq[Path]; taint: Taint): seq[Path] =
   ## Each of `paths` as a fork joined with `taint`.
@@ -25551,7 +25511,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   loweringPendingTaint = {}
   let outerStray = w.stmtStrayTaint
   w.stmtStrayTaint = {}
-  let since = w.exitSerial
+  let since = w.exits.mark
   result =
     if outerPending == {}: walkCapSynced(stmt, paths, w)
     else: walkCapSynced(stmt, taintAll(paths, outerPending), w)
@@ -25565,7 +25525,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
 # ---- Statement exit-taint test hook (H1 pattern) -----------------------------
 # `Path`/`WalkCtx` are private to the runtime unit, so -- as
 # `h1PathHasHeapFields` and `rfc0005S1CarrierProbe` -- the hook below drives
-# the real `walk`, `routeRaise`, `parkExit` and `stampExitsSince` for
+# the real `walk`, `routeRaise`, `park` and `stampExitsSince` for
 # `tests/tsymex_rfc0005_r2_walktaint.nim` and reports what it observed. It
 # exists solely for that test and has no role in the walker; it saves and
 # restores every threadvar it touches. The source shapes that would reach
@@ -25580,8 +25540,8 @@ type
     pendingAfter*: Taint     ## the caller's queue once the `break` returned
     breakTaint*: Taint       ## the taint of the path the `break` sent out
     channelTaints*: seq[Taint]
-      ## The taint of each entry `exitEntries` yields after one path was
-      ## parked on every channel and the stamp ran.
+      ## The taint of each entry parked after the mark, one per channel,
+      ## once one path was parked on every channel and the stamp ran.
     priorTaint*: Taint       ## an entry parked before the statement began
     caughtTaints*: seq[Taint]
       ## The `caught` entries after a second raise into a handler that holds
@@ -25609,33 +25569,49 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
   result.resultLen = r.len
   result.pendingAfter = loweringPendingTaint
   if w.loopStack[0].breakPaths.len > 0:
-    result.breakTaint = w.loopStack[0].breakPaths[0].taint
+    result.breakTaint = w.loopStack[0].breakPaths.contents[0].taint
   loweringPendingTaint = savedPending
   var w2: WalkCtx
   w2.loopStack.add LoopFrame()
   w2.callStack.add CallFrame()
-  w2.loopStack[0].breakPaths.add w2.parkExit(np())
-  let since = w2.exitSerial
-  w2.topReturnedPaths.add w2.parkExit(np())
-  w2.callStack[0].returnedPaths.add w2.parkExit(np())
-  w2.loopStack[0].breakPaths.add w2.parkExit(np())
-  w2.loopStack[0].continuePaths.add w2.parkExit(np())
-  w2.frame.caught.add (depth: 0, path: w2.parkExit(np()))
-  w2.frame.pendingRaise.add (depth: 0, path: w2.parkExit(np()), typeId: "E",
-                             msg: none(string))
-  w2.frame.pendingReturn.add (depth: 0, path: w2.parkExit(np()))
-  w2.frame.pendingJump.add (depth: 0, path: w2.parkExit(np()), target: 0,
-                            isCont: false)
-  w2.frame.escaped.add EscapedRaise(path: w2.parkExit(np()), typeId: "E")
+  w2.loopStack[0].breakPaths.park(w2.exits, np())
+  let since = w2.exits.mark
+  w2.topReturnedPaths.park(w2.exits, np())
+  w2.callStack[0].returnedPaths.park(w2.exits, np())
+  w2.loopStack[0].breakPaths.park(w2.exits, np())
+  w2.loopStack[0].continuePaths.park(w2.exits, np())
+  w2.frame.caught.park(w2.exits, (depth: 0, path: np()))
+  w2.frame.pendingRaise.park(w2.exits, (depth: 0, path: np(), typeId: "E",
+                                        msg: none(string)))
+  w2.frame.pendingReturn.park(w2.exits, (depth: 0, path: np()))
+  w2.frame.pendingJump.park(w2.exits, (depth: 0, path: np(), target: 0,
+                                       isCont: false))
+  w2.frame.escaped.park(w2.exits, EscapedRaise(path: np(), typeId: "E"))
   stampExitsSince(w2, since, spur)
-  result.priorTaint = w2.loopStack[0].breakPaths[0].taint
-  for p in exitEntries(w2):
-    if p.exitSerial > since: result.channelTaints.add p.taint
+  result.priorTaint = w2.loopStack[0].breakPaths.contents[0].taint
+  for p in w2.topReturnedPaths.mitemsSince(since):
+    result.channelTaints.add p.taint
+  for p in w2.callStack[0].returnedPaths.mitemsSince(since):
+    result.channelTaints.add p.taint
+  for p in w2.loopStack[0].breakPaths.mitemsSince(since):
+    result.channelTaints.add p.taint
+  for p in w2.loopStack[0].continuePaths.mitemsSince(since):
+    result.channelTaints.add p.taint
+  for e in w2.frame.caught.mitemsSince(since):
+    result.channelTaints.add e.path.taint
+  for e in w2.frame.pendingRaise.mitemsSince(since):
+    result.channelTaints.add e.path.taint
+  for e in w2.frame.pendingReturn.mitemsSince(since):
+    result.channelTaints.add e.path.taint
+  for e in w2.frame.pendingJump.mitemsSince(since):
+    result.channelTaints.add e.path.taint
+  for e in w2.frame.escaped.mitemsSince(since):
+    result.channelTaints.add e.path.taint
   var w3: WalkCtx
   w3.frame.handlerStack.add HandlerFrame(handlers: @[ExceptHandler(
     typeIds: @[], body: mkBlock(@[mkTry(mkBlock(@[]), @[])]))])
   discard routeRaise(np(), "E", none(string), w3)
-  let since3 = w3.exitSerial
+  let since3 = w3.exits.mark
   discard routeRaise(np(), "E", none(string), w3)
   stampExitsSince(w3, since3, spur)
   for c in w3.frame.caught: result.caughtTaints.add c.path.taint
@@ -25784,7 +25760,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
         # merges them into ITS continuation, so the caught path exits the try
         # instead of resuming the try body after the raise site.
         for hp in handlerPaths:
-          w.frame.caught.add (depth: i, path: w.parkExit(hp))
+          w.frame.caught.park(w.exits, (depth: i, path: hp))
         return @[]
     # Phase 15 E5: a `finally` guards the raise too: it runs on the RAISED
     # exit path before the raise propagates onward, deferred to that try's
@@ -25800,16 +25776,16 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     # `try: (try: raise finally: u = 1) except: ...` ran the outer handler
     # without the inner finally's write (a false sxUnsat on `u == 1`).
     if hf.finallyBlock != nil:
-      w.frame.pendingRaise.add (depth: i, path: w.parkExit(rp), typeId: typeId,
-                                msg: msg)
+      w.frame.pendingRaise.park(w.exits, (depth: i, path: rp, typeId: typeId,
+                                          msg: msg))
       return @[]
   # 2. No handler matched in this frame.
   if w.frameStack.len > 0:
     # We are inside a callee — let the raise escape to the caller's handlers.
     # The caller's `isCall` arm drains `escaped` after we return. Carry the
     # raise-site path so heap/pc state is preserved (R1b; structural now).
-    w.frame.escaped.add EscapedRaise(path: w.parkExit(rp), typeId: typeId,
-                                     msg: msg)
+    w.frame.escaped.park(w.exits, EscapedRaise(path: rp, typeId: typeId,
+                                               msg: msg))
     return @[]
   # 3. Top-level (SUT) frame: surface as a public sxRaised finding.
   # Phase 15 E6. A raise of a Nim `Defect` subtype is a CONTRACT VIOLATION that
@@ -25903,8 +25879,8 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
           "not known -- path degraded to sxUnknown (heNilDerefMayBeCaught)")
       return
   if w.frameStack.len > 0:
-    w.frame.escaped.add EscapedRaise(path: w.parkExit(p), typeId: typeId,
-                                     msg: none(string), crash: true)
+    w.frame.escaped.park(w.exits, EscapedRaise(path: p, typeId: typeId,
+                                               msg: none(string), crash: true))
     return
   if w.mode == wmFollowConcrete and
      concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
@@ -26525,7 +26501,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   w.callStack.add CallFrame(
     callee: "closure@" & $clo.closureSite.siteHash & "/" &
             $clo.closureSite.declOrder,
-    retSym: funcApp, retName: "__closureRet", returnedPaths: @[],
+    retSym: funcApp, retName: "__closureRet",
     # RFC-0005 S8m: a bare `return` that never assigned `result` binds the
     # zero value, as the fall-through twin below does. With no `retTy` the
     # path joined `returnedPaths` unbound, and the explicit-return loop
@@ -26674,7 +26650,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # RFC-0005 S7: capture the raises that escaped the body's own handlers
   # BEFORE `popFrame` discards the closure frame (as the `isCall` arm does);
   # `drainClosureRaises` routes them from the calling path.
-  let escapedRaises = w.frame.escaped
+  let escapedRaises = w.frame.escaped.contents
   popFrame(w)
   w.callStack.setLen(frameIx)
   restorePendingLowerEffects(w, pending)
@@ -27032,7 +27008,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   #     with closure-allocated refs (same invariant as named-proc arm).
   #   * liveRefs: the closure exit's liveRefs is already the UNION of the seeded
   #     caller refs + any refs minted inside the body; replace directly.
-  let exitPaths = fallThrough & frame.returnedPaths
+  let exitPaths = fallThrough & frame.returnedPaths.contents
   if exitPaths.len > 0:
     currentClosureDidMutateHeap = true   # threadvar fallback
     # Single-exit-path fast path (straight-line body, most common case).
@@ -28995,7 +28971,7 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
-  let initial = drainPreWalkPendingTaint(Path(pc: initialPC, env: env))
+  let initial = initialWalkPath(initialPC, env)
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     z3: ctx, target: target, params: prog.params,
@@ -29873,10 +29849,10 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                            globals: globalsTable(prog.globals)),  ## S8as
   )
   currentWalkCtxPtr = addr w
-  let initial = drainPreWalkPendingTaint(Path(pc: initialPC, env: env))
+  let initial = initialWalkPath(initialPC, env)
   # RFC-0005 S8j: a path that left through the SUT's own `return` is a
   # normal exit too; its constraints join the soundness pin below.
-  let resultPaths = walk(prog.body, @[initial], w) & w.topReturnedPaths
+  let resultPaths = walk(prog.body, @[initial], w) & w.topReturnedPaths.contents
   currentWalkCtxPtr = nil
   # RFC-0005 S1c: the walk-end pending-taint leak pin, exactly as
   # `runSymexImpl` runs it. This driver used to skip it, so a lowering

@@ -20,9 +20,15 @@
 ## mark and the new entry landed below it, unstamped. The same claim walked
 ## the earlier catch's continuation through the rest of the arm a second
 ## time (the source row: a false `sxSat`). Entries now carry the serial they
-## were parked at (`parkExit`); a statement stamps, and a try claims, only
-## what was parked after it began. The writer pin keeps every channel append
-## on `parkExit` and every channel appended to in `exitEntries`.
+## were parked at; a statement stamps, and a try claims, only what was
+## parked after it began.
+##
+## Review R4: the channels are `ExitChannel`s (`nelli/smt/exits`), whose
+## storage is private: `park` is the only way on and takes the serial, which
+## lives on the entry rather than the shared `Path`. The R3 text scan over
+## `runtime.nim` is gone; the module's semantics are pinned directly below.
+## The walk's initial path is built by one constructor that drains what the
+## parameter set-up queued (`initialWalkPath`), pinned by a proc parameter.
 ##
 ## The shapes the finding named do not reach the hole from source: a closure
 ## body is walked with the calling expression's queue set aside
@@ -31,11 +37,12 @@
 ## a queue it does not own, as an arm that walks a child before draining
 ## would. Each source row runs the routine natively (`native`) beside the
 ## walk's verdict.
-import std/[unittest, strutils, os, sets]
+import std/[unittest, strutils]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import nelli/smt/exits
 import ./s8cu_helpers
 
 var gN: int          # never written: 0 natively, `feGlobalHavoc` to the walk
@@ -125,6 +132,12 @@ proc handlerInnerTry(b: byte) =
     inc x
   if x == 2: symexTarget("hit")
 
+# A proc-typed parameter: allocating it declines (no lambda the walk built)
+# before the walk begins. The target does not read it, but the path the
+# walk starts from carries the decline.
+proc procParam(f: proc(x: int): int {.closure.}; b: byte) =
+  if b > 3: symexTarget("hit")
+
 # Controls: the same shapes over a value the walk knows.
 proc closureKnown(b: byte) =
   let f = proc(x: int): int = return 1
@@ -153,7 +166,7 @@ template tainted(fn: untyped; tgt: SymexTarget) =
 suite "R2 SD1/SD2: lowering taint survives a nested walk and its exits":
 
   test "walker version floor":
-    check parseInt(symexWalkerVersion) >= 271
+    check parseInt(symexWalkerVersion) >= 272
 
   test "SD1: a nested walk keeps the caller's queue; its break path carries it":
     let probe = stmtExitTaintProbe()
@@ -174,43 +187,6 @@ suite "R2 SD1/SD2: lowering taint survives a nested walk and its exits":
     # The earlier catch's entry stands outside the statement: the inner try
     # no longer claims and re-parks it.
     check {} in probe.caughtTaints
-
-  test "every exit-channel append parks through parkExit, on a listed channel":
-    let src = readFile(currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-                       "smt" / "runtime.nim")
-    var listed, parked: HashSet[string]
-    var inIter = false
-    var bare: seq[string]
-    for raw in src.splitLines():
-      if raw.startsWith("iterator exitEntries("): inIter = true; continue
-      if inIter:
-        if raw.len > 0 and raw[0] != ' ': inIter = false
-        else:
-          let ix = raw.find(".mitems")
-          if ix > 0 and "yield" in raw:
-            var j = ix
-            while j > 0 and raw[j - 1] in IdentChars: dec j
-            listed.incl raw[j ..< ix]
-          continue
-      let t = raw.strip()
-      if t.startsWith("#"): continue
-      let ax = t.find(".add ")
-      if ax <= 0: continue
-      var j = ax
-      while j > 0 and t[j - 1] in IdentChars: dec j
-      let chan = t[j ..< ax]
-      if "parkExit(" in t: parked.incl chan
-      else: bare.add t
-    check listed.len == 9
-    checkpoint "parked on unlisted channels: " & $(parked - listed)
-    check parked == listed
-    var unparked: seq[string]
-    for t in bare:
-      for c in listed:
-        if t.contains("." & c & ".add ") or t.startsWith(c & ".add "):
-          unparked.add t
-    checkpoint "appends that skip parkExit: " & $unparked
-    check unparked.len == 0
 
   test "T1 source shape: a handler's inner try leaves earlier catches alone":
     check native(handlerInnerTry(4)) == "ran"
@@ -253,8 +229,125 @@ suite "R2 SD1/SD2: lowering taint survives a nested walk and its exits":
     check native(loopContinue(4)) == "ran"
     tainted(loopContinue, tLabel("hit"))
 
+  test "initial path: a proc parameter's decline reaches the result":
+    let r = symexFind(procParam, tLabel("hit"))
+    checkpoint show(r.errors)
+    checkpoint $r.status & " " & $r.soundness.pathTaint & " " &
+      $r.soundness.replay
+    check not r.clean
+    check r.status == sxUnknown
+    check r.errors.named(ceUnsupportedHof)
+    # The leak pin stays quiet: the decline was drained onto the initial
+    # path, the one every path of the walk derives from. A driver that
+    # skips the drain leaves it queued, and the pin fires here.
+    check not r.errors.named(weInternalWalkerFault)
+
   test "controls: a known operand decides":
     check native(closureKnown(4)) == "hit"
     decides(closureKnown, sxSat)
     check native(closureKnownDead(2)) == "ran"
     decides(closureKnownDead, sxUnsat)
+
+type Entry = tuple[depth: int, v: string]
+
+proc vs[T](xs: seq[T]): seq[string] =
+  for x in xs: result.add x.v
+
+suite "R4: exit channels (nelli/smt/exits)":
+
+  test "park assigns increasing serials across channels on one clock":
+    var clock: ExitClock
+    var a, b: ExitChannel[Entry]
+    let m0 = clock.mark
+    check not clock.parkedSince(m0)
+    a.park(clock, (0, "a1"))
+    let m1 = clock.mark
+    check clock.parkedSince(m0)
+    check not clock.parkedSince(m1)
+    b.park(clock, (0, "b1"))
+    a.park(clock, (0, "a2"))
+    check clock.parkedSince(m1)
+    # Since m1: b1 and a2, not a1.
+    var since: seq[string]
+    for e in a.mitemsSince(m1): since.add e.v
+    for e in b.mitemsSince(m1): since.add e.v
+    check since == @["a2", "b1"]
+    check a.contents.vs == @["a1", "a2"]
+    check a.len == 2 and b.len == 1
+
+  test "claimAt takes only entries parked after the mark, at the depth":
+    var clock: ExitClock
+    var ch: ExitChannel[Entry]
+    ch.park(clock, (1, "old1"))
+    ch.park(clock, (0, "old0"))
+    let m = clock.mark
+    ch.park(clock, (1, "new1a"))
+    ch.park(clock, (0, "new0"))
+    ch.park(clock, (1, "new1b"))
+    check ch.claimAt(m, 1).vs == @["new1a", "new1b"]
+    # Kept entries stay in order.
+    check ch.contents.vs == @["old1", "old0", "new0"]
+    # A claim at the other depth sees only the new one.
+    check ch.claimAt(m, 0).vs == @["new0"]
+    check ch.contents.vs == @["old1", "old0"]
+    # Nothing is parked after a fresh mark.
+    check ch.claimAt(clock.mark, 1).len == 0
+
+  test "kept entries keep their original serial through a claim":
+    # T1's shape: an outer scope marks, an inner try claims around an entry
+    # it does not own, and the outer scope must still find that entry.
+    var clock: ExitClock
+    var ch: ExitChannel[Entry]
+    ch.park(clock, (0, "earlier"))
+    let outer = clock.mark
+    ch.park(clock, (0, "outerOwn"))
+    let inner = clock.mark
+    ch.park(clock, (0, "innerOwn"))
+    check ch.claimAt(inner, 0).vs == @["innerOwn"]
+    var seen: seq[string]
+    for e in ch.mitemsSince(outer): seen.add e.v
+    check seen == @["outerOwn"]
+    # Re-reading after the claim: the earlier entry is still not "since".
+    check ch.claimAt(outer, 0).vs == @["outerOwn"]
+    check ch.contents.vs == @["earlier"]
+
+  test "a stamp replaces the item and the entry keeps its serial":
+    var clock: ExitClock
+    var ch: ExitChannel[Entry]
+    ch.park(clock, (0, "before"))
+    let m = clock.mark
+    ch.park(clock, (0, "after"))
+    for e in ch.mitemsSince(m): e.v = e.v & "*"
+    check ch.contents.vs == @["before", "after*"]
+    # The stamped entry is still parked after `m`.
+    check ch.claimAt(m, 0).vs == @["after*"]
+
+  test "the serial is the entry's: one ref parked twice moves neither":
+    type R = ref object
+      depth: int
+      tag: string
+    var clock: ExitClock
+    var ch: ExitChannel[R]
+    let shared = R(depth: 0, tag: "x")
+    ch.park(clock, shared)
+    let m = clock.mark
+    ch.park(clock, shared)
+    # Parking the same ref again did not move the first entry past `m`.
+    var n = 0
+    for e in ch.mitemsSince(m): inc n
+    check n == 1
+    check ch.claimAt(m, 0).len == 1
+    check ch.len == 1
+
+  test "takeAll empties the channel whatever the serials":
+    var clock: ExitClock
+    var ch: ExitChannel[Entry]
+    ch.park(clock, (0, "a"))
+    let m = clock.mark
+    ch.park(clock, (3, "b"))
+    check ch.takeAll().vs == @["a", "b"]
+    check ch.len == 0
+    check ch.claimAt(m, 3).len == 0
+    var items: seq[string]
+    for e in ch: items.add e.v
+    check items.len == 0

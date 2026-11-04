@@ -148,7 +148,7 @@ suite "S8bd (2): a seq[distinct] parameter has a witness":
     if r.status == sxSat:
       let w: seq[Meters] = r.witness[0]
       check w.len > 1 and int(w[0]) == 3 and int(w[1]) < -5
-      check replayWitness(dParam, r.witness, tLabel("dp"), {}) == roConfirmed
+      check replayWitness(dParam, r.witness, tLabel("dp"), {}).outcome == roConfirmed
     discard clean(dParam, "dp_dead", sxUnsat)
 
   test "other widths, a float base, a nested distinct":
@@ -156,7 +156,7 @@ suite "S8bd (2): a seq[distinct] parameter has a witness":
     if a.status == sxSat:
       let w: seq[Grams] = a.witness[0]
       check w.len == 2 and int32(w[1]) == 70000'i32
-      check replayWitness(dParam32, a.witness, tLabel("d32"), {}) == roConfirmed
+      check replayWitness(dParam32, a.witness, tLabel("d32"), {}).outcome == roConfirmed
     # A distinct of a float carries S8ba's `geDistinctBijectivitySkipped`
     # hint (sevHint): the sort is modelled without the round-trip axiom. A
     # distinct of a distinct over a DECIDABLE base (`Km` here) does not,
@@ -177,7 +177,7 @@ suite "S8bd (2): a seq[distinct] parameter has a witness":
     if b.status == sxSat:
       let w: seq[Secs] = b.witness[0]
       check float(w[0]) > 2.5
-      check replayWitness(dParamF, b.witness, tLabel("df"), {}) == roConfirmed
+      check replayWitness(dParamF, b.witness, tLabel("df"), {}).outcome == roConfirmed
     let c = hinted(dParamNested, "dn")
     # RFC-0005 S8bg: `Km`'s real base (`int`, through `Meters`) is
     # decidable, so no hint fires for it any more (unlike `dParamF`'s
@@ -186,7 +186,7 @@ suite "S8bd (2): a seq[distinct] parameter has a witness":
     if c.status == sxSat:
       let w: seq[Km] = c.witness[0]
       check int(Meters(w[0])) == 11
-      check replayWitness(dParamNested, c.witness, tLabel("dn"), {}) == roConfirmed
+      check replayWitness(dParamNested, c.witness, tLabel("dn"), {}).outcome == roConfirmed
 
 # ---- (3) the heap-depth budget bounds a chain, not a count -------------------
 

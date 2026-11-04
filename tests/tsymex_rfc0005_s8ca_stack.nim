@@ -23,7 +23,7 @@
 ##       decline in-band; with about 1 MB left a shallow call is still
 ##       inlined and decides;
 ##   (3) a decline the stack forced is the machine's, not the program's,
-##       and is not cached (`symexNativeStackCut`).
+##       and is not cached (`rdNativeStack`, on the result).
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
@@ -85,7 +85,7 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check stackNamed(r.errors)
-    check symexNativeStackCut()
+    check rdNativeStack in r.soundness.runDependence
 
   # The crash pin's own budget (`maxCallDepth: 50`) stays where it is pinned,
   # `tsymex_configdefaults`, on c and cpp: on Windows, where the fiber's 16 MB
@@ -99,13 +99,13 @@ suite "S8ca (1): the walk declines before the native stack runs out":
       let r = symexFind(s8caShallow, tLabel("s8ca_shallow"))
       checkpoint show(r.errors)
       check r.status == sxSat
-      check not symexNativeStackCut()
+      check rdNativeStack notin r.soundness.runDependence
 
   test "a run the stack does not cut is not flagged":
     let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 5)))
     check r.status == sxUnknown
-    check not symexNativeStackCut()
+    check rdNativeStack notin r.soundness.runDependence
 
 # (2) A 2 MB stack: a Nim thread's on every platform (on Windows the solve
 # itself runs on its own fiber, and these hold there too).
@@ -121,7 +121,7 @@ proc analyse(which: int) =
   template take(call: untyped) =
     let r = call
     outs[which] = ThreadOut(status: r.status, named: stackNamed(r.errors),
-                            cut: symexNativeStackCut(),
+                            cut: rdNativeStack in r.soundness.runDependence,
                             left: nativeStackLeft())
   case which
   of 0, 2: take(symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never")))

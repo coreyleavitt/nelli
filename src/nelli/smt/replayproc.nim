@@ -71,7 +71,8 @@ type
       ## memory limit, or could not be started or handed its state for a
       ## reason of the moment (a failed `fork`, pipe or job object, a runtime
       ## hook the host had set). Another run may decide it, so a verdict
-      ## it leaves undecided is not cached (`replayRunDependent`).
+      ## it leaves undecided is not cached (`rdReplay`, carried on the
+      ## result's `Soundness.runDependence`).
 
 var replayExecCount = 0
   ## How many children the host has started: symex never runs `fn` itself, so
@@ -83,39 +84,8 @@ proc replayExecutions*(): int =
   {.cast(gcsafe).}:
     replayExecCount
 
-var replayDetail {.threadvar.}: string
-  ## The last child's ending, in words, for the verdict's hint.
-var replayEnding {.threadvar.}: ReplayEnding
-  ## The last child's ending.
-var replayRunDependentFlag {.threadvar.}: bool
-  ## RFC-0005 0.9.1 (WA-7). Some child since `resetReplayRunDependence` ended
-  ## in a way another run may not (`ReplayChild.runDependent`).
-
-proc lastReplayDetail*(): string =
-  ## RFC-0005 S8ct. How the last replay on this thread ended, for a hint.
-  replayDetail
-
-proc lastReplayEnding*(): ReplayEnding =
-  ## RFC-0005 0.9.1 (WA-2). How the last replay on this thread ended. Read
-  ## with a confirmed outcome, which only a child that ran gives: a child
-  ## that reached the target and then did not finish (`reExited`,
-  ## `reSignalled`, `reTimedOut`) makes its witness unsafe to run in a host.
-  replayEnding
-
-proc resetReplayRunDependence*() =
-  ## RFC-0005 0.9.1 (WA-7). Called by each entry macro's replay settle before
-  ## it runs a child.
-  replayRunDependentFlag = false
-
-proc replayRunDependent*(): bool =
-  ## RFC-0005 0.9.1 (WA-7). Whether a replay of the last settle on this thread
-  ## ended in a way that depends on the run. Like a solve the clock cut off
-  ## (`symexQueryTimedOut`), its verdict is the machine's, not only the
-  ## program's, so `saveSymexVerdictImpl` does not cache it.
-  replayRunDependentFlag
-
-proc describe(c: ReplayChild): string =
-  ## The words `lastReplayDetail` hands to a `feReplay*` hint.
+func describe*(c: ReplayChild): string =
+  ## How the child ended, in words, for a `feReplay*` hint (`replayresult.nim`).
   ##
   ## Known limitation (RFC-0005 0.9.1, WA-13): on a forked child where libc
   ## has no `on_exit` (macOS, musl: `hasOnExit` is false), the exit hook is
@@ -140,13 +110,11 @@ proc describe(c: ReplayChild): string =
   of reTimedOut: "it ran past its bound and was killed"
   of reRefused: c.why
 
-proc settled(c: ReplayChild): ReplayChild =
+func settled(c: ReplayChild): ReplayChild =
+  ## The child as the host reports it: a run past the bound or into the memory
+  ## limit is the run's, not only the program's.
   result = c
   if c.ending == reTimedOut or c.outOfMemory: result.runDependent = true
-  {.cast(gcsafe).}:
-    replayDetail = describe(result)
-    replayEnding = result.ending
-    if result.runDependent: replayRunDependentFlag = true
 
 proc refused(why: string; runDependent = true): ReplayChild =
   ## No child ran. `runDependent`: for a reason of the moment (the default:

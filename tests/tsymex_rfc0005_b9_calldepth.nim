@@ -55,10 +55,10 @@ suite "batch 9: Nim's call depth limit":
     check r.status == sxUnknown
     check framesNamed(r.errors)
     # The machine's limit, not the program's: not cached.
-    check symexNativeStackCut()
+    check rdNativeStack in r.soundness.runDependence
 
   test "a call the limit leaves room for is inlined and decides":
     let r = symexFind(shallow, tLabel("cd_shallow"))
     checkpoint show(r.errors)
     check r.status == sxSat
-    check not symexNativeStackCut()
+    check rdNativeStack notin r.soundness.runDependence

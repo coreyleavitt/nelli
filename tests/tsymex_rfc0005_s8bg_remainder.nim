@@ -79,7 +79,7 @@ suite "S8bg (1): a known-heap-cell pointer dereference is modeled":
 
   test "reachable twin replays, dead label is unsat":
     let r = clean(sutPtrFormalDeref, "pfA", sxSat)
-    check replayWitness(sutPtrFormalDeref, r.witness, tLabel("pfA"), {}) ==
+    check replayWitness(sutPtrFormalDeref, r.witness, tLabel("pfA"), {}).outcome ==
           roConfirmed
     discard clean(sutPtrFormalDeref, "pfA_dead", sxUnsat)
 
@@ -197,13 +197,13 @@ suite "S8bg (2): a representation-preserving conversion lvalue is modeled":
 
   test "distinct, whole lvalue: reachable twin replays, dead label is unsat":
     let r = clean(sutConvDistinctWhole, "cvd", sxSat)
-    check replayWitness(sutConvDistinctWhole, r.witness, tLabel("cvd"), {}) ==
+    check replayWitness(sutConvDistinctWhole, r.witness, tLabel("cvd"), {}).outcome ==
           roConfirmed
     discard clean(sutConvDistinctWhole, "cvd_dead", sxUnsat)
 
   test "range to base, whole lvalue: reachable twin replays, dead label is unsat":
     let r = clean(sutConvRangeWhole, "cvr", sxSat)
-    check replayWitness(sutConvRangeWhole, r.witness, tLabel("cvr"), {}) ==
+    check replayWitness(sutConvRangeWhole, r.witness, tLabel("cvr"), {}).outcome ==
           roConfirmed
     discard clean(sutConvRangeWhole, "cvr_dead", sxUnsat)
 

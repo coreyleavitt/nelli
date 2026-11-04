@@ -100,6 +100,23 @@ type
                    ## but nothing has run the reported witness: not `trusted()`.
                    ## A `feReplay*` hint says why
 
+  RunDependence* = enum
+    ## RFC-0005 0.9.1 (WA-7; review R1-07). Why a verdict is this run's and not
+    ## only the program's: another run, on another machine or at another
+    ## moment, may decide what this one left undecided. Set where the run
+    ## ends (`runSymex`) and where its replays settle, and read off the
+    ## result at save time, never off the thread: a verdict the save is
+    ## handed carries its own.
+    rdQueryTimeout  ## RFC-0005 S8bu. A solve the wall clock cut off
+                    ## (`queryTimeoutMs`)
+    rdNativeStack   ## RFC-0005 S8ca. A call declined for want of native stack
+                    ## (or of Nim's call depth): a thread with more goes deeper
+    rdReplay        ## RFC-0005 0.9.1 (WA-7). A replay's child ended in a way
+                    ## another run may not: killed at `replayTimeoutMs`, ended
+                    ## at the replay's memory limit, or not started or not
+                    ## handed its state for a reason of the moment
+                    ## (`ReplayChild.runDependent`)
+
   Soundness* = object
     ## RFC-0005 §8.1. One common-section field on `RawResult`, `SymexResult`
     ## and `SymexFinding`, so a generic consumer reads the taint without
@@ -123,6 +140,12 @@ type
       ## consumer runs it in the host: `assertCoveredBy` does not splat it and
       ## `symexForAll` does not seed it. Only a replay sets it; a witness
       ## nothing ran is `false`.
+    runDependence*: set[RunDependence]
+      ## RFC-0005 0.9.1 (WA-7; review R1-07). What of this verdict depends on
+      ## the run (`RunDependence`); `{}` for one any run would reach. An
+      ## `sxUnknown` with any is not cached, and an `rsUnconfirmed` witness
+      ## with `rdReplay` is not stored as unconfirmed for good. Verdict-neutral:
+      ## `trusted()` does not read it.
 
 func trustedSat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxSat` / `sxRaised` arm: a clean winning

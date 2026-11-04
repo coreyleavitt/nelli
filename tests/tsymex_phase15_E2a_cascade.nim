@@ -94,6 +94,63 @@ suite "symex Phase 15 E2a — structural sxRaised cascade + multi-finding cache"
       checkpoint "failAt=" & $failAt & " loaded=" & $got.len
       check got.len == 0 or got.len == 2
 
+  test "Q1: a torn re-save never reads back as a mixed old/new set":
+    # Old save [A,B] (isDefect=false), then a re-save of the same key
+    # (isDefect=true) that throws at each position. Every load is the whole
+    # old set, the whole new set, or a miss -- never new A with old B.
+    let prog = SymexProgram(body: mkBlock(@[]))
+    let target = tAssertionViolation()
+    proc mk(defect: bool): seq[RawResult] =
+      @[RawResult(status: sxRaised, raisedTypeId: "ValueError", isDefect: defect),
+        RawResult(status: sxRaised, raisedTypeId: "IOError", isDefect: defect)]
+    for failAt in 1 .. 5:
+      let db0 = inMemoryDatabase()
+      var errors0: seq[string] = @[]
+      saveSymexRaisedImpl(db0, prog, target, defaultSymexSettings(),
+                          mk(false), errors0)
+      check errors0.len == 0
+      var db = db0
+      var n = 0
+      let inner = db0.saveWithMetaImpl
+      let plain = db0.saveImpl
+      db.saveWithMetaImpl = proc (t: string; c: seq[ChoiceNode];
+                                  m: Table[string, string]; mx: int) =
+        inc n
+        if n == failAt: raise newException(IOError, "injected")
+        inner(t, c, m, mx)
+      db.saveImpl = proc (t: string; c: seq[ChoiceNode]; mx: int) =
+        inc n
+        if n == failAt: raise newException(IOError, "injected")
+        plain(t, c, mx)
+      var errors: seq[string] = @[]
+      saveSymexRaisedImpl(db, prog, target, defaultSymexSettings(),
+                          mk(true), errors)
+      var loadErrors: seq[string] = @[]
+      let got = loadSymexRaisedImpl(db0, prog, target,
+                                    defaultSymexSettings(), loadErrors)
+      checkpoint "failAt=" & $failAt & " loaded=" & $got.len
+      if got.len > 0:
+        check got.len == 2
+        check got[0].raw.isDefect == got[1].raw.isDefect
+
+  test "R7 Q2: an index listing the same type id twice is a miss":
+    let db = inMemoryDatabase()
+    let prog = SymexProgram(body: mkBlock(@[]))
+    let target = tAssertionViolation()
+    var errors: seq[string] = @[]
+    saveSymexRaisedImpl(db, prog, target, defaultSymexSettings(),
+      @[RawResult(status: sxRaised, raisedTypeId: "ValueError")], errors)
+    let baseKey = symexCacheKey(prog, target, defaultSymexSettings(),
+      z3Version = z3FullVersion(), nimVersion = NimVersion,
+      walkerVersion = symexWalkerVersion,
+      renderingVersion = renderAsChoicesVersion)
+    let tid = "ValueError"
+    let node = bytesChoice(cast[seq[byte]](tid), 0, tid.len)
+    db.save(baseKey & ":raised2", @[node, node], 1)
+    var loadErrors: seq[string] = @[]
+    check loadSymexRaisedImpl(db, prog, target, defaultSymexSettings(),
+                              loadErrors).len == 0
+
   test "E2a: stkRaisedExn target kind exists with typeFilter":
     let t = SymexTarget(kind: stkRaisedExn, typeFilter: "ValueError")
     check t.kind == stkRaisedExn

@@ -795,12 +795,16 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
 const raisedDefectMetaKey = "rdef"
   ## RFC-0005 W1. The `:raised:<type>` sentinel's `RawResult.isDefect`.
 
-const cacheKeyRaisedIndex = ":raised"
+const cacheKeyRaisedIndex = ":raised2"
   ## Phase 15 E2a. Index slot for the multi-`sxRaised` cache protocol. The
   ## per-type sentinels live under `cacheKeyRaised(typeId)` (e.g.
   ## `:raised:ValueError`); the index here enumerates which type ids were
   ## persisted (the general example-DB has no key-prefix scan, so the set of
   ## raised types must be recorded explicitly to be reloadable).
+  ## The suffix is `:raised2`, not `:raised`: records written before the
+  ## all-or-nothing index format (a single-type `:raised` index was
+  ## byte-identical to this one, a multi-type one was not) are never read,
+  ## so every pre-existing record is a clean miss.
 
 proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
                           target: SymexTarget, settings: SymexSettings,
@@ -817,8 +821,18 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ##       slot per `(exnType)` finding), and
   ##   (b) as an index entry under `cacheKeyRaisedIndex` so `loadSymexRaisedImpl`
   ##       can enumerate the persisted type ids without a DB key-prefix scan.
-  ##       The index is a single entry written after every sentinel, so a
-  ##       failed save reads back as a miss, never as a partial set.
+  ## Scope: production (`symexFindAllWitnesses`) only ever saves ONE type and
+  ## loads `cachedRaised[0]`; the multi-type all-or-nothing rule below serves
+  ## this exported Impl API and its multi-type tests.
+  ##
+  ## Atomicity (none of it relies on the DB being transactional). Before any
+  ## sentinel is touched an EMPTY index is written, which the loader reads as
+  ## a miss; the real index, one entry listing every type id, is written
+  ## last. So a save or re-save that fails part-way reads back as a MISS
+  ## (the previous set is dropped as soon as the first write lands), except
+  ## that a failure of the very first write leaves the previous complete
+  ## set intact. It never reads back as a partial set, nor as a mix of old
+  ## and new sentinels. Only a fully successful save reads back as a hit.
   ## A SUT with two distinct raise paths (e.g. ValueError, IOError) round-trips
   ## both findings through save/load. The witness rides the sentinel since
   ## RFC-0005 W1 (`witnesses`, below).
@@ -863,6 +877,10 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       defectByType.add raw.isDefect
   if typeIds.len == 0: return false
   try:
+    # Invalidate first: the old index (if any) must not outlive the first
+    # sentinel rewrite, or a torn re-save would serve new and old sentinels
+    # together. An empty id list loads as a miss.
+    db.save(baseKey & cacheKeyRaisedIndex, newSeq[ChoiceNode](), 1)
     for i, tid in typeIds:
       # (a) per-type sentinel slot, carrying the finding's soundness,
       # (RFC-0005 S8az) its gaps and (RFC-0005 W1) its witness, as the
@@ -919,6 +937,11 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
         errors.add "loadSymexRaisedImpl: malformed raised index; a miss"
         return
       let tid = cast[string](node.bytesVal)
+      for prev in loaded:
+        if prev.raw.raisedTypeId == tid:
+          errors.add "loadSymexRaisedImpl: raised index lists " & tid &
+            " twice; a miss"
+          return
       let sentinel = db.loadPrimaryWithMeta(baseKey & cacheKeyRaised(tid))
       # RFC-0005 W1: the value is the raise's witness (it was `@[]`), so a
       # sentinel is any single entry; its soundness still decides a hit.
@@ -928,8 +951,7 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       if s.isNone:
         # A hit needs the complete set the index describes.
         errors.add "loadSymexRaisedImpl: raised(" & tid & ") has no " &
-          "soundness-carrying sentinel (torn or pre-RFC-0005-S11 " &
-          "format); a miss"
+          "soundness-carrying sentinel (torn save); a miss"
         return
       loaded.add (raw: RawResult(status: sxRaised, raisedTypeId: tid,
                                  isDefect: sentinel[0].meta.getOrDefault(
@@ -4029,19 +4051,14 @@ macro assertCoveredBy*(fn: typed,
   # call site among several `fn`s, and a generic one among its instantiations.
   # Review R5 (3d): a routine is told apart as `routineKey` tells routines
   # apart (name and body hash; `signatureHash` is the same for every routine
-  # of one parameter list). The entry macros take only a routine symbol or a
-  # non-symbol: a template, a macro, or a proc-typed variable has no body to
-  # walk and is rejected before this point. A non-symbol (a lambda, a call) is
-  # a fixed-width hash of its text, so a lambda's whole body is not embedded in
-  # every finding's key.
-  let fnIdText =
-    if fn.kind == nnkSym:
-      doAssert fn.symKind in {nskProc, nskFunc, nskMethod, nskIterator,
-                              nskConverter},
-        "assertCoveredBy: a non-routine symbol reached the finding key"
-      routineKey(fn)
-    else:
-      sha256Hex(fn.repr) & "#" & fn.lineInfo
+  # of one parameter list). `parseEntryImplWarned` above has already resolved
+  # `fn` through `getImpl`, which rejects anything that is not a routine
+  # symbol (a lambda, a call, a template, a macro, a proc-typed variable), so
+  # only a symbol of a kind `resolveRoutineImpl` accepts gets here.
+  if fn.kind != nnkSym or fn.symKind notin {nskProc, nskFunc, nskConverter,
+                                            nskMethod}:
+    error("assertCoveredBy: a non-routine symbol reached the finding key", fn)
+  let fnIdText = routineKey(fn)
   let fnIdLit = newLit(fnIdText & "@" & fn.getTypeInst.repr)
   let originLit = nnkObjConstr.newTree(bindSym"FindingOrigin",
     nnkExprColonExpr.newTree(ident"site", siteLit),

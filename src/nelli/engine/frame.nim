@@ -42,13 +42,19 @@ type Severity = enum
   ## lets a later, weaker finding replace an earlier, stronger one (equal
   ## ranks keep the latest):
   ##   skAudit             `sfNotApplicable` / `sfReplayMiss`: not verdicts,
-  ##                       only a record that symex was skipped or missed;
+  ##                       only a record that symex was skipped or missed.
+  ##                       Exists for `severity`'s exhaustiveness only: those
+  ##                       findings are appended in `engine/phases.nim` and
+  ##                       never pass through `record`;
   ##   skTrustedCovered    a trusted claim the test covered;
   ##   skUnconfirmed       a covered claim no trust backs;
   ##   skUnknown           decided nothing (`sfUnknown`, accepted or not);
-  ##   skUnconfirmedMiss   an unconfirmed claim the run did not reach (kept
-  ##                       when `acceptUnknown` downgrades it, so it carries
-  ##                       no failure);
+  ##   skUnconfirmedMiss   an untrusted claim the run did not reach. Not
+  ##                       `acceptUnknown`-downgraded, it raises a
+  ##                       `SymexCoverageDefect`, so it does carry a failure;
+  ##                       it ranks below `skCoverageFailure` because that
+  ##                       claim is trusted, and above `skUnknown` because it
+  ##                       is a claim, not a non-answer;
   ##   skCoverageFailure   a TRUSTED claim the test failed to cover: the one
   ##                       finding no other may displace.
   skAudit, skTrustedCovered, skUnconfirmed, skUnknown, skUnconfirmedMiss,

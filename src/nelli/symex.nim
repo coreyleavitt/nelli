@@ -240,7 +240,8 @@ import ./engine/phases
 import ./engine/pipeline
 import ./optbox
 import ./smt/canonicalize
-export canonicalize.symexCacheKey, canonicalize.symexWalkerVersion,
+export canonicalize.symexCacheKey, canonicalize.symexCacheKeyPrefix,
+       canonicalize.symexWalkerVersion,
        canonicalize.renderAsChoicesVersion, canonicalize.canonicalize,
        canonicalize.cacheKeySat, canonicalize.cacheKeyUnsat,
        canonicalize.cacheKeyUnknown, canonicalize.cacheKeyRaised,

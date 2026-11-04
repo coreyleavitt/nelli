@@ -153,8 +153,8 @@ suite "symex C1 — category 1: borrow op twin equality":
   test "C1-borrow: cache keys are well-formed and distinct (different programs, no collision)":
     let kProc = symexCacheKeyForFn(sutC1BorrowProc, tLabel("c1-borrow-proc"))
     let kFunc = symexCacheKeyForFn(sutC1BorrowFunc, tLabel("c1-borrow-func"))
-    check kProc.startsWith("sx:") and kProc.len > 3
-    check kFunc.startsWith("sx:") and kFunc.len > 3
+    check kProc.startsWith(symexCacheKeyPrefix) and kProc.len > symexCacheKeyPrefix.len
+    check kFunc.startsWith(symexCacheKeyPrefix) and kFunc.len > symexCacheKeyPrefix.len
     check kProc != kFunc
 
 suite "symex C1 — category 2: proc-as-value capture twin equality":
@@ -171,8 +171,8 @@ suite "symex C1 — category 2: proc-as-value capture twin equality":
   test "C1-value: cache keys are well-formed and distinct":
     let kProc = symexCacheKeyForFn(sutC1ValueProc, tLabel("c1-value-proc"))
     let kFunc = symexCacheKeyForFn(sutC1ValueFunc, tLabel("c1-value-func"))
-    check kProc.startsWith("sx:") and kProc.len > 3
-    check kFunc.startsWith("sx:") and kFunc.len > 3
+    check kProc.startsWith(symexCacheKeyPrefix) and kProc.len > symexCacheKeyPrefix.len
+    check kFunc.startsWith(symexCacheKeyPrefix) and kFunc.len > symexCacheKeyPrefix.len
     check kProc != kFunc
 
 suite "symex C1 — category 3: string-param twin equality":
@@ -188,8 +188,8 @@ suite "symex C1 — category 3: string-param twin equality":
   test "C1-string: cache keys are well-formed and distinct":
     let kProc = symexCacheKeyForFn(sutC1StringProc, tLabel("c1-string-proc"))
     let kFunc = symexCacheKeyForFn(sutC1StringFunc, tLabel("c1-string-func"))
-    check kProc.startsWith("sx:") and kProc.len > 3
-    check kFunc.startsWith("sx:") and kFunc.len > 3
+    check kProc.startsWith(symexCacheKeyPrefix) and kProc.len > symexCacheKeyPrefix.len
+    check kFunc.startsWith(symexCacheKeyPrefix) and kFunc.len > symexCacheKeyPrefix.len
     check kProc != kFunc
 
 suite "symex C1 — category 4: generic callee twin equality":
@@ -203,8 +203,8 @@ suite "symex C1 — category 4: generic callee twin equality":
   test "C1-generic: cache keys are well-formed and distinct":
     let kProc = symexCacheKeyForFn(sutC1GenericProc, tAssertionViolation())
     let kFunc = symexCacheKeyForFn(sutC1GenericFunc, tAssertionViolation())
-    check kProc.startsWith("sx:") and kProc.len > 3
-    check kFunc.startsWith("sx:") and kFunc.len > 3
+    check kProc.startsWith(symexCacheKeyPrefix) and kProc.len > symexCacheKeyPrefix.len
+    check kFunc.startsWith(symexCacheKeyPrefix) and kFunc.len > symexCacheKeyPrefix.len
     check kProc != kFunc
 
 suite "symex C1 — category 5: plain callee twin equality":
@@ -221,8 +221,8 @@ suite "symex C1 — category 5: plain callee twin equality":
   test "C1-plain: cache keys are well-formed and distinct":
     let kProc = symexCacheKeyForFn(sutC1PlainProc, tAssertionViolation())
     let kFunc = symexCacheKeyForFn(sutC1PlainFunc, tAssertionViolation())
-    check kProc.startsWith("sx:") and kProc.len > 3
-    check kFunc.startsWith("sx:") and kFunc.len > 3
+    check kProc.startsWith(symexCacheKeyPrefix) and kProc.len > symexCacheKeyPrefix.len
+    check kFunc.startsWith(symexCacheKeyPrefix) and kFunc.len > symexCacheKeyPrefix.len
     check kProc != kFunc
 
 # ============================================================================

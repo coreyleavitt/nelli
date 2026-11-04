@@ -5635,6 +5635,84 @@ proc lowerCondChain(arms: seq[CondArm]; elseBody: IRStmt;
   inner.add rest
   mkIf(branches, mkBlock(inner))
 
+type OrdStepCheck = enum
+  ## RFC-0005 review R1-02. What bounds a step of an ordinal value is
+  ## checked against (`ordStepBounds`).
+  oscIntFamily    ## an integer type: the arithmetic's own overflow check
+  oscBounds       ## the bounds `lo .. hi`
+  oscUnknown      ## a type the walk does not read bounds from
+
+proc ordStepBounds(x: NimNode; ownRange: bool; lo, hi: var int64): OrdStepCheck =
+  ## RFC-0005 review R1-02. The bounds Nim checks a step of `x` against,
+  ## raising `OverflowDefect` (not `RangeDefect`) outside them, as probed:
+  ##
+  ##   * an enum: its first and last ordinal; `char`: 0 .. 255;
+  ##   * a `range`: under `succ` / `pred` (`ownRange` false) its BASE type,
+  ##     so `succ` of 3 in `range[0..3]` is 4, and a subrange of an enum is
+  ##     checked against the whole enum; under `inc` / `dec` (`ownRange`) the
+  ##     range itself, so `inc` of 3 in a `range[0..3]` variable raises;
+  ##   * an integer type: none beyond the arithmetic's own overflow check.
+  case x.typeKind
+  of ntyChar:
+    lo = 0
+    hi = 255
+    oscBounds
+  of ntyEnum:
+    # The lifted enum carries its first and last ordinal as its range (the
+    # typed `getTypeImpl` drops explicit `= N` ordinals, so it is not read).
+    let t = classifyType(x).ty
+    if t.kind != itInt or t.enumName.len == 0 or not t.hasRange or
+       t.enumRange:
+      return oscUnknown
+    lo = t.rangeLo
+    hi = t.rangeHi
+    oscBounds
+  of ntyRange:
+    let impl = x.getTypeImpl
+    if impl.kind != nnkBracketExpr or impl.len != 2 or
+       impl[1].kind != nnkInfix or impl[1].len != 3:
+      return oscUnknown
+    if not ownRange: return ordStepBounds(impl[1][1], false, lo, hi)
+    # The classified range's bounds (a `Natural`'s `high(int)` included).
+    let t = classifyType(x).ty
+    if t.kind != itInt or not t.hasRange: return oscUnknown
+    lo = t.rangeLo
+    hi = t.rangeHi
+    oscBounds
+  of ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
+     ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64:
+    oscIntFamily
+  else:
+    oscUnknown
+
+proc checkedOrdinalStep(base: IRExpr; baseTy: IRType; step: IRExpr;
+                        stepTy: IRType; isAdd: bool; lo, hi: int64;
+                        preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0005 review R1-02. `base +/- step` checked against `lo .. hi`,
+  ## raising `OverflowDefect` outside them, as Nim's `succ` / `pred` / `inc`
+  ## / `dec` do. The sum is taken in `int64` (Nim's own, whose overflow is
+  ## the same `OverflowDefect`) and narrowed back to `baseTy` once in range.
+  ## `stepTy` nil is the literal default step. Nil when an operand is not an
+  ## integer the sum can be taken over (a `uint64`): the caller declines.
+  proc wide(e: IRExpr; t: IRType): IRExpr =
+    if t == nil or (t.width == 64 and t.signed): e
+    else: mkConvIntWidth(e, t.width, t.signed, 64, true)
+  if baseTy.kind != itInt or (baseTy.width == 64 and not baseTy.signed):
+    return nil
+  if stepTy != nil and
+     (stepTy.kind != itInt or (stepTy.width == 64 and not stepTy.signed)):
+    return nil
+  let v = freshSynth(ctx, "ordStep")
+  preamble.add mkLet(v, tInt(64, signed = true),
+    mkBinop(if isAdd: bAdd else: bSub, wide(base, baseTy), wide(step, stepTy)))
+  preamble.add mkIf(@[mkBranch(
+    mkBinop(bOr, mkBinop(bLt, mkVar(v), mkIntLit(lo)),
+                 mkBinop(bGt, mkVar(v), mkIntLit(hi))),
+    mkRaise("OverflowDefect", nil))])
+  if baseTy.width == 64 and baseTy.signed: mkVar(v)
+  else: mkConvIntWidth(mkVar(v), 64, true, baseTy.width, baseTy.signed,
+                       hasRange = true, lo = lo, hi = hi)
+
 proc armYieldsValue(body: NimNode): bool =
   ## RFC-0005 s1. Does this branch arm produce a VALUE, or does it leave the
   ## path? A `case`/`if` in expression position may still carry arms that
@@ -12617,8 +12695,26 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let step = if n.len == 3: parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (pred/succ)
                  else: mkIntLit(1)
       keepInlineRaiseOrder(base, n[1], mark, preamble, ctx)
-      return mkBinop(if calleeSym.strVal == "pred": bSub else: bAdd,
-                     base, step)
+      # RFC-0005 review R1-02: an enum or a `char` (or a range of one) is
+      # checked against its base type's bounds, `OverflowDefect` outside
+      # them; it lowered to the unchecked sum, which wrapped.
+      var lo, hi: int64
+      case ordStepBounds(n[1], ownRange = false, lo, hi)
+      of oscIntFamily:
+        return mkBinop(if calleeSym.strVal == "pred": bSub else: bAdd,
+                       base, step)
+      of oscBounds:
+        let stepTy = if n.len == 3: classifyType(n[2]).ty else: nil
+        let checked = checkedOrdinalStep(base, classifyType(n[1]).ty, step,
+          stepTy, calleeSym.strVal == "succ", lo, hi, preamble, ctx)
+        if checked != nil: return checked
+      of oscUnknown: discard
+      preamble.add ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "`" & calleeSym.strVal & "` on `" & n[1].repr &
+                "`: the bounds of its type are not modelled -- path " &
+                "degraded to sxUnknown"),
+        "`" & calleeSym.strVal & "` on this operand is not modelled")
+      return mkIntLit(0)
     # A7 (ADR-0017 Path B): borrow comparison ops (==, !=, <, <=, >, >=) on
     # types that classify as tInt (e.g. Rune → tInt) arriving as nnkCall.
     # The nnkInfix borrowIntercept already handles infix-form writes; this block
@@ -19905,7 +20001,25 @@ proc parseStmtInner(n: NimNode,
       let incTy = if incCls.ty.kind == itInt and incCls.ty.hasRange:
                     incCls.ty
                   else: nil
-      mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR), incTy)
+      # RFC-0005 review R1-02: an enum, a `char` or a `range` receiver is
+      # checked against its own type's bounds, `OverflowDefect` outside them
+      # (probed: `inc` of 3 in a `range[0..3]` variable raises
+      # `OverflowDefect`, not `RangeDefect`). An enum or a `char` wrapped.
+      var lo, hi: int64
+      case ordStepBounds(recv, ownRange = true, lo, hi)
+      of oscIntFamily:
+        return mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR), incTy)
+      of oscBounds:
+        let stepTy = if n.len >= 3: classifyType(n[2]).ty else: nil
+        let checked = checkedOrdinalStep(mkVar(nm), incCls.ty, stepIR,
+          stepTy, bop == bAdd, lo, hi, preamble, ctx)
+        if checked != nil: return mkAssign(nm, checked, incTy)
+      of oscUnknown: discard
+      ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "`" & n[0].strVal & "` on `" & recv.repr &
+                "`: the bounds of its type are not modelled -- path " &
+                "degraded to sxUnknown"),
+        "`" & n[0].strVal & "` on this receiver is not modelled")
     elif n.len >= 2 and n[0].kind == nnkSym and
          isBuiltinNamed(n[0], ["inc", "dec"]):
       # RFC-0005 S8bc (item 7): every other system `inc`/`dec`.
@@ -20428,6 +20542,20 @@ proc parseStmtInner(n: NimNode,
         let augTy = if augCls.ty.kind == itInt and augCls.ty.hasRange:
                       augCls.ty
                     else: nil
+        # RFC-0005 review R1-02: `+=` / `-=` are the `Inc` / `Dec` magics, so
+        # past a range receiver's bounds they raise `OverflowDefect`, as
+        # `inc` / `dec` do (probed), not the assignment's `RangeDefect`.
+        if augTy != nil and baseOpStr in ["+", "-"]:
+          var lo, hi: int64
+          if ordStepBounds(lhs, ownRange = true, lo, hi) == oscBounds:
+            let checked = checkedOrdinalStep(mkVar(nm), augTy, rhsIR,
+              classifyType(n[2]).ty, baseOpStr == "+", lo, hi, preamble, ctx)
+            if checked != nil: return mkAssign(nm, checked, augTy)
+          return ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(n, "`" & augOp.strVal & "` on `" & lhs.repr &
+                    "`: the bounds of its type are not modelled -- path " &
+                    "degraded to sxUnknown"),
+            "`" & augOp.strVal & "` on this receiver is not modelled")
         return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR), augTy)
       elif lhs.kind == nnkDerefExpr and lhs.len == 1 and
            augOp.strVal != "&=" and

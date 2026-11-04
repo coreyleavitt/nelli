@@ -2,7 +2,7 @@
 type  = "review"
 id    = "0005-review"
 title = "RFC-0005 code review ledger (0.9.1)"
-state = "pending"
+state = "floor"
 profile = "rfc-flow@6"
 +++
 

@@ -161,6 +161,10 @@ state = "pending"
 id    = "S8cp-r"
 title = "S8cp items 4-8: rc=139 of p7, n42 on cpp, stack size off Linux, declined shapes, declined magics"
 state = "pending"
+[[slice]]
+id    = "rv0005-lows"
+title = "The RFC-0005 code review's open Lows (INT-28 to INT-38): replay child hardening, cache-key coverage, replay and settle policy, fuzzer-path liveness, design cleanups, exit-group guards, finding-collector edges, precision probes, cache hygiene"
+state = "pending"
 +++
 
 # RFC — native-parity hardening: the walker agrees with the compiled program, or declines
@@ -612,6 +616,27 @@ against 0.8.0, as the audit was; none is worse than it.
 | INT-25 | Hypothesis: on macOS a kill at `replayTimeoutMs` does not reach the SUT's own child processes, and the child does not die with the host. `setpgid` and `PR_SET_PDEATHSIG` are Linux-only (`replayproc.nim:296-298`, `:374-376`). There is no macOS CI to probe it | 0.9.1 wiring audit | unclear (hypothesis; no macOS host) | |
 | INT-26 | `RegexError` reaching `symexFindAllWitnesses` through the user exception hierarchy (WA-1, `symex.nim:4523`) is unpinned: W1 pinned a user exception type only. It needs a PCRE SUT | 0.9.1 wiring audit | test-harness | |
 | INT-27 | Under `--panics:on` `replayInScope` declines every target (`symex.nim:2264`), so every lossy clean winner is `rsUnconfirmed` (`settleWinner`, `:3417`) and none is `trusted()` | 0.9.1 wiring audit | precision | |
+
+**From the RFC-0005 code review (2026-11-04).** The Lows the review's ten
+rounds reported and did not fix under the through-Medium mandate
+(`docs/rfc/0005-review.md`; floor reached at round 10, `2e7a0bb6`). Each row
+groups related Lows and names the ledger rows it carries. None is a
+Critical/High/Medium finding. Standing against `main` was not measured at
+intake, so each row still needs its three-way row (§5.7 rule) before work.
+
+| ID | Item | Source | Class | Owner |
+|---|---|---|---|---|
+| INT-28 | Replay child lifecycle and limits: SUT-started grandchildren survive when the child ends by itself; no memory cap on macOS/BSD and no CPU/FSIZE/NPROC limits or Windows `ActiveProcessLimit`; `pipe2`, the `PDEATHSIG` thread, `WaitForSingleObject` wrap, `resumeThread`, wire length overflow, "(deleted)" exe, non-atomic counter; `waitpid(-1)` elsewhere and no `setpgid` off Linux | 0005 review R1-24, R1-31, R1-32, R2-25, R2-27 | crash (hardening); not compared against `main` | slice `rv0005-lows` |
+| INT-29 | Replay child start-up robustness: a POSIX re-exec `execve` failure does `_exit(127)` and reads as a SUT crash; a child that cannot open its out file writes to nil and segfaults; the Windows private dir inherits the parent's ACL; the re-exec child inherits non-CLOEXEC fds; with fd 0-2 closed in the host the report fd is clobbered | 0005 review R2-21 to R2-24, R2-26 | crash (hardening); not compared against `main` | slice `rv0005-lows` |
+| INT-30 | The wire reader accepts a zero-size seq, amplifies allocation and does not bound recursion depth; unverified: the Windows fiber stack under refc | 0005 review R2-28, R2-29 | crash (hardening); the fiber half is unverified | slice `rv0005-lows` |
+| INT-31 | Cache-key coverage: `--opt`, `--cc`, `--cpu` and `--os` are not in the `\|bf=` segment; a `{.push.}` inside `fn` itself is invisible to it (covered by the `feCheckOption` decline, worth a test) | 0005 review R2-16, R2-20, R3-16 | soundness (key coverage); not compared against `main` | slice `rv0005-lows` |
+| INT-32 | Replay and settle policy: stale "trusted by construction" comment, unenforced one-digit codec, `storedGaps` prefix, `reSignalled` not run-dependent, first-soundness-per-type, lossy sibling precision; `witnessUnsafe` not rendered, `spinJitter` costing up to about 100 syscalls per op, the `ReplayOutcome` doc saying "three-valued"; an always-hanging witness is cacheable and pays `replayTimeoutMs` every run, and a loser's timeout blocks the winner; a statically refused replay stored `rsUnconfirmed` and runnable on a hit (documented policy, to be revisited) | 0005 review R1-33, R1-34, R4-07, R4-10 | performance and precision; no wrong verdict described | slice `rv0005-lows` |
+| INT-33 | Liveness on the fuzzer path: `ConcolicCollectResult.annotationViolations` has no reader; `saveSecondary` is unguarded, so the new `DbError` escapes `forAll`; the concolic flip solve lacks `maxSeqLen`/`seqQueryRLimit` and the theory facts `trySolve` adds | 0005 review R1-25, R1-26, R1-27 | crash (R1-26) and precision (R1-27); not compared against `main` | slice `rv0005-lows` |
+| INT-34 | Design cleanups: `FindingHint`/`FindingGap` kinds are strings; include-split `runtime_*` modules and a `symex.nim` that mixes codegen, cache codecs and settle; the `engineSymexDbErrors` threadvar sink; `loweringPendingTaint` still a threadvar with `walk`/`walkCapSynced` as two shallow layers; the `sx2:` prefix is redundant with the walker version | 0005 review R1-28, R1-29, R2-10, R2-14, R4-08 | design debt; no wrong verdict described | slice `rv0005-lows` |
+| INT-35 | Exit-group guards: a compile-time `fields()` check that every group-typed field of `WalkCtx`/`LoopFrame`/`CallFrame`/`CallFrameCtx` is visited by `forEachExitGroup`; per-frame constructors so a group cannot be default-constructed unbound; `mitemsSince` yields `var T` so an entry's depth is mutable; `replayNotRun`'s hint check | 0005 review R5-08, R6-03, R6-04 | design debt; guards against a future soundness slip | slice `rv0005-lows` |
+| INT-36 | The finding collector's edges: `droppedSymexFindings` has no production consumer and is per-thread, so a worker thread's drops are invisible; `popEngineFrame` merges speculative nested runs and double-reports; a finding filed mid-statement is not stamped with later stray taint (pre-existing) | 0005 review R5-07, R6-08, R4-09, R3-17 | precision (R4-09, R5-07) and soundness (R3-17, not compared against `main`) | slice `rv0005-lows` |
+| INT-37 | Precision and unverified probes: `claimStrayPendingTaint` over-taints coalesced pending taint; a possessive quantifier on a non-group item may add 0 to the PCRE size bound (probe near 65536); `symBodyHash` on a bodiless routine (importc or forward declaration) may fail at compile time | 0005 review R2-08, R2-09, R6-09 | precision; two items unverified | slice `rv0005-lows` |
+| INT-38 | Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up | 0005 review R6-07, R8-04 | performance; no wrong verdict | slice `rv0005-lows` |
 
 **From the INF-05 owner audit (rows marked UNOWNED).** The rows the audit
 marked OWNED-0016 were already in this document (PRC-31, PRC-32, INF-04,

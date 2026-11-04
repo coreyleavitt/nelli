@@ -16441,6 +16441,15 @@ type
                       ## without the earlier one's survivor fact, and forked
                       ## raises after a `RegexError` Nim never reaches). Saved
                       ## and reset with the sinks.
+    stmtStrayTaint: Taint
+                      ## RFC-0005 review R1-04. Pending lowering taint
+                      ## (`loweringPendingTaint`) that a walker lowering
+                      ## entry point found already queued
+                      ## (`claimStrayPendingTaint`): a deposit no earlier
+                      ## lowering of this statement drained, so the path it
+                      ## belongs to is not known. `walk` taints every path
+                      ## the statement yields with it, and with any taint
+                      ## still queued when the statement returns.
     closureVarOuts: seq[tuple[name: string, val: SymVal]]
                       ## RFC-0005 S8bh. The `var` formals' exit values of the
                       ## closure calls lowered in the current expression,
@@ -19498,6 +19507,22 @@ proc drainPendingLowerEffects(p: Path): Path =
     wp[].closureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
   p2
 
+proc claimStrayPendingTaint() =
+  ## RFC-0005 review R1-04. The entry check of every walker lowering:
+  ## `loweringPendingTaint` must be empty when a walk arm starts lowering for
+  ## a path, because the drain that follows folds whatever is queued onto
+  ## THAT path. A non-empty queue is a deposit an earlier lowering in this
+  ## statement left undrained -- possibly for a sibling path (the raw
+  ## `lower` over a variant constructor's plain fields, per survivor, left
+  ## one path's unwritten-global taint for the next survivor's drain, and
+  ## the path that read the global stayed clean). The owner is not known
+  ## here, so the taint is kept for the statement (`stmtStrayTaint`), and
+  ## `walk` puts it on every path the statement yields; it still lands on
+  ## this path through the drain as before.
+  if loweringPendingTaint != {} and currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].stmtStrayTaint = wp[].stmtStrayTaint + loweringPendingTaint
+
 proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
                  proto = none(SymVal)): (SymVal, Path) =
   ## Phase 15 CR-9 Stage 1. Encapsulates the seed → reset-transient-sinks →
@@ -19519,6 +19544,7 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   ## threadvar resets so the WalkCtx LIVE store starts clean for each lower() call.
   ## `seedCallerHeapThreadvars` (called below) also calls `seedCallerHeapInWalkCtx`
   ## to reset the exit-heap WalkCtx fields; the remaining sink resets happen here.
+  claimStrayPendingTaint()               ## RFC-0005 review R1-04
   parseIntRaiseConds = @[]
   w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
@@ -19558,6 +19584,7 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   ##
   ## CR-9 Stage 6: resets WalkCtx fields (via w param) in addition to the
   ## threadvar resets so the WalkCtx LIVE store starts clean for each lowerBool() call.
+  claimStrayPendingTaint()               ## RFC-0005 review R1-04
   parseIntRaiseConds = @[]
   w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
@@ -19604,6 +19631,7 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): (SymVal, Path) =
   doAssert e.kind in {iekVar, iekField},
     "lowerLeafInExpr: expected side-effect-free container expr; got " & $e.kind &
     " — add seed+drain if parser changes"
+  claimStrayPendingTaint()               ## RFC-0005 review R1-04
   let sv = lower(p.env, e)
   if loweringPendingTaint == {}: return (sv, p)
   (sv, forkPathTainted(p, p.pc, p.env, takeLoweringPendingDegrade()))
@@ -21359,10 +21387,6 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
       else: p1
     # ---- Phase 5: Table[K, V] indexing ----
     if arrSV.kind == svTable:
-      ## Table key: always a string expression — no float→int conv or closure
-      ## can appear in a string sub-expression, so no seed+drain needed here.
-      ## If the parser ever emits non-string keyed tables, add the uniform
-      ## seed/drain wrapper before the lower call.
       if not isBackedTableTy(arrSV.tabKeyTy, arrSV.tabValTy):
         # RFC-0005 S8u: an unbacked table is `allocateSym`'s declined,
         # inert placeholder; its key must not be lowered against the key
@@ -21381,41 +21405,47 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
         continue
       # RFC-0005 S8ar: every backed key and value type (`tabKeyTerm` /
       # `tabValOf`); was a string key and a 64-bit cell value.
-      let keySV = lower(p.env, stmt.ixIdx, seqElemLitProto(arrSV.tabKeyTy))
-      let kOpt = tabKeyTerm(keySV, arrSV.tabKeyTy)   ## RFC-0005 S8f: noted
-      if kOpt.isNone:
-        let d = w.degrade(feUnsupportedOp,
-          "Table index: key lowered to " & plainEnglishSymValKind(keySV.kind) &
-          " — expected a " & $arrSV.tabKeyTy & " (feUnsupportedOp)")
-        survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
-        continue
-      let ctx = arrSV.tabSize.ctx
-      let k = kOpt.get
-      # Nim's `Table[K, V].[]` raises `KeyError` when the key is
-      # absent. To preserve that semantics in symex we add a
-      # presence constraint to the surviving path.
-      var presentCond = wrap[Z3Bool](ctx,
-        checkedSelect(ctx, arrSV.tabPresentRaw.raw, k.raw))
-      let nanOpt = tabKeyNaN(keySV, arrSV.tabKeyTy)   ## RFC-0005 S8at
-      if nanOpt.isSome: presentCond = presentCond and not nanOpt.get
-      # RFC-0005 S8at: the absent key RAISES (`KeyError`), routed to a
-      # handler as any raise is. It only narrowed the surviving path, so
-      # `try: t[k] except KeyError: ...` never ran its handler: a false
-      # `sxUnsat` for a target in it, and no `sxRaised` at the boundary.
-      maybeForkDefect(p, not presentCond, "KeyError", none(string), w)
-      # RFC-0005 S8z: read back at the value type's width.
-      let tableVal = tabValAt(ctx, arrSV, k.raw)
-      var newEnv = p.env
-      newEnv[stmt.ixRetName] = tableVal
-      # Issue #163 wiring-audit W2 (Table-value sibling): a
-      # `Table[string, range[lo..hi]]` value read here has the exact
-      # same reach gap as a seq element — see the `isIndex`/svSeq arm's
-      # own comment just above for the full rationale. Review R11: routed
-      # through `rangeCondsIfNeeded`. RFC-0005 S8ar: a string value is a
-      # string of bytes (`seqStrElemConds`, a free string's fact).
-      let tblRangeConds = rangeCondsIfNeeded(tableVal, arrSV.tabValTy) &
-                          seqStrElemConds(tableVal)
-      survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
+      # RFC-0005 review R1-04: the key is lowered ON this path
+      # (`lowerInExpr`), so an in-band decline in it (an unwritten global's
+      # `feGlobalHavoc`) taints this path rather than whichever lowering
+      # drains next, and its raise forks are taken before the lookup.
+      let (keySV, pk) = lowerInExpr(p, stmt.ixIdx, w,
+                                    seqElemLitProto(arrSV.tabKeyTy))
+      for p in drainScalarRaiseForks(pk, w):
+        let kOpt = tabKeyTerm(keySV, arrSV.tabKeyTy)   ## RFC-0005 S8f: noted
+        if kOpt.isNone:
+          let d = w.degrade(feUnsupportedOp,
+            "Table index: key lowered to " & plainEnglishSymValKind(keySV.kind) &
+            " — expected a " & $arrSV.tabKeyTy & " (feUnsupportedOp)")
+          survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
+          continue
+        let ctx = arrSV.tabSize.ctx
+        let k = kOpt.get
+        # Nim's `Table[K, V].[]` raises `KeyError` when the key is
+        # absent. To preserve that semantics in symex we add a
+        # presence constraint to the surviving path.
+        var presentCond = wrap[Z3Bool](ctx,
+          checkedSelect(ctx, arrSV.tabPresentRaw.raw, k.raw))
+        let nanOpt = tabKeyNaN(keySV, arrSV.tabKeyTy)   ## RFC-0005 S8at
+        if nanOpt.isSome: presentCond = presentCond and not nanOpt.get
+        # RFC-0005 S8at: the absent key RAISES (`KeyError`), routed to a
+        # handler as any raise is. It only narrowed the surviving path, so
+        # `try: t[k] except KeyError: ...` never ran its handler: a false
+        # `sxUnsat` for a target in it, and no `sxRaised` at the boundary.
+        maybeForkDefect(p, not presentCond, "KeyError", none(string), w)
+        # RFC-0005 S8z: read back at the value type's width.
+        let tableVal = tabValAt(ctx, arrSV, k.raw)
+        var newEnv = p.env
+        newEnv[stmt.ixRetName] = tableVal
+        # Issue #163 wiring-audit W2 (Table-value sibling): a
+        # `Table[string, range[lo..hi]]` value read here has the exact
+        # same reach gap as a seq element — see the `isIndex`/svSeq arm's
+        # own comment just above for the full rationale. Review R11: routed
+        # through `rangeCondsIfNeeded`. RFC-0005 S8ar: a string value is a
+        # string of bytes (`seqStrElemConds`, a free string's fact).
+        let tblRangeConds = rangeCondsIfNeeded(tableVal, arrSV.tabValTy) &
+                            seqStrElemConds(tableVal)
+        survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
       continue
     # ---- Phase 5: dynamic seq[T] indexing ----
     if arrSV.kind == svSeq:
@@ -22643,10 +22673,24 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
     ## R1-style Invariant-3 soundness: `stmt.vcsDiscExpr` may itself
     ## deposit scalar-raise-fork predicates. Drain and thread the
     ## survivor(s) forward, mirroring `isVariantReassignSymbolic`.
-    for cp in drainScalarRaiseForks(pr, w):
-      var plainFields: seq[SymVal]
+    ## RFC-0005 review R1-04: each plain field is lowered ON the path that
+    ## binds it (`lowerInExpr`), so its in-band decline (an unwritten
+    ## global's `feGlobalHavoc`) taints that path; the raw `lower` here left
+    ## the taint queued for whatever lowering ran next, on a sibling path or
+    ## none. Its raise forks are drained in field order, as Nim evaluates
+    ## the constructor's fields.
+    var fieldPaths: seq[(Path, seq[SymVal])]
+    for cp0 in drainScalarRaiseForks(pr, w):
+      var cur = @[(cp0, newSeq[SymVal]())]
       for fe in stmt.vcsPlainFields:
-        plainFields.add lower(cp.env, fe)
+        var nxt: seq[(Path, seq[SymVal])]
+        for (fp, vals) in cur:
+          let (fv, fp2) = lowerInExpr(fp, fe, w)
+          for fp3 in drainScalarRaiseForks(fp2, w):
+            nxt.add (fp3, vals & @[fv])
+        cur = nxt
+      fieldPaths.add cur
+    for (cp, plainFields) in fieldPaths:
       for tag in stmt.vcsTagSet:
         var armFields = initOrderedTable[int, seq[SymVal]]()
         var armNames  = initOrderedTable[int, seq[string]]()
@@ -22904,6 +22948,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         regexRaiseMsgs = @[]
         w.regexRaiseMsgs = @[]
         w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
+        claimStrayPendingTaint()        ## RFC-0005 review R1-04
         for arg in stmt.cargs:
           discard lower(p.env, arg)
         let pd = drainPendingLowerEffects(p)
@@ -23102,6 +23147,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
       w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
       w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
+      claimStrayPendingTaint()          ## RFC-0005 review R1-04
       for i, formal in sig.params:
         ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
         ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
@@ -25265,7 +25311,7 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
   q.env = env2
   drainPendingLowerEffects(q)
 
-proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
   ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
   ##
@@ -25381,6 +25427,31 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   if w.frame.addrCells.len > 0:
     result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
     result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
+
+proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+  ## RFC-0005 review R1-04. `walkCapSynced`, with the statement as the unit
+  ## of the pending-lowering-taint discipline. A lowering decline cannot
+  ## fork a path from inside `lower`: it queues its taint
+  ## (`loweringPendingTaint`) for the walk arm that called `lower` to drain
+  ## onto the path it lowered for. A statement owns what it queues: when it
+  ## returns, nothing it lowered may still be queued, and nothing may have
+  ## been found queued by one of its lowerings (`claimStrayPendingTaint`,
+  ## the drain's entry check). Either is a deposit whose path is not known
+  ## (a raw `lower` with no drain of its own), so every path the statement
+  ## yields carries it -- the one that produced it among them. Before this,
+  ## the variant constructor's plain fields left an unwritten global's
+  ## `feGlobalHavoc` queued for the next drain, a sibling's or none, and the
+  ## path that read the global reached a target as a clean `sxSat`.
+  let outerStray = w.stmtStrayTaint
+  w.stmtStrayTaint = {}
+  result = walkCapSynced(stmt, paths, w)
+  let stray = w.stmtStrayTaint + loweringPendingTaint
+  loweringPendingTaint = {}
+  w.stmtStrayTaint = outerStray
+  if stray != {}:
+    for i in 0 ..< result.len:
+      let p = result[i]
+      result[i] = forkPathTainted(p, p.pc, p.env, carriedDegrade(stray))
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =
@@ -27385,11 +27456,15 @@ proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
   # The receiver is not a variant (its construction already declined and
   # bound a stand-in: `seVariantFieldOnDeclinedCtor`, as `isVariantField`
   # reports it), or no slot holds the field. Taint the path and keep the
-  # old value: no verdict on this path is trusted.
-  lowerDegrade(seVariantFieldOnDeclinedCtor,
+  # old value: no verdict on this path is trusted. RFC-0005 review R1-13:
+  # the path goes on without the write, a dropped write, so the kind is
+  # `feUnsupportedOp` (`dcSubstituted`, which taints the path). It was
+  # `seVariantFieldOnDeclinedCtor`, the READ arm's halt kind (`dcOmitted`,
+  # no path taint), right only where the path ends.
+  lowerDegrade(feUnsupportedOp,
     "variant field '" & e.vfsFieldName & "' written on a receiver with no " &
-    "such field slot (SymVal kind=" & $recv.kind & ") " &
-    "(seVariantFieldOnDeclinedCtor)")
+    "such field slot (SymVal kind=" & $recv.kind & "): the write is " &
+    "dropped (feUnsupportedOp)")
   recv
 
 proc concreteSeqLen(seqSV: SymVal): Option[int] =
@@ -28184,6 +28259,22 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentCallerTaint = {}                ## RFC-0005 S8cn
   currentCallerPc = @[]                  ## RFC-0005 S8cn
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
+  # RFC-0005 review R1-12: the rest of the per-expression lowering state.
+  # Each is consumed by the drain that follows its `lower`, so a run that
+  # aborted between the two (a raise out of the walk) left it set, and the
+  # next run's first drain or lowering read it: `ptr` operands and closure
+  # writes holding Z3 terms of the freed context, a receiver flag that
+  # skipped the first read's global observation.
+  pendingPtrCompares = @[]               ## RFC-0005 S8ax
+  closureEnvWrites = @[]                 ## RFC-0005 S8as
+  loweringReadNames = @[]                ## RFC-0005 S8as
+  lastDrainedClosureExitPc = @[]         ## RFC-0005 S7
+  lowerAsReceiver = false                ## RFC-0005 S8bw
+  allocEnumZeroLegal = false             ## RFC-0005 S8z
+  glUnwrittenCtx = default(RawZ3Context) ## RFC-0005 batch 6: the run's
+                                         ## context is new (`glUnwrittenFresh`)
+  seqConformCounter = 0                  ## RFC-0005 S8bc: bound-var names
+  strCharsCounter = 0                    ## RFC-0005 S8ca: bound-var names
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions

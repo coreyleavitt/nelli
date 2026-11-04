@@ -28,6 +28,12 @@ type
     ## internal `forAll` and returns true iff the law holds at the
     ## chosen budget. `diagnostic` returns a `repro()`-format string
     ## of the failing example for triage when `check` returned false.
+    ##
+    ## The inner run's `Report` is not kept. Symex findings its predicate
+    ## made (`assertCoveredBy`) reach the report of any `forAll` that runs
+    ## the law (review R3, E3: a closing frame hands its findings to the
+    ## enclosing one); a law run from a plain test body has no such report,
+    ## and there `assertCoveredBy`'s return value is their only channel.
     name*: string
     check*: proc(): bool {.closure.}
     diagnostic*: proc(): string {.closure.}

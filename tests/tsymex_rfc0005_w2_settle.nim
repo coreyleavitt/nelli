@@ -390,3 +390,58 @@ suite "W2 / WA-9: a lossy winner is trusted only once replay confirms it":
     check r2.soundness.replay == rsNotNeeded
     check trusted(r2)
     check replayExecutions() == n0
+
+# ---- Review round 3 -----------------------------------------------------------
+#
+# * E11. The run boundary (`runSymex`) settles only what needs no replay: a
+#   claim on an `scSpurious` path leaves it unsettled, and only the replay pass
+#   settles it. Nothing asserted that it does.
+# * SC1. A confirmed claim whose child was killed past the target carries
+#   `witnessUnsafe` for a reason of the run (`rdReplay`); it was cached, so one
+#   slow run marked the witness unrunnable for good.
+
+proc labelThenSpin(k: int) =
+  ## Reaches the label, then runs past a small `replayTimeoutMs`.
+  if k == 123457:
+    let a = gG
+    symexTarget("ts")
+    sleep(3000 + a)
+
+proc raiseOnSpurious(k: int) =
+  if gG == 0 and k == 77:
+    raise newException(ValueError, "r3")
+
+suite "R3 E11: the replay pass settles a spurious claim":
+  test "a confirmed sxSat leaves settled":
+    let r = symexFind(confirmable, tLabel("c"))
+    check scSpurious in r.soundness.pathTaint
+    check r.status == sxSat
+    check r.soundness.replay == rsConfirmed
+
+  test "a confirmed sxRaised leaves settled":
+    let r = symexFind(raiseOnSpurious, tRaisedExn("ValueError"))
+    checkpoint $r.status & " " & show(r.errors)
+    check scSpurious in r.soundness.pathTaint
+    check r.status == sxRaised
+    check r.soundness.replay == rsConfirmed
+
+  test "with replay off it is an sxUnknown, settled":
+    let r = symexFind(confirmable, tLabel("c"), noReplay)
+    check r.status == sxUnknown
+    check r.soundness.replay == rsNotNeeded
+
+suite "R3 SC1: a witness unsafe for a reason of the run is not cached":
+  test "a confirmed claim killed past the target is replayed again":
+    let db = inMemoryDatabase()
+    let f1 = labelFinding(symexFindAllWitnesses(labelThenSpin, db, tinyReplay),
+                          "ts")
+    checkpoint $f1.soundness
+    check f1.status == sfSat
+    check f1.soundness.replay == rsConfirmed
+    check f1.soundness.witnessUnsafe
+    check rdReplay in f1.soundness.runDependence
+    let n1 = replayExecutions()
+    let f2 = labelFinding(symexFindAllWitnesses(labelThenSpin, db, tinyReplay),
+                          "ts")
+    check not f2.fromCache
+    check replayExecutions() > n1

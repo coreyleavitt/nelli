@@ -240,7 +240,8 @@ import ./engine/phases
 import ./engine/pipeline
 import ./optbox
 import ./smt/canonicalize
-export canonicalize.symexCacheKey, canonicalize.symexWalkerVersion,
+export canonicalize.symexCacheKey, canonicalize.symexCacheKeyPrefix,
+       canonicalize.symexWalkerVersion,
        canonicalize.renderAsChoicesVersion, canonicalize.canonicalize,
        canonicalize.cacheKeySat, canonicalize.cacheKeyUnsat,
        canonicalize.cacheKeyUnknown, canonicalize.cacheKeyRaised,
@@ -313,12 +314,36 @@ func taintBits(t: Taint): int =
 func runDependenceBits(d: set[RunDependence]): int =
   for c in d: result = result or (1 shl ord(c))
 
+# Review R3 (E8). Encoding version 3 writes these enums' ordinals, so their
+# order IS the format. Pinned here: reordering, inserting or appending a member
+# fails to compile, and the fix is a new `soundnessMetaVersion` (and this pin).
+# Every field is one decimal digit (`decodeSoundness` reads exactly one), so
+# the largest value each can take must stay below 10.
+static:
+  doAssert ord(scSpurious) == 0 and ord(scIncomplete) == 1 and
+           high(SoundnessChannel) == scIncomplete
+  doAssert ord(rsUnsettled) == 0 and ord(rsNotNeeded) == 1 and
+           ord(rsConfirmed) == 2 and ord(rsUnconfirmed) == 3 and
+           high(ReplayStatus) == rsUnconfirmed
+  doAssert ord(rdQueryTimeout) == 0 and ord(rdNativeStack) == 1 and
+           ord(rdReplay) == 2 and high(RunDependence) == rdReplay
+  doAssert (1 shl (ord(high(SoundnessChannel)) + 1)) - 1 <= 9
+  doAssert ord(high(ReplayStatus)) <= 9
+  doAssert (1 shl (ord(high(RunDependence)) + 1)) - 1 <= 9
+
+func digit(n: int): char =
+  ## One field of the encoding. Review R3 (E8): never two digits, which
+  ## `decodeSoundness` would read as a miss; the static pins above make it
+  ## unreachable.
+  doAssert n in 0 .. 9, "soundness field out of one digit: " & $n
+  char(ord('0') + n)
+
 proc encodeSoundness(s: Soundness): string =
-  result = soundnessMetaVersion & ":" & $taintBits(s.pathTaint) & ":" &
-    $taintBits(s.runTaint) & ":" & $ord(s.replay) & ":" &
-    $ord(s.witnessUnsafe)
+  result = soundnessMetaVersion & ":" & digit(taintBits(s.pathTaint)) & ":" &
+    digit(taintBits(s.runTaint)) & ":" & digit(ord(s.replay)) & ":" &
+    digit(ord(s.witnessUnsafe))
   if s.runDependence != {}:
-    result.add ":" & $runDependenceBits(s.runDependence)
+    result.add ":" & digit(runDependenceBits(s.runDependence))
 
 proc decodeSoundness(v: string): Option[Soundness] =
   ## The inverse of `encodeSoundness`; `none` for anything it did not write.
@@ -456,13 +481,15 @@ type
     ## thread-local sink that leaked into later callers).
     findings*: seq[SymexFinding]
 
-proc coverageOutcome(f: SymexFinding; failure: string): SymexFinding
-                    {.discardable.} =
+proc coverageOutcome(site: string; f: SymexFinding;
+                     failure: string): SymexFinding {.discardable.} =
   ## Review R1-10. The end of a single-target `assertCoveredBy`: its finding,
   ## or a `SymexCoverageDefect` carrying it when `failure` says why coverage
   ## is not proven. Review R2 (DD3): inside a property, the finding also
-  ## goes on the run's report (`recordSymexFinding`), on success or failure.
-  recordSymexFinding(f)
+  ## goes on the run's report (`recordSymexFinding`), on success or failure;
+  ## review R3 (E2): as the latest of its call site `site` for its target.
+  ## Outside any property, the return and the defect are its only channel.
+  recordSymexFinding(site, f)
   if failure.len > 0:
     var e = newException(SymexCoverageDefect, failure)
     e.findings = @[f]
@@ -3248,8 +3275,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   result.abstractions = raw.abstractions
   result.obligations  = raw.obligations
   result.callStats    = raw.callStats
-  var unsafe = false
-  let ended = confirmedEnding(replayed, c.status, c.raisedTypeId, input, unsafe)
+  let ended = confirmedEnding(replayed, c.status, c.raisedTypeId, input)
   result.errors       = raw.errors & c.errors & ended   # RFC-0005 0.9.1 WA-2
   # RFC-0005 S11: the claim's soundness -- its own path, the run's
   # coordinate (re-derived: the candidate's extraction errors are now part
@@ -3257,7 +3283,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   result.soundness    = Soundness(pathTaint: c.pathTaint,
                                   runTaint: runTaintOf(result.errors),
                                   replay: replayed.replayStatus,
-                                  witnessUnsafe: unsafe,
+                                  witnessUnsafe: replayed.endsChild,
                                   runDependence: raw.soundness.runDependence +
                                                  replayed.runDependence)
   result.bounds       = raw.bounds
@@ -3316,9 +3342,8 @@ proc settleWinner(raw: RawResult; replayed: ReplayResult;
   # run in the host, confirmed or not, as a typed fact the cache stores.
   result.soundness.witnessUnsafe = replayed.endsChild
   if replayed.outcome == roConfirmed:
-    var unsafe = false
     let tid = if raw.status == sxRaised: raw.raisedTypeId else: ""
-    result.errors.add confirmedEnding(replayed, raw.status, tid, input, unsafe)
+    result.errors.add confirmedEnding(replayed, raw.status, tid, input)
   else:
     result.errors.add winnerHint(replayed, rawClaimText(raw), input)
 
@@ -3816,6 +3841,11 @@ macro assertCoveredBy*(fn: typed,
   ##
   ## Returns the call's `SymexFinding` (discardable); on failure the
   ## `SymexCoverageDefect` carries it in `findings` (review R1-10).
+  ## Inside a `forAll` (nested ones included), the finding is also on the
+  ## run's `Report.symexFindings`: one entry per call site and target, the
+  ## latest (review R2 DD3, R3 E2, E3). Outside one (a plain test body, a
+  ## fuzz or concolic harness, a thread of the property's own) the return
+  ## value and the defect are its only channel.
   ##
   ## `testFn` defaults to `fn` itself — the common shape where the
   ## same code under symex is the same code under random PBT.
@@ -3970,6 +4000,9 @@ macro assertCoveredBy*(fn: typed,
     "blamed (set acceptUnknownAsCovered = true to downgrade)")
   let runnableSym = bindSym"hostRunnable"
   let outcomeSym = bindSym"coverageOutcome"
+  # Review R3 (E2): the call site the run's report keys this finding by. The
+  # multi-target form hands its own `fn` node on, so its targets share it.
+  let siteLit = newLit(fn.lineInfo)
   let trustedSym = bindSym"trusted"
   # Shared by the arm bodies below and the block they are spliced into.
   let rId = genSym(nskLet, "r")
@@ -4081,7 +4114,7 @@ macro assertCoveredBy*(fn: typed,
             "prove coverage (set acceptUnknownAsCovered = true to downgrade)"
       of sxRaised:
         `raisedArm`
-      `outcomeSym`(`findingId`, `failureId`)
+      `outcomeSym`(`siteLit`, `findingId`, `failureId`)
 
 macro assertCoveredBy*(fn: typed,
                        targets: static openArray[SymexTarget],

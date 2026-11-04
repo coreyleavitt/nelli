@@ -105,7 +105,7 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
         "Settings.derandomize=true requires a non-empty Settings.testId")
     settings.seed = cast[uint64](hash(settings.testId))
   engineStack.add EngineFrame()
-  defer: discard engineStack.pop()
+  defer: popEngineFrame()   # review R3 (E3): findings reach the parent
   let originalProp = prop
   let deadline = settings.deadline
   let hasDeadline = deadline.inNanoseconds > 0

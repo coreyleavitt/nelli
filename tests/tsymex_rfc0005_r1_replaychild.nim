@@ -199,9 +199,9 @@ when defined(posix):
       let r = replayResultOf(c, lossy = true)
       check r.outcome == roConfirmed
       check r.replayStatus == rsConfirmed
-      var unsafe = false
-      let hints = confirmedEnding(r, sxSat, "", "", unsafe)
-      check unsafe          # never run in the host
+      let hints = confirmedEnding(r, sxSat, "", "")
+      check r.endsChild     # never run in the host
+      check rdReplay in r.runDependence   # review R3 (SC1): the host's
       check hints.len == 1
 
     test "SIGCHLD ignored: a child that finished is read as finished":

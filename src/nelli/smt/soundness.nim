@@ -150,13 +150,14 @@ type
       ## the target is reached all the same (§5a); review R2 (DD1): on an
       ## `rsUnconfirmed` one it ended before the target. Only a replay sets
       ## it; a witness nothing ran is `false`. Stored with the verdict, so a
-      ## cache hit reads it as the cold run did.
+      ## cache hit reads it as the cold run did; review R3 (SC1): only when
+      ## no replay of the run's could have set it (`cacheable`).
     runDependence*: set[RunDependence]
       ## RFC-0005 0.9.1 (WA-7; review R1-07). What of this verdict depends on
       ## the run (`RunDependence`); `{}` for one any run would reach. An
-      ## `sxUnknown` with any is not cached, and an `rsUnconfirmed` witness
-      ## with `rdReplay` is not stored as unconfirmed for good. Verdict-neutral:
-      ## `trusted()` does not read it.
+      ## `sxUnknown` with any is not cached, and an `rsUnconfirmed` or
+      ## `witnessUnsafe` claim with `rdReplay` is not stored for good
+      ## (`cacheable`). Verdict-neutral: `trusted()` does not read it.
 
 func trustedSat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxSat` / `sxRaised` arm: a clean winning
@@ -181,7 +182,20 @@ func cacheable*(s: Soundness): bool =
   ## `s` may be stored for good. Not a lossy winner the replay left
   ## unconfirmed for a reason of the run (`rdReplay`, WA-7, WA-9): the next
   ## run replays it again.
-  not (s.replay == rsUnconfirmed and rdReplay in s.runDependence)
+  ##
+  ## Review R3 (SC1): nor a claim whose `witnessUnsafe` may be the run's (a
+  ## child killed at `replayTimeoutMs`, one ended at the memory limit, one
+  ## whose status was lost), confirmed or not. Stored, one slow or odd host
+  ## would mark the witness unrunnable for good. Not stored rather than
+  ## stored without the bit: a hit would then run in the host a witness
+  ## whose replay hung or lost its child, which fails open; a miss costs one
+  ## solve and one replay, which re-derive the bit on this run's host.
+  ## `runDependence` is the verdict's join, so an `rdReplay` from an earlier
+  ## candidate's replay also keeps an unsafe claim out: conservative, never
+  ## wrong. An unsafe bit no replay of the run's could have set (`quit`, a
+  ## signal, on every run) is the program's and is stored.
+  not ((s.replay == rsUnconfirmed or s.witnessUnsafe) and
+       rdReplay in s.runDependence)
 
 func trustedUnsat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxUnsat` arm: nothing under-approximated.

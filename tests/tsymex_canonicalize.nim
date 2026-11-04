@@ -265,7 +265,9 @@ suite "symex canonicalize — symexCacheKey":
       walkerVersion = "1", renderingVersion = "1")
     check k1 == k2
     check k1.len > 0
-    check k1.startsWith("sx:")
+    check k1.startsWith(symexCacheKeyPrefix)
+    check k1.len == symexCacheKeyPrefix.len + 64   # review R3 (E10): SHA-256
+    check symexCacheKeyPrefix == "sx2:"            # old "sx:" keys miss
 
   test "SUT body change → different key (witness depends on body)":
     let p1 = SymexProgram(body: mkBlock(@[mkLet("x", tInt(64, true), mkIntLit(0))]))

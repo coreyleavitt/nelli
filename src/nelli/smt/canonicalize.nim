@@ -16,17 +16,23 @@
 ## No constructor's payload may contain an unescaped sigil; primitives
 ## are wrapped to enforce that.
 
-import std/[strutils, tables, algorithm, sha1]
+import std/[strutils, tables, algorithm]
 import ./types
 import ./pcre_engine
 import ./replayproc   ## RFC-0005 0.9.1 (WA-8): how this build replays
+import ./sha256       ## review R3 (E10): the one hash the cache keys with
 
 const
+  symexCacheKeyPrefix* = "sx2:"
+    ## Review R3 (E10). What every content-addressed key starts with, before
+    ## the 64-hex-digit SHA-256 of its canon (`symexCacheKey`). It was `"sx:"`
+    ## over a SHA-1; the new prefix makes every key written under the old one
+    ## a miss.
   cacheKeySat*     = ":sat"
     ## Phase 13 cycle 2; renamed Phase 15 Z3e. Suffix appended to a
     ## content-addressed key for SAT witness entries. Sibling suffixes
     ## (`:sat`/`:unsat`/`:unknown` + per-type `:raised:<typeId>` via
-    ## `cacheKeyRaised`) coexist under one `"sx:" & H` hash so verdicts
+    ## `cacheKeyRaised`) coexist under one `symexCacheKeyPrefix & H` hash so verdicts
     ## have distinct DB slots.
   cacheKeyUnsat*   = ":unsat"
     ## UNSAT verdict sentinel slot. Value is `@[]` (empty seq).
@@ -6617,7 +6623,8 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
   ## Content-addressed key over every input that determines a
   ## witness's validity. Stable across builds (no source locations,
   ## no map-iteration order, no compiler-specific hashes). Returns
-  ## `"sx:" & <40-char SHA-1 hex>`.
+  ## `symexCacheKeyPrefix & <64-char SHA-256 hex>` (review R3, E10: SHA-256,
+  ## `sha256.nim`, the hash the implementation digest uses too).
   ##
   ## `walkerVersion` covers walker semantics (what the walker
   ## computes from a given IR). `renderingVersion` covers the
@@ -6641,4 +6648,4 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
     # RFC-0005 review R1-08: the checks and flags this build runs `fn` under
     # (`buildFlagsSegment`).
     "|bf=" & buildFlags
-  "sx:" & $secureHash(canon)
+  symexCacheKeyPrefix & sha256Hex(canon)

@@ -30,6 +30,14 @@ type
     ## `ReplayOutcome` is a VERDICT-TIME fact about a fresh solver witness from
     ## this run. A seed miss says the harness drifted; `roRefuted` says the
     ## model did.
+    ##
+    ## Review R3 (E1): the zero value is `roDeclined`, so a `ReplayResult`
+    ## nothing produced is the replay that did not run (what
+    ## `replayResultOf` makes of the zero `ReplayChild`, `reRefused`): never
+    ## a confirmation, never trusted.
+    roDeclined      ## RFC-0005 S8ct: no child could run this replay, so it did
+                    ## not run: the candidate stays sxUnknown, with a
+                    ## `feReplayDeclined` hint
     roConfirmed     ## the real fn reached the target on this witness -- the
                     ## target is reachable in reality, whatever the model's taint
     roRefuted       ## the real fn ran to completion (returned, or raised
@@ -56,9 +64,6 @@ type
                     ## neither a confirmation nor a refutation of the target: the
                     ## candidate stays sxUnknown, with a `feReplayCrashed` hint
                     ## saying how it ended and on what input
-    roDeclined      ## RFC-0005 S8ct: no child could run this replay, so it did
-                    ## not run: the candidate stays sxUnknown, with a
-                    ## `feReplayDeclined` hint
 
   ReplayResult* = object
     ## RFC-0005 0.9.1 (review R1-06). One replay, as the settle reads it: what
@@ -66,7 +71,11 @@ type
     ## (`replayWitness`, the entry macros' replay pass) and handed to the
     ## settle as an argument. Review R2 (DD6): built only by `replayNotRun`
     ## and `replayResultOf`, so the outcome is always the one the child's
-    ## ending means.
+    ## ending means. Review R3 (E1): its zero value (`ReplayResult()`, a
+    ## `var` left unset) is `roDeclined` over a child that did not run, the
+    ## same value `replayResultOf(ReplayChild(), _)` builds: a replay that
+    ## settled nothing, which no settle confirms or marks host-safe by
+    ## default.
     fOutcome: ReplayOutcome
     fChild: ReplayChild
       ## The child's report. A replay that ran no child (the witness or target
@@ -118,8 +127,13 @@ func detail*(r: ReplayResult): string =
 
 func runDependence*(r: ReplayResult): set[RunDependence] =
   ## RFC-0005 0.9.1 (WA-7). What this replay adds to its verdict's
-  ## `Soundness.runDependence`.
-  if r.child.runDependent: {rdReplay} else: {}
+  ## `Soundness.runDependence`. Review R3 (SC1): a child killed at its bound
+  ## (`reTimedOut`) or one whose status was lost (`reLost`, the host ignores
+  ## `SIGCHLD` or another `wait` reaped it) ended as it did because of the
+  ## host and the moment, so it is run-dependent by its ending, whatever flag
+  ## its producer set.
+  if r.child.runDependent or r.child.ending in {reTimedOut, reLost}: {rdReplay}
+  else: {}
 
 func replayStatus*(r: ReplayResult): ReplayStatus =
   ## The `ReplayStatus` a claim this replay settled carries: only a
@@ -148,14 +162,13 @@ func claimText*(status: SymexStatusKind; raisedTypeId: string): string =
                           else: "claim (target hit") & ")"
 
 func confirmedEnding*(r: ReplayResult; status: SymexStatusKind;
-                      raisedTypeId: string; input: string;
-                      unsafe: var bool): seq[SymexErrorInfo] =
+                      raisedTypeId: string; input: string): seq[SymexErrorInfo] =
   ## RFC-0005 0.9.1 (WA-2). A confirming replay's child reached the target; this
   ## is how it ended afterwards. A target reached is reached (§5a), so the
   ## verdict stands; but a child that did not finish (`quit`, a raw `exit`, a
   ## signal, the bound) says the witness ends or hangs whatever runs it, so
-  ## the claim carries `Soundness.witnessUnsafe` and a hint saying how.
-  unsafe = r.endsChild
+  ## the claim carries `Soundness.witnessUnsafe` (`endsChild`, which the
+  ## settle reads) and the hint this returns, saying how.
   case r.child.ending
   of reFinished, reRefused:
     discard

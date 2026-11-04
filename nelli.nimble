@@ -1708,5 +1708,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_r1_lowertaint",
             "tsymex_rfc0005_r1_variantset",
             "tsymex_rfc0005_r1_pcrelimits",
-            "tsymex_rfc0005_r1_rundependence"]:
+            "tsymex_rfc0005_r1_rundependence",
+            "tsymex_rfc0005_r1_findingapi",
+            "tsymex_rfc0005_r1_replaychild",
+            "tsymex_rfc0005_r1_replaychild_reexec"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -155,6 +155,7 @@ Trend of Critical/High/Medium found per round: R1 22, R2 7, R3 7 (+1 pre-existin
 | R9-01 | Medium | fixed | design | `symex.nim` ~896; `tests/tsymex_phase15_E2a_cascade.nim` (K4) | The sentinel save's literal `1` replaces `verdictCacheMaxEntries`, which is already 1, yet its comment called it a fix; the new K4 test passes on the pre-delta code, so it cannot catch a revert | Reading; 2e7a0bb6 rewords both as hardening and a pin; comment-only, no test |
 | R9-02 | Low | fixed | design | `symex.nim` 851-860 (`saveSymexRaisedImpl`) | The concurrent-writer caveat called interleaving benign; that holds for the single-type production path only, not a multi-type set saved through the exported API by racing writers | Reading; 2e7a0bb6 |
 | R9-03 | Low | fixed | design | `engine/frame.nim` 43-50 | The `skAudit` note omitted the zero-targets `sfNotApplicable` site in `symexFindAllWitnesses` | Reading; 2e7a0bb6 |
+| G-01 | — | fixed | gate | `symex.nim` ~4071 (`assertCoveredBy`) | Found by the Windows `symex-mingw` leg at 245e0fba, not by a lens: the R6 and R7 fixes gated `fn` on a bare `nskProc`/`nskFunc` set, which `tsymex_phase15_N2_kindgate_audit` forbids outside the `resolveRoutineImpl` core. Not counted toward the floor (it is a gate red, not a review finding) | d5440cd3 asks `resolveRoutineImpl`; `tsymex_phase15_N2_kindgate_audit` |
 
 ## Accepted judgement calls
 

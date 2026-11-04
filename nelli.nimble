@@ -1689,5 +1689,10 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cu_hidden",
             "tsymex_rfc0005_s8cu_nil",
             "tsymex_rfc0005_s8cu_nil_setjmp",
-            "tsymex_rfc0005_s8cu_nil_native"]:
+            "tsymex_rfc0005_s8cu_nil_native",
+            # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
+            # exception hierarchy, hints, diagnostics and a cached raise reach
+            # symexFindAllWitnesses / symexForAll; the no-targets finding
+            # carries soundness, gaps and violations. Walker 264->265.
+            "tsymex_rfc0005_w1_parity"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

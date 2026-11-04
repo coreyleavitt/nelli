@@ -213,7 +213,18 @@ const renderAsChoicesVersion* = "12"
   ##   is abandoned). A `var` formal over a global keeps S8cs's route check
   ##   under S8bz's copy-in (`glVarGlobal`). 262 while S8cq was out; 264 with it.
 
-const symexWalkerVersion* = "264"
+const symexWalkerVersion* = "265"
+  ## RFC-0005 W1 (0.9.1 wiring, 265) -- entry-point parity. Not a walker
+  ## change: the cache's key and value moved, which this segment orphans.
+  ## `symexFindAllWitnesses` (and so `symexForAll`) now builds its program with
+  ## the user exception hierarchy `symexFind` always passed, so a user exception
+  ## type is no longer `eeUnknownExnType` there; `canonicalize(SymexProgram)`
+  ## keys the hierarchy (`;uxh=[...]`, absent when empty), so a changed parent
+  ## type is a new key. The `:raised:<type>` sentinel now holds the raise's
+  ## witness and its defect-ness (it held `@[]`), and a `:notes` record holds
+  ## the run's hints and non-winning diagnostics, so a cache hit serves what the
+  ## cold run reported.
+  ##
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
   ## does not see. A program's globals carry `hiddenRoute` from the macro-time
   ## route analysis (lifetime hooks, code it cannot list), and a read of such a
@@ -6308,9 +6319,19 @@ proc canonicalize*(prog: SymexProgram): string =
       (if g.init == nil: "free" else: canonicalize(g.init)) &
       (if g.hiddenRoute.len > 0: "!hidden" else: "")   ## RFC-0005 S8cs
   let glPart = if glParts.len == 0: "" else: ";gl=[" & glParts.join(",") & "]"
+  # RFC-0005 W1: the user exception hierarchy decides which handler catches a
+  # raise and whether it is a defect, and is not in the IR (a type is named,
+  # its parent is not), so it keys the program. Sorted: `Table` order is not
+  # stable. A program with no user exception types keys as before.
+  var uxhParts: seq[string]
+  for child, parent in prog.userExnHierarchy:
+    uxhParts.add child.escape & ">" & parent.escape
+  sort(uxhParts)
+  let uxhPart =
+    if uxhParts.len == 0: "" else: ";uxh=[" & uxhParts.join(",") & "]"
   "Pg<params=[" & paramParts.join(",") & "];body=" &
     canonicalize(prog.body, env) &
-    ";procs=[" & procParts.join(",") & "]" & retPart & glPart & ">"
+    ";procs=[" & procParts.join(",") & "]" & retPart & glPart & uxhPart & ">"
 
 # ---- SymexTarget -----------------------------------------------------------
 

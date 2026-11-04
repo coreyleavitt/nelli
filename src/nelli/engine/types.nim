@@ -89,6 +89,35 @@ type
       ## annotation's promise was found false. Verdict-neutral and loud: the
       ## render layer reports each one. Parse-time facts, so a cache hit
       ## carries them too.
+    hints*:          seq[FindingHint]
+      ## RFC-0005 W1 (0.9.1). Every entry of the run's error list that `gaps`
+      ## leaves out (a hint, or a warning that taints nothing), in order. The
+      ## replay outcomes are here: `feReplayCrashed` (the real fn ended its
+      ## process, naming how and on what input), `feReplayDeclined` (the replay
+      ## did not run, and why), `feReplayTimedOut` and `feReplayRefuted`.
+      ## Persisted with the verdict, so a cache hit serves the cold run's.
+    diagnostics*:    seq[FindingDiagnostic]
+      ## RFC-0005 W1 (0.9.1). The raises the run reached on the way that did
+      ## not decide the verdict (`SymexResult.diagnostics`, ADR-0012 D2), each
+      ## with the witness that reaches it. Best-effort: the walk may stop at
+      ## the first answer. Persisted with the verdict, so a cache hit serves
+      ## the cold run's.
+
+  FindingHint* = object
+    ## RFC-0005 W1. One entry of `SymexFinding.hints`: a recorded diagnostic
+    ## that decided nothing, projected to strings like `FindingGap`.
+    kind*:     string   ## the `SymexErrorKind`, by name (e.g. "feReplayCrashed")
+    severity*: string   ## the `SymexErrorSeverity`, by name ("sevHint", "sevWarning")
+    msg*:      string
+
+  FindingDiagnostic* = object
+    ## RFC-0005 W1. One entry of `SymexFinding.diagnostics`: a non-winning
+    ## raise (`DefectFinding` without its typed witness, which is rendered to
+    ## `witnessChoices` the way `SymexFinding.witnessChoices` is).
+    raisedTypeId*:   string
+    isDefect*:       bool
+    raisedMsg*:      string   ## the message when the walker knew it, else ""
+    witnessChoices*: seq[ChoiceNode]
 
   FindingGap* = object
     ## RFC-0005 S11. One entry of `SymexFinding.gaps`: a decline that built

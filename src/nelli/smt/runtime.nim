@@ -28148,11 +28148,15 @@ proc runSymex*(prog: SymexProgram,
   # It equals the `w.runTaint` the verdict read, plus a winner's witness
   # extraction errors (the one sink `runSymexImpl` drains after deciding).
   result.soundness.runTaint = runTaintOf(result.errors)
-  # RFC-0005 0.9.1 (review R1-16). The run settles every verdict it ships: a
-  # winner stood without replay (the replay pass, which runs after this, re-
-  # settles a candidate or a lossy winner), and an `sxUnsat` / `sxUnknown`
-  # needs none. A record nothing settles stays `rsUnsettled`, never trusted.
-  if result.soundness.replay == rsUnsettled:
+  # RFC-0005 0.9.1 (review R1-16). The run settles the verdicts that need no
+  # replay: an `sxUnsat` / `sxUnknown`, and a winner on a path no degrade made
+  # spurious (the replay pass, which runs after this, re-settles a lossy
+  # one). Review R2 (DD5): only those. A claim on an `scSpurious` path is not
+  # a winner rules 1-2 ship; should one reach here it stays `rsUnsettled`,
+  # never trusted, rather than being promoted to a clean claim.
+  if result.soundness.replay == rsUnsettled and
+     (result.status in {sxUnsat, sxUnknown} or
+      scSpurious notin result.soundness.pathTaint):
     result.soundness.replay = rsNotNeeded
   # RFC-0005 S8bu/S8ca (review R1-07). What of the verdict is this run's, on
   # the result: a save reads it there, never the thread's flags, which the

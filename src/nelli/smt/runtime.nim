@@ -16646,10 +16646,27 @@ proc takeLoweringPendingDegrade(): Degrade =
   ## RFC-0005 S1. The lowering-sink half of the token discipline: converts the
   ## pending taint `lowerDegrade` accumulated (each join already paired with a
   ## recorded `loweringDegradeErrors` entry) into a `Degrade` token and resets
-  ## the pending taint to `{}`. Called ONLY by `drainPendingLowerEffects` and
-  ## the walk-end leak stamp.
+  ## the pending taint to `{}`. Called by the drains that fold the queue onto
+  ## the path it was queued for: `drainPendingLowerEffects`, `lowerInExpr`
+  ## and, before the walk, `drainPreWalkPendingTaint`.
   result = Degrade(path: loweringPendingTaint)
   loweringPendingTaint = {}
+
+proc drainPreWalkPendingTaint(initial: Path): Path =
+  ## RFC-0005 review R3 (leak fix). A walk driver's initial path, joined
+  ## with what the parameter set-up queued before the walk began. Setting
+  ## up the parameters allocates their symbols, and an allocation that
+  ## declines (`allocDegrade`, a `proc`-typed parameter has no lambda the
+  ## walker built) queues its taint with no drain of its own. That taint
+  ## belongs to the initial path, the one the allocation was made for, and
+  ## so to every path the walk derives from it. It must be drained here:
+  ## the top-level `walk` sets a queue it finds on entry aside as its
+  ## caller's (R2 SD1) and puts it back on return, and the driver has no
+  ## drain after it, so the walk-end leak pin fired on a taint that had
+  ## in fact reached every path.
+  if loweringPendingTaint == {}: initial
+  else: forkPathTainted(initial, initial.pc, initial.env,
+                        takeLoweringPendingDegrade())
 
 proc closureDegrade(kind: SymexErrorKind; msg: string) =
   ## RFC-0005 S7 (§2.5 precondition for S9). THE way a closure / HOF site
@@ -28978,7 +28995,7 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
-  let initial = Path(pc: initialPC, env: env)
+  let initial = drainPreWalkPendingTaint(Path(pc: initialPC, env: env))
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     z3: ctx, target: target, params: prog.params,
@@ -29856,7 +29873,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                            globals: globalsTable(prog.globals)),  ## S8as
   )
   currentWalkCtxPtr = addr w
-  let initial = Path(pc: initialPC, env: env)
+  let initial = drainPreWalkPendingTaint(Path(pc: initialPC, env: env))
   # RFC-0005 S8j: a path that left through the SUT's own `return` is a
   # normal exit too; its constraints join the soundness pin below.
   let resultPaths = walk(prog.body, @[initial], w) & w.topReturnedPaths

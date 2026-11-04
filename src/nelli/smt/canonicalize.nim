@@ -222,8 +222,14 @@ const renderAsChoicesVersion* = "12"
   ##   the `{.symexTransparent.}` fallback, read their arguments through
   ##   `parseOrderedArgs` (`nimArgTemps`), and a deleted inert
   ##   `{.symexTransparent.}` call binds each computed argument to a sink `let`.
+  ## - RFC-0005 code review round 2 (SD1, SD2; 269->270): `walk` sets aside the
+  ##   lowering taint queued when its statement begins (the enclosing
+  ##   statement's), stamps it on the statement's starting paths and puts it
+  ##   back on return; its own stray taint reaches every exit channel
+  ##   (`returnedPaths`, `breakPaths`, `continuePaths`, the frame's raise and
+  ##   `finally` channels) as well as its result.
 
-const symexWalkerVersion* = "269"
+const symexWalkerVersion* = "270"
   ## RFC-0005 code review, round 1 fixes for 0.9.1 (269), on 268:
   ## - R1-01: an `elif` condition's preamble (a bounds fork, a hoisted call)
   ##   runs only on the path that tests that condition, not ahead of the whole

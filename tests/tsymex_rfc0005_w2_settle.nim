@@ -17,7 +17,7 @@
 ##
 ## The re-execution path (Windows) runs this suite through
 ## `tsymex_rfc0005_w2_settle_reexec` (`-d:nelliReplayReexec`).
-import std/[unittest, strutils, os, osproc, streams, strtabs]
+import std/[unittest, strutils, os, osproc, streams, strtabs, tables]
 import nelli
 import nelli/symex
 import nelli/smt/types
@@ -445,3 +445,38 @@ suite "R3 SC1: a witness unsafe for a reason of the run is not cached":
                           "ts")
     check not f2.fromCache
     check replayExecutions() > n1
+
+suite "R4 W2: the notes are saved only with their verdict":
+  proc watched(db: ExampleDatabase; keys: ref seq[string]): ExampleDatabase =
+    result = db
+    let inner = db.saveWithMetaImpl
+    let plain = db.saveImpl
+    result.saveWithMetaImpl = proc (t: string; c: seq[ChoiceNode];
+                                    m: Table[string, string]; n: int) =
+      keys[].add t
+      inner(t, c, m, n)
+    result.saveImpl = proc (t: string; c: seq[ChoiceNode]; n: int) =
+      keys[].add t
+      plain(t, c, n)
+
+  test "a verdict skipped as run-dependent leaves no notes record":
+    var keys = new(seq[string])
+    let db = watched(inMemoryDatabase(), keys)
+    let f = labelFinding(symexFindAllWitnesses(sutSpin, db, tinyReplay), "big")
+    check f.status == sfUnknown
+    check f.soundness.runDependence != {}
+    var notes = 0
+    for k in keys[]:
+      if ":notes" in k: inc notes
+    checkpoint $keys[]
+    check notes == 0
+
+  test "control: a cacheable verdict leaves its notes record":
+    var keys = new(seq[string])
+    let db = watched(inMemoryDatabase(), keys)
+    discard labelFinding(symexFindAllWitnesses(quitBefore, db), "q")
+    var notes = 0
+    for k in keys[]:
+      if ":notes" in k: inc notes
+    checkpoint $keys[]
+    check notes > 0

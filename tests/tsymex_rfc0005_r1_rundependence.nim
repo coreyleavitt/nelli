@@ -152,11 +152,13 @@ suite "R3 E1: a replay result nothing produced is not a confirmation":
 
 suite "R3 SC1: an ending of the host's is run-dependent":
   test "a child whose status was lost":
-    let r = replayResultOf(ReplayChild(ending: reLost, reached: true), false)
+    let r = replayResultOf(ReplayChild(ending: reLost, reached: true,
+                                         runDependent: true), false)
     check r.outcome == roConfirmed
     check rdReplay in r.runDependence
   test "a child killed at its bound":
-    let r = replayResultOf(ReplayChild(ending: reTimedOut), false)
+    let r = replayResultOf(ReplayChild(ending: reTimedOut,
+                                         runDependent: true), false)
     check rdReplay in r.runDependence
   test "control: a child that exited is the program's":
     let r = replayResultOf(ReplayChild(ending: reExited, code: 3), false)

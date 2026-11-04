@@ -86,7 +86,10 @@ func outcome*(r: ReplayResult): ReplayOutcome = r.fOutcome
 func child*(r: ReplayResult): ReplayChild = r.fChild
 
 func replayNotRun*(): ReplayResult =
-  ## A replay decided without running anything: `roInconclusive`.
+  ## A replay decided without running anything: `roInconclusive`. Not
+  ## `roDeclined` (no child COULD run, which leaves a `feReplayDeclined`
+  ## hint): here nothing was to run (an ineligible taint or an out-of-scope
+  ## witness or target), so nothing was learned and no hint is left.
   ReplayResult(fOutcome: roInconclusive,
                fChild: ReplayChild(ending: reRefused))
 
@@ -105,8 +108,7 @@ func replayResultOf*(c: ReplayChild; lossy: bool): ReplayResult =
       of reFinished:
         if not c.bound or lossy: roInconclusive else: roRefuted
       of reTimedOut: roTimedOut
-      of reExited, reSignalled, reLost: roCrashed
-      of reRefused: roDeclined
+      else: roCrashed   # reExited, reSignalled, reLost (reRefused is above)
   ReplayResult(fOutcome: outcome, fChild: c)
 
 func endsChild*(r: ReplayResult): bool =
@@ -127,12 +129,11 @@ func detail*(r: ReplayResult): string =
 
 func runDependence*(r: ReplayResult): set[RunDependence] =
   ## RFC-0005 0.9.1 (WA-7). What this replay adds to its verdict's
-  ## `Soundness.runDependence`. Review R3 (SC1): a child killed at its bound
-  ## (`reTimedOut`) or one whose status was lost (`reLost`, the host ignores
-  ## `SIGCHLD` or another `wait` reaped it) ended as it did because of the
-  ## host and the moment, so it is run-dependent by its ending, whatever flag
-  ## its producer set.
-  if r.child.runDependent or r.child.ending in {reTimedOut, reLost}: {rdReplay}
+  ## `Soundness.runDependence`. Review R3 (SC1), R4 (X5): set once, where the
+  ## child is classified (`replayproc.nim`: `settled` for a kill at the bound
+  ## or the memory limit, `statusLost` for `reLost`); every producer of a
+  ## `ReplayChild` ends in one of them, so it is read here, not derived again.
+  if r.child.runDependent: {rdReplay}
   else: {}
 
 func replayStatus*(r: ReplayResult): ReplayStatus =

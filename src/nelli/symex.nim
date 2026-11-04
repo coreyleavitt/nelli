@@ -319,6 +319,11 @@ func runDependenceBits(d: set[RunDependence]): int =
 # fails to compile, and the fix is a new `soundnessMetaVersion` (and this pin).
 # Every field is one decimal digit (`decodeSoundness` reads exactly one), so
 # the largest value each can take must stay below 10.
+const
+  allBits = (1 shl (ord(high(SoundnessChannel)) + 1)) - 1
+    ## The largest taint bitset a field holds (review R4, X4: defined once,
+    ## used by the pins below and `decodeSoundness`).
+  allRunBits = (1 shl (ord(high(RunDependence)) + 1)) - 1
 static:
   doAssert ord(scSpurious) == 0 and ord(scIncomplete) == 1 and
            high(SoundnessChannel) == scIncomplete
@@ -327,15 +332,13 @@ static:
            high(ReplayStatus) == rsUnconfirmed
   doAssert ord(rdQueryTimeout) == 0 and ord(rdNativeStack) == 1 and
            ord(rdReplay) == 2 and high(RunDependence) == rdReplay
-  doAssert (1 shl (ord(high(SoundnessChannel)) + 1)) - 1 <= 9
-  doAssert ord(high(ReplayStatus)) <= 9
-  doAssert (1 shl (ord(high(RunDependence)) + 1)) - 1 <= 9
+  doAssert allBits <= 9 and allRunBits <= 9 and ord(high(ReplayStatus)) <= 9
 
 func digit(n: int): char =
   ## One field of the encoding. Review R3 (E8): never two digits, which
-  ## `decodeSoundness` would read as a miss; the static pins above make it
-  ## unreachable.
-  doAssert n in 0 .. 9, "soundness field out of one digit: " & $n
+  ## `decodeSoundness` would read as a miss. The static pins above bound
+  ## every field (the largest is `allBits`, `allRunBits` or the last
+  ## `ReplayStatus`), so no runtime check is needed.
   char(ord('0') + n)
 
 proc encodeSoundness(s: Soundness): string =
@@ -355,8 +358,6 @@ proc decodeSoundness(v: string): Option[Soundness] =
     if parts[i].len != 1 or parts[i][0] notin {'0' .. '9'}:
       return none(Soundness)
     nums[i - 1] = ord(parts[i][0]) - ord('0')
-  const allBits = (1 shl (ord(high(SoundnessChannel)) + 1)) - 1
-  const allRunBits = (1 shl (ord(high(RunDependence)) + 1)) - 1
   if nums[0] > allBits or nums[1] > allBits or
      nums[2] > ord(high(ReplayStatus)) or nums[3] > 1 or
      (parts.len == 6 and nums[4] notin 1 .. allRunBits):
@@ -529,6 +530,18 @@ const notesVersion = "1"
 
 proc notesKey(baseKey: string; diag: int): string =
   baseKey & cacheKeyNotes & ":diag:" & $diag
+
+func verdictSaved*(status: SymexFindingStatus; s: Soundness): bool =
+  ## Review R4 (W2). Whether the save of a cold run's verdict writes it (the
+  ## `saveSymexWitnessImpl` / `saveSymexVerdictImpl` / `saveSymexRaisedImpl`
+  ## skips): a run-dependent one is not cached. The `:notes` record rides a
+  ## verdict, so it is saved only when this is true: a later hit would serve
+  ## an old verdict with a newer run's hints.
+  case status
+  of sfSat, sfRaised: s.cacheable
+  of sfUnknown: s.runDependence == {}
+  of sfUnsat: true
+  of sfNotApplicable, sfReplayMiss: false
 
 proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
                          target: SymexTarget, settings: SymexSettings,
@@ -4642,8 +4655,11 @@ macro symexFindAllWitnesses*(fn: typed,
                                     @[raw], `dbErrorsId`, @[f.gaps],  ## RFC-0005 S8az
                                     @[f.witnessChoices])               ## RFC-0005 W1
               # RFC-0005 W1: beside whichever slot the arm above wrote.
-              saveSymexNotesImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
-                                 f.hints, f.diagnostics, `dbErrorsId`)
+              # Review R4 (W2): only when that arm saved the verdict.
+              if verdictSaved(f.status, f.soundness):
+                saveSymexNotesImpl(`db`, `progId`, `loopTarget`,
+                                   `symexSettings`, f.hints, f.diagnostics,
+                                   `dbErrorsId`)
           if f.fromCache:
             # RFC-0005 W1: every hit above serves the cold run's hints and
             # diagnostics too, from the `:notes` record the cold arm wrote.

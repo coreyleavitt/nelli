@@ -235,9 +235,9 @@ const renderAsChoicesVersion* = "12"
   ##   (`returnedPaths`, `breakPaths`, `continuePaths`, the frame's raise and
   ##   `finally` channels) as well as its result.
   ## - RFC-0005 code review round 3 (T1, E4; 270->271): every exit-channel
-  ##   entry carries the serial it was parked at (`parkExit`). A statement
-  ##   stamps its stray taint on the entries parked after it began, wherever
-  ##   a claim moved them (length marks missed one an inner try had shifted
+  ##   entry carries the serial it was parked at (`park`, `exits.nim`). A
+  ##   statement stamps its stray taint on the entries parked after it
+  ##   began, wherever a claim moved them (length marks missed one an inner try had shifted
   ##   below the mark), and a `try` claims only what was parked while it ran:
   ##   an inner `try` in an `except` arm no longer re-walks an earlier catch's
   ##   continuation through the rest of the arm (a false `sxSat`).

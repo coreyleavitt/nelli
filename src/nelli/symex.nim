@@ -43,7 +43,7 @@ import ./smt/replaywire   ## RFC-0005 S8ct
 import ./smt/replayresult ## RFC-0005 0.9.1 (review R1-06, R1-14)
 export replayExecutions
 export replayresult.ReplayOutcome, replayresult.ReplayResult,
-       replayresult.detail
+       replayresult.detail, replayresult.runDependence
 from ./smt/scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,

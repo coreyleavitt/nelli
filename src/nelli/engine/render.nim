@@ -234,7 +234,10 @@ proc symexFindingJson(f: SymexFinding): string =
             ",\"witnessUnsafe\":" & $f.soundness.witnessUnsafe &
             ",\"runDependence\":[" & runDependenceJson(f.soundness.runDependence) &
             "]}"
-  result &= ",\"bounds\":" & boundsJson(f.bounds)   # review R1-17
+  # Review R1-17: the bounds a verdict was decided under. Review R2 (LV3): not
+  # on an entry that is no verdict, as in the text rendering.
+  if f.status notin {sfNotApplicable, sfReplayMiss}:
+    result &= ",\"bounds\":" & boundsJson(f.bounds)
   result &= ",\"gaps\":["
   for i, g in f.gaps:
     if i > 0: result &= ","

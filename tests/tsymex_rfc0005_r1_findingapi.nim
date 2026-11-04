@@ -317,3 +317,16 @@ suite "R2 DD3: assertCoveredBy inside a property reaches the report":
     let rep = forAll(integers(0, 3), proc (x: int) = discard,
                      Settings(maxExamples: 3))
     check rep.symexFindings.len == 0
+
+suite "R2 LV3: a seed that does not fit":
+  test "its sfNotApplicable entry is settled and shows no bounds":
+    let rep = forAllWithSymexSeeds(@[newSeq[ChoiceNode]()], integers(0, 10),
+                                   proc (x: int) = discard)
+    var na: seq[SymexFinding]
+    for f in rep.symexFindings:
+      if f.status == sfNotApplicable: na.add f
+    check na.len == 1
+    if na.len == 1:
+      check na[0].soundness.replay != rsUnsettled
+      let j = parseJson(renderReport(rep, ofJson))
+      check not j["symexFindings"][0].hasKey("bounds")

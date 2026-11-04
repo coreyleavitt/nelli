@@ -1091,7 +1091,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## iterator's length assert; an inert opaque callee's float checks are
     ## forked; a statement-position opaque call reads its arguments where
     ## the C backend does. 264->267.
-    check symexWalkerVersion == "267"
+    ## RFC-0005 0.9.1 wiring slice W2 (WA-2, WA-7, WA-8, WA-9): a lossy clean
+    ## winner is replayed and trusted only on a confirmation, and a confirmed
+    ## replay that ended its child after the target marks its witness unsafe.
+    ## Provisional 266. Merged with W1 and W3 as 268.
+    check symexWalkerVersion == "268"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

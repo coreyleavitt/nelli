@@ -24,7 +24,7 @@
 ##
 ## A platform with neither runs no replay at all.
 
-import std/strutils
+import std/[strutils, monotimes, times]
 when defined(windows) or defined(nelliReplayReexec):
   import std/os
 import ../engine/markers
@@ -107,7 +107,8 @@ func describe*(c: ReplayChild): string =
       "it was ended by the system exception 0x" & toHex(c.code, 8)
     else:
       "it was ended by signal " & $c.code
-  of reTimedOut: "it ran past its bound and was killed"
+  of reTimedOut:
+    if c.why.len > 0: c.why else: "it ran past its bound and was killed"
   of reRefused: c.why
 
 func settled(c: ReplayChild): ReplayChild =
@@ -163,13 +164,20 @@ proc hostRuntimeHook*(): string =
   check errorMessageWriter
   ""
 
+
 var hitLabel: string
 var hitDepth: int
 var hitOut: proc (b: char) {.nimcall, gcsafe.}
+var hitSent = false
+  ## RFC-0005 0.9.1 (review R1-18). The child has reported its hit. A label is
+  ## reported once: a SUT that reaches it a million times must not write a
+  ## million bytes for the host to read.
 
 proc hitSink(name: string; depth: int) {.nimcall, gcsafe.} =
   {.cast(gcsafe).}:
-    if depth == hitDepth and name == hitLabel and hitOut != nil:
+    if not hitSent and depth == hitDepth and name == hitLabel and
+       hitOut != nil:
+      hitSent = true
       hitOut('H')
 
 proc armReplayHit*(label: string) =
@@ -189,6 +197,107 @@ proc readFlags(c: char; into: var ReplayChild) =
   let f = ord(c) - ord('0')
   into.reached = into.reached or (f and 1) != 0
   into.bound = (f and 2) != 0
+
+# ---- the child's report -------------------------------------------------------
+#
+# RFC-0005 0.9.1 (review R1-18, R1-30). What a child writes, the host decodes as
+# it arrives, a byte at a time: no byte is read twice, none is kept, and nothing
+# in it can raise. A report is a handful of bytes, each written once:
+#
+#   H        the target label was hit (`hitSink`)
+#   M        an allocation failed at the memory limit (`childOom`)
+#   E<f>     the SUT ran to its end; `f` is '0'..'3' (`flagsChar`)
+#   X<n>\n   the process exited with status `n` (fork, `childOnExit`)
+#   W        the witness could not be read (re-exec)
+#
+# A child that writes more than `replayReportCap` bytes, or a byte the report
+# does not have, is not writing a report: what it wrote is not trusted, and it
+# is stopped.
+
+const replayReportCap* = 4096
+  ## The most a child's report may take before the host stops the child.
+
+type
+  ReportState = enum
+    rsNext, rsFlags, rsCode, rsDone
+  ReportReader = object
+    state: ReportState
+    total: int
+    reached, outOfMemory: bool
+    finished: bool       ## E<f>
+    flags: char
+    exited: bool         ## X<n>\n
+    code, digits: int
+    negative: bool
+    unreadable: bool     ## W
+    corrupt: bool        ## past the cap, or not a report
+
+proc done(r: ReportReader): bool = r.state == rsDone
+
+proc feed(r: var ReportReader; bytes: openArray[char]) =
+  for ch in bytes:
+    if r.corrupt: return
+    inc r.total
+    if r.total > replayReportCap:
+      r.corrupt = true
+      return
+    case r.state
+    of rsNext:
+      case ch
+      of 'H': r.reached = true
+      of 'M': r.outOfMemory = true
+      of 'E': r.state = rsFlags
+      of 'X': r.state = rsCode
+      of 'W':
+        r.unreadable = true
+        r.state = rsDone
+      else: r.corrupt = true
+    of rsFlags:
+      if ch in {'0' .. '3'}:
+        r.flags = ch
+        r.finished = true
+        r.state = rsDone
+      else:
+        r.corrupt = true
+    of rsCode:
+      if ch == '\n':
+        if r.negative and r.digits == 0: r.corrupt = true
+        else:
+          if r.negative: r.code = -r.code
+          r.exited = true
+          r.state = rsDone
+      elif ch == '-' and r.digits == 0 and not r.negative:
+        r.negative = true
+      elif ch in {'0' .. '9'} and r.digits < 10:
+        r.code = r.code * 10 + (ord(ch) - ord('0'))
+        inc r.digits
+      else:
+        r.corrupt = true
+    of rsDone:
+      # What follows an ending is not read: a copy of the child the SUT forked
+      # may finish too.
+      discard
+
+proc stopped(why: string): ReplayChild =
+  ## A child whose report was not a report (`ReportReader.corrupt`): killed,
+  ## and nothing it wrote is read. Undecided, and not cached.
+  settled(ReplayChild(ending: reTimedOut,
+    why: "it wrote past what a replay's report holds (" &
+         $replayReportCap & " bytes) or what one says, and was killed" &
+         (if why.len > 0: " (" & why & ")" else: "")))
+
+proc statusLost(c: ReplayChild): ReplayChild =
+  ## RFC-0005 0.9.1 (review R1-19). The child ended without a report, and its
+  ## exit status was gone before the host could read it: the host ignores
+  ## `SIGCHLD`, so the system reaped it, or another thread's `wait` did. How
+  ## it ended is not known, so it is not reported as anything it may not
+  ## have been.
+  result = c
+  result.ending = reRefused
+  result.why = "the replay's child ended, but its exit status was lost " &
+    "before the host could read it (SIGCHLD is ignored, or another wait " &
+    "reaped it), so how it ended is not known"
+  result.runDependent = true
 
 # ---- fork ---------------------------------------------------------------------
 
@@ -231,12 +340,17 @@ when replayForks:
 
   var hostOomHook: proc () {.nimcall, tags: [], gcsafe, raises: [].}
 
+  var oomSent = false
+
   proc childOom() {.nimcall, tags: [], gcsafe, raises: [].} =
     ## RFC-0005 0.9.1 (WA-7): an allocation failed. Written before Nim's own
     ## `out of memory` exit, so the host can tell the limit from a `quit(1)`.
+    ## Once (R1-18).
     {.cast(gcsafe).}:
       {.cast(tags: []).}:
-        childWrite(['M'])
+        if not oomSent:
+          oomSent = true
+          childWrite(['M'])
         if hostOomHook != nil: hostOomHook()
 
   when hasOnExit:
@@ -308,38 +422,9 @@ when replayForks:
     childWrite(['E', flagsChar(rep)])
     exitnow(0)
 
-  proc decodeChild(buf: string; c: var ReplayChild): bool =
-    ## The stream a child has written so far. True when it says the child is
-    ## finished.
-    var i = 0
-    while i < buf.len:
-      case buf[i]
-      of 'H':
-        c.reached = true
-      of 'M':
-        c.outOfMemory = true
-      of 'E':
-        if i + 1 < buf.len:
-          readFlags(buf[i + 1], c)
-          c.ending = reFinished
-          return true
-      of 'X':
-        let e = buf.find('\n', i)
-        if e > 0:
-          c.ending = reExited
-          c.code = (if e > i + 1: parseInt(buf[i + 1 .. e - 1]) else: 0)
-          return true
-      else:
-        discard
-      inc i
-    false
-
-  proc nowMs(): int64 =
-    var t: Timespec
-    discard clock_gettime(CLOCK_MONOTONIC, t)
-    int64(t.tv_sec) * 1000 + int64(t.tv_nsec) div 1_000_000
-
   proc killChild(pid: Pid) =
+    ## Only for a child not yet waited for: until then its pid, and the group
+    ## it leads, are still this process's and cannot name another.
     when defined(linux):
       discard kill(-pid, SIGKILL)   # its group: what the SUT started with it
     discard kill(pid, SIGKILL)
@@ -357,9 +442,10 @@ when replayForks:
     discard c_fflush(nil)
     let pid = fork()
     if pid < 0:
+      let err = errno
       discard close(fds[0])
       discard close(fds[1])
-      return refused("fork failed (errno " & $errno & ")")
+      return refused("fork failed (errno " & $err & ")")
     if pid == 0:
       childFd = fds[1]
       discard close(fds[0])
@@ -370,93 +456,167 @@ when replayForks:
     discard close(fds[1])
     when defined(linux):
       discard setpgid(pid, pid)   # either side may run first
-    let deadline = if timeoutMs > 0: nowMs() + timeoutMs else: 0'i64
-    var buf = ""
+    let start = getMonoTime()
+    var rd: ReportReader
     var eof = false
-    var reaped = false
+    var reaped = false       # waited for: its pid is no longer the host's
+    var haveStatus = false   # and `status` is what it ended with
     var status: cint = 0
-    var c = ReplayChild(ending: reSignalled)
-    var finished = false
     var killed = false
-    while not (finished or reaped):
+    template reap(flags: cint) =
+      let w = waitpid(pid, status, flags)
+      if w == pid:
+        reaped = true
+        haveStatus = true
+      elif w < 0 and errno != EINTR:
+        # ECHILD: the host ignores SIGCHLD, or another wait took it. Gone,
+        # and its status with it; its pid may already name another process.
+        reaped = true
+    template readSome(wait: cint): bool =
+      ## Reads what is there within `wait` ms; false when nothing was.
+      var got = false
+      var p = TPollfd(fd: fds[0], events: POLLIN)
+      if poll(addr p, Tnfds(1), wait) > 0:
+        var chunk: array[512, char]
+        let n = read(fds[0], addr chunk[0], chunk.len)
+        if n > 0:
+          rd.feed(chunk.toOpenArray(0, n - 1))
+          got = true
+        elif n == 0 or errno != EINTR:
+          eof = true
+      got
+    while not (rd.done or rd.corrupt or reaped):
       var wait = cint(50)
-      if deadline != 0:
-        let left = deadline - nowMs()
+      if timeoutMs > 0:
+        let left = timeoutMs - (getMonoTime() - start).inMilliseconds
         if left <= 0:
           killed = true
           break
         wait = cint(min(left, 50))
       if not eof:
-        var p = TPollfd(fd: fds[0], events: POLLIN)
-        if poll(addr p, Tnfds(1), wait) > 0:
-          var chunk: array[256, char]
-          let n = read(fds[0], addr chunk[0], chunk.len)
-          if n > 0:
-            for i in 0 ..< n: buf.add chunk[i]
-            finished = decodeChild(buf, c)
-          elif n == 0:
-            eof = true
-          elif errno != EINTR:
-            eof = true
+        discard readSome(wait)
       else:
         discard usleep(cuint(wait) * 1000)
-      if not finished and not reaped:
+      if not (rd.done or rd.corrupt):
         # A child's own children may hold the pipe open past its end, and the
         # pipe may be closed while it still runs.
-        let w = waitpid(pid, status, WNOHANG)
-        if w == pid: reaped = true
-        elif w < 0 and errno != EINTR:
-          reaped = true   # SIGCHLD ignored: no status is coming
-          status = 0
-          eof = true
-    if killed or finished:
-      # A finished child calls `_exit` straight after its report; one that
-      # raced past the bound has done nothing the verdict reads.
-      killChild(pid)
+        reap(WNOHANG)
     if not reaped:
-      while waitpid(pid, status, 0) < 0 and errno == EINTR:
-        discard
-    # What a child wrote before it ended.
-    while not finished:
-      var chunk: array[256, char]
-      var p = TPollfd(fd: fds[0], events: POLLIN)
-      if poll(addr p, Tnfds(1), 0) <= 0: break
-      let n = read(fds[0], addr chunk[0], chunk.len)
-      if n <= 0: break
-      for i in 0 ..< n: buf.add chunk[i]
-      finished = decodeChild(buf, c)
+      # Timed out, flooding, or finished and about to `_exit`: either way
+      # nothing more is read from it. Not yet waited for, so its pid is ours.
+      killChild(pid)
+      while not reaped: reap(0)
+    # What a child wrote before it ended, up to the cap: a SUT's children
+    # outside its group may still be writing.
+    while not (rd.done or rd.corrupt or eof):
+      if not readSome(0): break
     discard close(fds[0])
-    if not finished:
-      discard decodeChild(buf, c)
-    if finished:
-      discard
+    if rd.corrupt:
+      return stopped("")
+    var c = ReplayChild(reached: rd.reached, outOfMemory: rd.outOfMemory)
+    if rd.finished:
+      readFlags(rd.flags, c)
+      c.ending = reFinished
+    elif rd.exited:
+      c.ending = reExited
+      c.code = rd.code
     elif killed:
       c.ending = reTimedOut
-    elif WIFSIGNALED(status):
+    elif haveStatus and WIFSIGNALED(status):
       c.ending = reSignalled
       c.code = int(WTERMSIG(status))
-    else:
+    elif haveStatus and WIFEXITED(status):
       c.ending = reExited
       c.code = int(WEXITSTATUS(status))
+    else:
+      c = statusLost(c)
     settled(c)
 
 # ---- re-execution -------------------------------------------------------------
+#
+# RFC-0005 0.9.1 (review R1-20, R1-23). The host hands a re-executed child two
+# files in a directory of its own, created for this one child and readable by
+# no other user (`mkdtemp`, or a random name `CreateDirectoryW` would refuse to
+# reuse), each created exclusively: `in` (the witness) and `out` (the report).
+# The child is told where by `NELLI_REPLAY_CHILD`, which also carries a nonce
+# drawn for this spawn. `in` starts with the same nonce, so a marker the program
+# merely inherited (one its host never set for it, or one left from a replay
+# long gone) names no file that matches it, and is ignored. The host reads
+# `out` through the handle it created it with, never by its name again.
 
 const replayChildEnv = "NELLI_REPLAY_CHILD"
 
-type ChildSpec = object
-  site, input, output: string
-
 when replayReexecs:
-  proc parseSpec(s: string): ChildSpec =
-    let parts = s.split('|')
-    if parts.len == 3:
-      result = ChildSpec(site: parts[0], input: parts[1], output: parts[2])
+  import std/sysrand
 
-  let childSpec = parseSpec(getEnv(replayChildEnv))
-    ## Non-empty in a child, from its first module initialiser on.
+  const
+    replayMagic = "NELLIRP1"
+    nonceLen = 32           # hex digits
+    replayStackCap = 1 shl 32
+      ## The most stack a child's fiber is given: what a host thread may
+      ## have, and no more, whatever the witness file says.
 
-  var tempCounter = 0
+  type ChildRole = object
+    site, payload, output: string
+
+  var childRoleRead = false
+  var childRoleVal: ChildRole
+
+  proc toHexString(b: openArray[byte]): string =
+    const digits = "0123456789abcdef"
+    for x in b:
+      result.add digits[int(x shr 4)]
+      result.add digits[int(x and 15)]
+
+  proc putInt64(s: var string; v: int64) =
+    var x = v
+    let at = s.len
+    s.setLen(at + 8)
+    copyMem(addr s[at], addr x, 8)
+
+  proc getInt64(s: string; at: int): int64 =
+    copyMem(addr result, unsafeAddr s[at], 8)
+
+  proc witnessFile(nonce, site, payload: string): string =
+    result = replayMagic & nonce
+    result.putInt64(int64(site.len))
+    result.add site
+    result.add payload
+
+  proc readChildRole(): ChildRole =
+    ## This process's part as a replay's child: none, unless its host set the
+    ## marker for it, which `in` proves.
+    let marker = getEnv(replayChildEnv)
+    if marker.len < nonceLen + 2 or marker[nonceLen] != '|': return
+    let nonce = marker[0 ..< nonceLen]
+    for ch in nonce:
+      if ch notin {'0' .. '9', 'a' .. 'f'}: return
+    let dir = marker[nonceLen + 1 .. ^1]
+    var data: string
+    try:
+      data = readFile(dir / "in")
+    except CatchableError:
+      return
+    let head = replayMagic.len + nonceLen + 8
+    if data.len < head or data[0 ..< replayMagic.len] != replayMagic or
+       data[replayMagic.len ..< replayMagic.len + nonceLen] != nonce:
+      return
+    let siteLen = getInt64(data, head - 8)
+    if siteLen <= 0 or siteLen > int64(data.len - head): return
+    result = ChildRole(site: data[head ..< head + int(siteLen)],
+                       payload: data[head + int(siteLen) .. ^1],
+                       output: dir / "out")
+    # One child: a process the SUT starts must not take itself for it.
+    delEnv(replayChildEnv)
+    try: removeFile(dir / "in")
+    except CatchableError: discard
+
+  proc childRole(): ChildRole =
+    {.cast(gcsafe).}:
+      if not childRoleRead:
+        childRoleRead = true
+        childRoleVal = readChildRole()
+      childRoleVal
 
   when defined(windows):
     import std/winlean
@@ -477,6 +637,10 @@ when replayReexecs:
         io: IoCounters
         processMemoryLimit, jobMemoryLimit: uint
         peakProcess, peakJob: uint
+      StartupInfoEx {.pure.} = object
+        ## `STARTUPINFOEXW`.
+        startupInfo: STARTUPINFO
+        attributeList: pointer
 
     const
       jobObjectExtendedLimitInformation = 9'i32
@@ -486,16 +650,22 @@ when replayReexecs:
       createSuspendedFlag = 0x4'i32
       createNoWindowFlag = 0x08000000'i32
       createUnicodeEnvironmentFlag = 0x00000400'i32
+      extendedStartupInfoPresent = 0x00080000'i32
+      procThreadAttributeHandleList = 0x00020002'u
       startfUseStdHandlesFlag = 0x100'i32
       semFailCriticalErrors = 0x1'u32
       semNoGpFaultErrorBox = 0x2'u32
       semNoOpenFileErrorBox = 0x8000'u32
       waitObject0 = 0'i32
       waitTimeoutResult = 258'i32
+      genericRead = 0x80000000'u32
+      genericWrite = 0x40000000'u32
       genericReadWrite = 0xC0000000'u32
       fileShareRW = 3'u32
+      fileShareAll = 7'u32
+      createNewFlag = 1'u32
       openExistingFlag = 3'u32
-      handleFlagInherit = 1'u32
+      fileAttributeTemporary = 0x100'u32
 
     proc createJobObjectW(attrs: pointer; name: pointer): Handle
       {.importc: "CreateJobObjectW", stdcall, dynlib: "kernel32".}
@@ -511,8 +681,35 @@ when replayReexecs:
     proc createFileWR(name: WideCString; access, share: uint32; attrs: pointer;
                       disposition, flags: uint32; tmpl: Handle): Handle
       {.importc: "CreateFileW", stdcall, dynlib: "kernel32".}
-    proc setHandleInformationR(h: Handle; mask, flags: uint32): int32
-      {.importc: "SetHandleInformation", stdcall, dynlib: "kernel32".}
+    proc createDirectoryWR(name: WideCString; attrs: pointer): int32
+      {.importc: "CreateDirectoryW", stdcall, dynlib: "kernel32".}
+    proc writeFileR(h: Handle; buf: pointer; n: uint32; written: ptr uint32;
+                    overlapped: pointer): int32
+      {.importc: "WriteFile", stdcall, dynlib: "kernel32".}
+    proc readFileR(h: Handle; buf: pointer; n: uint32; got: ptr uint32;
+                   overlapped: pointer): int32
+      {.importc: "ReadFile", stdcall, dynlib: "kernel32".}
+    proc getFileSizeExR(h: Handle; size: ptr int64): int32
+      {.importc: "GetFileSizeEx", stdcall, dynlib: "kernel32".}
+    proc initializeProcThreadAttributeListR(list: pointer; count: uint32;
+                                            flags: uint32;
+                                            size: ptr csize_t): int32
+      {.importc: "InitializeProcThreadAttributeList", stdcall,
+        dynlib: "kernel32".}
+    proc updateProcThreadAttributeR(list: pointer; flags: uint32;
+                                    attribute: uint; value: pointer;
+                                    size: csize_t; previous: pointer;
+                                    returnSize: ptr csize_t): int32
+      {.importc: "UpdateProcThreadAttribute", stdcall, dynlib: "kernel32".}
+    proc deleteProcThreadAttributeListR(list: pointer)
+      {.importc: "DeleteProcThreadAttributeList", stdcall, dynlib: "kernel32".}
+    proc createProcessExR(app, cmdLine: WideCString;
+                          processAttrs, threadAttrs: pointer;
+                          inheritHandles: int32; flags: int32;
+                          env: pointer; dir: WideCString;
+                          startup: ptr StartupInfoEx;
+                          info: ptr PROCESS_INFORMATION): int32
+      {.importc: "CreateProcessW", stdcall, dynlib: "kernel32".}
     proc getEnvironmentStringsWR(): pointer
       {.importc: "GetEnvironmentStringsW", stdcall, dynlib: "kernel32".}
     proc freeEnvironmentStringsWR(p: pointer): int32
@@ -535,20 +732,86 @@ when replayReexecs:
     proc terminateProcessSelf(code: uint32) =
       exitProcessR(code)
 
+    type OutHandle = Handle
+    const noOut = Handle(-1)
+
+    proc makePrivateDir(): string =
+      ## A directory of this host's own, by a name no one can guess, which
+      ## `CreateDirectoryW` refuses to reuse. "" when none could be made.
+      var r: array[16, byte]
+      if not urandom(r): return ""
+      let dir = getTempDir() / ("nelli-replay-" & toHexString(r))
+      if createDirectoryWR(newWideCString(dir), nil) == 0: return ""
+      dir
+
+    proc writeNew(path, data: string): bool =
+      ## `data` to `path`, which must not exist yet (`CREATE_NEW`).
+      let h = createFileWR(newWideCString(path), genericWrite, 0, nil,
+                           createNewFlag, fileAttributeTemporary, Handle(0))
+      if h == Handle(-1): return false
+      result = true
+      var at = 0
+      while at < data.len:
+        var n: uint32
+        let want = uint32(min(data.len - at, 1 shl 20))
+        if writeFileR(h, unsafeAddr data[at], want, addr n, nil) == 0 or
+           n == 0:
+          result = false
+          break
+        at += int(n)
+      discard closeHandle(h)
+
+    proc openNewOutput(path: string): OutHandle =
+      ## The report's file, created here (`CREATE_NEW`) and read through this
+      ## handle; the child opens it by name to write.
+      createFileWR(newWideCString(path), genericRead, fileShareAll, nil,
+                   createNewFlag, fileAttributeTemporary, Handle(0))
+
+    proc outputSize(h: OutHandle): int64 =
+      if getFileSizeExR(h, addr result) == 0: result = 0
+
+    proc readOutput(h: OutHandle; most: int): string =
+      result = newString(most)
+      var at = 0
+      while at < most:
+        var n: uint32
+        if readFileR(h, addr result[at], uint32(most - at), addr n, nil) == 0 or
+           n == 0:
+          break
+        at += int(n)
+      result.setLen(at)
+
+    proc closeOutput(h: OutHandle) =
+      discard closeHandle(h)
+
     proc environmentWith(name, value: string): seq[uint16] =
-      ## The block `CreateProcessW` takes: the current environment and one more
-      ## variable. An exact block rather than `SetEnvironmentVariable`, which
-      ## another thread starting a process could inherit.
+      ## The block `CreateProcessW` takes: the current environment with `name`
+      ## set to `value`. An exact block rather than `SetEnvironmentVariable`,
+      ## which another thread starting a process could inherit. A `name` the
+      ## environment already has (one this program inherited) is left out, so
+      ## the child sees one, ours.
+      let prefix = newWideCString(name & "=")
+      var plen = 0
+      while prefix[plen].uint16 != 0: inc plen
+      proc upper(c: uint16): uint16 =
+        if c >= uint16('a') and c <= uint16('z'): c - 32 else: c
       let base = getEnvironmentStringsWR()
       if base != nil:
-        var p = cast[ptr UncheckedArray[uint16]](base)
+        let p = cast[ptr UncheckedArray[uint16]](base)
         var i = 0
-        while not (p[i] == 0 and p[i + 1] == 0):
-          result.add p[i]
-          inc i
-        # The last variable's terminator. A second one would end the block here,
-        # and the child would not see the variable added below.
-        if i > 0: result.add 0'u16
+        while p[i] != 0:
+          # One variable, from `i` to its terminator.
+          var e = i
+          while p[e] != 0: inc e
+          var same = e - i >= plen
+          if same:
+            for k in 0 ..< plen:
+              if upper(p[i + k]) != upper(prefix[k].uint16):
+                same = false
+                break
+          if not same:
+            for k in i .. e: result.add p[k]   # with its terminator
+          i = e + 1
         discard freeEnvironmentStringsWR(base)
       let added = newWideCString(name & "=" & value)
       var j = 0
@@ -558,8 +821,11 @@ when replayReexecs:
       result.add 0'u16
       result.add 0'u16
 
-    proc spawnAndWait(spec: string; timeoutMs: int; c: var ReplayChild): bool =
-      ## False: no child ran (`c.why`).
+    proc spawnAndWait(spec: string; timeoutMs: int; output: OutHandle;
+                      c: var ReplayChild; lost, flooded: var bool): bool =
+      ## False: no child ran (`c.why`). `lost`: it ended, and how is not
+      ## known. `flooded`: its report grew past `replayReportCap`, and it was
+      ## killed.
       let job = createJobObjectW(nil, nil)
       if job == Handle(0):
         c.why = "a job object could not be created for the replay's child"
@@ -574,31 +840,60 @@ when replayReexecs:
         discard closeHandle(job)
         c.why = "the replay's job object could not be limited"
         return false
+      # Inheritable from birth, and the only handle the child inherits: the
+      # attribute list below names it alone (R1-21).
+      var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
+                                   lpSecurityDescriptor: nil,
+                                   bInheritHandle: 1)
       let null = createFileWR(newWideCString("NUL"), genericReadWrite,
-                              fileShareRW, nil, openExistingFlag, 0, Handle(0))
+                              fileShareRW, addr sa, openExistingFlag, 0,
+                              Handle(0))
       if null == Handle(-1):
         discard closeHandle(job)
         c.why = "NUL could not be opened for the replay's child"
         return false
-      discard setHandleInformationR(null, handleFlagInherit, handleFlagInherit)
-      var si: STARTUPINFO
-      si.cb = int32(sizeof(si))
-      si.dwFlags = startfUseStdHandlesFlag
-      si.hStdInput = null
-      si.hStdOutput = null
-      si.hStdError = null
+      var attrSize: csize_t = 0
+      discard initializeProcThreadAttributeListR(nil, 1, 0, addr attrSize)
+      var attrs = newSeq[byte](max(int(attrSize), 1))
+      if initializeProcThreadAttributeListR(addr attrs[0], 1, 0,
+                                            addr attrSize) == 0:
+        discard closeHandle(null)
+        discard closeHandle(job)
+        c.why = "the replay's child could not be limited to the handles " &
+                "it needs (error " & $getLastError() & ")"
+        return false
+      var inherit = [null]
+      if updateProcThreadAttributeR(addr attrs[0], 0,
+                                    procThreadAttributeHandleList,
+                                    addr inherit[0],
+                                    csize_t(sizeof(Handle)), nil, nil) == 0:
+        deleteProcThreadAttributeListR(addr attrs[0])
+        discard closeHandle(null)
+        discard closeHandle(job)
+        c.why = "the replay's child could not be limited to the handles " &
+                "it needs (error " & $getLastError() & ")"
+        return false
+      var si: StartupInfoEx
+      si.startupInfo.cb = int32(sizeof(StartupInfoEx))
+      si.startupInfo.dwFlags = startfUseStdHandlesFlag
+      si.startupInfo.hStdInput = null
+      si.startupInfo.hStdOutput = null
+      si.startupInfo.hStdError = null
+      si.attributeList = addr attrs[0]
       var pi: PROCESS_INFORMATION
       var env = environmentWith(replayChildEnv, spec)
       let exe = newWideCString(getAppFilename())
-      let ok = createProcessW(exe, nil, nil, nil, 1,
-                              createSuspendedFlag or createNoWindowFlag or
-                                createUnicodeEnvironmentFlag,
-                              cast[WideCString](addr env[0]), nil, si, pi)
+      let ok = createProcessExR(exe, nil, nil, nil, 1,
+                                createSuspendedFlag or createNoWindowFlag or
+                                  createUnicodeEnvironmentFlag or
+                                  extendedStartupInfoPresent,
+                                addr env[0], nil, addr si, addr pi)
+      let err = getLastError()
+      deleteProcThreadAttributeListR(addr attrs[0])
       discard closeHandle(null)
       if ok == 0:
         discard closeHandle(job)
-        c.why = "the program could not be re-executed (error " &
-                $getLastError() & ")"
+        c.why = "the program could not be re-executed (error " & $err & ")"
         return false
       if assignProcessToJobObject(job, pi.hProcess) == 0:
         discard terminateProcess(pi.hProcess, 1)
@@ -611,19 +906,42 @@ when replayReexecs:
       discard closeHandle(pi.hThread)
       {.cast(gcsafe).}:
         inc replayExecCount
-      let wait = if timeoutMs > 0: int32(timeoutMs) else: -1'i32
-      let w = waitForSingleObject(pi.hProcess, wait)
-      if w == waitObject0:
+      # In slices, so the report's size is watched and no bound wraps an
+      # `int32`.
+      let start = getMonoTime()
+      var ended = false
+      var killed = false
+      while true:
+        var slice = 50'i32
+        if timeoutMs > 0:
+          let left = timeoutMs - (getMonoTime() - start).inMilliseconds
+          if left <= 0:
+            killed = true
+            break
+          slice = int32(min(left, 50))
+        let w = waitForSingleObject(pi.hProcess, slice)
+        if w == waitObject0:
+          ended = true
+          break
+        if w != waitTimeoutResult:
+          lost = true   # WAIT_FAILED: what it does is not known
+          break
+        if outputSize(output) > replayReportCap:
+          flooded = true
+          break
+      if ended:
         var code: int32
-        discard getExitCodeProcess(pi.hProcess, code)
-        let ucode = cast[uint32](code)
-        if ucode >= 0xC0000000'u32:
-          c.ending = reSignalled
-          c.code = int(ucode)
+        if getExitCodeProcess(pi.hProcess, code) == 0:
+          lost = true
         else:
-          c.ending = reExited
-          c.code = int(ucode)
-      else:
+          let ucode = cast[uint32](code)
+          if ucode >= 0xC0000000'u32:
+            c.ending = reSignalled
+            c.code = int(ucode)
+          else:
+            c.ending = reExited
+            c.code = int(ucode)
+      elif killed:
         c.ending = reTimedOut
       discard terminateJobObject(job, 1)
       discard closeHandle(pi.hProcess)
@@ -685,46 +1003,145 @@ when replayReexecs:
     # local of that name, which shadows the enum constant with an
     # uninitialised one, and `setrlimit` then fails without a word.
     var rlimitAsReexec {.importc: "RLIMIT_AS", header: "<sys/resource.h>".}: cint
+    var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
 
-    proc spawnAndWait(spec: string; timeoutMs: int; c: var ReplayChild): bool =
+    type OutHandle = cint
+    const noOut = cint(-1)
+
+    proc makePrivateDir(): string =
+      ## A directory only this user can enter, by a name `mkdtemp` chose and
+      ## created. "" when none could be made.
+      var tmpl = getTempDir() / "nelli-replay-XXXXXX"
+      if mkdtemp(tmpl.cstring) == nil: return ""
+      tmpl
+
+    proc writeNew(path, data: string): bool =
+      ## `data` to `path`, which must not exist yet (`O_EXCL`), as a file only
+      ## this user can read.
+      let fd = open(path.cstring,
+                    O_WRONLY or O_CREAT or O_EXCL or oNoFollow or O_CLOEXEC,
+                    Mode(0o600))
+      if fd < 0: return false
+      result = true
+      var at = 0
+      while at < data.len:
+        let n = write(fd, unsafeAddr data[at], data.len - at)
+        if n < 0 and errno == EINTR: continue
+        if n <= 0:
+          result = false
+          break
+        at += n
+      discard close(fd)
+
+    proc openNewOutput(path: string): OutHandle =
+      ## The report's file, created here (`O_EXCL`) and read through this
+      ## descriptor; the child opens it by name to write.
+      open(path.cstring, O_RDONLY or O_CREAT or O_EXCL or oNoFollow or
+           O_CLOEXEC, Mode(0o600))
+
+    proc outputSize(h: OutHandle): int64 =
+      var st: Stat
+      if fstat(h, st) == 0: int64(st.st_size) else: 0
+
+    proc readOutput(h: OutHandle; most: int): string =
+      result = newString(most)
+      var at = 0
+      while at < most:
+        let n = pread(h, addr result[at], most - at, Off(at))
+        if n < 0 and errno == EINTR: continue
+        if n <= 0: break
+        at += n
+      result.setLen(at)
+
+    proc closeOutput(h: OutHandle) =
+      discard close(h)
+
+    proc childEnvironment(spec: string): seq[string] =
+      ## This process's environment with the marker set to `spec`: built
+      ## before the `fork`, so the child allocates nothing before `execve`.
+      for k, v in envPairs():
+        if k != replayChildEnv: result.add k & "=" & v
+      result.add replayChildEnv & "=" & spec
+
+    proc spawnAndWait(spec: string; timeoutMs: int; output: OutHandle;
+                      c: var ReplayChild; lost, flooded: var bool): bool =
+      ## As the Windows one. The child leads a process group of its own, and
+      ## is signalled, it and its group, only while it is not yet waited for:
+      ## until then its pid cannot name another process (R1-19).
       let exe = getAppFilename()
+      let args = allocCStringArray([exe])
+      let envp = allocCStringArray(childEnvironment(spec))
       let pid = fork()
       if pid < 0:
-        c.why = "fork failed"
+        let err = errno
+        deallocCStringArray(args)
+        deallocCStringArray(envp)
+        c.why = "fork failed (errno " & $err & ")"
         return false
       if pid == 0:
-        putEnv(replayChildEnv, spec)
+        discard setpgid(0, 0)
         let null = open("/dev/null", O_RDWR)
         if null >= 0:
           discard dup2(null, 0)
           discard dup2(null, 1)
           discard dup2(null, 2)
-        var args = allocCStringArray([exe])
-        discard execv(exe.cstring, args)
+        discard execve(exe.cstring, args, envp)
         c_exit_now(127)
+      deallocCStringArray(args)
+      deallocCStringArray(envp)
+      discard setpgid(pid, pid)   # either side may run first
       {.cast(gcsafe).}:
         inc replayExecCount
+      let start = getMonoTime()
       var status: cint
-      var waited = 0
-      var done = false
+      var reaped = false       # waited for: its pid is no longer the host's
+      var haveStatus = false
+      var killed = false
+      var nap = 1
       while true:
         let w = waitpid(pid, status, WNOHANG)
         if w == pid:
-          done = true
+          reaped = true
+          haveStatus = true
           break
-        if timeoutMs > 0 and waited >= timeoutMs: break
-        sleep(2)
-        waited += 2
-      if not done:
+        if w < 0:
+          if errno == EINTR: continue
+          # ECHILD: the host ignores SIGCHLD, or another wait took it.
+          reaped = true
+          break
+        if outputSize(output) > replayReportCap:
+          flooded = true
+          break
+        var left = 20'i64
+        if timeoutMs > 0:
+          left = timeoutMs - (getMonoTime() - start).inMilliseconds
+          if left <= 0:
+            killed = true
+            break
+        discard usleep(cuint(min(int64(nap), left)) * 1000)
+        nap = min(nap * 2, 20)
+      if not reaped:
+        discard kill(-pid, SIGKILL)   # its group: what the SUT started with it
         discard kill(pid, SIGKILL)
-        discard waitpid(pid, status, 0)
+        while true:
+          let w = waitpid(pid, status, 0)
+          if w == pid:
+            haveStatus = true
+            break
+          if w < 0 and errno == EINTR: continue
+          break
+      if flooded:
+        discard
+      elif killed:
         c.ending = reTimedOut
-      elif WIFSIGNALED(status):
+      elif haveStatus and WIFSIGNALED(status):
         c.ending = reSignalled
         c.code = int(WTERMSIG(status))
-      else:
+      elif haveStatus and WIFEXITED(status):
         c.ending = reExited
         c.code = int(WEXITSTATUS(status))
+      else:
+        lost = true
       true
 
     proc callerStackSize*(): int = 0
@@ -747,16 +1164,19 @@ when replayReexecs:
 
   var childOutput: File
   var hostOomHookR: proc () {.nimcall, tags: [], gcsafe, raises: [].}
+  var oomSentR = false
 
   proc childOomR() {.nimcall, tags: [], gcsafe, raises: [].} =
     ## RFC-0005 0.9.1 (WA-7): as the fork path's `childOom`.
     {.cast(gcsafe).}:
       {.cast(tags: []).}:
-        try:
-          childOutput.write('M')
-          childOutput.flushFile()
-        except Exception:
-          discard
+        if not oomSentR:
+          oomSentR = true
+          try:
+            childOutput.write('M')
+            childOutput.flushFile()
+          except Exception:
+            discard
         if hostOomHookR != nil: hostOomHookR()
 
   proc childOut(b: char) {.nimcall, gcsafe.} =
@@ -767,8 +1187,13 @@ when replayReexecs:
   proc inReplayChild*(): bool =
     ## RFC-0005 S8ct. This process is a replay's child. It starts no child of
     ## its own: should the call site not be found on the way in (a library
-    ## loaded by another program), it must not go on re-executing.
-    childSpec.site.len > 0
+    ## loaded by another program), it must not go on re-executing. Only a
+    ## marker its host set for it counts (`readChildRole`).
+    childRole().site.len > 0
+
+  proc removeQuietly(path: string) =
+    try: removeFile(path)
+    except CatchableError: discard
 
   proc runReplayReexec*(site, payload: string; timeoutMs: int): ReplayChild =
     ## RFC-0005 S8ct. The host's half: `payload` to a re-executed copy of this
@@ -776,51 +1201,50 @@ when replayReexecs:
     ## (`replayChildEntry`), and what it reported.
     if inReplayChild():
       return refused("a replay's child does not start another")
-    {.cast(gcsafe).}:
-      inc tempCounter
-      let tag = $getCurrentProcessId() & "-" & $tempCounter
-    let base = getTempDir() / ("nelli-replay-" & tag)
-    let input = base & ".in"
-    let output = base & ".out"
+    var r: array[16, byte]
+    if not urandom(r):
+      return refused("no random bytes for the replay's private directory")
+    let nonce = toHexString(r)
+    let dir = makePrivateDir()
+    if dir.len == 0:
+      return refused("a private directory could not be created for the " &
+                     "replay's child")
+    let input = dir / "in"
+    let outName = dir / "out"
+    var output = noOut
     defer:
-      try: removeFile(input)
+      if output != noOut: closeOutput(output)
+      removeQuietly(input)
+      removeQuietly(outName)
+      try: removeDir(dir)
       except CatchableError: discard
-      try: removeFile(output)
-      except CatchableError: discard
-    try:
-      writeFile(input, payload)
-      writeFile(output, "")
-    except CatchableError as e:
-      return refused("the replay's witness could not be written: " & e.msg)
+    if not writeNew(input, witnessFile(nonce, site, payload)):
+      return refused("the replay's witness could not be written")
+    output = openNewOutput(outName)
+    if output == noOut:
+      return refused("the replay's report file could not be created")
     var c = ReplayChild(ending: reSignalled)
+    var lost, flooded = false
     flushFile(stdout)
     flushFile(stderr)
-    if not spawnAndWait(site & "|" & input & "|" & output, timeoutMs, c):
+    if not spawnAndWait(nonce & "|" & dir, timeoutMs, output, c, lost,
+                        flooded):
       return refused(c.why)
-    var seen = ""
-    try:
-      seen = readFile(output)
-    except CatchableError:
-      seen = ""
-    var i = 0
-    while i < seen.len:
-      case seen[i]
-      of 'H':
-        c.reached = true
-      of 'M':
-        c.outOfMemory = c.ending != reTimedOut
-      of 'E':
-        if i + 1 < seen.len and c.ending != reTimedOut:
-          readFlags(seen[i + 1], c)
-          c.ending = reFinished
-        inc i
-      of 'W':
-        c.ending = reRefused
-        c.why = "the child could not read the witness"
-        c.runDependent = true
-      else:
-        discard
-      inc i
+    var rd: ReportReader
+    rd.feed(readOutput(output, replayReportCap + 1))
+    if flooded or rd.corrupt:
+      return stopped("")
+    c.reached = rd.reached
+    c.outOfMemory = rd.outOfMemory and c.ending != reTimedOut
+    if rd.finished and c.ending != reTimedOut:
+      readFlags(rd.flags, c)
+      c.ending = reFinished
+    elif rd.unreadable:
+      c.ending = reRefused
+      c.why = "the child could not read the witness"
+      c.runDependent = true
+    elif lost:
+      c = statusLost(c)
     settled(c)
 
   proc replayChildEntry*(site: string;
@@ -829,18 +1253,19 @@ when replayReexecs:
     ## RFC-0005 S8ct. The child's half, from a `{.global.}` initialiser at each
     ## call site: returns at once except in the child of this very site, which
     ## runs the SUT and ends.
-    if childSpec.site != site: return false
+    let role = childRole()
+    if role.site.len == 0 or role.site != site: return false
     quietChild()
     hostOomHookR = outOfMemHook
     outOfMemHook = childOomR
     var rep: ReplayReport
     var failed = false
     try:
-      childOutput = open(childSpec.output, fmWrite)
+      childOutput = open(role.output, fmWrite)
       hitOut = childOut
-      let payload = readFile(childSpec.input)
-      let stack = (if payload.len >= 8: cast[ptr int64](unsafeAddr payload[0])[]
-                   else: 0'i64)
+      let payload = role.payload
+      var stack = (if payload.len >= 8: getInt64(payload, 0) else: 0'i64)
+      if stack < 0 or stack > replayStackCap: stack = 0
       runOnStack(int(stack), proc () {.closure.} =
         try:
           rep = run(payload)

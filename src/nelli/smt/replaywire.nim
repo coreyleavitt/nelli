@@ -37,7 +37,7 @@ proc putRaw(w: var WireWriter; p: pointer; n: int) =
 
 proc getRaw(r: var WireReader; p: pointer; n: int) =
   if n > 0:
-    if r.pos + n > r.data.len:
+    if n > r.data.len - r.pos:
       raise newException(WireError, "the replay's witness is truncated")
     copyMem(p, addr r.data[r.pos], n)
     r.pos += n
@@ -53,6 +53,15 @@ proc getLen(r: var WireReader): int =
   var v: int64
   r.getRaw(addr v, 8)
   int(v)
+
+proc getCount(r: var WireReader): int =
+  ## A string's or seq's length (RFC-0005 0.9.1, review R1-20): never
+  ## negative, and never more than the bytes left, which each element takes
+  ## at least one of but for an empty one. A witness that says otherwise is
+  ## not one the host wrote.
+  result = r.getLen()
+  if result < 0 or result > r.data.len - r.pos:
+    raise newException(WireError, "the replay's witness is malformed")
 
 proc wirePut*[T](w: var WireWriter; x: T) =
   when T is distinct:
@@ -97,11 +106,11 @@ proc wireGet*[T](r: var WireReader; x: var T) =
   elif T is (SomeNumber | bool | char | enum | set | range):
     r.getRaw(addr x, sizeof(T))
   elif T is string:
-    let n = r.getLen()
+    let n = r.getCount()
     x = newString(n)
     if n > 0: r.getRaw(addr x[0], n)
   elif T is seq:
-    let n = r.getLen()
+    let n = r.getCount()
     x.setLen(n)
     for i in 0 ..< n: r.wireGet(x[i])
   elif T is array:

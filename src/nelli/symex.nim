@@ -3578,7 +3578,7 @@ proc entryParse(fn: NimNode; apiName: string; settings: SymexSettings;
   result.parsed =
     if warn: parseEntryImplWarned(fn, apiName, settings)
     else: parseEntryImpl(fn, apiName, settings.budget.maxInstantiationsPerProc)
-  let p = result.parsed
+  var p = result.parsed  # a copy: a `let` of an object field aliases in the VM (S8x)
   let paramsExpr = p.paramsNimNode
   let bodyExpr = p.bodyNimNode
   let procsExpr = p.procsNimNode
@@ -3613,7 +3613,7 @@ macro symexFind*(fn: typed,
   let e = entryParse(fn, "symexFind", settings, newCall(bindSym"symexFind",
     fn, targetLit(target), newLit(settings)))
   if e.again != nil: return e.again
-  let parsed = e.parsed
+  var parsed = e.parsed  # a copy: a `let` of an object field aliases in the VM (S8x)
   let progExpr = e.prog
 
   # Build the tuple type and witness-construction tuple. We genSym a
@@ -4350,7 +4350,7 @@ macro symexFindAllWitnesses*(fn: typed,
     newCall(bindSym"symexFindAllWitnesses", fn, db, newLit(symexSettings),
             excludeTargets))
   if e.again != nil: return e.again
-  let parsed = e.parsed
+  var parsed = e.parsed  # a copy: a `let` of an object field aliases in the VM (S8x)
   let progExpr = e.prog
 
   let labels = irCollectLabels(parsed.body, parsed.procs)

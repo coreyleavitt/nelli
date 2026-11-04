@@ -817,6 +817,8 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ##       slot per `(exnType)` finding), and
   ##   (b) as an index entry under `cacheKeyRaisedIndex` so `loadSymexRaisedImpl`
   ##       can enumerate the persisted type ids without a DB key-prefix scan.
+  ##       The index is a single entry written after every sentinel, so a
+  ##       failed save reads back as a miss, never as a partial set.
   ## A SUT with two distinct raise paths (e.g. ValueError, IOError) round-trips
   ## both findings through save/load. The witness rides the sentinel since
   ## RFC-0005 W1 (`witnesses`, below).
@@ -870,10 +872,13 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       meta[raisedDefectMetaKey] = (if defectByType[i]: "1" else: "0")
       db.save(baseKey & cacheKeyRaised(tid), witsByType[i], meta,
               verdictCacheMaxEntries)
-      # (b) index entry: the type id encoded as its raw bytes.
-      db.save(baseKey & cacheKeyRaisedIndex,
-              @[bytesChoice(cast[seq[byte]](tid), 0, tid.len)],
-              typeIds.len)
+    # (b) the index, last and as ONE entry listing every type id (each as its
+    # raw bytes): a reader trusts only a complete index, and one save is all
+    # or nothing, so a throw above leaves the previous index (or none).
+    var idx: seq[ChoiceNode] = @[]
+    for tid in typeIds:
+      idx.add bytesChoice(cast[seq[byte]](tid), 0, tid.len)
+    db.save(baseKey & cacheKeyRaisedIndex, idx, 1)
     result = true
   except CatchableError as e:
     errors.add "saveSymexRaisedImpl: " & $e.name & ": " & e.msg
@@ -894,7 +899,7 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## `gaps` metadata (`gapsMeta`/`storedGaps`); missing/pre-S8az gaps
   ## metadata degrades to `@[]` rather than a miss — gaps stays
   ## best-effort on top of the load-bearing soundness. Returns `@[]` on a
-  ## full miss.
+  ## miss; a sentinel missing for any indexed type makes it a full miss.
   ##
   ## Load errors are appended to `errors` and the call degrades to a miss
   ## (symmetric with `loadSymexVerdictImpl`). Best-effort.
@@ -906,25 +911,33 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
     renderingVersion = renderAsChoicesVersion)
   try:
     let entries = db.loadPrimary(baseKey & cacheKeyRaisedIndex)
-    for entry in entries:
-      if entry.len == 1 and entry[0].kind == ckBytes:
-        let tid = cast[string](entry[0].bytesVal)
-        let sentinel = db.loadPrimaryWithMeta(baseKey & cacheKeyRaised(tid))
-        # RFC-0005 W1: the value is the raise's witness (it was `@[]`), so a
-        # sentinel is any single entry; its soundness still decides a hit.
-        let s =
-          if sentinel.len == 1: storedSoundness(sentinel[0].meta)
-          else: none(Soundness)
-        if s.isSome:
-          let g = storedGaps(sentinel[0].meta)
-          result.add (raw: RawResult(status: sxRaised, raisedTypeId: tid,
-                                     isDefect: sentinel[0].meta.getOrDefault(
-                                       raisedDefectMetaKey, "") == "1",
-                                     soundness: s.get), gaps: g,
-                      choices: sentinel[0].choices)
-        else:
-          errors.add "loadSymexRaisedImpl: raised(" & tid & ") has no " &
-            "soundness-carrying sentinel (pre-RFC-0005-S11 format); a miss"
+    # One entry lists every type id; anything else is not this encoding.
+    if entries.len != 1: return
+    var loaded: seq[CachedRaised] = @[]
+    for node in entries[0]:
+      if node.kind != ckBytes:
+        errors.add "loadSymexRaisedImpl: malformed raised index; a miss"
+        return
+      let tid = cast[string](node.bytesVal)
+      let sentinel = db.loadPrimaryWithMeta(baseKey & cacheKeyRaised(tid))
+      # RFC-0005 W1: the value is the raise's witness (it was `@[]`), so a
+      # sentinel is any single entry; its soundness still decides a hit.
+      let s =
+        if sentinel.len == 1: storedSoundness(sentinel[0].meta)
+        else: none(Soundness)
+      if s.isNone:
+        # A hit needs the complete set the index describes.
+        errors.add "loadSymexRaisedImpl: raised(" & tid & ") has no " &
+          "soundness-carrying sentinel (torn or pre-RFC-0005-S11 " &
+          "format); a miss"
+        return
+      loaded.add (raw: RawResult(status: sxRaised, raisedTypeId: tid,
+                                 isDefect: sentinel[0].meta.getOrDefault(
+                                   raisedDefectMetaKey, "") == "1",
+                                 soundness: s.get),
+                  gaps: storedGaps(sentinel[0].meta),
+                  choices: sentinel[0].choices)
+    result = loaded
   except CatchableError as e:
     errors.add "loadSymexRaisedImpl: " & $e.name & ": " & e.msg
     result = @[]
@@ -4016,17 +4029,17 @@ macro assertCoveredBy*(fn: typed,
   # call site among several `fn`s, and a generic one among its instantiations.
   # Review R5 (3d): a routine is told apart as `routineKey` tells routines
   # apart (name and body hash; `signatureHash` is the same for every routine
-  # of one parameter list). Any other symbol (a proc-typed parameter or local
-  # variable, which has no body to hash) is its name and the site it is used
-  # at; a non-symbol (a lambda, a call) is a fixed-width hash of its text, so
-  # a lambda's whole body is not embedded in every finding's key.
+  # of one parameter list). The entry macros take only a routine symbol or a
+  # non-symbol: a template, a macro, or a proc-typed variable has no body to
+  # walk and is rejected before this point. A non-symbol (a lambda, a call) is
+  # a fixed-width hash of its text, so a lambda's whole body is not embedded in
+  # every finding's key.
   let fnIdText =
     if fn.kind == nnkSym:
-      if fn.symKind in {nskProc, nskFunc, nskMethod, nskIterator,
-                        nskConverter, nskTemplate, nskMacro}:
-        routineKey(fn)
-      else:
-        fn.strVal & "#" & fn.lineInfo
+      doAssert fn.symKind in {nskProc, nskFunc, nskMethod, nskIterator,
+                              nskConverter},
+        "assertCoveredBy: a non-routine symbol reached the finding key"
+      routineKey(fn)
     else:
       sha256Hex(fn.repr) & "#" & fn.lineInfo
   let fnIdLit = newLit(fnIdText & "@" & fn.getTypeInst.repr)

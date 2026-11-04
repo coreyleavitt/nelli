@@ -124,16 +124,15 @@ func describe*(c: ReplayChild): string =
   of reRefused, reLost: c.why
 
 func settled(c: ReplayChild): ReplayChild =
-  ## The child as the host reports it: a run into the memory limit is the
-  ## run's, not only the program's. (A run past the bound is too, by its
-  ## ending: see `ReplayChild.runDependent`.)
+  ## The child as the host reports it. What makes it run-dependent is
+  ## stated once, at `ReplayChild.runDependent`.
   result = c
   if c.outOfMemory: result.runDependent = true
 
 proc refused(why: string; runDependent = true): ReplayChild =
-  ## No child ran. `runDependent`: for a reason of the moment (the default:
-  ## a failed `fork`, pipe, job object or temporary file); `false` for one
-  ## that holds on every run (`refusedStatically`, `refusedNotMarshallable`).
+  ## No child ran. `runDependent` defaults to true; see
+  ## `ReplayChild.runDependent` for what it means (`refusedStatically` and
+  ## `refusedNotMarshallable` pass false).
   settled(ReplayChild(ending: reRefused, why: why, runDependent: runDependent))
 
 proc refusedStatically*(why: string): ReplayChild =

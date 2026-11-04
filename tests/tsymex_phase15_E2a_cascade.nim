@@ -7,7 +7,7 @@
 ## (STRUCTURAL — NO handler matching, NO propagation, NO witness; those land
 ## E2b+). `WalkCtx.found: seq[RawResult]` (Z4) and `cacheKeyRaised` (Z3e) already
 ## existed; E2a consumes them.
-import std/unittest
+import std/[unittest, tables]
 import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl, runtime]
@@ -61,6 +61,38 @@ suite "symex Phase 15 E2a — structural sxRaised cascade + multi-finding cache"
       typeIds.add r.raw.raisedTypeId
     check "ValueError" in typeIds
     check "IOError" in typeIds
+
+  test "S1: a torn multi-type save never reads back as a partial set":
+    # Whichever save throws, a later load sees the whole set or nothing.
+    let prog = SymexProgram(body: mkBlock(@[]))
+    let target = tAssertionViolation()
+    let found = @[
+      RawResult(status: sxRaised, raisedTypeId: "ValueError"),
+      RawResult(status: sxRaised, raisedTypeId: "IOError"),
+    ]
+    for failAt in 1 .. 4:
+      let db0 = inMemoryDatabase()
+      var db = db0
+      var n = 0
+      let inner = db0.saveWithMetaImpl
+      let plain = db0.saveImpl
+      db.saveWithMetaImpl = proc (t: string; c: seq[ChoiceNode];
+                                  m: Table[string, string]; mx: int) =
+        inc n
+        if n == failAt: raise newException(IOError, "injected")
+        inner(t, c, m, mx)
+      db.saveImpl = proc (t: string; c: seq[ChoiceNode]; mx: int) =
+        inc n
+        if n == failAt: raise newException(IOError, "injected")
+        plain(t, c, mx)
+      var errors: seq[string] = @[]
+      saveSymexRaisedImpl(db, prog, target, defaultSymexSettings(), found,
+                          errors)
+      var loadErrors: seq[string] = @[]
+      let got = loadSymexRaisedImpl(db0, prog, target,
+                                    defaultSymexSettings(), loadErrors)
+      checkpoint "failAt=" & $failAt & " loaded=" & $got.len
+      check got.len == 0 or got.len == 2
 
   test "E2a: stkRaisedExn target kind exists with typeFilter":
     let t = SymexTarget(kind: stkRaisedExn, typeFilter: "ValueError")

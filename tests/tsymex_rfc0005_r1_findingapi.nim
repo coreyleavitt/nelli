@@ -488,6 +488,32 @@ suite "R4 U1: a failing finding is not overwritten by a later pass":
       check got.len == 1
       check got[0].status == sfUnknown
 
+  test "R6 N2: a later unconfirmed uncovered finding keeps an earlier trusted failure":
+    withEngineFrame:
+      let o = FindingOrigin(site: "s", fnId: "fn")
+      var bad = SymexFinding(targetDesc: "t", status: sfSat, covered: false)
+      bad.soundness.replay = rsConfirmed
+      check trusted(bad)
+      var weak = SymexFinding(targetDesc: "t", status: sfSat, covered: false)
+      check not trusted(weak)
+      recordSymexFinding(o, bad)
+      recordSymexFinding(o, weak)
+      let got = toSeq(engineStack[^1].symexFindings.values)
+      check got.len == 1
+      check trusted(got[0])
+
+  test "R6 N2: an audit entry never replaces a verdict":
+    withEngineFrame:
+      let o = FindingOrigin(site: "s", fnId: "fn")
+      var good = SymexFinding(targetDesc: "t", status: sfSat, covered: true)
+      good.soundness.replay = rsConfirmed
+      recordSymexFinding(o, good)
+      for st in [sfNotApplicable, sfReplayMiss]:
+        recordSymexFinding(o, SymexFinding(targetDesc: "t", status: st))
+      let got = toSeq(engineStack[^1].symexFindings.values)
+      check got.len == 1
+      check got[0].status == sfSat
+
   test "two fns through one call site are two entries":
     withEngineFrame:
       let f = SymexFinding(targetDesc: "t", status: sfSat)

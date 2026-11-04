@@ -36,17 +36,33 @@ type EngineFrame* = object
 
 var engineStack* {.threadvar.}: seq[EngineFrame]
 
-func severity(f: SymexFinding): int =
-  ## Review R4 (U1), R5 (D3a). How much a report needs to show a finding, each
-  ## rank distinct so a tie never lets a later, weaker finding replace an
-  ## earlier, stronger one: 4 for one that failed coverage on a witness (a
-  ## claim the test missed), 3 for one that decided nothing (an unknown), 2 for
-  ## a covered one no trust backs (an unconfirmed claim), 1 for a trusted,
-  ## covered one.
-  if f.status == sfUnknown: 3
-  elif not f.covered: 4
-  elif not trusted(f): 2
-  else: 1
+type Severity = enum
+  ## Review R4 (U1), R5 (D3a), R6 (N2). How much a report needs to show a
+  ## finding, weakest first. Each meaning has its own rank, so a tie never
+  ## lets a later, weaker finding replace an earlier, stronger one (equal
+  ## ranks keep the latest):
+  ##   skAudit             `sfNotApplicable` / `sfReplayMiss`: not verdicts,
+  ##                       only a record that symex was skipped or missed;
+  ##   skTrustedCovered    a trusted claim the test covered;
+  ##   skUnconfirmed       a covered claim no trust backs;
+  ##   skUnknown           decided nothing (`sfUnknown`, accepted or not);
+  ##   skUnconfirmedMiss   an unconfirmed claim the run did not reach (kept
+  ##                       when `acceptUnknown` downgrades it, so it carries
+  ##                       no failure);
+  ##   skCoverageFailure   a TRUSTED claim the test failed to cover: the one
+  ##                       finding no other may displace.
+  skAudit, skTrustedCovered, skUnconfirmed, skUnknown, skUnconfirmedMiss,
+  skCoverageFailure
+
+func severity(f: SymexFinding): Severity =
+  case f.status
+  of sfNotApplicable, sfReplayMiss: skAudit
+  of sfUnknown: skUnknown
+  of sfSat, sfUnsat, sfRaised:
+    if not f.covered:
+      if trusted(f): skCoverageFailure else: skUnconfirmedMiss
+    elif not trusted(f): skUnconfirmed
+    else: skTrustedCovered
 
 proc record(fr: var EngineFrame; key: string; f: SymexFinding) =
   ## Review R3 (E2), R4 (U1). The entry for `key` becomes `f` unless the

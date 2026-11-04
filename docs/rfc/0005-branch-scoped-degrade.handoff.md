@@ -508,3 +508,49 @@ its own new machinery could express its own examples. Both of round 2's
 design-level catches (`channels()` vs the k-unroll survivor, §2.6 vs the
 `pathTaint` codomain) were found by *type-checking the RFC against itself*, not
 against the source. Do that pass explicitly next time.
+
+## 2026-11-03 — Wiring audit (rfc-flow 3.5), after the v0.9.0 tag
+
+v0.9.0 was tagged without stages 3.5 (wiring audit) and 4 (code review).
+Both now run against `46205d96`, and their fixes ship as 0.9.1 from branch
+`rfc-0005-wiring`. RFC-0016 waits until both close. `wiring` stays
+`unproven`.
+
+**Entry points.** `symexFind`, `symexForAll` (through `symexFindAllWitnesses`),
+`symexFindAllWitnesses` and `symexCacheKeyForFn`; `runSymex` has no other
+caller in `src/`. **Load-bearing property** (§0.1, §6.2): every verdict is
+licensed by its path's channels, and a replay of the real `fn` confirms what
+over-taint leaves unsure, through every entry point.
+
+**Verdict: the property is not reached in full from `symexForAll` and
+`symexFindAllWitnesses`.** Three read-only lenses: the verdict lattice, replay
+and the cache, and the front end with its claims. Findings, deduped, by blast
+radius:
+
+| ID | Kind | Finding | Anchor |
+|---|---|---|---|
+| WA-1 | 2 | `symexFindAllWitnesses` builds its `SymexProgram` without `userExnHierarchy`, which `symexFind` and the concolic entries pass. User exception types and `RegexError` become `eeUnknownExnType` (⊤): no `sxUnsat`, named `except`s skipped, a clean `sxRaised` ends `sfUnknown`. The cache key also ignores the hierarchy | `symex.nim:4294` vs `:3374`; `canonicalize.nim:6285` |
+| WA-2 | 5 | A replay that reaches the target and then crashes (`quit`, segfault) is `roConfirmed` with no hint. Then `assertCoveredBy`'s splat and `symexForAll`'s seeds run that witness **in the host process**, which S8ct exists to prevent | `symex.nim:2052-2056`, `:3102-3118`, `:3687/:3697/:3759`, `:824` |
+| WA-3 | 2 | Seq `items`/`pairs` lower to `while iv < s.len` with no `assert(len(a) == L)`; `mitems`/`mpairs` and the Table iterators model it. `for _ in s: discard s.pop()` can give a clean wrong verdict. Hypothesis until pinned natively | `dsl_parser.nim:19261-19290` vs `:18886-18911` |
+| WA-4 | 2 | An opaque callee's defect summary ignores its check options: under `nanChecks: on`, `FloatInvalidOpDefect` is not forked, so a possible clean `sxUnsat`. Hypothesis | `dsl_parser.nim:4071-4167` vs `routineChecks` consumers `:21727/:21223/:3211/:19400` |
+| WA-5 | 2 | Statement-position opaque calls, and the transparent-violation fallback, parse arguments without `parseOrderedArgs` (`nimArgTemps`). Hypothesis | `dsl_parser.nim:16781-16783`, `:16736-16738` vs `:9672` |
+| WA-6 | 2/5 | `symexFindAllWitnesses` drops `raw.diagnostics` and every hint (`findingGaps` keeps only `taintsRun`): the `feReplay*` hints, including the crashing input, never reach `SymexFinding`, `Report` or a renderer. The Windows guidance in CHANGELOG and migration §5a/§7 cannot be followed through `symexForAll` | `symex.nim:4255-4290`, `:4260`; `types.nim:4084`; `engine/types.nim:40-95`; `render.nim:70-85` |
+| WA-7 | 2 | Run-dependent replay outcomes are cached as a permanent `:unk`: `roTimedOut`, fork/pipe/job `roDeclined`, hook-time `roDeclined`, memory-limit `roCrashed`. The save already skips query timeouts for the same reason | `symex.nim:507-509`, `:4269` |
+| WA-8 | 7 | The cache key no longer covers every input that decides a verdict: the replay child mode and `--panics:on` | `canonicalize.nim:6408-6469`; `symex.nim:2105` |
+| WA-9 | 2 | A lossy witness (`feExtractionFailed`, `wfLossy`) gates replay but not `trusted()`: a clean winner with a lossy witness is `trusted`. **Recommend:** a lossy winner is trusted only after replay confirms it | `runtime.nim:10909-10955`; `symex.nim:2257`, `:3024`; `soundness.nim:109` |
+| WA-10 | 2 | A cached `:raised` hit loses `targetDesc`, `defectTypeId` and the witness (pre-existing since v0.8.0); its comment claims E2b carries the witness | `symex.nim:4244-4252` vs `:4276-4290`; `:677`, `:4246` |
+| WA-11 | 4 | `SymexResult.fromCache` is never set true, though its doc and migration §2 say so | `types.nim:3121` |
+| WA-12 | 7 | The no-targets finding carries no `soundness`, `gaps` or `annotationViolations` (RFC §8.1 S11 says every finding does) | `symex.nim:4199-4203` |
+| WA-13 | 3/7 | Docs and comments: migration §1.1 still says replay runs "in your process"/"on a thread"; §3.4 lists the private `ReplayFootprint` as an export; `isInertOpaqueCall`'s soundness argument says the walker does not model globals; `nilDerefFork`'s comment is stale; `ConcolicYieldCounters.parseDeclines` misses the Class-B markers; macOS/musl hints report exit code 0 for any `quit(n)`; `replayWitness` takes no settings | migration §1.1/§3.4; `dsl_parser.nim:3424-3429`; `runtime.nim:22846-22851`; `runtime_heap.nim:1370`; `concolictaxonomy.nim:225`; `replayproc.nim:178-181`; `symex.nim:2933` |
+
+Hypothesis, unowned until probed: on macOS a timeout kill does not reach the
+SUT's own child processes (`replayproc.nim:186-190`, Linux-only `setpgid` and
+`PDEATHSIG`). No macOS CI exists.
+
+**Slices** (branch `rfc-0005-wiring`; each RED first, natively where a verdict is
+involved):
+- **W1 (entry-point parity):** WA-1, WA-6, WA-10, WA-11, WA-12.
+- **W2 (replay settle and cache):** WA-2, WA-7, WA-8, WA-9.
+- **W3 (front-end probes):** WA-3, WA-4, WA-5. Probe each natively first and
+  record whether `main` gives the same verdict.
+- **W4 (docs):** WA-13, after W1–W3.

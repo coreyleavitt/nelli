@@ -2667,6 +2667,10 @@ type
                           ## that witness, or only slow. Recorded by
                           ## `settleCandidate` like `feReplayRefuted`, so it
                           ## never enters `runTaint`; always `sevHint`.
+                          ## RFC-0005 0.9.1: also on a CONFIRMED claim whose
+                          ## child ran past the bound after reaching the
+                          ## target (`Soundness.witnessUnsafe`, WA-2), and on
+                          ## a lossy winner left `rsUnconfirmed` (WA-9).
                           ## `classOf` is `dcFreshSymbol`, for the same reason.
     feReplayCrashed       ## RFC-0005 S8ct (§4.2 `roCrashed`). NOT a degrade:
                           ## the verdict-time replay of a candidate's witness
@@ -2675,6 +2679,10 @@ type
                           ## The message says how, and on what input. Recorded
                           ## by `settleCandidate` like `feReplayRefuted`, so it
                           ## never enters `runTaint`; always `sevHint`.
+                          ## RFC-0005 0.9.1: also on a CONFIRMED claim whose
+                          ## child ended AFTER reaching the target
+                          ## (`Soundness.witnessUnsafe`, WA-2), and on a lossy
+                          ## winner left `rsUnconfirmed` (WA-9).
     feReplayDeclined      ## RFC-0005 S8ct (§4.2 `roDeclined`). NOT a degrade:
                           ## no child could run this replay (it could not be
                           ## started, or, on a platform where the program is

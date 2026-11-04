@@ -1084,7 +1084,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## reads it (`nimArgTemps`). Provisional 263.
     ## RFC-0005 batch 11: S8cs, S8ct, S8cu, S8bv, S8bz, S8cp and S8cq (with
     ## S8cn) stacked on batch 10. 252->264.
-    check symexWalkerVersion == "264"
+    ## RFC-0005 0.9.1 wiring slice W2 (WA-2, WA-7, WA-8, WA-9): a lossy clean
+    ## winner is replayed and trusted only on a confirmation, and a confirmed
+    ## replay that ended its child after the target marks its witness unsafe.
+    ## Provisional 266.
+    check symexWalkerVersion == "266"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

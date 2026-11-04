@@ -84,12 +84,21 @@ type
 
   ReplayStatus* = enum
     ## RFC-0005 §8.1. How a `sxSat`/`sxRaised` claim was settled.
-    ## Refuted and inconclusive replays never ship on a winner (they leave
-    ## the run `sxUnknown`), so they have no member here.
-    rsNotNeeded    ## a clean path -- the claim stood without replay (and the
-                   ## value on every `sxUnsat` / `sxUnknown`)
-    rsConfirmed    ## an `scSpurious`-tainted path whose witness the REAL `fn`
-                   ## was run on and confirmed (`roConfirmed`, §2.3 rule 3)
+    ## Refuted and inconclusive replays of a CANDIDATE never ship on a winner
+    ## (they leave the run `sxUnknown`), so they have no member here.
+    rsNotNeeded    ## a clean path whose witness is the model's -- the claim
+                   ## stood without replay (and the value on every `sxUnsat` /
+                   ## `sxUnknown`)
+    rsConfirmed    ## an `scSpurious`-tainted path, or a clean one whose witness
+                   ## renders lossily, whose witness the REAL `fn` was run on
+                   ## and confirmed (`roConfirmed`, §2.3 rule 3)
+    rsUnconfirmed  ## RFC-0005 0.9.1 (WA-9). A clean winner whose witness is
+                   ## lossy (`feExtractionFailed`, `wfLossy`: the rendered value
+                   ## is not the model's), which no replay confirmed: it was
+                   ## refuted, timed out, crashed, declined or did not run. The
+                   ## clean path still reaches the target, so the status stands,
+                   ## but nothing has run the reported witness: not `trusted()`.
+                   ## A `feReplay*` hint says why
 
   Soundness* = object
     ## RFC-0005 §8.1. One common-section field on `RawResult`, `SymexResult`
@@ -105,11 +114,24 @@ type
       ## (Invariant-7 extension). It is the join over every decline, so on
       ## a real SUT it is often ⊤; the per-cause view is `gaps()`.
     replay*:    ReplayStatus
+    witnessUnsafe*: bool
+      ## RFC-0005 0.9.1 (WA-2). The replay that confirmed this claim reached
+      ## the target and then did not finish: its child exited (`quit`, a raw
+      ## `exit`), was ended by a signal or a system exception, or ran past
+      ## `replayTimeoutMs`. The target is reached all the same (§5a), but
+      ## running this witness in a process ends or hangs that process, so no
+      ## consumer runs it in the host: `assertCoveredBy` does not splat it and
+      ## `symexForAll` does not seed it. Only a replay sets it; a witness
+      ## nothing ran is `false`.
 
 func trustedSat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxSat` / `sxRaised` arm: a clean winning
-  ## path, or a spurious one the real `fn` confirmed.
-  scSpurious notin s.pathTaint or s.replay == rsConfirmed
+  ## path with a faithful witness, or one the real `fn` confirmed (a spurious
+  ## path, or since 0.9.1 a lossy witness, WA-9).
+  case s.replay
+  of rsConfirmed: true
+  of rsUnconfirmed: false
+  of rsNotNeeded: scSpurious notin s.pathTaint
 
 func trustedUnsat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxUnsat` arm: nothing under-approximated.

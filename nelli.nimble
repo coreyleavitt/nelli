@@ -1689,5 +1689,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cu_hidden",
             "tsymex_rfc0005_s8cu_nil",
             "tsymex_rfc0005_s8cu_nil_setjmp",
-            "tsymex_rfc0005_s8cu_nil_native"]:
+            "tsymex_rfc0005_s8cu_nil_native",
+            # RFC-0005 0.9.1 wiring slice W2 -- the replay settle and the
+            # verdict cache (WA-2, WA-7, WA-8, WA-9). Walker 264->266.
+            "tsymex_rfc0005_w2_settle",
+            "tsymex_rfc0005_w2_settle_reexec"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

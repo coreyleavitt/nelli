@@ -61,6 +61,17 @@ type
     code*: int       ## `reExited`: the exit code. `reSignalled`: the signal,
                      ## or the system's exception code
     why*: string     ## `reRefused`: the reason
+    outOfMemory*: bool
+      ## RFC-0005 0.9.1 (WA-7). The child ended because an allocation failed
+      ## at the replay's memory limit (`replayMemoryLimit`), which on a fork
+      ## is relative to what the host had mapped.
+    runDependent*: bool
+      ## RFC-0005 0.9.1 (WA-7). How the child ended depends on this run, not
+      ## only on the program and the witness: it ran past its bound, hit the
+      ## memory limit, or could not be started or handed its state for a
+      ## reason of the moment (a failed `fork`, pipe or job object, a runtime
+      ## hook the host had set). Another run may decide it, so a verdict
+      ## it leaves undecided is not cached (`replayRunDependent`).
 
 var replayExecCount = 0
   ## How many children the host has started: symex never runs `fn` itself, so
@@ -74,15 +85,43 @@ proc replayExecutions*(): int =
 
 var replayDetail {.threadvar.}: string
   ## The last child's ending, in words, for the verdict's hint.
+var replayEnding {.threadvar.}: ReplayEnding
+  ## The last child's ending.
+var replayRunDependentFlag {.threadvar.}: bool
+  ## RFC-0005 0.9.1 (WA-7). Some child since `resetReplayRunDependence` ended
+  ## in a way another run may not (`ReplayChild.runDependent`).
 
 proc lastReplayDetail*(): string =
   ## RFC-0005 S8ct. How the last replay on this thread ended, for a hint.
   replayDetail
 
+proc lastReplayEnding*(): ReplayEnding =
+  ## RFC-0005 0.9.1 (WA-2). How the last replay on this thread ended. Read
+  ## with a confirmed outcome, which only a child that ran gives: a child
+  ## that reached the target and then did not finish (`reExited`,
+  ## `reSignalled`, `reTimedOut`) makes its witness unsafe to run in a host.
+  replayEnding
+
+proc resetReplayRunDependence*() =
+  ## RFC-0005 0.9.1 (WA-7). Called by each entry macro's replay settle before
+  ## it runs a child.
+  replayRunDependentFlag = false
+
+proc replayRunDependent*(): bool =
+  ## RFC-0005 0.9.1 (WA-7). Whether a replay of the last settle on this thread
+  ## ended in a way that depends on the run. Like a solve the clock cut off
+  ## (`symexQueryTimedOut`), its verdict is the machine's, not only the
+  ## program's, so `saveSymexVerdictImpl` does not cache it.
+  replayRunDependentFlag
+
 proc describe(c: ReplayChild): string =
   case c.ending
   of reFinished: "it ran to its end"
-  of reExited: "it exited the process with code " & $c.code
+  of reExited:
+    if c.outOfMemory:
+      "it ran out of the replay's memory limit (an allocation failed; exit " &
+        "code " & $c.code & ")"
+    else: "it exited the process with code " & $c.code
   of reSignalled:
     when defined(windows):
       "it was ended by the system exception 0x" & toHex(c.code, 8)
@@ -92,17 +131,23 @@ proc describe(c: ReplayChild): string =
   of reRefused: c.why
 
 proc settled(c: ReplayChild): ReplayChild =
+  result = c
+  if c.ending == reTimedOut or c.outOfMemory: result.runDependent = true
   {.cast(gcsafe).}:
-    replayDetail = describe(c)
-  c
+    replayDetail = describe(result)
+    replayEnding = result.ending
+    if result.runDependent: replayRunDependentFlag = true
 
-proc refused(why: string): ReplayChild =
-  settled(ReplayChild(ending: reRefused, why: why))
+proc refused(why: string; runDependent = true): ReplayChild =
+  ## No child ran. `runDependent`: for a reason of the moment (the default:
+  ## a failed `fork`, pipe, job object or temporary file); `false` for one
+  ## that holds on every run (`refusedStatically`, `refusedNotMarshallable`).
+  settled(ReplayChild(ending: reRefused, why: why, runDependent: runDependent))
 
 proc refusedStatically*(why: string): ReplayChild =
   ## RFC-0005 S8ct. No child: the entry macro proved at compile time that this
   ## SUT's state cannot be handed to one.
-  refused(why)
+  refused(why, runDependent = false)
 
 proc refusedNotMarshallable*(why: string): ReplayChild =
   ## RFC-0005 S8ct. A re-executed child (Windows) must be handed what the SUT
@@ -110,7 +155,17 @@ proc refusedNotMarshallable*(why: string): ReplayChild =
   ## so a Linux or macOS run replays the same SUT; the message says so.
   refused("replay not marshallable: " & why & " (on this platform replay " &
           "runs in a re-executed child, which must be handed what the SUT " &
-          "reaches; a Linux or macOS run forks and replays it)")
+          "reaches; a Linux or macOS run forks and replays it)",
+          runDependent = false)
+
+proc refusedHostHook*(why: string): ReplayChild =
+  ## RFC-0005 0.9.1 (WA-7). As `refusedNotMarshallable`, for a runtime hook the
+  ## host had set at the time (`hostRuntimeHook`): a run without it replays,
+  ## so the decline depends on the run.
+  refused("replay not marshallable: " & why & " (on this platform replay " &
+          "runs in a re-executed child, which must be handed what the SUT " &
+          "reaches; a Linux or macOS run forks and replays it)",
+          runDependent = true)
 
 proc hostRuntimeHook*(): string =
   ## RFC-0005 batch 11. A runtime hook of the stdlib's that the program set,
@@ -196,6 +251,16 @@ when replayForks:
   proc childOut(b: char) {.nimcall, gcsafe.} =
     childWrite([b])
 
+  var hostOomHook: proc () {.nimcall, tags: [], gcsafe, raises: [].}
+
+  proc childOom() {.nimcall, tags: [], gcsafe, raises: [].} =
+    ## RFC-0005 0.9.1 (WA-7): an allocation failed. Written before Nim's own
+    ## `out of memory` exit, so the host can tell the limit from a `quit(1)`.
+    {.cast(gcsafe).}:
+      {.cast(tags: []).}:
+        childWrite(['M'])
+        if hostOomHook != nil: hostOomHook()
+
   when hasOnExit:
     proc childOnExit(status: cint; arg: pointer) {.noconv.} =
       # Registered last, so runs first: what the host registered to run at its
@@ -247,6 +312,8 @@ when replayForks:
       discard c_on_exit(childOnExit, nil)
     else:
       discard c_atexit(childAtExit)
+    hostOomHook = outOfMemHook   # the SUT runs under the host's, after ours
+    outOfMemHook = childOom
 
   proc runChildBody(body: proc (): ReplayReport {.closure, gcsafe.}) =
     enterChild()
@@ -268,6 +335,8 @@ when replayForks:
       case buf[i]
       of 'H':
         c.reached = true
+      of 'M':
+        c.outOfMemory = true
       of 'E':
         if i + 1 < buf.len:
           readFlags(buf[i + 1], c)
@@ -696,6 +765,18 @@ when replayReexecs:
       c_exit_now(cint(code))
 
   var childOutput: File
+  var hostOomHookR: proc () {.nimcall, tags: [], gcsafe, raises: [].}
+
+  proc childOomR() {.nimcall, tags: [], gcsafe, raises: [].} =
+    ## RFC-0005 0.9.1 (WA-7): as the fork path's `childOom`.
+    {.cast(gcsafe).}:
+      {.cast(tags: []).}:
+        try:
+          childOutput.write('M')
+          childOutput.flushFile()
+        except Exception:
+          discard
+        if hostOomHookR != nil: hostOomHookR()
 
   proc childOut(b: char) {.nimcall, gcsafe.} =
     {.cast(gcsafe).}:
@@ -745,6 +826,8 @@ when replayReexecs:
       case seen[i]
       of 'H':
         c.reached = true
+      of 'M':
+        c.outOfMemory = c.ending != reTimedOut
       of 'E':
         if i + 1 < seen.len and c.ending != reTimedOut:
           readFlags(seen[i + 1], c)
@@ -753,6 +836,7 @@ when replayReexecs:
       of 'W':
         c.ending = reRefused
         c.why = "the child could not read the witness"
+        c.runDependent = true
       else:
         discard
       inc i
@@ -766,6 +850,8 @@ when replayReexecs:
     ## runs the SUT and ends.
     if childSpec.site != site: return false
     quietChild()
+    hostOomHookR = outOfMemHook
+    outOfMemHook = childOomR
     var rep: ReplayReport
     var failed = false
     try:

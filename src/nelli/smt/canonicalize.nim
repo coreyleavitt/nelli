@@ -19,6 +19,7 @@
 import std/[strutils, tables, algorithm, sha1]
 import ./types
 import ./pcre_engine
+import ./replayproc   ## RFC-0005 0.9.1 (WA-8): how this build replays
 
 const
   cacheKeySat*     = ":sat"
@@ -213,7 +214,18 @@ const renderAsChoicesVersion* = "12"
   ##   is abandoned). A `var` formal over a global keeps S8cs's route check
   ##   under S8bz's copy-in (`glVarGlobal`). 262 while S8cq was out; 264 with it.
 
-const symexWalkerVersion* = "264"
+const symexWalkerVersion* = "266"
+  ## RFC-0005 0.9.1 wiring slice W2 (2026-11-03), provisional 266 on 264 --
+  ## the replay settle and the verdict cache. WA-9: a clean winner whose
+  ## witness renders lossily (`wfLossy`, `feExtractionFailed`) is replayed, and
+  ## is `trusted()` only when the replay confirms it (`rsConfirmed`); any other
+  ## outcome, or replay off, leaves it `rsUnconfirmed` with a hint. WA-2: a
+  ## confirming replay whose child then exited, was signalled or ran past its
+  ## bound sets `Soundness.witnessUnsafe` (stored, encoding version 2), with a
+  ## hint, and no consumer runs that witness in the host. WA-7: an `:unk` a
+  ## replay left undecided for a reason of the run is not cached. WA-8: the key
+  ## carries how the build replays (`replayModeSegment`).
+  ##
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
   ## does not see. A program's globals carry `hiddenRoute` from the macro-time
   ## route analysis (lifetime hooks, code it cannot list), and a read of such a
@@ -6439,10 +6451,24 @@ proc canonicalize*(s: SymexSettings): string =
 
 # ---- Cache key -------------------------------------------------------------
 
+func replayModeSegment*(forks = replayForks; reexecs = replayReexecs;
+                        panics = defined(nimPanics)): string =
+  ## RFC-0005 0.9.1 (WA-8). How a build runs a verdict's replays, which decides
+  ## verdicts the program and settings do not: a forked child (POSIX) copies
+  ## the host and replays what a re-executed one (Windows,
+  ## `-d:nelliReplayReexec`) must decline as not marshallable, a build with
+  ## neither replays nothing, and under `--panics:on` `replayInScope` declines
+  ## every target. So a database shared across platforms or builds must not
+  ## serve one's `:unk` to another that would confirm. The defaults are this
+  ## build's.
+  (if forks: "fork" elif reexecs: "reexec" else: "none") &
+    (if panics: "+panics" else: "")
+
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,
                     z3Version, nimVersion, walkerVersion,
-                    renderingVersion: string): string =
+                    renderingVersion: string;
+                    replayMode = replayModeSegment()): string =
   ## Content-addressed key over every input that determines a
   ## witness's validity. Stable across builds (no source locations,
   ## no map-iteration order, no compiler-specific hashes). Returns
@@ -6452,7 +6478,8 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
   ## computes from a given IR). `renderingVersion` covers the
   ## serialisation of sat witnesses to the choice-IR. Bumping one
   ## must not silently invalidate witnesses whose semantics under
-  ## the other axis are unchanged.
+  ## the other axis are unchanged. `replayMode` (RFC-0005 0.9.1, WA-8) is
+  ## how the build runs replays; the default is this build's.
   let canon =
     "K|" & canonicalize(prog) &
     "|" & canonicalize(target) &
@@ -6463,5 +6490,7 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
     "|r=" & renderingVersion &
     # RFC-0005 S8bj: std/re's unanchored calls run on PCRE's JIT or its
     # interpreter, which the walker reads differently (`pcre_engine`).
-    "|pcre=" & pcreEngineName()
+    "|pcre=" & pcreEngineName() &
+    # RFC-0005 0.9.1 (WA-8): how this build replays (`replayModeSegment`).
+    "|rm=" & replayMode
   "sx:" & $secureHash(canon)

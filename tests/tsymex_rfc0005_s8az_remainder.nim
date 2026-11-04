@@ -68,7 +68,7 @@ suite "RFC-0005 S8az (1) -- :sat witness cache hit also serves gaps()":
                                  defaultSymexSettings())
     # Hand-built: the exact shape `saveSymexWitnessImpl` wrote before S8az --
     # `"soundness"` metadata key present, no "gapsv"/"gapsn" keys at all.
-    db.save(key & cacheKeySat, @[], {"soundness": "1:0:0:0"}.toTable, 64)
+    db.save(key & cacheKeySat, @[], {"soundness": "2:0:0:0:0"}.toTable, 64)
     let loaded = loadSymexWitnesses(db, s8azPreFn, tLabel("s8az_pre_sat"),
                                     defaultSymexSettings())
     check loaded.len == 1
@@ -146,7 +146,7 @@ suite "RFC-0005 S8az (2) -- :raised:<type> cache hit also serves gaps()":
       walkerVersion    = symexWalkerVersion,
       renderingVersion = renderAsChoicesVersion)
     db.save(baseKey & cacheKeyRaised("IOError"), @[],
-            {"soundness": "1:0:0:0"}.toTable, verdictCacheMaxEntries)
+            {"soundness": "2:0:0:0:0"}.toTable, verdictCacheMaxEntries)
     let loaded = loadSymexRaisedImpl(db, s8azRaisedProg, s8azRaisedTarget,
                                      settings, errors)
     check loaded.len == 1

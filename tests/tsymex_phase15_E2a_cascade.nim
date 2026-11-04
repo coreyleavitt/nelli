@@ -133,6 +133,29 @@ suite "symex Phase 15 E2a — structural sxRaised cascade + multi-finding cache"
         check got.len == 2
         check got[0].raw.isDefect == got[1].raw.isDefect
 
+  test "K4: re-saving a type with a different witness replaces the slot":
+    # The db dedups by witness, so a sentinel saved with a roomy cap grew a
+    # second entry and the loader (exactly one entry) missed forever.
+    let db = inMemoryDatabase()
+    let prog = SymexProgram(body: mkBlock(@[]))
+    let target = tAssertionViolation()
+    let found = @[RawResult(status: sxRaised, raisedTypeId: "ValueError")]
+    let w1 = @[integerChoice(1, 0, 10, 0)]
+    let w2 = @[integerChoice(2, 0, 10, 0)]
+    var errors: seq[string] = @[]
+    check saveSymexRaisedImpl(db, prog, target, defaultSymexSettings(), found,
+                              errors, @[], @[w1])
+    check saveSymexRaisedImpl(db, prog, target, defaultSymexSettings(), found,
+                              errors, @[], @[w2])
+    check errors.len == 0
+    var loadErrors: seq[string] = @[]
+    let got = loadSymexRaisedImpl(db, prog, target, defaultSymexSettings(),
+                                  loadErrors)
+    check loadErrors.len == 0
+    check got.len == 1
+    if got.len == 1:
+      check got[0].choices == w2
+
   test "R7 Q2: an index listing the same type id twice is a miss":
     let db = inMemoryDatabase()
     let prog = SymexProgram(body: mkBlock(@[]))

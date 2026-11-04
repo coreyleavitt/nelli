@@ -849,6 +849,12 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## a hit rebuilds the finding the cold run reported (its `raised(<type>)`
   ## descriptor, `defectTypeId` and witness), not only its status.
   ##
+  ## Caveat: the all-or-nothing guarantee holds for a SINGLE writer that
+  ## crashes part-way. Concurrent writers to one directory DB, or a power loss
+  ## without fsync, can still interleave sentinel and index writes. That is
+  ## benign when the base key is deterministic (every writer stores the same
+  ## record under it).
+  ##
   ## DB save errors are appended to `errors` and the call returns normally — the
   ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
   # RFC-0005 0.9.1 (WA-7, WA-9): as `saveSymexWitnessImpl`.
@@ -888,8 +894,11 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       var meta = soundnessMeta(sounds[i])
       for k, v in gapsMeta(gapsByType[i]): meta[k] = v
       meta[raisedDefectMetaKey] = (if defectByType[i]: "1" else: "0")
-      db.save(baseKey & cacheKeyRaised(tid), witsByType[i], meta,
-              verdictCacheMaxEntries)
+      # Exactly ONE entry per slot: the db dedups by witness, so any roomier
+      # cap lets a re-save with a different witness add a second entry, which
+      # the loader (`sentinel.len == 1`) reads as a permanent miss. A literal,
+      # not `verdictCacheMaxEntries`, so this holds if that constant moves.
+      db.save(baseKey & cacheKeyRaised(tid), witsByType[i], meta, 1)
     # (b) the index, last and as ONE entry listing every type id (each as its
     # raw bytes): a reader trusts only a complete index, and one save is all
     # or nothing, so a throw above leaves the previous index (or none).
@@ -951,7 +960,8 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       if s.isNone:
         # A hit needs the complete set the index describes.
         errors.add "loadSymexRaisedImpl: raised(" & tid & ") has no " &
-          "soundness-carrying sentinel (torn save); a miss"
+          "soundness-carrying sentinel, or more than one entry (torn " &
+          "save); a miss"
         return
       loaded.add (raw: RawResult(status: sxRaised, raisedTypeId: tid,
                                  isDefect: sentinel[0].meta.getOrDefault(
@@ -4623,9 +4633,13 @@ macro symexFindAllWitnesses*(fn: typed,
             let cachedVerdict = loadSymexVerdictImpl(`db`, `progId`, `loopTarget`,
                                                      `symexSettings`,
                                                      `dbErrorsId`)
-            let cachedRaised = loadSymexRaisedImpl(`db`, `progId`, `loopTarget`,
-                                                   `symexSettings`,
-                                                   `dbErrorsId`)
+            # The raised slot is read only when the verdict missed; the
+            # cascade is witness, then verdict, then raised.
+            let cachedRaised =
+              if cachedVerdict.isNone:
+                loadSymexRaisedImpl(`db`, `progId`, `loopTarget`,
+                                    `symexSettings`, `dbErrorsId`)
+              else: @[]
             if cachedVerdict.isSome:
               f.status = cachedVerdict.get.status
               f.soundness = cachedVerdict.get.soundness   ## RFC-0005 S11

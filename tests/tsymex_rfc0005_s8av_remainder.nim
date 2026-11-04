@@ -223,6 +223,26 @@ suite "RFC-0005 S8av (3) -- verdict cache hit also serves gaps()":
     check warm.gaps == cold.gaps
     check warm.gaps.len > 0
 
+  test "K1: a verdict cache hit does not read the raised slot":
+    # The cascade is witness, then verdict, then raised: a verdict hit never
+    # looks at the raised index (":raised2"), so a torn raised record beside
+    # it cannot add a dbErrors entry.
+    let inner = inMemoryDatabase()
+    var raisedLoads = 0
+    var db = inner
+    db.loadPrimaryImpl = proc (t: string): seq[seq[ChoiceNode]] =
+      if t.endsWith(":raised2"): inc raisedLoads
+      inner.loadPrimaryImpl(t)
+    for f in symexFindAllWitnesses(s8avOpaque, db): discard   # cold
+    check raisedLoads == 1          # verdict missed, so raised was consulted
+    raisedLoads = 0
+    var warm: SymexFinding
+    for f in symexFindAllWitnesses(s8avOpaque, db):
+      if f.targetDesc == "label(\"s8av_opaque\")": warm = f
+    check warm.fromCache
+    check warm.status == sfUnknown
+    check raisedLoads == 0
+
 # =============================================================================
 # (4) the "raise-irrelevant-parameter witness sentinel" is not a sentinel: it
 # is IndexDefect's own witness, misattributed by the E6 defect-pre-emption

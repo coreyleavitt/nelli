@@ -5604,6 +5604,37 @@ proc intConvSrcName(operand: NimNode, src: string): string =
   if cls.ty.kind != itInt: return src
   (if cls.ty.signed: "int" else: "uint") & $cls.ty.width
 
+type CondArm = tuple[pre: seq[IRStmt], br: IRBranch]
+  ## RFC-0005 review R1-01. One arm of an `if` / `elif` chain: its parsed
+  ## branch and the preamble its CONDITION needs run before it is tested.
+
+proc lowerCondChain(arms: seq[CondArm]; elseBody: IRStmt;
+                    preamble: var seq[IRStmt]): IRStmt =
+  ## RFC-0005 review R1-01. The `if` an `if c1: A elif c2: B ... else: E`
+  ## chain lowers to. The first condition's preamble runs before the `if`,
+  ## so it goes to `preamble`. A later condition's preamble runs only where
+  ## every earlier condition was false, so the chain is split at the first
+  ## later arm that has one: `if c1: A else: (pre2; if c2: B ... else: E)`.
+  ##
+  ## Every `if` lowering used to append each condition's preamble ahead of
+  ## the whole construct. A later condition's bounds fork, hoisted call or
+  ## defect fork then ran on the paths that took an earlier branch: `if
+  ## i >= s.len: <label> elif s[i] == 3` raised `IndexDefect` before testing
+  ## `i >= s.len`. A chain whose later conditions have no preamble, nearly
+  ## every one, lowers to the single `if` it always did.
+  doAssert arms.len > 0, "lowerCondChain: an if with no condition"
+  for cs in arms[0].pre: preamble.add cs
+  var branches = @[arms[0].br]
+  var k = 1
+  while k < arms.len and arms[k].pre.len == 0:
+    branches.add arms[k].br
+    inc k
+  if k == arms.len: return mkIf(branches, elseBody)
+  var inner: seq[IRStmt]
+  let rest = lowerCondChain(arms[k ..< arms.len], elseBody, inner)
+  inner.add rest
+  mkIf(branches, mkBlock(inner))
+
 proc armYieldsValue(body: NimNode): bool =
   ## RFC-0005 s1. Does this branch arm produce a VALUE, or does it leave the
   ## path? A `case`/`if` in expression position may still carry arms that
@@ -5653,12 +5684,10 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
   ##     count is always sound, just less precise (see the `nnkCaseStmt`
   ##     statement arm's own comment) — and mirroring it would duplicate the
   ##     label-mining logic. A later slice can lift it into a shared helper.
-  ##   * Elif-condition preambles are surfaced to the OUTER preamble, exactly
-  ##     as the `nnkIfStmt` statement arm does. That is the known CR-1b
-  ##     deposit shape (issue #157) and is PRE-EXISTING and shared: the same
-  ##     source in statement position behaves identically. Diverging here
-  ##     would make the two positions disagree, which is worse than the
-  ##     shared limitation.
+  ##   * `of` labels are constant expressions (Nim requires it), so a label's
+  ##     preamble is empty and the OUTER preamble is safe for it. A condition
+  ##     that may carry one belongs to an `if` chain, which `lowerCondChain`
+  ##     lowers (RFC-0005 review R1-01).
   let resultTy = classifyType(n).ty
   let tmp = freshSynth(ctx, "caseexpr")
 
@@ -12633,19 +12662,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `mathInterception`, and never reach here).
     let resultTy = classifyType(n).ty
     let tmp = freshSynth(ctx, "ifexpr")
-    var branches: seq[IRBranch]
+    var arms: seq[CondArm]   # RFC-0005 review R1-01: `lowerCondChain`
     var elseBody: IRStmt = nil
     for arm in n:
       case arm.kind
       of nnkElifBranch, nnkElifExpr:
         var condPre: seq[IRStmt]
         let condIR = parseExpr(arm[0], condPre, ctx)
-        for cs in condPre: preamble.add cs
         var bodyPre: seq[IRStmt]
         let bodyIR = parseExpr(arm[1], bodyPre, ctx)
         bodyPre.add mkLet(tmp, resultTy, bodyIR)
-        branches.add mkBranch(condIR,
-          if bodyPre.len == 1: bodyPre[0] else: mkBlock(bodyPre))
+        arms.add (condPre, mkBranch(condIR,
+          if bodyPre.len == 1: bodyPre[0] else: mkBlock(bodyPre)))
       of nnkElse, nnkElseExpr:
         var bodyPre: seq[IRStmt]
         let bodyIR = parseExpr(arm[0], bodyPre, ctx)
@@ -12653,7 +12681,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         elseBody = if bodyPre.len == 1: bodyPre[0] else: mkBlock(bodyPre)
       else:
         error(&"symex M5: unexpected if-expr arm kind {arm.kind}", arm)
-    preamble.add mkIf(branches, elseBody)
+    let ifSt = lowerCondChain(arms, elseBody, preamble)
+    preamble.add ifSt
     mkVar(tmp)
   of nnkTupleConstr:
     # RFC-chapulin-hardening P1 (walker v51->52): a general N-ary tuple
@@ -15924,7 +15953,7 @@ proc parseIterBodyStmt(n: NimNode,
     discard ctx.popJumpTarget()
     whileIR
   of nnkIfStmt, nnkIfExpr:
-    var branches: seq[IRBranch]
+    var arms: seq[CondArm]   # RFC-0005 review R1-01: `lowerCondChain`
     var elseBody: IRStmt = nil
     var allPre: seq[IRStmt]
     for arm in n:
@@ -15932,13 +15961,12 @@ proc parseIterBodyStmt(n: NimNode,
       of nnkElifBranch, nnkElifExpr:
         var cp: seq[IRStmt]
         let condIR = parseExpr(arm[0], cp, ctx)
-        for cs in cp: allPre.add cs
         let branchBody = parseIterBodyStmt(arm[1], iterVarBindings, forBodyNode, ctx)
-        branches.add mkBranch(condIR, branchBody)
+        arms.add (cp, mkBranch(condIR, branchBody))
       of nnkElse, nnkElseExpr:
         elseBody = parseIterBodyStmt(arm[0], iterVarBindings, forBodyNode, ctx)
       else: discard
-    let ifNode = mkIf(branches, elseBody)
+    let ifNode = lowerCondChain(arms, elseBody, allPre)
     if allPre.len > 0:
       var all = allPre
       all.add ifNode
@@ -19051,25 +19079,22 @@ proc parseStmtInner(n: NimNode,
     let inner = if n.kind == nnkBlockStmt: n[1] else: n
     parseDeferList(stmtListItems(inner), 0, ctx)
   of nnkIfStmt, nnkIfExpr:
-    var branches: seq[IRBranch]
+    # Each condition's preamble runs just before that condition is tested:
+    # the first one's before the if, a later one's in the else of the arm
+    # before it (`lowerCondChain`, RFC-0005 review R1-01).
+    var arms: seq[CondArm]
     var elseBody: IRStmt = nil
     for arm in n:
       case arm.kind
       of nnkElifBranch, nnkElifExpr:
-        # Each branch's condition gets its own preamble; we surface it
-        # into the outer preamble so the call runs *before* the if.
         var condPreamble: seq[IRStmt]
         let condIR = parseExpr(arm[0], condPreamble, ctx)
-        # The condition's preamble must run before the if for the
-        # branch's then-body to see the bindings. For Phase 3 a
-        # single if's preamble flows into the enclosing block.
-        for cs in condPreamble: preamble.add cs
-        branches.add mkBranch(condIR, parseStmt(arm[1], ctx))
+        arms.add (condPreamble, mkBranch(condIR, parseStmt(arm[1], ctx)))
       of nnkElse, nnkElseExpr:
         elseBody = parseStmt(arm[0], ctx)
       else:
         error(&"symex: unexpected if-arm kind {arm.kind}", arm)
-    mkIf(branches, elseBody)
+    lowerCondChain(arms, elseBody, preamble)
   of nnkAsgn:
     return parseAsgn(n, nil, preamble, ctx)
   of nnkSinkAsgn:

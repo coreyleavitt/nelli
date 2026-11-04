@@ -1711,5 +1711,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_r1_rundependence",
             "tsymex_rfc0005_r1_findingapi",
             "tsymex_rfc0005_r1_replaychild",
-            "tsymex_rfc0005_r1_replaychild_reexec"]:
+            "tsymex_rfc0005_r1_replaychild_reexec",
+            "tsymex_rfc0005_r1_keyflags",
+            "tsymex_rfc0005_r1_keyimpl",
+            "tsymex_rfc0005_r1_keymethod"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

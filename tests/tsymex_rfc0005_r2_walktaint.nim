@@ -158,7 +158,7 @@ template tainted(fn: untyped; tgt: SymexTarget) =
 suite "R2 SD1/SD2: lowering taint survives a nested walk and its exits":
 
   test "walker version floor":
-    check parseInt(symexWalkerVersion) >= 271
+    check parseInt(symexWalkerVersion) >= 272
 
   test "SD1: a nested walk keeps the caller's queue; its break path carries it":
     let probe = stmtExitTaintProbe()

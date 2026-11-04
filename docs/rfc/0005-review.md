@@ -25,7 +25,7 @@ as evidence.
 - Round 6: delta `90f6902b..fb41eeba`. 2 (Medium). Fix `51d6a02b`.
 - Round 7: delta `fb41eeba..51d6a02b`. 3 (Medium, all in the raised-type cache and its docs). Fix `29a60d5a`.
 - Round 8: delta `51d6a02b..29a60d5a`. 1 real (Medium); a second Medium (K4) was refuted. Fix `c0283f30`.
-- Round 9: delta `29a60d5a..c0283f30`. 1 (Medium, a doc overclaim). Fix `2e7a0bb6`.
+- Round 9: delta `29a60d5a..c0283f30`. 1 Medium (a no-op cap literal described as a fix, with a test that cannot fail), 2 Lows. Fix `2e7a0bb6`.
 - Round 10: delta `c0283f30..2e7a0bb6`, a comment-only commit verified inline. 0 Critical/High/Medium: the floor.
 
 Trend of Critical/High/Medium found per round: R1 22, R2 7, R3 7 (+1 pre-existing Critical), R4 1, R5 5, R6 2, R7 3, R8 1 (K4 refuted), R9 1, R10 0.
@@ -152,8 +152,9 @@ Trend of Critical/High/Medium found per round: R1 22, R2 7, R3 7 (+1 pre-existin
 | R8-02 | Medium | refuted | settle/cache | `symex.nim` ~886 | The raised sentinel is saved with `verdictCacheMaxEntries`, so after a torn save a re-save with a different witness accumulates 2+ entries and the loader (`sentinel.len == 1`) is a permanent miss that never heals (reported as K4) | Refuted: `verdictCacheMaxEntries == 1`. Pinned anyway: c0283f30 saves sentinels with the literal 1 and adds a test; 2e7a0bb6 rewords the comment as hardening, not a fix |
 | R8-03 | Low | fixed | design | `engine/frame.nim` 43-50; `symex.nim` | The `skUnconfirmedMiss` doc was wrong again (under `acceptUnknown` there is no failure); the `skAudit` doc (`sfReplayMiss` is never constructed; `sfNotApplicable` is built in `phases.nim`); the concurrent-writer caveat | Reading; c0283f30, 2e7a0bb6 |
 | R8-04 | Low | open | settle/cache | `symex.nim` | Old `:raised` indexes (before `:raised2`) are never cleaned up | Reading; RFC-0016 INT-38 |
-| R9-01 | Medium | fixed | design | `symex.nim` 851-860 (`saveSymexRaisedImpl`) | The concurrent-writer caveat called interleaving "benign when the base key is deterministic", which is wrong for a multi-type set saved through the exported API by racing writers (one writer's sentinel for one type can pair with another's for the next). Recorded from the fix commit: no round 9 lens notes were kept | Reading (from the diff of 2e7a0bb6); 2e7a0bb6 states what stays self-consistent and what can mix; a comment-only change, no test |
-| R9-02 | Low | fixed | design | `symex.nim` ~896; `engine/frame.nim` 43-50 | The sentinel cap comment overclaimed a fix (`verdictCacheMaxEntries` is also 1 today); the `skAudit` note omitted the zero-targets arm of `symexFindAllWitnesses` | Reading (from the diff of 2e7a0bb6); 2e7a0bb6 |
+| R9-01 | Medium | fixed | design | `symex.nim` ~896; `tests/tsymex_phase15_E2a_cascade.nim` (K4) | The sentinel save's literal `1` replaces `verdictCacheMaxEntries`, which is already 1, yet its comment called it a fix; the new K4 test passes on the pre-delta code, so it cannot catch a revert | Reading; 2e7a0bb6 rewords both as hardening and a pin; comment-only, no test |
+| R9-02 | Low | fixed | design | `symex.nim` 851-860 (`saveSymexRaisedImpl`) | The concurrent-writer caveat called interleaving benign; that holds for the single-type production path only, not a multi-type set saved through the exported API by racing writers | Reading; 2e7a0bb6 |
+| R9-03 | Low | fixed | design | `engine/frame.nim` 43-50 | The `skAudit` note omitted the zero-targets `sfNotApplicable` site in `symexFindAllWitnesses` | Reading; 2e7a0bb6 |
 
 ## Accepted judgement calls
 

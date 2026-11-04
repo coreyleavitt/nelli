@@ -181,6 +181,8 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
     db: db, dbEnabled: dbEnabled, explicit: explicit)
   var state = initEngineState(spec)
   result = runPipeline(state, phases)
+  # Review R2 (DD3): what `assertCoveredBy` found inside the property.
+  result.symexFindings.add engineStack[^1].symexFindings
   if settings.coverageGuided:
     # U1: the frontier (not a raw scalar re-read) is now the single
     # source of truth for the run's cumulative distinct-edge count too.

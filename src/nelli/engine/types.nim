@@ -57,9 +57,8 @@ type
     discoveredBy*:   seq[string]
       ## Phase 10. Test/context names that produced or observed this
       ## witness. Secondary attribution metadata — not part of the
-      ## content-addressed cache key, never affects equality. Default
-      ## empty; the `assertCoveredBy` macro will stamp the enclosing
-      ## test name when one is available.
+      ## content-addressed cache key. Default empty: nothing stamps it
+      ## yet.
     fromCache*:      bool
       ## Phase 13 cycle 7. True iff the verdict (`status` +
       ## `witnessChoices` if any) came from the content-addressed
@@ -252,10 +251,11 @@ type
     symexFindings*: seq[SymexFinding]
       ## Symex-derived evidence of THIS run: `symexForAll`'s per-target
       ## findings, then the `sfNotApplicable` audit entries its seed phase
-      ## records for seeds that did not fit. Empty when symex wasn't used.
-      ## Phase 7. Review R1-10: findings ride values, never a thread-local
-      ## sink, so another call's findings cannot leak in (`assertCoveredBy`
-      ## returns its own).
+      ## records for seeds that did not fit, then (review R2, DD3) what
+      ## `assertCoveredBy` found inside the property, each once, on a pass
+      ## or a failure. Empty when symex wasn't used. Phase 7. Review R1-10:
+      ## nothing from another run leaks in; the collector is the run's own
+      ## engine frame (`recordSymexFinding`).
     crash*: Option[CrashInfo]
       ## RFC-fuzzer-nextgen U0: typed crash identity when the falsifying
       ## example was a caught property `Defect` (failed `doAssert`,

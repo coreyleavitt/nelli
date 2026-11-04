@@ -233,10 +233,13 @@ proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
           # (Rejection). Either way it's not a falsification —
           # record an `sfNotApplicable` finding so the eventual
           # report carries an honest audit trail and continue.
+          # Review R2 (LV3): settled. It is no verdict, so nothing about it
+          # needed a replay, and it was decided under no bounds.
           state.acc.symexFindings.add(SymexFinding(
             targetDesc: "<seed-shape-mismatch-or-rejected>",
             status:     sfNotApplicable,
-            covered:    false))
+            covered:    false,
+            soundness:  Soundness(replay: rsNotNeeded)))
         of ekPassed:
           discard
       pcContinue)

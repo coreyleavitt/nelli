@@ -234,7 +234,10 @@ proc symexFindingJson(f: SymexFinding): string =
             ",\"witnessUnsafe\":" & $f.soundness.witnessUnsafe &
             ",\"runDependence\":[" & runDependenceJson(f.soundness.runDependence) &
             "]}"
-  result &= ",\"bounds\":" & boundsJson(f.bounds)   # review R1-17
+  # Review R1-17: the bounds a verdict was decided under. Review R2 (LV3): not
+  # on an entry that is no verdict, as in the text rendering.
+  if f.status notin {sfNotApplicable, sfReplayMiss}:
+    result &= ",\"bounds\":" & boundsJson(f.bounds)
   result &= ",\"gaps\":["
   for i, g in f.gaps:
     if i > 0: result &= ","
@@ -391,8 +394,8 @@ proc renderGithub[T](r: Report[T], testName: string): string =
     if f.soundness.witnessUnsafe:
       result &= "\n::warning title=symex witness unsafe::" &
                 ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
-                         ": its replay ended or hung the process running it " &
-                         "after reaching the target; it is not run in the host")
+                         ": its replay ended or hung the process running " &
+                         "it; it is not run in the host")
     # RFC-0005 W1: a hint is a `::notice` of its own, so a replay that crashed
     # or did not run says so, with its message, where the CI reader looks.
     for h in f.hints:

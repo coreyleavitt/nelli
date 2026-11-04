@@ -47,6 +47,11 @@ type
     reTimedOut    ## it ran past the bound and was killed
     reRefused     ## no child ran: it could not be started, or the state the
                   ## SUT reaches could not be handed to it
+    reLost        ## review R2 (LV1). A child ran and ended without a report
+                  ## of its end, and its exit status was gone before the host
+                  ## could read it (`statusLost`). It did not finish, as far
+                  ## as anyone knows, so it counts as having ended its
+                  ## process: never as "did not run"
 
   ReplayReport* = object
     ## What the SUT's run established, from inside the child.
@@ -60,7 +65,8 @@ type
     bound*: bool
     code*: int       ## `reExited`: the exit code. `reSignalled`: the signal,
                      ## or the system's exception code
-    why*: string     ## `reRefused`: the reason
+    why*: string     ## `reRefused`, `reLost`: the reason. `reTimedOut`: why
+                     ## it was stopped, when that was not the bound
     outOfMemory*: bool
       ## RFC-0005 0.9.1 (WA-7). The child ended because an allocation failed
       ## at the replay's memory limit (`replayMemoryLimit`), which on a fork
@@ -109,7 +115,7 @@ func describe*(c: ReplayChild): string =
       "it was ended by signal " & $c.code
   of reTimedOut:
     if c.why.len > 0: c.why else: "it ran past its bound and was killed"
-  of reRefused: c.why
+  of reRefused, reLost: c.why
 
 func settled(c: ReplayChild): ReplayChild =
   ## The child as the host reports it: a run past the bound or into the memory
@@ -291,9 +297,11 @@ proc statusLost(c: ReplayChild): ReplayChild =
   ## exit status was gone before the host could read it: the host ignores
   ## `SIGCHLD`, so the system reaped it, or another thread's `wait` did. How
   ## it ended is not known, so it is not reported as anything it may not
-  ## have been.
+  ## have been. Review R2 (LV1): it is `reLost`, not `reRefused`. It ran, so
+  ## a hit it reported stands (`reached` is kept), and it did not finish, so
+  ## its witness is never run in the host.
   result = c
-  result.ending = reRefused
+  result.ending = reLost
   result.why = "the replay's child ended, but its exit status was lost " &
     "before the host could read it (SIGCHLD is ignored, or another wait " &
     "reaped it), so how it ended is not known"

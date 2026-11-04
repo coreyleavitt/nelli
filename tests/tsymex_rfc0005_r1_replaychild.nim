@@ -17,12 +17,18 @@
 ##   environment, not one its host set for it, is ignored: the program neither
 ##   refuses every replay nor takes itself for a replay's child.
 ##
+## * Review R2 (LV1, LV2): a child whose status was lost had started, so its
+##   replay is not "declined" (that let its witness run in the host); and a
+##   child stopped for flooding its report says so in its hint.
+##
 ## `tsymex_rfc0005_r1_replaychild_reexec` runs this file under
 ## `-d:nelliReplayReexec`.
 import std/[unittest, os, osproc, strutils, strtabs, monotimes, times, sequtils, streams]
 import std/posix
 import nelli/engine/markers
 import nelli/smt/replayproc
+import nelli/smt/replayresult
+import nelli/smt/types
 
 proc msSince(t: MonoTime): int64 = (getMonoTime() - t).inMilliseconds
 
@@ -48,6 +54,14 @@ proc floodPipes() =
 proc killSelf() =
   discard kill(getpid(), SIGKILL)
 
+proc hitThenKill(): ReplayReport =
+  ## A SUT that reaches its label, then is killed before it returns.
+  symexCaptureBegin()
+  armReplayHit("t")
+  symexTarget("t")
+  killSelf()
+  ReplayReport(reached: true, bound: true)
+
 # ---- re-exec: the child's half, and a probe of this program as a host ---------
 
 when replayReexecs:
@@ -59,6 +73,7 @@ when replayReexecs:
     of "kill":
       killSelf()
       ReplayReport()
+    of "hitkill": hitThenKill()
     else: ReplayReport()
 
   let registered {.used.} = replayChildEntry("r1-replaychild-site", childRun)
@@ -127,6 +142,14 @@ when replayForks:
       check c.ending == reTimedOut
       check c.runDependent
       check not c.reached
+      # Review R2 (LV2): the hint says why it was stopped, not that it ran
+      # past replayTimeoutMs.
+      let r = replayResultOf(c, lossy = false)
+      check r.outcome == roTimedOut
+      for h in candidateHint(r, sxSat, "", "") & winnerHint(r, "a claim", ""):
+        checkpoint h.msg
+        check "wrote past" in h.msg
+        check "replayTimeoutMs" notin h.msg
 
     test "with no bound: the host still returns":
       let t0 = getMonoTime()
@@ -152,10 +175,30 @@ suite "R1-19: the child's exit status":
     let ms = msSince(t0)
     checkpoint "ending " & $c.ending & ", " & $ms & " ms, " & describe(c)
     check not (c.ending == reExited and c.code == 0)
-    check c.ending == reRefused
+    check c.ending == reLost
     check c.runDependent
     check "status" in c.why
     check ms < 4_000
+    # Review R2 (LV1): a child that started is not one that did not run. It
+    # ended its process before reaching the target, as far as anyone knows.
+    let r = replayResultOf(c, lossy = false)
+    check r.outcome == roCrashed
+    check r.runDependence == {rdReplay}
+
+  test "SIGCHLD ignored: a reach before the status was lost is confirmed":
+    discard signal(SIGCHLD, SIG_IGN)
+    defer: discard signal(SIGCHLD, SIG_DFL)
+    let c = runChild(sut(hitThenKill()), "hitkill", 5_000)
+    checkpoint "ending " & $c.ending & ", " & describe(c)
+    check c.ending == reLost
+    check c.reached
+    let r = replayResultOf(c, lossy = true)
+    check r.outcome == roConfirmed
+    check r.replayStatus == rsConfirmed
+    var unsafe = false
+    let hints = confirmedEnding(r, sxSat, "", "", unsafe)
+    check unsafe          # never run in the host
+    check hints.len == 1
 
   test "SIGCHLD ignored: a child that finished is read as finished":
     discard signal(SIGCHLD, SIG_IGN)

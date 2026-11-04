@@ -379,10 +379,10 @@ suite "R3 E2: one entry per call site and target":
       warm.fromCache = true
       var other = cold
       other.soundness.runDependence = {rdReplay}
-      recordSymexFinding("f.nim(1, 2)", "fn", cold)
-      recordSymexFinding("f.nim(1, 2)", "fn", warm)
-      recordSymexFinding("f.nim(3, 4)", "fn", cold)
-      recordSymexFinding("f.nim(1, 2)", "fn", other)
+      recordSymexFinding(FindingOrigin(site: "f.nim(1, 2)", fnId: "fn"), cold)
+      recordSymexFinding(FindingOrigin(site: "f.nim(1, 2)", fnId: "fn"), warm)
+      recordSymexFinding(FindingOrigin(site: "f.nim(3, 4)", fnId: "fn"), cold)
+      recordSymexFinding(FindingOrigin(site: "f.nim(1, 2)", fnId: "fn"), other)
       let got = toSeq(engineStack[^1].symexFindings.values)
       check got.len == 2
       if got.len == 2:
@@ -445,8 +445,8 @@ suite "R4 U1: a failing finding is not overwritten by a later pass":
       var good = bad
       good.covered = true
       good.soundness.replay = rsConfirmed
-      recordSymexFinding("s", "fn", bad)
-      recordSymexFinding("s", "fn", good)
+      recordSymexFinding(FindingOrigin(site: "s", fnId: "fn"), bad)
+      recordSymexFinding(FindingOrigin(site: "s", fnId: "fn"), good)
       let got = toSeq(engineStack[^1].symexFindings.values)
       check got.len == 1
       check not got[0].covered
@@ -456,17 +456,43 @@ suite "R4 U1: a failing finding is not overwritten by a later pass":
       var unconf = SymexFinding(targetDesc: "t", status: sfSat, covered: true)
       var good = unconf
       good.soundness.replay = rsConfirmed
-      recordSymexFinding("s", "fn", unconf)
-      recordSymexFinding("s", "fn", good)
+      recordSymexFinding(FindingOrigin(site: "s", fnId: "fn"), unconf)
+      recordSymexFinding(FindingOrigin(site: "s", fnId: "fn"), good)
       let got = toSeq(engineStack[^1].symexFindings.values)
       check got.len == 1
       check not trusted(got[0])
 
+  test "R5 D3a: a later unknown does not replace an earlier coverage failure":
+    withEngineFrame:
+      let o = FindingOrigin(site: "s", fnId: "fn")
+      var bad = SymexFinding(targetDesc: "t", status: sfSat, covered: false)
+      var unk = SymexFinding(targetDesc: "t", status: sfUnknown,
+                             covered: false)
+      recordSymexFinding(o, bad)
+      recordSymexFinding(o, unk)
+      let got = toSeq(engineStack[^1].symexFindings.values)
+      check got.len == 1
+      check got[0].status == sfSat
+      check not got[0].covered
+
+  test "R5 D3a: an unknown still beats an unconfirmed or trusted covered one":
+    withEngineFrame:
+      let o = FindingOrigin(site: "s", fnId: "fn")
+      var unk = SymexFinding(targetDesc: "t", status: sfUnknown,
+                             covered: false)
+      var good = SymexFinding(targetDesc: "t", status: sfSat, covered: true)
+      good.soundness.replay = rsConfirmed
+      recordSymexFinding(o, unk)
+      recordSymexFinding(o, good)
+      let got = toSeq(engineStack[^1].symexFindings.values)
+      check got.len == 1
+      check got[0].status == sfUnknown
+
   test "two fns through one call site are two entries":
     withEngineFrame:
       let f = SymexFinding(targetDesc: "t", status: sfSat)
-      recordSymexFinding("s", "fnA", f)
-      recordSymexFinding("s", "fnB", f)
+      recordSymexFinding(FindingOrigin(site: "s", fnId: "fnA"), f)
+      recordSymexFinding(FindingOrigin(site: "s", fnId: "fnB"), f)
       check engineStack[^1].symexFindings.len == 2
 
   test "a failure on the first example survives later passes in the report":
@@ -492,9 +518,34 @@ suite "R4 U1: a failing finding is not overwritten by a later pass":
 
 suite "R4 X8: a finding recorded outside a frame is counted":
   test "the drop counter moves":
+    resetDroppedSymexFindings()
     let before = droppedSymexFindings()
-    recordSymexFinding("s", "fn", SymexFinding(targetDesc: "t"))
+    check before == 0
+    recordSymexFinding(FindingOrigin(site: "s", fnId: "fn"),
+                       SymexFinding(targetDesc: "t"))
     check droppedSymexFindings() == before + 1
     withEngineFrame:
-      recordSymexFinding("s", "fn", SymexFinding(targetDesc: "t"))
+      recordSymexFinding(FindingOrigin(site: "s", fnId: "fn"),
+                       SymexFinding(targetDesc: "t"))
     check droppedSymexFindings() == before + 1
+
+suite "R5 3d: the fn identity":
+  test "a local proc variable and a proc parameter are refused, not crashed":
+    # Neither is a routine symbol, so neither has a body to hash: the entry
+    # macro refuses them ("expected a `proc` symbol", before the identity is
+    # built), a clean compile error, not a macro crash.
+    let local = r1Alpha
+    proc viaParam(p: proc (x: int)): bool =
+      compiles(assertCoveredBy(p, tLabel("alpha")))
+    check not compiles(assertCoveredBy(local, tLabel("alpha")))
+    check not viaParam(r1Alpha)
+    check compiles(assertCoveredBy(r1Alpha, tLabel("alpha")))
+
+  test "two routines at one site keep distinct entries":
+    let rep = forAll(integers(0, 1), proc (x: int) =
+      try: assertCoveredBy(r1Alpha, tLabel("alpha"), r4Late)
+      except SymexCoverageDefect: discard
+      try: assertCoveredBy(r1Beta, tLabel("beta"), r4Late)
+      except SymexCoverageDefect: discard,
+      Settings(maxExamples: 2))
+    check rep.symexFindings.len == 2

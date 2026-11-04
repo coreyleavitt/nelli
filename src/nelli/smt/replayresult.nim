@@ -108,7 +108,8 @@ func replayResultOf*(c: ReplayChild; lossy: bool): ReplayResult =
       of reFinished:
         if not c.bound or lossy: roInconclusive else: roRefuted
       of reTimedOut: roTimedOut
-      else: roCrashed   # reExited, reSignalled, reLost (reRefused is above)
+      of reExited, reSignalled, reLost: roCrashed
+      of reRefused: roDeclined   # unreachable: handled above
   ReplayResult(fOutcome: outcome, fChild: c)
 
 func endsChild*(r: ReplayResult): bool =
@@ -129,11 +130,11 @@ func detail*(r: ReplayResult): string =
 
 func runDependence*(r: ReplayResult): set[RunDependence] =
   ## RFC-0005 0.9.1 (WA-7). What this replay adds to its verdict's
-  ## `Soundness.runDependence`. Review R3 (SC1), R4 (X5): set once, where the
-  ## child is classified (`replayproc.nim`: `settled` for a kill at the bound
-  ## or the memory limit, `statusLost` for `reLost`); every producer of a
-  ## `ReplayChild` ends in one of them, so it is read here, not derived again.
-  if r.child.runDependent: {rdReplay}
+  ## `Soundness.runDependence`. Review R5 (D4b): a pure function of the child:
+  ## a `reTimedOut` or `reLost` ending is run-dependent by construction, so no
+  ## producer can forget it; `ReplayChild.runDependent` adds the causes an
+  ## ending cannot express (see its doc, the one place both are described).
+  if r.child.ending in {reTimedOut, reLost} or r.child.runDependent: {rdReplay}
   else: {}
 
 func replayStatus*(r: ReplayResult): ReplayStatus =

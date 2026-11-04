@@ -37,10 +37,14 @@ type EngineFrame* = object
 var engineStack* {.threadvar.}: seq[EngineFrame]
 
 func severity(f: SymexFinding): int =
-  ## Review R4 (U1). How much a report needs to show a finding: 3 for one that
-  ## failed coverage (or decided nothing: an unknown), 2 for a covered one no
-  ## trust backs (an unconfirmed claim), 1 for a trusted, covered one.
-  if not f.covered: 3
+  ## Review R4 (U1), R5 (D3a). How much a report needs to show a finding, each
+  ## rank distinct so a tie never lets a later, weaker finding replace an
+  ## earlier, stronger one: 4 for one that failed coverage on a witness (a
+  ## claim the test missed), 3 for one that decided nothing (an unknown), 2 for
+  ## a covered one no trust backs (an unconfirmed claim), 1 for a trusted,
+  ## covered one.
+  if f.status == sfUnknown: 3
+  elif not f.covered: 4
   elif not trusted(f): 2
   else: 1
 
@@ -84,23 +88,36 @@ proc currentFrame*: var EngineFrame {.inline.} =
 
 var droppedFindings {.threadvar.}: int
 
+proc resetDroppedSymexFindings*() =
+  ## Review R5 (3c). Zeroes this thread's drop count (`droppedSymexFindings`).
+  ## The count is per thread and only ever grows, so a test that reads it
+  ## resets it first, or compares against a reading taken before.
+  droppedFindings = 0
+
 proc droppedSymexFindings*(): int =
   ## Review R4 (X8). How many findings `recordSymexFinding` dropped on this
   ## thread because no engine frame was open. A nonzero count in a test that
   ## expected its finding on a `Report` means the call ran outside `forAll`.
   droppedFindings
 
-func findingKey(site, fnId: string; f: SymexFinding): string =
+type FindingOrigin* = object
+  ## Review R5 (3b). Where a finding came from: the call site that made it
+  ## (`file(line, col)`) and the identity of the `fn` it checked. Two strings
+  ## that are easy to swap as arguments, so they travel as named fields.
+  site*: string
+  fnId*: string
+
+func findingKey(o: FindingOrigin; f: SymexFinding): string =
   ## Review R3 (E2), R4 (U1). What makes two findings one entry: the `fn`
   ## under test, the call site that made them (a template or helper shares
   ## one among several `fn`s, a generic one among its instantiations) and the
   ## target (one multi-target call makes one per target).
-  $fnId.len & ':' & fnId & $site.len & ':' & site & f.targetDesc
+  $o.fnId.len & ':' & o.fnId & $o.site.len & ':' & o.site & f.targetDesc
 
-proc recordSymexFinding*(site, fnId: string; f: SymexFinding) =
+proc recordSymexFinding*(origin: FindingOrigin; f: SymexFinding) =
   ## Review R2 (DD3), R3 (E2, E3), R4 (U1, X8). Records a finding
-  ## `assertCoveredBy` made at `site` (its call site, `file(line, col)`) on
-  ## `fnId` (the identity of the `fn` it checked) on the running property's
+  ## `assertCoveredBy` made at `origin.site` (its call site, `file(line, col)`) on
+  ## `origin.fnId` (the identity of the `fn` it checked) on the running property's
   ## frame. One entry per fn, site and target; it holds the most severe
   ## finding made under that key, the latest among equals, so a failure on one
   ## example is not overwritten by a later pass. Constant time.
@@ -113,7 +130,7 @@ proc recordSymexFinding*(site, fnId: string; f: SymexFinding) =
   if engineStack.len == 0:
     inc droppedFindings
     return
-  record(engineStack[^1], findingKey(site, fnId, f), f)
+  record(engineStack[^1], findingKey(origin, f), f)
 
 # --- user-facing accumulator APIs --------------------------------------------
 

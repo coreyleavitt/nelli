@@ -144,7 +144,7 @@ when defined(posix):
         checkpoint "ending " & $c.ending & ", " & $ms & " ms, " & describe(c)
         check ms < 10_000
         check c.ending == reTimedOut
-        check c.runDependent
+        check replayResultOf(c, lossy = false).runDependence == {rdReplay}
         check not c.reached
         # Review R2 (LV2): the hint says why it was stopped, not that it ran
         # past replayTimeoutMs.
@@ -180,7 +180,6 @@ when defined(posix):
       checkpoint "ending " & $c.ending & ", " & $ms & " ms, " & describe(c)
       check not (c.ending == reExited and c.code == 0)
       check c.ending == reLost
-      check c.runDependent
       check "status" in c.why
       check ms < 4_000
       # Review R2 (LV1): a child that started is not one that did not run. It

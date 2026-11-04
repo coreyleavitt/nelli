@@ -74,13 +74,17 @@ type
       ## at the replay's memory limit (`replayMemoryLimit`), which on a fork
       ## is relative to what the host had mapped.
     runDependent*: bool
-      ## RFC-0005 0.9.1 (WA-7). How the child ended depends on this run, not
-      ## only on the program and the witness: it ran past its bound, hit the
-      ## memory limit, or could not be started or handed its state for a
-      ## reason of the moment (a failed `fork`, pipe or job object, a runtime
-      ## hook the host had set). Another run may decide it, so a verdict
-      ## it leaves undecided is not cached (`rdReplay`, carried on the
-      ## result's `Soundness.runDependence`).
+      ## RFC-0005 0.9.1 (WA-7), review R5 (D4b). The run-dependence the ending
+      ## cannot express. This flag and `ending` are the two sources of a
+      ## replay's `rdReplay`, and `ReplayResult.runDependence` (`replayresult.nim`)
+      ## joins them: a `reTimedOut` or `reLost` ending is run-dependent BY
+      ## CONSTRUCTION (a run past its bound, a status the system lost), whatever
+      ## this flag says. This flag carries the rest: an allocation that failed at
+      ## the memory limit (`outOfMemory`), a child that could not be started or
+      ## handed its state for a reason of the moment (a failed `fork`, pipe or
+      ## job object, a runtime hook the host had set), and a report the host
+      ## could not read. Another run may decide these, so a verdict they leave
+      ## undecided is not cached.
 
 var replayExecCount = 0
   ## How many children the host has started: symex never runs `fn` itself, so
@@ -120,10 +124,11 @@ func describe*(c: ReplayChild): string =
   of reRefused, reLost: c.why
 
 func settled(c: ReplayChild): ReplayChild =
-  ## The child as the host reports it: a run past the bound or into the memory
-  ## limit is the run's, not only the program's.
+  ## The child as the host reports it: a run into the memory limit is the
+  ## run's, not only the program's. (A run past the bound is too, by its
+  ## ending: see `ReplayChild.runDependent`.)
   result = c
-  if c.ending == reTimedOut or c.outOfMemory: result.runDependent = true
+  if c.outOfMemory: result.runDependent = true
 
 proc refused(why: string; runDependent = true): ReplayChild =
   ## No child ran. `runDependent`: for a reason of the moment (the default:
@@ -307,7 +312,6 @@ proc statusLost(c: ReplayChild): ReplayChild =
   result.why = "the replay's child ended, but its exit status was lost " &
     "before the host could read it (SIGCHLD is ignored, or another wait " &
     "reaped it), so how it ended is not known"
-  result.runDependent = true
 
 # ---- fork ---------------------------------------------------------------------
 

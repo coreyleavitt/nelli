@@ -160,6 +160,19 @@ suite "R3 SC1: an ending of the host's is run-dependent":
     let r = replayResultOf(ReplayChild(ending: reTimedOut,
                                          runDependent: true), false)
     check rdReplay in r.runDependence
+  test "R5 D4b: the ending alone makes a timed-out or lost child run-dependent":
+    # A producer that forgot the `runDependent` flag must not cache the verdict.
+    for ending in [reTimedOut, reLost]:
+      let r = replayResultOf(ReplayChild(ending: ending, runDependent: false),
+                             false)
+      check r.runDependence == {rdReplay}
+      let s = Soundness(replay: rsUnconfirmed, witnessUnsafe: true,
+                        runDependence: r.runDependence)
+      check not s.cacheable
+  test "R5 D4b: the flag still carries what the ending cannot say":
+    let r = replayResultOf(ReplayChild(ending: reRefused, runDependent: true),
+                           false)
+    check r.runDependence == {rdReplay}
   test "control: a child that exited is the program's":
     let r = replayResultOf(ReplayChild(ending: reExited, code: 3), false)
     check rdReplay notin r.runDependence

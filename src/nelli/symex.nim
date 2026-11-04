@@ -48,7 +48,8 @@ export replayresult.ReplayOutcome, replayresult.ReplayResult,
        replayresult.detail, replayresult.runDependence
 from ./smt/scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
-from ./engine/frame import recordSymexFinding   ## review R2 (DD3)
+from ./engine/frame import recordSymexFinding, FindingOrigin   ## review R2 (DD3)
+import ./smt/sha256   ## review R5 (3d): `fnIdLit` hashes a non-symbol `fn`
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
        engineTypes.FindingGap, engineTypes.trusted   ## RFC-0005 S11
 
@@ -482,7 +483,7 @@ type
     ## thread-local sink that leaked into later callers).
     findings*: seq[SymexFinding]
 
-proc coverageOutcome(site, fnId: string; f: SymexFinding;
+proc coverageOutcome(origin: FindingOrigin; f: SymexFinding;
                      failure: string): SymexFinding {.discardable.} =
   ## Review R1-10. The end of a single-target `assertCoveredBy`: its finding,
   ## or a `SymexCoverageDefect` carrying it when `failure` says why coverage
@@ -490,7 +491,7 @@ proc coverageOutcome(site, fnId: string; f: SymexFinding;
   ## goes on the run's report (`recordSymexFinding`), on success or failure;
   ## review R3 (E2): as the latest of its call site `site` for its target.
   ## Outside any property, the return and the defect are its only channel.
-  recordSymexFinding(site, fnId, f)
+  recordSymexFinding(origin, f)
   if failure.len > 0:
     var e = newException(SymexCoverageDefect, failure)
     e.findings = @[f]
@@ -530,18 +531,6 @@ const notesVersion = "1"
 
 proc notesKey(baseKey: string; diag: int): string =
   baseKey & cacheKeyNotes & ":diag:" & $diag
-
-func verdictSaved*(status: SymexFindingStatus; s: Soundness): bool =
-  ## Review R4 (W2). Whether the save of a cold run's verdict writes it (the
-  ## `saveSymexWitnessImpl` / `saveSymexVerdictImpl` / `saveSymexRaisedImpl`
-  ## skips): a run-dependent one is not cached. The `:notes` record rides a
-  ## verdict, so it is saved only when this is true: a later hit would serve
-  ## an old verdict with a newer run's hints.
-  case status
-  of sfSat, sfRaised: s.cacheable
-  of sfUnknown: s.runDependence == {}
-  of sfUnsat: true
-  of sfNotApplicable, sfReplayMiss: false
 
 proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
                          target: SymexTarget, settings: SymexSettings,
@@ -621,8 +610,9 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
                            finding: SymexFinding,
                            errors: var seq[string],
-                           maxEntries = 64) =
-  ## Runtime body of `saveSymexWitness`. Skips non-Sat findings (no
+                           maxEntries = 64): bool {.discardable.} =
+  ## Runtime body of `saveSymexWitness`. Review R5 (D4a): true only when it
+  ## wrote the entry (the `:notes` record rides a saved verdict, nothing else). Skips non-Sat findings (no
   ## witness to persist), otherwise saves the choice array under the
   ## content-addressed key with `:sat` suffix, with `finding.soundness` in
   ## the entry's metadata (RFC-0005 S11). RFC-0005 S8az: also carries
@@ -636,12 +626,12 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## ("errors flow to Report.dbErrors") was violated here by
   ## propagating exceptions. Callers route `errors` into
   ## `Report.dbErrors`.
-  if finding.status != sfSat: return
+  if finding.status != sfSat: return false
   # RFC-0005 0.9.1 (WA-7, WA-9): a lossy winner the replay did not confirm for
   # a reason of the run is not stored as unconfirmed for good. Read off the
   # finding (review R1-07), never off the thread.
-  if not finding.soundness.cacheable: return
-  if not metaReady(db, "saveSymexWitnessImpl", errors): return
+  if not finding.soundness.cacheable: return false
+  if not metaReady(db, "saveSymexWitnessImpl", errors): return false
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
@@ -651,6 +641,7 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
   for k, v in gapsMeta(finding.gaps): meta[k] = v   ## RFC-0005 S8az
   try:
     db.save(key, finding.witnessChoices, meta, maxEntries)
+    result = true
   except CatchableError as e:
     errors.add "saveSymexWitnessImpl: " & $e.name & ": " & e.msg
 
@@ -694,7 +685,8 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
                             status: SymexFindingStatus,
                             soundness: Soundness,
                             errors: var seq[string],
-                            gaps: seq[FindingGap] = @[]) =
+                            gaps: seq[FindingGap] = @[]): bool {.discardable.} =
+  ## Review R5 (D4a): true only when it wrote the entry.
   ## Phase 13 cycle 3. Persist a non-SAT verdict (sfUnsat /
   ## sfUnknown) under the content-addressed key with the
   ## appropriate suffix. The stored value is the sentinel empty
@@ -719,10 +711,10 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
     case status
     of sfUnsat:   cacheKeyUnsat
     of sfUnknown: cacheKeyUnknown
-    of sfSat, sfNotApplicable, sfReplayMiss: return
+    of sfSat, sfNotApplicable, sfReplayMiss: return false
       # `sfReplayMiss` (Phase 14 B5) is a per-replay diagnostic;
       # it's not a verdict and has no cache representation.
-    of sfRaised: return
+    of sfRaised: return false
       # Phase 15 E2a. An `sfRaised` finding carries a per-type id and is
       # persisted by `saveSymexRaisedImpl` (multi-finding protocol), not by
       # this single-sentinel verdict path. No-op here.
@@ -738,8 +730,8 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   # Review R1-07: read off the `soundness` the verdict was decided under, so a
   # save after other work on this thread still reads its own run's.
   if status == sfUnknown and soundness.runDependence != {}:
-    return
-  if not metaReady(db, "saveSymexVerdictImpl", errors): return
+    return false
+  if not metaReady(db, "saveSymexVerdictImpl", errors): return false
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
@@ -749,6 +741,7 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   for k, v in gapsMeta(gaps): meta[k] = v
   try:
     db.save(key, @[], meta, verdictCacheMaxEntries)
+    result = true
   except CatchableError as e:
     errors.add "saveSymexVerdictImpl: " & $e.name & ": " & e.msg
 
@@ -814,7 +807,9 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
                           found: seq[RawResult],
                           errors: var seq[string],
                           gaps: seq[seq[FindingGap]] = @[],
-                          witnesses: seq[seq[ChoiceNode]] = @[]) =
+                          witnesses: seq[seq[ChoiceNode]] = @[]
+                         ): bool {.discardable.} =
+  ## Review R5 (D4a): true only when it wrote the sentinels.
   ## Phase 15 E2a. Persist every `sxRaised` finding in `found` under the
   ## content-addressed key. STRUCTURAL multi-finding protocol: each distinct
   ## raised type id is written
@@ -842,8 +837,8 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
   # RFC-0005 0.9.1 (WA-7, WA-9): as `saveSymexWitnessImpl`.
   for raw in found:
-    if not raw.soundness.cacheable: return
-  if not metaReady(db, "saveSymexRaisedImpl", errors): return
+    if not raw.soundness.cacheable: return false
+  if not metaReady(db, "saveSymexRaisedImpl", errors): return false
   let baseKey = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
@@ -864,7 +859,7 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       gapsByType.add (if i < gaps.len: gaps[i] else: @[])
       witsByType.add (if i < witnesses.len: witnesses[i] else: @[])
       defectByType.add raw.isDefect
-  if typeIds.len == 0: return
+  if typeIds.len == 0: return false
   try:
     for i, tid in typeIds:
       # (a) per-type sentinel slot, carrying the finding's soundness,
@@ -879,6 +874,7 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       db.save(baseKey & cacheKeyRaisedIndex,
               @[bytesChoice(cast[seq[byte]](tid), 0, tid.len)],
               typeIds.len)
+    result = true
   except CatchableError as e:
     errors.add "saveSymexRaisedImpl: " & $e.name & ": " & e.msg
 
@@ -4018,9 +4014,25 @@ macro assertCoveredBy*(fn: typed,
   let siteLit = newLit(fn.lineInfo)
   # Review R4 (U1): and the `fn` itself, since a template or helper shares one
   # call site among several `fn`s, and a generic one among its instantiations.
-  let fnIdLit = newLit(
-    (if fn.kind == nnkSym: fn.strVal & "#" & $signatureHash(fn)
-     else: fn.repr & "#" & fn.lineInfo) & "@" & fn.getTypeInst.repr)
+  # Review R5 (3d): a routine is told apart as `routineKey` tells routines
+  # apart (name and body hash; `signatureHash` is the same for every routine
+  # of one parameter list). Any other symbol (a proc-typed parameter or local
+  # variable, which has no body to hash) is its name and the site it is used
+  # at; a non-symbol (a lambda, a call) is a fixed-width hash of its text, so
+  # a lambda's whole body is not embedded in every finding's key.
+  let fnIdText =
+    if fn.kind == nnkSym:
+      if fn.symKind in {nskProc, nskFunc, nskMethod, nskIterator,
+                        nskConverter, nskTemplate, nskMacro}:
+        routineKey(fn)
+      else:
+        fn.strVal & "#" & fn.lineInfo
+    else:
+      sha256Hex(fn.repr) & "#" & fn.lineInfo
+  let fnIdLit = newLit(fnIdText & "@" & fn.getTypeInst.repr)
+  let originLit = nnkObjConstr.newTree(bindSym"FindingOrigin",
+    nnkExprColonExpr.newTree(ident"site", siteLit),
+    nnkExprColonExpr.newTree(ident"fnId", fnIdLit))
   let trustedSym = bindSym"trusted"
   # Shared by the arm bodies below and the block they are spliced into.
   let rId = genSym(nskLet, "r")
@@ -4132,7 +4144,7 @@ macro assertCoveredBy*(fn: typed,
             "prove coverage (set acceptUnknownAsCovered = true to downgrade)"
       of sxRaised:
         `raisedArm`
-      `outcomeSym`(`siteLit`, `fnIdLit`, `findingId`, `failureId`)
+      `outcomeSym`(`originLit`, `findingId`, `failureId`)
 
 macro assertCoveredBy*(fn: typed,
                        targets: static openArray[SymexTarget],
@@ -4625,15 +4637,16 @@ macro symexFindAllWitnesses*(fn: typed,
                   isDefect:       diagEntry.isDefect,
                   raisedMsg:      diagEntry.raisedMsg.get(""),
                   witnessChoices: renderAsChoices(typedDiagWit))
+              var verdictSaved = false
               case raw.status
               of sxSat:
                 let `witId` {.used.} = raw.witness
                 let typedWit: `tupleTy` = `witnessTup`
                 f.witnessChoices = renderAsChoices(typedWit)
-                saveSymexWitnessImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
+                verdictSaved = saveSymexWitnessImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
                                       f, `dbErrorsId`)
               of sxUnsat, sxUnknown:
-                saveSymexVerdictImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
+                verdictSaved = saveSymexVerdictImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
                                       f.status, f.soundness, `dbErrorsId`,
                                       f.gaps)   ## RFC-0005 S8av
               of sxRaised:
@@ -4651,12 +4664,13 @@ macro symexFindAllWitnesses*(fn: typed,
                 # display when the raised type is a `Defect` subtype.
                 if raw.isDefect:
                   f.defectTypeId = raw.raisedTypeId
-                saveSymexRaisedImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
+                verdictSaved = saveSymexRaisedImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
                                     @[raw], `dbErrorsId`, @[f.gaps],  ## RFC-0005 S8az
                                     @[f.witnessChoices])               ## RFC-0005 W1
               # RFC-0005 W1: beside whichever slot the arm above wrote.
-              # Review R4 (W2): only when that arm saved the verdict.
-              if verdictSaved(f.status, f.soundness):
+              # Review R4 (W2), R5 (D4a): only when that arm saved the verdict
+              # (its own return, not a copy of its skip rules).
+              if verdictSaved:
                 saveSymexNotesImpl(`db`, `progId`, `loopTarget`,
                                    `symexSettings`, f.hints, f.diagnostics,
                                    `dbErrorsId`)

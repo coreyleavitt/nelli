@@ -290,3 +290,30 @@ suite "R2 DD1: host safety is typed, not read off hints":
     check warm.hints.len == 0
     check warm.soundness.replay == rsUnconfirmed
     check not hostRunnable(warm.soundness)
+
+suite "R2 DD3: assertCoveredBy inside a property reaches the report":
+  test "on a pass":
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      discard assertCoveredBy(r1Alpha, tLabel("alpha")),
+      Settings(maxExamples: 3))
+    var descs: seq[string]
+    for f in rep.symexFindings: descs.add f.targetDesc
+    checkpoint $rep.outcome & " " & $descs
+    check rep.outcome == otPassed
+    check descs == @["label(\"alpha\")"]
+
+  test "on a failure":
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      assertCoveredBy(r1Alpha, tLabel("alpha"), r2Skip),
+      Settings(maxExamples: 3))
+    checkpoint $rep.outcome & " " & $rep.symexFindings.len
+    check rep.outcome == otFalsified
+    check rep.symexFindings.len == 1
+    if rep.symexFindings.len == 1:
+      check rep.symexFindings[0].targetDesc == "label(\"alpha\")"
+      check not rep.symexFindings[0].covered
+
+  test "nothing carries into the next run":
+    let rep = forAll(integers(0, 3), proc (x: int) = discard,
+                     Settings(maxExamples: 3))
+    check rep.symexFindings.len == 0

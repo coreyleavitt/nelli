@@ -48,6 +48,7 @@ export replayresult.ReplayOutcome, replayresult.ReplayResult,
        replayresult.detail, replayresult.runDependence
 from ./smt/scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
+from ./engine/frame import recordSymexFinding   ## review R2 (DD3)
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
        engineTypes.FindingGap, engineTypes.trusted   ## RFC-0005 S11
 
@@ -459,7 +460,9 @@ proc coverageOutcome(f: SymexFinding; failure: string): SymexFinding
                     {.discardable.} =
   ## Review R1-10. The end of a single-target `assertCoveredBy`: its finding,
   ## or a `SymexCoverageDefect` carrying it when `failure` says why coverage
-  ## is not proven.
+  ## is not proven. Review R2 (DD3): inside a property, the finding also
+  ## goes on the run's report (`recordSymexFinding`), on success or failure.
+  recordSymexFinding(f)
   if failure.len > 0:
     var e = newException(SymexCoverageDefect, failure)
     e.findings = @[f]

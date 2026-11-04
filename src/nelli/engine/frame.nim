@@ -4,7 +4,8 @@
 ## (thread-local). The frame accumulates:
 ##
 ## - **Per-example state** (cleared on each prop call): `notes`, `scores`.
-## - **Cross-example state** (lives the run): `eventsCategorical`, `eventsNumeric`.
+## - **Cross-example state** (lives the run): `eventsCategorical`, `eventsNumeric`,
+##   `symexFindings`.
 ##
 ## Stacking via `engineStack` is what makes nested `forAll` calls compose
 ## (#91): the inner run gets a fresh frame, runs its own examples, pops;
@@ -23,6 +24,11 @@ type EngineFrame* = object
   scores*: ScoreMap                            ## per-example
   eventsCategorical*: Table[string, int]       ## cross-example
   eventsNumeric*: Table[string, seq[float]]    ## cross-example
+  symexFindings*: seq[SymexFinding]            ## cross-example
+    ## Review R2 (DD3). The findings `assertCoveredBy` made inside this run's
+    ## property (`recordSymexFinding`), on every example, each once. The
+    ## engine moves them onto the run's `Report.symexFindings` when the run
+    ## ends, passed or failed. A fresh frame per run: nothing carries over.
 
 var engineStack* {.threadvar.}: seq[EngineFrame]
 
@@ -38,6 +44,15 @@ proc currentFrame*: var EngineFrame {.inline.} =
     raise newException(ValueError,
       "note/target/event called outside any forAll — there's no example to attach to")
   engineStack[^1]
+
+proc recordSymexFinding*(f: SymexFinding) =
+  ## Review R2 (DD3). Records a finding `assertCoveredBy` made on the running
+  ## property's report. Outside any `forAll` it does nothing: the finding is
+  ## the caller's, returned or carried by the defect it raised. The same
+  ## finding made again (by the next example, or by a shrink) is kept once.
+  if engineStack.len == 0: return
+  if f notin engineStack[^1].symexFindings:
+    engineStack[^1].symexFindings.add f
 
 # --- user-facing accumulator APIs --------------------------------------------
 

@@ -134,8 +134,9 @@ suite "symex Phase 15 E2a — structural sxRaised cascade + multi-finding cache"
         check got[0].raw.isDefect == got[1].raw.isDefect
 
   test "K4: re-saving a type with a different witness replaces the slot":
-    # The db dedups by witness, so a sentinel saved with a roomy cap grew a
-    # second entry and the loader (exactly one entry) missed forever.
+    # A pin, not a red test: the db dedups by witness, so a sentinel saved
+    # with a cap above 1 would grow a second entry and the loader (exactly
+    # one entry) would miss forever. The cap is 1 today; this keeps it so.
     let db = inMemoryDatabase()
     let prog = SymexProgram(body: mkBlock(@[]))
     let target = tAssertionViolation()

@@ -851,9 +851,11 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ##
   ## Caveat: the all-or-nothing guarantee holds for a SINGLE writer that
   ## crashes part-way. Concurrent writers to one directory DB, or a power loss
-  ## without fsync, can still interleave sentinel and index writes. That is
-  ## benign when the base key is deterministic (every writer stores the same
-  ## record under it).
+  ## without fsync, can still interleave sentinel and index writes. Every
+  ## slot stays self-consistent (one entry, carrying its own soundness), so
+  ## the single-type production path is unaffected; a multi-type set saved
+  ## through this API by racing writers can pair one writer's sentinel for
+  ## one type with another writer's for the next.
   ##
   ## DB save errors are appended to `errors` and the call returns normally — the
   ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
@@ -894,10 +896,11 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       var meta = soundnessMeta(sounds[i])
       for k, v in gapsMeta(gapsByType[i]): meta[k] = v
       meta[raisedDefectMetaKey] = (if defectByType[i]: "1" else: "0")
-      # Exactly ONE entry per slot: the db dedups by witness, so any roomier
-      # cap lets a re-save with a different witness add a second entry, which
-      # the loader (`sentinel.len == 1`) reads as a permanent miss. A literal,
-      # not `verdictCacheMaxEntries`, so this holds if that constant moves.
+      # Exactly ONE entry per slot: the db dedups by witness, so a roomier
+      # cap would let a re-save with a different witness add a second entry,
+      # which the loader (`sentinel.len == 1`) reads as a permanent miss.
+      # Hardening, not a fix: `verdictCacheMaxEntries` is also 1 today; the
+      # literal keeps this true if that constant moves.
       db.save(baseKey & cacheKeyRaised(tid), witsByType[i], meta, 1)
     # (b) the index, last and as ONE entry listing every type id (each as its
     # raw bytes): a reader trusts only a complete index, and one save is all

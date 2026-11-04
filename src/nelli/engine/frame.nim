@@ -43,11 +43,12 @@ type Severity = enum
   ## ranks keep the latest):
   ##   skAudit             `sfNotApplicable` / `sfReplayMiss`: not verdicts.
   ##                       Only `sfNotApplicable` is ever built (in
-  ##                       `engine/phases.nim`, as a record that symex was
-  ##                       skipped); `sfReplayMiss` is never constructed in
-  ##                       `src`. Exists for `severity`'s exhaustiveness only:
-  ##                       those findings are appended in `engine/phases.nim`
-  ##                       and never pass through `record`;
+  ##                       `engine/phases.nim`, when symex was skipped, and
+  ##                       in `symex.nim`'s zero-targets arm of
+  ##                       `symexFindAllWitnesses`); `sfReplayMiss` is never
+  ##                       constructed in `src`. Exists for `severity`'s
+  ##                       exhaustiveness only: neither site goes through
+  ##                       `recordSymexFinding`, so `record` never sees it;
   ##   skTrustedCovered    a trusted claim the test covered;
   ##   skUnconfirmed       a covered claim no trust backs;
   ##   skUnknown           decided nothing (`sfUnknown`, accepted or not);

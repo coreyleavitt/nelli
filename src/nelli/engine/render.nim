@@ -62,6 +62,9 @@ proc crashTypeLabel[T](r: Report[T]): string =
 # i3 channel: a user annotation's promise found false -- verdict-neutral, so
 # it is rendered loudly rather than folded into a status). All of it is
 # additive: a report with no findings renders byte-for-byte as before.
+# RFC-0005 W1 adds each finding's hints (the replay outcomes among them: a
+# crash names its input, a declined replay says why) and its non-winning
+# raises (`diagnostics`); a finding with neither renders as before.
 
 func taintText(t: Taint): string =
   ## `{}` / `{scSpurious}` / `{scSpurious, scIncomplete}`, as Nim prints a set.
@@ -84,6 +87,13 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
   for av in f.annotationViolations:
     result.add "  annotation violation " & $av.kind & " {." & $av.pragma &
                ".} " & av.callee & " at " & av.site & ": " & av.msg
+  for h in f.hints:
+    result.add "  hint " & h.kind & ": " & h.msg
+  for d in f.diagnostics:
+    result.add "  also raised " & d.raisedTypeId &
+               (if d.isDefect: " (defect)" else: "") &
+               (if d.raisedMsg.len > 0: ": " & d.raisedMsg else: "") &
+               " witness=" & $d.witnessChoices.len & " choices"
 
 proc symexSection(findings: seq[SymexFinding]): string =
   result = "[symex]\n"
@@ -207,6 +217,21 @@ proc symexFindingJson(f: SymexFinding): string =
               $av.kind & "\",\"callee\":\"" & jsonEscape(av.callee) &
               "\",\"site\":\"" & jsonEscape(av.site) &
               "\",\"msg\":\"" & jsonEscape(av.msg) & "\"}"
+  result &= "]"
+  result &= ",\"hints\":["   # RFC-0005 W1
+  for i, h in f.hints:
+    if i > 0: result &= ","
+    result &= "{\"kind\":\"" & jsonEscape(h.kind) & "\",\"severity\":\"" &
+              jsonEscape(h.severity) & "\",\"msg\":\"" & jsonEscape(h.msg) &
+              "\"}"
+  result &= "]"
+  result &= ",\"diagnostics\":["   # RFC-0005 W1
+  for i, d in f.diagnostics:
+    if i > 0: result &= ","
+    result &= "{\"raisedTypeId\":\"" & jsonEscape(d.raisedTypeId) &
+              "\",\"isDefect\":" & $d.isDefect &
+              ",\"raisedMsg\":\"" & jsonEscape(d.raisedMsg) &
+              "\",\"witnessChoiceCount\":" & $d.witnessChoices.len & "}"
   result &= "]}"
 
 proc renderJson[T](r: Report[T]): string =
@@ -324,6 +349,12 @@ proc renderGithub[T](r: Report[T], testName: string): string =
                 ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
                          " runTaint=" & taintText(f.soundness.runTaint) &
                          (if gapText.len > 0: " gaps: " & gapText else: ""))
+    # RFC-0005 W1: a hint is a `::notice` of its own, so a replay that crashed
+    # or did not run says so, with its message, where the CI reader looks.
+    for h in f.hints:
+      result &= "\n::notice title=symex hint::" &
+                ghEscape(testName & " — " & f.targetDesc & " " & h.kind &
+                         ": " & h.msg)
 
 proc renderReport*[T](r: Report[T], format = ofText,
                       testName = "property"): string =

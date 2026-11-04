@@ -3119,11 +3119,15 @@ type
       ## bounds -- and by §2.3 it has no under-approximating error to say
       ## so, so the settings are the one carrier (RFC-0011 / RFC-0008).
     fromCache*:    bool
-      ## Phase 14 cycle C1. `true` iff this result was served from
-      ## the verdict cache (`:unsat`/`:unk` suffix) or the witness
-      ## cache (`:sat` suffix) without re-running `runSymex`. When
-      ## true, `abstractions` and `callStats` are `@[]` — those
-      ## fields record THIS run's exploration, which didn't happen.
+      ## Always `false` today. `symexFind`, the one producer of a
+      ## `SymexResult`, takes no `ExampleDatabase`, so it never serves a
+      ## cached result: every call walks. The content-addressed cache is
+      ## `symexFindAllWitnesses`'s (hence `symexForAll`'s), and its hit
+      ## flag is `SymexFinding.fromCache`. Phase 14 cycle C1 planned a
+      ## cache cascade for `symexFind` and added this field for it; the
+      ## cascade never landed (RFC-0005 W1, WA-11). Were it to, a served
+      ## result would carry `abstractions`/`callStats` `@[]` (they record
+      ## a run's exploration) and no `diagnostics` beyond what is stored.
     diagnostics*:  seq[DefectFinding[T]]
       ## ADR-0012 D2. Incidentally-discovered defect/exception raises found
       ## while searching for the primary target. Populated by the reduction

@@ -280,13 +280,22 @@ type
     ## view from the run that produced it. `gaps` is `@[]` on an entry
     ## written before S8av or by a writer that never recorded it — see
     ## `storedGaps`.
-  CachedRaised* = tuple[raw: RawResult, gaps: seq[FindingGap]]
+  CachedRaised* = tuple[raw: RawResult, gaps: seq[FindingGap],
+                       choices: seq[ChoiceNode]]
     ## RFC-0005 S11/S8az. A `:raised:<type>` cache hit: the reconstructed
-    ## `RawResult` (status `sxRaised`, `raisedTypeId` and `soundness` only —
-    ## E2a's STRUCTURAL protocol carries no witness) and (S8az) the
-    ## per-cause `gaps()` view of the run that produced it. `gaps` is `@[]`
-    ## on an entry written before S8az or by a writer that never recorded
-    ## it — see `storedGaps`.
+    ## `RawResult` (status `sxRaised`, `raisedTypeId`, `soundness` and, since
+    ## RFC-0005 W1, `isDefect`; its `raisedWitness` is not rebuilt) and
+    ## (S8az) the per-cause `gaps()` view of the run that produced it. `gaps`
+    ## is `@[]` on an entry written before S8az or by a writer that never
+    ## recorded it — see `storedGaps`. RFC-0005 W1: `choices` is the raise's
+    ## witness as `renderAsChoices` rendered it (what `SymexFinding.
+    ## witnessChoices` carries), `@[]` when the writer passed none.
+  CachedNotes* = tuple[hints: seq[FindingHint],
+                      diagnostics: seq[FindingDiagnostic]]
+    ## RFC-0005 W1. The `:notes` record of a cached verdict: the run's hints
+    ## and its non-winning diagnostics (`SymexFinding.hints`/`.diagnostics`).
+    ## Both `@[]` when the record is absent, the same best-effort rule as
+    ## `gaps` (`storedNotes`).
 
 func taintBits(t: Taint): int =
   for c in t: result = result or (1 shl ord(c))
@@ -400,6 +409,117 @@ proc findingGaps(errors: seq[SymexErrorInfo]): seq[FindingGap] =
   ## RFC-0005 S11. `gapsOf` projected onto the Z3-free `FindingGap`.
   for g in gapsOf(errors):
     result.add FindingGap(class: g.class, kind: $g.e.kind, msg: g.e.msg)
+
+proc findingHints(errors: seq[SymexErrorInfo]): seq[FindingHint] =
+  ## RFC-0005 W1. The complement of `findingGaps`: every entry `taintsRun`
+  ## does not admit (a hint, or a warning that decides nothing), in order.
+  ## `gapsOf` leaves these out by design; without this projection a
+  ## `SymexFinding` never showed them, the replay outcomes among them.
+  for e in errors:
+    if not taintsRun(e):
+      result.add FindingHint(kind: $e.kind, severity: $e.severity, msg: e.msg)
+
+proc findingDiagnostics[T](ds: seq[DefectFinding[T]]): seq[FindingDiagnostic] =
+  ## RFC-0005 W1. `SymexResult.diagnostics` projected onto the Z3-free
+  ## `FindingDiagnostic`, the witness rendered as `witnessChoices` is.
+  for d in ds:
+    result.add FindingDiagnostic(raisedTypeId: d.raisedTypeId,
+                                 isDefect: d.isDefect, raisedMsg: d.raisedMsg.get(""),
+                                 witnessChoices: renderAsChoices(d.witness))
+
+# ---- RFC-0005 W1: the `:notes` record --------------------------------------
+#
+# A finding's `hints` and `diagnostics` are the cold run's, so a cache hit must
+# serve them or the warm report says less than the cold one. They ride one
+# record beside the verdict's slot, under the same base key: `:notes`, an
+# empty-valued entry whose metadata holds the hints (one key set per entry, as
+# `gapsMeta` does, so no message needs escaping) and the diagnostic count, and
+# `:notes:diag:<i>`, one entry per diagnostic whose VALUE is its witness and
+# whose metadata holds its type, defect-ness and message. Each slot keeps one
+# entry (`verdictCacheMaxEntries`), and a cold run rewrites them all, so the
+# record always describes the most recent cold run, as the verdict slots do.
+# Missing or malformed, it degrades to empty (best-effort, like `gaps`).
+
+const cacheKeyNotes = ":notes"
+const notesVersionMetaKey = "notesv"
+const notesVersion = "1"
+
+proc notesKey(baseKey: string; diag: int): string =
+  baseKey & cacheKeyNotes & ":diag:" & $diag
+
+proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
+                         target: SymexTarget, settings: SymexSettings,
+                         hints: seq[FindingHint],
+                         diagnostics: seq[FindingDiagnostic],
+                         errors: var seq[string]) =
+  ## RFC-0005 W1. Persist a cold run's hints and diagnostics beside its
+  ## verdict (see the section comment). Save errors are appended to `errors`
+  ## and the call returns normally.
+  if not metaReady(db, "saveSymexNotesImpl", errors): return
+  let baseKey = symexCacheKey(prog, target, settings,
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion)
+  var meta = initTable[string, string]()
+  meta[notesVersionMetaKey] = notesVersion
+  meta["hintn"] = $hints.len
+  for i, h in hints:
+    meta["hintk" & $i] = h.kind
+    meta["hints" & $i] = h.severity
+    meta["hintm" & $i] = h.msg
+  meta["diagn"] = $diagnostics.len
+  try:
+    for i, d in diagnostics:
+      var dm = initTable[string, string]()
+      dm["tid"] = d.raisedTypeId
+      dm["def"] = (if d.isDefect: "1" else: "0")
+      dm["msg"] = d.raisedMsg
+      db.save(notesKey(baseKey, i), d.witnessChoices, dm,
+              verdictCacheMaxEntries)
+    # The count last: a reader never trusts a count whose entries were not
+    # all written first.
+    db.save(baseKey & cacheKeyNotes, @[], meta, verdictCacheMaxEntries)
+  except CatchableError as e:
+    errors.add "saveSymexNotesImpl: " & $e.name & ": " & e.msg
+
+proc loadSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
+                         target: SymexTarget, settings: SymexSettings,
+                         errors: var seq[string]): CachedNotes =
+  ## RFC-0005 W1. The inverse of `saveSymexNotesImpl`; empty when the record
+  ## is absent or not in this encoding (never a miss of the verdict itself).
+  if not metaReady(db, "loadSymexNotesImpl", errors): return
+  let baseKey = symexCacheKey(prog, target, settings,
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion)
+  try:
+    let head = db.loadPrimaryWithMeta(baseKey & cacheKeyNotes)
+    if head.len != 1: return
+    let meta = head[0].meta
+    if meta.getOrDefault(notesVersionMetaKey, "") != notesVersion: return
+    var nh, nd: int
+    try:
+      nh = parseInt(meta.getOrDefault("hintn", ""))
+      nd = parseInt(meta.getOrDefault("diagn", ""))
+    except ValueError: return
+    for i in 0 ..< nh:
+      if ("hintk" & $i) notin meta: break
+      result.hints.add FindingHint(kind: meta["hintk" & $i],
+                                   severity: meta.getOrDefault("hints" & $i, ""),
+                                   msg: meta.getOrDefault("hintm" & $i, ""))
+    for i in 0 ..< nd:
+      let e = db.loadPrimaryWithMeta(notesKey(baseKey, i))
+      if e.len != 1 or "tid" notin e[0].meta: break
+      result.diagnostics.add FindingDiagnostic(
+        raisedTypeId: e[0].meta["tid"],
+        isDefect: e[0].meta.getOrDefault("def", "") == "1",
+        raisedMsg: e[0].meta.getOrDefault("msg", ""),
+        witnessChoices: e[0].choices)
+  except CatchableError as e:
+    errors.add "loadSymexNotesImpl: " & $e.name & ": " & e.msg
+    result = (hints: @[], diagnostics: @[])
 
 proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
@@ -573,6 +693,9 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   tryLoad(cacheKeyUnknown,   sfUnknown)
   none(CachedVerdict)
 
+const raisedDefectMetaKey = "rdef"
+  ## RFC-0005 W1. The `:raised:<type>` sentinel's `RawResult.isDefect`.
+
 const cacheKeyRaisedIndex = ":raised"
   ## Phase 15 E2a. Index slot for the multi-`sxRaised` cache protocol. The
   ## per-type sentinels live under `cacheKeyRaised(typeId)` (e.g.
@@ -584,7 +707,8 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
                           target: SymexTarget, settings: SymexSettings,
                           found: seq[RawResult],
                           errors: var seq[string],
-                          gaps: seq[seq[FindingGap]] = @[]) =
+                          gaps: seq[seq[FindingGap]] = @[],
+                          witnesses: seq[seq[ChoiceNode]] = @[]) =
   ## Phase 15 E2a. Persist every `sxRaised` finding in `found` under the
   ## content-addressed key. STRUCTURAL multi-finding protocol: each distinct
   ## raised type id is written
@@ -593,14 +717,20 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ##   (b) as an index entry under `cacheKeyRaisedIndex` so `loadSymexRaisedImpl`
   ##       can enumerate the persisted type ids without a DB key-prefix scan.
   ## A SUT with two distinct raise paths (e.g. ValueError, IOError) round-trips
-  ## both findings through save/load. No witness is stored in E2a (the structural
-  ## walker emits no witness); E2b populates witnesses.
+  ## both findings through save/load. The witness rides the sentinel since
+  ## RFC-0005 W1 (`witnesses`, below).
   ##
   ## RFC-0005 S8az: `gaps[i]` is `found[i]`'s per-cause view (default `@[]`
   ## for a caller that has none to offer, e.g. the hand-built multi-finding
   ## tests that construct `found` directly) — paired by INDEX into `found`,
   ## the same way `RawResult.soundness` already is, and persisted onto the
   ## same per-type sentinel the soundness rides, via `gapsMeta`/`storedGaps`.
+  ##
+  ## RFC-0005 W1: `witnesses[i]` is `found[i]`'s witness as `renderAsChoices`
+  ## rendered it (paired by index like `gaps`, default `@[]`). It is the
+  ## per-type sentinel's VALUE, and `found[i].isDefect` rides its metadata, so
+  ## a hit rebuilds the finding the cold run reported (its `raised(<type>)`
+  ## descriptor, `defectTypeId` and witness), not only its status.
   ##
   ## DB save errors are appended to `errors` and the call returns normally — the
   ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
@@ -615,20 +745,27 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   var typeIds: seq[string] = @[]
   var sounds: seq[Soundness] = @[]   ## RFC-0005 S11: the first finding's, per type
   var gapsByType: seq[seq[FindingGap]] = @[]   ## RFC-0005 S8az: ditto
+  var witsByType: seq[seq[ChoiceNode]] = @[]   ## RFC-0005 W1: ditto
+  var defectByType: seq[bool] = @[]            ## RFC-0005 W1: ditto
   for i, raw in found:
     if raw.status != sxRaised: continue
     if raw.raisedTypeId notin typeIds:
       typeIds.add raw.raisedTypeId
       sounds.add raw.soundness
       gapsByType.add (if i < gaps.len: gaps[i] else: @[])
+      witsByType.add (if i < witnesses.len: witnesses[i] else: @[])
+      defectByType.add raw.isDefect
   if typeIds.len == 0: return
   try:
     for i, tid in typeIds:
-      # (a) per-type sentinel slot, carrying the finding's soundness and
-      # (RFC-0005 S8az) its gaps.
+      # (a) per-type sentinel slot, carrying the finding's soundness,
+      # (RFC-0005 S8az) its gaps and (RFC-0005 W1) its witness, as the
+      # value, and defect-ness.
       var meta = soundnessMeta(sounds[i])
       for k, v in gapsMeta(gapsByType[i]): meta[k] = v
-      db.save(baseKey & cacheKeyRaised(tid), @[], meta, verdictCacheMaxEntries)
+      meta[raisedDefectMetaKey] = (if defectByType[i]: "1" else: "0")
+      db.save(baseKey & cacheKeyRaised(tid), witsByType[i], meta,
+              verdictCacheMaxEntries)
       # (b) index entry: the type id encoded as its raw bytes.
       db.save(baseKey & cacheKeyRaisedIndex,
               @[bytesChoice(cast[seq[byte]](tid), 0, tid.len)],
@@ -643,8 +780,9 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## findings from the DB without re-invoking Z3, each paired with its
   ## stored `gaps()` view. Reads the index slot (`cacheKeyRaisedIndex`) to
   ## enumerate the persisted type ids and rebuilds one
-  ## `(raw: RawResult{status: sxRaised, raisedTypeId, soundness}, gaps)`
-  ## per entry. The index is the enumeration source; RFC-0005 S11: the
+  ## `(raw: RawResult{status: sxRaised, raisedTypeId, isDefect, soundness},
+  ## gaps, choices)` per entry (RFC-0005 W1: `choices` is the stored witness,
+  ## `isDefect` its stored defect-ness). The index is the enumeration source; RFC-0005 S11: the
   ## per-type sentinel (`cacheKeyRaised(typeId)`) carries the finding's
   ## `Soundness`, and a type whose sentinel is missing or has no soundness
   ## metadata is a miss. RFC-0005 S8az: the SAME sentinel also carries
@@ -667,15 +805,18 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       if entry.len == 1 and entry[0].kind == ckBytes:
         let tid = cast[string](entry[0].bytesVal)
         let sentinel = db.loadPrimaryWithMeta(baseKey & cacheKeyRaised(tid))
+        # RFC-0005 W1: the value is the raise's witness (it was `@[]`), so a
+        # sentinel is any single entry; its soundness still decides a hit.
         let s =
-          if sentinel.len == 1 and sentinel[0].choices.len == 0:
-            storedSoundness(sentinel[0].meta)
+          if sentinel.len == 1: storedSoundness(sentinel[0].meta)
           else: none(Soundness)
         if s.isSome:
-          let g =
-            if sentinel.len == 1: storedGaps(sentinel[0].meta) else: @[]
+          let g = storedGaps(sentinel[0].meta)
           result.add (raw: RawResult(status: sxRaised, raisedTypeId: tid,
-                                     soundness: s.get), gaps: g)
+                                     isDefect: sentinel[0].meta.getOrDefault(
+                                       raisedDefectMetaKey, "") == "1",
+                                     soundness: s.get), gaps: g,
+                      choices: sentinel[0].choices)
         else:
           errors.add "loadSymexRaisedImpl: raised(" & tid & ") has no " &
             "soundness-carrying sentinel (pre-RFC-0005-S11 format); a miss"
@@ -3682,6 +3823,8 @@ macro assertCoveredBy*(fn: typed,
     of stkNilAccess:       newCall(bindSym"tNilAccess")
 
   let gapsSym = bindSym"findingGaps"   ## RFC-0005 S11 (private helper)
+  let hintsSym = bindSym"findingHints"         ## RFC-0005 W1 (private helper)
+  let diagsSym = bindSym"findingDiagnostics"   ## RFC-0005 W1 (private helper)
   result = quote do:
     block:
       let r = symexFind(`fn`, `targetExpr`, `settings`)
@@ -3718,7 +3861,9 @@ macro assertCoveredBy*(fn: typed,
           z3Version:      z3FullVersion(),
           soundness:      r.soundness,              ## RFC-0005 S11
           gaps:           `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations))
+          annotationViolations: r.annotationViolations,
+          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
+          diagnostics: `diagsSym`(r.diagnostics)))
         if not covered:
           raise newException(AssertionDefect, `failMsg`)
       of sxUnsat:
@@ -3727,7 +3872,9 @@ macro assertCoveredBy*(fn: typed,
           z3Version:  z3FullVersion(),
           soundness:  r.soundness,                  ## RFC-0005 S11
           gaps:       `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations))
+          annotationViolations: r.annotationViolations,
+          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
+          diagnostics: `diagsSym`(r.diagnostics)))
         discard  # vacuous pass
       of sxUnknown:
         recordSymexFinding(SymexFinding(
@@ -3735,7 +3882,9 @@ macro assertCoveredBy*(fn: typed,
           z3Version:  z3FullVersion(),
           soundness:  r.soundness,                  ## RFC-0005 S11
           gaps:       `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations))
+          annotationViolations: r.annotationViolations,
+          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
+          diagnostics: `diagsSym`(r.diagnostics)))
         let s: SymexSettings = `settings`
         if not s.acceptUnknownAsCovered:
           raise newException(AssertionDefect,
@@ -3780,7 +3929,9 @@ macro assertCoveredBy*(fn: typed,
           z3Version:      z3FullVersion(),
           soundness:      r.soundness,              ## RFC-0005 S11
           gaps:           `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations))
+          annotationViolations: r.annotationViolations,
+          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
+          diagnostics: `diagsSym`(r.diagnostics)))
         if not covered:
           raise newException(AssertionDefect, `failMsg`)
 
@@ -3866,12 +4017,14 @@ macro symexCacheKeyForFn*(fn: typed,
   let procsExpr  = parsed.procsNimNode
   let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
+  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
+                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
       symexCacheKey(prog, `targetExpr`, `settings`,
                     z3Version        = z3FullVersion(),
                     nimVersion       = NimVersion,
@@ -3895,12 +4048,14 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   let procsExpr  = parsed.procsNimNode
   let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
+  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
+                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
       var dbErrors: seq[string] = @[]
       saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
                             `finding`, dbErrors, `maxEntries`)
@@ -3930,12 +4085,14 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   let procsExpr  = parsed.procsNimNode
   let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
+  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
+                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
       var dbErrors: seq[string] = @[]
       let witnesses = loadSymexWitnessesImpl(`db`, prog, `targetExpr`,
                                               `settings`, dbErrors)
@@ -3974,12 +4131,14 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   let procsExpr  = parsed.procsNimNode
   let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
+  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
+                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
       var dbErrors: seq[string] = @[]
       saveSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`,
                             `status`, `soundness`, dbErrors)
@@ -4004,12 +4163,14 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   let procsExpr  = parsed.procsNimNode
   let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
+  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
+                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
       var dbErrors: seq[string] = @[]
       let verdict = loadSymexVerdictImpl(`db`, prog, `targetExpr`,
                                           `settings`, dbErrors)
@@ -4117,12 +4278,17 @@ macro symexFindAllWitnesses*(fn: typed,
   # into the choice IR for the example DB and report.
   let witId = genSym(nskLet, "rawWit")
   let (tupleTy, witnessTup) = emitWitnessTuple(parsed.params, witId)
+  # RFC-0005 W1: the per-diagnostic reader, as `symexFind` builds it (a
+  # distinct gensym so it never shadows `witId`).
+  let diagWitId = genSym(nskLet, "diagRawWit")
+  let (_, diagWitnessTup) = emitWitnessTuple(parsed.params, diagWitId)
 
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
   let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
+  let uxhExpr    = parsed.userExnHierarchyNimNode  ## RFC-0005 W1 (Phase 15 E4a)
   let peExpr     = parsed.parseErrorsNimNode   ## Phase 15 G1c
   let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
 
@@ -4193,14 +4359,24 @@ macro symexFindAllWitnesses*(fn: typed,
                                          loopTarget, newLit(symexSettings),
                                          symexSettings.replay)
   let gapsSym = bindSym"findingGaps"   ## RFC-0005 S11 (private helper)
+  let hintsSym = bindSym"findingHints"   ## RFC-0005 W1 (private helper)
   let runtimeBody =
     if nTargets == 0:
+      # RFC-0005 W1 (§8.1, S11: every finding carries soundness, gaps and
+      # annotation violations). Nothing ran, so the run's error list is the
+      # parse-time one; its coordinate is derived from it as `runSymex`
+      # derives a run's (`runTaintOf`), so the gaps' class join is the
+      # `runTaint`, and there is no winning path or replay.
       quote do:
         let noTargetsFinding = SymexFinding(
           targetDesc: "no-targets-discovered",
           status:     sfNotApplicable,
           covered:    false,
-          z3Version:  z3FullVersion())
+          z3Version:  z3FullVersion(),
+          soundness:  Soundness(runTaint: runTaintOf(`progId`.parseErrors)),
+          gaps:       `gapsSym`(`progId`.parseErrors),
+          hints:      `hintsSym`(`progId`.parseErrors),
+          annotationViolations: `progId`.annotationViolations)
         recordSymexFinding(noTargetsFinding)
         `findingsId`.add noTargetsFinding
     else:
@@ -4242,12 +4418,18 @@ macro symexFindAllWitnesses*(fn: typed,
               f.gaps = cachedVerdict.get.gaps             ## RFC-0005 S8av
               f.fromCache = true
             elif cachedRaised.len > 0:
-              # Phase 15 E2a (STRUCTURAL). A reachable raise was persisted for
-              # this target; serve it from cache without Z3. (E2b carries the
-              # witness; E2a has none, so only the status is reloaded here.)
+              # Phase 15 E2a. A reachable raise was persisted for this target;
+              # serve it from cache without Z3. RFC-0005 W1: as the cold arm
+              # below builds it -- the `raised(<type>)` descriptor, the
+              # defect type and the witness the sentinel stores.
+              let hit = cachedRaised[0]
               f.status = sfRaised
-              f.soundness = cachedRaised[0].raw.soundness   ## RFC-0005 S11
-              f.gaps = cachedRaised[0].gaps                 ## RFC-0005 S8az
+              f.targetDesc = "raised(" & hit.raw.raisedTypeId & ")"
+              if hit.raw.isDefect:
+                f.defectTypeId = hit.raw.raisedTypeId
+              f.witnessChoices = hit.choices
+              f.soundness = hit.raw.soundness   ## RFC-0005 S11
+              f.gaps = hit.gaps                 ## RFC-0005 S8az
               f.fromCache = true
             else:
               # RFC-0005 S10: run + rule-3 replay settle; persisted below
@@ -4258,6 +4440,18 @@ macro symexFindAllWitnesses*(fn: typed,
               # verdict) and the per-cause view of this run.
               f.soundness = raw.soundness
               f.gaps = `gapsSym`(raw.errors)
+              # RFC-0005 W1: what `gaps` leaves out (the replay outcomes
+              # among it) and the raises that did not decide the verdict,
+              # the latter rendered as `symexFind` types them.
+              f.hints = `hintsSym`(raw.errors)
+              for diagEntry in raw.diagnostics:
+                let `diagWitId` {.used.} = diagEntry.raisedWitness
+                let typedDiagWit: `tupleTy` = `diagWitnessTup`
+                f.diagnostics.add FindingDiagnostic(
+                  raisedTypeId:   diagEntry.raisedTypeId,
+                  isDefect:       diagEntry.isDefect,
+                  raisedMsg:      diagEntry.raisedMsg.get(""),
+                  witnessChoices: renderAsChoices(typedDiagWit))
               case raw.status
               of sxSat:
                 let `witId` {.used.} = raw.witness
@@ -4285,7 +4479,18 @@ macro symexFindAllWitnesses*(fn: typed,
                 if raw.isDefect:
                   f.defectTypeId = raw.raisedTypeId
                 saveSymexRaisedImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
-                                    @[raw], `dbErrorsId`, @[f.gaps])  ## RFC-0005 S8az
+                                    @[raw], `dbErrorsId`, @[f.gaps],  ## RFC-0005 S8az
+                                    @[f.witnessChoices])               ## RFC-0005 W1
+              # RFC-0005 W1: beside whichever slot the arm above wrote.
+              saveSymexNotesImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
+                                 f.hints, f.diagnostics, `dbErrorsId`)
+          if f.fromCache:
+            # RFC-0005 W1: every hit above serves the cold run's hints and
+            # diagnostics too, from the `:notes` record the cold arm wrote.
+            let notes = loadSymexNotesImpl(`db`, `progId`, `loopTarget`,
+                                           `symexSettings`, `dbErrorsId`)
+            f.hints = notes.hints
+            f.diagnostics = notes.diagnostics
           recordSymexFinding(f)
           `findingsId`.add f
 
@@ -4294,6 +4499,7 @@ macro symexFindAllWitnesses*(fn: typed,
       let `progId` {.used.} = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
+                              userExnHierarchy: `uxhExpr`,   ## RFC-0005 W1
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
       `targetsBuild`

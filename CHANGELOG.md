@@ -12,6 +12,42 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
+## [Unreleased] — 0.9.1
+
+### Fixed
+
+- **`symexFindAllWitnesses` and `symexForAll` see user exception types.**
+  They built their program without the user exception hierarchy that
+  `symexFind` passes, so a user exception type (or `RegexError`) was an
+  unknown type there: a named `except` was skipped, and a verdict `symexFind`
+  decided came back `sfUnknown`. The cache key now covers the hierarchy, so
+  a changed parent type is a new key.
+- **A cached `sfRaised` finding is the cold one.** It kept only its status:
+  the `raised(<type>)` descriptor, `defectTypeId` and the witness were lost.
+  The `:raised:<type>` sentinel now stores the witness and the defect-ness.
+- **The no-targets finding carries `soundness`, `gaps` and
+  `annotationViolations`**, as every other finding does.
+
+### Added
+
+- **`SymexFinding.hints` and `SymexFinding.diagnostics`.** `hints` holds what
+  `gaps` leaves out, including the replay outcomes: `feReplayCrashed` names
+  the input the real fn crashed on, and `feReplayDeclined` says why a replay
+  did not run (the Windows guidance in the 0.9.0 migration note, §5a and §7,
+  can now be followed through `symexForAll`). `diagnostics` holds the raises
+  the run reached that did not decide the verdict, each with its witness.
+  Every report format renders both. A cache hit serves the cold run's, from
+  a new `:notes` record (`saveSymexNotesImpl`/`loadSymexNotesImpl`).
+- `CachedRaised` gains `choices` (the stored witness), and
+  `saveSymexRaisedImpl` an optional trailing `witnesses` (no break).
+
+### Changed
+
+- `SymexResult.fromCache` is documented as always `false`: `symexFind` has
+  no cache. The 0.9.0 migration note said otherwise.
+- Walker version 264 -> 265: the cache's key and value changed, so every
+  0.9.0 cache entry is orphaned (a miss, then a cold run).
+
 ## [0.9.0] — 2026-11-03
 
 RFC-0005, soundness channels. Each symex result now says how far to trust it:

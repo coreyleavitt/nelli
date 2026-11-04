@@ -5652,7 +5652,17 @@ proc ordStepBounds(x: NimNode; ownRange: bool; lo, hi: var int64): OrdStepCheck 
   ##     checked against the whole enum; under `inc` / `dec` (`ownRange`) the
   ##     range itself, so `inc` of 3 in a `range[0..3]` variable raises;
   ##   * an integer type: none beyond the arithmetic's own overflow check.
-  case x.typeKind
+  # `var` (and `lent`, which Nim types as `var`) wraps the value's type
+  # without changing its ordinal semantics (a `var int` parameter is an
+  # `int`): read the kind off the underlying type. `classifyType(x)` already
+  # sees through them.
+  var tn = x
+  while tn.typeKind == ntyVar:
+    let inst = tn.getTypeInst
+    if inst.kind notin {nnkVarTy, nnkCommand} or inst.len < 1:
+      return oscUnknown
+    tn = inst[^1]
+  case tn.typeKind
   of ntyChar:
     lo = 0
     hi = 255
@@ -5668,7 +5678,7 @@ proc ordStepBounds(x: NimNode; ownRange: bool; lo, hi: var int64): OrdStepCheck 
     hi = t.rangeHi
     oscBounds
   of ntyRange:
-    let impl = x.getTypeImpl
+    let impl = tn.getTypeImpl
     if impl.kind != nnkBracketExpr or impl.len != 2 or
        impl[1].kind != nnkInfix or impl[1].len != 3:
       return oscUnknown

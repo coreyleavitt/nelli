@@ -27,6 +27,8 @@
 ## storage is private: `park` is the only way on and takes the serial, which
 ## lives on the entry rather than the shared `Path`. The R3 text scan over
 ## `runtime.nim` is gone; the module's semantics are pinned directly below.
+## The walk's initial path is built by one constructor that drains what the
+## parameter set-up queued (`initialWalkPath`), pinned by a proc parameter.
 ##
 ## The shapes the finding named do not reach the hole from source: a closure
 ## body is walked with the calling expression's queue set aside
@@ -130,6 +132,12 @@ proc handlerInnerTry(b: byte) =
     inc x
   if x == 2: symexTarget("hit")
 
+# A proc-typed parameter: allocating it declines (no lambda the walk built)
+# before the walk begins. The target does not read it, but the path the
+# walk starts from carries the decline.
+proc procParam(f: proc(x: int): int {.closure.}; b: byte) =
+  if b > 3: symexTarget("hit")
+
 # Controls: the same shapes over a value the walk knows.
 proc closureKnown(b: byte) =
   let f = proc(x: int): int = return 1
@@ -220,6 +228,19 @@ suite "R2 SD1/SD2: lowering taint survives a nested walk and its exits":
   test "loop body leaving through continue":
     check native(loopContinue(4)) == "ran"
     tainted(loopContinue, tLabel("hit"))
+
+  test "initial path: a proc parameter's decline reaches the result":
+    let r = symexFind(procParam, tLabel("hit"))
+    checkpoint show(r.errors)
+    checkpoint $r.status & " " & $r.soundness.pathTaint & " " &
+      $r.soundness.replay
+    check not r.clean
+    check r.status == sxUnknown
+    check r.errors.named(ceUnsupportedHof)
+    # The leak pin stays quiet: the decline was drained onto the initial
+    # path, the one every path of the walk derives from. A driver that
+    # skips the drain leaves it queued, and the pin fires here.
+    check not r.errors.named(weInternalWalkerFault)
 
   test "controls: a known operand decides":
     check native(closureKnown(4)) == "hit"

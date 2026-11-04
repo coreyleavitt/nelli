@@ -4067,9 +4067,10 @@ macro assertCoveredBy*(fn: typed,
   # of one parameter list). `parseEntryImplWarned` above has already resolved
   # `fn` through `getImpl`, which rejects anything that is not a routine
   # symbol (a lambda, a call, a template, a macro, a proc-typed variable), so
-  # only a symbol of a kind `resolveRoutineImpl` accepts gets here.
-  if fn.kind != nnkSym or fn.symKind notin {nskProc, nskFunc, nskConverter,
-                                            nskMethod}:
+  # only a symbol `resolveRoutineImpl` accepts gets here. Asked of that
+  # resolver, not of a symbol-kind set, so the two cannot drift (the N2 kind
+  # gate audit forbids a bare kind gate outside it).
+  if fn.kind != nnkSym or resolveRoutineImpl(fn).isNil:
     error("assertCoveredBy: a non-routine symbol reached the finding key", fn)
   let fnIdText = routineKey(fn)
   let fnIdLit = newLit(fnIdText & "@" & fn.getTypeInst.repr)

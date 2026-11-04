@@ -3955,6 +3955,7 @@ macro assertCoveredBy*(fn: typed,
           witnessChoices: renderAsChoices(`witId`),
           z3Version:      z3FullVersion(),
           soundness:      r.soundness,              ## RFC-0005 S11
+          bounds:     r.bounds,                     ## review R1-17
           gaps:           `gapsSym`(r.errors),
           annotationViolations: r.annotationViolations,
           hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
@@ -3968,6 +3969,7 @@ macro assertCoveredBy*(fn: typed,
           targetDesc: `targetDescLit`, status: sfUnsat, covered: true,
           z3Version:  z3FullVersion(),
           soundness:  r.soundness,                  ## RFC-0005 S11
+          bounds:     r.bounds,                     ## review R1-17
           gaps:       `gapsSym`(r.errors),
           annotationViolations: r.annotationViolations,
           hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
@@ -3978,6 +3980,7 @@ macro assertCoveredBy*(fn: typed,
           targetDesc: `targetDescLit`, status: sfUnknown, covered: false,
           z3Version:  z3FullVersion(),
           soundness:  r.soundness,                  ## RFC-0005 S11
+          bounds:     r.bounds,                     ## review R1-17
           gaps:       `gapsSym`(r.errors),
           annotationViolations: r.annotationViolations,
           hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
@@ -4030,6 +4033,7 @@ macro assertCoveredBy*(fn: typed,
           witnessChoices: renderAsChoices(`witId`),
           z3Version:      z3FullVersion(),
           soundness:      r.soundness,              ## RFC-0005 S11
+          bounds:     r.bounds,                     ## review R1-17
           gaps:           `gapsSym`(r.errors),
           annotationViolations: r.annotationViolations,
           hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
@@ -4478,6 +4482,7 @@ macro symexFindAllWitnesses*(fn: typed,
           covered:    false,
           z3Version:  z3FullVersion(),
           soundness:  Soundness(runTaint: runTaintOf(`progId`.parseErrors)),
+          bounds:     `symexSettings`.budget,       ## review R1-17
           gaps:       `gapsSym`(`progId`.parseErrors),
           hints:      `hintsSym`(`progId`.parseErrors),
           annotationViolations: `progId`.annotationViolations)
@@ -4491,6 +4496,9 @@ macro symexFindAllWitnesses*(fn: typed,
             covered:    false,
             z3Version:  z3FullVersion(),
             fromCache:  false,
+            # Review R1-17: the budget; a cache hit's key was derived from
+            # it (every field is keyed), so the stored verdict ran under it.
+            bounds:     `symexSettings`.budget,
             # RFC-0005 S11: parse-time facts, so a cache hit has them too.
             annotationViolations: `progId`.annotationViolations)
           # Phase 13 cycle 7. Three-level cascade:
@@ -4543,6 +4551,7 @@ macro symexFindAllWitnesses*(fn: typed,
               # RFC-0005 S11: the settled soundness (persisted below with the
               # verdict) and the per-cause view of this run.
               f.soundness = raw.soundness
+              f.bounds = raw.bounds   ## review R1-17
               f.gaps = `gapsSym`(raw.errors)
               # RFC-0005 W1: what `gaps` leaves out (the replay outcomes
               # among it) and the raises that did not decide the verdict,

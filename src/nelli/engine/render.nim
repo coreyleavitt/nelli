@@ -70,6 +70,21 @@ func taintText(t: Taint): string =
   ## `{}` / `{scSpurious}` / `{scSpurious, scIncomplete}`, as Nim prints a set.
   $t
 
+func boundsText(b: ResourceBudget): string =
+  ## Review R1-17. The budget a verdict was decided under, one `name=value`
+  ## per field: `maxCallDepth=3 maxLoopUnwind=5 ...`.
+  for name, v in fieldPairs(b):
+    if result.len > 0: result &= " "
+    result &= name & "=" & $v
+
+func boundsJson(b: ResourceBudget): string =
+  ## Review R1-17. `{"queryRLimit":250000000,...}`; every field is a number.
+  result = "{"
+  for name, v in fieldPairs(b):
+    if result.len > 1: result &= ","
+    result &= "\"" & name & "\":" & $v
+  result &= "}"
+
 proc symexFindingLines(f: SymexFinding): seq[string] =
   ## The text rendering of one finding: a summary line, then one indented
   ## line per gap and per annotation violation. Shared by `repro` (ofText)
@@ -79,9 +94,16 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
              " pathTaint=" & taintText(f.soundness.pathTaint) &
              " runTaint=" & taintText(f.soundness.runTaint) &
              " replay=" & $f.soundness.replay
+  # Review round 1 (Low): the two soundness fields no renderer showed.
+  if f.soundness.witnessUnsafe: head &= " witnessUnsafe=true"
+  if f.soundness.runDependence != {}:
+    head &= " runDependence=" & $f.soundness.runDependence
   if f.fromCache: head &= " fromCache=true"
   if f.defectTypeId.len > 0: head &= " defect=" & f.defectTypeId
   result.add head
+  # Review R1-17: an `sfUnsat` is a proof only under these bounds.
+  if f.status notin {sfNotApplicable, sfReplayMiss}:
+    result.add "  bounds " & boundsText(f.bounds)
   for g in f.gaps:
     result.add "  gap " & $g.class & " " & g.kind & ": " & g.msg
   for av in f.annotationViolations:
@@ -190,6 +212,12 @@ proc taintJson(t: Taint): string =
     first = false
   result &= "]"
 
+func runDependenceJson(d: set[RunDependence]): string =
+  ## `"rdQueryTimeout","rdReplay"` -- the elements of a JSON array.
+  for x in d:
+    if result.len > 0: result &= ","
+    result &= "\"" & $x & "\""
+
 proc symexFindingJson(f: SymexFinding): string =
   ## RFC-0005 S11. One element of the `symexFindings` array.
   result = "{\"target\":\"" & jsonEscape(f.targetDesc) & "\""
@@ -202,7 +230,11 @@ proc symexFindingJson(f: SymexFinding): string =
   result &= ",\"soundness\":{\"pathTaint\":" &
             taintJson(f.soundness.pathTaint) &
             ",\"runTaint\":" & taintJson(f.soundness.runTaint) &
-            ",\"replay\":\"" & $f.soundness.replay & "\"}"
+            ",\"replay\":\"" & $f.soundness.replay & "\"" &
+            ",\"witnessUnsafe\":" & $f.soundness.witnessUnsafe &
+            ",\"runDependence\":[" & runDependenceJson(f.soundness.runDependence) &
+            "]}"
+  result &= ",\"bounds\":" & boundsJson(f.bounds)   # review R1-17
   result &= ",\"gaps\":["
   for i, g in f.gaps:
     if i > 0: result &= ","
@@ -349,6 +381,18 @@ proc renderGithub[T](r: Report[T], testName: string): string =
                 ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
                          " runTaint=" & taintText(f.soundness.runTaint) &
                          (if gapText.len > 0: " gaps: " & gapText else: ""))
+    # Review R1-17: an `sfUnsat` holds only within its bounds, so the CI
+    # reader is told which ones, as a `::notice`.
+    if f.status == sfUnsat:
+      result &= "\n::notice title=symex bounds::" &
+                ghEscape(testName & " — " & f.targetDesc & " sfUnsat within " &
+                         boundsText(f.bounds))
+    # Review round 1 (Low): a witness no consumer runs in the host says so.
+    if f.soundness.witnessUnsafe:
+      result &= "\n::warning title=symex witness unsafe::" &
+                ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
+                         ": its replay ended or hung the process running it " &
+                         "after reaching the target; it is not run in the host")
     # RFC-0005 W1: a hint is a `::notice` of its own, so a replay that crashed
     # or did not run says so, with its message, where the CI reader looks.
     for h in f.hints:

@@ -13,6 +13,8 @@ import ../choice, ../datasource/distribution, ../optbox, ../crashinfo
 export distribution, optbox, crashinfo
 import ../smt/soundness   ## RFC-0005 S11: Z3-free and IR-free (a leaf)
 export soundness
+import ../smt/budget      ## review R1-17: Z3-free and IR-free (a leaf)
+export budget
 
 type
   SymexFindingStatus* = enum
@@ -76,6 +78,12 @@ type
       ## the run coordinate, and whether a SAT claim was replay-confirmed.
       ## Persisted with the verdict and served unchanged by a cache hit
       ## (§7). Read it through `trusted(f)`.
+    bounds*:         ResourceBudget
+      ## RFC-0005 0.9.1 (review R1-17). The budget the verdict was decided
+      ## under (`SymexResult.bounds`): an `sfUnsat` is a proof only within
+      ## these bounds, and an `sfUnknown` may be one a larger budget decides.
+      ## A cache hit carries the budget its key was derived from, which is
+      ## the one the stored verdict ran under. Every renderer shows it.
     gaps*:           seq[FindingGap]
       ## RFC-0005 S11 (§8.1). The per-cause view (`gaps()` on a
       ## `SymexResult`), projected to strings so this record stays free of

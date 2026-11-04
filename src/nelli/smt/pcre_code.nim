@@ -72,20 +72,23 @@ proc branchItems*(x: Rx): seq[Rx] = (if x.kind == rxCat: x.kids else: @[x])
 
 proc codeSize*(x: Rx): int
 proc branchSize*(br: Rx): int =
-  for it in branchItems(br): result += codeSize(it)
+  for it in branchItems(br): result = satAdd(result, codeSize(it))
 
 proc codeSize*(x: Rx): int =
   ## RFC-0005 S8bj. Code units in pcre_compile.c's layout, as addresses:
   ## only the order matters (THEN's catch test compares addresses;
   ## RFC-0005 S8bt: a repeat's address names it, `Code.address`).
+  ## RFC-0005 R1-22: saturating (a reading the reader accepts is within
+  ## PCRE's 65536 code units, which bound this count, but no caller may
+  ## overflow on another tree).
   case x.kind
   of rxCat, rxAlt:
     result = 1
-    for br in groupAlts(x): result += branchSize(br) + 1
+    for br in groupAlts(x): result = satAdd(result, satAdd(branchSize(br), 1))
   of rxRep:
     if x.sub.isGroup:
       let copies = (if x.hi == 0: 1 elif x.hi < 0: max(x.lo, 1) else: x.hi)
-      result = 1 + copies * codeSize(x.sub)
+      result = satAdd(1, satMul(copies, codeSize(x.sub)))
     else:
       result = 1
   else:

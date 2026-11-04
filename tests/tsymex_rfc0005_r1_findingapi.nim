@@ -14,7 +14,7 @@
 ##   forgot it failed open. Its zero is now `rsUnsettled`, which nothing trusts.
 ## * R1-17. `SymexFinding` dropped the budget an `sxUnsat` is a proof under. It
 ##   now carries `bounds`, and every renderer shows them.
-import std/[unittest, strutils, options, json, tables]
+import std/[unittest, strutils, options, json, tables, sequtils]
 import nelli
 import nelli/symex
 
@@ -379,11 +379,11 @@ suite "R3 E2: one entry per call site and target":
       warm.fromCache = true
       var other = cold
       other.soundness.runDependence = {rdReplay}
-      recordSymexFinding("f.nim(1, 2)", cold)
-      recordSymexFinding("f.nim(1, 2)", warm)
-      recordSymexFinding("f.nim(3, 4)", cold)
-      recordSymexFinding("f.nim(1, 2)", other)
-      let got = engineStack[^1].symexFindings
+      recordSymexFinding("f.nim(1, 2)", "fn", cold)
+      recordSymexFinding("f.nim(1, 2)", "fn", warm)
+      recordSymexFinding("f.nim(3, 4)", "fn", cold)
+      recordSymexFinding("f.nim(1, 2)", "fn", other)
+      let got = toSeq(engineStack[^1].symexFindings.values)
       check got.len == 2
       if got.len == 2:
         check got[0].soundness.runDependence == {rdReplay}
@@ -416,3 +416,85 @@ suite "R3 E3: a nested run's findings reach the enclosing run":
         Settings(maxExamples: 2)).symexFindings,
       Settings(maxExamples: 1))
     check descsOf(inner) == @["label(\"alpha\")"]
+
+# ---- Review round 4 -------------------------------------------------------------
+#
+# * U1/X1. The collector kept the latest finding per key, so a later passing
+#   example (or shrink candidate) overwrote an earlier failing one, and a
+#   template or helper shared one key among several `fn`s. A key is now the
+#   fn, the call site and the target; an entry keeps its most severe finding.
+# * X8. A finding recorded outside any engine frame is counted, not just lost.
+
+var r4Calls = 0
+proc r4Late(x: int) =
+  ## Not covering on its first call, covering on every call after.
+  inc r4Calls
+  if r4Calls > 1: r1Alpha(x)
+
+template r4Check(f: untyped) =
+  ## One call site shared by every `f`.
+  try:
+    discard assertCoveredBy(f, tLabel("alpha"), r4Late)
+  except SymexCoverageDefect:
+    discard
+
+suite "R4 U1: a failing finding is not overwritten by a later pass":
+  test "a later covered finding does not replace an earlier uncovered one":
+    withEngineFrame:
+      var bad = SymexFinding(targetDesc: "t", status: sfSat, covered: false)
+      var good = bad
+      good.covered = true
+      good.soundness.replay = rsConfirmed
+      recordSymexFinding("s", "fn", bad)
+      recordSymexFinding("s", "fn", good)
+      let got = toSeq(engineStack[^1].symexFindings.values)
+      check got.len == 1
+      check not got[0].covered
+
+  test "an unconfirmed covered finding beats a trusted covered one":
+    withEngineFrame:
+      var unconf = SymexFinding(targetDesc: "t", status: sfSat, covered: true)
+      var good = unconf
+      good.soundness.replay = rsConfirmed
+      recordSymexFinding("s", "fn", unconf)
+      recordSymexFinding("s", "fn", good)
+      let got = toSeq(engineStack[^1].symexFindings.values)
+      check got.len == 1
+      check not trusted(got[0])
+
+  test "two fns through one call site are two entries":
+    withEngineFrame:
+      let f = SymexFinding(targetDesc: "t", status: sfSat)
+      recordSymexFinding("s", "fnA", f)
+      recordSymexFinding("s", "fnB", f)
+      check engineStack[^1].symexFindings.len == 2
+
+  test "a failure on the first example survives later passes in the report":
+    r4Calls = 0
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      try:
+        assertCoveredBy(r1Alpha, tLabel("alpha"), r4Late)
+      except SymexCoverageDefect:
+        discard,
+      Settings(maxExamples: 4))
+    check rep.outcome == otPassed
+    check rep.symexFindings.len == 1
+    if rep.symexFindings.len == 1:
+      check not rep.symexFindings[0].covered
+
+  test "two fns through one template call site are two entries":
+    r4Calls = 0
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      r4Check(r1Alpha)
+      r4Check(r1Beta),
+      Settings(maxExamples: 2))
+    check rep.symexFindings.len == 2
+
+suite "R4 X8: a finding recorded outside a frame is counted":
+  test "the drop counter moves":
+    let before = droppedSymexFindings()
+    recordSymexFinding("s", "fn", SymexFinding(targetDesc: "t"))
+    check droppedSymexFindings() == before + 1
+    withEngineFrame:
+      recordSymexFinding("s", "fn", SymexFinding(targetDesc: "t"))
+    check droppedSymexFindings() == before + 1

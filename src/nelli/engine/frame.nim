@@ -25,31 +25,34 @@ type EngineFrame* = object
   scores*: ScoreMap                            ## per-example
   eventsCategorical*: Table[string, int]       ## cross-example
   eventsNumeric*: Table[string, seq[float]]    ## cross-example
-  symexFindings*: seq[SymexFinding]            ## cross-example
+  symexFindings*: OrderedTable[string, SymexFinding]  ## cross-example
     ## Review R2 (DD3). The findings `assertCoveredBy` made inside this run's
     ## property (`recordSymexFinding`), on every example. The engine moves
     ## them onto the run's `Report.symexFindings` when the run ends, passed or
-    ## failed. A fresh frame per run: nothing carries over. Review R3 (E2):
-    ## one entry per call site and target, in the order each was first made.
-  symexFindingAt: Table[string, int]
-    ## Review R3 (E2). Each entry's key (`findingKey`) to its index in
-    ## `symexFindings`.
-  symexFindingKeys: seq[string]
-    ## The key of each entry, by index, so a closing frame hands its parent
-    ## the same keys (`popEngineFrame`).
+    ## failed. A fresh frame per run: nothing carries over. Review R3 (E2),
+    ## R4 (U1): one entry per `findingKey` (the `fn`, its call site and the
+    ## target), in the order each was first made, holding the most severe
+    ## finding made under that key (`severity`).
 
 var engineStack* {.threadvar.}: seq[EngineFrame]
 
+func severity(f: SymexFinding): int =
+  ## Review R4 (U1). How much a report needs to show a finding: 3 for one that
+  ## failed coverage (or decided nothing: an unknown), 2 for a covered one no
+  ## trust backs (an unconfirmed claim), 1 for a trusted, covered one.
+  if not f.covered: 3
+  elif not trusted(f): 2
+  else: 1
+
 proc record(fr: var EngineFrame; key: string; f: SymexFinding) =
-  ## Review R3 (E2). The entry for `key` becomes `f`: the latest finding of
-  ## that call site for that target replaces the one before, in place.
-  let at = fr.symexFindingAt.getOrDefault(key, -1)
-  if at >= 0:
-    fr.symexFindings[at] = f
-  else:
-    fr.symexFindingAt[key] = fr.symexFindings.len
-    fr.symexFindingKeys.add key
-    fr.symexFindings.add f
+  ## Review R3 (E2), R4 (U1). The entry for `key` becomes `f` unless the
+  ## entry it holds is more severe: a later passing example, shrink candidate
+  ## or cache hit must not hide an earlier failure. Equal severity keeps the
+  ## latest. The entry keeps its place in the order.
+  if key in fr.symexFindings and
+     severity(fr.symexFindings[key]) > severity(f):
+    return
+  fr.symexFindings[key] = f
 
 proc popEngineFrame*() =
   ## Pops the top frame. Review R3 (E3): its symex findings also reach the
@@ -58,12 +61,17 @@ proc popEngineFrame*() =
   ## the inner one (`laws` keeps only the outcome).
   var fr = engineStack.pop()
   if engineStack.len > 0:
-    for i, f in fr.symexFindings:
-      record(engineStack[^1], fr.symexFindingKeys[i], f)
+    for k, f in fr.symexFindings:
+      record(engineStack[^1], k, f)
+
+proc pushEngineFrame*() =
+  ## Opens a fresh frame. Review R4 (X3): the one way a frame is opened;
+  ## pair it with `popEngineFrame` on every exit path (`withEngineFrame`).
+  engineStack.add EngineFrame()
 
 template withEngineFrame*(body: untyped) =
   ## Push a fresh frame for `body`; guarantees pop on any exit path.
-  engineStack.add EngineFrame()
+  pushEngineFrame()
   try: body
   finally: popEngineFrame()
 
@@ -74,24 +82,38 @@ proc currentFrame*: var EngineFrame {.inline.} =
       "note/target/event called outside any forAll — there's no example to attach to")
   engineStack[^1]
 
-func findingKey(site: string; f: SymexFinding): string =
-  ## Review R3 (E2). What makes two findings one entry: the call site that
-  ## made them, and the target (one multi-target call makes one per target).
-  $site.len & ':' & site & f.targetDesc
+var droppedFindings {.threadvar.}: int
 
-proc recordSymexFinding*(site: string; f: SymexFinding) =
-  ## Review R2 (DD3), R3 (E2, E3). Records a finding `assertCoveredBy` made at
-  ## `site` (its call site, `file(line, col)`) on the running property's
-  ## frame. A call site keeps one entry per target, the latest: the next
-  ## example, a shrink or a cache hit on the same call replaces it, and two
-  ## call sites that find the same thing are two entries. Constant time.
+proc droppedSymexFindings*(): int =
+  ## Review R4 (X8). How many findings `recordSymexFinding` dropped on this
+  ## thread because no engine frame was open. A nonzero count in a test that
+  ## expected its finding on a `Report` means the call ran outside `forAll`.
+  droppedFindings
+
+func findingKey(site, fnId: string; f: SymexFinding): string =
+  ## Review R3 (E2), R4 (U1). What makes two findings one entry: the `fn`
+  ## under test, the call site that made them (a template or helper shares
+  ## one among several `fn`s, a generic one among its instantiations) and the
+  ## target (one multi-target call makes one per target).
+  $fnId.len & ':' & fnId & $site.len & ':' & site & f.targetDesc
+
+proc recordSymexFinding*(site, fnId: string; f: SymexFinding) =
+  ## Review R2 (DD3), R3 (E2, E3), R4 (U1, X8). Records a finding
+  ## `assertCoveredBy` made at `site` (its call site, `file(line, col)`) on
+  ## `fnId` (the identity of the `fn` it checked) on the running property's
+  ## frame. One entry per fn, site and target; it holds the most severe
+  ## finding made under that key, the latest among equals, so a failure on one
+  ## example is not overwritten by a later pass. Constant time.
   ##
   ## Outside any engine frame (no `forAll` is running on this thread: a test
   ## body, a `fuzz` or concolic harness, a thread the property started) it
-  ## records nothing. There the finding's only channel is the call itself:
-  ## `assertCoveredBy` returns it, and its `SymexCoverageDefect` carries it.
-  if engineStack.len == 0: return
-  record(engineStack[^1], findingKey(site, f), f)
+  ## records nothing, and counts the drop (`droppedSymexFindings`). There the
+  ## finding's only channel is the call itself: `assertCoveredBy` returns it,
+  ## and its `SymexCoverageDefect` carries it.
+  if engineStack.len == 0:
+    inc droppedFindings
+    return
+  record(engineStack[^1], findingKey(site, fnId, f), f)
 
 # --- user-facing accumulator APIs --------------------------------------------
 

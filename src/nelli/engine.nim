@@ -104,7 +104,7 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
       raise newException(ValueError,
         "Settings.derandomize=true requires a non-empty Settings.testId")
     settings.seed = cast[uint64](hash(settings.testId))
-  engineStack.add EngineFrame()
+  pushEngineFrame()
   defer: popEngineFrame()   # review R3 (E3): findings reach the parent
   let originalProp = prop
   let deadline = settings.deadline
@@ -182,7 +182,7 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
   var state = initEngineState(spec)
   result = runPipeline(state, phases)
   # Review R2 (DD3): what `assertCoveredBy` found inside the property.
-  result.symexFindings.add engineStack[^1].symexFindings
+  for f in engineStack[^1].symexFindings.values: result.symexFindings.add f
   if settings.coverageGuided:
     # U1: the frontier (not a raw scalar re-read) is now the single
     # source of truth for the run's cumulative distinct-edge count too.

@@ -481,7 +481,7 @@ type
     ## thread-local sink that leaked into later callers).
     findings*: seq[SymexFinding]
 
-proc coverageOutcome(site: string; f: SymexFinding;
+proc coverageOutcome(site, fnId: string; f: SymexFinding;
                      failure: string): SymexFinding {.discardable.} =
   ## Review R1-10. The end of a single-target `assertCoveredBy`: its finding,
   ## or a `SymexCoverageDefect` carrying it when `failure` says why coverage
@@ -489,7 +489,7 @@ proc coverageOutcome(site: string; f: SymexFinding;
   ## goes on the run's report (`recordSymexFinding`), on success or failure;
   ## review R3 (E2): as the latest of its call site `site` for its target.
   ## Outside any property, the return and the defect are its only channel.
-  recordSymexFinding(site, f)
+  recordSymexFinding(site, fnId, f)
   if failure.len > 0:
     var e = newException(SymexCoverageDefect, failure)
     e.findings = @[f]
@@ -4003,6 +4003,11 @@ macro assertCoveredBy*(fn: typed,
   # Review R3 (E2): the call site the run's report keys this finding by. The
   # multi-target form hands its own `fn` node on, so its targets share it.
   let siteLit = newLit(fn.lineInfo)
+  # Review R4 (U1): and the `fn` itself, since a template or helper shares one
+  # call site among several `fn`s, and a generic one among its instantiations.
+  let fnIdLit = newLit(
+    (if fn.kind == nnkSym: fn.strVal & "#" & $signatureHash(fn)
+     else: fn.repr & "#" & fn.lineInfo) & "@" & fn.getTypeInst.repr)
   let trustedSym = bindSym"trusted"
   # Shared by the arm bodies below and the block they are spliced into.
   let rId = genSym(nskLet, "r")
@@ -4114,7 +4119,7 @@ macro assertCoveredBy*(fn: typed,
             "prove coverage (set acceptUnknownAsCovered = true to downgrade)"
       of sxRaised:
         `raisedArm`
-      `outcomeSym`(`siteLit`, `findingId`, `failureId`)
+      `outcomeSym`(`siteLit`, `fnIdLit`, `findingId`, `failureId`)
 
 macro assertCoveredBy*(fn: typed,
                        targets: static openArray[SymexTarget],

@@ -353,11 +353,12 @@ proc otherCaseRange(c: var int32; d: int32; oc, od: var int32): int =
   c = x
   0
 
-proc ucdFoldRange*(lo, hi: int32): CpSet =
+proc ucdFoldRangeRaw(lo, hi: int32): CpSet =
   ## RFC-0005 S8bt. pcre_compile.c's `add_to_class` for a caseless range in
   ## UTF mode: each run's other cases (extending the range where they
   ## overlap it, as the C code does), each caseless set's members, and the
-  ## range itself.
+  ## range itself. RFC-0005 R1-03: unmerged, one entry per range the class
+  ## lists (its compiled size).
   var start = lo
   var stop = hi
   var c = lo
@@ -372,7 +373,10 @@ proc ucdFoldRange*(lo, hi: int32): CpSet =
     elif od > stop and oc <= stop + 1: stop = od
     else: result.add (oc, od)
   result.add (start, stop)
-  result = cpNorm(result)
+
+proc ucdFoldRange*(lo, hi: int32): CpSet =
+  ## RFC-0005 S8bt. `ucdFoldRangeRaw`, merged.
+  cpNorm(ucdFoldRangeRaw(lo, hi))
 
 proc utf8Len*(c: int32): int =
   if c < 0x80: 1 elif c < 0x800: 2 elif c < 0x10000: 3 else: 4
@@ -479,8 +483,45 @@ type
     extra: bool          ## `(?X)` (PCRE_EXTRA)
     classPre845: bool    ## RFC-0005 S8bt: see `PcreParse.classPre845`
     pre845: bool         ## RFC-0005 S8cf: the library's classes are 8.37's
+    # RFC-0005 R1-03: PCRE's compile limits (see `pcreMaxLength`).
+    size: int            ## an upper bound on pcre_compile's pre-pass length
+                         ## of what has been read (saturating at `sizeCap`)
+    wsBase: int          ## an upper bound on the compile workspace the
+                         ## enclosing groups hold
+    classCost: int       ## `readClass`: its class's size bound
+
+const
+  pcreNestLimit* = 250
+    ## RFC-0005 R1-03: PARENS_NEST_LIMIT ("parentheses are too deeply
+    ## nested" when a group opens deeper).
+  pcreMaxLength* = 65536
+    ## RFC-0005 R1-03: MAX_PATTERN_SIZE under LINK_SIZE 2 ("regular
+    ## expression is too large" past it).
+  pcreWorkspace = 4096 - 100
+    ## RFC-0005 R1-03: COMPILE_WORK_SIZE less WORK_SIZE_SAFETY_MARGIN
+    ## ("regular expression is too complicated" past it).
+  wsMargin = 64
+  sizeCap = 1 shl 40
+  overflowSafe = 1 shl 30
+    ## Below it no pre-pass length check (OFLOW_MAX, about INT_MAX) can
+    ## have fired, so a later error is the one PCRE reports.
+
+proc satAdd*(a, b: int): int =
+  ## RFC-0005 R1-03 / R1-22. `a + b` for non-negative sizes, saturating at
+  ## `sizeCap` (2^40).
+  (if a >= sizeCap - b: sizeCap else: a + b)
+proc satMul*(a, b: int): int =
+  ## `a * b` for non-negative sizes, saturating at `sizeCap`.
+  (if a == 0 or b == 0: 0 elif a >= sizeCap div b: sizeCap else: a * b)
+
+proc unknown(r: var Reader; why: string) {.noreturn.}
 
 proc reject(r: var Reader; msg: string; offset: int) {.noreturn.} =
+  if r.size > overflowSafe:
+    # RFC-0005 R1-03: pcre_compile may have stopped earlier, at one of its
+    # length overflow checks ("regular expression is too large").
+    r.unknown("a pattern whose compiled size may pass PCRE's overflow " &
+              "check before the error at offset " & $offset)
   r.status = psRejected
   # Nim's `rawCompile`: `msg & "\n" & pattern & "\n" & spaces(offset) & "^\n"`.
   r.errMsg = msg & "\n" & r.pat & "\n" & spaces(offset) & "^\n"
@@ -493,6 +534,14 @@ proc unknown(r: var Reader; why: string) {.noreturn.} =
 
 proc unmodelled(r: var Reader; why: string) =
   if r.unmodelled.len == 0: r.unmodelled = why
+
+proc grow(r: var Reader; n: int) = r.size = satAdd(r.size, n)
+
+proc wsCheck(r: var Reader; held: int) =
+  ## RFC-0005 R1-03. `held` more units of workspace in use at this level.
+  if satAdd(r.wsBase, held) + wsMargin > pcreWorkspace:
+    r.unknown("a pattern near PCRE's compile workspace limit " &
+              "(\"regular expression is too complicated\")")
 
 proc atEnd(r: Reader): bool = r.i >= r.pat.len
 proc cur(r: Reader): char = (if r.i < r.pat.len: r.pat[r.i] else: '\0')
@@ -572,6 +621,35 @@ proc mkChar(r: var Reader; c: int32): Rx =
     result.clist = true
 
 proc mkCat(kids: seq[Rx]): Rx = Rx(kind: rxCat, kids: kids)
+
+proc xEntries(rs: CpSet): int =
+  ## RFC-0005 R1-03. An upper bound on the OP_XCLASS data listing the parts
+  ## of `rs` above 0xFF (the rest is the bitmap): XCL_SINGLE / XCL_RANGE
+  ## and the characters' UTF-8 (one for a single), one entry per range.
+  for x in rs:
+    if x.hi > 255:
+      let lo = max(x.lo, 256'i32)
+      result = satAdd(result, 1 + utf8Len(lo) +
+                              (if x.hi > lo: utf8Len(x.hi) else: 0))
+
+proc repKind(r: Reader; x: Rx): int =
+  ## RFC-0005 R1-03. How pcre_compile.c repeats a one-character item: 0 a
+  ## character (OP_EXACT / OP_STAR and its data), 1 a type (OP_TYPE*
+  ## and the type's opcode), 2 a class (OP_CR*).
+  case x.op
+  of aoChar, aoNot: 0
+  of aoClass, aoNClass, aoXClass: 2
+  else: 1
+
+proc atomCost(r: Reader; x: Rx): int =
+  ## RFC-0005 R1-03. An upper bound on the code units of a one-character
+  ## item that is not a multi-character class (pcre_compile.c: OP_CHAR /
+  ## OP_NOT and the character, OP_PROP and its two data units, a type).
+  case x.op
+  of aoChar, aoNot: 1 + (if r.utf: utf8Len(x.ch) else: 1)
+  of aoProp: 3
+  of aoClass, aoNClass: 33
+  else: 1
 
 proc isHex(c: char): bool = c in {'0'..'9', 'a'..'f', 'A'..'F'}
 
@@ -879,6 +957,8 @@ proc readClass(r: var Reader): Rx =
   var xclass = false     ## characters above 0xFF listed (UTF mode)
   var hasProp = false    ## a property item (xclass_has_prop)
   var has8 = false       ## an item below 0x100 (class_has_8bitchar)
+  var xData = 0          ## RFC-0005 R1-03: a bound on the OP_XCLASS data
+  var mapBits = false    ## RFC-0005 R1-03: the class sets bitmap bits
   while true:
     if r.atEnd:
       r.reject("missing terminating ] for character class", r.pat.len)
@@ -956,6 +1036,12 @@ proc readClass(r: var Reader): Rx =
           posixSpecial = true
         r.i = t + 2
         isChar = false
+        # RFC-0005 R1-03: under `(*UCP)` a property (XCL_PROP) or `\h`'s
+        # list; else the bitmap (and a negated one's range above 0xFF).
+        xData += (if r.ucp: (if name == "blank": 9 + xEntries(uHSpace) else: 6)
+                  else: 13)
+        if not r.ucp or name in ["ascii", "cntrl", "xdigit", "blank"]:
+          mapBits = true
         let base = (if useU: uset else: cpOfBytes(ps))
         itemSet = (if neg: cpComplement(base, r.topCp) else: base)
         if r.cur == '-' and r.at(1) != ']':
@@ -969,14 +1055,22 @@ proc readClass(r: var Reader): Rx =
       of ekSet:
         isChar = false
         itemSet = e.s
+        # RFC-0005 R1-03: XCL_PROP / XCL_NOTPROP, a type's property or
+        # range above 0xFF, or `\h \v`'s list.
+        xData += (case e.op
+                  of aoProp: 3
+                  of aoType: 13
+                  else: 9 + xEntries(e.s))
         case e.op
         of aoProp: hasProp = true
         of aoType:
           has8 = true
           if e.neg: flip = true
+          if not r.ucp: mapBits = true   # RFC-0005 R1-03: else a property
         else:
           # `\h \H \v \V`: in UTF mode their lists reach above 0xFF.
           has8 = true
+          mapBits = true
           if r.utf: xclass = true
       else: r.unknown("an escape in a class")
     else:
@@ -1011,10 +1105,20 @@ proc readClass(r: var Reader): Rx =
       oneCh = lo
     if lo < 256: has8 = true
     if hi > 255: xclass = true
-    let folded = r.foldCps(@[(lo, hi)])
+    var folded: CpSet
+    if r.caseless and r.utf:
+      # RFC-0005 R1-03: each listed range is XCL_RANGE / XCL_SINGLE with
+      # its characters (at most 9 units).
+      let raw = (if lo == hi: ucdFoldChar(lo) else: ucdFoldRangeRaw(lo, hi))
+      xData = satAdd(xData, xEntries(raw))
+      folded = cpNorm(raw)
+    else:
+      folded = r.foldCps(@[(lo, hi)])
+      xData = satAdd(xData, xEntries(@[(lo, hi)]))
     # RFC-0005 S8bt: `add_to_class` lists every caseless other case above
     # 0xFF in the class's extra data (an OP_XCLASS).
     if r.utf and folded.len > 0 and folded[^1].hi > 255: xclass = true
+    if folded.len > 0 and folded[0].lo < 256: mapBits = true
     cs = cpUnion(cs, folded)
   if hasProp: xclass = true
   # RFC-0005 S8cf (item 7): a negated escape reads the same on 8.37 (probed on
@@ -1038,6 +1142,13 @@ proc readClass(r: var Reader): Rx =
     result.xProp = hasProp
   else:
     result = r.mkAtom(members, (if negated == flip: aoClass else: aoNClass))
+  # RFC-0005 R1-03: OP_XCLASS, its length and flags, the bitmap when an
+  # item sets a bit in it (or the class is negated; probed: properties
+  # and `(*UCP)`'s substitutes set none), the data, and XCL_END.
+  let bitmap = mapBits or negated or flip
+  r.classCost = (if result.op == aoXClass:
+                   satAdd(5 + (if bitmap: 32 else: 0), xData)
+                 else: r.atomCost(result))
 
 proc isCountedRepeat(r: Reader; j: int): bool =
   ## PCRE's `is_counted_repeat` at `pat[j-1] == '{'`.
@@ -1157,10 +1268,45 @@ type Prev = enum
   pvAtom       ## a quantifiable item, last in `items`
   pvOpaque     ## a quantifiable unmodelled item (no tree)
 
+proc groupRepSize(g, lo, hi: int; poss: bool): int =
+  ## RFC-0005 R1-03. An upper bound on a group of size `g` repeated
+  ## `lo .. hi` times (`hi == -1`: unbounded), as pcre_compile.c's
+  ## pre-pass counts it: `{0}`, `{0,1}` and `{0,}` are the group behind
+  ## OP_SKIPZERO / OP_BRAZERO; otherwise `lo` copies, then `hi - lo`
+  ## optional ones, each with OP_BRAZERO and an OP_BRA .. OP_KET around it
+  ## (`length_prevgroup + 1 + 2 + 2*LINK_SIZE`). A possessive repeat
+  ## wraps the result in OP_ONCE .. OP_KET.
+  if lo == 0 and (hi <= 1): result = satAdd(g, 1)
+  elif hi < 0: result = satMul(lo, g)
+  else: result = satAdd(satMul(lo, g), satMul(hi - lo, g + 7))
+  if poss: result = satAdd(result, 6)
+
 proc readCat(r: var Reader; depth: int): Rx =
   ## One alternative, up to `|`, `)` or the end.
+  ##
+  ## RFC-0005 R1-03: and pcre_compile.c's pre-pass bookkeeping, as upper
+  ## bounds: `r.size` grows by each item's code; a quantifier replaces the
+  ## last item's (`last0` is where it began); `held` is the workspace the
+  ## previous item keeps while the next one compiles (none after a
+  ## quantifier, an anchor, a verb or an option setting: PCRE's
+  ## `previous == NULL`).
   var items: seq[Rx]
   var prev = pvNone
+  var last0 = r.size
+  var lastGroup = false
+  var lastAssert = false ## the last group is an assertion
+  var lastKind = 0       ## 0 a character, 1 a type, 2 a class or reference
+  var held = 0
+  template atomDone(len0: int; kind = 1) =
+    let cost = r.size - len0
+    r.wsCheck(held + cost)
+    last0 = len0
+    lastGroup = false
+    lastAssert = false
+    lastKind = kind
+    held = cost
+  template unheld() =
+    held = 0
   while true:
     r.skipX()
     if r.atEnd: break
@@ -1173,8 +1319,11 @@ proc readCat(r: var Reader; depth: int): Rx =
       if c == '{':
         if not r.isCountedRepeat(r.i + 1):
           # A literal `{`.
+          let len0 = r.size
           inc r.i
           items.add r.mkChar(int32('{'))
+          r.grow(2)
+          atomDone(len0, 0)
           prev = pvAtom
           continue
         (lo, hi) = r.readCounts()
@@ -1189,8 +1338,10 @@ proc readCat(r: var Reader; depth: int): Rx =
       inc r.i   # past `*` / `+` / `?` / `}`
       r.skipX()
       var lazy = false
+      var poss = false
       if r.cur == '+':
         inc r.i
+        poss = true
         r.unmodelled("a possessive quantifier")
       elif r.cur == '?':
         inc r.i
@@ -1200,34 +1351,76 @@ proc readCat(r: var Reader; depth: int): Rx =
       if prev == pvAtom:
         let sub = items.pop()
         items.add Rx(kind: rxRep, sub: sub, lo: lo, hi: hi, lazy: lazy)
+      # RFC-0005 R1-03: a group is replicated; a class or a back-reference
+      # takes an OP_CR* opcode and two counts; a character or type becomes
+      # OP_EXACT (the opcode, a count, the item's data) and / or OP_STAR /
+      # OP_UPTO forms (OP_TYPE* carry the type's opcode as well).
+      let g = r.size - last0
+      if lastAssert:
+        # pcre_compile.c: a repeated assertion with a minimum is compiled
+        # once (the quantifier is dropped); `{0,n}` is one optional copy.
+        if lo == 0: r.size = satAdd(last0, groupRepSize(g, 0, 1, poss))
+        elif poss: r.grow(6)
+      elif lastGroup: r.size = satAdd(last0, groupRepSize(g, lo, hi, poss))
+      elif lastKind == 2: r.grow(5)
+      else:
+        let kExact = (if lastKind == 0: 2 else: 3)
+        let kStar = (if lastKind == 0: 0 else: 1)
+        let n = (if lo == hi: g + kExact
+                 elif hi < 0 and lo <= 1: g + kStar
+                 else: 2 * (g + kExact))
+        r.size = satAdd(last0, n)
+      unheld()
       prev = pvNone
     of '.':
+      let len0 = r.size
       inc r.i
       items.add r.mkDot(r.dotall)
+      r.grow(1)
+      atomDone(len0)
       prev = pvAtom
     of '^':
       inc r.i
       items.add Rx(kind: rxBol, multi: r.multiline)
+      r.grow(1)
+      unheld()
       prev = pvNone
     of '$':
       inc r.i
       items.add Rx(kind: rxEol, multi: r.multiline)
+      r.grow(1)
+      unheld()
       prev = pvNone
     of '[':
       if r.at(1) in {':', '.', '='} and r.checkPosixSyntax(r.i) >= 0:
         r.unknown("a POSIX class outside a class")
+      let len0 = r.size
       items.add r.readClass()
+      r.grow(r.classCost)
+      atomDone(len0, r.repKind(items[^1]))
       prev = pvAtom
     of '(':
       if r.at(1) == '*' and r.at(2) in {'a'..'z', 'A'..'Z', ':'}:
         # RFC-0005 S8bj: a verb (S8bb read `(*F)`, the marks and
         # `(*ACCEPT)`). PCRE sets nothing to repeat after any of them.
         items.add r.readVerb()
+        # RFC-0005 R1-03: the opcode, an argument's length, text and NUL,
+        # and (*ACCEPT)'s OP_CLOSE for each open group.
+        block:
+          let txt = r.pat[start ..< r.i]
+          let colon = txt.find(':')
+          let arg = (if colon >= 0: txt.len - colon - 2 else: 0)
+          r.grow(1 + (if arg > 0: arg + 2 else: 0) +
+                 (if items[^1].kind == rxAccept: 3 * r.open.len else: 0))
+        unheld()
         prev = pvNone
         continue
       # `(*...)` otherwise: a group whose first item is a quantifier.
       var capture = true
       var opaque = false
+      var failGroup = false  ## RFC-0005 R1-03: `(?!)`, compiled as OP_FAIL
+      var assertion = false
+      let len0 = r.size
       let saved = (r.caseless, r.dotall, r.ungreedy, r.ext, r.multiline,
                    r.extra)
       if r.at(1) == '?':
@@ -1248,6 +1441,13 @@ proc readCat(r: var Reader; depth: int): Rx =
           capture = false
           opaque = true
           r.unmodelled("a lookahead assertion")
+          assertion = true
+          # RFC-0005 R1-03: pcre_compile.c reads `(?!)` with no quantifier
+          # after it as OP_FAIL, not a group (it opens no nesting level).
+          if k == '!' and r.at(3) == ')':
+            let q = r.at(4)
+            failGroup = not (q in {'*', '+', '?'} or
+                             (q == '{' and r.isCountedRepeat(r.i + 5)))
           r.i += 3
         of '>':
           capture = false
@@ -1278,6 +1478,7 @@ proc readCat(r: var Reader; depth: int): Rx =
             r.readOptions()
             if r.cur == ')':
               inc r.i
+              unheld()
               prev = pvNone
               continue
             capture = false
@@ -1298,12 +1499,24 @@ proc readCat(r: var Reader; depth: int): Rx =
           if r.cur == ')':
             # To the end of the enclosing group: `saved` is not restored.
             inc r.i
+            unheld()
             prev = pvNone
             continue
           capture = false
           inc r.i   # `:`
       else:
         inc r.i
+      # RFC-0005 R1-03: PCRE's nesting limit, at the offset past the opener
+      # (probed: `(`, `(?:`, `(?=`, `(?>`, `(?i:`, a named group).
+      if not failGroup and depth + 1 > pcreNestLimit:
+        r.reject("parentheses are too deeply nested", r.i)
+      # RFC-0005 R1-03: OP_BRA (OP_CBRA and its number), a name's entry,
+      # then OP_KET after the body; the enclosing levels hold the
+      # previous item and the bracket in the workspace meanwhile.
+      r.grow(if capture: 5 else: 3)
+      let savedBase = r.wsBase
+      r.wsBase = satAdd(r.wsBase, held + 5)
+      r.wsCheck(0)
       if capture: inc r.groups
       let group = (if capture: r.groups else: 0)
       if capture: r.open.add group
@@ -1313,6 +1526,17 @@ proc readCat(r: var Reader; depth: int): Rx =
       if r.atEnd:
         r.reject("missing )", r.pat.len)
       inc r.i   # `)`
+      r.wsBase = savedBase
+      r.grow(3)
+      # pcre_compile.c's pre-pass reduces a closed group to an empty
+      # OP_BRA .. OP_KET in the workspace (probed: `(?:[ab])(?:` nests 250
+      # deep where `[ab](?:` stops at 110).
+      let footprint = 8
+      r.wsCheck(held + footprint)
+      last0 = len0
+      lastGroup = true
+      lastAssert = assertion
+      held = footprint
       # RFC-0005 S8bb: an option set inside a group ends with it.
       (r.caseless, r.dotall, r.ungreedy, r.ext, r.multiline, r.extra) = saved
       if opaque:
@@ -1321,35 +1545,54 @@ proc readCat(r: var Reader; depth: int): Rx =
         items.add inner
         prev = pvAtom
     of '\\':
+      let len0 = r.size
       let e = r.readEscape(inClass = false)
       case e.kind
       of ekChar:
         r.noteChar(e.c)
         items.add r.mkChar(e.c)
+        r.grow(r.atomCost(items[^1]))
+        atomDone(len0, r.repKind(items[^1]))
         prev = pvAtom
       of ekSet:
         let a = r.mkAtom(e.s, e.op)
         a.negType = e.neg
         items.add a
+        r.grow(r.atomCost(a))
+        atomDone(len0)
         prev = pvAtom
       of ekDot:
         items.add r.mkDot(false)
+        r.grow(1)
+        atomDone(len0)
         prev = pvAtom
       of ekBol:
         items.add Rx(kind: rxBol)
+        r.grow(1)
+        unheld()
         prev = pvNone
       of ekEol:
         items.add Rx(kind: rxEol)
+        r.grow(1)
+        unheld()
         prev = pvNone
       of ekEolAbs:
         items.add Rx(kind: rxEolAbs)
+        r.grow(1)
+        unheld()
         prev = pvNone
       of ekAssert:
         r.unmodelled("the assertion " & r.pat[start ..< r.i])
+        r.grow(1)
+        unheld()
         prev = pvNone
       of ekBackref:
         r.unmodelled("a backreference \\" & $e.n)
         r.maxBackref = max(r.maxBackref, e.n)
+        # OP_REF and the number; a reference inside the group it names is
+        # wrapped in OP_ONCE .. OP_KET (probed: `((a)\\1){N}`).
+        r.grow(9)
+        atomDone(len0, 2)
         prev = pvOpaque
       of ekQuote:
         # Literal characters up to `\E` or the end.
@@ -1357,23 +1600,31 @@ proc readCat(r: var Reader; depth: int): Rx =
           if r.cur == '\\' and r.at(1) == 'E':
             r.i += 2
             break
+          let q0 = r.size
           let q = r.readChar()
           r.noteChar(q)
           items.add r.mkChar(q)
+          r.grow(r.atomCost(items[^1]))
+          atomDone(q0, r.repKind(items[^1]))
           prev = pvAtom
       of ekQuoteEnd:
         discard   # a stray `\E` is ignored; `prev` unchanged
     else:
+      let len0 = r.size
       let q = r.readChar()
       r.noteChar(q)
       items.add r.mkChar(q)
+      r.grow(r.atomCost(items[^1]))
+      atomDone(len0, r.repKind(items[^1]))
       prev = pvAtom
   mkCat(items)
 
 proc readAlt(r: var Reader; depth: int): Rx =
+  ## RFC-0005 R1-03: each `|` is an OP_ALT.
   var alts = @[r.readCat(depth)]
   while r.cur == '|' and not r.atEnd:
     inc r.i
+    r.grow(3)
     alts.add r.readCat(depth)
   if r.cur == ')' and not r.atEnd and depth == 0:
     r.reject("unmatched parentheses", r.i)
@@ -1396,7 +1647,10 @@ proc readLimit(r: Reader; j: int): (bool, int64, int) =
 proc parsePcre*(pattern: string; extended = false; pre845 = false): PcreParse =
   ## RFC-0005 S8ay. Reads `pattern` as `re(pattern)` (`extended = false`)
   ## or `rex(pattern)` (`extended = true`) compiles it. See the module doc.
-  var r = Reader(pat: pattern, ext: extended, pre845: pre845)
+  # RFC-0005 R1-03: the pattern's OP_BRA .. OP_KET and OP_END; the
+  # workspace holds the outer bracket.
+  var r = Reader(pat: pattern, ext: extended, pre845: pre845, size: 7,
+                 wsBase: 5)
   if '\0' in pattern:
     # Nim passes the pattern to PCRE as a cstring: it ends at the NUL.
     return PcreParse(status: psUnknown, reason: "a NUL byte in the pattern")
@@ -1457,6 +1711,16 @@ proc parsePcre*(pattern: string; extended = false; pre845 = false): PcreParse =
       let bad = utf8Error(pattern)
       if bad >= 0: r.reject("invalid UTF-8 string", bad)
     let root = r.readAlt(0)
+    # RFC-0005 R1-03: PCRE checks the pre-pass length before anything
+    # else after the pass. `r.size` (and each name's table entry, at most
+    # 32 bytes and the number) bounds it from above, so a pattern
+    # within the limit compiles; one past the bound may not, and whether
+    # it does is left undecided.
+    if satAdd(r.size, 36 * r.names.len) > pcreMaxLength:
+      return PcreParse(status: psUnknown,
+        reason: "a pattern whose compiled size may pass PCRE's limit of " &
+                $pcreMaxLength & " code units (\"regular expression is " &
+                "too large\"; bound " & $r.size & ")")
     if r.maxBackref > r.groups:
       r.reject("reference to non-existent subpattern", pattern.len)
     if r.unmodelled.len > 0:

@@ -12,7 +12,7 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
-## [Unreleased] — 0.9.1
+## [0.9.1] — 2026-11-04
 
 This release carries two sets of fixes made after the 0.9.0 tag (RFC-0005):
 the wiring audit (handoff entry "2026-11-03 — Wiring audit", WA-1 to WA-13)

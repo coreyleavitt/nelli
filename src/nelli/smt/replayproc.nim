@@ -40,13 +40,15 @@ const
 
 type
   ReplayEnding* = enum
-    ## How one child ended.
+    ## How one child ended. Review R3 (E1): the zero value is `reRefused`, a
+    ## child that did not run, so a `ReplayChild` nothing filled in reports
+    ## no run, never one that finished.
+    reRefused     ## no child ran: it could not be started, or the state the
+                  ## SUT reaches could not be handed to it
     reFinished    ## the SUT returned, or raised into the replay's frame
     reExited      ## the process exited before that (`quit`, C `exit`, ...)
     reSignalled   ## a signal or an unhandled system exception ended it
     reTimedOut    ## it ran past the bound and was killed
-    reRefused     ## no child ran: it could not be started, or the state the
-                  ## SUT reaches could not be handed to it
     reLost        ## review R2 (LV1). A child ran and ended without a report
                   ## of its end, and its exit status was gone before the host
                   ## could read it (`statusLost`). It did not finish, as far

@@ -19,6 +19,9 @@
 import std/[unittest, strutils, options]
 import nelli
 import nelli/symex
+import nelli/smt/replayproc
+import nelli/smt/replayresult
+import nelli/smt/soundness
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -121,3 +124,63 @@ suite "R1-06: a replay's result is a value":
     check miss.outcome == roRefuted
     check hit.detail == "it ran to its end"
     check rdReplay notin hit.runDependence
+
+# ---- Review round 3 -----------------------------------------------------------
+#
+# * E1. `ReplayResult`'s zero value was `roConfirmed` over a child that
+#   finished: a confirmed, host-safe replay that nothing ran. Its zero, and its
+#   child's, is now the replay that did not run.
+# * SC1. Whether a replay is run-dependent rested on a flag each producer had to
+#   set; a lost status or a kill is the host's, whatever the flag says. And a
+#   confirmed claim whose child was killed or lost (`witnessUnsafe` for a reason
+#   of the run) was cached for good, so one slow host marked the witness
+#   unrunnable forever.
+
+suite "R3 E1: a replay result nothing produced is not a confirmation":
+  test "the zero ReplayChild is a child that did not run":
+    var c: ReplayChild
+    check c.ending == reRefused
+    check not c.reached
+
+  test "the zero ReplayResult is the decline its child means":
+    var r: ReplayResult
+    check r.outcome != roConfirmed
+    check r.replayStatus != rsConfirmed
+    check r.child.ending != reFinished
+    check r.outcome == replayResultOf(r.child, lossy = false).outcome
+    check ReplayResult().outcome == r.outcome
+
+suite "R3 SC1: an ending of the host's is run-dependent":
+  test "a child whose status was lost":
+    let r = replayResultOf(ReplayChild(ending: reLost, reached: true), false)
+    check r.outcome == roConfirmed
+    check rdReplay in r.runDependence
+  test "a child killed at its bound":
+    let r = replayResultOf(ReplayChild(ending: reTimedOut), false)
+    check rdReplay in r.runDependence
+  test "control: a child that exited is the program's":
+    let r = replayResultOf(ReplayChild(ending: reExited, code: 3), false)
+    check rdReplay notin r.runDependence
+
+suite "R3 SC1: an unsafe witness of the run's is not cached for good":
+  test "a confirmed claim whose child was killed or lost":
+    check not Soundness(replay: rsConfirmed, witnessUnsafe: true,
+                        runDependence: {rdReplay}).cacheable
+  test "an unconfirmed one":
+    check not Soundness(replay: rsUnconfirmed, witnessUnsafe: true,
+                        runDependence: {rdReplay}).cacheable
+  test "control: an unsafe witness of the program's is cached":
+    check Soundness(replay: rsConfirmed, witnessUnsafe: true).cacheable
+    check Soundness(replay: rsConfirmed, witnessUnsafe: true,
+                    runDependence: {rdQueryTimeout}).cacheable
+  test "control: a safe confirmed claim is cached":
+    check Soundness(replay: rsConfirmed, runDependence: {rdReplay}).cacheable
+  test "the save drops it":
+    let db = inMemoryDatabase()
+    saveSymexWitness(db, r1Unrelated, tLabel("r1_unrelated"),
+                     defaultSymexSettings(),
+                     SymexFinding(status: sfSat, soundness: Soundness(
+                       replay: rsConfirmed, witnessUnsafe: true,
+                       runDependence: {rdReplay})))
+    check loadSymexWitnesses(db, r1Unrelated, tLabel("r1_unrelated"),
+                             defaultSymexSettings()).len == 0

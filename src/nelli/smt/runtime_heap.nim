@@ -1366,11 +1366,13 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   ## Phase 15 R5 (Cluster R, ADR-0010). Fork a `p[]` deref (READ or WRITE) of a
   ## possibly-nil ref/ptr `p` into:
   ##   * a NIL sub-path — `p == nil` asserted — which is the NilAccessDefect
-  ##     finding (conceptually `sxRaised("NilAccessDefect")`, a Nim `Defect`). It
-  ##     is GATED on the `stkNilAccess` target: only under that target is the
-  ##     defect witness (`p == nil`) solved and recorded; under any other target
-  ##     the nil path terminates silently. The nil path is TERMINAL — it never
-  ##     continues into the select/store.
+  ##     finding (`sxRaised("NilAccessDefect")`). It is forked under EVERY
+  ##     target (Phase 16 D1a; the `stkNilAccess` gate this comment once
+  ##     described is gone): the path is marked `nilDeref` (RFC-0005 S8k, so
+  ##     replay never runs the real SIGSEGV it models) and handed to
+  ##     `crashRaise` (RFC-0005 S8cu), a crash no `except` or `finally` sees,
+  ##     which a raise target matches like any other raise. The nil path is
+  ##     TERMINAL — it never continues into the select/store.
   ##   * a NON-NIL continuation — `p != nil` asserted — RETURNED to the caller to
   ##     continue the ordinary deref (the R1 select / R4 store).
   ##

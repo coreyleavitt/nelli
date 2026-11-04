@@ -115,6 +115,16 @@ proc replayRunDependent*(): bool =
   replayRunDependentFlag
 
 proc describe(c: ReplayChild): string =
+  ## The words `lastReplayDetail` hands to a `feReplay*` hint.
+  ##
+  ## Known limitation (RFC-0005 0.9.1, WA-13): on a forked child where libc
+  ## has no `on_exit` (macOS, musl: `hasOnExit` is false), the exit hook is
+  ## `atexit`, which is not told the status. The child reports an exit with
+  ## no code, so `code` is 0 and the hint reads "exited the process with code
+  ## 0" for ANY `quit(n)` or C `exit(n)`, whatever `n` was. The ending
+  ## (`reExited`) and every verdict are right; only the code in the message
+  ## is not. Linux with glibc, and the re-executed child (which reads the
+  ## real status from `waitpid` or the process exit code), report the code.
   case c.ending
   of reFinished: "it ran to its end"
   of reExited:
@@ -272,6 +282,9 @@ when replayForks:
       exitnow(status)
   else:
     proc childAtExit() {.noconv.} =
+      # `atexit` is not handed the status, so the report carries no code and
+      # the host reads 0 (see `describe`'s known limitation). The child's own
+      # status is then 120, not the SUT's.
       childWrite(['X'])
       childWrite(['\n'])
       exitnow(120)

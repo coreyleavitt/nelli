@@ -85,6 +85,43 @@ of    = "fork-c-clean-replay"
 title = "Do not add it; rely on native pins and the fuzzer"
 cost  = "A false sxSat on a clean path reaches a consumer unless a pin or the fuzzer finds the shape first."
 
+[[item]]
+id       = "fromcache-field"
+title    = "Remove the always-false SymexResult.fromCache, or keep it?"
+question = "SymexResult.fromCache is never true, because symexFind has no cache (WA-11). Should 0.10.0 remove the field, a breaking change, or keep it documented as always false until a symexFind cache exists?"
+state    = "open"
+owner    = "corey"
+kind     = "design"
+reversible = "one-way"
+recommendation = "fromcache-field.A"
+lean     = "Removing it breaks every caller that reads it and gives no user anything, since it already reads false; keep it until a symexFind cache gives it a producer, or remove it then if that cache never comes."
+
+[[option]]
+id    = "fromcache-field.A"
+of    = "fromcache-field"
+title = "Keep it, documented as always false, until a symexFind cache exists"
+cost  = "A field with no producer stays in the public type, which the zero-tech-debt rule counts as dormant substrate; its doc must stay accurate."
+
+[[option]]
+id    = "fromcache-field.B"
+of    = "fromcache-field"
+title = "Remove it in the next minor (0.10.0), with a migration note"
+cost  = "A compile break for every reader of the field, for no change in what any program observes."
+
+[[claim]]
+id    = "fromcache-field.c1"
+of    = "fromcache-field"
+text  = "No code path sets SymexResult.fromCache to true; its doc says it is always false because symexFind takes no ExampleDatabase."
+basis = "read"
+ev    = ["src/nelli/smt/types.nim#/fromCache\\*: +bool/", "src/nelli/symex.nim#/macro symexFind\\*/"]
+
+[[claim]]
+id    = "fromcache-field.c2"
+of    = "fromcache-field.A"
+text  = "The cache-hit flag users can read is SymexFinding.fromCache, which symexFindAllWitnesses sets on a hit, so keeping the SymexResult field costs no user a signal."
+basis = "read"
+ev    = ["src/nelli/engine/types.nim#/fromCache\\*/"]
+
 [[slice]]
 id    = "D1"
 title = "Differential fuzzing harness: generated SUT shapes, walker against native execution, exhaustive small domains (§4)"
@@ -562,6 +599,19 @@ and, for audit rows only, the audit's own class.
 | INT-19 | PCRE 8.37 built without JIT, which is on the verified-library list, was not run. U1 and U2 were verified on 8.37 JIT, 8.39 JIT and 8.44 JIT: the candidate declines where `main` gives a false pair | pre-tag probes (U2) | test-harness | |
 | INT-20 | U5's original SUT (October false sxUnsat) lives only on the offline worker. S8cl's reconstruction (`unsafeNew(p, 8); if p != nil`) is correct on the candidate. Recover the original, and pin it, when the worker returns | pre-tag probes (U5) | test-harness | |
 | INT-21 | The check-off probe's `ai_caught` (`mitems` over `int16`, `assertions: off`) decides sxRaised. The raise looks real (int16 overflow at 32767 with overflow checks on), but no native run tried that input. Pin it natively | pre-tag probes (S8cp item) | test-harness | |
+
+**From the 0.9.1 wiring audit (2026-11-03).** What RFC-0005's post-tag
+wiring audit (WA-1 to WA-13) and its fix slices W1 to W3 left open. Measured
+against 0.8.0, as the audit was; none is worse than it.
+
+| ID | Item | Source | Class | Owner |
+|---|---|---|---|---|
+| INT-22 | A clean, faithful winner is never replayed, so nothing learns that its witness ends the process after the target. `assertCoveredBy` still splats it and `symexForAll` still seeds it, in the host (`symex.nim:4057-4061`, `:982`). Unchanged from 0.8.0; WA-2 closed only the replayed case (`witnessUnsafe`) | 0.9.1 wiring audit | crash, same as 0.8.0 | |
+| INT-23 | A replay that ends at a memory limit is run-dependent only when the child's `outOfMemHook` reports it (`replayproc.nim:145`, `:328`). Under `-d:useMalloc` the hook is not reached, and a kernel OOM kill is a `reSignalled` SIGKILL, so either is cached as a permanent `:unk` | 0.9.1 wiring audit | precision | |
+| INT-24 | The run-dependence flag is a threadvar reset by each entry macro's settle (`replayproc.nim:90`; read at `symex.nim:646`). A user-level `saveSymexVerdict` of an `sfUnknown` right after a settle that set it skips its save too | 0.9.1 wiring audit | performance | |
+| INT-25 | Hypothesis: on macOS a kill at `replayTimeoutMs` does not reach the SUT's own child processes, and the child does not die with the host. `setpgid` and `PR_SET_PDEATHSIG` are Linux-only (`replayproc.nim:296-298`, `:374-376`). There is no macOS CI to probe it | 0.9.1 wiring audit | unclear (hypothesis; no macOS host) | |
+| INT-26 | `RegexError` reaching `symexFindAllWitnesses` through the user exception hierarchy (WA-1, `symex.nim:4523`) is unpinned: W1 pinned a user exception type only. It needs a PCRE SUT | 0.9.1 wiring audit | test-harness | |
+| INT-27 | Under `--panics:on` `replayInScope` declines every target (`symex.nim:2264`), so every lossy clean winner is `rsUnconfirmed` (`settleWinner`, `:3417`) and none is `trusted()` | 0.9.1 wiring audit | precision | |
 
 **From the INF-05 owner audit (rows marked UNOWNED).** The rows the audit
 marked OWNED-0016 were already in this document (PRC-31, PRC-32, INF-04,

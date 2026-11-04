@@ -22844,10 +22844,14 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
     #
     # Soundness: with no bound result and nothing writable passed in, the
     # only channel left for such a callee to affect the SUT is a
-    # module-level global — and the walker does not model globals AT ALL,
-    # so a SUT that could observe one already degrades to sxUnknown (an
-    # unclassified KeyError) at its OWN read site, independently of this
-    # call. Dropping the taint here cannot introduce a false verdict. What
+    # module-level global (or a capture). The walker models globals; the
+    # parser sets `opaqueInert` only where that channel is closed: a
+    # catalogued stdlib routine writes no user global (RFC-0005 S8as), and a
+    # user, `{.symexOpaque.}` or foreign callee is inert only when its effect
+    # summary (`opaqueWriteSummary`, `opaqueArgEffects`) says it writes
+    # nothing the SUT reads, with its raises forked (`opaqueRaiseTypes`,
+    # `opaqueDefectTypes`). Dropping the taint here cannot introduce a false
+    # verdict. What
     # it forgoes is a callee that never returns or raises (`echo` can
     # raise IOError) reached out of the intended order — a pre-existing,
     # symmetric gap: an opaque call placed AFTER the target was already

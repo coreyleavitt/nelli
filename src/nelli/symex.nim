@@ -3116,6 +3116,15 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
   ## placeholders -- permanently), or a target kind outside
   ## `replayInScope`. Otherwise runs `fn` once, inside its own nested capture
   ## frame, catching whatever escapes.
+  ##
+  ## It takes no `SymexSettings`, and uses the defaults: the macro-time parse
+  ## of `fn` (which reads only its parameters, to type the witness) runs under
+  ## `defaultSymexSettings()`'s `maxInstantiationsPerProc`, and the child is
+  ## killed at `SymexSettings().replayTimeoutMs` (10_000 ms). Why: this is the
+  ## direct-call form of the replay the entry macros run, and they do not
+  ## call it -- they splice `emitReplayWitness` with their own settings'
+  ## timeout (`emitRunSymexReplayed`). A caller who needs another bound, or
+  ## `replay = false`, goes through `symexFind` with its settings.
   let parsed = parseEntryImpl(fn, "replayWitness",
     defaultSymexSettings().budget.maxInstantiationsPerProc)
   emitReplayWitness(fn, parsed.params, witness, target, pathTaint)

@@ -3422,13 +3422,19 @@ proc isInertOpaqueCall(n: NimNode): bool =
   ##
   ## Soundness: with no bound result and nothing writable passed in, the
   ## only channel left for such a callee to influence the SUT is a
-  ## module-level global. The walker does not model globals AT ALL — a SUT
-  ## branching on a module-level `var` already answers `sxUnknown` with an
-  ## unclassified `KeyError` at its OWN read site, independently of any
-  ## opaque call ahead of it. So a SUT that could observe a global mutation
-  ## from an "inert" call has already degraded before this predicate ever
-  ## runs, and dropping the taint here cannot introduce a false verdict.
-  ## What this DOES forgo is a callee that never returns or that raises
+  ## module-level global (or a nested routine's capture). The walker models
+  ## globals, so that channel is closed by who may reach this predicate, not
+  ## by the walker ignoring it. Only two callers rely on it alone: a
+  ## catalogued stdlib routine (`smkOpaqueEffectful`, not a user routine),
+  ## which writes no user global (RFC-0005 S8as), and a `{.symexTransparent.}`
+  ## call, whose pragma is the user's promise that the callee has no effect
+  ## the walk must see (a promise found false where an argument is writable
+  ## is an `AnnotationViolation`). A user, `{.symexOpaque.}` or bodiless
+  ## foreign callee does not use this predicate: its inertness is its effect
+  ## summary's (`opaqueWriteSummary`, which bounds its writes to globals and
+  ## captures, with `opaqueArgEffects`), and its raises are forked
+  ## (`opaqueRaiseTypes`, `opaqueDefectTypes`). So dropping the taint here
+  ## cannot introduce a false verdict. What this DOES forgo is a callee that never returns or that raises
   ## (`echo` can raise `IOError`) — a pre-existing, symmetric gap: an opaque
   ## call AFTER the target branch was already invisible to it before this
   ## change. So this trades away call-ORDERING precision, never soundness.

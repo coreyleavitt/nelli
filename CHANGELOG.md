@@ -14,39 +14,169 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] — 0.9.1
 
-### Fixed
+The fixes from the wiring audit that ran after the 0.9.0 tag (RFC-0005,
+handoff entry "2026-11-03 — Wiring audit", WA-1 to WA-13). Upgrading:
+`docs/migration/0.9.1.md`. Three of the fixes are regressions that 0.9.0
+shipped against 0.8.0; they come first.
 
-- **`symexFindAllWitnesses` and `symexForAll` see user exception types.**
-  They built their program without the user exception hierarchy that
-  `symexFind` passes, so a user exception type (or `RegexError`) was an
-  unknown type there: a named `except` was skipped, and a verdict `symexFind`
-  decided came back `sfUnknown`. The cache key now covers the hierarchy, so
-  a changed parent type is a new key.
-- **A cached `sfRaised` finding is the cold one.** It kept only its status:
-  the `raised(<type>)` descriptor, `defectTypeId` and the witness were lost.
-  The `:raised:<type>` sentinel now stores the witness and the defect-ness.
+### Fixed — regressions against 0.8.0
+
+- **Seq `items`/`pairs` whose body changes the seq's length** (WA-3). Nim's
+  `items` and `pairs` read the length once and assert it is unchanged after
+  each step, so a body that grows or shrinks the seq ends the loop in
+  `AssertionDefect`. The walk bounded the loop by the live length with no
+  assert, so `for _ in s: discard s.pop()` was a clean false `sxSat` for a
+  target after the loop and a clean false `sxUnsat` for one in `except
+  AssertionDefect`. 0.8.0 gave `sxUnknown` there. Both iterators now use the
+  length-assert model `mitems`/`mpairs` already had; in a module where
+  `assert` may be compiled out the loop declines, as `mitems` does.
+- **`symexFindAllWitnesses` and `symexForAll` see user exception types**
+  (WA-1). They built their program without the user exception hierarchy that
+  `symexFind` passes. 0.8.0 omitted it too, but 0.9.0 reads an exception type
+  it does not know as ⊤ (`eeUnknownExnType`): a named `except` of a user type
+  (or `RegexError`) was skipped, and a verdict `symexFind` decided came back
+  `sfUnknown` where 0.8.0 gave `sfUnsat`. The cache key now covers the
+  hierarchy (below), so a changed parent type is a new key.
+- **A witness that ends its process after reaching the target is not run in
+  the host** (WA-2). A replay that reached the target and then exited
+  (`quit`, a raw `exit`), was signalled or ran past `replayTimeoutMs` was
+  confirmed with nothing saying how it ended, and `assertCoveredBy`'s splat
+  and `symexForAll`'s seeds then ran the same witness in the calling process,
+  which it ended or hung. 0.8.0 replayed nothing and declined such a
+  candidate. The claim still stands (the target is reached), but it now
+  carries `Soundness.witnessUnsafe` and a `feReplayCrashed` or
+  `feReplayTimedOut` hint saying how the child ended and on what input.
+  `symexForAll` does not seed such a witness, cold or from the cache.
+  `assertCoveredBy` never splats it: with no `testFn`, the confirming replay
+  is the coverage and the check passes; with a `testFn`, or on an `sxRaised`
+  claim (whose replay targeted the raise, not the check's target), the check
+  fails with an `AssertionDefect` that says why.
+
+### Fixed — wrong on 0.8.0 too
+
+- **Float checks in an opaque callee** (WA-4). An inert `{.symexOpaque.}`
+  callee's defect scan assumed the default checks. A callee compiled with
+  `nanChecks` or `infChecks` on (by `push`, or `floatChecks`) raises
+  `FloatInvalidOpDefect` or `FloatOverflowDefect` from float arithmetic, and
+  neither was forked: a target in `except FloatingPointDefect` around the
+  call was a clean false `sxUnsat`. The scan now reads each scanned routine's
+  check options (`routineChecks`), the callee's and every routine it calls. A
+  callee compiled with a check OFF now forks a `Defect` it cannot raise; that
+  fork carries `feOpaqueEffectHavoc`, so a hit through it is replayed and
+  refuted (`sxUnknown`), and an `sxUnsat` stands.
+- **Argument order of a statement-position opaque call** (WA-5). The
+  statement-position opaque and foreign arm, and the `{.symexTransparent.}`
+  fallback beside it, parsed arguments one after another, so a later
+  argument's call ran before an earlier argument was read: `opq(v div b,
+  bump(b))` with `b == 0` divided by the bumped `b`, a clean false `sxSat`
+  after the call and a clean false `sxUnsat` in `except DivByZeroDefect`.
+  They now read arguments where Nim's C backend does (`parseOrderedArgs`),
+  as the expression-position arm already did.
+- **A deleted `{.symexTransparent.}` call keeps its arguments' checks.** A
+  transparent call in statement position whose arguments are inert is
+  deleted. Its arguments were parsed and their values thrown away, so a check
+  an argument carries was never forked: `trv(v div b, 0)` with `b == 0` was a
+  clean false `sxUnsat`. Each argument that is not a literal or a variable is
+  now bound to a sink `let`, as `discard <expr>` is.
+- **A cached `sfRaised` finding is the cold one** (WA-10). A `:raised` hit
+  kept only its status and soundness: the `raised(<type>)` descriptor,
+  `defectTypeId` and the witness were lost. The `:raised:<type>` sentinel now
+  stores the witness and the defect-ness.
 - **The no-targets finding carries `soundness`, `gaps` and
-  `annotationViolations`**, as every other finding does.
-
-### Added
-
-- **`SymexFinding.hints` and `SymexFinding.diagnostics`.** `hints` holds what
-  `gaps` leaves out, including the replay outcomes: `feReplayCrashed` names
-  the input the real fn crashed on, and `feReplayDeclined` says why a replay
-  did not run (the Windows guidance in the 0.9.0 migration note, §5a and §7,
-  can now be followed through `symexForAll`). `diagnostics` holds the raises
-  the run reached that did not decide the verdict, each with its witness.
-  Every report format renders both. A cache hit serves the cold run's, from
-  a new `:notes` record (`saveSymexNotesImpl`/`loadSymexNotesImpl`).
-- `CachedRaised` gains `choices` (the stored witness), and
-  `saveSymexRaisedImpl` an optional trailing `witnesses` (no break).
+  `annotationViolations`** (WA-12), derived from the parse-time errors, as
+  every other finding does.
 
 ### Changed
 
+- **Lossy clean winners are replayed** (WA-9). A clean winning path whose
+  witness renders lossily (a `wfLossy` parameter shape, or a run whose
+  extraction substituted a value, `feExtractionFailed`) was `trusted()`
+  though nothing had run that witness. It is now replayed as the settle's one
+  job. A confirmation makes it `rsConfirmed`; any other outcome, or
+  `SymexSettings.replay = false`, leaves it `rsUnconfirmed` (new, below) with
+  a hint, and its status stands. **This widens when `fn` runs at verdict
+  time** (the S10 execution contract, 0.9.0 migration note §1.1): a clean
+  `sxSat`/`sxRaised` with a lossy witness now executes `fn` once, in a child.
+- **A run-dependent `:unk` is not cached** (WA-7). A replay left undecided
+  for a reason of the run (a child killed at `replayTimeoutMs`, one ended at
+  the replay's memory limit, or one that could not be started or handed its
+  state at that moment, including a runtime hook the host had set) no longer
+  stores a permanent `:unk`; the next run replays again. An `rsUnconfirmed`
+  lossy winner left so for such a reason is not stored either.
+- **The cache key gains two parts.** `|rm=<mode>` says how the build replays
+  (`fork`, `reexec` or `none`, plus `+panics` under `--panics:on`), so a
+  database shared across platforms or builds does not serve one build's
+  `:unk` to another that would confirm (WA-8). `;uxh=[...]` in the program's
+  canonical form keys the user exception hierarchy, and is absent when there
+  is none (WA-1).
+- **The soundness cache encoding is version 2**
+  (`"2:<pathTaint>:<runTaint>:<replay>:<unsafe>"`), which stores
+  `witnessUnsafe`. A version-1 entry cannot say a stored witness is safe to
+  run, so it is a miss.
+- **Walker version 268** (264 in 0.9.0). The cache's key and value changed,
+  so every 0.9.0 cache entry is orphaned: a miss, then a cold run.
 - `SymexResult.fromCache` is documented as always `false`: `symexFind` has
-  no cache. The 0.9.0 migration note said otherwise.
-- Walker version 264 -> 265: the cache's key and value changed, so every
-  0.9.0 cache entry is orphaned (a miss, then a cold run).
+  no cache. The 0.9.0 migration note (§2) said otherwise. The cache-hit flag
+  is `SymexFinding.fromCache`.
+- `trustedSat` reads `rsUnconfirmed` as untrusted; `rsNotNeeded` keeps its
+  0.9.0 meaning (trusted unless the path is `scSpurious`).
+
+### Added
+
+- **`SymexFinding.hints` and `SymexFinding.diagnostics`** (WA-6). `hints:
+  seq[FindingHint]` holds every entry of the run's error list that `gaps`
+  leaves out, the replay outcomes among them: `feReplayCrashed` names the
+  input the real fn crashed on, and `feReplayDeclined` says why a replay did
+  not run (the Windows guidance in the 0.9.0 migration note, §5a and §7, can
+  now be followed through `symexForAll`). `diagnostics:
+  seq[FindingDiagnostic]` holds the raises the run reached that did not
+  decide the verdict, each with its witness. `symexFindAllWitnesses` and
+  `assertCoveredBy` fill both, and a cache hit serves the cold run's, from a
+  new `:notes` record.
+- **Every report format renders them.** A finding with neither renders as
+  before. `ofText` (and `ofJunit`'s `<system-out>`, which carries the same
+  text): a `hint <kind>: <msg>` line per hint and an `also raised
+  <type>[ (defect)][: <msg>] witness=<n> choices` line per diagnostic, under
+  the finding. `ofJson`: `"hints"` (`kind`, `severity`, `msg`) and
+  `"diagnostics"` (`raisedTypeId`, `isDefect`, `raisedMsg`,
+  `witnessChoiceCount`) arrays on every symex finding, `[]` when empty.
+  `ofGithubAnnotation`: a `::notice title=symex hint::` line per hint.
+- **`Soundness.witnessUnsafe: bool`** (WA-2): the confirming replay's child
+  reached the target and then did not finish. Only a replay sets it.
+- **`ReplayStatus.rsUnconfirmed`** (WA-9), tail-appended: a clean winner with
+  a lossy witness that no replay confirmed. Not `trusted()`. An exhaustive
+  `case` over `ReplayStatus` needs an arm.
+- New exports, by module:
+  - `nelli/engine/types` (so `import nelli`; `nelli/symex` re-exports only
+    `SymexFinding`, `SymexFindingStatus`, `FindingGap` and `trusted` from
+    it): `FindingHint` (`kind`, `severity`, `msg`, as strings) and
+    `FindingDiagnostic` (`raisedTypeId`, `isDefect`, `raisedMsg`,
+    `witnessChoices`).
+  - `nelli/symex`: `CachedNotes`, `saveSymexNotesImpl` and
+    `loadSymexNotesImpl` (the `:notes` record). `CachedRaised` gains a third
+    field, `choices` (the stored witness), and `saveSymexRaisedImpl` an
+    optional trailing `witnesses`. Neither breaks a call; a positional
+    unpack of `CachedRaised` into two names does.
+  - `nelli/smt/canonicalize` (import directly): `replayModeSegment`, and
+    `symexCacheKey` gains a trailing `replayMode = replayModeSegment()`.
+  - `nelli/smt/replayproc` (import directly): `lastReplayEnding`,
+    `resetReplayRunDependence`, `replayRunDependent` and `refusedHostHook`;
+    `ReplayChild` gains `outOfMemory` and `runDependent`.
+
+### Known limitations
+
+- **macOS and musl report exit code 0 in a replay hint.** Where libc has no
+  `on_exit`, the forked child's exit hook is `atexit`, which is not told the
+  status, so a `feReplayCrashed` hint reads "exited the process with code 0"
+  for any `quit(n)` or C `exit(n)`. The ending and every verdict are right;
+  only the code in the message is not. Linux with glibc, and the re-executed
+  child (Windows, `-d:nelliReplayReexec`), report the real code.
+- The others are tracked in `docs/rfc/0016-native-parity-hardening.md` §5.8
+  (INT-22 to INT-27). Two to know about: a clean, faithful winner (one
+  nothing replays) that crashes after its target still runs in the host
+  through `assertCoveredBy`/`symexForAll`, as on 0.8.0; and under
+  `--panics:on` every lossy winner is `rsUnconfirmed`, because nothing
+  replays there.
 
 ## [0.9.0] — 2026-11-03
 

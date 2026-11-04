@@ -225,7 +225,16 @@ type
     parseDeclines*:       int   ## Issue #163 round 10 companion. Count of
                                 ## `prog.parseErrors` entries with
                                 ## `severity == sevError` for the program
-                                ## THIS collect ran — the predicate
+                                ## THIS collect ran. That is the parse-time
+                                ## RECORDS only: a Class-A decline
+                                ## (`declineAtSite`, `dsl_parser.nim`) and the
+                                ## `declineUnsafeCast` / `declineCallee`
+                                ## records. A Class-B decline
+                                ## (`declineMarker`) writes no parse record
+                                ## (its only record is the walker's, on
+                                ## reach), so it is NOT counted here: a
+                                ## program whose only declines are Class-B
+                                ## reads 0. This was the predicate
                                 ## `runSymexImpl`'s `capForcedUnknown`
                                 ## (`smt/runtime.nim`) used to force
                                 ## `sxUnknown` on the `wmExplore` path until

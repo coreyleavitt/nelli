@@ -3096,9 +3096,10 @@ type
       ## during THIS run, and whether it was discharged by the static
       ## interval analysis or handed to the solver. The audit trail for
       ## the ADR-0001 amendment: a verifier that silently chooses which
-      ## obligations to prove itself is not one you can check. Empty when
-      ## `fromCache` — like `abstractions`, this records an exploration
-      ## that did not happen.
+      ## obligations to prove itself is not one you can check. Like
+      ## `abstractions`, it records this run's exploration (were a result
+      ## ever served from a cache it would be empty; `fromCache` is always
+      ## false today).
     callStats*:    CallStats   ## per-callee walk + cache-hit counts
     heapSnapshot*: seq[HeapSnapshotEntry]
       ## Phase 15 R12. The heap-snapshot witness (one entry per ref/ptr param)
@@ -3115,7 +3116,8 @@ type
       ## promise (today: `{.symexTransparent.}`) was found false. Loud and
       ## verdict-NEUTRAL: it never changes `status`, and a call it names is
       ## still tainted through its own `feOpaqueCallUnmodelled` entry in
-      ## `errors`. Empty when `fromCache`.
+      ## `errors`. (`fromCache` is always false today, so it is never
+      ## served from a cache.)
     soundness*:    Soundness
       ## RFC-0005 S11 (§8.1). The winning path's taint, the run coordinate
       ## and how a SAT claim was settled -- one common field, so every status

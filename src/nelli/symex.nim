@@ -262,25 +262,17 @@ export canonicalize.symexCacheKey, canonicalize.symexWalkerVersion,
 
 const soundnessMetaKey = "soundness"
   ## The metadata key of the stored `Soundness`.
-const soundnessMetaVersion = "2"
-  ## The encoding's own version: `"2:<pathTaint>:<runTaint>:<replay>:<unsafe>"`,
+const soundnessMetaVersion = "3"
+  ## The encoding's own version: `"3:<pathTaint>:<runTaint>:<replay>:<unsafe>"`,
   ## each taint a bitmask over `SoundnessChannel` ordinals, `replay` the
-  ## `ReplayStatus`'s `replayCode` and `unsafe` `witnessUnsafe` as `0`/`1`. Anything
-  ## else decodes as a miss. RFC-0005 0.9.1 (WA-2): version 1 had no
-  ## `witnessUnsafe`, so it cannot say a stored witness is safe to run; it is a
-  ## miss. RFC-0005 0.9.1 (review R1-07): a non-empty `runDependence` follows
-  ## as a sixth field, a bitmask over `RunDependence` ordinals. It is written
-  ## only when non-empty, so a record without it reads as before, as `{}`.
-  ## RFC-0005 0.9.1 (review R1-16): `replay` is written through a fixed code
-  ## (`replayCode`), not the enum's ordinal. Inserting `rsUnsettled` as the
-  ## zero value moved every ordinal; the codes kept their meaning, so a record
-  ## written before reads as it was written (`0` is still `rsNotNeeded`, a
-  ## settled value) and the version stays `2`. `3` is `rsUnsettled`.
-
-const replayCode: array[ReplayStatus, char] = [
-  ## The stored code of each `ReplayStatus`: fixed, so it cannot move when the
-  ## enum does (review R1-16).
-  rsUnsettled: '3', rsNotNeeded: '0', rsConfirmed: '1', rsUnconfirmed: '2']
+  ## `ReplayStatus`'s ordinal and `unsafe` `witnessUnsafe` as `0`/`1`. A
+  ## non-empty `runDependence` follows as a sixth field, a bitmask over
+  ## `RunDependence` ordinals (review R1-07); without it the record reads as
+  ## `{}`. Anything else decodes as a miss, so a change to any of these enums'
+  ## order, or to what a field means, bumps the version. Review R2 (DD1):
+  ## version 3 is the one where `witnessUnsafe` also marks an unconfirmed
+  ## witness whose replay ended its child; a version 2 record cannot say so,
+  ## and is a miss.
 
 type
   CachedWitness* = tuple[choices: seq[ChoiceNode], soundness: Soundness,
@@ -322,7 +314,7 @@ func runDependenceBits(d: set[RunDependence]): int =
 
 proc encodeSoundness(s: Soundness): string =
   result = soundnessMetaVersion & ":" & $taintBits(s.pathTaint) & ":" &
-    $taintBits(s.runTaint) & ":" & replayCode[s.replay] & ":" &
+    $taintBits(s.runTaint) & ":" & $ord(s.replay) & ":" &
     $ord(s.witnessUnsafe)
   if s.runDependence != {}:
     result.add ":" & $runDependenceBits(s.runDependence)
@@ -339,16 +331,11 @@ proc decodeSoundness(v: string): Option[Soundness] =
     nums[i - 1] = ord(parts[i][0]) - ord('0')
   const allBits = (1 shl (ord(high(SoundnessChannel)) + 1)) - 1
   const allRunBits = (1 shl (ord(high(RunDependence)) + 1)) - 1
-  var replay = rsUnsettled
-  var known = false
-  for r in ReplayStatus:
-    if replayCode[r] == parts[3][0]:
-      replay = r
-      known = true
-  if nums[0] > allBits or nums[1] > allBits or not known or nums[3] > 1 or
+  if nums[0] > allBits or nums[1] > allBits or
+     nums[2] > ord(high(ReplayStatus)) or nums[3] > 1 or
      (parts.len == 6 and nums[4] notin 1 .. allRunBits):
     return none(Soundness)
-  var s = Soundness(replay: replay, witnessUnsafe: nums[3] == 1)
+  var s = Soundness(replay: ReplayStatus(nums[2]), witnessUnsafe: nums[3] == 1)
   for c in SoundnessChannel:
     if (nums[0] and (1 shl ord(c))) != 0: s.pathTaint.incl c
     if (nums[1] and (1 shl ord(c))) != 0: s.runTaint.incl c
@@ -459,37 +446,6 @@ proc findingDiagnostics[T](ds: seq[DefectFinding[T]]): seq[FindingDiagnostic] =
     result.add FindingDiagnostic(raisedTypeId: d.raisedTypeId,
                                  isDefect: d.isDefect, raisedMsg: d.raisedMsg.get(""),
                                  witnessChoices: renderAsChoices(d.witness))
-
-# ---- Review R1-10 / R1-15: what a consumer may do with a witness -----------
-
-const replayEndedKinds = {feReplayCrashed, feReplayTimedOut}
-  ## A replay of this run ended or hung its child before it could confirm.
-
-func hostRunnable(trustedClaim: bool; s: Soundness;
-                  errors: openArray[SymexErrorInfo]): bool =
-  ## Review R1-15. Whether a consumer may run a claim's witness in its own
-  ## process. Never one whose confirming replay ended its child after the
-  ## target (`witnessUnsafe`, WA-2). A trusted claim otherwise: the real `fn`
-  ## or the model reached the target on it. An untrusted one (`rsUnconfirmed`:
-  ## a lossy witness nothing confirmed) only when no replay of its run ended
-  ## or hung its child, since that replay may have been this witness's.
-  if s.witnessUnsafe: return false
-  if trustedClaim: return true
-  for e in errors:
-    if e.kind in replayEndedKinds: return false
-  true
-
-func hostRunnable*(f: SymexFinding): bool =
-  ## Review R1-15. `hostRunnable` for a finding: an `sfSat` / `sfRaised`
-  ## whose witness a consumer may run in its own process (`symexForAll`
-  ## seeds only these).
-  if f.status notin {sfSat, sfRaised}: return false
-  if f.soundness.witnessUnsafe: return false
-  if trusted(f): return true
-  for h in f.hints:
-    for k in replayEndedKinds:
-      if h.kind == $k: return false
-  true
 
 type
   SymexCoverageDefect* = object of AssertionDefect
@@ -641,9 +597,7 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
   # RFC-0005 0.9.1 (WA-7, WA-9): a lossy winner the replay did not confirm for
   # a reason of the run is not stored as unconfirmed for good. Read off the
   # finding (review R1-07), never off the thread.
-  if finding.soundness.replay == rsUnconfirmed and
-     rdReplay in finding.soundness.runDependence:
-    return
+  if not finding.soundness.cacheable: return
   if not metaReady(db, "saveSymexWitnessImpl", errors): return
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
@@ -845,9 +799,7 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
   # RFC-0005 0.9.1 (WA-7, WA-9): as `saveSymexWitnessImpl`.
   for raw in found:
-    if raw.soundness.replay == rsUnconfirmed and
-       rdReplay in raw.soundness.runDependence:
-      return
+    if not raw.soundness.cacheable: return
   if not metaReady(db, "saveSymexRaisedImpl", errors): return
   let baseKey = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
@@ -1076,11 +1028,10 @@ macro symexForAll*(s: typed, fn: typed,
         # too: since 0.9.1 (WA-9) that is a lossy witness no replay confirmed
         # (`rsUnconfirmed`), which may or may not reach the target, and the
         # finding's `trusted()` says which it is (review R1-15). But a seed
-        # runs `prop` in this process: a witness whose replay ended its child
-        # (`witnessUnsafe`, WA-2), or an unconfirmed one whose run had a
-        # replay end or hang, would end or hang it. `hostRunnable` refuses
-        # those.
-        if f.status == sfSat and hostRunnable(f):
+        # runs `prop` in this process: a witness whose replay ended or hung
+        # its child (`witnessUnsafe`, WA-2, review R2) would end or hang it.
+        # `hostRunnable` refuses those.
+        if f.status == sfSat and hostRunnable(f.soundness):
           seeds.add f.witnessChoices
       var report = forAllWithSymexSeeds(seeds, `s`, `prop`,
                                          `forAllSettings`)
@@ -3358,11 +3309,13 @@ proc settleWinner(raw: RawResult; replayed: ReplayResult;
   result = raw
   result.soundness.replay = replayed.replayStatus
   result.soundness.runDependence.incl replayed.runDependence
+  # Review R2 (DD1): a child that did not finish makes the witness unsafe to
+  # run in the host, confirmed or not, as a typed fact the cache stores.
+  result.soundness.witnessUnsafe = replayed.endsChild
   if replayed.outcome == roConfirmed:
     var unsafe = false
     let tid = if raw.status == sxRaised: raw.raisedTypeId else: ""
     result.errors.add confirmedEnding(replayed, raw.status, tid, input, unsafe)
-    result.soundness.witnessUnsafe = unsafe
   else:
     result.errors.add winnerHint(replayed, rawClaimText(raw), input)
 
@@ -3994,7 +3947,7 @@ macro assertCoveredBy*(fn: typed,
   # claim's witness reaches the target in `fn`, so a `testFn` that does not
   # reach it on that witness is to blame. An untrusted one (`rsUnconfirmed`: a
   # lossy witness no replay confirmed) proves no witness exists: it is run
-  # (unless a replay of its run ended its child, `hostRunnable`), and a hit
+  # (unless its replay ended its child, `hostRunnable`), and a hit
   # proves coverage, but a miss proves nothing about `testFn`. It is reported
   # as unconfirmed, as an UNKNOWN is, and `acceptUnknownAsCovered` downgrades
   # it the same way.
@@ -4031,7 +3984,7 @@ macro assertCoveredBy*(fn: typed,
     quote do:
       let `witId` = `witField`
       let trustedClaim = `trustedSym`(`rId`)
-      let runIt = `runnableSym`(trustedClaim, `rId`.soundness, `rId`.errors)
+      let runIt = `runnableSym`(`rId`.soundness)
       symexCaptureBegin()
       var `assertionRaisedId` = false
       var `indexRaisedId` = false
@@ -4057,7 +4010,7 @@ macro assertCoveredBy*(fn: typed,
       let reached = runIt and `coveredExpr`
       var covered = false
       var failure = ""
-      if `rId`.soundness.witnessUnsafe:
+      if `rId`.soundness.witnessUnsafe and trustedClaim:
         if `sameFn` and `unsafeCovers`: covered = true
         else: failure = `unsafeMsg`
       elif reached:
@@ -4068,8 +4021,8 @@ macro assertCoveredBy*(fn: typed,
         if not `acceptUnknown`:
           failure = `unconfirmedMsg` &
             (if runIt: "Running it did not reach the target. "
-             else: "It was not run here: a replay of this run ended or " &
-                   "hung its process. ") & `unconfirmedTail`
+             else: "It was not run here: its replay ended or hung its " &
+                   "process. ") & `unconfirmedTail`
       `findingId` = SymexFinding(
         targetDesc:     `targetDescLit`,
         status:         `status`,

@@ -140,14 +140,17 @@ type
       ## How the claim was settled; `rsUnsettled` (the zero value) until a
       ## producer settles it, and then never trusted (review R1-16).
     witnessUnsafe*: bool
-      ## RFC-0005 0.9.1 (WA-2). The replay that confirmed this claim reached
-      ## the target and then did not finish: its child exited (`quit`, a raw
-      ## `exit`), was ended by a signal or a system exception, or ran past
-      ## `replayTimeoutMs`. The target is reached all the same (§5a), but
-      ## running this witness in a process ends or hangs that process, so no
-      ## consumer runs it in the host: `assertCoveredBy` does not splat it and
-      ## `symexForAll` does not seed it. Only a replay sets it; a witness
-      ## nothing ran is `false`.
+      ## RFC-0005 0.9.1 (WA-2). A replay of this claim's witness did not
+      ## finish: its child exited (`quit`, a raw `exit`), was ended by a
+      ## signal or a system exception, ran past `replayTimeoutMs`, or ended
+      ## with its status lost. Running the witness in a process ends or hangs
+      ## that process, so no consumer runs it in the host (`hostRunnable`):
+      ## `assertCoveredBy` does not splat it and `symexForAll` does not seed
+      ## it. On an `rsConfirmed` claim the child reached the target first, and
+      ## the target is reached all the same (§5a); review R2 (DD1): on an
+      ## `rsUnconfirmed` one it ended before the target. Only a replay sets
+      ## it; a witness nothing ran is `false`. Stored with the verdict, so a
+      ## cache hit reads it as the cold run did.
     runDependence*: set[RunDependence]
       ## RFC-0005 0.9.1 (WA-7; review R1-07). What of this verdict depends on
       ## the run (`RunDependence`); `{}` for one any run would reach. An
@@ -164,6 +167,21 @@ func trustedSat*(s: Soundness): bool =
   of rsConfirmed: true
   of rsUnconfirmed, rsUnsettled: false
   of rsNotNeeded: scSpurious notin s.pathTaint
+
+func hostRunnable*(s: Soundness): bool =
+  ## Review R1-15, R2 (DD1, DD2). Whether a consumer may run a claim's witness
+  ## in its own process, from typed data only: never one a replay saw end or
+  ## hang its child (`witnessUnsafe`), and never an unsettled record (R1-16).
+  ## Untrusted claims (`rsUnconfirmed`) are runnable otherwise: running one
+  ## is how a consumer learns whether it reaches the target.
+  s.replay != rsUnsettled and not s.witnessUnsafe
+
+func cacheable*(s: Soundness): bool =
+  ## Review R2 (DD7). Whether a claim (`sxSat` / `sxRaised`) settled under
+  ## `s` may be stored for good. Not a lossy winner the replay left
+  ## unconfirmed for a reason of the run (`rdReplay`, WA-7, WA-9): the next
+  ## run replays it again.
+  not (s.replay == rsUnconfirmed and rdReplay in s.runDependence)
 
 func trustedUnsat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxUnsat` arm: nothing under-approximated.

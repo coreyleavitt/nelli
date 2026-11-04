@@ -169,16 +169,17 @@ suite "R1-16: a zero Soundness is not trusted":
     check not trusted(SymexFinding(status: v.get.status,
                                    soundness: v.get.soundness))
 
-  test "a record written before keeps its meaning (code 0 is rsNotNeeded)":
-    let db = inMemoryDatabase()
-    saveSymexVerdict(db, r1Never, tLabel("never"), defaultSymexSettings(),
-                     sfUnsat, Soundness(replay: rsNotNeeded))
-    let v = loadSymexVerdict(db, r1Never, tLabel("never"),
-                             defaultSymexSettings())
-    check v.isSome
-    check v.get.soundness == Soundness(replay: rsNotNeeded)
-    check trusted(SymexFinding(status: v.get.status,
-                               soundness: v.get.soundness))
+  test "every settled record round-trips (encoding version 3)":
+    for rs in [rsNotNeeded, rsConfirmed, rsUnconfirmed]:
+      for unsafe in [false, true]:
+        let db = inMemoryDatabase()
+        let snd = Soundness(replay: rs, witnessUnsafe: unsafe)
+        saveSymexVerdict(db, r1Never, tLabel("never"), defaultSymexSettings(),
+                         sfUnsat, snd)
+        let v = loadSymexVerdict(db, r1Never, tLabel("never"),
+                                 defaultSymexSettings())
+        check v.isSome
+        if v.isSome: check v.get.soundness == snd
 
 # ---- R1-17 --------------------------------------------------------------------
 
@@ -224,3 +225,68 @@ suite "R1-17: a finding carries the bounds it was decided under":
     check j["symexFindings"][0]["soundness"]["witnessUnsafe"].getBool
     check "::warning title=symex witness unsafe::" in
       renderReport(r, ofGithubAnnotation, "p")
+
+# ---- Review round 2 -----------------------------------------------------------
+#
+# * DD1. Whether a witness may run in the host was read off the finding's
+#   hints, which a cache hit rebuilds from the best-effort `:notes` record. A
+#   hit whose notes were missing let a witness whose replay ended its child
+#   run in the host. It is now a typed `Soundness` fact, stored with the
+#   verdict.
+# * DD3. `assertCoveredBy` inside a property returned its finding to the
+#   property, which discards it: no report showed it. The engine now collects
+#   them for the run, on a pass and on a failure.
+# * LV3. The seed phase's `sfNotApplicable` entry was unsettled, and JSON
+#   printed the zero bounds of a finding that has none.
+
+type
+  R2Stub = object
+    ## Renders as `default(R2Stub)` (see `R1Stub`): `a` is 0 on replay.
+    kind: int
+    a: int
+    b: int
+
+proc r2LossyCrash(v: R2Stub) =
+  ## A clean path to the label; the rendered witness takes the other branch,
+  ## which ends the process.
+  if v.a == 5:
+    symexTarget("lc")
+  else:
+    quit(9)
+
+proc r2Skip(x: int) = discard
+
+proc dropNotes(db: ExampleDatabase): ExampleDatabase =
+  ## `db`, with every `:notes` record gone (missing, or written by a reader
+  ## that does not know the encoding).
+  result = db
+  let inner = db.loadPrimaryWithMetaImpl
+  result.loadPrimaryWithMetaImpl = proc (k: string): seq[PrimaryEntry] =
+    if ":notes" in k: @[] else: inner(k)
+
+proc lcFinding(fs: seq[SymexFinding]): SymexFinding =
+  for f in fs:
+    if f.targetDesc == "label(\"lc\")": return f
+  doAssert false, "no label(\"lc\") finding"
+
+suite "R2 DD1: host safety is typed, not read off hints":
+  test "probe: the lossy winner's replay ended its child":
+    let f = lcFinding(symexFindAllWitnesses(r2LossyCrash, inMemoryDatabase()))
+    var kinds: seq[string]
+    for h in f.hints: kinds.add h.kind
+    checkpoint $f.status & " " & $f.soundness & " " & $kinds
+    check f.status == sfSat
+    check f.soundness.replay == rsUnconfirmed
+    check "feReplayCrashed" in kinds
+    check not hostRunnable(f.soundness)
+
+  test "a cache hit without its notes still refuses the host":
+    let db = inMemoryDatabase()
+    let cold = lcFinding(symexFindAllWitnesses(r2LossyCrash, db))
+    check not cold.fromCache
+    let warm = lcFinding(symexFindAllWitnesses(r2LossyCrash, dropNotes(db)))
+    checkpoint $warm.soundness
+    check warm.fromCache
+    check warm.hints.len == 0
+    check warm.soundness.replay == rsUnconfirmed
+    check not hostRunnable(warm.soundness)

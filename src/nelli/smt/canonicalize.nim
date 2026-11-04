@@ -6371,9 +6371,15 @@ proc canonicalize*(prog: SymexProgram): string =
   sort(uxhParts)
   let uxhPart =
     if uxhParts.len == 0: "" else: ";uxh=[" & uxhParts.join(",") & "]"
+  # RFC-0005 review R1-09: the source of the routines the SUT calls, which a
+  # replay runs and the IR may hold only as a name (`impl_digest.nim`). A
+  # program that calls none keys as before.
+  let implPart =
+    if prog.implDigest.len == 0: "" else: ";impl=" & prog.implDigest
   "Pg<params=[" & paramParts.join(",") & "];body=" &
     canonicalize(prog.body, env) &
-    ";procs=[" & procParts.join(",") & "]" & retPart & glPart & uxhPart & ">"
+    ";procs=[" & procParts.join(",") & "]" & retPart & glPart & uxhPart &
+    implPart & ">"
 
 # ---- SymexTarget -----------------------------------------------------------
 

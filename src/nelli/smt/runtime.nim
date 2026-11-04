@@ -25418,30 +25418,176 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
     result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
 
+type
+  StmtExitMarks = object
+    ## RFC-0005 review R2 (SD2). Where each exit channel a statement can
+    ## leave by stood when it began: a path the statement sends past its
+    ## own result (`return`, `break`/`continue`, a raise, a jump held for a
+    ## `finally`) is appended to one of these, and every entry from the
+    ## mark on is the statement's. Channels only ever shrink by an arm
+    ## claiming entries it produced itself (the `isTry` arm's depth filter,
+    ## a loop's own `continuePaths`), so what stood at the mark is a stable
+    ## prefix.
+    frameId:    int
+    topReturns: int
+    returns:    seq[int]          ## per `callStack` frame
+    breaks:     seq[int]          ## per `loopStack` frame
+    continues:  seq[int]
+    caught, pendingRaise, pendingReturn, pendingJump, escaped: int
+
+proc stmtExitMarks(w: WalkCtx): StmtExitMarks =
+  result = StmtExitMarks(frameId: w.frame.frameId,
+                         topReturns: w.topReturnedPaths.len,
+                         caught: w.frame.caught.len,
+                         pendingRaise: w.frame.pendingRaise.len,
+                         pendingReturn: w.frame.pendingReturn.len,
+                         pendingJump: w.frame.pendingJump.len,
+                         escaped: w.frame.escaped.len)
+  for f in w.callStack: result.returns.add f.returnedPaths.len
+  for f in w.loopStack:
+    result.breaks.add f.breakPaths.len
+    result.continues.add f.continuePaths.len
+
+proc stampStmtExits(w: var WalkCtx; m: StmtExitMarks; taint: Taint) =
+  ## RFC-0005 review R2 (SD2). Taint every path the statement sent down an
+  ## exit channel since `m` was taken. Each is replaced by a tainted fork,
+  ## never mutated: a sibling may share the ref.
+  template stampFrom(s: untyped; lo: int) =
+    for i in max(lo, 0) ..< s.len:
+      let p = s[i]
+      s[i] = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint))
+  template stampFieldFrom(s: untyped; lo: int) =
+    for i in max(lo, 0) ..< s.len:
+      let p = s[i].path
+      s[i].path = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint))
+  stampFrom(w.topReturnedPaths, m.topReturns)
+  for k in 0 ..< w.callStack.len:
+    stampFrom(w.callStack[k].returnedPaths,
+              (if k < m.returns.len: m.returns[k] else: 0))
+  for k in 0 ..< w.loopStack.len:
+    stampFrom(w.loopStack[k].breakPaths,
+              (if k < m.breaks.len: m.breaks[k] else: 0))
+    stampFrom(w.loopStack[k].continuePaths,
+              (if k < m.continues.len: m.continues[k] else: 0))
+  # A statement pops every call frame it pushes, so the frame it leaves in
+  # is the one it began in; were it not, every entry is unaccounted for.
+  let same = w.frame.frameId == m.frameId
+  stampFieldFrom(w.frame.caught, (if same: m.caught else: 0))
+  stampFieldFrom(w.frame.pendingRaise, (if same: m.pendingRaise else: 0))
+  stampFieldFrom(w.frame.pendingReturn, (if same: m.pendingReturn else: 0))
+  stampFieldFrom(w.frame.pendingJump, (if same: m.pendingJump else: 0))
+  stampFieldFrom(w.frame.escaped, (if same: m.escaped else: 0))
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
-  ## RFC-0005 review R1-04. `walkCapSynced`, with the statement as the unit
-  ## of the pending-lowering-taint discipline. A lowering decline cannot
-  ## fork a path from inside `lower`: it queues its taint
-  ## (`loweringPendingTaint`) for the walk arm that called `lower` to drain
-  ## onto the path it lowered for. A statement owns what it queues: when it
-  ## returns, nothing it lowered may still be queued, and nothing may have
-  ## been found queued by one of its lowerings (`claimStrayPendingTaint`,
-  ## the drain's entry check). Either is a deposit whose path is not known
-  ## (a raw `lower` with no drain of its own), so every path the statement
-  ## yields carries it -- the one that produced it among them. Before this,
-  ## the variant constructor's plain fields left an unwritten global's
-  ## `feGlobalHavoc` queued for the next drain, a sibling's or none, and the
-  ## path that read the global reached a target as a clean `sxSat`.
+  ## RFC-0005 review R1-04, R2 (SD1/SD2). `walkCapSynced`, with the
+  ## statement as the unit of the pending-lowering-taint discipline. A
+  ## lowering decline cannot fork a path from inside `lower`: it queues its
+  ## taint (`loweringPendingTaint`) for the walk arm that called `lower` to
+  ## drain onto the path it lowered for.
+  ##
+  ## A statement owns what it queues, and only that. What is queued when it
+  ## begins belongs to the enclosing statement -- an expression half
+  ## lowered around a body walked mid-expression, or an arm's undrained
+  ## deposit before it walks a child -- so it is set aside for the
+  ## statement and put back when it returns, for the enclosing statement's
+  ## drain (R2 SD1: R1-04 took it as this statement's own and cleared it,
+  ## and when the statement left only through `return`/`break`/`continue`
+  ## it landed on no path at all). The paths the statement starts from
+  ## continue the path it was queued for, so they carry it too: a target
+  ## the statement reaches is not solved clean on what it says is not
+  ## modelled.
+  ##
+  ## When the statement returns, nothing it lowered may still be queued,
+  ## and nothing may have been found queued by one of its lowerings
+  ## (`claimStrayPendingTaint`, the drain's entry check). Either is a
+  ## deposit whose path is not known (a raw `lower` with no drain of its
+  ## own), so every path the statement produced carries it: the ones it
+  ## returns, and the ones it sent down an exit channel (R2 SD2,
+  ## `stampStmtExits`). Before R1-04, the variant constructor's plain fields
+  ## left an unwritten global's `feGlobalHavoc` queued for the next drain, a
+  ## sibling's or none, and the path that read the global reached a target
+  ## as a clean `sxSat`.
+  let outerPending = loweringPendingTaint
+  loweringPendingTaint = {}
   let outerStray = w.stmtStrayTaint
   w.stmtStrayTaint = {}
-  result = walkCapSynced(stmt, paths, w)
+  var ins = paths
+  if outerPending != {}:
+    for i in 0 ..< ins.len:
+      let p = ins[i]
+      ins[i] = forkPathTainted(p, p.pc, p.env, carriedDegrade(outerPending))
+  let marks = stmtExitMarks(w)
+  result = walkCapSynced(stmt, ins, w)
   let stray = w.stmtStrayTaint + loweringPendingTaint
-  loweringPendingTaint = {}
+  loweringPendingTaint = outerPending
   w.stmtStrayTaint = outerStray
   if stray != {}:
     for i in 0 ..< result.len:
       let p = result[i]
       result[i] = forkPathTainted(p, p.pc, p.env, carriedDegrade(stray))
+    stampStmtExits(w, marks, stray)
+
+# ---- RFC-0005 review R2: exported test hook (H1 pattern) --------------------
+# `tests/tsymex_rfc0005_r2_walktaint.nim` drives the real `walk` through this
+# hook. The source shapes the finding named (a closure body walked
+# mid-expression) set the calling expression's queue aside themselves
+# (`takePendingLowerEffects`), so no source program known reaches `walk` with
+# a queue it does not own; the hook does, as an arm that walks a child before
+# draining would. It saves and restores every threadvar it touches.
+
+type
+  Rfc0005R2WalkTaintProbe* = object
+    ## Observations `rfc0005R2WalkTaintProbe` reports (see its doc).
+    resultLen*: int
+    pendingAfter*: Taint     ## the caller's queue once the `break` returned
+    breakTaint*: Taint       ## the taint of the path the `break` sent out
+    channelTaints*: seq[Taint]
+      ## Each exit channel's entry added after the marks, once stamped.
+    priorTaint*: Taint       ## an entry that stood before the marks
+
+proc rfc0005R2WalkTaintProbe*(): Rfc0005R2WalkTaintProbe =
+  ## Walks a `break` inside one loop frame on a clean path, with
+  ## `{scSpurious}` queued by the (simulated) enclosing statement: the queue
+  ## must be the caller's again afterwards, and the break path must carry it.
+  ## Then stamps one fresh entry on every exit channel (`stampStmtExits`):
+  ## each must carry the taint, and an entry from before the marks must not.
+  let savedPending = loweringPendingTaint
+  let spur: Taint = {scSpurious}
+  var w: WalkCtx
+  w.loopStack.add LoopFrame()
+  loweringPendingTaint = spur
+  let clean = Path(pc: @[], env: initOrderedTable[string, SymVal]())
+  let r = walk(mkBreak(), @[clean], w)
+  result.resultLen = r.len
+  result.pendingAfter = loweringPendingTaint
+  if w.loopStack[0].breakPaths.len > 0:
+    result.breakTaint = w.loopStack[0].breakPaths[0].taint
+  loweringPendingTaint = savedPending
+  # SD2: every exit channel, stamped from the marks on.
+  var w2: WalkCtx
+  w2.loopStack.add LoopFrame()
+  w2.callStack.add CallFrame()
+  let prior = Path(pc: @[], env: initOrderedTable[string, SymVal]())
+  w2.loopStack[0].breakPaths.add prior
+  let m = stmtExitMarks(w2)
+  template np(): Path = Path(pc: @[], env: initOrderedTable[string, SymVal]())
+  w2.topReturnedPaths.add np()
+  w2.callStack[0].returnedPaths.add np()
+  w2.loopStack[0].breakPaths.add np()
+  w2.loopStack[0].continuePaths.add np()
+  w2.frame.caught.add (depth: 0, path: np())
+  w2.frame.pendingRaise.add (depth: 0, path: np(), typeId: "E",
+                             msg: none(string))
+  w2.frame.pendingReturn.add (depth: 0, path: np())
+  w2.frame.pendingJump.add (depth: 0, path: np(), target: 0, isCont: false)
+  w2.frame.escaped.add EscapedRaise(path: np(), typeId: "E")
+  stampStmtExits(w2, m, spur)
+  result.priorTaint = w2.loopStack[0].breakPaths[0].taint
+  result.channelTaints = @[w2.topReturnedPaths[0].taint,
+    w2.callStack[0].returnedPaths[0].taint, w2.loopStack[0].breakPaths[1].taint,
+    w2.loopStack[0].continuePaths[0].taint, w2.frame.caught[0].path.taint,
+    w2.frame.pendingRaise[0].path.taint, w2.frame.pendingReturn[0].path.taint,
+    w2.frame.pendingJump[0].path.taint, w2.frame.escaped[0].path.taint]
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =

@@ -14,7 +14,7 @@
 ##   forgot it failed open. Its zero is now `rsUnsettled`, which nothing trusts.
 ## * R1-17. `SymexFinding` dropped the budget an `sxUnsat` is a proof under. It
 ##   now carries `bounds`, and every renderer shows them.
-import std/[unittest, strutils, options, json]
+import std/[unittest, strutils, options, json, tables]
 import nelli
 import nelli/symex
 
@@ -180,6 +180,22 @@ suite "R1-16: a zero Soundness is not trusted":
                                  defaultSymexSettings())
         check v.isSome
         if v.isSome: check v.get.soundness == snd
+
+  test "review R3 (E8): the stored encoding, golden":
+    # Version 3 writes enum ordinals; a reordered enum would still round-trip
+    # above, so the bytes are pinned here as well.
+    let db = inMemoryDatabase()
+    saveSymexVerdict(db, r1Never, tLabel("never"), defaultSymexSettings(),
+                     sfUnsat, Soundness(pathTaint: {scSpurious},
+                                        runTaint: {scIncomplete},
+                                        replay: rsUnconfirmed,
+                                        witnessUnsafe: true,
+                                        runDependence: {rdQueryTimeout}))
+    let key = symexCacheKeyForFn(r1Never, tLabel("never")) & cacheKeyUnsat
+    let got = db.loadPrimaryWithMetaImpl(key)
+    check got.len == 1
+    if got.len == 1:
+      check got[0].meta.getOrDefault("soundness") == "3:1:2:3:1:1"
 
 # ---- R1-17 --------------------------------------------------------------------
 

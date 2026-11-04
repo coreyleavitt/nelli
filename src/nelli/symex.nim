@@ -313,12 +313,36 @@ func taintBits(t: Taint): int =
 func runDependenceBits(d: set[RunDependence]): int =
   for c in d: result = result or (1 shl ord(c))
 
+# Review R3 (E8). Encoding version 3 writes these enums' ordinals, so their
+# order IS the format. Pinned here: reordering, inserting or appending a member
+# fails to compile, and the fix is a new `soundnessMetaVersion` (and this pin).
+# Every field is one decimal digit (`decodeSoundness` reads exactly one), so
+# the largest value each can take must stay below 10.
+static:
+  doAssert ord(scSpurious) == 0 and ord(scIncomplete) == 1 and
+           high(SoundnessChannel) == scIncomplete
+  doAssert ord(rsUnsettled) == 0 and ord(rsNotNeeded) == 1 and
+           ord(rsConfirmed) == 2 and ord(rsUnconfirmed) == 3 and
+           high(ReplayStatus) == rsUnconfirmed
+  doAssert ord(rdQueryTimeout) == 0 and ord(rdNativeStack) == 1 and
+           ord(rdReplay) == 2 and high(RunDependence) == rdReplay
+  doAssert (1 shl (ord(high(SoundnessChannel)) + 1)) - 1 <= 9
+  doAssert ord(high(ReplayStatus)) <= 9
+  doAssert (1 shl (ord(high(RunDependence)) + 1)) - 1 <= 9
+
+func digit(n: int): char =
+  ## One field of the encoding. Review R3 (E8): never two digits, which
+  ## `decodeSoundness` would read as a miss; the static pins above make it
+  ## unreachable.
+  doAssert n in 0 .. 9, "soundness field out of one digit: " & $n
+  char(ord('0') + n)
+
 proc encodeSoundness(s: Soundness): string =
-  result = soundnessMetaVersion & ":" & $taintBits(s.pathTaint) & ":" &
-    $taintBits(s.runTaint) & ":" & $ord(s.replay) & ":" &
-    $ord(s.witnessUnsafe)
+  result = soundnessMetaVersion & ":" & digit(taintBits(s.pathTaint)) & ":" &
+    digit(taintBits(s.runTaint)) & ":" & digit(ord(s.replay)) & ":" &
+    digit(ord(s.witnessUnsafe))
   if s.runDependence != {}:
-    result.add ":" & $runDependenceBits(s.runDependence)
+    result.add ":" & digit(runDependenceBits(s.runDependence))
 
 proc decodeSoundness(v: string): Option[Soundness] =
   ## The inverse of `encodeSoundness`; `none` for anything it did not write.

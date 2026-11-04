@@ -267,8 +267,25 @@ onward is in the RFC's "As landed" notes and the merge commits, not here.
   `9ebe2a46` (its shard placement merged with batch 11).
   Every soundness item worse than `main` (6cbfe8f) is fixed.
 - **Final walker version: 264** (`canonicalize.nim`; CR2's `==` pin 264).
-- **Release gate:** pending; see the coordinator. A whole-suite gate was
-  running against `8177eb27` when this entry was written.
+- **Release gate: green.** Every run is pinned to `8177eb27`; the release head
+  adds docs, the version constant and the quipu.toml commit only.
+  - Whole suite, c, Z3 5.1: 969/969 against the `main` baseline (6cbfe8f).
+    regressed=0 and new-failing=0. Seven suites moved from skip to pass:
+    the former Linux hangers.
+  - Whole suite, c, Z3 4.13.4 (the symex-mingw leg's version): 969/969,
+    with every result identical to the 5.1 run.
+  - Whole suite, cpp, Z3 5.1 (on eos): 968/969. The one failure is
+    `tsymex_rfc0005_s8by_remainder`'s spend-equality check, which fails
+    deterministically on cpp while every outcome agrees. It is a test of
+    solver spend, not a verdict, and no CI leg runs cpp; it is INT-04 in
+    RFC-0016.
+  - Windows: fuzzer-msvc, fuzzer-mingw and symex-mingw green at `fbe5d1db`
+    (the release code). `tfuzzpackaging` passes at the release head.
+  - Pre-tag probes on `8177eb27`: B1-B26 and W1-W2 all match native or
+    decline. U1, U2, U6 and U7 are verified; U5's original SUT is on the
+    offline worker (INT-20). The two latent crashes do not reproduce on
+    either tree. Every check-off pragma declines. cpp n42, n43 and the
+    procCall declines pass. Follow-ups are INT-18 to INT-21.
 - **Fence.** Every `[[slice]]` row is `done`. S8cp is `done` for its narrowed
   RFC-0005 scope (the slice lifecycle has no narrowing state): item 2 landed,
   item 1 was superseded by S8ct's child replay, item 3 moved to S8ct, and
@@ -279,11 +296,12 @@ onward is in the RFC's "As landed" notes and the merge commits, not here.
 - **Open work went to RFC-0016** (`docs/rfc/0016-native-parity-hardening.md`),
   per Corey's split of 2026-11-02. The findings batch 11 and the release left,
   and the unowned rows of the INF-05 owner audit, are its §5.8 (INT-01 to
-  INT-17, AUD-01 to AUD-11).
+  INT-21, AUD-01 to AUD-11).
 - **Release docs:** version 0.9.0 in `nelli.nimble`, `milpa.kdl` and
   `nelliVersion`; `CHANGELOG.md` 0.9.0 entry; `docs/migration/0.9.0.md` §7
   "Known gaps"; RFC Status and frontmatter `implemented`.
-- **Next:** on a green gate, fast-forward `main` and tag `v0.9.0` (no PR).
+- **Released:** `main` fast-forwarded and tagged `v0.9.0` (no PR). Work
+  continues on RFC-0016.
 
 ## Implementation plan — model allocation
 

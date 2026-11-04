@@ -194,7 +194,7 @@ suite "RFC-0005 S8av (3) -- verdict cache hit also serves gaps()":
                                  defaultSymexSettings())
     # Hand-built: the exact shape `saveSymexVerdictImpl` wrote before S8av --
     # `"soundness"` metadata key present (`encodeSoundness`'s pinned
-    # "2:0:0:0:0" for a default `Soundness()`), no "gapsv"/"gapsn" keys at all.
+    # "2:0:0:0:0" for a settled, clean `Soundness`), no "gapsv"/"gapsn" keys.
     db.save(key & cacheKeyUnknown, @[], {"soundness": "2:0:0:0:0"}.toTable,
            verdictCacheMaxEntries)
     let loaded = loadSymexVerdict(db, s8avPreFn, tLabel("s8av_pre"),
@@ -202,7 +202,9 @@ suite "RFC-0005 S8av (3) -- verdict cache hit also serves gaps()":
     check loaded.isSome
     check loaded.get.status == sfUnknown
     check loaded.get.gaps.len == 0
-    check loaded.get.soundness == Soundness()
+    # Review R1-16: the stored code `0` is `rsNotNeeded`, as it always was;
+    # the zero value (`rsUnsettled`) is a different, never-trusted record.
+    check loaded.get.soundness == Soundness(replay: rsNotNeeded)
 
   test "end-to-end: a warm sfUnknown finding serves the same gaps as the cold one":
     let db = inMemoryDatabase()

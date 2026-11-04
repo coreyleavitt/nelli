@@ -86,6 +86,12 @@ type
     ## RFC-0005 §8.1. How a `sxSat`/`sxRaised` claim was settled.
     ## Refuted and inconclusive replays of a CANDIDATE never ship on a winner
     ## (they leave the run `sxUnknown`), so they have no member here.
+    rsUnsettled    ## RFC-0005 0.9.1 (review R1-16). The zero value: no producer
+                   ## settled this record, so nothing about it is trusted. Every
+                   ## real verdict leaves the run boundary (`runSymex`) with one
+                   ## of the members below; a record still `rsUnsettled` was
+                   ## built by hand, or by a constructor that forgot the field,
+                   ## and fails closed rather than open
     rsNotNeeded    ## a clean path whose witness is the model's -- the claim
                    ## stood without replay (and the value on every `sxUnsat` /
                    ## `sxUnknown`)
@@ -131,6 +137,8 @@ type
       ## (Invariant-7 extension). It is the join over every decline, so on
       ## a real SUT it is often ⊤; the per-cause view is `gaps()`.
     replay*:    ReplayStatus
+      ## How the claim was settled; `rsUnsettled` (the zero value) until a
+      ## producer settles it, and then never trusted (review R1-16).
     witnessUnsafe*: bool
       ## RFC-0005 0.9.1 (WA-2). The replay that confirmed this claim reached
       ## the target and then did not finish: its child exited (`quit`, a raw
@@ -151,11 +159,14 @@ func trustedSat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxSat` / `sxRaised` arm: a clean winning
   ## path with a faithful witness, or one the real `fn` confirmed (a spurious
   ## path, or since 0.9.1 a lossy witness, WA-9).
+  ## An `rsUnsettled` record (the zero value) is never trusted (R1-16).
   case s.replay
   of rsConfirmed: true
-  of rsUnconfirmed: false
+  of rsUnconfirmed, rsUnsettled: false
   of rsNotNeeded: scSpurious notin s.pathTaint
 
 func trustedUnsat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxUnsat` arm: nothing under-approximated.
-  scIncomplete notin s.runTaint
+  ## An `rsUnsettled` record (the zero value) is never trusted (R1-16): a
+  ## `runTaint` of `{}` there means only that no producer wrote one.
+  s.replay != rsUnsettled and scIncomplete notin s.runTaint

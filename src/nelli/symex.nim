@@ -266,12 +266,22 @@ const soundnessMetaKey = "soundness"
 const soundnessMetaVersion = "2"
   ## The encoding's own version: `"2:<pathTaint>:<runTaint>:<replay>:<unsafe>"`,
   ## each taint a bitmask over `SoundnessChannel` ordinals, `replay` the
-  ## `ReplayStatus` ordinal and `unsafe` `witnessUnsafe` as `0`/`1`. Anything
+  ## `ReplayStatus`'s `replayCode` and `unsafe` `witnessUnsafe` as `0`/`1`. Anything
   ## else decodes as a miss. RFC-0005 0.9.1 (WA-2): version 1 had no
   ## `witnessUnsafe`, so it cannot say a stored witness is safe to run; it is a
   ## miss. RFC-0005 0.9.1 (review R1-07): a non-empty `runDependence` follows
   ## as a sixth field, a bitmask over `RunDependence` ordinals. It is written
   ## only when non-empty, so a record without it reads as before, as `{}`.
+  ## RFC-0005 0.9.1 (review R1-16): `replay` is written through a fixed code
+  ## (`replayCode`), not the enum's ordinal. Inserting `rsUnsettled` as the
+  ## zero value moved every ordinal; the codes kept their meaning, so a record
+  ## written before reads as it was written (`0` is still `rsNotNeeded`, a
+  ## settled value) and the version stays `2`. `3` is `rsUnsettled`.
+
+const replayCode: array[ReplayStatus, char] = [
+  ## The stored code of each `ReplayStatus`: fixed, so it cannot move when the
+  ## enum does (review R1-16).
+  rsUnsettled: '3', rsNotNeeded: '0', rsConfirmed: '1', rsUnconfirmed: '2']
 
 type
   CachedWitness* = tuple[choices: seq[ChoiceNode], soundness: Soundness,
@@ -313,7 +323,7 @@ func runDependenceBits(d: set[RunDependence]): int =
 
 proc encodeSoundness(s: Soundness): string =
   result = soundnessMetaVersion & ":" & $taintBits(s.pathTaint) & ":" &
-    $taintBits(s.runTaint) & ":" & $ord(s.replay) & ":" &
+    $taintBits(s.runTaint) & ":" & replayCode[s.replay] & ":" &
     $ord(s.witnessUnsafe)
   if s.runDependence != {}:
     result.add ":" & $runDependenceBits(s.runDependence)
@@ -330,11 +340,16 @@ proc decodeSoundness(v: string): Option[Soundness] =
     nums[i - 1] = ord(parts[i][0]) - ord('0')
   const allBits = (1 shl (ord(high(SoundnessChannel)) + 1)) - 1
   const allRunBits = (1 shl (ord(high(RunDependence)) + 1)) - 1
-  if nums[0] > allBits or nums[1] > allBits or
-     nums[2] > ord(high(ReplayStatus)) or nums[3] > 1 or
+  var replay = rsUnsettled
+  var known = false
+  for r in ReplayStatus:
+    if replayCode[r] == parts[3][0]:
+      replay = r
+      known = true
+  if nums[0] > allBits or nums[1] > allBits or not known or nums[3] > 1 or
      (parts.len == 6 and nums[4] notin 1 .. allRunBits):
     return none(Soundness)
-  var s = Soundness(replay: ReplayStatus(nums[2]), witnessUnsafe: nums[3] == 1)
+  var s = Soundness(replay: replay, witnessUnsafe: nums[3] == 1)
   for c in SoundnessChannel:
     if (nums[0] and (1 shl ord(c))) != 0: s.pathTaint.incl c
     if (nums[1] and (1 shl ord(c))) != 0: s.runTaint.incl c

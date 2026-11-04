@@ -73,7 +73,8 @@ suite "RFC-0005 S8az (1) -- :sat witness cache hit also serves gaps()":
                                     defaultSymexSettings())
     check loaded.len == 1
     check loaded[0].gaps.len == 0
-    check loaded[0].soundness == Soundness()
+    # Review R1-16: the stored code `0` is `rsNotNeeded`, as it always was.
+    check loaded[0].soundness == Soundness(replay: rsNotNeeded)
 
   test "end-to-end: a warm sfSat finding serves the same gaps as the cold one":
     proc s8azSatConfirm(a: bool; x: int) =

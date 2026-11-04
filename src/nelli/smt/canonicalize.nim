@@ -212,8 +212,17 @@ const renderAsChoicesVersion* = "12"
   ##   on batch 10. S8cp's item 1 code is dropped for S8ct's replay child (nothing
   ##   is abandoned). A `var` formal over a global keeps S8cs's route check
   ##   under S8bz's copy-in (`glVarGlobal`). 262 while S8cq was out; 264 with it.
+  ## - RFC-0005 W3 (264->267, 0.9.1 wiring): `items` / `pairs` over a seq bound
+  ##   the loop by the length at entry and raise `AssertionDefect` where the
+  ##   body changed it (`seqIterLenChanged`, `mitems`'s model); an inert opaque
+  ##   callee compiled with `nanChecks` / `infChecks` on forks
+  ##   `FloatInvalidOpDefect` / `FloatOverflowDefect` (`routineChecks` in
+  ##   `opaqueDefectTypes`); a statement-position opaque or foreign call, and
+  ##   the `{.symexTransparent.}` fallback, read their arguments through
+  ##   `parseOrderedArgs` (`nimArgTemps`), and a deleted inert
+  ##   `{.symexTransparent.}` call binds each computed argument to a sink `let`.
 
-const symexWalkerVersion* = "264"
+const symexWalkerVersion* = "267"
   ## RFC-0005 S8cs (260 on batch 10's 252, renumbered 262 by batch 11) -- the stores the walk
   ## does not see. A program's globals carry `hiddenRoute` from the macro-time
   ## route analysis (lifetime hooks, code it cannot list), and a read of such a

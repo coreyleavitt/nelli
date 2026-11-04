@@ -6553,20 +6553,47 @@ const buildMemModel*: string = block:
   elif compileOption("mm", "none"): "none"
   else: "other"
 
+# RFC-0005 review R2 SM3. The backend `fn` is compiled for.
+const buildBackend*: string =
+  when defined(js): "js"
+  elif defined(cpp): "cpp"
+  elif defined(objc): "objc"
+  else: "c"
+
+# RFC-0005 review R2 SM3. `--exceptions`: how a raise unwinds.
+const buildExceptions*: string =
+  when compileOption("exceptions", "goto"): "goto"
+  elif compileOption("exceptions", "setjmp"): "setjmp"
+  elif compileOption("exceptions", "quirky"): "quirky"
+  elif compileOption("exceptions", "cpp"): "cpp"
+  else: "default"
+
 func buildFlagsSegment*(checksOn = buildChecksOn; danger = defined(danger);
                         release = defined(release);
-                        mm = buildMemModel): string =
+                        mm = buildMemModel;
+                        backend = buildBackend;
+                        exceptions = buildExceptions;
+                        threads = compileOption("threads");
+                        stackTrace = compileOption("stackTrace");
+                        lineTrace = compileOption("lineTrace")): string =
   ## RFC-0005 review R1-08. The build flags that change what the native `fn`
   ## does, which the program and the settings do not key: the checks it was
   ## compiled with (a debug build's confirmed raise cannot happen in a
   ## `-d:danger` one, where `fn` does not check), `danger` and `release`
   ## themselves (code may branch on them with `when defined`), and the memory
-  ## model. `--panics:on` is in `replayModeSegment`. The defaults are this
+  ## model, and (R2 SM3) the backend, `--exceptions`, `--threads`, `--stackTrace`
+  ## and `--lineTrace`. `--panics:on` is in `replayModeSegment`. The defaults are this
   ## build's.
   "ck=" & checksOn.join(",") &
     (if danger: "+danger" else: "") &
     (if release: "+release" else: "") &
-    "+mm=" & mm
+    "+mm=" & mm &
+    # R2 SM3: backend, exception model, threads and trace instrumentation.
+    "+be=" & backend &
+    "+ex=" & exceptions &
+    (if threads: "+thr" else: "") &
+    (if stackTrace: "+st" else: "") &
+    (if lineTrace: "+lt" else: "")
 
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,

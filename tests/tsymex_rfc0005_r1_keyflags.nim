@@ -23,6 +23,30 @@ proc key(bf: string): string =
 const allOn = @["assertions", "boundChecks", "fieldChecks", "objChecks",
                 "overflowChecks", "rangeChecks"]
 
+# R2 SM3: the arguments after the memory model, named so the old positional
+# calls above keep their meaning.
+suite "R2 SM3: backend, exceptions, threads and stack traces are keyed":
+
+  test "each is a different key":
+    # An explicit base, so no argument equals this build's own default.
+    proc seg(be = "c"; ex = "quirky"; thr = false; st = false; lt = false): string =
+      key(buildFlagsSegment(allOn, false, false, "orc", be, ex, thr, st, lt))
+    let base = seg()
+    check seg(be = "cpp") != base
+    check seg(ex = "goto") != base
+    check seg(ex = "setjmp") != base
+    check seg(ex = "goto") != seg(ex = "setjmp")
+    check seg(thr = true) != base
+    check seg(st = true) != base
+    check seg(lt = true) != base
+
+  test "the default is this build's":
+    let seg = buildFlagsSegment()
+    check ("+be=cpp" in seg) == defined(cpp)
+    check ("+thr" in seg) == compileOption("threads")
+    check ("+st" in seg) == compileOption("stackTrace")
+    check ("+ex=goto" in seg) == compileOption("exceptions", "goto")
+
 suite "R1-08: the key varies with the build's checks and flags":
 
   test "each check, turned off, is a different key":

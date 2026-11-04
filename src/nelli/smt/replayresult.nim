@@ -64,22 +64,30 @@ type
     ## RFC-0005 0.9.1 (review R1-06). One replay, as the settle reads it: what
     ## it means for the claim, and how its child ended. Returned by the replay
     ## (`replayWitness`, the entry macros' replay pass) and handed to the
-    ## settle as an argument.
-    outcome*: ReplayOutcome
-    child*: ReplayChild
+    ## settle as an argument. Review R2 (DD6): built only by `replayNotRun`
+    ## and `replayResultOf`, so the outcome is always the one the child's
+    ## ending means.
+    fOutcome: ReplayOutcome
+    fChild: ReplayChild
       ## The child's report. A replay that ran no child (the witness or target
       ## is outside replay, `replayNotRun`) reports `reRefused` with no reason
       ## and is not run-dependent.
 
+func outcome*(r: ReplayResult): ReplayOutcome = r.fOutcome
+func child*(r: ReplayResult): ReplayChild = r.fChild
+
 func replayNotRun*(): ReplayResult =
   ## A replay decided without running anything: `roInconclusive`.
-  ReplayResult(outcome: roInconclusive, child: ReplayChild(ending: reRefused))
+  ReplayResult(fOutcome: roInconclusive,
+               fChild: ReplayChild(ending: reRefused))
 
 func replayResultOf*(c: ReplayChild; lossy: bool): ReplayResult =
   ## RFC-0005 S8ct. What one child's ending means. A target reached is reached,
   ## whatever happened to the process afterwards (`confirmedEnding` says how it
   ## did). `lossy`: the rendered witness is not the model's, so a miss proves
-  ## nothing.
+  ## nothing. Review R2 (LV1): a child whose status was lost (`reLost`) ran,
+  ## so a hit it wrote confirms, as any reach does (the hit is written as it
+  ## happens, by the real `fn`), and a miss is a crash: it did not finish.
   let outcome =
     if c.ending == reRefused: roDeclined
     elif c.reached: roConfirmed
@@ -88,9 +96,21 @@ func replayResultOf*(c: ReplayChild; lossy: bool): ReplayResult =
       of reFinished:
         if not c.bound or lossy: roInconclusive else: roRefuted
       of reTimedOut: roTimedOut
-      of reExited, reSignalled: roCrashed
+      of reExited, reSignalled, reLost: roCrashed
       of reRefused: roDeclined
-  ReplayResult(outcome: outcome, child: c)
+  ReplayResult(fOutcome: outcome, fChild: c)
+
+func endsChild*(r: ReplayResult): bool =
+  ## Review R2 (DD1). The replay's child did not finish: it exited, was ended
+  ## by a signal or a system exception, was killed, or ended with its status
+  ## lost. Running the same witness in a process does that to the process,
+  ## so a claim whose witness this was carries `Soundness.witnessUnsafe`.
+  r.child.ending in {reExited, reSignalled, reTimedOut, reLost}
+
+func killedWhy(r: ReplayResult; fallback: string): string =
+  ## Review R2 (LV2). Why a `reTimedOut` child was killed: the reason it
+  ## carries (a report flood, `stopped`), or `fallback` (the bound).
+  if r.child.why.len > 0: r.child.why else: fallback
 
 func detail*(r: ReplayResult): string =
   ## How the child ended, in words.
@@ -135,11 +155,11 @@ func confirmedEnding*(r: ReplayResult; status: SymexStatusKind;
   ## verdict stands; but a child that did not finish (`quit`, a raw `exit`, a
   ## signal, the bound) says the witness ends or hangs whatever runs it, so
   ## the claim carries `Soundness.witnessUnsafe` and a hint saying how.
+  unsafe = r.endsChild
   case r.child.ending
   of reFinished, reRefused:
-    unsafe = false
-  of reExited, reSignalled:
-    unsafe = true
+    discard
+  of reExited, reSignalled, reLost:
     result.add tagged(feReplayCrashed,
       "replay confirmed " & claimText(status, raisedTypeId) &
       ", then ended its process after reaching the target: " & r.detail &
@@ -148,11 +168,10 @@ func confirmedEnding*(r: ReplayResult; status: SymexStatusKind;
       "runs it, so it is never run in the host (no assertCoveredBy " &
       "splat, no symexForAll seed)")
   of reTimedOut:
-    unsafe = true
     result.add tagged(feReplayTimedOut,
       "replay confirmed " & claimText(status, raisedTypeId) &
-      ", then ran past replayTimeoutMs after reaching the target and " &
-      "was killed" & onInput(input) &
+      ", then was killed after reaching the target: " &
+      r.killedWhy("it ran past replayTimeoutMs") & onInput(input) &
       ". The target is reached; the witness may not terminate, so it " &
       "is never run in the host (no assertCoveredBy splat, no " &
       "symexForAll seed)")
@@ -179,10 +198,10 @@ func candidateHint*(r: ReplayResult; status: SymexStatusKind;
       "replay of " & candidate & " did not run: " & r.detail)
   of roTimedOut:
     result.add tagged(kind,
-      "replay of " & candidate &
-      " was killed: the real fn ran past replayTimeoutMs on the " &
-      "solver's witness -- it may not terminate there, or is only " &
-      "slow; neither confirmed nor refuted")
+      "replay of " & candidate & " was killed: " &
+      r.killedWhy("the real fn ran past replayTimeoutMs on the " &
+                  "solver's witness -- it may not terminate there, or is " &
+                  "only slow") & "; neither confirmed nor refuted")
   of roRefuted:
     result.add tagged(kind,
       "replay refuted " & candidate &
@@ -203,7 +222,8 @@ func winnerHint*(r: ReplayResult; claim: string;
     of roRefuted:
       "the real fn ran on it without reaching the target"
     of roTimedOut:
-      "the real fn ran past replayTimeoutMs on it and was killed"
+      "it was killed: " &
+        r.killedWhy("the real fn ran past replayTimeoutMs on it")
     of roCrashed:
       "the real fn ended its process before reaching the target: " &
         r.detail & onInput(input)

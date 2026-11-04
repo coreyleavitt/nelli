@@ -456,13 +456,15 @@ type
     ## thread-local sink that leaked into later callers).
     findings*: seq[SymexFinding]
 
-proc coverageOutcome(f: SymexFinding; failure: string): SymexFinding
-                    {.discardable.} =
+proc coverageOutcome(site: string; f: SymexFinding;
+                     failure: string): SymexFinding {.discardable.} =
   ## Review R1-10. The end of a single-target `assertCoveredBy`: its finding,
   ## or a `SymexCoverageDefect` carrying it when `failure` says why coverage
   ## is not proven. Review R2 (DD3): inside a property, the finding also
-  ## goes on the run's report (`recordSymexFinding`), on success or failure.
-  recordSymexFinding(f)
+  ## goes on the run's report (`recordSymexFinding`), on success or failure;
+  ## review R3 (E2): as the latest of its call site `site` for its target.
+  ## Outside any property, the return and the defect are its only channel.
+  recordSymexFinding(site, f)
   if failure.len > 0:
     var e = newException(SymexCoverageDefect, failure)
     e.findings = @[f]
@@ -3816,6 +3818,11 @@ macro assertCoveredBy*(fn: typed,
   ##
   ## Returns the call's `SymexFinding` (discardable); on failure the
   ## `SymexCoverageDefect` carries it in `findings` (review R1-10).
+  ## Inside a `forAll` (nested ones included), the finding is also on the
+  ## run's `Report.symexFindings`: one entry per call site and target, the
+  ## latest (review R2 DD3, R3 E2, E3). Outside one (a plain test body, a
+  ## fuzz or concolic harness, a thread of the property's own) the return
+  ## value and the defect are its only channel.
   ##
   ## `testFn` defaults to `fn` itself — the common shape where the
   ## same code under symex is the same code under random PBT.
@@ -3970,6 +3977,9 @@ macro assertCoveredBy*(fn: typed,
     "blamed (set acceptUnknownAsCovered = true to downgrade)")
   let runnableSym = bindSym"hostRunnable"
   let outcomeSym = bindSym"coverageOutcome"
+  # Review R3 (E2): the call site the run's report keys this finding by. The
+  # multi-target form hands its own `fn` node on, so its targets share it.
+  let siteLit = newLit(fn.lineInfo)
   let trustedSym = bindSym"trusted"
   # Shared by the arm bodies below and the block they are spliced into.
   let rId = genSym(nskLet, "r")
@@ -4081,7 +4091,7 @@ macro assertCoveredBy*(fn: typed,
             "prove coverage (set acceptUnknownAsCovered = true to downgrade)"
       of sxRaised:
         `raisedArm`
-      `outcomeSym`(`findingId`, `failureId`)
+      `outcomeSym`(`siteLit`, `findingId`, `failureId`)
 
 macro assertCoveredBy*(fn: typed,
                        targets: static openArray[SymexTarget],

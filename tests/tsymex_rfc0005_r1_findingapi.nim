@@ -330,3 +330,73 @@ suite "R2 LV3: a seed that does not fit":
       check na[0].soundness.replay != rsUnsettled
       let j = parseJson(renderReport(rep, ofJson))
       check not j["symexFindings"][0].hasKey("bounds")
+
+# ---- Review round 3 -----------------------------------------------------------
+#
+# * E2. The run's collector kept one entry per distinct finding, the whole
+#   finding compared: two call sites with equal findings collapsed into one,
+#   and one call site whose finding moved (a cache hit after a cold run, a
+#   replay of the run's) was recorded once per variant. An entry is now one
+#   call site's for one target, holding its latest finding.
+# * E3. A finding made in a nested `forAll` reached only the inner report,
+#   which a caller may discard (`laws`). A frame's findings now also reach the
+#   frame it was opened in.
+
+proc descsOf(fs: seq[SymexFinding]): seq[string] =
+  for f in fs: result.add f.targetDesc
+
+suite "R3 E2: one entry per call site and target":
+  test "two call sites with equal findings are two entries":
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      discard assertCoveredBy(r1Alpha, tLabel("alpha"))
+      discard assertCoveredBy(r1Alpha, tLabel("alpha")),
+      Settings(maxExamples: 3))
+    checkpoint $descsOf(rep.symexFindings)
+    check rep.outcome == otPassed
+    check descsOf(rep.symexFindings) ==
+      @["label(\"alpha\")", "label(\"alpha\")"]
+
+  test "one call site whose finding moves keeps the latest, once":
+    withEngineFrame:
+      let cold = SymexFinding(targetDesc: "label(\"a\")", status: sfSat)
+      var warm = cold
+      warm.fromCache = true
+      var other = cold
+      other.soundness.runDependence = {rdReplay}
+      recordSymexFinding("f.nim(1, 2)", cold)
+      recordSymexFinding("f.nim(1, 2)", warm)
+      recordSymexFinding("f.nim(3, 4)", cold)
+      recordSymexFinding("f.nim(1, 2)", other)
+      let got = engineStack[^1].symexFindings
+      check got.len == 2
+      if got.len == 2:
+        check got[0].soundness.runDependence == {rdReplay}
+        check not got[0].fromCache
+        check got[1].targetDesc == "label(\"a\")"
+
+  test "the multi-target form is one entry per target":
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      discard assertCoveredBy(r1Alpha, [tLabel("alpha"), tLabel("alpha")]),
+      Settings(maxExamples: 3))
+    checkpoint $descsOf(rep.symexFindings)
+    check descsOf(rep.symexFindings) == @["label(\"alpha\")"]
+
+suite "R3 E3: a nested run's findings reach the enclosing run":
+  test "an inner forAll whose report is discarded":
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      discard forAll(integers(0, 3), proc (y: int) =
+        discard assertCoveredBy(r1Alpha, tLabel("alpha")),
+        Settings(maxExamples: 2)),
+      Settings(maxExamples: 2))
+    checkpoint $descsOf(rep.symexFindings)
+    check rep.outcome == otPassed
+    check descsOf(rep.symexFindings) == @["label(\"alpha\")"]
+
+  test "the inner report keeps them too":
+    var inner: seq[SymexFinding]
+    discard forAll(integers(0, 3), proc (x: int) =
+      inner = forAll(integers(0, 3), proc (y: int) =
+        discard assertCoveredBy(r1Alpha, tLabel("alpha")),
+        Settings(maxExamples: 2)).symexFindings,
+      Settings(maxExamples: 1))
+    check descsOf(inner) == @["label(\"alpha\")"]

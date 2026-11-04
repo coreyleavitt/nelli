@@ -28259,6 +28259,22 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentCallerTaint = {}                ## RFC-0005 S8cn
   currentCallerPc = @[]                  ## RFC-0005 S8cn
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
+  # RFC-0005 review R1-12: the rest of the per-expression lowering state.
+  # Each is consumed by the drain that follows its `lower`, so a run that
+  # aborted between the two (a raise out of the walk) left it set, and the
+  # next run's first drain or lowering read it: `ptr` operands and closure
+  # writes holding Z3 terms of the freed context, a receiver flag that
+  # skipped the first read's global observation.
+  pendingPtrCompares = @[]               ## RFC-0005 S8ax
+  closureEnvWrites = @[]                 ## RFC-0005 S8as
+  loweringReadNames = @[]                ## RFC-0005 S8as
+  lastDrainedClosureExitPc = @[]         ## RFC-0005 S7
+  lowerAsReceiver = false                ## RFC-0005 S8bw
+  allocEnumZeroLegal = false             ## RFC-0005 S8z
+  glUnwrittenCtx = default(RawZ3Context) ## RFC-0005 batch 6: the run's
+                                         ## context is new (`glUnwrittenFresh`)
+  seqConformCounter = 0                  ## RFC-0005 S8bc: bound-var names
+  strCharsCounter = 0                    ## RFC-0005 S8ca: bound-var names
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions

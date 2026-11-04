@@ -27456,11 +27456,15 @@ proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
   # The receiver is not a variant (its construction already declined and
   # bound a stand-in: `seVariantFieldOnDeclinedCtor`, as `isVariantField`
   # reports it), or no slot holds the field. Taint the path and keep the
-  # old value: no verdict on this path is trusted.
-  lowerDegrade(seVariantFieldOnDeclinedCtor,
+  # old value: no verdict on this path is trusted. RFC-0005 review R1-13:
+  # the path goes on without the write, a dropped write, so the kind is
+  # `feUnsupportedOp` (`dcSubstituted`, which taints the path). It was
+  # `seVariantFieldOnDeclinedCtor`, the READ arm's halt kind (`dcOmitted`,
+  # no path taint), right only where the path ends.
+  lowerDegrade(feUnsupportedOp,
     "variant field '" & e.vfsFieldName & "' written on a receiver with no " &
-    "such field slot (SymVal kind=" & $recv.kind & ") " &
-    "(seVariantFieldOnDeclinedCtor)")
+    "such field slot (SymVal kind=" & $recv.kind & "): the write is " &
+    "dropped (feUnsupportedOp)")
   recv
 
 proc concreteSeqLen(seqSV: SymVal): Option[int] =

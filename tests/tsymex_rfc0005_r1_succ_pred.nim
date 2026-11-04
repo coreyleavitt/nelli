@@ -101,6 +101,65 @@ proc incNatural(x: Natural) =
     inc r
     if r == 5: symexTarget("hit")
 
+
+# A `var` parameter wraps the value's type in `ntyVar`: the step is still
+# checked against the underlying type's bounds.
+proc stepIntV(a: var int) = inc a
+proc stepEnumV(a: var C) = inc a
+proc stepEnumDecV(a: var C) = dec a
+proc stepCharV(a: var char) = inc a
+proc stepRangeV(a: var R) = inc a
+proc stepRangePlusV(a: var R) = a += 1
+proc succVarEnum(a: var C): C = succ(a)
+proc succVarRange(a: var R): int = succ(a)
+proc viaIntV(x: int) =
+  var v = x
+  stepIntV(v)
+  if v == 5: symexTarget("hit")
+proc viaEnumV(x: C) =
+  var v = x
+  stepEnumV(v)
+proc viaEnumDecV(x: C) =
+  var v = x
+  stepEnumDecV(v)
+proc viaEnumOkV(x: C) =
+  var v = x
+  if x != cc:
+    stepEnumV(v)
+    if v == cc: symexTarget("hit")
+proc viaCharV(x: char) =
+  var v = x
+  stepCharV(v)
+  if v == '\0': symexTarget("hit")
+proc viaRangeV(x: R) =
+  var v = x
+  stepRangeV(v)
+proc viaRangePlusV(x: R) =
+  var v = x
+  stepRangePlusV(v)
+proc viaSuccVarEnum(x: C) =
+  var v = x
+  discard succVarEnum(v)
+proc viaSuccVarRange(x: R) =
+  var v = x
+  if succVarRange(v) == 4: symexTarget("hit")
+
+# `distinct`: native checks the step against the underlying type.
+type
+  DI = distinct int
+  DI8 = distinct int8
+  DC = distinct C
+proc incDistinctInt(x: int) =
+  var d = DI(x)
+  inc d
+  if int(d) == 5: symexTarget("hit")
+proc incDistinctInt8(x: int8) =
+  var d = DI8(x)
+  inc d
+proc incDistinctEnum(x: C) =
+  var d = DC(x)
+  inc d
+
 template overflows(fn: untyped; target: SymexTarget) =
   let r = symexFind(fn, target)
   checkpoint show(r.errors)
@@ -182,3 +241,36 @@ suite "R1-02: succ / pred / inc / dec past an ordinal's end":
     decides(succNatural, sxSat)
     check native(incNatural(4)) == "hit"
     decides(incNatural, sxSat)
+
+  test "a var parameter is checked against its underlying type":
+    check native(viaIntV(4)) == "hit"
+    decides(viaIntV, sxSat)
+    check native(viaEnumOkV(cb)) == "hit"
+    decides(viaEnumOkV, sxSat)
+    check native(viaEnumV(cc)) == "OverflowDefect"
+    overflows(viaEnumV)
+    check native(viaEnumDecV(ca)) == "OverflowDefect"
+    overflows(viaEnumDecV)
+    check native(viaCharV('\xff')) == "OverflowDefect"
+    overflows(viaCharV, tLabel("hit"))
+    check native(viaRangeV(3)) == "OverflowDefect"
+    overflows(viaRangeV)
+    check native(viaRangePlusV(3)) == "OverflowDefect"
+    overflows(viaRangePlusV)
+
+  test "succ / pred on a var parameter's value":
+    check native(viaSuccVarEnum(cc)) == "OverflowDefect"
+    overflows(viaSuccVarEnum)
+    # succ of 3 in range[0..3] is 4, within the base type: no raise.
+    check native(viaSuccVarRange(3)) == "hit"
+    decides(viaSuccVarRange, sxSat)
+
+  test "a distinct receiver is declined, never a wrong verdict":
+    # Native checks the step against the underlying type; `inc` on a
+    # distinct is not modelled (the receiver gate), so it must not be sxUnsat.
+    check native(incDistinctInt(4)) == "hit"
+    declines(incDistinctInt, feUnsupportedOp)
+    check native(incDistinctInt8(127)) == "OverflowDefect"
+    declines(incDistinctInt8, feUnsupportedOp)
+    check native(incDistinctEnum(cc)) == "OverflowDefect"
+    declines(incDistinctEnum, feUnsupportedOp)

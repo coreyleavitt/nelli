@@ -40,7 +40,7 @@ template replays(fn: typed, lbl: string) =
   block:
     let r = verdict(fn, lbl, sxSat)
     if r.status == sxSat:
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayWitness(fn, r.witness, tLabel(lbl), {}).outcome == roConfirmed
 
 template declines(fn: typed, lbl, why: string) =
   block:

@@ -131,7 +131,7 @@ suite "RFC-0005 S2 -- replayWitness":
     let r = symexFind(magicSut, tLabel("magic"))
     check r.status == sxSat
     runsAtStart = replayExecutions()
-    check replayWitness(magicSut, r.witness, tLabel("magic"), {}) == roConfirmed
+    check replayWitness(magicSut, r.witness, tLabel("magic"), {}).outcome == roConfirmed
     check runsSince() == 1
 
   test "roRefuted: a real fresh-symbol candidate the real fn does not reach":
@@ -158,9 +158,9 @@ suite "RFC-0005 S2 -- replayWitness":
     check t.witness[1] == 100
     check runsSince() == 1
     check replayWitness(freshTwinSut, t.witness, tLabel("freshTwin"),
-                        pathTaint(dcFreshSymbol)) == roConfirmed
+                        pathTaint(dcFreshSymbol)).outcome == roConfirmed
     check replayWitness(freshSut, t.witness, tLabel("fresh"),
-                        pathTaint(dcFreshSymbol)) == roRefuted
+                        pathTaint(dcFreshSymbol)).outcome == roRefuted
 
   test "eligibility gate: only an entirely-dcFreshSymbol path taint replays":
     ## Real witness, reaching input -- so any non-confirmed answer below is the
@@ -174,7 +174,7 @@ suite "RFC-0005 S2 -- replayWitness":
       check not replayEligible(pathTaint(c))
       runsAtStart = replayExecutions()
       check replayWitness(magicSut, r.witness, tLabel("magic"),
-                          pathTaint(c)) == roInconclusive
+                          pathTaint(c)).outcome == roInconclusive
       check runsSince() == 0
     ## A fresh-symbol join with any other class is no longer "entirely"
     ## fresh-symbol.
@@ -187,11 +187,11 @@ suite "RFC-0005 S2 -- replayWitness":
     let r = symexFind(refSut, tLabel("refHit"))
     check r.status == sxSat
     runsAtStart = replayExecutions()
-    check replayWitness(refSut, r.witness, tLabel("refHit"), {}) == roConfirmed
+    check replayWitness(refSut, r.witness, tLabel("refHit"), {}).outcome == roConfirmed
     check runsSince() == 1
     var cell = new int
     cell[] = 0
-    check replayWitness(refSut, (cell,), tLabel("refHit"), {}) == roRefuted
+    check replayWitness(refSut, (cell,), tLabel("refHit"), {}).outcome == roRefuted
     check runsSince() == 2
 
   test "witness fidelity: a lossy ref witness confirms on a hit, never refutes":
@@ -201,11 +201,11 @@ suite "RFC-0005 S2 -- replayWitness":
     var box = new LossyBox
     box.n = 5
     runsAtStart = replayExecutions()
-    check replayWitness(lossySut, (box,), tLabel("lossyHit"), {}) == roConfirmed
+    check replayWitness(lossySut, (box,), tLabel("lossyHit"), {}).outcome == roConfirmed
     check runsSince() == 1
     ## A miss on a lossy render says nothing about the model's witness.
     box.n = 0
-    check replayWitness(lossySut, (box,), tLabel("lossyHit"), {}) ==
+    check replayWitness(lossySut, (box,), tLabel("lossyHit"), {}).outcome ==
           roInconclusive
     check runsSince() == 2
 
@@ -232,7 +232,7 @@ suite "RFC-0005 S2 -- replayWitness":
     ## valid input is not run.
     var seqVal = @[1, 2, 3]
     runsAtStart = replayExecutions()
-    check replayWitness(ptrSeqSut, (addr seqVal,), tLabel("ptrSeqHit"), {}) ==
+    check replayWitness(ptrSeqSut, (addr seqVal,), tLabel("ptrSeqHit"), {}).outcome ==
           roInconclusive
     check runsSince() == 0
 
@@ -240,7 +240,7 @@ suite "RFC-0005 S2 -- replayWitness":
     let r = symexFind(magicSut, tLabel("magic"))
     check r.status == sxSat
     runsAtStart = replayExecutions()
-    check replayWitness(magicSut, r.witness, tNilAccess(), {}) == roInconclusive
+    check replayWitness(magicSut, r.witness, tNilAccess(), {}).outcome == roInconclusive
     check runsSince() == 0
 
   test "raise targets: an escaping raise confirms; a miss or wrong type refutes":
@@ -249,18 +249,18 @@ suite "RFC-0005 S2 -- replayWitness":
     check r.raisedTypeId == "ValueError"
     runsAtStart = replayExecutions()
     check replayWitness(raiser, r.raisedWitness, tRaisedExn(r.raisedTypeId),
-                        {}) == roConfirmed
-    check replayWitness(raiser, r.raisedWitness, tRaisedExn(), {}) == roConfirmed
+                        {}).outcome == roConfirmed
+    check replayWitness(raiser, r.raisedWitness, tRaisedExn(), {}).outcome == roConfirmed
     check replayWitness(raiser, r.raisedWitness, tRaisedExn("KeyError"),
-                        {}) == roRefuted
-    check replayWitness(raiser, (1,), tRaisedExn("ValueError"), {}) == roRefuted
+                        {}).outcome == roRefuted
+    check replayWitness(raiser, (1,), tRaisedExn("ValueError"), {}).outcome == roRefuted
     check runsSince() == 4
 
   test "raise targets: a handler-caught raise is not an escaping raise":
     ## The walker reports only raises that escape the SUT frame; replay
     ## observes exactly that, so a caught raise refutes.
     runsAtStart = replayExecutions()
-    check replayWitness(caughtRaiser, (7,), tRaisedExn("ValueError"), {}) ==
+    check replayWitness(caughtRaiser, (7,), tRaisedExn("ValueError"), {}).outcome ==
           roRefuted
     check runsSince() == 1
 
@@ -268,18 +268,18 @@ suite "RFC-0005 S2 -- replayWitness":
     let r = symexFind(indexer, tIndexError())
     check r.status == sxRaised
     runsAtStart = replayExecutions()
-    check replayWitness(indexer, r.raisedWitness, tIndexError(), {}) ==
+    check replayWitness(indexer, r.raisedWitness, tIndexError(), {}).outcome ==
           roConfirmed
     check replayWitness(indexer, r.raisedWitness,
-                        tRaisedExn(r.raisedTypeId), {}) == roConfirmed
-    check replayWitness(indexer, (1,), tIndexError(), {}) == roRefuted
+                        tRaisedExn(r.raisedTypeId), {}).outcome == roConfirmed
+    check replayWitness(indexer, (1,), tIndexError(), {}).outcome == roRefuted
     check runsSince() == 3
 
   test "var params: the witness is splatted through a var local":
     let r = symexFind(bumper, tLabel("bumped"))
     check r.status == sxSat
     runsAtStart = replayExecutions()
-    check replayWitness(bumper, r.witness, tLabel("bumped"), {}) == roConfirmed
+    check replayWitness(bumper, r.witness, tLabel("bumped"), {}).outcome == roConfirmed
     check runsSince() == 1
 
 suite "RFC-0005 S2 -- stackable capture context":
@@ -305,7 +305,7 @@ suite "RFC-0005 S2 -- stackable capture context":
     check r.status == sxSat
     symexCaptureBegin()
     symexTarget("userBefore")
-    check replayWitness(magicSut, r.witness, tLabel("magic"), {}) == roConfirmed
+    check replayWitness(magicSut, r.witness, tLabel("magic"), {}).outcome == roConfirmed
     symexTarget("userAfter")
     let userHits = symexCaptureEnd()
     check userHits == toHashSet(["userBefore", "userAfter"])
@@ -315,7 +315,7 @@ suite "RFC-0005 S2 -- stackable capture context":
     proc outerSut(x: int) =
       symexTarget("outerLabel")
       ## The inner replay reaches "magic"; the outer frame must not see it.
-      doAssert replayWitness(magicSut, (42,), tLabel("magic"), {}) ==
+      doAssert replayWitness(magicSut, (42,), tLabel("magic"), {}).outcome ==
                roConfirmed
     check replayedOrNotMarshallable(replayWitness(outerSut, (0,), tLabel("outerLabel"), {}), roConfirmed)
     check replayedOrNotMarshallable(replayWitness(outerSut, (0,), tLabel("magic"), {}), roRefuted)

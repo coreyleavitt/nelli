@@ -215,7 +215,7 @@ suite "S8bu (1): no query is unbounded under the defaults":
       if e.kind == beSolverUndef and "queryTimeoutMs = 2000" in e.msg:
         named = true
     check named
-    check symexQueryTimedOut()
+    check rdQueryTimeout in r.soundness.runDependence
 
 suite "S8bu: walker version":
   test "symexWalkerVersion >= 225":

@@ -13934,24 +13934,14 @@ var queryTimeoutMsCur {.threadvar.}: uint
 var nativeStackCutFlag {.threadvar.}: bool
   ## RFC-0005 S8ca. Some call of the current run declined because the
   ## native stack left was under the walk's reserve (`nativeStackShort`);
-  ## reset by `resetSymexRunState`.
-
-proc symexNativeStackCut*(): bool =
-  ## RFC-0005 S8ca. Whether a call of the last run on this thread declined
-  ## for want of native stack. Like a clock cut-off its verdict is the
-  ## machine's (the thread's stack), not only the program's, so
-  ## `saveSymexVerdictImpl` does not cache it.
-  nativeStackCutFlag
+  ## reset by `resetSymexRunState`. Like a clock cut-off its verdict is the
+  ## machine's (the thread's stack), not only the program's: `runSymex` puts
+  ## it on the result (`rdNativeStack`), which is what a save reads.
 
 var queryTimedOutFlag {.threadvar.}: bool
   ## RFC-0005 S8bu. Some solve of the current run was cut off by the clock
-  ## (`solveBounded`); reset by `resetSymexRunState`.
-
-proc symexQueryTimedOut*(): bool =
-  ## RFC-0005 S8bu. Whether a solve of the last run on this thread was cut
-  ## off by `queryTimeoutMs`. Its verdict is the machine's, not only the
-  ## program's, so `saveSymexVerdictImpl` does not cache it.
-  queryTimedOutFlag
+  ## (`solveBounded`); reset by `resetSymexRunState`. `runSymex` puts it on
+  ## the result (`rdQueryTimeout`), which is what a save reads.
 
 proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
   ## RFC-0005 S8bu. `s.check()` (under `assumptions`, `checkWith`), noting
@@ -28158,6 +28148,11 @@ proc runSymex*(prog: SymexProgram,
   # It equals the `w.runTaint` the verdict read, plus a winner's witness
   # extraction errors (the one sink `runSymexImpl` drains after deciding).
   result.soundness.runTaint = runTaintOf(result.errors)
+  # RFC-0005 S8bu/S8ca (review R1-07). What of the verdict is this run's, on
+  # the result: a save reads it there, never the thread's flags, which the
+  # next run resets.
+  if queryTimedOutFlag: result.soundness.runDependence.incl rdQueryTimeout
+  if nativeStackCutFlag: result.soundness.runDependence.incl rdNativeStack
   # RFC-0005 S11 (§8.2). The bound echo.
   result.bounds = settings.budget
 

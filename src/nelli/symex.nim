@@ -40,7 +40,10 @@ export dsl
 import ./smt/scan
 import ./smt/replayproc   ## RFC-0005 S8ct
 import ./smt/replaywire   ## RFC-0005 S8ct
+import ./smt/replayresult ## RFC-0005 0.9.1 (review R1-06, R1-14)
 export replayExecutions
+export replayresult.ReplayOutcome, replayresult.ReplayResult,
+       replayresult.detail, replayresult.runDependence
 from ./smt/scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
@@ -266,7 +269,9 @@ const soundnessMetaVersion = "2"
   ## `ReplayStatus` ordinal and `unsafe` `witnessUnsafe` as `0`/`1`. Anything
   ## else decodes as a miss. RFC-0005 0.9.1 (WA-2): version 1 had no
   ## `witnessUnsafe`, so it cannot say a stored witness is safe to run; it is a
-  ## miss.
+  ## miss. RFC-0005 0.9.1 (review R1-07): a non-empty `runDependence` follows
+  ## as a sixth field, a bitmask over `RunDependence` ordinals. It is written
+  ## only when non-empty, so a record without it reads as before, as `{}`.
 
 type
   CachedWitness* = tuple[choices: seq[ChoiceNode], soundness: Soundness,
@@ -303,28 +308,38 @@ type
 func taintBits(t: Taint): int =
   for c in t: result = result or (1 shl ord(c))
 
+func runDependenceBits(d: set[RunDependence]): int =
+  for c in d: result = result or (1 shl ord(c))
+
 proc encodeSoundness(s: Soundness): string =
-  soundnessMetaVersion & ":" & $taintBits(s.pathTaint) & ":" &
+  result = soundnessMetaVersion & ":" & $taintBits(s.pathTaint) & ":" &
     $taintBits(s.runTaint) & ":" & $ord(s.replay) & ":" &
     $ord(s.witnessUnsafe)
+  if s.runDependence != {}:
+    result.add ":" & $runDependenceBits(s.runDependence)
 
 proc decodeSoundness(v: string): Option[Soundness] =
   ## The inverse of `encodeSoundness`; `none` for anything it did not write.
   let parts = v.split(':')
-  if parts.len != 5 or parts[0] != soundnessMetaVersion: return none(Soundness)
-  var nums: array[4, int]
-  for i in 1 .. 4:
+  if parts.len notin {5, 6} or parts[0] != soundnessMetaVersion:
+    return none(Soundness)
+  var nums: array[5, int]
+  for i in 1 ..< parts.len:
     if parts[i].len != 1 or parts[i][0] notin {'0' .. '9'}:
       return none(Soundness)
     nums[i - 1] = ord(parts[i][0]) - ord('0')
   const allBits = (1 shl (ord(high(SoundnessChannel)) + 1)) - 1
+  const allRunBits = (1 shl (ord(high(RunDependence)) + 1)) - 1
   if nums[0] > allBits or nums[1] > allBits or
-     nums[2] > ord(high(ReplayStatus)) or nums[3] > 1:
+     nums[2] > ord(high(ReplayStatus)) or nums[3] > 1 or
+     (parts.len == 6 and nums[4] notin 1 .. allRunBits):
     return none(Soundness)
   var s = Soundness(replay: ReplayStatus(nums[2]), witnessUnsafe: nums[3] == 1)
   for c in SoundnessChannel:
     if (nums[0] and (1 shl ord(c))) != 0: s.pathTaint.incl c
     if (nums[1] and (1 shl ord(c))) != 0: s.runTaint.incl c
+  for d in RunDependence:
+    if (nums[4] and (1 shl ord(d))) != 0: s.runDependence.incl d
   some(s)
 
 proc soundnessMeta(s: Soundness): Table[string, string] =
@@ -546,8 +561,11 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## `Report.dbErrors`.
   if finding.status != sfSat: return
   # RFC-0005 0.9.1 (WA-7, WA-9): a lossy winner the replay did not confirm for
-  # a reason of the run is not stored as unconfirmed for good.
-  if finding.soundness.replay == rsUnconfirmed and replayRunDependent(): return
+  # a reason of the run is not stored as unconfirmed for good. Read off the
+  # finding (review R1-07), never off the thread.
+  if finding.soundness.replay == rsUnconfirmed and
+     rdReplay in finding.soundness.runDependence:
+    return
   if not metaReady(db, "saveSymexWitnessImpl", errors): return
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
@@ -637,13 +655,14 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   # cut off (`queryTimeoutMs`) is the machine's, not only the program's:
   # another machine may decide it. Not cached.
   # RFC-0005 S8ca: likewise one a call declined for want of native stack
-  # (`symexNativeStackCut`): a thread with a larger stack goes deeper.
+  # (`rdNativeStack`): a thread with a larger stack goes deeper.
   # RFC-0005 0.9.1 (WA-7): likewise one a replay left undecided for a reason
-  # of the run (`replayRunDependent`): a child killed at `replayTimeoutMs`, one
-  # ended at the replay's memory limit, or one that could not be started or
-  # handed its state at that moment. The next run tries the replay again.
-  if status == sfUnknown and (symexQueryTimedOut() or symexNativeStackCut() or
-                              replayRunDependent()):
+  # of the run (`rdReplay`): a child killed at `replayTimeoutMs`, one ended at
+  # the replay's memory limit, or one that could not be started or handed its
+  # state at that moment. The next run tries the replay again.
+  # Review R1-07: read off the `soundness` the verdict was decided under, so a
+  # save after other work on this thread still reads its own run's.
+  if status == sfUnknown and soundness.runDependence != {}:
     return
   if not metaReady(db, "saveSymexVerdictImpl", errors): return
   let key = symexCacheKey(prog, target, settings,
@@ -748,7 +767,9 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
   # RFC-0005 0.9.1 (WA-7, WA-9): as `saveSymexWitnessImpl`.
   for raw in found:
-    if raw.soundness.replay == rsUnconfirmed and replayRunDependent(): return
+    if raw.soundness.replay == rsUnconfirmed and
+       rdReplay in raw.soundness.runDependence:
+      return
   if not metaReady(db, "saveSymexRaisedImpl", errors): return
   let baseKey = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
@@ -2166,63 +2187,6 @@ type ReplayFootprint = object
   why: string
   globals: seq[NimNode]
 
-type ReplayOutcome* = enum
-  ## RFC-0005 §4.2. The result of executing a witness against the real `fn`.
-  ## Three-valued because a `bool` would conflate "refuted" with "could not
-  ## run" -- different facts with different downstream reporting.
-  ##
-  ## DISTINCT from `SymexFindingStatus.sfReplayMiss` (Phase 14 B5,
-  ## `engine/types.nim`): that status diagnoses a persisted REGRESSION SEED
-  ## whose choice sequence no longer drives the test runtime onto its marker
-  ## (strategy/generator skew, found by `assertCoveredBy` in the seed phase).
-  ## `ReplayOutcome` is a VERDICT-TIME fact about a fresh solver witness from
-  ## this run. A seed miss says the harness drifted; `roRefuted` says the
-  ## model did.
-  roConfirmed     ## the real fn reached the target on this witness -- the
-                  ## target is reachable in reality, whatever the model's taint
-  roRefuted       ## the real fn ran to completion (returned, or raised
-                  ## something other than the target) on a FAITHFULLY rendered
-                  ## witness and did not reach the target: this witness is
-                  ## proven spurious (a confirmed model gap). It says nothing
-                  ## about OTHER inputs -- the model's havoc symbols (an opaque
-                  ## call's return, …) are not part of the witness, so the
-                  ## verdict for a refuted candidate is sxUnknown, never sxUnsat
-                  ## (§2.3 rule 4)
-  roInconclusive  ## replay declined or not faithfully executable: an
-                  ## ineligible taint, a witness outside the renderable
-                  ## fragment, a target kind outside replay scope, or a lossy
-                  ## witness that did not reach the target. The candidate
-                  ## stays sxUnknown
-  roTimedOut      ## RFC-0005 S8be: the real fn ran past
-                  ## `SymexSettings.replayTimeoutMs` on this witness and the
-                  ## replay was abandoned -- it may be looping, or only slow.
-                  ## Neither confirmed nor refuted: the candidate stays
-                  ## sxUnknown, with a `feReplayTimedOut` hint
-  roCrashed       ## RFC-0005 S8ct: the real fn ended its child process (an
-                  ## exit, a signal, a system exception) on this witness before
-                  ## it reached the target. A real fact about a real input, and
-                  ## neither a confirmation nor a refutation of the target: the
-                  ## candidate stays sxUnknown, with a `feReplayCrashed` hint
-                  ## saying how it ended and on what input
-  roDeclined      ## RFC-0005 S8ct: no child could run this replay, so it did
-                  ## not run: the candidate stays sxUnknown, with a
-                  ## `feReplayDeclined` hint
-
-proc replayOutcomeOf(c: ReplayChild; lossy: bool): ReplayOutcome =
-  ## RFC-0005 S8ct. What one child's ending means. A target reached is reached,
-  ## whatever happened to the process afterwards. `lossy`: the rendered witness
-  ## is not the model's, so a miss proves nothing. RFC-0005 0.9.1 (WA-2): how a
-  ## confirming child ended afterwards is not lost: `settleCandidate` and
-  ## `settleWinner` read it (`lastReplayEnding`, `confirmedEnding`).
-  if c.ending == reRefused: return roDeclined
-  if c.reached: return roConfirmed
-  case c.ending
-  of reFinished:
-    if not c.bound or lossy: roInconclusive else: roRefuted
-  of reTimedOut: roTimedOut
-  of reExited, reSignalled: roCrashed
-  of reRefused: roDeclined
-
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
   ## whose path taint derives ENTIRELY from `dcFreshSymbol` sites. Read off
@@ -2894,7 +2858,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         child: ChildWitness = ChildWitness()): NimNode =
   ## RFC-0005 S2: the macro-time half of `replayWitness`, spliced by S10 into
   ## the entry macros' shared replay emitter (`emitRunSymexReplayed`). Emits
-  ## an expression of type `ReplayOutcome`. `witness` is the typed witness
+  ## an expression of type `ReplayResult`. `witness` is the typed witness
   ## tuple (the output of `emitTyAndReader`), `target` a `SymexTarget`
   ## expression, `pathTaint` a `Taint` expression (the candidate's).
   ## `extraLossy` (RFC-0005 S10) is a runtime `bool`: true when the model
@@ -2915,10 +2879,10 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   if fidelity == wfUnexecutable:
     # Decided at macro time: the splat is not even emitted, so a placeholder
     # (a nil proc, a nil ptr) can never be called.
-    return bindSym"roInconclusive"
+    return newCall(bindSym"replayNotRun")
   let paramTys = formalParamTypes(fn)
   if paramTys.len != params.len:
-    return bindSym"roInconclusive"   # not a plain proc type: never run it
+    return newCall(bindSym"replayNotRun")   # not a plain proc type: never run it
   let witId = genSym(nskLet, "replayWit")
   let tgtId = genSym(nskLet, "replayTarget")
   let escId = genSym(nskVar, "replayEscaped")
@@ -3089,21 +3053,22 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       let `tgtId`: SymexTarget = `target`
       if not replayEligible(`pathTaint`) or not replayInScope(`tgtId`) or
          `nilDeref`:
-        roInconclusive
+        replayNotRun()
       else:
         let `witId` {.used.} = `witness`
         when not (`convertible`):
-          roInconclusive
+          replayNotRun()
         else:
           # RFC-0005 S8ct: the run is in a child: the host learns how it ended.
           let `childRes` = `runChild`
-          replayOutcomeOf(`childRes`, `lossy` or `extraLossy` or `converted`)
+          replayResultOf(`childRes`, `lossy` or `extraLossy` or `converted`)
 
 macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
                      pathTaint: Taint): untyped =
   ## RFC-0005 §4.2: execute `witness` (a `SymexResult.witness`, or
   ## `.raisedWitness`, of a `symexFind(fn, …)` run) against the REAL `fn`
-  ## and report whether it reaches `target`. Target-shaped, so the
+  ## and report whether it reaches `target`, as a `ReplayResult`: its
+  ## `outcome`, and how the child ended (`detail`). Target-shaped, so the
   ## raise-flavoured targets §2.3 puts in scope are expressible: a `sxRaised`
   ## candidate is replayed with `tRaisedExn(r.raisedTypeId)` -- the claim
   ## that exact type ESCAPES `fn`, whatever the search target was (under E6 a
@@ -3111,7 +3076,8 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
   ## `pathTaint` is the candidate's `RawResult.pathTaint`, the input to the
   ## eligibility gate (`replayEligible`).
   ##
-  ## Returns `roInconclusive` WITHOUT running `fn` for an ineligible taint, a
+  ## Returns `roInconclusive` (`replayNotRun`) WITHOUT running `fn` for an
+  ## ineligible taint, a
   ## witness shape outside the faithfully-renderable fragment (`emitTyAndReader`
   ## placeholders -- permanently), or a target kind outside
   ## `replayInScope`. Otherwise runs `fn` once, inside its own nested capture
@@ -3214,134 +3180,58 @@ func candidateLossy*(c: SatCandidate): bool =
     if e.kind == feExtractionFailed: return true
   false
 
-func claimText(status: SymexStatusKind; raisedTypeId: string): string =
-  "a " & $status & " " & (if status == sxRaised: "claim (raise " & raisedTypeId
-                          else: "claim (target hit") & ")"
-
-proc confirmedEnding(status: SymexStatusKind; raisedTypeId: string;
-                     input: string; unsafe: var bool): seq[SymexErrorInfo] =
-  ## RFC-0005 0.9.1 (WA-2). A confirming replay's child reached the target; this
-  ## is how it ended afterwards. A target reached is reached (§5a), so the
-  ## verdict stands; but a child that did not finish (`quit`, a raw `exit`, a
-  ## signal, the bound) says the witness ends or hangs whatever runs it, so
-  ## the claim carries `Soundness.witnessUnsafe` and a hint saying how.
-  ## Read straight after the replay that confirmed: only a child that ran
-  ## confirms, so `lastReplayEnding` is that child's.
-  let ending = lastReplayEnding()
-  case ending
-  of reFinished, reRefused:
-    unsafe = false
-  of reExited, reSignalled:
-    unsafe = true
-    result.add SymexErrorInfo(kind: feReplayCrashed, severity: sevHint,
-      msg: "replay confirmed " & claimText(status, raisedTypeId) &
-           ", then ended its process after reaching the target: " &
-           lastReplayDetail() &
-           (if input.len > 0: ", on the input " & input else: "") &
-           ". The target is reached; the witness ends any process that " &
-           "runs it, so it is never run in the host (no assertCoveredBy " &
-           "splat, no symexForAll seed) (feReplayCrashed)")
-  of reTimedOut:
-    unsafe = true
-    result.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
-      msg: "replay confirmed " & claimText(status, raisedTypeId) &
-           ", then ran past replayTimeoutMs after reaching the target and " &
-           "was killed" &
-           (if input.len > 0: ", on the input " & input else: "") &
-           ". The target is reached; the witness may not terminate, so it " &
-           "is never run in the host (no assertCoveredBy splat, no " &
-           "symexForAll seed) (feReplayTimedOut)")
-
 proc settleCandidate(raw: RawResult; c: SatCandidate;
-                     outcome: ReplayOutcome; input: string): RawResult =
-  ## RFC-0005 S10 (§2.3 rule 3). Applies ONE candidate's replay outcome to
-  ## the `sxUnknown` result `raw`:
+                     replayed: ReplayResult; input: string): RawResult =
+  ## RFC-0005 S10 (§2.3 rule 3). Applies ONE candidate's replay to the
+  ## `sxUnknown` result `raw`, by its `outcome`:
   ##   * `roConfirmed` -- the verdict becomes the candidate's claim
   ##     (`sxSat`/`sxRaised`) carrying its model as the witness, its
   ##     `pathTaint` (still `scSpurious`, with RFC-0005 S11's `replay =
   ##     rsConfirmed` beside it -- the one writer of `rsConfirmed`) and its
   ##     own extraction errors after the run's. RFC-0005 0.9.1 (WA-2): a child
   ##     that ended or hung after the target sets `witnessUnsafe`, with a
-  ##     `feReplayCrashed`/`feReplayTimedOut` hint. No `diagnostics`: every other finding is either a
-  ##     candidate nobody confirmed or a clean one an unplaced decline
-  ##     suppressed (`decideVerdict`'s `reachUnknown`, RFC-0005 S9).
-  ##   * `roRefuted` -- stays `sxUnknown` (rule 4: the enlarged program
-  ##     reaches the target; never `sxUnsat`), plus a `feReplayRefuted`
-  ##     `sevHint` naming the witness's confirmed model gap (§4.2).
-  ##   * `roInconclusive` -- unchanged.
-  ##   * `roCrashed` (RFC-0005 S8ct) -- stays `sxUnknown`, plus a
-  ##     `feReplayCrashed` `sevHint`: the real fn ended its process on this
-  ##     input before reaching the target. A real finding about that input, and
-  ##     nothing about the target's reachability on any other.
-  ##   * `roDeclined` (RFC-0005 S8ct) -- stays `sxUnknown`, plus a
-  ##     `feReplayDeclined` `sevHint`: it did not run.
-  ##   * `roTimedOut` (RFC-0005 S8be) -- stays `sxUnknown`, plus a
-  ##     `feReplayTimedOut` `sevHint`: the replay's child was killed at its
-  ##     bound, so the witness is neither confirmed nor refuted.
+  ##     `feReplayCrashed`/`feReplayTimedOut` hint (`confirmedEnding`). No
+  ##     `diagnostics`: every other finding is either a candidate nobody
+  ##     confirmed or a clean one an unplaced decline suppressed
+  ##     (`decideVerdict`'s `reachUnknown`, RFC-0005 S9).
+  ##   * any other -- stays `sxUnknown` (a refuted candidate too, by rule 4:
+  ##     the enlarged program reaches the target; never `sxUnsat`), with the
+  ##     replay's hint (`candidateHint`): none for `roInconclusive`.
+  ## Either way the replay's run-dependence joins the verdict's (WA-7).
   ## Private (the only candidate -> verdict constructor); see the section
   ## comment.
   result = raw
-  case outcome
-  of roInconclusive: discard
-  of roCrashed:   # RFC-0005 S8ct
-    result.errors.add SymexErrorInfo(kind: feReplayCrashed, severity: sevHint,
-      msg: "replay of a " & $c.status & " candidate (" &
-           (if c.status == sxRaised: "raise " & c.raisedTypeId
-            else: "target hit") &
-           ") ended its process before reaching the target: " &
-           lastReplayDetail() &
-           (if input.len > 0: ", on the input " & input else: "") &
-           ". The real fn crashes on that input; this says nothing of the " &
-           "target on any other; neither confirmed nor refuted " &
-           "(feReplayCrashed)")
-  of roDeclined:   # RFC-0005 S8ct
-    result.errors.add SymexErrorInfo(kind: feReplayDeclined, severity: sevHint,
-      msg: "replay of a " & $c.status & " candidate (" &
-           (if c.status == sxRaised: "raise " & c.raisedTypeId
-            else: "target hit") &
-           ") did not run: " & lastReplayDetail() & " (feReplayDeclined)")
-  of roTimedOut:
-    result.errors.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
-      msg: "replay of a " & $c.status & " candidate (" &
-           (if c.status == sxRaised: "raise " & c.raisedTypeId
-            else: "target hit") &
-           ") was killed: the real fn ran past replayTimeoutMs on the " &
-           "solver's witness -- it may not terminate there, or is only " &
-           "slow; neither confirmed nor refuted (feReplayTimedOut)")
-  of roRefuted:
-    result.errors.add SymexErrorInfo(kind: feReplayRefuted, severity: sevHint,
-      msg: "replay refuted a " & $c.status & " candidate (" &
-           (if c.status == sxRaised: "raise " & c.raisedTypeId
-            else: "target hit") &
-           "): the real fn ran on the solver's witness without reaching " &
-           "the target -- a confirmed model gap on a scSpurious path " &
-           "(feReplayRefuted)")
-  of roConfirmed:
-    case c.status
-    of sxSat:
-      result = RawResult(status: sxSat, witness: c.input)
-    of sxRaised:
-      result = RawResult(status: sxRaised, raisedTypeId: c.raisedTypeId,
-                         isDefect: c.isDefect, raisedMsg: c.raisedMsg,
-                         raisedWitness: c.input)
-    of sxUnsat, sxUnknown:
-      return raw    ## not a claim; `toCandidate` never builds one
-    result.abstractions = raw.abstractions
-    result.obligations  = raw.obligations
-    result.callStats    = raw.callStats
-    var unsafe = false
-    let ended = confirmedEnding(c.status, c.raisedTypeId, input, unsafe)
-    result.errors       = raw.errors & c.errors & ended   # RFC-0005 0.9.1 WA-2
-    # RFC-0005 S11: the claim's soundness -- its own path, the run's
-    # coordinate (re-derived: the candidate's extraction errors are now part
-    # of this result's error list), and the replay that confirmed it.
-    result.soundness    = Soundness(pathTaint: c.pathTaint,
-                                    runTaint: runTaintOf(result.errors),
-                                    replay: rsConfirmed,
-                                    witnessUnsafe: unsafe)
-    result.bounds       = raw.bounds
-    result.candidates   = raw.candidates
-    result.annotationViolations = raw.annotationViolations   # RFC-0005 S8
+  if replayed.outcome != roConfirmed:
+    result.errors.add candidateHint(replayed, c.status, c.raisedTypeId, input)
+    result.soundness.runDependence.incl replayed.runDependence
+    return
+  case c.status
+  of sxSat:
+    result = RawResult(status: sxSat, witness: c.input)
+  of sxRaised:
+    result = RawResult(status: sxRaised, raisedTypeId: c.raisedTypeId,
+                       isDefect: c.isDefect, raisedMsg: c.raisedMsg,
+                       raisedWitness: c.input)
+  of sxUnsat, sxUnknown:
+    return raw    ## not a claim; `toCandidate` never builds one
+  result.abstractions = raw.abstractions
+  result.obligations  = raw.obligations
+  result.callStats    = raw.callStats
+  var unsafe = false
+  let ended = confirmedEnding(replayed, c.status, c.raisedTypeId, input, unsafe)
+  result.errors       = raw.errors & c.errors & ended   # RFC-0005 0.9.1 WA-2
+  # RFC-0005 S11: the claim's soundness -- its own path, the run's
+  # coordinate (re-derived: the candidate's extraction errors are now part
+  # of this result's error list), and the replay that confirmed it.
+  result.soundness    = Soundness(pathTaint: c.pathTaint,
+                                  runTaint: runTaintOf(result.errors),
+                                  replay: replayed.replayStatus,
+                                  witnessUnsafe: unsafe,
+                                  runDependence: raw.soundness.runDependence +
+                                                 replayed.runDependence)
+  result.bounds       = raw.bounds
+  result.candidates   = raw.candidates
+  result.annotationViolations = raw.annotationViolations   # RFC-0005 S8
 
 func winnerLossy(raw: RawResult; staticLossy: bool): bool =
   ## RFC-0005 0.9.1 (WA-9). A clean winner (rules 1-2 decided `sxSat` or
@@ -3380,50 +3270,24 @@ proc winnerCandidate(raw: RawResult): SatCandidate =
 func rawClaimText(raw: RawResult): string =
   claimText(raw.status, (if raw.status == sxRaised: raw.raisedTypeId else: ""))
 
-const lossyWhy = "its witness is lossy (a rendered value is not the " &
-  "solver's model: a substituted float or integer, feExtractionFailed, or a " &
-  "ref cell, variant or seq field the render cannot reproduce)"
-
-proc settleWinner(raw: RawResult; outcome: ReplayOutcome;
+proc settleWinner(raw: RawResult; replayed: ReplayResult;
                   input: string): RawResult =
   ## RFC-0005 0.9.1 (WA-9). Applies the replay of a lossy clean winner's
   ## witness. The status stands either way: the clean path reaches the
   ## target. `roConfirmed` makes it `rsConfirmed` (with WA-2's ending); any
   ## other outcome leaves it `rsUnconfirmed`, not `trusted()`, with a hint
-  ## saying why.
+  ## saying why (`winnerHint`). The replay's run-dependence joins the
+  ## verdict's (WA-7).
   result = raw
-  let claim = rawClaimText(raw)
-  if outcome == roConfirmed:
+  result.soundness.replay = replayed.replayStatus
+  result.soundness.runDependence.incl replayed.runDependence
+  if replayed.outcome == roConfirmed:
     var unsafe = false
     let tid = if raw.status == sxRaised: raw.raisedTypeId else: ""
-    result.errors.add confirmedEnding(raw.status, tid, input, unsafe)
-    result.soundness.replay = rsConfirmed
+    result.errors.add confirmedEnding(replayed, raw.status, tid, input, unsafe)
     result.soundness.witnessUnsafe = unsafe
-    return
-  result.soundness.replay = rsUnconfirmed
-  let (kind, why) =
-    case outcome
-    of roRefuted:
-      (feReplayRefuted, "the real fn ran on it without reaching the target")
-    of roTimedOut:
-      (feReplayTimedOut, "the real fn ran past replayTimeoutMs on it and " &
-                         "was killed")
-    of roCrashed:
-      (feReplayCrashed, "the real fn ended its process before reaching the " &
-                        "target: " & lastReplayDetail() &
-                        (if input.len > 0: ", on the input " & input else: ""))
-    of roDeclined:
-      (feReplayDeclined, "it did not run: " & lastReplayDetail())
-    of roInconclusive, roConfirmed:
-      (feReplayDeclined, "replay did not decide it: the real fn ran without " &
-                         "reaching the target on a render that is not the " &
-                         "model, or it was not run (a witness shape or " &
-                         "target replay does not run, a nil dereference on " &
-                         "the path, or --panics:on)")
-  result.errors.add SymexErrorInfo(kind: kind, severity: sevHint,
-    msg: "the clean winner, " & claim & ", reaches the target, but " &
-         lossyWhy & ", and its replay did not confirm it: " & why &
-         ". Not trusted (rsUnconfirmed) (" & $kind & ")")
+  else:
+    result.errors.add winnerHint(replayed, rawClaimText(raw), input)
 
 proc markLossyWinnerUnreplayed(raw: RawResult; staticLossy: bool): RawResult =
   ## RFC-0005 0.9.1 (WA-9). `SymexSettings.replay = false`: a lossy clean
@@ -3431,11 +3295,7 @@ proc markLossyWinnerUnreplayed(raw: RawResult; staticLossy: bool): RawResult =
   result = raw
   if winnerLossy(raw, staticLossy):
     result.soundness.replay = rsUnconfirmed
-    result.errors.add SymexErrorInfo(kind: feReplayDeclined, severity: sevHint,
-      msg: "the clean winner, " & rawClaimText(raw) &
-           ", reaches the target, but " & lossyWhy & ", and replay is off " &
-           "(SymexSettings.replay = false), so nothing confirmed it. Not " &
-           "trusted (rsUnconfirmed) (feReplayDeclined)")
+    result.errors.add winnerUnreplayedHint(rawClaimText(raw))
 
 proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
                           prog, target, settings: NimNode;
@@ -3456,14 +3316,16 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   ##
   ## Settles an `sxUnknown` (rules 1-2 already produced any clean
   ## verdict; `sxUnsat` has no candidates), and (RFC-0005 0.9.1, WA-9) a clean
-  ## winner with a lossy witness (`winnerLossy`, `settleWinner`). Resets
-  ## `replayRunDependent` first (WA-7). For each candidate, in
+  ## winner with a lossy witness (`winnerLossy`, `settleWinner`). For each
+  ## candidate, in
   ## discovery order, `sxSat` claims first: renders its model through the
   ## same `emitTyAndReader` readers the verdict uses, replays it
   ## (`emitReplayWitness`) against the search target (an `sxSat` claim) or
   ## `tRaisedExn(<its raised type>)` (an `sxRaised` claim -- the claim that
-  ## exact type escapes `fn`), and folds the outcome in with
-  ## `settleCandidate`; stops at the first confirmation.
+  ## exact type escapes `fn`), and hands the `ReplayResult` it returns to
+  ## `settleCandidate`; stops at the first confirmation. Nothing about a
+  ## replay is read off the thread (review R1-06): what the settle and a
+  ## later save need of it, the run-dependence included, is on the value.
   let rawId     = genSym(nskLet, "rawPreReplay")
   let runCall = quote do:
     runSymex(`prog`, `target`, `settings`)
@@ -3471,11 +3333,8 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   let staticLossy = newLit(paramsFidelity(params) == wfLossy)
   if not replayOn:
     let markSym = bindSym"markLossyWinnerUnreplayed"
-    let resetSym = bindSym"resetReplayRunDependence"
     return quote do:
-      block:
-        `resetSym`()
-        `markSym`(`runCall`, `staticLossy`)
+      `markSym`(`runCall`, `staticLossy`)
   let witId  = genSym(nskLet, "candRawWit")
   let (tupleTy, witnessTup) = emitWitnessTuple(params, witId)
   let settledId = genSym(nskVar, "settled")
@@ -3483,14 +3342,13 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   let candId    = genSym(nskForVar, "cand")
   let claimId   = genSym(nskForVar, "claim")
   let typedId   = genSym(nskLet, "candWitness")
-  let outcomeId = genSym(nskLet, "replayOutcome")
+  let replayedId = genSym(nskLet, "replayed")
   let replayTgt = genSym(nskLet, "replayTarget")
   let inputSym  = bindSym"candidateInput"
   let settleSym = bindSym"settleCandidate"
   let winnerSettleSym = bindSym"settleWinner"
   let lossyWinSym = bindSym"winnerLossy"
   let winnerCandSym = bindSym"winnerCandidate"
-  let resetSym = bindSym"resetReplayRunDependence"
   let lossyWinId = genSym(nskLet, "lossyWinner")
   let jobsId = genSym(nskLet, "replayJobs")
   # A zero-param `fn` has the empty tuple `()` as its witness, which is a
@@ -3526,7 +3384,6 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
     child)
   result = quote do:
     block:
-      `resetSym`()   # RFC-0005 0.9.1 (WA-7)
       let `rawId` = `runCall`
       var `settledId` = `rawId`
       # RFC-0005 0.9.1 (WA-9): a lossy clean winner is the pass's one job.
@@ -3546,13 +3403,13 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
                 else: tRaisedExn(`candId`.raisedTypeId)
               let `witId` {.used.} = `inputSym`(`candId`)
               `typedDecl`
-              let `outcomeId` = `replay`
+              let `replayedId` = `replay`
               let shown = (when compiles($`typedId`): $`typedId` else: "")
               `settledId` =
                 if `lossyWinId`:
-                  `winnerSettleSym`(`settledId`, `outcomeId`, shown)
-                else: `settleSym`(`settledId`, `candId`, `outcomeId`, shown)
-              if `outcomeId` == roConfirmed: break replayPass
+                  `winnerSettleSym`(`settledId`, `replayedId`, shown)
+                else: `settleSym`(`settledId`, `candId`, `replayedId`, shown)
+              if `replayedId`.outcome == roConfirmed: break replayPass
       `settledId`
 
 # ---- The driver macro -------------------------------------------------------

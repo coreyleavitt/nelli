@@ -44,7 +44,7 @@ template replays(fn: typed, lbl: string) =
   block:
     let r = verdict(fn, lbl, sxSat)
     if r.status == sxSat:
-      check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
+      check replayWitness(fn, r.witness, tLabel(lbl), {}).outcome == roConfirmed
 
 var gArr: array[3, int]
 var gArr32: array[3, int32]

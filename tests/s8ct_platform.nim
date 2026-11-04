@@ -12,13 +12,13 @@ export replayForks, replayReexecs
 
 const notMarshallable* = "replay not marshallable"
 
-proc replayedOrNotMarshallable*(got, want: ReplayOutcome): bool =
+proc replayedOrNotMarshallable*(got: ReplayResult; want: ReplayOutcome): bool =
   ## `got` is `want`, or (re-exec only) a decline naming why it did not run.
-  if got == want: return true
+  if got.outcome == want: return true
   when replayReexecs:
-    let why = lastReplayDetail()
+    let why = got.detail
     checkpoint "declined: " & why
-    got == roDeclined and notMarshallable in why
+    got.outcome == roDeclined and notMarshallable in why
   else:
     false
 

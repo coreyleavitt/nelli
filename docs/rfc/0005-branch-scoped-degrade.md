@@ -9,6 +9,7 @@ profile = "rfc-flow@3"
 size = "l"
 value = "high"
 
+review = "pending"
 [[item]]
 id    = "i1"
 title = "Round-2 cost: keep full scope (SAT replay half) in one RFC? Conditional on S0b's measured payoff"

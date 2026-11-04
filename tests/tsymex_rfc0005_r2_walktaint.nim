@@ -13,6 +13,17 @@
 ##        exit channel (`returnedPaths`, a loop's `breakPaths` and
 ##        `continuePaths`).
 ##
+## Review R3 (T1): R2 found a statement's exit entries by per-channel length
+## marks. Handler bodies are walked with the handler stack cut back to the
+## matched try, so an inner try in one has that try's depth and claimed every
+## `caught` entry there, older ones included: the channel shrank under its
+## mark and the new entry landed below it, unstamped. The same claim walked
+## the earlier catch's continuation through the rest of the arm a second
+## time (the source row: a false `sxSat`). Entries now carry the serial they
+## were parked at (`parkExit`); a statement stamps, and a try claims, only
+## what was parked after it began. The writer pin keeps every channel append
+## on `parkExit` and every channel appended to in `exitEntries`.
+##
 ## The shapes the finding named do not reach the hole from source: a closure
 ## body is walked with the calling expression's queue set aside
 ## (`takePendingLowerEffects`), and a named callee after its arguments are
@@ -20,7 +31,7 @@
 ## a queue it does not own, as an arm that walks a child before draining
 ## would. Each source row runs the routine natively (`native`) beside the
 ## walk's verdict.
-import std/[unittest, strutils]
+import std/[unittest, strutils, os, sets]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
@@ -100,6 +111,20 @@ proc loopContinue(b: byte) =
     if b > 3: continue
   if r == 5: symexTarget("hit")
 
+# T1's shape: two raises caught by one try in separate statements, its
+# handler holding an inner try. Each path runs the handler once: `x` is 1.
+proc handlerInnerTry(b: byte) =
+  var x = 0
+  var y = 0
+  try:
+    if b > 3: raise newException(ValueError, "a")
+    raise newException(ValueError, "b")
+  except ValueError:
+    try: inc y
+    except CatchableError: discard
+    inc x
+  if x == 2: symexTarget("hit")
+
 # Controls: the same shapes over a value the walk knows.
 proc closureKnown(b: byte) =
   let f = proc(x: int): int = return 1
@@ -128,19 +153,69 @@ template tainted(fn: untyped; tgt: SymexTarget) =
 suite "R2 SD1/SD2: lowering taint survives a nested walk and its exits":
 
   test "walker version floor":
-    check parseInt(symexWalkerVersion) >= 270
+    check parseInt(symexWalkerVersion) >= 271
 
   test "SD1: a nested walk keeps the caller's queue; its break path carries it":
-    let probe = rfc0005R2WalkTaintProbe()
+    let probe = stmtExitTaintProbe()
     check probe.resultLen == 0
     check probe.pendingAfter == {scSpurious}   # was {}: the caller's, cleared
     check probe.breakTaint == {scSpurious}     # was {}: the stamp landed nowhere
 
   test "SD2: a statement's stray taint reaches every exit channel":
-    let probe = rfc0005R2WalkTaintProbe()
+    let probe = stmtExitTaintProbe()
     check probe.channelTaints.len == 9
     for t in probe.channelTaints: check t == {scSpurious}
     check probe.priorTaint == {}
+
+  test "T1: an inner try in a handler body does not hide the new caught entry":
+    let probe = stmtExitTaintProbe()
+    check probe.caughtTaints.len == 2
+    check {scSpurious} in probe.caughtTaints   # was {} for the new entry
+    # The earlier catch's entry stands outside the statement: the inner try
+    # no longer claims and re-parks it.
+    check {} in probe.caughtTaints
+
+  test "every exit-channel append parks through parkExit, on a listed channel":
+    let src = readFile(currentSourcePath.parentDir() / ".." / "src" / "nelli" /
+                       "smt" / "runtime.nim")
+    var listed, parked: HashSet[string]
+    var inIter = false
+    var bare: seq[string]
+    for raw in src.splitLines():
+      if raw.startsWith("iterator exitEntries("): inIter = true; continue
+      if inIter:
+        if raw.len > 0 and raw[0] != ' ': inIter = false
+        else:
+          let ix = raw.find(".mitems")
+          if ix > 0 and "yield" in raw:
+            var j = ix
+            while j > 0 and raw[j - 1] in IdentChars: dec j
+            listed.incl raw[j ..< ix]
+          continue
+      let t = raw.strip()
+      if t.startsWith("#"): continue
+      let ax = t.find(".add ")
+      if ax <= 0: continue
+      var j = ax
+      while j > 0 and t[j - 1] in IdentChars: dec j
+      let chan = t[j ..< ax]
+      if "parkExit(" in t: parked.incl chan
+      else: bare.add t
+    check listed.len == 9
+    checkpoint "parked on unlisted channels: " & $(parked - listed)
+    check parked == listed
+    var unparked: seq[string]
+    for t in bare:
+      for c in listed:
+        if t.contains("." & c & ".add ") or t.startsWith(c & ".add "):
+          unparked.add t
+    checkpoint "appends that skip parkExit: " & $unparked
+    check unparked.len == 0
+
+  test "T1 source shape: a handler's inner try leaves earlier catches alone":
+    check native(handlerInnerTry(4)) == "ran"
+    check native(handlerInnerTry(2)) == "ran"
+    decides(handlerInnerTry, sxUnsat)
 
   test "closure body leaving through return (the finding)":
     check native(closureReturn(4)) == "ran"

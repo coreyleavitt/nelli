@@ -223,7 +223,25 @@ const renderAsChoicesVersion* = "12"
   ##   `parseOrderedArgs` (`nimArgTemps`), and a deleted inert
   ##   `{.symexTransparent.}` call binds each computed argument to a sink `let`.
 
-const symexWalkerVersion* = "268"
+const symexWalkerVersion* = "269"
+  ## RFC-0005 code review, round 1 fixes for 0.9.1 (269), on 268:
+  ## - R1-01: an `elif` condition's preamble (a bounds fork, a hoisted call)
+  ##   runs only on the path that tests that condition, not ahead of the whole
+  ##   `if` (statement, value-position and iterator-body forms). Preamble-free
+  ##   chains lower to the same IR.
+  ## - R1-02: `succ`/`pred` fork `OverflowDefect` at the operand's base-type
+  ##   bounds; `inc`/`dec` (and `+=`/`-=` on a range) at the variable's own
+  ##   type, where they raised `RangeDefect` before, which native contradicts.
+  ## - R1-04: a variant constructor's plain fields and a `Table` key lower on
+  ##   the path they bind, and each statement owns the pending lowering taint,
+  ##   so a degrade can no longer leave the path that produced it clean.
+  ## - R1-13: a dropped variant field write is `feUnsupportedOp`.
+  ## - R1-03, R1-05, R1-22: the regex reader models PCRE's nesting limit
+  ##   exactly and declines a pattern near its size limits.
+  ## - R1-07: run-dependence travels on `Soundness.runDependence`; the cache
+  ##   metadata gains an optional sixth field.
+  ##
+  ## Earlier:
   ## RFC-0005 0.9.1 wiring, merged (268): W1 (265), W2 (266) and W3 (267)
   ## stacked on 264. Each slice's change is described below.
   ##

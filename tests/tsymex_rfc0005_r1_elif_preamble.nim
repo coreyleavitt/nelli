@@ -18,7 +18,7 @@
 ## preamble for `c2` is `if c1: A else: (pre2; if c2: B else: C)`.
 ##
 ## Each row runs the routine natively beside the walk's verdict.
-import std/unittest
+import std/[unittest, strutils]
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -77,6 +77,9 @@ proc laterRealIdxElse(s: seq[int], i: int) =
   else: symexTarget("hit")
 
 suite "R1-01: an elif condition's preamble runs only when it is reached":
+
+  test "the walker version carries the round 1 fixes":
+    check parseInt(symexWalkerVersion) >= 269
 
   test "statement if: the bounds fork follows the first condition":
     check native(stmtIdx(@[], 0)) == "hit"

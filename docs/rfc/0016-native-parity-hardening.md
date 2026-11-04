@@ -505,7 +505,7 @@ name what moves and what stays.
 | CRH-01 | Compile stop on a `sort` callback: `s.sort(proc ...)` | sort S13 | compile stop on both; runs natively (`p_havoc2 a15`). S8cu is collecting both columns again; if it confirms SAME, it stays here | |
 | CRH-02 | Compile stop on `create` and `GC_ref` | sort S12 | compile stop on both at e497dcf; S8cl turned both into declines at batch 10. Confirm at the tag head; models are PRC-18, PRC-20 | |
 | CRH-03 | A ref-local merge runs out of memory and is killed | S8ct | an OOM kill that matches `main`; earlier measured as a 250 s merge, and a silent exit at 300 merges under audit. Bound it to a decline within budget | |
-| CRH-04 | A regex literal of 2600 nested groups | S8ct | assigned here by the coordinator (2026-11-02); bound the parser's recursion and decline | |
+| CRH-04 | A regex literal of 2600 nested groups | S8ct | assigned here by the coordinator (2026-11-02); bound the parser's recursion and decline | fixed in 0.9.1 (RFC-0005 review R1-22): the reader stops at PCRE's nesting limit and raises `RegexError` as `re()` does; `tsymex_rfc0005_r1_pcrelimits` |
 | CRH-05 | A pointer plus 11 Table inserts ran past 1400 s | S8cn | liveness; the pin uses one insert | |
 
 Two latent crashes are not settled and sit in §5.7: the `byteLeafIds`

@@ -1701,5 +1701,12 @@ task test, "Run the test suite":
             # RFC-0005 0.9.1 wiring slice W2 -- the replay settle and the
             # verdict cache (WA-2, WA-7, WA-8, WA-9). Walker 264->266.
             "tsymex_rfc0005_w2_settle",
-            "tsymex_rfc0005_w2_settle_reexec"]:
+            "tsymex_rfc0005_w2_settle_reexec",
+            # RFC-0005 code review round 1 (0.9.1). Walker 268->269.
+            "tsymex_rfc0005_r1_elif_preamble",
+            "tsymex_rfc0005_r1_succ_pred",
+            "tsymex_rfc0005_r1_lowertaint",
+            "tsymex_rfc0005_r1_variantset",
+            "tsymex_rfc0005_r1_pcrelimits",
+            "tsymex_rfc0005_r1_rundependence"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

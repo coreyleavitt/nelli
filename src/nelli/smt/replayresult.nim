@@ -162,14 +162,13 @@ func claimText*(status: SymexStatusKind; raisedTypeId: string): string =
                           else: "claim (target hit") & ")"
 
 func confirmedEnding*(r: ReplayResult; status: SymexStatusKind;
-                      raisedTypeId: string; input: string;
-                      unsafe: var bool): seq[SymexErrorInfo] =
+                      raisedTypeId: string; input: string): seq[SymexErrorInfo] =
   ## RFC-0005 0.9.1 (WA-2). A confirming replay's child reached the target; this
   ## is how it ended afterwards. A target reached is reached (§5a), so the
   ## verdict stands; but a child that did not finish (`quit`, a raw `exit`, a
   ## signal, the bound) says the witness ends or hangs whatever runs it, so
-  ## the claim carries `Soundness.witnessUnsafe` and a hint saying how.
-  unsafe = r.endsChild
+  ## the claim carries `Soundness.witnessUnsafe` (`endsChild`, which the
+  ## settle reads) and the hint this returns, saying how.
   case r.child.ending
   of reFinished, reRefused:
     discard

@@ -3250,8 +3250,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   result.abstractions = raw.abstractions
   result.obligations  = raw.obligations
   result.callStats    = raw.callStats
-  var unsafe = false
-  let ended = confirmedEnding(replayed, c.status, c.raisedTypeId, input, unsafe)
+  let ended = confirmedEnding(replayed, c.status, c.raisedTypeId, input)
   result.errors       = raw.errors & c.errors & ended   # RFC-0005 0.9.1 WA-2
   # RFC-0005 S11: the claim's soundness -- its own path, the run's
   # coordinate (re-derived: the candidate's extraction errors are now part
@@ -3259,7 +3258,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   result.soundness    = Soundness(pathTaint: c.pathTaint,
                                   runTaint: runTaintOf(result.errors),
                                   replay: replayed.replayStatus,
-                                  witnessUnsafe: unsafe,
+                                  witnessUnsafe: replayed.endsChild,
                                   runDependence: raw.soundness.runDependence +
                                                  replayed.runDependence)
   result.bounds       = raw.bounds
@@ -3318,9 +3317,8 @@ proc settleWinner(raw: RawResult; replayed: ReplayResult;
   # run in the host, confirmed or not, as a typed fact the cache stores.
   result.soundness.witnessUnsafe = replayed.endsChild
   if replayed.outcome == roConfirmed:
-    var unsafe = false
     let tid = if raw.status == sxRaised: raw.raisedTypeId else: ""
-    result.errors.add confirmedEnding(replayed, raw.status, tid, input, unsafe)
+    result.errors.add confirmedEnding(replayed, raw.status, tid, input)
   else:
     result.errors.add winnerHint(replayed, rawClaimText(raw), input)
 

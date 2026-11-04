@@ -704,22 +704,15 @@ through to the next suffix, and on full miss `runSymex`
 re-derives. The correct verdict overwrites the corrupted slot
 on next save. No crash, no false hit.
 
-### Stale-sink note
+### Stale-sink note (retired)
 
-`recordSymexFinding` deposits into a per-thread sink threadvar
-that `consumeSymexFindings()` drains. The sink **survives across
-`symexFindAllWitnesses` invocations**. Callers wrapping symex
-calls in a retry loop should drain the sink between calls:
-
-```nim
-for attempt in 1 .. retries:
-  discard consumeSymexFindings()   # clear stale state
-  let report = symexForAll(s, fn, db)
-  ...
-```
-
-This is a pre-existing Phase 12 property, not new in Phase 13;
-documented here for completeness.
+Through 0.9.0, `recordSymexFinding` deposited into a per-thread sink
+that only `symexForAll` drained, so findings from an earlier call on
+the thread (an `assertCoveredBy`, a bare `symexFindAllWitnesses`)
+leaked into a later `symexForAll`'s report. Review R1-10 removed the
+sink: `assertCoveredBy` returns its finding (or carries it on its
+`SymexCoverageDefect`), `symexFindAllWitnesses` returns its findings,
+and a report holds only its own run's. No draining is needed.
 
 ### Settings-mutation gotcha
 

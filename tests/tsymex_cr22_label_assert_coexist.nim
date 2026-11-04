@@ -38,7 +38,6 @@ suite "CR-22 regression — symexTarget label + doAssert coexistence":
     ## Before the fix, `parseStmtInner` replaced the entire StmtList with the
     ## assert-raise IR, causing irCollectLabels to find zero labels and
     ## symexFindAllWitnesses to return no sfSat finding.
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(withLabelAndAssert, db)
     let satFindings = findings.filterIt(
@@ -48,7 +47,6 @@ suite "CR-22 regression — symexTarget label + doAssert coexistence":
   test "doAssert still raises sfRaised(AssertionDefect) alongside the label":
     ## The assert-raise IR for the doAssert must be preserved as a sibling,
     ## not lost.  The walker must still surface sxRaised{AssertionDefect}.
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(withLabelAndAssert, db)
     let raisedFindings = findings.filterIt(
@@ -63,7 +61,6 @@ suite "CR-22 regression — symexTarget label + doAssert coexistence":
   test "standalone doAssert (no label): sfRaised still produced — E6 baseline":
     ## Guard: the scoped fix must not break the simple E6 case where the
     ## entire proc body IS the doAssert expansion and nothing else.
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(standaloneAssert, db)
     let raised = findings.filterIt(

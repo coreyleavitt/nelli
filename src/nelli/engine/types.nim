@@ -250,11 +250,12 @@ type
       ## run (union of per-example bitmaps). `0` when
       ## `Settings.coverageGuided` was off. #107.
     symexFindings*: seq[SymexFinding]
-      ## Symex-derived evidence accumulated during the run. Populated
-      ## by `assertCoveredBy` calls made inside the property (via the
-      ## thread-local sink in `nelli/symex`) plus any
-      ## `withSymexSeeds`-injected seeds. Empty when symex wasn't
-      ## used. Phase 7.
+      ## Symex-derived evidence of THIS run: `symexForAll`'s per-target
+      ## findings, then the `sfNotApplicable` audit entries its seed phase
+      ## records for seeds that did not fit. Empty when symex wasn't used.
+      ## Phase 7. Review R1-10: findings ride values, never a thread-local
+      ## sink, so another call's findings cannot leak in (`assertCoveredBy`
+      ## returns its own).
     crash*: Option[CrashInfo]
       ## RFC-fuzzer-nextgen U0: typed crash identity when the falsifying
       ## example was a caught property `Defect` (failed `doAssert`,
@@ -280,32 +281,14 @@ func defaultSettings*(): Settings =
   ## release that already changes the behaviour of every partial literal.
   Settings()
 
-# ---- SymexFinding sink (Phase 7 surface, relocated in Phase 12 cycle 1) -----
-#
-# `assertCoveredBy` (Phase 7) and `symexSeedPhase` (Phase 12) deposit
-# a `SymexFinding` here. The engine's terminal phase drains via
-# `consumeSymexFindings()` into `Report.symexFindings`. Lives in
-# `engine/types.nim` so phase modules can record findings without
-# importing `nelli/symex` (which would pull in the entire z3 +
-# SMT stack). `symex.nim` re-exports these for backward compat.
-
-var symexFindings* {.threadvar.}: seq[SymexFinding]
-
-proc recordSymexFinding*(f: SymexFinding) =
-  symexFindings.add f
-
-proc consumeSymexFindings*(): seq[SymexFinding] =
-  result = symexFindings
-  symexFindings.setLen(0)
-
 # ---- engineSymexDbErrors sink (Phase 14 cycle C2) ---------------------------
 #
 # Layer 1's `symexFindAllWitnesses` macro currently routes DB save/
 # load errors into a local `errors` accumulator, but the engine
 # layer's `Report.dbErrors` (the user-visible surface) never
-# receives them. C2 adds a thread-local sink mirroring
-# `symexFindings`: Layer 1 deposits, `finalizePhase` drains via
-# `consumeSymexDbErrors()` and appends to `Report.dbErrors`.
+# receives them. C2 adds a thread-local sink: Layer 1 deposits,
+# `finalizePhase` drains via `consumeSymexDbErrors()` and appends to
+# `Report.dbErrors`.
 
 var engineSymexDbErrors* {.threadvar.}: seq[string]
 

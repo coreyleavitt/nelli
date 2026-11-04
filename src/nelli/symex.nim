@@ -202,15 +202,12 @@ export symexMarkers.SymexCaptureCtx,
        symexMarkers.symexAssert,
        symexMarkers.symexAssume
 
-# ---- SymexFinding sink (relocated to engine/types in Phase 12 cycle 1) ------
-#
-# The threadvar + recordSymexFinding + consumeSymexFindings live in
-# `engine/types.nim` so phase modules can record findings without a
-# circular import into the full symex+z3 stack. They're re-exported
-# below for callers that imported them from `nelli/symex`.
-export engineTypes.symexFindings,
-       engineTypes.recordSymexFinding,
-       engineTypes.consumeSymexFindings
+# Review R1-10: the thread-local `SymexFinding` sink (`recordSymexFinding` /
+# `consumeSymexFindings`) is gone. Only `symexForAll` drained it, so findings
+# from an earlier call on the thread leaked into its report. A finding now
+# belongs to the call that made it: `assertCoveredBy` returns it (or carries
+# it on its `SymexCoverageDefect`), `symexFindAllWitnesses` returns them, and
+# a run's report holds its own.
 
 proc describeTarget*(t: SymexTarget): string =
   case t.kind
@@ -460,6 +457,70 @@ proc findingDiagnostics[T](ds: seq[DefectFinding[T]]): seq[FindingDiagnostic] =
     result.add FindingDiagnostic(raisedTypeId: d.raisedTypeId,
                                  isDefect: d.isDefect, raisedMsg: d.raisedMsg.get(""),
                                  witnessChoices: renderAsChoices(d.witness))
+
+# ---- Review R1-10 / R1-15: what a consumer may do with a witness -----------
+
+const replayEndedKinds = {feReplayCrashed, feReplayTimedOut}
+  ## A replay of this run ended or hung its child before it could confirm.
+
+func hostRunnable(trustedClaim: bool; s: Soundness;
+                  errors: openArray[SymexErrorInfo]): bool =
+  ## Review R1-15. Whether a consumer may run a claim's witness in its own
+  ## process. Never one whose confirming replay ended its child after the
+  ## target (`witnessUnsafe`, WA-2). A trusted claim otherwise: the real `fn`
+  ## or the model reached the target on it. An untrusted one (`rsUnconfirmed`:
+  ## a lossy witness nothing confirmed) only when no replay of its run ended
+  ## or hung its child, since that replay may have been this witness's.
+  if s.witnessUnsafe: return false
+  if trustedClaim: return true
+  for e in errors:
+    if e.kind in replayEndedKinds: return false
+  true
+
+func hostRunnable*(f: SymexFinding): bool =
+  ## Review R1-15. `hostRunnable` for a finding: an `sfSat` / `sfRaised`
+  ## whose witness a consumer may run in its own process (`symexForAll`
+  ## seeds only these).
+  if f.status notin {sfSat, sfRaised}: return false
+  if f.soundness.witnessUnsafe: return false
+  if trusted(f): return true
+  for h in f.hints:
+    for k in replayEndedKinds:
+      if h.kind == $k: return false
+  true
+
+type
+  SymexCoverageDefect* = object of AssertionDefect
+    ## Review R1-10. What `assertCoveredBy` raises when coverage is not
+    ## proven, carrying the finding(s) the call made: a finding belongs to
+    ## the call that produced it, on failure as on success (it was a
+    ## thread-local sink that leaked into later callers).
+    findings*: seq[SymexFinding]
+
+proc coverageOutcome(f: SymexFinding; failure: string): SymexFinding
+                    {.discardable.} =
+  ## Review R1-10. The end of a single-target `assertCoveredBy`: its finding,
+  ## or a `SymexCoverageDefect` carrying it when `failure` says why coverage
+  ## is not proven.
+  if failure.len > 0:
+    var e = newException(SymexCoverageDefect, failure)
+    e.findings = @[f]
+    raise e
+  f
+
+proc coverageOutcomes(fs: seq[SymexFinding]; failures: seq[string];
+                      total: int): seq[SymexFinding] {.discardable.} =
+  ## Review R1-10. The end of a multi-target `assertCoveredBy`: every
+  ## target's finding, or one `SymexCoverageDefect` carrying them all.
+  if failures.len > 0:
+    var msg = "assertCoveredBy (multi): " & $failures.len &
+              " of " & $total & " targets uncovered:"
+    for f in failures:
+      msg.add "\n  - " & f
+    var e = newException(SymexCoverageDefect, msg)
+    e.findings = fs
+    raise e
+  fs
 
 # ---- RFC-0005 W1: the `:notes` record --------------------------------------
 #
@@ -1008,24 +1069,23 @@ macro symexForAll*(s: typed, fn: typed,
                                             `excludeTargets`)
       var seeds: seq[seq[ChoiceNode]] = @[]
       for f in findings:
-        # RFC-0005 S11 (§8.1 "the seed filter"): no `trusted()` test is
-        # needed here. Since S10 an sfSat finding is trusted by construction
-        # (a tainted candidate becomes sfSat only on `rsConfirmed`), and a
-        # seed is only an input -- the property itself judges it.
-        # RFC-0005 0.9.1 (WA-2): but a seed runs `prop` in this process, and
-        # a witness whose replay ended its child after the target
-        # (`witnessUnsafe`) would end or hang it. It is not seeded.
-        if f.status == sfSat and not f.soundness.witnessUnsafe:
+        # RFC-0005 S11 (§8.1 "the seed filter"). A seed is only an input --
+        # the property itself judges it -- so an untrusted sfSat is seeded
+        # too: since 0.9.1 (WA-9) that is a lossy witness no replay confirmed
+        # (`rsUnconfirmed`), which may or may not reach the target, and the
+        # finding's `trusted()` says which it is (review R1-15). But a seed
+        # runs `prop` in this process: a witness whose replay ended its child
+        # (`witnessUnsafe`, WA-2), or an unconfirmed one whose run had a
+        # replay end or hang, would end or hang it. `hostRunnable` refuses
+        # those.
+        if f.status == sfSat and hostRunnable(f):
           seeds.add f.witnessChoices
       var report = forAllWithSymexSeeds(seeds, `s`, `prop`,
                                          `forAllSettings`)
-      # Drain the sink — picks up Layer 1's deposits PLUS any
-      # sfNotApplicable findings symexSeedPhase deposited for
-      # shape-mismatched seeds during Layer 2 — into the Report
-      # so the audit trail flows back to the caller without a
-      # separate `consumeSymexFindings()` call.
-      for f in consumeSymexFindings():
-        report.symexFindings.add f
+      # Review R1-10: Layer 1's findings, then the sfNotApplicable entries
+      # the seed phase recorded on this run (already on `report`). Nothing
+      # from another call on the thread.
+      report.symexFindings = findings & report.symexFindings
       report
 
 
@@ -3776,9 +3836,15 @@ macro assertCoveredBy*(fn: typed,
                       ): untyped =
   ## Prove that `testFn`, invoked on the symex witness for `target`
   ## inside `fn`, actually exercises that target. Raises
-  ## `AssertionDefect` when symex found a witness (`sxSat`) but the
-  ## testFn run did not observe the target. UNSAT vacuously passes;
-  ## UNKNOWN raises (cycle 4 will gate this on a setting).
+  ## `SymexCoverageDefect` (an `AssertionDefect`) when symex found a
+  ## trusted witness (`sxSat` / `sxRaised`, `trusted()`) but the testFn
+  ## run did not observe the target. UNSAT vacuously passes; UNKNOWN
+  ## raises unless `acceptUnknownAsCovered`. An untrusted witness that
+  ## misses is reported as unconfirmed, the way UNKNOWN is, never as
+  ## testFn's failure (review R1-15).
+  ##
+  ## Returns the call's `SymexFinding` (discardable); on failure the
+  ## `SymexCoverageDefect` carries it in `findings` (review R1-10).
   ##
   ## `testFn` defaults to `fn` itself — the common shape where the
   ## same code under symex is the same code under random PBT.
@@ -3908,140 +3974,143 @@ macro assertCoveredBy*(fn: typed,
   # saw the target reached, which is the coverage this checks (an `sxSat`
   # claim is replayed against the search target). Otherwise nothing runs it,
   # and the check fails, saying why.
+  #
+  # Review R1-15. The arm reads `trusted()`, not `status` alone. A trusted
+  # claim's witness reaches the target in `fn`, so a `testFn` that does not
+  # reach it on that witness is to blame. An untrusted one (`rsUnconfirmed`: a
+  # lossy witness no replay confirmed) proves no witness exists: it is run
+  # (unless a replay of its run ended its child, `hostRunnable`), and a hit
+  # proves coverage, but a miss proves nothing about `testFn`. It is reported
+  # as unconfirmed, as an UNKNOWN is, and `acceptUnknownAsCovered` downgrades
+  # it the same way.
+  #
+  # Review R1-10. The finding is the call's own: returned (discardable), or
+  # carried by the `SymexCoverageDefect` the call raises.
   let sameFn = newLit(testFn.kind == nnkNilLit)
   let unsafeMsg = newLit("assertCoveredBy: the symex witness is known to " &
     "end or hang the process that runs it after reaching the target (its " &
     "replay's child did not finish); it is not run in this process, so " &
     "testFn's coverage of it is not checked")
+  let unconfirmedMsg = newLit("assertCoveredBy: symex claims " &
+    describeTarget(target) & " is reachable, but the claim is not trusted " &
+    "(its witness renders lossily and no replay of the real fn confirmed " &
+    "it), so no witness is known to reach the target. ")
+  let unconfirmedTail = newLit("Coverage is unconfirmed, and testFn is not " &
+    "blamed (set acceptUnknownAsCovered = true to downgrade)")
+  let runnableSym = bindSym"hostRunnable"
+  let outcomeSym = bindSym"coverageOutcome"
+  let trustedSym = bindSym"trusted"
+  # Shared by the arm bodies below and the block they are spliced into.
+  let rId = genSym(nskLet, "r")
+  let findingId = genSym(nskVar, "finding")
+  let failureId = genSym(nskVar, "failureMsg")
+  # One body for the two arms that carry a witness: `sxSat` (`r.witness`) and
+  # `sxRaised` (`r.raisedWitness`). `sameFnOk` says whether, with no `testFn`,
+  # an unsafe witness's replay already established the coverage: true for
+  # `sxSat` (replayed against this target), false for `sxRaised` (replayed
+  # against the raise).
+  let acceptUnknown = newLit(settings.acceptUnknownAsCovered)
+  proc claimArm(witField: NimNode; status: NimNode;
+                sameFnOk: bool): NimNode =
+    let unsafeCovers = newLit(sameFnOk)
+    quote do:
+      let `witId` = `witField`
+      let trustedClaim = `trustedSym`(`rId`)
+      let runIt = `runnableSym`(trustedClaim, `rId`.soundness, `rId`.errors)
+      symexCaptureBegin()
+      var `assertionRaisedId` = false
+      var `indexRaisedId` = false
+      var `fieldRaisedId` = false
+      var `anyRaisedId` = false   ## Phase 15 E2a: any exception raised
+      try:
+        if runIt:
+          `splatBlock`
+      except AssertionDefect:
+        `assertionRaisedId` = true
+        `anyRaisedId` = true
+      except IndexDefect:
+        `indexRaisedId` = true
+        `anyRaisedId` = true
+      except FieldDefect:
+        `fieldRaisedId` = true
+        `anyRaisedId` = true
+      except NilAccessDefect:                       ## Phase 15 R5
+        `anyRaisedId` = true
+      except CatchableError:
+        `anyRaisedId` = true
+      let `hitsId` = symexCaptureEnd()
+      let reached = runIt and `coveredExpr`
+      var covered = false
+      var failure = ""
+      if `rId`.soundness.witnessUnsafe:
+        if `sameFn` and `unsafeCovers`: covered = true
+        else: failure = `unsafeMsg`
+      elif reached:
+        covered = true
+      elif trustedClaim:
+        failure = `failMsg`
+      else:
+        if not `acceptUnknown`:
+          failure = `unconfirmedMsg` &
+            (if runIt: "Running it did not reach the target. "
+             else: "It was not run here: a replay of this run ended or " &
+                   "hung its process. ") & `unconfirmedTail`
+      `findingId` = SymexFinding(
+        targetDesc:     `targetDescLit`,
+        status:         `status`,
+        covered:        covered,
+        witnessChoices: renderAsChoices(`witId`),
+        z3Version:      z3FullVersion(),
+        soundness:      `rId`.soundness,              ## RFC-0005 S11
+        bounds:         `rId`.bounds,                 ## review R1-17
+        gaps:           `gapsSym`(`rId`.errors),
+        annotationViolations: `rId`.annotationViolations,
+        hints: `hintsSym`(`rId`.errors),                 ## RFC-0005 W1
+        diagnostics: `diagsSym`(`rId`.diagnostics))
+      `failureId` = failure
+  let satArm = claimArm(newDotExpr(rId, ident"witness"), bindSym"sfSat", true)
+  # Phase 16 D1a: defect targets (tAssertionViolation, tIndexError,
+  # tFieldDefect, tNilAccess) return sxRaised with a populated
+  # `raisedWitness` (the path-constrained witness that triggers the raise),
+  # replayed through testFn exactly as an `sxSat` witness is.
+  let raisedArm = claimArm(newDotExpr(rId, ident"raisedWitness"),
+                           bindSym"sfRaised", false)
   result = quote do:
     block:
-      let r = symexFind(`fn`, `targetExpr`, `settings`)
-      case r.status
+      let `rId` = symexFind(`fn`, `targetExpr`, `settings`)
+      var `findingId`: SymexFinding
+      var `failureId` = ""
+      case `rId`.status
       of sxSat:
-        let `witId` = r.witness
-        symexCaptureBegin()
-        var `assertionRaisedId` = false
-        var `indexRaisedId` = false
-        var `fieldRaisedId` = false
-        var `anyRaisedId` = false   ## Phase 15 E2a: any exception raised
-        var unsafeRefused {.used.} = false
-        try:
-          if r.soundness.witnessUnsafe:
-            when `sameFn`: discard
-            else: unsafeRefused = true
-          else:
-            `splatBlock`
-        except AssertionDefect:
-          `assertionRaisedId` = true
-          `anyRaisedId` = true
-        except IndexDefect:
-          `indexRaisedId` = true
-          `anyRaisedId` = true
-        except FieldDefect:
-          `fieldRaisedId` = true
-          `anyRaisedId` = true
-        except NilAccessDefect:                       ## Phase 15 R5
-          `anyRaisedId` = true
-        except CatchableError:
-          `anyRaisedId` = true
-        let `hitsId` = symexCaptureEnd()
-        let covered =
-          if r.soundness.witnessUnsafe: not unsafeRefused
-          else: `coveredExpr`
-        recordSymexFinding(SymexFinding(
-          targetDesc:     `targetDescLit`,
-          status:         sfSat,
-          covered:        covered,
-          witnessChoices: renderAsChoices(`witId`),
-          z3Version:      z3FullVersion(),
-          soundness:      r.soundness,              ## RFC-0005 S11
-          bounds:     r.bounds,                     ## review R1-17
-          gaps:           `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations,
-          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
-          diagnostics: `diagsSym`(r.diagnostics)))
-        if unsafeRefused:
-          raise newException(AssertionDefect, `unsafeMsg`)
-        if not covered:
-          raise newException(AssertionDefect, `failMsg`)
+        `satArm`
       of sxUnsat:
-        recordSymexFinding(SymexFinding(
+        `findingId` = SymexFinding(
           targetDesc: `targetDescLit`, status: sfUnsat, covered: true,
           z3Version:  z3FullVersion(),
-          soundness:  r.soundness,                  ## RFC-0005 S11
-          bounds:     r.bounds,                     ## review R1-17
-          gaps:       `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations,
-          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
-          diagnostics: `diagsSym`(r.diagnostics)))
-        discard  # vacuous pass
+          soundness:  `rId`.soundness,                  ## RFC-0005 S11
+          bounds:     `rId`.bounds,                     ## review R1-17
+          gaps:       `gapsSym`(`rId`.errors),
+          annotationViolations: `rId`.annotationViolations,
+          hints: `hintsSym`(`rId`.errors),                 ## RFC-0005 W1
+          diagnostics: `diagsSym`(`rId`.diagnostics))
+        # A vacuous pass.
       of sxUnknown:
-        recordSymexFinding(SymexFinding(
+        `findingId` = SymexFinding(
           targetDesc: `targetDescLit`, status: sfUnknown, covered: false,
           z3Version:  z3FullVersion(),
-          soundness:  r.soundness,                  ## RFC-0005 S11
-          bounds:     r.bounds,                     ## review R1-17
-          gaps:       `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations,
-          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
-          diagnostics: `diagsSym`(r.diagnostics)))
+          soundness:  `rId`.soundness,                  ## RFC-0005 S11
+          bounds:     `rId`.bounds,                     ## review R1-17
+          gaps:       `gapsSym`(`rId`.errors),
+          annotationViolations: `rId`.annotationViolations,
+          hints: `hintsSym`(`rId`.errors),                 ## RFC-0005 W1
+          diagnostics: `diagsSym`(`rId`.diagnostics))
         let s: SymexSettings = `settings`
         if not s.acceptUnknownAsCovered:
-          raise newException(AssertionDefect,
-            "assertCoveredBy: symex returned UNKNOWN; cannot prove " &
-            "coverage (set acceptUnknownAsCovered = true to downgrade)")
+          `failureId` = "assertCoveredBy: symex returned UNKNOWN; cannot " &
+            "prove coverage (set acceptUnknownAsCovered = true to downgrade)"
       of sxRaised:
-        # Phase 16 D1a: defect targets (tAssertionViolation, tIndexError,
-        # tFieldDefect, tNilAccess) now return sxRaised with a populated
-        # `raisedWitness` (the path-constrained witness that triggers the
-        # raise). Replay it through testFn — the same witness-replay logic
-        # as sxSat — to validate that testFn actually exercises the defect.
-        # Before D1a (E2a STRUCTURAL) no witness was available; the old
-        # comment "no witness-replay coverage check" no longer applies.
-        let `witId` = r.raisedWitness
-        symexCaptureBegin()
-        var `assertionRaisedId` = false
-        var `indexRaisedId` = false
-        var `fieldRaisedId` = false
-        var `anyRaisedId` = false
-        # RFC-0005 0.9.1 (WA-2): never splatted when known to end the process.
-        # The confirming replay targeted the raise, not this check's target,
-        # so even with no `testFn` the coverage is not established: refused.
-        let unsafeRefused = r.soundness.witnessUnsafe
-        try:
-          if not unsafeRefused:
-            `splatBlock`
-        except AssertionDefect:
-          `assertionRaisedId` = true
-          `anyRaisedId` = true
-        except IndexDefect:
-          `indexRaisedId` = true
-          `anyRaisedId` = true
-        except FieldDefect:
-          `fieldRaisedId` = true
-          `anyRaisedId` = true
-        except NilAccessDefect:
-          `anyRaisedId` = true
-        except CatchableError:
-          `anyRaisedId` = true
-        let `hitsId` = symexCaptureEnd()
-        let covered = `coveredExpr`
-        recordSymexFinding(SymexFinding(
-          targetDesc:     `targetDescLit`,
-          status:         sfRaised,
-          covered:        covered and not unsafeRefused,
-          witnessChoices: renderAsChoices(`witId`),
-          z3Version:      z3FullVersion(),
-          soundness:      r.soundness,              ## RFC-0005 S11
-          bounds:     r.bounds,                     ## review R1-17
-          gaps:           `gapsSym`(r.errors),
-          annotationViolations: r.annotationViolations,
-          hints: `hintsSym`(r.errors),                 ## RFC-0005 W1
-          diagnostics: `diagsSym`(r.diagnostics)))
-        if unsafeRefused:
-          raise newException(AssertionDefect, `unsafeMsg`)
-        if not covered:
-          raise newException(AssertionDefect, `failMsg`)
+        `raisedArm`
+      `outcomeSym`(`findingId`, `failureId`)
 
 macro assertCoveredBy*(fn: typed,
                        targets: static openArray[SymexTarget],
@@ -4051,10 +4120,14 @@ macro assertCoveredBy*(fn: typed,
   ## Multi-target form: prove `testFn` covers every target. Each
   ## target is dispatched through the single-target `assertCoveredBy`;
   ## failures are accumulated and reported as one aggregate message.
+  ## Returns every target's `SymexFinding` (discardable); on failure the
+  ## one `SymexCoverageDefect` carries them all (review R1-10).
   let failuresId = genSym(nskVar, "failures")
+  let findingsId = genSym(nskVar, "findings")
   result = newStmtList()
   result.add quote do:
     var `failuresId`: seq[string] = @[]
+    var `findingsId`: seq[SymexFinding] = @[]
   for t in targets:
     let tNode =
       case t.kind
@@ -4068,17 +4141,14 @@ macro assertCoveredBy*(fn: typed,
     let inner = newCall(ident"assertCoveredBy", fn, tNode, testFn, settingsNode)
     result.add quote do:
       try:
-        `inner`
-      except AssertionDefect as e:
+        `findingsId`.add `inner`
+      except SymexCoverageDefect as e:
+        `findingsId`.add e.findings
         `failuresId`.add e.msg
   let totalLit = newLit(targets.len)
+  let outcomesSym = bindSym"coverageOutcomes"
   result.add quote do:
-    if `failuresId`.len > 0:
-      var msg = "assertCoveredBy (multi): " & $`failuresId`.len &
-                " of " & $`totalLit` & " targets uncovered:"
-      for f in `failuresId`:
-        msg.add "\n  - " & f
-      raise newException(AssertionDefect, msg)
+    `outcomesSym`(`findingsId`, `failuresId`, `totalLit`)
   result = nnkBlockStmt.newTree(newEmptyNode(), result)
 
 # ---- Macro forms for the content-addressed DB API ---------------------------
@@ -4291,9 +4361,8 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
 #
 # Phase 12 cycle 7. The Layer-1 primitive: given a SUT and an
 # `ExampleDatabase`, run symex against every auto-discovered target
-# in the SUT's IR and return one `SymexFinding` per. Each finding
-# is also deposited via `recordSymexFinding` so the engine's
-# `finalizePhase` later drains them into `Report.symexFindings`.
+# in the SUT's IR and return one `SymexFinding` per (review R1-10: as a
+# value only; `symexForAll` puts them on its report).
 #
 # Cycle 7 covers `tLabel` only — `symexTarget("name")` markers
 # extracted via `irCollectLabels` (cycle 4) walking transitively
@@ -4316,9 +4385,7 @@ macro symexFindAllWitnesses*(fn: typed,
                               excludeTargets: seq[SymexTarget] = @[]
                              ): seq[SymexFinding] =
   ## Run symex against every auto-discovered target in `fn`. Returns
-  ## one `SymexFinding` per target, in IR-traversal order; each
-  ## finding is also recorded into the per-thread sink so it flows
-  ## into `Report.symexFindings` at end-of-run.
+  ## one `SymexFinding` per target, in IR-traversal order.
   # Phase 14 A7b: the Phase-12 `var T` guard is lifted. Witness
   # semantics: the walker reports the INITIAL value of each `var`
   # param (via `initialEnv`), which the test runtime invokes the
@@ -4481,12 +4548,14 @@ macro symexFindAllWitnesses*(fn: typed,
           status:     sfNotApplicable,
           covered:    false,
           z3Version:  z3FullVersion(),
-          soundness:  Soundness(runTaint: runTaintOf(`progId`.parseErrors)),
+          # Review R1-16: settled by construction -- nothing ran, so there
+          # is no claim to replay.
+          soundness:  Soundness(runTaint: runTaintOf(`progId`.parseErrors),
+                                replay: rsNotNeeded),
           bounds:     `symexSettings`.budget,       ## review R1-17
           gaps:       `gapsSym`(`progId`.parseErrors),
           hints:      `hintsSym`(`progId`.parseErrors),
           annotationViolations: `progId`.annotationViolations)
-        recordSymexFinding(noTargetsFinding)
         `findingsId`.add noTargetsFinding
     else:
       quote do:
@@ -4506,9 +4575,8 @@ macro symexFindAllWitnesses*(fn: typed,
           #   2. Verdict cache hit → load sfUnsat/sfUnknown,
           #      fromCache=true.
           #   3. Cold path → runSymex; save witness or verdict.
-          # `recordSymexFinding(f)` stays outside the if-else tree
-          # so EVERY path deposits — invariant pinned by cycle 7's
-          # `consumeSymexFindings()` assertion.
+          # `findingsId.add f` stays outside the if-else tree so EVERY
+          # path returns a finding.
           let cached = loadSymexWitnessesImpl(`db`, `progId`, `loopTarget`,
                                               `symexSettings`, `dbErrorsId`)
           if cached.len > 0:
@@ -4604,7 +4672,6 @@ macro symexFindAllWitnesses*(fn: typed,
                                            `symexSettings`, `dbErrorsId`)
             f.hints = notes.hints
             f.diagnostics = notes.diagnostics
-          recordSymexFinding(f)
           `findingsId`.add f
 
   result = quote do:

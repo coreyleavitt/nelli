@@ -112,7 +112,6 @@ suite "E1 C7 — AST proof-spike (capture-consumability freeze-guard)":
     # genSym'd top-level proc, never a hand-written named proc. Bounded:
     # a single `doAssert` over a bare int, default (already-small) budget
     # (maxCallDepth 3 / maxLoopUnwind 5) — no loops, no recursion.
-    discard consumeSymexFindings()
     let findings = spikeFeedFindAllWitnesses(proc(x: int) = doAssert x != 42)
     let raised = findings.filterIt(
       it.status == sfRaised and it.defectTypeId == "AssertionDefect")
@@ -128,7 +127,6 @@ suite "E1 C7 — AST proof-spike (capture-consumability freeze-guard)":
     # instantiation types (int, bool) from the same SUT — the load-bearing
     # G1a collision shape. Bounded: no loops, two trivial instantiations
     # well under the default maxInstantiationsPerProc=64 cap.
-    discard consumeSymexFindings()
     let report = spikeFeedForAll(
       map(just(0), just(false)),
       proc(a: int, b: bool) =

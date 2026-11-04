@@ -40,11 +40,11 @@ suite "symex Phase 15 E6 — Defect modeling (sxRaised isDefect + defectExclusio
     check r.raisedTypeId == "AssertionDefect"
 
   test "E6: Report surface — symexFindings carries an sfRaised defect entry":
-    # The recording path (symexFindAllWitnesses → recordSymexFinding) surfaces
+    # The finding path (symexFindAllWitnesses, whose findings symexForAll puts
+    # on its report) surfaces
     # the reachable AssertionDefect as an `sfRaised` finding with its
     # `defectTypeId` set, so it reaches `Report.symexFindings` rather than
     # being silently dropped.
-    discard consumeSymexFindings()  # clear any prior findings
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(f, db)
     let raised = findings.filterIt(it.status == sfRaised)

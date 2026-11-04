@@ -184,7 +184,6 @@ suite "symex Phase 15 E7 — Cluster-E regression smoke + walker version 7":
 
   # ---- Report-surface defect entry (E6 recording path) ----
   test "E7: Report surface — symexFindings carries the AssertionDefect":
-    discard consumeSymexFindings()  # clear any prior findings
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(assertDefect, db)
     let raised = findings.filterIt(it.status == sfRaised)

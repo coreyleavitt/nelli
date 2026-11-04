@@ -37,7 +37,6 @@ proc seedPipeline(seeds: seq[seq[ChoiceNode]]): seq[Phase[int]] =
 
 suite "symex Phase 12 cycle 14 — symexSeedPhase":
   test "falsifying seed produces otFalsified through shrink+finalize":
-    discard consumeSymexFindings()
     # `integers(0, 1000)` draws one ckInteger(value, 0, 1000, 0).
     # A seed of `@[integerChoice(200, 0, 1000, 0)]` replays as 200.
     # The property fails on x ≥ 100, so 200 falsifies it.
@@ -55,7 +54,6 @@ suite "symex Phase 12 cycle 14 — symexSeedPhase":
     # The seed forces x = 200. The property fails for all x >= 100;
     # the shrinker must minimise the int down to 100 (the integer
     # boundary). Observable via `report.counterexample`.
-    discard consumeSymexFindings()
     let s = integers(0, 1000)
     proc prop(x: int) =
       doAssert x < 100
@@ -75,8 +73,8 @@ suite "symex Phase 12 cycle 14 — symexSeedPhase":
     # Strategy expects ONE ckInteger; seed has ZERO. evalReplay
     # raises Overrun → ekRejected → sfNotApplicable deposit. The
     # report passes (no falsification surfaced from a malformed
-    # seed). The deposit is observable via consumeSymexFindings.
-    discard consumeSymexFindings()
+    # seed). The entry rides the report (review R1-10: the run's own,
+    # not a thread-local sink).
     let s = integers(0, 1000)
     proc prop(x: int) =
       doAssert x < 100
@@ -86,6 +84,5 @@ suite "symex Phase 12 cycle 14 — symexSeedPhase":
       s, prop, defaultSettings(), toExamples[int](@[]),
       seedPipeline(@[emptySeed]))
     check report.outcome == otPassed
-    let drained = consumeSymexFindings()
-    check drained.len == 1
-    check drained[0].status == sfNotApplicable
+    check report.symexFindings.len == 1
+    check report.symexFindings[0].status == sfNotApplicable

@@ -21,7 +21,6 @@ proc twoLabels(x: int) =
 
 suite "symex Phase 14 cycle B67 — label-by-name excludeTargets":
   test "excludeTargets = @[tLabel(\"zero\")] suppresses ONLY \"zero\"":
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(
       twoLabels, db, excludeTargets = @[tLabel("zero")])
@@ -33,7 +32,6 @@ suite "symex Phase 14 cycle B67 — label-by-name excludeTargets":
     check sawOne
 
   test "no excludeTargets: both labels discovered (control)":
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(twoLabels, db)
     var sawZero, sawOne = false

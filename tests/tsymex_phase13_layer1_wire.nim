@@ -12,8 +12,8 @@
 ##       confirms `symexZ3CallCount == 0`),
 ##   (c) `fromCache = true` flags the loaded-vs-derived
 ##       provenance, and
-##   (d) `recordSymexFinding` runs on the verdict-hit path so the
-##       finding flows into `consumeSymexFindings()`.
+##   (d) the verdict-hit path returns the finding like every other
+##       path (review R1-10: as a value; there is no sink).
 ##
 ## This pattern is *not* asserting correctness of UNSAT for `x ==
 ## 1` — Z3 would say SAT. It's asserting that the cache returns
@@ -32,7 +32,6 @@ proc handle(x: int) =
 
 suite "symex Phase 13 cycle 7 — Layer 1 verdict-cache wire":
   test "verdict cache hit returns sfUnsat, fromCache=true, Z3 not called":
-    discard consumeSymexFindings()  # clear sink from prior tests
     let db = inMemoryDatabase()
 
     # Pre-seed the verdict cache under the content-addressed key
@@ -54,13 +53,6 @@ suite "symex Phase 13 cycle 7 — Layer 1 verdict-cache wire":
     check f.fromCache == true
     # Z3 was NOT called — cache served the load.
     check symexZ3CallCount == 0
-    # The finding flowed through `recordSymexFinding` and is
-    # available to drain via the sink (Layer 3 / `symexForAll`
-    # picks it up that way).
-    let drained = consumeSymexFindings()
-    check drained.len == 1
-    check drained[0].status == sfUnsat
-    check drained[0].fromCache == true
 
 # Cold-path SUT: target is provably unreachable (no int is both above 5
 # and below 3). Z3 returns UNSAT after a small handful of operations.
@@ -78,7 +70,6 @@ suite "symex Phase 13 cycle 8 — cold path saves UNSAT verdict":
 
     # Cold call — verdict cache empty; Z3 derives UNSAT; result
     # saved to the `:unsat` slot via the cycle-7 wire.
-    discard consumeSymexFindings()
     symexZ3CallCount = 0
     let cold = symexFindAllWitnesses(fnGhost, db)
     check cold.len == 1
@@ -87,7 +78,6 @@ suite "symex Phase 13 cycle 8 — cold path saves UNSAT verdict":
     check symexZ3CallCount == 1
 
     # Warm call — verdict cache hits; Z3 not invoked.
-    discard consumeSymexFindings()
     symexZ3CallCount = 0
     let warm = symexFindAllWitnesses(fnGhost, db)
     check warm.len == 1
@@ -120,7 +110,6 @@ suite "symex Phase 13 cycle 9 — cold path saves UNKNOWN verdict":
     # The walker MAY invoke Z3 on the in-arm path conditions even
     # before deciding UNKNOWN — we don't assert call count on the
     # cold call; `fromCache = false` is the discriminator.
-    discard consumeSymexFindings()
     symexZ3CallCount = 0
     let cold = symexFindAllWitnesses(fnDeep, db, tightUnwind)
     check cold.len == 1
@@ -128,7 +117,6 @@ suite "symex Phase 13 cycle 9 — cold path saves UNKNOWN verdict":
     check cold[0].fromCache == false
 
     # Warm call. Verdict cache hits; Z3 absolutely not invoked.
-    discard consumeSymexFindings()
     symexZ3CallCount = 0
     let warm = symexFindAllWitnesses(fnDeep, db, tightUnwind)
     check warm.len == 1

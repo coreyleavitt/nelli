@@ -88,6 +88,10 @@ type
     refPoint*: ScoreMap
     dbReplays*: int
     dbErrors*: seq[string]
+    symexFindings*: seq[SymexFinding]
+      ## Review R1-10. The findings phases of THIS run record (the symex
+      ## seed phase's `sfNotApplicable` audit entries); `runPipeline` puts
+      ## them on the report. Was a thread-local sink any caller could fill.
 
   EnginePhaseOutput*[T] = object
     ## Phase results consumed by downstream phases.
@@ -160,4 +164,6 @@ proc runPipeline*[T](state: var EngineState[T],
     raise newException(Defect,
       "engine pipeline ended without a final report — " &
       "missing a finalizePhase or a phase that sets state.output.finalReport")
-  state.output.finalReport.get
+  result = state.output.finalReport.get
+  # Review R1-10: whichever phase built the report, the run's findings ride it.
+  result.symexFindings.add state.acc.symexFindings

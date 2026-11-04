@@ -3,9 +3,8 @@
 ## Layer 1 primitive: at macro time, scan the SUT's IR (transitively
 ## through `parseProc`'s callee table) for `symexTarget("name")`
 ## markers; at runtime, run symex once per discovered target and
-## return one `SymexFinding` per. Each finding is also deposited via
-## `recordSymexFinding` so the engine's `finalizePhase` later drains
-## them into `Report.symexFindings`.
+## return one `SymexFinding` per, as a value (review R1-10: there is no
+## thread-local sink; `symexForAll` puts them on its report).
 ##
 ## Cycles 8-10 will auto-include defect targets
 ## (tAssertionViolation / tIndexError / tFieldDefect); cycle 11
@@ -80,7 +79,6 @@ proc fnVarParam(x: var int) =
 
 suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
   test "returns one SymexFinding per discovered label, all sfSat":
-    discard consumeSymexFindings()  # clear sink from any prior test
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnTwoLabels, db)
     check findings.len == 2
@@ -91,20 +89,15 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
     check "label(\"zero\")" in descs
     check "label(\"magic\")" in descs
 
-  test "findings flow into the per-thread sink for finalizePhase":
-    # `recordSymexFinding` deposits to a threadvar that
-    # `consumeSymexFindings()` drains. The macro must record every
-    # finding it returns so the engine's finalize step picks them
-    # up at end-of-run regardless of whether the user inspects the
-    # return value.
-    discard consumeSymexFindings()  # clear sink
+  test "one call's findings do not reach the next call":
+    # Review R1-10: findings are the call's return value only. Two calls
+    # return their own, in the same order.
     let db = inMemoryDatabase()
-    let findings = symexFindAllWitnesses(fnTwoLabels, db)
-    let drained = consumeSymexFindings()
-    check drained.len == findings.len
-    # Drained findings carry the same targetDescs (order-preserving).
-    for i in 0 ..< findings.len:
-      check drained[i].targetDesc == findings[i].targetDesc
+    let first = symexFindAllWitnesses(fnTwoLabels, db)
+    let second = symexFindAllWitnesses(fnNoTargets, db)
+    check first.len == 2
+    check second.len == 1
+    check second[0].status == sfNotApplicable
 
   test "rejects a non-proc first argument at macro time":
     # The macro inspects `fn.getImpl` and demands `nnkProcDef`. A
@@ -122,7 +115,6 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
 
   test "auto-includes tAssertionViolation when SUT contains symexAssert":
     ## Phase 16 D1a: status sfSat→sfRaised; targetDesc now "raised(AssertionDefect)".
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnAssertable, db)
     var descs: seq[string]
@@ -136,7 +128,6 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
 
   test "auto-includes tIndexError when SUT contains an indexing op":
     ## Phase 16 D1a: status sfSat→sfRaised; targetDesc now "raised(IndexDefect)".
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnIndexable, db)
     var descs: seq[string]
@@ -149,7 +140,6 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
 
   test "auto-includes tFieldDefect when SUT contains an arm-field read":
     ## Phase 16 D1a: status sfSat→sfRaised; targetDesc now "raised(FieldDefect)".
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnVariantField, db)
     var descs: seq[string]
@@ -166,7 +156,6 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
     # `excludeTargets = [tIndexError()]` the assertion still
     # surfaces but the index-error does not.
     ## Phase 16 D1a: assertion finding targetDesc is now "raised(AssertionDefect)".
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(
       fnIndexAndAssert, db,
@@ -183,7 +172,6 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
     # If the macro consults the DB first, the returned finding's
     # witnessChoices match the pre-seed; if it ignored the cache
     # and ran symex fresh, the choices would carry x = 0.
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let preseed = renderAsChoices((1234567,))
     saveSymexWitness(db, fnTwoLabels, tLabel("zero"),
@@ -202,14 +190,8 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
     check saw
 
   test "zero-targets fallback: single sfNotApplicable audit entry":
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnNoTargets, db)
     check findings.len == 1
     check findings[0].status == sfNotApplicable
     check findings[0].targetDesc == "no-targets-discovered"
-    # The finding also flowed into the sink so the engine's
-    # finalize-time drain picks it up.
-    let drained = consumeSymexFindings()
-    check drained.len == 1
-    check drained[0].status == sfNotApplicable

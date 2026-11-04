@@ -204,7 +204,7 @@ proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
     run: proc(state: var EngineState[T]): PhaseAction =
       # Phase 14 cycle B2: `forcePhases` override. When `phSymexSeed`
       # is in the set, the phase runs even after a prior phase
-      # falsified; its findings are deposited into the sink and the
+      # falsified; its findings are recorded on the run and the
       # existing `rawFalsification` is left intact (not overwritten).
       let forced = phSymexSeed in state.spec.settings.forcePhases
       if state.output.rawFalsification.isSome and not forced:
@@ -219,7 +219,7 @@ proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
           # the exact sequence to minimise.
           # Phase 14 B2: when forced, preserve any prior falsification
           # (the existing one wins) — symexSeed still finishes
-          # iterating so its findings flow to the sink, but doesn't
+          # iterating so its findings are recorded, but doesn't
           # overwrite an already-found counterexample.
           if state.output.rawFalsification.isNone:
             state.output.rawFalsification = some(RawFalsification[T](
@@ -233,7 +233,7 @@ proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
           # (Rejection). Either way it's not a falsification —
           # record an `sfNotApplicable` finding so the eventual
           # report carries an honest audit trail and continue.
-          recordSymexFinding(SymexFinding(
+          state.acc.symexFindings.add(SymexFinding(
             targetDesc: "<seed-shape-mismatch-or-rejected>",
             status:     sfNotApplicable,
             covered:    false))

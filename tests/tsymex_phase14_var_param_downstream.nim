@@ -24,7 +24,6 @@ proc varParamSUT(x: var int) =
 
 suite "symex Phase 14 cycle A7b — var T downstream":
   test "symexFindAllWitnesses accepts var T SUT":
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(varParamSUT, db)
     var sawHit = false

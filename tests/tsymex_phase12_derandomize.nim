@@ -26,10 +26,8 @@ suite "symex Phase 12 cycle 19 — derandomize × symex seeds":
     settings.derandomize = true
     settings.testId = "phase12-cycle19-pin"
 
-    discard consumeSymexFindings()
     let r1 = symexForAll(integers(0, 1000), handleFalsifying,
                          inMemoryDatabase(), forAllSettings = settings)
-    discard consumeSymexFindings()
     let r2 = symexForAll(integers(0, 1000), handleFalsifying,
                          inMemoryDatabase(), forAllSettings = settings)
 

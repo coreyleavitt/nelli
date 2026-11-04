@@ -1,33 +1,26 @@
-## Phase 12 cycle 1 — symex finding sink lives in `engine/types.nim`.
+## Phase 12 cycle 1 put a thread-local `SymexFinding` sink in
+## `engine/types.nim` (`recordSymexFinding` / `consumeSymexFindings`) so
+## phase modules could record findings without importing `nelli/symex`.
 ##
-## Pre-requisite for Layer 1: `engine/phases.nim` will need to
-## record findings from the symex seed phase without importing
-## `nelli/symex` (which pulls in the entire z3 + SMT stack).
-## The sink (threadvar + record + consume) belongs alongside the
-## `SymexFinding` / `SymexFindingStatus` types that already live in
-## `engine/types.nim`.
-##
-## This test imports the sink from the engine module ONLY — no
-## `nelli/symex` import. If the sink is still in `symex.nim`,
-## the imports fail.
+## Review R1-10 removed it: only `symexForAll` drained it, so findings from
+## an earlier call on the thread leaked into a later report. A finding now
+## rides a value: the engine's phases record on the run's own state
+## (`EngineAccumulators.symexFindings`), and every symex entry point returns
+## its findings. This test pins that the sink is gone, from `engine/types`
+## and from `nelli/symex` alike, while the types stay importable without the
+## z3 stack.
 
 import std/unittest
 import nelli/engine/types
 
-suite "symex Phase 12 cycle 1 — sink accessible from engine/types":
-  test "recordSymexFinding + consumeSymexFindings importable":
-    # Cycle 1's contract: these symbols live in engine/types now.
-    discard consumeSymexFindings()  # clear any prior state
+suite "review R1-10 -- no thread-local finding sink":
+  test "the finding types are importable from engine/types alone":
+    let f = SymexFinding(targetDesc: "test", status: sfSat, covered: true,
+                         z3Version: "test")
+    var r: Report[int]
+    r.symexFindings.add f
+    check r.symexFindings.len == 1
 
-    recordSymexFinding(SymexFinding(
-      targetDesc: "test", status: sfSat, covered: true,
-      z3Version: "test"))
-
-    let drained = consumeSymexFindings()
-    check drained.len == 1
-    check drained[0].targetDesc == "test"
-    check drained[0].status == sfSat
-
-    # Second drain returns empty (the first drain cleared the
-    # threadvar atomically).
-    check consumeSymexFindings().len == 0
+  test "recordSymexFinding and consumeSymexFindings no longer exist":
+    check not compiles(recordSymexFinding(SymexFinding()))
+    check not compiles(consumeSymexFindings())

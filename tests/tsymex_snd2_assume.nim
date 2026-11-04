@@ -48,7 +48,6 @@ suite "SND-2 — flagship repro: symexAssume must not mask sxUnsat with false sx
 suite "SND-2 — scan trap (a): assume-only SUT must not auto-discover tAssertionViolation":
 
   test "a SUT using ONLY symexAssume (no symexAssert) does not auto-discover an assertion-violation target":
-    discard consumeSymexFindings()
     proc assumeOnly(x: int) =
       symexAssume(x >= 0)
       if x == 42:

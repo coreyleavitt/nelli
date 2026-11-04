@@ -190,12 +190,11 @@ suite "symex Phase 7 — assertCoveredBy":
     check cs2[1].intVal == toInt128(7)
 
   test "successful assertCoveredBy records a covered SymexFinding":
-    discard consumeSymexFindings()  # clear any prior findings
     proc fn(x: int) =
       if x == 42:
         symexTarget("magic")
-    assertCoveredBy(fn, tLabel("magic"))
-    let findings = consumeSymexFindings()
+    # Review R1-10: the call returns its own finding.
+    let findings = @[assertCoveredBy(fn, tLabel("magic"))]
     check findings.len == 1
     check findings[0].status == sfSat
     check findings[0].covered
@@ -205,25 +204,23 @@ suite "symex Phase 7 — assertCoveredBy":
     check findings[0].z3Version.len > 0
 
   test "uncovered assertCoveredBy records a finding before raising":
-    discard consumeSymexFindings()
     proc fn(x: int) =
       if x == 42: symexTarget("missed")
     proc skip(x: int) = discard
+    # Review R1-10: the failure carries the call's finding.
+    var findings: seq[SymexFinding]
     try:
       assertCoveredBy(fn, tLabel("missed"), skip)
-    except AssertionDefect:
-      discard
-    let findings = consumeSymexFindings()
+    except SymexCoverageDefect as e:
+      findings = e.findings
     check findings.len == 1
     check findings[0].status == sfSat
     check not findings[0].covered
 
   test "UNSAT records a vacuous (covered) finding":
-    discard consumeSymexFindings()
     proc fn(x: int) =
       if x != x: symexTarget("ghost")
-    assertCoveredBy(fn, tLabel("ghost"))
-    let findings = consumeSymexFindings()
+    let findings = @[assertCoveredBy(fn, tLabel("ghost"))]
     check findings.len == 1
     check findings[0].status == sfUnsat
     check findings[0].covered

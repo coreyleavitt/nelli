@@ -27,7 +27,6 @@ proc handlePair(a: int, b: bool) =
 
 suite "symex Phase 12 cycle 16 — symexForAll (single-arg)":
   test "Report.symexFindings carries the auto-discovered label finding":
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let report = symexForAll(integers(0, 1000), handle, db)
     # The SUT never raises — symex's witness merely *reaches* the
@@ -45,7 +44,6 @@ suite "symex Phase 12 cycle 16 — symexForAll (single-arg)":
     # The macro emits a wrapper that splats the tuple positionally
     # into `handlePair(a, b)` while passing `handlePair` itself to
     # Layer 1 for IR scanning.
-    discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let report = symexForAll(
       map(integers(0, 1000), booleans()),

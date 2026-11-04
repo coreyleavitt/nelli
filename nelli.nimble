@@ -1694,5 +1694,8 @@ task test, "Run the test suite":
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding
             # carries soundness, gaps and violations. Walker 264->265.
-            "tsymex_rfc0005_w1_parity"]:
+            "tsymex_rfc0005_w1_parity",
+            "tsymex_rfc0005_w3_seqiter",
+            "tsymex_rfc0005_w3_opqchecks",
+            "tsymex_rfc0005_w3_stmtargs"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

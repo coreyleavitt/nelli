@@ -4020,6 +4020,10 @@ const
   rangeMagics = ["Chr", "Inc", "Dec", "Succ", "Pred"]
     ## RFC-0005 S8be. Magics that check a range or enum bound
     ## (`RangeDefect`): `chr`, and a step past an enum's or a subrange's end.
+  floatArithMagics = ["AddF64", "SubF64", "MulF64", "DivF64"]
+    ## RFC-0005 W3 (WA-4). The float arithmetic the float checks guard
+    ## (`nanChecks`: `FloatInvalidOpDefect`, `infChecks`:
+    ## `FloatOverflowDefect`).
   maxDefectScanDepth = 8
     ## RFC-0005 S8be. How many routines deep `scanOpaqueDefects` reads; a
     ## deeper call counts as `anyDefect`.
@@ -4068,9 +4072,23 @@ proc runRoutineDef(sym: NimNode): NimNode =
   if impl.kind in RoutineNodes - {nnkTemplateDef, nnkMacroDef}: impl
   else: nil
 
+type FloatCheckMemo = seq[tuple[def: NimNode; on: set[CheckOption]]]
+
+proc floatChecksOn(def: NimNode; memo: var FloatCheckMemo): set[CheckOption] =
+  ## RFC-0005 W3 (WA-4). Which of the float checks (`nanChecks`, `infChecks`,
+  ## off by default) may be on in the routine definition `def`: its options at
+  ## its definition (`routineChecks`, as a walked routine's are read). Read
+  ## once per routine, and only where its body does float arithmetic.
+  for m in memo:
+    if m.def == def: return m.on
+  result = routineChecks(def).checks * {coNan, coInf}
+  memo.add (def: def, on: result)
+
 proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
-                       seen: var seq[NimNode]; depth: int; ctx: ParseCtx) =
-  ## RFC-0005 S8be. See `opaqueDefectTypes`.
+                       seen: var seq[NimNode]; depth: int; ctx: ParseCtx;
+                       owner: NimNode; memo: var FloatCheckMemo) =
+  ## RFC-0005 S8be. See `opaqueDefectTypes`. `owner` is the routine
+  ## definition whose body `n` is part of.
   template add(t: string) =
     if t notin acc: acc.add t
   if n == nil or anyDefect in acc and acc.len > 12: return
@@ -4092,13 +4110,13 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
         add "IndexDefect"
       # The index's hidden conversion to the array's range is the index
       # check itself (`IndexDefect`), not a `RangeDefect`.
-      scanOpaqueDefects(n[0], acc, seen, depth, ctx)
-      scanOpaqueDefects(ix, acc, seen, depth, ctx)
+      scanOpaqueDefects(n[0], acc, seen, depth, ctx, owner, memo)
+      scanOpaqueDefects(ix, acc, seen, depth, ctx, owner, memo)
     else:
-      for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx)
+      for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx, owner, memo)
   of nnkCheckedFieldExpr:
     add "FieldDefect"
-    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx)
+    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx, owner, memo)
   of nnkConv, nnkHiddenStdConv, nnkHiddenSubConv:
     if n.len >= 2:
       let src = n[^1]
@@ -4109,14 +4127,14 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
          src.typeKind notin {ntyFloat .. ntyFloat128} and
          not intConvExact(n.typeKind, src.typeKind):
         add "RangeDefect"
-      scanOpaqueDefects(src, acc, seen, depth, ctx)
+      scanOpaqueDefects(src, acc, seen, depth, ctx, owner, memo)
   of nnkRaiseStmt:
     if n.len == 0 or n[0].kind == nnkEmpty:
       add anyDefect   # a re-raise of what the arm caught
     else:
       let d = typeIsDefect(n[0].getTypeInst, ctx)
       if d.len > 0: add d
-      scanOpaqueDefects(n[0], acc, seen, depth, ctx)
+      scanOpaqueDefects(n[0], acc, seen, depth, ctx, owner, memo)
   of nnkCall, nnkInfix, nnkPrefix, nnkPostfix, nnkCommand, nnkCallStrLit,
      nnkHiddenCallConv:
     let f = n[0]
@@ -4126,6 +4144,13 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
       if magic.len > 0:
         if magic in overflowMagics: add "OverflowDefect"
         if magic in divMagics: add "DivByZeroDefect"
+        # RFC-0005 W3 (WA-4): float arithmetic raises under the float
+        # checks, which are off by default; on where the routine whose body
+        # holds the operation was compiled with them (`floatChecksOn`).
+        if magic in floatArithMagics and owner != nil:
+          let on = floatChecksOn(owner, memo)
+          if coNan in on: add "FloatInvalidOpDefect"
+          if coInf in on: add "FloatOverflowDefect"
         if magic in rangeMagics:
           if magic == "Chr" or n.len > 1 and
              n[1].typeKind in {ntyEnum, ntyRange, ntyChar, ntyVar}:
@@ -4137,15 +4162,17 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
         # A converter's or iterator's body is scanned like a proc's.
         if fDef.len > 6 and fDef[6].kind != nnkEmpty:
           if depth >= maxDefectScanDepth: add anyDefect
-          else: scanOpaqueDefects(fDef[6], acc, seen, depth + 1, ctx)
+          else: scanOpaqueDefects(fDef[6], acc, seen, depth + 1, ctx,
+                                  fDef, memo)
         # No body: foreign code, which raises no Nim exception.
     elif f.kind != nnkSym or f.symKind notin {nskTemplate, nskMacro}:
       # A closure or a routine-valued variable: any code at all.
       if f.typeKind in {ntyProc, ntyVar} or f.kind != nnkSym:
         add anyDefect
-    for i in 1 ..< n.len: scanOpaqueDefects(n[i], acc, seen, depth, ctx)
+    for i in 1 ..< n.len:
+      scanOpaqueDefects(n[i], acc, seen, depth, ctx, owner, memo)
   else:
-    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx)
+    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx, owner, memo)
 
 proc opaqueDefectTypes(calleeSym: NimNode; ctx: ParseCtx): seq[string] =
   ## RFC-0005 S8be. The `Defect` types an inert opaque call may raise, which
@@ -4161,10 +4188,19 @@ proc opaqueDefectTypes(calleeSym: NimNode; ctx: ParseCtx): seq[string] =
   ## Before S8be the walk forked none: `IndexDefect` out of an opaque call
   ## was a false `sxUnsat`, and a `finally` reached only through it was
   ## never walked.
+  ##
+  ## RFC-0005 W3 (WA-4): each routine's float checks are its own
+  ## (`floatChecksOn`): under `nanChecks` / `infChecks` its float arithmetic
+  ## raises `FloatInvalidOpDefect` / `FloatOverflowDefect`. The scan assumed
+  ## the default checks, so `except FloatingPointDefect:` around such a call
+  ## was a clean false `sxUnsat`. A check the routine has OFF leaves its
+  ## `Defect` in the list: a fork it cannot take carries
+  ## `feOpaqueEffectHavoc`, and its replay refutes a hit.
   var seen = @[calleeSym]
+  var memo: FloatCheckMemo
   let impl = resolveRoutineImpl(calleeSym)
   if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty: return
-  scanOpaqueDefects(impl[6], result, seen, 0, ctx)
+  scanOpaqueDefects(impl[6], result, seen, 0, ctx, impl, memo)
 proc hasVarFormal(impl: NimNode): bool =
   ## RFC-0005 S8bl (item 1). `impl` declares a `var` parameter.
   if impl == nil or impl.kind notin walkableRoutineKinds: return false
@@ -16701,8 +16737,8 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     # whose promise is contradicted degrades to `{.symexOpaque.}`
     # handling — fails safe, never a silent wrong witness).
     #
-    # The ARGUMENTS are still parsed, into the preamble, and only their
-    # values are thrown away. The pragma is a promise about the CALLEE,
+    # The ARGUMENTS are still parsed and evaluated; only the call is
+    # dropped. The pragma is a promise about the CALLEE,
     # not about the expressions written at the call site: Nim evaluates
     # those before the call whether or not symex models the call, so
     # dropping them unparsed would silently delete any effect they carry
@@ -16711,9 +16747,24 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     # `{.cover.}`'s `recordEdge(123)` is an int literal, `{.covercmp.}`'s
     # `logCmp(lTmp, rTmp, "==")` reads temps the rewrite already bound —
     # so the preamble stays empty in the case that motivated this arm.
-    for i in 1 ..< n.len:
-      discard parseExpr(n[i], preamble, ctx)
-    mkBlock(@[])
+    #
+    # RFC-0005 W3 (WA-5): each argument is read where Nim reads it
+    # (`parseOrderedArgs`), and one that is not a literal or a variable is
+    # bound to a sink `let`, as `discard <expr>` is: a check an argument's
+    # value carries (`v div b`: `DivByZeroDefect`) is forked where the
+    # value is computed, and a thrown-away value computed nothing. That was
+    # a clean false `sxUnsat` on `trv(v div b, 0)` with `b == 0`.
+    let argIRs = parseOrderedArgs(n, 1, preamble, ctx)
+    var sinks: seq[IRStmt]
+    for i, a in argIRs:
+      if a == nil or a.kind in {iekIntLit, iekBoolLit, iekVar, iekStrLit,
+                                iekFloatLit}:
+        continue
+      let c = if n[i + 1].kind == nnkExprColonExpr: n[i + 1][1] else: n[i + 1]
+      let ty = if a.kind in {iekLambda, iekClosureCall}: tBool()
+               else: classifyType(c).ty
+      sinks.add mkLet(freshSynth(ctx, "trArg"), ty, a)
+    mkBlock(sinks)
   elif hasSymexTransparentPragma(calleeSym):
     # #163 review R7: the callee over-claimed `{.symexTransparent.}` —
     # at least one argument is not provably inert (a writable `var`/
@@ -16733,9 +16784,9 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
       "but takes a writable argument (var/ref/ptr/possibly-ref-" &
       "carrying), so it is not provably inert; treated as opaque " &
       "instead of dropped")
-    var argIRs: seq[IRExpr]
-    for i in 1 ..< n.len:
-      argIRs.add parseExpr(n[i], preamble, ctx)
+    # RFC-0005 W3 (WA-5): each argument read where Nim reads it, as the
+    # expression-position arm does (`parseOrderedArgs`).
+    let argIRs = parseOrderedArgs(n, 1, preamble, ctx)
     mkOpaqueCall(calleeName, "", argIRs, tBool(), false)
   elif (m.kind == smkOpaqueEffectful and not userCallee) or
        hasSymexOpaquePragma(calleeSym) or isBodilessForeign(calleeSym):
@@ -16778,9 +16829,11 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
       for h in heapTys:
         if $h == $it: dup = true
       if not dup: heapTys.add it
-    var argIRs: seq[IRExpr]
-    for i in 1 ..< n.len:
-      argIRs.add parseExpr(n[i], preamble, ctx)
+    # RFC-0005 W3 (WA-5): each argument read where Nim reads it
+    # (`parseOrderedArgs`, S8ax / S8cq), as the expression-position arm
+    # does. A plain `parseExpr` loop ran a later argument's hoisted call
+    # first: `opq(v div b, bump(b))` divided by the bumped `b`.
+    let argIRs = parseOrderedArgs(n, 1, preamble, ctx)
     mkOpaqueCall(calleeName, "", argIRs, tBool(), inert, eff.havoc,
                  heapTys, eff.heapAll, raises, defects, eff.why)
   else:
@@ -18792,6 +18845,31 @@ proc yieldedElement(n: NimNode): NimNode =
     if r != nil: return r
   nil
 
+proc seqIterLenChanged(ctx: ParseCtx; n, c: NimNode; iter: string): IRStmt =
+  ## RFC-0005 S8ca. What a stdlib seq iterator does at the end of an iteration
+  ## in which the seq's length changed: its `assert(len(a) == L)` raises
+  ## `AssertionDefect` (`system.items`, `pairs`, `mitems`, `mpairs`). Compiled
+  ## out under `--assertions:off`, where the loop goes on to the old length and
+  ## `yield a[i]` checks the index: declined there. RFC-0005 S8cu: the
+  ## iterator's options are its first instantiation's, so a module that may
+  ## compile `assert` out declines (`assertsMaybeOff`).
+  if compileOption("assertions") and not ctx.assertsMayBeOff:
+    mkRaise("AssertionDefect", nil)
+  elif compileOption("assertions"):
+    ctx.declineAtSite(feCheckOption,
+      siteMsg(n, "the length of `" & c.repr & "` changed during an " &
+              "iteration of `" & iter & "`, and this module may compile the " &
+              "iterator's `assert` out (`assertions: off`): its check is not " &
+              "known -- path degraded to sxUnknown (RFC-0005 S8cu)"),
+      iter & " over a seq whose length changed (feCheckOption)")
+  else:
+    ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "RFC-0005 S8bu: the length of `" & c.repr & "` changed " &
+              "during an iteration of `" & iter & "` under " &
+              "`--assertions:off`: the iteration goes on to the old length, " &
+              "which is not modelled (feUnsupportedOp)"),
+      iter & " over a seq whose length changed (feUnsupportedOp)")
+
 proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bu. `for x in mitems(c)` / `for i, x in mpairs(c)` over a
   ## seq or an array. Nim yields each element by address (`var T`), and its
@@ -18886,29 +18964,9 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
   let lenNow = mkSeqLen(parseExpr(fixed, lp, ctx))
   for st in lp: loopStmts.add st
   # RFC-0005 S8ca: Nim's `assert(len(a) == L)` at the end of the iteration
-  # (`system.mitems`): an `AssertionDefect` (S8bu declined it). Compiled
-  # out under `--assertions:off`, where the loop goes on to the old length
-  # and `yield a[i]` checks the index: still declined there.
-  # RFC-0005 S8cu: `mitems[T]`'s options are its first instantiation's, so a
-  # module that may compile `assert` out declines (`assertsMaybeOff`).
+  # (`system.mitems`): an `AssertionDefect` (S8bu declined it).
   loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
-    (if compileOption("assertions") and not ctx.assertsMayBeOff:
-       mkRaise("AssertionDefect", nil)
-     elif compileOption("assertions"):
-       ctx.declineAtSite(feCheckOption,
-         siteMsg(n, "the length of `" & c.repr & "` changed during an " &
-                 "iteration of `" & iterExpr[0].strVal & "`, and this module " &
-                 "may compile the iterator's `assert` out (`assertions: " &
-                 "off`): its check is not known -- path degraded to " &
-                 "sxUnknown (RFC-0005 S8cu)"),
-         "mitems over a seq whose length changed (feCheckOption)")
-     else:
-       ctx.declineAtSite(feUnsupportedOp,
-         siteMsg(n, "RFC-0005 S8bu: the length of `" & c.repr & "` changed " &
-                 "during an iteration of `" & iterExpr[0].strVal & "` under " &
-                 "`--assertions:off`: the iteration goes on to the old " &
-                 "length, which is not modelled (feUnsupportedOp)"),
-         "mitems over a seq whose length changed (feUnsupportedOp)")))])
+    seqIterLenChanged(ctx, n, c, iterExpr[0].strVal))])
   stmts.add mkWhile(mkBinop(bLt, mkVar(iv), mkVar(lenName)), mkBlock(loopStmts))
   mkBlock(stmts)
 
@@ -19269,10 +19327,20 @@ proc parseStmtInner(n: NimNode,
           let seqTmp = freshSynth(ctx, "fseq")
           preamble3.add mkLet(seqTmp, recvCls.ty, seqIR)
           seqIR = mkVar(seqTmp)
+        # RFC-0005 W3 (WA-3): `system.items` / `pairs` over a seq is
+        #   var i = 0; let L = len(a)
+        #   while i < L: yield a[i]; inc(i); assert(len(a) == L)
+        # so the bound is the length at loop entry, and a body that changes
+        # the length ends the iteration in `AssertionDefect`, as `mitems`
+        # does (`seqIterLenChanged`). The bound was `s.len` re-read with no
+        # assert: `for _ in s: discard s.pop()` was a clean false `sxSat` on a
+        # target after the loop and a false `sxUnsat` on one in
+        # `except AssertionDefect`.
         let ivName = freshSynth(ctx, "iv")
         let initStmt = mkLet(ivName, intTy, mkIntLit(0))
-        let lenExpr = mkSeqLen(seqIR)
-        let cond = mkBinop(bLt, mkVar(ivName), lenExpr)
+        let lenName = freshSynth(ctx, "itLen")
+        let lenInit = mkLet(lenName, intTy, mkSeqLen(seqIR))
+        let cond = mkBinop(bLt, mkVar(ivName), mkVar(lenName))
         let synth = freshSynth(ctx, "fs")
         # A-normalised index: isIndex stmt + bind via let
         let idxStmt = mkIndexStmt(synth, seqIR, mkVar(ivName),
@@ -19284,10 +19352,14 @@ proc parseStmtInner(n: NimNode,
         if isPairs:   # RFC-0005 S8z: `i` is the position
           loopStmts.add mkLet(iterName, intTy, mkVar(ivName))
         loopStmts.add @[bindIter, body, incIv]
+        loopStmts.add mkIf(@[mkBranch(
+          mkBinop(bNe, mkSeqLen(seqIR), mkVar(lenName)),
+          seqIterLenChanged(ctx, n, container, iterExpr[0].strVal))])
         let loopBody = mkBlock(loopStmts)
         let whileSt = mkWhile(cond, loopBody)
         var allStmts = preamble3
         allStmts.add initStmt
+        allStmts.add lenInit
         allStmts.add whileSt
         mkBlock(allStmts)
       of itBitSet:

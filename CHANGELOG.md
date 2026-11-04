@@ -14,10 +14,15 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] — 0.9.1
 
-The fixes from the wiring audit that ran after the 0.9.0 tag (RFC-0005,
-handoff entry "2026-11-03 — Wiring audit", WA-1 to WA-13). Upgrading:
-`docs/migration/0.9.1.md`. Three of the fixes are regressions that 0.9.0
-shipped against 0.8.0; they come first.
+This release carries two sets of fixes made after the 0.9.0 tag (RFC-0005):
+the wiring audit (handoff entry "2026-11-03 — Wiring audit", WA-1 to WA-13)
+and the multi-round code review of the same surface (`docs/rfc/0005-review.md`,
+R1-01 to R1-35, review rounds 1 to 8). Review findings are cited as R<round>-nn
+in the entries below, and by the finding id the review gave them where a round
+re-reviewed an earlier fix. Upgrading: `docs/migration/0.9.1.md`. Three of the
+wiring-audit fixes are regressions that 0.9.0 shipped against 0.8.0; they come
+first. Then come the verdicts that were wrong on 0.8.0 as well, then the ones
+wrong only in machinery 0.9.0 introduced.
 
 ### Fixed — regressions against 0.8.0
 
@@ -54,6 +59,49 @@ shipped against 0.8.0; they come first.
 
 ### Fixed — wrong on 0.8.0 too
 
+- **An inner `try` inside an `except` handler gave a false `sxSat`** (review
+  round 3, T1; `157a578a`). A handler body is walked with the handler stack
+  cut back to the `try` that caught the raise, so a `try` inside the handler
+  had that outer `try`'s depth, and its claim on the caught entries (a filter
+  on depth) took every caught entry at that depth, not only the ones its own
+  body produced. When one `try` caught two raises from separate statements,
+  the claim walked the earlier catch's continuation through the rest of the
+  handler a second time. With `except ValueError: try: inc y; except
+  CatchableError: discard; inc x`, a path ran `inc x` twice, and a target on
+  `x == 2` (which native Nim never reaches, one handler run per path) was a
+  clean false `sxSat`. The depth-filtered claim is the same code in 0.8.0 and
+  0.9.0. A statement's exit entries are now identified by the serial they were
+  parked with (`park`), and a `try` claims only the entries parked while it
+  ran, so an inner `try` cannot take an older entry. The channels are their
+  own internal module (`smt/exits.nim`), grouped by owner and bound to the
+  walk's clock.
+- **An `elif` condition's preamble ran before the whole `if`** (R1-01;
+  `bfbc34e1`). A later condition's bounds fork, hoisted call or defect fork was
+  appended ahead of the entire `if` (statement, value position and iterator
+  body alike), so it ran on the paths that took an earlier branch. `if i >=
+  s.len: symexTarget("past-end") elif s[i] == 3: discard` gave `sxRaised
+  IndexDefect` on `s = @[]`, `i = 0`, reported `trusted()`, where native Nim
+  reaches the label; a label target gave a false `sxRaised`, and `if a == 1:
+  ... elif bump(s)` with a `var` seq gave a clean false `sxUnsat`. 0.8.0
+  lowers `if` the same way. A condition with a preamble is now nested into the
+  `else` of the arm before it, so the preamble runs only where that condition
+  is tested.
+- **`succ`, `pred`, `inc`, `dec`, `+=` and `-=` are checked against the
+  operand's bounds** (R1-02; `00101ddb`, `0f89a68f`). `succ`/`pred` on an enum
+  or `char`, and `inc`/`dec` on an enum or `char` variable, lowered to an
+  unchecked sum, so a target on `OverflowDefect` was a clean false `sxUnsat`
+  and a label behind the wrapped value a false `sxSat` (`succ('\xff')`).
+  `inc`/`dec` and `+=`/`-=` on a range variable raised the assignment's
+  `RangeDefect` where native Nim raises `OverflowDefect`. `succ`/`pred` check
+  the base type (an enum's first and last ordinal, `char` 0..255; a range is
+  checked against its base), `inc`/`dec`/`+=`/`-=` the variable's own type, a
+  range included; both raise `OverflowDefect`. A type whose bounds are not
+  read declines. 0.8.0 lowers `succ`/`pred` as plain `+`/`-`.
+- **A finding from an earlier `assertCoveredBy` showed up in a later
+  `symexForAll` report** (R1-10; `dd30ee50`). Findings went through a
+  thread-local sink that only `symexForAll` drained, so findings made by an
+  earlier call on the thread leaked into its report. The sink is removed
+  (below); a finding belongs to the call that made it.
 - **Float checks in an opaque callee** (WA-4). An inert `{.symexOpaque.}`
   callee's defect scan assumed the default checks. A callee compiled with
   `nanChecks` or `infChecks` on (by `push`, or `floatChecks`) raises
@@ -86,6 +134,57 @@ shipped against 0.8.0; they come first.
   `annotationViolations`** (WA-12), derived from the parse-time errors, as
   every other finding does.
 
+### Fixed — wrong in 0.9.0, in machinery 0.8.0 did not have
+
+- **PCRE's compile limits are modelled** (R1-03, R1-05, R1-22; `c9682ebc`,
+  `9663105d`). The regex reader did not model what `pcre_compile` rejects, so
+  a pattern native Nim raises `RegexError` on got a clean verdict: 300 nested
+  groups gave `sxSat "a"` (trusted), `(?:[a-z]){1700}|b` gave `sxSat "b"`,
+  and an `except RegexError` target gave `sxUnsat`. A group opened past
+  `PARENS_NEST_LIMIT` (250) is now rejected with Nim's own message ("parentheses
+  are too deeply nested") and offset, so the walk raises `RegexError` as native
+  does (2600 nested groups no longer recurse the host). The reader also keeps a
+  saturating upper bound on `pcre_compile`'s pre-pass length and its compile
+  workspace: a pattern whose bound passes 65536 code units ("regular expression
+  is too large") or nears the workspace limit ("too complicated") is declined
+  as `sxUnknown`, never decided. That bound is an upper bound, so a pattern
+  PCRE would accept but whose bound is past the limit declines too. Counted
+  groups are checked at parse time, before the NFA expands them: a counted
+  group nested three deep (`200` repeats at each level) took 33.6 s and peaked at 5.7 GB of the
+  test host's memory before it declined through `maxSeqLen`. `codeSize` and
+  `branchSize` now add and multiply with saturation (a large repeated group
+  overflowed the code-unit count into an `OverflowDefect`). The reader's
+  recursion is bounded by the nesting limit. The pattern families are pinned
+  against `re()` in `tsymex_rfc0005_r1_pcrelimits`. Closes RFC-0016 CRH-04.
+- **A variant construction's taint no longer lands on a sibling path**
+  (R1-04; `222b78af`). A variant constructor's plain fields were lowered
+  without draining the taint a decline queued (an unwritten global's
+  `feGlobalHavoc`), so it landed on whichever lowering drained next, a sibling
+  path or none. `if b > 3: let p = Pkt(opcode: op, tag: gN); if p.tag == 5:
+  <label>` gave `sxSat` with `pathTaint = {}`, reported `trusted()`, where
+  native Nim never reaches the label. Both raw lowering sites now lower through
+  `lowerInExpr` on the path they bind. Structurally, the statement is the unit
+  of the pending-taint discipline: any stray taint found queued, or still queued
+  when the statement returns, goes on every path the statement yields,
+  including the ones it sends down an exit channel (`return`, `break`,
+  `continue`, a raise or `finally`). The caller's queue survives a nested
+  walk, and the parameter set-up's queue is drained onto the initial path
+  (`initialWalkPath`).
+- **A variant field write the receiver has no slot for is a substitution**
+  (R1-13; `69c2f0a1`). `lowerVariantFieldSet` kept the old value and went on
+  without the write, recording the read arm's halt kind (`dcOmitted`, no taint).
+  It now records `feUnsupportedOp` (`dcSubstituted`), as every other dropped
+  write does. No program was found that reaches the write on a clean path, so
+  no verdict is known to move.
+- **Per-run walk state is reset** (R1-12; `08e40fc8`). `resetSymexRunState` did
+  not clear `pendingPtrCompares`, so a run aborted between a pointer
+  comparison and its drain left Z3 terms of the freed context for the next
+  run. The same gap in eight more per-expression lowering threadvars
+  (`closureEnvWrites`, `loweringReadNames`, `lastDrainedClosureExitPc`,
+  `lowerAsReceiver`, `allocEnumZeroLegal`, `glUnwrittenCtx`, and the
+  `seqConformCounter` and `strCharsCounter` counters) is closed. No abort
+  shape that reaches it was constructed, so there is no test.
+
 ### Changed
 
 - **Lossy clean winners are replayed** (WA-9). A clean winning path whose
@@ -109,12 +208,188 @@ shipped against 0.8.0; they come first.
   `:unk` to another that would confirm (WA-8). `;uxh=[...]` in the program's
   canonical form keys the user exception hierarchy, and is absent when there
   is none (WA-1).
-- **The soundness cache encoding is version 2**
-  (`"2:<pathTaint>:<runTaint>:<replay>:<unsafe>"`), which stores
-  `witnessUnsafe`. A version-1 entry cannot say a stored witness is safe to
-  run, so it is a miss.
-- **Walker version 268** (264 in 0.9.0). The cache's key and value changed,
-  so every 0.9.0 cache entry is orphaned: a miss, then a cold run.
+- **The soundness cache encoding is version 3**
+  (`"3:<pathTaint>:<runTaint>:<replay>:<unsafe>"`, with an optional sixth
+  field for `runDependence`; version 2 was the wiring audit's, version 1
+  0.9.0's). `witnessUnsafe` is stored (WA-2), and from version 3 it also marks
+  an unconfirmed witness whose replay ended its child (review R2, DD1). A
+  version-1 or version-2 entry cannot say whether a stored witness is safe to
+  run, so it is a miss. The fields are the enums' ordinals, which compile-time
+  pins now fix; reordering a member, or a field past one digit, fails to
+  compile and needs a new encoding version (review R3, E8).
+- **Walker version 272** (264 in 0.9.0). The cache's key and value changed
+  and the walker's exit handling changed (above), so every 0.9.0 cache entry
+  is orphaned: a miss, then a cold run.
+- **The cache key moves to `sx2:` plus SHA-256, and gains two more parts**
+  (review R1-08, R1-09, R3 E10). The key was `sx:` plus a SHA-1 of its
+  canonical form; it is now `sx2:` plus the SHA-256 of it (`symexCacheKeyPrefix`,
+  the new internal module `nelli/smt/sha256`, which runs in the compile-time
+  VM), so every SHA-1 key is a miss. `|bf=<flags>` (`buildFlagsSegment`) names
+  the build flags that decide whether the native `fn` raises: the runtime
+  checks compiled in (assertions and each check switch), `-d:danger`,
+  `-d:release`, the memory model, the backend, `--exceptions`, `--threads`,
+  `--stackTrace` and `--lineTrace`. Without it, a debug build's replay-confirmed
+  raise could be served as trusted to a `-d:danger` build whose `fn` does not
+  check. `;impl=<digest>` in the program's canonical form (`implDigest` on
+  `SymexProgram`, `nelli/smt/impl_digest`) is a SHA-256 over the source of every
+  user routine `fn` reaches natively, transitively, with the check options each
+  was compiled under, absent when there is none. A cached `rsConfirmed`,
+  `witnessUnsafe` or `:raised` record is a fact about the real `fn` and the
+  callee bodies the IR holds only by name (`{.symexOpaque.}`,
+  `{.symexTransparent.}`, a declined call); an edited callee body used to
+  leave the key unchanged and serve the old run's trusted result. The digest
+  is length-prefixed and counted, so two different bodies cannot collide by
+  sliding a literal into the next node's kind. Not keyed, by design: the
+  external body of an `importc` or `dynlib` routine (its name, signature and
+  pragmas are), the overrides of a method `fn` calls (those the walk
+  dispatches over are in the IR; their own callees are not followed), the
+  target of a call through a proc value, and the compiler's `lib/` tree (the
+  `nim=` segment moves with the toolchain).
+- **Every cache entry macro keys a method-calling SUT as `symexFind` does**
+  (R1-11; `b19ea30e`). `symexCacheKeyForFn`, `saveSymexWitness`,
+  `loadSymexWitnesses`, `saveSymexVerdict` and `loadSymexVerdict` parsed
+  without registering the SUT's methods, so for a SUT that calls a method they
+  keyed the undispatched program wherever no other entry had registered the
+  methods yet: a key `symexFindAllWitnesses` never writes, and one that
+  depended on expansion order. Every entry macro now parses through one helper.
+- **The `:raised` index is `:raised2`, and a raised-type save is
+  all-or-nothing** (review rounds 6 to 8; `51d6a02b`, `29a60d5a`, `c0283f30`).
+  A save writes an empty index first, then every per-type sentinel, then the
+  real index, one entry listing every type id; the load needs every indexed
+  sentinel and rejects an index that lists a type id twice. A save that fails
+  part-way reads back as a miss, never as a partial set or a mix of old and
+  new sentinels (a failure of the very first write leaves the previous
+  complete set). The index moved to the new key `:raised2` because an old
+  multi-type index did not parse as the new format and an old single-type
+  one did, so every record written before is now a clean miss. Old `:raised`
+  index entries are not removed. The guarantee is for one writer that crashes;
+  concurrent writers to one directory database, or a power loss without
+  fsync, can still interleave. `symexFindAllWitnesses` saves one type and
+  loads the first, so it is unaffected. A verdict hit no longer reads the
+  raised slot.
+- **`Soundness.runDependence` replaces the run-dependence threadvars**
+  (R1-07, `d8969822`; review rounds 5 and 6). Whether a verdict is this run's (a
+  solve cut off by the wall clock, a call declined for want of native stack, a
+  replay left undecided for a reason of the run) was three thread-local flags
+  read at save time, so a public `saveSymexVerdict` after other work on the
+  thread read another run's flags. It now rides the result as
+  `Soundness.runDependence: set[RunDependence]` (`rdQueryTimeout`,
+  `rdNativeStack`, `rdReplay`), set by `runSymex` and by the replay settle,
+  and the save paths read the soundness they are handed. A child killed at its
+  bound, or whose status was lost, is run-dependent by its ending.
+  `Soundness.cacheable` is the one save-side rule: an `rsUnconfirmed` claim,
+  or one with `witnessUnsafe`, whose `runDependence` has `rdReplay` is not
+  stored, since a hit would run in the host a witness whose replay hung or
+  lost its child on another host. The `:notes` record is saved only when its
+  verdict was.
+- **A replay's result is a value** (R1-06, R1-14; `d8969822`). A replay
+  returns a `ReplayResult` (the outcome and the child's report) handed to the
+  settle as an argument; the thread-local `replayDetail`, `replayEnding` and
+  run-dependence flags, and their readers, are gone. `replayWitness` returns a
+  `ReplayResult`: compare `.outcome`, not the result. The mapping from a
+  child's ending to `ReplayStatus`, run-dependence and every `feReplay*` hint
+  is in `nelli/smt/replayresult` (hint texts are unchanged). The zero value of
+  `ReplayResult`, `ReplayOutcome` and the child's `ReplayEnding` is the replay
+  that did not run (`roDeclined`, `reRefused`): never a confirmation, never
+  host-safe (review round 3, E1). A child that started and whose exit status was
+  lost (`reLost`: `SIGCHLD` ignored, or the status reaped by another wait)
+  ended: a reach it wrote confirms, a miss is a crash, and the witness is
+  never run in the host. It was reported as a refused replay before.
+- **`witnessUnsafe` is set by any replay that does not finish** (review round 2,
+  DD1, DD2). Whether a witness could run in the host was read off its
+  `feReplay*` hints, which a cache hit rebuilds from the best-effort `:notes`
+  record; with it missing, a witness whose replay ended its child ran in the
+  host. A replay that does not finish now sets `witnessUnsafe` whether or not
+  it confirmed, and it is stored with the verdict. One function decides:
+  `hostRunnable(Soundness)` in `nelli/smt/soundness`, false for a
+  `witnessUnsafe` or `rsUnsettled` claim and true otherwise (so an
+  `rsUnconfirmed` witness is run, which is how a consumer learns whether it
+  reaches the target).
+- **`assertCoveredBy` decides on `trusted()`** (R1-15; `dd30ee50`). Reading
+  `status` alone, it spliced an `rsUnconfirmed` lossy witness and blamed `testFn`
+  when it missed. A trusted claim whose witness `testFn` misses still blames
+  `testFn`. An untrusted one is run unless it is not `hostRunnable`; a hit
+  proves coverage, a miss is reported as unconfirmed, as an `sxUnknown` is, and
+  `acceptUnknownAsCovered` downgrades it. `symexForAll` seeds only
+  `hostRunnable` witnesses.
+- **Findings are returned by value, and `assertCoveredBy` returns its own**
+  (R1-10; `dd30ee50`, `947bffea`). The thread-local `SymexFinding` sink is
+  removed, as are `consumeSymexFindings` and the `symexFindings` variable.
+  `assertCoveredBy` returns its call's `SymexFinding` (a `seq[SymexFinding]`,
+  one per target, for the multi-target form), discardable; on failure it raises
+  `SymexCoverageDefect`, a subtype of `AssertionDefect` (an `except
+  AssertionDefect` still catches it), whose `findings` carries them. Inside a
+  `forAll` the finding is also recorded on the run's engine frame
+  (`recordSymexFinding`) and the engine moves the frame's findings onto
+  `Report.symexFindings` when the run ends, passed or failed; a nested `forAll`'s
+  findings reach the enclosing run when its frame is popped
+  (`popEngineFrame`). Outside a `forAll` (a plain test body, a fuzz or concolic
+  harness, a thread the property started) nothing is recorded and
+  `droppedSymexFindings()` counts the drop; the return value and the defect
+  are then the only channel. One entry is kept per `fn`, call site and target,
+  in the order each was first made, and it is the most severe finding made
+  under that key: a trusted coverage failure outranks an unconfirmed miss, which
+  outranks an `sfUnknown`, which outranks a covered unconfirmed claim, which
+  outranks a trusted covered one, with `sfNotApplicable` and `sfReplayMiss`
+  lowest; among equals the latest wins. A later passing example or shrink
+  candidate no longer hides an earlier failure.
+- **A zero `Soundness` is untrusted** (R1-16; `d390f119`, `9e0c4c2b`).
+  `ReplayStatus` gains `rsUnsettled` as its zero value, and neither
+  `trusted()` arm trusts it, so a record whose producer forgot the field fails
+  closed. A hand-built `SymexFinding(status: sfSat)` or `SymexResult` that
+  left `soundness` at its default was `trusted()` before; it is not now.
+  `runSymex` settles every verdict it ships that needs no replay (an `sxUnsat`,
+  an `sxUnknown`, a winner on a path with no `scSpurious`); anything else
+  leaves it unsettled until the replay pass settles it.
+- **The replay child is bounded and its host half hardened** (R1-18 to R1-21,
+  R1-23, R1-30; `c2e7751f`, `6d04387f`):
+  - *Quadratic decode.* The child reported a hit one byte at a time and the
+    host re-decoded the whole buffer as it grew, so a flooding child overran
+    `replayTimeoutMs` and, with no timeout, grew memory without bound. The
+    child now reports a hit and an allocation failure once; the host decodes
+    incrementally as the report arrives (`ReportReader`), keeps nothing and caps
+    it at `replayReportCap` (4096) bytes. A child that writes past the cap, or
+    bytes that are not a report, is killed and read as timed out
+    (run-dependent), with nothing it wrote trusted; its hint says that reason,
+    not `replayTimeoutMs`. The bound is measured on the monotonic clock,
+    decode included. The decoder parses the exit code itself and cannot raise
+    (an uncaught parse leaked a descriptor and left a zombie).
+  - *Wait status.* A child whose exit status is lost (`ECHILD`) was reported as
+    exit 0, so a signalled child read as a clean exit; it is now `reLost`
+    (above). `EINTR` is retried. A child, and its process group, is signalled
+    only while it has not been waited for, so its pid cannot name another
+    process. The POSIX re-exec path leads its own process group, handles
+    `waitpid` returning -1 (it spun, then killed a possibly reused pid), and
+    builds its environment before `fork` and `execve`s, with no `putEnv` in the
+    child.
+  - *Temp-file names.* The re-executed child's files had predictable names in
+    the shared temp directory (a symlink or time-of-check race, or a forged
+    report, was possible). They now live in a private directory (`mkdtemp`, or
+    a random name `CreateDirectoryW` will not reuse), created exclusively
+    (`O_EXCL|O_NOFOLLOW`, mode 0600; `CREATE_NEW`). The host reads the report
+    through the descriptor it created it with, capped, and watches its size
+    while the child runs. The child clamps the fiber stack size it is told, and
+    the wire reader rejects negative or oversized lengths.
+  - *Windows handle inheritance.* `CreateProcessW` ran with `bInheritHandles`
+    true, handing every inheritable host handle to the child and the SUT. It now
+    inherits only the NUL handle, through `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` in
+    a `STARTUPINFOEXW`. Cross-compiled; the Windows legs are the proof.
+  - *Environment marker.* `NELLI_REPLAY_CHILD` came from the environment, so a
+    stale marker the program merely inherited refused every replay (silent
+    precision loss), and a `|` in the temp directory broke the spec so the
+    child ran `main` and replayed recursively. The marker now carries a
+    per-spawn nonce and the private directory, and the witness file starts with
+    the same nonce and the site; a marker that matches no file is ignored. A real
+    child removes the marker from its environment, and the Windows environment
+    block drops an inherited copy instead of appending a second.
+- **`SymexFinding` carries the bounds a verdict was decided under, and the
+  renderers show them** (R1-17; `50ebce5b`, `b091aaeb`). See Added.
+- `saveSymexWitnessImpl`, `saveSymexVerdictImpl` and `saveSymexRaisedImpl`
+  return a `{.discardable.}` `bool`: true only when they wrote. A caller that
+  ignored the result compiles as before. `saveSymexWitnessImpl` and
+  `saveSymexRaisedImpl` skip a claim that is not `cacheable`.
+- `symexCacheKey` gains a trailing `buildFlags = buildFlagsSegment()` after
+  `replayMode`; pass it only to compute another build's key.
 - `SymexResult.fromCache` is documented as always `false`: `symexFind` has
   no cache. The 0.9.0 migration note (§2) said otherwise. The cache-hit flag
   is `SymexFinding.fromCache`.
@@ -133,16 +408,23 @@ shipped against 0.8.0; they come first.
   decide the verdict, each with its witness. `symexFindAllWitnesses` and
   `assertCoveredBy` fill both, and a cache hit serves the cold run's, from a
   new `:notes` record.
-- **Every report format renders them.** A finding with neither renders as
-  before. `ofText` (and `ofJunit`'s `<system-out>`, which carries the same
+- **Every report format renders them.** `ofText` (and `ofJunit`'s `<system-out>`, which carries the same
   text): a `hint <kind>: <msg>` line per hint and an `also raised
   <type>[ (defect)][: <msg>] witness=<n> choices` line per diagnostic, under
   the finding. `ofJson`: `"hints"` (`kind`, `severity`, `msg`) and
   `"diagnostics"` (`raisedTypeId`, `isDefect`, `raisedMsg`,
-  `witnessChoiceCount`) arrays on every symex finding, `[]` when empty.
+  `witnessChoiceCount`) arrays on every symex finding, `[]` when empty. A
+  finding with neither renders as it did, apart from the bounds and soundness
+  fields below.
   `ofGithubAnnotation`: a `::notice title=symex hint::` line per hint.
-- **`Soundness.witnessUnsafe: bool`** (WA-2): the confirming replay's child
-  reached the target and then did not finish. Only a replay sets it.
+- **`Soundness.witnessUnsafe: bool`** (WA-2): a replay of the claim's witness
+  did not finish. On an `rsConfirmed` claim the child reached the target
+  first; on an `rsUnconfirmed` one it ended before it (review round 2, DD1).
+  Only a replay sets it.
+- **`ReplayStatus.rsUnsettled`** (R1-16), the first member, so the zero value:
+  no producer settled the record, and it is never trusted. Ordinals move
+  (`rsNotNeeded` 0 to 1, `rsConfirmed` 1 to 2); an exhaustive `case` needs an
+  arm.
 - **`ReplayStatus.rsUnconfirmed`** (WA-9), tail-appended: a clean winner with
   a lossy witness that no replay confirmed. Not `trusted()`. An exhaustive
   `case` over `ReplayStatus` needs an arm.
@@ -159,9 +441,66 @@ shipped against 0.8.0; they come first.
     unpack of `CachedRaised` into two names does.
   - `nelli/smt/canonicalize` (import directly): `replayModeSegment`, and
     `symexCacheKey` gains a trailing `replayMode = replayModeSegment()`.
-  - `nelli/smt/replayproc` (import directly): `lastReplayEnding`,
-    `resetReplayRunDependence`, `replayRunDependent` and `refusedHostHook`;
-    `ReplayChild` gains `outOfMemory` and `runDependent`.
+  - `nelli/smt/replayproc` (import directly): `refusedHostHook`;
+    `ReplayChild` gains `outOfMemory` and `runDependent`. Review rounds
+    added `reLost` to `ReplayEnding` and put `reRefused` first, and
+    `replayReportCap`.
+- **`SymexFinding.bounds: ResourceBudget`** (R1-17): the budget the verdict was
+  decided under, since an `sfUnsat` is a proof only within it and an
+  `sfUnknown` may be one a larger budget decides. A cold finding carries the
+  run's echo and a cache hit the budget its key was derived from.
+  `ResourceBudget` moved to the Z3-free leaf `nelli/smt/budget` (re-exported by
+  `nelli/smt/types` and `nelli/engine/types`, so `import nelli` sees it). The
+  renderers show it: `ofText` and `ofJunit` a `bounds <field>=<value> ...`
+  line under every finding except `sfNotApplicable` and `sfReplayMiss`; `ofJson`
+  a `"bounds"` object with the budget's field names, on the same findings;
+  `ofGithubAnnotation` a `::notice title=symex bounds::` line for an `sfUnsat`
+  ("sfUnsat within ..."). The soundness rendering now also shows what no
+  renderer showed: `witnessUnsafe` and `runDependence` in the text head, a
+  `"witnessUnsafe"` boolean and a `"runDependence"` array of member names in the
+  JSON `"soundness"` object, and a `::warning title=symex witness unsafe::` line
+  for a witness that is not run in the host.
+- **`Soundness.runDependence: set[RunDependence]`** and
+  **`RunDependence`** (`rdQueryTimeout`, `rdNativeStack`, `rdReplay`) in
+  `nelli/smt/soundness` (R1-07). Verdict-neutral: `trusted()` does not read it.
+  Stored as an optional sixth field of the soundness encoding.
+- **`ReplayResult`**, a value type in the new `nelli/smt/replayresult` with
+  private fields (R1-06, review round 2, DD6): built only by `replayNotRun()`
+  and `replayResultOf(child, lossy)`, read through `outcome`, `child`, `detail`
+  and `runDependence` (`nelli/symex` exports the type and those four).
+  `ReplayOutcome` moved from `nelli/symex` to that module, still exported by
+  `nelli/symex`, with `roDeclined` now its first member (zero); the other
+  members' ordinals each move up one.
+- **`hostRunnable(Soundness): bool`** and **`Soundness.cacheable`** in
+  `nelli/smt/soundness` (above).
+- **`SymexCoverageDefect`** (`nelli/symex`; an `AssertionDefect`, with
+  `findings: seq[SymexFinding]`), and the return values of `assertCoveredBy`
+  (above).
+- **`nelli/engine/frame`**: `FindingOrigin` (`site`, `fnId`),
+  `recordSymexFinding(origin, f)`, `pushEngineFrame()` and `popEngineFrame()`
+  (`withEngineFrame` now uses them, and `EngineFrame` gains a `symexFindings`
+  table), `droppedSymexFindings()` and `resetDroppedSymexFindings()`.
+  `droppedSymexFindings` is per thread and only grows, so a test that reads it
+  resets it first. The fn identity in `FindingOrigin.fnId` is the routine's
+  name and body hash (`routineKey`) and its type.
+- **`nelli/smt/canonicalize`**: `symexCacheKeyPrefix` (`"sx2:"`),
+  `buildFlagsSegment` (and `buildChecksOn`, `buildMemModel`, `buildBackend`,
+  `buildExceptions`, the build-time values it defaults to).
+
+### Removed
+
+- **`consumeSymexFindings`, the thread-local `symexFindings` variable and
+  `recordSymexFinding(f)`** (`nelli/engine/types`, so `import nelli`). Findings
+  are returned by value or carried by `SymexCoverageDefect` (R1-10). Use
+  `assertCoveredBy`'s return value; inside a `forAll` they arrive on
+  `Report.symexFindings`. `recordSymexFinding` is back as the two-argument form
+  above.
+- **`lastReplayDetail`** (`nelli/smt/replayproc`) and **`symexQueryTimedOut`**
+  and **`symexNativeStackCut`** (`nelli/smt/runtime`): replaced by
+  `ReplayResult.detail` and `Soundness.runDependence`. All three were exported
+  for the symex entry macros, not for callers.
+- The wiring audit's `lastReplayEnding`, `resetReplayRunDependence` and
+  `replayRunDependent`, which were never in a release.
 
 ### Known limitations
 
@@ -171,6 +510,10 @@ shipped against 0.8.0; they come first.
   for any `quit(n)` or C `exit(n)`. The ending and every verdict are right;
   only the code in the message is not. Linux with glibc, and the re-executed
   child (Windows, `-d:nelliReplayReexec`), report the real code.
+- The review's Low findings that stay open (R1-24 to R1-29, R1-31 to R1-34:
+  grandchildren the SUT starts that outlive a child that ends by itself, the
+  unread `annotationViolations` on the fuzzer path, no memory cap on macOS or
+  BSD, among them) are marked open in `docs/rfc/0005-review.md`.
 - The others are tracked in `docs/rfc/0016-native-parity-hardening.md` §5.8
   (INT-22 to INT-27). Two to know about: a clean, faithful winner (one
   nothing replays) that crashes after its target still runs in the host

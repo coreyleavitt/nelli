@@ -6371,9 +6371,15 @@ proc canonicalize*(prog: SymexProgram): string =
   sort(uxhParts)
   let uxhPart =
     if uxhParts.len == 0: "" else: ";uxh=[" & uxhParts.join(",") & "]"
+  # RFC-0005 review R1-09: the source of the routines the SUT calls, which a
+  # replay runs and the IR may hold only as a name (`impl_digest.nim`). A
+  # program that calls none keys as before.
+  let implPart =
+    if prog.implDigest.len == 0: "" else: ";impl=" & prog.implDigest
   "Pg<params=[" & paramParts.join(",") & "];body=" &
     canonicalize(prog.body, env) &
-    ";procs=[" & procParts.join(",") & "]" & retPart & glPart & uxhPart & ">"
+    ";procs=[" & procParts.join(",") & "]" & retPart & glPart & uxhPart &
+    implPart & ">"
 
 # ---- SymexTarget -----------------------------------------------------------
 
@@ -6515,11 +6521,59 @@ func replayModeSegment*(forks = replayForks; reexecs = replayReexecs;
   (if forks: "fork" elif reexecs: "reexec" else: "none") &
     (if panics: "+panics" else: "")
 
+const buildChecksOn*: seq[string] = block:
+  ## RFC-0005 review R1-08. The runtime checks this build compiles in, from the
+  ## command line (`-d:danger`, `--checks`, `--assertions` and each check's own
+  ## switch). `nilChecks` is not here: on this toolchain it is no option
+  ## (`check_options.nim`). A `{.push.}` is not visible from here, nor from a
+  ## macro (probed: `compileOption` in a macro expanded under a push reads the
+  ## command line); a walked routine's push is in the IR as its
+  ## `feCheckOption` decline, and a called routine's in `implDigest`.
+  var on: seq[string]
+  when compileOption("assertions"): on.add "assertions"
+  when compileOption("boundChecks"): on.add "boundChecks"
+  when compileOption("fieldChecks"): on.add "fieldChecks"
+  when compileOption("infChecks"): on.add "infChecks"
+  when compileOption("nanChecks"): on.add "nanChecks"
+  when compileOption("objChecks"): on.add "objChecks"
+  when compileOption("overflowChecks"): on.add "overflowChecks"
+  when compileOption("rangeChecks"): on.add "rangeChecks"
+  on
+
+const buildMemModel*: string = block:
+  ## RFC-0005 review R1-08. This build's memory management: whether a
+  ## destructor or a cycle collection runs is part of what the native `fn` does.
+  when compileOption("mm", "orc"): "orc"
+  elif compileOption("mm", "arc"): "arc"
+  elif compileOption("mm", "atomicArc"): "atomicArc"
+  elif compileOption("mm", "refc"): "refc"
+  elif compileOption("mm", "markAndSweep"): "markAndSweep"
+  elif compileOption("mm", "boehm"): "boehm"
+  elif compileOption("mm", "go"): "go"
+  elif compileOption("mm", "none"): "none"
+  else: "other"
+
+func buildFlagsSegment*(checksOn = buildChecksOn; danger = defined(danger);
+                        release = defined(release);
+                        mm = buildMemModel): string =
+  ## RFC-0005 review R1-08. The build flags that change what the native `fn`
+  ## does, which the program and the settings do not key: the checks it was
+  ## compiled with (a debug build's confirmed raise cannot happen in a
+  ## `-d:danger` one, where `fn` does not check), `danger` and `release`
+  ## themselves (code may branch on them with `when defined`), and the memory
+  ## model. `--panics:on` is in `replayModeSegment`. The defaults are this
+  ## build's.
+  "ck=" & checksOn.join(",") &
+    (if danger: "+danger" else: "") &
+    (if release: "+release" else: "") &
+    "+mm=" & mm
+
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,
                     z3Version, nimVersion, walkerVersion,
                     renderingVersion: string;
-                    replayMode = replayModeSegment()): string =
+                    replayMode = replayModeSegment();
+                    buildFlags = buildFlagsSegment()): string =
   ## Content-addressed key over every input that determines a
   ## witness's validity. Stable across builds (no source locations,
   ## no map-iteration order, no compiler-specific hashes). Returns
@@ -6543,5 +6597,8 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
     # interpreter, which the walker reads differently (`pcre_engine`).
     "|pcre=" & pcreEngineName() &
     # RFC-0005 0.9.1 (WA-8): how this build replays (`replayModeSegment`).
-    "|rm=" & replayMode
+    "|rm=" & replayMode &
+    # RFC-0005 review R1-08: the checks and flags this build runs `fn` under
+    # (`buildFlagsSegment`).
+    "|bf=" & buildFlags
   "sx:" & $secureHash(canon)

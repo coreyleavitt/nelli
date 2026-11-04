@@ -97,10 +97,15 @@ let symexSrc = readFile(symexPath)
 const
   approvedCallers = [
     "parseEntryImplWarned",  # the chokepoint itself
-    "symexCacheKeyForFn", "saveSymexWitness", "loadSymexWitnesses",
-    "saveSymexVerdict", "loadSymexVerdict",
+    "entryParse",            # review R1-11: the five cache/DB helpers' parse
     "replayWitness",         # RFC-0005 S2: runs `fn`, never the walker
   ]
+    ## Review R1-11: `symexCacheKeyForFn`, `saveSymexWitness`,
+    ## `loadSymexWitnesses`, `saveSymexVerdict` and `loadSymexVerdict` no
+    ## longer call `parseEntryImpl` themselves. They parse through
+    ## `entryParse` (`warn = false`), which registers the SUT's methods first
+    ## as the walking entries do; `entryParse` holds the one direct call they
+    ## share.
     ## The five cache/DB helper macros that legitimately call
     ## `parseEntryImpl` directly (they build a cache key or persist/load an
     ## already-computed result -- they never run the walker), plus the one

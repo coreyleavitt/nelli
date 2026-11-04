@@ -38,6 +38,7 @@ export choice
 import ./smt/dsl
 export dsl
 import ./smt/scan
+import ./smt/impl_digest   ## RFC-0005 review R1-09
 import ./smt/replayproc   ## RFC-0005 S8ct
 import ./smt/replaywire   ## RFC-0005 S8ct
 import ./smt/replayresult ## RFC-0005 0.9.1 (review R1-06, R1-14)
@@ -3550,11 +3551,12 @@ proc parseEntryImplWarned(fn: NimNode, apiName: string,
   ## directly, so parsing and warning can never drift apart again for
   ## that set. The five cache/DB helper macros
   ## (`symexCacheKeyForFn`/`saveSymexWitness`/`loadSymexWitnesses`/
-  ## `saveSymexVerdict`/`loadSymexVerdict`) still call `parseEntryImpl`
-  ## directly and deliberately stay out of this: they don't run the walker
+  ## `saveSymexVerdict`/`loadSymexVerdict`) parse through the same
+  ## `entryParse` with `warn = false`: they don't run the walker
   ## themselves, they key or persist results computed elsewhere, so an
   ## arithChecks-empty warning at a cache lookup would be noise pointing at
-  ## the wrong call site.
+  ## the wrong call site. (Review R1-11: they once called `parseEntryImpl`
+  ## directly and so skipped `methodPrelude` too.)
   ##
   ## `settings` is `static SymexSettings` at every call site (an entry
   ## macro's own `static` parameter), so this whole call resolves at macro
@@ -3591,6 +3593,50 @@ proc targetLit(t: SymexTarget): NimNode =
   else: nnkObjConstr.newTree(bindSym"SymexTarget",
                              newColonExpr(ident"kind", newLit(t.kind)))
 
+type EntryParse = object
+  ## RFC-0005 review R1-11. What an entry macro starts from (`entryParse`).
+  again: NimNode      ## non-nil: return this (the methods' registration, then
+                      ## the macro again)
+  parsed: ParseResult
+  prog: NimNode       ## the `SymexProgram` constructor, keyed and walked
+
+proc entryParse(fn: NimNode; apiName: string; settings: SymexSettings;
+                again: NimNode; warn = true): EntryParse =
+  ## RFC-0005 review R1-11. Every entry macro's parse of `fn`, the cache and DB
+  ## helpers' among them, so what they key cannot drift from what the walking
+  ## entries write. First the methods `fn` calls are registered in the
+  ## caller's scope (`methodPrelude`): `again` is the macro's own call, which
+  ## then expands once more, after them. Before this the five cache/DB macros
+  ## parsed without it, and keyed the undispatched program wherever no other
+  ## entry had registered the methods yet.
+  ##
+  ## `warn`: the walking entries warn on an incoherent `settings`
+  ## (`parseEntryImplWarned`); the cache/DB macros run no walk and do not.
+  ## `prog` carries the source digest of the routines `fn` calls
+  ## (`implDigest`, R1-09).
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    result.again = newTree(nnkStmtListExpr, pre, again)
+    return
+  result.parsed =
+    if warn: parseEntryImplWarned(fn, apiName, settings)
+    else: parseEntryImpl(fn, apiName, settings.budget.maxInstantiationsPerProc)
+  let p = result.parsed
+  let paramsExpr = p.paramsNimNode
+  let bodyExpr = p.bodyNimNode
+  let procsExpr = p.procsNimNode
+  let glExpr = p.globalsNimNode
+  let rtExpr = p.retTyNimNode
+  let uxhExpr = p.userExnHierarchyNimNode
+  let peExpr = p.parseErrorsNimNode
+  let avExpr = p.annotationViolationsNimNode
+  let digest = newLit(implDigest(fn))
+  result.prog = quote do:
+    SymexProgram(params: `paramsExpr`, body: `bodyExpr`, procs: `procsExpr`,
+                 globals: `glExpr`, retTy: `rtExpr`,
+                 userExnHierarchy: `uxhExpr`, parseErrors: `peExpr`,
+                 annotationViolations: `avExpr`, implDigest: `digest`)
+
 macro symexFind*(fn: typed,
                  target: static SymexTarget,
                  settings: static SymexSettings = defaultSymexSettings()
@@ -3606,11 +3652,12 @@ macro symexFind*(fn: typed,
   # `settings` and THEN calls `parseEntryImpl` — a single call site both
   # entries share.
   # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
-  let pre = methodPrelude(fn)
-  if pre != nil:
-    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFind", fn,
-      targetLit(target), newLit(settings)))
-  let parsed = parseEntryImplWarned(fn, "symexFind", settings)
+  # Review R1-11: the prelude and the parse are `entryParse`'s.
+  let e = entryParse(fn, "symexFind", settings, newCall(bindSym"symexFind",
+    fn, targetLit(target), newLit(settings)))
+  if e.again != nil: return e.again
+  let parsed = e.parsed
+  let progExpr = e.prog
 
   # Build the tuple type and witness-construction tuple. We genSym a
   # local name for the RawWitness so the witness-constructor calls
@@ -3627,14 +3674,6 @@ macro symexFind*(fn: typed,
   # `(int,)` is a syntactic 1-tuple; nnkTupleConstr with one child
   # renders correctly for both the type and the value.
 
-  let bodyExpr   = parsed.bodyNimNode
-  let paramsExpr = parsed.paramsNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode  ## Phase 15 E4a
-  let peExpr     = parsed.parseErrorsNimNode       ## Phase 15 G1c
-  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
 
   # RFC-0005 S10: the walker run AND the rule-3 replay settle of its
   # candidates, in one emitted expression (`emitRunSymexReplayed`) -- the
@@ -3646,12 +3685,7 @@ macro symexFind*(fn: typed,
 
   result = quote do:
     block:
-      let `progId` = SymexProgram(params: `paramsExpr`,
-                              body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
-                              userExnHierarchy: `uxhExpr`,
-                              parseErrors: `peExpr`,
-                              annotationViolations: `avExpr`)
+      let `progId` = `progExpr`
       let raw = `runReplayed`
       ## ADR-0012 D2: type each RawDiagnostic into DefectFinding[T] by
       ## rebinding diagWitId per entry and running the same witnessTup reader.
@@ -3742,25 +3776,15 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   ## per `fn` parameter, whether it's a direct (symbolic) draw or a
   ## concretized (opaque-combinator) value — see `ConcolicParamBinding`.
   # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
-  let pre = methodPrelude(fn)
-  if pre != nil:
-    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicCollect",
-      fn, trace, bindings, newLit(settings), newLit(maxDraws)))
-  let parsed = parseEntryImplWarned(fn, "concolicCollect", settings)
-  let bodyExpr   = parsed.bodyNimNode
-  let paramsExpr = parsed.paramsNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode
-  let peExpr     = parsed.parseErrorsNimNode
-  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
+  # Review R1-11: the prelude and the parse are `entryParse`'s.
+  let e = entryParse(fn, "concolicCollect", settings,
+    newCall(bindSym"concolicCollect", fn, trace, bindings, newLit(settings),
+            newLit(maxDraws)))
+  if e.again != nil: return e.again
+  let progExpr = e.prog
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
-                              parseErrors: `peExpr`,
-                              annotationViolations: `avExpr`)
+      let prog = `progExpr`
       runConcolicCollectImpl(prog, `trace`, `bindings`, `settings`, `maxDraws`)
 
 # ---- concolicFlip (RFC-fuzzer-nextgen G2) -----------------------------------
@@ -3781,26 +3805,16 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   ## `branchTrace`) to flip — a caller-supplied designator at G2; G3 wires
   ## frontier-stall selection on top of this later.
   # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
-  let pre = methodPrelude(fn)
-  if pre != nil:
-    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicFlip",
-      fn, trace, bindings, targetBranchIndex, newLit(settings),
-      newLit(maxDraws), newLit(maxRelaxationAttempts), newLit(z3TimeoutMs)))
-  let parsed = parseEntryImplWarned(fn, "concolicFlip", settings)
-  let bodyExpr   = parsed.bodyNimNode
-  let paramsExpr = parsed.paramsNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode
-  let peExpr     = parsed.parseErrorsNimNode
-  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
+  # Review R1-11: the prelude and the parse are `entryParse`'s.
+  let e = entryParse(fn, "concolicFlip", settings,
+    newCall(bindSym"concolicFlip", fn, trace, bindings, targetBranchIndex,
+            newLit(settings), newLit(maxDraws), newLit(maxRelaxationAttempts),
+            newLit(z3TimeoutMs)))
+  if e.again != nil: return e.again
+  let progExpr = e.prog
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
-                              parseErrors: `peExpr`,
-                              annotationViolations: `avExpr`)
+      let prog = `progExpr`
       runConcolicFlipImpl(prog, `trace`, `bindings`, `targetBranchIndex`,
                          `settings`, `maxDraws`, `maxRelaxationAttempts`,
                          `z3TimeoutMs`)
@@ -4187,22 +4201,17 @@ macro symexCacheKeyForFn*(fn: typed,
   ## suffix participation contract. NOT intended for production
   ## consumers — they should use `saveSymexWitness` /
   ## `loadSymexWitnesses` which encapsulate the suffix.
-  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
-  let parsed = parseEntryImpl(fn, "symexCacheKeyForFn",
-                               settings.budget.maxInstantiationsPerProc)
-  let paramsExpr = parsed.paramsNimNode
-  let bodyExpr   = parsed.bodyNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
+  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
+  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
+  let e = entryParse(fn, "symexCacheKeyForFn", settings,
+    newCall(bindSym"symexCacheKeyForFn", fn, targetLit(target), newLit(settings)),
+    warn = false)
+  if e.again != nil: return e.again
+  let progExpr = e.prog
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`,
-                              body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
-                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
+      let prog = `progExpr`
       symexCacheKey(prog, `targetExpr`, `settings`,
                     z3Version        = z3FullVersion(),
                     nimVersion       = NimVersion,
@@ -4218,22 +4227,17 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   ## key derived from `fn`'s IR, the target, the witness-relevant
   ## subset of `settings`, and the current Z3/Nim/walker versions.
   ## Non-Sat findings are skipped.
-  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
-  let parsed = parseEntryImpl(fn, "saveSymexWitness",
-                               settings.budget.maxInstantiationsPerProc)
-  let paramsExpr = parsed.paramsNimNode
-  let bodyExpr   = parsed.bodyNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
+  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
+  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
+  let e = entryParse(fn, "saveSymexWitness", settings,
+    newCall(bindSym"saveSymexWitness", db, fn, targetLit(target), newLit(settings), finding, maxEntries),
+    warn = false)
+  if e.again != nil: return e.again
+  let progExpr = e.prog
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`,
-                              body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
-                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
+      let prog = `progExpr`
       var dbErrors: seq[string] = @[]
       saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
                             `finding`, dbErrors, `maxEntries`)
@@ -4255,22 +4259,17 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   ## SUT/target/settings/Z3/Nim/walker combination, each with its
   ## stored `Soundness` (`seq[CachedWitness]`, RFC-0005 S11).
   ## Mismatched key → empty seq.
-  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
-  let parsed = parseEntryImpl(fn, "loadSymexWitnesses",
-                               settings.budget.maxInstantiationsPerProc)
-  let paramsExpr = parsed.paramsNimNode
-  let bodyExpr   = parsed.bodyNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
+  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
+  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
+  let e = entryParse(fn, "loadSymexWitnesses", settings,
+    newCall(bindSym"loadSymexWitnesses", db, fn, targetLit(target), newLit(settings)),
+    warn = false)
+  if e.again != nil: return e.again
+  let progExpr = e.prog
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`,
-                              body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
-                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
+      let prog = `progExpr`
       var dbErrors: seq[string] = @[]
       let witnesses = loadSymexWitnessesImpl(`db`, prog, `targetExpr`,
                                               `settings`, dbErrors)
@@ -4301,22 +4300,17 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## content-addressed key, with the `soundness` it was decided under
   ## (RFC-0005 S11). No-op for sfSat (use `saveSymexWitness`) and
   ## sfNotApplicable.
-  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
-  let parsed = parseEntryImpl(fn, "saveSymexVerdict",
-                               settings.budget.maxInstantiationsPerProc)
-  let paramsExpr = parsed.paramsNimNode
-  let bodyExpr   = parsed.bodyNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
+  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
+  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
+  let e = entryParse(fn, "saveSymexVerdict", settings,
+    newCall(bindSym"saveSymexVerdict", db, fn, targetLit(target), newLit(settings), status, soundness),
+    warn = false)
+  if e.again != nil: return e.again
+  let progExpr = e.prog
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`,
-                              body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
-                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
+      let prog = `progExpr`
       var dbErrors: seq[string] = @[]
       saveSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`,
                             `status`, `soundness`, dbErrors)
@@ -4333,22 +4327,17 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## (UNSAT-first load-order tie-break). Returns
   ## `Option[CachedVerdict]`: the status, its stored `Soundness`
   ## (RFC-0005 S11) and `gaps` (RFC-0005 S8av).
-  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
-  let parsed = parseEntryImpl(fn, "loadSymexVerdict",
-                               settings.budget.maxInstantiationsPerProc)
-  let paramsExpr = parsed.paramsNimNode
-  let bodyExpr   = parsed.bodyNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode   ## RFC-0005 W1: keys the program
+  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
+  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
+  let e = entryParse(fn, "loadSymexVerdict", settings,
+    newCall(bindSym"loadSymexVerdict", db, fn, targetLit(target), newLit(settings)),
+    warn = false)
+  if e.again != nil: return e.again
+  let progExpr = e.prog
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`,
-                              body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
-                              userExnHierarchy: `uxhExpr`)   ## RFC-0005 W1
+      let prog = `progExpr`
       var dbErrors: seq[string] = @[]
       let verdict = loadSymexVerdictImpl(`db`, prog, `targetExpr`,
                                           `settings`, dbErrors)
@@ -4398,11 +4387,14 @@ macro symexFindAllWitnesses*(fn: typed,
   # through `symexFind`/`assertCoveredBy` (its own settings never touched
   # `warnIncoherentSettings` before this).
   # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
-  let pre = methodPrelude(fn)
-  if pre != nil:
-    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFindAllWitnesses",
-      fn, db, newLit(symexSettings), excludeTargets))
-  let parsed = parseEntryImplWarned(fn, "symexFindAllWitnesses", symexSettings)
+  # Review R1-11: the prelude and the parse are `entryParse`'s, as the cache
+  # and DB macros' are, so their keys are the ones written here.
+  let e = entryParse(fn, "symexFindAllWitnesses", symexSettings,
+    newCall(bindSym"symexFindAllWitnesses", fn, db, newLit(symexSettings),
+            excludeTargets))
+  if e.again != nil: return e.again
+  let parsed = e.parsed
+  let progExpr = e.prog
 
   let labels = irCollectLabels(parsed.body, parsed.procs)
 
@@ -4458,14 +4450,6 @@ macro symexFindAllWitnesses*(fn: typed,
   let diagWitId = genSym(nskLet, "diagRawWit")
   let (_, diagWitnessTup) = emitWitnessTuple(parsed.params, diagWitId)
 
-  let bodyExpr   = parsed.bodyNimNode
-  let paramsExpr = parsed.paramsNimNode
-  let procsExpr  = parsed.procsNimNode
-  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
-  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
-  let uxhExpr    = parsed.userExnHierarchyNimNode  ## RFC-0005 W1 (Phase 15 E4a)
-  let peExpr     = parsed.parseErrorsNimNode   ## Phase 15 G1c
-  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
 
   # Compile-time list of target constructors. We materialise them
   # at runtime as a `seq[SymexTarget]` so the runtime loop is a
@@ -4676,12 +4660,7 @@ macro symexFindAllWitnesses*(fn: typed,
 
   result = quote do:
     block:
-      let `progId` {.used.} = SymexProgram(params: `paramsExpr`,
-                              body: `bodyExpr`,
-                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
-                              userExnHierarchy: `uxhExpr`,   ## RFC-0005 W1
-                              parseErrors: `peExpr`,
-                              annotationViolations: `avExpr`)
+      let `progId` {.used.} = `progExpr`
       `targetsBuild`
       var `findingsId`: seq[SymexFinding] = @[]
       var `dbErrorsId` {.used.}: seq[string] = @[]

@@ -3003,6 +3003,14 @@ type
                                      ## Verdict-neutral: `runSymex` copies
                                      ## them onto every `RawResult` and reads
                                      ## them for nothing else.
+    implDigest*: string
+                                     ## RFC-0005 review R1-09. A digest of
+                                     ## the source of the user routines the
+                                     ## SUT calls (`impl_digest.nim`), which
+                                     ## a replay runs and the IR may hold
+                                     ## only as a name. Keys the program;
+                                     ## the walker never reads it. Empty
+                                     ## where the SUT calls none.
 
   CallStat* = object
     name*:      string

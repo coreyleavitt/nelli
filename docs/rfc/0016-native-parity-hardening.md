@@ -154,9 +154,49 @@ state    = "settled"
 title    = "Remove SymexResult.fromCache in 0.10.0 with a migration note (INT-39). That release breaks the API anyway, and the field has no producer"
 resolves = ["fromcache-field"]
 
+[[decision]]
+id       = "D-0016-5"
+state    = "settled"
+title    = "Wave 1 (the seven clean false verdicts of §5.0) ships as 0.9.2, after the /architect rounds on §8-§13"
+
+[[decision]]
+id       = "D-0016-6"
+state    = "settled"
+title    = "Tracking is about twenty quipu rows plus the generated universe ledger (§8.2), not one row per cell"
+
+[[decision]]
+id       = "D-0016-7"
+state    = "settled"
+title    = "--mm:refc is refused by name at symexFind macro time (admitBuild, §8.3), not modelled"
+
+[[decision]]
+id       = "D-0016-8"
+state    = "settled"
+title    = "Int-offset soundness (N24, #166, #169) is owned by RFC-0014; RFC-0016 carries a pointer row only"
+
+[[decision]]
+id       = "D-0016-9"
+state    = "settled"
+title    = "No signed-wrap setting: C undefined behaviour is an outcome the build profile defines (K10, §9)"
+
 [[slice]]
 id    = "D1"
-title = "Differential fuzzing harness: generated SUT shapes, walker against native execution, exhaustive small domains (§4)"
+title = "Differential fuzzing harness (§4, §10): K8a skeleton with one family in Wave 2, families from the admission tables in Wave 4"
+state = "pending"
+
+[[slice]]
+id    = "W1"
+title = "Wave 1 / 0.9.2 (§11): W1-a..W1-g fix the seven clean false verdicts of §5.0 and the cheapest compile stops; W1-z integrates them as one walker bump"
+state = "pending"
+
+[[slice]]
+id    = "W2"
+title = "Wave 2 (§11): CI-A/CI-B Linux legs, K9 pin helper, ADM-1 admission spike, K1a universe ledger with ratchet, K7 Survivors type, K8a fuzzer skeleton"
+state = "pending"
+
+[[slice]]
+id    = "W3"
+title = "Wave 3 (§11): admission tables K2-K6 and K10 undefined behaviour as an outcome, each shrinking the K1 allowlist"
 state = "pending"
 
 [[slice]]
@@ -209,7 +249,11 @@ state = "pending"
   declines RFC-0005 added. Nothing was dropped. This RFC is open-ended: it has
   no fixed slice list, and it is tracked by the rate of new findings (§3). The
   exit criterion is §3.3: the work list empty (Corey, 2026-11-06, item
-  `exit-criterion`).
+  `exit-criterion`), measured as §12 defines it. **Revised 2026-11-06 by
+  `/architect` round 1:** a read-and-probe of the whole walker surface found
+  seven clean false verdicts no row named (§5.0), so §8-§13 add a closure
+  design (one admission mechanism, a generated universe ledger, undefined
+  behaviour as an outcome) and a slice order. Round 2 pending.
 - Category: symex
 - Size: L
 - Value: high
@@ -380,7 +424,8 @@ whatever RFC owns the next tag; it does not wait in this RFC's precision queue.
 ### §3.3 What "done" means — **decided 2026-11-06: the work list alone**
 
 Corey chose option B of item `exit-criterion` (decision D-0016-1): the RFC
-closes when item 1 below holds. Items 2 and 3 were the proposal and are not
+closes when item 1 below holds. "Empty" is measured by §12: a test result,
+not a reading of this list. Items 2 and 3 were the proposal and are not
 part of the exit criterion; they stay here as the record of what was weighed,
 and the differential fuzzer (§4) still runs as the search that feeds the work
 list. The proposal was:
@@ -441,9 +486,10 @@ with a native harness, and compares.
 - **Builds.** The same seed runs on c and cpp, and on both Z3 versions; a
   finding records the build. The PCRE differential leg S8co item 2 asks for is
   the same idea applied to regex, and should share the harness.
-- **Where it runs.** On the worker (`nelli-work`) at first, then as a
-  scheduled CI job on a Linux runner, which also gives the cpp leg in CI-02 a
-  home. It does not run on every push.
+- **Where it runs.** A scheduled CI job on a Linux runner (§11, K8a),
+  rotating one build row per night; it does not run on every push. (The
+  first draft named the `sls2` worker, which has been offline since
+  2026-11-03.) §10 revises the domain and the oracle.
 
 ### §4.3 What it is not
 
@@ -453,6 +499,32 @@ foreign threads, files); the generator keeps SUTs effect-free except for
 memory, unless a generator family for effects is added deliberately.
 
 ## §5 — Work list
+
+### §5.0 Found by the 2026-11-06 research round
+
+Six read-and-probe lenses over `83c1d304` (reports and the merged list,
+W-01 to W-69 with its corrections to §5.1-§5.8, are in
+`docs/rfc/0016-research/`; `MERGED-worklist.md` is the backlog this section
+summarises). Seven clean false verdicts, each on the default or a documented
+build; evidence V = re-run by the coordinator on one build, P = the lens ran
+walker and native on one build. Every mechanism predates RFC-0005, so each is
+expected to be `same` as `main`; each still gets its three-way row in W1-z.
+
+| ID | Item | Evidence | Cause | Slice |
+|---|---|---|---|---|
+| W-01 | `except T as e:`: handler label false `sxUnsat`, raise target false `sxRaised` | V | `dsl_parser.nim:20460-20461` stores the `repr` as the type id | W1-a |
+| W-02 | explicit `{.cursor.}` on a local: false `sxUnsat` and `sxSat` (c/orc, c/arc release, cpp) | V | `dsl_parser.nim:19771-19792` drops every local pragma but `noinit` | W1-b |
+| W-03 | `--panics:on`: a label after a Defect is a clean `sxSat`; natively the process dies | V | the walker never reads `nimPanics` (only `symex.nim:2343`) | W1-c |
+| W-04 | `float32` ↔ `float64` conversions, hidden ones included: false clean verdicts | P | transparent `else: parseExpr(operand)` at `dsl_parser.nim:10658`, `:10845` | W1-e |
+| W-05 | `low(int) mod -1`, literal divisor: false `sxUnsat` (gcc folds to 0) | P | `runtime.nim:8862-8870` traps regardless of divisor or target | W1-d |
+| W-06 | unsigned `div`/`mod` by zero: `sxRaised DivByZeroDefect`, natively SIGFPE | P | `dsl_parser.nim:4023-4025` lists unsigned beside signed | W1-d |
+| W-07 | checks-off signed overflow modelled as wrap: `v + 1 > v` clean `sxSat` at `high(int)` | P | `runtime.nim:24500-24502` consumes the marker with no token | W1-d |
+
+The rows of §5.1-§5.8 below are unchanged by this round. The reconciliation
+lens found 16 of them closable at the tag head, 4 that close as a recorded
+decline, 14 duplicates, 11 with stale evidence and 3 misclassified
+(`E-reconcile.md`); those edits are round 2's, so the row ids stay stable
+while §8 is reviewed.
 
 Owners are left empty: the coordinator assigns them. "Moved slice" means a
 job file on `origin/worker-jobs` written under RFC-0005; it keeps its id and
@@ -714,9 +786,453 @@ Unchanged from RFC-0005's worker brief, with two additions from its lessons:
 
 ## §7 — Open forks
 
-None open. Decided by Corey on 2026-11-06:
+None open. `/architect` round 1 (2026-11-06) resolved every point its five
+lenses raised by recommendation (§8-§13; the handoff's round-1 ledger lists
+each). Corey's decisions on the research round are D-0016-5 to D-0016-9:
+Wave 1 as 0.9.2 after the design rounds; about twenty tracker rows plus the
+generated ledger; refc refused by name; int-offset soundness owned by
+RFC-0014; undefined behaviour as an outcome instead of a wrap setting.
+Earlier: Decided by Corey on 2026-11-06:
 
 - **`exit-criterion`:** the work list alone (B, D-0016-1).
 - **`upstream-reports`:** file UPS-01 and UPS-03, hold UPS-02 (B, D-0016-3).
 - **`fork-c-clean-replay`:** not added (B, D-0016-2).
 - **`fromcache-field`:** remove the field in 0.10.0 (B, D-0016-4; INT-39).
+
+## §8 — Closure design (revision of 2026-11-06, `/architect` round 1)
+
+**Why a design section was needed.** A read-and-probe of the whole walker
+surface at `83c1d304` (six lenses: constructs, types × memory, magics and
+stdlib, the soundness machinery and builds, reconciliation of this list, and
+the test surface; reports in `docs/rfc/0016-research/`) found seven clean
+false verdicts that no row here named (§5.0). They share one shape: **a clean
+model at a place that is not a table.** A transparent `else:
+parseExpr(operand)` (`dsl_parser.nim:10658`, `:10845`), a type id built from a
+node's `repr` (`:20461`), a local pragma dropped by a loop that keeps only
+`noinit` (`:19771-19792`), a build flag that is keyed but never read
+(`symex.nim:2343`), a C-compiler fact modelled as a Nim fact
+(`runtime.nim:8866-8870`, `:24500-24502`). The carrier is not the problem: the
+same audit traced 23 taint mechanisms (fork, merge, call cache, unroll, prune,
+halt, replay settle, cache load) and none loses taint. What is missing is
+admission: §2.1 says a model is admitted by an allowlist, and in these places
+nothing admitted it.
+
+Fixing the seven one at a time is the whack-a-mole RFC-0005 played. This
+section replaces it with one mechanism that makes an unadmitted model
+impossible to write silently, and a finish line (§12) that is a property of
+that mechanism's output, not a count of rows.
+
+### §8.1 Admission: one table type, default decline
+
+`smt/admission.nim`, a Z3-free leaf beside `soundness.nim`:
+
+```nim
+type
+  AdmissionModel* = enum amExact, amDeclined, amOutOfScope
+  Admission*[K] = object
+    key*:    K
+    model*:  AdmissionModel
+    kind*:   SymexErrorKind        ## the decline kind when amDeclined
+    pin*:    string                ## test file; required for amExact
+    rows*:   set[BuildRow]         ## build rows the pin covers (§8.3)
+    reason*: string                ## why it stays declined / out of scope
+func admit*[K](t: openArray[Admission[K]]; k: K): Admission[K]
+  ## an absent key is Admission(model: amDeclined, kind: feUnadmitted)
+```
+
+`feUnadmitted` is a new kind, classified `dcOmitted` (a Class-A
+`declineAtSite`). The invariant the whole RFC rests on: **forgetting a table
+entry produces a decline, never a model.** The codebase already has this shape
+three times and the design generalises them rather than adding parallel
+structures: `classOf` (`types.nim:3228`, an exhaustive `case` with no `else`),
+`varParamMagics` (`dsl_parser.nim:4254`, with the lib-scanning guard
+`tsymex_rfc0005_s8bl_magicscan`), and `verifiedLibs` (`pcre_engine.nim:143`).
+
+The tables, one per axis, each a `const`:
+
+| table | key | consumers | absorbs |
+|---|---|---|---|
+| `admitMagic` | magic name × operand class (literal / const / variable, width, signedness) | the per-name switch at `dsl_parser.nim:11868`, `ensureProcRegistered` | `varParamMagics`, the four `divMagics`-style string arrays (`:4018-4030`) |
+| `admitTypeOp` | `(IRTypeKind, MemOp)` | `typeCopiedByValue` (`:7835`), `holdsSharedMemory` (`:16561`, inverted to a value-only list), a new `localDeclGate` | the S8cq by-value allowlist |
+| `admitLocalPragma` | pragma name on a `var`/`let` | `localDeclGate` | the `noinit` special case at `:19771-19792` |
+| `admitBuild` | `BuildProfile` field values (§8.3) | `symexFind` at macro time | `verifiedLibs`' role for the compiler, Z3 and Nim |
+| `admitReadOnly` | `NimNodeKind` (and call shape) proved not to write | one `mayWrite(n)` | the four parser predicates `nodeWritesHeap` (`:16574`), `routeStoresThroughDeref` (`:22429`), `ptrUsesStayLocal` (`:6546`), the hook copy-proof (`:22505`) |
+| `admitDefinedness` | `(op, BuildProfile)` → defined / Defect / UB (§9) | the arithmetic lowering | `arithTrapConds`, `currentArithWraps` (`runtime.nim:1976`) |
+| `admitStdlibBody` | `(module, routine)` walked by body | the inliner | the implicit "walk any `lib/` body" |
+
+`bindsViewWhole` (`runtime.nim:21011`) works on `IRStmt`, not `NimNode`, and
+stays a separate IR-level predicate; it gets its own fail-closed rewrite, not
+the parser oracle.
+
+**Constructs are the one axis that is not a `const` table.** Dispatch there is
+`case n.kind` plus positional child reads. Admission is the `classOf` shape
+instead: every `case` over a `NimNode` kind in `src/nelli` (the parser, and
+also `concolic.nim:165-200`, `replaywire.nim:140-175`, the `symex.nim`
+footprint scanners, `check_options.nim`, `vm_alias_guard.nim`) either has no
+`else`, or its `else` body is a decline. This is enforced structurally (§8.4
+K2), not by grep, plus a child-shape census corpus (A §3.1: a `getImpl`
+snippet per construct row asserting an IR with no unsupported node or a named
+decline; a macro `error()` fails it).
+
+**Proof spike.** `Admission[K]` is designed against more than one consumer
+from the start: its first slice (ADM-1, §11) converts `varParamMagics` and
+the PCRE `verifiedLibs` list onto it with no verdict change, so the generic
+shape is checked against a name-keyed and a record-keyed table before any
+new table is written on it.
+
+### §8.2 The universe ledger is an output
+
+`tests/tsymex_0016_universe.nim` (registered in `nelli.nimble`) enumerates the
+axes, looks each element up in its admission table, and **emits**
+`docs/rfc/0016-universe.tsv` the way `sweep.sh` emits `.drift`. It is not a
+hand-annotated input: "stale row" and "cell in two states" cannot happen, and
+the reason a cell stays declined lives in the table entry, where review sees
+it.
+
+- **A cell is `(dispatch site, arm key)`**, the discriminant the code actually
+  reads: an operator name, a `(fromKind, toKind)` conversion pair, a magic ×
+  operand class, a `(IRTypeKind, MemOp)`. A cell `(nnkInfix, expr)` would be
+  exact for `int ==` and declined for `seq ==` at once; the arm key is what
+  makes a cell well-formed.
+- **Axes.** Constructs (from the dispatch census), type × memory operation,
+  magics (name-keyed strings scanned from all of `lib/` with multi-line
+  declarations; `TMagic` is not importable, so its count is a dev-image script
+  output, not an assertion), stdlib bodies, build rows, `SymexErrorKind`
+  members (each named by at least one cell, or deleted), the rows of §5, and
+  two that the first draft lacked: **call-site shape × callee shape**
+  (converter, template with a side-effecting argument, default-valued formals,
+  named and varargs arguments, two instantiations of one generic, two closures
+  sharing an environment, inline vs closure iterator, `method` dispatch,
+  hooks, `defer`, `{.borrow.}`) and **exceptions × memory** (a raise inside
+  `=destroy`, `finally`, `defer` or an inlined iterator; `getCurrentException`
+  across nested handlers; UPS-01 is this class).
+- **States:** `exact(pin, rows)`, `declined(kind, reason)`,
+  `out-of-scope(reason)`, and for unsat cells a distinction between
+  **exhaustive** and **sampled** native evidence (§10), printed separately.
+  `unclassified` is the only state the test rejects.
+- **What it certifies.** K1 certifies **single-site** exactness. It does not
+  certify combinations (a construct nested in another, a memory route through
+  a call); those are the fuzzer's job, measured by a pairwise co-occurrence
+  figure (§12 item 4). The RFC says so rather than letting the ledger's count
+  imply more.
+- **Ratchet from the first commit.** The test fails on any *new* unclassified
+  cell against a committed allowlist file that may only shrink (the
+  `sweep-diff.sh` pattern). It is never "reporting only": each later table
+  must classify what it surfaces in the same commit. §12 is reached when the
+  allowlist is empty.
+- **Where the work happens.** Enum axes regenerate at compile time; pin-file
+  checks (the file exists, is registered, calls the K9 helper) run at run
+  time with `readFile`, since `staticRead` of ~850 test files is VM time a
+  compile should not pay. A leg checks only the cells that claim its own
+  build row; a cell that claims a row no leg runs is `unclassified`.
+- **First commit proves it runs.** The slice that lands it shows it RED on
+  each CI leg with a planted unclassified cell, as `symex-mingw.yaml:217-230`
+  pins the z3-optional seam.
+
+### §8.3 BuildProfile: one constant, read and keyed
+
+The SUT and nelli are one binary, so the build is a compile-time fact:
+`const buildProfile*: BuildProfile` in a leaf `smt/buildprofile.nim`,
+computed from `compileOption`, `defined`, `querySetting(compileOptions)`,
+`querySetting(ccompilerPath)`, `sizeof(int)`, `hostCPU`, `hostOS`,
+`NimVersion` and the patched-toolchain stamp, `z3FullVersion()` and the PCRE
+engine. Fields: check options, panics, memory manager, exceptions mode,
+backend, `--opt`, C compiler and version, `-fwrapv`/`-fno-strict-overflow`
+and `-ffast-math` fragments, CPU and pointer width, OS,
+`nimOldCaseObjects`/`strictCaseObjects`, Nim version and patchset, Z3
+version, PCRE engine.
+
+Three things derive from the one constant, so none can drift from it (today
+the key segment is a second hand list that did drift, INT-31):
+
+1. the cache key's `|bf=` segment is `$buildProfile`;
+2. `admit(admitBuild, buildProfile)` runs at `symexFind` macro time: a profile
+   outside the verified set is a compile-time `error()` naming the field
+   (`--mm:refc` refused by name, decision D-3; 32-bit `int`; an unverified Z3,
+   Nim or PCRE build, as PCRE already does). The C compiler identity is a
+   **pin** axis, not a refusal axis: K10 (§9) removes compiler folding from
+   the trust surface, so a gcc bump does not refuse every consumer;
+3. `Soundness.profile` carries the profile hash, so a finding renders "decided
+   on goto/orc/c/64-bit, panics off" and a verdict read into another build
+   can be seen to be foreign.
+
+Every walker arm that depends on the build reads `buildProfile`; a test pins
+that `defined(nimPanics)`, `compileOption(` and `defined(release)` occur in
+`smt/` only inside `buildprofile.nim`. `{.push.}` regions stay in the IR as
+`feCheckOption` markers: the profile is the command-line baseline,
+`check_options.nim` the per-routine delta. What `querySetting` cannot read is
+refused, not guessed. Build rows the CI can run: Linux and mingw today; an
+arm64 row (`ubuntu-24.04-arm`) and a macOS row (`macos-14`) are added at
+least as compile-only legs, since arm64 does not trap on `INT_MIN / -1` and
+INT-25/PND-03 have waited on a macOS host.
+
+### §8.4 The mechanisms, as views of admission
+
+| K | what | closes |
+|---|---|---|
+| K1 | universe test and ledger (§8.2) | the finish line itself |
+| K2 | constructs: dispatch census over every `case n.kind` in `src/nelli` (the test parses each source file's AST at compile time and asserts each `else` body is a `declineAtSite`/`declineMarker` call, robust to renames and to `ctx.parseExpr` spellings); `typeIdOf(sym): Option[string]` as the only source of exception type ids (`none` is `eeUnknownExnType`); child-shape census corpus | W-01, W-04, W-21, W-27, W-33 |
+| K3 | `admitTypeOp` and `admitLocalPragma` (the pragma list is hand-written: Nim has no enum of `var`/`let` pragmas, so the guard is a list checked against Nim's `pragmas.nim` text) | W-02, W-12, W-20, W-43, B-04 |
+| K4 | `admitMagic` with a lib-wide guard; a magic with a real body that is not admitted as walked-by-body declines; `admitStdlibBody` seeded from a `feStdlibBodyWalked` hint recorded per routine the walker inlines; every raise-text decline gets a `SymexErrorKind`; every admitted stdlib body has one bounded run in the guard | W-05, W-06, W-22, W-24, C-11, C-16 |
+| K5 | `BuildProfile` (§8.3) | W-03, W-14, W-17, W-23, W-50..53 |
+| K6 | `mayWrite(n)` over `admitReadOnly`; a walked user callee recurses with a cycle bound, an opaque one may write anything; pinned on a write-shape corpus with native runs | W-08..W-10 |
+| K7 | degrade discipline by type: `degrade` stops being exported; the walker exports `forkTainted(...)`, `halt(...)` and `proven(paths, pin)`, each returning a distinct `Survivors` type that an `isUnsupported` arm must return. The token-less `return paths` at `runtime.nim:24500-24502` becomes a type error, and the 20 `discard w.degrade(` sites become `halt` | W-07, D-13 |
+| K8 | differential fuzzer (slice D1, §4), its families generated from the admission tables (§10) | the next W-01, before a consumer finds it |
+| K9 | one shared native-pin helper, `tests/nativepin.nim`: `pinExact(fn, label, domain)`, `pinUnsat(fn, label, domain, exhaustive)`, `pinDecline(fn, label, kind)`, `pinRaised(fn, target, domain)`. The helper is the assertion, so "the pin file calls the helper" means "the pin checks something" | W-54..W-56 |
+| K10 | undefined behaviour as an outcome (§9) | W-05, W-06, W-07, B-08 |
+
+**Ergonomics.** Adding a model is now: one table entry, the arm, the pin
+(through K9), and a walker bump. The ledger row and the RFC cell are
+generated. The omission that matters, a missing entry, is a decline, not a
+wrong verdict.
+
+## §9 — Undefined behaviour is an outcome (K10)
+
+**The problem.** Nim's checked operations define their failure as a Defect.
+Its unchecked ones are plain C operators, and C leaves several of them
+undefined: the compiler may assume they never happen, and rewrite code around
+them, including code that runs *before* them. The walker today models one
+build's outcome as the semantics: two's-complement wrap for signed overflow
+under checks off (`runtime.nim:24500-24502`; gcc folds `v + 1 > v` away, D-02),
+an x86 trap for `low(int) mod -1` (`:8866-8870`; gcc folds a literal `-1` to
+0, C-01; arm64 returns 0 for any divisor), a catchable `DivByZeroDefect` for
+unsigned division by zero (`dsl_parser.nim:4023-4025`; natively SIGFPE, B-07),
+and the x86 count mask for shifts (`runtime.nim:6214-6220`, B-08). Replay is
+no evidence: a replay on the native build agrees with that build's choice and
+says nothing about `-O2`, clang, MSVC or arm64.
+
+**Several of these are undefined on the default build**, with all checks on:
+unsigned `div`/`mod` by zero, shifts by a count outside `[0, width)`,
+`INT_MIN mod -1` (Nim's `nimModInt` is a plain C `%`). Float to int out of
+range is the same class and is already a decline (`feConvFloatToIntUndefined`,
+`runtime_floats.nim:230`).
+
+### §9.1 Design
+
+The CBMC / Frama-C RTE / Alive2 treatment, expressed in this engine's
+existing vocabulary:
+
+1. **`admitDefinedness`**, one `(op, operand class, BuildProfile)` table with
+   three answers: *defined* (exact, including wrap where the profile defines
+   it: unsigned arithmetic always; signed add/sub/mul under `-fwrapv`),
+   *Defect* (Nim's checked operation: the existing raise fork), *undefined*.
+   The default build is a row of the table, not a special case. The table is
+   written out in the RFC's ledger, not in prose. `arithTrapConds` and the x86
+   shift mask are retired: each is a hardware-specific definite outcome.
+2. **Each unchecked op forks on its definedness condition**, using the
+   predicates the walker already has (`addNoOverflow` and its siblings,
+   `runtime.nim:8478-8492`, today used for the `OverflowDefect` fork). The
+   defined side continues exactly. The undefined side is a `halt` (K7) with a
+   new kind `ubUndefinedBehaviour`, classified `dcOmitted`: no survivor, run
+   coordinate `{scIncomplete}`. So `sxUnsat` is not trusted while undefined
+   behaviour is feasible on some path.
+3. **A trusted `sxSat` needs the whole run to be defined, not only its
+   prefix.** C's undefined behaviour is not sequenced: a compiler may delete
+   or rewrite the branch that led to the label because an operation after the
+   label is undefined on that input. And the walk stops at the first label
+   hit (`shouldStop`, `runtime.nim:17308-17318`), so it never sees what
+   follows. Therefore, on a profile where `admitDefinedness` has any
+   *undefined* entry that the routine reaches, the winning path is continued
+   under its concrete witness to the routine's exit and every definedness
+   predicate on it is checked. A witness is trusted only if none is feasible;
+   otherwise the verdict is `rsUnconfirmed` (not `trusted()`), with the
+   reason recorded. This is a one-path concrete walk, not a search.
+4. **Undefined behaviour is a target, not a status.** `stkUndefined`
+   (`tUndefined(classes: set[UbClass])`), beside `stkNilAccess`
+   (`types.nim:1862`), which is the precedent for "the program does something
+   other than return or raise here". `symexFind(f, tUndefined({ubSignedOverflow,
+   ubDivZero, …}))` returns `sxSat` with a witness ("signed overflow reachable
+   at f.nim:12 with v = high(int)") or `sxUnsat`, meaning none of the
+   *listed* classes is reachable, never "no undefined behaviour". No
+   `SymexStatusKind` member is added, so no consumer's `case r.status` breaks.
+   Under any other target, an undefined behaviour the walk reaches is also
+   listed in `diagnostics` as an incidental finding.
+5. **Replay does not run a `tUndefined` witness** (refused by target kind:
+   replay on one build is not evidence). `assertCoveredBy` never executes one
+   in the host; its splat catches `Defect` regardless (W-26). `symexForAll`
+   does not seed one unless the caller opts in. The cache encodes the target
+   kind in its key already; `|bf=` now carries the profile (§8.3), which
+   definedness depends on.
+6. **The native pin is UBSan**: a `-fsanitize=undefined -fno-sanitize-recover`
+   build traps at exactly the witnesses the walker reports. This is a Linux
+   pin (gcc/clang). MSVC has no UBSan and mingw's is unsupported, so the
+   Windows legs carry a declared `out-of-scope(no sanitizer)` cell for these
+   rows, and the SIGFPE pin of an unsigned zero divisor reads differently on
+   Windows (an SEH code, not a signal).
+7. **`arithChecks` is removed in 0.10.0** (with `fromCache`, INT-39): the
+   checks are a fact of the build, read from the profile, and a setting that
+   contradicts the build is a claim the build does not make. If a consumer
+   later wants CBMC's "assume no undefined behaviour", it is an
+   `assumptions: set[VerdictAssumption]` field on `Soundness`, rendered on the
+   finding and encoded on the cache sentinel, with `trusted()` unchanged. It
+   is not in 0.10.0.
+
+**Not in K10.** A read of a `{.noinit.}` variable (W-13, B-15) is an
+indeterminate value, and the walker already models it soundly as havoc
+(`runtime.nim:9226-9240`), so `sxUnsat` stays trusted. The defect is that
+replay *confirmed* a witness that needed garbage memory. Its fix is a mark on
+the path that no replay can lift, in the settle; halting there would throw
+away a trusted `sxUnsat` for nothing. UBSan does not detect uninitialised
+reads, so its native pin is MemorySanitizer or valgrind.
+
+**Wave 1 (0.9.2) ships the fail-closed half** before the table exists: a
+checks-off signed op, an unsigned zero divisor, `INT_MIN mod -1` and a shift
+count not proved in range each decline (`ubUndefinedBehaviour` as a plain
+decline). A decline is safe; it costs precision on those shapes, which the
+sweep-diff records. K10 in 0.10.0 restores the defined side exactly and adds
+the target.
+
+## §10 — The oracle is part of the universe
+
+Every `exact` cell is measured against native execution, so the native side
+has to be right too. The first draft classified the walker and not its
+oracle.
+
+- **Boundary values.** Integer inputs draw from `{low, low+1, -1, 0, 1, 7,
+  high-1, high}` as well as the small range. W-05 and W-07 live at `low(int)`
+  and `high(int)`, which a `0..7` domain never reaches.
+- **Witness-directed.** The native side always runs the walker's own `sxSat`
+  witness, whatever the domain. An `sxUnsat` cell is `exact` only if its
+  native search was exhaustive over the declared domain; otherwise it is
+  `sampled`, a state the ledger prints separately (§2.2 already asks a pin to
+  say which).
+- **The declared domain is the enumerated domain.** `symexAssume` is a no-op
+  natively (`engine/markers.nim:127`); the harness enumerates exactly the
+  domain the walker was told, or the generator emits the guard as a real early
+  return.
+- **Capture window.** Marker capture is per thread (`markers.nim:70`). The
+  harness asserts the SUT starts no thread and runs each point in a fresh
+  scope, so hooks fire inside the capture window.
+- **Sanitized native rows.** A native run that executes undefined behaviour is
+  not evidence (§9). The fuzzer's native build row includes
+  `-fsanitize=undefined,address`; a cell goes `exact` only on a
+  sanitizer-clean native run.
+- **Witness rendering has an oracle.** Per `IRTypeKind`: render → parse →
+  equal to the witness, including NaN, −0.0, embedded NUL and shared `ref`
+  cells (`runtime.nim:30854-30930`).
+- **A second oracle where cheap.** For generated SUTs with no `importc` or
+  pointer arithmetic, the Nim VM (`nim e`) gives a third column: walker against
+  the Nim language versus Nim against the C backend. Every Tier-0 row in §5.0
+  is a desugaring bug of the first kind; the column separates them from
+  backend facts for free.
+- **Public entry points.** K1 refuses an `exact` cell whose pin does not go
+  through a public entry point (`symexFind`, `symexForAll`, `assertCoveredBy`,
+  the concolic path).
+- **Families from the tables.** The fuzzer's families iterate the admission
+  tables (every `amExact` entry with its operand classes and build rows), so
+  "coverage" means "entry exercised on its build rows", not a hand list that
+  can drift. `tfuzzconcolicmismatch` and `annotationViolations` (INT-33) are
+  ingested as a second findings source.
+
+## §11 — Slices and order
+
+Each row is a slice within about three modules; a row marked *round* flips
+verdicts broadly and is gated by a pinned sweep baseline from a worktree at
+its base sha (`sweep.sh` + `sweep-diff.sh`), not by its own tests. Wave 1 is
+integrated as **one** walker bump, not seven.
+
+**Wave 1 — 0.9.2: the seven clean false verdicts, and the cheapest stops.**
+Each slice carries its own seam, which the Wave 2–3 table later absorbs.
+
+| id | scope | modules | depends | size |
+|---|---|---|---|---|
+| W1-a | `typeIdOf`; `except T as e` (W-01), `raise <value>` (W-33) | `dsl_parser.nim`, 1 test | — | s |
+| W1-b | local-pragma allowlist (`admitLocalPragma` as a plain const): `{.cursor.}` and every other unlisted pragma declines (W-02) | `dsl_parser.nim:19771`, 1 test | — | s |
+| W1-c | minimal `buildProfile` const (panics, checks) read by the arms; under panics a Defect is the S8cu `crash: true` escape (W-03); `assertCoveredBy` splat catches `Defect` (W-26) | `smt/buildprofile.nim` (new), `runtime_exceptions.nim`, `symex.nim`, `--panics:on` cfg test | — | s |
+| W1-d | fail-closed undefined behaviour (§9 last paragraph): W-05, W-06, W-07, shift count; `{.noinit.}` read unconfirmable (W-13) | `runtime.nim:8855-8875`, `:24500`, `dsl_parser.nim:4023`, settle in `symex.nim` | — | s |
+| W1-e | float width conversions decline off an allowlist (W-04) | `dsl_parser.nim` (conv arms) | — | s |
+| W1-f | compile stops: object field defaults decline (W-20), `case` with `elif` (W-21) | `dsl_typebridge.nim:1218`, `dsl_parser.nim:19300`, `:12789` | — | xs-s |
+| W1-g | `x in a..b` (W-31); the five everyday syntax declines (W-32) | `dsl_parser.nim` | — | s |
+| W1-z | integration: one walker bump, CR2 pin, three-way rows (0.9.1 / head / native) for every W1 row, migration note, 0.9.2 | `canonicalize.nim:251`, CR2 test, `docs/migration/0.9.2.md` | all W1 | s |
+
+**Wave 2 — the enforcing substrate, live from its first commit.**
+
+| id | scope | depends | size |
+|---|---|---|---|
+| CI-A | `symex-linux` leg on every push: ghcr Nim artifact, Z3 5.1 and PCRE provisioned, the whole `test` task (closes F-06), shards placed by `derive-ci-suites.ps1` | — | m |
+| CI-B | the same workflow on a `schedule:`: cpp, and Z3 4.13.4 on Linux | CI-A | s |
+| K9a | `tests/nativepin.nim`; migrate the 31 `nativeHits` copies | — | s |
+| K9b | migrate the `declines` copies that already name a kind; `pinDecline` requires a kind | K9a | s |
+| ADM-1 | `smt/admission.nim`, `feUnadmitted`; `varParamMagics` and `verifiedLibs` moved onto it with no verdict change (the second-consumer spike) | — | s |
+| K1a | universe test emitting the ledger, ratchet allowlist failing from day one, planted RED on each leg | ADM-1, K9a, CI-A | m |
+| K7 | `Survivors` type; the 20 `discard w.degrade(` sites and `:24500` converted | — | s, s |
+| K8a | fuzzer skeleton with one family (the §5.0 construct shapes), boundary domains, sampled state, a scheduled workflow with a rotation over build rows (one build row per night, not the product) | K9a, CI-A | m |
+
+**Wave 3 — the tables.** Each adds its fuzzer family and shrinks the K1
+allowlist in the same commit.
+
+| id | scope | depends | size |
+|---|---|---|---|
+| K2a | dispatch census over every `case n.kind` in `src/nelli` | K1a | s |
+| K2b | float width conversions exact (`fp.to_fp`, RNE) | K2a | s-m |
+| K2c | child-shape census corpus | K2a | m |
+| K3a | `admitTypeOp` under `typeCopiedByValue` and `holdsSharedMemory` (*round*) | ADM-1, K1a | m |
+| K3b | object field defaults exact (`wasMoved` stays bitwise zero) | K3a | m |
+| K4a | `admitMagic` + lib-wide guard (multi-line declarations, all of `lib/`) | ADM-1 | m |
+| K4b | an unadmitted bodied magic declines (*round*) | K4a | m |
+| K4c | `feStdlibBodyWalked` and `admitStdlibBody` (*round*) | K4a | m |
+| K5a | full `BuildProfile`; readers migrated with no verdict change | W1-c | m |
+| K5b | `admitBuild`: refusals by name (refc, 32-bit, unverified Z3/Nim/PCRE); arm64 and macOS compile-only legs | K5a | s-m |
+| K6a/b/c | `mayWrite` into `nodeWritesHeap`, the hook copy-proof, then `ptrUsesStayLocal`/`routeStoresThroughDeref` (*round* each) | ADM-1 | m each |
+| K10a | `admitDefinedness`; `stkUndefined`; `ubUndefinedBehaviour`; replay refusal by target kind | K5a, K7 | m |
+| K10b | whole-run definedness check for a trusted `sxSat` (§9.1 item 3) | K10a | m |
+| K10c | UBSan pin suite (Linux); declared Windows cells | K10a, CI-B | s |
+| K10d | `arithChecks` removed (0.10.0, with INT-39) | K10a | s |
+
+**Wave 4 — the search, then the tail.** Fuzzer families per admission table;
+the pairwise co-occurrence figure; the VM column; witness round-trip pins;
+the K1 allowlist emptied. Then the long tail: the 132 kind-less decline
+assertions (each kind found by running it) and pins for the 481 verdict suites
+with no native idiom, generated by family where the SUT is a pure proc; then
+the precision rows of §5 in the frequency order of the research list.
+
+**The walker under sanitizers.** A scheduled job runs a slice of the corpus
+with nelli itself built under ASan: a use-after-free in a Z3 AST can produce a
+wrong verdict, not only a crash (PND-04).
+
+## §12 — The finish line
+
+Decision D-0016-1 closes the RFC when the work list is empty. This section is
+how "empty" is measured, so that it is a test result and not an opinion:
+
+1. `tsymex_0016_universe` is green with an **empty allowlist** on every build
+   row that has a CI leg (c and cpp, Z3 5.1 and 4.13.4, Linux and mingw; arm64
+   and macOS compile-only): no unclassified cell; every `exact` cell
+   native-pinned through a public entry point on each row it claims; every
+   `declined` cell's pin asserts its kind; `sampled` unsat cells counted
+   separately from exhaustive ones.
+2. Every row of §5 maps to cells that are all `exact` or `declined`, its
+   reason in the admission entry.
+3. No failing file on any gate; no `skip()` or platform arm without a cell; no
+   decline assertion without a kind.
+4. The fuzzer has exercised every admitted entry on its build rows, and the
+   pairwise figure (production × production in one SUT with a definite
+   verdict) is at or above its stated floor.
+5. The certifying gate logs carry their `.summary` sidecars.
+
+Size, from the research: about 1,000–1,100 cells, most classified in bulk from
+the code's own dispatch; the tail is about 250 construct cells and 190
+type × operation cells that each need a pin. Two to three months of slice
+work plus the fuzzer's hours, measured by one test's output.
+
+## §13 — Alternatives considered
+
+- **Model the post-`transf` AST through the patched compiler.** Every Tier-0
+  construct row is a desugaring the walker re-implements (`except T as e`,
+  hidden conversions, stripped pragmas); the compiler's transformed tree has
+  them already lowered. Not taken in this RFC: it rewrites the 23k-line
+  parser against an unstable internal representation, and it does not touch
+  the type, memory, magic, build or undefined-behaviour classes. It is a
+  candidate for its own RFC, measured against K2's census once that exists.
+- **CBMC or KLEE on the generated C** as a wide-domain `sxUnsat` oracle
+  (bounded, complete on 64-bit bit-vectors). Deferred: §10's boundary values
+  and witness direction cover the known rows; reconsider if the `sampled`
+  count stays high.
+- **Gated clean-path replay** (INF-02): declined by D-0016-2; §9.1 item 3 is a
+  model-side check on one path, not a replay.
+- **Ten independent mechanisms** (the first draft's K2–K6 each built by hand):
+  replaced by §8.1's one admission type.
+- **A hand-annotated ledger reconciled against the code**: replaced by §8.2's
+  generated ledger.
+- **A new `sxUndefined` status**: replaced by a target kind and a halt kind
+  (§9.1 item 4), which needs no public-type break.

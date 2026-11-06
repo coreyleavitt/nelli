@@ -14,12 +14,14 @@ value = "high"
 id       = "exit-criterion"
 title    = "What exit criterion closes an open-ended RFC tracked by findings rate?"
 question = "Should RFC-0016 close on §3.3's proposal (work list empty, 500 fuzzer CPU-hours with no new soundness finding in the last 250, and a release cycle with no consumer soundness finding), or on a different criterion?"
-state    = "open"
+state    = "resolved"
 owner    = "corey"
 kind     = "design"
 reversible = "reversible"
 recommendation = "exit-criterion.A"
 lean     = "A gives a stated, measurable bar that shrinks only when search stops finding things; the figures are a starting point and can be revised without changing the shape."
+choice = "exit-criterion.B"
+reason = "Corey 2026-11-06: close on an empty work list only; no fuzzer-hours or quiet-cycle bar"
 
 [[option]]
 id    = "exit-criterion.A"
@@ -37,12 +39,14 @@ cost  = "Cheap and familiar, but it is the RFC-0005 bar, whose list grew by rema
 id       = "upstream-reports"
 title    = "File the three upstream reports in §5.6?"
 question = "Should the Nim raise-path destroy, the Z3 mk_unique check and the Z3 spacer pob_queue::reset invalid read be filed upstream now, or held?"
-state    = "open"
+state    = "resolved"
 owner    = "corey"
 kind     = "risk"
 reversible = "one-way"
 recommendation = "upstream-reports.B"
 lean     = "File the Nim and spacer reports, which have reductions; hold mk_unique until S8cj reduces it, since the sort did not reproduce it at e497dcf."
+choice = "upstream-reports.B"
+reason = "Corey 2026-11-06: file the Nim raise-path destroy (UPS-01) and the Z3 spacer pob_queue::reset invalid read (UPS-03); hold mk_unique (UPS-02) until S8cj reduces it"
 
 [[option]]
 id    = "upstream-reports.A"
@@ -66,12 +70,14 @@ cost  = "Upstream fixes, which nelli and nim-z3 both work around today, do not s
 id       = "fork-c-clean-replay"
 title    = "RFC-0005's fork (c): a gated clean replay as a safety net for clean-path sxSat (INF-02)"
 question = "Should a clean-path sxSat also be replayed natively, gated by a setting, so that a false sxSat on a clean path is caught at verdict time?"
-state    = "open"
+state    = "resolved"
 owner    = "corey"
 kind     = "design"
 reversible = "reversible"
 recommendation = "fork-c-clean-replay.A"
 lean     = "The blockers were trusted verdicts on clean paths; a replay gate would have refuted the false sxSat half of them, at a run-time cost a setting can switch off."
+choice = "fork-c-clean-replay.B"
+reason = "Corey 2026-11-06: no clean-path replay setting; rely on native pins and the differential fuzzer"
 
 [[option]]
 id    = "fork-c-clean-replay.A"
@@ -89,12 +95,14 @@ cost  = "A false sxSat on a clean path reaches a consumer unless a pin or the fu
 id       = "fromcache-field"
 title    = "Remove the always-false SymexResult.fromCache, or keep it?"
 question = "SymexResult.fromCache is never true, because symexFind has no cache (WA-11). Should 0.10.0 remove the field, a breaking change, or keep it documented as always false until a symexFind cache exists?"
-state    = "open"
+state    = "resolved"
 owner    = "corey"
 kind     = "design"
 reversible = "one-way"
 recommendation = "fromcache-field.A"
 lean     = "Removing it breaks every caller that reads it and gives no user anything, since it already reads false; keep it until a symexFind cache gives it a producer, or remove it then if that cache never comes."
+choice = "fromcache-field.B"
+reason = "Corey 2026-11-06: remove SymexResult.fromCache in 0.10.0 with a migration note; the release breaks the API anyway and the field has no producer"
 
 [[option]]
 id    = "fromcache-field.A"
@@ -121,6 +129,30 @@ of    = "fromcache-field.A"
 text  = "The cache-hit flag users can read is SymexFinding.fromCache, which symexFindAllWitnesses sets on a hit, so keeping the SymexResult field costs no user a signal."
 basis = "read"
 ev    = ["src/nelli/engine/types.nim#/fromCache\\*/"]
+
+[[decision]]
+id       = "D-0016-1"
+state    = "settled"
+title    = "RFC-0016 closes when the §5 work list is empty: every item fixed with native pins, or its decline recorded with the reason it stays. No fuzzer-hours window and no quiet-release-cycle bar"
+resolves = ["exit-criterion"]
+
+[[decision]]
+id       = "D-0016-2"
+state    = "settled"
+title    = "No gated clean-path replay. A false sxSat on a clean path is caught by native pins and the differential fuzzer (D1), not at verdict time"
+resolves = ["fork-c-clean-replay"]
+
+[[decision]]
+id       = "D-0016-3"
+state    = "settled"
+title    = "File UPS-01 (Nim raise-path destroy) and UPS-03 (Z3 spacer pob_queue::reset invalid read), the two with reductions; hold UPS-02 (mk_unique) until S8cj reduces it"
+resolves = ["upstream-reports"]
+
+[[decision]]
+id       = "D-0016-4"
+state    = "settled"
+title    = "Remove SymexResult.fromCache in 0.10.0 with a migration note (INT-39). That release breaks the API anyway, and the field has no producer"
+resolves = ["fromcache-field"]
 
 [[slice]]
 id    = "D1"
@@ -176,7 +208,8 @@ state = "pending"
   that match `main`, CI and test-time work, and the exact models behind the
   declines RFC-0005 added. Nothing was dropped. This RFC is open-ended: it has
   no fixed slice list, and it is tracked by the rate of new findings (§3). The
-  exit criterion in §3.3 is a proposal, **awaiting Corey** (item `exit-criterion`).
+  exit criterion is §3.3: the work list empty (Corey, 2026-11-06, item
+  `exit-criterion`).
 - Category: symex
 - Size: L
 - Value: high
@@ -344,10 +377,13 @@ Classes:
 A soundness finding that is `worse` goes to the release-blocker list of
 whatever RFC owns the next tag; it does not wait in this RFC's precision queue.
 
-### §3.3 What "done" means — **proposal, awaiting Corey**
+### §3.3 What "done" means — **decided 2026-11-06: the work list alone**
 
-Every listed item closed is necessary but not sufficient, because the list is
-open-ended. The proposal:
+Corey chose option B of item `exit-criterion` (decision D-0016-1): the RFC
+closes when item 1 below holds. Items 2 and 3 were the proposal and are not
+part of the exit criterion; they stay here as the record of what was weighed,
+and the differential fuzzer (§4) still runs as the search that feeds the work
+list. The proposal was:
 
 1. **The work list is empty**: each item in §5 is fixed with native pins, or
    its decline is recorded with the reason it stays (cannot be expressed in the
@@ -529,14 +565,16 @@ does not settle them, they move here.
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | INF-01 | The differential fuzzing harness (§4), slice D1 | coordinator ledger, S8cq blocker (2026-11-02) | every sort blocker was found by hand | |
-| INF-02 | Fork (c): a gated clean replay as a safety net, which would catch a false `sxSat` on a clean path. **Awaiting Corey** (item `fork-c-clean-replay`) | RFC-0005 "the open fork (c) below" (line 1667 at 67f0b622; the DoD audit cited it at 1615); DoD audit fork 2 | the fork was never written down in RFC-0005; this is its first record | |
+| INF-02 | Fork (c): a gated clean replay as a safety net, which would catch a false `sxSat` on a clean path. **Decided 2026-11-06: not added** (item `fork-c-clean-replay`, decision D-0016-2); native pins and D1 carry it | RFC-0005 "the open fork (c) below" (line 1667 at 67f0b622; the DoD audit cited it at 1615); DoD audit fork 2 | the fork was never written down in RFC-0005; this is its first record | |
 | INF-03 | The findings ledger and a weekly rate report (§3.2) | this RFC | none yet | |
 | INF-04 | S8ck after item 1 (slice S8ck-r): items 2 (`Z3FuncDeclOwn`, `Z3FuncInterpOwn`, `Z3RcfNum` hooks never release `ctx`), 3 (`Z3Ast[S: static]` hooks unused for `Z3Int`/`Z3Bool`), 4's version half (`tffi`, `tversion`, `tmultiversion` assert a 4.x runtime), 5 (`injectShapeFault` comment), 6's first half (ADR-0023's "a lowering-time degrade must never raise", keep or simplify), 7 (`s8s_precision` run wall 13.2 to 19.1 s on Windows), 8 (`examples/properties.nim:30`, examples in nim-z3 CI on c and cpp), 9 (a leak gate that fails on invalid reads, writes and frees, shown RED on a planted bad `dec_ref`), 10 (record and reduce the spacer read; do not file), 11 (generated seq hooks on the raise path release every element), 12 (separate real leaks from live globals, `trcf`'s 26 `Z3ContextOwn` blocks). Item 4's hang half and item 6's second half are in §5.7 | `jobs/s8ck.md`; `worker-reports/s8ck-item1.md` | item 1 closed: cc5ffc9 identical to ae509f0 on invalid accesses and leaks | |
 | INF-05 | Audit the older "Different mechanisms, reported and not fixed here" lists against the remainder chain. This document took the lists of slices landed through batch 10 whose remainder has no later slice (S8ca, S8by, S8cc, S8cf, S8cb, S8cd, S8cl, S8cn) item by item. The earlier lists were each carried into a remainder slice whose job said "defer nothing", but no one has checked that every item reached one | RFC-0005, about 80 such lists | **done 2026-11-03** (owner audit of the lists of 72 slices, S8c, S8e/S9 and S8g through S8bt, plus the inline not-fixed notes in S8y, S8ah, S8ao and S8bk): 318 rows fixed, 17 owned by RFC-0005, 9 already owned here. The 13 unowned rows (11 distinct items) are filed in §5.8 as AUD-01 to AUD-11 | |
 
-### §5.6 Upstream reports — awaiting Corey
+### §5.6 Upstream reports
 
-Outward-facing; none is filed. Each needs Corey's decision to file (item `upstream-reports`).
+Outward-facing. Decided 2026-11-06 (item `upstream-reports`, decision
+D-0016-3): file UPS-01 and UPS-03, which have reductions; hold UPS-02 until
+S8cj reduces it. None is filed yet.
 
 | ID | Report | Source | Evidence | Owner |
 |---|---|---|---|---|
@@ -637,6 +675,7 @@ intake, so each row still needs its three-way row (§5.7 rule) before work.
 | INT-36 | The finding collector's edges: `droppedSymexFindings` has no production consumer and is per-thread, so a worker thread's drops are invisible; `popEngineFrame` merges speculative nested runs and double-reports; a finding filed mid-statement is not stamped with later stray taint (pre-existing) | 0005 review R5-07, R6-08, R4-09, R3-17 | precision (R4-09, R5-07) and soundness (R3-17, not compared against `main`) | slice `rv0005-lows` |
 | INT-37 | Precision and unverified probes: `claimStrayPendingTaint` over-taints coalesced pending taint; a possessive quantifier on a non-group item may add 0 to the PCRE size bound (probe near 65536); `symBodyHash` on a bodiless routine (importc or forward declaration) may fail at compile time | 0005 review R2-08, R2-09, R6-09 | precision; two items unverified | slice `rv0005-lows` |
 | INT-38 | Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up | 0005 review R6-07, R8-04 | performance; no wrong verdict | slice `rv0005-lows` |
+| INT-39 | Remove `SymexResult.fromCache`, which no code path sets (WA-11), in 0.10.0 with a migration note | item `fromcache-field`, decision D-0016-4 | `src/nelli/smt/types.nim`; the readable cache-hit flag is `SymexFinding.fromCache` | |
 
 **From the INF-05 owner audit (rows marked UNOWNED).** The rows the audit
 marked OWNED-0016 were already in this document (PRC-31, PRC-32, INF-04,
@@ -675,11 +714,9 @@ Unchanged from RFC-0005's worker brief, with two additions from its lessons:
 
 ## §7 — Open forks
 
-- **`exit-criterion`.** §3.3's proposal, or the work list alone. Recommended:
-  §3.3's proposal. Awaiting Corey.
-- **`upstream-reports`.** File UPS-01 to UPS-03 now, file the two with
-  reductions (UPS-01, UPS-03) and hold UPS-02 for S8cj, or hold all three.
-  Recommended: file the two with reductions. Awaiting Corey.
-- **`fork-c-clean-replay`.** A gated clean replay as a safety net (INF-02),
-  off by default and on in nelli's own suites and the fuzzer, or none.
-  Recommended: add it. Awaiting Corey.
+None open. Decided by Corey on 2026-11-06:
+
+- **`exit-criterion`:** the work list alone (B, D-0016-1).
+- **`upstream-reports`:** file UPS-01 and UPS-03, hold UPS-02 (B, D-0016-3).
+- **`fork-c-clean-replay`:** not added (B, D-0016-2).
+- **`fromcache-field`:** remove the field in 0.10.0 (B, D-0016-4; INT-39).

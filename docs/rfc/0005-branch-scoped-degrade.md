@@ -2,7 +2,7 @@
 type    = "rfc"
 id      = "0005"
 title   = "RFC — soundness channels: separating over- from under-approximation"
-state   = "implemented"
+state   = "complete"
 wiring   = "proven"
 stage   = "rfc"
 profile = "rfc-flow@3"
@@ -566,7 +566,10 @@ state = "done"
 
 # RFC — soundness channels: separating over- from under-approximation
 
-- **Status:** implemented — **released as nelli 0.9.0 (2026-11-03).**
+- **Status:** implemented — **released as nelli 0.9.0 (2026-11-03); closed
+  in 0.9.1 (2026-11-04)** after the wiring audit (`wiring = proven`) and a
+  ten-round code review to floor (`docs/rfc/0005-review.md`). The ledger state
+  is `complete` as of 2026-11-06.
   Batch 11 closed the RFC at `8177eb27` (walker 264); every soundness item
   worse than `main` (6cbfe8f) is fixed, and the remaining findings moved to
   RFC-0016 (see the successor paragraph below). Every fence row is `done`.

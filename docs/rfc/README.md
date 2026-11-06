@@ -28,6 +28,7 @@ git-add order: three docs were authored earlier and committed late.
 | 0014 | integer-range-provenance | symex |
 | 0015 | audit-remainder | core |
 | 0016 | native-parity-hardening | symex |
+| 0017 | symex-reach | symex |
 
 0006–0012 were composed together on 2026-09-03 from a post-0005 architecture
 survey rather than authored one at a time. They are grouped by shared
@@ -65,6 +66,12 @@ else it had found (same-severity soundness, precision, crashes and hangs that
 match `main`, CI time, and exact models for its new declines) moved to 0016.
 0016 is open-ended: it has no fixed slice list and is tracked by the rate of
 new findings, with an exit criterion proposed for Corey.
+
+**0017** is a `seed` composed 2026-11-05, after the 0.9.1 release. 0016
+makes the walker agree with native execution shape by shape; 0017 raises the
+structural limits that decline whole classes of code (loop trip counts, call
+depth, branch fan-out, private callees). It measures before it builds: slice
+M1's decline census orders the tracks. Three forks await Corey.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the

@@ -111,6 +111,9 @@ jobs:
           NELLI_HOST: "1"
         run: |
           set -uo pipefail
+          # The same host flags sweep.sh --host exports (the artifact ships Nim
+          # alone: C compiler, Z3 headers and dep paths are named here).
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
           mkdir -p "$RUNNER_TEMP/k1lite"
           # Runs the seven W1 suites into a fresh pin dir, then the join.
           scripts/k1lite.sh -k "$RUNNER_TEMP/k1lite/pins" 2>&1 \

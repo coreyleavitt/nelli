@@ -4,7 +4,7 @@ id      = "0016"
 title   = "RFC — native-parity hardening: the walker agrees with the compiled program, or declines"
 state   = "in-progress"
 wiring  = "proven"
-review  = "pending"
+review  = "floor"
 profile = "rfc-flow@6"
 blocked_by = ["0005"]
 size = "l"
@@ -261,6 +261,16 @@ at = "785c4a6a2f952115445555e4efedf814cf8552c2"
 owner = "corey"
 date = 2026-11-07
 reason = "Wave 1 wiring audit (two lenses at c0f59ca6): S1-S4 soundness and P1-P4 fixed with RED/GREEN pins (af8de076, 96165e3a, d9086529); F3-F5, F7, F10-F12 fixed (06ac34b9); K1-0 join green on c, cpp and z3-4.13.4 at d9086529, on c and cpp in CI; mingw/MSVC joins and rowOf deferred to Wave 2 (K1a-ci, K5a)"
+
+[[audit]]
+id = "review-2"
+closes = "review"
+verdict = "floor"
+at = "205e20e50ee6b1ef2564a4bf00571b86386a8d53"
+owner = "corey"
+date = 2026-11-07
+reason = "round 2, 0 C/H/M at 6a242791; round 1 fixed SC2, D1, M2-M6, N1; open Lows filed as INT-42"
+ledger = "0016-review"
 +++
 
 # RFC — native-parity hardening: the walker agrees with the compiled program, or declines

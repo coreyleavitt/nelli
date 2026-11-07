@@ -648,6 +648,7 @@ name what moves and what stays.
 | PRC-35 | S8cp item 8 | declined magics: `math.toInt`, a holey enum's invalid value, `=dup` of an object or tuple through its hook, `$float`, the remaining `repr` shapes; stop only where the theory cannot express it or the cost is measured out of budget, with the number Add `$bool` (`dsl_parser.nim:11205,11831`, not re-verified). | `jobs/s8cp.md`; S8cb item 5 remainder | |
 | PRC-36 | W1-b | an exact local `{.cursor.}` model: a cursor local is a non-owning alias of its source's storage (no copy, no destroy), so `var c {.cursor.} = gs; gs[0] = 9` reads 9 through `c`; replaces `feLocalPragma` for `cursor` only, other non-allowlisted local pragmas keep the decline; native pins on c and cpp | W1-b's designed decline; three-way row in the handoff (2026-11-07, W1-z) | |
 | PRC-37 | W1-e | an exact float width model: `float32(x)` rounds to binary32 (Z3 `fp.to_fp` at 8/24, round-nearest-even) and widening back is exact, so `float64(float32(x)) == x` gets a model rather than `feFloatWidth`; native pins at 0.5 (hit) and 0.1 (no hit) on every build row | W1-e's designed decline; three-way row in the handoff (2026-11-07, W1-z) | |
+| PRC-38 | CR-A | an exact generic exception model: identify `G[ValueError]` by its full instantiation, with ancestry from `G`'s declared base, so `except G[ValueError]` and `except CatchableError` decide rather than decline with `eeUnknownExnType`; native pins for both | CR-A's designed decline (0.9.2 review SC2, 2026-11-07) | |
 
 ### §5.3 Crashes, compile stops and hangs
 
@@ -793,6 +794,8 @@ intake, so each row still needs its three-way row (§5.7 rule) before work.
 | INT-37 | Precision and unverified probes: `claimStrayPendingTaint` over-taints coalesced pending taint; a possessive quantifier on a non-group item may add 0 to the PCRE size bound (probe near 65536); `symBodyHash` on a bodiless routine (importc or forward declaration) may fail at compile time | 0005 review R2-08, R2-09, R6-09 | precision; two items unverified | slice `rv0005-lows` |
 | INT-38 | Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up | 0005 review R6-07, R8-04 | performance; no wrong verdict | slice `rv0005-lows` |
 | INT-39 | Remove `SymexResult.fromCache`, which no code path sets (WA-11), in 0.10.0 with a migration note | item `fromcache-field`, decision D-0016-4 | `src/nelli/smt/types.nim`; the readable cache-hit flag is `SymexFinding.fromCache` | |
+| INT-40 | A fork replay child inherits the host's current value of a routine `{.global.}`, so after earlier host calls a walker SAT through that global can be confirmed from run history; the verdict carries no `runDependence` (re-exec replay starts from the initial value and refutes) | 0.9.2 review SC1 (residual, predates Wave 1) | soundness: run-history dependence; unverified beyond code reading | |
+| INT-41 | `symexFind`'s expansion calls `newLit(settings)` (`symex.nim:~3743`), which reads the deprecated `arithChecks` inside Nim's `macros.nim` and raises a Deprecated warning no call-site push can silence | 0.9.2 review (CR-B) | diagnostic | |
 
 **From the INF-05 owner audit (rows marked UNOWNED).** The rows the audit
 marked OWNED-0016 were already in this document (PRC-31, PRC-32, INF-04,

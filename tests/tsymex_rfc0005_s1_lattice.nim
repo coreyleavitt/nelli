@@ -106,7 +106,6 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
     # adds its producer; the check below fails if a listed kind has gained
     # one, or an unlisted kind has none.
     const unproducedUntil = {ubUnsignedDivZero,    # W1-d1b
-                             ubSignedOverflow,     # K10a
                              ubFloatToIntRange,    # K10a
                              ubIndeterminateRead}  # K10a
     var src = ""

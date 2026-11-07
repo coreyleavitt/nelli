@@ -2049,13 +2049,16 @@ var uninitReadConds* {.threadvar.}: seq[Z3Bool]
 
 type ArithTrap* = object
   ## RFC-0016 W1-d1a. One `arithTrapConds` deposit: the trap predicate, and
-  ## whether the C division is UNDEFINED there (`ub`, `ubIntMinModMinusOne`:
-  ## `low(T) mod -1`, or `low(T) div -1` with overflow checks off, at 32 and
-  ## 64 bits) rather than a definite hardware outcome. `drainArithTraps`
-  ## halts an `ub` deposit through `haltUndefined`; the rest still confine
-  ## the survivor.
+  ## whether the C division is UNDEFINED there rather than a definite
+  ## hardware outcome. `ub` names the kind the deposit halts with
+  ## (`ubIntMinModMinusOne` for `low(T) mod -1`; `ubSignedOverflow` for
+  ## `low(T) div -1` with overflow checks off, at 32 and 64 bits) and `site`
+  ## the construct for the omission's text; `none` is a definite outcome.
+  ## `drainArithTraps` halts a `some` deposit through `haltUndefined`; the
+  ## rest still confine the survivor.
   cond*: Z3Bool
-  ub*: bool
+  ub*: Option[UbKind]
+  site*: string
 
 var arithTrapConds* {.threadvar.}: seq[ArithTrap]
   ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
@@ -8880,7 +8883,15 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
         # the overflow checks off, so the C division is UNDEFINED there
         # (section 9.1); with the checks on, `div` is the `OverflowDefect`
         # fork above and the survivor is merely confined.
-        let tr = ArithTrap(cond: tc, ub: op == bMod or currentArithWraps)
+        let tr =
+          if op == bMod:
+            ArithTrap(cond: tc, ub: some(UbKind(ubIntMinModMinusOne)),
+                      site: "`low(T) mod -1`")
+          elif currentArithWraps:
+            ArithTrap(cond: tc, ub: some(UbKind(ubSignedOverflow)),
+                      site: "`low(T) div -1`")
+          else:
+            ArithTrap(cond: tc)
         arithTrapConds.add tr
         syncArithTrapCond(tr)
   if a.kind == svInt:
@@ -19116,7 +19127,7 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   ## removes.
   ##
   ## RFC-0016 W1-d1a (section 9.1 item 2). A deposit marked `ub` is not a
-  ## definite hardware outcome but undefined behaviour (`ubIntMinModMinusOne`)
+  ## definite hardware outcome but undefined behaviour (the trap's own kind)
   ## and is decided at the op: the undefined side's reachability is asked of
   ## the solver on the path's full query under `loopPruneRLimit`. UNSAT: the
   ## side is dropped and the fact logged in the current call's prune window
@@ -19141,7 +19152,7 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
     return @[p]
   var cur = forkPath(p, p.pc, p.env)
   for t in conds:
-    if t.ub:
+    if t.ub.isSome:
       if guardLiteral(t.cond) != glFalse:
         let unsat = guardLiteral(t.cond) != glTrue and
           checkCapped(w.z3, pathRoots(cur, [t.cond]), w.settings,
@@ -19149,8 +19160,7 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
         if unsat:
           logPrune(cur, [t.cond])
         else:
-          haltUndefined(cur, ubIntMinModMinusOne, t.cond,
-                        "`low(T) mod -1`", w)
+          haltUndefined(cur, t.ub.get, t.cond, t.site, w)
       let nxt = forkPath(cur, cur.pc & @[not t.cond], cur.env)
       cur = nxt
     else:

@@ -13,7 +13,8 @@
 ## agreed with it. It is not an answer the language gives: the C division is
 ## undefined, and on a target where the quotient wraps (or the remainder is 0)
 ## the label is reached. The verdict is therefore no longer a trusted
-## `sxUnsat`: the path halts and the run records `ubIntMinModMinusOne`
+## `sxUnsat`: the path halts and the run records `ubIntMinModMinusOne` for
+## `mod` and `ubSignedOverflow` for the unchecked `div`
 ## (`dcOmitted`, run coordinate `{scIncomplete}`). Where Nim's own check forks
 ## a Defect (`div`, checks on) the op is Defect, not undefined, and there is
 ## one fork.
@@ -164,4 +165,5 @@ suite "W1-d1a low(T) div -1":
     let r = symexFind(sutDivUnchecked, tLabel("hit"), noOverflowChecks)
     checkpoint show(r.errors)
     check not r.trusted
-    check r.errors.named(ubIntMinModMinusOne)
+    check r.errors.named(ubSignedOverflow)
+    check not r.errors.named(ubIntMinModMinusOne)

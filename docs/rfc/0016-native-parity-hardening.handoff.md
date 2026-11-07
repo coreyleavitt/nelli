@@ -156,7 +156,7 @@ precision losses by design: the spec makes each a named decline
 happened to agree with native. Neither blocks 0.9.2: W1-b and W1-e's spec
 rows name these exact shapes and verdicts (§11, "today a trusted false
 pair"), and the decline is what makes the hidden-witness twins sound.
-Recovering the precision is PRC work in later waves. Not probed: the hidden-witness
+Recovering the precision is PRC-36 and PRC-37 (Wave 4, "the precision rows"). Not probed: the hidden-witness
 shapes that made F-0002 and F-0004 false verdicts in 0.9.1 (the probes
 asserted the label, not the witness values), and Windows.
 

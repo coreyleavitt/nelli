@@ -3,6 +3,7 @@ import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
             options, streams]
 import nelli/symex
 import nelli/smt/admission
+import nelli/smt/buildprofile
 export admission
 
 proc show*(errs: seq[SymexErrorInfo]): string =
@@ -87,7 +88,7 @@ type
     walker*: string        ## the walker's status ("" for crash and skip)
     declineKind*: string   ## the SymexErrorKind a decline named ("" otherwise)
     native*: string        ## what the native run showed
-    build*: string         ## `buildSegment()` at write time
+    build*: string         ## `pinBuildSegment()` at write time
     flags*: seq[string]    ## pinCrash: the exact flags the probe was built with
     why*: string           ## skipCell: the reason
 
@@ -118,37 +119,10 @@ proc mkPinSettings(): SymexSettings =
 const pinSettingsConst* = mkPinSettings()
   ## The settings every pin runs under (`symexFind` takes `static` settings).
 
-const mmName = (
-  when defined(gcArc): "arc" elif defined(gcOrc): "orc"
-  elif defined(gcAtomicArc): "atomicArc" elif defined(gcRefc): "refc"
-  elif defined(gcMarkAndSweep): "markAndSweep" elif defined(gcBoehm): "boehm"
-  elif defined(gcGo): "go" else: "none")
-
-proc buildSegment*(): string =
-  ## The build this run is: rendered from `defined()` and `compileOption` arms
-  ## in this one proc. W1-c1a replaces the body with the `BuildProfile` const.
-  var parts: seq[string]
-  parts.add "backend=" & (when defined(cpp): "cpp" else: "c")
-  parts.add "os=" & hostOS
-  parts.add "cpu=" & hostCPU
-  parts.add "cc=" & (when defined(vcc): "vcc" elif defined(clang): "clang"
-                     elif defined(gcc): "gcc" else: "other")
-  parts.add "mm=" & mmName
-  parts.add "exceptions=" & (
-    when compileOption("exceptions", "setjmp"): "setjmp"
-    elif compileOption("exceptions", "quirky"): "quirky"
-    elif compileOption("exceptions", "goto"): "goto"
-    else: "cpp")
-  parts.add "panics=" & (when defined(nimPanics): "on" else: "off")
-  parts.add "overflowChecks=" & (when compileOption("overflowChecks"): "on" else: "off")
-  parts.add "rangeChecks=" & (when compileOption("rangeChecks"): "on" else: "off")
-  parts.add "boundChecks=" & (when compileOption("boundChecks"): "on" else: "off")
-  parts.add "fwrapv=" & (when defined(nelliFwrapv): "on" else: "off")
-  parts.add "opt=" & (when defined(danger): "danger" elif defined(release): "release"
-                      else: "debug")
-  parts.add "threads=" & (when compileOption("threads"): "on" else: "off")
-  parts.add "z3=" & z3FullVersion()
-  parts.join(";")
+proc pinBuildSegment*(): string =
+  ## The build this run is: `buildprofile.buildSegment` (the one renderer) and
+  ## the Z3 version this run linked.
+  buildprofile.buildSegment() & ";z3=" & z3FullVersion()
 
 # --- the record file -------------------------------------------------------
 
@@ -190,7 +164,7 @@ proc writePinRecord*(r: PinRecord): string {.discardable.} =
   ## Appends `r` to this run's file (one file per run id, so two runs never
   ## clobber). Under a lock, so it is correct from any thread. Returns the path.
   var rec = r
-  rec.build = buildSegment()
+  rec.build = pinBuildSegment()
   {.cast(gcsafe).}:
     withLock pinLock:
       if pinFile.len == 0:
@@ -449,7 +423,7 @@ proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
   var args = @["--hints:off", "--warnings:off", "--threads:on",
                "--nimcache:" & (dir / "cache"), "--out:" & exe,
                "--panics:" & (when defined(nimPanics): "on" else: "off"),
-               "--mm:" & mmName]
+               "--mm:" & $buildSemantics.mm]
   when defined(nelliFwrapv): args.add "-d:nelliFwrapv"
   when defined(release): args.add "-d:release"
   when defined(danger): args.add "-d:danger"

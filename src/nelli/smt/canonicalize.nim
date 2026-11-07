@@ -20,6 +20,7 @@ import std/[strutils, tables, algorithm]
 import ./types
 import ./pcre_engine
 import ./replayproc   ## RFC-0005 0.9.1 (WA-8): how this build replays
+import ./buildprofile ## RFC-0016 W1-c1a: the build reads live there
 import ./sha256       ## review R3 (E10): the one hash the cache keys with
 
 const
@@ -6549,61 +6550,15 @@ func replayModeSegment*(forks = replayForks; reexecs = replayReexecs;
   (if forks: "fork" elif reexecs: "reexec" else: "none") &
     (if panics: "+panics" else: "")
 
-const buildChecksOn*: seq[string] = block:
-  ## RFC-0005 review R1-08. The runtime checks this build compiles in, from the
-  ## command line (`-d:danger`, `--checks`, `--assertions` and each check's own
-  ## switch). `nilChecks` is not here: on this toolchain it is no option
-  ## (`check_options.nim`). A `{.push.}` is not visible from here, nor from a
-  ## macro (probed: `compileOption` in a macro expanded under a push reads the
-  ## command line); a walked routine's push is in the IR as its
-  ## `feCheckOption` decline, and a called routine's in `implDigest`.
-  var on: seq[string]
-  when compileOption("assertions"): on.add "assertions"
-  when compileOption("boundChecks"): on.add "boundChecks"
-  when compileOption("fieldChecks"): on.add "fieldChecks"
-  when compileOption("infChecks"): on.add "infChecks"
-  when compileOption("nanChecks"): on.add "nanChecks"
-  when compileOption("objChecks"): on.add "objChecks"
-  when compileOption("overflowChecks"): on.add "overflowChecks"
-  when compileOption("rangeChecks"): on.add "rangeChecks"
-  on
-
-const buildMemModel*: string = block:
-  ## RFC-0005 review R1-08. This build's memory management: whether a
-  ## destructor or a cycle collection runs is part of what the native `fn` does.
-  when compileOption("mm", "orc"): "orc"
-  elif compileOption("mm", "arc"): "arc"
-  elif compileOption("mm", "atomicArc"): "atomicArc"
-  elif compileOption("mm", "refc"): "refc"
-  elif compileOption("mm", "markAndSweep"): "markAndSweep"
-  elif compileOption("mm", "boehm"): "boehm"
-  elif compileOption("mm", "go"): "go"
-  elif compileOption("mm", "none"): "none"
-  else: "other"
-
-# RFC-0005 review R2 SM3. The backend `fn` is compiled for.
-const buildBackend*: string =
-  when defined(js): "js"
-  elif defined(cpp): "cpp"
-  elif defined(objc): "objc"
-  else: "c"
-
-# RFC-0005 review R2 SM3. `--exceptions`: how a raise unwinds.
-const buildExceptions*: string =
-  when compileOption("exceptions", "goto"): "goto"
-  elif compileOption("exceptions", "setjmp"): "setjmp"
-  elif compileOption("exceptions", "quirky"): "quirky"
-  elif compileOption("exceptions", "cpp"): "cpp"
-  else: "default"
-
-func buildFlagsSegment*(checksOn = buildChecksOn; danger = defined(danger);
-                        release = defined(release);
-                        mm = buildMemModel;
-                        backend = buildBackend;
-                        exceptions = buildExceptions;
-                        threads = compileOption("threads");
-                        stackTrace = compileOption("stackTrace");
-                        lineTrace = compileOption("lineTrace")): string =
+func buildFlagsSegment*(checksOn = checkNames(buildSemantics.checks);
+                        danger = buildSemantics.danger;
+                        release = buildSemantics.release;
+                        mm = $buildSemantics.mm;
+                        backend = $buildSemantics.backend;
+                        exceptions = $buildSemantics.exceptions;
+                        threads = buildSemantics.threads;
+                        stackTrace = buildSemantics.stackTrace;
+                        lineTrace = buildSemantics.lineTrace): string =
   ## RFC-0005 review R1-08. The build flags that change what the native `fn`
   ## does, which the program and the settings do not key: the checks it was
   ## compiled with (a debug build's confirmed raise cannot happen in a
@@ -6612,16 +6567,8 @@ func buildFlagsSegment*(checksOn = buildChecksOn; danger = defined(danger);
   ## model, and (R2 SM3) the backend, `--exceptions`, `--threads`, `--stackTrace`
   ## and `--lineTrace`. `--panics:on` is in `replayModeSegment`. The defaults are this
   ## build's.
-  "ck=" & checksOn.join(",") &
-    (if danger: "+danger" else: "") &
-    (if release: "+release" else: "") &
-    "+mm=" & mm &
-    # R2 SM3: backend, exception model, threads and trace instrumentation.
-    "+be=" & backend &
-    "+ex=" & exceptions &
-    (if threads: "+thr" else: "") &
-    (if stackTrace: "+st" else: "") &
-    (if lineTrace: "+lt" else: "")
+  renderBuildFlags(checksOn, danger, release, mm, backend, exceptions,
+                   threads, stackTrace, lineTrace)
 
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,

@@ -57,7 +57,7 @@ suite "K9a":
     check rec.verdict == pvExact
     check rec.walker == "sxSat"
     check rec.native.startsWith("witness hit")
-    check rec.build == buildSegment()
+    check rec.build == pinBuildSegment()
     check rec.runId.len > 0
     check rec.flags.len == 0
 

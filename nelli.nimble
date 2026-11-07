@@ -1692,6 +1692,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cu_nil_native",
             # RFC-0016 K9a: the native-pin verbs and the pin record.
             "tsymex_0016_k9a_pins",
+            "tsymex_0016_w1c1a_buildprofile",
             "tsymex_0016_w1c3_splat_defect",
             # RFC-0016 W1-a: one exception type id (W-01, W-33).
             "tsymex_0016_w1a_exn_typeid",

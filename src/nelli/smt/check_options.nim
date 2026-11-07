@@ -43,22 +43,12 @@
 ## Not visible to any of this (`docs/migration/0.9.0.md`): a hidden push whose pop
 ## is hidden too (or that never pops), and an importer outside that graph.
 import std/[macros, os, strutils, tables, compilesettings]
+import ./buildprofile
+export buildprofile.CheckOption   ## moved to buildprofile (RFC-0016 W1-c1a)
 
 {.warning[Deprecated]: off.}   # `NimNode.owner`: no replacement in 2.2.10
 
 type
-  CheckOption* = enum
-    coField = "fieldChecks"
-    coOverflow = "overflowChecks"
-    coRange = "rangeChecks"
-    coBound = "boundChecks"
-    coObj = "objChecks"
-    coNan = "nanChecks"
-    coInf = "infChecks"
-    coAssert = "assertions"
-      ## Never a deviation: it is read only where the walker models an assert of
-      ## its own (`assertsMaybeOff`). `checks` turns it with the rest.
-
   CheckState* = object
     ## Per option, whether it may be off and whether it may be on at a position.
     ## Both, where the scan cannot tell.
@@ -109,15 +99,7 @@ const
 const commandLineChecks*: CheckState = block:
   ## Read at this module's compilation, when no user `push` is open unless the
   ## user imported nelli under one (then every routine reads as that push).
-  var on: set[CheckOption]
-  when compileOption("fieldChecks"): on.incl coField
-  when compileOption("overflowChecks"): on.incl coOverflow
-  when compileOption("rangeChecks"): on.incl coRange
-  when compileOption("boundChecks"): on.incl coBound
-  when compileOption("objChecks"): on.incl coObj
-  when compileOption("nanChecks"): on.incl coNan
-  when compileOption("infChecks"): on.incl coInf
-  when compileOption("assertions"): on.incl coAssert
+  let on = buildSemantics.checks
   CheckState(maybeOn: on, maybeOff: everyOption - on)
 
 proc deviation*(st: CheckState): set[CheckOption] =

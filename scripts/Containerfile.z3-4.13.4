@@ -1,0 +1,28 @@
+# Second supported build row: the dev image with Z3 swapped for the official
+# 4.13.4 release, the version the Windows CI legs install (fuzzer-msvc,
+# fuzzer-mingw, symex-mingw). Everything else (Nim, PCRE1, mingw cross
+# toolchain) is inherited unchanged, so Z3 is the ONLY difference between this
+# row and the default image (which ships whatever Z3 Tumbleweed carries).
+#
+# Build:  scripts/build-dev-image.sh z3-4.13.4   ->   localhost/nelli-dev:z3-4.13.4
+# Use:    scripts/dt-bounded.sh -i z3-4.13.4 c tests/foo.nim
+#         scripts/sweep.sh -i z3-4.13.4 <outlog>
+FROM localhost/nelli-dev:latest
+ARG Z3_VERSION=4.13.4
+ARG Z3_ASSET=z3-4.13.4-x64-glibc-2.35
+ARG Z3_SHA256=93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b
+# The release zip is unpacked with python3 (no unzip in the base). The
+# distro's libz3 and headers are removed first so exactly one libz3 is
+# resolvable: nim-z3 dlopens libz3.so / libz3.so.4 and must not find 5.x.
+RUN curl -fsSL -o /tmp/z3.zip \
+      "https://github.com/Z3Prover/z3/releases/download/z3-${Z3_VERSION}/${Z3_ASSET}.zip" && \
+    echo "${Z3_SHA256}  /tmp/z3.zip" | sha256sum -c - && \
+    python3 -I -c "import zipfile; zipfile.ZipFile('/tmp/z3.zip').extractall('/tmp/z3')" && \
+    rm -f /usr/lib64/libz3.so* /usr/include/z3*.h /opt/z3-headers/z3*.h && \
+    install -m 0755 /tmp/z3/${Z3_ASSET}/bin/libz3.so /usr/lib64/libz3.so.4.13 && \
+    ln -s libz3.so.4.13 /usr/lib64/libz3.so.4 && \
+    ln -s libz3.so.4.13 /usr/lib64/libz3.so && \
+    cp /tmp/z3/${Z3_ASSET}/include/z3*.h /usr/include/ && \
+    cp /tmp/z3/${Z3_ASSET}/include/z3*.h /opt/z3-headers/ && \
+    ldconfig && \
+    rm -rf /tmp/z3 /tmp/z3.zip

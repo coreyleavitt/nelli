@@ -6,7 +6,10 @@ the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
 - nim is NOT installed on the host. Build/run tests via `scripts/dt.sh` or
   `scripts/dt-bounded.sh <c|cpp> <test.nim>` (podman, `localhost/nelli-dev`);
   `scripts/dt-crosswin.sh` cross-compiles for `--os:windows` to catch Windows
-  API misuse without a Windows host. No suite is known to hang under
+  API misuse without a Windows host.
+  `-i z3-4.13.4` on `dt-bounded.sh`/`sweep.sh` selects the Z3 4.13.4 image row
+  (`scripts/Containerfile.z3-4.13.4`, the Windows legs' Z3); default is Z3 5.1.
+  `sweep.sh` records the Z3 that ran in `<outlog>.env`. No suite is known to hang under
   Linux/podman: the six `tsymex_r6_*` hangers were fixed by RFC-0005 S8k and
   S8q, and `tsymex_snd3_6_equality_loop` terminates since S8t. A kill
   (rc=137) in a sweep is therefore a real signal, not a known hang.

@@ -33,6 +33,9 @@ scratch/
 # Session scratch (sweep logs, debug probes)
 scratchpad/
 
+# Z3 pin records (written by the pin tests; default NELLI_PIN_DIR)
+tests/.pins/
+
 # Design docs deliberately kept OUT of the repo (see 40091e2). Both were
 # swept in twice by `git add -A docs` -- 2dca562, then da20181 undoing
 # 40091e2's own correction one commit later -- so ignore them by name

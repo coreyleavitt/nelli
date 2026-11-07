@@ -25,10 +25,13 @@
 # prose next to the code that computes it is a number that goes stale; read
 # <outlog>.drift, which is generated and therefore cannot lie.
 #
-# Usage: scripts/sweep.sh [-j N] [-t SECS] [-b c|cpp] [-f REGEX] <outlog>
+# Usage: scripts/sweep.sh [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>
 #   -j N      parallel jobs (default 6)
 #   -t SECS   per-test timeout passed to dt-bounded.sh (default 900)
 #   -b BE     backend, c or cpp (default c; `nimble test` uses c only)
+#   -i IMAGE  dev image variant, localhost/nelli-dev:IMAGE (default `latest`,
+#             the distro Z3; `z3-4.13.4` is the Z3 4.13.4 row). Built on demand.
+#             Passed to every dt-bounded.sh worker; composes with -b and -f.
 #   -f REGEX  restrict the run set to basenames matching REGEX
 #
 # Output contract, one line per test, in completion order:
@@ -51,9 +54,12 @@
 # This script's own exit status is 0 unless it could not run at all — the log
 # is the sole source of truth, matching psweep.sh's contract.
 #
-# Two side files are written next to the log:
+# Side files written next to the log:
 #   <outlog>.drift    registry drift against nelli.nimble
-#   <outlog>.summary  counts plus the failing set
+#   <outlog>.summary  the image/Z3 line, counts, and the failing set
+#   <outlog>.env      the image and the libz3 version that actually ran, so a
+#                     baseline is self-describing. (Kept out of <outlog>
+#                     itself: sweep-diff.sh keys every line of that file.)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -61,18 +67,20 @@ jobs=6
 timeout_secs=900
 backend=c
 filter=
+image=latest
 
-while getopts ":j:t:b:f:" opt; do
+while getopts ":j:t:b:i:f:" opt; do
   case "$opt" in
     j) jobs="$OPTARG" ;;
     t) timeout_secs="$OPTARG" ;;
     b) backend="$OPTARG" ;;
+    i) image="$OPTARG" ;;
     f) filter="$OPTARG" ;;
-    *) echo "usage: sweep.sh [-j N] [-t SECS] [-b c|cpp] [-f REGEX] <outlog>" >&2; exit 2 ;;
+    *) echo "usage: sweep.sh [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>" >&2; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))
-outlog="${1:?usage: sweep.sh [-j N] [-t SECS] [-b c|cpp] [-f REGEX] <outlog>}"
+outlog="${1:?usage: sweep.sh [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>}"
 
 case "$backend" in c|cpp) ;; *) echo "sweep.sh: backend must be c or cpp" >&2; exit 2 ;; esac
 
@@ -128,6 +136,20 @@ if [ "${#run_set[@]}" -eq 0 ]; then
 fi
 
 : > "$outlog"
+
+# ---- which Z3 ran ---------------------------------------------------------
+# Ask the image itself (compile and run a one-line C probe against its libz3)
+# rather than trusting its tag, so the record cannot disagree with reality.
+podman image exists "localhost/nelli-dev:$image" || scripts/build-dev-image.sh "$image" >&2 || exit 2
+z3_full="$(podman run --rm "localhost/nelli-dev:$image" bash -c '
+  printf "%s\n" "#include <stdio.h>" "#include <z3.h>" \
+    "int main(void){puts(Z3_get_full_version());return 0;}" > /tmp/zv.c &&
+  gcc -o /tmp/zv /tmp/zv.c -lz3 && /tmp/zv' 2>&1 | tail -n1)"
+z3_full="${z3_full#Z3 }"
+[ -n "$z3_full" ] || z3_full="unknown"
+env_line="image=localhost/nelli-dev:$image Z3=$z3_full"
+echo "$env_line" > "$outlog.env"
+export NELLI_IMAGE="$image"
 
 # ---- registry drift ------------------------------------------------------
 # nelli.nimble's `test` task list is hand-maintained; symex-mingw derives its
@@ -282,6 +304,7 @@ killed=$(awk '$1 == "137"' "$outlog" | wc -l | tr -d ' ')
 warn_tests=$(awk '$4+0 > 0' "$outlog" | wc -l | tr -d ' ')
 warn_total=$(awk '{s+=$4+0} END{print s+0}' "$outlog")
 {
+  echo "$env_line"
   echo "backend=$backend jobs=$jobs timeout=${timeout_secs}s${filter:+ filter=$filter}"
   echo "pass=$pass fail=$fail (of which timeout-killed=$killed) skip=$skip total=$((pass + fail + skip))"
   echo "unregistered=$unregistered_n missing=$missing_n stale_skiplist=$stale_n  (see $drift)"

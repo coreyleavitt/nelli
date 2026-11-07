@@ -87,12 +87,12 @@ cost  = "A helper-heavy module stays mostly Unknown."
 
 [[slice]]
 id    = "M1"
-title = "Decline census and value benchmark on a pinned corpus (§3)"
+title = "Decline census and value benchmark on a pinned corpus (§3); validates maxLoopUnwind (§7)"
 state = "pending"
 
 [[slice]]
 id    = "L1"
-title = "Concolic trip-count concretization: the generated input fixes the loop count, the solver works on the branch past it (§4.1)"
+title = "Concolic trip-count concretization: the generated input fixes the loop count, the solver works on the branch past it (§4.1); takes N20 (§7)"
 state = "pending"
 
 [[slice]]
@@ -112,7 +112,7 @@ state = "pending"
 
 [[slice]]
 id    = "P1"
-title = "Path merging at if and case joins, generalizing S8w's short-circuit join (§4.3)"
+title = "Path merging at if and case joins, generalizing S8w's short-circuit join (§4.3); takes OQ1 and the merge half of RFC-0016 CRH-03 (§7)"
 state = "pending"
 
 [[slice]]
@@ -122,7 +122,7 @@ state = "pending"
 
 [[slice]]
 id    = "E1"
-title = "Private cross-module callees, per item cross-module (§4.4)"
+title = "Private cross-module callees, per item cross-module (§4.4); cites #138 (§7)"
 state = "pending"
 +++
 
@@ -323,3 +323,21 @@ set before M1 exists.
 
 Items `order`, `loop-strategy` and `cross-module` in the front matter,
 **awaiting Corey**.
+
+## §7 — Moved from RFC-0016 (MOV-01, recorded 2026-11-07, W1-z)
+
+RFC-0016 §5.9 row MOV-01 listed six items that are reach, not parity. Each
+is recorded here with the slice that takes it; RFC-0016 keeps only the
+soundness half of each (a decline that is named, a cap that is a halt).
+
+| Id | Item | Slice | Evidence | Stays in RFC-0016 |
+|---|---|---|---|---|
+| N20 | A per-iteration solver check at the k-unroll: the loop unroller asks the solver at every iteration instead of using the generated input's trip count | L1 | `canonicalize.nim:2568-2588`; RFC-0001 handoff lines 265-266, 1103 | nothing |
+| OQ1 | Path merging at ordinary `if` and `case` joins (SYMEX_PLAN open question 1); today only S8w's short-circuit guard merges | P1 | `SYMEX_PLAN.md` lines 2244-2252, 2267-2279; `runtime.nim:20534` | nothing |
+| CRH-03 (merge OOM) | A ref-local merge runs out of memory: 8.36 GB under an 8 GB limit, killed at 124-135 s, the same on `main`; no `iteDeep` pin in `tests/`. P1 must not make it worse and should bound it | P1 | RFC-0016 CRH-03 and the retired INT-02; sort item S8ct | the bounded decline within budget, as a `declined` cell |
+| `maxLoopUnwind` | The default of 5 (OQ3 in SYMEX_PLAN) was never validated against real code; RFC-0011 i3 notes that a proof under `maxLoopUnwind = 8` is not a proof | M1 (census), then L1/L2 | `types.nim:3400`; RFC-0011 line 101 | that the unwind exit is a halt with a named kind (`beBudgetExhausted`) |
+| #138 | Cross-module private callees: `getImpl` cannot resolve a private routine in another module and the call declines. §2.4 and item `cross-module` do not cite the issue | E1 | `dsl_parser.nim:20953`; GitHub issue #138 | the decline kind stays named |
+| Caps | "Raise the cap" for the caps in RFC-0016 §8.4: `maxFrontierSize` (P2), `maxLoopUnwind` (M1, L1), `maxCallDepth` and `maxRecursionDepth` (C1), `maxHeapDepth` (C1), `maxInstantiationsPerProc` and `geInstantiationCapped` (E1); the call cache's exact-actuals conservatism (`runtime.nim:23590`, C1) | per cap | `types.nim:5873-5918`; `runtime.nim:23022,23060` | the K7a `CapKind` halt per cap and its soundness |
+
+Interval survival across loop iterations (RFC-0014 lines 161-167) borders L3
+and is not moved here; it stays a border note.

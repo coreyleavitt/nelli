@@ -70,6 +70,7 @@
 #
 # Side files written next to the log:
 #   <outlog>.drift    registry drift against nelli.nimble
+#   <outlog>.failures/  stdout+stderr tails of each non-zero test (only if any)
 #   <outlog>.summary  the image/Z3 line, counts, and the failing set
 #   <outlog>.env      the image and the libz3 version that actually ran, so a
 #                     baseline is self-describing. (Kept out of <outlog>
@@ -228,7 +229,8 @@ else
   warn_root=/work
 fi
 echo "$env_line" > "$outlog.env"
-export NELLI_IMAGE="$image" warn_root
+failure_dir="$outlog.failures"; rm -rf "$failure_dir"
+export NELLI_IMAGE="$image" warn_root failure_dir
 
 # ---- registry drift ------------------------------------------------------
 # nelli.nimble's `test` task list is hand-maintained; symex-mingw derives its
@@ -307,9 +309,17 @@ stale_n="${#stale_skiplist[@]}"
 run_one() {
   local b="$1" f="$2" t="$3" name rc stderr_tmp filtered warn_n
   name="$(basename "$f" .nim)"
-  stderr_tmp="$(mktemp)"
-  scripts/dt-bounded.sh "$b" "$f" "$t" >/dev/null 2>"$stderr_tmp"
+  stderr_tmp="$(mktemp)"; stdout_tmp="$(mktemp)"
+  scripts/dt-bounded.sh "$b" "$f" "$t" >"$stdout_tmp" 2>"$stderr_tmp"
   rc=$?
+  # A failure leaves its output tail in <outlog>.failures/ so a CI log that
+  # only has "rc=1" is diagnosable. Sidecar only; never touches the log.
+  if [ "$rc" -ne 0 ]; then
+    mkdir -p "$failure_dir"
+    { echo "## stdout (tail)"; tail -n 60 "$stdout_tmp"
+      echo "## stderr (tail)"; tail -n 60 "$stderr_tmp"; } > "$failure_dir/$b.$name"
+  fi
+  rm -f "$stdout_tmp"
   filtered="$(grep -E "^$warn_root/(src|tests)/.*Warning:" "$stderr_tmp" 2>/dev/null || true)"
   if [ -n "$filtered" ]; then
     warn_n=$(printf '%s\n' "$filtered" | wc -l | tr -d ' ')

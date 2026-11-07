@@ -94,18 +94,29 @@ suite "RFC-0005 S8cb magics: unsigned operators":
   c(div8, sxSat):
     let a = int8(x and 3) - 4'i8
     if a == -1'i8 and a /% 2'i8 == 127'i8: symexTarget("t")
-  c(divzero, sxSat):
+  ## RFC-0016 W1-d1b (rule a): an unsigned `/%` or `%%` by zero is undefined
+  ## behaviour (`ubUnsignedDivZero`, a halt), not a caught `DivByZeroDefect`;
+  ## the label behind the `except` is no longer reached, and the verdict is
+  ## `sxUnknown` naming the halt.
+  c(divzero, sxUnknown):
     try:
       if y == 0:
         discard x /% y
     except DivByZeroDefect:
       symexTarget("t")
-  c(modzero, sxSat):
+  c(modzero, sxUnknown):
     try:
       if y == 0:
         discard x %% y
     except DivByZeroDefect:
       symexTarget("t")
+  test "the unsigned zero divisors name the halt (ubUnsignedDivZero)":
+    for r in [symexFind(divzero, tLabel("t")), symexFind(modzero, tLabel("t"))]:
+      var halted = false
+      for e in r.errors:
+        if e.kind == ubUnsignedDivZero: halted = true
+      check halted
+      check not r.trusted
   c(callform, sxUnsat): (if x == -1 and y == 1 and `<%`(x, y): symexTarget("t"))
 
 suite "RFC-0005 S8cb magics: ashr, ord, chr, unary plus":

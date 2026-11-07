@@ -8,6 +8,13 @@
 ## `check_options.nim`'s `defaultOn` model is unchanged: it reads
 ## `buildSemantics.checks` as its command-line baseline, and `routineChecks`
 ## stays an absolute deviation from `defaultOn`, not from this profile.
+##
+## `buildSemantics` is a constant of THIS module, evaluated where it is first
+## compiled. A module that imports nelli under a `{.push fieldChecks: off.}` (or
+## any other push of a check option) therefore records those checks as off in
+## the profile. That profile fails closed: it disagrees with the build's real
+## checks, so the walker declines (`feCheckOption`) rather than answer for a
+## program it does not model. Import nelli before the push.
 import std/[strutils, algorithm]
 
 type

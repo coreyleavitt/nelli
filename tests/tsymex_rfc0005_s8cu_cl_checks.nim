@@ -13,7 +13,12 @@ suite "S8cu: --checks:off":
     check native(clField(4)) == "hit"
     declines(clField, feCheckOption)
     check native(clOver(high(int))) == "hit"
-    declines(clOver, feOverflowCheckOption)
+    ## RFC-0016 W1-d2 (rule a): the build has signed overflow checks off, so
+    ## the overflow is an `ubSignedOverflow` halt (not `feOverflowCheckOption`);
+    ## `feCheckOption` stays, from the field/range/bound/obj checks this
+    ## routine is also compiled without.
+    declines(clOver, ubSignedOverflow)
+    declines(clOver, feCheckOption)
     check native(clRange(300)) == "hit"
     declines(clRange, feCheckOption)
     check native(clBound(3)) == "hit"

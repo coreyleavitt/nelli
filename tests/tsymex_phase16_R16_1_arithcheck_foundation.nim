@@ -199,7 +199,9 @@ suite "R16-1 — validateSymexSettings arithChecks warnings":
     s.arithChecks = {acDivByZero, acRange}   ## acOverflow is OFF
     s.defectExclusions.incl dkOverflowDefect
     let warns = validateSymexSettings(s)
-    check warns.allIt("acOverflow" notin it)
+    ## RFC-0016 W1-d2: the build-disagreement warning prints the whole set
+    ## (so it may name "acOverflow"); the claim is about the WASTE warning.
+    check warns.allIt(not ("acOverflow" in it and "dkOverflowDefect" in it))
 
   test "pre-existing seqInlineThreshold warning still fires alongside R16-1 warnings":
     ## Regression: the new warnings must coexist with the pre-existing

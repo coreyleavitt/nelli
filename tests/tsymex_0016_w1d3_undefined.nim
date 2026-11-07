@@ -7,7 +7,7 @@ import std/[unittest, strutils, tables, options]
 import nelli
 import nelli/symex
 import nelli/db
-import nelli/smt/[types, dsl, runtime, canonicalize]
+import nelli/smt/[types, dsl, runtime, canonicalize, replayproc]
 import nelli/engine/types
 import ./s8cu_helpers
 
@@ -41,9 +41,11 @@ suite "W1-d3 the noinit read":
     let r = symexFind(sutNoinitRead, tLabel("z"))
     checkpoint show(r.errors) & " " & $r.soundness
     check not r.trusted
-    when defined(cpp):
+    when defined(cpp) or replayReexecs:
       ## The scrubbed slot is not zero in the cpp build's replay frames (a
-      ## different stack layout), so the replay refutes the witness: the
+      ## different stack layout), nor in a re-executed replay's child (a fresh
+      ## stack the host's `scrub` never touched; Windows, or
+      ## `-d:nelliReplayReexec`), so the replay refutes the witness: the
       ## claim stays unconfirmed, which is the same untrusted outcome.
       check r.status in {sxSat, sxUnknown}
       if r.status == sxSat:

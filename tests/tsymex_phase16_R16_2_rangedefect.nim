@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import nelli/smt/types
 
 # Phase 16 R16-2 — float→int RangeDefect.
 #
@@ -115,8 +116,26 @@ suite "symex Phase 16 R16-2 — acRange gate":
     let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
 
-  test "R16-2-4b: acRange off → no RangeDefect raise":
+  test "R16-2-4b: acRange off (disagrees with the build) → tainted, never a raise":
+    ## RFC-0016 W1-d2 (rule a): `arithChecks` derives from the build; a value
+    ## without `acRange` on this range-checked build taints every path.
     let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"), noAcRangeSettings())
+    check r.status != sxRaised
+    check not r.trusted
+    var tainted = false
+    for e in r.errors:
+      if e.kind == feCheckOption: tainted = true
+    check tainted
+
+  test "R16-2-4c: RangeDefect excluded → no RangeDefect raise":
+    ## RFC-0016 W1-d2 (rule b): the old 4b property (no RangeDefect finding),
+    ## kept at full strength through `defectExclusions`, which does not
+    ## disagree with the build.
+    const s = block:
+      var x = defaultSymexSettings()
+      x.defectExclusions.incl dkRangeDefect
+      x
+    let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"), s)
     check r.status == sxUnsat   ## no RangeDefect path raised
 
 # ---------------------------------------------------------------------------

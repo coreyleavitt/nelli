@@ -10,13 +10,17 @@
 ##
 ## Each row runs the routine natively on this build beside the walker's verdict.
 import std/[unittest, sets, macros, strutils]
-import ./s8cu_fix_hidden_m1
-import ./s8cu_fix_hidden_m2
-import ./s8cu_fix_hidden_tpl
+## nelli comes first: `buildprofile`'s `buildSemantics` constant is compiled
+## where it is first imported, so importing it through a fixture's push of
+## check options would record those checks as off (RFC-0016 W1-d2, import
+## order; see `buildprofile.nim`).
 import nelli
 import nelli/symex
 import nelli/smt/check_options
 import ./s8cu_helpers
+import ./s8cu_fix_hidden_m1
+import ./s8cu_fix_hidden_m2
+import ./s8cu_fix_hidden_tpl
 
 type K = enum kA, kB
 type P = object

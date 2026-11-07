@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import nelli/smt/types
 
 # Phase 16 R16-3 — div/mod-by-zero DivByZeroDefect raise fork.
 #
@@ -139,8 +140,27 @@ proc noAcDivByZeroSettings(): SymexSettings =
 
 suite "symex Phase 16 R16-3 — acDivByZero gate":
 
-  test "R16-3-6: acDivByZero off → no DivByZeroDefect raise (honest-incomplete)":
+  test "R16-3-6: acDivByZero off (disagrees with the build) → tainted, never a DivByZeroDefect raise":
+    ## RFC-0016 W1-d2 (rule a): `arithChecks` derives from the build; a value
+    ## without `acDivByZero` on this checked build taints every path.
     let r = symexFind(sd_off, tRaisedExn("DivByZeroDefect"), noAcDivByZeroSettings())
+    check not r.trusted
+    var tainted = false
+    for e in r.errors:
+      if e.kind == feCheckOption: tainted = true
+    check tainted
+    if r.status == sxRaised:
+      check r.raisedTypeId != "DivByZeroDefect"
+
+  test "R16-3-6b: DivByZeroDefect excluded → no DivByZeroDefect raise (honest-incomplete)":
+    ## RFC-0016 W1-d2 (rule b): the old R16-3-6 property, kept at full
+    ## strength through `defectExclusions`, which does not disagree with the
+    ## build.
+    const s = block:
+      var x = defaultSymexSettings()
+      x.defectExclusions.incl dkDivByZeroDefect
+      x
+    let r = symexFind(sd_off, tRaisedExn("DivByZeroDefect"), s)
     ## RFC-0005 S8i: acOverflow stays on, so `low(int) div -1`'s
     ## `OverflowDefect` (always surfaced) is the one finding left; no
     ## `DivByZeroDefect` is forked with the gate off.

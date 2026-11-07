@@ -40,6 +40,7 @@
 import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
+import nelli/smt/types
 import nelli/symex
 
 # RFC-0005 S8i: `return i` into a `range[0..1000]` result is a checked
@@ -53,14 +54,18 @@ import nelli/symex
 # `beSolverUndef` naming the cap: the honest verdict is `sxUnknown`, never
 # `sxUnsat` (the defect is real) and never `sxSat` (which the unranged
 # placeholder W8 fixed would produce at once, with a short string). The
-# same searches with range checks off (`acRange` excluded: no RangeDefect
+# same searches with range checks off (`dkRangeDefect` excluded: no RangeDefect
 # fork) pin the placeholder range on its own: `sxUnsat`.
 # `tsymex_rfc0005_s8i_models` pins the callee-return check itself, at a
 # bound Z3 can witness.
 
 proc noRangeChecks(): SymexSettings =
+  ## RFC-0016 W1-d2 (rule b): `arithChecks` derives from the (range-checked)
+  ## build and a differing explicit value taints the verdict, so the RangeDefect
+  ## fork is suppressed by exclusion instead. `--rangeChecks:off` is not a
+  ## modelled build (every routine declines `feCheckOption`), so no sibling.
   result = defaultSymexSettings()
-  result.arithChecks = {acOverflow, acDivByZero}
+  result.defectExclusions.incl dkRangeDefect
 
 proc capDeclineOnly[T](r: SymexResult[T]): bool =
   ## sxUnknown whose only errors are the `maxSeqLen` decline.

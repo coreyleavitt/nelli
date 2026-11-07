@@ -193,10 +193,19 @@ proc refuted(k: int) =
   if gG != 0 and k == 42:
     symexTarget("t")
 
-# State the re-executed child cannot be handed: a routine's `{.global.}`.
+# A routine's `{.global.}` named by that routine alone links in a re-executed
+# child, which runs the routine itself (RFC-0016 W1-m): the positive pin.
 proc routineGlobal(k: int) =
   var calls {.global.} = 0
   if gG == 0 and calls == 0 and k == 3:
+    symexTarget("t")
+
+# State the re-executed child cannot be handed: a routine's `{.global.}` named
+# from ANOTHER routine (here a nested one), which does not link (RFC-0016 W1-m).
+proc routineGlobalOther(k: int) =
+  var calls {.global.} = 0
+  proc seesZero(): bool = calls == 0
+  if gG == 0 and seesZero() and k == 3:
     symexTarget("t")
 
 # Threads at the fork. Another thread would end the wait, and in the child that
@@ -242,6 +251,7 @@ proc nativeMain(row: string; k: int) =
     of "confirmed": confirmed(k)
     of "refuted": refuted(k)
     of "routineGlobal": routineGlobal(k)
+    of "routineGlobalOther": routineGlobalOther(k)
     else: quit(250)
   except Exception as e:
     stdout.writeLine "RAISED|" & $e.name
@@ -341,8 +351,19 @@ suite "S8ct: §2.3 rule 3 still holds":
     check hasKind(r.errors, feReplayRefuted)
     check not nativeRun("refuted", 42).hit
 
-  test "state the wire cannot carry: Linux decides, re-exec names why not":
+  test "a routine's own {.global.} is replay-confirmed on both platforms":
+    ## RFC-0016 W1-m: the re-executed child runs the routine itself, so the
+    ## global is its own; the old re-exec decline pinned here is gone.
     let r = symexFind(routineGlobal, tLabel("t"))
+    checkpoint(show(r.errors))
+    check r.status == sxSat
+    check r.soundness.replay == rsConfirmed
+    check nativeRun("routineGlobal", 3).hit
+
+  test "state the wire cannot carry: Linux decides, re-exec names why not":
+    ## RFC-0016 W1-m: a routine global named from ANOTHER routine still makes
+    ## the re-exec replay decline.
+    let r = symexFind(routineGlobalOther, tLabel("t"))
     checkpoint(show(r.errors))
     when replayReexecs:
       check r.status == sxUnknown
@@ -352,7 +373,7 @@ suite "S8ct: §2.3 rule 3 still holds":
     else:
       check r.status == sxSat
       check r.soundness.replay == rsConfirmed
-    check nativeRun("routineGlobal", 3).hit
+    check nativeRun("routineGlobalOther", 3).hit
 
   test "the walker's version floor":
     check parseInt(symexWalkerVersion) >= 261

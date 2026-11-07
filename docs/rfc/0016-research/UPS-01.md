@@ -1,4 +1,4 @@
-# UPS-01 (draft, not filed): Nim, a destructor's `try/except` swallows an in-flight exception on the C backend
+# UPS-01 (filed 2026-11-07 as nim-lang/Nim#26661): Nim, a destructor's `try/except` swallows an in-flight exception on the C backend
 
 Target: nim-lang/Nim. RFC-0016 section 5.6, decision D-0016-3. Drafted
 2026-11-07 (W1-z). Nothing here has been filed; the issue URL goes in section

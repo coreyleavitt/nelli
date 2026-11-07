@@ -416,17 +416,29 @@ is the per-cause view.
 Nim leaves some operations to C, and C leaves them undefined: the compiler may
 assume they never happen and rewrite code around them, including code before
 them. The walker does not pick one build's outcome. The path ends at the
-operation (it is neither a `Defect` nor a value), the omission is recorded on
-the path and the verdict (`Soundness.witnessUndefined`, `undefinedKinds()`),
-and a replay cannot lift it: a witness that reaches the target past such an
-operation is not `trusted()` and is not run in your process by
-`assertCoveredBy` or `symexForAll`. These are all in the *omitted* class.
+operation (it is neither a `Defect` nor a value) and the omission is recorded.
+These are all in the *omitted* class.
+
+Two things can happen to the omission, by kind:
+
+- Only `ubIndeterminateRead` (a `{.noinit.}` local read before any write) rides
+  a witness. The path continues past the read, so a witness that reaches the
+  target past it carries the kind in `Soundness.witnessUndefined`
+  (`undefinedKinds()`), which a replay cannot lift: the witness is not
+  `trusted()` and is not run in your process by `assertCoveredBy` or
+  `symexForAll`.
+- The arithmetic kinds (`ubUnsignedDivZero`, `ubIntMinModMinusOne`,
+  `ubSignedOverflow`, `ubSignedDivZero`) halt the path at the operation. The
+  halted side reaches no target and carries no witness; the omission shows in
+  the verdict's gaps, so an `sxUnsat` is not trusted past it. A witness found
+  through a different, defined path is unaffected.
+- `ubFloatToIntRange` is declared and has no emission site yet.
 
 | Kind | The operation | What to do |
 |---|---|---|
 | `ubUnsignedDivZero` | `x div 0` or `x mod 0` on an unsigned type. Nim has no check; the C division traps (SIGFPE on x86-64). Not a `DivByZeroDefect`. | Guard the divisor, or keep the property off inputs where it can be zero. |
 | `ubIntMinModMinusOne` | `low(T) mod -1` (and `low(T) div -1` with overflow checks off) at 32 and 64 bits. The C division is undefined and traps on x86. | Guard the divisor against `-1` for the minimum. |
-| `ubSignedOverflow` | signed `+`, `-`, `*` or negation that overflows, in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`) and no `-d:nelliFwrapv`. The compiler may assume it never happens (`v + 1 > v` folds to true). | Build with overflow checks on, or `-d:nelliFwrapv` if the program relies on the wrap, or bound the operands. |
+| `ubSignedOverflow` | signed `+`, `-`, `*` or negation that overflows, in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`) and no wrapping build mode (`-d:nelliFwrapv` is planned, K5a, and is not implemented yet). The compiler may assume it never happens (`v + 1 > v` folds to true). | Build with overflow checks on, or bound the operands. (A `-d:nelliFwrapv` build for programs that rely on the wrap is planned, K5a, not implemented.) |
 | `ubFloatToIntRange` | a float to int conversion out of range. Declared; no emission site yet (the conversion still records `feConvFloatToIntUndefined`). | See `feConvFloatToIntUndefined`. |
 | `ubIndeterminateRead` | a read of a `{.noinit.}` local before any write. | Initialise it. |
 | `ubSignedDivZero` | `x div 0` or `x mod 0` on a signed type in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`). Nim emits its zero check under `overflowChecks` alone, so the C division is reached and is undefined (SIGFPE on x86-64). With the checks on it is a `DivByZeroDefect`. | Guard the divisor, or build with overflow checks on. |
@@ -497,6 +509,16 @@ meaning.
 
 `scripts/check-readme-kinds.sh` fails if a `fe*` or `ub*` member of
 `SymexErrorKind` (other than a retired one) is not named in this file.
+
+## Local variable pragmas
+
+A pragma on a local `var` or `let` is either admitted or declined. Admitted:
+`noinit` (the local reads as an indeterminate value until written, see
+`ubIndeterminateRead`), `global`, `inject`, `gensym` and `used`. Any other
+(`cursor`, `align`, `volatile`, `codegenDecl`, ...) is declined with
+`feLocalPragma` on every path that reaches the declaration. The declaration is
+still lowered so later uses resolve. To analyse the routine, move the pragma
+off it. The catalogue row is under "Constructs the walker declines".
 
 ## Out of scope for v1 (diagnosed at macro time)
 

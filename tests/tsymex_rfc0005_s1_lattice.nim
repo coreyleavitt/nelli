@@ -107,15 +107,36 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
     # one, or an unlisted kind has none.
     # (`ubIndeterminateRead` left it in W1-d3: the `{.noinit.}` read.)
     const unproducedUntil = {ubFloatToIntRange}    # K10a
+    proc code(line: string): string =
+      ## The line's code: string literals blanked and any `#` comment cut, so
+      ## a kind named only in a comment or a message is not a producer.
+      var inStr = false
+      var i = 0
+      while i < line.len:
+        let c = line[i]
+        if inStr:
+          if c == '\\': inc i
+          elif c == '"': inStr = false
+        elif c == '"': inStr = true
+        elif c == '#': break
+        else: result.add c
+        inc i
+    proc occurs(src, name: string): bool =
+      var at = src.find(name)
+      while at >= 0:
+        let before = if at == 0: ' ' else: src[at - 1]
+        let after = if at + name.len >= src.len: ' ' else: src[at + name.len]
+        if before notin IdentChars and after notin IdentChars: return true
+        at = src.find(name, at + 1)
     var src = ""
     for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim"]:
       let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
       if fileExists(path):
         for line in readFile(path).splitLines():
-          if not line.strip().startsWith("#"): src.add line & "\n"
+          src.add code(line) & "\n"
     for k in UbKind:
       check classOf(k) == dcOmitted
-      check (($k in src) == (k notin unproducedUntil))
+      check (occurs(src, $k) == (k notin unproducedUntil))
 
   test "pathTaint per class (RFC §2.2 table)":
     check pathTaint(dcFreshSymbol) == {scSpurious}

@@ -3925,6 +3925,21 @@ proc allRaiseFindings*[T](r: SymexResult[T]): seq[DefectFinding[T]] =
 
 # ---- assertCoveredBy --------------------------------------------------------
 
+proc hostRefusalReason(s: Soundness): string =
+  ## Why `hostRunnable(s)` is false, as the reason `assertCoveredBy` gives for
+  ## not running a witness: the actual cause, not one guessed for all of them.
+  if s.replay == rsUnsettled:
+    "its record was never settled"
+  elif s.witnessUndefined != {}:
+    var names: seq[string] = @[]
+    for k in undefinedKinds(s): names.add $k
+    "its path ran past undefined behaviour (" & names.join(", ") & ")"
+  elif s.witnessUnsafe:
+    "its witness ends or hangs the process that runs it (a crash claim, " &
+      "or a replay that ended or hung its child)"
+  else:
+    "it is not host-runnable"
+
 macro assertCoveredBy*(fn: typed,
                        target: static SymexTarget,
                        testFn: typed = nil,
@@ -4099,6 +4114,7 @@ macro assertCoveredBy*(fn: typed,
   let unconfirmedTail = newLit("Coverage is unconfirmed, and testFn is not " &
     "blamed (set acceptUnknownAsCovered = true to downgrade)")
   let runnableSym = bindSym"hostRunnable"
+  let refusalSym = bindSym"hostRefusalReason"
   let outcomeSym = bindSym"coverageOutcome"
   # Review R3 (E2): the call site the run's report keys this finding by. The
   # multi-target form hands its own `fn` node on, so its targets share it.
@@ -4179,8 +4195,8 @@ macro assertCoveredBy*(fn: typed,
         if not `acceptUnknown`:
           failure = `unconfirmedMsg` &
             (if runIt: "Running it did not reach the target. "
-             else: "It was not run here: its replay ended or hung its " &
-                   "process. ") & `unconfirmedTail`
+             else: "It was not run here: " & `refusalSym`(`rId`.soundness) &
+                   ". ") & `unconfirmedTail`
       `findingId` = SymexFinding(
         targetDesc:     `targetDescLit`,
         status:         `status`,

@@ -1,6 +1,6 @@
 ## RFC-0005 S8cu. What the suites share: the native check and the decline check.
 import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
-            options, streams]
+            options, streams, tempfiles]
 import nelli/symex
 import nelli/smt/admission
 import nelli/smt/buildprofile
@@ -453,9 +453,7 @@ proc prepareProbe(who: string; probe: string; flags: openArray[string]
   let nim = findExe("nim")
   if nim.len == 0: pinFail(who & ": nim is not on PATH")
   inc probeCounter
-  result.dir = getTempDir() / ("k9a_probe_" & $getCurrentProcessId() & "_" &
-                               $probeCounter)
-  createDir(result.dir)
+  result.dir = createTempDir("k9a_probe_", "_" & $probeCounter)
   var src = probe
   if '\n' in probe or defined(windows):
     src = result.dir / "probe_src.nim"

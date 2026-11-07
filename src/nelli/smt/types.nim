@@ -2881,16 +2881,17 @@ type
     # declared together and contiguous so `UbKind` is one range. Each names a
     # place where the program's behaviour is undefined, not a Defect and not
     # a value: the path ends there (`haltUndefined`) and the run records the
-    # omission. All `dcOmitted`, sevError. Only `ubIntMinModMinusOne` has a
-    # producer so far (W1-d1a); `ubUnsignedDivZero` follows in W1-d1b,
-    # `ubSignedOverflow`, `ubFloatToIntRange` and `ubIndeterminateRead` with
-    # K10a.
+    # omission. All `dcOmitted`, sevError. Producers: `ubIntMinModMinusOne`
+    # (W1-d1a), `ubUnsignedDivZero` (W1-d1b), `ubSignedDivZero`, `ubSignedOverflow`
+    # (W1-d2) and `ubIndeterminateRead` (W1-d3, the `{.noinit.}` read).
+    # `ubFloatToIntRange` has none until K10a.
     ubUnsignedDivZero     ## `x div 0` / `x mod 0` on an unsigned type.
     ubIntMinModMinusOne   ## `low(T) mod -1` (and `low(T) div -1` with
                           ## overflow checks off) at 32 and 64 bits: the C
                           ## division is undefined and traps on x86 (SIGFPE).
     ubSignedOverflow      ## signed add / sub / mul / neg overflow with the
-                          ## overflow checks off and no `-d:nelliFwrapv`.
+                          ## overflow checks off (`-d:nelliFwrapv` is planned, K5a, not yet
+                          ## implemented).
     ubFloatToIntRange     ## a float to int conversion out of range.
     ubIndeterminateRead   ## a read of an uninitialised value.
     ubSignedDivZero       ## `x div 0` / `x mod 0` on a signed type with the
@@ -5962,7 +5963,8 @@ func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
 func buildWraps*(b: BuildSemantics = buildSemantics): bool =
   ## RFC-0016 W1-d2 (W-07). Whether signed `+`, `-`, `*` (and `div`) in this
   ## build are UNCHECKED: with `overflowChecks` off the C operation is
-  ## undefined on overflow (not a wrap, unless `-d:nelliFwrapv`), so the
+  ## undefined on overflow (not a wrap; a `-d:nelliFwrapv` build is planned, K5a, and not yet
+  ## implemented), so the
   ## walker does not model a wrap and a trusted answer. The ONE predicate
   ## `currentArithWraps`, the wrap scan and the exact-offset promotion read;
   ## settings never feed it (the build is what the native program does; a

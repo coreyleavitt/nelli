@@ -32,6 +32,9 @@ on:
       - 'README.md'
       - 'CHANGELOG.md'
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -44,6 +47,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
 
       - name: Install the patched Nim toolchain (OCI artifact)
         uses: ./.github/actions/setup-nim-artifact
@@ -108,7 +112,9 @@ jobs:
       - name: README decline catalogue names every kind (scripts/check-readme-kinds.sh)
         if: ${{ !cancelled() }}
         shell: bash
-        run: bash scripts/check-readme-kinds.sh
+        run: |
+          bash scripts/check-readme-kinds.sh
+          bash scripts/check-readme-kinds.sh --self-test
 
       - name: K1-0 pin join (scripts/k1lite.sh on the host)
         if: ${{ !cancelled() }}
@@ -125,6 +131,28 @@ jobs:
           scripts/k1lite.sh -k "$RUNNER_TEMP/k1lite/pins" 2>&1 \
             | tee "$RUNNER_TEMP/k1lite/k1lite.log"
           exit "${PIPESTATUS[0]}"
+
+      - name: K1-0 pin join, cpp backend (scripts/k1lite.sh -b cpp on the host)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+        run: |
+          set -uo pipefail
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          mkdir -p "$RUNNER_TEMP/k1lite-cpp"
+          g++ --version | head -1
+          scripts/k1lite.sh -b cpp -k "$RUNNER_TEMP/k1lite-cpp/pins" 2>&1 \
+            | tee "$RUNNER_TEMP/k1lite-cpp/k1lite.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload the K1-0 cpp pins and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: symex-linux-k1lite-cpp
+          path: ${{ runner.temp }}/k1lite-cpp/
+          if-no-files-found: warn
 
       - name: Upload the sweep log and sidecars
         if: always()

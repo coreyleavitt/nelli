@@ -43,8 +43,12 @@ suites=(w1a_exn_typeid w1b_localpragma panics w1e_floatwidth
 fail=0
 out="$pins.out"; mkdir -p "$out"   # per-suite logs and rcs, beside the records
 export K1_OUT="$out"
+# be, secs and the pin/log dirs reach the worker as positional arguments, never
+# spliced into the command string.
 printf '%s\n' "${suites[@]}" | xargs -P 4 -I{} bash -c \
-  'scripts/dt-bounded.sh "$@" '"$be"' tests/tsymex_0016_{}.nim '"$secs"' >"$K1_OUT/{}.log" 2>&1; echo "$? {}"' _ ${img[@]+"${img[@]}"} \
+  'be=$1; secs=$2; name=$3; shift 3
+   scripts/dt-bounded.sh "$@" "$be" "tests/tsymex_0016_${name}.nim" "$secs" >"$K1_OUT/${name}.log" 2>&1
+   echo "$? $name"' _ "$be" "$secs" {} ${img[@]+"${img[@]}"} \
   > "$out/rcs" || true
 cat "$out/rcs"
 while read -r rc name; do [ "$rc" = 0 ] || fail=1; done < "$out/rcs"

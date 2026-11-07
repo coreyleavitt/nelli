@@ -408,8 +408,9 @@ proc renderGithub[T](r: Report[T], testName: string): string =
     if f.soundness.witnessUnsafe:
       result &= "\n::warning title=symex witness unsafe::" &
                 ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
-                         ": its replay ended or hung the process running " &
-                         "it; it is not run in the host")
+                         ": its witness ends or hangs the process running " &
+                         "it (a crash claim, or a replay that ended or " &
+                         "hung its child); it is not run in the host")
     # RFC-0016 WA-B (P4): the undefined behaviour the witness ran past.
     if f.soundness.witnessUndefined != {}:
       result &= "\n::warning title=symex witness undefined::" &

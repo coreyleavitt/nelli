@@ -1,0 +1,36 @@
+name: readme-kinds
+
+# RFC-0016 W1-z: the README decline catalogue names every fe*/ub* kind. The
+# symex-linux workflow ignores docs/**, so a README-only edit would never run
+# the check there; this small workflow runs it on exactly the files it reads.
+# No toolchain: pure grep/awk.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'rfc-*']
+    paths:
+      - docs/symex/README.md
+      - src/nelli/smt/types.nim
+      - scripts/check-readme-kinds.sh
+  pull_request:
+    paths:
+      - docs/symex/README.md
+      - src/nelli/smt/types.nim
+      - scripts/check-readme-kinds.sh
+
+permissions:
+  contents: read
+
+jobs:
+  readme-kinds:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: README names every kind
+        run: bash scripts/check-readme-kinds.sh
+      - name: A removed kind fails the check (self-test)
+        run: bash scripts/check-readme-kinds.sh --self-test

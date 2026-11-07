@@ -92,6 +92,9 @@ on:
         required: false
         default: 'tests/tsymex_0016_*.nim'
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/rfc-') }}
@@ -105,6 +108,7 @@ jobs:
         with:
           # Empty on push (the triggering ref); the dispatch input otherwise.
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Install Z3 4.13.4 (x64-win)
         shell: pwsh

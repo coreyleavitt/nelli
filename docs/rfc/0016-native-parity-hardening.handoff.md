@@ -11,6 +11,22 @@
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.
 - **Open forks:** none.
+- **Wave 1 progress (2026-11-07, `/loop` grind):** landed on `main` in order:
+  INF-05 `977ca243`, K9a `595a2a8b`, W1-c3 `03fb59fc`, W1-a `c0e8bd44`
+  (walker 273), W1-c1a `d4efde91`, W1-c2 `6d40f03c` (walker 274), W1-p
+  `7f45bc8e`. In flight: W1-c1b, W1-b, W1-e, W1-g (parallel worktrees; the
+  three walker bumps renumber at merge). 0.9.1 baselines running on eos
+  (`~/nelli/bl091.sh`: worktrees `bl091c`, `bl091cpp` at `v0.9.1` with the
+  INF-05 scripts; logs `~/nelli/bl091-{c,cpp,z3-4.13.4}.log`), to be
+  uploaded as `v0.9.1` release assets and listed in
+  `tests/0016-baselines.txt`. Per-slice gates are the touched suites; the
+  whole-suite diff against the baselines runs at batch shas once eos frees.
+- **Spec corrections found in implementation (apply at W1-z):** W1-c2's RED
+  expects `sxUnsat` for the label; the walker's established Defect rule (E6)
+  gives `sxRaised` with `witnessUnsafe`, never `sxSat`, which is the
+  intended property. SND-07's `ua3_diff` is not a native HIT (native never
+  reaches `diff`; the decline is conservative, a precision row). W1-c2 sets
+  `witnessUnsafe` on every crash claim, not only panics ones.
 
 ## Findings ledger (§3.2), newest at the bottom
 

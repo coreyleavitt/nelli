@@ -28,6 +28,7 @@ import std/math   ## Phase 15 F2: classify() for float-literal NaN/Inf/-0.0 lowe
 import std/strutils   ## Phase 15 S5: parseInt on a concrete seqLen numeral; split
 import z3
 
+from ./buildprofile import buildSemantics, exSetjmp   ## RFC-0016 W1-c1b
 import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
@@ -25754,8 +25755,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   # decline above (`eeUnknownExnType`).
   # NAMED KNOWN GAP: destructors that run while a panic unwinds are not
   # modelled (a `=destroy` side effect is neither walked nor reported).
-  # W1-c1b reroutes this build read to the build profile.
-  when defined(nimPanics):
+  when buildSemantics.panics:
     if raisedKnown and isDefect(w.statics.exnTable, typeId,
                                 w.statics.userExnHierarchy):
       crashRaise(rp, typeId, w)
@@ -25929,7 +25929,7 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
   ## it ends as a finding at the SUT boundary. Before S8cu it was routed as an
   ## ordinary raise: a label in `except NilAccessDefect` was a false sxSat and
   ## `tNilAccess` a false sxUnsat.
-  when compileOption("exceptions", "setjmp"):
+  when buildSemantics.exceptions == exSetjmp:
     var guarded = w.frame.handlerStack.len > 0
     for f in w.frameStack:
       if f.handlerStack.len > 0: guarded = true

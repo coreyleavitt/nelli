@@ -56,7 +56,9 @@ export coverage
 import ./autolabel
 export autolabel
 
-when compileOption("panics"):
+from ./smt/buildprofile import buildSemantics
+
+when buildSemantics.panics:
   {.warning: "nelli: under --panics:on, property *crashes* (Defects — " &
     "IndexDefect, nil-deref, overflow, doAssert/failed assert) are fatal and " &
     "uncatchable, so the engine cannot report them as shrunk counterexamples — " &

@@ -1693,6 +1693,7 @@ task test, "Run the test suite":
             # RFC-0016 K9a: the native-pin verbs and the pin record.
             "tsymex_0016_k9a_pins",
             "tsymex_0016_w1c1a_buildprofile",
+            "tsymex_0016_w1c1b_reads",
             "tsymex_0016_w1c3_splat_defect",
             # RFC-0016 W1-c2: a Defect under --panics:on crashes (W-03, INT-27).
             "tsymex_0016_panics",

@@ -6538,7 +6538,7 @@ proc canonicalize*(s: SymexSettings): string =
 # ---- Cache key -------------------------------------------------------------
 
 func replayModeSegment*(forks = replayForks; reexecs = replayReexecs;
-                        panics = defined(nimPanics)): string =
+                        panics = buildSemantics.panics): string =
   ## RFC-0005 0.9.1 (WA-8). How a build runs a verdict's replays, which decides
   ## verdicts the program and settings do not: a forked child (POSIX) copies
   ## the host and replays what a re-executed one (Windows,

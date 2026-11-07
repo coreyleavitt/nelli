@@ -31,6 +31,13 @@
 
 import std/[macros, sets, tables, algorithm, options, strutils, importutils]
 from std/os import extractFilename
+# RFC-0016 W1-c1b: the build is admitted (or refused, by name) BEFORE `z3` is
+# imported. Under `--mm:refc` nim-z3's `=destroy` hooks do not compile, and
+# that error names `z3/ast.nim`, not the build; this one names the field.
+from ./smt/buildprofile import buildSemantics, admitBuild, refusalMessage
+const buildAdmission = admitBuild(buildSemantics)
+when not buildAdmission.ok:
+  {.error: refusalMessage(buildAdmission).}
 import z3
 export z3.z3FullVersion
 import ./choice
@@ -2340,7 +2347,7 @@ func replayInScope*(target: SymexTarget): bool =
   ##   * otherwise every kind (`stkLabel`, the Defect targets, any other
   ##     `stkRaisedExn`): an escaping exception, Defects included, is caught
   ##     by the replay frame and classified.
-  const panics = defined(nimPanics)
+  const panics = buildSemantics.panics
   if panics: return false
   case target.kind
   of stkLabel, stkAssertionViolation, stkIndexError, stkFieldDefect: true

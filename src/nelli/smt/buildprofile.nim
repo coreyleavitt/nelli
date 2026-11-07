@@ -109,3 +109,21 @@ func buildSegment*(b: BuildSemantics = buildSemantics): string =
   renderBuildFlags(checkNames(b.checks), b.danger, b.release, $b.mm,
                    $b.backend, $b.exceptions, b.threads, b.stackTrace,
                    b.lineTrace)
+
+type Admission* = tuple[ok: bool, field, reason: string]
+
+func admitBuild*(b: BuildSemantics = buildSemantics): Admission =
+  ## RFC-0016 W1-c1b (section 8.3, Refusals). Whether `nelli/symex` runs on
+  ## build `b` at all. The only Wave-1 refusal is the memory model: D-0016-7
+  ## refuses `--mm:refc` by name (its heap and destructor timing are not a
+  ## verified build, and nim-z3's `=destroy` hooks do not compile under it).
+  ## Pure and compile-time evaluable; `symex.nim` calls it once, before it
+  ## imports `z3`, since under refc the `z3` import is the first thing to fail.
+  if b.mm == mmRefc:
+    return (false, "mm",
+      "mm=refc is not a verified build (D-0016-7); use --mm:orc or --mm:arc")
+  (true, "", "")
+
+func refusalMessage*(a: Admission): string =
+  ## The compile-time error text for a refused build.
+  "nelli/symex: this build is refused: " & a.reason & " [field: " & a.field & "]"

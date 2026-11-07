@@ -400,6 +400,64 @@ proc appTestFile(): string = splitFile(getAppFilename()).name & ".nim"
 
 var probeCounter {.threadvar.}: int
 
+type ProbeBuild = object
+  dir, exe, backend: string
+  args: seq[string]
+  cmd: string
+
+proc prepareProbe(who: string; probe: string; flags: openArray[string]
+                 ): ProbeBuild =
+  ## The child build shared by `pinCrash` and `pinRefused`: the host's
+  ## build-relevant defines plus `flags`; `probe` is a path or, with a newline,
+  ## the source text itself.
+  let nim = findExe("nim")
+  if nim.len == 0: pinFail(who & ": nim is not on PATH")
+  inc probeCounter
+  result.dir = getTempDir() / ("k9a_probe_" & $getCurrentProcessId() & "_" &
+                               $probeCounter)
+  createDir(result.dir)
+  var src = probe
+  if '\n' in probe:
+    src = result.dir / "probe_src.nim"
+    writeFile(src, probe)
+  else:
+    src = absolutePath(probe)
+  result.exe = result.dir / ("probe" & ExeExt)
+  result.args = @["--hints:off", "--warnings:off", "--threads:on",
+               "--nimcache:" & (result.dir / "cache"), "--out:" & result.exe,
+               "--panics:" & (when defined(nimPanics): "on" else: "off"),
+               "--mm:" & $buildSemantics.mm]
+  when defined(nelliFwrapv): result.args.add "-d:nelliFwrapv"
+  when defined(release): result.args.add "-d:release"
+  when defined(danger): result.args.add "-d:danger"
+  when defined(vcc): result.args.add "--cc:vcc"
+  elif defined(windows): result.args.add "--cc:gcc"   # the toolchain ships Nim alone
+  for f in flags: result.args.add f
+  result.backend = when defined(cpp): "cpp" else: "c"
+  result.cmd = quoteShellCommand(@[nim, result.backend] & result.args & @[src])
+
+proc pinRefused*(key: CellKey; probe: string; flags: openArray[string];
+                 mustMention: string) =
+  ## The build-cell form of a decline (RFC-0016 section 8.3, Refusals): the
+  ## probe is built in a child with `flags` and the BUILD must be refused,
+  ## i.e. the compile fails and its output contains `mustMention` (the refused
+  ## field, by name). A child that compiles, or that fails without naming the
+  ## field (a different error), fails the pin. Recorded as `pvDeclined` with
+  ## entry `admitBuild`.
+  let pb = prepareProbe("pinRefused", probe, flags)
+  let (cout, crc) = execCmdEx(pb.cmd)
+  removeDir(pb.dir)
+  if crc == 0:
+    pinFail("pinRefused " & render(key) & ": the probe compiled; the build " &
+            "was not refused")
+  if mustMention notin cout:
+    pinFail("pinRefused " & render(key) & ": the compile failed, but not by " &
+            "naming " & mustMention & ":\n" & cout)
+  writePinRecord(PinRecord(testFile: appTestFile(),
+    entry: "admitBuild", cell: key, target: "-", domain: "-",
+    verdict: pvDeclined, declineKind: "refused:" & mustMention,
+    native: "compile refused", flags: @(pb.args) & @[pb.backend]))
+
 proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
                expect: CrashExpect) =
   ## Compiles `probe` in a child with the host's build-relevant defines plus
@@ -407,31 +465,12 @@ proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
   ## file, or the source text itself when it contains a newline. A child that
   ## exits 0 fails. The record is `pvCrashed`: it bypasses every public entry
   ## point, so K1 may use it for a `declined` or `never` cell only.
-  let nim = findExe("nim")
-  if nim.len == 0: pinFail("pinCrash: nim is not on PATH")
-  inc probeCounter
-  let dir = getTempDir() / ("k9a_probe_" & $getCurrentProcessId() & "_" &
-                            $probeCounter)
-  createDir(dir)
-  var src = probe
-  if '\n' in probe:
-    src = dir / "probe_src.nim"
-    writeFile(src, probe)
-  else:
-    src = absolutePath(probe)
-  let exe = dir / ("probe" & ExeExt)
-  var args = @["--hints:off", "--warnings:off", "--threads:on",
-               "--nimcache:" & (dir / "cache"), "--out:" & exe,
-               "--panics:" & (when defined(nimPanics): "on" else: "off"),
-               "--mm:" & $buildSemantics.mm]
-  when defined(nelliFwrapv): args.add "-d:nelliFwrapv"
-  when defined(release): args.add "-d:release"
-  when defined(danger): args.add "-d:danger"
-  when defined(vcc): args.add "--cc:vcc"
-  elif defined(windows): args.add "--cc:gcc"   # the toolchain ships Nim alone
-  for f in flags: args.add f
-  let backend = when defined(cpp): "cpp" else: "c"
-  let (cout, crc) = execCmdEx(quoteShellCommand(@[nim, backend] & args & @[src]))
+  let pb = prepareProbe("pinCrash", probe, flags)
+  let dir = pb.dir
+  let exe = pb.exe
+  let args = pb.args
+  let backend = pb.backend
+  let (cout, crc) = execCmdEx(pb.cmd)
   if crc != 0: pinFail("pinCrash " & render(key) & ": probe build failed:\n" & cout)
   let p = startProcess(exe, options = {poStdErrToStdOut})
   let rc = p.waitForExit(20_000)

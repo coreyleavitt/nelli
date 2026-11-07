@@ -17,6 +17,8 @@
 ## `high(int)`: the stack is not measured there and `maxCallDepth` alone
 ## bounds the walk, as before S8ca.
 
+from ./buildprofile import buildSemantics   ## RFC-0016 W1-c1b
+
 when defined(windows):
   proc getCurrentThreadStackLimits(low, high: ptr uint) {.
     importc: "GetCurrentThreadStackLimits", stdcall, dynlib: "kernel32".}
@@ -77,7 +79,7 @@ const nimCallDepthLimit {.intdefine.} = 2000
 proc nimFramesLeft*(): int =
   ## RFC-0005 batch 9. The frames Nim's call depth check leaves below the
   ## current one, `high(int)` in a build with no stack traces (no check).
-  when compileOption("stacktrace"):
+  when buildSemantics.stackTrace:
     let f = getFrame()
     if f == nil: nimCallDepthLimit
     else: nimCallDepthLimit - int(f.calldepth)

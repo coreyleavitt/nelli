@@ -1309,7 +1309,7 @@ type
     ## build whose own overflow checks are off (`buildWraps()`). Checked-ness is
     ## per routine: the build's setting unless an enclosing `push overflowChecks:
     ## on` says otherwise. The parser stamps the routine's body block; the
-    ## walker sets `currentArithWraps` for the block and restores it after, so a
+    ## walker pushes it for the block and pops it after, so a
     ## caller's scope never leaks into a callee and back.
     asInherit   ## no claim (every block but a routine body; any body in a checks-on build)
     asBuild     ## unchecked signed arithmetic: the build's (`ubSignedOverflow`)
@@ -5966,7 +5966,7 @@ func buildWraps*(b: BuildSemantics = buildSemantics): bool =
   ## undefined on overflow (not a wrap; a `-d:nelliFwrapv` build is planned, K5a, and not yet
   ## implemented), so the
   ## walker does not model a wrap and a trusted answer. The ONE predicate
-  ## `currentArithWraps`, the wrap scan and the exact-offset promotion read;
+  ## `wraps()`, the wrap scan and the exact-offset promotion read;
   ## settings never feed it (the build is what the native program does; a
   ## setting that disagrees taints, `arithChecksDisagree`). A routine under
   ## `{.push overflowChecks: off.}` is a separate route: its marker declines.

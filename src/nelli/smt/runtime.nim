@@ -2013,14 +2013,39 @@ var overflowConds* {.threadvar.}: seq[Z3Bool]
   ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
   ## Reset alongside `divByZeroConds` at every reset site.
 
-var currentArithWraps* {.threadvar.}: bool
-  ## RFC-0005 S8w, RFC-0016 W1-d2. `buildWraps()` for the running walk (set by
-  ## `resetSymexRunState`, beside `currentMaxSplitParts`): the build's signed
-  ## arithmetic is UNCHECKED (`-d:danger`, `--overflowChecks:off`). It is not
-  ## a wrap: the C operation is undefined on overflow, so `lowerArith` deposits
-  ## the overflow side as an `ubSignedOverflow` `ArithTrap` and the surviving
-  ## side carries its negation. Unsigned results still wrap
-  ## (`wrapIntToWidth`), and the `div` rows below read it.
+type WalkArith* = enum
+  ## RFC-0016 D1a. The arithmetic scope the walker is lowering under; the
+  ## walk-time reading of `ArithScope`, with the sense made positive.
+  waChecked   ## the C operation is checked (overflow and div-by-zero raise)
+  waWraps     ## unchecked: signed overflow is UB, an 8/16-bit result wraps
+
+var arithScopes {.threadvar.}: seq[WalkArith]
+  ## RFC-0005 S8w, RFC-0016 W1-d2 / D1a. A lexical stack: the top is the scope
+  ## of the routine body being walked. `resetSymexRunState` seeds it with the
+  ## build's (`buildWraps()`: `-d:danger`, `--overflowChecks:off`). A routine
+  ## body block pushes its `ArithScope` and pops it on the way out; a leaked
+  ## push is caught by `popArith`'s assert. Deliberately no try/finally (see the
+  ## `runSymexCaught` note): every escape ends the run, which re-seeds the
+  ## stack. Read only through `wraps()` and `checked()`.
+  ##
+  ## Unchecked arithmetic is not a wrap: the C operation is undefined on
+  ## overflow, so `lowerArith` deposits the overflow side as an
+  ## `ubSignedOverflow` `ArithTrap` and the surviving side carries its negation.
+  ## Unsigned results still wrap (`wrapIntToWidth`).
+
+proc resetArith() =
+  arithScopes = @[(if buildWraps(): waWraps else: waChecked)]
+
+proc pushArith(sc: ArithScope) =
+  arithScopes.add(if sc == asBuild: waWraps else: waChecked)
+
+proc popArith() =
+  doAssert arithScopes.len > 1, "arith scope stack underflow"
+  arithScopes.setLen(arithScopes.len - 1)
+
+proc wraps(): bool =
+  ## Is the C operation unchecked (signed overflow UB, 8/16-bit result wraps)?
+  arithScopes.len > 0 and arithScopes[^1] == waWraps
 
 var obligationLog* {.threadvar.}: ObligationLog
   ## Issue #161 slice 2. Audit trail, NOT a raise-fork sink — deliberately
@@ -8803,17 +8828,18 @@ proc wrapIntToWidth(r: SymVal): SymVal =
   SymVal(kind: svInt, zi: ite(inWin, r.zi, wrapped), ziWidth: r.ziWidth,
          ziSigned: r.ziSigned, ziIvl: win.ivl)
 
-proc arithCheckedHere(ac: ArithCheck): bool =
-  ## RFC-0016 W1-d2c. A routine pushed `overflowChecks: on` in a build whose own
-  ## checks are off (`asChecked`: `currentArithWraps` off under `buildWraps()`)
-  ## raises `OverflowDefect` and `DivByZeroDefect` whatever the settings say:
-  ## the settings describe the build, and the routine is not the build.
-  ac in {acOverflow, acDivByZero} and buildWraps() and not currentArithWraps
+proc checked(ac: ArithCheck; settings: SymexSettings): bool =
+  ## RFC-0016 W1-d2c / D1a. Is `ac`'s check emitted? The settings describe the
+  ## build; a routine that pushed `overflowChecks: on` in a checks-off build
+  ## (`waChecked` under `buildWraps()`) raises `OverflowDefect` and
+  ## `DivByZeroDefect` whatever the settings say: the routine is not the build.
+  ac in effectiveArithChecks(settings) or
+    (ac in {acOverflow, acDivByZero} and buildWraps() and not wraps())
 
 proc depositSignedOverflow(oc: Z3Bool; width: int) =
   ## RFC-0016 W1-d2 (W-07). A signed `+`, `-` or `*` overflow side. With the
   ## build's overflow checks on it is Nim's `OverflowDefect` fork
-  ## (`overflowConds`). With them off (`currentArithWraps`) the C operation is
+  ## (`overflowConds`). With them off (`wraps()`) the C operation is
   ## undefined, so it is the `ubSignedOverflow` trap `drainArithTraps` decides
   ## at the op: an unreachable side is pruned, any other halts.
   ##
@@ -8822,7 +8848,7 @@ proc depositSignedOverflow(oc: Z3Bool; width: int) =
   ## promoted `int`, which cannot overflow, and the narrowing wraps (modular on
   ## every supported compiler). There is no undefined side: the result is
   ## wrapped to the width by `lowerArith` and nothing halts.
-  if currentArithWraps:
+  if wraps():
     if width in {8, 16}: return
     let tr = ArithTrap(cond: oc, ub: some(UbKind(ubSignedOverflow)),
                        site: "signed `+`, `-` or `*` overflow")
@@ -8896,17 +8922,17 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       if unsignedDiv:
         ArithTrap(cond: c, ub: some(UbKind(ubUnsignedDivZero)),
                   site: (if op == bDiv: "`x div 0'u`" else: "`x mod 0'u`"))
-      elif currentArithWraps:
+      elif wraps():
         # RFC-0016 WA-B (S3): with the checks off Nim emits no zero check
         # and the signed C division by zero is undefined, as the unsigned
         # one is: the zero side halts, it is not a definite trap.
         ArithTrap(cond: c, ub: some(UbKind(ubSignedDivZero)),
                   site: (if op == bDiv: "`x div 0`" else: "`x mod 0`"))
       else: ArithTrap(cond: c)
-    if currentArithWraps:
+    if wraps():
       # RFC-0005 S8aa: Nim's zero-divisor check is part of its overflow
       # checks (the C code generator emits it only under `overflowChecks`),
-      # so with them off -- `acOverflow` excluded, `currentArithWraps` --
+      # so with them off -- `acOverflow` excluded, `wraps()` --
       # `x div 0` and `x mod 0` reach the C division itself, which traps
       # (x86 `idiv` / `div`, SIGFPE) at every width and signedness. Probed
       # on the pinned toolchain in the debug build a test replays under, c
@@ -8970,7 +8996,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
                      a.ziIvl.get.lo > intBounds(width)[0]
     if signedOp and width in {8, 16, 32, 64} and not loExcluded:
       let tc = divLowByMinusOne(a, b)
-      if op == bDiv and not currentArithWraps:
+      if op == bDiv and not wraps():
         overflowConds.add tc
         syncOverflowCond(tc)
       if width in {32, 64}:
@@ -8982,7 +9008,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
           if op == bMod:
             ArithTrap(cond: tc, ub: some(UbKind(ubIntMinModMinusOne)),
                       site: "`low(T) mod -1`")
-          elif currentArithWraps:
+          elif wraps():
             ArithTrap(cond: tc, ub: some(UbKind(ubSignedOverflow)),
                       site: "`low(T) div -1`")
           else:
@@ -8993,14 +9019,14 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     # RFC-0005 S8w: a width-stamped result wraps where the machine's does:
     # always for an unsigned type (Nim's unsigned arithmetic is modular),
     # and for a signed one when the build's arithmetic is unchecked
-    # (`currentArithWraps`). With checked signed arithmetic the value never
+    # (`wraps()`). With checked signed arithmetic the value never
     # leaves the window on a surviving path (`overflowCondInt` forks the
     # raise), so there is nothing to wrap. `div` joins for the signed
     # case: `low(T) div -1` at 8 and 16 bits yields `-low(T)` in C's
     # promoted `int` and wraps back to `low(T)` (32 and 64 bits trap,
     # `arithTrapConds` above).
     let r = arithInt(a, b, op)
-    if r.ziWidth in {8, 16, 32, 64} and r.ziSigned and currentArithWraps and
+    if r.ziWidth in {8, 16, 32, 64} and r.ziSigned and wraps() and
        op == bDiv:
       # RFC-0005 S8ac: a truncated quotient is never further from zero than
       # its dividend, so the one quotient outside the window is `low(T) div
@@ -9019,7 +9045,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       # raise fork leaves the survivors in the window; unchecked, the
       # `ubSignedOverflow` trap does.
       wrapIntToWidth(r)
-    elif r.ziWidth in {8, 16} and r.ziSigned and currentArithWraps and
+    elif r.ziWidth in {8, 16} and r.ziSigned and wraps() and
          op in {bAdd, bSub, bMul}:
       # RFC-0016 WA-B (P1): a signed 8 or 16 bit result is computed in `int`
       # and narrowed back, a defined wrap (`depositSignedOverflow` halts
@@ -19075,8 +19101,7 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
     # means "unconditional drain" (parseInt/str-index) — never early-returns on
     # the gate. `some(acFoo)` (div-by-zero/overflow) is settings-gated: skip
     # (honest-incomplete) unless that check is enabled.
-    if (gate.isSome and gate.get notin effectiveArithChecks(w.settings) and
-        not arithCheckedHere(gate.get)) or conds.len == 0:
+    if (gate.isSome and not checked(gate.get, w.settings)) or conds.len == 0:
       return @[p]
     for c in conds:
       let raisePath = forkPath(p, p.pc & @[c], p.env)
@@ -23944,12 +23969,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if stmt.blkArith != asInherit:
       # RFC-0016 W1-d2c. A routine body: its arithmetic is its own, whoever
       # called it, and the caller's resumes after it.
-      let saved = currentArithWraps
-      currentArithWraps = stmt.blkArith == asBuild
+      pushArith(stmt.blkArith)
       let plain = IRStmt(kind: isBlock, stmts: stmt.stmts,
                          blkLabel: stmt.blkLabel)
       result = walkStmt(plain, paths, w)
-      currentArithWraps = saved
+      popArith()
       return
     if stmt.blkLabel.len == 0:
       return walkBlock(stmt.stmts, paths, w)
@@ -28768,7 +28792,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
                            ## threadvar's own doc comment for why it must not
                            ## join the raise-cond sinks' reset list.
   currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
-  currentArithWraps = buildWraps()                                 ## RFC-0016 W1-d2
+  resetArith()                                                     ## RFC-0016 W1-d2
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   rfc0005RawStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink

@@ -186,17 +186,22 @@ state = "pending"
 
 [[slice]]
 id    = "W1"
-title = "Wave 1 / 0.9.2 (§11): K9a pin helper, then W1-a..W1-g (13 slices) fix the seven clean false verdicts of §5.0; W1-z integrates and gates the release"
+title = "Wave 1 / 0.9.2 (§11): K9a, W1-a..W1-g, INF-05, W1-m, W1-z (15 rows): the seven false verdicts of §5.0 plus W-20/21/26/31/33, the walker on MSVC, the release gate and publication"
 state = "pending"
 
 [[slice]]
 id    = "W2"
-title = "Wave 2 (§11): CI-A/CI-B Linux legs, K9 pin helper, ADM-1 admission spike, K1a universe ledger with ratchet, K7 Survivors type, K8a fuzzer skeleton"
+title = "Wave 2 (§11): CI-A/CI-B legs incl. symex-msvc, K9b migration, ADM-1 admission spike, K1a-test/K1a-ci universe ledger with ratchet, K7a/b Survivors, K8-0 (INT-33 reader), K8a fuzzer skeleton, S8cj carried, W2-z integration"
 state = "pending"
 
 [[slice]]
 id    = "W3"
-title = "Wave 3 (§11): admission tables K2-K6 and K10 undefined behaviour as an outcome, each shrinking the K1 allowlist"
+title = "Wave 3 / 0.10.0 with Wave 2 (§11): admission tables K2-K6, K5a/b BuildProfile, K10 undefined behaviour as an outcome, PRC-01/02 Windows replay, W3-z integration"
+state = "pending"
+
+[[slice]]
+id    = "W4"
+title = "Wave 4 (§11): K8b fuzzer families and pairwise floor, K8c sanitizer job, K7c, K9c kind-less declines, K9d native pins for 481 suites, precision rows, W4-z allowlists emptied and §12 checked"
 state = "pending"
 
 [[slice]]
@@ -211,7 +216,7 @@ state = "pending"
 
 [[slice]]
 id    = "S8ci"
-title = "S8by's item 3 reopened: a term order that earns its cost, r4_strip back to S8bm, configdefaults_depth under 60 s, wide factoring decided again"
+title = "S8by's item 3 reopened: a term order that earns its cost, r4_strip back to S8bm, wide factoring decided again"
 state = "pending"
 
 [[slice]]
@@ -235,7 +240,7 @@ title = "S8cp items 4-8: rc=139 of p7, n42 on cpp, stack size off Linux, decline
 state = "pending"
 [[slice]]
 id    = "rv0005-lows"
-title = "The RFC-0005 code review's open Lows (INT-28 to INT-38): replay child hardening, cache-key coverage, replay and settle policy, fuzzer-path liveness, design cleanups, exit-group guards, finding-collector edges, precision probes, cache hygiene"
+title = "The RFC-0005 code review's open Lows (INT-28 to INT-38 less INT-31 and INT-33): replay child hardening, cache-key coverage, replay and settle policy, fuzzer-path liveness, design cleanups, exit-group guards, finding-collector edges, precision probes, cache hygiene"
 state = "pending"
 +++
 
@@ -255,7 +260,11 @@ state = "pending"
   design (one admission mechanism, a generated universe ledger, undefined
   behaviour as an outcome) and a slice order; round 2 the same day reshaped
   admission into per-axis verbs, corrected §9 (shifts are defined), split
-  Wave 1 into slices with RED specs, and reconciled §5 against head.
+  Wave 1 into slices with RED specs, and reconciled §5 against head; round 3
+took test and tracking metadata out of the admission rows, fixed the
+undefined-behaviour sink to decide at the op, made `-d:nelliFwrapv` produce
+the flag, added MSVC, the 4.13.4 tooling and publication to the 0.9.2 gate,
+and gave every finish-line item and intake sink a producing slice.
 - Category: symex
 - Size: L
 - Value: high
@@ -513,17 +522,19 @@ expected to be `same` as `main`; each still gets its three-way row in W1-z.
 |---|---|---|---|---|
 | W-01 | `except T as e:`: handler label false `sxUnsat`, raise target false `sxRaised` | V | `dsl_parser.nim:20460-20461` stores the `repr` as the type id | W1-a |
 | W-02 | explicit `{.cursor.}` on a local: false `sxUnsat` and `sxSat` (c/orc, c/arc release, cpp) | V | `dsl_parser.nim:19771-19792` drops every local pragma but `noinit` | W1-b |
-| W-03 | `--panics:on`: a label after a Defect is a clean `sxSat`; natively the process dies | V | the walker never reads `nimPanics` (only `symex.nim:2343`) | W1-c |
+| W-03 | `--panics:on`: a label after a Defect is a clean `sxSat`; natively the process dies | V | the walker never reads `nimPanics` (only `symex.nim:2343`) | W1-c2 |
 | W-04 | `float32` ↔ `float64` conversions, hidden ones included: false clean verdicts | P | transparent `else: parseExpr(operand)` at `dsl_parser.nim:10658`, `:10845` | W1-e |
-| W-05 | `low(int) mod -1`, literal divisor: false `sxUnsat` (gcc folds to 0) | P | `runtime.nim:8862-8870` traps regardless of divisor or target | W1-d |
-| W-06 | unsigned `div`/`mod` by zero: `sxRaised DivByZeroDefect`, natively SIGFPE | P | `dsl_parser.nim:4023-4025` lists unsigned beside signed | W1-d |
-| W-07 | checks-off signed overflow modelled as wrap: `v + 1 > v` clean `sxSat` at `high(int)` | P | `runtime.nim:24500-24502` consumes the marker with no token | W1-d |
+| W-05 | `low(int) mod -1`, literal divisor: false `sxUnsat` (gcc folds to 0) | P | `runtime.nim:8862-8870` traps regardless of divisor or target | W1-d1 |
+| W-06 | unsigned `div`/`mod` by zero: `sxRaised DivByZeroDefect`, natively SIGFPE | P | `dsl_parser.nim:4023-4025` lists unsigned beside signed | W1-d1 |
+| W-07 | checks-off signed overflow modelled as wrap: `v + 1 > v` clean `sxSat` at `high(int)` | P | `runtime.nim:24500-24502` consumes the marker with no token; the settings route (`:8881-8897`, `:19032`) is the same model | W1-d2 |
 
-The rows of §5.1-§5.8 below are unchanged by this round. The reconciliation
-lens found 16 of them closable at the tag head, 4 that close as a recorded
-decline, 14 duplicates, 11 with stale evidence and 3 misclassified
-(`E-reconcile.md`); those edits are round 2's, so the row ids stay stable
-while §8 is reviewed.
+Round 2 applied the reconciliation lens's edits to §5.1-§5.8
+(`E-reconcile.md`: 16 rows closable at the tag head, 4 closing as a recorded
+decline, 14 duplicates, 11 with stale evidence, 3 misclassified); round 3
+corrected the ones that lens had read from an older tree. Row ids are stable.
+Each row's last column is its state: a row is open unless it starts with
+`closed`, `merged`, `moved`, `never` or an owning RFC. K1a-test adds a `cell:`
+reference to each open row (§8.2).
 
 Owners are left empty: the coordinator assigns them. "Moved slice" means a
 job file on `origin/worker-jobs` written under RFC-0005; it keeps its id and
@@ -553,7 +564,7 @@ Rows were reconciled against head `83c1d304` in `/architect` round 2 (2026-11-06
 | SND-11 | PCRE stop code as a witness: `not s.match(...)` at `a^30` | sort S11; S8cf | same file `:92`, `!= sxSat` for `cf_miss_long`. | closed |
 | SND-12 | `let` cursor over a shared global: `gc_shared` | S8cn blocker probe 1 | No test contains `gc_shared`. Nearest pin is the local-seq cursor `sCur`/`cu_shared` (`tests/tsymex_rfc0005_s8cn_seqview_e.nim:124-128`). Probe and both-sha logs at `origin/worker-sls2:worker-reports/s8cn-blocker/`. Mechanism `letCursorDecline`, `dsl_parser.nim:16698-16706`. Port probe 1 (a `let` cursor over a shared global): native HIT + `status != sxUnsat`, expect `sxUnknown`. | |
 | SND-13 | S8cu's known limits: macro-built pragmas, a pushing template from another module, an import under a push in a module the scan does not read | PND-11, reclassified round 2 | a missed check-off region is the false `sxRaised` class S8cu fixed: soundness risk, not pending | |
-| SND-14 | Int-offset arithmetic without an overflow fork (N24, #166) and the `range[0'u64..>int64.high]` round trip (#169) | decision D-0016-8 | owned by RFC-0014; this RFC carries no work | RFC-0014 |
+| SND-14 | Int-offset arithmetic without an overflow fork (N24, #166; W-19) and the `range[0'u64..>int64.high]` round trip (#169) | decision D-0016-8 | owned by RFC-0014; this RFC carries no work | RFC-0014 |
 
 ### §5.2 Precision
 
@@ -607,7 +618,7 @@ name what moves and what stays.
 
 | ID | Slice | Moves | Source | Owner |
 |---|---|---|---|---|
-| PRC-29 | S8cg | items 2 (copy a `var openArray` view at the call, so `fill(gArr, bumpA())` decides), 3 (a later argument that only reads a global counts as a read), 4 (`ti_tuple` exact `sxSat` under default budgets), 5 (`bb_rep_sym_empty_hit` exact on both Z3 versions), 7 (an index call through a proc value), 8 (`s8bb_constructs` 40.7 s (under 60); `tsymex_r6_b6_optionregion` is absent from `scripts/ci-suite-seconds.tsv`, so it is in no Windows shard and its time is unmeasured: add it to a shard or record why not). Items 1 and 6 were closed by S8ca and S8by | `jobs/s8cg.md`; batch 7 note | |
+| PRC-29 | S8cg | items 2 (copy a `var openArray` view at the call, so `fill(gArr, bumpA())` decides), 3 (a later argument that only reads a global counts as a read), 4 (`ti_tuple` exact `sxSat` under default budgets), 5 (`bb_rep_sym_empty_hit` exact on both Z3 versions), 7 (an index call through a proc value), 8 (`s8bb_constructs` 40.7 s (under 60); `tsymex_r6_b6_optionregion` is absent from `scripts/ci-suite-seconds.tsv`, so it is sharded at the median estimate (`derive-ci-suites.ps1:278`) because it is unmeasured: measure it). Items 1 and 6 were closed by S8ca and S8by | `jobs/s8cg.md`; batch 7 note | |
 | PRC-30 | S8ch | both items: the address of a global in a walked callee halts the path; `unsafeAddr` of a by-value array formal declines | `jobs/s8ch.md`; S8cc remainder | |
 | PRC-31 | S8ci | all six items: a term order that earns its cost or none; `r4_strip` within 10% of S8bm; a behavioural pin for the order; ~~`configdefaults_depth` under 60 s without lowering the depth~~ (met by S8cm's split (`tests/tsymex_configdefaults_b.nim:21-23`, 53.6 s), not by lowering the depth); wide factoring decided again; the skip's real saving. Also batch 9's addition: `ti_tuple`'s SAT search 79.8M to 411.8M units on 4.13.4, so `tupleBudget` 300M to 600M | `jobs/s8ci.md`; S8by remainder | |
 | PRC-32 | S8cj item 1 | a fresh thread's spend on a query follows what earlier threads ran (72,124 to 5,854,994 units on Z3 5.1); correct the "function of the query alone" claims from S8bm and S8bp. Item 2's trust question is in §5.7 Same in-process phenomenon as CI-03 (and INT-04). | `jobs/s8cj.md`; S8by remainder | |
@@ -619,10 +630,10 @@ name what moves and what stays.
 
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
-| CRH-01 | Compile stop on a `sort` callback: `s.sort(proc ...)` | sort S13 | confirmed SAME by S8cu: `docs/rfc/0005-branch-scoped-degrade.md:15478-15480`, `s.sort()` aborts the compile as on `main` (`dsl_typebridge.nim(1261,20)`). Includes INT-09 (`splitLines`) and the generic-param `.len/.add` stop (HRV-44): one `classifyType` row; mechanism K2a/K2c. | |
+| CRH-01 | Compile stops in `classifyType`: `splitLines` (INT-09) and the generic-param `.len/.add` stop (HRV-44, zero corpus coverage) | sort S13 | the `sort` stop this row first named is gone at 83c1d304: `s.sort()` and `s.sort(system.cmp[int], Descending)` compile and decline (C-06), now precision row W-36. The other two are not re-probed at head. One `classifyType` row; mechanism K2a/K2c. | |
 | CRH-02 | Compile stop on `create` and `GC_ref` | sort S12 | `s8cl_lifetime_b.nim:193-201`; models remain PRC-18/PRC-20. | closed |
 | CRH-03 | A ref-local merge runs out of memory and is killed Includes INT-02's figures (8.36 GB under an 8 GB limit, killed at 124-135 s, same on `main`); no `iteDeep` pin in `tests/`; borders RFC-0017 P1 (path merging), which does not cite it. | S8ct | an OOM kill that matches `main`; earlier measured as a 250 s merge, and a silent exit at 300 merges under audit. Bound it to a decline within budget | |
-| CRH-04 | A regex literal of 2600 nested groups | S8ct | fixed in 0.9.1 (review R1-22; `c9682ebc`, `9663105d`): `tests/tsymex_rfc0005_r1_pcrelimits.nim` | closed |
+| CRH-04 | A regex literal of 2600 nested groups | S8ct | fixed in 0.9.1 (review R1-22; `c9682ebc`, `9663105d`): `tests/tsymex_rfc0005_r1_pcrelimits.nim`. Includes INT-03. | closed |
 | CRH-05 | ~~A pointer plus 11 Table inserts ran past 1400 s~~ merged into PRC-05 | S8cn | liveness; the pin uses one insert | merged |
 | CRH-06 | `zeroMem` and `copyMem` on `addr x`: a walker fault (`FieldDefect` reading `ptrPointeeTy` of an `itUninterp`). First make it a named decline, then model it | S8cl remainder; ex-PRC-16 | the only `zeroMem`/`copyMem` pins are the opaque-global form (`tests/tsymex_rfc0005_s8cs_routes2.nim:125,131,363`); the `zeroMem(addr x)` fault has no test. First a named decline, then back to §5.2 as precision. | |
 | CRH-07 | **Latent crash:** a `v == f` Int definition in `regexRecDefConds` segfaults at `byteLeafIds` `dec_ref` | sort U4; S8co item 1; S8cf remainder | avoided, not fixed; no SUT at e497dcf reaches it; a wrong refcount can hide a use-after-free | the walker-under-sanitizers job, §11 |
@@ -722,7 +733,7 @@ and, for audit rows only, the audit's own class.
 | INT-17 | ~~30 corpus suites over 60 s~~ merged into CI-01 | S8cm (done; `9ebe2a46`) | test-harness | merged |
 | INT-18 | Probe p7 (sort N3) now declines (sxUnknown) where `main` decides correctly (sxSat; native hits at k=3). A precision loss on this SUT, not a soundness one. Its old rc=139 did not recur in 450 runs per tree (c, cpp, ASan) | pre-tag probes on `8177eb27` | precision | |
 | INT-19 | PCRE 8.37 built without JIT, which is on the verified-library list, was not run. U1 and U2 were verified on 8.37 JIT, 8.39 JIT and 8.44 JIT: the candidate declines where `main` gives a false pair | pre-tag probes (U2) | test-harness | |
-| INT-20 | U5's original SUT (October false sxUnsat) lives only on the offline worker. S8cl's reconstruction (`unsafeNew(p, 8); if p != nil`) is correct on the candidate. Recover the original, and pin it, when the worker returns Evidence: `origin/worker-sls2` is fetched (88 report files) but the U5 SUT is not among them; S8cl's reconstruction is pinned at `s8cl_magics.nim:61-72`. Recover from the host or declare the reconstruction the pin and close. | pre-tag probes (U5) | test-harness | |
+| INT-20 | U5's original SUT (October false sxUnsat) lives only on the offline worker. S8cl's reconstruction (`unsafeNew(p, 8); if p != nil`) is correct on the candidate. Recover the original, and pin it, when the worker returns Evidence: `origin/worker-sls2` is fetched (88 report files) but the U5 SUT is not among them; S8cl's reconstruction is pinned at `s8cl_magics.nim:61-72`. Recover from the host or declare the reconstruction the pin and close. Includes PND-06. | pre-tag probes (U5) | test-harness | |
 | INT-21 | The check-off probe's `ai_caught` (`mitems` over `int16`, `assertions: off`) decides sxRaised. The raise looks real (int16 overflow at 32767 with overflow checks on), but no native run tried that input. Pin it natively | pre-tag probes (S8cp item) | test-harness | |
 
 **From the 0.9.1 wiring audit (2026-11-03).** What RFC-0005's post-tag
@@ -732,11 +743,11 @@ against 0.8.0, as the audit was; none is worse than it.
 | ID | Item | Source | Class | Owner |
 |---|---|---|---|---|
 | INT-22 | A clean, faithful winner is never replayed, so nothing learns that its witness ends the process after the target. `assertCoveredBy` still splats it and `symexForAll` still seeds it, in the host (`symex.nim:4057-4061`, `:982`). Unchanged from 0.8.0; WA-2 closed only the replayed case (`witnessUnsafe`) | 0.9.1 wiring audit | crash, same as 0.8.0 | |
-| INT-23 | A replay that ends at a memory limit is run-dependent only when the child's `outOfMemHook` reports it (`replayproc.nim:145`, `:328`). Under `-d:useMalloc` the hook is not reached, and a kernel OOM kill is a `reSignalled` SIGKILL, so either is cached as a permanent `:unk` | 0.9.1 wiring audit | precision | |
+| INT-23 | A replay that ends at a memory limit is run-dependent only when the child's `outOfMemHook` reports it (`replayproc.nim:423-424`, `:1272-1273`). Under `-d:useMalloc` the hook is not reached, and a kernel OOM kill is a `reSignalled` SIGKILL, so either is cached as a permanent `:unk` | 0.9.1 wiring audit | precision | |
 | INT-24 | The run-dependence flag is a threadvar reset by each entry macro's settle (`replayproc.nim:90`; read at `symex.nim:646`). A user-level `saveSymexVerdict` of an `sfUnknown` right after a settle that set it skips its save too Evidence: `d8969822`; no `threadvar` in `replayproc.nim`/`replayresult.nim` | 0.9.1 wiring audit | performance | closed |
-| INT-25 | Hypothesis: on macOS a kill at `replayTimeoutMs` does not reach the SUT's own child processes, and the child does not die with the host. `setpgid` and `PR_SET_PDEATHSIG` are Linux-only (`replayproc.nim:296-298`, `:374-376`). There is no macOS CI to probe it Includes HRV-03: on macOS/musl `quit(n)` is reported as exit 0 in the hint (`replayproc.nim:100-108`). | 0.9.1 wiring audit | unclear (hypothesis; no macOS host) | |
+| INT-25 | Hypothesis: on macOS a kill at `replayTimeoutMs` does not reach the SUT's own child processes, and the child does not die with the host. `setpgid` and `PR_SET_PDEATHSIG` are Linux-only (`replayproc.nim:393`, `:471`, `:1095`, `:1105`). There is no macOS CI to probe it Includes HRV-03: on macOS/musl `quit(n)` is reported as exit 0 in the hint (`replayproc.nim:100-108`). | 0.9.1 wiring audit | unclear (hypothesis; no macOS host) | |
 | INT-26 | `RegexError` reaching `symexFindAllWitnesses` through the user exception hierarchy (WA-1, `symex.nim:4523`) is unpinned: W1 pinned a user exception type only. It needs a PCRE SUT | 0.9.1 wiring audit | test-harness | |
-| INT-27 | Under `--panics:on` `replayInScope` declines every target (`symex.nim:2264`), so every lossy clean winner is `rsUnconfirmed` (`settleWinner`, `:3417`) and none is `trusted()` In W1-c's scope (the panics profile, §11). | 0.9.1 wiring audit | precision | |
+| INT-27 | Under `--panics:on` `replayInScope` declines every target (`replayInScope`, `symex.nim:2318`; the gate `:3169`), so every lossy clean winner is `rsUnconfirmed` (`settleWinner`, `:3387`) and none is `trusted()`. In W1-c2's scope (the panics profile, §11). | 0.9.1 wiring audit | precision | |
 
 **From the RFC-0005 code review (2026-11-04).** The Lows the review's ten
 rounds reported and did not fix under the through-Medium mandate
@@ -766,7 +777,7 @@ PND-07, PND-08, UPS-01) and are not repeated.
 
 | ID | Item | Source | Class | Owner |
 |---|---|---|---|---|
-| AUD-01 | `isLoose` leaves an `isIntOffset` parameter unstamped. By design (ADR-0001: `isLoose` is opt-in unsound and carries its banner on `main`); needs a "stays by design" record, not a slice | S8w | soundness, opt-in and documented; not worse than `main` | stays by design: `out-of-scope(reason)` cell, written by K1a |
+| AUD-01 | `isLoose` leaves an `isIntOffset` parameter unstamped. By design (ADR-0001: `isLoose` is opt-in unsound and carries its banner on `main`); needs a "stays by design" record, not a slice | S8w | soundness, opt-in and documented; not worse than `main` | stays by design: `never(reason)` cell, written by K1a-test |
 | AUD-02 | `acDivByZero` off with `acOverflow` on leaves the continuation unconstrained at a zero divisor. A nelli setting with no Nim counterpart (Nim's zero check rides on `overflowChecks`); a witness relying on it would trap on replay, which S8ct's child contains | S8aa | unclear (policy); not worse than `main` | |
 | AUD-03 | No clean no-zero type remains for the free-`retSym` guard pins; they are now `sxUnknown` on a `HashSet[string]` arm field, so the guard's coverage is weaker. No verdict defect | S8z | test-harness | |
 | AUD-04 | Macro-VM closure capture: a nested proc capturing a loop `var` kept one closure environment across iterations (seen as a duplicate case label). **Probed, no instance** at `main` 6cbfe8f and the channel at 67f0b622; the one known instance was fixed in S8z (`tagOrdOf` top-level). No other RFC-0016 item audits this class (AUD-06 and AUD-07 are the `let`/parameter alias guard's coverage) | S8z; coordinator probe, 2026-11-03 | unclear at audit; probed, no instance | closed |
@@ -774,9 +785,9 @@ PND-07, PND-08, UPS-01) and are not repeated.
 | AUD-06 | The build-time VM-alias gate runs on one suite per CI leg, not the whole corpus (deliberate: about 15–18 s per compile). Carried unchanged through S8ak and S8al | S8ah, S8ak, S8al | test-harness | |
 | AUD-07 | A generic never instantiated in the scope's compilation unit gives the VM-alias guard an un-instantiated `getImpl()` tree | S8al | test-harness | |
 | AUD-08 | ~~Non-integer `HashSet` elements decline~~ merged into PRC-12 | S8am | precision | merged |
-| AUD-09 | A `var` global initialised by a literal is not read at its initialiser: its entry value is fresh. A deliberate sound choice (S8as item 3) | S8as | precision | stays by design: `out-of-scope(reason)` cell, written by K1a |
+| AUD-09 | A `var` global initialised by a literal is not read at its initialiser: its entry value is fresh. A deliberate sound choice (S8as item 3) | S8as | precision | stays by design: `never(reason)` cell, written by K1a-test |
 | AUD-10 | The nil-dereference check of a lazily read operand happened where the read moved (S8ax's `orderOperands`), not where Nim checks it. The S8ax probe turned this into two blockers, both fixed: S8cq makes argument reads follow the C backend's temporaries (`nimArgTemps`; `tests/tsymex_rfc0005_s8cq_argorder.nim`), and S8cu makes a nil dereference an uncatchable crash routed through frame exits (`tests/tsymex_rfc0005_s8cu_nil.nim`, `_nil_native`, `_nil_setjmp`) | S8ax; S8be item 7; S8cq; S8cu | soundness at audit; fixed | closed by S8cq and S8cu |
-| AUD-11 | S8aw's `L`-against-`indexof` link now covers native terms only; the walker no longer emits `seq.last_indexof` or `str.indexof` for `rfind`/`find`. A coverage note, no wrong verdict or decline described | S8au | precision | stays by design: `out-of-scope(reason)` cell, written by K1a |
+| AUD-11 | S8aw's `L`-against-`indexof` link now covers native terms only; the walker no longer emits `seq.last_indexof` or `str.indexof` for `rfind`/`find`. A coverage note, no wrong verdict or decline described | S8au | precision | stays by design: `never(reason)` cell, written by K1a-test |
 
 AUD-04 and AUD-10 were the two rows whose standing against `main` the audit
 could not settle. Both are closed: AUD-04 by a probe at both shas that found
@@ -786,19 +797,49 @@ no instance, AUD-10 by S8cq and S8cu.
 
 The research list's rows that §5.0-§5.8 and §8's mechanisms do not already
 carry. Ids are the research list's (`docs/rfc/0016-research/MERGED-worklist.md`,
-which has the evidence); each needs its three-way row before work.
+which has the evidence); each needs its three-way row before work. One id per
+row, so K1's scan sees each (§8.2). W-43 is K3's; W-19 is SND-14; W-19d and
+W-30 were meta-rows applied in round 2; W-57 is §10's domain rule; W-59 is
+CI-A's derive mode; W-60 is CI-B's CI-C and CI-D.
 
 | ID | Item | Home | Owner |
 |---|---|---|---|
 | W-15 | `isThreadvarSym`/`isImportedVar` read a `getImpl` failure as "no": fail closed | K2a | |
-| W-19b | S8cs "not covered" store routes (threads, signals, dynamic-subtype hooks, ORC cycle collector); Windows re-exec unseen macro hooks; S8cu scan misses (`mitems` instantiated under a push elsewhere, never-popped push, importer outside the graph, nelli under a user push); opaque proc with `var T` params leaves the environment unmutated | probe each, then fix or an `out-of-scope` record; Wave 4 | |
+| W-19b | S8cs "not covered" store routes (threads, signals, dynamic-subtype hooks, ORC cycle collector); Windows re-exec unseen macro hooks; S8cu scan misses (`mitems` instantiated under a push elsewhere, never-popped push, importer outside the graph, nelli under a user push); opaque proc with `var T` params leaves the environment unmutated | probe each, then fix or a `never` record; Wave 4 | |
 | W-19c | closure unverified: S1b block/break binding, S7 `lowerInExpr` drains | probe; Wave 4 | |
-| W-34..W-42, W-44..W-49 | the precision list ranked by frequency, and the harvested precision items | Wave 4, in the research list's order | |
-| W-62 | CI odds: mingw B5-4, the `fuzzer-msvc` pull-request trigger, R1-12/13 unpinned, `dt-bounded` orphans, witness folding across nim-z3; refc never tested closes as `out-of-scope` under D-0016-7 | CI-B and Wave 4 | |
-| W-63 | JIT PCRE suites `skip()` on every build in use: a JIT build row | CI-B | |
-| W-65..W-68 | hygiene: stale comments, the `caseNarrow` duplicate, `dOpaque` stubs, six GitHub issues, RFC-0002 commit-or-drop, stale SYMEX_PLAN, ADR and migration text | Wave 4 | |
-| MOVE-0017 | the moves to RFC-0017 (N20, OQ1, CRH-03's OOM, `maxLoopUnwind`, #138, caps): record each in RFC-0017 with its id, then close here | coordinator, before W1-z | |
-| STAYS | the "declined, and it stays" records (A-10, C-13, C-10, HRV-18, HRV-27, HRV-63, HRV-105, B §1.2, AUD-01, AUD-09, AUD-11) | `out-of-scope` rows, written by the slice that introduces each axis | |
+| W-34 | `$` of seq/array/tuple/object/set/cstring (C-05, PRC-35; needs PRC-07 for `addQuoted`) | Wave 4 | |
+| W-35 | `==` on seq/array/tuple (C-08, PRC-34, HRV-53) | Wave 4 | |
+| W-36 | formals typed by a default are unreadable: `sort`, `sorted`, `align`, `formatFloat`, `parseHex` (C-06; the `sort` compile stop of CRH-01 is gone at 83c1d304, and it now declines) | Wave 4 | |
+| W-37 | `min`/`max(openArray)`, `low`/`high` on seq/array values (C-07, HRV-19) | Wave 4 | |
+| W-38 | `&` with a char operand; `intToStr`; `s.add('c')` outside loops (C-04) | Wave 4 | |
+| W-39 | `for i in a ..< s.len` with a non-symbol bound written in the body (A-04) | Wave 4 | |
+| W-40 | iterator shapes: yield under case/for/try, `return` in an iterator, break/continue over a user iterator, closure iterators, tuple-yield of a var (A-11) | Wave 4 | |
+| W-41 | `split` variants, `contains(set[char])`, `fmt`, `%`, `cmp(string)`, `count`, `binarySearch`, `mapIt`/`toSeq`, `parseFloat` (C-09, C-14) | Wave 4 | |
+| W-42 | `string` element view beside the whole `vs(s[0], s)` (B-03) | Wave 4 | |
+| W-44 | `Table[K, ref T]`/`seq[T]` values; Table non-string keys at zero-init (B-09, HRV-04) | Wave 4 | |
+| W-45 | value-object slicing, `of` on values (natively `of` is true on a sliced value) (B-12) | Wave 4 | |
+| W-46 | set by value; a set over 8 bytes passed by pointer untracked (B-10) | Wave 4 | |
+| W-47 | stdlib generic objects (Option, OrderedTable, CountTable, Deque) decline by catch-all, not by allowlist (B-11, HRV-62) | K4c | |
+| W-48 | harvested precision with no row (the HRV list in the research file) | Wave 4; many close on a probe | |
+| W-49 | open PRC/INT/AUD rows after the reconciliation, evidence refreshed | Wave 4 | |
+| W-62 | CI odds: mingw B5-4, the `fuzzer-msvc` pull-request trigger, R1-12/13 unpinned, `dt-bounded` orphans, witness folding across nim-z3; refc never tested is a `never` record under D-0016-7 | CI-B and Wave 4 | |
+| W-63 | JIT PCRE suites `skip()` on every Linux build: a JIT build row | CI-B | closed: the Windows legs are the JIT rows (PRC-27); K2a's `skip(` census rechecks it |
+| W-64 | 12 `SymexErrorKind`s with no producer, two produced only in dead arms (HRV-05) | K1 (error-kind coverage), K10d | |
+| W-65 | stale "STUB/defer" comments and dead boundary arms; the `caseNarrow` duplicate; `dOpaque` stubs | Wave 4 | |
+| W-66 | close six GitHub issues for shipped work: #152 #153 #160 #161 #162 #163 | Wave 4 | |
+| W-67 | RFC-0002 listed but absent; issues #146/#148/#149/#150: commit or drop | Wave 4 | |
+| W-68 | stale docs: SYMEX_PLAN status, ADR "PROPOSED" for landed ADRs, 0.9.0 known-gap text, RFC-0001 "Complete", CLAUDE.md's active RFC, 0014/0015 gates citing a pre-0.9.0 baseline, `docs/symex/README.md`'s decline catalogue (W1-z rewrites it) | Wave 4 | |
+| W-69 | "not green on a good day" wording in CLAUDE.md and `sweep-diff.sh` | | never: repository wording, outside this RFC |
+| MOV-01 | the moves to RFC-0017 (N20, OQ1, CRH-03's OOM, `maxLoopUnwind`, #138, caps): record each in RFC-0017 with its id, then close here | W1-z | |
+| STY-01 | `return` in `finally` on a raised path: c re-raises, cpp returns (A-10) | `never` cell of the build axis; K5a | |
+| STY-02 | Table/HashSet iteration order, hash- and build-dependent (C-13) | `never` cell of the stdlib-body axis; K4c | |
+| STY-03 | pointer order `<` (C-10, W-28) | `never` cell of the definedness axis; K10a | |
+| STY-04 | `owned T`, `Atomic[T]` (HRV-18) | `never` cell of the type × memory axis; K3a | |
+| STY-05 | `nextafter` (HRV-27) | `never` cell of the magic axis; K4a | |
+| STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | one `never` cell each, written by K3a, K2b and K4c | |
+| STY-07 | `addr s[0]` then growth (B §1.2) | `never` cell of the definedness axis; K10a | |
+| STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | `never` cell of the build axis; K5a | |
+| STY-09 | the AUD-01, AUD-09 and AUD-11 records | `never` cells, written with their own rows | |
 
 ## §6 — Slice procedure
 
@@ -812,13 +853,15 @@ Unchanged from RFC-0005's worker brief, with two additions from its lessons:
   harness exists, this is the hand-run version of it.
 - Report anything found and not fixed as a finding (§3.2), with its class and
   its three-way table, not as prose at the end of a slice note.
-- **Fuzzer and consumer intake.** Each issue the nightly fuzzer job opens
-  (§10), and each consumer report, becomes an `F-NNNN` row with its
-  three-way probe within the week, and is named by a cell (§8.2).
+- **Fuzzer, CI and consumer intake.** Each issue the nightly fuzzer job or a
+  red CI-B run opens (labelled `rfc-0016-intake`, §10, §11), and each
+  consumer report, becomes an `F-NNNN` row with its three-way probe within
+  the week, and is named by a cell (§8.2). Each wave's integration slice
+  (W2-z, W3-z, W4-z) checks that none is older than seven days.
 
 ## §7 — Open forks
 
-None open. `/architect` round 1 (2026-11-06) resolved every point its five
+None open. `/architect` rounds 1-3 (2026-11-06) resolved every point their
 lenses raised by recommendation (§8-§13; the handoff's round-1 ledger lists
 each). Corey's decisions on the research round are D-0016-5 to D-0016-9:
 Wave 1 as 0.9.2 after the design rounds; about twenty tracker rows plus the
@@ -831,7 +874,7 @@ Earlier: Decided by Corey on 2026-11-06:
 - **`fork-c-clean-replay`:** not added (B, D-0016-2).
 - **`fromcache-field`:** remove the field in 0.10.0 (B, D-0016-4; INT-39).
 
-## §8 — Closure design (`/architect` rounds 1 and 2, 2026-11-06)
+## §8 — Closure design (`/architect` rounds 1-3, 2026-11-06)
 
 **Why a design section was needed.** A read-and-probe of the whole walker
 surface at `83c1d304` (six lenses: constructs, types × memory, magics and
@@ -857,68 +900,88 @@ that mechanism's output, not a count of rows.
 
 ### §8.1 Admission: per-axis verbs over private rows, default decline
 
-`smt/admission.nim`, a Z3-free leaf beside `soundness.nim`. Callers never see
-a row; each axis exports a decision verb that returns the answer, and an
-enumerator that K1 reads:
+`smt/admission.nim`, a Z3-free module above `types.nim` (its keys,
+`IRTypeKind`, `MemOp`, `ArithOp`, `SymexErrorKind`, live there). Callers never
+see a row; each axis exports a decision verb that returns the answer, and an
+enumerator that K1 reads. Test and tracking metadata (which file pins a cell,
+which RFC row it closes) never enters `src/`:
 
 ```nim
 type
-  AdmissionModel* = enum amExact, amDeclined, amOutOfScope
-  Admit* = object                         ## the answer a consumer branches on
-    case model*: AdmissionModel
-    of amExact:      discard
-    of amDeclined:   kind*: SymexErrorKind; reason*: string
-    of amOutOfScope: why*: string
+  Admit*[P] = object                    ## what a consumer branches on
+    case admitted*: bool
+    of true:  value*: P                 ## payload where an axis has one (PcreEngine)
+    of false: kind*: SymexErrorKind; reason*: string
+  Intent* = enum iModel, iNever         ## ledger only: declined for now vs out of scope
   Axis* = enum axConstruct, axTypeOp, axLocalPragma, axMagic, axStdlibBody,
-               axBuild, axReadOnly, axDefinedness, axCallShape, axExnMemory,
-               axErrorKind
-  Cell* = object                          ## what K1 enumerates
-    axis*: Axis; key*: string; site*: string
-    model*: AdmissionModel; pin*: string; rows*: set[BuildRow]; items*: seq[string]
+               axBuild, axReadOnly, axDefinedness
+  CellKey* = object                     ## typed identity, cheap to name from a test
+    case axis*: Axis
+    of axMagic:       magic*: string; shape*: MagicShape
+    of axTypeOp:      ty*: IRTypeKind; op*: MemOp
+    of axDefinedness: arith*: ArithOp; cls*: OperandClass
+    # ... one branch per axis
+  Cell* = object                        ## what K1 enumerates
+    key*: CellKey; rows*: set[BuildRow]; intent*: Intent; sites*: set[SiteId]
 
-func admitMagic*(name: string; shape: MagicShape): Admit
-func admitTypeOp*(k: IRTypeKind; op: MemOp): Admit
-func admitDefinedness*(op: ArithOp; cls: OperandClass; p: BuildProfile): Admit
-# ... one verb per axis ...
+func admitMagic*(name: string; shape: MagicShape): Admit[Empty]
+func admitTypeOp*(k: IRTypeKind; op: MemOp): Admit[Empty]
+func admitDefinedness*(op: ArithOp; cls: OperandClass; p: BuildSemantics): Admit[Empty]
+func admitPcreLib*(version: string; jit: bool): Admit[PcreEngine]   ## absent: psUnverifiedLib
+func magic*(name: static string; shape: MagicShape): CellKey          ## static: row must exist
 iterator cells*(axis: Axis): Cell
 ```
 
-Rules the type carries, not the reviewer:
+Rules the types carry, not the reviewer:
 
 - **Absent is a decline.** A string-keyed axis (magics, pragmas, stdlib
-  bodies) answers `amDeclined(feUnadmitted)` for a key it has no row for. An
-  enum-keyed axis (`IRTypeKind × MemOp`, `ArithOp × OperandClass`) is an
-  `array[K, …]`, so a missing key is a compile error and the lookup is O(1)
-  on the walk's hot path; the macro-time string axes stay linear lookups
-  behind a lib-scanning guard.
-- **An exact row needs its evidence.** Rows are built with
-  `exact(key, pin, rows)`, `declined(key, kind, reason)`,
-  `outOfScope(key, why)`; `exact` with an empty `rows` set does not compile.
+  bodies) answers `admitted = false` with `feUnadmitted` (or the axis's own
+  absent kind, `psUnverifiedLib` for PCRE) for a key it has no row for. An
+  enum-keyed axis is an `array[K, …]`, so a missing key is a compile error and
+  the lookup is O(1) on the walk's hot path; the macro-time string axes stay
+  linear lookups behind a lib-scanning guard.
+- **Out of scope is a ledger intent, not a third answer.** A consumer does the
+  same thing for "not yet" and "never": decline with a kind. `Intent` says
+  which, for the ledger only.
+- **An exact row states its build rows.** Rows are built with
+  `exact(key, rows)`, `declined(key, kind, reason)`,
+  `never(key, kind, why)`; `exact` with an empty `rows` set does not compile.
+  Which test pins a row is not on the row: pins report themselves (§8.2).
 - **The consumer cannot bypass the table.** The seven findings were sites
   that never looked anything up, and a table only proves its own
-  completeness. So parser dispatch over a keyed axis is generated:
-  `dispatchMagic` (and its siblings) expands to the `case` whose `else` is a
-  decline, and `error()`s at compile time on an arm with no row or a row with
-  no arm. The per-name switch at `dsl_parser.nim:11868-11892`, whose
-  `else: discard` falls through to generic call handling today, is the first
-  one converted. `admitTypeOp` is attached to the IR at parse time
-  (`IRParam.copyModel`), so a walker consumer cannot read a type without its
-  verdict.
+  completeness. So parser dispatch over a keyed axis is generated, per site:
+  each axis has a site enum (`MagicSite = enum msCallExpr, msProcRegister,
+  msDefectScan`), each row names the sites that consume it, and
+  `dispatchMagic(site: static MagicSite, …)` expands to the `case` whose
+  `else` is a decline and `error()`s at compile time on an arm with no row for
+  that site or a row for that site with no arm. The K2 census asserts each
+  site member is instantiated exactly once. The per-name switch at
+  `dsl_parser.nim:11868-11892`, whose `else: discard` falls through to generic
+  call handling today, is the first one converted. The type × memory-op
+  verdict is attached to the IR at parse time (`IRParam.copyModel`), so a
+  walker consumer cannot read a type without it.
 - **`feUnadmitted` is `dcNoAnswer` until K7 lands.** The walker's
   `isUnsupported` arm continues every live path with `forkPathTainted`
   (`runtime.nim:24508-24512`) and `pathTaint(dcOmitted)` is empty
   (`types.nim:3650-3652`), so a `dcOmitted` decline there would let an
   `sxSat` through clean. `feUnadmitted` moves to `dcOmitted` only once K7's
-  `halt` drops the path.
+  `halted` drops the path.
+
+**Not axes.** Three things the ledger also enumerates are not admission,
+because no engine code answers them: `SymexErrorKind` coverage (each member is
+the kind of some declined row or `pinDecline`, or it is deleted) is derived by
+K1 from the pin records; **call-site × callee shape** and **exceptions ×
+memory** are test-side pin *families*, named `family:<name>/<shape>`, because
+the walker has no single dispatch point for them.
 
 The axes and what they absorb:
 
 | axis | key | consumers | absorbs |
 |---|---|---|---|
-| magic | name × `MagicShape` (literal / const / variable, width, signedness) | `dispatchMagic` at `dsl_parser.nim:11868`, `ensureProcRegistered`, the opaque-call defect scan (`:4152`) | `varParamMagics` (`:4254`), the four string arrays (`:4018-4030`) |
+| magic | name × `MagicShape` (literal / const / variable, width, signedness) | three sites: `dispatchMagic` at `dsl_parser.nim:11868`, `ensureProcRegistered`, the opaque-call defect scan (`:4152`) | `varParamMagics` (`:4254`), the four string arrays (`:4018-4030`) |
 | type × memory op | `array[IRTypeKind, set[MemOp]]` | `typeCopiedByValue` (`:7835`, on `NimNode`) and `holdsSharedMemory` (`:16561`, on `IRType`) through one `classifyType` normalisation, itself a row of the construct census | the S8cq by-value allowlist |
 | local pragma | pragma name on a `var`/`let` | `localDeclGate` | the `noinit`/`global` special cases at `:19771-19792` |
-| build | `BuildProfile` semantic fields (§8.3) | `symexFind` at macro time | `verifiedLibs`' role for Z3, Nim and PCRE |
+| build | `BuildSemantics` (§8.3) | `symexFind` at macro time | `verifiedLibs`' role for Z3, Nim and PCRE (`admitPcreLib`) |
 | read-only | node kind and call shape proved not to write | one `mayWrite(n)` | the four parser predicates `nodeWritesHeap` (`:16574`), `routeStoresThroughDeref` (`:22429`), `ptrUsesStayLocal` (`:6546`), the hook copy-proof (`:22505`) |
 | definedness | `array[ArithOp, array[OperandClass, …]]` read with the profile (§9) | the arithmetic lowering | `arithTrapConds`, `currentArithWraps` (`runtime.nim:1976`) |
 | stdlib body | `(module, routine)` walked by body, with its check-option delta | the inliner | the implicit "walk any `lib/` body" |
@@ -938,14 +1001,12 @@ construct row, asserting an IR with no unsupported node or a named decline)
 covers the positional reads.
 
 **Proof spike.** ADM-1 moves two existing tables onto the module with no
-verdict change: `varParamMagics` (19 string-keyed entries, 16 modelled; each
-needs its pin file named, which exists across the S8bl and #145 suites) and
-`verifiedLibs` (`pcre_engine.nim:143`, record-keyed, whose consumer
-`pcreSearchEngine` returns a payload, the engine model, and whose absent-key
-kind is `psUnverifiedLib`). The second is the test of the interface: it needs
-either a payload on `Admit` or an absent-kind parameter, and the spike decides
-which before any new table is written. The interface above is expected to
-change there.
+verdict change: `varParamMagics` (19 string-keyed entries, 16 modelled) and
+`verifiedLibs` (`pcre_engine.nim:143`, record-keyed, three consumers in
+`pcre_engine.nim`, whose lookup returns a payload, the engine model, and whose
+absent kind is `psUnverifiedLib`). The second is why `Admit` carries a
+payload and an axis-specific absent kind; if the spike finds the shape wrong,
+the interface changes there, before any new table is written on it.
 
 ### §8.2 The universe ledger is an output
 
@@ -954,85 +1015,105 @@ change there.
 way `sweep.sh` emits `.drift`. It is not a hand-annotated input: the reason a
 cell stays declined lives in its row, where review sees it.
 
-- **A cell is `(axis, arm key)`**, the discriminant the code actually reads:
-  an operator name, a conversion pair, a magic × shape, a type × memory
-  operation. Identity does not include a file or line, so a refactor does not
-  churn it. A dispatch site registers under a reviewed `site` string passed
-  to the generated dispatch; the K2 census asserts each site string occurs
-  once.
-- **Axes:** those of §8.1, plus `SymexErrorKind` members (each named by a
-  cell, or deleted), **call-site shape × callee shape** (converter, template
-  with a side-effecting argument, default-valued formals, named and varargs
-  arguments, two instantiations of one generic, two closures sharing an
-  environment, inline vs closure iterator, `method` dispatch, hooks, `defer`,
-  `{.borrow.}`) and **exceptions × memory** (a raise inside `=destroy`,
-  `finally`, `defer` or an inlined iterator; `getCurrentException` across
-  nested handlers; UPS-01 is this class). Magic names are scanned from all of
-  `lib/` with multi-line declarations; `TMagic` is not importable, so its
-  count is a dev-image script output, not an assertion.
-- **States:** `exact(pin, rows)`, `declined(kind, reason)`,
-  `out-of-scope(reason)`, and for unsat cells **exhaustive** vs **sampled**
-  native evidence, printed separately. `unclassified` is the only state the
-  test rejects.
-- **Pins report themselves.** The K9 helpers write a pin record at run time:
-  test file, entry point, cell, target, domain, `exhaustive`, verdict, native
-  result, and the `BuildProfile` segment. K1 joins cells to records; it does
-  not scan test text. Because CI runs the corpus in shards, K1 is a job after
-  the shards in each leg, consuming the records as artifacts. A leg checks
-  only the cells that claim its own build row; a cell claiming a row that no
-  leg runs is `unclassified`.
-- **The work list is joined too.** `Cell.items` names §5 row ids and
-  `F-NNNN` ids. K1 reads this RFC and its handoff at run time for row ids
-  (`^\| (SND|PRC|CRH|CI|INF|UPS|PND|INT|AUD|W|F)-\d+ \|`) and fails on an
-  open id that no cell names. The work list is the hand list; reading it is
-  the point.
+- **A cell is a `CellKey`**: an axis and the discriminant the code actually
+  reads (an operator name, a conversion pair, a magic × shape, a type ×
+  memory operation), or a test-side `family:<name>/<shape>`. Identity has no
+  file or line, so a refactor does not churn it.
+- **What is enumerated:** every axis of §8.1, the two families, and the
+  error-kind coverage derivation. Magic names are scanned from all of `lib/`
+  with multi-line declarations; `TMagic` is not importable, so its count is a
+  dev-image script output, not an assertion.
+- **States:** `exact(rows)`, `declined(kind, reason)`, `never(kind, why)`,
+  and for unsat cells **exhaustive** vs **sampled** native evidence, printed
+  separately. `unclassified` is the only state the test rejects.
+- **Pins report themselves.** The K9 helpers write one record per pin at run
+  time: test file, entry point, `CellKey` (or family), target, domain,
+  `exhaustive`, verdict, native result, and the build segment. Records go to
+  `$NELLI_PIN_DIR` (default `tests/.pins/`), one file per (test file, build
+  segment), so concurrent runs of different builds do not clobber. K1 joins
+  cells to records; it does not scan test text.
+- **K1 runs after the pins it joins.** In CI, the shards upload their record
+  directories as artifacts and a join job per leg runs the universe test over
+  them. Locally, `sweep.sh` excludes the universe file from its parallel set
+  and runs it last over the sweep's record directory, failing if the
+  directory is empty. A leg checks only the cells that claim its own build
+  row; until a row's leg exists, its cells are in that axis's allowlist,
+  named as waiting on the leg.
+- **The work list names its cells.** §5 and §5.9 rows and the handoff's F
+  ledger carry a `cell:` reference in their last column (several allowed);
+  the engine never learns an RFC id. K1 reads this RFC and its handoff at run
+  time. Every row id matches `^[A-Z]+-\d+[a-z]?$` (`MOVE-0017`, `STAYS` and
+  the `W-34..W-42`-style ranges of §5.9 are split into one id per row). A row
+  is **open** unless its last column starts with `closed`, `merged`, `moved`,
+  `never` or `RFC-NNNN` (owned elsewhere); the F ledger's `state` column
+  uses the same words. K1 fails on an open id that names no cell, against a
+  second committed allowlist of such ids, which follows the same ratchet.
 - **What it certifies.** Single-site exactness. Combinations (a construct
   nested in another, a memory route through a call) are the fuzzer's,
   measured by the pairwise figure (§12 item 4).
-- **Ratchet, per axis.** The test fails on any new unclassified cell against
-  a committed allowlist file. The commit that introduces an axis may add
-  exactly that axis's cells (the delta must equal the new axis's cell set,
-  nothing from another axis); after that, the axis's allowlist may only
-  shrink. K1a's first axes are the error kinds (about 90 cells, nearly all
-  unclassified on day one), the two ADM-1 tables and the build rows, so the
-  ratchet has content from its first commit.
+- **Ratchet.** Allowlists live in `tests/0016-allowlist/<axis>.txt` and
+  `tests/0016-allowlist/ids.txt`. What the test checks: every unclassified
+  cell (or unnamed open id) is in the allowlist, and every allowlist entry is
+  still unclassified (a stale entry fails, which forces removal). What review
+  checks on the diff: an allowlist grows only in the commit that introduces
+  its axis, by exactly that axis's cells. K1a-test's first content is the
+  error-kind derivation (about 90 kinds, nearly all unpinned on day one), the
+  two ADM-1 axes, the build rows and the id list.
 - **First commit proves it runs.** The slice that lands it shows it RED on
-  each CI leg with a planted unclassified cell, as `symex-mingw.yaml:217-230`
-  pins the z3-optional seam.
+  each CI leg with a planted unclassified cell, demonstrated in the slice's
+  report with the failing run URL.
 - **Skips name a cell.** A platform arm or `skip()` in a test takes
-  `skip("cell:<axis>/<key>")`, so §12 item 3 is checkable.
+  `skip("cell:<key>")`, so §12 item 3 is checkable; K2a's census lists the
+  `skip(` and `defined(windows)` sites that do not.
+- **Threads.** Pin records and marker capture are per thread
+  (`markers.nim:70`); K9's helpers merge at exit. Running `symexFind` off the
+  main thread (`parallel.nim:843` with `symexSeedPhase`, `symex.nim:990-1007`)
+  is a cell of the build axis, pinned by the three isolation suites
+  (`s8bp_isolation`, `s8ca_stack`, `s8ct_isolation_e`).
 
 ### §8.3 BuildProfile: one constant, read and keyed
 
 The SUT and nelli are one binary, so the build is a compile-time fact:
-`const buildProfile*: BuildProfile` in a leaf `smt/buildprofile.nim`. Its
-fields split by what reads them:
+`const buildProfile*: BuildProfile` in a leaf `smt/buildprofile.nim`, split
+by type into what is keyed and what is rendered, so a new field is keyed or
+not by where it lands and no field list can be forgotten:
 
-- **Semantic** (read by walker arms, keyed): check options, panics, memory
-  manager, exceptions mode, backend, `--opt`, the declared signed-wrap mode,
-  pointer width, CPU, OS, `nimOldCaseObjects`/`strictCaseObjects`, PCRE
-  engine. Each comes from `compileOption`, `defined` or `sizeof(int)`.
-- **Provenance** (rendered on a finding and recorded on a pin, not keyed):
-  C compiler family (`defined(gcc|clang|vcc)`), Nim version and patchset,
-  Z3 version (already its own `symexCacheKey` parameter). The C compiler
-  version is a run-time fact of the pin record; nothing at macro time reads
-  it.
+```nim
+type
+  BuildSemantics* = object   ## read by walker arms, keyed
+    checks*: set[CheckOption]; panics*: bool; mm*: MemModel; exceptions*: ExcMode
+    backend*: Backend; opt*: OptLevel; fwrapv*: bool; ptrBits*: int
+    cpu*, os*: string; caseObjects*: CaseObjMode; pcre*: PcreEngine
+  BuildProvenance* = object  ## rendered on findings and pin records, not keyed
+    ccFamily*: CcFamily; nimVersion*, patchset*, z3Version*: string
+  BuildProfile* = object
+    semantics*: BuildSemantics; provenance*: BuildProvenance
+func cacheSegment*(s: BuildSemantics): string    ## fieldPairs over s, tagged and versioned
+```
 
-**What `querySetting` cannot read is refused or declared, not guessed.**
+`buildprofile.nim` absorbs the build consts that exist today
+(`buildChecksOn`, `buildMemModel`, `buildBackend`, `buildExceptions`,
+`canonicalize.nim:6549-6595`; `check_options.nim:113-120`'s
+`compileOption("overflowChecks")`). The C compiler version is a run-time fact
+of the pin record; nothing at macro time reads it.
+
+**What `querySetting` cannot read is refused or produced, never guessed.**
 `querySetting(compileOptions)` does not see `--passC` from the command line,
 `nim.cfg` or `config.nims` (Nim routes those to `compileOptionsCmd`,
 `commands.nim:862-864`; `vmops.nim:169` returns only `compileOptions`), nor
-`{.localPassC.}`, nor the `-O` level. So `-fwrapv` cannot be read: signed
-wrap is undefined unless the consumer declares `-d:nelliFwrapv`, a define the
-profile does read, and which a native pin row (UBSan plus `-fwrapv`) checks.
+`{.localPassC.}`, nor the `-O` level. So nelli does not try to read
+`-fwrapv`; it **produces** it. A consumer who wants defined signed wrap
+compiles with `-d:nelliFwrapv`, and `buildprofile.nim` does
+`when defined(nelliFwrapv): {.passC: "-fwrapv".}`, a global pragma that
+reaches every C compile of the program (`pragmas.nim:1164-1169`). The define
+is then a fact of the build, not a claim, and `fwrapv` is a semantic field.
+`admitBuild` refuses it under `vcc`, which has no such flag.
 
 Three things derive from the one constant:
 
-1. **The cache key.** `cacheSegment(p)` iterates `fieldPairs` over the
-   semantic fields with an explicit field list, a `static` assertion that
-   semantic + provenance lists cover every field, a segment tag with a
-   version, and a golden string per build pinned in the CR2 cache-key test.
-   (Nim's `$` on an object changes with any field rename or reorder.) It
+1. **The cache key.** `cacheSegment` iterates `fieldPairs` over
+   `BuildSemantics`, under a versioned tag. (Nim's `$` on an object changes
+   with any field rename or reorder.) It
    replaces the hand list at `canonicalize.nim:6558-6592` (INT-31's `|bf=`
    half) and the `defined(nimPanics)` default at `:6537`.
 2. **Refusals at macro time.** `admitBuild(buildProfile)` runs in
@@ -1041,13 +1122,17 @@ Three things derive from the one constant:
    Wave 1), 32-bit `int`, an unverified Z3, Nim or PCRE build, and arm64 and
    macOS **until a CI leg runs the suite there** (a compile-only leg cannot
    satisfy §12). The C compiler is a pin axis, not a refusal axis.
-3. **On the verdict.** `Soundness.profile` carries the segment string, so a
-   finding renders "decided on c/orc/goto/64-bit, panics off, gcc" and a
-   cached verdict read under another profile is a different key, never a hit.
+3. **On the verdict.** `Soundness.buildSegment` carries `cacheSegment`'s
+   output, so a finding renders "decided on c/orc/goto/64-bit, panics off" and
+   a cached verdict read under another profile is a different key, never a
+   hit. The CR2 cache-key test holds one golden segment per run leg, selected
+   by `when defined(cpp)` / `defined(vcc)` / the Z3 version, never by
+   `cacheSegment` itself.
 
 Every walker arm that depends on the build reads `buildProfile`; a test pins
 that `defined(nimPanics)`, `compileOption(` and `defined(release)` occur in
-`src/nelli` only inside `buildprofile.nim`. `{.push.}` regions stay in the IR
+`src/nelli` only inside `buildprofile.nim` (W1-c1 pins `defined(nimPanics)`
+and the check-option reads; K5a extends the pin to the rest). `{.push.}` regions stay in the IR
 as `feCheckOption` markers: the profile is the command-line baseline,
 `check_options.nim` the per-routine delta. An inlined stdlib body's push is
 visible only in `implDigest`, so an `admitStdlibBody` row carries its
@@ -1063,7 +1148,7 @@ legs exist; INT-25 and PND-03 wait on the macOS one.
 
 | K | what | closes |
 |---|---|---|
-| K1 | universe test and ledger (§8.2) | the finish line itself |
+| K1 | universe test and ledger (§8.2); error-kind coverage, deleting producer-less kinds | the finish line itself; W-64 |
 | K2 | dispatch census over every `case n.kind` in `src/nelli`; `typeIdOf(sym): Option[string]` as the only source of exception type ids (`none` is `eeUnknownExnType`); child-shape census corpus | W-01, W-04, W-15, W-21, W-27, W-33 |
 | K3 | the type × memory-op and local-pragma axes (the pragma list is hand-written: Nim has no enum of `var`/`let` pragmas, so the guard is checked against Nim's `pragmas.nim` text) | W-02, W-12, W-20, W-43, B-04 |
 | K4 | the magic axis with a lib-wide guard; a bodied magic not admitted as walked-by-body declines; the stdlib-body axis seeded from a `feStdlibBodyWalked` hint; every raise-text decline gets a `SymexErrorKind` | W-05, W-06, W-22, W-24, C-11, C-16 |
@@ -1071,32 +1156,45 @@ legs exist; INT-25 and PND-03 wait on the macOS one.
 | K6 | `mayWrite(n)` over the read-only axis; a walked user callee recurses with a cycle bound, an opaque one may write anything; pinned on a write-shape corpus with native runs | W-08..W-10 |
 | K7 | degrade discipline by type (below) | W-07, W-11, W-16, D-13 |
 | K8 | differential fuzzer (slice D1, §4, §10), its families generated from the axes | the next W-01, before a consumer finds it |
-| K9 | one shared native-pin helper (below) | W-54..W-56, W-61 |
+| K9 | one shared native-pin helper (below) | W-54..W-57, W-61 |
 | K10 | undefined behaviour as an outcome (§9) | W-05, W-06, W-07, W-13 (settle half) |
 
-**K7, concretely.** `degrade` stops being exported from the walker. The
-token-dropping primitive becomes `proc halt(w: var WalkCtx; kind; msg)`,
-returning nothing: the absence of a token *is* the halt, so `discard`
-leaves the vocabulary. Every other degrade result flows into
-`forkPathTainted` or `taintInPlace`, which is already how 93 of the call
-sites use it. The 20 `discard w.degrade(` code sites (19 in `runtime.nim`,
-1 in `runtime_heap.nim`) have three shapes, an arm return, a void return in a
-routing proc, and a per-path drop inside a loop, and each converts to `halt`
-plus its own control flow. The `isUnsupported` arm becomes
-`proc walkUnsupported(stmt, paths, w): Survivors` with no conversion from
-`seq[Path]`, so the token-less `return paths` at `runtime.nim:24500-24502`
-cannot be written; W1-d2 deletes that line first. The K2 census asserts no
-`discard` of a `degrade` call. W-11 (`svWithRaw` returning the old value for a
-composite) and W-16 (`defectExclusions` making a Defect path unreachable with
-`sxUnsat` still trusted) are the same discipline: each records a
-`dcOmitted` halt instead.
+**K7, concretely.** Paths are `seq[Path]` everywhere
+(`walkStmt(stmt, paths, w): seq[Path]`, `runtime.nim:23704`; `Path` is a
+`ref object` private to `runtime.nim:549`), so the type has to be introduced
+at arm exits:
 
-**K9, concretely.** It grows `tests/s8cu_helpers.nim`, which already shares
-`native`/`declines`/`decides` by import, instead of starting a fourth
-lineage beside the 35 `nativeHits` copies and the 55 `declines` templates.
-It is built on `assertCoveredBy`'s argument splat, so it is not tied to
-`proc(k: int)`, and it runs the walker's own `sxSat` witness natively as well
-as the domain:
+```nim
+type Survivors = object               ## runtime.nim, beside Degrade
+  live: seq[Path]
+func halted(w: var WalkCtx; kind: SymexErrorKind; msg: string;
+            scope = walkSite()): Survivors      ## records, returns no paths
+func surviving(ps: seq[Path]; d: Degrade): Survivors   ## forks each path tainted
+func admittedExact(ps: seq[Path]; a: Admit): Survivors ## the only token-free one
+```
+
+`degrade` stops being exported; `halted` holds the one sanctioned `discard`
+of its token. K7b converts the `isUnsupported` arm to
+`walkUnsupported(…): Survivors`; the end state, reached arm by arm in Wave 4,
+is every `walkStmt` arm returning `Survivors`, so every arm exit names its
+admission or its degrade. `Degrade`'s privacy inside a 31k-line module is
+itself enforced by K2's AST census of construction sites, not by the type
+alone. The 20 `discard w.degrade(` code sites (19 in `runtime.nim`, 1 in
+`runtime_heap.nim`) come in four shapes: an arm return, a void return in a
+routing proc, a per-path drop inside a loop, and recorded-but-continued
+(`runtime.nim:19172` records `weInternalWalkerFault` and routes the raises
+anyway). The first three become `halted`; the fourth keeps its path and
+takes the token through `taintInPlace`, since a halt would continue it with
+no taint. W-11 (`svWithRaw` returning the old value for a composite) and W-16
+(`defectExclusions` making a Defect path unreachable with `sxUnsat` still
+trusted) take the same discipline.
+
+**K9, concretely.** It grows `tests/s8cu_helpers.nim`, which already
+shares `native`/`declines`/`decides` by import, instead of starting a fourth
+lineage beside the 35 `nativeHits` copies and the 55 `declines` templates. It
+is built on `assertCoveredBy`'s argument splat (`emitWitnessSplat`,
+`symex.nim:2553`, exported for it), so it is not tied to `proc(k: int)`, and
+it runs the walker's own `sxSat` witness natively as well as the domain:
 
 ```nim
 type Domain*[T] = object
@@ -1104,17 +1202,25 @@ type Domain*[T] = object
 func exhaustive*[T](v: openArray[T]): Domain[T]
 func sampled*[T](v: openArray[T]): Domain[T]
 const boundaryInts* = sampled([low(int), low(int)+1, -1, 0, 1, 7, high(int)-1, high(int)])
-macro pinExact*(fn: typed; cell: static Cell; target = tLabel("hit");
+macro pinExact*(fn: typed; key: CellKey; target = tLabel("hit");
                 domain = boundaryInts): untyped        ## returns the SymexResult
-template pinDecline*(fn: typed; cell: static Cell; kind: SymexErrorKind;
+template pinDecline*(fn: typed; key: CellKey; kind: SymexErrorKind;
                      target = tLabel("hit"))
-template pinRaised*(fn: typed; cell: static Cell; exn: typedesc; domain = boundaryInts)
+template pinRaised*(fn: typed; key: CellKey; exn: typedesc; domain = boundaryInts)
+proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
+               expect: CrashExpect)    ## compile a probe, run it in a child:
+                                       ## must not compile / must not finish
+iterator pinRecords*(dir: string): PinRecord   ## the reader K1 joins on
 ```
 
-The cell is a typed value from `admission.nim`, so a typo is a compile error;
-`kind` is mandatory on a decline; the helper writes the pin record K1 joins
-on, and returns the `SymexResult` for extra checks. Whether an unsat is
-exhaustive is the declared domain's property, not a separate entry point.
+Pins name a cell by key (`magic("DivU", msBinary)`, checked against the
+`const` row at compile time), never by a row value, so a test never holds a
+`Cell` and there is no circularity. `kind` is mandatory on a decline. Whether
+an unsat is exhaustive is the declared domain's property. Until ADM-1 exists
+(Wave 2), `key` is a `static string` of the form `axis/key` checked by a
+compile-time pattern; K9b retypes it to `CellKey`. `pinCrash` absorbs the
+`probe()` shape of `tsymex_rfc0005_s8cu_nil_native.nim:18-40`, which W1-c1,
+W1-c2 and W1-d1 need.
 
 ## §9 — Undefined behaviour is an outcome (K10)
 
@@ -1163,59 +1269,92 @@ existing vocabulary:
    definite outcome.
 2. **Each unchecked op forks on its definedness condition**, using the
    predicates the walker already has (`addNoOverflow` and its siblings,
-   `runtime.nim:8478-8492`). The defined side continues exactly. The
-   undefined side halts with kind `ubUndefinedBehaviour` (`dcOmitted`, run
-   coordinate `{scIncomplete}`), **but only if it is feasible**: `degrade`
-   records its kind unconditionally (`runtime.nim:16613-16632`), and a halt
-   has no later solve, so without a check `if y == 0: return; x div y` would
-   taint every run that guards its divisor. The `(pc, cond)` pairs are
-   collected in a sink like `defectSurvivorPc` and decided as one
-   disjunction at path exit: one solve per terminal path, not per op. Where
-   a Defect fork already covers the condition (checks on), the op is
-   *Defect*, not undefined, and there is one fork, not two.
+   `runtime.nim:8478-8492`). The defined side continues exactly, carrying
+   `¬cond`. The undefined side is its own terminal path
+   `forkPath(p, p.pc & @[cond], p.env)` at the op, as `genRaiseForkDrain`
+   does for the raise side (`runtime.nim:18881-18883`), so its feasibility is
+   decided against the path condition *at the op*, not at the survivor's
+   exit (where `¬cond` would make it trivially unsat). It is decided lazily
+   where `routeRaise` decides raise paths, at the boundary with
+   `solveTargetHit` (`:25870-25880`): sat records `ubUndefinedBehaviour`
+   (`dcOmitted`, run coordinate `{scIncomplete}`) once; unsat is a prune
+   fact (`logPrune`, `:15711`), so a call-cache summary that relied on it is
+   replayed only where it still holds (`pruneFactsHold`, `:23598-23610`). An
+   `sxSat` run cut off by `shouldStop` decides no undefined side it did not
+   reach; the winner's own prefix carries its `¬cond` facts. This sink is
+   ungated, like `arithTrapConds` (`:19091-19113`): the gated drains
+   (`genRaiseForkDrain` at `:18879-18880`, `drainRangeRaises` at `:19006`)
+   return `@[p]` untainted when a check is out of `arithChecks`, which until
+   K10d must taint with `feCheckOption` instead. Where a Defect fork already
+   covers the condition (checks on), the op is *Defect*, not undefined, and
+   there is one fork, not two.
 3. **A trusted `sxSat` needs the whole run defined, not only its prefix.**
    C's undefined behaviour is not sequenced, and the walk stops at the first
    label hit (`shouldStop`, `runtime.nim:17308-17318`), so it never sees what
-   follows. Rule: if a static scan of the routine's IR finds any op whose
-   definedness row is *undefined* on this profile, the winning path is
-   continued from the label under its witness. The continuation must reach a
-   routine exit (return or raise) with every definedness predicate on it
-   unsat. Any other ending (a budget such as `maxLoopUnwind`, a query
-   timeout, a predicate over a free symbol the witness does not bind, a
-   decline marker) counts as undefined. `symexFindAllWitnesses` runs one
-   continuation per witness.
+   follows. The gate: a scan, transitive over the entry's walked callees
+   (`parsed.procs`, `symex.nim:4461`), for any op whose definedness row is
+   *undefined* on this profile; any call not walked by body (opaque,
+   `importc`, a closure value, `method`, a magic not admitted as walked)
+   answers "may be undefined". It reuses `scanOpaqueDefects`
+   (`dsl_parser.nim:4093-4170`, which already recurses into callee ASTs and
+   fails closed at `maxDefectScanDepth`) with a definedness predicate. When
+   the gate is on, the winner is continued from the label with the engine's
+   concrete-follow mode (`wmFollowConcrete` with the model as `concreteEq`,
+   `runtime.nim:25728-25731`), ignoring `shouldStop`. It must reach a routine
+   exit with `concretelyInfeasible` (`:19793`) true for every undefined side
+   on the way. A decline, a budget (`beBudgetExhausted`, `:20952`), or a side
+   `concretelyInfeasible` cannot decide counts as undefined.
+   `symexFindAllWitnesses` runs one continuation per finding.
 4. **The verdict carries it, and replay cannot lift it.** `Soundness` gains
-   `witnessUndefined: bool`, cached with the verdict (it is a function of the
-   program and the profile). `trustedSat` (`soundness.nim:163-169`) becomes
-   `(today's rule) and not witnessUndefined`, so a native replay that reaches
-   the label on this build cannot make the verdict `trusted()` through
-   `settleWinner` (`symex.nim:3387-3407`). The `{.noinit.}` read (below) sets
-   the same field.
+   `witnessUndefined: set[UbKind]` (`{}` means defined), cached with the
+   verdict as a fixed field (`encodeSoundness`, `symex.nim:345-350`, version 4:
+   six fixed fields and the optional seventh, the static pin at `:320-333`
+   extended). `trustedSat` (`soundness.nim:162-169`) and `hostRunnable` both
+   require it empty: a native replay that reaches the label cannot make the
+   verdict `trusted()`, and neither `symexForAll` (`symex.nim:1121`) nor
+   `assertCoveredBy` runs such a witness in the host, where its outcome is one
+   compiler's choice. `cacheable` is unchanged. The unconfirmed-claim message
+   says "undefined behaviour" (`feWitnessUndefined` hint), not "lossy
+   witness". `SymexFinding` projects it the way `gaps` is projected to
+   `FindingGap`.
 5. **Undefined behaviour is a target, not a status.** `stkUndefined`
-   (`tUndefined(classes: set[UbClass] = all)`), beside `stkNilAccess`
-   (`types.nim:1862`). `sxSat` comes with a witness; `sxUnsat` means none of
-   the *listed* classes is reachable, never "no undefined behaviour", and
-   `$target` (`symex.nim:217`) renders the list. The result gains
-   `undefined*: seq[UbFinding[T]]` (class, source anchor, witness), and an
+   (`tUndefined(kinds: set[UbKind] = all)`), beside `stkNilAccess`
+   (`types.nim:1862`). `UbKind`, not "class": class is the lattice's word
+   (`classOf`, `DegradeClass`). The taxonomy lives in `UbKind`, so
+   `ubUndefinedBehaviour` stays the one `SymexErrorKind` of its family.
+   `sxSat` comes with a witness; `sxUnsat` means none of the *listed* kinds is
+   reachable, never "no undefined behaviour", and `describeTarget`
+   (`symex.nim:216`) renders the list. The result gains
+   `undefined*: seq[UbFinding[T]]` (kind, source anchor, witness), and an
    undefined behaviour reached under any other target is listed there, not
    in `diagnostics`, which is typed for raised Defects. A halt under another
-   target names `tUndefined` as the next query in its message. No
-   `SymexStatusKind` member is added; `SymexTargetKind` grows, so a
-   consumer's `case` on it without `else` is a 0.10.0 break, in the migration
-   note.
+   target names `tUndefined` as the next query. No `SymexStatusKind` member is
+   added; `SymexTargetKind` grows, which breaks every `case` on it without
+   `else`: in-tree, `replayInScope` (`symex.nim:2343`), `wireTarget`/
+   `unwireTarget` (`:2923-2943`) and the `bindSym` splices (`:3630`,
+   `:3980-4024`, `:4212`, `:4246`); outside, any consumer's, listed in the
+   0.10.0 migration note.
 6. **Replay does not run a `tUndefined` witness** (refused by target kind).
    `assertCoveredBy` never executes one in the host; its splat catches
    `Defect` regardless (W-26). `symexForAll` does not seed one unless asked.
 7. **The native pin is UBSan**: `-fsanitize=undefined
    -fno-sanitize-recover`, gcc/clang, Linux (CI-A). MSVC has no UBSan and
    mingw's is unsupported, so the Windows legs carry declared
-   `out-of-scope(no sanitizer)` cells for these rows; the unsigned-zero-divisor
+   `never(no sanitizer)` cells for these rows; the unsigned-zero-divisor
    crash pin asserts "the child did not finish" rather than a signal, since
    Windows reports an SEH code.
 8. **`arithChecks` is removed in 0.10.0** (with `fromCache`, INT-39): the
-   checks are a fact of the build. A consumer who later wants "assume no
-   undefined behaviour" gets an `assumptions: set[VerdictAssumption]` field
-   on `Soundness`, rendered on the finding and keyed; not in 0.10.0.
+   checks are a fact of the build, and Nim's answer is the build's alone
+   (with `optOverflowCheck` on, `div`/`mod` get the zero check and
+   `nimDivInt`'s `low(T) / -1` check, `ccgexprs.nim:595-617`; with it off,
+   plain C operators). Until then, from W1-c1, the wrap model
+   (`currentArithWraps`, `runtime.nim:28471`) is derived from the build's
+   check options, and an `arithChecks` that disagrees with the build is
+   warned by `warnIncoherentSettings` (`symex.nim:3532`) and taints every
+   path it touches with `feCheckOption`: a decline, not a refusal, so 0.9.2
+   breaks no caller that sets it. A consumer who later wants "assume no
+   undefined behaviour" gets an `assumptions` field on `Soundness`, rendered
+   and keyed; not in 0.10.0.
 
 **Float to int out of range** moves to the halt. Today it is a tainted fresh
 symbol (`feConvFloatToIntUndefined`, `dcFreshSymbol`,
@@ -1227,14 +1366,22 @@ change.
 indeterminate value, and the walker already models it soundly as havoc
 (`runtime.nim:9226-9240`), so an `sxUnsat` stays trusted. The defect is that
 replay *confirmed* a witness that needed garbage memory (W-13). The fix is
-item 4's field, set on any path that read one; its native pin is
-MemorySanitizer or valgrind, since UBSan does not detect it.
+item 4's field with `ubIndeterminateRead`. In Wave 1 it is run-level and
+fail-closed: `noinitValue` records a distinct kind `feNoinitRead`, and every
+`sxSat`/`sxRaised` of a run that recorded it gets
+`witnessUndefined = {ubIndeterminateRead}` (`degrade` records run-globally,
+`:16649`, so the winner's path cannot be told apart yet). Per-path precision,
+a `Path` field carried by every taint carrier with its own pin in the S1
+lattice test, is a K10 item. Its native pin is MemorySanitizer or valgrind,
+since UBSan does not detect it.
 
 **Wave 1 (0.9.2) ships the fail-closed half** before the table exists (§11
 W1-d1, W1-d2, W1-d3): the zero side of an unsigned divisor and the
-`INT_MIN mod -1` side halt (the nonzero side stays exact); a checks-off
-signed op declines; the `{.noinit.}` field. K10 in 0.10.0 restores the
-defined side of signed arithmetic under a declared wrap and adds the target.
+`INT_MIN mod -1` side halt through an inline degrade-and-drop (K7's `halted`
+does not exist yet; the nonzero side stays exact); a checks-off signed op
+declines on both routes (the push marker and the setting); the run-level
+`{.noinit.}` field. K10 in 0.10.0 restores the defined side of signed
+arithmetic under `-d:nelliFwrapv` and adds the target.
 
 ## §10 — The oracle is part of the universe
 
@@ -1276,125 +1423,159 @@ has to be right too.
   reader is a K8a dependency.
 - **Triage has a sink.** The nightly job uploads `findings/<date>.tsv` and
   the shrunk `.nim` files as an artifact and opens or updates one issue per
-  new shape hash. Within the week each issue becomes an `F-NNNN` row with its
-  three-way probe (§6).
+  new shape hash, labelled `rfc-0016-intake`. It also checks out the last
+  release tag and fills the release column of the three-way row itself, and
+  writes a dated heartbeat into the artifact. Each wave's integration slice
+  checks that no `rfc-0016-intake` issue is older than seven days without an
+  F row, and that the heartbeat is under seven days old (§6, §11).
 
 ## §11 — Slices and order
 
 Each row is a slice within about three modules; a row marked *round* flips
 verdicts broadly and is gated by a pinned sweep baseline from a worktree at
-its base sha (`sweep.sh` + `sweep-diff.sh`), not by its own tests.
+its base sha (`sweep.sh` + `sweep-diff.sh`), not by its own tests. Every new
+test file a slice adds is registered in `nelli.nimble`'s `test` task in the
+same slice; otherwise symex-mingw's derived corpus (`derive-ci-suites.ps1:18-19`)
+never sees it.
 
-**Wave 1 — 0.9.2: the seven clean false verdicts.** The walker version is
-bumped in the first semantics-bearing slice (W1-a) so no intermediate sha
-serves a stale cache; later Wave-1 slices take floors above it and W1-z
-assigns the final number. Every pin goes through `symexFind` or
-`assertCoveredBy` and runs its witness natively, through K9a.
+**Releases.** Wave 1 ships as 0.9.2. Waves 2 and 3 ship together as 0.10.0
+(`feUnadmitted`, the K3/K4/K7b verdict flips, the `cacheSegment` cold start
+and the removal of `arithChecks` are breaks). Wave 4 ships in 0.10.x patches,
+except that a *round* slice ships in a minor.
+
+**Wave 1 — 0.9.2: the seven clean false verdicts, plus W-20, W-21, W-26,
+W-31 and W-33.** In order: K9a, W1-c3, W1-a, W1-c1, W1-c2, then W1-b, W1-e,
+W1-f and W1-g in any order, W1-d1, W1-d3, INF-05, W1-m, W1-d2 last, W1-z.
+The walker version is bumped in the first semantics-bearing slice (W1-a) so
+no intermediate sha serves a stale cache; later slices take floors above it
+and W1-z assigns the final number. Every pin goes through `symexFind` or
+`assertCoveredBy` and runs its witness natively, through K9a. None goes
+through `symexForAll` or the concolic path; those entry points get their
+first pins in Wave 4. Each new decline names its `SymexErrorKind` in the RED,
+and its message points at a section of `docs/symex/README.md`, not at an RFC
+id.
 
 | id | scope | modules | RED test (default build: c, orc, goto, checks on, unless stated) | size |
 |---|---|---|---|---|
-| K9a | the pin helper and pin records (§8.4); the 35 `nativeHits` copies are migrated later (K9b) | `tests/s8cu_helpers.nim` | the helper itself: a planted wrong `exact` pin fails | s |
-| W1-a | `typeIdOf`; W-01, W-33; first walker bump | `dsl_parser.nim` (:20461, :20444) | `try: (if k==3: raise newException(ValueError,"x")) except ValueError as e: symexTarget("h")`: `tLabel("h")` `sxSat` (today `sxUnsat`), native hit at 3; `tRaisedExn("ValueError")` `sxUnsat` (today `sxRaised`). `let e = newException(ValueError,"x"); raise e` is `sxRaised ValueError`; `raise ex` with `ex: ref Exception` a parameter declines `eeUnknownExnType` | s |
-| W1-b | local-pragma allowlist (`noinit`, `global`); every other local pragma declines (W-02) | `dsl_parser.nim:19771` | `gs = @[k]; var c {.cursor.} = gs; gs[0] = 9; if c[0] == 9: symexTarget("shared")` and its `let` twin: `sxUnknown`, kind names `cursor` (today a trusted false pair, c/orc, c/arc release, cpp); `{.noinit.}`/`{.global.}` SUTs unchanged | s |
-| W1-c1 | `buildprofile.nim` const; reroute `symex.nim:2343` and `canonicalize.nim:6537`; refc refused by name (D-0016-7); constructor-only pin | `buildprofile.nim` (new), `symex.nim`, `canonicalize.nim` | `defined(nimPanics)` occurs in `src/nelli` only in `buildprofile.nim`; a `--mm:refc` compile of a `symexFind` SUT fails naming the field; no verdict change (sweep-diff empty) | xs |
-| W1-c2 | under panics a Defect is the S8cu `crash: true` escape (W-03, INT-27) | `runtime.nim` (`routeRaise` :25666, drains :19186, :23574), `tsymex_0016_panics.nim` + `.nim.cfg` `--panics:on` (the suite's first panics row) | `try: discard v+1 except Defect: symexTarget("h")`: `tLabel("h")` `sxUnsat`, `tRaisedExn("OverflowDefect")` not `sxRaised` (today both clean); native: a spawned child does not finish (the `s8cu_nil_native` shape) | s |
-| W1-c3 | `assertCoveredBy` splat catches `Defect` (W-26) | `symex.nim:4106-4117` | `symexTarget("hit"); discard v + 1` with a `high(int)` witness: reported, host alive (today the process dies) | xs |
-| W1-d1 | unsigned zero divisor and `INT_MIN mod -1` halt, feasibility-checked (§9.1 item 2); `ubUndefinedBehaviour` kind | `runtime.nim` (:8862, the `divByZeroConds` drain :19026), `dsl_parser.nim:4152`, `types.nim` (+ lattice test); rewrites the trap pins in `s8aa_remainder`, `s8i_models` | `if x == low(int): (let q = x mod -1; if q == 0: symexTarget("t"))` not a trusted `sxUnsat` (today trusted; native hit). `let r = 10'u64 div uint64(k)`: `tRaisedExn("DivByZeroDefect")` not `sxRaised`; with `except DivByZeroDefect: symexTarget("c")` not a trusted `sxSat`; `r == 5` at `k == 2` stays `sxSat`; `if k != 0: …div…` keeps a trusted `sxUnsat` where one is right; native child does not finish | s-m |
-| W1-d2 | checks-off signed op declines: delete the early return at `runtime.nim:24500-24502` (W-07) | `runtime.nim`; rewrites the wrap pins in the 13 files that opt `acOverflow` out | `{.push overflowChecks: off.}` `if v+1 > v: discard else: symexTarget("hit")`: not a trusted `sxSat` (today clean `sxSat` at `high(int)`; gcc folds it away) | s |
-| W1-d3 | `Soundness.witnessUndefined`; set by a `{.noinit.}` read (W-13); cache-format bump (`soundnessMetaVersion`, `symex.nim:268`) | `soundness.nim`, `runtime.nim:9226`, `symex.nim` settle | `var x {.noinit.}: int; if x == 0: symexTarget("z")`: not `trusted()` on c, cpp and arc release alike (today build-dependent) | s-m |
-| W1-e | float width conversions decline (W-04) | `dsl_parser.nim` :10658, :10845 (and :4126 if it shares the path) | `let y = float32(x); if float64(y) == x: symexTarget("same")` and a hidden-conversion twin: `sxUnknown` with a conversion kind (today clean verdicts); int↔float verdicts unchanged | s |
-| W1-f | object field defaults decline (W-20); `case` with `elif` (W-21) | `dsl_typebridge.nim` field walks (:646-650, the plain-record twin, tuple :1350-1356); `dsl_parser.nim` :19300, :12789, :5821 | `type O = object; x: int = 5`, `var o: O; if o.x == 5: symexTarget("h")` compiles and declines (today a compile stop); `case x of 1: … elif x > 5: symexTarget("big") else: …` in statement, expression and `hoistCaseExpr` forms: `sxSat`, native 6 | xs-s |
-| W1-g | `x in a..b` / `notin` (W-31) | `dsl_parser.nim:11070` | `if x in 0 .. 10 and x == 7: symexTarget("t")` `sxSat`, native 7; `notin`, `char` and enum slices | s |
-| W1-z | integration: final walker number, CR2 pin, three-way rows (0.9.1 / head / native) for every W1 row, `docs/migration/0.9.2.md` (the bump, the new kind, the new declines, the known-gap list §2.4 requires) | `canonicalize.nim:251`, CR2 test, docs | — | s |
+| K9a | the pin helpers, `pinCrash`, the record writer and its reader `pinRecords` (§8.4); `key` is a `static string` until ADM-1; the record's build segment is rendered from `defined()` arms until W1-c1 swaps in the const; the 35 `nativeHits` copies migrate later (K9b) | `tests/s8cu_helpers.nim`, `symex.nim` (export `emitWitnessSplat`) | a planted wrong `exact` pin fails, and its record read back through `pinRecords` round-trips every field | s |
+| W1-c3 | `assertCoveredBy` splat catches `Defect` (W-26); every later in-host Defect witness needs it | `symex.nim:4080-4117` | `symexTarget("hit"); discard v + 1` with a `high(int)` witness: reported, host alive (today the process dies); holds on a panics-off build only (under `--panics:on` the host cannot catch it, W1-c2) | xs |
+| W1-a | `typeIdOf` through `canonicalExnTypeSym` (`:1488`); W-01, W-33; first walker bump | `dsl_parser.nim` (:20444, :20461) | `try: (if k==3: raise newException(ValueError,"x")) except ValueError as e: symexTarget("h")`: `tLabel("h")` `sxSat` (today `sxUnsat`), native hit at 3; `tRaisedExn("ValueError")` `sxUnsat` (today `sxRaised`). `let e = newException(ValueError,"x"); raise e` is `sxRaised ValueError`; `raise ex` with `ex: ref Exception` a parameter declines `eeUnknownExnType` | s |
+| W1-c1 | `buildprofile.nim` const, absorbing `buildChecksOn`, `buildMemModel`, `buildBackend`, `buildExceptions` (`canonicalize.nim:6549-6595`) and `check_options.nim:113-120`; reroute `symex.nim:2343` and `canonicalize.nim:6537`; refc refused by name (D-0016-7) | `buildprofile.nim` (new), `symex.nim`, `canonicalize.nim` | `defined(nimPanics)` and `compileOption(` occur in `src/nelli` only in `buildprofile.nim`; a `--mm:refc` compile of a `symexFind` SUT fails naming the field (`pinCrash`); no verdict change (sweep-diff empty) | s |
+| W1-c2 | under panics a Defect is the S8cu `crash: true` escape (W-03, INT-27): `routeRaise` tests defect-ness before the handler search; a `raise` of an unknown-typed `ref Exception` under any `try` declines instead of warning; `hostRunnable` is false for an `isDefect` claim | `runtime.nim` (`routeRaise` :25666, :25733-25735, :25847, drains :19186, :23574), `symex.nim` (`hostRunnable`), `tsymex_0016_panics.nim` + `.nim.cfg` `--panics:on` (the suite's first panics row; `symexFind` and K9a pins only, since `SymexCoverageDefect` is fatal there) | `try: discard v+1 except Defect: symexTarget("h")`: `tLabel("h")` `sxUnsat`, `tRaisedExn("OverflowDefect")` not `sxRaised` (today both clean); native: `pinCrash`, the child does not finish | s |
+| W1-b | local-pragma allowlist (`noinit`, `global`); every other local pragma declines `feLocalPragma` (W-02) | `dsl_parser.nim:19771-19792` | `gs = @[k]; var c {.cursor.} = gs; gs[0] = 9; if c[0] == 9: symexTarget("shared")` and its `let` twin: `sxUnknown` with `feLocalPragma` naming `cursor` (today a trusted false pair, c/orc, c/arc release, cpp); `{.noinit.}`/`{.global.}` SUTs unchanged | s |
+| W1-e | float width conversions decline `feFloatWidth` (W-04) | `dsl_parser.nim` :10658, :10845 | `let y = float32(x); if float64(y) == x: symexTarget("same")` and a hidden-conversion twin: `sxUnknown` with `feFloatWidth` (today clean verdicts); int↔float verdicts unchanged | s |
+| W1-f | object field defaults decline (W-20); `case` with `elif` (W-21) | `dsl_typebridge.nim` field walks (:646-650, the plain-record twin, tuple :1350-1356); `dsl_parser.nim` `case` sites :19259-19300 (statement), :10366 (expression), :5747-5821 (`hoistCaseExpr`) | `type O = object; x: int = 5`, `var o: O; if o.x == 5: symexTarget("h")` compiles and declines with a named kind (today a compile stop or a silent zero; the RED tells which); `case x of 1: … elif x > 5: symexTarget("big") else: …` in all three forms: `sxSat`, native 6 | xs-s |
+| W1-g | `x in a..b` / `notin` (W-31), in the infix list and, after template expansion, the `DotExpr` arm | `dsl_parser.nim:11070` | `if x in 0 .. 10 and x == 7: symexTarget("t")` `sxSat`, native 7; `notin`, `char` and enum slices | s |
+| W1-d1 | unsigned zero divisor and `INT_MIN mod -1` halt (§9.1 item 2): the undefined side is a terminal path at the op, decided at the raise boundary, unsat sides logged as prune facts; the sink is ungated; the halt is an inline degrade-and-drop until K7; `ubUndefinedBehaviour` kind and the `UbKind` enum | `runtime.nim` (:8862, the `divByZeroConds` drain :19026, `routeRaise`), `dsl_parser.nim:4152`, `types.nim` (+ lattice test); rewrites the trap pins in `s8aa_remainder`, `s8i_models` | `if x == low(int): (let q = x mod -1; if q == 0: symexTarget("t"))` not a trusted `sxUnsat` (today trusted; native hit). `let r = 10'u64 div uint64(k)`: `tRaisedExn("DivByZeroDefect")` not `sxRaised`; with `except DivByZeroDefect: symexTarget("c")` not a trusted `sxSat`; `r == 5` at `k == 2` stays `sxSat`; `if k != 0: …div…` keeps a trusted `sxUnsat`; a callee holding the division, called twice under contexts where only the second admits zero, is not a trusted `sxUnsat` (the call-cache prune fact); native: `pinCrash`, the child does not finish | s-m |
+| W1-d3 | `Soundness.witnessUndefined: set[UbKind]`, run-level: `noinitValue` records `feNoinitRead` and every `sxSat`/`sxRaised` of the run gets `{ubIndeterminateRead}` (W-13); `trustedSat` and `hostRunnable` require it empty; cache format version 4 with six fixed fields (`soundnessMetaVersion`, `symex.nim:268`; codec `:345-370`; static pin `:320-333`) | `soundness.nim`, `runtime.nim:9226`, `symex.nim` | `var x {.noinit.}: int; if x == 0: symexTarget("z")` with the slot forced to zero: `replay == rsConfirmed and not trusted()`, not host-run by `assertCoveredBy` (today build-dependent and trusted where the garbage is zero); a version-3 cache record decodes as a miss | s-m |
+| INF-05 | Z3 4.13.4 tooling: `Containerfile.z3-4.13.4` and an image flag on `dt-bounded.sh` and `sweep.sh` (RFC-0005's 4.13.4 sweep ran off an unversioned scratchpad script) | `Containerfile.z3-4.13.4` (new), `scripts/dt-bounded.sh`, `scripts/sweep.sh` | `sweep.sh --image z3-4.13.4` runs one file and its log names Z3 4.13.4 | xs-s |
+| W1-m | the walker on MSVC before 0.9.2: a `fuzzer-msvc` step compiles and runs every `tsymex_0016_*` file with `--cc:vcc` against the installed Z3 4.13.4 (round 2 made MSVC a shipping build; today `fuzzer-msvc` runs one walker suite, `s8ab_letaudit`, `fuzzer-msvc.yaml:344`) | `.github/workflows/fuzzer-msvc.yaml` | the step fails on a planted red `tsymex_0016_*` file, shown by its run URL; the step's own log names `vcc` | s |
+| W1-d2 | checks-off signed op declines on both routes (W-07): delete the push-marker early return (`runtime.nim:24500-24502`), derive `currentArithWraps` (`:28471`) from the build's check options, and make the settings route (`:8881-8897`, the `some(acOverflow)` gate at `:19032`) and the gated drains (`:18879-18880`, `:19006`) taint with `feCheckOption` when `arithChecks` disagrees with the build, instead of continuing clean | `runtime.nim`, `symex.nim` (`warnIncoherentSettings` :3532); rewrites the opt-out pins in the 13 verdict-bearing files of the 19 that name `arithChecks` (listed in the handoff) | `{.push overflowChecks: off.}` `if v+1 > v: discard else: symexTarget("hit")`: not a trusted `sxSat` (today clean `sxSat` at `high(int)`; gcc folds it away); the same SUT with `arithChecks = {acDivByZero}` and no push: not a trusted `sxSat`; `10'u64 div k` with `acDivByZero` excluded: not trusted | *round*, s-m |
+| W1-z | integration: final walker number, CR2 pin, three-way rows (0.9.1 / head / native) for every W1 row; `docs/migration/0.9.2.md` with the bump, the new kinds, the new declines, the §2.4 known-gap list and a **Compile breaks** section (`ubUndefinedBehaviour`, `feLocalPragma`, `feFloatWidth`, `feNoinitRead`, `UbKind`, `Soundness.witnessUndefined`, the `soundnessMetaVersion` cold start, `--mm:refc` now an error); `docs/symex/README.md`'s decline catalogue (`:381-395`) rewritten for the new declines; UPS-01 and UPS-03 filed with their URLs in §5.6; RFC-0017 records MOVE-0017's items | `canonicalize.nim:251`, CR2 test, docs | §5.6 holds two issue URLs; RFC-0017 names N20, OQ1, CRH-03, `maxLoopUnwind`, #138 and the caps; the README lists every Wave-1 kind | s |
 
 **0.9.2's gate.** CI-A does not exist yet, so the release is gated by
-`sweep.sh` on c, cpp and Z3 4.13.4 from a worktree pinned to the W1-z sha,
-diffed against a 0.9.1 baseline from a worktree at its own sha (every flip is
-either a Wave-1 row or accepted in the migration note), plus the three
-Windows legs green at that sha, then `/wiring-audit` and `/code-review` to
-floor before the tag. W-32's five syntax declines (research A-06) are
-precision, not one of the seven, and move to Wave 4.
+`sweep.sh` on c, `sweep.sh -b cpp`, and `sweep.sh --image z3-4.13.4` (INF-05),
+all from a worktree pinned to the W1-z sha, each diffed against a 0.9.1
+baseline from a worktree at the 0.9.1 tag (every flip is a Wave-1 row or
+accepted in the migration note). The three 0.9.1 baseline logs are kept on
+eos and named in the handoff; §12 item 5 reads them. Then the three Windows
+legs and the W1-m step green at that sha, then `/wiring-audit` and
+`/code-review` to floor. Then publication: `nelli.nimble` to 0.9.2 (milpa
+refuses a tag that does not match the version), a `workflow_dispatch` dry run
+of `tianguis-publish.yaml`, the `v0.9.2` tag pushed, and the registry entry
+checked. W-32's five syntax declines (research A-06) are precision, not one
+of the seven, and move to Wave 4.
 
 **Wave 2 — the enforcing substrate, live from its first commit.**
 
 | id | scope | depends | size |
 |---|---|---|---|
-| CI-A | `symex-linux` on every push: the `2.2.10-linux-x64` Nim artifact (verify it is published first), Z3 5.1 from its release archive with `LD_LIBRARY_PATH`, PCRE 8.45 from source (cached; Ubuntu's 8.39 is unverified), a derive mode for the whole `test` task (F-06), a portable suite runner, and a committed known-red allowlist from one baseline run on the Ubuntu toolchain | — | m-l |
-| CI-B | the same workflow on `schedule:` and `workflow_dispatch`: cpp, Z3 4.13.4 on Linux, and `symex-msvc` (c, vcc); a red run opens or updates an issue; required at every wave integration and tag | CI-A | s-m |
-| K9b | migrate the 35 `nativeHits` copies and the `declines` templates that already name a kind | K9a | s |
-| ADM-1 | `smt/admission.nim`, `feUnadmitted` (`dcNoAnswer`); `varParamMagics` and `verifiedLibs` moved onto it with no verdict change (the second-consumer spike, §8.1) | — | s-m |
-| K1a | universe test and post-shard job; axes: error kinds, the ADM-1 tables, build rows; the §5/F join; per-axis ratchet; planted RED on each leg | ADM-1, K9a, CI-A | m |
-| K7a | `halt`; the 20 `discard w.degrade(` sites | — | s |
+| CI-A | `symex-linux` on every push: the `2.2.10-linux-x64` Nim artifact (verify it is published first), Z3 5.1 from its release archive with `LD_LIBRARY_PATH`, PCRE 8.45 from source (cached; Ubuntu's 8.39 is unverified), a derive mode for the whole `test` task (W-59), a portable suite runner that writes `<log>.summary` in `sweep.sh:277-294`'s shape (§12 item 6), and a committed known-red allowlist from one baseline run on the Ubuntu toolchain | — | m-l |
+| CI-B | the same workflow on `schedule:` and on `workflow_dispatch` with a `ref` input (a schedule runs `main` only): cpp, Z3 4.13.4 on Linux, `symex-msvc` (c, vcc) absorbing W1-m; baseline logs kept as artifacts with `sweep-diff.sh` run in CI (CI-C, W-60) and the 60 s ceiling enforced (CI-D, W-60); a red run opens or updates an issue labelled `rfc-0016-intake`. W-63's JIT PCRE row closes against the Windows legs, which are the JIT rows (PRC-27) | CI-A | m |
+| K9b | migrate the 35 `nativeHits` copies and the `declines` templates that already name a kind; retype `key` to `CellKey` | K9a, ADM-1 | s |
+| ADM-1 | `smt/admission.nim`, `feUnadmitted` (`dcNoAnswer`); `varParamMagics` and `verifiedLibs` (as `admitPcreLib`) moved onto it with no verdict change (the second-consumer spike, §8.1) | — | s-m |
+| K1a-test | `tsymex_0016_universe.nim` (registered): axes of ADM-1, the build rows, the error-kind derivation; the §5/F `cell:` join with the open-state vocabulary; allowlists under `tests/0016-allowlist/`; `sweep.sh` runs it last over the sweep's record directory | ADM-1, K9b | m |
+| K1a-ci | post-shard join on each leg: record upload steps and a join job in `symex-mingw.yaml`, the CI-A workflow and CI-B's; planted RED shown on each leg by run URL | K1a-test, CI-B | s-m |
+| K7a | `halted`, `surviving`, `admittedExact`; the 20 `discard w.degrade(` sites in their four shapes (§8.4) | — | s |
 | K7b | `walkUnsupported(…): Survivors`; `feUnadmitted` to `dcOmitted`; W-11, W-16 | K7a, ADM-1 | s |
-| INT-33 | `annotationViolations` gets its reader (K8a's second source) | — | s |
-| K8a | fuzzer skeleton with one family (the §5.0 construct shapes), boundary domains, a scheduled Linux job rotating one build row per night, the triage sink of §10 | K9a, CI-A, INT-33 | m |
+| K8-0 | `annotationViolations` gets its reader (INT-33; K8a's second source) | — | s |
+| K8a | fuzzer skeleton with one family (the §5.0 construct shapes), boundary domains, a scheduled Linux job rotating one build row per night with a `workflow_dispatch` `ref` input, a last-tag checkout that fills the three-way release column, a dated heartbeat, and the triage sink of §10 | K9a, CI-A, K8-0 | m |
 | S8cj | carried: thread-history spend; Z3 mk_unique (D-0016-3 waits on it for UPS-02) | — | m |
+| W2-z | integration: CI-B and K8a dispatched at the integration sha and green, run URLs in the handoff; no `rfc-0016-intake` issue older than seven days without an F row; the K8a heartbeat under seven days old | all of Wave 2 | xs |
 
 **Wave 3 — the tables.** Each introduces its axis under §8.2's rule, adds its
 fuzzer family, and shrinks its allowlist.
 
 | id | scope | depends | size |
 |---|---|---|---|
-| K2a | dispatch census over every `case n.kind` in `src/nelli`; site registration | K1a | s |
+| K2a | dispatch census over every `case n.kind` in `src/nelli`; per-axis site enums instantiated once; the `skip(` and platform-arm sites without a `cell:` reason; `Degrade` construction sites | K1a-test | s |
 | K2b | float width conversions exact (`fp.to_fp`, RNE) | K2a | s-m |
-| K2c | child-shape census corpus (includes CRH-01's `classifyType` stops) | K2a | m |
-| K3a | type × memory-op axis under `typeCopiedByValue` and `holdsSharedMemory` (*round*) | ADM-1, K1a | m |
+| K2c | child-shape census corpus (includes CRH-01's remaining `classifyType` stops) | K2a | m |
+| K3a | type × memory-op axis under `typeCopiedByValue` and `holdsSharedMemory` (*round*) | ADM-1, K1a-test | m |
 | K3b | object field defaults exact (`wasMoved` stays bitwise zero) | K3a | m |
-| K4a | magic axis, generated `dispatchMagic`, lib-wide guard | ADM-1 | m |
+| K4a | magic axis, generated `dispatchMagic` per site, lib-wide guard | ADM-1 | m |
 | K4b | an unadmitted bodied magic declines (*round*) | K4a | m |
 | K4c | stdlib-body axis with check-option deltas (*round*) | K4a | m |
-| K5a | full `BuildProfile`; `cacheSegment` with golden strings; readers migrated with no verdict change (INT-31's `\|bf=` half) | W1-c1 | m |
-| K5b | refusals (32-bit, unverified Z3/Nim/PCRE, arm64, macOS); `-d:nelliFwrapv` declared wrap; cfg suites for `--mm`, `-d:useMalloc`, setjmp, `-d:release` (W-58) | K5a | s-m |
+| K5a | full `BuildProfile` (`BuildSemantics` / `BuildProvenance`); `cacheSegment`; one golden segment per run leg in the CR2 test, selected by `defined(cpp)`, `defined(vcc)` and the Z3 version; readers migrated with no verdict change (INT-31's `\|bf=` half) | W1-c1 | m |
+| K5b | refusals (32-bit, unverified Z3/Nim/PCRE, arm64, macOS); `-d:nelliFwrapv` producing `-fwrapv` (§8.3), refused under `vcc`; cfg suites for `--mm`, `-d:useMalloc`, setjmp, `-d:release` (W-58) | K5a | s-m |
 | K6a/b/c | `mayWrite` into `nodeWritesHeap`, the hook copy-proof, then `ptrUsesStayLocal`/`routeStoresThroughDeref` (*round* each) | ADM-1 | m each |
-| K10a | the definedness axis; `stkUndefined`, `UbFinding`; replay refusal by target kind; float-to-int to the halt | K5a, K7b | m |
-| K10b | whole-run definedness continuation (§9.1 item 3) | K10a, W1-d3 | m |
+| K10a | the definedness axis; `stkUndefined`, `UbFinding`, the `FindingUndefined` projection; replay refusal by target kind; float-to-int to the halt; the concolic flip solve carries the definedness disjunction (its outputs are otherwise only fuzzer inputs, executed natively) | K5a, K7b | m |
+| K10b | whole-run definedness continuation by concrete follow (§9.1 item 3); per-path `{.noinit.}` precision | K10a, W1-d3 | m |
 | K10c | UBSan pin suite (Linux); declared Windows cells | K10a, CI-A | s |
-| K10d | `arithChecks` removed; `docs/migration/0.10.0.md` (`fromCache` INT-39, `arithChecks`, `SymexErrorKind` deletions and additions, `stkUndefined`, `Soundness.profile` and `witnessUndefined`, the second cache cold start from `cacheSegment`) | K10a, K5a | s |
+| K10d | `arithChecks` removed; `docs/migration/0.10.0.md` (`fromCache` INT-39, `arithChecks`, `SymexErrorKind` deletions and additions, `stkUndefined` and the `case` sites it breaks, `Soundness.buildSegment`, the second cache cold start from `cacheSegment`) | K10a, K5a | s |
 | PRC-01/02 | Windows re-exec replay: marshal case-object, `ptr`/`ref`, proc-value, `method` and `{.global.}` witnesses (the first precision item; consumers' main platform) | — | m, m |
+| W3-z | integration, as W2-z, plus the 0.10.0 publication steps of 0.9.2's gate | all of Wave 3 | xs |
 
-**Wave 4 — the search, then the tail.** Fuzzer families per axis; the
-pairwise figure; the VM column; witness round-trip pins; the allowlists
-emptied. Then the tail: the 132 decline assertions with no kind (each kind
-found by running it), pins for the 481 verdict suites with no native idiom
-(generated by family where the SUT is a pure proc), W-32, and the precision
-rows of §5 and §5.9 in the frequency order of the research list.
+**Wave 4 — the search, then the tail.**
+
+| id | scope | depends | size |
+|---|---|---|---|
+| K8b | fuzzer families per axis; the pairwise figure with its floor committed in `tests/0016-pairwise.floor` and read by the nightly job; cells-exercised records | K8a, Wave 3 | m-l |
+| K8c | the walker under sanitizers: a scheduled job runs a slice of the corpus with nelli built under ASan, since a use-after-free in a Z3 AST can produce a wrong verdict, not only a crash (CRH-07) | CI-B | s |
+| K7c | every `walkStmt` arm returns `Survivors` (§8.4) | K7b | m |
+| K9c | the 132 decline assertions with no kind: each kind found by running it (W-56) | K9b | m |
+| K9d | pins for the 481 verdict suites with no native idiom, generated by family where the SUT is a pure proc; first pins through `symexForAll` and the concolic path (W-54) | K9b | l |
+| W-32 and the precision rows | §5 and §5.9 precision rows in the research list's frequency order; the VM column; witness round-trip pins | — | per row |
+| W4-z | the allowlists emptied; §12 checked item by item | all | s |
 
 **Carried slices.** The pending `[[slice]]` rows from RFC-0005 map here:
 S8cj to Wave 2 (above); `rv0005-lows` loses INT-31 (K5a, and its `;impl=`
-half stays with the row) and INT-33 (Wave 2) and keeps the rest for Wave 4;
+half stays with the row) and INT-33 (K8-0) and keeps the rest for Wave 4;
 S8ck-r (nim-z3 hygiene, INF-04), S8cg, S8ch, S8ci, S8co and S8cp-r are Wave 4.
-UPS-01 and UPS-03 are filed by the coordinator before W1-z and their URLs
-recorded in §5.6.
-
-**The walker under sanitizers.** A scheduled job runs a slice of the corpus
-with nelli itself built under ASan: a use-after-free in a Z3 AST can produce a
-wrong verdict, not only a crash (CRH-07).
+INF-04's item 10 ("do not file") is superseded by D-0016-3: UPS-03 is filed
+in W1-z.
 
 ## §12 — The finish line
 
 Decision D-0016-1 closes the RFC when the work list is empty. This section is
-how "empty" is measured, so that it is a test result and not an opinion:
+how "empty" is measured, so that it is a test result and not an opinion. Each
+item names the slice that produces it.
 
-1. `tsymex_0016_universe` is green with **every axis's allowlist empty** on
-   every build row with a run leg (Linux c, Linux cpp, Z3 5.1 and 4.13.4,
-   mingw, MSVC): no unclassified cell; every `exact` cell has a pin record
-   from a public entry point on each row it claims (`rows` is never empty);
-   every `declined` cell's pin asserts its kind; `sampled` unsat cells counted
-   separately from exhaustive ones.
-2. Every open id in §5, §5.9 and the handoff's F ledger is named by a cell
-   that is `exact`, `declined` or `out-of-scope`, and every F row is `fixed`,
-   `declined` or `refuted`.
+1. `tsymex_0016_universe` is green with **every allowlist empty** on every
+   build row with a run leg (Linux c, Linux cpp, Z3 5.1 and 4.13.4, mingw,
+   MSVC): no unclassified cell; every `exact` cell has a pin record from a
+   public entry point on each row it claims; every `declined` cell's pin
+   asserts its kind; `sampled` unsat cells counted separately from
+   exhaustive ones. (K1a-test, K1a-ci; the legs from CI-A and CI-B; emptied
+   by Waves 3-4, checked at W4-z.)
+2. Every open id in §5, §5.9 and the handoff's F ledger names a cell that is
+   `exact`, `declined` or `never`, and the ids allowlist is empty. (K1a-test's
+   join; every fixing slice.)
 3. No failing file on any gate; no `skip()` or platform arm without a
-   `cell:` reason; no decline assertion without a kind.
+   `cell:` reason; no decline assertion without a kind. (K2a lists them; K9c
+   converts the assertions.)
 4. The fuzzer has exercised every exact row on its build rows, and the
    pairwise figure (two productions in one SUT with a definite verdict) is at
-   or above the floor set by K8a's first full run, ratcheted.
-5. **No precision regression bought the empty list.** Against the 0.9.1
-   pinned corpus, no verdict that was exact and natively correct there is
-   declined at the end without a §5 row saying why (the W-wave three-way rows
-   and `sweep-diff.sh` measure it).
+   or above the floor in `tests/0016-pairwise.floor`, which only rises. (K8b.)
+5. **No precision regression bought the empty list.** Per axis, the set of
+   `exact` cells only grows from the first K1 run that includes the axis, and
+   a cell that leaves `exact` is named by a §5 row. Before an axis exists,
+   the Wave-1 three-way rows and each wave's `sweep-diff.sh` against the kept
+   0.9.1 baselines measure it. (K1a-test; W1-z; W4-z.) `sweep-diff.sh` alone
+   cannot: it diffs pass/fail per file, so a pin rewritten from exact to a
+   decline passes.
 6. The certifying gate logs carry their `.summary` sidecars: CI-A emits the
-   same shape `sweep.sh` does (`scripts/sweep.sh:277-294`).
+   same shape `sweep.sh` does (`scripts/sweep.sh:277-294`). (CI-A.)
 
 Size, from the research: about 1,000–1,100 cells, most classified in bulk from
 the code's own dispatch; the tail is about 250 construct cells and 190
@@ -1422,7 +1603,16 @@ work plus the fuzzer's hours, measured by one test's output.
 - **A `proven(paths, pin)` constructor for K7**: dropped; a pin string at walk
   time proves nothing, and after K10 no unsupported arm has a clean exit.
 - **Reading `-fwrapv` and the compiler version from `querySetting`**: not
-  possible (§8.3); declared instead.
+  possible (§8.3). `-fwrapv` is produced from `-d:nelliFwrapv` instead; the
+  compiler version is a run-time fact of the pin record.
+- **`-d:nelliFwrapv` as a recorded assumption** (`assumptions = {vaSignedWrap}`
+  on `Soundness`, round 3): not needed once the define produces the flag, so
+  the verdict depends on no unverified claim.
+- **Pin file and RFC ids on `Cell`** (round 2): moved out of `src/` in
+  round 3. The pin record is the only link from a cell to its test, and the
+  RFC row names its cell.
+- **A `bool` for `witnessUndefined`**: replaced by `set[UbKind]`, which
+  renders which undefined behaviour and is still one field.
 - **A hand-annotated ledger reconciled against the code**: replaced by §8.2's
   generated ledger.
 - **A new `sxUndefined` status**: replaced by a target kind, a halt kind and

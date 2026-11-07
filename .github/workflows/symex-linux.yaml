@@ -6,7 +6,7 @@ name: symex-linux
 # runs scripts/sweep.sh --host (CI-A2: the podman sweep's runner without
 # podman); the default run set is ONE Z3 file and ONE PCRE-using file, and a
 # dispatch can widen it with tests_regex / derive. CI-A3 widens the push run.
-# Triggers are deliberately narrow until CI-A3: dispatch and rfc-* pushes.
+# Triggers are deliberately narrow until CI-A3: dispatch, main and rfc-* pushes.
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ on:
         required: false
         default: false
   push:
-    branches: ['rfc-*']
+    branches: [main, 'rfc-*']
     paths-ignore:
       - 'docs/**'
       - '.claude/**'
@@ -105,7 +105,13 @@ jobs:
           awk '$1 != "0" && $1 != "skip" { bad = 1 } END { exit bad }' \
             "$RUNNER_TEMP/sweep/sweep.log"
 
+      - name: README decline catalogue names every kind (scripts/check-readme-kinds.sh)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/check-readme-kinds.sh
+
       - name: K1-0 pin join (scripts/k1lite.sh on the host)
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           NELLI_HOST: "1"
@@ -115,7 +121,7 @@ jobs:
           # alone: C compiler, Z3 headers and dep paths are named here).
           export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
           mkdir -p "$RUNNER_TEMP/k1lite"
-          # Runs the seven W1 suites into a fresh pin dir, then the join.
+          # Runs the W1 suites into a fresh pin dir, then the join.
           scripts/k1lite.sh -k "$RUNNER_TEMP/k1lite/pins" 2>&1 \
             | tee "$RUNNER_TEMP/k1lite/k1lite.log"
           exit "${PIPESTATUS[0]}"

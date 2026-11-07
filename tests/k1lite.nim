@@ -2,7 +2,7 @@
 ##
 ## File name. The RFC's K1-0 row names `tests/tsymex_0016_k1lite.nim`. It is
 ## `tests/k1lite.nim` instead, outside the `t*.nim` globs: this join is
-## meaningless alone (it needs the records of seven other suites from one run),
+## meaningless alone (it needs the records of the other suites from one run),
 ## yet the per-file runners (`scripts/sweep.sh`, the fuzzer-msvc W1-m glob of
 ## `tests/tsymex_0016_*.nim`, symex-mingw's per-file corpus from `nelli.nimble`)
 ## would run it with no pin directory and fail it. It runs only through
@@ -30,6 +30,12 @@
 ## is not compared. A record from another backend or Z3 version is not
 ## evidence for this row; it makes the join fail as foreign (a mixed directory
 ## is a stale one).
+##
+## Public entry points. A record counts as evidence only when its `entry` is one
+## of the six section 10 names (`publicEntries`). `pinExactOn` records
+## ("caller": the verdict is supplied, not the walker's) and `pinRefused`
+## records ("admitBuild") never satisfy a key. The crash exception below keeps
+## its own entry, `pinCrash`.
 ##
 ## Crash records. `pinCrash` bypasses every public entry point (section 8.4:
 ## "declined/never only"), so a crash record alone never satisfies a key. It
@@ -68,7 +74,9 @@ let rows = @[
     need(cellKey(axDefinedness, "div/unsigned/zero")),
     need(cellKey(axDefinedness, "mod/unsigned/zero"))]),
   Row(id: "W-07", slice: "W1-d2", needs: @[
-    need(cellKey(axDefinedness, "add/signed/checksOff"))])]
+    need(cellKey(axDefinedness, "add/signed/checksOff")),
+    need(cellKey(axDefinedness, "add/signed/pushOff")),
+    need(cellKey(axDefinedness, "add/signed/pushOffId"))])]
 
 proc buildRow(segment: string): string =
   ## The part of a build segment that names the build row: backend and Z3.
@@ -78,7 +86,11 @@ proc buildRow(segment: string): string =
   let at = segment.find(";z3=")
   be & (if at >= 0: segment[at .. ^1] else: ";z3=?")
 
-func isEvidence(v: PinVerdict): bool = v in {pvExact, pvRaised, pvDeclined}
+const publicEntries = ["symexFind", "symexFindAllWitnesses", "symexForAll",
+                       "assertCoveredBy", "concolic", "loadSymexVerdict"]
+
+func isEvidence(r: PinRecord): bool =
+  r.verdict in {pvExact, pvRaised, pvDeclined} and r.entry in publicEntries
 
 proc joinRows(recs: seq[PinRecord]; rows: seq[Row]; here: string): seq[string] =
   ## One message per failing key, each naming the W row, the slice and the key;
@@ -88,10 +100,11 @@ proc joinRows(recs: seq[PinRecord]; rows: seq[Row]; here: string): seq[string] =
   for row in rows:
     for n in row.needs:
       let mine = recs.filterIt(it.cell == n.key and buildRow(it.build) == here)
-      let ok = mine.anyIt(isEvidence(it.verdict)) or
-               (n.crashOk and mine.anyIt(it.verdict == pvCrashed))
+      let ok = mine.anyIt(isEvidence(it)) or
+               (n.crashOk and
+                mine.anyIt(it.verdict == pvCrashed and it.entry == "pinCrash"))
       if not ok:
-        let seen = mine.mapIt($it.verdict).join(",")
+        let seen = mine.mapIt($it.verdict & "@" & it.entry).join(",")
         result.add row.id & " (" & row.slice & ") key " & render(n.key) &
           " has no exact or declined record on " & here &
           " (records here: " & (if seen.len == 0: "none" else: seen) & ")"
@@ -178,3 +191,17 @@ suite "K1-0: the seven section 5.0 rows have evidence on this build row":
     let fails = joinRows(recs, rows, here)
     check fails.named("W-04", k)
     check fails.anyIt("foreign record" in it)
+
+  test "a record from a non-public entry does not satisfy a key":
+    let k = cellKey(axDefinedness, "div/unsigned/zero")
+    for bad in ["caller", "admitBuild", "skipCell", "pinCrash", ""]:
+      var recs = loadRecords()
+      for r in recs.mitems:
+        if r.cell == k: r.entry = bad
+      check joinRows(recs, rows, here).named("W-06", k)
+    # Every public name is accepted.
+    for ok in publicEntries:
+      var recs = loadRecords()
+      for r in recs.mitems:
+        if r.cell == k: r.entry = ok
+      check not joinRows(recs, rows, here).named("W-06", k)

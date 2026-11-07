@@ -10,7 +10,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
-putEnv("NELLI_PIN_DIR", getTempDir() / ("w1p_pins_" & $getCurrentProcessId()))
+if getEnv("NELLI_PIN_DIR").len == 0:  # keep a sweep-wide dir; else a private one
+  putEnv("NELLI_PIN_DIR", getTempDir() / ("w1p_pins_" & $getCurrentProcessId()))
 
 # --- SND-07: uncheckedAssign, the other arm's bytes differ --------------------
 

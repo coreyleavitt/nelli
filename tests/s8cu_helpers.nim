@@ -242,12 +242,12 @@ proc pinJudge*[T, D](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
                      dom: Domain[D]; file: string;
                      runW: proc (w: T): NativeRun;
                      runD: proc (vals: seq[D];
-                                 hit: proc (n: NativeRun): bool): string
-                    ): SymexResult[T] =
+                                 hit: proc (n: NativeRun): bool): string;
+                     entry = "symexFind"): SymexResult[T] =
   ## The differential judgement `pinExact` expands to.
   let cell = render(key)
   let isHit = proc (n: NativeRun): bool = hitsTarget(n, tgt)
-  var rec = PinRecord(testFile: file, entry: "symexFind", cell: key,
+  var rec = PinRecord(testFile: file, entry: entry, cell: key,
                       target: describeTarget(tgt), domain: describe(dom),
                       exhaustive: dom.exhaustive, walker: $res.status)
   case res.status
@@ -298,7 +298,8 @@ proc paramCount(fn: NimNode): int =
   let fp = ty[0]
   for i in 1 ..< fp.len: result += fp[i].len - 2
 
-macro pinExactImpl*(fn: typed; claim, key, target, domain, file: untyped): untyped =
+macro pinExactImpl*(fn: typed; claim, key, target, domain, file,
+                    entry: untyped): untyped =
   let n = paramCount(fn)
   let res = genSym(nskLet, "res")
   let tgt = genSym(nskLet, "tgt")
@@ -336,7 +337,8 @@ macro pinExactImpl*(fn: typed; claim, key, target, domain, file: untyped): untyp
               `hit`: proc (n: NativeRun): bool): string =
           var `found` = ""
           `loops`
-          `found`)
+          `found`,
+        `entry`)
 
 template pinExact*(fn: untyped; key: CellKey;
                    target: untyped = tLabel("hit");
@@ -347,14 +349,16 @@ template pinExact*(fn: untyped; key: CellKey;
   ## `sxUnknown` or untrusted: fails with `PinFailure`. A raise is a target:
   ## `target = tRaisedExn("ValueError")`.
   pinExactImpl(fn, symexFind(fn, target, pinSettingsConst), key, target, domain,
-               instantiationInfo(-1).filename)
+               instantiationInfo(-1).filename, "symexFind")
 
 template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
                      target: untyped = tLabel("hit");
                      domain: untyped = boundaryInts): untyped =
   ## `pinExact`'s judgement over a verdict the caller supplies instead of the
   ## walker's: the way a test plants a wrong claim and sees the pin refuse it.
-  pinExactImpl(fn, claim, key, target, domain, instantiationInfo(-1).filename)
+  ## Its record's entry is "caller", not a public entry point: K1 refuses it.
+  pinExactImpl(fn, claim, key, target, domain, instantiationInfo(-1).filename,
+               "caller")
 
 # --- pinDecline ------------------------------------------------------------
 

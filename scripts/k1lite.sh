@@ -20,6 +20,10 @@ while getopts ":b:i:t:k:" o; do
     *) echo "usage: k1lite.sh [-b c|cpp] [-i IMAGE] [-t SECS] [-k DIR]" >&2; exit 2 ;;
   esac
 done
+if [ -n "${NELLI_HOST:-}" ] && [ ${#img[@]} -gt 0 ]; then
+  echo "k1lite: -i ${img[1]} is not supported with NELLI_HOST=1 (dt-bounded.sh's host branch ignores the image; the Z3 would not be the one named)" >&2
+  exit 2
+fi
 if [ -n "$keep" ]; then
   mkdir -p "$keep"
   [ -z "$(ls -A "$keep")" ] || { echo "k1lite: $keep is not empty" >&2; exit 2; }
@@ -35,7 +39,7 @@ else
 fi
 export NELLI_PIN_DIR="$pins"
 suites=(w1a_exn_typeid w1b_localpragma panics w1e_floatwidth
-        w1d1a_intminmod w1d1b_udivzero checksoff)
+        w1d1a_intminmod w1d1b_udivzero checksoff w1d2_wraps)
 fail=0
 out="$pins.out"; mkdir -p "$out"   # per-suite logs and rcs, beside the records
 export K1_OUT="$out"
@@ -46,5 +50,7 @@ cat "$out/rcs"
 while read -r rc name; do [ "$rc" = 0 ] || fail=1; done < "$out/rcs"
 scripts/dt-bounded.sh ${img[@]+"${img[@]}"} "$be" tests/k1lite.nim "$secs"
 rc=$?
-echo "k1lite: backend=$be pins=$pins suites_ok=$((1-fail)) join_rc=$rc"
+# The Z3 actually joined: the version in the records, not the requested image.
+z3seen="$(cat "$pins"/*.jsonl 2>/dev/null | command grep -o ';z3=[^"]*' | sort -u | sed 's/^;z3=//' | paste -sd, -)"
+echo "k1lite: backend=$be z3=${z3seen:-none} image=${img[1]:-latest} pins=$pins suites_ok=$((1-fail)) join_rc=$rc"
 [ "$rc" -eq 0 ] && [ "$fail" -eq 0 ]

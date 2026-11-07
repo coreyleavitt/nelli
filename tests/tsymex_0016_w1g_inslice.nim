@@ -6,7 +6,8 @@ import nelli/symex
 import nelli/smt/canonicalize
 import ./s8cu_helpers
 
-putEnv("NELLI_PIN_DIR", getTempDir() / ("w1g_pins_" & $getCurrentProcessId()))
+if getEnv("NELLI_PIN_DIR").len == 0:  # keep a sweep-wide dir; else a private one
+  putEnv("NELLI_PIN_DIR", getTempDir() / ("w1g_pins_" & $getCurrentProcessId()))
 
 type E = enum eA = 0, eB = 1, eC = 5, eD = 6, eE = 9
 

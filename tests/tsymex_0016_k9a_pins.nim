@@ -7,6 +7,9 @@ import ./s8cu_fix_assert
 
 let pinTmp = getTempDir() / ("k9a_pins_" & $getCurrentProcessId())
 createDir(pinTmp)
+# Always private, never the caller's dir: this file plants deliberately wrong
+# claims (pinExactOn, entry "caller") and counts records, so its records must
+# not reach a sweep-wide or K1 pin directory.
 putEnv("NELLI_PIN_DIR", pinTmp)
 
 proc recordsFor(cell: CellKey): seq[PinRecord] =

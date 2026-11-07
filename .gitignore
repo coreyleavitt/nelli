@@ -10,6 +10,7 @@ htmldocs/
 # Build artifacts / test binaries
 tests/tsmoke
 tests/t*[!.]
+tests/k1lite
 !tests/*.nim
 !tests/*.nim.cfg
 examples/symex_*[!.nim]

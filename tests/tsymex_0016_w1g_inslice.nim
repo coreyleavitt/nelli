@@ -60,7 +60,23 @@ proc inVarBounds(x, a, b: int) =
 proc inVarBoundsEmpty(x, a, b: int) =
   if a == 5 and b == 3 and x in a .. b: symexTarget("t")
 
+proc inExclVar(x, a, b: int) =
+  if x in a ..< b and x == 5: symexTarget("t")
+
+proc inExclVarU8(x, a, b: uint8) =
+  if x in a ..< b and x == 5'u8: symexTarget("t")
+
 suite "RFC-0016 W1-g: x in a..b":
+  test "native ..< at the boundary":
+    # int: pred(low(int)) overflows. uint8: `b - 1` wraps, so `0 ..< 0` is the
+    # full range and contains 5.
+    check nativeRun(inExclVar(5, 0, low(int))).raised == "OverflowDefect"
+    check nativeRun(inExclVar(5, 0, 6)).hits.contains("t")
+    check not nativeRun(inExclVar(5, 5, 5)).hits.contains("t")
+    let r = nativeRun(inExclVarU8(5'u8, 0'u8, 0'u8))
+    check r.raised == ""
+    check r.hits.contains("t")
+
   test "version floor":
     check parseInt(symexWalkerVersion) >= 276
 
@@ -119,3 +135,18 @@ suite "RFC-0016 W1-g: x in a..b":
     check pinExact(inVarBoundsEmpty, cellKey(axConstruct, "in/slice/empty"),
                    target = tLabel("t"),
                    domain = sampled(@[3, 4, 5, 7])).status == sxUnsat
+
+  test "..< with a variable bound: sat, boundary raise":
+    check pinExact(inExclVar, cellKey(axConstruct, "in/slice/excl/var"),
+                   target = tLabel("t")).status == sxSat
+    check pinExact(inExclVar, cellKey(axConstruct, "in/slice/excl/var/lowRaise"),
+                   target = tRaisedExn("OverflowDefect"),
+                   domain = sampled(@[low(int), -1, 0, 5, 6, high(int)])).status == sxRaised
+  test "..< with a variable uint8 bound":
+    let dom = sampled(@[0'u8, 4, 5, 6, 255])
+    check pinExact(inExclVarU8, cellKey(axConstruct, "in/slice/excl/var/u8"),
+                   target = tLabel("t"), domain = dom).status == sxSat
+    # b == 0 wraps natively rather than raising, so no run raises.
+    check pinExact(inExclVarU8, cellKey(axConstruct, "in/slice/excl/var/u8/raise"),
+                   target = tRaisedExn("OverflowDefect"),
+                   domain = dom).status == sxUnsat

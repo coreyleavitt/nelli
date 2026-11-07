@@ -269,8 +269,10 @@ const renderAsChoicesVersion* = "12"
   ##   on.}` is modelled as a checked build models it (signed overflow and
   ##   division by zero raise, settings aside) where W1-d2 answered the
   ##   `ubSignedOverflow` halt; each routine body carries its `ArithScope`.
+  ## - RFC-0016 W1-m (283->284): a re-executed replay no longer refuses a SUT
+  ##   naming its own routine `{.global.}`.
 
-const symexWalkerVersion* = "283"
+const symexWalkerVersion* = "284"
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.

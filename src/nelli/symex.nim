@@ -2778,7 +2778,7 @@ proc markOpen(acc: var RoutineFootprint; why: string) =
   acc.open = true
   if acc.why.len == 0: acc.why = why
 
-proc scanFootprint(n: NimNode; user: bool; owner: string;
+proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
                    acc: var RoutineFootprint) =
   ## RFC-0005 S8cb. See `replayFootprint`. `user`: `n` is code of the program,
   ## not of the stdlib; `owner`: the routine's name.
@@ -2799,7 +2799,15 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
         elif isRoutineGlobal(n):
           # Naming a routine's `{.global.}` from outside that routine does not
           # link: a C `extern` emitted first takes the place of its definition.
-          acc.markOpen("`" & n.strVal & "`, a routine's `{.global.}`")
+          # RFC-0016 W1-m: from inside it does. The child runs that routine
+          # itself, so the variable is the child's own, initialised by its
+          # own declaration: a state the program can be in, which the walk
+          # models as any value of its type. (Declining here refused every
+          # re-executed replay of such a SUT, so on Windows its SAT stayed
+          # `sxUnknown` where a fork confirmed it.)
+          let o = owner(n)
+          if not (user and o.kind == nnkSym and routineKey(o) == selfKey):
+            acc.markOpen("`" & n.strVal & "`, a routine's `{.global.}`")
         elif user or symKind(n) == nskVar:
           acc.globals.add n
       # A proc value the program holds, so may hand to the stdlib: code this
@@ -2854,7 +2862,7 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
            not (h.kind == nnkBracketExpr and h[0].kind in
                 {nnkOpenSymChoice, nnkClosedSymChoice}):
         acc.markOpen("a call through a proc value")
-    for c in n: scanFootprint(c, user, owner, acc)
+    for c in n: scanFootprint(c, user, owner, selfKey, acc)
   of nnkAsmStmt:
     if user: acc.markOpen("`asm` in `" & owner & "`")
   of nnkPragma:
@@ -2863,7 +2871,7 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
                   p[0].kind in {nnkIdent, nnkSym} and p[0].strVal == "emit"
       if emits and user: acc.markOpen("`emit` in `" & owner & "`")
   else:
-    for c in n: scanFootprint(c, user, owner, acc)
+    for c in n: scanFootprint(c, user, owner, selfKey, acc)
 
 proc isRuntimeCode(impl: NimNode): bool =
   ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
@@ -2892,7 +2900,7 @@ proc routineFootprint(r: NimNode): RoutineFootprint =
     # library's, whose state the host and the child each have their own of.
     if user: result.markOpen("`" & r.strVal & "`, a foreign routine")
   else:
-    scanFootprint(impl[6], user, r.strVal, result)
+    scanFootprint(impl[6], user, r.strVal, key, result)
     # RFC-0005 batch 11. A parameter the body never names, or a result it never
     # spells, is still destroyed at the routine's end.
     if user and impl[3].kind == nnkFormalParams and not result.open:

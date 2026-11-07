@@ -7,8 +7,6 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
-putEnv("NELLI_PIN_DIR", getTempDir() / ("w1b_pins_" & $getCurrentProcessId()))
-
 var gs: seq[int]
 
 proc varCursor(k: int) =

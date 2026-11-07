@@ -78,6 +78,19 @@ on:
       - 'CHANGELOG.md'
       - 'CLAUDE.md'
       - 'LICENSE'
+  # RFC-0016 W1-m: re-run the walker leg against any ref on demand (a release
+  # candidate before a tag, or a throwaway ref). Inputs from a branch dispatch
+  # only work once the default branch's copy of this file declares them too.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to check out (empty = the triggering ref)'
+        required: false
+        default: ''
+      tests_glob:
+        description: 'Walker test glob for the vcc step'
+        required: false
+        default: 'tests/tsymex_0016_*.nim'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -89,6 +102,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Empty on push (the triggering ref); the dispatch input otherwise.
+          ref: ${{ inputs.ref }}
 
       - name: Install Z3 4.13.4 (x64-win)
         shell: pwsh
@@ -96,6 +112,9 @@ jobs:
           $v = '4.13.4'
           curl.exe -L -o C:\z3.zip "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip"
           if ($LASTEXITCODE -ne 0) { throw 'z3 download failed' }
+          $want = '0a36dd5654fe423d23a727c4570c9db9a315926a4301189b868b6eb9bfd5979d'
+          $got = (Get-FileHash C:\z3.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "z3 zip sha256 mismatch: $got" }
           Expand-Archive -Path C:\z3.zip -DestinationPath C:\ -Force
           Move-Item "C:\z3-$v-x64-win" C:\z3
           if (!(Test-Path C:\z3\bin\libz3.dll)) { throw 'libz3.dll missing' }
@@ -377,6 +396,47 @@ jobs:
           # $env:GITHUB_PATH entry is inherited here, unlike by a container).
           pwsh -NoProfile -ExecutionPolicy Bypass -File _ci\run-msvc-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "MSVC suite failed (exit $LASTEXITCODE) -- see the diagnostics block above for env/Z3/cl.exe state" }
+
+      # RFC-0016 W1-m: the walker on MSVC. mingw (symex-mingw) cannot catch
+      # MSVC-only defect classes, so every tsymex_0016_* file is compiled with
+      # --cc:vcc and run against the installed Z3 4.13.4. Driven by a glob, not
+      # a list, so a new RFC-0016 file is covered on arrival; a glob matching
+      # zero files FAILS (a renamed prefix must not read as a green leg).
+      # Nim picks up each file's sibling .nim.cfg itself (project config is
+      # not skipped here).
+      - name: Run RFC-0016 walker tests under MSVC (vcc)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          TESTS_GLOB: ${{ inputs.tests_glob || 'tests/tsymex_0016_*.nim' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "compiler: vcc (nim --cc:vcc)"
+          nim --version
+          $prev = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          & cmd /c "cl.exe 2>&1" | Select-Object -First 2 | ForEach-Object { Write-Host $_ }
+          $ErrorActionPreference = $prev
+          Write-Host "glob: $env:TESTS_GLOB"
+          $tests = @(Get-ChildItem -Path $env:TESTS_GLOB -File -ErrorAction SilentlyContinue | Sort-Object Name)
+          Write-Host "matched $($tests.Count) test files"
+          if ($tests.Count -eq 0) {
+            throw "glob '$env:TESTS_GLOB' matched 0 files -- refusing to report a false green"
+          }
+          $failed = @()
+          foreach ($t in $tests) {
+            Write-Host "==> $($t.Name) [vcc]"
+            nim c -r --cc:vcc --threads:on --hints:off --colors:off `
+              --nimcache:_nimcache-0016 `
+              --path:src --path:_deps\z3\src --path:_deps\softlink\src `
+              --cincludes:C:\z3\include $t.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $t.Name }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "FAILED under vcc: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host "All $($tests.Count) RFC-0016 walker tests passed under vcc."
 
       # NO cpp/MSVC STEP -- it was added here on 2026-09-02 and REMOVED the
       # same day, because it answered its own question in the negative.

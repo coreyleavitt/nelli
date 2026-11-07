@@ -11,3 +11,11 @@ proc walk(n: Node) =
   let s = Survivors(a, b)
   let t = Survivors(c) ; let u = Degrade(e)
   # Survivors( in a comment is not counted
+  case node.kind
+  of nkA: discard
+  case sym.typ.kind:
+  of tyInt: discard
+  case kind(x)
+  of nkA: discard
+  case node.kinds
+  of nkA: discard

@@ -2,9 +2,13 @@
 # RFC-0016 K2-s: read-only construct census. Gates nothing; K2a / K2a-fail
 # later consume its counts. Pure bash/awk, no toolchain, no side effects.
 #
-# Four kinds are counted (one TSV row per occurrence):
+# Five kinds are counted (one TSV row per occurrence):
 #   case_n_kind  every `case n.kind` in src/nelli/**/*.nim (the walker's
 #                dispatch sites; the construct axis of K2a).
+#   case_kind    every `case <expr>.kind` dispatch (and `case kind(<expr>)`) in
+#                src/nelli, whatever the scrutinee is called. A superset of
+#                case_n_kind (the RFC's literal row, kept as is); this is the
+#                row K2a means by "every node-kind dispatch".
 #   survivors    every `Survivors(` literal in src/nelli. K7a introduces the
 #                type, so until it lands the count is 0 (the script still
 #                runs and reports it).
@@ -55,6 +59,7 @@ census() {  # $1 = root; emits unsorted-then-sorted census + summary on stdout
           s = $0; i = index(s, "#"); if (i) s = substr(s, 1, i - 1)
           if (F ~ /^src\/nelli\//) {
             t = s; while (match(t, /(^|[^A-Za-z0-9_])case[ \t]+n\.kind([^A-Za-z0-9_]|$)/)) { emit("case_n_kind", $0); t = substr(t, RSTART + RLENGTH) }
+            t = s; while (match(t, /(^|[^A-Za-z0-9_])case[ \t]+(([A-Za-z_][]A-Za-z0-9_.()[]*\.kind([^A-Za-z0-9_]|$))|kind\()/)) { emit("case_kind", $0); t = substr(t, RSTART + RLENGTH) }
             t = s; while (match(t, /(^|[^A-Za-z0-9_])Survivors\(/)) { emit("survivors", $0); t = substr(t, RSTART + RLENGTH) }
             t = s; while (match(t, /(^|[^A-Za-z0-9_])Degrade\(/)) { emit("degrade", $0); t = substr(t, RSTART + RLENGTH) }
           } else {
@@ -71,7 +76,7 @@ report() {  # $1 = raw census file
   awk -F'\t' '
     { tot[$2]++; split($3, p, ":"); per[$2 ":" p[1]]++ }
     END {
-      n = split("case_n_kind survivors degrade bare_skip", ks, " ")
+      n = split("case_n_kind case_kind survivors degrade bare_skip", ks, " ")
       for (i = 1; i <= n; i++) printf "summary\t%s\t%d\t-\n", ks[i], tot[ks[i]] + 0
       for (k in per) printf "summary\t%s\t%d\t-\n", k, per[k]
     }' "$raw" | LC_ALL=C sort -t$'\t' -k2,2
@@ -88,11 +93,11 @@ case "${1:-}" in
   --self-test)
     out="$(run "$here/tests/fixtures/k2census")" || { echo "self-test: census failed" >&2; exit 1; }
     for want in $'summary\tcase_n_kind\t2' $'summary\tsurvivors\t2' \
-                $'summary\tdegrade\t2' $'summary\tbare_skip\t2'; do
+                $'summary\tcase_kind\t5' $'summary\tdegrade\t2' $'summary\tbare_skip\t2'; do
       printf '%s\n' "$out" | command grep -qF -- "$want" \
         || { echo "self-test: missing '$want'" >&2; printf '%s\n' "$out" >&2; exit 1; }
     done
-    echo "census-k2: self-test ok (fixture counts 2/2/2/2; comments, allocDegrade, skipCell ignored)"
+    echo "census-k2: self-test ok (fixture counts n_kind 2, case_kind 5, 2/2/2; comments, allocDegrade, skipCell ignored)"
     exit 0 ;;
   --root) [ -n "${2:-}" ] && [ -d "$2" ] || { echo "--root needs a directory" >&2; exit 2; }
           run "$(cd "$2" && pwd)"; exit $? ;;

@@ -2010,12 +2010,13 @@ var overflowConds* {.threadvar.}: seq[Z3Bool]
   ## Reset alongside `divByZeroConds` at every reset site.
 
 var currentArithWraps* {.threadvar.}: bool
-  ## RFC-0005 S8w. `acOverflow notin settings.arithChecks` for the running
-  ## walk (set by `resetSymexRunState`, beside `currentMaxSplitParts`): the
-  ## program's signed arithmetic WRAPS (`-d:danger`, `--overflowChecks:off`)
-  ## instead of raising. `lowerArith` reads it to wrap a width-stamped
-  ## signed `svInt` result into its type's window (`wrapIntToWidth`); a
-  ## bit-vector wraps by construction and needs nothing.
+  ## RFC-0005 S8w, RFC-0016 W1-d2. `buildWraps()` for the running walk (set by
+  ## `resetSymexRunState`, beside `currentMaxSplitParts`): the build's signed
+  ## arithmetic is UNCHECKED (`-d:danger`, `--overflowChecks:off`). It is not
+  ## a wrap: the C operation is undefined on overflow, so `lowerArith` deposits
+  ## the overflow side as an `ubSignedOverflow` `ArithTrap` and the surviving
+  ## side carries its negation. Unsigned results still wrap
+  ## (`wrapIntToWidth`), and the `div` rows below read it.
 
 var obligationLog* {.threadvar.}: ObligationLog
   ## Issue #161 slice 2. Audit trail, NOT a raise-fork sink — deliberately
@@ -8798,6 +8799,21 @@ proc wrapIntToWidth(r: SymVal): SymVal =
   SymVal(kind: svInt, zi: ite(inWin, r.zi, wrapped), ziWidth: r.ziWidth,
          ziSigned: r.ziSigned, ziIvl: win.ivl)
 
+proc depositSignedOverflow(oc: Z3Bool) =
+  ## RFC-0016 W1-d2 (W-07). A signed `+`, `-` or `*` overflow side. With the
+  ## build's overflow checks on it is Nim's `OverflowDefect` fork
+  ## (`overflowConds`). With them off (`currentArithWraps`) the C operation is
+  ## undefined, so it is the `ubSignedOverflow` trap `drainArithTraps` decides
+  ## at the op: an unreachable side is pruned, any other halts.
+  if currentArithWraps:
+    let tr = ArithTrap(cond: oc, ub: some(UbKind(ubSignedOverflow)),
+                       site: "signed `+`, `-` or `*` overflow")
+    arithTrapConds.add tr
+    syncArithTrapCond(tr)
+  else:
+    overflowConds.add oc
+    syncOverflowCond(oc)
+
 proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
   ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
@@ -8893,9 +8909,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       syncDivByZeroCond(c)
   if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and
      a.signed and not bvOverflowDischarged(a, b, op):   # RFC-0005 S8bv
-    let oc = overflowCond(a, b, op)
-    overflowConds.add oc
-    syncOverflowCond(oc)
+    depositSignedOverflow(overflowCond(a, b, op))
   elif op in {bAdd, bSub, bMul} and a.kind == svInt and a.ziWidth != 0 and a.ziSigned:
     # Issue #161 slice 2. The obligation is raised unconditionally; what
     # varies is who discharges it. Try the static proof first, and record
@@ -8910,9 +8924,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       obligationLog.add ObligationEntry(
         op: op, width: a.ziWidth, signed: a.ziSigned,
         disposition: odLive, bound: none(Interval))
-      let oc = overflowCondInt(a, b, op)
-      overflowConds.add oc
-      syncOverflowCond(oc)
+      depositSignedOverflow(overflowCondInt(a, b, op))
   # RFC-0005 S8i: signed `div`/`mod` of `low(T)` by `-1`. `div` raises
   # `OverflowDefect` (Nim's check, at every width) -- the `overflowConds`
   # sink, acOverflow-gated like add/sub/mul. At 32 and 64 bits the C
@@ -8929,7 +8941,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
                      a.ziIvl.get.lo > intBounds(width)[0]
     if signedOp and width in {8, 16, 32, 64} and not loExcluded:
       let tc = divLowByMinusOne(a, b)
-      if op == bDiv:
+      if op == bDiv and not currentArithWraps:
         overflowConds.add tc
         syncOverflowCond(tc)
       if width in {32, 64}:
@@ -8973,8 +8985,10 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       SymVal(kind: svInt, zi: ite(divLowByMinusOne(a, b), win.lo, r.zi),
              ziWidth: r.ziWidth, ziSigned: true, ziIvl: win.ivl)
     elif r.ziWidth in {8, 16, 32, 64} and
-       ((not r.ziSigned and op in {bAdd, bSub, bMul}) or
-        (r.ziSigned and currentArithWraps and op in {bAdd, bSub, bMul})):
+       (not r.ziSigned and op in {bAdd, bSub, bMul}):
+      # RFC-0016 W1-d2: a signed result needs no wrap here. Checked, the
+      # raise fork leaves the survivors in the window; unchecked, the
+      # `ubSignedOverflow` trap does.
       wrapIntToWidth(r)
     else:
       r
@@ -16768,6 +16782,19 @@ proc takeLoweringPendingDegrade(): Degrade =
   result = Degrade(path: loweringPendingTaint, ub: loweringPendingUb)
   loweringPendingTaint = {}
   loweringPendingUb = {}
+
+proc noteArithChecksDisagreement(settings: SymexSettings) =
+  ## RFC-0016 W1-d2. An explicit `arithChecks` that is not what this build
+  ## compiles in (`arithChecksDisagree`) taints the run `feCheckOption`: the
+  ## gated drains skip an unlisted check and return the path clean, and the
+  ## build's own arithmetic is what runs natively. Queued here, it joins the
+  ## initial path through `initialWalkPath`, so every path carries it. An
+  ## agreeing setting taints nothing.
+  if arithChecksDisagree(settings):
+    lowerDegrade(feCheckOption,
+      "arithChecks " & $settings.arithChecks & " disagrees with the build's " &
+      "checks " & $arithChecksFor() & ": the verdict is not the native " &
+      "program's -- path degraded to sxUnknown")
 
 proc initialWalkPath(pc: seq[Z3Bool]; env: Env): Path =
   ## RFC-0005 review R3 (leak fix), R4. THE constructor of a walk driver's
@@ -24664,11 +24691,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # constraints); an undecided query keeps the path, tainted as before.
     # RFC-0005 S8bn's late-address and proc-field declines rely on this:
     # they sit under forks the walk makes without a feasibility check.
-    # RFC-0005 S8cu: a routine without overflow checks, where the settings model
-    # that (the wrap, S8w; the trap, S8aa).
-    if stmt.unKind == feOverflowCheckOption and
-       acOverflow notin w.settings.arithChecks:
-      return paths
+    # RFC-0016 W1-d2 (W-07): the S8cu early return that passed a routine
+    # without overflow checks where the settings model the wrap is gone. Its
+    # signed `+`, `-` and `*` are undefined on overflow in C, not a wrap, and
+    # nothing here tells the arithmetic which routine it is in: the marker
+    # declines (the degrade below) on every setting.
     var live: seq[Path]
     for p in paths:
       if not pathInfeasible(w.z3, p, w.settings): live.add p
@@ -28693,7 +28720,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
                            ## threadvar's own doc comment for why it must not
                            ## join the raise-cond sinks' reset list.
   currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
-  currentArithWraps = acOverflow notin settings.arithChecks        ## RFC-0005 S8w
+  currentArithWraps = buildWraps()                                 ## RFC-0016 W1-d2
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   rfc0005RawStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
@@ -28945,8 +28972,7 @@ proc runSymexImpl(prog: SymexProgram,
   # to catch is not a raise but a defined result. So promotion must be
   # proven statically or declined — which is what finally puts Phase 2's
   # `tryEvalInterval` to work; it has had no caller in `src/` until now.
-  let wrapScan = settings.integerSemantics == isOptimised and
-                 acOverflow notin settings.arithChecks
+  let wrapScan = settings.integerSemantics == isOptimised and buildWraps()
   var banPol = BanPolicy(intVars: intParamNames, wrapScan: wrapScan)
   if wrapScan:
     # Narrowest int window among the params: a result must fit the tightest
@@ -29107,7 +29133,7 @@ proc runSymexImpl(prog: SymexProgram,
       # an unbounded Int does not, and `isExact` runs no wrap scan
       # (`collectBan`'s `wrapScan` is `isOptimised`-only).
       let offsetExact = settings.integerSemantics == isExact and
-                        isOffsetParam and acOverflow in settings.arithChecks
+                        isOffsetParam and not buildWraps()
       let promoteSound = (settings.integerSemantics == isOptimised or
                           offsetExact) and
                          hasRange and
@@ -29204,8 +29230,8 @@ proc runSymexImpl(prog: SymexProgram,
             derivation: "accumulating-scan offset, " & $p.ty &
               " window, width-stamped" &
               (if not p.ty.signed: " (wraps: unsigned)"
-               elif acOverflow notin settings.arithChecks:
-                 " (wraps: unchecked arithmetic)"
+               elif buildWraps():
+                 " (unchecked arithmetic: overflow is undefined)"
                else: " (overflow forks kept)"))
         if promoteSound:
           initialPC.add (env[p.name].zi >= mkZ3IntLit(rangeLo))
@@ -29246,6 +29272,7 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
+  noteArithChecksDisagreement(settings)
   let initial = initialWalkPath(initialPC, env)
   let exitClock = newExitClock()
   var w = WalkCtx(
@@ -30130,6 +30157,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                            globals: globalsTable(prog.globals)),  ## S8as
   )
   currentWalkCtxPtr = addr w
+  noteArithChecksDisagreement(settings)
   let initial = initialWalkPath(initialPC, env)
   # RFC-0005 S8j: a path that left through the SUT's own `return` is a
   # normal exit too; its constraints join the soundness pin below.

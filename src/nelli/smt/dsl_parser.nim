@@ -1468,10 +1468,15 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   elif others != {}:
     decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " & $others &
       " other than the walker models -- path degraded to sxUnknown")
-  if coOverflow in c.checks and c.why.len == 0:
+  # RFC-0016 W1-d2: in a build whose own overflow checks are off
+  # (`buildWraps()`) every routine is unchecked, and that is the build route:
+  # `lowerArith` deposits the signed overflow as an `ubSignedOverflow` trap.
+  # The marker is for a routine pushed off in a build that checks.
+  if coOverflow in c.checks and c.why.len == 0 and not buildWraps():
     decl.add ctx.declineMarker(feOverflowCheckOption, where &
-      " is compiled with overflowChecks off, and the settings model them on " &
-      "(`acOverflow` in `arithChecks`) -- path degraded to sxUnknown")
+      " is compiled with overflowChecks off: its signed `+`, `-` and `*` are " &
+      "undefined on overflow, which no setting models -- path degraded to " &
+      "sxUnknown")
   if body != nil: decl.add body
   mkBlock(decl)
 

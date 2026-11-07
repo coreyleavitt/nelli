@@ -258,8 +258,14 @@ const renderAsChoicesVersion* = "12"
   ##   the verdict carries it (`Soundness.witnessUndefined`, soundness codec
   ##   version 4): a replay-confirmed witness is not `trusted()` and is not
   ##   run in the host.
+  ## - RFC-0016 W1-d2 (281->282): signed `+`, `-` and `*` with the build's
+  ##   overflow checks off are undefined on overflow in C, not a wrap: the
+  ##   overflow side is an `ubSignedOverflow` trap (pruned if unreachable,
+  ##   else the path halts), `{.push overflowChecks: off.}` routines always
+  ##   decline, `arithChecks` derives from the build, and a setting that
+  ##   disagrees with the build taints `feCheckOption`.
 
-const symexWalkerVersion* = "281"
+const symexWalkerVersion* = "282"
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.

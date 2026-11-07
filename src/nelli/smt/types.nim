@@ -11,6 +11,8 @@ import ./soundness   ## RFC-0005 S11: the Z3-free soundness vocabulary
 export soundness
 import ./budget      ## review R1-17: `ResourceBudget`, a Z3-free leaf
 export budget
+import ./buildprofile   ## RFC-0016 W1-d2: `arithChecks` derives from the build
+export buildprofile
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:
@@ -3252,10 +3254,20 @@ type
       ## Phase 15 Z3. Defect families the walker must NOT model as
       ## raise-paths. Default excludes OOM + stack-overflow (modelling
       ## those yields spurious sxRaised for virtually all real SUTs).
-    arithChecks*: set[ArithCheck] = {acOverflow, acDivByZero, acRange}
+    arithChecks*: set[ArithCheck] =
+      (when coOverflow in buildSemantics.checks: {acOverflow, acDivByZero}
+       else: default(set[ArithCheck])) +
+      (when coRange in buildSemantics.checks: {acRange}
+       else: default(set[ArithCheck]))
       ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks to EMIT.
-      ## Default all-on `{acOverflow, acDivByZero, acRange}` (debug-like; finds
-      ## bugs). Empty = release-like (wrap/unchecked). Orthogonal to
+      ## RFC-0016 W1-d2: the default is DERIVED from the build
+      ## (`arithChecksFor(buildSemantics)`): a debug build is all-on
+      ## `{acOverflow, acDivByZero, acRange}`, `--overflowChecks:off` drops
+      ## `acOverflow` and `acDivByZero` (Nim emits the zero check under
+      ## `overflowChecks` alone), `--rangeChecks:off` drops `acRange`. A value
+      ## that disagrees with the build is explicit, and the run taints
+      ## `feCheckOption` (`arithChecksDisagree`): the program the build
+      ## compiles does not do what the setting says. Orthogonal to
       ## `defectExclusions`: `arithChecks` gates fork emission (2^N cost lever);
       ## `defectExclusions` gates finding surfacing after the fork. In cache key.
     inlinePolicy*: InlinePolicy = ipHybrid
@@ -5904,6 +5916,29 @@ proc defaultResourceBudget*(): ResourceBudget =
   ## and a partial literal carries them too. Kept as a name for one release.
   ResourceBudget()
 
+func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
+  ## RFC-0016 W1-d2. The `arithChecks` a build `b` implies: the checks its
+  ## compiled code performs. `SymexSettings.arithChecks`' default is this for
+  ## `buildSemantics`.
+  if coOverflow in b.checks: result.incl {acOverflow, acDivByZero}
+  if coRange in b.checks: result.incl acRange
+
+func buildWraps*(b: BuildSemantics = buildSemantics): bool =
+  ## RFC-0016 W1-d2 (W-07). Whether signed `+`, `-`, `*` (and `div`) in this
+  ## build are UNCHECKED: with `overflowChecks` off the C operation is
+  ## undefined on overflow (not a wrap, unless `-d:nelliFwrapv`), so the
+  ## walker does not model a wrap and a trusted answer. The ONE predicate
+  ## `currentArithWraps`, the wrap scan and the exact-offset promotion read;
+  ## settings never feed it (the build is what the native program does; a
+  ## setting that disagrees taints, `arithChecksDisagree`). A routine under
+  ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
+  coOverflow notin b.checks
+
+func arithChecksDisagree*(s: SymexSettings;
+                          b: BuildSemantics = buildSemantics): bool =
+  ## RFC-0016 W1-d2. `s.arithChecks` is not what build `b` compiles in.
+  s.arithChecks != arithChecksFor(b)
+
 proc defaultSymexSettings*(): SymexSettings =
   ## Phase 2 endpoint: `isOptimised` is now the default. Range-typed
   ## parameters auto-promote to Z3Int when the abstraction-soundness
@@ -6019,6 +6054,11 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
     result.add "arithChecks is empty: no arithmetic defect forks will be " &
       "emitted (OverflowDefect, DivByZeroDefect, and RangeDefect are all " &
       "unreachable). Set acOverflow/acDivByZero/acRange to re-enable."
+  # RFC-0016 W1-d2: `arithChecks` that is not what the build compiles in.
+  if arithChecksDisagree(s):
+    result.add "arithChecks (" & $s.arithChecks & ") disagrees with this " &
+      "build's checks (" & $arithChecksFor() & "): the program does not do " &
+      "what the setting models, so every verdict is tainted feCheckOption."
   # RFC-0010 B4 round 2 (d): maxCallDepth == 0 exhausts immediately rather
   # than meaning unlimited -- a native-stack SIGSEGV was the alternative
   # (see ResourceBudget's umbrella doc comment above), so this field keeps

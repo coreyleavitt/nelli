@@ -1718,6 +1718,9 @@ task test, "Run the test suite":
             "tsymex_0016_w1d1c_cachedprune",
             # RFC-0016 W1-d3: Path.undefined, Soundness.witnessUndefined, codec v4.
             "tsymex_0016_w1d3_undefined",
+            # RFC-0016 W1-d2: checks-off signed arithmetic is undefined, not a wrap; arithChecks derives from the build (W-07).
+            "tsymex_0016_checksoff",
+            "tsymex_0016_w1d2_wraps",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

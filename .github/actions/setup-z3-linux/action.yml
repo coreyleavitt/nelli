@@ -1,0 +1,53 @@
+name: "Setup Z3 (Linux x64, official release archive)"
+description: >
+  Install Z3 from the official GitHub release archive into a cached prefix,
+  verify its sha256, and expose it through LD_LIBRARY_PATH and
+  NELLI_Z3_INCLUDE. The glibc 2.39 asset needs ubuntu-24.04 or newer.
+
+inputs:
+  version:
+    description: "Z3 release version"
+    required: false
+    default: "5.1.0"
+  asset:
+    description: "Release asset basename (without .zip)"
+    required: false
+    default: "z3-5.1.0-x64-glibc-2.39"
+  sha256:
+    description: "sha256 of the release zip"
+    required: false
+    default: "f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a"
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the Z3 prefix
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/z3-prefix
+        key: z3-${{ inputs.version }}-${{ inputs.sha256 }}
+
+    - name: Download, verify and unpack Z3
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        d="$(mktemp -d)"
+        curl -fsSL --retry 5 -o "$d/z3.zip" \
+          "https://github.com/Z3Prover/z3/releases/download/z3-${{ inputs.version }}/${{ inputs.asset }}.zip"
+        echo "${{ inputs.sha256 }}  $d/z3.zip" | sha256sum -c -
+        unzip -q "$d/z3.zip" -d "$d/x"
+        mkdir -p ~/z3-prefix
+        cp -a "$d/x/${{ inputs.asset }}/bin" "$d/x/${{ inputs.asset }}/include" ~/z3-prefix/
+        rm -rf "$d"
+
+    - name: Expose Z3
+      shell: bash
+      run: |
+        set -euo pipefail
+        ls -l ~/z3-prefix/bin
+        test -f ~/z3-prefix/include/z3.h
+        ls ~/z3-prefix/bin/libz3.so*
+        echo "LD_LIBRARY_PATH=$HOME/z3-prefix/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+        echo "NELLI_Z3_INCLUDE=$HOME/z3-prefix/include" >> "$GITHUB_ENV"

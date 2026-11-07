@@ -1,0 +1,91 @@
+name: symex-linux
+
+# RFC-0016 CI-A1: native Linux provisioning for the symex engine, with no
+# container. Patched Nim from the OCI artifact, Z3 5.1.0 from its release
+# archive, PCRE 8.45 from source (both hash-pinned and cached). For now it
+# builds and runs ONE Z3 file and ONE PCRE-using file; CI-A2/A3 widen it.
+# Triggers are deliberately narrow until CI-A3: dispatch and rfc-* pushes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test"
+        required: false
+        default: ""
+  push:
+    branches: ['rfc-*']
+    paths-ignore:
+      - 'docs/**'
+      - '.claude/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  one-file:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install the patched Nim toolchain (OCI artifact)
+        uses: ./.github/actions/setup-nim-artifact
+        with:
+          tag: 2.2.10-linux-x64
+
+      - name: Install Z3 5.1.0
+        uses: ./.github/actions/setup-z3-linux
+
+      - name: Install PCRE 8.45
+        uses: ./.github/actions/setup-pcre1-linux
+
+      - name: Clone deps at milpa.lock provenance SHAs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p _deps
+          python3 -I - <<'PY'
+          import re, subprocess
+          lock = open('milpa.lock').read()
+          pat = re.compile(r'dep "([^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "([^"]+)"[\s\S]*?commit_sha "([0-9a-f]{40})"')
+          for name, url, sha in pat.findall(lock):
+              print('dep', name, url, sha, flush=True)
+              subprocess.check_call(['git', 'clone', url, '_deps/' + name])
+              subprocess.check_call(['git', '-C', '_deps/' + name, 'checkout', '--detach', sha])
+          PY
+          test -d _deps/z3 && test -d _deps/softlink
+
+      - name: Report toolchain versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          nim --version | head -1
+          gcc --version | head -1
+          cat > "$RUNNER_TEMP/ver.nim" <<'NIM'
+          import z3
+          echo "Z3: ", z3FullVersion()
+          NIM
+          nim c -r --cc:gcc --hints:off --colors:off \
+            --path:_deps/z3/src --path:_deps/softlink/src \
+            --cincludes:"$NELLI_Z3_INCLUDE" \
+            --nimcache:"$RUNNER_TEMP/nc-ver" "$RUNNER_TEMP/ver.nim"
+          echo "PCRE: $("$NELLI_PCRE_PREFIX/bin/pcretest" -C | head -1)"
+          ls -l "$NELLI_PCRE_PREFIX"/lib/libpcre.so.1*
+
+      - name: Build and run the Z3 file and the PCRE file
+        shell: bash
+        run: |
+          set -euo pipefail
+          for t in tsymex_0016_k9a_pins tsymex_phase15_S6b_regex; do
+            echo "==> $t"
+            nim c -r --cc:gcc --threads:on --hints:off --colors:off \
+              --path:src --path:_deps/z3/src --path:_deps/softlink/src \
+              --cincludes:"$NELLI_Z3_INCLUDE" \
+              --nimcache:"$RUNNER_TEMP/nc-$t" "tests/$t.nim"
+          done

@@ -1,0 +1,49 @@
+name: "Setup PCRE1 from source (Linux)"
+description: >
+  Build PCRE 8.45 (the final PCRE1 release) from the official source
+  tarball into a cached prefix and expose it through LD_LIBRARY_PATH, for
+  Nim's std/re (which dlopens libpcre.so.1). Same configure options as the
+  podman dev image (scripts/Containerfile).
+
+inputs:
+  version:
+    required: false
+    default: "8.45"
+  sha256:
+    required: false
+    default: "4e6ce03e0336e8b4a3d6c2b70b1c5e18590a5673a98186da90d4f33c23defc09"
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the PCRE prefix
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/pcre-prefix
+        key: pcre-${{ inputs.version }}-${{ inputs.sha256 }}-utf-ucp
+
+    - name: Build PCRE from source
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        d="$(mktemp -d)"
+        curl -fsSL --retry 5 -o "$d/pcre.tar.gz" \
+          "https://sourceforge.net/projects/pcre/files/pcre/${{ inputs.version }}/pcre-${{ inputs.version }}.tar.gz/download"
+        echo "${{ inputs.sha256 }}  $d/pcre.tar.gz" | sha256sum -c -
+        tar -C "$d" -xzf "$d/pcre.tar.gz"
+        cd "$d/pcre-${{ inputs.version }}"
+        ./configure --prefix="$HOME/pcre-prefix" \
+          --disable-static --disable-cpp --enable-utf --enable-unicode-properties
+        make -j"$(nproc)"
+        make install
+        rm -rf "$d"
+
+    - name: Expose PCRE
+      shell: bash
+      run: |
+        set -euo pipefail
+        ls -l ~/pcre-prefix/lib/libpcre.so*
+        echo "LD_LIBRARY_PATH=$HOME/pcre-prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+        echo "NELLI_PCRE_PREFIX=$HOME/pcre-prefix" >> "$GITHUB_ENV"

@@ -699,6 +699,11 @@ type RoutineChecks* = object
     ## may have been compiled first (`mitems[T]` takes the options of its first
     ## instantiation). Read where the walker models a stdlib iterator's assert.
   why*: string                ## set where the position could not be read at all
+  overflowOn*: bool
+    ## RFC-0016 W1-d2c. The routine's position was read and `overflowChecks`
+    ## is on there on every reading (no `coOverflow` deviation): in a build
+    ## whose own checks are off, a `push overflowChecks: on`. False wherever
+    ## the position was not read (own runtime, `why`) or may be off.
 
 proc routinePlace*(impl: NimNode): string =
   ## For a message: the routine, its file and line.
@@ -747,3 +752,4 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
       result.checks = result.checks + l.opts
   if result.checks * defaultOff != {} and not touchesFloat(impl[6]):
     result.checks = result.checks - defaultOff
+  result.overflowOn = coOverflow notin result.checks

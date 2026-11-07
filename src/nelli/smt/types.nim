@@ -1304,10 +1304,24 @@ type
     ## the field's name, an index step `[` and the IR name of a `let`
     ## holding the index, and `?` a step the walk cannot follow.
 
+  ArithScope* = enum
+    ## RFC-0016 W1-d2c. Which arithmetic a routine body is walked under, in a
+    ## build whose own overflow checks are off (`buildWraps()`). Checked-ness is
+    ## per routine: the build's setting unless an enclosing `push overflowChecks:
+    ## on` says otherwise. The parser stamps the routine's body block; the
+    ## walker sets `currentArithWraps` for the block and restores it after, so a
+    ## caller's scope never leaks into a callee and back.
+    asInherit   ## no claim (every block but a routine body; any body in a checks-on build)
+    asBuild     ## unchecked signed arithmetic: the build's (`ubSignedOverflow`)
+    asChecked   ## `push overflowChecks: on` in a checks-off build: `OverflowDefect`
+
   IRStmt* = ref object
     case kind*: IRStmtKind
     of isBlock:
       stmts*: seq[IRStmt]
+      blkArith*: ArithScope
+        ## RFC-0016 W1-d2c. `asInherit` except on a routine's body block in a
+        ## checks-off build (`withCheckDeclines`).
       blkLabel*: string
         ## RFC-0005 S8m. "" for a plain statement sequence. Non-empty: a
         ## BREAK TARGET -- a source `block` some `break` leaves, or the
@@ -4242,6 +4256,10 @@ proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
 
+proc mkArithBlock*(scope: ArithScope; stmts: seq[IRStmt]): IRStmt =
+  ## RFC-0016 W1-d2c. A routine body walked under `scope`'s arithmetic.
+  IRStmt(kind: isBlock, stmts: stmts, blkArith: scope)
+
 proc mkLabelledBlock*(label: string; stmts: seq[IRStmt]): IRStmt =
   ## RFC-0005 S8m. A break target: `break label` resumes after it.
   IRStmt(kind: isBlock, stmts: stmts, blkLabel: label)
@@ -6377,6 +6395,7 @@ proc render*(s: IRStmt): string =
   case s.kind
   of isBlock:
     (if s.blkLabel.len > 0: s.blkLabel & ":" else: "") &
+      (if s.blkArith != asInherit: $s.blkArith else: "") &
       "{" & s.stmts.mapIt(render(it)).join(";") & "}"
   of isIf:
     var arms = ""

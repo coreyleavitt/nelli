@@ -824,6 +824,8 @@ proc emitStmt*(s: IRStmt): NimNode =
       seqLit.add emitStmt(st)
     if s.blkLabel.len > 0:   # RFC-0005 S8m: a break target
       newCall(bindSym"mkLabelledBlock", newLit(s.blkLabel), prefix(seqLit, "@"))
+    elif s.blkArith != asInherit:   # RFC-0016 W1-d2c: a routine body's arithmetic
+      newCall(bindSym"mkArithBlock", newLit(s.blkArith), prefix(seqLit, "@"))
     else:
       newCall(bindSym"mkBlock", prefix(seqLit, "@"))
   of isIf:
@@ -1458,7 +1460,16 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   ## RFC-0005 S8cu. `body` behind the markers for what `c` says of the routine
   ## (`routineChecks`, read before its body is parsed). Overflow has a marker of
   ## its own: the walker passes it where the settings model the wrap.
-  if c.checks == {}: return body
+  # RFC-0016 W1-d2c: in a build whose own overflow checks are off every
+  # routine body is stamped with the arithmetic it is compiled under: the
+  # build's (unchecked), or `OverflowDefect`-raising for one read as pushed
+  # `overflowChecks: on`. A checks-on build needs no stamp (nothing to override
+  # but the `off` push, which declines below).
+  let scope =
+    if not buildWraps(): asInherit
+    elif c.overflowOn and c.why.len == 0: asChecked
+    else: asBuild
+  if c.checks == {} and scope == asInherit: return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
   let others = c.checks - {coOverflow}
@@ -1478,7 +1489,8 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
       "undefined on overflow, which no setting models -- path degraded to " &
       "sxUnknown")
   if body != nil: decl.add body
-  mkBlock(decl)
+  result = mkBlock(decl)
+  if body != nil: result.blkArith = scope
 
 proc annotationViolation(ctx: ParseCtx; n: NimNode;
                          kind: AnnotationViolationKind; callee, msg: string) =

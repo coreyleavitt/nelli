@@ -264,8 +264,13 @@ const renderAsChoicesVersion* = "12"
   ##   else the path halts), `{.push overflowChecks: off.}` routines always
   ##   decline, `arithChecks` derives from the build, and a setting that
   ##   disagrees with the build taints `feCheckOption`.
+  ## - RFC-0016 W1-d2c (282->283): checked-ness is per routine. In a build
+  ##   whose overflow checks are off, a routine under `{.push overflowChecks:
+  ##   on.}` is modelled as a checked build models it (signed overflow and
+  ##   division by zero raise, settings aside) where W1-d2 answered the
+  ##   `ubSignedOverflow` halt; each routine body carries its `ArithScope`.
 
-const symexWalkerVersion* = "282"
+const symexWalkerVersion* = "283"
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.
@@ -6125,7 +6130,9 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
               else: ""
     var parts: seq[string]
     for x in s.stmts: parts.add canonicalize(x, env)
-    "St<Bk:" & lbl & "[" & parts.join(",") & "]>"
+    # RFC-0016 W1-d2c: a routine body's arithmetic scope is part of its meaning.
+    let ar = if s.blkArith != asInherit: "@" & $s.blkArith & ":" else: ""
+    "St<Bk:" & lbl & ar & "[" & parts.join(",") & "]>"
   of isIf:
     var parts: seq[string]
     for br in s.branches:

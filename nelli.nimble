@@ -1729,6 +1729,8 @@ task test, "Run the test suite":
             # RFC-0016 W1-d2: checks-off signed arithmetic is undefined, not a wrap; arithChecks derives from the build (W-07).
             "tsymex_0016_checksoff",
             "tsymex_0016_w1d2_wraps",
+            # RFC-0016 W1-d2c: a routine under `push overflowChecks: on` in a checks-off build raises OverflowDefect (per-routine ArithScope).
+            "tsymex_0016_w1d2c_pushon",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

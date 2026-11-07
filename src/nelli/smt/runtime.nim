@@ -8799,6 +8799,13 @@ proc wrapIntToWidth(r: SymVal): SymVal =
   SymVal(kind: svInt, zi: ite(inWin, r.zi, wrapped), ziWidth: r.ziWidth,
          ziSigned: r.ziSigned, ziIvl: win.ivl)
 
+proc arithCheckedHere(ac: ArithCheck): bool =
+  ## RFC-0016 W1-d2c. A routine pushed `overflowChecks: on` in a build whose own
+  ## checks are off (`asChecked`: `currentArithWraps` off under `buildWraps()`)
+  ## raises `OverflowDefect` and `DivByZeroDefect` whatever the settings say:
+  ## the settings describe the build, and the routine is not the build.
+  ac in {acOverflow, acDivByZero} and buildWraps() and not currentArithWraps
+
 proc depositSignedOverflow(oc: Z3Bool) =
   ## RFC-0016 W1-d2 (W-07). A signed `+`, `-` or `*` overflow side. With the
   ## build's overflow checks on it is Nim's `OverflowDefect` fork
@@ -19038,7 +19045,8 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
     # means "unconditional drain" (parseInt/str-index) — never early-returns on
     # the gate. `some(acFoo)` (div-by-zero/overflow) is settings-gated: skip
     # (honest-incomplete) unless that check is enabled.
-    if (gate.isSome and gate.get notin w.settings.arithChecks) or conds.len == 0:
+    if (gate.isSome and gate.get notin w.settings.arithChecks and
+        not arithCheckedHere(gate.get)) or conds.len == 0:
       return @[p]
     for c in conds:
       let raisePath = forkPath(p, p.pc & @[c], p.env)
@@ -23903,6 +23911,16 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
+    if stmt.blkArith != asInherit:
+      # RFC-0016 W1-d2c. A routine body: its arithmetic is its own, whoever
+      # called it, and the caller's resumes after it.
+      let saved = currentArithWraps
+      currentArithWraps = stmt.blkArith == asBuild
+      let plain = IRStmt(kind: isBlock, stmts: stmt.stmts,
+                         blkLabel: stmt.blkLabel)
+      result = walkStmt(plain, paths, w)
+      currentArithWraps = saved
+      return
     if stmt.blkLabel.len == 0:
       return walkBlock(stmt.stmts, paths, w)
     # RFC-0005 S8m: a labelled block is a break target (a source `block` a

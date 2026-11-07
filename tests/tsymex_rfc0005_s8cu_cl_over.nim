@@ -54,10 +54,12 @@ suite "S8cu: --overflowChecks:off":
     check not symexFind(clField, tLabel("hit")).errors.named(feOverflowCheckOption)
     check not symexFind(clPure, tLabel("hit")).errors.named(feOverflowCheckOption)
 
-  test "a routine under `push overflowChecks: on` in a checks-off build is not trusted (control)":
-    ## Rule (a)/precision: natively it raises OverflowDefect, but the walker
-    ## models the BUILD's arithmetic (`buildWraps()`), so the overflow is the
-    ## ubSignedOverflow halt, not an sxRaised. Sound, not precise: pushed-on
-    ## routines in a checks-off build are not modelled separately.
+  test "a routine under `push overflowChecks: on` in a checks-off build raises OverflowDefect":
+    ## RFC-0016 W1-d2c. Natively it raises OverflowDefect, and so does the
+    ## walker: checked-ness is per routine (`ArithScope`), so the pushed-on
+    ## routine is modelled as a checked build models it, an exact sxRaised
+    ## where W1-d2 answered the build's ubSignedOverflow halt (sxUnknown).
     check native(clOverOn(high(int))) == "OverflowDefect"
-    declines(clOverOn, ubSignedOverflow)
+    let r = pinExact(clOverOn, cellKey(axDefinedness, "add/signed/clPushOn"))
+    check r.status == sxRaised
+    check r.trusted

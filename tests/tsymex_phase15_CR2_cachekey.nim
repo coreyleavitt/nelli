@@ -1110,7 +1110,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W1-d1b: 279->280.
     ## RFC-0016 W1-d3: 280->281.
     ## RFC-0016 W1-d2: 281->282.
-    check symexWalkerVersion == "282"
+    ## RFC-0016 W1-d2c: 282->283.
+    check symexWalkerVersion == "283"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

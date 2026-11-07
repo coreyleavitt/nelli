@@ -13,20 +13,40 @@
 - **Open forks:** none.
 - **Wave 1 progress (2026-11-07, `/loop` grind):** landed on `main` in order:
   INF-05 `977ca243`, K9a `595a2a8b`, W1-c3 `03fb59fc`, W1-a `c0e8bd44`
-  (walker 273), W1-c1a `d4efde91`, W1-c2 `6d40f03c` (walker 274), W1-p
-  `7f45bc8e`. In flight: W1-c1b, W1-b, W1-e, W1-g (parallel worktrees; the
-  three walker bumps renumber at merge). 0.9.1 baselines running on eos
-  (`~/nelli/bl091.sh`: worktrees `bl091c`, `bl091cpp` at `v0.9.1` with the
-  INF-05 scripts; logs `~/nelli/bl091-{c,cpp,z3-4.13.4}.log`), to be
-  uploaded as `v0.9.1` release assets and listed in
-  `tests/0016-baselines.txt`. Per-slice gates are the touched suites; the
-  whole-suite diff against the baselines runs at batch shas once eos frees.
+  (walker 273), W1-c1a `d4efde91`, W1-c2 `6d40f03c` (274), W1-p `7f45bc8e`,
+  W1-c1b `24ab03ca`, W1-b `2b5a1f8e` (275), W1-g `05dbb256` (276), W1-e
+  `86536fa9` (277), W1-f `3451144a` (278), CI-A1 `39cca9e5` (Wave 2,
+  provisioning; runs 42363408913 / 42363671399), W1-d1a `e044a290` (279),
+  W1-d1b `682de5a4` (280). ADM-1 built on `origin/rfc-0016-adm1` `04cd1ab7`,
+  held until after the 0.9.2 tag. In flight: W1-d1c, W1-d3, W1-m (fuzzer-msvc
+  step, CI runs), CI-A2. Remaining after them: W1-d2 (round), K1-0, W1-z.
+  0.9.1 baselines still running on eos (`~/nelli/bl091.sh`, logs
+  `~/nelli/bl091-{c,cpp,z3-4.13.4}.log`), to be uploaded as `v0.9.1` release
+  assets and listed in `tests/0016-baselines.txt`; the whole-suite diff runs
+  at a batch sha once they finish.
 - **Spec corrections found in implementation (apply at W1-z):** W1-c2's RED
   expects `sxUnsat` for the label; the walker's established Defect rule (E6)
   gives `sxRaised` with `witnessUnsafe`, never `sxSat`, which is the
   intended property. SND-07's `ua3_diff` is not a native HIT (native never
   reaches `diff`; the decline is conservative, a precision row). W1-c2 sets
-  `witnessUnsafe` on every crash claim, not only panics ones.
+  `witnessUnsafe` on every crash claim, not only panics ones. W1-f: the
+  field-default decline premise was wrong (native `var o: T` reads zero,
+  `default(T)`/ctors/`new` apply defaults; the walker already agreed in every
+  shape); W-20's compile stop was an empty `seq` default reaching the parser
+  as a bare `[]`, fixed by lowering typed `seq` brackets as seq literals.
+  W1-d1a: natively `low(int) mod -1` is SIGFPE on x86-64 (never the label);
+  the halt is still right (C leaves it undefined). W1-d1a cost vs 0.9.1:
+  identical Z3 check counts; units unchanged on guarded SUTs, ~3x on the one
+  SUT whose undefined side is reachable on a sat path. W1-d1b: unsigned
+  div/mod by zero SIGFPE natively (signed raises `DivByZeroDefect`); an
+  opaque callee's unsigned division now forks no Defect and is not yet
+  answered "undefined" (the opaque-scan "may be undefined" answer is §9.1
+  item 3, K10b). ADM-1's spike changed the interface (feed into the RFC at
+  W1-z): the decline kind is `Option[SymexErrorKind]` (PCRE's refusal is not
+  a `SymexErrorKind`); a row is admitted per site set with an `elsewhere`
+  kind; the key type parameter is dropped (string keys); rows are a `const`
+  seq; the per-axis verbs live beside their payload types (import cycles).
+  The `vsArm` site is declared but consumed only at K4a.
 
 ## Findings ledger (§3.2), newest at the bottom
 

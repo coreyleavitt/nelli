@@ -9594,6 +9594,48 @@ proc parseSetLitMember(setNode, keyNode: NimNode; preamble: var seq[IRStmt];
         mkBinop(bEq, key, parseExpr(e, preamble, ctx))
     addTerm term
 
+proc parseSliceMember(sliceNode, keyNode: NimNode; preamble: var seq[IRStmt];
+                      ctx: ParseCtx): IRExpr =
+  ## RFC-0016 W1-g (W-31). `contains(a .. b, x)`, the typed form of `x in a ..
+  ## b` (and, under `not`, of `x notin a .. b`), as `a <= x and x <= b` for an
+  ## ordinal `x` (an int of any width, unsigned, `char`, enum, `bool`) whose
+  ## bounds have its type. `x in a ..< b` arrives as `a .. pred(b)` (a folded
+  ## literal for a constant `b`). An empty slice (`a > b`) contains nothing.
+  ## Nim evaluates `a`, then `b`, then `x` (probe: `x() in a() .. b()` logs
+  ## `abx`, and a `b` that raises never reaches `x`), then compares; the three
+  ## are read in that order. Nil when the shape is anything else, which leaves
+  ## the call to the paths below.
+  var sl = sliceNode
+  while sl.kind == nnkStmtListExpr and sl.len >= 1 and sl[0].kind == nnkEmpty:
+    sl = sl[sl.len - 1]
+  if sl.kind notin {nnkInfix, nnkCall} or sl.len != 3 or
+     not isBuiltinNamed(sl[0], [".."]):
+    return nil
+  if keyNode.typeKind == ntyNone or sl[1].typeKind == ntyNone or
+     sl[2].typeKind == ntyNone:
+    return nil
+  let kt = classifyType(keyNode).ty
+  let lt = classifyType(sl[1]).ty
+  let ht = classifyType(sl[2]).ty
+  if kt.kind notin {itInt, itBool} or lt.kind != kt.kind or ht.kind != kt.kind:
+    return nil
+  let m0 = preamble.len
+  let lo = parseAtomicOperand(sl[1], preamble, ctx)
+  let m1 = preamble.len
+  let hi = parseAtomicOperand(sl[2], preamble, ctx)
+  var before = preamble.len
+  keepInlineRaiseOrder(lo, sl[1], m1, preamble, ctx)
+  let m1k = m1 + (preamble.len - before)
+  let m2 = preamble.len
+  let key = parseAtomicOperand(keyNode, preamble, ctx)
+  before = preamble.len
+  keepInlineRaiseOrder(hi, sl[2], m2, preamble, ctx)
+  let m2k = m2 + (preamble.len - before)
+  var ops = @[lo, hi, key]
+  orderOperands(preamble, @[m0, m1k, m2k], ops, @[IRType(nil), nil, nil],
+                omOperands, ctx)
+  mkBinop(bAnd, mkBinop(bLe, ops[0], ops[2]), mkBinop(bLe, ops[2], ops[1]))
+
 proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
                         retTy: IRType; preamble: var seq[IRStmt];
                         ctx: ParseCtx): IRStmt
@@ -12567,6 +12609,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if n.len == 3 and isBuiltinNamed(calleeSym, ["contains"]):
       let member = parseSetLitMember(n[1], n[2], preamble, ctx)
       if member != nil: return member
+      let inSlice = parseSliceMember(n[1], n[2], preamble, ctx)   # RFC-0016 W1-g
+      if inSlice != nil: return inSlice
       # RFC-0005 S8bq (item 2): `k in s` on a builtin set value. The key's
       # conversion to `T` is parsed with it, so it is range-checked (probe:
       # `x in rs` for `rs: set[range[0..9]]` and `x = 20` raises

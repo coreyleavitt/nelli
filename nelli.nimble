@@ -1704,6 +1704,8 @@ task test, "Run the test suite":
             "tsymex_0016_w1p_probes",
             # RFC-0016 W1-b: local pragmas outside the allowlist decline (W-02).
             "tsymex_0016_w1b_localpragma",
+            # RFC-0016 W1-g: x in a..b / notin lower to bound comparisons (W-31).
+            "tsymex_0016_w1g_inslice",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

@@ -249,7 +249,9 @@ const renderAsChoicesVersion* = "12"
   ##   one place (`initialWalkPath`). No verdict moves; the bump keeps cache
   ##   entries of the two claim identities apart.
 
-const symexWalkerVersion* = "275"
+const symexWalkerVersion* = "276"
+  ## RFC-0016 W1-g (275->276): `x in a .. b` / `x notin a .. b` over an
+  ## ordinal lowers to `a <= x and x <= b` (read a, b, x) where it declined.
   ## RFC-0016 W1-b (274->275): a local pragma outside the allowlist
   ## (`cursor`, ...) declines `feLocalPragma`.
   ## RFC-0016 W1-a (272->273): one exception type id (`typeIdOf`) for the

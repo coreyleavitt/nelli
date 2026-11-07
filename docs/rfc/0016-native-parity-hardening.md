@@ -815,6 +815,7 @@ intake, so each row still needs its three-way row (§5.7 rule) before work.
 | INT-39 | Remove `SymexResult.fromCache`, which no code path sets (WA-11), in 0.10.0 with a migration note | item `fromcache-field`, decision D-0016-4 | `src/nelli/smt/types.nim`; the readable cache-hit flag is `SymexFinding.fromCache` | |
 | INT-40 | A fork replay child inherits the host's current value of a routine `{.global.}`, so after earlier host calls a walker SAT through that global can be confirmed from run history; the verdict carries no `runDependence` (re-exec replay starts from the initial value and refutes) | 0.9.2 review SC1 (residual, predates Wave 1) | soundness: run-history dependence; unverified beyond code reading | |
 | INT-41 | `symexFind`'s expansion calls `newLit(settings)` (`symex.nim:~3743`), which reads the deprecated `arithChecks` inside Nim's `macros.nim` and raises a Deprecated warning no call-site push can silence | 0.9.2 review (CR-B) | diagnostic | |
+| INT-42 | The 0.9.2 code review's open Lows: R2-03 (`arithStamp` derives from the resolved push), R2-04 (one refusal-cause enum behind `hostRunnable` and `hostRefusalReason`), R2-05 (rename `effectiveArithChecks`), R2-06 (collapse `BuildRefusal.field`), R2-08 (zero-arg concolic entries), R2-10 (`k1lite.sh -b` validation), L9, SC3, D8 | `docs/rfc/0016-review.md` rounds 1-2 | design and test hygiene; no wrong verdict | |
 
 **From the INF-05 owner audit (rows marked UNOWNED).** The rows the audit
 marked OWNED-0016 were already in this document (PRC-31, PRC-32, INF-04,

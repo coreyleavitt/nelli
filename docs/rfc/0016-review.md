@@ -2,7 +2,7 @@
 type = "review"
 id = "0016-review"
 title = "RFC-0016 Wave 1 (0.9.2) code review ledger"
-state = "pending"
+state = "floor"
 profile = "rfc-flow@6"
 +++
 
@@ -47,3 +47,22 @@ Four lenses ran: correctness and soundness, security, design and ergonomics, and
 
 Fix commits `24d514c2`, `2cdb66b6`, `490c80b1` and `2bb912d4` were merged onto d9086529. On the merged tree, 16 touched suites and `check-readme-kinds.sh` all returned rc=0. D1 was fixed as a refactor under green: the walker scope became a lexical stack read through `wraps()` and `checked()`, and the parser computes it through a single pure function, `arithScopeFor`. The 12 joint suites and the CR2 pin returned rc 0, with no walker bump. The D7 and D9 parts that D1 touched are folded in; D8 (`renderBuildFlags` arity) stays Low.
 
+
+## Round 2 (delta d9086529..b1bab060)
+
+Four lenses ran: correctness, security, design and liveness. Adversarial verifiers then checked every finding at Medium or above.
+
+| id | sev | status | finding | evidence / fix |
+|---|---|---|---|---|
+| R2-01 | Low | fixed (6a242791) | The parser's `overflowChecked` reads `asBuild` as unchecked, but in a checks-on build `asBuild` is checked. Every current reader guards on `buildWraps()`, so the hazard is latent. A design lens filed it as Medium; the verifier confirmed it and downgraded it to Low. | `buildWraps()` is folded into `overflowChecked`; `ordinalUnchecked` derives from it. |
+| R2-02 | - | refuted | `pushArith` maps `asInherit` to checked with no guard. It is private, and its single caller filters out `asInherit`. | A `doAssert sc != asInherit` was added anyway (6a242791). |
+| R2-03 | Low | open | `arithStamp` recomputes the scope with a dummy caller instead of deriving the stamp from the parser's resolved push. | `dsl_parser.nim:~1496`. |
+| R2-04 | Low | open | `hostRefusalReason` re-enumerates `hostRunnable`'s conjuncts, and the crash-claim wording is duplicated in `render.nim`. | `symex.nim:~3935`. |
+| R2-05 | Low | open | `effectiveArithChecks` reads the raw field; "effective" suggests a resolved value. | `types.nim:~5979`. |
+| R2-06 | Low | open | `BuildRefusal.field` is redundant with the reason text. | `buildprofile.nim:~125`. |
+| R2-07 | Low | open | `tsymex_0016_wa_undefined_e2e` runs only on the Linux C leg. It skips on cpp and under re-exec replay. | Inherent to stack-layout-dependent noinit reads. |
+| R2-08 | Low | open | `tsymex_0016_cr_zeroarg` does not cover `concolicCollect`/`concolicFlip`. | `symex.nim:3852-3900`. |
+| R2-09 | Low | fixed (6a242791) | A stale comment in the e2e test said `symexFindAllWitnesses` needs a parameter. | |
+| R2-10 | Low | open | `k1lite.sh -b` is not validated against `c|cpp`. Developer-run only; no privilege boundary. | `scripts/k1lite.sh`. |
+
+**Floor reached at round 2:** 0 Critical, 0 High and 0 Medium inside the surface. The 12 touched suites returned rc=0 at 6a242791. The open Lows (R2-03 to R2-08, R2-10, L9, SC3, D8) carry into Wave 2 under INT-42.

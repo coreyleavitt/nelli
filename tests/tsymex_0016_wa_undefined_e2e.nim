@@ -19,8 +19,7 @@ proc scrub() {.noinline.} =
 var ueRan = 0
 
 proc ueNoinit(k: int) =
-  ## `k` keeps the parameter list non-empty, which `symexFindAllWitnesses`
-  ## needs; the read of `x` is on the path to the label. The label does not
+  ## `k` gives the witness a parameter to carry; the read of `x` is on the path to the label. The label does not
   ## depend on the value `x` happens to hold (`x == x`), so the replay reaches
   ## it on any stack layout, whichever entry point runs it.
   var x {.noinit.}: int

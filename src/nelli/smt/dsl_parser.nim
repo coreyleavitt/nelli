@@ -1477,13 +1477,16 @@ func currentArith(ctx: ParseCtx): ArithScope =
   if ctx.arithScopes.len > 0: ctx.arithScopes[^1] else: asBuild
 
 func overflowChecked(ctx: ParseCtx): bool =
-  ## Signed arithmetic is `OverflowDefect`-checked where the parse is now.
-  ctx.currentArith == asChecked
+  ## Signed arithmetic is `OverflowDefect`-checked where the parse is now: the
+  ## build checks it, or an enclosing routine is pushed `overflowChecks: on`.
+  ## `buildWraps()` is folded in here because the stack's `asBuild` means
+  ## "the build's own arithmetic", which is checked in a checks-on build.
+  not buildWraps() or ctx.currentArith == asChecked
 
 func ordinalUnchecked(ctx: ParseCtx): bool =
   ## Signed arithmetic is unchecked where the parse is now: the build wraps and
   ## no enclosing routine is pushed `overflowChecks: on`.
-  buildWraps() and not ctx.overflowChecked
+  not ctx.overflowChecked
 
 proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
   ## Opens the routine's arithmetic scope for its parse.

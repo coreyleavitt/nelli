@@ -2037,6 +2037,7 @@ proc resetArith() =
   arithScopes = @[(if buildWraps(): waWraps else: waChecked)]
 
 proc pushArith(sc: ArithScope) =
+  doAssert sc != asInherit, "an inheriting block opens no arith scope"
   arithScopes.add(if sc == asBuild: waWraps else: waChecked)
 
 proc popArith() =

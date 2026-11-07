@@ -1719,6 +1719,7 @@ task test, "Run the test suite":
             "tsymex_0016_w1f_defaults_caseelif",
             # RFC-0016 W1-d1a: low(T) mod -1 and unchecked low(T) div -1 halt (W-52).
             "tsymex_0016_w1d1a_intminmod",
+            "tsymex_0016_w1d1a_intminmod_checksoff",
             # RFC-0016 W1-d1b: unsigned div/mod by zero halts through haltUndefined.
             "tsymex_0016_w1d1b_udivzero",
             # RFC-0016 W1-d1c: a call summary relying on a pruned undefined side is reused only where the prune holds.

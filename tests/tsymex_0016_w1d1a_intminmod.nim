@@ -161,9 +161,15 @@ suite "W1-d1a low(T) div -1":
     check r.status == sxRaised
     check not r.errors.named(ubIntMinModMinusOne)
 
-  test "checks off: the path halts":
+  test "checks off by push in a checks-on build: declines, no halt (rule a)":
+    ## RFC-0016 W1-d2: was the `ubSignedOverflow` halt under an opt-out. A
+    ## pushed-off routine in a checks-on build always declines
+    ## (feOverflowCheckOption), and the explicit setting disagrees with the
+    ## build (feCheckOption). The halt itself needs a checks-off BUILD:
+    ## `tsymex_0016_w1d1a_intminmod_checksoff.nim`.
     let r = symexFind(sutDivUnchecked, tLabel("hit"), noOverflowChecks)
     checkpoint show(r.errors)
     check not r.trusted
-    check r.errors.named(ubSignedOverflow)
+    check r.errors.named(feOverflowCheckOption)
+    check r.errors.named(feCheckOption)
     check not r.errors.named(ubIntMinModMinusOne)

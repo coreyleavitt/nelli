@@ -1662,7 +1662,13 @@ proc typeIdOf*(sym: NimNode; ctx: ParseCtx = nil): Option[string] =
       if cur.len == 0: return none(string)
       cur = cur[cur.len - 1]
     of nnkBracketExpr:
-      if cur.len == 0: return none(string)
+      # RFC-0016 CR-A. Only `ref[T]` / `ptr[T]` name their last child. Any
+      # other bracket is a generic instantiation (`G[ValueError]`): its
+      # identity is the whole instantiation, never a type argument, so it
+      # cannot be named and the caller declines.
+      if cur.len < 2 or cur[0].kind notin {nnkSym, nnkIdent} or
+         macros.strVal(cur[0]) notin ["ref", "ptr"]:
+        return none(string)
       cur = cur[cur.len - 1]
     of nnkType:
       # An `except` branch's type node: the written name's symbol.
@@ -4170,7 +4176,7 @@ proc typeIsDefect(t: NimNode; ctx: ParseCtx): string =
   if s.kind == nnkSym and s.symKind == nskType:
     let impl = s.getTypeImpl
     if impl.kind == nnkRefTy and impl.len == 1: s = impl[0]
-  elif s.kind in {nnkRefTy, nnkBracketExpr} and s.len >= 1:
+  elif s.kind == nnkRefTy and s.len >= 1:
     s = s[^1]
   let id = typeIdOf(s, ctx)
   if id.isNone: return ""

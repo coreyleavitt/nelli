@@ -1739,6 +1739,8 @@ task test, "Run the test suite":
             "tsymex_0016_wa_runtime",
             "tsymex_0016_wa_runtime_checksoff",
             "tsymex_0016_wa_runtime_panics",
+            # RFC-0016 CR-A: a generic exception type is identified by its full instantiation, not its last type argument.
+            "tsymex_0016_cr_generic_exn",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

@@ -285,7 +285,10 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "286"
+const symexWalkerVersion* = "287"
+  ## RFC-0016 CR-A (286->287): a generic exception type (`G[ValueError]`)
+  ## is no longer identified by its last type argument; `typeIdOf` declines
+  ## it (`eeUnknownExnType`), so `except ValueError` no longer "catches" it.
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.

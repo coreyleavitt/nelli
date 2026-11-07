@@ -13,11 +13,15 @@ on:
       - docs/symex/README.md
       - src/nelli/smt/types.nim
       - scripts/check-readme-kinds.sh
+      - scripts/census-k2.sh
+      - tests/fixtures/k2census/**
   pull_request:
     paths:
       - docs/symex/README.md
       - src/nelli/smt/types.nim
       - scripts/check-readme-kinds.sh
+      - scripts/census-k2.sh
+      - tests/fixtures/k2census/**
 
 permissions:
   contents: read
@@ -34,3 +38,5 @@ jobs:
         run: bash scripts/check-readme-kinds.sh
       - name: A removed kind fails the check (self-test)
         run: bash scripts/check-readme-kinds.sh --self-test
+      - name: K2-s census self-test
+        run: bash scripts/census-k2.sh --self-test

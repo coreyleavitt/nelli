@@ -106,7 +106,9 @@ program (`symexCaptureBegin`/`symexCaptureEnd`). Variants: base, `_c1`, `_c2`,
 `_fd`, `_fdseq`, `_off` (`--overflowChecks:off`), `_pan` (`--panics:on`).
 Cell key is the K1-0 key where the row has one (`tests/k1lite.nim`), else `-`.
 "vs release" is `same` (0.9.1 already behaved the same way), `better` (head is
-closer to native) or `worse`. A row that is `worse` is a release blocker. Native
+closer to native) or `worse`. A row worse in soundness blocks the tag (the
+RFC-0005 release rule); a precision loss the RFC itself specifies as a decline
+does not. Native
 `not probed` means the probe had no native run for the row; the native column
 then gives what Nim guarantees and its source.
 
@@ -151,9 +153,10 @@ Summary: 34 rows. better 17, same 15, worse 2. No row is worse in
 soundness. The two `worse` rows, W1-b `{.cursor.}` and W1-e float width, are
 precision losses by design: the spec makes each a named decline
 (`feLocalPragma`, `feFloatWidth`), and on the probed label shape 0.9.1
-happened to agree with native. They are still `worse` by the rule above and
-therefore a release blocker as the task defines it; the call to accept a
-declared precision loss for 0.9.2 is Corey's. Not probed: the hidden-witness
+happened to agree with native. Neither blocks 0.9.2: W1-b and W1-e's spec
+rows name these exact shapes and verdicts (§11, "today a trusted false
+pair"), and the decline is what makes the hidden-witness twins sound.
+Recovering the precision is PRC work in later waves. Not probed: the hidden-witness
 shapes that made F-0002 and F-0004 false verdicts in 0.9.1 (the probes
 asserted the label, not the witness values), and Windows.
 

@@ -273,8 +273,14 @@ const renderAsChoicesVersion* = "12"
   ##   `ubSignedOverflow` halt; each routine body carries its `ArithScope`.
   ## - RFC-0016 W1-m (283->284): a re-executed replay no longer refuses a SUT
   ##   naming its own routine `{.global.}`.
+  ## - RFC-0016 WA-A (284->285): in a checks-off build a `for` over a closure
+  ##   iterator is inlined (it was dropped, an empty block); an ordinal
+  ##   `inc`/`dec`/`succ`/`pred`/`+=` past its bounds declines where unchecked
+  ##   (it raised `OverflowDefect`); a magic-backed callee (`abs`) takes its
+  ##   caller's arithmetic scope, and a closure iterator of another scope
+  ##   declines.
 
-const symexWalkerVersion* = "284"
+const symexWalkerVersion* = "285"
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.

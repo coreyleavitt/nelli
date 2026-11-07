@@ -1731,6 +1731,10 @@ task test, "Run the test suite":
             "tsymex_0016_w1d2_wraps",
             # RFC-0016 W1-d2c: a routine under `push overflowChecks: on` in a checks-off build raises OverflowDefect (per-routine ArithScope).
             "tsymex_0016_w1d2c_pushon",
+            # RFC-0016 WA-A: closure-iterator loops and ordinal steps in a checks-off build; scope of magic bodies.
+            "tsymex_0016_wa_checksoff",
+            # RFC-0016 WA-A (P3): nelli imported under a check push reads the push as the build (documented, pinned).
+            "tsymex_0016_wa_importpush",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

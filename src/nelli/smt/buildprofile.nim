@@ -12,9 +12,14 @@
 ## `buildSemantics` is a constant of THIS module, evaluated where it is first
 ## compiled. A module that imports nelli under a `{.push fieldChecks: off.}` (or
 ## any other push of a check option) therefore records those checks as off in
-## the profile. That profile fails closed: it disagrees with the build's real
-## checks, so the walker declines (`feCheckOption`) rather than answer for a
-## program it does not model. Import nelli before the push.
+## the profile, and nothing in nelli can tell that from a command line that set
+## them off: `compileOption` is all the compiler offers a library, and it
+## answers for the push. The profile is NOT a fail-closed disagreement and the
+## walker does not decline (`feCheckOption`) for it; it takes the push as the
+## build. For `overflowChecks` that means `buildWraps()` holds and the walker
+## models the unchecked arithmetic of a checks-off build (`ubSignedOverflow`),
+## for every routine of a program whose real build checks overflow. Pinned by
+## `tsymex_0016_wa_importpush`. Import nelli before the push.
 import std/[strutils, algorithm]
 
 type

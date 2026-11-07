@@ -18,9 +18,18 @@
 ## The default-regime behaviour (the wrap raises) is pinned by the final test.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc wrapNeeded(x: int8) =
   if x + 1 < x:
+    symexTarget("wrap-needed")
+
+## RFC-0016 W1-d2: signed wrap with checks off is undefined, so the BV/Int
+## wrap-soundness demonstration (rule b: the property is the three integer
+## modes' model of a DEFINED wrap) runs on the unsigned twin, under settings
+## that agree with the build. The signed twin is pinned as untrusted below.
+proc wrapNeededU(x: uint8) =
+  if x + 1'u8 < x:
     symexTarget("wrap-needed")
 
 ## Settings helpers — pure procs so they evaluate as `static SymexSettings`
@@ -30,6 +39,18 @@ proc exactNoOverflowSettings(): SymexSettings =
   result = defaultSymexSettings()
   result.integerSemantics = isExact
   result.arithChecks = {}
+
+proc exactSettings(): SymexSettings =
+  ## isExact, arithChecks as the build derives them (agree: nothing taints).
+  result = defaultSymexSettings()
+  result.integerSemantics = isExact
+
+proc optimisedAgreeSettings(): SymexSettings =
+  result = optimisedSymexSettings()
+
+proc looseAgreeSettings(): SymexSettings =
+  result = looseSymexSettingsPreset
+  result.arithChecks = defaultSymexSettings().arithChecks
 
 proc optimisedNoOverflowSettings(): SymexSettings =
   ## isOptimised (no range info → stays BV), arithChecks off: same wrap regime.
@@ -43,25 +64,35 @@ proc looseNoOverflowSettings(): SymexSettings =
 
 suite "symex Phase 2 — ADR-0001 soundness validation":
   test "isExact finds the BV-only witness":
-    ## arithChecks={}: run in overflow-off regime to observe the silent int8
-    ## wrap that is the whole point of this test (R16-4 / ADR-0012 reconciliation).
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"), exactNoOverflowSettings())
+    ## Rule (b), unsigned twin: x + 1 < x holds exactly at uint8.high (255).
+    let r = symexFind(wrapNeededU, tLabel("wrap-needed"), exactSettings())
     check r.status == sxSat
-    check r.witness[0] == 127
+    check r.trusted
+    check r.witness[0] == 255
 
   test "isOptimised agrees with isExact (no range info → no promotion)":
-    ## arithChecks={}: same overflow-off regime for BV wrap-soundness consistency.
-    ## No range info on int8 → no abstraction → stays BV → same result.
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"), optimisedNoOverflowSettings())
+    ## Rule (b): no range info on uint8 → no abstraction → stays BV → same result.
+    let r = symexFind(wrapNeededU, tLabel("wrap-needed"), optimisedAgreeSettings())
     check r.status == sxSat
-    check r.witness[0] == 127
+    check r.trusted
+    check r.witness[0] == 255
     check r.abstractions.len == 0
 
   test "isLoose misses the overflow-only path (false negative)":
-    ## arithChecks={}: overflow-off regime for consistency; Z3Int still says
-    ## x+1 > x always — the documented false negative is preserved.
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"), looseNoOverflowSettings())
+    ## Rule (b): Z3Int still says x+1 > x always -- the documented false
+    ## negative is preserved.
+    let r = symexFind(wrapNeededU, tLabel("wrap-needed"), looseAgreeSettings())
     check r.status == sxUnsat   ## ← UNSOUND: Int says x+1 > x always
+
+  test "signed int8 with an opt-out that disagrees with the build is not trusted":
+    ## Rule (a): the former signed form of the three tests above. The
+    ## explicit arithChecks={} no longer yields a trusted wrap witness: signed
+    ## wrap with checks off is undefined, and this build checks.
+    for r in [symexFind(wrapNeeded, tLabel("wrap-needed"), exactNoOverflowSettings()),
+              symexFind(wrapNeeded, tLabel("wrap-needed"), optimisedNoOverflowSettings()),
+              symexFind(wrapNeeded, tLabel("wrap-needed"), looseNoOverflowSettings())]:
+      check not r.trusted
+      check r.errors.named(feCheckOption)
 
   test "overflow-on default: the wrap now RAISES (R16-4)":
     ## Under default arithChecks=all-on, x+1 at x=127 raises OverflowDefect

@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 16 R16-4 — signed integer OverflowDefect raise fork.
 #
@@ -164,8 +165,16 @@ proc noAcOverflowSettings(): SymexSettings =
 suite "symex Phase 16 R16-4 — acOverflow gate":
 
   test "R16-4-8: acOverflow off → no OverflowDefect raise (honest-incomplete)":
+    ## RFC-0016 W1-d2, rule (a): the property is "acOverflow off emits no
+    ## OverflowDefect fork". Signed overflow with checks off is now undefined,
+    ## and this build checks overflow, so the explicit opt-out disagrees with
+    ## the build: it still emits no raise, but the verdict is not trusted
+    ## (feCheckOption) where it was a trusted sxUnsat. The checks-off BUILD
+    ## half is `tsymex_phase16_R16_4_overflow_checksoff.nim`.
     let r = symexFind(sa_off, tRaisedExn("OverflowDefect"), noAcOverflowSettings())
-    check r.status == sxUnsat
+    check r.status != sxRaised
+    check not r.trusted
+    check r.errors.named(feCheckOption)
 
 # ---------------------------------------------------------------------------
 # Behavior 9: Bounded operands — no false positive when in-range

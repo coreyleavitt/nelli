@@ -32,6 +32,7 @@ task test, "Run the test suite":
             "tsymex_phase1_dsl",
             "tsymex_phase2_bv_arith", "tsymex_phase2_abstraction",
             "tsymex_phase2_fallback", "tsymex_phase2_overflow",
+            "tsymex_phase2_overflow_checksoff",
             "tsymex_phase3_inline", "tsymex_phase3_recursion",
             "tsymex_phase3_summarization", "tsymex_phase3_mutual",
             "tsymex_phase3_stdlib",
@@ -398,6 +399,7 @@ task test, "Run the test suite":
             # cstring), the wrap-scan's whole-program (not per-variable) ban,
             # and the documented opaque-call-after-target ordering asymmetry.
             "tsymex_163rev_inert_exclusions",
+            "tsymex_163rev_inert_exclusions_checksoff",
             # Issue #163 review finding R22 (Medium): the ONLY RangeDefect
             # fork in the whole engine was float->int conversion -- an
             # out-of-range ASSIGNMENT into a `range[lo..hi]`-typed local
@@ -507,6 +509,7 @@ task test, "Run the test suite":
             "tsymex_phase16_R16_2b_shortcircuit_conv",
             "tsymex_phase16_R16_3_divzero",
             "tsymex_phase16_R16_4_overflow",
+            "tsymex_phase16_R16_4_overflow_checksoff",
             "tsymex_phase16_R16_5_overflow_thru_closure",
             "tsymex_phase16_R16_6_diagnostics_channel",
             # RFC-chapulin-hardening CR-2a/b/c — the three distinct

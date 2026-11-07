@@ -212,8 +212,13 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
 ## OWN arithmetic is provably safe promotes ALONE, but stops promoting the
 ## instant an unrelated, unprovable sibling shares the same program.
 
-const Unchecked = SymexSettings(integerSemantics: isOptimised,
-                                arithChecks: {acDivByZero, acRange})
+# RFC-0016 W1-d2: the wrap-scan ban is a property of a checks-OFF build (it
+# reads `buildWraps()`, not the settings), so the two whole-program-ban tests
+# below moved to `tsymex_163rev_inert_exclusions_checksoff.nim`, which builds
+# with `--overflowChecks:off`. What stays here is the checked-build control:
+# no wrap scan runs, so an unprovable sibling bans nothing.
+
+const Unchecked = SymexSettings(integerSemantics: isOptimised)
 
 proc safeAlone(safeP: range[0'i64..1000'i64]) =
   let s = safeP + safeP     ## <= 2000 -- provably safe in isolation
@@ -230,31 +235,12 @@ proc mixedBan(safeP: range[0'i64..1000'i64],
 
 suite "#163 review R14c -- the wrap-scan bans the whole program, not per-variable":
 
-  test "oracle -- safeP's own doubling never leaves int64, unsafeP's square does":
-    proc rtSafe(a: range[0'i64..1000'i64]): int64 = a + a
-    check rtSafe(1000'i64) == 2000'i64
-    {.push overflowChecks: off.}
-    proc rtUnsafe(a: range[0'i64..4_000_000_000'i64]): int64 = a * a
-    {.pop.}
-    ## True product at the ceiling is 1.6e19, which does not fit int64 (max
-    ## ~9.22e18) -- it wraps under unchecked semantics to a negative value,
-    ## which is the whole reason it is "unprovable": no finite int64
-    ## interval bounds it honestly.
-    check rtUnsafe(4_000_000_000'i64) < 0'i64
-
-  test "in isolation, the provably-safe param DOES promote":
-    let r = symexFind(safeAlone, tLabel("t"), Unchecked)
-    check r.status == sxSat
-    check r.abstractions.len == 1
-
-  test "sharing a program with an unprovable sibling, NEITHER param promotes":
-    ## The load-bearing property. A per-variable-banning regression would
-    ## leave `safeP` promoted here (`abstractions.len == 1`, naming only
-    ## `safeP`) even though `unsafeP` is banned -- exactly the mixed-sort
-    ## state the comment says must never happen under unchecked semantics.
-    let r = symexFind(mixedBan, tLabel("t"), Unchecked)
-    check r.status == sxSat
-    check r.abstractions.len == 0
+  test "checked build (control): the wrap scan is off, the provably-safe param promotes in either program":
+    let alone = symexFind(safeAlone, tLabel("t"), Unchecked)
+    check alone.status == sxSat
+    check alone.abstractions.len == 1
+    let mixed = symexFind(mixedBan, tLabel("t"), Unchecked)
+    check mixed.abstractions.len >= 1   ## no whole-program ban in a checked build
 
 # =============================================================================
 # R14d -- an opaque call placed AFTER the target is invisible to it.

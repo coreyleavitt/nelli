@@ -1,9 +1,12 @@
 # RFC-0016 native-parity hardening — handoff
 
-- **Stage:** design done: `/architect` rounds 1-3 on 2026-11-06, on branch
+- **Stage:** design done: `/architect` rounds 1-3 on 2026-11-06 and round 4
+  on 2026-11-07, on branch
   `rfc-0016-design` (base `main` 83c1d304). Implementation of
   Wave 1 (0.9.2) is next (decision D-0016-5).
-- **Resume:** `/tdd rfc-0016 wave 1` (K9a first, then W1-c3; order in §11).
+- **Resume:** `/tdd rfc-0016 wave 1` (INF-05 first, then the three 0.9.1
+  baselines as release assets, then K9a, W1-c3; order in §11). ADM-1 and
+  CI-A1 may run in parallel worktrees.
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.
@@ -21,8 +24,8 @@ build; P = the lens did.
 | F-0002 | 2026-11-06 | soundness | same (expected) | research lens B | local `{.cursor.}` (W-02) | V | W1-b | open |
 | F-0003 | 2026-11-06 | soundness | same (expected) | research lens D | `--panics:on` Defect path (W-03) | V | W1-c2 | open |
 | F-0004 | 2026-11-06 | soundness | same (expected) | research lens A | float32/float64 conversion (W-04) | P | W1-e | open |
-| F-0005 | 2026-11-06 | soundness | same (expected) | research lens C | `low(int) mod -1`, literal divisor (W-05) | P | W1-d1 | open |
-| F-0006 | 2026-11-06 | soundness | same (expected) | research lens B | unsigned div/mod by zero (W-06) | P | W1-d1 | open |
+| F-0005 | 2026-11-06 | soundness | same (expected) | research lens C | `low(int) mod -1`, literal divisor (W-05) | P | W1-d1a | open |
+| F-0006 | 2026-11-06 | soundness | same (expected) | research lens B | unsigned div/mod by zero (W-06) | P | W1-d1b | open |
 | F-0007 | 2026-11-06 | soundness | same (expected) | research lens D | checks-off signed wrap (W-07) | P | W1-d2 | open |
 
 ## Round 1 ledger (2026-11-06)
@@ -192,14 +195,88 @@ patch release whose migration note lists them (D-0016-5 stands).
 | 61 | liveness | `symex-mingw.yaml:217-230` cite is the Z3 install step | the cite was in the replaced §8.2 text; dropped |
 | 62 | liveness | INF-04 item 10 "do not file" contradicts D-0016-3 | superseded note in §11 carried slices |
 
-**W1-d2's files** (verdict-bearing `acOverflow` opt-outs, 13 of the 19 that
-name `arithChecks`): `tsymex_161_overflow_obligation`,
+**W1-d2's files** (verdict-bearing `acOverflow` opt-outs, 13 of the 21 that
+name `arithChecks`; round 3 said 19): `tsymex_161_overflow_obligation`,
 `tsymex_163rev_concolic_modes`, `tsymex_163rev_inert_exclusions`,
 `tsymex_phase16_R16_4_overflow`, `tsymex_phase2_overflow`,
 `tsymex_phase3_summarization`, `tsymex_rfc0005_s8aa_remainder`,
 `s8ac_remainder`, `s8ad_remainder`, `s8aj_remainder_c`, `s8cu_cl_over`,
 `s8cu_push`, `s8w_remainder_b`. The other six pin settings shape or mention
-it in a comment.
+it in a comment, and two (`tsymex_configdefaults`, `tentrypointwiring`) pin
+the default `arithChecks`, which W1-d2 now derives from the build.
 
-**Next:** `/tdd rfc-0016 wave 1`, K9a first. The RFC is ready for `/tdd`;
+## Round 4 ledger (2026-11-07)
+
+Five lenses (depth, breadth, design, feasibility, liveness). All findings
+resolved by recommendation; no fork reached Corey.
+
+| # | lens | finding | resolution |
+|---|---|---|---|
+| 1 | liveness | the property the RFC lives on was never stated; first end-to-end run at W4-z | §8 opening sentence; K1-0 runs it on the seven §5.0 cells in Wave 1 |
+| 2 | breadth | no trust base: Z3 unsat, FFI, patched Nim and its VM, C compiler, unobservable C flags | §2.5 with a mitigation per row; the parser-VM cell in CI-B |
+| 3 | design | `Admit` constructible anywhere; IR built without it | private fields, accessors; IR constructors take `Admit` (ADM-1 spikes `ensureProcRegistered`) |
+| 4 | design | four declarations per axis | generic private `Row[S;P]`/`AxisTable[K;S;P]`; per-axis site enum, rows, verb |
+| 5 | design | `CellKey` stringly typed | `(scope: Scope, key)`; key only from `render`; `magic(static string)` |
+| 6 | design | `MagicShape` duplicates the definedness axis | dropped; magic keys on name, `OperandClass` only in definedness |
+| 7 | breadth | no type-class axis (`NimTypeKind` × modifiers) | ninth axis `axTypeClass`, K3a; K2c corpus per `NimTypeKind` |
+| 8 | breadth | generics have no home | `faGeneric` family (geUnresolvedGeneric, geInstantiationCapped, AUD-07) |
+| 9 | breadth | pragma axis only local | three lists; `union`/`packed`/`byref`/`bycopy`; `noalias` as an `OperandClass` (K3c) |
+| 10 | feasibility | `unsignedIntOps` (`dsl_parser.nim:11866`) a fifth magic table | in the magic axis's absorbs; the first converted site |
+| 11 | depth | ledger parses markdown by regex | `docs/rfc/0016-worklist.toml`, rendered back with a staleness check (K1a-ids) |
+| 12 | depth | records keyed by (file, segment): Z3 versions and reruns clobber | one file per run id; `rowOf` in the record |
+| 13 | feasibility | `NELLI_PIN_DIR` does not reach the container; `.pins/` untracked | INF-05 forwards it; `.gitignore` |
+| 14 | depth | an `exact` cell with no record on a leg passes | counts as unclassified there |
+| 15 | depth | "only grows" checked by review | committed `0016-universe.tsv` diffed by the test |
+| 16 | depth | closed and `never` rows unverified | closed names an exact/never cell or pin; never names a never cell |
+| 17 | depth | declined-for-now cells count as done | `iModel` is open (§12 item 2); `NeverReason` enum |
+| 18 | depth | bare `skip(` | `skipCell` writes a `skipped` record; census fails from Wave 4 (K2a-fail) |
+| 19 | breadth | 17 caps have no coverage | `CapKind`, one halt site each (K7a); K1 derives coverage |
+| 20 | feasibility | "about 90" error kinds | 81 |
+| 21 | depth | PCRE and Z3 are run-time facts in a compile-time profile | `HostSemantics`, keyed (`pcre_engine.nim:93`, `canonicalize.nim:6645`) |
+| 22 | design | `cpu`/`os` strings; endian unread; two names for the segment | enums; `endian` refused; one name `buildSegment` |
+| 23 | depth | build-to-row mapping implicit | `rowOf` with per-field justifications; no row refuses |
+| 24 | breadth | unobservable C flags | `assumedAbsent` provenance; `never(nrUnobservable)`; K10c `-ffp-contract=off` pin |
+| 25 | depth | §8.3 said `check_options` rebases on the profile, which reopens W-07 | baseline stays `defaultOn`; W1-c1a moves only the reads |
+| 26 | depth | `SymexSettings` keyed by a hand list | `fieldPairs` with an explicit neutral `const` (K5a), pinned in CR2 |
+| 27 | depth | `pinCrash` probe loses `-d:` defines and the C compiler | inherits defines; `vcc` arm; flags in its record |
+| 28 | design | `admittedExact` is a walker claim with no evidence | dropped; `exact` + K2 literal census; `continued` added for `:19172` |
+| 29 | design | four pin verbs; `pinRaised` duplicates `pinExact` | three verbs; raise is a target; `PinVerdict` enum |
+| 30 | depth | `pinCrash` records could evidence `exact` cells | only `declined` or `never`; exit class per OS |
+| 31 | feasibility | `pinExact` needed exports from `symex.nim` | built on public `assertCoveredBy` + domain loop |
+| 32 | feasibility | K9b retyped every Wave-1 key | K9a lands `CellKey` unchecked; axes switch their own keys |
+| 33 | depth | UB beside taint, not through it | `Degrade.ub`, `Path.undefined` joined by carriers; contiguous `ub*` kinds and `UbKind` range; `feNoinitRead`/`feWitnessUndefined` dropped |
+| 34 | depth | lazy decision at the boundary puts the prune outside the callee window | eager capped check at the op (`loopArmInfeasible` shape) |
+| 35 | depth | `routeRaise` lets `except:`/`finally` consume UB | `haltUndefined`, sibling of `crashRaise`; `¬cond` in `pc` not `defectSurvivorPc` |
+| 36 | depth | "opaque means may be undefined" untrusts nearly every sat | opaque answers by magic and stdlib-body rows |
+| 37 | feasibility | no resume-from-label exists | second walk from the entry under the witness's choices; lossy counts as undefined; K10b a round with perf figure |
+| 38 | depth | codec one char per field cannot hold a 5-member set | decimal of any length; `ord` pin; `runDependence` detection by length |
+| 39 | depth | `{.noinit.}` recorded at allocation also hits written vars | at the read site (`unwrittenKind`/`observeRecvPart`), per path in W1-d3 |
+| 40 | depth | three wrap readers can disagree (#161 shape) | one `buildWraps` predicate; `defaultSymexSettings` derives `arithChecks`; checks-off cfg suite |
+| 41 | depth | Windows UB pin asserted only "did not finish" | exit class per OS |
+| 42 | liveness | sat-after-label gap unlisted for 0.9.2 | named known gap in the migration note |
+| 43 | breadth | entry points: four listed, six exist | `symexFindAllWitnesses` and the cache hit added |
+| 44 | depth | wall-clock budgets flake exact pins | rlimit-only in `pinExact` |
+| 45 | breadth | no metamorphic oracle | §10 relations; K8a-gen, K8b |
+| 46 | breadth | pin strength unmeasured | K9e mutation figure |
+| 47 | liveness | INF-05 after the slices that need its gate; baselines on one host | INF-05 first; baselines as `v0.9.1` release assets in `tests/0016-baselines.txt` |
+| 48 | feasibility | W1-c1 touched five modules | W1-c1a (reads) and W1-c1b (reroutes, refusal) |
+| 49 | feasibility | W1-c2 changed `hostRunnable` | uses `witnessUnsafe`; destructor gap named |
+| 50 | liveness | W1-m dispatch and empty-glob | `workflow_dispatch` with ref; zero matches fail |
+| 51 | liveness | SND-07, SND-12, INT-21 probe agreements unpinned | W1-p |
+| 52 | feasibility | W1-d1 mixed three mechanisms | W1-d1a (signed), W1-d1b (unsigned sink and scan), W1-d1c (call cache) |
+| 53 | feasibility | per-slice walker bumps unspecified | every verdict-bearing slice bumps, updates CR2:1103, adds a floor |
+| 54 | feasibility | CI-A, K1a, K4a, K8a, K10a over three modules | split (CI-A1-3, K1a-cells/ids/last/ci, K4a-table/dispatch/guard, K8a-gen/job/sink, K10a-target/axis/float/concolic) |
+| 55 | liveness | probes deferred to Wave 4 behind K4c | K2-0 probe batch in Wave 2 |
+| 56 | liveness | `symexForAll`/concolic first pinned in Wave 4 | K9d-0 in Wave 2 |
+| 57 | feasibility | K5a in Wave 3 though Wave 2 records need the profile | K5a first in Wave 2, emits `-fwrapv` |
+| 58 | liveness | W2-z/W3-z checked presence, not content | nonzero records, cells, SUTs; per-axis exact cell and shrunk allowlist |
+| 59 | breadth | hygiene rows homed "Wave 4" only | H1 |
+| 60 | liveness | 16 research W ids invisible to the ledger | §5.9 rows W-08..W-61 |
+| 61 | liveness | STY rows homed by prose | slice id as state; AUD-01/09/11 homed |
+| 62 | depth | CRH-03 wholly moved | bounded decline stays as a declined cell; only the merge moves |
+| 63 | breadth | §12 had no cost or docs item | items 7 (25% per leg, 60 s, minutes cap) and 8 (README names every kind) |
+| 64 | breadth | alternatives unrecorded | §13: checks-off refusal (D-0016-9), always `-fwrapv`, second solver, EMI, mutation, UB-free generation, IR interpreter |
+| 65 | feasibility | handoff said 19 files name `arithChecks` | 21; two pin the default |
+
+**Next:** `/tdd rfc-0016 wave 1`, INF-05 first. The RFC is ready for `/tdd`;
 `state` stays `in-progress`.

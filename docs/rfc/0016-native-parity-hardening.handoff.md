@@ -4,9 +4,8 @@
   on 2026-11-07, on branch
   `rfc-0016-design` (base `main` 83c1d304). Implementation of
   Wave 1 (0.9.2) is next (decision D-0016-5).
-- **Resume:** `/tdd rfc-0016 wave 1` (INF-05 first, then the three 0.9.1
-  baselines as release assets, then K9a, W1-c3; order in §11). ADM-1 and
-  CI-A1 may run in parallel worktrees.
+- **Resume:** `/tdd rfc-0016 wave 1` (K1-0, then W1-z second half, then
+  the 0.9.2 gate; see Wave 1 progress).
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.
@@ -16,14 +15,42 @@
   (walker 273), W1-c1a `d4efde91`, W1-c2 `6d40f03c` (274), W1-p `7f45bc8e`,
   W1-c1b `24ab03ca`, W1-b `2b5a1f8e` (275), W1-g `05dbb256` (276), W1-e
   `86536fa9` (277), W1-f `3451144a` (278), CI-A1 `39cca9e5` (Wave 2,
-  provisioning; runs 42363408913 / 42363671399), W1-d1a `e044a290` (279),
-  W1-d1b `682de5a4` (280). ADM-1 built on `origin/rfc-0016-adm1` `04cd1ab7`,
-  held until after the 0.9.2 tag. In flight: W1-d1c, W1-d3, W1-m (fuzzer-msvc
-  step, CI runs), CI-A2. Remaining after them: W1-d2 (round), K1-0, W1-z.
-  0.9.1 baselines still running on eos (`~/nelli/bl091.sh`, logs
-  `~/nelli/bl091-{c,cpp,z3-4.13.4}.log`), to be uploaded as `v0.9.1` release
-  assets and listed in `tests/0016-baselines.txt`; the whole-suite diff runs
-  at a batch sha once they finish.
+  provisioning), W1-d1a `e044a290` (279), W1-d1b `682de5a4` (280), W1-d1c
+  `b7296b78` (test only), CI-A2 `9540ecb3` (`sweep.sh --host`/`--derive`),
+  W1-d3 `a22d7f5c` (281, codec v4), W1-d2 `0aa6b3bb` (282, 14 pin files
+  rewritten, 8 `_checksoff` siblings), W1-d2c `0325b50f` (283, `push
+  overflowChecks: on` in a checks-off build is checked), W1-m `154c56a0`
+  (284; fuzzer-msvc runs every `tsymex_0016_*` under vcc; the re-exec replay
+  confirms a SUT naming its own routine global), let-audit fix `42add4ed`,
+  W1-z first half `a3836f09` (deprecations, `docs/migration/0.9.2.md`, README
+  decline catalogue, `scripts/check-readme-kinds.sh`), stale-test migration
+  `63a1f4a6`, Windows crash classifier `a6b2523e`. ADM-1 held on
+  `origin/rfc-0016-adm1` `04cd1ab7` until after the 0.9.2 tag. In flight:
+  K1-0 (worktree `k10`, `scripts/k1lite.sh` runs the seven W1 suites into a
+  fresh pin dir, then the join). Remaining: K1-0, W1-z second half (three-way
+  rows, F-0001..F-0007 closed, UPS-01/UPS-03 filed, RFC-0017 MOV-01 records,
+  the spec corrections below applied to the RFC), then the 0.9.2 gate.
+- **Gate lesson (2026-11-07):** slices landed on their own suites only, and
+  the Windows legs' runs on `main` were cancelled by each next push, so the
+  W1-d2/W1-d1b/W1-m/W1-d3 contract changes left 11 stale files (red on Linux
+  and Windows) plus a let-audit red that no run surfaced until symex-mingw
+  finished at `42add4ed`. Fixed by `42add4ed`, `63a1f4a6`, `a6b2523e`. From
+  here a slice that changes a contract runs every test naming the changed
+  surface (`command grep -l`) before landing, and the 0.9.2 gate is the
+  whole-suite podman sweep on eos at the W1-z sha (CI host sweep is not yet
+  a gate: the `symex-linux` job's 45-minute cap ran 246 of ~900 tests, and
+  four fuzzer tests, `tfuzzcovdump`, `tfuzzcovreset`, `tfuzzworkerprocess`,
+  `tfuzzworkerspawnfailshm`, fail on the ubuntu-24.04 host while green in the
+  0.9.1 podman baseline; both are CI-A3's to fix).
+- **Windows native facts:** a Nim probe's division fault on Windows prints
+  `SIGFPE: Arithmetic error` and exits 1 (the CRT maps 0xC0000094); `low(int)
+  mod -1`/`div -1` raise 0xC0000095, which the mingw CRT does not map, so
+  without the probes' first-chance handler the process sat in WER until the
+  20 s budget and was killed with code 0. With the handler both trap, as on
+  Linux.
+- **0.9.1 baselines:** still running on eos (`~/nelli/bl091.sh`, logs
+  `~/nelli/bl091-{c,cpp,z3-4.13.4}.log`); upload as `v0.9.1` release assets
+  and list in `tests/0016-baselines.txt` when `~/nelli/bl091.all.done` exists.
 - **Spec corrections found in implementation (apply at W1-z):** W1-c2's RED
   expects `sxUnsat` for the label; the walker's established Defect rule (E6)
   gives `sxRaised` with `witnessUnsafe`, never `sxSat`, which is the
@@ -46,7 +73,12 @@
   a `SymexErrorKind`); a row is admitted per site set with an `elsewhere`
   kind; the key type parameter is dropped (string keys); rows are a `const`
   seq; the per-axis verbs live beside their payload types (import cycles).
-  The `vsArm` site is declared but consumed only at K4a.
+  The `vsArm` site is declared but consumed only at K4a. W1-z first half:
+  Nim 2.2 rejects `{.deprecated: "msg".}` on an object field, so `arithChecks`
+  and `SymexResult.fromCache` carry the bare pragma and the path forward is in
+  the doc comment and the migration note (the row's "path in the message"
+  cannot hold for fields). A `--rangeChecks:off` build declines every routine
+  `feCheckOption` (PRC-07/PRC-08, later waves).
 
 ## Findings ledger (§3.2), newest at the bottom
 

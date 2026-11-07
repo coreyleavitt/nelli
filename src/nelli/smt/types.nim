@@ -4,6 +4,8 @@
 ## the bottom of the file (right above the rendering helpers); the
 ## rest of this module is type definitions only.
 
+{.push warning[Deprecated]: off.}  ## RFC-0016 W1-z: this module reads `arithChecks` itself (deprecated for users)
+
 import std/tables
 import std/options   ## Phase 15 R12: Option[string] for HeapSnapshotEntry.aliasRef/pointsTo
 export tables, options
@@ -3212,7 +3214,13 @@ type
       ## used, on every status. An `sxUnsat` is a proof only under these
       ## bounds -- and by §2.3 it has no under-approximating error to say
       ## so, so the settings are the one carrier (RFC-0011 / RFC-0008).
-    fromCache*:    bool
+    fromCache* {.deprecated.}: bool
+      ## DEPRECATED (RFC-0016 W1-z; removed in 0.10.0, INT-39). Nim's
+      ## `deprecated` pragma takes no message on an object field, so the
+      ## path forward is here: the cache-hit flag is
+      ## `SymexFinding.fromCache` (`symexFindAllWitnesses`, `symexForAll`);
+      ## this field has no producer. See docs/migration/0.9.2.md.
+      ##
       ## Always `false` today. `symexFind`, the one producer of a
       ## `SymexResult`, takes no `ExampleDatabase`, so it never serves a
       ## cached result: every call walks. The content-addressed cache is
@@ -3268,11 +3276,18 @@ type
       ## Phase 15 Z3. Defect families the walker must NOT model as
       ## raise-paths. Default excludes OOM + stack-overflow (modelling
       ## those yields spurious sxRaised for virtually all real SUTs).
-    arithChecks*: set[ArithCheck] =
+    arithChecks* {.deprecated.}: set[ArithCheck] =
       (when coOverflow in buildSemantics.checks: {acOverflow, acDivByZero}
        else: default(set[ArithCheck])) +
       (when coRange in buildSemantics.checks: {acRange}
        else: default(set[ArithCheck]))
+      ## DEPRECATED (RFC-0016 W1-z; removed in 0.10.0, INT-39). Nim's
+      ## `deprecated` pragma takes no message on an object field, so the
+      ## path forward is here: do not set it. The build decides, via
+      ## `--overflowChecks` / `--rangeChecks` (see `nelli/smt/buildprofile`
+      ## and `arithChecksFor`); an explicit disagreeing value taints the
+      ## run `feCheckOption`. See docs/migration/0.9.2.md.
+      ##
       ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks to EMIT.
       ## RFC-0016 W1-d2: the default is DERIVED from the build
       ## (`arithChecksFor(buildSemantics)`): a debug build is all-on

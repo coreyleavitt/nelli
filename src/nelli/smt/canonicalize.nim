@@ -16,6 +16,8 @@
 ## No constructor's payload may contain an unescaped sigil; primitives
 ## are wrapped to enforce that.
 
+{.push warning[Deprecated]: off.}  ## RFC-0016 W1-z: this module reads `arithChecks` itself (deprecated for users)
+
 import std/[strutils, tables, algorithm]
 import ./types
 import ./pcre_engine

@@ -16,6 +16,8 @@
 ## here ship with the variant present and the structural plumbing in
 ## place, so cycle 5 only adds the promotion logic, not new families.
 
+{.push warning[Deprecated]: off.}  ## RFC-0016 W1-z: this module reads `arithChecks` itself (deprecated for users)
+
 import std/tables
 import std/options
 from std/typetraits import nil   ## RFC-0005 S8ar: `readCellField`'s distinct arm

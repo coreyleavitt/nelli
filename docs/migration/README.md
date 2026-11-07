@@ -41,3 +41,13 @@ CHANGELOG entry cannot do the work on its own:
 
 If the change announces itself with a clear compile error at the right place,
 the CHANGELOG is enough. Do not write one of these out of habit.
+
+## Index
+
+| Upgrading to | Note | What it is about |
+|---|---|---|
+| 0.7.0 | [0.7.0.md](0.7.0.md) | `import nelli` no longer re-exports the symex and concolic surface |
+| 0.8.0 | [0.8.0.md](0.8.0.md) | the silent behaviour changes; supersedes the per-RFC downstream audit |
+| 0.9.0 | [0.9.0.md](0.9.0.md) | the RFC-0005 soundness surface |
+| 0.9.1 | [0.9.1.md](0.9.1.md) | wiring-audit and code-review fixes; three 0.9.0 regressions |
+| 0.9.2 | [0.9.2.md](0.9.2.md) | RFC-0016 Wave 1: the clean false verdicts, undefined behaviour as an outcome, build-derived checks |

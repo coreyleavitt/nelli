@@ -392,17 +392,112 @@ strategies actually consume). Effect on existing DBs:
 Walker version stays at `"3"`; non-collection witnesses across
 the Phase 12 upgrade keep their cache entries.
 
-### Local variable pragmas
+## Declines, taints and undefined behaviour
 
-A pragma on a local `var` or `let` is admitted only when the walker models it
-or it cannot change what the program does: `noinit`, `global`, `inject`,
-`gensym` and `used`. Any other (`cursor`, `align`, `volatile`, `codegenDecl`,
-...) declines with `feLocalPragma` on every path that reaches the declaration:
-the verdict is `sxUnknown`, never a trusted `sxSat` or `sxUnsat`. `{.cursor.}`
-in particular makes the local share the source's memory, which the walk models
-as a copy.
+A run that cannot model something does not guess. It records a classified
+`SymexErrorInfo` (`SymexResult.errors`, `SymexFinding` through `gaps`), and the
+kind tells you what the walker did in place of the real behaviour. Every kind
+below is a member of `SymexErrorKind`; read them off the result, never by
+matching message text. The four classes (`classOf`) decide what the verdict
+may claim:
 
-### Out of scope for v1 (diagnosed at macro time)
+| Class | What the walker did | What it costs the verdict |
+|---|---|---|
+| no answer | the walk stopped; there is no path | `sxUnknown` |
+| substituted | a forced value, a stale environment or a fabricated continuation took the real behaviour's place | a `sxSat` or `sxUnsat` through the path is not trusted; the path's claim is `sxUnknown` or an untrusted verdict |
+| fresh symbol | the result became an unconstrained value of its sort, a superset of the real behaviours | an `sxUnsat` stands; an `sxSat` is replayed on the real function before it is reported |
+| omitted | the path was dropped (a halt, a crash, or a pruned side) | the omission is recorded; a trusted `sxSat` needs the omission to be benign |
+
+`trusted(result)` is the test for "may I act on this verdict"; `gaps(result)`
+is the per-cause view.
+
+### Undefined behaviour (`ub*`, `UbKind`)
+
+Nim leaves some operations to C, and C leaves them undefined: the compiler may
+assume they never happen and rewrite code around them, including code before
+them. The walker does not pick one build's outcome. The path ends at the
+operation (it is neither a `Defect` nor a value), the omission is recorded on
+the path and the verdict (`Soundness.witnessUndefined`, `undefinedKinds()`),
+and a replay cannot lift it: a witness that reaches the target past such an
+operation is not `trusted()` and is not run in your process by
+`assertCoveredBy` or `symexForAll`. These are all in the *omitted* class.
+
+| Kind | The operation | What to do |
+|---|---|---|
+| `ubUnsignedDivZero` | `x div 0` or `x mod 0` on an unsigned type. Nim has no check; the C division traps (SIGFPE on x86-64). Not a `DivByZeroDefect`. | Guard the divisor, or keep the property off inputs where it can be zero. |
+| `ubIntMinModMinusOne` | `low(T) mod -1` (and `low(T) div -1` with overflow checks off) at 32 and 64 bits. The C division is undefined and traps on x86. | Guard the divisor against `-1` for the minimum. |
+| `ubSignedOverflow` | signed `+`, `-`, `*` or negation that overflows, in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`) and no `-d:nelliFwrapv`. The compiler may assume it never happens (`v + 1 > v` folds to true). | Build with overflow checks on, or `-d:nelliFwrapv` if the program relies on the wrap, or bound the operands. |
+| `ubFloatToIntRange` | a float to int conversion out of range. Declared; no emission site yet (the conversion still records `feConvFloatToIntUndefined`). | See `feConvFloatToIntUndefined`. |
+| `ubIndeterminateRead` | a read of a `{.noinit.}` local before any write. | Initialise it. |
+
+### Build and check taints
+
+| Kind | Meaning | What to do |
+|---|---|---|
+| `feCheckOption` | A routine is compiled without a check the walker models (`fieldChecks`, `rangeChecks`, `boundChecks`, `objChecks`), or with a float check it does not; or `SymexSettings.arithChecks` was set to something other than what the build compiles in. The routine's raises and values are not the model's. | Compile with the checks on. Do not set `arithChecks`: the build decides it (see the 0.9.2 migration note). |
+| `feOverflowCheckOption` | `{.push overflowChecks: off.}` (or `{.overflowChecks: off.}`) on a routine while the settings model overflow. A pushed-off routine in a checking build always declines. | Remove the pragma, or build the whole program with overflow checks off. |
+
+A `{.push overflowChecks: on.}` routine in a checks-off build is modelled as a
+checked routine: its signed overflow and division by zero raise.
+
+### Constructs the walker declines
+
+Path-scoped: only the paths that reach the construct are affected, and the
+rest of the run is unchanged.
+
+| Kind | Meaning | What to do |
+|---|---|---|
+| `feLocalPragma` | A local `var` or `let` carries a pragma the walker neither models nor can ignore. Admitted: `noinit`, `global`, `inject`, `gensym`, `used`. Any other (`cursor`, `align`, `volatile`, `codegenDecl`, ...) declines on every path that reaches the declaration. `{.cursor.}` in particular makes the local share the source's memory, which the walk models as a copy. | Move the pragma off the analysed routine, or restructure. |
+| `feFloatWidth` | A conversion between `float32` and `float64`, explicit (`float32(x)`, `float64(y)`, `float(y)`) or compiler-inserted. The exact rounding conversion is not modelled; see [Float widths](#float-widths). A `float32` operand of a binary operator whose peer is a `float64` is exact and kept. | Keep one width inside the property, or convert outside it. |
+| `feConvFloatToIntUndefined` | A float to int conversion whose operand may lie outside the target range (NaN, infinity, or a value that does not fit). Nim never raises there; the C cast is undefined. The result is a fresh symbol, so a hit is replayed. | Bound the operand before the conversion. |
+| `feUnsupportedOp` | An unmodelled operation; its result is a substituted value. | Mark the callee `{.symexOpaque.}` or `{.symexTransparent.}`, or extend the model. |
+| `feUnsupportedOpHavoc` | As above where the result is a fresh unconstrained symbol (a superset). | None needed for an `sxUnsat`; an `sxSat` is replayed. |
+| `feUnsupportedOpAborted` | An unmodelled `math.<name>` or float operation aborted the whole walk. `sxUnknown` with no path. | Avoid the operation under analysis, or wrap it in an opaque callee. |
+| `feUnsupportedExprKind` | The parser met an expression shape outside the supported fragment. It used to stop the compile; it now declines. | Rewrite the expression, or see the supported fragment. |
+| `feUnsupportedStmtKind` | The same for a statement position (unmodelled assignment shapes, iterator forms, an uninitialised declaration the model cannot place). | As above. |
+| `feUnsupportedParamType` | A parameter type outside the supported scalar and container set. | Take a supported type at the analysed boundary. |
+| `feUnsupportedWitnessType` | The witness reader cannot render a `seq`, `Table` or `HashSet` element shape. | Use a renderable element type. |
+| `feEnumOrdinalUnresolved` | An enum constant's ordinal could not be resolved from its declaration. | Reference the constant through its type. |
+| `feExtractionFailed` | The solver's model value for a float could not be read back, so the witness renders lossily. A lossy witness is replayed or not trusted. | Treat the witness as an approximation. |
+| `feEvalOrderUnmodelled` | An operand Nim checks where it stands but reads after a later operand's call (`a[i] + f()`) where that call changes what the operand reads. | Bind the operand to a `let` first. |
+| `feGlobalReadUnmodelled` | A read of a module-level name the walk could not bind. | Pass the value as a parameter. |
+| `feGlobalRouteUnproved` | A read of a module-level `var` that a store the walk does not see may reach (a lifetime hook, code the analysis cannot read). The held value may be stale. | Pass the value as a parameter. |
+| `feOpaqueCallUnmodelled` | A call classified as a black box (`echo`, `readLine`, `writeFile`, ..., or a `{.symexOpaque.}` proc) whose result or effects the walker cannot model. | Mark an inert callee `{.symexTransparent.}`, or accept the taint. |
+
+### Over-approximations (fresh symbols)
+
+Nothing is forked away and no effect is dropped, so an `sxUnsat` holds for
+every real behaviour and an `sxSat` is replayed before it is reported.
+
+| Kind | Meaning |
+|---|---|
+| `feGlobalHavoc` | A module-level variable the walk does not know takes a fresh value (a read before any write, or a global an opaque call's summary says it may write). |
+| `feOpaqueEffectHavoc` | An inert opaque call's other effects: heap cells it reaches take fresh contents, and a raise of each type it declares is forked. |
+| `feUncheckedDiscBytes` | A discriminator written under `{.cast(uncheckedAssign).}` to a different value takes the old bytes or zero. |
+| `feTableIterOrder` | A `for` over a `Table` with two or more entries on the path: the walker visits the keys in a free order, which covers the real hash order. |
+
+### Replay hints
+
+A candidate `sxSat` is run on the real function. These record why it did not
+become a confirmed claim. They are `sevHint`s on an `sxUnknown` result, never
+part of the taint.
+
+| Kind | Meaning |
+|---|---|
+| `feReplayRefuted` | The real run completed without reaching the target: a confirmed model gap on that witness. |
+| `feReplayTimedOut` | The replay outlived `SymexSettings.replayTimeoutMs`. Neither confirmed nor refuted. |
+| `feReplayCrashed` | The replay ended its child process (an exit, a signal, a system exception) before, or after, reaching the target. The message says how. |
+| `feReplayDeclined` | No child could run the replay (it could not start, or the state the SUT may reach cannot be handed to one). |
+
+Retired kinds (`feConvDomainExcluded`, `feTransparentArgNotInert`,
+`feTransparentResultUsed`) keep their ordinal and are never emitted; they stay
+in `SymexErrorKind` so cached entries and consumer `case` statements keep their
+meaning.
+
+`scripts/check-readme-kinds.sh` fails if a `fe*` or `ub*` member of
+`SymexErrorKind` (other than a retired one) is not named in this file.
+
+## Out of scope for v1 (diagnosed at macro time)
 
 - Unbounded loops without invariants (k-unwind exhaustion → `sxUnknown`)
 - Cross-module private callees (Nim `getImpl` returns empty)

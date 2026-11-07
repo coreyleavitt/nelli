@@ -1699,6 +1699,8 @@ task test, "Run the test suite":
             "tsymex_0016_panics_off",
             # RFC-0016 W1-a: one exception type id (W-01, W-33).
             "tsymex_0016_w1a_exn_typeid",
+            # RFC-0016 W1-p: the three probe agreements, natively (SND-07, SND-12, INT-21).
+            "tsymex_0016_w1p_probes",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

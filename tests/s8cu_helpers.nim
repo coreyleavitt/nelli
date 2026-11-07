@@ -64,8 +64,8 @@ type
     pvSkipped    ## `skipCell`: not run on this build, and why
 
   CrashExpect* = enum
-    ceDivTrap    ## SIGFPE on POSIX, 0xC0000094 on Windows
-    ceSegv       ## SIGSEGV on POSIX, 0xC0000005 on Windows
+    ceDivTrap    ## SIGFPE on POSIX; on Windows 0xC0000094/5 or Nim's SIGFPE report, exit 1
+    ceSegv       ## SIGSEGV on POSIX; on Windows 0xC0000005 or Nim's SIGSEGV report, exit 1
     ceDefect     ## a Nim Defect or panic: exit 1 with an unhandled-exception report
     ceAbnormal   ## any non-zero exit
 
@@ -381,12 +381,23 @@ template pinDecline*(fn: untyped; key: CellKey; kind: SymexErrorKind;
 
 # --- pinCrash and skipCell -------------------------------------------------
 
-proc crashClass(rc: int; output: string; expect: CrashExpect): bool =
-  when defined(windows):
+proc crashClassOn*(rc: int; output: string; expect: CrashExpect;
+                   windows: bool): bool =
+  ## Pure: is `rc` with `output` the `expect` class on that platform? A Nim
+  ## program on Windows rarely dies with the raw SEH code: the CRT maps the
+  ## divide fault 0xC0000094 to SIGFPE and the access violation to SIGSEGV,
+  ## and Nim's handler prints the report and quits with 1. So the class is
+  ## decided by evidence: the raw code, or exit 1 plus Nim's own report.
+  ## 0xC0000095 (INT_MIN idiv -1) is not mapped by the CRT and arrives raw.
+  if windows:
     let code = cast[uint32](int32(rc))
     case expect
-    of ceDivTrap: code == 0xC0000094'u32
-    of ceSegv: code == 0xC0000005'u32
+    of ceDivTrap:
+      code == 0xC0000094'u32 or code == 0xC0000095'u32 or
+        (rc == 1 and "SIGFPE: Arithmetic error" in output)
+    of ceSegv:
+      code == 0xC0000005'u32 or
+        (rc == 1 and "SIGSEGV: Illegal storage access" in output)
     of ceDefect: rc != 0 and "Defect]" in output
     of ceAbnormal: rc != 0
   else:
@@ -395,6 +406,13 @@ proc crashClass(rc: int; output: string; expect: CrashExpect): bool =
     of ceSegv: rc == 128 + 11        # SIGSEGV
     of ceDefect: rc != 0 and "Defect]" in output
     of ceAbnormal: rc != 0
+
+proc crashClass(rc: int; output: string; expect: CrashExpect): bool =
+  crashClassOn(rc, output, expect, defined(windows))
+
+when defined(windows):
+  proc setErrorMode(mode: uint32): uint32
+    {.importc: "SetErrorMode", stdcall, dynlib: "kernel32".}
 
 proc appTestFile(): string = splitFile(getAppFilename()).name & ".nim"
 
@@ -472,11 +490,20 @@ proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
   let backend = pb.backend
   let (cout, crc) = execCmdEx(pb.cmd)
   if crc != 0: pinFail("pinCrash " & render(key) & ": probe build failed:\n" & cout)
+  # A fault must die at once with its code, not wait in the error-reporting
+  # dialog (the child inherits the error mode).
+  when defined(windows):
+    let prevMode = setErrorMode(0x0001'u32 or 0x0002'u32)  # FAILCRITICALERRORS, NOGPFAULTERRORBOX
   let p = startProcess(exe, options = {poStdErrToStdOut})
-  let rc = p.waitForExit(20_000)
-  let output = p.outputStream.readAll()
+  when defined(windows): discard setErrorMode(prevMode)
+  # Explicit wall-clock budget: waitForExit's timeout path terminates the
+  # child with code 0 on Windows, which would read as a clean exit.
+  let t0 = epochTime()
+  while p.running and epochTime() - t0 < 20.0: sleep(20)
   let timedOut = p.running
   if timedOut: p.kill()
+  let rc = if timedOut: -1 else: p.peekExitCode()
+  let output = if timedOut: "" else: p.outputStream.readAll()
   p.close()
   removeDir(dir)
   if timedOut: pinFail("pinCrash " & render(key) & ": the probe did not finish")

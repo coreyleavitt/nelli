@@ -121,6 +121,28 @@ suite "K9a":
     pinCrash(key, "quit(3)\n", [], ceAbnormal)
     check recordsFor(key).len == 2
 
+  test "crashClassOn: Windows classification is by evidence":
+    const fpe = "SIGFPE: Arithmetic error.\n"
+    const segv = "SIGSEGV: Illegal storage access. (Attempt to read from nil?)\n"
+    # Windows: raw SEH codes and Nim's mapped report (exit 1)
+    check crashClassOn(int(cast[int32](0xC0000094'u32)), "", ceDivTrap, true)
+    check crashClassOn(int(cast[int32](0xC0000095'u32)), "", ceDivTrap, true)
+    check crashClassOn(1, fpe, ceDivTrap, true)
+    check not crashClassOn(1, "", ceDivTrap, true)
+    check not crashClassOn(1, segv, ceDivTrap, true)
+    check not crashClassOn(0, fpe, ceDivTrap, true)
+    check crashClassOn(int(cast[int32](0xC0000005'u32)), "", ceSegv, true)
+    check crashClassOn(1, segv, ceSegv, true)
+    check not crashClassOn(1, fpe, ceSegv, true)
+    check not crashClassOn(1, "boom", ceSegv, true)
+    check crashClassOn(1, "x [ValueDefect]", ceDefect, true)
+    check crashClassOn(3, "", ceAbnormal, true)
+    check not crashClassOn(0, "", ceAbnormal, true)
+    # POSIX: unchanged, and a Windows-shaped result is not a POSIX trap
+    check crashClassOn(136, "", ceDivTrap, false)
+    check crashClassOn(139, "", ceSegv, false)
+    check not crashClassOn(1, fpe, ceDivTrap, false)
+
   test "skipCell writes a skipped record":
     let key = cellKey(axMagic, "DivU")
     skipCell(key, "no native oracle on this build")

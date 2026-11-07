@@ -1,9 +1,9 @@
 # RFC-0016 native-parity hardening — handoff
 
-- **Stage:** design. `/architect` round 1 done 2026-11-06 on branch
-  `rfc-0016-design` (base `main` 83c1d304); round 2 next. Implementation of
-  Wave 1 (0.9.2) waits for round 2 (decision D-0016-5).
-- **Resume:** `/architect rfc-0016 round 2`, then `/tdd rfc-0016 wave 1`.
+- **Stage:** design done: `/architect` rounds 1 and 2 on 2026-11-06, on branch
+  `rfc-0016-design` (base `main` 83c1d304). Implementation of
+  Wave 1 (0.9.2) is next (decision D-0016-5).
+- **Resume:** `/tdd rfc-0016 wave 1` (K9a first).
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.
@@ -68,3 +68,53 @@ duplicates, stale evidence, reclassifications); check §8-§13 against the code
 once more (the admission table list, the 20 degrade sites, the census reach);
 stale CLAUDE.md lines (active RFC, "not green on a good day") are a
 repo-hygiene edit outside this RFC.
+
+## Round 2 ledger (2026-11-06)
+
+Five Fable lenses on `ff843ccc`; a sonnet agent applied the breadth lens's
+row-by-row §5 reconciliation. Every point resolved by recommendation; none
+reached Corey.
+
+| # | lens | finding | resolution |
+|---|---|---|---|
+| 1 | depth | shifts are masked by Nim's codegen (`ccgexprs.nim:665-667`), not UB | §9 corrected; shift decline dropped from W1-d; `shiftCountBV` is a defined row |
+| 2 | depth | a UB halt taints runs whose UB side is infeasible | halt only if `pc ∧ cond` sat, decided once per path at exit (§9.1 item 2) |
+| 3 | depth | whole-run check has no lattice home; replay could override it | `Soundness.witnessUndefined`, `trustedSat` respects it (§9.1 item 4); shared with noinit |
+| 4 | depth | continuation is not a concrete walk; no failure rule | reach an exit with every predicate unsat, any other ending counts as undefined; static IR scan gate |
+| 5 | depth, design | `SymexTargetKind` cases break; UB witness has no payload home | migration note; `undefined: seq[UbFinding[T]]` |
+| 6 | depth | `feUnadmitted` as `dcOmitted` leaves the surviving path clean | `dcNoAnswer` until K7b drops the path |
+| 7 | depth, design | a table does not prove a dispatch consults it | generated dispatch (`dispatchMagic`), arm ⇔ row checked at compile time; type-op verdict attached to the IR |
+| 8 | depth | enum-keyed tables as `openArray` lookups | `array[K, …]`; `exact(...)` constructor rejects empty rows |
+| 9 | depth | `querySetting` cannot see `--passC`, `-O`, compiler version | declared `-d:nelliFwrapv`; compiler family by `defined`, version a pin fact |
+| 10 | depth | inlined stdlib body under a push | stdlib-body rows carry their check-option delta |
+| 11 | depth | cell identity churns under refactor | cell = (axis, arm key); registered site strings |
+| 12 | depth | §12 vacuous three ways | non-empty rows; precision non-regression item 5; pairwise floor from K8a's first run |
+| 13 | depth | compile-only arm64/macOS cannot satisfy §12 | refused by name until run legs exist |
+| 14 | depth | `skip()` not checkable against cells | `skip("cell:<axis>/<key>")` |
+| 15 | design | `Admission[K]` is a row type, not a module | per-axis verbs, private rows, `Admit` answer, `Cell` enumerator (§8.1); old shape recorded in §13 |
+| 16 | design | `proven(paths, pin)` reopens the hole | dropped; `halt` returns void; `walkUnsupported(): Survivors` |
+| 17 | design | `$buildProfile` unstable; cc identity keyed | `cacheSegment` via `fieldPairs` + golden pins; semantic vs provenance fields |
+| 18 | design | K9 a fourth lineage, arity-locked | grows `s8cu_helpers.nim`, on the splat, typed `Domain`, typed cell |
+| 19 | design | float-to-int is a fresh symbol, not a halt | moves to the halt (K10a) |
+| 20 | liveness | W1 pins written before K9 | K9a first in Wave 1 |
+| 21 | liveness | K1 cannot read run-time `exhaustive`; shards split pins | pin records + post-shard K1 job |
+| 22 | liveness | ratchet forbids introducing an axis | per-axis introduction rule |
+| 23 | liveness | §5 rows and F ledger invisible to §12 | `Cell.items` + run-time id scan; §12 item 2 |
+| 24 | liveness | fuzzer and scheduled legs have no failure consumer | issue per shape hash / per red run; §6 intake rule |
+| 25 | liveness | MSVC shipping build has no row | `symex-msvc` in CI-B |
+| 26 | liveness | refc refusal only in Wave 3; RFC-0014 pointer missing | refusal in W1-c1; SND-14 |
+| 27 | liveness | older pending slices orphaned | "Carried slices" paragraph (§11) |
+| 28 | liveness, feasibility | 0.9.2 gate undefined | sweeps c/cpp/4.13.4 at the W1-z sha vs a 0.9.1 baseline, Windows legs, wiring audit, code review |
+| 29 | feasibility | W1-c and W1-d are rounds | split into c1/c2/c3 and d1/d2/d3; W-32 to Wave 4 |
+| 30 | feasibility | W-06 has two sites; W-20 cite wrong; W-21 has a third site | corrected in the Wave-1 table |
+| 31 | feasibility | second `nimPanics` read at `canonicalize.nim:6537` | rerouted in W1-c1 |
+| 32 | feasibility | stale cache between W1 slices | bump in W1-a |
+| 33 | feasibility | `verifiedLibs` needs a payload or absent-kind | ADM-1 decides; interface expected to change |
+| 34 | feasibility | CI-A hides a known-red allowlist and provisioning | sized m-l with its parts listed |
+| 35 | breadth | many W rows and §5 rows had no slice | §5.9; PRC-01/02 in Wave 3; K7 takes W-11/W-16; K5b takes W-58 |
+| 36 | breadth | 0.10.0 migration note unnamed; second cold start | K10d writes it |
+| 37 | breadth | §3.1 still said "tracked by rate" | restated; INF-03 rate report dropped |
+| 38 | breadth | §5.1-§5.8 reconciliation | applied row by row (closes, merges, moves, SND-13/14, PRC-36/37, CRH-06..09) |
+
+**Next:** `/tdd rfc-0016 wave 1`, starting with K9a. The RFC's `state` stays
+`in-progress` (it was already past `ready` when RFC-0005's slices moved in).

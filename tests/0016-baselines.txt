@@ -1,0 +1,14 @@
+# RFC-0016 section 11: the 0.9.1 whole-suite sweep baselines that every
+# Wave-1 and later gate diffs against (scripts/sweep-diff.sh <baseline> <current>).
+#
+# Each baseline was recorded from a worktree whose tree is identical to the
+# v0.9.1 tag's (tree 965e2eb4). They are published as assets of the GitHub release v0.9.1;
+# fetch them with:
+#   gh release download v0.9.1 -p 'sweep-0.9.1-*' -p SHA256SUMS
+# Each row has five files: <name>.log, .log.drift, .log.env, .log.summary and
+# .log.warnings. SHA256SUMS in the release covers all of them.
+#
+# row        sweep flags          asset                       sha256 (of the .log)
+c          -                    sweep-0.9.1-c.log           392dd36ab5ff4742f4d548db408a53045239cb390779f22d19a7a60767951932
+cpp        -b cpp               sweep-0.9.1-cpp.log         4fde1c197a610bea165349d9355cb6cc24dc0482f7755beaef3b4e5fac8f9256
+z3-4.13.4  -i z3-4.13.4         sweep-0.9.1-z3-4.13.4.log   2f48b80e2cfe2c7053302fa59462b77138b87c75e10480eb3d72a8e0f7e6aabd

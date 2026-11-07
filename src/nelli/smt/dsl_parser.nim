@@ -5931,7 +5931,10 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
   # The scrutinee is evaluated unconditionally, so its preamble belongs in the
   # OUTER preamble — before the lowered if-chain.
   let scrutinee = parseExpr(n[0], preamble, ctx)
-  var branches: seq[IRBranch]
+  # RFC-0016 W1-f (W-21): the `of` arms by value, then each `elif` in order,
+  # then `else`. An `elif` condition's preamble runs only where every earlier
+  # arm failed, which is what `lowerCondChain` places.
+  var arms: seq[CondArm]
   var elseBody: IRStmt = nil
   for i in 1 ..< n.len:
     let arm = n[i]
@@ -5942,7 +5945,11 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
         let labelIR = parseExpr(arm[j], preamble, ctx)
         let eq = mkBinop(bEq, scrutinee, labelIR)
         cond = if cond == nil: eq else: mkBinop(bOr, cond, eq)
-      branches.add mkBranch(cond, armBodyStmt(arm[arm.len - 1]))
+      arms.add (newSeq[IRStmt](), mkBranch(cond, armBodyStmt(arm[arm.len - 1])))
+    of nnkElifBranch, nnkElifExpr:
+      var condPreamble: seq[IRStmt]
+      let condIR = parseExpr(arm[0], condPreamble, ctx)
+      arms.add (condPreamble, mkBranch(condIR, armBodyStmt(arm[1])))
     of nnkElse, nnkElseExpr:
       elseBody = armBodyStmt(arm[0])
     else:
@@ -5969,7 +5976,11 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
       return mkIntLit(0)
     elseBody = mkLet(tmp, resultTy, zero)
 
-  preamble.add mkIf(branches, elseBody)
+  if arms.len == 0:
+    preamble.add mkIf(newSeq[IRBranch](), elseBody)
+  else:
+    let chain = lowerCondChain(arms, elseBody, preamble)
+    preamble.add chain
   mkVar(tmp)
 
 proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
@@ -11422,8 +11433,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   of nnkBracket:
     # Static array literal `[a, b, c]`. The element type comes from
     # the first element; uniform homogeneity is enforced by Nim.
+    # RFC-0016 W1-f: an EMPTY bracket has no first element. A field default
+    # `s: seq[int] = @[]` reaches here as a bare `[]` typed `seq[T]` (the `@`
+    # is folded away), so the type comes from the node itself.
+    if n.len == 0:
+      let emptyCls = classifyType(n)
+      if emptyCls.ty.kind != itSeq:
+        error("symex: cannot infer element type of empty `[]`", n)
+      return mkSeqLit(@[], emptyCls.ty.seqElemTy)
     # RFC-0005 S8ax: elements filled in order (`orderOperands`).
     let elems = parseOrderedArgs(n, 0, preamble, ctx, omElements)
+    let litCls = classifyType(n)
+    if litCls.ty.kind == itSeq:        # a field default `@[1, 2]`: a seq
+      return mkSeqLit(elems, litCls.ty.seqElemTy)
     let elemCls = classifyType(n[0])
     mkArrayLit(elems, elemCls.ty)
   of nnkBracketExpr:
@@ -19461,7 +19483,7 @@ proc parseStmtInner(n: NimNode,
     # `elif scrutinee == label: body`, with multiple labels chained via OR.
     var preamble3: seq[IRStmt]
     let scrutinee = parseExpr(n[0], preamble3, ctx)
-    var branches: seq[IRBranch]
+    var arms: seq[CondArm]   # RFC-0016 W1-f: `of` arms, then `elif`s
     var elseBody: IRStmt = nil
     for i in 1 ..< n.len:
       let arm = n[i]
@@ -19493,12 +19515,19 @@ proc parseStmtInner(n: NimNode,
           ctx.procScoped.caseNarrow.add (subjectRepr: scopedRepr(n[0]), tags: narrowTags)  ## RFC-0005 S8e: symbol-keyed
         let armBody = parseStmt(arm[arm.len - 1], ctx)
         if pushNarrow: discard ctx.procScoped.caseNarrow.pop()
-        branches.add mkBranch(cond, armBody)
+        arms.add (newSeq[IRStmt](), mkBranch(cond, armBody))
+      of nnkElifBranch, nnkElifExpr:
+        # RFC-0016 W1-f (W-21). Tested in order, after every `of` arm.
+        var condPreamble: seq[IRStmt]
+        let condIR = parseExpr(arm[0], condPreamble, ctx)
+        arms.add (condPreamble, mkBranch(condIR, parseStmt(arm[1], ctx)))
       of nnkElse, nnkElseExpr:
         elseBody = parseStmt(arm[0], ctx)
       else:
         error(&"unexpected case-arm kind {arm.kind}", arm)
-    let ifNode = mkIf(branches, elseBody)
+    let ifNode =
+      if arms.len == 0: mkIf(newSeq[IRBranch](), elseBody)
+      else: lowerCondChain(arms, elseBody, preamble3)
     if preamble3.len == 0: ifNode
     else:
       var all = preamble3

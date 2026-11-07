@@ -248,8 +248,12 @@ const renderAsChoicesVersion* = "12"
   ##   claim filters a channel in place. The walk's initial path is built in
   ##   one place (`initialWalkPath`). No verdict moves; the bump keeps cache
   ##   entries of the two claim identities apart.
+  ## - RFC-0016 W1-f (277->278): `case` takes `elif` arms, tested in order
+  ##   after the `of` arms (statement, expression and hoisted forms).
 
-const symexWalkerVersion* = "277"
+const symexWalkerVersion* = "278"
+  ## RFC-0016 W1-f (277->278): `case` takes `elif` arms; a bracket typed
+  ## `seq[T]` (a seq field default `@[]`, `@[1, 2]`) is a seq literal.
   ## RFC-0016 W1-e (276->277): a `float32` <-> `float64` conversion, explicit
   ## or compiler-inserted, declines `feFloatWidth` (was a pass-through).
   ## RFC-0016 W1-g (275->276): `x in a .. b` / `x notin a .. b` over an

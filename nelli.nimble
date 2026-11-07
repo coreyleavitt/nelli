@@ -1713,6 +1713,8 @@ task test, "Run the test suite":
             "tsymex_0016_w1p_probes",
             # RFC-0016 W1-b: local pragmas outside the allowlist decline (W-02).
             "tsymex_0016_w1b_localpragma",
+            # RFC-0016 code review: zero-parameter SUTs through every entry point.
+            "tsymex_0016_cr_zeroarg",
             # RFC-0016 W1-g: x in a..b / notin lower to bound comparisons (W-31).
             "tsymex_0016_w1g_inslice",
             # RFC-0016 W1-f: field defaults pinned against native; `case` with `elif` (W-20, W-21).

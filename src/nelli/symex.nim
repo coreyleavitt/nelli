@@ -1102,7 +1102,7 @@ macro symexForAll*(s: typed, fn: typed,
   for i in 1 ..< formalParams.len:
     nParams += formalParams[i].len - 2
   let prop =
-    if nParams <= 1:
+    if nParams == 1:
       fn      # single-arg: `fn` IS the property
     else:
       # Multi-arg: emit `proc(t: T) = fn(t[0], t[1], …)`. Type
@@ -1122,11 +1122,18 @@ macro symexForAll*(s: typed, fn: typed,
       if sTypeInst.kind != nnkBracketExpr or not sTypeInst[0].eqIdent("Strategy"):
         error("symexForAll: expected `s` to have type Strategy[T] " &
               "(got " & $sTypeInst.repr & ")", s)
-      let elemTy = sTypeInst[1]
+      # An empty element type reflects back as `()`, a value, not a type
+      # node; spell it `tuple[]`.
+      let elemTy =
+        if sTypeInst[1].kind == nnkTupleConstr and sTypeInst[1].len == 0:
+          newTree(nnkTupleTy)
+        else: sTypeInst[1]
       # Reject named-field tuples — `map(s1, s2)` produces an
       # anonymous positional tuple (nnkTupleConstr). Named-field
       # tuple strategies are deferred to a future cycle.
-      if elemTy.kind == nnkTupleTy:
+      # (A zero-parameter `fn` takes the strategy's element, ignores it, and
+      # calls `fn()`; its element type may be the empty `tuple[]`.)
+      if nParams > 1 and elemTy.kind == nnkTupleTy:
         error("symexForAll: named-field tuple strategies are not " &
               "supported as `s` for multi-arg `fn`; use the " &
               "anonymous `map(s1, s2, …)` form", s)
@@ -4577,6 +4584,21 @@ macro symexFindAllWitnesses*(fn: typed,
   # distinct gensym so it never shadows `witId`).
   let diagWitId = genSym(nskLet, "diagRawWit")
   let (_, diagWitnessTup) = emitWitnessTuple(parsed.params, diagWitId)
+  # A zero-parameter `fn` has the empty tuple `()` as its witness: a value,
+  # not a type annotation, so annotate only a non-empty one.
+  proc witnessDecl(name, tup: NimNode): NimNode =
+    if parsed.params.len == 0:
+      quote do:
+        let `name` {.used.} = `tup`
+    else:
+      quote do:
+        let `name`: `tupleTy` = `tup`
+  let typedDiagWitId = genSym(nskLet, "typedDiagWit")
+  let typedWitId = genSym(nskLet, "typedWit")
+  let typedRaisedWitId = genSym(nskLet, "typedRaisedWit")
+  let typedDiagWitDeclNode = witnessDecl(typedDiagWitId, diagWitnessTup)
+  let typedWitDeclNode = witnessDecl(typedWitId, witnessTup)
+  let typedRaisedWitDeclNode = witnessDecl(typedRaisedWitId, witnessTup)
 
 
   # Compile-time list of target constructors. We materialise them
@@ -4743,18 +4765,18 @@ macro symexFindAllWitnesses*(fn: typed,
               f.hints = `hintsSym`(raw.errors)
               for diagEntry in raw.diagnostics:
                 let `diagWitId` {.used.} = diagEntry.raisedWitness
-                let typedDiagWit: `tupleTy` = `diagWitnessTup`
+                `typedDiagWitDeclNode`
                 f.diagnostics.add FindingDiagnostic(
                   raisedTypeId:   diagEntry.raisedTypeId,
                   isDefect:       diagEntry.isDefect,
                   raisedMsg:      diagEntry.raisedMsg.get(""),
-                  witnessChoices: renderAsChoices(typedDiagWit))
+                  witnessChoices: renderAsChoices(`typedDiagWitId`))
               var verdictSaved = false
               case raw.status
               of sxSat:
                 let `witId` {.used.} = raw.witness
-                let typedWit: `tupleTy` = `witnessTup`
-                f.witnessChoices = renderAsChoices(typedWit)
+                `typedWitDeclNode`
+                f.witnessChoices = renderAsChoices(`typedWitId`)
                 verdictSaved = saveSymexWitnessImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
                                       f, `dbErrorsId`)
               of sxUnsat, sxUnknown:
@@ -4769,8 +4791,8 @@ macro symexFindAllWitnesses*(fn: typed,
                 # sfSat filter loops in tests don't double-match on the
                 # same base descriptor.
                 let `witId` {.used.} = raw.raisedWitness
-                let typedRaisedWit: `tupleTy` = `witnessTup`
-                f.witnessChoices = renderAsChoices(typedRaisedWit)
+                `typedRaisedWitDeclNode`
+                f.witnessChoices = renderAsChoices(`typedRaisedWitId`)
                 f.targetDesc = "raised(" & raw.raisedTypeId & ")"
                 # Phase 15 E6. Carry the defect type id onto the finding for
                 # display when the raised type is a `Defect` subtype.

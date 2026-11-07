@@ -11,6 +11,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/dsl_parser
+import nelli/smt/admission   # ADM-1: `varParamMagics.keys`
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -83,7 +84,7 @@ suite "S8bl (1): every system magic with a var parameter is classified":
       checkpoint m
       check m in names
     var classified: HashSet[string]
-    for m in varParamMagics: classified.incl m.magic
+    for m in varParamMagics.keys: classified.incl m
     for m in found:
       checkpoint "unclassified var-parameter magic `" & m.routine &
                  "` (magic \"" & m.magic & "\"): add it to `varParamMagics`"

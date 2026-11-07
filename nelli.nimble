@@ -1705,6 +1705,7 @@ task test, "Run the test suite":
             "tsymex_0016_k5a_segment",
             # RFC-0016 K7a: Survivors, CapKind and the halted/continued sites.
             "tsymex_0016_k7a_survivors",
+            "tsymex_0016_adm1_admission",
             "tsymex_0016_w1c1a_buildprofile",
             "tsymex_0016_w1c1b_reads",
             "tsymex_0016_w1c3_splat_defect",

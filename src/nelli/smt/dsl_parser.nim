@@ -40,6 +40,7 @@ import std/algorithm   ## Phase 15 G1a: sorted type-tuple in the inst key
 import std/hashes      ## Phase 15 C1: lambda-site body-hash (lineInfo fallback)
 import std/unicode     ## Phase 16 A7-S3: toRunes/runeLen for literal decode at parse time
 import ./types
+import ./admission   ## RFC-0016 ADM-1: `Admit`, `AxisTable`
 import ./dsl_typebridge
 from ./abstraction import collectVarRefs   ## RFC-0005 S8bl: `writesName`
 import ./stdlib_models
@@ -2814,9 +2815,24 @@ type ByRefSub = object
   keyPart: string
   base: NimNode       ## the caller's ref, evaluated at the call
 
+type VarMagicModel* = enum
+  ## RFC-0005 S8bl (item 1). How the parser treats a system magic with a
+  ## `var` parameter (`varParamMagics`).
+  vmModelled   ## modelled exactly for the argument shapes its arm accepts;
+               ## any other shape declines at the call, naming the magic
+  vmDeclined   ## every call declines, naming the magic and the reason
+
+type VarMagicSite* = enum
+  ## RFC-0016 ADM-1. The places that consume the magic axis for a magic with
+  ## a `var` parameter.
+  vsArm           ## a parser arm that models the call (hand-written today;
+                  ## K4a generates the dispatch from this site)
+  vsProcRegister  ## `ensureProcRegistered`: the call fell through every arm
+
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil;
-                          byRef: seq[ByRefSub] = @[]): string
+                          byRef: seq[ByRefSub] = @[];
+                          varMagic: Option[Admit[VarMagicModel]]): string
 proc hasGenericParams(impl: NimNode): bool  ## RFC-0005 S8ba (fwd)
 proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
 proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int]
@@ -4393,69 +4409,100 @@ proc isGeneratedHook(sym: NimNode): bool =
     if f.kind == nnkArgList: return true
   false
 
-type VarMagicModel* = enum
-  ## RFC-0005 S8bl (item 1). How the parser treats a system magic with a
-  ## `var` parameter (`varParamMagics`).
-  vmModelled   ## modelled exactly for the argument shapes its arm accepts;
-               ## any other shape declines at the call, naming the magic
-  vmDeclined   ## every call declines, naming the magic and the reason
+func vmRow(magic: string; model: VarMagicModel; note: string):
+    tuple[key: string, row: Row[VarMagicSite, VarMagicModel]] =
+  ## A modelled magic is admitted at its arms only; at `ensureProcRegistered`
+  ## it declines (`feUnsupportedOp`) with the note, as it did before ADM-1. A
+  ## declined one is admitted nowhere.
+  case model
+  of vmModelled:
+    (magic, modelled[VarMagicSite, VarMagicModel](model, {vsArm},
+       "modelled only for the argument shapes its arm accepts: " & note,
+       elsewhere = some(feUnsupportedOp)))
+  of vmDeclined:
+    (magic, refused[VarMagicSite, VarMagicModel](some(feUnsupportedOp), note,
+       intent = iNever, never = nrByDesign))
 
-const varParamMagics*: seq[tuple[magic: string; model: VarMagicModel;
-                                 note: string]] = @[
-  ## RFC-0005 S8bl (item 1). Every magic of the system module that takes a
-  ## `var` parameter (Nim 2.2), and its treatment. A call of one that no
-  ## arm models reaches `ensureProcRegistered`, which declines it naming the
-  ## magic (`varMagicDecline`) -- before S8bl it was registered with an
-  ## empty body, a silent no-op on its argument. The guard test
+const varParamMagics* = axisTable[VarMagicSite, VarMagicModel](axMagic, [
+  ## RFC-0005 S8bl (item 1), on RFC-0016 ADM-1's admission table. Every
+  ## magic of the system module that takes a `var` parameter (Nim 2.2), and
+  ## its treatment. A call of one that no arm models reaches
+  ## `ensureProcRegistered`, which declines it naming the magic
+  ## (`varMagicDecline`) -- before S8bl it was registered with an empty body,
+  ## a silent no-op on its argument. A magic with NO row is absent, which the
+  ## axis declines `feUnadmitted`. The guard test
   ## (`tsymex_rfc0005_s8bl_magicscan`) scans the stdlib's system sources for
   ## `var`-parameter magics and fails on one missing here.
-  ("Swap", vmModelled,
-   "`swap(a, b)`: both read, then both written (`parseVarMagicStmt`)"),
-  ("WasMoved", vmModelled,
-   "`wasMoved(x)` / `=wasMoved(x)`: x becomes its type's zero"),
-  ("Move", vmModelled,
-   "`move(x)`: x's value, and x becomes its type's zero (`parseMoveExpr`)"),
-  ("SetLengthSeq", vmModelled, "`setLen(s, n)` on a seq (`isSetLen`)"),
-  ("SetLengthStr", vmModelled, "`setLen(s, n)` on a string (`isSetLen`)"),
-  ("SetLengthSeqUninit", vmModelled,
-   "`setLenUninit(s, n)`: a shrink is `setLen`'s; a grow declines (the " &
+  vmRow("Swap", vmModelled,
+    "`swap(a, b)`: both read, then both written (`parseVarMagicStmt`)"),
+  vmRow("WasMoved", vmModelled,
+    "`wasMoved(x)` / `=wasMoved(x)`: x becomes its type's zero"),
+  vmRow("Move", vmModelled,
+    "`move(x)`: x's value, and x becomes its type's zero (`parseMoveExpr`)"),
+  vmRow("SetLengthSeq", vmModelled,
+    "`setLen(s, n)` on a seq (`isSetLen`)"),
+  vmRow("SetLengthStr", vmModelled,
+    "`setLen(s, n)` on a string (`isSetLen`)"),
+  vmRow("SetLengthSeqUninit", vmModelled,
+    "`setLenUninit(s, n)`: a shrink is `setLen`'s; a grow declines (the " &
    "new slots are uninitialised memory)"),
-  ("AppendStrCh", vmModelled, "`add(s, c)` on a string (the #145 arms)"),
-  ("AppendStrStr", vmModelled,
-   "`add(s, t)` / `s &= t` on a string (the #145 arms, the `&=` arm)"),
-  ("AppendSeqElem", vmModelled, "`add(s, x)` on a seq (the #145 arms)"),
-  ("Inc", vmModelled, "`inc(x[, y])` / `x += y` (the R8 and S8bc arms)"),
-  ("Dec", vmModelled, "`dec(x[, y])` / `x -= y` (the R8 and S8bc arms)"),
-  ("New", vmModelled,
-   "`new(x)`: a fresh zeroed cell; `unsafeNew(x, size)` too, when `size` " &
+  vmRow("AppendStrCh", vmModelled,
+    "`add(s, c)` on a string (the #145 arms)"),
+  vmRow("AppendStrStr", vmModelled,
+    "`add(s, t)` / `s &= t` on a string (the #145 arms, the `&=` arm)"),
+  vmRow("AppendSeqElem", vmModelled,
+    "`add(s, x)` on a seq (the #145 arms)"),
+  vmRow("Inc", vmModelled,
+    "`inc(x[, y])` / `x += y` (the R8 and S8bc arms)"),
+  vmRow("Dec", vmModelled,
+    "`dec(x[, y])` / `x -= y` (the R8 and S8bc arms)"),
+  vmRow("New", vmModelled,
+    "`new(x)`: a fresh zeroed cell; `unsafeNew(x, size)` too, when `size` " &
    "holds the pointee (`parseUnsafeNew`)"),
-  ("NewSeq", vmModelled, "`newSeq(s, n)` (S8bc; batch 5's `iekSeqNew`)"),
-  ("Asgn", vmModelled, "`=`(d, s) / `=copy` / `=sink`: the assignment `d = s`"),
-  ("Incl", vmModelled,
-   "`incl(s, k)` on a builtin `set[T]` (S8bq, `parseBitSetInclExcl`)"),
-  ("Excl", vmModelled,
-   "`excl(s, k)` on a builtin `set[T]` (S8bq, `parseBitSetInclExcl`)"),
-  ("Destroy", vmDeclined,
-   "an explicit destructor call leaves its argument unspecified"),
-  ("Trace", vmDeclined, "a cycle-collector hook over a raw environment pointer"),
-  ("ShallowCopy", vmDeclined,
-   "declared under the refc memory manager only; it shares the payload")]
+  vmRow("NewSeq", vmModelled,
+    "`newSeq(s, n)` (S8bc; batch 5's `iekSeqNew`)"),
+  vmRow("Asgn", vmModelled,
+    "`=`(d, s) / `=copy` / `=sink`: the assignment `d = s`"),
+  vmRow("Incl", vmModelled,
+    "`incl(s, k)` on a builtin `set[T]` (S8bq, `parseBitSetInclExcl`)"),
+  vmRow("Excl", vmModelled,
+    "`excl(s, k)` on a builtin `set[T]` (S8bq, `parseBitSetInclExcl`)"),
+  vmRow("Destroy", vmDeclined,
+    "an explicit destructor call leaves its argument unspecified"),
+  vmRow("Trace", vmDeclined,
+    "a cycle-collector hook over a raw environment pointer"),
+  vmRow("ShallowCopy", vmDeclined,
+    "declared under the refc memory manager only; it shares the payload")])
 
-proc varMagicDecline(ctx: ParseCtx; name, magic: string; key: string): string =
+proc admitVarMagic*(magic: string; site: VarMagicSite):
+    Admit[VarMagicModel] =
+  ## The magic axis for a system magic with a `var` parameter.
+  varParamMagics.admit(magic, site)
+
+proc calleeVarMagic(calleeSym: NimNode): Option[Admit[VarMagicModel]] =
+  ## `ensureProcRegistered`'s admission: `none` unless `calleeSym` is a
+  ## system magic with a `var` parameter, else the axis's answer at
+  ## `vsProcRegister`.
+  let impl = resolveRoutineImpl(calleeSym)
+  if impl == nil: return none(Admit[VarMagicModel])
+  let magic = implMagic(impl)
+  if magic.len > 0 and hasVarFormal(impl):
+    some(admitVarMagic(magic, vsProcRegister))
+  else: none(Admit[VarMagicModel])
+
+proc varMagicDecline(ctx: ParseCtx; name, magic: string;
+                     adm: Admit[VarMagicModel]; key: string): string =
   ## RFC-0005 S8bl (item 1). The decline of a call to the system magic
   ## `magic` (routine `name`) with a `var` parameter that no parser arm
   ## modelled (`ensureProcRegistered`): a never-registered key, so the
-  ## walker's missing-callee arm degrades the path that reaches it.
-  var why = "a magic no arm models (not in `varParamMagics`)"
-  for m in varParamMagics:
-    if m.magic == magic:
-      why = if m.model == vmDeclined: m.note
-            else: "modelled only for the argument shapes its arm accepts: " &
-                  m.note
-  ctx.declineCallee(feUnsupportedOp,
+  ## walker's missing-callee arm degrades the path that reaches it. The kind
+  ## and the reason are the admission's (`feUnadmitted` for a magic with no
+  ## row).
+  let (kind, why) = adm.decline
+  ctx.declineCallee(kind.get(feUnadmitted),
     "system magic `" & name & "` (magic \"" & magic & "\") with a `var` " &
     "parameter is not modelled here -- " & why & " -- path degraded to " &
-    "sxUnknown (feUnsupportedOp)", key)
+    "sxUnknown (" & $kind.get(feUnadmitted) & ")", key)
 
 const foreignImportPragmas = ["importc", "importcpp", "importobjc",
                               "importjs", "dynlib"]
@@ -8893,7 +8940,8 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
   # RFC-0005 S8ba: the by-reference formals call the callee's
   # specialisation to them.
   let key = if byRefs.len == 0: callKey
-            else: ensureProcRegistered(ctx, calleeSym, n, byRefs)
+            else: ensureProcRegistered(ctx, calleeSym, n, byRefs,
+                                       varMagic = calleeVarMagic(calleeSym))
   let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards,
                     locs, (if anyVarActual: varSafe else: @[]))
   # RFC-0005 S8cn: the actuals are plain (`seqViewPeer`), so the index read
@@ -9928,7 +9976,7 @@ proc procFieldCallIR(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx):
         var call = newNimNode(nnkCall, n)
         call.add c
         for j in 1 ..< n.len: call.add n[j]
-        let ck = ensureProcRegistered(ctx, c, call)
+        let ck = ensureProcRegistered(ctx, c, call, varMagic = calleeVarMagic(c))
         var pre: seq[IRStmt]
         let st = userCallStmt(call, c, ck, retName, retTy, @[], pre, ctx)
         branches.add mkBranch(mkBinop(bEq, mkVar(codeT), mkIntLit(int64(i + 1))),
@@ -10127,7 +10175,8 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     if d != nil:
       preamble.add d
       return mkVar(synthM)
-  let callKey = ensureProcRegistered(ctx, calleeSym, n)
+  let callKey = ensureProcRegistered(ctx, calleeSym, n,
+                                     varMagic = calleeVarMagic(calleeSym))
   let retCls = classifyType(n)
   let synth = freshSynth(ctx, calleeName)
   # Round-6 B5 (ADR-0028 Leg 1, chained composition): if the callee's OWN
@@ -10248,7 +10297,7 @@ proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
     var c = copyNimNode(n)
     c.add m
     for i in 1 ..< n.len: c.add n[i]
-    let key = ensureProcRegistered(ctx, m, c)
+    let key = ensureProcRegistered(ctx, m, c, varMagic = calleeVarMagic(m))
     var pre: seq[IRStmt]
     let call = userCallStmt(c, m, key, retName, retTy, @[], pre, ctx)
     mkBlock(pre & @[call])
@@ -10273,7 +10322,8 @@ proc userOrMethodCallStmt(n, calleeSym: NimNode; preamble: var seq[IRStmt];
   if calleeSym.kind == nnkSym and calleeSym.symKind == nskMethod:
     let d = methodDispatchStmt(n, calleeSym, "", tBool(), preamble, ctx)
     if d != nil: return d
-  let callKey = ensureProcRegistered(ctx, calleeSym, n)
+  let callKey = ensureProcRegistered(ctx, calleeSym, n,
+                                     varMagic = calleeVarMagic(calleeSym))
   # RFC-0005 batch 10: `procCall`'s formal is `untyped`, so the actual of
   # `procCall f(x)` with a void `f` has no type for `userCallStmt` to read, and
   # the compile stopped. The call declines on its key; nothing is walked.
@@ -21500,7 +21550,13 @@ proc stubBody(body: NimNode): bool =
 
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil;
-                          byRef: seq[ByRefSub] = @[]): string =
+                          byRef: seq[ByRefSub] = @[];
+                          varMagic: Option[Admit[VarMagicModel]]): string =
+  ## RFC-0016 ADM-1: `varMagic` is the magic axis's answer for this callee
+  ## at `vsProcRegister` (`calleeVarMagic`), `none` for a routine that is
+  ## not a system magic with a `var` parameter. An admission is the
+  ## decision: a call whose magic the axis does not admit here is declined,
+  ## never registered.
   ## Registers the (monomorphized) callee under its instantiation key and
   ## returns that key. The CALLER must use the returned key as the `mkCall`
   ## callee name so the walker's `w.procs[stmt.callee]` dispatch lands on the
@@ -21538,9 +21594,9 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # monomorphised magic's formals crashed `parseCalleeImpl` (`wasMoved`,
   # `move`). It declines, naming the magic.
   block:
-    let magic = implMagic(impl)
-    if magic.len > 0 and hasVarFormal(impl):
-      return ctx.varMagicDecline(name, magic, name & "#varMagic")
+    if varMagic.isSome:
+      return ctx.varMagicDecline(name, implMagic(impl), varMagic.get,
+                                 name & "#varMagic")
     # RFC-0005 S8cl (item 2). A routine whose formals are not `nnkIdentDefs`
     # (the compiler's generated hooks) cannot be read: it declines, so
     # `parseCalleeImpl`'s `expectKind` never fails the build on one.

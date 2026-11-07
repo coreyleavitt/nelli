@@ -1888,7 +1888,7 @@ proc parseSpec*(sp: RegexSpec): PcreParse =
   ## The walker's reading of a regex literal: `parsePcre`, and RFC-0005
   ## S8bj's library-version scoping (`pcre_engine.pcreBefore838`).
   ## RFC-0005 S8bt (SOUNDNESS): with a libpcre build the model is not
-  ## verified against (`pcre_engine.verifiedLibs`) every pattern is
+  ## verified against (`pcre_engine.pcreLibs`) every pattern is
   ## `psUnknown`, its reason `unverifiedLibReason()`: whether that library
   ## accepts a pattern, and what it matches, are not known.
   if sp.flag notin ["re", "rex"]:

@@ -1,6 +1,6 @@
 ## RFC-0005 S8bt (item 1, SOUNDNESS) -- the walker reads a regex only when
 ## std/re's libpcre is a build the model has been verified against
-## (`pcre_engine.verifiedLibs`: the version string `pcre_version()` reports
+## (`pcre_engine.pcreLibs`: the version string `pcre_version()` reports
 ## and the engine std/re runs unanchored calls on). Any other library --
 ## another version, an engine not verified for that version, or one the
 ## walker cannot ask -- declines every regex call with a named reason

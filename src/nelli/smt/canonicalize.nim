@@ -855,7 +855,7 @@ const symexWalkerVersion* = "289"
   ##
   ## RFC-0005 S8bt (2026-10-03) — S8bj's remainder. SOUNDNESS: the walker
   ## reads a regex only when std/re's libpcre is a build the model is
-  ## verified against (`pcre_engine.verifiedLibs`, version string and
+  ## verified against (`pcre_engine.pcreLibs`, version string and
   ## engine); any other library declines every regex call (S8bj recorded
   ## it in the cache key but read it with 8.45's model). The JIT (8.37,
   ## the Windows legs) is its own engine model (`peJit837`: its prefix

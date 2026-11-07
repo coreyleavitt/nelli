@@ -11,14 +11,16 @@
 ##
 ## RFC-0005 S8bt (SOUNDNESS). The model is PCRE 8.45's interpreter, checked
 ## against other builds; the walker reads a regex only when std/re's library
-## is one of them (`verifiedLibs`), and declines every regex call otherwise
+## is one of them (`pcreLibs`), and declines every regex call otherwise
 ## (`unverifiedLibReason`, read by `pcre_syntax.parseSpec`). S8bj recorded
 ## the library in the cache key but read every one with 8.45's model.
 ## RFC-0005 S8bt: a verified build names the engine model its unanchored
 ## calls are read with (`VerifiedLib.model`, `pcreSearchEngine`): 8.37's
 ## JIT is modelled (`pcre_jit.nim`, `pcre_select`'s `peJit837`), so its
 ## searches are decided rather than declined.
-import std/[dynlib, strutils]
+import std/[dynlib, strutils, options]
+import ./types
+import ./admission
 
 type
   PcreEngine* = enum
@@ -133,31 +135,44 @@ proc pcreEngineName*(): string =
   (if pcreRunsJit(): "pcre-jit-" else: "pcre-interp-") &
     pcreVersion().split(' ')[0]
 
-type VerifiedLib* = object
-  ## RFC-0005 S8bt. A libpcre build the model has been checked against: its
-  ## `pcre_version()` string and engine, the engine model its unanchored
-  ## calls are read with, and the evidence.
-  version*: string
-  jit*: bool
-  model*: PcreEngine
-  evidence*: string
+type PcreSite* = enum
+  pcSearch                ## the walker's regex model, reading the library
 
-const verifiedLibs* = [
-  VerifiedLib(version: "8.45 2021-06-15", jit: false, model: peInterp, evidence:
+func pcreLibKey(version: string; jit: bool): string =
+  version & "|" & (if jit: "jit" else: "interp")
+
+func pcreRow(version: string; jit: bool; model: PcreEngine;
+             evidence: string): tuple[key: string,
+                                      row: Row[PcreSite, PcreEngine]] =
+  (pcreLibKey(version, jit), modelled[PcreSite, PcreEngine](
+    model, {pcSearch}, evidence))
+
+const pcreLibs* = axisTable[PcreSite, PcreEngine](axBuild, [
+  ## RFC-0016 ADM-1 (was RFC-0005 S8bt's `pcreLibs`). A libpcre build the
+  ## model has been checked against: its `pcre_version()` string and engine
+  ## (the key), the engine model its unanchored calls are read with (the
+  ## payload), and the evidence (the note).
+  pcreRow("8.45 2021-06-15", false, peInterp,
     "the model's own reference: every regex suite (Linux test image)"),
-  VerifiedLib(version: "8.37 2015-04-28", jit: true, model: peJit837, evidence:
+  pcreRow("8.37 2015-04-28", true, peJit837,
     "every regex suite on the Windows legs (Nim's pcre64.dll, JIT), the " &
     "S8bj tri-oracle and the S8bj suites against a local JIT build"),
-  VerifiedLib(version: "8.37 2015-04-28", jit: false, model: peInterp, evidence:
+  pcreRow("8.37 2015-04-28", false, peInterp,
     "the S8bj tri-oracle: identical to 8.45's interpreter on 56764 verb " &
     "patterns, and the start-of-match data on 142108 patterns but the " &
-    "declined `{0}` case")]
+    "declined `{0}` case")])
+
+func admitPcreLib*(version: string; jit: bool): Admit[PcreEngine] =
+  ## RFC-0005 S8bt, on the admission interface. The library `version` on
+  ## that engine, admitted with the engine model its unanchored calls are
+  ## read with. Absent is `psUnverifiedLib`, which is the walker's
+  ## `psUnknown` (a `PcreParse` status), not a `SymexErrorKind`: the decline
+  ## carries no kind.
+  pcreLibs.admit(pcreLibKey(version, jit), pcSearch, absent = none(SymexErrorKind))
 
 proc isVerifiedLib*(version: string; jit: bool): bool =
-  ## RFC-0005 S8bt. Whether `version` on that engine is in `verifiedLibs`.
-  for v in verifiedLibs:
-    if v.version == version and v.jit == jit: return true
-  false
+  ## RFC-0005 S8bt. Whether `version` on that engine is a verified build.
+  admitPcreLib(version, jit).admitted
 
 proc pcreLibVerified*(): bool =
   ## RFC-0005 S8bt. Whether std/re's libpcre is a verified build.
@@ -168,8 +183,9 @@ proc unverifiedLibReason*(): string =
   ## libpcre, "" when it is a verified build.
   if pcreLibVerified(): return ""
   var known: seq[string]
-  for v in verifiedLibs:
-    known.add v.version.split(' ')[0] & (if v.jit: " JIT" else: "")
+  for k in pcreLibs.keys:
+    let p = k.split('|')
+    known.add p[0].split(' ')[0] & (if p[1] == "jit": " JIT" else: "")
   "std/re's libpcre (" &
     (if pcreVersion().len == 0: "a version the walker cannot ask"
      else: pcreVersion()) &
@@ -188,6 +204,5 @@ proc pcreSearchEngine*(): PcreEngine =
   ## RFC-0005 S8bt. The engine model of std/re's unanchored calls (`find`,
   ## `contains`, `findBounds`, `replace`): the verified build's. (An
   ## unverified library declines every call before this is asked.)
-  for v in verifiedLibs:
-    if v.version == pcreVersion() and v.jit == pcreRunsJit(): return v.model
-  peInterp
+  let a = admitPcreLib(pcreVersion(), pcreRunsJit())
+  if a.admitted: a.payload else: peInterp

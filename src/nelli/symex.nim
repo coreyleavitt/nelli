@@ -378,7 +378,9 @@ proc decodeSoundness(v: string): Option[Soundness] =
   for i in 1 ..< parts.len:
     if i == 5:
       # RFC-0016 W1-d3: a canonical decimal of any length, at most 30 bits.
-      let t = parts[i]
+      # A `var` copy, not a `let`: the S8ab self-audit refuses a compile-time
+      # `let` alias of a managed element (`decodeSoundness` is VM-reachable).
+      var t = parts[i]
       if t.len == 0 or t.len > 10 or (t.len > 1 and t[0] == '0'):
         return none(Soundness)
       for ch in t:

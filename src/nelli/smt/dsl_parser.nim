@@ -1254,13 +1254,12 @@ type
                                    ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
-    ovfChecked*: seq[bool]
+    arithScopes*: seq[ArithScope]
                                    ## RFC-0016 WA-A. Per routine being parsed,
-                                   ## innermost last: is it walked under
-                                   ## CHECKED signed arithmetic in a build whose
-                                   ## own overflow checks are off (a `push
-                                   ## overflowChecks: on`)? Mirrors the
-                                   ## `ArithScope` `withCheckDeclines` stamps.
+                                   ## innermost last: the RESOLVED
+                                   ## `arithScopeFor` of each (never
+                                   ## `asInherit`). Its top is the only
+                                   ## parse-time reader (`overflowChecked`).
     assertsOff*: seq[bool]
                                    ## RFC-0005 S8cu. Per routine being parsed,
                                    ## innermost last: may its module compile
@@ -1462,23 +1461,39 @@ proc assertsMayBeOff(ctx: ParseCtx): bool =
   ## compiled out in the routine being parsed. The command line is read apart.
   ctx.assertsOff.len > 0 and ctx.assertsOff[^1]
 
-proc scopeChecked(c: RoutineChecks): bool =
-  ## RFC-0016 WA-A. The routine's own arithmetic is checked although the
-  ## build's is not (`asChecked`).
-  buildWraps() and c.overflowOn and c.why.len == 0
+func arithScopeFor(c: RoutineChecks; caller: ArithScope;
+                   inherit: bool): ArithScope =
+  ## RFC-0016 WA-A / W1-d2c. The one decision of which signed arithmetic a
+  ## routine is walked under. Total and pure (`buildWraps()` is the only global
+  ## read); never `asInherit`. An `inherit` routine (a magic: the compiler
+  ## expands it at the call site, under the caller's options) takes `caller`'s.
+  ## Otherwise `asChecked` where the build wraps but the routine's position was
+  ## read as `push overflowChecks: on`, else `asBuild`.
+  if inherit: caller
+  elif buildWraps() and c.overflowOn and c.why.len == 0: asChecked
+  else: asBuild
+
+func currentArith(ctx: ParseCtx): ArithScope =
+  if ctx.arithScopes.len > 0: ctx.arithScopes[^1] else: asBuild
+
+func overflowChecked(ctx: ParseCtx): bool =
+  ## Signed arithmetic is `OverflowDefect`-checked where the parse is now.
+  ctx.currentArith == asChecked
+
+func ordinalUnchecked(ctx: ParseCtx): bool =
+  ## Signed arithmetic is unchecked where the parse is now: the build wraps and
+  ## no enclosing routine is pushed `overflowChecks: on`.
+  buildWraps() and not ctx.overflowChecked
 
 proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
-  ## RFC-0016 WA-A. Opens the routine's arithmetic scope for its parse. A
-  ## `inherit` routine (a magic: the compiler expands it at the call site,
-  ## under the caller's options) keeps the caller's.
-  ctx.ovfChecked.add(
-    if inherit: ctx.ovfChecked.len > 0 and ctx.ovfChecked[^1]
-    else: scopeChecked(c))
+  ## Opens the routine's arithmetic scope for its parse.
+  ctx.arithScopes.add arithScopeFor(c, ctx.currentArith, inherit)
 
-proc ordinalUnchecked(ctx: ParseCtx): bool =
-  ## RFC-0016 WA-A. Signed arithmetic is unchecked where the parse is now: the
-  ## build wraps and no enclosing routine is pushed `overflowChecks: on`.
-  buildWraps() and not (ctx.ovfChecked.len > 0 and ctx.ovfChecked[^1])
+func arithStamp(c: RoutineChecks; inherit: bool): ArithScope =
+  ## The IR stamp of a routine body: `arithScopeFor`'s answer, but only where a
+  ## claim is made (a checks-off build, not an `inherit` routine).
+  if not buildWraps() or inherit: asInherit
+  else: arithScopeFor(c, asBuild, false)
 
 proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
                        body: IRStmt; inherit = false): IRStmt =
@@ -1490,10 +1505,7 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # build's (unchecked), or `OverflowDefect`-raising for one read as pushed
   # `overflowChecks: on`. A checks-on build needs no stamp (nothing to override
   # but the `off` push, which declines below).
-  let scope =
-    if not buildWraps() or inherit: asInherit
-    elif c.overflowOn and c.why.len == 0: asChecked
-    else: asBuild
+  let scope = arithStamp(c, inherit)
   if c.checks == {} and scope == asInherit: return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
@@ -3370,7 +3382,7 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
   ctx.assertsOff.add checkOpts.assertsMaybeOff
   ctx.pushArithScope(checkOpts)
   let bodyParsed = parseStmt(bodyNode, ctx)
-  discard ctx.ovfChecked.pop()
+  discard ctx.arithScopes.pop()
   discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, n, checkOpts, bodyParsed)
   # RFC-0005 S8bh: with the summary a call through it needs to apply its
@@ -19910,7 +19922,8 @@ proc parseStmtInner(n: NimNode,
             return withCheckDeclines(ctx, impl, c, nil)
           # (P2) Inlined, the iterator would be walked under the caller's
           # arithmetic, not the one it is compiled with.
-          if buildWraps() and scopeChecked(c) == ctx.ordinalUnchecked():
+          if buildWraps() and
+             arithScopeFor(c, ctx.currentArith, false) != ctx.currentArith:
             return ctx.declineMarker(feCheckOption, routinePlace(impl) &
               ": a closure iterator compiled under a different `overflowChecks` " &
               "than its caller -- path degraded to sxUnknown")
@@ -21789,7 +21802,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # `-x` the compiler expands inline under the caller's options).
   let inheritScope = implMagic(impl).len > 0
   ctx.pushArithScope(checkOpts, inheritScope)
-  defer: discard ctx.ovfChecked.pop()
+  defer: discard ctx.arithScopes.pop()
   var monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
   # RFC-0005 S8bd: a generic callee is specialised to its by-reference
@@ -22355,7 +22368,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   ctx.assertsOff.add checkOpts.assertsMaybeOff
   ctx.pushArithScope(checkOpts)
   let parsed = parseStmt(devirtProcLets(procDef[6]), ctx)   # RFC-0005 S8cn
-  discard ctx.ovfChecked.pop()
+  discard ctx.arithScopes.pop()
   discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, procDef, checkOpts,
     if parsed != nil and parsed.kind == isBlock: parsed

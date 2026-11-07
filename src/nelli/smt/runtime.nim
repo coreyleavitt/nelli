@@ -25744,6 +25744,22 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   # RFC-0005 S8be: and an element a pointer to it wrote.
   rp = syncElemCellsFromHeap(rp, w)
   var unknownJoined = false
+  # RFC-0016 W1-c2 (W-03, INT-27). Under `--panics:on` a Defect is not
+  # catchable: it prints its report and ends the process (probed on the pinned
+  # Nim 2.2.10: rc 1, `[OverflowDefect]` on stderr, and neither an `except
+  # Defect` / `except OverflowDefect` / bare `except:` arm nor a `finally`
+  # runs). So its defect-ness is tested BEFORE the handler search and it takes
+  # the S8cu crash channel, which no arm and no `finally` sees. A type the
+  # walker cannot resolve is not decided here: it keeps the unknown-type
+  # decline above (`eeUnknownExnType`).
+  # NAMED KNOWN GAP: destructors that run while a panic unwinds are not
+  # modelled (a `=destroy` side effect is neither walked nor reported).
+  # W1-c1b reroutes this build read to the build profile.
+  when defined(nimPanics):
+    if raisedKnown and isDefect(w.statics.exnTable, typeId,
+                                w.statics.userExnHierarchy):
+      crashRaise(rp, typeId, w)
+      return @[]
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):
     let hf = w.frame.handlerStack[i]
@@ -25943,6 +25959,9 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
     var r = toPublic(iv)
     r.soundness.pathTaint = p.taint
     r.nilDerefOnPath = p.nilDeref
+    # RFC-0016 W1-c2: the witness ends the process wherever it runs, so no
+    # consumer runs it in the host (`hostRunnable`).
+    r.soundness.witnessUnsafe = true
     r.errors.add candErrs
     w.admitSolvedHit(r)
   of sxUnknown:

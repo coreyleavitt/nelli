@@ -1694,6 +1694,9 @@ task test, "Run the test suite":
             "tsymex_0016_k9a_pins",
             "tsymex_0016_w1c1a_buildprofile",
             "tsymex_0016_w1c3_splat_defect",
+            # RFC-0016 W1-c2: a Defect under --panics:on crashes (W-03, INT-27).
+            "tsymex_0016_panics",
+            "tsymex_0016_panics_off",
             # RFC-0016 W1-a: one exception type id (W-01, W-33).
             "tsymex_0016_w1a_exn_typeid",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user

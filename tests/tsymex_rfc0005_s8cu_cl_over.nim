@@ -7,32 +7,57 @@ import nelli/symex
 import ./s8cu_fix_cl
 import ./s8cu_helpers
 
+## RFC-0016 W1-d2 (W-07). This build is checks-off, so the default settings
+## follow it (`acOverflow` out) and there is no routine-level decline to make:
+## the build is the program. A signed overflow is undefined, not a wrap, so the
+## rows that decided a wrap now halt; an explicit setting that models what the
+## build does not do taints `feCheckOption`.
+const clSettings = SymexSettings(arithChecks: {acDivByZero, acRange})
+
 suite "S8cu: --overflowChecks:off":
 
-  test "declines where the settings model the check":
+  test "the settings follow the build, and the signed overflow halts":
+    ## Rule (a): was a feOverflowCheckOption decline under settings that
+    ## modelled the check; the settings now agree with the build, and the
+    ## overflowing `+` is the ubSignedOverflow halt.
     check native(clOver(high(int))) == "hit"
-    declines(clOver, feOverflowCheckOption)
+    check not arithChecksDisagree(defaultSymexSettings())
+    declines(clOver, ubSignedOverflow)
+    check not symexFind(clOver, tLabel("hit")).errors.named(feOverflowCheckOption)
 
-  test "decides where the settings model the wrap: S8w (control)":
-    let r = symexFind(clOver, tLabel("hit"), SymexSettings(arithChecks: {acDivByZero, acRange}))
+  test "settings that model the wrap disagree with the build and are not trusted":
+    ## Rule (a): was a trusted sxSat/sxRaised/sxSat (S8w). The explicit
+    ## arithChecks differs from this build's ({acRange}).
+    let r = symexFind(clOver, tLabel("hit"), clSettings)
     checkpoint show(r.errors)
-    check r.status == sxSat
-    if r.status == sxSat: check native(clOver(r.witness[0])) == "hit"
-    let f = symexFind(clField, tLabel("hit"), SymexSettings(arithChecks: {acDivByZero, acRange}))
+    check not r.trusted
+    check r.errors.named(feCheckOption)
+    let f = symexFind(clField, tLabel("hit"), clSettings)
     checkpoint show(f.errors)
-    check f.status == sxRaised
-    check native(clField(4)) == "FieldDefect"
-    let p = symexFind(clPure, tLabel("hit"), SymexSettings(arithChecks: {acDivByZero, acRange}))
+    check not f.trusted
+    check f.errors.named(feCheckOption)
+    let p = symexFind(clPure, tLabel("hit"), clSettings)
     checkpoint show(p.errors)
-    check p.status == sxSat
-    check native(clPure(7)) == "hit"
+    check not p.trusted
+    check p.errors.named(feCheckOption)
 
-  test "the rule is per routine: one that never meets the check declines too":
+  test "no routine declines for the build's own checks: one that never meets the check decides":
+    ## Rule (c), premise changed: the old "per routine" decline existed because
+    ## the settings modelled checks the build did not have. They now agree with
+    ## the build, so a routine that never reaches the check is decided and
+    ## carries no marker (W1-d2a's `withCheckDeclines` emits only when not
+    ## `buildWraps()`; not a src defect).
     check native(clField(4)) == "FieldDefect"
-    declines(clField, feOverflowCheckOption)
+    decides(clField, sxRaised)
     check native(clPure(7)) == "hit"
-    declines(clPure, feOverflowCheckOption)
+    decides(clPure, sxSat)
+    check not symexFind(clField, tLabel("hit")).errors.named(feOverflowCheckOption)
+    check not symexFind(clPure, tLabel("hit")).errors.named(feOverflowCheckOption)
 
-  test "a routine under `push overflowChecks: on` has it back (control)":
+  test "a routine under `push overflowChecks: on` in a checks-off build is not trusted (control)":
+    ## Rule (a)/precision: natively it raises OverflowDefect, but the walker
+    ## models the BUILD's arithmetic (`buildWraps()`), so the overflow is the
+    ## ubSignedOverflow halt, not an sxRaised. Sound, not precise: pushed-on
+    ## routines in a checks-off build are not modelled separately.
     check native(clOverOn(high(int))) == "OverflowDefect"
-    decides(clOverOn, sxRaised)
+    declines(clOverOn, ubSignedOverflow)

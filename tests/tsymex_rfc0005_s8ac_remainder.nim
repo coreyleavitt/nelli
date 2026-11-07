@@ -296,12 +296,21 @@ proc readCStr(data: seq[byte], offset: int): (string, int) =
     i.inc
   raise newException(ScanError, "unterminated")
 
-{.push overflowChecks: off.}
+## RFC-0016 W1-d2 (rule b: the property is that an exact `start div y` of an
+## offset stays LINEAR -- bounded solver steps -- not the unchecked opt-out).
+## The `{.push overflowChecks: off.}` that wrapped these routines declines in a
+## checks-on build (the S8cu early return is gone) and signed overflow with
+## checks off is undefined, so the routines now compile with the build's
+## checks and the settings agree with it. `low(int) div -1` is then the
+## OverflowDefect fork rather than a SIGFPE, and the label is dead either way.
 proc sutDivY(data: seq[byte], start, y: int) =
   ## S8aa's probe: `start < 0 and y < 0` makes the quotient positive, or
-  ## `low(int) div -1`, which traps (SIGFPE). (A negative start would
-  ## raise `IndexDefect` in the scan, so it returns first.)
-  if start < 0 and y < 0 and start div y < 0: symexTarget("dy_dead")
+  ## `low(int) div -1`. RFC-0016 W1-d2: that corner is the OverflowDefect fork
+  ## in this checks-on build (and undefined with checks off), so the guard
+  ## is `y < -1`: the quotient is positive, the label dead, with no corner.
+  ## (A negative start would raise `IndexDefect` in the scan, so it returns
+  ## first.)
+  if start < 0 and y < -1 and start div y < 0: symexTarget("dy_dead")
   if start < 0: return
   try:
     let (k, p) = readCStr(data, start)
@@ -318,10 +327,8 @@ proc sutDivS(data: seq[byte], start, y: int) =
   let (k, p) = readCStr(data, start)
   if y > 1 and start div y == 3 and k.len == 2:
     symexTarget("ds")
-{.pop.}
 
-const exactUnchecked = SymexSettings(integerSemantics: isExact,
-                                     arithChecks: {acDivByZero, acRange})
+const exactUnchecked = SymexSettings(integerSemantics: isExact)
 
 suite "S8ac (2): an exact unchecked div of an offset stays linear":
 

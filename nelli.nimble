@@ -950,6 +950,7 @@ task test, "Run the test suite":
             # walker 169->171.
             "tsymex_rfc0005_s8w_remainder",
             "tsymex_rfc0005_s8w_remainder_b",
+            "tsymex_rfc0005_s8w_remainder_b_checksoff",
             # RFC-0005 S8x -- S8t2's remainder: the compile-time VM's `let`
             # aliasing pinned, the parser's two latent value-location lets
             # bound by index / `var`; no walker bump.
@@ -965,6 +966,7 @@ task test, "Run the test suite":
             # cells, refs and multi-path operands, B6 negative starts
             # raise, `len.uint` reinterprets; walker 171->172.
             "tsymex_rfc0005_s8aa_remainder",
+            "tsymex_rfc0005_s8aa_remainder_checksoff",
             # RFC-0005 S8v -- S8r's termination remainder: checkCapped's
             # step 1c carries str.len / str.indexof / seq.last_indexof
             # ranges, so a cap-only refutation through them declines without
@@ -1024,6 +1026,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8aj_remainder",
             "tsymex_rfc0005_s8aj_remainder_b",
             "tsymex_rfc0005_s8aj_remainder_c",
+            "tsymex_rfc0005_s8aj_remainder_c_checksoff",
             # RFC-0005 S8ao -- S8aj's remainder: `add` on a dotted seq
             # field (`o.s.add v`, nested `a.b.s.add v`, a ref object's
             # `p.s.add v`) is modelled through the field path instead of

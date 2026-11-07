@@ -172,17 +172,19 @@ proc sNegModLowSat(data: seq[byte], start, y: int) =
 proc sNegDivSat(data: seq[byte], start, y: int) =
   if start < 0 and y > 1 and start div y == start + 1: symexTarget("t")
   scan()
-{.push overflowChecks: off.}
+## RFC-0016 W1-d2 (rule b: the property is that the EXACT-mode quotient of a
+## scan offset is refuted within the step bound). The `push overflowChecks:
+## off` and the `arithChecks` opt-out are gone: that route declines in a
+## checks-on build and signed overflow with checks off is undefined. The
+## routines compile with the build's checks and the settings agree with it.
 proc uNegDiv(data: seq[byte], start, y: int) =
   if start < 0 and y > 1 and start div y == start: symexTarget("t")
   scan()
 proc uPosDiv(data: seq[byte], start, y: int) =
   if start > 0 and y > 1 and start div y == start: symexTarget("t")
   scan()
-{.pop.}
 
-const exactUnchecked = SymexSettings(integerSemantics: isExact,
-                                     arithChecks: {acDivByZero, acRange})
+const exactUnchecked = SymexSettings(integerSemantics: isExact)
 
 suite "S8ad (2): an Int quotient under the sequence theory decides":
 

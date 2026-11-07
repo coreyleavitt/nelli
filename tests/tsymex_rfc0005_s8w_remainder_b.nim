@@ -45,26 +45,6 @@ proc readCStr(data: seq[byte], offset: int): (string, int) =
     i.inc
   raise newException(ScanError, "unterminated")
 
-{.push overflowChecks: off.}
-proc sutWrapB4(data: seq[byte], start: int) =
-  ## Built without overflow checks (`-d:danger`'s arithmetic): `start + 1`
-  ## wraps to `low(int)` at `high(int)`.
-  let bump = start + 1
-  if bump < start:
-    symexTarget("s8w_wrap_b4")
-  let (k, p) = readCStr(data, start)
-  if k.len == 2 and p == start + 3:
-    symexTarget("s8w_wrap_b4_hit")
-
-proc sutWrapMulB4(data: seq[byte], start: int) =
-  ## `start * 4` wraps: `start == high(int) div 2` gives a negative product.
-  let q = start * 4
-  if start > 0 and q < 0:
-    symexTarget("s8w_wrapmul_b4")
-  let (k, p) = readCStr(data, start)
-  if k.len == 1 and p == start + 2:
-    symexTarget("s8w_wrapmul_b4_hit")
-{.pop.}
 
 proc sutBitB4(data: seq[byte], start: int) =
   ## A bit operation on the offset bans its promotion (ADR-0001), and the
@@ -115,63 +95,13 @@ proc sutB4(data: seq[byte], start: int) =
   if k.len == 2 and p == start + 3:
     symexTarget("s8w_b4")
 
-const exactUnchecked = SymexSettings(integerSemantics: isExact,
-                                     arithChecks: {acDivByZero, acRange})
-const optUnchecked = SymexSettings(integerSemantics: isOptimised,
-                                   arithChecks: {acDivByZero, acRange})
-
 suite "S8w (3): a B4 offset whose promotion is turned down stays faithful":
 
-  test "oracle: without overflow checks start + 1 wraps":
-    var hit = false
-    try: sutWrapB4(@[], high(int))
-    except ScanError: hit = true
-    check hit
-    check (block:
-      var x = high(int) div 2
-      {.push overflowChecks: off.}
-      let q = x * 4
-      {.pop.}
-      q < 0)
-
-  test "isExact, unchecked: the wrap is reachable":
-    ## RED: `sxUnsat` -- the offset was an unbounded Int, and `start + 1 <
-    ## start` has no solution over the integers.
-    let r = symexFind(sutWrapB4, tLabel("s8w_wrap_b4"), exactUnchecked)
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    if r.status == sxSat:
-      check r.witness[1] == high(int)
-
-  test "isOptimised, unchecked: the wrap is reachable":
-    ## RED: `sxUnsat` (the wrap scan bans the promotion; the offset stayed
-    ## an unbounded Int).
-    let r = symexFind(sutWrapB4, tLabel("s8w_wrap_b4"), optUnchecked)
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    if r.status == sxSat:
-      check r.witness[1] == high(int)
-
-  test "isOptimised, unchecked: a multiplication's wrap is reachable":
-    let r = symexFind(sutWrapMulB4, tLabel("s8w_wrapmul_b4"), optUnchecked)
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    if r.status == sxSat:
-      let start = r.witness[1]
-      var q: int
-      {.push overflowChecks: off.}
-      q = start * 4
-      {.pop.}
-      check start > 0 and q < 0
-
-  test "unchecked: the B4 hit is still reachable, and replays":
-    let r = symexFind(sutWrapB4, tLabel("s8w_wrap_b4_hit"), optUnchecked)
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    if r.status == sxSat:
-      let (data, start) = r.witness
-      let (k, p) = readCStr(data, start)
-      check k.len == 2 and p == start + 3
+  ## RFC-0016 W1-d2: the five tests about a signed wrap with overflow checks off
+  ## (the oracle, the wrap, the multiplication's wrap, and the B4 hit beside
+  ## them) moved to `tsymex_rfc0005_s8w_remainder_b_checksoff.nim`, built with
+  ## `--overflowChecks:off`: a `push overflowChecks: off` routine declines in
+  ## this checks-on build.
 
   test "a bit-banned offset keeps its OverflowDefect":
     ## Probe: `sutBitB4(@[], high(int))` raises OverflowDefect.

@@ -119,12 +119,16 @@ suite "S8cu: the push form":
     check native(overOff(high(int))) == "hit"
     declines(overOff, feOverflowCheckOption)
 
-  test "overflowChecks, with the settings modelling the wrap, decide (S8w)":
+  test "overflowChecks, with the settings modelling the wrap, no longer decide (S8w)":
+    ## Rule (a): was a trusted sxSat (S8w). A signed wrap with checks off is
+    ## undefined, and the pushed-off routine declines on every setting; the
+    ## explicit arithChecks also disagrees with this checks-on build.
     let r = symexFind(overOff, tLabel("hit"),
                       SymexSettings(arithChecks: {acDivByZero, acRange}))
     checkpoint show(r.errors)
-    check r.status == sxSat
-    if r.status == sxSat: check native(overOff(r.witness[0])) == "hit"
+    check r.status == sxUnknown
+    check r.errors.named(feOverflowCheckOption)
+    check r.errors.named(feCheckOption)
 
   test "rangeChecks":
     check native(rangeOff(300)) == "hit"

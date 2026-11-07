@@ -16,13 +16,12 @@ suite "symex Phase 2 -- ADR-0001, checks-off build (signed overflow is undefined
     check not arithChecksDisagree(defaultSymexSettings())
 
   test "isExact (rule a): the overflow side halts, no trusted wrap witness":
-    var s = defaultSymexSettings()
-    s.integerSemantics = isExact
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"), s)
+    let r = symexFind(wrapNeeded, tLabel("wrap-needed"),
+                      SymexSettings(integerSemantics: isExact))
     check not r.trusted
     check r.errors.named(ubSignedOverflow)
 
   test "isOptimised (rule a): the same":
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"), optimisedSymexSettings())
+    let r = symexFind(wrapNeeded, tLabel("wrap-needed"), SymexSettings(integerSemantics: isOptimised))
     check not r.trusted
     check r.errors.named(ubSignedOverflow)

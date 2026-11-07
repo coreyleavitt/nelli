@@ -82,30 +82,48 @@ proc readCStr(data: seq[byte], offset: int): (string, int) =
     i.inc
   raise newException(ScanError, "unterminated")
 
+proc readCStrU(data: seq[byte], offset: uint): (string, uint) =
+  var acc = ""
+  var i = offset
+  while i < data.len.uint:
+    if data[i] == 0'u8:
+      return (acc, i + 1)
+    acc.add char(data[i])
+    i.inc
+  raise newException(ScanError, "unterminated")
+
 template scan() =
   ## Makes `start` a scan offset (a width-stamped Int) and puts `data`, a
   ## seq, in every query of the walk, as S8ad's suite does.
-  if start < 0: return
   try:
-    let (k, p) = readCStr(data, start)
+    let (k, p) = readCStrU(data, start)
     if k.len == 2 and p == start + 3: symexTarget("hit")
   except ScanError:
     discard
 
-{.push overflowChecks: off.}
-proc uAddWrap(data: seq[byte], start, y: int) =
-  if start >= 0 and y > 1 and start + (y + 1) == start: symexTarget("t")
+## RFC-0016 W1-d2 (rule b: the property is that `wrapIntToWidth`'s window
+## facts decide a wrapping sum within the step bound). A SIGNED sum that wraps
+## is undefined with checks off (and an OverflowDefect with them on), so the
+## probes are UNSIGNED, where the wrap is defined and exact, under settings
+## that agree with the build. `y < 1000` keeps `y + 1` itself from wrapping,
+## so the dead shapes stay dead (`start + (y + 1) == start` needs y + 1 == 0)
+## and the live one needs the sum to wrap. `data.len < 4` keeps the unsigned
+## scan inside the loop unwind bound (a signed `start < 0` return did that). The signed twins are pinned in
+## `tsymex_rfc0005_s8aj_remainder_c_checksoff.nim`.
+proc uAddWrap(data: seq[byte], start, y: uint) =
+  symexAssume(data.len < 4)
+  if y > 1'u and y < 1000'u and start + (y + 1'u) == start: symexTarget("t")
   scan()
-proc uAddWrapSat(data: seq[byte], start, y: int) =
-  if start >= 0 and y > 1 and start + (y + 1) < start: symexTarget("t")
+proc uAddWrapSat(data: seq[byte], start, y: uint) =
+  symexAssume(data.len < 4)
+  if y > 1'u and y < 1000'u and start + (y + 1'u) < start: symexTarget("t")
   scan()
-proc uSubWrap(data: seq[byte], start, y: int) =
-  if start >= 0 and y > 1 and start - (y + 1) == start: symexTarget("t")
+proc uSubWrap(data: seq[byte], start, y: uint) =
+  symexAssume(data.len < 4)
+  if y > 1'u and y < 1000'u and start - (y + 1'u) == start: symexTarget("t")
   scan()
-{.pop.}
 
-const exactUnchecked = SymexSettings(integerSemantics: isExact,
-                                     arithChecks: {acDivByZero, acRange})
+const exactUnchecked = SymexSettings(integerSemantics: isExact)
 
 proc walkSteps(): int =
   ## The walk's Z3 steps: the sum of each query's own count.
@@ -136,7 +154,7 @@ suite "S8aj (2): an unchecked sum that wraps decides":
     let r = bounded(uAddWrapSat, sxSat, 3_000_000)
     if r.status == sxSat:
       let (start, y) = (r.witness[1], r.witness[2])
-      check start >= 0 and y > 1 and start +% (y +% 1) < start
+      check y > 1'u and y < 1000'u and start + (y + 1'u) < start
 
 suite "S8aj (2): the window facts are theorems":
 

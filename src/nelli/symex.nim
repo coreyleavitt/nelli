@@ -3385,7 +3385,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
                                   witnessUndefined: c.witnessUndefined,   # RFC-0016 W1-d3
                                   runTaint: runTaintOf(result.errors),
                                   replay: replayed.replayStatus,
-                                  witnessUnsafe: replayed.endsChild,
+                                  witnessUnsafe: c.witnessUnsafe or replayed.endsChild,   # RFC-0016 WA-B (S4)
                                   runDependence: raw.soundness.runDependence +
                                                  replayed.runDependence)
   result.bounds       = raw.bounds
@@ -3442,7 +3442,9 @@ proc settleWinner(raw: RawResult; replayed: ReplayResult;
   result.soundness.runDependence.incl replayed.runDependence
   # Review R2 (DD1): a child that did not finish makes the witness unsafe to
   # run in the host, confirmed or not, as a typed fact the cache stores.
-  result.soundness.witnessUnsafe = replayed.endsChild
+  # RFC-0016 WA-B (S4): the claim's own flag (a crash claim's) is not the
+  # replay's to clear.
+  result.soundness.witnessUnsafe = raw.soundness.witnessUnsafe or replayed.endsChild
   if replayed.outcome == roConfirmed:
     let tid = if raw.status == sxRaised: raw.raisedTypeId else: ""
     result.errors.add confirmedEnding(replayed, raw.status, tid, input)

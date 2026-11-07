@@ -149,7 +149,7 @@ suite "W1-d3 soundness codec version 4":
 
   test "malformed sixth fields are misses":
     for bad in ["4:0:0:1:0", "4:0:0:1:0:", "4:0:0:1:0:05", "4:0:0:1:0:a",
-                "4:0:0:1:0:32", "4:0:0:1:0:99999999999", "4:0:0:1:0:0:0",
+                "4:0:0:1:0:64", "4:0:0:1:0:99999999999", "4:0:0:1:0:0:0",
                 "4:0:0:1:0:0:9", "4:0:0:1:0:0:1:0"]:
       let db = inMemoryDatabase()
       let key = symexCacheKeyForFn(w1d3Fn, tLabel("w1d3_codec"),

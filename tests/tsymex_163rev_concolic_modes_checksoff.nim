@@ -32,19 +32,22 @@ suite "#163 review R16 D2 -- signed narrow width, checks-off build":
     check buildWraps()
     check not arithChecksDisagree(defaultSymexSettings())
 
-  test "D2 wmExplore (rule a): the overflow at a=100, b=100 halts, not a trusted sat":
+  test "D2 wmExplore (rule a): the wrap at a=100, b=100 is a trusted sat (int8 wraps)":
     let r = symexFind(addI8UncheckedGateAt100_100, tLabel("i8_wrapped_100_100"))
-    check not r.trusted
-    check r.errors.named(ubSignedOverflow)
+    # RFC-0016 WA-B (P1): an int8 sum is computed in `int` and narrowed, a
+    # defined wrap (the oracle above), so the pair is an exact witness.
+    check r.status == sxSat
+    check r.trusted
+    check not r.errors.named(ubSignedOverflow)
 
-  test "D2 wmFollowConcrete (rule a): the overflowing pair no longer satisfies the path":
-    ## The concrete inputs reach the undefined overflow side, which is halted,
-    ## not followed.
+  test "D2 wmFollowConcrete (rule a): the wrapping pair satisfies the path":
+    ## RFC-0016 WA-B (P1): the concrete inputs wrap (100 + 100 is -56) and
+    ## that is followed.
     let trace = @[integerChoice(100, -128, 127, 0), integerChoice(100, -128, 127, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
                      ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
     let r = concolicCollect(addI8UncheckedGate, trace, bindings)
-    check not r.pcSatByConcreteInputs
+    check r.pcSatByConcreteInputs
 
   test "D2 wmFollowConcrete (control): an in-window pair still follows the narrow width":
     let trace = @[integerChoice(0, -128, 127, 0), integerChoice(-5, -128, 127, 0)]

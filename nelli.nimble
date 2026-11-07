@@ -1735,6 +1735,10 @@ task test, "Run the test suite":
             "tsymex_0016_wa_checksoff",
             # RFC-0016 WA-A (P3): nelli imported under a check push reads the push as the build (documented, pinned).
             "tsymex_0016_wa_importpush",
+            # RFC-0016 WA-B: signed div by zero (checks off) halts; 8/16-bit signed arithmetic wraps; a crash claim stays witnessUnsafe; witnessUndefined renders.
+            "tsymex_0016_wa_runtime",
+            "tsymex_0016_wa_runtime_checksoff",
+            "tsymex_0016_wa_runtime_panics",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

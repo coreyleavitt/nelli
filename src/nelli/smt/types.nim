@@ -2895,8 +2895,12 @@ type
                           ## overflow checks off and no `-d:nelliFwrapv`.
     ubFloatToIntRange     ## a float to int conversion out of range.
     ubIndeterminateRead   ## a read of an uninitialised value.
+    ubSignedDivZero       ## `x div 0` / `x mod 0` on a signed type with the
+                          ## overflow checks off (Nim emits no zero check
+                          ## then, and the C division is undefined). RFC-0016
+                          ## WA-B; appended so every earlier ordinal holds.
 
-  UbKind* = range[ubUnsignedDivZero .. ubIndeterminateRead]
+  UbKind* = range[ubUnsignedDivZero .. ubSignedDivZero]
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
     ## the contiguous `ub*` members of `SymexErrorKind`.
 
@@ -2909,6 +2913,7 @@ static:
            ord(ubIntMinModMinusOne) + 1 == ord(ubSignedOverflow) and
            ord(ubSignedOverflow) + 1 == ord(ubFloatToIntRange) and
            ord(ubFloatToIntRange) + 1 == ord(ubIndeterminateRead) and
+           ord(ubIndeterminateRead) + 1 == ord(ubSignedDivZero) and
            ord(high(UbKind)) - ord(low(UbKind)) < 30
 
 func ubOrdinals*(ks: set[UbKind]): set[UbOrdinal] =
@@ -3744,7 +3749,7 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # RFC-0016 W1-e: a parse-site decline with a typed-zero dummy, the class
     # of `feUnsupportedExprKind`.
   of ubUnsignedDivZero, ubIntMinModMinusOne, ubSignedOverflow,
-     ubFloatToIntRange, ubIndeterminateRead: dcOmitted
+     ubFloatToIntRange, ubIndeterminateRead, ubSignedDivZero: dcOmitted
     # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
     # successor, a pure omission.
 

@@ -279,8 +279,13 @@ const renderAsChoicesVersion* = "12"
   ##   (it raised `OverflowDefect`); a magic-backed callee (`abs`) takes its
   ##   caller's arithmetic scope, and a closure iterator of another scope
   ##   declines.
+  ## - RFC-0016 WA-B (285->286): with the overflow checks off a signed `div` or
+  ##   `mod` by zero halts as `ubSignedDivZero` (it was a definite trap);
+  ##   signed 8 and 16 bit `+`, `-`, `*` and negation wrap (`(NI8)(a op b)`)
+  ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
+  ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "285"
+const symexWalkerVersion* = "286"
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.

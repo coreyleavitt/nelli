@@ -8,6 +8,7 @@
 import std/[options, tables, algorithm, strutils]
 import ../strategy, ../optbox
 import ./types
+from ../smt/types import UbKind, undefinedKinds   ## Z3-free (RFC-0016 WA-B, P4)
 
 # `renderDisplayed` is internal — it bridges the strategy's optional
 # display proc to the rendered string. Phases call it at Report
@@ -85,6 +86,16 @@ func boundsJson(b: ResourceBudget): string =
     result &= "\"" & name & "\":" & $v
   result &= "}"
 
+func undefinedNames(f: SymexFinding): seq[string] =
+  ## RFC-0016 WA-B (P4). `Soundness.witnessUndefined` by `UbKind` name, in
+  ## ordinal order.
+  for k in undefinedKinds(f.soundness): result.add $k
+
+func undefinedJson(f: SymexFinding): string =
+  for i, n in undefinedNames(f):
+    if i > 0: result &= ","
+    result &= "\"" & n & "\""
+
 proc symexFindingLines(f: SymexFinding): seq[string] =
   ## The text rendering of one finding: a summary line, then one indented
   ## line per gap and per annotation violation. Shared by `repro` (ofText)
@@ -96,6 +107,8 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
              " replay=" & $f.soundness.replay
   # Review round 1 (Low): the two soundness fields no renderer showed.
   if f.soundness.witnessUnsafe: head &= " witnessUnsafe=true"
+  if f.soundness.witnessUndefined != {}:
+    head &= " witnessUndefined=" & undefinedNames(f).join(",")
   if f.soundness.runDependence != {}:
     head &= " runDependence=" & $f.soundness.runDependence
   if f.fromCache: head &= " fromCache=true"
@@ -232,6 +245,7 @@ proc symexFindingJson(f: SymexFinding): string =
             ",\"runTaint\":" & taintJson(f.soundness.runTaint) &
             ",\"replay\":\"" & $f.soundness.replay & "\"" &
             ",\"witnessUnsafe\":" & $f.soundness.witnessUnsafe &
+            ",\"witnessUndefined\":[" & undefinedJson(f) & "]" &
             ",\"runDependence\":[" & runDependenceJson(f.soundness.runDependence) &
             "]}"
   # Review R1-17: the bounds a verdict was decided under. Review R2 (LV3): not
@@ -396,6 +410,13 @@ proc renderGithub[T](r: Report[T], testName: string): string =
                 ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
                          ": its replay ended or hung the process running " &
                          "it; it is not run in the host")
+    # RFC-0016 WA-B (P4): the undefined behaviour the witness ran past.
+    if f.soundness.witnessUndefined != {}:
+      result &= "\n::warning title=symex witness undefined::" &
+                ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
+                         ": its path ran past undefined behaviour (" &
+                         undefinedNames(f).join(", ") & "); it is not run " &
+                         "in the host")
     # RFC-0005 W1: a hint is a `::notice` of its own, so a replay that crashed
     # or did not run says so, with its message, where the CI reader looks.
     for h in f.hints:

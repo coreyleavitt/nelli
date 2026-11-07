@@ -742,6 +742,10 @@ type
     witnessUndefined*: set[UbOrdinal]
       ## RFC-0016 W1-d3. The claim's `Soundness.witnessUndefined`, carried to
       ## `settleCandidate` (replay cannot lift it).
+    witnessUnsafe*: bool
+      ## RFC-0016 WA-B (S4). The claim's own `Soundness.witnessUnsafe` (a
+      ## crash claim: its witness ends the process wherever it runs), carried
+      ## to `settleCandidate`, which ORs the replay's `endsChild` into it.
     nilDerefOnPath*: bool
       ## RFC-0005 S8k. The claim's path went through the walker's nil
       ## dereference edge (`Path.nilDeref`): its real run would SIGSEGV
@@ -8808,13 +8812,20 @@ proc arithCheckedHere(ac: ArithCheck): bool =
   ## the settings describe the build, and the routine is not the build.
   ac in {acOverflow, acDivByZero} and buildWraps() and not currentArithWraps
 
-proc depositSignedOverflow(oc: Z3Bool) =
+proc depositSignedOverflow(oc: Z3Bool; width: int) =
   ## RFC-0016 W1-d2 (W-07). A signed `+`, `-` or `*` overflow side. With the
   ## build's overflow checks on it is Nim's `OverflowDefect` fork
   ## (`overflowConds`). With them off (`currentArithWraps`) the C operation is
   ## undefined, so it is the `ubSignedOverflow` trap `drainArithTraps` decides
   ## at the op: an unreachable side is pruned, any other halts.
+  ##
+  ## RFC-0016 WA-B (P1). Below `int`'s width (8 and 16 bits) the operation is
+  ## NOT undefined: Nim emits `(NI8)(a op b)`, the arithmetic happens in C's
+  ## promoted `int`, which cannot overflow, and the narrowing wraps (modular on
+  ## every supported compiler). There is no undefined side: the result is
+  ## wrapped to the width by `lowerArith` and nothing halts.
   if currentArithWraps:
+    if width in {8, 16}: return
     let tr = ArithTrap(cond: oc, ub: some(UbKind(ubSignedOverflow)),
                        site: "signed `+`, `-` or `*` overflow")
     arithTrapConds.add tr
@@ -8887,6 +8898,12 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       if unsignedDiv:
         ArithTrap(cond: c, ub: some(UbKind(ubUnsignedDivZero)),
                   site: (if op == bDiv: "`x div 0'u`" else: "`x mod 0'u`"))
+      elif currentArithWraps:
+        # RFC-0016 WA-B (S3): with the checks off Nim emits no zero check
+        # and the signed C division by zero is undefined, as the unsigned
+        # one is: the zero side halts, it is not a definite trap.
+        ArithTrap(cond: c, ub: some(UbKind(ubSignedDivZero)),
+                  site: (if op == bDiv: "`x div 0`" else: "`x mod 0`"))
       else: ArithTrap(cond: c)
     if currentArithWraps:
       # RFC-0005 S8aa: Nim's zero-divisor check is part of its overflow
@@ -8918,7 +8935,12 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       syncDivByZeroCond(c)
   if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and
      a.signed and not bvOverflowDischarged(a, b, op):   # RFC-0005 S8bv
-    depositSignedOverflow(overflowCond(a, b, op))
+    depositSignedOverflow(overflowCond(a, b, op),
+                          case a.kind
+                          of svBV8: 8
+                          of svBV16: 16
+                          of svBV32: 32
+                          else: 64)
   elif op in {bAdd, bSub, bMul} and a.kind == svInt and a.ziWidth != 0 and a.ziSigned:
     # Issue #161 slice 2. The obligation is raised unconditionally; what
     # varies is who discharges it. Try the static proof first, and record
@@ -8933,7 +8955,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       obligationLog.add ObligationEntry(
         op: op, width: a.ziWidth, signed: a.ziSigned,
         disposition: odLive, bound: none(Interval))
-      depositSignedOverflow(overflowCondInt(a, b, op))
+      depositSignedOverflow(overflowCondInt(a, b, op), a.ziWidth)
   # RFC-0005 S8i: signed `div`/`mod` of `low(T)` by `-1`. `div` raises
   # `OverflowDefect` (Nim's check, at every width) -- the `overflowConds`
   # sink, acOverflow-gated like add/sub/mul. At 32 and 64 bits the C
@@ -8998,6 +9020,12 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       # RFC-0016 W1-d2: a signed result needs no wrap here. Checked, the
       # raise fork leaves the survivors in the window; unchecked, the
       # `ubSignedOverflow` trap does.
+      wrapIntToWidth(r)
+    elif r.ziWidth in {8, 16} and r.ziSigned and currentArithWraps and
+         op in {bAdd, bSub, bMul}:
+      # RFC-0016 WA-B (P1): a signed 8 or 16 bit result is computed in `int`
+      # and narrowed back, a defined wrap (`depositSignedOverflow` halts
+      # nothing there).
       wrapIntToWidth(r)
     else:
       r
@@ -17758,10 +17786,12 @@ func toCandidate(r: RawResult): SatCandidate =
   of sxSat:
     SatCandidate(status: sxSat, pathTaint: r.soundness.pathTaint, errors: r.errors,
                  witnessUndefined: r.soundness.witnessUndefined,
+                 witnessUnsafe: r.soundness.witnessUnsafe,
                  nilDerefOnPath: r.nilDerefOnPath, input: r.witness)
   of sxRaised:
     SatCandidate(status: sxRaised, pathTaint: r.soundness.pathTaint, errors: r.errors,
                  witnessUndefined: r.soundness.witnessUndefined,
+                 witnessUnsafe: r.soundness.witnessUnsafe,
                  nilDerefOnPath: r.nilDerefOnPath,
                  raisedTypeId: r.raisedTypeId, isDefect: r.isDefect,
                  raisedMsg: r.raisedMsg, input: r.raisedWitness)

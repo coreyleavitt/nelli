@@ -429,6 +429,7 @@ operation is not `trusted()` and is not run in your process by
 | `ubSignedOverflow` | signed `+`, `-`, `*` or negation that overflows, in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`) and no `-d:nelliFwrapv`. The compiler may assume it never happens (`v + 1 > v` folds to true). | Build with overflow checks on, or `-d:nelliFwrapv` if the program relies on the wrap, or bound the operands. |
 | `ubFloatToIntRange` | a float to int conversion out of range. Declared; no emission site yet (the conversion still records `feConvFloatToIntUndefined`). | See `feConvFloatToIntUndefined`. |
 | `ubIndeterminateRead` | a read of a `{.noinit.}` local before any write. | Initialise it. |
+| `ubSignedDivZero` | `x div 0` or `x mod 0` on a signed type in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`). Nim emits its zero check under `overflowChecks` alone, so the C division is reached and is undefined (SIGFPE on x86-64). With the checks on it is a `DivByZeroDefect`. | Guard the divisor, or build with overflow checks on. |
 
 ### Build and check taints
 

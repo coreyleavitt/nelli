@@ -2849,6 +2849,18 @@ type
                           ## read, so the path declines. Every other build
                           ## crashes there (SIGSEGV) and no handler runs.
                           ## sevError.
+    feFloatWidth          ## RFC-0016 W1-e (W-04). A conversion between
+                          ## `float32` and `float64`, explicit (`float32(x)`,
+                          ## `float64(y)`) or one the compiler inserts (a
+                          ## `float32` passed or assigned where a `float64`
+                          ## is expected). The two widths are different Z3
+                          ## sorts; the conversion was the transparent
+                          ## pass-through, so a value of one width flowed on
+                          ## as the other. Exact rounding (`fp.to_fp`, RNE)
+                          ## is not modelled yet, so the path declines.
+                          ## `classOf` is `dcNoAnswer`, as
+                          ## `feUnsupportedExprKind`. sevError. See
+                          ## `docs/symex/README.md`, "Float widths".
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3647,6 +3659,9 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of seRecursiveValueDepth: dcNoAnswer
     # A scoped decline, as `seNestedSeqUnsupported` (the read of a seq
     # past the depth bound is not modelled; see the enum member).
+  of feFloatWidth: dcNoAnswer
+    # RFC-0016 W1-e: a parse-site decline with a typed-zero dummy, the class
+    # of `feUnsupportedExprKind`.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the

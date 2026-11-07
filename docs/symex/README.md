@@ -130,6 +130,20 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 | `itSet`    | `HashSet[T]`, `set[T]` | 5 | `members + size` |
 | `itVariant` | Nim variant objects (`case kind: …`) | 11 | first-class sum type: per-arm fields, walker forks at access, witness via case-dispatch construction; literal- and symbolic-discriminant EXPRESSION construction landed Round 6 (ADR-0029, see below) |
 
+### Float widths
+
+`float32` and `float64` are separate IEEE sorts and `float32` arithmetic is
+exact at its own width. A conversion between the two is not yet modelled: an
+explicit `float32(x)` / `float64(y)` (and `float(y)`) and the conversion Nim
+inserts where a `float32` is passed, assigned or returned as a `float64` (or
+the reverse) decline with `feFloatWidth` (`sxUnknown`). The one exception is
+a `float32` operand of a binary operator whose peer is a `float64`: that
+widening is exact and modelled (comparisons and arithmetic), so it is kept. The correctly rounded
+conversion (`fp.to_fp`, round-to-nearest-even) is future work. For example
+`float64(float32(x)) == x` is false natively for `x = 0.1` and true for
+`x = 0.5`, so no single clean answer is right. Conversions between an integer
+and either float width are unaffected.
+
 ### Statements (`IRStmtKind`)
 
 | Kind | Nim source shape | Phase |

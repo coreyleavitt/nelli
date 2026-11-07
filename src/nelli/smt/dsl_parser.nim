@@ -5162,6 +5162,22 @@ proc keepInlineRaiseOrder(l: IRExpr; a: NimNode; mark: int;
     let tmp = freshSynth(ctx, "evalOrder")
     preamble.insert(mkLet(tmp, classifyType(a).ty, l), mark)
 
+proc widenedFloatOperand(a, peer: NimNode): NimNode =
+  ## RFC-0016 W1-e. The compiler widens a `float32` operand of a binary
+  ## operator whose peer is a `float64` through a hidden conversion. The
+  ## widening is exact (every float32 is a float64) and `reconcileFloat`
+  ## (`runtime.nim`) performs it for comparisons and arithmetic, so the
+  ## operand is parsed at its own width and that conversion is the one
+  ## width change that does not decline `feFloatWidth`.
+  if a.kind == nnkHiddenStdConv and a.len == 2 and
+     a.typeKind != ntyNone and peer.typeKind != ntyNone and
+     a.getTypeInst.typeKind in {ntyFloat, ntyFloat64} and
+     a[1].typeKind == ntyFloat32 and
+     peer.getTypeInst.typeKind in {ntyFloat, ntyFloat64}:
+    a[1]
+  else:
+    a
+
 proc parseOperandPair(a, b: NimNode; preamble: var seq[IRStmt];
                       ctx: ParseCtx): (IRExpr, IRExpr) =
   ## RFC-0005 S8ax. `parseAtomicOperand` of a binary operator's two
@@ -5176,9 +5192,9 @@ proc parseOperandPair(a, b: NimNode; preamble: var seq[IRStmt];
   ## raise, in a `let` ending its own statements, ahead of the right one's;
   ## the order below then treats that `let` as the left operand's own.
   let m0 = preamble.len
-  let l = parseAtomicOperand(a, preamble, ctx)
+  let l = parseAtomicOperand(widenedFloatOperand(a, b), preamble, ctx)
   let m1 = preamble.len
-  let r = parseAtomicOperand(b, preamble, ctx)
+  let r = parseAtomicOperand(widenedFloatOperand(b, a), preamble, ctx)
   let before = preamble.len
   keepInlineRaiseOrder(l, a, m1, preamble, ctx)
   let m1k = m1 + (preamble.len - before)
@@ -5610,6 +5626,39 @@ proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
     if n.typeKind != ntyNone: zeroValueForType(classifyType(n).ty)
     else: nil
   (if dummy != nil: dummy else: mkIntLit(0))
+
+proc fltWidthOfKind(k: NimTypeKind): int =
+  ## RFC-0016 W1-e. The IEEE width a float type kind names: 32 for `float32`,
+  ## 64 for `float64` and `float`, 0 for anything else.
+  case k
+  of ntyFloat32: 32
+  of ntyFloat, ntyFloat64: 64
+  else: 0
+
+proc declineFloatWidth(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
+                       src, tgt: string): IRExpr =
+  ## RFC-0016 W1-e (W-04). A `float32` <-> `float64` conversion, explicit or
+  ## compiler-inserted, was the transparent pass-through: the operand flowed
+  ## on at its own width in a slot of the other (and `float64(float32(0.1))
+  ## == 0.1` came back true; natively it is false). Exact rounding is not
+  ## modelled, so the conversion declines with a typed-zero dummy of the
+  ## target type, as `declineIntWidthConv`.
+  preamble.add ctx.declineAtSite(
+    feFloatWidth,
+    siteMsg(n, "W1-e: float width conversion `" & src & "` -> `" & tgt &
+               "` is not modelled (see docs/symex/README.md, Float widths)"),
+    "W1-e: float width conversion " & src & "->" & tgt & " (feFloatWidth)")
+  let dummy =
+    if n.typeKind != ntyNone: zeroValueForType(classifyType(n).ty)
+    else: nil
+  (if dummy != nil: dummy else: mkIntLit(0))
+
+proc isFloatWidthChange(operand, conv: NimNode): bool =
+  ## RFC-0016 W1-e. Both sides are builtin floats of different widths.
+  if operand.typeKind == ntyNone or conv.typeKind == ntyNone: return false
+  let a = fltWidthOfKind(operand.getTypeInst.typeKind)
+  let b = fltWidthOfKind(conv.getTypeInst.typeKind)
+  a != 0 and b != 0 and a != b
 
 proc isPromoteSoundEligibleParam(operand: NimNode, operandTy: IRType): bool =
   ## Issue #163 review (rev item 2 follow-up) soundness carve-out, factored
@@ -10610,6 +10659,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         preamble.add mkIf(@[mkBranch(
           mkBinop(bNe, mkVar(cell), mkNil(hier.tgtTy)), mkBlock(reads))])
         mkVar(cell)
+    elif tgt in fltTyNames and src in fltTyNames and
+         isFloatWidthChange(operand, n):
+      # RFC-0016 W1-e (W-04).
+      declineFloatWidth(n, preamble, ctx, src, tgt)
     elif tgt in fltTyNames and src in intTyNames:
       mkConvIntToFloat(parseExpr(operand, preamble, ctx), if tgt == "float32": 32 else: 64)
     elif tgt in intTyNames and src in fltTyNames:
@@ -10870,6 +10923,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # `classifyType` on it aborted the compile.
       if isIntLiteralNode(wrapped) or n.kind == nnkHiddenAddr:
         parseExpr(wrapped, preamble, ctx)
+      elif isFloatWidthChange(wrapped, n):
+        # RFC-0016 W1-e (W-04): a compiler-inserted float32 <-> float64.
+        declineFloatWidth(n, preamble, ctx, valueTypeName(wrapped),
+                          valueTypeName(n))
       else:
         let outerCls = classifyType(n)
         let innerCls = classifyType(wrapped)

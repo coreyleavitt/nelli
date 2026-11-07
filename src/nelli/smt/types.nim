@@ -2861,6 +2861,14 @@ type
                           ## `classOf` is `dcNoAnswer`, as
                           ## `feUnsupportedExprKind`. sevError. See
                           ## `docs/symex/README.md`, "Float widths".
+    feUnadmitted          ## RFC-0016 ADM-1 (§8.1). A cell with no row in its
+                          ## admission table: the code reached something the
+                          ## axis was never asked to classify, which is a
+                          ## decline, never a silent model. `classOf` is
+                          ## `dcNoAnswer` until K7's `halted` drops the path
+                          ## (a `dcOmitted` row would let an `sxSat` through
+                          ## clean). sevError. Produced by the magic axis for
+                          ## a `var`-parameter magic with no row.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3662,6 +3670,8 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feFloatWidth: dcNoAnswer
     # RFC-0016 W1-e: a parse-site decline with a typed-zero dummy, the class
     # of `feUnsupportedExprKind`.
+  of feUnadmitted: dcNoAnswer
+    # RFC-0016 ADM-1: a decline naming the cell with no row; the default.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the

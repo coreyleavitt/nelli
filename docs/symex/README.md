@@ -378,6 +378,16 @@ strategies actually consume). Effect on existing DBs:
 Walker version stays at `"3"`; non-collection witnesses across
 the Phase 12 upgrade keep their cache entries.
 
+### Local variable pragmas
+
+A pragma on a local `var` or `let` is admitted only when the walker models it
+or it cannot change what the program does: `noinit`, `global`, `inject`,
+`gensym` and `used`. Any other (`cursor`, `align`, `volatile`, `codegenDecl`,
+...) declines with `feLocalPragma` on every path that reaches the declaration:
+the verdict is `sxUnknown`, never a trusted `sxSat` or `sxUnsat`. `{.cursor.}`
+in particular makes the local share the source's memory, which the walk models
+as a copy.
+
 ### Out of scope for v1 (diagnosed at macro time)
 
 - Unbounded loops without invariants (k-unwind exhaustion → `sxUnknown`)

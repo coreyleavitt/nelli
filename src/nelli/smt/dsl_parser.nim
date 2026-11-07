@@ -16754,6 +16754,26 @@ proc lentLoopDecline(n, container, loopVar, bodyNode: NimNode; ctx: ParseCtx;
             "(RFC-0016) (feUnsupportedOp)"),
     "a `for` variable holding the memory the body may write")
 
+const localPragmaAllowlist = ["noinit", "global", "inject", "gensym", "used"]
+  ## RFC-0016 W1-b (W-02). The pragmas on a local `var` / `let` the walker
+  ## admits; every other one declines `feLocalPragma`.
+  ##   * `noinit`: modelled (an unwritten read taints, `noinitPlain`).
+  ##   * `global`: modelled (a module-level variable, `isModuleGlobal`).
+  ##   * `inject`, `gensym`: template hygiene only -- they rename the
+  ##     symbol at expansion and have no run-time effect (`std/re`'s `=~`).
+  ##   * `used`: suppresses the unused-variable hint; no code is changed.
+const localPragmaAllowlistText = "`noinit`, `global`, `inject`, `gensym` and `used`"
+
+proc localPragmaName(p: NimNode): string =
+  ## The name of one pragma of a local (`cursor`, `align: 8` -> `align`).
+  case p.kind
+  of nnkIdent, nnkSym: p.strVal
+  of nnkExprColonExpr, nnkCall, nnkCommand:
+    if p.len > 0: localPragmaName(p[0]) else: "?"
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    if p.len > 0: localPragmaName(p[0]) else: "?"
+  else: "?"
+
 proc letCursorDecline(c: NimNode; rest: seq[NimNode]; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8cn. The decline of `let c = lv` over a seq, a string, a Table
   ## or an object holding one, where a later statement of its list reads `c`
@@ -19859,8 +19879,22 @@ proc parseStmtInner(n: NimNode,
           var noInit = false
           if d.len > 1:
             for p in d[1]:
-              if p.kind in {nnkIdent, nnkSym} and p.strVal == "noinit":
-                noInit = true
+              let pn = localPragmaName(p)
+              if pn == "noinit": noInit = true
+              elif pn notin localPragmaAllowlist:
+                # RFC-0016 W1-b (W-02): a pragma the walker does not model
+                # (`cursor` shares memory the copy-model does not; `align`,
+                # `volatile`, `codegenDecl` ... change the generated code).
+                # The declaration is still lowered below, so later uses
+                # resolve; the marker taints every path that reaches it.
+                stmts.add ctx.declineAtSite(feLocalPragma,
+                  siteMsg(d, "the local `" & d[0].strVal & "` carries the " &
+                          "pragma `{." & pn & ".}`, which is not modelled: " &
+                          "only " & localPragmaAllowlistText & " are " &
+                          "(docs/symex/README.md, \"Local variable " &
+                          "pragmas\") (feLocalPragma)"),
+                  "the local pragma `" & pn & "`")
+                break
           if noInit and id0[^1].kind == nnkEmpty:
             # RFC-0005 S8bz (item 7): unwritten until written; a read of a
             # part no write reached taints the path. A managed part declines

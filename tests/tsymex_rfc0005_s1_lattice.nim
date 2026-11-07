@@ -85,7 +85,9 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feCheckOption, feOverflowCheckOption,
                         # RFC-0005 S8cp: a discriminator written under
                         # `{.cast(uncheckedAssign).}`, its bytes unknown.
-                        feUncheckedDiscBytes}
+                        feUncheckedDiscBytes,
+                        # RFC-0016 W1-b: a local pragma outside the allowlist.
+                        feLocalPragma}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

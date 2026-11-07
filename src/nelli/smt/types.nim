@@ -2786,6 +2786,12 @@ type
                           ## fresh value of its type. Every real value is a model
                           ## and nothing is dropped: `classOf` is `dcFreshSymbol`,
                           ## a hit is replayed, an `sxUnsat` stands. sevError.
+    feLocalPragma         ## RFC-0016 W1-b (W-02). A local `var` / `let` carries a
+                          ## pragma the walker does not model (`{.cursor.}`, which
+                          ## shares the memory the walk copies, `align`,
+                          ## `volatile` ...). The declaration is lowered as if it
+                          ## had none and the path that reaches it declines
+                          ## (`dcSubstituted`). sevError.
     feEvalOrderUnmodelled ## RFC-0005 S8ax. An operand Nim checks where it
                           ## stands but reads after a later operand's call
                           ## (`a[i] + f()`, `-x + f()`, `x div 2 + f()`),
@@ -3624,6 +3630,8 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feUncheckedDiscBytes: dcFreshSymbol
     # RFC-0005 S8cp: a fresh value of the arm field's type, with no range fact,
     # for bytes Nim leaves or zeroes; nothing is forked away or dropped.
+  of feLocalPragma: dcSubstituted
+    # RFC-0016 W1-b: the pragma's effect is replaced by none.
   of feEvalOrderUnmodelled: dcNoAnswer
     # RFC-0005 S8ax: a decline; the conservative default.
     # A HALT: the path whose `break` / `continue` leaves a `finally` during a

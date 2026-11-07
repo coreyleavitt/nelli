@@ -216,9 +216,10 @@ if [ "$host" -eq 1 ]; then
   [ -n "$z3_full" ] || z3_full="unknown"
   env_line="host=$(uname -sr) gcc=$(gcc -dumpfullversion) nim=$(nim --version | head -n1 | awk '{print $4}') Z3=$z3_full"
   # Same compile command as the container (scripts/run-one.sh); the Nim
-  # artifact ships Nim alone, so the C compiler and Z3 headers are named here.
+  # artifact ships Nim alone, so the C compiler, Z3 headers and dep paths are
+  # named here (the container resolves them through the repo's nim.cfg).
   export NELLI_HOST=1
-  export NELLI_NIM_FLAGS="--cc:gcc --colors:off${NELLI_Z3_INCLUDE:+ --cincludes:$NELLI_Z3_INCLUDE}"
+  export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src${NELLI_Z3_INCLUDE:+ --cincludes:$NELLI_Z3_INCLUDE}"
   warn_root="$PWD"
 else
   podman image exists "localhost/nelli-dev:$image" || scripts/build-dev-image.sh "$image" >&2 || exit 2

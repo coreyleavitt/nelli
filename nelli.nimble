@@ -1710,6 +1710,8 @@ task test, "Run the test suite":
             "tsymex_0016_w1g_inslice",
             # RFC-0016 W1-f: field defaults pinned against native; `case` with `elif` (W-20, W-21).
             "tsymex_0016_w1f_defaults_caseelif",
+            # RFC-0016 W1-d1b: unsigned div/mod by zero halts through haltUndefined.
+            "tsymex_0016_w1d1b_udivzero",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

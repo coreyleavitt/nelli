@@ -153,9 +153,15 @@ suite "S8aa (1): a division that traps in C is not a Defect":
     check r.halted(ubSignedOverflow)
 
   test "unsigned: unchecked x div 0 is a trap":
+    ## Native (pinned toolchain, c and cpp): `10'u64 div 0` is a SIGFPE, no
+    ## `except` arm runs. RFC-0016 W1-d1b: the C division is undefined there,
+    ## so the zero side halts (`ubUnsignedDivZero`) instead of being a
+    ## confined, trusted `sxUnsat`.
     let r = symexFind(sutZeroDivU, tRaisedExn("DivByZeroDefect"), optUnchecked)
     checkpoint show(r.errors)
-    check r.status == sxUnsat
+    check r.status != sxRaised
+    check not r.trusted
+    check r.halted(ubUnsignedDivZero)
 
   test "no execution continues past x div 0 (no checks at all)":
     ## RED: `sxSat` with witness (0, 0): the continuation carried Z3's

@@ -105,8 +105,7 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
     # Kinds with no producer yet. A kind leaves this list in the slice that
     # adds its producer; the check below fails if a listed kind has gained
     # one, or an unlisted kind has none.
-    const unproducedUntil = {ubUnsignedDivZero,    # W1-d1b
-                             ubFloatToIntRange,    # K10a
+    const unproducedUntil = {ubFloatToIntRange,    # K10a
                              ubIndeterminateRead}  # K10a
     var src = ""
     for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim"]:

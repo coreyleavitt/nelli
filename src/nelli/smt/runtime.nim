@@ -8817,6 +8817,14 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## from the same pre-lower path in `drainOverflowRaises`, kind-agnostic.
   if op in {bDiv, bMod} and a.kind notin {svFloat32, svFloat64}:
     let c = divisorIsZero(b)
+    let unsignedDiv = (a.kind in {svBV8, svBV16, svBV32, svBV64} and
+                       not a.signed) or
+                      (a.kind == svInt and a.ziWidth != 0 and not a.ziSigned)
+    let divTrap =
+      if unsignedDiv:
+        ArithTrap(cond: c, ub: some(UbKind(ubUnsignedDivZero)),
+                  site: (if op == bDiv: "`x div 0'u`" else: "`x mod 0'u`"))
+      else: ArithTrap(cond: c)
     if currentArithWraps:
       # RFC-0005 S8aa: Nim's zero-divisor check is part of its overflow
       # checks (the C code generator emits it only under `overflowChecks`),
@@ -8832,8 +8840,16 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       # aborts the process on replay) and, with `acDivByZero` off too, the
       # continuation carried Z3's `x div 0` value, a state Nim never
       # reaches.
-      arithTrapConds.add ArithTrap(cond: c)
-      syncArithTrapCond(ArithTrap(cond: c))
+      arithTrapConds.add divTrap
+      syncArithTrapCond(divTrap)
+    elif unsignedDiv:
+      # RFC-0016 W1-d1b: Nim's zero-divisor check covers the signed types
+      # only; an unsigned `x div 0` / `x mod 0` reaches the C division and
+      # traps (SIGFPE, probed c and cpp, default build), so it is no
+      # `DivByZeroDefect` and no `except` arm runs. The C division is
+      # undefined there, so the zero side halts (section 9.1 item 1).
+      arithTrapConds.add divTrap
+      syncArithTrapCond(divTrap)
     else:
       divByZeroConds.add c
       syncDivByZeroCond(c)

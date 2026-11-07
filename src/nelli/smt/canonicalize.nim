@@ -248,8 +248,13 @@ const renderAsChoicesVersion* = "12"
   ##   claim filters a channel in place. The walk's initial path is built in
   ##   one place (`initialWalkPath`). No verdict moves; the bump keeps cache
   ##   entries of the two claim identities apart.
+  ## - RFC-0016 W1-d1b (279->280): an unsigned `div`/`mod` by zero is
+  ##   undefined (the C division traps; Nim has no check for it) and halts
+  ##   through `haltUndefined` as `ubUnsignedDivZero`, not a
+  ##   `DivByZeroDefect` raise; the opaque-call defect scan no longer lists
+  ##   `DivByZeroDefect` for the unsigned division magics.
 
-const symexWalkerVersion* = "279"
+const symexWalkerVersion* = "280"
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.

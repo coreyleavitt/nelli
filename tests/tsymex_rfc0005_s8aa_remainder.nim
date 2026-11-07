@@ -125,6 +125,17 @@ const exactUnchecked = SymexSettings(integerSemantics: isExact,
                                      arithChecks: {acDivByZero, acRange})
 const noChecks = SymexSettings(integerSemantics: isOptimised, arithChecks: {})
 
+proc halted(r: SymexResult[auto]): bool =
+  ## RFC-0016 W1-d1a. Natively `low(T) div -1` and `low(T) mod -1` at 32 and
+  ## 64 bits die of SIGFPE on x86-64 (probed, c and cpp), so the label is not
+  ## reached there; but the C division is undefined, so the walk no longer
+  ## claims `sxUnsat`: the path halts through `haltUndefined`, the run records
+  ## `ubIntMinModMinusOne` and the verdict is `sxUnknown`. The old pins
+  ## (`sxUnsat`) were the hardware's outcome, not the language's. For a
+  ## symbolic `x div y` the undefined input (low, -1) is reachable before the
+  ## `y == 0` guard is read, so the zero-divisor pins halt too.
+  r.status == sxUnknown and r.errors.hasKind(ubIntMinModMinusOne)
+
 suite "S8aa (1): a division that traps in C is not a Defect":
 
   test "unchecked x div 0 is a trap, not a DivByZeroDefect (isOptimised)":
@@ -132,13 +143,13 @@ suite "S8aa (1): a division that traps in C is not a Defect":
     ## aborts with SIGFPE.
     let r = symexFind(sutZeroDiv, tRaisedExn("DivByZeroDefect"), optUnchecked)
     checkpoint show(r.errors)
-    check r.status == sxUnsat
+    check r.halted
 
   test "unchecked x div 0 is a trap, not a DivByZeroDefect (isExact)":
     let r = symexFind(sutZeroDiv, tRaisedExn("DivByZeroDefect"),
                       exactUnchecked)
     checkpoint show(r.errors)
-    check r.status == sxUnsat
+    check r.halted
 
   test "unsigned: unchecked x div 0 is a trap":
     let r = symexFind(sutZeroDivU, tRaisedExn("DivByZeroDefect"), optUnchecked)
@@ -150,13 +161,13 @@ suite "S8aa (1): a division that traps in C is not a Defect":
     ## `x div 0 == -1`, and the witness aborts on replay.
     let r = symexFind(sutZeroDiv, tLabel("s8aa_zero_div"), noChecks)
     checkpoint show(r.errors)
-    check r.status == sxUnsat
+    check r.halted
 
   test "no execution continues past x mod 0 (no checks at all)":
     ## RED: `sxSat` with witness (0, 0) (Z3's `x mod 0 == x`).
     let r = symexFind(sutZeroMod, tLabel("s8aa_zero_mod"), noChecks)
     checkpoint show(r.errors)
-    check r.status == sxUnsat
+    check r.halted
 
   test "checked arithmetic still raises DivByZeroDefect, and it replays":
     var real = ""
@@ -178,7 +189,7 @@ suite "S8aa (1): a division that traps in C is not a Defect":
       block:
         let r = symexFind(fn, tLabel(lbl), st)
         checkpoint lbl & " " & show(r.errors)
-        check r.status == sxUnsat
+        check r.halted
     dead(sutLowDiv, "s8aa_low_div", optUnchecked)
     dead(sutLowDiv, "s8aa_low_div", exactUnchecked)
     dead(sutLowDiv32, "s8aa_low_div32", optUnchecked)
@@ -208,7 +219,7 @@ suite "S8aa (1): a division that traps in C is not a Defect":
   test "a stamped B4 offset divided by -1 traps at low(int)":
     let r = symexFind(sutOffsetDiv, tLabel("s8aa_offset_div"), optUnchecked)
     checkpoint show(r.errors)
-    check r.status == sxUnsat
+    check r.halted
     let r2 = symexFind(sutOffsetDiv, tLabel("s8aa_offset_hit"), optUnchecked)
     checkpoint show(r2.errors)
     check r2.status == sxSat

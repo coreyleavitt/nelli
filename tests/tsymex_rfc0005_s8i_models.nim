@@ -134,15 +134,20 @@ suite "S8i (1) low(T) div -1 raises OverflowDefect; low(T) mod -1 traps":
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
 
-  test "low(int) mod -1 does not continue (was a false sxSat: the SUT dies of SIGFPE)":
+  # RFC-0016 W1-d1a: natively (x86-64, c and cpp) the process dies of SIGFPE,
+  # but the C division is undefined, so the verdict is no longer a trusted
+  # sxUnsat: the path halts (`ubIntMinModMinusOne`) and the run is sxUnknown.
+  test "low(int) mod -1 does not continue and is undefined (was a false sxSat: the SUT dies of SIGFPE)":
     let r = symexFind(modTrap, tLabel("s8i_mod_trap"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check r.errors.hasKind(ubIntMinModMinusOne)
 
   test "low(int32) mod -1 does not continue":
     let r = symexFind(modTrap32, tLabel("s8i_mod_trap32"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check r.errors.hasKind(ubIntMinModMinusOne)
 
   test "low(int8) mod -1 is 0 and continues":
     let r = symexFind(modNoTrap8, tLabel("s8i_mod_notrap8"))

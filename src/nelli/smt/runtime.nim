@@ -2047,7 +2047,17 @@ var uninitReadConds* {.threadvar.}: seq[Z3Bool]
   ## `WalkCtx.uninitReadConds` when in a walk. Reset alongside
   ## `arithTrapConds` at every reset site.
 
-var arithTrapConds* {.threadvar.}: seq[Z3Bool]
+type ArithTrap* = object
+  ## RFC-0016 W1-d1a. One `arithTrapConds` deposit: the trap predicate, and
+  ## whether the C division is UNDEFINED there (`ub`, `ubIntMinModMinusOne`:
+  ## `low(T) mod -1`, or `low(T) div -1` with overflow checks off, at 32 and
+  ## 64 bits) rather than a definite hardware outcome. `drainArithTraps`
+  ## halts an `ub` deposit through `haltUndefined`; the rest still confine
+  ## the survivor.
+  cond*: Z3Bool
+  ub*: bool
+
+var arithTrapConds* {.threadvar.}: seq[ArithTrap]
   ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
   ## generated C rather than raising: signed `mod` of `low(T)` by `-1` at 32
   ## and 64 bits (and `div` there, which traps when overflow checks are
@@ -2303,7 +2313,7 @@ proc syncUninitReadCond*(cond: Z3Bool)
   ## RFC-0005 S8bv fwd-decl. Appends `cond` to `WalkCtx.uninitReadConds`
   ## when a walk is active. Defined after `WalkCtx`.
 
-proc syncArithTrapCond*(cond: Z3Bool)
+proc syncArithTrapCond*(cond: ArithTrap)
   ## RFC-0005 S8i fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
   ## appends `cond` to `WalkCtx.arithTrapConds` (the LIVE store for the
   ## survivor-only arithmetic-trap sink). No-op when no active walk. Defined
@@ -8819,8 +8829,8 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       # aborts the process on replay) and, with `acDivByZero` off too, the
       # continuation carried Z3's `x div 0` value, a state Nim never
       # reaches.
-      arithTrapConds.add c
-      syncArithTrapCond(c)
+      arithTrapConds.add ArithTrap(cond: c)
+      syncArithTrapCond(ArithTrap(cond: c))
     else:
       divByZeroConds.add c
       syncDivByZeroCond(c)
@@ -8866,8 +8876,13 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
         overflowConds.add tc
         syncOverflowCond(tc)
       if width in {32, 64}:
-        arithTrapConds.add tc
-        syncArithTrapCond(tc)
+        # RFC-0016 W1-d1a: `mod` has no Nim check, and `div` has none with
+        # the overflow checks off, so the C division is UNDEFINED there
+        # (section 9.1); with the checks on, `div` is the `OverflowDefect`
+        # fork above and the survivor is merely confined.
+        let tr = ArithTrap(cond: tc, ub: op == bMod or currentArithWraps)
+        arithTrapConds.add tr
+        syncArithTrapCond(tr)
   if a.kind == svInt:
     # RFC-0005 S8w: a width-stamped result wraps where the machine's does:
     # always for an unsigned type (Nim's unsigned arithmetic is modular),
@@ -16449,7 +16464,7 @@ type
                       ## under which an inline HOF read an unwritten
                       ## `newSeqUninit` element (see the threadvar's doc).
                       ## Drained by `drainUninitReads`.
-    arithTrapConds: seq[Z3Bool]
+    arithTrapConds: seq[ArithTrap]
                       ## RFC-0005 S8i. LIVE accumulator for the survivor-only
                       ## arithmetic-trap predicates `lowerArith` deposits (see
                       ## the threadvar's doc). Drained by `drainArithTraps`.
@@ -17026,7 +17041,7 @@ proc syncUninitReadCond*(cond: Z3Bool) =
     wp[].uninitReadConds.add cond
     wp[].raiseOrder.add rskUninitRead
 
-proc syncArithTrapCond*(cond: Z3Bool) =
+proc syncArithTrapCond*(cond: ArithTrap) =
   ## RFC-0005 S8i. Survivor-only arithmetic-trap predicates. See
   ## syncParseIntRaiseCond.
   if currentWalkCtxPtr != nil:
@@ -17079,7 +17094,7 @@ type
     parseInt: seq[ParseIntRaise]              ## RFC-0005 S10
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound, rangeDefect: seq[Z3Bool]
-    arithTrap: seq[Z3Bool]                    ## RFC-0005 S8i
+    arithTrap: seq[ArithTrap]                    ## RFC-0005 S8i
     uninitRead: seq[Z3Bool]                   ## RFC-0005 S8bv
     regexRaise: seq[string]                   ## RFC-0005 S8ay
     raiseOrder: seq[RaiseSinkKind]            ## RFC-0005 S8bb
@@ -18660,6 +18675,9 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
 proc crashRaise(p: Path, typeId: string, w: var WalkCtx)
   ## RFC-0005 S8cu fwd decl (defined beside `routeRaise`).
+proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
+                   w: var WalkCtx)
+  ## RFC-0016 W1-d1a fwd decl (defined beside `crashRaise`).
 
 proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
                                                    unknown: seq[string]] =
@@ -19090,12 +19108,24 @@ proc drainUninitReads(p: Path, w: var WalkCtx): seq[Path] =
   result.add alt
 
 proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
-  ## RFC-0005 S8i. Drain the survivor-only arithmetic-trap sink (see the
-  ## `arithTrapConds` threadvar): the continuation `p` gains each trap
-  ## predicate's negation as a defect-survivor fact, and nothing is forked --
-  ## a SIGFPE aborts the process, so there is no raise to route and no
-  ## execution past it. Ungated: `arithChecks` models Nim's runtime checks,
-  ## and this is the hardware's, which no check setting removes.
+  ## RFC-0005 S8i. Drain the arithmetic-trap sink (see the `arithTrapConds`
+  ## threadvar): the continuation `p` gains each trap predicate's negation
+  ## and nothing is forked -- a SIGFPE aborts the process, so there is no
+  ## raise to route and no execution past it. Ungated: `arithChecks` models
+  ## Nim's runtime checks, and this is the hardware's, which no check setting
+  ## removes.
+  ##
+  ## RFC-0016 W1-d1a (section 9.1 item 2). A deposit marked `ub` is not a
+  ## definite hardware outcome but undefined behaviour (`ubIntMinModMinusOne`)
+  ## and is decided at the op: the undefined side's reachability is asked of
+  ## the solver on the path's full query under `loopPruneRLimit`. UNSAT: the
+  ## side is dropped and the fact logged in the current call's prune window
+  ## (`logPrune`). SAT or UNKNOWN: it ends through `haltUndefined`. The
+  ## defined side continues with the negation in its `pc`, not in
+  ## `defectSurvivorPc` (which would make a callee uncacheable). The other
+  ## deposits (`div` with the checks on, where the `OverflowDefect` fork
+  ## already took the side) still confine the survivor through
+  ## `defectSurvivorPc`.
   let conds = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
@@ -19109,9 +19139,23 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
       c
   if conds.len == 0:
     return @[p]
-  let surv = forkPath(p, p.pc, p.env)
-  for c in conds: surv.defectSurvivorPc.add(not c)
-  @[surv]
+  var cur = forkPath(p, p.pc, p.env)
+  for t in conds:
+    if t.ub:
+      if guardLiteral(t.cond) != glFalse:
+        let unsat = guardLiteral(t.cond) != glTrue and
+          checkCapped(w.z3, pathRoots(cur, [t.cond]), w.settings,
+                      loopPruneRLimit(w.settings)).status == zsUnsat
+        if unsat:
+          logPrune(cur, [t.cond])
+        else:
+          haltUndefined(cur, ubIntMinModMinusOne, t.cond,
+                        "`low(T) mod -1`", w)
+      let nxt = forkPath(cur, cur.pc & @[not t.cond], cur.env)
+      cur = nxt
+    else:
+      cur.defectSurvivorPc.add(not t.cond)
+  @[cur]
 
 proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ay. Route the expression's `RegexError` (see the
@@ -25970,6 +26014,27 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
            "` (queryRLimit=" & $w.settings.budget.queryRLimit &
            "): " & why & " (beSolverUndef)")
   of sxUnsat, sxRaised: discard
+
+proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
+                   w: var WalkCtx) =
+  ## RFC-0016 W1-d1a (section 9.1 item 2). The undefined side of an op, when
+  ## it is not provably unreachable: a TERMINAL path that leaves through the
+  ## crash channel's end (no `escaped` parking), never `routeRaise`, whose
+  ## handler search would let a bare `except:`, an `except DivByZeroDefect:` or
+  ## a `finally` consume it. So: no setjmp arm (nothing recovers an undefined
+  ## operation), no `defectExclusions` check (it is not a Defect), and a
+  ## `degrade` halt of the op's `UbKind` (`dcOmitted`: run coordinate
+  ## `{scIncomplete}`, which keeps `sxUnsat` from being trusted) in place of a
+  ## finding. `p` is the path BEFORE the op; `cond` is the undefined side.
+  ## In concrete-follow mode a side the witness's inputs rule out is not
+  ## reached and records nothing.
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc & @[cond],
+                          w.settings):
+    return
+  discard w.degrade(kind,
+    "undefined behaviour at " & site & " (" & $kind & "): the path ends " &
+    "here, what follows is not modelled")
 
 # ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------
 

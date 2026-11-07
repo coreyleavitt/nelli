@@ -88,11 +88,36 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feUncheckedDiscBytes,
                         # RFC-0016 W1-b: a local pragma outside the allowlist.
                         feLocalPragma}
+  # RFC-0016 W1-d1a: the undefined-behaviour kinds (`dcOmitted`).
+  const ubKinds = {ubUnsignedDivZero .. ubIndeterminateRead}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:
-      if k notin reclassified:
+      if k notin reclassified and k notin ubKinds:
         check classOf(k) == dcNoAnswer
+
+  test "the ub kinds are contiguous, dcOmitted, and each is produced or allowlisted (RFC-0016 W1-d1a)":
+    check ord(high(UbKind)) - ord(low(UbKind)) == 4
+    check low(UbKind) == ubUnsignedDivZero
+    check high(UbKind) == ubIndeterminateRead
+    for k in SymexErrorKind:
+      check (k in ubKinds) == (k in {low(UbKind) .. high(UbKind)})
+    # Kinds with no producer yet. A kind leaves this list in the slice that
+    # adds its producer; the check below fails if a listed kind has gained
+    # one, or an unlisted kind has none.
+    const unproducedUntil = {ubUnsignedDivZero,    # W1-d1b
+                             ubSignedOverflow,     # K10a
+                             ubFloatToIntRange,    # K10a
+                             ubIndeterminateRead}  # K10a
+    var src = ""
+    for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim"]:
+      let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
+      if fileExists(path):
+        for line in readFile(path).splitLines():
+          if not line.strip().startsWith("#"): src.add line & "\n"
+    for k in UbKind:
+      check classOf(k) == dcOmitted
+      check (($k in src) == (k notin unproducedUntil))
 
   test "pathTaint per class (RFC §2.2 table)":
     check pathTaint(dcFreshSymbol) == {scSpurious}
@@ -121,7 +146,7 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
       let ch = channels(k)
       check ch.path == pathTaint(classOf(k))
       check ch.run == runTaint(classOf(k))
-      if k notin reclassified:
+      if k notin reclassified and k notin ubKinds:
         check ch.path == {scSpurious, scIncomplete}
         check ch.run == {scSpurious, scIncomplete}
 

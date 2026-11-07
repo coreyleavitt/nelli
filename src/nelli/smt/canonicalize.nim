@@ -249,7 +249,10 @@ const renderAsChoicesVersion* = "12"
   ##   one place (`initialWalkPath`). No verdict moves; the bump keeps cache
   ##   entries of the two claim identities apart.
 
-const symexWalkerVersion* = "278"
+const symexWalkerVersion* = "279"
+  ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
+  ## the overflow checks off) at 32 and 64 bits ends the path through
+  ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.
   ## RFC-0016 W1-f (277->278): `case` takes `elif` arms; a bracket typed
   ## `seq[T]` (a seq field default `@[]`, `@[1, 2]`) is a seq literal.
   ## RFC-0016 W1-e (276->277): a `float32` <-> `float64` conversion, explicit

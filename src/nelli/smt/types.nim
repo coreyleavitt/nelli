@@ -2861,6 +2861,26 @@ type
                           ## `classOf` is `dcNoAnswer`, as
                           ## `feUnsupportedExprKind`. sevError. See
                           ## `docs/symex/README.md`, "Float widths".
+    # RFC-0016 W1-d1a (section 9.1 item 4): the undefined-behaviour kinds,
+    # declared together and contiguous so `UbKind` is one range. Each names a
+    # place where the program's behaviour is undefined, not a Defect and not
+    # a value: the path ends there (`haltUndefined`) and the run records the
+    # omission. All `dcOmitted`, sevError. Only `ubIntMinModMinusOne` has a
+    # producer so far (W1-d1a); `ubUnsignedDivZero` follows in W1-d1b,
+    # `ubSignedOverflow`, `ubFloatToIntRange` and `ubIndeterminateRead` with
+    # K10a.
+    ubUnsignedDivZero     ## `x div 0` / `x mod 0` on an unsigned type.
+    ubIntMinModMinusOne   ## `low(T) mod -1` (and `low(T) div -1` with
+                          ## overflow checks off) at 32 and 64 bits: the C
+                          ## division is undefined and traps on x86 (SIGFPE).
+    ubSignedOverflow      ## signed add / sub / mul / neg overflow with the
+                          ## overflow checks off and no `-d:nelliFwrapv`.
+    ubFloatToIntRange     ## a float to int conversion out of range.
+    ubIndeterminateRead   ## a read of an uninitialised value.
+
+  UbKind* = range[ubUnsignedDivZero .. ubIndeterminateRead]
+    ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
+    ## the contiguous `ub*` members of `SymexErrorKind`.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3662,6 +3682,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feFloatWidth: dcNoAnswer
     # RFC-0016 W1-e: a parse-site decline with a typed-zero dummy, the class
     # of `feUnsupportedExprKind`.
+  of ubUnsignedDivZero, ubIntMinModMinusOne, ubSignedOverflow,
+     ubFloatToIntRange, ubIndeterminateRead: dcOmitted
+    # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
+    # successor, a pure omission.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the

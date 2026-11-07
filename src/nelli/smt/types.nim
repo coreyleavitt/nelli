@@ -2882,6 +2882,26 @@ type
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
     ## the contiguous `ub*` members of `SymexErrorKind`.
 
+static:
+  # RFC-0016 W1-d3: `Soundness.witnessUndefined` and codec version 4 store
+  # `ord(k) - ord(low(UbKind))`, so these ords ARE the persisted format:
+  # reordering, inserting or removing a member fails the build (the fix is a
+  # new `soundnessMetaVersion` and this pin).
+  doAssert ord(ubUnsignedDivZero) + 1 == ord(ubIntMinModMinusOne) and
+           ord(ubIntMinModMinusOne) + 1 == ord(ubSignedOverflow) and
+           ord(ubSignedOverflow) + 1 == ord(ubFloatToIntRange) and
+           ord(ubFloatToIntRange) + 1 == ord(ubIndeterminateRead) and
+           ord(high(UbKind)) - ord(low(UbKind)) < 30
+
+func ubOrdinals*(ks: set[UbKind]): set[UbOrdinal] =
+  ## RFC-0016 W1-d3. The kinds as `Soundness.witnessUndefined` stores them.
+  for k in ks: result.incl UbOrdinal(ord(k) - ord(low(UbKind)))
+
+func undefinedKinds*(s: Soundness): set[UbKind] =
+  ## RFC-0016 W1-d3. `s.witnessUndefined` as kinds.
+  for o in s.witnessUndefined: result.incl UbKind(ord(low(UbKind)) + int(o))
+
+type
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
     dkAssertionDefect    ## assert / doAssert / raiseAssert

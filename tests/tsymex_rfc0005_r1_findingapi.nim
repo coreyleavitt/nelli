@@ -195,7 +195,7 @@ suite "R1-16: a zero Soundness is not trusted":
     let got = db.loadPrimaryWithMetaImpl(key)
     check got.len == 1
     if got.len == 1:
-      check got[0].meta.getOrDefault("soundness") == "3:1:2:3:1:1"
+      check got[0].meta.getOrDefault("soundness") == "4:1:2:3:1:0:1"
 
 # ---- R1-17 --------------------------------------------------------------------
 

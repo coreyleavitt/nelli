@@ -272,14 +272,22 @@ export canonicalize.symexCacheKey, canonicalize.symexCacheKeyPrefix,
 
 const soundnessMetaKey = "soundness"
   ## The metadata key of the stored `Soundness`.
-const soundnessMetaVersion = "3"
-  ## The encoding's own version: `"3:<pathTaint>:<runTaint>:<replay>:<unsafe>"`,
-  ## each taint a bitmask over `SoundnessChannel` ordinals, `replay` the
-  ## `ReplayStatus`'s ordinal and `unsafe` `witnessUnsafe` as `0`/`1`. A
-  ## non-empty `runDependence` follows as a sixth field, a bitmask over
-  ## `RunDependence` ordinals (review R1-07); without it the record reads as
-  ## `{}`. Anything else decodes as a miss, so a change to any of these enums'
-  ## order, or to what a field means, bumps the version. Review R2 (DD1):
+const soundnessMetaVersion = "4"
+  ## The encoding's own version:
+  ## `"4:<pathTaint>:<runTaint>:<replay>:<unsafe>:<undefined>"`, each taint a
+  ## bitmask over `SoundnessChannel` ordinals, `replay` the `ReplayStatus`'s
+  ## ordinal and `unsafe` `witnessUnsafe` as `0`/`1`. RFC-0016 W1-d3: the
+  ## sixth field is `witnessUndefined`, a canonical decimal integer of any
+  ## length (no leading zeros): the bitmask over `ord(k) - ord(low(UbKind))`
+  ## (five members need two digits, and a later one must not need a format
+  ## change; the static pin in `smt/types.nim` bounds it below 30 bits).
+  ## A non-empty `runDependence` follows as an optional seventh field, a
+  ## bitmask over `RunDependence` ordinals (review R1-07); without it the
+  ## record reads as `{}`. The seventh is told by FIELD COUNT (7 vs 6), never
+  ## by guessing at a field's value. Anything else decodes as a miss, so a
+  ## change to any of these enums' order, or to what a field means, bumps the
+  ## version. A version 3 record has no undefined field and cannot say what
+  ## it was proved under: a miss (a cold start), not an error. Review R2 (DD1):
   ## version 3 is the one where `witnessUnsafe` also marks an unconfirmed
   ## witness whose replay ended its child; a version 2 record cannot say so,
   ## and is a miss.
@@ -341,6 +349,11 @@ static:
   doAssert ord(rdQueryTimeout) == 0 and ord(rdNativeStack) == 1 and
            ord(rdReplay) == 2 and high(RunDependence) == rdReplay
   doAssert allBits <= 9 and allRunBits <= 9 and ord(high(ReplayStatus)) <= 9
+  doAssert ord(high(UbKind)) - ord(low(UbKind)) < 30   # also pinned in smt/types
+
+func undefinedBits(u: set[UbOrdinal]): int =
+  ## RFC-0016 W1-d3. The sixth field's value: bit `i` is `UbOrdinal` `i`.
+  for o in u: result = result or (1 shl int(o))
 
 func digit(n: int): char =
   ## One field of the encoding. Review R3 (E8): never two digits, which
@@ -352,30 +365,44 @@ func digit(n: int): char =
 proc encodeSoundness(s: Soundness): string =
   result = soundnessMetaVersion & ":" & digit(taintBits(s.pathTaint)) & ":" &
     digit(taintBits(s.runTaint)) & ":" & digit(ord(s.replay)) & ":" &
-    digit(ord(s.witnessUnsafe))
+    digit(ord(s.witnessUnsafe)) & ":" & $undefinedBits(s.witnessUndefined)
   if s.runDependence != {}:
     result.add ":" & digit(runDependenceBits(s.runDependence))
 
 proc decodeSoundness(v: string): Option[Soundness] =
   ## The inverse of `encodeSoundness`; `none` for anything it did not write.
   let parts = v.split(':')
-  if parts.len notin {5, 6} or parts[0] != soundnessMetaVersion:
+  if parts.len notin {6, 7} or parts[0] != soundnessMetaVersion:
     return none(Soundness)
-  var nums: array[5, int]
+  var nums: array[6, int]    # [0..3] the fixed digits, [4] undefined, [5] run
   for i in 1 ..< parts.len:
-    if parts[i].len != 1 or parts[i][0] notin {'0' .. '9'}:
-      return none(Soundness)
-    nums[i - 1] = ord(parts[i][0]) - ord('0')
+    if i == 5:
+      # RFC-0016 W1-d3: a canonical decimal of any length, at most 30 bits.
+      let t = parts[i]
+      if t.len == 0 or t.len > 10 or (t.len > 1 and t[0] == '0'):
+        return none(Soundness)
+      for ch in t:
+        if ch notin {'0' .. '9'}: return none(Soundness)
+      let v = parseBiggestInt(t)
+      if v >= (1'i64 shl (ord(high(UbKind)) - ord(low(UbKind)) + 1)):
+        return none(Soundness)
+      nums[4] = int(v)
+    else:
+      if parts[i].len != 1 or parts[i][0] notin {'0' .. '9'}:
+        return none(Soundness)
+      nums[if i < 5: i - 1 else: 5] = ord(parts[i][0]) - ord('0')
   if nums[0] > allBits or nums[1] > allBits or
      nums[2] > ord(high(ReplayStatus)) or nums[3] > 1 or
-     (parts.len == 6 and nums[4] notin 1 .. allRunBits):
+     (parts.len == 7 and nums[5] notin 1 .. allRunBits):
     return none(Soundness)
   var s = Soundness(replay: ReplayStatus(nums[2]), witnessUnsafe: nums[3] == 1)
+  for o in UbOrdinal.low .. UbOrdinal.high:
+    if (nums[4] and (1 shl int(o))) != 0: s.witnessUndefined.incl o
   for c in SoundnessChannel:
     if (nums[0] and (1 shl ord(c))) != 0: s.pathTaint.incl c
     if (nums[1] and (1 shl ord(c))) != 0: s.runTaint.incl c
   for d in RunDependence:
-    if (nums[4] and (1 shl ord(d))) != 0: s.runDependence.incl d
+    if (nums[5] and (1 shl ord(d))) != 0: s.runDependence.incl d
   some(s)
 
 proc soundnessMeta(s: Soundness): Table[string, string] =
@@ -3345,6 +3372,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   # coordinate (re-derived: the candidate's extraction errors are now part
   # of this result's error list), and the replay that confirmed it.
   result.soundness    = Soundness(pathTaint: c.pathTaint,
+                                  witnessUndefined: c.witnessUndefined,   # RFC-0016 W1-d3
                                   runTaint: runTaintOf(result.errors),
                                   replay: replayed.replayStatus,
                                   witnessUnsafe: replayed.endsChild,

@@ -4525,13 +4525,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               hitEnv[stmt.dRetName] = tr.val
               let hit = forkPath(cp2, cp2.pc & @[tr.unwritten.get], hitEnv)
               taintInPlace(hit, w.degrade(unwrittenKind(tr.part),
-                                          unwrittenMsg(tr.part)))
+                                          unwrittenMsg(tr.part),
+                                          ub = unwrittenUb(tr.part)))
               survivors.add hit
             cp2.pc.add not tr.unwritten.get
           # The pointer's own cell may hold one (an `addr` actual's copy).
           let unwritten = unwrittenIn(valSV)
           if unwritten.len > 0 and unwrittenKind(unwritten) == feGlobalHavoc:
-            taintInPlace(cp2, w.degrade(feGlobalHavoc, unwrittenMsg(unwritten)))
+            taintInPlace(cp2, w.degrade(feGlobalHavoc, unwrittenMsg(unwritten),
+                                        ub = unwrittenUb(unwritten)))
           elif unwritten.len > 0:
             survivors.add degradeHeapArmForPath(cp2, stmt.dElemTy,
               stmt.dRetName, "__ptrTargetRead",

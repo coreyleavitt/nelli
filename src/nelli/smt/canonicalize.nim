@@ -253,8 +253,13 @@ const renderAsChoicesVersion* = "12"
   ##   through `haltUndefined` as `ubUnsignedDivZero`, not a
   ##   `DivByZeroDefect` raise; the opaque-call defect scan no longer lists
   ##   `DivByZeroDefect` for the unsigned division magics.
+  ## - RFC-0016 W1-d3 (280->281): the `{.noinit.}` read of an unwritten slot
+  ##   puts `ubIndeterminateRead` on the reading path (`Path.undefined`), and
+  ##   the verdict carries it (`Soundness.witnessUndefined`, soundness codec
+  ##   version 4): a replay-confirmed witness is not `trusted()` and is not
+  ##   run in the host.
 
-const symexWalkerVersion* = "280"
+const symexWalkerVersion* = "281"
   ## RFC-0016 W1-d1a (278->279): `low(T) mod -1` (and `low(T) div -1` with
   ## the overflow checks off) at 32 and 64 bits ends the path through
   ## `haltUndefined` (`ubIntMinModMinusOne`) where it confined the survivor.

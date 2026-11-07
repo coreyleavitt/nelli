@@ -123,6 +123,14 @@ type
                     ## handed its state for a reason of the moment
                     ## (`ReplayChild.runDependent`)
 
+  UbOrdinal* = range[0 .. 29]
+    ## RFC-0016 W1-d3. An undefined-behaviour kind as its offset from the
+    ## first `UbKind` (`ord(k) - ord(low(UbKind))`). This leaf module cannot
+    ## name `UbKind` (it lives in `SymexErrorKind`, in `smt/types.nim`, which
+    ## imports this module), so `Soundness` stores the offsets and
+    ## `smt/types.nim` converts (`ubOrdinals`, `undefinedKinds`). The bound is
+    ## the codec's: the set is one decimal integer of at most 30 bits.
+
   Soundness* = object
     ## RFC-0005 §8.1. One common-section field on `RawResult`, `SymexResult`
     ## and `SymexFinding`, so a generic consumer reads the taint without
@@ -152,6 +160,13 @@ type
       ## it; a witness nothing ran is `false`. Stored with the verdict, so a
       ## cache hit reads it as the cold run did; review R3 (SC1): only when
       ## no replay of the run's could have set it (`cacheable`).
+    witnessUndefined*: set[UbOrdinal]
+      ## RFC-0016 W1-d3 (section 9.1 item 4). The undefined behaviours the
+      ## winning path read through (`Path.undefined` at the hit, as
+      ## `pathTaint` is); `{}` for a path that read none. Replay cannot lift
+      ## it: a native run that reaches the label does not make the verdict
+      ## `trusted()`, and the witness is not run in the host (`hostRunnable`).
+      ## Read it as kinds with `undefinedKinds` (`smt/types.nim`).
     runDependence*: set[RunDependence]
       ## RFC-0005 0.9.1 (WA-7; review R1-07). What of this verdict depends on
       ## the run (`RunDependence`); `{}` for one any run would reach. An
@@ -164,6 +179,7 @@ func trustedSat*(s: Soundness): bool =
   ## path with a faithful witness, or one the real `fn` confirmed (a spurious
   ## path, or since 0.9.1 a lossy witness, WA-9).
   ## An `rsUnsettled` record (the zero value) is never trusted (R1-16).
+  if s.witnessUndefined != {}: return false   # RFC-0016 W1-d3: replay cannot lift it
   case s.replay
   of rsConfirmed: true
   of rsUnconfirmed, rsUnsettled: false
@@ -175,7 +191,8 @@ func hostRunnable*(s: Soundness): bool =
   ## hang its child (`witnessUnsafe`), and never an unsettled record (R1-16).
   ## Untrusted claims (`rsUnconfirmed`) are runnable otherwise: running one
   ## is how a consumer learns whether it reaches the target.
-  s.replay != rsUnsettled and not s.witnessUnsafe
+  s.replay != rsUnsettled and not s.witnessUnsafe and
+    s.witnessUndefined == {}   # RFC-0016 W1-d3: undefined behaviour is never run in the host
 
 func cacheable*(s: Soundness): bool =
   ## Review R2 (DD7). Whether a claim (`sxSat` / `sxRaised`) settled under

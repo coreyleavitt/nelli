@@ -105,8 +105,8 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
     # Kinds with no producer yet. A kind leaves this list in the slice that
     # adds its producer; the check below fails if a listed kind has gained
     # one, or an unlisted kind has none.
-    const unproducedUntil = {ubFloatToIntRange,    # K10a
-                             ubIndeterminateRead}  # K10a
+    # (`ubIndeterminateRead` left it in W1-d3: the `{.noinit.}` read.)
+    const unproducedUntil = {ubFloatToIntRange}    # K10a
     var src = ""
     for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim"]:
       let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
@@ -194,6 +194,17 @@ suite "RFC-0005 S1 (b) -- the Path carrier and the degrade() funnel (runtime.nim
 
   test "degrade() does NOT write the run coordinate -- it is derived at drain (§2.2)":
     check probe.runTaintBeforeDrain == clean
+
+  test "Path.undefined rides every carrier that joins taint (RFC-0016 W1-d3)":
+    check probe.undefForkPropagated == {UbKind(ubIndeterminateRead)}
+    check probe.undefTokenFromKind == {UbKind(ubSignedOverflow)}
+    check probe.undefForkTaintedJoined == {UbKind(ubIndeterminateRead), UbKind(ubSignedOverflow)}
+    check probe.undefForkTaintedParentUntouched == {UbKind(ubIndeterminateRead)}
+    check probe.undefInPlaceJoined == {UbKind(ubUnsignedDivZero), UbKind(ubSignedOverflow)}
+    check probe.undefReturnMergeJoined == {UbKind(ubIntMinModMinusOne), UbKind(ubIndeterminateRead)}
+    check probe.undefReturnMergeCleanStaysClean == {}
+    check probe.undefLowerDrained == {UbKind(ubIndeterminateRead)}
+    check probe.undefLowerPendingAfterDrain == {}
 
   test "taintInPlace joins into an existing path (the runtime_heap.nim isNew shape)":
     check probe.taintInPlaceJoined == {scSpurious} + pathTaint(classOf(heNewFieldZeroUnsupported))

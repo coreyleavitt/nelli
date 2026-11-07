@@ -194,8 +194,8 @@ suite "RFC-0005 S8av (3) -- verdict cache hit also serves gaps()":
                                  defaultSymexSettings())
     # Hand-built: the exact shape `saveSymexVerdictImpl` wrote before S8av --
     # `"soundness"` metadata key present (`encodeSoundness`'s pinned
-    # "3:0:0:1:0" for a settled, clean `Soundness`), no "gapsv"/"gapsn" keys.
-    db.save(key & cacheKeyUnknown, @[], {"soundness": "3:0:0:1:0"}.toTable,
+    # "4:0:0:1:0:0" for a settled, clean `Soundness`), no "gapsv"/"gapsn" keys.
+    db.save(key & cacheKeyUnknown, @[], {"soundness": "4:0:0:1:0:0"}.toTable,
            verdictCacheMaxEntries)
     let loaded = loadSymexVerdict(db, s8avPreFn, tLabel("s8av_pre"),
                                   defaultSymexSettings())

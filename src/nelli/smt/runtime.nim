@@ -565,6 +565,17 @@ type
       ## is unchanged for every non-closure path; `forkPath` inherits the field so
       ## the named-proc return-merge propagates it to the caller for free.
     env:       Env
+    undefined: set[UbKind]
+                      ## RFC-0016 W1-d3 (section 9.1 item 4). The undefined
+                      ## behaviours this path has read through (today the
+                      ## `{.noinit.}` read of an unwritten slot,
+                      ## `ubIndeterminateRead`). Joined by every carrier that
+                      ## joins `taint` (`forkPath` propagates, `forkPathTainted`
+                      ## joins a `Degrade`'s `ub`, `forkPathMerged` unions,
+                      ## `taintInPlace` joins), pinned by the lattice test's
+                      ## carrier probe. Derived at the hit into
+                      ## `Soundness.witnessUndefined`, which replay cannot
+                      ## lift. Invariant: non-empty implies `taint != {}`.
     taint: Taint      ## RFC-0005 S1 (was SND-1's `uncertain: bool`). The
                       ## soundness channels this path has picked up from a
                       ## degrade (a bailed call, an unmodelled statement, an
@@ -651,6 +662,9 @@ type
     ## Construct a `Degrade(...)` ONLY inside the sanctioned funnels (pinned by
     ## the writer grep-pin); a site never builds one by hand.
     path: Taint
+    ub: set[UbKind]
+      ## RFC-0016 W1-d3. The undefined behaviours the same degrade site read
+      ## through; joined into `Path.undefined` beside `path`.
 
   DegradeSink = enum
     ## RFC-0005 S1. Which existing error sink `degrade()` records into. The
@@ -723,6 +737,9 @@ type
     raisedTypeId*: string            ## `sxRaised` claims only
     isDefect*:     bool              ## `sxRaised` claims only
     raisedMsg*:    Option[string]    ## `sxRaised` claims only
+    witnessUndefined*: set[UbOrdinal]
+      ## RFC-0016 W1-d3. The claim's `Soundness.witnessUndefined`, carried to
+      ## `settleCandidate` (replay cannot lift it).
     nilDerefOnPath*: bool
       ## RFC-0005 S8k. The claim's path went through the walker's nil
       ## dereference edge (`Path.nilDeref`): its real run would SIGSEGV
@@ -870,7 +887,8 @@ func sameHeapTerm(a, b: HeapTerm): bool =
   else: x == y
 
 template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
-                                taintExpr: Taint): Path =
+                                taintExpr: Taint;
+                                undefExpr: set[UbKind]): Path =
   ## Phase 15 H1 / R3 hardening / RFC-0005 S1: construct a CHILD `Path` from
   ## `parent`, deep-copying the logical-heap state (heaps / heapDepth /
   ## allocCounters) so the fork is isolated — the single enforcement point for
@@ -887,6 +905,7 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   ## any other routine calls it.
   let hs = deepCopyHeapState(parent)
   Path(pc: pcExpr, env: envExpr, taint: taintExpr,
+       undefined: undefExpr,                             ## RFC-0016 W1-d3
        defectSurvivorPc: parent.defectSurvivorPc,        ## Phase 16 ADR-0012
        heaps: hs.heaps, heapDepth: parent.heapDepth,
        allocCounters: hs.allocCounters,
@@ -906,7 +925,8 @@ template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## (RFC-0005's per-path soundness channels, formerly SND-1's `uncertain`)
   ## to the child — there is no taint parameter to silently drop or forget.
   ## Use `forkPathTainted` at sites that deliberately INTRODUCE taint.
-  forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint)
+  forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint,
+                          parent.undefined)
 
 template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                          d: Degrade): Path =
@@ -917,7 +937,12 @@ template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   ## taint a path without having recorded a kind (the token is the proof),
   ## and one token serves every survivor of a one-error-many-survivors site
   ## (`let d = w.degrade(…)` once, then fork per survivor).
-  forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint + d.path)
+  block:
+    # `d` is bound once: a template argument is substituted where it is named,
+    # and `takeLoweringPendingDegrade()` drains what it reads.
+    let tok = d
+    forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint + tok.path,
+                           parent.undefined + tok.ub)
 
 template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                         caller: Path): Path =
@@ -932,7 +957,8 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   ## `NilAccessDefect`) would otherwise lose the mark on the body's raise.
   block:
     let merged = forkPathTaintPrimitive(callee, pcExpr, envExpr,
-                                        callee.taint + caller.taint)
+                                        callee.taint + caller.taint,
+                                        callee.undefined + caller.undefined)
     merged.nilDeref = callee.nilDeref or caller.nilDeref
     # RFC-0005 S8y: a closure body's descent starts from a fresh root, so
     # the caller's loop depths are joined back in (the deeper of the two).
@@ -991,6 +1017,7 @@ proc taintInPlace(p: Path; d: Degrade) =
   ## (its contribution is run-global by construction), so halt sites call
   ## `discard w.degrade(…)` and do not come here.
   p.taint = p.taint + d.path
+  p.undefined = p.undefined + d.ub     ## RFC-0016 W1-d3
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
 # `Path` is a private `ref object`, so the H1 RED test cannot name it. These two
@@ -1755,6 +1782,12 @@ var loweringReadNames {.threadvar.}: seq[string]
   ## there (not as its own argument) declines: which value Nim reads then
   ## depends on an evaluation order the walk does not model.
 
+var loweringPendingUb* {.threadvar.}: set[UbKind]
+  ## RFC-0016 W1-d3. The undefined behaviours the pending lowering decline
+  ## read through, the `loweringPendingTaint` of `Path.undefined`: set and
+  ## saved, restored, drained and reset wherever that is. Non-empty implies
+  ## `loweringPendingTaint != {}` (the producers also taint).
+
 var loweringPendingTaint* {.threadvar.}: Taint
   ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
   ## bool`, walker v58, ADR-0023). The PENDING path taint of an in-band
@@ -1780,7 +1813,8 @@ var loweringPendingTaint* {.threadvar.}: Taint
   ## whose native exceptions propagate cleanly). In-band taint sidesteps the
   ## raise entirely, so both backends agree.
 
-proc lowerDegrade(kind: SymexErrorKind; msg: string) =
+proc lowerDegrade(kind: SymexErrorKind; msg: string;
+                  ub: set[UbKind] = {}) =
   ## RFC-0005 S1: the LOWERING-sink sibling of `degrade(w, kind, msg)` (which
   ## lives after `WalkCtx`). For sites with no `w: var WalkCtx`/`Path` in
   ## scope — `lower()` and the pure helpers it calls. Performs both acts from
@@ -1795,6 +1829,7 @@ proc lowerDegrade(kind: SymexErrorKind; msg: string) =
     # RFC-0005 S8: a lowering decline is recorded by the walk that reached
     # it -- its reach is the record itself (`dskWalkSite`).
   loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
+  loweringPendingUb = loweringPendingUb + ub     # RFC-0016 W1-d3
 
 # ---- RFC-0005 S8m: sort-checked Z3 term construction ------------------------
 #
@@ -2564,6 +2599,8 @@ var lastDrainedClosureExitPc {.threadvar.}: seq[Z3Bool]
   ## evaluation order (`rskClosureExit`), so a raise evaluated before a
   ## closure call does not carry the facts that the call completed.
 
+var currentCallerUb {.threadvar.}: set[UbKind]
+  ## RFC-0016 W1-d3. `currentCallerTaint`'s undefined.
 var currentCallerTaint {.threadvar.}: Taint
   ## RFC-0005 S8cn. The taint of the path a closure call is lowered on: a target
   ## in the body is reached on it (`applyClosureGround`).
@@ -2591,6 +2628,7 @@ proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   currentCallerAllocCounters = p.allocCounters
   currentCallerLiveRefs = p.liveRefs                     ## Phase 15 CR-5
   currentCallerTaint = p.taint                           ## RFC-0005 S8cn
+  currentCallerUb = p.undefined                          ## RFC-0016 W1-d3
   currentCallerPc = p.pc                                 ## RFC-0005 S8cn
   # Reset the exit-heap threadvars so a non-heap-writing closure doesn't
   # carry the PREVIOUS call's exit heap forward to the next call.
@@ -9331,6 +9369,13 @@ proc unwrittenKind(part: string): SymexErrorKind =
   if glPartHavoc.getOrDefault(part, false): feGlobalHavoc
   else: feGlobalReadUnmodelled
 
+func unwrittenUb(part: string): set[UbKind] =
+  ## RFC-0016 W1-d3. What reading the unwritten part `part` is undefined
+  ## through: a `{.noinit.}` local holds an indeterminate value (the walk
+  ## models it as any value of its type and replays the hit); a module-level
+  ## global does not (it is zero-initialised).
+  if part.startsWith(noinitReadPrefix): {UbKind(ubIndeterminateRead)} else: {}
+
 proc unwrittenMsg(part: string): string =
   ## RFC-0005 batch 6. `unwrittenKind`'s message.
   if part.startsWith(noinitReadPrefix):
@@ -9369,7 +9414,7 @@ proc observeGlobalRead(e: IRExpr; v: SymVal; simplified = false) =
   ## mentions an unwritten part.
   let part = globalReadPart(e, v, simplified)
   if part.len > 0:
-    lowerDegrade(unwrittenKind(part), unwrittenMsg(part))
+    lowerDegrade(unwrittenKind(part), unwrittenMsg(part), unwrittenUb(part))
 
 var callGuardedNames {.threadvar.}: seq[string]
   ## RFC-0005 S8an. The globals and captures that an ACTIVE walked call
@@ -16507,6 +16552,7 @@ type
                       ## raises after a `RegexError` Nim never reaches). Saved
                       ## and reset with the sinks.
     stmtStrayTaint: Taint
+    stmtStrayUb: set[UbKind]       ## RFC-0016 W1-d3: `stmtStrayTaint`'s undefined
                       ## RFC-0005 review R1-04. Pending lowering taint
                       ## (`loweringPendingTaint`) that a walker lowering
                       ## entry point found already queued
@@ -16654,7 +16700,8 @@ type
       ## each still is (`pruneFactsHold`).
 
 proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
-             sink = dsWalk; scope = walkSite()): Degrade =
+             sink = dsWalk; scope = walkSite();
+             ub: set[UbKind] = {}): Degrade =
   ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). THE way a
   ## walk-level degrade site (one with `w: var WalkCtx` in scope) records a
   ## classified degrade and obtains its `Degrade` token:
@@ -16704,12 +16751,12 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
   of dsUnknownExn:
     unknownExnWarnings.add info         # threadvar: fallback
     w.unknownExnWarnings.add info       # CR-9 Stage 5: LIVE WalkCtx field
-  Degrade(path: pathTaint(classOf(kind)))
+  Degrade(path: pathTaint(classOf(kind)), ub: ub)
 
-proc carriedDegrade(taint: Taint): Degrade =
+proc carriedDegrade(taint: Taint; ub: set[UbKind] = {}): Degrade =
   ## RFC-0005 S8cn. A closure body's start: taint its caller's path already
   ## holds and its call's pending decline, each recorded where it arose.
-  Degrade(path: taint)
+  Degrade(path: taint, ub: ub)
 
 proc takeLoweringPendingDegrade(): Degrade =
   ## RFC-0005 S1. The lowering-sink half of the token discipline: converts the
@@ -16718,8 +16765,9 @@ proc takeLoweringPendingDegrade(): Degrade =
   ## the pending taint to `{}`. Called by the drains that fold the queue onto
   ## the path it was queued for: `drainPendingLowerEffects`, `lowerInExpr`
   ## and, before the walk, `initialWalkPath`.
-  result = Degrade(path: loweringPendingTaint)
+  result = Degrade(path: loweringPendingTaint, ub: loweringPendingUb)
   loweringPendingTaint = {}
+  loweringPendingUb = {}
 
 proc initialWalkPath(pc: seq[Z3Bool]; env: Env): Path =
   ## RFC-0005 review R3 (leak fix), R4. THE constructor of a walk driver's
@@ -16781,6 +16829,7 @@ proc stampLoweringPendingLeak(w: var WalkCtx) =
       "end — a lowering degrade's path taint was never drained onto a path " &
       "(RFC-0005 S1 leak pin; weInternalWalkerFault)")
     loweringPendingTaint = {}
+    loweringPendingUb = {}
 
 # ---- RFC-0005 S1: exported test hooks (H1 pattern) --------------------------
 # `Path`/`WalkCtx`/`Degrade` are private to the runtime unit, so — exactly as
@@ -16806,6 +16855,12 @@ type
     lowerPendingAfter*: Taint
     loweringSinkKinds*: seq[SymexErrorKind]
     lowerDrainedPath*, lowerPendingAfterDrain*: Taint
+    # RFC-0016 W1-d3: `Path.undefined` through every carrier that joins taint.
+    undefForkPropagated*, undefForkTaintedJoined*: set[UbKind]
+    undefForkTaintedParentUntouched*, undefInPlaceJoined*: set[UbKind]
+    undefReturnMergeJoined*, undefReturnMergeCleanStaysClean*: set[UbKind]
+    undefLowerDrained*, undefLowerPendingAfterDrain*: set[UbKind]
+    undefTokenFromKind*: set[UbKind]
 
   Rfc0005S1LeakPinProbe* = object
     ## Observations `rfc0005S1LeakPinProbe` reports (see its doc).
@@ -16829,6 +16884,8 @@ proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
   let savedClosure = currentClosureCallErrors
   let savedLowering = loweringDegradeErrors
   let savedPending = loweringPendingTaint
+  let savedPendingUb = loweringPendingUb
+  loweringPendingUb = {}
   heapDepthErrors = @[]
   newFieldZeroErrors = @[]
   currentClosureCallErrors = @[]
@@ -16875,8 +16932,35 @@ proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
   heapDepthErrors = savedHeapDepth
   newFieldZeroErrors = savedNewFieldZero
   currentClosureCallErrors = savedClosure
+  # RFC-0016 W1-d3: the same carriers for `undefined`.
+  let ubParent = Path(pc: @[], env: initOrderedTable[string, SymVal](),
+                      taint: spur, undefined: {UbKind(ubIndeterminateRead)})
+  result.undefForkPropagated =
+    forkPath(ubParent, ubParent.pc, ubParent.env).undefined
+  let dub = w.degrade(feGlobalHavoc, "rfc0016 W1-d3 probe (undefined)",
+                      ub = {UbKind(ubSignedOverflow)})
+  result.undefTokenFromKind = dub.ub
+  result.undefForkTaintedJoined =
+    forkPathTainted(ubParent, ubParent.pc, ubParent.env, dub).undefined
+  result.undefForkTaintedParentUntouched = ubParent.undefined
+  let ubInPlace = Path(pc: @[], env: initOrderedTable[string, SymVal](),
+                       taint: spur, undefined: {UbKind(ubUnsignedDivZero)})
+  taintInPlace(ubInPlace, dub)
+  result.undefInPlaceJoined = ubInPlace.undefined
+  let ubCallee = Path(pc: @[], env: initOrderedTable[string, SymVal](),
+                      undefined: {UbKind(ubIntMinModMinusOne)})
+  result.undefReturnMergeJoined =
+    forkPathMerged(ubCallee, ubCallee.pc, ubCallee.env, ubParent).undefined
+  result.undefReturnMergeCleanStaysClean =
+    forkPathMerged(cleanCallee, cleanCallee.pc, cleanCallee.env,
+                   cleanCallee).undefined
+  lowerDegrade(feGlobalHavoc, "rfc0016 W1-d3 probe (lowering undefined)",
+               {UbKind(ubIndeterminateRead)})
+  result.undefLowerDrained = takeLoweringPendingDegrade().ub
+  result.undefLowerPendingAfterDrain = loweringPendingUb
   loweringDegradeErrors = savedLowering
   loweringPendingTaint = savedPending
+  loweringPendingUb = savedPendingUb
 
 proc rfc0005S1LeakPinProbe*(): Rfc0005S1LeakPinProbe =
   ## Drives `stampLoweringPendingLeak` twice on a scratch `WalkCtx`: once with
@@ -17118,6 +17202,7 @@ type
     ## clears the sinks) before the descent; `restorePendingLowerEffects` puts
     ## them back after it, before the call deposits its own.
     pendingTaint: Taint
+    pendingUb: set[UbKind]                    ## RFC-0016 W1-d3
     parseInt: seq[ParseIntRaise]              ## RFC-0005 S10
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound, rangeDefect: seq[Z3Bool]
@@ -17145,7 +17230,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   ## saved; both stores are cleared. The caller-heap seed is saved, not
   ## cleared -- the descent reads it.
   result = PendingLowerEffects(
-    pendingTaint: loweringPendingTaint,
+    pendingTaint: loweringPendingTaint, pendingUb: loweringPendingUb,
     parseInt: w.parseIntRaiseConds, divByZero: w.divByZeroConds,
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
@@ -17162,6 +17247,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   closureEnvWrites = @[]
   loweringReadNames = @[]
   loweringPendingTaint = {}
+  loweringPendingUb = {}
   w.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
   w.divByZeroConds = @[]; divByZeroConds = @[]
   w.overflowConds = @[]; overflowConds = @[]
@@ -17183,6 +17269,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   ## expression's pending effects in BOTH stores, discarding whatever the
   ## descent's own statement arms left behind (they drained their own).
   loweringPendingTaint = s.pendingTaint
+  loweringPendingUb = s.pendingUb
   w.parseIntRaiseConds = s.parseInt; parseIntRaiseConds = s.parseInt
   w.divByZeroConds = s.divByZero; divByZeroConds = s.divByZero
   w.overflowConds = s.overflow; overflowConds = s.overflow
@@ -17634,9 +17721,11 @@ func toCandidate(r: RawResult): SatCandidate =
   case r.status
   of sxSat:
     SatCandidate(status: sxSat, pathTaint: r.soundness.pathTaint, errors: r.errors,
+                 witnessUndefined: r.soundness.witnessUndefined,
                  nilDerefOnPath: r.nilDerefOnPath, input: r.witness)
   of sxRaised:
     SatCandidate(status: sxRaised, pathTaint: r.soundness.pathTaint, errors: r.errors,
+                 witnessUndefined: r.soundness.witnessUndefined,
                  nilDerefOnPath: r.nilDerefOnPath,
                  raisedTypeId: r.raisedTypeId, isDefect: r.isDefect,
                  raisedMsg: r.raisedMsg, input: r.raisedWitness)
@@ -19650,6 +19739,7 @@ proc claimStrayPendingTaint() =
   if loweringPendingTaint != {} and currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].stmtStrayTaint = wp[].stmtStrayTaint + loweringPendingTaint
+    wp[].stmtStrayUb = wp[].stmtStrayUb + loweringPendingUb
 
 proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
                  proto = none(SymVal)): (SymVal, Path) =
@@ -20161,7 +20251,8 @@ proc observeRecvPart(p: Path; part: SymVal; w: var WalkCtx): Option[Degrade] =
   ## arm to decline on.
   let unwritten = unwrittenIn(part, simplified = true)
   if unwritten.len == 0: return none(Degrade)
-  let d = w.degrade(unwrittenKind(unwritten), unwrittenMsg(unwritten))
+  let d = w.degrade(unwrittenKind(unwritten), unwrittenMsg(unwritten),
+                    ub = unwrittenUb(unwritten))
   if unwrittenKind(unwritten) != feGlobalHavoc: return some(d)
   taintInPlace(p, d)
   none(Degrade)
@@ -20734,7 +20825,8 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
   if not sameZ3Seq(skip.defectSurvivorPc, base.defectSurvivorPc):
     return decline
   for a in armOut:
-    if a.taint != skip.taint or not heapMetaExtends(a, skip) or
+    if a.taint != skip.taint or a.undefined != skip.undefined or
+       not heapMetaExtends(a, skip) or
        not hasZ3Prefix(a.pc, base.pc) or a.pc.len <= base.pc.len or
        a.pc[base.pc.len].raw != cond.raw or
        not hasZ3Prefix(a.defectSurvivorPc, base.defectSurvivorPc):
@@ -21511,7 +21603,8 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
          globalReadPart(stmt.ixArr, arrSV).len > 0:
         forkPathTainted(p1, p1.pc, p1.env, w.degrade(
           unwrittenKind(globalReadPart(stmt.ixArr, arrSV)),
-          unwrittenMsg(globalReadPart(stmt.ixArr, arrSV))))
+          unwrittenMsg(globalReadPart(stmt.ixArr, arrSV)),
+          ub = unwrittenUb(globalReadPart(stmt.ixArr, arrSV))))
       else: p1
     # ---- Phase 5: Table[K, V] indexing ----
     if arrSV.kind == svTable:
@@ -21870,7 +21963,8 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
                                    [inLoCond, inHiCond], w.settings)):
         survivors.add forkPathTainted(cpM, cpM.pc & @[inLoCond, inHiCond],
           newEnv, w.degrade(unwrittenKind(unwrittenPart),
-                            unwrittenMsg(unwrittenPart)))
+                            unwrittenMsg(unwrittenPart),
+                            ub = unwrittenUb(unwrittenPart)))
       else:
         survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
   survivors
@@ -22395,7 +22489,8 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
       # value, any of its type: the path is tainted and the reassignment
       # modelled on it (`unwrittenKind`); any other declines.
       let part = unwrittenDisc(oldSV)
-      let d = w.degrade(unwrittenKind(part), unwrittenMsg(part))
+      let d = w.degrade(unwrittenKind(part), unwrittenMsg(part),
+                        ub = unwrittenUb(part))
       if unwrittenKind(part) != feGlobalHavoc:
         out2.add forkPathTainted(p, p.pc, p.env, d)
         continue
@@ -22492,7 +22587,8 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
       # value, any of its type: the path is tainted and the reassignment
       # modelled on it (`unwrittenKind`); any other declines.
       let part = unwrittenDisc(oldSV)
-      let d = w.degrade(unwrittenKind(part), unwrittenMsg(part))
+      let d = w.degrade(unwrittenKind(part), unwrittenMsg(part),
+                        ub = unwrittenUb(part))
       if unwrittenKind(part) != feGlobalHavoc:
         out2.add forkPathTainted(p, p.pc, p.env, d)
         continue
@@ -24304,7 +24400,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # RFC-0005 S1: `pathTaint` is PRODUCED here -- the hitting path's
         # taint, which `admitSolvedHit` routes on.
         of sxSat:    w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
-                                                soundness: Soundness(pathTaint: p.taint),
+                                                soundness: Soundness(pathTaint: p.taint,
+                                                     witnessUndefined: ubOrdinals(p.undefined)),
                                                 nilDerefOnPath: p.nilDeref,
                                                 errors: candErrs))
         of sxUnknown:
@@ -25580,7 +25677,8 @@ proc visitExitsSince(w: var WalkCtx; since: ExitMark;
   ## `forEachExitGroup` reaches.
   forEachExitGroup(w, g): g.visitSince(since, visit)
 
-proc stampExitsSince(w: var WalkCtx; since: ExitMark; taint: Taint) =
+proc stampExitsSince(w: var WalkCtx; since: ExitMark; taint: Taint;
+                     ub: set[UbKind] = {}) =
   ## RFC-0005 review R2 (SD2), R3 (T1), R4, R5. Taint every exit-channel entry
   ## parked after `since`: the paths a statement sent down an exit channel,
   ## wherever a claim has left them since. Identified by serial, not by
@@ -25593,13 +25691,14 @@ proc stampExitsSince(w: var WalkCtx; since: ExitMark; taint: Taint) =
   ## and pins the stamp, with no list to extend.
   if not w.exitClock.parkedSince(since): return   # nothing parked
   w.visitExitsSince(since, proc (p: var Path) =
-    p = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint)))
+    p = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint, ub)))
 
-proc taintAll(paths: seq[Path]; taint: Taint): seq[Path] =
+proc taintAll(paths: seq[Path]; taint: Taint;
+              ub: set[UbKind] = {}): seq[Path] =
   ## Each of `paths` as a fork joined with `taint`.
   result = newSeqOfCap[Path](paths.len)
   for p in paths:
-    result.add forkPathTainted(p, p.pc, p.env, carriedDegrade(taint))
+    result.add forkPathTainted(p, p.pc, p.env, carriedDegrade(taint, ub))
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0005 review R1-04, R2 (SD1/SD2), R3 (T1). `walkCapSynced`, with the
@@ -25637,19 +25736,26 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## under its mark, so the new entry landed below it unstamped). A
   ## statement with nothing queued on either side allocates nothing.
   let outerPending = loweringPendingTaint
+  let outerPendingUb = loweringPendingUb
   loweringPendingTaint = {}
+  loweringPendingUb = {}
   let outerStray = w.stmtStrayTaint
+  let outerStrayUb = w.stmtStrayUb
   w.stmtStrayTaint = {}
+  w.stmtStrayUb = {}
   let since = w.exitClock.mark
   result =
     if outerPending == {}: walkCapSynced(stmt, paths, w)
-    else: walkCapSynced(stmt, taintAll(paths, outerPending), w)
+    else: walkCapSynced(stmt, taintAll(paths, outerPending, outerPendingUb), w)
   let stray = w.stmtStrayTaint + loweringPendingTaint
+  let strayUb = w.stmtStrayUb + loweringPendingUb
   loweringPendingTaint = outerPending
+  loweringPendingUb = outerPendingUb
   w.stmtStrayTaint = outerStray
+  w.stmtStrayUb = outerStrayUb
   if stray != {}:
-    result = taintAll(result, stray)
-    stampExitsSince(w, since, stray)
+    result = taintAll(result, stray, strayUb)
+    stampExitsSince(w, since, stray, strayUb)
 
 # ---- Statement exit-taint test hook (H1 pattern) -----------------------------
 # `Path`/`WalkCtx` are private to the runtime unit, so -- as
@@ -25968,6 +26074,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       # routes on it (clean -> `found`, spurious-tainted -> `candidates`).
       var r = toPublic(iv)
       r.soundness.pathTaint = rp.taint
+      r.soundness.witnessUndefined = ubOrdinals(rp.undefined)
       r.nilDerefOnPath = rp.nilDeref   # RFC-0005 S8k
       r.errors.add candErrs
       w.admitSolvedHit(r)
@@ -26028,6 +26135,7 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
                              raisedIsDefect: true)
     var r = toPublic(iv)
     r.soundness.pathTaint = p.taint
+    r.soundness.witnessUndefined = ubOrdinals(p.undefined)
     r.nilDerefOnPath = p.nilDeref
     # RFC-0016 W1-c2: the witness ends the process wherever it runs, so no
     # consumer runs it in the host (`hostRunnable`).
@@ -26796,7 +26904,8 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   let bodyEntry =
     if pending.pendingTaint + currentCallerTaint != {}:
       forkPathTainted(descentBase, descentBase.pc, descentBase.env,
-                      carriedDegrade(pending.pendingTaint + currentCallerTaint))
+                      carriedDegrade(pending.pendingTaint + currentCallerTaint,
+                                     pending.pendingUb + currentCallerUb))
     else: descentBase
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
   let outerBodyPc = closureBodyCallerPc
@@ -26966,9 +27075,15 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # recorded by the degrade that produced it. A raise's taint rides its own
   # routed path (`drainClosureRaises`).
   var exitTaint: Taint = {}
-  for cp in frame.exits.returnedPaths: exitTaint = exitTaint + cp.taint
-  for cp in fallThrough: exitTaint = exitTaint + cp.taint
+  var exitUb: set[UbKind] = {}
+  for cp in frame.exits.returnedPaths:
+    exitTaint = exitTaint + cp.taint
+    exitUb = exitUb + cp.undefined
+  for cp in fallThrough:
+    exitTaint = exitTaint + cp.taint
+    exitUb = exitUb + cp.undefined
   loweringPendingTaint = loweringPendingTaint + exitTaint
+  loweringPendingUb = loweringPendingUb + exitUb
   # ---- 5. Lift each body return sub-path to a GROUND per-call axiom (D6). ----
   # Two channels yield sub-paths `(branch_conds_i, v_i)`:
   #   (a) EXPLICIT `return EXPR` — `walk(isReturn)` bound the value to the frame
@@ -28595,6 +28710,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
   closureBodyCallerPc = @[]              ## RFC-0005 S8cn
   currentCallerTaint = {}                ## RFC-0005 S8cn
+  currentCallerUb = {}                   ## RFC-0016 W1-d3
+  loweringPendingUb = {}
   currentCallerPc = @[]                  ## RFC-0005 S8cn
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
   # RFC-0005 review R1-12: the rest of the per-expression lowering state.

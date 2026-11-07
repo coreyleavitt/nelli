@@ -248,7 +248,10 @@ const renderAsChoicesVersion* = "12"
   ##   one place (`initialWalkPath`). No verdict moves; the bump keeps cache
   ##   entries of the two claim identities apart.
 
-const symexWalkerVersion* = "272"
+const symexWalkerVersion* = "273"
+  ## RFC-0016 W1-a (272->273): one exception type id (`typeIdOf`) for the
+  ## raise sites and the handlers; `except T as e` matches, `raise e` is
+  ## its static type.
   ## RFC-0005 code review, round 1 fixes for 0.9.1 (269), on 268:
   ## - R1-01: an `elif` condition's preamble (a bounds fork, a hoisted call)
   ##   runs only on the path that tests that condition, not ahead of the whole

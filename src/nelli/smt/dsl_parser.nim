@@ -1582,6 +1582,82 @@ proc collectUserExnAncestors(typeSym: NimNode, ctx: ParseCtx) =
       return
     cur = parent
 
+const unknownExnTypeId = "<unknown-exn-type>"
+  ## RFC-0016 W1-a. The id of a raise whose type `typeIdOf` cannot name: in
+  ## neither exception table, so the walk records `eeUnknownExnType`.
+
+proc typeIdOf*(sym: NimNode; ctx: ParseCtx = nil): Option[string] =
+  ## RFC-0016 W1-a (K2). THE exception type id: the only function that turns
+  ## a node naming an exception type, or holding an exception, into the id
+  ## the raise sites and the handlers share. `none` means the type cannot be
+  ## named statically; the caller declines with `eeUnknownExnType` (the
+  ## walker's unknown-type degrade).
+  ##
+  ## Accepted: a type symbol or an `nnkType` node (an `except T` branch, an
+  ## alias, a `ref T` alias); `T as e` (an `except T as e:` branch, whose
+  ## typed AST is `Infix[as, T, e]` -- before W1-a its `repr` was the id, so
+  ## the handler matched nothing); a `ref T` / `ptr T` / `Par` wrapper; and a
+  ## VALUE, whose id is its static type's (`raise e`). A value of static type
+  ## `Exception` is `none`: its dynamic type is anything. With `ctx`, the
+  ## user inheritance chain of the id is recorded (E4a).
+  var cur = sym
+  var viaValue = false
+  var guard = 0
+  while guard < 64:
+    inc guard
+    case cur.kind
+    of nnkInfix:
+      if cur.len == 3 and cur[0].kind in {nnkIdent, nnkSym} and
+         macros.strVal(cur[0]) == "as":
+        cur = cur[1]
+      else: return none(string)
+    of nnkPar, nnkRefTy, nnkPtrTy, nnkHiddenStdConv, nnkHiddenSubConv,
+       nnkExprColonExpr:
+      if cur.len == 0: return none(string)
+      cur = cur[cur.len - 1]
+    of nnkBracketExpr:
+      if cur.len == 0: return none(string)
+      cur = cur[cur.len - 1]
+    of nnkType:
+      # An `except` branch's type node: the written name's symbol.
+      let inst =
+        try: cur.getTypeInst
+        except CatchableError: return none(string)
+      if inst.kind == nnkType or inst.kind == nnkEmpty: return none(string)
+      cur = inst
+    of nnkSym, nnkIdent:
+      let canon = canonicalExnTypeSym(cur)
+      if canon.kind == nnkSym and canon.symKind == nskType:
+        # `type R = ref T`: the pointee is the exception type.
+        let impl =
+          try: canon.getImpl
+          except CatchableError: newEmptyNode()
+        if impl.kind == nnkTypeDef and impl.len >= 3 and
+           impl[2].kind == nnkRefTy and impl[2].len == 1 and
+           impl[2][0].kind == nnkSym:
+          cur = impl[2][0]
+          continue
+        if canon.strVal == "Exception" and viaValue: return none(string)
+        if ctx != nil: collectUserExnAncestors(canon, ctx)
+        return some(canon.strVal)
+      if canon.kind == nnkSym and not viaValue:
+        # A value (variable, parameter, `result`): its static type.
+        viaValue = true
+        let ty =
+          try: canon.getTypeInst
+          except CatchableError: return none(string)
+        cur = ty
+      elif canon.kind == nnkIdent: return some(macros.strVal(canon))
+      else: return none(string)
+    else:
+      if viaValue: return none(string)
+      viaValue = true
+      let ty =
+        try: cur.getTypeInst
+        except CatchableError: return none(string)
+      cur = ty
+  none(string)
+
 proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
   inc ctx.synthCounter
   "__sym_" & prefixWord & "_" & $ctx.synthCounter
@@ -3979,10 +4055,9 @@ proc opaqueRaiseTypes(calleeSym: NimNode; ctx: ParseCtx): seq[string] =
     try: getRaisesList(calleeSym)
     except CatchableError: newEmptyNode()
   for tn0 in lst:
-    let tn = canonicalExnTypeSym(tn0)
-    let typeId = if tn.kind in {nnkSym, nnkIdent}: macros.strVal(tn)
-                 else: tn.repr
-    collectUserExnAncestors(tn, ctx)
+    # `none` (a raise type the effect list does not name statically) keeps
+    # the node's spelling: unknown to both tables, so the walk degrades it.
+    let typeId = typeIdOf(tn0, ctx).get(tn0.repr)
     if typeId notin result: result.add typeId
 
 const anyDefect* = "Defect"
@@ -4043,10 +4118,9 @@ proc typeIsDefect(t: NimNode; ctx: ParseCtx): string =
     if impl.kind == nnkRefTy and impl.len == 1: s = impl[0]
   elif s.kind in {nnkRefTy, nnkBracketExpr} and s.len >= 1:
     s = s[^1]
-  s = canonicalExnTypeSym(s)
-  if s.kind notin {nnkSym, nnkIdent}: return ""
-  collectUserExnAncestors(s, ctx)
-  let nm = macros.strVal(s)
+  let id = typeIdOf(s, ctx)
+  if id.isNone: return ""
+  let nm = id.get
   if isDefect(exnTypeTable, nm, ctx.userExnHierarchy): nm else: ""
 
 func intConvExact(dst, src: NimTypeKind): bool =
@@ -20426,23 +20500,18 @@ proc parseStmtInner(n: NimNode,
         var tn = oc[0]
         while tn.kind in {nnkPar, nnkRefTy, nnkPtrTy} and tn.len > 0:
           tn = tn[0]
-        tn = canonicalExnTypeSym(tn)   ## RFC-0005 S8b: an alias is its target
-        let typeId =
-          if tn.kind in {nnkSym, nnkIdent}: tn.strVal else: tn.repr
-        # Phase 15 E4a. Capture the RAISED type's inheritance chain (beyond the
-        # RFC's nnkExceptBranch-only wording): a SUT may raise a user subtype
-        # `MyError` here yet catch its stdlib base `ValueError` — the link only
-        # appears at this raise site, so we must walk getImpl on `tn`.
-        collectUserExnAncestors(tn, ctx)
+        # RFC-0016 W1-a: one id function; `none` is the unknown-type decline.
+        let typeId = typeIdOf(tn, ctx).get(unknownExnTypeId)
+        # Phase 15 E4a: `typeIdOf` also records the RAISED type's chain.
         var msgIR: IRExpr = nil
         for k in 1 ..< oc.len:
           if oc[k].kind == nnkExprColonExpr and oc[k][0].repr == "msg":
             msgIR = parseExpr(oc[k][1], preamble, ctx)
         mkRaise(typeId, msgIR)
       else:
-        # `raise <existing exception value>` (not the newException form) —
-        # E1 has no value-tracking; classify so the walker stubs it.
-        mkRaise(oc.repr, nil)
+        # `raise <existing exception value>`: the value's static type.
+        # RFC-0016 W1-a: `none` (static `Exception`) declines.
+        mkRaise(typeIdOf(oc, ctx).get(unknownExnTypeId), nil)
   of nnkTryStmt:
     # Phase 15 E1. `try: body  (except [T,…]: h)*  [finally: f]`.
     # Typed-AST shape: TryStmt[ <body>, ExceptBranch[<Type>* , <handlerBody>]*,
@@ -20457,13 +20526,11 @@ proc parseStmtInner(n: NimNode,
       of nnkExceptBranch:
         var typeIds: seq[string]
         for j in 0 ..< arm.len - 1:
-          let tnode = canonicalExnTypeSym(arm[j])   ## RFC-0005 S8b
-          typeIds.add (if tnode.kind in {nnkSym, nnkIdent}: tnode.strVal
-                       else: tnode.repr)
-          # Phase 15 E4a. Capture the HANDLER type's inheritance chain too
-          # (RFC §E4a's stated source) — e.g. a SUT catching a user base that
-          # is itself a subtype of a stdlib exn.
-          collectUserExnAncestors(tnode, ctx)
+          # RFC-0016 W1-a: the handler id is the raise site's function, so
+          # `except T as e` matches (it was `repr`: "T as e"). `typeIdOf`
+          # records the handler type's chain (E4a). A handler that names no
+          # static type keeps its spelling and matches nothing.
+          typeIds.add typeIdOf(arm[j], ctx).get(arm[j].repr)
         handlers.add ExceptHandler(typeIds: typeIds,
                                    body: parseStmt(arm[arm.len - 1], ctx))
       of nnkFinally:

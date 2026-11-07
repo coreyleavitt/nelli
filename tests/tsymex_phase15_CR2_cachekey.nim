@@ -1100,7 +1100,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 code review round 2 (SD1, SD2): 269->270.
     ## RFC-0005 code review round 3 (T1, E4): 270->271.
     ## RFC-0005 code review round 4 (exit channels as a module): 271->272.
-    check symexWalkerVersion == "272"
+    ## RFC-0016 W1-a: 272->273.
+    check symexWalkerVersion == "273"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

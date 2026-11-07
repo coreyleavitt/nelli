@@ -8,12 +8,12 @@ export admission
 proc show*(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs:
-    if e.severity == sevError: parts.add $e.kind & ": " & e.msg
+    if taintsRun(e): parts.add $e.kind & ": " & e.msg
   "[" & parts.join(", ") & "]"
 
 proc named*(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   for e in errs:
-    if e.kind == k and e.severity == sevError: return true
+    if e.kind == k and taintsRun(e): return true
 
 template native*(call: untyped): string =
   ## "hit" if the call reached the label, the Defect's name if it raised, else
@@ -256,7 +256,7 @@ func describeNative(nr: NativeRun): string =
 proc kindsOf(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs:
-    if e.severity == sevError: parts.add $e.kind
+    if taintsRun(e): parts.add $e.kind
   parts.join(",")
 
 proc pinFail(msg: string) {.noreturn.} =

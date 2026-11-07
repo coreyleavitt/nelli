@@ -2,7 +2,7 @@
 ## checks-ON build (the default).
 ##
 ## Native, probed on the pinned toolchain (c and cpp identical, x86-64 Linux,
-## default optimisation): under `{.push overflowChecks: off.}`,
+## default optimisation; MSVC differs, see the native test): under `{.push overflowChecks: off.}`,
 ## `if v + 1 > v: discard else: symexTarget("hit")` never reaches "hit" at
 ## `high(int)` (gcc folds the comparison: signed overflow is undefined),
 ## with the operand through a `noinline` identity or not; `id(high(int)) + 1`
@@ -47,9 +47,16 @@ suite "W1-d2 push route and explicit settings":
     check defaultSymexSettings().arithChecks ==
       {acOverflow, acDivByZero, acRange}
 
-  test "native: a pushed-off v + 1 > v never reaches the else branch":
-    check "hit" notin nativeRun(sutPushed(high(int))).hits
-    check "hit" notin nativeRun(sutPushedViaId(high(int))).hits
+  test "native: a pushed-off v + 1 > v is compiler-dependent (undefined)":
+    # gcc and clang fold the comparison and never reach "hit"; MSVC wraps
+    # and does (fuzzer-msvc, 2026-11-07). Either is a legal reading of
+    # undefined behaviour, which is why the walker declines.
+    when defined(vcc):
+      check "hit" in nativeRun(sutPushed(high(int))).hits
+      check "hit" in nativeRun(sutPushedViaId(high(int))).hits
+    else:
+      check "hit" notin nativeRun(sutPushed(high(int))).hits
+      check "hit" notin nativeRun(sutPushedViaId(high(int))).hits
 
   test "push: the marker declines, the verdict is not a trusted sxSat":
     pinDecline(sutPushed, cellKey(axDefinedness, "add/signed/pushOff"),

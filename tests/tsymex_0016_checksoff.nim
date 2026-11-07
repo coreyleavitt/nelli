@@ -61,9 +61,17 @@ suite "W1-d2 checks-off build":
     check not arithChecksDisagree(defaultSymexSettings())
     check validateSymexSettings(defaultSymexSettings()).len == 0
 
-  test "native: v + 1 > v at high(int) never reaches the else branch":
+  test "native: v + 1 > v at high(int) is compiler-dependent (undefined)":
+    # Signed overflow is undefined, so the native outcome is the C
+    # compiler's: gcc and clang fold `v + 1 > v` to true and never reach
+    # "hit"; MSVC computes the wrapped sum and does. The walker's halt is
+    # right under both; this pin records each compiler's outcome so a change
+    # in either shows up.
     let n = nativeRun(sutAddCmp(high(int)))
-    check "hit" notin n.hits
+    when defined(vcc):
+      check "hit" in n.hits
+    else:
+      check "hit" notin n.hits
     check n.raised == ""
 
   test "add: the overflow side halts, the verdict is not a trusted sxSat":

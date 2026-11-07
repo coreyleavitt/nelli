@@ -418,6 +418,24 @@ proc appTestFile(): string = splitFile(getAppFilename()).name & ".nim"
 
 var probeCounter {.threadvar.}: int
 
+const winProbePrologue = when defined(windows): """
+# A first-chance vectored handler: a divide trap, integer overflow trap or
+# access violation ends the process at once with the exception code. Without
+# it the mingw CRT can resume the faulting instruction forever (no SIGFPE
+# mapping for 0xC0000095), and the probe hangs instead of dying.
+proc nelliAddVeh(first: culong; h: pointer): pointer
+  {.importc: "AddVectoredExceptionHandler", stdcall, dynlib: "kernel32".}
+proc nelliExitProcess(code: cuint) {.importc: "ExitProcess", stdcall,
+                                      dynlib: "kernel32".}
+proc nelliVeh(p: pointer): int32 {.stdcall.} =
+  let code = cast[ptr ptr uint32](p)[][]
+  if code == 0xC0000094'u32 or code == 0xC0000095'u32 or
+     code == 0xC0000005'u32:
+    nelliExitProcess(cuint(code))
+  0'i32
+discard nelliAddVeh(1, cast[pointer](nelliVeh))
+""" else: ""
+
 type ProbeBuild = object
   dir, exe, backend: string
   args: seq[string]
@@ -435,9 +453,10 @@ proc prepareProbe(who: string; probe: string; flags: openArray[string]
                                $probeCounter)
   createDir(result.dir)
   var src = probe
-  if '\n' in probe:
+  if '\n' in probe or defined(windows):
     src = result.dir / "probe_src.nim"
-    writeFile(src, probe)
+    let body = if '\n' in probe: probe else: readFile(absolutePath(probe))
+    writeFile(src, winProbePrologue & body)
   else:
     src = absolutePath(probe)
   result.exe = result.dir / ("probe" & ExeExt)

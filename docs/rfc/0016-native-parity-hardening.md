@@ -4,7 +4,7 @@ id      = "0016"
 title   = "RFC — native-parity hardening: the walker agrees with the compiled program, or declines"
 state   = "in-progress"
 wiring  = "unproven"
-review  = "unreviewed"
+review  = "pending"
 profile = "rfc-flow@6"
 blocked_by = ["0005"]
 size = "l"
@@ -242,6 +242,16 @@ state = "pending"
 id    = "rv0005-lows"
 title = "The RFC-0005 code review's open Lows (INT-28 to INT-38 less INT-31 and INT-33): replay child hardening, cache-key coverage, replay and settle policy, fuzzer-path liveness, design cleanups, exit-group guards, finding-collector edges, precision probes, cache hygiene"
 state = "pending"
+
+[[audit]]
+id = "review-1"
+closes = "review"
+verdict = "pending"
+at = "c53ea0f89f8cfba7c89dd6f88a9277e36ffeb393"
+owner = "corey"
+date = 2026-11-07
+reason = "0.9.2 code review opened over e769b87d..d9086529: round 1 found SC2 (High, fixed), D1 (High, open), M2-M6 and N1 (fixed); ledger 0016-review"
+ledger = "0016-review"
 +++
 
 # RFC — native-parity hardening: the walker agrees with the compiled program, or declines

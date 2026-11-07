@@ -25,7 +25,21 @@
 # prose next to the code that computes it is a number that goes stale; read
 # <outlog>.drift, which is generated and therefore cannot lie.
 #
-# Usage: scripts/sweep.sh [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>
+# Usage: scripts/sweep.sh [--host] [--derive] [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>
+#   --host    no podman (RFC-0016 CI-A2): run each test directly on this
+#             machine through the same scripts/run-one.sh the container runs,
+#             under the same hard-kill timeout. Needs `nim` and gcc on PATH,
+#             Z3 reachable (LD_LIBRARY_PATH, and NELLI_Z3_INCLUDE for the
+#             headers) and PCRE 1 for the regex suites -- what the CI-A1
+#             setup-* actions provision. -i is ignored. The log, .summary,
+#             .env, .drift and .warnings keep the podman shapes (the .env /
+#             summary first line reads `host=... Z3=...` instead of `image=...
+#             Z3=...`), so sweep-diff.sh compares a host log with a podman log.
+#   --derive  take the run set from nelli.nimble's `test` task instead of the
+#             tests/t*.nim glob: exactly the registered suite, which is what a
+#             CI leg should run. .drift still reports files on disk that are
+#             registered nowhere. A registered name with no file is reported
+#             there and not run. Composes with -f.
 #   -j N      parallel jobs (default 6)
 #   -t SECS   per-test timeout passed to dt-bounded.sh (default 900)
 #   -b BE     backend, c or cpp (default c; `nimble test` uses c only)
@@ -68,7 +82,21 @@ timeout_secs=900
 backend=c
 filter=
 image=latest
+host=0
+derive=0
 
+# Long options first (getopts has none); everything else falls through.
+args=()
+for a in "$@"; do
+  case "$a" in
+    --host) host=1 ;;
+    --derive) derive=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+usage="usage: sweep.sh [--host] [--derive] [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>"
 while getopts ":j:t:b:i:f:" opt; do
   case "$opt" in
     j) jobs="$OPTARG" ;;
@@ -76,11 +104,11 @@ while getopts ":j:t:b:i:f:" opt; do
     b) backend="$OPTARG" ;;
     i) image="$OPTARG" ;;
     f) filter="$OPTARG" ;;
-    *) echo "usage: sweep.sh [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>" >&2; exit 2 ;;
+    *) echo "$usage" >&2; exit 2 ;;
   esac
 done
 shift $((OPTIND - 1))
-outlog="${1:?usage: sweep.sh [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>}"
+outlog="${1:?$usage}"
 
 case "$backend" in c|cpp) ;; *) echo "sweep.sh: backend must be c or cpp" >&2; exit 2 ;; esac
 
@@ -119,9 +147,35 @@ is_known_hang() {
   return 1
 }
 
+# ---- registry (nelli.nimble's test task) and disk -----------------------
+# Needed before the run set (--derive) and again for the drift report below.
+registered="$(mktemp)"; ondisk="$(mktemp)"
+warn_dir="$(mktemp -d)"; export warn_dir
+trap 'rm -f "$registered" "$ondisk"; rm -rf "$warn_dir"' EXIT
+
+# Strip comments BEFORE extracting quoted names: the list is heavily
+# commented, and a comment containing a quoted string (e.g. an explanatory
+# `# a = (1, "alpha")`) was otherwise scraped as a registered suite and
+# reported as "registered but MISSING on disk" -- a phantom that made the
+# drift report cry wolf about a registration gap that did not exist.
+sed -n '/for f in \[/,/\]:/p' nelli.nimble \
+  | sed 's/#.*$//' \
+  | grep -o '"[^"]*"' | tr -d '"' | LC_ALL=C sort -u > "$registered"
+for f in tests/t*.nim; do [ -e "$f" ] && basename "$f" .nim; done \
+  | LC_ALL=C sort -u > "$ondisk"
+
+
 # ---- run set -------------------------------------------------------------
 run_set=()
-for f in tests/t*.nim; do
+if [ "$derive" -eq 1 ]; then
+  candidates=()
+  while IFS= read -r name; do
+    [ -e "tests/$name.nim" ] && candidates+=("tests/$name.nim")
+  done < "$registered"
+else
+  candidates=(tests/t*.nim)
+fi
+for f in ${candidates[@]+"${candidates[@]}"}; do
   [ -e "$f" ] || continue
   name="$(basename "$f" .nim)"
   if [ -n "$filter" ]; then
@@ -138,18 +192,43 @@ fi
 : > "$outlog"
 
 # ---- which Z3 ran ---------------------------------------------------------
-# Ask the image itself (compile and run a one-line C probe against its libz3)
-# rather than trusting its tag, so the record cannot disagree with reality.
-podman image exists "localhost/nelli-dev:$image" || scripts/build-dev-image.sh "$image" >&2 || exit 2
-z3_full="$(podman run --rm "localhost/nelli-dev:$image" bash -c '
+# Ask the environment itself (compile and run a one-line C probe against its
+# libz3) rather than trusting a tag or a version file, so the record cannot
+# disagree with reality.
+write_probe() {
   printf "%s\n" "#include <stdio.h>" "#include <z3.h>" \
-    "int main(void){puts(Z3_get_full_version());return 0;}" > /tmp/zv.c &&
-  gcc -o /tmp/zv /tmp/zv.c -lz3 && /tmp/zv' 2>&1 | tail -n1)"
-z3_full="${z3_full#Z3 }"
-[ -n "$z3_full" ] || z3_full="unknown"
-env_line="image=localhost/nelli-dev:$image Z3=$z3_full"
+    "int main(void){puts(Z3_get_full_version());return 0;}"
+}
+if [ "$host" -eq 1 ]; then
+  command -v nim >/dev/null || { echo "sweep.sh --host: nim not on PATH" >&2; exit 2; }
+  command -v gcc >/dev/null || { echo "sweep.sh --host: gcc not on PATH" >&2; exit 2; }
+  probe_dir="$(mktemp -d)"
+  write_probe > "$probe_dir/zv.c"
+  probe_l=()
+  IFS=: read -ra ld_dirs <<< "${LD_LIBRARY_PATH:-}"
+  for d in ${ld_dirs[@]+"${ld_dirs[@]}"}; do [ -n "$d" ] && probe_l+=("-L$d"); done
+  z3_full="$(gcc ${NELLI_Z3_INCLUDE:+-I"$NELLI_Z3_INCLUDE"} -o "$probe_dir/zv" "$probe_dir/zv.c" \
+      ${probe_l[@]+"${probe_l[@]}"} -lz3 2>&1 && "$probe_dir/zv" 2>&1 | tail -n1)"
+  z3_full="$(printf '%s\n' "$z3_full" | tail -n1)"
+  rm -rf "$probe_dir"
+  z3_full="${z3_full#Z3 }"
+  [ -n "$z3_full" ] || z3_full="unknown"
+  env_line="host=$(uname -sr) gcc=$(gcc -dumpfullversion) nim=$(nim --version | head -n1 | awk '{print $4}') Z3=$z3_full"
+  # Same compile command as the container (scripts/run-one.sh); the Nim
+  # artifact ships Nim alone, so the C compiler and Z3 headers are named here.
+  export NELLI_HOST=1
+  export NELLI_NIM_FLAGS="--cc:gcc --colors:off${NELLI_Z3_INCLUDE:+ --cincludes:$NELLI_Z3_INCLUDE}"
+  warn_root="$PWD"
+else
+  podman image exists "localhost/nelli-dev:$image" || scripts/build-dev-image.sh "$image" >&2 || exit 2
+  z3_full="$(podman run --rm "localhost/nelli-dev:$image" bash -c "$(declare -f write_probe); write_probe > /tmp/zv.c && gcc -o /tmp/zv /tmp/zv.c -lz3 && /tmp/zv" 2>&1 | tail -n1)"
+  z3_full="${z3_full#Z3 }"
+  [ -n "$z3_full" ] || z3_full="unknown"
+  env_line="image=localhost/nelli-dev:$image Z3=$z3_full"
+  warn_root=/work
+fi
 echo "$env_line" > "$outlog.env"
-export NELLI_IMAGE="$image"
+export NELLI_IMAGE="$image" warn_root
 
 # ---- registry drift ------------------------------------------------------
 # nelli.nimble's `test` task list is hand-maintained; symex-mingw derives its
@@ -161,21 +240,6 @@ drift="$outlog.drift"
   echo "# generated by scripts/sweep.sh"
   echo
 } > "$drift"
-
-registered="$(mktemp)"; ondisk="$(mktemp)"
-warn_dir="$(mktemp -d)"; export warn_dir
-trap 'rm -f "$registered" "$ondisk"; rm -rf "$warn_dir"' EXIT
-
-# Strip comments BEFORE extracting quoted names: the list is heavily
-# commented, and a comment containing a quoted string (e.g. an explanatory
-# `# a = (1, "alpha")`) was otherwise scraped as a registered suite and
-# reported as "registered but MISSING on disk" -- a phantom that made the
-# drift report cry wolf about a registration gap that did not exist.
-sed -n '/for f in \[/,/\]:/p' nelli.nimble \
-  | sed 's/#.*$//' \
-  | grep -o '"[^"]*"' | tr -d '"' | LC_ALL=C sort -u > "$registered"
-for f in tests/t*.nim; do [ -e "$f" ] && basename "$f" .nim; done \
-  | LC_ALL=C sort -u > "$ondisk"
 
 unregistered_n=$(LC_ALL=C comm -23 "$ondisk" "$registered" | wc -l | tr -d ' ')
 missing_n=$(LC_ALL=C comm -13 "$ondisk" "$registered" | wc -l | tr -d ' ')
@@ -246,7 +310,7 @@ run_one() {
   stderr_tmp="$(mktemp)"
   scripts/dt-bounded.sh "$b" "$f" "$t" >/dev/null 2>"$stderr_tmp"
   rc=$?
-  filtered="$(grep -E '^/work/(src|tests)/.*Warning:' "$stderr_tmp" 2>/dev/null || true)"
+  filtered="$(grep -E "^$warn_root/(src|tests)/.*Warning:" "$stderr_tmp" 2>/dev/null || true)"
   if [ -n "$filtered" ]; then
     warn_n=$(printf '%s\n' "$filtered" | wc -l | tr -d ' ')
   else
@@ -256,7 +320,7 @@ run_one() {
     {
       echo "## $b $f ($warn_n warning(s))"
       printf '%s\n' "$filtered" \
-        | sed -E 's#^/work/##; s#\([0-9]+, *[0-9]+\) Warning: #: #' \
+        | sed -E "s#^$warn_root/##; s#\([0-9]+, *[0-9]+\) Warning: #: #" \
         | LC_ALL=C sort \
         | uniq -c \
         | awk '{c=$1; $1=""; sub(/^ /, ""); print (c > 1) ? $0 " x" c : $0}'
@@ -297,6 +361,7 @@ warnlog="$outlog.warnings"
 
 # ---- summary -------------------------------------------------------------
 summary="$outlog.summary"
+derive_note=; [ "$derive" -eq 1 ] && derive_note=" derive=test-task"
 pass=$(awk '$1 == "0"' "$outlog" | wc -l | tr -d ' ')
 skip=$(awk '$1 == "skip"' "$outlog" | wc -l | tr -d ' ')
 fail=$(awk '$1 != "0" && $1 != "skip"' "$outlog" | wc -l | tr -d ' ')
@@ -305,7 +370,7 @@ warn_tests=$(awk '$4+0 > 0' "$outlog" | wc -l | tr -d ' ')
 warn_total=$(awk '{s+=$4+0} END{print s+0}' "$outlog")
 {
   echo "$env_line"
-  echo "backend=$backend jobs=$jobs timeout=${timeout_secs}s${filter:+ filter=$filter}"
+  echo "backend=$backend jobs=$jobs timeout=${timeout_secs}s${derive_note}${filter:+ filter=$filter}"
   echo "pass=$pass fail=$fail (of which timeout-killed=$killed) skip=$skip total=$((pass + fail + skip))"
   echo "unregistered=$unregistered_n missing=$missing_n stale_skiplist=$stale_n  (see $drift)"
   echo "warn_tests=$warn_tests warn_total=$warn_total  (see $warnlog) -- trend only, never zero; the gate is scripts/sweep-diff.sh's warnings delta against a baseline, not this total"

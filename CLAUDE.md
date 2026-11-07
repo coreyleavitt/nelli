@@ -18,7 +18,11 @@ the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
   `scripts/sweep-diff.sh <baseline> <current>`. The suite is not green on a
   good day, so the gate is *what moved against a recorded baseline*, never
   "the sweep passed". `scripts/psweep.sh` remains the `tsymex_*`-only,
-  both-backends sweep. `sweep.sh` also writes `<outlog>.drift`, which counts
+  both-backends sweep. `sweep.sh --host` runs the same sweep with no podman
+  (`nim`+gcc+Z3 on PATH, as the `symex-linux` CI leg provisions them; same log and
+  sidecars, so `sweep-diff.sh` compares host and podman logs), and `--derive`
+  takes the run set from `nelli.nimble`'s `test` task instead of the
+  `tests/t*.nim` glob. Both compile through `scripts/run-one.sh`. `sweep.sh` also writes `<outlog>.drift`, which counts
   `tests/t*.nim` on disk against `nelli.nimble`'s `test` task; the ones it
   lists are registered nowhere and so run in no CI leg. Read that file for
   the count — it is generated, and the figure previously quoted here had

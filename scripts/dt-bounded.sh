@@ -15,6 +15,9 @@
 #        path; absolute outside the repo is bind-mounted at the same path.
 #        Unset: nothing is forwarded (the in-repo default tests/.pins/ reaches
 #        the host through the /work mount anyway).
+#        NELLI_HOST=1  no podman: run scripts/run-one.sh directly on the host
+#        under the same hard-kill timeout (`sweep.sh --host`). The compile
+#        command is scripts/run-one.sh either way.
 # Exit:  0 = passed/ran to completion; 137 = HUNG (killed at timeout);
 #        other = compile/test failure.
 set -uo pipefail
@@ -31,7 +34,8 @@ backend="${1:?usage: dt-bounded.sh [-i IMAGE] <c|cpp> <test.nim> [timeout_secs]}
 test_file="${1:?usage: dt-bounded.sh [-i IMAGE] <c|cpp> <test.nim> [timeout_secs]}"; shift
 timeout_secs="${1:-180}"; [ $# -gt 0 ] && shift
 img="localhost/nelli-dev:$image"
-podman image exists "$img" || scripts/build-dev-image.sh "$image" >&2
+host="${NELLI_HOST:-}"
+[ -n "$host" ] || podman image exists "$img" || scripts/build-dev-image.sh "$image" >&2
 
 # NELLI_PIN_DIR forwarding (see header).
 pin_args=()
@@ -46,22 +50,27 @@ if [ -n "${NELLI_PIN_DIR:-}" ]; then
   esac
 fi
 
-# Unique container name so we can guarantee teardown even if `timeout` kills
-# only the podman client and leaves the container detached.
-cname="dtbound_$(basename "$test_file" .nim)_${backend}_$$"
-cleanup() { podman rm -f "$cname" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
-cleanup
+if [ -n "$host" ]; then
+  # `timeout` puts the child in its own process group and, on expiry, signals
+  # the whole group, so the compiled test binary dies with nim.
+  timeout --signal=KILL "$timeout_secs" scripts/run-one.sh "$backend" "$test_file"
+else
+  # Unique container name so we can guarantee teardown even if `timeout` kills
+  # only the podman client and leaves the container detached.
+  cname="dtbound_$(basename "$test_file" .nim)_${backend}_$$"
+  cleanup() { podman rm -f "$cname" >/dev/null 2>&1 || true; }
+  trap cleanup EXIT
+  cleanup
 
-timeout --signal=KILL "$timeout_secs" podman run --rm --name "$cname" \
-  -v "$PWD:/work" \
-  -v "$HOME/.cache/milpa:/.cache/milpa" \
-  -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
-  -w /work \
-  ${pin_args[@]+"${pin_args[@]}"} \
-  "$img" \
-  bash -c 'b="$1"; f="$2"; nim "$b" -r --threads:on --hints:off "$f"' \
-  _ "$backend" "$test_file"
+  timeout --signal=KILL "$timeout_secs" podman run --rm --name "$cname" \
+    -v "$PWD:/work" \
+    -v "$HOME/.cache/milpa:/.cache/milpa" \
+    -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
+    -w /work \
+    ${pin_args[@]+"${pin_args[@]}"} \
+    "$img" \
+    scripts/run-one.sh "$backend" "$test_file"
+fi
 rc=$?
 if [ "$rc" -eq 137 ] || [ "$rc" -eq 124 ]; then
   echo ">>> HUNG: $test_file ($backend) killed after ${timeout_secs}s — treat as an engine non-termination defect, not a slow test." >&2

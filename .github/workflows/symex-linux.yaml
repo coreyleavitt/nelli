@@ -3,7 +3,9 @@ name: symex-linux
 # RFC-0016 CI-A1: native Linux provisioning for the symex engine, with no
 # container. Patched Nim from the OCI artifact, Z3 5.1.0 from its release
 # archive, PCRE 8.45 from source (both hash-pinned and cached). For now it
-# builds and runs ONE Z3 file and ONE PCRE-using file; CI-A2/A3 widen it.
+# runs scripts/sweep.sh --host (CI-A2: the podman sweep's runner without
+# podman); the default run set is ONE Z3 file and ONE PCRE-using file, and a
+# dispatch can widen it with tests_regex / derive. CI-A3 widens the push run.
 # Triggers are deliberately narrow until CI-A3: dispatch and rfc-* pushes.
 
 on:
@@ -13,6 +15,15 @@ on:
         description: "Git ref to test"
         required: false
         default: ""
+      tests_regex:
+        description: "sweep.sh -f REGEX over test basenames (use . for every test in the run set)"
+        required: false
+        default: "tsymex_0016_k9a_pins|tsymex_phase15_S6b_regex"
+      derive:
+        description: "Run set from nelli.nimble's test task (sweep.sh --derive) instead of the tests/t*.nim glob"
+        type: boolean
+        required: false
+        default: false
   push:
     branches: ['rfc-*']
     paths-ignore:
@@ -78,14 +89,26 @@ jobs:
           echo "PCRE: $("$NELLI_PCRE_PREFIX/bin/pcretest" -C | head -1)"
           ls -l "$NELLI_PCRE_PREFIX"/lib/libpcre.so.1*
 
-      - name: Build and run the Z3 file and the PCRE file
+      - name: Sweep on the host (scripts/sweep.sh --host)
         shell: bash
+        env:
+          TESTS_REGEX: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex || 'tsymex_0016_k9a_pins|tsymex_phase15_S6b_regex' }}
+          DERIVE: ${{ inputs.derive && '--derive' || '' }}
         run: |
-          set -euo pipefail
-          for t in tsymex_0016_k9a_pins tsymex_phase15_S6b_regex; do
-            echo "==> $t"
-            nim c -r --cc:gcc --threads:on --hints:off --colors:off \
-              --path:src --path:_deps/z3/src --path:_deps/softlink/src \
-              --cincludes:"$NELLI_Z3_INCLUDE" \
-              --nimcache:"$RUNNER_TEMP/nc-$t" "tests/$t.nim"
-          done
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/sweep"
+          # sweep.sh exits 0 unless it could not run; the log is the record.
+          # The step fails if any selected test failed.
+          scripts/sweep.sh --host $DERIVE ${TESTS_REGEX:+-f "$TESTS_REGEX"} \
+            "$RUNNER_TEMP/sweep/sweep.log"
+          cat "$RUNNER_TEMP/sweep/sweep.log.summary" >> "$GITHUB_STEP_SUMMARY"
+          awk '$1 != "0" && $1 != "skip" { bad = 1 } END { exit bad }' \
+            "$RUNNER_TEMP/sweep/sweep.log"
+
+      - name: Upload the sweep log and sidecars
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: symex-linux-sweep
+          path: ${{ runner.temp }}/sweep/
+          if-no-files-found: warn

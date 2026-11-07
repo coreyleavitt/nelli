@@ -281,16 +281,20 @@ proc addU8GateAt200_100(a, b: range[0'u8..255'u8]) =
 # `wrapProbe`/`Unchecked` idiom, reused here for the concolic mode it never
 # covered.
 
-const Unchecked163R16 = SymexSettings(integerSemantics: isOptimised,
-                                      arithChecks: {acDivByZero, acRange})
-
-proc addI8UncheckedGate(a, b: int8) =
+# RFC-0016 W1-d2: signed wrap with checks off is undefined, and a checked
+# build raises. The overflowing int8 pair therefore lives in
+# `tsymex_163rev_concolic_modes_checksoff.nim` (a checks-off build, where it is
+# a `ubSignedOverflow` halt). What is kept here, trusted, is the property this
+# suite is about -- a signed narrow param binds at its declared width and
+# sign -- through a signed int8 sum that stays in the window.
+proc addI8DefinedGate(a, b: int8) =
   if a + b < a:
-    symexTarget("i8_wrapped")
+    symexTarget("i8_negative_b")
 
-proc addI8UncheckedGateAt100_100(a, b: int8) =
-  if a == 100'i8 and b == 100'i8 and a + b < a:
-    symexTarget("i8_wrapped_100_100")
+proc addI8DefinedGateOverflowFree(a, b: int8) =
+  ## The sum stays inside int8, so it is defined in every build.
+  if a == -100'i8 and b == 100'i8 and a + b == 0'i8:
+    symexTarget("i8_cancel")
 
 # ---- D3: the non-regression anchor -- plain `int`, default (checked) settings
 #
@@ -328,27 +332,27 @@ suite "#163 review R16 -- concolic-bound scalar params bind at their declared wi
     check r.branchTrace.len == 1
     check r.branchTrace[0].armTaken == 0    ## the "if" arm ("wrapped")
 
-  test "D2 oracle: under unchecked arithmetic, 100'i8 + 100'i8 wraps to -56":
-    {.push overflowChecks: off.}
-    proc rt(a, b: int8): int8 = a + b
-    {.pop.}
-    let c = rt(100'i8, 100'i8)
-    check c == -56'i8
-    check c < 100'i8
+  test "D2 oracle: -100'i8 + 100'i8 is 0, inside int8":
+    check -100'i8 + 100'i8 == 0'i8
 
-  test "D2 wmExplore agrees the wrap is reachable at exactly a=100, b=100 (unchecked)":
-    let r = symexFind(addI8UncheckedGateAt100_100, tLabel("i8_wrapped_100_100"),
-                      Unchecked163R16)
+  test "D2 wmExplore (rule b): a signed narrow sum in the window is reachable at a=-100, b=100":
+    let r = symexFind(addI8DefinedGateOverflowFree, tLabel("i8_cancel"))
     check r.status == sxSat
+    check r.trusted
 
-  test "D2 wmFollowConcrete now agrees too for a signed narrow width":
-    let trace = @[integerChoice(100, -128, 127, 0), integerChoice(100, -128, 127, 0)]
+  test "D2 wmExplore (rule b): a < 0 sum below a is reachable for a signed narrow b":
+    let r = symexFind(addI8DefinedGate, tLabel("i8_negative_b"))
+    check r.status == sxSat
+    check r.trusted
+
+  test "D2 wmFollowConcrete (rule b) agrees for a signed narrow width, default settings":
+    let trace = @[integerChoice(0, -128, 127, 0), integerChoice(-5, -128, 127, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
                      ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
-    let r = concolicCollect(addI8UncheckedGate, trace, bindings, Unchecked163R16)
+    let r = concolicCollect(addI8DefinedGate, trace, bindings)
     check r.pcSatByConcreteInputs
     check r.branchTrace.len == 1
-    check r.branchTrace[0].armTaken == 0    ## the "if" arm ("i8_wrapped")
+    check r.branchTrace[0].armTaken == 0    ## the "if" arm ("i8_negative_b"): 0 + -5 < 0
 
   test "D3 oracle: 100 + 100 neither wraps nor overflows a plain int":
     check not (100 + 100 < 100)

@@ -348,6 +348,7 @@ task test, "Run the test suite":
             # (unsigned/narrow-width param arithmetic loses its wraparound
             # semantics under concolic collection).
             "tsymex_163rev_concolic_modes",
+            "tsymex_163rev_concolic_modes_checksoff",
             # Issue #163 review finding R7 (Medium, CONFIRMED with a concrete
             # wrong verdict) -- the statement-position `{.symexTransparent.}`
             # arm deleted the call unconditionally, never consulting the

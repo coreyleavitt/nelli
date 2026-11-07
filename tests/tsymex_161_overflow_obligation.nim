@@ -23,6 +23,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # #161's repro, verbatim. a*b reaches 1.6e19, which does not fit int64.
 # Runtime truth: mul64(4_000_000_000, 4_000_000_000) raises OverflowDefect
@@ -47,6 +48,18 @@ proc addSafe(a, b: range[0'i64..1000'i64]) =
 proc wrapProbe(a, b: range[0'i64..4_000_000_000'i64]) =
   if a * b < 0:
     symexTarget("wrapped")
+
+# RFC-0016 W1-d2. Signed wrap with checks off is now undefined, so the old
+# signed `wrapProbe` witness is one the binary does not reach. The mode
+# agreement it carried (ADR-0001) is kept on a probe whose wrap IS defined:
+# unsigned. Reachable only if the product wraps (b >= 2, so a*b >= a unless
+# it wrapped); settings agree with the build, nothing taints.
+proc wrapProbeU(a, b: range[0'u64..5_000_000_000'u64]) =
+  if b >= 2'u64 and a * b < a:
+    symexTarget("wrapped")
+
+const UncheckedU = SymexSettings(integerSemantics: isOptimised)
+const UncheckedUExact = SymexSettings(integerSemantics: isExact)
 
 const Unchecked = SymexSettings(integerSemantics: isOptimised,
                                 arithChecks: {acDivByZero, acRange})
@@ -154,15 +167,28 @@ suite "#161 — promotion keeps the overflow obligation live":
     check c < 0
 
   test "under unchecked arithmetic the two integer modes still agree":
-    ## Slice 3, and the load-bearing property for it. `isExact` is the
-    ## oracle: BV arithmetic wraps because that is what bit-vectors DO.
-    ## `isOptimised` answered sxUnsat here — it suppressed the raise fork
-    ## (correct) while still modelling the product as an unbounded Int
-    ## that never wraps (not correct), and so lost the path.
+    ## Rule (b): the property is the ADR-0001 mode agreement, kept at full
+    ## strength on an unsigned probe (defined wrap, trusted sat). `isExact`
+    ## is the oracle: BV arithmetic wraps because that is what bit-vectors
+    ## DO; `isOptimised` once modelled the product as an unbounded Int.
+    let oracle = symexFind(wrapProbeU, tLabel("wrapped"), UncheckedUExact)
+    let opt = symexFind(wrapProbeU, tLabel("wrapped"), UncheckedU)
+    check oracle.status == sxSat
+    check oracle.trusted
+    check opt.status == oracle.status
+    check opt.trusted
+
+  test "a signed unchecked model that disagrees with the build is not trusted":
+    ## Rule (a): the old signed `wrapProbe` under an explicit
+    ## `arithChecks` lacking acOverflow. Signed wrap with checks off is
+    ## undefined, so the model's wrap is no longer a trusted witness: the
+    ## run is tainted feCheckOption (this build checks overflow).
     let oracle = symexFind(wrapProbe, tLabel("wrapped"), UncheckedExact)
     let opt = symexFind(wrapProbe, tLabel("wrapped"), Unchecked)
-    check oracle.status == sxSat
-    check opt.status == oracle.status
+    check not oracle.trusted
+    check not opt.trusted
+    check oracle.errors.named(feCheckOption)
+    check opt.errors.named(feCheckOption)
 
   test "unchecked arithmetic raises no OverflowDefect":
     ## The other half of the same setting: with `acOverflow` off there is

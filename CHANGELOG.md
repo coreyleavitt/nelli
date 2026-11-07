@@ -12,6 +12,258 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
+## [0.9.2] — 2026-11-07
+
+This release is Wave 1 of RFC-0016 (native-parity hardening): the seven clean
+false verdicts the 2026-11-06 research round found (RFC-0016 §5.0, W-01 to
+W-07), the model of undefined behaviour the checks-off work needed, the
+Wave 1 wiring audit (WA-A and WA-B, handoff entries of 2026-11-07) and the
+code review of the same surface (`docs/rfc/0016-review.md`, two rounds, floor
+at round 2). Slices are cited as W1-x and the audit's fixes as WA-x; review
+findings by the id the ledger gives them (SC2, D1, M2 to M6, N1, R2-01).
+Upgrading: `docs/migration/0.9.2.md`. The verdict fixes come first, ordered by
+how wrong the old answer was: a trusted `sxSat` or `sxUnsat` that native Nim
+contradicts, then a raise or confinement the build does not do, then
+constructs that declined and now decide.
+
+The walker version moves from `"272"` to `"287"` (fifteen bumps), and the
+soundness codec from version 3 to 4. Every 0.9.1 cache entry is orphaned; the
+first run after the upgrade is cold.
+
+### Fixed — wrong clean verdicts
+
+- **A generic exception type is no longer identified by its last type
+  argument** (SC2). `typeIdOf` took the last child of any bracket expression,
+  so `G[ValueError]` got the id `ValueError`, and `except ValueError` caught a
+  `G[ValueError]` that escapes natively: a trusted `sxSat` for a target in the
+  handler. Only `ref[T]` and `ptr[T]` unwrap now; any other instantiation
+  declines `eeUnknownExnType` (the exact model is PRC-38, below). Walker 287.
+- **`except T as e:`, `raise e`, and a handler naming a type through an alias**
+  (W1-a, W-01). A raise site and a handler stored different ids for one type
+  (the `repr` of the node), so a handler was missed (a false `sxUnsat` for its
+  label) or the wrong type matched (a false `sxRaised`). One id now comes from
+  `canonicalExnTypeSym`; `raise e` has the static type of `e`. An exact raised
+  value is modelled only for a `let`-bound `newException`; a handler whose type
+  cannot be named declines. Walker 273.
+- **`--panics:on`: a `Defect` inside a `try` ran its `except` arm and
+  `finally`** (W1-c2, W-03). Natively a `Defect` ends the process under
+  `--panics:on`; a label after it was a clean `sxSat`. `routeRaise` now tests
+  defect-ness before the handler search and sends a known `Defect` down the
+  crash channel: no `except` arm or `finally` runs, and the claim is a crash.
+  Every crash claim carries `witnessUnsafe` (it was set only on some), and the
+  flag survives the replay settle and the cache, so a lossy `AssertionDefect`
+  claim under `--panics:on` is no longer reported host-runnable (WA-B). A
+  `raise` of an unknown-typed `ref Exception` under any `try` declines. Walker
+  274, 286.
+- **`low(T) mod -1`, `low(T) div -1`** (W1-d1a, W-05). The walk trapped
+  regardless of the divisor and confined the survivor, a false `sxUnsat`
+  where gcc folds the expression. Natively the operation is SIGFPE on x86-64.
+  The path now halts (`ubIntMinModMinusOne`; the unchecked `div` case is
+  `ubSignedOverflow`), 32 and 64 bits.
+- **Unsigned `div` or `mod` by zero** (W1-d1b, W-06). It was a catchable
+  `DivByZeroDefect` (a `sxRaised`, or a trusted `sxSat` through an `except`
+  arm). Natively it is SIGFPE; Nim has no check for it. The path now halts
+  (`ubUnsignedDivZero`). The opaque-call scan no longer lists
+  `DivByZeroDefect` for the unsigned division magics.
+- **Signed `+`, `-`, `*` and negation overflowing with the overflow checks
+  off** (W1-d2a, W-07). The walk wrapped (two's complement), so `v + 1 > v` at
+  `high(int)` was a clean `sxSat` while gcc folds it to true. The operation is
+  undefined in C: the overflow side is an `ubSignedOverflow` trap, pruned where
+  unreachable and otherwise halting the path. Signed 8 and 16 bit arithmetic
+  is computed in C's promoted `int` and narrowed, a defined wrap, so it does
+  not halt; 32 and 64 bit stay undefined (WA-B). Walker 282, 286.
+- **Signed `div` or `mod` by zero with the overflow checks off** (WA-B). Nim
+  emits no zero check then and the C division is undefined (SIGFPE on x86-64).
+  It was a definite trap that confined the survivor, with no omission
+  recorded. The path now halts as `ubSignedDivZero`, appended to `UbKind` so
+  earlier codec ordinals hold. Walker 286.
+- **A `{.noinit.}` local read before any write** (W1-d3). The value was
+  unconstrained and trusted. The reading path now records
+  `ubIndeterminateRead`; the verdict is not `trusted()` and is not run in your
+  process. Walker 281.
+- **A local with `{.cursor.}`, `align`, `volatile`, `codegenDecl` or any
+  pragma outside `noinit`, `global`, `inject`, `gensym`, `used`** (W1-b, W-02).
+  The parser dropped every local pragma but `noinit`, so a `{.cursor.}` that
+  shares memory was modelled as a copy: a false `sxUnsat` and a false `sxSat`
+  on c/orc, c/arc and cpp. It declines `feLocalPragma` on every path that
+  reaches it (the exact model is PRC-36, below).
+- **`float32` <-> `float64` conversions, explicit or compiler-inserted**
+  (W1-e, W-04). The conversion was a transparent pass-through, so a value of
+  one width flowed on as the other (`float64(float32(x)) == x` was decided).
+  It declines `feFloatWidth` (the exact model is PRC-37, below). int <-> float
+  verdicts are unchanged.
+- **`{.push overflowChecks: off.}` on a routine** in a checking build is modelled as the
+  settings said; it always declines now (`feOverflowCheckOption`) (W1-d2).
+- **A call summary that relied on a pruned undefined side** was reused
+  anywhere. It is reused only where the prune holds (W1-d1c).
+
+### Fixed — wrong in a checks-off build, or declined without cause
+
+- **Closure-iterator loops and unchecked ordinal steps in a checks-off
+  build** (WA-A). A `for` over a closure iterator was replaced by an empty
+  block; it is inlined now. `inc`, `dec`, `succ`, `pred` and `+=` on an enum,
+  char or range raised `OverflowDefect` where the arithmetic is unchecked; the
+  out-of-range side now declines as unmodelled. A magic-backed callee (`abs`)
+  takes its caller's arithmetic scope, and a closure iterator compiled under a
+  different scope than its caller declines. Walker 285.
+- **`{.push overflowChecks: on.}` on a routine in a checks-off build** was
+  modelled with the unchecked model. Checked-ness is per routine now (W1-d2c):
+  such a body raises `OverflowDefect` and `DivByZeroDefect` whatever the
+  build-derived settings say, and a call across the boundary keeps each side's
+  own arithmetic. Walker 283.
+- **`assertCoveredBy`, a witness that reaches the target and then raises a
+  `Defect` the splat has no arm for** (W1-c3, W-26). The `Defect` unwound out
+  of the call and, with no handler above it, ended the process. The call
+  reports the finding and the host survives (panics-off only).
+- **`x in a .. b` and `x notin a .. b`** over an ordinal, including
+  non-constant `..<` bounds, declined (W1-g, W-31). They lower to `a <= x and
+  x <= b`, pinned against native including the boundary.
+- **`case ... elif`** in statement, expression and hoisted forms declined
+  (W1-f, W-21). It is modelled.
+- **A `seq` field default `@[]` or `@[1, 2]`** reached the parser as a bare
+  `[]`: a compile stop for an empty default (W1-f, W-20). A bracket typed
+  `seq[T]` is lowered as a seq literal. The slice's premise that object field
+  defaults needed a decline was wrong: native `var o: T` reads zero while
+  `default(T)`, constructors and `new` apply the defaults, and the walker
+  already agreed in every shape.
+- **A re-executed replay (Windows) of a SUT naming its own routine
+  `{.global.}`** was refused, so the verdict stayed `sxUnknown` where the POSIX
+  fork confirmed it (W1-m). A global named from inside its own routine links in
+  the child and is confirmed; one named from another routine stays open.
+  Walker 284.
+- **`symexFindAllWitnesses` and `symexForAll` on a SUT with no parameters**
+  did not compile (N1). The first annotated the witness with an empty tuple
+  type, the second passed a zero-argument SUT as a one-argument property. Both
+  accept the SUT now. `concolicAssist` still refuses zero parameters by design.
+
+### Changed
+
+- **`SymexSettings.arithChecks` derives from the build** (W1-d2a).
+  `defaultSymexSettings` calls `arithChecksFor`: a debug build is all-on,
+  `--overflowChecks:off` drops `acOverflow` and `acDivByZero`,
+  `--rangeChecks:off` drops `acRange`. A value that disagrees with the build
+  taints the run `feCheckOption`: the program the build compiles does not do
+  what the setting says. An opt-out through `arithChecks` therefore no longer
+  yields a clean verdict. See Deprecated.
+- **Undefined behaviour rides the path and the verdict** (W1-d3). The omission
+  is recorded on `Path.undefined`, joined by every taint carrier, and the
+  verdict carries `Soundness.witnessUndefined` (`undefinedKinds()`). A replay
+  cannot lift it: such a witness is not `trusted()`, and neither `symexForAll`
+  nor `assertCoveredBy` runs it in your process. It is rendered by `UbKind`
+  name in the text line, the JSON and a GitHub warning. Soundness codec 4.
+- **`--mm:refc` is a compile error at `import nelli/symex`** (W1-c1b), naming
+  the build field. Under refc nim-z3's `=destroy` hooks do not compile and the
+  error used to name `z3/ast.nim`. Use `--mm:orc` or `arc`.
+- **The build is read in one module** (W1-c1a, W1-c1b). `nelli/smt/buildprofile`
+  owns the build reads (checks, panics, memory model, exceptions, backend) and
+  `arithChecksFor`/`arithChecksDisagree`. `admitBuild` returns
+  `Option[BuildRefusal]` keyed by a `BuildField` enum, which removes the
+  `Admission` name clash with `nelli/coverage` (M4). The walker follows an
+  in-source `push` as the build; nelli cannot tell a push from the command
+  line, and a push-time import fails closed.
+- **The arithmetic scope is decided once** (D1, R2-01). The walker kept the
+  scope in a bool threadvar read raw at about ten sites, with a save and
+  restore around routine bodies that nothing enforced. It is now a lexical
+  stack read through `wraps()` and `checked()`, and the parser computes it
+  through one pure function, `arithScopeFor`, with the build's checks folded
+  into `overflowChecked` (R2-01). A refactor under green: no verdict or cache
+  key moves and the walker is not bumped for it.
+- **The symex README's decline catalogue is rewritten** around every `fe*`
+  and `ub*` kind (W1-z, M2, M6). `scripts/check-readme-kinds.sh` derives the
+  kinds from `SymexErrorKind` and fails if the README omits one; it runs on
+  docs changes and has a negative self-test. The README states which `ub*`
+  kinds can ride a witness (only `ubIndeterminateRead` does today).
+- **Deprecation noise is scoped** (M3). The three module-wide
+  `warning[Deprecated]` pushes in `types`, `canonicalize` and `runtime`, two
+  of them never popped, are gone; internal reads of `arithChecks` go through
+  one accessor. `symexFind` no longer initialises `SymexResult.fromCache`.
+- **Remediation text names the right reason** for a witness that is not run in
+  the host (`witnessUndefined`, a crash claim) rather than a replay, and the
+  `feLocalPragma` message no longer cites a missing README heading.
+
+### Added
+
+- **`UbKind` and the `ub*` kinds** in `SymexErrorKind`: `ubUnsignedDivZero`,
+  `ubIntMinModMinusOne`, `ubSignedOverflow`, `ubFloatToIntRange`,
+  `ubIndeterminateRead`, `ubSignedDivZero`. `ubFloatToIntRange` is declared
+  and has no emission site yet; float-to-int out of range stays
+  `feConvFloatToIntUndefined`.
+- **`feLocalPragma`, `feFloatWidth`**, and the `feCheckOption` and
+  `feOverflowCheckOption` uses above.
+- **`Soundness.witnessUndefined`, `undefinedKinds()`, `Path.undefined`,
+  `ArithScope` (`asBuild`, `asChecked`)** on a routine body, and the
+  `nelli/smt/buildprofile` module.
+- **K1-0, the native-reproduction join** (`tests/tsymex_0016_k1lite.nim`,
+  `tests/k1lite.nim`, `scripts/k1lite.sh`). It joins `pinRecords` against the
+  seven §5.0 cell keys (W-01 to W-07) and fails, naming the W row, slice and
+  key, when any lacks an exact or declined record from this build row. It runs
+  on Linux only, on the c and cpp backends in two steps of the `symex-linux`
+  leg, and on Z3 4.13.4 at release by hand. The native-pin helpers (K9a:
+  `pinExact`, `pinDecline`, `pinCrash`, `skipCell`, `pinRecords`) classify
+  Windows crashes by evidence and install a first-chance fault handler.
+- **Tooling.** The Z3 4.13.4 dev image with `-i IMAGE` on `dt-bounded.sh` and
+  `sweep.sh` (INF-05); `sweep.sh` records the libz3 version it ran; the
+  `symex-linux` leg provisions the Nim artifact, Z3 5.1 and PCRE 8.45 (CI-A1)
+  and runs on pushes to main; `sweep.sh` runs on the host and derives its list
+  from the test task, keeping the output tail of each failing test (CI-A2);
+  `fuzzer-msvc` runs the RFC-0016 walker tests under `vcc` (W1-m); the 0.9.1
+  sweep baselines are published as release assets.
+- **Tests** for each row above, among them
+  `tsymex_0016_crb_macro_deprecation` (a `symexFind` call site is
+  deprecation-clean) and `tsymex_0016_cr_zeroarg`.
+
+### Deprecated
+
+Both are removed in 0.10.0 (RFC-0016, INT-39). Nim's `deprecated` pragma takes
+no message on an object field, so the warning reads "`arithChecks` is
+deprecated" and the path forward is in the field's documentation and the
+migration note.
+
+- **`SymexSettings.arithChecks`**: do not set it. The build decides, through
+  `--overflowChecks` and `--rangeChecks`. To model checks off, build with them
+  off; the unchecked operations are then undefined and halt (`ub*`).
+- **`SymexResult.fromCache`**: always `false`, since `symexFind` has no cache.
+  The cache-hit flag is `SymexFinding.fromCache`, set by
+  `symexFindAllWitnesses` and `symexForAll`.
+
+### Known limitations
+
+- **Designed declines, tracked as precision rows.** PRC-36 (W1-b): a
+  `{.cursor.}` local declines `feLocalPragma`; the exact model is a non-owning
+  alias of the source's storage. PRC-37 (W1-e): a `float32` <-> `float64`
+  conversion declines `feFloatWidth`; the exact model rounds to binary32 and
+  needs native pins at 0.5 and 0.1. PRC-38 (CR-A): a generic exception type
+  such as `G[ValueError]` declines `eeUnknownExnType`; the exact model
+  identifies the full instantiation. None blocks this release.
+- **A fork replay inherits a routine `{.global.}`** (INT-40, found in review as
+  SC1b, older than this release). A fork replay child inherits the host's
+  current value, so after earlier host calls a walker `sxSat` through that
+  global can be confirmed from run history, with no `runDependence`. Re-exec
+  replay starts from the initial value and refutes it.
+- **A `sxSat` is trusted on its prefix.** C's undefined behaviour is not
+  sequenced and the walk stops at the first label hit, so a trusted `sxSat`
+  can be defined up to the label and undefined after it. The tail is not
+  scanned; the whole-run check is planned (K10b).
+- **Destructors during panic unwinding are not modelled** (W1-c2). Under
+  `--panics:on` a destructor's side effect between the raise and the exit is
+  not walked.
+- **Unsigned division in an opaque callee gives no answer** (W1-d1b, K10b): it
+  is neither a raise nor a halt.
+- **A checked routine calling an unchecked callee that overflows** declines
+  `ubSignedOverflow` (W1-d2c).
+- **The halted path records no `undefined` set** (W1-d3): the halt is visible
+  as the path's absence.
+- **On Windows a `{.global.}` named only from another routine** stays open under
+  the re-exec replay, so such a SAT is not confirmed there (W1-m).
+- **The native-reproduction join covers Linux only.** The mingw and MSVC rows
+  are pinned by their suites but not joined (K1a-ci, K5a `rowOf`, Wave 2).
+- **Open Lows from the review** (R2-03 to R2-08, R2-10, L9, SC3, D8) carry into
+  Wave 2 under INT-42; the ledger is `docs/rfc/0016-review.md`.
+- **`tsymex_rfc0005_s8by_remainder` is red on c and cpp** at the 0.9.1
+  baseline: its spend-equality check (`r.units == base.units`) asserts Z3 spend
+  that drifts within a process (INT-04, CI-03). It is unchanged by this release.
+- **The deprecations above land in 0.10.0** (INT-39).
+
 ## [0.9.1] — 2026-11-04
 
 This release carries two sets of fixes made after the 0.9.0 tag (RFC-0005):

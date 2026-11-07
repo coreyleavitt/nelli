@@ -4116,6 +4116,11 @@ macro assertCoveredBy*(fn: typed,
         `anyRaisedId` = true
       except CatchableError:
         `anyRaisedId` = true
+      except Defect:
+        # RFC-0016 W1-c3 (W-26): any other Defect (overflow, range, div by
+        # zero, ...) is a raise like the arms above, not the host's end.
+        # Under --panics:on a Defect is not catchable (W1-c2 owns that).
+        `anyRaisedId` = true
       let `hitsId` = symexCaptureEnd()
       let reached = runIt and `coveredExpr`
       var covered = false

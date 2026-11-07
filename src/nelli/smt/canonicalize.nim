@@ -16,8 +16,6 @@
 ## No constructor's payload may contain an unescaped sigil; primitives
 ## are wrapped to enforce that.
 
-{.push warning[Deprecated]: off.}  ## RFC-0016 W1-z: this module reads `arithChecks` itself (deprecated for users)
-
 import std/[strutils, tables, algorithm]
 import ./types
 import ./pcre_engine
@@ -6566,7 +6564,7 @@ proc canonicalize*(s: SymexSettings): string =
     ";de=" & $s.defectExclusions &      ## CR-2: set[DefectKind] renders as stable
                                         ## bitmask (ordinal order); deterministic
                                         ## across runs and both backends.
-    ";ac=" & $s.arithChecks &           ## R16-1: set[ArithCheck]; same ordinal-
+    ";ac=" & $effectiveArithChecks(s) &           ## R16-1: set[ArithCheck]; same ordinal-
                                         ## stable rendering as defectExclusions.
     ";mcic=" & $s.budget.maxClosureInlineCount &  ## CR-2
     ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2

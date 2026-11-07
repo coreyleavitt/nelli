@@ -20,7 +20,7 @@
 ## models the unchecked arithmetic of a checks-off build (`ubSignedOverflow`),
 ## for every routine of a program whose real build checks overflow. Pinned by
 ## `tsymex_0016_wa_importpush`. Import nelli before the push.
-import std/[strutils, algorithm]
+import std/[strutils, algorithm, options]
 
 type
   CheckOption* = enum
@@ -122,20 +122,29 @@ func buildSegment*(b: BuildSemantics = buildSemantics): string =
                    $b.backend, $b.exceptions, b.threads, b.stackTrace,
                    b.lineTrace)
 
-type Admission* = tuple[ok: bool, field, reason: string]
+type
+  BuildField* = enum
+    ## The build fields `admitBuild` can refuse. Its string value is the name
+    ## the refusal message and the `pinRefused` probes quote.
+    bfMm = "mm"
 
-func admitBuild*(b: BuildSemantics = buildSemantics): Admission =
-  ## RFC-0016 W1-c1b (section 8.3, Refusals). Whether `nelli/symex` runs on
-  ## build `b` at all. The only Wave-1 refusal is the memory model: D-0016-7
+  BuildRefusal* = object
+    field*: BuildField
+    reason*: string
+
+func admitBuild*(b: BuildSemantics = buildSemantics): Option[BuildRefusal] =
+  ## RFC-0016 W1-c1b (section 8.3, Refusals). `none` when `nelli/symex` runs
+  ## on build `b`, else the refusal. The only Wave-1 refusal is the memory
+  ## model: D-0016-7
   ## refuses `--mm:refc` by name (its heap and destructor timing are not a
   ## verified build, and nim-z3's `=destroy` hooks do not compile under it).
   ## Pure and compile-time evaluable; `symex.nim` calls it once, before it
   ## imports `z3`, since under refc the `z3` import is the first thing to fail.
   if b.mm == mmRefc:
-    return (false, "mm",
-      "mm=refc is not a verified build (D-0016-7); use --mm:orc or --mm:arc")
-  (true, "", "")
+    return some(BuildRefusal(field: bfMm,
+      reason: "mm=refc is not a verified build (D-0016-7); use --mm:orc or --mm:arc"))
+  none(BuildRefusal)
 
-func refusalMessage*(a: Admission): string =
+func refusalMessage*(a: BuildRefusal): string =
   ## The compile-time error text for a refused build.
-  "nelli/symex: this build is refused: " & a.reason & " [field: " & a.field & "]"
+  "nelli/symex: this build is refused: " & a.reason & " [field: " & $a.field & "]"

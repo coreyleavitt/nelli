@@ -4,8 +4,6 @@
 ## the bottom of the file (right above the rendering helpers); the
 ## rest of this module is type definitions only.
 
-{.push warning[Deprecated]: off.}  ## RFC-0016 W1-z: this module reads `arithChecks` itself (deprecated for users)
-
 import std/tables
 import std/options   ## Phase 15 R12: Option[string] for HeapSnapshotEntry.aliasRef/pointsTo
 export tables, options
@@ -5972,10 +5970,19 @@ func buildWraps*(b: BuildSemantics = buildSemantics): bool =
   ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
   coOverflow notin b.checks
 
+func effectiveArithChecks*(s: SymexSettings): set[ArithCheck] =
+  ## RFC-0016 code review M3. The internal read of the deprecated
+  ## `SymexSettings.arithChecks`: the one place a read is allowed to be quiet,
+  ## so no module has to switch the Deprecated warning off wholesale. Every
+  ## nelli-internal consumer goes through this, never the field.
+  {.push warning[Deprecated]: off.}
+  result = s.arithChecks
+  {.pop.}
+
 func arithChecksDisagree*(s: SymexSettings;
                           b: BuildSemantics = buildSemantics): bool =
   ## RFC-0016 W1-d2. `s.arithChecks` is not what build `b` compiles in.
-  s.arithChecks != arithChecksFor(b)
+  effectiveArithChecks(s) != arithChecksFor(b)
 
 proc defaultSymexSettings*(): SymexSettings =
   ## Phase 2 endpoint: `isOptimised` is now the default. Range-typed
@@ -6051,7 +6058,10 @@ proc `+`*(a, b: SymexSettings): SymexSettings {.deprecated:
   if b.acceptUnknownAsCovered != d.acceptUnknownAsCovered:
     result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
-  if b.arithChecks != d.arithChecks: result.arithChecks = b.arithChecks  ## R16-1
+  if effectiveArithChecks(b) != effectiveArithChecks(d):   ## R16-1
+    {.push warning[Deprecated]: off.}
+    result.arithChecks = b.arithChecks
+    {.pop.}
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
   if b.replay != d.replay: result.replay = b.replay   ## RFC-0005 S10
   if b.replayTimeoutMs != d.replayTimeoutMs:   ## RFC-0005 S8be
@@ -6088,13 +6098,13 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
       ") is set but inlinePolicy is " & $s.inlinePolicy &
       " (not ipHybrid); the threshold is ignored under this policy."
   # R16-1 (b): all arith checks disabled → no arithmetic defects can be found.
-  if s.arithChecks == {}:
+  if effectiveArithChecks(s) == {}:
     result.add "arithChecks is empty: no arithmetic defect forks will be " &
       "emitted (OverflowDefect, DivByZeroDefect, and RangeDefect are all " &
       "unreachable). Set acOverflow/acDivByZero/acRange to re-enable."
   # RFC-0016 W1-d2: `arithChecks` that is not what the build compiles in.
   if arithChecksDisagree(s):
-    result.add "arithChecks (" & $s.arithChecks & ") disagrees with this " &
+    result.add "arithChecks (" & $effectiveArithChecks(s) & ") disagrees with this " &
       "build's checks (" & $arithChecksFor() & "): the program does not do " &
       "what the setting models, so every verdict is tainted feCheckOption."
   # RFC-0010 B4 round 2 (d): maxCallDepth == 0 exhausts immediately rather
@@ -6125,7 +6135,7 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
     acDivByZero: dkDivByZeroDefect,
     acRange:     dkRangeDefect,
   ]
-  for ac in s.arithChecks:
+  for ac in effectiveArithChecks(s):
     let dk = arithCheckToDefectKind[ac]
     if dk in s.defectExclusions:
       result.add $ac & " is enabled in arithChecks but " & $dk &

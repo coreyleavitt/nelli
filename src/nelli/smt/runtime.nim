@@ -16,8 +16,6 @@
 ## here ship with the variant present and the structural plumbing in
 ## place, so cycle 5 only adds the promotion logic, not new families.
 
-{.push warning[Deprecated]: off.}  ## RFC-0016 W1-z: this module reads `arithChecks` itself (deprecated for users)
-
 import std/tables
 import std/options
 from std/typetraits import nil   ## RFC-0005 S8ar: `readCellField`'s distinct arm
@@ -16829,7 +16827,7 @@ proc noteArithChecksDisagreement(settings: SymexSettings) =
   ## agreeing setting taints nothing.
   if arithChecksDisagree(settings):
     lowerDegrade(feCheckOption,
-      "arithChecks " & $settings.arithChecks & " disagrees with the build's " &
+      "arithChecks " & $effectiveArithChecks(settings) & " disagrees with the build's " &
       "checks " & $arithChecksFor() & ": the verdict is not the native " &
       "program's -- path degraded to sxUnknown")
 
@@ -19077,7 +19075,7 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
     # means "unconditional drain" (parseInt/str-index) — never early-returns on
     # the gate. `some(acFoo)` (div-by-zero/overflow) is settings-gated: skip
     # (honest-incomplete) unless that check is enabled.
-    if (gate.isSome and gate.get notin w.settings.arithChecks and
+    if (gate.isSome and gate.get notin effectiveArithChecks(w.settings) and
         not arithCheckedHere(gate.get)) or conds.len == 0:
       return @[p]
     for c in conds:
@@ -19205,7 +19203,7 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
     return cp   ## `av`'s kind carries no bound assertion (e.g. a degrade
                 ## placeholder reaching an itInt target) — honest-incomplete,
                 ## matching `bvRangeConds`'s own `else` contract.
-  if acRange notin w.settings.arithChecks:
+  if acRange notin effectiveArithChecks(w.settings):
     # Same gate `drainRangeRaises` uses, but this site's OWN
     # off-behaviour matches `genRaiseForkDrain`'s family instead of
     # float→int's: when the check is disabled the assignment is not

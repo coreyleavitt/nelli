@@ -1731,6 +1731,8 @@ task test, "Run the test suite":
             "tsymex_0016_w1d2_wraps",
             # RFC-0016 W1-d2c: a routine under `push overflowChecks: on` in a checks-off build raises OverflowDefect (per-routine ArithScope).
             "tsymex_0016_w1d2c_pushon",
+            # RFC-0016 code review M1: symexFind's macro expansion names no deprecated field (compiled under --warningAsError:Deprecated).
+            "tsymex_0016_crb_macro_deprecation",
             # RFC-0016 WA-A: closure-iterator loops and ordinal steps in a checks-off build; scope of magic bodies.
             "tsymex_0016_wa_checksoff",
             # RFC-0016 WA-A (P3): nelli imported under a check push reads the push as the build (documented, pinned).

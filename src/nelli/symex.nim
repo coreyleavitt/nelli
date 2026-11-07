@@ -36,8 +36,8 @@ from std/os import extractFilename
 # that error names `z3/ast.nim`, not the build; this one names the field.
 from ./smt/buildprofile import buildSemantics, admitBuild, refusalMessage
 const buildAdmission = admitBuild(buildSemantics)
-when not buildAdmission.ok:
-  {.error: refusalMessage(buildAdmission).}
+when buildAdmission.isSome:
+  {.error: refusalMessage(buildAdmission.get).}
 import z3
 export z3.z3FullVersion
 import ./choice
@@ -3799,7 +3799,6 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               fromCache: false,
                                diagnostics: diagResult)
       of sxUnsat:
         SymexResult[`tupleTy`](status: sxUnsat,
@@ -3810,7 +3809,6 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               fromCache: false,
                                diagnostics: diagResult)
       of sxUnknown:
         SymexResult[`tupleTy`](status: sxUnknown,
@@ -3821,7 +3819,6 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               fromCache: false,
                                diagnostics: diagResult)
       of sxRaised:
         # Phase 15 E2b. The walker reached a reachable `raise`; surface the
@@ -3841,7 +3838,6 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               fromCache: false,
                                diagnostics: diagResult)
 
 # ---- concolicCollect (RFC-fuzzer-nextgen G1b) -------------------------------

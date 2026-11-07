@@ -8,7 +8,7 @@
 ## `admitBuild` before it imports `z3`, so the error is the refusal. That is
 ## import time, not entry-macro time: the entry macros are unreachable under
 ## refc, because the module that defines them cannot be imported.
-import std/[unittest, strutils, os]
+import std/[unittest, strutils, os, options]
 import nelli/smt/buildprofile
 import nelli/smt/admission
 import ./s8cu_helpers
@@ -41,14 +41,15 @@ suite "W1-c1b: build reads and the refc refusal":
     var b = buildSemantics
     b.mm = mmRefc
     let r = admitBuild(b)
-    check not r.ok
-    check r.field == "mm"
-    check "D-0016-7" in r.reason
-    check "refc" in r.reason
+    check r.isSome
+    check r.get.field == bfMm
+    check $r.get.field == "mm"
+    check "D-0016-7" in r.get.reason
+    check "refc" in r.get.reason
     for m in [mmOrc, mmArc, mmAtomicArc, mmMarkAndSweep, mmBoehm, mmGo, mmNone]:
       b.mm = m
-      check admitBuild(b).ok
-    check admitBuild().ok   # this build is admitted, or this test did not run
+      check admitBuild(b).isNone
+    check admitBuild().isNone   # this build is admitted, or this test did not run
 
   test "native: --mm:refc is refused by name at the import":
     pinRefused(cellKey(axBuild, "mm=refc"),

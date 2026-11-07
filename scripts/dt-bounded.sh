@@ -53,7 +53,7 @@ fi
 if [ -n "$host" ]; then
   # `timeout` puts the child in its own process group and, on expiry, signals
   # the whole group, so the compiled test binary dies with nim.
-  timeout --signal=KILL "$timeout_secs" scripts/run-one.sh "$backend" "$test_file"
+  timeout --signal=KILL "$timeout_secs" bash scripts/run-one.sh "$backend" "$test_file"
 else
   # Unique container name so we can guarantee teardown even if `timeout` kills
   # only the podman client and leaves the container detached.
@@ -69,7 +69,7 @@ else
     -w /work \
     ${pin_args[@]+"${pin_args[@]}"} \
     "$img" \
-    scripts/run-one.sh "$backend" "$test_file"
+    bash scripts/run-one.sh "$backend" "$test_file"
 fi
 rc=$?
 if [ "$rc" -eq 137 ] || [ "$rc" -eq 124 ]; then

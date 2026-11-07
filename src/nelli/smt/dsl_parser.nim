@@ -1596,10 +1596,14 @@ proc typeIdOf*(sym: NimNode; ctx: ParseCtx = nil): Option[string] =
   ## Accepted: a type symbol or an `nnkType` node (an `except T` branch, an
   ## alias, a `ref T` alias); `T as e` (an `except T as e:` branch, whose
   ## typed AST is `Infix[as, T, e]` -- before W1-a its `repr` was the id, so
-  ## the handler matched nothing); a `ref T` / `ptr T` / `Par` wrapper; and a
-  ## VALUE, whose id is its static type's (`raise e`). A value of static type
-  ## `Exception` is `none`: its dynamic type is anything. With `ctx`, the
-  ## user inheritance chain of the id is recorded (E4a).
+  ## the handler matched nothing); a `ref T` / `ptr T` / `Par` wrapper; and
+  ## a VALUE (`raise e`) only when its dynamic type is provable: a `let`
+  ## symbol whose initializer is directly `newException(T, ...)` (hidden
+  ## conversions and statement-list wrappers stripped), whose id is `T`. Any
+  ## other value (a `var`, a parameter, a field, a call result, a `let` bound
+  ## to anything else) is `none`: its dynamic type may be a strict subtype of
+  ## its static type, so no id is exact. With `ctx`, the user inheritance
+  ## chain of the id is recorded (E4a).
   var cur = sym
   var viaValue = false
   var guard = 0
@@ -1637,25 +1641,26 @@ proc typeIdOf*(sym: NimNode; ctx: ParseCtx = nil): Option[string] =
            impl[2][0].kind == nnkSym:
           cur = impl[2][0]
           continue
-        if canon.strVal == "Exception" and viaValue: return none(string)
         if ctx != nil: collectUserExnAncestors(canon, ctx)
         return some(canon.strVal)
-      if canon.kind == nnkSym and not viaValue:
-        # A value (variable, parameter, `result`): its static type.
+      if canon.kind == nnkSym and not viaValue and
+         canon.symKind == nskLet:
+        # A value: exact only for `let e = newException(T, ...)`.
         viaValue = true
-        let ty =
-          try: canon.getTypeInst
+        let impl =
+          try: canon.getImpl
           except CatchableError: return none(string)
-        cur = ty
+        if impl.kind != nnkIdentDefs or impl.len < 3: return none(string)
+        var init = impl[impl.len - 1]
+        while init.kind in {nnkStmtListExpr, nnkStmtList, nnkHiddenStdConv,
+                            nnkHiddenSubConv, nnkPar} and init.len > 0:
+          init = init[init.len - 1]
+        if init.kind != nnkObjConstr or init.len == 0: return none(string)
+        cur = init[0]
       elif canon.kind == nnkIdent: return some(macros.strVal(canon))
       else: return none(string)
     else:
-      if viaValue: return none(string)
-      viaValue = true
-      let ty =
-        try: cur.getTypeInst
-        except CatchableError: return none(string)
-      cur = ty
+      return none(string)
   none(string)
 
 proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
@@ -4055,9 +4060,9 @@ proc opaqueRaiseTypes(calleeSym: NimNode; ctx: ParseCtx): seq[string] =
     try: getRaisesList(calleeSym)
     except CatchableError: newEmptyNode()
   for tn0 in lst:
-    # `none` (a raise type the effect list does not name statically) keeps
-    # the node's spelling: unknown to both tables, so the walk degrades it.
-    let typeId = typeIdOf(tn0, ctx).get(tn0.repr)
+    # `none`: the sentinel, in neither table, so the raise records
+    # `eeUnknownExnType` at the walk (`routeRaise`, `not raisedKnown`).
+    let typeId = typeIdOf(tn0, ctx).get(unknownExnTypeId)
     if typeId notin result: result.add typeId
 
 const anyDefect* = "Defect"
@@ -20520,6 +20525,7 @@ proc parseStmtInner(n: NimNode,
     let tBody = parseStmt(n[0], ctx)
     var handlers: seq[ExceptHandler]
     var finallyBody: IRStmt = nil
+    var unnamedHandler = false
     for k in 1 ..< n.len:
       let arm = n[k]
       case arm.kind
@@ -20528,15 +20534,23 @@ proc parseStmtInner(n: NimNode,
         for j in 0 ..< arm.len - 1:
           # RFC-0016 W1-a: the handler id is the raise site's function, so
           # `except T as e` matches (it was `repr`: "T as e"). `typeIdOf`
-          # records the handler type's chain (E4a). A handler that names no
-          # static type keeps its spelling and matches nothing.
-          typeIds.add typeIdOf(arm[j], ctx).get(arm[j].repr)
+          # records the handler type's chain (E4a). A handler type that
+          # cannot be named fails closed: the whole `try` is declined below.
+          let hid = typeIdOf(arm[j], ctx)
+          if hid.isNone: unnamedHandler = true
+          else: typeIds.add hid.get
         handlers.add ExceptHandler(typeIds: typeIds,
                                    body: parseStmt(arm[arm.len - 1], ctx))
       of nnkFinally:
         finallyBody = parseStmt(arm[0], ctx)
       else:
         discard
+    if unnamedHandler:
+      # RFC-0016 W1-a: matching nothing would let a raise escape that Nim
+      # catches (fail open); decline the construct instead.
+      return ctx.declineMarker(eeUnknownExnType,
+        "an `except` type that cannot be named statically -- path degraded " &
+        "to sxUnknown")
     mkTry(tBody, handlers, finallyBody)
   of nnkInfix:
     # RFC-0005 S8c: a statement-position operator whose head resolved to a

@@ -28,6 +28,16 @@ proc sutRaiseLet(k: int) =
     let e = newException(ValueError, "x")
     raise e
 
+type MyErr = object of ValueError
+
+proc sutSubtype(k: int) =
+  let e: ref ValueError =
+    if k == 1: newException(MyErr, "x") else: newException(ValueError, "y")
+  try:
+    raise e
+  except MyErr:
+    symexTarget("h")
+
 proc sutRaiseParam(ex: ref Exception) =
   raise ex
 
@@ -56,6 +66,10 @@ suite "W1-a exception type id":
     let r = pinExact(sutRaiseLet, cellKey(axConstruct, "raise-let-value"),
                      target = tRaisedExn("ValueError"), domain = dom3)
     check r.status == sxRaised
+
+  test "raise of a value whose dynamic type may be a subtype declines":
+    pinDecline(sutSubtype, cellKey(axConstruct, "raise-value-subtype"),
+               eeUnknownExnType, target = tLabel("h"))
 
   test "raise of a ref Exception parameter declines":
     pinDecline(sutRaiseParam, cellKey(axConstruct, "raise-ref-exception"),

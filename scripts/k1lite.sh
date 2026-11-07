@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RFC-0016 K1-0: the property on one build row, as one sha- and build-pinned
 # fact. Makes a FRESH pin directory, runs the W1 suites that write the seven
-# section 5.0 pins into it, then runs tests/tsymex_0016_k1lite.nim over it.
+# section 5.0 pins into it, then runs tests/k1lite.nim over it.
 # A stale directory cannot satisfy the join because there is none to reuse.
 #
 # Usage: scripts/k1lite.sh [-b c|cpp] [-i IMAGE] [-t SECS] [-k KEEPDIR]
@@ -44,7 +44,7 @@ printf '%s\n' "${suites[@]}" | xargs -P 4 -I{} bash -c \
   > "$out/rcs" || true
 cat "$out/rcs"
 while read -r rc name; do [ "$rc" = 0 ] || fail=1; done < "$out/rcs"
-scripts/dt-bounded.sh ${img[@]+"${img[@]}"} "$be" tests/tsymex_0016_k1lite.nim "$secs"
+scripts/dt-bounded.sh ${img[@]+"${img[@]}"} "$be" tests/k1lite.nim "$secs"
 rc=$?
 echo "k1lite: backend=$be pins=$pins suites_ok=$((1-fail)) join_rc=$rc"
 [ "$rc" -eq 0 ] && [ "$fail" -eq 0 ]

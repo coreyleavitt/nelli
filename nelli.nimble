@@ -13,10 +13,6 @@ requires "nim >= 2.0.0"
 # Tasks
 
 task test, "Run the test suite":
-  # RFC-0016 K1-0: a fresh pin directory per task run, so tsymex_0016_k1lite
-  # joins only the records the W1 suites above it wrote in this run.
-  putEnv("NELLI_PIN_DIR", "tests/.pins/nimble-run")
-  rmDir "tests/.pins/nimble-run"
   for f in ["tsmoke", "tchoice", "tserialize", "trng", "tdatasource",
             "tstrategy", "tstrategies", "tengine", "tshrinker", "tdsl",
             "tderive", "tdb", "tstateful", "ttarget", "tbias",
@@ -1735,8 +1731,6 @@ task test, "Run the test suite":
             "tsymex_0016_w1d2_wraps",
             # RFC-0016 W1-d2c: a routine under `push overflowChecks: on` in a checks-off build raises OverflowDefect (per-routine ArithScope).
             "tsymex_0016_w1d2c_pushon",
-            # RFC-0016 K1-0: the property joined over the seven section 5.0 pins; keep after every W1 suite.
-            "tsymex_0016_k1lite",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

@@ -105,10 +105,24 @@ jobs:
           awk '$1 != "0" && $1 != "skip" { bad = 1 } END { exit bad }' \
             "$RUNNER_TEMP/sweep/sweep.log"
 
+      - name: K1-0 pin join (scripts/k1lite.sh on the host)
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/k1lite"
+          # Runs the seven W1 suites into a fresh pin dir, then the join.
+          scripts/k1lite.sh -k "$RUNNER_TEMP/k1lite/pins" 2>&1 \
+            | tee "$RUNNER_TEMP/k1lite/k1lite.log"
+          exit "${PIPESTATUS[0]}"
+
       - name: Upload the sweep log and sidecars
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: symex-linux-sweep
-          path: ${{ runner.temp }}/sweep/
+          path: |
+            ${{ runner.temp }}/sweep/
+            ${{ runner.temp }}/k1lite/
           if-no-files-found: warn

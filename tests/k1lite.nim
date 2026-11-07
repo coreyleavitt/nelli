@@ -1,5 +1,13 @@
 ## RFC-0016 K1-0 -- the load-bearing property on Wave 1's cells, as a join.
 ##
+## File name. The RFC's K1-0 row names `tests/tsymex_0016_k1lite.nim`. It is
+## `tests/k1lite.nim` instead, outside the `t*.nim` globs: this join is
+## meaningless alone (it needs the records of seven other suites from one run),
+## yet the per-file runners (`scripts/sweep.sh`, the fuzzer-msvc W1-m glob of
+## `tests/tsymex_0016_*.nim`, symex-mingw's per-file corpus from `nelli.nimble`)
+## would run it with no pin directory and fail it. It runs only through
+## `scripts/k1lite.sh`, which the symex-linux workflow calls on every run.
+##
 ## The property (section 8): every trusted definite verdict a consumer can
 ## obtain through a public entry point has been reproduced natively on this
 ## build row, or its cell declines. K9a's pin record is the evidence; this is
@@ -10,10 +18,9 @@
 ##
 ## Where the records come from. The join reads `$NELLI_PIN_DIR`, which MUST be
 ## set and MUST hold the records of the W1 suites run on this build row in one
-## go: `scripts/k1lite.sh` makes a fresh directory, runs the W1 suites into it
-## and then this test; `nimble test` does the same with a fresh directory per
-## task run. Do not run this file bare: run `scripts/k1lite.sh [-b c|cpp]
-## [-i z3-4.13.4]`, which is the property on one build row. There is no default directory (the in-repo `tests/.pins/` is
+## go: `scripts/k1lite.sh [-b c|cpp] [-i z3-4.13.4]` makes a fresh directory, runs
+## the W1 suites into it and then this test; that is the property on one build
+## row. Do not run this file bare. There is no default directory (the in-repo `tests/.pins/` is
 ## shared across runs, and a record from an older run would satisfy the join).
 ## An unset, missing or empty directory FAILS; it never skips.
 ##
@@ -113,7 +120,7 @@ suite "K1-0: the seven section 5.0 rows have evidence on this build row":
   test "the records directory is explicit and holds records":
     checkpoint "NELLI_PIN_DIR=" & dir & ": this file joins the records the W1 " &
       "suites wrote on this build; run it through scripts/k1lite.sh " &
-      "(or `nimble test`), never bare"
+      "never bare"
     check dir.len > 0
     check dirExists(dir)
     check loadRecords().len > 0

@@ -17,7 +17,7 @@
 ## specific reason (test fixtures that hand-craft sequences, custom shrinker
 ## passes, etc.); they are not part of the stability promise.
 
-const nelliVersion* = "0.9.1"
+const nelliVersion* = "0.9.2"
   ## The package version, and one of THREE sites that must agree
   ## (`nelli.nimble`, `milpa.kdl`, here). They had drifted to 0.6.0 / 0.4.0 /
   ## 0.1.0 respectively by the time RFC-z3-optional bumped them, because the

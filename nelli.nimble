@@ -1690,6 +1690,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cu_nil",
             "tsymex_rfc0005_s8cu_nil_setjmp",
             "tsymex_rfc0005_s8cu_nil_native",
+            # RFC-0016 K9a: the native-pin verbs and the pin record.
+            "tsymex_0016_k9a_pins",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

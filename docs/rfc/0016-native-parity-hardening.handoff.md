@@ -25,11 +25,12 @@
   W1-z first half `a3836f09` (deprecations, `docs/migration/0.9.2.md`, README
   decline catalogue, `scripts/check-readme-kinds.sh`), stale-test migration
   `63a1f4a6`, Windows crash classifier `a6b2523e`. ADM-1 held on
-  `origin/rfc-0016-adm1` `04cd1ab7` until after the 0.9.2 tag. In flight:
-  K1-0 (worktree `k10`, `scripts/k1lite.sh` runs the seven W1 suites into a
-  fresh pin dir, then the join). Remaining: K1-0, W1-z second half (three-way
-  rows, F-0001..F-0007 closed, UPS-01/UPS-03 filed, RFC-0017 MOV-01 records,
-  the spec corrections below applied to the RFC), then the 0.9.2 gate.
+  `origin/rfc-0016-adm1` `04cd1ab7` until after the 0.9.2 tag. K1-0 landed
+  (`tests/k1lite.nim`, `scripts/k1lite.sh`). W1-z second half recorded
+  2026-11-07: the three-way rows below, F-0001..F-0007 closed, RFC-0017 §7
+  holds MOV-01's items, the spec corrections below applied to the RFC body.
+  Remaining: file UPS-01 and UPS-03 (drafts are `docs/rfc/0016-research/UPS-01.md`
+  and `UPS-03.md`; UPS-03 needs a reduction first), then the 0.9.2 gate.
 - **Gate lesson (2026-11-07):** slices landed on their own suites only, and
   the Windows legs' runs on `main` were cancelled by each next push, so the
   W1-d2/W1-d1b/W1-m/W1-d3 contract changes left 11 stale files (red on Linux
@@ -51,7 +52,7 @@
 - **0.9.1 baselines:** still running on eos (`~/nelli/bl091.sh`, logs
   `~/nelli/bl091-{c,cpp,z3-4.13.4}.log`); upload as `v0.9.1` release assets
   and list in `tests/0016-baselines.txt` when `~/nelli/bl091.all.done` exists.
-- **Spec corrections found in implementation (apply at W1-z):** W1-c2's RED
+- **Spec corrections found in implementation (applied to the RFC body 2026-11-07, W1-z):** W1-c2's RED
   expects `sxUnsat` for the label; the walker's established Defect rule (E6)
   gives `sxRaised` with `witnessUnsafe`, never `sxSat`, which is the
   intended property. SND-07's `ua3_diff` is not a native HIT (native never
@@ -82,19 +83,79 @@
 
 ## Findings ledger (§3.2), newest at the bottom
 
-Severity against `main` not yet measured for any row; W1-z adds the
-three-way rows. Evidence V = coordinator re-ran walker and native on one
+Severity against the 0.9.1 release is measured in "Three-way rows (W1-z)"
+below (2026-11-07). F-0001..F-0007 are closed by their fix shas. Evidence V = coordinator re-ran walker and native on one
 build; P = the lens did.
 
 | F | date | class | vs release | source | shape | evidence | fix | state |
 |---|---|---|---|---|---|---|---|---|
-| F-0001 | 2026-11-06 | soundness | same (expected) | research lens A | `except T as e:` (W-01) | V | W1-a | open |
-| F-0002 | 2026-11-06 | soundness | same (expected) | research lens B | local `{.cursor.}` (W-02) | V | W1-b | open |
-| F-0003 | 2026-11-06 | soundness | same (expected) | research lens D | `--panics:on` Defect path (W-03) | V | W1-c2 | open |
-| F-0004 | 2026-11-06 | soundness | same (expected) | research lens A | float32/float64 conversion (W-04) | P | W1-e | open |
-| F-0005 | 2026-11-06 | soundness | same (expected) | research lens C | `low(int) mod -1`, literal divisor (W-05) | P | W1-d1a | open |
-| F-0006 | 2026-11-06 | soundness | same (expected) | research lens B | unsigned div/mod by zero (W-06) | P | W1-d1b | open |
-| F-0007 | 2026-11-06 | soundness | same (expected) | research lens D | checks-off signed wrap (W-07) | P | W1-d2 | open |
+| F-0001 | 2026-11-06 | soundness | better | research lens A | `except T as e:` (W-01) | V | W1-a | closed `c0e8bd44` (2026-11-07) |
+| F-0002 | 2026-11-06 | soundness | worse (precision) | research lens B | local `{.cursor.}` (W-02) | V | W1-b | closed `2b5a1f8e` (2026-11-07) |
+| F-0003 | 2026-11-06 | soundness | better | research lens D | `--panics:on` Defect path (W-03) | V | W1-c2 | closed `6d40f03c` (2026-11-07) |
+| F-0004 | 2026-11-06 | soundness | worse (precision) | research lens A | float32/float64 conversion (W-04) | P | W1-e | closed `86536fa9` (2026-11-07) |
+| F-0005 | 2026-11-06 | soundness | better | research lens C | `low(int) mod -1`, literal divisor (W-05) | P | W1-d1a | closed `e044a290` (2026-11-07) |
+| F-0006 | 2026-11-06 | soundness | better | research lens B | unsigned div/mod by zero (W-06) | P | W1-d1b | closed `682de5a4` (2026-11-07) |
+| F-0007 | 2026-11-06 | soundness | same | research lens D | checks-off signed wrap (W-07) | P | W1-d2 | closed `0aa6b3bb` (2026-11-07) |
+
+## Three-way rows (W1-z)
+
+Recorded 2026-11-07. Probes: `tests/zz_threeway091*.nim` (not committed),
+each run twice on c, once with the walker at the 0.9.1 tag and once at head
+(`5e2728cf`), Nim 2.2.10 patched, Z3 5.1, and on one build the native
+program (`symexCaptureBegin`/`symexCaptureEnd`). Variants: base, `_c1`, `_c2`,
+`_fd`, `_fdseq`, `_off` (`--overflowChecks:off`), `_pan` (`--panics:on`).
+Cell key is the K1-0 key where the row has one (`tests/k1lite.nim`), else `-`.
+"vs release" is `same` (0.9.1 already behaved the same way), `better` (head is
+closer to native) or `worse`. A row that is `worse` is a release blocker. Native
+`not probed` means the probe had no native run for the row; the native column
+then gives what Nim guarantees and its source.
+
+| row | cell key | 0.9.1 | head | native | vs release |
+|---|---|---|---|---|---|
+| W1-a `except ValueError as e` label (k=3) | `construct:except-as-label` | `sxUnsat` trusted | `sxSat` trusted | hit "h" | better |
+| W1-a `as e`, `tRaisedExn("ValueError")` | `construct:except-as-raise` | `sxRaised` ValueError | `sxUnsat` trusted | caught, no raise | better |
+| W1-b local `{.cursor.}` alias label | `pragma:local/cursor` | `sxSat` trusted | `sxUnknown`, `feLocalPragma` | hit "shared" | worse: precision only, a designed decline (W1-b); 0.9.1 agreed with native on this shape and the probe did not reproduce the false pair |
+| W1-e `float64(float32(x)) == x` label | `construct:conv/float32<-float64` | `sxSat` trusted | `sxUnknown`, `feFloatWidth` | x=0.5 hit, x=0.1 no hit | worse: precision only, a designed decline (W1-e); the probe's label verdict was right in 0.9.1 and its witness was not checked |
+| W1-g `x in 0 .. 10` (sat) | - | `sxUnknown`, `feUnsupportedOp` | `sxSat` trusted | hit at 7 | better |
+| W1-g `x notin 0 .. 10` (sat) | - | `sxUnknown` | `sxSat` trusted | not probed (expected hit at 11) | better |
+| W1-g `c in 'a' .. 'z'` (sat) | - | `sxUnknown` | `sxSat` trusted | not probed (expected hit at 'q') | better |
+| W1-g enum `in eB .. eD` with `eE` (unsat) | - | `sxUnknown` | `sxUnsat` trusted | no hit | better |
+| W1-g empty variable bounds (unsat) | - | `sxUnknown` | `sxUnsat` trusted | not probed (a..b with 5..3 holds nothing by definition) | better |
+| W1-c2 `except Defect` label under `--panics:on` | `construct:panic-overflow-defect` | `sxSat` trusted | `sxRaised` OverflowDefect, `witnessUnsafe` | not probed (a panic is fatal and uncatchable, so no hit) | better |
+| W1-c2 `finally` label under panics | `construct:panic-overflow-defect` | `sxSat` trusted | `sxRaised` OverflowDefect | not probed (as above) | better |
+| W1-c2 escape, `tRaisedExn("OverflowDefect")` under panics | `construct:panic-overflow-defect` | `sxRaised` | `sxRaised` | not probed | same |
+| W1-d1a `low(int) mod -1` label | `defined:mod/intMin/minusOne` | `sxUnsat` trusted | `sxUnknown`, `ubIntMinModMinusOne` | SIGFPE (never the label) | better: a trusted unreachable claim over a crash became a named decline |
+| W1-d1a `int16` `low mod -1` (defined) | - | `sxSat` trusted | `sxSat` trusted | defined, hits | same |
+| W1-d1a `x div -1` checked, `tRaisedExn("OverflowDefect")` | - | `sxRaised` OverflowDefect | `sxRaised` OverflowDefect | OverflowDefect | same |
+| W1-d1a `--overflowChecks:off` `low div -1` | `defined:add/signed/checksOff` | `sxUnknown`, `feOverflowCheckOption` | `sxUnknown`, `ubSignedOverflow` | not probed | same |
+| W1-d1b `10'u64 div k`, `r == 11` (unreachable) | `defined:div/unsigned/zero` | `sxRaised` DivByZeroDefect | `sxUnknown`, `ubUnsignedDivZero` | k=0 is SIGFPE, `r == 11` never | better |
+| W1-d1b `r == 5` (sat) | `defined:div/unsigned/zero` | `sxSat` trusted | `sxSat` trusted (`ubUnsignedDivZero` noted) | hit at k=2 | same |
+| W1-d1b unsigned div, `tRaisedExn("DivByZeroDefect")` | `defined:div/unsigned/zero` | `sxRaised` | `sxUnknown`, `ubUnsignedDivZero` | SIGFPE, not a Defect | better |
+| W1-d1b `except DivByZeroDefect` label | `defined:div/unsigned/zero` | `sxSat` trusted | `sxUnknown`, `ubUnsignedDivZero` | SIGFPE, label never hit | better |
+| W1-d1b signed `10 div k` raised | - | `sxRaised` DivByZeroDefect | `sxRaised` DivByZeroDefect | DivByZeroDefect | same |
+| W1-d2 `{.push overflowChecks: off.}` `v + 1 > v` else-label | `defined:add/signed/checksOff` | `sxUnknown`, `feOverflowCheckOption` | `sxUnknown`, `feOverflowCheckOption` | no hit at `high(int)` (gcc folds the compare) | same |
+| W1-d2 `--overflowChecks:off` add | `defined:add/signed/checksOff` | `sxUnknown`, `feOverflowCheckOption` | `sxUnknown`, `ubSignedOverflow` | no hit | same: 0.9.1 already declined at the source scan, so this probe reproduces no false verdict |
+| W1-d2 `--overflowChecks:off` sub | `defined:add/signed/checksOff` | `sxUnknown`, `feOverflowCheckOption` | `sxUnknown`, `ubSignedOverflow` | not probed | same |
+| W1-d2 `--overflowChecks:off` mul | `defined:add/signed/checksOff` | `sxUnknown`, `feOverflowCheckOption` | `sxUnknown`, `ubSignedOverflow` | not probed | same |
+| W1-d2c `push overflowChecks: on` in a checks-off build, label | - | `sxRaised` OverflowDefect | `sxRaised` OverflowDefect | OverflowDefect | same |
+| W1-d2c same, `tRaisedExn("OverflowDefect")` | - | `sxRaised` | `sxRaised` | OverflowDefect | same |
+| W1-d3 `{.noinit.}` read, label | - | `sxSat` trusted, `feGlobalHavoc` | `sxSat` untrusted, `feGlobalHavoc` | not probed (stack-dependent by definition) | better: the claim is no longer trusted |
+| W1-d3 `{.noinit.}` written before read | - | `sxSat` trusted | `sxSat` trusted | hit | same |
+| W1-f `var o: O` with `x: int = 5` (unsat) | - | `sxUnsat` trusted | `sxUnsat` trusted | zero read, no hit | same |
+| W1-f `default(O)` (sat) | - | `sxSat` trusted | `sxSat` trusted | hit | same |
+| W1-f `seq[int] = @[]` field default | - | compile stop (index out of bounds in the parser) | `sxSat` | not probed | better |
+| W1-f `case`/`elif`, statement form | - | compile stop (`unexpected case-arm kind nnkElifBranch`) | `sxSat` trusted | hit at 6 | better |
+| W1-f `case`/`elif`, expression form | - | compile stop | `sxSat` trusted | hit at 6 | better |
+
+Summary: 34 rows. better 17, same 15, worse 2. No row is worse in
+soundness. The two `worse` rows, W1-b `{.cursor.}` and W1-e float width, are
+precision losses by design: the spec makes each a named decline
+(`feLocalPragma`, `feFloatWidth`), and on the probed label shape 0.9.1
+happened to agree with native. They are still `worse` by the rule above and
+therefore a release blocker as the task defines it; the call to accept a
+declared precision loss for 0.9.2 is Corey's. Not probed: the hidden-witness
+shapes that made F-0002 and F-0004 false verdicts in 0.9.1 (the probes
+asserted the label, not the witness values), and Windows.
 
 ## Round 1 ledger (2026-11-06)
 

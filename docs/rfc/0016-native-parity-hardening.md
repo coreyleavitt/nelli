@@ -695,7 +695,7 @@ S8cj reduces it. None is filed yet.
 |---|---|---|---|---|
 | UPS-01 | Nim: a raise-path destroy (a destructor swallowing an in-flight exception on the C backend) | S8ce | reduction at worker `s8ce-work/probe/purenim.nim`, condensed in `worker-reports/s8ce.md` | filed 2026-11-07: https://github.com/nim-lang/Nim/issues/26661 (body from `docs/rfc/0016-research/UPS-01.md`) |
 | UPS-02 | Z3 5.1: `Failed to verify: m_cache.mk_unique(p) == p` on wide factoring | S8by remainder; S8cj item 2 | not reproduced at e497dcf (sort N4); S8cj is to reduce it to SMT-LIB | held; includes PND-10 (S8cj item 2) |
-| UPS-03 | Z3: invalid read in `spacer::pob_queue::reset()` | S8ck item 1, item 10 | fixedpoint only, unreachable from nelli; S8ck item 10 reduces it | file; record the issue URL here. Draft (not filed): `docs/rfc/0016-research/UPS-03.md`, which still lacks a reduction |
+| UPS-03 | Z3: invalid read in `spacer::pob_queue::reset()` | S8ck item 1, item 10 | fixedpoint only, unreachable from nelli; S8ck item 10 reduces it | filed 2026-11-07: https://github.com/Z3Prover/z3/issues/11601 (4-line input and C driver in `docs/rfc/0016-research/`; reproduces on 4.13.4, 5.1.0.0 and the 2026-11-07 master nightly) |
 
 ### §5.7 Pending classification
 

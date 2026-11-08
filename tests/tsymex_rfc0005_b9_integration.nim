@@ -46,11 +46,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
 
-template nativeHits(call: untyped): untyped =
-  block:
-    symexCaptureBegin()
-    call
-    symexCaptureEnd()
+from ./s8cu_helpers import nativeHits
 
 template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
   block:

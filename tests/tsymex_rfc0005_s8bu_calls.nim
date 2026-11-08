@@ -44,10 +44,7 @@ template declines(fn: typed, lbl, why: string): untyped =
       if e.kind == feUnsupportedOp and why in e.msg: named = true
     check named
 
-proc nativeHits(fn: proc (k: int) {.nimcall.}; ks: openArray[int]): HashSet[string] =
-  symexCaptureBegin()
-  for k in ks: fn(k)
-  symexCaptureEnd()
+from ./s8cu_helpers import nativeHits
 
 const ks = [-3, 0, 3, 5, 7]
 

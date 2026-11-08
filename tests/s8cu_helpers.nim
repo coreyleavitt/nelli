@@ -36,6 +36,21 @@ template declines*(fn: untyped; kind: SymexErrorKind) =
   check r.status == sxUnknown
   check r.errors.named(kind)
 
+template nativeHits*(call: untyped): HashSet[string] =
+  ## The labels `call` reaches on this build, under a capture frame. The one
+  ## shared copy of what thirty-five suites each defined (RFC-0016 K9b).
+  block:
+    symexCaptureBegin()
+    call
+    symexCaptureEnd()
+
+proc nativeHits*(fn: proc (k: int) {.nimcall.};
+                 ks: openArray[int]): HashSet[string] =
+  ## The labels `fn` reaches over every `k` in `ks`, on this build.
+  symexCaptureBegin()
+  for k in ks: fn(k)
+  symexCaptureEnd()
+
 template decides*(fn: untyped; want: SymexStatusKind) =
   let r = symexFind(fn, tLabel("hit"))
   checkpoint show(r.errors)

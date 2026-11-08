@@ -47,10 +47,7 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
 
-proc nativeHits(fn: proc (k: int) {.nimcall.}; ks: openArray[int]): HashSet[string] =
-  symexCaptureBegin()
-  for k in ks: fn(k)
-  symexCaptureEnd()
+from ./s8cu_helpers import nativeHits
 
 # ---- (1) the int-field form: a by-address `int` field read by a callee ----
 

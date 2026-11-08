@@ -1,5 +1,5 @@
 ## RFC-0016 K9a -- the native-pin verbs and the pin record.
-import std/[unittest, os, options, strutils, sets]
+import std/[unittest, os, options, strutils, sets, sequtils]
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -154,4 +154,17 @@ suite "K9a":
     check recs[0].verdict == pvSkipped
     check recs[0].why == "no native oracle on this build"
     check recs[0].entry == "skipCell"
+  test "K9b: no test file defines its own nativeHits":
+    # The one definition is s8cu_helpers'; every suite imports it.
+    var offenders: seq[string]
+    for f in walkFiles(probeDir / "*.nim"):
+      if f.extractFilename == "s8cu_helpers.nim": continue
+      for i, line in toSeq(lines(f)):
+        for kw in ["proc", "func", "template", "macro", "iterator"]:
+          if line.startsWith(kw & " nativeHits") or
+             line.startsWith(kw & " `nativeHits`"):
+            offenders.add f.extractFilename & ":" & $(i + 1)
+    check offenders.len == 0
+    if offenders.len > 0: checkpoint offenders.join(", ")
+
 removeDir(pinTmp)

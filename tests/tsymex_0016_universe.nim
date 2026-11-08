@@ -186,6 +186,8 @@ proc loadAllow(dir: string): seq[Allow] =
     let p = dir / (s & ".txt")
     if fileExists(p): result.add parseAllow(readFile(p))
 
+let knownRows = toSeq(BuildRow).mapIt($it)
+
 proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
     seq[string] =
   ## Allowlist entries against the universe, with no records involved.
@@ -197,6 +199,10 @@ proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
     if a.key in seen: result.add "allowlist entry " & a.key & " is listed twice"
     seen.incl a.key
     result.add entryProblems(a, ids)
+    for r in a.rows:
+      if r notin knownRows:
+        result.add "allowlist entry " & a.key & ": row scope \"" & r &
+                   "\" is not a build row (" & knownRows.join(", ") & ")"
 
 proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow];
                   legRow = ""; partial = false): seq[string] =
@@ -208,9 +214,13 @@ proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow];
   ## `partial` is a narrowed run (a `tests_regex` dispatch): the records are a
   ## slice, so an unclassified cell proves nothing and is not reported; a
   ## record that contradicts an allowlist entry still is.
-  let allowed = allow.mapIt(it.key)
-                     .filterIt(legRow.len == 0 or not it.startsWith("build:row/"))
-                     .toHashSet
+  ## An entry with a `rows` scope (K1a-ci) is live only on a leg whose row is
+  ## in it: it excuses the cell there, is stale there, and is inert elsewhere.
+  let allowed = allow
+    .filterIt(it.rows.len == 0 or legRow in it.rows)
+    .mapIt(it.key)
+    .filterIt(legRow.len == 0 or not it.startsWith("build:row/"))
+    .toHashSet
   for c in u:
     if legRow.len > 0 and c.key.startsWith("build:row/") and
        c.key != "build:row/" & legRow:
@@ -448,6 +458,45 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
     for r in recs.mitems: r.row = "msvc"
     let fails = joinUniverse(universe, recs, allowFor(@[]), "msvc")
     check fails.len == 1 and "errorkind:feUnadmitted" in fails[0]
+
+  test "K1a-ci: a row-scoped entry excuses its cell on a scoped row only":
+    let k = "errorkind:feUnadmitted"
+    let scoped = @[Allow(key: k, slice: "K9c", reason: "r",
+                         rows: @["mingw", "msvc"])]
+    var recs = synthAll(k)
+    for r in recs.mitems: r.row = "mingw"
+    check joinUniverse(universe, recs, scoped, "mingw").len == 0
+    # RED: on a row outside the scope the cell is unclassified
+    var other = synthAll(k)
+    for r in other.mitems: r.row = "linux-cpp"
+    let fails = joinUniverse(universe, other, scoped, "linux-cpp")
+    check fails.len == 1 and k in fails[0] and "unclassified" in fails[0]
+
+  test "K1a-ci: a row-scoped entry is stale only on its scoped rows":
+    let k = "errorkind:feUnadmitted"
+    let scoped = @[Allow(key: k, slice: "K9c", reason: "r", rows: @["mingw"])]
+    var onScoped = synthAll()
+    for r in onScoped.mitems: r.row = "mingw"
+    let fails = joinUniverse(universe, onScoped, scoped, "mingw")
+    check fails.len == 1 and "stale" in fails[0] and k in fails[0]
+    var onOther = synthAll()
+    for r in onOther.mitems: r.row = "linux-c"
+    check joinUniverse(universe, onOther, scoped, "linux-c").len == 0
+
+  test "K1a-ci: an unknown row name in a scope is an error":
+    let ids = sliceIds(readFile(rfcPath))
+    let k = universe.mustFirst("magic").key
+    let fails = structural(universe, @[Allow(key: k, slice: "K9c", reason: "r",
+                                             rows: @["mingw", "winders"])], ids)
+    check fails.len == 1 and "winders" in fails[0]
+    check structural(universe, @[Allow(key: k, slice: "K9c", reason: "r",
+                                       rows: @["mingw", "msvc"])], ids).len == 0
+
+  test "K1a-ci: the parser reads an optional rows= field":
+    let a = parseAllow("errorkind:heX\tK9c\twhy\trows=mingw,msvc\n" &
+                       "errorkind:heY\tK9c\twhy\n")
+    check a[0].rows == @["mingw", "msvc"]
+    check a[1].rows.len == 0
 
   test "a partial run reports no unclassified cell but still a stale entry":
     let recs = synthAll("magic:Swap")

@@ -7,6 +7,8 @@
 ##     universe derives). The cell then needs its own pin record or
 ##     allowlist entry in the cell join, so the id is as proven as its cell;
 ##   * `pins`: a registered test file (in `tests/`, listed in `nelli.nimble`).
+## An entry may end in a fourth field `rows=<row>,<row>`: it then applies to
+## those build rows only (a cell that only some rows can evidence).
 ## Only an `open` row needs evidence. An open row with none must be in
 ## `tests/0016-allowlist/ids.txt` (`id<TAB>slice<TAB>reason`); an entry for a
 ## row that is not open, or is evidenced, is stale and fails, so entries ratchet
@@ -19,6 +21,7 @@ const unassigned* = "UNASSIGNED"   ## rejected as a slice id
 
 type Allow* = object
   key*, slice*, reason*: string
+  rows*: seq[string]   ## optional row scope; empty means every row
 
 proc sliceIds*(rfcText: string): HashSet[string] =
   ## The ids in the first column of the RFC's tables.
@@ -46,8 +49,12 @@ proc parseAllow*(text: string): seq[Allow] =
     let l = raw.strip(trailing = true)
     if l.len == 0 or l.startsWith("#"): continue
     let f = l.split('\t')
+    var rows: seq[string]
+    if f.len > 3 and f[3].strip.startsWith("rows="):
+      for r in f[3].strip["rows=".len .. ^1].split(','):
+        if r.strip.len > 0: rows.add r.strip
     result.add Allow(key: f[0], slice: (if f.len > 1: f[1].strip else: ""),
-                     reason: (if f.len > 2: f[2].strip else: ""))
+                     reason: (if f.len > 2: f[2].strip else: ""), rows: rows)
 
 proc entryProblems*(a: Allow; slices: HashSet[string]): seq[string] =
   ## The rules every allowlist line obeys: a real slice id (never UNASSIGNED)

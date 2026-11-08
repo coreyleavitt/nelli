@@ -1,9 +1,6 @@
 # RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-errorkind:beBudgetExhausted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:beBudgetExhaustedAssumedBound	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:beBudgetExhaustedPrune	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:beBudgetExhaustedUnmodelled	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:beSolverUndef	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:ceClosureBodyDiverged	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:ceClosureBodyUncertain	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
@@ -37,9 +34,7 @@ errorkind:feTableIterOrder	K9c	no pinDecline asserts this kind; K9c finds each k
 errorkind:feTransparentArgNotInert	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feTransparentResultUsed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feUnadmitted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feUnsupportedExprKind	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feUnsupportedOpAborted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feUnsupportedOpHavoc	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feUnsupportedWitnessType	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geConceptViolation	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geDistinctBarrier	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
@@ -78,3 +73,4 @@ errorkind:ubIndeterminateRead	K9c	no pinDecline asserts this kind; K9c finds eac
 errorkind:weBreakOutsideLoop	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:weInternalWalkerFault	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:weRecursionCycleCut	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:heNilDerefMayBeCaught	K9c	produced only in an --exceptions:setjmp build (runtime.nim); its sole pin test tsymex_rfc0005_s8cu_nil_setjmp is not defined(windows) because setjmp on Windows crashes the walker fiber (INT-12), and the cpp backend cannot build setjmp; linux-c evidences it, so the entry applies to the rows that cannot	rows=mingw,msvc,linux-cpp

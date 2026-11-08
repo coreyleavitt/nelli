@@ -29,7 +29,7 @@ const
 
 func startCase(): Case =
   if k8aStart.len > 0: return decodeCase(k8aStart)
-  result.prog = genPrograms(k8aSeed, k8aProgId + 1)[k8aProgId]
+  result.prog = genPrograms(k8aSeed, 1, k8aProgId)[0]
   for t in Twin:
     if twinName(t) == k8aVariant: result.tw = t
 

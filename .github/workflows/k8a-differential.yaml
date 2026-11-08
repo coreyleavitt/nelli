@@ -31,6 +31,11 @@ name: k8a-differential
 # open issue that already carries its key. `issues: write` is granted to that
 # job alone; the differential job stays read-only.
 #
+# BATCHES. One build holds every program in the compiler (about 0.2 GB each),
+# so the driver builds and runs the count in batches of 25 under a 12 GB memory
+# guard (see BATCHING in scripts/k8a-nightly.sh). A batch that dies fails the
+# step naming the batch; it does not take the runner with it.
+#
 # COUNT. The default budget is sized for 30-60 minutes of the differential on
 # a hosted runner; the first dispatch after landing records the real wall time
 # in the step summary, and the default is tuned from that figure.
@@ -133,7 +138,7 @@ jobs:
           echo "out=$out" >> "$GITHUB_OUTPUT"
           echo "seed=$SEED row=$ROW count=$COUNT"
           start=$SECONDS
-          args=(-r "$ROW" -s "$SEED" -n "$COUNT" -o "$out" -T 4800)
+          args=(-r "$ROW" -s "$SEED" -n "$COUNT" -o "$out" -T 1500)
           [ -z "$TAG" ] || args+=(-t "$TAG")
           bash scripts/k8a-nightly.sh run "${args[@]}"
           rc=$?

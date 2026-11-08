@@ -107,7 +107,7 @@ repro_cmd() { # repro_cmd <row> <seed> <prog>
   eval "$(bash scripts/k8a-nightly.sh plan --row "$1" --seed "$2" | grep -E '^(backend|image)=')"
   local img=""
   [ "$image" = latest ] || img="-i $image "
-  echo "NELLI_NIM_FLAGS=\"-d:k8aSeed=$2 -d:k8aCount=$(( $3 + 1 ))\" scripts/dt-bounded.sh ${img}${backend} tests/tsymex_0016_k8a_gen.nim 900"
+  echo "NELLI_NIM_FLAGS=\"-d:k8aSeed=$2 -d:k8aCount=1 -d:k8aFirst=$3\" scripts/dt-bounded.sh ${img}${backend} tests/tsymex_0016_k8a_gen.nim 900"
 }
 
 file_cmd() {

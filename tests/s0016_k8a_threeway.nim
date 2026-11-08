@@ -24,6 +24,7 @@ import ./s0016_k8a_gen
 const
   k8aSeed {.intdefine.} = 20261108
   k8aCount {.intdefine.} = 6
+  k8aFirst {.intdefine.} = 0
 
 macro emitThreeWay(progs: static seq[Prog]): untyped =
   var src = ""
@@ -60,6 +61,6 @@ macro emitThreeWay(progs: static seq[Prog]): untyped =
   src.add "  discard\n"
   parseStmt(src)
 
-const progs = genPrograms(k8aSeed, k8aCount)
+const progs = genPrograms(k8aSeed, k8aCount, k8aFirst)
 emitThreeWay(progs)
 runThreeWay()

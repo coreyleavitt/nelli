@@ -20,6 +20,11 @@
 #        NELLI_NIM_FLAGS  if set, forwarded into the container (run-one.sh reads
 #        it), so a caller can pass `-d:name=value` to the test build. A host
 #        run reads it directly.
+#        NELLI_MEM_MB  if set, a memory guard for the build and the run: a host
+#        run applies `ulimit -v` (address space, so an over-budget compile
+#        fails with an allocation error instead of taking the machine down); a
+#        podman run passes `--memory` (the cgroup OOM-kills the container).
+#        Either way the test exits non-zero and the caller names it.
 #        NELLI_HOST=1  no podman: run scripts/run-one.sh directly on the host
 #        under the same hard-kill timeout (`sweep.sh --host`). The compile
 #        command is scripts/run-one.sh either way.
@@ -78,6 +83,7 @@ if [ -n "$host" ]; then
   host_tmp="$(mktemp -d)"
   trap 'rm -rf "$host_tmp"' EXIT
   TMPDIR="$host_tmp" timeout --signal=KILL "$timeout_secs" bash -c '
+    [ -z "${NELLI_MEM_MB:-}" ] || ulimit -v $(( NELLI_MEM_MB * 1024 )) || exit 125
     for f in /proc/self/fd/*; do n="${f##*/}"; [ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"; done 2>/dev/null
     exec bash scripts/run-one.sh "$@"' _ "$backend" "$test_file"
 else
@@ -93,6 +99,7 @@ else
     -v "$HOME/.cache/milpa:/.cache/milpa" \
     -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
     -w /work \
+    ${NELLI_MEM_MB:+--memory=${NELLI_MEM_MB}m --memory-swap=${NELLI_MEM_MB}m} \
     ${pin_args[@]+"${pin_args[@]}"} \
     ${NELLI_NIM_FLAGS:+-e NELLI_NIM_FLAGS} \
     "$img" \

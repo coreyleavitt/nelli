@@ -7,7 +7,7 @@
 ## else in §5.0 (W-02 cursor, W-03 panics, W-07 checks-off) needs a global,
 ## a build flag or a different config and is a later family (K8b).
 ##
-## `genPrograms(seed, count)` is pure and compile-time evaluable: a seeded list
+## `genPrograms(seed, count, first)` is pure and compile-time evaluable: a seeded list
 ## of `Prog` descriptions. `render` turns one into Nim source, plain or under a
 ## metamorphic twin (§10: dead code under a provably false guard, commutative
 ## reorder, extract-to-proc, wrap-in-template, `let` -> `var`, predicate
@@ -298,10 +298,15 @@ proc genProg*(r: var Rand; id: int): Prog =
     if not (result.hitA or result.hitB): result.hitA = true
   result.predA = result.shape in {shOvf, shF32} and r.rand(2) == 0
 
-proc genPrograms*(seed, count: int): seq[Prog] =
-  ## Program `i` of seed `s` is the same program for any `count > i`.
+proc genPrograms*(seed, count: int; first = 0): seq[Prog] =
+  ## Program `i` of seed `s` is the same program for any `count > i`, and for
+  ## any `first <= i`: this returns programs `[first, first + count)` of the
+  ## seed's stream, each carrying its absolute id. The stream is sequential, so
+  ## the skipped prefix is generated and dropped (cheap: no source, no walk).
   var r = initRand(seed)
-  for i in 0 ..< count: result.add genProg(r, i)
+  for i in 0 ..< first + count:
+    let p = genProg(r, i)
+    if i >= first: result.add p
 
 # --- the emitted check -------------------------------------------------------
 

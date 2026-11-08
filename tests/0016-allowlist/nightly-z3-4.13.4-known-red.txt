@@ -1,2 +1,7 @@
-# RFC-0016 CI-B: tests red on the z3-4.13.4 leg of symex-nightly. One test per line, then the reason.
-# Baseline: not yet recorded.
+# RFC-0016 CI-B: tests red on the z3-4.13.4 leg of symex-nightly (Linux host, backend c,
+# Z3 4.13.4 from its glibc-2.35 release archive). One test per line, then the reason.
+# scripts/check-linux-allowlist.sh fails the leg on a red test NOT listed here AND on a
+# listed test that passes, so an entry goes in the commit that fixes it.
+#
+# Baseline: run 42440545873 at 41483364, 1031 of 1031 registered tests ran, 0 red. The list is empty
+# on purpose: INT-43 (tsymex_rfc0005_s8cn_step1d) is specific to Z3 5.1.0's archive.

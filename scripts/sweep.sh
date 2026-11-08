@@ -330,7 +330,7 @@ run_one() {
       echo "## stderr (tail)"; tail -n 60 "$stderr_tmp"; } > "$failure_dir/$b.$name"
   fi
   rm -f "$stdout_tmp"
-  filtered="$(grep -E "^$warn_root/(src|tests)/.*Warning:" "$stderr_tmp" 2>/dev/null || true)"
+  filtered="$(grep -E "^($warn_root/)?(src|tests)/.*Warning:" "$stderr_tmp" 2>/dev/null || true)"
   if [ -n "$filtered" ]; then
     warn_n=$(printf '%s\n' "$filtered" | wc -l | tr -d ' ')
   else

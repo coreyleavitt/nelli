@@ -17,7 +17,8 @@ name: symex-linux
 # `watchdog` fails when the K8a heartbeat or an rfc-0016-intake issue is over
 # seven days old (scripts/rfc0016-watchdog.sh; its header holds the
 # absent-heartbeat policy). `pins` is the K1-0 pin join and the README kind
-# check, which are not sharded.
+# check, which are not sharded. `universe` is K1a-ci's post-shard join of the
+# shards' pin records (scripts/universe-join.sh).
 #
 # A red outside the allowlist is the signal; the suite is not green on a good
 # day, so the allowlist is the recorded baseline and "what moved against it" is
@@ -149,6 +150,45 @@ jobs:
             "$RUNNER_TEMP/expected.txt" shards/shard-*.log > "$RUNNER_TEMP/gate.txt" 2>&1 || rc=$?
           cat "$RUNNER_TEMP/gate.txt"
           { echo '### symex-linux gate'; echo '```'; cat "$RUNNER_TEMP/gate.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  # RFC-0016 K1a-ci. The shards' pin records (scripts/sweep.sh writes each
+  # shard's into <outlog>.pins/, which the shard artifact carries) joined by
+  # the universe test, scoped to this leg's row. Zero records fails.
+  universe:
+    needs: [derive, sweep]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-symex-linux
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: symex-linux-shard-*
+          path: records
+          merge-multiple: true
+
+      - name: Universe join over the shards' pin records
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+          PARTIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex != '' && '1' || '' }}
+        run: |
+          set -uo pipefail
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          bash scripts/universe-join.sh --self-test
+          mkdir -p "$RUNNER_TEMP/universe"
+          UNIVERSE_JOIN_WORK="$RUNNER_TEMP/universe" \
+            bash scripts/universe-join.sh ${PARTIAL:+--partial} symex-linux linux-c records \
+            2>&1 | tee "$RUNNER_TEMP/universe/join.txt"
+          rc=${PIPESTATUS[0]}
+          { echo '### symex-linux universe join'; echo '```'; tail -n 60 "$RUNNER_TEMP/universe/join.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
   watchdog:

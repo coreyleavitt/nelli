@@ -198,13 +198,25 @@ proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
     seen.incl a.key
     result.add entryProblems(a, ids)
 
-proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow]):
-    seq[string] =
+proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow];
+                  legRow = ""; partial = false): seq[string] =
   ## One message per failing cell. Needs the records of one run.
-  let allowed = allow.mapIt(it.key).toHashSet
+  ##
+  ## `legRow` (K1a-ci) scopes the join to one CI leg: a leg runs ONE build row,
+  ## so every other `build:row/` cell is not its business (and no allowlist
+  ## line for a row excuses the leg's own: its records must evidence it).
+  ## `partial` is a narrowed run (a `tests_regex` dispatch): the records are a
+  ## slice, so an unclassified cell proves nothing and is not reported; a
+  ## record that contradicts an allowlist entry still is.
+  let allowed = allow.mapIt(it.key)
+                     .filterIt(legRow.len == 0 or not it.startsWith("build:row/"))
+                     .toHashSet
   for c in u:
+    if legRow.len > 0 and c.key.startsWith("build:row/") and
+       c.key != "build:row/" & legRow:
+      continue
     let covered = recs.anyIt(c.evidences(it))
-    if not covered and c.key notin allowed:
+    if not covered and not partial and c.key notin allowed:
       result.add "unclassified cell " & c.key & " (" & c.state &
         "): no pin record evidences it and no allowlist entry names it"
     if covered and c.key in allowed:
@@ -266,6 +278,10 @@ proc joinDirProblems(dirEnv: string; recs: seq[PinRecord]; now: Time):
 let
   universe = deriveUniverse()
   pinDirEnv = getEnv("NELLI_PIN_DIR", "")
+  ## K1a-ci: the CI join job names its leg's build row and whether the run was
+  ## narrowed (`scripts/universe-join.sh` sets both).
+  legRowEnv = getEnv("NELLI_UNIVERSE_ROW", "")
+  partialEnv = getEnv("NELLI_UNIVERSE_PARTIAL", "") == "1"
 
 proc loadRecords(dir: string): seq[PinRecord] =
   for r in pinRecords(dir): result.add r
@@ -409,6 +425,37 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
     check fails.len == 1
     check "stale" in fails[0] and "magic:Swap" in fails[0]
 
+  test "K1a-ci: a leg's join owns its own build row only":
+    # mingw's records carry the mingw row and nothing else; the other four
+    # rows are other legs' business, and the mingw row is allowlisted nowhere
+    # for this leg even though the unscoped allowlist excuses it.
+    let rowsOnly = synthAll().filterIt(it.row == "linux-c")
+    var recs = rowsOnly
+    for r in recs.mitems: r.row = "mingw"
+    let rowAllow = @["build:row/mingw", "build:row/msvc"]
+    check joinUniverse(universe, recs, allowFor(rowAllow), "mingw").len == 0
+
+  test "RED: a leg whose records lack its own row fails naming the row":
+    var recs = synthAll()
+    for r in recs.mitems: r.row = "linux-c"
+    let fails = joinUniverse(universe, recs, allowFor(@["build:row/mingw"]),
+                             "mingw")
+    check fails.len == 1
+    check "build:row/mingw" in fails[0] and "unclassified" in fails[0]
+
+  test "RED: a scoped leg still fails an unclassified non-row cell":
+    var recs = synthAll("errorkind:feUnadmitted")
+    for r in recs.mitems: r.row = "msvc"
+    let fails = joinUniverse(universe, recs, allowFor(@[]), "msvc")
+    check fails.len == 1 and "errorkind:feUnadmitted" in fails[0]
+
+  test "a partial run reports no unclassified cell but still a stale entry":
+    let recs = synthAll("magic:Swap")
+    check joinUniverse(universe, recs, allowFor(@[]), "", true).len == 0
+    let fails = joinUniverse(universe, recs, allowFor(@["errorkind:feUnadmitted"]),
+                             "", true)
+    check fails.len == 1 and "stale" in fails[0]
+
   test "an allowlisted cell with no record passes":
     let recs = synthAll("magic:Swap")
     let gaps = @["magic:Swap"]
@@ -497,7 +544,8 @@ suite "RFC-0016 K1a-cells: the join over this run's records":
     if pinDirEnv.len == 0:
       echo "universe: the join was NOT evaluated (NELLI_PIN_DIR is unset)"
     elif recs.len > 0:
-      let fails = joinUniverse(universe, recs, loadAllow(allowDir))
+      let fails = joinUniverse(universe, recs, loadAllow(allowDir),
+                               legRowEnv, partialEnv)
       checkpoint "NELLI_PIN_DIR=" & pinDirEnv & " (" & $recs.len &
                  " records)\n" & fails.join("\n")
       check fails.len == 0

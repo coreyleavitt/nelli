@@ -76,6 +76,10 @@ fi
 
 # NELLI_PIN_NOW (unix seconds) fixes the pin clock (RFC-0016 K1a-last).
 [ -n "${NELLI_PIN_NOW:-}" ] && pin_args+=(-e "NELLI_PIN_NOW=$NELLI_PIN_NOW")
+# NELLI_UNIVERSE_ROW / NELLI_UNIVERSE_PARTIAL scope the universe join to one CI
+# leg (RFC-0016 K1a-ci; scripts/universe-join.sh).
+[ -n "${NELLI_UNIVERSE_ROW:-}" ] && pin_args+=(-e "NELLI_UNIVERSE_ROW=$NELLI_UNIVERSE_ROW")
+[ -n "${NELLI_UNIVERSE_PARTIAL:-}" ] && pin_args+=(-e "NELLI_UNIVERSE_PARTIAL=$NELLI_UNIVERSE_PARTIAL")
 
 if [ -n "$host" ]; then
   # `timeout` puts the child in its own process group and, on expiry, signals

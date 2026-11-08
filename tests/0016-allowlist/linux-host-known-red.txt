@@ -1,0 +1,11 @@
+# RFC-0016 CI-A3: tests that are red on the symex-linux host leg (ubuntu-24.04,
+# the CI-A1 toolchain) and are accepted as red. One test per line, then the
+# reason; `#` starts a comment. scripts/check-linux-allowlist.sh fails the leg
+# on a red test NOT listed here AND on a listed test that passes, so an entry
+# is removed in the commit that fixes it. An entry is added only for a defect
+# that is real and specific to the host, with its row in the RFC (§5.3 or the
+# INT table); environment differences are fixed in the runner (see
+# scripts/dt-bounded.sh), not listed.
+#
+# Baseline: run 42434778262 at ad623d97, 1031 of 1031 registered tests ran, 1 red.
+tsymex_rfc0005_s8cn_step1d  INT-43: official Z3 5.1.0 spends about 1.66x the rlimit units of the image's Z3 on the same queries, so grow_stale_dead returns sxUnknown (canceled under seqQueryRLimit) instead of sxUnsat; passes in podman

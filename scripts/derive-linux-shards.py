@@ -11,8 +11,12 @@ tsymex_*: the Linux leg is the one that runs the fuzzer and base suites.
 
 The table was measured on the symex-mingw leg (Windows, one test at a time),
 so on Linux it is a relative weight, not a duration; TIME_SCALE converts it
-to the Linux wall time at JOBS parallel workers. Retune TIME_SCALE from a
-run's per-shard times (the shard summary prints them).
+to the Linux wall time at JOBS parallel workers. Calibration (run 42434778262, 8 shards at scale 0.5 / 25 min): the shards ran
+20 to 35 min of wall time, about 2.4 times the prediction, and unevenly (the
+mingw table is only a rough proxy for Linux cost), so the target is held low
+(12 predicted min, 16 shards) to keep the slowest shard well inside the job's
+45-minute cap. Retune TIME_SCALE or the target from a run's per-shard times
+(the shard summary prints them).
 
 Outputs (to $GITHUB_OUTPUT under Actions, else stdout):
   shards_json  {"0": ["tsymex_a", ...], ...}
@@ -25,9 +29,9 @@ import re
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TARGET_SHARD_MIN = 25      # wall minutes one shard should take on Linux
+TARGET_SHARD_MIN = 12      # wall minutes one shard should take on Linux
 JOBS = 4                   # sweep.sh -j on a 4-core ubuntu-24.04 runner
-TIME_SCALE = float(os.environ.get("NELLI_LINUX_TIME_SCALE", "0.5"))
+TIME_SCALE = float(os.environ.get("NELLI_LINUX_TIME_SCALE", "1.2"))
 MIN_SHARDS = 8
 CORPUS_FLOOR = 500
 

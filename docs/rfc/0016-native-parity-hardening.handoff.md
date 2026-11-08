@@ -43,6 +43,21 @@
   four fuzzer tests, `tfuzzcovdump`, `tfuzzcovreset`, `tfuzzworkerprocess`,
   `tfuzzworkerspawnfailshm`, fail on the ubuntu-24.04 host while green in the
   0.9.1 podman baseline; both are CI-A3's to fix).
+- **CI-A3 (2026-11-08):** `symex-linux` now runs every registered test (1031)
+  in sharded `sweep` jobs, joined by a `gate` job against
+  `tests/0016-allowlist/linux-host-known-red.txt` (fails on a new red, a
+  stale entry, or a test with no result), with a `watchdog` job
+  (`scripts/rfc0016-watchdog.sh`). The four fuzzer reds were host environment,
+  fixed in `scripts/dt-bounded.sh`'s host path: `tfuzzcovdump`/`tfuzzcovreset`
+  shared `/tmp/ptcov_build_*` between parallel workers (now a private
+  `TMPDIR` per test), and `tfuzzworkerprocess` R23 / `tfuzzworkerspawnfailshm`
+  R53 tighten `RLIMIT_NOFILE` to the open-fd count plus one, which fails to
+  starve `pipe()` when the runner leaks fds 142 and 145 into the test (now
+  fds above 2 are closed). The one remaining host red is INT-43. An F row names
+  its `rfc-0016-intake` issue as `#N` in its `source` cell; the watchdog reads
+  that. The K8a heartbeat is the `k8a-heartbeat` artifact of a
+  `.github/workflows/k8a-*.yaml` workflow; the check arms itself when such a
+  workflow exists and is a loud "NOT ARMED" notice until then.
 - **Windows native facts:** a Nim probe's division fault on Windows prints
   `SIGFPE: Arithmetic error` and exits 1 (the CRT maps 0xC0000094); `low(int)
   mod -1`/`div -1` raise 0xC0000095, which the mingw CRT does not map, so

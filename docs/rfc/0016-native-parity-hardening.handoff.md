@@ -1,11 +1,11 @@
 # RFC-0016 native-parity hardening — handoff
 
-- **Stage:** design done: `/architect` rounds 1-3 on 2026-11-06 and round 4
-  on 2026-11-07, on branch
-  `rfc-0016-design` (base `main` 83c1d304). Implementation of
-  Wave 1 (0.9.2) is next (decision D-0016-5).
-- **Resume:** `/tdd rfc-0016 wave 1` (K1-0, then W1-z second half, then
-  the 0.9.2 gate; see Wave 1 progress).
+- **Stage:** Wave 1 shipped as **0.9.2** (2026-11-08): signed tag `v0.9.2`
+  at `bc06d09f`, published `ghcr.io/coreyleavitt/nelli@sha256:925d0deb...`
+  (content `dag-sha256:dded114f...`). Wave 2 in progress.
+- **Resume:** `/loop` grind over Wave 2: land the queue in "Wave 2 progress",
+  then K1a-ci, a full eos sweep at the new main to calibrate the universe
+  and id allowlists, W2-z; then Wave 3.
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.
@@ -31,6 +31,37 @@
   holds MOV-01's items, the spec corrections below applied to the RFC body.
   Remaining: file UPS-01 and UPS-03 (drafts are `docs/rfc/0016-research/UPS-01.md`
   and `UPS-03.md`; UPS-03 needs a reduction first), then the 0.9.2 gate.
+- **0.9.2 release gate (2026-11-08):** whole-suite podman sweeps on eos at
+  `bc06d09f` against the 0.9.1 baselines (`sweep-diff.sh`): c, cpp and
+  z3-4.13.4 each unchanged=989 regressed=0 new-failing=0 new-ok=36; the one
+  red (`s8by_remainder`, c and cpp) is in the baseline. Publish needed four
+  reruns: GitHub release downloads (oras, cosign, Z3) returned 504
+  intermittently for about an hour. The workflow_dispatch dry run cannot
+  certify before the tag exists (milpa requires a `v<version>` tag at HEAD;
+  a short sha is also read as a branch by checkout). FINDING, outside this
+  repo: the tianguis `index.json` lists nelli at 0.3.5 only, although the
+  publish dispatch answered HTTP 200 for 0.9.0, 0.9.1 and 0.9.2 (the OCI
+  artifacts and tags are on GHCR); the index's last nelli-relevant change
+  predates the rename (see the nelli-rename registry-aliasing item).
+- **Wave 2 progress (2026-11-08):** on `main`: K5a, CI-A1/A2/A3, K9b, K2-s,
+  K7a/b, K8-0 (earlier), K1a-cells `ed2982fd`, K9d-0 `2c4b48a5` (an
+  infeasible concolic flip returns `cfoSolvedOptimistic`, never `cfoUnsat`),
+  K8A-1 `ec719a37` (template `except T as e` macro-time crash), K1a-ids
+  `f3a73be8` (work list as `docs/rfc-data/0016-worklist.toml`, rendered into
+  §5 by `scripts/check-worklist.sh`), K8a-gen `4321230f`, K2-0 `79e6b18d`
+  (SND-13, INT-22 soundness pins), INT-46 `4d343177` (the fork-safety guard
+  counted joined threads still listed in `/proc/self/task`; now skips
+  exiting/zombie/vanished tasks). In CI: K1a-last (`rfc-0016-k1al`),
+  K8a-job + K8a-sink (`rfc-0016-k8as`, with a bounded first-heartbeat grace
+  in the watchdog; dispatch `k8a-differential.yaml` right after landing).
+  CI-B (`rfc-0016-cib`, nightly cpp/z3/msvc legs) rebases after K1a-last
+  with a fresh agent, adding the 60 s ceiling as a ratchet (committed
+  offender list; new offender or stale entry fails). INT-45 MSVC-only reds
+  (`rfc-0016-msvcd`): three fixed test-side (`s6a_budget` constant `1 div
+  0`, `s8cs_routes2` x64 asm, `k5a_fwrapv` vcc arm); `s8bz_overlap` SIGSEGV
+  reproduces under vcc only (module-init IR building, `tVariant` `=dup`), root
+  cause in progress. Decisions: keep `fuzzer-msvc`'s per-push vcc step; fix
+  MSVC defects rather than allowlist them.
 - **Gate lesson (2026-11-07):** slices landed on their own suites only, and
   the Windows legs' runs on `main` were cancelled by each next push, so the
   W1-d2/W1-d1b/W1-m/W1-d3 contract changes left 11 stale files (red on Linux

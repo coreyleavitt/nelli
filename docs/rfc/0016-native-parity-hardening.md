@@ -187,7 +187,7 @@ state = "pending"
 [[slice]]
 id    = "W1"
 title = "Wave 1 / 0.9.2 (§11): INF-05 and the 0.9.1 baselines, K9a, W1-c3, W1-a, W1-c1a/b, W1-c2, W1-p, W1-b/e/g/f, W1-d1a/b/c, W1-d3, W1-d2 (round), K1-0, W1-m, W1-z (20 rows): the seven false verdicts of §5.0 end to end, plus W-20/21/26/31/33/52, the walker on MSVC, the release gate"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "W2"

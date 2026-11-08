@@ -477,6 +477,7 @@ jobs:
               printf '%s\n' "$out" | bash scripts/rfc0016-intake.sh --extract "$leg" /dev/stdin \
                 | awk -F'\t' '{ n = split($2, w, " "); printf "%s\t%s\t60 s ceiling ratchet: %s\n", $1, w[n], $3 }' >> findings/findings-ceiling.tsv
             }
+            printf '%s\n' "$out" | command grep -q '^WARN' && echo "::warning::$leg: unlisted tests over the 60 s ceiling (under the 90 s gate); see the step summary"
             { echo "### $leg: 60 s ceiling ratchet"; echo '```'; printf '%s\n' "$out" | command grep -v '^[0-9.]* ' ; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
           echo "rc=$rc" >> "$GITHUB_OUTPUT"

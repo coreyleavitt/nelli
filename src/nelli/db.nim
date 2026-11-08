@@ -1096,30 +1096,51 @@ const nelliShmPrefix* = "nelli_"
   ## prefix-only scoping — and never touch a foreign process's segment.
 
 when defined(posix):
+  from std/posix import kill, Pid, ESRCH
+
+  proc shmSegmentOwnerAlive*(fileName: string): bool =
+    ## Whether the process that created the `nelli_`-prefixed segment
+    ## `fileName` (a bare name under `/dev/shm`) is still running. Every
+    ## nelli-created segment name embeds its creator's pid as the FIRST
+    ## all-digit `_`-separated token (`nelli_worker_cmp_<pid>_<n>`,
+    ## `nelli_ext_cmp_<pid>_<n>`, `nelli_<tag>_<pid>`); the counter that may
+    ## follow is never read as a pid. A name with no such token has no
+    ## recoverable owner and is reported dead (reclaimable), as before.
+    ## `EPERM` from `kill(pid, 0)` means the pid exists under another user,
+    ## so it counts as alive.
+    for tok in fileName.split('_'):
+      if tok.len > 0 and tok.len <= 9 and tok.allCharsInSet({'0'..'9'}):
+        let pid = parseInt(tok)
+        if pid <= 0: return false
+        if kill(Pid(pid), 0) == 0: return true
+        return osLastError() != OSErrorCode(ESRCH)
+    false
+
   proc sweepStaleShmSegments() =
     ## RFC-fuzzer-nextgen E-cleanup: a crashed/hard-killed prior campaign's
     ## `shm_open` coverage segments (E2b) are NOT reclaimed by the OS on
     ## process death — unlike an ordinary fd, a `shm_open` segment persists
     ## in `/dev/shm` until explicitly unlinked. Swept here by name-prefix
-    ## match only: safe because this runs at campaign-startup construction
-    ## time, before this campaign (or any worker of it) has created its OWN
-    ## shm segments, so every `nelli_`-prefixed entry found here is
-    ## necessarily left over from a PRIOR run. A foreign process's segment
-    ## never carries this prefix and is left untouched. (On Linux,
-    ## `shm_open("/foo", ...)` materializes as an ordinary file at
-    ## `/dev/shm/foo` — the same mechanism `nelli_shm.c` itself relies on —
-    ## so an ordinary `removeFile` here is exactly `shm_unlink`, no extra
-    ## FFI needed.) Known scope limit: this is a GLOBAL OS namespace, not
-    ## scoped to this DB's `path` — two DIFFERENT nelli campaigns running
-    ## concurrently on the same host would need distinguishable names to
-    ## avoid this sweep racing a live sibling campaign; not a new problem
-    ## this slice introduces (every current shm-name caller already
-    ## self-selects a unique suffix, e.g. `$pid`), just not itself enforced
-    ## here.
+    ## match, EXCEPT segments whose owning process (the pid embedded in the
+    ## name, see `shmSegmentOwnerAlive`) is still alive. `/dev/shm` is a
+    ## host-global namespace, so this constructor can run while a sibling
+    ## process (a concurrent campaign, or a parallel test binary) holds live
+    ## segments; unlinking those makes that process's next attach to the
+    ## name create a fresh, empty segment and silently lose its published
+    ## coverage/cmp log (the intermittent tfuzzcmplogshm red, CI run
+    ## 42480895818). A foreign process's segment never carries the `nelli_`
+    ## prefix and is left untouched. (On Linux, `shm_open("/foo", ...)`
+    ## materializes as an ordinary file at `/dev/shm/foo`, so an ordinary
+    ## `removeFile` here is exactly `shm_unlink`, no extra FFI needed.)
+    ## Residual limit: pid liveness is checked in this process's pid
+    ## namespace, so containers that share `/dev/shm` but not pids can still
+    ## see each other's segments as dead.
     const shmDir = "/dev/shm"
     if not dirExists(shmDir): return
     for kind, p in walkDir(shmDir, relative = false):
-      if kind == pcFile and extractFilename(p).startsWith(nelliShmPrefix):
+      let name = extractFilename(p)
+      if kind == pcFile and name.startsWith(nelliShmPrefix) and
+         not shmSegmentOwnerAlive(name):
         try: removeFile(p)
         except OSError: discard
 

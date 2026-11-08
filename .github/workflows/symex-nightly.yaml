@@ -55,10 +55,6 @@ on:
         default: "dry-run"
         type: choice
         options: [off, dry-run, live]
-  # TEMPORARY (CI-B development): a workflow_dispatch needs the file on the default
-  # branch, so the branch that adds it runs on push. Removed before the merge.
-  push:
-    branches: ['rfc-0016-cib']
 
 permissions:
   contents: read
@@ -95,8 +91,6 @@ jobs:
           set -euo pipefail
           all='cpp z3-4.13.4 msvc'
           want="${LEGS//,/ }"
-          # TEMPORARY (CI-B development): a push has no inputs; this file picks the legs.
-          [ "$GITHUB_EVENT_NAME" = push ] && [ -r .github/nightly-push-legs ] && want="$(cat .github/nightly-push-legs)"
           [ -n "${want// /}" ] || want="$all"
           sel=()
           for l in $want; do

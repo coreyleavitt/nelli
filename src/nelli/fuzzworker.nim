@@ -718,6 +718,29 @@ when defined(posix):
       ## another OS thread is alive in this process at the moment it would
       ## `fork()` — see `assertForkSafeSingleThreaded` below.
 
+  proc taskIsExiting(taskDir: string): bool =
+    ## True when the task under `taskDir` (a `/proc/self/task/<tid>` path) has
+    ## `PF_EXITING` (0x4) set in its `/proc/<tid>/stat` flags. `pthread_join`
+    ## returns once the kernel clears the child tid, which `do_exit` does
+    ## AFTER setting `PF_EXITING` but BEFORE the task is removed from
+    ## `/proc/self/task`; a bare directory count therefore reports a joined
+    ## thread as alive for a short window (INT-46). A task with `PF_EXITING`
+    ## never runs user code again, so it cannot hold a lock across `fork()`.
+    ## Anything unreadable or unparsable counts as NOT exiting (the
+    ## conservative direction: it keeps the guard firing).
+    try:
+      let stat = readFile(taskDir / "stat")
+      let rp = stat.rfind(')')
+      if rp < 0: return false
+      # Fields after "(comm)": state ppid pgrp session tty_nr tpgid flags ...
+      let f = stat[rp + 1 .. ^1].splitWhitespace()
+      if f.len < 7: return false
+      result = f[0] in ["Z", "X"] or (parseBiggestUInt(f[6]) and 0x4'u64) != 0
+    except CatchableError:
+      # The entry can be reaped between `walkDir` listing it and this read:
+      # a vanished task is a finished one, not a live one.
+      result = not dirExists(taskDir)
+
   proc assertForkSafeSingleThreaded() =
     ## RFC-fuzzer-nextgen R15: the ENFORCED form of `newForkWorker`'s own
     ## hazard doc below — a runtime check, not a compile-time one. A
@@ -750,8 +773,8 @@ when defined(posix):
     var threads = 0
     var determined = false
     try:
-      for kind, _ in walkDir("/proc/self/task"):
-        if kind == pcDir: inc threads
+      for kind, path in walkDir("/proc/self/task"):
+        if kind == pcDir and not taskIsExiting(path): inc threads
       determined = true
     except OSError:
       discard

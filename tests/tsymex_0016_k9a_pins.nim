@@ -136,6 +136,9 @@ suite "K9a":
     check not crashClassOn(0, fpe, ceDivTrap, true)
     check crashClassOn(int(cast[int32](0xC0000005'u32)), "", ceSegv, true)
     check crashClassOn(1, segv, ceSegv, true)
+    # RFC-0016 INT-47: stack exhaustion is the guard-page SIGSEGV of POSIX
+    check crashClassOn(int(cast[int32](0xC00000FD'u32)), "", ceSegv, true)
+    check not crashClassOn(int(cast[int32](0xC00000FD'u32)), "", ceDivTrap, true)
     check not crashClassOn(1, fpe, ceSegv, true)
     check not crashClassOn(1, "boom", ceSegv, true)
     check crashClassOn(1, "x [ValueDefect]", ceDefect, true)

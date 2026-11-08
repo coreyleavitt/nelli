@@ -78,7 +78,7 @@ type
 
   CrashExpect* = enum
     ceDivTrap    ## SIGFPE on POSIX; on Windows 0xC0000094/5 or Nim's SIGFPE report, exit 1
-    ceSegv       ## SIGSEGV on POSIX; on Windows 0xC0000005 or Nim's SIGSEGV report, exit 1
+    ceSegv       ## SIGSEGV on POSIX; on Windows 0xC0000005, 0xC00000FD (stack overflow) or Nim's SIGSEGV report, exit 1
     ceDefect     ## a Nim Defect or panic: exit 1 with an unhandled-exception report
     ceAbnormal   ## any non-zero exit
 
@@ -656,6 +656,9 @@ proc crashClassOn*(rc: int; output: string; expect: CrashExpect;
         (rc == 1 and "SIGFPE: Arithmetic error" in output)
     of ceSegv:
       code == 0xC0000005'u32 or
+        # Stack exhaustion: on POSIX the guard page's SIGSEGV, on Windows the
+        # raw STACK_OVERFLOW, which the CRT does not map to a signal.
+        code == 0xC00000FD'u32 or
         (rc == 1 and "SIGSEGV: Illegal storage access" in output)
     of ceDefect: rc != 0 and "Defect]" in output
     of ceAbnormal: rc != 0

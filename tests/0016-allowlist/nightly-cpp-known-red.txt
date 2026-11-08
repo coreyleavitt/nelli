@@ -3,6 +3,7 @@
 # scripts/check-linux-allowlist.sh fails the leg on a red test NOT listed here AND on a
 # listed test that passes, so an entry goes in the commit that fixes it.
 #
-# Baseline: run 42440545873 at 41483364, 1031 of 1031 registered tests ran, 2 red.
+# Baseline: run 42487154319 on the rebased CI-B tree, 1041 of 1041 registered tests ran, 1 red.
+# s8by_remainder (INT-44) passed there and is closed: the S8cj fix on main (the test threads release
+# their Z3 contexts) removed the unit-count drift.
 tsymex_rfc0005_s8cn_step1d  INT-43: the official Z3 5.1.0 archive spends about 1.66x the rlimit units of the image's Z3, so grow_stale_dead returns sxUnknown (canceled) instead of sxUnsat; also red on symex-linux (c)
-tsymex_rfc0005_s8by_remainder  INT-44: on cpp a scratch solve's unit count differs with the context (r.units 13236530 against 19018808), so the exact-units pin fails; outcomes agree; c passes

@@ -1539,15 +1539,15 @@ id = "INT-44"
 table = "5.8c"
 title = "On the cpp backend `tsymex_rfc0005_s8by_remainder`'s \"what the context holds moves neither a scratch solve's spend nor its outcome\" fails `r.units == base.units` (`holds 1`: 13236530 against 19018808, `holds 3`: 5854996; the `holds 0` baseline spends 19018808, and the outcomes and `infeasibleUnits` agree). The c backend passes it on Z3 5.1.0 and 4.13.4 and the podman cpp row passed at 0.9.1, so the unit count of a scratch solve depends on the compiled backend or the host's Z3 build; the verdicts are unaffected. Known-red in `tests/0016-allowlist/nightly-cpp-known-red.txt` until the pin compares an outcome rather than an exact unit count on the leg"
 class = "precision (cpp host; the verdict is sound)"
-state = "open"
-note = ""
+state = "closed"
+note = "Passed on cpp in `symex-nightly` run 42487154319 (rebased CI-B tree); the cause was the S8cj Z3-context leak in the test threads (INT-04), fixed on main"
 source = "CI-B first nightly, run 42440545873"
 cells = []
 
 [[row]]
 id = "INT-45"
 table = "5.8c"
-title = "The first `symex-msvc` (c, vcc, Z3 4.13.4) nightly run found MSVC-only reds that `symex-mingw` cannot see: `tsymex_rfc0005_s6a_budget` (cl.exe C2124, a constant division by zero in the generated C), `tsymex_rfc0005_s8bz_overlap` (SIGSEGV in a `=dup` hook under `tVariant` during module-init IR construction; MSVC-only, mingw passes; root cause in progress), `tsymex_rfc0005_s8cs_routes2` (the test's `asm \"nop\"` is not accepted on x64, C4235), and `tsymex_0016_k5a_fwrapv` (the build is refused by design under vcc and the test has no vcc arm). Known-red in `tests/0016-allowlist/nightly-msvc-known-red.txt`; the branch `rfc-0016-msvcd` fixes `k5a_fwrapv`, `s6a_budget` and `s8cs_routes2` (a vcc run passed all three) and removes their entries when it lands"
+title = "The first `symex-msvc` (c, vcc, Z3 4.13.4) nightly run found MSVC-only reds that `symex-mingw` cannot see: `tsymex_rfc0005_s6a_budget` (cl.exe C2124, a constant division by zero in the generated C), `tsymex_rfc0005_s8bz_overlap` (SIGSEGV in a `=dup` hook under `tVariant` during module-init IR construction; MSVC-only, mingw passes; PASSED in run 42487154319, entry removed, cause not identified), `tsymex_rfc0005_s8cs_routes2` (the test's `asm \"nop\"` is not accepted on x64, C4235), and `tsymex_0016_k5a_fwrapv` (the build is refused by design under vcc and the test has no vcc arm). Known-red in `tests/0016-allowlist/nightly-msvc-known-red.txt`; the branch `rfc-0016-msvcd` fixes `k5a_fwrapv`, `s6a_budget` and `s8cs_routes2` (a vcc run passed all three) and removes their entries when it lands"
 class = "soundness-adjacent (the SIGSEGV is unclassified until triaged); the rest portability"
 state = "open"
 note = ""
@@ -1563,6 +1563,16 @@ state = "closed"
 note = ""
 source = "CI-B, run 42458557944"
 sha = "4d343177"
+cells = []
+
+[[row]]
+id = "INT-47"
+table = "5.8c"
+title = "New MSVC-only reds on `symex-msvc` (run 42487154319), none in the 0.9.1 era: `tsymex_0016_k8a_gen` and `tsymex_0016_k8a1_template_except_as` fail to build under vcc (`symex.nim(2828, 29) Error: node has no type`, via `pinExact` and `scanFootprint`); `tsymex_0016_k20_probes` HRV-46 sees the PCRE interpreter exit -1073741571 (stack overflow) where the pin expects `ceSegv`; `tsymex_0016_universe` exits 1 after 0.2 s at its K1a-ids RED self-tests (suspect a CRLF or path assumption in the id join). Known-red in `tests/0016-allowlist/nightly-msvc-known-red.txt`"
+class = "unclassified until triaged (the build error may be a walker defect on Windows)"
+state = "open"
+note = ""
+source = "CI-B, run 42487154319"
 cells = []
 
 [[row]]

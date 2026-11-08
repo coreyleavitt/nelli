@@ -18685,9 +18685,9 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
     # RFC-0005 S8cu: the instance's options are its first instantiation's,
     # so a module that may compile `assert` out declines (`assertsMaybeOff`).
     let lenChanged =
-      if compileOption("assertions") and not ctx.assertsMayBeOff:
+      if coAssert in buildSemantics.checks and not ctx.assertsMayBeOff:
         mkRaise("AssertionDefect", nil)
-      elif compileOption("assertions"):
+      elif coAssert in buildSemantics.checks:
         ctx.declineAtSite(feCheckOption,
           siteMsg(n, "the Table's length changed while iterating over it, " &
                   "and this module may compile the iterator's `assert` out " &
@@ -19295,9 +19295,9 @@ proc seqIterLenChanged(ctx: ParseCtx; n, c: NimNode; iter: string): IRStmt =
   ## `yield a[i]` checks the index: declined there. RFC-0005 S8cu: the
   ## iterator's options are its first instantiation's, so a module that may
   ## compile `assert` out declines (`assertsMaybeOff`).
-  if compileOption("assertions") and not ctx.assertsMayBeOff:
+  if coAssert in buildSemantics.checks and not ctx.assertsMayBeOff:
     mkRaise("AssertionDefect", nil)
-  elif compileOption("assertions"):
+  elif coAssert in buildSemantics.checks:
     ctx.declineAtSite(feCheckOption,
       siteMsg(n, "the length of `" & c.repr & "` changed during an " &
               "iteration of `" & iter & "`, and this module may compile the " &

@@ -27,6 +27,8 @@ type
     ## JIT. Anchored calls always run on the interpreter (PCRE_ANCHORED is
     ## not a JIT option).
     peInterp, peJit837
+    peUnverified   ## RFC-0016 K5a: the host profile's "not a verified build";
+                   ## never a model (`pcreSearchEngine` answers peInterp there)
 
 
 const pcreConfigJit = 9'i32   ## pcre.h's PCRE_CONFIG_JIT
@@ -174,6 +176,13 @@ proc unverifiedLibReason*(): string =
     (if pcreRunsJit(): ", JIT" else: ", interpreter") &
     ") is not a build the regex model is verified against (" &
     known.join(", ") & "): psUnverifiedLib"
+
+proc pcreHostEngine*(): PcreEngine =
+  ## RFC-0016 K5a. `HostSemantics.pcre`: the verified build's engine model,
+  ## `peUnverified` when std/re's libpcre is not in `verifiedLibs`.
+  for v in verifiedLibs:
+    if v.version == pcreVersion() and v.jit == pcreRunsJit(): return v.model
+  peUnverified
 
 proc pcreSearchEngine*(): PcreEngine =
   ## RFC-0005 S8bt. The engine model of std/re's unanchored calls (`find`,

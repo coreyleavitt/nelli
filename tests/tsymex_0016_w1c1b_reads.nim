@@ -21,7 +21,7 @@ proc codeLines(txt: string): string =
 suite "W1-c1b: build reads and the refc refusal":
   test "the Wave-1 reads occur only in buildprofile.nim":
     let root = currentSourcePath().parentDir.parentDir / "src" / "nelli"
-    # `compileOption("assertions")` also stays in dsl_parser.nim until K5a.
+    # K5a (`tsymex_0016_k5a_reads`) extends this to every `compileOption(`.
     let moved = ["defined(nimPanics)", "compileOption(\"panics\")",
                  "compileOption(\"exceptions\"", "compileOption(\"stacktrace\")",
                  "compileOption(\"stackTrace\")"]
@@ -37,7 +37,7 @@ suite "W1-c1b: build reads and the refc refusal":
             fail()
     check seen[0] and seen[2] and seen[4]   # moved here, not vanished
 
-  test "admitBuild refuses refc by field, and nothing else":
+  test "admitBuild refuses refc by field; the unpinned models by row":
     var b = buildSemantics
     b.mm = mmRefc
     let r = admitBuild(b)
@@ -46,9 +46,13 @@ suite "W1-c1b: build reads and the refc refusal":
     check $r.get.field == "mm"
     check "D-0016-7" in r.get.reason
     check "refc" in r.get.reason
-    for m in [mmOrc, mmArc, mmAtomicArc, mmMarkAndSweep, mmBoehm, mmGo, mmNone]:
+    for m in [mmOrc, mmArc, mmAtomicArc]:
       b.mm = m
       check admitBuild(b).isNone
+    # K5a: a model no row is pinned on is refused as an unprojectable profile.
+    for m in [mmMarkAndSweep, mmBoehm, mmGo, mmNone]:
+      b.mm = m
+      check admitBuild(b).get.field == bfRow
     check admitBuild().isNone   # this build is admitted, or this test did not run
 
   test "native: --mm:refc is refused by name at the import":

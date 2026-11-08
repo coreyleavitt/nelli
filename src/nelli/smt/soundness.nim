@@ -173,6 +173,15 @@ type
       ## `sxUnknown` with any is not cached, and an `rsUnconfirmed` or
       ## `witnessUnsafe` claim with `rdReplay` is not stored for good
       ## (`cacheable`). Verdict-neutral: `trusted()` does not read it.
+    buildSegment*: string
+      ## RFC-0016 K5a (section 8.3). The `buildSegment` this verdict was decided
+      ## under: the cache key's build and host half, "" for a record no run
+      ## stamped (a hand-built one, a finding of a run that did not start).
+      ## Stamped at the run boundary and on every finding; it is NOT stored with
+      ## the verdict, because the key already carries it: a hit is this build's.
+    buildRow*: string
+      ## The row `rowOf` projects that build onto ("linux-c", "mingw", ...),
+      ## "" when none covers it.
 
 func trustedSat*(s: Soundness): bool =
   ## RFC-0005 §8.1 `trusted()`'s `sxSat` / `sxRaised` arm: a clean winning
@@ -219,3 +228,35 @@ func trustedUnsat*(s: Soundness): bool =
   ## An `rsUnsettled` record (the zero value) is never trusted (R1-16): a
   ## `runTaint` of `{}` there means only that no producer wrote one.
   s.replay != rsUnsettled and scIncomplete notin s.runTaint
+
+func segmentValue*(segment, name: string): string =
+  ## RFC-0016 K5a. The value of field `name` in a `buildSegment` text
+  ## ("bs1<build:...;mm=orc;...|host:...>"), "" when it has none. Fields are
+  ## `name=value` between `;`, `:`, `<` and `|`, so the match is on a whole name.
+  let pat = name & "="
+  var at = 0
+  while at + pat.len <= segment.len:
+    var hit = true
+    for k in 0 ..< pat.len:
+      if segment[at + k] != pat[k]:
+        hit = false
+        break
+    if hit and (at == 0 or segment[at - 1] in {';', ':', '<', '|'}):
+      var j = at + pat.len
+      let start = j
+      while j < segment.len and segment[j] notin {';', '|', '>'}: inc j
+      return segment[start ..< j]
+    inc at
+  ""
+
+func buildSummary*(s: Soundness): string =
+  ## RFC-0016 K5a. How a finding says what build decided it, "" for a record
+  ## no run stamped: "decided on c/orc/goto/64-bit, panics off (row linux-c)".
+  if s.buildSegment.len == 0: return ""
+  let seg = s.buildSegment
+  result = "decided on " & seg.segmentValue("backend") & "/" &
+           seg.segmentValue("mm") & "/" & seg.segmentValue("exceptions") &
+           "/" & seg.segmentValue("ptrBits") & "-bit, panics " &
+           (if seg.segmentValue("panics") == "1": "on" else: "off")
+  result.add (if s.buildRow.len > 0: " (row " & s.buildRow & ")"
+              else: " (no verified row)")

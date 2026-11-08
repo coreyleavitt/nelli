@@ -1702,6 +1702,7 @@ task test, "Run the test suite":
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",
+            "tsymex_0016_k5a_segment",
             "tsymex_0016_w1c1a_buildprofile",
             "tsymex_0016_w1c1b_reads",
             "tsymex_0016_w1c3_splat_defect",

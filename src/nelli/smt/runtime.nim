@@ -29,6 +29,7 @@ import std/strutils   ## Phase 15 S5: parseInt on a concrete seqLen numeral; spl
 import z3
 
 from ./buildprofile import buildSemantics, exSetjmp   ## RFC-0016 W1-c1b
+import ./buildprofile as bprof   ## RFC-0016 K5a: the host half, the segment, the row
 import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
@@ -28665,6 +28666,70 @@ proc runSymexCaught(prog: SymexProgram,
                                        scope: abortScope())])
 
 
+# ---- RFC-0016 K5a: the host half of the build profile ------------------------
+
+type HostGate = object
+  read: bool
+  host: bprof.HostSemantics
+  refusal: Option[bprof.BuildRefusal]
+
+var hostGate: HostGate
+  ## The process's host, read once at the first run and admitted once. A plain
+  ## global, as `libOverride` (pcre_engine): the walker may run on another thread.
+var hostSeam: Option[bprof.HostSemantics]
+  ## A test's stand-in for the host (`overrideHostForTest`): not cached.
+
+proc overrideHostForTest*(h: bprof.HostSemantics) =
+  ## RFC-0016 K5a. Makes every run read `h` as the host instead of the loaded
+  ## libz3 and libpcre (tests); `clearHostOverride` restores them. The seam an
+  ## unverified Z3 is tested through, since the suite cannot install another.
+  {.cast(gcsafe).}:
+    hostSeam = some(h)
+
+proc clearHostOverride*() =
+  {.cast(gcsafe).}:
+    hostSeam = none(bprof.HostSemantics)
+
+proc currentHost*(): bprof.HostSemantics =
+  ## RFC-0016 K5a. The host this run reads: the seam's, else the process's,
+  ## read the first time it is asked.
+  {.cast(gcsafe).}:
+    if hostSeam.isSome: return hostSeam.get
+    if not hostGate.read:
+      hostGate.host = bprof.readHost(z3FullVersion())
+      hostGate.refusal = bprof.admitHost(hostGate.host)
+      hostGate.read = true
+    hostGate.host
+
+proc hostAdmission*(): Option[bprof.BuildRefusal] =
+  ## RFC-0016 K5a (section 8.3, Refusals). `admitHost` of `currentHost()`:
+  ## `none` when the host is a verified one. Shared by every run entry
+  ## (`runSymex`, the concolic collect), read once.
+  {.cast(gcsafe).}:
+    if hostSeam.isSome: return bprof.admitHost(hostSeam.get)
+    discard currentHost()
+    hostGate.refusal
+
+proc stampBuild*(s: var Soundness) =
+  ## RFC-0016 K5a. Records on `s` the build this run is: `buildSegment` of the
+  ## build and the host, and the row `rowOf` projects them onto.
+  let h = currentHost()
+  s.buildSegment = bprof.buildSegment(buildSemantics, h)
+  let row = bprof.rowOf(buildSemantics, h, bprof.buildProvenance)
+  s.buildRow = (if row.isSome: $row.get else: "")
+
+proc hostRefusedError(r: bprof.BuildRefusal): SymexErrorInfo =
+  SymexErrorInfo(kind: feHostUnadmitted, severity: sevError,
+                 msg: r.reason & " [field: " & $r.field & "] (feHostUnadmitted)",
+                 scope: signatureScope())
+
+proc hostRefusedResult(r: bprof.BuildRefusal): RawResult =
+  ## The verdict of a run the host half refused: `sxUnknown`, nothing decided.
+  result = RawResult(status: sxUnknown, errors: @[hostRefusedError(r)])
+  result.soundness.runTaint = runTaintOf(result.errors)
+  result.soundness.replay = rsNotNeeded
+  stampBuild(result.soundness)
+
 proc runSymex*(prog: SymexProgram,
                target: SymexTarget,
                settings: SymexSettings = defaultSymexSettings()): RawResult =
@@ -28672,6 +28737,14 @@ proc runSymex*(prog: SymexProgram,
   ## (§13.3, i3): the program's annotation violations ride out on EVERY
   ## verdict branch, including a boundary abort. Verdict-neutral: nothing
   ## reads them to decide `status`.
+  # RFC-0016 K5a: the host half of the build profile, read once. A host no
+  # row covers decides nothing: `sxUnknown` with `feHostUnadmitted`, no raise.
+  let hostRefusal = hostAdmission()
+  if hostRefusal.isSome:
+    result = hostRefusedResult(hostRefusal.get)
+    result.annotationViolations = prog.annotationViolations
+    result.bounds = settings.budget
+    return
   result = runSymexCaught(prog, target, settings)
   # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
   # (the C backend loses a raise unwinding through the walk) has no verdict.
@@ -28715,6 +28788,7 @@ proc runSymex*(prog: SymexProgram,
   if nativeStackCutFlag: result.soundness.runDependence.incl rdNativeStack
   # RFC-0005 S11 (§8.2). The bound echo.
   result.bounds = settings.budget
+  stampBuild(result.soundness)   # RFC-0016 K5a: the build this verdict is of
 
 proc raiseParamAllocIssue(issue: FieldAllocIssue) =
   ## N40 (round-6 fix round 6, walker v104). The pre-walk PARAMETER-entry
@@ -29947,6 +30021,14 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     "runConcolicCollectImpl: exactly one binding per property parameter " &
     "is required (got " & $bindings.len & " bindings for " &
     $prog.params.len & " params)"
+  # RFC-0016 K5a: the host half of the build profile, read once. A host no
+  # row covers collects nothing; the refusal rides `parseErrors`, and the
+  # empty `branchTrace` makes a flip `cfoUnmodelable`.
+  let hostRefusal = hostAdmission()
+  if hostRefusal.isSome:
+    result.parseErrors = @[hostRefusedError(hostRefusal.get)]
+    result.annotationViolations = prog.annotationViolations
+    return
   let ctx = resetSymexRunState(settings)
   var counters: ConcolicYieldCounters
   let cappedLen = min(trace.len, maxDraws)

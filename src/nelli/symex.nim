@@ -3389,6 +3389,8 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   # coordinate (re-derived: the candidate's extraction errors are now part
   # of this result's error list), and the replay that confirmed it.
   result.soundness    = Soundness(pathTaint: c.pathTaint,
+                                  buildSegment: raw.soundness.buildSegment,   # RFC-0016 K5a
+                                  buildRow: raw.soundness.buildRow,
                                   witnessUndefined: c.witnessUndefined,   # RFC-0016 W1-d3
                                   runTaint: runTaintOf(result.errors),
                                   replay: replayed.replayStatus,
@@ -4669,6 +4671,7 @@ macro symexFindAllWitnesses*(fn: typed,
                                          symexSettings.replay)
   let gapsSym = bindSym"findingGaps"   ## RFC-0005 S11 (private helper)
   let hintsSym = bindSym"findingHints"   ## RFC-0005 W1 (private helper)
+  let stampSym = bindSym"stampBuild"     ## RFC-0016 K5a
   let runtimeBody =
     if nTargets == 0:
       # RFC-0005 W1 (§8.1, S11: every finding carries soundness, gaps and
@@ -4815,6 +4818,7 @@ macro symexFindAllWitnesses*(fn: typed,
                                            `symexSettings`, `dbErrorsId`)
             f.hints = notes.hints
             f.diagnostics = notes.diagnostics
+          `stampSym`(f.soundness)   ## RFC-0016 K5a: a cache hit's too
           `findingsId`.add f
 
   result = quote do:

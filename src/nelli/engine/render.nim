@@ -9,6 +9,7 @@ import std/[options, tables, algorithm, strutils]
 import ../strategy, ../optbox
 import ./types
 from ../smt/types import UbKind, undefinedKinds   ## Z3-free (RFC-0016 WA-B, P4)
+from ../smt/soundness import buildSummary   ## RFC-0016 K5a
 
 # `renderDisplayed` is internal — it bridges the strategy's optional
 # display proc to the rendered string. Phases call it at Report
@@ -117,6 +118,9 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
   # Review R1-17: an `sfUnsat` is a proof only under these bounds.
   if f.status notin {sfNotApplicable, sfReplayMiss}:
     result.add "  bounds " & boundsText(f.bounds)
+  # RFC-0016 K5a: the build that decided it (none for a record no run stamped).
+  if f.soundness.buildSegment.len > 0:
+    result.add "  " & buildSummary(f.soundness)
   for g in f.gaps:
     result.add "  gap " & $g.class & " " & g.kind & ": " & g.msg
   for av in f.annotationViolations:
@@ -247,7 +251,11 @@ proc symexFindingJson(f: SymexFinding): string =
             ",\"witnessUnsafe\":" & $f.soundness.witnessUnsafe &
             ",\"witnessUndefined\":[" & undefinedJson(f) & "]" &
             ",\"runDependence\":[" & runDependenceJson(f.soundness.runDependence) &
-            "]}"
+            "]" &
+            (if f.soundness.buildSegment.len == 0: ""
+             else: ",\"buildSegment\":\"" & jsonEscape(f.soundness.buildSegment) &
+                   "\",\"buildRow\":\"" & jsonEscape(f.soundness.buildRow) & "\"") &
+            "}"
   # Review R1-17: the bounds a verdict was decided under. Review R2 (LV3): not
   # on an entry that is no verdict, as in the text rendering.
   if f.status notin {sfNotApplicable, sfReplayMiss}:

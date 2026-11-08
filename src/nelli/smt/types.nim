@@ -2898,6 +2898,15 @@ type
                           ## overflow checks off (Nim emits no zero check
                           ## then, and the C division is undefined). RFC-0016
                           ## WA-B; appended so every earlier ordinal holds.
+    feHostUnadmitted      ## RFC-0016 K5a (section 8.3). The host half of the
+                          ## build profile is not a verified one: the loaded
+                          ## libz3 is not 4.13.4 or 5.1, or no build row
+                          ## covers this build under it. The run decides
+                          ## nothing and is `sxUnknown`; it is not a raise.
+                          ## The message names the field and the value.
+                          ## Appended after the `ub*` range, so `UbKind` and
+                          ## every earlier ordinal hold. `classOf` is
+                          ## `dcNoAnswer`. sevError.
 
   UbKind* = range[ubUnsignedDivZero .. ubSignedDivZero]
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
@@ -3747,6 +3756,8 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feFloatWidth: dcNoAnswer
     # RFC-0016 W1-e: a parse-site decline with a typed-zero dummy, the class
     # of `feUnsupportedExprKind`.
+  of feHostUnadmitted: dcNoAnswer
+    # RFC-0016 K5a: the run never started; there is no modelled program.
   of ubUnsignedDivZero, ubIntMinModMinusOne, ubSignedOverflow,
      ubFloatToIntRange, ubIndeterminateRead, ubSignedDivZero: dcOmitted
     # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no

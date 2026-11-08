@@ -94,7 +94,10 @@ jobs:
         run: |
           set -euo pipefail
           all='cpp z3-4.13.4 msvc'
-          want="${LEGS//,/ }"; [ -n "${want// /}" ] || want="$all"
+          want="${LEGS//,/ }"
+          # TEMPORARY (CI-B development): a push has no inputs; this file picks the legs.
+          [ "$GITHUB_EVENT_NAME" = push ] && [ -r .github/nightly-push-legs ] && want="$(cat .github/nightly-push-legs)"
+          [ -n "${want// /}" ] || want="$all"
           sel=()
           for l in $want; do
             case " $all " in *" $l "*) sel+=("$l") ;; *) echo "unknown leg: $l" >&2; exit 1 ;; esac
@@ -230,8 +233,14 @@ jobs:
               # JIT (pcre64.dll here). Keep their output and count [OK] against
               # [SKIPPED], so the closing evidence is "ran, did not skip", not "rc 0".
               $jf = Join-Path $out "jit-$t.out"
-              ./scripts/run-ci-suite.ps1 -Suite $t -Cc vcc -TimeoutSec 600 -NimCache $nimcache -ExtraNimArgs $extra 2>&1 | Tee-Object -FilePath $jf
-              $m = Select-String -Path $jf -Pattern "<== $t rc=(\d+)" | Select-Object -Last 1
+              # A child process, its streams redirected at the OS level: piping this
+              # script's native stderr through PowerShell makes the first cl.exe warning
+              # a terminating error under the step's ErrorActionPreference.
+              $ca = @('-NoProfile', '-File', './scripts/run-ci-suite.ps1', '-Suite', $t, '-Cc', 'vcc', '-TimeoutSec', '600', '-NimCache', $nimcache)
+              if ($extra.Count -gt 0) { $ca += '-ExtraNimArgs'; $ca += $extra }
+              pwsh @ca *> $jf
+              Get-Content $jf | Select-Object -Last 60
+              $m = Select-String -Path $jf -Pattern "<== $t rc=(-?\d+)" | Select-Object -Last 1
               $rc = if ($m) { [int]$m.Matches[0].Groups[1].Value } else { 1 }
               $ok = @(Select-String -Path $jf -Pattern '^\s*\[OK\]').Count
               $sk = @(Select-String -Path $jf -Pattern '^\s*\[SKIPPED\]').Count

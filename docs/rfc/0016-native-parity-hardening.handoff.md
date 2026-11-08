@@ -3,12 +3,19 @@
 - **Stage:** Wave 1 shipped as **0.9.2** (2026-11-08): signed tag `v0.9.2`
   at `bc06d09f`, published `ghcr.io/coreyleavitt/nelli@sha256:925d0deb...`
   (content `dag-sha256:dded114f...`). Wave 2 in progress.
-- **Resume:** `/loop` grind over Wave 2. Remaining: CI-B (a fresh agent
-  continues from the CI-B agent's handoff on `rfc-0016-cib2`, carrying
-  `scratchpad/cib-continuation-notes.md`: empty the MSVC known-red list, all
-  four fixed), then K1a-ci, the shm-leak-count fix
-  (`rfc-0016-shmleakcount`, agent running), a full eos sweep at the new main
-  to calibrate the universe and id allowlists, W2-z; then Wave 3.
+- **Resume:** `/loop` grind over Wave 2. In flight (2026-11-08, each on
+  its own branch, none landed): CI-B continuation on `rfc-0016-cib2`
+  (ceiling ratchet re-banded to fail unlisted >90 s, stale listed <40 s,
+  i.e. 60 s x/÷ the measured 1.5x run noise; INT-45 closed; verification
+  nightly 42494651488); INT-47 fixes on `rfc-0016-int47` (four MSVC-only
+  reds; vcc check 42495630919); the K8a nightly runner kill (two attempts
+  of 42493251144 killed at 3m23s, deterministic, so resource exhaustion)
+  being fixed by batching `k8a-nightly.sh` over a new `-d:k8aStart` offset on
+  `rfc-0016-k8anight`; the shm-leak-count fix `rfc-0016-shmleakcount`
+  (`fba6f303`, CI running). Land each after its CI; CI-B lands with the
+  INT-47 entries removed from the msvc known-red list once INT-47 is in.
+  Then K1a-ci, a full eos sweep at the new main to calibrate the universe
+  and id allowlists, W2-z; then Wave 3.
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.

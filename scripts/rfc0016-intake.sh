@@ -89,6 +89,19 @@ self_test() {
   gh() { echo "self-test FAILED: dry-run called gh $*"; bad=1; }
   apply dry-run "$d/plan.txt" > "$d/out.txt"
   grep -q 'would OPEN' "$d/out.txt" || { echo "self-test FAILED: dry-run output"; bad=1; }
+  # the live path is the SAME apply(): with gh stubbed it must create the new issue (title,
+  # label, key-bearing body) and comment on the open one, and the dry run must have planned
+  # exactly those two actions (dry-run is the only difference: a guard before the gh calls)
+  [ "$(grep -c '^\[dry-run\]' "$d/out.txt")" = "$(wc -l < "$d/plan.txt" | tr -d ' ')" ] || { echo "self-test FAILED: dry-run lines differ from the plan"; bad=1; }
+  : > "$d/calls.txt"
+  gh() { printf '%s\n' "$*" | tr '\n' ' ' >> "$d/calls.txt"; echo >> "$d/calls.txt"; }
+  RUN_URL=https://example.invalid/run SHA=0123456789abcdef EVENT=schedule apply live "$d/plan.txt"
+  grep -q '^issue create --title \[nightly\] c-z3-4.13.4:tsymex_b --label rfc-0016-intake --body .*rfc0016-intake-key: c-z3-4.13.4:tsymex_b' "$d/calls.txt" \
+    || { echo "self-test FAILED: live did not create the new issue"; cat "$d/calls.txt"; bad=1; }
+  grep -q '^issue comment 7 --body .*rfc0016-intake-key: c-z3-4.13.4:tsymex_a' "$d/calls.txt" \
+    || { echo "self-test FAILED: live did not comment on the open issue"; cat "$d/calls.txt"; bad=1; }
+  [ "$(wc -l < "$d/calls.txt" | tr -d ' ')" = 3 ] || { echo "self-test FAILED: live made $(wc -l < "$d/calls.txt") gh calls, want 3 (a comment, two creates)"; bad=1; }
+  unset -f gh
   rm -rf "$d"
   [ "$bad" -eq 0 ] && echo "rfc0016-intake self-test: ok"
   return "$bad"

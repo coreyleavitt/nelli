@@ -2,11 +2,13 @@
 # --cc:vcc, Z3 4.13.4). One test per line, then the reason; `#` starts a comment.
 # scripts/check-linux-allowlist.sh fails the leg on a red test NOT listed here AND on a
 # listed test that passes, so an entry goes in the commit that fixes it. Each entry is a
-# real MSVC-only defect class that symex-mingw cannot see (INT-45).
+# real MSVC-only defect class that symex-mingw cannot see (INT-45). Branch rfc-0016-msvcd fixes
+# k5a_fwrapv, s6a_budget and s8cs_routes2; whichever of the two branches lands second deletes
+# those three entries (a listed test that passes fails the leg).
 #
 # Baseline: run 42446649374 at 13afdc01, 896 of 896 symex tests ran, 15 red; the stack and
 # capture artifacts of that run are fixed in the commit that adds this list.
 tsymex_0016_k5a_fwrapv  INT-45: the build is refused by design under vcc (-d:nelliFwrapv has no effect there, symex.nim:40); the test has no vcc arm
 tsymex_rfc0005_s6a_budget  INT-45: cl.exe rejects the generated C with C2124 (divide or mod by zero), a constant division gcc accepts
-tsymex_rfc0005_s8bz_overlap  INT-45: SIGSEGV (nil read) in tVariant, types.nim:2959, in the S8bz (6) inactive-branch suite under vcc
+tsymex_rfc0005_s8bz_overlap  INT-45: SIGSEGV in a `=dup` hook under tVariant during module-init IR construction; MSVC-only (mingw passes); root cause in progress
 tsymex_rfc0005_s8cs_routes2  INT-45: the test's asm "nop" is not accepted on x64 MSVC (C4235), so the generated C does not compile

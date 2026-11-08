@@ -23,10 +23,12 @@ name: symex-nightly
 # release asset, informational). A test that passed in the last main artifact
 # and fails now turns the leg red even if the allowlist covers it.
 #
-# CI-D. `.times` is the per-test compile+run wall time; scripts/check-ceiling.sh
-# reports every test over 60 s into the job summary and the artifact. It is a
-# finding, not a gate (dozens of tests are over today; their split is a work-list
-# row).
+# CI-D. `.times` is the per-test compile+run wall time. The gate job reports every
+# test over 60 s into the job summary and the artifact; the `report` job then
+# GATES it as a ratchet (scripts/check-ceiling.sh --offenders, the committed
+# tests/0016-allowlist/ceiling-offenders-<leg>.txt): an unlisted test over 60 s
+# is a new offender, a listed test under 45 s is a stale entry, and a finding for
+# either goes into the intake issues. The list only shrinks.
 #
 # INTAKE. A red `schedule` run opens or updates one `rfc-0016-intake` issue per
 # (leg, test) (scripts/rfc0016-intake.sh). Every other trigger is a dry run that
@@ -325,13 +327,13 @@ jobs:
           { echo '### W-63: JIT PCRE suites on symex-msvc'; echo '```'; cat out/jit-rows.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ -s out/jit-rows.txt ] && [ -z "$bad" ] || { echo "JIT rows did not all run: $bad"; exit 1; }
 
-      - name: CI-D, the 60 s ceiling
+      - name: CI-D, the 60 s ceiling (report; the `report` job gates it)
         if: ${{ !cancelled() }}
         run: |
           bash scripts/check-ceiling.sh --self-test
           bash scripts/check-ceiling.sh out/merged.log.times > out/ceiling.txt
           cat out/ceiling.txt
-          { echo "### $LEG: tests over the 60 s ceiling (CI-D finding, not a gate)"; echo '```'; head -n 40 out/ceiling.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### $LEG: tests over the 60 s ceiling (slowest 40; the ratchet is in the report job)"; echo '```'; head -n 40 out/ceiling.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: CI-C, sweep-diff against the recorded baseline
         id: diff
@@ -428,7 +430,7 @@ jobs:
 
   report:
     needs: [derive, sweep, msvc-sweep, gate, vm-alias]
-    if: ${{ always() && !cancelled() && (github.event_name == 'schedule' || inputs.intake != 'off') }}
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -446,7 +448,35 @@ jobs:
           path: findings
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-*-merged
+          path: merged
+
+      - name: CI-D, the 60 s ceiling ratchet
+        id: ceiling
+        run: |
+          set -uo pipefail
+          bash scripts/check-ceiling.sh --self-test
+          mkdir -p findings
+          rc=0
+          for dir in merged/nightly-*-merged; do
+            leg="${dir#merged/nightly-}"; leg="${leg%-merged}"
+            [ -r "$dir/merged.log.times" ] || continue   # vm-alias writes no times
+            out="$(bash scripts/check-ceiling.sh --offenders "tests/0016-allowlist/ceiling-offenders-$leg.txt" "$dir/merged.log.times")" || {
+              rc=1
+              # the FAIL blocks have the shape the intake extractor reads
+              # (a line is `  <seconds> <name>` or `  <name>`: the key is the last word)
+              printf '%s\n' "$out" | bash scripts/rfc0016-intake.sh --extract "$leg" /dev/stdin \
+                | awk -F'\t' '{ n = split($2, w, " "); printf "%s\t%s\t60 s ceiling ratchet: %s\n", $1, w[n], $3 }' >> findings/findings-ceiling.tsv
+            }
+            { echo "### $leg: 60 s ceiling ratchet"; echo '```'; printf '%s\n' "$out" | command grep -v '^[0-9.]* ' ; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          [ "$rc" = 0 ]
+
       - name: File or update the rfc-0016-intake issues
+        if: ${{ always() && !cancelled() && (github.event_name == 'schedule' || inputs.intake != 'off') }}
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}

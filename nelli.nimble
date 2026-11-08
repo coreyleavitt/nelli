@@ -1717,6 +1717,7 @@ task test, "Run the test suite":
             "tsymex_0016_panics_off",
             # RFC-0016 W1-a: one exception type id (W-01, W-33).
             "tsymex_0016_w1a_exn_typeid",
+            "tsymex_0016_k8a1_template_except_as",
             # RFC-0016 W1-e: float32 <-> float64 conversions decline (W-04).
             "tsymex_0016_w1e_floatwidth",
             # RFC-0016 W1-p: the three probe agreements, natively (SND-07, SND-12, INT-21).

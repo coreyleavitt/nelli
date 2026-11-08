@@ -3,17 +3,21 @@
 - **Stage:** Wave 1 shipped as **0.9.2** (2026-11-08): signed tag `v0.9.2`
   at `bc06d09f`, published `ghcr.io/coreyleavitt/nelli@sha256:925d0deb...`
   (content `dag-sha256:dded114f...`). Wave 2 in progress.
-- **Resume:** `/loop` grind over Wave 2. In flight (2026-11-08, each on
-  its own branch, none landed): CI-B continuation on `rfc-0016-cib2`
-  (ceiling ratchet made one-sided: fails only an unlisted test over 150 s,
-  60 s x 2.5; stale entries and 60 to 150 s tests warn; INT-45 closed); INT-47 fixes on `rfc-0016-int47` (four MSVC-only
-  reds; vcc check 42495630919); the K8a nightly runner kill (two attempts
-  of 42493251144 killed at 3m23s, deterministic, so resource exhaustion)
-  being fixed by batching `k8a-nightly.sh` over a new `-d:k8aStart` offset on
-  `rfc-0016-k8anight`; the shm-leak-count fix `rfc-0016-shmleakcount`
-  (`fba6f303`, CI running). Land each after its CI; CI-B lands with the
-  INT-47 entries removed from the msvc known-red list once INT-47 is in.
-  Then K1a-ci, a full eos sweep at the new main to calibrate the universe
+- **Resume:** `/loop` grind over Wave 2. Landed 2026-11-08: shm leak count
+  `785fb31a`, K8a nightly batching `b1f17b39` (10 batches of 25 under a 12 GB
+  guard; run 42497426347 green at 250 programs), INT-47 `846d18e9..4f682783`,
+  k8a_sink under Git Bash `2a91b74a`, CI-B `06c2cb95` (nightly cpp/z3-4.13.4/
+  msvc legs; ceiling ratchet one-sided at 60 s x 2.5 = 150 s, stale entries
+  warn only; msvc known-red list empty; verification 42519745480 green). In
+  flight: K1a-ci on `rfc-0016-k1aci` (`0e7198eb`; `scripts/universe-join.sh`
+  joins every leg's pin records, fails on zero records), planted RED on the
+  throwaway `rfc-0016-k1aci-red` (`3eb757a6`, a stale `errorkind:feFloatWidth`
+  allowlist line). Proof runs: symex-linux 42532172123 / 42532180790,
+  symex-mingw 42532172035 / 42532180826, nightly narrowed to
+  `tsymex_0016_w1e_floatwidth` 42532200997 / 42532198619 (green / red). Open
+  risk: full-run joins on non-`linux-c` rows may show unclassified cells (the
+  allowlists were calibrated on linux-c). Then delete the throwaway branch,
+  land K1a-ci, a full eos sweep at the new main to calibrate the universe
   and id allowlists, W2-z; then Wave 3.
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,

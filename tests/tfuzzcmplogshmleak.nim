@@ -52,16 +52,25 @@ import nelli/[datasource, rng]
 disableParamFiltering()
 
 when defined(posix):
-  proc countNelliShmEntries(): int =
-    ## Mirrors `db.nim`'s `sweepStaleShmSegments` prefix-only scoping
-    ## (`nelliShmPrefix = "nelli_"`) rather than importing it: this test
-    ## deliberately does not depend on `db.nim`'s own internals, only on the
-    ## SAME observable fact its module doc states (a POSIX `shm_open`
-    ## segment is an ordinary file under `/dev/shm`).
+  proc countNelliShmEntries(ownerPid: int): int =
+    ## Counts `nelli_*` entries under `/dev/shm` that THIS process could
+    ## have created (embedded owner pid == `ownerPid`, parsed by the
+    ## product's own `shmSegmentOwnerPid`). A global count is not safe:
+    ## `scripts/sweep.sh -j N` runs sibling tests that create and sweep
+    ## their own `nelli_*` segments in the same `/dev/shm` concurrently.
     if not dirExists("/dev/shm"): return 0
     for kind, p in walkDir("/dev/shm", relative = false):
-      if kind == pcFile and extractFilename(p).startsWith("nelli_"):
+      let name = extractFilename(p)
+      if kind == pcFile and name.startsWith(nelliShmPrefix) and
+         shmSegmentOwnerPid(name) == ownerPid:
         inc result
+
+  proc plant(names: seq[string]) =
+    for n in names: writeFile("/dev/shm" / n, "")
+
+  proc unplant(names: seq[string]) =
+    for n in names:
+      try: removeFile("/dev/shm" / n) except OSError: discard
 
 proc leakProbeGate(x: int) {.cover, covercmp.} =
   if x == 0xDEADBEEF:
@@ -72,10 +81,11 @@ proc leakProbeGate(x: int) {.cover, covercmp.} =
 when defined(posix):
   suite "RFC-fuzzer-nextgen R12 follow-up — cmp-log shm segments are reclaimed, not leaked, on POSIX":
     test "a 60-iteration processIsolation: true + enableI2S: true campaign does not accumulate one /dev/shm segment per iteration":
-      let before = countNelliShmEntries()
+      let me = getCurrentProcessId()
+      let before = countNelliShmEntries(me)
       let report = fuzz(integers(0, 0xFFFFFFFF), leakProbeGate,
                         FuzzSettings(seed: 7'u64, maxIterations: 60, guidance: GuidanceConfig(enableI2S: true), executor: ExecutorConfig(processIsolation: true)))
-      let after = countNelliShmEntries()
+      let after = countNelliShmEntries(me)
       check report.iterations == 60   # the campaign genuinely ran all 60 spawns
       # Before the follow-up fix, every spawn's cmp-log segment was left
       # behind permanently (no unlink anywhere in this codebase) -- a
@@ -85,6 +95,20 @@ when defined(posix):
       # segment before the NEXT spawn even starts, so growth here must stay
       # a small constant, never proportional to `maxIterations`.
       check after - before < 10
+  suite "count scoping — immune to concurrent tests' segments":
+    test "foreign-pid segments planted between snapshots do not move the count; own-pid ones do":
+      let me = getCurrentProcessId()
+      let other = me + 1
+      var foreign, own: seq[string]
+      for i in 1 .. 12:
+        foreign.add "nelli_foreign_cmp_" & $other & "_" & $i
+        own.add "nelli_worker_cmp_" & $me & "_" & $(900000 + i)
+      defer: unplant(foreign); unplant(own)
+      let before = countNelliShmEntries(me)
+      plant foreign
+      check countNelliShmEntries(me) - before < 10   # sibling noise ignored
+      plant own
+      check countNelliShmEntries(me) - before >= 10  # a real own leak is caught
 else:
   suite "RFC-fuzzer-nextgen R12 follow-up — cmp-log shm segments are reclaimed, not leaked, on POSIX":
     test "skipped on non-POSIX (no /dev/shm; Windows named mappings self-clean on last handle close)":

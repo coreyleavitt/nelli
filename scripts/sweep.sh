@@ -87,6 +87,8 @@
 #   <outlog>.drift    registry drift against nelli.nimble
 #   <outlog>.failures/  stdout+stderr tails of each non-zero test (only if any)
 #   <outlog>.summary  the image/Z3 line, counts, and the failing set
+#   <outlog>.times    `<seconds> <backend> <file>` per test, compile plus run
+#                     (RFC-0016 CI-D; scripts/check-ceiling.sh reads it)
 #   <outlog>.env      the image and the libz3 version that actually ran, so a
 #                     baseline is self-describing. (Kept out of <outlog>
 #                     itself: sweep-diff.sh keys every line of that file.)
@@ -223,6 +225,7 @@ fi
 pin_dir="$outlog.pins"
 rm -rf "$pin_dir"; mkdir -p "$pin_dir"
 export NELLI_PIN_DIR="$pin_dir"
+: > "$outlog.times"
 
 # ---- which Z3 ran ---------------------------------------------------------
 # Ask the environment itself (compile and run a one-line C probe against its
@@ -263,7 +266,7 @@ else
 fi
 echo "$env_line" > "$outlog.env"
 failure_dir="$outlog.failures"; rm -rf "$failure_dir"
-export NELLI_IMAGE="$image" warn_root failure_dir universe_name
+export NELLI_IMAGE="$image" warn_root failure_dir universe_name outlog
 
 # ---- registry drift ------------------------------------------------------
 # nelli.nimble's `test` task list is hand-maintained; symex-mingw derives its
@@ -346,8 +349,14 @@ run_one() {
   # The universe test in the PARALLEL set (a filtered shard) sees a partial
   # directory; it gets none, as before K1a-last.
   if [ "$name" = "$universe_name" ] && [ "${universe_joined:-0}" != 1 ]; then unset NELLI_PIN_DIR; fi
+  local t0=$EPOCHREALTIME
   scripts/dt-bounded.sh "$b" "$f" "$t" >"$stdout_tmp" 2>"$stderr_tmp"
   rc=$?
+  # RFC-0016 CI-D: per-test wall time (compile + run), a sidecar so the log
+  # keeps its <rc> <backend> <file> <warn> shape. One short append per test is
+  # atomic across the parallel workers.
+  awk -v a="$t0" -v b="$EPOCHREALTIME" -v bk="$b" -v f="$f" \
+    'BEGIN { printf "%.1f %s %s\n", b - a, bk, f }' >> "$outlog.times"
   # A failure leaves its output tail in <outlog>.failures/ so a CI log that
   # only has "rc=1" is diagnosable. Sidecar only; never touches the log.
   if [ "$rc" -ne 0 ]; then

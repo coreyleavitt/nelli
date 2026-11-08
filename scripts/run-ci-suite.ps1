@@ -30,6 +30,10 @@
   Peak working-set limit for the test binary, in MB.
 .PARAMETER ExtraNimArgs
   Additional `nim c` arguments (e.g. -d:symexCiLeanB5).
+.PARAMETER Cc
+  The C compiler: gcc (the symex-mingw default) or vcc (the CI-B symex-msvc
+  leg, which needs cl.exe on PATH from vcvars64). vcc links an 8 MB main
+  stack with /STACK where gcc uses -Wl,--stack.
 .PARAMETER NimCache
   A nimcache directory to build in, shared by the suites of one shard
   (RFC-0005 S8cm). Empty: nim's default, one directory per suite.
@@ -39,7 +43,8 @@ param(
   [int]$TimeoutSec = 240,
   [int]$MaxWorkingSetMB = 6144,
   [string[]]$ExtraNimArgs = @(),
-  [string]$NimCache = ''
+  [string]$NimCache = '',
+  [ValidateSet('gcc', 'vcc')][string]$Cc = 'gcc'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,10 +54,11 @@ if ($NimCache) { $ExtraNimArgs = @("--nimcache:$NimCache") + $ExtraNimArgs }
 # -Wl,--stack: link an 8 MB main-thread stack (Linux parity). Windows
 # defaults to 1 MB, and deep walker/Z3 recursion intermittently overflowed it
 # as a silent crash (catalog #11 class).
-nim c --cc:gcc --threads:on --hints:off --colors:off `
+$stackFlag = if ($Cc -eq 'vcc') { '--passL:/STACK:8388608' } else { '--passL:-Wl,--stack,8388608' }
+nim c "--cc:$Cc" --threads:on --hints:off --colors:off `
   --path:src --path:_deps/z3/src --path:_deps/softlink/src `
   --cincludes:C:/z3/include `
-  --passL:"-Wl,--stack,8388608" @ExtraNimArgs "tests/$Suite.nim"
+  $stackFlag @ExtraNimArgs "tests/$Suite.nim"
 if ($LASTEXITCODE -ne 0) {
   Write-Host "<== $Suite rc=$LASTEXITCODE (compile failed)"
   exit $LASTEXITCODE

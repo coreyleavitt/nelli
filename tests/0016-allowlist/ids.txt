@@ -4,7 +4,6 @@
 # An alias (F-0001 for W-01) resolves to its row.
 SND-07	W1-p	no cell or pin names it yet; section 11 names the id in this slice only
 SND-12	W1-p	no cell or pin names it yet; section 11 names the id in this slice only
-SND-13	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
 PRC-01	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-02	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-03	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
@@ -42,28 +41,20 @@ PRC-40	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 PRC-38	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 CRH-01	K2c	no cell or pin names it yet; section 11 names the id in this slice only
 CRH-03	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-CRH-06	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
 CRH-07	K8c	no cell or pin names it yet; the row's home names this slice
-CRH-08	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
-CRH-09	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
 CI-01	H1	no cell or pin names it yet; section 11 names the id in this slice only
 CI-02	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INF-01	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INF-04	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 UPS-02	S8cj	no cell or pin names it yet; section 11 names the id in this slice only
 PND-03	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-PND-13	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
 INT-05	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-06	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-07	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-INT-11	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
-INT-12	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
-INT-15	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
 INT-18	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-19	H1	no cell or pin names it yet; section 11 names the id in this slice only
 INT-20	H1	no cell or pin names it yet; section 11 names the id in this slice only
 INT-21	W1-p	no cell or pin names it yet; section 11 names the id in this slice only
-INT-22	K2-0	no cell or pin names it yet; section 11 names the id in this slice only
 INT-23	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-25	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-26	H1	no cell or pin names it yet; section 11 names the id in this slice only
@@ -84,9 +75,7 @@ W-10	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision
 W-12	K3b	no cell or pin names it yet; the row's home names this slice
 W-14	K5b	no cell or pin names it yet; the row's home names this slice
 W-17	K5a	no cell or pin names it yet; the row's home names this slice
-W-22	K2-0	no cell or pin names it yet; the row's home names this slice
 W-23	W1-c1b	no cell or pin names it yet; the row's home names this slice
-W-24	K2-0	no cell or pin names it yet; the row's home names this slice
 W-27	K2a	no cell or pin names it yet; the row's home names this slice
 W-50	K5a	no cell or pin names it yet; the row's home names this slice
 W-51	K5b	no cell or pin names it yet; the row's home names this slice
@@ -95,8 +84,6 @@ W-53	K5a	no cell or pin names it yet; the row's home names this slice
 W-55	K9b	no cell or pin names it yet; the row's home names this slice
 W-61	K9d-0	no cell or pin names it yet; the row's home names this slice
 W-15	K2a	no cell or pin names it yet; the row's home names this slice
-W-19b	K2-0	no cell or pin names it yet; the row's home names this slice
-W-19c	K2-0	no cell or pin names it yet; the row's home names this slice
 W-34	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-35	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-36	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do

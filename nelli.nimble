@@ -1722,6 +1722,9 @@ task test, "Run the test suite":
             "tsymex_0016_w1e_floatwidth",
             # RFC-0016 W1-p: the three probe agreements, natively (SND-07, SND-12, INT-21).
             "tsymex_0016_w1p_probes",
+            # RFC-0016 K2-0: the probe batch (SND-13, CRH-06, CRH-08, CRH-09, INT-11, INT-12, INT-15, INT-22, PND-13, W-19b, W-19c, W-22, W-24).
+            "tsymex_0016_k20_probes",
+            "tsymex_0016_k20_probes_child",
             # RFC-0016 W1-b: local pragmas outside the allowlist decline (W-02).
             "tsymex_0016_w1b_localpragma",
             # RFC-0016 code review: zero-parameter SUTs through every entry point.

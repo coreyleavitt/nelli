@@ -103,6 +103,7 @@ type
     native*: string        ## what the native run showed
     build*: string         ## `pinBuildSegment()` at write time
     row*: string           ## `rowOf`'s BuildRow at write time ("" when none)
+    date*: string          ## UTC write time, `pinDateFmt` ("" in older records)
     cap*: string           ## pinCap: the CapKind member the run halted on
     flags*: seq[string]    ## pinCrash: the exact flags the probe was built with
     why*: string           ## skipCell: the reason
@@ -162,12 +163,22 @@ initLock(pinLock)
 proc pinDir*(): string =
   getEnv("NELLI_PIN_DIR", "tests" / ".pins")
 
+const pinDateFmt* = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+
+proc pinNow*(): Time =
+  ## The clock every pin date and freshness check reads. `$NELLI_PIN_NOW`
+  ## (unix seconds) replaces the wall clock, so a test can fix "now".
+  let o = getEnv("NELLI_PIN_NOW", "")
+  if o.len > 0: fromUnix(parseBiggestInt(o)) else: getTime()
+
+proc pinDate*(t: Time): string = t.utc.format(pinDateFmt)
+
 func toJson(r: PinRecord): JsonNode =
   %*{"runId": r.runId, "testFile": r.testFile, "entry": r.entry,
      "cell": render(r.cell), "target": r.target, "domain": r.domain,
      "exhaustive": r.exhaustive, "verdict": $r.verdict, "walker": r.walker,
      "declineKind": r.declineKind, "native": r.native, "build": r.build,
-     "row": r.row, "cap": r.cap, "flags": r.flags, "why": r.why}
+     "row": r.row, "date": r.date, "cap": r.cap, "flags": r.flags, "why": r.why}
 
 proc fromJson(n: JsonNode): PinRecord =
   result.runId = n["runId"].getStr
@@ -185,6 +196,7 @@ proc fromJson(n: JsonNode): PinRecord =
   result.native = n["native"].getStr
   result.build = n["build"].getStr
   result.row = n{"row"}.getStr       # absent in records written before K1a
+  result.date = n{"date"}.getStr     # absent in records written before K1a-last
   result.cap = n{"cap"}.getStr
   for f in n["flags"]: result.flags.add f.getStr
   result.why = n["why"].getStr
@@ -195,6 +207,7 @@ proc writePinRecord*(r: PinRecord): string {.discardable.} =
   var rec = r
   rec.build = pinBuildSegment()
   rec.row = pinBuildRow()
+  rec.date = pinDate(pinNow())
   {.cast(gcsafe).}:
     withLock pinLock:
       if pinFile.len == 0:

@@ -25,7 +25,7 @@
 # prose next to the code that computes it is a number that goes stale; read
 # <outlog>.drift, which is generated and therefore cannot lie.
 #
-# Usage: scripts/sweep.sh [--host] [--derive] [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>
+# Usage: scripts/sweep.sh [--host] [--derive] [--universe] [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>
 #   --host    no podman (RFC-0016 CI-A2): run each test directly on this
 #             machine through the same scripts/run-one.sh the container runs,
 #             under the same hard-kill timeout. Needs `nim` and gcc on PATH,
@@ -40,6 +40,11 @@
 #             CI leg should run. .drift still reports files on disk that are
 #             registered nowhere. A registered name with no file is reported
 #             there and not run. Composes with -f.
+#   --universe  run tests/tsymex_0016_universe.nim last even under -f (RFC-0016
+#             K1a-last). Without -f it always runs last; with -f it runs last
+#             only under this flag, and otherwise stays an ordinary member of
+#             the parallel set with NELLI_PIN_DIR unset (the CI shards, which
+#             hold a slice of the pins, until K1a-ci joins their directories).
 #   -j N      parallel jobs (default 6)
 #   -t SECS   per-test timeout passed to dt-bounded.sh (default 900)
 #   -b BE     backend, c or cpp (default c; `nimble test` uses c only)
@@ -47,6 +52,16 @@
 #             the distro Z3; `z3-4.13.4` is the Z3 4.13.4 row). Built on demand.
 #             Passed to every dt-bounded.sh worker; composes with -b and -f.
 #   -f REGEX  restrict the run set to basenames matching REGEX
+#
+# Record directory and the universe join (RFC-0016 section 8.2, K1a-last).
+# Every test runs with NELLI_PIN_DIR=<outlog>.pins/ (made empty at the start,
+# so it is unique per sweep and never the shared tests/.pins/). The universe
+# test is held out of the parallel phase and run LAST over that directory. The
+# sweep FAILS (exit 3, a `sweep.sh: UNIVERSE FAILED` line on stderr and in
+# .summary) if that directory holds no record or the universe test exits
+# non-zero. The universe test's own line stays in the log in the normal
+# `<rc> <backend> <file> <warnings>` format, so sweep-diff.sh is unaffected.
+# The per-row seven-day freshness check runs inside the universe test.
 #
 # Output contract, one line per test, in completion order:
 #
@@ -85,6 +100,8 @@ filter=
 image=latest
 host=0
 derive=0
+force_universe=0
+universe_name=tsymex_0016_universe
 
 # Long options first (getopts has none); everything else falls through.
 args=()
@@ -92,12 +109,13 @@ for a in "$@"; do
   case "$a" in
     --host) host=1 ;;
     --derive) derive=1 ;;
+    --universe) force_universe=1 ;;
     *) args+=("$a") ;;
   esac
 done
 set -- ${args[@]+"${args[@]}"}
 
-usage="usage: sweep.sh [--host] [--derive] [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>"
+usage="usage: sweep.sh [--host] [--derive] [--universe] [-j N] [-t SECS] [-b c|cpp] [-i IMAGE] [-f REGEX] <outlog>"
 while getopts ":j:t:b:i:f:" opt; do
   case "$opt" in
     j) jobs="$OPTARG" ;;
@@ -110,6 +128,7 @@ while getopts ":j:t:b:i:f:" opt; do
 done
 shift $((OPTIND - 1))
 outlog="${1:?$usage}"
+case "$outlog" in /*) ;; *) outlog="$PWD/$outlog" ;; esac
 
 case "$backend" in c|cpp) ;; *) echo "sweep.sh: backend must be c or cpp" >&2; exit 2 ;; esac
 
@@ -176,21 +195,34 @@ if [ "$derive" -eq 1 ]; then
 else
   candidates=(tests/t*.nim)
 fi
+universe_file=
 for f in ${candidates[@]+"${candidates[@]}"}; do
   [ -e "$f" ] || continue
   name="$(basename "$f" .nim)"
+  if [ "$name" = "$universe_name" ] && [ -z "$filter" -o "$force_universe" -eq 1 ]; then
+    universe_file="$f"; continue    # held out: runs last (below)
+  fi
   if [ -n "$filter" ]; then
     printf '%s' "$name" | grep -Eq "$filter" || continue
   fi
   run_set+=("$f")
 done
 
-if [ "${#run_set[@]}" -eq 0 ]; then
+# --universe forces the join even when the candidate list (or -f) left the
+# universe test out of the run set's candidates.
+if [ "$force_universe" -eq 1 ] && [ -z "$universe_file" ] && [ -e "tests/$universe_name.nim" ]; then
+  universe_file="tests/$universe_name.nim"
+fi
+
+if [ "${#run_set[@]}" -eq 0 ] && [ -z "$universe_file" ]; then
   echo "sweep.sh: run set is empty${filter:+ (filter: $filter)}" >&2
   exit 2
 fi
 
 : > "$outlog"
+pin_dir="$outlog.pins"
+rm -rf "$pin_dir"; mkdir -p "$pin_dir"
+export NELLI_PIN_DIR="$pin_dir"
 
 # ---- which Z3 ran ---------------------------------------------------------
 # Ask the environment itself (compile and run a one-line C probe against its
@@ -231,7 +263,7 @@ else
 fi
 echo "$env_line" > "$outlog.env"
 failure_dir="$outlog.failures"; rm -rf "$failure_dir"
-export NELLI_IMAGE="$image" warn_root failure_dir
+export NELLI_IMAGE="$image" warn_root failure_dir universe_name
 
 # ---- registry drift ------------------------------------------------------
 # nelli.nimble's `test` task list is hand-maintained; symex-mingw derives its
@@ -311,6 +343,9 @@ run_one() {
   local b="$1" f="$2" t="$3" name rc stderr_tmp filtered warn_n
   name="$(basename "$f" .nim)"
   stderr_tmp="$(mktemp)"; stdout_tmp="$(mktemp)"
+  # The universe test in the PARALLEL set (a filtered shard) sees a partial
+  # directory; it gets none, as before K1a-last.
+  if [ "$name" = "$universe_name" ] && [ "${universe_joined:-0}" != 1 ]; then unset NELLI_PIN_DIR; fi
   scripts/dt-bounded.sh "$b" "$f" "$t" >"$stdout_tmp" 2>"$stderr_tmp"
   rc=$?
   # A failure leaves its output tail in <outlog>.failures/ so a CI log that
@@ -355,7 +390,20 @@ export -f run_one
     # contain a space).
     printf '%s\0%s\0%s\0' "$backend" "$f" "$timeout_secs"
   done
-} | xargs -0 -P"$jobs" -n3 bash -c 'run_one "$0" "$1" "$2"' >> "$outlog"
+} | xargs -0 -r -P"$jobs" -n3 bash -c 'run_one "$0" "$1" "$2"' >> "$outlog"
+
+# ---- the universe join, last, over this sweep's record directory ------------
+universe_fail=
+if [ -n "$universe_file" ]; then
+  pin_n=$(find "$pin_dir" -name '*.jsonl' -size +0 2>/dev/null | wc -l | tr -d ' ')
+  universe_joined=1 run_one "$backend" "$universe_file" "$timeout_secs" >> "$outlog"
+  urc=$(awk -v f="$universe_file" '$3 == f {r=$1} END{print r}' "$outlog")
+  if [ "$pin_n" -eq 0 ]; then
+    universe_fail="empty record directory $pin_dir (no pin record was written by this sweep)"
+  elif [ "$urc" != "0" ]; then
+    universe_fail="the universe join exited $urc over $pin_n record file(s) in $pin_dir"
+  fi
+fi
 
 # ---- warnings sidecar -----------------------------------------------------
 warnlog="$outlog.warnings"
@@ -385,6 +433,8 @@ warn_total=$(awk '{s+=$4+0} END{print s+0}' "$outlog")
   echo "pass=$pass fail=$fail (of which timeout-killed=$killed) skip=$skip total=$((pass + fail + skip))"
   echo "unregistered=$unregistered_n missing=$missing_n stale_skiplist=$stale_n  (see $drift)"
   echo "warn_tests=$warn_tests warn_total=$warn_total  (see $warnlog) -- trend only, never zero; the gate is scripts/sweep-diff.sh's warnings delta against a baseline, not this total"
+  echo "pins=$pin_dir"
+  [ -n "$universe_fail" ] && echo "sweep.sh: UNIVERSE FAILED: $universe_fail"
   if [ "$fail" -gt 0 ]; then
     echo
     echo "## failing"
@@ -392,4 +442,7 @@ warn_total=$(awk '{s+=$4+0} END{print s+0}' "$outlog")
   fi
 } > "$summary"
 cat "$summary" >&2
+# Exit 3 is the universe gate and nothing else; any other failure stays in the
+# log (this script's contract above).
+[ -n "$universe_fail" ] && exit 3
 exit 0

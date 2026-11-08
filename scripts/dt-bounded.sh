@@ -15,6 +15,8 @@
 #        path; absolute outside the repo is bind-mounted at the same path.
 #        Unset: nothing is forwarded (the in-repo default tests/.pins/ reaches
 #        the host through the /work mount anyway).
+#        NELLI_PIN_NOW  if set, forwarded: the clock the pin dates and the
+#        seven-day freshness check read (unix seconds).
 #        NELLI_HOST=1  no podman: run scripts/run-one.sh directly on the host
 #        under the same hard-kill timeout (`sweep.sh --host`). The compile
 #        command is scripts/run-one.sh either way.
@@ -49,6 +51,9 @@ if [ -n "${NELLI_PIN_DIR:-}" ]; then
       pin_args+=(-e "NELLI_PIN_DIR=$pin_abs" -v "$pin_abs:$pin_abs") ;;
   esac
 fi
+
+# NELLI_PIN_NOW (unix seconds) fixes the pin clock (RFC-0016 K1a-last).
+[ -n "${NELLI_PIN_NOW:-}" ] && pin_args+=(-e "NELLI_PIN_NOW=$NELLI_PIN_NOW")
 
 if [ -n "$host" ]; then
   # `timeout` puts the child in its own process group and, on expiry, signals

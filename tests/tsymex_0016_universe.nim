@@ -45,8 +45,11 @@
 ## (k1lite's reason, too). Without records the structural checks still run
 ## (the committed ledger, the allowlist entries against the universe, the
 ## self-tests over fixtures) and the test prints that the join was not
-## evaluated. Failing on an empty directory, and the sweep that makes one, is
-## K1a-last's; the CI join job is K1a-ci's.
+## evaluated. When the variable IS set, an empty directory fails (K1a-last):
+## `scripts/sweep.sh` sets it to a per-sweep directory and runs this file
+## last. The same run fails a row whose newest record is over seven days old
+## (`freshnessProblems`, the clock `$NELLI_PIN_NOW` or the wall clock). The
+## CI join job is K1a-ci's.
 ##
 ## The allowlists are `tests/0016-allowlist/<scope>.txt` for scope magic,
 ## build, errorkind and capkind. A line is `cell<TAB>slice<TAB>reason`; the
@@ -57,7 +60,8 @@
 ## derived one on every run. To regenerate after reviewing the growth:
 ##   scripts/dt-bounded.sh c tests/tsymex_0016_universe.nim 900
 ##   cp tests/.pins/universe.derived.tsv docs/rfc/0016-universe.tsv
-import std/[unittest, os, strutils, sequtils, sets, tables, algorithm, options]
+import std/[unittest, os, strutils, sequtils, sets, tables, algorithm, options,
+            times]
 import nelli
 import nelli/symex
 import nelli/smt/types
@@ -218,6 +222,44 @@ proc orphanCells(u: seq[UCell]; recs: seq[PinRecord]): seq[string] =
       seen.incl k
       result.add k
   result.sort()
+
+const maxEvidenceAgeDays = 7
+
+proc freshnessProblems(recs: seq[PinRecord]; now: Time;
+                       maxDays = maxEvidenceAgeDays): seq[string] =
+  ## RFC-0016 section 8.2: each BuildRow with a run leg needs evidence dated
+  ## within seven days. For every row the records name, its NEWEST record must
+  ## be no older than `maxDays` (a record with no date counts as undated, and
+  ## undated is stale). A row with no record at all is the join's business (the
+  ## build:row cell), not this check's. `now` is a parameter so tests fix it.
+  var newest = initTable[string, Time]()
+  var undated = initHashSet[string]()
+  for r in recs:
+    if r.row.len == 0: continue
+    if r.date.len == 0:
+      undated.incl r.row
+      continue
+    let t = try: parse(r.date, pinDateFmt, utc()).toTime
+            except TimeParseError: (undated.incl r.row; continue)
+    if r.row notin newest or t > newest[r.row]: newest[r.row] = t
+  for row in undated:
+    if row notin newest:
+      result.add "row " & row & ": its records carry no parsable date"
+  for row, t in newest:
+    let age = now - t
+    if age > initDuration(days = maxDays):
+      result.add "row " & row & ": newest record is " & $age.inDays &
+        " days old (" & pinDate(t) & "), over " & $maxDays & " days"
+  result.sort()
+
+proc joinDirProblems(dirEnv: string; recs: seq[PinRecord]; now: Time):
+    seq[string] =
+  ## What a set `$NELLI_PIN_DIR` must satisfy before the join runs at all.
+  if dirEnv.len > 0 and recs.len == 0:
+    result.add "empty record directory: NELLI_PIN_DIR=" & dirEnv &
+      " holds no records, so the join would evaluate nothing"
+  else:
+    result.add freshnessProblems(recs, now)
 
 # --- the run ---------------------------------------------------------------
 
@@ -436,11 +478,12 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
 suite "RFC-0016 K1a-cells: the join over this run's records":
   test "the committed allowlists against NELLI_PIN_DIR":
     let recs = if pinDirEnv.len > 0: loadRecords(pinDirEnv) else: @[]
-    if recs.len == 0:
-      echo "universe: the join was NOT evaluated (NELLI_PIN_DIR " &
-           (if pinDirEnv.len == 0: "is unset" else: pinDirEnv & " holds no records") &
-           "); K1a-last makes this a failure"
-    else:
+    let dirProblems = joinDirProblems(pinDirEnv, recs, pinNow())
+    checkpoint dirProblems.join("\n")
+    check dirProblems.len == 0
+    if pinDirEnv.len == 0:
+      echo "universe: the join was NOT evaluated (NELLI_PIN_DIR is unset)"
+    elif recs.len > 0:
       let fails = joinUniverse(universe, recs, loadAllow(allowDir))
       checkpoint "NELLI_PIN_DIR=" & pinDirEnv & " (" & $recs.len &
                  " records)\n" & fails.join("\n")
@@ -449,6 +492,44 @@ suite "RFC-0016 K1a-cells: the join over this run's records":
       echo "universe: " & $universe.len & " cells, " & $recs.len &
            " records, " & $orphans.len & " cells that records name and no " &
            "table has yet (K1a-ids joins them): " & orphans.join(", ")
+
+suite "RFC-0016 K1a-last: empty and stale record directories fail":
+  let now = fromUnix(1_800_000_000)
+  proc rec(row: string; ageDays: int): PinRecord =
+    PinRecord(row: row, verdict: pvExact,
+              date: pinDate(now - initDuration(days = ageDays)))
+
+  test "RED: a set but empty NELLI_PIN_DIR fails":
+    let p = joinDirProblems("/some/sweep.pins", @[], now)
+    check p.len == 1
+    check "empty record directory" in p[0]
+
+  test "an unset NELLI_PIN_DIR is not a failure (plain single-test run)":
+    check joinDirProblems("", @[], now).len == 0
+
+  test "RED: a record dated eight days before now fails the freshness check":
+    let p = freshnessProblems(@[rec("linux-c", 8)], now)
+    check p.len == 1
+    check "linux-c" in p[0] and "8 days old" in p[0]
+
+  test "records of seven days or less pass; the newest record of a row counts":
+    check freshnessProblems(@[rec("linux-c", 7)], now).len == 0
+    check freshnessProblems(@[rec("linux-c", 30), rec("linux-c", 1)], now).len == 0
+
+  test "each row is judged on its own newest record":
+    let p = freshnessProblems(@[rec("linux-c", 1), rec("mingw", 9),
+                                rec("mingw", 10)], now)
+    check p.len == 1 and p[0].startsWith("row mingw")
+
+  test "an undated record is stale; a record with no row is not judged":
+    check freshnessProblems(@[PinRecord(row: "linux-c")], now).len == 1
+    check freshnessProblems(@[PinRecord(row: "")], now).len == 0
+
+  test "the clock is injectable":
+    check freshnessProblems(@[rec("linux-c", 0)], now + initDuration(days = 8)).len == 1
+    putEnv("NELLI_PIN_NOW", "1800000000")
+    check pinNow().toUnix == 1_800_000_000
+    delEnv("NELLI_PIN_NOW")
 
 # --- K1a-ids: the work list ------------------------------------------------
 

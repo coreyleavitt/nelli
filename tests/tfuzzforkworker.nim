@@ -114,3 +114,25 @@ when defined(posix):
       let obs = w.submit(@[])
       check obs.verdict == vOk
       check obs.message == "single-threaded-ok"
+
+    test "submit does not misfire on a thread that was just joined (stress)":
+      # INT-46: pthread_join returns once the kernel clears the child tid,
+      # which happens in do_exit BEFORE the task leaves /proc/self/task. A
+      # guard that counts directory entries sees the dead thread for a short
+      # window and raises ForkUnsafeError on a process that is single-threaded
+      # by every observable measure. Repeating create/join/submit makes the
+      # window hit reliably instead of once in a CI run.
+      let dispatch = proc(input: ChoiceSeq): Observation[void] =
+        Observation[void](verdict: vOk)
+      let w = newForkWorker[void](dispatch)
+      var misfires = 0
+      for i in 0 ..< 5000:
+        keepSpinning = false
+        var th: Thread[int]
+        createThread(th, idleThreadBody, 0)
+        joinThread(th)
+        try:
+          discard w.submit(@[])
+        except ForkUnsafeError:
+          inc misfires
+      check misfires == 0

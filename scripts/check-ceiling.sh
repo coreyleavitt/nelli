@@ -11,12 +11,12 @@
 #               shape of the other allowlists). Without it the script only
 #               REPORTS (exit 0), as CI-D first did.
 # Env:    CEILING_SECS         the ceiling, default 60
-#         CEILING_FACTOR       the new-offender margin over the ceiling, default 2.1
+#         CEILING_FACTOR       the new-offender margin over the ceiling, default 2.5
 #         CEILING_TESTS_DIR    where tests/<name>.nim live, default tests
 #
 # Prints every test over the ceiling, slowest first, as `<seconds> <test>`
 # under a total line. With --offenders it is a gate (exit 1) on:
-#   1. NEW offenders: an unlisted test over NEW_ABOVE (60 * 2.1 = 126 s);
+#   1. NEW offenders: an unlisted test over NEW_ABOVE (60 * 2.5 = 150 s);
 #   2. a listed name with no tests/<name>.nim (a retired test), a duplicate
 #      entry, or an entry with no reason.
 # It WARNS (reported, exit unchanged, and a finding for the intake issues) on:
@@ -42,11 +42,14 @@
 #   cpp, z3-4.13.4: 0 in all three folds at every factor;
 #   msvc: 0, 0 and 1 at 2.0. The one is tsymex_0016_k8a1_template_except_as,
 #   12.3 s, 10.2 s, then 125.7 s (a 10x outlier, not a ratio tail), so 2.0
-#   (120 s) is not enough and 2.1 (126 s) is the smallest one-decimal factor
-#   giving 0 in every fold. 3.0 is the cap; past it, re-seed the lists instead.
+#   (120 s) is not enough. 2.1 (126 s) is the smallest one-decimal factor
+#   giving 0 in every fold, but it clears that one outlier by 0.3 s, which is
+#   fitting a single point, not a margin. 2.5 (150 s) is 0 in every fold and
+#   sits a third above the widest observed p95 ratio (1.87) and a fifth above
+#   the outlier. 3.0 is the cap; past it, re-seed the lists instead.
 set -uo pipefail
 ceiling="${CEILING_SECS:-60}"
-factor="${CEILING_FACTOR:-2.1}"
+factor="${CEILING_FACTOR:-2.5}"
 new_above="$(awk -v c="$ceiling" -v n="$factor" 'BEGIN { print c * n }')"   # NEW_ABOVE
 
 
@@ -120,7 +123,7 @@ self_test() {
   : > "$d/tests/tnew.nim"; : > "$d/tests/tstale.nim"; : > "$d/tests/tband.nim"
   : > "$d/tests/tslow.nim"; : > "$d/tests/tfast.nim"; : > "$d/tests/tedge.nim"
   printf '%s\n' '# header' 'tstale  seed 80.0' 'tband  seed 70.0' 'tslow  seed 90.0' > "$d/off"
-  printf '%s\n' '10.0 c tests/tfast.nim' '130.5 c tests/tnew.nim' '35.0 c tests/tstale.nim' \
+  printf '%s\n' '10.0 c tests/tfast.nim' '160.5 c tests/tnew.nim' '35.0 c tests/tstale.nim' \
     '50.0 c tests/tband.nim' '300.2 c tests/tslow.nim' '60.0 c tests/tedge.nim' > "$d/t"
   expect() { # name want-rc pattern...
     local name="$1" want="$2"; shift 2
@@ -132,11 +135,11 @@ self_test() {
 
   # report-only (no offenders file): exits 0, lists the offenders, td at exactly 60 is not over
   expect report 0 "$d/t"
-  has '^300.2 tslow$'; has '^130.5 tnew$'; hasnt ' tedge$'; has '2 of 6 tests over'
+  has '^300.2 tslow$'; has '^160.5 tnew$'; hasnt ' tedge$'; has '2 of 6 tests over'
   # gate: tnew over the new-offender edge and unlisted fails; tstale listed and under 60 is a
   # STALE warning only (it is not what fails the gate); tband listed at 50 warns too; tslow is quiet
   expect gate 1 --offenders "$d/off" "$d/t"
-  has 'NEW offenders'; has '130.5 tnew'; has 'WARN: stale'; has 'tstale'; hasnt 'FAIL: STALE'; hasnt '  tslow'; hasnt '  tfast'
+  has 'NEW offenders'; has '160.5 tnew'; has 'WARN: stale'; has 'tstale'; hasnt 'FAIL: STALE'; hasnt '  tslow'; hasnt '  tfast'
   # only a listed-and-fast (warn) and a still-slow case: green
   printf '%s\n' 'tband  seed' 'tslow  seed' > "$d/off2"
   printf '%s\n' '50.0 c tests/tband.nim' '300.2 c tests/tslow.nim' '10.0 c tests/tfast.nim' > "$d/t2"
@@ -145,17 +148,17 @@ self_test() {
   expect partial 0 --offenders "$d/off2" "$d/t2" 
   printf '%s\n' '50.0 c tests/tband.nim' '10.0 c tests/tfast.nim' > "$d/t3"
   expect absent 0 --offenders "$d/off2" "$d/t3"
-  # the edges (ceiling 60, factor 2.1: new offender above 126; a stale entry never fails)
+  # the edges (ceiling 60, factor 2.5: new offender above 150; a stale entry never fails)
   : > "$d/tests/tw.nim"; : > "$d/tests/tl.nim"
   printf '%s\n' 'tl  seed' > "$d/offl"; : > "$d/offnone"
   printf '%s\n' '75.0 c tests/tw.nim' > "$d/tw75"
   expect warn75 0 --offenders "$d/offnone" "$d/tw75"; has 'WARN: over'; has '75.0 tw'; hasnt 'FAIL'; has 'PASS'
-  printf '%s\n' '125.0 c tests/tw.nim' > "$d/tw125"
-  expect warn125 0 --offenders "$d/offnone" "$d/tw125"; has 'WARN: over'; has '125.0 tw'; hasnt 'FAIL'
-  printf '%s\n' '130.0 c tests/tw.nim' > "$d/tw130"
-  expect new130 1 --offenders "$d/offnone" "$d/tw130"; has 'NEW offenders'; has '130.0 tw'
-  printf '%s\n' '126.0 c tests/tw.nim' > "$d/tw126"
-  expect edge126 0 --offenders "$d/offnone" "$d/tw126"; has 'WARN: over'
+  printf '%s\n' '145.0 c tests/tw.nim' > "$d/tw145"
+  expect warn145 0 --offenders "$d/offnone" "$d/tw145"; has 'WARN: over'; has '145.0 tw'; hasnt 'FAIL'
+  printf '%s\n' '155.0 c tests/tw.nim' > "$d/tw155"
+  expect new155 1 --offenders "$d/offnone" "$d/tw155"; has 'NEW offenders'; has '155.0 tw'
+  printf '%s\n' '150.0 c tests/tw.nim' > "$d/tw150"
+  expect edge150 0 --offenders "$d/offnone" "$d/tw150"; has 'WARN: over'
   printf '%s\n' '50.0 c tests/tl.nim' > "$d/tl50"
   expect listed50 0 --offenders "$d/offl" "$d/tl50"; has 'WARN: stale'; has '50.0 tl'; hasnt 'FAIL'; has 'PASS'
   printf '%s\n' '20.0 c tests/tl.nim' > "$d/tl20"

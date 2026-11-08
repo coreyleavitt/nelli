@@ -5,8 +5,8 @@
   (content `dag-sha256:dded114f...`). Wave 2 in progress.
 - **Resume:** `/loop` grind over Wave 2. In flight (2026-11-08, each on
   its own branch, none landed): CI-B continuation on `rfc-0016-cib2`
-  (ceiling ratchet made one-sided: fails only an unlisted test over 126 s,
-  60 s x 2.1; stale entries and 60 to 126 s tests warn; INT-45 closed); INT-47 fixes on `rfc-0016-int47` (four MSVC-only
+  (ceiling ratchet made one-sided: fails only an unlisted test over 150 s,
+  60 s x 2.5; stale entries and 60 to 150 s tests warn; INT-45 closed); INT-47 fixes on `rfc-0016-int47` (four MSVC-only
   reds; vcc check 42495630919); the K8a nightly runner kill (two attempts
   of 42493251144 killed at 3m23s, deterministic, so resource exhaustion)
   being fixed by batching `k8a-nightly.sh` over a new `-d:k8aStart` offset on
@@ -134,11 +134,11 @@
   longer loses a child's stderr, with a self-test). `scripts/check-ceiling.sh` is a GATE (the `report` job) with
   per-leg offender lists `tests/0016-allowlist/ceiling-offenders-<leg>.txt` and a one-sided gate: measured run-to-run
   per-test ratios over runs 42487154319, 42494651488 and 42508458773 had p5 0.46 to 0.67, p95 1.54 to 1.87 and msvc
-  tails past 3x, so no symmetric band held. An unlisted test fails only above 126 s (60 x 2.1); between 60 and 126 s
+  tails past 3x, so no symmetric band held. An unlisted test fails only above 150 s (60 x 2.5); between 60 and 150 s
   it warns; a listed entry that ran under 60 s warns as a stale entry and never fails. Every warning is an intake
   finding (leg `ceiling-<leg>`) that feeds a periodic re-seed. Lists are seeded with the union of tests over 60 s in
-  any of the three runs; leave-one-out (seed from two, test the third) gives 0 new offenders per leg per fold at 2.1
-  (at 2.0 msvc gives one: `tsymex_0016_k8a1_template_except_as`, 12.3, 10.2 then 125.7 s). `scripts/vm-alias-slice.sh` builds `tsymex_rfc0005_s8ab_letaudit`
+  any of the three runs; leave-one-out (seed from two, test the third) gives 0 new offenders per leg per fold at 2.5
+  (at 2.0 msvc gives one: `tsymex_0016_k8a1_template_except_as`, 12.3, 10.2 then 125.7 s; 2.1 would clear it by 0.3 s, so 2.5 for margin). `scripts/vm-alias-slice.sh` builds `tsymex_rfc0005_s8ab_letaudit`
   plus a rotating 12-test slice with `-d:nelliVmAliasAudit`. `scripts/rfc0016-intake.sh` files `rfc-0016-intake` issues
   keyed `leg:test` (more than 10 on a leg collapse to `leg:*`); only `schedule`, or a dispatch with `intake: live`,
   files; everything else prints `[dry-run]` lines. Defect rows: INT-44 (cpp unit pin), INT-45 (MSVC-only reds; the s8bz

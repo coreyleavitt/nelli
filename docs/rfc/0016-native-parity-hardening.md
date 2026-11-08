@@ -192,7 +192,7 @@ state = "pending"
 [[slice]]
 id    = "W2"
 title = "Wave 2 (§11): K5a build profile first, CI-A1/A2/A3 and CI-B legs incl. symex-msvc, K9b, ADM-1, K2-s census, K1a-cells/ids/last/ci ledger over the TOML work list, K7a/b Survivors and CapKind, K2-0 probe batch, K9d-0, K8-0, K8a-gen/job/sink, S8cj, W2-z"
-state = "pending"
+state = "in-progress"
 
 [[slice]]
 id    = "W3"

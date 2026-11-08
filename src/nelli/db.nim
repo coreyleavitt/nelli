@@ -1098,6 +1098,16 @@ const nelliShmPrefix* = "nelli_"
 when defined(posix):
   from std/posix import kill, Pid, ESRCH
 
+  proc shmSegmentOwnerPid*(fileName: string): int =
+    ## The creator pid embedded in the `nelli_`-prefixed segment name
+    ## `fileName`: the FIRST all-digit `_`-separated token (see
+    ## `shmSegmentOwnerAlive` for the naming scheme). Returns 0 when the
+    ## name carries no recoverable pid (or a non-positive one).
+    for tok in fileName.split('_'):
+      if tok.len > 0 and tok.len <= 9 and tok.allCharsInSet({'0'..'9'}):
+        return max(parseInt(tok), 0)
+    0
+
   proc shmSegmentOwnerAlive*(fileName: string): bool =
     ## Whether the process that created the `nelli_`-prefixed segment
     ## `fileName` (a bare name under `/dev/shm`) is still running. Every
@@ -1108,13 +1118,10 @@ when defined(posix):
     ## recoverable owner and is reported dead (reclaimable), as before.
     ## `EPERM` from `kill(pid, 0)` means the pid exists under another user,
     ## so it counts as alive.
-    for tok in fileName.split('_'):
-      if tok.len > 0 and tok.len <= 9 and tok.allCharsInSet({'0'..'9'}):
-        let pid = parseInt(tok)
-        if pid <= 0: return false
-        if kill(Pid(pid), 0) == 0: return true
-        return osLastError() != OSErrorCode(ESRCH)
-    false
+    let pid = shmSegmentOwnerPid(fileName)
+    if pid <= 0: return false
+    if kill(Pid(pid), 0) == 0: return true
+    osLastError() != OSErrorCode(ESRCH)
 
   proc sweepStaleShmSegments() =
     ## RFC-fuzzer-nextgen E-cleanup: a crashed/hard-killed prior campaign's

@@ -567,24 +567,32 @@ build; evidence V = re-run by the coordinator on one build, P = the lens ran
 walker and native on one build. Every mechanism predates RFC-0005, so each is
 expected to be `same` as `main`; each still gets its three-way row in W1-z.
 
-| ID | Item | Evidence | Cause | Slice |
-|---|---|---|---|---|
-| W-01 | `except T as e:`: handler label false `sxUnsat`, raise target false `sxRaised` | V | `dsl_parser.nim:20460-20461` stores the `repr` as the type id | W1-a |
-| W-02 | explicit `{.cursor.}` on a local: false `sxUnsat` and `sxSat` (c/orc, c/arc release, cpp) | V | `dsl_parser.nim:19771-19792` drops every local pragma but `noinit` | W1-b |
-| W-03 | `--panics:on`: a label after a Defect is a clean `sxSat`; natively the process dies | V | the walker never reads `nimPanics` (only `symex.nim:2343`) | W1-c2 |
-| W-04 | `float32` ↔ `float64` conversions, hidden ones included: false clean verdicts | P | transparent `else: parseExpr(operand)` at `dsl_parser.nim:10658`, `:10845` | W1-e |
-| W-05 | `low(int) mod -1`, literal divisor: false `sxUnsat` (gcc folds to 0) | P | `runtime.nim:8862-8870` traps regardless of divisor or target | W1-d1a |
-| W-06 | unsigned `div`/`mod` by zero: `sxRaised DivByZeroDefect`, natively SIGFPE | P | `dsl_parser.nim:4023-4025` lists unsigned beside signed | W1-d1b |
-| W-07 | checks-off signed overflow modelled as wrap: `v + 1 > v` clean `sxSat` at `high(int)` | P | `runtime.nim:24500-24502` consumes the marker with no token; the settings route (`:8881-8897`, `:19032`) is the same model | W1-d2 |
+<!-- worklist:begin 5.0 -->
+| ID | Item | Evidence | Cause | Slice | State |
+|---|---|---|---|---|---|
+| W-01 | `except T as e:`: handler label false `sxUnsat`, raise target false `sxRaised` | V | `dsl_parser.nim:20460-20461` stores the `repr` as the type id | W1-a | closed `c0e8bd44` (2026-11-07) |
+| W-02 | explicit `{.cursor.}` on a local: false `sxUnsat` and `sxSat` (c/orc, c/arc release, cpp) | V | `dsl_parser.nim:19771-19792` drops every local pragma but `noinit` | W1-b | closed `2b5a1f8e` (2026-11-07) |
+| W-03 | `--panics:on`: a label after a Defect is a clean `sxSat`; natively the process dies | V | the walker never reads `nimPanics` (only `symex.nim:2343`) | W1-c2 | closed `6d40f03c` (2026-11-07) |
+| W-04 | `float32` ↔ `float64` conversions, hidden ones included: false clean verdicts | P | transparent `else: parseExpr(operand)` at `dsl_parser.nim:10658`, `:10845` | W1-e | closed `86536fa9` (2026-11-07) |
+| W-05 | `low(int) mod -1`, literal divisor: false `sxUnsat` (gcc folds to 0) | P | `runtime.nim:8862-8870` traps regardless of divisor or target | W1-d1a | closed `e044a290` (2026-11-07) |
+| W-06 | unsigned `div`/`mod` by zero: `sxRaised DivByZeroDefect`, natively SIGFPE | P | `dsl_parser.nim:4023-4025` lists unsigned beside signed | W1-d1b | closed `682de5a4` (2026-11-07) |
+| W-07 | checks-off signed overflow modelled as wrap: `v + 1 > v` clean `sxSat` at `high(int)` | P | `runtime.nim:24500-24502` consumes the marker with no token; the settings route (`:8881-8897`, `:19032`) is the same model | W1-d2 | closed `0aa6b3bb` (2026-11-07) |
+
+<!-- worklist:end 5.0 -->
 
 Round 2 applied the reconciliation lens's edits to §5.1-§5.8
 (`E-reconcile.md`: 16 rows closable at the tag head, 4 closing as a recorded
 decline, 14 duplicates, 11 with stale evidence, 3 misclassified); round 3
 corrected the ones that lens had read from an older tree. Row ids are stable.
 Each row's last column is its state: a row is open unless it starts with
-`closed`, `merged`, `moved`, `never` or an owning RFC. K1a-ids moves these
-tables into `docs/rfc/0016-worklist.toml` with a `cells` field per row and
-renders them back here (§8.2).
+`closed`, `merged`, `moved`, `never` or an owning RFC. K1a-ids moved these
+tables into `docs/rfc-data/0016-worklist.toml` with a `cells` field per row and
+renders them back here (§8.2): the tables between the `worklist:begin` and
+`worklist:end` markers are generated, so edit the TOML and run
+`scripts/check-worklist.sh write`; `scripts/check-worklist.sh` (CI's `pins`
+job) fails when they differ. F-0001 to F-0007 are the aliases of W-01 to W-07;
+the duplicate PRC-36 and PRC-37 of the moved-slices table are PRC-39 and
+PRC-40.
 
 Owners are left empty: the coordinator assigns them. "Moved slice" means a
 job file on `origin/worker-jobs` written under RFC-0005; it keeps its id and
@@ -599,6 +607,7 @@ it, or reopen it if the fix did not hold.
 
 Rows were reconciled against head `83c1d304` in `/architect` round 2 (2026-11-06); a closed row keeps its id.
 
+<!-- worklist:begin 5.1 -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | SND-01 | Direct var-returning actual: `rab(t["a"], t, "a")` | sort S1; S8cq item 2 | Closed as a decline at head: `tests/tsymex_rfc0005_s8cq_varret.nim:84,158-159` pins `rab(t["a"], t, "a")` (`p01_r50` native hit, walker `sxUnknown`); `tests/tsymex_rfc0005_s8cq_byvalue.nim:126,162-163` (`vc_rx1`). S8cq landed in batch 11 (`47e3363e`). Exact model: PRC-36. | closed (decline; exact model PRC-36) |
@@ -616,18 +625,24 @@ Rows were reconciled against head `83c1d304` in `/architect` round 2 (2026-11-06
 | SND-13 | S8cu's known limits: macro-built pragmas, a pushing template from another module, an import under a push in a module the scan does not read | PND-11, reclassified round 2 | a missed check-off region is the false `sxRaised` class S8cu fixed: soundness risk, not pending | |
 | SND-14 | Int-offset arithmetic without an overflow fork (N24, #166; W-19) and the `range[0'u64..>int64.high]` round trip (#169) | decision D-0016-8 | owned by RFC-0014; this RFC carries no work | RFC-0014 |
 
+<!-- worklist:end 5.1 -->
+
 ### §5.2 Precision
 
 **Replay and witnesses.**
 
+<!-- worklist:begin 5.2a -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | PRC-01 | **First precision item.** Windows re-exec replay: marshal case-object and `ptr`/`ref` witnesses instead of declining. Windows is a consumer's main platform, so a decline there is a decline in daily use Includes INT-01 and INT-14: batch 11 (`7b2ab1e5`) widened the footprint to type symbols, result types and routine signatures, so more SUTs decline on Windows. | S8ct (coordinator ledger, 2026-11-02) | S8ct moved replay to a child process; on Windows a witness of these kinds declines with a named reason, documented in the 0.9.0 migration note and pinned on Linux by the re-exec pin | |
 | PRC-02 | Windows re-exec replay: proc-value, `method` and `{.global.}` witnesses decline Includes INT-13: the six hooks `hostRuntimeHook` checks (`replayproc.nim:171-176`); `setControlCHook` stays INT-15. | S8ct | same mechanism as PRC-01; after it | |
 | PRC-03 | Replay cannot aim a witness `ptr` at a global: S8cr's three open holes | S8cr; batch 10 integrator | the three open-hole pins give `sxUnknown` (`feGlobalHavoc`, `feReplayRefuted`), not `sxSat`; the false `sxUnsat` is closed, the precision is not | |
 
+<!-- worklist:end 5.2a -->
+
 **Exact models for RFC-0005's declines.**
 
+<!-- worklist:begin 5.2b -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | PRC-04 | Inventory every decline RFC-0005 added or widened, and give each an exact model or a recorded reason it stays. Generate the list from the code (decline sites and `SymexErrorKind` members, 6cbfe8f against the tag), not from memory. Known families to seed it: S8cq's by-value allowlist (types where Nim's copy behaviour varies); S8cs's fail-closed global write routes (hooks, opaque routines behind a local alias, `{.emit.}`); S8ct's replay declines (quit, nil deref, unbounded recursion; W1, W2); S8cu's check-option source scan; S8cl's "magic with no body declines"; S8cf's past-safe-length `zsUnknown`; S8ca's `viewFollows` "any other write declines"; S8bk's `feEvalOrderUnmodelled` late address Includes INT-10 (the seven `feGlobalRouteUnproved` pins). The inventory is generated, not written: K2a's census plus K1's `SymexErrorKind` axis (354 decline sites, 91 members, 12 with no producer). | Corey's split, 2026-11-02 | decline-before-verdict was the release fix for most blockers (ledger, 2026-11-02 entries); each decline is sound and costs precision | |
@@ -637,8 +652,11 @@ Rows were reconciled against head `83c1d304` in `/architect` round 2 (2026-11-06
 | PRC-08 | S8cu: a `-d:danger` or `--fieldChecks:off` build declines every routine Mechanism: K10a/K5a (§9, §8.3). | S8cu | follows from the source scan; depends on PRC-07 | |
 | PRC-09 | S8cu: `math.nim`'s pushed regions now decline Mechanism: K4c `admitStdlibBody`. | S8cu | every routine in a pushed region of `std/math` declines | |
 
+<!-- worklist:end 5.2b -->
+
 **Shapes and magics.**
 
+<!-- worklist:begin 5.2c -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | PRC-10 | `lastIdx`: a query SAT only past the cap declines; lift the cap past 8 | S8cd item 6 (S8k) | `t.len > 10` under a cap of 8 has no model within the cap; a leaf equal to a leaf equal to a literal still takes the cap | |
@@ -663,9 +681,12 @@ Rows were reconciled against head `83c1d304` in `/architect` round 2 (2026-11-06
 | PRC-36 | Exact model of a `var`-returning actual (`rab(t["a"], t, "a")`) | SND-01; HRV-01 | | |
 | PRC-37 | `uncheckedAssign` where the other arm's bytes differ: exact model | SND-07; HRV-02 | | |
 
+<!-- worklist:end 5.2c -->
+
 **Moved slices (precision).** Each keeps its job file's scope; the rows below
 name what moves and what stays.
 
+<!-- worklist:begin 5.2m -->
 | ID | Slice | Moves | Source | Owner |
 |---|---|---|---|---|
 | PRC-29 | S8cg | items 2 (copy a `var openArray` view at the call, so `fill(gArr, bumpA())` decides), 3 (a later argument that only reads a global counts as a read), 4 (`ti_tuple` exact `sxSat` under default budgets), 5 (`bb_rep_sym_empty_hit` exact on both Z3 versions), 7 (an index call through a proc value), 8 (`s8bb_constructs` 40.7 s (under 60); `tsymex_r6_b6_optionregion` is absent from `scripts/ci-suite-seconds.tsv`, so it is sharded at the median estimate (`derive-ci-suites.ps1:278`) because it is unmeasured: measure it). Items 1 and 6 were closed by S8ca and S8by | `jobs/s8cg.md`; batch 7 note | |
@@ -675,12 +696,15 @@ name what moves and what stays.
 | PRC-33 | S8co | items 3 (auto-possession with a property or XCLASS), 4 (kept `ignore_skip_arg` under a limit), 5 (`detect_repeat` group repeats on the JIT, 400 calls skipped), 6 (SKIP:NAME past 100, languages past 7), 7 (symbolic `(*ANY)` under the JIT scan, 72+ differences when lifted), 9 (`replace`'s unmarked SKIP:NAME, `first` in UTF, `count` of `set[char]` and overlapping counts), 10 (unbounded no-match refutation past `limitReach`'s safe length, with PRC-24). Items 1, 2 and 8 are in §5.7 Includes PRC-24 (item 10) and PND-02's remainder (a differential-only leg for older PCRE). | `jobs/s8co.md`; S8cf remainder | |
 | PRC-34 | S8cp item 7 | declined shapes: whole-tuple `==` (`eqBV`); a local `let b = addr o.y` alias on whole assignment; a type section in a routine body (with PRC-22); a parameter pragma `x {.inject.}: int`, a compile error in `collectStringBackedByteSeqParamsImpl`, to fix first; nested `addr t[1][0]`. `s[1].b = 7` and `s[1][0] = x` only if S8bz left them declined Includes PRC-22; add whole-seq `==` (`runtime.nim:8341`, not re-verified). | `jobs/s8cp.md`; S8cb remainder | |
 | PRC-35 | S8cp item 8 | declined magics: `math.toInt`, a holey enum's invalid value, `=dup` of an object or tuple through its hook, `$float`, the remaining `repr` shapes; stop only where the theory cannot express it or the cost is measured out of budget, with the number Add `$bool` (`dsl_parser.nim:11205,11831`, not re-verified). | `jobs/s8cp.md`; S8cb item 5 remainder | |
-| PRC-36 | W1-b | an exact local `{.cursor.}` model: a cursor local is a non-owning alias of its source's storage (no copy, no destroy), so `var c {.cursor.} = gs; gs[0] = 9` reads 9 through `c`; replaces `feLocalPragma` for `cursor` only, other non-allowlisted local pragmas keep the decline; native pins on c and cpp | W1-b's designed decline; three-way row in the handoff (2026-11-07, W1-z) | |
-| PRC-37 | W1-e | an exact float width model: `float32(x)` rounds to binary32 (Z3 `fp.to_fp` at 8/24, round-nearest-even) and widening back is exact, so `float64(float32(x)) == x` gets a model rather than `feFloatWidth`; native pins at 0.5 (hit) and 0.1 (no hit) on every build row | W1-e's designed decline; three-way row in the handoff (2026-11-07, W1-z) | |
+| PRC-39 | W1-b | an exact local `{.cursor.}` model: a cursor local is a non-owning alias of its source's storage (no copy, no destroy), so `var c {.cursor.} = gs; gs[0] = 9` reads 9 through `c`; replaces `feLocalPragma` for `cursor` only, other non-allowlisted local pragmas keep the decline; native pins on c and cpp | W1-b's designed decline; three-way row in the handoff (2026-11-07, W1-z) | renumbered from PRC-36 (duplicate id), K1a-ids |
+| PRC-40 | W1-e | an exact float width model: `float32(x)` rounds to binary32 (Z3 `fp.to_fp` at 8/24, round-nearest-even) and widening back is exact, so `float64(float32(x)) == x` gets a model rather than `feFloatWidth`; native pins at 0.5 (hit) and 0.1 (no hit) on every build row | W1-e's designed decline; three-way row in the handoff (2026-11-07, W1-z) | renumbered from PRC-37 (duplicate id), K1a-ids |
 | PRC-38 | CR-A | an exact generic exception model: identify `G[ValueError]` by its full instantiation, with ancestry from `G`'s declared base, so `except G[ValueError]` and `except CatchableError` decide rather than decline with `eeUnknownExnType`; native pins for both | CR-A's designed decline (0.9.2 review SC2, 2026-11-07) | |
+
+<!-- worklist:end 5.2m -->
 
 ### §5.3 Crashes, compile stops and hangs
 
+<!-- worklist:begin 5.3 -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | CRH-01 | Compile stops in `classifyType`: `splitLines` (INT-09) and the generic-param `.len/.add` stop (HRV-44, zero corpus coverage) | sort S13 | the `sort` stop this row first named is gone at 83c1d304: `s.sort()` and `s.sort(system.cmp[int], Descending)` compile and decline (C-06), now precision row W-36. The other two are not re-probed at head. One `classifyType` row; mechanism K2a/K2c. | |
@@ -693,20 +717,26 @@ name what moves and what stays.
 | CRH-08 | The `cmpIgnoreStyle` hang | PND-12; S8cu (resumed 2026-11-02) | no `main` column yet; S8cu is producing the three-way table | |
 | CRH-09 | Harvested crash and hang items with no SUT yet: N35 OOM, `cast[int32]` fault, PCRE interpreter SIGSEGV, `$simplify` hang sites, cumulative Z3 MEMOUT, `mkIntLit(0)` placeholder (HRV-06, HRV-43, HRV-45 to HRV-51); bitwise `not` on a Z3 Int (W-25); `<` on `ptr` reaching `cmpBV` (W-28) | research round, `docs/rfc/0016-research/MERGED-worklist.md` W-25, W-28, W-29 | read only: probe each, then a named decline or a fix | |
 
+<!-- worklist:end 5.3 -->
+
 The two latent crashes that sat in §5.7 are settled: the `byteLeafIds`
 segfault (PND-04) moved to CRH-07, and probe p7's rc=139 (PND-05) is closed,
 superseded by INT-18.
 
 ### §5.4 CI and test time
 
+<!-- worklist:begin 5.4 -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | CI-01 | S8cm: corpus files over 60 s of compile plus run on Windows, and shard budgets (no shard's typical time above 30 of 40 minutes). **S8cm is running and may finish before the tag**; if it lands on RFC-0005, it keeps its row there and this item tracks only what it leaves (the files listed after it started: `b10_integration` 107 s, `s8cd_setorder_large` 102 s, `_small` 100 s, `s8cn_views_c` 121 s, `s8bq_remainder` 91.4 s, `s8cr_intro` 60.2 s, `s8cd_globals`) | `jobs/s8cm.md`; ledger entries for batches 9-10, S8cd, S8cn, S8cr | S8cm done (`9ebe2a46`; shard target 23 min, `d7948de5`). `scripts/ci-suite-seconds.tsv` lists 30 suites over 60 s, longest `s8ab_letaudit` 127.4 s. Includes INT-17 and INT-08. | |
 | CI-02 | A permanent cpp CI leg. No leg runs cpp today; n42 and n43 broke on cpp for several batches unnoticed (sort B21). Also run Z3 4.13.4 on a schedule: until now batch gates were c on Z3 5.1 only, and full 4.13.4 and cpp sweeps run only at the release gate | S8cl item 5; sort B21; ledger (release gate) | `.github/workflows/` = `fuzzer-mingw`, `fuzzer-msvc`, `symex-mingw`, `tianguis-publish`; no Linux leg, no cpp, no `schedule:`. Z3 4.13.4 already runs on every push on all three Windows legs, so the 'run 4.13.4 on a schedule' half is struck; what remains is CI-A (Linux c, every push) and CI-B (cpp and 4.13.4 on Linux), §11. | |
-| CI-03 | `s8by_remainder`'s units check is not deterministic under load | S8ct | **Cause (S8cj):** the test's own threads each leaked a 17 MB Z3 context (nim-z3's current-context threadvar, never destroyed with the thread), so the process crossed Z3's 100 MB strategy threshold between `base` and the compared runs (PRC-32); under a sweep's load other processes do not matter (the count is per process), but a cpp build crossed the line at a different thread. Fixed: the threads release their contexts (`setCurrentContext(nil)`), so `tests/tsymex_rfc0005_s8by_remainder.nim:189`'s `check r.units == base.units` compares two threads at one count, which the probes show exact (mode 15r: six threads, one figure). Header corrected. Includes INT-04; owner S8cj. | `docs/rfc/0016-research/S8cj.md` conclusion 4; `s8cj/hist-c-z3-5.1.log` mode 15r | test-harness; fixed |
+| CI-03 | `s8by_remainder`'s units check is not deterministic under load | S8ct | **Cause (S8cj):** the test's own threads each leaked a 17 MB Z3 context (nim-z3's current-context threadvar, never destroyed with the thread), so the process crossed Z3's 100 MB strategy threshold between `base` and the compared runs (PRC-32); under a sweep's load other processes do not matter (the count is per process), but a cpp build crossed the line at a different thread. Fixed: the threads release their contexts (`setCurrentContext(nil)`), so `tests/tsymex_rfc0005_s8by_remainder.nim:189`'s `check r.units == base.units` compares two threads at one count, which the probes show exact (mode 15r: six threads, one figure). Header corrected. Includes INT-04; owner S8cj. \| `docs/rfc/0016-research/S8cj.md` conclusion 4; `s8cj/hist-c-z3-5.1.log` mode 15r | closed: test-harness; fixed |
+
+<!-- worklist:end 5.4 -->
 
 ### §5.5 Infrastructure
 
+<!-- worklist:begin 5.5 -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
 | INF-01 | The differential fuzzing harness (§4), slice D1 | coordinator ledger, S8cq blocker (2026-11-02) | every sort blocker was found by hand | |
@@ -715,17 +745,22 @@ superseded by INT-18.
 | INF-04 | S8ck after item 1 (slice S8ck-r): items 2 (`Z3FuncDeclOwn`, `Z3FuncInterpOwn`, `Z3RcfNum` hooks never release `ctx`), 3 (`Z3Ast[S: static]` hooks unused for `Z3Int`/`Z3Bool`), 4's version half (`tffi`, `tversion`, `tmultiversion` assert a 4.x runtime), 5 (`injectShapeFault` comment), 6's first half (ADR-0023's "a lowering-time degrade must never raise", keep or simplify), 7 (`s8s_precision` run wall 13.2 to 19.1 s on Windows), 8 (`examples/properties.nim:30`, examples in nim-z3 CI on c and cpp), 9 (a leak gate that fails on invalid reads, writes and frees, shown RED on a planted bad `dec_ref`), 10 (record and reduce the spacer read; do not file), 11 (generated seq hooks on the raise path release every element), 12 (separate real leaks from live globals, `trcf`'s 26 `Z3ContextOwn` blocks). Item 4's hang half and item 6's second half are in §5.7 | `jobs/s8ck.md`; `worker-reports/s8ck-item1.md` | item 1 closed: cc5ffc9 identical to ae509f0 on invalid accesses and leaks | |
 | INF-05 | Audit the older "Different mechanisms, reported and not fixed here" lists against the remainder chain. This document took the lists of slices landed through batch 10 whose remainder has no later slice (S8ca, S8by, S8cc, S8cf, S8cb, S8cd, S8cl, S8cn) item by item. The earlier lists were each carried into a remainder slice whose job said "defer nothing", but no one has checked that every item reached one | RFC-0005, about 80 such lists | **done 2026-11-03** (owner audit of the lists of 72 slices, S8c, S8e/S9 and S8g through S8bt, plus the inline not-fixed notes in S8y, S8ah, S8ao and S8bk): 318 rows fixed, 17 owned by RFC-0005, 9 already owned here. The 13 unowned rows (11 distinct items) are filed in §5.8 as AUD-01 to AUD-11 | closed |
 
+<!-- worklist:end 5.5 -->
+
 ### §5.6 Upstream reports
 
 Outward-facing. Decided 2026-11-06 (item `upstream-reports`, decision
 D-0016-3): file UPS-01 and UPS-03, which have reductions; hold UPS-02 until
 S8cj reduces it. None is filed yet.
 
+<!-- worklist:begin 5.6 -->
 | ID | Report | Source | Evidence | Owner |
 |---|---|---|---|---|
-| UPS-01 | Nim: a raise-path destroy (a destructor swallowing an in-flight exception on the C backend) | S8ce | reduction at worker `s8ce-work/probe/purenim.nim`, condensed in `worker-reports/s8ce.md` | filed 2026-11-07: https://github.com/nim-lang/Nim/issues/26661 (body from `docs/rfc/0016-research/UPS-01.md`) |
-| UPS-02 | Z3 5.1: `Failed to verify: m_cache.mk_unique(p) == p` on wide factoring | S8by remainder; S8cj item 2 | **Reduced (S8cj) to three assertions** `(> p 1) (> q 1) (= (* p q) 16777207)`: on 5.1.0.0 the VERIFY fails in `nlsat::solver::imp::reinit_cache` (from `reorder`) and the check returns `unknown` (`canceled` at any rlimit 5M-50M; `unreachable` under `arith.nl.order = false` or `random_seed = 1`, the not-canceled path) for a composite, a prime and with `p, q < 200000`; 4.13.4 answers `sat` in 2,175,259 units with no message (decision regression). No `arith.nl.*` or global `nlsat.*` setting avoids it; dropping the lower bounds does. c and cpp agree. Draft report `docs/rfc/0016-research/UPS-02.md` (nightly and the `z3` binary still to run). Includes PND-10. | `docs/rfc/0016-research/UPS-02.md`; `s8cj/ups02b-*.log` | held (D-0016-3); ready to file once the nightly is run |
-| UPS-03 | Z3: invalid read in `spacer::pob_queue::reset()` | S8ck item 1, item 10 | fixedpoint only, unreachable from nelli; S8ck item 10 reduces it | filed 2026-11-07: https://github.com/Z3Prover/z3/issues/11601 (4-line input and C driver in `docs/rfc/0016-research/`; reproduces on 4.13.4, 5.1.0.0 and the 2026-11-07 master nightly) |
+| UPS-01 | Nim: a raise-path destroy (a destructor swallowing an in-flight exception on the C backend) | S8ce | reduction at worker `s8ce-work/probe/purenim.nim`, condensed in `worker-reports/s8ce.md` | closed: filed 2026-11-07: https://github.com/nim-lang/Nim/issues/26661 (body from `docs/rfc/0016-research/UPS-01.md`) |
+| UPS-02 | Z3 5.1: `Failed to verify: m_cache.mk_unique(p) == p` on wide factoring | S8by remainder; S8cj item 2 | **Reduced (S8cj) to three assertions** `(> p 1) (> q 1) (= (* p q) 16777207)`: on 5.1.0.0 the VERIFY fails in `nlsat::solver::imp::reinit_cache` (from `reorder`) and the check returns `unknown` (`canceled` at any rlimit 5M-50M; `unreachable` under `arith.nl.order = false` or `random_seed = 1`, the not-canceled path) for a composite, a prime and with `p, q < 200000`; 4.13.4 answers `sat` in 2,175,259 units with no message (decision regression). No `arith.nl.*` or global `nlsat.*` setting avoids it; dropping the lower bounds does. c and cpp agree. Draft report `docs/rfc/0016-research/UPS-02.md` (nightly and the `z3` binary still to run). Includes PND-10. \| `docs/rfc/0016-research/UPS-02.md`; `s8cj/ups02b-*.log` | held (D-0016-3); ready to file once the nightly is run |
+| UPS-03 | Z3: invalid read in `spacer::pob_queue::reset()` | S8ck item 1, item 10 | fixedpoint only, unreachable from nelli; S8ck item 10 reduces it | closed: filed 2026-11-07: https://github.com/Z3Prover/z3/issues/11601 (4-line input and C driver in `docs/rfc/0016-research/`; reproduces on 4.13.4, 5.1.0.0 and the 2026-11-07 master nightly) |
+
+<!-- worklist:end 5.6 -->
 
 ### §5.7 Pending classification
 
@@ -734,6 +769,7 @@ rows (U1–U8) are awaiting disposition before the tag and are **not moved**;
 they are listed so nothing is lost. Each moves into §5.1–§5.4 once its
 disposition shows it is not worse than `main`, or stays with RFC-0005 if it is.
 
+<!-- worklist:begin 5.7 -->
 | ID | Item | Source | Why pending | Owner |
 |---|---|---|---|---|
 | PND-01 | PCRE JIT stack limit `-27` read as a false `sxUnsat` | sort U1; S8cf items 1, 2 | needs a JIT build; the image's 8.45 has none Closed round 2: remainder INT-19. | closed |
@@ -745,10 +781,12 @@ disposition shows it is not worse than `main`, or stays with RFC-0005 if it is.
 | PND-07 | `z3ApiErrorCount` over-count changing a verdict | sort U6; S8ck item 6 | read, not observed; looks like a decline Closed round 2: U6 and U7 are verified. | closed |
 | PND-08 | `tregex_index` hang on Z3 5.1, and whether the walker can reach it | sort U7; S8ck item 4 | the nim-z3 suite's shape was not ported to a probe Closed round 2: U6 and U7 are verified. | closed |
 | PND-09 | Every row of the sort on Z3 4.13.4 | sort U8 | covered by the release gate's full 4.13.4 sweep Closed round 2: c + Z3 4.13.4 969/969 identical to 5.1, `0005 handoff:274-276`. | closed |
-| PND-10 | ~~Whether a verdict reached after Z3's `mk_unique` check can be trusted~~ merged into UPS-02 | S8cj item 2 | **Answered (S8cj):** there is no verdict after the message. The failed VERIFY throws; the check returns `unknown` either as `canceled` (limit cut first) or `unreachable` (exception first), never `sat`/`unsat`, so nelli declines (`sxUnknown`). Pinned natively by `tests/tsymex_0016_s8cj_mkunique.nim` through `symexFind` on `p > 1 and q > 1 and p * q == 16777207` with fd 2 captured: never `sxUnsat`; `sxUnknown` whenever the message was printed; a `sxSat` (4.13.4) carries a natively checked witness. | `docs/rfc/0016-research/S8cj.md` item 2; `docs/rfc/0016-research/UPS-02.md` | merged; test added |
+| PND-10 | ~~Whether a verdict reached after Z3's `mk_unique` check can be trusted~~ merged into UPS-02 | S8cj item 2 | **Answered (S8cj):** there is no verdict after the message. The failed VERIFY throws; the check returns `unknown` either as `canceled` (limit cut first) or `unreachable` (exception first), never `sat`/`unsat`, so nelli declines (`sxUnknown`). Pinned natively by `tests/tsymex_0016_s8cj_mkunique.nim` through `symexFind` on `p > 1 and q > 1 and p * q == 16777207` with fd 2 captured: never `sxUnsat`; `sxUnknown` whenever the message was printed; a `sxSat` (4.13.4) carries a natively checked witness. \| `docs/rfc/0016-research/S8cj.md` item 2; `docs/rfc/0016-research/UPS-02.md` | merged; test added |
 | PND-11 | S8cu's known limits (moved to SND-13) | S8cu | if the scan misses a check-off region, the walker assumes checks are on, which is the false `sxRaised` S8cu fixed; `main` faulted on these routines, so a miss may be worse than `main` | moved |
 | PND-12 | S8cu's resumed rows: ~~`push assertions:off`, a global initialiser under a push, a nil deref with SIGSEGV against a caught `NilAccessDefect`, the cross-module rows~~ dropped round 2; the `cmpIgnoreStyle` hang moved to CRH-08 | S8cu (resumed 2026-11-02) | S8cu is producing the three-way table | moved |
 | PND-13 | Z3's own internal recursion depth, not audited when S8ct bounded the walker's term walks | S8ct (B19 disposition) | to be checked at disposition | |
+
+<!-- worklist:end 5.7 -->
 
 After round 2, §5.7 holds PND-03 and PND-13 only.
 
@@ -765,6 +803,7 @@ and, for audit rows only, the audit's own class.
 
 **From batch 11 and the release.**
 
+<!-- worklist:begin 5.8a -->
 | ID | Item | Source | Class | Owner |
 |---|---|---|---|---|
 | INT-01 | ~~Windows re-exec replay marshalling~~ merged into PRC-01 | S8ct, "For RFC-0016" 1 | precision | merged |
@@ -789,10 +828,13 @@ and, for audit rows only, the audit's own class.
 | INT-20 | U5's original SUT (October false sxUnsat) lives only on the offline worker. S8cl's reconstruction (`unsafeNew(p, 8); if p != nil`) is correct on the candidate. Recover the original, and pin it, when the worker returns Evidence: `origin/worker-sls2` is fetched (88 report files) but the U5 SUT is not among them; S8cl's reconstruction is pinned at `s8cl_magics.nim:61-72`. Recover from the host or declare the reconstruction the pin and close. Includes PND-06. | pre-tag probes (U5) | test-harness | |
 | INT-21 | The check-off probe's `ai_caught` (`mitems` over `int16`, `assertions: off`) decides sxRaised. The raise looks real (int16 overflow at 32767 with overflow checks on), but no native run tried that input. Pin it natively | pre-tag probes (S8cp item) | test-harness | |
 
+<!-- worklist:end 5.8a -->
+
 **From the 0.9.1 wiring audit (2026-11-03).** What RFC-0005's post-tag
 wiring audit (WA-1 to WA-13) and its fix slices W1 to W3 left open. Measured
 against 0.8.0, as the audit was; none is worse than it.
 
+<!-- worklist:begin 5.8b -->
 | ID | Item | Source | Class | Owner |
 |---|---|---|---|---|
 | INT-22 | A clean, faithful winner is never replayed, so nothing learns that its witness ends the process after the target. `assertCoveredBy` still splats it and `symexForAll` still seeds it, in the host (`symex.nim:4057-4061`, `:982`). Unchanged from 0.8.0; WA-2 closed only the replayed case (`witnessUnsafe`) | 0.9.1 wiring audit | crash, same as 0.8.0 | |
@@ -802,6 +844,8 @@ against 0.8.0, as the audit was; none is worse than it.
 | INT-26 | `RegexError` reaching `symexFindAllWitnesses` through the user exception hierarchy (WA-1, `symex.nim:4523`) is unpinned: W1 pinned a user exception type only. It needs a PCRE SUT | 0.9.1 wiring audit | test-harness | |
 | INT-27 | Under `--panics:on` `replayInScope` declines every target (`replayInScope`, `symex.nim:2318`; the gate `:3169`), so every lossy clean winner is `rsUnconfirmed` (`settleWinner`, `:3387`) and none is `trusted()`. In W1-c2's scope (the panics profile, §11). | 0.9.1 wiring audit | precision | |
 
+<!-- worklist:end 5.8b -->
+
 **From the RFC-0005 code review (2026-11-04).** The Lows the review's ten
 rounds reported and did not fix under the through-Medium mandate
 (`docs/rfc/0005-review.md`; floor reached at round 10, `2e7a0bb6`). Each row
@@ -809,32 +853,36 @@ groups related Lows and names the ledger rows it carries. None is a
 Critical/High/Medium finding. Standing against `main` was not measured at
 intake, so each row still needs its three-way row (§5.7 rule) before work.
 
+<!-- worklist:begin 5.8c -->
 | ID | Item | Source | Class | Owner |
 |---|---|---|---|---|
-| INT-28 | Replay child lifecycle and limits: SUT-started grandchildren survive when the child ends by itself; no memory cap on macOS/BSD and no CPU/FSIZE/NPROC limits or Windows `ActiveProcessLimit`; `pipe2`, the `PDEATHSIG` thread, `WaitForSingleObject` wrap, `resumeThread`, wire length overflow, "(deleted)" exe, non-atomic counter; ~~`waitpid(-1)` elsewhere~~ (only `waitpid(pid, …)` at `:480,1115,1140`) and no `setpgid` off Linux | 0005 review R1-24, R1-31, R1-32, R2-25, R2-27 | crash (hardening); not compared against `main` | slice `rv0005-lows` |
-| INT-29 | Replay child start-up robustness: a POSIX re-exec `execve` failure does `_exit(127)` and reads as a SUT crash; a child that cannot open its out file writes to nil and segfaults; the Windows private dir inherits the parent's ACL; the re-exec child inherits non-CLOEXEC fds; with fd 0-2 closed in the host the report fd is clobbered | 0005 review R2-21 to R2-24, R2-26 | crash (hardening); not compared against `main` | slice `rv0005-lows` |
-| INT-30 | The wire reader accepts a zero-size seq, amplifies allocation and does not bound recursion depth; unverified: the Windows fiber stack under refc | 0005 review R2-28, R2-29 | crash (hardening); the fiber half is unverified | slice `rv0005-lows` |
-| INT-31 | Cache-key coverage: `--opt`, `--cc`, `--cpu` and `--os` are not in the `\|bf=` segment; a `{.push.}` inside `fn` itself is invisible to it (covered by the `feCheckOption` decline, worth a test) Includes W-18: the `;impl=` digest holes (importc/dynlib bodies, override callees, proc-value targets, `lib/`; `docs/migration/0.9.1.md:264-273`). The `\|bf=` half is closed by K5a. | 0005 review R2-16, R2-20, R3-16 | soundness (key coverage); not compared against `main` | slice `rv0005-lows` |
-| INT-32 | Replay and settle policy: ~~stale "trusted by construction" comment, unenforced one-digit codec~~ (fixed: `3476f039`), `storedGaps` prefix, `reSignalled` not run-dependent, first-soundness-per-type, lossy sibling precision; `witnessUnsafe` not rendered, `spinJitter` costing up to about 100 syscalls per op, ~~the `ReplayOutcome` doc saying "three-valued"~~ (fixed: `3476f039`); an always-hanging witness is cacheable and pays `replayTimeoutMs` every run, and a loser's timeout blocks the winner; a statically refused replay stored `rsUnconfirmed` and runnable on a hit (documented policy, to be revisited) | 0005 review R1-33, R1-34, R4-07, R4-10 | performance and precision; no wrong verdict described | slice `rv0005-lows` |
-| INT-33 | Liveness on the fuzzer path: `ConcolicCollectResult.annotationViolations` has no reader; `saveSecondary` is unguarded, so the new `DbError` escapes `forAll`; the concolic flip solve lacks `maxSeqLen`/`seqQueryRLimit` and the theory facts `trySolve` adds Includes PRC-25. | 0005 review R1-25, R1-26, R1-27 | crash (R1-26) and precision (R1-27); not compared against `main` | slice `rv0005-lows` |
-| INT-34 | Design cleanups: `FindingHint`/`FindingGap` kinds are strings; include-split `runtime_*` modules and a `symex.nim` that mixes codegen, cache codecs and settle; the `engineSymexDbErrors` threadvar sink; `loweringPendingTaint` still a threadvar with `walk`/`walkCapSynced` as two shallow layers; the `sx2:` prefix is redundant with the walker version | 0005 review R1-28, R1-29, R2-10, R2-14, R4-08 | design debt; no wrong verdict described | slice `rv0005-lows` |
-| INT-35 | Exit-group guards: a compile-time `fields()` check that every group-typed field of `WalkCtx`/`LoopFrame`/`CallFrame`/`CallFrameCtx` is visited by `forEachExitGroup`; per-frame constructors so a group cannot be default-constructed unbound; `mitemsSince` yields `var T` so an entry's depth is mutable; `replayNotRun`'s hint check | 0005 review R5-08, R6-03, R6-04 | design debt; guards against a future soundness slip | slice `rv0005-lows` |
-| INT-36 | The finding collector's edges: `droppedSymexFindings` has no production consumer and is per-thread, so a worker thread's drops are invisible; `popEngineFrame` merges speculative nested runs and double-reports; a finding filed mid-statement is not stamped with later stray taint (pre-existing) | 0005 review R5-07, R6-08, R4-09, R3-17 | precision (R4-09, R5-07) and soundness (R3-17, not compared against `main`) | slice `rv0005-lows` |
-| INT-37 | Precision and unverified probes: `claimStrayPendingTaint` over-taints coalesced pending taint; a possessive quantifier on a non-group item may add 0 to the PCRE size bound (probe near 65536); `symBodyHash` on a bodiless routine (importc or forward declaration) may fail at compile time | 0005 review R2-08, R2-09, R6-09 | precision; two items unverified | slice `rv0005-lows` |
-| INT-38 | Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up | 0005 review R6-07, R8-04 | performance; no wrong verdict | slice `rv0005-lows` |
+| INT-28 | Replay child lifecycle and limits: SUT-started grandchildren survive when the child ends by itself; no memory cap on macOS/BSD and no CPU/FSIZE/NPROC limits or Windows `ActiveProcessLimit`; `pipe2`, the `PDEATHSIG` thread, `WaitForSingleObject` wrap, `resumeThread`, wire length overflow, "(deleted)" exe, non-atomic counter; ~~`waitpid(-1)` elsewhere~~ (only `waitpid(pid, …)` at `:480,1115,1140`) and no `setpgid` off Linux | 0005 review R1-24, R1-31, R1-32, R2-25, R2-27 | crash (hardening); not compared against `main` | moved: slice `rv0005-lows` |
+| INT-29 | Replay child start-up robustness: a POSIX re-exec `execve` failure does `_exit(127)` and reads as a SUT crash; a child that cannot open its out file writes to nil and segfaults; the Windows private dir inherits the parent's ACL; the re-exec child inherits non-CLOEXEC fds; with fd 0-2 closed in the host the report fd is clobbered | 0005 review R2-21 to R2-24, R2-26 | crash (hardening); not compared against `main` | moved: slice `rv0005-lows` |
+| INT-30 | The wire reader accepts a zero-size seq, amplifies allocation and does not bound recursion depth; unverified: the Windows fiber stack under refc | 0005 review R2-28, R2-29 | crash (hardening); the fiber half is unverified | moved: slice `rv0005-lows` |
+| INT-31 | Cache-key coverage: `--opt`, `--cc`, `--cpu` and `--os` are not in the `\|bf=` segment; a `{.push.}` inside `fn` itself is invisible to it (covered by the `feCheckOption` decline, worth a test) Includes W-18: the `;impl=` digest holes (importc/dynlib bodies, override callees, proc-value targets, `lib/`; `docs/migration/0.9.1.md:264-273`). The `\|bf=` half is closed by K5a. | 0005 review R2-16, R2-20, R3-16 | soundness (key coverage); not compared against `main` | moved: slice `rv0005-lows` |
+| INT-32 | Replay and settle policy: ~~stale "trusted by construction" comment, unenforced one-digit codec~~ (fixed: `3476f039`), `storedGaps` prefix, `reSignalled` not run-dependent, first-soundness-per-type, lossy sibling precision; `witnessUnsafe` not rendered, `spinJitter` costing up to about 100 syscalls per op, ~~the `ReplayOutcome` doc saying "three-valued"~~ (fixed: `3476f039`); an always-hanging witness is cacheable and pays `replayTimeoutMs` every run, and a loser's timeout blocks the winner; a statically refused replay stored `rsUnconfirmed` and runnable on a hit (documented policy, to be revisited) | 0005 review R1-33, R1-34, R4-07, R4-10 | performance and precision; no wrong verdict described | moved: slice `rv0005-lows` |
+| INT-33 | Liveness on the fuzzer path: `ConcolicCollectResult.annotationViolations` has no reader; `saveSecondary` is unguarded, so the new `DbError` escapes `forAll`; the concolic flip solve lacks `maxSeqLen`/`seqQueryRLimit` and the theory facts `trySolve` adds Includes PRC-25. | 0005 review R1-25, R1-26, R1-27 | crash (R1-26) and precision (R1-27); not compared against `main` | moved: slice `rv0005-lows` |
+| INT-34 | Design cleanups: `FindingHint`/`FindingGap` kinds are strings; include-split `runtime_*` modules and a `symex.nim` that mixes codegen, cache codecs and settle; the `engineSymexDbErrors` threadvar sink; `loweringPendingTaint` still a threadvar with `walk`/`walkCapSynced` as two shallow layers; the `sx2:` prefix is redundant with the walker version | 0005 review R1-28, R1-29, R2-10, R2-14, R4-08 | design debt; no wrong verdict described | moved: slice `rv0005-lows` |
+| INT-35 | Exit-group guards: a compile-time `fields()` check that every group-typed field of `WalkCtx`/`LoopFrame`/`CallFrame`/`CallFrameCtx` is visited by `forEachExitGroup`; per-frame constructors so a group cannot be default-constructed unbound; `mitemsSince` yields `var T` so an entry's depth is mutable; `replayNotRun`'s hint check | 0005 review R5-08, R6-03, R6-04 | design debt; guards against a future soundness slip | moved: slice `rv0005-lows` |
+| INT-36 | The finding collector's edges: `droppedSymexFindings` has no production consumer and is per-thread, so a worker thread's drops are invisible; `popEngineFrame` merges speculative nested runs and double-reports; a finding filed mid-statement is not stamped with later stray taint (pre-existing) | 0005 review R5-07, R6-08, R4-09, R3-17 | precision (R4-09, R5-07) and soundness (R3-17, not compared against `main`) | moved: slice `rv0005-lows` |
+| INT-37 | Precision and unverified probes: `claimStrayPendingTaint` over-taints coalesced pending taint; a possessive quantifier on a non-group item may add 0 to the PCRE size bound (probe near 65536); `symBodyHash` on a bodiless routine (importc or forward declaration) may fail at compile time | 0005 review R2-08, R2-09, R6-09 | precision; two items unverified | moved: slice `rv0005-lows` |
+| INT-38 | Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up | 0005 review R6-07, R8-04 | performance; no wrong verdict | moved: slice `rv0005-lows` |
 | INT-39 | Remove `SymexResult.fromCache`, which no code path sets (WA-11), in 0.10.0 with a migration note | item `fromcache-field`, decision D-0016-4 | `src/nelli/smt/types.nim`; the readable cache-hit flag is `SymexFinding.fromCache` | |
 | INT-40 | A fork replay child inherits the host's current value of a routine `{.global.}`, so after earlier host calls a walker SAT through that global can be confirmed from run history; the verdict carries no `runDependence` (re-exec replay starts from the initial value and refutes) | 0.9.2 review SC1 (residual, predates Wave 1) | soundness: run-history dependence; unverified beyond code reading | |
 | INT-41 | `symexFind`'s expansion calls `newLit(settings)` (`symex.nim:~3743`), which reads the deprecated `arithChecks` inside Nim's `macros.nim` and raises a Deprecated warning no call-site push can silence | 0.9.2 review (CR-B) | diagnostic | |
 | INT-42 | The 0.9.2 code review's open Lows: R2-03 (`arithStamp` derives from the resolved push), R2-04 (one refusal-cause enum behind `hostRunnable` and `hostRefusalReason`), R2-05 (rename `effectiveArithChecks`), R2-06 (collapse `BuildRefusal.field`), R2-08 (zero-arg concolic entries), R2-10 (`k1lite.sh -b` validation), L9, SC3, D8 | `docs/rfc/0016-review.md` rounds 1-2 | design and test hygiene; no wrong verdict | |
 | INT-43 | Z3 5.1.0's official Linux release archive (the `symex-linux` host leg) consumes about 1.66 times the rlimit units the podman image's Z3 5.1.0 does on the same queries (`tsymex_rfc0005_s8cn_step1d`: `rlimit=740770840` host, `446158528` podman, 74 queries both), so a budget-sensitive verdict flips: `grow_stale_dead` returns `sxUnknown` (`Z3: canceled` under `seqQueryRLimit = 20000000`) where podman returns `sxUnsat`. Known-red in `tests/0016-allowlist/linux-host-known-red.txt` until the budget is set from a unit that does not depend on the Z3 build, or the leg uses the image's Z3. S8cj: the Z3 build is one of three process-external inputs to a unit count; the others are the process's Z3 memory (the default solver's strategy reads it at 20 / 100 / 300 MB thresholds, PRC-32) and wall clock (the strategies' `try_for` stages), so a budget-sensitive verdict can also flip between a small test process and a real run, or on a slow host. Not re-measured here; the 1.66x remains unexplained by S8cj's mechanism unless the host leg's process sits in another memory regime (the probe is `Z3_get_estimated_alloc_size` at the query). | CI-A3 baseline, run 42434778262; `docs/rfc/0016-research/S8cj.md` conclusion 5 | precision (host-specific; the verdict is sound) | |
 
+<!-- worklist:end 5.8c -->
+
 **From the INF-05 owner audit (rows marked UNOWNED).** The rows the audit
 marked OWNED-0016 were already in this document (PRC-31, PRC-32, INF-04,
 PND-07, PND-08, UPS-01) and are not repeated.
 
+<!-- worklist:begin 5.8d -->
 | ID | Item | Source | Class | Owner |
 |---|---|---|---|---|
-| AUD-01 | `isLoose` leaves an `isIntOffset` parameter unstamped. By design (ADR-0001: `isLoose` is opt-in unsound and carries its banner on `main`); needs a "stays by design" record, not a slice | S8w | soundness, opt-in and documented; not worse than `main` | stays by design: `never(reason)` cell, written by K1a-test |
+| AUD-01 | `isLoose` leaves an `isIntOffset` parameter unstamped. By design (ADR-0001: `isLoose` is opt-in unsound and carries its banner on `main`); needs a "stays by design" record, not a slice | S8w | soundness, opt-in and documented; not worse than `main` | never: stays by design: `never(reason)` cell, written by K1a-test |
 | AUD-02 | `acDivByZero` off with `acOverflow` on leaves the continuation unconstrained at a zero divisor. A nelli setting with no Nim counterpart (Nim's zero check rides on `overflowChecks`); a witness relying on it would trap on replay, which S8ct's child contains | S8aa | unclear (policy); not worse than `main` | |
 | AUD-03 | No clean no-zero type remains for the free-`retSym` guard pins; they are now `sxUnknown` on a `HashSet[string]` arm field, so the guard's coverage is weaker. No verdict defect | S8z | test-harness | |
 | AUD-04 | Macro-VM closure capture: a nested proc capturing a loop `var` kept one closure environment across iterations (seen as a duplicate case label). **Probed, no instance** at `main` 6cbfe8f and the channel at 67f0b622; the one known instance was fixed in S8z (`tagOrdOf` top-level). No other RFC-0016 item audits this class (AUD-06 and AUD-07 are the `let`/parameter alias guard's coverage) | S8z; coordinator probe, 2026-11-03 | unclear at audit; probed, no instance | closed |
@@ -842,9 +890,11 @@ PND-07, PND-08, UPS-01) and are not repeated.
 | AUD-06 | The build-time VM-alias gate runs on one suite per CI leg, not the whole corpus (deliberate: about 15–18 s per compile). Carried unchanged through S8ak and S8al | S8ah, S8ak, S8al | test-harness | |
 | AUD-07 | A generic never instantiated in the scope's compilation unit gives the VM-alias guard an un-instantiated `getImpl()` tree | S8al | test-harness | |
 | AUD-08 | ~~Non-integer `HashSet` elements decline~~ merged into PRC-12 | S8am | precision | merged |
-| AUD-09 | A `var` global initialised by a literal is not read at its initialiser: its entry value is fresh. A deliberate sound choice (S8as item 3) | S8as | precision | stays by design: `never(reason)` cell, written by K1a-test |
+| AUD-09 | A `var` global initialised by a literal is not read at its initialiser: its entry value is fresh. A deliberate sound choice (S8as item 3) | S8as | precision | never: stays by design: `never(reason)` cell, written by K1a-test |
 | AUD-10 | The nil-dereference check of a lazily read operand happened where the read moved (S8ax's `orderOperands`), not where Nim checks it. The S8ax probe turned this into two blockers, both fixed: S8cq makes argument reads follow the C backend's temporaries (`nimArgTemps`; `tests/tsymex_rfc0005_s8cq_argorder.nim`), and S8cu makes a nil dereference an uncatchable crash routed through frame exits (`tests/tsymex_rfc0005_s8cu_nil.nim`, `_nil_native`, `_nil_setjmp`) | S8ax; S8be item 7; S8cq; S8cu | soundness at audit; fixed | closed by S8cq and S8cu |
-| AUD-11 | S8aw's `L`-against-`indexof` link now covers native terms only; the walker no longer emits `seq.last_indexof` or `str.indexof` for `rfind`/`find`. A coverage note, no wrong verdict or decline described | S8au | precision | stays by design: `never(reason)` cell, written by K1a-test |
+| AUD-11 | S8aw's `L`-against-`indexof` link now covers native terms only; the walker no longer emits `seq.last_indexof` or `str.indexof` for `rfind`/`find`. A coverage note, no wrong verdict or decline described | S8au | precision | never: stays by design: `never(reason)` cell, written by K1a-test |
+
+<!-- worklist:end 5.8d -->
 
 AUD-04 and AUD-10 were the two rows whose standing against `main` the audit
 could not settle. Both are closed: AUD-04 by a probe at both shas that found
@@ -861,6 +911,7 @@ CI-A2's derive mode; W-60 is CI-B's CI-C and CI-D. A `never` row's Home names
 the slice that writes its cell; until the cell lands, the slice id is its
 state (§8.2).
 
+<!-- worklist:begin 5.9 -->
 | ID | Item | Home | Owner |
 |---|---|---|---|
 | W-08 | `nodeWritesHeap` is a fail-open denylist | K6a | |
@@ -905,7 +956,7 @@ state (§8.2).
 | W-67 | RFC-0002 listed but absent; issues #146/#148/#149/#150: commit or drop | H1 | |
 | W-68 | stale docs: SYMEX_PLAN status, ADR "PROPOSED" for landed ADRs, 0.9.0 known-gap text, RFC-0001 "Complete", CLAUDE.md's active RFC, 0014/0015 gates citing a pre-0.9.0 baseline, `docs/symex/README.md`'s decline catalogue (W1-z rewrites it) | H1 | |
 | W-69 | "not green on a good day" wording in CLAUDE.md and `sweep-diff.sh` | | never: repository wording, outside this RFC |
-| MOV-01 | the moves to RFC-0017 (N20, OQ1, CRH-03's OOM, `maxLoopUnwind`, #138, caps): record each in RFC-0017 with its id, then close here | W1-z | done (2026-11-07, W1-z): recorded in `docs/rfc/0017-symex-reach.md` §7 and cited from slices M1, L1, P1 and E1 |
+| MOV-01 | the moves to RFC-0017 (N20, OQ1, CRH-03's OOM, `maxLoopUnwind`, #138, caps): record each in RFC-0017 with its id, then close here | W1-z | closed: done (2026-11-07, W1-z): recorded in `docs/rfc/0017-symex-reach.md` §7 and cited from slices M1, L1, P1 and E1 |
 | STY-01 | `return` in `finally` on a raised path: c re-raises, cpp returns (A-10) | K5b (`never` cell of the build axis) | |
 | STY-02 | Table/HashSet iteration order, hash- and build-dependent (C-13) | K4c (`never` cell of the stdlib-body axis) | |
 | STY-03 | pointer order `<` (C-10, W-28) | K10a-axis (`never` cell of the definedness axis) | |
@@ -915,6 +966,8 @@ state (§8.2).
 | STY-07 | `addr s[0]` then growth (B §1.2) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | K5b (`never` cell of the build axis) | |
 | STY-09 | the AUD-01, AUD-09 and AUD-11 records | K5b (AUD-01), K2a (AUD-09), K4c (AUD-11) | |
+
+<!-- worklist:end 5.9 -->
 
 ## §6 — Slice procedure
 
@@ -1166,7 +1219,7 @@ review.
   and runs it last over the sweep's record directory, failing if the
   directory is empty. Each `BuildRow` with a run leg must have a record
   directory dated within seven days; a dead leg is a failure, not an absence.
-- **The work list is data.** `docs/rfc/0016-worklist.toml` holds one
+- **The work list is data.** `docs/rfc-data/0016-worklist.toml` holds one
   `[[row]]` per id: `id`, `title`, `class`, `state` (`open`, `closed`,
   `merged`, `moved`, `never`, `owned:RFC-NNNN`), `cells` (rendered
   `CellKey`s), `home` (slice), and for `never` a `NeverReason`. §5's tables
@@ -1737,7 +1790,7 @@ first, since every record after it carries the real profile.
 | ADM-1 | (from Wave 1's parallel worktree) `smt/admission.nim`'s `Admit`, `Row`, `AxisTable`; `feUnadmitted` (`dcNoAnswer`); `varParamMagics` and `verifiedLibs` (as `admitPcreLib`) moved onto it with no verdict change, and `ensureProcRegistered` taking an `Admit` (the second-consumer spike, §8.1) | K9a | s-m |
 | K2-s | read-only census script: every `case n.kind` in `src/nelli`, every `Survivors(`/`Degrade(` literal, every bare `skip(`; prints counts, gates nothing yet | — | xs |
 | K1a-cells | `tsymex_0016_universe.nim` (registered): cells of ADM-1's axes and the build rows; the error-kind and cap-kind derivations; the record join; allowlists under `tests/0016-allowlist/`; the committed `0016-universe.tsv` diff | ADM-1, K9b | s-m |
-| K1a-ids | `docs/rfc/0016-worklist.toml` from §5, §5.9 and the F ledger; `scripts/render_worklist.nim` and the staleness check; the id join and `ids.txt` | K1a-cells | s-m |
+| K1a-ids | `docs/rfc-data/0016-worklist.toml` from §5, §5.9 and the F ledger; `scripts/render_worklist.nim` and the staleness check; the id join and `ids.txt` | K1a-cells | s-m |
 | K1a-last | `sweep.sh` runs the universe test last over the sweep's record directory and fails on an empty one; the per-row seven-day freshness check | K1a-ids | xs |
 | K1a-ci | post-shard join on each leg: record upload steps and a join job in `symex-mingw.yaml`, `symex-linux` and CI-B's; planted RED shown on each leg by run URL | K1a-last, CI-B | s-m |
 | K7a | `Survivors` with `halted`, `surviving`, `continued`, `exact`; `CapKind` with one site per member; the 20 `discard w.degrade(` sites in their four shapes (§8.4) | — | s |
@@ -1817,7 +1870,7 @@ item names the slice that produces it.
    exhaustive ones; every `CapKind` and `SymexErrorKind` covered. (K1a-cells,
    K1a-last, K1a-ci; the legs from CI-A3 and CI-B; emptied by Waves 3-4,
    checked at W4-z.)
-2. Every row of `docs/rfc/0016-worklist.toml` is closed, merged, moved,
+2. Every row of `docs/rfc-data/0016-worklist.toml` is closed, merged, moved,
    owned elsewhere, or `never` with a `NeverReason`; no `iModel` decline
    remains (a declined-for-now cell is open work); the ids allowlist is
    empty. (K1a-ids; every fixing slice.)

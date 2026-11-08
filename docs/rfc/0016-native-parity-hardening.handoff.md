@@ -171,7 +171,7 @@ precision losses by design: the spec makes each a named decline
 happened to agree with native. Neither blocks 0.9.2: W1-b and W1-e's spec
 rows name these exact shapes and verdicts (§11, "today a trusted false
 pair"), and the decline is what makes the hidden-witness twins sound.
-Recovering the precision is PRC-36 and PRC-37 (Wave 4, "the precision rows"). Not probed: the hidden-witness
+Recovering the precision is PRC-39 and PRC-40 (Wave 4, "the precision rows"). Not probed: the hidden-witness
 shapes that made F-0002 and F-0004 false verdicts in 0.9.1 (the probes
 asserted the label, not the witness values), and Windows.
 
@@ -369,7 +369,7 @@ resolved by recommendation; no fork reached Corey.
 | 8 | breadth | generics have no home | `faGeneric` family (geUnresolvedGeneric, geInstantiationCapped, AUD-07) |
 | 9 | breadth | pragma axis only local | three lists; `union`/`packed`/`byref`/`bycopy`; `noalias` as an `OperandClass` (K3c) |
 | 10 | feasibility | `unsignedIntOps` (`dsl_parser.nim:11866`) a fifth magic table | in the magic axis's absorbs; the first converted site |
-| 11 | depth | ledger parses markdown by regex | `docs/rfc/0016-worklist.toml`, rendered back with a staleness check (K1a-ids) |
+| 11 | depth | ledger parses markdown by regex | `docs/rfc-data/0016-worklist.toml`, rendered back with a staleness check (K1a-ids) |
 | 12 | depth | records keyed by (file, segment): Z3 versions and reruns clobber | one file per run id; `rowOf` in the record |
 | 13 | feasibility | `NELLI_PIN_DIR` does not reach the container; `.pins/` untracked | INF-05 forwards it; `.gitignore` |
 | 14 | depth | an `exact` cell with no record on a leg passes | counts as unclassified there |

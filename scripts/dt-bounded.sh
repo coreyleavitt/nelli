@@ -32,6 +32,20 @@
 #        other = compile/test failure.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# --self-test: a host run must keep the child's stderr (and close the fds above 2).
+if [ "${1:-}" = "--self-test" ]; then
+  d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+  printf '%s\n' 'echo "child-stdout"' 'echo "child-stderr Warning: x" >&2' 'ls /proc/self/fd | tr "\n" " " > "$FDLOG"' > "$d/stub.sh"
+  exec 7>"$d/leaked"   # an fd above 2 that the run must not inherit
+  FDLOG="$d/fds" NELLI_HOST=1 NELLI_RUN_ONE="$d/stub.sh" bash "$0" c tests/x.nim 20 >"$d/out" 2>"$d/err"
+  exec 7>&-
+  grep -q child-stdout "$d/out" || { echo "dt-bounded self-test FAILED: stdout lost"; exit 1; }
+  grep -q 'child-stderr Warning' "$d/err" || { echo "dt-bounded self-test FAILED: the child's stderr was lost (an fd-closing loop took the saved stderr with it)"; exit 1; }
+  # only fds 0-2 and the one `ls` itself opens may be open
+  extra="$(tr ' ' '\n' < "$d/fds" | awk 'NF && $1 > 3')"
+  [ -z "$extra" ] || { echo "dt-bounded self-test FAILED: fds above 3 inherited: $extra"; exit 1; }
+  echo "dt-bounded self-test: ok"; exit 0
+fi
 image="${NELLI_IMAGE:-latest}"
 while getopts ":i:" opt; do
   case "$opt" in
@@ -78,14 +92,18 @@ if [ -n "$host" ]; then
   #     only if the fds are contiguous; the runner's leaked fds 142 and 145
   #     put the limit at 7, below them, so pipe() took fds 4 and 5 and
   #     succeeded.
+  # The loop must carry NO redirection: bash saves the original fd 2 at a high
+  # descriptor to restore a `done 2>/dev/null`, the loop then closes that copy, and
+  # stderr stays /dev/null for everything after it -- a host sweep read zero compiler
+  # warnings (and lost every test's stderr) for exactly this reason.
   # So the host run gets the same two things: its own TMPDIR, and fds above 2
   # closed before the test starts.
   host_tmp="$(mktemp -d)"
   trap 'rm -rf "$host_tmp"' EXIT
   TMPDIR="$host_tmp" timeout --signal=KILL "$timeout_secs" bash -c '
     [ -z "${NELLI_MEM_MB:-}" ] || ulimit -v $(( NELLI_MEM_MB * 1024 )) || exit 125
-    for f in /proc/self/fd/*; do n="${f##*/}"; [ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"; done 2>/dev/null
-    exec bash scripts/run-one.sh "$@"' _ "$backend" "$test_file"
+    for n in $(ls /proc/self/fd); do [ "$n" -gt 2 ] && eval "exec $n>&-"; done
+    exec bash "${NELLI_RUN_ONE:-scripts/run-one.sh}" "$@"' _ "$backend" "$test_file"
 else
   # Unique container name so we can guarantee teardown even if `timeout` kills
   # only the podman client and leaves the container detached.

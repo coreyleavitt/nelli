@@ -151,6 +151,9 @@ jobs:
           z3-asset: ${{ matrix.leg == 'z3-4.13.4' && 'z3-4.13.4-x64-glibc-2.35' || 'z3-5.1.0-x64-glibc-2.39' }}
           z3-sha256: ${{ matrix.leg == 'z3-4.13.4' && '93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b' || 'f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a' }}
 
+      - name: The host runner keeps the child's stderr (the compiler warnings sidecar depends on it)
+        run: bash scripts/dt-bounded.sh --self-test
+
       - name: Sweep shard ${{ matrix.shard }} on the host (scripts/sweep.sh --host)
         shell: bash
         env:
@@ -406,18 +409,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-symex-linux
-
-      - name: DIAG (temporary) where do the host compiler warnings go
-        shell: bash
-        run: |
-          set -uo pipefail
-          nim c --threads:on --hints:off --cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src \
-            --cincludes:"$NELLI_Z3_INCLUDE" --nimcache:"$RUNNER_TEMP/ncd" -o:"$RUNNER_TEMP/dx" tests/tfuzzforkworker.nim >"$RUNNER_TEMP/d.out" 2>"$RUNNER_TEMP/d.err" || true
-          echo "pwd=$PWD"; echo "stdout Warning lines: $(grep -c 'Warning:' "$RUNNER_TEMP/d.out")"; echo "stderr Warning lines: $(grep -c 'Warning:' "$RUNNER_TEMP/d.err")"
-          grep -m5 'Warning:' "$RUNNER_TEMP/d.out" "$RUNNER_TEMP/d.err" || true
-          head -5 "$RUNNER_TEMP/d.out" "$RUNNER_TEMP/d.err"
-          nim dump --dump.format:json 2>/dev/null | head -c 600 || true
-          ls "$(dirname "$(command -v nim)")/../config" 2>/dev/null; cat "$(dirname "$(readlink -f "$(command -v nim)")")/../config/nim.cfg" 2>/dev/null | grep -in 'warn\|hint\|listFull' || true
 
       - name: vm_alias_guard over a sampled slice (scripts/vm-alias-slice.sh)
         run: |

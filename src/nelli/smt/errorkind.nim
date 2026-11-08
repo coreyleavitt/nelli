@@ -978,10 +978,24 @@ type
                           ## admission table: the code reached something the
                           ## axis was never asked to classify, which is a
                           ## decline, never a silent model. `classOf` is
-                          ## `dcNoAnswer` until K7's `halted` drops the path
-                          ## (a `dcOmitted` row would let an `sxSat` through
-                          ## clean). sevError. Produced by the magic axis for
-                          ## a `var`-parameter magic with no row.
+                          ## `dcOmitted` since K7b: every site that reaches
+                          ## one drops the path (`halted`; the walker's
+                          ## missing-callee arm, for a magic), so no path
+                          ## carries it and no clean `sxSat` rides past the
+                          ## cell, while the run coordinate `{scIncomplete}`
+                          ## keeps `sxUnsat` untrusted. sevError. Produced
+                          ## by the magic axis for a `var`-parameter magic
+                          ## with no row.
+    feDefectExcluded      ## RFC-0016 K7b (W-16). A `Defect` raise that
+                          ## reached the SUT boundary on a feasible path was
+                          ## suppressed because its `DefectKind` is in
+                          ## `settings.defectExclusions`: the path ends with
+                          ## no finding, a pure omission. `classOf` is
+                          ## `dcOmitted` (run `{scIncomplete}`), so a search
+                          ## that the excluded raise could have answered is
+                          ## never a trusted `sxUnsat`. sevError. Appended
+                          ## after `feUnadmitted`, so every earlier ordinal
+                          ## holds.
 
   UbKind* = range[ubUnsignedDivZero .. ubSignedDivZero]
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:

@@ -282,7 +282,15 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "289"
+const symexWalkerVersion* = "290"
+  ## RFC-0016 K7b (289->290): `feUnadmitted` is `dcOmitted` and its sites
+  ## halt (the `isUnsupported` arm, now `walkUnsupported`, and the
+  ## missing-callee arm drop the path), so a target reachable only past an
+  ## unadmitted cell is not claimed and no clean `sxSat` rides past it. W-16:
+  ## a `Defect` raise suppressed by `defectExclusions` on a feasible path
+  ## records `feDefectExcluded` (`dcOmitted`), so a search it could have
+  ## answered is `sxUnknown`, not a trusted `sxUnsat`. W-11: `svWithRaw` on a
+  ## composite asserts (unreachable today).
   ## RFC-0016 K5a-2 (288->289): the cache key's build and host half is one
   ## `buildSegment` (`|bs=`, every field of `BuildSemantics` and
   ## `HostSemantics` by `fieldPairs`) in place of `|z3=`, `|pcre=` and `|bf=`,

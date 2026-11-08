@@ -3097,7 +3097,7 @@ proc stampHeapSteps(sv: var SymVal; steps: int) =
         for f in fs.mitems: stampHeapSteps(f, steps)
   else: discard
 
-proc svWithRaw(ctx: Z3Context; sv: SymVal; raw: Z3AnyAst): SymVal =
+proc svWithRaw*(ctx: Z3Context; sv: SymVal; raw: Z3AnyAst): SymVal =
   ## RFC-0005 S8bz (item 3). The scalar or string `sv` holding the term `raw`,
   ## of its own sort: `rawAnyAstOf`'s inverse.
   result = sv
@@ -3111,7 +3111,13 @@ proc svWithRaw(ctx: Z3Context; sv: SymVal; raw: Z3AnyAst): SymVal =
   of svFloat32: result.fp32 = wrap[Z3Float32](ctx, raw.raw)
   of svFloat64: result.fp64 = wrap[Z3Float64](ctx, raw.raw)
   of svString: result.str = wrap[Z3String](ctx, raw.raw)
-  else: discard
+  else:
+    ## RFC-0016 K7b (W-11). A composite has no single term to hold: returning
+    ## `sv` would hand back the stale value with no record. Its one caller
+    ## (`unwrittenLeafSplit`) recurses into composites and asks only for a
+    ## leaf, so this is unreachable today; a future caller that reaches it
+    ## fails loudly rather than substitute silently.
+    doAssert false, "svWithRaw: " & $sv.kind & " is not a scalar or string"
 
 proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   ## The raw ast of ANY base SymVal that may underlie a distinct type — used
@@ -23395,6 +23401,16 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
     # missing callee with NO parse-time decline behind it has no modelled
     # cause at all: that is a walker/parser bug, recorded as such.
     var declineKind: SymexErrorKind
+    # RFC-0016 K7b: a decline of class `dcOmitted` (`feUnadmitted`) halts:
+    # continuing on a fresh return value would carry no taint, so a hit past
+    # the call would be a clean `sxSat`.
+    if unregisteredCalleeKind(stmt.callee, declineKind) and
+       classOf(declineKind) == dcOmitted:
+      return w.halted(declineKind,
+        "call to unregistered callee `" & stmt.callee & "` reached at " &
+             "walk time -- declined at parse time (" & $declineKind &
+             "); the path ends here, what follows is not modelled",
+        scope = calleeKeyed(stmt.callee)).live
     let d =
       if unregisteredCalleeKind(stmt.callee, declineKind):
         w.degrade(declineKind,
@@ -24027,6 +24043,31 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
     if extRoot and w.depthHardHits > hardMark:
       return depthBail(w, stmt, paths, dcutHard)
     survivors
+
+proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
+                     w: var WalkCtx): Survivors =
+  ## RFC-0016 K7b. The `isUnsupported` arm. A path that reaches the decline
+  ## but that no execution can take is dropped, not tainted (RFC-0005 S8bc);
+  ## the rest meet the node's classified kind:
+  ##   * a kind of class `dcOmitted` (`feUnadmitted`) is a HALT: the record
+  ##     is the run act, and no path survives it, so no clean `sxSat` rides
+  ##     past a cell the walker could not classify;
+  ##   * any other kind forks every path through tainted (`surviving`), as
+  ##     before: the dropped mutation left `env` stale relative to the real
+  ##     program, and the taint chokepoints demote a later hit.
+  ## RFC-0005 S8: the record carries the node's parse-minted anchor.
+  ## RFC-0016 W1-d2 (W-07): there is no early return that passes a routine
+  ## without overflow checks; the marker declines on every setting.
+  var live: seq[Path]
+  for p in paths:
+    if not pathInfeasible(w.z3, p, w.settings): live.add p
+  if live.len == 0: return exact(live)
+  if classOf(stmt.unKind) == dcOmitted:
+    return w.halted(stmt.unKind, stmt.reason,
+                    scope = siteAnchored(stmt.unMarker))
+  let d = w.degrade(stmt.unKind, stmt.reason,
+                    scope = siteAnchored(stmt.unMarker))
+  surviving(live, d)
 
 proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   if w.shouldStop or stmt == nil or paths.len == 0:
@@ -24834,16 +24875,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # signed `+`, `-` and `*` are undefined on overflow in C, not a wrap, and
     # nothing here tells the arithmetic which routine it is in: the marker
     # declines (the degrade below) on every setting.
-    var live: seq[Path]
-    for p in paths:
-      if not pathInfeasible(w.z3, p, w.settings): live.add p
-    if live.len == 0: return live
-    let d = w.degrade(stmt.unKind, stmt.reason,
-                      scope = siteAnchored(stmt.unMarker))
-    var out2: seq[Path]
-    for p in live:
-      out2.add forkPathTainted(p, p.pc, p.env, d)
-    out2
+    walkUnsupported(stmt, paths, w).live
   of isUnsafeCast:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -26004,6 +26036,24 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
   stampExitsSince(w3, since3, spur)
   for c in w3.frame.exits.held.caught: result.caughtTaints.add c.path.taint
 
+proc haltExcludedDefect(p: Path, typeId: string, w: var WalkCtx) =
+  ## RFC-0016 K7b (W-16). A `Defect` raise that reaches the SUT boundary
+  ## while its `DefectKind` is in `settings.defectExclusions` ends its path
+  ## with no finding (the user excluded it). The omission is now recorded
+  ## (`feDefectExcluded`, `dcOmitted`: run `{scIncomplete}`), so a search
+  ## the excluded raise could have answered is `sxUnknown`, never a trusted
+  ## `sxUnsat`. A path no execution takes, or one a concrete witness's
+  ## inputs rule out, is not reached and records nothing.
+  if pathInfeasible(w.z3, p, w.settings): return
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                          w.settings):
+    return
+  w.halted(feDefectExcluded,
+    "a raise of `" & typeId & "` is excluded by `defectExclusions` (" &
+    $typeIdToDefectKind(typeId) & "): the path ends here with no finding, " &
+    "so a search it could have answered is not decided")
+
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =
   ## Phase 15 E3. Route a raise on path `p` carrying `typeId`/`msg`. This is the
@@ -26205,6 +26255,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   let defectExcluded =
     raisedIsDefect and
     typeIdToDefectKind(typeId) in w.settings.defectExclusions
+  if defectExcluded: haltExcludedDefect(rp, typeId, w)  ## RFC-0016 K7b
   let wantsRaise =
     if defectExcluded:
       false  ## E6: an excluded defect is suppressed (no finding).
@@ -26290,7 +26341,9 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
      concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
                           w.settings):
     return
-  if typeIdToDefectKind(typeId) in w.settings.defectExclusions: return
+  if typeIdToDefectKind(typeId) in w.settings.defectExclusions:
+    haltExcludedDefect(p, typeId, w)   ## RFC-0016 K7b (W-16)
+    return
   let (st, wit, candErrs, why) = solveTargetHit(w, p)
   case st
   of sxSat:

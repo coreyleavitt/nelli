@@ -36,7 +36,7 @@ suite "ADM-1 magic axis":
     check not a.admitted
     let (kind, why) = a.decline
     check kind == some(feUnadmitted)
-    check classOf(feUnadmitted) == dcNoAnswer
+    check classOf(feUnadmitted) == dcOmitted  ## K7b (was dcNoAnswer)
     check "magic:NoSuchMagic" in why
 
   test "the table has the nineteen rows, sixteen modelled":

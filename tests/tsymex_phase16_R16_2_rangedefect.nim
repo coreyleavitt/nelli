@@ -136,7 +136,14 @@ suite "symex Phase 16 R16-2 — acRange gate":
       x.defectExclusions.incl dkRangeDefect
       x
     let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"), s)
-    check r.status == sxUnsat   ## no RangeDefect path raised
+    ## RFC-0016 K7b (W-16): no RangeDefect path raised, and the excluded raise
+    ## is recorded (`feDefectExcluded`, dcOmitted), so the answer is not a
+    ## trusted `sxUnsat` (it was, before K7b).
+    check r.status == sxUnknown
+    var recorded = false
+    for e in r.errors:
+      if e.kind == feDefectExcluded: recorded = true
+    check recorded
 
 # ---------------------------------------------------------------------------
 # Behavior 5: int32 width — never raises; exact at width 32 in range

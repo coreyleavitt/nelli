@@ -2787,8 +2787,11 @@ func classOf*(k: SymexErrorKind): DegradeClass =
      ubFloatToIntRange, ubIndeterminateRead, ubSignedDivZero: dcOmitted
     # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
     # successor, a pure omission.
-  of feUnadmitted: dcNoAnswer
-    # RFC-0016 ADM-1: a decline naming the cell with no row; the default.
+  of feUnadmitted, feDefectExcluded: dcOmitted
+    # RFC-0016 K7b: `halted` drops the path, so nothing survives the cell
+    # to carry a witness; a pure omission (ADM-1 had `feUnadmitted` as
+    # `dcNoAnswer` until then). `feDefectExcluded` is W-16: the excluded
+    # raise ends its path.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the

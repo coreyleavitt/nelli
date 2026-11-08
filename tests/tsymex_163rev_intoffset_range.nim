@@ -67,6 +67,21 @@ proc noRangeChecks(): SymexSettings =
   result = defaultSymexSettings()
   result.defectExclusions.incl dkRangeDefect
 
+proc unreachableModuloExcluded[T](r: SymexResult[T]): bool =
+  ## RFC-0016 K7b (W-16). `noRangeChecks` excludes `dkRangeDefect`, and an
+  ## excluded raise on a feasible path is now recorded (`feDefectExcluded`,
+  ## dcOmitted), so "no path reaches the label" is `sxUnknown` carrying that
+  ## record and nothing else -- it was a bare `sxUnsat` before K7b. The label
+  ## is still never claimed (`sxSat`), which is what these pins are about.
+  if r.status == sxUnsat: return true
+  if r.status != sxUnknown: return false
+  var excluded = false
+  for e in r.errors:
+    if e.severity != sevError: continue
+    if e.kind == feDefectExcluded: excluded = true
+    else: return false
+  excluded
+
 proc capDeclineOnly[T](r: SymexResult[T]): bool =
   ## sxUnknown whose only errors are the `maxSeqLen` decline.
   if r.status != sxUnknown: return false
@@ -117,7 +132,7 @@ suite "#163 review W8 -- bare scan-offset return: the placeholder keeps the call
     ## (Nim itself would have raised `RangeDefect` first, per the oracle
     ## above) -- a false `sxSat` witness.
     let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"), noRangeChecks())
-    check r.status == sxUnsat
+    check unreachableModuloExcluded(r)
 
   test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
     let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"))
@@ -169,7 +184,7 @@ suite "#163 review W8 -- traced tuple position: the placeholder keeps the callee
     ## `sxSat` mechanism as the bare arm above, at the OTHER call-return
     ## site the fix touches.
     let r = symexFind(callerTuple, tLabel("impossible_tuple"), noRangeChecks())
-    check r.status == sxUnsat
+    check unreachableModuloExcluded(r)
 
   test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
     let r = symexFind(callerTuple, tLabel("impossible_tuple"))
@@ -199,7 +214,7 @@ suite "#163 review W8 -- non-regression: Q1/B0 never reaches these arms":
 
   test "the skip-while shape still terminates and still respects the range (ordinary BV route)":
     let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"), noRangeChecks())
-    check r.status == sxUnsat
+    check unreachableModuloExcluded(r)
 
   test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
     let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"))

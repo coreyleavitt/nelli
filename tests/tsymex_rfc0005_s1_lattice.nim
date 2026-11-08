@@ -30,7 +30,9 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
   # the rune-decode split.
   # RFC-0005 S8c retired `seBytesLengthTooLarge`, `seBytesSymbolicLength` and
   # `hePtrArith` back to dcNoAnswer (never emitted; rows kept for totality).
-  const reclassified = {heUnsupportedPointeeRead, seUnsupportedCompoundSortLeaf,
+  # RFC-0016 K7b: `feUnadmitted` and `feDefectExcluded` are dcOmitted.
+  const reclassified = {feUnadmitted, feDefectExcluded,
+                        heUnsupportedPointeeRead, seUnsupportedCompoundSortLeaf,
                         seZ3VersionMissing, seZ3StringIncomplete,
                         seRuneDecodeSymbolic,
                         # RFC-0005 S6a: the budget family.

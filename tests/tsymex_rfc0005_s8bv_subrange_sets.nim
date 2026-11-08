@@ -35,16 +35,7 @@ template verdict(sut: untyped; label: string): SymexResult =
              (if r.status == sxSat: $r.witness else: "-")
   r
 
-template nativeHits(body: untyped): HashSet[string] =
-  symexCaptureBegin()
-  body
-  symexCaptureEnd()
-type
-  E4 = enum e0, e1, e2, e3
-  SE = range[e1..e2]
-  SubHolder = object
-    f: SE
-    n: int
+from ./s8cu_helpers import nativeHits
 
 proc takeSE(s: set[SE]): int = card(s)
 

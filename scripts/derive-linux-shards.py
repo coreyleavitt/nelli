@@ -29,11 +29,16 @@ import re
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TARGET_SHARD_MIN = 12      # wall minutes one shard should take on Linux
-JOBS = 4                   # sweep.sh -j on a 4-core ubuntu-24.04 runner
+# CI-B knobs: the symex-msvc leg cuts only tsymex_* (NELLI_NAME_PREFIX) for a
+# runner that runs one test at a time (NELLI_JOBS=1), at the scale the table
+# was measured on (NELLI_LINUX_TIME_SCALE=1.0).
+TARGET_SHARD_MIN = float(os.environ.get("NELLI_TARGET_MIN", "12"))  # wall minutes per shard
+JOBS = int(os.environ.get("NELLI_JOBS", "4"))   # sweep.sh -j on a 4-core ubuntu-24.04 runner
+NAME_PREFIX = os.environ.get("NELLI_NAME_PREFIX", "")
+OUT_PREFIX = os.environ.get("NELLI_OUTPUT_PREFIX", "")   # e.g. msvc_ -> msvc_shards_json
 TIME_SCALE = float(os.environ.get("NELLI_LINUX_TIME_SCALE", "1.2"))
-MIN_SHARDS = 8
-CORPUS_FLOOR = 500
+MIN_SHARDS = int(os.environ.get("NELLI_MIN_SHARDS", "8"))
+CORPUS_FLOOR = 200 if NAME_PREFIX else 500
 
 
 def registered():
@@ -58,6 +63,8 @@ def measured():
 
 def main():
     names = [n for n in registered() if os.path.exists(os.path.join(ROOT, "tests", n + ".nim"))]
+    if NAME_PREFIX:
+        names = [n for n in names if n.startswith(NAME_PREFIX)]
     only = os.environ.get("NELLI_TESTS_REGEX", "")
     floor = CORPUS_FLOOR
     if only:                  # a dispatch narrowing the run: no floor, no MIN_SHARDS
@@ -71,7 +78,7 @@ def main():
     default = known[len(known) // 2] if known else 45.0
     est = {n: meas.get(n, default) * TIME_SCALE for n in names}
     total = sum(est.values())
-    count = max(1 if only else MIN_SHARDS, -(-int(total) // (60 * TARGET_SHARD_MIN * JOBS)))
+    count = max(1 if only else MIN_SHARDS, -(-int(total) // int(60 * TARGET_SHARD_MIN * JOBS)))
     count = min(count, len(names))
     shards = [[] for _ in range(count)]
     loads = [0.0] * count
@@ -96,10 +103,10 @@ def main():
     if gh:
         with open(gh, "a") as f:
             for k, v in out.items():
-                f.write("%s=%s\n" % (k, v))
+                f.write("%s%s=%s\n" % (OUT_PREFIX, k, v))
     else:
         for k, v in out.items():
-            print("%s=%s" % (k, v))
+            print("%s%s=%s" % (OUT_PREFIX, k, v))
 
 
 main()

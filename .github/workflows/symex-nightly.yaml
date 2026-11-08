@@ -1,0 +1,444 @@
+name: symex-nightly
+
+# RFC-0016 CI-B (Wave 2): the rotation that is too slow or too wide for every
+# push, run nightly and on demand. It is symex-linux's shape (derive, sharded
+# sweeps, a gate against a known-red allowlist) over three more legs:
+#
+#   cpp         Linux, backend cpp, Z3 5.1.0       (n42/n43 broke on cpp for batches)
+#   z3-4.13.4   Linux, backend c,   Z3 4.13.4      (the Windows legs' Z3, on Linux)
+#   msvc        Windows, c with vcc, Z3 4.13.4     (`symex-msvc`: the whole symex
+#                                                   task; absorbs W1-m's tsymex_0016_*)
+#
+# plus the parser-VM cell: `vm_alias_guard` over a sampled corpus slice
+# (scripts/vm-alias-slice.sh).
+#
+# EACH LEG has its own known-red allowlist, tests/0016-allowlist/nightly-<leg>-known-red.txt,
+# with symex-linux's stale-entry rule (scripts/check-linux-allowlist.sh): a red test
+# not listed fails the leg, and a listed test that passed fails it too.
+#
+# CI-C. Every leg uploads `nightly-<leg>-merged` (the merged sweep log and its
+# .summary/.env/.warnings/.times sidecars, the gate output, the ceiling report and
+# the diff) and diffs against a recorded baseline with scripts/sweep-diff.sh
+# (scripts/ci-baseline.sh: the newest main artifact; failing that the 0.9.1
+# release asset, informational). A test that passed in the last main artifact
+# and fails now turns the leg red even if the allowlist covers it.
+#
+# CI-D. `.times` is the per-test compile+run wall time; scripts/check-ceiling.sh
+# reports every test over 60 s into the job summary and the artifact. It is a
+# finding, not a gate (dozens of tests are over today; their split is a work-list
+# row).
+#
+# INTAKE. A red `schedule` run opens or updates one `rfc-0016-intake` issue per
+# (leg, test) (scripts/rfc0016-intake.sh). Every other trigger is a dry run that
+# prints what it would file, unless a dispatch chooses `intake: live`.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test"
+        required: false
+        default: ""
+      legs:
+        description: "Comma list of legs to run: cpp, z3-4.13.4, msvc (empty = all)"
+        required: false
+        default: ""
+      tests_regex:
+        description: "Run only test basenames matching this REGEX (empty = the whole suite)"
+        required: false
+        default: ""
+      intake:
+        description: "rfc-0016-intake issues: off, dry-run (print only) or live"
+        required: false
+        default: "dry-run"
+        type: choice
+        options: [off, dry-run, live]
+  # TEMPORARY (CI-B development): a workflow_dispatch needs the file on the default
+  # branch, so the branch that adds it runs on push. Removed before the merge.
+  push:
+    branches: ['rfc-0016-cib']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  derive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      shards_json: ${{ steps.derive.outputs.shards_json }}
+      shard_ids: ${{ steps.derive.outputs.shard_ids }}
+      regexes_json: ${{ steps.derive.outputs.regexes_json }}
+      msvc_shards_json: ${{ steps.derive.outputs.msvc_shards_json }}
+      msvc_shard_ids: ${{ steps.derive.outputs.msvc_shard_ids }}
+      legs_json: ${{ steps.legs.outputs.legs_json }}
+      linux_legs_json: ${{ steps.legs.outputs.linux_legs_json }}
+      has_linux: ${{ steps.legs.outputs.has_linux }}
+      has_msvc: ${{ steps.legs.outputs.has_msvc }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Select the legs
+        id: legs
+        env:
+          LEGS: ${{ inputs.legs }}
+        run: |
+          set -euo pipefail
+          all='cpp z3-4.13.4 msvc'
+          want="${LEGS//,/ }"; [ -n "${want// /}" ] || want="$all"
+          sel=()
+          for l in $want; do
+            case " $all " in *" $l "*) sel+=("$l") ;; *) echo "unknown leg: $l" >&2; exit 1 ;; esac
+          done
+          lin=(); for l in "${sel[@]}"; do [ "$l" = msvc ] || lin+=("$l"); done
+          j() { printf '%s\n' "$@" | jq -R . | jq -sc .; }
+          echo "legs_json=$(j "${sel[@]}")" >> "$GITHUB_OUTPUT"
+          echo "linux_legs_json=$( [ ${#lin[@]} -gt 0 ] && j "${lin[@]}" || echo '[]')" >> "$GITHUB_OUTPUT"
+          echo "has_linux=$([ ${#lin[@]} -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "has_msvc=$(case " ${sel[*]} " in *' msvc '*) echo true ;; *) echo false ;; esac)" >> "$GITHUB_OUTPUT"
+
+      - name: Derive and shard the registered suite (Linux legs)
+        id: derive
+        env:
+          NELLI_TESTS_REGEX: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex || '' }}
+          # cpp compiles slower than c: a lower target keeps a shard inside its cap.
+          NELLI_TARGET_MIN: "10"
+        run: python3 -I scripts/derive-linux-shards.py
+
+      - name: Derive and shard the symex task (symex-msvc)
+        env:
+          NELLI_TESTS_REGEX: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex || '' }}
+          NELLI_NAME_PREFIX: tsymex_
+          NELLI_OUTPUT_PREFIX: msvc_
+          NELLI_JOBS: "1"
+          NELLI_TARGET_MIN: "23"
+          NELLI_LINUX_TIME_SCALE: "1.0"
+        run: python3 -I scripts/derive-linux-shards.py
+
+  sweep:
+    needs: derive
+    if: ${{ needs.derive.outputs.has_linux == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJson(needs.derive.outputs.linux_legs_json) }}
+        shard: ${{ fromJson(needs.derive.outputs.shard_ids) }}
+    name: sweep (${{ matrix.leg }} shard ${{ matrix.shard }})
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-symex-linux
+        with:
+          z3-version: ${{ matrix.leg == 'z3-4.13.4' && '4.13.4' || '5.1.0' }}
+          z3-asset: ${{ matrix.leg == 'z3-4.13.4' && 'z3-4.13.4-x64-glibc-2.35' || 'z3-5.1.0-x64-glibc-2.39' }}
+          z3-sha256: ${{ matrix.leg == 'z3-4.13.4' && '93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b' || 'f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a' }}
+
+      - name: Sweep shard ${{ matrix.shard }} on the host (scripts/sweep.sh --host)
+        shell: bash
+        env:
+          REGEXES_JSON: ${{ needs.derive.outputs.regexes_json }}
+          SHARD: ${{ matrix.shard }}
+          BACKEND: ${{ matrix.leg == 'cpp' && 'cpp' || 'c' }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/sweep"
+          regex="$(printf '%s' "$REGEXES_JSON" | jq -r --arg s "$SHARD" '.[$s]')"
+          [ -n "$regex" ] && [ "$regex" != null ] || { echo "shard $SHARD: no regex"; exit 1; }
+          start=$SECONDS
+          scripts/sweep.sh --host --derive -j 4 -b "$BACKEND" -f "$regex" "$RUNNER_TEMP/sweep/shard-$SHARD.log"
+          rc=$?
+          {
+            echo "### ${{ matrix.leg }} shard $SHARD: $(( (SECONDS - start) / 60 )) min $(( (SECONDS - start) % 60 )) s"
+            echo '```'
+            cat "$RUNNER_TEMP/sweep/shard-$SHARD.log.summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "shard $SHARD wall time: $(( SECONDS - start )) s"
+          exit "$rc"
+
+      - name: Upload the shard log and sidecars
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.leg }}-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/sweep/
+          if-no-files-found: warn
+
+  msvc-sweep:
+    needs: derive
+    if: ${{ needs.derive.outputs.has_msvc == 'true' }}
+    runs-on: windows-2025
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.derive.outputs.msvc_shard_ids) }}
+    name: sweep (msvc shard ${{ matrix.shard }})
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-symex-msvc
+
+      - name: Run shard ${{ matrix.shard }} under vcc
+        shell: pwsh
+        env:
+          SHARDS_JSON: ${{ needs.derive.outputs.msvc_shards_json }}
+          SHARD_IDX: ${{ matrix.shard }}
+        run: |
+          $shards = $env:SHARDS_JSON | ConvertFrom-Json
+          $tests = $shards.($env:SHARD_IDX)
+          if (-not $tests -or $tests.Count -eq 0) { throw "msvc shard $($env:SHARD_IDX): empty suite list -- failing loudly" }
+          $out = Join-Path $env:RUNNER_TEMP 'sweep'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $log = Join-Path $out "shard-$($env:SHARD_IDX).log"
+          $timesFile = "$log.times"
+          '' | Set-Content -NoNewline $log; '' | Set-Content -NoNewline $timesFile
+          # The gate reads results in scripts/sweep.sh's shape: `<rc> <backend> <file> <warn>`.
+          # A suite the shard did not reach writes NO line, which the gate names as missing.
+          $stopMin = 95
+          $clock = [System.Diagnostics.Stopwatch]::StartNew()
+          $nimcache = Join-Path $env:RUNNER_TEMP 'nimcache-msvc'
+          $notRun = @()
+          foreach ($t in $tests) {
+            if ($clock.Elapsed.TotalMinutes -gt $stopMin) { $notRun += $t; continue }
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $extra = @()
+            if ($t -eq 'tsymex_rfc0005_s8ab_letaudit') { $extra += '-d:nelliVmAliasAudit' }
+            if ($t -eq 'tsymex_r6_b5_chained') { $extra += '-d:symexCiLeanB5' }
+            # 600 s per suite (the mingw corpus uses the 240 s default; the scan-tail
+            # suites run past it, and the nightly leg has no isolated jobs).
+            ./scripts/run-ci-suite.ps1 -Suite $t -Cc vcc -TimeoutSec 600 -NimCache $nimcache -ExtraNimArgs $extra
+            $rc = $LASTEXITCODE
+            $sec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            Add-Content -Path $log -Value "$rc vcc tests/$t.nim 0"
+            Add-Content -Path $timesFile -Value ("{0} vcc tests/{1}.nim" -f $sec.ToString([cultureinfo]::InvariantCulture), $t)
+          }
+          $res = Get-Content $log | Where-Object { $_ }
+          $fail = @($res | Where-Object { $_ -notmatch '^0 ' })
+          Set-Content -Path "$log.env" -Value "host=windows-2025 cc=vcc Z3=4.13.4"
+          Set-Content -Path "$log.summary" -Value @("host=windows-2025 cc=vcc Z3=4.13.4", "backend=vcc shard=$($env:SHARD_IDX)", "pass=$($res.Count - $fail.Count) fail=$($fail.Count) notrun=$($notRun.Count)")
+          Set-Content -Path "$log.warnings" -Value '(none)'
+          $min = [math]::Round($clock.Elapsed.TotalMinutes, 1)
+          $sum = @("### msvc shard $($env:SHARD_IDX): $min min, $($res.Count) of $($tests.Count) suites run", '```') + (Get-Content "$log.summary") + '```'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($sum -join "`n")
+          if ($notRun.Count -gt 0) { Write-Host "NOT RUN (stopped at $stopMin min): $($notRun -join ', ')"; exit 1 }
+
+      - name: Upload the shard log and sidecars
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-msvc-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/sweep/
+          if-no-files-found: warn
+
+  gate:
+    needs: [derive, sweep, msvc-sweep]
+    if: ${{ !cancelled() && needs.derive.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJson(needs.derive.outputs.legs_json) }}
+    name: gate (${{ matrix.leg }})
+    env:
+      LEG: ${{ matrix.leg }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-${{ matrix.leg }}-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Join the shards against the leg's known-red allowlist
+        id: join
+        env:
+          SHARDS_JSON: ${{ matrix.leg == 'msvc' && needs.derive.outputs.msvc_shards_json || needs.derive.outputs.shards_json }}
+          PARTIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex != '' && '1' || '' }}
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          bash scripts/check-linux-allowlist.sh --self-test
+          printf '%s' "$SHARDS_JSON" | jq -r '.[][]' > expected.txt
+          # the merged record: log, .env (first shard's), .warnings, .times
+          cat shards/shard-*.log > out/merged.log
+          for ext in warnings times; do cat shards/shard-*.log.$ext > out/merged.log.$ext 2>/dev/null || :; done
+          cat shards/shard-*.log.drift > out/merged.log.drift 2>/dev/null || :
+          head -qn1 shards/shard-*.log.env 2>/dev/null | sort -u > out/merged.log.env || :
+          awk '{ if ($1 == "0") p++; else if ($1 == "skip") s++; else f++ } END { printf "pass=%d fail=%d skip=%d total=%d\n", p, f, s, p+f+s }' out/merged.log > out/merged.log.summary
+          rc=0
+          bash scripts/check-linux-allowlist.sh "tests/0016-allowlist/nightly-$LEG-known-red.txt" \
+            expected.txt shards/shard-*.log > out/gate.txt 2>&1 || rc=$?
+          cat out/gate.txt
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: CI-D, the 60 s ceiling
+        if: ${{ !cancelled() }}
+        run: |
+          bash scripts/check-ceiling.sh --self-test
+          bash scripts/check-ceiling.sh out/merged.log.times > out/ceiling.txt
+          cat out/ceiling.txt
+          { echo "### $LEG: tests over the 60 s ceiling (CI-D finding, not a gate)"; echo '```'; head -n 40 out/ceiling.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: CI-C, sweep-diff against the recorded baseline
+        id: diff
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          kind="$(bash scripts/ci-baseline.sh "$LEG" baseline)"
+          echo "baseline kind: $kind"
+          drc=0
+          if [ "$kind" = none ]; then
+            echo "no baseline for $LEG; this run's merged log becomes it" | tee out/diff.txt
+          else
+            bash scripts/sweep-diff.sh -s baseline/baseline.log out/merged.log > out/diff.txt 2>&1 || drc=$?
+            cat out/diff.txt
+          fi
+          # REGRESSED is red only against a nightly baseline; the release row was recorded
+          # under podman and is informational.
+          [ "$kind" = nightly ] || drc=0
+          { echo "### $LEG: sweep-diff vs $kind baseline"; echo '```'; head -n 60 out/diff.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "rc=$drc" >> "$GITHUB_OUTPUT"
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+
+      - name: Findings for the intake issue
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          bash scripts/rfc0016-intake.sh --extract "$LEG" out/gate.txt > out/findings.tsv
+          if [ "${{ steps.diff.outputs.rc }}" != 0 ]; then
+            awk -v leg="$LEG" '/^## REGRESSED/ {on=1; next} /^## / {on=0} on && NF >= 3 { n=$2; sub(/^.*\//,"",n); sub(/\.nim$/,"",n); printf "%s\t%s\tREGRESSED vs the last nightly baseline\n", leg, n }' out/diff.txt >> out/findings.tsv
+          fi
+          if [ "${{ steps.join.outputs.rc }}" != 0 ] && [ ! -s out/findings.tsv ]; then
+            printf '%s\t%s\t%s\n' "$LEG" '(gate)' "gate failed with no named test; see the run" >> out/findings.tsv
+          fi
+          mkdir -p findings; cp out/findings.tsv "findings/findings-$LEG.tsv"
+
+      - name: Upload the merged record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.leg }}-merged
+          path: out/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload the findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-findings-${{ matrix.leg }}
+          path: findings/
+          if-no-files-found: ignore
+
+      - name: Verdict
+        if: ${{ !cancelled() }}
+        run: |
+          [ "${{ steps.join.outputs.rc }}" = 0 ] && [ "${{ steps.diff.outputs.rc }}" = 0 ]
+
+  vm-alias:
+    needs: derive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-symex-linux
+
+      - name: vm_alias_guard over a sampled slice (scripts/vm-alias-slice.sh)
+        run: |
+          set -uo pipefail
+          mkdir -p out findings
+          scripts/vm-alias-slice.sh -n 12 out/slice.log
+          { echo '### vm_alias_guard slice'; echo '```'; cat out/slice.log.summary; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          awk '$1 != "0" { n=$3; sub(/^.*\//,"",n); sub(/\.nim$/,"",n); printf "vm-alias\t%s\tvm_alias_guard slice: rc=%s\n", n, $1 }' out/slice.log > findings/findings-vm-alias.tsv
+          [ ! -s findings/findings-vm-alias.tsv ]
+
+      - name: Upload the slice record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-vm-alias-merged
+          path: out/
+          if-no-files-found: warn
+
+      - name: Upload the findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-findings-vm-alias
+          path: findings/
+          if-no-files-found: ignore
+
+  report:
+    needs: [derive, sweep, msvc-sweep, gate, vm-alias]
+    if: ${{ always() && !cancelled() && (github.event_name == 'schedule' || inputs.intake != 'off') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-findings-*
+          path: findings
+          merge-multiple: true
+
+      - name: File or update the rfc-0016-intake issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # schedule files for real; everything else is a dry run unless a dispatch says live.
+          MODE: ${{ github.event_name == 'schedule' && 'live' || inputs.intake || 'dry-run' }}
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          set -uo pipefail
+          bash scripts/rfc0016-intake.sh --self-test
+          cat findings/*.tsv > findings.tsv 2>/dev/null || : > findings.tsv
+          # a job that failed without writing findings (setup broke, a runner was lost)
+          # is itself a finding, keyed by job
+          for j in derive sweep msvc-sweep gate vm-alias; do
+            r="$(printf '%s' "$NEEDS_JSON" | jq -r --arg j "$j" '.[$j].result')"
+            [ "$r" = failure ] && [ ! -s findings.tsv ] && printf 'workflow\t%s\tjob %s result: failure\n' "$j" "$j" >> findings.tsv
+          done
+          echo "intake mode: $MODE; findings: $(wc -l < findings.tsv)"
+          { echo "### rfc-0016-intake ($MODE)"; echo '```'; cat findings.tsv; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/rfc0016-intake.sh --mode "$MODE" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --sha "$GITHUB_SHA" --event "$GITHUB_EVENT_NAME" findings.tsv 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"

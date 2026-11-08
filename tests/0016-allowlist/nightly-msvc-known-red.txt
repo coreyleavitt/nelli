@@ -1,0 +1,2 @@
+# RFC-0016 CI-B: tests red on the msvc leg of symex-nightly. One test per line, then the reason.
+# Baseline: not yet recorded.

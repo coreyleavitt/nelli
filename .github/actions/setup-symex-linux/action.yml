@@ -4,6 +4,18 @@ description: >
   pin-join job: the patched Nim OCI artifact, Z3 5.1.0, PCRE 8.45, the milpa.lock
   deps cloned at their provenance SHAs, and a version report. Exports
   NELLI_Z3_INCLUDE, NELLI_PCRE_PREFIX and LD_LIBRARY_PATH to later steps.
+inputs:
+  z3-version:
+    description: "Z3 release version (RFC-0016 CI-B runs 4.13.4 as well as 5.1.0)"
+    required: false
+    default: "5.1.0"
+  z3-asset:
+    required: false
+    default: "z3-5.1.0-x64-glibc-2.39"
+  z3-sha256:
+    required: false
+    default: "f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a"
+
 runs:
   using: composite
   steps:
@@ -12,8 +24,12 @@ runs:
       with:
         tag: 2.2.10-linux-x64
 
-    - name: Install Z3 5.1.0
+    - name: Install Z3
       uses: ./.github/actions/setup-z3-linux
+      with:
+        version: ${{ inputs.z3-version }}
+        asset: ${{ inputs.z3-asset }}
+        sha256: ${{ inputs.z3-sha256 }}
 
     - name: Install PCRE 8.45
       uses: ./.github/actions/setup-pcre1-linux

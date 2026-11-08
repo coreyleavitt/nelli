@@ -22727,9 +22727,17 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
   of nnkSym:
     case symKind(n)
     of nskVar, nskLet:
-      acc.types.add (n.getTypeInst, isModuleGlobal(n))
+      # RFC-0016 K8A-1. A template body's `except T as e` binds an `e` the
+      # semchecker never typed (the template is not instantiated where it is
+      # only defined, and a gensym'd binding keeps no type): `getTypeInst`
+      # on it is a hard "node has no type" error. It names no value of a type
+      # this scan misses: the handler's exception type is the `except`
+      # branch's own, and the expanded copy of the body carries a typed `e`.
+      if n.typeKind != ntyNone:
+        acc.types.add (n.getTypeInst, isModuleGlobal(n))
     of nskParam, nskForVar, nskResult, nskConst, nskTemp:
-      acc.types.add (n.getTypeInst, false)
+      if n.typeKind != ntyNone:
+        acc.types.add (n.getTypeInst, false)
     of nskType:
       acc.types.add (n, false)
     of userRoutineSymKinds:

@@ -11,6 +11,9 @@ import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8be_remainder_c")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -35,16 +38,6 @@ template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
     let r = symexFind(fn, tgt, s)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, tgt: SymexTarget, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tgt)
-    checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (12) an element's address as a value; a case object's address ----------
@@ -193,7 +186,7 @@ suite "RFC-0005 S8be (12): an element's address as a value":
     verdict(sutElemPtrFromCallee, tLabel("ok"), sxSat)
     verdict(sutElemPtrFromCallee, tLabel("bad"), sxUnsat)
   test "used after a resize declines":
-    declines(sutElemPtrResized, tLabel("ok"), feUnsupportedOp, "S8be")
+    pinDecline(sutElemPtrResized, declKey, feUnsupportedOp, tLabel("ok"), "S8be")
   test "the index is checked where `addr` takes it":
     verdict(sutElemPtrOob, tRaisedExn("IndexDefect"), sxRaised)
 
@@ -205,7 +198,7 @@ suite "RFC-0005 S8be (12): a case object's address":
     verdict(sutVariantFieldAddr, tLabel("ok"), sxSat)
     verdict(sutVariantFieldAddr, tLabel("bad"), sxUnsat)
   test "an arm field's pointer after the object changes arm declines":
-    declines(sutVariantFieldRearm, tLabel("ok"), feUnsupportedOp, "another arm")
+    pinDecline(sutVariantFieldRearm, declKey, feUnsupportedOp, tLabel("ok"), "another arm")
 
 suite "RFC-0005 S8be (13): the call-depth decline":
   test "names the budget":

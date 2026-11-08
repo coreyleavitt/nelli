@@ -19,6 +19,9 @@ import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bn_remainder_b")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -34,17 +37,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
     r
-
-template declines(fn: typed, lbl: string, ek: SymexErrorKind,
-                  needle: string): untyped =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == ek and needle in e.msg: named = true
-    check named
 
 template confirmed(fn: typed, lbl: string): untyped =
   ## A sound `sxSat` whose witness replays `roConfirmed` against Nim.
@@ -203,17 +195,17 @@ suite "S8bn (4): a ptr into an aggregate":
   test "an element of a seq held in the heap":
     ## RED: sxUnknown, `feUnsupportedOp` "held in a heap cell".
     confirmed(sutPHeapSeq, "phs")
-    declines(sutPHeapSeqPop, "phsp", feUnsupportedOp, "may dangle")
+    pinDecline(sutPHeapSeqPop, declKey, feUnsupportedOp, tLabel("phsp"), "may dangle")
 
   test "a seq the path resized still declines":
-    declines(sutPSeqGrow, "psg", feUnsupportedOp, "may dangle")
+    pinDecline(sutPSeqGrow, declKey, feUnsupportedOp, tLabel("psg"), "may dangle")
 
   test "a value of a table, and a set's members":
     ## RED: sxUnknown, `feUnsupportedOp` "by-value aggregate this model
     ## holds no cell for".
     confirmed(sutPTabVar, "ptb")
-    declines(sutPTabGrow, "ptbg", feUnsupportedOp, "may dangle")
-    declines(sutPTabDel, "ptbd", feUnsupportedOp, "may dangle")
+    pinDecline(sutPTabGrow, declKey, feUnsupportedOp, tLabel("ptbg"), "may dangle")
+    pinDecline(sutPTabDel, declKey, feUnsupportedOp, tLabel("ptbd"), "may dangle")
     discard clean(sutPSetVar, "pss", sxSat)
     discard clean(sutPSetVar, "pss_dead", sxUnsat)
 

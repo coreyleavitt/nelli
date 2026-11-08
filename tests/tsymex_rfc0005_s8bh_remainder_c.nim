@@ -27,6 +27,9 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bh_remainder_c")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -42,17 +45,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
     r
-
-template declines(fn: typed, lbl: string, ek: SymexErrorKind,
-                  needle: string): untyped =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == ek and needle in e.msg: named = true
-    check named
 
 # ---- 1. var writes through an indirect call ---------------------------------
 
@@ -147,12 +139,12 @@ proc sutMethod(k: int) =
 
 suite "S8bh (1): var writes through an indirect call":
   test "an actual that is also the closure's capture declines":
-    declines(sutCapAlias, "ca_dead", ceCaptureByRefUnmodelled, "`c`")
+    pinDecline(sutCapAlias, declKey, ceCaptureByRefUnmodelled, tLabel("ca_dead"), "`c`")
 
   test "an unknown target declines, and its effects are havocked":
-    declines(sutUnknown, "uk", ceClosureUnknownCallee, "`f`")
-    declines(sutUnknown, "uk_moved", ceClosureUnknownCallee, "`f`")
-    declines(sutUnknownHeap, "ukh_moved", ceClosureUnknownCallee, "`f`")
+    pinDecline(sutUnknown, declKey, ceClosureUnknownCallee, tLabel("uk"), "`f`")
+    pinDecline(sutUnknown, declKey, ceClosureUnknownCallee, tLabel("uk_moved"), "`f`")
+    pinDecline(sutUnknownHeap, declKey, ceClosureUnknownCallee, tLabel("ukh_moved"), "`f`")
 
   test "a heap actual the body reaches through a capture (RFC-0005 S8ca)":
     # S8bh declined it ("outside its formals"). RFC-0005 S8ca: the field is
@@ -163,7 +155,7 @@ suite "S8bh (1): var writes through an indirect call":
     discard clean(sutHeapCaptureOther, "hco", sxSat)
 
   test "an addr actual whose pointer may escape declines":
-    declines(sutAddrEscape, "ae_dead", feUnsupportedOp, "escape the call")
+    pinDecline(sutAddrEscape, declKey, feUnsupportedOp, tLabel("ae_dead"), "escape the call")
 
   test "a proc field and a method call are walked (S8bn)":
     ## They declined at S8bh; S8bn (item 6) walks a call through a proc

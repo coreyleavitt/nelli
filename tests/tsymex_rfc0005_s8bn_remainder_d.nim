@@ -18,6 +18,9 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bn_remainder_d")
 
 macro progOf(fn: typed): untyped =
   ## The `SymexProgram` `symexFind` would build for `fn`, so a test can read
@@ -47,17 +50,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
     r
-
-template declines(fn: typed, lbl: string, ek: SymexErrorKind,
-                  needle: string): untyped =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == ek and needle in e.msg: named = true
-    check named
 
 # ---- 1-2. ptr alias witnesses ------------------------------------------------
 #
@@ -293,7 +285,7 @@ suite "S8bn (6): proc fields and methods":
     discard clean(sutProcFieldNilRef, "pn_dead", sxUnsat)
 
   test "a heap proc field no assignment names declines":
-    declines(sutProcFieldIn, "pin", feUnsupportedOp, "no assignment")
+    pinDecline(sutProcFieldIn, declKey, feUnsupportedOp, tLabel("pin"), "no assignment")
 
   test "a method call dispatches on the run-type tag":
     ## RED: `sxUnknown` (`feUnsupportedOp`, `setM6`).
@@ -304,7 +296,7 @@ suite "S8bn (6): proc fields and methods":
     discard clean(sutMethodParam, "mp_dead", sxUnsat)
 
   test "an unknown target havocs the globals it may write":
-    declines(sutUnknownGlobal, "ug_moved", ceClosureUnknownCallee, "`f`")
+    pinDecline(sutUnknownGlobal, declKey, ceClosureUnknownCallee, tLabel("ug_moved"), "`f`")
     ## RED: no candidate -- the global kept its value past the call, and
     ## only the path's taint stood for the havoc.
     let r = runSymex(progOf(sutUnknownGlobal), tLabel("ug_moved"))

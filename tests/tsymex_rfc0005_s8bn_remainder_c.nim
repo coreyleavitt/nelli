@@ -18,6 +18,9 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bn_remainder_c")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -33,17 +36,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
     r
-
-template declines(fn: typed, lbl: string, ek: SymexErrorKind,
-                  needle: string): untyped =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == ek and needle in e.msg: named = true
-    check named
 
 # ---- 1-2. ptr alias witnesses ------------------------------------------------
 #
@@ -229,7 +221,7 @@ suite "S8bn (6b): a by-address argument's address is taken at the call":
   test "a later call that moves a checked index declines":
     ## RFC-0005 batch 6: S8bk's `placeLateAddr` (on the base) replaces the
     ## port S8bn made of it; its decline kind is `feEvalOrderUnmodelled`.
-    declines(sutLateIdxMoved, "lim", feEvalOrderUnmodelled, "never checked")
+    pinDecline(sutLateIdxMoved, declKey, feEvalOrderUnmodelled, tLabel("lim"), "never checked")
 
 type Ops6 = object
   f: proc (a, b: var int) {.nimcall.}

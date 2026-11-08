@@ -12,6 +12,9 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8be_remainder_b")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -36,16 +39,6 @@ template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
     let r = symexFind(fn, tgt, s)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check decidedOrNotMarshallable(r, want)
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, tgt: SymexTarget, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tgt)
-    checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (9) a returned tuple of closures ----------------------------------------

@@ -28,6 +28,9 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bh_remainder_f")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -43,17 +46,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
     r
-
-template declines(fn: typed, lbl: string, ek: SymexErrorKind,
-                  needle: string): untyped =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == ek and needle in e.msg: named = true
-    check named
 
 # ---- 1. var writes through an indirect call ---------------------------------
 
@@ -206,7 +198,7 @@ suite "S8bh: stacked on S8ax and S8be (batch 4)":
 
   test "var actuals one location at equal computed indices":
     # As a direct call does (`userCallStmt`): the equal-index path declines.
-    declines(sutIdxAlias, "ia_dead", feUnsupportedOp, "indices are equal")
+    pinDecline(sutIdxAlias, declKey, feUnsupportedOp, tLabel("ia_dead"), "indices are equal")
     let r = symexFind(sutIdxAlias, tLabel("ia"))
     checkpoint "ia " & $r.status & " " & show(r.errors)
     check r.status == sxSat

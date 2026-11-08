@@ -28,6 +28,9 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bh_remainder_d")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -43,17 +46,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
     r
-
-template declines(fn: typed, lbl: string, ek: SymexErrorKind,
-                  needle: string): untyped =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == ek and needle in e.msg: named = true
-    check named
 
 # ---- 1. var writes through an indirect call ---------------------------------
 
@@ -203,7 +195,7 @@ suite "S8bh (2): a ptr of unknown origin":
   test "a by-value aggregate global declines":
     ## S8bn (item 4): a seq element is a target now, but `gPS = @[1]`
     ## replaced the seq the pointer may have addressed: it may dangle.
-    declines(sutPSeqGlobal, "psg", feUnsupportedOp, "may dangle")
+    pinDecline(sutPSeqGlobal, declKey, feUnsupportedOp, tLabel("psg"), "may dangle")
     ## S8bn (item 3): `x` is a local whose address is never taken, so the
     ## pointer cannot address the formal's actual.
     discard clean(sutPVarFormal, "pvf", sxSat)

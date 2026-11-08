@@ -19,6 +19,9 @@ import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bn_remainder")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -34,17 +37,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
     r
-
-template declines(fn: typed, lbl: string, ek: SymexErrorKind,
-                  needle: string): untyped =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == ek and needle in e.msg: named = true
-    check named
 
 template confirmed(fn: typed, lbl: string): untyped =
   ## A sound `sxSat` whose witness replays `roConfirmed` against Nim.
@@ -235,8 +227,8 @@ suite "S8bn (3): a var formal whose actual no pointer can address":
     discard clean(sutVFClosure, "vfc_dead", sxUnsat)
 
   test "a location a pointer may address still declines":
-    declines(sutVFAddrTaken, "vfa", feUnsupportedOp, "RFC-0005 S8bh")
-    declines(sutVFRootVar, "vfr", feUnsupportedOp, "RFC-0005 S8bh")
+    pinDecline(sutVFAddrTaken, declKey, feUnsupportedOp, tLabel("vfa"), "RFC-0005 S8bh")
+    pinDecline(sutVFRootVar, declKey, feUnsupportedOp, tLabel("vfr"), "RFC-0005 S8bh")
 
   test "a heap field is passed by reference (S8bs)":
     ## Was a decline (the copy-in/copy-out formal). Native: the "nim" test

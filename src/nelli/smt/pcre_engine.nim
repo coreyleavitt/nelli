@@ -19,7 +19,7 @@
 ## JIT is modelled (`pcre_jit.nim`, `pcre_select`'s `peJit837`), so its
 ## searches are decided rather than declined.
 import std/[dynlib, strutils, options]
-import ./types
+import ./errorkind
 import ./admission
 
 type
@@ -196,9 +196,8 @@ proc unverifiedLibReason*(): string =
 proc pcreHostEngine*(): PcreEngine =
   ## RFC-0016 K5a. `HostSemantics.pcre`: the verified build's engine model,
   ## `peUnverified` when std/re's libpcre is not in `verifiedLibs`.
-  for v in verifiedLibs:
-    if v.version == pcreVersion() and v.jit == pcreRunsJit(): return v.model
-  peUnverified
+  let a = admitPcreLib(pcreVersion(), pcreRunsJit())
+  if a.admitted: a.payload else: peUnverified
 
 proc pcreSearchEngine*(): PcreEngine =
   ## RFC-0005 S8bt. The engine model of std/re's unanchored calls (`find`,

@@ -356,6 +356,7 @@ suite "RFC-0005 S1 (d) -- the .taint / .runTaint writer grep-pin":
       # RFC-0005 S11: the PUBLIC run coordinate, `RawResult.soundness.runTaint`
       # -- derived (`runTaintOf`) from the final error list at the one public
       # exit, after the boundary overrides. Still derived, still not a site.
+      "runtime.nim:hostRefusedResult",      # RFC-0016 K5a: the refused-host verdict, same derivation
       "runtime.nim:runSymex",
       "runtime.nim:runSymexImpl",            # `w.runTaint`, the verdict input
     ]

@@ -14,7 +14,7 @@
 ## a checked one (`magic("DivU")` is a `static` lookup) and the pins retype to
 ## it with no change to `render`.
 import std/options
-import ./types
+import ./errorkind
 
 type
   Scope* = enum                         ## what a cell belongs to

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # RFC-0016 W1-z. docs/symex/README.md's decline catalogue must name every
 # `fe*` member of `SymexErrorKind` and every `ub*` member (the `UbKind` range)
-# declared in src/nelli/smt/types.nim. That is the whole scope: it does NOT
+# declared in src/nelli/smt/errorkind.nim. That is the whole scope: it does NOT
 # check the other kinds a consumer can see (the `sx*` / `sf*` statuses, the
 # `sc*` taints, `rs*` replay states, `gap*` causes, or any kind declared outside
-# `SymexErrorKind` / `UbKind`). The list is derived from types.nim, not
+# `SymexErrorKind` / `UbKind`). The list is derived from errorkind.nim, not
 # hard-coded, so an `fe*` / `ub*` kind added later fails this check until the
 # README names it. A member whose declaration line says "retired" (never
 # emitted, ordinal kept for cache-key stability) is exempt. Pure grep/awk: no
 # toolchain, runs on the host.
 #
-# Usage: scripts/check-readme-kinds.sh [readme] [types.nim]
+# Usage: scripts/check-readme-kinds.sh [readme] [errorkind.nim]
 #        scripts/check-readme-kinds.sh --self-test
 # Exit:  0 = every kind is named; 1 = some are missing (listed); 2 = misuse.
 # --self-test copies the README to a temp file with one kind removed and
@@ -36,7 +36,7 @@ if [ "${1:-}" = "--self-test" ]; then
   exit 0
 fi
 readme="${1:-docs/symex/README.md}"
-types="${2:-src/nelli/smt/types.nim}"
+types="${2:-src/nelli/smt/errorkind.nim}"
 [ -f "$readme" ] || { echo "no such file: $readme" >&2; exit 2; }
 [ -f "$types" ] || { echo "no such file: $types" >&2; exit 2; }
 

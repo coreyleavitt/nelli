@@ -105,13 +105,13 @@ suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
     check symexCacheKey(prog, tLabel("two"), s1, "z3", "nim", "9", "2") !=
           symexCacheKey(prog, tLabel("two"), s2, "z3", "nim", "9", "2")
 
-  test "R10: maxHeapDepth=0 serialises as heapDepth=unlimited":
-    # Human-readable sentinel for the unlimited mode.
+  test "R10: maxHeapDepth=0 (unlimited) serialises as its own value":
+    # K5a-2: every field renders as `path=value`; 0 is the unlimited mode.
     var s0 = defaultSymexSettings(); s0.budget.maxHeapDepth = 0
-    check canonicalize(s0).contains("heapDepth=unlimited")
-    # A bounded budget renders the numeric value, NOT the sentinel.
+    check canonicalize(s0).contains(";budget.maxHeapDepth=0;")
     var s5 = defaultSymexSettings(); s5.budget.maxHeapDepth = 5
-    check not canonicalize(s5).contains("heapDepth=unlimited")
+    check canonicalize(s5).contains(";budget.maxHeapDepth=5;")
+    check canonicalize(s0) != canonicalize(s5)
 
   test "R10: depth-2 cached unknown is NOT served for a depth-3 query":
     # The observable of cache-key participation: run the depth-2 query (which

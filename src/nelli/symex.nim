@@ -2823,7 +2823,14 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
       # scan does not see.
       if user and n.typeKind == ntyProc:
         acc.markOpen("`" & n.strVal & "`, a proc value")
-      if user:
+      # RFC-0016 INT-47. A template body's `except T as e` binds an `e` the
+      # semchecker never typed (see `routeScan`): `getTypeInst` on it is a hard
+      # "node has no type" error, reached only where a replay is re-executed
+      # (Windows). It names no value of a type this scan misses; the expanded
+      # copy of the body carries a typed `e`. Such an `e` reports `ntyNone` or
+      # `ntyGenericInvocation` (the `ref`-of-exception it was to be), never a
+      # type `getTypeInst` can give.
+      if user and n.typeKind notin {ntyNone, ntyGenericInvocation}:
         var seen: seq[string]
         if typeMayHaveHook(n.getTypeInst, seen):
           acc.markOpen("`" & n.strVal & "`, of a type whose module declares a hook")

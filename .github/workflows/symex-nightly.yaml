@@ -225,8 +225,21 @@ jobs:
             if ($t -eq 'tsymex_r6_b5_chained') { $extra += '-d:symexCiLeanB5' }
             # 600 s per suite (the mingw corpus uses the 240 s default; the scan-tail
             # suites run past it, and the nightly leg has no isolated jobs).
-            ./scripts/run-ci-suite.ps1 -Suite $t -Cc vcc -TimeoutSec 600 -NimCache $nimcache -ExtraNimArgs $extra
-            $rc = $LASTEXITCODE
+            if ($t -match '^tsymex_rfc0005_s8cf_jit|^tsymex_rfc0005_s8bt_limit_langs_b$') {
+              # W-63 / PRC-27: the JIT PCRE suites `skip()` unless the library runs the
+              # JIT (pcre64.dll here). Keep their output and count [OK] against
+              # [SKIPPED], so the closing evidence is "ran, did not skip", not "rc 0".
+              $jf = Join-Path $out "jit-$t.out"
+              ./scripts/run-ci-suite.ps1 -Suite $t -Cc vcc -TimeoutSec 600 -NimCache $nimcache -ExtraNimArgs $extra 2>&1 | Tee-Object -FilePath $jf
+              $m = Select-String -Path $jf -Pattern "<== $t rc=(\d+)" | Select-Object -Last 1
+              $rc = if ($m) { [int]$m.Matches[0].Groups[1].Value } else { 1 }
+              $ok = @(Select-String -Path $jf -Pattern '^\s*\[OK\]').Count
+              $sk = @(Select-String -Path $jf -Pattern '^\s*\[SKIPPED\]').Count
+              Add-Content -Path (Join-Path $out 'jit-rows.txt') -Value "$t rc=$rc ok=$ok skipped=$sk"
+            } else {
+              ./scripts/run-ci-suite.ps1 -Suite $t -Cc vcc -TimeoutSec 600 -NimCache $nimcache -ExtraNimArgs $extra
+              $rc = $LASTEXITCODE
+            }
             $sec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
             Add-Content -Path $log -Value "$rc vcc tests/$t.nim 0"
             Add-Content -Path $timesFile -Value ("{0} vcc tests/{1}.nim" -f $sec.ToString([cultureinfo]::InvariantCulture), $t)

@@ -1,8 +1,8 @@
 ## RFC-0016 W1-c1a (section 8.3). The one place this build's compile-time
 ## options are read for the Wave-1 fields: the runtime checks, `--panics`, the
 ## memory model, the backend and `--exceptions`, plus the `danger`/`release`
-## defines and the threads and trace switches the cache key's `|bf=` segment
-## renders. Everything else that wants to know "what build is this" asks
+## defines and the threads and trace switches the cache key's `|bs=` segment
+## (`buildSegment`) renders. Everything else that wants to know "what build is this" asks
 ## `buildSemantics`; `buildSegment` is the text the cache key carries.
 ##
 ## `check_options.nim`'s `defaultOn` model is unchanged: it reads
@@ -128,7 +128,13 @@ type
   HostSemantics* = object
     ## Run time, read once at the first `symexFind` call.
     pcre*: PcreEngine           ## `peUnverified` for a libpcre not in `verifiedLibs`
+    pcreVersion*: string        ## `pcre_version()` up to its first space ("8.45"), "" if unaskable
+    pcreJit*: bool              ## whether std/re's unanchored calls run on the JIT
     z3*: Z3Version
+    z3Full*: string             ## `z3FullVersion()` as loaded ("4.13.4.0"); "" until read
+      ## The last three keep the cache key as fine as it was: `pcre` maps 8.37
+      ## without the JIT and 8.45 both to `peInterp`, and `z3` maps every
+      ## unverified version to `z3Other`. Two libraries that differ keep two keys.
 
   BuildProvenance* = object
     ## Rendered on findings and pin records, never keyed.
@@ -199,28 +205,44 @@ func checkNames*(cs: set[CheckOption]): seq[string] =
   for c in cs: result.add $c
   result.sort()
 
-func renderBuildFlags*(checksOn: seq[string]; danger, release: bool;
-                       mm, backend, exceptions: string;
-                       threads, stackTrace, lineTrace: bool;
-                       fwrapv = false): string =
-  ## The `|bf=` text, from already-rendered parts (the explicit-argument form
-  ## `buildFlagsSegment` keeps for tests that vary one part).
-  "ck=" & checksOn.join(",") &
-    (if danger: "+danger" else: "") &
-    (if release: "+release" else: "") &
-    "+mm=" & mm &
-    "+be=" & backend &
-    "+ex=" & exceptions &
-    (if threads: "+thr" else: "") &
-    (if stackTrace: "+st" else: "") &
-    (if lineTrace: "+lt" else: "") &
-    (if fwrapv: "+fwrapv" else: "")   ## rendered only when on: default keys hold
+func renderField(v: set[CheckOption]): string =
+  checkNames(v).join(",")
 
-func buildSegment*(b: BuildSemantics = buildSemantics): string =
-  ## The cache key's `|bf=` segment for build `b` (this build by default).
-  renderBuildFlags(checkNames(b.checks), b.danger, b.release, $b.mm,
-                   $b.backend, $b.exceptions, b.threads, b.stackTrace,
-                   b.lineTrace, b.fwrapv)
+func renderField(v: bool): string =
+  if v: "1" else: "0"
+
+func renderField(v: string): string =
+  escape(v)
+
+func renderField[T: enum | SomeInteger](v: T): string =
+  $v
+
+const buildSegmentTag* = "bs1"
+  ## The segment's version. A change of how a field is rendered, or of the
+  ## separators, bumps it; a new or renamed field needs no bump, since the
+  ## field's name is in the text.
+
+func buildSegment*(b: BuildSemantics; h: HostSemantics): string =
+  ## RFC-0016 K5a (section 8.3). The cache key's build segment: every field of
+  ## `BuildSemantics` and `HostSemantics`, by `fieldPairs`, as `name=value`
+  ## under a versioned tag. A field added to either object is keyed by being
+  ## added; none can be forgotten. (Nim's `$` on an object changes with any
+  ## field rename or reorder, so it is not used.) Example, Linux c:
+  ##
+  ##   bs1<build:checks=assertions,...;panics=0;mm=orc;...|host:pcre=...>
+  result = buildSegmentTag & "<build:"
+  var first = true
+  for name, v in b.fieldPairs:
+    if not first: result.add ';'
+    first = false
+    result.add name & "=" & renderField(v)
+  result.add "|host:"
+  first = true
+  for name, v in h.fieldPairs:
+    if not first: result.add ';'
+    first = false
+    result.add name & "=" & renderField(v)
+  result.add '>'
 
 const buildProvenance*: BuildProvenance = block:
   var p: BuildProvenance
@@ -247,6 +269,16 @@ func z3VersionOf*(fullVersion: string): Z3Version =
     z3v5_1
   else:
     z3Other
+
+proc readHost*(z3Full: string): HostSemantics =
+  ## The host this process runs on: the Z3 the caller loaded (`z3FullVersion()`;
+  ## `symex.nim` and `runtime.nim` import `z3`, this module does not) and
+  ## std/re's libpcre, asked the way `pcre_engine` asks it.
+  result.z3Full = z3Full
+  result.z3 = z3VersionOf(z3Full)
+  result.pcre = pcreHostEngine()
+  result.pcreVersion = pcreVersion().split(' ')[0]
+  result.pcreJit = pcreRunsJit()
 
 type
   BuildField* = enum
@@ -379,11 +411,17 @@ func admitBuild*(b: BuildSemantics = buildSemantics;
 func admitHost*(h: HostSemantics; b: BuildSemantics = buildSemantics;
                 p: BuildProvenance = buildProvenance): Option[BuildRefusal] =
   ## RFC-0016 K5a. The host half of the refusal: a Z3 that no row covers. Pure.
-  ## NOT wired into `symexFind` in part 1 (what a refused first call returns
-  ## is a decision; see the handoff).
+  ## Wired once, at the first run (`hostAdmission`, runtime.nim); a refusal is
+  ## an `sxUnknown` with `feHostUnadmitted`, never a raise. A libpcre that is
+  ## not in `verifiedLibs` is NOT refused here: it declines each regex call by
+  ## itself (`psUnverifiedLib`), and refusing the host would end runs that
+  ## never touch a regex (see `rowOf`).
   if h.z3 == z3Other:
+    var shown = h.z3Full
+    if shown.endsWith(".0") and shown.count('.') == 3:
+      shown.setLen(shown.len - 2)
     return some(BuildRefusal(field: bfZ3,
-      reason: "the loaded libz3 is not a verified version (4.13.4, 5.1)"))
+      reason: "z3 " & shown & " is not a verified Z3 (4.13.4, 5.1)"))
   if rowOf(b, h, p).isNone:
     return some(BuildRefusal(field: bfRow,
       reason: "no verified build row covers this build under z3=" & $h.z3))

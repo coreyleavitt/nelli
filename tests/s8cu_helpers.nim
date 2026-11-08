@@ -120,9 +120,10 @@ const pinSettingsConst* = mkPinSettings()
   ## The settings every pin runs under (`symexFind` takes `static` settings).
 
 proc pinBuildSegment*(): string =
-  ## The build this run is: `buildprofile.buildSegment` (the one renderer) and
-  ## the Z3 version this run linked.
-  buildprofile.buildSegment() & ";z3=" & z3FullVersion()
+  ## The build this run is: `buildprofile.buildSegment` (the one renderer) of
+  ## this build and the host this run linked (the Z3 version in it).
+  buildprofile.buildSegment(buildprofile.buildSemantics,
+                            buildprofile.readHost(z3FullVersion()))
 
 # --- the record file -------------------------------------------------------
 

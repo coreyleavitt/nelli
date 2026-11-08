@@ -43,6 +43,7 @@
 ## crash-channel `sxRaised` (`witnessUnsafe`) that no in-process pin can
 ## execute, so no `exact` record can exist; the walker half is asserted by
 ## `tsymex_0016_panics.nim` and the native half is the crash record.
+import nelli/smt/soundness
 import std/[unittest, os, strutils, sequtils]
 import nelli
 import nelli/symex
@@ -80,11 +81,8 @@ let rows = @[
 
 proc buildRow(segment: string): string =
   ## The part of a build segment that names the build row: backend and Z3.
-  var be = ""
-  for tok in segment.split(';')[0].split('+'):
-    if tok.startsWith("be="): be = tok
-  let at = segment.find(";z3=")
-  be & (if at >= 0: segment[at .. ^1] else: ";z3=?")
+  "backend=" & segment.segmentValue("backend") & ";z3=" &
+    segment.segmentValue("z3Full")
 
 const publicEntries = ["symexFind", "symexFindAllWitnesses", "symexForAll",
                        "assertCoveredBy", "concolic", "loadSymexVerdict"]

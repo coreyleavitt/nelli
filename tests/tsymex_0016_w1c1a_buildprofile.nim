@@ -1,24 +1,16 @@
 ## RFC-0016 W1-c1a (section 8.3). `buildprofile.nim` is the one place the
 ## build's `compileOption` reads for the checks, the memory model, the backend
-## and the exception model live, and `buildSegment` renders the `|bf=` text the
-## cache key has always carried, byte for byte.
+## and the exception model live, and `buildSegment` renders them for the cache key (RFC-0016 K5a).
 import std/[unittest, strutils, os]
 import nelli/smt/buildprofile
 import nelli/smt/canonicalize
 
-const
-  goldenC = "ck=assertions,boundChecks,fieldChecks,objChecks,overflowChecks," &
-    "rangeChecks+mm=orc+be=c+ex=goto+thr+st+lt"
-  goldenCpp = "ck=assertions,boundChecks,fieldChecks,objChecks,overflowChecks," &
-    "rangeChecks+mm=orc+be=cpp+ex=cpp+thr+st+lt"
-
 suite "W1-c1a: buildprofile":
-  test "buildSegment is the old |bf= text on this leg":
-    when defined(cpp):
-      check buildSegment() == goldenCpp
-    else:
-      check buildSegment() == goldenC
-    check buildFlagsSegment() == buildSegment()
+  test "buildSegment renders this build (the goldens are CR2's)":
+    let seg = buildSegment(buildSemantics, readHost("4.13.4.0"))
+    check ("backend=" & (when defined(cpp): "cpp" else: "c")) in seg
+    check "mm=orc" in seg
+    check seg.startsWith("bs1<build:")
 
   test "the moved reads occur only in buildprofile.nim":
     let root = currentSourcePath().parentDir.parentDir / "src" / "nelli"

@@ -74,7 +74,7 @@ suite "RFC-0005 S8ax (3): the call depth adapts to the frontier":
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(beBudgetExhaustedUnmodelled)
-  test "maxRecursionDepth enters the cache key only when not the default":
-    check ";mrd=" notin canonicalize(SymexSettings())
-    check ";mrd=7" in canonicalize(
+  test "maxRecursionDepth enters the cache key":
+    check ";budget.maxRecursionDepth=24" in canonicalize(SymexSettings())
+    check ";budget.maxRecursionDepth=7" in canonicalize(
       SymexSettings(budget: ResourceBudget(maxRecursionDepth: 7)))

@@ -166,12 +166,12 @@ suite "S8k (1): every query over strings is bounded":
       if e.kind == beSolverUndef and "seqQueryRLimit" in e.msg: named = true
     check named
 
-  test "maxSeqLen and seqQueryRLimit enter the cache key only when not the default":
+  test "maxSeqLen and seqQueryRLimit enter the cache key":
     let d = defaultSymexSettings()
-    check ";msl=" notin canonicalize(d)
-    check ";msl=160" in canonicalize(wideCap)
-    check ";sqr=" notin canonicalize(d)
-    check ";sqr=50000" in canonicalize(smallSeqBudget)
+    check ";budget.maxSeqLen=128" in canonicalize(d)
+    check ";budget.maxSeqLen=160" in canonicalize(wideCap)
+    check ";budget.seqQueryRLimit=20000000" in canonicalize(d)
+    check ";budget.seqQueryRLimit=50000" in canonicalize(smallSeqBudget)
 
 # ---- (2) loop-iteration feasibility pruning ---------------------------------
 #

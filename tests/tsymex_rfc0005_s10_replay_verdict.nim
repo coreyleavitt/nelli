@@ -451,11 +451,11 @@ suite "RFC-0005 S10 (e) -- the opt-out: SymexSettings.replay = false":
     check f.isSome and f.get.status == sfUnknown
     check runsSince() == 0
 
-  test "replay participates in the cache key only when off (default keys unchanged)":
+  test "replay participates in the cache key":
     var on = defaultSymexSettings()
     check on.replay
-    check "rp=" notin canonicalize(on)
-    check ";rp=off" in canonicalize(s10NoReplay)
+    check ";replay=true" in canonicalize(on)
+    check ";replay=false" in canonicalize(s10NoReplay)
 
   test "symexForAll honours the opt-out":
     let report = symexForAll(booleans(), s10AllConfirm, inMemoryDatabase(),

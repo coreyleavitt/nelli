@@ -264,9 +264,9 @@ suite "RFC-0005 S8be (2): a replay that does not end":
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     check not r.errors.hasKind(feReplayTimedOut)
-  test "the timeout enters the cache key only when not the default":
-    check ";rpt=" notin canonicalize(SymexSettings())
-    check ";rpt=300" in canonicalize(SymexSettings(replayTimeoutMs: 300))
+  test "the timeout enters the cache key":
+    check ";replayTimeoutMs=10000" in canonicalize(SymexSettings())
+    check ";replayTimeoutMs=300" in canonicalize(SymexSettings(replayTimeoutMs: 300))
 
 suite "RFC-0005 S8be (3): `{.global.}` in a routine":
   test "is initialised once and kept across calls":

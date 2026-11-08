@@ -126,9 +126,9 @@ suite "R16-1 — arithChecks participates in cache key":
     s1.arithChecks = {acDivByZero}
     check canonicalize(s0) != canonicalize(s1)
 
-  test "canonical form contains the ;ac= field":
+  test "canonical form contains the arithChecks field":
     let s = defaultSymexSettings()
-    check ";ac=" in canonicalize(s)
+    check ";arithChecks=" in canonicalize(s)
 
 # ---- Part 6: SymexSettings + merge threads arithChecks ----------------------
 

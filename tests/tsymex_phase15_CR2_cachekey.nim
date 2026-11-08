@@ -13,9 +13,11 @@
 ## Written as individual sub-tests so CI can pinpoint which setting was missed
 ## if a regression is introduced later.
 
-import std/unittest
+import std/[unittest, strutils, options]
 import nelli/smt/canonicalize
 import nelli/smt/types
+import nelli/smt/buildprofile
+from z3 import z3FullVersion
 
 suite "Phase 15 CR-2 — four missing settings now in cache key":
 
@@ -1116,7 +1118,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 WA-B: 285->286.
     ## RFC-0016 CR-A: 286->287.
     ## RFC-0016 K5a: 287->288.
-    check symexWalkerVersion == "288"
+    ## RFC-0016 K5a-2: 288->289.
+    check symexWalkerVersion == "289"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
@@ -1242,3 +1245,82 @@ suite "Phase 15 CR-2 — version bumps":
     ## are verdict-surface changes and do not bump the render version,
     ## same "N37"/Bucket-2 no-op precedent above.)
     check renderAsChoicesVersion == "12"
+
+
+# ---- RFC-0016 K5a-2: one golden build segment per run leg ----------------------
+#
+# The cache key's build and host half is `buildSegment`. A golden is a literal,
+# chosen by what the leg IS (`when defined(cpp)` / `defined(windows)` /
+# `defined(vcc)` and the Z3 the process linked), never computed by the segment
+# function, so a change of the segment's text or of a build read fails here
+# instead of silently renaming every key.
+#
+# Linux c, Linux cpp and Linux c under Z3 4.13.4 were read off a run of each.
+# The mingw and MSVC goldens are DERIVED from the fields, not run: os is
+# windows, the backend is c, the host libpcre is Nim's pcre64.dll, 8.37 on the
+# JIT (`verifiedLibs`), and Z3 is 4.13.4 (`rowOf`). The Windows CI legs
+# (symex-mingw, and symex-msvc once it exists) confirm them; a mismatch there
+# means the derivation, not the code, is wrong.
+
+const
+  checksAll = "assertions,boundChecks,fieldChecks,objChecks,overflowChecks," &
+              "rangeChecks"
+  linuxTail = ";opt=unknown;fwrapv=0;ptrBits=64;cpu=amd64;os=linux;" &
+              "endian=little;caseObjects=strict;danger=0;release=0;" &
+              "threads=1;stackTrace=1;lineTrace=1"
+  winTail = ";opt=unknown;fwrapv=0;ptrBits=64;cpu=amd64;os=windows;" &
+            "endian=little;caseObjects=strict;danger=0;release=0;" &
+            "threads=1;stackTrace=1;lineTrace=1"
+  goldenLinuxC = "bs1<build:checks=" & checksAll &
+    ";panics=0;mm=orc;exceptions=goto;backend=c" & linuxTail &
+    "|host:pcre=peInterp;pcreVersion=\"8.45\";pcreJit=0;z3=5.1;" &
+    "z3Full=\"5.1.0.0\">"
+  goldenLinuxCpp = "bs1<build:checks=" & checksAll &
+    ";panics=0;mm=orc;exceptions=cpp;backend=cpp" & linuxTail &
+    "|host:pcre=peInterp;pcreVersion=\"8.45\";pcreJit=0;z3=5.1;" &
+    "z3Full=\"5.1.0.0\">"
+  goldenZ3v4 = "bs1<build:checks=" & checksAll &
+    ";panics=0;mm=orc;exceptions=goto;backend=c" & linuxTail &
+    "|host:pcre=peInterp;pcreVersion=\"8.45\";pcreJit=0;z3=4.13.4;" &
+    "z3Full=\"4.13.4.0\">"
+  goldenMingw = "bs1<build:checks=" & checksAll &       # derived
+    ";panics=0;mm=orc;exceptions=goto;backend=c" & winTail &
+    "|host:pcre=peJit837;pcreVersion=\"8.37\";pcreJit=1;z3=4.13.4;" &
+    "z3Full=\"4.13.4.0\">"
+  goldenMsvc = goldenMingw                                # derived: see below
+
+suite "RFC-0016 K5a-2 — one golden build segment per leg":
+
+  test "the five legs' goldens are distinct but for the compiler":
+    # mingw and MSVC differ in the C compiler family, which is provenance and
+    # not keyed: their segments agree, their rows (below) do not.
+    check goldenLinuxC != goldenLinuxCpp
+    check goldenLinuxC != goldenZ3v4
+    check goldenLinuxC != goldenMingw
+    check goldenLinuxCpp != goldenMingw
+    check goldenZ3v4 != goldenMingw
+    check goldenMsvc == goldenMingw
+
+  test "this leg's segment is its golden":
+    let seg = buildSegment(buildSemantics, readHost(z3FullVersion()))
+    let z3v4 = z3FullVersion().startsWith("4.13.4")
+    checkpoint seg
+    when defined(windows):
+      check seg == goldenMingw    # also the MSVC leg's: derived, see above
+    elif defined(cpp):
+      if not z3v4: check seg == goldenLinuxCpp
+    else:
+      check seg == (if z3v4: goldenZ3v4 else: goldenLinuxC)
+
+  test "this leg's row is the one the cells claim":
+    let row = rowOf(buildSemantics, readHost(z3FullVersion()), buildProvenance)
+    when defined(windows):
+      check row.isSome and
+            row.get == (when defined(vcc): brMsvc else: brMingw)
+    elif defined(cpp):
+      if not z3FullVersion().startsWith("4.13.4"):
+        check row.isSome and row.get == brLinuxCpp
+    else:
+      check row.isSome and
+            row.get == (if z3FullVersion().startsWith("4.13.4"): brZ3v4_13_4
+                        else: brLinuxC)

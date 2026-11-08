@@ -201,8 +201,8 @@ suite "S8bu (1): no query is unbounded under the defaults":
           defaultConcreteBranchRLimit
     check defaultSymexSettings().budget.queryRLimit != 0'u
     check ResourceBudget().queryTimeoutMs == 600_000'u
-    check ";qto=" notin canonicalize(defaultSymexSettings())
-    check ";qto=2000" in canonicalize(clockOnly)
+    check ";budget.queryTimeoutMs=600000" in canonicalize(defaultSymexSettings())
+    check ";budget.queryTimeoutMs=2000" in canonicalize(clockOnly)
 
   test "a solve the clock cuts off declines, named, and is not cached":
     ## No step bound at all (`queryRLimit: 0`); the cubes query is one Z3

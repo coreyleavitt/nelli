@@ -18,7 +18,6 @@
 
 import std/[strutils, tables, algorithm]
 import ./types
-import ./pcre_engine
 import ./replayproc   ## RFC-0005 0.9.1 (WA-8): how this build replays
 import ./buildprofile ## RFC-0016 W1-c1a: the build reads live there
 import ./sha256       ## review R3 (E10): the one hash the cache keys with
@@ -283,7 +282,13 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "288"
+const symexWalkerVersion* = "289"
+  ## RFC-0016 K5a-2 (288->289): the cache key's build and host half is one
+  ## `buildSegment` (`|bs=`, every field of `BuildSemantics` and
+  ## `HostSemantics` by `fieldPairs`) in place of `|z3=`, `|pcre=` and `|bf=`,
+  ## and `canonicalize(SymexSettings)` keys every settings field but the two in
+  ## `symexSettingsNeutral`. Every cache key changes; no verdict does. A host
+  ## whose Z3 is not 4.13.4 or 5.1 declines the run (`feHostUnadmitted`).
   ## RFC-0016 K5a (287->288): a `-d:nelliFwrapv` build (`-fwrapv`) defines
   ## signed `+`, `-`, `*` and negation as a wrap at 32 and 64 bits, so the
   ## overflow side no longer halts `ubSignedOverflow` there; the result wraps.
@@ -6477,117 +6482,60 @@ proc canonicalize*(t: SymexTarget): string =
 
 # ---- SymexSettings ---------------------------------------------------------
 
+const symexSettingsNeutral* = [
+  "acceptUnknownAsCovered",
+    # Governs `assertCoveredBy`'s raise/pass decision AFTER the walker
+    # returns; it has no influence on what symex returns or what is persisted.
+  "budget.maxInstantiationsPerProc"
+    # Self-protected: the cap changes which procs are registered in
+    # `prog.procs`, which is already part of the program's canonical key
+    # (`canonicalize(prog)`).
+  ]
+  ## RFC-0016 K5a (section 8.3). The `SymexSettings` fields (dotted for the
+  ## ones inside `budget`) that are verdict-neutral and so NOT in the cache
+  ## key. Exactly the two the hand-written list left out. Every other field,
+  ## and any field added later, is keyed by `canonicalize(SymexSettings)`
+  ## iterating `fieldPairs`: a new setting cannot be silently unkeyed, and
+  ## keeping one out of the key means naming it here with a reason.
+
+proc addKeyed[T: object](res: var string; prefix: string; x: T) =
+  for name, v in x.fieldPairs:
+    let path = prefix & name
+    when v is object:
+      addKeyed(res, path & ".", v)
+    else:
+      if path notin symexSettingsNeutral:
+        res.add ";" & path & "=" & $v
+
+{.push warning[Deprecated]: off.}
+static:
+  # A neutral name that is no field (a rename, a typo) would silently stop
+  # excluding anything and, worse, hide that the list is stale.
+  proc neutralPaths(prefix: string; x: SymexSettings | ResourceBudget;
+                    acc: var seq[string]) =
+    for name, v in x.fieldPairs:
+      when v is object:
+        neutralPaths(prefix & name & ".", v, acc)
+      else:
+        acc.add prefix & name
+  var paths: seq[string]
+  neutralPaths("", SymexSettings(), paths)
+  for n in symexSettingsNeutral:
+    doAssert n in paths, "symexSettingsNeutral names no SymexSettings field: " & n
+{.pop.}
+
 proc canonicalize*(s: SymexSettings): string =
-  ## Audited inclusion/exclusion list (CR-2 close-out). Every field that
-  ## provably changes the walker's verdict or the persisted witness shape is
-  ## INCLUDED; fields that are verdict-neutral are EXCLUDED with a reason.
-  ##
-  ## INCLUDED (changing the field changes what the walker computes):
-  ##   integerSemantics   — governs BV vs Z3Int encoding; changes sat/unsat.
-  ##   queryRLimit        — changes when Z3 gives up (sxUnknown vs sat/unsat).
-  ##   maxFrontierSize    — caps path exploration; changes coverage.
-  ##   maxCallDepth       — caps call-stack depth; sxUnknown vs sat/unsat.
-  ##   maxHeapDepth       — caps ref/ptr deref depth (R9/R10); sxUnknown vs sat.
-  ##   maxLoopUnwind      — caps loop unrolling; sxUnknown vs sat/unsat.
-  ##   inlinePolicy       — inline vs axiom for HOF; changes sat/unsat.
-  ##   seqInlineThreshold — HOF unroll count under ipHybrid; changes sat/unsat.
-  ##   defectExclusions   — which defect raises become sxRaised vs suppressed
-  ##                        (runtime.nim typeIdToDefectKind + membership test);
-  ##                        changes sxRaised↔suppressed. CR-2 (was missing).
-  ##   arithChecks        — which arithmetic defect forks are EMITTED; an
-  ##                        unchecked kind is never forked so verdicts differ.
-  ##                        R16-1 (ADR-0011 F2). Rendered as `;ac=`.
-  ##   maxClosureInlineCount — cap on closure descent depth; triggers
-  ##                        ceInlineBudgetExceeded → sxUnknown if hit.
-  ##                        CR-2 (was missing).
-  ##   replay             — RFC-0005 S10: whether a replay-eligible candidate
-  ##                        may be confirmed into sxSat/sxRaised or stays
-  ##                        sxUnknown; changes the verdict. Rendered `;rp=off`
-  ##                        only when disabled (default keys unchanged).
-  ##   maxSeqLen          — RFC-0005 S8k: the per-term seq/string length cap
-  ##                        every query assumes; an UNSAT it took part in is
-  ##                        sxUnknown, so it changes the verdict. Rendered
-  ##                        `;msl=` only when not the default 128 (default
-  ##                        keys unchanged).
-  ##   seqQueryRLimit     — RFC-0005 S8k: the rlimit of a query that mentions
-  ##                        a string / seq; a query it cuts off is
-  ##                        sxUnknown. Rendered `;sqr=` only when not the
-  ##                        default 20M (default keys unchanged).
-  ##   queryTimeoutMs     — RFC-0005 S8bu: the wall-clock bound of every
-  ##                        solve; one it cuts off is sxUnknown. Rendered
-  ##                        `;qto=` only when not the default 600000.
-  ##   maxRecursionDepth  — RFC-0005 S8ax: the hard budget the adaptive call
-  ##                        depth extends to past `maxCallDepth`; a call
-  ##                        past it declines, so it changes the verdict.
-  ##                        Rendered `;mrd=` only when not the default 24
-  ##                        (default keys unchanged).
-  ##   maxFreshnessAssertions — cap on `newRef != prior` inequalities; when hit,
-  ##                        dropped constraints allow Z3 to alias refs it
-  ##                        otherwise could not → false-SAT direction.
-  ##                        CR-2 (was missing).
-  ##
-  ## EXCLUDED (provably verdict-neutral):
-  ##   acceptUnknownAsCovered — governs assertCoveredBy's raise/pass decision
-  ##                        AFTER the walker returns; zero influence on what
-  ##                        symex returns or what witness is persisted.
-  ##   maxInstantiationsPerProc — self-protected: cap changes which procs are
-  ##                        registered in prog.procs, which is ALREADY part of
-  ##                        the program canonical key (canonicalize(prog)).
-  ##                        Adding it here is harmless but unnecessary; omitted
-  ##                        to avoid implying it was a cache-key hole.
-  ##   maxSplitParts      — WIRED as of CR-11/CR-18: the concrete-inline split
-  ##                        paths (empty-sep and both-literal) now check this
-  ##                        cap and classify sxUnknown when parts.len > cap
-  ##                        (if cap > 0). A settings change here changes whether
-  ##                        a large-literal split yields sxSat or sxUnknown, so
-  ##                        it MUST participate in the cache key (previously
-  ##                        excluded because it was unwired — CR-2 audit comment
-  ##                        at that time was correct; now updated).
-  ##   maxVariantConstructorForks — Round-6 A3 (ADR-0029): gates whether a
-  ##                        symbolic-discriminant variant CONSTRUCTION forks
-  ##                        per-tag (real sxSat/sxUnsat) or classifies a
-  ##                        `beBudgetExhausted` decline (sxUnknown) — WIRED
-  ##                        from the same commit that introduces the field
-  ##                        (never had an "unwired" period to exclude it for).
-  ##   maxVariantConstructorFieldAllocs — N9 (round-6 review remediation):
-  ##                        gates whether `isVariantConstructSym`'s per-fork
-  ##                        ALL-ARMS field allocation proceeds (real
-  ##                        sxSat/sxUnsat) or classifies a `beBudgetExhausted`
-  ##                        decline (sxUnknown) — same wiring precedent as
-  ##                        `maxVariantConstructorForks` above, WIRED from the
-  ##                        commit that introduces the field.
-  "St<is=" & $s.integerSemantics &
-    ";rl=" & $s.budget.queryRLimit &
-    ";fr=" & $s.budget.maxFrontierSize &
-    ";cd=" & $s.budget.maxCallDepth &
-    ";hd=" & (if s.budget.maxHeapDepth == 0: "heapDepth=unlimited"   ## Phase 15 R10
-              else: $s.budget.maxHeapDepth) &
-    ";lu=" & $s.budget.maxLoopUnwind &
-    ";ip=" & $s.inlinePolicy &          ## Phase 15 C4: HOF inline/axiom choice
-    ";sit=" & $s.budget.seqInlineThreshold &   ## Phase 15 C4: HOF unroll bound
-    ";de=" & $s.defectExclusions &      ## CR-2: set[DefectKind] renders as stable
-                                        ## bitmask (ordinal order); deterministic
-                                        ## across runs and both backends.
-    ";ac=" & $effectiveArithChecks(s) &           ## R16-1: set[ArithCheck]; same ordinal-
-                                        ## stable rendering as defectExclusions.
-    ";mcic=" & $s.budget.maxClosureInlineCount &  ## CR-2
-    ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2
-    ";msp=" & $s.budget.maxSplitParts &           ## CR-11/CR-18: now wired
-    ";mvcf=" & $s.budget.maxVariantConstructorForks &  ## Round-6 A3
-    ";mvfa=" & $s.budget.maxVariantConstructorFieldAllocs &  ## N9
-    (if s.replay: "" else: ";rp=off") &   ## RFC-0005 S10: rendered only when
-                                          ## off, so default keys are unchanged
-    (if s.budget.maxSeqLen == ResourceBudget().maxSeqLen: ""
-     else: ";msl=" & $s.budget.maxSeqLen) &   ## RFC-0005 S8k, same rule
-    (if s.budget.seqQueryRLimit == ResourceBudget().seqQueryRLimit: ""
-     else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
-    (if s.budget.queryTimeoutMs == ResourceBudget().queryTimeoutMs: ""
-     else: ";qto=" & $s.budget.queryTimeoutMs) &   ## RFC-0005 S8bu, same rule
-    (if s.budget.maxRecursionDepth == ResourceBudget().maxRecursionDepth: ""
-     else: ";mrd=" & $s.budget.maxRecursionDepth) &   ## RFC-0005 S8ax, same rule
-    (if s.replayTimeoutMs == SymexSettings().replayTimeoutMs: ""
-     else: ";rpt=" & $s.replayTimeoutMs) &   ## RFC-0005 S8be, same rule
-    ">"
+  ## RFC-0016 K5a (section 8.3). Every field of `SymexSettings`, by
+  ## `fieldPairs` (the nested `budget` too), as `path=value`, except those
+  ## named in `symexSettingsNeutral`. Replaces the audited hand list of the
+  ## CR-2 close-out: a field is keyed unless it is excluded by name with a
+  ## reason, so a new setting cannot be silently unkeyed. The deprecated
+  ## `arithChecks` is keyed too (`effectiveArithChecks` reads the same field).
+  result = "St2<"
+  {.push warning[Deprecated]: off.}
+  addKeyed(result, "", s)
+  {.pop.}
+  result.add ">"
 
 # ---- Cache key -------------------------------------------------------------
 
@@ -6604,35 +6552,12 @@ func replayModeSegment*(forks = replayForks; reexecs = replayReexecs;
   (if forks: "fork" elif reexecs: "reexec" else: "none") &
     (if panics: "+panics" else: "")
 
-func buildFlagsSegment*(checksOn = checkNames(buildSemantics.checks);
-                        danger = buildSemantics.danger;
-                        release = buildSemantics.release;
-                        mm = $buildSemantics.mm;
-                        backend = $buildSemantics.backend;
-                        exceptions = $buildSemantics.exceptions;
-                        threads = buildSemantics.threads;
-                        stackTrace = buildSemantics.stackTrace;
-                        lineTrace = buildSemantics.lineTrace;
-                        fwrapv = buildSemantics.fwrapv): string =
-  ## RFC-0005 review R1-08. The build flags that change what the native `fn`
-  ## does, which the program and the settings do not key: the checks it was
-  ## compiled with (a debug build's confirmed raise cannot happen in a
-  ## `-d:danger` one, where `fn` does not check), `danger` and `release`
-  ## themselves (code may branch on them with `when defined`), and the memory
-  ## model, and (R2 SM3) the backend, `--exceptions`, `--threads`, `--stackTrace`
-  ## and `--lineTrace`. `--panics:on` is in `replayModeSegment`. The defaults are this
-  ## build's.
-  ## RFC-0016 K5a: `fwrapv` is rendered only when on, so a build without it
-  ## keeps its key.
-  renderBuildFlags(checksOn, danger, release, mm, backend, exceptions,
-                   threads, stackTrace, lineTrace, fwrapv)
-
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,
                     z3Version, nimVersion, walkerVersion,
                     renderingVersion: string;
                     replayMode = replayModeSegment();
-                    buildFlags = buildFlagsSegment()): string =
+                    buildSeg = ""): string =
   ## Content-addressed key over every input that determines a
   ## witness's validity. Stable across builds (no source locations,
   ## no map-iteration order, no compiler-specific hashes). Returns
@@ -6645,20 +6570,22 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
   ## must not silently invalidate witnesses whose semantics under
   ## the other axis are unchanged. `replayMode` (RFC-0005 0.9.1, WA-8) is
   ## how the build runs replays; the default is this build's.
+  ## RFC-0016 K5a: `buildSeg` is `buildSegment` of this build and host (the
+  ## default, read for the Z3 `z3Version` names); it replaces the `|z3=`,
+  ## `|pcre=` and `|bf=` segments.
+  let seg = if buildSeg.len > 0: buildSeg
+            else: buildSegment(buildSemantics, readHost(z3Version))
   let canon =
     "K|" & canonicalize(prog) &
     "|" & canonicalize(target) &
     "|" & canonicalize(settings) &
-    "|z3=" & z3Version &
     "|nim=" & nimVersion &
     "|w=" & walkerVersion &
     "|r=" & renderingVersion &
-    # RFC-0005 S8bj: std/re's unanchored calls run on PCRE's JIT or its
-    # interpreter, which the walker reads differently (`pcre_engine`).
-    "|pcre=" & pcreEngineName() &
     # RFC-0005 0.9.1 (WA-8): how this build replays (`replayModeSegment`).
     "|rm=" & replayMode &
-    # RFC-0005 review R1-08: the checks and flags this build runs `fn` under
-    # (`buildFlagsSegment`).
-    "|bf=" & buildFlags
+    # RFC-0016 K5a: the build and the host (`buildSegment`): the checks and
+    # flags `fn` runs under, the Z3 and the libpcre (the engine std/re's
+    # unanchored calls run on, which the walker reads differently).
+    "|bs=" & seg
   symexCacheKeyPrefix & sha256Hex(canon)

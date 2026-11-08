@@ -3,9 +3,12 @@
 - **Stage:** Wave 1 shipped as **0.9.2** (2026-11-08): signed tag `v0.9.2`
   at `bc06d09f`, published `ghcr.io/coreyleavitt/nelli@sha256:925d0deb...`
   (content `dag-sha256:dded114f...`). Wave 2 in progress.
-- **Resume:** `/loop` grind over Wave 2: land the queue in "Wave 2 progress",
-  then K1a-ci, a full eos sweep at the new main to calibrate the universe
-  and id allowlists, W2-z; then Wave 3.
+- **Resume:** `/loop` grind over Wave 2. Remaining: CI-B (a fresh agent
+  continues from the CI-B agent's handoff on `rfc-0016-cib2`, carrying
+  `scratchpad/cib-continuation-notes.md`: empty the MSVC known-red list, all
+  four fixed), then K1a-ci, the shm-leak-count fix
+  (`rfc-0016-shmleakcount`, agent running), a full eos sweep at the new main
+  to calibrate the universe and id allowlists, W2-z; then Wave 3.
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.
@@ -51,17 +54,41 @@
   §5 by `scripts/check-worklist.sh`), K8a-gen `4321230f`, K2-0 `79e6b18d`
   (SND-13, INT-22 soundness pins), INT-46 `4d343177` (the fork-safety guard
   counted joined threads still listed in `/proc/self/task`; now skips
-  exiting/zombie/vanished tasks). In CI: K1a-last (`rfc-0016-k1al`),
-  K8a-job + K8a-sink (`rfc-0016-k8as`, with a bounded first-heartbeat grace
-  in the watchdog; dispatch `k8a-differential.yaml` right after landing).
-  CI-B (`rfc-0016-cib`, nightly cpp/z3/msvc legs) rebases after K1a-last
-  with a fresh agent, adding the 60 s ceiling as a ratchet (committed
-  offender list; new offender or stale entry fails). INT-45 MSVC-only reds
-  (`rfc-0016-msvcd`): three fixed test-side (`s6a_budget` constant `1 div
-  0`, `s8cs_routes2` x64 asm, `k5a_fwrapv` vcc arm); `s8bz_overlap` SIGSEGV
-  reproduces under vcc only (module-init IR building, `tVariant` `=dup`), root
-  cause in progress. Decisions: keep `fuzzer-msvc`'s per-push vcc step; fix
-  MSVC defects rather than allowlist them.
+  exiting/zombie/vanished tasks), K1a-last `b36dc4c4`, INT-45 test side
+  `13578374` + `fuzzer-msvc` multi-glob/`nim_flags` `9ae34c9a`, K8a-job +
+  K8a-sink + watchdog grace `8a13795f..e8630d44` with D1 in progress
+  `42af2d2b` (first nightly dispatched; attempt 1 lost its runner, rerun),
+  shm sweep fix `c39b770c` (below). CI-B (`rfc-0016-cib2`) green after the
+  toolchain incident reruns; awaiting its agent's handoff.
+- **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
+  defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
+  a packed case object's branch `#pragma pack(pop)` into the enclosing
+  record's builder (`result`) instead of the union body (`obj`), so under
+  vcc the pops land before the union and pack(1) leaks to every later struct
+  in the module (`sizeof(VariantArm)` 65 in the test's C vs 72 in
+  `types.nim`'s). Fixed upstream in devel (nim-lang/Nim#24461, `b7b1003e6a`),
+  never backported to 2.2. Our toolchain series gained patch 0007 (toolchain
+  `3a4c85f`, with a vcc pack-depth check that runs without MSVC); published
+  `2.2.10-windows-x64`; `fuzzer-msvc` run 42489572022 passes `s8bz_overlap`
+  under vcc. Upstream backport request drafted at
+  `scratchpad/nim-upstream-vcc-pack.md`, not filed.
+- **Toolchain incident (2026-11-08):** that toolchain push republished
+  `2.2.10-linux-x64` from the Tumbleweed (rolling) image; its `bin/nim`
+  needed GLIBC_2.44 and every Linux CI job failed at setup from about 12:54
+  to 13:50Z. Rolled back by manifest PUT, then fixed at the root (toolchain
+  `8b56a3d`, `855bf4f`, `abc9b14`): the glibc artifacts now build on
+  ubuntu-22.04 runners with a pre-publish GLIBC floor guard (2.35), and
+  macOS moved to `macos-15` (the `macos-14` arm64 configuration is no
+  longer provisioned). New `linux-x64` `332425eb` verified on stock Ubuntu
+  24.04. Lesson: record every tag digest before a toolchain push.
+- **Shm sweep (2026-11-08):** the intermittent `tfuzzcmplogshm` red was a
+  product bug: `db.nim`'s campaign-startup `sweepStaleShmSegments` unlinked
+  every `/dev/shm/nelli_*` segment, including a live sibling campaign's (or
+  a parallel test's), so its reader re-created an empty segment. The sweep
+  now spares segments whose embedded owner pid is alive (`c39b770c`,
+  RED in `tdbcleanupsweep`). Residual limit: pid namespaces that share
+  `/dev/shm`. Decisions: keep `fuzzer-msvc`'s per-push vcc step; fix MSVC
+  defects rather than allowlist them.
 - **Gate lesson (2026-11-07):** slices landed on their own suites only, and
   the Windows legs' runs on `main` were cancelled by each next push, so the
   W1-d2/W1-d1b/W1-m/W1-d3 contract changes left 11 stale files (red on Linux

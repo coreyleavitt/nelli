@@ -27,15 +27,6 @@ template replays(fn: typed, lbl: string) =
     let r = verdict(fn, lbl, sxSat)
     check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
 
-template declines(fn: typed, lbl: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feEvalOrderUnmodelled)
-    check "never checked" in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
-
 type Box = ref object
   x: int
 type Outer = ref object

@@ -9,6 +9,9 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bk_argtiming")
 
 include s8bk_argtiming_fixture
 
@@ -45,9 +48,9 @@ suite "S8bk: address checks, forwarded formals, proc values":
     discard verdict(sutFwd, "fw_dead", sxUnsat)
 
   test "a later call changes what an address check read":
-    declines(sutIdxMoved, "im")
-    declines(sutSeqShrunk, "ss")
-    declines(sutRefElemMoved, "rm")
+    pinDecline(sutIdxMoved, declKey, feEvalOrderUnmodelled, tLabel("im"), "never checked")
+    pinDecline(sutSeqShrunk, declKey, feEvalOrderUnmodelled, tLabel("ss"), "never checked")
+    pinDecline(sutRefElemMoved, declKey, feEvalOrderUnmodelled, tLabel("rm"), "never checked")
     block:
       let r = symexFind(sutHeapIdx, tLabel("hx"))
       checkpoint $r.status & " " & show(r.errors)
@@ -64,4 +67,4 @@ suite "S8bk: address checks, forwarded formals, proc values":
     discard verdict(sutClosure, "cl_dead", sxUnsat)
     discard verdict(sutClosureAddr, "ca", sxSat)
     discard verdict(sutClosureAddr, "ca_dead", sxUnsat)
-    declines(sutClosureIdxMoved, "cm")
+    pinDecline(sutClosureIdxMoved, declKey, feEvalOrderUnmodelled, tLabel("cm"), "never checked")

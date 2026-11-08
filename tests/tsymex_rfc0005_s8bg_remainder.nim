@@ -28,6 +28,9 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bg_remainder")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -214,17 +217,8 @@ suite "S8bg (2): a representation-preserving conversion lvalue is modeled":
     discard clean(sutConvDistinctMid3, "cvm3_dead", sxUnsat)
 
   test "the chain through a type with an open hierarchy declines (RFC-0016)":
-    template declines(lbl: static string) =
-      block:
-        let r = symexFind(sutConvDistinctMid, tLabel(lbl))
-        checkpoint lbl & " " & $r.status & " " & show(r.errors)
-        check r.status == sxUnknown
-        var found = false
-        for e in r.errors:
-          if e.kind == feGlobalRouteUnproved: found = true
-        check found
-    declines("cvm")
-    declines("cvm_dead")
+    pinDecline(sutConvDistinctMid, declKey, feGlobalRouteUnproved, tLabel("cvm"))
+    pinDecline(sutConvDistinctMid, declKey, feGlobalRouteUnproved, tLabel("cvm_dead"))
 
 # ---- (2) cast: a scoped decline naming the cast, not a crash -----------------
 

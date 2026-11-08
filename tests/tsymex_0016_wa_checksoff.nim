@@ -13,6 +13,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "wa_checksoff")
+
 type Col = enum cRed, cGreen, cBlue
 type Small = range[0 .. 3]
 
@@ -117,15 +119,10 @@ suite "WA-A checks-off build":
     check native(sutPlusEqRange(1)) == "hit"
 
   test "S2: the out-of-range step declines, it is not pruned or raised":
-    template declinesOp(f: untyped) =
-      let r = symexFind(f, tLabel("hit"))
-      checkpoint show(r.errors)
-      check r.status == sxUnknown
-      check r.errors.named(feUnsupportedOp)
-    declinesOp(sutIncEnum)
-    declinesOp(sutDecEnum)
-    declinesOp(sutSuccEnum)
-    declinesOp(sutPlusEqRange)
+    pinDecline(sutIncEnum, declKey, feUnsupportedOp)
+    pinDecline(sutDecEnum, declKey, feUnsupportedOp)
+    pinDecline(sutSuccEnum, declKey, feUnsupportedOp)
+    pinDecline(sutPlusEqRange, declKey, feUnsupportedOp)
 
   test "S2: an in-range step is exact":
     let r = symexFind(sutIncInRange, tLabel("hit"))

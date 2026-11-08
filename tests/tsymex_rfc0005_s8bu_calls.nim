@@ -33,17 +33,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
-  ## A shape the walk does not model: `sxUnknown`, with the decline named.
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == feUnsupportedOp and why in e.msg: named = true
-    check named
-
 from ./s8cu_helpers import nativeHits
 
 const ks = [-3, 0, 3, 5, 7]

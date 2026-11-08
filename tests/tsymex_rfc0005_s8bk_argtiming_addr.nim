@@ -8,6 +8,9 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bk_argtiming")
 
 include s8bk_argtiming_fixture
 
@@ -50,7 +53,7 @@ suite "S8bk: addr and by-reference actuals take the address at the call":
     discard verdict(sutAddrRef, "ar2_dead", sxUnsat)
     discard verdict(sutAddrIdx, "ai", sxSat)
     discard verdict(sutAddrIdx, "ai_dead", sxUnsat)
-    declines(sutAddrIdxMoved, "am")
+    pinDecline(sutAddrIdxMoved, declKey, feEvalOrderUnmodelled, tLabel("am"), "never checked")
 
   test "by reference: a symbol base, an element base, a call base":
     replays(sutRefSym, "rs")

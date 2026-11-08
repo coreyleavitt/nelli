@@ -174,10 +174,18 @@ proc n11(k: int) =
   let a = gCw
   o11()
   if gCw != a: symexTarget("n11_live")
-proc o30() {.symexOpaque.} =
-  asm """
-    nop
-  """
+when defined(vcc):
+  # x64 MSVC has no inline `asm` (C4235), so foreign code inline is an `emit`
+  # of the `__nop` intrinsic: the same statement-level no-op, and the scan
+  # takes an `emit` and an `asm` as one case (`mayWriteAnyVariable`).
+  {.emit: "/*INCLUDESECTION*/\n#include <intrin.h>".}
+  proc o30() {.symexOpaque.} =
+    {.emit: "__nop();".}
+else:
+  proc o30() {.symexOpaque.} =
+    asm """
+      nop
+    """
 var gH5: int
 proc asm1(k: int) =
   let a = gH5

@@ -1,0 +1,64 @@
+--- begin full/50M
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end full/50M: zsUnknown (canceled) units=50000027
+--- begin full/50M/no-seed
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end full/50M/no-seed: zsUnknown (canceled) units=50000027
+--- begin no-x
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end no-x: zsUnknown (canceled) units=50000020
+--- begin no-lower-bounds
+--- end no-lower-bounds: zsSat units=128
+--- begin x-bounded
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end x-bounded: zsUnknown (canceled) units=50000034
+--- begin small-product
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end small-product: zsUnknown (canceled) units=50000027
+--- begin prime-product
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end prime-product: zsUnknown (canceled) units=50000027
+--- begin full/5M
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end full/5M: zsUnknown (canceled) units=5000027
+--- begin full/50M/nlsat.reorder=false
+/work/tests/probe_s8cj_ups02.nim(42) probe_s8cj_ups02
+/work/tests/probe_s8cj_ups02.nim(24) variant
+/home/corey/.cache/milpa/cas/dag-sha256/9a033bebe5b01bc9633d0e12c9c68b8f2e358dd0cc7917d98226b0ab26eb68d8/src/z3/error.nim(246) add
+/home/corey/.cache/milpa/cas/dag-sha256/9a033bebe5b01bc9633d0e12c9c68b8f2e358dd0cc7917d98226b0ab26eb68d8/src/z3/error.nim(212) raiseZ3Error
+Error: unhandled exception: Z3 Z3_EXCEPTION: unknown parameter 'nlsat.reorder'

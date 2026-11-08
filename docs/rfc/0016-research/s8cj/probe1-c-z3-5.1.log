@@ -1,0 +1,22 @@
+Z3 5.1.0.0
+main #1: z3 units=72089 (zsSat); nelli units=72124 (some(true))
+main #2: z3 units=72089 (zsSat); nelli units=72124 (some(true))
+thread fresh #1: z3 units=72053 (zsSat); nelli units=72124 (some(true))
+thread fresh #2: z3 units=72053 (zsSat); nelli units=72124 (some(true))
+mallocOnly: kept 2062 blocks
+thread after malloc-only thread #1: z3 units=72053 (zsSat); nelli units=72124 (some(true))
+thread after malloc-only thread #2: z3 units=72053 (zsSat); nelli units=19758774 (some(true))
+main after malloc-only thread: z3 units=72053 (zsSat); nelli units=16304701 (some(true))
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+z3Work: zsUnknown units=4000027
+thread after z3 work #1: z3 units=876223 (zsSat); nelli units=19281922 (some(true))
+thread after z3 work #2: z3 units=876223 (zsSat); nelli units=15649702 (some(true))
+main after z3 work: z3 units=876223 (zsSat); nelli units=16004828 (some(true))
+sameThread: 876223 876223 | malloc-perturbed 876223 876223 | freed 876223
+thread last: z3 units=876223 (zsSat); nelli units=17036235 (some(true))
+main last: z3 units=876223 (zsSat); nelli units=14819740 (some(true))

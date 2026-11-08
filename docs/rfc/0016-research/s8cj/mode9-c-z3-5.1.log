@@ -1,0 +1,19 @@
+Z3 5.1.0.0 mode 9
+main before: z3 units=72089 (zsSat)
+thread before: z3 units=72053 (zsSat)
+after leaking 8 bytes: 72053 72053
+after leaking 24 bytes: 72053 72053
+after leaking 40 bytes: 72053 72053
+after leaking 56 bytes: 72053 72053
+after leaking 72 bytes: 72053 72053
+after leaking 104 bytes: 72053 72053
+after leaking 136 bytes: 72053 72053
+after leaking 200 bytes: 72053 72053
+after leaking 1000 bytes: 72053 72053
+after leaking 4096 bytes: 72053 72053
+after leaking 8192 bytes: 72053 72053
+after leaking 65536 bytes: 72053 72053
+main after: z3 units=72053 (zsSat)
+thread after: z3 units=72053 (zsSat)
+thread after #2: z3 units=72053 (zsSat)
+main after #2: z3 units=72053 (zsSat)

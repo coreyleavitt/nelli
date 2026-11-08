@@ -1,0 +1,14 @@
+Z3 5.1.0.0 mode 3
+main before: z3 units=72089 (zsSat)
+thread before: z3 units=72053 (zsSat)
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+factoring(consts=0, rlimit=50000000): zsUnknown@50000027
+main after: z3 units=72053 (zsSat)
+thread after: z3 units=72053 (zsSat)
+thread after #2: z3 units=72053 (zsSat)
+main after #2: z3 units=72053 (zsSat)

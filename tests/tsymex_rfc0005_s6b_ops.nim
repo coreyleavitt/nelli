@@ -731,10 +731,10 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
         if t.len == 0 or isCommentLine(t): continue
         for k in SymexErrorKind:
           if classOf(k) != dcOmitted: continue
-          if ("degrade(" & $k & ",") in t:
+          if ("degrade(" & $k & ",") in t or ("halted(" & $k & ",") in t:
             inc omitted
             checkpoint(f & ": " & t)
-            check t.startsWith("discard w.degrade(")
+            check "w.halted(" in t   ## RFC-0016 K7a: `halted` IS the discard
     check omitted >= 6
 
 suite "RFC-0005 S6b -- walker version pin":

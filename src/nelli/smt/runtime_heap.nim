@@ -1357,7 +1357,7 @@ proc heapDepthExhausted(p: Path, w: var WalkCtx; step: int;
     # gone; the token is discarded. `dsHeapDepth` writes the threadvar +
     # LIVE WalkCtx field exactly as the two hand-written adds did, and the
     # run act is derived at drain from that entry (was `w.sawUnknown`).
-    discard w.degrade(heDepthExhausted, msg, dsHeapDepth)
+    w.halted(heDepthExhausted, msg, sink = dsHeapDepth, cap = ckHeapDepth)
     return true
   false
 

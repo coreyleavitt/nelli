@@ -435,7 +435,8 @@ proc degradeSites(src: string; k: SymexErrorKind): seq[string] =
   for raw in src.splitLines():
     let t = raw.strip()
     if t.len == 0 or isCommentLine(t): continue
-    if ("degrade(" & $k & ",") in t or ("closureDegrade(" & $k & ",") in t:
+    if ("degrade(" & $k & ",") in t or ("closureDegrade(" & $k & ",") in t or
+       ("halted(" & $k & ",") in t:
       result.add t
 
 suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
@@ -467,7 +468,7 @@ suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
       for t in degradeSites(src, k):
         inc omitted
         checkpoint($k & ": " & t)
-        check t.startsWith("discard w.degrade(")
+        check "w.halted(" in t     ## RFC-0016 K7a: `halted` IS the discard
     check omitted >= 1
 
 suite "RFC-0005 S6a -- walker version pin":

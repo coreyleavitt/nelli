@@ -667,6 +667,36 @@ type
       ## RFC-0016 W1-d3. The undefined behaviours the same degrade site read
       ## through; joined into `Path.undefined` beside `path`.
 
+  Survivors = object
+    ## RFC-0016 K7a (section 8.4, K7). The paths an arm leaves live, typed
+    ## by HOW it left them, so a degrade can no longer be discarded in
+    ## place. A layer over `Degrade`/`forkPathTainted`/`taintInPlace`, not
+    ## beside them. There is no "admitted" constructor: an `Admit` is the
+    ## parser's fact and proves nothing at walk time, so the untainted exit
+    ## is plain `exact`, and what keeps it honest is K2's census of
+    ## `Survivors(`, `exact(` and `Degrade(` sites (privacy inside this
+    ## module is nominal). Constructors: `halted`, `surviving`, `continued`,
+    ## `exact`.
+    live: seq[Path]
+
+  CapKind = enum
+    ## RFC-0016 K7a (section 8.4, "Caps are halts"). One member per cap-cut
+    ## PRODUCING SITE, named at that site by `cap = <member>`; a cap cut at
+    ## two sites has two members. K1 derives cap coverage from this
+    ## enum, and `tsymex_0016_k7a_survivors` pins one site per member.
+    ## Caps with no walk-level degrade site yet (the parse-time and
+    ## solver-side ones) join when their site is converted.
+    ckNone                ## not a cap cut (the default)
+    ckFrontier            ## `maxFrontierSize`: `walkBlock`'s prune (a halt)
+    ckHeapDepth           ## `maxHeapDepth`: `heapDerefDecline` (a halt)
+    ckCallDepth           ## `maxCallDepth`/`maxRecursionDepth`: the `isCall` bail
+    ckLoopUnwind          ## `maxLoopUnwind`: the `isWhile` k-unroll
+    ckLoopUnwindFollow    ## `maxLoopUnwind`: the concrete-follow loop
+    ckVariantForks        ## `maxVariantConstructorForks`
+    ckVariantFieldAllocs  ## `maxVariantConstructorFieldAllocs`
+    ckTermWalkRead        ## `termWalkMaxDepth`: a too-wide array read
+    ckTermWalkWrite       ## `termWalkMaxDepth`: a too-wide array write
+
   DegradeSink = enum
     ## RFC-0005 S1. Which existing error sink `degrade()` records into. The
     ## sinks predate the funnel and are drained separately at verdict
@@ -1020,7 +1050,7 @@ proc taintInPlace(p: Path; d: Degrade) =
   ## after the fact (`runtime_heap.nim`'s `isNew` zero-write, per unmodelled
   ## field). Joins, never replaces. A halted path needs no carrier at all
   ## (its contribution is run-global by construction), so halt sites call
-  ## `discard w.degrade(…)` and do not come here.
+  ## `w.halted(…)` and do not come here.
   p.taint = p.taint + d.path
   p.undefined = p.undefined + d.ub     ## RFC-0016 W1-d3
 
@@ -16381,6 +16411,10 @@ type
     checks, prunes: int
 
   WalkCtx = object
+    capCuts:   set[CapKind]
+      ## RFC-0016 K7a. The caps this walk cut at, recorded by `degrade`'s
+      ## `cap` argument. Diagnostic only: read by nothing that decides a
+      ## verdict, so no walker bump and no cache key.
     z3:        Z3Context
     target:    SymexTarget
     params:    seq[IRParam]
@@ -16780,7 +16814,7 @@ type
 
 proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
              sink = dsWalk; scope = walkSite();
-             ub: set[UbKind] = {}): Degrade =
+             ub: set[UbKind] = {}; cap = ckNone): Degrade =
   ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). THE way a
   ## walk-level degrade site (one with `w: var WalkCtx` in scope) records a
   ## classified degrade and obtains its `Degrade` token:
@@ -16815,6 +16849,7 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
   let severity = if sink == dsUnknownExn: sevWarning else: sevError
   let info = SymexErrorInfo(kind: kind, severity: severity, msg: msg,
                             scope: scope)
+  if cap != ckNone: w.capCuts.incl cap     ## RFC-0016 K7a
   case sink
   of dsWalk:
     w.walkDegradeErrors.add info
@@ -16831,6 +16866,33 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
     unknownExnWarnings.add info         # threadvar: fallback
     w.unknownExnWarnings.add info       # CR-9 Stage 5: LIVE WalkCtx field
   Degrade(path: pathTaint(classOf(kind)), ub: ub)
+
+proc halted(w: var WalkCtx; kind: SymexErrorKind; msg: string;
+            scope = walkSite(); sink = dsWalk; cap = ckNone): Survivors
+           {.discardable.} =
+  ## RFC-0016 K7a. A HALT: records the classified degrade and returns no
+  ## paths. A halted path needs no carrier (its contribution is run-global),
+  ## so this holds the one sanctioned discard of a `Degrade` token; a halt
+  ## site never writes `discard w.degrade(...)`. Discardable because a void
+  ## routing proc has nothing to return the empty `Survivors` to.
+  discard w.degrade(kind, msg, sink, scope, cap = cap)
+  Survivors(live: @[])
+
+func exact(ps: seq[Path]): Survivors =
+  ## RFC-0016 K7a. The walker's word that `ps` leave untainted; no token.
+  Survivors(live: ps)
+
+proc surviving(ps: seq[Path]; d: Degrade): Survivors =
+  ## RFC-0016 K7a. A fold of `forkPathTainted`: each of `ps` forks onto its
+  ## own env carrying `d`'s path coordinate.
+  result = Survivors(live: @[])
+  for p in ps: result.live.add forkPathTainted(p, p.pc, p.env, d)
+
+proc continued(ps: seq[Path]; d: Degrade): Survivors =
+  ## RFC-0016 K7a. A fold of `taintInPlace`: the degrade was recorded and
+  ## `ps` go on, each now carrying `d`'s path coordinate.
+  for p in ps: p.taintInPlace d
+  Survivors(live: ps)
 
 proc carriedDegrade(taint: Taint; ub: set[UbKind] = {}): Degrade =
   ## RFC-0005 S8cn. A closure body's start: taint its caller's path already
@@ -16916,7 +16978,7 @@ proc stampLoweringPendingLeak(w: var WalkCtx) =
   ## (so telemetry sees the leak) and reset the residue so it cannot bleed
   ## into the next run on this thread.
   if loweringPendingTaint != {}:
-    discard w.degrade(weInternalWalkerFault,
+    w.halted(weInternalWalkerFault,
       "lowering pending taint " & $loweringPendingTaint & " leaked at walk " &
       "end — a lowering degrade's path taint was never drained onto a path " &
       "(RFC-0005 S1 leak pin; weInternalWalkerFault)")
@@ -16998,10 +17060,10 @@ proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
   let child = forkPathTainted(parent, parent.pc, parent.env, d)
   result.forkTaintedJoined = child.taint
   result.forkTaintedParentUntouched = parent.taint
-  discard w.degrade(heDepthExhausted, "rfc0005 S1 probe (heap depth)", dsHeapDepth)
+  w.halted(heDepthExhausted, "rfc0005 S1 probe (heap depth)", sink = dsHeapDepth)
   let dz = w.degrade(heNewFieldZeroUnsupported, "rfc0005 S1 probe (new zero)",
                      dsNewFieldZero)
-  discard w.degrade(ceInlineBudgetExceeded, "rfc0005 S1 probe (closure)", dsClosure)
+  w.halted(ceInlineBudgetExceeded, "rfc0005 S1 probe (closure)", sink = dsClosure)
   result.heapDepthSinkKinds = kindsOf(w.heapDepthErrors)
   result.newFieldZeroSinkKinds = kindsOf(w.newFieldZeroErrors)
   result.closureSinkKinds = kindsOf(w.closureCallErrors)
@@ -18816,7 +18878,7 @@ proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
          stmt.callee & "` — " & why & "; raise " &
          "settings.budget.maxCallDepth or maxRecursionDepth if " &
          "this SUT's real call nesting is deeper than the current " &
-         "bound (beBudgetExhaustedUnmodelled)")
+         "bound (beBudgetExhaustedUnmodelled)", cap = ckCallDepth)
   for p in live:
     var newEnv = p.env
     var pcInit: seq[Z3Bool]
@@ -19417,15 +19479,17 @@ proc drainClosureRaises(p: Path; exitFactsPlaced: bool;
   w.closureRaises = @[]
   if raises.len == 0:
     return @[p]
+  var kept = exact(@[p])
   if not exitFactsPlaced:
     # Not reachable by construction (every raise drain runs on the path
     # `drainPendingLowerEffects` just returned, whose tail is exactly the
     # facts it appended); if it ever is, the raise would be forked under its
     # own negation -- record the walker fault and route the raises anyway
-    # rather than drop them silently.
-    discard w.degrade(weInternalWalkerFault,
+    # rather than drop them silently. RFC-0016 K7a: recorded-but-continued,
+    # so the survivor carries the fault's path coordinate.
+    kept = continued(@[p], w.degrade(weInternalWalkerFault,
       "closure raise drained on a path whose defect-survivor tail is not " &
-      "the last drained closure exit facts (RFC-0005 S7 drainClosureRaises)")
+      "the last drained closure exit facts (RFC-0005 S7 drainClosureRaises)"))
   for cr in raises:
     let er = cr.raised
     # RFC-0005 S8as: the raising exit's own by-reference writes.
@@ -19440,7 +19504,7 @@ proc drainClosureRaises(p: Path; exitFactsPlaced: bool;
     if er.crash: crashRaise(rp, er.typeId, w)       # RFC-0005 S8cu
     else: discard routeRaise(rp, er.typeId, er.msg, w)
     if w.shouldStop: break
-  @[p]
+  kept.live
 
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7: routes any closure-body raises (`drainClosureRaises`).
@@ -20506,7 +20570,7 @@ proc exitJump(p: Path; target: int; isCont: bool; w: var WalkCtx) =
   ## `return` there does.
   if w.frame.raisedFinallyLoops.len > 0 and
      target < w.frame.raisedFinallyLoops[^1]:
-    discard w.degrade(eeFinallyJumpOnRaise,
+    w.halted(eeFinallyJumpOnRaise,
       "`" & (if isCont: "continue" else: "break") & "` leaving a `finally` " &
       "that runs on a raised exit: the c backend re-raises, cpp does not -- " &
       "path dropped (eeFinallyJumpOnRaise)")
@@ -21210,7 +21274,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
       "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
            $unwind & ") while following a concrete replay that was still " &
            "continuing — the trace claims more iterations than the bound " &
-           "allows (beBudgetExhausted)")
+           "allows (beBudgetExhausted)", cap = ckLoopUnwindFollow)
     for p in active:
       survivors.add forkPathTainted(p, p.pc, p.env, d)
   survivors
@@ -21404,11 +21468,12 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
       # under-approximation (`{scIncomplete}` on the run), and its empty path
       # coordinate is sound ONLY because this is a halt: the token must stay
       # discarded (pinned in `tsymex_rfc0005_s6a_budget.nim`).
-      discard w.degrade(beBudgetExhaustedPrune,
+      w.halted(beBudgetExhaustedPrune,
         "path-frontier cap (maxFrontierSize=" &
              $w.settings.budget.maxFrontierSize & ") pruned " &
              $(result.len - kept.len) &
-             " live path(s) — their verdicts are unexplored (beBudgetExhaustedPrune)")
+             " live path(s) — their verdicts are unexplored (beBudgetExhaustedPrune)",
+        cap = ckFrontier)
       result = kept
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
@@ -22023,7 +22088,7 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
           locPrefix & "isIndex: an array of " & $n & " elements at a " &
           "symbolic index that may name more than termWalkMaxDepth (" &
           $termWalkMaxDepth & ") of them; the element read is a fresh value " &
-          "(feUnsupportedOpHavoc)")
+          "(feUnsupportedOpHavoc)", cap = ckTermWalkRead)
         survivors.add forkPathTainted(cp, cp.pc & @[inLoCond, inHiCond],
           declinedIndexEnv(cp.env, stmt, stmt.ixElemTy), dw)
         continue
@@ -22112,7 +22177,8 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
             let dw = w.degrade(feUnsupportedStmtKind,
               locPrefix & "isIndexAssign: an array of " & $n & " elements at " &
               "a symbolic index that may name more than termWalkMaxDepth (" &
-              $termWalkMaxDepth & ") of them; the write is dropped")
+              $termWalkMaxDepth & ") of them; the write is dropped",
+              cap = ckTermWalkWrite)
             survivors.add forkPathTainted(vp, vp.pc & @[inLoCond, inHiCond],
                                           vp.env, dw)
             continue
@@ -22873,7 +22939,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
       stmt.vcsLoc & ": variant constructor fork budget exhausted " &
            "(maxVariantConstructorForks=" & $vcsBudget & ", feasible " &
            "tags=" & $stmt.vcsTagSet.len & ") — construction unmodeled " &
-           "(beBudgetExhaustedUnmodelled)")
+           "(beBudgetExhaustedUnmodelled)", cap = ckVariantForks)
     for p in paths:
       # RFC-0005 S8ba: `stmt.vcsResultVar` is bound to a fresh value of
       # the variant type on the tainted path (`declinedVariantEnv`). It
@@ -22914,7 +22980,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
            $vcsFieldBudget & ", forks=" & $stmt.vcsTagSet.len &
            " x leaf-allocs-per-fork=" & $vcsArmFieldCost & " = " &
            $vcsFieldAllocs & ") — construction unmodeled " &
-           "(beBudgetExhaustedUnmodelled)")
+           "(beBudgetExhaustedUnmodelled)", cap = ckVariantFieldAllocs)
     for p in paths:
       # Same safe-degrade idiom as the fork-count budget above.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
@@ -23110,7 +23176,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
       # the path (mirrors `isUnsafeCast`'s "halt this path" idiom) rather
       # than fabricate arm data for a receiver that was never a real
       # variant to begin with. RFC-0005 S1: HALT site — token discarded.
-      discard w.degrade(seVariantFieldOnDeclinedCtor,
+      w.halted(seVariantFieldOnDeclinedCtor,
         "variant field '" & stmt.vfFieldName & "' read on a " &
              "receiver whose construction was already declined " &
              "(non-variant SymVal kind=" & $recv.kind & ") " &
@@ -24266,6 +24332,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # satisfiable, NOT `not cond` — so the continuation is fiction (⊤ on
       # the path), and the omitted iterations void any UNSAT claim
       # (`{scIncomplete}` on the run).
+      let cap = ckLoopUnwind     ## RFC-0016 K7a: both branches cut this cap
       var d: Degrade
       if stmt.wHasAssumedBound:
         # Round-6 fix round 3 (item 5): softened wording — `wHasAssumedBound`
@@ -24286,12 +24353,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                "bound exists on a guard variable (symexAssume), but it " &
                "does not end the loop within the unroll budget on this path " &
                "(or the per-iteration feasibility check ran out of its " &
-               "budget) (beBudgetExhaustedAssumedBound)")
+               "budget) (beBudgetExhaustedAssumedBound)", cap = cap)
       else:
         d = w.degrade(beBudgetExhausted,
           "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
                $unwind & ") with the guard still satisfiable — trip counts " &
-               "beyond the bound are unexplored (beBudgetExhausted)")
+               "beyond the bound are unexplored (beBudgetExhausted)", cap = cap)
       for p in active:
         survivors.add forkPathTainted(p, p.pc, p.env, d)
     discard w.loopStack.pop()
@@ -24308,10 +24375,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # rejects a `break` with nothing to leave).
       # RFC-0005 S1b: HALT site — the recorded `weBreakOutsideLoop` is the run
       # act (was a kindless run mark with no error); token discarded.
-      discard w.degrade(weBreakOutsideLoop,
+      return w.halted(weBreakOutsideLoop,
         "`break` reached with no enclosing loop or block to leave — the " &
-             "breaking path is dropped (weBreakOutsideLoop)")
-      return @[]
+             "breaking path is dropped (weBreakOutsideLoop)").live
     # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
       exitJump(p, target, isCont = false, w)
@@ -24324,10 +24390,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if target < 0:
       # continue outside any loop — rejected by Nim itself, so reachable only
       # from hand-built IR. RFC-0005 S1b: HALT site, same kind as `break`.
-      discard w.degrade(weBreakOutsideLoop,
+      return w.halted(weBreakOutsideLoop,
         "`continue` reached with no enclosing loop — the path is dropped " &
-             "(weBreakOutsideLoop)")
-      return @[]
+             "(weBreakOutsideLoop)").live
     # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
       exitJump(p, target, isCont = true, w)
@@ -24358,8 +24423,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # (`raisedFinallyLoops`, this frame) is backend-divergent -- c re-raises the
     # in-flight exception, cpp returns (probed). HALT the path.
     if w.frame.raisedFinallyLoops.len > 0:
-      discard w.degrade(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)")
-      return @[]
+      return w.halted(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)").live
     # RFC-0005 S8j (top level) / R1 (callee): lower `stmt.retExpr` and
     # drain its scalar raises, so a raise in the returned expression routes
     # to its handler (`return 100 div x`, a `Natural` result's range check).
@@ -24514,7 +24578,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # `weInternalWalkerFault` by the Invariant-7 backstop). Since S1c
           # this is also the ONLY unsolved skip (§2.3 "the unsolved-skip is
           # itself an omission"), on a tainted path as on a clean one.
-          discard w.degrade(beSolverUndef,
+          w.halted(beSolverUndef,
             "solver returned unknown on a path reaching target label `" &
                  stmt.tname & "` (queryRLimit=" &
                  $w.settings.budget.queryRLimit & "): " & why &
@@ -24569,10 +24633,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # RFC-0005 S1: HALT site — token discarded; the recorded error is
         # the run act (was `for p in paths: w.sawUnknown = true`; `paths`
         # is never empty here — `walk` returns early on an empty frontier).
-        discard w.degrade(eeRaiseOutsideHandler,
+        return w.halted(eeRaiseOutsideHandler,
           "bare `raise` (re-raise) with no in-flight exception " &
-               "(eeRaiseOutsideHandler)")
-        return @[]
+               "(eeRaiseOutsideHandler)").live
       else:
         # Inside a handler with no recorded in-flight exn yet — handler-stack
         # re-raise is E3+. Surface as unknown rather than guess.
@@ -24580,11 +24643,10 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # frontier — so the old per-path loop was an unconditional mark.)
         # RFC-0005 S1b: HALT site — the recorded kind is the run act (was a
         # kindless run mark with no error).
-        discard w.degrade(eeHandlerReraiseUnmodelled,
+        return w.halted(eeHandlerReraiseUnmodelled,
           "bare `raise` (re-raise) inside a `try` with no in-flight " &
                "exception — not modelled (real Nim raises ReraiseDefect); " &
-               "the path is dropped (eeHandlerReraiseUnmodelled)")
-        return @[]
+               "the path is dropped (eeHandlerReraiseUnmodelled)").live
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
@@ -24805,10 +24867,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # the parse-time one, which says the cast EXISTS, not that a path reached
     # it -- the blanket veto made that distinction moot; S9 deleted the veto
     # and joins on it. The token is discarded: a halted path needs no carrier.
-    discard w.degrade(heUnsafeCast,
+    w.halted(heUnsafeCast,
       "unsafe pointer materialisation (" & stmt.ucReason & ") reached at " &
-      "walk time -- path halted", scope = siteAnchored(stmt.ucMarker))
-    @[]
+      "walk time -- path halted", scope = siteAnchored(stmt.ucMarker)).live
 
 const capSnapPrefix = "__capsnap#"
   ## RFC-0005 S8ax. A frame-local name (no `__gl:` prefix, so no call
@@ -26184,7 +26245,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     of sxUnknown:
       # RFC-0005 S1b (§3.1 solver-undef row): the raised finding's path could
       # not be decided — record it (was a kindless run mark).
-      discard w.degrade(beSolverUndef,
+      w.halted(beSolverUndef,
         "solver returned unknown on a path raising `" & typeId &
              "` (queryRLimit=" & $w.settings.budget.queryRLimit &
              "): " & why & " (beSolverUndef)")
@@ -26215,7 +26276,7 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
       if f.handlerStack.len > 0: guarded = true
     if guarded:
       if not pathInfeasible(w.z3, p, w.settings):
-        discard w.degrade(heNilDerefMayBeCaught,
+        w.halted(heNilDerefMayBeCaught,
           "a nil dereference under a `try` in a build with " &
           "`--exceptions:setjmp`, where `std/segfaults` would make it a " &
           "catchable `" & typeId & "` and run the `finally`: what follows is " &
@@ -26246,7 +26307,7 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
     r.errors.add candErrs
     w.admitSolvedHit(r)
   of sxUnknown:
-    discard w.degrade(beSolverUndef,
+    w.halted(beSolverUndef,
       "solver returned unknown on a path raising `" & typeId &
            "` (queryRLimit=" & $w.settings.budget.queryRLimit &
            "): " & why & " (beSolverUndef)")
@@ -26269,7 +26330,7 @@ proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
      concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc & @[cond],
                           w.settings):
     return
-  discard w.degrade(kind,
+  w.halted(kind,
     "undefined behaviour at " & site & " (" & $kind & "): the path ends " &
     "here, what follows is not modelled")
 
@@ -27362,7 +27423,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # any closure-sink sevError, which this site never did; S9 deleted it).
     # RFC-0005 S7: a HALT (`dcOmitted`) -- the exit-coverage fact
     # above is `false` here, so no caller continuation survives the call.
-    discard w.degrade(ceClosureBodyDiverged,
+    w.halted(ceClosureBodyDiverged,
       "closure body produced no value-bearing exit (every body path raised, " &
            "halted or was dropped) — the call's result is unconstrained " &
            "(ceClosureBodyDiverged)")

@@ -3,12 +3,8 @@
 # scripts/check-linux-allowlist.sh fails the leg on a red test NOT listed here AND on a
 # listed test that passes, so an entry goes in the commit that fixes it. Each entry is a
 # real MSVC-only defect class that symex-mingw cannot see. The INT-45 entries (k5a_fwrapv,
-# s6a_budget, s8cs_routes2, s8bz_overlap) are fixed and gone; INT-47 is open.
+# s6a_budget, s8cs_routes2, s8bz_overlap) are fixed and gone, as are the INT-47 entries (fixed on main). The list is empty.
 #
 # Baseline: run 42446649374 at 13afdc01 (15 red; the stack and capture artifacts fixed since), then
 # run 42487154319 on the rebased tree, 905 of 905 ran, 7 red: the four INT-47 entries are new on main
 # and three INT-45 entries (since fixed by 13578374).
-tsymex_0016_k20_probes  INT-47: HRV-46 pinCrash build:pcre/interpreter/longSubject exits -1073741571 (0xC00000FD, stack overflow), not the expected ceSegv; MSVC-only
-tsymex_0016_k8a1_template_except_as  INT-47: the vcc build fails at symex.nim(2828, 29) `Error: node has no type` under pinExact -> symexFind (new on main since the 46af70b2 base)
-tsymex_0016_k8a_gen  INT-47: the vcc build fails at symex.nim(2828, 29) `Error: node has no type` in scanFootprint under pinExactImpl (same root as k8a1_template_except_as)
-tsymex_0016_universe  INT-47: exits rc=1 after 0.2 s on the Windows shard at the K1a-ids RED self-tests; the id join reads the work list and ids.txt, so a path or line-ending assumption is the first suspect (CRLF checkout)

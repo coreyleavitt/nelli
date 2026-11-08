@@ -140,8 +140,8 @@
   plus a rotating 12-test slice with `-d:nelliVmAliasAudit`. `scripts/rfc0016-intake.sh` files `rfc-0016-intake` issues
   keyed `leg:test` (more than 10 on a leg collapse to `leg:*`); only `schedule`, or a dispatch with `intake: live`,
   files; everything else prints `[dry-run]` lines. Defect rows: INT-44 (cpp unit pin), INT-45 (MSVC-only reds; the s8bz
-  cause was toolchain patch 0007) and INT-46 (tfuzzforkworker thread race) are closed; INT-47 (four new MSVC-only reds,
-  allowlisted in `nightly-msvc-known-red.txt`) is open, another agent is fixing it. W-63 closed against the msvc leg.
+  cause was toolchain patch 0007), INT-46 (tfuzzforkworker thread race) and INT-47 (four MSVC-only reds, fixed on main)
+  are closed, and the msvc known-red list is empty (pending INT-48 below if the verification run shows `k8a_sink` red). W-63 closed against the msvc leg.
   `fuzzer-msvc` still carries its W1-m `tsymex_0016_*` step (kept: the nightly msvc leg is not per-push).
 - **Windows native facts:** a Nim probe's division fault on Windows prints
   `SIGFPE: Arithmetic error` and exits 1 (the CRT maps 0xC0000094); `low(int)

@@ -38,10 +38,7 @@ template verdict(sut: untyped; label: string): SymexResult =
              (if r.status == sxSat: $r.witness else: "-")
   r
 
-template nativeHits(body: untyped): HashSet[string] =
-  symexCaptureBegin()
-  body
-  symexCaptureEnd()
+from ./s8cu_helpers import nativeHits
 
 # ---- item 3: pigeonhole-hard card queries -----------------------------------
 

@@ -32,11 +32,7 @@ template verdict(sut: untyped; label: string): SymexResult =
              (if r.status == sxSat: $r.witness else: "-")
   r
 
-template nativeHits(body: untyped): HashSet[string] =
-  symexCaptureBegin()
-  body
-  symexCaptureEnd()
-type E4 = enum e0, e1, e2, e3
+from ./s8cu_helpers import nativeHits
 
 proc itInt8First(s: set[int8]) =
   var first = 0'i8

@@ -35,16 +35,7 @@ template verdict(sut: untyped; label: string): SymexResult =
              (if r.status == sxSat: $r.witness else: "-")
   r
 
-template nativeHits(body: untyped): HashSet[string] =
-  symexCaptureBegin()
-  body
-  symexCaptureEnd()
-type
-  E4 = enum e0, e1, e2, e3
-  SE = range[e1..e2]
-  RI = range[0..9]
-  RJ = range[0..20]
-  RC = range['a'..'z']
+from ./s8cu_helpers import nativeHits
 
 proc setConvNodes(n: NimNode): int =
   if n.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and

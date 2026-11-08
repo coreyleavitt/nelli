@@ -32,19 +32,7 @@ template verdict(sut: untyped; label: string): SymexResult =
              (if r.status == sxSat: $r.witness else: "-")
   r
 
-template nativeHits(body: untyped): HashSet[string] =
-  symexCaptureBegin()
-  body
-  symexCaptureEnd()
-proc itInt8First(s: set[int8]) =
-  var first = 0'i8
-  var seen = false
-  for v in s:
-    if not seen:
-      first = v
-      seen = true
-  if seen and first > 0 and -5'i8 in s: symexTarget("bv_it_int8_first")
-  if seen and first == -128'i8: symexTarget("bv_it_int8_min")
+from ./s8cu_helpers import nativeHits
 
 suite "S8bv: walker version":
   test "the walker version floor":

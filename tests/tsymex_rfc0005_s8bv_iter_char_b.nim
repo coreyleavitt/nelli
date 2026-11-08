@@ -26,19 +26,7 @@ template verdict(sut: untyped; label: string): SymexResult =
              (if r.status == sxSat: $r.witness else: "-")
   r
 
-template nativeHits(body: untyped): HashSet[string] =
-  symexCaptureBegin()
-  body
-  symexCaptureEnd()
-proc itCharFirst(s: set[char]) =
-  var first = '\0'
-  var seen = false
-  for c in s:
-    if not seen:
-      first = c
-      seen = true
-  if 'a' in s and 'b' in s and first == 'b': symexTarget("bv_it_char_first")
-  if seen and first == 'q' and card(s) == 1: symexTarget("bv_it_char_one")
+from ./s8cu_helpers import nativeHits
 
 suite "S8bv (1): for x in a builtin set":
   test "a set[char]: its only member":

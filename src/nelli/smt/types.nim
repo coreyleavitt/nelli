@@ -4259,6 +4259,39 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
   ## when any arm has `isElse=true` so the walker can derive the
   ## legal disc range. Empty for exhaustive-`of` variants without
   ## `else:` (the per-arm equality disjunction is then sufficient).
+  when defined(nelliMsvcdProbe):
+   # Debug probe: bracket the MSVC-only SIGSEGV in this constructor.
+   when nimvm: discard
+   else:
+    template raw(s: untyped): untyped =
+      cast[ptr tuple[len: int, p: pointer]](unsafeAddr s)[]
+    stderr.writeLine "[probe] tVariant ", objectName, " arms(len=", raw(arms).len,
+      " p=", cast[uint](raw(arms).p), ") discTags(len=", raw(discTags).len,
+      " p=", cast[uint](raw(discTags).p), ") pft(len=", raw(plainFieldTypes).len,
+      " p=", cast[uint](raw(plainFieldTypes).p), ")"
+    for i in 0 ..< arms.len:
+      stderr.writeLine "[probe]  arm ", i, " ord=", arms[i].tagOrdinal,
+        " fn(len=", raw(arms[i].fieldNames).len, " p=",
+        cast[uint](raw(arms[i].fieldNames).p), ") ft(len=",
+        raw(arms[i].fieldTypes).len, " p=", cast[uint](raw(arms[i].fieldTypes).p), ")"
+      stderr.writeLine "[probe]   tag=", arms[i].tagName
+      for j in 0 ..< arms[i].fieldNames.len:
+        stderr.writeLine "[probe]   fn ", j, " ", arms[i].fieldNames[j]
+      for j in 0 ..< arms[i].fieldTypes.len:
+        stderr.writeLine "[probe]   ft ", j, " p=", cast[uint](arms[i].fieldTypes[j])
+        if arms[i].fieldTypes[j] != nil:
+          stderr.writeLine "[probe]   ft kind=", arms[i].fieldTypes[j].kind
+    for i in 0 ..< discTags.len:
+      stderr.writeLine "[probe]  tag ", i, " ord=", discTags[i].ord, " name.p=",
+        cast[uint](raw(discTags[i].name).p), " name=", discTags[i].name
+    block:
+      var c1 = arms
+      stderr.writeLine "[probe] arms copied, len=", c1.len
+      var c2 = discTags
+      stderr.writeLine "[probe] discTags copied, len=", c2.len
+      var c3 = plainFieldTypes
+      stderr.writeLine "[probe] plainFieldTypes copied, len=", c3.len
+    stderr.writeLine "[probe] constructing"
   IRType(kind: itVariant, vObjectName: objectName,
          vDiscName: discName, vDiscTy: discTy, vArms: arms,
          vDiscTags: discTags, vNominalId: nominalId,

@@ -147,9 +147,9 @@ jobs:
 
       - uses: ./.github/actions/setup-symex-linux
         with:
-          z3-version: ${{ matrix.leg == 'z3-4.13.4' && '4.13.4' || '5.1.0' }}
-          z3-asset: ${{ matrix.leg == 'z3-4.13.4' && 'z3-4.13.4-x64-glibc-2.35' || 'z3-5.1.0-x64-glibc-2.39' }}
-          z3-sha256: ${{ matrix.leg == 'z3-4.13.4' && '93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b' || 'f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a' }}
+          z3_version: ${{ matrix.leg == 'z3-4.13.4' && '4.13.4' || '5.1.0' }}
+          z3_asset: ${{ matrix.leg == 'z3-4.13.4' && 'z3-4.13.4-x64-glibc-2.35' || 'z3-5.1.0-x64-glibc-2.39' }}
+          z3_sha256: ${{ matrix.leg == 'z3-4.13.4' && '93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b' || 'f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a' }}
 
       - name: The host runner keeps the child's stderr (the compiler warnings sidecar depends on it)
         run: bash scripts/dt-bounded.sh --self-test

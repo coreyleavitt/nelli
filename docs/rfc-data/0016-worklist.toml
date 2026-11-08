@@ -1547,10 +1547,11 @@ cells = []
 [[row]]
 id = "INT-45"
 table = "5.8c"
-title = "The first `symex-msvc` (c, vcc, Z3 4.13.4) nightly run found MSVC-only reds that `symex-mingw` cannot see: `tsymex_rfc0005_s6a_budget` (cl.exe C2124, a constant division by zero in the generated C), `tsymex_rfc0005_s8bz_overlap` (SIGSEGV in a `=dup` hook under `tVariant` during module-init IR construction; MSVC-only, mingw passes; PASSED in run 42487154319, entry removed, cause not identified), `tsymex_rfc0005_s8cs_routes2` (the test's `asm \"nop\"` is not accepted on x64, C4235), and `tsymex_0016_k5a_fwrapv` (the build is refused by design under vcc and the test has no vcc arm). Known-red in `tests/0016-allowlist/nightly-msvc-known-red.txt`; the branch `rfc-0016-msvcd` fixes `k5a_fwrapv`, `s6a_budget` and `s8cs_routes2` (a vcc run passed all three) and removes their entries when it lands"
-class = "soundness-adjacent (the SIGSEGV is unclassified until triaged); the rest portability"
-state = "open"
-note = ""
+title = "The first `symex-msvc` (c, vcc, Z3 4.13.4) nightly run found MSVC-only reds that `symex-mingw` cannot see: `tsymex_rfc0005_s6a_budget` (cl.exe C2124, a constant division by zero in the generated C), `tsymex_rfc0005_s8cs_routes2` (the test's `asm \"nop\"` is not accepted on x64, C4235), `tsymex_0016_k5a_fwrapv` (the build is refused by design under vcc and the test has no vcc arm), and `tsymex_rfc0005_s8bz_overlap` (SIGSEGV in a `=dup` hook under `tVariant` during module-init IR construction). Fixed: the first three are test-side fixes in `13578374`; `s8bz_overlap` was a Nim 2.2.10 codegen defect (under vcc a `{.packed.}` case object's `#pragma pack(pop)` landed outside the union, so pack(1) leaked to every later struct in the module), fixed by toolchain patch 0007, a backport of nim-lang/Nim#24461, published in `2.2.10-windows-x64` on 2026-11-08"
+class = "toolchain defect (vcc codegen) plus test portability"
+state = "closed"
+note = "`fuzzer-msvc` run 42489572022 passed `s8bz_overlap` under vcc with patch 0007; the nightly msvc known-red list no longer carries any INT-45 entry"
+sha = "13578374"
 source = "CI-B first nightly, run 42446649374"
 cells = []
 

@@ -2,16 +2,12 @@
 # --cc:vcc, Z3 4.13.4). One test per line, then the reason; `#` starts a comment.
 # scripts/check-linux-allowlist.sh fails the leg on a red test NOT listed here AND on a
 # listed test that passes, so an entry goes in the commit that fixes it. Each entry is a
-# real MSVC-only defect class that symex-mingw cannot see (INT-45). Branch rfc-0016-msvcd fixes
-# k5a_fwrapv, s6a_budget and s8cs_routes2; whichever of the two branches lands second deletes
-# those three entries (a listed test that passes fails the leg).
+# real MSVC-only defect class that symex-mingw cannot see. The INT-45 entries (k5a_fwrapv,
+# s6a_budget, s8cs_routes2, s8bz_overlap) are fixed and gone; INT-47 is open.
 #
 # Baseline: run 42446649374 at 13afdc01 (15 red; the stack and capture artifacts fixed since), then
-# run 42487154319 on the rebased tree, 905 of 905 ran, 7 red: the four INT-47 entries are new on main,
-# the three INT-45 entries remain, and s8bz_overlap PASSED there, so its entry is gone.
-tsymex_0016_k5a_fwrapv  INT-45: the build is refused by design under vcc (-d:nelliFwrapv has no effect there, symex.nim:40); the test has no vcc arm
-tsymex_rfc0005_s6a_budget  INT-45: cl.exe rejects the generated C with C2124 (divide or mod by zero), a constant division gcc accepts
-tsymex_rfc0005_s8cs_routes2  INT-45: the test's asm "nop" is not accepted on x64 MSVC (C4235), so the generated C does not compile
+# run 42487154319 on the rebased tree, 905 of 905 ran, 7 red: the four INT-47 entries are new on main
+# and three INT-45 entries (since fixed by 13578374).
 tsymex_0016_k20_probes  INT-47: HRV-46 pinCrash build:pcre/interpreter/longSubject exits -1073741571 (0xC00000FD, stack overflow), not the expected ceSegv; MSVC-only
 tsymex_0016_k8a1_template_except_as  INT-47: the vcc build fails at symex.nim(2828, 29) `Error: node has no type` under pinExact -> symexFind (new on main since the 46af70b2 base)
 tsymex_0016_k8a_gen  INT-47: the vcc build fails at symex.nim(2828, 29) `Error: node has no type` in scanFootprint under pinExactImpl (same root as k8a1_template_except_as)

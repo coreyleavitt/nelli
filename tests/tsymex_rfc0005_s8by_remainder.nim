@@ -9,7 +9,18 @@
 ##       units in one context and 5,854,996 in one that made the query's
 ##       constants the other way round (Z3 5.1; 23,956 and 911,593 on
 ##       4.13.4), and under a bound between them one decided it and the
-##       other did not. Now what its context holds moves neither;
+##       other did not. Now what its context holds moves neither.
+##       RFC-0016 S8cj: what DOES move it is Z3's process-wide allocation
+##       counter (the tactic layer's `memory` probe): its default solver's
+##       QF_NIA portfolio skips its bit-blasting stage above 100 MB, so the
+##       same query costs 72,053 units in a small process and 876,223 /
+##       5,854,994 (by term order) in one holding 100 MB of Z3 contexts
+##       (23,883 / 911,591 on 4.13.4). The spend is a function of the
+##       query AND the process's Z3 memory at the time; the outcome under
+##       a bound above both figures is not. The threads below release
+##       their contexts before exiting (a thread's current context is
+##       otherwise never freed) so all run in one process state, where the
+##       comparison is exact;
 ##   (2) after a facts-first SAT, `checkCapped` runs neither (1b) nor
 ##       (1c)'s uncapped half: the facts-first check is (1c)'s query under
 ##       a smaller budget, and (1b)'s is a subset of it, so both are known
@@ -21,7 +32,8 @@
 ##       function of the query alone (`queryTermOrder`: the roots in
 ##       order, each term's arguments last to first, children first); Z3's
 ##       search, so its wall time per unit and its units, follows that
-##       order (`r4_strip`'s binary 133 and 122 CPU seconds against 143 and
+##       order (and the process's Z3 memory, S8cj; the order is what the
+##       query itself fixes) (`r4_strip`'s binary 133 and 122 CPU seconds against 143 and
 ##       129, side by side, Z3 5.1);
 ##   (4) a regex membership below the top level -- under a disjunction
 ##       (`a or not s.contains(re"b")`), in an `ite` branch, under a `not`
@@ -137,12 +149,18 @@ proc scratchSolves(arg: tuple[holds: int; bound: uint]) {.thread.} =
     here = ctxCount(ctx)
     let inf = concretelyInfeasible(ctx, @[], facts & @[x <= one], settings)
     scratchOut = (o, inf, units, ownContextUnits - own + ctxCount(ctx) - here)
+    # RFC-0016 S8cj: `newContext` made `ctx` this thread's current context;
+    # a threadvar is never destroyed with its thread, so without this the
+    # context (17 MB) outlives the thread and moves every later solve.
+    setCurrentContext(nil)
 
 proc settleProcess() {.thread.} =
   ## A factoring search over other constants, on a thread of its own. A
-  ## fresh thread's spend on one query also moves with what earlier threads
-  ## of the process ran (the RFC's "As landed (S8by)", a different
-  ## mechanism), so the comparison below is made after that has settled.
+  ## fresh thread's spend on one query also moves with the process's Z3
+  ## memory (RFC-0016 S8cj: the default solver's strategy reads it), which
+  ## is what "what earlier threads ran" was; with every thread releasing
+  ## its context the process stays in one state, and the comparison below
+  ## is exact.
   {.cast(gcsafe).}:
     let ctx = newContext()
     let p = mkIntVar(ctx, "p")
@@ -157,6 +175,7 @@ proc settleProcess() {.thread.} =
     s.add p * q == mkInt(ctx, 4093 * 4099)
     s.add p < x
     discard s.check()
+    setCurrentContext(nil)   # RFC-0016 S8cj, as in `scratchSolves`
 
 proc scratchIn(holds: int; bound: uint): ScratchRun =
   var th: Thread[tuple[holds: int; bound: uint]]
@@ -186,6 +205,8 @@ suite "S8by (1): a concolic scratch solve is the same in any context":
     let bounded = scratchIn(0, between)
     for holds in 1 .. 3:
       let r = scratchIn(holds, 50_000_000'u)
+      # Exact in one process state (RFC-0016 S8cj): the threads release
+      # their contexts, so Z3's memory is the same for `base` and `r`.
       check r.units == base.units
       check r.infeasibleUnits == base.infeasibleUnits
       check r.outcome == base.outcome

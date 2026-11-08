@@ -73,21 +73,119 @@ All outcomes were `zsSat` / `some(true)` throughout; only the spend moved.
 5. **The "function of the query alone" claims** (S8bm, S8bp, `queryTermOrder`'s doc comment, `concreteScratchCheck`'s doc comment, `tsymex_rfc0005_s8by_remainder.nim` header item (1) and (3)) are correct only within one process history, as S8by's remainder note already said. `s8by_remainder:189` (`check r.units == base.units`) compares two fresh threads after a settle sequence; it is deterministic in modes 1-14 and not in probe 1, so it fails whenever the process reaches the moved state, which the sweep's load evidently reaches (CI-03) and a cpp build reaches more often (INT-04). Nothing was changed in the test yet.
 6. **nelli sets no Z3 global state.** `Z3_global_param_set`, `Z3_toggle_warning_messages`, `Z3_open_log`, `Z3_enable_trace` and `Z3_reset_memory` are called nowhere in `src/nelli`; `setGlobalParam` appears only in a comment (`runtime.nim:14165`). Every solver gets `random_seed = 0` and `rlimit`; no tactic configuration is set. Contexts are `Z3_mk_context_rc` with nim-z3's no-op error handler.
 
-### Hypotheses, with the evidence
+### The mechanism (second round, 2026-11-07, base `f560f280`)
 
-- **Rejected: heap layout / malloc arenas.** Mode 9 (twelve address shifts, no change) and probe 1's `sameThread` row (malloc perturbation on the solving thread, no change). Z3's nonlinear search on this query is not pointer-ordered. The first-solve 36 units is initialisation, not addresses.
-- **Rejected: Z3 global params, nelli-set.** Fact 6.
-- **Rejected: the `mk_unique` failure or the 3000 constants as the trigger.** Modes 3, 5, 8.
-- **Open, leading: Z3 process-wide state reached by nelli's per-thread setup across several threads.** The nelli path's first use on a thread builds per-thread probe contexts (`probeContext()` in `ensureIntDivDeclKinds`, `theoryFreeSimple`, the `seqCapKinds` probes) that live for the thread; probe 1 created four such threads, then the malloc-only thread, and the fifth nelli thread moved. Candidates inside Z3 that are process-wide and fed by allocation or by live contexts: the `memory` module's allocation counters and high-watermark checks (`memory::get_allocation_size`, `above_high_watermark`), which some heuristics read; the global `rational`/`mpq` manager; `symbol` table growth. The varying-per-call figure (14.8M-19.7M) is the strongest clue: something read during the search that is not a function of the query, such as a memory statistic or a timer.
-- **Open: translation.** The nelli path differs from the pure one only by `translate` into the own context (one `ast_translation` over `queryTermOrder`'s vector) and `querySolver`'s params; the moved pure query (876k, one fixed number) and the moved nelli path (14-19M, varying) differ in kind, so the translation step, not just Z3, is involved in the larger figure.
+Probe `s8cj/probe_s8cj_hist.nim` (one compile; the binary re-executes
+itself once per mode, so every mode is a fresh process) prints, at every
+measurement, the units, Z3's process-wide allocation counter
+(`Z3_get_estimated_alloc_size`, looked up with `dynlib` since nim-z3 does
+not bind it) and the raw addresses of `x` and `y`. Logs:
+`s8cj/hist-{c,cpp}-z3-5.1.log`, `s8cj/hist-c-z3-4.13.4.log`. "pure" is
+`solveQ` (Z3's own term order), "own" the own-context order (`scratchQ`,
+or `translateQ`, which is `queryTermOrder` + `translate` + `querySolver`
+with no nelli per-thread setup and gives the same figure minus the 71
+units of the second, UNSAT, solve).
 
-### Next experiments, in order
+| Mode | What | Result (Z3 5.1, c) |
+|---|---|---|
+| 15 | six fresh threads, pure then own, nothing else | counter +17.3 MB per thread (each exited thread leaks its last `newContext()` through nim-z3's `currentZ3Ctx` threadvar); own moves at thread 4 (86.7 MB: 5,855,052), pure at thread 5 (104 MB: 876,228 then 876,223); main moves too |
+| 15r | mode 15 with `setCurrentContext(nil)` before each thread exits | counter stays at 17.5-17.9 MB; **nothing moves** across six threads (72,053 / 72,124 every time) |
+| 15p | six fresh threads, pure only | same as 15: the nelli path is not needed |
+| 16 | probe 1 without the nelli path | malloc-only thread: counter unchanged, nothing moves; z3Work: +18.7 MB to 106 MB, pure moves to 876,223 for the rest of the process |
+| 17 | **main thread only**, 1/2/4/8/16/32/64 live contexts | 1-2 live (34-52 MB): pure 72,053 (not the first-solve 72,089), own 72,124; 4 live (86 MB): own 5,856,872; 8-64 live (155 MB-1.1 GB): pure 876,223, own 5,854,994; **after freeing them (17.4 MB): 72,089 / 72,124 again** |
+| 18a | `translateQ` on six threads | follows the own figure (5,854,923) |
+| 18b | `querySolver` in the build context, no translation | follows the pure figure (876,223) |
+| 19 | main thread, `free(malloc(1/4/32 MB))` | nothing (not Z3's allocations, not counted) |
+| 20 | mode 15 under `mallopt(M_ARENA_MAX, 1)` | same as 15 |
+| 21 | mode 15 with `M_MMAP_THRESHOLD` fixed | same as 15 |
 
-1. **Mode 15:** probe 1 without the malloc-only thread and without z3Work: six fresh threads each running pure Z3 then the nelli path. Does the nelli path move by thread repetition alone? (Isolates "several threads' per-thread setup" from "malloc thread".)
-2. **Mode 16:** probe 1 without the nelli path (pure Z3 on threads, then the malloc-only thread, then z3Work). Does the pure 876k move need the nelli path to have run?
-3. With the minimal trigger known, bisect the nelli path: (a) `ownContextSolver` with `translate` but `newSolver` params only; (b) `querySolver` in the walk context with no translation; (c) `probeContext()` alone on N threads, then the pure query. Expose `Z3_get_estimated_alloc_size` in nim-z3 (not in `ffi.nim` today) and print it at each step: if the move tracks the counter, it is the memory-accounting hypothesis.
-4. Run the trigger under `MALLOC_ARENA_MAX=1` (`mallopt(M_ARENA_MAX, 1)` is already in `probe_s8cj_spend.nim` under `-d:s8cjArena1`) and on cpp, then on Z3 4.13.4 (`-i z3-4.13.4`), since S8by reports 4.13.4 moving alike (26,695 to 911,593).
-5. Only then the fix: if the moved state is a Z3 statistic or counter, the design choice is between a fresh *process*-equivalent reset (`Z3_reset_memory` is only legal with no live contexts, so not in a walk) and accepting history-dependence with budgets set at a multiple of the moved figure; `s8by_remainder:189` then pins what is invariant, which the matrix says is: outcome under a bound above both figures, and spend equality between two fresh threads *in the same process state* (modes 1-14), never across a state move. INT-43's 1.66× between Z3 builds is a separate axis (same query, different build) and is not explained by anything here.
+`x < y` in every row: the addresses never mattered. Z3 4.13.4 (c) is the
+same picture with its own figures: pure 26,653 (17 MB) / 26,622 (34-87 MB)
+/ 24,968-23,883 (104 MB and above); own 26,693 / 913,469-930,289 (86 MB) /
+911,591 (104 MB and above); mode 17 restores 26,653 / 26,693 on freeing.
+S8by's "23,956 and 911,593 on 4.13.4" are these two regimes. cpp (Z3 5.1)
+is identical to c, with thread 4 of mode 15 giving the own figure
+19,683,525: the varying 14.8M-19.7M of probe 1.
+
+**Where Z3 reads it (source, 5.1.0 tag).** The counter is
+`memory::get_allocation_size()`; the tactic layer exposes it as the
+`memory` probe (`tactic/probe.cpp`, megabytes), and the `max_memory`
+parameter of a tactic is checked against it. nelli's solvers are
+`Z3_mk_solver`, the strategic solver, which runs the tactic for the goal's
+detected logic on the first check. For this query that is `mk_qfnia_tactic`
+(`tactic/smtlogics/qfnia_tactic.cpp`):
+
+- the preamble's `cofactor_term_ite` runs under `max_memory = 20` MB inside
+  `skip_if_failed`: above 20 MB it is skipped. That is the 72,089 against
+  72,053 regime (and S8by's "72,162 against 72,126"): the "one-time
+  initialisation effect" of the first round was the process crossing 20 MB
+  with its second context;
+- the first branch of the `or_else`, `mk_qfnia_sat_solver` (`nla2bv`, then
+  bit-blasting and a SAT solver under `max_memory = 100` MB, `max_conflicts
+  = 500`), fails above 100 MB and the portfolio falls to `try_for(smt, 2000
+  ms)`, then `try_for(nlsat, 3000 ms)`, then `smt` unbounded. That is the
+  876k / 5.85M regime: the smt core's nonlinear search instead of the
+  bit-blasted one, in either term order. Between about 86 and 100 MB the
+  SAT stage starts and fails mid-run when its own allocations cross the
+  line, at a point that depends on the exact count: hence the own order
+  moving earlier than the pure one (its two contexts allocate more) and the
+  varying figures (5,855,052 / 5,856,872 / 19,683,525) at the boundary;
+- the portfolio also has **wall-clock** stages (`try_for` 2000 and 3000
+  ms), so on a slow enough machine the unit count is not even a function of
+  (query, process memory).
+
+`mk_qfnra_tactic` chooses its whole sub-solver by the same probe (30 / 80 /
+300 / 600 MB), `mk_qfbv_tactic` gates a simplification at 300 MB, and
+`qflia`'s preamble has the same 20 MB `cofactor_term_ite`; nelli's BV64
+lowering (`isOptimised`) and plain Int queries go through those. In any
+process of real size (a walk's context alone is far above 100 MB) the
+portfolio's bit-blasting stage never runs, and what the small test
+processes measure is a different strategy from what a run uses.
+
+### Conclusions
+
+1. **Trigger:** the process's Z3 allocation count at the moment of the
+   solve, read by the default solver's tactic strategy. Not threads, not
+   addresses, not malloc arenas or mmap thresholds, not the VERIFY failure,
+   not nelli's per-thread setup, not translation. Deterministic and
+   reversible (mode 17).
+2. **Not nelli-controllable in substance**: the count is every live Z3
+   context in the process, nelli's and anyone else's (a consumer's own
+   solvers, other threads), and the strategy's wall-clock stages are Z3's.
+   The alternative, a solver built from an explicit tactic (`smt`, or
+   `Z3_mk_simple_solver`), would make the spend memory-independent at the
+   price of losing the portfolio's bit-blasting stage, which is what decides
+   factoring queries in 72k rather than 876k-5.85M units, and of a walker
+   version bump for every budget-sensitive verdict; S8r already runs the
+   theory-free checks on the simple solver where 4.13.4 needs it. Not taken
+   here; recorded under PRC-32 as the design alternative.
+3. **Nelli-controllable in part, and fixed:** what grew the count in the
+   tests and in any consumer with short-lived threads is a run's context
+   outliving the run. `resetSymexRunState` makes the walk's context the
+   thread's current one and nothing restored the previous one, so the
+   context lived until the thread's next run or for ever on an exited
+   thread (17 MB empty, plus the walk). `runSymex` now restores the
+   previous current context after `runSymexCaught` returns and
+   `runConcolicCollectImpl` restores it on every exit (`defer`, which
+   CR-13's goto-exception caveat does not reach: neither entry has a
+   nested `try`). Pinned by `tests/tsymex_0016_s8cj_runctx.nim` (RED on
+   `f560f280`: the context stayed current; GREEN after).
+4. **The invariant `s8by_remainder:189` can defend:** the outcome under a
+   bound above both figures is the query's; the spend is equal between two
+   fresh threads in the same process state. The test's threads now release
+   their contexts before exiting (`setCurrentContext(nil)`, as mode 15r),
+   so every comparison runs at one count and `check r.units == base.units`
+   is exact rather than lucky. The header's items (1) and (3), and the doc
+   comments of `queryTermOrder`, `ownContextSolver` and
+   `concreteScratchCheck`, now say "the query and the process's Z3 memory"
+   where they said "the query alone".
+5. **Verdict trust is unchanged:** every outcome in every row was `zsSat`
+   / `some(true)`; an rlimit cut is a cap (`zsUnknown` → `none(bool)` /
+   decline), never a flipped verdict. What moves is precision under a
+   budget, which already has one process-external axis (INT-43: the Z3
+   build) and now has two more (process memory, and wall clock on a slow
+   machine). A budget that is a multiple of the moved figure is the only
+   budget that means the same thing in a test process and in a run.
 
 ## Item 2: Z3 5.1's `mk_unique` check (UPS-02, PND-10)
 
@@ -201,8 +299,73 @@ caught and the search continued inside Z3) has one candidate site, grobner's
 after the message is not trusted because it is never a verdict; it is
 `unknown`. This is a reading, not yet a test.
 
+
+### Second round: the matrix (`s8cj/probe_s8cj_ups02b.nim`)
+
+Solver params take the smt solver's names unprefixed (`arith.nl.nra`,
+not `smt.arith.nl.nra`; `nlsat.*` is not a solver param at all and is
+reachable only through `Z3_global_param_set`). `three` is the three-
+assertion reduction; `prime` its UNSAT twin (16777213); `bounded-200k`
+adds `p, q < 200000` (S8by's shape). Logs `s8cj/ups02b-*.log`.
+
+| Variant (rlimit 50M unless noted) | Z3 5.1 (c) | Z3 4.13.4 (c) |
+|---|---|---|
+| full (with `p < x`) | VERIFY; `unknown (canceled)` 50,000,027, 30.7 s | `sat` 2,438,387, 1.5 s |
+| three | VERIFY; `unknown (canceled)` 50,000,020, 27.8 s | `sat` 2,175,259, 1.4 s |
+| three, rlimit 5M | VERIFY; `unknown (canceled)` 5,000,020, 2.5 s | `sat` 2,175,259 |
+| prime (UNSAT) | VERIFY; `unknown (canceled)` 50,000,020 | `unknown (canceled)` 50,000,020, 24 s |
+| bounded-200k | VERIFY; `unknown (canceled)` 50,000,034 | `sat` 22,300,690, 7.8 s |
+| `arith.nl.nra = false` | VERIFY; `unknown (incomplete (theory arithmetic))` 444,699, 0.14 s | `sat` 2,175,259 |
+| `arith.nl.grobner = false` | VERIFY; `unknown (canceled)` 50,000,020 | `sat` 2,175,259 |
+| **`arith.nl.order = false`** | **three VERIFY messages; `unknown (unreachable)` 741,565, 0.2 s** | `sat` 2,175,259 |
+| `random_seed = 1` | (c run: probe error, string given) cpp run: VERIFY; `unknown (unreachable)` 41,475,772, 12.8 s | `sat` 2,175,259 |
+| global `nlsat.reorder = false` | VERIFY; `unknown (canceled)` 50,000,020 | `sat` 2,179,719 |
+| global `nlsat.simplify_conflicts = false` | VERIFY; `unknown (canceled)` | `sat` 2,180,593 |
+| global `nlsat.factor = false` | VERIFY; `unknown (canceled)` | `sat` 2,173,455 |
+| global `nlsat.seed = 7` | VERIFY; `unknown (canceled)` | `sat` 2,172,712 |
+
+So on 5.1 the failure is in every configuration that reaches nlsat,
+`nlsat.reorder = false` included (the `reorder` site is reached from
+elsewhere too, or the global did not reach the embedded solver); `arith.nl.order = false`
+shows the **not-canceled path**: the VERIFY's exception reaches the API's
+check before the limit is cut and comes back as `unknown` with
+`reason_unknown = "unreachable"` at 741k units, with no `Z3_EXCEPTION`
+raised through nim-z3's `check()` (which does not read the error code
+after `Z3_solver_check`). 4.13.4 decides every SAT variant and prints
+nothing; it decides the UNSAT prime no better than 5.1 (both cut at 50M).
+Decision regression on 5.1 confirmed on every SAT variant. cpp (Z3 5.1,
+`s8cj/ups02b-cpp-z3-5.1.log`) agrees with c row by row.
+
+**PND-10, answered with a test.** Either path gives `unknown`: canceled
+(the message, then the bound) or `unreachable` (the message, then the
+exception). Neither is a verdict, so a verdict "after the message" does not
+exist in one check; nelli maps both to `sxUnknown` (a decline).
+`tests/tsymex_0016_s8cj_mkunique.nim` pins it through `symexFind` on `if p
+> 1 and q > 1 and p * q == 16777207`, under `queryRLimit = 20M`, with fd 2
+captured for the run: (1) never `sxUnsat` (the target is reachable); (2)
+where the message was printed in this process, `sxUnknown`; (3) a `sxSat`
+(4.13.4) carries a witness checked natively.
+
 ## Status of the slice
 
-- No source or test change; no walker version bump. `s8by_remainder:189`
-  unchanged (its invariant is named under "Next experiments" item 5).
-- RFC rows not yet edited: PRC-32, CI-03, UPS-02, PND-10, INT-04, INT-43.
+- Source: `runSymex` and `runConcolicCollectImpl` restore the previous
+  current context (conclusion 3); doc comments of `queryTermOrder`,
+  `ownContextSolver`, `concreteScratchCheck` corrected. No verdict changes,
+  no walker version bump.
+- Tests: `tsymex_rfc0005_s8by_remainder` (threads release their contexts,
+  header corrected), new `tsymex_0016_s8cj_runctx` (RED then GREEN) and
+  `tsymex_0016_s8cj_mkunique` (PND-10), both registered.
+- `docs/rfc/0016-research/UPS-02.md` drafted (not filed).
+- RFC rows PRC-32, CI-03, UPS-02, PND-10, INT-04, INT-43 updated.
+- Not run: the Z3 nightly and the `z3` binary (item 2); every cpp pass of
+  the tests (the coordinator runs cpp in the landing check).
+
+## Test results (c backend, podman)
+
+| Test | Z3 | Result |
+|---|---|---|
+| `tsymex_0016_s8cj_runctx` at `f560f280` (before the source fix) | 5.1 | RED: `Check failed: probe.ctxAfter` (the run's context stayed current), rc=1 |
+| `tsymex_0016_s8cj_runctx` after the fix | 5.1 | GREEN, rc=0 |
+| `tsymex_0016_s8cj_mkunique` | 5.1 | rc=0 (run before the test echoed its observation, so whether the message was printed in that process is not in the log; the matrix says it is, on every 5.1 check of this shape) |
+| `tsymex_0016_s8cj_mkunique` | 4.13.4 | rc=0; `status=sxRaised`, the target query `Z3: canceled` under `queryRLimit = 20M`, no message. The walk's target query is not the bare reduction (nelli's lowering adds the overflow conditions of `p * q`, and the raise path reaches the label first), so (3) did not fire on 4.13.4 either; (1) held |
+| `tsymex_rfc0005_s8by_remainder` with the released contexts | 5.1 | all 12 checks `[OK]`, rc=0 |

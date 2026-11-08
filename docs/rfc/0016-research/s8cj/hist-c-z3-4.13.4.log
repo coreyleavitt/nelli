@@ -1,0 +1,103 @@
+== mode 15 Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x000000000E0FFB20 y=0x000000000E0FFB40 x<y nelli=26693(some(true)) alloc=17434792
+thread #1: z3=26622(zsSat) x=0x00007F6C0D04B880 y=0x00007F6C0D04B8A0 x<y nelli=26693(some(true)) alloc=34732232
+thread #2: z3=26622(zsSat) x=0x00007F6C0D069450 y=0x00007F6C0D069470 x<y nelli=26693(some(true)) alloc=52029848
+thread #3: z3=26622(zsSat) x=0x00007F6C0D08BCE0 y=0x00007F6C0D08BD00 x<y nelli=26693(some(true)) alloc=69327608
+thread #4: z3=26622(zsSat) x=0x00007F6C0D125E00 y=0x00007F6C0D125E20 x<y nelli=913469(some(true)) alloc=86624872
+thread #5: z3=24968(zsSat) x=0x00007F6C0D09AEA0 y=0x00007F6C0D09AEC0 x<y nelli=911591(some(true)) alloc=103922648
+thread #6: z3=23883(zsSat) x=0x00007F6C0C883990 y=0x00007F6C0C8839B0 x<y nelli=911591(some(true)) alloc=121220232
+main after: z3=23883(zsSat) x=0x000000000E10CA40 y=0x000000000E10CA60 x<y nelli=911591(some(true)) alloc=121220264
+== mode 15 rc=0
+== mode 15r Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x0000000033493B20 y=0x0000000033493B40 x<y nelli=26693(some(true)) alloc=17434792
+thread #1: z3=26622(zsSat) x=0x00007F63D904B880 y=0x00007F63D904B8A0 x<y nelli=26693(some(true)) alloc=17505912
+thread #2: z3=26622(zsSat) x=0x00007F63D904B8A0 y=0x00007F63D904B8C0 x<y nelli=26693(some(true)) alloc=17577032
+thread #3: z3=26622(zsSat) x=0x00007F63D904B8C0 y=0x00007F63D904B8E0 x<y nelli=26693(some(true)) alloc=17648152
+thread #4: z3=26622(zsSat) x=0x00007F63D904B8B0 y=0x00007F63D904B8D0 x<y nelli=26693(some(true)) alloc=17719272
+thread #5: z3=26622(zsSat) x=0x00007F63D904B8B0 y=0x00007F63D904B8D0 x<y nelli=26693(some(true)) alloc=17790392
+thread #6: z3=26622(zsSat) x=0x00007F63D904B8C0 y=0x00007F63D904B8E0 x<y nelli=26693(some(true)) alloc=17861512
+main after: z3=26653(zsSat) x=0x00000000334A0A40 y=0x00000000334A0A60 x<y nelli=26693(some(true)) alloc=17861720
+== mode 15r rc=0
+== mode 15p Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x000000001BB6EB20 y=0x000000001BB6EB40 x<y alloc=17631344
+thread #1: z3=26622(zsSat) x=0x00007F136904B880 y=0x00007F136904B8A0 x<y alloc=35117448
+thread #2: z3=26622(zsSat) x=0x00007F13691798A0 y=0x00007F13691798C0 x<y alloc=52603744
+thread #3: z3=26622(zsSat) x=0x00007F136906E530 y=0x00007F136906E550 x<y alloc=70090056
+thread #4: z3=26622(zsSat) x=0x00007F1368062EF0 y=0x00007F1368062F10 x<y alloc=87576320
+thread #5: z3=23883(zsSat) x=0x00007F13680765F0 y=0x00007F1368076610 x<y alloc=104932472
+thread #6: z3=23883(zsSat) x=0x00007F13681674C0 y=0x00007F13681674E0 x<y alloc=122288608
+main after: z3=23883(zsSat) x=0x000000001BB9DFF0 y=0x000000001BB9E010 x<y nelli=911591(some(true)) alloc=122092056
+== mode 15p rc=0
+== mode 16 Z3 4.13.4.0 alloc=0
+main #1: z3=26653(zsSat) x=0x000000001C6B0B20 y=0x000000001C6B0B40 x<y alloc=17631344
+main #2: z3=26653(zsSat) x=0x000000001C6DFFF0 y=0x000000001C6E0010 x<y alloc=17623664
+thread fresh #1: z3=26622(zsSat) x=0x00007FC12504B880 y=0x00007FC12504B8A0 x<y alloc=35109768
+thread fresh #2: z3=26622(zsSat) x=0x00007FC1251798A0 y=0x00007FC1251798C0 x<y alloc=52596064
+mallocOnly: kept 2062 blocks alloc=52596064
+thread after malloc-only #1: z3=26622(zsSat) x=0x00007FC1250C4530 y=0x00007FC1250C4550 x<y alloc=70082440
+thread after malloc-only #2: z3=26622(zsSat) x=0x00007FC1247160A0 y=0x00007FC1247160C0 x<y alloc=87568880
+main after malloc-only: z3=26622(zsSat) x=0x000000001C6B6C00 y=0x000000001C6B6C20 x<y alloc=87569344
+z3Work: zsSat units=3717165 alloc=115437576
+thread after z3 work #1: z3=23883(zsSat) x=0x00007FC12433E660 y=0x00007FC12433E680 x<y alloc=132149904
+thread after z3 work #2: z3=23883(zsSat) x=0x00007FC125B888A0 y=0x00007FC125B888C0 x<y alloc=149506648
+main after z3 work: z3=23883(zsSat) x=0x000000001C73C640 y=0x000000001C73C660 x<y alloc=149376416
+main last (nelli too): z3=23883(zsSat) x=0x000000001C6B6C00 y=0x000000001C6B6C20 x<y nelli=911591(some(true)) alloc=149317216
+== mode 16 rc=0
+== mode 17 Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x0000000014BF0B20 y=0x0000000014BF0B40 x<y nelli=26693(some(true)) alloc=17434792
+main with 1 live contexts: z3=26622(zsSat) x=0x0000000014D7DE60 y=0x0000000014D7DE80 x<y nelli=26693(some(true)) alloc=34644144
+main with 2 live contexts: z3=26622(zsSat) x=0x0000000014C18060 y=0x0000000014C18080 x<y nelli=26693(some(true)) alloc=51853656
+main with 4 live contexts: z3=26622(zsSat) x=0x0000000014D03FD0 y=0x0000000014D03FF0 x<y nelli=930289(some(true)) alloc=86272488
+main with 8 live contexts: z3=23883(zsSat) x=0x00000000156C45A0 y=0x00000000156C45C0 x<y nelli=911591(some(true)) alloc=155109992
+main with 16 live contexts: z3=23883(zsSat) x=0x00000000157DC800 y=0x00000000157DC820 x<y nelli=911591(some(true)) alloc=292783736
+main with 32 live contexts: z3=23883(zsSat) x=0x00000000159796D0 y=0x00000000159796F0 x<y nelli=911591(some(true)) alloc=568130088
+main with 64 live contexts: z3=23883(zsSat) x=0x0000000057700E10 y=0x0000000057700E30 x<y nelli=911591(some(true)) alloc=1118819656
+main after freeing them: z3=26653(zsSat) x=0x0000000058930D80 y=0x0000000058930DA0 x<y nelli=26693(some(true)) alloc=17435048
+== mode 17 rc=0
+== mode 18a Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x000000001B31CB20 y=0x000000001B31CB40 x<y translate=26622(zsSat) alloc=17347280
+thread #1: z3=26622(zsSat) x=0x00007F385104B880 y=0x00007F385104B8A0 x<y translate=26622(zsSat) alloc=34557336
+thread #2: z3=26622(zsSat) x=0x00007F385108BCE0 y=0x00007F385108BD00 x<y translate=26622(zsSat) alloc=51767568
+thread #3: z3=26622(zsSat) x=0x00007F3851198B10 y=0x00007F3851198B30 x<y translate=26622(zsSat) alloc=68977768
+thread #4: z3=26622(zsSat) x=0x00007F3851115210 y=0x00007F3851115230 x<y translate=930128(zsSat) alloc=86282840
+thread #5: z3=27451(zsSat) x=0x00007F38519E3790 y=0x00007F38519E37B0 x<y translate=911520(zsSat) alloc=103503944
+thread #6: z3=23883(zsSat) x=0x00007F38519E3790 y=0x00007F38519E37B0 x<y translate=911520(zsSat) alloc=120725032
+main after: z3=23883(zsSat) x=0x000000001B3C1610 y=0x000000001B3C1630 x<y translate=911520(zsSat) nelli=911591(some(true)) alloc=120812656
+== mode 18a rc=0
+== mode 18b Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x000000000F56FB20 y=0x000000000F56FB40 x<y inctx=26653(zsSat) alloc=17623712
+thread #1: z3=26622(zsSat) x=0x00007FA67104B880 y=0x00007FA67104B8A0 x<y inctx=26622(zsSat) alloc=35110120
+thread #2: z3=26622(zsSat) x=0x00007FA67104F8A0 y=0x00007FA67104F8C0 x<y inctx=26622(zsSat) alloc=52597064
+thread #3: z3=26622(zsSat) x=0x00007FA671051980 y=0x00007FA6710519A0 x<y inctx=26622(zsSat) alloc=70084136
+thread #4: z3=26622(zsSat) x=0x00007FA6710D8540 y=0x00007FA6710D8560 x<y inctx=26622(zsSat) alloc=87571176
+thread #5: z3=23883(zsSat) x=0x00007FA6710D8540 y=0x00007FA6710D8560 x<y inctx=23883(zsSat) alloc=104928328
+thread #6: z3=23883(zsSat) x=0x00007FA670857980 y=0x00007FA6708579A0 x<y inctx=23883(zsSat) alloc=122285616
+main after: z3=23883(zsSat) x=0x000000000F5F5B50 y=0x000000000F5F5B70 x<y inctx=23883(zsSat) nelli=911591(some(true)) alloc=122096792
+== mode 18b rc=0
+== mode 19 Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x0000000012F72B20 y=0x0000000012F72B40 x<y nelli=26693(some(true)) alloc=17434792
+main after free(malloc(1MB)): z3=26653(zsSat) x=0x0000000012F7FA40 y=0x0000000012F7FA60 x<y nelli=26693(some(true)) alloc=17434792
+main after free(malloc(4MB)): z3=26653(zsSat) x=0x0000000012F7FA40 y=0x0000000012F7FA60 x<y nelli=26693(some(true)) alloc=17434952
+main after free(malloc(32MB)): z3=26653(zsSat) x=0x0000000012F78C20 y=0x0000000012F78C40 x<y nelli=26693(some(true)) alloc=17434856
+== mode 19 rc=0
+== mode 20 Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x0000000024024B20 y=0x0000000024024B40 x<y nelli=26693(some(true)) alloc=17434792
+thread #1: z3=26622(zsSat) x=0x0000000024031A40 y=0x0000000024031A60 x<y nelli=26693(some(true)) alloc=34732664
+thread #2: z3=26622(zsSat) x=0x00000000240653D0 y=0x00000000240653F0 x<y nelli=26693(some(true)) alloc=52030328
+thread #3: z3=26622(zsSat) x=0x000000002402AC20 y=0x000000002402AC40 x<y nelli=26693(some(true)) alloc=69327976
+thread #4: z3=26622(zsSat) x=0x000000002406AF70 y=0x000000002406AF90 x<y nelli=913469(some(true)) alloc=86625432
+thread #5: z3=24968(zsSat) x=0x00000000241B5BF0 y=0x00000000241B5C10 x<y nelli=911591(some(true)) alloc=103923272
+thread #6: z3=23883(zsSat) x=0x0000000024038B00 y=0x0000000024038B20 x<y nelli=911591(some(true)) alloc=121221144
+main after: z3=23883(zsSat) x=0x0000000024038B00 y=0x0000000024038B20 x<y nelli=911591(some(true)) alloc=121221144
+== mode 20 rc=0
+== mode 21 Z3 4.13.4.0 alloc=0
+main: z3=26653(zsSat) x=0x00000000112A1B20 y=0x00000000112A1B40 x<y nelli=26693(some(true)) alloc=17442936
+thread #1: z3=26622(zsSat) x=0x00007F9BDC00B860 y=0x00007F9BDC00B880 x<y nelli=26693(some(true)) alloc=34748568
+thread #2: z3=26622(zsSat) x=0x00007F9BDC04BCC0 y=0x00007F9BDC04BCE0 x<y nelli=26693(some(true)) alloc=52054392
+thread #3: z3=26622(zsSat) x=0x00007F9BDC18EB30 y=0x00007F9BDC18EB50 x<y nelli=26693(some(true)) alloc=69360216
+thread #4: z3=26622(zsSat) x=0x00007F9BDC0E5DE0 y=0x00007F9BDC0E5E00 x<y nelli=912676(some(true)) alloc=86665992
+thread #5: z3=24131(zsSat) x=0x00007F9BDC0E5DE0 y=0x00007F9BDC0E5E00 x<y nelli=911591(some(true)) alloc=103972008
+thread #6: z3=23883(zsSat) x=0x00007F9BDC14E190 y=0x00007F9BDC14E1B0 x<y nelli=911591(some(true)) alloc=121278024
+main after: z3=23883(zsSat) x=0x00000000112AEA40 y=0x00000000112AEA60 x<y nelli=911591(some(true)) alloc=121277944
+== mode 21 rc=0
+rc=0

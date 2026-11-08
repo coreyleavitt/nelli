@@ -1,0 +1,30 @@
+Z3 4.13.4.0
+--- begin full/50M
+--- end full/50M: zsSat units=2438387 wall=1465ms
+--- begin three/50M
+--- end three/50M: zsSat units=2175259 wall=1375ms
+--- begin three/5M
+--- end three/5M: zsSat units=2175259 wall=1379ms
+--- begin prime/50M
+--- end prime/50M: zsUnknown (canceled) units=50000020 wall=24149ms
+--- begin bounded-200k/50M
+--- end bounded-200k/50M: zsSat units=22300690 wall=7785ms
+--- begin three/50M/arith.nl.nra=false
+--- end three/50M/arith.nl.nra=false: zsSat units=2175259 wall=1832ms
+--- begin three/50M/arith.nl.grobner=false
+--- end three/50M/arith.nl.grobner=false: zsSat units=2175259 wall=1715ms
+--- begin three/50M/arith.nl.order=false
+--- end three/50M/arith.nl.order=false: zsSat units=2175259 wall=1776ms
+--- begin three/50M/random_seed=1
+--- end three/50M/random_seed=1: zsSat units=2175259 wall=1756ms
+--- begin three/50M/global nlsat.reorder=false
+--- end three/50M/global nlsat.reorder=false: zsSat units=2179719 wall=1694ms
+--- begin three/50M/global nlsat.simplify_conflicts=false
+--- end three/50M/global nlsat.simplify_conflicts=false: zsSat units=2180593 wall=1986ms
+--- begin three/50M/global nlsat.factor=false
+--- end three/50M/global nlsat.factor=false: zsSat units=2173455 wall=1975ms
+--- begin three/50M/global nlsat.seed=7
+--- end three/50M/global nlsat.seed=7: zsSat units=2172712 wall=1836ms
+--- begin three/50M again (globals reset)
+--- end three/50M again (globals reset): zsSat units=2175259 wall=1933ms
+rc=0

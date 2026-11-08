@@ -1753,6 +1753,10 @@ task test, "Run the test suite":
             "tsymex_0016_wa_runtime_panics",
             # RFC-0016 CR-A: a generic exception type declines rather than being identified by its last type argument.
             "tsymex_0016_cr_generic_exn",
+            # RFC-0016 S8cj: a run's Z3 context does not outlive the run (PRC-32, CI-03);
+            # a verdict after Z3 5.1's mk_unique message is never a trusted sat/unsat (UPS-02, PND-10).
+            "tsymex_0016_s8cj_runctx",
+            "tsymex_0016_s8cj_mkunique",
             "tsymex_0016_wa_undefined_e2e",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach

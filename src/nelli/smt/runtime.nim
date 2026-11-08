@@ -14195,8 +14195,12 @@ proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
   ## RFC-0005 S8by. Every term of `roots`, each once, children before
   ## parents: the roots in order, each term's arguments last to first.
   ## `ownContextSolver` makes a query's terms in its context in this
-  ## order. Z3's units on a query were a function of the query alone
-  ## since S8bp, but not the wall time a unit costs: the search a unit
+  ## order. Z3's units on a query were a function of the query and of the
+  ## process's Z3 memory since S8bp (RFC-0016 S8cj: the default solver's
+  ## strategy reads `memory::get_allocation_size()` as its `memory` probe,
+  ## so a query costs 72k units in a small process and 876k in one holding
+  ## 100 MB of contexts; nothing the context holds, only how much the
+  ## process does), but not the wall time a unit costs: the search a unit
   ## pays for follows the context's term ids (`r4_strip`'s budget-out step
   ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
   ## walk's, S8bp). The order moves the search, so units as well as wall
@@ -14231,7 +14235,8 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   ## RFC-0005 S8by: the query's terms are made in the new context in one
   ## order, a function of the query alone (`queryTermOrder`), and so are
   ## their ids, which Z3's search reads. Its units were already the
-  ## query's (S8bp); the wall time a unit costs follows the order too.
+  ## query's and the process's Z3 memory's (S8bp; RFC-0016 S8cj); the
+  ## wall time a unit costs follows the order too.
   let prev = currentContext()
   let own = newContext()
   setCurrentContext(prev)
@@ -20056,7 +20061,11 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   ## the other way round (Z3 5.1; 23,956 and 911,593 on 4.13.4), and under
   ## a bound between them it was decided in the first and not in the second
   ## (`tsymex_rfc0005_s8by_remainder`). Now what the context holds moves
-  ## neither its spend nor whether it decides within its bound.
+  ## neither its spend nor whether it decides within its bound. RFC-0016
+  ## S8cj: the process's Z3 memory still does (Z3's QF_NIA portfolio skips
+  ## its bit-blasting stage above 100 MB: 72k against 876k / 5.85M units
+  ## on this query), so the spend is the query's AND the process's; what a
+  ## bound above both figures decides is the query's alone.
   ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
 
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
@@ -28859,7 +28868,20 @@ proc runSymex*(prog: SymexProgram,
     result.annotationViolations = prog.annotationViolations
     result.bounds = settings.budget
     return
+  # RFC-0016 S8cj: the run's context must not outlive the run.
+  # `resetSymexRunState` makes it the thread's current context (nim-z3's
+  # threadvar holds a reference), and nothing put the previous one back, so
+  # it lived until the thread's next run, or for ever on a thread that
+  # exits. Z3's process-wide allocation count is an input to its default
+  # solver's strategy (the `memory` probe: the QF_NIA portfolio skips its
+  # bit-blasting stage above 100 MB), so every leaked run moved every later
+  # query's spend on every thread (`tsymex_0016_s8cj_runctx`,
+  # `docs/rfc/0016-research/S8cj.md`). Restored here, after `runSymexCaught`
+  # has returned on every path it catches; `runSymexImpl` cannot do it in a
+  # `finally` (CR-13's goto-exception caveat).
+  let prevCtx = currentContext()
   result = runSymexCaught(prog, target, settings)
+  setCurrentContext(prevCtx)
   # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
   # (the C backend loses a raise unwinding through the walk) has no verdict.
   if z3ApiErrorCount > 0:
@@ -30143,6 +30165,11 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     result.parseErrors = @[hostRefusedError(hostRefusal.get)]
     result.annotationViolations = prog.annotationViolations
     return
+  # RFC-0016 S8cj: restore the thread's current context on every exit, as
+  # `runSymex` does (this entry has no nested `try`, so CR-13's caveat about
+  # a `finally` on the raise path does not apply).
+  let prevCtx = currentContext()
+  defer: setCurrentContext(prevCtx)
   let ctx = resetSymexRunState(settings)
   var counters: ConcolicYieldCounters
   let cappedLen = min(trace.len, maxDraws)

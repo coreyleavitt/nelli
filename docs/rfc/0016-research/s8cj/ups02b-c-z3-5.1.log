@@ -1,0 +1,114 @@
+Z3 5.1.0.0
+--- begin full/50M
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end full/50M: zsUnknown (canceled) units=50000027 wall=30738ms
+--- begin three/50M
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M: zsUnknown (canceled) units=50000020 wall=27790ms
+--- begin three/5M
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/5M: zsUnknown (canceled) units=5000020 wall=2512ms
+--- begin prime/50M
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end prime/50M: zsUnknown (canceled) units=50000020 wall=27518ms
+--- begin bounded-200k/50M
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end bounded-200k/50M: zsUnknown (canceled) units=50000034 wall=26034ms
+--- begin three/50M/arith.nl.nra=false
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M/arith.nl.nra=false: zsUnknown (smt tactic failed to show goal to be sat/unsat (incomplete (theory arithmetic))) units=444699 wall=142ms
+--- begin three/50M/arith.nl.grobner=false
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M/arith.nl.grobner=false: zsUnknown (canceled) units=50000020 wall=25292ms
+--- begin three/50M/arith.nl.order=false
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M/arith.nl.order=false: zsUnknown (unreachable) units=741565 wall=202ms
+--- begin three/50M/random_seed=1
+--- end three/50M/random_seed=1: EXCEPTION Z3OperationError: Z3 Z3_EXCEPTION: Parameter random_seed was given argument of type symbol, expected unsigned int wall=5ms
+--- begin three/50M/global nlsat.reorder=false
+--- end three/50M/global nlsat.reorder=false: zsUnknown (canceled) units=50000020 wall=20331ms
+--- begin three/50M/global nlsat.simplify_conflicts=false
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M/global nlsat.simplify_conflicts=false: zsUnknown (canceled) units=50000020 wall=28894ms
+--- begin three/50M/global nlsat.factor=false
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M/global nlsat.factor=false: zsUnknown (canceled) units=50000020 wall=24618ms
+--- begin three/50M/global nlsat.seed=7
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M/global nlsat.seed=7: zsUnknown (canceled) units=50000020 wall=27796ms
+--- begin three/50M again (globals reset)
+ASSERTION VIOLATION
+File: /home/abuild/rpmbuild/BUILD/z3-5.1.0-build/z3-z3-5.1.0/src/nlsat/nlsat_solver.cpp
+Line: 3178
+Failed to verify: m_cache.mk_unique(p) == p
+5.1.0.0
+Please file an issue with this message and more detail about how you encountered it at https://github.com/Z3Prover/z3/issues/new
+--- end three/50M again (globals reset): zsUnknown (canceled) units=50000020 wall=24863ms
+rc=0

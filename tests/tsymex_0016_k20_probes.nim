@@ -253,9 +253,20 @@ suite "RFC-0016 K2-0: crashes and faults (CRH-06, INT-11, W-19b)":
     check "hit" in nativeRun(thrSut(1)).hits
     let r = symexFind(thrSut, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
-    check r.faulted("ptrPointeeTy")
-    skipCell(cellKey(axConstruct, "threads/createThread"),
-             "K2-0 W-19b reproduces: weInternalWalkerFault (ptrPointeeTy), sxUnknown")
+    when defined(windows):
+      # RFC-0016 INT-47. `createThread` is the stdlib's Win32 body here
+      # (`t.sys = createThread(...)` on a `Thread[int]`), not the pthread one
+      # whose `ptr` the walker faults on. The walker meets the body's first
+      # unsupported statements and declines by name: still no verdict.
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedStmtKind)
+      check not r.errors.named(weInternalWalkerFault)
+      skipCell(cellKey(axConstruct, "threads/createThread"),
+               "K2-0 W-19b reproduces on Windows: feUnsupportedStmtKind (the Win32 body), sxUnknown")
+    else:
+      check r.faulted("ptrPointeeTy")
+      skipCell(cellKey(axConstruct, "threads/createThread"),
+               "K2-0 W-19b reproduces: weInternalWalkerFault (ptrPointeeTy), sxUnknown")
 
   when defined(posix):
     test "W-19b: a signal handler writing a global declines (not a fault)":

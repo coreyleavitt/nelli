@@ -326,6 +326,19 @@ suite "RFC-0016 K1a-cells: the universe is derived":
     check c.len == 1
     check c[0].detail == $classOf(feUnadmitted)
 
+  test "INT-47: the checkout is LF on every platform":
+    # This file compares the committed ledger and the RFC's tables with text it
+    # renders byte for byte, and edits them with `\n`-terminated patterns. A
+    # Windows checkout with `core.autocrlf` turns the files into CRLF and every
+    # such comparison fails, so the repository pins the line ending itself.
+    let attrs = if fileExists(root / ".gitattributes"):
+                  readFile(root / ".gitattributes") else: ""
+    check attrs.splitLines.anyIt(
+      it.strip.splitWhitespace.len >= 3 and it.strip.startsWith("* ") and
+      "text=auto" in it and "eol=lf" in it)
+    # and what this build read is LF
+    check '\r' notin readFile(ledgerPath)
+
   test "the committed ledger equals the derived one":
     createDir(derivedPath.parentDir)
     let derived = ledgerText(universe)

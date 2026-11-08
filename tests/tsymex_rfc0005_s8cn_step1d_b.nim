@@ -28,11 +28,7 @@ when not defined(symexQueryStats):
 
 const smallCap = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
 
-template nativeHits(call: untyped): untyped =
-  block:
-    symexCaptureBegin()
-    call
-    symexCaptureEnd()
+from ./s8cu_helpers import nativeHits
 
 proc stepStatus(name: string): string =
   ## The last answer step `name` gave in the walk just run, or "".

@@ -18,7 +18,8 @@ import std/[options, times, monotimes, os, strutils, sets, tables, algorithm]
 import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db, ./bandit,
        ./learnedstate, ./crashinfo, ./bootstrapbreaker, ./fuzzcheckpoint, ./fuzzcorpus,
        ./fuzzoperator, ./fuzzcrash
-import ./smt/concolictaxonomy
+import ./smt/concolictaxonomy, ./smt/soundness
+export soundness
 export fuzzir
 export bandit
 # `BootstrapBreaker` (R29a) and the concolic yield taxonomy (R28/R29b) are
@@ -581,6 +582,15 @@ type
       ## at least one iteration — the direct, campaign-level observable for
       ## "stacking happened" that a caller/test can check without needing
       ## per-iteration introspection.
+    annotationViolations*: seq[AnnotationViolation]
+      ## RFC-0016 K8-0 (INT-33). False user-annotation claims
+      ## (`{.symexTransparent.}` on a call whose result is used or whose
+      ## argument is not inert) the concolic assist found in the property,
+      ## one per distinct site. Empty without an assist. A defect in the
+      ## annotated code, not a crash: verdict-neutral, never in `irCrashes`.
+      ## They are parse-time facts, so they appear once the bridge has run
+      ## once (it runs when the frontier stalls). RFC-0016 K8a reads this as
+      ## its second findings source.
     stats*: CampaignStats
       ## RFC-fuzzer-nextgen S5 (a+b): the read-only campaign observability
       ## surface — see `CampaignStats`'s own doc for the full field list and
@@ -1178,6 +1188,13 @@ type
       ## `ConcolicBridgeResult.flip` in here via `foldFlipResult`, and every
       ## admission decision via `recordAdmitOutcome`, at those same two call
       ## sites. Read back via `concolicYield*` for `CampaignStats.concolicYield`.
+    annotationViolations: seq[AnnotationViolation]
+      ## RFC-0016 K8-0 (INT-33). Every distinct false-annotation claim any
+      ## `concolicBridge` call reported (`ConcolicFlipResult.annotationViolations`),
+      ## de-duplicated on `(pragma, kind, callee, site)`: the walker re-parses
+      ## the property on every flip, so the same site is reported once per
+      ## attempt. Read back via `annotationViolations*` for
+      ## `FuzzReport.annotationViolations`.
     concolicBridge: ConcolicBridgeEntry
       ## RFC-fuzzer-nextgen G3: the call-site concolic bridge (see
       ## `ConcolicBridgeEntry`'s doc) — `nil` (the default) makes
@@ -1453,6 +1470,23 @@ proc concolicYield*[T](o: Orchestrator[T]): ConcolicYield =
   ## RFC-fuzzer-nextgen S5b/R28: the campaign-cumulative concolic-yield
   ## tally — see `Orchestrator.concolicYield`'s doc.
   o.concolicYield
+
+proc annotationViolations*[T](o: Orchestrator[T]): seq[AnnotationViolation] =
+  ## RFC-0016 K8-0: the de-duplicated annotation violations the concolic
+  ## bridge reported over this orchestrator's lifetime, in first-seen order.
+  o.annotationViolations
+
+proc recordAnnotationViolations[T](o: Orchestrator[T];
+                                   found: seq[AnnotationViolation]) =
+  ## RFC-0016 K8-0: fold one flip's violations into the campaign set.
+  for av in found:
+    var seen = false
+    for have in o.annotationViolations:
+      if have.pragma == av.pragma and have.kind == av.kind and
+         have.callee == av.callee and have.site == av.site:
+        seen = true
+        break
+    if not seen: o.annotationViolations.add av
 
 proc recordSpawnOutcome[T](o: Orchestrator[T]; obs: Observation[T];
                            firstSubmitSinceSpawn: bool) =
@@ -1807,6 +1841,7 @@ proc tryConcolicBridge*[T](o: Orchestrator[T]; trace: ChoiceSeq
     # `CampaignStats.concolicYield` answers "how is the solver doing"
     # independent of admission outcome.
     foldFlipResult(o.concolicYield, bridged.flip, bridged.construct)
+    recordAnnotationViolations(o, bridged.flip.annotationViolations)
     if bridged.flip.outcome notin {cfoSolvedExact, cfoSolvedOptimistic} or
        bridged.flip.materialized.len == 0: continue
     let obs = o.run(bridged.flip.materialized)
@@ -2521,6 +2556,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # surface, once, from state this loop/orchestrator already tracked above —
   # see `CampaignStats`'s doc for the full per-field sourcing.
   let elapsedDur = getMonoTime() - started
+  result.annotationViolations = orchestrator.annotationViolations
   result.stats = CampaignStats(
     execs: iter,
     elapsed: elapsedDur,

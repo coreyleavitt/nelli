@@ -30722,6 +30722,7 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   ## decision encountered along the concrete replay.
   let collected = runConcolicCollectImpl(prog, trace, bindings, settings, maxDraws)
   result.collectCounters = collected.counters
+  result.annotationViolations = collected.annotationViolations   # RFC-0016 K8-0
 
   template finish(o: ConcolicFlipOutcome, c: ConcolicCoverageOutcome) =
     result.outcome = o

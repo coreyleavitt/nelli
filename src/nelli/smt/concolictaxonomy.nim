@@ -34,6 +34,7 @@
 
 import std/[tables, strutils]
 import ../choice
+import ./soundness
 
 type
   WalkerConstructKind* = enum
@@ -269,6 +270,14 @@ type
     materialized*:    seq[ChoiceNode]
       ## Empty unless `outcome in {cfoSolvedExact, cfoSolvedOptimistic}`.
     collectCounters*: ConcolicYieldCounters   ## From the initial (G1b) collection pass.
+    annotationViolations*: seq[AnnotationViolation]
+      ## RFC-0016 K8-0 (INT-33's reader). The false user-annotation claims
+      ## the initial collection pass found at parse time, copied from
+      ## `ConcolicCollectResult.annotationViolations` on every outcome (they
+      ## are facts about the property, independent of whether the flip
+      ## solved). The fuzzer's `Orchestrator` accumulates them, de-duplicated,
+      ## onto `FuzzReport.annotationViolations`. Verdict-neutral, so it is not
+      ## folded into the yield counters.
     flipCounters*:    ConcolicFlipCounters
 
   ConstructTally* = object

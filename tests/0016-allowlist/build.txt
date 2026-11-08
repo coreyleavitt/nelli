@@ -1,0 +1,9 @@
+# RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
+# (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
+build:8.37 2015-04-28|interp	K5b	no pin record names a verified PCRE library cell; the unverified-PCRE refusals and per-build pins are K5b
+build:8.37 2015-04-28|jit	CI-B	the JIT PCRE row runs on the Windows legs and no Linux build (W-63); no pin writes a record for it
+build:8.45 2021-06-15|interp	K5b	no pin record names a verified PCRE library cell; the unverified-PCRE refusals and per-build pins are K5b
+build:row/linux-c-z3-4.13.4	CI-B	the Z3 4.13.4 run leg is CI-B; a default-image record directory evidences linux-c only
+build:row/linux-cpp	CI-B	the cpp run leg is CI-B; a c-backend record directory evidences linux-c only
+build:row/mingw	K1a-ci	no record can name the mingw row: the build segment carries no C compiler family and PinRecord has no rowOf field; the symex-mingw join is K1a-ci
+build:row/msvc	CI-B	no record can name the msvc row (segment carries no compiler family); the symex-msvc leg is CI-B

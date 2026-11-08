@@ -1,0 +1,21 @@
+# RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
+# (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
+magic:AppendSeqElem	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:AppendStrCh	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:AppendStrStr	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Asgn	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Dec	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Destroy	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Excl	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Inc	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Incl	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Move	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:New	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:NewSeq	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:SetLengthSeq	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:SetLengthSeqUninit	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:SetLengthStr	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:ShallowCopy	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Swap	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:Trace	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row
+magic:WasMoved	K4a-table	no pin record: the magic axis rows exist but no pin writes a record for them until the axis is dispatched and pinned per row

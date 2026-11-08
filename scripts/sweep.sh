@@ -364,8 +364,11 @@ run_one() {
     { echo "## stdout (tail)"; tail -n 60 "$stdout_tmp"
       echo "## stderr (tail)"; tail -n 60 "$stderr_tmp"; } > "$failure_dir/$b.$name"
   fi
+  # Compiler diagnostics: stderr under podman; a host run (RFC-0016 CI-B) has them on
+  # stdout, so a host sidecar read zero warnings against a baseline of thousands.
+  # Read both streams.
+  filtered="$(cat "$stderr_tmp" "$stdout_tmp" | grep -E "^($warn_root/)?(src|tests)/.*Warning:" 2>/dev/null || true)"
   rm -f "$stdout_tmp"
-  filtered="$(grep -E "^($warn_root/)?(src|tests)/.*Warning:" "$stderr_tmp" 2>/dev/null || true)"
   if [ -n "$filtered" ]; then
     warn_n=$(printf '%s\n' "$filtered" | wc -l | tr -d ' ')
   else

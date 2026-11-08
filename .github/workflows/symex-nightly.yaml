@@ -244,7 +244,7 @@ jobs:
               $rc = if ($m) { [int]$m.Matches[0].Groups[1].Value } else { 1 }
               $ok = @(Select-String -Path $jf -Pattern '^\s*\[OK\]').Count
               $sk = @(Select-String -Path $jf -Pattern '^\s*\[SKIPPED\]').Count
-              Add-Content -Path (Join-Path $out 'jit-rows.txt') -Value "$t rc=$rc ok=$ok skipped=$sk"
+              Add-Content -Path (Join-Path $out "jit-rows-$($env:SHARD_IDX).txt") -Value "$t rc=$rc ok=$ok skipped=$sk"
             } else {
               ./scripts/run-ci-suite.ps1 -Suite $t -Cc vcc -TimeoutSec 600 -NimCache $nimcache -ExtraNimArgs $extra
               $rc = $LASTEXITCODE
@@ -325,7 +325,7 @@ jobs:
       - name: W-63, the JIT PCRE rows ran on this Windows leg
         if: ${{ matrix.leg == 'msvc' && !cancelled() }}
         run: |
-          cat shards/jit-rows.txt | sort | tee out/jit-rows.txt
+          cat shards/jit-rows-*.txt | sort | tee out/jit-rows.txt
           # every JIT suite must have run its tests (ok > 0) and skipped none
           bad="$(awk '{ split($3,o,"="); split($4,k,"="); if (o[2] + 0 == 0 || k[2] + 0 > 0 || $2 != "rc=0") print }' out/jit-rows.txt)"
           { echo '### W-63: JIT PCRE suites on symex-msvc'; echo '```'; cat out/jit-rows.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

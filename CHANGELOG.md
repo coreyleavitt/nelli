@@ -86,11 +86,11 @@ first run after the upgrade is cold.
   The parser dropped every local pragma but `noinit`, so a `{.cursor.}` that
   shares memory was modelled as a copy: a false `sxUnsat` and a false `sxSat`
   on c/orc, c/arc and cpp. It declines `feLocalPragma` on every path that
-  reaches it (the exact model is PRC-36, below).
+  reaches it (the exact model is PRC-39, below).
 - **`float32` <-> `float64` conversions, explicit or compiler-inserted**
   (W1-e, W-04). The conversion was a transparent pass-through, so a value of
   one width flowed on as the other (`float64(float32(x)) == x` was decided).
-  It declines `feFloatWidth` (the exact model is PRC-37, below). int <-> float
+  It declines `feFloatWidth` (the exact model is PRC-40, below). int <-> float
   verdicts are unchanged.
 - **`{.push overflowChecks: off.}` on a routine** in a checking build is modelled as the
   settings said; it always declines now (`feOverflowCheckOption`) (W1-d2).
@@ -228,9 +228,9 @@ migration note.
 
 ### Known limitations
 
-- **Designed declines, tracked as precision rows.** PRC-36 (W1-b): a
+- **Designed declines, tracked as precision rows.** PRC-39 (W1-b): a
   `{.cursor.}` local declines `feLocalPragma`; the exact model is a non-owning
-  alias of the source's storage. PRC-37 (W1-e): a `float32` <-> `float64`
+  alias of the source's storage. PRC-40 (W1-e): a `float32` <-> `float64`
   conversion declines `feFloatWidth`; the exact model rounds to binary32 and
   needs native pins at 0.5 and 0.1. PRC-38 (CR-A): a generic exception type
   such as `G[ValueError]` declines `eeUnknownExnType`; the exact model

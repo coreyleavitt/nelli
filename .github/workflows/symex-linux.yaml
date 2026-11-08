@@ -191,6 +191,16 @@ jobs:
           bash scripts/check-readme-kinds.sh
           bash scripts/check-readme-kinds.sh --self-test
 
+      - name: Work-list tables are the render of the TOML (scripts/check-worklist.sh)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+          NELLI_NIM_FLAGS: "--cc:gcc --colors:off"
+        run: |
+          bash scripts/check-worklist.sh
+          bash scripts/check-worklist.sh --self-test
+
       - name: K1-0 pin join (scripts/k1lite.sh on the host)
         if: ${{ !cancelled() }}
         shell: bash

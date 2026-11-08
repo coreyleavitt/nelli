@@ -67,6 +67,8 @@ import nelli/smt/dsl_parser
 import nelli/smt/buildprofile
 import nelli/smt/soundness
 import ./s8cu_helpers
+import ./worklist_toml
+import ./rfc0016_ids
 
 const
   root = currentSourcePath().parentDir() / ".."
@@ -74,10 +76,13 @@ const
   derivedPath = root / "tests" / ".pins" / "universe.derived.tsv"
   allowDir = root / "tests" / "0016-allowlist"
   rfcPath = root / "docs" / "rfc" / "0016-native-parity-hardening.md"
+  handoffPath = root / "docs" / "rfc" / "0016-native-parity-hardening.handoff.md"
+  worklistPath = root / "docs" / "rfc-data" / "0016-worklist.toml"
+  nimblePath = root / "nelli.nimble"
+  testsDir = root / "tests"
   fixtureDir = root / "tests" / "0016-fixtures" / "universe-pins"
   runtimePath = root / "src" / "nelli" / "smt" / "runtime.nim"
   scopes = ["magic", "build", "errorkind", "capkind"]
-  unassigned = "UNASSIGNED"   ## rejected as a slice id
   publicEntries = ["symexFind", "symexFindAllWitnesses", "symexForAll",
                    "assertCoveredBy", "concolic", "loadSymexVerdict"]
 
@@ -86,9 +91,6 @@ type
     key: string      ## rendered: `magic:Swap`, `errorkind:feX`, `build:row/msvc`
     state: string    ## modelled | declined | never | row | cap | the DegradeClass
     detail: string
-
-  Allow = object
-    key, slice, reason: string
 
 # --- the universe ----------------------------------------------------------
 
@@ -175,27 +177,10 @@ func evidences(u: UCell; r: PinRecord): bool =
                    r.entry == "admitBuild"
         strong or (u.state in ["declined", "never"] and weak)
 
-proc sliceIds(): HashSet[string] =
-  ## The ids in the first column of the RFC's tables.
-  for line in readFile(rfcPath).splitLines():
-    if line.startsWith("| "):
-      let cell = line[2 .. ^1].split('|')[0].strip()
-      if cell.len > 0 and ' ' notin cell and not cell.startsWith("-"):
-        for part in cell.split('/'): result.incl part.strip(chars = {'`', ' '})
-        result.incl cell.strip(chars = {'`', ' '})
-
-proc parseAllow(text, file: string): seq[Allow] =
-  for raw in text.splitLines():
-    let l = raw.strip(trailing = true)
-    if l.len == 0 or l.startsWith("#"): continue
-    let f = l.split('\t')
-    result.add Allow(key: f[0], slice: (if f.len > 1: f[1].strip else: ""),
-                     reason: (if f.len > 2: f[2].strip else: ""))
-
 proc loadAllow(dir: string): seq[Allow] =
   for s in scopes:
     let p = dir / (s & ".txt")
-    if fileExists(p): result.add parseAllow(readFile(p), p)
+    if fileExists(p): result.add parseAllow(readFile(p))
 
 proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
     seq[string] =
@@ -207,12 +192,7 @@ proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
       result.add "allowlist entry " & a.key & " names no cell of the universe"
     if a.key in seen: result.add "allowlist entry " & a.key & " is listed twice"
     seen.incl a.key
-    if a.slice notin ids:
-      result.add "allowlist entry " & a.key & ": slice \"" & a.slice &
-                 "\" is not a slice id of the RFC (" & unassigned &
-                 " is not allowed: name the slice that fills it)"
-    if a.reason.len == 0:
-      result.add "allowlist entry " & a.key & " has no reason"
+    result.add entryProblems(a, ids)
 
 proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow]):
     seq[string] =
@@ -317,7 +297,7 @@ suite "RFC-0016 K1a-cells: the universe is derived":
     check committed == derived
 
 suite "RFC-0016 K1a-cells: the allowlists":
-  let ids = sliceIds()
+  let ids = sliceIds(readFile(rfcPath))
 
   test "the RFC's slice table is read":
     check "K4a-table" in ids
@@ -347,7 +327,7 @@ suite "RFC-0016 K1a-cells: the allowlists":
     check structural(universe, allowFor(@[k, k]), ids).anyIt("twice" in it)
 
   test "the allowlist parser reads cell, slice and reason":
-    let a = parseAllow("# c\n\nmagic:Swap\tK4a-table\tno pin yet\n", "x")
+    let a = parseAllow("# c\n\nmagic:Swap\tK4a-table\tno pin yet\n")
     check a == @[Allow(key: "magic:Swap", slice: "K4a-table",
                        reason: "no pin yet")]
 
@@ -435,7 +415,7 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
   test "RED: UNASSIGNED is not a slice id":
     let k = universe.mustFirst("magic").key
     check structural(universe, @[Allow(key: k, slice: unassigned,
-      reason: "r")], sliceIds()).anyIt("UNASSIGNED" in it)
+      reason: "r")], sliceIds(readFile(rfcPath))).anyIt("UNASSIGNED" in it)
 
   test "orphan cells are the distinct, sorted cells no table derives":
     var a = synth(universe.mustFirst("magic"))
@@ -469,3 +449,184 @@ suite "RFC-0016 K1a-cells: the join over this run's records":
       echo "universe: " & $universe.len & " cells, " & $recs.len &
            " records, " & $orphans.len & " cells that records name and no " &
            "table has yet (K1a-ids joins them): " & orphans.join(", ")
+
+# --- K1a-ids: the work list ------------------------------------------------
+
+proc mutate(w: Worklist; id: string; key: string; val: seq[string]): Worklist =
+  result = w
+  for r in result.rows.mitems:
+    if r.id == id: r.arr[key] = val
+
+proc setState(w: Worklist; id, state: string): Worklist =
+  result = w
+  for r in result.rows.mitems:
+    if r.id == id: r.str["state"] = state
+
+proc firstWith(w: Worklist; pred: proc (r: WRow): bool): WRow =
+  for r in w.rows:
+    if pred(r): return r
+  raise newException(ValueError, "no such row")
+
+suite "RFC-0016 K1a-ids: the work list is data":
+  let
+    wl = parseWorklist(readFile(worklistPath), worklistPath)
+    slices = sliceIds11(readFile(rfcPath))
+    ukeys = universe.mapIt(it.key).toHashSet
+    registered = registeredTests(readFile(nimblePath))
+    idsAllow = parseAllow(readFile(allowDir / "ids.txt"))
+
+  proc join(w: Worklist; a: seq[Allow]): seq[string] =
+    joinIds(w, a, slices, ukeys, registered, testsDir)
+
+  test "the committed work list, ids.txt and slice ids agree":
+    let fails = join(wl, idsAllow)
+    checkpoint fails.join("\n")
+    check fails.len == 0
+
+  test "every section 5 table is a [[table]] and the rows are all there":
+    check wl.tables.len == 16
+    check wl.rows.len >= 200
+    check "K1a-ids" in slices and "W4-z" in slices
+    check "SND-01" notin slices        # a work-list id is not a filling slice
+
+  test "the RFC's tables are the render of the TOML (the staleness check)":
+    let have = readFile(rfcPath)
+    let (want, problems) = renderRfc(have, wl)
+    checkpoint problems.join("\n") & "\n" & lineDiff(have, want) &
+      "\nregenerate: scripts/check-worklist.sh write"
+    check problems.len == 0
+    check want == have
+
+  test "RED: a hand edit to a rendered row is stale":
+    let have = readFile(rfcPath)
+    let edited = have.replace("| SND-02 | ", "| SND-02 (hand edit) | ")
+    check edited != have
+    let (want, problems) = renderRfc(edited, wl)
+    check problems.len == 0
+    check want != edited
+    check want == have                 # the render restores the TOML's text
+
+  test "RED: a table with no marker pair, or a marker naming no table, fails":
+    let have = readFile(rfcPath)
+    check renderRfc(have.replace("<!-- worklist:begin 5.1 -->\n", ""),
+                    wl).problems.len >= 1
+    check renderRfc(have.replace("worklist:begin 5.1 ", "worklist:begin 9.9 "),
+                    wl).problems.anyIt("9.9" in it)
+
+  test "a rendered status cell begins with the vocabulary word":
+    for r in wl.rows:
+      if r.get("state") == "open": continue
+      let c = r.statusCell
+      let word = if r.stateWord == "owned": r.get("state")[6 .. ^1]
+                 else: r.get("state")
+      check c.startsWith(word)
+
+  test "F ledger ids are aliases of the W rows, with the ledger's sha":
+    var n = 0
+    for l in readFile(handoffPath).splitLines():
+      if l.startsWith("| F-0"):
+        let f = l.split('|').mapIt(it.strip())
+        let row = wl.resolve(f[1])
+        check row.isSome
+        if row.isSome:
+          inc n
+          check row.get.id.startsWith("W-")
+          check row.get.get("state") == "closed"
+          check ("`" & row.get.get("sha") & "`") in f[^2]
+          check ("(" & row.get.id & ")") in f[6]
+    check n == 7
+    check wl.resolve("F-0001").get.id == "W-01"
+    check wl.resolve("F-9999").isNone
+
+  test "the renumbered rows keep their notes and the old ids are the 5.2 rows":
+    check wl.resolve("PRC-39").get.get("note").contains("renumbered from PRC-36")
+    check wl.resolve("PRC-40").get.get("note").contains("renumbered from PRC-37")
+    check wl.resolve("PRC-36").get.get("title").contains("var")
+    check wl.resolve("PRC-37").get.get("title").contains("uncheckedAssign")
+
+suite "RFC-0016 K1a-ids: the id join (RED self-tests)":
+  let
+    wl = parseWorklist(readFile(worklistPath), worklistPath)
+    slices = sliceIds11(readFile(rfcPath))
+    ukeys = universe.mapIt(it.key).toHashSet
+    registered = registeredTests(readFile(nimblePath))
+    idsAllow = parseAllow(readFile(allowDir / "ids.txt"))
+    openRow = wl.firstWith(proc (r: WRow): bool = r.get("state") == "open" and
+                                                  not r.evidenced)
+    closedRow = wl.firstWith(proc (r: WRow): bool = r.get("state") == "closed")
+    aKind = universe.mustFirst("errorkind").key
+
+  proc join(w: Worklist; a: seq[Allow]): seq[string] =
+    joinIds(w, a, slices, ukeys, registered, testsDir)
+  proc entry(id: string; slice = "K9c"; reason = "r"): Allow =
+    Allow(key: id, slice: slice, reason: reason)
+
+  test "RED: an open id with no evidence and no entry fails naming the id":
+    let a = idsAllow.filterIt(it.key != openRow.id)
+    let fails = join(wl, a)
+    check fails.len == 1
+    check openRow.id in fails[0] and "open id" in fails[0]
+
+  test "an open id with a cell is evidenced and needs no entry":
+    let w = wl.mutate(openRow.id, "cells", @[aKind])
+    let a = idsAllow.filterIt(it.key != openRow.id)
+    check join(w, a).len == 0
+
+  test "RED: an entry for an evidenced id is stale":
+    let w = wl.mutate(openRow.id, "cells", @[aKind])
+    let fails = join(w, idsAllow)
+    check fails.len == 1
+    check "stale" in fails[0] and openRow.id in fails[0]
+
+  test "RED: an entry for a closed id is stale":
+    let fails = join(wl, idsAllow & entry(closedRow.id))
+    check fails.len == 1
+    check "stale" in fails[0] and "closed" in fails[0]
+
+  test "RED: a closing open id leaves its entry stale":
+    let w = wl.setState(openRow.id, "closed")
+    let fails = join(w, idsAllow)
+    check fails.len == 1
+    check "stale" in fails[0] and openRow.id in fails[0]
+
+  test "an alias resolves to its row (an entry naming it counts for the row)":
+    let r = wl.firstWith(proc (x: WRow): bool = x.list("aliases").len > 0)
+    let w = wl.setState(r.id, "open")
+    check join(w, idsAllow).anyIt("open id " & r.id in it)
+    let a = idsAllow & entry(r.list("aliases")[0])
+    check join(w, a).len == 0
+    check join(w, a & entry(r.id)).anyIt("twice" in it)
+
+  test "RED: an entry for an unknown id, a duplicate, UNASSIGNED, an invented":
+    check join(wl, idsAllow & entry("NOPE-99")).anyIt("NOPE-99" in it)
+    check join(wl, idsAllow & entry(idsAllow[0].key)).anyIt("twice" in it)
+    check join(wl, idsAllow & entry("NOPE-99", unassigned)).anyIt(
+      "UNASSIGNED" in it)
+    check join(wl, idsAllow & entry("NOPE-99", "K99z")).anyIt("K99z" in it)
+    check join(wl, idsAllow & entry("NOPE-99", "K9c", "")).anyIt(
+      "no reason" in it)
+
+  test "RED: a typo in a cells entry fails instead of naming nothing":
+    let w = wl.mutate(openRow.id, "cells", @["magic:NoSuchCell"])
+    check join(w, idsAllow).anyIt("NoSuchCell" in it)
+    let w2 = wl.mutate(openRow.id, "cells", @["errorkind:feNoSuchKind"])
+    check join(w2, idsAllow).anyIt("feNoSuchKind" in it)
+
+  test "RED: an unregistered or missing pin file fails":
+    let w = wl.mutate(openRow.id, "pins", @["tsymex_0016_no_such_test"])
+    let fails = join(w, idsAllow)
+    check fails.anyIt("not registered" in it)
+    check fails.anyIt("not a file" in it)
+
+  test "RED: a state outside the vocabulary, or a duplicate id, fails":
+    check join(wl.setState(openRow.id, "done"), idsAllow).anyIt("vocabulary" in it)
+    var w = wl
+    w.rows.add wl.rows[0]
+    check join(w, idsAllow).anyIt("listed twice" in it)
+
+  test "the flat reader rejects an unknown key and reads escapes":
+    expect AssertionDefect:
+      discard parseWorklist("[[row]]\nidd = \"x\"\n")
+    let w = parseWorklist("[[row]]\nid = \"a\\\\|b \\\"q\\\"\"\ncells = [\"x\", \"y\"]\n")
+    check w.rows[0].id == "a\\|b \"q\""
+    check w.rows[0].list("cells") == @["x", "y"]

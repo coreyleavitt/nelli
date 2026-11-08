@@ -54,7 +54,7 @@ if ($NimCache) { $ExtraNimArgs = @("--nimcache:$NimCache") + $ExtraNimArgs }
 # -Wl,--stack: link an 8 MB main-thread stack (Linux parity). Windows
 # defaults to 1 MB, and deep walker/Z3 recursion intermittently overflowed it
 # as a silent crash (catalog #11 class).
-$stackFlag = if ($Cc -eq 'vcc') { '--passL:/STACK:8388608' } else { '--passL:-Wl,--stack,8388608' }
+$stackFlag = if ($Cc -eq 'vcc') { '--passL:/link /STACK:8388608' } else { '--passL:-Wl,--stack,8388608' }
 nim c "--cc:$Cc" --threads:on --hints:off --colors:off `
   --path:src --path:_deps/z3/src --path:_deps/softlink/src `
   --cincludes:C:/z3/include `

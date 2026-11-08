@@ -75,8 +75,8 @@ jobs:
       shards_json: ${{ steps.derive.outputs.shards_json }}
       shard_ids: ${{ steps.derive.outputs.shard_ids }}
       regexes_json: ${{ steps.derive.outputs.regexes_json }}
-      msvc_shards_json: ${{ steps.derive.outputs.msvc_shards_json }}
-      msvc_shard_ids: ${{ steps.derive.outputs.msvc_shard_ids }}
+      msvc_shards_json: ${{ steps.derive-msvc.outputs.msvc_shards_json }}
+      msvc_shard_ids: ${{ steps.derive-msvc.outputs.msvc_shard_ids }}
       legs_json: ${{ steps.legs.outputs.legs_json }}
       linux_legs_json: ${{ steps.legs.outputs.linux_legs_json }}
       has_linux: ${{ steps.legs.outputs.has_linux }}
@@ -115,6 +115,7 @@ jobs:
         run: python3 -I scripts/derive-linux-shards.py
 
       - name: Derive and shard the symex task (symex-msvc)
+        id: derive-msvc
         env:
           NELLI_TESTS_REGEX: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex || '' }}
           NELLI_NAME_PREFIX: tsymex_
@@ -379,7 +380,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p out findings
-          scripts/vm-alias-slice.sh -n 12 out/slice.log
+          bash scripts/vm-alias-slice.sh -n 12 out/slice.log
           { echo '### vm_alias_guard slice'; echo '```'; cat out/slice.log.summary; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           awk '$1 != "0" { n=$3; sub(/^.*\//,"",n); sub(/\.nim$/,"",n); printf "vm-alias\t%s\tvm_alias_guard slice: rc=%s\n", n, $1 }' out/slice.log > findings/findings-vm-alias.tsv
           [ ! -s findings/findings-vm-alias.tsv ]

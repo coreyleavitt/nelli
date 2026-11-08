@@ -352,8 +352,9 @@ title = "S8cu's known limits: macro-built pragmas, a pushing template from anoth
 state = "open"
 note = ""
 source = "PND-11, reclassified round 2"
-evidence = "a missed check-off region is the false `sxRaised` class S8cu fixed: soundness risk, not pending"
+evidence = "a missed check-off region is the false `sxRaised` class S8cu fixed: soundness risk, not pending **K2-0 probe (2026-11-08): reproduces, a soundness defect.** A push AND its pop both built by macros (`pushOffS()` / `popS()`, `fieldChecks: off`) leave nothing in the source text for the scan: native reaches the label (`fieldChecks` off), the walker answers a false `sxRaised` (`FieldDefect`). The existing S8cu fixtures (`tsymex_rfc0005_s8cu_hidden`) cover only a macro push with a visible pop, which declines. Pinned as the current behaviour with `pinExact` expecting `PinFailure`: `tests/tsymex_0016_k20_probes.nim` (`SND-13` suite). Fix: decline when the module expands any macro or template call in statement position that the scan cannot read, or read the expansion (K3c)."
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "SND-14"
@@ -820,8 +821,9 @@ title = "`zeroMem` and `copyMem` on `addr x`: a walker fault (`FieldDefect` read
 state = "open"
 note = ""
 source = "S8cl remainder; ex-PRC-16"
-evidence = "the only `zeroMem`/`copyMem` pins are the opaque-global form (`tests/tsymex_rfc0005_s8cs_routes2.nim:125,131,363`); the `zeroMem(addr x)` fault has no test. First a named decline, then back to §5.2 as precision."
+evidence = "the only `zeroMem`/`copyMem` pins are the opaque-global form (`tests/tsymex_rfc0005_s8cs_routes2.nim:125,131,363`); the `zeroMem(addr x)` fault has no test. First a named decline, then back to §5.2 as precision. **K2-0 probe (2026-11-08): reproduces.** `zeroMem(addr x, sizeof(x))` and `copyMem(addr y, addr x, sizeof(int))` on a local int both end `sxUnknown` with `weInternalWalkerFault: FieldDefect ... 'ptrPointeeTy' ... kind = itUninterp` (a fault, not a named decline); native reaches the label. Pinned: `tests/tsymex_0016_k20_probes.nim`."
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "CRH-07"
@@ -841,8 +843,9 @@ title = "The `cmpIgnoreStyle` hang"
 state = "open"
 note = ""
 source = "PND-12; S8cu (resumed 2026-11-02)"
-evidence = "no `main` column yet; S8cu is producing the three-way table"
+evidence = "no `main` column yet; S8cu is producing the three-way table. **K2-0 probe (2026-11-08): reproduces.** `if cmpIgnoreStyle(a, \"abc\") == 0` over a string parameter: `symexFind` is still running after 25 s in a child process (the marker file shows it entered the walk; a control walk finishes in under a second). Native terminates. Pinned in `tests/tsymex_0016_k20_probes_child.nim` (child re-execution with its own budget)."
 cells = []
+pins = ["tsymex_0016_k20_probes_child"]
 
 [[row]]
 id = "CRH-09"
@@ -851,8 +854,9 @@ title = "Harvested crash and hang items with no SUT yet: N35 OOM, `cast[int32]` 
 state = "open"
 note = ""
 source = "research round, `docs/rfc/0016-research/MERGED-worklist.md` W-25, W-28, W-29"
-evidence = "read only: probe each, then a named decline or a fix"
+evidence = "read only: probe each, then a named decline or a fix **K2-0 probe (2026-11-08), one result per item** (`tests/tsymex_0016_k20_probes.nim` unless noted). N35 (HRV-43): `while chk(i) and i < 10` with a `while`+`continue` callee, both operand orders, does not reproduce: `sxSat` with a `beBudgetExhausted` taint, no OOM, no fault. `cast[int32]` over a helper (HRV-45): does not reproduce; a named `feUnsupportedExprKind` (`nnkCast`) decline. Bitwise `not` (W-25): does not reproduce; `(not k) + 1 == 5` agrees with native (`pinExact`). `<` on `ptr` (W-28): does not reproduce; named `feUnsupportedOp` decline (`ref/ptr comparison op bLt`). `{'0'..'9'}` `in`/`contains` (HRV-47) and `array[Enum, T]` indexing (HRV-49): both agree with native. Cumulative Z3 MEMOUT (HRV-51): 30 sequential `symexFind` calls in one binary, all `sxSat`, no MEMOUT. `mkIntLit(0)` placeholder (HRV-06): never a bare verdict; the Table and HashSet omitted-field cases decline `feUnsupportedOpHavoc`, the array, distinct and tuple cases agree with native (`tests/tsymex_0016_k20_probes_child.nim`). PCRE interpreter SIGSEGV (HRV-46): reproduces natively on Linux at 100000 subject bytes (`pinCrash`, `ceSegv`; 10000 bytes do not crash, so 8000 is a Windows PCRE 8.45 figure); no walker verdict is involved. `$simplify` literal-test hang sites (HRV-50): not probed with a SUT; the one big-term probe (1500 straight-line additions) is slow in the walk but is a cost curve (see PND-13), not a located `$simplify` print. Remaining open from this row: HRV-46's native crash (needs a decline or a documented `never`) and HRV-50 (needs a site-level probe)."
 cells = []
+pins = ["tsymex_0016_k20_probes", "tsymex_0016_k20_probes_child"]
 
 [[row]]
 id = "CI-01"
@@ -1088,11 +1092,13 @@ cells = []
 id = "PND-13"
 table = "5.7"
 title = "Z3's own internal recursion depth, not audited when S8ct bounded the walker's term walks"
-state = "open"
-note = ""
+state = "never"
+note = ": unreachable from a SUT (K2-0)"
 source = "S8ct (B19 disposition)"
-why = "to be checked at disposition"
+why = "to be checked at disposition. **K2-0 probe (2026-11-08): not reachable from a SUT.** A straight-line SUT of 3000 additions stops the compile in the parser (the VM iteration cap in `parseDeferList`), far below Z3's own recursion depth; 1500 additions then an equality do not finish in 25 s, but 40 finish in about a second, so the cost is superlinear in the walk, not a Z3 stack. Probe and a `skipCell` record: `tests/tsymex_0016_k20_probes_child.nim` (`PND-13`)."
+never_reason = "unreachable from a SUT (K2-0)"
 cells = []
+pins = ["tsymex_0016_k20_probes_child"]
 
 [[row]]
 id = "INT-01"
@@ -1198,21 +1204,23 @@ cells = []
 id = "INT-11"
 table = "5.8a"
 title = "The `trace1` row of `tsymex_rfc0005_s8cs_routes` (a `=trace` hook only the cycle collector runs) is a walker fault, `coerceIntLit` on an `svPtr`; `main` stops the compile on it Add a walker pin expecting a named decline on `trace1` (today Nim-only, `s8cs_routes.nim:195-199`), then fix `coerceIntLit`."
-class = "crash (walker fault)"
+class = "crash (walker fault) **K2-0 probe (2026-11-08): reproduces on this head.** `trace1` (a `=trace` hook only the cycle collector runs) ends `sxUnknown` with `weInternalWalkerFault: ValueError: coerceIntLit: composite prototype for integer literal kind=svPtr`; native reaches the label. A dynamic-subtype `=destroy` (W-19b) is the same fault. Pinned: `tests/tsymex_0016_k20_probes.nim`."
 state = "open"
 note = ""
 source = "S8cs (coordinator, release intake)"
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "INT-12"
 table = "5.8a"
 title = "Under `--exceptions:setjmp` on Windows, the walker crashes entering its 16 MB fiber (SIGSEGV in `runSymexCaught`, before any walk). The same fiber and the same crash as `main`; the setjmp suite pins the default crash on Windows and cpp"
-class = "crash, same as `main`"
+class = "crash, same as `main` **K2-0 (2026-11-08): not probed, Windows only.** The crash is in the 16 MB fiber under setjmp on Windows; this build is Linux. `skipCell` in `tests/tsymex_0016_k20_probes.nim`; the Linux c arm of `tsymex_rfc0005_s8cu_nil_setjmp` is green and carries the Windows pin."
 state = "open"
 note = ""
 source = "S8cu, \"Windows\""
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "INT-13"
@@ -1238,11 +1246,12 @@ cells = []
 id = "INT-15"
 table = "5.8a"
 title = "`setControlCHook` is not among the runtime hooks `hostRuntimeHook` checks, so a re-executed replay does not decline when the host set one, and the child runs without it. Not classified: needs a three-way row"
-class = "unclassified (§5.7 rule)"
+class = "unclassified (§5.7 rule) **K2-0 (2026-11-08): Linux half probed by reading, Windows half not runnable.** A fork replay copies the host's hooks, so there is no divergence on Linux or macOS; the re-exec replay is Windows-only. `hostRuntimeHook` (`replayproc.nim`) checks six hooks and not `setControlCHook`. `skipCell` in `tests/tsymex_0016_k20_probes.nim`. Classification: a Windows-only replay-fidelity gap; its three-way row needs a Windows leg."
 state = "open"
 note = ""
 source = "batch 11 (`replayproc.nim`)"
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "INT-16"
@@ -1308,11 +1317,12 @@ cells = []
 id = "INT-22"
 table = "5.8b"
 title = "A clean, faithful winner is never replayed, so nothing learns that its witness ends the process after the target. `assertCoveredBy` still splats it and `symexForAll` still seeds it, in the host (`symex.nim:4057-4061`, `:982`). Unchanged from 0.8.0; WA-2 closed only the replayed case (`witnessUnsafe`)"
-class = "crash, same as 0.8.0"
+class = "crash, same as 0.8.0 **K2-0 probe (2026-11-08): reproduces.** `proc quitAfter(k) = if k == 5: symexTarget(\"hit\"); quit(0)`: the verdict is a clean `sxSat` with no errors; `assertCoveredBy(quitAfter, tLabel(\"hit\"))` then ends the host process (rc 0, nothing after the call runs). Pinned in a child process: `tests/tsymex_0016_k20_probes_child.nim`."
 state = "open"
 note = ""
 source = "0.9.1 wiring audit"
 cells = []
+pins = ["tsymex_0016_k20_probes_child"]
 
 [[row]]
 id = "INT-23"
@@ -1700,10 +1710,11 @@ id = "W-22"
 table = "5.9"
 title = "`parseBool` with `len 4` hangs"
 state = "open"
-note = ""
+note = "K2-0 (2026-11-08) reproduces: the walk is still running after 25 s (child process, marker file shows it entered `symexFind`); pinned in `tests/tsymex_0016_k20_probes_child.nim` (CRH-08 hangs the same way)."
 slice = "K2-0"
 home = "K2-0 (with CRH-09)"
 cells = []
+pins = ["tsymex_0016_k20_probes_child"]
 
 [[row]]
 id = "W-23"
@@ -1719,11 +1730,12 @@ cells = []
 id = "W-24"
 table = "5.9"
 title = "`filterIt` raises `weInternalWalkerFault`"
-state = "open"
-note = ""
+state = "closed"
+note = "(K2-0, 2026-11-08): `filterIt` no longer raises `weInternalWalkerFault`; it is a named `feUnsupportedExprKind` decline (`nnkCommand`), pinned in `tests/tsymex_0016_k20_probes.nim`. Precision stays W-36's neighbour."
 slice = "K2-0"
 home = "K2-0 (with CRH-09)"
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "W-27"
@@ -1810,20 +1822,22 @@ id = "W-19b"
 table = "5.9"
 title = "S8cs \"not covered\" store routes (threads, signals, dynamic-subtype hooks, ORC cycle collector); Windows re-exec unseen macro hooks; S8cu scan misses (`mitems` instantiated under a push elsewhere, never-popped push, importer outside the graph, nelli under a user push); opaque proc with `var T` params leaves the environment unmutated"
 state = "open"
-note = ""
+note = "K2-0 (2026-11-08), per item. Reproduces as walker faults (`sxUnknown`, never a wrong verdict): threads (`createThread`: `ptrPointeeTy`), dynamic-subtype `=destroy` hook and the ORC cycle collector (`coerceIntLit`, INT-11). Declines, no fault: signal handlers (`feOpaqueCallUnmodelled`), never-popped push (`feCheckOption`). Closed: opaque proc with a `var T` parameter (`feGlobalHavoc` havoc of the argument; no stale value is trusted); nelli under a user push (WA-A pins it as documented, no decline). Open: a macro-built push with a macro-built pop (SND-13, false `sxRaised`); `mitems` under a push elsewhere (INT-21 pins the in-module form only); importer outside the graph (no SUT shape found). Windows re-exec macro hooks: `skipCell`, no Windows host. Pins: `tests/tsymex_0016_k20_probes.nim`."
 slice = "K2-0"
 home = "K2-0 (probe each), then fix or a `never` record"
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "W-19c"
 table = "5.9"
 title = "closure unverified: S1b block/break binding, S7 `lowerInExpr` drains"
-state = "open"
-note = ""
+state = "closed"
+note = "(K2-0, 2026-11-08): S1b nested block/break binding and for-loop labels, and S7 expression-position statement lists, `try` and argument-order drains, agree with native over their domains (`tests/tsymex_0016_k20_probes.nim`, `pinExact`)."
 slice = "K2-0"
 home = "K2-0 (probe), then fix"
 cells = []
+pins = ["tsymex_0016_k20_probes"]
 
 [[row]]
 id = "W-34"

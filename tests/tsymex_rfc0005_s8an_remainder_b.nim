@@ -43,6 +43,9 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8an_remainder_b")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -59,16 +62,6 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 proc sutCapValue(x: int) =
@@ -165,7 +158,7 @@ suite "S8an (1): a routine declared inside the code under test":
   test "a var actual that is also a capture of the callee declines, scoped":
     ## Probe: `sutCapVarAlias(1)` leaves `c == 12`; copy-in/copy-out
     ## would leave `c == 2`.
-    declines(sutCapVarAlias, "cva", feUnsupportedOp, "c")
+    pinDecline(sutCapVarAlias, declKey, feUnsupportedOp, tLabel("cva"), "c")
 
   test "a nested template or iterator declaration is not a statement":
     ## RED: `feUnsupportedStmtKind` ("statement kind nnkTemplateDef" /

@@ -379,25 +379,41 @@ template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
 # --- pinDecline ------------------------------------------------------------
 
 proc pinDeclineJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
-                         kind: SymexErrorKind; file: string) =
+                         kind: SymexErrorKind; file: string;
+                         needle: string = "") =
   let cell = render(key)
   if res.trusted:
     pinFail("pinDecline " & cell & ": the verdict " & $res.status &
             " is trusted; it should decline with " & $kind)
+  # An internal walker fault is never an acceptable decline, of any severity.
+  for e in res.errors:
+    if e.kind == weInternalWalkerFault:
+      pinFail("pinDecline " & cell & ": an internal walker fault was recorded: " &
+              e.msg)
   if not res.errors.named(kind):
     pinFail("pinDecline " & cell & ": not trusted, but no " & $kind &
             " was recorded; errors: " & kindsOf(res.errors))
+  if needle.len > 0:
+    var found = false
+    for e in res.errors:
+      if e.kind == kind and taintsRun(e) and needle in e.msg: found = true
+    if not found:
+      pinFail("pinDecline " & cell & ": no " & $kind & " message contains \"" &
+              needle & "\"; errors: " & show(res.errors))
   writePinRecord(PinRecord(testFile: file, entry: "symexFind", cell: key,
     target: describeTarget(tgt), domain: "-", verdict: pvDeclined,
     walker: $res.status, declineKind: $kind,
     native: "not run: the cell declines"))
 
 template pinDecline*(fn: untyped; key: CellKey; kind: SymexErrorKind;
-                     target: untyped = tLabel("hit")) =
-  ## The cell declines: the verdict is not trusted and `kind` was recorded.
+                     target: untyped = tLabel("hit"); needle: string = "") =
+  ## The cell declines: the verdict is not trusted, `kind` was recorded, no
+  ## internal walker fault was, and, when `needle` is given, a `kind` message
+  ## contains it.
   block:
     let pdRes = symexFind(fn, target, pinSettingsConst)
-    pinDeclineJudge(pdRes, key, target, kind, instantiationInfo(-1).filename)
+    pinDeclineJudge(pdRes, key, target, kind, instantiationInfo(-1).filename,
+                    needle)
 
 # --- pinCrash and skipCell -------------------------------------------------
 

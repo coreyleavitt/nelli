@@ -13,6 +13,9 @@ import std/[unittest, strutils, math]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8as_remainder_b")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -29,16 +32,6 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (2) an opaque call writes a module-level variable ----------------------
@@ -239,4 +232,4 @@ suite "RFC-0005 S8as (6): the alias check is by path":
     verdict(sutVarFields, "vf", sxSat)
     verdict(sutVarFields, "vf_dead", sxUnsat)
   test "a whole and its part still decline":
-    declines(sutAddrOverlap, "ao", feUnsupportedOp, "aliases another argument")
+    pinDecline(sutAddrOverlap, declKey, feUnsupportedOp, tLabel("ao"), "aliases another argument")

@@ -38,6 +38,9 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8au_remainder")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -54,16 +57,6 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (1) local distinct values ------------------------------------------------

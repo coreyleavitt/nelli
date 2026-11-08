@@ -16,6 +16,9 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8ax_remainder_e")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -34,16 +37,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind) =
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
 
 type S8axRR = ref object
   a: int
@@ -178,7 +171,7 @@ suite "RFC-0005 S8ax (6): a closure applied away from its frame":
     clean(sutCloBranch, "ok", sxSat)
     clean(sutCloBranch, "bad", sxUnsat)
   test "a capture passed by address while the closure runs declines":
-    declines(sutCloByAddr, "ok", ceCaptureByRefUnmodelled, "passed by address")
+    pinDecline(sutCloByAddr, declKey, ceCaptureByRefUnmodelled, tLabel("ok"), "passed by address")
 
 type S8axPair = object
   a, b: int

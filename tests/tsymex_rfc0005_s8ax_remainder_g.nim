@@ -16,6 +16,9 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8ax_remainder_g")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -32,16 +35,6 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (4) every signed int heap cell is Int-sorted -----------------------------
@@ -147,10 +140,10 @@ proc sutAddrIndexChecked(i: int) =
 
 suite "RFC-0005 S8ax (8): `addr` of a routine's variable":
   test "a pointer to a returned frame's variable declines":
-    declines(sutAddrDangling, "ok", feUnsupportedOp, "dereferenced here")
-    declines(sutAddrDeadCompare, "ok", feUnsupportedOp, "compared here")
+    pinDecline(sutAddrDangling, declKey, feUnsupportedOp, tLabel("ok"), "dereferenced here")
+    pinDecline(sutAddrDeadCompare, declKey, feUnsupportedOp, tLabel("ok"), "compared here")
   test "a var formal's address bound to a field declines":
-    declines(sutAddrLostFormal, "ok", feUnsupportedOp, "var` formal")
+    pinDecline(sutAddrLostFormal, declKey, feUnsupportedOp, tLabel("ok"), "var` formal")
   test "the address of a seq element":
     ## RED: `heUnsafeCast` (unsafe pointer materialisation).
     verdict(sutAddrSeqElem, "ok", sxSat)
@@ -158,7 +151,7 @@ suite "RFC-0005 S8ax (8): `addr` of a routine's variable":
     verdict(sutAddrSeqWrite, "ok", sxSat)
     verdict(sutAddrSeqWrite, "bad", sxUnsat)
   test "a seq element's pointer used after a resize declines":
-    declines(sutAddrSeqResized, "ok", feUnsupportedOp, "resize")
+    pinDecline(sutAddrSeqResized, declKey, feUnsupportedOp, tLabel("ok"), "resize")
   test "the address of a computed index":
     ## RED: `heUnsafeCast` (unsafe pointer materialisation).
     verdict(sutAddrIndexArr, "ok", sxSat)
@@ -237,7 +230,7 @@ suite "RFC-0005 S8ax (9): by-address arguments that may be one location":
     verdict(sutAliasIndexP, "ok", sxSat)
     verdict(sutAliasIndexP, "bad", sxUnsat)
   test "two computed indices that may be equal decline":
-    declines(sutAliasIndexEq, "ok", feUnsupportedOp, "one location")
+    pinDecline(sutAliasIndexEq, declKey, feUnsupportedOp, tLabel("ok"), "one location")
   test "two fields of one variant arm":
     ## RED: `feUnsupportedOp` ("var argument write-back not modelled").
     verdict(sutAliasArm, "ok", sxSat)

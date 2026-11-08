@@ -43,6 +43,9 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8an_remainder_d")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -59,16 +62,6 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (3) a module-level var reached from a callee ----------------------------
@@ -170,19 +163,19 @@ suite "S8an (3): a module-level var reached from a callee":
   test "a var or addr actual that is a global the callee reaches declines":
     ## RED: `ga_dead` `sxSat`, `errors` empty. Probe: `setAlG(gCount, 8)`
     ## leaves `gCount == 5` (the callee's direct write is the later one).
-    declines(sutGlobalAlias, "ga", feUnsupportedOp, "gCount")
-    declines(sutGlobalAlias, "ga_dead", feUnsupportedOp, "gCount")
-    declines(sutGlobalAliasRead, "gar", feUnsupportedOp, "gCount")
-    declines(sutGlobalAddr, "gaddr", feUnsupportedOp, "gCount")
+    pinDecline(sutGlobalAlias, declKey, feUnsupportedOp, tLabel("ga"), "gCount")
+    pinDecline(sutGlobalAlias, declKey, feUnsupportedOp, tLabel("ga_dead"), "gCount")
+    pinDecline(sutGlobalAliasRead, declKey, feUnsupportedOp, tLabel("gar"), "gCount")
+    pinDecline(sutGlobalAddr, declKey, feUnsupportedOp, tLabel("gaddr"), "gCount")
 
   test "a var actual whose index another argument writes declines":
     ## RED: `ia` `sxUnsat` and `ia_dead` `sxSat`; `dv` `sxUnsat` and
     ## `dv_dead` `sxSat` (`errors` empty). Probe: `setIJ(s[i], i)` leaves
     ## `s == @[7, 0]`; `setIJ(i, i)` leaves `i == 7`.
-    declines(sutIdxAlias, "ia", feUnsupportedOp, "s[i]")
-    declines(sutIdxAlias, "ia_dead", feUnsupportedOp, "s[i]")
-    declines(sutDupVar, "dv", feUnsupportedOp, "`i`")
-    declines(sutDupVar, "dv_dead", feUnsupportedOp, "`i`")
+    pinDecline(sutIdxAlias, declKey, feUnsupportedOp, tLabel("ia"), "s[i]")
+    pinDecline(sutIdxAlias, declKey, feUnsupportedOp, tLabel("ia_dead"), "s[i]")
+    pinDecline(sutDupVar, declKey, feUnsupportedOp, tLabel("dv"), "`i`")
+    pinDecline(sutDupVar, declKey, feUnsupportedOp, tLabel("dv_dead"), "`i`")
 
   test "a closure reads a global as it stands at the call":
     verdict(sutLambdaGlobalRead, "lgr", sxSat)

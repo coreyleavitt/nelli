@@ -16,6 +16,9 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8ax_remainder_d")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -41,16 +44,6 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind) =
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (4) every signed int heap cell is Int-sorted -----------------------------
 #
@@ -175,8 +168,8 @@ suite "RFC-0005 S8ax (7): evaluation order":
     verdict(sutOrdArg, "ok", sxSat)
     verdict(sutOrdArg, "bad", sxUnsat)
   test "a checked read whose value a later call changes declines":
-    declines(sutOrdNeg, "ok", feEvalOrderUnmodelled, "reads after a later")
-    declines(sutOrdDiv, "ok", feEvalOrderUnmodelled, "reads after a later")
+    pinDecline(sutOrdNeg, declKey, feEvalOrderUnmodelled, tLabel("ok"), "reads after a later")
+    pinDecline(sutOrdDiv, declKey, feEvalOrderUnmodelled, tLabel("ok"), "reads after a later")
   test "an element is checked where it stands and read after the call":
     ## S8ax declined it; RFC-0005 S8be checks the index before `g()` and
     ## reads the element after it, as Nim does.

@@ -16,6 +16,9 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8ax_remainder_b")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -32,16 +35,6 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, lbl: string, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (5) an opaque routine's raises, heap writes and other writes ------------
@@ -170,7 +163,7 @@ suite "RFC-0005 S8ax (5): an opaque routine's effects":
   test "a routine that may not return declines":
     ## RED before S8ax: sxSat, `errors` empty (and a replay of it would not
     ## end).
-    declines(sutOpaqueSpin, "os", feOpaqueCallUnmodelled, "`while` loop")
+    pinDecline(sutOpaqueSpin, declKey, feOpaqueCallUnmodelled, tLabel("os"), "`while` loop")
   test "a Defect caught around the call is raised":
     ## RED before S8ax: sxUnsat, `errors` empty. S8ax declined it; RFC-0005
     ## S8be forks the `DivByZeroDefect` the body raises (`10 div 0`), and

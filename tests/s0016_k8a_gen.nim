@@ -56,6 +56,13 @@ type
     lit2*: Lit
     asE*, asE2*: bool ## `except T as e` binding
     hitA*, hitB*: bool
+    only*: seq[string]  ## K8a-sink: narrows the native domain to these element
+                        ## expressions (empty = the type's own domain)
+
+  Case* = object
+    ## One program under one variant: the unit the sink's reducer shrinks.
+    prog*: Prog
+    tw*: Twin
 
   OutKind* = enum okExact, okDecline, okDisagree
 
@@ -102,6 +109,7 @@ func domainElems*(p: Prog): string =
   ## 8-bit types are exhaustive; the rest are §10's boundary set plus the
   ## shape's edges.
   let t = p.ty
+  if p.only.len > 0: return "[" & p.only.join(", ") & "]"
   if t in ["int8", "uint8"]:
     return "toSeq(low(" & t & ")..high(" & t & "))"
   var vs: seq[string]
@@ -118,9 +126,20 @@ func domainElems*(p: Prog): string =
     vs.add t & "(" & $(p.lit.n) & ")"
   "[" & vs.join(", ") & "]"
 
+func domainList*(p: Prog): seq[string] =
+  ## `domainElems` as one expression per element (the reducer's unit).
+  if p.only.len > 0: return p.only
+  if p.ty in ["int8", "uint8"]:
+    let lo = if p.ty == "int8": -128 else: 0
+    let hi = if p.ty == "int8": 127 else: 255
+    for n in lo .. hi: result.add p.ty & "(" & $n & ")"
+    return
+  let e = domainElems(p)
+  e[1 .. ^2].split(", ")
+
 func domainSrc(p: Prog): string =
   ## The native domain, as a `Domain[T]` expression.
-  if p.ty in ["int8", "uint8"]: "exhaustive(" & domainElems(p) & ")"
+  if p.ty in ["int8", "uint8"] and p.only.len == 0: "exhaustive(" & domainElems(p) & ")"
   else: "sampled(" & domainElems(p) & ")"
 
 func core(p: Prog; swap: bool): string =
@@ -305,37 +324,49 @@ template captureRes*(call, o, plant): untyped =
           r.witness = default(typeof(r.witness))
     r
 
-macro genBatch*(progs: static seq[Prog]; plant: static bool;
-                tag: static string): untyped =
+proc emitCases*(cases: seq[Case]; plant: bool; tag: string): NimNode =
+  ## Emits each case as a proc plus `runBatch_<tag>()`, one `GenOutcome` per
+  ## case (the case's program id and variant name key it).
   var src = ""
   var runs = ""
-  for p in progs:
-    var tws = @[twNone]
-    tws.add applicable(p)
-    for tw in tws:
-      let name = procName(tag, p, tw)
-      src.add render(p, name, tw)
-      let dom = domainSrc(p)
-      let ex = p.ty in ["int8", "uint8"]
-      runs.add "  o = GenOutcome(progId: " & $p.id & ", variant: \"" &
-        twinName(tw) & "\", shape: " & $p.shape & ", exhaustive: " & $ex &
-        ")\n" &
-        "  try:\n" &
-        "    discard pinExactImpl(" & name &
-        ", claimed(captureRes(symexFind(" & name & ", tLabel(\"hit\"), " &
-        "pinSettingsConst), o, " & $plant & "), \"symexFind\"), " &
-        "cellKey(axConstruct, \"k8a-gen/" & ($p.shape)[2 .. ^1] & "\"), " &
-        "tLabel(\"hit\"), " & dom & ", \"tsymex_0016_k8a_gen.nim\")\n" &
-        "    o.kind = okExact\n" &
-        "  except PinFailure as e:\n" &
-        "    o.msg = e.msg\n" &
-        "    o.kind = if o.trusted and o.status != \"sxUnknown\": okDisagree " &
-        "else: okDecline\n" &
-        "  result.add o\n"
+  for c in cases:
+    let p = c.prog
+    let tw = c.tw
+    let name = procName(tag, p, tw)
+    src.add render(p, name, tw)
+    let dom = domainSrc(p)
+    let ex = p.ty in ["int8", "uint8"] and p.only.len == 0
+    runs.add "  o = GenOutcome(progId: " & $p.id & ", variant: \"" &
+      twinName(tw) & "\", shape: " & $p.shape & ", exhaustive: " & $ex &
+      ")\n" &
+      "  try:\n" &
+      "    discard pinExactImpl(" & name &
+      ", claimed(captureRes(symexFind(" & name & ", tLabel(\"hit\"), " &
+      "pinSettingsConst), o, " & $plant & "), \"symexFind\"), " &
+      "cellKey(axConstruct, \"k8a-gen/" & ($p.shape)[2 .. ^1] & "\"), " &
+      "tLabel(\"hit\"), " & dom & ", \"tsymex_0016_k8a_gen.nim\")\n" &
+      "    o.kind = okExact\n" &
+      "  except PinFailure as e:\n" &
+      "    o.msg = e.msg\n" &
+      "    o.kind = if o.trusted and o.status != \"sxUnknown\": okDisagree " &
+      "else: okDecline\n" &
+      "  result.add o\n"
   src.add "proc runBatch_" & tag & "*(): seq[GenOutcome] =\n  var o: GenOutcome\n"
   src.add runs
   when defined(k8aDump): echo "K8ADUMP-BEGIN ", tag, "\n", src, "K8ADUMP-END"
   parseStmt(src)
+
+macro genCases*(cases: static seq[Case]; plant: static bool;
+                tag: static string): untyped =
+  emitCases(cases, plant, tag)
+
+macro genBatch*(progs: static seq[Prog]; plant: static bool;
+                tag: static string): untyped =
+  var cases: seq[Case]
+  for p in progs:
+    cases.add Case(prog: p, tw: twNone)
+    for tw in applicable(p): cases.add Case(prog: p, tw: tw)
+  emitCases(cases, plant, tag)
 
 # --- findings ----------------------------------------------------------------
 

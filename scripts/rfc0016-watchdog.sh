@@ -30,6 +30,15 @@
 #     than MAX_AGE_DAYS, FAILS. It cannot silently never check: landing K8a-job
 #     arms the check with no further edit, and K8a-job's own slice is not done
 #     until this step is green after its first nightly.
+#   - FIRST-HEARTBEAT GRACE: between the commit that adds the workflow and its
+#     first run there is necessarily no heartbeat (workflow_dispatch needs the
+#     file on the default branch). For GRACE_DAYS (default 2: the next 03:17
+#     cron plus a day's margin) after the workflow's first commit, a missing
+#     heartbeat is a loud warning, not a failure. The age is the committer
+#     date of the earliest commit touching `k8a-*.yaml` reachable from
+#     GITHUB_SHA, read from the GitHub API (a shallow checkout cannot answer
+#     it: every file looks added in the one commit it has). An unreadable age
+#     grants no grace. A stale heartbeat, or an expired one, never gets grace.
 #
 # (b) THE F ROW. An issue "has an F row" when a row of the handoff's F ledger
 # (docs/rfc/0016-native-parity-hardening.handoff.md, rows starting `| F-`)
@@ -42,11 +51,14 @@ cd "$(dirname "$0")/.."
 MAX_AGE_DAYS="${MAX_AGE_DAYS:-7}"
 LEDGER="${LEDGER:-docs/rfc/0016-native-parity-hardening.handoff.md}"
 WORKFLOWS_DIR="${WORKFLOWS_DIR:-.github/workflows}"
+GRACE_DAYS="${GRACE_DAYS:-2}"
 now() { echo "${NOW_EPOCH:-$(date -u +%s)}"; }
 epoch() { date -u -d "$1" +%s; }
 summary() { if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then echo "$*" >> "$GITHUB_STEP_SUMMARY"; fi; echo "$*"; }
 
-# heartbeat_check <artifacts-json>  (the `gh api .../artifacts?name=...` body)
+# heartbeat_check <artifacts-json> [armed-since-epoch]
+#   (the `gh api .../artifacts?name=...` body; the epoch of the workflow's
+#   first commit, empty when unknown)
 heartbeat_check() {
   local json="$1" armed=0
   compgen -G "$WORKFLOWS_DIR/k8a-*.yaml" > /dev/null && armed=1
@@ -57,6 +69,13 @@ heartbeat_check() {
   fi
   local newest
   newest="$(printf '%s' "$json" | jq -r '[.artifacts[] | select(.name == "k8a-heartbeat" and (.expired | not))] | sort_by(.created_at) | last | .created_at // empty')"
+  local since="${2:-}"
+  if [ -z "$newest" ] && [ -n "$since" ] && [ $(( $(now) - since )) -le $(( GRACE_DAYS * 86400 )) ]; then
+    local hrs=$(( ( $(now) - since ) / 3600 ))
+    echo "::warning title=K8a heartbeat awaiting first run::the k8a workflow landed ${hrs}h ago and has not beaten yet; this fails after ${GRACE_DAYS} days"
+    summary "- K8a heartbeat: ARMED, awaiting the first run (workflow ${hrs}h old; grace ${GRACE_DAYS} days)"
+    return 0
+  fi
   if [ -z "$newest" ]; then
     echo "::error title=K8a heartbeat missing::a k8a-*.yaml workflow exists but no unexpired k8a-heartbeat artifact does"
     summary "- K8a heartbeat: FAIL, no unexpired \`k8a-heartbeat\` artifact"
@@ -110,6 +129,13 @@ self_test() {
   t 0 "armed, fresh heartbeat" heartbeat_check "$fresh"
   t 1 "armed, stale heartbeat" heartbeat_check "$old"
   t 1 "armed, no heartbeat" heartbeat_check "$none"
+  local young old_since
+  young="$(date -u -d 2026-11-19T12:00:00Z +%s)"; old_since="$(date -u -d 2026-11-10T00:00:00Z +%s)"
+  t 0 "armed 12h ago, no heartbeat yet: grace" heartbeat_check "$none" "$young"
+  grep -q 'awaiting the first run' "$d/out" || { echo "self-test FAILED: grace is not loud"; bad=1; }
+  t 1 "armed 10 days ago, no heartbeat: grace over" heartbeat_check "$none" "$old_since"
+  t 1 "armed 12h ago but the heartbeat is stale: no grace" heartbeat_check "$old" "$young"
+  t 1 "armed, age unknown, no heartbeat: no grace" heartbeat_check "$none" ""
   t 1 "armed, only expired heartbeat" heartbeat_check '{"artifacts":[{"name":"k8a-heartbeat","expired":true,"created_at":"2026-11-19T03:00:00Z"}]}'
   t 0 "no intake issues" intake_check '[]'
   t 0 "old issue with an F row" intake_check '[{"number":12,"createdAt":"2026-11-01T00:00:00Z","title":"a"}]'
@@ -127,7 +153,15 @@ rc=0
 repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY unset}"
 summary "### RFC-0016 watchdog"
 arts="$(gh api "repos/$repo/actions/artifacts?name=k8a-heartbeat&per_page=100")" || { echo "::error::could not list artifacts"; exit 1; }
-heartbeat_check "$arts" || rc=1
+since=""
+if compgen -G "$WORKFLOWS_DIR/k8a-*.yaml" > /dev/null; then
+  for f in "$WORKFLOWS_DIR"/k8a-*.yaml; do
+    d="$(gh api --paginate "repos/$repo/commits?path=$f&sha=${GITHUB_SHA:-HEAD}&per_page=100" -q '.[].commit.committer.date' 2>/dev/null | tail -1)"
+    [ -n "$d" ] || continue
+    e="$(epoch "$d")"; { [ -z "$since" ] || [ "$e" -lt "$since" ]; } && since="$e"
+  done
+fi
+heartbeat_check "$arts" "$since" || rc=1
 issues="$(gh issue list --repo "$repo" --label rfc-0016-intake --state open --limit 200 --json number,createdAt,title)" \
   || { echo "::error::could not list rfc-0016-intake issues"; exit 1; }
 intake_check "$issues" || rc=1

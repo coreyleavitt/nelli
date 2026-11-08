@@ -161,12 +161,9 @@ func exceptStmt(p: Prog; swapHandlers: bool; ind: string): string =
 
 func applicable*(p: Prog): seq[Twin] =
   if p.shape == shExcept:
-    # FINDING K8A-1: `except T as e:` inside a statement `template` in a proc
-    # stops the compile ("node has no type", dsl_parser routeScan ->
-    # dsl_typebridge viewTypeInst) instead of declining. The twin is withheld
-    # for `as e` programs until that is fixed, or it would stop this suite.
-    if p.asE or p.asE2: @[twDead, twExtract, twHandlerSwap]
-    else: @[twDead, twExtract, twTemplate, twHandlerSwap]
+    # K8A-1 (fixed in ec719a37): the template twin of an `as e` handler once
+    # stopped the compile in routeScan; it now runs for every handler shape.
+    @[twDead, twExtract, twTemplate, twHandlerSwap]
   else:
     @[twDead, twComm, twExtract, twTemplate, twVar, twNegPred]
 
@@ -318,11 +315,10 @@ macro genBatch*(progs: static seq[Prog]; plant: static bool;
         ")\n" &
         "  try:\n" &
         "    discard pinExactImpl(" & name &
-        ", captureRes(symexFind(" & name & ", tLabel(\"hit\"), " &
-        "pinSettingsConst), o, " & $plant & "), " &
+        ", claimed(captureRes(symexFind(" & name & ", tLabel(\"hit\"), " &
+        "pinSettingsConst), o, " & $plant & "), \"symexFind\"), " &
         "cellKey(axConstruct, \"k8a-gen/" & ($p.shape)[2 .. ^1] & "\"), " &
-        "tLabel(\"hit\"), " & dom & ", \"tsymex_0016_k8a_gen.nim\", " &
-        "\"symexFind\")\n" &
+        "tLabel(\"hit\"), " & dom & ", \"tsymex_0016_k8a_gen.nim\")\n" &
         "    o.kind = okExact\n" &
         "  except PinFailure as e:\n" &
         "    o.msg = e.msg\n" &

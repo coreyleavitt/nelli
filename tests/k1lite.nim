@@ -185,7 +185,7 @@ suite "K1-0: the seven section 5.0 rows have evidence on this build row":
     var recs = loadRecords()
     let k = cellKey(axConstruct, "conv/float32<-float64")
     for r in recs.mitems:
-      if r.cell == k: r.build = r.build.replace("+be=", "+be=other")
+      if r.cell == k: r.build = r.build.replace(";backend=", ";backend=other")
     let fails = joinRows(recs, rows, here)
     check fails.named("W-04", k)
     check fails.anyIt("foreign record" in it)

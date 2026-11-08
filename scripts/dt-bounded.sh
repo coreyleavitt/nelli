@@ -53,7 +53,25 @@ fi
 if [ -n "$host" ]; then
   # `timeout` puts the child in its own process group and, on expiry, signals
   # the whole group, so the compiled test binary dies with nim.
-  timeout --signal=KILL "$timeout_secs" bash scripts/run-one.sh "$backend" "$test_file"
+  #
+  # RFC-0016 CI-A3: the container gives each test a private /tmp and exactly
+  # fds 0-2; a bare host gives it the sweep's shared /tmp and whatever fds the
+  # CI runner leaked into the process tree. Both bit (run 42434354454):
+  #   - tfuzzcovdump / tfuzzcovreset build into /tmp/ptcov_build_<backend>_<n>
+  #     and, run side by side, one links the other's tu0.o (`undefined
+  #     reference to helper`);
+  #   - tfuzzworkerprocess (R23) / tfuzzworkerspawnfailshm (R53) tighten
+  #     RLIMIT_NOFILE to (open-fd count + 1) so pipe() must fail, which holds
+  #     only if the fds are contiguous; the runner's leaked fds 142 and 145
+  #     put the limit at 7, below them, so pipe() took fds 4 and 5 and
+  #     succeeded.
+  # So the host run gets the same two things: its own TMPDIR, and fds above 2
+  # closed before the test starts.
+  host_tmp="$(mktemp -d)"
+  trap 'rm -rf "$host_tmp"' EXIT
+  TMPDIR="$host_tmp" timeout --signal=KILL "$timeout_secs" bash -c '
+    for f in /proc/self/fd/*; do n="${f##*/}"; [ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"; done 2>/dev/null
+    exec bash scripts/run-one.sh "$@"' _ "$backend" "$test_file"
 else
   # Unique container name so we can guarantee teardown even if `timeout` kills
   # only the podman client and leaves the container detached.

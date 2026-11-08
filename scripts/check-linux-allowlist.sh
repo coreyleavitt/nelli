@@ -62,6 +62,7 @@ check() {
 
 self_test() {
   local d; d="$(mktemp -d)"; local bad=0
+  local PARTIAL=
   printf 'ta\ntb\ntc\ntd\n' > "$d/expect"
   printf 'tb  known host defect\n' > "$d/allow"
   expect_rc() { # want label allow log...

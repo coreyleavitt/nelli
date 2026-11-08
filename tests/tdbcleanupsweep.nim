@@ -89,37 +89,54 @@ suite "E-cleanup C1: campaign-startup sweep — superseded corpus generations":
     check fileExists(dbPath / "multiB.corpus.1.log")      # multiB's only generation: untouched
 
 when defined(posix):
+  import std/osproc
+
   suite "E-cleanup C1: campaign-startup sweep — stale nelli shm segments":
     proc leakShmFile(name: string) =
-      ## Simulates a `shm_open`-created segment a prior campaign never
-      ## cleaned up: on Linux, `shm_open("/foo", ...)` materializes as an
-      ## ordinary file at `/dev/shm/foo` (the leading slash stripped) — so
-      ## planting one by hand faithfully stands in for a real leaked
-      ## segment without needing an actual crashed worker.
+      ## Simulates a `shm_open`-created segment: on Linux,
+      ## `shm_open("/foo", ...)` materializes as an ordinary file at
+      ## `/dev/shm/foo` (the leading slash stripped) — so planting one by
+      ## hand faithfully stands in for a real segment.
       writeFile("/dev/shm" / name, "leaked")
 
     proc shmFileExists(name: string): bool =
       fileExists("/dev/shm" / name)
 
+    proc deadPid(): int =
+      ## The pid of a child that has already been reaped: no live process
+      ## owns it, so a segment named after it is a genuine leftover.
+      let p = startProcess("/bin/true")
+      result = processID(p)
+      discard waitForExit(p)
+      close(p)
+
+    var staleName, liveName, liveCtrName, foreignName: string
     setup:
       let dbPath = getTempDir() / "nelli_test_cleanupsweep_shm_db"
       removeDir(dbPath)
-      let staleName = "nelli_stale_test_" & $getCurrentProcessId()
-      let foreignName = "otherapp_live_test_" & $getCurrentProcessId()
-      leakShmFile(staleName)
-      leakShmFile(foreignName)
+      let me = $getCurrentProcessId()
+      staleName = "nelli_stale_test_" & $deadPid() & "_3"
+      liveName = "nelli_live_test_" & me
+      liveCtrName = "nelli_live_ctr_test_" & me & "_7"
+      foreignName = "otherapp_live_test_" & me
+      for n in [staleName, liveName, liveCtrName, foreignName]: leakShmFile(n)
     teardown:
       removeDir(dbPath)
-      try: removeFile("/dev/shm" / ("nelli_stale_test_" & $getCurrentProcessId()))
-      except OSError: discard
-      try: removeFile("/dev/shm" / ("otherapp_live_test_" & $getCurrentProcessId()))
-      except OSError: discard
+      for n in [staleName, liveName, liveCtrName, foreignName]:
+        try: removeFile("/dev/shm" / n)
+        except OSError: discard
 
-    test "a nelli-prefixed shm segment is swept; a foreign-prefixed one is left untouched":
-      check shmFileExists(staleName)
-      check shmFileExists(foreignName)
-
+    test "a nelli-prefixed segment of a dead process is swept; a foreign-prefixed one is left untouched":
       discard newExampleDB(dbPath)                        # campaign-startup sweep trigger
-
-      check not shmFileExists(staleName)                  # nelli's own leaked segment: reclaimed
+      check not shmFileExists(staleName)                  # leftover of a dead owner: reclaimed
       check shmFileExists(foreignName)                     # a foreign process's segment: untouched
+
+    test "a nelli-prefixed segment whose owning pid is ALIVE survives the sweep (a concurrent campaign's live channel)":
+      # Root cause of the intermittent tfuzzcmplogshm red (CI run
+      # 42480895818): the sweep unlinked every `nelli_*` entry, including the
+      # live segments of a sibling process on the same host, so that
+      # process's late first attach created a fresh EMPTY segment.
+      discard newExampleDB(dbPath)
+      check shmFileExists(liveName)
+      check shmFileExists(liveCtrName)                    # `<pid>_<counter>` shape
+

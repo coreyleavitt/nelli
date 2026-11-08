@@ -80,4 +80,8 @@ suite "K8a-gen":
       echo "FINDING ", f
     check findings(progs, outs, k8aSeed).len == 0
     check d.exact + d.sampledExact > 0
-    for sh in Shape: check d.byShape[sh] > 0
+    # Programs take shapes round-robin (`id mod` the shape count), so a run of
+    # at least one program per shape must reach every shape; a smaller
+    # -d:k8aCount covers only the first k8aCount shapes.
+    for sh in Shape:
+      if ord(sh) < k8aCount: check d.byShape[sh] > 0

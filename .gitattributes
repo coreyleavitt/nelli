@@ -1,0 +1,2 @@
+# Shell scripts run under Git Bash on the Windows legs; CRLF would break them.
+*.sh text eol=lf

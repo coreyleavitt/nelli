@@ -11,7 +11,7 @@ import ./s8cu_helpers
 import ./s0016_k8a_gen
 import ./s0016_k8a_sink
 
-let tmp = getTempDir() / ("k8a_sink_" & $getCurrentProcessId())
+let tmp = (getTempDir() / ("k8a_sink_" & $getCurrentProcessId())).replace("\\", "/")
 createDir(tmp)
 putEnv("NELLI_PIN_DIR", tmp)
 
@@ -29,7 +29,40 @@ genCases(roundCs, true, "sink")
 
 const stub = "#!/bin/sh\necho \"$@\" >> \"" & "GHLOG" & "\"\nexit 1\n"
 
-proc sh(cmd: string): (string, int) = execCmdEx("bash -c '" & cmd & "'")
+proc bashExe(): string =
+  ## The bash that runs scripts/*.sh. On Windows a bare `bash` resolves to
+  ## System32's WSL launcher (which only prints "no installed distributions"),
+  ## so Git for Windows' own bash is taken from beside `git`, and a missing one
+  ## is a loud failure, never a skip.
+  when defined(windows):
+    let g = findExe("git")
+    if g.len > 0:
+      let b = g.parentDir.parentDir / "bin" / "bash.exe"
+      if fileExists(b): return b
+    let pf = getEnv("ProgramFiles", r"C:\Program Files") / "Git" / "bin" / "bash.exe"
+    doAssert fileExists(pf), "Git for Windows' bash.exe not found"
+    pf
+  else:
+    "bash"
+
+var runSeq = 0
+
+proc runBash(args: seq[string]; stdinText = ""): (string, int) =
+  ## bash with `args`, stderr merged into the output. No shell sits between us
+  ## and bash, so quoting means the same on every platform. Stdin and output go
+  ## through files, not pipes: reading a Git Bash child's stdout pipe on Windows
+  ## came back truncated after its first line.
+  inc runSeq
+  let inF = tmp / ("in" & $runSeq & ".txt")
+  let outF = tmp / ("out" & $runSeq & ".txt")
+  writeFile(inF, stdinText)
+  let p = startProcess(bashExe(),
+    args = @["-c", "o=\"$1\"; i=\"$2\"; shift 2; bash \"$@\" > \"$o\" 2>&1 < \"$i\"",
+             "bash", outF, inF] & args,
+    options = {poStdErrToStdOut, poUsePath})
+  let rc = p.waitForExit()
+  p.close()
+  (readFile(outF), rc)
 
 proc sink(args: string; ghlog: string): string =
   ## Runs scripts/k8a-sink.sh with a `gh` on PATH that records every call and
@@ -38,8 +71,10 @@ proc sink(args: string; ghlog: string): string =
   createDir(bin)
   writeFile(bin / "gh", stub.replace("GHLOG", ghlog))
   setFilePermissions(bin / "gh", {fpUserExec, fpUserRead, fpUserWrite})
-  let (o, rc) = execCmdEx("PATH=" & bin & ":$PATH bash scripts/k8a-sink.sh file " &
-                          args & " --dry-run 2>&1")
+  if not getEnv("PATH").startsWith(bin):
+    putEnv("PATH", bin & $PathSep & getEnv("PATH"))
+  let (o, rc) = runBash(@["scripts/k8a-sink.sh", "file"] &
+                        args.splitWhitespace & @["--dry-run"])
   check rc == 0
   o
 
@@ -117,7 +152,7 @@ suite "K8a-sink":
               "annotationViolations: 2", "something else"]:
       let p = tmp / "pairin.txt"
       writeFile(p, f)
-      let (o, rc) = execCmdEx("bash scripts/k8a-sink.sh pair < " & p)
+      let (o, rc) = runBash(@["scripts/k8a-sink.sh", "pair"], readFile(p))
       check rc == 0
       check o.strip() == verdictPair(f)
 
@@ -167,7 +202,7 @@ suite "K8a-sink":
     check not fileExists(ghlog)
 
   test "the shell self-test passes":
-    let (o, rc) = execCmdEx("bash scripts/k8a-sink.sh --self-test 2>&1")
+    let (o, rc) = runBash(@["scripts/k8a-sink.sh", "--self-test"])
     check rc == 0
     check "self-test: ok" in o
 

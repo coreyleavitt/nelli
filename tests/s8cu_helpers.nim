@@ -2,6 +2,10 @@
 import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
             options, streams, tempfiles]
 import nelli/symex
+import nelli/db
+import nelli/choice
+import nelli/int128
+import nelli/engine/types
 import nelli/smt/admission
 import nelli/smt/buildprofile
 export admission
@@ -262,6 +266,142 @@ proc kindsOf(errs: seq[SymexErrorInfo]): string =
 proc pinFail(msg: string) {.noreturn.} =
   raise newException(PinFailure, msg)
 
+# --- entry-point adapters --------------------------------------------------
+#
+# A pin goes through a public entry point (RFC-0016 section 10) chosen with
+# `pinExact(..., via = ...)`. An adapter runs the entry point and returns a
+# `Claimed`: the verdict as a `SymexResult` plus the entry's name. The name is
+# written only here, beside the call it names, so a record's `entry` cannot
+# say an entry point the verdict did not come through.
+
+type
+  Claimed*[T] = object
+    res*: SymexResult[T]
+    entry*: string
+
+proc claimed*[T](res: SymexResult[T]; entry: string): Claimed[T] =
+  Claimed[T](res: res, entry: entry)
+
+proc statusResult[T](st: SymexStatusKind; w: T; s: Soundness): SymexResult[T] =
+  case st
+  of sxSat: SymexResult[T](status: sxSat, witness: w, soundness: s)
+  of sxUnsat: SymexResult[T](status: sxUnsat, soundness: s)
+  else: SymexResult[T](status: sxUnknown, soundness: s)
+
+proc decodeWitness*[T: tuple](nodes: seq[ChoiceNode]): T =
+  ## A witness's choice sequence as the parameter tuple: one integer or
+  ## boolean node per field, in order.
+  var i = 0
+  for f in fields(result):
+    if i >= nodes.len:
+      raise newException(PinFailure, "pin: a witness of " & $nodes.len &
+        " choices does not cover " & $T)
+    let n = nodes[i]
+    inc i
+    when f is bool:
+      if n.kind != ckBoolean:
+        raise newException(PinFailure, "pin: choice " & $(i - 1) & " is not a bool")
+      f = n.boolVal
+    elif f is SomeInteger:
+      if n.kind != ckInteger:
+        raise newException(PinFailure, "pin: choice " & $(i - 1) & " is not an integer")
+      f = typeof(f)(n.intVal.toInt64)
+    else:
+      {.error: "pin: finding witnesses decode integer and bool parameters only".}
+
+proc fromFinding*[T](f: SymexFinding; entry: string): Claimed[T] =
+  ## A `SymexFinding` (`symexFindAllWitnesses`, `symexForAll`,
+  ## `assertCoveredBy`) as a typed verdict. The witness is decoded from its
+  ## choices; a raise finding is not an exact claim here.
+  let st = case f.status
+    of sfSat: sxSat
+    of sfUnsat: sxUnsat
+    else: sxUnknown
+  let w = if st == sxSat: decodeWitness[T](f.witnessChoices) else: default(T)
+  Claimed[T](res: statusResult(st, w, f.soundness), entry: entry)
+
+proc findingFor*(fs: openArray[SymexFinding]; t: SymexTarget): SymexFinding =
+  for f in fs:
+    if f.targetDesc == describeTarget(t): return f
+  raise newException(PinFailure, "pin: no finding for " & describeTarget(t) &
+    " among " & $fs.len)
+
+proc fromVerdict*[T](v: Option[CachedVerdict]; entry: string): Claimed[T] =
+  ## A `loadSymexVerdict` hit: its stored status and soundness, no witness.
+  if v.isNone:
+    raise newException(PinFailure, "pin: the cache holds no verdict")
+  let st = if v.get.status == sfUnsat: sxUnsat else: sxUnknown
+  Claimed[T](res: statusResult(st, default(T), v.get.soundness), entry: entry)
+
+proc fromFlip*[T](r: ConcolicFlipResult; entry: string): Claimed[T] =
+  ## A `concolicFlip` outcome. It carries no soundness record, so the claim is
+  ## `rsNotNeeded` and the pin's native run is its only evidence: a solved
+  ## flip is a witness, a proven-infeasible one an `sxUnsat`, anything else
+  ## (an optimistic relaxation included) is `sxUnknown`.
+  let s = Soundness(replay: rsNotNeeded)
+  case r.outcome
+  of cfoSolvedExact:
+    Claimed[T](res: statusResult(sxSat, decodeWitness[T](r.materialized), s),
+               entry: entry)
+  of cfoUnsat:
+    Claimed[T](res: statusResult(sxUnsat, default(T), s), entry: entry)
+  else:
+    Claimed[T](res: statusResult(sxUnknown, default(T), s), entry: entry)
+
+template witnessTypeOf*(fn: untyped): untyped =
+  typeof(symexFind(fn, tLabel("hit"), pinSettingsConst).witness)
+
+template viaFind*(fn, target: untyped): untyped =
+  claimed(symexFind(fn, target, pinSettingsConst), "symexFind")
+
+template viaFindAll*(fn, target: untyped): untyped =
+  fromFinding[witnessTypeOf(fn)](
+    findingFor(symexFindAllWitnesses(fn, inMemoryDatabase(), pinSettingsConst),
+               target), "symexFindAllWitnesses")
+
+template viaForAll*(fn, target, strategy: untyped): untyped =
+  ## `strategy` yields `fn`'s parameter (a tuple for several).
+  fromFinding[witnessTypeOf(fn)](
+    findingFor(symexForAll(strategy, fn, inMemoryDatabase(),
+                           pinSettingsConst).symexFindings, target),
+    "symexForAll")
+
+template viaCovered*(fn, target: untyped): untyped =
+  block:
+    var cov: SymexFinding
+    try:
+      cov = assertCoveredBy(fn, target, fn, pinSettingsConst)
+    except SymexCoverageDefect as e:
+      raise newException(PinFailure, "pin: assertCoveredBy refused its own " &
+        "witness: " & e.msg)
+    fromFinding[witnessTypeOf(fn)](cov, "assertCoveredBy")
+
+template viaCache*(fn, target: untyped): untyped =
+  ## A cold `symexFindAllWitnesses` fills the database; the claim is what
+  ## `loadSymexVerdict` then serves (a non-SAT verdict).
+  block:
+    let cacheDb = inMemoryDatabase()
+    discard symexFindAllWitnesses(fn, cacheDb, pinSettingsConst)
+    fromVerdict[witnessTypeOf(fn)](
+      loadSymexVerdict(cacheDb, fn, target, pinSettingsConst),
+      "loadSymexVerdict")
+
+template viaConcolic*(fn, target, trace, bindings, branch: untyped): untyped =
+  ## Flip the recorded decision `branch` of `trace` and read the new draws.
+  ## `target` is what the flipped run is native-checked against.
+  fromFlip[witnessTypeOf(fn)](
+    concolicFlip(fn, trace, bindings, branch, pinSettingsConst), "concolic")
+
+macro viaClaim(via, fn, target: untyped): untyped =
+  ## `via` is an adapter name, or a call of one with its extra arguments;
+  ## `fn` and `target` are put in front of those.
+  if via.kind in {nnkIdent, nnkSym}:
+    result = newCall(via, fn, target)
+  else:
+    result = copyNimTree(via)
+    result.insert(1, fn)
+    result.insert(2, target)
+
 # --- pinExact --------------------------------------------------------------
 
 proc pinJudge*[T, D](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
@@ -324,8 +464,8 @@ proc paramCount(fn: NimNode): int =
   let fp = ty[0]
   for i in 1 ..< fp.len: result += fp[i].len - 2
 
-macro pinExactImpl*(fn: typed; claim, key, target, domain, file,
-                    entry: untyped): untyped =
+macro pinExactImpl*(fn: typed; claim, key, target, domain,
+                    file: untyped): untyped =
   let n = paramCount(fn)
   let res = genSym(nskLet, "res")
   let tgt = genSym(nskLet, "tgt")
@@ -357,25 +497,29 @@ macro pinExactImpl*(fn: typed; claim, key, target, domain, file,
       let `tgt` = `target`
       let `dom` = `domain`
       let `res` = `claim`
-      pinJudge(`res`, `key`, `tgt`, `dom`, `file`,
-        proc (`w`: typeof(`res`.witness)): NativeRun = nativeRun(`wcall`),
+      pinJudge(`res`.res, `key`, `tgt`, `dom`, `file`,
+        proc (`w`: typeof(`res`.res.witness)): NativeRun = nativeRun(`wcall`),
         proc (`vals`: seq[typeof(`dom`.values[0])];
               `hit`: proc (n: NativeRun): bool): string =
           var `found` = ""
           `loops`
           `found`,
-        `entry`)
+        `res`.entry)
 
 template pinExact*(fn: untyped; key: CellKey;
                    target: untyped = tLabel("hit");
-                   domain: untyped = boundaryInts): untyped =
-  ## Differential exact pin; returns the `SymexResult`. `sxSat`: the witness
+                   domain: untyped = boundaryInts;
+                   via: untyped = viaFind): untyped =
+  ## Differential exact pin; returns the `SymexResult`. `via` names the public
+  ## entry point the verdict comes through (an adapter above, with its extra
+  ## arguments, e.g. `via = viaForAll(integers(0, 10))`); the record's `entry`
+  ## is that entry point. `sxSat`: the witness
   ## hits natively. `sxUnsat`: no domain value hits (every combination across
   ## the parameters; each parameter takes the domain's element type).
   ## `sxUnknown` or untrusted: fails with `PinFailure`. A raise is a target:
   ## `target = tRaisedExn("ValueError")`.
-  pinExactImpl(fn, symexFind(fn, target, pinSettingsConst), key, target, domain,
-               instantiationInfo(-1).filename, "symexFind")
+  pinExactImpl(fn, viaClaim(via, fn, target), key, target, domain,
+               instantiationInfo(-1).filename)
 
 template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
                      target: untyped = tLabel("hit");
@@ -383,8 +527,8 @@ template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
   ## `pinExact`'s judgement over a verdict the caller supplies instead of the
   ## walker's: the way a test plants a wrong claim and sees the pin refuse it.
   ## Its record's entry is "caller", not a public entry point: K1 refuses it.
-  pinExactImpl(fn, claim, key, target, domain, instantiationInfo(-1).filename,
-               "caller")
+  pinExactImpl(fn, claimed(claim, "caller"), key, target, domain,
+               instantiationInfo(-1).filename)
 
 # --- pinDecline ------------------------------------------------------------
 

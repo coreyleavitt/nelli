@@ -1700,6 +1700,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cu_nil_native",
             # RFC-0016 K9a: the native-pin verbs and the pin record.
             "tsymex_0016_k9a_pins",
+            "tsymex_0016_k9d0_entries",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

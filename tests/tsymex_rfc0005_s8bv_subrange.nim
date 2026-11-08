@@ -37,6 +37,13 @@ template verdict(sut: untyped; label: string): SymexResult =
 
 from ./s8cu_helpers import nativeHits
 
+type
+  E4 = enum e0, e1, e2, e3
+  SE = range[e1..e2]
+  RI = range[0..9]
+  RJ = range[0..20]
+  RC = range['a'..'z']
+
 proc setConvNodes(n: NimNode): int =
   if n.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
      n.getTypeInst.typeKind == ntySet:

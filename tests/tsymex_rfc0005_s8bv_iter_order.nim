@@ -34,6 +34,8 @@ template verdict(sut: untyped; label: string): SymexResult =
 
 from ./s8cu_helpers import nativeHits
 
+type E4 = enum e0, e1, e2, e3
+
 proc itOrder(s: set[E4]) =
   # Ascending order: {e1, e3} accumulates 2 then 4.
   var acc = 0

@@ -34,6 +34,8 @@ template verdict(sut: untyped; label: string): SymexResult =
 
 from ./s8cu_helpers import nativeHits
 
+type E4 = enum e0, e1, e2, e3
+
 proc itInt8First(s: set[int8]) =
   var first = 0'i8
   var seen = false

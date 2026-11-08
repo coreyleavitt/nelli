@@ -330,7 +330,8 @@ jobs:
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
       - name: W-63, the JIT PCRE rows ran on this Windows leg
-        if: ${{ matrix.leg == 'msvc' && !cancelled() }}
+        # a dispatch narrowed by tests_regex need not include the JIT suites
+        if: ${{ matrix.leg == 'msvc' && !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.tests_regex != '') }}
         run: |
           cat shards/jit-rows-*.txt | sort | tee out/jit-rows.txt
           # every JIT suite must have run its tests (ok > 0) and skipped none

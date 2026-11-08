@@ -96,12 +96,14 @@ func render*(l: Lit; ty: string): string =
 
 func rtype(p: Prog): string = (if p.shape == shF32: "float64" else: p.ty)
 
-func domainSrc(p: Prog): string =
-  ## The native domain, as a `Domain[T]` expression. 8-bit types are
-  ## exhaustive; the rest are §10's boundary set plus the shape's edges.
+func domainElems*(p: Prog): string =
+  ## The native domain's values, as a `seq`/array expression (no helper
+  ## needed, so a runner built against an older engine can enumerate it).
+  ## 8-bit types are exhaustive; the rest are §10's boundary set plus the
+  ## shape's edges.
   let t = p.ty
   if t in ["int8", "uint8"]:
-    return "exhaustive(toSeq(low(" & t & ")..high(" & t & ")))"
+    return "toSeq(low(" & t & ")..high(" & t & "))"
   var vs: seq[string]
   if isSigned(t):
     vs = @["low(" & t & ")", "low(" & t & ")+1", t & "(-1)", t & "(0)",
@@ -114,7 +116,12 @@ func domainSrc(p: Prog): string =
     vs.add [t & "(16777216)", t & "(16777217)", t & "(-16777217)"]
   if p.shape == shDivLit and p.lit.kind == lkNum:
     vs.add t & "(" & $(p.lit.n) & ")"
-  "sampled([" & vs.join(", ") & "])"
+  "[" & vs.join(", ") & "]"
+
+func domainSrc(p: Prog): string =
+  ## The native domain, as a `Domain[T]` expression.
+  if p.ty in ["int8", "uint8"]: "exhaustive(" & domainElems(p) & ")"
+  else: "sampled(" & domainElems(p) & ")"
 
 func core(p: Prog; swap: bool): string =
   let t = p.ty

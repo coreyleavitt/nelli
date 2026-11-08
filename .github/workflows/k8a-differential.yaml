@@ -1,0 +1,174 @@
+name: k8a-differential
+
+# RFC-0016 K8a-job (§10, §11): the nightly differential fuzz. One Linux build
+# row per night by rotation (scripts/k8a-nightly.sh plan: day-of-year mod 3
+# over linux-c, linux-cpp and linux-c-z3-4.13.4), the K8a generator at a
+# nightly budget on a date-derived seed, the disagreement report and pin
+# records uploaded, the release column of the three-way table filled from the
+# last v* tag's engine, and a dated heartbeat.
+#
+# NOT ON PUSH. The job runs on `schedule` and `workflow_dispatch` only. Inputs
+# on dispatch: `ref` (what to test), `row` (override the rotation), `seed`,
+# `count`, `tag` (the release to compare against, `none` skips the column).
+#
+# THE HEARTBEAT. scripts/rfc0016-watchdog.sh arms itself on this file
+# (`.github/workflows/k8a-*.yaml`) and reads the `created_at` of the newest
+# unexpired artifact named `k8a-heartbeat`; over seven days old (or missing)
+# fails the symex-linux watchdog job. So the artifact is uploaded on every run
+# that got as far as running the driver, whatever the driver found (a
+# disagreement is the job working), with retention 30 days (the watchdog needs
+# at least 14). Its content is one line: the UTC time, row, seed, count, tag
+# and the differential's exit status.
+#
+# THE RELEASE COLUMN, and why it is built the way it is: see the header of
+# scripts/k8a-nightly.sh. Triage (opening issues per shape hash) is K8a-sink,
+# not this slice: a red job and the uploaded `k8a-findings-*` artifact are the
+# sink's input.
+#
+# COUNT. The default budget is sized for 30-60 minutes of the differential on
+# a hosted runner; the first dispatch after landing records the real wall time
+# in the step summary, and the default is tuned from that figure.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test (default: the workflow's own ref)"
+        required: false
+        default: ""
+      row:
+        description: "Build row (empty = tonight's rotation): linux-c, linux-cpp or linux-c-z3-4.13.4"
+        required: false
+        default: ""
+      seed:
+        description: "Generator seed (empty = the date as YYYYMMDD)"
+        required: false
+        default: ""
+      count:
+        description: "Programs to generate"
+        required: false
+        default: ""
+      tag:
+        description: "Release tag for the release column (empty = newest v* tag, 'none' = skip)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  K8A_DEFAULT_COUNT: "250"
+
+jobs:
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Plan tonight's run (row, seed, Z3)
+        id: plan
+        shell: bash
+        env:
+          ROW: ${{ inputs.row }}
+          SEED: ${{ inputs.seed }}
+        run: |
+          set -euo pipefail
+          bash scripts/k8a-nightly.sh --self-test
+          args=()
+          [ -z "$ROW" ] || args+=(--row "$ROW")
+          [ -z "$SEED" ] || args+=(--seed "$SEED")
+          bash scripts/k8a-nightly.sh plan "${args[@]}" | tee -a "$GITHUB_OUTPUT"
+          bash scripts/k8a-nightly.sh plan "${args[@]}" | sed 's/^/plan: /'
+
+      - uses: ./.github/actions/setup-symex-linux
+        with:
+          z3_version: ${{ steps.plan.outputs.z3_version }}
+          z3_asset: ${{ steps.plan.outputs.z3_asset }}
+          z3_sha256: ${{ steps.plan.outputs.z3_sha256 }}
+
+      - name: Run the differential and the three-way column
+        id: run
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+          ROW: ${{ steps.plan.outputs.row }}
+          SEED: ${{ steps.plan.outputs.seed }}
+          COUNT: ${{ inputs.count || env.K8A_DEFAULT_COUNT }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -uo pipefail
+          # The same host flags sweep.sh --host exports (the artifact ships
+          # Nim alone: C compiler, Z3 headers and dep paths are named here).
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          out="$RUNNER_TEMP/k8a"
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          echo "seed=$SEED row=$ROW count=$COUNT"
+          start=$SECONDS
+          args=(-r "$ROW" -s "$SEED" -n "$COUNT" -o "$out" -T 4800)
+          [ -z "$TAG" ] || args+=(-t "$TAG")
+          bash scripts/k8a-nightly.sh run "${args[@]}"
+          rc=$?
+          {
+            echo "### k8a-differential: row $ROW, seed $SEED, count $COUNT"
+            echo "wall time: $(( (SECONDS - start) / 60 )) min, differential exit status $rc"
+            echo '```'
+            command grep -a '^k8a-gen' "$out/differential.log" || true
+            echo '```'
+            echo "findings: $(command grep -c '^FINDING ' "$out/findings.txt" || true)"
+            echo '#### Three-way table (release / head / native)'
+            echo '```'
+            cat "$out/threeway.tsv"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # hashFiles() cannot see $RUNNER_TEMP, so the beat is flagged here.
+          [ ! -s "$out/heartbeat/heartbeat.txt" ] || echo "beat=true" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Upload the disagreement report and pin records
+        if: always() && steps.run.outputs.out != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8a-findings-${{ steps.plan.outputs.date }}-${{ steps.plan.outputs.row }}
+          path: |
+            ${{ steps.run.outputs.out }}/differential.log
+            ${{ steps.run.outputs.out }}/findings.txt
+            ${{ steps.run.outputs.out }}/pins/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload the three-way table
+        if: always() && steps.run.outputs.out != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8a-threeway-${{ steps.plan.outputs.date }}-${{ steps.plan.outputs.row }}
+          path: |
+            ${{ steps.run.outputs.out }}/threeway.tsv
+            ${{ steps.run.outputs.out }}/head.tsv
+            ${{ steps.run.outputs.out }}/tag.tsv
+            ${{ steps.run.outputs.out }}/threeway-head.log
+            ${{ steps.run.outputs.out }}/threeway-tag.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      # The heartbeat the watchdog reads (see the header). Only when the driver
+      # wrote one, i.e. it ran to its end; a job that died earlier must not beat.
+      - name: Upload the heartbeat
+        if: always() && steps.run.outputs.beat == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8a-heartbeat
+          path: ${{ steps.run.outputs.out }}/heartbeat/heartbeat.txt
+          retention-days: 30
+          if-no-files-found: error

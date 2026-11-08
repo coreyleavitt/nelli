@@ -17,6 +17,9 @@
 #        the host through the /work mount anyway).
 #        NELLI_PIN_NOW  if set, forwarded: the clock the pin dates and the
 #        seven-day freshness check read (unix seconds).
+#        NELLI_NIM_FLAGS  if set, forwarded into the container (run-one.sh reads
+#        it), so a caller can pass `-d:name=value` to the test build. A host
+#        run reads it directly.
 #        NELLI_HOST=1  no podman: run scripts/run-one.sh directly on the host
 #        under the same hard-kill timeout (`sweep.sh --host`). The compile
 #        command is scripts/run-one.sh either way.
@@ -91,6 +94,7 @@ else
     -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
     -w /work \
     ${pin_args[@]+"${pin_args[@]}"} \
+    ${NELLI_NIM_FLAGS:+-e NELLI_NIM_FLAGS} \
     "$img" \
     bash scripts/run-one.sh "$backend" "$test_file"
 fi

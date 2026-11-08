@@ -6,6 +6,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_forms")
+
 type K = enum kA, kB, kC, kD
 type P = object
   case k: K
@@ -119,13 +121,13 @@ suite "S8cu: statements":
 
   test "a bare statement under a push, and the pop":
     check native(bareOff(4)) == "hit"
-    declines(bareOff, feCheckOption)
+    pinDecline(bareOff, declKey, feCheckOption)
     check native(barePopped(4)) == "FieldDefect"
     decides(barePopped, sxRaised)
 
   test "a bare statement with no push, and turned back on":
     check native(bareNoPush(4)) == "hit"
-    declines(bareNoPush, feCheckOption)
+    pinDecline(bareNoPush, declKey, feCheckOption)
     check native(bareBackOn(4)) == "FieldDefect"
     decides(bareBackOn, sxRaised)
 
@@ -133,9 +135,9 @@ suite "S8cu: user pragmas":
 
   test "a user pragma as a statement, with and without its own push":
     check native(userStmt(4)) == "hit"
-    declines(userStmt, feCheckOption)
+    pinDecline(userStmt, declKey, feCheckOption)
     check native(userPush(4)) == "hit"
-    declines(userPush, feCheckOption)
+    pinDecline(userPush, declKey, feCheckOption)
     check native(afterUser(4)) == "FieldDefect"
     decides(afterUser, sxRaised)
 
@@ -150,39 +152,39 @@ suite "S8cu: nesting":
     check native(innerOn(4)) == "FieldDefect"
     decides(innerOn, sxRaised)
     check native(innerPopped(4)) == "hit"
-    declines(innerPopped, feCheckOption)
+    pinDecline(innerPopped, declKey, feCheckOption)
 
   test "under `checks: off` the others stay off":
     check native(umbrellaInnerOn(4)) == "FieldDefect"
-    declines(umbrellaInnerOn, feCheckOption)
+    pinDecline(umbrellaInnerOn, declKey, feCheckOption)
 
 suite "S8cu: spelling":
 
   test "`false` and an underscore":
     check native(litFalse(4)) == "hit"
-    declines(litFalse, feCheckOption)
+    pinDecline(litFalse, declKey, feCheckOption)
     check native(underscored(4)) == "hit"
-    declines(underscored, feCheckOption)
+    pinDecline(underscored, declKey, feCheckOption)
 
   test "a value that is no literal is not read, either way":
     check native(constOff(4)) == "hit"
-    declines(constOff, feCheckOption)
+    pinDecline(constOff, declKey, feCheckOption)
     check native(constOn(4)) == "FieldDefect"
-    declines(constOn, feCheckOption)
+    pinDecline(constOn, declKey, feCheckOption)
 
 suite "S8cu: when":
 
   test "decided branches":
     check native(whenTrue(4)) == "hit"
-    declines(whenTrue, feCheckOption)
+    pinDecline(whenTrue, declKey, feCheckOption)
     check native(whenFalse(4)) == "FieldDefect"
     decides(whenFalse, sxRaised)
 
   test "an undecided condition declines, whichever way it went":
     check native(whenTaken(4)) == "hit"
-    declines(whenTaken, feCheckOption)
+    pinDecline(whenTaken, declKey, feCheckOption)
     check native(whenNotTaken(4)) == "FieldDefect"
-    declines(whenNotTaken, feCheckOption)
+    pinDecline(whenNotTaken, declKey, feCheckOption)
 
 suite "S8cu: not checks":
 
@@ -198,4 +200,4 @@ suite "S8cu: a template that pushes":
     check native(beforePushingTemplate(4)) == "FieldDefect"
     decides(beforePushingTemplate, sxRaised)
     check native(viaPushingTemplate(4)) == "hit"
-    declines(viaPushingTemplate, feCheckOption)
+    pinDecline(viaPushingTemplate, declKey, feCheckOption)

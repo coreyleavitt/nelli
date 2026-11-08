@@ -30,12 +30,6 @@ template native*(call: untyped): string =
     if res.len == 0: res = if "hit" in hits: "hit" else: "ran"
     res
 
-template declines*(fn: untyped; kind: SymexErrorKind) =
-  let r = symexFind(fn, tLabel("hit"))
-  checkpoint show(r.errors)
-  check r.status == sxUnknown
-  check r.errors.named(kind)
-
 template nativeHits*(call: untyped): HashSet[string] =
   ## The labels `call` reaches on this build, under a capture frame. The one
   ## shared copy of what thirty-five suites each defined (RFC-0016 K9b).

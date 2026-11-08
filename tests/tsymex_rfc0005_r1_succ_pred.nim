@@ -21,6 +21,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "r1_succ_pred")
+
 type
   C = enum ca, cb, cc
   C5 = enum d5 = 5, d6, d7
@@ -269,8 +271,8 @@ suite "R1-02: succ / pred / inc / dec past an ordinal's end":
     # Native checks the step against the underlying type; `inc` on a
     # distinct is not modelled (the receiver gate), so it must not be sxUnsat.
     check native(incDistinctInt(4)) == "hit"
-    declines(incDistinctInt, feUnsupportedOp)
+    pinDecline(incDistinctInt, declKey, feUnsupportedOp)
     check native(incDistinctInt8(127)) == "OverflowDefect"
-    declines(incDistinctInt8, feUnsupportedOp)
+    pinDecline(incDistinctInt8, declKey, feUnsupportedOp)
     check native(incDistinctEnum(cc)) == "OverflowDefect"
-    declines(incDistinctEnum, feUnsupportedOp)
+    pinDecline(incDistinctEnum, declKey, feUnsupportedOp)

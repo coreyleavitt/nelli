@@ -13,6 +13,8 @@ import nelli/symex
 import ./s8cu_fix_assert
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_assert")
+
 # A module with no assertions push: the iterator's assert is modelled. `uint16`
 # is instantiated nowhere else under a push.
 proc mitemsClean(v: int) =
@@ -48,18 +50,18 @@ suite "S8cu: assertions":
 
   test "`push checks: off` drops assert too, and the routine declines":
     check native(aChecksOff(4)) == "hit"
-    declines(aChecksOff, feCheckOption)
+    pinDecline(aChecksOff, declKey, feCheckOption)
 
   test "an iterator's first instantiation under the push: no assert, declines":
     # Was a false sxRaised: the walker modelled the length check.
     check native(mitemsFirstOff(4)) == "hit"
-    declines(mitemsFirstOff, feCheckOption)
+    pinDecline(mitemsFirstOff, declKey, feCheckOption)
     check native(pairsFirstOff(4)) == "hit"
-    declines(pairsFirstOff, feCheckOption)
+    pinDecline(pairsFirstOff, declKey, feCheckOption)
 
   test "outside the push, in the same module, it declines too":
     check native(mitemsOutside(4)) == "AssertionDefect"
-    declines(mitemsOutside, feCheckOption)
+    pinDecline(mitemsOutside, declKey, feCheckOption)
 
   test "a module with no assertions push keeps the model (control)":
     check native(mitemsClean(4)) == "AssertionDefect"
@@ -74,4 +76,4 @@ suite "S8cu: a global's initialiser under a push":
     check r.status in {sxSat, sxUnknown}
     check r.errors.named(feGlobalHavoc)
     check native(readWrappedNot(4)) == "ran"
-    declines(readWrappedNot, feGlobalHavoc)
+    pinDecline(readWrappedNot, declKey, feGlobalHavoc)

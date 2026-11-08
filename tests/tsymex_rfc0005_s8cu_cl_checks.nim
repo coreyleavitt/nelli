@@ -7,30 +7,32 @@ import nelli/symex
 import ./s8cu_fix_cl
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_cl_checks")
+
 suite "S8cu: --checks:off":
 
   test "every check declines":
     check native(clField(4)) == "hit"
-    declines(clField, feCheckOption)
+    pinDecline(clField, declKey, feCheckOption)
     check native(clOver(high(int))) == "hit"
     ## RFC-0016 W1-d2 (rule a): the build has signed overflow checks off, so
     ## the overflow is an `ubSignedOverflow` halt (not `feOverflowCheckOption`);
     ## `feCheckOption` stays, from the field/range/bound/obj checks this
     ## routine is also compiled without.
-    declines(clOver, ubSignedOverflow)
-    declines(clOver, feCheckOption)
+    pinDecline(clOver, declKey, ubSignedOverflow)
+    pinDecline(clOver, declKey, feCheckOption)
     check native(clRange(300)) == "hit"
-    declines(clRange, feCheckOption)
+    pinDecline(clRange, declKey, feCheckOption)
     check native(clBound(3)) == "hit"
-    declines(clBound, feCheckOption)
+    pinDecline(clBound, declKey, feCheckOption)
     check native(clObj(4)) == "hit"
-    declines(clObj, feCheckOption)
+    pinDecline(clObj, declKey, feCheckOption)
     check native(clPure(7)) == "hit"
-    declines(clPure, feCheckOption)
+    pinDecline(clPure, declKey, feCheckOption)
 
   test "turning one back on leaves the rest off":
     check native(clFieldOn(4)) == "FieldDefect"
-    declines(clFieldOn, feCheckOption)
+    pinDecline(clFieldOn, declKey, feCheckOption)
 
   test "`push checks: on` turns them all back on (control)":
     check native(clAllOn(4)) == "FieldDefect"

@@ -9,6 +9,8 @@ import nelli/symex
 import nelli/smt/canonicalize
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_push")
+
 type K = enum kA, kB, kC, kD
 type P = object
   case k: K
@@ -107,7 +109,7 @@ suite "S8cu: the push form":
 
   test "fieldChecks":
     check native(fieldOff(4)) == "hit"
-    declines(fieldOff, feCheckOption)
+    pinDecline(fieldOff, declKey, feCheckOption)
     let d = symexFind(fieldOff, tFieldDefect())
     check d.status == sxUnknown
 
@@ -117,7 +119,7 @@ suite "S8cu: the push form":
 
   test "overflowChecks, with the settings modelling them on":
     check native(overOff(high(int))) == "hit"
-    declines(overOff, feOverflowCheckOption)
+    pinDecline(overOff, declKey, feOverflowCheckOption)
 
   test "overflowChecks, with the settings modelling the wrap, no longer decide (S8w)":
     ## Rule (a): was a trusted sxSat (S8w). A signed wrap with checks off is
@@ -132,7 +134,7 @@ suite "S8cu: the push form":
 
   test "rangeChecks":
     check native(rangeOff(300)) == "hit"
-    declines(rangeOff, feCheckOption)
+    pinDecline(rangeOff, declKey, feCheckOption)
 
   test "rangeChecks with `acRange` out: the conversion's value is not modelled":
     let r = symexFind(rangeOff, tLabel("hit"),
@@ -142,11 +144,11 @@ suite "S8cu: the push form":
 
   test "boundChecks":
     check native(boundOff(3)) == "hit"
-    declines(boundOff, feCheckOption)
+    pinDecline(boundOff, declKey, feCheckOption)
 
   test "objChecks":
     check native(objOff(1)) == "hit"
-    declines(objOff, feCheckOption)
+    pinDecline(objOff, declKey, feCheckOption)
 
   test "checks":
     check native(umbrella(high(int))) == "hit"
@@ -158,9 +160,9 @@ suite "S8cu: the push form":
 
   test "a raise the model catches is no `sxUnsat`":
     check native(caughtOff(high(int))) == "hit"
-    declines(caughtOff, feOverflowCheckOption)
+    pinDecline(caughtOff, declKey, feOverflowCheckOption)
     check native(neverRaisesHere(high(int))) == "hit"
-    declines(neverRaisesHere, feOverflowCheckOption)
+    pinDecline(neverRaisesHere, declKey, feOverflowCheckOption)
 
   test "a decline is never trusted":
     let r = symexFind(caughtOff, tLabel("hit"))

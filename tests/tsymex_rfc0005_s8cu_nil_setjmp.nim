@@ -21,6 +21,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_nil_setjmp")
+
 type R = ref object
   a: int
 
@@ -61,7 +63,7 @@ suite "S8cu: a nil dereference with --exceptions:setjmp":
       checkpoint "rc=" & $rc & " " & output
       check rc == 0
       check "RAN hit" in output
-    declines(param, heNilDerefMayBeCaught)
+    pinDecline(param, declKey, heNilDerefMayBeCaught)
 
    test "a `finally` in the caller guards a callee's dereference too":
     # The label in the `finally` is reached on a non-nil input (sxSat); the nil

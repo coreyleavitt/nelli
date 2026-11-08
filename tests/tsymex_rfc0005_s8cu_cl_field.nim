@@ -7,19 +7,21 @@ import nelli/symex
 import ./s8cu_fix_cl
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_cl_field")
+
 suite "S8cu: --fieldChecks:off":
 
   test "the named check declines":
     check native(clField(4)) == "hit"
-    declines(clField, feCheckOption)
+    pinDecline(clField, declKey, feCheckOption)
 
   test "the rule is per routine: one that never meets the check declines too":
     check native(clOver(high(int))) == "OverflowDefect"
-    declines(clOver, feCheckOption)
+    pinDecline(clOver, declKey, feCheckOption)
     check native(clBound(3)) == "IndexDefect"
-    declines(clBound, feCheckOption)
+    pinDecline(clBound, declKey, feCheckOption)
     check native(clPure(7)) == "hit"
-    declines(clPure, feCheckOption)
+    pinDecline(clPure, declKey, feCheckOption)
 
   test "a routine under `push fieldChecks: on` has it back (control)":
     check native(clFieldOn(4)) == "FieldDefect"

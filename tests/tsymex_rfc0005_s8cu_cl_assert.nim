@@ -6,6 +6,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_cl_assert")
+
 proc aPlain(v: int) =
   if v == 4:
     assert v != 4
@@ -51,4 +53,4 @@ suite "S8cu: --assertions:off":
 
   test "an iterator's length check is gone, and the iteration on declines":
     check native(mitemsGrow(4)) == "hit"
-    declines(mitemsGrow, feUnsupportedOp)
+    pinDecline(mitemsGrow, declKey, feUnsupportedOp)

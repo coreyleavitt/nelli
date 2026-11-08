@@ -7,6 +7,8 @@ import nelli/symex
 import ./s8cu_fix_cl
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_cl_over")
+
 ## RFC-0016 W1-d2 (W-07). This build is checks-off, so the default settings
 ## follow it (`acOverflow` out) and there is no routine-level decline to make:
 ## the build is the program. A signed overflow is undefined, not a wrap, so the
@@ -22,7 +24,7 @@ suite "S8cu: --overflowChecks:off":
     ## overflowing `+` is the ubSignedOverflow halt.
     check native(clOver(high(int))) == "hit"
     check not arithChecksDisagree(defaultSymexSettings())
-    declines(clOver, ubSignedOverflow)
+    pinDecline(clOver, declKey, ubSignedOverflow)
     check not symexFind(clOver, tLabel("hit")).errors.named(feOverflowCheckOption)
 
   test "settings that model the wrap disagree with the build and are not trusted":

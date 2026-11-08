@@ -7,6 +7,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_kinds")
+
 type K = enum kA, kB, kC, kD
 type P = object
   case k: K
@@ -142,11 +144,11 @@ suite "S8cu: a body":
 
   test "a push in a body declines by its statement":
     check native(bodyPush(4)) == "hit"
-    declines(bodyPush, feUnsupportedStmtKind)
+    pinDecline(bodyPush, declKey, feUnsupportedStmtKind)
 
   test "a routine nested under a body's push":
     check native(bodyPushNested(4)) == "hit"
-    declines(bodyPushNested, feUnsupportedStmtKind)
+    pinDecline(bodyPushNested, declKey, feUnsupportedStmtKind)
 
 suite "S8cu: a forward declaration":
 
@@ -154,15 +156,15 @@ suite "S8cu: a forward declaration":
     check native(fwdUnder(4)) == "FieldDefect"
     decides(fwdUnder, sxRaised)
     check native(fwdClean(4)) == "hit"
-    declines(fwdClean, feCheckOption)
+    pinDecline(fwdClean, declKey, feCheckOption)
 
 suite "S8cu: routines of other kinds":
 
   test "a func and an inline proc":
     check native(viaFunc(high(int))) == "hit"
-    declines(viaFunc, feOverflowCheckOption)
+    pinDecline(viaFunc, declKey, feOverflowCheckOption)
     check native(viaInline(high(int))) == "hit"
-    declines(viaInline, feOverflowCheckOption)
+    pinDecline(viaInline, declKey, feOverflowCheckOption)
 
   test "a method":
     check native(viaMethod(high(int))) == "hit"
@@ -192,13 +194,13 @@ suite "S8cu: routines of other kinds":
     check native(viaInlineIter(high(int))) == "OverflowDefect"
     decides(viaInlineIter, sxRaised)
     check native(inlineIterInPush(high(int))) == "hit"
-    declines(inlineIterInPush, feOverflowCheckOption)
+    pinDecline(inlineIterInPush, declKey, feOverflowCheckOption)
 
 suite "S8cu: a callee":
 
   test "a callee under a push":
     check native(viaCallee(4)) == "hit"
-    declines(viaCallee, feCheckOption)
+    pinDecline(viaCallee, declKey, feCheckOption)
 
   test "one no input reaches does not decline the rest":
     check native(calleeNotReached(7)) == "hit"
@@ -210,7 +212,7 @@ suite "S8cu: templates":
     check native(tplOutOfPush(high(int))) == "OverflowDefect"
     decides(tplOutOfPush, sxRaised)
     check native(tplInPush(high(int))) == "hit"
-    declines(tplInPush, feOverflowCheckOption)
+    pinDecline(tplInPush, declKey, feOverflowCheckOption)
 
 suite "S8cu: the float checks":
 
@@ -220,14 +222,14 @@ suite "S8cu: the float checks":
 
   test "on, the walker has no such raise":
     check native(floatOn(1e308)) == "FloatOverflowDefect"
-    declines(floatOn, feCheckOption)
+    pinDecline(floatOn, declKey, feCheckOption)
     check native(infOn(1e308)) == "FloatOverflowDefect"
-    declines(infOn, feCheckOption)
+    pinDecline(infOn, declKey, feCheckOption)
     check native(nanOn(Inf)) == "FloatInvalidOpDefect"
-    declines(nanOn, feCheckOption)
+    pinDecline(nanOn, declKey, feCheckOption)
 
   test "`checks: on` turns them on, and matters only to float code":
     check native(checksOnFloat(1e308)) == "FloatOverflowDefect"
-    declines(checksOnFloat, feCheckOption)
+    pinDecline(checksOnFloat, declKey, feCheckOption)
     check native(checksOnNoFloat(4)) == "FieldDefect"
     decides(checksOnNoFloat, sxRaised)

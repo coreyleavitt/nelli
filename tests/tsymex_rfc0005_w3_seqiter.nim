@@ -28,6 +28,8 @@ import nelli/smt/canonicalize
 import ./s8cu_helpers
 import ./w3_fix_assertoff
 
+const declKey = cellKey(faGeneric, "w3_seqiter")
+
 proc popAfter(v: int) =
   if v == 4:
     var s = @[1'i32, 2, 3]
@@ -187,6 +189,6 @@ suite "W3 WA-3: items and pairs over a seq whose length changes":
     let nat = native(itemsPopOff(4))
     checkpoint "native " & nat
     check nat in ["IndexDefect", "AssertionDefect"]
-    declines(itemsPopOff, feCheckOption)
+    pinDecline(itemsPopOff, declKey, feCheckOption)
     check native(itemsPopOutside(4)) == "AssertionDefect"
-    declines(itemsPopOutside, feCheckOption)
+    pinDecline(itemsPopOutside, declKey, feCheckOption)

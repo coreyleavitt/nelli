@@ -8,6 +8,8 @@ import nelli/symex
 import ./s8cu_fix_callee
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_modules")
+
 template hitIfWraps(call: untyped) =
   if v == high(int):
     let w = call
@@ -87,21 +89,21 @@ suite "S8cu: a callee in another module":
 
   test "an unchecked callee declines":
     check native(viaUncheckedField(4)) == "hit"
-    declines(viaUncheckedField, feCheckOption)
+    pinDecline(viaUncheckedField, declKey, feCheckOption)
     check native(viaUncheckedAdd(high(int))) == "hit"
-    declines(viaUncheckedAdd, feOverflowCheckOption)
+    pinDecline(viaUncheckedAdd, declKey, feOverflowCheckOption)
 
 suite "S8cu: generics":
 
   test "defined under a push, instantiated here: unchecked":
     check native(viaGenericUnder(high(int))) == "hit"
-    declines(viaGenericUnder, feOverflowCheckOption)
+    pinDecline(viaGenericUnder, declKey, feOverflowCheckOption)
 
   test "defined clean, instantiated under a push: checked":
     check native(viaGenericCleanInPush(high(int))) == "OverflowDefect"
     # The instantiating routine is itself under the push, and declines; the generic
     # alone, from a clean routine, decides.
-    declines(viaGenericCleanInPush, feOverflowCheckOption)
+    pinDecline(viaGenericCleanInPush, declKey, feOverflowCheckOption)
     check native(viaGenericClean(high(int))) == "OverflowDefect"
     decides(viaGenericClean, sxRaised)
 
@@ -109,7 +111,7 @@ suite "S8cu: include":
 
   test "a push in the including file reaches the included routine":
     check native(viaIncludedPlain(high(int))) == "hit"
-    declines(viaIncludedPlain, feOverflowCheckOption)
+    pinDecline(viaIncludedPlain, declKey, feOverflowCheckOption)
 
   test "an inner push in the included file turns it back on":
     check native(viaIncludedOn(high(int))) == "OverflowDefect"
@@ -119,15 +121,15 @@ suite "S8cu: generated routines":
 
   test "a template in another module":
     check native(viaAdderThere(high(int))) == "hit"
-    declines(viaAdderThere, feOverflowCheckOption)
+    pinDecline(viaAdderThere, declKey, feOverflowCheckOption)
 
   test "a template in this file":
     check native(viaAdderHere(high(int))) == "hit"
-    declines(viaAdderHere, feOverflowCheckOption)
+    pinDecline(viaAdderHere, declKey, feOverflowCheckOption)
 
   test "a macro, under the push and not":
     check native(viaMacro(high(int))) == "hit"
-    declines(viaMacro, feOverflowCheckOption)
+    pinDecline(viaMacro, declKey, feOverflowCheckOption)
     check native(viaMacroClean(high(int))) == "OverflowDefect"
     decides(viaMacroClean, sxRaised)
 
@@ -135,9 +137,9 @@ suite "S8cu: the stdlib":
 
   test "a walked routine under `math.nim`'s push declines":
     check native(viaFloorDiv(7)) == "hit"
-    declines(viaFloorDiv, feCheckOption)
+    pinDecline(viaFloorDiv, declKey, feCheckOption)
     check native(viaIsPowerOfTwo(8)) == "hit"
-    declines(viaIsPowerOfTwo, feCheckOption)
+    pinDecline(viaIsPowerOfTwo, declKey, feCheckOption)
 
   test "models and routines outside those regions still decide (control)":
     check native(viaAbs(-3)) == "hit"

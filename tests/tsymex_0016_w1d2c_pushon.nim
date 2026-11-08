@@ -10,6 +10,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "0016_w1d2c_pushon")
+
 {.push overflowChecks: on.}
 proc checkedOver(v: int) =
   if v == high(int):
@@ -79,7 +81,7 @@ suite "W1-d2c push overflowChecks: on in a checks-off build":
     check r.trusted
 
   test "a pushed-on caller's call into an unchecked callee still halts":
-    declines(checkedCallsUnchecked, ubSignedOverflow)
+    pinDecline(checkedCallsUnchecked, declKey, ubSignedOverflow)
 
   test "a pushed-on caller is checked again after an unchecked callee returns":
     let r = pinExact(checkedAfterCall,

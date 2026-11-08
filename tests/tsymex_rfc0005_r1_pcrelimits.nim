@@ -28,6 +28,8 @@ import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "r1_pcrelimits")
+
 proc nest(opener: string; n: int; body = "a"): string =
   repeat(opener, n) & body & repeat(')', n)
 
@@ -264,11 +266,11 @@ suite "R1-03: the walker's verdicts on PCRE's limits":
 
   test "a pattern past PCRE's size is not decided":
     check native(big1700Handler("")) == "hit"
-    declines(big1700Handler, seUnsupportedRegex)   # was a clean sxUnsat
+    pinDecline(big1700Handler, declKey, seUnsupportedRegex)   # was a clean sxUnsat
     check native(big1700Alt("b")) == "ran"
-    declines(big1700Alt, seUnsupportedRegex)       # was sxSat "b"
+    pinDecline(big1700Alt, declKey, seUnsupportedRegex)       # was sxSat "b"
     check native(big1700Opt("")) == "ran"
-    declines(big1700Opt, seUnsupportedRegex)       # was sxSat ""
+    pinDecline(big1700Opt, declKey, seUnsupportedRegex)       # was sxSat ""
 
   test "CRH-04: 2600 nested groups raise RegexError":
     check native(nest2600Handler("a")) == "hit"

@@ -166,5 +166,36 @@ suite "K9a":
             offenders.add f.extractFilename & ":" & $(i + 1)
     check offenders.len == 0
     if offenders.len > 0: checkpoint offenders.join(", ")
+  test "K9b: no test defines a `declines` template that names an error kind":
+    # A kind-naming decline is `pinDecline` (s8cu_helpers); a template walks
+    # the SUT itself and judges with a weaker check. The allowlist is the
+    # call sites `pinDecline` refused (K9b findings), kept on the old template.
+    const allowed: seq[string] = @[
+      # Names a kind only to exclude weInternalWalkerFault; kindless otherwise,
+      # so it migrates with the other kindless declines (K9c).
+      "tsymex_rfc0005_s8cd_globals_b.nim",
+      # Also asserts `not hasKind(feUnsupportedStmtKind)`, which pinDecline
+      # cannot express: left on the template (K9b finding).
+      "tsymex_rfc0005_s8ap_remainder_d.nim"]
+    let markers = ["hasKind(", "named(", ".kind ==", ".kind in", "SymexErrorKind"]
+    var offenders: seq[string]
+    for f in walkFiles(probeDir / "*.nim"):
+      if f.extractFilename in allowed: continue
+      let ls = toSeq(lines(f))
+      for i, line in ls:
+        let t = line.strip
+        if not (t.startsWith("template declines") or t.startsWith("proc declines") or
+                t.startsWith("macro declines")): continue
+        let ind = line.len - line.strip(trailing = false).len
+        var j = i + 1
+        var body = line
+        while j < ls.len and (ls[j].strip.len == 0 or
+              ls[j].len - ls[j].strip(trailing = false).len > ind):
+          body.add "\n" & ls[j]; inc j
+        for m in markers:
+          if m in body:
+            offenders.add f.extractFilename & ":" & $(i + 1); break
+    check offenders.len == 0
+    if offenders.len > 0: checkpoint offenders.join(", ")
 
 removeDir(pinTmp)

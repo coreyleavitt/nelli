@@ -14,6 +14,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 
+const declKey = cellKey(faGeneric, "s8cu_nil")
+
 type R = ref object
   a: int
 
@@ -159,4 +161,4 @@ suite "S8cu: a nil dereference crashes":
 
   test "a global ref declines (not modelled)":
     check crashes("global")
-    declines(global, feGlobalReadUnmodelled)
+    pinDecline(global, declKey, feGlobalReadUnmodelled)

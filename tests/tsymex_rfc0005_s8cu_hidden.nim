@@ -22,6 +22,8 @@ import ./s8cu_fix_hidden_m1
 import ./s8cu_fix_hidden_m2
 import ./s8cu_fix_hidden_tpl
 
+const declKey = cellKey(faGeneric, "s8cu_hidden")
+
 type K = enum kA, kB
 type P = object
   case k: K
@@ -107,31 +109,31 @@ suite "S8cu: a push the text does not show":
 
   test "a macro building the pragma from a string":
     check native(strField(4)) == "hit"
-    declines(strField, feCheckOption)
+    pinDecline(strField, declKey, feCheckOption)
     check native(strRange(300)) == "hit"
-    declines(strRange, feCheckOption)
+    pinDecline(strRange, declKey, feCheckOption)
     check native(strObj(4)) == "hit"
-    declines(strObj, feCheckOption)
+    pinDecline(strObj, declKey, feCheckOption)
 
   test "a macro building it from nodes":
     check native(astField(4)) == "hit"
-    declines(astField, feCheckOption)
+    pinDecline(astField, declKey, feCheckOption)
 
   test "a pushing template or macro from another module":
     check native(tplField(4)) == "hit"
-    declines(tplField, feCheckOption)
+    pinDecline(tplField, declKey, feCheckOption)
     check native(tplRange(300)) == "hit"
-    declines(tplRange, feCheckOption)
+    pinDecline(tplRange, declKey, feCheckOption)
     check native(macObj(4)) == "hit"
-    declines(macObj, feCheckOption)
+    pinDecline(macObj, declKey, feCheckOption)
 
   test "an import under a push in a module the walk never enters":
     check native(impField(4)) == "hit"
-    declines(impField, feCheckOption)
+    pinDecline(impField, declKey, feCheckOption)
     check native(impRange(300)) == "hit"
-    declines(impRange, feCheckOption)
+    pinDecline(impRange, declKey, feCheckOption)
     check native(impObj(4)) == "hit"
-    declines(impObj, feCheckOption)
+    pinDecline(impObj, declKey, feCheckOption)
 
   test "after the pop the checks are back (control)":
     check native(ctlField(4)) == "FieldDefect"

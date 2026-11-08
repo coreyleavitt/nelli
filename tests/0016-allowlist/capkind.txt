@@ -1,11 +1,6 @@
 # RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-capkind:ckCallDepth	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckFrontier	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckHeapDepth	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckLoopUnwind	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckLoopUnwindFollow	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckTermWalkRead	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckTermWalkWrite	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckVariantFieldAllocs	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
-capkind:ckVariantForks	UNASSIGNED	tsymex_0016_k7a_survivors pins a cut run per cap but writes no record, and PinRecord has no field naming a cap; no RFC slice adds one
+capkind:ckHeapDepth	K7c	the cap site exists (heapDerefDecline, a halt) but no test cuts a run on it and calls pinCap; K7c brings every walkStmt arm to Survivors and pins each cap halt it converts
+capkind:ckLoopUnwindFollow	K7c	the cap site exists (the concrete-follow loop) but needs a concolic replay to cut a run on it; no test calls pinCap; K7c brings every walkStmt arm to Survivors and pins each cap halt it converts
+capkind:ckVariantForks	K7c	the cap site exists but no test cuts a run on it and calls pinCap; tsymex_r6_a3_variantconstruct_sym asserts the decline without a record; K7c brings every walkStmt arm to Survivors and pins each cap halt it converts
+capkind:ckVariantFieldAllocs	K7c	the cap site exists but no test cuts a run on it and calls pinCap; tsymex_r6_n9_variant_budget asserts the decline without a record; K7c brings every walkStmt arm to Survivors and pins each cap halt it converts

@@ -98,6 +98,8 @@ type
     declineKind*: string   ## the SymexErrorKind a decline named ("" otherwise)
     native*: string        ## what the native run showed
     build*: string         ## `pinBuildSegment()` at write time
+    row*: string           ## `rowOf`'s BuildRow at write time ("" when none)
+    cap*: string           ## pinCap: the CapKind member the run halted on
     flags*: seq[string]    ## pinCrash: the exact flags the probe was built with
     why*: string           ## skipCell: the reason
 
@@ -134,6 +136,17 @@ proc pinBuildSegment*(): string =
   buildprofile.buildSegment(buildprofile.buildSemantics,
                             buildprofile.readHost(z3FullVersion()))
 
+proc pinBuildRow*(): string =
+  ## The `BuildRow` this build is (RFC-0016 section 8.2: records carry
+  ## `rowOf`'s row), "" when no row covers it. Unlike the segment this sees the
+  ## C compiler family (`buildProvenance`), so it tells mingw from msvc. It is
+  ## computed here and never keyed: `buildSegment` and the cache key are
+  ## untouched.
+  let r = buildprofile.rowOf(buildprofile.buildSemantics,
+                             buildprofile.readHost(z3FullVersion()),
+                             buildprofile.buildProvenance)
+  if r.isSome: $r.get else: ""
+
 # --- the record file -------------------------------------------------------
 
 var
@@ -150,7 +163,7 @@ func toJson(r: PinRecord): JsonNode =
      "cell": render(r.cell), "target": r.target, "domain": r.domain,
      "exhaustive": r.exhaustive, "verdict": $r.verdict, "walker": r.walker,
      "declineKind": r.declineKind, "native": r.native, "build": r.build,
-     "flags": r.flags, "why": r.why}
+     "row": r.row, "cap": r.cap, "flags": r.flags, "why": r.why}
 
 proc fromJson(n: JsonNode): PinRecord =
   result.runId = n["runId"].getStr
@@ -167,6 +180,8 @@ proc fromJson(n: JsonNode): PinRecord =
   result.declineKind = n["declineKind"].getStr
   result.native = n["native"].getStr
   result.build = n["build"].getStr
+  result.row = n{"row"}.getStr       # absent in records written before K1a
+  result.cap = n{"cap"}.getStr
   for f in n["flags"]: result.flags.add f.getStr
   result.why = n["why"].getStr
 
@@ -175,6 +190,7 @@ proc writePinRecord*(r: PinRecord): string {.discardable.} =
   ## clobber). Under a lock, so it is correct from any thread. Returns the path.
   var rec = r
   rec.build = pinBuildSegment()
+  rec.row = pinBuildRow()
   {.cast(gcsafe).}:
     withLock pinLock:
       if pinFile.len == 0:
@@ -416,6 +432,54 @@ template pinDecline*(fn: untyped; key: CellKey; kind: SymexErrorKind;
     let pdRes = symexFind(fn, target, pinSettingsConst)
     pinDeclineJudge(pdRes, key, target, kind, instantiationInfo(-1).filename,
                     needle, excluding)
+
+# --- pinCap ----------------------------------------------------------------
+
+func capExpectation*(cap: string): tuple[kind: SymexErrorKind, needle: string] =
+  ## What a run cut by `cap` records: the kind and a phrase of the message at
+  ## its one producing site (`CapKind` is private to `runtime.nim`, so the cap
+  ## is named by its member's text; `tsymex_0016_k7a_survivors` pins one site
+  ## per member). A cap not listed here has no pin yet.
+  case cap
+  of "ckFrontier": (beBudgetExhaustedPrune, "path-frontier cap")
+  of "ckCallDepth": (beBudgetExhaustedUnmodelled, "call-inlining depth budget")
+  of "ckLoopUnwind": (beBudgetExhausted, "while-loop k-unroll budget exhausted")
+  of "ckLoopUnwindFollow": (beBudgetExhausted, "following a concrete replay")
+  of "ckVariantForks": (beBudgetExhaustedUnmodelled, "variant constructor fork budget")
+  of "ckVariantFieldAllocs": (beBudgetExhaustedUnmodelled, "field-allocation budget")
+  of "ckTermWalkRead": (feUnsupportedOpHavoc, "isIndex: an array of")
+  of "ckTermWalkWrite": (feUnsupportedStmtKind, "isIndexAssign: an array of")
+  else:
+    raise newException(PinFailure, "pinCap: no expectation for cap " & cap)
+
+proc pinCapJudge*[T](res: SymexResult[T]; cap: string; tgt: SymexTarget;
+                     file: string) =
+  ## The run was cut by `cap`: not trusted, and a tainting error of the cap
+  ## site's kind with the site's message was recorded. Writes a `pvDeclined`
+  ## record carrying `cap`, so K1's join can evidence `capkind:<cap>`.
+  let ex = capExpectation(cap)
+  if res.trusted:
+    pinFail("pinCap " & cap & ": the verdict " & $res.status & " is trusted")
+  var found = false
+  for e in res.errors:
+    if e.kind == ex.kind and taintsRun(e) and ex.needle in e.msg: found = true
+  if not found:
+    pinFail("pinCap " & cap & ": no " & $ex.kind & " message contains \"" &
+            ex.needle & "\"; errors: " & show(res.errors))
+  writePinRecord(PinRecord(testFile: file, entry: "symexFind",
+    cell: CellKey(scope: axConstruct, key: "cap/" & cap),
+    target: describeTarget(tgt), domain: "-", verdict: pvDeclined,
+    walker: $res.status, declineKind: $ex.kind, cap: cap,
+    native: "not run: the run is cut by " & cap))
+
+template pinCap*(fn: untyped; cap: static string;
+                 target: untyped = tLabel("hit");
+                 settings: untyped = pinSettingsConst) =
+  ## The run of `fn` is cut by `cap` (a `CapKind` member's name): see
+  ## `pinCapJudge`. `settings` lowers the cap where the default cannot reach it.
+  block:
+    let pcRes = symexFind(fn, target, settings)
+    pinCapJudge(pcRes, cap, target, instantiationInfo(-1).filename)
 
 # --- pinCrash and skipCell -------------------------------------------------
 

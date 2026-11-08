@@ -1189,8 +1189,8 @@ review.
   id) is in its allowlist, and every allowlist entry is still unclassified (a
   stale entry fails, which forces removal). What review checks on the diff:
   an allowlist grows only in the commit that introduces its scope, by exactly
-  that scope's cells. K1a's first content is the error-kind derivation (81
-  `SymexErrorKind` members, nearly all unpinned on day one), the two ADM-1
+  that scope's cells. K1a's first content is the error-kind derivation (every
+  member of `SymexErrorKind`, nearly all unpinned on day one), the two ADM-1
   axes, the build rows and the id list.
 - **First commit proves it runs.** The slice that lands it shows it RED on
   each CI leg with a planted unclassified cell, demonstrated by run URL.

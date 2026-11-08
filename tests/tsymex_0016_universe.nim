@@ -21,14 +21,18 @@
 ##   * a `CellKey` cell: a record with that cell and an `exact`/`raised`/
 ##     `declined` verdict from one of section 10's six entry points; a
 ##     `declined` or `never` cell also takes a `pinCrash` or `admitBuild` record;
-##   * a build row: a record whose build segment projects to the row
-##     (`rowOfSegment`: os, backend, Z3). mingw and msvc differ only in the C
-##     compiler family, which is provenance and never in a segment, so no
-##     record can name either row yet (the record lacks `rowOf`'s row, which
-##     section 8.2 lists and `PinRecord` does not carry);
+##   * a build row: a record whose `row` field is the row. The record carries
+##     `rowOf`'s row, filled at write time (`pinBuildRow`); `rowOf` reads the
+##     C compiler family, so mingw and msvc are told apart, and neither
+##     `buildSegment` nor the cache key changes;
 ##   * an error kind: a `declined` record whose `declineKind` is the member;
-##   * a cap kind: nothing. No record field names a cap, so every cap is
-##     allowlisted (slice `UNASSIGNED`: no RFC slice adds that field).
+##   * a cap kind: a `declined` record whose `cap` field is the member
+##     (`pinCap`: the run halted on that cap, asserted from the cap site's
+##     kind and message). A cap without such a pin is allowlisted under the
+##     slice that adds it.
+## Records naming a cell no table derives (an axis with no table yet, or an
+## id K1a-ids joins) are ORPHANS: the test prints them as a named list and
+## does not fail on them.
 ## An unclassified cell with no allowlist entry FAILS; an allowlist entry for
 ## a classified cell FAILS as stale (so entries ratchet out).
 ##
@@ -46,7 +50,8 @@
 ##
 ## The allowlists are `tests/0016-allowlist/<scope>.txt` for scope magic,
 ## build, errorkind and capkind. A line is `cell<TAB>slice<TAB>reason`; the
-## slice is an id from the RFC's slice tables (or `UNASSIGNED`).
+## slice is an id from the RFC's slice tables. `UNASSIGNED` is rejected: an
+## entry with no owning slice is not allowed.
 ##
 ## The committed ledger `docs/rfc/0016-universe.tsv` is compared with the
 ## derived one on every run. To regenerate after reviewing the growth:
@@ -72,7 +77,7 @@ const
   fixtureDir = root / "tests" / "0016-fixtures" / "universe-pins"
   runtimePath = root / "src" / "nelli" / "smt" / "runtime.nim"
   scopes = ["magic", "build", "errorkind", "capkind"]
-  unassigned = "UNASSIGNED"
+  unassigned = "UNASSIGNED"   ## rejected as a slice id
   publicEntries = ["symexFind", "symexFindAllWitnesses", "symexForAll",
                    "assertCoveredBy", "concolic", "loadSymexVerdict"]
 
@@ -151,28 +156,16 @@ proc lineDiff(committed, derived: string): string =
 
 # --- records and the join --------------------------------------------------
 
-func rowOfSegment(seg: string): string =
-  ## The `BuildRow` a build segment names, "" when it names none or several.
-  ## Windows is ambiguous (mingw and msvc differ in provenance only).
-  case seg.segmentValue("os")
-  of "linux":
-    case seg.segmentValue("backend")
-    of "c":
-      if seg.segmentValue("z3Full").startsWith("4.13.4"): $brZ3v4_13_4
-      else: $brLinuxC
-    of "cpp": $brLinuxCpp
-    else: ""
-  else: ""
-
 func evidences(u: UCell; r: PinRecord): bool =
   case scopeOf(u.key)
   of "errorkind":
     r.verdict == pvDeclined and "errorkind:" & r.declineKind == u.key
   of "capkind":
-    false
+    r.verdict == pvDeclined and r.cap.len > 0 and
+      "capkind:" & r.cap == u.key
   else:
     if u.key.startsWith("build:row/"):
-      r.verdict != pvSkipped and rowOfSegment(r.build) == u.key[10 .. ^1]
+      r.verdict != pvSkipped and r.row == u.key[10 .. ^1]
     else:
       if render(r.cell) != u.key: false
       else:
@@ -184,7 +177,6 @@ func evidences(u: UCell; r: PinRecord): bool =
 
 proc sliceIds(): HashSet[string] =
   ## The ids in the first column of the RFC's tables.
-  result.incl unassigned
   for line in readFile(rfcPath).splitLines():
     if line.startsWith("| "):
       let cell = line[2 .. ^1].split('|')[0].strip()
@@ -217,7 +209,8 @@ proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
     seen.incl a.key
     if a.slice notin ids:
       result.add "allowlist entry " & a.key & ": slice \"" & a.slice &
-                 "\" is not a slice id of the RFC (nor " & unassigned & ")"
+                 "\" is not a slice id of the RFC (" & unassigned &
+                 " is not allowed: name the slice that fills it)"
     if a.reason.len == 0:
       result.add "allowlist entry " & a.key & " has no reason"
 
@@ -233,6 +226,18 @@ proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow]):
     if covered and c.key in allowed:
       result.add "stale allowlist entry " & c.key &
         ": a pin record evidences it now; remove the line"
+
+proc orphanCells(u: seq[UCell]; recs: seq[PinRecord]): seq[string] =
+  ## The distinct cells records name that no table derives, sorted. Not a
+  ## failure yet: K1a-ids joins ids and the axes without tables.
+  let known = u.mapIt(it.key).toHashSet
+  var seen = initHashSet[string]()
+  for r in recs:
+    let k = render(r.cell)
+    if k notin known and k notin seen:
+      seen.incl k
+      result.add k
+  result.sort()
 
 # --- the run ---------------------------------------------------------------
 
@@ -250,29 +255,25 @@ proc synth(c: UCell): PinRecord =
   ## A record that evidences `c` (the self-tests' stand-in for a run).
   result = PinRecord(testFile: "synth.nim", entry: "symexFind",
     cell: cellKey(axConstruct, "synth"), target: "t", domain: "-",
-    verdict: pvExact, build: seg("linux", "c", "5.1.0"))
+    verdict: pvExact, build: seg("linux", "c", "5.1.0"), row: "linux-c")
   case scopeOf(c.key)
   of "errorkind":
     result.verdict = pvDeclined
     result.declineKind = c.key["errorkind:".len .. ^1]
-  of "capkind": discard
+  of "capkind":
+    result.verdict = pvDeclined
+    result.cap = c.key["capkind:".len .. ^1]
   else:
     if c.key.startsWith("build:row/"):
-      case c.key[10 .. ^1]
-      of "linux-c": discard
-      of "linux-cpp": result.build = seg("linux", "cpp", "5.1.0")
-      of "linux-c-z3-4.13.4": result.build = seg("linux", "c", "4.13.4.0")
-      else: result.build = seg("windows", "c", "4.13.4.0")
+      result.row = c.key[10 .. ^1]
     else:
       result.cell = parseCellKey(c.key).get
       if c.state in ["declined", "never"]: result.verdict = pvDeclined
 
 proc synthAll(skip: string = ""): seq[PinRecord] =
-  ## Records for every cell that CAN be evidenced, except `skip`.
+  ## Records for every cell, except `skip`.
   for c in universe:
-    if c.key != skip and scopeOf(c.key) != "capkind" and
-       c.key notin ["build:row/mingw", "build:row/msvc"]:
-      result.add synth(c)
+    if c.key != skip: result.add synth(c)
 
 proc allowFor(cells: seq[string]): seq[Allow] =
   cells.mapIt(Allow(key: it, slice: "K9c", reason: "r"))
@@ -290,7 +291,6 @@ suite "RFC-0016 K1a-cells: the universe is derived":
     check universe.countIn("build:row/") == ord(high(BuildRow)) + 1
     check universe.countIn("errorkind:") == ord(high(SymexErrorKind)) + 1
     check universe.countIn("capkind:") >= 9
-    check universe.countIn("errorkind:") >= 81
 
   test "keys are unique and every CellKey cell parses back":
     check universe.mapIt(it.key).toHashSet.len == universe.len
@@ -352,16 +352,14 @@ suite "RFC-0016 K1a-cells: the allowlists":
                        reason: "no pin yet")]
 
 suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
-  test "records for every evidenceable cell leave only the known gaps":
-    let gaps = @["build:row/mingw", "build:row/msvc"] &
-               universe.filterIt(scopeOf(it.key) == "capkind").mapIt(it.key)
+  test "records for every cell leave no gap":
+    let gaps = newSeq[string]()
     let fails = joinUniverse(universe, synthAll(), allowFor(gaps))
     checkpoint fails.join("\n")
     check fails.len == 0
 
   test "RED: a planted missing record fails naming the cell":
-    let gaps = @["build:row/mingw", "build:row/msvc"] &
-               universe.filterIt(scopeOf(it.key) == "capkind").mapIt(it.key)
+    let gaps = newSeq[string]()
     for victim in ["magic:Swap", "errorkind:feUnadmitted", "build:row/linux-cpp",
                    "build:8.45 2021-06-15|interp"]:
       let fails = joinUniverse(universe, synthAll(victim), allowFor(gaps))
@@ -370,8 +368,7 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
       check victim in fails[0] and "unclassified" in fails[0]
 
   test "RED: a stale allowlist entry fails":
-    let gaps = @["build:row/mingw", "build:row/msvc"] &
-               universe.filterIt(scopeOf(it.key) == "capkind").mapIt(it.key)
+    let gaps = newSeq[string]()
     let fails = joinUniverse(universe, synthAll(),
                              allowFor(gaps & "magic:Swap"))
     check fails.len == 1
@@ -379,8 +376,7 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
 
   test "an allowlisted cell with no record passes":
     let recs = synthAll("magic:Swap")
-    let gaps = @["build:row/mingw", "build:row/msvc", "magic:Swap"] &
-               universe.filterIt(scopeOf(it.key) == "capkind").mapIt(it.key)
+    let gaps = @["magic:Swap"]
     check joinUniverse(universe, recs, allowFor(gaps)).len == 0
 
   test "a skipped or non-public record is not evidence":
@@ -406,11 +402,18 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
     r.entry = "admitBuild"
     check d.evidences(r)
 
-  test "a build row is named by os, backend and Z3 only":
-    check rowOfSegment(seg("linux", "c", "5.1.0")) == "linux-c"
-    check rowOfSegment(seg("linux", "c", "4.13.4.0")) == "linux-c-z3-4.13.4"
-    check rowOfSegment(seg("linux", "cpp", "5.1.0")) == "linux-cpp"
-    check rowOfSegment(seg("windows", "c", "4.13.4.0")) == ""
+  test "a build row is named by the record's row field, not its segment":
+    let c = UCell(key: "build:row/mingw", state: "row", detail: "-")
+    var r = synth(c)
+    check c.evidences(r)
+    r.row = "msvc"
+    check not c.evidences(r)
+    r = synth(c)
+    r.row = ""
+    check not c.evidences(r)
+    r.row = "mingw"
+    r.verdict = pvSkipped
+    check not c.evidences(r)
 
   test "an error kind is evidenced by a declined record's declineKind only":
     let c = universe.filterIt(it.key == "errorkind:feUnadmitted")[0]
@@ -419,16 +422,36 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
     r.verdict = pvExact
     check not c.evidences(r)
 
-  test "a cap is evidenced by no record today":
-    for c in universe.filterIt(scopeOf(it.key) == "capkind"):
-      check not c.evidences(synth(c))
+  test "a cap is evidenced by a declined record naming it":
+    let c = UCell(key: "capkind:ckFrontier", state: "cap", detail: "-")
+    var r = synth(c)
+    check c.evidences(r)
+    r.cap = "ckCallDepth"
+    check not c.evidences(r)
+    r = synth(c)
+    r.verdict = pvExact
+    check not c.evidences(r)
+
+  test "RED: UNASSIGNED is not a slice id":
+    let k = universe.mustFirst("magic").key
+    check structural(universe, @[Allow(key: k, slice: unassigned,
+      reason: "r")], sliceIds()).anyIt("UNASSIGNED" in it)
+
+  test "orphan cells are the distinct, sorted cells no table derives":
+    var a = synth(universe.mustFirst("magic"))
+    var b = a
+    b.cell = cellKey(axMagic, "NoSuchMagicB")
+    var c = a
+    c.cell = cellKey(axMagic, "NoSuchMagicA")
+    check orphanCells(universe, @[a, b, c, c]) ==
+      @["magic:NoSuchMagicA", "magic:NoSuchMagicB"]
 
   test "the fixture directory loads and evidences its cells":
     let recs = loadRecords(fixtureDir)
     check recs.len == 2
     let swap = universe.filterIt(it.key == "magic:Swap")[0]
     check recs.anyIt(swap.evidences(it))
-    check rowOfSegment(recs[0].build) == "linux-c"
+    check recs[0].row == "linux-c"
 
 suite "RFC-0016 K1a-cells: the join over this run's records":
   test "the committed allowlists against NELLI_PIN_DIR":
@@ -442,7 +465,7 @@ suite "RFC-0016 K1a-cells: the join over this run's records":
       checkpoint "NELLI_PIN_DIR=" & pinDirEnv & " (" & $recs.len &
                  " records)\n" & fails.join("\n")
       check fails.len == 0
-      let known = universe.mapIt(it.key).toHashSet
-      let orphans = recs.countIt(render(it.cell) notin known)
+      let orphans = orphanCells(universe, recs)
       echo "universe: " & $universe.len & " cells, " & $recs.len &
-           " records, " & $orphans & " records name a cell no table has yet"
+           " records, " & $orphans.len & " cells that records name and no " &
+           "table has yet (K1a-ids joins them): " & orphans.join(", ")

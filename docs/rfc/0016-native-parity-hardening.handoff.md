@@ -131,16 +131,18 @@
   allowlist `tests/0016-allowlist/nightly-<leg>-known-red.txt` with the stale-entry rule. CI-C: every leg uploads
   `nightly-<leg>-merged` (merged log, `.times`, gate, ceiling, diff) and diffs with `sweep-diff.sh` against the newest
   main artifact (`scripts/ci-baseline.sh`), else the 0.9.1 release row (informational), else none (msvc, first run).
-  CI-D: `sweep.sh` now writes `<log>.times` and `scripts/check-ceiling.sh` reports tests over 60 s into the summary: a finding,
-  not a gate (cpp 708, z3-4.13.4 524, msvc 283 over). `scripts/vm-alias-slice.sh` builds `tsymex_rfc0005_s8ab_letaudit` plus a rotating
-  12-test slice with `-d:nelliVmAliasAudit`. `scripts/rfc0016-intake.sh` files `rfc-0016-intake` issues keyed
-  `leg:test` (more than 10 on a leg collapse to `leg:*`); only `schedule`, or a dispatch with `intake: live`, files;
-  everything else prints `[dry-run]` lines (proven in run 42458557944). New defect rows: INT-44 (cpp unit pin), INT-45
-  (four MSVC-only reds), INT-46 (tfuzzforkworker thread race). W-63 closed against the msvc leg (evidence in the row).
-  Open: the host `.warnings` sidecar is empty (warn_total=0) so the warnings delta against any podman baseline reads
-  "resolved 15328" and is inert; `sweep.sh` now also reads stdout but the first run after that change still showed zero,
-  so the compiler's diagnostics on the host need a look. `fuzzer-msvc` still carries its W1-m `tsymex_0016_*` step (kept: the
-  nightly msvc leg is not per-push). The branch trigger in the workflow was a development aid and is removed in the last commit.
+  CI-D: `sweep.sh` writes `<log>.times` and compiler warnings are captured (stdout and stderr; `dt-bounded.sh` no
+  longer loses a child's stderr, with a self-test). `scripts/check-ceiling.sh` is a GATE (the `report` job) with
+  per-leg offender lists `tests/0016-allowlist/ceiling-offenders-<leg>.txt` and a hysteresis band calibrated to the
+  measured 1.5x run-to-run noise: an unlisted test fails only above 90 s (60 x 1.5), warns between 60 and 90 s, and a
+  listed entry is stale only below 40 s (60 / 1.5). Lists are seeded with the union of tests over 60 s in runs
+  42487154319 and 42494651488 (0 new, 0 stale on both). `scripts/vm-alias-slice.sh` builds `tsymex_rfc0005_s8ab_letaudit`
+  plus a rotating 12-test slice with `-d:nelliVmAliasAudit`. `scripts/rfc0016-intake.sh` files `rfc-0016-intake` issues
+  keyed `leg:test` (more than 10 on a leg collapse to `leg:*`); only `schedule`, or a dispatch with `intake: live`,
+  files; everything else prints `[dry-run]` lines. Defect rows: INT-44 (cpp unit pin), INT-45 (MSVC-only reds; the s8bz
+  cause was toolchain patch 0007) and INT-46 (tfuzzforkworker thread race) are closed; INT-47 (four new MSVC-only reds,
+  allowlisted in `nightly-msvc-known-red.txt`) is open, another agent is fixing it. W-63 closed against the msvc leg.
+  `fuzzer-msvc` still carries its W1-m `tsymex_0016_*` step (kept: the nightly msvc leg is not per-push).
 - **Windows native facts:** a Nim probe's division fault on Windows prints
   `SIGFPE: Arithmetic error` and exits 1 (the CRT maps 0xC0000094); `low(int)
   mod -1`/`div -1` raise 0xC0000095, which the mingw CRT does not map, so

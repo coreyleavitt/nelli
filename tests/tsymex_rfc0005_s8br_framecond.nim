@@ -13,6 +13,9 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8br_framecond")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -38,15 +41,6 @@ template replays(fn: typed, lbl: string) =
     let r = verdict(fn, lbl, sxSat)
     if r.status == sxSat:
       check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
-
-template declines(fn: typed, lbl, why: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feEvalOrderUnmodelled)
-    check why in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
 
 type Box = ref object
   x: int
@@ -176,12 +170,12 @@ suite "S8br: a check no snapshot carries":
     discard verdict(sutHeapKept, "hk_dead", sxUnsat)
     replays(sutHeapOther, "hb")
     discard verdict(sutHeapOther, "hb_dead", sxUnsat)
-    declines(sutHeapMoved, "hw", "may change what the check read")
-    declines(sutHeapIdx, "hi", "may change what the check read")
-    declines(sutHeapElem, "he", "may change what the check read")
+    pinDecline(sutHeapMoved, declKey, feEvalOrderUnmodelled, tLabel("hw"), "may change what the check read")
+    pinDecline(sutHeapIdx, declKey, feEvalOrderUnmodelled, tLabel("hi"), "may change what the check read")
+    pinDecline(sutHeapElem, declKey, feEvalOrderUnmodelled, tLabel("he"), "may change what the check read")
     replays(sutHeapKeptProc, "pk")
     discard verdict(sutHeapKeptProc, "pk_dead", sxUnsat)
-    declines(sutHeapMovedProc, "pw", "may change what the check read")
+    pinDecline(sutHeapMovedProc, declKey, feEvalOrderUnmodelled, tLabel("pw"), "may change what the check read")
 
   test "walker version floor":
     check symexWalkerVersion.parseInt >= 229

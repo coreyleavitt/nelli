@@ -40,6 +40,9 @@ import std/[unittest, strutils, tables, sets]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "b9_integration_b")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -56,13 +59,6 @@ template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
-
-template declines(fn: typed; lbl: static string; kind: SymexErrorKind) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, kind)
 
 template guardT(): untyped {.dirty.} =
   if t0.len != 1 or "a" notin t0: return
@@ -169,11 +165,11 @@ suite "batch 9: a view and its Table through a proc value":
 suite "batch 9: a by-value location the body also reaches declines":
 
   test "a capture":
-    declines(sCapture, "cap_live", ceCaptureByRefUnmodelled)
-    declines(sCapture, "cap_dead", ceCaptureByRefUnmodelled)
+    pinDecline(sCapture, declKey, ceCaptureByRefUnmodelled, tLabel("cap_live"))
+    pinDecline(sCapture, declKey, ceCaptureByRefUnmodelled, tLabel("cap_dead"))
 
   test "a global seq and a global Table":
-    declines(sGlobalSeq, "gseq_live", feUnsupportedOp)
-    declines(sGlobalSeq, "gseq_dead", feUnsupportedOp)
-    declines(sGlobalTable, "gtab_live", feUnsupportedOp)
-    declines(sGlobalTable, "gtab_dead", feUnsupportedOp)
+    pinDecline(sGlobalSeq, declKey, feUnsupportedOp, tLabel("gseq_live"))
+    pinDecline(sGlobalSeq, declKey, feUnsupportedOp, tLabel("gseq_dead"))
+    pinDecline(sGlobalTable, declKey, feUnsupportedOp, tLabel("gtab_live"))
+    pinDecline(sGlobalTable, declKey, feUnsupportedOp, tLabel("gtab_dead"))

@@ -33,6 +33,9 @@ import std/[unittest, strutils, sequtils, atomics]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8ao_remainder")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -204,24 +207,14 @@ proc zUnsupportedGenericVar(x: int) =
 
 suite "S8ao (2): itUninterp has no zero":
 
-  template declines(fn: typed, lbl: string, kind: SymexErrorKind): untyped =
-    ## RFC-0005 S8ap: the decline carries the placeholder's own kind (was
-    ## `feUnsupportedStmtKind` "zero-init not modeled" for all three).
-    block:
-      let r = symexFind(fn, tLabel(lbl))
-      checkpoint lbl & " " & $r.status & " " & show(r.errors)
-      check r.status == sxUnknown
-      check not r.errors.hasKind(weInternalWalkerFault)
-      check r.errors.hasKind(kind)
-
   test "a closure-typed local (__closure) declines, never crashes":
-    declines(zClosureVar, "closurevar", ceUnsupportedHof)
+    pinDecline(zClosureVar, declKey, ceUnsupportedHof, tLabel("closurevar"))
 
   test "an Atomic-typed local (__ownership:Atomic) declines, never crashes":
-    declines(zAtomicVar, "atomicvar", heUnsupportedOwnership)
+    pinDecline(zAtomicVar, declKey, heUnsupportedOwnership, tLabel("atomicvar"))
 
   test "an unrecognised generic local (__unsupported:*) declines, never crashes":
-    declines(zUnsupportedGenericVar, "weirdvar", feUnsupportedParamType)
+    pinDecline(zUnsupportedGenericVar, declKey, feUnsupportedParamType, tLabel("weirdvar"))
 
   test "symexWalkerVersion >= 181 (item 2)":
     check parseInt(symexWalkerVersion) >= 181

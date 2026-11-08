@@ -7,6 +7,9 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bo_nil")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -17,16 +20,6 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
   for e in errs:
     if e.kind == k: return true
   false
-
-template declines(fn: typed, tgt: SymexTarget, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tgt)
-    checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
 
 template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
   block:
@@ -141,7 +134,7 @@ suite "RFC-0005 S8bo (1): `isNil` is the nil comparison":
     verdict(sutNilField, tLabel("nil"), sxSat)
     verdict(sutNilField, tLabel("some"), sxSat)
   test "a proc value declines as `== nil` does":
-    declines(sutNilProc, tLabel("nil"), ceUnsupportedHof, "compared with nil")
+    pinDecline(sutNilProc, declKey, ceUnsupportedHof, tLabel("nil"), "compared with nil")
 
 suite "RFC-0005 S8bo (1): a conversion or cast to `pointer`":
   test "`pointer(p) == nil`":
@@ -154,7 +147,7 @@ suite "RFC-0005 S8bo (1): an unlowered magic declines":
   test "a value magic with a doc-only body":
     # RFC-0005 S8cb models `ashr`; a `cstring` has no model at all.
     verdict(sutAshr, tLabel("a"), sxSat)
-    declines(sutCStrNil, tLabel("a"), feUnsupportedOp, "compiler magic `isNil`")
+    pinDecline(sutCStrNil, declKey, feUnsupportedOp, tLabel("a"), "compiler magic `isNil`")
   # `swap` and `wasMoved` are S8bl's var-parameter magics now, modelled.
   test "a statement magic S8bl models":
     verdict(sutSwap, tLabel("a"), sxSat)

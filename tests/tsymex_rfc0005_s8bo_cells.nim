@@ -8,6 +8,9 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8bo_cells")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -24,16 +27,6 @@ template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
     let r = symexFind(fn, tgt)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check r.status == want
-    check not r.errors.hasKind(weInternalWalkerFault)
-
-template declines(fn: typed, tgt: SymexTarget, kind: SymexErrorKind,
-                  needle: string) =
-  block:
-    let r = symexFind(fn, tgt)
-    checkpoint $tgt & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(kind)
-    check needle in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
 # ---- (2) a plain object's address cell ---------------------------------------
@@ -287,9 +280,9 @@ suite "RFC-0005 S8bo (2): a plain object's address cell":
 
 suite "RFC-0005 S8bo (3): a whole seq assignment is a resize":
   test "a callee assigning the value the seq holds":
-    declines(sutSeqCalleeSame, tLabel("ok"), feUnsupportedOp, "freed")
+    pinDecline(sutSeqCalleeSame, declKey, feUnsupportedOp, tLabel("ok"), "freed")
   test "an assignment of an equal value by name":
-    declines(sutSeqLocalSame, tLabel("ok"), feUnsupportedOp, "freed")
+    pinDecline(sutSeqLocalSame, declKey, feUnsupportedOp, tLabel("ok"), "freed")
 
 suite "RFC-0005 S8bo (4): an arm field's address as a value":
   test "stored in another object, written through it":
@@ -305,7 +298,7 @@ suite "RFC-0005 S8bo (4): an arm field's address as a value":
     verdict(sutArmSameArm, tLabel("ok"), sxSat)
     verdict(sutArmSameArm, tLabel("bad"), sxUnsat)
   test "after the object changes arm, a dereference declines":
-    declines(sutArmRearm, tLabel("ok"), feUnsupportedOp, "changed arm")
+    pinDecline(sutArmRearm, declKey, feUnsupportedOp, tLabel("ok"), "changed arm")
   test "the arm is checked where `addr` takes the field":
     verdict(sutArmWrongArm, tRaisedExn("FieldDefect"), sxRaised)
 
@@ -327,7 +320,7 @@ suite "RFC-0005 S8bo (5): an element cell over a seq of objects":
     verdict(sutSeqObjPassed, tLabel("ok"), sxSat)
     verdict(sutSeqObjPassed, tLabel("bad"), sxUnsat)
   test "after a resize, a dereference declines":
-    declines(sutSeqObjResized, tLabel("ok"), feUnsupportedOp, "freed")
+    pinDecline(sutSeqObjResized, declKey, feUnsupportedOp, tLabel("ok"), "freed")
   test "an object holding a string":
     verdict(sutSeqNamedCell, tLabel("ok"), sxSat)
     verdict(sutSeqNamedCell, tLabel("bad"), sxUnsat)

@@ -31,6 +31,9 @@ import std/[unittest, strutils, tables]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "b8_integration_b")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -47,13 +50,6 @@ template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
-
-template declines(fn: typed; lbl: static string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, feUnsupportedOp)
 
 template guardT(): untyped {.dirty.} =
   if t0.len != 1 or "a" notin t0: return
@@ -152,4 +148,4 @@ suite "batch 8: a table write is seen through the view":
     verdict(sHandler, "hand_dead", sxUnsat)
 
   test "a removed key declines where it is removed":
-    declines(sRemoved, "rem_dead")
+    pinDecline(sRemoved, declKey, feUnsupportedOp, tLabel("rem_dead"))

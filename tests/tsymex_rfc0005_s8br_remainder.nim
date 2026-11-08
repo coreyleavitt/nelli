@@ -16,6 +16,9 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8br_remainder")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -41,15 +44,6 @@ template replays(fn: typed, lbl: string) =
     let r = verdict(fn, lbl, sxSat)
     if r.status == sxSat:
       check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
-
-template declines(fn: typed, lbl, why: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feEvalOrderUnmodelled)
-    check why in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
 
 var gArr: array[3, int]
 var gs: seq[int]
@@ -249,7 +243,7 @@ suite "S8br: a call in a by-address actual's index":
     discard verdict(sutIdxCallKept, "iv_dead", sxUnsat)
     discard verdict(sutIdxCallAddr, "ia", sxSat)
     discard verdict(sutIdxCallAddr, "ia_dead", sxUnsat)
-    declines(sutIdxCallShrunk, "is", "never checked")
+    pinDecline(sutIdxCallShrunk, declKey, feEvalOrderUnmodelled, tLabel("is"), "never checked")
 
   test "an index call through a proc value decides":
     ## RED: `fs_dead` a false `sxSat` (the seq copy-out called `fv` again);

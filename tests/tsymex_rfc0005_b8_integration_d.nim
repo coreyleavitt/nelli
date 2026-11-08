@@ -31,6 +31,9 @@ import std/[unittest, strutils, tables]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "b8_integration_d")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -47,13 +50,6 @@ template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
-
-template declines(fn: typed; lbl: static string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, feUnsupportedOp)
 
 template guardT(): untyped {.dirty.} =
   if t0.len != 1 or "a" notin t0: return
@@ -155,8 +151,8 @@ suite "batch 8: module-level containers":
   test "a global seq with the element and its seq: decided (RFC-0005 S8cn)":
     verdict(sSeqPass, "sp_dead", sxUnsat)
   test "a global seq by its name with the element: declines":
-    declines(sSeqDirect, "sd_dead")
-    declines(sSeqDirectW, "sw_dead")
+    pinDecline(sSeqDirect, declKey, feUnsupportedOp, tLabel("sd_dead"))
+    pinDecline(sSeqDirectW, declKey, feUnsupportedOp, tLabel("sw_dead"))
 
 suite "batch 8: walker version":
 

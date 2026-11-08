@@ -20,6 +20,9 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "s8cc_remainder")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -45,15 +48,6 @@ template replays(fn: typed, lbl: string) =
     let r = verdict(fn, lbl, sxSat)
     if r.status == sxSat:
       check replayedOrNotMarshallable(replayWitness(fn, r.witness, tLabel(lbl), {}), roConfirmed)
-
-template declines(fn: typed, lbl: string) =
-  ## The later argument may write what the lvalue reads: never a verdict.
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feEvalOrderUnmodelled)
-    check not r.errors.hasKind(weInternalWalkerFault)
 
 type Holder = ref object
   s: seq[int]
@@ -275,18 +269,18 @@ suite "S8cc: a later argument that only reads":
     discard verdict(sutReadAsg, "ra_dead", sxUnsat)
 
   test "a callee that writes them, however it spells it, still declines":
-    declines(sutWrAsg, "wa_dead")
-    declines(sutWrInc, "wi_dead")
-    declines(sutWrVar, "wv_dead")
+    pinDecline(sutWrAsg, declKey, feEvalOrderUnmodelled, tLabel("wa_dead"))
+    pinDecline(sutWrInc, declKey, feEvalOrderUnmodelled, tLabel("wi_dead"))
+    pinDecline(sutWrVar, declKey, feEvalOrderUnmodelled, tLabel("wv_dead"))
     block:
       # `addr` of a global in a callee halts the path (`heUnsafeCast`).
       let r = symexFind(sutWrAddr, tLabel("wp_dead"))
       checkpoint "wp_dead " & $r.status & " " & show(r.errors)
       check r.status == sxUnknown
       check not r.errors.hasKind(weInternalWalkerFault)
-    declines(sutWrRet, "wr_dead")
-    declines(sutWrSwap, "ws_dead")
-    declines(sutWrDeep, "wd_dead")
-    declines(sutWrAlias, "wl_dead")
-    declines(sutWrPass, "wy_dead")
-    declines(sutWrByVal, "wb_dead")
+    pinDecline(sutWrRet, declKey, feEvalOrderUnmodelled, tLabel("wr_dead"))
+    pinDecline(sutWrSwap, declKey, feEvalOrderUnmodelled, tLabel("ws_dead"))
+    pinDecline(sutWrDeep, declKey, feEvalOrderUnmodelled, tLabel("wd_dead"))
+    pinDecline(sutWrAlias, declKey, feEvalOrderUnmodelled, tLabel("wl_dead"))
+    pinDecline(sutWrPass, declKey, feEvalOrderUnmodelled, tLabel("wy_dead"))
+    pinDecline(sutWrByVal, declKey, feEvalOrderUnmodelled, tLabel("wb_dead"))

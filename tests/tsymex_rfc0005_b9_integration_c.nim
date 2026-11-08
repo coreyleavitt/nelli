@@ -40,6 +40,9 @@ import std/[unittest, strutils, tables, sets]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "b9_integration_c")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -56,13 +59,6 @@ template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
-
-template declines(fn: typed; lbl: static string; kind: SymexErrorKind) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, kind)
 
 template guardT(): untyped {.dirty.} =
   if t0.len != 1 or "a" notin t0: return
@@ -184,14 +180,14 @@ suite "batch 9: a by-value location the body also reaches declines":
 
 
   test "a body that only reads":
-    declines(sReadOnly, "ro_live", feUnsupportedOp)
-    declines(sReadOnly, "ro_dead", feUnsupportedOp)
+    pinDecline(sReadOnly, declKey, feUnsupportedOp, tLabel("ro_live"))
+    pinDecline(sReadOnly, declKey, feUnsupportedOp, tLabel("ro_dead"))
 
 suite "batch 9: a call returning var as a var actual declines":
 
   test "f(t[k], t, k)":
-    declines(sVarCall, "vc_live", feUnsupportedOp)
-    declines(sVarCall, "vc_dead", feUnsupportedOp)
+    pinDecline(sVarCall, declKey, feUnsupportedOp, tLabel("vc_live"))
+    pinDecline(sVarCall, declKey, feUnsupportedOp, tLabel("vc_dead"))
 
 suite "batch 9: what the lifted limit is for stays exact":
 

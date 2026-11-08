@@ -17,6 +17,9 @@ import std/[unittest, strutils, times]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+const declKey = cellKey(faGeneric, "b7_integration")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -41,15 +44,6 @@ template replays(fn: typed, lbl: string) =
     let r = verdict(fn, lbl, sxSat)
     if r.status == sxSat:
       check replayWitness(fn, r.witness, tLabel(lbl), {}).outcome == roConfirmed
-
-template declines(fn: typed, lbl, why: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feEvalOrderUnmodelled)
-    check why in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
 
 var gArr: array[3, int]
 var gW: seq[int]
@@ -174,11 +168,11 @@ suite "RFC-0005 batch 7: integration":
   test "a var openArray view a later argument writes declines":
     ## RED at S8bu's tip: `oa`, `os` a false `sxUnsat`, `oa_dead`,
     ## `os_dead` a refuted `sxSat`.
-    declines(sutOa, "oa", "copied where it stands")
-    declines(sutOa, "oa_dead", "copied where it stands")
-    declines(sutOaSlice, "os", "copied where it stands")
-    declines(sutOaSlice, "os_dead", "copied where it stands")
-    declines(sutOaClosure, "oc_dead", "copied where it stands")
+    pinDecline(sutOa, declKey, feEvalOrderUnmodelled, tLabel("oa"), "copied where it stands")
+    pinDecline(sutOa, declKey, feEvalOrderUnmodelled, tLabel("oa_dead"), "copied where it stands")
+    pinDecline(sutOaSlice, declKey, feEvalOrderUnmodelled, tLabel("os"), "copied where it stands")
+    pinDecline(sutOaSlice, declKey, feEvalOrderUnmodelled, tLabel("os_dead"), "copied where it stands")
+    pinDecline(sutOaClosure, declKey, feEvalOrderUnmodelled, tLabel("oc_dead"), "copied where it stands")
 
   test "a var openArray view a later argument leaves alone is modelled":
     replays(sutOaOther, "ot")

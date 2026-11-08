@@ -313,6 +313,15 @@ jobs:
           cat out/gate.txt
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
+      - name: W-63, the JIT PCRE rows ran on this Windows leg
+        if: ${{ matrix.leg == 'msvc' && !cancelled() }}
+        run: |
+          cat shards/jit-rows.txt | sort | tee out/jit-rows.txt
+          # every JIT suite must have run its tests (ok > 0) and skipped none
+          bad="$(awk '{ split($3,o,"="); split($4,k,"="); if (o[2] + 0 == 0 || k[2] + 0 > 0 || $2 != "rc=0") print }' out/jit-rows.txt)"
+          { echo '### W-63: JIT PCRE suites on symex-msvc'; echo '```'; cat out/jit-rows.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ -s out/jit-rows.txt ] && [ -z "$bad" ] || { echo "JIT rows did not all run: $bad"; exit 1; }
+
       - name: CI-D, the 60 s ceiling
         if: ${{ !cancelled() }}
         run: |

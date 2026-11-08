@@ -2018,6 +2018,7 @@ type WalkArith* = enum
   ## walk-time reading of `ArithScope`, with the sense made positive.
   waChecked   ## the C operation is checked (overflow and div-by-zero raise)
   waWraps     ## unchecked: signed overflow is UB, an 8/16-bit result wraps
+              ## (32/64-bit too under `-d:nelliFwrapv`: `signedWrapDefined`)
 
 var arithScopes {.threadvar.}: seq[WalkArith]
   ## RFC-0005 S8w, RFC-0016 W1-d2 / D1a. A lexical stack: the top is the scope
@@ -8850,7 +8851,8 @@ proc depositSignedOverflow(oc: Z3Bool; width: int) =
   ## every supported compiler). There is no undefined side: the result is
   ## wrapped to the width by `lowerArith` and nothing halts.
   if wraps():
-    if width in {8, 16}: return
+    # RFC-0016 K5a: `-d:nelliFwrapv` defines the 32 and 64 bit wrap as well.
+    if signedWrapDefined(width): return
     let tr = ArithTrap(cond: oc, ub: some(UbKind(ubSignedOverflow)),
                        site: "signed `+`, `-` or `*` overflow")
     arithTrapConds.add tr
@@ -9046,11 +9048,11 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       # raise fork leaves the survivors in the window; unchecked, the
       # `ubSignedOverflow` trap does.
       wrapIntToWidth(r)
-    elif r.ziWidth in {8, 16} and r.ziSigned and wraps() and
-         op in {bAdd, bSub, bMul}:
+    elif r.ziWidth in {8, 16, 32, 64} and signedWrapDefined(r.ziWidth) and
+         r.ziSigned and wraps() and op in {bAdd, bSub, bMul}:
       # RFC-0016 WA-B (P1): a signed 8 or 16 bit result is computed in `int`
       # and narrowed back, a defined wrap (`depositSignedOverflow` halts
-      # nothing there).
+      # nothing there). K5a: so is a 32 or 64 bit one under `-fwrapv`.
       wrapIntToWidth(r)
     else:
       r

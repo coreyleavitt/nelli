@@ -283,7 +283,11 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "287"
+const symexWalkerVersion* = "288"
+  ## RFC-0016 K5a (287->288): a `-d:nelliFwrapv` build (`-fwrapv`) defines
+  ## signed `+`, `-`, `*` and negation as a wrap at 32 and 64 bits, so the
+  ## overflow side no longer halts `ubSignedOverflow` there; the result wraps.
+  ## `low(T) div -1` and `mod -1` stay undefined. No other build changes.
   ## RFC-0016 CR-A (286->287): a generic exception type (`G[ValueError]`)
   ## is no longer identified by its last type argument; `typeIdOf` declines
   ## it (`eeUnknownExnType`), so `except ValueError` no longer "catches" it.
@@ -6608,7 +6612,8 @@ func buildFlagsSegment*(checksOn = checkNames(buildSemantics.checks);
                         exceptions = $buildSemantics.exceptions;
                         threads = buildSemantics.threads;
                         stackTrace = buildSemantics.stackTrace;
-                        lineTrace = buildSemantics.lineTrace): string =
+                        lineTrace = buildSemantics.lineTrace;
+                        fwrapv = buildSemantics.fwrapv): string =
   ## RFC-0005 review R1-08. The build flags that change what the native `fn`
   ## does, which the program and the settings do not key: the checks it was
   ## compiled with (a debug build's confirmed raise cannot happen in a
@@ -6617,8 +6622,10 @@ func buildFlagsSegment*(checksOn = checkNames(buildSemantics.checks);
   ## model, and (R2 SM3) the backend, `--exceptions`, `--threads`, `--stackTrace`
   ## and `--lineTrace`. `--panics:on` is in `replayModeSegment`. The defaults are this
   ## build's.
+  ## RFC-0016 K5a: `fwrapv` is rendered only when on, so a build without it
+  ## keeps its key.
   renderBuildFlags(checksOn, danger, release, mm, backend, exceptions,
-                   threads, stackTrace, lineTrace)
+                   threads, stackTrace, lineTrace, fwrapv)
 
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,

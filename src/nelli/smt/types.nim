@@ -2890,8 +2890,8 @@ type
                           ## overflow checks off) at 32 and 64 bits: the C
                           ## division is undefined and traps on x86 (SIGFPE).
     ubSignedOverflow      ## signed add / sub / mul / neg overflow with the
-                          ## overflow checks off (`-d:nelliFwrapv` is planned, K5a, not yet
-                          ## implemented).
+                          ## overflow checks off and no `-d:nelliFwrapv` at
+                          ## 32 and 64 bits (K5a; 8 and 16 bit wrap).
     ubFloatToIntRange     ## a float to int conversion out of range.
     ubIndeterminateRead   ## a read of an uninitialised value.
     ubSignedDivZero       ## `x div 0` / `x mod 0` on a signed type with the
@@ -5963,14 +5963,22 @@ func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
 func buildWraps*(b: BuildSemantics = buildSemantics): bool =
   ## RFC-0016 W1-d2 (W-07). Whether signed `+`, `-`, `*` (and `div`) in this
   ## build are UNCHECKED: with `overflowChecks` off the C operation is
-  ## undefined on overflow (not a wrap; a `-d:nelliFwrapv` build is planned, K5a, and not yet
-  ## implemented), so the
-  ## walker does not model a wrap and a trusted answer. The ONE predicate
+  ## undefined on overflow (not a wrap, unless the build is `-d:nelliFwrapv`,
+  ## which `signedWrapDefined` reports), so the walker does not model a wrap
+  ## and a trusted answer for 32 and 64 bit. The ONE predicate
   ## `wraps()`, the wrap scan and the exact-offset promotion read;
   ## settings never feed it (the build is what the native program does; a
   ## setting that disagrees taints, `arithChecksDisagree`). A routine under
   ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
   coOverflow notin b.checks
+
+func signedWrapDefined*(width: int; b: BuildSemantics = buildSemantics): bool =
+  ## RFC-0016 K5a. Whether an unchecked signed `+`, `-`, `*` or negation at
+  ## `width` bits is a DEFINED wrap in build `b`: always below `int`'s width
+  ## (8 and 16 bit: C computes in the promoted `int` and the narrowing wraps),
+  ## and at 32 and 64 bit only when the build compiles with `-fwrapv`
+  ## (`-d:nelliFwrapv`). `low(T) div -1` and `mod -1` are not covered by it.
+  width in {8, 16} or b.fwrapv
 
 func effectiveArithChecks*(s: SymexSettings): set[ArithCheck] =
   ## RFC-0016 code review M3. The internal read of the deprecated

@@ -38,10 +38,6 @@ name: symex-nightly
 on:
   schedule:
     - cron: '17 3 * * *'
-  # TEMPORARY (CI-B development): a workflow_dispatch needs the file on the default
-  # branch, so the branch that adds it runs on push. Removed before the merge.
-  push:
-    branches: ['rfc-0016-cib2']
   workflow_dispatch:
     inputs:
       ref:

@@ -219,11 +219,18 @@ jobs:
           $stopMin = 95
           $clock = [System.Diagnostics.Stopwatch]::StartNew()
           $nimcache = Join-Path $env:RUNNER_TEMP 'nimcache-msvc'
+          # RFC-0016 K1a-ci: every suite writes its pin records into pins/ beside
+          # the log (uploaded with the shard, joined by the `universe` job). The
+          # universe suite itself runs with the variable unset: it would join a slice.
+          $pinDir = Join-Path $out 'pins'
+          New-Item -ItemType Directory -Force $pinDir | Out-Null
           $notRun = @()
           foreach ($t in $tests) {
             if ($clock.Elapsed.TotalMinutes -gt $stopMin) { $notRun += $t; continue }
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $extra = @()
+            if ($t -eq 'tsymex_0016_universe') { Remove-Item Env:NELLI_PIN_DIR -ErrorAction SilentlyContinue }
+            else { $env:NELLI_PIN_DIR = $pinDir }
             if ($t -eq 'tsymex_rfc0005_s8ab_letaudit') { $extra += '-d:nelliVmAliasAudit' }
             if ($t -eq 'tsymex_r6_b5_chained') { $extra += '-d:symexCiLeanB5' }
             # 600 s per suite (the mingw corpus uses the 240 s default; the scan-tail
@@ -395,6 +402,70 @@ jobs:
         run: |
           [ "${{ steps.join.outputs.rc }}" = 0 ] && [ "${{ steps.diff.outputs.rc }}" = 0 ]
 
+  # RFC-0016 K1a-ci. Each leg's shard pin records (the Linux shards' sweep.sh
+  # writes <outlog>.pins/; the msvc shards write pins/) joined by the universe
+  # test, scoped to the leg's build row. Zero records fails the leg. The join
+  # reads JSON only, so the msvc leg is joined on Linux too.
+  universe:
+    needs: [derive, sweep, msvc-sweep]
+    if: ${{ !cancelled() && needs.derive.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJson(needs.derive.outputs.legs_json) }}
+    name: universe (${{ matrix.leg }})
+    env:
+      LEG: ${{ matrix.leg }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-symex-linux
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-${{ matrix.leg }}-shard-*
+          path: records
+          merge-multiple: true
+
+      - name: Universe join over the leg's pin records
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+          PARTIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex != '' && '1' || '' }}
+        run: |
+          set -uo pipefail
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          case "$LEG" in
+            cpp) row=linux-cpp ;;
+            z3-4.13.4) row=linux-c-z3-4.13.4 ;;
+            msvc) row=msvc ;;
+            *) echo "no build row for leg $LEG"; exit 1 ;;
+          esac
+          bash scripts/universe-join.sh --self-test
+          mkdir -p "$RUNNER_TEMP/universe" findings
+          UNIVERSE_JOIN_WORK="$RUNNER_TEMP/universe" \
+            bash scripts/universe-join.sh ${PARTIAL:+--partial} "nightly-$LEG" "$row" records \
+            2>&1 | tee "$RUNNER_TEMP/universe/join.txt"
+          rc=${PIPESTATUS[0]}
+          { echo "### nightly $LEG universe join"; echo '```'; tail -n 60 "$RUNNER_TEMP/universe/join.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" != 0 ]; then
+            printf '%s\t%s\t%s\n' "$LEG" '(universe join)' "$(command grep -m1 -E 'FAILED|unclassified|stale' "$RUNNER_TEMP/universe/join.txt" | cut -c1-200)" > "findings/findings-universe-$LEG.tsv"
+          fi
+          exit "$rc"
+
+      - name: Upload the findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-findings-universe-${{ matrix.leg }}
+          path: findings/
+          if-no-files-found: ignore
+
   vm-alias:
     needs: derive
     runs-on: ubuntu-24.04
@@ -433,7 +504,7 @@ jobs:
           if-no-files-found: ignore
 
   report:
-    needs: [derive, sweep, msvc-sweep, gate, vm-alias]
+    needs: [derive, sweep, msvc-sweep, gate, universe, vm-alias]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -493,7 +564,7 @@ jobs:
           cat findings/*.tsv > findings.tsv 2>/dev/null || : > findings.tsv
           # a job that failed without writing findings (setup broke, a runner was lost)
           # is itself a finding, keyed by job
-          for j in derive sweep msvc-sweep gate vm-alias; do
+          for j in derive sweep msvc-sweep gate universe vm-alias; do
             r="$(printf '%s' "$NEEDS_JSON" | jq -r --arg j "$j" '.[$j].result')"
             [ "$r" = failure ] && [ ! -s findings.tsv ] && printf 'workflow\t%s\tjob %s result: failure\n' "$j" "$j" >> findings.tsv
           done

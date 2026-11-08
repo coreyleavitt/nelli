@@ -301,6 +301,12 @@ jobs:
           # from Defender's scan was measured in the same run and saved
           # nothing.
           $nimcache = Join-Path $env:RUNNER_TEMP 'nimcache-corpus'
+          # RFC-0016 K1a-ci: every suite of the shard writes its pin records
+          # into one directory, uploaded with the shard and joined by the
+          # `universe` job. The universe suite itself must NOT see it (it
+          # would join a slice), so it runs with the variable unset.
+          $pinDir = Join-Path $env:RUNNER_TEMP 'pins'
+          New-Item -ItemType Directory -Force $pinDir | Out-Null
           $times = @()
           $notRun = @()
           $failed = @()
@@ -328,6 +334,8 @@ jobs:
             # and every one of them would pay it for zero additional
             # coverage (none besides this suite self-audits symex.nim/
             # concolic.nim's OWN routines at build time).
+            if ($t -eq 'tsymex_0016_universe') { Remove-Item Env:NELLI_PIN_DIR -ErrorAction SilentlyContinue }
+            else { $env:NELLI_PIN_DIR = $pinDir }
             if ($t -eq 'tsymex_rfc0005_s8ab_letaudit') {
               ./scripts/run-ci-suite.ps1 -Suite $t -NimCache $nimcache -ExtraNimArgs @('-d:nelliVmAliasAudit')
             } else {
@@ -360,6 +368,17 @@ jobs:
           }
           if ($bad) { exit 1 }
           Write-Host "All suites in this shard passed, in $shardMin min."
+
+      # RFC-0016 K1a-ci. A red shard's records still reach the join: this runs
+      # on failure too, and a shard that wrote none uploads nothing (warn), which
+      # the `universe` job then fails as ZERO records.
+      - name: Upload the shard's pin records
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: symex-mingw-pins-${{ matrix.shard }}
+          path: ${{ runner.temp }}/pins/
+          if-no-files-found: warn
 
       # RFC-0010 C3c. examples/symex_loops.nim stopped compiling at CR-9(b)
       # and nobody noticed for months, because examples/ is built by neither
@@ -395,6 +414,42 @@ jobs:
             exit 1
           }
           Write-Host 'All examples built and ran.'
+
+  # RFC-0016 K1a-ci. The corpus shards' pin records joined by the universe
+  # test, scoped to the mingw row. The join reads JSON only, so it runs on
+  # Linux (one cheap runner, the shared setup action) rather than on a second
+  # Windows toolchain. Zero records fails.
+  universe:
+    needs: corpus
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/setup-symex-linux
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: symex-mingw-pins-*
+          path: records
+          merge-multiple: true
+
+      - name: Universe join over the corpus shards' pin records
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+        run: |
+          set -uo pipefail
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          bash scripts/universe-join.sh --self-test
+          mkdir -p "$RUNNER_TEMP/universe"
+          UNIVERSE_JOIN_WORK="$RUNNER_TEMP/universe" \
+            bash scripts/universe-join.sh symex-mingw mingw records \
+            2>&1 | tee "$RUNNER_TEMP/universe/join.txt"
+          rc=${PIPESTATUS[0]}
+          { echo '### symex-mingw universe join'; echo '```'; tail -n 60 "$RUNNER_TEMP/universe/join.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
   scan-tail:
     runs-on: windows-latest

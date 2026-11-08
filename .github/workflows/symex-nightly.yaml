@@ -37,6 +37,10 @@ name: symex-nightly
 on:
   schedule:
     - cron: '17 3 * * *'
+  # TEMPORARY (CI-B development): a workflow_dispatch needs the file on the default
+  # branch, so the branch that adds it runs on push. Removed before the merge.
+  push:
+    branches: ['rfc-0016-cib2']
   workflow_dispatch:
     inputs:
       ref:
@@ -402,6 +406,18 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-symex-linux
+
+      - name: DIAG (temporary) where do the host compiler warnings go
+        shell: bash
+        run: |
+          set -uo pipefail
+          nim c --threads:on --hints:off --cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src \
+            --cincludes:"$NELLI_Z3_INCLUDE" --nimcache:"$RUNNER_TEMP/ncd" -o:"$RUNNER_TEMP/dx" tests/tfuzzforkworker.nim >"$RUNNER_TEMP/d.out" 2>"$RUNNER_TEMP/d.err" || true
+          echo "pwd=$PWD"; echo "stdout Warning lines: $(grep -c 'Warning:' "$RUNNER_TEMP/d.out")"; echo "stderr Warning lines: $(grep -c 'Warning:' "$RUNNER_TEMP/d.err")"
+          grep -m5 'Warning:' "$RUNNER_TEMP/d.out" "$RUNNER_TEMP/d.err" || true
+          head -5 "$RUNNER_TEMP/d.out" "$RUNNER_TEMP/d.err"
+          nim dump --dump.format:json 2>/dev/null | head -c 600 || true
+          ls "$(dirname "$(command -v nim)")/../config" 2>/dev/null; cat "$(dirname "$(readlink -f "$(command -v nim)")")/../config/nim.cfg" 2>/dev/null | grep -in 'warn\|hint\|listFull' || true
 
       - name: vm_alias_guard over a sampled slice (scripts/vm-alias-slice.sh)
         run: |

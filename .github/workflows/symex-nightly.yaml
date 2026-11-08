@@ -26,9 +26,10 @@ name: symex-nightly
 # CI-D. `.times` is the per-test compile+run wall time. The gate job reports every
 # test over 60 s into the job summary and the artifact; the `report` job then
 # GATES it as a ratchet (scripts/check-ceiling.sh --offenders, the committed
-# tests/0016-allowlist/ceiling-offenders-<leg>.txt): an unlisted test over 60 s
-# is a new offender, a listed test under 45 s is a stale entry, and a finding for
-# either goes into the intake issues. The list only shrinks.
+# tests/0016-allowlist/ceiling-offenders-<leg>.txt): an unlisted test over 126 s
+# (60 s x 2.1) fails the gate. An unlisted test between 60 and 126 s and a listed
+# test under 60 s (a stale entry) only warn. Every failure and every warning goes
+# into the intake issues, and the warnings feed a periodic re-seed of the lists.
 #
 # INTAKE. A red `schedule` run opens or updates one `rfc-0016-intake` issue per
 # (leg, test) (scripts/rfc0016-intake.sh). Every other trigger is a dry run that
@@ -470,14 +471,13 @@ jobs:
           for dir in merged/nightly-*-merged; do
             leg="${dir#merged/nightly-}"; leg="${leg%-merged}"
             [ -r "$dir/merged.log.times" ] || continue   # vm-alias writes no times
-            out="$(bash scripts/check-ceiling.sh --offenders "tests/0016-allowlist/ceiling-offenders-$leg.txt" "$dir/merged.log.times")" || {
-              rc=1
-              # the FAIL blocks have the shape the intake extractor reads
-              # (a line is `  <seconds> <name>` or `  <name>`: the key is the last word)
-              printf '%s\n' "$out" | bash scripts/rfc0016-intake.sh --extract "$leg" /dev/stdin \
-                | awk -F'\t' '{ n = split($2, w, " "); printf "%s\t%s\t60 s ceiling ratchet: %s\n", $1, w[n], $3 }' >> findings/findings-ceiling.tsv
-            }
-            printf '%s\n' "$out" | command grep -q '^WARN' && echo "::warning::$leg: unlisted tests over the 60 s ceiling (under the 90 s gate); see the step summary"
+            out="$(bash scripts/check-ceiling.sh --offenders "tests/0016-allowlist/ceiling-offenders-$leg.txt" "$dir/merged.log.times")" || rc=1
+            # the FAIL and WARN blocks have the shape the intake extractor reads
+            # (a line is `  <seconds> <name>` or `  <name>`: the key is the last word);
+            # the leg key is `ceiling-<leg>` so a flood of warnings collapses into its own issue
+            printf '%s\n' "$out" | sed 's/^WARN: /FAIL: /' | bash scripts/rfc0016-intake.sh --extract "ceiling-$leg" /dev/stdin \
+              | awk -F'\t' '{ n = split($2, w, " "); printf "%s\t%s\t60 s ceiling ratchet: %s\n", $1, w[n], $3 }' >> findings/findings-ceiling.tsv
+            printf '%s\n' "$out" | command grep -q '^WARN' && echo "::warning::$leg: ceiling ratchet warnings (not a failure); see the step summary"
             { echo "### $leg: 60 s ceiling ratchet"; echo '```'; printf '%s\n' "$out" | command grep -v '^[0-9.]* ' ; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
           echo "rc=$rc" >> "$GITHUB_OUTPUT"

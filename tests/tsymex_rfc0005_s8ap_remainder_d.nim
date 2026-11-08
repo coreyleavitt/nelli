@@ -36,6 +36,11 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+
+# The placeholder's own kind declines, never the generic unsupported-statement
+# fallback, hence `excluding`.
+const declKey = cellKey(faGeneric, "s8ap_remainder_d")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -180,23 +185,17 @@ proc uUnsupportedVar(x: int) =
 
 suite "S8ap (4): an itUninterp var declines with its placeholder's own kind":
 
-  template declines(fn: typed, lbl: string, kind: SymexErrorKind): untyped =
-    block:
-      let r = symexFind(fn, tLabel(lbl))
-      checkpoint lbl & " " & $r.status & " " & show(r.errors)
-      check r.status == sxUnknown
-      check not r.errors.hasKind(weInternalWalkerFault)
-      check r.errors.hasKind(kind)
-      check not r.errors.hasKind(feUnsupportedStmtKind)
-
   test "__closure -> ceUnsupportedHof":
-    declines(uClosureVar, "u_closure", ceUnsupportedHof)
+    pinDecline(uClosureVar, declKey, ceUnsupportedHof, tLabel("u_closure"),
+               excluding = {feUnsupportedStmtKind})
 
   test "__ownership:Atomic -> heUnsupportedOwnership":
-    declines(uAtomicVar, "u_atomic", heUnsupportedOwnership)
+    pinDecline(uAtomicVar, declKey, heUnsupportedOwnership, tLabel("u_atomic"),
+               excluding = {feUnsupportedStmtKind})
 
   test "__unsupported:* -> feUnsupportedParamType":
-    declines(uUnsupportedVar, "u_weird", feUnsupportedParamType)
+    pinDecline(uUnsupportedVar, declKey, feUnsupportedParamType, tLabel("u_weird"),
+               excluding = {feUnsupportedStmtKind})
 
 suite "S8ap: walker version":
   test "symexWalkerVersion >= 183":

@@ -374,7 +374,8 @@ template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
 
 proc pinDeclineJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
                          kind: SymexErrorKind; file: string;
-                         needle: string = "") =
+                         needle: string = "";
+                         excluding: set[SymexErrorKind] = {}) =
   let cell = render(key)
   if res.trusted:
     pinFail("pinDecline " & cell & ": the verdict " & $res.status &
@@ -384,6 +385,12 @@ proc pinDeclineJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
     if e.kind == weInternalWalkerFault:
       pinFail("pinDecline " & cell & ": an internal walker fault was recorded: " &
               e.msg)
+  # A kind in `excluding` must not be recorded at any severity: the decline
+  # has to come from `kind`, not from a broader fallback that also fires.
+  for e in res.errors:
+    if e.kind in excluding:
+      pinFail("pinDecline " & cell & ": " & $e.kind &
+              " was recorded and is excluded: " & e.msg)
   if not res.errors.named(kind):
     pinFail("pinDecline " & cell & ": not trusted, but no " & $kind &
             " was recorded; errors: " & kindsOf(res.errors))
@@ -400,14 +407,15 @@ proc pinDeclineJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
     native: "not run: the cell declines"))
 
 template pinDecline*(fn: untyped; key: CellKey; kind: SymexErrorKind;
-                     target: untyped = tLabel("hit"); needle: string = "") =
+                     target: untyped = tLabel("hit"); needle: string = "";
+                     excluding: set[SymexErrorKind] = {}) =
   ## The cell declines: the verdict is not trusted, `kind` was recorded, no
-  ## internal walker fault was, and, when `needle` is given, a `kind` message
-  ## contains it.
+  ## internal walker fault was, no kind in `excluding` was, and, when
+  ## `needle` is given, a `kind` message contains it.
   block:
     let pdRes = symexFind(fn, target, pinSettingsConst)
     pinDeclineJudge(pdRes, key, target, kind, instantiationInfo(-1).filename,
-                    needle)
+                    needle, excluding)
 
 # --- pinCrash and skipCell -------------------------------------------------
 

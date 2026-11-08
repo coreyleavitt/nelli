@@ -173,10 +173,7 @@ suite "K9a":
     const allowed: seq[string] = @[
       # Names a kind only to exclude weInternalWalkerFault; kindless otherwise,
       # so it migrates with the other kindless declines (K9c).
-      "tsymex_rfc0005_s8cd_globals_b.nim",
-      # Also asserts `not hasKind(feUnsupportedStmtKind)`, which pinDecline
-      # cannot express: left on the template (K9b finding).
-      "tsymex_rfc0005_s8ap_remainder_d.nim"]
+      "tsymex_rfc0005_s8cd_globals_b.nim"]
     let markers = ["hasKind(", "named(", ".kind ==", ".kind in", "SymexErrorKind"]
     var offenders: seq[string]
     for f in walkFiles(probeDir / "*.nim"):

@@ -91,6 +91,10 @@ on:
         description: 'Walker test glob for the vcc step'
         required: false
         default: 'tests/tsymex_0016_*.nim'
+      nim_flags:
+        description: 'Extra nim flags for the vcc step (e.g. --debugger:native -d:nelliReplayReexec)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -413,6 +417,7 @@ jobs:
         shell: pwsh
         env:
           TESTS_GLOB: ${{ inputs.tests_glob || 'tests/tsymex_0016_*.nim' }}
+          NIM_FLAGS: ${{ inputs.nim_flags || '' }}
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host "compiler: vcc (nim --cc:vcc)"
@@ -422,7 +427,11 @@ jobs:
           & cmd /c "cl.exe 2>&1" | Select-Object -First 2 | ForEach-Object { Write-Host $_ }
           $ErrorActionPreference = $prev
           Write-Host "glob: $env:TESTS_GLOB"
-          $tests = @(Get-ChildItem -Path $env:TESTS_GLOB -File -ErrorAction SilentlyContinue | Sort-Object Name)
+          # TESTS_GLOB may name several globs, separated by commas or spaces.
+          $globs = @($env:TESTS_GLOB -split '[,\s]+' | Where-Object { $_ })
+          $extra = @($env:NIM_FLAGS -split '\s+' | Where-Object { $_ })
+          Write-Host "extra flags: $($extra -join ' ')"
+          $tests = @(Get-ChildItem -Path $globs -File -ErrorAction SilentlyContinue | Sort-Object Name -Unique)
           Write-Host "matched $($tests.Count) test files"
           if ($tests.Count -eq 0) {
             throw "glob '$env:TESTS_GLOB' matched 0 files -- refusing to report a false green"
@@ -430,7 +439,7 @@ jobs:
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $($t.Name) [vcc]"
-            nim c -r --cc:vcc --threads:on --hints:off --colors:off `
+            nim c -r --cc:vcc --threads:on --hints:off --colors:off @extra `
               --nimcache:_nimcache-0016 `
               --path:src --path:_deps\z3\src --path:_deps\softlink\src `
               --cincludes:C:\z3\include $t.FullName

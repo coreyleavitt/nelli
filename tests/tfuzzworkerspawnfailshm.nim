@@ -91,6 +91,10 @@ when defined(posix):
         for kind, p in walkDir("/proc/self/fd"): inc result
 
       let openBefore = countOpenFds()
+      block diag:
+        var fds: seq[string]
+        for kind, p in walkDir("/proc/self/fd"): fds.add(extractFilename(p))
+        echo "DIAG fds(", fds.len, ")=", fds, " nofile=", (block: (var l: RLimit; discard getrlimit(RLIMIT_NOFILE, l); (l.rlim_cur, l.rlim_max)))
       var oldLimit: RLimit
       check getrlimit(RLIMIT_NOFILE, oldLimit) == 0
       var tight = RLimit(rlim_cur: openBefore + 1, rlim_max: oldLimit.rlim_max)

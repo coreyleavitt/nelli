@@ -1,12 +1,28 @@
 name: symex-linux
 
-# RFC-0016 CI-A1: native Linux provisioning for the symex engine, with no
+# RFC-0016 CI-A1/A3: the native Linux leg for the whole suite, with no
 # container. Patched Nim from the OCI artifact, Z3 5.1.0 from its release
-# archive, PCRE 8.45 from source (both hash-pinned and cached). For now it
-# runs scripts/sweep.sh --host (CI-A2: the podman sweep's runner without
-# podman); the default run set is ONE Z3 file and ONE PCRE-using file, and a
-# dispatch can widen it with tests_regex / derive. CI-A3 widens the push run.
-# Triggers are deliberately narrow until CI-A3: dispatch, main and rfc-* pushes.
+# archive, PCRE 8.45 from source (all hash-pinned and cached; the shared
+# .github/actions/setup-symex-linux).
+#
+# SHAPE. `derive` cuts every test registered in nelli.nimble's `test` task
+# into shards (scripts/derive-linux-shards.py: the Linux twin of
+# derive-ci-suites.ps1, placed by scripts/ci-suite-seconds.tsv). Each `sweep`
+# shard runs scripts/sweep.sh --host --derive on its slice and uploads the
+# log with the .summary / .env / .drift / .warnings sidecars sweep.sh writes.
+# `gate` joins the shard logs and fails on
+#   - a registered test with no result (a shard died or was cut),
+#   - a red test that is not in tests/0016-allowlist/linux-host-known-red.txt,
+#   - an allowlisted test that PASSED (a stale entry; the list cannot rot).
+# `watchdog` fails when the K8a heartbeat or an rfc-0016-intake issue is over
+# seven days old (scripts/rfc0016-watchdog.sh; its header holds the
+# absent-heartbeat policy). `pins` is the K1-0 pin join and the README kind
+# check, which are not sharded.
+#
+# A red outside the allowlist is the signal; the suite is not green on a good
+# day, so the allowlist is the recorded baseline and "what moved against it" is
+# the gate. Adding an entry needs a reason on its line and, for a defect, a
+# row in the RFC (§5.3 or the INT table).
 
 on:
   workflow_dispatch:
@@ -16,14 +32,9 @@ on:
         required: false
         default: ""
       tests_regex:
-        description: "sweep.sh -f REGEX over test basenames (use . for every test in the run set)"
+        description: "Run only test basenames matching this REGEX (empty = the whole registered suite)"
         required: false
-        default: "tsymex_0016_k9a_pins|tsymex_phase15_S6b_regex"
-      derive:
-        description: "Run set from nelli.nimble's test task (sweep.sh --derive) instead of the tests/t*.nim glob"
-        type: boolean
-        required: false
-        default: false
+        default: ""
   push:
     branches: [main, 'rfc-*']
     paths-ignore:
@@ -40,7 +51,129 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  one-file:
+  derive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      shards_json: ${{ steps.derive.outputs.shards_json }}
+      shard_ids: ${{ steps.derive.outputs.shard_ids }}
+      regexes_json: ${{ steps.derive.outputs.regexes_json }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Derive and shard the registered suite
+        id: derive
+        env:
+          NELLI_TESTS_REGEX: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex || '' }}
+        run: python3 -I scripts/derive-linux-shards.py
+
+  sweep:
+    needs: derive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.derive.outputs.shard_ids) }}
+    name: sweep (shard ${{ matrix.shard }})
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-symex-linux
+
+      - name: Sweep shard ${{ matrix.shard }} on the host (scripts/sweep.sh --host)
+        shell: bash
+        env:
+          REGEXES_JSON: ${{ needs.derive.outputs.regexes_json }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/sweep"
+          regex="$(printf '%s' "$REGEXES_JSON" | jq -r --arg s "$SHARD" '.[$s]')"
+          [ -n "$regex" ] && [ "$regex" != null ] || { echo "shard $SHARD: no regex"; exit 1; }
+          start=$SECONDS
+          # sweep.sh exits 0 unless it could not run; the log is the record
+          # and the `gate` job reads it. A red test does not fail the shard.
+          scripts/sweep.sh --host --derive -j 4 -f "$regex" "$RUNNER_TEMP/sweep/shard-$SHARD.log"
+          rc=$?
+          {
+            echo "### shard $SHARD: $(( (SECONDS - start) / 60 )) min $(( (SECONDS - start) % 60 )) s"
+            echo '```'
+            cat "$RUNNER_TEMP/sweep/shard-$SHARD.log.summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "shard $SHARD wall time: $(( SECONDS - start )) s"
+          exit "$rc"
+
+      - name: Upload the shard log and sidecars
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: symex-linux-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/sweep/
+          if-no-files-found: warn
+
+  gate:
+    needs: [derive, sweep]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: symex-linux-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Join the shards against the known-red allowlist
+        env:
+          SHARDS_JSON: ${{ needs.derive.outputs.shards_json }}
+          PARTIAL: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex != '' && '1' || '' }}
+        run: |
+          set -uo pipefail
+          bash scripts/check-linux-allowlist.sh --self-test
+          printf '%s' "$SHARDS_JSON" | jq -r '.[][]' > "$RUNNER_TEMP/expected.txt"
+          rc=0
+          bash scripts/check-linux-allowlist.sh tests/0016-allowlist/linux-host-known-red.txt \
+            "$RUNNER_TEMP/expected.txt" shards/shard-*.log > "$RUNNER_TEMP/gate.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/gate.txt"
+          { echo '### symex-linux gate'; echo '```'; cat "$RUNNER_TEMP/gate.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  watchdog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Watchdog self-test
+        run: bash scripts/rfc0016-watchdog.sh --self-test
+
+      - name: K8a heartbeat and rfc-0016-intake issue age
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/rfc0016-watchdog.sh
+
+  pins:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -49,65 +182,7 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
 
-      - name: Install the patched Nim toolchain (OCI artifact)
-        uses: ./.github/actions/setup-nim-artifact
-        with:
-          tag: 2.2.10-linux-x64
-
-      - name: Install Z3 5.1.0
-        uses: ./.github/actions/setup-z3-linux
-
-      - name: Install PCRE 8.45
-        uses: ./.github/actions/setup-pcre1-linux
-
-      - name: Clone deps at milpa.lock provenance SHAs
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p _deps
-          python3 -I - <<'PY'
-          import re, subprocess
-          lock = open('milpa.lock').read()
-          pat = re.compile(r'dep "([^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "([^"]+)"[\s\S]*?commit_sha "([0-9a-f]{40})"')
-          for name, url, sha in pat.findall(lock):
-              print('dep', name, url, sha, flush=True)
-              subprocess.check_call(['git', 'clone', url, '_deps/' + name])
-              subprocess.check_call(['git', '-C', '_deps/' + name, 'checkout', '--detach', sha])
-          PY
-          test -d _deps/z3 && test -d _deps/softlink
-
-      - name: Report toolchain versions
-        shell: bash
-        run: |
-          set -euo pipefail
-          nim --version | head -1
-          gcc --version | head -1
-          cat > "$RUNNER_TEMP/ver.nim" <<'NIM'
-          import z3
-          echo "Z3: ", z3FullVersion()
-          NIM
-          nim c -r --cc:gcc --hints:off --colors:off \
-            --path:_deps/z3/src --path:_deps/softlink/src \
-            --cincludes:"$NELLI_Z3_INCLUDE" \
-            --nimcache:"$RUNNER_TEMP/nc-ver" "$RUNNER_TEMP/ver.nim"
-          echo "PCRE: $("$NELLI_PCRE_PREFIX/bin/pcretest" -C | head -1)"
-          ls -l "$NELLI_PCRE_PREFIX"/lib/libpcre.so.1*
-
-      - name: Sweep on the host (scripts/sweep.sh --host)
-        shell: bash
-        env:
-          TESTS_REGEX: ${{ github.event_name == 'workflow_dispatch' && inputs.tests_regex || 'tsymex_0016_k9a_pins|tsymex_phase15_S6b_regex' }}
-          DERIVE: ${{ inputs.derive && '--derive' || '' }}
-        run: |
-          set -uo pipefail
-          mkdir -p "$RUNNER_TEMP/sweep"
-          # sweep.sh exits 0 unless it could not run; the log is the record.
-          # The step fails if any selected test failed.
-          scripts/sweep.sh --host $DERIVE ${TESTS_REGEX:+-f "$TESTS_REGEX"} \
-            "$RUNNER_TEMP/sweep/sweep.log"
-          cat "$RUNNER_TEMP/sweep/sweep.log.summary" >> "$GITHUB_STEP_SUMMARY"
-          awk '$1 != "0" && $1 != "skip" { bad = 1 } END { exit bad }' \
-            "$RUNNER_TEMP/sweep/sweep.log"
+      - uses: ./.github/actions/setup-symex-linux
 
       - name: README decline catalogue names every kind (scripts/check-readme-kinds.sh)
         if: ${{ !cancelled() }}
@@ -154,12 +229,10 @@ jobs:
           path: ${{ runner.temp }}/k1lite-cpp/
           if-no-files-found: warn
 
-      - name: Upload the sweep log and sidecars
+      - name: Upload the K1-0 pins and log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: symex-linux-sweep
-          path: |
-            ${{ runner.temp }}/sweep/
-            ${{ runner.temp }}/k1lite/
+          name: symex-linux-k1lite
+          path: ${{ runner.temp }}/k1lite/
           if-no-files-found: warn

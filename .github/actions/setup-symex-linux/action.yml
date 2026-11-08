@@ -1,0 +1,53 @@
+name: setup-symex-linux
+description: >
+  The symex-linux toolchain (RFC-0016 CI-A1), shared by the sweep shards and the
+  pin-join job: the patched Nim OCI artifact, Z3 5.1.0, PCRE 8.45, the milpa.lock
+  deps cloned at their provenance SHAs, and a version report. Exports
+  NELLI_Z3_INCLUDE, NELLI_PCRE_PREFIX and LD_LIBRARY_PATH to later steps.
+runs:
+  using: composite
+  steps:
+    - name: Install the patched Nim toolchain (OCI artifact)
+      uses: ./.github/actions/setup-nim-artifact
+      with:
+        tag: 2.2.10-linux-x64
+
+    - name: Install Z3 5.1.0
+      uses: ./.github/actions/setup-z3-linux
+
+    - name: Install PCRE 8.45
+      uses: ./.github/actions/setup-pcre1-linux
+
+    - name: Clone deps at milpa.lock provenance SHAs
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p _deps
+        python3 -I - <<'PY'
+        import re, subprocess
+        lock = open('milpa.lock').read()
+        pat = re.compile(r'dep "([^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "([^"]+)"[\s\S]*?commit_sha "([0-9a-f]{40})"')
+        for name, url, sha in pat.findall(lock):
+            print('dep', name, url, sha, flush=True)
+            subprocess.check_call(['git', 'clone', url, '_deps/' + name])
+            subprocess.check_call(['git', '-C', '_deps/' + name, 'checkout', '--detach', sha])
+        PY
+        test -d _deps/z3 && test -d _deps/softlink
+
+    - name: Report toolchain versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        nim --version | head -1
+        gcc --version | head -1
+        echo "cores: $(nproc), memory: $(free -g | awk '/Mem:/ {print $2}') GB, /dev/shm: $(df -h /dev/shm | awk 'NR==2 {print $2}')"
+        cat > "$RUNNER_TEMP/ver.nim" <<'NIM'
+        import z3
+        echo "Z3: ", z3FullVersion()
+        NIM
+        nim c -r --cc:gcc --hints:off --colors:off \
+          --path:_deps/z3/src --path:_deps/softlink/src \
+          --cincludes:"$NELLI_Z3_INCLUDE" \
+          --nimcache:"$RUNNER_TEMP/nc-ver" "$RUNNER_TEMP/ver.nim"
+        echo "PCRE: $("$NELLI_PCRE_PREFIX/bin/pcretest" -C | head -1)"
+        ls -l "$NELLI_PCRE_PREFIX"/lib/libpcre.so.1*

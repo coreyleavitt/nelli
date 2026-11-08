@@ -260,8 +260,11 @@ suite "RFC-0005 S6a -- oracles":
 
   test "oracle: the variant plain-field operand raises on d == 0":
     var raised = false
+    # A variable zero: cl.exe rejects a literal `1 / 0` in the generated C
+    # (C2124) where gcc accepts it, and the divisor is what the oracle exercises.
+    var zero = 0
     try:
-      let p = S6aWide(kind: s6t0, tag: 1 div 0)
+      let p = S6aWide(kind: s6t0, tag: 1 div zero)
       discard p
     except DivByZeroDefect:
       raised = true

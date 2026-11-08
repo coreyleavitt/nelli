@@ -182,7 +182,7 @@ title    = "No signed-wrap setting: C undefined behaviour is an outcome the buil
 [[slice]]
 id    = "D1"
 title = "Differential fuzzing harness (§4, §10): K8a skeleton with one family in Wave 2, families from the admission tables in Wave 4"
-state = "pending"
+state = "in-progress"
 
 [[slice]]
 id    = "W1"

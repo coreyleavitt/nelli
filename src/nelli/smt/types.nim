@@ -474,6 +474,12 @@ type
                                     # allocated once and survive
                                     # discriminator reassignment.
       vPlainFieldTypes*: seq[IRType]
+      vLayoutPragma*:    string
+        ## RFC-0016 PRC-07 slice B. The pragma on the object's declaration
+        ## that changes its C layout: "packed", or one the layout declines
+        ## ("union", "align", "importc", "bitsize"...; `dsl_typebridge.
+        ## layoutPragmaOf`). "" for a plain object. Identity only, like
+        ## `vNominalId`: NOT part of `IRType.==` or the canonical form.
     of itUninterp:
       uninterpName*: string   ## Phase 15 Z3b: Z3 uninterpreted-sort name.
     of itFloat32, itFloat64:
@@ -4396,7 +4402,8 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
                nominalId = "";
                inheritChain: seq[string] = @[];
                ownedFieldNames: seq[string] = @[];
-               ownedFieldIds: seq[string] = @[]): IRType =
+               ownedFieldIds: seq[string] = @[];
+               layoutPragma = ""): IRType =
   ## Phase 11 + Phase 14 (A2). Tagged sum type — Nim variant object.
   ##
   ## `plainFieldNames`/`plainFieldTypes` carry the always-present
@@ -4413,7 +4420,8 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
          vPlainFieldNames: plainFieldNames,
          vPlainFieldTypes: plainFieldTypes,
          vInheritChain: inheritChain,                ## RFC-0005 S8bn
-         vOwnedFieldNames: ownedFieldNames, vOwnedFieldIds: ownedFieldIds)
+         vOwnedFieldNames: ownedFieldNames, vOwnedFieldIds: ownedFieldIds,
+         vLayoutPragma: layoutPragma)                ## RFC-0016 PRC-07 B
 
 proc hierChain*(t: IRType): seq[string] =
   ## RFC-0005 S8bn (item 8). The inheritance chain of an object type, a

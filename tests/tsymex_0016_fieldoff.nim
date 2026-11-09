@@ -109,6 +109,19 @@ type
     of kwa: h: int16
     of kwb: w: int32
     of kwc: discard
+  Wk {.packed.} = object  ## slice B 0a: no padding, every member at alignment 1
+    pre: int8
+    case k: Kw
+    of kwa: x: int64
+    of kwb:
+      a: int8
+      b: int32
+    of kwc: discard
+
+proc sutPackedRead(v: int64) =
+  # packed: `b` is bytes 3..7 of the object, bytes 1..5 of `x` (at 2..10)
+  let o = Wk(k: kwa, pre: 1, x: v)
+  if o.b == 0x11223344'i32: symexTarget("hit")
 
 const fk = cellKey(axBuild, "fieldChecks=off")
 const uk = cellKey(axDefinedness, "field/inactiveBranch")
@@ -284,6 +297,12 @@ suite "PRC-07: --fieldChecks:off":
     check pc[0] == pc[1]
     check pd[0] == pd[1]
     check pa[0] == "size=8;x@4;wa@4;wb@6;wc@4"
+    # slice B 0a: a `{.packed.}` variant has no padding at any level
+    var e = Wk(k: kwa, pre: 1, x: 2)
+    let pe = layoutPins(Wk, e)
+    checkpoint "walker " & pe[0] & " native " & pe[1]
+    check pe[0] == pe[1]
+    check pe[0] == "size=10;x@2;a@2;b@3"
 
   test "the build has the field check off and the others on":
     check coField notin buildSemantics.checks

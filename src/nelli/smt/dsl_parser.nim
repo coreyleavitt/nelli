@@ -773,7 +773,8 @@ proc emitIRType*(t: IRType): NimNode =
       newLit(t.vNominalId),   # RFC-0005 S8j: keys the `Ref_<id>` sort
       # RFC-0005 S8bn (item 8): a case-object hierarchy's chain and owners.
       newLit(t.vInheritChain), newLit(t.vOwnedFieldNames),
-      newLit(t.vOwnedFieldIds))
+      newLit(t.vOwnedFieldIds),
+      newLit(t.vLayoutPragma))   # RFC-0016 PRC-07 slice B
   of itMultiVariant:
     # Phase 14 cycle A1a stub. Re-emit a runtime-reconstructible
     # `mkMultiVariant(…)` call. Full A1b (parser-side classification)

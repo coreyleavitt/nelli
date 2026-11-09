@@ -79,16 +79,27 @@ func variantLayout*(ty: IRType; cpu: Cpu; endian: Endian;
               "and arm64)")
   if ty.vInheritChain.len > 0 or ty.vIsAxisView:
     return no("a variant of an inheritance hierarchy")
+  # RFC-0016 PRC-07 slice B (0a). `{.packed.}` is `#pragma pack(push, 1)`
+  # around the whole struct (gcc also `__attribute__((__packed__))`): every
+  # member of it, of the anonymous union and of each arm struct sits at
+  # alignment 1 (pinned natively, `Wk` in `tsymex_0016_fieldoff`). Any other
+  # layout pragma (`union`, `align`, `bitsize`, an imported struct) is a
+  # layout the walker has not derived: declined, never exact-and-wrong.
+  let packed = ty.vLayoutPragma == "packed"
+  if ty.vLayoutPragma.len > 0 and not packed:
+    return no("a `{." & ty.vLayoutPragma & ".}` object whose C layout is " &
+              "not derived")
   var off = 0
   var align = 1
   proc place(at: var int; al: var int; name: string;
              t: IRType; dst: var seq[Place]; base: int): bool =
     let (sz, kind) = scalar(t)
     if sz == 0: return false
-    at = alignUp(at, sz)
+    let a = if packed: 1 else: sz
+    at = alignUp(at, a)
     dst.add Place(name: name, off: base + at, size: sz, kind: kind, ty: t)
     at += sz
-    al = max(al, sz)
+    al = max(al, a)
     true
   var res = VariantLayout(ok: true)
   for i, n in ty.vPlainFieldNames:
@@ -96,8 +107,9 @@ func variantLayout*(ty: IRType; cpu: Cpu; endian: Endian;
       return no("plain field `" & n & "` of a type whose size is not derived")
   let (dsz, _) = scalar(ty.vDiscTy)
   if dsz == 0: return no("a discriminator whose size is not derived")
-  off = alignUp(off, dsz) + dsz
-  align = max(align, dsz)
+  let dal = if packed: 1 else: dsz
+  off = alignUp(off, dal) + dsz
+  align = max(align, dal)
   var unionAlign, unionSize = 1
   var armRel: OrderedTable[int, seq[Place]]
   for arm in ty.vArms:

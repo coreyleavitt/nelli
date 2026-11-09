@@ -194,6 +194,50 @@ proc isInheritableRoot(sym: NimNode): bool =
     if pr.kind in {nnkIdent, nnkSym} and pr.strVal == "inheritable": return true
   false
 
+proc layoutPragmaOf*(sym: NimNode; recList: NimNode): string =
+  ## RFC-0016 PRC-07 slice B. The pragma on `sym`'s declaration, or on one
+  ## of its fields, that changes the object's C layout; "" for none. The
+  ## names are Nim's (`packed`, `union`, `align`, `bitsize`, `importc`,
+  ## `header`, `incompleteStruct`, `completeStruct`, `exportc`); the one
+  ## `variant_layout` derives is `packed`, every other one declines there.
+  const layoutPragmas = ["packed", "union", "align", "importc", "header",
+                         "incompleteStruct", "completeStruct", "exportc",
+                         "bitsize"]
+  proc nameOf(pr: NimNode): string =
+    var n = pr
+    if n.kind in {nnkExprColonExpr, nnkCall} and n.len >= 1: n = n[0]
+    if n.kind in {nnkIdent, nnkSym}: n.strVal else: ""
+  if sym.kind == nnkSym:
+    let impl = sym.getImpl
+    if impl.kind == nnkTypeDef and impl.len >= 1 and
+       impl[0].kind == nnkPragmaExpr and impl[0].len >= 2:
+      for pr in impl[0][1]:
+        let n = nameOf(pr)
+        if n in layoutPragmas: return n
+    # `type T {.packed.} = object` sits on the TypeDef; `object {.packed.}`
+    # on the ObjectTy's own pragma node
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkObjectTy and impl[2].len >= 1 and
+       impl[2][0].kind == nnkPragma:
+      for pr in impl[2][0]:
+        let n = nameOf(pr)
+        if n in layoutPragmas: return n
+  proc fieldPragma(n: NimNode): string =
+    case n.kind
+    of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse:
+      for c in n:
+        let r = fieldPragma(c)
+        if r.len > 0: return r
+    of nnkIdentDefs:
+      for i in 0 ..< n.len - 2:
+        if n[i].kind == nnkPragmaExpr and n[i].len >= 2:
+          for pr in n[i][1]:
+            let nm = nameOf(pr)
+            if nm in layoutPragmas: return nm
+    else: discard
+    ""
+  if recList.kind == nnkRecList: fieldPragma(recList) else: ""
+
 proc inheritInfo*(sym: NimNode): tuple[chain, ownedNames, ownedIds: seq[string];
                                        parent: NimNode] =
   ## RFC-0005 S8bh (item 3). For a type declared `of` another (`RootObj`
@@ -803,7 +847,9 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         plainFieldNames = plainFieldNames,
         plainFieldTypes = plainFieldTypes,
         discTags = axes[0].discTags,
-        nominalId = nominalId(nameSym)).keyedBySym(nameSym)   # RFC-0005 S8j
+        nominalId = nominalId(nameSym),                       # RFC-0005 S8j
+        layoutPragma = layoutPragmaOf(nameSym, recList)       # RFC-0016 PRC-07 B
+        ).keyedBySym(nameSym)
     else:
       return mkMultiVariant(objectName = s,
         axes = axes,

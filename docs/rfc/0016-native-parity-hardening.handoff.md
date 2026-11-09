@@ -120,18 +120,31 @@
   `UncheckedArray` field another (witness `int` placeholder in the slot; a flexible
   array member in a witness tuple). CRH-01 re-probed: HRV-44 is gone (pinned);
   `splitLines` was `classifyType` on an empty-typed iterator formal (`keepEol = false`),
-  fixed, declines over a bounded string (pinned); over an UNBOUNDED string it does not
-  terminate (loop cap, K7), so CRH-01 stays open on that residue. The `case n.kind` census row in
+  fixed, declines over a bounded string (pinned); over an UNBOUNDED string it ended in
+  a typed `ckWalkWork` cap once K7 landed (below), so CRH-01 is closed. The `case n.kind` census row in
   `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
   K7 total work (`rfc-0016-k2c`, walker 292, same number): `budget.walkRLimit`
-  (default 0 until the corpus maximum is measured) bounds the Z3 units of every
-  check of one walk (`ownContextCheck` charges, `checkCapped` runs each query
-  under what is left, `shouldStop` ends the walk, `runSymexImpl` records the one
-  `ckWalkWork` halt as `beBudgetExhaustedPrune`). `NELLI_WALK_UNITS_LOG=<file>`
-  appends `<units>\t<target>\t<status>` per walk (`dt-bounded.sh` forwards it);
-  that is how the default is measured. `tsymex_0016_k7_splitlines_unbounded`
-  (registered) pins the typed cap under an explicit 20M limit (20,033,527 units
-  consumed before the cap).
+  bounds the Z3 units of every check of one walk (`ownContextCheck` charges,
+  `checkCapped` runs each query under what is left, `shouldStop` ends the walk,
+  `runSymexImpl` records the one `ckWalkWork` halt as `beBudgetExhaustedPrune`).
+  `NELLI_WALK_UNITS_LOG=<file>` appends `<units>\t<target>\t<status>` per walk
+  (`dt-bounded.sh` forwards it). DEFAULT `1_000_000_000` (0 opts out),
+  measured 2026-11-09 at d5d1d563 over the whole suite (1047 files, 7818 walks,
+  eos): largest decided walk 175,310,967 units (`label:prod12`, sxSat,
+  `tests/tsymex_augmented_assign.nim`), then 25,590,064 (`label:wrapped`),
+  20,955,494 (`label:s8cj_wide_factoring`, sxRaised); largest overall 175.3M,
+  then 120,601,918 (`label:ti_tuple`) and 103,233,480 (`label:t`), both
+  sxUnknown. So the default is about 5.7x the largest decided walk and no
+  decided verdict in the corpus is lost to it. `prod12` decides under the
+  default with no override (`tsymex_augmented_assign` green, 381 s).
+  `tsymex_0016_k7_splitlines_unbounded` (registered) KEEPS its explicit 20M
+  limit: at the default the walk was still running at the dt-bounded 900 s kill
+  (rc=137). Units vs wall time: the 20M-limit run consumed 20,033,527 units per
+  walk, two walks in 278 s including a ~40 s compile, so about 118 s per walk,
+  about 170,000 units/s; the default cap on this walk would take about 5,900 s
+  (98 min). The cap bounds work, not wall time, and a `queryTimeoutMs` or
+  harness timeout still ends a walk first. CRH-01 closed (pins:
+  `k7_splitlines_unbounded`, `augmented_assign`, `k2c_typeclass`).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

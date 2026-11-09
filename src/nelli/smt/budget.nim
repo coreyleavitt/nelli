@@ -173,9 +173,9 @@ type
       ## minutes at 40-55k units/s), so on a query whose counter advances
       ## the step bound, which is deterministic, still answers first; the
       ## clock is the backstop for one whose counter does not.
-    walkRLimit*: uint = 0
+    walkRLimit*: uint = 1_000_000_000
       ## RFC-0016 K7. The total Z3 resource units (`rlimit`) every solver
-      ## check of ONE walk may spend together; `0` is unbounded. The
+      ## check of ONE walk may spend together; `0` opts out (unbounded). The
       ## per-query bounds above do not bound the SUM: a loop nest whose
       ## unrolled paths multiply (`for l in s.splitLines` over an unbounded
       ## `string`: three nested loops, each unrolled 5x, the live set 1, 33,
@@ -191,6 +191,17 @@ type
       ## cache key. A walk's spend is appended to the file named by the
       ## environment variable `NELLI_WALK_UNITS_LOG` (`logWalkUnits`), which
       ## is how this default is re-measured.
+      ##
+      ## Why `1_000_000_000`: measured over the whole suite (1047 test files,
+      ## 7818 walks, 2026-11-09, sha d5d1d563). The largest walk that reached
+      ## a decided verdict spent 175,310,967 units (`label:prod12`, `sxSat`,
+      ## `tests/tsymex_augmented_assign.nim`); the next decided walks spent
+      ## 25,590,064 (`label:wrapped`) and 20,955,494
+      ## (`label:s8cj_wide_factoring`, `sxRaised`). The default is about 5.7x
+      ## the largest decided walk, so no decided verdict in the corpus is lost
+      ## to the cap. The largest walks overall (175.3M, then 120,601,918
+      ## `label:ti_tuple` and 103,233,480 `label:t`, both `sxUnknown`) were
+      ## undecided anyway. Re-measure when the corpus or the solver changes.
     maxFrontierSize*: int = 0
       ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
       ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path

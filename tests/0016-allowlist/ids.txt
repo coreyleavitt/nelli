@@ -39,7 +39,6 @@ PRC-35	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 PRC-39	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-40	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-38	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-CRH-01	K2c	no cell or pin names it yet; section 11 names the id in this slice only
 CRH-03	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 CRH-07	K8c	no cell or pin names it yet; the row's home names this slice
 CI-01	H1	no cell or pin names it yet; section 11 names the id in this slice only

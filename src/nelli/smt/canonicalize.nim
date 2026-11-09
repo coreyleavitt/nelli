@@ -302,7 +302,9 @@ const symexWalkerVersion* = "292"
   ## walk spends; at the limit the walk stops (`ckWalkWork`,
   ## `beBudgetExhaustedPrune`, `sxUnknown` unless a sound witness was already
   ## found). A walk that ran unbounded before (a nested-loop unroll that never
-  ## ended) now ends in that halt under a nonzero limit.
+  ## ended) now ends in that halt under a nonzero limit. The default is
+  ## 1_000_000_000 units (about 5.7x the largest decided walk in the corpus,
+  ## see `walkRLimit`), so an unmodified setting is bounded.
   ## RFC-0016 K3a (290->291): `holdsSharedMemory` reads the type x memory-op
   ## axis (`typeaxes`) and looks through a variant's plain fields and arms, a
   ## multi-variant's axes and a distinct base, so `let c = gV` over a case

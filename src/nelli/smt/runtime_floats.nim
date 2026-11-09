@@ -295,8 +295,9 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     else: raise newException(ValueError, "int(): operand is not a float")
     let fresh = bvVar(tInt(w, signed), freshDegradeName("__convFloatToIntFresh"))
     let value = iteSV(domainCond, exact, fresh)
-    convFloatToIntBoundConds.add domainCond          # threadvar fallback
-    syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+    let bound = ConvBound(cond: domainCond, site: e.convSite)
+    convFloatToIntBoundConds.add bound               # threadvar fallback
+    syncConvFloatToIntBoundCond(bound)               # CR-9 Stage 6 Group-1
     if e.convHasRange:
       var inRange = mkTrue()
       # [range-invariant: range-defect-check -- the converted value's

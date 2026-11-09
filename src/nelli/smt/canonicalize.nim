@@ -6005,6 +6005,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     # RFC-0005 S8g: signedness and a range target's bounds change the model.
     "Ex<CFI:" & $e.convWidth & ":" & $e.convSigned & ":" &
       (if e.convHasRange: $e.convLo & ".." & $e.convHi else: "-") & ":" &
+      (if e.convSite.len > 0: e.convSite & ":" else: "") &
       canonicalize(e.convOperand, env) & ">"
   of iekConvIntWidth:
     # Round-6 B2. Every field that changes the encoding (source/target width
@@ -6035,6 +6036,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
             canonicalize(e.vGlobalTy) & (if e.vCopy: ":copy" else: "") & ">"
   of iekBinop:
     "Ex<Bn:" & binopTag(e.bop) & ";" &
+      (if e.bsite.len > 0: e.bsite & ";" else: "") &
       canonicalize(e.lhs, env) & ";" & canonicalize(e.rhs, env) & ">"
   of iekUnop:
     "Ex<Un:" & unopTag(e.uop) & ";" & canonicalize(e.operand, env) & ">"

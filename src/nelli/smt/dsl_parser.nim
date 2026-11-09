@@ -11795,8 +11795,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if n[1].kind in {nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit}:
         mkFloatLit(-n[1].floatVal, if n[1].kind == nnkFloat32Lit: 32 else: 64)
       else:
-        withSite(mkUnop(uNeg, parseAtomicOperand(n[1], preamble, ctx)),
-                 srcSite(n))  ## A2a chokepoint (unary minus)
+        let negOperand = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (unary minus)
+        withSite(mkUnop(uNeg, negOperand), srcSite(n))
     of "@":
       # Phase 15 C4: a seq literal `@[a, b, c]` (incl. empty `@[]`). The typed
       # form is `Prefix(Sym "@", Bracket)`. Lower to a CONCRETE-length `svSeq`

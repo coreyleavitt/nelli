@@ -291,7 +291,7 @@ const renderAsChoicesVersion* = "12"
   ##   its row is admitted at `msBodyWalk` (the `mmBody` rows); any other
   ##   row declines with its kind (was: the body inlined as the semantics),
   ##   a magic with no row `feUnadmitted`.
-  ## - RFC-0016 K4c (stays 292; the control loop renumbers at landing): the
+  ## - RFC-0016 K4c (296->297): the
   ##   stdlib-body axis. A stdlib routine walked by body under a module push
   ##   that turns checks off (`math.nim`) reads its `stdlibAxis` row: an
   ##   option the body cannot trip is no deviation, and `overflowChecks` that
@@ -309,7 +309,7 @@ const renderAsChoicesVersion* = "12"
   ##   `unicode.toLower` and `typedthreads.createThread` calls decline by their
   ##   `never` rows.
 
-const symexWalkerVersion* = "296"
+const symexWalkerVersion* = "297"
   ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case
   ## objects, in a witness and in a variable the SUT reaches, where it declined
   ## as not marshallable. A cached `:unk` that was that decline is stale.

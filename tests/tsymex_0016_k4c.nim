@@ -8,6 +8,7 @@
 ## `applyStdlibDelta`. This build checks (the default); `tsymex_0016_k4c_off`
 ## is the same SUTs under `--overflowChecks:off`.
 import std/[unittest, math, options, strutils]
+import nelli/smt/canonicalize
 import nelli/symex
 import nelli/smt/errorkind
 import nelli/smt/admission
@@ -99,3 +100,7 @@ suite "K4c: a declined row keeps declining":
     check native(sCeilDiv(7)) == "hit"
     let c = cellKey(axStdlibBody, "math.ceilDiv")
     pinDecline(sCeilDiv, c, feCheckOption, needle = render(c))
+
+suite "K4c: the walker version":
+  test "the walker version floor":
+    check parseInt(symexWalkerVersion) >= 297

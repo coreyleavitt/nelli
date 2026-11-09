@@ -598,8 +598,11 @@ proc emitExpr*(e: IRExpr): NimNode =
 
 proc symexNoCopyMem*[T](): bool =
   ## `noCopyMemExpr`'s probe: the type is a generic argument, as in
-  ## `hookProbes`, so a symbol the macro built is read as a type.
-  not supportsCopyMem(T)
+  ## `hookProbes`, so a symbol the macro built is read as a type. A `ref`
+  ## or `ptr` symbol (`RV = ref object case ...`, whose pointee has no name
+  ## of its own) is asked of its pointee: the case object the heap holds.
+  when T is ref or T is ptr: not supportsCopyMem(typeof(default(T)[]))
+  else: not supportsCopyMem(T)
 
 proc noCopyMemExpr(t: IRType): NimNode =
   ## RFC-0016 PRC-07 slice B. `not supportsCopyMem(T)` for the Nim type `t`
@@ -1031,7 +1034,8 @@ proc emitStmt*(s: IRStmt): NimNode =
               newLit(s.nAddrField))
     else:
       newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
-              newLit(s.nAddrOf))   # RFC-0005 S8ax
+              newLit(s.nAddrOf), newNilLit(), newLit(""),
+              newLit(s.nUninit))   # RFC-0005 S8ax; RFC-0016 PRC-07 `uninit`
   of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
     if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
       newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
@@ -13962,7 +13966,27 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           axes = objTy.mvAxes
           plainNames = objTy.mvPlainFieldNames
           plainTypes = objTy.mvPlainFieldTypes
-        preamble.add mkNewT(tmp, objTyFull)
+        # RFC-0016 PRC-07: a constructor naming every field of its arm (and
+        # every plain field) is `nimNewObjUninit`: Nim zeroes the cell only
+        # when it would otherwise leave a field unwritten, as for a value
+        # constructor (`vlZeroFilled`). A non-constant discriminator is a
+        # zeroing constructor (no arm field may be set with it).
+        var uninit = false
+        if objTy.kind == itVariant and byName.hasKey(objTy.vDiscName):
+          var scratchPre: seq[IRStmt]
+          let tagIR0 = discTagLit(parseExpr(byName[objTy.vDiscName],
+                                            scratchPre, ctx))
+          if tagIR0.kind == iekIntLit and scratchPre.len == 0:
+            uninit = true
+            for fieldName in objTy.vPlainFieldNames:
+              if not byName.hasKey(fieldName) or
+                 ctorFilledDefault(byName[fieldName], n): uninit = false
+            for arm in objTy.vArms:
+              if tagIR0.ival != arm.tagOrdinal: continue
+              for fieldName in arm.fieldNames:
+                if not byName.hasKey(fieldName) or
+                   ctorFilledDefault(byName[fieldName], n): uninit = false
+        preamble.add mkNewT(tmp, objTyFull, uninit = uninit)
         for ax in axes:
           if byName.hasKey(ax.discName):
             var tagIR = discTagLit(parseExpr(byName[ax.discName], preamble, ctx))

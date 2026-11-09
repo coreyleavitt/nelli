@@ -326,6 +326,15 @@ const symexWalkerVersion* = "309"
   ## variant type that is plain bits (`IRType.vNoCopyMem`, the compiler's
   ## `not supportsCopyMem(T)` emitted by the parser); a type with lifetime
   ## hooks takes the `dwmHavoc` model for a branch-changing discriminator write.
+  ## RFC-0016 PRC-07 (309, ref variants): a heap case object carries the same
+  ## union image, in `<id>__@img<i>`/`<id>__@msk<i>` heaps whose active-arm
+  ## bytes are the pack of the active arm's field heaps at every read
+  ## (`cellImage`); `new(V)` is zero, a constructor naming every field of its
+  ## arm (`isNew.nUninit`, `nimNewObjUninit`) leaves the rest indeterminate; a
+  ## branch-changing discriminator store fixes the old arm's bytes and reads
+  ## the new arm from them. cpp tracks the active member in `<id>__@act`/
+  ## `<id>__@acton`. The parser asks `supportsCopyMem` of a `ref`/`ptr`
+  ## symbol's pointee.
   ## RFC-0016 PRC-07 (308->309, range half): a `--rangeChecks:off` build is
   ## walked as compiled (range conversions are the plain C cast; a routine's
   ## options no longer decline `feCheckOption` for the build's own bit), and an
@@ -364,7 +373,7 @@ const symexWalkerVersion* = "309"
   ## `range` field of foreign bytes is the raw value under `--rangeChecks:off`.
   ## `field/inactiveBytes` keeps a bool, or a `range` with its checks on,
   ## overwritten with foreign bytes, pointer-payload arms, other layout
-  ## pragmas, the `else` arm, and `ref` variants. A cpp value variant carries its active member (`vActive`, the arm
+  ## pragmas, and the `else` arm. A cpp value variant carries its active member (`vActive`, the arm
   ## last written): a write to any member is exact, and a read through a
   ## member that is not the active one, the discriminator's own branch after a
   ## wrong-branch write included, halts `ubInactiveVariantField`. A build with
@@ -6598,9 +6607,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
                 else: ""
     # RFC-0005 S8bo: a field cell's arm field.
     let ofFld = if s.nAddrField.len > 0: ";fld=" & s.nAddrField else: ""
+    # RFC-0016 PRC-07: a constructor's unzeroed allocation.
+    let ofUninit = if s.nUninit: ";uninit" else: ""
     let slot = bindLocal(env, s.nRetName)
     "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ofIdx &
-      ofFld & ">"
+      ofFld & ofUninit & ">"
   of isDerefWrite:
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).

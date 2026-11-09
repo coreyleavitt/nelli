@@ -1446,6 +1446,170 @@ proc variantSlots(ty: IRType): seq[VariantSlot] =
                   baseId & "__@" & $arm.tagOrdinal & "__" & fname,
                   arm.fieldTypes[i], ty)
 
+# RFC-0016 PRC-07 (ref variants). A heap cell of a case object carries the
+# union image a value variant does (`SymVal.vImage`: n data cells then n
+# indeterminate-byte mask cells, 64-bit little-endian words over
+# `variant_layout`'s offsets, `unionImageGate` deciding when), in heaps
+# beside its per-tag field heaps: `<id>__@img<i>` and `<id>__@msk<i>`. One
+# image per object, so an alias reads what its referent's writes made, and
+# a merge joins the heaps as any other (`__@img`/`__@msk`, like `__@disc`,
+# are no field family: `ptrFamilyKey` skips them).
+#
+# The bytes the active arm's fields cover are the pack of those fields'
+# cells, by construction at every read (`cellImage` overlays them on the
+# stored heaps), so any writer of an active arm field (a field store, a
+# pointer into the field, an opaque call's havoc) keeps the image without
+# touching it, and an input ref's image agrees with its free fields at its
+# first read. The stored heaps answer for the other bytes. An untouched
+# data heap is the free input constant (an input ref's bytes are free, as a
+# free parameter's), an untouched mask heap the zero array (determinate).
+# What writes the stored heaps: `isNew` (zero for `new`, every byte
+# indeterminate for an uninit constructor, `isNew.nUninit`), a whole-cell
+# store (`variantCellStore`), and a branch-changing discriminator store,
+# which first fixes the old arm's bytes in them, then re-reads the new arm's
+# fields from the image. An out-of-arm arm-field store is exact in the arms it
+# leaves with a value in every field (`outOfArmFieldStore`: its bytes into the
+# stored heaps, the mask cleared, the covered fields of those arms re-read);
+# the rest is declined (`writeExactArm`). An opaque call's havoc gives the
+# data heaps fresh contents and the mask heaps the zero array (`havocOpaqueHeaps`).
+#
+# cpp (`activeMemberTracked`): the union's active member, `vActive`, lives
+# in two heaps, `<id>__@act` (the arm's tag) and `<id>__@acton` (set once it
+# may differ from the discriminator; an untouched cell's active member is its
+# discriminator's arm, as a value variant's at construction). A field write
+# makes its arm active (any arm: defined); a discriminator store fixes the
+# old member as active; a read through another arm is
+# `ubInactiveVariantField`. A variant with an `else` arm is not tracked.
+
+proc imageHeapKey(baseId: string; i: int; mask: bool): string =
+  baseId & (if mask: "__@msk" else: "__@img") & $i
+
+proc imageHeapCells(ctx: Z3Context; p: Path; baseId: string;
+                    refSort: RawZ3Sort; lay: vl.VariantLayout): HeapCell =
+  ## The stored image heaps of the case object `baseId` on `p`: data cells
+  ## then mask cells. Reads `p`, never writes it.
+  let n = unionCellCount(lay)
+  let zero = mkBitVec[64](0'i64)
+  let bvSort = sortOfRaw(ctx, zero.raw)
+  for i in 0 ..< 2 * n:
+    let k = imageHeapKey(baseId, i mod n, i >= n)
+    if p.heaps.hasKey(k):
+      result.add (k, p.heaps[k])
+    elif i < n:
+      let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, bvSort)
+      let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+                                                 heapInputName(p, k).cstring)
+      result.add (k, wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                                   arrSort)))
+    else:
+      result.add (k, wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(
+        ctx.raw, refSort, zero.raw)))
+
+proc imageSelect(ctx: Z3Context; cells: HeapCell;
+                 refAst: Z3AnyAst): seq[Z3BitVec[64]] =
+  for c in cells:
+    result.add wrap[Z3BitVec[64]](ctx, checkedSelect(ctx, c.arr.raw, refAst.raw))
+
+proc imageStore(ctx: Z3Context; p: Path; cells: HeapCell; refAst: Z3AnyAst;
+                img: seq[Z3BitVec[64]]) =
+  ## `p` with the cell at `refAst` holding `img`.
+  for i, c in cells:
+    p.heaps[c.key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, c.arr.raw, refAst.raw,
+                                                      img[i].raw))
+
+proc keepHeaps(p: Path; cell: HeapCell) =
+  ## `p` holding the heaps of `cell` it read (an input heap's constant): the
+  ## heaps a value read is built from are the path's own, which the witness
+  ## pins (`modelPins`) and a join compares.
+  for c in cell:
+    if not p.heaps.hasKey(c.key): p.heaps[c.key] = c.arr
+
+proc cellDisc(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst): SymVal =
+  ## The discriminator of the case object at `refAst` on `p`.
+  let cell = heapCellArrays(ctx, p, variantDiscHeapKey(ty), allocRefSort(ctx, ty),
+                            ty.vDiscTy, ty)
+  keepHeaps(p, cell)
+  heapCellSelect(ctx, cell, refAst, ty.vDiscTy)
+
+proc cellImage(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+               lay: vl.VariantLayout): seq[Z3BitVec[64]] =
+  ## The union image of the case object at `refAst` on `p`: the stored heaps
+  ## with the active arm's fields packed over the bytes they cover. Each
+  ## field's declared range is asserted on `p` (a free input field's cell is
+  ## otherwise any bit pattern, which another arm would then read), and the
+  ## heaps read are kept on `p` (`keepHeaps`).
+  let refSort = allocRefSort(ctx, ty)
+  let baseId = refPointeeTypeId(ty)
+  let cells = imageHeapCells(ctx, p, baseId, refSort, lay)
+  keepHeaps(p, cells)
+  let stored = imageSelect(ctx, cells, refAst)
+  let disc = cellDisc(ctx, p, ty, refAst)
+  var seeded = false
+  for ai in countdown(ty.vArms.len - 1, 0):
+    let arm = ty.vArms[ai]
+    if arm.isElse or not lay.arms.hasKey(arm.tagOrdinal) or
+       lay.arms[arm.tagOrdinal].len != arm.fieldNames.len: continue
+    var img = stored
+    for j, f in lay.arms[arm.tagOrdinal]:
+      let fty = arm.fieldTypes[j]
+      let cell = heapCellArrays(ctx, p, baseId & "__@" & $arm.tagOrdinal & "__" &
+                                arm.fieldNames[j], refSort, fty, ty)
+      keepHeaps(p, cell)
+      let v = heapCellSelect(ctx, cell, refAst, fty)
+      for c in rangeCondsIfNeeded(v, fty): p.pc.add c
+      let bits = placeBits(v, f)
+      if bits.isSome:
+        img = imgWrite(img, f.off - lay.unionOff, f.size, bits.get)
+    if not seeded:
+      result = img
+      seeded = true
+    else:
+      let c = variantDiscEq(disc, int64(arm.tagOrdinal))
+      for i in 0 ..< img.len: result[i] = ite(c, img[i], result[i])
+  if not seeded: result = stored
+
+proc heapActiveTracked(ty: IRType): bool =
+  ## cpp: the heap cell of `ty` tracks its active member (no `else` arm,
+  ## whose member no single tag names).
+  if not activeMemberTracked(ty): return false
+  for arm in ty.vArms:
+    if arm.isElse: return false
+  true
+
+proc activeHeaps(ctx: Z3Context; p: Path; ty: IRType):
+    tuple[act, on: tuple[key: string; arr: Z3AnyAst]] =
+  ## The active-member heaps of `ty` on `p` (untouched: `on` false).
+  let refSort = allocRefSort(ctx, ty)
+  let baseId = refPointeeTypeId(ty)
+  let ka = baseId & "__@act"
+  let ko = baseId & "__@acton"
+  result.act = (ka, if p.heaps.hasKey(ka): p.heaps[ka]
+                    else: wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(
+                      ctx.raw, refSort, rawAnyAstOf(discConst(ty.vDiscTy, 0)))))
+  result.on = (ko, if p.heaps.hasKey(ko): p.heaps[ko]
+                   else: wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(
+                     ctx.raw, refSort, mkBool(false).raw)))
+
+proc cellActive(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+                disc: SymVal): SymVal =
+  ## The active member's tag of the case object at `refAst` (`disc` its
+  ## discriminator).
+  let (act, on) = activeHeaps(ctx, p, ty)
+  let isOn = wrap[Z3Bool](ctx, checkedSelect(ctx, on.arr.raw, refAst.raw))
+  iteSV(isOn, liftHeapValue(ctx, checkedSelect(ctx, act.arr.raw, refAst.raw),
+                            ty.vDiscTy), disc)
+
+proc storeActive(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+                 active: Option[SymVal]) =
+  ## `p` with the cell at `refAst`'s active member `active` (`none`: its
+  ## discriminator's arm).
+  let (act, on) = activeHeaps(ctx, p, ty)
+  if active.isSome:
+    p.heaps[act.key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, act.arr.raw,
+      refAst.raw, rawAnyAstOf(active.get)))
+  p.heaps[on.key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, on.arr.raw,
+    refAst.raw, mkBool(active.isSome).raw))
+
 proc variantCellValue(ctx: Z3Context; p: Path; ty: IRType;
                       refAst: Z3AnyAst): SymVal =
   ## RFC-0005 S8be. The case object held at `refAst` on `p`: a value of
@@ -1469,6 +1633,13 @@ proc variantCellValue(ctx: Z3Context; p: Path; ty: IRType;
       if result.vArmFieldNames.hasKey(sl.ord):
         let i = result.vArmFieldNames[sl.ord].find(sl.name)
         if i >= 0: result.vArmFields[sl.ord][i] = v
+  # RFC-0016 PRC-07 (ref variants): the cell's union image is the value's
+  # (c), its active member the value's `vActive` (cpp).
+  let gate = unionImageGate(ty)
+  if gate.isSome:
+    result.vImage = cellImage(ctx, p, ty, refAst, gate.get)
+  if heapActiveTracked(ty) and result.vDisc != nil:
+    result.vActive = activeOf(cellActive(ctx, p, ty, refAst, result.vDisc[]))
 
 proc variantCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                       v: SymVal) =
@@ -1502,6 +1673,79 @@ proc variantCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
     for c in heapCellStore(ctx, cell, refAst,
                            heapStoreValue(fv, proto, sl.ty), sl.ty):
       p.heaps[c.key] = c.arr
+  # RFC-0016 PRC-07 (ref variants): the value's union image goes with it. A
+  # value with no derived image (`vImage` empty under the gate) marks every
+  # byte its active arm's fields do not cover indeterminate, so no later
+  # read of them is exact.
+  let gate = unionImageGate(ty)
+  if gate.isSome:
+    let cells = imageHeapCells(ctx, p, refPointeeTypeId(ty), refSort, gate.get)
+    var img = v.vImage
+    if img.len != cells.len:
+      img = imageSelect(ctx, cells, refAst)
+      for i in cells.len div 2 ..< cells.len: img[i] = mkBitVec[64](-1'i64)
+    imageStore(ctx, p, cells, refAst, img)
+  # cpp: the value's active member (untracked: its discriminator's arm).
+  if heapActiveTracked(ty):
+    storeActive(ctx, p, ty, refAst,
+                (if v.vActive != nil: some(v.vActive[]) else: none(SymVal)))
+
+proc outOfArmFieldExactArms(ty: IRType; lay: vl.VariantLayout; tp: vl.Place;
+                            hitTags: seq[int]; disc: SymVal): Option[Z3Bool] =
+  ## RFC-0016 PRC-07 (c). The discriminator values of the arms an out-of-arm
+  ## store of `tp` is exact in: every arm that does not name the field and
+  ## that the write leaves with a value in each field (`writeExactArm`).
+  var seeded = false
+  var ok: Z3Bool
+  for arm in ty.vArms:
+    if arm.isElse or arm.tagOrdinal in hitTags or
+       not lay.arms.hasKey(arm.tagOrdinal) or
+       lay.arms[arm.tagOrdinal].len != arm.fieldNames.len or
+       not writeExactArm(lay, arm.tagOrdinal, tp):
+      continue
+    let c = variantDiscEq(disc, int64(arm.tagOrdinal))
+    ok = (if seeded: ok or c else: c)
+    seeded = true
+  if seeded: some(ok) else: none(Z3Bool)
+
+proc outOfArmFieldStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+                        lay: vl.VariantLayout; tp: vl.Place; disc: SymVal;
+                        written: SymVal; hitTags: seq[int]): bool =
+  ## RFC-0016 PRC-07 (c). A store of `written` to the field at `tp` while the
+  ## active arm is one that does not name it (`outOfArmFieldExactArms`): its
+  ## bytes go into the stored image heaps at their offset, clearing the mask
+  ## over them, and every field of an exact arm those bytes cover takes its
+  ## value from the image (the active arm's fields are what a read overlays).
+  ## `false` (nothing written) when the value has no bytes.
+  let bits = placeBits(written, tp)
+  if bits.isNone: return false
+  let refSort = allocRefSort(ctx, ty)
+  let baseId = refPointeeTypeId(ty)
+  var img = cellImage(ctx, p, ty, refAst, lay)
+  img = imgWrite(img, tp.off - lay.unionOff, tp.size, bits.get)
+  imageStore(ctx, p, imageHeapCells(ctx, p, baseId, refSort, lay), refAst, img)
+  for arm in ty.vArms:
+    if arm.isElse or arm.tagOrdinal in hitTags or
+       not lay.arms.hasKey(arm.tagOrdinal) or
+       lay.arms[arm.tagOrdinal].len != arm.fieldNames.len or
+       not writeExactArm(lay, arm.tagOrdinal, tp):
+      continue
+    let sel = variantDiscEq(disc, int64(arm.tagOrdinal))
+    for j, f in lay.arms[arm.tagOrdinal]:
+      if not overlaps(f, tp): continue
+      let nv = bitsPlace(imgReadDef(img, f.off - lay.unionOff, f.size), f,
+                         some((tp, written)))
+      if nv.isNone: continue
+      let fty = arm.fieldTypes[j]
+      let cell = heapCellArrays(ctx, p, baseId & "__@" & $arm.tagOrdinal & "__" &
+                                arm.fieldNames[j], refSort, fty, ty)
+      var scratch: seq[Z3Bool]
+      let proto = allocateSym(fty, "__armImageProto", scratch)
+      let merged = heapCellIte(ctx, sel, heapStoreValue(nv.get, proto, fty),
+                               heapCellSelect(ctx, cell, refAst, fty), fty)
+      for c in heapCellStore(ctx, cell, refAst, merged, fty):
+        p.heaps[c.key] = c.arr
+  true
 
 proc multiVariantCellValue(ctx: Z3Context; p: Path; ty: IRType;
                            refAst: Z3AnyAst): SymVal =
@@ -4189,7 +4433,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # in practice, kept for audit completeness (every `mkHeapArrayVar`
           # call site on this READ path gets the same treatment).
           let cpA = drainPendingLowerEffects(cp0)
-          let discSV = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
+          let discReal = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
+          # RFC-0016 PRC-07 (cpp): the arm a read is defined through is the
+          # union's active member, not the discriminator's.
+          let discSV = if fieldsUnchecked() and heapActiveTracked(objTy):
+                         cellActive(ctx, cpA, objTy, refAst, discReal)
+                       else: discReal
           # discEq dispatch — IDENTICAL to isVariantField / refVariantDiscRangeClause.
           proc discEq(tagOrd: int64): Z3Bool =
             case discSV.kind
@@ -4256,19 +4505,53 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # disc heap (a field shared by all arms would otherwise FieldDefect on
           # an impossible ordinal; a second ref's disc would otherwise be free).
           var basePc = cpA.pc
-          let rangeOpt = refVariantDiscRangeClause(objTy, discSV)
+          let rangeOpt = refVariantDiscRangeClause(objTy, discReal)
           if rangeOpt.isSome:
             basePc = basePc & @[rangeOpt.get]
           # FieldDefect fork — Phase 16 D1a unconditional (same call shape as the
           # value-variant `isVariantField` arm); forked off the ranged base.
           if fieldsUnchecked():
             # RFC-0016 PRC-07: no `FieldDefect`; a union read outside the arm.
+            # Ref variants: the field's bytes of the cell's union image,
+            # exact where they are a value of it (a value variant's
+            # `isVariantField` read); a read of a byte no write reached
+            # taints the side (`imgReadDef`); the rest is declined on its
+            # own path.
             var denv = cpA.env
             var scratch: seq[Z3Bool]
             denv[stmt.dRetName] = allocateSym(stmt.dElemTy,
               freshDegradeName("__declinedFieldRead"), scratch)
-            survivors.add inactiveFieldSide(forkPath(cpA, basePc, cpA.env),
-                                            not inArmCond, denv, "", w)
+            var imageVal: Option[SymVal]
+            var imageFacts: seq[Z3Bool]
+            let gate = unionImageGate(objTy)
+            if gate.isSome:
+              var tags: seq[int]
+              for hit in armHits: tags.add hit.tagOrd
+              let tp = vl.accessPlace(gate.get, tags, stmt.dField)
+              if tp.isSome:
+                let n0 = cpA.pc.len
+                let img = cellImage(ctx, cpA, objTy, refAst, gate.get)
+                imageFacts = cpA.pc[n0 .. ^1]
+                imageVal = bitsPlace(imgReadDef(img, tp.get.off - gate.get.unionOff,
+                                                tp.get.size),
+                                     tp.get, none((vl.Place, SymVal)))
+            if imageVal.isSome:
+              if guardLiteral(not inArmCond) != glFalse:
+                var envX = cpA.env
+                envX[stmt.dRetName] = imageVal.get
+                var exact = forkPath(cpA, basePc & imageFacts & @[not inArmCond],
+                                     envX)
+                # simplified: an out-of-arm store rewrote the cell word, which
+                # still mentions the unwritten bytes it overwrote
+                let part = unwrittenIn(imageVal.get, simplified = true)
+                if part.len > 0:
+                  taintInPlace(exact, w.degrade(unwrittenKind(part),
+                                                unwrittenMsg(part),
+                                                ub = unwrittenUb(part)))
+                survivors.add exact
+            else:
+              survivors.add inactiveFieldSide(forkPath(cpA, basePc, cpA.env),
+                                              not inArmCond, denv, "", w)
           else:
             discard forkDefect(forkPath(cpA, basePc, cpA.env),
                                not inArmCond, "FieldDefect", none(string), w)
@@ -4324,6 +4607,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           child.heaps[discHeapKey] = discHeap
           for (hk, hh) in armHeaps:
             child.heaps[hk] = hh
+          # RFC-0016 PRC-07 (ref variants): a field a discriminator store
+          # re-read from indeterminate bytes taints the path that reads it.
+          # simplified: a field an out-of-arm store re-read from the image
+          # mentions the cell word it rewrote, whose overwritten bytes the
+          # field's own extract does not reach
+          let partIn = unwrittenIn(bound, simplified = true)
+          if partIn.len > 0:
+            taintInPlace(child, w.degrade(unwrittenKind(partIn),
+                                          unwrittenMsg(partIn),
+                                          ub = unwrittenUb(partIn)))
           survivors.add child
       return survivors
     let sortTy = if isField: stmt.dObjTy else: stmt.dElemTy
@@ -4787,6 +5080,21 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let storedRaw = checkedStore(ctx, fheap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
           child.heaps[fieldKey] = wrap[Z3AnyAst](ctx, storedRaw)
+        # RFC-0016 PRC-07 (ref variants): the cell's union image. `new` is
+        # `nimNewObj`, zero; a constructor naming every field of its arm is
+        # `nimNewObjUninit` (`nUninit`): every byte indeterminate until the
+        # constructor's field writes reach it (generated C, pinned in
+        # `tests/tsymex_0016_fieldref.nim`).
+        if pointee.kind == itVariant:
+          let gate = unionImageGate(pointee)
+          if gate.isSome:
+            imageStore(ctx, child, imageHeapCells(ctx, child, typeId, refSort, gate.get),
+                       newRef, (if stmt.nUninit: unwrittenImage(gate.get)
+                                else: zeroImage(gate.get)))
+          # cpp: the fresh cell's active member is its discriminator's arm
+          # (the constructor's initialising discriminator store included).
+          if heapActiveTracked(pointee):
+            storeActive(ctx, child, pointee, newRef, none(SymVal))
       else:
         # RFC-0005 S8g: a NON-object pointee (`new int`, `new bool`, ...) is
         # zero-initialised too (probe: `new int` reads 0, `new float` 0.0,
@@ -5008,10 +5316,33 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # FieldDefect fork — D1a unconditional, forked off the ranged base.
           # Uses the PRE-lower cp state (the defect is about the disc, not the
           # RHS, so the RHS lower is irrelevant here — matching D2 read path).
-          if fieldsUnchecked():
-            survivors.add inactiveFieldSide(forkPath(cpDW, basePcW, cpDW.env),
-                                            not inArmCondW, cpDW.env, "", w,
-                                            isWrite = true)
+          # RFC-0016 PRC-07 (cpp, a tracked cell): a write to any member is
+          # defined and makes it the active one: no side to decline.
+          let cppActiveW = fieldsUnchecked() and heapActiveTracked(objTy)
+          # c, with the union image: a store out of the active arm is exact
+          # in the arms it leaves with a value in every field
+          # (`outOfArmFieldStore`); only the rest is declined.
+          var exactCondW: Option[Z3Bool]
+          var exactLay: vl.VariantLayout
+          var exactPlace: vl.Place
+          var hitTagsW: seq[int]
+          for hit in armHitsW: hitTagsW.add hit.tagOrd
+          if fieldsUnchecked() and not cppActiveW:
+            let gateW = unionImageGate(objTy)
+            if gateW.isSome:
+              let tpW = vl.accessPlace(gateW.get, hitTagsW, stmt.dwField)
+              if tpW.isSome:
+                exactCondW = outOfArmFieldExactArms(objTy, gateW.get, tpW.get,
+                                                    hitTagsW, discSV)
+                exactLay = gateW.get
+                exactPlace = tpW.get
+          if cppActiveW:
+            discard
+          elif fieldsUnchecked():
+            survivors.add inactiveFieldSide(
+              forkPath(cpDW, basePcW, cpDW.env),
+              (if exactCondW.isSome: (not inArmCondW) and (not exactCondW.get)
+               else: not inArmCondW), cpDW.env, "", w, isWrite = true)
           else:
             discard forkDefect(forkPath(cpDW, basePcW, cpDW.env),
                                not inArmCondW, "FieldDefect", none(string), w)
@@ -5019,7 +5350,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # In-arm continuation: build the child path, THEN lower the RHS on it.
           # Disc heap is carried unchanged (D3: the disc is not mutated by an
           # arm-field write — only the arm's data heap changes).
-          var childPcW = basePcW & @[inArmCondW]
+          var childPcW =
+            if cppActiveW: basePcW
+            elif exactCondW.isSome: basePcW & @[inArmCondW or exactCondW.get]
+            else: basePcW & @[inArmCondW]
           var cpChild = forkPath(cpDW, childPcW, cpDW.env)
           cpChild.heaps[discHeapKeyW] = discHeap
           # Lower RHS on the in-arm path (proto from the field type) — BV coercion
@@ -5041,12 +5375,31 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # regardless of which arm(s) `armHitsW` matched. Checked BEFORE the
             # svInt->BV coercion below so the discharge can still see `valSV`'s
             # `ziIvl`.
-            let cpInArmRanged =
+            let cpInArmChecked =
               if stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange and
                  not carriesRangeCheck(stmt.dwValue, stmt.dwElemTy):   # RFC-0005 S8j
                 forkAssignRangeCheck(cpInArm, valSV, stmt.dwElemTy, w)
               else: cpInArm
             valSV = heapStoreValue(valSV, proto, stmt.dwElemTy)   # RFC-0005 S8as
+            var cpInArmRanged = cpInArmChecked
+            if exactCondW.isSome:
+              var cpX = forkPath(cpInArmRanged, cpInArmRanged.pc & @[exactCondW.get],
+                                 cpInArmRanged.env)
+              if outOfArmFieldStore(ctx, cpX, objTy, refAst, exactLay,
+                                    exactPlace, discSV, valSV, hitTagsW):
+                survivors.add drainPendingLowerEffects(cpX)
+              else:
+                survivors.add degradeHeapArmForPath(cpX, w.degrade(
+                  feUnsupportedOp, "an out-of-branch field store through a " &
+                  "`ref` whose value has no bytes (fieldChecksOffLayout) -- " &
+                  "path degraded to sxUnknown"))
+              # the arm the field names is not the active one: the in-arm
+              # continuation has no execution (a read on it would taint the
+              # run over bytes it never holds)
+              if guardLiteral(inArmCondW) == glFalse: continue
+              cpInArmRanged = forkPath(cpInArmRanged,
+                                       cpInArmRanged.pc & @[inArmCondW],
+                                       cpInArmRanged.env)
             # Store RHS into each matching arm's field heap.
             # RFC-0005 S8ap: a compound arm field stores every leaf.
             for hit in armHitsW:
@@ -5064,6 +5417,18 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # (a different, possibly-unsupported per-arm shape than the RHS's
             # own `stmt.dwElemTy` proto) would otherwise sit undrained past
             # `survivors.add` below. Same fix as the read-side arm-field path.
+            # RFC-0016 PRC-07 (cpp): the member written is now the active
+            # one (a field several tags share: the tag the discriminator
+            # names among them, as a value variant's `lowerVariantFieldSet`).
+            # On c the image needs no store: its active arm's bytes are read
+            # from the field heaps (`cellImage`).
+            if cppActiveW:
+              var act = discConst(objTy.vDiscTy, int64(armHitsW[0].tagOrd))
+              for k in 1 ..< armHitsW.len:
+                let t = int64(armHitsW[k].tagOrd)
+                act = iteSV(variantDiscEq(discSV, t),
+                            discConst(objTy.vDiscTy, t), act)
+              storeActive(ctx, cpInArmRanged, objTy, refAst, some(act))
             let cpInArmDrained = drainPendingLowerEffects(cpInArmRanged)
             survivors.add cpInArmDrained
       return survivors
@@ -5223,27 +5588,99 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             if rangeOpt.isSome: basePc = basePc & @[rangeOpt.get]
             let groups = branchGroups(objTy.vArms)
             let same = sameBranchSymCond(oldDisc, valSV, groups)
-            if fieldsUnchecked():
+            # RFC-0016 PRC-07 (ref variants): `imageArms`, the arms whose
+            # fields the cell's union image answers after the store (c);
+            # `fixImage`, the image with the old arm's bytes, which the
+            # stored heaps keep once that arm is no longer active.
+            var imageArms: seq[(int, seq[SymVal])]
+            var fixImage: seq[Z3BitVec[64]]
+            var contPc = basePc & @[same]
+            let tracked = fieldsUnchecked() and heapActiveTracked(objTy)
+            let gate = unionImageGate(objTy)
+            if tracked:
+              # cpp: no branch-change check, and the store is of the tag
+              # alone: the old member stays the active one (fixed below), so
+              # a read through the new arm is `ubInactiveVariantField` until
+              # a write makes one of its members active.
+              contPc = basePc
+            elif fieldsUnchecked():
               # RFC-0016 PRC-07: no branch-change check; the new branch holds
-              # the old bytes, which the walker has no layout for. This side
-              # is declined on its own path (`inactiveFieldSide`'s c decline;
-              # the cpp backend declines it too: the stored tag no longer
-              # names the active member, so no later read is modelled).
-              let (dk, dwhy) = admitDefined(aoField, ocInactiveBytes,
-                                            dsField).decline
-              if guardLiteral(not same) != glFalse:
+              # the old bytes. With the union image (c, a plain-bits type),
+              # the store is of the tag alone and the new arm's fields are
+              # the image's bytes at their places (a value variant's
+              # `discWriteOutcomes`): exact; an arm with a field the bytes
+              # are no value of (a bool, a checked range, the `else` arm) is
+              # declined on the side that selects it. Without one (a hooked
+              # type, an `else` arm on cpp) the branch-changing side is
+              # declined whole.
+              var declineCond = some(not same)
+              var dwhyImg = ""
+              if gate.isSome:
+                declineCond = none(Z3Bool)
+                let lay = gate.get
+                let n0 = cp.pc.len
+                let img = cellImage(ctx, cp, objTy, refAst, lay)
+                basePc = basePc & cp.pc[n0 .. ^1]
+                fixImage = img
+                for ai, arm in objTy.vArms:
+                  var after: seq[SymVal]
+                  var why = ""
+                  if arm.isElse: why = "the `else` arm"
+                  elif not lay.arms.hasKey(arm.tagOrdinal) or
+                       lay.arms[arm.tagOrdinal].len != arm.fieldNames.len:
+                    why = "arm `" & $arm.tagOrdinal & "` has no layout"
+                  else:
+                    for j, f in lay.arms[arm.tagOrdinal]:
+                      let nv = bitsPlace(imgReadDef(img, f.off - lay.unionOff,
+                                                    f.size), f,
+                                         none((vl.Place, SymVal)))
+                      if nv.isNone:
+                        why = "field `" & arm.fieldNames[j] &
+                              "` holds only its own values"
+                        break
+                      after.add nv.get
+                  if why.len == 0:
+                    imageArms.add (ai, after)
+                    continue
+                  var selTag: Z3Bool
+                  if arm.isElse:
+                    var seeded = false
+                    for o in objTy.vArms:
+                      if o.isElse: continue
+                      let neg = not variantDiscEq(valSV, int64(o.tagOrdinal))
+                      selTag = (if seeded: selTag and neg else: neg)
+                      seeded = true
+                    if not seeded: continue
+                  else:
+                    selTag = variantDiscEq(valSV, int64(arm.tagOrdinal))
+                  let c = (not same) and selTag
+                  declineCond = some(if declineCond.isSome: declineCond.get or c
+                                     else: c)
+                  dwhyImg = "; " & why
+                contPc = basePc
+                if declineCond.isSome: contPc = basePc & @[not declineCond.get]
+              if declineCond.isSome and
+                 guardLiteral(declineCond.get) != glFalse:
+                let (dk, dwhy) = admitDefined(aoField, ocInactiveBytes,
+                                              dsField).decline
                 survivors.add forkPathTainted(
-                  cp, basePc & @[not same], cp.env,
+                  cp, basePc & @[declineCond.get], cp.env,
                   w.degrade(dk.get(feUnsupportedOp),
                     "a discriminator write through a `ref` that changes " &
                     "branch with `fieldChecks` off (fieldChecksOffLayout): " &
-                    "the new branch holds the old bytes (" & dwhy &
+                    "the new branch holds the old bytes (" & dwhy & dwhyImg &
                     ") -- path degraded to sxUnknown"))
             else:
               maybeForkDefect(forkPath(cp, basePc, cp.env), not same,
                               "FieldDefect", none(string), w)
             if w.shouldStop: return survivors
-            cpS = forkPath(cp, basePc & @[same], cp.env)
+            cpS = forkPath(cp, contPc, cp.env)
+            if fixImage.len > 0:
+              imageStore(ctx, cpS, imageHeapCells(ctx, cpS, refPointeeTypeId(objTy),
+                         allocRefSort(ctx, objTy), gate.get), refAst, fixImage)
+            if tracked:
+              storeActive(ctx, cpS, objTy, refAst,
+                          some(cellActive(ctx, cp, objTy, refAst, oldDisc)))
             let baseId = refPointeeTypeId(objTy)
             for g in groups:
               if g.len < 2: continue
@@ -5273,6 +5710,22 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   for c in heapCellStore(ctx, cells[k], refAst, carried, fty):
                     cpS.heaps[c.key] = c.arr
                 for c in wf: cpS.pc.add c
+            # RFC-0016 PRC-07 (ref variants): the arm the new tag selects
+            # reads its fields from the union image (the bytes stay).
+            for (ai, after) in imageArms:
+              let arm = objTy.vArms[ai]
+              let sel = variantDiscEq(valSV, int64(arm.tagOrdinal))
+              let refSortI = allocRefSort(ctx, objTy)
+              for j, fname in arm.fieldNames:
+                let fty = arm.fieldTypes[j]
+                let k = baseId & "__@" & $arm.tagOrdinal & "__" & fname
+                let cellI = heapCellArrays(ctx, cpS, k, refSortI, fty, objTy)
+                var scratchI: seq[Z3Bool]
+                let protoI = allocateSym(fty, "__armImageProto", scratchI)
+                let nv = heapCellIte(ctx, sel, heapStoreValue(after[j], protoI, fty),
+                                     heapCellSelect(ctx, cellI, refAst, fty), fty)
+                for c in heapCellStore(ctx, cellI, refAst, nv, fty):
+                  cpS.heaps[c.key] = c.arr
           let stored = heapCellStore(ctx, cell, refAst, valSV, stmt.dwElemTy)
           # REPLACE the per-path heap binding with the stored array on the surviving
           # path (PER-PATH — an unforked branch never sees this update).

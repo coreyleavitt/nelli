@@ -473,16 +473,23 @@ suite "PRC-07: --fieldChecks:off":
       pinDecline(sutRefWrongRead, wrongKey, ubInactiveVariantField,
                  excluding = {feCheckOption})
     else:
-      pinDecline(sutRefWrongRead, wrongKey, feUnsupportedOp, tLabel("hit"),
-                 "fieldChecksOffLayout", excluding = {feCheckOption})
+      # the active `a` covers every byte of `b`: exact, as a value's
+      let r = pinExact(sutRefWrongRead, fk, domain = sampled([3, 0, 1]))
+      check r.status == sxSat
+      check r.trusted
+      check r.undefined.len == 0
 
   test "a ref variant write outside its branch is no finding on either backend":
+    # cpp: the member becomes active (defined); c: the active `a` covers every
+    # byte of `b`. The ref carries the active member and the image, so both
+    # are exact and trusted.
     let r = symexFind(sutRefWrongWrite, tLabel("hit"))
     checkpoint show(r.errors)
     check r.undefined.len == 0
-    check not r.trusted
-    check r.errors.named(feUnsupportedOp)
-    check "fieldChecksOffLayout" in show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    check not r.errors.named(feUnsupportedOp)
+    check "fieldChecksOffLayout" notin show(r.errors)
     check symexFind(sutRefWrongWrite,
                     tUndefined({UbKind(ubInactiveVariantField)})).status != sxSat
 
@@ -513,13 +520,18 @@ suite "PRC-07: --fieldChecks:off":
       check not r.errors.named(feUncheckedDiscBytes)
     check not r.errors.named(feCheckOption)
 
-  test "a branch-changing discriminator write through a ref is declined, on its own path":
+  test "a branch-changing discriminator write through a ref is exact":
+    # c: the union image carries the bytes; cpp: the old member stays active
+    # and the walker havocs the new arm's fields (`feUncheckedDiscBytes`)
     let r = symexFind(sutRefDiscChange, tLabel("hit"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
-    check "fieldChecksOffLayout" in show(r.errors)
+    check r.status == sxSat
+    check r.witness[0] == 3
+    check not r.errors.named(feUnsupportedOp)
+    check "fieldChecksOffLayout" notin show(r.errors)
     check not r.errors.named(feCheckOption)
+    when not defined(cpp):
+      check r.trusted
 
 when not defined(cpp):
   proc scrub() {.noinline.} =

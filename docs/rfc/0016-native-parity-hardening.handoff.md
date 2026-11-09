@@ -654,8 +654,8 @@
   Note a user `=destroy` on a variant is a compile error with a discriminator
   assignment, and the layout already declines any non-scalar field, so the
   copy/sink hook is the reachable case. Remaining for `field/inactiveBytes`
-  as listed in the migration note (ref variants, bool/range targets, layout
-  pragmas, `else`, multi-axis).
+  as listed in the migration note (bool/range targets, layout pragmas,
+  `else`, multi-axis, an out-of-branch field write through a `ref` on c).
   PRC-07 slice B continued (same branch, walker 306 kept, comment extended; RED
   first, `tsymex_0016_fieldoff` on c: `[FAILED] a branch-changing discriminator
   write keeps the bytes: the new arm reads the old` (`pinExact ... sxUnknown;
@@ -678,7 +678,7 @@
   tainted for that, the c image path does not. (4) DONE: under `rangeChecks:off`
   `bitsPlace` returns the raw value for a `range` (`rangeUnchecked`) and
   `writeExactArm` accepts a range overlap; with its checks on it stays declined.
-  (2) NOT DONE, ref variants: the per-(tag, field) heap arrays are written at
+  (2) DONE in PRC-07 ref variants, below. Was: ref variants: the per-(tag, field) heap arrays are written at
   every ref constructor, field store, discriminator store and `new`; an image
   heap beside them must be coherent at all of those and at an input ref's first
   materialisation (the image cell of an address must equal the pack of the
@@ -706,7 +706,47 @@
   differs from the discriminator" state (write then read through the
   discriminator's branch is UB), which need a union byte image on the value
   (a new `SymVal` field merged by `iteSV`, `svPartsOf`, retBindEq, hashing: ~100
-  sites), and the `ref` variant twin.
+  sites).
+  PRC-07 ref variants (same branch, walker 309 kept, comment extended; RED
+  first on 708589c8, new `tsymex_0016_fieldref` (`--fieldChecks:off`): c
+  `[FAILED] a branch-changing discriminator write through a ref reinterprets
+  the bytes`, `through an alias`, `a constructor naming every arm field leaves
+  the other arm's tail indeterminate`, `new zeroes the cell: the other arm's
+  tail is zero`, `an input ref's bytes are free`; cpp `[FAILED] a read through
+  the member the wrong-branch write made active`, `a read through the
+  discriminator's branch after a wrong-branch write`, `a branch-changing
+  discriminator write leaves the old member active`): a heap case object
+  carries the union image in `<id>__@img<i>`/`<id>__@msk<i>` heaps
+  (`runtime_heap.nim` `cellImage`): the active arm's bytes are packed from its
+  field heaps at every read, so every writer of an active field (field store,
+  pointer into a field, havoc) and an input ref's first read are coherent by
+  construction; the stored heaps are written by `isNew` (zero for `new`, all
+  indeterminate for `isNew.nUninit`, a constructor naming every field of its
+  arm: generated C `nimNewObjUninit` vs `nimNewObj`, c and cpp, debug and
+  release), `variantCellStore` (a whole store, an address cell) and a
+  branch-changing discriminator store (fixes the old arm's bytes, then reads
+  the new arm's fields from them). cpp: `<id>__@act`/`<id>__@acton` hold the
+  active member (untouched: the discriminator's arm); a field write makes its
+  arm active, a discriminator store fixes the old one, a read through another
+  arm halts `ubInactiveVariantField`. `symexNoCopyMem` asks `supportsCopyMem`
+  of a `ref`/`ptr` symbol's pointee (it answered `false` for every `ref
+  object`). An out-of-branch field write through a `ref` on c is exact (`outOfArmFieldStore`,
+  runtime_heap.nim: the field's bytes into the stored image heaps at its layout
+  offset, the mask cleared, every covered field of the arms `writeExactArm`
+  accepts re-read from the image; a bool, a checked `range` or the `else` arm
+  keeps the value path's per-side decline); `havocOpaqueHeaps` gives an opaque
+  call's havoc the zero mask array (the convention of a value variant's
+  `allocateSym` and a rebound `{.noinit.}` local; the path is already tainted
+  `feOpaqueEffectHavoc`), so a byte the constructor wrote is no longer a
+  spurious `ubIndeterminateRead` after the call (cost: a byte the callee never
+  wrote and the ctor left indeterminate also reads determinate there, replayed
+  not halted). RED then GREEN on `tsymex_0016_fieldref` (c): `[FAILED] an
+  out-of-arm write is read back through the active arm's field`, `... whole
+  through the same field`, `... keeps the bytes it does not cover` (sxUnknown,
+  `fieldChecksOffLayout`), `a ref variant fully written by its constructor stays
+  determinate over an opaque call` (`ubIndeterminateRead`). The stale
+  `tsymex_0016_fieldoff` ref pins are re-pinned to the new model. Remainder: an
+  `else` arm is neither imaged nor tracked.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

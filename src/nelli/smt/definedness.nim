@@ -277,7 +277,10 @@ func defRows(): seq[DefKey] =
       "`rangeChecks` on, overwritten with bytes that are not its values, " &
       "an arm holding a string/seq/ref/object/set (unsized), another " &
       "layout pragma, a multi-axis or inheritance variant, an `else` arm, " &
-      "and a `ref` variant. A branch-changing discriminator write carries " &
+      "and, for a `ref` variant (which carries the image in the heap, c " &
+      "and cpp), the same per-arm declines on an out-of-branch field " &
+      "write (c) and a branch-changing discriminator write. A " &
+      "branch-changing discriminator write carries " &
       "the bytes (the new arm is read from the image)"))
 
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())

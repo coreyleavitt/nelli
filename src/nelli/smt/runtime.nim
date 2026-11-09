@@ -18716,6 +18716,19 @@ proc havocOpaqueHeaps(w: var WalkCtx; p: Path; stmt: IRStmt): bool =
     if not hit: continue
     let old = p.heaps[k]
     let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, old.raw)
+    # RFC-0016 PRC-07 (ref variants): the indeterminate-byte mask of a case
+    # object's union image (`<id>__@msk<i>`) is determinate after the call,
+    # as a value variant's havoc (`allocateSym`: a parameter's bytes are all
+    # determinate) and a `{.noinit.}` local rebound by `havocOpaqueWrites`
+    # are. The data heaps take fresh contents; a mask of fresh constants
+    # would let a read of a byte the callee wrote observe "indeterminate"
+    # (`ubIndeterminateRead`), where the path is already tainted and a
+    # witness through it replayed.
+    if "__@msk" in k:
+      let dom = ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort)
+      p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(
+        ctx.raw, dom, mkBitVec[64](0'i64).raw))
+      continue
     inc w.synthZ3
     let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
       ("heap_" & k & "@hv" & $w.synthZ3).cstring)

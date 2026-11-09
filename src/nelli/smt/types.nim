@@ -1782,6 +1782,12 @@ type
                              ## variable, `addr nAddrOf.<field>` of an arm
                              ## field: a field cell (`walkFieldCell`). ""
                              ## otherwise.
+      nUninit*:    bool      ## RFC-0016 PRC-07: a ref-variant constructor
+                             ## naming every field of its arm allocates
+                             ## without zeroing (`nimNewObjUninit`): the
+                             ## union bytes no field write reaches are
+                             ## indeterminate. `new(T)` and a constructor
+                             ## that omits a field zero the cell.
     of isDerefWrite:
       dwPtr*:      IRExpr    ## Phase 15 R3: the ref/ptr expr being written through.
       dwValue*:    IRExpr    ## the RHS value stored into `dwPtr[]`.
@@ -5086,14 +5092,16 @@ proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType,
          dPtrFamily: true, dCell: cell)
 
 proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
-             addrIdx: IRExpr = nil; addrField = ""): IRStmt =
+             addrIdx: IRExpr = nil; addrField = ""; uninit = false): IRStmt =
   ## Phase 15 R1a (ADR-0010). `let retName = new(T)` allocation binding a fresh
   ## ref. `refTy` is the allocated `itRef`/`itPtr` type.
   ## RFC-0005 S8ax: `addrOf` names a local whose address cell this is.
   ## RFC-0005 S8be: `addrIdx`, an element of it (`isNew.nAddrIdx`).
   ## RFC-0005 S8bo: `addrField`, an arm field of it (`isNew.nAddrField`).
+  ## RFC-0016 PRC-07: `uninit`, a constructor's unzeroed allocation
+  ## (`isNew.nUninit`).
   IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy, nAddrOf: addrOf,
-         nAddrIdx: addrIdx, nAddrField: addrField)
+         nAddrIdx: addrIdx, nAddrField: addrField, nUninit: uninit)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
                    ptrFamily = false, cell = false, inPlace = false): IRStmt =
@@ -5727,7 +5735,8 @@ proc render*(s: IRStmt): string =
     s.nRetName & "=new(" & $s.nRefTy & ")" &
       (if s.nAddrOf.len > 0: "@" & s.nAddrOf else: "") &   # RFC-0005 S8ax
       (if s.nAddrIdx != nil: "[" & render(s.nAddrIdx) & "]" else: "") &   # S8be
-      (if s.nAddrField.len > 0: "." & s.nAddrField else: "")   # RFC-0005 S8bo
+      (if s.nAddrField.len > 0: "." & s.nAddrField else: "") &   # RFC-0005 S8bo
+      (if s.nUninit: " uninit" else: "")   # RFC-0016 PRC-07
   of isDerefWrite:
     let fam = if s.dwPtrFamily: "ptr" else: "ref"
     let fld = if s.dwField.len > 0: "." & s.dwField else: ""

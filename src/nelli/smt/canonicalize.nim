@@ -309,7 +309,14 @@ const renderAsChoicesVersion* = "12"
   ##   `unicode.toLower` and `typedthreads.createThread` calls decline by their
   ##   `never` rows.
 
-const symexWalkerVersion* = "297"
+const symexWalkerVersion* = "298"
+  ## RFC-0016 K2c (297->298): `classifyType` reads the type-class axis. A
+  ## `c_longdouble` (STY-06) is refused by the `float128` row and declines
+  ## (`feUnsupportedParamType`) where it was modelled as an IEEE double
+  ## (`sxSat` on a value of the C target's `long double`); `owned T` and
+  ## `Atomic[T]` read their `never` rows (STY-04), and as a top-level
+  ## parameter they decline `heUnsupportedOwnership` where they were a
+  ## compile stop (CRH-01); an omitted variant field reads its HRV-06 row.
   ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case
   ## objects, in a witness and in a variable the SUT reaches, where it declined
   ## as not marshallable. A cached `:unk` that was that decline is stale.

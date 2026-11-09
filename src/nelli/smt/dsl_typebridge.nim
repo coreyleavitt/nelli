@@ -33,6 +33,8 @@ import ./check_options   ## RFC-0016 K4c: `moduleStemOf`
 import ./stdlib_rows     ## RFC-0016 K4c: the stdlib-body axis
 import ./admission
 import ./errorkind
+import ./admission   ## RFC-0016 K2c: `Admit` verbs (`admitted`, `decline`)
+import ./typeaxes   ## RFC-0016 K2c: the type-class axis `classifyType` reads
 
 # ---- RFC-0005 S8c: callee resolution by SYMBOL, not by name ------------------
 #
@@ -904,6 +906,10 @@ proc classifyArrayBracket(arr: NimNode): ClassifiedType =
   ## RFC-0005 S8z. `array[<idx>, T]`, resolved: an `itArray` of the index
   ## type's size, or the scoped `__unsupported:` decline for an index type
   ## `arrayIndexBounds` does not model.
+  # RFC-0016 K2c: an enum index is a type feature the type-class axis names.
+  if arr[1].kind == nnkSym and arr[1].typeKind == ntyEnum and
+     not admitTypeFeature("array/enumIndex").admitted:
+    return unranged(tUninterp("__unsupported:" & arr.repr.strip))
   let b = arrayIndexBounds(arr[1])
   if not b.ok:
     return unranged(tUninterp("__unsupported:" & arr.repr.strip))
@@ -1283,7 +1289,10 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # before `getTypeInst`.
   if ty.kind == nnkCommand and ty.len == 2 and
      isBuiltinTypeHead(ty[0], ["owned"]):   ## RFC-0005 S8d: by symbol
-    return unranged(tUninterp("__ownership:owned"))
+    # RFC-0016 K2c: the `owned` feature row (STY-04) decides; it is `never`.
+    if not admitTypeFeature("owned").admitted:
+      return unranged(tUninterp("__ownership:owned"))
+    return classifyType(ty[1])
   # Phase 15 G7: a `static[N]`-dimensioned array formal `array[N, T]` is
   # monomorphized (by `monomorphize`, with `N → nnkIntLit`) into a SYNTHESIZED
   # `nnkBracketExpr[Ident "array", IntLit n, T]` that carries NO type — so
@@ -1307,6 +1316,15 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   var resolved = ty.getTypeInst
   if resolved.kind == nnkVarTy and resolved.len == 1:
     resolved = resolved[0]
+  # RFC-0016 K2c (STY-06): `c_longdouble` is Nim's spelling of the C target's
+  # `long double` (x87 80-bit on x86-64, 64-bit on MSVC and some ARM). It
+  # aliases `float64` for the compiler, so the alias walk below would model it
+  # as an IEEE double. The type-class axis says what the walker does with a
+  # float128: the row refuses it, and the type declines through the row.
+  if isBuiltinTypeHead(resolved, ["c_longdouble", "clongdouble"]):
+    let a = admitTypeClass(ntyFloat128, tcClassify)
+    if not a.admitted:
+      return unranged(tUninterp("__unsupported:c_longdouble"))
   # RFC-0005 S8bn (item 8): a user generic object instance (`G[int]`).
   if resolved.kind == nnkBracketExpr and resolved.len >= 2:
     let gimpl = userGenericObjectImpl(resolved[0])
@@ -1747,7 +1765,10 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # the by-symbol rule it could only ever match a USER type of that name
       # (a name-only model, as S8c's `replaceAll`/`bytes`). A user `WeakRef`
       # is a user generic: the `__unsupported:` catch-all below.
-      return unranged(tUninterp("__ownership:" & head))
+      # RFC-0016 K2c: the `atomic` feature row (STY-04) decides; it is `never`.
+      if not admitTypeFeature("atomic").admitted:
+        return unranged(tUninterp("__ownership:" & head))
+      return unranged(tUninterp("__unsupported:" & head))
     else: discard
   # Phase 15 Cluster R (R1a, ADR-0010). Inline `ref T` / `ptr T` — classify to
   # `tRef`/`tPtr` of the pointee (REPLACING the pre-R unwrap-to-pointee

@@ -772,7 +772,7 @@ title = "Compile stops in `classifyType`: `splitLines` (INT-09) and the generic-
 state = "open"
 note = ""
 source = "sort S13"
-evidence = "the `sort` stop this row first named is gone at 83c1d304: `s.sort()` and `s.sort(system.cmp[int], Descending)` compile and decline (C-06), now precision row W-36. The other two are not re-probed at head. One `classifyType` row; mechanism K2a/K2c."
+evidence = "the `sort` stop this row first named is gone at 83c1d304: `s.sort()` and `s.sort(system.cmp[int], Descending)` compile and decline (C-06), now precision row W-36. The other two are not re-probed at head. One `classifyType` row; mechanism K2a/K2c. K2c (2026-11-09): a top-level `Atomic[T]` or `owned T` parameter was a further compile stop (`emitTyAndReader` raised on the `__ownership:` placeholder); it now declines `heUnsupportedOwnership`, pinned in `tests/tsymex_0016_k2c_typeclass.nim`."
 cells = []
 
 [[row]]
@@ -2166,7 +2166,7 @@ id = "STY-06"
 table = "5.9"
 title = "concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105)"
 state = "never"
-note = ": K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`). K4c (2026-11-09): symbolic-length sort, concurrency and full Unicode case fold are `never` rows (`stdlib:algorithm.sort/symbolicLength`, `stdlib:typedthreads.createThread/concurrency`, `stdlib:unicode.toLower/fullCaseFold`); the sort decline names its cell, the other two have no declining site to name it (createThread is a walker fault, W-19b; toLower on a symbolic Rune did not terminate in a 900 s probe)"
+note = ": K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`). K4c (2026-11-09): symbolic-length sort, concurrency and full Unicode case fold are `never` rows (`stdlib:algorithm.sort/symbolicLength`, `stdlib:typedthreads.createThread/concurrency`, `stdlib:unicode.toLower/fullCaseFold`); the sort decline names its cell, the other two have no declining site to name it (createThread is a walker fault, W-19b; toLower on a symbolic Rune did not terminate in a 900 s probe). K2c (2026-11-09): `classifyType` reads the `float128` row, so a `c_longdouble` parameter declines `feUnsupportedParamType` (it was modelled as a double)"
 never_reason = "stays by design: no thread interleaving, no symbolic-length sort, no payload-exact NaN, no float80, no full Unicode fold"
 slice = "K4c"
 home = "K3a, K2b, K4c (one `never` cell each)"

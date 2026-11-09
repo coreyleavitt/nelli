@@ -4876,6 +4876,19 @@ proc parseVariantCtorField(fieldName: string, fty: IRType,
   elif isRefField:
     return mkNil(fty)
   else:
+    # RFC-0016 K2c: the type-class axis decides whether this kind has a zero
+    # value in the model (HRV-06); a refused row declines with its own kind.
+    let featKey = omittedFieldFeature(fty.kind)
+    if featKey.len > 0:
+      let feat = admitTypeFeature(featKey)
+      if not feat.admitted:
+        let (fk, why) = feat.decline
+        preamble.add ctx.declineAtSite(
+          fk.get(feUnsupportedExprKind), "A1: omitted variant field `" &
+            fieldName & "` of `" & ctorNode.repr & "`: " & why,
+          "A1: omitted variant field `" & fieldName & "` (" &
+            $fk.get(feUnsupportedExprKind) & ")")
+        return unsupportedFieldPlaceholder(fty)
     let zv = zeroValueForType(fty)
     if zv != nil:
       return zv

@@ -316,6 +316,22 @@
   seq and tuple fields. `routeScan` no longer asks for the type of an untyped
   callee symbol (`wasMoved`'s own `=wasMoved(obj)` in a generic body was a hard
   "node has no type" error). W-12 closed.
+  K2c (`rfc-0016-k2c`, walker 291 to 292, renumbered at landing): `classifyType`
+  reads the type-class axis. New site `tcClassify` (kinds that become an IR
+  type); `admitTypeFeature` reads the named rows. `owned T` and `Atomic[T]`
+  read their `never` rows; a top-level `Atomic`/`owned` parameter was a compile
+  stop (`emitTyAndReader` raised on `__ownership:`, CRH-01) and now declines
+  `heUnsupportedOwnership`. `c_longdouble`/`clongdouble` reads the `float128`
+  row and declines `feUnsupportedParamType` (it was modelled as a double, STY-06).
+  An enum-indexed array (`classifyArrayBracket`) and an omitted variant field
+  (`omittedFieldFeature`, the A1 constructor path) read their rows. The corpus is
+  `tests/tsymex_0016_k2c_typeclass.nim`: one pinned snippet per kind a parameter
+  can have (32 cells leave `typeclass.txt`). Remaining there: `K4c` owns
+  `float/sNaNPayload` (a bit-pattern cast, not a type); the rest is `W4-z` (kinds
+  no parameter can have, and `pointer`, `ptr`, `openArray`, `varargs`,
+  `uncheckedArray`, `var`, not yet in the corpus). CRH-01's `splitLines` and
+  HRV-44 stops were not re-probed. The `case n.kind` census row in
+  `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

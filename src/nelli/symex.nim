@@ -1488,7 +1488,12 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       return (nnkProcTy.newTree(nnkFormalParams.newTree(newEmptyNode()),
                                 newEmptyNode()), placeholder)
     if ty.uninterpName.startsWith("__unsupported:") or
-       ty.uninterpName.startsWith("__unsupported_witness:"):
+       ty.uninterpName.startsWith("__unsupported_witness:") or
+       ty.uninterpName.startsWith("__ownership:"):
+      # RFC-0016 K2c: `__ownership:*` (`owned T`, `Atomic[T]`) is the same
+      # shape: `allocateSym` raises `heUnsupportedOwnership` at parameter
+      # allocation, so a top-level parameter of it reached this raise as a
+      # COMPILE stop (CRH-01) instead of an `sxUnknown`.
       # RFC-chapulin-hardening CR-2b/CR-2c (Cluster 2 — Crash-totality,
       # round-2 Option 2 / Option A). Two distinct catch-alls feed this ONE
       # placeholder arm:

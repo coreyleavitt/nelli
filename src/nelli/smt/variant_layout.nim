@@ -30,10 +30,13 @@ import ./buildprofile
 type
   PlaceKind* = enum
     pkInt         ## an integer or char: every bit pattern is a value
-    pkRestricted  ## a `range` or an enum: readable as bytes, but a write of
-                  ## arbitrary bytes may leave its values
+    pkRestricted  ## a `range`: readable as bytes, but arbitrary bytes may
+                  ## leave its values
+    pkEnum        ## an enum: its C width and raw value (slice B; an
+                  ## out-of-range one is a plain value, as under
+                  ## `--rangeChecks:off`)
     pkBool        ## a bool: the byte is 0 or 1
-    pkOpaque      ## a float: sized, never reinterpreted
+    pkOpaque      ## a float: its IEEE bits (slice B reinterprets them)
 
   Place* = object
     name*: string
@@ -63,7 +66,9 @@ func scalar(t: IRType): tuple[size: int, kind: PlaceKind] =
   of itInt:
     if t.width notin [8, 16, 32, 64]: return (0, pkOpaque)
     (t.width div 8,
-     if t.hasRange or t.enumName.len > 0: pkRestricted else: pkInt)
+     if t.enumName.len > 0: pkEnum   # an enum's ordinal range is not a `range`
+     elif t.hasRange: pkRestricted
+     else: pkInt)
   of itBool: (1, pkBool)
   of itFloat32: (4, pkOpaque)
   of itFloat64: (8, pkOpaque)
@@ -164,44 +169,3 @@ func accessPlace*(lay: VariantLayout; tags: openArray[int];
     if lay.arms.hasKey(t):
       for p in lay.arms[t]:
         if p.name == name: return some(p)
-
-func pieces(lay: VariantLayout; active: int; target: Place; forWrite: bool):
-    Option[seq[Piece]] =
-  ## The active arm's fields that cover every byte of `target`'s extent, or
-  ## `none` when a byte is in no field of the active arm (padding, bytes only
-  ## another arm owns) or in a field that cannot supply or take it.
-  if not lay.ok or not lay.arms.hasKey(active): return
-  # A target that is a range or enum holds only its own values; a float is
-  # never reinterpreted.
-  if target.kind in {pkRestricted, pkOpaque}: return
-  var ps: seq[Piece]
-  var at = target.off
-  let stop = target.off + target.size
-  while at < stop:
-    var hit = -1
-    for j, p in lay.arms[active]:
-      if at >= p.off and at < p.off + p.size: hit = j
-    if hit < 0: return
-    let f = lay.arms[active][hit]
-    let n = min(stop, f.off + f.size) - at
-    if forWrite:
-      # Bytes may take any value: not into a range, an enum or a float, and
-      # into a bool only as the bool itself.
-      if f.kind in {pkRestricted, pkOpaque}: return
-      if f.kind == pkBool and not (target.kind == pkBool and n == 1): return
-    else:
-      if f.kind == pkOpaque: return
-      # A bool reads as a bool only from a whole bool field.
-      if target.kind == pkBool and not (f.kind == pkBool and n == 1): return
-    ps.add Piece(field: hit, fieldByte: at - f.off, targetByte: at - target.off,
-                 len: n)
-    at += n
-  some(ps)
-
-func readPieces*(lay: VariantLayout; active: int; target: Place):
-    Option[seq[Piece]] =
-  pieces(lay, active, target, false)
-
-func writePieces*(lay: VariantLayout; active: int; target: Place):
-    Option[seq[Piece]] =
-  pieces(lay, active, target, true)

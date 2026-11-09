@@ -583,6 +583,50 @@
   a multi-axis variant, a `ref` variant (one heap array per tag: not local), an
   inheritance variant, a `packed` object (invisible to the layout: unpinned
   trap). cpp: a read stays `ubInactiveVariantField`, a write declined.
+  PRC-07 slice B (same branch, walker 306 kept, comment extended; RED first:
+  `[FAILED] the walker's variant layout is the compiler's` with `walker
+  size=16;x@8;a@8;b@12 native size=10;x@2;a@2;b@3` for a `{.packed.}` variant,
+  then `[FAILED] a packed variant reads the active arm's bytes at its own
+  offsets`, `bytes no field of the active arm owns are the zero of
+  initialisation`, `a float arm is its IEEE bits, and int bytes read back as a
+  float`, `an enum arm field is its raw C value`, `an int read past the active
+  arm's fields takes the zero tail byte`; `tsymex_r6_r6_emit_roundtrip` RED
+  `Error: not all cases are covered; missing: {isUndefined}`): 0a `{.packed.}`
+  is alignment 1 at every level (`IRType.vLayoutPragma`, identity only, read by
+  `dsl_typebridge.layoutPragmaOf` from the type's and its fields' pragmas; any
+  other layout pragma declines the layout). FINDING: slice A's "unpinned trap"
+  was never reachable: the walker declines every `{.packed.}` type at its
+  construction (row `pragma:type/packed`, layout AND passing), so a packed
+  variant's symex read is `sxUnknown` there (pinned so in the file); the
+  layout is ready for the day that row is lifted. 0b the round-trip emitter covers
+  `isUndefined`. Slice B proper: the per-arm slots stay the representation of
+  the active arm; on c a value variant also carries the union as one byte image
+  (`SymVal.vImage`, a 64-bit cell per 8 bytes, little-endian, built only under
+  `unionImageGate`: `--fieldChecks:off`, c, layout derived), coherent by
+  construction -- a constructor writes the arm's fields over zero
+  (`lowerVariantLit`, the runtime-discriminator constructor, `defaultZero`), a
+  free parameter over fresh cells (`allocateSym`, `variantImage` ite over the
+  discriminator), `lowerVariantFieldSet` inserts every write into the image
+  and re-derives the active arm's fields the bytes cover (`bitsPlace`), and
+  `isVariantField`'s out-of-arm read extracts the target's bytes (`imgRead`)
+  whichever arm is active (one path, no per-arm split); a write's out-of-arm
+  side is exact in the arms it leaves with a value in every field
+  (`writeExactArm`), the rest declined. Floats go through `toIeeeBv`/
+  `bvToFpBits`, enums are their raw value (`PlaceKind.pkEnum`), a bool or
+  `range` target of foreign bytes declines (`bitsPlace` none), `joinSV` merges
+  images cell by cell, a branch-changing discriminator write drops the image
+  (the new arm's slots are the havoc; an out-of-arm read after it declines).
+  cpp: `SymVal.vActive` (the arm last written; constructors set it to the
+  discriminator) replaces the discriminator in `isVariantField`'s arm
+  conditions, a write is exact and sets it (`lowerVariantFieldSet`), a
+  discriminator write leaves it, so `x.b = 5; x.a` halts
+  `ubInactiveVariantField` and `x.b = 5; x.b` is exact. Slice A's
+  `armBytesRead`/`armBytesWrite`/`pieces` are deleted. `field/inactiveBytes`
+  keeps what the handoff's migration note lists. REMAINING: ref variants (the
+  image as heap cells beside the per-tag arrays; `runtime_heap.nim` sites
+  4270/5012 still decline), deriving the new arm from the image at a
+  discriminator write (would replace `dwmHavoc` on c), a `range` target's
+  raw value under `--rangeChecks:off`.
   REMAINING, slice B: uncovered bytes/padding and the cpp "active member
   differs from the discriminator" state (write then read through the
   discriminator's branch is UB), which need a union byte image on the value

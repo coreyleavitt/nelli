@@ -347,6 +347,22 @@ const symexWalkerVersion* = "309"
   ## WRITE outside the branch is declined the same way, being defined there), and a
   ## branch-changing discriminator write is the `dwmHavoc` model. Neither
   ## build declines every routine (`feCheckOption`) any more.
+  ## PRC-07 slice B (306 kept: the checked path is unchanged): under
+  ## `--fieldChecks:off` only, a c-backend value variant carries the union's
+  ## bytes as one image (`SymVal.vImage`, a 64-bit cell per 8 bytes over
+  ## `variant_layout`; a `{.packed.}` object at alignment 1) that every arm
+  ## field views: padding and a shorter arm's tail are the zero of the
+  ## initialisation (a parameter's are free cells), a float its IEEE bits, an
+  ## enum its raw value, so an out-of-branch read or write is exact where it
+  ## used to decline; `field/inactiveBytes` keeps a bool or `range` field
+  ## overwritten with foreign bytes, pointer-payload arms, other layout
+  ## pragmas, `ref` variants and reads after a branch-changing discriminator
+  ## write. A cpp value variant carries its active member (`vActive`, the arm
+  ## last written): a write to any member is exact, and a read through a
+  ## member that is not the active one, the discriminator's own branch after a
+  ## wrong-branch write included, halts `ubInactiveVariantField`. A build with
+  ## field checks on builds neither term (`unionImageGate`,
+  ## `activeMemberTracked`): no new term on the checked path.
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the
   ## winning path's own heaps (`heap_<key>` and its havoc epochs), not every
   ## model constant named `heap_*`, so a havoc'd copy (`@hv`) is not pinned.

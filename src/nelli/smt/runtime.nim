@@ -408,6 +408,13 @@ type
                                           ## SymVals (ARM-SPECIFIC only)
       vArmFieldNames*: OrderedTable[int, seq[string]]
                                           ## arm-parallel field names
+      vImage*:       seq[Z3BitVec[64]]    ## RFC-0016 PRC-07 slice B (c,
+                                          ## `--fieldChecks:off` only): the
+                                          ## union's bytes, 8 per cell,
+                                          ## little-endian; empty = none
+      vActive*:      ref SymVal           ## slice B (cpp, `--fieldChecks:off`
+                                          ## only): the arm last written, the
+                                          ## union's active member; nil = untracked
       vPlainFields*: seq[SymVal]          ## plain (always-present) field
                                           ## SymVals — shared across all
                                           ## arms; allocated once;
@@ -2961,6 +2968,19 @@ proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal
 proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal
   ## RFC-0005 S8s fwd-decl. A variant value with one field replaced.
 
+proc unionImageGate(ty: IRType): Option[vl.VariantLayout]
+proc activeMemberTracked(ty: IRType): bool
+proc unionCellCount(lay: vl.VariantLayout): int
+proc zeroImage(lay: vl.VariantLayout): seq[Z3BitVec[64]]
+proc armImage(lay: vl.VariantLayout; tag: int; slots: seq[SymVal];
+              fill: seq[Z3BitVec[64]]): Option[seq[Z3BitVec[64]]]
+proc variantImage(lay: vl.VariantLayout; disc: SymVal;
+                  arms: OrderedTable[int, seq[SymVal]];
+                  fill: seq[Z3BitVec[64]]): seq[Z3BitVec[64]]
+proc activeOf(disc: SymVal): ref SymVal
+  ## RFC-0016 PRC-07 slice B fwd-decls: the union byte image (c) and the
+  ## active member (cpp) a value variant carries under `--fieldChecks:off`.
+
 proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
   ## closure per element via the C2b descent), called from `lower(iekHofCall)`.
@@ -3787,11 +3807,21 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       for k in 1 ..< ordSet.len:
         clause = clause or variantDiscEq(discInner, int64(ordSet[k]))
       pcOut.add clause
-    SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
-           vObjectName: ty.vObjectName,
-           vArmFields: armFields, vArmFieldNames: armNames,
-           vPlainFields: plainFields,
-           vPlainFieldNames: ty.vPlainFieldNames)
+    var sv = SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
+                    vObjectName: ty.vObjectName,
+                    vArmFields: armFields, vArmFieldNames: armNames,
+                    vPlainFields: plainFields,
+                    vPlainFieldNames: ty.vPlainFieldNames)
+    # RFC-0016 PRC-07 slice B: a free variant's padding and tail bytes are
+    # free too (fresh cells); the active arm's fields are its slots' bytes.
+    let gate = unionImageGate(ty)
+    if gate.isSome:
+      var fill: seq[Z3BitVec[64]]
+      for i in 0 ..< unionCellCount(gate.get):
+        fill.add mkBitVecVar[64](baseName & ".@bytes" & $i)
+      sv.vImage = variantImage(gate.get, discInner, armFields, fill)
+    if activeMemberTracked(ty): sv.vActive = activeOf(discInner)
+    sv
   of itMultiVariant:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # Phase 14 cycle A1c per ADR-0003 D1. Each axis is allocated
@@ -5722,38 +5752,158 @@ proc normSlot(v: SymVal; ty: IRType): SymVal =
                         else: svBV64)
   result.signed = ty.signed
 
-proc armBytesRead(slots: seq[SymVal]; places: seq[vl.Place]; ps: seq[vl.Piece];
-                  target: IRType): Option[SymVal] =
-  ## RFC-0016 PRC-07 slice A. The value of a `target`-typed field read from
-  ## the bytes of an active arm's fields (little-endian; `variant_layout`
-  ## says which bytes): each piece is `len` bytes of one slot's 64-bit cell,
-  ## moved to its place in the result.
-  var acc = mkBitVec[64](0'i64)
-  for pc in ps:
-    if pc.field >= slots.len or pc.field >= places.len: return
-    let c = cellOf(normSlot(slots[pc.field], places[pc.field].ty),
-                   places[pc.field].ty)
-    if c.isNone: return
-    acc = acc or (((c.get.lshr ofByteShift(pc.fieldByte)) and byteMask(pc.len)) shl
-                  ofByteShift(pc.targetByte))
-  some(cellValue(acc, target))
+# ---- RFC-0016 PRC-07 slice B: the union byte image -----------------------------
+#
+# With `--fieldChecks:off` on the c backend a variant field is a plain union
+# member access, defined as the bytes of the union (C11 6.5.2.3 note 95). A
+# value variant then carries the union's bytes as one image: a 64-bit cell
+# per 8 bytes (`vImage`), the arm fields its views at `variant_layout`'s
+# offsets. The per-arm slots stay the representation of the active arm's
+# fields (an in-arm read is its slot), and the two are kept coherent by
+# construction: a constructor writes the arm's fields over the zero of the
+# object's initialisation (a free parameter's padding over fresh cells), every
+# write inserts into the image and re-derives the active arm's fields its
+# bytes cover, an out-of-arm read extracts from the image. A checked build
+# builds no image (`unionImageGate`), so it carries no term for it.
+#
+# On cpp the same access is defined only through the union's active member,
+# the member last written, so a value variant carries that arm (`vActive`)
+# and a read through another arm is `ubInactiveVariantField` there.
 
-proc armBytesWrite(slots: seq[SymVal]; places: seq[vl.Place]; ps: seq[vl.Piece];
-                   val: SymVal; valTy: IRType): Option[seq[SymVal]] =
-  ## The slots of the active arm after `val` (a `valTy` field) is written
-  ## over the bytes `ps` names: each piece is a bit-insert into one slot.
-  let vc = cellOf(normSlot(val, valTy), valTy)
-  if vc.isNone: return
-  var res = slots
-  for pc in ps:
-    if pc.field >= slots.len or pc.field >= places.len: return
-    let dc = cellOf(normSlot(res[pc.field], places[pc.field].ty),
-                    places[pc.field].ty)
-    if dc.isNone: return
-    let m = byteMask(pc.len) shl ofByteShift(pc.fieldByte)
-    let ins = (vc.get.lshr ofByteShift(pc.targetByte)) shl ofByteShift(pc.fieldByte) and m
-    res[pc.field] = cellValue((dc.get and (not m)) or ins, places[pc.field].ty)
-  some(res)
+proc unionImageGate(ty: IRType): Option[vl.VariantLayout] =
+  ## The layout a value variant of `ty` carries its byte image under: only a
+  ## `--fieldChecks:off` c-backend build, and only a layout derived.
+  if ty == nil or ty.kind != itVariant: return
+  if coField in buildSemantics.checks or buildSemantics.backend != beC: return
+  let lay = vl.variantLayout(ty)
+  if lay.ok: some(lay) else: none(vl.VariantLayout)
+
+proc activeMemberTracked(ty: IRType): bool =
+  ## cpp `--fieldChecks:off`: a value variant carries the arm last written.
+  ty != nil and ty.kind == itVariant and coField notin buildSemantics.checks and
+    buildSemantics.backend == beCpp
+
+proc unionCellCount(lay: vl.VariantLayout): int =
+  (lay.size - lay.unionOff + 7) div 8
+
+proc zeroImage(lay: vl.VariantLayout): seq[Z3BitVec[64]] =
+  for _ in 0 ..< unionCellCount(lay): result.add mkBitVec[64](0'i64)
+
+proc activeOf(disc: SymVal): ref SymVal =
+  result = new SymVal
+  result[] = disc
+
+proc placeBits(v: SymVal; p: vl.Place): Option[Z3BitVec[64]] =
+  ## The bytes a `p`-typed field value occupies, as the low `p.size` bytes
+  ## of a cell: an int or enum by its cell, a bool as 0/1, a float as its
+  ## IEEE bits (what C stores).
+  case p.ty.kind
+  of itFloat64:
+    if v.kind == svFloat64: some(toIeeeBv(v.fp64)) else: none(Z3BitVec[64])
+  of itFloat32:
+    if v.kind == svFloat32: some(zeroExtend(toIeeeBv(v.fp32), 32))
+    else: none(Z3BitVec[64])
+  else:
+    let c = cellOf(normSlot(v, p.ty), p.ty)
+    if c.isNone: return
+    some(c.get and byteMask(p.size))
+
+proc samePlace(f, w: vl.Place): bool =
+  f.off == w.off and f.size == w.size and f.kind == w.kind and
+    f.ty.kind == w.ty.kind and (f.kind == vl.pkBool or f.ty == w.ty)
+
+proc bitsPlace(bits: Z3BitVec[64]; p: vl.Place;
+               writer: Option[(vl.Place, SymVal)]): Option[SymVal] =
+  ## The value of a `p`-typed field whose bytes are the low `p.size` bytes of
+  ## `bits`. An int is every bit pattern; an enum its raw C value; a float
+  ## the value of its IEEE bits. A bool or a `range` holds only its own
+  ## values, so arbitrary bytes are no value of it: `none` (the caller
+  ## declines), unless `writer`, a field of the same place and kind, just
+  ## wrote them: its value then.
+  case p.kind
+  of vl.pkBool, vl.pkRestricted:
+    if writer.isSome and samePlace(p, writer.get[0]):
+      return some(normSlot(writer.get[1], p.ty))
+    none(SymVal)
+  of vl.pkOpaque:
+    case p.ty.kind
+    of itFloat64:
+      some(SymVal(kind: svFloat64, fp64: bvToFpBits(bits, Z3Float64)))
+    of itFloat32:
+      some(SymVal(kind: svFloat32,
+                  fp32: bvToFpBits(extract(bits, 31, 0), Z3Float32)))
+    else: none(SymVal)
+  of vl.pkInt, vl.pkEnum:
+    some(cellValue(bits and byteMask(p.size), p.ty))
+
+proc imgRead(img: seq[Z3BitVec[64]]; off, size: int): Z3BitVec[64] =
+  ## The `size` bytes at union byte `off`, as the low bytes of a cell.
+  result = mkBitVec[64](0'i64)
+  var at = off
+  while at < off + size:
+    let cell = at div 8
+    let inCell = at mod 8
+    let n = min(8 - inCell, off + size - at)
+    result = result or (((img[cell].lshr ofByteShift(inCell)) and byteMask(n)) shl
+                        ofByteShift(at - off))
+    at += n
+
+proc imgWrite(img: seq[Z3BitVec[64]]; off, size: int;
+              bits: Z3BitVec[64]): seq[Z3BitVec[64]] =
+  ## `img` with the low `size` bytes of `bits` at union byte `off`.
+  result = img
+  var at = off
+  while at < off + size:
+    let cell = at div 8
+    let inCell = at mod 8
+    let n = min(8 - inCell, off + size - at)
+    let m = byteMask(n) shl ofByteShift(inCell)
+    let ins = ((bits.lshr ofByteShift(at - off)) shl ofByteShift(inCell)) and m
+    result[cell] = (result[cell] and (not m)) or ins
+    at += n
+
+proc armImage(lay: vl.VariantLayout; tag: int; slots: seq[SymVal];
+              fill: seq[Z3BitVec[64]]): Option[seq[Z3BitVec[64]]] =
+  ## The image of a variant whose active arm is `tag` with `slots`: `fill`
+  ## (the bytes no field of the arm covers) with each field's bytes at its
+  ## place. `none` when a slot's bytes are not derived.
+  if not lay.arms.hasKey(tag) or lay.arms[tag].len != slots.len: return
+  var img = fill
+  for j, p in lay.arms[tag]:
+    let b = placeBits(slots[j], p)
+    if b.isNone: return
+    img = imgWrite(img, p.off - lay.unionOff, p.size, b.get)
+  some(img)
+
+proc variantImage(lay: vl.VariantLayout; disc: SymVal;
+                  arms: OrderedTable[int, seq[SymVal]];
+                  fill: seq[Z3BitVec[64]]): seq[Z3BitVec[64]] =
+  ## The image of a variant whose discriminator is `disc`: the arm it selects
+  ## over `fill`. Empty (no image: an out-of-arm read declines) when an arm's
+  ## is not derived.
+  result = fill
+  for tag, slots in arms:
+    if tag < 0: continue
+    let ai = armImage(lay, tag, slots, fill)
+    if ai.isNone: return @[]
+    let sel = variantDiscEq(disc, int64(tag))
+    for i in 0 ..< result.len:
+      result[i] = ite(sel, ai.get[i], result[i])
+
+proc overlaps(f, g: vl.Place): bool =
+  f.off < g.off + g.size and g.off < f.off + f.size
+
+proc writeExactArm(lay: vl.VariantLayout; tag: int; written: vl.Place): bool =
+  ## Whether a write to `written` while `tag` is the active arm leaves every
+  ## field of that arm with a value (`bitsPlace`): an int, enum or float
+  ## takes any bytes; a bool or `range` only its own, written as itself.
+  if not lay.arms.hasKey(tag): return false
+  for f in lay.arms[tag]:
+    if overlaps(f, written) and
+       f.kind notin {vl.pkInt, vl.pkEnum, vl.pkOpaque} and
+       not samePlace(f, written):
+      return false
+  true
 
 proc floatKeyCell(k: SymVal; keyTy: IRType): Option[Z3BitVec[64]] =
   ## RFC-0005 S8at. The 64-bit cell of a float `Table` key: the IEEE bit
@@ -7130,11 +7280,15 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
                                      arm.fieldNames[j])
         armFields[arm.tagOrdinal] = fields
         armNames[arm.tagOrdinal]  = arm.fieldNames
-      return SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: t.vDiscName,
-                    vObjectName: t.vObjectName,
-                    vArmFields: armFields, vArmFieldNames: armNames,
-                    vPlainFields: plainFields,
-                    vPlainFieldNames: t.vPlainFieldNames)
+      var sv = SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: t.vDiscName,
+                      vObjectName: t.vObjectName,
+                      vArmFields: armFields, vArmFieldNames: armNames,
+                      vPlainFields: plainFields,
+                      vPlainFieldNames: t.vPlainFieldNames)
+      let gate = unionImageGate(t)   # RFC-0016 PRC-07 slice B: all zero
+      if gate.isSome: sv.vImage = zeroImage(gate.get)
+      if activeMemberTracked(t): sv.vActive = activeOf(discBoxed[])
+      return sv
     raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (a variant or multi-variant whose zero discriminator is not a legal tag has no default) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal (N46, S8n)]
       "A5 zero-init: variant " & $t & " has no legal zero value")
   of itDistinct:
@@ -9566,6 +9720,8 @@ proc svAsts(sv: SymVal; acc: var seq[RawZ3Ast]) =
     for fs in sv.vArmFields.values:
       for f in fs: svAsts(f, acc)
     for f in sv.vPlainFields: svAsts(f, acc)
+    for c in sv.vImage: acc.add c.raw             # RFC-0016 PRC-07 slice B
+    if sv.vActive != nil: svAsts(sv.vActive[], acc)
   of svMultiVariant:
     for ax in sv.mvAxes:
       svAsts(ax.disc[], acc)
@@ -21453,10 +21609,20 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
       arms[tag] = js
     var dr = new SymVal
     dr[] = d.get
+    # RFC-0016 PRC-07 slice B: the images merge cell by cell (one is missing:
+    # none), the active members as discriminators do.
+    var img: seq[Z3BitVec[64]]
+    if t.vImage.len > 0 and t.vImage.len == e.vImage.len:
+      for i in 0 ..< t.vImage.len: img.add ite(sel, t.vImage[i], e.vImage[i])
+    var act: ref SymVal
+    if t.vActive != nil and e.vActive != nil:
+      let ja = joinSV(sel, t.vActive[], e.vActive[])
+      if ja.isSome: act = activeOf(ja.get)
     some(SymVal(kind: svVariant, vDisc: dr, vDiscName: t.vDiscName,
                 vObjectName: t.vObjectName, vArmFields: arms,
                 vArmFieldNames: t.vArmFieldNames, vPlainFields: plain,
-                vPlainFieldNames: t.vPlainFieldNames))
+                vPlainFieldNames: t.vPlainFieldNames,
+                vImage: img, vActive: act))
   of svUninterpRef:
     # RFC-0005 S8ac. An opaque ref (an exception object) is its constant.
     if t.sortName != e.sortName or t.typeTag != e.typeTag:
@@ -23319,7 +23485,8 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
                          vArmFields: o.arms,
                          vArmFieldNames: oldSV.vArmFieldNames,
                          vPlainFields: oldSV.vPlainFields,       # shared:
-                         vPlainFieldNames: oldSV.vPlainFieldNames) # preserved.
+                         vPlainFieldNames: oldSV.vPlainFieldNames, # preserved.
+                         vActive: oldSV.vActive)   # RFC-0016 PRC-07 B: no image
       child.env[stmt.vrObjName] = newSV
       out2.add child
   return out2
@@ -23451,7 +23618,8 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
                                vArmFields: o.arms,
                                vArmFieldNames: oldSV.vArmFieldNames,
                                vPlainFields: oldSV.vPlainFields,
-                               vPlainFieldNames: oldSV.vPlainFieldNames)
+                               vPlainFieldNames: oldSV.vPlainFieldNames,
+                               vActive: oldSV.vActive)   # RFC-0016 PRC-07 B
             child.env[stmt.vrsObjName] = newSV
             out2.add child
       of svMultiVariant:
@@ -23718,12 +23886,17 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
           armFields[arm.tagOrdinal] = fields
         let discBoxed = new(SymVal)
         discBoxed[] = discConst(vcsTy.vDiscTy, int64(tag))
-        let newSV = SymVal(kind: svVariant, vDisc: discBoxed,
+        var newSV = SymVal(kind: svVariant, vDisc: discBoxed,
                            vDiscName: vcsTy.vDiscName,
                            vObjectName: vcsTy.vObjectName,
                            vArmFields: armFields, vArmFieldNames: armNames,
                            vPlainFields: plainFields,
                            vPlainFieldNames: vcsTy.vPlainFieldNames)
+        # RFC-0016 PRC-07 slice B: every arm field is its zero, so the
+        # union's bytes are the zero of the initialisation.
+        let gate = unionImageGate(vcsTy)
+        if gate.isSome: newSV.vImage = zeroImage(gate.get)
+        if activeMemberTracked(vcsTy): newSV.vActive = activeOf(discBoxed[])
         var newEnv = cp.env
         newEnv[stmt.vcsResultVar] = newSV
         out2.add forkPath(cp, cp.pc & @[vcsDiscEq(int64(tag))], newEnv)
@@ -23768,6 +23941,10 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
       disc            = recv.vDisc[]
       armFieldsTbl    = recv.vArmFields
       armFieldNamesTbl = recv.vArmFieldNames
+      # RFC-0016 PRC-07 slice B (cpp, `--fieldChecks:off`): the arm an access
+      # is defined through is the union's active member, the arm last
+      # written, not the discriminator's.
+      if recv.vActive != nil: disc = recv.vActive[]
     of svMultiVariant:
       var found = false
       for ax in recv.mvAxes:
@@ -23848,36 +24025,57 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     # side channel for try/except routing + target-witness search, not a
     # fork-every-arm construct).
     var declinedSide: seq[Path]
-    var exactArms: seq[(int, SymVal)]
+    var exactCond: Option[Z3Bool]   # the out-of-arm side the bytes answer
+    var exactVal: SymVal
+    var cppWrite = false
     if fieldsUnchecked():
-      # RFC-0016 PRC-07: no `FieldDefect`; the side is a union read.
-      var denv = p.env
-      var scratch: seq[Z3Bool]
-      denv[stmt.vfRetName] = allocateSym(stmt.vfFieldTy,
-        freshDegradeName("__declinedFieldRead"), scratch)
-      # RFC-0016 PRC-07 slice A. On the c backend a wrong-branch access
-      # whose bytes the active arm's integer fields cover is exact: the
-      # arms whose bytes do are `exactArms`, the rest is declined as before.
-      if buildSemantics.backend == beC and recv.kind == svVariant and
-         stmt.vfVariantTy != nil:
-        let lay = vl.variantLayout(stmt.vfVariantTy)
-        let tp = vl.accessPlace(lay, stmt.vfMatchingTags, stmt.vfFieldName)
-        if tp.isSome:
-          for tag, slots in recv.vArmFields:
-            if tag < 0 or tag in stmt.vfMatchingTags or
-               not lay.arms.hasKey(tag) or slots.len != lay.arms[tag].len:
-              continue
-            let ps = if stmt.vfWrite: vl.writePieces(lay, tag, tp.get)
-                     else: vl.readPieces(lay, tag, tp.get)
-            if ps.isNone: continue
-            let v = armBytesRead(slots, lay.arms[tag], ps.get, stmt.vfFieldTy)
-            if v.isNone: continue
-            exactArms.add (tag, v.get)
-      var declinedCond = outOfArmCond
-      for (tag, _) in exactArms:
-        declinedCond = declinedCond and not variantDiscEq(disc, int64(tag))
-      declinedSide = inactiveFieldSide(p, declinedCond, denv, stmt.vfLoc, w,
-                                       stmt.vfWrite)
+      # RFC-0016 PRC-07: no `FieldDefect`; the side is a union access.
+      if recv.kind == svVariant and recv.vActive != nil and stmt.vfWrite:
+        # slice B, cpp: a write to any member is defined and makes it the
+        # active one (`lowerVariantFieldSet` records it): no side to halt
+        # or decline, and no constraint on the path.
+        cppWrite = true
+      else:
+        var denv = p.env
+        var scratch: seq[Z3Bool]
+        denv[stmt.vfRetName] = allocateSym(stmt.vfFieldTy,
+          freshDegradeName("__declinedFieldRead"), scratch)
+        var declinedCond = outOfArmCond
+        var declineAny = true
+        # slice B, c: the out-of-arm side is the union's bytes. A read is
+        # the field's bytes of the image (every arm alike); a write is
+        # exact in the arms it leaves with a value in every field, the
+        # rest is declined (`fieldChecksOffLayout`, path-local).
+        if recv.kind == svVariant and recv.vImage.len > 0 and
+           stmt.vfVariantTy != nil:
+          let lay = vl.variantLayout(stmt.vfVariantTy)
+          let tp = vl.accessPlace(lay, stmt.vfMatchingTags, stmt.vfFieldName)
+          if lay.ok and tp.isSome:
+            if stmt.vfWrite:
+              var ok: Z3Bool
+              var seeded = false
+              for tag in recv.vArmFields.keys:
+                if tag < 0 or tag in stmt.vfMatchingTags or
+                   not writeExactArm(lay, tag, tp.get):
+                  continue
+                let c = variantDiscEq(disc, int64(tag))
+                ok = (if seeded: ok or c else: c)
+                seeded = true
+              if seeded:
+                exactCond = some(ok)
+                exactVal = denv[stmt.vfRetName]   # the pre-write read is unused
+                declinedCond = declinedCond and not ok
+            else:
+              let v = bitsPlace(imgRead(recv.vImage, tp.get.off - lay.unionOff,
+                                        tp.get.size),
+                                tp.get, none((vl.Place, SymVal)))
+              if v.isSome:
+                exactCond = some(outOfArmCond)
+                exactVal = v.get
+                declineAny = false
+        if declineAny:
+          declinedSide = inactiveFieldSide(p, declinedCond, denv, stmt.vfLoc, w,
+                                           stmt.vfWrite)
     else:
       maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
     if w.shouldStop: return
@@ -23892,19 +24090,14 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     let pM = drainPendingLowerEffects(p)
     var newEnv = pM.env
     newEnv[stmt.vfRetName] = bound
-    survivors.add forkPath(pM, pM.pc & @[inArmCond], newEnv)
-    if exactArms.len > 0:
-      # the active arm's bytes: the value is the ite over the exact arms
-      var exactCond = variantDiscEq(disc, int64(exactArms[0][0]))
-      var bytesVal = exactArms[^1][1]
-      for k in 1 ..< exactArms.len:
-        exactCond = exactCond or variantDiscEq(disc, int64(exactArms[k][0]))
-      for k in countdown(exactArms.len - 2, 0):
-        bytesVal = iteSV(variantDiscEq(disc, int64(exactArms[k][0])),
-                         exactArms[k][1], bytesVal)
+    if cppWrite:
+      survivors.add forkPath(pM, pM.pc, newEnv)
+    else:
+      survivors.add forkPath(pM, pM.pc & @[inArmCond], newEnv)
+    if exactCond.isSome:
       var envX = pM.env
-      envX[stmt.vfRetName] = bytesVal
-      survivors.add forkPath(pM, pM.pc & @[exactCond], envX)
+      envX[stmt.vfRetName] = exactVal
+      survivors.add forkPath(pM, pM.pc & @[exactCond.get], envX)
   survivors
 
 proc walkCallArm(stmt: IRStmt, paths: seq[Path],
@@ -28745,10 +28938,18 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
     plainFields.add lower(env, fe)
   let (armFields, armNames) = variantLitArms(env, ty.vArms, e.vlTagOrd,
                                              e.vlArmFields, ty.vObjectName)
-  SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
-         vObjectName: ty.vObjectName, vArmFields: armFields,
-         vArmFieldNames: armNames, vPlainFields: plainFields,
-         vPlainFieldNames: ty.vPlainFieldNames)
+  var sv = SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
+                  vObjectName: ty.vObjectName, vArmFields: armFields,
+                  vArmFieldNames: armNames, vPlainFields: plainFields,
+                  vPlainFieldNames: ty.vPlainFieldNames)
+  # RFC-0016 PRC-07 slice B: Nim zero-fills the object and sets the
+  # literal's fields: the union's bytes are the arm's fields over zero.
+  let gate = unionImageGate(ty)
+  if gate.isSome and armFields.hasKey(e.vlTagOrd):
+    sv.vImage = armImage(gate.get, e.vlTagOrd, armFields[e.vlTagOrd],
+                         zeroImage(gate.get)).get(@[])
+  if activeMemberTracked(ty): sv.vActive = activeOf(discBoxed[])
+  sv
 
 
 proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal =
@@ -28805,29 +29006,42 @@ proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
       if newVal.isNone: newVal = some(replaced(recv.vArmFields[tag][ix]))
       result.vArmFields[tag][ix] = newVal.get
     if newVal.isSome:
-      # RFC-0016 PRC-07 slice A. With `fieldChecks` off on the c backend a
-      # write outside the active arm is a write into the active arm's
-      # bytes: every other arm whose fields cover the written field's
-      # bytes takes the bit-insert while it is the active one.
-      if fieldsUnchecked() and buildSemantics.backend == beC and
-         e.vfsVariantTy != nil:
-        let lay = vl.variantLayout(e.vfsVariantTy)
-        let tp = vl.accessPlace(lay, e.vfsTags, e.vfsFieldName)
-        if tp.isSome:
-          for tag, slots in recv.vArmFields:
-            if tag < 0 or tag in e.vfsTags or not lay.arms.hasKey(tag) or
-               slots.len != lay.arms[tag].len:
-              continue
-            let ps = vl.writePieces(lay, tag, tp.get)
-            if ps.isNone: continue
-            let nw = armBytesWrite(slots, lay.arms[tag], ps.get, newVal.get,
-                                   tp.get.ty)
-            if nw.isNone: continue
-            let isActive = variantDiscEq(recv.vDisc[], int64(tag))
-            for pc in ps.get:
-              result.vArmFields[tag][pc.field] =
-                iteSV(isActive, nw.get[pc.field],
-                    normSlot(slots[pc.field], lay.arms[tag][pc.field].ty))
+      if e.vfsVariantTy != nil:
+        # RFC-0016 PRC-07 slice B (c): the write is into the union's bytes;
+        # every field of the active arm those bytes cover takes its value
+        # from the image (an arm the write leaves without a value in some
+        # field was declined upstream, `isVariantField`'s write side).
+        if result.vImage.len > 0:
+          let lay = vl.variantLayout(e.vfsVariantTy)
+          let tp = vl.accessPlace(lay, e.vfsTags, e.vfsFieldName)
+          let bits = if lay.ok and tp.isSome: placeBits(newVal.get, tp.get)
+                     else: none(Z3BitVec[64])
+          if bits.isNone:
+            result.vImage = @[]   # no image: a later out-of-arm read declines
+          else:
+            result.vImage = imgWrite(result.vImage, tp.get.off - lay.unionOff,
+                                     tp.get.size, bits.get)
+            for tag, slots in recv.vArmFields:
+              if tag < 0 or tag in e.vfsTags or not lay.arms.hasKey(tag) or
+                 slots.len != lay.arms[tag].len:
+                continue
+              let isActive = variantDiscEq(recv.vDisc[], int64(tag))
+              for j, f in lay.arms[tag]:
+                if not overlaps(f, tp.get): continue
+                let nv = bitsPlace(imgRead(result.vImage, f.off - lay.unionOff,
+                                           f.size),
+                                   f, some((tp.get, newVal.get)))
+                if nv.isNone: continue
+                result.vArmFields[tag][j] =
+                  iteSV(isActive, nv.get, normSlot(slots[j], f.ty))
+        # slice B (cpp): the member written is now the active one.
+        if result.vActive != nil and e.vfsTags.len > 0:
+          var act = discConst(e.vfsVariantTy.vDiscTy, int64(e.vfsTags[0]))
+          for k in 1 ..< e.vfsTags.len:
+            let t = int64(e.vfsTags[k])
+            act = iteSV(variantDiscEq(recv.vDisc[], t),
+                        discConst(e.vfsVariantTy.vDiscTy, t), act)
+          result.vActive = activeOf(act)
       return
   of svMultiVariant:
     result = recv

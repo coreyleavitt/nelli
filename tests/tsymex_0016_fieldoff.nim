@@ -237,14 +237,52 @@ proc sutPadRead(v: int32) =
   let o = Pd(k: kwa, x: v)
   if o.pb == 5: symexTarget("hit")
 
+# Slice B: the union is one byte image. Bytes no field of the active arm
+# covers are the zero of the object's initialisation (Nim zero-fills the
+# whole object before it sets the fields), a float is its IEEE bits and an
+# enum its raw C value.
+type
+  Pe = object            ## an enum arm field read from an int's byte
+    case k: Kw
+    of kwa: x: int8
+    of kwb: e: Kw
+    of kwc: discard
+
+proc sutPadZero(v: int32) =
+  # `pb` is bytes 8..12: no field of arm A owns them; zero-initialised
+  let o = Pd(k: kwa, x: v)
+  if o.pb == 0 and o.pa == 0x21'i8 and v == 0x4321: symexTarget("hit")
+
+proc sutFloatFromInt(v: int64) =
+  let o = Pf(k: kwb, i: v)
+  if o.f == 1.0: symexTarget("hit")
+
+proc sutEnumRead(v: int8) =
+  let o = Pe(k: kwa, x: v)
+  if o.e == kwb: symexTarget("hit")
+
+proc sutWrongWriteReadOwn(v: int) =
+  # c: `a` and `b` are the same bytes; cpp: `a` is no longer the active member
+  var x = V(k: ka, a: v)
+  x.b = 5
+  if x.a == 5 and v == 3: symexTarget("hit")
+
+proc sutWrongWriteReadSame(v: int) =
+  # cpp: the write made `b` the active member, so reading it is defined
+  var x = V(k: ka, a: v)
+  x.b = 5
+  if x.b == 5 and v == 3: symexTarget("hit")
+
 proc sutFloatRead(v: int64) =
   let o = Pf(k: kwa, f: 1.0)
   if o.i == v: symexTarget("hit")
 
-proc sutRangeWrite(v: int32) =
-  var o = Pr(k: kwa, x: v)
-  o.r = 3
-  if o.x == 3: symexTarget("hit")
+proc sutRangeOverwrite(v: int32) =
+  # the active arm's `r` is a range: bytes written through `x` need not be
+  # a value of it, so that arm's side declines
+  var o = Pr(k: kwb, r: 3)
+  o.x = v
+  if o.r == 3: symexTarget("hit")
 
 proc sutPartialRead(v: int16) =
   # arm A's 2 bytes against a 4-byte field of the other arm
@@ -264,7 +302,7 @@ proc sutBoolFromInt(v: int32) =
 proc sutIntFromBytes(v: uint8) =
   # `z` is bytes 4..8, the active arm's three fields cover 4..7 only
   let o = Wb(k: true, p: 1, u: v, v: 'A', w: true)
-  if o.z == 7: symexTarget("hit")
+  if o.z == 0x14142'i32: symexTarget("hit")
 
 proc sutUByteWrite(v: int32) =
   var o = Wb(k: false, p: 1, z: v)
@@ -374,15 +412,33 @@ suite "PRC-07: --fieldChecks:off":
     checkpoint show(r.errors)
     check r.undefined.len == 0
     check not r.errors.named(feCheckOption)
+    # cpp (slice B): the walker tracks the active member, so the write is
+    # exact; on c the bytes `a` and `b` share are the active arm's: exact.
+    check r.status == sxSat
+    check r.trusted
+    check not r.errors.named(feUnsupportedOp)
+    check symexFind(sutWrongWrite,
+                    tUndefined({UbKind(ubInactiveVariantField)})).status != sxSat
+
+  test "a read through the discriminator's branch after a wrong-branch write":
+    # C++: `x.b = 5` made `b` the active member; `x.a` is then an inactive
+    # member read, undefined where it happens. C: the same bytes.
+    let r = symexFind(sutWrongWriteReadOwn, tLabel("hit"))
+    checkpoint show(r.errors)
     when defined(cpp):
-      check not r.trusted
-      check r.errors.named(feUnsupportedOp)
-      check "fieldChecksOffLayout" in show(r.errors)
+      check r.status != sxSat
+      check symexFind(sutWrongWriteReadOwn,
+                      tUndefined({UbKind(ubInactiveVariantField)})).status == sxSat
     else:
       check r.status == sxSat
       check r.trusted
-    check symexFind(sutWrongWrite,
-                    tUndefined({UbKind(ubInactiveVariantField)})).status != sxSat
+      check r.witness[0] == 3
+
+  test "a read through the member the wrong-branch write made active":
+    let r = pinExact(sutWrongWriteReadSame, fk, domain = sampled([3, 0, 1]))
+    check r.status == sxSat
+    check r.trusted
+    check r.undefined.len == 0
 
   test "a ref variant read outside its branch":
     when defined(cpp):
@@ -491,20 +547,54 @@ when not defined(cpp):
       check r.trusted
       check int32(r.witness[0]) == 0x00070042
 
-    test "bytes the active arm does not own stay declined":
-      pinDecline(sutPadRead, bk, feUnsupportedOp, tLabel("hit"),
-                 "fieldChecksOffLayout", excluding = {feCheckOption})
+    test "a packed variant is declined whole by its type-pragma row, never exact-and-wrong":
+      # The layout is derived (pinned above), but the walker declines every
+      # `{.packed.}` type at its construction (`pragma:type/packed`: layout
+      # AND passing); lifting that row is not this slice's. Until then the
+      # wrong layout can never be claimed.
+      let r = symexFind(sutPackedRead, tLabel("hit"))
+      checkpoint show(r.errors)
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+      check "pragma:type/packed" in show(r.errors)
+      check not r.errors.named(feCheckOption)
 
-    test "a partly covered extent stays declined":
-      pinDecline(sutPartialRead, bk, feUnsupportedOp, tLabel("hit"),
-                 "fieldChecksOffLayout", excluding = {feCheckOption})
+    test "bytes no field of the active arm owns are the zero of initialisation":
+      let r = pinExact(sutPadRead, fk, domain = sampled([5'i32, 0, 1, -1]))
+      check r.status == sxUnsat
+      let r2 = pinExact(sutPadZero, fk, domain = sampled(
+        [0x4321'i32, 0x21'i32, 0, 1, -1]))
+      check r2.status == sxSat
+      check r2.trusted
+      check r2.witness[0] == 0x4321
 
-    test "a float arm is never reinterpreted":
-      pinDecline(sutFloatRead, bk, feUnsupportedOp, tLabel("hit"),
-                 "fieldChecksOffLayout", excluding = {feCheckOption})
+    test "a partly covered extent is the field's bytes and the zero tail":
+      # h: int16 at 4..6; w: int32 at 4..8, its high half the zero tail
+      let r = pinExact(sutPartialRead, fk, domain = sampled([7'i16, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check r.witness[0] == 7
 
-    test "a write of arbitrary bytes into a range stays declined":
-      pinDecline(sutRangeWrite, bk, feUnsupportedOp, tLabel("hit"),
+    test "a float arm is its IEEE bits, and int bytes read back as a float":
+      let r = pinExact(sutFloatRead, fk, domain = sampled(
+        [0x3FF0000000000000'i64, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check r.witness[0] == 0x3FF0000000000000'i64
+      let r2 = pinExact(sutFloatFromInt, fk, domain = sampled(
+        [0x3FF0000000000000'i64, 0, 1, -1]))
+      check r2.status == sxSat
+      check r2.trusted
+      check r2.witness[0] == 0x3FF0000000000000'i64
+
+    test "an enum arm field is its raw C value":
+      let r = pinExact(sutEnumRead, fk, domain = sampled([1'i8, 0, 2, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check r.witness[0] == 1
+
+    test "a range field overwritten with foreign bytes stays declined":
+      pinDecline(sutRangeOverwrite, bk, feUnsupportedOp, tLabel("hit"),
                  "fieldChecksOffLayout", excluding = {feCheckOption})
 
     test "a char is a byte of the active arm's int":
@@ -524,6 +614,10 @@ when not defined(cpp):
       pinDecline(sutBoolFromInt, bk, feUnsupportedOp, tLabel("hit"),
                  "fieldChecksOffLayout", excluding = {feCheckOption})
 
-    test "an int read past the bytes of the active arm's fields stays declined":
-      pinDecline(sutIntFromBytes, bk, feUnsupportedOp, tLabel("hit"),
-                 "fieldChecksOffLayout", excluding = {feCheckOption})
+    test "an int read past the active arm's fields takes the zero tail byte":
+      # z is bytes 4..8: u, 'A', true, and the zero byte 7
+      let r = pinExact(sutIntFromBytes, fk, domain = sampled(
+        [0x42'u8, 0, 1, 255'u8]))
+      check r.status == sxSat
+      check r.trusted
+      check r.witness[0] == 0x42

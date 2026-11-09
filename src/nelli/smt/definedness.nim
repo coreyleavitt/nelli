@@ -270,11 +270,14 @@ func defRows(): seq[DefKey] =
       "RFC-0016 PRC-07 (`fieldChecksOffLayout`): with `fieldChecks: off` on " &
       "the c backend the same access is defined, as the overlapping bytes of " &
       "the active branch (C11 6.5.2.3 note 95), and on cpp a write is " &
-      "defined (the member becomes active). Where the active arm's " &
-      "int/char/bool fields cover the bytes (`variant_layout.nim`) the " &
-      "side is exact; otherwise (uncovered bytes, padding, a float, a " &
-      "range or enum written, a `ref` variant, cpp) the wrong-branch side " &
-      "is declined path-locally"))
+      "defined (the member becomes active). Slice B: a value variant " &
+      "carries the union's bytes as one image over `variant_layout.nim` " &
+      "(c) or its active member (cpp), so the side is exact; what is " &
+      "declined path-locally is a bool or `range` field overwritten with " &
+      "bytes that are not its values, an arm holding a string/seq/ref/" &
+      "object/set (unsized), another layout pragma, a multi-axis or " &
+      "inheritance variant, a `ref` variant, and a read after a " &
+      "branch-changing discriminator write"))
 
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())
 

@@ -4147,8 +4147,10 @@ proc opaqueWriteSummary(calleeSym: NimNode): OpaqueEffects =
 proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode  ## RFC-0005 S8ax fwd decl
 proc addrActualLvalue(a: NimNode): NimNode  ## RFC-0005 S8ax fwd decl
 proc addrCellLocal(e: NimNode): NimNode  ## RFC-0005 S8bs fwd decl
-proc ptrFormalStaysLocal(callee: NimNode; idx: int;
-                         seen: var seq[string]): bool  ## RFC-0005 S8ax fwd decl
+proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
+                          seen: var seq[string]): bool  ## RFC-0005 S8ax fwd decl
+proc viewFormalStaysLocal(callee: NimNode; idx: int;
+                          seen: var seq[string]): bool  ## RFC-0016 K6c fwd decl
 
 proc opaqueArgEffects(n, calleeSym: NimNode; acc: var OpaqueEffects) =
   ## RFC-0005 S8ax. The writes an opaque call `n` may make through its
@@ -6803,51 +6805,121 @@ proc dropVarIndirection(n, f: NimNode): NimNode =
   result = copyNimNode(n)
   for c in n: result.add dropVarIndirection(c, f)
 
-proc ptrUsesStayLocal(n, f: NimNode; seen: var seq[string]): bool =
-  ## RFC-0005 S8an. True when every use of the pointer `f` in `n` is one
-  ## that cannot let it outlive the call: a dereference `f[]` (read, write,
-  ## or passed on as a `var` actual) that is not itself under `addr`, a
-  ## comparison (`==`, `!=`, `isNil`), or an argument to a `ptr` formal of a
-  ## user routine that itself keeps its pointer local. Anything else (a
-  ## store, a return, a capture, an argument to anything else) may escape.
+proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
+  ## RFC-0005 S8an, RFC-0016 K6c (W-10). True when every use of the pointer
+  ## `f` in `n` is one that cannot let it outlive the call: a dereference
+  ## `f[]` (read, write) that is not under `addr`, a comparison (`==`, `!=`,
+  ## `isNil`), an argument to a `ptr` formal of a user routine that itself
+  ## keeps its pointer local, or `f[]` handed to a `var` formal (the pointee's
+  ## address) of a routine that keeps that address local.
+  ##
+  ## This is an ESCAPE question, not `mayWrite`'s (a store of the pointer to a
+  ## variable by name is an escape and writes nothing `mayWrite` reads as a
+  ## write through `f`), so it is not built over `mayWrite`. It shares
+  ## D-05's foreign-write facts (`foreignWriteNode`, `opaqueRoutine`) with it.
+  ## It is FAIL-CLOSED: the `case` has no `else`, and a use it cannot show
+  ## local escapes -- an address taken of anything built from `f` (`addr
+  ## f[].a`, `addr f[]`), an address passed to a callee the walk cannot read
+  ## (an opaque routine, a non-magic stdlib one) or returned by one that
+  ## reads the walked body (`proc g(x: var int): ptr int = addr x`), and `f`
+  ## inside inline assembly, a `cast` or an `emit`.
   case n.kind
   of nnkSym:
     return not containsSym(@[f], n)
   of nnkDerefExpr, nnkHiddenDeref:
     if n.len == 1 and isSymOf(n[0], f): return true
-  of nnkAddr:
-    if n.len == 1 and n[0].kind in {nnkDerefExpr, nnkHiddenDeref} and
-       n[0].len == 1 and isSymOf(n[0][0], f):
-      return false
+    for c in n:
+      if not ptrUsesStayLocal(c, f, seen): return false
+    return true
+  of nnkAddr, nnkHiddenAddr:
+    # A call's `var` actuals are read in the call arm below; any other
+    # address of something built from `f` is a pointer that can outlive it.
+    return not mentionsSym(n, f)
+  of nnkAsmStmt, nnkCast:
+    return not mentionsSym(n, f)   # `foreignWriteNode`
+  of nnkPragma:
+    if foreignWriteNode(n): return not mentionsSym(n, f)
+    for c in n:
+      if not ptrUsesStayLocal(c, f, seen): return false
+    return true
   of RoutineNodes:
     return not mentionsSym(n, f)
-  of nnkInfix, nnkCall, nnkCommand, nnkPrefix, nnkHiddenCallConv:
+  of nnkInfix, nnkCall, nnkCommand, nnkPrefix, nnkPostfix, nnkHiddenCallConv,
+     nnkCallStrLit, nnkDotCall:
     if n.len > 0 and n[0].kind == nnkSym:
       let head = n[0]
+      let user = isUserCallee(head)
       let builtinCmp = macros.strVal(head) in ["==", "!=", "isNil"] and
-                       not isUserCallee(head)
-      let userCall = isUserCallee(head)
-      if builtinCmp or userCall:
-        for j in 1 ..< n.len:
-          if isSymOf(n[j], f):
-            if builtinCmp: continue
-            if not ptrFormalStaysLocal(head, j - 1, seen): return false
-          elif userCall and n[j].kind == nnkHiddenAddr and n[j].len == 1 and
-               isSymOf(n[j][0], f):
-            # RFC-0005 S8au: the pointer variable itself passed to a `var
-            # ptr` formal. It stays local when that formal only ever
-            # dereferences it (never rebinds or stores it).
-            if not ptrFormalStaysLocal(head, j - 1, seen): return false
-          elif not ptrUsesStayLocal(n[j], f, seen):
+                       not user
+      let opaque = opaqueRoutine(head)
+      let magic = routineMagic(head)
+      for j in 1 ..< n.len:
+        let a = n[j]
+        if isSymOf(a, f):
+          if builtinCmp: continue
+          if opaque or not user or not ptrFormalStaysLocal(head, j - 1, seen):
             return false
-        return true
-  else: discard
-  for c in n:
-    if not ptrUsesStayLocal(c, f, seen): return false
-  true
+        elif a.kind == nnkHiddenAddr and a.len == 1 and isSymOf(a[0], f):
+          # RFC-0005 S8au: the pointer variable itself passed to a `var
+          # ptr` formal. It stays local when that formal only ever
+          # dereferences it (never rebinds or stores it).
+          if opaque or not user or not ptrFormalStaysLocal(head, j - 1, seen):
+            return false
+        elif a.kind == nnkHiddenAddr and mentionsSym(a, f):
+          # The pointee (or a part of it) as a `var` actual: its address
+          # goes to the callee. Local only when the callee keeps it so; a
+          # compiler magic does not retain or return it.
+          if opaque: return false
+          if user:
+            if not viewFormalStaysLocal(head, j - 1, seen): return false
+          elif magic.len == 0 or "Addr" in magic: return false
+          else:
+            for c in a:
+              if not ptrUsesStayLocal(c, f, seen): return false
+        elif not ptrUsesStayLocal(a, f, seen):
+          return false
+      return true
+    for c in n:
+      if not ptrUsesStayLocal(c, f, seen): return false
+    return true
+  of nnkNone, nnkEmpty, nnkIdent, nnkType, nnkCharLit, nnkIntLit, nnkInt8Lit,
+     nnkInt16Lit, nnkInt32Lit, nnkInt64Lit, nnkUIntLit, nnkUInt8Lit,
+     nnkUInt16Lit, nnkUInt32Lit, nnkUInt64Lit, nnkFloatLit, nnkFloat32Lit,
+     nnkFloat64Lit, nnkFloat128Lit, nnkStrLit, nnkRStrLit, nnkTripleStrLit,
+     nnkNilLit, nnkComesFrom, nnkAccQuoted, nnkBind, nnkClosedSymChoice,
+     nnkOpenSymChoice, nnkOpenSym, nnkGenericParams, nnkFormalParams,
+     nnkOfInherit, nnkImportAs, nnkTypeSection, nnkTypeDef, nnkImportStmt,
+     nnkImportExceptStmt, nnkExportStmt, nnkExportExceptStmt, nnkFromStmt,
+     nnkIncludeStmt, nnkBindStmt, nnkMixinStmt, nnkUsingStmt, nnkCommentStmt,
+     nnkStmtListType, nnkBlockType, nnkWith, nnkWithout, nnkObjectTy,
+     nnkTupleTy, nnkTupleClassTy, nnkTypeClassTy, nnkStaticTy, nnkRecList,
+     nnkRecCase, nnkRecWhen, nnkRefTy, nnkPtrTy, nnkVarTy, nnkConstTy,
+     nnkOutTy, nnkDistinctTy, nnkProcTy, nnkIteratorTy, nnkEnumTy,
+     nnkEnumFieldDef, nnkError, nnkModuleRef, nnkReplayAction, nnkNilRodNode:
+    # A leaf, a type, or a declaration a typed body does not hold: a pointer
+    # named in one is not shown local.
+    return not mentionsSym(n, f)
+  of nnkExprEqExpr, nnkExprColonExpr, nnkIdentDefs, nnkVarTuple, nnkPar,
+     nnkObjConstr, nnkCurly, nnkCurlyExpr, nnkBracket, nnkBracketExpr,
+     nnkPragmaExpr, nnkRange, nnkDotExpr, nnkCheckedFieldExpr, nnkIfExpr,
+     nnkElifExpr, nnkElseExpr, nnkTableConstr, nnkHiddenStdConv,
+     nnkHiddenSubConv, nnkConv, nnkStaticExpr, nnkObjDownConv, nnkObjUpConv,
+     nnkChckRangeF, nnkChckRange64, nnkChckRange, nnkStringToCString,
+     nnkCStringToString, nnkAsgn, nnkFastAsgn, nnkSinkAsgn, nnkOfBranch,
+     nnkElifBranch, nnkExceptBranch, nnkElse, nnkPragmaBlock, nnkIfStmt,
+     nnkWhenStmt, nnkForStmt, nnkParForStmt, nnkWhileStmt, nnkCaseStmt,
+     nnkVarSection, nnkLetSection, nnkConstSection, nnkConstDef, nnkYieldStmt,
+     nnkDefer, nnkTryStmt, nnkFinally, nnkRaiseStmt, nnkReturnStmt,
+     nnkBreakStmt, nnkContinueStmt, nnkBlockStmt, nnkStaticStmt,
+     nnkDiscardStmt, nnkStmtList, nnkStmtListExpr, nnkBlockExpr,
+     nnkTypeOfExpr, nnkArgList, nnkPattern, nnkHiddenTryStmt, nnkClosure,
+     nnkGotoState, nnkState, nnkBreakState, nnkTupleConstr:
+    for c in n:
+      if not ptrUsesStayLocal(c, f, seen): return false
+    return true
 
-proc ptrFormalStaysLocal(callee: NimNode; idx: int;
-                         seen: var seq[string]): bool =
+proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
+                          seen: var seq[string]): bool =
   ## RFC-0005 S8an. True when user routine `callee`'s `idx`-th formal is a
   ## `ptr` whose every use stays local (`ptrUsesStayLocal`). A routine
   ## already being checked is assumed to (the check is a greatest fixed
@@ -6890,6 +6962,36 @@ proc ptrFormalStaysLocal(callee: NimNode; idx: int;
     # (a rebind `p = q`, a store, a return) does not. A `var ptr` formal
     # that only dereferences is a `ptr` formal; the `var` is never used.
     return ptrUsesStayLocal(dropVarIndirection(body(impl), fsym), fsym, seen)
+  ptrUsesStayLocal(body(impl), fsym, seen)
+
+proc viewFormalStaysLocal(callee: NimNode; idx: int;
+                          seen: var seq[string]): bool =
+  ## RFC-0016 K6c. True when user routine `callee`'s `idx`-th formal is a `var`
+  ## whose every use keeps the address of its argument local
+  ## (`ptrUsesStayLocal` on the formal, whose body spelling `x` is the typed
+  ## AST's `nnkHiddenDeref(x)`): a callee that returns or stores `addr x`
+  ## hands the caller's pointee address on. False for anything else.
+  if callee.kind != nnkSym: return false
+  let key = macros.strVal(callee) & "@" & callee.lineInfo & "#v" & $idx
+  if key in seen: return true
+  seen.add key
+  let impl = resolveRoutineImpl(callee)
+  if impl == nil or impl.len < 7: return false
+  let formal = impl[3]
+  if formal.kind != nnkFormalParams: return false
+  var k = 0
+  var fsym: NimNode = nil
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    if id.kind != nnkIdentDefs: return false
+    for j in 0 ..< id.len - 2:
+      if k == idx:
+        if id[^2].kind != nnkVarTy: return false
+        fsym = id[j]
+      inc k
+  if fsym == nil or fsym.kind != nnkSym: return false
+  fsym = formalInBody(impl, fsym)
+  if fsym == nil: return false
   ptrUsesStayLocal(body(impl), fsym, seen)
 
 proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;

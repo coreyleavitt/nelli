@@ -13,8 +13,9 @@
 ##    about aliasing, not writing, over the IR: its `else: discard` is now an
 ##    exhaustive `case`, so a statement kind added later must decide.
 ##  * `ptrUsesStayLocal` (a pointer does not outlive the call) is an escape
-##    question; a store to a variable by name is not `mayWrite`'s. It is left as
-##    it was.
+##    question; a store to a variable by name is not `mayWrite`'s. It stays an
+##    escape predicate (sharing `foreignWriteNode`/`opaqueRoutine`) and is now
+##    fail-closed: an exhaustive `case`; its own verdict is pinned below.
 ##
 ## No SUT was found for which any of the three, as it stood, gave a false
 ## trusted verdict: each shape a probe built to slip past (an `addr` of a
@@ -26,6 +27,8 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/dsl_parser
+import std/macros
 
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs:
@@ -255,6 +258,42 @@ proc sWhole(v: int) =
   gq[] = v
   if x == v and v != 1: symexTarget("pw_live")
   if x == 1 and v != 1: symexTarget("pw_dead")
+
+# The predicate's own verdict, asked of a callee's `ptr` formal. The two
+# misjudged shapes decline in `symexFind` for another, earlier reason
+# (`feUnsupportedExprKind` on `nnkAddr`), so the reason string cannot show the
+# predicate: this is the focused test (the internal-test style of
+# `tsymex_0016_k4a_table`, which imports `dsl_parser`).
+macro formalStaysLocal(fn: typed; idx: static int): untyped =
+  var seen: seq[string]
+  newLit(ptrFormalStaysLocal(fn, idx, seen))
+
+proc extSink(p: ptr int) {.importc: "extSink_k6c", cdecl.}
+proc bumpV(x: var int) = x += 1
+proc viaOpaque(p: ptr int) = extSink(p)
+proc viaBump(p: ptr int) = bumpV(p[])
+proc viaInc(p: ptr int) = inc p[]
+proc cmpOnly(p: ptr int): bool = p != nil and p[] > 0
+proc retAddr(p: ptr Pr): ptr int = addr p[].b
+proc retWhole(p: ptr int): ptr int = p
+
+suite "K6c: ptrUsesStayLocal (the predicate itself)":
+  test "an address through a dereference escapes, independent of the expr gate":
+    check not formalStaysLocal(keepFld, 0)
+    check not formalStaysLocal(retAddr, 0)
+  test "a pointee passed `var` to a callee returning its address escapes":
+    check not formalStaysLocal(keepViaVar, 0)
+  test "the pointer stored or returned escapes":
+    check not formalStaysLocal(keepWhole, 0)
+    check not formalStaysLocal(retWhole, 0)
+  test "the pointer flowing into an opaque routine escapes":
+    check not formalStaysLocal(viaOpaque, 0)
+  test "local uses stay local (precision)":
+    check formalStaysLocal(setTwo, 0)
+    check formalStaysLocal(setTwo, 1)
+    check formalStaysLocal(viaBump, 0)
+    check formalStaysLocal(viaInc, 0)
+    check formalStaysLocal(cmpOnly, 0)
 
 suite "K6c: ptrUsesStayLocal":
   test "native: an escaped pointer writes the variable later":

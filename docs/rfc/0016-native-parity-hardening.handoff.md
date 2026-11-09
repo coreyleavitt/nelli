@@ -399,9 +399,17 @@
   stdlib-argument rule takes `argHoldsCell`, the union of the two scans it
   replaces, and exempts a lifetime hook, which `readHooks` walks as its own).
   `bindsViewWhole`'s `else: discard` is an exhaustive `case` over
-  `IRStmtKind` (a new kind must decide). `ptrUsesStayLocal` is unchanged: it
-  asks whether a pointer escapes, which is not `mayWrite`'s question (a store
-  to a global by name is not one). No SUT gave any of the three a false
+  `IRStmtKind` (a new kind must decide). `ptrUsesStayLocal` is an escape
+  predicate sharing D-05's foreign-write facts (`foreignWriteNode`,
+  `opaqueRoutine`) rather than built over `mayWrite`: a store of the pointer
+  to a global by name is an escape and not a `mayWrite` question. It is
+  fail-closed: an exhaustive `case` with no `else`, so an address taken
+  through a deref (`addr p[].a`), returned by a callee (`addr x` of a `var`
+  formal, `viewFormalStaysLocal`), passed to an opaque or non-magic callee, or
+  a pointer inside asm/`cast`/`emit` escapes by the predicate itself, no
+  longer masked by the `nnkAddr` gate. Focused test of the predicate:
+  `formalStaysLocal` in `tests/tsymex_0016_k6c_round.nim` (internal style of
+  `tsymex_0016_k4a_table`). No SUT gave any of the three a false
   trusted verdict: `addr p[].f` and a `var` actual returning its address are
   declined earlier (`feUnsupportedExprKind` on `nnkAddr`), a `var c = t`, a
   `lent` loop and a `lent`-returning call are declined, a tuple built from the

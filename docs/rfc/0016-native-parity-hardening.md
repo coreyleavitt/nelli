@@ -1369,7 +1369,7 @@ legs exist; INT-25 and PND-03 wait on the macOS one.
 | K3 | the type-class, type × memory-op and pragma axes (the pragma lists are hand-written: Nim has no enum of pragmas, so the guard is checked against Nim's `pragmas.nim` text) | W-02, W-12, W-20, W-43, B-04 |
 | K4 | the magic axis with a lib-wide guard; a bodied magic not admitted as walked-by-body declines; the stdlib-body axis seeded from a `feStdlibBodyWalked` hint; every raise-text decline gets a `SymexErrorKind` | W-05, W-06, W-22, W-24, C-11, C-16 |
 | K5 | `BuildProfile` (§8.3) | W-03, W-14, W-17, W-23, W-50, W-51, W-52, W-53, INT-31 |
-| K6 | `mayWrite(n)` over the read-only axis; a walked user callee recurses with a cycle bound, an opaque one may write anything; pinned on a write-shape corpus with native runs | W-08..W-10 |
+| K6 | `mayWrite(n)` over the read-only axis; a walked user callee recurses with a cycle bound, an opaque one may write anything; pinned on a write-shape corpus with native runs. `ptrUsesStayLocal` (K6c) is an escape predicate sharing D-05's foreign-write facts (`foreignWriteNode`, `opaqueRoutine`) rather than built over `mayWrite`: a store of the pointer to a global by name is an escape, not a write through it. It is fail-closed (exhaustive case, no `else`) | W-08..W-10 |
 | K7 | degrade discipline by type, and every cap a typed halt (below) | W-07, W-11, W-16, D-13 |
 | K8 | differential fuzzer (slice D1, §4, §10), its families generated from the axes, plus metamorphic relations (§10) | the next W-01, before a consumer finds it |
 | K9 | one shared native-pin helper (below) | W-54, W-55, W-56, W-57, W-61 |

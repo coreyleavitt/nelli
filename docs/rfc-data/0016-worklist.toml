@@ -747,12 +747,13 @@ cells = []
 [[row]]
 id = "PRC-40"
 table = "5.2m"
-state = "open"
-note = "renumbered from PRC-37 (duplicate id), K1a-ids"
+state = "closed"
+note = "K2b (`rfc-0016-k2b`, walker 291, 2026-11-08); renumbered from PRC-37 (duplicate id), K1a-ids"
 home = "W1-e"
 source = "W1-e's designed decline; three-way row in the handoff (2026-11-07, W1-z)"
 moves = "an exact float width model: `float32(x)` rounds to binary32 (Z3 `fp.to_fp` at 8/24, round-nearest-even) and widening back is exact, so `float64(float32(x)) == x` gets a model rather than `feFloatWidth`; native pins at 0.5 (hit) and 0.1 (no hit) on every build row"
 cells = []
+pins = ["tsymex_0016_w1e_floatwidth"]
 
 [[row]]
 id = "PRC-38"

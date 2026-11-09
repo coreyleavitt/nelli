@@ -5285,8 +5285,8 @@ proc widenedFloatOperand(a, peer: NimNode): NimNode =
   ## operator whose peer is a `float64` through a hidden conversion. The
   ## widening is exact (every float32 is a float64) and `reconcileFloat`
   ## (`runtime.nim`) performs it for comparisons and arithmetic, so the
-  ## operand is parsed at its own width and that conversion is the one
-  ## width change that does not decline `feFloatWidth`.
+  ## operand is parsed at its own width, which saves the `toFloat64`
+  ## wrapper (`convertFloatWidth`) the same widening would get.
   if a.kind == nnkHiddenStdConv and a.len == 2 and
      a.typeKind != ntyNone and peer.typeKind != ntyNone and
      a.getTypeInst.typeKind in {ntyFloat, ntyFloat64} and
@@ -5753,23 +5753,17 @@ proc fltWidthOfKind(k: NimTypeKind): int =
   of ntyFloat, ntyFloat64: 64
   else: 0
 
-proc declineFloatWidth(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
-                       src, tgt: string): IRExpr =
-  ## RFC-0016 W1-e (W-04). A `float32` <-> `float64` conversion, explicit or
-  ## compiler-inserted, was the transparent pass-through: the operand flowed
-  ## on at its own width in a slot of the other (and `float64(float32(0.1))
-  ## == 0.1` came back true; natively it is false). Exact rounding is not
-  ## modelled, so the conversion declines with a typed-zero dummy of the
-  ## target type, as `declineIntWidthConv`.
-  preamble.add ctx.declineAtSite(
-    feFloatWidth,
-    siteMsg(n, "W1-e: float width conversion `" & src & "` -> `" & tgt &
-               "` is not modelled (see docs/symex/README.md, Float widths)"),
-    "W1-e: float width conversion " & src & "->" & tgt & " (feFloatWidth)")
-  let dummy =
-    if n.typeKind != ntyNone: zeroValueForType(classifyType(n).ty)
-    else: nil
-  (if dummy != nil: dummy else: mkIntLit(0))
+proc convertFloatWidth(n, operand: NimNode, preamble: var seq[IRStmt],
+                       ctx: ParseCtx): IRExpr =
+  ## RFC-0016 K2b (W-04, PRC-40). A `float32` <-> `float64` conversion,
+  ## explicit or compiler-inserted, lowers to `fp.to_fp` at the target width
+  ## in round-nearest-even (`toFloat32` / `toFloat64`, an `iekMathCall`):
+  ## narrowing rounds, widening is exact. W1-e declined it (`feFloatWidth`)
+  ## after the pass-through had let a value of one width flow on as the
+  ## other.
+  let op = if fltWidthOfKind(n.getTypeInst.typeKind) == 32: "toFloat32"
+           else: "toFloat64"
+  mkMathCall(op, @[parseExpr(operand, preamble, ctx)])
 
 proc isFloatWidthChange(operand, conv: NimNode): bool =
   ## RFC-0016 W1-e. Both sides are builtin floats of different widths.
@@ -10804,8 +10798,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         mkVar(cell)
     elif tgt in fltTyNames and src in fltTyNames and
          isFloatWidthChange(operand, n):
-      # RFC-0016 W1-e (W-04).
-      declineFloatWidth(n, preamble, ctx, src, tgt)
+      # RFC-0016 K2b (W-04): exact `fp.to_fp`, RNE.
+      convertFloatWidth(n, operand, preamble, ctx)
     elif tgt in fltTyNames and src in intTyNames:
       mkConvIntToFloat(parseExpr(operand, preamble, ctx), if tgt == "float32": 32 else: 64)
     elif tgt in intTyNames and src in fltTyNames:
@@ -11067,9 +11061,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if isIntLiteralNode(wrapped) or n.kind == nnkHiddenAddr:
         parseExpr(wrapped, preamble, ctx)
       elif isFloatWidthChange(wrapped, n):
-        # RFC-0016 W1-e (W-04): a compiler-inserted float32 <-> float64.
-        declineFloatWidth(n, preamble, ctx, valueTypeName(wrapped),
-                          valueTypeName(n))
+        # RFC-0016 K2b (W-04): a compiler-inserted float32 <-> float64.
+        convertFloatWidth(n, wrapped, preamble, ctx)
       else:
         let outerCls = classifyType(n)
         let innerCls = classifyType(wrapped)

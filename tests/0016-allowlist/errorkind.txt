@@ -24,6 +24,7 @@ errorkind:feConvFloatToIntUndefined	K9c	no pinDecline asserts this kind; K9c fin
 errorkind:feDefectExcluded	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feEnumOrdinalUnresolved	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feExtractionFailed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:feFloatWidth	K9c	K2b models every float32/float64 conversion exactly, so nothing produces this kind; W-64 (K10d) deletes a kind with no producer
 errorkind:feHostUnadmitted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feOpaqueEffectHavoc	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feReplayCrashed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer

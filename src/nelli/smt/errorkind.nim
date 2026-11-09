@@ -939,8 +939,9 @@ type
                           ## is expected). The two widths are different Z3
                           ## sorts; the conversion was the transparent
                           ## pass-through, so a value of one width flowed on
-                          ## as the other. Exact rounding (`fp.to_fp`, RNE)
-                          ## is not modelled yet, so the path declines.
+                          ## as the other. RFC-0016 K2b models the
+                          ## conversion exactly (`fp.to_fp`, RNE), so
+                          ## nothing produces this kind now.
                           ## `classOf` is `dcNoAnswer`, as
                           ## `feUnsupportedExprKind`. sevError. See
                           ## `docs/symex/README.md`, "Float widths".

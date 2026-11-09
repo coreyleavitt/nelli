@@ -282,13 +282,17 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "291"
+const symexWalkerVersion* = "292"
   ## RFC-0016 K3a (290->291): `holdsSharedMemory` reads the type x memory-op
   ## axis (`typeaxes`) and looks through a variant's plain fields and arms, a
   ## multi-variant's axes and a distinct base, so `let c = gV` over a case
   ## object holding a seq, string or Table arm declines like the plain-object
   ## twin (B-04) where the walker used to decide it; `typeCopiedByValue` reads
   ## the type-class axis with the same allowlist.
+  ## RFC-0016 K2b (291->292): a `float32` <-> `float64` conversion, explicit
+  ## or compiler-inserted, is exact (`fp.to_fp` at the target width in
+  ## round-nearest-even, an `iekMathCall` `toFloat32` / `toFloat64`); it
+  ## declined `feFloatWidth` (W1-e), which nothing produces now.
   ## RFC-0016 K7b (289->290): `feUnadmitted` is `dcOmitted` and its sites
   ## halt (the `isUnsupported` arm, now `walkUnsupported`, and the
   ## missing-callee arm drop the path), so a target reachable only past an

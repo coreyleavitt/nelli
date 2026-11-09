@@ -84,6 +84,16 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
   doAssert a.kind in {svFloat32, svFloat64},
     "lowerMathCall: first arg is not a float — got " & $a.kind
 
+  # ----- RFC-0016 K2b: width conversion, `fp.to_fp` in round-nearest-even.
+  # Narrowing rounds (overflow gives infinity, NaN stays NaN); widening is
+  # exact. The same width is the identity.
+  if op == "toFloat32":
+    return (if a.kind == svFloat32: a
+            else: SymVal(kind: svFloat32, fp32: toFp(rmRNE(), a.fp64, Z3Float32)))
+  if op == "toFloat64":
+    return (if a.kind == svFloat64: a
+            else: SymVal(kind: svFloat64, fp64: toFp(rmRNE(), a.fp32, Z3Float64)))
+
   # ----- predicates (return svBool), width-symmetric -----
   template pred(call: untyped): SymVal =
     if a.kind == svFloat32: ofBool(call(a.fp32)) else: ofBool(call(a.fp64))

@@ -127,6 +127,18 @@
   walker version is unchanged. Windows-leg claims (8.37 JIT cells, mingw
   setjmp skip, msvc fwrapv skip) are `rows=`-scoped allowlist entries that
   no Windows run has confirmed yet.
+  K2b (`rfc-0016-k2b`, walker 291->292): every `float32` <-> `float64`
+  conversion is exact. W1-e had already made int->float exact and kept the
+  widening of a binary operand; K2b replaces the remaining `feFloatWidth`
+  decline (explicit narrowing and widening, hidden argument/initialiser
+  widening) with `toFloat32` / `toFloat64` `iekMathCall`s lowered to
+  `fp.to_fp` RNE. Pins in `tests/tsymex_0016_w1e_floatwidth.nim` cover 0.1,
+  both float32 ties (to even), overflow to infinity, the three conv cells.
+  `feFloatWidth` is now unproduced: allowlisted in `errorkind.txt` for K9c /
+  W-64. Float-to-int stays K10a-float. PRC-40 resolved. STY-06's float80 /
+  sNaN `never` cell is not created here (needs the admission-table `never`
+  machinery of K3a/K4c). K3a also takes the walker to 291: expect a conflict
+  in `canonicalize.nim` and the CR2 pin.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

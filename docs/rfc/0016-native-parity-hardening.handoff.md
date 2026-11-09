@@ -419,6 +419,17 @@
   Chain note (int4a): `smt/stdlib_ledger.nim` was seeded by K4c at 07dc23ab on an older
   main; K3b, K2c and K6 add no stdlib bodies. Reseed it (`scripts/stdlib-ledger.sh`) if
   the CI corpus run shows `feUnadmitted` stdlib declines.
+  int4a CI fixes (symex-linux 42619836822, symex-mingw 42619836849): four
+  `errorkind` allowlist entries removed (now pin-evidenced); a footprint scan
+  skips an untyped call head (`getTypeImpl` "node has no type" on a re-executed
+  replay, Windows-only; reproduced with `dt-crosswin.sh`); K3b pins all 11
+  other modelled `fieldDefault` cells and the `uninterp` decline; W-19b
+  `createThread` now asserts K4c's call-site decline; k7 splitLines budget
+  re-derived (4M units, measured rates in the test); S6a counts 2 Prune sites
+  (K7's `ckWalkWork` halt, audited dcOmitted); configdefaults override sets
+  `walkRLimit`, ResourceBudget count 17 (merge line already in `+`). Walker
+  stays 299. `s8cn_step1d` is red on Linux CI only: the known INT-43 Z3 5.1.0
+  rlimit skew (`linux-host-known-red.txt`).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

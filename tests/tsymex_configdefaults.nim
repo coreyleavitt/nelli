@@ -200,7 +200,8 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
         maxVariantConstructorFieldAllocs: 151,
         maxSeqLen: 161, seqQueryRLimit: 171'u,   # RFC-0005 S8k
         maxRecursionDepth: 181,                   # RFC-0005 S8ax
-        queryTimeoutMs: 191'u))                   # RFC-0005 S8bu
+        queryTimeoutMs: 191'u,                    # RFC-0005 S8bu
+        walkRLimit: 201'u))                       # RFC-0016 K7
     check defaultSymexSettings() + b == b
 
   test "the field counts the merge was written against have not changed":
@@ -209,12 +210,15 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
     # and the pin passes while `+` silently ignores it. Pinning the counts is
     # what forces the next person who adds a field to come here, and from here
     # to both `+` bodies.
-    check fieldCount[ResourceBudget]() == 16   # RFC-0005 S8c deleted
+    check fieldCount[ResourceBudget]() == 17   # RFC-0005 S8c deleted
                                                # `maxBytesEncodingLen`;
                                                # S8k added `maxSeqLen` and
                                                # `seqQueryRLimit`; S8ax
                                                # `maxRecursionDepth`; S8bu
-                                               # `queryTimeoutMs`
+                                               # `queryTimeoutMs`; RFC-0016
+                                               # K7 `walkRLimit` (its merge
+                                               # line is in `+`, and the
+                                               # override above sets it)
     check fieldCount[SymexSettings]() == 8   # 7 scalars plus `budget`
                                              # (RFC-0005 S10 added `replay`,
                                              # S8be `replayTimeoutMs`)

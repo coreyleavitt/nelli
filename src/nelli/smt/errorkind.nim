@@ -953,7 +953,8 @@ type
     # (W1-d1a), `ubUnsignedDivZero` (W1-d1b), `ubSignedDivZero`, `ubSignedOverflow`
     # (W1-d2) and `ubIndeterminateRead` (W1-d3, the `{.noinit.}` read).
     # K10a-axis: every member has a producer; `ubFloatToIntRange` was removed
-    # with none (K10a-float adds it back with its halt site).
+    # with none. K10a-float adds it back (`ubFloatToIntRange`, produced by the
+    # float -> int conversion drain), appended after `ubSignedDivZero`.
     ubUnsignedDivZero     ## `x div 0` / `x mod 0` on an unsigned type.
     ubIntMinModMinusOne   ## `low(T) mod -1` (and `low(T) div -1` with
                           ## overflow checks off) at 32 and 64 bits: the C
@@ -966,6 +967,12 @@ type
                           ## overflow checks off (Nim emits no zero check
                           ## then, and the C division is undefined). RFC-0016
                           ## WA-B; appended so every earlier ordinal holds.
+    ubFloatToIntRange     ## RFC-0016 K10a-float. A float -> int conversion
+                          ## whose operand is NaN, infinite or too large for
+                          ## the target: Nim 2.2.10 emits a plain C cast (no
+                          ## raise under any check profile), which is
+                          ## undefined. Appended so every earlier ordinal
+                          ## holds.
     feHostUnadmitted      ## RFC-0016 K5a (section 8.3). The host half of the
                           ## build profile is not a verified one: the loaded
                           ## libz3 is not 4.13.4 or 5.1, or no build row
@@ -998,7 +1005,7 @@ type
                           ## after `feUnadmitted`, so every earlier ordinal
                           ## holds.
 
-  UbKind* = range[ubUnsignedDivZero .. ubSignedDivZero]
+  UbKind* = range[ubUnsignedDivZero .. ubFloatToIntRange]
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
     ## the contiguous `ub*` members of `SymexErrorKind`.
 static:
@@ -1010,4 +1017,5 @@ static:
            ord(ubIntMinModMinusOne) + 1 == ord(ubSignedOverflow) and
            ord(ubSignedOverflow) + 1 == ord(ubIndeterminateRead) and
            ord(ubIndeterminateRead) + 1 == ord(ubSignedDivZero) and
+           ord(ubSignedDivZero) + 1 == ord(ubFloatToIntRange) and
            ord(high(UbKind)) - ord(low(UbKind)) < 30

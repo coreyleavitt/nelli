@@ -244,10 +244,13 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     #   ite(domain, exact truncation, FRESH symbol of the target type)
     # and `domain` goes to the `convFloatToIntBoundConds` sink, where
     # `drainConvFloatToIntFresh` (the first scalar-drain stage after the
-    # closure raises) forks the continuation in two: in range, clean and
-    # exact; out of range, tainted `feConvFloatToIntUndefined`
-    # (`dcFreshSymbol`) -- a replay-gated candidate, never a claim and never
-    # a dropped input. The model was an exact-or-raise split (R16-2): a
+    # closure raises) decides the out-of-domain side as undefined behaviour
+    # (RFC-0016 K10a-float: `haltUndefined`, `ubFloatToIntRange`, the
+    # `convert/floatToInt` row of the definedness axis) and continues in
+    # range, clean and exact; the fresh arm of the `ite` is never reached by
+    # a surviving path. (Until K10a-float the out-of-range side continued
+    # tainted `feConvFloatToIntUndefined`, `dcFreshSymbol`.) The model was an
+    # exact-or-raise split (R16-2): a
     # false `sxRaised(RangeDefect)`, a live `except RangeDefect`, and a
     # false `sxUnsat` for every out-of-range target.
     #

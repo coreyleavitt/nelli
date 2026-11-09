@@ -180,27 +180,6 @@ suite "flips to sxUnsat: construction and zero values":
 
 # ---- numeric models -----------------------------------------------------------
 
-proc flF2iUnbound(x: float) =
-  if int(x) == 3: symexTarget("f2i_unbound")
-
-proc flF2iNan(x: float) =
-  if isNaN(x) and int(x) == 3: symexTarget("f2i_nan")
-
-proc flF2iInf(x: float) =
-  if x == Inf and int(x) == 3: symexTarget("f2i_inf")
-
-proc flI32Conv(x: float) =
-  if int32(x) == 5'i32: symexTarget("i32conv")
-
-proc flF2iLet(x: float) =
-  let v = int(x)
-  if v == 7: symexTarget("cr9_floatIntLet_hit")
-
-proc flInt32Width(f: float) =
-  let i = int32(f)
-  discard i
-  symexTarget("rdInt32Hit")
-
 proc flSplitEmptySep(s: string) =
   if s == "x":
     let parts = "abcde".split("")
@@ -219,21 +198,11 @@ const flCap3 = withSymexSettings() do (s: var SymexSettings):
   s.budget.maxSplitParts = 3
 
 suite "flips to sxUnsat: numeric and string models":
-  # flip: b744fcde tsymex_phase15_CR3_CR4_CR6_float
-  test "S8g: a float -> int conversion has no RangeDefect (was a false sxRaised)":
-    justifyOver(flF2iUnbound, tRaisedExn("RangeDefect"), feConvFloatToIntUndefined)
-    justifyOver(flF2iNan, tRaisedExn("RangeDefect"), feConvFloatToIntUndefined)
-    justifyOver(flF2iInf, tRaisedExn("RangeDefect"), feConvFloatToIntUndefined)
-    justifyOver(flI32Conv, tRaisedExn("RangeDefect"), feConvFloatToIntUndefined)
-  # flip: b744fcde tsymex_phase15_F5_float_conv
-  test "S8g: the same, on F5's SUT":
-    justifyOver(flF2iUnbound, tRaisedExn("RangeDefect"), feConvFloatToIntUndefined)
-  # flip: b744fcde tsymex_phase15_cr9_lowerInExpr
-  test "S8g: the same, in a let":
-    justifyOver(flF2iLet, tRaisedExn("RangeDefect"), feConvFloatToIntUndefined)
-  # flip: b744fcde tsymex_phase16_R16_2_rangedefect
-  test "S8g: the same, at width 32":
-    justifyOver(flInt32Width, tRaisedExn("RangeDefect"), feConvFloatToIntUndefined)
+  # K10a-float: the four S8g float -> int flips (CR3_CR4_CR6_float,
+  # F5_float_conv, cr9_lowerInExpr, R16_2_rangedefect) no longer end in sxUnsat
+  # over a tainted fresh value: the out-of-range side is undefined behaviour and
+  # halts (`ubFloatToIntRange`), an untrusted sxUnknown. They are pinned in
+  # tsymex_0016_k10af_float and the files named above.
   # flip: b744fcde tsymex_phase15_CR11_CR18_splitcap
   test "S8g: split on an empty separator is one part under any cap":
     justifyWith(flSplitEmptySep, tLabel("hit"), flCap3)

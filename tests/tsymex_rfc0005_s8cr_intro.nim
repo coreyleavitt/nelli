@@ -106,35 +106,9 @@ suite "introduction invariant: seParseIntLaxSyntax":
     pinFree(introParseLaxNeg, "intro_parse_lax_neg", seParseIntLaxSyntax)
 
 # ---- feConvFloatToIntUndefined ------------------------------------------------
-
-proc introF2iNan(x: float) =
-  ## Nim's `int(NaN)` is `low(int)` on the platforms the suite runs on. The
-  ## out-of-domain value is free, so it can be any value of the target type.
-  if isNaN(x) and int(x) == outOfReach:
-    symexTarget("intro_f2i_nan")
-
-proc introF2iNeg(x: float) =
-  if isNaN(x) and not (int(x) == low(int)):
-    symexTarget("intro_f2i_neg")
-
-proc introF2iWide(x: float) =
-  ## Outside the domain the value is not narrowed to anything near the
-  ## operand either.
-  if x > 1e30 and int(x) == 7:
-    symexTarget("intro_f2i_wide")
-
-suite "introduction invariant: feConvFloatToIntUndefined":
-  test "oracle: out of domain the conversion gives low(int)":
-    let nan = NaN
-    check int(nan) == low(int)
-    let big = 1e31
-    check int(big) == low(int)
-  test "int(NaN) takes a value the native conversion does not give":
-    pinFree(introF2iNan, "intro_f2i_nan", feConvFloatToIntUndefined)
-  test "both polarities":
-    pinFree(introF2iNeg, "intro_f2i_neg", feConvFloatToIntUndefined)
-  test "too large an operand":
-    pinFree(introF2iWide, "intro_f2i_wide", feConvFloatToIntUndefined)
+# RFC-0016 K10a-float: nothing introduces this kind any more. An out-of-range
+# float -> int conversion is `ubFloatToIntRange`, a halt (see
+# `tsymex_0016_k10af_float`), so there is no fresh value to take a free value.
 
 # ---- feOpaqueEffectHavoc ------------------------------------------------------
 

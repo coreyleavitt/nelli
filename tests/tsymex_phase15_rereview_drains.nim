@@ -384,14 +384,15 @@ suite "symex Phase 15 re-review NI-2: isDerefWrite missing float→int drain":
     let r = symexFind(ni2DerefWriteFloatConv, tLabel("ni2DerefHit"))
     check r.status == sxSat
 
-  test "NI-2-2: p[]=int(NaN) path is never a claim (S8g: fresh value, sxUnknown)":
-    ## The drain still runs at the deref-write (the NI-2 fix); what it drains
-    ## is now the fresh-value fork, so the verdict carries its degrade kind.
+  test "NI-2-2: p[]=int(NaN) path is never a claim (K10a-float: halted undefined, sxUnknown)":
+    ## The drain still runs at the deref-write (the NI-2 fix); what it decides
+    ## is now the undefined out-of-range side, so the verdict carries
+    ## `ubFloatToIntRange`.
     let r = symexFind(ni2DerefWriteNanExcluded, tLabel("ni2NanHit"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
-      if e.kind == feConvFloatToIntUndefined: sawKind = true
+      if e.kind == ubFloatToIntRange: sawKind = true
     check sawKind
 
 suite "symex Phase 15 re-review S-3: isCall arg-lowering drainClosureExitHeap":

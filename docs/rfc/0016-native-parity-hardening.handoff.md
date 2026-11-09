@@ -112,6 +112,21 @@
   K4a-dispatch's. All 217 `magic:` cells are allowlisted under K4a-dispatch
   (no pin writes a record for them yet; `skipCell` on `magic:DivU` is not a
   classifying verdict).
+  K5b (`rfc-0016-k5b`): `buildprofile.nim` gains `BuildProvenance.stockNim`
+  (two compile-time probes for backports 25858 and 26093, the only ones a
+  `compiles` can reach; a toolchain with neither reads as stock), `bfNim`, and
+  `buildCells` (refusal, hazard and cfg cells of the build axis, keyed like
+  `mm=refc`). Refused by name: 32-bit, big-endian, arm64, macOS, `fwrapv` under
+  vcc, an unpatched Nim, an unverified Z3 (`pinAdmission` over a synthetic
+  build; `--cpu:i386` also as a real child build). The stock-Nim slice runs
+  `tsymex_0016_k5b_stock.nim` under `NELLI_STOCK_NIM=<unmodified nim>` (no CI
+  leg has one). Cfg suites `tsymex_0016_k5b_cfg_*` (mm arc, atomicArc,
+  useMalloc, setjmp, release, nelliFwrapv) share `k5b_cfg_body.nim`; W-51 is
+  those memory pins plus `tsymex_0016_k5b_pcre`. STY-01, STY-08, AUD-01 and
+  W-52's `sizeof` are `never` cells (`pinNever`); refc's is `mm=refc`. The
+  walker version is unchanged. Windows-leg claims (8.37 JIT cells, mingw
+  setjmp skip, msvc fwrapv skip) are `rows=`-scoped allowlist entries that
+  no Windows run has confirmed yet.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

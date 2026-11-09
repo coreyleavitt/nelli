@@ -929,8 +929,8 @@ state (§8.2).
 | W-24 | `filterIt` raises `weInternalWalkerFault` | K2-0 (with CRH-09) | closed (K2-0, 2026-11-08): `filterIt` no longer raises `weInternalWalkerFault`; it is a named `feUnsupportedExprKind` decline (`nnkCommand`), pinned in `tests/tsymex_0016_k20_probes.nim`. Precision stays W-36's neighbour. |
 | W-27 | macro `error()` sites reachable from SUTs | K2a | |
 | W-50 | the build profile keyed and read | W1-c1a, K5a | |
-| W-51 | per-build memory pins | K5b | |
-| W-52 | shifts and `sizeof` as host facts; symbolic `low(int) div -1` | `div -1`: W1-d1a; `sizeof`: a `never(nrPlatform)` cell, K5b | |
+| W-51 | per-build memory pins | K5b | closed |
+| W-52 | shifts and `sizeof` as host facts; symbolic `low(int) div -1` | `div -1`: W1-d1a; `sizeof`: a `never(nrPlatform)` cell, K5b | : K5b done for `sizeof` (the never cell `build:sizeof/host`); the shifts half has no cell yet |
 | W-53 | INT-31 widened to every build read | K5a | |
 | W-55 | the native-pin helper copied per file | K9a, K9b | |
 | W-61 | probe agreements with no pin | W1-p, K9d-0 | |
@@ -961,14 +961,14 @@ state (§8.2).
 | W-68 | stale docs: SYMEX_PLAN status, ADR "PROPOSED" for landed ADRs, 0.9.0 known-gap text, RFC-0001 "Complete", CLAUDE.md's active RFC, 0014/0015 gates citing a pre-0.9.0 baseline, `docs/symex/README.md`'s decline catalogue (W1-z rewrites it) | H1 | |
 | W-69 | "not green on a good day" wording in CLAUDE.md and `sweep-diff.sh` | | never: repository wording, outside this RFC |
 | MOV-01 | the moves to RFC-0017 (N20, OQ1, CRH-03's OOM, `maxLoopUnwind`, #138, caps): record each in RFC-0017 with its id, then close here | W1-z | closed: done (2026-11-07, W1-z): recorded in `docs/rfc/0017-symex-reach.md` §7 and cited from slices M1, L1, P1 and E1 |
-| STY-01 | `return` in `finally` on a raised path: c re-raises, cpp returns (A-10) | K5b (`never` cell of the build axis) | |
+| STY-01 | `return` in `finally` on a raised path: c re-raises, cpp returns (A-10) | K5b (`never` cell of the build axis) | never: stays by design: `never(reason)` cell, written by K5b |
 | STY-02 | Table/HashSet iteration order, hash- and build-dependent (C-13) | K4c (`never` cell of the stdlib-body axis) | |
 | STY-03 | pointer order `<` (C-10, W-28) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-04 | `owned T`, `Atomic[T]` (HRV-18) | K3a (`never` cell of the type × memory axis) | never: done (2026-11-08, K3a): `typeclass:owned` and `typeclass:atomic` are `never` rows of the type-class axis |
 | STY-05 | `nextafter` (HRV-27) | K4a-table (`never` cell of the magic axis) | never: no SMT-LIB FP-theory primitive for nextafter: `never` cell `magic:nextafter` (K4a-table) |
 | STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`); K2b and K4c own the rest |
 | STY-07 | `addr s[0]` then growth (B §1.2) | K10a-axis (`never` cell of the definedness axis) | |
-| STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | K5b (`never` cell of the build axis) | |
+| STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | K5b (`never` cell of the build axis) | never: stays by design: `never(reason)` cell, written by K5b |
 | STY-09 | the AUD-01, AUD-09 and AUD-11 records | K5b (AUD-01), K2a (AUD-09), K4c (AUD-11) | |
 
 <!-- worklist:end 5.9 -->

@@ -1585,7 +1585,7 @@ state = "never"
 note = ": stays by design: `never(reason)` cell, written by K1a-test"
 source = "S8w"
 never_reason = "stays by design"
-cells = []
+cells = ["build:setting/isLoose"]
 
 [[row]]
 id = "AUD-02"
@@ -1803,21 +1803,22 @@ cells = []
 id = "W-51"
 table = "5.9"
 title = "per-build memory pins"
-state = "open"
+state = "closed"
 note = ""
 slice = "K5b"
 home = "K5b"
 cells = []
+pins = ["tsymex_0016_k5b_cfg_mm_arc", "tsymex_0016_k5b_cfg_mm_atomicarc", "tsymex_0016_k5b_cfg_usemalloc", "tsymex_0016_k5b_cfg_setjmp", "tsymex_0016_k5b_cfg_release", "tsymex_0016_k5b_cfg_fwrapv", "tsymex_0016_k5b_pcre"]
 
 [[row]]
 id = "W-52"
 table = "5.9"
 title = "shifts and `sizeof` as host facts; symbolic `low(int) div -1`"
 state = "open"
-note = ""
+note = ": K5b done for `sizeof` (the never cell `build:sizeof/host`); the shifts half has no cell yet"
 slice = "K5b"
 home = "`div -1`: W1-d1a; `sizeof`: a `never(nrPlatform)` cell, K5b"
-cells = []
+cells = ["build:sizeof/host"]
 
 [[row]]
 id = "W-53"
@@ -2109,11 +2110,12 @@ cells = []
 id = "STY-01"
 table = "5.9"
 title = "`return` in `finally` on a raised path: c re-raises, cpp returns (A-10)"
-state = "open"
-note = ""
+state = "never"
+note = ": stays by design: `never(reason)` cell, written by K5b"
 slice = "K5b"
 home = "K5b (`never` cell of the build axis)"
-cells = []
+cells = ["build:finally/returnOnRaise"]
+never_reason = "c and cpp disagree natively on a return in a finally on a raised path"
 
 [[row]]
 id = "STY-02"
@@ -2181,11 +2183,12 @@ cells = []
 id = "STY-08"
 table = "5.9"
 title = "Z3-version-dependent `deepUnsat` (HRV-63)"
-state = "open"
-note = ""
+state = "never"
+note = ": stays by design: `never(reason)` cell, written by K5b"
 slice = "K5b"
 home = "K5b (`never` cell of the build axis)"
-cells = []
+cells = ["build:z3/deepUnsat"]
+never_reason = "the verdict on a deep term depends on the Z3 version's own recursion; each verified Z3 is its own row"
 
 [[row]]
 id = "STY-09"

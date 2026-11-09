@@ -36,6 +36,8 @@
 ## passed in (`z3VersionOf(fullVersion)`), read by `symex.nim`.
 import std/[strutils, algorithm, options]
 import ./pcre_engine
+import ./admission
+import ./errorkind
 export pcre_engine.PcreEngine
 
 type
@@ -139,7 +141,9 @@ type
   BuildProvenance* = object
     ## Rendered on findings and pin records, never keyed.
     ccFamily*: CcFamily
-    nimVersion*, patchset*: string  ## `patchset` is "": the compiler cannot report it
+    nimVersion*: string
+    patchset*: string               ## the backports the probes below saw ("" on a stock Nim)
+    stockNim*: bool                 ## RFC-0016 K5b: the probes saw an unpatched Nim
     assumedAbsent*: set[CFlag]      ## flags nelli assumes the build does not pass
 
 when defined(nelliFwrapv) and not defined(vcc):
@@ -244,6 +248,46 @@ func buildSegment*(b: BuildSemantics; h: HostSemantics): string =
     result.add name & "=" & renderField(v)
   result.add '>'
 
+# RFC-0016 K5b. The compiler cannot report which patches it carries (no define
+# or version string says), so the patched Nim 2.2.10 is identified by what it
+# DOES: each probe is a program a stock 2.2.10 rejects and the toolchain's
+# backport accepts. `compiles` evaluates them where this module is compiled.
+# They cover two of the seven backports (the ones a `compiles` can reach: both
+# are semantic-pass fixes); the others (a codegen fix, the allocator) are not
+# probed, so a toolchain carrying only those would read as stock and be
+# refused, never the reverse.
+type
+  ProbeBox[T] {.requiresInit, used.} = object
+    v: T
+  ProbeObj {.used.} = ref object
+    x: int
+
+func probeMake[T](_: typedesc[ProbeBox[T]]; v: T): ProbeBox[T] {.used.} =
+  ProbeBox[T](v: v)
+
+let probeG {.used.}: ProbeObj = ProbeObj(x: 1)
+
+const
+  probe25858 = compiles(
+    block:
+      proc probeF(): ProbeBox[int] =
+        probeMake(typeof(result), 1)
+      discard probeF())
+    # nim-lang/Nim#25858: `typeof(result)` in a `requiresInit` return type is
+    # no use-before-init.
+  probe26093 = compiles(
+    block:
+      proc probeConsumer(): int {.gcsafe.} =
+        {.cast(gcsafe).}:
+          let a = probeG.x
+          {.cast(gcsafe).}:
+            discard probeG.x
+          let c = probeG.x
+          a + c
+      discard probeConsumer())
+    # nim-lang/Nim#26093: leaving a nested `cast(gcsafe)` block keeps the
+    # enclosing block's cast for the statements after it.
+
 const buildProvenance*: BuildProvenance = block:
   var p: BuildProvenance
   p.ccFamily =
@@ -252,7 +296,11 @@ const buildProvenance*: BuildProvenance = block:
     elif defined(gcc): ccGcc
     else: ccOther
   p.nimVersion = NimVersion
-  p.patchset = ""
+  var patches: seq[string]
+  if probe25858: patches.add "backport-25858"
+  if probe26093: patches.add "backport-26093"
+  p.patchset = patches.join(",")
+  p.stockNim = patches.len < 2
   # nelli cannot read the C flags a build passes; it assumes none of these is
   # present, except the one it produces itself.
   p.assumedAbsent = {cfFwrapv, cfTrapv, cfFastMath, cfSanitize}
@@ -292,6 +340,7 @@ type
     bfOs = "os"
     bfCpu = "cpu"
     bfZ3 = "z3"
+    bfNim = "nim"
 
   BuildRefusal* = object
     field*: BuildField
@@ -326,11 +375,13 @@ func rowOf*(b: BuildSemantics; h: HostSemantics; p: BuildProvenance
   ##    no cell is pinned under it: unprojectable.
   ##  * `host.pcre`: an unverified libpcre declines each regex call by itself
   ##    (`psUnverifiedLib`), so it is not a reason to refuse the build.
-  ##  * `provenance.nimVersion`, `patchset`, `assumedAbsent`: reported, not
-  ##    projected.
+  ##  * `provenance.stockNim`: an unpatched Nim is unprojectable (K5b): the
+  ##    cells were decided on the patched toolchain (`nimVersion`, `patchset`
+  ##    are reported; `assumedAbsent` is not projected).
   if b.ptrBits != 64 or b.endian != enLittle or b.cpu != cpuAmd64:
     return none(BuildRow)
   if b.caseObjects != cmStrict: return none(BuildRow)
+  if p.stockNim: return none(BuildRow)
   case b.mm
   of mmOrc, mmArc, mmAtomicArc: discard
   of mmRefc, mmMarkAndSweep, mmBoehm, mmGo, mmNone, mmOther:
@@ -399,6 +450,11 @@ func admitBuild*(b: BuildSemantics = buildSemantics;
     return some(BuildRefusal(field: bfFwrapv,
       reason: "-d:nelliFwrapv has no effect under vcc, which has no " &
               "-fwrapv; signed overflow stays undefined there"))
+  if p.stockNim:
+    return some(BuildRefusal(field: bfNim,
+      reason: "an unpatched Nim " & p.nimVersion & " is an unverified " &
+              "toolchain: the cells were decided on the patched 2.2.10 " &
+              "(ghcr.io/coreyleavitt/nim)"))
   if rowOf(b, unreadHost, p).isNone:
     return some(BuildRefusal(field: bfRow,
       reason: "no verified build row covers this profile (" &
@@ -430,3 +486,83 @@ func admitHost*(h: HostSemantics; b: BuildSemantics = buildSemantics;
 func refusalMessage*(a: BuildRefusal): string =
   ## The compile-time error text for a refused build.
   "nelli/symex: this build is refused: " & a.reason & " [field: " & $a.field & "]"
+
+# ---------------------------------------------------------------------------
+# RFC-0016 K5b: the build axis's own cells (section 8.1, 8.2).
+# ---------------------------------------------------------------------------
+
+type BuildSite* = enum
+  bsBuild                 ## the build as `symexFind` meets it
+
+const buildCells* = axisTable[BuildSite, bool](axBuild, [
+  ## The cells of the build axis that are not a PCRE library (`pcreLibs`) or a
+  ## `BuildRow`: the build configurations the profile REFUSES (a `never` cell
+  ## is a configuration that stays refused; a `declined` one is refused until
+  ## a CI leg runs it), the cross-build cfg suites that pin `rowOf`'s neutrality
+  ## claims, and the documented hazards that no run can fix. The key is the
+  ## text a pin record names (`pinRefused`'s `mm=refc` is one).
+  ##
+  # Refusals.
+  ("mm=refc", refused[BuildSite, bool](none(SymexErrorKind),
+    "refc is not a verified build (D-0016-7): its heap and destructor timing " &
+    "are unpinned and nim-z3's `=destroy` hooks do not compile under it",
+    iNever, nrByDesign)),
+  ("ptrBits=32", refused[BuildSite, bool](none(SymexErrorKind),
+    "Nim's `int` is hard-coded as a 64-bit vector (W-14); no 32-bit CI leg",
+    iNever, nrPlatform)),
+  ("endian=big", refused[BuildSite, bool](none(SymexErrorKind),
+    "byte layout is read as little-endian; no big-endian CI leg",
+    iNever, nrPlatform)),
+  ("cpu=arm64", refused[BuildSite, bool](none(SymexErrorKind),
+    "refused until a CI leg runs the suite on arm64 (a compile-only leg " &
+    "cannot satisfy section 12)")),
+  ("os=macosx", refused[BuildSite, bool](none(SymexErrorKind),
+    "refused until a CI leg runs the suite on macOS (a compile-only leg " &
+    "cannot satisfy section 12)")),
+  ("fwrapv/vcc", refused[BuildSite, bool](none(SymexErrorKind),
+    "-d:nelliFwrapv under vcc: cl.exe has no -fwrapv, so the wrap would be " &
+    "claimed and not given", iNever, nrPlatform)),
+  ("nim/unpatched", refused[BuildSite, bool](none(SymexErrorKind),
+    "an unpatched Nim 2.2.10 is an unverified toolchain: the cells were " &
+    "decided on the patched one (the macro VM the parser runs in included)")),
+  ("z3/unverified", refused[BuildSite, bool](none(SymexErrorKind),
+    "a Z3 other than 4.13.4 and 5.1 is refused at the first run " &
+    "(`admitHost`), as `sxUnknown` with `feHostUnadmitted`")),
+  ("pcre/unverified", refused[BuildSite, bool](none(SymexErrorKind),
+    "a libpcre not in `pcreLibs` declines each regex call (`psUnverifiedLib`) " &
+    "and does not refuse the build: runs that touch no regex are unaffected")),
+  ("profile/unprojectable", refused[BuildSite, bool](none(SymexErrorKind),
+    "a profile no `BuildRow` covers (an unpinned memory model, `quirky` " &
+    "exceptions, `nimOldCaseObjects`, a C compiler with no leg) is refused " &
+    "by name, never borrowed onto a row")),
+  # Hazards that stay by design or by platform; each has a native check.
+  ("finally/returnOnRaise", refused[BuildSite, bool](none(SymexErrorKind),
+    "STY-01 (A-10): `return` in a `finally` on a raised path re-raises on the " &
+    "c backend and returns on cpp; the two backends disagree natively",
+    iNever, nrPlatform)),
+  ("z3/deepUnsat", refused[BuildSite, bool](none(SymexErrorKind),
+    "STY-08 (HRV-63): whether a deep term is decided or cut off depends on " &
+    "the Z3 version's own recursion; the 4.13.4 and 5.1 rows are separate " &
+    "legs, and no SUT-level pin can force it", iNever, nrUnobservable)),
+  ("setting/isLoose", refused[BuildSite, bool](none(SymexErrorKind),
+    "AUD-01: `isLoose` leaves an `isIntOffset` parameter unstamped; opt-in " &
+    "unsound by ADR-0001 and carrying its banner", iNever, nrByDesign)),
+  ("sizeof/host", refused[BuildSite, bool](none(SymexErrorKind),
+    "W-52: `sizeof` and shift widths are facts of the host the walker " &
+    "reads from its own build, not modelled per target",
+    iNever, nrPlatform)),
+  # The cross-build cfg suites (W-58): `rowOf` calls each of these neutral,
+  # and each is pinned by exact verdicts under that configuration.
+  ("mm=arc", modelled[BuildSite, bool](true, {bsBuild},
+    "arc agrees with orc except for the cycle collector (S8cs)")),
+  ("mm=atomicArc", modelled[BuildSite, bool](true, {bsBuild},
+    "atomicArc agrees with arc; it differs in reference-count atomicity only")),
+  ("useMalloc", modelled[BuildSite, bool](true, {bsBuild},
+    "-d:useMalloc swaps the allocator, not the value semantics")),
+  ("exceptions/setjmp", modelled[BuildSite, bool](true, {bsBuild},
+    "setjmp exceptions: c backend, Linux only (the cpp backend cannot build " &
+    "them; the Windows walk crashes entering the fiber, INT-12)")),
+  ("release", modelled[BuildSite, bool](true, {bsBuild},
+    "-d:release acts only through `checks`, which it leaves on")),
+  ("fwrapv", modelled[BuildSite, bool](true, {bsBuild},
+    "-d:nelliFwrapv with checks on is the default build's verdicts"))])

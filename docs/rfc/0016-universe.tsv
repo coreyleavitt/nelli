@@ -6,7 +6,7 @@
 # axis pragma: 0 cells
 # axis magic: 242 cells
 # axis stdlib: 0 cells
-# axis build: 3 cells (pcre libs; rows below)
+# axis build: 23 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
 # axis defined: 0 cells
 # build rows: 5
@@ -16,11 +16,31 @@ cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
 build:8.37 2015-04-28|jit	modelled	-
 build:8.45 2021-06-15|interp	modelled	-
+build:cpu=arm64	declined	-
+build:endian=big	never	-
+build:exceptions/setjmp	modelled	-
+build:finally/returnOnRaise	never	-
+build:fwrapv	modelled	-
+build:fwrapv/vcc	never	-
+build:mm=arc	modelled	-
+build:mm=atomicArc	modelled	-
+build:mm=refc	never	-
+build:nim/unpatched	declined	-
+build:os=macosx	declined	-
+build:pcre/unverified	declined	-
+build:profile/unprojectable	declined	-
+build:ptrBits=32	never	-
+build:release	modelled	-
 build:row/linux-c	row	-
 build:row/linux-c-z3-4.13.4	row	-
 build:row/linux-cpp	row	-
 build:row/mingw	row	-
 build:row/msvc	row	-
+build:setting/isLoose	never	-
+build:sizeof/host	never	-
+build:useMalloc	modelled	-
+build:z3/deepUnsat	never	-
+build:z3/unverified	declined	-
 capkind:ckCallDepth	cap	-
 capkind:ckFrontier	cap	-
 capkind:ckHeapDepth	cap	-

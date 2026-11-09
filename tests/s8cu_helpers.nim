@@ -802,3 +802,37 @@ proc skipCell*(key: CellKey; why: string) =
   writePinRecord(PinRecord(testFile: appTestFile(),
     entry: "skipCell", cell: key, target: "-", domain: "-",
     verdict: pvSkipped, why: why))
+
+proc pinAdmission*(key: CellKey; refusal: Option[BuildRefusal];
+                   field: BuildField; mustMention: string) =
+  ## RFC-0016 K5b. The build-cell form of a decline for a configuration this
+  ## host cannot build (32-bit, big-endian, arm64, macOS, an unpatched Nim, an
+  ## unverified Z3): the caller runs the decision function (`admitBuild` or
+  ## `admitHost`) over a SYNTHETIC build description and passes its answer.
+  ## The platform is never faked; only the description is. The refusal must be
+  ## `field` and its message must contain `mustMention`. Recorded as
+  ## `pvDeclined` with entry `admitBuild`, like `pinRefused`.
+  if refusal.isNone:
+    pinFail("pinAdmission " & render(key) & ": the build was admitted")
+  let r = refusal.get
+  if r.field != field:
+    pinFail("pinAdmission " & render(key) & ": refused on field " & $r.field &
+            ", expected " & $field)
+  if mustMention notin r.reason:
+    pinFail("pinAdmission " & render(key) & ": the reason does not name " &
+            mustMention & ": " & r.reason)
+  writePinRecord(PinRecord(testFile: appTestFile(),
+    entry: "admitBuild", cell: key, target: "-", domain: "-",
+    verdict: pvDeclined, declineKind: "refused:" & $field,
+    native: "decision function (synthetic build)"))
+
+proc pinNever*(key: CellKey; holds: bool; native: string) =
+  ## RFC-0016 K5b. A `never` cell: a behaviour that stays as it is (by design
+  ## or by platform), with `native` saying what the host showed and `holds` the
+  ## check the caller made of it. A false `holds` fails the pin. Recorded as
+  ## `pvDeclined` with entry `pinNever`, which only a `never` cell accepts.
+  if not holds:
+    pinFail("pinNever " & render(key) & ": the claim does not hold: " & native)
+  writePinRecord(PinRecord(testFile: appTestFile(),
+    entry: "pinNever", cell: key, target: "-", domain: "-",
+    verdict: pvDeclined, declineKind: "never", native: native))

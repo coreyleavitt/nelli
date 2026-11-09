@@ -1707,6 +1707,16 @@ task test, "Run the test suite":
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",
             "tsymex_0016_k5a_segment",
+            # RFC-0016 K5b: refusals, the stock-Nim slice, the cross-build cfg suites (W-58), per-build pins (W-51).
+            "tsymex_0016_k5b_refusals",
+            "tsymex_0016_k5b_stock",
+            "tsymex_0016_k5b_pcre",
+            "tsymex_0016_k5b_cfg_mm_arc",
+            "tsymex_0016_k5b_cfg_mm_atomicarc",
+            "tsymex_0016_k5b_cfg_usemalloc",
+            "tsymex_0016_k5b_cfg_setjmp",
+            "tsymex_0016_k5b_cfg_release",
+            "tsymex_0016_k5b_cfg_fwrapv",
             # RFC-0016 K7a: Survivors, CapKind and the halted/continued sites.
             "tsymex_0016_k7a_survivors",
             "tsymex_0016_k7b_unsupported",

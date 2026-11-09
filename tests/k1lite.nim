@@ -192,7 +192,7 @@ suite "K1-0: the seven section 5.0 rows have evidence on this build row":
 
   test "a record from a non-public entry does not satisfy a key":
     let k = cellKey(axDefinedness, "div/unsigned/zero")
-    for bad in ["caller", "admitBuild", "skipCell", "pinCrash", ""]:
+    for bad in ["caller", "admitBuild", "skipCell", "pinCrash", "pinNever", ""]:
       var recs = loadRecords()
       for r in recs.mitems:
         if r.cell == k: r.entry = bad

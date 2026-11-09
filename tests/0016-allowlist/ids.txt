@@ -78,8 +78,6 @@ W-17	K5a	no cell or pin names it yet; the row's home names this slice
 W-23	W1-c1b	no cell or pin names it yet; the row's home names this slice
 W-27	K2a	no cell or pin names it yet; the row's home names this slice
 W-50	K5a	no cell or pin names it yet; the row's home names this slice
-W-51	K5b	no cell or pin names it yet; the row's home names this slice
-W-52	K5b	no cell or pin names it yet; the row's home names this slice
 W-53	K5a	no cell or pin names it yet; the row's home names this slice
 W-55	K9b	no cell or pin names it yet; the row's home names this slice
 W-61	K9d-0	no cell or pin names it yet; the row's home names this slice
@@ -105,9 +103,7 @@ W-65	H1	no cell or pin names it yet; the row's home names this slice
 W-66	H1	no cell or pin names it yet; the row's home names this slice
 W-67	H1	no cell or pin names it yet; the row's home names this slice
 W-68	H1	no cell or pin names it yet; the row's home names this slice
-STY-01	K5b	no cell or pin names it yet; the row's home names this slice
 STY-02	K4c	no cell or pin names it yet; the row's home names this slice
 STY-03	K10a-axis	no cell or pin names it yet; the row's home names this slice
 STY-07	K10a-axis	no cell or pin names it yet; the row's home names this slice
-STY-08	K5b	no cell or pin names it yet; the row's home names this slice
 STY-09	K4c	no cell or pin names it yet; the row's home names this slice

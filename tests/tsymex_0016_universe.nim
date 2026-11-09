@@ -2,7 +2,8 @@
 ##
 ## The universe is DERIVED, never hand-listed:
 ##   * every cell of every admission table that exists (`magicAxis`,
-##     the magic axis; `pcreLibs`, the PCRE-library cells of the build axis;
+##     the magic axis; `pcreLibs`, the PCRE-library cells of the build axis,
+##     and `buildCells`, its refusal, hazard and cfg-suite cells;
 ##     `typeClassTable` and `typeOpTable`, K3a's type-class and type x
 ##     memory-op axes), read through `cells()`;
 ##   * the five `BuildRow`s (`build:row/<row>`);
@@ -21,7 +22,8 @@
 ## The join. A cell is CLASSIFIED when a pin record evidences it:
 ##   * a `CellKey` cell: a record with that cell and an `exact`/`raised`/
 ##     `declined` verdict from one of section 10's six entry points; a
-##     `declined` or `never` cell also takes a `pinCrash` or `admitBuild` record;
+##     `declined` or `never` cell also takes a `pinCrash` or `admitBuild` record,
+##     and a `never` cell a `pinNever` record (K5b);
 ##   * a build row: a record whose `row` field is the row. The record carries
 ##     `rowOf`'s row, filled at write time (`pinBuildRow`); `rowOf` reads the
 ##     C compiler family, so mingw and msvc are told apart, and neither
@@ -130,6 +132,9 @@ proc deriveUniverse(): seq[UCell] =
   for c in typeOpTable.cells:
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-")
+  for c in buildCells.cells:
+    result.add UCell(key: render(c.cell),
+                     state: stateOf(c.admitted, c.intent), detail: "-")
   for r in BuildRow:
     result.add UCell(key: "build:row/" & $r, state: "row", detail: "-")
   for k in SymexErrorKind:
@@ -151,7 +156,7 @@ proc ledgerText(u: seq[UCell]): string =
     let p = scopePrefix[a] & ":"
     result.add "# axis " & scopePrefix[a] & ": " &
                $(u.countIn(p) - (if a == axBuild: u.countIn("build:row/") else: 0)) &
-               " cells" & (if a == axBuild: " (pcre libs; rows below)" else: "") & "\n"
+               " cells" & (if a == axBuild: " (pcre libs and build cells; rows below)" else: "") & "\n"
   result.add "# build rows: " & $u.countIn("build:row/") & "\n"
   result.add "# error kinds: " & $u.countIn("errorkind:") & "\n"
   result.add "# cap kinds: " & $u.countIn("capkind:") & "\n"
@@ -187,7 +192,10 @@ func evidences(u: UCell; r: PinRecord): bool =
                      r.entry in publicEntries
         let weak = (r.verdict == pvCrashed and r.entry == "pinCrash") or
                    r.entry == "admitBuild"
-        strong or (u.state in ["declined", "never"] and weak)
+        # K5b: a `never` cell stays as it is; `pinNever` records the native
+        # fact that says so. Only a `never` cell accepts it.
+        strong or (u.state in ["declined", "never"] and weak) or
+          (u.state == "never" and r.entry == "pinNever")
 
 proc loadAllow(dir: string): seq[Allow] =
   for s in scopes:

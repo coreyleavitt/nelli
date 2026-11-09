@@ -430,6 +430,22 @@
   `walkRLimit`, ResourceBudget count 17 (merge line already in `+`). Walker
   stays 299. `s8cn_step1d` is red on Linux CI only: the known INT-43 Z3 5.1.0
   rlimit skew (`linux-host-known-red.txt`).
+  K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
+  at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
+  (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by
+  `DefProfile` (checked, unchecked, fwrapv): defined / Defect / undefined with
+  a `UbKind`. Read by `lowerArith`/`depositSignedOverflow` (the overflow,
+  zero-divisor and `low(T) by -1` rows, same answers as the hand-written
+  traps), `unwrittenUb` (`read/uninitialised`), the ref/ptr ordering arm
+  (`order/pointer`, STY-03 `never`), the stale element pointer marker
+  (`grow/elemAddr`, STY-07 `never`) and `withCheckDeclines` (`call/noalias`: a
+  `{.noalias.}` parameter beside another pointer-like one declines; new). The
+  other 14 arithmetic cells are allowlisted to K10c (`tests/0016-allowlist/
+  defined.txt`). `ubFloatToIntRange` is REMOVED from `UbKind` (no producer):
+  K10a-float re-adds it, at the END of the range (after `ubSignedDivZero`),
+  with its halt site and a row (codec 4 is unreleased, so the ordinal shift
+  here needs no meta bump). `pinUndefined`
+  (`s8cu_helpers`) evidences a kind that rides a witness instead of halting.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

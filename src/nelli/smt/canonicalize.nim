@@ -309,7 +309,18 @@ const renderAsChoicesVersion* = "12"
   ##   `unicode.toLower` and `typedthreads.createThread` calls decline by their
   ##   `never` rows.
 
-const symexWalkerVersion* = "299"
+const symexWalkerVersion* = "300"
+  ## RFC-0016 K10a-axis (299->300; was 293->294 on its branch): the definedness axis
+  ## (`smt/definedness`)
+  ## answers the arithmetic undefined-behaviour sites (same answers, one
+  ## table), and three behaviours are new or renamed: a routine that declares a
+  ## `{.noalias.}` parameter beside another pointer-like one declines
+  ## (`feUnsupportedOp`, `defined:call/noalias`); the `<` over `ptr` and the
+  ## `addr s[i]` after a resize declines name their `defined:` cell; and
+  ## `ubFloatToIntRange`, which nothing produced, left `UbKind`, so
+  ## `ubIndeterminateRead` and `ubSignedDivZero` are ordinal 3 and 4 in the
+  ## persisted `witnessUndefined` (codec 4 is not released; the walker version
+  ## is in every cache key).
   ## RFC-0016 K6a, K6b (298->299): `mayWrite` is an allowlist of read-only
   ## node kinds (`nodeWritesHeap` was a denylist), so a `lent` / `let` loop
   ## whose body casts, emits, or calls an opaque routine declines. K6b: the

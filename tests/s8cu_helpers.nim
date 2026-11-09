@@ -7,6 +7,8 @@ import nelli/choice
 import nelli/int128
 import nelli/engine/types
 import nelli/smt/admission
+from nelli/smt/errorkind import UbKind
+from nelli/smt/types import undefinedKinds, `$`
 import nelli/smt/buildprofile
 export admission
 
@@ -590,6 +592,31 @@ template pinDecline*(fn: untyped; key: CellKey; kind: SymexErrorKind;
     let pdRes = symexFind(fn, target, pinSettingsConst)
     pinDeclineJudge(pdRes, key, target, kind, instantiationInfo(-1).filename,
                     needle, excluding)
+
+# --- pinUndefined ----------------------------------------------------------
+
+template pinUndefined*(fn: untyped; key: CellKey; kind: UbKind;
+                       tgt: untyped = tLabel("hit")) =
+  ## RFC-0016 K10a-axis. The run reaches the label past an operation that is
+  ## undefined in `kind` and the verdict carries it (`Soundness.witnessUndefined`
+  ## by `kind`): not trusted, a `sxSat`. Recorded as a `pvDeclined` record whose
+  ## `declineKind` is `kind`, which is what evidences `errorkind:<kind>` for a
+  ## kind that rides a witness instead of halting (no error carries it).
+  block:
+    let puRes = symexFind(fn, tgt, pinSettingsConst)
+    if puRes.trusted:
+      pinFail("pinUndefined " & render(key) & ": the verdict is trusted")
+    if puRes.status != sxSat:
+      pinFail("pinUndefined " & render(key) & ": expected sxSat, got " &
+              $puRes.status & "; errors: " & show(puRes.errors))
+    if kind notin puRes.soundness.undefinedKinds:
+      pinFail("pinUndefined " & render(key) & ": the verdict does not carry " &
+              $kind & ": " & $puRes.soundness)
+    writePinRecord(PinRecord(testFile: instantiationInfo(-1).filename,
+      entry: "symexFind", cell: key, target: describeTarget(tgt),
+      domain: "-", verdict: pvDeclined, walker: $puRes.status,
+      declineKind: $kind,
+      native: "not run: the cell is undefined behaviour"))
 
 # --- pinCap ----------------------------------------------------------------
 

@@ -94,6 +94,4 @@ W-65	H1	no cell or pin names it yet; the row's home names this slice
 W-66	H1	no cell or pin names it yet; the row's home names this slice
 W-67	H1	no cell or pin names it yet; the row's home names this slice
 W-68	H1	no cell or pin names it yet; the row's home names this slice
-STY-03	K10a-axis	no cell or pin names it yet; the row's home names this slice
-STY-07	K10a-axis	no cell or pin names it yet; the row's home names this slice
 STY-09	K4c	no cell or pin names it yet; the row's home names this slice

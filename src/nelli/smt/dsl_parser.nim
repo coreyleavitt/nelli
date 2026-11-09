@@ -45,6 +45,7 @@ import ./magic_rows  ## RFC-0016 K4a: `magicAxis`, `dispatchMagic`
 import ./stdlib_rows ## RFC-0016 K4c: `stdlibAxis`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
+import ./definedness ## RFC-0016 K10a-axis: the stale element address and `noalias` rows
 import ./dsl_typebridge
 from ./abstraction import collectVarRefs   ## RFC-0005 S8bl: `writesName`
 import ./stdlib_models
@@ -1545,6 +1546,28 @@ proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
   var ex = adm.payload.exercises
   c.checks = (c.checks * ex) + (c.checks * defaultOff)
   c.overflowModelled = coOverflow in c.checks
+proc noaliasWithPeers(impl: NimNode): seq[string] =
+  ## RFC-0016 K10a-axis. The names of the `{.noalias.}` parameters of the
+  ## routine `impl` when another parameter is pointer-like too (`ptr`, `ref`,
+  ## `var`, `openArray`, `pointer`): two such may alias, and `restrict` makes
+  ## that undefined. One pointer-like parameter has no peer to alias.
+  if impl == nil or impl.len < 4 or impl[3].kind != nnkFormalParams: return
+  proc pointerLike(t: NimNode): bool =
+    t.kind in {nnkPtrTy, nnkRefTy, nnkVarTy} or
+      t.typeKind in {ntyPtr, ntyRef, ntyVar, ntyOpenArray, ntyPointer}
+  var names: seq[string]
+  var peers = 0
+  for i in 1 ..< impl[3].len:
+    let id = impl[3][i]
+    if id.kind != nnkIdentDefs: continue
+    let like = pointerLike(id[id.len - 2])
+    for j in 0 ..< id.len - 2:
+      if like: inc peers
+      if id[j].kind == nnkPragmaExpr and id[j].len > 1:
+        for pr in id[j][1]:
+          if pr.kind == nnkIdent and pr.eqIdent("noalias") and like:
+            names.add $id[j][0]
+  if names.len > 0 and peers >= 2: result = names
 
 proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
                        body: IRStmt; inherit = false): IRStmt =
@@ -1557,10 +1580,23 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # `overflowChecks: on`. A checks-on build needs no stamp (nothing to override
   # but the `off` push, which declines below).
   let scope = arithStamp(c, inherit)
-  if c.checks == {} and scope == asInherit and c.unadmitted.len == 0:
+  let restrictParams = noaliasWithPeers(impl)
+  if c.checks == {} and scope == asInherit and c.unadmitted.len == 0 and
+     restrictParams.len == 0:
     return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
+  if restrictParams.len > 0:
+    # RFC-0016 K10a-axis: `noalias` as an `OperandClass` (the `call/noalias`
+    # row). C `restrict` makes an access through another pointer to the same
+    # object undefined; the walk does not know which parameters may alias.
+    let na = admitDefined(aoCall, ocNoalias, dsRoutine)
+    let (naKind, naWhy) = na.decline
+    decl.add ctx.declineAtSite(naKind.get(feUnsupportedOp),
+      where & ": parameter `" & restrictParams[0] & "` is `{.noalias.}` beside " &
+      "another pointer-like parameter, so the call is undefined if they " &
+      "alias, which is not modelled (" & naWhy & ")",
+      "a `noalias` parameter beside another pointer-like parameter")
   let others = c.checks - {coOverflow}
   if c.why.len > 0:
     decl.add ctx.declineMarker(feCheckOption, where &
@@ -21055,8 +21091,11 @@ proc parseStmtInner(n: NimNode,
   of nnkEmpty, nnkCommentStmt:
     # RFC-0005 S8ax: `staleElemUseMarker`'s comment is a decline.
     if n.kind == nnkCommentStmt and n.strVal.startsWith(staleElemMarkerTag):
-      return ctx.declineAtSite(feUnsupportedOp,
-        n.strVal[staleElemMarkerTag.len .. ^1],
+      # RFC-0016 K10a-axis (STY-07): the kind is the definedness axis's
+      # `grow/elemAddr` row, a `never` cell.
+      let grow = admitDefined(aoGrow, ocElemAddr, dsGrow).decline
+      return ctx.declineAtSite(grow[0].get(feUnsupportedOp),
+        n.strVal[staleElemMarkerTag.len .. ^1] & " [" & grow[1] & "]",
         "pointer to a seq element used after a resize (feUnsupportedOp)")
     mkBlock(@[])
   of nnkConstSection, nnkBindStmt, nnkMixinStmt:

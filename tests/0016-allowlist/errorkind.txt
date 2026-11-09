@@ -64,8 +64,6 @@ errorkind:seUnsupportedTableValType	K9c	no pinDecline asserts this kind; K9c fin
 errorkind:seVariantFieldOnDeclinedCtor	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seZ3StringIncomplete	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seZ3VersionMissing	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:ubFloatToIntRange	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:ubIndeterminateRead	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:weBreakOutsideLoop	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:weInternalWalkerFault	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:weRecursionCycleCut	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer

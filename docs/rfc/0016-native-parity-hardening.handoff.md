@@ -450,6 +450,18 @@
   `walkRLimit`, ResourceBudget count 17 (merge line already in `+`). Walker
   stays 299. `s8cn_step1d` is red on Linux CI only: the known INT-43 Z3 5.1.0
   rlimit skew (`linux-host-known-red.txt`).
+  int5 (`rfc-0016-int5` on main ad93de7f, walker 299 to 305): the int4b stack
+  (K10a family 300, K10b 301, K10d 302, ADM-IR 303, K10b precision 304) rebased onto
+  int4a's CI fixes, then `rfc-0016-cigate` and K7 charging (305, was 300 on its
+  branch). Configdefaults: ResourceBudget 17 (K7), SymexSettings 8 (K10b added
+  `wholeRunDefinedness`, K10d removed `arithChecks`); S6a counts 2 Prune sites.
+  K10d follow-up: `tests/tsymex_0016_k10d_drain_checksoff.nim` pins that, in an
+  `--overflowChecks:off` build, nothing forks an `OverflowDefect` (int8 wrap defined,
+  int wide overflow is the axis's halt only). The drain's own gate is not reachable alone
+  (the deposit site is already decided by the axis), so RED was shown by breaking both
+  layers. The 0.10.0 migration note records the walker-work charge and the spend log's
+  4th column. PENDING: the default `walkRLimit` (1e9) re-measure under the charge; the
+  control loop is measuring it on eos.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

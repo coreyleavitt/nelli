@@ -1,0 +1,135 @@
+## RFC-0016 K10b -- whole-run definedness (section 9.1 item 3), a round.
+##
+## A trusted `sxSat` needs the whole run defined, not only its prefix: the
+## explore walk stops at the label (`shouldStop`), so what follows it was
+## never seen (the 0.9.2 known gap). Under `SymexSettings.wholeRunDefinedness`
+## the winner is checked by a second walk from the entry in concrete-follow
+## mode under the witness's model pins, past the label to a routine exit. An
+## undefined side the pins do not rule out, an opaque call whose body may be
+## undefined (the parameterised `scanOpaqueDefects`), a decline, a budget or a
+## lossy witness untrusts the verdict through `Soundness.witnessUndefined`,
+## which replay cannot lift. Gate off: 0.9.2's behaviour exactly.
+import std/[unittest, strutils]
+import nelli
+import nelli/symex
+import nelli/db
+import ./s8cu_helpers
+
+const gateOff = block:
+  var s = pinSettingsConst
+  s.wholeRunDefinedness = false
+  s
+
+# The file builds with `--overflowChecks:off` (its `.nim.cfg`): the
+# `dpUnchecked` profile, under which a signed overflow is `ubSignedOverflow`
+# (K10c pins the row). A per-routine push is W1-d2's decline route instead.
+proc sutTailOverflow(x: int64): int64 =
+  ## The label, then a signed overflow every input past the label takes.
+  if x > 100: symexTarget("hit")
+  result = x + high(int64)
+
+proc sutTailBranch(x: int64) =
+  ## The label at `x == 5`; the overflow sits on a branch the witness does
+  ## not take.
+  if x == 5: symexTarget("hit")
+  if x > 100:
+    let y {.used.} = x + high(int64)
+
+proc sutTwoLabels(x: int64): int64 =
+  ## Two labels: `a` is followed by an overflow, `b` is not.
+  if x > 100:
+    symexTarget("a")
+    result = x + high(int64)
+  elif x == 3:
+    symexTarget("b")
+    result = x
+
+proc cAbs(x: cint): cint {.importc: "abs", header: "<stdlib.h>".}
+
+proc sutTailForeign(x: int32) =
+  ## The label, then a foreign call with no row: its body may be undefined.
+  if x == 5: symexTarget("hit")
+  discard cAbs(cint(x))
+
+type
+  LossyStub = object
+    ## A plain object that looks like a variant (a leading `kind` and more
+    ## than two fields): the witness reader renders it as `default(LossyStub)`,
+    ## not as the model (`rendersAsDefaultObject`, `wfLossy`), so the witness
+    ## cannot be followed past the label.
+    kind: int
+    a: int
+    b: int
+
+proc sutLossy(v: LossyStub; x: int64) =
+  if x == 7: symexTarget("hit")
+
+suite "K10b: whole-run definedness":
+  test "version floor":
+    check parseInt(symexWalkerVersion) >= 301
+
+  test "(a) an undefined op after the label untrusts the sxSat, carrying its kind":
+    pinUndefined(sutTailOverflow, cellKey(axDefinedness, "add/signedWide"),
+                 UbKind(ubSignedOverflow))
+    let r = symexFind(sutTailOverflow, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check not r.trusted
+    check r.soundness.undefinedKinds == {UbKind(ubSignedOverflow)}
+    check r.witness[0] > 100
+
+  test "(b) an undefined op on a branch the witness does not take: trusted":
+    let r = pinExact(sutTailBranch, cellKey(axDefinedness, "add/signedWide"),
+                     tLabel("hit"))
+    check r.status == sxSat
+    check r.trusted
+    check r.witness[0] == 5
+
+  test "(c) an opaque foreign call with no row after the label: untrusted":
+    pinUndefined(sutTailForeign, cellKey(axDefinedness, "call/opaqueBody"),
+                 UbKind(ubTailUnverified))
+    let r = symexFind(sutTailForeign, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check not r.trusted
+    check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
+    check r.witness[0] == 5'i32
+
+  test "(d) a lossy witness cannot be followed: untrusted (fail closed)":
+    let r = symexFind(sutLossy, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check not r.trusted
+    check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
+
+  test "(e) gate off: 0.9.2's verdict, trusted on its prefix":
+    let r = symexFind(sutTailOverflow, tLabel("hit"), gateOff)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    check r.soundness.undefinedKinds == {}
+    check r.witness[0] > 100
+    let r2 = symexFind(sutTailForeign, tLabel("hit"), gateOff)
+    check r2.status == sxSat
+    check r2.trusted
+    let r3 = symexFind(sutLossy, tLabel("hit"), gateOff)
+    check r3.status == sxSat
+    check r3.trusted
+
+  test "(f) symexFindAllWitnesses: trust per finding, one walk each":
+    let fs = symexFindAllWitnesses(sutTwoLabels, inMemoryDatabase(),
+                                   pinSettingsConst)
+    var sawA, sawB = false
+    for f in fs:
+      checkpoint f.targetDesc & ": " & $f.soundness
+      if "\"a\"" in f.targetDesc:
+        sawA = true
+        check f.status == sfSat
+        check not f.trusted
+        check f.soundness.undefinedKinds == {UbKind(ubSignedOverflow)}
+      elif "\"b\"" in f.targetDesc:
+        sawB = true
+        check f.status == sfSat
+        check f.trusted
+        check f.soundness.undefinedKinds == {}
+    check sawA and sawB

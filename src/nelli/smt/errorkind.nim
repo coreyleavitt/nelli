@@ -973,6 +973,16 @@ type
                           ## raise under any check profile), which is
                           ## undefined. Appended so every earlier ordinal
                           ## holds.
+    ubTailUnverified      ## RFC-0016 K10b (section 9.1 item 3). The whole-run
+                          ## definedness gate could not show the run defined
+                          ## past the label: an opaque call whose body is
+                          ## foreign or unreadable (row `call/opaqueBody`), a
+                          ## decline or an exhausted budget on the second
+                          ## walk, or a lossy witness it cannot follow. Fail
+                          ## closed: the `sxSat` stands but is not trusted and
+                          ## replay cannot lift it. Never a halt of the
+                          ## explore walk and never a `tUndefined` hit.
+                          ## Appended so every earlier ordinal holds.
     feHostUnadmitted      ## RFC-0016 K5a (section 8.3). The host half of the
                           ## build profile is not a verified one: the loaded
                           ## libz3 is not 4.13.4 or 5.1, or no build row
@@ -1005,7 +1015,7 @@ type
                           ## after `feUnadmitted`, so every earlier ordinal
                           ## holds.
 
-  UbKind* = range[ubUnsignedDivZero .. ubFloatToIntRange]
+  UbKind* = range[ubUnsignedDivZero .. ubTailUnverified]
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
     ## the contiguous `ub*` members of `SymexErrorKind`.
 static:
@@ -1018,4 +1028,5 @@ static:
            ord(ubSignedOverflow) + 1 == ord(ubIndeterminateRead) and
            ord(ubIndeterminateRead) + 1 == ord(ubSignedDivZero) and
            ord(ubSignedDivZero) + 1 == ord(ubFloatToIntRange) and
+           ord(ubFloatToIntRange) + 1 == ord(ubTailUnverified) and
            ord(high(UbKind)) - ord(low(UbKind)) < 30

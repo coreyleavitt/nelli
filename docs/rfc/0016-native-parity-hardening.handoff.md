@@ -539,6 +539,71 @@
   `formatUndefinedFindings(report)` is the human summary. Pin:
   `tfuzzconcolicundefined` (registered in `nelli.nimble`; a `fuzzConcolic`
   campaign over `a div b > a` with `b == 0` at one magic draw).
+  K10b (`rfc-0016-k10b` on `rfc-0016-int4b`, walker 300->301, a *round*):
+  whole-run definedness (section 9.1 item 3). `SymexSettings.wholeRunDefinedness`
+  (default `true`, in the cache key through `canonicalize`): a clean label
+  `sxSat` is checked by a second walk (`verifyTailDefined`, `runtime.nim`) from
+  the entry in `wmFollowConcrete` under the witness's model pins
+  (`RawWitness.pins`: `leaf == model(leaf)` over `svLeafTerms` of every param,
+  built in `trySolve` while the model is live; an unpinnable leaf stays free,
+  which only widens the check), with a sentinel label so `shouldStop` never
+  fires, to the routine's exits. Every `UbKind` a halt records on a side the
+  pins do not rule out (`haltUndefined`'s `concretelyInfeasible` test) joins
+  `Soundness.witnessUndefined`; a decline, a budget, `walkWorkExhausted` before
+  or after the walk, or a lossy witness (`gateLossyWinner` in `symex.nim`,
+  before replay) adds the new `ubTailUnverified` (appended to `UbKind`,
+  ordinal 6, `classOf` `dcOmitted`). `trustedSat` needs the set empty and
+  replay cannot lift it. The explore walk is untouched: the gate only moves
+  trust. `scanOpaqueDefects` is parameterised (`IRStmt.opaqueUndefined`,
+  emitted through `ubMaskOf`/`ubSetOf`, canonical key `;undef=`): a foreign or
+  unreadable body (closure, method, re-raise, too deep) answers
+  `ubTailUnverified` through the new definedness-axis row `call/opaqueBody`
+  (`ocOpaqueBody`, `dsOpaque`, `opaqueBodyDefinedness`); float-source
+  conversions answer the `convert/floatToInt` row; overflow and division
+  magics read the owner's check options (`ownerChecksOn`) and answer
+  `ubSignedOverflow` / `ubSignedDivZero` / `ubIntMinModMinusOne` when the owner
+  is unchecked, `ubUnsignedDivZero` for `DivU`/`ModU` always (W1-d1b's open
+  end). On the second walk `opaqueRaiseForks` (under `WalkCtx.tailGate`, which
+  the concolic collect driver never sets) ends every path that concretely
+  reaches such a call. Pins: `tests/tsymex_0016_k10b_round.nim` (+ `.nim.cfg`
+  `--overflowChecks:off`, the `dpUnchecked` route; a `{.push.}` is W1-d2's
+  decline): (a) overflow after the label untrusted with `ubSignedOverflow`
+  (`pinUndefined` on `add/signedWide`), (b) the same op on a branch the witness
+  does not take trusted (`pinExact`), (c) a foreign call after the label
+  untrusted (`pinUndefined` on `call/opaqueBody`), (d) a lossy shape
+  (`rendersAsDefaultObject`) untrusted, (e) gate off is 0.9.2's verdict,
+  (f) `symexFindAllWitnesses` trusts per finding. Forks resolved by
+  recommendation: gate default ON (a round is for flipping trust; the key
+  carries it); ONE new kind for every fail-closed answer rather than one per
+  cause (the cause is in the message; a kind per cause would widen `UbKind` for
+  no reader); the opaque "may be undefined" answer is a table row, not a
+  hardcoded kind, so the universe ledger evidences it; a lossy witness fails
+  closed as the RFC says even though the model pins could follow it (precision
+  follow-up: run the second walk for a lossy winner too, since `pins` do not
+  need the rendered value). The 0.9.2 known gap is closed in the RFC, the
+  migration note and CHANGELOG. Perf reading (K10 SUT set, gate on vs off, two
+  lanes side by side so wall time is indicative): explore units are identical
+  on and off in every file (the explore walk is untouched); the tail walks'
+  own units (`k10b-tail` lines of `NELLI_WALK_UNITS_LOG`) per file, explore ->
+  tail: k10aa_axis 4815 -> 12348, k10af_float 215072 -> 24553, k10af_sites
+  211776 -> 7537, k10af_sites_checksoff 78319 -> 39013, k10at_target 1549055 ->
+  532, k10b_round 7389 -> 499300 (the outlier: follow-mode halts under pins on
+  wide int64 overflow sides; a precision/perf follow-up), k10c_fma 75314 ->
+  2026, k10c_ubsan 88278 -> 550, the concolic pair 0 (no label walks). Wall
+  time of the whole dt-bounded run (compile included), on vs off, seconds:
+  axis 72/53, concolic 49/53, concolic_checksoff 80/57, float 64/61, sites
+  70/50, sites_checksoff 57/55, target 90/64, k10b 55/55, fma 76/68, ubsan
+  72/47; every gate-on run green (rc 0, 0 failures); under `-d:nelliGateOff`
+  only `k10b_round`'s four trust tests fail, as they must. Not run before the
+  handoff (context line reached): the rest of the final batch
+  (`tfuzzconcolicundefined`, `tsymex_0016_w1d*`, `CR2_cachekey`, `k2a_census`,
+  `N2_kindgate_audit`, `s8ab_letaudit`, `s1_lattice`, the five
+  `scanOpaqueDefects`/`mkOpaqueCall` consumers `k4a_guard`, `163rev_inert_argfork`,
+  `g3fix_walkergap`, `r6_r6_emit_roundtrip`, `rfc0005_w3_opqchecks`, and
+  `tsymex_0016_universe` with the ledger regen); the script is
+  `scratchpad/k10b/batch.sh`. `check-readme-kinds.sh` and `check-worklist.sh
+  check` pass. No worklist TOML row is owned by K10b (the W1-d1b hand row
+  carries the note).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

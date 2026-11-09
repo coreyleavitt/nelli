@@ -734,6 +734,15 @@ type
       ## Empty for a SUT with no ref/ptr params (backward compat). Built in
       ## `extractWitness` from the live Z3 model; threaded out through
       ## `RawResult.witness` and mirrored onto `SymexResult.heapSnapshot`.
+    pins: seq[Z3Bool]
+      ## RFC-0016 K10b. The model's choices as equalities over the initial
+      ## environment's leaf terms (`svLeafTerms`, `leaf == model(leaf)`), one
+      ## per pinnable leaf of every parameter, built in `trySolve` while the
+      ## model is live. The whole-run gate's second walk runs under them as
+      ## its `concreteEq`, so what it follows is the model, not the rendered
+      ## witness. A leaf that cannot be pinned is left free: the gate then
+      ## over-approximates (a side the solver can reach with any value of it
+      ## is undefined), never under. In-process only, never persisted.
 
   RawDiagnostic* = object
     ## ADR-0012 D2. One non-winning sxRaised finding from `w.found`,
@@ -12655,6 +12664,27 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
   # pointee) -- the typed witness's `resolveRef` reads them there.
   result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
+proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]): seq[Z3Bool] =
+  ## RFC-0016 K10b. `RawWitness.pins`: `leaf == model(leaf)` for every leaf
+  ## term of every parameter's initial value the model can evaluate. A
+  ## parameter whose value does not fit its type's leaf split (a placeholder
+  ## some upstream degrade left) or a leaf the model cannot evaluate is left
+  ## free, which only widens what the second walk must show defined.
+  for p in params:
+    if not env.hasKey(p.name): continue
+    let sv = env[p.name]
+    if not svFitsHeapTy(sv, p.ty): continue
+    var leaves: seq[Z3AnyAst]
+    try:
+      leaves = svLeafTerms(sv, p.ty)
+    except CatchableError:
+      continue
+    for leaf in leaves:
+      try:
+        result.add bsEqZ(leaf, m.eval(leaf))
+      except CatchableError:
+        discard
+
 var symexTargetSolveStats* {.threadvar.}:
     tuple[budgetOut, declined, slowSat, units: int]
   ## RFC-0005 S8y. `solveTargetHit`'s own tally, never reset by the engine
@@ -15995,8 +16025,9 @@ proc trySolve(ctx: Z3Context,
     currentWinningGlobals = @[]                     ## RFC-0005 S8bn
     for k in path.env.keys:
       if isGlobalEnvName(k): currentWinningGlobals.add k
-    (status: sxSat, witness: extractWitness(m, envForExtract, params),
-     undefWhy: "")
+    var wit = extractWitness(m, envForExtract, params)
+    wit.pins = modelPins(m, envForExtract, params)   ## RFC-0016 K10b
+    (status: sxSat, witness: wit, undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
   of zsUnknown:
@@ -16887,6 +16918,14 @@ type
                       ## free closures). Written by `applyClosureGround`,
                       ## read by `drainClosureExitHeap`, reset by
                       ## `seedCallerHeapInWalkCtx` (per-call reset, NI-1).
+    tailGate: bool
+                      ## RFC-0016 K10b. This is the whole-run gate's second
+                      ## walk (`verifyTailDefined`): `wmFollowConcrete` under
+                      ## the winner's model pins, past the label. The one
+                      ## reader is `opaqueRaiseForks`, which ends a path at an
+                      ## opaque call whose body may be undefined
+                      ## (`IRStmt.opaqueUndefined`); the concolic collect
+                      ## driver, also `wmFollowConcrete`, never sets it.
     concreteEq: seq[Z3Bool]
                       ## RFC-fuzzer-nextgen G1b. Only meaningful when
                       ## `mode == wmFollowConcrete`: one `drawVar == concreteLit`
@@ -19134,6 +19173,10 @@ proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
   if w.target.kind == stkRaisedExn and w.target.typeFilter.len > 0:
     consider(w.target.typeFilter)
 
+proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
+                           conds: seq[Z3Bool], settings: SymexSettings): bool
+  ## RFC-0016 K10b fwd-decl (defined with the follow-mode helpers below).
+
 proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
                       stmt: IRStmt): seq[Path] =
   ## RFC-0005 S8ax. The raises of an inert opaque call that returned on
@@ -19161,6 +19204,28 @@ proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
   ##   S8be such an arm declined the call (`feOpaqueCallUnmodelled`). An arm
   ##   naming a type the hierarchy does not know still does: it may be a
   ##   subtype the split cannot see.
+  # RFC-0016 K10b (section 9.1 item 3): on the whole-run gate's second walk
+  # an opaque call whose body may be undefined (`IRStmt.opaqueUndefined`, the
+  # parameterised scan's answer) ends every path that concretely reaches it:
+  # what the call does is not modelled, so nothing past it is shown defined.
+  # The kinds are recorded as the halt's reason; `verifyTailDefined` folds
+  # them into the winner's `witnessUndefined`. A path the pins rule out
+  # records nothing. The explore walk and the concolic collect never enter.
+  if w.tailGate and stmt.opaqueUndefined != {}:
+    var reached = false
+    for p in paths:
+      if not concretelyInfeasible(w.z3, w.concreteEq,
+                                  p.pc & p.defectSurvivorPc, w.settings):
+        reached = true
+    if reached:
+      var kinds: seq[string]
+      for k in stmt.opaqueUndefined: kinds.add $k
+      for k in stmt.opaqueUndefined:
+        w.halted(k,
+          "opaque call `" & stmt.callee & "` after the label: its body may " &
+          "be undefined (" & kinds.join(", ") & "), so the run is not shown " &
+          "defined past it (RFC-0016 K10b whole-run gate)")
+      return @[]
   let raised = stmt.opaqueRaises & stmt.opaqueDefects
   if raised.len == 0: return paths
   let dRet = w.degrade(feOpaqueEffectHavoc,
@@ -29440,6 +29505,85 @@ template drainSinkUnion(dst: var seq[SymexErrorInfo]; w: WalkCtx;
   ## buys real signature documentation plus type-checking at the call site.
   drainDedupedByMsg(dst, w.walkField & threadVarSrc)
 
+proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
+                       ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
+                       pins: seq[Z3Bool]): set[UbKind] =
+  ## RFC-0016 K10b (section 9.1 item 3). The whole-run gate's second walk:
+  ## from the entry, in concrete-follow mode under the winner's model `pins`
+  ## (`RawWitness.pins`), past the label to a routine exit. The target is a
+  ## label no program carries, so `shouldStop` never ends it on a hit; what
+  ## ends it is the paths' own exits, a halt, or the run's work budget.
+  ## Returns the kinds the run is not shown defined in:
+  ##   * each `UbKind` a halt recorded (`haltUndefined` on a side the pins do
+  ##     not rule out; `opaqueRaiseForks` at an opaque call whose body may be
+  ##     undefined);
+  ##   * `ubTailUnverified` for anything else that taints the run: a decline
+  ##     reached, an exhausted budget (`beBudgetExhausted` and its siblings),
+  ##     the walk work cap (`walkWorkExhausted`), a parse-time decline a path
+  ##     reached. Fail closed: a tail the walk could not model is not defined.
+  ## Empty: every undefined side was `concretelyInfeasible` under the pins and
+  ## nothing declined, so the witness's whole run is defined.
+  let lowerBase = loweringDegradeErrors.len
+  if walkWorkExhausted:
+    return {UbKind(ubTailUnverified)}   # no budget left to look with
+  let unitsBefore = walkUnitsSpent()
+  defer:
+    # The K10b perf reading: the tail walk's own units, as a line of the
+    # `NELLI_WALK_UNITS_LOG` file beside the explore walk's.
+    if getEnv(walkUnitsLogEnv).len > 0:
+      let spent = walkUnitsSpent() - unitsBefore
+      try:
+        var f: File
+        if open(f, getEnv(walkUnitsLogEnv), fmAppend):
+          f.write($spent & "\tk10b-tail\t" & $result & "\n")
+          f.close()
+      except IOError, OSError:
+        discard
+  let exitClock = newExitClock()
+  var w = WalkCtx(
+    extHardMark: -1,
+    exitClock: exitClock, topExits: exitClock.newExits(CallExits),
+    frame: CallFrameCtx(exits: exitClock.newExits(FrameExits)),
+    z3: ctx,
+    target: SymexTarget(kind: stkLabel, label: "__nelli_k10b_tail_unreached__"),
+    params: prog.params, mode: wmFollowConcrete, tailGate: true,
+    found: @[], settings: settings, procs: prog.procs,
+    callStack: @[], callStats: initTable[string, CallStat](),
+    callCache: initTable[string, seq[CallCacheEntry]](),
+    activeCalls: initHashSet[string](), initialEnv: env,
+    concreteEq: pins,
+    statics: WalkerStatics(exnTable: exnTypeTable,
+                           userExnHierarchy: prog.userExnHierarchy,
+                           sutRetTy: prog.retTy,
+                           globals: globalsTable(prog.globals)),
+  )
+  for tid, srt in currentRefSorts: w.statics.refSorts[tid] = srt
+  for tid, nc in currentNilConsts: w.statics.nilConsts[tid] = nc
+  for dn, de in currentDistinctSorts:
+    if not w.statics.distinctSorts.hasKey(dn):
+      w.statics.distinctSorts[dn] = de
+      w.statics.distinctSortNames.add dn
+  for ck, fd in currentClosureSyms:
+    if not w.statics.closureSyms.hasKey(ck): w.statics.closureSyms[ck] = fd
+  for sk, cb in currentClosureBodies:
+    if not w.statics.closureBodies.hasKey(sk): w.statics.closureBodies[sk] = cb
+  currentWalkCtxPtr = addr w
+  let initial = initialWalkPath(initialPC, env)
+  discard walk(prog.body, @[initial], w)
+  currentWalkCtxPtr = nil
+  stampLoweringPendingLeak(w)
+  if walkWorkExhausted: result.incl UbKind(ubTailUnverified)
+  var errs = w.walkDegradeErrors & w.heapDepthErrors & w.newFieldZeroErrors &
+             w.closureCallErrors
+  if loweringDegradeErrors.len > lowerBase:
+    errs.add loweringDegradeErrors[lowerBase .. ^1]
+  errs.add reachJoinParseErrors(prog.parseErrors, errs)
+  for e in errs:
+    if ord(e.kind) >= ord(low(UbKind)) and ord(e.kind) <= ord(high(UbKind)):
+      result.incl UbKind(e.kind)
+    elif taintsRun(e):
+      result.incl UbKind(ubTailUnverified)
+
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult =
@@ -30014,6 +30158,19 @@ proc runSymexImpl(prog: SymexProgram,
     r.errors.add parseErrs         ## Phase 15 G1c; RFC-0005 S9: reach-joined
     r.errors.add closureErrs       ## Phase 15 C2b
     r.candidates = toCandidates(w.candidates)    ## RFC-0005 S1c / S10
+    # RFC-0016 K10b (section 9.1 item 3): a clean label `sxSat` is trusted
+    # only when the whole run is defined. The explore walk stopped at the
+    # hit, so the tail is checked by a second walk under the witness's model
+    # pins (`verifyTailDefined`); the kinds it is not shown defined in join
+    # `witnessUndefined`, which `trustedSat` requires empty and replay cannot
+    # lift (item 4). A verdict already carrying a kind needs no second look;
+    # a raise ends the run at the raise, so `sxRaised` is not gated.
+    if settings.wholeRunDefinedness and r.status == sxSat and
+       target.kind == stkLabel and r.soundness.witnessUndefined == {}:
+      let tail = verifyTailDefined(prog, settings, ctx, env, initialPC,
+                                   r.witness.pins)
+      if tail != {}:
+        r.soundness.witnessUndefined = ubOrdinals(tail)
     r
   elif decision.status == sxUnknown:
     # v64 (chapulin catalog #5(b)): Invariant-7 BACKSTOP. Every sxUnknown

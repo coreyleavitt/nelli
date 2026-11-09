@@ -309,7 +309,19 @@ const renderAsChoicesVersion* = "12"
   ##   `unicode.toLower` and `typedthreads.createThread` calls decline by their
   ##   `never` rows.
 
-const symexWalkerVersion* = "300"
+const symexWalkerVersion* = "301"
+  ## RFC-0016 K10b (300->301): whole-run definedness (section 9.1 item 3). A
+  ## trusted `sxSat` needs the whole run defined: under
+  ## `SymexSettings.wholeRunDefinedness` (on by default, keyed) the winner is
+  ## checked by a second walk from the entry in concrete-follow mode under the
+  ## witness's model pins, past the label; an undefined side the pins do not
+  ## rule out, an opaque call whose body may be undefined (the parameterised
+  ## `scanOpaqueDefects`, `IRStmt.opaqueUndefined`, in the canonical form as
+  ## `;undef=`), a decline, a budget or a lossy witness adds its kind to
+  ## `Soundness.witnessUndefined`; `ubTailUnverified` is appended to `UbKind`
+  ## (ordinal 6) for the unanswerable ones and row `call/opaqueBody` joins the
+  ## definedness axis. The 0.9.2 known gap (an undefined op after the label
+  ## did not untrust an `sxSat`) is closed.
   ## RFC-0016 K10a-axis (299->300; was 293->294 on its branch): the definedness axis
   ## (`smt/definedness`)
   ## answers the arithmetic undefined-behaviour sites (same answers, one
@@ -6359,6 +6371,9 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
        else: "") &
       (if s.opaqueHeapAll: ";heapAll" else: "") &
       (if s.opaqueRaises.len > 0: ";raises=[" & s.opaqueRaises.join(",") & "]"
+       else: "") &
+      (if s.opaqueUndefined != {}:   # RFC-0016 K10b
+         ";undef=" & $ubMaskOf(s.opaqueUndefined)
        else: "") &
       (if s.opaqueDefects.len > 0:   # RFC-0005 S8be
          ";defects=[" & s.opaqueDefects.join(",") & "]"

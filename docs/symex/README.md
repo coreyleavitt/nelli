@@ -439,6 +439,17 @@ Two things can happen to the omission, by kind:
   (`undefinedKinds()`), which a replay cannot lift: the witness is not
   `trusted()` and is not run in your process by `assertCoveredBy` or
   `symexForAll`.
+- A trusted `sxSat` needs the whole run defined, not only the prefix up to
+  the label (RFC-0016 K10b, `SymexSettings.wholeRunDefinedness`, on by
+  default). The winner is checked by a second walk from the entry under the
+  witness's model values, past the label to the routine's exits: an
+  undefined operation that walk reaches, an opaque call whose body may be
+  undefined, a decline, an exhausted budget or a witness that renders
+  lossily puts a kind into `Soundness.witnessUndefined` and the verdict is
+  not `trusted()`. `ubTailUnverified` is the kind for the answers the walk
+  cannot give (the body it cannot read, the decline, the budget, the lossy
+  witness); the others carry their own kind. Set the field `false` for the
+  prefix-only verdict of 0.9.2.
 - The arithmetic kinds (`ubUnsignedDivZero`, `ubIntMinModMinusOne`,
   `ubSignedOverflow`, `ubSignedDivZero`) and `ubFloatToIntRange` halt the path
   at the operation. The
@@ -482,6 +493,7 @@ Two things can happen to the omission, by kind:
 | `ubIndeterminateRead` | a read of a `{.noinit.}` local before any write. | Initialise it. |
 | `ubSignedDivZero` | `x div 0` or `x mod 0` on a signed type in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`). Nim emits its zero check under `overflowChecks` alone, so the C division is reached and is undefined (SIGFPE on x86-64). With the checks on it is a `DivByZeroDefect`. | Guard the divisor, or build with overflow checks on. |
 | `ubFloatToIntRange` | a float to int conversion whose operand is NaN, infinite or whose truncation does not fit the target type. Nim 2.2.10 emits a plain C cast and range-checks the cast value, so no check profile raises and the cast is undefined (the value differs by platform). | Bound the operand before the conversion. |
+| `ubTailUnverified` | the whole-run definedness gate (RFC-0016 K10b) could not show the witness's run defined past the label: an opaque call whose body the walker cannot read (a foreign routine, a closure, a method, a re-raise, a body too deep to scan), a decline or a budget on the second walk, or a witness that renders lossily. The `sxSat` stands and is not `trusted()`. | Mark the callee `{.symexTransparent.}` or give it a body the walker can read; raise the budget; or set `wholeRunDefinedness = false` to accept a prefix-only verdict. |
 
 ### Build and check taints
 

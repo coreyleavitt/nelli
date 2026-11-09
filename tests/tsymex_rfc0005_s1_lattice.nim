@@ -91,7 +91,7 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         # RFC-0016 W1-b: a local pragma outside the allowlist.
                         feLocalPragma}
   # RFC-0016 W1-d1a: the undefined-behaviour kinds (`dcOmitted`).
-  const ubKinds = {ubUnsignedDivZero .. ubFloatToIntRange}
+  const ubKinds = {ubUnsignedDivZero .. ubTailUnverified}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:
@@ -99,9 +99,9 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
         check classOf(k) == dcNoAnswer
 
   test "the ub kinds are contiguous, dcOmitted, and each is produced or allowlisted (RFC-0016 W1-d1a)":
-    check ord(high(UbKind)) - ord(low(UbKind)) == 5
+    check ord(high(UbKind)) - ord(low(UbKind)) == 6
     check low(UbKind) == ubUnsignedDivZero
-    check high(UbKind) == ubFloatToIntRange
+    check high(UbKind) == ubTailUnverified   # RFC-0016 K10b, appended
     for k in SymexErrorKind:
       check (k in ubKinds) == (k in {low(UbKind) .. high(UbKind)})
     # Every kind has a producer (K10a-axis): the definedness table row the

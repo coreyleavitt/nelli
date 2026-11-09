@@ -54,6 +54,10 @@ type
                                       ## wider signed C integer (`floatToIntLowering`);
                                       ## undefined outside THAT type's range,
                                       ## a defined wrap inside it
+    ocOpaqueBody                      ## RFC-0016 K10b: an opaque call whose
+                                      ## body the defect scan cannot read
+                                      ## (foreign, a closure, a method, too
+                                      ## deep): what it does is not modelled
   DefProfile* = enum                  ## the build's arithmetic
     dpChecked                         ## Nim's overflow and zero checks are on
     dpUnchecked                       ## checks off, the C operation as is
@@ -72,6 +76,7 @@ type
     dsGrow                            ## the stale element pointer marker
     dsRoutine                         ## a routine's parameters
     dsConvert                         ## the float -> int conversion drain
+    dsOpaque                          ## RFC-0016 K10b: the opaque-call scan
   DefKey = tuple[key: string, row: Row[DefSite, DefRule]]
 
 func defined(): Definedness = Definedness(kind: dkDefined)
@@ -105,6 +110,7 @@ func classKey(c: OperandClass): string =
   of ocNoalias: "noalias"
   of ocFloatToInt: "floatToInt"
   of ocFloatToIntVia: "floatToIntVia"
+  of ocOpaqueBody: "opaqueBody"
 
 func defKey*(op: ArithOp; c: OperandClass): string =
   opKey(op) & "/" & classKey(c)
@@ -186,6 +192,15 @@ func defRows(): seq[DefKey] =
       "value inside it that does not fit the target converts to the target " &
       "by the C integer conversion, which gcc defines as modulo 2^n " &
       "(implementation-defined, documented) and is not undefined"))
+  result.add (defKey(aoCall, ocOpaqueBody),
+    modelled[DefSite, DefRule](
+      [undef(ubTailUnverified), undef(ubTailUnverified),
+       undef(ubTailUnverified)], {dsOpaque},
+      "RFC-0016 K10b: an opaque call whose body the defect scan cannot read " &
+      "(foreign code with no row, a closure, a method, a re-raise, a body " &
+      "deeper than the scan reads) may do anything, undefined operations " &
+      "included. Under the whole-run gate it answers `may be undefined`; the " &
+      "explore walk forks its Defects as before and walks on"))
 
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())
 
@@ -234,6 +249,14 @@ func convertDefinedness*(c: OperandClass; p: DefProfile): Definedness =
   ## row of class `c` for the build's profile (undefined under every one).
   let a = admitDefined(aoConvert, c, dsConvert)
   doAssert a.admitted, "definedness: no dsConvert row " & defKey(aoConvert, c)
+  a.payload[p]
+
+func opaqueBodyDefinedness*(p: DefProfile): Definedness =
+  ## RFC-0016 K10b. The opaque-call scan's read for a body it cannot see:
+  ## the answer of the admitted `dsOpaque` row (undefined under every
+  ## profile, `ubTailUnverified`).
+  let a = admitDefined(aoCall, ocOpaqueBody, dsOpaque)
+  doAssert a.admitted, "definedness: no dsOpaque row"
   a.payload[p]
 
 func readUb*(): UbKind =

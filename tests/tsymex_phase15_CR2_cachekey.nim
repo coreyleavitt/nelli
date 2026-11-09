@@ -1130,7 +1130,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 K2c: 297->298 (and K7's `walkRLimit` halt, same number).
     ## RFC-0016 K6 (K6a-c): 298->299.
     ## RFC-0016 K10a-axis: 299->300.
-    check symexWalkerVersion == "300"
+    ## RFC-0016 K10b: 300->301.
+    check symexWalkerVersion == "301"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

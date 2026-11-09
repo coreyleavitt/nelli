@@ -1516,6 +1516,16 @@ type
                          ## `"Defect"` for one the scan cannot name). The
                          ## walk forks a raise of each. Replaces S8ax's
                          ## `opaqueMayDefect` flag, which forked none.
+      opaqueUndefined*: set[UbKind]
+                         ## RFC-0016 K10b (section 9.1 item 3). For an inert
+                         ## opaque call: the whole-run gate's answer for its
+                         ## body, the undefined-behaviour kinds the
+                         ## parameterised `scanOpaqueDefects` found it may
+                         ## reach (an unchecked signed op in a checks-off
+                         ## owner, an unsigned divisor, a float -> int
+                         ## conversion, `ubTailUnverified` for a body it
+                         ## cannot read). Read only by the gate's second walk;
+                         ## the explore walk forks `opaqueDefects` as before.
       cGuardRoots*: seq[string]
                          ## RFC-0005 S8an. The IR names of the ROOT
                          ## variables of this call's `var` and `addr`
@@ -2378,6 +2388,20 @@ type
     inlinePolicy*: InlinePolicy = ipHybrid
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
+    wholeRunDefinedness*: bool = not defined(nelliGateOff)
+      ## RFC-0016 K10b (section 9.1 item 3). A trusted `sxSat` needs the whole
+      ## run defined, not only the prefix up to the label: the explore walk
+      ## stops at the first hit, so with this on the winner is checked by a
+      ## second walk from the entry in concrete-follow mode under the
+      ## witness's model pins, past the label to a routine exit. An undefined
+      ## side the pins do not rule out, an opaque call whose body may be
+      ## undefined, a decline, an exhausted budget or a lossy witness adds its
+      ## `UbKind` to `Soundness.witnessUndefined` (`ubTailUnverified` for the
+      ## unanswerable ones), so the verdict is not `trusted()` and replay
+      ## cannot lift it. Off: 0.9.2's behaviour, the `sxSat` trusted on its
+      ## prefix. In the cache key. The default is `false` only under
+      ## `-d:nelliGateOff`, the perf reading's build (the K10 SUT set with the
+      ## gate off against the default); it is not a supported configuration.
     replay*: bool = true
       ## RFC-0005 S10 (§2.3 rule 3). When a run's only SAT lies on a
       ## replay-eligible `scSpurious` path, the entry macro EXECUTES `fn` on
@@ -2822,9 +2846,12 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feHostUnadmitted: dcNoAnswer
     # RFC-0016 K5a: the run never started; there is no modelled program.
   of ubUnsignedDivZero, ubIntMinModMinusOne, ubSignedOverflow,
-     ubIndeterminateRead, ubSignedDivZero, ubFloatToIntRange: dcOmitted
+     ubIndeterminateRead, ubSignedDivZero, ubFloatToIntRange,
+     ubTailUnverified: dcOmitted
     # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
-    # successor, a pure omission.
+    # successor, a pure omission. K10b: `ubTailUnverified` rides the winner's
+    # `witnessUndefined` only (the second walk's unverified tail); as a
+    # recorded kind it is the same omission.
   of feUnadmitted, feDefectExcluded: dcOmitted
     # RFC-0016 K7b: `halted` drops the path, so nothing survives the cell
     # to carry a witness; a pure omission (ADM-1 had `feUnadmitted` as
@@ -4700,15 +4727,29 @@ proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false, havoc: seq[string] = @[],
                    heapTys: seq[IRType] = @[], heapAll = false,
                    raises: seq[string] = @[], defects: seq[string] = @[],
-                   why = ""): IRStmt =
+                   why = ""; undefined: set[UbKind] = {}): IRStmt =
   ## RFC-0005 S8as: `havoc` is an inert call's effect summary
   ## (`IRStmt.opaqueHavoc`). RFC-0005 S8ax: `heapTys`, `heapAll` and
   ## `raises` are the rest of it (`IRStmt.opaqueHeapTys` ...); RFC-0005
-  ## S8be: and `defects` (`IRStmt.opaqueDefects`).
+  ## S8be: and `defects` (`IRStmt.opaqueDefects`); RFC-0016 K10b: and
+  ## `undefined` (`IRStmt.opaqueUndefined`).
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: true, opaqueInert: inert,
          opaqueHavoc: havoc, opaqueHeapTys: heapTys, opaqueHeapAll: heapAll,
-         opaqueRaises: raises, opaqueDefects: defects, opaqueWhy: why)
+         opaqueRaises: raises, opaqueDefects: defects, opaqueWhy: why,
+         opaqueUndefined: undefined)
+
+func ubMaskOf*(ks: set[UbKind]): int =
+  ## RFC-0016 K10b. A `set[UbKind]` as a bit mask over `ord(k) - ord(low)`:
+  ## the form the parser's IR emit writes `IRStmt.opaqueUndefined` in (a set
+  ## literal of a range type does not round-trip through `newLit`; the
+  ## W1-d3 `static` pin keeps the range under 30 members).
+  for k in ks: result = result or (1 shl (ord(k) - ord(low(UbKind))))
+
+func ubSetOf*(mask: int): set[UbKind] =
+  ## RFC-0016 K10b. `ubMaskOf`'s inverse.
+  for k in low(UbKind) .. high(UbKind):
+    if ((mask shr (ord(k) - ord(low(UbKind)))) and 1) == 1: result.incl k
 
 proc mkIRGlobal*(name: string, ty: IRType, isVar: bool,
                  init: IRExpr): IRGlobal =

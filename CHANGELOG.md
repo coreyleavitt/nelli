@@ -243,12 +243,14 @@ migration note.
 - **A `sxSat` is trusted on its prefix.** C's undefined behaviour is not
   sequenced and the walk stops at the first label hit, so a trusted `sxSat`
   can be defined up to the label and undefined after it. The tail is not
-  scanned; the whole-run check is planned (K10b).
+  scanned; the whole-run check is planned (K10b). *Closed in 0.10.0 by K10b:
+  `SymexSettings.wholeRunDefinedness`, see the 0.9.2 migration note.*
 - **Destructors during panic unwinding are not modelled** (W1-c2). Under
   `--panics:on` a destructor's side effect between the raise and the exit is
   not walked.
 - **Unsigned division in an opaque callee gives no answer** (W1-d1b, K10b): it
-  is neither a raise nor a halt.
+  is neither a raise nor a halt. *Closed in 0.10.0 by K10b, see the 0.9.2
+  migration note.*
 - **A checked routine calling an unchecked callee that overflows** declines
   `ubSignedOverflow` (W1-d2c).
 - **The halted path records no `undefined` set** (W1-d3): the halt is visible

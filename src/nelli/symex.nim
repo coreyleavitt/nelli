@@ -3537,6 +3537,19 @@ proc settleWinner(raw: RawResult; replayed: ReplayResult;
   else:
     result.errors.add winnerHint(replayed, rawClaimText(raw), input)
 
+proc gateLossyWinner(raw: RawResult; staticLossy: bool;
+                     settings: SymexSettings): RawResult =
+  ## RFC-0016 K10b (section 9.1 item 3). Under the whole-run gate a clean
+  ## label `sxSat` whose witness is lossy (`winnerLossy`: the shape renders
+  ## lossily, or the run substituted a value) cannot be followed past the
+  ## label, so it fails closed: `ubTailUnverified` joins `witnessUndefined`,
+  ## the status stands, the verdict is not `trusted()` and the replay that
+  ## follows cannot lift it. Gate off: `raw` unchanged.
+  result = raw
+  if settings.wholeRunDefinedness and raw.status == sxSat and
+     winnerLossy(raw, staticLossy):
+    result.soundness.witnessUndefined.incl ubOrdinals({UbKind(ubTailUnverified)})
+
 proc markLossyWinnerUnreplayed(raw: RawResult; staticLossy: bool): RawResult =
   ## RFC-0005 0.9.1 (WA-9). `SymexSettings.replay = false`: a lossy clean
   ## winner cannot be confirmed, so it is `rsUnconfirmed`.
@@ -3575,10 +3588,14 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   ## replay is read off the thread (review R1-06): what the settle and a
   ## later save need of it, the run-dependence included, is on the value.
   let rawId     = genSym(nskLet, "rawPreReplay")
-  let runCall = quote do:
-    runSymex(`prog`, `target`, `settings`)
   # RFC-0005 0.9.1 (WA-9): whether every witness of `fn` renders lossily.
   let staticLossy = newLit(paramsFidelity(params) == wfLossy)
+  # RFC-0016 K10b: a lossy witness cannot be followed past the label, so under
+  # the whole-run gate it fails closed (`ubTailUnverified`) before any replay.
+  let gateLossySym = bindSym"gateLossyWinner"
+  let runCall = quote do:
+    `gateLossySym`(runSymex(`prog`, `target`, `settings`), `staticLossy`,
+                   `settings`)
   if not replayOn:
     let markSym = bindSym"markLossyWinnerUnreplayed"
     return quote do:

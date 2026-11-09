@@ -11,10 +11,25 @@
   warn only; msvc known-red list empty; verification 42519745480 green),
   K1a-ci (post-shard universe join on all five rows, row-scoped allowlist
   entries; planted RED 42532198619, green 42537270847 / 42537270688 /
-  42537276403). Next: a full eos sweep at the new main to calibrate the
-  universe and id allowlists, then W2-z (CI-B and K8a dispatched at the
-  integration sha, every leg's record directory nonempty, universe counts
-  nonzero, CI-A3 watchdog green); then Wave 3.
+  42537276403), W2-z (Wave 2 integration, below). Wave 2 is complete; the
+  eos calibration sweep was dropped because the full CI joins on all five
+  rows calibrated the allowlists. Now Wave 3, one branch per slice, landed
+  in order after its symex-linux and symex-mingw runs are green.
+- **W2-z (2026-11-09):** integration sha `3fbb1676`. symex-nightly
+  42543319693 (CI-B, all legs, universe joins green), k8a-differential
+  42543321720, symex-linux 42543282587 (CI-A3 watchdog: K8a heartbeat 0 days,
+  no open intake issue), symex-mingw 42543282339, fuzzer-mingw 42543282630:
+  all green. fuzzer-msvc 42543282381 hit its 90-minute job timeout with 43 of
+  45 walker files run (also on `06c2cb95`); the walker tests now run as their
+  own `walker-msvc` job (run 42551700369: fuzzer-msvc 33 min, walker-msvc 39
+  min, 45 files). The universe join now prints and checks a record census
+  (fails on no SUT, or a full join with no exact verdict). Census at
+  `407bd354`: linux-c 138 cells, 387 records over 72 files, 94 SUTs,
+  exact 118 / declined 237 / raised 11 / crashed 9 / skipped 12 (symex-linux
+  42557135225); mingw 384 records over 71 files, 94 SUTs, exact 118 /
+  declined 235 / raised 11 / crashed 9 / skipped 11 (symex-mingw 42557135246).
+  Every leg's record directory is nonempty. Open intake issues older than
+  seven days: none.
 - **Research:** `docs/rfc/0016-research/` (six lens reports, the merged list
   W-01..W-69, the magic table, the test classification). Snapshot 83c1d304,
   walker 272.

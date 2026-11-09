@@ -192,12 +192,12 @@ state = "done"
 [[slice]]
 id    = "W2"
 title = "Wave 2 (§11): K5a build profile first, CI-A1/A2/A3 and CI-B legs incl. symex-msvc, K9b, ADM-1, K2-s census, K1a-cells/ids/last/ci ledger over the TOML work list, K7a/b Survivors and CapKind, K2-0 probe batch, K9d-0, K8-0, K8a-gen/job/sink, S8cj, W2-z"
-state = "in-progress"
+state = "done"
 
 [[slice]]
 id    = "W3"
 title = "Wave 3 / 0.10.0 with Wave 2 (§11): admission tables K2a-c, K3a-c (type class, memory, pragma), K4a-table/dispatch/guard, K4b/c, K5b refusals, K6a-c, K10a-target/axis/float/concolic, K10b (round), K10c/d, PRC-01/02, W3-z"
-state = "pending"
+state = "in-progress"
 
 [[slice]]
 id    = "W4"

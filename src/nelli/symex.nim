@@ -3539,15 +3539,18 @@ proc settleWinner(raw: RawResult; replayed: ReplayResult;
 
 proc gateLossyWinner(raw: RawResult; staticLossy: bool;
                      settings: SymexSettings): RawResult =
-  ## RFC-0016 K10b (section 9.1 item 3). Under the whole-run gate a clean
-  ## label `sxSat` whose witness is lossy (`winnerLossy`: the shape renders
-  ## lossily, or the run substituted a value) cannot be followed past the
-  ## label, so it fails closed: `ubTailUnverified` joins `witnessUndefined`,
+  ## RFC-0016 K10b (section 9.1 item 3). The second walk needs the model's
+  ## pins, not the rendered value, so a lossy winner (`winnerLossy`: the
+  ## shape renders lossily, or the run substituted a value) is tail-checked
+  ## like any other (`verifyTailDefined`) and stays trusted when its tail is
+  ## defined. It "cannot be followed" only where a pin is genuinely missing
+  ## (`RawWitness.pinsComplete` false: a parameter or leaf the pins skipped),
+  ## and then it fails closed: `ubTailUnverified` joins `witnessUndefined`,
   ## the status stands, the verdict is not `trusted()` and the replay that
   ## follows cannot lift it. Gate off: `raw` unchanged.
   result = raw
   if settings.wholeRunDefinedness and raw.status == sxSat and
-     winnerLossy(raw, staticLossy):
+     not raw.witness.pinsComplete and winnerLossy(raw, staticLossy):
     result.soundness.witnessUndefined.incl ubOrdinals({UbKind(ubTailUnverified)})
 
 proc markLossyWinnerUnreplayed(raw: RawResult; staticLossy: bool): RawResult =

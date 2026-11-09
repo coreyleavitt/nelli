@@ -435,7 +435,7 @@ proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
   of svSet:   @[sv.setMembersRaw.raw, sv.setSize.raw]
   else:       @[rawAnyAstOf(sv)]
 
-proc heapLeafTerm(sv: SymVal; ty: IRType): Z3AnyAst =
+proc heapLeafTerm(sv: SymVal; ty: IRType; pinForm = false): Z3AnyAst =
   ## RFC-0005 S8bc. `heapLeafRaw`, as an owning handle: an `int` part held as
   ## a Z3 Int is converted to the heap's bitvector, a term nothing else
   ## holds, so its raw handle is not valid past the call that made it.
@@ -446,6 +446,11 @@ proc heapLeafTerm(sv: SymVal; ty: IRType): Z3AnyAst =
   ## terms at the bit-vector sort while every read lifted the select as an
   ## Int: an ill-sorted term at the first comparison, the defect batch 3
   ## fixed in `heapLeafRaw`.
+  if pinForm and sv.kind in {svBV8, svBV16, svBV32, svBV64}:
+    # RFC-0016 K10b: the value's own bit-vector, not its Int projection
+    # (`ubv_to_int` under a sign `ite`): an equality on the projection made
+    # every query the second walk's pins joined a mixed-theory one.
+    return wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))
   if ty.kind == itInt and intHeapCell(ty):
     return toAnyAst(heapStoreValue(sv, sv, ty).zi)
   if ty.kind == itInt and sv.kind == svInt:
@@ -456,19 +461,19 @@ proc heapLeafTerm(sv: SymVal; ty: IRType): Z3AnyAst =
     else:  return toAnyAst(intToBv[64](sv.zi, Z3BitVec[64]))
   wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))
 
-proc svLeafTerms(sv: SymVal; ty: IRType): seq[Z3AnyAst] =
+proc svLeafTerms(sv: SymVal; ty: IRType; pinForm = false): seq[Z3AnyAst] =
   ## RFC-0005 S8bc. `svLeafAsts`, as owning handles (`heapLeafTerm`). A seq
   ## element store writes a value's leaves into the seq's data arrays across
   ## several Z3 calls. Precondition for a tree: `svFitsHeapTy(sv, ty)`.
   if ty != nil and heapTreeTy(ty):
     if ty.kind == itDistinct:
       let g = distinctGround(ty)
-      if heapCompoundTy(g): return svLeafTerms(ejectBase(sv), g)
-      return @[heapLeafTerm(ejectBase(sv), g)]
+      if heapCompoundTy(g): return svLeafTerms(ejectBase(sv), g, pinForm)
+      return @[heapLeafTerm(ejectBase(sv), g, pinForm)]
     let psvs = svPartsOf(sv, ty)
     for i, part in heapParts(ty):
-      if heapCompoundTy(part.ty): result.add svLeafTerms(psvs[i], part.ty)
-      else: result.add heapLeafTerm(psvs[i], part.ty)
+      if heapCompoundTy(part.ty): result.add svLeafTerms(psvs[i], part.ty, pinForm)
+      else: result.add heapLeafTerm(psvs[i], part.ty, pinForm)
     return
   # A container's leaves are the value's own fields, alive while `sv` is.
   let ctx = requireCurrentContext()

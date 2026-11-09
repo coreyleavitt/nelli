@@ -578,9 +578,8 @@
   cause (the cause is in the message; a kind per cause would widen `UbKind` for
   no reader); the opaque "may be undefined" answer is a table row, not a
   hardcoded kind, so the universe ledger evidences it; a lossy witness fails
-  closed as the RFC says even though the model pins could follow it (precision
-  follow-up: run the second walk for a lossy winner too, since `pins` do not
-  need the rendered value). The 0.9.2 known gap is closed in the RFC, the
+  closed as the RFC says even though the model pins could follow it (the
+  precision follow-up below closed that). The 0.9.2 known gap is closed in the RFC, the
   migration note and CHANGELOG. Perf reading (K10 SUT set, gate on vs off, two
   lanes side by side so wall time is indicative): explore units are identical
   on and off in every file (the explore walk is untouched); the tail walks'
@@ -604,6 +603,33 @@
   `scratchpad/k10b/batch.sh`. `check-readme-kinds.sh` and `check-worklist.sh
   check` pass. No worklist TOML row is owned by K10b (the W1-d1b hand row
   carries the note).
+  K10b follow-up (2026-11-09, same walker 301, after the rebase onto int4b
+  `82028e37`): (i) a lossy winner is tail-checked like any other
+  (`gateLossyWinner` fails closed only when `RawWitness.pinsComplete` is false:
+  `modelPins` skipped a parameter or leaf), so a lossy-witness SUT with a
+  defined tail is `trusted()` (test (d); (d2) an undefined tail untrusts it by
+  its own kind); RFC section 9.1 item 3 reworded to "cannot be followed" being
+  the condition. No shape in the corpus reaches the incomplete-pin branch
+  (object, variant, seq, Table, set, array, ref params all pin completely), so
+  it is a defensive guard with no pin of its own. (ii) The `k10b_round`
+  outlier (7389 explore units -> 499300 tail units) was the pins, not the
+  overflow sides: `svLeafTerms` returned the heap leaf of a signed int field as
+  its Int projection (`ite(bvslt b 0, ubv_to_int b - 2^64, ubv_to_int b)`), so
+  `leaf == model` made every query of the second walk mixed-theory over 64-bit
+  words; a tail with nothing in it cost 477,838 units. `svLeafTerms`/
+  `heapLeafTerm` take `pinForm`, which returns the value's own bit-vector, so
+  the pin folds. The halt also no longer lists a finding under `tailGate`
+  (`listIt`), which solved an unpinned witness query nothing read. Before ->
+  after tail units: lossy stub with a defined tail 477,838 -> 126, with an
+  overflow 956,056 -> 518, scalar overflow 7,038 -> 3,648, scalar branch 126 ->
+  126, foreign call 48 -> 48; pin (g) bounds a defined object-param tail under
+  20,000. Also fixed in the rebase/batch: the scan's float conversion reads
+  `convertDefinedness(ocFloatToInt, dpChecked)` (int4b gave it a class
+  argument; both float rows answer one kind), `tsymex_configdefaults` (field
+  count 9, merge carries `wholeRunDefinedness`), `tsymex_rfc0005_s6a_budget`
+  (the K7 walk-cap `beBudgetExhaustedPrune` site was never counted),
+  `tsymex_0016_w1d3_undefined` (mask 64 is `ubTailUnverified`, valid; 128 is
+  the first invalid), universe ledger regenerated for `call/opaqueBody`.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

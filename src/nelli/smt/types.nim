@@ -5215,6 +5215,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings {.deprecated:
   if b.replay != d.replay: result.replay = b.replay   ## RFC-0005 S10
   if b.replayTimeoutMs != d.replayTimeoutMs:   ## RFC-0005 S8be
     result.replayTimeoutMs = b.replayTimeoutMs
+  if b.wholeRunDefinedness != d.wholeRunDefinedness:   ## RFC-0016 K10b
+    result.wholeRunDefinedness = b.wholeRunDefinedness
 
 proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ## Phase 15 C4 / R16-1. Returns a list of human-readable warnings about

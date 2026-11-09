@@ -734,6 +734,10 @@ type
       ## Empty for a SUT with no ref/ptr params (backward compat). Built in
       ## `extractWitness` from the live Z3 model; threaded out through
       ## `RawResult.witness` and mirrored onto `SymexResult.heapSnapshot`.
+    pinsComplete*: bool
+      ## RFC-0016 K10b. True when `pins` covers every leaf of every
+      ## parameter (`modelPins`): none was skipped as unfitting or unevaluable.
+      ## A lossy witness is followed past the label only then.
     pins: seq[Z3Bool]
       ## RFC-0016 K10b. The model's choices as equalities over the initial
       ## environment's leaf terms (`svLeafTerms`, `leaf == model(leaf)`), one
@@ -1351,7 +1355,7 @@ proc svFitsHeapTy(sv: SymVal; ty: IRType): bool
 proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
                   ty: IRType = nil): SymVal
 proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast]
-proc svLeafTerms(sv: SymVal; ty: IRType): seq[Z3AnyAst]
+proc svLeafTerms(sv: SymVal; ty: IRType; pinForm = false): seq[Z3AnyAst]
   ## RFC-0005 S8bc fwd-decl (defined in runtime_heap.nim, included below).
   ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
   ## A container `Table` value is held leaf-split (`tabValLeaves`).
@@ -12664,26 +12668,34 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
   # pointee) -- the typed witness's `resolveRef` reads them there.
   result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
-proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]): seq[Z3Bool] =
+proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
+    tuple[pins: seq[Z3Bool], complete: bool] =
   ## RFC-0016 K10b. `RawWitness.pins`: `leaf == model(leaf)` for every leaf
   ## term of every parameter's initial value the model can evaluate. A
   ## parameter whose value does not fit its type's leaf split (a placeholder
   ## some upstream degrade left) or a leaf the model cannot evaluate is left
-  ## free, which only widens what the second walk must show defined.
+  ## free, which only widens what the second walk must show defined, and
+  ## clears `complete`: a lossy winner is tail-checked only when it is set.
+  result.complete = true
   for p in params:
-    if not env.hasKey(p.name): continue
+    if not env.hasKey(p.name):
+      result.complete = false
+      continue
     let sv = env[p.name]
-    if not svFitsHeapTy(sv, p.ty): continue
+    if not svFitsHeapTy(sv, p.ty):
+      result.complete = false
+      continue
     var leaves: seq[Z3AnyAst]
     try:
-      leaves = svLeafTerms(sv, p.ty)
+      leaves = svLeafTerms(sv, p.ty, pinForm = true)
     except CatchableError:
+      result.complete = false
       continue
     for leaf in leaves:
       try:
-        result.add bsEqZ(leaf, m.eval(leaf))
+        result.pins.add bsEqZ(leaf, m.eval(leaf))
       except CatchableError:
-        discard
+        result.complete = false
 
 var symexTargetSolveStats* {.threadvar.}:
     tuple[budgetOut, declined, slowSat, units: int]
@@ -16026,7 +16038,7 @@ proc trySolve(ctx: Z3Context,
     for k in path.env.keys:
       if isGlobalEnvName(k): currentWinningGlobals.add k
     var wit = extractWitness(m, envForExtract, params)
-    wit.pins = modelPins(m, envForExtract, params)   ## RFC-0016 K10b
+    (wit.pins, wit.pinsComplete) = modelPins(m, envForExtract, params)   ## RFC-0016 K10b
     (status: sxSat, witness: wit, undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
@@ -20284,7 +20296,12 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   ## its bit-blasting stage above 100 MB: 72k against 876k / 5.85M units
   ## on this query), so the spend is the query's AND the process's; what a
   ## bound above both figures decides is the query's alone.
-  ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
+  let dbgU0 = ownContextUnits
+  result = ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
+  if ownContextUnits - dbgU0 > 20000:
+    var dbgS = ""
+    for r in roots: dbgS.add $r & "\n"
+    echo "DBGSCRATCH ", ownContextUnits - dbgU0, " ", result, "\n", dbgS[0 ..< min(dbgS.len, 3000)]
 
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,
@@ -26650,8 +26667,10 @@ proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
   # The path ends either way: nothing past the op is modelled.
   let tgt = w.target
   let isHit = tgt.kind == stkUndefined and kind in tgt.ubKinds
+  # RFC-0016 K10b: the whole-run gate's second walk reads only the halt, so
+  # it lists nothing (the solve for a witness would run unpinned).
   var listIt = tgt.kind != stkUndefined and scSpurious notin p.taint and
-               w.undefinedFound.len < maxUndefinedFindings
+               w.undefinedFound.len < maxUndefinedFindings and not w.tailGate
   for u in w.undefinedFound:
     if u.kind == kind and u.site == site: listIt = false   # one per op
   if (isHit and not w.shouldStop) or listIt:

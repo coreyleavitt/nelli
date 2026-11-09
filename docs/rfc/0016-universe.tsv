@@ -8,9 +8,9 @@
 # axis stdlib: 79 cells
 # axis build: 25 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
-# axis defined: 20 cells
+# axis defined: 21 cells
 # build rows: 5
-# error kinds: 102
+# error kinds: 103
 # cap kinds: 10
 cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
@@ -56,6 +56,7 @@ capkind:ckWalkWork	cap	-
 defined:add/signedNarrow	modelled	-
 defined:add/signedWide	modelled	-
 defined:call/noalias	declined	-
+defined:call/opaqueBody	modelled	-
 defined:convert/floatToInt	modelled	-
 defined:convert/floatToIntVia	modelled	-
 defined:div/lowByMinusOneNarrow	modelled	-
@@ -171,6 +172,7 @@ errorkind:ubIndeterminateRead	kind	dcOmitted
 errorkind:ubIntMinModMinusOne	kind	dcOmitted
 errorkind:ubSignedDivZero	kind	dcOmitted
 errorkind:ubSignedOverflow	kind	dcOmitted
+errorkind:ubTailUnverified	kind	dcOmitted
 errorkind:ubUnsignedDivZero	kind	dcOmitted
 errorkind:weBreakOutsideLoop	kind	dcOmitted
 errorkind:weInternalWalkerFault	kind	dcNoAnswer

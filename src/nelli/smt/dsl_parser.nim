@@ -4452,12 +4452,13 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
         add "RangeDefect"
       # RFC-0016 K10b: a float-source integer conversion raises nothing (a
       # plain C cast, K10a-float) and so is not in `acc`; its NaN, infinite
-      # or out-of-range operand is undefined (row `convert/floatToInt`).
+      # or out-of-range operand is undefined (rows `convert/floatToInt` and
+      # `convert/floatToIntVia` answer one kind under every profile).
       if src.kind notin {nnkCharLit .. nnkFloat128Lit, nnkNilLit} and
          n.typeKind in {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange,
                         ntyBool} and
          src.typeKind in {ntyFloat .. ntyFloat128}:
-        addUb ubOf(convertDefinedness(dpChecked)).get
+        addUb ubOf(convertDefinedness(ocFloatToInt, dpChecked)).get
       scanOpaqueDefects(src, acc, seen, depth, ctx, owner, memo, undef)
   of nnkRaiseStmt:
     if n.len == 0 or n[0].kind == nnkEmpty:

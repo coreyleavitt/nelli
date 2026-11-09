@@ -7,9 +7,9 @@
 ## mode under the witness's model pins, past the label to a routine exit. An
 ## undefined side the pins do not rule out, an opaque call whose body may be
 ## undefined (the parameterised `scanOpaqueDefects`), a decline, a budget or a
-## lossy witness untrusts the verdict through `Soundness.witnessUndefined`,
+## lossy witness whose pins are missing untrusts the verdict through `Soundness.witnessUndefined`,
 ## which replay cannot lift. Gate off: 0.9.2's behaviour exactly.
-import std/[unittest, strutils]
+import std/[unittest, strutils, os]
 import nelli
 import nelli/symex
 import nelli/db
@@ -64,6 +64,11 @@ type
 proc sutLossy(v: LossyStub; x: int64) =
   if x == 7: symexTarget("hit")
 
+proc sutLossyOverflow(v: LossyStub; x: int64): int64 =
+  ## The same lossy shape, with an overflow after the label.
+  if x == 7: symexTarget("hit")
+  result = x + high(int64)
+
 suite "K10b: whole-run definedness":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 301
@@ -95,12 +100,22 @@ suite "K10b: whole-run definedness":
     check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
     check r.witness[0] == 5'i32
 
-  test "(d) a lossy witness cannot be followed: untrusted (fail closed)":
+  test "(d) a lossy witness whose pins cover the choices: tail-checked, trusted":
+    # The second walk needs the model's pins, not the rendered value
+    # (section 9.1 item 3: "cannot be followed" is the condition).
     let r = symexFind(sutLossy, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     check r.status == sxSat
+    check r.trusted
+    check r.soundness.undefinedKinds == {}
+    check r.witness[1] == 7
+
+  test "(d2) a lossy witness with an undefined tail: untrusted, by the tail's kind":
+    let r = symexFind(sutLossyOverflow, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat
     check not r.trusted
-    check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
+    check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds
 
   test "(e) gate off: 0.9.2's verdict, trusted on its prefix":
     let r = symexFind(sutTailOverflow, tLabel("hit"), gateOff)
@@ -133,3 +148,24 @@ suite "K10b: whole-run definedness":
         check f.trusted
         check f.soundness.undefinedKinds == {}
     check sawA and sawB
+
+  test "(g) the pins fold: a defined tail over object params costs few units":
+    # The pin on an int leaf of a heap-held object was an equality on the
+    # leaf's Int projection (`ubv_to_int` under a sign `ite`), so every query
+    # the second walk issued was mixed-theory over 64-bit words: 477,838 units
+    # for a tail with nothing in it. Pinned on the bit-vector itself it folds.
+    let log = getTempDir() / "k10b_g_units.log"
+    removeFile(log)
+    putEnv("NELLI_WALK_UNITS_LOG", log)
+    defer:
+      delEnv("NELLI_WALK_UNITS_LOG")
+      removeFile(log)
+    let r = symexFind(sutLossy, tLabel("hit"), pinSettingsConst)
+    check r.status == sxSat
+    check r.trusted
+    var tail = -1
+    for line in readFile(log).splitLines:
+      let f = line.split('\t')
+      if f.len >= 2 and f[1] == "k10b-tail": tail = parseInt(f[0])
+    checkpoint "tail units: " & $tail
+    check tail >= 0 and tail < 20_000

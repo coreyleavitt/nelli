@@ -1547,8 +1547,11 @@ existing vocabulary:
    `runtime.nim:29882-29894`; there is no resume-from-label), ignoring
    `shouldStop`, to a routine exit with `concretelyInfeasible` (`:19793`)
    true for every undefined side. A decline, a budget (`beBudgetExhausted`,
-   `:20952`), an undecided side, or a lossy witness (`wfLossy`, which cannot
-   be followed) counts as undefined. `symexFindAllWitnesses` runs one walk per
+   `:20952`) or an undecided side counts as undefined, and so does a lossy
+   witness (`wfLossy`) that cannot be followed. The second walk needs the
+   model's pins, not the rendered value, so a lossy witness whose pins cover
+   every choice is followed like any other; only a missing pin makes it
+   undefined. `symexFindAllWitnesses` runs one walk per
    finding. K10b flips trust broadly and is a *round*.
 4. **The verdict carries it, and replay cannot lift it.** Undefined
    behaviour rides the soundness machinery the way taint does: each kind is a
@@ -1642,7 +1645,7 @@ field. **Known gap in 0.9.2**, listed in its migration note: an undefined op
 2026-11-09 by K10b (walker 301): `SymexSettings.wholeRunDefinedness`, on by
 default, runs the second walk under the witness's model pins; the kinds it is
 not shown defined in join `witnessUndefined`, `ubTailUnverified` for the
-unanswerable ones (decline, budget, lossy witness, a body the scan cannot
+unanswerable ones (decline, budget, a lossy witness whose pins are incomplete, a body the scan cannot
 read).* K10 in 0.10.0 restores the defined side of signed arithmetic under
 `-d:nelliFwrapv` and adds the target.
 

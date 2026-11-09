@@ -447,8 +447,8 @@ Two things can happen to the omission, by kind:
   undefined, a decline, an exhausted budget or a witness that renders
   lossily puts a kind into `Soundness.witnessUndefined` and the verdict is
   not `trusted()`. `ubTailUnverified` is the kind for the answers the walk
-  cannot give (the body it cannot read, the decline, the budget, the lossy
-  witness); the others carry their own kind. Set the field `false` for the
+  cannot give (the body it cannot read, the decline, the budget, a lossy
+  witness whose pins are incomplete); the others carry their own kind. Set the field `false` for the
   prefix-only verdict of 0.9.2.
 - The arithmetic kinds (`ubUnsignedDivZero`, `ubIntMinModMinusOne`,
   `ubSignedOverflow`, `ubSignedDivZero`) and `ubFloatToIntRange` halt the path

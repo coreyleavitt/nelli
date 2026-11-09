@@ -12698,6 +12698,35 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
         result.pins.add bsEqZ(leaf, m.eval(leaf))
       except CatchableError:
         result.complete = false
+  # Each ref sort's `nil` constant the model interprets. A pinned ref leaf
+  # (`p == Ref!val!0`) says nothing of `p != nil` unless `nil` is pinned too:
+  # the tail walk's `p != nil` read as undecided. Without completion: a `nil`
+  # the model does not mention is left free (a completed value could equal a
+  # live ref's, which a real nil never does), and an undecided branch on it
+  # fails the tail check closed.
+  for tid, nc in currentNilConsts:
+    try:
+      let v = m.eval(nc, modelCompletion = false)
+      if $v != $nc: result.pins.add bsEqZ(nc, v)
+    except CatchableError:
+      discard
+  # The parameters' heaps. A ref parameter's pointee fields are cells of the
+  # run's free `heap_*` arrays, not leaves of the parameter's value, so a
+  # branch on `p.v` read as undecided under the pins. Each free heap array
+  # the model interprets is pinned whole (an array equality over the model's
+  # own store term). Only the initial arrays are constants: a write the walk
+  # makes is a `store` over them and follows from them.
+  let ctx = m.ctx
+  for i in 0 ..< m.numConsts:
+    try:
+      let d = m.constDecl(i)
+      let nm = $Z3_get_symbol_string(ctx.raw, Z3_get_decl_name(ctx.raw, d.raw))
+      if not nm.startsWith("heap_"): continue
+      let c = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_app(ctx.raw, d.raw, 0, nil))
+      let v = m.eval(c, modelCompletion = false)
+      if $v != $c: result.pins.add bsEqZ(c, v)
+    except CatchableError:
+      result.complete = false
 
 var symexTargetSolveStats* {.threadvar.}:
     tuple[budgetOut, declined, slowSat, units: int]
@@ -16940,6 +16969,13 @@ type
                       ## opaque call whose body may be undefined
                       ## (`IRStmt.opaqueUndefined`); the concolic collect
                       ## driver, also `wmFollowConcrete`, never sets it.
+    tailUndecided: bool
+                      ## RFC-0016 K10b. Set under `tailGate` by
+                      ## `followBranchOutcome` when a branch stays undecided
+                      ## after the retry under the path's `pc`: the walk went
+                      ## on without either arm, so the run is not shown
+                      ## defined. `verifyTailDefined` answers
+                      ## `ubTailUnverified`.
     concreteEq: seq[Z3Bool]
                       ## RFC-fuzzer-nextgen G1b. Only meaningful when
                       ## `mode == wmFollowConcrete`: one `drawVar == concreteLit`
@@ -21342,7 +21378,19 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
   if result.isNone and w.tailGate:
     result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings,
                                    dp.pc & dp.defectSurvivorPc & facts)
-  if result.isNone: markAmbiguous(w, construct)
+  if result.isNone:
+    markAmbiguous(w, construct)
+    # Section 9.1 item 3: an undecided side counts as undefined. The walk
+    # goes on without either arm's bindings and effects, so an undefined
+    # operation inside an arm is skipped; the tail check fails closed.
+    # Except on a path the pins rule out: an arm of an earlier fork the
+    # witness does not take (`setLen`'s shrink arm of a grow, say) has a `pc`
+    # that contradicts the pins, so both asks read unsat and the replayed run
+    # is not on it. Nothing it skips is part of the run.
+    if w.tailGate and
+       not concretelyInfeasible(w.z3, w.concreteEq,
+                                dp.pc & dp.defectSurvivorPc & facts, w.settings):
+      w.tailUndecided = true
 
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
@@ -29599,7 +29647,8 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
   stampLoweringPendingLeak(w)
-  if walkWorkExhausted: result.incl UbKind(ubTailUnverified)
+  if walkWorkExhausted or w.tailUndecided:
+    result.incl UbKind(ubTailUnverified)
   var errs = w.walkDegradeErrors & w.heapDepthErrors & w.newFieldZeroErrors &
              w.closureCallErrors
   if loweringDegradeErrors.len > lowerBase:

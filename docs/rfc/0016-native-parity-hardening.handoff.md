@@ -630,6 +630,22 @@
   (the K7 walk-cap `beBudgetExhaustedPrune` site was never counted),
   `tsymex_0016_w1d3_undefined` (mask 64 is `ubTailUnverified`, valid; 128 is
   the first invalid), universe ledger regenerated for `call/opaqueBody`.
+  K10b fail-closed fix (`rfc-0016-k10fix`, walker stays 302): a tail branch
+  still undecided after `followBranchOutcome`'s retry under the path's `pc`
+  walked on without either arm, so an undefined op in an arm was skipped and
+  the `sxSat` stayed trusted (RFC 9.1 item 3: an undecided side counts as
+  undefined). `WalkCtx.tailUndecided` now fails the tail check with
+  `ubTailUnverified`. Exception, the root of the `NewString`/`NewStringOfCap`/
+  `SetLengthStr` regressions a blanket fail-closed caused: `setLen`'s
+  shrink arm of a grow has a `pc` the pins contradict (both asks unsat), the
+  replayed run is not on that path, so it does not count
+  (`concretelyInfeasible`). Pin: k10b_round (i), a branch on an unwritten
+  module global with a checks-off overflow arm. A ref-param SUT
+  (`tsymex_rfc0005_s8n_precision`) also lost trust, since its `p != nil` and
+  `p.v` were unpinned: `modelPins` now also pins each ref sort's `nil`
+  constant (no completion) and every free `heap_*` array the model interprets,
+  so those branches decide. Batch (k10b_round, k4a/k4b/k4c, k10*, g1b, g2,
+  s8n_precision, tfuzzconcolicundefined, CR2, universe cmp identical): green.
   K10d (`rfc-0016-k10d` on `rfc-0016-k10b`, walker 301->302): `SymexSettings.arithChecks`
   and `SymexResult.fromCache` deleted (INT-39, INT-41 closed). The build is the
   only source of the check gates: `checked(ac)` (`runtime.nim`) reads

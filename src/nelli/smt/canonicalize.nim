@@ -331,8 +331,16 @@ const symexWalkerVersion* = "302"
   ## parameter pins leave open again under the path's `pc` and closure facts
   ## (`followBranchOutcome`; the pins alone left a call's result constant
   ## free, so `$enum` of a call was an "ambiguous" branch and the walk went
-  ## on without the arm's bindings: `weInternalWalkerFault`). The fuzzer's
-  ## replay is unchanged.
+  ## on without the arm's bindings: `weInternalWalkerFault`). A branch still
+  ## undecided after that ask fails the tail check closed
+  ## (`ubTailUnverified`, section 9.1 item 3: an undecided side counts as
+  ## undefined), the walk having gone on without either arm and so skipped
+  ## whatever an arm holds; a path whose `pc` the pins contradict (the arm of
+  ## an earlier fork the witness does not take, `setLen`'s shrink arm of a
+  ## grow) is not the replayed run and does not count. The pins also cover each
+  ## ref sort's `nil` and the free `heap_*` arrays the model interprets, so a
+  ## ref parameter's `p != nil` and `p.v` decide. The fuzzer's replay is
+  ## unchanged.
   ## RFC-0016 K10a-axis (299->300; was 293->294 on its branch): the definedness axis
   ## (`smt/definedness`)
   ## answers the arithmetic undefined-behaviour sites (same answers, one

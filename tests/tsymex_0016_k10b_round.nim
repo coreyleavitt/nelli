@@ -194,3 +194,28 @@ suite "K10b: whole-run definedness":
     check r.witness[0] == 2
     for e in r.errors:
       check e.kind != weInternalWalkerFault
+
+var tailGlobal = 0
+proc setTailGlobal(v: int) =
+  ## Natively reachable state: an earlier call of the program sets it.
+  tailGlobal = v
+
+proc sutTailUndecided(x: int64) =
+  ## The label, then a branch on a module global the SUT never writes. Neither
+  ## the parameter pins nor the path's `pc` say what it holds (the walk reads
+  ## it as a free constant), so the branch is undecided. Natively the arm is
+  ## reachable: `setTailGlobal(6)` ran before the call, and then
+  ## `x + high(int64)` overflows (checks off: undefined).
+  if x == 5: symexTarget("hit")
+  if tailGlobal > 5:
+    let y {.used.} = x + high(int64)
+
+suite "K10b: an undecided branch in the tail fails closed":
+  test "(i) a branch the pins and the pc leave open untrusts the sxSat":
+    # RFC section 9.1 item 3: an undecided side counts as undefined. Taking
+    # neither arm's bindings and walking on would skip the overflow.
+    let r = symexFind(sutTailUndecided, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check not r.trusted
+    check UbKind(ubTailUnverified) in r.soundness.undefinedKinds

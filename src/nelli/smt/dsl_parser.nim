@@ -10578,6 +10578,12 @@ proc methodOverrides(sym: NimNode): seq[NimNode] =
   for c in methodRegistry.getOrDefault(macros.strVal(sym)):
     if c.kind == nnkSym and c.symKind == nskMethod: result.add c
 
+proc registeredMethods*(name: string): seq[NimNode] =
+  ## RFC-0016 PRC-02b. The methods named `name` visible where an entry macro was
+  ## called: the overrides a replay's footprint scan reads as callees.
+  for c in methodRegistry.getOrDefault(name):
+    if c.kind == nnkSym and c.symKind == nskMethod: result.add c
+
 proc methodRecvPointee(m: NimNode): IRType =
   ## RFC-0005 S8bn (item 6). The object type of method `m`'s first
   ## parameter (its receiver), or nil.

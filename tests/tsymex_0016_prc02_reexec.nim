@@ -10,8 +10,12 @@
 ##   routine the code does not name, decline, saying which.
 ## * A `{.global.}` of a routine that a nested routine names is the child's own
 ##   (it runs the declaring routine), as the routine's own use already was.
-## * A `method` still declines: the override that runs depends on the receiver's
-##   dynamic type and the scan cannot list overrides.
+## * A `method` declines under a stock Nim: the override that runs depends on
+##   the receiver's dynamic type and the scan cannot list overrides. Under the
+##   in-house toolchain that emits a per-binary dispatch table
+##   (`defined(nimHasMethodDispatchTable)`, RFC-0016 PRC-02b) the host asks the
+##   table which bodies a dispatcher can run: confirmed when the scan read every
+##   one, declined (at run time) naming the override that no scan read.
 ## * A runtime hook naming a routine the replayed code names is reinstalled in
 ##   the child (INT-13); any other still declines, naming the hook.
 import std/[unittest, strutils]
@@ -191,16 +195,19 @@ proc sutProcCall(v: int) =
   if gOut == 4: symexTarget("t")
 
 suite "PRC-02: a method":
-  test "a dynamic call declines, naming the method and its base":
+  test "a dynamic call over a visible hierarchy":
     let r = replayWitness(sutMethod, (3,), tLabel("t"), {})
     checkpoint r.detail
-    when replayReexecs:
+    when replayReexecs and not defined(nimHasMethodDispatchTable):
+      # Stock Nim: the dispatcher's override set cannot be read, so it declines.
       check r.outcome == roDeclined
       check "`area`, a method on `Base`, whose overrides the scan cannot " &
             "list" in r.detail
       check "a module `sutMethod` cannot see" in r.detail
       check "a Linux or macOS run forks and replays it" in r.detail
     else:
+      # RFC-0016 PRC-02b: every body the dispatcher can run was scanned, so the
+      # replay is confirmed (the toolchain table says which bodies those are).
       check r.outcome == roConfirmed
 
   test "procCall of a method is a static call: scanned as a plain routine":
@@ -213,9 +220,15 @@ suite "PRC-02: a method":
     # its module; only a fork (which copies the process) reproduces it.
     let r = replayWitness(sutHidden, (3,), tLabel("t"), {})
     checkpoint r.detail
-    when replayReexecs:
+    when replayReexecs and not defined(nimHasMethodDispatchTable):
       check r.outcome == roDeclined
       check "whose overrides the scan cannot list" in r.detail
+    elif replayReexecs:
+      # RFC-0016 PRC-02b: the table lists the override no scan read, and the
+      # decline names it. The run is not run-dependent.
+      check r.outcome == roDeclined
+      check "an override of `area` for `Sub` the entry could not see" in
+            r.detail
     else:
       check r.outcome == roConfirmed
 

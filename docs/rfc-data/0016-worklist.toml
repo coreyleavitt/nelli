@@ -391,9 +391,9 @@ id = "PRC-02b"
 table = "5.2a"
 title = "Toolchain oracle: patch the in-house Nim's `cgmeth.generateMethodDispatchers` to emit a per-binary (base method, receiver RTTI, override address) table so the re-exec child can confirm dispatch soundly"
 state = "open"
-note = "follow-up of PRC-02; a Windows re-exec replay of a dynamic `method` call declines until this lands (no macro-time list of overrides is closed: an override may sit in a module the entry cannot see)"
+note = "`rfc-0016-prc02b` (2026-11-09): nelli side built and pinned against a locally built patched compiler (toolchain patch 0008, branch `prc02b`, `nimHasMethodDispatchTable`); a re-exec replay of a dynamic `method` call confirms when the scan read every body the table lists for the dispatcher and declines at run time naming the unread override. Stays open until the 0008 toolchain is published as the `2.2.10-<platform>` artifacts, which is what turns it on in CI; a stock Nim keeps the PRC-02 decline. `symexFind` over a method SUT is still `sxUnknown` through the route scan's own decline (`feGlobalRouteUnproved`), a compile-time analysis the table cannot answer"
 source = "PRC-02 probes 3 and 4"
-evidence = "`tsymex_0016_prc02_reexec` pins the decline"
+evidence = "`tsymex_0016_prc02_reexec` pins the confirm and the runtime decline under the patched compiler, and the stock decline otherwise"
 cells = []
 
 [[row]]

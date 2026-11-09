@@ -150,6 +150,54 @@ proc refusedNotMarshallable*(why: string): ReplayChild =
           "reaches; a Linux or macOS run forks and replays it)",
           runDependent = false)
 
+when defined(nimHasMethodDispatchTable):
+  type MethodRow = object
+    bucket, fn: pointer
+    recv: cstring
+
+  proc nimMethodDispatchTable(count: ptr int): pointer
+    {.importc: "nimMethodDispatchTable", cdecl.}
+    ## RFC-0016 PRC-02b. The patched toolchain's per-binary table: one row per
+    ## branch of every method dispatcher, in the dispatcher's if-chain order.
+
+  proc methodDispatchRefusal*(names: openArray[string];
+                              called, scanned: openArray[pointer]): string =
+    ## RFC-0016 PRC-02b. Empty when every body a dispatcher of the methods
+    ## `called` (the bodies at those addresses, named `names`) can run is one of
+    ## `scanned`, the bodies of the methods the scan read; else the decline. The
+    ## child is this
+    ## binary, so the table the host reads is the child's. It lists what the
+    ## dispatcher chooses from, an override in a module the entry cannot see
+    ## included, and the one of two same-signature overrides the compiler kept.
+    ## A dispatcher's whole bucket is checked, not only the receivers the replay
+    ## can build: an unread override of an unrelated subtype declines too.
+    var n = 0
+    let rows = cast[ptr UncheckedArray[MethodRow]](nimMethodDispatchTable(addr n))
+    if n < 0:
+      return "dispatch of a method here is not an if-chain (vtables), so its " &
+             "overrides cannot be listed"
+    var buckets: seq[pointer]
+    var bucketName: seq[string]    # a scanned method that names each bucket
+    for i, m in called:
+      var found = false
+      for r in 0 ..< n:
+        if rows[r].fn == m:
+          found = true
+          if rows[r].bucket notin buckets:
+            buckets.add rows[r].bucket
+            bucketName.add names[i]
+      if not found:
+        return "`" & names[i] & "`, a method the toolchain's dispatch table " &
+               "does not list"
+    for r in 0 ..< n:
+      let b = buckets.find(rows[r].bucket)
+      if b >= 0 and rows[r].fn notin scanned:
+        var recv = $rows[r].recv
+        let colon = recv.find(':')
+        if colon >= 0: recv.setLen colon
+        return "an override of `" & bucketName[b] & "` for `" & recv &
+               "` the entry could not see"
+
 proc refusedHostHook*(why: string): ReplayChild =
   ## RFC-0005 0.9.1 (WA-7). As `refusedNotMarshallable`, for a runtime hook the
   ## host had set at the time (`hostRuntimeHook`): a run without it replays,

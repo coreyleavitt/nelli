@@ -1029,7 +1029,30 @@
   `roConfirmed` under fork. PRC-02 is closed; PRC-02b is the next slice:
   patch the in-house Nim's `cgmeth.generateMethodDispatchers` to emit a
   per-binary (base method, receiver RTTI, override address) table so the
-  re-exec child can confirm dispatch soundly. Not started.
+  re-exec child can confirm dispatch soundly.
+  PRC-02b (`rfc-0016-prc02b`, no walker bump: the footprint and the replay run
+  change, the walk does not): toolchain patch 0008 (`patches/2.2.10/
+  0008-method-dispatch-table.patch`, branch `prc02b` of the `toolchain` series)
+  makes the main module's C carry `void* nimMethodDispatchTable(NI* count)`, a
+  static const table of {dispatcher address, method body address, receiver type
+  name} rows in each dispatcher's if-chain order, and defines
+  `nimHasMethodDispatchTable`. With it, `scanFootprint` no longer opens on a
+  method: it scans the method and every override `methodRegistry` holds for the
+  name, and `replayFootprint` hands `emitReplayWitness` the methods the code
+  dispatches (a `procCall` is not one) and every method it scanned. The host,
+  which is the child's binary, calls `methodDispatchRefusal` (`replayproc.nim`)
+  before it spawns: every row of the dispatchers' buckets must be a scanned
+  body, else `refusedNotMarshallable` ("an override of `area` for `Sub` the
+  entry could not see", not run-dependent). The table is the oracle for
+  probes 3 and 4: it lists the override in the module the entry cannot see and
+  the one of two same-signature overrides the compiler kept. The check is
+  conservative: a whole bucket is checked, not the receivers the replay can
+  build, so an unread override of an unrelated subtype also declines.
+  `replayWitness` now registers the methods it needs (`methodPrelude`) as the
+  other entries do. Stock Nim keeps the PRC-02 decline. Not done: the artifact
+  is not published, so no CI leg has the define yet; `symexFind` over a method
+  SUT stays `sxUnknown` through the route scan (`routeScan`, `feGlobalRoute
+  Unproved`), which is compile-time and which the table cannot answer.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

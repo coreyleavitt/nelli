@@ -2393,6 +2393,12 @@ type ReplayFootprint = object
   routines: seq[NimNode]
     ## RFC-0016 PRC-02. The program's own top-level routines the scan read: the
     ## table a proc value crosses by (`replaywire.nim`).
+  methods: seq[NimNode]
+    ## RFC-0016 PRC-02b. Every method the scan read: the bodies the child may
+    ## run, which the toolchain's dispatch table is checked against.
+  dispatched: seq[NimNode]
+    ## RFC-0016 PRC-02b. The methods the code calls through a dispatcher: the
+    ## dispatchers the table is asked about (`methodDispatchRefusal`).
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -2770,6 +2776,9 @@ type RoutineFootprint = object
   ownGlobals: seq[NimNode]
     ## RFC-0016 PRC-02. A `{.global.}` of another routine, which is the child's
     ## own if that routine is one the child runs (`replayFootprint` decides).
+  dispatched: seq[NimNode]
+    ## RFC-0016 PRC-02b. The methods this body calls through their dispatcher
+    ## (a `procCall` is a static call, so is not one).
   open: bool
   why: string
 
@@ -2903,24 +2912,36 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
         if typeMayHaveHook(n.getTypeInst, seen):
           acc.markOpen("`" & n.strVal & "`, of a type whose module declares a hook")
     of nskMethod:
-      # RFC-0016 PRC-02. Not closable: the override that runs depends on the
-      # receiver's dynamic type, and the macro API cannot list a method's
-      # overrides (they are collected into the dispatcher after this scan).
-      # RFC-0016 PRC-02 / probes 3 and 4. The dispatcher is built after every
-      # module is semmed and an override may sit in a module the entry cannot
-      # see (or twice, in two modules: Nim accepts both and picks one), so no
-      # list of overrides can be closed. A fork copies the process and replays
-      # it, so the decline names the run that can. `<entry>` is filled in by
-      # `replayFootprint`, which knows the routine it was asked about.
-      var base = "its first parameter's type"
-      let t = n.getTypeImpl
-      if t.kind == nnkProcTy and t.len > 0 and t[0].kind == nnkFormalParams and
-         t[0].len > 1 and t[0][1].kind == nnkIdentDefs:
-        base = t[0][1][^2].repr
-      acc.markOpen("`" & n.strVal & "`, a method on `" & base & "`, whose " &
-                   "overrides the scan cannot list (one may be declared in a " &
-                   "module `<entry>` cannot see; a Linux or macOS run forks " &
-                   "and replays it)")
+      # RFC-0016 PRC-02b. With a toolchain that emits a per-binary dispatch
+      # table the method is read, with every override visible to the entry, and
+      # the replay checks the table at run time: a body it lists that no scan
+      # read declines (`methodDispatchRefusal`). Stock Nim declines here.
+      when defined(nimHasMethodDispatchTable):
+        if user:
+          acc.callees.add n
+          acc.dispatched.add n
+          for o in registeredMethods(n.strVal): acc.callees.add o
+        else:
+          acc.markOpen("`" & n.strVal & "`, a method of the stdlib")
+      else:
+        # RFC-0016 PRC-02. Not closable: the override that runs depends on the
+        # receiver's dynamic type, and the macro API cannot list a method's
+        # overrides (they are collected into the dispatcher after this scan).
+        # RFC-0016 PRC-02 / probes 3 and 4. The dispatcher is built after every
+        # module is semmed and an override may sit in a module the entry cannot
+        # see (or twice, in two modules: Nim accepts both and picks one), so no
+        # list of overrides can be closed. A fork copies the process and replays
+        # it, so the decline names the run that can. `<entry>` is filled in by
+        # `replayFootprint`, which knows the routine it was asked about.
+        var base = "its first parameter's type"
+        let t = n.getTypeImpl
+        if t.kind == nnkProcTy and t.len > 0 and t[0].kind == nnkFormalParams and
+           t[0].len > 1 and t[0][1].kind == nnkIdentDefs:
+          base = t[0][1][^2].repr
+        acc.markOpen("`" & n.strVal & "`, a method on `" & base & "`, whose " &
+                     "overrides the scan cannot list (one may be declared in a " &
+                     "module `<entry>` cannot see; a Linux or macOS run forks " &
+                     "and replays it)")
     of nskType:
       # RFC-0005 batch 11. A value no variable holds still has its hooks run: a
       # constructor's or a conversion's temporary, passed on to a callee that
@@ -3064,7 +3085,9 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     if key in seen: continue
     seen.add key
     routines.add r
+    if symKind(r) == nskMethod: result.methods.add r
     let f = routineFootprint(r)
+    for d in f.dispatched: result.dispatched.add d
     if f.open and not result.open:
       result.open = true
       result.why = f.why.replace("<entry>", fn.strVal)
@@ -3311,6 +3334,24 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
         putGlobals.add quote do:
           wirePut(`wr`, `g`)
       let blob = if child.blob != nil: child.blob else: witId
+      # RFC-0016 PRC-02b. The child is this binary, so the toolchain's table of
+      # what each method dispatcher can run says what it would run: a body no
+      # scan read declines. Empty (nothing to ask) without a method in the scan.
+      var dispatchCheck = newLit("")
+      when defined(nimHasMethodDispatchTable):
+        if fp.dispatched.len > 0:
+          var names = nnkBracket.newTree()
+          var calls = nnkBracket.newTree()
+          var addrs = nnkBracket.newTree()
+          for m in fp.dispatched:
+            names.add newLit(m.strVal)
+            calls.add quote do: cast[pointer](`m`)
+          for m in fp.methods:
+            addrs.add quote do: cast[pointer](`m`)
+          dispatchCheck = newCall(bindSym"methodDispatchRefusal",
+                                  nnkPrefix.newTree(ident"@", names),
+                                  nnkPrefix.newTree(ident"@", calls),
+                                  nnkPrefix.newTree(ident"@", addrs))
       # The host runs no child for a witness that does not convert (`convertible`
       # below); the child's splat must not be compiled for one either.
       var childConvertible = newLit(true)
@@ -3356,7 +3397,9 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
             # it the ones it can). RFC-0005 0.9.1 (WA-7): set at this moment
             # only, so the decline is not cached.
             let hook = putHostHooks(`wr`)
+            let dispatch = `dispatchCheck`
             if hook.len > 0: refusedHostHook(hook)
+            elif dispatch.len > 0: refusedNotMarshallable(dispatch)
             else: runReplayReexec(`site`, `wr`.data, `timeoutMs`)
   else:
     runChild = quote do:
@@ -3377,6 +3420,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           # RFC-0005 S8ct: the run is in a child: the host learns how it ended.
           let `childRes` = `runChild`
           replayResultOf(`childRes`, `lossy` or `extraLossy` or `converted`)
+
+proc methodPrelude(fn: NimNode): NimNode
 
 macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
                      pathTaint: Taint): untyped =
@@ -3406,6 +3451,14 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
   ## call it -- they splice `emitReplayWitness` with their own settings'
   ## timeout (`emitRunSymexReplayed`). A caller who needs another bound, or
   ## `replay = false`, goes through `symexFind` with its settings.
+  # RFC-0016 PRC-02b: register the methods `fn` calls in the caller's scope
+  # first, so a replay's footprint reads the overrides the entry can see.
+  when defined(nimHasMethodDispatchTable):
+    let pre = methodPrelude(fn)
+    if pre != nil:
+      return newTree(nnkStmtListExpr, pre,
+                     newCall(bindSym"replayWitness", fn, witness, target,
+                             pathTaint))
   let parsed = parseEntryImpl(fn, "replayWitness",
     defaultSymexSettings().budget.maxInstantiationsPerProc)
   emitReplayWitness(fn, parsed.params, witness, target, pathTaint)

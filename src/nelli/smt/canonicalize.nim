@@ -321,7 +321,12 @@ const renderAsChoicesVersion* = "12"
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "304"
+const symexWalkerVersion* = "305"
+  ## RFC-0016 K7 (304->305, charge): the walker-side work of each query (its
+  ## construction in `ownContextSolver` and the per-query fact passes) is
+  ## charged to `walkRLimit` beside the Z3 units, so the budget bounds wall
+  ## time on table-heavy shapes too. A walk near the limit now ends in
+  ## `ckWalkWork` sooner than before; a cached verdict from before is stale.
   ## RFC-0016 K10b precision (303->304): the tail walk's pins cover each ref
   ## sort's `nil` constant by model completion, also where the explore model
   ## never mentions it (an unconstrained constant takes any value the witness

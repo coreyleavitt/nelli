@@ -174,8 +174,10 @@ type
       ## the step bound, which is deterministic, still answers first; the
       ## clock is the backstop for one whose counter does not.
     walkRLimit*: uint = 1_000_000_000
-      ## RFC-0016 K7. The total Z3 resource units (`rlimit`) every solver
-      ## check of ONE walk may spend together; `0` opts out (unbounded). The
+      ## RFC-0016 K7. The total work units every solver check of ONE walk may
+      ## spend together (Z3 `rlimit` units plus, at `walkerTermUnits` per term
+      ## visit, the walker's own query construction and fact passes, so the
+      ## budget bounds wall time and not only solver time); `0` opts out (unbounded). The
       ## per-query bounds above do not bound the SUM: a loop nest whose
       ## unrolled paths multiply (`for l in s.splitLines` over an unbounded
       ## `string`: three nested loops, each unrolled 5x, the live set 1, 33,

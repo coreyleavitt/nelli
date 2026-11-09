@@ -337,7 +337,7 @@
   fixed, declines over a bounded string (pinned); over an UNBOUNDED string it ended in
   a typed `ckWalkWork` cap once K7 landed (below), so CRH-01 is closed. The `case n.kind` census row in
   `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
-  K7 hang, OPEN (`rfc-0016-k7hang`, no source change): two sequential binary searches over a
+  K7 hang, FIXED by the walker-side charge (`rfc-0016-k7charge`, walker 300; finding from `rfc-0016-k7hang`): two sequential binary searches over a
   450-entry const table (`unicode.toLower`'s shape; `tests/tsymex_0016_k7_twosearch.nim`) DO end
   as `ckWalkWork` under an explicit `walkRLimit`, but 20M units took 190-260 s, ~88k units/s
   against ~1M/s for arithmetic: the default 1e9 is hours. Wall time is walker-side, not Z3
@@ -346,12 +346,22 @@
   all inside `checkExact`). Each query is ~2000 DAG terms (8.66M terms over 4029 checks): the
   path condition carries each table as a 450-deep `store` chain (`select(store(...))`, 1.4 MB as
   text, DAG-shared), re-walked by about ten per-query passes. Paths stay few (max 64, usually 1-2),
-  so it is per-query cost, not path explosion. Units do not see it: each query is ~5k units.
+  so it is per-query cost, not path explosion. Units did not see it: each query is ~5k units.
+  Fix: `walkerWorkUnits` charges `walkerTermUnits` (15) units per term visit of
+  `ownContextSolver`'s build and of each fact pass to the same `walkRLimit`
+  spend (`walkUnitsSpent`); rate calibration is the comment by the constant
+  (Z3 0.254 us/unit on three arithmetic suites, 4.0 us/visit on twosearch).
+  The 1e9 default is NOT changed: re-measure it on the suite from this branch.
+  Collect with `NELLI_WALK_UNITS_LOG=<abs file>` (dt-bounded.sh forwards it):
+  `<units>\t<target>\t<status>\t<walker>`, `units` the whole spend now
+  (Z3 + charge), `walker` its charge share (4th column, new). Decided walks
+  that were table-heavy spend more than before (`splitlines_unbounded` still
+  ends `ckWalkWork` at its explicit 20M, 15.4M of it charge).
   K7 total work (`rfc-0016-k2c`, walker 298, with K2c): `budget.walkRLimit`
   bounds the Z3 units of every check of one walk (`ownContextCheck` charges,
   `checkCapped` runs each query under what is left, `shouldStop` ends the walk,
   `runSymexImpl` records the one `ckWalkWork` halt as `beBudgetExhaustedPrune`).
-  `NELLI_WALK_UNITS_LOG=<file>` appends `<units>\t<target>\t<status>` per walk
+  `NELLI_WALK_UNITS_LOG=<file>` appends `<units>\t<target>\t<status>\t<walker charge>` per walk
   (`dt-bounded.sh` forwards it). DEFAULT `1_000_000_000` (0 opts out),
   measured 2026-11-09 at d5d1d563 over the whole suite (1047 files, 7818 walks,
   eos): largest decided walk 175,310,967 units (`label:prod12`, sxSat,

@@ -5827,6 +5827,46 @@ var bitSetCardSets {.threadvar.}: Table[int, tuple[s: Z3AnyAst, n: int]]
   ## RFC-0005 S8bv. Each `card` term's set and width, by the term's id (the
   ## set held, so its id stays live), for `bitSetCardFacts`.
 
+var walkerWorkUnits* {.threadvar.}: int
+  ## RFC-0016 K7. The walker-side work units of this thread, running total:
+  ## query construction (`ownContextSolver`) and the per-query fact passes
+  ## (`chargeWalkerTerms`). Charged to the same `walkRLimit` budget as the Z3
+  ## units, so the budget bounds wall time and not only solver time.
+
+const walkerTermUnits* = 15
+  ## RFC-0016 K7. Units charged per term visit: one term, once, by one query
+  ## construction (`ownContextSolver`) or one fact pass (`seqLenCaps`,
+  ## `seqRangeFacts`, `divRangeFacts`, `bvOffsetLinks`, `bvIntInverseFacts`,
+  ## `bitSetCardFacts`, `mergeMemberships`' `holds`/`rewrite`, and the three
+  ## site scans). Count-based, a function of the query alone, so a cut walk is
+  ## the same on every host. It makes a unit of walker work cost about what a
+  ## unit of Z3 work costs, so `walkRLimit` bounds wall time for every shape.
+  ##
+  ## Calibration (2026-11-09, one host, podman `nelli-dev`, charge set to 1 per
+  ## visit so the log's last column counts visits, each test binary timed
+  ## whole; Z3 units = log units - visits):
+  ##   Z3 seconds per unit, arithmetic-heavy SUTs:
+  ##     tsymex_augmented_assign   175.46M units in 46.6 s  = 0.266 us/unit
+  ##     tsymex_0016_s8cj_mkunique  20.96M units in  5.07 s = 0.242 us/unit
+  ##     tsymex_161_overflow_obligation 59.76M units in 15.1 s = 0.253 us/unit
+  ##   (mean 0.254 us/unit, about 3.9M units/s on this host).
+  ##   Walker seconds per visit, `tsymex_0016_k7_twosearch` (two binary
+  ##   searches over a 450-entry const table; 3 walks, 4.0M Z3 units, 10.02M
+  ##   visits, 41.2 s): (41.2 s - 4.0M * 0.254 us) / 10.02M = 4.0 us/visit
+  ##   (build ~5.7, divRangeFacts ~4.2, mergeMemberships ~5.9, seqLenCaps ~2.2,
+  ##   bvOffsetLinks ~1.7, bvIntInverseFacts ~1.8 us/term in the K7 profile).
+  ##   Rate: 4.0 us/visit / 0.254 us/unit = 15.7 units per visit; 15 is used
+  ##   (the profile's passes are lighter than the mean in the cheap ones, and
+  ##   a pass not yet charged adds slack the other way). Before the charge
+  ##   the same walk ran 106k units/s (94 s for 10M units); with it the
+  ##   walk's units/s is within the arithmetic shapes' (see
+  ##   `tests/tsymex_0016_k7_twosearch.nim`).
+
+template chargeWalkerTerms(n: int) =
+  ## One count-based charge (a function of the query's terms alone, so the
+  ## verdict is the same on every host).
+  walkerWorkUnits += n * walkerTermUnits
+
 proc queryMentionsBitSetCard(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
   ## RFC-0005 S8bq. Some term of `roots` is a builtin set's `card`.
   if bitSetCardIds.len == 0: return false
@@ -5838,6 +5878,7 @@ proc queryMentionsBitSetCard(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
     let id = astId(ctx, t)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if id in bitSetCardIds: return true
     if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
     let app = Z3_to_app(ctx.raw, t)
@@ -5911,6 +5952,7 @@ proc bitSetCardFacts(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let id = astId(ctx, t)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if id in bitSetCardIds:
       let (sv, n) = bitSetCardSets[id]
       found.add (wrap[Z3BitVec[64]](ctx, t), sv, n)
@@ -13151,6 +13193,7 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     let k = ord(Z3_get_decl_kind(ctx.raw, decl))
@@ -13527,6 +13570,7 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     let k = ord(Z3_get_decl_kind(ctx.raw, decl))
@@ -14137,6 +14181,7 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
   proc holds(t: Z3AnyAst): bool =
     let id = astId(ctx, t.raw)
     if id in hasLit: return hasLit[id]
+    chargeWalkerTerms(1)   ## RFC-0016 K7
     result = literal(t).ok
     if not result and getAstKind(t) == akApp:
       for a in unpackApp(t).args:
@@ -14160,6 +14205,7 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     if pol == polBoth or getAstKind(t) != akApp or not holds(t): return t
     let key = (astId(ctx, t.raw), envId, pol, conj)
     if key in memo: return memo[key]
+    chargeWalkerTerms(1)   ## RFC-0016 K7
     if not conj:
       let (decl, args) = unpackApp(t)
       let k = kindOf(t)
@@ -14290,6 +14336,8 @@ var queryTimedOutFlag {.threadvar.}: bool
   ## (`solveBounded`); reset by `resetSymexRunState`. `runSymex` puts it on
   ## the result (`rdQueryTimeout`), which is what a save reads.
 
+var walkerWorkBase {.threadvar.}: int
+  ## RFC-0016 K7. `walkerWorkUnits` when the current run began.
 var walkUnitsBase {.threadvar.}: int
   ## RFC-0016 K7. `ownContextUnits` when the current run began
   ## (`resetSymexRunState`): the walk's spend is the total's growth since.
@@ -14302,7 +14350,7 @@ var walkWorkExhausted {.threadvar.}: bool
 
 proc walkUnitsSpent(): int {.inline.} =
   ## RFC-0016 K7. The Z3 units every own-context check of this run has spent.
-  ownContextUnits - walkUnitsBase
+  ownContextUnits - walkUnitsBase + walkerWorkUnits - walkerWorkBase
 
 proc chargeWalkWork() =
   ## RFC-0016 K7. Called after every own-context check (`ownContextCheck`,
@@ -14316,8 +14364,10 @@ const walkUnitsLogEnv* = "NELLI_WALK_UNITS_LOG"
 
 proc logWalkUnits(target, status: string) =
   ## RFC-0016 K7. When the environment names a file, appends one line
-  ## `<units>\t<target>\t<status>` for the walk that just finished: the Z3
-  ## units its checks spent. Append mode and one write per line, so
+  ## `<units>\t<target>\t<status>\t<walker>` for the walk that just finished:
+  ## the units it spent (RFC-0016 K7: its Z3 checks AND the walker-side charge,
+  ## the budget `walkRLimit` bounds) and, last, the part of them that is the
+  ## walker-side charge (`units - walker` is the Z3 share). Append mode and one write per line, so
   ## concurrent test processes interleave whole lines. Off when unset. This
   ## is how `walkRLimit`'s default is measured (the maximum over the corpus).
   let path = getEnv(walkUnitsLogEnv)
@@ -14325,7 +14375,8 @@ proc logWalkUnits(target, status: string) =
   try:
     var f: File
     if open(f, path, fmAppend):
-      f.write($walkUnitsSpent() & "\t" & target & "\t" & status & "\n")
+      f.write($walkUnitsSpent() & "\t" & target & "\t" & status & "\t" &
+              $(walkerWorkUnits - walkerWorkBase) & "\n")
       f.close()
   except IOError, OSError:
     discard
@@ -14424,6 +14475,7 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   let own = newContext()
   setCurrentContext(prev)
   let order = queryTermOrder(ctx, roots)
+  chargeWalkerTerms(order.len)   ## RFC-0016 K7: one build/translate visit per term
   var at: Table[int, int]
   let terms = newAstVector(ctx)
   for i, t in order:
@@ -14565,6 +14617,7 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     for a in args: stack.add a
@@ -14705,6 +14758,7 @@ proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     for a in args: stack.add a
@@ -14830,6 +14884,7 @@ proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     for a in args: stack.add a
@@ -15505,6 +15560,7 @@ proc stringConstants(ctx: Z3Context; query: openArray[Z3Bool]): seq[string] =
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if Z3_is_string(ctx.raw, t.raw):
       var b = ""
       for cp in getStringContents(wrap[Z3String](ctx, t.raw)):
@@ -15550,6 +15606,7 @@ proc pointSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if id in byId:
       for i in byId[id]: hit.incl i
     if getAstKind(t) != akApp: continue
@@ -15834,6 +15891,7 @@ proc limitSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
     let id = astId(ctx, t.raw)
     if id in seen: continue
     seen.incl id
+    chargeWalkerTerms(1)
     if id in byId:
       for i in byId[id]: hit.incl i
     if getAstKind(t) != akApp: continue
@@ -29358,6 +29416,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   queryTimedOutFlag = false                            ## RFC-0005 S8bu
   nativeStackCutFlag = false                           ## RFC-0005 S8ca
   walkUnitsBase = ownContextUnits                      ## RFC-0016 K7
+  walkerWorkBase = walkerWorkUnits
   walkRLimitCur = settings.budget.walkRLimit
   walkWorkExhausted = false
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).

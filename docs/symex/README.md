@@ -349,8 +349,10 @@ in the suite); `0` opts out. At the limit the walk stops and records the cap
 `sxUnknown`, while a target already reached with a sound witness stays a hit.
 Deterministic and part of the cache key. To measure it, set the environment
 variable `NELLI_WALK_UNITS_LOG` to a file: each finished walk appends one line
-`<units>\t<target>\t<status>` (target `label:<name>`, `raised:<type>` or the
-target kind). That is how the default is re-measured over the corpus.
+`<units>\t<target>\t<status>\t<walker>` (target `label:<name>`, `raised:<type>` or
+the target kind; `units` is the whole spend, the Z3 units plus the walker-side
+charge for query construction and the fact passes, and `walker` is that charge's
+share). That is how the default is re-measured over the corpus.
 
 **Warm-run cost** (after Phase 13's verdict caching): one DB
 load per target. SAT, UNSAT, and UNKNOWN findings all cache

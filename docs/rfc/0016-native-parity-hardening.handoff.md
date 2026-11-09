@@ -173,9 +173,11 @@
   ptr and generic arguments); a routine pragma with no row declines
   `feUnadmitted`. The lib-wide guard (`tsymex_0016_k3c_pragmaaxis`) fails on
   a pragma `lib/` spells that has no row in any place (pragmas.nim is not in
-  the toolchain image, so lib/ is the text scanned). Open: a union-typed
-  module-level variable reached by no local, formal or result is not gated;
-  K8b exercises the unpinned cells (allowlisted in `pragma.txt`).
+  the toolchain image, so lib/ is the text scanned). A module-level
+  variable the SUT or a callee names is checked as a local is, at the end of
+  `parseProc` over `seenModuleGlobals()` (pinned by `tsymex_0016_k3c_pragmaaxis`:
+  union and packed globals, and a union global reached only through a callee).
+  Open: K8b exercises the unpinned cells (allowlisted in `pragma.txt`).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

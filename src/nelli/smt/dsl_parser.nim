@@ -22544,6 +22544,17 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
         parsed = mkBlock(@[ctx.declineMarker(feUnsupportedOp,
           "the target routine: " & why & " (feUnsupportedOp)"), parsed])
         break
+  # A module-level variable the SUT or a routine it calls names: its type
+  # is checked as a local's is (the global footprint reaches no local, formal
+  # or result).
+  block:
+    for g in seenModuleGlobals():
+      let why = typePragmaReason(g.getTypeInst)
+      if why.len > 0:
+        parsed = mkBlock(@[ctx.declineMarker(feUnsupportedOp,
+          "the module-level variable `" & macros.strVal(g) & "`: " & why &
+          " (feUnsupportedOp)"), parsed])
+        break
   discard ctx.arithScopes.pop()
   discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, procDef, checkOpts,

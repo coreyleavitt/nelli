@@ -86,6 +86,9 @@ var
   gBR: ByRefObj
   gBC: ByCopyObj
   gHold: HoldsUnion
+  gUnion: UnionObj
+  gPacked: PackedObj
+  gViaCallee: UnionObj
 
 proc unionLocal(k: int) =
   var u: UnionObj
@@ -105,6 +108,21 @@ proc byRefLocal(k: int) =
 proc byCopyLocal(k: int) =
   let o = ByCopyObj(a: k)
   if o.a == 5: symexTarget("hit")
+
+proc unionGlobal(k: int) =
+  gUnion.all = 0
+  gUnion.lo = int32(k)
+  if gUnion.all == 5: symexTarget("hit")
+
+proc packedGlobal(k: int) =
+  gPacked.b = int32(k)
+  if gPacked.b == 5: symexTarget("hit")
+
+proc touchViaCallee(k: int) =
+  gViaCallee.lo = int32(k)
+proc unionGlobalViaCallee(k: int) =
+  touchViaCallee(k)
+  if k == 5: symexTarget("hit")
 
 proc nestedUnion(k: int) =
   var h: HoldsUnion
@@ -209,6 +227,18 @@ suite "RFC-0016 K3c: the pragma axis":
   test "a bycopy local declines":
     pinDecline(byCopyLocal, cellKey(axPragma, "type/bycopy"), feUnsupportedOp,
                needle = "pragma:type/bycopy")
+
+  test "a union module-level variable declines":
+    pinDecline(unionGlobal, cellKey(axPragma, "type/union"), feUnsupportedOp,
+               needle = "pragma:type/union")
+
+  test "a packed module-level variable declines":
+    pinDecline(packedGlobal, cellKey(axPragma, "type/packed"), feUnsupportedOp,
+               needle = "pragma:type/packed")
+
+  test "a union global reached only through a callee declines":
+    pinDecline(unionGlobalViaCallee, cellKey(axPragma, "type/union"),
+               feUnsupportedOp, needle = "pragma:type/union")
 
   test "a union nested in a field declines":
     pinDecline(nestedUnion, cellKey(axPragma, "type/union"), feUnsupportedOp,

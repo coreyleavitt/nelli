@@ -17,6 +17,7 @@
 ## place, so cycle 5 only adds the promotion logic, not new families.
 
 import std/tables
+from std/os import getEnv
 import std/options
 from std/typetraits import nil   ## RFC-0005 S8ar: `readCellField`'s distinct arm
 import std/sets
@@ -696,6 +697,7 @@ type
     ckVariantFieldAllocs  ## `maxVariantConstructorFieldAllocs`
     ckTermWalkRead        ## `termWalkMaxDepth`: a too-wide array read
     ckTermWalkWrite       ## `termWalkMaxDepth`: a too-wide array write
+    ckWalkWork            ## `walkRLimit`: the walk's total solver work (a halt)
 
   DegradeSink = enum
     ## RFC-0005 S1. Which existing error sink `degrade()` records into. The
@@ -14147,6 +14149,46 @@ var queryTimedOutFlag {.threadvar.}: bool
   ## (`solveBounded`); reset by `resetSymexRunState`. `runSymex` puts it on
   ## the result (`rdQueryTimeout`), which is what a save reads.
 
+var walkUnitsBase {.threadvar.}: int
+  ## RFC-0016 K7. `ownContextUnits` when the current run began
+  ## (`resetSymexRunState`): the walk's spend is the total's growth since.
+var walkRLimitCur {.threadvar.}: uint
+  ## RFC-0016 K7. The run's `walkRLimit`, set by `resetSymexRunState`.
+var walkWorkExhausted {.threadvar.}: bool
+  ## RFC-0016 K7. The run's solver checks together spent `walkRLimitCur`
+  ## (`chargeWalkWork`); reset by `resetSymexRunState`. `shouldStop` reads it,
+  ## `runSymexImpl` records the `ckWalkWork` halt.
+
+proc walkUnitsSpent(): int {.inline.} =
+  ## RFC-0016 K7. The Z3 units every own-context check of this run has spent.
+  ownContextUnits - walkUnitsBase
+
+proc chargeWalkWork() =
+  ## RFC-0016 K7. Called after every own-context check (`ownContextCheck`,
+  ## the one place a walk's Z3 units are counted): once the run's spend
+  ## reaches `walkRLimit` the walk is out of work budget.
+  let spent = walkUnitsSpent()
+  if walkRLimitCur != 0 and spent >= 0 and uint(spent) >= walkRLimitCur:
+    walkWorkExhausted = true
+
+const walkUnitsLogEnv* = "NELLI_WALK_UNITS_LOG"
+
+proc logWalkUnits(target, status: string) =
+  ## RFC-0016 K7. When the environment names a file, appends one line
+  ## `<units>\t<target>\t<status>` for the walk that just finished: the Z3
+  ## units its checks spent. Append mode and one write per line, so
+  ## concurrent test processes interleave whole lines. Off when unset. This
+  ## is how `walkRLimit`'s default is measured (the maximum over the corpus).
+  let path = getEnv(walkUnitsLogEnv)
+  if path.len == 0: return
+  try:
+    var f: File
+    if open(f, path, fmAppend):
+      f.write($walkUnitsSpent() & "\t" & target & "\t" & status & "\n")
+      f.close()
+  except IOError, OSError:
+    discard
+
 proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
   ## RFC-0005 S8bu. `s.check()` (under `assumptions`, `checkWith`), noting
   ## a solve the wall clock cut off (`queryTimeoutMs`).
@@ -14286,6 +14328,7 @@ proc ownContextCheck(s: Z3Solver;
   if st.contains("rlimit count"):
     ownContextUnits += (if st.isInt("rlimit count"): st.getInt("rlimit count")
                         else: int(st.getFloat("rlimit count")))
+  chargeWalkWork()   ## RFC-0016 K7
 
 var intDivDeclKinds {.threadvar.}:
     tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub, bvadd: int]
@@ -15711,7 +15754,7 @@ proc limitWorldRefuted(ctx: Z3Context; query: openArray[Z3Bool];
   true
 
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
-                 settings: SymexSettings; rlimit: uint):
+                 settings: SymexSettings; rlimit0: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
                        why: string] =
   ## RFC-0005 S8cf (SOUNDNESS). `checkExact` reads every regex call as a
@@ -15723,6 +15766,15 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##   * an UNSAT stands only if the query stays UNSAT with those calls
   ##     stopped at a limit (`limitWorldRefuted`), else `zsUnknown`.
   ## A query with no such call is `checkExact` alone.
+  # RFC-0016 K7. Under a `walkRLimit` the query runs under at most what the
+  # walk has left (at least 1: the work is spent and the walk stops, so it
+  # decides nothing it need not), so one query cannot overshoot the total.
+  var rlimit = rlimit0
+  if walkRLimitCur != 0:
+    let spent = walkUnitsSpent()
+    let left = if spent < 0 or uint(spent) >= walkRLimitCur: 1'u
+               else: walkRLimitCur - uint(spent)
+    if rlimit == 0 or left < rlimit: rlimit = left
   let sites = limitSitesIn(ctx, query)
   let points = pointSitesIn(ctx, query)
   var decided = false
@@ -17606,6 +17658,7 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
   ## sxRaised (defect found on a sibling path) must NOT stop exploration, or the
   ## label's sxSat is never computed. All raise-flavoured targets: an sxRaised IS
   ## the terminal answer (unchanged).
+  if walkWorkExhausted: return true   ## RFC-0016 K7: out of solver work
   for r in w.found:
     if r.status == sxSat: return true
     if r.status == sxRaised and w.target.kind != stkLabel: return true
@@ -29017,6 +29070,9 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   queryTimeoutMsCur = settings.budget.queryTimeoutMs   ## RFC-0005 S8bu
   queryTimedOutFlag = false                            ## RFC-0005 S8bu
   nativeStackCutFlag = false                           ## RFC-0005 S8ca
+  walkUnitsBase = ownContextUnits                      ## RFC-0016 K7
+  walkRLimitCur = settings.budget.walkRLimit
+  walkWorkExhausted = false
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
@@ -29633,6 +29689,16 @@ proc runSymexImpl(prog: SymexProgram,
     if not w.statics.closureBodies.hasKey(sk):
       w.statics.closureBodies[sk] = cb
   discard walk(prog.body, @[initial], w)
+  if walkWorkExhausted:
+    # RFC-0016 K7. The one `ckWalkWork` site: the walk's checks spent
+    # `walkRLimit` together and `shouldStop` ended it; every path not yet
+    # decided is dropped, so the run is `sxUnknown` unless a sound witness
+    # was already found (`decideVerdict`, as for `ckFrontier`).
+    w.halted(beBudgetExhaustedPrune,
+      "walk work cap (walkRLimit=" & $walkRLimitCur & " Z3 units; " &
+           $walkUnitsSpent() & " spent) ended the walk -- the paths not yet " &
+           "decided are unexplored (beBudgetExhaustedPrune)",
+      cap = ckWalkWork)
   currentWalkCtxPtr = nil   ## (a) normal-path clear: walk() completed without raising
   stampLoweringPendingLeak(w)  ## RFC-0005 S1: pending-taint leak pin (§2.2)
   # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/
@@ -29769,6 +29835,10 @@ proc runSymexImpl(prog: SymexProgram,
   let decision = decideVerdict(w.found, w.candidates, w.runTaint,
                                reachUnknown = reachUnknown)
   rfc0005RawStatus = decision.status
+  logWalkUnits(case target.kind
+               of stkLabel: "label:" & target.label
+               of stkRaisedExn: "raised:" & target.typeFilter
+               else: $target.kind, $decision.status)
   let winnerFound = decision.status in {sxSat, sxRaised}
   let winnerIdx   = decision.winnerIdx
   if winnerFound:

@@ -173,6 +173,24 @@ type
       ## minutes at 40-55k units/s), so on a query whose counter advances
       ## the step bound, which is deterministic, still answers first; the
       ## clock is the backstop for one whose counter does not.
+    walkRLimit*: uint = 0
+      ## RFC-0016 K7. The total Z3 resource units (`rlimit`) every solver
+      ## check of ONE walk may spend together; `0` is unbounded. The
+      ## per-query bounds above do not bound the SUM: a loop nest whose
+      ## unrolled paths multiply (`for l in s.splitLines` over an unbounded
+      ## `string`: three nested loops, each unrolled 5x, the live set 1, 33,
+      ## 594, ...) issues thousands of fast checks, each well under
+      ## `queryRLimit`, and no live-path cap bounds the work (it grows as
+      ## `(5 * cap) ^ depth`). Every check of the walk is charged
+      ## (`ownContextCheck`); a query runs under at most what is left, and
+      ## once the total is spent the walk stops: the paths not yet decided
+      ## are dropped as `beBudgetExhaustedPrune` (`sxUnknown`, cap
+      ## `ckWalkWork`), while a target already reached with a sound witness
+      ## stays a hit. Deterministic (a step count, not a clock), so a walk it
+      ## cuts is the same on every machine, and cacheable: it is part of the
+      ## cache key. A walk's spend is appended to the file named by the
+      ## environment variable `NELLI_WALK_UNITS_LOG` (`logWalkUnits`), which
+      ## is how this default is re-measured.
     maxFrontierSize*: int = 0
       ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
       ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path

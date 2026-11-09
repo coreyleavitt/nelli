@@ -106,6 +106,7 @@ SymexSettings(
   integerSemantics:        isOptimised,  # ADR-0001
   queryTimeoutMs:          5000,
   maxFrontierSize:         256,
+  budget.walkRLimit:       0,     # total Z3 units per walk; 0 = unbounded (cap ckWalkWork)
   maxCallDepth:            3,
   maxLoopUnwind:           5,
   acceptUnknownAsCovered:  false)
@@ -339,6 +340,17 @@ steps (`queryRLimit`), not wall-clock ms — Phase 13 wired the
 field to Z3's `rlimit` parameter for deterministic resource
 bounds. Default `queryRLimit = 0` means unbounded; opt in by
 setting a positive value.
+
+**Total work per walk.** `budget.walkRLimit` bounds the sum of Z3
+resource units (`rlimit`) every solver check of one walk spends, which the
+per-query bounds do not (thousands of fast checks over multiplying unrolled
+paths). `0` is unbounded. At the limit the walk stops and records the cap
+`ckWalkWork` (`beBudgetExhaustedPrune`): paths not yet decided are
+`sxUnknown`, while a target already reached with a sound witness stays a hit.
+Deterministic and part of the cache key. To measure it, set the environment
+variable `NELLI_WALK_UNITS_LOG` to a file: each finished walk appends one line
+`<units>\t<target>\t<status>` (target `label:<name>`, `raised:<type>` or the
+target kind). That is how the default is re-measured over the corpus.
 
 **Warm-run cost** (after Phase 13's verdict caching): one DB
 load per target. SAT, UNSAT, and UNKNOWN findings all cache

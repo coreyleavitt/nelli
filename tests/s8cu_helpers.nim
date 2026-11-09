@@ -604,6 +604,7 @@ func capExpectation*(cap: string): tuple[kind: SymexErrorKind, needle: string] =
   of "ckLoopUnwindFollow": (beBudgetExhausted, "following a concrete replay")
   of "ckVariantForks": (beBudgetExhaustedUnmodelled, "variant constructor fork budget")
   of "ckVariantFieldAllocs": (beBudgetExhaustedUnmodelled, "field-allocation budget")
+  of "ckWalkWork": (beBudgetExhaustedPrune, "walk work cap")
   of "ckTermWalkRead": (feUnsupportedOpHavoc, "isIndex: an array of")
   of "ckTermWalkWrite": (feUnsupportedStmtKind, "isIndexAssign: an array of")
   else:

@@ -5079,6 +5079,7 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget {.deprecated:
   if b.maxSeqLen != d.maxSeqLen: result.maxSeqLen = b.maxSeqLen   ## RFC-0005 S8k
   if b.seqQueryRLimit != d.seqQueryRLimit: result.seqQueryRLimit = b.seqQueryRLimit   ## RFC-0005 S8k
   if b.queryTimeoutMs != d.queryTimeoutMs: result.queryTimeoutMs = b.queryTimeoutMs   ## RFC-0005 S8bu
+  if b.walkRLimit != d.walkRLimit: result.walkRLimit = b.walkRLimit   ## RFC-0016 K7
   if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
   if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
   if b.maxRecursionDepth != d.maxRecursionDepth: result.maxRecursionDepth = b.maxRecursionDepth   ## RFC-0005 S8ax

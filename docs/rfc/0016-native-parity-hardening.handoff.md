@@ -67,6 +67,13 @@
   shm sweep fix `c39b770c` (below). CI-B (`rfc-0016-cib2`) green after the
   toolchain incident reruns; awaiting its agent's handoff.
   K1a-ci (`rfc-0016-k1aci`): post-shard universe joins on symex-linux, symex-mingw and symex-nightly; allowlist entries take an optional `rows=` scope (`heNilDerefMayBeCaught` is scoped to mingw, msvc, linux-cpp: setjmp is INT-12 on Windows and unbuildable on cpp); five stale `errorkind` entries deleted. Planted-RED nightly https://github.com/coreyleavitt/nelli/actions/runs/42532198619; green: linux https://github.com/coreyleavitt/nelli/actions/runs/42537270847, mingw https://github.com/coreyleavitt/nelli/actions/runs/42537270688, nightly (cpp, z3-4.13.4, msvc) https://github.com/coreyleavitt/nelli/actions/runs/42537276403.
+- **Wave 3 progress (2026-11-08):** K2a (`rfc-0016-k2a`):
+  `tests/tsymex_0016_k2a_census.nim`, registered in `nelli.nimble`, counts the
+  `case n.kind` sites, `Survivors(`/`Degrade(` literals, bare `skip(` calls and
+  platform arms in files without `skipCell`, and joins them to
+  `tests/0016-allowlist/census.txt` (unlisted site and stale entry both fail;
+  the K2-s script totals are cross-checked on Linux). K2a-fail (Wave 4) turns
+  the bare `skip(` rows from listed into failing.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

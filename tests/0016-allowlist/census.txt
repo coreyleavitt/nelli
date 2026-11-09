@@ -1,0 +1,154 @@
+# RFC-0016 K2a allowlist. Line: site<TAB>slice<TAB>reason. A site is kind:file:context (see tests/tsymex_0016_k2a_census.nim).
+# An entry is removed in the commit that removes its site (the census fails a stale entry); a new site is added in the commit that introduces it.
+bare_skip:tests/tfuzzcbuild.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcbuild.nim:skip()#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcbuild.nim:skip()#3	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcbuild.nim:skip()#4	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcbuild.nim:skip()#5	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcbuild.nim:skip()#6	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcmplogshm.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcmplogshmleak.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcovdump.nim:if not available(backend): skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcovdump.nim:if not available(cbGcc): skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcovdump.nim:if not available(cbGcc): skip()#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcovreset.nim:if not available(cbGcc): skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcovreset.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzcovshm.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzdiff.nim:if not available(cbGcc): skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzdiff.nim:if not available(cbGcc): skip()#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzdiff.nim:if not available(cbGcc): skip()#3	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzexternal.nim:if not available(cbGcc): skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzexternal.nim:if not available(cbGcc): skip()#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzexternal.nim:if not available(cbGcc): skip()#3	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzexternalworker.nim:if not available(cbGcc): skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzexternalworker.nim:if not available(cbGcc): skip()#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzshmhold.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tfuzzworkerspawnfailshm.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tprobe_n45stats.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_0016_k20_probes.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_0016_w1c3_splat_defect.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_0016_w1c3_splat_defect.nim:skip()#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_0016_wa_undefined_e2e.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_phase7_assertcovered.nim:proc skip(x: int) = discard	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_phase7_assertcovered.nim:proc skip(x: int) = discard#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_phase7_assertcovered.nim:proc skip(x: int) = discard#3	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_r1_findingapi.nim:proc skip(x: int) = discard	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_r1_findingapi.nim:proc skip(x: int) = discard#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_r1_findingapi.nim:proc skip(x: int) = discard#3	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_r1_replaychild.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_s8cf_jitlimit_b.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_s8cf_jitutf.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+case_n_kind:src/nelli/choice.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/choice.nim:case n.kind#2	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/coverage.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/coverage.nim:case n.kind#2	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/fuzzmacro.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/parallel.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/shrinker.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/check_options.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/check_options.nim:case n.kind#2	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/check_options.nim:case n.kind#3	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/check_options.nim:case n.kind#4	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/check_options.nim:case n.kind#5	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/check_options.nim:case n.kind#6	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#10	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#11	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#12	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#13	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#14	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#15	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#16	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#17	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#18	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#19	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#2	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#20	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#21	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#22	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#23	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#24	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#25	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#26	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#27	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#28	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#29	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#3	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#30	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#31	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#32	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#4	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#5	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#6	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#7	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#8	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#9	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_typebridge.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/impl_digest.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/scoped_names.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/vm_alias_guard.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/vm_alias_guard.nim:case n.kind#2	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/symex.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/symex.nim:case n.kind#2	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+degrade:src/nelli/smt/runtime.nim:Degrade(path: pathTaint(classOf(kind)), ub: ub)	K7c	Degrade literal inside a sanctioned funnel (AUD-09, the runtime.nim privacy note); K7c reviews each
+degrade:src/nelli/smt/runtime.nim:Degrade(path: taint, ub: ub)	K7c	Degrade literal inside a sanctioned funnel (AUD-09, the runtime.nim privacy note); K7c reviews each
+degrade:src/nelli/smt/runtime.nim:result = Degrade(path: loweringPendingTaint, ub: loweringPendingUb)	K7c	Degrade literal inside a sanctioned funnel (AUD-09, the runtime.nim privacy note); K7c reviews each
+degrade:src/nelli/smt/runtime_heap.nim:Degrade(path: pathTaint(classOf(kind)))	K7c	Degrade literal inside a sanctioned funnel (AUD-09, the runtime.nim privacy note); K7c reviews each
+platform:tests/tdbcleanupsweep.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tdbcleanupsweep.nim:when defined(posix):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzcmplogshm.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzcmplogshmleak.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzcmplogshmleak.nim:when defined(posix):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzcovreset.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzcovshm.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzdiff.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzexternal.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzexternal.nim:when defined(windows):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzexternal.nim:when defined(windows):#3	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzexternalworker.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzexternalworker.nim:when defined(windows):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzforkworker.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzshmhold.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzwinjoblimits.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzwinshm.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzwinshm.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzwinworker.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzwinworker.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzworkerlifecycle.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzworkerprocess.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):#3	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_checksoff.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_k5a_fwrapv.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_k5a_profile.nim:when defined(linux): check buildSemantics.os == osLinux	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_k5a_profile.nim:when defined(windows): check buildSemantics.os == osWindows	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_k8a_sink.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_s8cj_mkunique.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_s8cj_mkunique.nim:when defined(posix): import std/posix	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_s8cj_runctx.nim:const names = when defined(windows): ["libz3.dll", "z3.dll"]	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_s8cj_runctx.nim:elif defined(macosx): ["libz3.dylib"]	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_w1d2_wraps.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_phase15_CR2_cachekey.nim:row.get == (when defined(vcc): brMsvc else: brMingw)	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_phase15_CR2_cachekey.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_phase15_CR2_cachekey.nim:when defined(windows):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_r1_replaychild.nim:when defined(posix):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_r2_impldigest.nim:defined(windows) == false	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8ca_stack.nim:when not defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8ca_stack.nim:when not defined(windows):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cb_replay.nim:when defined(linux) and compileOption("threads"):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cb_replay.nim:when defined(linux) and compileOption("threads"):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cs_routes2.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8ct_deepterm.nim:check r.status == (when defined(windows): sxUnknown else: sxSat)	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8ct_isolation_e.nim:when defined(linux):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8ct_isolation_e.nim:when defined(linux):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cu_nil_native.nim:echo "NATIVE ", hostOS, " ", tag, ": rc=", rc, " caught=", result.caught,	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cu_nil_native.nim:when defined(windows): args.add "--cc:gcc"	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cu_nil_setjmp.nim:when not defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cu_nil_setjmp.nim:when not defined(windows):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cu_scan.nim:when hostOS == "no such os":	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_rfc0005_s8cu_scan.nim:when not (hostOS == "no such os"):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+survivors:src/nelli/smt/runtime.nim:Survivors(live: @[])	K7c	Survivors literal; K7c brings every walkStmt arm to Survivors through the sanctioned constructors
+survivors:src/nelli/smt/runtime.nim:Survivors(live: ps)	K7c	Survivors literal; K7c brings every walkStmt arm to Survivors through the sanctioned constructors
+survivors:src/nelli/smt/runtime.nim:Survivors(live: ps)#2	K7c	Survivors literal; K7c brings every walkStmt arm to Survivors through the sanctioned constructors
+survivors:src/nelli/smt/runtime.nim:result = Survivors(live: @[])	K7c	Survivors literal; K7c brings every walkStmt arm to Survivors through the sanctioned constructors

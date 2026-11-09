@@ -948,11 +948,13 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isVariantReassign:
     newCall(bindSym"mkVariantReassign",
             newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName),
-            newLit(s.vrBranches), newLit(s.vrMode))
+            newLit(s.vrBranches), newLit(s.vrMode),
+            emitIRType(s.vrVariantTy))
   of isVariantReassignSymbolic:
     newCall(bindSym"mkVariantReassignSymbolic",
             newLit(s.vrsObjName), newLit(s.vrsDiscName),
-            emitExpr(s.vrsRhs), newLit(s.vrsBranches), newLit(s.vrsMode))
+            emitExpr(s.vrsRhs), newLit(s.vrsBranches), newLit(s.vrsMode),
+            emitIRType(s.vrsVariantTy))
   of isVariantConstructSym:
     var tagsLit = newTree(nnkBracket)
     for t in s.vcsTagSet: tagsLit.add newLit(t)
@@ -18299,9 +18301,9 @@ proc discReassignStmt(recvName: string; ty: IRType; discName: string;
         if arm.tagOrdinal == int(tagIR.ival):
           tagName = arm.tagName; break
       return mkVariantReassign(recvName, int(tagIR.ival), tagName,
-                               branchGroups(ty.vArms), mode)
+                               branchGroups(ty.vArms), mode, ty)
     return mkVariantReassignSymbolic(recvName, "", tagIR, branchGroups(ty.vArms),
-                                     mode)
+                                     mode, ty)
   for ax in ty.mvAxes:
     if ax.discName == discName:
       return mkVariantReassignSymbolic(recvName, ax.discName, tagIR,
@@ -19789,11 +19791,12 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
               tagName = arm.tagName; break
           return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName,
                                    branchGroups(recvCls.ty.vArms),
-                                   discWriteMode(recvCls.ty, ctx))
+                                   discWriteMode(recvCls.ty, ctx), recvCls.ty)
         # Symbolic RHS: A4 fork path.
         return mkVariantReassignSymbolic(recv.strVal, "", tagIR,
                                          branchGroups(recvCls.ty.vArms),
-                                         discWriteMode(recvCls.ty, ctx))
+                                         discWriteMode(recvCls.ty, ctx),
+                                         recvCls.ty)
       if recvCls.ty.kind == itMultiVariant:
         # Identify which axis owns `fieldNode.strVal` as discName.
         for ax in recvCls.ty.mvAxes:

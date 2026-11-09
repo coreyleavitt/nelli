@@ -5778,6 +5778,12 @@ proc unionImageGate(ty: IRType): Option[vl.VariantLayout] =
   let lay = vl.variantLayout(ty)
   if lay.ok: some(lay) else: none(vl.VariantLayout)
 
+proc rangeUnchecked(): bool =
+  ## `--rangeChecks:off`: a `range` value is a plain load and store of its
+  ## base integer, so foreign bytes are a value of it (the build holds no
+  ## range fact for them either).
+  coRange notin buildSemantics.checks
+
 proc activeMemberTracked(ty: IRType): bool =
   ## cpp `--fieldChecks:off`: a value variant carries the arm last written.
   ty != nil and ty.kind == itVariant and coField notin buildSemantics.checks and
@@ -5819,11 +5825,14 @@ proc bitsPlace(bits: Z3BitVec[64]; p: vl.Place;
   ## the value of its IEEE bits. A bool or a `range` holds only its own
   ## values, so arbitrary bytes are no value of it: `none` (the caller
   ## declines), unless `writer`, a field of the same place and kind, just
-  ## wrote them: its value then.
+  ## wrote them: its value then. A `range` under `--rangeChecks:off` is
+  ## every bit pattern of its base integer (`rangeUnchecked`).
   case p.kind
   of vl.pkBool, vl.pkRestricted:
     if writer.isSome and samePlace(p, writer.get[0]):
       return some(normSlot(writer.get[1], p.ty))
+    if p.kind == vl.pkRestricted and rangeUnchecked():
+      return some(cellValue(bits and byteMask(p.size), p.ty))
     none(SymVal)
   of vl.pkOpaque:
     case p.ty.kind
@@ -5901,6 +5910,7 @@ proc writeExactArm(lay: vl.VariantLayout; tag: int; written: vl.Place): bool =
   for f in lay.arms[tag]:
     if overlaps(f, written) and
        f.kind notin {vl.pkInt, vl.pkEnum, vl.pkOpaque} and
+       not (f.kind == vl.pkRestricted and rangeUnchecked()) and
        not samePlace(f, written):
       return false
   true
@@ -21014,6 +21024,8 @@ type DiscOutcome = object
   arms: OrderedTable[int, seq[SymVal]]    ## the arm fields after it
   havoc: bool     ## the arm holds a fresh value (`feUncheckedDiscBytes`)
   decline: bool   ## a field of the arm has no fresh or zero value here
+  keepImage: bool ## PRC-07 slice B (c): the union image is carried over; the
+                  ## new arm's fields are read from it (no havoc)
 
 proc armScalarAfter(sv: SymVal; zero: bool; declined: var bool): SymVal =
   ## RFC-0005 S8cp (item 2). `sv`'s type's zero, or a fresh value with no range
@@ -21044,7 +21056,9 @@ proc discWriteOutcomes(mode: DiscWriteMode;
                        armFields: OrderedTable[int, seq[SymVal]];
                        oldDisc: SymVal; newTag: int;
                        branches: seq[seq[int]];
-                       sameValue: Z3Bool): seq[DiscOutcome] =
+                       sameValue: Z3Bool;
+                       variantTy: IRType = nil;
+                       image: seq[Z3BitVec[64]] = @[]): seq[DiscOutcome] =
   ## RFC-0005 S8cp (item 2). What an assignment of the tag `newTag` to a
   ## discriminator leaves in the arm fields (`DiscWriteMode`). Under
   ## `{.cast(uncheckedAssign).}` nothing raises, and the same value changes
@@ -21060,11 +21074,33 @@ proc discWriteOutcomes(mode: DiscWriteMode;
   if mode == dwmChecked:
     return @[DiscOutcome(cond: sameBranchCond(oldDisc, newTag, branches),
                          arms: carryBranchFields(armFields, oldDisc, newTag, branches))]
-  result.add DiscOutcome(cond: sameValue, arms: armFields)
+  result.add DiscOutcome(cond: sameValue, arms: armFields,
+                         keepImage: image.len > 0)
   var key = -1
   if newTag >= 0:
     for g in branches:
       if newTag in g: key = newTag
+  # RFC-0016 PRC-07 slice B (c, `--fieldChecks:off`): the assignment stores
+  # the tag alone and the bytes stay (generated C, pinned in
+  # `tests/tsymex_0016_fieldoff.nim`), so the new arm's fields are the
+  # union image's bytes at their places: exact, no havoc. A field the bytes
+  # are no value of (a bool, a range with its checks on) keeps the havoc.
+  if mode == dwmHavoc and image.len > 0 and variantTy != nil and key in armFields:
+    let lay = vl.variantLayout(variantTy)
+    if lay.ok and lay.arms.hasKey(key) and
+       lay.arms[key].len == armFields[key].len:
+      var carried = DiscOutcome(cond: not sameValue, arms: armFields,
+                                keepImage: true)
+      var after: seq[SymVal]
+      for j, f in lay.arms[key]:
+        let nv = bitsPlace(imgRead(image, f.off - lay.unionOff, f.size), f,
+                           none((vl.Place, SymVal)))
+        if nv.isNone: break
+        after.add nv.get
+      if after.len == lay.arms[key].len:
+        carried.arms[key] = after
+        result.add carried
+        return
   var changed = DiscOutcome(cond: not sameValue, arms: armFields,
                             havoc: mode == dwmHavoc)
   if key in armFields:
@@ -23468,7 +23504,8 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
     newDiscBoxed[] = newDiscInner
     let outcomes = discWriteOutcomes(stmt.vrMode, oldSV.vArmFields, oldDisc,
                                      stmt.vrNewTag, stmt.vrBranches,
-                                     variantDiscEq(oldDisc, tagOrd))
+                                     variantDiscEq(oldDisc, tagOrd),
+                                     stmt.vrVariantTy, oldSV.vImage)
     let pM = drainPendingLowerEffects(p)
     for o in outcomes:
       # RFC-0016 PRC-07: an outcome that records a decline or a havoc is not
@@ -23486,7 +23523,8 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
                          vArmFieldNames: oldSV.vArmFieldNames,
                          vPlainFields: oldSV.vPlainFields,       # shared:
                          vPlainFieldNames: oldSV.vPlainFieldNames, # preserved.
-                         vActive: oldSV.vActive)   # RFC-0016 PRC-07 B: no image
+                         vImage: (if o.keepImage: oldSV.vImage else: @[]),
+                         vActive: oldSV.vActive)   # RFC-0016 PRC-07 B
       child.env[stmt.vrObjName] = newSV
       out2.add child
   return out2
@@ -23601,7 +23639,8 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
           newDiscBoxed[] = newDiscInner
           let outcomes = discWriteOutcomes(stmt.vrsMode, oldSV.vArmFields,
                                            oldSV.vDisc[], tag, stmt.vrsBranches,
-                                           symEq(oldSV.vDisc[], newDiscInner))
+                                           symEq(oldSV.vDisc[], newDiscInner),
+                                           stmt.vrsVariantTy, oldSV.vImage)
           let chosenM = drainPendingLowerEffects(chosen)
           for o in outcomes:
             # RFC-0016 PRC-07: an outcome that records a decline or a havoc is not
@@ -23619,6 +23658,7 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
                                vArmFieldNames: oldSV.vArmFieldNames,
                                vPlainFields: oldSV.vPlainFields,
                                vPlainFieldNames: oldSV.vPlainFieldNames,
+                               vImage: (if o.keepImage: oldSV.vImage else: @[]),
                                vActive: oldSV.vActive)   # RFC-0016 PRC-07 B
             child.env[stmt.vrsObjName] = newSV
             out2.add child

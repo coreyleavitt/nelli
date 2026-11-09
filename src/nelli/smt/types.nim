@@ -1693,6 +1693,11 @@ type
         ## the old discriminator's branch differs from the new tag's, as Nim
         ## does at runtime, and keeps the fields otherwise.
       vrMode*:          DiscWriteMode  ## RFC-0005 S8cp (item 2)
+      vrVariantTy*:     IRType    ## RFC-0016 PRC-07 slice B: the variant's
+                                  ## type, for the C layout a branch-changing
+                                  ## write carries the union bytes through
+                                  ## (nil: none known). Identity only, as
+                                  ## `vfVariantTy`.
     of isVariantReassignSymbolic:
       vrsObjName*:      string    ## the variant variable in env
       vrsDiscName*:     string    ## which axis (itMultiVariant); ""
@@ -1701,6 +1706,7 @@ type
       vrsBranches*:     seq[seq[int]]
         ## RFC-0005 S8f. As `vrBranches`, for the reassigned axis.
       vrsMode*:         DiscWriteMode  ## RFC-0005 S8cp (item 2)
+      vrsVariantTy*:    IRType    ## as `vrVariantTy`
     of isVariantConstructSym:
       vcsResultVar*:    string    ## fresh temp the constructed value binds to
       vcsVariantTy*:    IRType    ## the full itVariant IRType (vArms,
@@ -4938,15 +4944,17 @@ func branchGroups*(arms: seq[VariantArm]): seq[seq[int]] =
 proc mkVariantReassign*(objName: string, newTag: int,
                         tagName: string;
                         branches: seq[seq[int]];
-                        mode = dwmChecked): IRStmt =
+                        mode = dwmChecked;
+                        variantTy: IRType = nil): IRStmt =
   IRStmt(kind: isVariantReassign, vrObjName: objName,
          vrNewTag: newTag, vrTagName: tagName, vrBranches: branches,
-         vrMode: mode)
+         vrMode: mode, vrVariantTy: variantTy)
 
 proc mkVariantReassignSymbolic*(objName, discName: string,
                                 rhs: IRExpr;
                                 branches: seq[seq[int]];
-                                mode = dwmChecked): IRStmt =
+                                mode = dwmChecked;
+                                variantTy: IRType = nil): IRStmt =
   ## Phase 14 cycle A4a (ADR-0003 D4). Symbolic-RHS variant disc
   ## reassignment: `discName == ""` selects the only axis on a
   ## single-axis itVariant; non-empty names a specific axis on an
@@ -4954,7 +4962,7 @@ proc mkVariantReassignSymbolic*(objName, discName: string,
   IRStmt(kind: isVariantReassignSymbolic,
          vrsObjName: objName, vrsDiscName: discName, vrsRhs: rhs,
          vrsBranches: branches,
-         vrsMode: mode)
+         vrsMode: mode, vrsVariantTy: variantTy)
 
 proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
                             discExpr: IRExpr, tagSet: seq[int],

@@ -20,8 +20,9 @@
 ##     is no finding: it is declined on its own path like the c backend's
 ##     (`fieldChecksOffLayout`), the walker holding no active-member state.
 ##   * either: an assignment to the discriminator that changes branch leaves
-##     the new branch holding the old bytes, the `dwmHavoc` model
-##     (`feUncheckedDiscBytes`, replay-confirmed).
+##     the new branch holding the old bytes. cpp: the `dwmHavoc` model
+##     (`feUncheckedDiscBytes`, replay-confirmed). c: the union image carries
+##     the bytes and the new arm's fields are read from it (exact).
 ## No sanitizer reports an inactive union member read and gcc documents it as
 ## type punning, so the `field/inactiveBranch` cell has no native pin; the
 ## native half here is that the in-branch witnesses reproduce.
@@ -213,6 +214,28 @@ proc sutByteRead(v: int32) =
   let o = Wd(k: kwa, x: v)
   if o.wc == 0x44'i8: symexTarget("hit")
 
+# Slice B (c): a branch-changing discriminator write keeps the bytes.
+proc sutDiscToPair(v: int32) =
+  var o = Wd(k: kwa, x: v)
+  o.k = kwb
+  if o.wa == 0x3344'i16 and o.wb == 0x1122'i16: symexTarget("hit")
+
+proc sutDiscToByte(v: int32) =
+  var o = Wd(k: kwa, x: v)
+  o.k = kwc
+  if o.wc == 0x44'i8: symexTarget("hit")
+
+proc sutDiscThenWrite(v: int32) =
+  var o = Wd(k: kwa, x: v)
+  o.k = kwb
+  o.wa = 0x0042'i16
+  if o.x == 0x11220042'i32: symexTarget("hit")
+
+proc sutDiscSymbolic(v: int32) =
+  var o = Wd(k: kwa, x: v)
+  o.k = (if v > 0: kwb else: kwc)
+  if v > 0 and o.wa == 0x3344'i16: symexTarget("hit")
+
 # Shapes the layout cannot answer stay declined, on their own path.
 type
   Pd = object            ## arm B's `pb` is bytes 8..12, arm A owns only 4..8
@@ -232,6 +255,11 @@ type
     of kwa: x: int32
     of kwb: r: range[0'i32 .. 9'i32]
     of kwc: discard
+
+proc sutDiscToRange(v: int32) =
+  var o = Pr(k: kwa, x: v)
+  o.k = kwb
+  if o.r == 3'i32: symexTarget("hit")
 
 proc sutPadRead(v: int32) =
   let o = Pd(k: kwa, x: v)
@@ -472,12 +500,17 @@ suite "PRC-07: --fieldChecks:off":
     else:
       check r.status != sxSat
 
-  test "a branch-changing discriminator write holds the old bytes (havoc)":
+  test "a branch-changing discriminator write holds the old bytes":
     let r = symexFind(sutDiscChange, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check r.witness[0] == 3
-    check r.errors.named(feUncheckedDiscBytes)
+    # c: the union image carries the bytes, so the new arm is exact (slice B,
+    # below); cpp holds no image and keeps the havoc model
+    when defined(cpp):
+      check r.errors.named(feUncheckedDiscBytes)
+    else:
+      check not r.errors.named(feUncheckedDiscBytes)
     check not r.errors.named(feCheckOption)
 
   test "a branch-changing discriminator write through a ref is declined, on its own path":
@@ -621,3 +654,50 @@ when not defined(cpp):
       check r.status == sxSat
       check r.trusted
       check r.witness[0] == 0x42
+
+    test "a branch-changing discriminator write keeps the bytes: the new arm reads the old":
+      # Native (generated C, ORC and release alike): `o.k = kwb` is the store
+      # of the tag alone, so the int16 pair reads the int32's halves.
+      let r = pinExact(sutDiscToPair, fk, domain = sampled(
+        [0x11223344'i32, 0x00003344'i32, 0x11220000'i32, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check int32(r.witness[0]) == 0x11223344
+      check not r.errors.named(feUncheckedDiscBytes)
+      check not r.errors.named(feUnsupportedOp)
+      let o = block:
+        var o = Wd(k: kwa, x: int32(r.witness[0]))
+        o.k = kwb
+        o
+      check o.wa == 0x3344'i16 and o.wb == 0x1122'i16
+
+    test "a discriminator write to a narrower arm reads the first byte":
+      let r = pinExact(sutDiscToByte, fk, domain = sampled(
+        [0x44'i32, 0x1144'i32, 0x4400'i32, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check (int32(r.witness[0]) and 0xFF) == 0x44
+      check not r.errors.named(feUncheckedDiscBytes)
+
+    test "a write into the new arm lands beside the carried bytes":
+      let r = pinExact(sutDiscThenWrite, fk, domain = sampled(
+        [0x11220000'i32, 0x11223344'i32, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check (int32(r.witness[0]) shr 16) == 0x1122
+      check not r.errors.named(feUncheckedDiscBytes)
+
+    test "a symbolic discriminator write carries the bytes too":
+      let r = pinExact(sutDiscSymbolic, fk, domain = sampled(
+        [0x11223344'i32, 0x00003344'i32, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check not r.errors.named(feUncheckedDiscBytes)
+
+    test "a discriminator write to a range arm (range checks on) keeps the havoc model":
+      # a range holds only its own values: foreign bytes are no value of it
+      # while the walker may assume range facts, so the new arm is the havoc
+      let r = symexFind(sutDiscToRange, tLabel("hit"))
+      checkpoint show(r.errors)
+      check r.status == sxUnknown
+      check r.errors.named(feUncheckedDiscBytes)

@@ -345,7 +345,8 @@ const symexWalkerVersion* = "309"
   ## extracts them and a write is a bit-insert into its slots), else declined
   ## path-locally (`fieldChecksOffLayout`, row `field/inactiveBytes`; a cpp
   ## WRITE outside the branch is declined the same way, being defined there), and a
-  ## branch-changing discriminator write is the `dwmHavoc` model. Neither
+  ## branch-changing discriminator write is the `dwmHavoc` model (slice B
+  ## below replaces it on c where the layout is derived). Neither
   ## build declines every routine (`feCheckOption`) any more.
   ## PRC-07 slice B (306 kept: the checked path is unchanged): under
   ## `--fieldChecks:off` only, a c-backend value variant carries the union's
@@ -354,10 +355,12 @@ const symexWalkerVersion* = "309"
   ## field views: padding and a shorter arm's tail are the zero of the
   ## initialisation (a parameter's are free cells), a float its IEEE bits, an
   ## enum its raw value, so an out-of-branch read or write is exact where it
-  ## used to decline; `field/inactiveBytes` keeps a bool or `range` field
+  ## used to decline; a branch-changing discriminator write keeps the image
+  ## (C stores the tag alone) and reads the new arm's fields from it, and a
+  ## `range` field of foreign bytes is the raw value under `--rangeChecks:off`.
+  ## `field/inactiveBytes` keeps a bool, or a `range` with its checks on,
   ## overwritten with foreign bytes, pointer-payload arms, other layout
-  ## pragmas, `ref` variants and reads after a branch-changing discriminator
-  ## write. A cpp value variant carries its active member (`vActive`, the arm
+  ## pragmas, the `else` arm, and `ref` variants. A cpp value variant carries its active member (`vActive`, the arm
   ## last written): a write to any member is exact, and a read through a
   ## member that is not the active one, the discriminator's own branch after a
   ## wrong-branch write included, halts `ubInactiveVariantField`. A build with

@@ -627,6 +627,46 @@
   4270/5012 still decline), deriving the new arm from the image at a
   discriminator write (would replace `dwmHavoc` on c), a `range` target's
   raw value under `--rangeChecks:off`.
+  PRC-07 slice B continued (same branch, walker 306 kept, comment extended; RED
+  first, `tsymex_0016_fieldoff` on c: `[FAILED] a branch-changing discriminator
+  write keeps the bytes: the new arm reads the old` (`pinExact ... sxUnknown;
+  errors: feUncheckedDiscBytes`), `... to a narrower arm reads the first byte`,
+  `a write into the new arm lands beside the carried bytes`, `a symbolic
+  discriminator write carries the bytes too`; the range half, new
+  `tsymex_0016_fieldrangeoff` (both `--fieldChecks:off` and `--rangeChecks:off`)
+  RED on the previous sha: `[FAILED] a wrong-branch read of a range field returns
+  the raw bytes`, `a range field overwritten with foreign bytes reads them
+  back`, `a discriminator write into the range arm carries the raw bytes`):
+  (3) DONE: `discWriteOutcomes` takes the variant type (`IRStmt.vrVariantTy`/
+  `vrsVariantTy`, identity only, set by the parser) and the receiver's image; on c
+  with the layout derived a branch-changing write keeps the image and the new
+  arm's fields are `bitsPlace (imgRead image field)` (`DiscOutcome.keepImage`),
+  no `feUncheckedDiscBytes`; a field the bytes are no value of (a bool, a range
+  with checks on) falls back to `dwmHavoc`. Confirmed from the generated C and a
+  native run (debug, ORC, release): `x.k = kb` is `x.k = 1` alone, the bytes
+  stay. cpp keeps the havoc. Residual: a user `=destroy` hook on the variant
+  object itself would zero it and cannot be read by a macro; the old havoc
+  tainted for that, the c image path does not. (4) DONE: under `rangeChecks:off`
+  `bitsPlace` returns the raw value for a `range` (`rangeUnchecked`) and
+  `writeExactArm` accepts a range overlap; with its checks on it stays declined.
+  (2) NOT DONE, ref variants: the per-(tag, field) heap arrays are written at
+  every ref constructor, field store, discriminator store and `new`; an image
+  heap beside them must be coherent at all of those and at an input ref's first
+  materialisation (the image cell of an address must equal the pack of the
+  active arm's cells), which is more than the two decline sites
+  (`runtime_heap.nim` read and write `fieldsUnchecked` arms) the brief named.
+  FINDING (soundness, pre-existing in slice B, NOT fixed here): the image's "zero
+  of initialisation" holds only for a default-initialised `var x: V` (generated C
+  `nimZeroMem`). An object constructor `V(k: ka, a: v)` on a scalar-only variant
+  is `x.k = 0; x.a = v` with no zeroing (throwaway probe, debug build:
+  `y.r` after `V(k: ka, a: 0x7fffffff)` / `y.k = kc` read
+  `0x340_7FFFFFFF`, release read `0x7FFFFFFF`), so the bytes no field of the
+  active arm owns are unspecified there. `lowerVariantLit`,
+  the runtime-discriminator constructor and `isVariantConstructSym` fill with
+  `zeroImage`; pins `sutPadRead`/`sutPadZero`/`sutPartialRead`/
+  `sutIntFromBytes` reproduce only because the stack was zero. A sound model needs
+  fresh (unspecified) cells for those bytes with the finding's trust withdrawn
+  when a read depends on them. Next slice.
   REMAINING, slice B: uncovered bytes/padding and the cpp "active member
   differs from the discriminator" state (write then read through the
   discriminator's branch is UB), which need a union byte image on the value

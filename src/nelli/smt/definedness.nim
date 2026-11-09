@@ -273,11 +273,12 @@ func defRows(): seq[DefKey] =
       "defined (the member becomes active). Slice B: a value variant " &
       "carries the union's bytes as one image over `variant_layout.nim` " &
       "(c) or its active member (cpp), so the side is exact; what is " &
-      "declined path-locally is a bool or `range` field overwritten with " &
-      "bytes that are not its values, an arm holding a string/seq/ref/" &
-      "object/set (unsized), another layout pragma, a multi-axis or " &
-      "inheritance variant, a `ref` variant, and a read after a " &
-      "branch-changing discriminator write"))
+      "declined path-locally is a bool field, or a `range` field with " &
+      "`rangeChecks` on, overwritten with bytes that are not its values, " &
+      "an arm holding a string/seq/ref/object/set (unsized), another " &
+      "layout pragma, a multi-axis or inheritance variant, an `else` arm, " &
+      "and a `ref` variant. A branch-changing discriminator write carries " &
+      "the bytes (the new arm is read from the image)"))
 
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())
 

@@ -71,7 +71,7 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
   of isBreak, isContinue, isReturn, isLet, isAssign,
      isTargetLabel, isRaise, isUnsupported, isVariantReassign,
      isVariantReassignSymbolic, isVariantConstructSym,
-     isDeref, isNew, isDerefWrite, isUnsafeCast,
+     isDeref, isNew, isDerefWrite, isUnsafeCast, isUndefined,
      isTabKeys,   # RFC-0005 S8bc: binds a key seq; no raise, no target
      isSetLen:    # RFC-0005 S8bl: binds a resized value; no raise, no target
     discard  # leaves; check below (isDeref/isNew: Phase 15 R1a — no recursion;

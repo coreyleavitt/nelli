@@ -601,4 +601,16 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
     "--boundChecks:off compiles `s[i]` and `a[i]` of a seq, string, " &
     "openArray or array as a plain C subscript: an index outside the " &
     "container is undefined, halted (`ubArrayOutOfBounds`), where a checked " &
-    "build raises `IndexDefect`; the in-bounds side is exact (PRC-07)"))])
+    "build raises `IndexDefect`; the in-bounds side is exact (PRC-07)")),
+  ("objChecks=off", modelled[BuildSite, bool](true, {bsBuild},
+    "--objChecks:off compiles `Derived(b)` of a `ref` with no " &
+    "`isObjDisplayCheck`: a conversion to a type the object is not succeeds " &
+    "and is type confusion, undefined, halted (`ubInvalidObjConversion`), " &
+    "where a checked build raises `ObjectConversionDefect`; the subtype " &
+    "side is exact (PRC-07)")),
+  ("fieldChecks=off", modelled[BuildSite, bool](true, {bsBuild},
+    "--fieldChecks:off compiles a variant field access as a plain union " &
+    "member access: outside its branch it is undefined on the cpp backend " &
+    "(`ubInactiveVariantField`) and the overlapping bytes on the c backend, " &
+    "declined path-locally (`fieldChecksOffLayout`); the in-branch side is " &
+    "exact (PRC-07)"))])

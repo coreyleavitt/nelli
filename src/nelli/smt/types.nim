@@ -1292,6 +1292,11 @@ type
                       ## checks and the read resolves through the FREE heap array.
                       ## The real `store(path.heaps[T], p, v)` semantics (and the
                       ## read-after-write / per-path isolation it enables) land R4.
+    isUndefined       ## RFC-0016 PRC-07: the path reaching this node performs
+                      ## an operation C leaves undefined (the object conversion
+                      ## `objChecks` no longer checks). The walker ends the path
+                      ## through `haltUndefined`, so what precedes it stays
+                      ## exact and what follows is not modelled.
     isUnsupported     ## any AST kind the Phase-1 parser doesn't model
     isUnsafeCast      ## Phase 15 R11 (ADR-0010, RFC §R11): an unsafe POINTER
                       ## MATERIALISATION (`cast[ptr T](...)`, `addr x`,
@@ -1658,6 +1663,9 @@ type
       vfFieldTy*:       IRType
       vfMatchingTags*:  seq[int]  ## tag ordinals of arms containing
                                   ## `vfFieldName`
+      vfLoc*:           string    ## RFC-0016 PRC-07: the source position, for
+                                  ## the access's undefined-behaviour site
+                                  ## (identity only, not canonicalised)
     of isVariantReassign:
       vrObjName*:       string    ## the variant variable in env
       vrNewTag*:        int       ## the new tag ordinal
@@ -1764,6 +1772,9 @@ type
                              ## seq's memory, so the store is logged as an
                              ## in-place step (`Path.inPlaceSteps`), which a
                              ## by-value copy sharing that memory follows.
+    of isUndefined:
+      udKind*: UbKind            ## RFC-0016 PRC-07: the undefined behaviour
+      udSite*: string            ## its text, `opSite` of the source position
     of isUnsupported:
       unKind*: SymexErrorKind    ## RFC-0005 S1b: the classified kind the
                                  ## walker's `isUnsupported` arm records via
@@ -2839,7 +2850,8 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # RFC-0016 K5a: the run never started; there is no modelled program.
   of ubUnsignedDivZero, ubIntMinModMinusOne, ubSignedOverflow,
      ubIndeterminateRead, ubSignedDivZero, ubFloatToIntRange,
-     ubTailUnverified, ubArrayOutOfBounds: dcOmitted
+     ubTailUnverified, ubArrayOutOfBounds, ubInvalidObjConversion,
+     ubInactiveVariantField: dcOmitted
     # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
     # successor, a pure omission. K10b: `ubTailUnverified` rides the winner's
     # `witnessUndefined` only (the second walk's unverified tail); as a
@@ -4882,10 +4894,11 @@ proc mkVarCopy*(name: string): IRExpr =
   IRExpr(kind: iekVar, vname: name, vCopy: true)
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
-                         fieldTy: IRType, matchingTags: seq[int]): IRStmt =
+                         fieldTy: IRType, matchingTags: seq[int];
+                         loc: string = ""): IRStmt =
   IRStmt(kind: isVariantField, vfRetName: retName, vfRecv: recv,
          vfFieldName: fieldName, vfFieldTy: fieldTy,
-         vfMatchingTags: matchingTags)
+         vfMatchingTags: matchingTags, vfLoc: loc)
 
 func branchGroups*(arms: seq[VariantArm]): seq[seq[int]] =
   ## RFC-0005 S8f. The explicit (`of`) tag ordinals of one variant axis,
@@ -5109,6 +5122,10 @@ proc unregisteredCalleeKind*(callee: string;
       kind = k
       return true
   false
+
+proc mkUndefined*(kind: UbKind; site: string): IRStmt =
+  ## RFC-0016 PRC-07. A path that reaches this node is undefined at `site`.
+  IRStmt(kind: isUndefined, udKind: kind, udSite: site)
 
 proc mkUnsafeCast*(reason: string; marker: int): IRStmt =
   ## Phase 15 R11 (ADR-0010, RFC §R11). Construct an `isUnsafeCast` node for an
@@ -5671,5 +5688,6 @@ proc render*(s: IRStmt): string =
     let fld = if s.dwField.len > 0: "." & s.dwField else: ""
     "deref<" & fam & ">(" & render(s.dwPtr) & ")" & fld & ":" & $s.dwElemTy &
       (if s.dwInit: "=init " else: "=") & render(s.dwValue)
+  of isUndefined:    "undefined(" & $s.udKind & ": " & s.udSite & ")"
   of isUnsupported:  "unsupported(" & $s.unKind & ": " & s.reason & ")"
   of isUnsafeCast:   "unsafeCast(" & s.ucReason & ")"

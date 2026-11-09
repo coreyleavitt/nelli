@@ -4261,8 +4261,17 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             basePc = basePc & @[rangeOpt.get]
           # FieldDefect fork — Phase 16 D1a unconditional (same call shape as the
           # value-variant `isVariantField` arm); forked off the ranged base.
-          discard forkDefect(forkPath(cpA, basePc, cpA.env),
-                             not inArmCond, "FieldDefect", none(string), w)
+          if fieldsUnchecked():
+            # RFC-0016 PRC-07: no `FieldDefect`; a union read outside the arm.
+            var denv = cpA.env
+            var scratch: seq[Z3Bool]
+            denv[stmt.dRetName] = allocateSym(stmt.dElemTy,
+              freshDegradeName("__declinedFieldRead"), scratch)
+            survivors.add inactiveFieldSide(forkPath(cpA, basePc, cpA.env),
+                                            not inArmCond, denv, "", w)
+          else:
+            discard forkDefect(forkPath(cpA, basePc, cpA.env),
+                               not inArmCond, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: assert inArmCond on the range-constrained base.
           var childPc = basePc & @[inArmCond]
@@ -4999,8 +5008,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # FieldDefect fork — D1a unconditional, forked off the ranged base.
           # Uses the PRE-lower cp state (the defect is about the disc, not the
           # RHS, so the RHS lower is irrelevant here — matching D2 read path).
-          discard forkDefect(forkPath(cpDW, basePcW, cpDW.env),
-                             not inArmCondW, "FieldDefect", none(string), w)
+          if fieldsUnchecked():
+            survivors.add inactiveFieldSide(forkPath(cpDW, basePcW, cpDW.env),
+                                            not inArmCondW, cpDW.env, "", w)
+          else:
+            discard forkDefect(forkPath(cpDW, basePcW, cpDW.env),
+                               not inArmCondW, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: build the child path, THEN lower the RHS on it.
           # Disc heap is carried unchanged (D3: the disc is not mutated by an
@@ -5209,8 +5222,25 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             if rangeOpt.isSome: basePc = basePc & @[rangeOpt.get]
             let groups = branchGroups(objTy.vArms)
             let same = sameBranchSymCond(oldDisc, valSV, groups)
-            maybeForkDefect(forkPath(cp, basePc, cp.env), not same,
-                            "FieldDefect", none(string), w)
+            if fieldsUnchecked():
+              # RFC-0016 PRC-07: no branch-change check; the new branch holds
+              # the old bytes, which the walker has no layout for. This side
+              # is declined on its own path (`inactiveFieldSide`'s c decline;
+              # the cpp backend declines it too: the stored tag no longer
+              # names the active member, so no later read is modelled).
+              let (dk, dwhy) = admitDefined(aoField, ocInactiveBytes,
+                                            dsField).decline
+              if guardLiteral(not same) != glFalse:
+                survivors.add forkPathTainted(
+                  cp, basePc & @[not same], cp.env,
+                  w.degrade(dk.get(feUnsupportedOp),
+                    "a discriminator write through a `ref` that changes " &
+                    "branch with `fieldChecks` off (fieldChecksOffLayout): " &
+                    "the new branch holds the old bytes (" & dwhy &
+                    ") -- path degraded to sxUnknown"))
+            else:
+              maybeForkDefect(forkPath(cp, basePc, cp.env), not same,
+                              "FieldDefect", none(string), w)
             if w.shouldStop: return survivors
             cpS = forkPath(cp, basePc & @[same], cp.env)
             let baseId = refPointeeTypeId(objTy)

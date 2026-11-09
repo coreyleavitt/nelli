@@ -733,6 +733,16 @@ type RoutineChecks* = object
     ## own bound checks are off, the routine pushed them back on (not
     ## modelled: its `s[i]` raises `IndexDefect`, the walker follows the
     ## build). `checks` never carries `coBound` in such a build.
+  objOn*: bool
+    ## RFC-0016 PRC-07. `boundOn`'s twin for `objChecks`: in a build whose own
+    ## object checks are off, the routine pushed them back on (not modelled:
+    ## its down-conversion raises `ObjectConversionDefect`). `checks` never
+    ## carries `coObj` in such a build.
+  fieldOn*: bool
+    ## RFC-0016 PRC-07. `boundOn`'s twin for `fieldChecks`: the routine pushed
+    ## them back on in a build whose own field checks are off (not modelled:
+    ## its variant access raises `FieldDefect`). `checks` never carries
+    ## `coField` in such a build.
   overflowOn*: bool
     ## RFC-0016 W1-d2c. The routine's position was read and `overflowChecks`
     ## is on there on every reading (no `coOverflow` deviation): in a build
@@ -806,3 +816,9 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if coBound notin buildSemantics.checks:
     result.boundOn = coBound notin result.checks
     result.checks = result.checks - {coBound}
+  if coField notin buildSemantics.checks:
+    result.fieldOn = coField notin result.checks
+    result.checks = result.checks - {coField}
+  if coObj notin buildSemantics.checks:
+    result.objOn = coObj notin result.checks
+    result.checks = result.checks - {coObj}

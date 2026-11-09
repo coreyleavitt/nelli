@@ -454,7 +454,8 @@ Two things can happen to the omission, by kind:
   prefix-only verdict of 0.9.2.
 - The arithmetic kinds (`ubUnsignedDivZero`, `ubIntMinModMinusOne`,
   `ubSignedOverflow`, `ubSignedDivZero`), `ubFloatToIntRange` and
-  `ubArrayOutOfBounds` halt the path
+  `ubArrayOutOfBounds`, `ubInvalidObjConversion` and `ubInactiveVariantField`
+  halt the path
   at the operation. The
   halted side reaches no label and no Defect; the omission shows in the
   verdict's gaps, so an `sxUnsat` is not trusted past it. A witness found

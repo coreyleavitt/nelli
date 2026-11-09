@@ -40,6 +40,8 @@ type
     aoCall                            ## a call through a declared contract
     aoConvert                         ## a float converted to an integer type
     aoIndex                           ## an element access with no bound check
+    aoConv                            ## a `ref` object down-conversion
+    aoField                           ## a variant field access
   OperandClass* = enum                ## what the operand is, for this op
     ocSignedWide                      ## signed, 32 or 64 bits
     ocSignedNarrow                    ## signed, 8 or 16 bits: C computes in `int`
@@ -67,6 +69,14 @@ type
                                       ## indexed by its own `range`/enum type
                                       ## under `rangeChecks: off`; any index
                                       ## under `boundChecks: off`)
+    ocObjDowncast                     ## RFC-0016 PRC-07: `Derived(b)` with no
+                                      ## `isObjDisplayCheck` (`objChecks: off`)
+    ocInactiveBranch                  ## RFC-0016 PRC-07: a variant field read
+                                      ## or written outside its branch with no
+                                      ## `fieldChecks`, where C++ calls it
+                                      ## undefined
+    ocInactiveBytes                   ## the same access where C defines it as
+                                      ## the overlapping bytes (the c backend)
   DefProfile* = enum                  ## the build's arithmetic
     dpChecked                         ## Nim's overflow and zero checks are on
     dpUnchecked                       ## checks off, the C operation as is
@@ -87,6 +97,8 @@ type
     dsConvert                         ## the float -> int conversion drain
     dsOpaque                          ## RFC-0016 K10b: the opaque-call scan
     dsIndex                           ## RFC-0016 PRC-07: the index sites
+    dsConv                            ## RFC-0016 PRC-07: the object conversion
+    dsField                           ## RFC-0016 PRC-07: the variant field sites
   DefKey = tuple[key: string, row: Row[DefSite, DefRule]]
 
 func defined(): Definedness = Definedness(kind: dkDefined)
@@ -106,6 +118,8 @@ func opKey(op: ArithOp): string =
   of aoCall: "call"
   of aoConvert: "convert"
   of aoIndex: "index"
+  of aoConv: "conv"
+  of aoField: "field"
 
 func classKey(c: OperandClass): string =
   case c
@@ -123,6 +137,9 @@ func classKey(c: OperandClass): string =
   of ocFloatToIntVia: "floatToIntVia"
   of ocOpaqueBody: "opaqueBody"
   of ocUncheckedAccess: "unchecked"
+  of ocObjDowncast: "objDowncast"
+  of ocInactiveBranch: "inactiveBranch"
+  of ocInactiveBytes: "inactiveBytes"
 
 func defKey*(op: ArithOp; c: OperandClass): string =
   opKey(op) & "/" & classKey(c)
@@ -227,6 +244,33 @@ func defRows(): seq[DefKey] =
       "is decided by the build's own option, so the row answers the same " &
       "under every profile"))
 
+  result.add (defKey(aoConv, ocObjDowncast),
+    modelled[DefSite, DefRule](
+      [undef(ubInvalidObjConversion), undef(ubInvalidObjConversion),
+       undef(ubInvalidObjConversion)], {dsConv},
+      "RFC-0016 PRC-07: `Derived(b)` of a `ref` whose dynamic type is not a " &
+      "`Derived`. A checked build raises `ObjectConversionDefect` " &
+      "(`isObjDisplayCheck`); `objChecks: off` removes it, the conversion " &
+      "succeeds, and the reference is used as a type it is not: an access " &
+      "through an incompatible type, past the allocation when `Derived` is " &
+      "the larger. Undefined whichever the profile"))
+  result.add (defKey(aoField, ocInactiveBranch),
+    modelled[DefSite, DefRule](
+      [undef(ubInactiveVariantField), undef(ubInactiveVariantField),
+       undef(ubInactiveVariantField)], {dsField},
+      "RFC-0016 PRC-07: with `fieldChecks: off` a variant field is a plain " &
+      "union member access. Outside its branch it reads (or writes) a member " &
+      "that is not the active one, which C++ calls undefined (cpp backend). " &
+      "No sanitizer sees it and gcc defines it as punning, so the cell has " &
+      "no native pin"))
+  result.add (defKey(aoField, ocInactiveBytes),
+    refused[DefSite, DefRule](some(feUnsupportedOp),
+      "RFC-0016 PRC-07 (`fieldChecksOffLayout`): with `fieldChecks: off` on " &
+      "the c backend the same access is defined, as the overlapping bytes of " &
+      "the active branch (C11 6.5.2.3 note 95). The walker keeps one slot " &
+      "per field and has no per-target byte layout of a variant, so the " &
+      "wrong-branch side is declined path-locally"))
+
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())
 
 func admitDefined*(op: ArithOp; c: OperandClass; site: DefSite):
@@ -290,6 +334,20 @@ func uncheckedIndexUb*(): UbKind =
   ## every profile.
   let a = admitDefined(aoIndex, ocUncheckedAccess, dsIndex)
   doAssert a.admitted, "definedness: no dsIndex row"
+  a.payload[dpChecked].ub
+
+func objDowncastUb*(): UbKind =
+  ## RFC-0016 PRC-07. The kind of a `ref` down-conversion that fails its type
+  ## test in a build with `objChecks` off: the admitted `dsConv` row.
+  let a = admitDefined(aoConv, ocObjDowncast, dsConv)
+  doAssert a.admitted, "definedness: no dsConv row"
+  a.payload[dpChecked].ub
+
+func inactiveFieldUb*(): UbKind =
+  ## RFC-0016 PRC-07. The kind of a variant field access outside its branch
+  ## with `fieldChecks` off, on the cpp backend (the `dsField` row).
+  let a = admitDefined(aoField, ocInactiveBranch, dsField)
+  doAssert a.admitted, "definedness: no dsField row"
   a.payload[dpChecked].ub
 
 func readUb*(): UbKind =

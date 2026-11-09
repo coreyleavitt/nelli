@@ -942,7 +942,7 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkVariantFieldStmt",
             newLit(s.vfRetName), emitExpr(s.vfRecv),
             newLit(s.vfFieldName), emitIRType(s.vfFieldTy),
-            prefix(tagsLit, "@"))
+            prefix(tagsLit, "@"), newLit(s.vfLoc))
   of isVariantReassign:
     newCall(bindSym"mkVariantReassign",
             newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName),
@@ -1017,6 +1017,8 @@ proc emitStmt*(s: IRStmt): NimNode =
               emitIRType(s.dwElemTy), newLit(s.dwPtrFamily),
               newLit(s.dwCell),      # RFC-0005 S8an
               newLit(s.dwInPlace))   # RFC-0005 S8ca
+  of isUndefined:
+    newCall(bindSym"mkUndefined", newLit(s.udKind), newLit(s.udSite))
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
             newLit(s.unMarker))
@@ -1627,8 +1629,13 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
                       coRange notin buildSemantics.checks
   let boundPushedOn = c.boundOn and c.why.len == 0 and
                       coBound notin buildSemantics.checks
+  let objPushedOn = c.objOn and c.why.len == 0 and
+                    coObj notin buildSemantics.checks
+  let fieldPushedOn = c.fieldOn and c.why.len == 0 and
+                      coField notin buildSemantics.checks
   if c.checks == {} and stamp.isNone and c.unadmitted.len == 0 and
-     restrictParams.len == 0 and not rangePushedOn and not boundPushedOn:
+     restrictParams.len == 0 and not rangePushedOn and not boundPushedOn and
+     not objPushedOn and not fieldPushedOn:
     return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
@@ -1654,6 +1661,17 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
       "`boundChecks: on` in a build whose bound checks are off: its index " &
       "operations raise `IndexDefect` there, which the walker, following " &
       "the build, does not model -- path degraded to sxUnknown")
+  if fieldPushedOn:
+    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
+      "`fieldChecks: on` in a build whose field checks are off: its variant " &
+      "accesses raise `FieldDefect` there, which the walker, following the " &
+      "build, does not model -- path degraded to sxUnknown")
+  if objPushedOn:
+    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
+      "`objChecks: on` in a build whose object checks are off: its " &
+      "down-conversions raise `ObjectConversionDefect` there, which the " &
+      "walker, following the build, does not model -- path degraded to " &
+      "sxUnknown")
   if c.why.len > 0:
     decl.add ctx.declineMarker(feCheckOption, where &
       ": its check options cannot be read (" & c.why & ") -- path degraded to sxUnknown")
@@ -2357,7 +2375,7 @@ proc stmtMayWrite(s: IRStmt): bool =
   of isDeref: irHasCall(s.dPtr)
   of isIndex: irHasCall(s.ixArr) or irHasCall(s.ixIdx)
   of isVariantField: irHasCall(s.vfRecv)
-  of isNew, isUnsupported: false
+  of isNew, isUnsupported, isUndefined: false
   of isBlock:
     for c in s.stmts:
       if stmtMayWrite(c): return true
@@ -4489,7 +4507,12 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
     else:
       for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
   of nnkCheckedFieldExpr:
-    add "FieldDefect"
+    # RFC-0016 PRC-07: with `fieldChecks` off the access is a plain union
+    # member access: undefined outside its branch on the cpp backend, the
+    # overlapping bytes (nothing raised, nothing undefined) on the c backend.
+    if coField in buildSemantics.checks: add "FieldDefect"
+    elif buildSemantics.backend == beCpp:
+      addUb admitDefined(aoField, ocInactiveBranch, dsField), dpChecked
     for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
   of nnkConv, nnkHiddenStdConv, nnkHiddenSubConv:
     if n.len >= 2:
@@ -11079,8 +11102,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           let eq = mkBinop(bEq, mkVar(tag),
                            mkIntLit(inheritTagCode(hier.tgtChain[lvl])))
           ok = if ok == nil: eq else: mkBinop(bAnd, ok, eq)
-        reads.add mkIf(@[mkBranch(mkUnop(uNot, ok),
-                                  mkRaise("ObjectConversionDefect", nil))])
+        # RFC-0016 PRC-07: with `objChecks` off Nim emits no display check, so
+        # the failing side is type confusion, undefined, not a raise.
+        let failing =
+          if coObj in buildSemantics.checks:
+            mkRaise("ObjectConversionDefect", nil)
+          else:
+            mkUndefined(objDowncastUb(),
+              "an object down-conversion to a type the object is not (no " &
+              "type check emitted) at " & siteLoc(n))
+        reads.add mkIf(@[mkBranch(mkUnop(uNot, ok), failing)])
         preamble.add mkIf(@[mkBranch(
           mkBinop(bNe, mkVar(cell), mkNil(hier.tgtTy)), mkBlock(reads))])
         mkVar(cell)
@@ -12119,7 +12150,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           return declineUnsupportedFieldRead(n, fieldName, fieldTy, preamble, ctx)
         let synth = freshSynth(ctx, "vf")
         preamble.add mkVariantFieldStmt(
-          synth, objIR, fieldName, fieldTy, matchingTags)
+          synth, objIR, fieldName, fieldTy, matchingTags, siteLoc(n))
         mkVar(synth)
     of itMultiVariant:
       # Phase 14 cycle A1c slice 2. Axis-aware field access on an
@@ -12164,7 +12195,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           return declineUnsupportedFieldRead(n, fieldName, fieldTy, preamble, ctx)
         let synth = freshSynth(ctx, "vf")
         preamble.add mkVariantFieldStmt(
-          synth, objIR, fieldName, fieldTy, matchingTags)
+          synth, objIR, fieldName, fieldTy, matchingTags, siteLoc(n))
         mkVar(synth)
     else:
       # v65 (§0 clause (b)): `.field` on an unclassified/unmodeled type —
@@ -18175,7 +18206,11 @@ proc discWriteMode(ty: IRType; ctx: ParseCtx): DiscWriteMode =
   ## and neither that nor a hook on a nominal field can be read by a macro. So
   ## only a field that certainly gives it a destructor, with no field that could
   ## also run a hook, is exact.
-  if ctx.procScoped.uncheckedAssign == 0: return dwmChecked
+  if ctx.procScoped.uncheckedAssign == 0:
+    # RFC-0016 PRC-07: with `fieldChecks` off Nim emits no branch-change
+    # check, so the assignment is a plain store of the tag and the new
+    # branch's fields are the old bytes: not modelled (`dwmHavoc`).
+    return if coField in buildSemantics.checks: dwmChecked else: dwmHavoc
   var managed, nominal: bool
   case ty.kind
   of itVariant:

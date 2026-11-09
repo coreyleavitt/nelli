@@ -1741,6 +1741,8 @@ task test, "Run the test suite":
             "tsymex_0016_k10d_drain_checksoff",
             "tsymex_0016_rangeoff",
             "tsymex_0016_boundoff",
+            "tsymex_0016_objoff",
+            "tsymex_0016_fieldoff",
             "tsymex_0016_k7_twosearch",
             "tsymex_0016_adm1_admission",
             "tsymex_0016_k4a_table",

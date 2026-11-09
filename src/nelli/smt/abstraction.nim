@@ -576,7 +576,8 @@ proc collectBan*(s: IRStmt, pol: BanPolicy): HashSet[string] =
   of isDerefWrite:   ## Phase 15 R3: the ptr expr + the stored RHS may carry vars.
     collectBanFromExpr(s.dwPtr, pol, result)
     collectBanFromExpr(s.dwValue, pol, result)
-  of isBreak, isContinue, isTargetLabel, isUnsupported, isUnsafeCast:
+  of isBreak, isContinue, isTargetLabel, isUnsupported, isUnsafeCast,
+     isUndefined:
     discard
 
 proc collectBan*(s: IRStmt,

@@ -522,16 +522,36 @@
   `tsymex_0016_rangeoff` (updated), `tsymex_0016_boundoff` (new, `--boundChecks:off`
   cfg; RED shown by forcing `boundsUnchecked()` false: the seven halt tests fail).
   Known imprecision: a string `s[len]` is halted although C reads the NUL terminator.
-  NOT DONE (separate follow-up, learned from the generated C): `--fieldChecks:off`
-  makes `v.b` on a variant a plain union member access: no UB, the inactive arm's bytes
-  are read (and a write to it leaves the discriminant), which needs a byte-level
-  union model, not a `UbKind`, and UBSan cannot see it. `--objChecks:off` removes the
-  `isObjDisplayCheck` from `Derived(b)` entirely (a `ref` downcast, nil passes): a
-  base object converted to a larger derived reads fields past its allocation, UB
-  detectable by ASan over `-d:useMalloc` only when the derived type is larger; the
-  fork is the parser's (`dsl_parser.nim` ~11061-11083, `mkRaise("ObjectConversionDefect")`),
-  so it needs the same build-bit split as `uncheckedTypedIndex`, a row, and a kind.
-  Both builds still decline every routine with `feCheckOption`.
+  PRC-07 object and field halves (same branch, walker 306 kept, unreleased; RED shown
+  first for each file): `--objChecks:off` removes `isObjDisplayCheck`, so `Der(b)` on
+  a `Base` succeeds and reads another object's bytes: `UbKind` `ubInvalidObjConversion`
+  (row `conv/objDowncast`, appended after `ubArrayOutOfBounds`), a new IR statement
+  `isUndefined` the parser puts where it raised `ObjectConversionDefect`
+  (`dsl_parser.nim` objConv arm), halted through `decideUndefined`; the subtype side
+  and nil are exact; native pin ASan over `-d:useMalloc` (`ubsan_support.objProbeSrc`,
+  derived type larger than the object), Windows skip. `--fieldChecks:off` makes `v.b`
+  a plain union member access. cpp backend: `ubInactiveVariantField` (row
+  `field/inactiveBranch`) halts a wrong-branch read, and a write too (C++ defines the
+  assignment but the walker cannot hold a branch whose active member is not its
+  discriminator's: halting is the sound omission); no native pin (no sanitizer sees it,
+  gcc defines it as punning). c backend DECISION: the walker has no faithful per-target
+  variant layout (no sizeof/offsetOf/byte-level machinery outside the host `sizeof/host`
+  refusal; `heapLeafTerm` pinForm is a heap-array leaf form, not a C layout), so the
+  wrong-branch side is declined on its own path (`feUnsupportedOp`, reason
+  `fieldChecksOffLayout`, row `field/inactiveBytes`, a refused row), never a routine
+  taint; the right-branch side is exact. REMAINING PRECISION ITEM: model the c
+  backend's overlapping-bytes read exactly, which needs the C layout of a variant
+  (arm struct offsets and widths per target, the discriminator's width and padding) and
+  a bit-level reinterpretation of the active arm's slots (C11 6.5.2.3 note 95), pinned
+  natively by value. A branch-changing discriminator write uses `dwmHavoc`
+  (`discWriteMode`: `feUncheckedDiscBytes`, replay-confirmed) for a value variant and a
+  path-local decline through a `ref` (`runtime_heap.nim` disc write); an infeasible
+  havoc/decline outcome is no longer recorded (`x.k = ka` of a `ka` stays exact). The
+  opaque-call scan answers the cpp kind for a `CheckedFieldExpr` and nothing on c.
+  Builds: `objChecks=off`, `fieldChecks=off` cells; `routineChecks` strips `coObj` and
+  `coField` in such a build (`objOn`/`fieldOn`; a push back on declines). Pins:
+  `tsymex_0016_objoff`, `tsymex_0016_fieldoff` (both backends). PRC-07 stays open:
+  the c-backend decline, nil checks, float checks (PRC-08).
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

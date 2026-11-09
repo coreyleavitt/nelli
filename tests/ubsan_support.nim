@@ -126,6 +126,34 @@ else: quit(3)
   ## string's elements are heap memory behind a pointer, which only
   ## AddressSanitizer over `malloc` (`-d:useMalloc`) bounds.
 
+const objProbeSrc* = """
+import std/os
+
+type
+  Base = ref object of RootObj
+    x: int
+  Der = ref object of Base
+    pad: array[16, int]
+    y: int
+
+proc mk(ty: string): Base {.noinline.} =
+  case ty
+  of "base": Base(x: 1)
+  of "der": Der(x: 1, y: 2)
+  else: nil
+
+proc rd(b: Base): int {.noinline.} =
+  let d = Der(b)
+  if d == nil: 0 else: d.pad[15] + d.y
+
+echo rd(mk(paramStr(1)))
+"""
+  ## RFC-0016 PRC-07, the `conv/objDowncast` cell. `Der(b)` of a `Base` whose
+  ## dynamic type is `ty` (`base`, `der`, `nil`), then a read of `Der`'s last
+  ## fields. `Der` is the larger type, so for an actual `Base` the read is
+  ## past the allocation, which AddressSanitizer over `malloc`
+  ## (`-d:useMalloc`) bounds.
+
 type
   UbExpect* = enum
     ueClean   ## the C operation is defined for these operands: exit 0
@@ -194,6 +222,18 @@ proc buildIndexProbe*(who: string; flags: openArray[string]): UbsanProbe =
   if crc != 0:
     raise newException(PinFailure, who & ": the index probe did not build:\n" &
                        cout)
+
+func objAsanFlags*(extra: openArray[string]): seq[string] =
+  ## `indexAsanFlags` for the object-conversion probe.
+  indexAsanFlags(extra)
+
+proc buildObjProbe*(who: string; flags: openArray[string]): UbsanProbe =
+  ## Compiles the object-conversion probe once with `flags`.
+  result.build = prepareProbe(who, objProbeSrc, flags)
+  let (cout, crc) = execCmdEx(result.build.cmd)
+  if crc != 0:
+    raise newException(PinFailure, who & ": the object probe did not " &
+                       "build:\n" & cout)
 
 proc dispose*(p: UbsanProbe) = removeDir(p.build.dir)
 

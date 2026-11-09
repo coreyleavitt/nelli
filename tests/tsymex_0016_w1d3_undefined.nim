@@ -148,8 +148,11 @@ suite "W1-d3 soundness codec version 4":
     errors = @[]
 
   test "malformed sixth fields are misses":
+    # The first value outside the mask: one bit per kind, so it follows the
+    # kind count and moves when a kind is added.
+    let maskBound = 1 shl (ord(high(UbKind)) - ord(low(UbKind)) + 1)
     for bad in ["4:0:0:1:0", "4:0:0:1:0:", "4:0:0:1:0:05", "4:0:0:1:0:a",
-                "4:0:0:1:0:256", "4:0:0:1:0:99999999999", "4:0:0:1:0:0:0",
+                "4:0:0:1:0:" & $maskBound, "4:0:0:1:0:99999999999", "4:0:0:1:0:0:0",
                 "4:0:0:1:0:0:9", "4:0:0:1:0:0:1:0"]:
       let db = inMemoryDatabase()
       let key = symexCacheKeyForFn(w1d3Fn, tLabel("w1d3_codec"),

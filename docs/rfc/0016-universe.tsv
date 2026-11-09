@@ -6,11 +6,11 @@
 # axis pragma: 181 cells
 # axis magic: 244 cells
 # axis stdlib: 88 cells
-# axis build: 27 cells (pcre libs and build cells; rows below)
+# axis build: 29 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
-# axis defined: 22 cells
+# axis defined: 25 cells
 # build rows: 5
-# error kinds: 104
+# error kinds: 106
 # cap kinds: 10
 cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
@@ -22,6 +22,7 @@ build:cflags/sanitize	never	-
 build:cpu=arm64	declined	-
 build:endian=big	never	-
 build:exceptions/setjmp	modelled	-
+build:fieldChecks=off	modelled	-
 build:finally/returnOnRaise	never	-
 build:fwrapv	modelled	-
 build:fwrapv/vcc	never	-
@@ -29,6 +30,7 @@ build:mm=arc	modelled	-
 build:mm=atomicArc	modelled	-
 build:mm=refc	never	-
 build:nim/unpatched	declined	-
+build:objChecks=off	modelled	-
 build:os=macosx	declined	-
 build:pcre/unverified	declined	-
 build:profile/unprojectable	declined	-
@@ -59,12 +61,15 @@ defined:add/signedNarrow	modelled	-
 defined:add/signedWide	modelled	-
 defined:call/noalias	declined	-
 defined:call/opaqueBody	modelled	-
+defined:conv/objDowncast	modelled	-
 defined:convert/floatToInt	modelled	-
 defined:convert/floatToIntVia	modelled	-
 defined:div/lowByMinusOneNarrow	modelled	-
 defined:div/lowByMinusOneWide	modelled	-
 defined:div/zeroDivisorSigned	modelled	-
 defined:div/zeroDivisorUnsigned	modelled	-
+defined:field/inactiveBranch	modelled	-
+defined:field/inactiveBytes	declined	-
 defined:grow/elemAddr	never	-
 defined:index/unchecked	modelled	-
 defined:mod/lowByMinusOneNarrow	modelled	-
@@ -172,8 +177,10 @@ errorkind:seZ3StringIncomplete	kind	dcFreshSymbol
 errorkind:seZ3VersionMissing	kind	dcFreshSymbol
 errorkind:ubArrayOutOfBounds	kind	dcOmitted
 errorkind:ubFloatToIntRange	kind	dcOmitted
+errorkind:ubInactiveVariantField	kind	dcOmitted
 errorkind:ubIndeterminateRead	kind	dcOmitted
 errorkind:ubIntMinModMinusOne	kind	dcOmitted
+errorkind:ubInvalidObjConversion	kind	dcOmitted
 errorkind:ubSignedDivZero	kind	dcOmitted
 errorkind:ubSignedOverflow	kind	dcOmitted
 errorkind:ubTailUnverified	kind	dcOmitted

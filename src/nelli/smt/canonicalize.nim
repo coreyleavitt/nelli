@@ -333,6 +333,17 @@ const symexWalkerVersion* = "309"
   ## `index/unchecked`, appended to the `ub*` range): the out-of-container side
   ## halts through `haltUndefined`, so the in-range witness stays exact and a
   ## `boundChecks` build no longer declines every routine (`feCheckOption`).
+  ## PRC-07, object and field halves: an `--objChecks:off` build compiles
+  ## `Derived(b)` of a `ref` with no display check, so the failing side is
+  ## `UbKind` `ubInvalidObjConversion` (row `conv/objDowncast`, the new
+  ## `isUndefined` statement the parser puts where it raised
+  ## `ObjectConversionDefect`); a `--fieldChecks:off` build compiles a variant
+  ## field as a plain union member access, so outside its branch it is
+  ## `ubInactiveVariantField` on the cpp backend (row `field/inactiveBranch`)
+  ## and declined path-locally on the c backend (`fieldChecksOffLayout`, row
+  ## `field/inactiveBytes`: no per-target layout of a variant), and a
+  ## branch-changing discriminator write is the `dwmHavoc` model. Neither
+  ## build declines every routine (`feCheckOption`) any more.
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the
   ## winning path's own heaps (`heap_<key>` and its havoc epochs), not every
   ## model constant named `heap_*`, so a havoc'd copy (`@hv`) is not pinned.
@@ -6577,6 +6588,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # `DegradeClass` (and so the verdict), so two nodes differing only in
     # kind must never share a cache entry.
     "St<Un:" & $s.unKind & ";" & s.reason.escape & ">"
+  of isUndefined:
+    "St<Ud:" & $s.udKind & ";" & s.udSite.escape & ">"
   of isUnsafeCast:
     # Phase 15 R11. Content-address by the routed pointer-materialisation reason.
     "St<Uc:" & s.ucReason.escape & ">"

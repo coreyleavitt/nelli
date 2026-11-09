@@ -992,6 +992,24 @@ type
                           ## container reads or writes memory outside it in C:
                           ## undefined. Row `index/unchecked`. Appended so
                           ## every earlier ordinal holds.
+    ubInvalidObjConversion ## RFC-0016 PRC-07. A `ref` object down-conversion
+                          ## (`Derived(b)`) whose dynamic type is not a
+                          ## `Derived`, in a `--objChecks:off` build: Nim
+                          ## emits no `isObjDisplayCheck`, so the conversion
+                          ## succeeds and the reference is used as a type it
+                          ## is not (type confusion: an access through an
+                          ## incompatible type, possibly past the
+                          ## allocation). Row `conv/objDowncast`. Appended
+                          ## so every earlier ordinal holds.
+    ubInactiveVariantField ## RFC-0016 PRC-07. A variant field read or written
+                          ## outside its branch, in a `--fieldChecks:off`
+                          ## build on the cpp backend: the access is a plain
+                          ## union member access, and reading a member that
+                          ## is not the active one is undefined in C++ (the
+                          ## c backend defines it as reinterpreting the
+                          ## bytes, which the walker declines, not this
+                          ## kind). Row `field/inactiveBranch`. Appended so
+                          ## every earlier ordinal holds.
     feHostUnadmitted      ## RFC-0016 K5a (section 8.3). The host half of the
                           ## build profile is not a verified one: the loaded
                           ## libz3 is not 4.13.4 or 5.1, or no build row
@@ -1024,7 +1042,7 @@ type
                           ## after `feUnadmitted`, so every earlier ordinal
                           ## holds.
 
-  UbKind* = range[ubUnsignedDivZero .. ubArrayOutOfBounds]
+  UbKind* = range[ubUnsignedDivZero .. ubInactiveVariantField]
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
     ## the contiguous `ub*` members of `SymexErrorKind`.
 static:
@@ -1039,4 +1057,6 @@ static:
            ord(ubSignedDivZero) + 1 == ord(ubFloatToIntRange) and
            ord(ubFloatToIntRange) + 1 == ord(ubTailUnverified) and
            ord(ubTailUnverified) + 1 == ord(ubArrayOutOfBounds) and
+           ord(ubArrayOutOfBounds) + 1 == ord(ubInvalidObjConversion) and
+           ord(ubInvalidObjConversion) + 1 == ord(ubInactiveVariantField) and
            ord(high(UbKind)) - ord(low(UbKind)) < 30

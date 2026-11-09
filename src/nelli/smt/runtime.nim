@@ -20544,6 +20544,45 @@ proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
                             conds, settings) == zsUnsat
 
+func fieldsUnchecked(): bool =
+  ## RFC-0016 PRC-07. The build compiles no `fieldChecks`: a variant field is
+  ## a plain union member access, so one outside its branch raises no
+  ## `FieldDefect`.
+  coField notin buildSemantics.checks
+
+proc inactiveFieldSide(cp: Path; outOfArm: Z3Bool; env: Env; loc: string;
+                       w: var WalkCtx): seq[Path] =
+  ## RFC-0016 PRC-07. The out-of-branch side `outOfArm` of a variant field
+  ## access on `cp` in a `fieldChecks: off` build. On the cpp backend reading a
+  ## union member that is not the active one is undefined: decided at the op
+  ## and halted (`ubInactiveVariantField`, row `field/inactiveBranch`; a write
+  ## halts too, conservatively: C++ defines the assignment but the walker
+  ## cannot hold a branch whose active member is not its discriminator's). On
+  ## the c backend C defines it as the overlapping bytes of the active branch,
+  ## which the walker has no per-target layout for (`fieldChecksOffLayout`): the
+  ## side is declined, on its own path only. Returns the declined child (`env`
+  ## its environment) for the caller to add to its survivors, or nothing.
+  if guardLiteral(outOfArm) == glFalse: return
+  if buildSemantics.backend == beCpp:
+    decideUndefined(cp, inactiveFieldUb(),  outOfArm,
+      opSite("a variant field accessed outside its branch (a plain union " &
+             "member, no check emitted)", loc), w)
+    return
+  let unsat = guardLiteral(outOfArm) != glTrue and
+    checkCapped(w.z3, pathRoots(cp, [outOfArm]), w.settings,
+                loopPruneRLimit(w.settings)).status == zsUnsat
+  if unsat:
+    logPrune(cp, [outOfArm])
+    return
+  let (kind, why) = admitDefined(aoField, ocInactiveBytes, dsField).decline
+  result.add forkPathTainted(cp, cp.pc & @[outOfArm], env,
+    w.degrade(kind.get(feUnsupportedOp),
+      (if loc.len > 0: loc & ": " else: "") &
+      "a variant field accessed outside its branch with `fieldChecks` off " &
+      "(fieldChecksOffLayout): C reads the active branch's overlapping bytes, " &
+      "which the walker has no layout for (" & why & ") -- path degraded " &
+      "to sxUnknown"))
+
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
   ## RFC-fuzzer-nextgen R14: `wmFollowConcrete` counterpart to the
@@ -21841,7 +21880,8 @@ proc bindsViewWhole(s: IRStmt; names: var seq[string]): bool =
   of isAssign, isBreak, isContinue, isReturn, isAssert, isAssume,
      isCall, isVariantField, isVariantReassign, isVariantReassignSymbolic,
      isVariantConstructSym, isIndexAssign, isSeqPop, isTargetLabel, isRaise,
-     isDeref, isNew, isDerefWrite, isUnsupported, isUnsafeCast, isSetLen:
+     isDeref, isNew, isDerefWrite, isUnsupported, isUnsafeCast, isSetLen,
+     isUndefined:
     discard
   false
 
@@ -23199,6 +23239,9 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
                                      variantDiscEq(oldDisc, tagOrd))
     let pM = drainPendingLowerEffects(p)
     for o in outcomes:
+      # RFC-0016 PRC-07: an outcome that records a decline or a havoc is not
+      # recorded for a side the guard rules out (`x.k = ka` of a `ka`).
+      if (o.decline or o.havoc) and guardLiteral(o.cond) == glFalse: continue
       let child = discOutcomePath(pM, o, w)
       if o.decline:
         out2.add child
@@ -23328,6 +23371,9 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
                                            symEq(oldSV.vDisc[], newDiscInner))
           let chosenM = drainPendingLowerEffects(chosen)
           for o in outcomes:
+            # RFC-0016 PRC-07: an outcome that records a decline or a havoc is not
+            # recorded for a side the guard rules out (`x.k = ka` of a `ka`).
+            if (o.decline or o.havoc) and guardLiteral(o.cond) == glFalse: continue
             let child = discOutcomePath(chosenM, o, w)
             if o.decline:
               out2.add child
@@ -23387,6 +23433,9 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
                                            symEq(oldAxis.disc[], newDiscInner))
           let chosenM = drainPendingLowerEffects(chosen)
           for o in outcomes:
+            # RFC-0016 PRC-07: an outcome that records a decline or a havoc is not
+            # recorded for a side the guard rules out (`x.k = ka` of a `ka`).
+            if (o.decline or o.havoc) and guardLiteral(o.cond) == glFalse: continue
             let child = discOutcomePath(chosenM, o, w)
             if o.decline:
               out2.add child
@@ -23732,8 +23781,18 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     # doc comment (same shape as `isIndex`'s OOB fork: a discarded-result
     # side channel for try/except routing + target-witness search, not a
     # fork-every-arm construct).
-    maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
+    var declinedSide: seq[Path]
+    if fieldsUnchecked():
+      # RFC-0016 PRC-07: no `FieldDefect`; the side is a union read.
+      var denv = p.env
+      var scratch: seq[Z3Bool]
+      denv[stmt.vfRetName] = allocateSym(stmt.vfFieldTy,
+        freshDegradeName("__declinedFieldRead"), scratch)
+      declinedSide = inactiveFieldSide(p, outOfArmCond, denv, stmt.vfLoc, w)
+    else:
+      maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
     if w.shouldStop: return
+    survivors.add declinedSide
     # In-arm path — bind retName to the ite-chain over arms.
     var bound = armBindings[armBindings.len - 1][1]
     for k in countdown(armBindings.len - 2, 0):
@@ -25382,6 +25441,15 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # nothing here tells the arithmetic which routine it is in: the marker
     # declines (the degrade below) on every setting.
     walkUnsupported(stmt, paths, w).live
+  of isUndefined:
+    # RFC-0016 PRC-07. The path performs an operation C leaves undefined: it
+    # ends here through `haltUndefined`, decided at the op as the arithmetic
+    # and index ones are (`decideUndefined`: provably unreachable is dropped
+    # and logged, anything else halts).
+    for p in paths:
+      if w.shouldStop: break
+      decideUndefined(p, stmt.udKind, w.z3.mkBool(true), stmt.udSite, w)
+    @[]
   of isUnsafeCast:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard

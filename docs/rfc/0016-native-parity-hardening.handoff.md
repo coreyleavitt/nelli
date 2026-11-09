@@ -462,6 +462,16 @@
   layers. The 0.10.0 migration note records the walker-work charge and the spend log's
   4th column. PENDING: the default `walkRLimit` (1e9) re-measure under the charge; the
   control loop is measuring it on eos.
+  int5 CI fix (walker 305 to 306): the universe join failed on `typeclass:set`
+  and five cells after it because `tsymex_0016_k2c_typeclass` failed at `set`
+  (`pinExact`: sxSat not trusted). K10b's `modelPins` ran `svFitsHeapTy` on a
+  `set[E]` parameter (`svBitSet`, which that heap-cell test does not name), so
+  its pins were incomplete and the lossy winner failed closed
+  (`ubTailUnverified`); the rest of the test's records were never written.
+  `modelPins` now pins a builtin set parameter by its bit-vector. The mingw
+  join also named `defined:read/uninitialised` and `errorkind:ubIndeterminateRead`
+  (the `{.noinit.}` pin is skipped on a re-exec replay), allowlisted
+  `rows=mingw,msvc,linux-cpp`, linux-c evidencing both.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

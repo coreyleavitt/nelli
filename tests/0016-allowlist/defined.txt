@@ -1,2 +1,3 @@
 # RFC-0016 K10a-axis allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
+defined:read/uninitialised	K10a-axis	the {.noinit.} read pin needs the scrubbed replay stack, which a cpp build and a re-executing replay child (every Windows leg) do not run on, so tsymex_0016_k10aa_axis records skipCell there; linux-c evidences it, so the entry applies to the rows that cannot	rows=mingw,msvc,linux-cpp

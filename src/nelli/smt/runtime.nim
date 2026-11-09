@@ -12726,12 +12726,19 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
       result.complete = false
       continue
     let sv = env[p.name]
-    if not svFitsHeapTy(sv, p.ty):
+    # A builtin set parameter is one bit-vector (`svBitSet`), which
+    # `svFitsHeapTy` (a heap cell's fit test) does not name; its leaf is the
+    # vector itself, so the witness pins it like any scalar.
+    let bitSetParam = p.ty != nil and p.ty.kind == itBitSet and
+                      sv.kind == svBitSet
+    if not bitSetParam and not svFitsHeapTy(sv, p.ty):
       result.complete = false
       continue
     var leaves: seq[Z3AnyAst]
     try:
-      leaves = svLeafTerms(sv, p.ty, pinForm = true)
+      leaves = if bitSetParam:
+                 @[wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))]
+               else: svLeafTerms(sv, p.ty, pinForm = true)
     except CatchableError:
       result.complete = false
       continue

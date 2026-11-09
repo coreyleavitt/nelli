@@ -321,7 +321,11 @@ const renderAsChoicesVersion* = "12"
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "305"
+const symexWalkerVersion* = "306"
+  ## RFC-0016 K10b pins (305->306): a builtin set parameter is pinned by its
+  ## bit-vector in the witness's pins (`modelPins`), so a lossy set winner is
+  ## tail-checked and trusted where its tail is defined, not failed closed
+  ## (`ubTailUnverified`) for a pin the walker never tried to make.
   ## RFC-0016 K7 (304->305, charge): the walker-side work of each query (its
   ## construction in `ownContextSolver` and the per-query fact passes) is
   ## charged to `walkRLimit` beside the Z3 units, so the budget bounds wall

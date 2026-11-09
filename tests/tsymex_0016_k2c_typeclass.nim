@@ -133,6 +133,7 @@ suite "RFC-0016 K2c: one snippet per NimTypeKind":
     discard pinExact(palias, cellKey(axTypeClass, "alias"), domain = sampled([3, 0]))
 
   test "aggregate and container kinds are modelled":
+    check parseInt(symexWalkerVersion) >= 306   # set parameters are pinned (K10b)
     discard pinExact(pstr, cellKey(axTypeClass, "string"), domain = sampled(["ab", "", "abc"]))
     discard pinExact(pseq, cellKey(axTypeClass, "sequence"), domain = sampled([@[1, 2], @[], @[1]]))
     discard pinExact(parr, cellKey(axTypeClass, "array"), domain = sampled([[0, 2, 0], [0, 0, 0]]))

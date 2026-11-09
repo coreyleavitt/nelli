@@ -2132,11 +2132,12 @@ cells = []
 id = "STY-03"
 table = "5.9"
 title = "pointer order `<` (C-10, W-28)"
-state = "open"
-note = ""
+state = "never"
+note = ": done (2026-11-09, K10a-axis): `defined:order/pointer` is a `never` row of the definedness axis; the ref/ptr comparison reads it"
 slice = "K10a-axis"
 home = "K10a-axis (`never` cell of the definedness axis)"
-cells = []
+never_reason = "stays by design: the order of two addresses is the allocator's, not a value of the program"
+cells = ["defined:order/pointer"]
 
 [[row]]
 id = "STY-04"
@@ -2174,11 +2175,12 @@ cells = ["typeclass:float/sNaNPayload", "typeclass:float128"]
 id = "STY-07"
 table = "5.9"
 title = "`addr s[0]` then growth (B §1.2)"
-state = "open"
-note = ""
+state = "never"
+note = ": done (2026-11-09, K10a-axis): `defined:grow/elemAddr` is a `never` row of the definedness axis; the stale element pointer decline reads it"
 slice = "K10a-axis"
 home = "K10a-axis (`never` cell of the definedness axis)"
-cells = []
+never_reason = "stays by design: whether Nim moves the elements depends on the seq's capacity, so the use after a resize is declined"
+cells = ["defined:grow/elemAddr"]
 
 [[row]]
 id = "STY-08"

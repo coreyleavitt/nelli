@@ -31,6 +31,8 @@ import z3
 from ./buildprofile import buildSemantics, exSetjmp   ## RFC-0016 W1-c1b
 import ./buildprofile as bprof   ## RFC-0016 K5a: the host half, the segment, the row
 import ./types
+import ./admission
+import ./definedness   ## RFC-0016 K10a-axis: the definedness axis
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
@@ -8152,8 +8154,13 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
     # RFC-0005 S6b: stays `feUnsupportedOp` -- `ref T` has no system
     # ordering, so an ordering `<` on refs IS a user overload (by-name
     # mapping, as `cmpBV`): its raises are dropped.
-    degradeAlloc(tBool(), feUnsupportedOp,
-      "ref/ptr comparison op " & $op & " not valid (only ==/!=)",
+    #
+    # RFC-0016 K10a-axis (STY-03): the kind and the reason are the definedness
+    # axis's `order/pointer` row, a `never` cell.
+    let ordRow = admitDefined(aoOrder, ocPointer, dsOrder)
+    let (ordKind, ordWhy) = ordRow.decline
+    degradeAlloc(tBool(), ordKind.get(feUnsupportedOp),
+      "ref/ptr comparison op " & $op & " not valid (only ==/!=): " & ordWhy,
       "__refEqOrderDegrade")
 
 proc refMixedCmpDecline(a, b: SymVal, op: IRBinop): SymVal =
@@ -8889,7 +8896,22 @@ proc checked(ac: ArithCheck; settings: SymexSettings): bool =
   ac in effectiveArithChecks(settings) or
     (ac in {acOverflow, acDivByZero} and buildWraps() and not wraps())
 
-proc depositSignedOverflow(oc: Z3Bool; width: int) =
+proc defProfile(): DefProfile =
+  ## RFC-0016 K10a-axis. The build's arithmetic, as the definedness axis keys
+  ## it: `wraps()` is the unchecked scope, `-fwrapv` is K5a's.
+  if not wraps(): dpChecked
+  elif buildSemantics.fwrapv: dpFwrapv
+  else: dpUnchecked
+
+func arithOpOf(op: IRBinop): ArithOp =
+  case op
+  of bAdd: aoAdd
+  of bSub: aoSub
+  of bMul: aoMul
+  of bDiv: aoDiv
+  else: aoMod
+
+proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop) =
   ## RFC-0016 W1-d2 (W-07). A signed `+`, `-` or `*` overflow side. With the
   ## build's overflow checks on it is Nim's `OverflowDefect` fork
   ## (`overflowConds`). With them off (`wraps()`) the C operation is
@@ -8901,14 +8923,19 @@ proc depositSignedOverflow(oc: Z3Bool; width: int) =
   ## promoted `int`, which cannot overflow, and the narrowing wraps (modular on
   ## every supported compiler). There is no undefined side: the result is
   ## wrapped to the width by `lowerArith` and nothing halts.
-  if wraps():
-    # RFC-0016 K5a: `-d:nelliFwrapv` defines the 32 and 64 bit wrap as well.
-    if signedWrapDefined(width): return
-    let tr = ArithTrap(cond: oc, ub: some(UbKind(ubSignedOverflow)),
+  ## RFC-0016 K10a-axis: which of the three is the definedness axis's
+  ## `(op, signed 8/16 or 32/64)` row at the build's profile. `-d:nelliFwrapv`
+  ## (K5a) defines the 32 and 64 bit wrap as well.
+  let ans = definedness(arithOpOf(op), arithClass(width in {32, 64}),
+                        defProfile())
+  case ans.kind
+  of dkDefined: return
+  of dkUndefined:
+    let tr = ArithTrap(cond: oc, ub: some(ans.ub),
                        site: "signed `+`, `-` or `*` overflow")
     arithTrapConds.add tr
     syncArithTrapCond(tr)
-  else:
+  of dkDefect:
     overflowConds.add oc
     syncOverflowCond(oc)
 
@@ -8972,16 +8999,21 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     let unsignedDiv = (a.kind in {svBV8, svBV16, svBV32, svBV64} and
                        not a.signed) or
                       (a.kind == svInt and a.ziWidth != 0 and not a.ziSigned)
+    # RFC-0016 K10a-axis: the divisor row of the definedness axis. Unsigned,
+    # Nim has no check and the C division is undefined. Signed, the zero
+    # check is Nim's (a `DivByZeroDefect` fork below) and with the checks off
+    # (WA-B, S3) the C division by zero is undefined as the unsigned one is:
+    # the zero side halts, it is not a definite trap.
+    let zeroAns = definedness(arithOpOf(op),
+      (if unsignedDiv: ocZeroDivisorUnsigned else: ocZeroDivisorSigned),
+      defProfile())
     let divTrap =
-      if unsignedDiv:
-        ArithTrap(cond: c, ub: some(UbKind(ubUnsignedDivZero)),
-                  site: (if op == bDiv: "`x div 0'u`" else: "`x mod 0'u`"))
-      elif wraps():
-        # RFC-0016 WA-B (S3): with the checks off Nim emits no zero check
-        # and the signed C division by zero is undefined, as the unsigned
-        # one is: the zero side halts, it is not a definite trap.
-        ArithTrap(cond: c, ub: some(UbKind(ubSignedDivZero)),
-                  site: (if op == bDiv: "`x div 0`" else: "`x mod 0`"))
+      if zeroAns.kind == dkUndefined:
+        ArithTrap(cond: c, ub: some(zeroAns.ub),
+                  site: (if unsignedDiv:
+                           (if op == bDiv: "`x div 0'u`" else: "`x mod 0'u`")
+                         else:
+                           (if op == bDiv: "`x div 0`" else: "`x mod 0`")))
       else: ArithTrap(cond: c)
     if wraps():
       # RFC-0005 S8aa: Nim's zero-divisor check is part of its overflow
@@ -9018,7 +9050,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
                           of svBV8: 8
                           of svBV16: 16
                           of svBV32: 32
-                          else: 64)
+                          else: 64, op)
   elif op in {bAdd, bSub, bMul} and a.kind == svInt and a.ziWidth != 0 and a.ziSigned:
     # Issue #161 slice 2. The obligation is raised unconditionally; what
     # varies is who discharges it. Try the static proof first, and record
@@ -9033,7 +9065,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       obligationLog.add ObligationEntry(
         op: op, width: a.ziWidth, signed: a.ziSigned,
         disposition: odLive, bound: none(Interval))
-      depositSignedOverflow(overflowCondInt(a, b, op), a.ziWidth)
+      depositSignedOverflow(overflowCondInt(a, b, op), a.ziWidth, op)
   # RFC-0005 S8i: signed `div`/`mod` of `low(T)` by `-1`. `div` raises
   # `OverflowDefect` (Nim's check, at every width) -- the `overflowConds`
   # sink, acOverflow-gated like add/sub/mul. At 32 and 64 bits the C
@@ -9050,7 +9082,11 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
                      a.ziIvl.get.lo > intBounds(width)[0]
     if signedOp and width in {8, 16, 32, 64} and not loExcluded:
       let tc = divLowByMinusOne(a, b)
-      if op == bDiv and not wraps():
+      # RFC-0016 K10a-axis: the `low(T) by -1` row of the definedness axis.
+      let lowAns = definedness(arithOpOf(op),
+        (if width in {32, 64}: ocLowByMinusOneWide
+         else: ocLowByMinusOneNarrow), defProfile())
+      if lowAns.kind == dkDefect:
         overflowConds.add tc
         syncOverflowCond(tc)
       if width in {32, 64}:
@@ -9059,12 +9095,10 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
         # (section 9.1); with the checks on, `div` is the `OverflowDefect`
         # fork above and the survivor is merely confined.
         let tr =
-          if op == bMod:
-            ArithTrap(cond: tc, ub: some(UbKind(ubIntMinModMinusOne)),
-                      site: "`low(T) mod -1`")
-          elif wraps():
-            ArithTrap(cond: tc, ub: some(UbKind(ubSignedOverflow)),
-                      site: "`low(T) div -1`")
+          if lowAns.kind == dkUndefined:
+            ArithTrap(cond: tc, ub: some(lowAns.ub),
+                      site: (if op == bMod: "`low(T) mod -1`"
+                             else: "`low(T) div -1`"))
           else:
             ArithTrap(cond: tc)
         arithTrapConds.add tr
@@ -9503,7 +9537,7 @@ func unwrittenUb(part: string): set[UbKind] =
   ## through: a `{.noinit.}` local holds an indeterminate value (the walk
   ## models it as any value of its type and replays the hit); a module-level
   ## global does not (it is zero-initialised).
-  if part.startsWith(noinitReadPrefix): {UbKind(ubIndeterminateRead)} else: {}
+  if part.startsWith(noinitReadPrefix): {readUb()} else: {}
 
 proc unwrittenMsg(part: string): string =
   ## RFC-0005 batch 6. `unwrittenKind`'s message.

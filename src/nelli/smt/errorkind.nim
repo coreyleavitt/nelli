@@ -952,7 +952,8 @@ type
     # omission. All `dcOmitted`, sevError. Producers: `ubIntMinModMinusOne`
     # (W1-d1a), `ubUnsignedDivZero` (W1-d1b), `ubSignedDivZero`, `ubSignedOverflow`
     # (W1-d2) and `ubIndeterminateRead` (W1-d3, the `{.noinit.}` read).
-    # `ubFloatToIntRange` has none until K10a.
+    # K10a-axis: every member has a producer; `ubFloatToIntRange` was removed
+    # with none (K10a-float adds it back with its halt site).
     ubUnsignedDivZero     ## `x div 0` / `x mod 0` on an unsigned type.
     ubIntMinModMinusOne   ## `low(T) mod -1` (and `low(T) div -1` with
                           ## overflow checks off) at 32 and 64 bits: the C
@@ -960,7 +961,6 @@ type
     ubSignedOverflow      ## signed add / sub / mul / neg overflow with the
                           ## overflow checks off and no `-d:nelliFwrapv` at
                           ## 32 and 64 bits (K5a; 8 and 16 bit wrap).
-    ubFloatToIntRange     ## a float to int conversion out of range.
     ubIndeterminateRead   ## a read of an uninitialised value.
     ubSignedDivZero       ## `x div 0` / `x mod 0` on a signed type with the
                           ## overflow checks off (Nim emits no zero check
@@ -1008,7 +1008,6 @@ static:
   # new `soundnessMetaVersion` and this pin).
   doAssert ord(ubUnsignedDivZero) + 1 == ord(ubIntMinModMinusOne) and
            ord(ubIntMinModMinusOne) + 1 == ord(ubSignedOverflow) and
-           ord(ubSignedOverflow) + 1 == ord(ubFloatToIntRange) and
-           ord(ubFloatToIntRange) + 1 == ord(ubIndeterminateRead) and
+           ord(ubSignedOverflow) + 1 == ord(ubIndeterminateRead) and
            ord(ubIndeterminateRead) + 1 == ord(ubSignedDivZero) and
            ord(high(UbKind)) - ord(low(UbKind)) < 30

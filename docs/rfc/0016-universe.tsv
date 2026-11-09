@@ -8,9 +8,9 @@
 # axis stdlib: 0 cells
 # axis build: 23 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
-# axis defined: 0 cells
+# axis defined: 18 cells
 # build rows: 5
-# error kinds: 102
+# error kinds: 101
 # cap kinds: 9
 cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
@@ -50,6 +50,24 @@ capkind:ckTermWalkRead	cap	-
 capkind:ckTermWalkWrite	cap	-
 capkind:ckVariantFieldAllocs	cap	-
 capkind:ckVariantForks	cap	-
+defined:add/signedNarrow	modelled	-
+defined:add/signedWide	modelled	-
+defined:call/noalias	declined	-
+defined:div/lowByMinusOneNarrow	modelled	-
+defined:div/lowByMinusOneWide	modelled	-
+defined:div/zeroDivisorSigned	modelled	-
+defined:div/zeroDivisorUnsigned	modelled	-
+defined:grow/elemAddr	never	-
+defined:mod/lowByMinusOneNarrow	modelled	-
+defined:mod/lowByMinusOneWide	modelled	-
+defined:mod/zeroDivisorSigned	modelled	-
+defined:mod/zeroDivisorUnsigned	modelled	-
+defined:mul/signedNarrow	modelled	-
+defined:mul/signedWide	modelled	-
+defined:order/pointer	never	-
+defined:read/uninitialised	modelled	-
+defined:sub/signedNarrow	modelled	-
+defined:sub/signedWide	modelled	-
 errorkind:beBudgetExhausted	kind	dcFabricated
 errorkind:beBudgetExhaustedAssumedBound	kind	dcFabricated
 errorkind:beBudgetExhaustedPrune	kind	dcOmitted
@@ -143,7 +161,6 @@ errorkind:seUnsupportedTableValType	kind	dcNoAnswer
 errorkind:seVariantFieldOnDeclinedCtor	kind	dcOmitted
 errorkind:seZ3StringIncomplete	kind	dcFreshSymbol
 errorkind:seZ3VersionMissing	kind	dcFreshSymbol
-errorkind:ubFloatToIntRange	kind	dcOmitted
 errorkind:ubIndeterminateRead	kind	dcOmitted
 errorkind:ubIntMinModMinusOne	kind	dcOmitted
 errorkind:ubSignedDivZero	kind	dcOmitted

@@ -92,7 +92,7 @@ suite "W1-d3 Soundness.witnessUndefined gates":
       s.witnessUndefined = ubOrdinals({k})
       check s.undefinedKinds == {k}
     check ubOrdinals({UbKind(ubUnsignedDivZero)}) == {UbOrdinal(0)}
-    check ubOrdinals({UbKind(ubIndeterminateRead)}) == {UbOrdinal(4)}
+    check ubOrdinals({UbKind(ubIndeterminateRead)}) == {UbOrdinal(3)}
 
 let w1d3Prog = SymexProgram(body: mkBlock(@[]))
 let w1d3Target = tLabel("w1d3_codec")

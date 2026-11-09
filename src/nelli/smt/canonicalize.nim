@@ -282,7 +282,17 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "293"
+const symexWalkerVersion* = "294"
+  ## RFC-0016 K10a-axis (293->294): the definedness axis (`smt/definedness`)
+  ## answers the arithmetic undefined-behaviour sites (same answers, one
+  ## table), and three behaviours are new or renamed: a routine that declares a
+  ## `{.noalias.}` parameter beside another pointer-like one declines
+  ## (`feUnsupportedOp`, `defined:call/noalias`); the `<` over `ptr` and the
+  ## `addr s[i]` after a resize declines name their `defined:` cell; and
+  ## `ubFloatToIntRange`, which nothing produced, left `UbKind`, so
+  ## `ubIndeterminateRead` and `ubSignedDivZero` are ordinal 3 and 4 in the
+  ## persisted `witnessUndefined` (codec 4 is not released; the walker version
+  ## is in every cache key).
   ## RFC-0016 K10a-target (292->293): `haltUndefined` also files the undefined
   ## side as a finding: under `tUndefined` a listed kind is the target's hit
   ## (`sxSat`, witness, `witnessUndefined`); under any other target it is listed

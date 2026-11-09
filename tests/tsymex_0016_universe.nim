@@ -5,12 +5,12 @@
 ##     the magic axis; `pcreLibs`, the PCRE-library cells of the build axis,
 ##     and `buildCells`, its refusal, hazard and cfg-suite cells;
 ##     `typeClassTable` and `typeOpTable`, K3a's type-class and type x
-##     memory-op axes), read through `cells()`;
+##     memory-op axes; `definednessTable`, K10a-axis's), read through
+##     `cells()`;
 ##   * the five `BuildRow`s (`build:row/<row>`);
 ##   * every `SymexErrorKind`, with its `classOf` (`errorkind:<member>`);
 ##   * every `CapKind` member but `ckNone` (`capkind:<member>`).
-## An axis with no table yet (construct, pragma, stdlib body, read-only,
-## definedness) contributes no cell; the ledger prints it as
+## An axis with no table yet (construct, pragma, stdlib body, read-only) contributes no cell; the ledger prints it as
 ## a comment line, so an axis landing shows as a diff.
 ##
 ## The error-kind and cap-kind sets are "Not axes" (section 8.1): they are
@@ -73,6 +73,7 @@ import nelli/smt/pcre_engine
 import nelli/smt/magic_rows
 import nelli/smt/buildprofile
 import nelli/smt/typeaxes
+import nelli/smt/definedness
 import nelli/smt/soundness
 import ./s8cu_helpers
 import ./worklist_toml
@@ -90,7 +91,8 @@ const
   testsDir = root / "tests"
   fixtureDir = root / "tests" / "0016-fixtures" / "universe-pins"
   runtimePath = root / "src" / "nelli" / "smt" / "runtime.nim"
-  scopes = ["magic", "build", "errorkind", "capkind", "typeclass", "typeop"]
+  scopes = ["magic", "build", "errorkind", "capkind", "typeclass", "typeop",
+            "defined"]
   publicEntries = ["symexFind", "symexFindAllWitnesses", "symexForAll",
                    "assertCoveredBy", "concolic", "loadSymexVerdict"]
 
@@ -130,6 +132,9 @@ proc deriveUniverse(): seq[UCell] =
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-")
   for c in typeOpTable.cells:
+    result.add UCell(key: render(c.cell),
+                     state: stateOf(c.admitted, c.intent), detail: "-")
+  for c in definednessTable.cells:
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-")
   for c in buildCells.cells:
@@ -380,6 +385,7 @@ suite "RFC-0016 K1a-cells: the universe is derived":
     check universe.countIn("magic:") >= 10
     check universe.countIn("typeclass:") == toSeq(typeClassTable.cells).len
     check universe.countIn("typeop:") == ord(high(IRTypeKind)) + 1
+    check universe.countIn("defined:") == toSeq(definednessTable.cells).len
     check universe.countIn("build:") >= 3 + 5
     check universe.countIn("build:row/") == ord(high(BuildRow)) + 1
     check universe.countIn("errorkind:") == ord(high(SymexErrorKind)) + 1
@@ -388,7 +394,7 @@ suite "RFC-0016 K1a-cells: the universe is derived":
   test "keys are unique and every CellKey cell parses back":
     check universe.mapIt(it.key).toHashSet.len == universe.len
     for c in universe:
-      if scopeOf(c.key) in ["magic", "build", "typeclass", "typeop"] and
+      if scopeOf(c.key) in ["magic", "build", "typeclass", "typeop", "defined"] and
          not c.key.startsWith("build:row/"):
         check parseCellKey(c.key).isSome
 

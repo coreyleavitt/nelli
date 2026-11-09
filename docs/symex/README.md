@@ -438,14 +438,21 @@ Two things can happen to the omission, by kind:
   listed on `SymexResult.undefined` (`UndefinedFinding`: kind, site, witness;
   `SymexFinding.undefined` as `FindingUndefined`), at most eight per run,
   and the halt names `tUndefined()` as the next query.
-- `ubFloatToIntRange` is declared and has no emission site yet.
+- Every kind is read from the definedness table (`smt/definedness.nim`):
+  `(operation, operand class)` to *defined*, *Defect* or *undefined* by build
+  profile. A float to int conversion out of range is not a `ub*` kind yet: it
+  still records `feConvFloatToIntUndefined`.
+- Three cases stay declines, not kinds: `<` over `ptr` (the order of two
+  addresses is the allocator's), a use of `addr s[i]` after `s` may have
+  resized, and a routine that declares a `{.noalias.}` parameter beside another
+  pointer-like one (C `restrict` makes an alias of the two undefined). Each is
+  a `feUnsupportedOp` decline naming its `defined:` cell.
 
 | Kind | The operation | What to do |
 |---|---|---|
 | `ubUnsignedDivZero` | `x div 0` or `x mod 0` on an unsigned type. Nim has no check; the C division traps (SIGFPE on x86-64). Not a `DivByZeroDefect`. | Guard the divisor, or keep the property off inputs where it can be zero. |
 | `ubIntMinModMinusOne` | `low(T) mod -1` (and `low(T) div -1` with overflow checks off) at 32 and 64 bits. The C division is undefined and traps on x86. | Guard the divisor against `-1` for the minimum. |
 | `ubSignedOverflow` | signed `+`, `-`, `*` or negation that overflows, in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`) at 32 and 64 bits and no `-d:nelliFwrapv` (8 and 16 bit wrap). The compiler may assume it never happens (`v + 1 > v` folds to true). | Build with overflow checks on, or bound the operands. (Or build with `-d:nelliFwrapv`, which passes `-fwrapv` to every C unit, so signed `+`, `-`, `*` and negation wrap at every width and the walker models the wrap; `low(T) div -1` and `mod -1` stay undefined. Not available under `vcc`, which is refused.) |
-| `ubFloatToIntRange` | a float to int conversion out of range. Declared; no emission site yet (the conversion still records `feConvFloatToIntUndefined`). | See `feConvFloatToIntUndefined`. |
 | `ubIndeterminateRead` | a read of a `{.noinit.}` local before any write. | Initialise it. |
 | `ubSignedDivZero` | `x div 0` or `x mod 0` on a signed type in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`). Nim emits its zero check under `overflowChecks` alone, so the C division is reached and is undefined (SIGFPE on x86-64). With the checks on it is a `DivByZeroDefect`. | Guard the divisor, or build with overflow checks on. |
 

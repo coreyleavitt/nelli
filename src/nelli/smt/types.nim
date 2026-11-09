@@ -2807,7 +2807,7 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feHostUnadmitted: dcNoAnswer
     # RFC-0016 K5a: the run never started; there is no modelled program.
   of ubUnsignedDivZero, ubIntMinModMinusOne, ubSignedOverflow,
-     ubFloatToIntRange, ubIndeterminateRead, ubSignedDivZero: dcOmitted
+     ubIndeterminateRead, ubSignedDivZero: dcOmitted
     # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
     # successor, a pure omission.
   of feUnadmitted, feDefectExcluded: dcOmitted

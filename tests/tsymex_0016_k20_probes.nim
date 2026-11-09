@@ -341,7 +341,8 @@ suite "RFC-0016 K2-0: CRH-09 items":
                      domain = sampled([-5, 0, 4, high(int)]))
 
   test "W-28: < on ptr is a named decline, not a cmpBV fault":
-    pinDecline(ptrLt, cellKey(axTypeOp, "ptr/lt"), feUnsupportedOp, needle = "bLt")
+    pinDecline(ptrLt, cellKey(axDefinedness, "order/pointer"), feUnsupportedOp,
+               needle = "bLt")
 
   test "HRV-47 / HRV-49: char-set contains and array[Enum, T] agree with native":
     discard pinExact(inSet, cellKey(axTypeOp, "set/char/in"),

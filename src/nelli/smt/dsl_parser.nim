@@ -17021,7 +17021,10 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
        d[0].len > 1:
       for p in d[0][1]:
         let a = admitPragma(ppType, pragmaName(p), psTypeDecl)
-        if not a.admitted:
+        # Only a row the table declines: a type pragma with no row (a name
+        # a macro or a template reads, `RootObj`'s `compilerproc`) changes
+        # no value the walk computes.
+        if not a.admitted and a.decline[0] == some(feUnsupportedOp):
           return TypePragmaHit(found: true, pragma: pragmaName(p),
                                typeName: head.strVal, adm: a)
   # Its components.

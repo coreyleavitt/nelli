@@ -21,8 +21,11 @@
 ## overlap, which is a precondition on the caller (undefined behaviour when
 ## false), so it belongs to the definedness axis's operand classes (K10b).
 ##
-## Absent is a decline: a name with no row answers `feUnadmitted` (at the
-## local place, `feLocalPragma`, the kind W1-b shipped). Nim has no enum of
+## Absent is a decline at the local, routine and parameter places: a name with
+## no row answers `feUnadmitted` (at the local place, `feLocalPragma`, the kind
+## W1-b shipped). At the type place the walker acts on the four declined rows
+## only: types carry pragmas for macros and templates freely (`RootObj` has
+## `compilerproc`), and none changes a value but those four. Nim has no enum of
 ## pragmas, so the lists are hand-written; `tsymex_0016_k3c_pragmaaxis` scans
 ## the toolchain's `lib/` and fails on a pragma it declares that has no row.
 ## Names are style-insensitive (`noSideEffect` is `nosideeffect`), as in Nim.

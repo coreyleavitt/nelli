@@ -22,9 +22,10 @@
 ##   * `nextafter` (STY-05, HRV-27) is not a `TMagic` member but the math
 ##     routine the walker recognises by name and cannot model: no SMT-LIB FP
 ##     primitive. A `never` cell (`nrTheory`).
-## The sites are the two `varParamMagics` already names; K4a-dispatch adds the
-## rest with the macro that consumes them.
-import std/options
+## K4a-dispatch. `dispatchMagic` checks a site's hand-written `case` against
+## the table at compile time, and `varParamMagics` is gone: a routine with a
+## `var` formal and a `{.magic.}` is declined at `msProcRegister` from its row.
+import std/[options, macros]
 import ./admission
 import ./errorkind
 
@@ -32,19 +33,35 @@ type
   MagicModel* = enum
     mmModelled, mmPartial, mmFolded, mmBody
   MagicSite* = enum
-    msArm           ## a parser or runtime arm that models the magic
-    msProcRegister  ## `ensureProcRegistered`: the call fell through every arm
+    msArm           ## a hand-written arm elsewhere models the magic; no
+                    ## dispatch reads this site (K4b and K4c settle each)
+    msProcRegister  ## `ensureProcRegistered`: the call fell through every
+                    ## arm; read with `admitMagic`, no row is admitted here
+                    ## (a magic with a stub body or a `var` formal declines)
+    msVarStmt       ## `parseVarMagicStmt`: a statement-position call of a
+                    ## `var`-parameter magic (a `dispatchMagic` site)
+    msCallSwitch    ## the stdlib call switch before `ensureProcRegistered`,
+                    ## in `parseCallExpr` (a `dispatchMagic` site); also
+                    ## admits the `unsignedIntOps` names, which are routines
+                    ## of `system`, not magics
+    msInfix         ## the unsigned operators spelled infix (a
+                    ## `dispatchMagic` site)
+    msNewString     ## `parseNewStringExpr` (a `dispatchMagic` site)
 
 type MagicRow = tuple[key: string, row: Row[MagicSite, MagicModel]]
 
-func admittedRow(key: string; model: MagicModel; note: string): MagicRow =
-  (key, modelled[MagicSite, MagicModel](model, {msArm}, note,
+func admittedRow(key: string; model: MagicModel; note: string;
+                 also: set[MagicSite]): MagicRow =
+  ## Every admitted row is admitted at `msArm`; `also` adds the dispatch
+  ## sites whose arm the row names.
+  (key, modelled[MagicSite, MagicModel](model, {msArm} + also, note,
                                         elsewhere = some(feUnsupportedOp)))
 
-func mModelled(key, note: string): MagicRow = admittedRow(key, mmModelled, note)
-func mPartial(key, note: string): MagicRow = admittedRow(key, mmPartial, note)
-func mFolded(key, note: string): MagicRow = admittedRow(key, mmFolded, note)
-func mBody(key, note: string): MagicRow = admittedRow(key, mmBody, note)
+func mModelled(key, note: string; also: set[MagicSite] = {}): MagicRow =
+  admittedRow(key, mmModelled, note, also)
+func mPartial(key, note: string): MagicRow = admittedRow(key, mmPartial, note, {})
+func mFolded(key, note: string): MagicRow = admittedRow(key, mmFolded, note, {})
+func mBody(key, note: string): MagicRow = admittedRow(key, mmBody, note, {})
 
 func mDeclined(key, note: string): MagicRow =
   (key, refused[MagicSite, MagicModel](some(feUnsupportedOp), note))
@@ -85,9 +102,9 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("Pred",
     "pred (system/arithmetics.nim:10): P:12691 (+/- step; R1-02 enum/char/range bounds)"),
   mModelled("Inc",
-    "+=,inc (system/arithmetics.nim:19): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026"),
+    "+=,inc (system/arithmetics.nim:19): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026", also = {msVarStmt}),
   mModelled("Dec",
-    "-=,dec (system/arithmetics.nim:31): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026"),
+    "-=,dec (system/arithmetics.nim:31): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026", also = {msVarStmt}),
   mModelled("BitnotI",
     "bitnot,not (system/arithmetics.nim:63): nnkPrefix \"not\" on an int operand P:11186 (uNot; runtime picks bitnot by kind)"),
   mModelled("BitandI",
@@ -101,7 +118,7 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("ShrI",
     "shr (system/arithmetics.nim:129): RT:10641-10683 (S8ac count mask, S8w stamping); AshrI by name P:11869"),
   mModelled("AshrI",
-    "ashr,shr (system/arithmetics.nim:135): RT:10641-10683 (S8ac count mask, S8w stamping); AshrI by name P:11869"),
+    "ashr,shr (system/arithmetics.nim:135): RT:10641-10683 (S8ac count mask, S8w stamping); AshrI by name P:11869", also = {msCallSwitch}),
   mModelled("AddU",
     "+ (system/arithmetics.nim:269): uint operands: lowerArith wrapIntToWidth RT:8890 (unsigned always wraps); divisorIsZero"),
   mModelled("SubU",
@@ -189,9 +206,9 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("Xor",
     "xor (system/basic_types.nim:89): P:11080-11180 (D1c short-circuit; A2b)"),
   mModelled("Chr",
-    "chr (system.nim:728): P:11879 (RangeDefect via hidden range conv)"),
+    "chr (system.nim:728): P:11879 (RangeDefect via hidden range conv)", also = {msCallSwitch}),
   mModelled("Ord",
-    "ord (system.nim:717): P:11874 (bool); other ordinals: identity through the conv arm P:12629"),
+    "ord (system.nim:717): P:11874 (bool); other ordinals: identity through the conv arm P:12629", also = {msCallSwitch}),
   mModelled("High",
     "high (system.nim:205): types: lowHighIntLit P:5407 (int family) + ordinal fold; values: s.high S3 arm P:11642+"),
   mModelled("Low",
@@ -211,19 +228,19 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("Card",
     "card,len (system/setops.nim:42): P:12460 len/card on a bitset"),
   mModelled("SetLengthSeq",
-    "setLen (system.nim:943): parseSetLen P:17705 (grow of Uninit declines)"),
+    "setLen (system.nim:943): parseSetLen P:17705 (grow of Uninit declines)", also = {msVarStmt}),
   mModelled("SetLengthStr",
-    "setLen (system.nim:974): parseSetLen P:17705 (grow of Uninit declines)"),
+    "setLen (system.nim:974): parseSetLen P:17705 (grow of Uninit declines)", also = {msVarStmt}),
   mModelled("SetLengthSeqUninit",
-    "setLenUninit (system.nim:959): parseSetLen P:17705 (grow of Uninit declines)"),
+    "setLenUninit (system.nim:959): parseSetLen P:17705 (grow of Uninit declines)", also = {msVarStmt}),
   mModelled("NewSeq",
     "newSeq (system.nim:614): P:9372-9389 (iekSeqNew)"),
   mModelled("NewSeqOfCap",
     "newSeqOfCap (system.nim:653): P:9372-9389 (iekSeqNew)"),
   mModelled("NewString",
-    "newStringUninit,newString (system.nim:986): P:17880 (parseNewString)"),
+    "newStringUninit,newString (system.nim:986): P:17880 (parseNewString)", also = {msNewString}),
   mModelled("NewStringOfCap",
-    "newStringOfCap (system.nim:995): P:17880 (parseNewString)"),
+    "newStringOfCap (system.nim:995): P:17880 (parseNewString)", also = {msNewString}),
   mModelled("ConStrStr",
     "& (system.nim:1002): & infix P:11000 iekStrConcat (itString both sides)"),
   mModelled("AppendStrCh",
@@ -271,19 +288,19 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mPartial("Repr",
     "repr (system.nim:1266): bool/enum/int via parseToStr; any other repr declines P:11850"),
   mModelled("New",
-    "new,unsafeNew (system.nim:567): parseNew/parseUnsafeNew P:17756; new(p, finalizer) is NewFinalize"),
+    "new,unsafeNew (system.nim:567): parseNew/parseUnsafeNew P:17756; new(p, finalizer) is NewFinalize", also = {msVarStmt}),
   mDeclined("NewFinalize",
     "new (system.nim:131): hasVarFormal decline in ensureProcRegistered P:21205; NOT listed in varParamMagics (generic reason text)"),
   mModelled("Swap",
-    "swap (system.nim:1404): parseVarMagicStmt P:17813 (both read, then both written); other shapes decline"),
+    "swap (system.nim:1404): parseVarMagicStmt P:17813 (both read, then both written); other shapes decline", also = {msVarStmt}),
   mModelled("WasMoved",
-    "=wasMoved,wasMoved (system.nim:161): P:17825 / parseMoveExpr P:17859 / P:11888"),
+    "=wasMoved,wasMoved (system.nim:161): P:17825 / parseMoveExpr P:17859 / P:11888", also = {msVarStmt}),
   mModelled("Move",
     "move (system.nim:169): P:17825 / parseMoveExpr P:17859 / P:11888"),
   mModelled("EnsureMove",
-    "ensureMove (system.nim:175): P:17825 / parseMoveExpr P:17859 / P:11888"),
+    "ensureMove (system.nim:175): P:17825 / parseMoveExpr P:17859 / P:11888", also = {msCallSwitch}),
   mModelled("Asgn",
-    "=,=copy,=sink (system.nim:375): =/=copy/=sink as assignment P:17830; a user hook declines (S8cs)"),
+    "=,=copy,=sink (system.nim:375): =/=copy/=sink as assignment P:17830; a user hook declines (S8cs)", also = {msVarStmt}),
   mNever("Destroy",
     "=destroy (system.nim:385): varParamMagics vmDeclined P:4289-4293"),
   mNever("Trace",
@@ -544,6 +561,28 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mFolded("CompileTime",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
 
+  mModelled("+%",
+    "`+%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; add on the operands as unsigned (S8cb, `parseUnsignedOp`)",
+    also = {msCallSwitch, msInfix}),
+  mModelled("-%",
+    "`-%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; subtract on the operands as unsigned (S8cb, `parseUnsignedOp`)",
+    also = {msCallSwitch, msInfix}),
+  mModelled("*%",
+    "`*%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; multiply on the operands as unsigned (S8cb, `parseUnsignedOp`)",
+    also = {msCallSwitch, msInfix}),
+  mModelled("/%",
+    "`/%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; divide on the operands as unsigned (S8cb, `parseUnsignedOp`)",
+    also = {msCallSwitch, msInfix}),
+  mModelled("%%",
+    "`%%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; remainder on the operands as unsigned (S8cb, `parseUnsignedOp`)",
+    also = {msCallSwitch, msInfix}),
+  mModelled("<%",
+    "`<%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; less-than on the operands as unsigned (S8cb, `parseUnsignedOp`)",
+    also = {msCallSwitch, msInfix}),
+  mModelled("<=%",
+    "`<=%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; less-or-equal on the operands as unsigned (S8cb, `parseUnsignedOp`)",
+    also = {msCallSwitch, msInfix}),
+
   # STY-05 (HRV-27): a math routine recognised by name, not a TMagic member.
   (key: "nextafter", row: refused[MagicSite, MagicModel](some(feUnsupportedOp),
     "`nextafter` (std/math): no SMT-LIB FP-theory primitive, a documented " &
@@ -553,3 +592,57 @@ proc admitMagic*(magic: string; site: MagicSite): Admit[MagicModel] =
   ## The magic axis, for every magic. The `var`-parameter subset is
   ## `dsl_parser.admitVarMagic`, which agrees.
   magicAxis.admit(magic, site)
+
+const magicDispatchSites* = {msVarStmt, msCallSwitch, msInfix, msNewString}
+  ## The sites whose `case` goes through `dispatchMagic`. `msArm` names no
+  ## place and `msProcRegister` is a single decision read with `admitMagic`.
+
+var dispatchedSites {.compileTime.}: set[MagicSite]
+  ## The sites a `dispatchMagic` expansion has covered, in this compilation.
+
+proc dispatchedMagicSites*(): set[MagicSite] {.compileTime.} = dispatchedSites
+
+macro dispatchMagic*(site: static MagicSite; body: untyped): untyped =
+  ## RFC-0016 K4a-dispatch (section 8.1). `body` is the site's `case` over a
+  ## magic's name. The expansion is that `case`, after the table has been
+  ## read at compile time:
+  ##   * every `of` string must have a row in `magicAxis` admitted at `site`;
+  ##   * every row admitted at `site` must have an `of` arm;
+  ##   * the `else` is the decline (the name is refused, absent, or admitted
+  ##     elsewhere), and must exist;
+  ##   * a site is expanded once: a second expansion is an error, so
+  ##     `dispatchedMagicSites()` is a registry of covered sites.
+  if site notin magicDispatchSites:
+    error("dispatchMagic: " & $site & " is not a dispatched site", body)
+  if site in dispatchedSites:
+    error("dispatchMagic: " & $site & " is dispatched twice", body)
+  var cs = body
+  while cs.kind in {nnkStmtList, nnkStmtListExpr} and cs.len == 1: cs = cs[0]
+  if cs.kind != nnkCaseStmt:
+    error("dispatchMagic: the body is a `case` over the magic's name", body)
+  var arms: seq[string]
+  var hasElse = false
+  for i in 1 ..< cs.len:
+    let br = cs[i]
+    if br.kind == nnkElse: hasElse = true
+    else:
+      for j in 0 ..< br.len - 1:
+        if br[j].kind notin {nnkStrLit .. nnkTripleStrLit}:
+          error("dispatchMagic: an arm names a magic by a string literal", br[j])
+        let a = br[j].strVal
+        if a in arms:
+          error("dispatchMagic: duplicate arm `" & a & "`", br[j])
+        arms.add a
+        if not magicAxis.hasRow(a):
+          error("dispatchMagic: arm `" & a & "` has no row in magicAxis", br[j])
+        if not magicAxis.admit(a, site).admitted:
+          error("dispatchMagic: arm `" & a & "` has a row that is not " &
+                "admitted at " & $site, br[j])
+  if not hasElse:
+    error("dispatchMagic: the case needs an `else`, the decline", body)
+  for k in magicAxis.keysAt(site):
+    if k notin arms:
+      error("dispatchMagic: the row `" & k & "` is admitted at " & $site &
+            " and has no arm", body)
+  dispatchedSites.incl site
+  result = cs

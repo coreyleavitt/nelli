@@ -151,6 +151,16 @@ func admit*[S: enum; P](t: AxisTable[S, P]; key: string; site: S;
 iterator keys*[S: enum; P](t: AxisTable[S, P]): string =
   for r in t.rows: yield r.key
 
+iterator keysAt*[S: enum; P](t: AxisTable[S, P]; site: S): string =
+  ## Every key whose row is admitted at `site`: what a generated dispatch
+  ## compares its arms against (K4a-dispatch).
+  for r in t.rows:
+    if r.row.admitted and site in r.row.sites: yield r.key
+
+func hasRow*[S: enum; P](t: AxisTable[S, P]; key: string): bool =
+  for r in t.rows:
+    if r.key == key: return true
+
 iterator cells*[S: enum; P](t: AxisTable[S, P]):
     tuple[cell: CellKey, admitted: bool, intent: Intent] =
   ## What K1 reads: every row's identity and whether it models the cell.

@@ -1,51 +1,42 @@
 ## RFC-0016 ADM-1 (§8.1). The admission interface through its two first
-## consumers: the magic axis (`varParamMagics`, read by
+## consumers: the magic axis (`magicAxis`, read by
 ## `ensureProcRegistered`) and the build axis (`pcreLibs`, read by the
 ## regex model). No verdict changes: the rows say what the old tables said.
 import std/[unittest, options, strutils]
 import nelli/smt/types
 import nelli/smt/admission
+import nelli/smt/magic_rows
 import nelli/smt/pcre_engine
-import nelli/smt/dsl_parser
 
 suite "ADM-1 magic axis":
   test "a modelled magic is admitted at its arm":
-    let a = admitVarMagic("Swap", vsArm)
+    let a = admitMagic("Swap", msVarStmt)
     check a.admitted
-    check a.payload == vmModelled
+    check a.payload == mmModelled
     check render(a.cell) == "magic:Swap"
 
   test "a modelled magic declines at ensureProcRegistered, as before":
-    let a = admitVarMagic("Swap", vsProcRegister)
+    let a = admitMagic("Swap", msProcRegister)
     check not a.admitted
     let (kind, why) = a.decline
     check kind == some(feUnsupportedOp)
     check "magic:Swap" in why
-    check "modelled only for the argument shapes" in why
 
   test "a declined magic is admitted nowhere and keeps its note":
-    for site in VarMagicSite:
-      let a = admitVarMagic("Destroy", site)
+    for site in MagicSite:
+      let a = admitMagic("Destroy", site)
       check not a.admitted
       let (kind, why) = a.decline
       check kind == some(feUnsupportedOp)
       check "magic:Destroy" in why
 
   test "a magic with no row is feUnadmitted":
-    let a = admitVarMagic("NoSuchMagic", vsProcRegister)
+    let a = admitMagic("NoSuchMagic", msProcRegister)
     check not a.admitted
     let (kind, why) = a.decline
     check kind == some(feUnadmitted)
     check classOf(feUnadmitted) == dcOmitted  ## K7b (was dcNoAnswer)
     check "magic:NoSuchMagic" in why
-
-  test "the table has the nineteen rows, sixteen modelled":
-    var n, m = 0
-    for c in varParamMagics.cells:
-      inc n
-      if c.admitted: inc m
-    check n == 19
-    check m == 16
 
 suite "ADM-1 build axis (PCRE)":
   test "the three verified builds are admitted with their engine":
@@ -67,4 +58,4 @@ suite "ADM-1 build axis (PCRE)":
       "build:8.45 2021-06-15|interp"
     check render(admitPcreLib("8.37 2015-04-28", true).cell) ==
       "build:8.37 2015-04-28|jit"
-    check render(admitVarMagic("Inc", vsArm).cell) == "magic:Inc"
+    check render(admitMagic("Inc", msArm).cell) == "magic:Inc"

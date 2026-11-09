@@ -2,7 +2,7 @@
 ## silent no-op magic. A system magic with a `var` parameter that no parser
 ## arm models was registered with an EMPTY body before S8bl, so its write to
 ## the argument was dropped without a record. Every such magic is now either
-## modelled or declined by name (`varParamMagics`, `varMagicDecline`). This
+## modelled or declined by name (`magicAxis`, `varMagicDecline`). This
 ## file scans the stdlib's system sources for `var`-parameter magics, so a
 ## toolchain that adds one fails here until it is classified.
 import std/[unittest, os, strutils, compilesettings, sets]
@@ -11,7 +11,8 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/dsl_parser
-import nelli/smt/admission   # ADM-1: `varParamMagics.keys`
+import nelli/smt/admission   # ADM-1: `keys`
+import nelli/smt/magic_rows  # K4a: the magic axis
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -84,10 +85,10 @@ suite "S8bl (1): every system magic with a var parameter is classified":
       checkpoint m
       check m in names
     var classified: HashSet[string]
-    for m in varParamMagics.keys: classified.incl m
+    for m in magicAxis.keys: classified.incl m
     for m in found:
       checkpoint "unclassified var-parameter magic `" & m.routine &
-                 "` (magic \"" & m.magic & "\"): add it to `varParamMagics`"
+                 "` (magic \"" & m.magic & "\"): add it to `magicAxis`"
       check m.magic in classified
 
   test "a declined magic is a decline that names it, never a no-op":

@@ -5,8 +5,8 @@
 ## so a toolchain that adds a magic fails here until it is classified (the
 ## S8bl guard, `tsymex_rfc0005_s8bl_magicscan`, covers only the `var`
 ## parameter magics and stays as the narrower check). The axis absorbs
-## `varParamMagics`: its keys are a subset of this table, with the same
-## verdict. The dispatch over the table's sites is K4a-dispatch's.
+## `varParamMagics` (deleted in K4a-dispatch, which dispatches the sites; see
+## `tsymex_0016_k4a_dispatch`).
 import std/[unittest, os, strutils, compilesettings, sets, options, tables]
 import nelli/smt/admission
 import nelli/smt/errorkind
@@ -57,20 +57,6 @@ suite "RFC-0016 K4a-table: the magic axis":
   test "the axis is keyed by name on the magic scope":
     check render(magicAxis.cellOf("DivU")) == "magic:DivU"
     check admitMagic("DivU", msArm).cell == cellKey(axMagic, "DivU")
-
-  test "varParamMagics is a subset of the axis with the same verdict":
-    for k in keys(varParamMagics):
-      checkpoint k
-      let narrow = admitVarMagic(k, vsArm).admitted
-      let wide = admitMagic(k, msArm).admitted
-      check narrow == wide
-    # The ledger state (modelled / declined / never) agrees too.
-    var narrowState, wideState: Table[string, Intent]
-    for c in varParamMagics.cells: narrowState[render(c.cell)] = c.intent
-    for c in magicAxis.cells: wideState[render(c.cell)] = c.intent
-    for k, v in narrowState:
-      checkpoint k
-      check wideState[k] == v
 
   test "a modelled magic is admitted at its arm":
     for m in ["AddI", "DivU", "Swap", "LtF64"]:

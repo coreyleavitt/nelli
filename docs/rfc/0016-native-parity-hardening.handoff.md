@@ -178,6 +178,30 @@
   `parseProc` over `seenModuleGlobals()` (pinned by `tsymex_0016_k3c_pragmaaxis`:
   union and packed globals, and a union global reached only through a callee).
   Open: K8b exercises the unpinned cells (allowlisted in `pragma.txt`).
+  K4a-dispatch (`rfc-0016-k4ad`, walker 294 to 295, renumbered at landing):
+  `magic_rows.nim`'s `dispatchMagic` macro checks a site's `case` against the
+  table at compile time (an arm with no row or a row not admitted at the
+  site, a row admitted at the site with no arm, no `else`, and a second
+  expansion of a site are errors) and records the site in a `{.compileTime.}`
+  registry (`dispatchedMagicSites()`; the pin file asserts it equals
+  `magicDispatchSites`). The sites are `msVarStmt` (`parseVarMagicStmt`),
+  `msCallSwitch` (the stdlib call switch), `msInfix` (the unsigned operators
+  spelled infix) and `msNewString`; `msProcRegister` is read with
+  `admitMagic` (a stub-bodied magic or a `var`-formal magic declines with the
+  row's kind, `feUnadmitted` for a magic with no row) and `msArm` names no
+  place. `varParamMagics`, `VarMagicSite`, `VarMagicModel` and
+  `unsignedIntOps` are gone: `+%`, `-%`, `*%`, `/%`, `%%`, `<%`, `<=%` are
+  rows of the magic axis (they are `system` routines, not magics; K4c's
+  stdlib-body axis may take them). Not converted: the opaque-call defect
+  scan's four arrays (K4a-guard), `cgMutatingMagics` (a write-set property,
+  K6), the `repr` magic list and the `IsNil`/`ProcCall`/`Move` equality
+  tests (single-name checks inside other conditions). `tsymex_0016_k4a_dispatch`
+  pins 87 `magic:` cells through `symexFind` (80 of the 242 allowlisted, plus
+  the seven new unsigned-operator rows); the allowlist is 162: 110 cells no
+  SUT reaches stay with K4a-dispatch (27 folded, 82 compile-time, macro or
+  DrNim magics, and `nextafter`, which std/math does not export), and 52
+  reachable ones (modelled, declined, unverified, bodied) are re-owned to
+  K4b, whose round pins each.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

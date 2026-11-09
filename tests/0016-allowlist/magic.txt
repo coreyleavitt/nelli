@@ -1,244 +1,164 @@
 # RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-magic:AbsI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AddF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AddI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AddU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Addr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AlignOf	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:And	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AppType	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AppendSeqElem	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AppendStrCh	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AppendStrStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ArrGet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ArrPut	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ArrToSeq	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Array	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Asgn	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AshrI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:AstToStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BitandI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BitnotI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BitorI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BitxorI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Bool	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BoolToStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BuildCPU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BuildOS	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:BuiltinType	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:CStrToStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Card	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:CharToStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Chr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:CompileDate	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:CompileOption	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:CompileOptionArg	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:CompileTime	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Compiles	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ConStrStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:CpuEndian	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Dec	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Declared	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:DeclaredInScope	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:DeepCopy	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Default	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Defined	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Destroy	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:DivF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:DivI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:DivU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:DotDot	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Dup	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Echo	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EnsureMove	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EnumToStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqB	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqCString	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqCh	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqEnum	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqIdent	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqNimrodNode	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqProc	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqRef	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:EqStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Exception	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Excl	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Exists	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Exit	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ExpandToAst	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:FieldPairs	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Fields	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Finished	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Forall	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:GCref	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:GCunref	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:GetImpl	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:GetImplTransf	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:GetTypeInfo	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:GetTypeInfoV2	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:High	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:HostCPU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:HostOS	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Iff	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Implies	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:InSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Inc	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Incl	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:InstantiationInfo	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Is	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:IsMainModule	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:IsNil	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Isolate	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeB	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeCh	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeEnum	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LePtr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LeU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LengthArray	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LengthOpenArray	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LengthSeq	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LengthStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Low	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtB	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtCh	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtEnum	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtPtr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:LtU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:MaxI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:MinI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:MinusSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ModI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ModU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Move	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:MulF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:MulI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:MulSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:MulU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NAdd	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NAddMultiple	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NBindSym	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NCallSite	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NChild	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NCopyNimNode	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NCopyNimTree	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NDel	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NError	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NFloatVal	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NGenSym	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NGetType	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NHint	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NIdent	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NIntVal	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NKind	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NLen	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NLineInfo	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NNewNimNode	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSetChild	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSetFloatVal	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSetIdent	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSetIntVal	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSetStrVal	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSetSymbol	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSigHash	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSizeOf	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NStrVal	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSymKind	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NSymbol	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NWarning	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NccInc	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NccValue	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NcsAdd	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NcsAt	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NcsIncl	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NcsLen	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NctGet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NctHasNext	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NctLen	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NctNext	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NctPut	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:New	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NewFinalize	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NewSeq	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NewSeqOfCap	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NewString	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NewStringOfCap	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Nil	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Nimvm	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:NodeId	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Not	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Of	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:OffsetOf	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Old	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:OmpParFor	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:OpenArray	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:OpenArrayToSeq	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Or	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Ord	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:PNimrodNode	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Parallel	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ParseBiggestFloat	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ParseExprToAst	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ParseStmtToAst	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Plugin	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:PlusSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Pred	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:PrivateAccess	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ProcCall	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:QuoteAst	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Range	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Repr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:RunnableExamples	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SameNodeType	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Seq	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Set	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SetLengthSeq	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SetLengthSeqUninit	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SetLengthStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ShallowCopy	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ShlI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ShrI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SizeOf	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Slice	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Slurp	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Spawn	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Static	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:StaticExec	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:StrToIdent	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:StrToStr	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SubF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SubI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SubU	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Succ	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Swap	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SymIsInstantiationOf	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:SymOwner	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Trace	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Type	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:TypeOf	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:TypeTrait	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:UnaryMinusF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:UnaryMinusI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:UnaryMinusI64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:UnaryPlusF64	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:UnaryPlusI	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:UncheckedArray	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Unown	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Varargs	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:VoidType	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:WasMoved	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:Xor	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:XorSet	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:ZeroDefault	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
-magic:nextafter	K4a-dispatch	no pin record: the row is derived from the magic table; a pin writes a record for it once the axis is dispatched per site
+magic:Addr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:AlignOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:AppType	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:ArrToSeq	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:Array	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Asgn	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:AstToStr	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Bool	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:BoolToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:BuildCPU	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:BuildOS	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:BuiltinType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:CStrToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:Card	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:CompileDate	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:CompileOption	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:CompileOptionArg	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:CompileTime	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Compiles	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:CpuEndian	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Declared	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:DeclaredInScope	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:DeepCopy	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:Default	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:Defined	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Destroy	K4b	reachable from a SUT (an explicit hook call) and refused; K4b pins the declines per row
+magic:DotDot	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:Dup	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
+magic:Echo	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:EnumToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:EqCString	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining body row
+magic:EqEnum	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:EqIdent	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:EqNimrodNode	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:EqProc	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
+magic:EqRef	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:EqSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:Exception	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Exists	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Exit	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:ExpandToAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:FieldPairs	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
+magic:Fields	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
+magic:Finished	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
+magic:Forall	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:GCref	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:GCunref	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:GetImpl	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:GetImplTransf	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:GetTypeInfo	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:GetTypeInfoV2	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:HostCPU	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:HostOS	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Iff	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Implies	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:InstantiationInfo	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Is	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:IsMainModule	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Isolate	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:LeEnum	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:LePtr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
+magic:LeSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:LengthOpenArray	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:Low	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:LtEnum	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:LtPtr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
+magic:LtSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:MinusSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:MulSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:NAdd	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NAddMultiple	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NBindSym	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NCallSite	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NChild	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NCopyNimNode	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NCopyNimTree	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NDel	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NError	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NFloatVal	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NGenSym	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NGetType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NHint	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NIdent	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NIntVal	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NKind	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NLen	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NLineInfo	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NNewNimNode	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSetChild	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSetFloatVal	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSetIdent	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSetIntVal	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSetStrVal	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSetSymbol	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSigHash	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSizeOf	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NStrVal	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSymKind	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NSymbol	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NWarning	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NccInc	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NccValue	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NcsAdd	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NcsAt	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NcsIncl	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NcsLen	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NctGet	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NctHasNext	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NctLen	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NctNext	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NctPut	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:NewFinalize	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:NewSeqOfCap	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:Nil	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Nimvm	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:NodeId	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Of	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:OffsetOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Old	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:OmpParFor	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:OpenArray	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:OpenArrayToSeq	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:PNimrodNode	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Parallel	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:ParseBiggestFloat	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:ParseExprToAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:ParseStmtToAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Plugin	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:PlusSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:PrivateAccess	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:ProcCall	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:QuoteAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Range	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Repr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
+magic:RunnableExamples	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:SameNodeType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Seq	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Set	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:SetLengthSeqUninit	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:ShallowCopy	K4b	reachable from a SUT (an explicit hook call) and refused; K4b pins the declines per row
+magic:SizeOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Slice	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
+magic:Slurp	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:Spawn	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Static	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:StaticExec	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:StrToIdent	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:StrToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:SymIsInstantiationOf	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:SymOwner	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Trace	K4b	reachable from a SUT (an explicit hook call) and refused; K4b pins the declines per row
+magic:Type	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:TypeOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:TypeTrait	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
+magic:UnaryMinusI64	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:UncheckedArray	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Unown	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:Varargs	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:VoidType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
+magic:XorSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:ZeroDefault	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:nextafter	K4a-dispatch	no SUT reaches it: Nim 2.2 std/math has no nextafter to call (tsymex_phase15_F6_float_math), so the never cell is a name the walker recognises and no program expresses

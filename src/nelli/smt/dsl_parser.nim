@@ -41,6 +41,7 @@ import std/hashes      ## Phase 15 C1: lambda-site body-hash (lineInfo fallback)
 import std/unicode     ## Phase 16 A7-S3: toRunes/runeLen for literal decode at parse time
 import ./types
 import ./admission   ## RFC-0016 ADM-1: `Admit`, `AxisTable`
+import ./magic_rows  ## RFC-0016 K4a: `magicAxis`, `dispatchMagic`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
 import ./dsl_typebridge
@@ -2817,24 +2818,10 @@ type ByRefSub = object
   keyPart: string
   base: NimNode       ## the caller's ref, evaluated at the call
 
-type VarMagicModel* = enum
-  ## RFC-0005 S8bl (item 1). How the parser treats a system magic with a
-  ## `var` parameter (`varParamMagics`).
-  vmModelled   ## modelled exactly for the argument shapes its arm accepts;
-               ## any other shape declines at the call, naming the magic
-  vmDeclined   ## every call declines, naming the magic and the reason
-
-type VarMagicSite* = enum
-  ## RFC-0016 ADM-1. The places that consume the magic axis for a magic with
-  ## a `var` parameter.
-  vsArm           ## a parser arm that models the call (hand-written today;
-                  ## K4a generates the dispatch from this site)
-  vsProcRegister  ## `ensureProcRegistered`: the call fell through every arm
-
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil;
                           byRef: seq[ByRefSub] = @[];
-                          varMagic: Option[Admit[VarMagicModel]]): string
+                          varMagic: Option[Admit[MagicModel]]): string
 proc hasGenericParams(impl: NimNode): bool  ## RFC-0005 S8ba (fwd)
 proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
 proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int]
@@ -4411,89 +4398,20 @@ proc isGeneratedHook(sym: NimNode): bool =
     if f.kind == nnkArgList: return true
   false
 
-func vmRow(magic: string; model: VarMagicModel; note: string):
-    tuple[key: string, row: Row[VarMagicSite, VarMagicModel]] =
-  ## A modelled magic is admitted at its arms only; at `ensureProcRegistered`
-  ## it declines (`feUnsupportedOp`) with the note, as it did before ADM-1. A
-  ## declined one is admitted nowhere.
-  case model
-  of vmModelled:
-    (magic, modelled[VarMagicSite, VarMagicModel](model, {vsArm},
-       "modelled only for the argument shapes its arm accepts: " & note,
-       elsewhere = some(feUnsupportedOp)))
-  of vmDeclined:
-    (magic, refused[VarMagicSite, VarMagicModel](some(feUnsupportedOp), note,
-       intent = iNever, never = nrByDesign))
-
-const varParamMagics* = axisTable[VarMagicSite, VarMagicModel](axMagic, [
-  ## RFC-0005 S8bl (item 1), on RFC-0016 ADM-1's admission table. Every
-  ## magic of the system module that takes a `var` parameter (Nim 2.2), and
-  ## its treatment. A call of one that no arm models reaches
-  ## `ensureProcRegistered`, which declines it naming the magic
-  ## (`varMagicDecline`) -- before S8bl it was registered with an empty body,
-  ## a silent no-op on its argument. A magic with NO row is absent, which the
-  ## axis declines `feUnadmitted`. The guard test
-  ## (`tsymex_rfc0005_s8bl_magicscan`) scans the stdlib's system sources for
-  ## `var`-parameter magics and fails on one missing here.
-  vmRow("Swap", vmModelled,
-    "`swap(a, b)`: both read, then both written (`parseVarMagicStmt`)"),
-  vmRow("WasMoved", vmModelled,
-    "`wasMoved(x)` / `=wasMoved(x)`: x becomes its type's zero"),
-  vmRow("Move", vmModelled,
-    "`move(x)`: x's value, and x becomes its type's zero (`parseMoveExpr`)"),
-  vmRow("SetLengthSeq", vmModelled,
-    "`setLen(s, n)` on a seq (`isSetLen`)"),
-  vmRow("SetLengthStr", vmModelled,
-    "`setLen(s, n)` on a string (`isSetLen`)"),
-  vmRow("SetLengthSeqUninit", vmModelled,
-    "`setLenUninit(s, n)`: a shrink is `setLen`'s; a grow declines (the " &
-   "new slots are uninitialised memory)"),
-  vmRow("AppendStrCh", vmModelled,
-    "`add(s, c)` on a string (the #145 arms)"),
-  vmRow("AppendStrStr", vmModelled,
-    "`add(s, t)` / `s &= t` on a string (the #145 arms, the `&=` arm)"),
-  vmRow("AppendSeqElem", vmModelled,
-    "`add(s, x)` on a seq (the #145 arms)"),
-  vmRow("Inc", vmModelled,
-    "`inc(x[, y])` / `x += y` (the R8 and S8bc arms)"),
-  vmRow("Dec", vmModelled,
-    "`dec(x[, y])` / `x -= y` (the R8 and S8bc arms)"),
-  vmRow("New", vmModelled,
-    "`new(x)`: a fresh zeroed cell; `unsafeNew(x, size)` too, when `size` " &
-   "holds the pointee (`parseUnsafeNew`)"),
-  vmRow("NewSeq", vmModelled,
-    "`newSeq(s, n)` (S8bc; batch 5's `iekSeqNew`)"),
-  vmRow("Asgn", vmModelled,
-    "`=`(d, s) / `=copy` / `=sink`: the assignment `d = s`"),
-  vmRow("Incl", vmModelled,
-    "`incl(s, k)` on a builtin `set[T]` (S8bq, `parseBitSetInclExcl`)"),
-  vmRow("Excl", vmModelled,
-    "`excl(s, k)` on a builtin `set[T]` (S8bq, `parseBitSetInclExcl`)"),
-  vmRow("Destroy", vmDeclined,
-    "an explicit destructor call leaves its argument unspecified"),
-  vmRow("Trace", vmDeclined,
-    "a cycle-collector hook over a raw environment pointer"),
-  vmRow("ShallowCopy", vmDeclined,
-    "declared under the refc memory manager only; it shares the payload")])
-
-proc admitVarMagic*(magic: string; site: VarMagicSite):
-    Admit[VarMagicModel] =
-  ## The magic axis for a system magic with a `var` parameter.
-  varParamMagics.admit(magic, site)
-
-proc calleeVarMagic(calleeSym: NimNode): Option[Admit[VarMagicModel]] =
+proc calleeVarMagic(calleeSym: NimNode): Option[Admit[MagicModel]] =
   ## `ensureProcRegistered`'s admission: `none` unless `calleeSym` is a
-  ## system magic with a `var` parameter, else the axis's answer at
-  ## `vsProcRegister`.
+  ## system magic with a `var` parameter, else the magic axis's answer at
+  ## `msProcRegister`. (K4a-dispatch: the `var`-parameter subset is no
+  ## separate table; a routine's `var` formal selects which rows apply.)
   let impl = resolveRoutineImpl(calleeSym)
-  if impl == nil: return none(Admit[VarMagicModel])
+  if impl == nil: return none(Admit[MagicModel])
   let magic = implMagic(impl)
   if magic.len > 0 and hasVarFormal(impl):
-    some(admitVarMagic(magic, vsProcRegister))
-  else: none(Admit[VarMagicModel])
+    some(admitMagic(magic, msProcRegister))
+  else: none(Admit[MagicModel])
 
 proc varMagicDecline(ctx: ParseCtx; name, magic: string;
-                     adm: Admit[VarMagicModel]; key: string): string =
+                     adm: Admit[MagicModel]; key: string): string =
   ## RFC-0005 S8bl (item 1). The decline of a call to the system magic
   ## `magic` (routine `name`) with a `var` parameter that no parser arm
   ## modelled (`ensureProcRegistered`): a never-registered key, so the
@@ -7633,10 +7551,6 @@ proc openArrayView(n: NimNode; preamble: var seq[IRStmt];
               "or an array only (feUnsupportedOp)"),
       "openArray view of an unmodelled storage (feUnsupportedOp)")
     mkSeqLit(@[], classifyType(n).ty.seqElemTy)
-
-const unsignedIntOps = ["+%", "-%", "*%", "/%", "%%", "<%", "<=%"]
-  ## RFC-0005 S8cb. System's operators that treat their signed operands as
-  ## unsigned (`parseUnsignedOp`).
 
 proc parseUnsignedOp(n, a, b: NimNode; op: string;
                      preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
@@ -11380,8 +11294,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `mkUnsupported` stmt for the SND-1 walker taint, and a typed zero
     # dummy so parsing continues.
     # RFC-0005 S8cb (item 5): the unsigned operators (`parseUnsignedOp`).
-    if n[0].strVal in unsignedIntOps and n.len == 3:
-      return parseUnsignedOp(n, n[1], n[2], n[0].strVal, preamble, ctx)
+    if n.len == 3:
+      let uop = n[0].strVal
+      dispatchMagic(msInfix):
+        case uop
+        of "+%", "-%", "*%", "/%", "%%", "<%", "<=%":
+          return parseUnsignedOp(n, n[1], n[2], uop, preamble, ctx)
+        else: discard
     if n[0].strVal notin ["+", "-", "*", "div", "/", "mod", "==", "!=",
                           "<", "<=", ">", ">=", "and", "or", "xor",
                           "shl", "shr"]:
@@ -12189,33 +12108,39 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # walks or declines the routine's own (empty) body:
     if not isUserCallee(calleeSym) and isStdlibDecl(calleeSym):
       # The unsigned operators, called by name.
-      if calleeSym.strVal in unsignedIntOps and n.len == 3:
-        return parseUnsignedOp(n, n[1], n[2], calleeSym.strVal, preamble, ctx)
-      case routineMagic(calleeSym)
-      of "AshrI":
-        # Nim's `shr` of a signed integer is the arithmetic shift already.
-        if n.len == 3:
-          let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
-          return mkBinop(bShr, l, r)
-      of "Ord":
-        if n.len == 2 and classifyType(n[1]).ty.kind == itBool:
-          return bindBoolChoice(parseExpr(n[1], preamble, ctx),
-                                classifyType(n).ty, mkIntLit(1), mkIntLit(0),
-                                preamble, ctx)
-      of "Chr":
-        # The argument's hidden conversion to `range[0..255]` carries the
-        # `RangeDefect`; the value in range is the char's byte.
-        if n.len == 2:
-          let a = classifyType(n[1]).ty
-          if a.kind == itInt:
-            let v = parseExpr(n[1], preamble, ctx)
-            if a.width == 8: return mkConvIntReinterpret(v, 8, false)
-            return mkConvIntWidth(v, a.width, a.signed, 8, false)
-      of "EnsureMove":
-        # `ensureMove(x)` is x's value (the compiler rejects a later use of x).
-        if n.len == 2:
-          return parseExpr(n[1], preamble, ctx)
-      else: discard
+      # K4a-dispatch: a magic is keyed by its name, and the `unsignedIntOps`
+      # routines (not magics) by the routine's.
+      var callKey = routineMagic(calleeSym)
+      if callKey.len == 0: callKey = calleeSym.strVal
+      dispatchMagic(msCallSwitch):
+        case callKey
+        of "+%", "-%", "*%", "/%", "%%", "<%", "<=%":
+          if n.len == 3:
+            return parseUnsignedOp(n, n[1], n[2], callKey, preamble, ctx)
+        of "AshrI":
+          # Nim's `shr` of a signed integer is the arithmetic shift already.
+          if n.len == 3:
+            let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
+            return mkBinop(bShr, l, r)
+        of "Ord":
+          if n.len == 2 and classifyType(n[1]).ty.kind == itBool:
+            return bindBoolChoice(parseExpr(n[1], preamble, ctx),
+                                  classifyType(n).ty, mkIntLit(1), mkIntLit(0),
+                                  preamble, ctx)
+        of "Chr":
+          # The argument's hidden conversion to `range[0..255]` carries the
+          # `RangeDefect`; the value in range is the char's byte.
+          if n.len == 2:
+            let a = classifyType(n[1]).ty
+            if a.kind == itInt:
+              let v = parseExpr(n[1], preamble, ctx)
+              if a.width == 8: return mkConvIntReinterpret(v, 8, false)
+              return mkConvIntWidth(v, a.width, a.signed, 8, false)
+        of "EnsureMove":
+          # `ensureMove(x)` is x's value (the compiler rejects a later use of x).
+          if n.len == 2:
+            return parseExpr(n[1], preamble, ctx)
+        else: discard
       # A `quit` as an arm of an expression: the path ends, so the stand-in
       # value is never read.
       if isExitCall(n):
@@ -18226,46 +18151,48 @@ proc parseVarMagicStmt(n: NimNode; preamble: var seq[IRStmt];
     if n.len == 2 and n[0].strVal == "=wasMoved" and isGeneratedHook(n[0]):
       return parseZeroWrite(n, "WasMoved", preamble, ctx)
     return nil
-  case magic
-  of "Swap":
-    if n.len != 3: return varMagicShapeDecline(n, magic, ctx)
-    let ta = pureLvalueTarget(n[1])
-    let tb = pureLvalueTarget(n[2])
-    if ta == nil or tb == nil: return varMagicShapeDecline(n, magic, ctx)
-    let ty = classifyType(n[1]).ty
-    let a0 = freshSynth(ctx, "swapA")
-    preamble.add mkLet(a0, ty, parseExpr(n[1], preamble, ctx))
-    let b0 = freshSynth(ctx, "swapB")
-    preamble.add mkLet(b0, ty, parseExpr(n[2], preamble, ctx))
-    preamble.add writeBack(ta, mkVar(b0), preamble, ctx)
-    writeBack(tb, mkVar(a0), preamble, ctx)
-  of "WasMoved":
-    if n.len != 2: return varMagicShapeDecline(n, magic, ctx)
-    parseZeroWrite(n, magic, preamble, ctx)
-  of "SetLengthSeq", "SetLengthStr", "SetLengthSeqUninit":
-    parseSetLen(n, magic, preamble, ctx)
-  of "Asgn":
-    if n.len != 3: return varMagicShapeDecline(n, magic, ctx)
-    parseAsgn(nnkAsgn.newTree(unwrapHidden(n[1]), n[2]), nil, preamble, ctx)
-  of "Inc", "Dec":
-    if n[0].strVal in ["+=", "-="] and n.len == 3:
-      return parseStmtInner(nnkInfix.newTree(n[0], n[1], n[2]), preamble, ctx)
-    nil
-  of "New":
-    if n[0].strVal == "unsafeNew" and n.len == 3:
-      return parseUnsafeNew(n, preamble, ctx)
-    if n[0].strVal != "new" or n.len != 2 or
-       unwrapHidden(n[1]).kind == nnkSym:
-      return nil   # S8u's `new(x)` arm
-    let target = pureLvalueTarget(n[1])
-    let ty = classifyType(n[1]).ty
-    if target == nil or ty.kind != itRef:
-      return varMagicShapeDecline(n, magic, ctx)
-    let cell = freshSynth(ctx, "newCell")
-    preamble.add mkNewT(cell, ty)
-    writeBack(target, mkVar(cell), preamble, ctx)
-  else:
-    nil
+  dispatchMagic(msVarStmt):
+    case magic
+    of "Swap":
+      if n.len != 3: return varMagicShapeDecline(n, magic, ctx)
+      let ta = pureLvalueTarget(n[1])
+      let tb = pureLvalueTarget(n[2])
+      if ta == nil or tb == nil: return varMagicShapeDecline(n, magic, ctx)
+      let ty = classifyType(n[1]).ty
+      let a0 = freshSynth(ctx, "swapA")
+      preamble.add mkLet(a0, ty, parseExpr(n[1], preamble, ctx))
+      let b0 = freshSynth(ctx, "swapB")
+      preamble.add mkLet(b0, ty, parseExpr(n[2], preamble, ctx))
+      preamble.add writeBack(ta, mkVar(b0), preamble, ctx)
+      writeBack(tb, mkVar(a0), preamble, ctx)
+    of "WasMoved":
+      if n.len != 2: return varMagicShapeDecline(n, magic, ctx)
+      parseZeroWrite(n, magic, preamble, ctx)
+    of "SetLengthSeq", "SetLengthStr", "SetLengthSeqUninit":
+      parseSetLen(n, magic, preamble, ctx)
+    of "Asgn":
+      if n.len != 3: return varMagicShapeDecline(n, magic, ctx)
+      parseAsgn(nnkAsgn.newTree(unwrapHidden(n[1]), n[2]), nil, preamble, ctx)
+    of "Inc", "Dec":
+      if n[0].strVal in ["+=", "-="] and n.len == 3:
+        return parseStmtInner(nnkInfix.newTree(n[0], n[1], n[2]), preamble, ctx)
+      nil
+    of "New":
+      if n[0].strVal == "unsafeNew" and n.len == 3:
+        return parseUnsafeNew(n, preamble, ctx)
+      if n[0].strVal != "new" or n.len != 2 or
+         unwrapHidden(n[1]).kind == nnkSym:
+        return nil   # S8u's `new(x)` arm
+      let target = pureLvalueTarget(n[1])
+      let ty = classifyType(n[1]).ty
+      if target == nil or ty.kind != itRef:
+        return varMagicShapeDecline(n, magic, ctx)
+      let cell = freshSynth(ctx, "newCell")
+      preamble.add mkNewT(cell, ty)
+      writeBack(target, mkVar(cell), preamble, ctx)
+    else:
+      nil
+
 
 proc parseMoveExpr(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                    ctx: ParseCtx): IRExpr =
@@ -18294,13 +18221,17 @@ proc parseNewStringExpr(n: NimNode; preamble: var seq[IRStmt];
   ## and a by-value copy of its address-taken result can be placed. It was an
   ## opaque call: every path through it declined. nil for any other call.
   let magic = callMagic(n)
-  if n.len != 2 or magic notin ["NewString", "NewStringOfCap"]: return nil
-  let lenIR = parseNewSeqLen(n[1], n[0].strVal, preamble, ctx)
-  let tmp = freshSynth(ctx, "newStr")
-  preamble.add mkSetLenStmt(tmp, mkStrLit(""),
-    (if magic == "NewString": lenIR else: mkIntLit(0)), tString(), siteLoc(n),
-    fresh = true)
-  mkVar(tmp)
+  if n.len != 2: return nil
+  dispatchMagic(msNewString):
+    case magic
+    of "NewString", "NewStringOfCap":
+      let lenIR = parseNewSeqLen(n[1], n[0].strVal, preamble, ctx)
+      let tmp = freshSynth(ctx, "newStr")
+      preamble.add mkSetLenStmt(tmp, mkStrLit(""),
+        (if magic == "NewString": lenIR else: mkIntLit(0)), tString(),
+        siteLoc(n), fresh = true)
+      mkVar(tmp)
+    else: nil
 proc dottedFieldMutate(fieldNode: NimNode, op: DottedOp, args: seq[IRExpr],
                        preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt
   ## RFC-0005 S8bl fwd decl (defined below), for `parseTableForLoop`.
@@ -21631,9 +21562,9 @@ proc stubBody(body: NimNode): bool =
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil;
                           byRef: seq[ByRefSub] = @[];
-                          varMagic: Option[Admit[VarMagicModel]]): string =
+                          varMagic: Option[Admit[MagicModel]]): string =
   ## RFC-0016 ADM-1: `varMagic` is the magic axis's answer for this callee
-  ## at `vsProcRegister` (`calleeVarMagic`), `none` for a routine that is
+  ## at `msProcRegister` (`calleeVarMagic`), `none` for a routine that is
   ## not a system magic with a `var` parameter. An admission is the
   ## decision: a call whose magic the axis does not admit here is declined,
   ## never registered.
@@ -21747,10 +21678,19 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # names the magic for the rest.
   let magic = implMagic(impl)
   if magic.len > 0 and not hasBorrowPragma(impl) and stubBody(impl[6]):
-    return ctx.declineCallee(feUnsupportedOp,
+    # K4a-dispatch: the magic axis names the kind. A row refused or admitted
+    # only at an arm declines `feUnsupportedOp`, as before; a magic with no
+    # row (a user's `{.magic.}`) is `feUnadmitted`. A stub body is never
+    # walked, whatever the row says.
+    let adm = admitMagic(magic, msProcRegister)
+    let (kind, why) =
+      if adm.admitted: (some(feUnsupportedOp), "a stub body is not walked")
+      else: adm.decline
+    return ctx.declineCallee(kind.get(feUnadmitted),
       "the compiler magic `" & name & "` ({.magic: \"" & magic &
-      "\".}) has no symbolic model -- the call is degraded to sxUnknown " &
-      "(RFC-0005 S8bo)", "magic:" & name)
+      "\".}) has no symbolic model -- " & why & " -- the call is degraded " &
+      "to sxUnknown (RFC-0005 S8bo, " & $kind.get(feUnadmitted) & ")",
+      "magic:" & name)
   # Detect generic procs. In typed AST, the generic-params live in
   # impl[2] (untyped) or nested in impl[5] (typed). Either way, we
   # use the call's `getType` reads to derive the substitution.

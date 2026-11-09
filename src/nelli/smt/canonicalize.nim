@@ -281,8 +281,13 @@ const renderAsChoicesVersion* = "12"
   ##   signed 8 and 16 bit `+`, `-`, `*` and negation wrap (`(NI8)(a op b)`)
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
+  ## - RFC-0016 K4a-dispatch (294->295; taken from base 291, renumbered at
+  ##   landing): the magic call sites read `magicAxis`. A stub-bodied
+  ##   `{.magic.}` with no row declines `feUnadmitted` (was `feUnsupportedOp`)
+  ##   and its message carries the row's note; the `var`-parameter table is
+  ##   the magic axis. Every magic in `lib/` keeps its verdict and kind.
 
-const symexWalkerVersion* = "294"
+const symexWalkerVersion* = "295"
   ## RFC-0016 K3c (293->294): the pragma axis (`pragmaaxes`). A local,
   ## routine, parameter or type pragma is a row; a local or a callee's formal
   ## or result of a type carrying (or holding) `{.union.}`, `{.packed.}`,

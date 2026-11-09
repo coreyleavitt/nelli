@@ -1729,6 +1729,8 @@ task test, "Run the test suite":
             "tsymex_0016_k7_splitlines_unbounded",
             "tsymex_0016_k10aa_axis",
             "tsymex_0016_k10af_float",
+            "tsymex_0016_k10af_sites",
+            "tsymex_0016_k10af_sites_checksoff",
             "tsymex_0016_adm1_admission",
             "tsymex_0016_k4a_table",
             "tsymex_0016_k4a_dispatch",

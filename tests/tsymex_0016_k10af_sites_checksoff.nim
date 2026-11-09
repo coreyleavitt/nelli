@@ -1,0 +1,47 @@
+## RFC-0016 K10a-float follow-up, the arithmetic traps. Built with
+## `--overflowChecks:off` (its `.nim.cfg`): a signed `+`, `-` or `*` is
+## undefined on overflow. Each such op names its own source site, so two
+## overflowing ops in one SUT are two findings, not one collapsed under the
+## construct's name.
+import std/[unittest, strutils]
+import nelli
+import nelli/symex
+import nelli/smt/errorkind
+import ./s8cu_helpers
+
+proc sutTwo(a, b: int) =
+  let x = a + 1
+  let y = b * 2
+  if x == 5 and y == 6: symexTarget("hit")
+
+proc sutSecondOnly(a, b: int) =
+  var x = 0
+  if a > 0 and a < 100:
+    x = a + 1
+  let y = b - 1
+  if x == 5 and y == 6: symexTarget("hit")
+
+proc lineOf(site: string): int =
+  let parts = site.rsplit(':', 2)
+  parseInt(parts[^2])
+
+suite "K10a-float: one site per undefined arithmetic op":
+  test "version floor":
+    check parseInt(symexWalkerVersion) >= 294
+
+  test "two overflowing ops give two findings with distinct sites":
+    let r = symexFind(sutTwo, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 2
+    if r.undefined.len == 2:
+      check {lineOf(r.undefined[0].site), lineOf(r.undefined[1].site)} ==
+            {13, 14}
+      for u in r.undefined:
+        check u.kind == UbKind(ubSignedOverflow)
+
+  test "only the second can overflow: the one finding names it":
+    let r = symexFind(sutSecondOnly, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 1
+    if r.undefined.len == 1:
+      check lineOf(r.undefined[0].site) == 21

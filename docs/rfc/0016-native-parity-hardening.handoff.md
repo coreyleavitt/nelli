@@ -461,9 +461,16 @@
   deletes it). Precision change: `int(NaN) == low(int)` is no longer a
   reachable label (the halt does not claim a platform value); it is a
   `tUndefined` finding. A `range` target (`Natural(f)`) still raises through
-  `rangeDefectConds`. Site string is one per drain ("float -> int
-  conversion"), so two conversions in one SUT list as one finding.
-  Pins: `tests/tsymex_0016_k10af_float.nim`.
+  `rangeDefectConds`. Every undefined finding names its own source site:
+  the float -> int conversion carries `IRExpr.convSite` and the signed
+  `+ - * div mod` binop `bsite` (`file:line:col` from the parser, part of
+  the canonical key when set), `convFloatToIntBoundConds` holds `ConvBound`
+  (cond + site), and `lowerArithAt` sets `lowerOpSite` so the arithmetic
+  traps name their op ("signed ... overflow at file:l:c"); two conversions
+  or ops in one SUT are two findings. Compound-assignment and `inc`/`dec`
+  rebuilds carry no `bsite` yet (they keep the construct-only name).
+  Pins: `tests/tsymex_0016_k10af_float.nim`, `tsymex_0016_k10af_sites.nim`,
+  `tsymex_0016_k10af_sites_checksoff.nim`.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

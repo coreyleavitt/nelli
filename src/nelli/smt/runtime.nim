@@ -2014,7 +2014,13 @@ proc checkedEq*(ctx: Z3Context; a, b: RawZ3Ast): RawZ3Ast =
     return freshOfSort(ctx, ctx.checkErr Z3_mk_bool_sort(ctx.raw))
   ctx.checkErr Z3_mk_eq(ctx.raw, a, b)
 
-var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
+type ConvBound* = object
+  ## K10a-float. One `convFloatToIntBoundConds` deposit: the conversion's
+  ## in-range domain, and the source site that names its undefined side.
+  cond*: Z3Bool
+  site*: string
+
+var convFloatToIntBoundConds* {.threadvar.}: seq[ConvBound]
   ## Phase 15 CR-3/CR-4; RFC-0005 S8g. The in-range DOMAIN of each float ->
   ## int conversion lowered by `lower(iekConvFloatToInt)` (the operand's
   ## truncation fits the target type). The lowered value is
@@ -2159,6 +2165,14 @@ var uninitReadConds* {.threadvar.}: seq[Z3Bool]
   ## read tainted the whole path in-band. `syncUninitReadCond` appends to
   ## `WalkCtx.uninitReadConds` when in a walk. Reset alongside
   ## `arithTrapConds` at every reset site.
+
+var lowerOpSite* {.threadvar.}: string
+  ## K10a-float. The source site of the binop `lower` is lowering, set around
+  ## `lowerArith` so the traps it deposits name their own op ("" outside).
+
+proc opSite(construct: string): string =
+  ## The trap's site text: the construct, at its source position when known.
+  if lowerOpSite.len > 0: construct & " at " & lowerOpSite else: construct
 
 type ArithTrap* = object
   ## RFC-0016 W1-d1a. One `arithTrapConds` deposit: the trap predicate, and
@@ -2447,7 +2461,7 @@ proc syncClosureCallError*(info: SymexErrorInfo)
   ## (lowerClosureCall/applyClosureGround/lowerHofCall run in lower() which has
   ## no WalkCtx). Defined after `WalkCtx`.
 
-proc syncConvFloatToIntBoundCond*(cond: Z3Bool)
+proc syncConvFloatToIntBoundCond*(cond: ConvBound)
   ## CR-9 Stage 6 fwd-decl (Group-1). If `currentWalkCtxPtr != nil` (a walk
   ## is active), appends `cond` to `WalkCtx.convFloatToIntBoundConds`.
   ## No-op when no active walk (lower() can be called from probe paths).
@@ -8941,7 +8955,7 @@ proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop) =
   of dkDefined: return
   of dkUndefined:
     let tr = ArithTrap(cond: oc, ub: some(ans.ub),
-                       site: "signed `+`, `-` or `*` overflow")
+                       site: opSite("signed `+`, `-` or `*` overflow"))
     arithTrapConds.add tr
     syncArithTrapCond(tr)
   of dkDefect:
@@ -9019,7 +9033,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     let divTrap =
       if zeroAns.kind == dkUndefined:
         ArithTrap(cond: c, ub: some(zeroAns.ub),
-                  site: (if unsignedDiv:
+                  site: opSite(if unsignedDiv:
                            (if op == bDiv: "`x div 0'u`" else: "`x mod 0'u`")
                          else:
                            (if op == bDiv: "`x div 0`" else: "`x mod 0`")))
@@ -9106,8 +9120,8 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
         let tr =
           if lowAns.kind == dkUndefined:
             ArithTrap(cond: tc, ub: some(lowAns.ub),
-                      site: (if op == bMod: "`low(T) mod -1`"
-                             else: "`low(T) div -1`"))
+                      site: opSite(if op == bMod: "`low(T) mod -1`"
+                                   else: "`low(T) div -1`"))
           else:
             ArithTrap(cond: tc)
         arithTrapConds.add tr
@@ -9160,6 +9174,13 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     of bDiv: divBV(a, b)
     of bMod: modBV(a, b)
     else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
+
+proc lowerArithAt(a, b: SymVal, op: IRBinop, site: string): SymVal =
+  ## K10a-float. `lowerArith` with the op's source site in view, so the
+  ## undefined-behaviour traps it deposits name this op.
+  lowerOpSite = site
+  try: result = lowerArith(a, b, op)
+  finally: lowerOpSite = ""
 
 proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised comparison dispatch: exact copy of the
@@ -10947,7 +10968,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let r = ejectBase(lower(env, e.rhs, pp))
       when defined(symexTestInjectWalkerFault):
         injectShapeFault("term")   # RFC-0005 S8ce: both operands built
-      lowerArith(l, r, e.bop)
+      lowerArithAt(l, r, e.bop, e.bsite)
   of iekBorrowOp:
     # Phase 15 G5. A `{.borrow.}` operator on a `distinct T`: EJECT both operands
     # to their base SymVals (G4's `distinctBaseSym`, via `ejectBase`), apply the
@@ -16706,7 +16727,7 @@ type
                       ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
                       ## this field (all branches, forces sxUnknown). Threadvar
                       ## `currentClosureCallErrors` remains fallback.
-    convFloatToIntBoundConds: seq[Z3Bool]
+    convFloatToIntBoundConds: seq[ConvBound]
                       ## CR-9 Stage 6 Group-1 (convFloatToIntBoundConds
                       ## migration). LIVE accumulator for float→int domain-bound
                       ## constraints deposited by `lower(iekConvFloatToInt)`
@@ -17358,7 +17379,7 @@ proc syncClosureCallError*(info: SymexErrorInfo) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].closureCallErrors.add info
 
-proc syncConvFloatToIntBoundCond*(cond: Z3Bool) =
+proc syncConvFloatToIntBoundCond*(cond: ConvBound) =
   ## CR-9 Stage 6 Group-1 (convFloatToIntBoundConds migration). If
   ## `currentWalkCtxPtr != nil` (a walk is active), appends `cond` to
   ## `WalkCtx.convFloatToIntBoundConds` so the field is the LIVE store for
@@ -17482,7 +17503,8 @@ type
     pendingUb: set[UbKind]                    ## RFC-0016 W1-d3
     parseInt: seq[ParseIntRaise]              ## RFC-0005 S10
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
-    convBound, rangeDefect: seq[Z3Bool]
+    convBound: seq[ConvBound]
+    rangeDefect: seq[Z3Bool]
     arithTrap: seq[ArithTrap]                    ## RFC-0005 S8i
     uninitRead: seq[Z3Bool]                   ## RFC-0005 S8bv
     regexRaise: seq[string]                   ## RFC-0005 S8ay
@@ -19227,19 +19249,30 @@ proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
       c
   if conds.len == 0:
     return @[p]
-  var inDomain = conds[0]
-  for i in 1 ..< conds.len: inDomain = inDomain and conds[i]
+  var inDomain = conds[0].cond
+  for i in 1 ..< conds.len: inDomain = inDomain and conds[i].cond
   let cur = forkPath(p, p.pc, p.env)
-  let outside = not inDomain
   let convUb = convertDefinedness(defProfile()).ubOf
-  if convUb.isSome and guardLiteral(outside) != glFalse:
-    let unsat = guardLiteral(outside) != glTrue and
-      checkCapped(w.z3, pathRoots(cur, [outside]), w.settings,
-                  loopPruneRLimit(w.settings)).status == zsUnsat
-    if unsat:
-      logPrune(cur, [outside])
-    else:
-      haltUndefined(cur, convUb.get, outside, "float -> int conversion", w)
+  # One undefined side per conversion, each under its own site: the side
+  # of conversion `i` is reached when every earlier one is in range (they
+  # evaluate in order and an undefined one ends the path).
+  var before: seq[Z3Bool]
+  for c in conds:
+    let outside = not c.cond
+    if convUb.isSome and guardLiteral(outside) != glFalse:
+      let side = before & @[outside]
+      let unsat = guardLiteral(outside) != glTrue and
+        checkCapped(w.z3, pathRoots(cur, side), w.settings,
+                    loopPruneRLimit(w.settings)).status == zsUnsat
+      if unsat:
+        logPrune(cur, side)
+      else:
+        var sideCond = outside
+        for b in before: sideCond = b and sideCond
+        haltUndefined(cur, convUb.get, sideCond,
+                      (if c.site.len > 0: "float -> int conversion at " & c.site
+                       else: "float -> int conversion"), w)
+    before.add c.cond
   @[forkPath(cur, cur.pc & @[inDomain], cur.env)]
 
 template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCheck]];

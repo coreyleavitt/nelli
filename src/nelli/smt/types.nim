@@ -809,6 +809,9 @@ type
       convSigned*:  bool     ## RFC-0005 S8g, float->int only: the target
                              ## integer type's signedness (`uint8(f)` is
                              ## unsigned). Always true for int->float.
+      convSite*: string      ## K10a-float: `file:line:col` of the conversion
+                             ## (float->int only; "" for a built IR), the
+                             ## name of its undefined-behaviour finding
       convHasRange*: bool    ## RFC-0005 S8g, float->int only: the target is
       convLo*, convHi*: int64 ## a `range[convLo..convHi]` of the base
                              ## integer type (`Natural(f)`), whose check on
@@ -850,6 +853,9 @@ type
     of iekBinop:
       bop*: IRBinop
       lhs*, rhs*: IRExpr
+      bsite*: string      ## K10a-float: `file:line:col` of a signed `+`, `-`
+                          ## or `*` / `div` / `mod`, the name of its
+                          ## undefined-behaviour finding ("" when unknown)
     of iekUnop:
       uop*: IRUnop
       operand*: IRExpr
@@ -2997,11 +3003,13 @@ proc mkConvIntToFloat*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
   IRExpr(kind: iekConvIntToFloat, convOperand: e, convWidth: targetWidth,
          convSigned: true)
 proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64, signed = true,
-                       hasRange = false, lo = 0'i64, hi = 0'i64): IRExpr =
+                       hasRange = false, lo = 0'i64, hi = 0'i64,
+                       site = ""): IRExpr =
   ## Phase 15 F5; RFC-0005 S8g added the target's signedness, the narrow
   ## widths and a `range` target's bounds.
   IRExpr(kind: iekConvFloatToInt, convOperand: e, convWidth: targetWidth,
-         convSigned: signed, convHasRange: hasRange, convLo: lo, convHi: hi)
+         convSigned: signed, convHasRange: hasRange, convLo: lo, convHi: hi,
+         convSite: site)
 
 proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
                       tgtWidth: int, tgtSigned: bool,
@@ -3069,6 +3077,11 @@ proc mkGlobalVar*(name: string; ty: IRType; copy = false): IRExpr =
 
 proc mkBinop*(op: IRBinop, lhs, rhs: IRExpr): IRExpr =
   IRExpr(kind: iekBinop, bop: op, lhs: lhs, rhs: rhs)
+
+proc withSite*(e: IRExpr, site: string): IRExpr =
+  ## K10a-float: stamp a binop with its source site.
+  e.bsite = site
+  e
 
 proc mkUnop*(op: IRUnop, operand: IRExpr): IRExpr =
   IRExpr(kind: iekUnop, uop: op, operand: operand)

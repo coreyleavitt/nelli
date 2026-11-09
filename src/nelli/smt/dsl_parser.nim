@@ -388,7 +388,7 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekConvFloatToInt:
     newCall(bindSym"mkConvFloatToInt", emitExpr(e.convOperand), newLit(e.convWidth),
             newLit(e.convSigned), newLit(e.convHasRange), newLit(e.convLo),
-            newLit(e.convHi))
+            newLit(e.convHi), newLit(e.convSite))
   of iekConvIntWidth:
     newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
             newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
@@ -413,7 +413,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     else:
       newCall(bindSym"mkVar", newLit(e.vname))
   of iekBinop:
-    newCall(bindSym"mkBinop", emitBinop(e.bop), emitExpr(e.lhs), emitExpr(e.rhs))
+    let bn = newCall(bindSym"mkBinop", emitBinop(e.bop), emitExpr(e.lhs),
+                     emitExpr(e.rhs))
+    if e.bsite.len > 0: newCall(bindSym"withSite", bn, newLit(e.bsite))
+    else: bn
   of iekUnop:
     newCall(bindSym"mkUnop", emitUnop(e.uop), emitExpr(e.operand))
   of iekBorrowOp:   ## Phase 15 G5
@@ -1622,6 +1625,12 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   if body != nil: decl.add body
   result = mkBlock(decl)
   if body != nil: result.blkArith = scope
+
+proc srcSite(n: NimNode): string =
+  ## K10a-float: `file:line:col` of `n`, the name of an undefined-behaviour
+  ## finding's site.
+  let li = n.lineInfoObj
+  li.filename & ":" & $li.line & ":" & $li.column
 
 proc annotationViolation(ctx: ParseCtx; n: NimNode;
                          kind: AnnotationViolationKind; callee, msg: string) =
@@ -10939,7 +10948,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # RFC-0005 S8g: the target's own width and signedness (`int8(f)` was
       # lowered at width 64, `uint8(f)` as signed).
       mkConvFloatToInt(parseExpr(operand, preamble, ctx),
-                       intTyWidth(tgt), intTySigned(tgt))
+                       intTyWidth(tgt), intTySigned(tgt),
+                       site = srcSite(n))
     elif src in fltTyNames and classifyType(n[0]).ty.kind == itInt and
          classifyType(n[0]).range.hasRange:
       # RFC-0005 S8g: a `range` target (`Natural(f)`). Nim converts to the
@@ -10949,7 +10959,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let cls = classifyType(n[0])
       mkConvFloatToInt(parseExpr(operand, preamble, ctx),
                        cls.ty.width, cls.ty.signed,
-                       true, cls.range.lo, cls.range.hi)
+                       true, cls.range.lo, cls.range.hi, srcSite(n))
     elif not isIntLiteralNode(operand) and
          n.typeKind in {ntyRange, ntyEnum} and
          operand.typeKind in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
@@ -11630,7 +11640,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # above in the `if op in {bAnd, bOr}` block and never fall through here;
       # constraint 1 is satisfied structurally by this branch's exclusivity).
       let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (general infix); RFC-0005 S8ax order
-      mkBinop(op, l, r)
+      if op in {bAdd, bSub, bMul, bDiv, bMod}: withSite(mkBinop(op, l, r), srcSite(n))
+      else: mkBinop(op, l, r)
   of nnkPrefix:
     # RFC-0005 S8c: a user prefix operator (`-`/`not`/`$`/`@` on a user type)
     # is a routine call, not the builtin its spelling names.

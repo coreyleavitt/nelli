@@ -201,6 +201,16 @@ const mathRows: seq[StdlibRow] = block:
       "math.nim:925: converts through `x.UT` and `.T` (unsigned), whose range " &
       "checks the push turns off; the walker models range checks on only, so " &
       "the routine keeps declining"),
+    floatModelled("abs", "clears the sign bit (fp.abs), exact"),
+    floatModelled("min", "fp.min, exact"),
+    floatModelled("max", "fp.max, exact"),
+    floatModelled("isInf", "fp.isInfinite, exact"),
+    floatModelled("isFinite", "not NaN and not infinite, exact"),
+    floatModelled("isNormal", "fp.isNormal, exact"),
+    floatModelled("toFloat32", "a float64 -> float32 conversion, fp.to_fp in " &
+      "round-nearest-even (K2b); not a std/math routine, the lowering's name"),
+    floatModelled("toFloat64", "a float32 -> float64 conversion, fp.to_fp, " &
+      "exact (K2b); not a std/math routine, the lowering's name"),
     floatModelled("sqrt", "IEEE sqrt (fp.sqrt, RNE), exact"),
     floatModelled("floor", "roundToIntegral toward negative, exact"),
     floatModelled("ceil", "roundToIntegral toward positive, exact"),
@@ -227,6 +237,9 @@ const mathRows: seq[StdlibRow] = block:
   r.add floatDeclined(["log", "cot", "sec", "csc", "coth", "sech", "csch",
       "arccot", "arcsec", "arccsc", "arccoth", "arcsech", "arccsch"],
     "a reciprocal or composition of libm functions the walker does not model")
+  r.add floatDeclined(["nextafter"],
+    "no SMT-LIB FP-theory primitive for the next representable value " &
+    "(a documented Z3 bound)")
   r.add floatDeclined(["frexp", "splitDecimal", "degToRad", "radToDeg",
       "almostEqual", "mod"],
     "a float-first call is lowered by name (`lowerMathCall`), which has no " &
@@ -263,12 +276,23 @@ func hasStdlibRow*(key: string): bool =
   ## `key` is an explicit row of the axis (the ledger's rows are not).
   stdlibAxis.hasRow(key)
 
+func floatCallKey*(op: string; nargs: int): string =
+  ## The row of a float-first `std/math` call: `round(x, places)` is a facet.
+  if op == "round" and nargs == 2: "math.round/places" else: "math." & op
+
+proc admitFloatCall*(op: string; nargs: int): Admit[StdlibBody] =
+  ## ADM-IR. The stdlib-body axis at `ssFloatCall` for `op`: the proof
+  ## `mkMathCall` takes. A name with no row is a decline of the kind a
+  ## declined float row carries (`feUnsupportedOpAborted`), as the lowering
+  ## reported it before the rows covered every name it models.
+  admitStdlibBody(floatCallKey(op, nargs), ssFloatCall,
+                  absent = some(feUnsupportedOpAborted))
+
 proc floatCallDecline*(op: string; nargs: int): string =
-  ## PRC-09. Why `lowerMathCall` declines a float-first call of `std/math`'s
-  ## `op`: the reason of its row (naming the cell), or "" when it has no row
-  ## or the row is admitted at `ssFloatCall`. `round(x, places)` is a facet.
-  let key = if op == "round" and nargs == 2: "math.round/places"
-            else: "math." & op
+  ## PRC-09. Why a float-first call of `std/math`'s `op` declines: the reason
+  ## of its row (naming the cell), or "" when it is admitted at `ssFloatCall`
+  ## or has no row (`mod` on floats asks this from `lower`).
+  let key = floatCallKey(op, nargs)
   if stdlibAxis.hasRow(key):
     let adm = admitStdlibBody(key, ssFloatCall)
     if not adm.admitted: return adm.decline[1]

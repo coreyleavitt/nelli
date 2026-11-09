@@ -603,6 +603,18 @@ var dispatchedSites {.compileTime.}: set[MagicSite]
 
 proc dispatchedMagicSites*(): set[MagicSite] {.compileTime.} = dispatchedSites
 
+template lowerMagic*(proof: Admit[MagicModel] | Admit[StdlibBody];
+                     body: untyped): untyped =
+  ## RFC-0016 ADM-IR (section 8.1). The one place a magic arm's lowering runs:
+  ## `dispatchMagic` wraps every `of` arm's body in it, with the proof the
+  ## arm's row gives at the site (`admitMagic`, or `admitStdlibBody` for an
+  ## unsigned operator). The lowering does not run on a declined proof, so a
+  ## magic's node is built only for a magic the table admits; another axis's
+  ## proof is a type error. The census in `tests/tsymex_0016_admir.nim`
+  ## counts the magic arms outside a dispatch.
+  doAssert proof.admitted, "lowerMagic: " & proof.decline[1]
+  body
+
 macro dispatchMagic*(site: static MagicSite; body: untyped): untyped =
   ## RFC-0016 K4a-dispatch (section 8.1). `body` is the site's `case` over a
   ## magic's name. The expansion is that `case`, after the table has been
@@ -657,5 +669,20 @@ macro dispatchMagic*(site: static MagicSite; body: untyped): untyped =
     if k notin arms.mapIt(unsignedOpKey(it)):
       error("dispatchMagic: the stdlib row `" & k & "` is admitted at " &
             $stdlibSite & " and has no arm", body)
+  # ADM-IR: each arm's lowering runs under the proof of its row at the site.
+  for i in 1 ..< cs.len:
+    let br = cs[i]
+    if br.kind == nnkElse: continue
+    var arm = br[^1]
+    for j in countdown(br.len - 2, 0):
+      let nm = br[j].strVal
+      let proof =
+        if hasStd and stdlibAxis.hasRow(unsignedOpKey(nm)):
+          newCall(bindSym"admitStdlibBody", newLit(unsignedOpKey(nm)),
+                  newLit(stdlibSite))
+        else:
+          newCall(bindSym"admitMagic", newLit(nm), newLit(site))
+      arm = newCall(bindSym"lowerMagic", proof, arm)
+    br[^1] = arm
   dispatchedSites.incl site
   result = cs

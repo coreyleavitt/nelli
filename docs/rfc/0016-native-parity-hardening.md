@@ -1102,6 +1102,23 @@ Rules the types carry, not the reviewer:
   `mkParam(copy: Admit[CopyModel], …)`). A parser arm that skips the table
   does not type-check. The census (K2) is then needed only on the construct
   axis, where no table exists.
+
+  (2026-11-09, ADM-IR) What shipped differs from the examples above, and the
+  code is the reference: the type x memory-op node is
+  `mkZeroValue(zero: Admit[TypeOpModel]; ty)`; the opaque-call node takes an
+  `OpaqueScan` (`mkOpaqueCall(..., scan, ...)`), not an `Admit`, because the
+  defect scan unions many rows (definedness and magic defect rows) and the
+  scan's fields are private to `definedness.nim`, so a kind enters only through
+  an admitted row; `mkMathCall(math: Admit[StdlibBody]; op, args)`;
+  `mkArithBlock(proof: ArithScopeProof; stmts)`, with the proof constructible
+  from an admitted pragma row, an admitted stdlib row, or the build's own
+  unchecked arithmetic (`asBuild` has no row); and a magic has no node of its
+  own (`mkMagicCall` was never needed: a magic lowers to ordinary nodes), so
+  `lowerMagic(proof, body)` is the one helper `dispatchMagic` runs every arm
+  under, with a census of `of "<magic>"` arms outside a dispatch. PCRE is the
+  one axis enforced at its runtime consumer: it has no IR node (a pattern is a
+  string consumed at walk time), so `admitPcreLib` gates the engine where it is
+  loaded.
 - **Absent is a decline.** A string-keyed axis (magics, pragmas, stdlib
   bodies) answers not-admitted with `feUnadmitted` (or the axis's own absent
   kind, `psUnverifiedLib` for PCRE) for a key it has no row for. An

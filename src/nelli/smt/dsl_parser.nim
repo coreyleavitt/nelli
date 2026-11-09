@@ -400,7 +400,9 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekMathCall:
     var argLit = newTree(nnkBracket)
     for a in e.mathArgs: argLit.add emitExpr(a)
-    newCall(bindSym"mkMathCall", newLit(e.mathOp), prefix(argLit, "@"))
+    newCall(bindSym"mkMathCall",
+            newCall(bindSym"admitFloatCall", newLit(e.mathOp), newLit(e.mathArgs.len)),
+            newLit(e.mathOp), prefix(argLit, "@"))   # ADM-IR: the row, re-asked
   of iekBoolLit:
     newCall(bindSym"mkBoolLit", newLit(e.bval))
   of iekVar:
@@ -842,7 +844,8 @@ proc emitStmt*(s: IRStmt): NimNode =
     if s.blkLabel.len > 0:   # RFC-0005 S8m: a break target
       newCall(bindSym"mkLabelledBlock", newLit(s.blkLabel), prefix(seqLit, "@"))
     elif s.blkArith != asInherit:   # RFC-0016 W1-d2c: a routine body's arithmetic
-      newCall(bindSym"mkArithBlock", newLit(s.blkArith), prefix(seqLit, "@"))
+      newCall(bindSym"mkArithBlock", newCall(bindSym"replayArith", newLit(s.blkArith)),
+              prefix(seqLit, "@"))   # ADM-IR: the stamp, replayed
     else:
       newCall(bindSym"mkBlock", prefix(seqLit, "@"))
   of isIf:
@@ -881,17 +884,18 @@ proc emitStmt*(s: IRStmt): NimNode =
       newCall(bindSym"mkOpaqueCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
+              # RFC-0016 K10b / ADM-IR, same trap: the scan's answer
+              # (`opaqueDefects`, S8be, and `opaqueUndefined`) round-trips as
+              # the defect names and a bit mask (`ubSetOf`/`ubMaskOf`); a
+              # `set[UbKind]` literal does not.
+              newCall(bindSym"replayScan", newLit(s.opaqueDefects),
+                      newLit(ubMaskOf(s.opaqueUndefined))),
               newLit(s.opaqueInert),
               newLit(s.opaqueHavoc),   ## RFC-0005 S8as, same trap
               emitIRTypeSeq(s.opaqueHeapTys),   ## RFC-0005 S8ax, same trap
               newLit(s.opaqueHeapAll),
               newLit(s.opaqueRaises),
-              newLit(s.opaqueDefects),   ## RFC-0005 S8be
-              newLit(s.opaqueWhy),
-              # RFC-0016 K10b, same trap: the gate's answer round-trips as
-              # a bit mask (`ubSetOf`/`ubMaskOf`); a `set[UbKind]` literal
-              # does not.
-              newCall(bindSym"ubSetOf", newLit(ubMaskOf(s.opaqueUndefined))))
+              newLit(s.opaqueWhy))
     else:
       # Round-6 B5: `retIntOffsetPositions` MUST round-trip through this
       # NimNode-literal reconstruction (the generated proc rebuilds the IR
@@ -1515,11 +1519,19 @@ proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
   ## Opens the routine's arithmetic scope for its parse.
   ctx.arithScopes.add arithScopeFor(c, ctx.currentArith, inherit)
 
-func arithStamp(c: RoutineChecks; inherit: bool): ArithScope =
+func arithStamp(c: RoutineChecks; inherit: bool): Option[ArithScopeProof] =
   ## The IR stamp of a routine body: `arithScopeFor`'s answer, but only where a
-  ## claim is made (a checks-off build, not an `inherit` routine).
-  if (not buildWraps() and not c.overflowModelled) or inherit: asInherit
-  else: arithScopeFor(c, asBuild, false)
+  ## claim is made (a checks-off build, not an `inherit` routine). RFC-0016
+  ## ADM-IR: the stamp is a proof of the axis that made the claim -- the
+  ## pragma row for a `push overflowChecks: on`, the stdlib row for a body
+  ## whose overflow delta is modelled, the build for its own arithmetic.
+  if (not buildWraps() and not c.overflowModelled) or inherit: return none(ArithScopeProof)
+  case arithScopeFor(c, asBuild, false)
+  of asChecked:
+    some(arithFromPragma(admitPragma(ppRoutine, "overflowChecks", psRoutineDecl)))
+  of asUnchecked: some(arithFromStdlib(c.overflowRow))
+  of asBuild: some(arithFromBuild())
+  of asInherit: none(ArithScopeProof)
 
 const nelliStdlibLedger {.strdefine.} = ""
   ## RFC-0016 K4c. With `-d:nelliStdlibLedger=<file>`, the parser appends the
@@ -1561,6 +1573,7 @@ proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
   var ex = adm.payload.exercises
   c.checks = (c.checks * ex) + (c.checks * defaultOff)
   c.overflowModelled = coOverflow in c.checks
+  if c.overflowModelled: c.overflowRow = adm   # ADM-IR: the stamp's proof
 proc noaliasWithPeers(impl: NimNode): seq[string] =
   ## RFC-0016 K10a-axis. The names of the `{.noalias.}` parameters of the
   ## routine `impl` when another parameter is pointer-like too (`ptr`, `ref`,
@@ -1594,9 +1607,9 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # build's (unchecked), or `OverflowDefect`-raising for one read as pushed
   # `overflowChecks: on`. A checks-on build needs no stamp (nothing to override
   # but the `off` push, which declines below).
-  let scope = arithStamp(c, inherit)
+  let stamp = arithStamp(c, inherit)
   let restrictParams = noaliasWithPeers(impl)
-  if c.checks == {} and scope == asInherit and c.unadmitted.len == 0 and
+  if c.checks == {} and stamp.isNone and c.unadmitted.len == 0 and
      restrictParams.len == 0:
     return body
   let where = routinePlace(impl)
@@ -1635,8 +1648,8 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
     decl.add ctx.declineMarker(c.unadmittedKind, where & ": " & c.unadmitted &
       " -- path degraded to sxUnknown")
   if body != nil: decl.add body
-  result = mkBlock(decl)
-  if body != nil: result.blkArith = scope
+  result = if body != nil and stamp.isSome: mkArithBlock(stamp.get, decl)
+           else: mkBlock(decl)
 
 proc srcSite(n: NimNode): string =
   ## K10a-float: `file:line:col` of `n`, the name of an undefined-behaviour
@@ -4388,11 +4401,10 @@ const unsignedDivMagics = ["DivU", "ModU"]
   ## under the gate they answer through the definedness axis's
   ## `div/zeroDivisorUnsigned` row.
 
-proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
+proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
                        seen: var seq[NimNode]; depth: int; ctx: ParseCtx;
-                       owner: NimNode; memo: var FloatCheckMemo;
-                       undef: var set[UbKind]) =
-  ## RFC-0005 S8be. See `opaqueDefectTypes`. `owner` is the routine
+                       owner: NimNode; memo: var FloatCheckMemo) =
+  ## RFC-0005 S8be. See `opaqueDefectScan`. `owner` is the routine
   ## definition whose body `n` is part of.
   ##
   ## RFC-0016 K10b (section 9.1 item 3): the scan is parameterised by its
@@ -4412,13 +4424,13 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
   ## in `acc`) is `ubTailUnverified` too. Both accumulators are filled in one
   ## pass; the gate decides at run time which it reads.
   template add(t: string) =
-    if t notin acc: acc.add t
-  template addUb(k: UbKind) =
-    undef.incl k
+    scan.noteDefect t
+  template addUb(a: Admit[DefRule]; p: DefProfile) =
+    scan.noteUndefined a, p
   template addUnreadable() =
     add anyDefect
-    addUb ubOf(opaqueBodyDefinedness(dpChecked)).get
-  if n == nil or anyDefect in acc and acc.len > 12: return
+    addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+  if n == nil or anyDefect in scan.defectNames and scan.defectNames.len > 12: return
   if isRoutineDefNode(n): return   # a routine declared here is not run here
   case n.kind
   of nnkBracketExpr:
@@ -4437,13 +4449,13 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
         add "IndexDefect"
       # The index's hidden conversion to the array's range is the index
       # check itself (`IndexDefect`), not a `RangeDefect`.
-      scanOpaqueDefects(n[0], acc, seen, depth, ctx, owner, memo, undef)
-      scanOpaqueDefects(ix, acc, seen, depth, ctx, owner, memo, undef)
+      scanOpaqueDefects(n[0], scan, seen, depth, ctx, owner, memo)
+      scanOpaqueDefects(ix, scan, seen, depth, ctx, owner, memo)
     else:
-      for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx, owner, memo, undef)
+      for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
   of nnkCheckedFieldExpr:
     add "FieldDefect"
-    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx, owner, memo, undef)
+    for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
   of nnkConv, nnkHiddenStdConv, nnkHiddenSubConv:
     if n.len >= 2:
       let src = n[^1]
@@ -4462,15 +4474,15 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
          n.typeKind in {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange,
                         ntyBool} and
          src.typeKind in {ntyFloat .. ntyFloat128}:
-        addUb ubOf(convertDefinedness(ocFloatToInt, dpChecked)).get
-      scanOpaqueDefects(src, acc, seen, depth, ctx, owner, memo, undef)
+        addUb admitDefined(aoConvert, ocFloatToInt, dsConvert), dpChecked
+      scanOpaqueDefects(src, scan, seen, depth, ctx, owner, memo)
   of nnkRaiseStmt:
     if n.len == 0 or n[0].kind == nnkEmpty:
       addUnreadable()   # a re-raise of what the arm caught
     else:
       let d = typeIsDefect(n[0].getTypeInst, ctx)
       if d.len > 0: add d
-      scanOpaqueDefects(n[0], acc, seen, depth, ctx, owner, memo, undef)
+      scanOpaqueDefects(n[0], scan, seen, depth, ctx, owner, memo)
   of nnkCall, nnkInfix, nnkPrefix, nnkPostfix, nnkCommand, nnkCallStrLit,
      nnkHiddenCallConv:
     let f = n[0]
@@ -4488,31 +4500,35 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
         # take carries `feOpaqueEffectHavoc` and its replay refutes a hit.
         let overflowOn = owner == nil or
                          coOverflow in ownerChecksOn(owner, memo)
-        if admitMagic(magic, msDefOverflow).admitted:
-          add "OverflowDefect"
+        let defOverflow = admitMagic(magic, msDefOverflow)
+        if defOverflow.admitted:
+          scan.noteMagicDefect defOverflow, "OverflowDefect"
           if not overflowOn:
-            addUb ubOf(definedness(aoAdd, ocSignedWide, dpUnchecked)).get
-        if admitMagic(magic, msDefDivZero).admitted:
-          add "DivByZeroDefect"
+            addUb admitDefined(aoAdd, ocSignedWide, dsArith), dpUnchecked
+        let defDivZero = admitMagic(magic, msDefDivZero)
+        if defDivZero.admitted:
+          scan.noteMagicDefect defDivZero, "DivByZeroDefect"
           if not overflowOn:
-            addUb ubOf(definedness(aoDiv, ocZeroDivisorSigned, dpUnchecked)).get
+            addUb admitDefined(aoDiv, ocZeroDivisorSigned, dsArith), dpUnchecked
           if magic.startsWith("Mod"):
-            addUb ubOf(definedness(aoMod, ocLowByMinusOneWide, dpChecked)).get
+            addUb admitDefined(aoMod, ocLowByMinusOneWide, dsArith), dpChecked
           elif not overflowOn:
-            addUb ubOf(definedness(aoDiv, ocLowByMinusOneWide, dpUnchecked)).get
+            addUb admitDefined(aoDiv, ocLowByMinusOneWide, dsArith), dpUnchecked
         if magic in unsignedDivMagics:
-          addUb ubOf(definedness(aoDiv, ocZeroDivisorUnsigned, dpChecked)).get
+          addUb admitDefined(aoDiv, ocZeroDivisorUnsigned, dsArith), dpChecked
         # RFC-0005 W3 (WA-4): float arithmetic raises under the float
         # checks, which are off by default; on where the routine whose body
         # holds the operation was compiled with them (`floatChecksOn`).
-        if admitMagic(magic, msDefFloat).admitted and owner != nil:
+        let defFloat = admitMagic(magic, msDefFloat)
+        if defFloat.admitted and owner != nil:
           let on = floatChecksOn(owner, memo)
-          if coNan in on: add "FloatInvalidOpDefect"
-          if coInf in on: add "FloatOverflowDefect"
-        if admitMagic(magic, msDefRange).admitted:
+          if coNan in on: scan.noteMagicDefect defFloat, "FloatInvalidOpDefect"
+          if coInf in on: scan.noteMagicDefect defFloat, "FloatOverflowDefect"
+        let defRange = admitMagic(magic, msDefRange)
+        if defRange.admitted:
           if magic == "Chr" or n.len > 1 and
              n[1].typeKind in {ntyEnum, ntyRange, ntyChar, ntyVar}:
-            add "RangeDefect"
+            scan.noteMagicDefect defRange, "RangeDefect"
       elif fDef.kind == nnkMethodDef:
         addUnreadable()   # dispatched: any override may run
       elif not containsSym(seen, f):
@@ -4520,24 +4536,23 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
         # A converter's or iterator's body is scanned like a proc's.
         if fDef.len > 6 and fDef[6].kind != nnkEmpty:
           if depth >= maxDefectScanDepth: addUnreadable()
-          else: scanOpaqueDefects(fDef[6], acc, seen, depth + 1, ctx,
-                                  fDef, memo, undef)
+          else: scanOpaqueDefects(fDef[6], scan, seen, depth + 1, ctx,
+                                  fDef, memo)
         else:
           # No body: foreign code, which raises no Nim exception (`acc`).
           # RFC-0016 K10b: and may do anything, so the gate's answer is "may
           # be undefined" (row `call/opaqueBody`).
-          addUb ubOf(opaqueBodyDefinedness(dpChecked)).get
+          addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
     elif f.kind != nnkSym or f.symKind notin {nskTemplate, nskMacro}:
       # A closure or a routine-valued variable: any code at all.
       if f.typeKind in {ntyProc, ntyVar} or f.kind != nnkSym:
         addUnreadable()
     for i in 1 ..< n.len:
-      scanOpaqueDefects(n[i], acc, seen, depth, ctx, owner, memo, undef)
+      scanOpaqueDefects(n[i], scan, seen, depth, ctx, owner, memo)
   else:
-    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx, owner, memo, undef)
+    for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
 
-proc opaqueDefectTypes(calleeSym: NimNode; ctx: ParseCtx;
-                       undef: var set[UbKind]): seq[string] =
+proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
   ## RFC-0005 S8be. The `Defect` types an inert opaque call may raise, which
   ## no `raises` list tracks: an index (`IndexDefect`), a checked integer
   ## operation (`OverflowDefect`, `DivByZeroDefect`), a range-checked
@@ -4567,9 +4582,9 @@ proc opaqueDefectTypes(calleeSym: NimNode; ctx: ParseCtx;
   var memo: FloatCheckMemo
   let impl = resolveRoutineImpl(calleeSym)
   if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty:
-    undef.incl ubOf(opaqueBodyDefinedness(dpChecked)).get
+    result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
     return
-  scanOpaqueDefects(impl[6], result, seen, 0, ctx, impl, memo, undef)
+  scanOpaqueDefects(impl[6], result, seen, 0, ctx, impl, memo)
 proc hasVarFormal(impl: NimNode): bool =
   ## RFC-0005 S8bl (item 1). `impl` declares a `var` parameter.
   if impl == nil or impl.kind notin walkableRoutineKinds: return false
@@ -5904,7 +5919,7 @@ proc convertFloatWidth(n, operand: NimNode, preamble: var seq[IRStmt],
   ## other.
   let op = if fltWidthOfKind(n.getTypeInst.typeKind) == 32: "toFloat32"
            else: "toFloat64"
-  mkMathCall(op, @[parseExpr(operand, preamble, ctx)])
+  mkMathCall(admitFloatCall(op, 1), op, @[parseExpr(operand, preamble, ctx)])
 
 proc isFloatWidthChange(operand, conv: NimNode): bool =
   ## RFC-0016 W1-e. Both sides are builtin floats of different widths.
@@ -10376,7 +10391,7 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     # this arm binds a result (`synth`), so clause (a) of the inertness
     # predicate fails by construction; `isInertOpaqueCall` is a
     # statement-position-only check and is deliberately not consulted here.
-    preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
+    preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty, unscanned)
     return mkVar(synth)
   # Phase 15 Cluster C (C1, ADR-0009 D6). A call THROUGH a proc-valued
   # VARIABLE (a local/param of proc type), distinct from a normal named-proc
@@ -13204,7 +13219,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             var mArgs: seq[IRExpr]
             for i in 1 ..< n.len:
               mArgs.add parseExpr(n[i], preamble, ctx)
-            return mkMathCall(cn, mArgs)
+            # RFC-0016 ADM-IR: the node needs the stdlib row's proof, so a
+            # declined or absent row is declined here, at parse time, with
+            # the row's kind and reason (it names its cell).
+            let adm = admitFloatCall(cn, mArgs.len)
+            if not adm.admitted:
+              let (dk, why) = adm.decline
+              let kind = dk.get(feUnsupportedOpAborted)
+              preamble.add ctx.declineAtSite(kind,
+                "math." & cn & " is not modeled by the symex engine -- " & why, why)
+              let dummy = zeroValueForType(classifyType(n).ty)
+              return (if dummy != nil: dummy else: mkIntLit(0))
+            return mkMathCall(adm, cn, mArgs)
     # A7 (ADR-0017 Path B): `ord(r)` where `r` classifies as tInt (Rune → tInt).
     # `ord` is a magic intrinsic with no parseable body; for a type already
     # classified to tInt (e.g. Rune after A7 intercept), `ord` is the identity
@@ -17673,7 +17699,7 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     # RFC-0005 W3 (WA-5): each argument read where Nim reads it, as the
     # expression-position arm does (`parseOrderedArgs`).
     let argIRs = parseOrderedArgs(n, 1, preamble, ctx)
-    mkOpaqueCall(calleeName, "", argIRs, tBool(), false)
+    mkOpaqueCall(calleeName, "", argIRs, tBool(), unscanned, false)
   elif (m.kind == smkOpaqueEffectful and not userCallee) or
        hasSymexOpaquePragma(calleeSym) or isBodilessForeign(calleeSym):
     # RFC-0005 S8c: the name catalog is stdlib names; a same-named user
@@ -17699,15 +17725,15 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     let catalogued = m.kind == smkOpaqueEffectful and not userCallee
     var inert = if catalogued: isInertOpaqueCall(n) else: true
     var eff: OpaqueEffects
-    var raises, defects: seq[string]
-    var undefined: set[UbKind]   # RFC-0016 K10b: the gate's answer
+    var raises: seq[string]
+    var scan = unscanned   # RFC-0016 K10b / ADM-IR: the gate's answer
     if not catalogued:
       eff = opaqueWriteSummary(calleeSym)
       opaqueArgEffects(n, calleeSym, eff)
       inert = eff.inert
       if inert:
         raises = opaqueRaiseTypes(calleeSym, ctx)
-        defects = opaqueDefectTypes(calleeSym, ctx, undefined)   # RFC-0005 S8be
+        scan = opaqueDefectScan(calleeSym, ctx)   # RFC-0005 S8be
     var heapTys: seq[IRType]
     for t in eff.heapTys:
       let it = classifyType(t).ty
@@ -17721,9 +17747,8 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     # does. A plain `parseExpr` loop ran a later argument's hoisted call
     # first: `opq(v div b, bump(b))` divided by the bumped `b`.
     let argIRs = parseOrderedArgs(n, 1, preamble, ctx)
-    mkOpaqueCall(calleeName, "", argIRs, tBool(), inert, eff.havoc,
-                 heapTys, eff.heapAll, raises, defects, eff.why,
-                 undefined = undefined)
+    mkOpaqueCall(calleeName, "", argIRs, tBool(), scan, inert, eff.havoc,
+                 heapTys, eff.heapAll, raises, eff.why)
   else:
     userOrMethodCallStmt(n, calleeSym, preamble, ctx)   ## RFC-0005 S8bn
 

@@ -126,6 +126,9 @@ import std/unittest
 import nelli/smt/types
 import nelli/smt/dsl_parser
 import nelli/smt/typeaxes
+import nelli/smt/definedness
+import nelli/smt/magic_rows
+import nelli/smt/stdlib_rows
 
 # ---------------------------------------------------------------------------
 # Round-trip macros. `static[T]` forces the compiler to evaluate the
@@ -609,7 +612,8 @@ proc sConvIntToFloat(): IRExpr = mkConvIntToFloat(mkIntLit(9), 32)
 proc sConvFloatToInt(): IRExpr = mkConvFloatToInt(mkFloatLit(9.5, 64), 32)
 proc sConvIntWidth(): IRExpr = mkConvIntWidth(mkVar("w"), 8, true, 64, false)
 proc sConvIntReinterpret(): IRExpr = mkConvIntReinterpret(mkVar("w2"), 32, false)
-proc sMathCall(): IRExpr = mkMathCall("sentinelMathOp", @[mkIntLit(1), mkIntLit(2)])
+proc sMathCall(): IRExpr =
+  mkMathCall(admitFloatCall("copySign", 2), "copySign", @[mkIntLit(1), mkIntLit(2)])
 proc sBoolLit(): IRExpr = mkBoolLit(true)
 proc sVar(): IRExpr = mkVar("sentinelVarName")
 proc sBinop(): IRExpr = mkBinop(bAdd, mkIntLit(11), mkVar("sentinelBinopVar"))
@@ -922,7 +926,11 @@ proc sCallWithOffsets(): IRStmt =
          viewAliases = @[(viewArg: 1, tabArg: 0, keyName: "sentKey",
                          tabField: "sentField")])
 proc sOpaqueCall(): IRStmt =
-  mkOpaqueCall("sentinelOpaque", "retOp", @[mkStrLit("s")], tString())
+  var scan: OpaqueScan   # ADM-IR: the proofs ride the round trip
+  scan.noteUndefined(admitDefined(aoAdd, ocSignedWide, dsArith), dpUnchecked)
+  scan.noteMagicDefect(admitMagic("AddI", msDefOverflow), "OverflowDefect")
+  scan.noteDefect("IndexDefect")
+  mkOpaqueCall("sentinelOpaque", "retOp", @[mkStrLit("s")], tString(), scan)
 proc sVariantFieldStmt(): IRStmt =
   mkVariantFieldStmt("sentVF", mkVar("obj"), "radius", tInt(64, true), @[0, 2, 5])
 proc sVariantReassign(): IRStmt =

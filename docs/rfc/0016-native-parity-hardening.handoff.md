@@ -673,14 +673,7 @@
   ty)` asserts an admitted `fieldDefault` row with `zmZeroValue`; the payload
   types moved to `types.nim` (typeaxes re-exports), `admitZeroValue(kind)` is
   the verb, the emitter re-asks it. Census: zero raw `iekZeroValue` builds
-  outside `types.nim`. Test `tsymex_0016_admir`. REMAINING (no keyed IR
-  constructor exists, so each needs an IR-shape decision): magics build
-  ordinary nodes (`mkBinop` ...), so `mkMagicCall` is a new node; definedness
-  and the magic defect scan reach the IR as `mkOpaqueCall(undefined:
-  set[UbKind], defects: seq[string])`; the stdlib axis stamps
-  `mkArithBlock(asUnchecked)` and routes float calls to `mkMathCall(op)`, which
-  the walker declines, not the parser; pragmas stamp `mkArithBlock(asChecked)`.
-  `docs/migration/0.10.0.md` updated.
+  outside `types.nim`. Test `tsymex_0016_admir`. ADM-IR remaining axes (walker 303): `mkOpaqueCall` takes an `OpaqueScan` (definedness and magic-defect rows, via `noteUndefined` / `noteMagicDefect`; `unscanned` for the three arms that never scan); `mkMathCall(Admit[StdlibBody]; ...)` with the parser declining a declined or absent float row at parse time (rows added for abs/min/max/isInf/isFinite/isNormal/toFloat32/toFloat64, nextafter declined; absent declines `feUnsupportedOpAborted`; this is why the walker bumps: such a program's IR carries a marker, not an `iekMathCall`); `mkArithBlock(ArithScopeProof; ...)` (pragma row, stdlib row, or the build); magics: `lowerMagic(proof, body)` wraps every `dispatchMagic` arm, census of `of "<magic>"` arms outside a dispatch is zero. NOT covered by a gate: the expression-form magic reads (`routineMagic(x) == "IsNil"`, the to-string group, `Move`, `SetLengthSeqUninit`, `ProcCall`) still build nodes without `lowerMagic`. PCRE documented as enforced at its runtime consumer. `docs/migration/0.10.0.md` updated.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

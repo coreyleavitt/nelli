@@ -314,8 +314,14 @@ const renderAsChoicesVersion* = "12"
   ##   settings string and no run taints `feCheckOption` for a setting that
   ##   disagrees with the build. Walker semantics are unchanged for a default
   ##   settings value; the number moves because the key's shape did.
+  ## - RFC-0016 ADM-IR (302->303): a float-first `std/math` call whose row is
+  ##   declined or absent is declined by the parser, at the call, with a
+  ##   marker carrying the row's kind and reason (`feUnsupportedOpAborted` for
+  ##   a libm routine), where the walker used to abort the whole walk at the
+  ##   lowering. The canonical IR of such a program carries the marker and not
+  ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "302"
+const symexWalkerVersion* = "303"
   ## RFC-0016 K10b (300->301): whole-run definedness (section 9.1 item 3). A
   ## trusted `sxSat` needs the whole run defined: under
   ## `SymexSettings.wholeRunDefinedness` (on by default, keyed) the winner is

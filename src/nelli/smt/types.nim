@@ -16,6 +16,11 @@ import ./budget      ## review R1-17: `ResourceBudget`, a Z3-free leaf
 export budget
 import ./buildprofile   ## RFC-0016 W1-d2: the arithmetic checks derive from the build
 export buildprofile
+import ./definedness   ## RFC-0016 ADM-IR: `OpaqueScan`, the proof `mkOpaqueCall` takes
+export OpaqueScan, unscanned, undefinedKinds, defectNames, ubMaskOf, ubSetOf,
+       replayScan
+import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`, the proof `mkMathCall` / `mkArithBlock` take
+import ./pragmaaxes    ## RFC-0016 ADM-IR: `PragmaModel`, the proof `mkArithBlock` takes
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:
@@ -3063,7 +3068,15 @@ proc mkConvIntReinterpret*(e: IRExpr, width: int, tgtSigned: bool): IRExpr =
   IRExpr(kind: iekConvIntReinterpret, cirOperand: e, cirWidth: width,
          cirTgtSigned: tgtSigned)
 
-proc mkMathCall*(op: string, args: seq[IRExpr]): IRExpr =   ## Phase 15 F6
+proc mkMathCall*(math: Admit[StdlibBody]; op: string;
+                 args: seq[IRExpr]): IRExpr =   ## Phase 15 F6
+  ## RFC-0016 ADM-IR (section 8.1). A std/math float call is lowered by name
+  ## (`lowerMathCall`); `math` is the stdlib-body axis's answer for that
+  ## routine at `ssFloatCall` (`admitFloatCall`), so a call whose row is
+  ## declined or absent has no node: the parser declines instead.
+  doAssert math.admitted, "mkMathCall: " & math.decline[1]
+  doAssert math.cell.key == floatCallKey(op, args.len),
+    "mkMathCall: " & render(math.cell) & " is not the row of " & op
   IRExpr(kind: iekMathCall, mathOp: op, mathArgs: args)
 
 proc mkBoolLit*(v: bool): IRExpr =
@@ -3381,9 +3394,44 @@ proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
 
-proc mkArithBlock*(scope: ArithScope; stmts: seq[IRStmt]): IRStmt =
-  ## RFC-0016 W1-d2c. A routine body walked under `scope`'s arithmetic.
-  IRStmt(kind: isBlock, stmts: stmts, blkArith: scope)
+type
+  ArithScopeProof* = object
+    ## RFC-0016 ADM-IR (section 8.1). The proof that a block's arithmetic
+    ## claim was stamped by the axis that owns it: the pragma axis (a `push
+    ## overflowChecks: on` row), the stdlib-body axis (a routine whose
+    ## check-option delta is modelled) or the build (its own arithmetic is
+    ## unchecked). The scope is private, so `mkArithBlock` cannot be handed a
+    ## bare `ArithScope` and the three constructors below are the only way in.
+    scope: ArithScope
+
+func arithScope*(p: ArithScopeProof): ArithScope = p.scope
+
+func arithFromPragma*(a: Admit[PragmaModel]): ArithScopeProof =
+  ## `asChecked`: the admitted `routine/overflowChecks` pragma row (a `push
+  ## overflowChecks: on` in a build whose own checks are off).
+  doAssert a.admitted, "arithFromPragma: " & a.decline[1]
+  doAssert a.cell.scope == axPragma and a.cell.key == "routine/overflowChecks",
+    "arithFromPragma: " & render(a.cell) & " is not the overflowChecks row"
+  ArithScopeProof(scope: asChecked)
+
+func arithFromStdlib*(a: Admit[StdlibBody]): ArithScopeProof =
+  ## `asUnchecked`: an admitted stdlib-body row whose body trips
+  ## `overflowChecks` (`exercises`), which `math.nim`'s push turns off.
+  doAssert a.admitted, "arithFromStdlib: " & a.decline[1]
+  doAssert coOverflow in a.payload.exercises,
+    "arithFromStdlib: " & render(a.cell) & " does not exercise overflowChecks"
+  ArithScopeProof(scope: asUnchecked)
+
+func replayArith*(s: ArithScope): ArithScopeProof =
+  ## The IR emit's rebuild of a stamp it already read. The parser's emit is
+  ## the only caller; `tests/tsymex_0016_admir.nim` counts the uses.
+  doAssert s != asInherit, "replayArith: asInherit is no claim"
+  ArithScopeProof(scope: s)
+
+proc mkArithBlock*(proof: ArithScopeProof; stmts: seq[IRStmt]): IRStmt =
+  ## RFC-0016 W1-d2c. A routine body walked under `proof`'s arithmetic;
+  ## ADM-IR: the scope rides a proof of the axis that stamped it.
+  IRStmt(kind: isBlock, stmts: stmts, blkArith: proof.scope)
 
 proc mkLabelledBlock*(label: string; stmts: seq[IRStmt]): IRStmt =
   ## RFC-0005 S8m. A break target: `break label` resumes after it.
@@ -4712,32 +4760,22 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
          cVarPtrSafe: varPtrSafe, cViewAliases: viewAliases)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
+                   scan: OpaqueScan,
                    inert = false, havoc: seq[string] = @[],
                    heapTys: seq[IRType] = @[], heapAll = false,
-                   raises: seq[string] = @[], defects: seq[string] = @[],
-                   why = ""; undefined: set[UbKind] = {}): IRStmt =
+                   raises: seq[string] = @[], why = ""): IRStmt =
   ## RFC-0005 S8as: `havoc` is an inert call's effect summary
   ## (`IRStmt.opaqueHavoc`). RFC-0005 S8ax: `heapTys`, `heapAll` and
-  ## `raises` are the rest of it (`IRStmt.opaqueHeapTys` ...); RFC-0005
-  ## S8be: and `defects` (`IRStmt.opaqueDefects`); RFC-0016 K10b: and
-  ## `undefined` (`IRStmt.opaqueUndefined`).
+  ## `raises` are the rest of it (`IRStmt.opaqueHeapTys` ...).
+  ## RFC-0016 ADM-IR (section 8.1): `scan` is the defect scan's answer, the
+  ## proof the definedness and magic axes hand over: `opaqueDefects` (S8be)
+  ## and `opaqueUndefined` (K10b) are read from it, and it is built only
+  ## through an admitted row (`noteUndefined`, `noteMagicDefect`).
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: true, opaqueInert: inert,
          opaqueHavoc: havoc, opaqueHeapTys: heapTys, opaqueHeapAll: heapAll,
-         opaqueRaises: raises, opaqueDefects: defects, opaqueWhy: why,
-         opaqueUndefined: undefined)
-
-func ubMaskOf*(ks: set[UbKind]): int =
-  ## RFC-0016 K10b. A `set[UbKind]` as a bit mask over `ord(k) - ord(low)`:
-  ## the form the parser's IR emit writes `IRStmt.opaqueUndefined` in (a set
-  ## literal of a range type does not round-trip through `newLit`; the
-  ## W1-d3 `static` pin keeps the range under 30 members).
-  for k in ks: result = result or (1 shl (ord(k) - ord(low(UbKind))))
-
-func ubSetOf*(mask: int): set[UbKind] =
-  ## RFC-0016 K10b. `ubMaskOf`'s inverse.
-  for k in low(UbKind) .. high(UbKind):
-    if ((mask shr (ord(k) - ord(low(UbKind)))) and 1) == 1: result.incl k
+         opaqueRaises: raises, opaqueDefects: scan.defectNames, opaqueWhy: why,
+         opaqueUndefined: scan.undefinedKinds)
 
 proc mkIRGlobal*(name: string, ty: IRType, isVar: bool,
                  init: IRExpr): IRGlobal =
@@ -5096,6 +5134,12 @@ func buildWraps*(b: BuildSemantics = buildSemantics): bool =
   ## settings never feed it (the build is what the native program does). A routine under
   ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
   coOverflow notin b.checks
+
+func arithFromBuild*(b: BuildSemantics = buildSemantics): ArithScopeProof =
+  ## `asBuild`: the build's own signed arithmetic is unchecked. Not a table
+  ## row: the build axis's claim is the build itself.
+  doAssert buildWraps(b), "arithFromBuild: the build checks its arithmetic"
+  ArithScopeProof(scope: asBuild)
 
 func signedWrapDefined*(width: int; b: BuildSemantics = buildSemantics): bool =
   ## RFC-0016 K5a. Whether an unchecked signed `+`, `-`, `*` or negation at

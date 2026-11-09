@@ -45,6 +45,8 @@
 import std/[macros, os, strutils, tables, compilesettings]
 import ./buildprofile
 import ./errorkind
+import ./admission     ## RFC-0016 ADM-IR: `Admit`
+import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`
 export buildprofile.CheckOption   ## moved to buildprofile (RFC-0016 W1-c1a)
 
 {.warning[Deprecated]: off.}   # `NimNode.owner`: no replacement in 2.2.10
@@ -710,6 +712,9 @@ type RoutineChecks* = object
     ## RFC-0016 K4c. A `stdlibAxis` row covers the routine's overflow delta:
     ## its body exercises `overflowChecks` and the push turns them off, and
     ## the walker models that (`asUnchecked`). Set by the parser, never here.
+  overflowRow*: Admit[StdlibBody]
+    ## RFC-0016 ADM-IR. The admitted row behind `overflowModelled`: the proof
+    ## `mkArithBlock` takes for the `asUnchecked` stamp. Set with it.
   unadmitted*: string
     ## RFC-0016 K4c. The stdlib-body axis does not admit this routine's body
     ## (`admitStdlibBody`: no row, or a declined one), and the reason names the

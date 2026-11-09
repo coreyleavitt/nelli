@@ -80,13 +80,8 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
   if e.mathArgs.len == 0:
     raise (ref SymexUnsupportedOpError)(op: "math." & op,
       msg: "math." & op & ": zero-arg float op is unsupported")
-  # RFC-0016 K4c (PRC-09): a `std/math` routine with a row is governed by it.
-  # A row this lowering models is admitted at `ssFloatCall`; any other row
-  # declines, naming its cell (`round(x, places)` is a facet of `round`).
-  let why = floatCallDecline(op, e.mathArgs.len)
-  if why.len > 0:
-    raise (ref SymexUnsupportedOpError)(op: "math." & op,
-      msg: "math." & op & " is not modeled by the symex engine -- " & why)
+  # RFC-0016 ADM-IR: the node exists only for a row admitted at `ssFloatCall`
+  # (`mkMathCall`); the parser declines the rest.
   let a = lower(env, e.mathArgs[0])
   doAssert a.kind in {svFloat32, svFloat64},
     "lowerMathCall: first arg is not a float — got " & $a.kind
@@ -183,12 +178,6 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
       return f32(ite(isNegative(b.fp32), -abs(a.fp32), abs(a.fp32)))
     else:
       return f64(ite(isNegative(b.fp64), -abs(a.fp64), abs(a.fp64)))
-  of "nextafter":
-    # nextafter has no Z3 FP-theory primitive (SMT-LIB FP has no fp.nextUp/nextDown);
-    # this is a documented bound — remains feUnsupportedOp (Invariant 3: never fake).
-    raise (ref SymexUnsupportedOpError)(op: "math.nextafter",
-      msg: "math.nextafter is not modeled: no SMT-LIB FP-theory primitive for " &
-           "next-representable value (documented Z3 bound; Invariant 3)")
   else:
     raise (ref SymexUnsupportedOpError)(op: "math." & op,
       msg: "math." & op & " is not modeled by the symex engine")

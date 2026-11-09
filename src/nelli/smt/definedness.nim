@@ -26,6 +26,7 @@
 import std/options
 import ./admission
 import ./errorkind
+import ./magic_rows   ## RFC-0016 ADM-IR: `MagicModel`, the magic axis's proof type
 
 type
   ArithOp* = enum                     ## the operation a row is about
@@ -264,3 +265,67 @@ func readUb*(): UbKind =
   let a = admitDefined(aoRead, ocUninitialised, dsRead)
   doAssert a.admitted
   a.payload[dpChecked].ub
+
+# ---------------------------------------------------------------------------
+# RFC-0016 ADM-IR: the opaque-call scan is a proof the IR demands.
+# ---------------------------------------------------------------------------
+
+type
+  OpaqueScan* = object
+    ## What the defect scan found in an opaque call's body: the `Defect`
+    ## names the explore walk forks and the undefined-behaviour kinds the
+    ## whole-run gate reads (`IRStmt.opaqueDefects`, `opaqueUndefined`).
+    ## The fields are private to this module, so a kind enters only through
+    ## an admitted definedness proof (`noteUndefined`) and a magic's defect
+    ## only through an admitted magic proof (`noteMagicDefect`): the IR
+    ## constructor `mkOpaqueCall` takes the scan, so a parser arm that
+    ## answers either axis without its table does not type-check.
+    undef: set[UbKind]
+    defs: seq[string]
+
+func ubMaskOf*(ks: set[UbKind]): int =
+  ## RFC-0016 K10b. A `set[UbKind]` as a bit mask over `ord(k) - ord(low)`:
+  ## the form the parser's IR emit writes `IRStmt.opaqueUndefined` in (a set
+  ## literal of a range type does not round-trip through `newLit`; the
+  ## W1-d3 `static` pin keeps the range under 30 members).
+  for k in ks: result = result or (1 shl (ord(k) - ord(low(UbKind))))
+
+func ubSetOf*(mask: int): set[UbKind] =
+  ## RFC-0016 K10b. `ubMaskOf`'s inverse.
+  for k in low(UbKind) .. high(UbKind):
+    if ((mask shr (ord(k) - ord(low(UbKind)))) and 1) == 1: result.incl k
+
+const unscanned* = OpaqueScan()
+  ## The scan of a call whose body the parser does not read: nothing found.
+  ## The two expression-position and annotation-violation arms that never
+  ## ran the scan name it, and `tests/tsymex_0016_admir.nim` counts the uses.
+
+func undefinedKinds*(s: OpaqueScan): set[UbKind] = s.undef
+func defectNames*(s: OpaqueScan): seq[string] = s.defs
+
+proc noteUndefined*(s: var OpaqueScan; a: Admit[DefRule]; p: DefProfile) =
+  ## The body may reach the undefined behaviour the admitted row `a` says it
+  ## is under profile `p`. A declined row, or one that is not undefined
+  ## there, is a bug in the caller.
+  doAssert a.admitted, "noteUndefined: " & a.decline[1]
+  let u = ubOf(a.payload[p])
+  doAssert u.isSome, "noteUndefined: " & render(a.cell) & " is not undefined under " & $p
+  s.undef.incl u.get
+
+proc noteMagicDefect*(s: var OpaqueScan; a: Admit[MagicModel]; name: string) =
+  ## A call of the magic row `a` raises the `Defect` `name`. The row must be
+  ## admitted (a defect site of the magic axis).
+  doAssert a.admitted, "noteMagicDefect: " & a.decline[1]
+  if name notin s.defs: s.defs.add name
+
+proc noteDefect*(s: var OpaqueScan; name: string) =
+  ## A `Defect` the scan names from the syntax, not a magic: an index, a
+  ## field of a variant, a range-checked conversion, a `raise`, or `anyDefect`
+  ## for what it cannot read. No axis keys these.
+  if name notin s.defs: s.defs.add name
+
+func replayScan*(defects: seq[string]; mask: int): OpaqueScan =
+  ## The IR emit's rebuild of a scan it already read (the macro-time
+  ## `IRStmt` is written out as constructor calls). The parser's emit is
+  ## the only caller; `tests/tsymex_0016_admir.nim` counts the uses.
+  OpaqueScan(undef: ubSetOf(mask), defs: defects)

@@ -5,7 +5,7 @@
 # axis typeop: 34 cells
 # axis pragma: 181 cells
 # axis magic: 242 cells
-# axis stdlib: 79 cells
+# axis stdlib: 88 cells
 # axis build: 25 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
 # axis defined: 21 cells
@@ -602,6 +602,7 @@ pragma:type/tags	modelled	-
 pragma:type/union	declined	-
 stdlib:algorithm.sort/symbolicLength	never	-
 stdlib:deques.Deque	declined	-
+stdlib:math.abs	modelled	-
 stdlib:math.almostEqual	declined	-
 stdlib:math.arccos	declined	-
 stdlib:math.arccosh	declined	-
@@ -640,15 +641,21 @@ stdlib:math.floorMod	modelled	-
 stdlib:math.frexp	declined	-
 stdlib:math.gamma	declined	-
 stdlib:math.hypot	declined	-
+stdlib:math.isFinite	modelled	-
+stdlib:math.isInf	modelled	-
 stdlib:math.isNaN	modelled	-
+stdlib:math.isNormal	modelled	-
 stdlib:math.isPowerOfTwo	modelled	-
 stdlib:math.lgamma	declined	-
 stdlib:math.ln	declined	-
 stdlib:math.log	declined	-
 stdlib:math.log10	declined	-
 stdlib:math.log2	declined	-
+stdlib:math.max	modelled	-
+stdlib:math.min	modelled	-
 stdlib:math.mod	declined	-
 stdlib:math.nextPowerOfTwo	modelled	-
+stdlib:math.nextafter	declined	-
 stdlib:math.pow	declined	-
 stdlib:math.radToDeg	declined	-
 stdlib:math.round	modelled	-
@@ -663,6 +670,8 @@ stdlib:math.splitDecimal	declined	-
 stdlib:math.sqrt	modelled	-
 stdlib:math.tan	declined	-
 stdlib:math.tanh	declined	-
+stdlib:math.toFloat32	modelled	-
+stdlib:math.toFloat64	modelled	-
 stdlib:math.trunc	modelled	-
 stdlib:options.Option	declined	-
 stdlib:sets.HashSet/iterationOrder	never	-

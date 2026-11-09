@@ -1,0 +1,50 @@
+name: "Setup Z3 (Windows x64, official release archive)"
+description: >
+  Install Z3 from the official GitHub release archive into C:\z3, verify its
+  sha256, and put C:\z3\bin on PATH. The unpacked prefix is cached by version
+  and hash, so a matrix of Windows jobs restores it instead of each fetching
+  the release asset: a burst of parallel fetches drew short error bodies from
+  the release CDN (92 bytes, symex-mingw runs 42559765798 and 42567229212),
+  which the old unchecked `curl -L` passed on to Expand-Archive. A cache miss
+  fetches with --fail and retries, and refuses a hash mismatch.
+
+inputs:
+  version:
+    description: "Z3 release version"
+    required: false
+    default: "4.13.4"
+  sha256:
+    description: "sha256 of the release zip"
+    required: false
+    default: "0a36dd5654fe423d23a727c4570c9db9a315926a4301189b868b6eb9bfd5979d"
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the Z3 prefix
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: C:\z3
+        key: z3-win-${{ inputs.version }}-${{ inputs.sha256 }}
+
+    - name: Download, verify and unpack Z3
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $v = '${{ inputs.version }}'
+        curl.exe -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o C:\z3.zip "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip"
+        if ($LASTEXITCODE -ne 0) { throw "z3 download failed (curl exit $LASTEXITCODE)" }
+        $got = (Get-FileHash C:\z3.zip -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne '${{ inputs.sha256 }}') { throw "z3 zip sha256 mismatch: $got" }
+        Expand-Archive -Path C:\z3.zip -DestinationPath C:\ -Force
+        if (Test-Path C:\z3) { Remove-Item -Recurse -Force C:\z3 }
+        Move-Item "C:\z3-$v-x64-win" C:\z3
+        Remove-Item C:\z3.zip
+
+    - name: Expose Z3
+      shell: pwsh
+      run: |
+        if (!(Test-Path C:\z3\bin\libz3.dll)) { throw 'libz3.dll missing' }
+        if (!(Test-Path C:\z3\include\z3.h))  { throw 'z3.h missing' }
+        Add-Content $env:GITHUB_PATH 'C:\z3\bin'

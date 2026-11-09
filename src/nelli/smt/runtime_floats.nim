@@ -235,29 +235,37 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     #
     # Nim 2.2.10 NEVER raises here for a plain integer target: its generated
     # C casts first and range-checks the CAST value (`(NI)(f) < MIN ||
-    # (NI)(f) > MAX`), which is tautological, and a narrow target is emitted
-    # as `(NI8)((NI64)f)` / `(NU8)(f)` with no check at all. The cast of an
-    # operand whose truncation does not fit the target (NaN, +-Inf, or too
-    # large) is C-level undefined: x86-64 gives `low(int)` for `int`, 0 for
-    # `int32(1e30)`, the low byte for `int8(300.0)` (probes: RFC-0005 S8g's
-    # test file). So the value is
-    #   ite(domain, exact truncation, FRESH symbol of the target type)
-    # and `domain` goes to the `convFloatToIntBoundConds` sink, where
-    # `drainConvFloatToIntFresh` (the first scalar-drain stage after the
-    # closure raises) decides the out-of-domain side as undefined behaviour
-    # (RFC-0016 K10a-float: `haltUndefined`, `ubFloatToIntRange`, the
-    # `convert/floatToInt` row of the definedness axis) and continues in
-    # range, clean and exact; the fresh arm of the `ite` is never reached by
-    # a surviving path. (Until K10a-float the out-of-range side continued
-    # tainted `feConvFloatToIntUndefined`, `dcFreshSymbol`.) The model was an
-    # exact-or-raise split (R16-2): a
-    # false `sxRaised(RangeDefect)`, a live `except RangeDefect`, and a
-    # false `sxUnsat` for every out-of-range target.
+    # (NI)(f) > MAX`), which is tautological, so no check profile raises.
+    # What the cast does is the `floatToIntLowering` table (read from the
+    # generated C, pinned with UBSan in `tsymex_0016_k10c_ubsan`):
+    #   * `int64(f)`, `int(f)` and every unsigned target are one C cast to the
+    #     target (`(NU8)f`): undefined unless the truncation fits it;
+    #   * a signed target narrower than the operand's natural integer is
+    #     `(NI8)((NI64)f)` (int32 for a float32 operand to int8/16): the inner
+    #     cast is undefined unless the truncation fits the INTERMEDIATE, and a
+    #     value inside it but outside the target converts by the C integer
+    #     conversion, modulo 2^n (gcc's documented, implementation-defined
+    #     behaviour; `int8(300.0) == 44`). That wrap is exact, not undefined.
+    # So the value is
+    #   ite(domain, exact, FRESH symbol of the target type)
+    # with `domain` the intermediate's range, `exact` the truncation into the
+    # intermediate then its low target bits, and `domain` goes to the
+    # `convFloatToIntBoundConds` sink, where `drainConvFloatToIntFresh` (the
+    # first scalar-drain stage after the closure raises) decides the
+    # out-of-domain side as undefined behaviour (RFC-0016 K10a-float:
+    # `haltUndefined`, `ubFloatToIntRange`, the `convert/floatToInt[Via]` row
+    # of the definedness axis) and continues in range, clean and exact; the
+    # fresh arm of the `ite` is never reached by a surviving path. (Until
+    # K10a-float the out-of-range side continued tainted
+    # `feConvFloatToIntUndefined`, `dcFreshSymbol`.) The model was an
+    # exact-or-raise split (R16-2): a false `sxRaised(RangeDefect)`, a live
+    # `except RangeDefect`, and a false `sxUnsat` for every out-of-range
+    # target.
     #
-    # `domain` is `trunc(f) in [lo, hi]` of the target type: `f > lo - 1 and
+    # `domain` is `trunc(f) in [lo, hi]` of the intermediate: `f > lo - 1 and
     # f < hi + 1`, with `hi + 1` a power of two (exact in both sorts) and
-    # `lo - 1` exact except for the signed 64-bit target in either sort and
-    # the signed 32-bit target from float32, where no float of the sort lies
+    # `lo - 1` exact except for the signed 64-bit intermediate in either sort
+    # and the signed 32-bit one from float32, where no float of the sort lies
     # strictly between `lo - 1` and `lo`, so `f >= lo` is the same set.
     # NaN compares false, so it is outside; +-Inf fails one bound.
     #
@@ -269,33 +277,37 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     let sv = lower(env, e.convOperand)
     let w = e.convWidth
     let signed = e.convSigned
-    let loF = if signed: -pow(2.0, float64(w - 1)) else: 0.0
-    let hiExclF = if signed: pow(2.0, float64(w - 1)) else: pow(2.0, float64(w))
+    let lowering = floatToIntLowering(
+      (if sv.kind == svFloat32: 32 else: 64), w, signed)
+    let iw = lowering.via          # the intermediate's width (== w if direct)
+    let loF = if signed: -pow(2.0, float64(iw - 1)) else: 0.0
+    let hiExclF = if signed: pow(2.0, float64(iw - 1)) else: pow(2.0, float64(iw))
     template convAt(fpv: typed; E, S: static int): SymVal =
-      case w
-      of 8:
-        if signed: liftBV(toSbv[E, S, 8](rmRTZ(), fpv), true)
-        else: liftBV(toUbv[E, S, 8](rmRTZ(), fpv), false)
-      of 16:
-        if signed: liftBV(toSbv[E, S, 16](rmRTZ(), fpv), true)
-        else: liftBV(toUbv[E, S, 16](rmRTZ(), fpv), false)
-      of 32:
-        if signed: liftBV(toSbv[E, S, 32](rmRTZ(), fpv), true)
-        else: liftBV(toUbv[E, S, 32](rmRTZ(), fpv), false)
-      else:
-        if signed: liftBV(toSbv[E, S, 64](rmRTZ(), fpv), true)
-        else: liftBV(toUbv[E, S, 64](rmRTZ(), fpv), false)
+      let viaBv = case iw
+        of 8:
+          if signed: liftBV(toSbv[E, S, 8](rmRTZ(), fpv), true)
+          else: liftBV(toUbv[E, S, 8](rmRTZ(), fpv), false)
+        of 16:
+          if signed: liftBV(toSbv[E, S, 16](rmRTZ(), fpv), true)
+          else: liftBV(toUbv[E, S, 16](rmRTZ(), fpv), false)
+        of 32:
+          if signed: liftBV(toSbv[E, S, 32](rmRTZ(), fpv), true)
+          else: liftBV(toUbv[E, S, 32](rmRTZ(), fpv), false)
+        else:
+          if signed: liftBV(toSbv[E, S, 64](rmRTZ(), fpv), true)
+          else: liftBV(toUbv[E, S, 64](rmRTZ(), fpv), false)
+      if iw == w: viaBv else: truncBV(viaBv, w, signed)
     var domainCond: Z3Bool
     var exact: SymVal
     case sv.kind
     of svFloat64:
-      let loExact = not signed or w <= 32
+      let loExact = not signed or iw <= 32
       let loOk = if loExact: sv.fp64 > mkFloat64(loF - 1.0)
                  else: sv.fp64 >= mkFloat64(loF)
       domainCond = loOk and (sv.fp64 < mkFloat64(hiExclF))
       exact = convAt(sv.fp64, 11, 53)
     of svFloat32:
-      let loExact = not signed or w <= 16
+      let loExact = not signed or iw <= 16
       let loOk = if loExact: sv.fp32 > mkFloat32(float32(loF - 1.0))
                  else: sv.fp32 >= mkFloat32(float32(loF))
       domainCond = loOk and (sv.fp32 < mkFloat32(float32(hiExclF)))
@@ -303,7 +315,8 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     else: raise newException(ValueError, "int(): operand is not a float")
     let fresh = bvVar(tInt(w, signed), freshDegradeName("__convFloatToIntFresh"))
     let value = iteSV(domainCond, exact, fresh)
-    let bound = ConvBound(cond: domainCond, site: e.convSite)
+    let bound = ConvBound(cond: domainCond, site: e.convSite,
+                         cls: lowering.cls)
     convFloatToIntBoundConds.add bound               # threadvar fallback
     syncConvFloatToIntBoundCond(bound)               # CR-9 Stage 6 Group-1
     if e.convHasRange:

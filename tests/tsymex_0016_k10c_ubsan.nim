@@ -181,31 +181,72 @@ proc casesFor(r: Row; p: DefProfile): seq[UbCase] =
                         expect: if undefined and cond: ueTrip else: ueClean,
                         cond: cond)
 
-# The float -> int cell: operands are float64 bit patterns, the target an
-# integer width. `cond` is the condition C itself makes undefined, decided
-# without C: NaN, an infinity, or a value outside `int64`. Nim 2.2.10 emits the
-# conversion to a narrower target through `NI` (int64), so a value in `int64`
-# but outside an `int32`/`int16`/`int8` target is an implementation-defined
-# wrap in C (`int8(300.0) == 44`), not undefined: the row calls it undefined
-# anyway (a conservative decline), and the cases below pin that difference as
-# clean native runs rather than hide it.
-const floatTargets = ["int64", "int32", "int16", "int8"]
+# The float -> int cells: operands are float64 bit patterns (op "f2i") or
+# float32-representable ones (op "f32i"), the target an integer type.
+#
+# The ORACLE here does not read the table. Nim 2.2.10's C (read from the
+# generated code, and what the cases below confirm) casts `int64`, `int` and
+# every unsigned target straight to the target, and a signed target narrower
+# than the operand's natural integer through `NI64` (`NI32` for a float32
+# operand to int8/16): `(NI8)((NI64)f)`. The cast to the intermediate is
+# undefined for NaN, an infinity or a truncation outside it; the integer
+# conversion from the intermediate to the target is defined (gcc: modulo 2^n).
+# `cond` is "the operand is outside the intermediate", decided without C.
+const floatTargets = ["int64", "int32", "int16", "int8",
+                      "uint64", "uint32", "uint16", "uint8"]
 
-func f2iCases(p: DefProfile): seq[UbCase] =
-  let undefined = convertDefinedness(p).kind == dkUndefined
-  for ty in floatTargets:
-    let w = width(ty)
-    let hi = pow(2.0, float(w - 1))      # the first value above the range
-    let lo = -hi                         # the lowest value in range
-    var xs = @[0.0, 1.5, -1.5, 100.0, lo, hi, hi * 4.0, lo * 4.0, 1.0e30,
-               -1.0e30, NaN, Inf, -Inf]
-    if w < 64: xs.add [hi - 1.0, lo - 1.0]
-    for x in xs:
-      let cond = x != x or x == Inf or x == -Inf or
-                 x >= 9.223372036854775808e18 or x < -9.223372036854775808e18
-      result.add UbCase(ty: ty, op: "f2i", a: cast[uint64](x), b: 0,
-                        expect: if undefined and cond: ueTrip else: ueClean,
-                        cond: cond)
+func isUnsigned(ty: string): bool = ty.startsWith("uint")
+
+func interWidth(op, ty: string): int =
+  ## The C type the value is cast to first, by the generated C above.
+  let natural = if op == "f32i": 32 else: 64
+  if not ty.isUnsigned and width(ty) < natural: natural else: width(ty)
+
+func outsideIntermediate(op, ty: string; x: float): bool =
+  if x != x or x == Inf or x == -Inf: return true
+  let t = trunc(x)
+  let iw = interWidth(op, ty)
+  if ty.isUnsigned: t < 0.0 or t >= pow(2.0, float(iw))
+  else: t < -pow(2.0, float(iw - 1)) or t >= pow(2.0, float(iw - 1))
+
+func f2iOperands(op, ty: string): seq[float] =
+  ## Just inside and outside the target's and the intermediate's range, NaN,
+  ## infinities, -0.0 and the values between.
+  let iw = interWidth(op, ty)
+  let w = width(ty)
+  let ihi = pow(2.0, float(if ty.isUnsigned: iw else: iw - 1))
+  let ilo = if ty.isUnsigned: 0.0 else: -ihi
+  result = @[0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 100.0, NaN, Inf, -Inf, 3.0e38,
+             -3.0e38, ihi, ilo, ihi - 1.0, ihi - 0.5, ilo - 0.5, ilo - 1.0,
+             ihi * 2.0, ilo * 2.0]
+  if ty.isUnsigned:
+    result.add [-1.0, 255.5, 256.0]
+  elif w < iw:
+    # past the TARGET but inside the intermediate: a defined wrap
+    let thi = pow(2.0, float(w - 1))
+    result.add [thi, thi + 44.0, -thi - 1.0, -thi - 100.0, thi * 4.0 + 7.0]
+  if op == "f2i": result.add [1.0e30, -1.0e30, 9.223372036854775808e18,
+                              9.2233720368547748e18, -9.223372036854775808e18]
+
+func f2iCases(p: DefProfile; direct: bool): seq[UbCase] =
+  ## The cases of one cell: `direct` is `convert/floatToInt`, else the narrowed
+  ## `convert/floatToIntVia`. The expectation is the TABLE's, for the class the
+  ## lowering function names, and its intermediate must be the oracle's.
+  for op in ["f2i", "f32i"]:
+    for ty in floatTargets:
+      let low = floatToIntLowering(if op == "f32i": 32 else: 64, width(ty),
+                                   not ty.isUnsigned)
+      doAssert low.via == interWidth(op, ty), "the table's intermediate " &
+        "disagrees with the C: " & op & " " & ty
+      if (low.cls == ocFloatToInt) != direct: continue
+      let undefined = convertDefinedness(low.cls, p).kind == dkUndefined
+      for x0 in f2iOperands(op, ty):
+        # the probe narrows a "f32i" operand to float32: judge that value
+        let x = if op == "f32i": float64(float32(x0)) else: x0
+        let cond = outsideIntermediate(op, ty, x)
+        result.add UbCase(ty: ty, op: op, a: cast[uint64](x), b: 0,
+                          expect: if undefined and cond: ueTrip else: ueClean,
+                          cond: cond)
 
 proc cellOf(r: Row): CellKey = parseCellKey("defined:" & r.key).get
 
@@ -274,32 +315,41 @@ suite "K10c: the table against C (UBSan)":
         "the walker half (tsymex_0016_k10af_float) and by the Linux legs' " &
         "-fsanitize=float-cast-overflow run")
   else:
-    test "the float -> int cell (-fsanitize=float-cast-overflow)":
+    test "the float -> int cells (-fsanitize=float-cast-overflow)":
       let p = buildFloatToIntProbe("K10c-f2i")
       defer: dispose(p)
-      let cases = f2iCases(dpUnchecked)
-      check cases.anyIt(it.expect == ueTrip)
-      pinUbsanCell(parseCellKey("defined:convert/floatToInt").get, p, cases)
-      # NaN, an infinity and a value outside int64 each trip; a value in range
-      # (the truncation included) does not.
-      for c in cases:
-        if c.cond: check c.expect == ueTrip
-        else: check c.expect == ueClean
+      for (key, direct) in [("defined:convert/floatToInt", true),
+                            ("defined:convert/floatToIntVia", false)]:
+        let cases = f2iCases(dpUnchecked, direct)
+        check cases.anyIt(it.expect == ueTrip)
+        check cases.anyIt(it.expect == ueClean and it.cond == false)
+        pinUbsanCell(parseCellKey(key).get, p, cases)
+        # NaN, an infinity and a value outside the intermediate each trip; a
+        # value inside it (the truncation, and for the narrowed cell the wrap,
+        # included) does not.
+        for c in cases:
+          if c.cond: check c.expect == ueTrip
+          else: check c.expect == ueClean
 
-    test "the float -> int row over-approximates narrow targets (documented)":
-      # Out of an int32/16/8 target but inside int64: the row says undefined
-      # (halt, untrusted) and C wraps, defined. Sound, and imprecise by design
-      # until the row distinguishes the target width.
-      check convertDefinedness(dpUnchecked).kind == dkUndefined
+    test "the narrowed cell: a value past the target wraps, defined":
+      # Inside the intermediate, outside the target: C converts modulo 2^n and
+      # UBSan is silent. The values are what the walker models.
       let p = buildFloatToIntProbe("K10c-f2i-wrap")
       defer: dispose(p)
-      for ty in ["int32", "int16", "int8"]:
-        let w = width(ty)
-        let x = pow(2.0, float(w - 1))
-        let (rc, output) = p.runCase(UbCase(ty: ty, op: "f2i",
+      for (ty, op, x, want) in [("int8", "f2i", 300.0, "44"),
+                                ("int8", "f2i", -156.0, "100"),
+                                ("int8", "f2i", 128.9, "-128"),
+                                ("int16", "f2i", 65535.0, "-1"),
+                                ("int32", "f2i", 4294967291.0, "-5"),
+                                ("int32", "f2i", 9.0e18, "-494665728"),
+                                ("int8", "f32i", 300.0, "44"),
+                                ("int16", "f32i", 65535.0, "-1")]:
+        let (rc, output) = p.runCase(UbCase(ty: ty, op: op,
           a: cast[uint64](x), b: 0, expect: ueClean))
         check rc == 0
         check "runtime error" notin output
+        check output.strip == want
+      check convertDefinedness(ocFloatToIntVia, dpUnchecked).kind == dkUndefined
 
     test "the default build profile (-fsanitize=undefined)":
       let p = buildUbsanProbe("K10c")

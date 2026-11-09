@@ -455,9 +455,16 @@ Two things can happen to the omission, by kind:
 - Every kind is read from the definedness table (`smt/definedness.nim`):
   `(operation, operand class)` to *defined*, *Defect* or *undefined* by build
   profile. A float to int conversion (`int(f)`, `int32(f)`, `uint8(f)`) of NaN,
-  an infinity or a value whose truncation does not fit the target is
-  `ubFloatToIntRange` under every profile: Nim emits a plain C cast and no
-  check raises. In range the truncation toward zero is exact. (A `range`
+  an infinity or a value whose truncation does not fit the C type it is cast
+  to is `ubFloatToIntRange` under every profile: Nim emits a plain C cast and
+  no check raises. In range the truncation toward zero is exact. `int64`,
+  `int` and the unsigned targets are cast directly, so the C type is the
+  target; `int8/16/32(f)` is `(NI8)((NI64)f)` (through `int32` for a
+  `float32` operand to `int8/16`), so only a value outside `int64` is
+  undefined and one inside it wraps modulo 2^n, defined and exact
+  (`int8(300.0) == 44`; the narrowing is implementation-defined, and gcc
+  documents it as modulo 2^n, the same assumption the 8 and 16 bit
+  arithmetic rows make). (A `range`
   target such as `Natural(f)` still raises `RangeDefect` for a converted
   value outside the range.) It no longer records `feConvFloatToIntUndefined`,
   which nothing produces now.

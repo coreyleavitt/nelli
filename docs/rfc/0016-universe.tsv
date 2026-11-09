@@ -8,7 +8,7 @@
 # axis stdlib: 79 cells
 # axis build: 25 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
-# axis defined: 19 cells
+# axis defined: 20 cells
 # build rows: 5
 # error kinds: 102
 # cap kinds: 10
@@ -57,6 +57,7 @@ defined:add/signedNarrow	modelled	-
 defined:add/signedWide	modelled	-
 defined:call/noalias	declined	-
 defined:convert/floatToInt	modelled	-
+defined:convert/floatToIntVia	modelled	-
 defined:div/lowByMinusOneNarrow	modelled	-
 defined:div/lowByMinusOneWide	modelled	-
 defined:div/zeroDivisorSigned	modelled	-

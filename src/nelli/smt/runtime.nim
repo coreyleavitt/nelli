@@ -2019,6 +2019,7 @@ type ConvBound* = object
   ## in-range domain, and the source site that names its undefined side.
   cond*: Z3Bool
   site*: string
+  cls*: OperandClass   ## the `convert/` row (`floatToIntLowering`)
 
 var convFloatToIntBoundConds* {.threadvar.}: seq[ConvBound]
   ## Phase 15 CR-3/CR-4; RFC-0005 S8g. The in-range DOMAIN of each float ->
@@ -19258,13 +19259,14 @@ proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
   var inDomain = conds[0].cond
   for i in 1 ..< conds.len: inDomain = inDomain and conds[i].cond
   let cur = forkPath(p, p.pc, p.env)
-  let convUb = convertDefinedness(defProfile()).ubOf
+  let profile = defProfile()
   # One undefined side per conversion, each under its own site: the side
   # of conversion `i` is reached when every earlier one is in range (they
   # evaluate in order and an undefined one ends the path).
   var before: seq[Z3Bool]
   for c in conds:
     let outside = not c.cond
+    let convUb = convertDefinedness(c.cls, profile).ubOf
     if convUb.isSome and guardLiteral(outside) != glFalse:
       let side = before & @[outside]
       let unsat = guardLiteral(outside) != glTrue and

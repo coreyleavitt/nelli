@@ -53,22 +53,31 @@ const floatToIntProbeSrc* = """
 import std/[os, strutils]
 
 proc conv[S](x: float64): S {.noinline.} = S(x)
+proc conv32[S](x: float32): S {.noinline.} = S(x)
 
 let ty = paramStr(1)
+let op = paramStr(2)      # "f2i": a float64 operand, "f32i": a float32 one
 let f = cast[float64](parseBiggestUInt(paramStr(3)))
 
 template go(S: typedesc) =
-  echo conv[S](f)
+  if op == "f32i": echo conv32[S](float32(f))
+  else: echo conv[S](f)
 
 case ty
 of "int64": go(int64)
 of "int32": go(int32)
 of "int16": go(int16)
 of "int8": go(int8)
+of "uint64": go(uint64)
+of "uint32": go(uint32)
+of "uint16": go(uint16)
+of "uint8": go(uint8)
 else: quit(3)
 """
-  ## RFC-0016 K10c, the float -> int cell. The operand is the bit pattern of a
-  ## `float64` (argument 3); the conversion is Nim's plain C cast. Built with
+  ## RFC-0016 K10c, the float -> int cells. The operand is the bit pattern of a
+  ## `float64` (argument 3; narrowed to a `float32` for op `f32i`, so the
+  ## caller passes only float32-representable values there); the conversion is
+  ## Nim's plain C cast. Built with
   ## `-fsanitize=float-cast-overflow`, which gcc does not include in
   ## `-fsanitize=undefined`.
 

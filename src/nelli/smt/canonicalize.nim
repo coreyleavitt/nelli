@@ -336,6 +336,13 @@ const symexWalkerVersion* = "300"
   ## `sxUnsat` over that taint, or an `sxSat` on a platform-defined native
   ## value (`int(NaN) == low(int)`, `int8(300.0) == 44`), are an untrusted
   ## `sxUnknown` carrying the kind; in-range conversions are unchanged.
+  ## K10a-float precision (still 300): the row is keyed by the C lowering. A
+  ## signed `int8/16/32(f)` is `(NI8)((NI64)f)` (through int32 for a float32
+  ## operand to int8/16), so only NaN, an infinity or a value outside that
+  ## INTERMEDIATE is undefined (`convert/floatToIntVia`); inside it the wrap
+  ## into the target is defined and exact (`int8(300.0) == 44`), and a verdict
+  ## on it is a trusted `sxSat`/`sxUnsat` again. `int64`, `int` and the
+  ## unsigned targets are one direct cast (`convert/floatToInt`), unchanged.
   ## RFC-0016 K6a, K6b (298->299): `mayWrite` is an allowlist of read-only
   ## node kinds (`nodeWritesHeap` was a denylist), so a `lent` / `let` loop
   ## whose body casts, emits, or calls an opaque routine declines. K6b: the

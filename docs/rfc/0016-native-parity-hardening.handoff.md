@@ -470,11 +470,25 @@
   pins through a second probe built with `-fsanitize=float-cast-overflow` (not part of
   `-fsanitize=undefined` in gcc); NaN, an infinity and a value outside int64 trip, in-range
   values (truncation included) run clean; mingw/MSVC declare it with `skipCell`.
-  FINDING: Nim 2.2.10 emits float -> int32/16/8 through int64, so a value in int64 but
-  outside the narrow target is an implementation-defined wrap in C (`int8(300.0) == 44`),
-  not UB; the row calls it undefined (a sound over-approximation: untrusted halt). Pinned
-  as a clean native run in `tsymex_0016_k10c_ubsan`; narrowing the row by target width is
-  a precision follow-up, not done here.
+  Precision (int4b, walker 300, K10a-float's semantics): the float -> int row is keyed
+  by the C lowering Nim 2.2.10 emits (generated C read at -O0/danger/default, UBSan at
+  the boundaries in `tsymex_0016_k10c_ubsan`). `definedness.floatToIntLowering(src, tgt,
+  signed)` is the table:
+  | target | float64 operand | float32 operand | row |
+  |---|---|---|---|
+  | int64, int | `(NI64)f` direct | direct | `convert/floatToInt` |
+  | int32 | `(NI32)((NI64)f)` | `(NI32)f` direct | `Via` / direct |
+  | int16, int8 | `(NI16)((NI64)f)` | `(NI16)((NI32)f)` | `convert/floatToIntVia` |
+  | uint8/16/32/64, uint | `(NU8)f` direct (negative or >= 2^w is UB) | direct | `convert/floatToInt` |
+  A distinct int takes its base's lowering. Undefined iff NaN, an infinity or the
+  truncation is outside the INTERMEDIATE; inside it the narrowing is the C integer
+  conversion, modulo 2^n (gcc documents it, implementation-defined; the same assumption
+  the 8/16 bit arithmetic rows already make, so no new `CFlag`), and the walker models it
+  exactly (`int8(300.0) == 44`, trusted). The `range` target check (`Natural(f)`) still
+  tests the converted value. Restored: `tsymex_rfc0005_s8g_models` `int8(f)` wrap (sxSat,
+  replay); the other K10a-float rewrites are NaN/inf or `int`-target driven and stay
+  `sxUnknown`. New cell `defined:convert/floatToIntVia` (evidenced by `pinDecline` in
+  `tsymex_0016_k10af_float`, UBSan-pinned in k10c).
   K10a-float (`rfc-0016-k10af` on `rfc-0016-k10aa`, walker 300 (shared with K10a-axis), its
   comment extended): `ubFloatToIntRange` is back at the
   END of `UbKind` (ordinal after `ubSignedDivZero`; `static` pin extended).

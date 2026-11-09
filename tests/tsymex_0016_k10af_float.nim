@@ -5,6 +5,13 @@
 ## the definedness axis) ends that side through `haltUndefined` with
 ## `ubFloatToIntRange`; the in-range side is exact (truncation toward zero).
 ##
+## Nim 2.2.10 emits `int8/16/32(f)` as a C conversion THROUGH `int64` (through
+## `int32` for a `float32` operand to `int8/16`), so a value that fits that
+## intermediate but not the target wraps, defined (`int8(300.0) == 44`); only
+## NaN, an infinity or a value outside the intermediate is undefined. The
+## unsigned targets and `int64`/`int` convert directly (`convert/floatToInt`);
+## the narrowed signed ones are `convert/floatToIntVia`.
+##
 ## Native agreement is pinned where the conversion is defined (the label is
 ## reproduced by the witness in the host); the undefined side is pinned by
 ## `tUndefined` findings, which are never run.
@@ -79,13 +86,178 @@ proc sutHalf(f: float) =
     let i = int(f)
     if i == 0: symexTarget("hit")
 
+proc sutI8Wrap(f: float) =
+  if f >= 128.0 and f < 1.0e18:
+    let i = int8(f)
+    if i == 44: symexTarget("hit")
+
+proc sutI8NoWrapHit(f: float) =
+  if f >= 128.0 and f < 129.0:
+    let i = int8(f)       # 128.x wraps to -128, never 0
+    if i == 0: symexTarget("hit")
+
+proc sutI16Wrap(f: float) =
+  if f >= 32768.0 and f < 1.0e18:
+    let i = int16(f)
+    if i == -1: symexTarget("hit")
+
+proc sutI32Wrap(f: float) =
+  if f >= 2147483648.0 and f < 1.0e18:
+    let i = int32(f)
+    if i == -5: symexTarget("hit")
+
+proc sutI8Neg(f: float) =
+  if f <= -129.0 and f > -1.0e18:
+    let i = int8(f)
+    if i == 100: symexTarget("hit")     # -156 wraps to 100
+
+proc sutF32I8Wrap(f: float32) =
+  if f >= 128.0'f32 and f < 1.0e9'f32:
+    let i = int8(f)
+    if i == 44: symexTarget("hit")
+
+proc sutF32I16Wrap(f: float32) =
+  if f >= 32768.0'f32 and f < 1.0e9'f32:
+    let i = int16(f)
+    if i == -1: symexTarget("hit")
+
+proc sutI8Bounded(f: float) =                  # inside int64: no undefined side
+  if f > -9.0e18 and f < 9.0e18:
+    let i = int8(f)
+    discard i
+    symexTarget("hit")
+
+proc sutI8Beyond(f: float) =
+  if f >= 9.3e18:
+    let i = int8(f)
+    discard i
+    symexTarget("hit")
+
+proc sutF32I8Bounded(f: float32) =             # inside int32: no undefined side
+  if f > -2.0e9'f32 and f < 2.0e9'f32:
+    let i = int8(f)
+    discard i
+    symexTarget("hit")
+
+proc sutF32I8Beyond(f: float32) =
+  if f >= 3.0e9'f32:
+    let i = int8(f)
+    discard i
+    symexTarget("hit")
+
+proc sutI8Free(f: float) =
+  let i = int8(f)
+  if i == 44: symexTarget("hit")
+
+proc sutU8Wrap(f: float) =
+  if f >= 256.0 and f < 300.0:
+    let i = uint8(f)
+    if i == 4: symexTarget("hit")
+
+proc sutU32Neg(f: float) =
+  if f <= -1.0 and f > -10.0:
+    let i = uint32(f)
+    discard i
+    symexTarget("hit")
+
+suite "K10a-float: the narrowed conversion wraps, defined":
+  test "the lowering table: which C type each target converts through":
+    check floatToIntLowering(64, 64, true) == FloatToIntLowering(cls: ocFloatToInt, via: 64)
+    for w in [8, 16, 32]:
+      check floatToIntLowering(64, w, true) ==
+        FloatToIntLowering(cls: ocFloatToIntVia, via: 64)
+      check floatToIntLowering(64, w, false) ==
+        FloatToIntLowering(cls: ocFloatToInt, via: w)
+    check floatToIntLowering(64, 64, false) == FloatToIntLowering(cls: ocFloatToInt, via: 64)
+    for w in [8, 16]:
+      check floatToIntLowering(32, w, true) ==
+        FloatToIntLowering(cls: ocFloatToIntVia, via: 32)
+    check floatToIntLowering(32, 32, true) == FloatToIntLowering(cls: ocFloatToInt, via: 32)
+    check floatToIntLowering(32, 64, true) == FloatToIntLowering(cls: ocFloatToInt, via: 64)
+    check floatToIntLowering(32, 8, false) == FloatToIntLowering(cls: ocFloatToInt, via: 8)
+
+  test "both rows are undefined under every profile":
+    for p in DefProfile:
+      for c in [ocFloatToInt, ocFloatToIntVia]:
+        check convertDefinedness(c, p) ==
+          Definedness(kind: dkUndefined, ub: ubFloatToIntRange)
+    check admitDefined(aoConvert, ocFloatToIntVia, dsConvert).admitted
+
+  test "int8(300.0) == 44: an exact, trusted, replay-confirmed verdict":
+    let r = symexFind(sutI8Wrap, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    check r.undefined.len == 0
+    check int8(r.witness[0]) == 44'i8
+    check reproduces(sutI8Wrap(r.witness[0]), "hit")
+    check reproduces(sutI8Wrap(300.0), "hit")
+
+  test "int8 wraps 128.x to -128: the label is unreachable, a trusted sxUnsat":
+    let r = symexFind(sutI8NoWrapHit, tLabel("hit"))
+    check r.status == sxUnsat
+    check r.trusted
+
+  test "int16 and int32 wrap the same way":
+    let a = symexFind(sutI16Wrap, tLabel("hit"))
+    check a.status == sxSat and a.trusted and a.undefined.len == 0
+    check reproduces(sutI16Wrap(a.witness[0]), "hit")
+    let b = symexFind(sutI32Wrap, tLabel("hit"))
+    check b.status == sxSat and b.trusted and b.undefined.len == 0
+    check reproduces(sutI32Wrap(b.witness[0]), "hit")
+
+  test "a negative value wraps too":
+    let r = symexFind(sutI8Neg, tLabel("hit"))
+    check r.status == sxSat and r.trusted and r.undefined.len == 0
+    check reproduces(sutI8Neg(r.witness[0]), "hit")
+    check reproduces(sutI8Neg(-156.0), "hit")
+
+  test "a float32 operand narrows through int32":
+    let r = symexFind(sutF32I8Wrap, tLabel("hit"))
+    check r.status == sxSat and r.trusted and r.undefined.len == 0
+    check reproduces(sutF32I8Wrap(r.witness[0]), "hit")
+    let s = symexFind(sutF32I16Wrap, tLabel("hit"))
+    check s.status == sxSat and s.trusted and s.undefined.len == 0
+    check reproduces(sutF32I16Wrap(s.witness[0]), "hit")
+
+  test "undefined only outside the intermediate: NaN, an infinity, past int64":
+    let free = symexFind(sutI8Free, tUndefined())
+    check free.status == sxSat
+    check free.witness[0].isNaN or abs(free.witness[0]) >= 9.2e18
+    let inside = symexFind(sutI8Bounded, tUndefined())
+    check inside.status == sxUnsat
+    check inside.trusted
+    let beyond = symexFind(sutI8Beyond, tUndefined())
+    check beyond.status == sxSat
+    check beyond.soundness.undefinedKinds == {UbKind(ubFloatToIntRange)}
+    check not beyond.trusted
+
+  test "the float32 intermediate is int32":
+    let inside = symexFind(sutF32I8Bounded, tUndefined())
+    check inside.status == sxUnsat
+    check inside.trusted
+    let beyond = symexFind(sutF32I8Beyond, tUndefined())
+    check beyond.status == sxSat
+    check beyond.witness[0] >= 2147483648.0'f32
+
+  test "unsigned targets convert directly: out of range is still undefined":
+    let r = symexFind(sutU8Wrap, tUndefined())
+    check r.status == sxSat
+    check not r.trusted
+    let n = symexFind(sutU32Neg, tUndefined())
+    check n.status == sxSat
+
+  test "the narrowed cell is evidenced: the free conversion halts":
+    pinDecline(sutI8Free, cellKey(axDefinedness, "convert/floatToIntVia"),
+               ubFloatToIntRange, tRaisedExn("RangeDefect"))
+
 suite "K10a-float: float -> int is undefined out of range":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 300
 
   test "the table: every profile is undefined, and the kind is appended":
     for p in DefProfile:
-      check convertDefinedness(p) ==
+      check convertDefinedness(ocFloatToInt, p) ==
         Definedness(kind: dkUndefined, ub: ubFloatToIntRange)
     check admitDefined(aoConvert, ocFloatToInt, dsConvert).admitted
     check not admitDefined(aoConvert, ocFloatToInt, dsArith).admitted
@@ -100,10 +272,10 @@ suite "K10a-float: float -> int is undefined out of range":
     let w = r.witness[0]
     check w.isNaN or abs(w) >= 9.2e18
 
-  test "a narrow target is undefined past its own range":
+  test "a narrow target is undefined past its intermediate's range":
     let r = symexFind(sutInt32, tUndefined())
     check r.status == sxSat
-    check abs(r.witness[0]) >= 2147483648.0 or r.witness[0].isNaN
+    check abs(r.witness[0]) >= 9.2e18 or r.witness[0].isNaN
     let u = symexFind(sutU8, tUndefined())
     check u.status == sxSat
     check u.witness[0].isNaN or u.witness[0] <= -1.0 or u.witness[0] >= 256.0

@@ -14,7 +14,7 @@
 ##   `div`/`mod` zero-divisor and `low(T) by -1` rows (`definedness`);
 ## * `runtime.unwrittenUb`: the `read/uninitialised` row;
 ## * `runtime.refEqOrder`: `order/pointer` (STY-03, `never`);
-## * `runtime.drainConvFloatToIntFresh`: `convert/floatToInt` (K10a-float);
+## * `runtime.drainConvFloatToIntFresh`: `convert/floatToInt` and `convert/floatToIntVia` (K10a-float);
 ## * `dsl_parser`'s stale element pointer marker: `grow/elemAddr` (STY-07,
 ##   `never`);
 ## * `dsl_parser.withCheckDeclines`: `call/noalias`, the routine that declares
@@ -47,8 +47,13 @@ type
     ocPointer                         ## a `ptr` or `ref` value
     ocElemAddr                        ## `addr s[i]` of a seq
     ocNoalias                         ## a parameter declared `{.noalias.}`
-    ocFloatToInt                      ## `int(f)`, `int32(f)`, `uint8(f)`: NaN,
-                                      ## infinite or out of the target's range
+    ocFloatToInt                      ## `int(f)`, `int64(f)`, `uint8(f)`: the
+                                      ## C cast goes straight to the target;
+                                      ## NaN, infinite or out of ITS range
+    ocFloatToIntVia                   ## `int8/16/32(f)`: Nim casts through a
+                                      ## wider signed C integer (`floatToIntLowering`);
+                                      ## undefined outside THAT type's range,
+                                      ## a defined wrap inside it
   DefProfile* = enum                  ## the build's arithmetic
     dpChecked                         ## Nim's overflow and zero checks are on
     dpUnchecked                       ## checks off, the C operation as is
@@ -99,6 +104,7 @@ func classKey(c: OperandClass): string =
   of ocElemAddr: "elemAddr"
   of ocNoalias: "noalias"
   of ocFloatToInt: "floatToInt"
+  of ocFloatToIntVia: "floatToIntVia"
 
 func defKey*(op: ArithOp; c: OperandClass): string =
   opKey(op) & "/" & classKey(c)
@@ -164,11 +170,22 @@ func defRows(): seq[DefKey] =
     modelled[DefSite, DefRule](
       [undef(ubFloatToIntRange), undef(ubFloatToIntRange),
        undef(ubFloatToIntRange)], {dsConvert},
-      "float -> int of NaN, an infinity or a value whose truncation does not " &
-      "fit the target: Nim 2.2.10 emits a plain C cast and range-checks the " &
-      "cast value (a tautology), so no check profile raises and the cast is " &
-      "undefined. Inside a `range` target the converted value's own range " &
-      "check still raises, and that is a separate fork"))
+      "float -> int64/int or an unsigned target: Nim 2.2.10 emits a plain C " &
+      "cast straight to the target and range-checks the cast value (a " &
+      "tautology), so no check profile raises. NaN, an infinity or a value " &
+      "whose truncation does not fit the target is undefined. Inside a " &
+      "`range` target the converted value's own range check still raises, " &
+      "and that is a separate fork"))
+  result.add (defKey(aoConvert, ocFloatToIntVia),
+    modelled[DefSite, DefRule](
+      [undef(ubFloatToIntRange), undef(ubFloatToIntRange),
+       undef(ubFloatToIntRange)], {dsConvert},
+      "float -> int8/16/32: Nim 2.2.10 emits `(NI8)((NI64)f)` (through int32 " &
+      "for a float32 operand to int8/16). The inner cast is undefined for " &
+      "NaN, an infinity or a truncation outside the INTERMEDIATE type; a " &
+      "value inside it that does not fit the target converts to the target " &
+      "by the C integer conversion, which gcc defines as modulo 2^n " &
+      "(implementation-defined, documented) and is not undefined"))
 
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())
 
@@ -192,11 +209,31 @@ func arithClass*(signedWide: bool): OperandClass =
 func ubOf*(d: Definedness): Option[UbKind] =
   if d.kind == dkUndefined: some(d.ub) else: none(UbKind)
 
-func convertDefinedness*(p: DefProfile): Definedness =
+type FloatToIntLowering* = object
+  ## The C a float -> int conversion compiles to (K10a-float; Nim 2.2.10, read
+  ## from the generated C and checked with UBSan in `tsymex_0016_k10c_ubsan`).
+  cls*: OperandClass       ## the row: `ocFloatToInt` or `ocFloatToIntVia`
+  via*: int                ## the width of the type the value is undefined
+                           ## outside of: the target's own when direct, else
+                           ## the signed intermediate
+
+func floatToIntLowering*(srcWidth, tgtWidth: int; tgtSigned: bool):
+    FloatToIntLowering =
+  ## `int64(f)`, `int(f)` and every unsigned target are one C cast to the
+  ## target. A signed target narrower than the operand's natural integer is
+  ## `(NI8)((NI64)f)`: int64 for a `float64` operand, int32 for a `float32`
+  ## one (`float32 -> int32` is direct).
+  let natural = if srcWidth == 32: 32 else: 64
+  if tgtSigned and tgtWidth < natural:
+    FloatToIntLowering(cls: ocFloatToIntVia, via: natural)
+  else:
+    FloatToIntLowering(cls: ocFloatToInt, via: tgtWidth)
+
+func convertDefinedness*(c: OperandClass; p: DefProfile): Definedness =
   ## The float -> int drain's read: the answer of the admitted `dsConvert`
-  ## row for the build's profile (undefined under every one).
-  let a = admitDefined(aoConvert, ocFloatToInt, dsConvert)
-  doAssert a.admitted, "definedness: no dsConvert row"
+  ## row of class `c` for the build's profile (undefined under every one).
+  let a = admitDefined(aoConvert, c, dsConvert)
+  doAssert a.admitted, "definedness: no dsConvert row " & defKey(aoConvert, c)
   a.payload[p]
 
 func readUb*(): UbKind =

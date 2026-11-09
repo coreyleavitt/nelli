@@ -154,13 +154,14 @@ suite "S8g (1) float -> int: no RangeDefect, exact in range, fresh outside":
     checkpoint($miss.status & " " & show(miss.errors))
     check miss.status == sxUnsat
 
-  test "int8(f) of an out-of-range f is not a false sxUnsat":
-    ## K10a-float: the C cast is undefined there (the low byte on x86-64);
-    ## the path halts, so the verdict is an untrusted sxUnknown.
+  test "int8(f) of an out-of-range f is not unreachable (was a false sxUnsat)":
+    ## Nim converts through int64, so the value wraps, defined: exact again
+    ## (K10a-float's precision fix; only NaN, an infinity or a value outside
+    ## int64 is undefined).
     let r = symexFind(f2iI8Wrap, tLabel("s8g_f2i_i8wrap"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnknown
-    check r.errors.hasKind(ubFloatToIntRange)
+    check r.status == sxSat
+    check reproduces(f2iI8Wrap(r.witness[0]), "s8g_f2i_i8wrap")
 
   test "int8(f) in range is exact at width 8":
     let r = symexFind(f2iI8InRange, tLabel("s8g_f2i_i8inrange"))

@@ -321,7 +321,12 @@ const renderAsChoicesVersion* = "12"
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "306"
+const symexWalkerVersion* = "307"
+  ## RFC-0016 K10b containment (306->307): building the witness's pins
+  ## (`modelPins`) and the tail walk no longer leave their in-band lowering
+  ## degrades in the sink the explore verdict drains, so a pin the walker could
+  ## not build (a variant with an unbacked seq arm) leaves the pins incomplete
+  ## instead of tainting the winner `sxUnknown` (`tsymex_r6_n13_reassign_seqarm`).
   ## RFC-0016 K10b pins (305->306): a builtin set parameter is pinned by its
   ## bit-vector in the witness's pins (`modelPins`), so a lossy set winner is
   ## tail-checked and trusted where its tail is defined, not failed closed

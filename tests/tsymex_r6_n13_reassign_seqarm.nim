@@ -176,3 +176,6 @@ suite "symex N13 -- walker version pin":
 
   test "walker version floor >= 98 (N13: test-only coverage closure, no verdict change)":
     check parseInt(symexWalkerVersion) >= 98
+
+  test "walker version floor >= 307 (K10b: the pins and tail walk leave no lowering degrade in the verdict)":
+    check parseInt(symexWalkerVersion) >= 307

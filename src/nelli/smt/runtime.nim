@@ -12721,6 +12721,20 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
   ## free, which only widens what the second walk must show defined, and
   ## clears `complete`: a lossy winner is tail-checked only when it is set.
   result.complete = true
+  # Building a leaf term may degrade in-band (`allocDegrade`: a compound value
+  # with no single-leaf sort, say), which records into the lowering sinks the
+  # verdict drains. A pin is not part of the program: its degrade must not
+  # taint the explore verdict (`tsymex_r6_n13_reassign_seqarm`), it only leaves
+  # the pins incomplete.
+  let degradeBase = loweringDegradeErrors.len
+  let pendingTaintBase = loweringPendingTaint
+  let pendingUbBase = loweringPendingUb
+  defer:
+    if loweringDegradeErrors.len > degradeBase:
+      loweringDegradeErrors.setLen(degradeBase)
+      result.complete = false
+    loweringPendingTaint = pendingTaintBase
+    loweringPendingUb = pendingUbBase
   for p in params:
     if not env.hasKey(p.name):
       result.complete = false
@@ -29282,6 +29296,20 @@ proc hostRefusedResult(r: bprof.BuildRefusal): RawResult =
   result.soundness.replay = rsNotNeeded
   stampBuild(result.soundness)
 
+proc dropWitnessPins(r: var RawResult) =
+  ## RFC-0016 K10b. The pins are Z3 terms, which keep the run's context alive
+  ## (17 MB before a term is made) for as long as any value holding one lives.
+  ## Only the run's own tail check reads them, so none leaves the run in a
+  ## result: a result that outlives it (the caller's, the cache's) would pin
+  ## the context (`tsymex_0016_s8cj_runctx`).
+  case r.status
+  of sxSat: r.witness.pins = @[]
+  of sxRaised: r.raisedWitness.pins = @[]
+  else: discard
+  for c in r.candidates.mitems: c.input.pins = @[]
+  for d in r.diagnostics.mitems: d.raisedWitness.pins = @[]
+  for u in r.undefined.mitems: u.witness.pins = @[]
+
 proc runSymex*(prog: SymexProgram,
                target: SymexTarget,
                settings: SymexSettings = defaultSymexSettings()): RawResult =
@@ -29310,6 +29338,7 @@ proc runSymex*(prog: SymexProgram,
   # `finally` (CR-13's goto-exception caveat).
   let prevCtx = currentContext()
   result = runSymexCaught(prog, target, settings)
+  dropWitnessPins(result)
   setCurrentContext(prevCtx)
   # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
   # (the C backend loses a raise unwinding through the walk) has no verdict.
@@ -29726,6 +29755,11 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
       result.incl UbKind(e.kind)
     elif taintsRun(e):
       result.incl UbKind(ubTailUnverified)
+  # The second walk is a check, not part of the verdict: what it recorded in
+  # the lowering sink was read above, and must not reach the explore walk's
+  # errors (`tsymex_r6_n13_reassign_seqarm`).
+  if loweringDegradeErrors.len > lowerBase:
+    loweringDegradeErrors.setLen(lowerBase)
 
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,

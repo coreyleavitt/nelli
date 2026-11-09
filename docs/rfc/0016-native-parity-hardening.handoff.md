@@ -472,6 +472,16 @@
   join also named `defined:read/uninitialised` and `errorkind:ubIndeterminateRead`
   (the `{.noinit.}` pin is skipped on a re-exec replay), allowlisted
   `rows=mingw,msvc,linux-cpp`, linux-c evidencing both.
+  int5 CI fixes (walker 306 to 307): `tsymex_r6_n13_reassign_seqarm` went sxRaised
+  because `modelPins` (a variant parameter's leaf split) and the tail walk recorded
+  `seUnsupportedCompoundSortLeaf` in `loweringDegradeErrors`, which the explore verdict
+  then drained; both now restore the sink and a degrade leaves the pins incomplete.
+  `tsymex_0016_s8cj_runctx`: `modelPins`' heap-constant loop did `continue` out of a
+  `try`, which skips the locals' destructors on goto exceptions and kept the 17 MB
+  context alive. `tsymex_0016_wa_checksoff` S1 bounds `n` (the model's 2^62 trips cannot be
+  followed, fail closed by design); `tsymex_rfc0005_s8bm_stability` names the target query
+  by its search, the tail walk appending a cheap query after it; the A2a marker is back on
+  its call line. Witness pins are dropped from every result at the run boundary.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

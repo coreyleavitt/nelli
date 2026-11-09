@@ -45,3 +45,33 @@ suite "K10a-float: one site per undefined arithmetic op":
     check r.undefined.len == 1
     if r.undefined.len == 1:
       check lineOf(r.undefined[0].site) == 21
+
+proc sutTwoPlusEq(a, b: int) =
+  var x = a
+  var y = b
+  x += 1
+  y += 2
+  if x == 5 and y == 6: symexTarget("hit")
+
+proc sutTwoInc(a, b: int) =
+  var x = a
+  var y = b
+  inc x
+  inc y, 2
+  if x == 5 and y == 6: symexTarget("hit")
+
+suite "K10a-float: rebuilt binops keep their source site":
+  test "two `+=` give two findings with distinct sites":
+    let r = symexFind(sutTwoPlusEq, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 2
+    if r.undefined.len == 2:
+      check {lineOf(r.undefined[0].site), lineOf(r.undefined[1].site)} ==
+            {52, 53}
+  test "two `inc` give two findings with distinct sites":
+    let r = symexFind(sutTwoInc, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 2
+    if r.undefined.len == 2:
+      check {lineOf(r.undefined[0].site), lineOf(r.undefined[1].site)} ==
+            {59, 60}

@@ -195,10 +195,11 @@
   the float -> int conversion carries `IRExpr.convSite` and the signed
   `+ - * div mod` binop `bsite` (`file:line:col` from the parser, part of
   the canonical key when set), `convFloatToIntBoundConds` holds `ConvBound`
-  (cond + site), and `lowerArithAt` sets `lowerOpSite` so the arithmetic
-  traps name their op ("signed ... overflow at file:l:c"); two conversions
-  or ops in one SUT are two findings. Compound-assignment and `inc`/`dec`
-  rebuilds carry no `bsite` yet (they keep the construct-only name).
+  (cond + site), and `lowerArith` takes the op's site as a parameter so the
+  arithmetic traps name their op ("signed ... overflow at file:l:c"); two
+  conversions or ops in one SUT are two findings. Every binop the parser
+  rebuilds (`+=`-style compound assignment, `inc`/`dec`, `succ`/`pred`)
+  takes the site of its source node (`siteBinop`).
   Pins: `tests/tsymex_0016_k10af_float.nim`, `tsymex_0016_k10af_sites.nim`,
   `tsymex_0016_k10af_sites_checksoff.nim`.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen

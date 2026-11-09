@@ -2163,13 +2163,10 @@ var uninitReadConds* {.threadvar.}: seq[Z3Bool]
   ## `WalkCtx.uninitReadConds` when in a walk. Reset alongside
   ## `arithTrapConds` at every reset site.
 
-var lowerOpSite* {.threadvar.}: string
-  ## K10a-float. The source site of the binop `lower` is lowering, set around
-  ## `lowerArith` so the traps it deposits name their own op ("" outside).
-
-proc opSite(construct: string): string =
-  ## The trap's site text: the construct, at its source position when known.
-  if lowerOpSite.len > 0: construct & " at " & lowerOpSite else: construct
+proc opSite(construct, site: string): string =
+  ## K10a-float. The trap's site text: the construct, at its source position
+  ## when the lowering op carries one.
+  if site.len > 0: construct & " at " & site else: construct
 
 type ArithTrap* = object
   ## RFC-0016 W1-d1a. One `arithTrapConds` deposit: the trap predicate, and
@@ -8925,7 +8922,7 @@ func arithOpOf(op: IRBinop): ArithOp =
   of bDiv: aoDiv
   else: aoMod
 
-proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop) =
+proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop; site: string) =
   ## RFC-0016 W1-d2 (W-07). A signed `+`, `-` or `*` overflow side. With the
   ## build's overflow checks on it is Nim's `OverflowDefect` fork
   ## (`overflowConds`). With them off (`wraps()`) the C operation is
@@ -8946,14 +8943,14 @@ proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop) =
   of dkDefined: return
   of dkUndefined:
     let tr = ArithTrap(cond: oc, ub: some(ans.ub),
-                       site: opSite("signed `+`, `-` or `*` overflow"))
+                       site: opSite("signed `+`, `-` or `*` overflow", site))
     arithTrapConds.add tr
     syncArithTrapCond(tr)
   of dkDefect:
     overflowConds.add oc
     syncOverflowCond(oc)
 
-proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
+proc lowerArith(a, b: SymVal, op: IRBinop, site = ""): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
   ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
   ## Same op-pair order; same signed/unsigned selection (via binBV/divBV/modBV).
@@ -9027,7 +9024,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
                   site: opSite(if unsignedDiv:
                            (if op == bDiv: "`x div 0'u`" else: "`x mod 0'u`")
                          else:
-                           (if op == bDiv: "`x div 0`" else: "`x mod 0`")))
+                           (if op == bDiv: "`x div 0`" else: "`x mod 0`"), site))
       else: ArithTrap(cond: c)
     if wraps():
       # RFC-0005 S8aa: Nim's zero-divisor check is part of its overflow
@@ -9064,7 +9061,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
                           of svBV8: 8
                           of svBV16: 16
                           of svBV32: 32
-                          else: 64, op)
+                          else: 64, op, site)
   elif op in {bAdd, bSub, bMul} and a.kind == svInt and a.ziWidth != 0 and a.ziSigned:
     # Issue #161 slice 2. The obligation is raised unconditionally; what
     # varies is who discharges it. Try the static proof first, and record
@@ -9079,7 +9076,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       obligationLog.add ObligationEntry(
         op: op, width: a.ziWidth, signed: a.ziSigned,
         disposition: odLive, bound: none(Interval))
-      depositSignedOverflow(overflowCondInt(a, b, op), a.ziWidth, op)
+      depositSignedOverflow(overflowCondInt(a, b, op), a.ziWidth, op, site)
   # RFC-0005 S8i: signed `div`/`mod` of `low(T)` by `-1`. `div` raises
   # `OverflowDefect` (Nim's check, at every width) -- the `overflowConds`
   # sink, acOverflow-gated like add/sub/mul. At 32 and 64 bits the C
@@ -9112,7 +9109,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
           if lowAns.kind == dkUndefined:
             ArithTrap(cond: tc, ub: some(lowAns.ub),
                       site: opSite(if op == bMod: "`low(T) mod -1`"
-                                   else: "`low(T) div -1`"))
+                                   else: "`low(T) div -1`", site))
           else:
             ArithTrap(cond: tc)
         arithTrapConds.add tr
@@ -9165,13 +9162,6 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     of bDiv: divBV(a, b)
     of bMod: modBV(a, b)
     else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
-
-proc lowerArithAt(a, b: SymVal, op: IRBinop, site: string): SymVal =
-  ## K10a-float. `lowerArith` with the op's source site in view, so the
-  ## undefined-behaviour traps it deposits name this op.
-  lowerOpSite = site
-  try: result = lowerArith(a, b, op)
-  finally: lowerOpSite = ""
 
 proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised comparison dispatch: exact copy of the
@@ -10959,7 +10949,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let r = ejectBase(lower(env, e.rhs, pp))
       when defined(symexTestInjectWalkerFault):
         injectShapeFault("term")   # RFC-0005 S8ce: both operands built
-      lowerArithAt(l, r, e.bop, e.bsite)
+      lowerArith(l, r, e.bop, e.bsite)
   of iekBorrowOp:
     # Phase 15 G5. A `{.borrow.}` operator on a `distinct T`: EJECT both operands
     # to their base SymVals (G4's `distinctBaseSym`, via `ejectBase`), apply the

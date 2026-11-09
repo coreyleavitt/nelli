@@ -1580,6 +1580,13 @@ proc srcSite(n: NimNode): string =
   let li = n.lineInfoObj
   li.filename & ":" & $li.line & ":" & $li.column
 
+proc siteBinop(op: IRBinop; l, r: IRExpr; n: NimNode): IRExpr =
+  ## K10a-float. A binop the parser rebuilds from source node `n` (`inc`,
+  ## `+=`, `succ`, ...): signed `+ - * div mod` carry `n`'s site, as the
+  ## infix form does, so each names its own undefined finding.
+  result = mkBinop(op, l, r)
+  if op in {bAdd, bSub, bMul, bDiv, bMod}: result.bsite = srcSite(n)
+
 proc annotationViolation(ctx: ParseCtx; n: NimNode;
                          kind: AnnotationViolationKind; callee, msg: string) =
   ## RFC-0005 S8 (§13.3, i3). Records a false `{.symexTransparent.}` claim at
@@ -13086,8 +13093,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       var lo, hi: int64
       case ordStepBounds(n[1], ownRange = false, lo, hi)
       of oscIntFamily:
-        return mkBinop(if calleeSym.strVal == "pred": bSub else: bAdd,
-                       base, step)
+        return siteBinop(if calleeSym.strVal == "pred": bSub else: bAdd,
+                         base, step, n)
       of oscBounds:
         let stepTy = if n.len == 3: classifyType(n[2]).ty else: nil
         let checked = checkedOrdinalStep(base, classifyType(n[1]).ty, step,
@@ -18036,7 +18043,7 @@ proc parseIncDecLvalue(n: NimNode; preamble: var seq[IRStmt];
   let oldTmp = freshSynth(ctx, "incOld")
   preamble.add mkLet(oldTmp, lty, parseExpr(n[1], preamble, ctx))
   let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
-  let newVal = mkBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR)
+  let newVal = siteBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR, n)
   parseAsgn(nnkAsgn.newTree(target, newEmptyNode()), newVal, preamble, ctx)
 
 proc callMagic(n: NimNode): string =
@@ -20434,7 +20441,7 @@ proc parseStmtInner(n: NimNode,
       var lo, hi: int64
       case ordStepBounds(recv, ownRange = true, lo, hi)
       of oscIntFamily:
-        return mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR), incTy)
+        return mkAssign(nm, siteBinop(bop, mkVar(nm), stepIR, n), incTy)
       of oscBounds:
         let stepTy = if n.len >= 3: classifyType(n[2]).ty else: nil
         let checked = checkedOrdinalStep(mkVar(nm), incCls.ty, stepIR,
@@ -20987,7 +20994,7 @@ proc parseStmtInner(n: NimNode,
                     "`: the bounds of its type are not modelled -- path " &
                     "degraded to sxUnknown"),
             "`" & augOp.strVal & "` on this receiver is not modelled")
-        return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR), augTy)
+        return mkAssign(nm, siteBinop(bop, mkVar(nm), rhsIR, n), augTy)
       elif lhs.kind == nnkDerefExpr and lhs.len == 1 and
            augOp.strVal != "&=" and
            ((classifyType(lhs).ty.kind == itInt and
@@ -20999,7 +21006,7 @@ proc parseStmtInner(n: NimNode,
         # ranged pointee declines (the write has no RangeDefect fork).
         let old = parseExpr(lhs, preamble, ctx)
         let rhsIR = parseExpr(n[2], preamble, ctx)
-        let newVal = mkBinop(binopForInfix(augOp.strVal[0 .. ^2]), old, rhsIR)
+        let newVal = siteBinop(binopForInfix(augOp.strVal[0 .. ^2]), old, rhsIR, n)
         return parseAsgn(nnkAsgn.newTree(lhs, newEmptyNode()), newVal,
                          preamble, ctx)
       else:
@@ -21025,7 +21032,7 @@ proc parseStmtInner(n: NimNode,
             let rhsIR = parseExpr(n[2], preamble, ctx)
             let newVal =
               if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
-              else: mkBinop(binopForInfix(baseOpStr), old, rhsIR)
+              else: siteBinop(binopForInfix(baseOpStr), old, rhsIR, n)
             let fw = valueFieldWrite(lhs, newVal, preamble, ctx)
             return fw.toStmt
         # RFC-0005 S8am (S8z's remainder, item 1): `s[i] += v` (and -=, *=,
@@ -21071,7 +21078,7 @@ proc parseStmtInner(n: NimNode,
                 let rhsIR = parseExpr(n[2], preamble, ctx)
                 let newVal =
                   if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
-                  else: mkBinop(binopForInfix(baseOpStr), old, rhsIR)
+                  else: siteBinop(binopForInfix(baseOpStr), old, rhsIR, n)
                 return mkIndexAssignStmt(seqRecv.strVal, idxIR, newVal, siteLoc(n))
         # RFC-0005 S8bc (item 7): `a[i] += v` on an ARRAY element not
         # reached above, `t[k] += v` on a TABLE value, and `t.mgetOrPut(k,
@@ -21096,7 +21103,7 @@ proc parseStmtInner(n: NimNode,
             let newVal =
               if baseOpStr == "&":
                 mkStrOp(iekStrConcat, "&", @[mkVar(oldTmp), rhsIR])
-              else: mkBinop(binopForInfix(baseOpStr), mkVar(oldTmp), rhsIR)
+              else: siteBinop(binopForInfix(baseOpStr), mkVar(oldTmp), rhsIR, n)
             return parseAsgn(nnkAsgn.newTree(elemLvalueBracket(n[1]),
                                              newEmptyNode()),
                              newVal, preamble, ctx)

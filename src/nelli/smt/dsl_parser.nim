@@ -16857,41 +16857,117 @@ proc markCheckOnly(st: IRStmt): IRStmt =
   elif st.kind == isIndex:
     st.ixCheckOnly = true
 
-proc routineWritesHeap(sym: NimNode; seen: var seq[NimNode]): bool
-proc nodeWritesHeap(n: NimNode; seen: var seq[NimNode]): bool =
-  ## RFC-0005 S8cn. `n` writes through a `ptr` or a `ref`, or calls a routine
-  ## that does, or a proc value.
-  if n == nil: return false
-  case n.kind
-  of nnkAsgn, nnkFastAsgn, nnkHiddenAddr:
-    var lv = (if n.kind == nnkHiddenAddr: n[0] else: n[0])
-    if n.kind == nnkHiddenAddr and isVarIndirection(lv): lv = lv[0]
-    var steps: seq[NimNode]
-    let r = lvalueRoot(lv, steps)
-    if r == nil or steps.len > 0: return true
-  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix:
-    if n.len > 0:
-      if n[0].kind != nnkSym: return true
-      # The markers' runtime side touches only its own capture state.
-      if isMarkerCall(n): return false
-      if symKind(n[0]) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
-        return true
-      if isUserRoutine(n[0]):
-        if routineWritesHeap(n[0], seen): return true
-      else:
-        for j in 1 ..< n.len:
-          if n[j].typeKind == ntyPtr: return true
-  else: discard
-  for c in n:
-    if nodeWritesHeap(c, seen): return true
-  false
+type MayWriteState = object
+  ## RFC-0016 K6a. The routines being analysed (a hit is a cycle) and the ones
+  ## already proved read-only.
+  stack, clean: seq[NimNode]
 
-proc routineWritesHeap(sym: NimNode; seen: var seq[NimNode]): bool =
-  if containsSym(seen, sym): return false
-  seen.add sym
+const mayWriteMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
+  "AppendStrStr", "AppendSeqElem", "New", "NewFinalize", "WasMoved",
+  "Destroy", "Swap"]
+  ## RFC-0016 K6a (W-08). The magics that write the location of a `var`
+  ## argument: `cgMutatingMagics` (`ccgcalls.getPotentialWrites`) without
+  ## `Addr`, which takes an address and writes nothing, plus `Swap`.
+
+const mayWriteMaxDepth = 64
+  ## RFC-0016 K6a. Walked callees nested deeper than this read as may-write.
+
+proc lvalueEscapes(lv: NimNode): bool =
+  ## RFC-0016 K6a. Storing to `lv` may reach memory no variable of the
+  ## routine names: it is rooted at a call result, or behind a `ptr`/`ref`.
+  var lv = lv
+  if lv.kind == nnkHiddenAddr and lv.len > 0: lv = lv[0]
+  if isVarIndirection(lv): lv = lv[0]
+  var steps: seq[NimNode]
+  let r = lvalueRoot(lv, steps)
+  r == nil or steps.len > 0
+
+proc mayWrite(n: NimNode; st: var MayWriteState): bool
+
+proc routineMayWrite(sym: NimNode; st: var MayWriteState): bool =
+  ## RFC-0016 K6a. A walked user routine's body may write; a routine met while
+  ## its own analysis is open (a cycle), a method, a body outside Nim and one
+  ## with no impl to read may write anything.
+  if sym.symKind == nskMethod or isBodilessForeign(sym): return true
+  if containsSym(st.clean, sym): return false
+  if containsSym(st.stack, sym) or st.stack.len >= mayWriteMaxDepth:
+    return true
   let impl = resolveRoutineImpl(sym)
   if impl == nil or impl.len < 7: return true
-  nodeWritesHeap(body(impl), seen)
+  st.stack.add sym
+  result = mayWrite(impl[6], st)
+  st.stack.setLen(st.stack.len - 1)
+  if not result: st.clean.add sym
+
+const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkSym, nnkIdent,
+  nnkEmpty, nnkCommentStmt, nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
+  nnkIfStmt, nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse, nnkElseExpr,
+  nnkWhenStmt, nnkCaseStmt, nnkOfBranch, nnkWhileStmt, nnkForStmt,
+  nnkReturnStmt, nnkBreakStmt, nnkContinueStmt, nnkDiscardStmt, nnkVarSection,
+  nnkLetSection, nnkConstSection, nnkConstDef, nnkIdentDefs, nnkVarTuple,
+  nnkTryStmt, nnkExceptBranch, nnkFinally, nnkRaiseStmt, nnkBracket, nnkCurly,
+  nnkPar, nnkTupleConstr, nnkObjConstr, nnkExprColonExpr, nnkBracketExpr,
+  nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr,
+  nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkChckRange,
+  nnkStringToCString, nnkCStringToString, nnkObjUpConv, nnkObjDownConv,
+  nnkRange}
+  ## RFC-0016 K6a. The node kinds proved to write nothing of their own: what
+  ## they may write is what their children may. The read-only axis of
+  ## RFC-0016 §8.1; every other kind reads as may-write.
+
+proc mayWrite(n: NimNode; st: var MayWriteState): bool =
+  ## RFC-0016 K6a (W-08). Evaluating `n` may write memory no variable of the
+  ## routine names -- through a `ptr` or a `ref`, through a `var` formal fed
+  ## such a location, in foreign code (`asm`, `emit`, a `cast`), or in a
+  ## callee that does. An allowlist: a node kind not in
+  ## `mayWriteReadOnlyKinds` answers true. A walked user callee is analysed
+  ## by its body (a cycle answers true, `routineMayWrite`); an opaque one, a
+  ## proc value and a callback argument may write anything. A write to a
+  ## variable by name is not this question (`mayWriteRoot` scans those).
+  if n == nil: return false
+  case n.kind
+  of nnkAsgn, nnkFastAsgn:
+    if lvalueEscapes(n[0]): return true
+  of nnkHiddenAddr:
+    if n.len > 0 and lvalueEscapes(n[0]): return true
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    if n.len == 0 or n[0].kind != nnkSym: return true
+    let head = n[0]
+    # The markers' runtime side touches only its own capture state.
+    if isMarkerCall(n): return false
+    if symKind(head) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
+      return true
+    let m = routineMagic(head)
+    if m == "Swap":
+      for i in 1 ..< n.len:
+        if lvalueEscapes(n[i]): return true
+    elif m in mayWriteMagics and n.len > 1 and lvalueEscapes(n[1]):
+      return true
+    if isUserRoutine(head):
+      if routineMayWrite(head, st): return true
+    elif macros.strVal(head) notin ["==", "!=", "isNil"]:
+      # A stdlib body is not read: what it writes through an address it is
+      # given (`copyMem`, `zeroMem`) or calls back is not visible here.
+      for j in 1 ..< n.len:
+        if n[j].kind in {nnkEmpty, nnkNilLit}: continue
+        if n[j].typeKind in {ntyPtr, ntyPointer, ntyCString, ntyRef, ntyProc} or
+           scanArgHoldsPtr(n[j].getTypeInst):
+          return true
+  of nnkPragma:
+    for p in n:
+      let head = if p.kind in {nnkExprColonExpr, nnkCall} and p.len > 0: p[0]
+                 else: p
+      if head.kind in {nnkSym, nnkIdent} and eqIdent(head, "emit"): return true
+  of mayWriteReadOnlyKinds: discard
+  else: return true
+  for c in n:
+    if mayWrite(c, st): return true
+  false
+
+proc mayWrite(n: NimNode): bool =
+  var st: MayWriteState
+  mayWrite(n, st)
 
 proc rootReachedByPointer(root: NimNode; heapSteps: seq[NimNode]): bool =
   ## RFC-0005 S8cn. A pointer may reach the memory of `root`: the location is
@@ -16935,8 +17011,7 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
     ""
   result = scan(n)
   if result.len == 0 and rootReachedByPointer(root, heapSteps):
-    var seen: seq[NimNode]
-    if nodeWritesHeap(n, seen):
+    if mayWrite(n):
       result = "written through a pointer or a ref"
 
 func alwaysCopied(t: IRType): bool =

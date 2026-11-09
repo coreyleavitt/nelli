@@ -359,6 +359,24 @@
   (98 min). The cap bounds work, not wall time, and a `queryTimeoutMs` or
   harness timeout still ends a walk first. CRH-01 closed (pins:
   `k7_splitlines_unbounded`, `augmented_assign`, `k2c_typeclass`).
+  K6a (`rfc-0016-k6a`, walker 292->293; W-08 closed): `mayWrite(n)` in
+  `dsl_parser.nim` replaces `nodeWritesHeap` / `routineWritesHeap`. It is an
+  allowlist of read-only node kinds (`mayWriteReadOnlyKinds`); every other
+  kind (asm, a `cast`, a lambda, ...) and an `emit` pragma read as may-write.
+  A call: a proc value, a method, a bodiless/importc routine, a stdlib routine
+  given a `ptr`/`pointer`/`cstring`/`ref`/proc argument, and a `var` actual
+  (or `mayWriteMagics` first argument, i.e. `cgMutatingMagics` minus `Addr`
+  plus `Swap`) whose lvalue is behind a pointer all may write; a walked user
+  callee is analysed by its body with a cycle bound (a cycle, or depth 64,
+  answers may-write; the old `seen` list answered "no write"). Its only
+  consumer is `mayWriteRoot`'s pointer branch (the S8cn `lent`/`let`
+  decline). `cgMutatingMagics` itself stays for `cgPotentialWrites` (a
+  different predicate: root symbols); K4a-dispatch's move of that list will
+  need `mayWriteMagics` to follow. Pins: `tests/tsymex_0016_k6a_maywrite.nim`
+  (12 may-write shapes with native runs, 5 read-only). Not done (remainder):
+  K6b hook copy-proof (W-09/W-10), K6c `ptrUsesStayLocal` /
+  `routeStoresThroughDeref` / `bindsViewWhole`; `scanOpaqueEffects` is still
+  a separate scanner (D-05's "one rule" is not yet one function).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

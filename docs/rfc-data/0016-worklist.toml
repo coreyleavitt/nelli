@@ -1696,11 +1696,12 @@ cells = ["stdlib:strutils.rfind/indexofLink"]
 id = "W-08"
 table = "5.9"
 title = "`nodeWritesHeap` is a fail-open denylist"
-state = "open"
-note = ""
+state = "closed"
+note = "K6a (`rfc-0016-k6a`, walker 293, 2026-11-09)"
 slice = "K6a"
 home = "K6a"
 cells = []
+pins = ["tsymex_0016_k6a_maywrite"]
 
 [[row]]
 id = "W-09"

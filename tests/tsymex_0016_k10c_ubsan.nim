@@ -18,7 +18,7 @@
 ## Linux only for the UBSan half: mingw gcc and MSVC have no UBSan runtime,
 ## so those legs record a `skipCell` for each cell and keep the walker half,
 ## which does not depend on the C compiler.
-import std/[unittest, strutils, os, options]
+import std/[unittest, strutils, os, options, math, sequtils]
 import nelli
 import nelli/symex
 import nelli/smt/definedness
@@ -181,6 +181,32 @@ proc casesFor(r: Row; p: DefProfile): seq[UbCase] =
                         expect: if undefined and cond: ueTrip else: ueClean,
                         cond: cond)
 
+# The float -> int cell: operands are float64 bit patterns, the target an
+# integer width. `cond` is the condition C itself makes undefined, decided
+# without C: NaN, an infinity, or a value outside `int64`. Nim 2.2.10 emits the
+# conversion to a narrower target through `NI` (int64), so a value in `int64`
+# but outside an `int32`/`int16`/`int8` target is an implementation-defined
+# wrap in C (`int8(300.0) == 44`), not undefined: the row calls it undefined
+# anyway (a conservative decline), and the cases below pin that difference as
+# clean native runs rather than hide it.
+const floatTargets = ["int64", "int32", "int16", "int8"]
+
+func f2iCases(p: DefProfile): seq[UbCase] =
+  let undefined = convertDefinedness(p).kind == dkUndefined
+  for ty in floatTargets:
+    let w = width(ty)
+    let hi = pow(2.0, float(w - 1))      # the first value above the range
+    let lo = -hi                         # the lowest value in range
+    var xs = @[0.0, 1.5, -1.5, 100.0, lo, hi, hi * 4.0, lo * 4.0, 1.0e30,
+               -1.0e30, NaN, Inf, -Inf]
+    if w < 64: xs.add [hi - 1.0, lo - 1.0]
+    for x in xs:
+      let cond = x != x or x == Inf or x == -Inf or
+                 x >= 9.223372036854775808e18 or x < -9.223372036854775808e18
+      result.add UbCase(ty: ty, op: "f2i", a: cast[uint64](x), b: 0,
+                        expect: if undefined and cond: ueTrip else: ueClean,
+                        cond: cond)
+
 proc cellOf(r: Row): CellKey = parseCellKey("defined:" & r.key).get
 
 # ---- the suite ---------------------------------------------------------------
@@ -242,7 +268,39 @@ suite "K10c: the table against C (UBSan)":
       for r in rows:
         skipCell(r.cellOf, "UBSan does not exist for mingw gcc or MSVC; the " &
           "cell is pinned by the walker half and by the Linux legs' UBSan run")
+    test "no float-cast sanitizer on this toolchain: the float cell is declared":
+      skipCell(parseCellKey("defined:convert/floatToInt").get,
+        "UBSan does not exist for mingw gcc or MSVC; the cell is pinned by " &
+        "the walker half (tsymex_0016_k10af_float) and by the Linux legs' " &
+        "-fsanitize=float-cast-overflow run")
   else:
+    test "the float -> int cell (-fsanitize=float-cast-overflow)":
+      let p = buildFloatToIntProbe("K10c-f2i")
+      defer: dispose(p)
+      let cases = f2iCases(dpUnchecked)
+      check cases.anyIt(it.expect == ueTrip)
+      pinUbsanCell(parseCellKey("defined:convert/floatToInt").get, p, cases)
+      # NaN, an infinity and a value outside int64 each trip; a value in range
+      # (the truncation included) does not.
+      for c in cases:
+        if c.cond: check c.expect == ueTrip
+        else: check c.expect == ueClean
+
+    test "the float -> int row over-approximates narrow targets (documented)":
+      # Out of an int32/16/8 target but inside int64: the row says undefined
+      # (halt, untrusted) and C wraps, defined. Sound, and imprecise by design
+      # until the row distinguishes the target width.
+      check convertDefinedness(dpUnchecked).kind == dkUndefined
+      let p = buildFloatToIntProbe("K10c-f2i-wrap")
+      defer: dispose(p)
+      for ty in ["int32", "int16", "int8"]:
+        let w = width(ty)
+        let x = pow(2.0, float(w - 1))
+        let (rc, output) = p.runCase(UbCase(ty: ty, op: "f2i",
+          a: cast[uint64](x), b: 0, expect: ueClean))
+        check rc == 0
+        check "runtime error" notin output
+
     test "the default build profile (-fsanitize=undefined)":
       let p = buildUbsanProbe("K10c")
       defer: dispose(p)

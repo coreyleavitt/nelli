@@ -49,6 +49,29 @@ of "uint16": go(uint16)
 else: quit(3)
 """
 
+const floatToIntProbeSrc* = """
+import std/[os, strutils]
+
+proc conv[S](x: float64): S {.noinline.} = S(x)
+
+let ty = paramStr(1)
+let f = cast[float64](parseBiggestUInt(paramStr(3)))
+
+template go(S: typedesc) =
+  echo conv[S](f)
+
+case ty
+of "int64": go(int64)
+of "int32": go(int32)
+of "int16": go(int16)
+of "int8": go(int8)
+else: quit(3)
+"""
+  ## RFC-0016 K10c, the float -> int cell. The operand is the bit pattern of a
+  ## `float64` (argument 3); the conversion is Nim's plain C cast. Built with
+  ## `-fsanitize=float-cast-overflow`, which gcc does not include in
+  ## `-fsanitize=undefined`.
+
 type
   UbExpect* = enum
     ueClean   ## the C operation is defined for these operands: exit 0
@@ -83,6 +106,19 @@ proc buildUbsanProbe*(who: string; fwrapv = false): UbsanProbe =
   if crc != 0:
     raise newException(PinFailure, who & ": the UBSan probe did not build:\n" &
                        cout)
+
+func floatToIntFlags*(): seq[string] =
+  ## The checks-off build with the float-cast sanitizer on and made fatal.
+  ubsanFlags(false) & @["--passC:-fsanitize=float-cast-overflow",
+                        "--passL:-fsanitize=float-cast-overflow"]
+
+proc buildFloatToIntProbe*(who: string): UbsanProbe =
+  ## Compiles the float -> int probe once (`-fsanitize=float-cast-overflow`).
+  result.build = prepareProbe(who, floatToIntProbeSrc, floatToIntFlags())
+  let (cout, crc) = execCmdEx(result.build.cmd)
+  if crc != 0:
+    raise newException(PinFailure, who & ": the float-cast probe did not " &
+                       "build:\n" & cout)
 
 proc dispose*(p: UbsanProbe) = removeDir(p.build.dir)
 

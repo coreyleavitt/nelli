@@ -2906,7 +2906,21 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
       # RFC-0016 PRC-02. Not closable: the override that runs depends on the
       # receiver's dynamic type, and the macro API cannot list a method's
       # overrides (they are collected into the dispatcher after this scan).
-      acc.markOpen("a method, whose overrides the scan cannot list")
+      # RFC-0016 PRC-02 / probes 3 and 4. The dispatcher is built after every
+      # module is semmed and an override may sit in a module the entry cannot
+      # see (or twice, in two modules: Nim accepts both and picks one), so no
+      # list of overrides can be closed. A fork copies the process and replays
+      # it, so the decline names the run that can. `<entry>` is filled in by
+      # `replayFootprint`, which knows the routine it was asked about.
+      var base = "its first parameter's type"
+      let t = n.getTypeImpl
+      if t.kind == nnkProcTy and t.len > 0 and t[0].kind == nnkFormalParams and
+         t[0].len > 1 and t[0][1].kind == nnkIdentDefs:
+        base = t[0][1][^2].repr
+      acc.markOpen("`" & n.strVal & "`, a method on `" & base & "`, whose " &
+                   "overrides the scan cannot list (one may be declared in a " &
+                   "module `<entry>` cannot see; a Linux or macOS run forks " &
+                   "and replays it)")
     of nskType:
       # RFC-0005 batch 11. A value no variable holds still has its hooks run: a
       # constructor's or a conversion's temporary, passed on to a callee that
@@ -2943,7 +2957,18 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
                      "whose module declares a hook")
     # RFC-0016 PRC-02: a call through a proc value is read as a call of the
     # routines the scan reads (see the symbol case above).
-    for c in n: scanFootprint(c, user, owner, selfKey, acc)
+    if n.kind in {nnkCall, nnkCommand} and n.len == 2 and
+       n[0].kind == nnkSym and
+       n[0].strVal == "procCall" and isStdlibDecl(n[0]) and
+       n[1].kind in nnkCallKinds and
+       n[1].len > 0 and n[1][0].kind == nnkSym and
+       symKind(n[1][0]) == nskMethod:
+      # `procCall m(args)` is a static call of `m`'s own body: no dispatch, so
+      # no override can run. Scan `m` as a plain routine.
+      acc.callees.add n[1][0]
+      for i in 1 ..< n[1].len: scanFootprint(n[1][i], user, owner, selfKey, acc)
+    else:
+      for c in n: scanFootprint(c, user, owner, selfKey, acc)
   of nnkAsmStmt:
     if user: acc.markOpen("`asm` in `" & owner & "`")
   of nnkPragma:
@@ -3042,7 +3067,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     let f = routineFootprint(r)
     if f.open and not result.open:
       result.open = true
-      result.why = f.why
+      result.why = f.why.replace("<entry>", fn.strVal)
     if symKind(r) in procValueSymKinds and not isStdlibDecl(r) and
        addressable(r):
       let ro = owner(r)

@@ -379,10 +379,21 @@ cells = []
 id = "PRC-02"
 table = "5.2a"
 title = "Windows re-exec replay: proc-value, `method` and `{.global.}` witnesses decline Includes INT-13: the six hooks `hostRuntimeHook` checks (`replayproc.nim:171-176`); `setControlCHook` stays INT-15."
-state = "open"
-note = "`rfc-0016-prc02` (2026-11-09), walker 292: proc values, routine `{.global.}`s and the INT-13 hooks done; reopened because `method` witnesses still decline (the scan cannot list a method's overrides) and a proc value naming a borrowed, magic or system routine declines; method gap under design"
+state = "closed"
+note = "`rfc-0016-prc02` (2026-11-09), walker 308: proc values, routine `{.global.}`s and the INT-13 hooks replay; a `method` declines with a message naming its base and why (its overrides cannot be listed: probes 3 and 4 in the handoff), and `procCall m(...)` scans `m` as a plain routine; sound confirmation of a dynamic call is PRC-02b"
 source = "S8ct"
 evidence = "same mechanism as PRC-01; after it"
+pins = ["tsymex_0016_prc02_reexec"]
+cells = []
+
+[[row]]
+id = "PRC-02b"
+table = "5.2a"
+title = "Toolchain oracle: patch the in-house Nim's `cgmeth.generateMethodDispatchers` to emit a per-binary (base method, receiver RTTI, override address) table so the re-exec child can confirm dispatch soundly"
+state = "open"
+note = "follow-up of PRC-02; a Windows re-exec replay of a dynamic `method` call declines until this lands (no macro-time list of overrides is closed: an override may sit in a module the entry cannot see)"
+source = "PRC-02 probes 3 and 4"
+evidence = "`tsymex_0016_prc02_reexec` pins the decline"
 cells = []
 
 [[row]]
@@ -2208,4 +2219,14 @@ state = "open"
 note = ""
 slice = "K4c"
 home = "K5b (AUD-01), K2a (AUD-09), K4c (AUD-11)"
+cells = []
+
+[[row]]
+id = "INT-48"
+table = "5.8c"
+title = "Nim accepts duplicate same-signature method overrides across modules; the dispatcher picks one silently (upstream Nim issue candidate; PRC-02 probe 4)"
+class = "upstream defect, no nelli verdict"
+state = "open"
+note = ""
+source = "PRC-02 probe 4"
 cells = []

@@ -19,6 +19,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/replayproc
+import helpers/prc03_sut     # imports an override module this file cannot see
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -94,7 +95,9 @@ type
 method area(x: Base; v: int): int {.base, gcsafe.} = v
 method area(x: Sub; v: int): int {.gcsafe.} = v + 1
 
-proc runMethod(v: int) {.symexOpaque.} = gOut = area(Sub(), v)
+proc runMethod(v: int) {.symexOpaque.} =
+  let b: Base = Sub()
+  gOut = area(b, v)         # dispatched on the receiver's dynamic type
 proc sutMethod(v: int) =
   symexAssume(v == 3)
   runMethod(v)
@@ -180,13 +183,39 @@ suite "PRC-02: proc values cross to the re-executed child":
     else:
       check r.outcome == roConfirmed
 
+proc runProcCall(v: int) {.symexOpaque.} =
+  gOut = procCall area(Sub(), v)   # a static call: no dispatch
+proc sutProcCall(v: int) =
+  symexAssume(v == 3)
+  runProcCall(v)
+  if gOut == 4: symexTarget("t")
+
 suite "PRC-02: a method":
-  test "declines, naming the method":
+  test "a dynamic call declines, naming the method and its base":
     let r = replayWitness(sutMethod, (3,), tLabel("t"), {})
     checkpoint r.detail
     when replayReexecs:
       check r.outcome == roDeclined
-      check "a method, whose overrides the scan cannot list" in r.detail
+      check "`area`, a method on `Base`, whose overrides the scan cannot " &
+            "list" in r.detail
+      check "a module `sutMethod` cannot see" in r.detail
+      check "a Linux or macOS run forks and replays it" in r.detail
+    else:
+      check r.outcome == roConfirmed
+
+  test "procCall of a method is a static call: scanned as a plain routine":
+    let r = replayWitness(sutProcCall, (3,), tLabel("t"), {})
+    checkpoint r.detail
+    check r.outcome == roConfirmed
+
+  test "an override in a module the entry cannot see":
+    # The dispatcher runs `Sub`'s override although this file never imports
+    # its module; only a fork (which copies the process) reproduces it.
+    let r = replayWitness(sutHidden, (3,), tLabel("t"), {})
+    checkpoint r.detail
+    when replayReexecs:
+      check r.outcome == roDeclined
+      check "whose overrides the scan cannot list" in r.detail
     else:
       check r.outcome == roConfirmed
 
@@ -244,7 +273,7 @@ suite "INT-13: runtime hooks":
     check r.outcome == roConfirmed
 
   test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 292
+    check parseInt(symexWalkerVersion) >= 308
 
 suite "borrowed and system routines":
   test "borrowed and system operators compile and replay":

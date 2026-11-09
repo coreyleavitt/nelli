@@ -3002,10 +3002,8 @@ proc addressable(r: NimNode): bool =
   ## compiler can take the address of (`cast[pointer](==)` is an internal error
   ## for a borrowed `==`), so it is not in the table and a proc value naming it
   ## declines, as one naming any routine the scan did not read does.
-  let impl =
-    try: r.getImpl
-    except CatchableError: return false
-  if impl.kind notin {nnkProcDef, nnkFuncDef} or impl.len <= 6: return false
+  let impl = resolveRoutineImpl(r)
+  if impl.isNil or impl.len <= 6: return false
   if impl[6].kind == nnkEmpty: return false
   if impl[2].kind != nnkEmpty: return false
   if impl[4].kind == nnkPragma:
@@ -3045,7 +3043,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     if f.open and not result.open:
       result.open = true
       result.why = f.why
-    if symKind(r) in {nskProc, nskFunc} and not isStdlibDecl(r) and
+    if symKind(r) in procValueSymKinds and not isStdlibDecl(r) and
        addressable(r):
       let ro = owner(r)
       if ro.kind != nnkSym or symKind(ro) notin userRoutineSymKinds:

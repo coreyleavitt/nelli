@@ -917,11 +917,13 @@ proc emitStmt*(s: IRStmt): NimNode =
             newLit(s.ixRetName), emitExpr(s.ixArr),
             emitExpr(s.ixIdx), emitIRType(s.ixElemTy), newLit(s.ixLoc),
             newLit(s.ixLo),   # RFC-0005 S8z
-            newLit(s.ixCheckOnly))   # RFC-0005 S8bw
+            newLit(s.ixCheckOnly),   # RFC-0005 S8bw
+            newLit(s.ixUnchecked))   # RFC-0016 PRC-07
   of isIndexAssign:
     newCall(bindSym"mkIndexAssignStmt",
             newLit(s.iaRecvName), emitExpr(s.iaIdx),
-            emitExpr(s.iaVal), newLit(s.iaLoc), newLit(s.iaLo))   # RFC-0005 S8z
+            emitExpr(s.iaVal), newLit(s.iaLoc), newLit(s.iaLo),   # RFC-0005 S8z
+            newLit(s.iaUnchecked))   # RFC-0016 PRC-07
   of isSeqPop:
     newCall(bindSym"mkSeqPopStmt",
             newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc),
@@ -1597,6 +1599,15 @@ proc noaliasWithPeers(impl: NimNode): seq[string] =
             names.add $id[j][0]
   if names.len > 0 and peers >= 2: result = names
 
+proc uncheckedTypedIndex(idx: NimNode): bool =
+  ## RFC-0016 PRC-07. An array index that Nim leaves unchecked in C: in a
+  ## build whose range checks are off, a value already of a `range` or enum
+  ## type (not the hidden conversion Nim wraps an `int` index in, which it
+  ## checks as an index). An out-of-range such value is an out-of-array access.
+  if coRange in buildSemantics.checks: return false
+  if idx.kind in {nnkHiddenStdConv, nnkHiddenSubConv}: return false
+  idx.typeKind in {ntyRange, ntyEnum}
+
 proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
                        body: IRStmt; inherit = false): IRStmt =
   ## RFC-0005 S8cu. `body` behind the markers for what `c` says of the routine
@@ -1609,8 +1620,13 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # but the `off` push, which declines below).
   let stamp = arithStamp(c, inherit)
   let restrictParams = noaliasWithPeers(impl)
+  # RFC-0016 PRC-07: a build whose own range checks are off is walked as
+  # compiled (`checks` never names `coRange` there); a routine pushed back to
+  # `rangeChecks: on` is the deviation.
+  let rangePushedOn = c.rangeOn and c.why.len == 0 and
+                      coRange notin buildSemantics.checks
   if c.checks == {} and stamp.isNone and c.unadmitted.len == 0 and
-     restrictParams.len == 0:
+     restrictParams.len == 0 and not rangePushedOn:
     return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
@@ -1626,6 +1642,11 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
       "alias, which is not modelled (" & naWhy & ")",
       "a `noalias` parameter beside another pointer-like parameter")
   let others = c.checks - {coOverflow}
+  if rangePushedOn:
+    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
+      "`rangeChecks: on` in a build whose range checks are off: its range " &
+      "conversions raise `RangeDefect` there, which the walker, following " &
+      "the build, does not model -- path degraded to sxUnknown")
   if c.why.len > 0:
     decl.add ctx.declineMarker(feCheckOption, where &
       ": its check options cannot be read (" & c.why & ") -- path degraded to sxUnknown")
@@ -11893,7 +11914,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # RFC-0005 S8z: the array's first index (`array[1..3, T]`: 1). It was
       # dropped, so `a[1]` read position 1 -- the second element.
       preamble.add mkIndexStmt(synth, arrIR, idxIR, lhsCls.ty.elemTy, "",
-                               arrayIndexLow(n[0]))
+                               arrayIndexLow(n[0]),
+                               unchecked = uncheckedTypedIndex(n[1]))
       mkVar(synth)
     of itSeq:
       # v67 (dev item 1) / round-6 B1: `data[a..b]` (slice, array-lambda
@@ -18063,7 +18085,9 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
       let idxIR = parseExpr(step.idx, preamble, ctx)
       ctx.indexConvPending = false
       preamble.add mkIndexAssignStmt(tmp, idxIR, newVal, siteLoc(step.recv),
-                                     step.lo)
+                                     step.lo,
+                                     unchecked = step.recvTy.kind == itArray and
+                                                 uncheckedTypedIndex(step.idx))
       mkVar(tmp)
     elif step.recvTy.kind == itArray:
       # RFC-0005 S8u: the other elements are constant-index reads of the old

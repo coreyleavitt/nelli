@@ -20495,6 +20495,27 @@ proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
                             conds, settings) == zsUnsat
 
+proc uncheckedIndexReachable(cp: Path; oob: Z3Bool; w: var WalkCtx): bool =
+  ## RFC-0016 PRC-07. Whether the out-of-array side of an unchecked typed index
+  ## is not provably unreachable: decided at the op, as `drainArithTraps`
+  ## decides a trap (provably unreachable under `loopPruneRLimit` is dropped
+  ## and logged, anything else is declined by the caller).
+  if guardLiteral(oob) == glFalse: return false
+  let unsat = guardLiteral(oob) != glTrue and
+    checkCapped(w.z3, pathRoots(cp, [oob]), w.settings,
+                loopPruneRLimit(w.settings)).status == zsUnsat
+  if unsat:
+    logPrune(cp, [oob])
+    return false
+  true
+
+proc uncheckedIndexMsg(loc: string): string =
+  (if loc.len > 0: loc & ": " else: "") &
+    "an array indexed by a value of its own `range`/enum type, with " &
+    "`rangeChecks` off: Nim emits no bound check, so an out-of-range value " &
+    "accesses memory outside the array in C (undefined, not modelled) -- " &
+    "path degraded to sxUnknown (feCheckOption)"
+
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
   ## RFC-fuzzer-nextgen R14: `wmFollowConcrete` counterpart to the
@@ -22512,8 +22533,17 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
       let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.ixLo, n)
       # OOB defect fork — Phase 16 D1a unconditional under `wmExplore`;
       # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
-      maybeForkDefect(cp, not (inLoCond and inHiCond),
-                      "IndexDefect", none(string), w)
+      if stmt.ixUnchecked:
+        # RFC-0016 PRC-07: no check is emitted, so out of range is an access
+        # outside the array in C (undefined), not an `IndexDefect`.
+        let oob = not (inLoCond and inHiCond)
+        if uncheckedIndexReachable(cp, oob, w):
+          survivors.add forkPathTainted(cp, cp.pc & @[oob],
+            declinedIndexEnv(cp.env, stmt, stmt.ixElemTy),
+            w.degrade(feCheckOption, uncheckedIndexMsg(stmt.ixLoc)))
+      else:
+        maybeForkDefect(cp, not (inLoCond and inHiCond),
+                        "IndexDefect", none(string), w)
       # RFC-0005 S8ct: an index that may name more positions than a term walk
       # takes reads a fresh value instead (`arrayAccessTooWide`).
       if arrayAccessTooWide(idxSV, stmt.ixLo, n):
@@ -22597,8 +22627,14 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
       let idxSV = coerceArrayBoolIndex(idxSVraw)
       for cp in drainScalarRaiseForks(idxP, w):
         let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.iaLo, n)
-        maybeForkDefect(cp, not (inLoCond and inHiCond),
-                        "IndexDefect", none(string), w)
+        if stmt.iaUnchecked:
+          let oob = not (inLoCond and inHiCond)
+          if uncheckedIndexReachable(cp, oob, w):
+            survivors.add forkPathTainted(cp, cp.pc & @[oob], cp.env,
+              w.degrade(feCheckOption, uncheckedIndexMsg(stmt.iaLoc)))
+        else:
+          maybeForkDefect(cp, not (inLoCond and inHiCond),
+                          "IndexDefect", none(string), w)
         let elemTy = recvSV.arrElemTy
         let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w,
                                         seqElemLitProto(elemTy))

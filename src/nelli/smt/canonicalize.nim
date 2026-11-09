@@ -321,7 +321,13 @@ const renderAsChoicesVersion* = "12"
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "308"
+const symexWalkerVersion* = "309"
+  ## RFC-0016 PRC-07 (308->309, range half): a `--rangeChecks:off` build is
+  ## walked as compiled (range conversions are the plain C cast; a routine's
+  ## options no longer decline `feCheckOption` for the build's own bit), and an
+  ## array indexed by a value of its own range/enum type is an unchecked access
+  ## there (`isIndex.ixUnchecked`): its out-of-range side is declined, never an
+  ## `IndexDefect`.
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the
   ## winning path's own heaps (`heap_<key>` and its havoc epochs), not every
   ## model constant named `heap_*`, so a havoc'd copy (`@hv`) is not pinned.
@@ -6439,7 +6445,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       "[" & canonicalize(s.ixIdx, env) & "];ety=" &
       canonicalize(s.ixElemTy) &
       (if s.ixLo != 0: ";lo=" & $s.ixLo else: "") &
-      (if s.ixCheckOnly: ";check" else: "") & ">"   # RFC-0005 S8bw
+      (if s.ixCheckOnly: ";check" else: "") &   # RFC-0005 S8bw
+      (if s.ixUnchecked: ";raw" else: "") & ">"   # RFC-0016 PRC-07
   of isIndexAssign:
     # N14 (RFC-chapulin-hardening bucket-2). Distinct `IxA:` prefix (never
     # collides with `Ix:`'s read-side content-address) — `xs[i] = v` and
@@ -6450,7 +6457,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # `bindLocal` (`isIndex`'s `ixRetName` is a fresh let-name instead).
     "St<IxA:" & lookupLocal(env, s.iaRecvName) & "[" &
       canonicalize(s.iaIdx, env) & "]=" & canonicalize(s.iaVal, env) &
-      (if s.iaLo != 0: ";lo=" & $s.iaLo else: "") & ">"
+      (if s.iaLo != 0: ";lo=" & $s.iaLo else: "") &
+      (if s.iaUnchecked: ";raw" else: "") & ">"
   of isTabKeys:
     # RFC-0005 S8bc (item 6). Distinct `TK:` prefix; the bound key sequence
     # is a fresh name (`bindLocal`), the table a content-addressed operand.

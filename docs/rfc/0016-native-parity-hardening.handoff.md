@@ -487,6 +487,18 @@
   followed, fail closed by design); `tsymex_rfc0005_s8bm_stability` names the target query
   by its search, the tail walk appending a cheap query after it; the A2a marker is back on
   its call line. Witness pins are dropped from every result at the run boundary.
+  PRC-07 range half (`rfc-0016-rangeoff` on `rfc-0016-int5`, walker 308->309): a
+  `--rangeChecks:off` build is walked as compiled, no `feCheckOption` for the
+  build's own bit (`RoutineChecks.rangeOn`; a push back to `on` declines).
+  Native (generated C): int8/int32 narrowing and `chr` truncate, a range/enum
+  conversion keeps the value, unsigned narrowing is unchecked in every build:
+  all defined, exact. An array indexed by its own range/enum type has no check
+  emitted, so an out-of-range value is an out-of-array access (UB in C):
+  declined where reachable (`isIndex.ixUnchecked`, `isIndexAssign.iaUnchecked`).
+  REMAINDER: model that access as an undefined kind of the definedness axis
+  (`UbKind` + soundness codec + a UBSan `array-bounds` pin) so the in-range
+  witness of an unguarded access stays trusted. New build cell
+  `build:rangeChecks=off`; test `tsymex_0016_rangeoff`.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

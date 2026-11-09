@@ -1619,6 +1619,12 @@ type
                             ## (`valueFieldChecked`): its value is never
                             ## used, so it observes no unwritten part of a
                             ## global.
+      ixUnchecked*: bool    ## RFC-0016 PRC-07. An array indexed by a value of
+                            ## its own index type (`range`/enum), in a build
+                            ## whose range checks are off: Nim emits NO check,
+                            ## so an out-of-range value reads out of the array
+                            ## in C (undefined), where a checked build raised
+                            ## at the conversion that made the value.
     of isIndexAssign:
       iaRecvName*: string  ## the seq-typed local/param NAME being rebound —
                             ## the parse site (dsl_parser.nim's `nnkAsgn` arm)
@@ -1636,6 +1642,7 @@ type
                             ## fallback (non-svSeq receiver / placeholder).
       iaLo*:       int64   ## RFC-0005 S8z. `ixLo`'s twin: an array
                             ## receiver's first index (0 for a seq).
+      iaUnchecked*: bool   ## RFC-0016 PRC-07. `ixUnchecked`'s twin.
     of isSeqPop:
       spRecvName*: string  ## the seq-typed local/param NAME being shrunk —
                             ## same bare-`nnkSym`-only scope as `iaRecvName`.
@@ -4933,17 +4940,18 @@ proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
 
 proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType,
                    loc: string = ""; lo: int64 = 0;
-                   checkOnly = false): IRStmt =
+                   checkOnly = false; unchecked = false): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
          ixIdx: idx, ixElemTy: elemTy, ixLoc: loc, ixLo: lo,
-         ixCheckOnly: checkOnly)
+         ixCheckOnly: checkOnly, ixUnchecked: unchecked)
 
 proc mkIndexAssignStmt*(recvName: string, idx, val: IRExpr,
-                         loc: string = ""; lo: int64 = 0): IRStmt =
+                         loc: string = ""; lo: int64 = 0;
+                         unchecked = false): IRStmt =
   ## N14: `xs[idx] = val` on a seq-typed local/param `recvName`.
   ## RFC-0005 S8z: or an array one (`lo` its first index).
   IRStmt(kind: isIndexAssign, iaRecvName: recvName, iaIdx: idx,
-         iaVal: val, iaLoc: loc, iaLo: lo)
+         iaVal: val, iaLoc: loc, iaLo: lo, iaUnchecked: unchecked)
 
 proc mkSeqPopStmt*(recvName, retName: string, loc: string = "",
                    elemTy: IRType = nil): IRStmt =

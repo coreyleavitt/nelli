@@ -591,4 +591,9 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
   ("release", modelled[BuildSite, bool](true, {bsBuild},
     "-d:release acts only through `checks`, which it leaves on")),
   ("fwrapv", modelled[BuildSite, bool](true, {bsBuild},
-    "-d:nelliFwrapv with checks on is the default build's verdicts"))])
+    "-d:nelliFwrapv with checks on is the default build's verdicts")),
+  ("rangeChecks=off", modelled[BuildSite, bool](true, {bsBuild},
+    "--rangeChecks:off compiles the plain C cast: signed narrowing and " &
+    "`chr` truncate, a `range` or enum conversion keeps its value, and an " &
+    "array indexed by its own out-of-range type is an unchecked access, " &
+    "declined (`feCheckOption`; PRC-07)"))])

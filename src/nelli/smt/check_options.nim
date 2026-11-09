@@ -722,6 +722,12 @@ type RoutineChecks* = object
     ## `unadmittedKind` marker.
   unadmittedKind*: SymexErrorKind
     ## The kind of that decline (`feUnadmitted` for an absent row).
+  rangeOn*: bool
+    ## RFC-0016 PRC-07. The routine's position was read and `rangeChecks` is
+    ## on there on every reading: in a build whose own range checks are off, a
+    ## `push rangeChecks: on`, which the walker does not model (it follows the
+    ## build's bit). `checks` never carries `coRange` in such a build: the
+    ## option being off is the build, not a deviation.
   overflowOn*: bool
     ## RFC-0016 W1-d2c. The routine's position was read and `overflowChecks`
     ## is on there on every reading (no `coOverflow` deviation): in a build
@@ -789,3 +795,6 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if result.checks * defaultOff != {} and not touchesFloat(impl[6]):
     result.checks = result.checks - defaultOff
   result.overflowOn = coOverflow notin result.checks
+  if coRange notin buildSemantics.checks:
+    result.rangeOn = coRange notin result.checks
+    result.checks = result.checks - {coRange}

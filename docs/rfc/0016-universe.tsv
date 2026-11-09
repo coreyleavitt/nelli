@@ -6,7 +6,7 @@
 # axis pragma: 181 cells
 # axis magic: 244 cells
 # axis stdlib: 88 cells
-# axis build: 25 cells (pcre libs and build cells; rows below)
+# axis build: 26 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
 # axis defined: 21 cells
 # build rows: 5
@@ -32,6 +32,7 @@ build:os=macosx	declined	-
 build:pcre/unverified	declined	-
 build:profile/unprojectable	declined	-
 build:ptrBits=32	never	-
+build:rangeChecks=off	modelled	-
 build:release	modelled	-
 build:row/linux-c	row	-
 build:row/linux-c-z3-4.13.4	row	-

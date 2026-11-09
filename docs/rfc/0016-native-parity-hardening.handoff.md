@@ -213,6 +213,25 @@
   `tsymex_0016_k4a_guard`, which pins each site's rows and that no unsigned
   divisor, refused or absent magic carries a defect. No allowlist entry was
   owned by K4a-guard; `cgMutatingMagics` and the `repr` list stay (K6).
+  K4b (`rfc-0016-k4b`, walker stays 292): a bodied magic is walked through its
+  Nim body only where its row is admitted at the new `msBodyWalk` (the four
+  `mmBody` rows: `AbsI`, `MinI`, `MaxI`, `EqCString`). `ensureProcRegistered`
+  reads it after the stub-body decline: any other row declines with its kind
+  (a modelled or partial row is `feUnsupportedOp`: the body was being inlined
+  as the semantics, e.g. a `succ` whose body is `x + 1000`), a magic with no
+  row `feUnadmitted` (no SUT can show that one: an unknown magic name crashes
+  the Nim compiler). `tsymex_0016_k4b` pins both outcomes through `symexFind`
+  with user routines carrying `{.magic.}` and a body; `tsymex_0016_k4b_cells`
+  pins 48 of the 52 re-owned `magic:` cells (one SUT per cell:
+  exact for the 28 modelled or walker-handled, decline for the rest). Four
+  stay allowlisted, under K4a-dispatch, each with a reason: `DeepCopy`
+  (needs `--deepcopy:on`), `ShallowCopy` (not declared under orc),
+  `NewFinalize` (orc finalizers are `=destroy`-shaped), `GetTypeInfoV2`
+  (`getDynamicTypeInfo` is not exported). `GCref` declines
+  `feUnsupportedExprKind` at the type bridge (`RefHeader`'s `when`), not at
+  the row. `Dup`, `Slice`, `SetLengthSeqUninit`, `EqProc`, `EqCString`,
+  `Fields` and `FieldPairs`, whose rows say partial, body or unverified, are
+  walker-handled and pin exact.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

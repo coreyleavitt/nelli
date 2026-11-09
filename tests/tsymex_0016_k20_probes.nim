@@ -249,24 +249,25 @@ suite "RFC-0016 K2-0: crashes and faults (CRH-06, INT-11, W-19b)":
     skipCell(cellKey(axConstruct, "hook/=destroy/dynamicSubtype"),
              "K2-0 W-19b reproduces: weInternalWalkerFault (coerceIntLit), sxUnknown")
 
-  test "W-19b: createThread is a walker fault (ptrPointeeTy), never a verdict":
+  test "W-19b: createThread declines by name at the call, never a verdict":
     check "hit" in nativeRun(thrSut(1)).hits
     let r = symexFind(thrSut, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
-    when defined(windows):
-      # RFC-0016 INT-47. `createThread` is the stdlib's Win32 body here
-      # (`t.sys = createThread(...)` on a `Thread[int]`), not the pthread one
-      # whose `ptr` the walker faults on. The walker meets the body's first
-      # unsupported statements and declines by name: still no verdict.
-      check r.status == sxUnknown
-      check r.errors.named(feUnsupportedStmtKind)
-      check not r.errors.named(weInternalWalkerFault)
-      skipCell(cellKey(axConstruct, "threads/createThread"),
-               "K2-0 W-19b reproduces on Windows: feUnsupportedStmtKind (the Win32 body), sxUnknown")
-    else:
-      check r.faulted("ptrPointeeTy")
-      skipCell(cellKey(axConstruct, "threads/createThread"),
-               "K2-0 W-19b reproduces: weInternalWalkerFault (ptrPointeeTy), sxUnknown")
+    # RFC-0016 K4c made `typedthreads.createThread` decline at the CALL by its
+    # `never` row (`callDeclines`), before the stdlib body (pthread or Win32)
+    # is registered. The probe's invariant is unchanged (no verdict, no
+    # fault); its old expectation of the K2-0 `ptrPointeeTy` fault is stale.
+    check r.status == sxUnknown
+    check not r.trusted
+    check r.errors.named(feUnsupportedOp)
+    check not r.errors.named(weInternalWalkerFault)
+    var named = false
+    for e in r.errors:
+      if e.kind == feUnsupportedOp and "routine `createThread` is not modelled" in e.msg:
+        named = true
+    check named
+    skipCell(cellKey(axConstruct, "threads/createThread"),
+             "K2-0 W-19b, re-pinned by K4c: feUnsupportedOp (the call declines by its never row), sxUnknown")
 
   when defined(posix):
     test "W-19b: a signal handler writing a global declines (not a fault)":

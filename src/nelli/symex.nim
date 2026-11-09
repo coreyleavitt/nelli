@@ -2916,7 +2916,7 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
       # table the method is read, with every override visible to the entry, and
       # the replay checks the table at run time: a body it lists that no scan
       # read declines (`methodDispatchRefusal`). Stock Nim declines here.
-      when defined(nimHasMethodDispatchTable):
+      when hasMethodTable:
         if user:
           acc.callees.add n
           acc.dispatched.add n
@@ -3338,7 +3338,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       # what each method dispatcher can run says what it would run: a body no
       # scan read declines. Empty (nothing to ask) without a method in the scan.
       var dispatchCheck = newLit("")
-      when defined(nimHasMethodDispatchTable):
+      when hasMethodTable:
         if fp.dispatched.len > 0:
           var names = nnkBracket.newTree()
           var calls = nnkBracket.newTree()
@@ -3453,7 +3453,7 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
   ## `replay = false`, goes through `symexFind` with its settings.
   # RFC-0016 PRC-02b: register the methods `fn` calls in the caller's scope
   # first, so a replay's footprint reads the overrides the entry can see.
-  when defined(nimHasMethodDispatchTable):
+  when hasMethodTable:
     let pre = methodPrelude(fn)
     if pre != nil:
       return newTree(nnkStmtListExpr, pre,

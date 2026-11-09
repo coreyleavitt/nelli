@@ -1033,14 +1033,16 @@
   PRC-02b (`rfc-0016-prc02b`, no walker bump: the footprint and the replay run
   change, the walk does not): toolchain patch 0008 (`patches/2.2.10/
   0008-method-dispatch-table.patch`, branch `prc02b` of the `toolchain` series)
-  makes the main module's C carry `void* nimMethodDispatchTable(NI* count)`, a
+  makes the main module's C of an executable (never `--app:lib` or
+  `--app:staticlib`, whose symbol would collide when two Nim libraries link; the
+  accessor is hidden) carry `void* nimMethodDispatchTable(NI* count)`, a
   static const table of {dispatcher address, method body address, receiver type
   name} rows in each dispatcher's if-chain order, and defines
   `nimHasMethodDispatchTable`. With it, `scanFootprint` no longer opens on a
   method: it scans the method and every override `methodRegistry` holds for the
   name, and `replayFootprint` hands `emitReplayWitness` the methods the code
   dispatches (a `procCall` is not one) and every method it scanned. The host,
-  which is the child's binary, calls `methodDispatchRefusal` (`replayproc.nim`)
+  which is the child's binary (a library build keeps the stock decline: `hasMethodTable` in `replayproc.nim` is false there), calls `methodDispatchRefusal` (`replayproc.nim`)
   before it spawns: every row of the dispatchers' buckets must be a scanned
   body, else `refusedNotMarshallable` ("an override of `area` for `Sub` the
   entry could not see", not run-dependent). The table is the oracle for

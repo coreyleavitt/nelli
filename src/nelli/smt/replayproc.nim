@@ -34,6 +34,14 @@ const
   replayForks* = defined(posix) and not defined(nelliReplayReexec)
   replayReexecs* = defined(windows) or
                    (defined(posix) and defined(nelliReplayReexec))
+  hasMethodTable* = defined(nimHasMethodDispatchTable) and
+                    not (compileOption("app", "lib") or
+                         compileOption("app", "staticlib"))
+    ## RFC-0016 PRC-02b. The toolchain's method dispatch table exists, and this
+    ## build can import it: the patched compiler writes the accessor for
+    ## executables only (a library build would export a symbol every other Nim
+    ## binary linking it also defines), so a library build keeps the stock
+    ## decline.
   replayMemoryLimit* = 2 shl 30
     ## What a replay may allocate past the address space it starts with. An
     ## allocation loop then fails in the child ("out of memory", a real exit)
@@ -150,7 +158,7 @@ proc refusedNotMarshallable*(why: string): ReplayChild =
           "reaches; a Linux or macOS run forks and replays it)",
           runDependent = false)
 
-when defined(nimHasMethodDispatchTable):
+when hasMethodTable:
   type MethodRow = object
     bucket, fn: pointer
     recv: cstring

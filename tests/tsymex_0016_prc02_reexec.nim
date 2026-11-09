@@ -13,7 +13,7 @@
 ## * A `method` declines under a stock Nim: the override that runs depends on
 ##   the receiver's dynamic type and the scan cannot list overrides. Under the
 ##   in-house toolchain that emits a per-binary dispatch table
-##   (`defined(nimHasMethodDispatchTable)`, RFC-0016 PRC-02b) the host asks the
+##   (`hasMethodTable`, RFC-0016 PRC-02b) the host asks the
 ##   table which bodies a dispatcher can run: confirmed when the scan read every
 ##   one, declined (at run time) naming the override that no scan read.
 ## * A runtime hook naming a routine the replayed code names is reinstalled in
@@ -198,7 +198,7 @@ suite "PRC-02: a method":
   test "a dynamic call over a visible hierarchy":
     let r = replayWitness(sutMethod, (3,), tLabel("t"), {})
     checkpoint r.detail
-    when replayReexecs and not defined(nimHasMethodDispatchTable):
+    when replayReexecs and not hasMethodTable:
       # Stock Nim: the dispatcher's override set cannot be read, so it declines.
       check r.outcome == roDeclined
       check "`area`, a method on `Base`, whose overrides the scan cannot " &
@@ -220,7 +220,7 @@ suite "PRC-02: a method":
     # its module; only a fork (which copies the process) reproduces it.
     let r = replayWitness(sutHidden, (3,), tLabel("t"), {})
     checkpoint r.detail
-    when replayReexecs and not defined(nimHasMethodDispatchTable):
+    when replayReexecs and not hasMethodTable:
       check r.outcome == roDeclined
       check "whose overrides the scan cannot list" in r.detail
     elif replayReexecs:

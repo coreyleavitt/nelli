@@ -2908,7 +2908,16 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
       # RFC-0005 batch 11. A call's result is a value no variable need hold.
       # The callee's own type, the instance's for a generic: a node of the
       # body need not carry one.
-      let pt = n[0].getTypeImpl
+      #
+      # RFC-0016 INT-4a. A callee sym the semchecker never typed (the head of a
+      # call inside a template body the scan reaches before its expansion)
+      # reports `ntyNone`, and `getTypeImpl` on it is the same hard "node has
+      # no type" error as the `getTypeInst` guard below, reached only where a
+      # replay is re-executed (Windows). It names no result type this scan
+      # misses: the expanded copy of the body carries a typed head.
+      let pt =
+        if n[0].typeKind == ntyNone: newEmptyNode()
+        else: n[0].getTypeImpl
       let t =
         if pt.kind == nnkProcTy and pt.len > 0 and pt[0].kind == nnkFormalParams:
           pt[0][0]

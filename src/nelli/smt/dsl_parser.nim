@@ -1542,7 +1542,7 @@ proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
     return
   if not adm.admitted: return
   if c.why.len > 0 or c.checks == {} or not adm.payload.deltaKnown: return
-  let ex = adm.payload.exercises
+  var ex = adm.payload.exercises
   c.checks = (c.checks * ex) + (c.checks * defaultOff)
   c.overflowModelled = coOverflow in c.checks
 

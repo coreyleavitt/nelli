@@ -1743,6 +1743,7 @@ task test, "Run the test suite":
             "tsymex_0016_boundoff",
             "tsymex_0016_objoff",
             "tsymex_0016_fieldoff",
+            "tsymex_0016_fieldhooks",
             "tsymex_0016_fieldrangeoff",
             "tsymex_0016_k7_twosearch",
             "tsymex_0016_adm1_admission",

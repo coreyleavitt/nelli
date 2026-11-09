@@ -627,6 +627,17 @@
   4270/5012 still decline), deriving the new arm from the image at a
   discriminator write (would replace `dwmHavoc` on c), a `range` target's
   raw value under `--rangeChecks:off`.
+  PRC-07 hooks gate (same branch, walker 309 kept, comment extended):
+  `IRType.vNoCopyMem` (`not supportsCopyMem(T)`, emitted by `emitIRType` as
+  `symexNoCopyMem[T]()` so the compiler answers; a generic type is taken to
+  have hooks) gates `unionImageGate`, so a hooked variant keeps `dwmHavoc`;
+  it is in `==` and the canonical key. RED first: `tsymex_0016_fieldhooks` on c,
+  `[FAILED] a variant with a user copy hook is the havoc model, never exact`.
+  Note a user `=destroy` on a variant is a compile error with a discriminator
+  assignment, and the layout already declines any non-scalar field, so the
+  copy/sink hook is the reachable case. Remaining for `field/inactiveBytes`
+  as listed in the migration note (ref variants, bool/range targets, layout
+  pragmas, `else`, multi-axis).
   PRC-07 slice B continued (same branch, walker 306 kept, comment extended; RED
   first, `tsymex_0016_fieldoff` on c: `[FAILED] a branch-changing discriminator
   write keeps the bytes: the new arm reads the old` (`pinExact ... sxUnknown;

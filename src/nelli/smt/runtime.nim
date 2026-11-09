@@ -5777,6 +5777,10 @@ proc unionImageGate(ty: IRType): Option[vl.VariantLayout] =
   ## `--fieldChecks:off` c-backend build, and only a layout derived.
   if ty == nil or ty.kind != itVariant: return
   if coField in buildSemantics.checks or buildSemantics.backend != beC: return
+  # A type with lifetime hooks (`not supportsCopyMem`): the discriminator
+  # write runs the old arm's destructor/reset, so the old bytes are not the
+  # new arm's slots. No image; the write is the `dwmHavoc` model.
+  if ty.vNoCopyMem: return
   let lay = vl.variantLayout(ty)
   if lay.ok: some(lay) else: none(vl.VariantLayout)
 

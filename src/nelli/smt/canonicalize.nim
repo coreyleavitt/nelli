@@ -322,6 +322,10 @@ const renderAsChoicesVersion* = "12"
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
 const symexWalkerVersion* = "309"
+  ## RFC-0016 PRC-07 (309, hooks half): the union image is carried only for a
+  ## variant type that is plain bits (`IRType.vNoCopyMem`, the compiler's
+  ## `not supportsCopyMem(T)` emitted by the parser); a type with lifetime
+  ## hooks takes the `dwmHavoc` model for a branch-changing discriminator write.
   ## RFC-0016 PRC-07 (308->309, range half): a `--rangeChecks:off` build is
   ## walked as compiled (range conversions are the plain C cast; a routine's
   ## options no longer decline `feCheckOption` for the build's own bit), and an
@@ -6079,7 +6083,9 @@ proc canonicalize*(t: IRType): string =
       (if t.vInheritChain.len == 0: ""
        else: ";inh=[" & t.vInheritChain.join(",") & "];own=[" &
              t.vOwnedFieldNames.join(",") & "|" &
-             t.vOwnedFieldIds.join(",") & "]") & ">"
+             t.vOwnedFieldIds.join(",") & "]") &
+      # RFC-0016 PRC-07 B: a type with lifetime hooks carries no union image.
+      (if t.vNoCopyMem: ";nocopymem" else: "") & ">"
   of itMultiVariant:
     # Phase 14 (ADR-0003 D1). Distinct prefix `MVr:` and distinct
     # axis-grouped format `;axes=[...]` ensure cache keys do not

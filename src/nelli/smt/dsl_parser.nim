@@ -596,6 +596,26 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkBitSet", newLit(e.bsOp), prefix(args, "@"),
             emitIRType(e.bsSetTy))
 
+proc symexNoCopyMem*[T](): bool =
+  ## `noCopyMemExpr`'s probe: the type is a generic argument, as in
+  ## `hookProbes`, so a symbol the macro built is read as a type.
+  not supportsCopyMem(T)
+
+proc noCopyMemExpr(t: IRType): NimNode =
+  ## RFC-0016 PRC-07 slice B. `not supportsCopyMem(T)` for the Nim type `t`
+  ## was classified from, spelled by its symbol so the compiler answers where
+  ## the emitted code is semchecked: it knows the user hooks and the
+  ## generated ones (a string, seq or ref field under arc/orc), which no
+  ## macro can read. A type with no symbol (a hand-built one) is plain bits;
+  ## a generic type's instance is not nameable here, so it is taken to have
+  ## hooks, the sound side: the union image is not carried.
+  let sym = witnessTypeSym(t)
+  if sym == nil or sym.kind != nnkSym: return newLit(false)
+  let d = sym.getImpl
+  if d.kind == nnkTypeDef and d.len >= 2 and d[1].kind != nnkEmpty:
+    return newLit(true)
+  newCall(nnkBracketExpr.newTree(bindSym"symexNoCopyMem", sym))
+
 proc emitIRType*(t: IRType): NimNode =
   # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
   # target has no declared range, or isn't `itInt` at all) -- mirror
@@ -775,7 +795,8 @@ proc emitIRType*(t: IRType): NimNode =
       # RFC-0005 S8bn (item 8): a case-object hierarchy's chain and owners.
       newLit(t.vInheritChain), newLit(t.vOwnedFieldNames),
       newLit(t.vOwnedFieldIds),
-      newLit(t.vLayoutPragma))   # RFC-0016 PRC-07 slice B
+      newLit(t.vLayoutPragma),   # RFC-0016 PRC-07 slice B
+      noCopyMemExpr(t))
   of itMultiVariant:
     # Phase 14 cycle A1a stub. Re-emit a runtime-reconstructible
     # `mkMultiVariant(…)` call. Full A1b (parser-side classification)

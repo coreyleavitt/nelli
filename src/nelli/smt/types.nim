@@ -480,6 +480,14 @@ type
         ## ("union", "align", "importc", "bitsize"...; `dsl_typebridge.
         ## layoutPragmaOf`). "" for a plain object. Identity only, like
         ## `vNominalId`: NOT part of `IRType.==` or the canonical form.
+      vNoCopyMem*:       bool
+        ## RFC-0016 PRC-07 slice B. `not supportsCopyMem(T)` for the Nim type
+        ## `T`, evaluated by the compiler where the parser's emitted code is
+        ## semchecked (`emitIRType`): the type has a user lifetime hook, or a
+        ## field with a compiler-generated one. A discriminator write on it
+        ## runs the old arm's destructor/reset, so its bytes are not simply
+        ## reinterpreted and the union image is not carried (`unionImageGate`).
+        ## Part of `==` and the canonical form (it changes the walk).
     of itUninterp:
       uninterpName*: string   ## Phase 15 Z3b: Z3 uninterpreted-sort name.
     of itFloat32, itFloat64:
@@ -4415,7 +4423,8 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
                inheritChain: seq[string] = @[];
                ownedFieldNames: seq[string] = @[];
                ownedFieldIds: seq[string] = @[];
-               layoutPragma = ""): IRType =
+               layoutPragma = "";
+               noCopyMem = false): IRType =
   ## Phase 11 + Phase 14 (A2). Tagged sum type — Nim variant object.
   ##
   ## `plainFieldNames`/`plainFieldTypes` carry the always-present
@@ -4433,7 +4442,8 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
          vPlainFieldTypes: plainFieldTypes,
          vInheritChain: inheritChain,                ## RFC-0005 S8bn
          vOwnedFieldNames: ownedFieldNames, vOwnedFieldIds: ownedFieldIds,
-         vLayoutPragma: layoutPragma)                ## RFC-0016 PRC-07 B
+         vLayoutPragma: layoutPragma,                ## RFC-0016 PRC-07 B
+         vNoCopyMem: noCopyMem)
 
 proc hierChain*(t: IRType): seq[string] =
   ## RFC-0005 S8bn (item 8). The inheritance chain of an object type, a
@@ -4512,6 +4522,7 @@ proc `==`*(a, b: IRType): bool =
   of itVariant:
     if a.vObjectName != b.vObjectName: return false
     if a.vDiscName != b.vDiscName: return false
+    if a.vNoCopyMem != b.vNoCopyMem: return false
     if a.vDiscTy != b.vDiscTy: return false
     if a.vPlainFieldNames != b.vPlainFieldNames: return false
     if a.vPlainFieldTypes.len != b.vPlainFieldTypes.len: return false

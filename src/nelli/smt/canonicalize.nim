@@ -295,6 +295,9 @@ const symexWalkerVersion* = "292"
   ## `pointer`/`UncheckedArray` field (the witness reader's `int` placeholder
   ## in that slot; a flexible array member in a witness tuple), and an inline
   ## iterator formal declared by its default alone (`splitLines`' `keepEol`).
+  ## Also K2c (CRH-01 residue, K7): a nonzero `maxFrontierSize` now applies
+  ## inside a `while` k-unroll too (its active and exit sets, `ckFrontier`),
+  ## not only between statements. Default 0, so only runs that opted in move.
   ## RFC-0016 K3a (290->291): `holdsSharedMemory` reads the type x memory-op
   ## axis (`typeaxes`) and looks through a variant's plain fields and arms, a
   ## multi-variant's axes and a distinct base, so `let c = gV` over a case

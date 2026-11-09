@@ -21445,6 +21445,16 @@ proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
                            slot: sig.params[a.tabArg].name)
   ""
 
+proc haltFrontier(w: var WalkCtx; pruned: int; where: string) =
+  ## The one `ckFrontier` site: `maxFrontierSize` dropped `pruned` live paths,
+  ## after a statement (`walkBlock`) or inside a k-unroll (`capLoopFrontier`).
+  w.halted(beBudgetExhaustedPrune,
+    "path-frontier cap (maxFrontierSize=" &
+         $w.settings.budget.maxFrontierSize & ") pruned " & $pruned &
+         " live path(s)" & where & " — their verdicts are unexplored " &
+         "(beBudgetExhaustedPrune)",
+    cap = ckFrontier)
+
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
@@ -21483,13 +21493,24 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
       # under-approximation (`{scIncomplete}` on the run), and its empty path
       # coordinate is sound ONLY because this is a halt: the token must stay
       # discarded (pinned in `tsymex_rfc0005_s6a_budget.nim`).
-      w.halted(beBudgetExhaustedPrune,
-        "path-frontier cap (maxFrontierSize=" &
-             $w.settings.budget.maxFrontierSize & ") pruned " &
-             $(result.len - kept.len) &
-             " live path(s) — their verdicts are unexplored (beBudgetExhaustedPrune)",
-        cap = ckFrontier)
+      haltFrontier(w, result.len - kept.len, "")
       result = kept
+
+proc capLoopFrontier(paths: var seq[Path]; w: var WalkCtx) =
+  ## RFC-0016 K7 (CRH-01). `walkBlock` prunes `maxFrontierSize` only after a
+  ## statement, and one unrolled loop multiplies its live set inside it. Holds
+  ## a k-unroll's active and exit sets to the same nonzero cap: certain paths
+  ## kept before tainted ones, the overflow HALTED as `ckFrontier`
+  ## (`beBudgetExhaustedPrune`), so the run is `sxUnknown`.
+  let limit = w.settings.budget.maxFrontierSize
+  if limit <= 0 or paths.len <= limit: return
+  var kept: seq[Path]
+  for p in paths:
+    if p.taint == {} and kept.len < limit: kept.add p
+  for p in paths:
+    if p.taint != {} and kept.len < limit: kept.add p
+  haltFrontier(w, paths.len - kept.len, " of a while-loop k-unroll")
+  paths = kept
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
 
@@ -24336,6 +24357,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let exitPath = forkPath(dp, dp.pc & @[not cond], dp.env)
             exitPath.atIteration(loopId, iter)       # RFC-0005 S8y
             survivors.add exitPath
+      # RFC-0016 K7 (CRH-01): bound the sets this statement grows.
+      capLoopFrontier(nextActive, w)
+      capLoopFrontier(survivors, w)
       active = nextActive
     # RFC-0005 S8k: a path still active after the last unrolled body faces
     # the guard once more, exactly as the real loop does. Where the guard is

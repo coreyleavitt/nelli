@@ -82,6 +82,24 @@
   shm sweep fix `c39b770c` (below). CI-B (`rfc-0016-cib2`) green after the
   toolchain incident reruns; awaiting its agent's handoff.
   K1a-ci (`rfc-0016-k1aci`): post-shard universe joins on symex-linux, symex-mingw and symex-nightly; allowlist entries take an optional `rows=` scope (`heNilDerefMayBeCaught` is scoped to mingw, msvc, linux-cpp: setjmp is INT-12 on Windows and unbuildable on cpp); five stale `errorkind` entries deleted. Planted-RED nightly https://github.com/coreyleavitt/nelli/actions/runs/42532198619; green: linux https://github.com/coreyleavitt/nelli/actions/runs/42537270847, mingw https://github.com/coreyleavitt/nelli/actions/runs/42537270688, nightly (cpp, z3-4.13.4, msvc) https://github.com/coreyleavitt/nelli/actions/runs/42537276403.
+- **Session state (2026-11-09):** Wave 3, slice 18/22 done, 4 remaining
+  (PRC-07, PRC-02/02b, PRC-07/08 remainder, W3-z); no forks open for Corey.
+  main 6490a48b (walker 308). In flight:
+  - PRC-07 `rfc-0016-rangeoff` (walker 309): the union image carries an
+    indeterminate-byte mask (f8c76b11; a callee-built hit follows the
+    `{.noinit.}` replay convention) and is gated on `supportsCopyMem`
+    (0d5bcd81, `IRType.vNoCopyMem`). Next: ref variants, then land via CI.
+  - PRC-02 `rfc-0016-prc02` 35ad0c27 and PRC-02b `rfc-0016-prc02b` d8951308
+    (both still say walker 308; rebase onto main after rangeoff, renumber to
+    310). The Nim fork `toolchain` was fast-forwarded to f7b3a6170 (patch
+    0008: a per-executable method dispatch table, hidden visibility);
+    republish runs in flight; old artifact digests saved for rollback.
+  - Open follow-ups: `symexFind` over a method SUT is `sxUnknown`
+    (`feGlobalRouteUnproved`); the cpp "nimcall-typed global" pin in
+    `tsymex_0016_prc02_reexec` fails `feHostUnadmitted` under both compilers;
+    tail-walk witness loop count above `maxLoopUnwind` fails closed.
+  - Resume: `/loop implement the next unimplemented rfc-0016 slice with /tdd ...`
+    (the standing prompt); re-read this file and MEMORY.md first.
 - **Wave 3 progress (2026-11-08):** K2a (`rfc-0016-k2a`):
   `tests/tsymex_0016_k2a_census.nim`, registered in `nelli.nimble`, counts the
   `case n.kind` sites, `Survivors(`/`Degrade(` literals, bare `skip(` calls and

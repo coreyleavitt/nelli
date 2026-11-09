@@ -16,6 +16,7 @@ import nelli/symex
 import nelli/smt/admission
 import nelli/smt/errorkind
 import nelli/smt/magic_rows
+import nelli/smt/stdlib_rows
 import nelli/smt/dsl_parser
 import nelli/smt/canonicalize
 import ./s8cu_helpers
@@ -70,10 +71,13 @@ suite "K4a-dispatch: the registry and the generated case":
 
   test "the table names each site's arms":
     check toHashSet(toSeq(magicAxis.keysAt(msCallSwitch))) ==
-      ["AshrI", "Ord", "Chr", "EnsureMove", "+%", "-%", "*%", "/%",
-       "%%", "<%", "<=%"].toHashSet
-    check toHashSet(toSeq(magicAxis.keysAt(msInfix))) ==
-      ["+%", "-%", "*%", "/%", "%%", "<%", "<=%"].toHashSet
+      ["AshrI", "Ord", "Chr", "EnsureMove"].toHashSet
+    # K4c: the unsigned operators are `system` routines, rows of stdlibAxis.
+    let unsignedKeys = ["system.+%", "system.-%", "system.*%", "system./%",
+                        "system.%%", "system.<%", "system.<=%"].toHashSet
+    check toHashSet(toSeq(stdlibAxis.keysAt(ssCallSwitch))) == unsignedKeys
+    check toHashSet(toSeq(stdlibAxis.keysAt(ssInfix))) == unsignedKeys
+    check toHashSet(toSeq(magicAxis.keysAt(msInfix))).len == 0
     check toHashSet(toSeq(magicAxis.keysAt(msNewString))) ==
       ["NewString", "NewStringOfCap"].toHashSet
     check "Swap" in toHashSet(toSeq(magicAxis.keysAt(msVarStmt)))
@@ -299,6 +303,11 @@ template pinSat(sut: untyped; cell: static string; dom: untyped = smallInts) =
     let r = pinExact(sut, cellKey(axMagic, cell), domain = dom)
     check r.status == sxSat
 
+template pinSatStd(sut: untyped; cell: static string) =
+  test cell:
+    let r = pinExact(sut, cellKey(axStdlibBody, cell), domain = smallInts)
+    check r.status == sxSat
+
 suite "K4a-dispatch: pins through symexFind, one record per cell":
   pinSat(sAddI, "AddI")
   pinSat(sSubI, "SubI")
@@ -322,13 +331,13 @@ suite "K4a-dispatch: pins through symexFind, one record per cell":
   pinSat(sEqI, "EqI")
   pinSat(sLeI, "LeI")
   pinSat(sLtI, "LtI")
-  pinSat(sAddUs, "+%")
-  pinSat(sSubUs, "-%")
-  pinSat(sMulUs, "*%")
-  pinSat(sDivUs, "/%")
-  pinSat(sModUs, "%%")
-  pinSat(sLtUs, "<%")
-  pinSat(sLeUs, "<=%")
+  pinSatStd(sAddUs, "system.+%")
+  pinSatStd(sSubUs, "system.-%")
+  pinSatStd(sMulUs, "system.*%")
+  pinSatStd(sDivUs, "system./%")
+  pinSatStd(sModUs, "system.%%")
+  pinSatStd(sLtUs, "system.<%")
+  pinSatStd(sLeUs, "system.<=%")
   pinSat(sAddU, "AddU", uDom)
   pinSat(sSubU, "SubU", uDom)
   pinSat(sMulU, "MulU", uDom)

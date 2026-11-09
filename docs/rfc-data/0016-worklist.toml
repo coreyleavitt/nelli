@@ -451,10 +451,10 @@ id = "PRC-09"
 table = "5.2b"
 title = "S8cu: `math.nim`'s pushed regions now decline Mechanism: K4c `admitStdlibBody`."
 state = "open"
-note = ""
+note = ": partly done (2026-11-09, K4c): four `std/math` routines have rows with their check-option delta and decide (walked under the push's unchecked arithmetic); every other routine of a pushed region has no row and keeps declining `feCheckOption`. Remainder: seed rows as pins land"
 source = "S8cu"
 evidence = "every routine in a pushed region of `std/math` declines"
-cells = []
+cells = ["stdlib:math.isPowerOfTwo", "stdlib:math.floorDiv", "stdlib:math.floorMod", "stdlib:math.euclDiv"]
 
 [[row]]
 id = "PRC-10"
@@ -1688,7 +1688,7 @@ state = "never"
 note = ": stays by design: `never(reason)` cell, written by K1a-test"
 source = "S8au"
 never_reason = "stays by design"
-cells = []
+cells = ["stdlib:strutils.rfind/indexofLink"]
 
 [[row]]
 id = "W-08"
@@ -1995,11 +1995,11 @@ cells = []
 id = "W-47"
 table = "5.9"
 title = "stdlib generic objects (Option, OrderedTable, CountTable, Deque) decline by catch-all, not by allowlist (B-11, HRV-62)"
-state = "open"
-note = ""
+state = "closed"
+note = ": done (2026-11-09, K4c): the four heads are `declined` rows of the stdlib-body axis (`options.Option`, `tables.OrderedTable`, `tables.CountTable`, `deques.Deque`); any other stdlib generic object is the axis's absent case with the same kind"
 slice = "K4c"
 home = "K4c"
-cells = []
+cells = ["stdlib:options.Option", "stdlib:tables.OrderedTable", "stdlib:tables.CountTable", "stdlib:deques.Deque"]
 
 [[row]]
 id = "W-48"
@@ -2122,11 +2122,12 @@ never_reason = "c and cpp disagree natively on a return in a finally on a raised
 id = "STY-02"
 table = "5.9"
 title = "Table/HashSet iteration order, hash- and build-dependent (C-13)"
-state = "open"
-note = ""
+state = "never"
+note = ": done (2026-11-09, K4c): `stdlib:tables.Table/iterationOrder` and `stdlib:sets.HashSet/iterationOrder` are `never` rows; the declines name them"
 slice = "K4c"
 home = "K4c (`never` cell of the stdlib-body axis)"
-cells = []
+never_reason = "hash order is build-sensitive (Nim version, -d:nimStringHash2, -d:nimPreviewHashRef): replay-gated for Table, declined for HashSet"
+cells = ["stdlib:tables.Table/iterationOrder", "stdlib:sets.HashSet/iterationOrder"]
 
 [[row]]
 id = "STY-03"
@@ -2164,11 +2165,12 @@ cells = ["magic:nextafter"]
 id = "STY-06"
 table = "5.9"
 title = "concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105)"
-state = "open"
-note = "K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`); K2b and K4c own the rest"
+state = "never"
+note = ": K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`). K4c (2026-11-09): symbolic-length sort, concurrency and full Unicode case fold are `never` rows (`stdlib:algorithm.sort/symbolicLength`, `stdlib:typedthreads.createThread/concurrency`, `stdlib:unicode.toLower/fullCaseFold`); the sort decline names its cell, the other two have no declining site to name it (createThread is a walker fault, W-19b; toLower on a symbolic Rune did not terminate in a 900 s probe)"
+never_reason = "stays by design: no thread interleaving, no symbolic-length sort, no payload-exact NaN, no float80, no full Unicode fold"
 slice = "K4c"
 home = "K3a, K2b, K4c (one `never` cell each)"
-cells = ["typeclass:float/sNaNPayload", "typeclass:float128"]
+cells = ["typeclass:float/sNaNPayload", "typeclass:float128", "stdlib:algorithm.sort/symbolicLength", "stdlib:typedthreads.createThread/concurrency", "stdlib:unicode.toLower/fullCaseFold"]
 
 [[row]]
 id = "STY-07"

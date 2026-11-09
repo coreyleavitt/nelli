@@ -1316,6 +1316,10 @@ type
     asInherit   ## no claim (every block but a routine body; any body in a checks-on build)
     asBuild     ## unchecked signed arithmetic: the build's (`ubSignedOverflow`)
     asChecked   ## `push overflowChecks: on` in a checks-off build: `OverflowDefect`
+    asUnchecked ## RFC-0016 K4c. A stdlib body under a push that turns its
+                ## overflow checks off (`math.nim`'s `checks: off`) in a build
+                ## that checks: unchecked signed arithmetic, as `asBuild` is
+                ## in a checks-off build. Only a `stdlibAxis` row stamps it.
 
   IRStmt* = ref object
     case kind*: IRStmtKind

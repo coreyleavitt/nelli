@@ -251,6 +251,33 @@
   (re-exec on Linux via its `.cfg`) pins case-object globals (both arms), a
   case-object and an aliased-`ref` witness through `replayWitness`, a SUT with
   type symbols in its footprint, and the `ptr` decline.
+  K4c (`rfc-0016-k4c`, walker stays 292, comment extended): `smt/stdlib_rows.nim`
+  holds the stdlib-body axis (`stdlibAxis`, key `<module>.<name>[/<facet>]`,
+  `admitStdlibBody`). Walked rows carry their check-option delta (`exercises`);
+  `applyStdlibDelta` (dsl_parser) reads it for a routine whose options deviate:
+  an option the body cannot trip is no deviation, and `overflowChecks` that it
+  trips is modelled (`ArithScope.asUnchecked`, `RoutineChecks.overflowModelled`:
+  signed overflow and a zero divisor are `ArithTrap`s, as in a checks-off build)
+  instead of declining. Rows: `math.isPowerOfTwo`, `floorDiv`, `floorMod`,
+  `euclDiv` (PRC-09 partly: every other routine of a pushed region keeps
+  declining `feCheckOption`; the absent-row decline for a routine with NO
+  deviation is not flipped, that needs the `feStdlibBodyWalked` corpus run and
+  a sweep baseline: the remainder). The seven unsigned operators moved from
+  `magicAxis` to `stdlibAxis` (`system.+%` ...; they are `system` routines):
+  `dispatchMagic` checks the `msCallSwitch` and `msInfix` cases against both
+  tables; their pins are `stdlib:` cells now. W-47: the four stdlib generic
+  objects are `declined` rows read by `classifyType`'s catch-all (a head with
+  no row is the absent case, same kind; the decline names the cell). STY-02:
+  `tables.Table/iterationOrder` and `sets.HashSet/iterationOrder` are `never`
+  rows the declines name. STY-06: `algorithm.sort/symbolicLength` (named by the
+  `#hook` decline), `typedthreads.createThread/concurrency` and
+  `unicode.toLower/fullCaseFold` are `never` rows; the last two have no
+  declining site (allowlisted `tests/0016-allowlist/stdlib.txt`). AUD-11 is the
+  `strutils.rfind/indexofLink` cell, pinned exact. Pins: `tsymex_0016_k4c`
+  (rows, four routines exact, the delta both ways, rows-absent control),
+  `tsymex_0016_k4c_off` (same under `--overflowChecks:off`),
+  `tsymex_0016_k4c_cells`. Finding: `unicode.toLower(Rune(a))` with a symbolic
+  rune did not terminate in 900 s (probe, not kept).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

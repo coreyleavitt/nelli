@@ -604,6 +604,12 @@ proc moduleFileOf(routine: NimNode; fallback: string): string =
     o = o.owner
   fallback
 
+proc moduleStemOf*(sym: NimNode): string =
+  ## RFC-0016 K4c. The name of the module a symbol belongs to (`tables` for
+  ## `OrderedTable`): the `<module>` of a `stdlibAxis` key.
+  normalPath(moduleFileOf(sym, sym.lineInfoObj.filename))
+    .extractFilename.changeFileExt("")
+
 proc isOwnRuntime(path: string): bool =
   ## Nelli's own engine, which pushes for its own reasons and is not the program.
   "/nelli/smt/" in path or path.endsWith("/nelli/engine/markers.nim")
@@ -699,6 +705,10 @@ type RoutineChecks* = object
     ## may have been compiled first (`mitems[T]` takes the options of its first
     ## instantiation). Read where the walker models a stdlib iterator's assert.
   why*: string                ## set where the position could not be read at all
+  overflowModelled*: bool
+    ## RFC-0016 K4c. A `stdlibAxis` row covers the routine's overflow delta:
+    ## its body exercises `overflowChecks` and the push turns them off, and
+    ## the walker models that (`asUnchecked`). Set by the parser, never here.
   overflowOn*: bool
     ## RFC-0016 W1-d2c. The routine's position was read and `overflowChecks`
     ## is on there on every reading (no `coOverflow` deviation): in a build
@@ -709,6 +719,19 @@ proc routinePlace*(impl: NimNode): string =
   ## For a message: the routine, its file and line.
   let li = impl.lineInfoObj
   "`" & impl[0].repr & "` (" & li.filename.extractFilename & ":" & $li.line & ")"
+
+proc stdlibRoutineKey*(impl: NimNode): string =
+  ## RFC-0016 K4c. The `stdlibAxis` key of a typed routine definition,
+  ## `<module>.<name>`, or "" for a routine outside the toolchain's `lib/`.
+  ## The module is the one the routine belongs to (`system` for a routine of
+  ## `system/arithmetics.nim`, which `system.nim` includes).
+  if impl.kind notin {nnkProcDef, nnkFuncDef} or impl.len == 0: return
+  let li = impl.lineInfoObj
+  let rootAt = anchored(moduleFileOf(impl[0], li.filename))
+  let root = normalPath(if rootAt.len > 0: rootAt
+                        else: moduleFileOf(impl[0], li.filename))
+  if not isStdlibFile(root): return
+  root.extractFilename.changeFileExt("") & "." & impl[0].strVal
 
 proc routineChecks*(impl: NimNode): RoutineChecks =
   ## How `impl` (a typed routine definition) differs from the model.

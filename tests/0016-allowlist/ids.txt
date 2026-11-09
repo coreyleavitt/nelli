@@ -11,7 +11,6 @@ PRC-05	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 PRC-06	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-07	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-08	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-PRC-09	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-10	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-11	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-12	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
@@ -92,7 +91,6 @@ W-42	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision
 W-44	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-45	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-46	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-W-47	K4c	no cell or pin names it yet; the row's home names this slice
 W-48	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-49	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-62	K5b	no cell or pin names it yet; the row's home names this slice
@@ -101,7 +99,6 @@ W-65	H1	no cell or pin names it yet; the row's home names this slice
 W-66	H1	no cell or pin names it yet; the row's home names this slice
 W-67	H1	no cell or pin names it yet; the row's home names this slice
 W-68	H1	no cell or pin names it yet; the row's home names this slice
-STY-02	K4c	no cell or pin names it yet; the row's home names this slice
 STY-03	K10a-axis	no cell or pin names it yet; the row's home names this slice
 STY-07	K10a-axis	no cell or pin names it yet; the row's home names this slice
 STY-09	K4c	no cell or pin names it yet; the row's home names this slice

@@ -75,6 +75,7 @@ import nelli/smt/magic_rows
 import nelli/smt/buildprofile
 import nelli/smt/typeaxes
 import nelli/smt/pragmaaxes
+import nelli/smt/stdlib_rows
 import nelli/smt/soundness
 import ./s8cu_helpers
 import ./worklist_toml
@@ -92,7 +93,7 @@ const
   testsDir = root / "tests"
   fixtureDir = root / "tests" / "0016-fixtures" / "universe-pins"
   runtimePath = root / "src" / "nelli" / "smt" / "runtime.nim"
-  scopes = ["magic", "build", "errorkind", "capkind", "typeclass", "typeop", "pragma"]
+  scopes = ["magic", "build", "errorkind", "capkind", "typeclass", "typeop", "pragma", "stdlib"]
   publicEntries = ["symexFind", "symexFindAllWitnesses", "symexForAll",
                    "assertCoveredBy", "concolic", "loadSymexVerdict"]
 
@@ -138,6 +139,9 @@ proc deriveUniverse(): seq[UCell] =
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-")
   for c in pragmaAxis.cells:
+    result.add UCell(key: render(c.cell),
+                     state: stateOf(c.admitted, c.intent), detail: "-")
+  for c in stdlibAxis.cells:
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-")
   for r in BuildRow:
@@ -394,7 +398,7 @@ suite "RFC-0016 K1a-cells: the universe is derived":
   test "keys are unique and every CellKey cell parses back":
     check universe.mapIt(it.key).toHashSet.len == universe.len
     for c in universe:
-      if scopeOf(c.key) in ["magic", "build", "typeclass", "typeop", "pragma"] and
+      if scopeOf(c.key) in ["magic", "build", "typeclass", "typeop", "pragma", "stdlib"] and
          not c.key.startsWith("build:row/"):
         check parseCellKey(c.key).isSome
 

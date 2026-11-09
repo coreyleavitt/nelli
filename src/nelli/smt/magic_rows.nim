@@ -29,9 +29,10 @@
 ## K4a-dispatch. `dispatchMagic` checks a site's hand-written `case` against
 ## the table at compile time, and `varParamMagics` is gone: a routine with a
 ## `var` formal and a `{.magic.}` is declined at `msProcRegister` from its row.
-import std/[options, macros]
+import std/[options, macros, sequtils]
 import ./admission
 import ./errorkind
+import ./stdlib_rows
 
 type
   MagicModel* = enum
@@ -45,9 +46,9 @@ type
     msVarStmt       ## `parseVarMagicStmt`: a statement-position call of a
                     ## `var`-parameter magic (a `dispatchMagic` site)
     msCallSwitch    ## the stdlib call switch before `ensureProcRegistered`,
-                    ## in `parseCallExpr` (a `dispatchMagic` site); also
-                    ## admits the `unsignedIntOps` names, which are routines
-                    ## of `system`, not magics
+                    ## in `parseCallExpr` (a `dispatchMagic` site); its
+                    ## arms also name the unsigned operators, which are
+                    ## `system` routines with rows in `stdlibAxis`
     msInfix         ## the unsigned operators spelled infix (a
                     ## `dispatchMagic` site)
     msNewString     ## `parseNewStringExpr` (a `dispatchMagic` site)
@@ -579,28 +580,6 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mFolded("CompileTime",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
 
-  mModelled("+%",
-    "`+%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; add on the operands as unsigned (S8cb, `parseUnsignedOp`)",
-    also = {msCallSwitch, msInfix}),
-  mModelled("-%",
-    "`-%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; subtract on the operands as unsigned (S8cb, `parseUnsignedOp`)",
-    also = {msCallSwitch, msInfix}),
-  mModelled("*%",
-    "`*%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; multiply on the operands as unsigned (S8cb, `parseUnsignedOp`)",
-    also = {msCallSwitch, msInfix}),
-  mModelled("/%",
-    "`/%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; divide on the operands as unsigned (S8cb, `parseUnsignedOp`)",
-    also = {msCallSwitch, msInfix}),
-  mModelled("%%",
-    "`%%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; remainder on the operands as unsigned (S8cb, `parseUnsignedOp`)",
-    also = {msCallSwitch, msInfix}),
-  mModelled("<%",
-    "`<%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; less-than on the operands as unsigned (S8cb, `parseUnsignedOp`)",
-    also = {msCallSwitch, msInfix}),
-  mModelled("<=%",
-    "`<=%` (system/arithmetics.nim, comparisons.nim): not a magic but a `system` routine over `cast[uint]`, so its row sits in the magic axis until K4c's stdlib-body axis takes it; less-or-equal on the operands as unsigned (S8cb, `parseUnsignedOp`)",
-    also = {msCallSwitch, msInfix}),
-
   # STY-05 (HRV-27): a math routine recognised by name, not a TMagic member.
   (key: "nextafter", row: refused[MagicSite, MagicModel](some(feUnsupportedOp),
     "`nextafter` (std/math): no SMT-LIB FP-theory primitive, a documented " &
@@ -638,6 +617,8 @@ macro dispatchMagic*(site: static MagicSite; body: untyped): untyped =
     error("dispatchMagic: " & $site & " is not a dispatched site", body)
   if site in dispatchedSites:
     error("dispatchMagic: " & $site & " is dispatched twice", body)
+  let hasStd = site in {msInfix, msCallSwitch}
+  let stdlibSite = if site == msInfix: ssInfix else: ssCallSwitch
   var cs = body
   while cs.kind in {nnkStmtList, nnkStmtListExpr} and cs.len == 1: cs = cs[0]
   if cs.kind != nnkCaseStmt:
@@ -655,9 +636,15 @@ macro dispatchMagic*(site: static MagicSite; body: untyped): untyped =
         if a in arms:
           error("dispatchMagic: duplicate arm `" & a & "`", br[j])
         arms.add a
-        if not magicAxis.hasRow(a):
-          error("dispatchMagic: arm `" & a & "` has no row in magicAxis", br[j])
-        if not magicAxis.admit(a, site).admitted:
+        if hasStd and stdlibAxis.hasRow(unsignedOpKey(a)):
+          # K4c: a `system` routine (the unsigned operators), not a magic.
+          if not stdlibAxis.admit(unsignedOpKey(a), stdlibSite).admitted:
+            error("dispatchMagic: arm `" & a & "` has a stdlib row that is " &
+                  "not admitted at " & $stdlibSite, br[j])
+        elif not magicAxis.hasRow(a):
+          error("dispatchMagic: arm `" & a & "` has no row in magicAxis or " &
+                "stdlibAxis", br[j])
+        elif not magicAxis.admit(a, site).admitted:
           error("dispatchMagic: arm `" & a & "` has a row that is not " &
                 "admitted at " & $site, br[j])
   if not hasElse:
@@ -666,5 +653,9 @@ macro dispatchMagic*(site: static MagicSite; body: untyped): untyped =
     if k notin arms:
       error("dispatchMagic: the row `" & k & "` is admitted at " & $site &
             " and has no arm", body)
+  for k in (if hasStd: toSeq(stdlibAxis.keysAt(stdlibSite)) else: @[]):
+    if k notin arms.mapIt(unsignedOpKey(it)):
+      error("dispatchMagic: the stdlib row `" & k & "` is admitted at " &
+            $stdlibSite & " and has no arm", body)
   dispatchedSites.incl site
   result = cs

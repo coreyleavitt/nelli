@@ -40,6 +40,7 @@ import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw t
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
 import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
 import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
+import ./stdlib_rows   ## RFC-0016 K4c: the facet cells a decline names
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
@@ -2080,7 +2081,7 @@ proc resetArith() =
 
 proc pushArith(sc: ArithScope) =
   doAssert sc != asInherit, "an inheriting block opens no arith scope"
-  arithScopes.add(if sc == asBuild: waWraps else: waChecked)
+  arithScopes.add(if sc in {asBuild, asUnchecked}: waWraps else: waChecked)
 
 proc popArith() =
   doAssert arithScopes.len > 1, "arith scope stack underflow"
@@ -22530,7 +22531,8 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
       let d = w.degrade(feTableIterOrder,
         locPrefix & "iteration over a Table with two or more entries: " &
         "Nim visits the keys in hash order, the model in any order -- a " &
-        "witness is replayed against the real order (feTableIterOrder)")
+        "witness is replayed against the real order (feTableIterOrder) -- " &
+        facetNote("tables.Table/iterationOrder"))
       survivors.add forkPathTainted(p, p.pc & facts & @[not atMostOne],
                                     env2, d)
   survivors

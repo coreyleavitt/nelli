@@ -42,6 +42,7 @@ import std/unicode     ## Phase 16 A7-S3: toRunes/runeLen for literal decode at 
 import ./types
 import ./admission   ## RFC-0016 ADM-1: `Admit`, `AxisTable`
 import ./magic_rows  ## RFC-0016 K4a: `magicAxis`, `dispatchMagic`
+import ./stdlib_rows ## RFC-0016 K4c: `stdlibAxis`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
 import ./dsl_typebridge
@@ -1475,6 +1476,7 @@ func arithScopeFor(c: RoutineChecks; caller: ArithScope;
   ## read as `push overflowChecks: on`, else `asBuild`.
   if inherit: caller
   elif buildWraps() and c.overflowOn and c.why.len == 0: asChecked
+  elif c.overflowModelled and not buildWraps(): asUnchecked
   else: asBuild
 
 func currentArith(ctx: ParseCtx): ArithScope =
@@ -1485,7 +1487,8 @@ func overflowChecked(ctx: ParseCtx): bool =
   ## build checks it, or an enclosing routine is pushed `overflowChecks: on`.
   ## `buildWraps()` is folded in here because the stack's `asBuild` means
   ## "the build's own arithmetic", which is checked in a checks-on build.
-  not buildWraps() or ctx.currentArith == asChecked
+  (not buildWraps() and ctx.currentArith != asUnchecked) or
+    ctx.currentArith == asChecked
 
 func ordinalUnchecked(ctx: ParseCtx): bool =
   ## Signed arithmetic is unchecked where the parse is now: the build wraps and
@@ -1499,8 +1502,26 @@ proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
 func arithStamp(c: RoutineChecks; inherit: bool): ArithScope =
   ## The IR stamp of a routine body: `arithScopeFor`'s answer, but only where a
   ## claim is made (a checks-off build, not an `inherit` routine).
-  if not buildWraps() or inherit: asInherit
+  if (not buildWraps() and not c.overflowModelled) or inherit: asInherit
   else: arithScopeFor(c, asBuild, false)
+
+proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks) =
+  ## RFC-0016 K4c (section 8.1). The stdlib-body axis's check-option delta.
+  ## A stdlib routine walked by body whose module turns checks off
+  ## (`math.nim`: `push checks: off`) has a row naming the checks its body can
+  ## trip (`exercises`). An option the push turns off that the body cannot
+  ## trip is no deviation. `overflowChecks` that the body trips is modelled
+  ## (`overflowModelled`: the body is walked under `asUnchecked`). Anything
+  ## else stays a deviation and declines (`withCheckDeclines`), as does a
+  ## routine with no row. A routine with no deviation is not read.
+  if c.why.len > 0 or c.checks == {}: return
+  let key = stdlibRoutineKey(impl)
+  if key.len == 0: return
+  let adm = admitStdlibBody(key, ssBodyWalk)
+  if not adm.admitted: return
+  let ex = adm.payload.exercises
+  c.checks = (c.checks * ex) + (c.checks * defaultOff)
+  c.overflowModelled = coOverflow in c.checks
 
 proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
                        body: IRStmt; inherit = false): IRStmt =
@@ -1527,7 +1548,8 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # (`buildWraps()`) every routine is unchecked, and that is the build route:
   # `lowerArith` deposits the signed overflow as an `ubSignedOverflow` trap.
   # The marker is for a routine pushed off in a build that checks.
-  if coOverflow in c.checks and c.why.len == 0 and not buildWraps():
+  if coOverflow in c.checks and c.why.len == 0 and not buildWraps() and
+     not c.overflowModelled:
     decl.add ctx.declineMarker(feOverflowCheckOption, where &
       " is compiled with overflowChecks off: its signed `+`, `-` and `*` are " &
       "undefined on overflow, which no setting models -- path degraded to " &
@@ -19884,7 +19906,13 @@ proc parseStmtInner(n: NimNode,
         mkBlock(stmts)
       else:
         # itString is handled by the early return above (before body parse).
-        ctx.declineMarker(feUnsupportedStmtKind, &"unsupported for-loop container kind: {recvCls.ty.kind}")
+        # RFC-0016 K4c (STY-02): a HashSet's iteration order is the hash
+        # order, a `never` cell of the stdlib-body axis; it names the cell.
+        let cellNote =
+          if recvCls.ty.kind == itSet:
+            " (" & facetNote("sets.HashSet/iterationOrder") & ")"
+          else: ""
+        ctx.declineMarker(feUnsupportedStmtKind, &"unsupported for-loop container kind: {recvCls.ty.kind}" & cellNote)
     elif iterExpr.kind == nnkCall and iterExpr.len >= 1 and
          iterExpr[0].kind == nnkSym:
       # Phase 16 A7-S3: intercept `for r in s.runes` / `for r in lit.runes`
@@ -21601,10 +21629,16 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     # (the compiler's generated hooks) cannot be read: it declines, so
     # `parseCalleeImpl`'s `expectKind` never fails the build on one.
     if not formalsReadable(impl):
+      # RFC-0016 K4c (STY-06): `algorithm.sort` is such a routine (its
+      # `order = Ascending` formal) and a `never` facet of the stdlib axis.
+      let facetKey = stdlibRoutineKey(impl) & "/symbolicLength"
+      let facet =
+        if stdlibAxis.hasRow(facetKey): " -- " & facetNote(facetKey)
+        else: ""
       return ctx.declineCallee(feUnsupportedOp,
         "routine `" & name & "`, whose formals cannot be read (a " &
         "compiler-generated hook, a formal typed by its default), is not modelled " &
-        "-- path degraded to sxUnknown (feUnsupportedOp)",
+        "-- path degraded to sxUnknown (feUnsupportedOp)" & facet,
         name & "#hook")
   # RFC-0016 K3c: the pragma axis. A routine pragma with no row, a parameter
   # pragma the axis declines, or a formal or result type carrying `{.union.}`,
@@ -21901,7 +21935,8 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ## sole caller (`ensureProcRegistered`, via `resolveRoutineImpl`) — a
   ## membership-only assertion, so it routes onto `walkableRoutineKinds`.
   impl.expectKind walkableRoutineKinds
-  let checkOpts = routineChecks(impl)   ## RFC-0005 S8cu: at the definition
+  var checkOpts = routineChecks(impl)   ## RFC-0005 S8cu: at the definition
+  applyStdlibDelta(impl, checkOpts)     ## RFC-0016 K4c
   ctx.assertsOff.add checkOpts.assertsMaybeOff
   defer: discard ctx.assertsOff.pop()
   # RFC-0016 WA-A: a magic's arithmetic is the call site's (`abs`, whose

@@ -291,6 +291,14 @@ const renderAsChoicesVersion* = "12"
   ##   its row is admitted at `msBodyWalk` (the `mmBody` rows); any other
   ##   row declines with its kind (was: the body inlined as the semantics),
   ##   a magic with no row `feUnadmitted`.
+  ## - RFC-0016 K4c (stays 292; the control loop renumbers at landing): the
+  ##   stdlib-body axis. A stdlib routine walked by body under a module push
+  ##   that turns checks off (`math.nim`) reads its `stdlibAxis` row: an
+  ##   option the body cannot trip is no deviation, and `overflowChecks` that
+  ##   it trips is modelled (`asUnchecked`: signed overflow and a zero
+  ##   divisor are `ArithTrap`s, as in a checks-off build) instead of
+  ##   declining `feCheckOption` (`math.floorDiv`, `isPowerOfTwo`, `floorMod`,
+  ##   `euclDiv`). A routine with no row declines as before.
 
 const symexWalkerVersion* = "296"
   ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case

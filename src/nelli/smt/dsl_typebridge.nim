@@ -29,6 +29,10 @@ import std/sequtils
 import std/tables     ## RFC-0005 S8e: the witness type-symbol registry
 import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
 import ./types
+import ./check_options   ## RFC-0016 K4c: `moduleStemOf`
+import ./stdlib_rows     ## RFC-0016 K4c: the stdlib-body axis
+import ./admission
+import ./errorkind
 
 # ---- RFC-0005 S8c: callee resolution by SYMBOL, not by name ------------------
 #
@@ -1840,7 +1844,16 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     # `SymexClassifiedDegradeError` (kind `feUnsupportedParamType`) at
     # PARAMETER-ALLOCATION time — before the body is walked — so the whole
     # run degrades to `sxUnknown` rather than crashing or aborting the build.
-    unranged(tUninterp("__unsupported:" & s))
+    # RFC-0016 K4c (W-47): a stdlib generic object is declined by its row in
+    # the stdlib-body axis, and the decline names the cell.
+    var marker = s
+    if resolved.kind == nnkBracketExpr and resolved.len > 0 and
+       resolved[0].kind == nnkSym and isStdlibTypeSym(resolved[0]):
+      let a = admitStdlibBody(moduleStemOf(resolved[0]) & "." &
+                              resolved[0].strVal, ssType,
+                              absent = some(feUnsupportedParamType))
+      if not a.admitted: marker = s & " [" & a.decline[1] & "]"
+    unranged(tUninterp("__unsupported:" & marker))
 
 proc namedRefPlaceholder(objSym: NimNode): IRType =
   ## Phase 15 R9 (ADR-0010). Build the `tRef`/`tPtr` POINTEE for a ref/ptr-typed

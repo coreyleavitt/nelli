@@ -650,7 +650,7 @@ Rows were reconciled against head `83c1d304` in `/architect` round 2 (2026-11-06
 | PRC-06 | The `ti_grow` Table `keys` loop that writes the Table, even with no key added: `ti_grow` at `a == 0` is now `sxUnknown`, moved from S8bl's `sxSat` | S8cn | repin accepted at batch 11 intake | |
 | PRC-07 | S8cu: exact unchecked semantics — model what a routine compiled with a check off actually does (overflow, bounds, range, field, nil, float checks), instead of the source-position decline Mechanism: K10a/K5a (§9, §8.3). | S8cu | S8cu's fail-closed decline (`feCheckOption`, `feOverflowCheckOption`) closed a false `sxRaised`. (2026-11-07, W1-z): a `--rangeChecks:off` build declines every routine `feCheckOption` | |
 | PRC-08 | S8cu: a `-d:danger` or `--fieldChecks:off` build declines every routine Mechanism: K10a/K5a (§9, §8.3). | S8cu | follows from the source scan; depends on PRC-07 | |
-| PRC-09 | S8cu: `math.nim`'s pushed regions now decline Mechanism: K4c `admitStdlibBody`. | S8cu | every routine in a pushed region of `std/math` declines | |
+| PRC-09 | S8cu: `math.nim`'s pushed regions now decline Mechanism: K4c `admitStdlibBody`. | S8cu | every routine in a pushed region of `std/math` declines | : partly done (2026-11-09, K4c): four `std/math` routines have rows with their check-option delta and decide (walked under the push's unchecked arithmetic); every other routine of a pushed region has no row and keeps declining `feCheckOption`. Remainder: seed rows as pins land |
 
 <!-- worklist:end 5.2b -->
 
@@ -949,7 +949,7 @@ state (§8.2).
 | W-44 | `Table[K, ref T]`/`seq[T]` values; Table non-string keys at zero-init (B-09, HRV-04) | Wave 4 | |
 | W-45 | value-object slicing, `of` on values (natively `of` is true on a sliced value) (B-12) | Wave 4 | |
 | W-46 | set by value; a set over 8 bytes passed by pointer untracked (B-10) | Wave 4 | |
-| W-47 | stdlib generic objects (Option, OrderedTable, CountTable, Deque) decline by catch-all, not by allowlist (B-11, HRV-62) | K4c | |
+| W-47 | stdlib generic objects (Option, OrderedTable, CountTable, Deque) decline by catch-all, not by allowlist (B-11, HRV-62) | K4c | closed: done (2026-11-09, K4c): the four heads are `declined` rows of the stdlib-body axis (`options.Option`, `tables.OrderedTable`, `tables.CountTable`, `deques.Deque`); any other stdlib generic object is the axis's absent case with the same kind |
 | W-48 | harvested precision with no row (the HRV list in the research file) | Wave 4; many close on a probe | |
 | W-49 | open PRC/INT/AUD rows after the reconciliation, evidence refreshed | Wave 4 | |
 | W-62 | CI odds: mingw B5-4, the `fuzzer-msvc` pull-request trigger, R1-12/13 unpinned, `dt-bounded` orphans, witness folding across nim-z3; refc never tested is a `never` cell under D-0016-7 | CI-B, H1; the refc cell K5b | |
@@ -962,11 +962,11 @@ state (§8.2).
 | W-69 | "not green on a good day" wording in CLAUDE.md and `sweep-diff.sh` | | never: repository wording, outside this RFC |
 | MOV-01 | the moves to RFC-0017 (N20, OQ1, CRH-03's OOM, `maxLoopUnwind`, #138, caps): record each in RFC-0017 with its id, then close here | W1-z | closed: done (2026-11-07, W1-z): recorded in `docs/rfc/0017-symex-reach.md` §7 and cited from slices M1, L1, P1 and E1 |
 | STY-01 | `return` in `finally` on a raised path: c re-raises, cpp returns (A-10) | K5b (`never` cell of the build axis) | never: stays by design: `never(reason)` cell, written by K5b |
-| STY-02 | Table/HashSet iteration order, hash- and build-dependent (C-13) | K4c (`never` cell of the stdlib-body axis) | |
+| STY-02 | Table/HashSet iteration order, hash- and build-dependent (C-13) | K4c (`never` cell of the stdlib-body axis) | never: done (2026-11-09, K4c): `stdlib:tables.Table/iterationOrder` and `stdlib:sets.HashSet/iterationOrder` are `never` rows; the declines name them |
 | STY-03 | pointer order `<` (C-10, W-28) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-04 | `owned T`, `Atomic[T]` (HRV-18) | K3a (`never` cell of the type × memory axis) | never: done (2026-11-08, K3a): `typeclass:owned` and `typeclass:atomic` are `never` rows of the type-class axis |
 | STY-05 | `nextafter` (HRV-27) | K4a-table (`never` cell of the magic axis) | never: no SMT-LIB FP-theory primitive for nextafter: `never` cell `magic:nextafter` (K4a-table) |
-| STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`); K2b and K4c own the rest |
+| STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | never: K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`). K4c (2026-11-09): symbolic-length sort, concurrency and full Unicode case fold are `never` rows (`stdlib:algorithm.sort/symbolicLength`, `stdlib:typedthreads.createThread/concurrency`, `stdlib:unicode.toLower/fullCaseFold`); the sort decline names its cell, the other two have no declining site to name it (createThread is a walker fault, W-19b; toLower on a symbolic Rune did not terminate in a 900 s probe) |
 | STY-07 | `addr s[0]` then growth (B §1.2) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | K5b (`never` cell of the build axis) | never: stays by design: `never(reason)` cell, written by K5b |
 | STY-09 | the AUD-01, AUD-09 and AUD-11 records | K5b (AUD-01), K2a (AUD-09), K4c (AUD-11) | |

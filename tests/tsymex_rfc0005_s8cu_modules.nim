@@ -135,11 +135,14 @@ suite "S8cu: generated routines":
 
 suite "S8cu: the stdlib":
 
-  test "a walked routine under `math.nim`'s push declines":
+  test "a walked routine under `math.nim`'s push, with a stdlib-body row, decides":
+    # RFC-0016 K4c (PRC-09): `floorDiv` and `isPowerOfTwo` have rows whose
+    # delta is `overflowChecks`; they are walked under the push's unchecked
+    # arithmetic instead of declining (`tsymex_0016_k4c` pins them).
     check native(viaFloorDiv(7)) == "hit"
-    pinDecline(viaFloorDiv, declKey, feCheckOption)
+    decides(viaFloorDiv, sxSat)
     check native(viaIsPowerOfTwo(8)) == "hit"
-    pinDecline(viaIsPowerOfTwo, declKey, feCheckOption)
+    decides(viaIsPowerOfTwo, sxSat)
 
   test "models and routines outside those regions still decide (control)":
     check native(viaAbs(-3)) == "hit"

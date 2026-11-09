@@ -176,6 +176,19 @@
   with its halt site and a row (codec 4 is unreleased, so the ordinal shift
   here needs no meta bump). `pinUndefined`
   (`s8cu_helpers`) evidences a kind that rides a witness instead of halting.
+  K10a-concolic (`rfc-0016-k10ac` on `rfc-0016-k10aa`, walker stays 294,
+  comment extended): `drainArithTraps` records each `ub` deposit of a
+  `wmFollowConcrete` replay (`ConcolicDefinedFact`, stamped with the decision
+  count); `runConcolicFlipImpl` conjoins the facts with `at <= target` into
+  EVERY attempt (the prefix already carried them, but the optimistic
+  relaxation drops conjuncts last-first and so used to hand back
+  `b == 0` / an overflowing pair as a seed), and solves the other disjunct for
+  the target condition's own operations: `ConcolicFlipResult.undefinedReached`
+  (kind, site, input; never a seed; counter `flipCounters.undefinedReached`,
+  folded). The prefix handed to that query drops the op's own defined side
+  (the walk had put it in `pc`). Checked-build signed `div`/`mod` by zero and
+  overflow stay Defect forks (raise), not UB, so they are not
+  facts. Pins: `tsymex_0016_k10ac_concolic{,_checksoff}`.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

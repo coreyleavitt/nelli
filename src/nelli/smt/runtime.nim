@@ -16464,6 +16464,18 @@ type
       ## actually changed the outcome AT THIS decision (the intended-vs-
       ## unrelated coverage split).
 
+  ConcolicDefinedFact* = object
+    ## RFC-0016 K10a-concolic (section 9.1 item 1). One operation a concolic
+    ## replay executed whose undefined side the definedness axis names
+    ## (`drainArithTraps`' `ub` deposits): `cond` is the undefined side,
+    ## `at` the number of `if` decisions recorded when it was evaluated, so
+    ## a flip of decision `k` carries every fact with `at <= k` (the
+    ## operations on the prefix and in the target's own condition).
+    cond*: Z3Bool
+    kind*: UbKind = ubUnsignedDivZero
+    site*: string
+    at*: int
+
   IfSiteStat = object
     ## RFC-0005 S8ax. How often one `if` arm (or else path) outside a
     ## recursion was checked, and how often the check dropped it.
@@ -16831,6 +16843,10 @@ type
                       ## this and `concolicAmbiguousBranches` together, so
                       ## they can never drift apart) and
                       ## `ConcolicYieldCounters.ambiguousByConstruct`'s doc.
+    definedFacts: seq[ConcolicDefinedFact]
+                      ## RFC-0016 K10a-concolic. Written by `drainArithTraps`
+                      ## in `wmFollowConcrete` only; copied out to
+                      ## `ConcolicCollectResult.definedFacts`.
     branchTrace: seq[ConcolicBranchRecord]
                       ## RFC-fuzzer-nextgen G2. Only meaningful when
                       ## `mode == wmFollowConcrete`: appended once per `if`
@@ -19478,6 +19494,10 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   var cur = forkPath(p, p.pc, p.env)
   for t in conds:
     if t.ub.isSome:
+      if w.mode == wmFollowConcrete and guardLiteral(t.cond) != glFalse:
+        # RFC-0016 K10a-concolic: the flip solve must keep this op defined.
+        w.definedFacts.add ConcolicDefinedFact(
+          cond: t.cond, kind: t.ub.get, site: t.site, at: w.branchTrace.len)
       if guardLiteral(t.cond) != glFalse:
         let unsat = guardLiteral(t.cond) != glTrue and
           checkCapped(w.z3, pathRoots(cur, [t.cond]), w.settings,
@@ -29997,6 +30017,9 @@ type
       ## `concreteBranchRLimit(settings)`; one that exhausts it is `false`
       ## (not proven).
     counters*: ConcolicYieldCounters
+    definedFacts*: seq[ConcolicDefinedFact]
+      ## RFC-0016 K10a-concolic. The operations with an undefined side this
+      ## replay executed, in encounter order (see `ConcolicDefinedFact`).
     branchTrace*: seq[ConcolicBranchRecord]
       ## RFC-fuzzer-nextgen G2. The `if`-decisions `walkIfFollowConcrete`
       ## resolved along this replay, in encounter order — `runConcolicFlipImpl`
@@ -30619,6 +30642,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     pinned & indexSplitRoots(ctx, pinned), settings) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
+  result.definedFacts = w.definedFacts
   result.drawVars = drawVars
   result.drawOverrides = drawOverrides
   # Issue #163 review R26 (continued) + the parse-error gap. Both fields'
@@ -30672,6 +30696,10 @@ const defaultMaxRelaxationAttempts* = 8
   ## optimistic-relaxation attempts — the mechanism that keeps a
   ## pathological/fully-unsolvable case from hanging or enumerating a `2^n`
   ## conjunct-subset search. Each attempt is one bounded Z3 check.
+
+const maxConcolicUndefined* = 8
+  ## RFC-0016 K10a-concolic. The most undefined-behaviour reaches one flip
+  ## solve reports (and so the most extra bounded checks it adds).
 
 const defaultZ3TimeoutMs* = 2000'u
   ## RFC-fuzzer-nextgen G2: per-attempt Z3 wall-clock timeout (Z3's own
@@ -30827,7 +30855,20 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   let target = collected.branchTrace[targetBranchIndex]
   let ctx = target.observedTruth.ctx   ## any Z3 AST carries its own context —
                                         ## no need to thread `Z3Context` separately.
-  let negatedTarget = not target.observedTruth
+  # RFC-0016 K10a-concolic (section 9.1 item 1). The flip's input is a native
+  # run's, so it must keep every operation on the prefix and in the target's
+  # own condition DEFINED: those facts (`definedFacts`, `at <= target`) are in
+  # EVERY attempt, the optimistic ones included, which drop only prefix
+  # conjuncts. The other disjunct, an input that makes one of the target
+  # condition's operations undefined, is solved after the seed and reported
+  # (never used as a seed).
+  var definedNow: seq[Z3Bool]
+  var targetOps: seq[ConcolicDefinedFact]
+  for f in collected.definedFacts:
+    if f.at <= targetBranchIndex:
+      definedNow.add(not f.cond)
+      if f.at == targetBranchIndex: targetOps.add f
+  let negatedTarget = mkAnd(@[not target.observedTruth] & definedNow)
 
   # ---- Attempt 0: exact — prefix AND negated-target, same bound as every
   # optimistic attempt (an exact query can hang just as easily as a relaxed
@@ -30872,6 +30913,33 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
       if solved: break
       inc k
   result.flipCounters.relaxationAttemptsUsed = attemptsUsed
+
+  # The second disjunct: each operation of the target's condition whose
+  # undefined side the prefix allows. The prefix is NOT relaxed here (an
+  # undefined side reached only by dropping a constraint is no finding).
+  # The walk already put each operation's defined side into the path it
+  # continued on (`drainArithTraps`), so the prefix would exclude the very
+  # side asked for: the operation's own defined side, and the later ones
+  # (an undefined operation ends the path before they run), are taken out.
+  var seenUb: seq[(UbKind, string)]
+  for i, f in targetOps:
+    if result.undefinedReached.len >= maxConcolicUndefined: break
+    if (f.kind, f.site) in seenUb: continue
+    var reach: seq[Z3Bool]
+    for c in target.prefixPc:
+      var own = false
+      for g in targetOps[i .. ^1]:
+        if astEqual(c, not g.cond): own = true
+      if not own: reach.add c
+    let (st, sv) = z3CheckBounded(ctx, reach, f.cond, z3TimeoutMs,
+                                  settings.budget.queryRLimit)
+    if st == zsSat:
+      seenUb.add (f.kind, f.site)
+      result.undefinedReached.add ConcolicUndefined(
+        kind: f.kind, site: f.site,
+        input: materializeConcolicModel(sv.model(), trace, collected.drawVars,
+          collected.drawOverrides, min(trace.len, maxDraws)))
+      inc result.flipCounters.undefinedReached
 
   if solved:
     let cappedLen = min(trace.len, maxDraws)

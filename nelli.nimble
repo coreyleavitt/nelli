@@ -1701,6 +1701,9 @@ task test, "Run the test suite":
             # RFC-0016 K9a: the native-pin verbs and the pin record.
             "tsymex_0016_k9a_pins",
             "tsymex_0016_k9d0_entries",
+            # RFC-0016 K10a-concolic: the flip solve keeps the prefix defined.
+            "tsymex_0016_k10ac_concolic",
+            "tsymex_0016_k10ac_concolic_checksoff",
             "tsymex_0016_k8a_gen",
             "tsymex_0016_k8a_sink",
             "tsymex_0016_k5a_fwrapv",

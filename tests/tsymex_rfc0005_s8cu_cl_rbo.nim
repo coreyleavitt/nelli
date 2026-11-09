@@ -13,18 +13,19 @@ suite "S8cu: --rangeChecks:off --boundChecks:off --objChecks:off":
 
   test "each declines":
     check native(clRange(300)) == "hit"
-    pinDecline(clRange, declKey, feCheckOption)
+    ## RFC-0016 PRC-07: the build is walked as compiled; an off check is exact or a halt of its own kind.
+    pinExact(clRange, declKey)
     check native(clBound(3)) == "hit"
-    pinDecline(clBound, declKey, feCheckOption)
+    pinDecline(clBound, declKey, ubArrayOutOfBounds)
     check native(clObj(4)) == "hit"
-    pinDecline(clObj, declKey, feCheckOption)
+    pinDecline(clObj, declKey, ubInvalidObjConversion)
 
   test "the rule is per routine: one that never meets the check declines too":
     check native(clField(4)) == "FieldDefect"
-    pinDecline(clField, declKey, feCheckOption)
+    decides(clField, sxRaised)
     check native(clPure(7)) == "hit"
-    pinDecline(clPure, declKey, feCheckOption)
+    pinExact(clPure, declKey)
 
   test "a routine under `push checks: on` has them back (control)":
     check native(clAllOn(4)) == "FieldDefect"
-    decides(clAllOn, sxRaised)
+    pinDecline(clAllOn, declKey, feCheckOption)

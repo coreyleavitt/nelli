@@ -13,20 +13,23 @@ suite "S8cu: --fieldChecks:off":
 
   test "the named check declines":
     check native(clField(4)) == "hit"
-    pinDecline(clField, declKey, feCheckOption)
+    ## RFC-0016 PRC-07: the build is walked as compiled, so a check that is off is a modelled
+    ## unchecked operation (exact, or a halt of its own kind), not a feCheckOption decline.
+    pinExact(clField, declKey)
 
   test "the rule is per routine: one that never meets the check declines too":
     check native(clOver(high(int))) == "OverflowDefect"
-    pinDecline(clOver, declKey, feCheckOption)
+    decides(clOver, sxRaised)
     check native(clBound(3)) == "IndexDefect"
-    pinDecline(clBound, declKey, feCheckOption)
+    decides(clBound, sxRaised)
     check native(clPure(7)) == "hit"
-    pinDecline(clPure, declKey, feCheckOption)
+    pinExact(clPure, declKey)
 
   test "a routine under `push fieldChecks: on` has it back (control)":
     check native(clFieldOn(4)) == "FieldDefect"
-    decides(clFieldOn, sxRaised)
+    ## pushed back on in a build with the check off: the deviation declines
+    pinDecline(clFieldOn, declKey, feCheckOption)
 
   test "a routine under `push checks: on` has it back (control)":
     check native(clAllOn(4)) == "FieldDefect"
-    decides(clAllOn, sxRaised)
+    pinDecline(clAllOn, declKey, feCheckOption)

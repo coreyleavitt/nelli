@@ -84,6 +84,7 @@ case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#7	K4a-dispatch	construct-ax
 case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#8	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
 case_n_kind:src/nelli/smt/dsl_parser.nim:case n.kind#9	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
 case_n_kind:src/nelli/smt/dsl_typebridge.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
+case_n_kind:src/nelli/smt/dsl_typebridge.nim:case n.kind#2	K4a-dispatch	PRC-07 fieldPragma recursion over a record-case field list (RecList/RecCase/IdentDefs), not a construct-axis dispatch; K4a-dispatch classifies it with the other node-kind sites
 case_n_kind:src/nelli/smt/impl_digest.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
 case_n_kind:src/nelli/smt/scoped_names.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind
 case_n_kind:src/nelli/smt/vm_alias_guard.nim:case n.kind	K4a-dispatch	construct-axis dispatch site; K4a-dispatch and K2c replace it with an admission-table lookup or classify it per node kind

@@ -444,8 +444,8 @@
   defined.txt`). `ubFloatToIntRange` is REMOVED from `UbKind` (no producer):
   K10a-float re-adds it, at the END of the range (after `ubSignedDivZero`),
   with its halt site and a row (codec 4 is unreleased, so the ordinal shift
-  here needs no meta bump). `pinUndefined`
-  K10c (`rfc-0016-k10c` on `rfc-0016-k10aa`, no walker change, 294):
+  here needs no meta bump). `pinUndefined` (`s8cu_helpers`) evidences a kind that rides a witness instead of halting.
+  K10c (`rfc-0016-k10c` on `rfc-0016-k10aa`, no walker change; 300 on int4b):
   `tests/tsymex_0016_k10c_ubsan.nim` (+ `.nim.cfg` `--overflowChecks:off`, the
   `dpUnchecked` profile) pins the 14 arithmetic `defined:` cells twice, tied by
   the table: the walker through `symexFind` (`pinDecline` with the row's `ub`,
@@ -466,7 +466,15 @@
   `assumedAbsentNote` is appended to every `haltUndefined` message and the
   flags are tabulated in `docs/symex/README.md`. Trap: `-O0` gcc never
   contracts, so the FMA probe builds at `-O2`.
-  (`s8cu_helpers`) evidences a kind that rides a witness instead of halting.
+  K10c float cell (int4b follow-up): `defined:convert/floatToInt` joins the UBSan
+  pins through a second probe built with `-fsanitize=float-cast-overflow` (not part of
+  `-fsanitize=undefined` in gcc); NaN, an infinity and a value outside int64 trip, in-range
+  values (truncation included) run clean; mingw/MSVC declare it with `skipCell`.
+  FINDING: Nim 2.2.10 emits float -> int32/16/8 through int64, so a value in int64 but
+  outside the narrow target is an implementation-defined wrap in C (`int8(300.0) == 44`),
+  not UB; the row calls it undefined (a sound over-approximation: untrusted halt). Pinned
+  as a clean native run in `tsymex_0016_k10c_ubsan`; narrowing the row by target width is
+  a precision follow-up, not done here.
   K10a-float (`rfc-0016-k10af` on `rfc-0016-k10aa`, walker 300 (shared with K10a-axis), its
   comment extended): `ubFloatToIntRange` is back at the
   END of `UbKind` (ordinal after `ubSignedDivZero`; `static` pin extended).
@@ -493,6 +501,10 @@
   takes the site of its source node (`siteBinop`).
   Pins: `tests/tsymex_0016_k10af_float.nim`, `tsymex_0016_k10af_sites.nim`,
   `tsymex_0016_k10af_sites_checksoff.nim`.
+  K10a-float sites (int4b follow-up, walker 300): a signed negation (`iekUnop.usite`) and
+  the borrowed operators (`iekBorrowOp.borrowSite`) carry their source node's
+  `file:line:col` like the binops (`withSite`), read by `lowerArith`; two negations (or two
+  borrowed `+`) in one SUT under checks off are two findings. Pins: `tsymex_0016_k10af_sites_checksoff`.
   K10a-concolic (`rfc-0016-k10ac` on `rfc-0016-k10aa`, walker 300,
   comment extended): `drainArithTraps` records each `ub` deposit of a
   `wmFollowConcrete` replay (`ConcolicDefinedFact`, stamped with the decision

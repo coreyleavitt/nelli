@@ -32,6 +32,7 @@ type
   Al = int
 
 proc `$`(d: Dist): string = $int(d)
+proc `$`(p: ptr int): string = (if p == nil: "nil" else: "ptr " & $p[])
 proc `$`(r: RefO): string = (if r == nil: "nil" else: $r.v)
 
 proc pint(x: int) = (if x == 3: symexTarget("hit"))
@@ -66,6 +67,47 @@ proc pgeneric(x: Box[int]) = (if x.v == 3: symexTarget("hit"))
 proc patomic(x: Atomic[int]) = symexTarget("hit")
 proc powned(x: owned RefO) = symexTarget("hit")
 proc pf128(x: c_longdouble) = (if x > 1.5: symexTarget("hit"))
+
+proc ppointer(x: pointer) = (if x != nil: symexTarget("hit"))
+proc pptr(x: ptr int) = (if x != nil: symexTarget("hit"))
+proc popenarr(x: openArray[int]) = (if x.len == 2: symexTarget("hit"))
+proc pvarargs(x: varargs[int]) = (if x.len == 2: symexTarget("hit"))
+proc punchecked(x: UncheckedArray[int]) = symexTarget("hit")
+proc pvarCallee(x: var int) = (if x == 3: symexTarget("hit"))
+proc pvar(x: int) =
+  ## pinExact's native call cannot pass a `var` argument, so the `var`
+  ## parameter is the callee's: the walker classifies its formal.
+  var y = x
+  pvarCallee(y)
+
+type
+  UcObj = object       ## a flexible array member: Nim cannot hold one in a tuple
+    n: int
+    data: UncheckedArray[int]
+  PtrObj = object
+    n: int
+    p: pointer
+proc pucobj(x: UcObj) = (if x.n == 2: symexTarget("hit"))
+proc pptruc(x: ptr UncheckedArray[int]) = (if x != nil: symexTarget("hit"))
+proc pptrobj(x: PtrObj) = (if x.n == 2: symexTarget("hit"))
+
+var gInt = 1
+
+proc psplit(s: string) =
+  if s.len > 2: return
+  var n = 0
+  for l in s.splitLines: inc n
+  if n == 2: symexTarget("hit")
+
+proc gen[T](x: seq[T]): int =
+  var y = x
+  y.add(x[0])
+  result = y.len
+proc pgen(x: seq[int]) =
+  if x.len > 0 and gen(x) == 3: symexTarget("hit")
+proc gen2[T](x: T) =
+  if x.len == 2: symexTarget("hit")
+proc pgen2(x: seq[int]) = gen2(x)
 
 const rangeVals: array[3, range[1..5]] = [3, 1, 5]
 
@@ -112,6 +154,46 @@ suite "RFC-0016 K2c: one snippet per NimTypeKind":
     for k in [ntyInt, ntyString, ntySequence, ntyTuple, ntyObject, ntyDistinct]:
       check admitTypeClass(k, tcClassify).admitted
     check not admitTypeClass(ntyForward, tcClassify).admitted
+
+suite "RFC-0016 K2c: the pointer and view kinds":
+  test "ptr, openArray and var are classified, pointer, varargs and UncheckedArray are not":
+    for k in [ntyPtr, ntyOpenArray, ntyVar]:
+      check admitTypeClass(k, tcClassify).admitted
+    for k in [ntyPointer, ntyVarargs, ntyUncheckedArray]:
+      check not admitTypeClass(k, tcClassify).admitted
+
+  test "ptr, openArray and var parameters are modelled":
+    discard pinExact(pptr, cellKey(axTypeClass, "ptr"),
+                     domain = sampled([cast[ptr int](nil), addr gInt]))
+    discard pinExact(popenarr, cellKey(axTypeClass, "openArray"),
+                     domain = sampled([@[1, 2], @[], @[1]]))
+    discard pinExact(pvar, cellKey(axTypeClass, "var"), domain = sampled([3, 0]))
+
+  test "pointer, varargs and UncheckedArray parameters decline with their row's kind":
+    pinDecline(ppointer, cellKey(axTypeClass, "pointer"), feUnsupportedParamType)
+    pinDecline(pvarargs, cellKey(axTypeClass, "varargs"), feUnsupportedParamType)
+    pinDecline(punchecked, cellKey(axTypeClass, "uncheckedArray"), feUnsupportedParamType)
+
+  test "a ptr to an UncheckedArray is still a modelled ptr (the demotion is for a value)":
+    let r = symexFind(pptruc, tLabel("hit"), pinSettingsConst)
+    check r.status == sxSat
+    check r.trusted
+
+  test "CRH-01 (HRV-44): a generic proc using .len/.add/index on its generic param runs":
+    check symexFind(pgen, tLabel("hit"), pinSettingsConst).trusted
+    check symexFind(pgen2, tLabel("hit"), pinSettingsConst).trusted
+
+  test "CRH-01 (INT-09): splitLines over a bounded string was a compile stop, now declines":
+    # the formal `keepEol = false` has an empty type slot in the iterator's
+    # impl; its type comes from the signature. An UNBOUNDED string does not
+    # terminate (a loop-cap matter, K7), so the input is bounded.
+    pinDecline(psplit, cellKey(axTypeClass, "string"), seUnsupportedStringOp)
+
+  test "CRH-01: an object field the walker declines was a compile stop, now declines":
+    # `pointer` field: the witness reader gave the `int` placeholder to a
+    # `pointer` slot. `UncheckedArray` field: a witness tuple cannot hold one.
+    pinDecline(pptrobj, cellKey(axTypeClass, "pointer"), feUnsupportedParamType)
+    pinDecline(pucobj, cellKey(axTypeClass, "uncheckedArray"), feUnsupportedWitnessType)
 
 suite "RFC-0016 K2c: classifyType reads the named-feature rows":
   test "STY-04: Atomic[T] and owned T decline (heUnsupportedOwnership), not a compile stop":

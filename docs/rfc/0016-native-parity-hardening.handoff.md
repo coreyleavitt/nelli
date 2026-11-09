@@ -326,11 +326,16 @@
   An enum-indexed array (`classifyArrayBracket`) and an omitted variant field
   (`omittedFieldFeature`, the A1 constructor path) read their rows. The corpus is
   `tests/tsymex_0016_k2c_typeclass.nim`: one pinned snippet per kind a parameter
-  can have (32 cells leave `typeclass.txt`). Remaining there: `K4c` owns
+  can have (38 cells leave `typeclass.txt`). Remaining there: `K4c` owns
   `float/sNaNPayload` (a bit-pattern cast, not a type); the rest is `W4-z` (kinds
-  no parameter can have, and `pointer`, `ptr`, `openArray`, `varargs`,
-  `uncheckedArray`, `var`, not yet in the corpus). CRH-01's `splitLines` and
-  HRV-44 stops were not re-probed. The `case n.kind` census row in
+  no parameter can have). `pointer`, `varargs`, `UncheckedArray` (declines), `ptr`,
+  `openArray`, `var` (modelled) are now in the corpus; `openArray` was a compile
+  stop (replay splat bound `var p: openArray`), an object with a `pointer` or
+  `UncheckedArray` field another (witness `int` placeholder in the slot; a flexible
+  array member in a witness tuple). CRH-01 re-probed: HRV-44 is gone (pinned);
+  `splitLines` was `classifyType` on an empty-typed iterator formal (`keepEol = false`),
+  fixed, declines over a bounded string (pinned); over an UNBOUNDED string it does not
+  terminate (loop cap, K7), so CRH-01 stays open on that residue. The `case n.kind` census row in
   `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes

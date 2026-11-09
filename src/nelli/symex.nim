@@ -1620,6 +1620,16 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
         var objVal = newTree(nnkObjConstr, objTyId)
         for i, fty in ty.fields:
           let suffix = "." & ty.fieldNames[i]
+          # RFC-0016 K2c: a field the walker declines (`pointer`,
+          # `UncheckedArray`, ...) renders as the `int` placeholder, which is
+          # not that field's type and stopped the compile. The run declines at
+          # allocation, so the witness is never read; leave the field at its
+          # zero value.
+          if fty.kind == itUninterp and witnessTypeSym(fty) == nil and
+             (fty.uninterpName.startsWith("__unsupported:") or
+              fty.uninterpName.startsWith("__unsupported_witness:") or
+              fty.uninterpName.startsWith("__ownership:")):
+            continue
           let (_, sv) = emitTyAndReader(fty, path & suffix, witId)
           objVal.add newTree(nnkExprColonExpr,
             ident(ty.fieldNames[i]), sv)
@@ -2722,6 +2732,12 @@ proc formalParamTypes(fn: NimNode): seq[NimNode] =
     let d = ty[0][i]
     var t = d[^2]
     if t.kind == nnkVarTy: t = t[0]
+    # RFC-0016 K2c: `openArray[T]`/`varargs[T]` are not types a local can have
+    # (`var p: openArray[int]` stops the compile), and the witness renders them
+    # as the `seq[T]` they are modelled as, which converts to either at the call.
+    if t.kind == nnkBracketExpr and t.len == 2 and t[0].kind in {nnkSym, nnkIdent} and
+       t[0].strVal in ["openArray", "varargs"]:
+      t = nnkBracketExpr.newTree(bindSym"seq", t[1])
     for _ in 0 ..< d.len - 2: result.add t
 
 proc isThreadvarSym(n: NimNode): bool =

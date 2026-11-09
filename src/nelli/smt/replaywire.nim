@@ -11,7 +11,8 @@
 ## `isWireableType` is the compile-time half: a type that cannot be encoded
 ## whatever its value holds (an imported C struct, whose fields Nim does not
 ## know; a `ref` to an inheritable object, whose dynamic type the encoding does
-## not carry; a case object).
+## not carry). A case object crosses: the discriminator, then the active
+## branch (RFC-0016 PRC-01).
 
 import std/[macros, tables]
 import std/typetraits
@@ -92,9 +93,20 @@ proc wirePut*[T](w: var WireWriter; x: T) =
   elif T is (tuple | object):
     for _, v in fieldPairs(x):
       w.wirePut(v)
-  elif T is (ptr | pointer | cstring) or (T is proc):
+  elif T is ptr:
+    # RFC-0016 PRC-01. What a non-nil `ptr` addresses is unknown memory (a
+    # variable, a field of another object, a C allocation): the child cannot
+    # be given that address, and a fresh cell would silently drop the aliasing.
+    # A `ptr` the solver's model puts in a witness is rebuilt by the child from
+    # the model (`ChildWitness`), not carried here.
     if not x.isNil:
-      raise newException(WireError, "a live pointer or proc value")
+      raise newException(WireError, "a non-nil `ptr`, whose target the child cannot be given")
+  elif T is (pointer | cstring):
+    if not x.isNil:
+      raise newException(WireError, "a non-nil `" & (when T is pointer: "pointer" else: "cstring") & "`, whose target the child cannot be given")
+  elif (T is proc):
+    if not x.isNil:
+      raise newException(WireError, "a live proc value")
   else:
     raise newException(WireError, "a value of an unmarshallable type")
 
@@ -126,7 +138,18 @@ proc wireGet*[T](r: var WireReader; x: var T) =
       GC_ref(x)       # the graph may hold it only through a later cycle
       r.cells.add cast[pointer](x)
       r.wireGet(x[])
-  elif T is (tuple | object):
+  elif T is object:
+    # RFC-0016 PRC-01. A case object: `fieldPairs` yields the discriminator and
+    # then the fields of the branch it selects, so the writer's order (the
+    # discriminator first, then the active branch) is read back by assigning
+    # the discriminator before the branch is visited. `reset` first: the target
+    # may hold another branch (a global), whose fields the assignment would
+    # otherwise leave unreleased.
+    reset(x)
+    {.cast(uncheckedAssign).}:
+      for _, v in fieldPairs(x):
+        r.wireGet(v)
+  elif T is tuple:
     for _, v in fieldPairs(x):
       r.wireGet(v)
   elif T is (ptr | pointer | cstring) or (T is proc):
@@ -135,6 +158,7 @@ proc wireGet*[T](r: var WireReader; x: var T) =
     raise newException(WireError, "a value of an unmarshallable type")
 
 proc wireableRef(t: NimNode; seen: var seq[NimNode]): bool
+proc wireableCase(c: NimNode; seen: var seq[NimNode]): bool
 
 proc wireableImpl(t: NimNode; seen: var seq[NimNode]): bool =
   case t.kind
@@ -209,11 +233,36 @@ proc wireableImpl(t: NimNode; seen: var seq[NimNode]): bool =
           if not wireableImpl(d[^2], seen): return false
         of nnkEmpty, nnkNilLit:
           discard
+        of nnkRecCase:
+          if not wireableCase(d, seen): return false
         else:
-          return false    # a case object, or a `when` in it
+          return false    # a `when` in it
     true
   else:
     false
+
+proc wireableRecList(l: NimNode; seen: var seq[NimNode]): bool =
+  case l.kind
+  of nnkRecList:
+    for d in l:
+      if not wireableRecList(d, seen): return false
+    true
+  of nnkIdentDefs:
+    wireableImpl(l[^2], seen)
+  of nnkRecCase:
+    wireableCase(l, seen)
+  of nnkEmpty, nnkNilLit:
+    true
+  else:
+    false     # a `when` in it
+
+proc wireableCase(c: NimNode; seen: var seq[NimNode]): bool =
+  ## RFC-0016 PRC-01. A case object's discriminator, then every branch.
+  if not wireableImpl(c[0][^2], seen): return false
+  for i in 1 ..< c.len:
+    let b = c[i]
+    if not wireableRecList(b[^1], seen): return false
+  true
 
 proc wireableRef(t: NimNode; seen: var seq[NimNode]): bool =
   ## A `ref`'s pointee: not inheritable, as its dynamic type would be lost.

@@ -237,6 +237,20 @@
   guard: every cell pinned exact has an admitted `mmModelled`/`mmFolded`/
   `mmBody` row (never partial, never refused), and a decline pin on an
   admitted row only on a partial or folded one.
+  PRC-01 (`rfc-0016-prc01`, walker 295 to 296, with INT-01 and INT-14): the
+  re-exec path already carried the solver's model for a `symexFind` witness, so
+  a case object, `ref` (identity kept) or `ptr` parameter replayed on every
+  leg. What declined was the wire itself: `replaywire.nim` refused a case
+  object statically, so a module-level variable of case type, and a typed
+  witness given to `replayWitness`, declined. It now writes the discriminator
+  then the active branch and reads it back with `reset` + `uncheckedAssign`
+  (`isWireableType` walks `nnkRecCase`). A non-nil `ptr`, `pointer` or
+  `cstring` in a global or typed witness still declines, now naming which: its
+  target (a variable, a field, C memory) cannot be given to the child and a
+  fresh cell would drop the aliasing. `tests/tsymex_0016_prc01_reexec.nim`
+  (re-exec on Linux via its `.cfg`) pins case-object globals (both arms), a
+  case-object and an aliased-`ref` witness through `replayWitness`, a SUT with
+  type symbols in its footprint, and the `ptr` decline.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

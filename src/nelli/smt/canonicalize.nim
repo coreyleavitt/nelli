@@ -292,7 +292,10 @@ const renderAsChoicesVersion* = "12"
   ##   row declines with its kind (was: the body inlined as the semantics),
   ##   a magic with no row `feUnadmitted`.
 
-const symexWalkerVersion* = "295"
+const symexWalkerVersion* = "296"
+  ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case
+  ## objects, in a witness and in a variable the SUT reaches, where it declined
+  ## as not marshallable. A cached `:unk` that was that decline is stale.
   ## RFC-0016 K3c (293->294): the pragma axis (`pragmaaxes`). A local,
   ## routine, parameter or type pragma is a row; a local or a callee's formal
   ## or result of a type carrying (or holding) `{.union.}`, `{.packed.}`,

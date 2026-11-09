@@ -3170,8 +3170,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       else: newCall(bindSym"typeof", witness)
     if refuse.len == 0 and child.blobTy == nil and
        not isWireableType(witness.getTypeInst):
-      refuse = "the witness, of a type the wire cannot carry (a case " &
-               "object, a ptr or ref, a proc)"
+      refuse = "the witness, of a type the wire cannot carry (a ref " &
+               "to an inheritable object, an imported C struct, a proc)"
     if refuse.len > 0:
       let msg = newLit(refuse)
       runChild = quote do:

@@ -377,6 +377,23 @@
   K6b hook copy-proof (W-09/W-10), K6c `ptrUsesStayLocal` /
   `routeStoresThroughDeref` / `bindsViewWhole`; `scanOpaqueEffects` is still
   a separate scanner (D-05's "one rule" is not yet one function).
+  K6b (`rfc-0016-k6b`, walker 293, extends K6a's; W-09 closed): the hook
+  copy-proof `routeHookCopies` is fail-closed. A field copy `dst.f = src.f`
+  counts only as a top-level statement of the hook body; every other
+  statement must not name the destination, hold a `return` / `raise`, or
+  `mayWrite`. Before, a copy under an `if`, behind an early `return` or
+  followed by `zap(a)` (a `var` parameter passed on has no `nnkHiddenAddr`)
+  was proved the plain copy and the walk decided it (false `sxUnsat`); an
+  `emit` after the copy already declined, through the effect summary. D-05
+  is not a worklist row: `foreignWriteNode` (asm, cast, `emit`) and
+  `opaqueRoutine` (method, bodiless) are now the one judgement
+  `scanOpaqueEffects` and `mayWrite` both call; the scanner stays a
+  separate summary (it names which globals and heap types, `mayWrite` only
+  whether), so its `ref`-argument and read-of-a-global rules are not
+  `mayWrite`'s. W-10 stays open (home K6c). Pins:
+  `tests/tsymex_0016_k6b_hookcopy.nim`. `tsymex_0016_k6a_maywrite` exits 0
+  on c and cpp under `dt-bounded.sh` (the non-zero exit K6a's agent saw did
+  not reproduce).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

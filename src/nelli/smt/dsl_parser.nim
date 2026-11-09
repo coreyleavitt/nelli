@@ -3818,6 +3818,27 @@ proc mayWriteAnyVariable(acc: var OpaqueEffects) =
   if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
   acc.heapAll = true
 
+proc foreignWriteNode(n: NimNode): bool =
+  ## RFC-0016 K6b (D-05, "one rule"). The node itself is code the walk cannot
+  ## read: inline assembly, a `cast` (a forged pointer), or an `emit` pragma. It
+  ## may write any memory, a variable included. The one judgement
+  ## `scanOpaqueEffects` (which memory, for its summary) and `mayWrite` (whether
+  ## at all) both take for these nodes.
+  case n.kind
+  of nnkAsmStmt, nnkCast: true
+  of nnkPragma:
+    for p in n:
+      let head = if p.kind in {nnkExprColonExpr, nnkCall} and p.len > 0: p[0]
+                 else: p
+      if head.kind in {nnkSym, nnkIdent} and eqIdent(head, "emit"): return true
+    false
+  else: false
+
+proc opaqueRoutine(sym: NimNode): bool =
+  ## RFC-0016 K6b (D-05). A call of `sym` may run code the walk cannot read: a
+  ## method (any override) or a body outside Nim. It may write any memory.
+  sym.symKind == nskMethod or isBodilessForeign(sym)
+
 const markersModuleSuffix = "/nelli/engine/markers.nim"
   ## RFC-0005 S8c: where the three DSL markers are declared.
 
@@ -4009,7 +4030,7 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
       if k == nskVar:
         let nm = globalIRName(n)
         if nm notin acc.havoc: acc.havoc.add nm
-    elif k == nskMethod or isBodilessForeign(n):
+    elif opaqueRoutine(n):
       # Dynamic dispatch, or a body outside Nim: it may write any
       # module-level variable (a foreign routine through an exported one,
       # or a callback), and (RFC-0005 S8ax) any cell one of them reaches.
@@ -4065,8 +4086,8 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
     # module-level variable and any heap cell (S8as declined it). A local
     # of the caller is reachable only through an argument, which the call
     # site summarises, or through an address, which is a heap cell.
-    if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
-    acc.heapAll = true
+    # (`foreignWriteNode`, the judgement `mayWrite` takes too.)
+    mayWriteAnyVariable(acc)
   of nnkWhileStmt:
     # RFC-0005 S8ax: a loop may not end, and a replay of a witness through
     # it would not either.
@@ -4075,11 +4096,8 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
     else:
       acc.notInert("its body holds a `while` loop, which may not terminate")
   of nnkPragma:
-    # RFC-0005 S8cs: foreign code inline, as `nnkAsmStmt` below.
-    for p in n:
-      if p.kind == nnkExprColonExpr and p[0].kind in {nnkIdent, nnkSym} and
-         macros.strVal(p[0]) == "emit":
-        mayWriteAnyVariable(acc)
+    # RFC-0005 S8cs: foreign code inline, as `nnkAsmStmt` above.
+    if foreignWriteNode(n): mayWriteAnyVariable(acc)
     if acc.writesOnly:
       for p in n:
         let head = if p.kind in {nnkExprColonExpr, nnkCall} and p.len > 0: p[0]
@@ -16888,7 +16906,7 @@ proc routineMayWrite(sym: NimNode; st: var MayWriteState): bool =
   ## RFC-0016 K6a. A walked user routine's body may write; a routine met while
   ## its own analysis is open (a cycle), a method, a body outside Nim and one
   ## with no impl to read may write anything.
-  if sym.symKind == nskMethod or isBodilessForeign(sym): return true
+  if opaqueRoutine(sym): return true
   if containsSym(st.clean, sym): return false
   if containsSym(st.stack, sym) or st.stack.len >= mayWriteMaxDepth:
     return true
@@ -16925,6 +16943,7 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
   ## proc value and a callback argument may write anything. A write to a
   ## variable by name is not this question (`mayWriteRoot` scans those).
   if n == nil: return false
+  if foreignWriteNode(n): return true
   case n.kind
   of nnkAsgn, nnkFastAsgn:
     if lvalueEscapes(n[0]): return true
@@ -16954,11 +16973,7 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
         if n[j].typeKind in {ntyPtr, ntyPointer, ntyCString, ntyRef, ntyProc} or
            scanArgHoldsPtr(n[j].getTypeInst):
           return true
-  of nnkPragma:
-    for p in n:
-      let head = if p.kind in {nnkExprColonExpr, nnkCall} and p.len > 0: p[0]
-                 else: p
-      if head.kind in {nnkSym, nnkIdent} and eqIdent(head, "emit"): return true
+  of nnkPragma: discard  # `emit` is `foreignWriteNode`'s
   of mayWriteReadOnlyKinds: discard
   else: return true
   for c in n:
@@ -23125,6 +23140,15 @@ proc routeHookCopies(h: NimNode): bool =
   ## destination, `=dup` in the result's, and nothing else touches the
   ## destination. `=destroy` and `=trace` make no copy. A `=wasMoved` only does
   ## when its body stores nothing.
+  ##
+  ## RFC-0016 K6b (W-09). A fail-closed proof. A field copy counts only as a
+  ## top-level statement of the body (under an `if`, in a loop or behind a
+  ## `return` it may not run, or not once). Every other statement must leave
+  ## the destination alone -- it names it nowhere, so no callee, `var` actual
+  ## or alias can write it -- must not leave the hook (`return`, `raise`) and
+  ## must not `mayWrite` (a store through a pointer, foreign code, a callee
+  ## that does). The check used to default to "copied" for what it did not
+  ## recognise.
   let name = macros.strVal(h)
   if name notin ["=copy", "=sink", "=dup", "=wasMoved"]: return true
   let impl = h.getImpl
@@ -23157,30 +23181,46 @@ proc routeHookCopies(h: NimNode): bool =
                      nnkDerefExpr, nnkHiddenAddr, nnkAddr} and r.len > 0:
       r = r[0]
     if r.kind == nnkSym: macros.strVal(r) else: ""
-  proc check(n: NimNode): bool =
-    result = true
-    case n.kind
-    of nnkAsgn, nnkFastAsgn:
-      if rootName(n[0]) == dst:
-        var l = n[0]
-        if l.kind in {nnkHiddenDeref, nnkDerefExpr}: l = l[0]
-        if name != "=wasMoved" and l.kind == nnkDotExpr and n[1].kind == nnkDotExpr and
-           l[1].repr == n[1][1].repr and rootName(n[1]) == src and
-           n[1][0].kind == nnkSym:
-          copied.add macros.strVal(l[1])
-          return true
-        return false
-      return check(n[1])
-    of nnkHiddenAddr, nnkAddr:
-      if rootName(n) == dst: return false
-    of nnkCall, nnkCommand:
-      # A lifetime call on the destination stores no value the copy keeps.
-      if n.len > 0 and n[0].kind == nnkSym and macros.strVal(n[0]).startsWith("=") and
-         macros.strVal(n[0]) != "=":
-        return true
-    else: discard
+  proc namesDst(n: NimNode): bool =
+    if n.kind == nnkSym and macros.strVal(n) == dst: return true
     for c in n:
-      if not check(c): return false
+      if namesDst(c): return true
+  proc leavesHook(n: NimNode): bool =
+    if n.kind in {nnkReturnStmt, nnkRaiseStmt}: return true
+    if n.kind in RoutineNodes: return false
+    for c in n:
+      if leavesHook(c): return true
+  proc fieldCopy(n: NimNode): string =
+    ## The field `dst.f = src.f` copies, or "".
+    if name == "=wasMoved" or n.kind notin {nnkAsgn, nnkFastAsgn} or n.len != 2:
+      return ""
+    var l = n[0]
+    if l.kind != nnkDotExpr or n[1].kind != nnkDotExpr or n[1][0].kind != nnkSym:
+      return ""
+    var o = l[0]
+    if o.kind in {nnkHiddenDeref, nnkDerefExpr} and o.len == 1: o = o[0]
+    if o.kind == nnkSym and macros.strVal(o) == dst and
+       l[1].repr == n[1][1].repr and macros.strVal(n[1][0]) == src:
+      macros.strVal(l[1])
+    else: ""
+  proc check(n: NimNode): bool =
+    case n.kind
+    of nnkStmtList:
+      for c in n:
+        if not check(c): return false
+      return true
+    of nnkEmpty, nnkCommentStmt: return true
+    else: discard
+    let f = fieldCopy(n)
+    if f.len > 0:
+      copied.add f
+      return true
+    # A lifetime call stores no value the copy keeps (its own body is walked
+    # as a hook of its own, `readHooks`).
+    if n.kind in {nnkCall, nnkCommand} and n.len > 0 and n[0].kind == nnkSym and
+       macros.strVal(n[0]).startsWith("=") and macros.strVal(n[0]) != "=":
+      return true
+    not (namesDst(n) or leavesHook(n) or mayWrite(n))
   if not check(impl[6]): return false
   for f in fields:
     if f notin copied: return false

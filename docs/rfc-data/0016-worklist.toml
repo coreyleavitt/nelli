@@ -1707,10 +1707,11 @@ pins = ["tsymex_0016_k6a_maywrite"]
 id = "W-09"
 table = "5.9"
 title = "the hook copy-proof defaults to \"copied\""
-state = "open"
-note = ""
+state = "closed"
+note = "K6b (`rfc-0016-k6b`, walker 293, 2026-11-09)"
 home = "K6b"
 cells = []
+pins = ["tsymex_0016_k6b_hookcopy"]
 
 [[row]]
 id = "W-10"

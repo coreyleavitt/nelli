@@ -65,7 +65,6 @@ AUD-03	H1	no cell or pin names it yet; section 11 names the id in this slice onl
 AUD-05	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 AUD-06	H1	no cell or pin names it yet; section 11 names the id in this slice only
 AUD-07	H1	no cell or pin names it yet; section 11 names the id in this slice only
-W-09	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-10	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-14	K5b	no cell or pin names it yet; the row's home names this slice
 W-17	K5a	no cell or pin names it yet; the row's home names this slice

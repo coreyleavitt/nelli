@@ -310,15 +310,14 @@ const renderAsChoicesVersion* = "12"
   ##   `never` rows.
 
 const symexWalkerVersion* = "299"
-  ## RFC-0016 K6a (298->299): `mayWrite` replaces `nodeWritesHeap`: an
-  ## allowlist of read-only node kinds, with every other kind, an `emit`, a
-  ## proc value, a method, an opaque callee and a stdlib routine given an
-  ## address reading as may-write (a walked callee is analysed by its body
-  ## with a cycle bound), so the pointer-write `lent`/`let` decline fires on
-  ## shapes it used to miss. (K6b and K6c ride the same number: the hook
-  ## copy-proof is fail-closed, a const root is never reached by a pointer
-  ## write, `ptrUsesStayLocal` is a fail-closed escape predicate, and
-  ## `routeStoresThroughDeref` / `bindsViewWhole` are exhaustive.)
+  ## RFC-0016 K6a, K6b (298->299): `mayWrite` is an allowlist of read-only
+  ## node kinds (`nodeWritesHeap` was a denylist), so a `lent` / `let` loop
+  ## whose body casts, emits, or calls an opaque routine declines. K6b: the
+  ## hook copy-proof counts a field copy only as a top-level statement and
+  ## every other statement must not name the destination, leave the hook or
+  ## `mayWrite`, so a `=copy` that copies under an `if`, behind a `return`, or
+  ## then lets a callee overwrite the destination declines (it was proved the
+  ## plain copy and decided).
   ## RFC-0016 K2c (297->298): `classifyType` reads the type-class axis. A
   ## `c_longdouble` (STY-06) is refused by the `float128` row and declines
   ## (`feUnsupportedParamType`) where it was modelled as an IEEE double

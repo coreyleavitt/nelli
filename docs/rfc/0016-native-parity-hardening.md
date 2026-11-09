@@ -919,7 +919,7 @@ state (§8.2).
 | ID | Item | Home | Owner |
 |---|---|---|---|
 | W-08 | `nodeWritesHeap` is a fail-open denylist | K6a | closed K6a (`rfc-0016-k6a`, walker 293, 2026-11-09) |
-| W-09 | the hook copy-proof defaults to "copied" | K6b | |
+| W-09 | the hook copy-proof defaults to "copied" | K6b | closed K6b (`rfc-0016-k6b`, walker 293, 2026-11-09) |
 | W-10 | `ptrUsesStayLocal`, `routeStoresThroughDeref`, `bindsViewWhole` share the denylist shape | K6c | |
 | W-12 | object field defaults (with W-20) | W1-f (decline), K3b (exact) | closed (2026-11-07, W1-z): W1-f found the decline premise wrong; the walker already agreed with native in every shape (see the W1-f row). (2026-11-09) K3b: the zero side reads the `typeop:fieldDefault/<kind>` rows; `wasMoved`, `reset` and `move` pinned at the bitwise zero |
 | W-14 | `int` hard-coded as BV64; i386 unread | K5b (32-bit refused) | |

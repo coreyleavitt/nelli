@@ -468,7 +468,7 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkVariantFieldSet", emitExpr(e.vfsRecv),
             newLit(e.vfsFieldName),
             prefix(tagsLit, "@"),
-            emitExpr(e.vfsVal))
+            emitExpr(e.vfsVal), emitIRType(e.vfsVariantTy))
   of iekSeqLen:
     newCall(bindSym"mkSeqLen", emitExpr(e.lenObj), newLit(e.lenLoc))
   of iekSeqSlice:
@@ -942,7 +942,8 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkVariantFieldStmt",
             newLit(s.vfRetName), emitExpr(s.vfRecv),
             newLit(s.vfFieldName), emitIRType(s.vfFieldTy),
-            prefix(tagsLit, "@"), newLit(s.vfLoc), newLit(s.vfWrite))
+            prefix(tagsLit, "@"), newLit(s.vfLoc), newLit(s.vfWrite),
+            emitIRType(s.vfVariantTy))
   of isVariantReassign:
     newCall(bindSym"mkVariantReassign",
             newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName),
@@ -12150,7 +12151,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           return declineUnsupportedFieldRead(n, fieldName, fieldTy, preamble, ctx)
         let synth = freshSynth(ctx, "vf")
         preamble.add mkVariantFieldStmt(
-          synth, objIR, fieldName, fieldTy, matchingTags, siteLoc(n))
+          synth, objIR, fieldName, fieldTy, matchingTags, siteLoc(n),
+          variantTy = lhsCls.ty)
         mkVar(synth)
     of itMultiVariant:
       # Phase 14 cycle A1c slice 2. Axis-aware field access on an
@@ -18150,7 +18152,9 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
                   else: mkField(recvIR, i, step.recvTy.fieldNames[i]))
       mkTupleLit(elems, step.recvTy)
     else:
-      mkVariantFieldSet(recvIR, step.name, step.tags, newVal)
+      mkVariantFieldSet(recvIR, step.name, step.tags, newVal,
+                        (if step.recvTy.kind == itVariant: step.recvTy
+                         else: nil))
   var operand: NimNode
   var fieldName: string
   if step.recv.kind == nnkSym:

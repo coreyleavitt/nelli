@@ -340,9 +340,11 @@ const symexWalkerVersion* = "309"
   ## `ObjectConversionDefect`); a `--fieldChecks:off` build compiles a variant
   ## field as a plain union member access, so outside its branch it is
   ## `ubInactiveVariantField` on the cpp backend (row `field/inactiveBranch`)
-  ## and declined path-locally on the c backend (`fieldChecksOffLayout`, row
-  ## `field/inactiveBytes`: no per-target layout of a variant; a cpp WRITE
-  ## outside the branch is declined the same way, being defined there), and a
+  ## and, on the c backend, the active arm's bytes: exact when they lie
+  ## wholly inside its int/char/bool fields (`variant_layout.nim`, a read
+  ## extracts them and a write is a bit-insert into its slots), else declined
+  ## path-locally (`fieldChecksOffLayout`, row `field/inactiveBytes`; a cpp
+  ## WRITE outside the branch is declined the same way, being defined there), and a
   ## branch-changing discriminator write is the `dwmHavoc` model. Neither
   ## build declines every routine (`feCheckOption`) any more.
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the

@@ -931,6 +931,7 @@ type
       vfsTags*:      seq[int]     ## tag ordinals of the arms declaring it;
                                    ## empty for a plain (shared) field
       vfsVal*:       IRExpr       ## the field's new value
+      vfsVariantTy*: IRType       ## RFC-0016 PRC-07 slice A: `vfVariantTy`
     of iekSeqLen:
       lenObj*: IRExpr
       lenLoc*: string            ## Round-6 B1 (siteLoc precedent, A3):
@@ -1669,6 +1670,12 @@ type
       vfWrite*:         bool      ## RFC-0016 PRC-07: the access is the check
                                   ## of a write `v.f = x` (the same
                                   ## identity-only status as `vfLoc`)
+      vfVariantTy*:     IRType    ## RFC-0016 PRC-07 slice A: the receiver's
+                                  ## variant type, for the C layout of a
+                                  ## wrong-branch access with `fieldChecks`
+                                  ## off (nil: none known). Identity only, as
+                                  ## `vfLoc`: the receiver's static type is
+                                  ## already in the program's key.
     of isVariantReassign:
       vrObjName*:       string    ## the variant variable in env
       vrNewTag*:        int       ## the new tag ordinal
@@ -3286,11 +3293,11 @@ proc mkMultiVariantLit*(ty: IRType, axisTags: seq[int],
          mvlAxisFields: axisFields, mvlPlainFields: plainFields)
 
 proc mkVariantFieldSet*(recv: IRExpr, fieldName: string, tags: seq[int],
-                         val: IRExpr): IRExpr =
+                         val: IRExpr; variantTy: IRType = nil): IRExpr =
   ## RFC-0005 S8s. `recv` with field `fieldName` replaced by `val` (see
   ## `iekVariantFieldSet`).
   IRExpr(kind: iekVariantFieldSet, vfsRecv: recv, vfsFieldName: fieldName,
-         vfsTags: tags, vfsVal: val)
+         vfsTags: tags, vfsVal: val, vfsVariantTy: variantTy)
 
 proc mkSeqLen*(obj: IRExpr, loc: string = ""): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj, lenLoc: loc)
@@ -4898,10 +4905,12 @@ proc mkVarCopy*(name: string): IRExpr =
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
                          fieldTy: IRType, matchingTags: seq[int];
-                         loc: string = ""; write: bool = false): IRStmt =
+                         loc: string = ""; write: bool = false;
+                         variantTy: IRType = nil): IRStmt =
   IRStmt(kind: isVariantField, vfRetName: retName, vfRecv: recv,
          vfFieldName: fieldName, vfFieldTy: fieldTy,
-         vfMatchingTags: matchingTags, vfLoc: loc, vfWrite: write)
+         vfMatchingTags: matchingTags, vfLoc: loc, vfWrite: write,
+         vfVariantTy: variantTy)
 
 func branchGroups*(arms: seq[VariantArm]): seq[seq[int]] =
   ## RFC-0005 S8f. The explicit (`of`) tag ordinals of one variant axis,

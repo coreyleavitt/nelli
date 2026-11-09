@@ -612,5 +612,6 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
     "--fieldChecks:off compiles a variant field access as a plain union " &
     "member access: outside its branch it is undefined on the cpp backend " &
     "(`ubInactiveVariantField`) and the overlapping bytes on the c backend, " &
-    "declined path-locally (`fieldChecksOffLayout`); the in-branch side is " &
+    "exact where the active arm's int/char/bool fields cover them and " &
+    "declined path-locally otherwise (`fieldChecksOffLayout`); the in-branch side is " &
     "exact (PRC-07)"))])

@@ -558,21 +558,36 @@
   the member active), so it is no longer `ubInactiveVariantField`; it is declined
   path-locally (`fieldChecksOffLayout`, row `field/inactiveBytes`), as on c.
   `IRStmt.vfWrite` (identity only, set by the assignment parser on the write's
-  own branch check) selects it; the heap write site passes `isWrite`. NOT DONE
-  (blocker, needs a fork): the exact c-backend overlapping-bytes model and the
-  cpp "write then read through the discriminator's branch is UB" halt. The
-  value variant holds one SymVal slot per arm field (`vArmFields`) and a ref
-  variant one heap array per tag; there is no union byte storage, so a wrong-
-  branch write has nowhere to put bytes the active arm's slots do not cover, and
-  "active member differs from the discriminator" has no state to live in (a new
-  `SymVal`/heap field, merged by `iteSV`, `svPartsOf`, retBindEq, hashing: ~100
-  sites). A narrower sound slice is available: reads and writes whose extent lies
-  inside the active arm's own fields (int-family, bool, char widths) done as
-  bit-insert/extract on those slots, with layout from the C ABI (struct `{disc;
-  union{struct{..}_k1;..}}`, offsets verified by a native `offsetof` probe) and
-  anything touching uncovered bytes (a shorter active arm, padding) or a float,
-  set, enum, nested object, string or seq declined. The layout table is therefore
-  not produced; the `field/inactiveBytes` row keeps its consumers.
+  own branch check) selects it; the heap write site passes `isWrite`.
+  PRC-07 c-backend variant bytes, slice A (same branch, walker 306 kept; RED first:
+  `[FAILED] the walker's variant layout is the compiler's`, then, with the layout
+  in, `[FAILED] a wrong-branch read is the active arm's bytes, by value` and the
+  five twins): DONE. The per-arm `SymVal` slots stay the representation; the union
+  bytes are derived from them through a C layout per target.
+  `smt/variant_layout.nim` computes it for a single-axis variant (struct
+  `{plain fields; disc; union{one-field arm: the field; else struct _k_N}}`, read
+  from the generated C; the C ABI places each member; amd64/arm64, little-endian,
+  64-bit pointers, every other target declines with the reason) and pins each
+  arm field's byte offset/width against `addr v.f` and `sizeof` natively
+  (`Wd`, `Wp` with a plain field, `Wb` with a bool disc, `Wf` with a float arm).
+  Consumer: on `--fieldChecks:off` c, `isVariantField` (value variant) answers a
+  wrong-branch READ whose bytes lie wholly inside the active arm's integer, char
+  or bool fields by `armBytesRead` (bv lshr/and/shl/or over the slots' 64-bit
+  cells), and `lowerVariantFieldSet` makes a wrong-branch WRITE a bit-insert into
+  those slots (`armBytesWrite`), the discriminator unchanged; per arm, so a
+  symbolic discriminator splits into exact arms and a declined remainder
+  (`fieldChecksOffLayout`, path-local). Needs `vfVariantTy`/`vfsVariantTy` on the
+  IR (identity only, emitted by the parser). Declined, as before: uncovered
+  bytes or padding, a float, a range or enum written with arbitrary bytes, a bool
+  read of non-bool bytes, a bool field overwritten by a non-bool, the `else` arm,
+  a multi-axis variant, a `ref` variant (one heap array per tag: not local), an
+  inheritance variant, a `packed` object (invisible to the layout: unpinned
+  trap). cpp: a read stays `ubInactiveVariantField`, a write declined.
+  REMAINING, slice B: uncovered bytes/padding and the cpp "active member
+  differs from the discriminator" state (write then read through the
+  discriminator's branch is UB), which need a union byte image on the value
+  (a new `SymVal` field merged by `iteSV`, `svPartsOf`, retBindEq, hashing: ~100
+  sites), and the `ref` variant twin.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

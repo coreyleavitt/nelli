@@ -34,6 +34,7 @@ import ./buildprofile as bprof   ## RFC-0016 K5a: the host half, the segment, th
 import ./types
 import ./admission
 import ./definedness   ## RFC-0016 K10a-axis: the definedness axis
+import ./variant_layout as vl   ## RFC-0016 PRC-07 slice A: a variant's C layout
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
@@ -5693,6 +5694,66 @@ proc cellValue(c: Z3BitVec[64]; ty: IRType): SymVal =
     return SymVal(kind: svBool, bo: not (c == mkBitVec[64](0'i64)))
   let whole = SymVal(kind: svBV64, signed: ty.signed, bv64: c)
   if ty.width == 64: whole else: truncBV(whole, ty.width, ty.signed)
+
+proc ofByteShift(n: int): Z3BitVec[64] = mkBitVec[64](int64(n * 8))
+
+proc byteMask(len: int): Z3BitVec[64] =
+  if len >= 8: not mkBitVec[64](0'i64) else: mkBitVec[64]((1'i64 shl (len * 8)) - 1)
+
+proc normSlot(v: SymVal; ty: IRType): SymVal =
+  ## An Int-promoted slot (`svInt`: a literal, a `.len`) of the fixed-width
+  ## int type `ty` as the bit-vector of its width, the representation the
+  ## bit moves work in; every other slot as it is.
+  if ty.kind != itInt: return v
+  # a literal reaches a narrow field as the 64-bit bit-vector it was written
+  # in: its low `ty.width` bits are the value
+  let wide = case v.kind
+             of svBV64: 64
+             of svBV32: 32
+             of svBV16: 16
+             else: 0
+  if wide > ty.width and ty.width in [8, 16, 32]:
+    return truncBV(v, ty.width, ty.signed)
+  if v.kind != svInt: return v
+  result = svIntToBV(v, case ty.width
+                        of 8: svBV8
+                        of 16: svBV16
+                        of 32: svBV32
+                        else: svBV64)
+  result.signed = ty.signed
+
+proc armBytesRead(slots: seq[SymVal]; places: seq[vl.Place]; ps: seq[vl.Piece];
+                  target: IRType): Option[SymVal] =
+  ## RFC-0016 PRC-07 slice A. The value of a `target`-typed field read from
+  ## the bytes of an active arm's fields (little-endian; `variant_layout`
+  ## says which bytes): each piece is `len` bytes of one slot's 64-bit cell,
+  ## moved to its place in the result.
+  var acc = mkBitVec[64](0'i64)
+  for pc in ps:
+    if pc.field >= slots.len or pc.field >= places.len: return
+    let c = cellOf(normSlot(slots[pc.field], places[pc.field].ty),
+                   places[pc.field].ty)
+    if c.isNone: return
+    acc = acc or (((c.get.lshr ofByteShift(pc.fieldByte)) and byteMask(pc.len)) shl
+                  ofByteShift(pc.targetByte))
+  some(cellValue(acc, target))
+
+proc armBytesWrite(slots: seq[SymVal]; places: seq[vl.Place]; ps: seq[vl.Piece];
+                   val: SymVal; valTy: IRType): Option[seq[SymVal]] =
+  ## The slots of the active arm after `val` (a `valTy` field) is written
+  ## over the bytes `ps` names: each piece is a bit-insert into one slot.
+  let vc = cellOf(normSlot(val, valTy), valTy)
+  if vc.isNone: return
+  var res = slots
+  for pc in ps:
+    if pc.field >= slots.len or pc.field >= places.len: return
+    let dc = cellOf(normSlot(res[pc.field], places[pc.field].ty),
+                    places[pc.field].ty)
+    if dc.isNone: return
+    let m = byteMask(pc.len) shl ofByteShift(pc.fieldByte)
+    let ins = (vc.get.lshr ofByteShift(pc.targetByte)) shl ofByteShift(pc.fieldByte) and m
+    res[pc.field] = cellValue((dc.get and (not m)) or ins, places[pc.field].ty)
+  some(res)
 
 proc floatKeyCell(k: SymVal; keyTy: IRType): Option[Z3BitVec[64]] =
   ## RFC-0005 S8at. The 64-bit cell of a float `Table` key: the IEEE bit
@@ -20560,9 +20621,12 @@ proc inactiveFieldSide(cp: Path; outOfArm: Z3Bool; env: Env; loc: string;
   ## member becomes active), so it is declined on its own path like the c
   ## backend's, the walker holding no state for a member other than its
   ## discriminator's. On
-  ## the c backend C defines it as the overlapping bytes of the active branch,
-  ## which the walker has no per-target layout for (`fieldChecksOffLayout`): the
-  ## side is declined, on its own path only. Returns the declined child (`env`
+  ## the c backend C defines it as the overlapping bytes of the active branch;
+  ## the caller has already taken the
+  ## arms whose bytes the active arm's int/char/bool fields cover
+  ## (`variant_layout`, slice A) out of `outOfArm`, and what is left, which
+  ## the walker cannot answer (`fieldChecksOffLayout`), is declined, on its own
+  ## path only. Returns the declined child (`env`
   ## its environment) for the caller to add to its survivors, or nothing.
   if guardLiteral(outOfArm) == glFalse: return
   if buildSemantics.backend == beCpp and not isWrite:
@@ -23784,13 +23848,35 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     # side channel for try/except routing + target-witness search, not a
     # fork-every-arm construct).
     var declinedSide: seq[Path]
+    var exactArms: seq[(int, SymVal)]
     if fieldsUnchecked():
       # RFC-0016 PRC-07: no `FieldDefect`; the side is a union read.
       var denv = p.env
       var scratch: seq[Z3Bool]
       denv[stmt.vfRetName] = allocateSym(stmt.vfFieldTy,
         freshDegradeName("__declinedFieldRead"), scratch)
-      declinedSide = inactiveFieldSide(p, outOfArmCond, denv, stmt.vfLoc, w,
+      # RFC-0016 PRC-07 slice A. On the c backend a wrong-branch access
+      # whose bytes the active arm's integer fields cover is exact: the
+      # arms whose bytes do are `exactArms`, the rest is declined as before.
+      if buildSemantics.backend == beC and recv.kind == svVariant and
+         stmt.vfVariantTy != nil:
+        let lay = vl.variantLayout(stmt.vfVariantTy)
+        let tp = vl.accessPlace(lay, stmt.vfMatchingTags, stmt.vfFieldName)
+        if tp.isSome:
+          for tag, slots in recv.vArmFields:
+            if tag < 0 or tag in stmt.vfMatchingTags or
+               not lay.arms.hasKey(tag) or slots.len != lay.arms[tag].len:
+              continue
+            let ps = if stmt.vfWrite: vl.writePieces(lay, tag, tp.get)
+                     else: vl.readPieces(lay, tag, tp.get)
+            if ps.isNone: continue
+            let v = armBytesRead(slots, lay.arms[tag], ps.get, stmt.vfFieldTy)
+            if v.isNone: continue
+            exactArms.add (tag, v.get)
+      var declinedCond = outOfArmCond
+      for (tag, _) in exactArms:
+        declinedCond = declinedCond and not variantDiscEq(disc, int64(tag))
+      declinedSide = inactiveFieldSide(p, declinedCond, denv, stmt.vfLoc, w,
                                        stmt.vfWrite)
     else:
       maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
@@ -23807,6 +23893,18 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     var newEnv = pM.env
     newEnv[stmt.vfRetName] = bound
     survivors.add forkPath(pM, pM.pc & @[inArmCond], newEnv)
+    if exactArms.len > 0:
+      # the active arm's bytes: the value is the ite over the exact arms
+      var exactCond = variantDiscEq(disc, int64(exactArms[0][0]))
+      var bytesVal = exactArms[^1][1]
+      for k in 1 ..< exactArms.len:
+        exactCond = exactCond or variantDiscEq(disc, int64(exactArms[k][0]))
+      for k in countdown(exactArms.len - 2, 0):
+        bytesVal = iteSV(variantDiscEq(disc, int64(exactArms[k][0])),
+                         exactArms[k][1], bytesVal)
+      var envX = pM.env
+      envX[stmt.vfRetName] = bytesVal
+      survivors.add forkPath(pM, pM.pc & @[exactCond], envX)
   survivors
 
 proc walkCallArm(stmt: IRStmt, paths: seq[Path],
@@ -28706,7 +28804,31 @@ proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
       if ix < 0: continue
       if newVal.isNone: newVal = some(replaced(recv.vArmFields[tag][ix]))
       result.vArmFields[tag][ix] = newVal.get
-    if newVal.isSome: return
+    if newVal.isSome:
+      # RFC-0016 PRC-07 slice A. With `fieldChecks` off on the c backend a
+      # write outside the active arm is a write into the active arm's
+      # bytes: every other arm whose fields cover the written field's
+      # bytes takes the bit-insert while it is the active one.
+      if fieldsUnchecked() and buildSemantics.backend == beC and
+         e.vfsVariantTy != nil:
+        let lay = vl.variantLayout(e.vfsVariantTy)
+        let tp = vl.accessPlace(lay, e.vfsTags, e.vfsFieldName)
+        if tp.isSome:
+          for tag, slots in recv.vArmFields:
+            if tag < 0 or tag in e.vfsTags or not lay.arms.hasKey(tag) or
+               slots.len != lay.arms[tag].len:
+              continue
+            let ps = vl.writePieces(lay, tag, tp.get)
+            if ps.isNone: continue
+            let nw = armBytesWrite(slots, lay.arms[tag], ps.get, newVal.get,
+                                   tp.get.ty)
+            if nw.isNone: continue
+            let isActive = variantDiscEq(recv.vDisc[], int64(tag))
+            for pc in ps.get:
+              result.vArmFields[tag][pc.field] =
+                iteSV(isActive, nw.get[pc.field],
+                    normSlot(slots[pc.field], lay.arms[tag][pc.field].ty))
+      return
   of svMultiVariant:
     result = recv
     let pix = recv.mvPlainFieldNames.find(e.vfsFieldName)

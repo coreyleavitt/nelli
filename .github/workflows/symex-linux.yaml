@@ -93,14 +93,19 @@ jobs:
         env:
           REGEXES_JSON: ${{ needs.derive.outputs.regexes_json }}
           SHARD: ${{ matrix.shard }}
+          SHARDS_JSON: ${{ needs.derive.outputs.shards_json }}
+          PARTIAL: "1"
         run: |
           set -uo pipefail
           mkdir -p "$RUNNER_TEMP/sweep"
           regex="$(printf '%s' "$REGEXES_JSON" | jq -r --arg s "$SHARD" '.[$s]')"
           [ -n "$regex" ] && [ "$regex" != null ] || { echo "shard $SHARD: no regex"; exit 1; }
           start=$SECONDS
-          # sweep.sh exits 0 unless it could not run; the log is the record
-          # and the `gate` job reads it. A red test does not fail the shard.
+          # sweep.sh exits 0 unless it could not run; the log is the record.
+          # This step then joins the log against the known-red allowlist for
+          # this shard's slice, so the shard fails on a red test outside the
+          # allowlist or an allowlisted test that now passes. The `gate` job
+          # keeps the whole-suite checks (missing results, typos).
           scripts/sweep.sh --host --derive -j 4 -f "$regex" "$RUNNER_TEMP/sweep/shard-$SHARD.log"
           rc=$?
           {
@@ -110,7 +115,16 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "shard $SHARD wall time: $(( SECONDS - start )) s"
-          exit "$rc"
+          bash scripts/check-linux-allowlist.sh --self-test || exit 1
+          printf '%s' "$SHARDS_JSON" | jq -r --arg s "$SHARD" '.[$s][]' > "$RUNNER_TEMP/sweep/expected-$SHARD.txt"
+          crc=0
+          bash scripts/check-linux-allowlist.sh tests/0016-allowlist/linux-host-known-red.txt \
+            "$RUNNER_TEMP/sweep/expected-$SHARD.txt" "$RUNNER_TEMP/sweep/shard-$SHARD.log" \
+            > "$RUNNER_TEMP/sweep/check-$SHARD.txt" 2>&1 || crc=$?
+          cat "$RUNNER_TEMP/sweep/check-$SHARD.txt"
+          { echo "#### shard $SHARD vs known-red allowlist"; echo '```'; cat "$RUNNER_TEMP/sweep/check-$SHARD.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$rc" -eq 0 ] || exit "$rc"
+          exit "$crc"
 
       - name: Upload the shard log and sidecars
         if: always()

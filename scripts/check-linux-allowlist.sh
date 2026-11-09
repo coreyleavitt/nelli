@@ -15,6 +15,10 @@
 #   3. an allowlisted test that PASSED (a stale entry: the list cannot rot);
 #   4. an allowlist entry with no reason, a duplicate, or a name outside the
 #      expected set (a typo or a retired test would otherwise pass unseen).
+# A shard job runs the same check over its own slice (expected-names = that
+# shard's tests) with PARTIAL=1, so a red test fails the shard that ran it and
+# the shard summary lists the known-red tests it absorbed; the `gate` job still
+# owns the whole-suite checks (missing shards, typos, duplicates).
 # PARTIAL=1 (a dispatch with a test filter) skips check 4's run-set test.
 # A `skip` line counts as run-and-not-red. Prints each class by name.
 set -uo pipefail
@@ -44,6 +48,10 @@ check() {
   report "tests with more than one result line" "$tmp/dupes"
   LC_ALL=C comm -23 "$tmp/red" "$tmp/allow" > "$tmp/new"
   report "red tests NOT in the allowlist (new failures)" "$tmp/new"
+  # Declared known-red tests that are red: expected, not a failure, but named
+  # so a shard's step summary shows what the allowlist is absorbing.
+  LC_ALL=C comm -12 "$tmp/red" "$tmp/allow" > "$tmp/known"
+  if [ -s "$tmp/known" ]; then echo "known-red (allowlisted, still red; not failing):"; sed 's/^/  /' "$tmp/known"; fi
   LC_ALL=C comm -12 "$tmp/green" "$tmp/allow" > "$tmp/stale"
   report "allowlisted tests that PASSED (stale entries; delete them)" "$tmp/stale"
   uniq -d "$tmp/allow.all" > "$tmp/adupes"
@@ -85,6 +93,19 @@ self_test() {
   printf '0 c tests/ta.nim 0\n1 c tests/tb.nim 0\n' > "$d/s1.log"
   printf '0 c tests/tc.nim 0\n0 c tests/td.nim 0\n' > "$d/s2.log"
   expect_rc 0 "two shard logs" "$d/allow" "$d/s1.log" "$d/s2.log"
+  # Shard mode: one slice, PARTIAL=1 (allowlist entries of other shards are not typos).
+  printf 'ta\ntb\n' > "$d/expect"
+  printf 'tb  known host defect\ntz  lives in another shard\n' > "$d/allow2"
+  printf '0 c tests/ta.nim 0\n1 c tests/tb.nim 0\n' > "$d/sh_ok.log"
+  PARTIAL=1 check "$d/allow2" "$d/expect" "$d/sh_ok.log" > "$d/out" 2>&1; got=$?
+  if [ "$got" -ne 0 ] || ! command grep -q 'known-red.*not failing' "$d/out" || ! command grep -qx '  tb' "$d/out"; then
+    echo "self-test FAILED: shard known-red passes but is reported (rc=$got)"; cat "$d/out"; bad=1; fi
+  printf '1 c tests/ta.nim 0\n1 c tests/tb.nim 0\n' > "$d/sh_new.log"
+  PARTIAL=1 check "$d/allow2" "$d/expect" "$d/sh_new.log" > "$d/out" 2>&1; got=$?
+  if [ "$got" -ne 1 ] || ! command grep -qx '  ta' "$d/out"; then echo "self-test FAILED: shard unlisted red must fail (rc=$got)"; cat "$d/out"; bad=1; fi
+  printf '0 c tests/ta.nim 0\n0 c tests/tb.nim 0\n' > "$d/sh_stale.log"
+  PARTIAL=1 check "$d/allow2" "$d/expect" "$d/sh_stale.log" > "$d/out" 2>&1; got=$?
+  if [ "$got" -ne 1 ] || ! command grep -q 'PASSED' "$d/out"; then echo "self-test FAILED: shard stale entry must fail (rc=$got)"; cat "$d/out"; bad=1; fi
   rm -rf "$d"
   [ "$bad" -eq 0 ] && echo "check-linux-allowlist self-test: ok"
   return "$bad"

@@ -20049,9 +20049,19 @@ proc parseStmtInner(n: NimNode,
         for fi in 1 ..< formal.len:
           let paramDef = formal[fi]
           if paramDef.kind != nnkIdentDefs: continue
-          let tyNode = paramDef[paramDef.len - 2]
-          let cls = classifyType(tyNode)
           let defaultNode = paramDef[paramDef.len - 1]
+          # RFC-0016 K2c (CRH-01, INT-09): a formal declared by its default
+          # alone (`keepEol = false` of `splitLines`) has an empty type slot;
+          # its type is in the iterator's signature. `classifyType` of the
+          # empty node stopped the compile ("node has no type").
+          var tyNode = paramDef[paramDef.len - 2]
+          if tyNode.kind == nnkEmpty:
+            let sig = itSym.getTypeInst
+            if sig.kind in {nnkProcTy, nnkIteratorTy} and sig.len > 0 and
+               sig[0].kind == nnkFormalParams and fi < sig[0].len and
+               sig[0][fi].kind == nnkIdentDefs:
+              tyNode = sig[0][fi][sig[0][fi].len - 2]
+          let cls = classifyType(tyNode)
           for pj in 0 ..< paramDef.len - 2:
             let bindName = paramDef[pj].strVal   # scoped (RFC-0005 S8e)
             let argNode =

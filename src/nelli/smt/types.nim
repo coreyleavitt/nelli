@@ -4153,6 +4153,12 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
       var ok = true
       for fty in ty.fields:
         if not isRenderableWitnessTy(fty): ok = false; break
+        # RFC-0016 K2c: a field of `UncheckedArray[T]` (a flexible array
+        # member) is a value Nim does not let a tuple or `let` hold, so a
+        # witness tuple with one stops the compile. The parameter declines.
+        if fty.kind == itUninterp and fty.uninterpName.len >= 29 and
+           fty.uninterpName[0 ..< 29] == "__unsupported:UncheckedArray[":
+          ok = false; break
       ok
   of itArray:
     isRenderableWitnessTy(ty.elemTy)          ## recurses into elem type + values

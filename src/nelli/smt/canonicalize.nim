@@ -290,6 +290,11 @@ const symexWalkerVersion* = "292"
   ## `Atomic[T]` read their `never` rows (STY-04), and as a top-level
   ## parameter they decline `heUnsupportedOwnership` where they were a
   ## compile stop (CRH-01); an omitted variant field reads its HRV-06 row.
+  ## Also CRH-01 compile stops that now decline or run: an `openArray`
+  ## parameter (the replay splat bound a `var` of it), an object with a
+  ## `pointer`/`UncheckedArray` field (the witness reader's `int` placeholder
+  ## in that slot; a flexible array member in a witness tuple), and an inline
+  ## iterator formal declared by its default alone (`splitLines`' `keepEol`).
   ## RFC-0016 K3a (290->291): `holdsSharedMemory` reads the type x memory-op
   ## axis (`typeaxes`) and looks through a variant's plain fields and arms, a
   ## multi-variant's axes and a distinct base, so `let c = gV` over a case

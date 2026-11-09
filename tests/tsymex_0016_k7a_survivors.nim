@@ -94,6 +94,17 @@ proc k7aPruneDead(x: int) =
       if x == 1 and x == 2:
         symexTarget("k7a_prune_dead")
 
+proc k7aLoopFork(n: int, x: int) =
+  ## Each iteration forks, so one k-unroll's active set grows inside ONE
+  ## statement; the target is unreachable.
+  var i = 0
+  var acc = 0
+  while i < n:
+    if x > i: acc = acc + 1 else: acc = acc + 2
+    i = i + 1
+  if acc == 1 and acc == 2:
+    symexTarget("k7a_loop_fork")
+
 proc k7aWideRead(i: int) =
   var a: array[300, int]
   if i >= 0 and i < 300:
@@ -140,6 +151,18 @@ suite "RFC-0016 K7a (c) -- a cut run is never trusted":
     check r.status != sxUnsat
     check not r.trusted()
     pinCap(k7aPruneDead, "ckFrontier", tLabel("k7a_prune_dead"), frontierOne)
+
+  test "frontier cut inside one k-unroll (ckFrontier)":
+    ## RFC-0016 K7 (CRH-01): `maxFrontierSize` also bounds a loop's live set
+    ## within its statement, not only between statements.
+    let r = symexFind(k7aLoopFork, tLabel("k7a_loop_fork"), frontierOne)
+    check r.status != sxUnsat
+    check not r.trusted()
+    var inUnroll = false
+    for e in r.errors:
+      if "of a while-loop k-unroll" in e.msg: inUnroll = true
+    check inUnroll
+    pinCap(k7aLoopFork, "ckFrontier", tLabel("k7a_loop_fork"), frontierOne)
 
   test "a too-wide array read cut (ckTermWalkRead)":
     pinCap(k7aWideRead, "ckTermWalkRead", tLabel("k7a_wide_read"))

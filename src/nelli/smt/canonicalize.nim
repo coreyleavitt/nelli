@@ -322,6 +322,9 @@ const symexWalkerVersion* = "298"
   ## `pointer`/`UncheckedArray` field (the witness reader's `int` placeholder
   ## in that slot; a flexible array member in a witness tuple), and an inline
   ## iterator formal declared by its default alone (`splitLines`' `keepEol`).
+  ## Also K2c (CRH-01 residue, K7): a nonzero `maxFrontierSize` now applies
+  ## inside a `while` k-unroll too (its active and exit sets, `ckFrontier`),
+  ## not only between statements. Default 0, so only runs that opted in move.
   ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case
   ## objects, in a witness and in a variable the SUT reaches, where it declined
   ## as not marshallable. A cached `:unk` that was that decline is stale.

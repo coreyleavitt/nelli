@@ -1785,6 +1785,7 @@ task test, "Run the test suite":
             # RFC-0016 K3a: the type-class and type x memory-op axes (tables, verbs), and the let-cursor x type pins through the walker.
             "tsymex_0016_k3a_typeaxes",
             "tsymex_0016_k3a_letcursor",
+            "tsymex_0016_k3c_pragmaaxis",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

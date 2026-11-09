@@ -282,7 +282,12 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "293"
+const symexWalkerVersion* = "294"
+  ## RFC-0016 K3c (293->294): the pragma axis (`pragmaaxes`). A local,
+  ## routine, parameter or type pragma is a row; a local or a callee's formal
+  ## or result of a type carrying (or holding) `{.union.}`, `{.packed.}`,
+  ## `{.byref.}` or `{.bycopy.}` declines `feUnsupportedOp`; a routine
+  ## pragma with no row declines `feUnadmitted` (absent is a decline).
   ## RFC-0016 K10a-target (292->293): `haltUndefined` also files the undefined
   ## side as a finding: under `tUndefined` a listed kind is the target's hit
   ## (`sxSat`, witness, `witnessUndefined`); under any other target it is listed

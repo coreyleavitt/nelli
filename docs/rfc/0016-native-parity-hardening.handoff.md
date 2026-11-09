@@ -160,6 +160,22 @@
   the cache for free. Traps: `UbKind` is a range that omits 0, so a field of it
   needs a declared default (`= ubUnsignedDivZero`) or `setLen` warns; a doc
   comment after `discard` in a variant branch breaks indentation.
+  K3c (`rfc-0016-k3c`, walker 293 to 294): `smt/pragmaaxes.nim`'s
+  `pragmaAxis` is the pragma axis, rows keyed `<place>/<name>` (`local/`,
+  `routine/`, `param/`, `type/`) on the `pragma:` scope, so W1-b's
+  `pragma:local/cursor` pins are its cells. `admitPragma(place, name, site)`
+  is read at the local declaration (replaces `localPragmaAllowlist`), at
+  `ensureProcRegistered` (a routine pragma, a formal's pragma, and each
+  formal and result type), at the local-declaration type gate and at the
+  target's own formals (`parseProc`). `union`, `packed`, `byref`, `bycopy`
+  on a type, `byref`, `bycopy`, `noalias` on a parameter, decline
+  `feUnsupportedOp` (a type is looked through fields, tuples, distinct, ref,
+  ptr and generic arguments); a routine pragma with no row declines
+  `feUnadmitted`. The lib-wide guard (`tsymex_0016_k3c_pragmaaxis`) fails on
+  a pragma `lib/` spells that has no row in any place (pragmas.nim is not in
+  the toolchain image, so lib/ is the text scanned). Open: a union-typed
+  module-level variable reached by no local, formal or result is not gated;
+  K8b exercises the unpinned cells (allowlisted in `pragma.txt`).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

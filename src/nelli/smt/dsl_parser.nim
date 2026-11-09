@@ -42,6 +42,7 @@ import std/unicode     ## Phase 16 A7-S3: toRunes/runeLen for literal decode at 
 import ./types
 import ./admission   ## RFC-0016 ADM-1: `Admit`, `AxisTable`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
+import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
 import ./dsl_typebridge
 from ./abstraction import collectVarRefs   ## RFC-0005 S8bl: `writesName`
 import ./stdlib_models
@@ -16990,25 +16991,103 @@ proc lentLoopDecline(n, container, loopVar, bodyNode: NimNode; ctx: ParseCtx;
             "(RFC-0016) (feUnsupportedOp)"),
     "a `for` variable holding the memory the body may write")
 
-const localPragmaAllowlist = ["noinit", "global", "inject", "gensym", "used"]
-  ## RFC-0016 W1-b (W-02). The pragmas on a local `var` / `let` the walker
-  ## admits; every other one declines `feLocalPragma`.
-  ##   * `noinit`: modelled (an unwritten read taints, `noinitPlain`).
-  ##   * `global`: modelled (a module-level variable, `isModuleGlobal`).
-  ##   * `inject`, `gensym`: template hygiene only -- they rename the
-  ##     symbol at expansion and have no run-time effect (`std/re`'s `=~`).
-  ##   * `used`: suppresses the unused-variable hint; no code is changed.
-const localPragmaAllowlistText = "`noinit`, `global`, `inject`, `gensym` and `used`"
+type TypePragmaHit = object
+  ## RFC-0016 K3c. A type pragma the axis does not admit: the pragma, the
+  ## named type it is on, and the axis's answer.
+  found: bool
+  pragma, typeName: string
+  adm: Admit[PragmaModel]
 
-proc localPragmaName(p: NimNode): string =
-  ## The name of one pragma of a local (`cursor`, `align: 8` -> `align`).
-  case p.kind
-  of nnkIdent, nnkSym: p.strVal
-  of nnkExprColonExpr, nnkCall, nnkCommand:
-    if p.len > 0: localPragmaName(p[0]) else: "?"
-  of nnkOpenSymChoice, nnkClosedSymChoice:
-    if p.len > 0: localPragmaName(p[0]) else: "?"
-  else: "?"
+proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
+    TypePragmaHit =
+  ## The first type reachable from `ty` (through object and tuple fields, a
+  ## distinct base, a `ref` / `ptr` target, a generic instance's arguments)
+  ## whose declaration carries a pragma the type list declines. A recursive
+  ## type is visited once; the walk stops at depth 8 (a deeper type is read
+  ## as it is, like `typeCopiedByValue`).
+  if ty == nil or depth > 8: return
+  # The named type: its declaration's pragma list is a row of the axis.
+  var head = ty
+  if head.kind == nnkBracketExpr and head.len > 0: head = head[0]
+  if head.kind == nnkSym and ty.typeKind in {ntyObject, ntyTuple,
+      ntyGenericInst, ntyDistinct, ntyAlias, ntyRef, ntyPtr}:
+    let key = ty.repr
+    if key in seen: return
+    seen.add key
+    let d =
+      try: head.getImpl
+      except CatchableError: newEmptyNode()
+    if d.kind == nnkTypeDef and d.len > 0 and d[0].kind == nnkPragmaExpr and
+       d[0].len > 1:
+      for p in d[0][1]:
+        let a = admitPragma(ppType, pragmaName(p), psTypeDecl)
+        if not a.admitted:
+          return TypePragmaHit(found: true, pragma: pragmaName(p),
+                               typeName: head.strVal, adm: a)
+  # Its components.
+  proc inField(f: NimNode; seen: var seq[string]; depth: int): TypePragmaHit =
+    case f.kind
+    of nnkIdentDefs:
+      typePragmaHit(f[^2], seen, depth + 1)
+    of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse, nnkElifBranch:
+      for c in f:
+        let r = inField(c, seen, depth)
+        if r.found: return r
+      TypePragmaHit()
+    else: TypePragmaHit()
+  let impl =
+    try: ty.getTypeImpl
+    except CatchableError: return
+  case impl.kind
+  of nnkObjectTy:
+    if impl.len > 1 and impl[1].kind == nnkOfInherit and impl[1].len > 0:
+      let r = typePragmaHit(impl[1][0], seen, depth + 1)
+      if r.found: return r
+    if impl.len > 2: return inField(impl[2], seen, depth)
+  of nnkTupleTy:
+    for f in impl:
+      let r = inField(f, seen, depth)
+      if r.found: return r
+  of nnkDistinctTy, nnkRefTy, nnkPtrTy:
+    for c in impl:
+      let r = typePragmaHit(c, seen, depth + 1)
+      if r.found: return r
+  of nnkBracketExpr:
+    for i in 1 ..< impl.len:
+      let r = typePragmaHit(impl[i], seen, depth + 1)
+      if r.found: return r
+  else: discard
+
+proc typePragmaReason(ty: NimNode): string =
+  ## "" when no type reachable from `ty` carries a declined pragma; else the
+  ## decline's message (it names the cell).
+  var seen: seq[string]
+  let h = typePragmaHit(ty, seen)
+  if not h.found: return ""
+  "the type `" & h.typeName & "` carries the pragma `{." & h.pragma &
+    ".}`, which is not modelled (" & h.adm.decline[1] & ")"
+
+proc routinePragmaReason(impl: NimNode): tuple[kind: SymexErrorKind, msg: string] =
+  ## RFC-0016 K3c. The first pragma of the routine `impl`, or of one of its
+  ## formals, that the routine and parameter lists decline ("" msg: none).
+  ## A formal's type is not read here: the callee's formal types are checked
+  ## by `typePragmaReason` where the formals are bound.
+  if impl.len > 4 and impl[4].kind == nnkPragma:
+    for p in impl[4]:
+      let a = admitPragma(ppRoutine, pragmaName(p), psRoutineDecl)
+      if not a.admitted:
+        return (a.decline[0].get, a.decline[1])
+  if impl.len > 3 and impl[3].kind == nnkFormalParams:
+    for fi in 1 ..< impl[3].len:
+      let f = impl[3][fi]
+      if f.kind != nnkIdentDefs: continue
+      for j in 0 ..< f.len - 2:
+        if f[j].kind == nnkPragmaExpr and f[j].len > 1:
+          for p in f[j][1]:
+            let a = admitPragma(ppParam, pragmaName(p), psRoutineDecl)
+            if not a.admitted:
+              return (a.decline[0].get, a.decline[1])
+  (feUnadmitted, "")
 
 proc letCursorDecline(c: NimNode; rest: seq[NimNode]; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8cn. The decline of `let c = lv` over a seq, a string, a Table
@@ -20134,20 +20213,24 @@ proc parseStmtInner(n: NimNode,
           var noInit = false
           if d.len > 1:
             for p in d[1]:
-              let pn = localPragmaName(p)
+              let pn = pragmaName(p)
               if pn == "noinit": noInit = true
-              elif pn notin localPragmaAllowlist:
-                # RFC-0016 W1-b (W-02): a pragma the walker does not model
-                # (`cursor` shares memory the copy-model does not; `align`,
-                # `volatile`, `codegenDecl` ... change the generated code).
-                # The declaration is still lowered below, so later uses
-                # resolve; the marker taints every path that reaches it.
-                stmts.add ctx.declineAtSite(feLocalPragma,
+              # RFC-0016 K3c: the local list is a row of the pragma axis
+              # (W1-b, W-02). A pragma it does not admit (`cursor` shares
+              # memory the copy-model does not; `align`, `volatile`,
+              # `codegenDecl` ... change the generated code) declines; the
+              # declaration is still lowered below, so later uses resolve;
+              # the marker taints every path that reaches it.
+              let adm = admitPragma(ppLocal, pn, psLocalDecl)
+              if not adm.admitted:
+                stmts.add ctx.declineAtSite(adm.decline[0].get,
                   siteMsg(d, "the local `" & d[0].strVal & "` carries the " &
                           "pragma `{." & pn & ".}`, which is not modelled: " &
-                          "only " & localPragmaAllowlistText & " are " &
+                          "only `" &
+                          admittedNames(ppLocal).join("`, `") & "` are " &
                           "(docs/symex/README.md, \"Local variable " &
-                          "pragmas\") (feLocalPragma)"),
+                          "pragmas\"; " & render(adm.cell) & ") (" &
+                          $adm.decline[0].get & ")"),
                   "the local pragma `" & pn & "`")
                 break
           if noInit and id0[^1].kind == nnkEmpty:
@@ -20168,6 +20251,17 @@ proc parseStmtInner(n: NimNode,
         if id.len == 0: continue
         id.add id0[^2]
         id.add id0[^1]
+      # RFC-0016 K3c: a local whose type (or a component of it) carries
+      # `{.union.}`, `{.packed.}`, `{.byref.}` or `{.bycopy.}`. The marker
+      # taints every path that reaches the declaration; it is still lowered.
+      for j in 0 ..< id.len - 2:
+        let why = typePragmaReason(id[j].getTypeInst)
+        if why.len > 0:
+          stmts.add ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(id[j], "the local `" & id[j].strVal & "`: " & why &
+                    " (feUnsupportedOp)"),
+            "a type pragma the object model does not represent")
+          break
       let valNode = id[id.len - 1]
       # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe POINTER MATERIALISATION RHS
       # (`cast[ptr T](...)`, `addr x`, `unsafeAddr x`) is unmodelable in the
@@ -21589,6 +21683,29 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
         "compiler-generated hook, a formal typed by its default), is not modelled " &
         "-- path degraded to sxUnknown (feUnsupportedOp)",
         name & "#hook")
+  # RFC-0016 K3c: the pragma axis. A routine pragma with no row, a parameter
+  # pragma the axis declines, or a formal or result type carrying `{.union.}`,
+  # `{.packed.}`, `{.byref.}` or `{.bycopy.}` (or holding one): the callee is
+  # not registered, the path degrades.
+  block:
+    let rp = routinePragmaReason(impl)
+    if rp.msg.len > 0:
+      return ctx.declineCallee(rp.kind,
+        "routine `" & name & "`: " & rp.msg & " -- path degraded to " &
+        "sxUnknown (" & $rp.kind & ")", name & "#pragma")
+    var tys: seq[NimNode]
+    if impl.len > 3 and impl[3].kind == nnkFormalParams:
+      if impl[3].len > 0 and impl[3][0].kind != nnkEmpty: tys.add impl[3][0]
+      for fi in 1 ..< impl[3].len:
+        let f = impl[3][fi]
+        if f.kind == nnkIdentDefs and f.len > 2:
+          tys.add (if f[0].kind == nnkPragmaExpr: f[0][0] else: f[0]).getTypeInst
+    for t in tys:
+      let why = typePragmaReason(t)
+      if why.len > 0:
+        return ctx.declineCallee(feUnsupportedOp,
+          "routine `" & name & "`: " & why & " -- path degraded to " &
+          "sxUnknown (feUnsupportedOp)", name & "#pragma")
   # Phase 15 G5. `geDistinctBarrier` (Invariant 3 — never a silent fallback). A
   # NON-borrowed proc taking a `distinct T` param whose body is NOT parseable
   # (`impl[6] == nnkEmpty`, e.g. an `{.importc.}` / magic on a distinct type)
@@ -22409,7 +22526,21 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # and bypass the prune entirely.
   ctx.assertsOff.add checkOpts.assertsMaybeOff
   ctx.pushArithScope(checkOpts)
-  let parsed = parseStmt(devirtProcLets(procDef[6]), ctx)   # RFC-0005 S8cn
+  var parsed = parseStmt(devirtProcLets(procDef[6]), ctx)   # RFC-0005 S8cn
+  # RFC-0016 K3c: a formal or the result of the target whose type (or a
+  # component) carries `{.union.}`, `{.packed.}`, `{.byref.}` or `{.bycopy.}`.
+  block:
+    var tys: seq[NimNode]
+    if formalParams[0].kind != nnkEmpty: tys.add formalParams[0]
+    for i in 1 ..< formalParams.len:
+      let f = formalParams[i]
+      if f.len > 2: tys.add f[0].getTypeInst
+    for t in tys:
+      let why = typePragmaReason(t)
+      if why.len > 0:
+        parsed = mkBlock(@[ctx.declineMarker(feUnsupportedOp,
+          "the target routine: " & why & " (feUnsupportedOp)"), parsed])
+        break
   discard ctx.arithScopes.pop()
   discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, procDef, checkOpts,

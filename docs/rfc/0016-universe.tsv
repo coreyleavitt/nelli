@@ -6,9 +6,9 @@
 # axis pragma: 181 cells
 # axis magic: 242 cells
 # axis stdlib: 79 cells
-# axis build: 23 cells (pcre libs and build cells; rows below)
+# axis build: 25 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
-# axis defined: 0 cells
+# axis defined: 19 cells
 # build rows: 5
 # error kinds: 102
 # cap kinds: 10
@@ -16,6 +16,8 @@ cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
 build:8.37 2015-04-28|jit	modelled	-
 build:8.45 2021-06-15|interp	modelled	-
+build:cflags/fpContract	never	-
+build:cflags/sanitize	never	-
 build:cpu=arm64	declined	-
 build:endian=big	never	-
 build:exceptions/setjmp	modelled	-
@@ -51,6 +53,25 @@ capkind:ckTermWalkWrite	cap	-
 capkind:ckVariantFieldAllocs	cap	-
 capkind:ckVariantForks	cap	-
 capkind:ckWalkWork	cap	-
+defined:add/signedNarrow	modelled	-
+defined:add/signedWide	modelled	-
+defined:call/noalias	declined	-
+defined:convert/floatToInt	modelled	-
+defined:div/lowByMinusOneNarrow	modelled	-
+defined:div/lowByMinusOneWide	modelled	-
+defined:div/zeroDivisorSigned	modelled	-
+defined:div/zeroDivisorUnsigned	modelled	-
+defined:grow/elemAddr	never	-
+defined:mod/lowByMinusOneNarrow	modelled	-
+defined:mod/lowByMinusOneWide	modelled	-
+defined:mod/zeroDivisorSigned	modelled	-
+defined:mod/zeroDivisorUnsigned	modelled	-
+defined:mul/signedNarrow	modelled	-
+defined:mul/signedWide	modelled	-
+defined:order/pointer	never	-
+defined:read/uninitialised	modelled	-
+defined:sub/signedNarrow	modelled	-
+defined:sub/signedWide	modelled	-
 errorkind:beBudgetExhausted	kind	dcFabricated
 errorkind:beBudgetExhaustedAssumedBound	kind	dcFabricated
 errorkind:beBudgetExhaustedPrune	kind	dcOmitted

@@ -476,9 +476,13 @@
   because `modelPins` (a variant parameter's leaf split) and the tail walk recorded
   `seUnsupportedCompoundSortLeaf` in `loweringDegradeErrors`, which the explore verdict
   then drained; both now restore the sink and a degrade leaves the pins incomplete.
-  `tsymex_0016_s8cj_runctx`: `modelPins`' heap-constant loop did `continue` out of a
-  `try`, which skips the locals' destructors on goto exceptions and kept the 17 MB
-  context alive. `tsymex_0016_wa_checksoff` S1 bounds `n` (the model's 2^62 trips cannot be
+  `tsymex_0016_s8cj_runctx` is STILL RED (a 17 MB context outlives the run): bisect puts
+  it at K10b's d428e924/e06b7b38; experiments show `modelPins`' heap-constant loop
+  (`constDecl` / `Z3_get_decl_name` per model constant, even with nothing pinned) is
+  what retains the context; neither dropping `continue`, reading the decl raw, nor
+  moving the body to its own proc released it. Witness pins are dropped from results at
+  the run boundary (`dropWitnessPins`), which did not fix it alone.
+  `tsymex_0016_wa_checksoff` S1 bounds `n` (the model's 2^62 trips cannot be
   followed, fail closed by design); `tsymex_rfc0005_s8bm_stability` names the target query
   by its search, the tail walk appending a cheap query after it; the A2a marker is back on
   its call line. Witness pins are dropped from every result at the run boundary.

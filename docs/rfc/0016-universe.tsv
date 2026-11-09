@@ -4,7 +4,7 @@
 # axis typeclass: 73 cells
 # axis typeop: 17 cells
 # axis pragma: 181 cells
-# axis magic: 242 cells
+# axis magic: 249 cells
 # axis stdlib: 0 cells
 # axis build: 23 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
@@ -152,6 +152,13 @@ errorkind:ubUnsignedDivZero	kind	dcOmitted
 errorkind:weBreakOutsideLoop	kind	dcOmitted
 errorkind:weInternalWalkerFault	kind	dcNoAnswer
 errorkind:weRecursionCycleCut	kind	dcSubstituted
+magic:%%	modelled	-
+magic:*%	modelled	-
+magic:+%	modelled	-
+magic:-%	modelled	-
+magic:/%	modelled	-
+magic:<%	modelled	-
+magic:<=%	modelled	-
 magic:AbsI	modelled	-
 magic:AddF64	modelled	-
 magic:AddI	modelled	-
@@ -222,8 +229,8 @@ magic:Excl	modelled	-
 magic:Exists	never	-
 magic:Exit	modelled	-
 magic:ExpandToAst	never	-
-magic:FieldPairs	declined	-
-magic:Fields	declined	-
+magic:FieldPairs	modelled	-
+magic:Fields	modelled	-
 magic:Finished	declined	-
 magic:Forall	never	-
 magic:GCref	declined	-

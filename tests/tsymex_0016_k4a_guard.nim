@@ -27,7 +27,7 @@ proc at(site: MagicSite): seq[string] =
 
 suite "K4a-guard: the defect properties of the magic axis":
   test "the walker version is at the dispatch floor":
-    check parseInt(symexWalkerVersion) >= 292
+    check parseInt(symexWalkerVersion) >= 295
 
   test "each defect site is exactly the old list, less names Nim lacks":
     check at(msDefOverflow) == @["AbsI", "AddI", "Dec", "Inc", "DivI", "ModI",

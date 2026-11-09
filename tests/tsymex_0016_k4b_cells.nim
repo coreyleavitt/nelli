@@ -9,6 +9,8 @@
 import std/[unittest, setutils, parseutils]
 import nelli/symex
 import nelli/smt/errorkind
+import nelli/smt/admission
+import nelli/smt/magic_rows
 import ./s8cu_helpers
 
 type
@@ -190,13 +192,17 @@ const
   k4I64Dom = sampled([-5'i64, 0, 5, 7])
   k4Ints = sampled([-3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 9])
 
+var exactPinned, declinePinned: seq[string]  ## filled as the tests run
+
 template exactCell(sut: untyped; cell: static string; dom: untyped = k4Ints) =
   test cell:
+    exactPinned.add cell
     let r = pinExact(sut, cellKey(axMagic, cell), domain = dom)
     check r.status in {sxSat, sxUnsat}
 template declineCell(sut: untyped; cell: static string;
                      kind: SymexErrorKind) =
   test cell:
+    declinePinned.add cell
     pinDecline(sut, cellKey(axMagic, cell), kind)
 
 suite "K4b: the reachable magic cells, through symexFind":
@@ -248,3 +254,31 @@ suite "K4b: the reachable magic cells, through symexFind":
   declineCell(sFinished, "Finished", feUnsupportedOp)
   declineCell(sLePtr, "LePtr", feUnsupportedOp)
   declineCell(sLtPtr, "LtPtr", feUnsupportedOp)
+
+suite "K4b: the row states agree with the pins (runs after the cells)":
+  test "a row pinned exact is admitted and is modelled, folded or bodied":
+    check exactPinned.len > 0
+    for cell in exactPinned:
+      let a = admitMagic(cell, msArm)
+      check a.admitted
+      if a.admitted:
+        check a.payload in {mmModelled, mmFolded, mmBody}
+
+  test "a partial, unverified or declined row has no exact pin":
+    for cell in exactPinned:
+      let a = admitMagic(cell, msArm)
+      check a.admitted            # refused (declined, unverified, never)
+      if a.admitted:
+        check a.payload != mmPartial
+
+  test "a row pinned as a decline is not claimed modelled without a partial shape":
+    check declinePinned.len > 0
+    for cell in declinePinned:
+      let a = admitMagic(cell, msArm)
+      # a decline pin on an admitted row is only honest for a partial or
+      # folded row (the shape that declines); a plain modelled row would be
+      # a stale claim.
+      if a.admitted: check a.payload in {mmPartial, mmFolded}
+
+  test "no exact pin of a cell also pins its decline":
+    for cell in exactPinned: check cell notin declinePinned

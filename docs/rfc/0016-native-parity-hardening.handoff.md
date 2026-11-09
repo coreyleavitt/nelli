@@ -202,7 +202,7 @@
   DrNim magics, and `nextafter`, which std/math does not export), and 52
   reachable ones (modelled, declined, unverified, bodied) are re-owned to
   K4b, whose round pins each.
-  K4a-guard (`rfc-0016-k4ag`, walker stays 292): the opaque-call defect scan
+  K4a-guard (`rfc-0016-k4ag`, walker stays 295): the opaque-call defect scan
   reads the magic axis. Which Defect a magic raises is a property of its row,
   four more `MagicSite`s (`msDefOverflow`, `msDefDivZero`, `msDefRange`,
   `msDefFloat`, `magicDefectSites`) read with `admitMagic`; `overflowMagics`,
@@ -213,9 +213,9 @@
   `tsymex_0016_k4a_guard`, which pins each site's rows and that no unsigned
   divisor, refused or absent magic carries a defect. No allowlist entry was
   owned by K4a-guard; `cgMutatingMagics` and the `repr` list stay (K6).
-  K4b (`rfc-0016-k4b`, walker stays 292): a bodied magic is walked through its
-  Nim body only where its row is admitted at the new `msBodyWalk` (the four
-  `mmBody` rows: `AbsI`, `MinI`, `MaxI`, `EqCString`). `ensureProcRegistered`
+  K4b (`rfc-0016-k4b`, walker stays 295): a bodied magic is walked through its
+  Nim body only where its row is admitted at the new `msBodyWalk` (the three
+  `mmBody` rows: `AbsI`, `MinI`, `MaxI`). `ensureProcRegistered`
   reads it after the stub-body decline: any other row declines with its kind
   (a modelled or partial row is `feUnsupportedOp`: the body was being inlined
   as the semantics, e.g. a `succ` whose body is `x + 1000`), a magic with no
@@ -229,9 +229,14 @@
   `NewFinalize` (orc finalizers are `=destroy`-shaped), `GetTypeInfoV2`
   (`getDynamicTypeInfo` is not exported). `GCref` declines
   `feUnsupportedExprKind` at the type bridge (`RefHeader`'s `when`), not at
-  the row. `Dup`, `Slice`, `SetLengthSeqUninit`, `EqProc`, `EqCString`,
-  `Fields` and `FieldPairs`, whose rows say partial, body or unverified, are
-  walker-handled and pin exact.
+  the row. The row states follow the pins: `Dup`, `Slice`, `EqProc`,
+  `EqCString`, `Fields` and `FieldPairs` were partial, body or unverified and
+  pin exact, so they are now `mmModelled` (`EqCString`'s importc `cmpStrings`
+  body is never walked: the cstring operands cross as strings, so it left
+  `msBodyWalk`). The last suite of `tsymex_0016_k4b_cells` is the drift
+  guard: every cell pinned exact has an admitted `mmModelled`/`mmFolded`/
+  `mmBody` row (never partial, never refused), and a decline pin on an
+  admitted row only on a partial or folded one.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

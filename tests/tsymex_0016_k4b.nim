@@ -19,14 +19,15 @@ import ./s8cu_helpers
 
 suite "K4b: the table":
   test "the walker version is at the K4b floor":
-    check parseInt(symexWalkerVersion) >= 292
+    check parseInt(symexWalkerVersion) >= 295
 
   test "msBodyWalk admits exactly the mmBody rows":
     for k in magicAxis.keysAt(msBodyWalk):
       check admitMagic(k, msBodyWalk).payload == mmBody
-    for k in ["AbsI", "MinI", "MaxI", "EqCString"]:
+    for k in ["AbsI", "MinI", "MaxI"]:
       check admitMagic(k, msBodyWalk).admitted
     check not admitMagic("Succ", msBodyWalk).admitted
+    check not admitMagic("EqCString", msBodyWalk).admitted
     check not admitMagic("XorSet", msBodyWalk).admitted
     check admitMagic("NoSuchMagic", msBodyWalk).decline[0] ==
       some(feUnadmitted)

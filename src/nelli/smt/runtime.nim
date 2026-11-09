@@ -3819,6 +3819,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       var fill: seq[Z3BitVec[64]]
       for i in 0 ..< unionCellCount(gate.get):
         fill.add mkBitVecVar[64](baseName & ".@bytes" & $i)
+      for i in 0 ..< unionCellCount(gate.get):
+        fill.add mkBitVec[64](0'i64)   # a parameter's bytes are all determinate
       sv.vImage = variantImage(gate.get, discInner, armFields, fill)
     if activeMemberTracked(ty): sv.vActive = activeOf(discInner)
     sv
@@ -5792,8 +5794,23 @@ proc activeMemberTracked(ty: IRType): bool =
 proc unionCellCount(lay: vl.VariantLayout): int =
   (lay.size - lay.unionOff + 7) div 8
 
+# The image is 2n cells: n data cells then n indeterminate-byte mask cells (a
+# mask byte of 0xFF marks a byte no write reached: Nim leaves an object that a
+# constructor built whole uninitialised before it writes, so those bytes are
+# whatever the stack held). A write sets the data and clears the mask over the
+# bytes it covers; a read of masked bytes is indeterminate (`imgReadDef`).
+
 proc zeroImage(lay: vl.VariantLayout): seq[Z3BitVec[64]] =
+  ## Every byte the zero of the object's initialisation: data zero, no byte
+  ## indeterminate.
+  for _ in 0 ..< 2 * unionCellCount(lay): result.add mkBitVec[64](0'i64)
+
+proc unwrittenImage(lay: vl.VariantLayout): seq[Z3BitVec[64]] =
+  ## Every byte indeterminate: a constructor Nim emits without zeroing
+  ## (`V(k: ka, a: v)` naming every field of the arm), before it writes the
+  ## arm's fields.
   for _ in 0 ..< unionCellCount(lay): result.add mkBitVec[64](0'i64)
+  for _ in 0 ..< unionCellCount(lay): result.add mkBitVec[64](-1'i64)
 
 proc activeOf(disc: SymVal): ref SymVal =
   result = new SymVal
@@ -5845,22 +5862,31 @@ proc bitsPlace(bits: Z3BitVec[64]; p: vl.Place;
   of vl.pkInt, vl.pkEnum:
     some(cellValue(bits and byteMask(p.size), p.ty))
 
-proc imgRead(img: seq[Z3BitVec[64]]; off, size: int): Z3BitVec[64] =
-  ## The `size` bytes at union byte `off`, as the low bytes of a cell.
+proc imgReadAt(img: seq[Z3BitVec[64]]; base, off, size: int): Z3BitVec[64] =
   result = mkBitVec[64](0'i64)
   var at = off
   while at < off + size:
-    let cell = at div 8
+    let cell = base + at div 8
     let inCell = at mod 8
     let n = min(8 - inCell, off + size - at)
     result = result or (((img[cell].lshr ofByteShift(inCell)) and byteMask(n)) shl
                         ofByteShift(at - off))
     at += n
 
+proc imgRead(img: seq[Z3BitVec[64]]; off, size: int): Z3BitVec[64] =
+  ## The `size` bytes of data at union byte `off`, as the low bytes of a cell.
+  imgReadAt(img, 0, off, size)
+
+proc imgReadMask(img: seq[Z3BitVec[64]]; off, size: int): Z3BitVec[64] =
+  ## The indeterminate-byte mask over the same bytes (0xFF per byte).
+  imgReadAt(img, img.len div 2, off, size)
+
 proc imgWrite(img: seq[Z3BitVec[64]]; off, size: int;
               bits: Z3BitVec[64]): seq[Z3BitVec[64]] =
-  ## `img` with the low `size` bytes of `bits` at union byte `off`.
+  ## `img` with the low `size` bytes of `bits` at union byte `off`, those
+  ## bytes no longer indeterminate.
   result = img
+  let half = img.len div 2
   var at = off
   while at < off + size:
     let cell = at div 8
@@ -5869,6 +5895,7 @@ proc imgWrite(img: seq[Z3BitVec[64]]; off, size: int;
     let m = byteMask(n) shl ofByteShift(inCell)
     let ins = ((bits.lshr ofByteShift(at - off)) shl ofByteShift(inCell)) and m
     result[cell] = (result[cell] and (not m)) or ins
+    result[half + cell] = result[half + cell] and (not m)
     at += n
 
 proc armImage(lay: vl.VariantLayout; tag: int; slots: seq[SymVal];
@@ -7025,6 +7052,11 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     for i in 0 ..< retSym.vPlainFields.len:
       let (fs, fv) = reconcileInt(retSym.vPlainFields[i], retVal.vPlainFields[i])
       acc = acc and retBindEq(fs, fv)
+    # RFC-0016 PRC-07 slice B: the union's bytes bind too, data and which of
+    # them no write reached (`freshRetSym` made the result's mask free).
+    if retSym.vImage.len > 0 and retSym.vImage.len == retVal.vImage.len:
+      for i in 0 ..< retSym.vImage.len:
+        acc = acc and (retSym.vImage[i] == retVal.vImage[i])
     acc
   of svMultiVariant:
     ## RFC-0005 S8p: the `svVariant` encoding, once per axis -- each axis's
@@ -7975,6 +8007,12 @@ proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
   allocEnumZeroLegal = true
   result = allocateSym(ty, name, pcOut, intOffsetPositions = intOffsetPositions)
   allocEnumZeroLegal = saved
+  # RFC-0016 PRC-07 slice B: which bytes of a returned variant no write
+  # reached is the callee's to say (`retBindEq`), not determinate by default.
+  if result.kind == svVariant and result.vImage.len > 0:
+    let half = result.vImage.len div 2
+    for i in 0 ..< half:
+      result.vImage[half + i] = mkBitVecVar[64](name & ".@mask" & $i)
 
 proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   ## Build a SymVal representing literal `ival` at `proto`'s
@@ -9870,9 +9908,15 @@ func unwrittenUb(part: string): set[UbKind] =
   ## global does not (it is zero-initialised).
   if part.startsWith(noinitReadPrefix): {readUb()} else: {}
 
+const variantBytesPart = noinitReadPrefix & "<variant bytes>"
+
 proc unwrittenMsg(part: string): string =
   ## RFC-0005 batch 6. `unwrittenKind`'s message.
-  if part.startsWith(noinitReadPrefix):
+  if part == variantBytesPart:
+    "a variant's union bytes no write reached are read through a field " &
+      "view: the object was built without zeroing, so they hold whatever " &
+      "the stack held and a hit through them is replayed (feGlobalHavoc)"
+  elif part.startsWith(noinitReadPrefix):
     "`{.noinit.}` variable '" & part[noinitReadPrefix.len .. ^1] & "' is " &
       "read before it is written: it may hold any value of its type, so a " &
       "hit through it is replayed (feGlobalHavoc)"
@@ -9881,6 +9925,24 @@ proc unwrittenMsg(part: string): string =
       "it: it may hold any value of its type when the property runs, so a " &
       "hit through it is replayed (feGlobalHavoc)"
   else: unwrittenReadMsg(part)
+
+proc imgReadDef(img: seq[Z3BitVec[64]]; off, size: int): Z3BitVec[64] =
+  ## RFC-0016 PRC-07 slice B: the `size` bytes at union byte `off`, where a
+  ## byte no write reached is indeterminate: `ite(mask == 0, data, U)` with
+  ## `U` a fresh unwritten leaf, so a read that can observe one taints the
+  ## path (`unwrittenIn`). The data itself when the mask folds to zero.
+  let data = imgRead(img, off, size)
+  let mask = imgReadMask(img, off, size)
+  let ctx = requireCurrentContext()
+  let folded = ctx.checkErr Z3_simplify(ctx.raw, mask.raw)
+  if Z3_is_numeral_ast(ctx.raw, folded):
+    var u: uint64
+    if Z3_get_numeral_uint64(ctx.raw, folded, addr u) and u == 0: return data
+  glUnwrittenFresh(ctx)
+  let fresh = mkBitVecVar[64](freshDegradeName("__variantBytes"))
+  registerUnwritten(ctx, SymVal(kind: svBV64, bv64: fresh, signed: false),
+                    variantBytesPart, havoc = true)
+  ite(mask == mkBitVec[64](0'i64), data, fresh)
 
 proc globalChainRoot(e: IRExpr): IRExpr =
   ## The `iekVar` an access chain (`g.a.b`, `g.arr[i]`) is rooted at, or nil.
@@ -21093,7 +21155,7 @@ proc discWriteOutcomes(mode: DiscWriteMode;
                                 keepImage: true)
       var after: seq[SymVal]
       for j, f in lay.arms[key]:
-        let nv = bitsPlace(imgRead(image, f.off - lay.unionOff, f.size), f,
+        let nv = bitsPlace(imgReadDef(image, f.off - lay.unionOff, f.size), f,
                            none((vl.Place, SymVal)))
         if nv.isNone: break
         after.add nv.get
@@ -24106,8 +24168,8 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
                 exactVal = denv[stmt.vfRetName]   # the pre-write read is unused
                 declinedCond = declinedCond and not ok
             else:
-              let v = bitsPlace(imgRead(recv.vImage, tp.get.off - lay.unionOff,
-                                        tp.get.size),
+              let v = bitsPlace(imgReadDef(recv.vImage, tp.get.off - lay.unionOff,
+                                           tp.get.size),
                                 tp.get, none((vl.Place, SymVal)))
               if v.isSome:
                 exactCond = some(outOfArmCond)
@@ -24130,14 +24192,24 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     let pM = drainPendingLowerEffects(p)
     var newEnv = pM.env
     newEnv[stmt.vfRetName] = bound
+    # RFC-0016 PRC-07 slice B: a field whose bytes a constructor Nim emits
+    # without zeroing left unwritten is indeterminate; observing one taints
+    # the path (a hit through it is replayed), as a `{.noinit.}` read does.
+    proc observed(path: Path; val: SymVal; w: var WalkCtx): Path =
+      let part = unwrittenIn(val)
+      if part.len == 0: return path
+      forkPathTainted(path, path.pc, path.env, w.degrade(
+        unwrittenKind(part), unwrittenMsg(part), ub = unwrittenUb(part)))
     if cppWrite:
       survivors.add forkPath(pM, pM.pc, newEnv)
     else:
-      survivors.add forkPath(pM, pM.pc & @[inArmCond], newEnv)
+      var inArm = forkPath(pM, pM.pc & @[inArmCond], newEnv)
+      survivors.add (if stmt.vfWrite: inArm else: observed(inArm, bound, w))
     if exactCond.isSome:
       var envX = pM.env
       envX[stmt.vfRetName] = exactVal
-      survivors.add forkPath(pM, pM.pc & @[exactCond.get], envX)
+      var exact = forkPath(pM, pM.pc & @[exactCond.get], envX)
+      survivors.add (if stmt.vfWrite: exact else: observed(exact, exactVal, w))
   survivors
 
 proc walkCallArm(stmt: IRStmt, paths: seq[Path],
@@ -28982,12 +29054,14 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
                   vObjectName: ty.vObjectName, vArmFields: armFields,
                   vArmFieldNames: armNames, vPlainFields: plainFields,
                   vPlainFieldNames: ty.vPlainFieldNames)
-  # RFC-0016 PRC-07 slice B: Nim zero-fills the object and sets the
-  # literal's fields: the union's bytes are the arm's fields over zero.
+  # RFC-0016 PRC-07 slice B: the union's bytes are the arm's fields over what
+  # the constructor started from: zero when it omits a field (Nim zeroes the
+  # object first), else nothing (the bytes are indeterminate until written).
   let gate = unionImageGate(ty)
   if gate.isSome and armFields.hasKey(e.vlTagOrd):
     sv.vImage = armImage(gate.get, e.vlTagOrd, armFields[e.vlTagOrd],
-                         zeroImage(gate.get)).get(@[])
+                         (if e.vlZeroFilled: zeroImage(gate.get)
+                          else: unwrittenImage(gate.get))).get(@[])
   if activeMemberTracked(ty): sv.vActive = activeOf(discBoxed[])
   sv
 
@@ -29068,8 +29142,8 @@ proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
               let isActive = variantDiscEq(recv.vDisc[], int64(tag))
               for j, f in lay.arms[tag]:
                 if not overlaps(f, tp.get): continue
-                let nv = bitsPlace(imgRead(result.vImage, f.off - lay.unionOff,
-                                           f.size),
+                let nv = bitsPlace(imgReadDef(result.vImage,
+                                              f.off - lay.unionOff, f.size),
                                    f, some((tp.get, newVal.get)))
                 if nv.isNone: continue
                 result.vArmFields[tag][j] =

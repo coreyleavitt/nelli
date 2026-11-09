@@ -449,7 +449,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     for c in e.vlPlainFields: plainLit.add emitExpr(c)
     newCall(bindSym"mkVariantLit", emitIRType(e.vlVariantTy),
             newLit(e.vlTagOrd), newLit(e.vlTagName),
-            prefix(armLit, "@"), prefix(plainLit, "@"))
+            prefix(armLit, "@"), prefix(plainLit, "@"),
+            newLit(e.vlZeroFilled))
   of iekMultiVariantLit:
     var axesLit = newTree(nnkBracket)
     for fs in e.mvlAxisFields:
@@ -5087,6 +5088,14 @@ proc declineUnsupportedFieldRead(n: NimNode, fieldName: string, fieldTy: IRType,
     siteMsg(n, reason),
     reason)   # kind is structured (unKind); N12: no raw kind-name parenthetical in the rendered msg
   mkSeqLit(@[], fieldTy.seqElemTy, declinedPlaceholder = true)
+
+proc ctorFilledDefault(val, ctor: NimNode): bool =
+  ## RFC-0016 PRC-07. `val` is the default semantic analysis filled an
+  ## omitted field of `ctor` with (`zeroDefault(T)`, its type node at the
+  ## constructor's own position), not a value the source spelled out.
+  val.kind == nnkCall and val.len >= 2 and val[0].kind == nnkSym and
+    val[0].strVal == "zeroDefault" and
+    val[1].lineInfoObj == ctor.lineInfoObj
 
 proc parseVariantCtorField(fieldName: string, fty: IRType,
                             byName: Table[string, NimNode], ctorNode: NimNode,
@@ -13779,8 +13788,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       for i, fieldName in objTyFull.vPlainFieldNames:
         plainFieldExprs.add parseVariantCtorField(fieldName, objTyFull.vPlainFieldTypes[i],
                                                    byNameDisc, n, preamble, ctx)
+      # RFC-0016 PRC-07: Nim zeroes the object only when the constructor
+      # omits a field it would otherwise leave unwritten.
+      # Sem fills an omitted field with `zeroDefault(T)` positioned at the
+      # constructor itself; a spelled-out `default(T)` sits at its own type.
+      var zeroFilled = false
+      for fieldName in activeArm.fieldNames & objTyFull.vPlainFieldNames:
+        if not byNameDisc.hasKey(fieldName) or
+           ctorFilledDefault(byNameDisc[fieldName], n):
+          zeroFilled = true
       return mkVariantLit(objTyFull, tagOrd, tagName,
-                           armFieldExprs, plainFieldExprs)
+                           armFieldExprs, plainFieldExprs, zeroFilled)
     of itMultiVariant:
       # RFC-0005 S8p: every discriminator a literal naming an explicit
       # (non-else) arm of its axis builds a real `svMultiVariant`

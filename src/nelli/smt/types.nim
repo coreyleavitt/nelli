@@ -923,6 +923,11 @@ type
       vlPlainFields*: seq[IRExpr] ## the shared (always-present) plain-field
                                    ## exprs, in `vlVariantTy.vPlainFieldNames`
                                    ## order
+      vlZeroFilled*:  bool        ## RFC-0016 PRC-07: the constructor omits a
+                                   ## field of the active arm or a plain
+                                   ## field, so Nim zeroes the object before
+                                   ## it writes the named ones; else its
+                                   ## unwritten bytes are indeterminate
     of iekMultiVariantLit:
       mvlTy*:         IRType      ## the full itMultiVariant IRType
       mvlAxisTags*:   seq[int]    ## per axis (`mvlTy.mvAxes` order): the
@@ -3270,7 +3275,8 @@ proc mkTupleLit*(elems: seq[IRExpr], tupleTy: IRType): IRExpr =
 
 proc mkVariantLit*(ty: IRType, tagOrd: int, tagName: string,
                     armFields: seq[IRExpr],
-                    plainFields: seq[IRExpr]): IRExpr =
+                    plainFields: seq[IRExpr],
+                    zeroFilled = false): IRExpr =
   ## Round-6 A1 (ADR-0029). `ty` must be the full `itVariant` IRType (as
   ## returned by `classifyType` on the object-constructor node). `tagOrd`
   ## is the literal discriminant's ordinal — the caller has already matched
@@ -3286,7 +3292,7 @@ proc mkVariantLit*(ty: IRType, tagOrd: int, tagName: string,
     $ty.vPlainFieldNames.len & " plain fields, got " & $plainFields.len
   IRExpr(kind: iekVariantLit, vlVariantTy: ty, vlTagOrd: tagOrd,
          vlTagName: tagName, vlArmFields: armFields,
-         vlPlainFields: plainFields)
+         vlPlainFields: plainFields, vlZeroFilled: zeroFilled)
 
 proc mkMultiVariantLit*(ty: IRType, axisTags: seq[int],
                         axisFields: seq[seq[IRExpr]],

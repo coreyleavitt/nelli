@@ -522,6 +522,36 @@ suite "PRC-07: --fieldChecks:off":
     check not r.errors.named(feCheckOption)
 
 when not defined(cpp):
+  proc scrub() {.noinline.} =
+    ## Zero the stack below the caller, where the replay's frames land, so
+    ## the bytes the constructor left unwritten read zero natively and the
+    ## replay confirms the witness (the same as `tsymex_0016_wa_undefined_e2e`).
+    var a {.volatile.}: array[8192, int]
+    for i in 0 ..< a.len: a[i] = 0
+
+  template indeterminate(fn: untyped) =
+    scrub()
+    let r = symexFind(fn, tLabel("hit"))
+    checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
+    check r.status == sxSat
+    check not r.trusted
+    check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
+
+
+  template indeterminateOrRefuted(fn: untyped) =
+    ## The read of a byte nothing wrote taints the path, and the witness is
+    ## replayed: confirmed it is sxSat untrusted with the kind, and refuted
+    ## (the model's value for the byte is not the stack's) it stays sxUnknown
+    ## with the havoc decline, as a `{.noinit.}` read does. Never trusted,
+    ## never an exact verdict.
+    scrub()
+    let r = symexFind(fn, tLabel("hit"))
+    checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
+    check not r.trusted
+    check r.status in {sxSat, sxUnknown}
+    check r.errors.named(feGlobalHavoc) or
+          UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
+
   suite "PRC-07 slice A: the active arm's bytes (c backend)":
     test "a wrong-branch read is the active arm's bytes, by value":
       # x: int32 at bytes 4..8, wb: int16 at 6..8 -- the high half of x
@@ -592,21 +622,15 @@ when not defined(cpp):
       check "pragma:type/packed" in show(r.errors)
       check not r.errors.named(feCheckOption)
 
-    test "bytes no field of the active arm owns are the zero of initialisation":
-      let r = pinExact(sutPadRead, fk, domain = sampled([5'i32, 0, 1, -1]))
-      check r.status == sxUnsat
-      let r2 = pinExact(sutPadZero, fk, domain = sampled(
-        [0x4321'i32, 0x21'i32, 0, 1, -1]))
-      check r2.status == sxSat
-      check r2.trusted
-      check r2.witness[0] == 0x4321
+    test "bytes no field of the active arm owns are indeterminate":
+      # `pb` is bytes 8..12, no field of arm A owns them and the constructor
+      # names every field: Nim leaves them unwritten
+      indeterminateOrRefuted(sutPadRead)
+      indeterminateOrRefuted(sutPadZero)
 
-    test "a partly covered extent is the field's bytes and the zero tail":
-      # h: int16 at 4..6; w: int32 at 4..8, its high half the zero tail
-      let r = pinExact(sutPartialRead, fk, domain = sampled([7'i16, 0, 1, -1]))
-      check r.status == sxSat
-      check r.trusted
-      check r.witness[0] == 7
+    test "a partly covered extent is the field's bytes and indeterminate bytes":
+      # h: int16 at 4..6; w: int32 at 4..8, its high half unwritten
+      indeterminateOrRefuted(sutPartialRead)
 
     test "a float arm is its IEEE bits, and int bytes read back as a float":
       let r = pinExact(sutFloatRead, fk, domain = sampled(
@@ -647,13 +671,9 @@ when not defined(cpp):
       pinDecline(sutBoolFromInt, bk, feUnsupportedOp, tLabel("hit"),
                  "fieldChecksOffLayout", excluding = {feCheckOption})
 
-    test "an int read past the active arm's fields takes the zero tail byte":
-      # z is bytes 4..8: u, 'A', true, and the zero byte 7
-      let r = pinExact(sutIntFromBytes, fk, domain = sampled(
-        [0x42'u8, 0, 1, 255'u8]))
-      check r.status == sxSat
-      check r.trusted
-      check r.witness[0] == 0x42
+    test "an int read past the active arm's fields takes an unwritten byte":
+      # z is bytes 4..8: u, 'A', true, and the unwritten byte 7
+      indeterminateOrRefuted(sutIntFromBytes)
 
     test "a branch-changing discriminator write keeps the bytes: the new arm reads the old":
       # Native (generated C, ORC and release alike): `o.k = kwb` is the store
@@ -769,13 +789,6 @@ proc sutCtorResult(v: int32) =
 
 when not defined(cpp):
   suite "PRC-07 slice B: the zero of initialisation is the zeroed constructions'":
-    template indeterminate(fn: untyped) =
-      let r = symexFind(fn, tLabel("hit"))
-      checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
-      check r.status == sxSat
-      check not r.trusted
-      check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
-
     test "a constructor's unwritten bytes are indeterminate: the probe case":
       indeterminate(sutCtorProbe)
 
@@ -783,7 +796,19 @@ when not defined(cpp):
       indeterminate(sutCtorOverVar)
 
     test "an object a callee built with a constructor is the same":
-      indeterminate(sutCtorResult)
+      # The garbage is the callee's own stack bytes, which the replay's frames
+      # need not hold as zero, so the replay may refute the witness. That is
+      # the indeterminate-read convention, not a new behaviour: a hit through
+      # a callee's `{.noinit.}` slot is likewise replayed and, refuted, stays
+      # sxUnknown (`tsymex_0016_wa_undefined_e2e`, `tsymex_0016_k10aa_axis`:
+      # only the scrubbed stack confirms one). Either way it is never trusted.
+      scrub()
+      let r = symexFind(sutCtorResult, tLabel("hit"))
+      checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
+      check r.status in {sxUnknown, sxSat}
+      check not r.trusted
+      check r.errors.named(feGlobalHavoc) or
+            UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
 
     test "var x: V is zeroed: the probe case is exact":
       let r = pinExact(sutVarZero, fk, domain = sampled(

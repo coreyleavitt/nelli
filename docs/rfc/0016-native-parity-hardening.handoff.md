@@ -655,18 +655,24 @@
   materialisation (the image cell of an address must equal the pack of the
   active arm's cells), which is more than the two decline sites
   (`runtime_heap.nim` read and write `fieldsUnchecked` arms) the brief named.
-  FINDING (soundness, pre-existing in slice B, NOT fixed here): the image's "zero
-  of initialisation" holds only for a default-initialised `var x: V` (generated C
-  `nimZeroMem`). An object constructor `V(k: ka, a: v)` on a scalar-only variant
-  is `x.k = 0; x.a = v` with no zeroing (throwaway probe, debug build:
-  `y.r` after `V(k: ka, a: 0x7fffffff)` / `y.k = kc` read
-  `0x340_7FFFFFFF`, release read `0x7FFFFFFF`), so the bytes no field of the
-  active arm owns are unspecified there. `lowerVariantLit`,
-  the runtime-discriminator constructor and `isVariantConstructSym` fill with
-  `zeroImage`; pins `sutPadRead`/`sutPadZero`/`sutPartialRead`/
-  `sutIntFromBytes` reproduce only because the stack was zero. A sound model needs
-  fresh (unspecified) cells for those bytes with the finding's trust withdrawn
-  when a read depends on them. Next slice.
+  FIXED (PRC-07 zero-fill, walker 309 kept): the image's "zero of
+  initialisation" holds only for a default-initialised `var x: V`,
+  `default(V)`, a constructor omitting a field and a `result` set field by field
+  (generated C `nimZeroMem`). A constructor naming every field
+  (`V(k: ka, a: v)`) is `x.k = 0; x.a = v` with no zeroing, so the bytes no
+  field of the active arm owns are unwritten. The union image now carries an
+  indeterminate-byte mask beside the data (`imgWrite` clears it over what it
+  writes; `x = V(...)` over an existing variable keeps the old image's bytes);
+  `IRExpr.vlZeroFilled` (parser, in the cache key) says which constructions
+  zero; `imgReadDef` reads `ite(mask == 0, data, U)` with `U` a fresh
+  unwritten leaf, and `isVariantField` taints the path (`forkPathTainted`,
+  `ubIndeterminateRead`) when a read observes one; `retBindEq` ties the
+  returned image's cells. Verdict: `sxSat` untrusted with the kind when the
+  replay confirms, `sxUnknown` + `feGlobalHavoc` when it refutes (the callee-built
+  case: the callee's garbage is its own stack), the `{.noinit.}` convention, not
+  a new behaviour. Pins `sutPadRead`/`sutPadZero`/`sutPartialRead`/
+  `sutIntFromBytes` re-pinned to it (`indeterminateOrRefuted`); the zeroed
+  constructions stay exact.
   REMAINING, slice B: uncovered bytes/padding and the cpp "active member
   differs from the discriminator" state (write then read through the
   discriminator's branch is UB), which need a union byte image on the value

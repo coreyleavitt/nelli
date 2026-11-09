@@ -6257,7 +6257,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     var plainParts: seq[string]
     for x in e.vlPlainFields: plainParts.add canonicalize(x, env)
     "Ex<VL:" & canonicalize(e.vlVariantTy) & ";" & $e.vlTagOrd & ";[" &
-      armParts.join(",") & "];[" & plainParts.join(",") & "]>"
+      armParts.join(",") & "];[" & plainParts.join(",") & "]" &
+      (if e.vlZeroFilled: "Z" else: "") & ">"
   of iekMultiVariantLit:
     # RFC-0005 S8p. Distinct `MVL:` prefix; every axis's tag is in the key.
     var axisParts: seq[string]

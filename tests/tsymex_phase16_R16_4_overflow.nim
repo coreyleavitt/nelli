@@ -147,34 +147,9 @@ suite "symex Phase 16 R16-4 — LHS arith raises (not over-guarded)":
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
 
-# ---------------------------------------------------------------------------
-# Behavior 8: acOverflow off — no OverflowDefect when gate disabled
-# ---------------------------------------------------------------------------
-
-proc sa_off(a, b: int) =
-  ## Same shape as sa, but tested with acOverflow excluded.
-  let c = a + b
-  symexTarget("toff")
-  discard c
-
-proc noAcOverflowSettings(): SymexSettings =
-  ## Settings with acOverflow excluded from arithChecks.
-  result = defaultSymexSettings()
-  result.arithChecks = {acDivByZero, acRange}
-
-suite "symex Phase 16 R16-4 — acOverflow gate":
-
-  test "R16-4-8: acOverflow off → no OverflowDefect raise (honest-incomplete)":
-    ## RFC-0016 W1-d2, rule (a): the property is "acOverflow off emits no
-    ## OverflowDefect fork". Signed overflow with checks off is now undefined,
-    ## and this build checks overflow, so the explicit opt-out disagrees with
-    ## the build: it still emits no raise, but the verdict is not trusted
-    ## (feCheckOption) where it was a trusted sxUnsat. The checks-off BUILD
-    ## half is `tsymex_phase16_R16_4_overflow_checksoff.nim`.
-    let r = symexFind(sa_off, tRaisedExn("OverflowDefect"), noAcOverflowSettings())
-    check r.status != sxRaised
-    check not r.trusted
-    check r.errors.named(feCheckOption)
+# Behavior 8 (acOverflow off) is the checks-off build's:
+# `tsymex_phase16_R16_4_overflow_checksoff.nim`. The `arithChecks` opt-out
+# went in RFC-0016 K10d.
 
 # ---------------------------------------------------------------------------
 # Behavior 9: Bounded operands — no false positive when in-range

@@ -17,4 +17,4 @@ suite "WA-A import under a push":
     # advice to import nelli before the push.
     check coOverflow notin buildSemantics.checks
     check buildWraps()
-    check acOverflow notin defaultSymexSettings().arithChecks
+    check acOverflow notin arithChecksFor(buildSemantics)

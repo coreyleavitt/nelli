@@ -14,7 +14,7 @@ proc sa_off(a, b: int) =
 
 suite "symex Phase 16 R16-4 -- acOverflow gate, checks-off build":
   test "R16-4-8 (rule a): checks off -> no OverflowDefect raise; the overflow halts":
-    check acOverflow notin defaultSymexSettings().arithChecks
+    check acOverflow notin arithChecksFor(buildSemantics)
     let r = symexFind(sa_off, tRaisedExn("OverflowDefect"))
     check r.status != sxRaised
     check not r.trusted

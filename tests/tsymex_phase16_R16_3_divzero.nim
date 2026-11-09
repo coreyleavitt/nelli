@@ -133,24 +133,7 @@ proc sd_off(a, b: int) =
   symexTarget("toff")
   discard q
 
-proc noAcDivByZeroSettings(): SymexSettings =
-  ## Settings with acDivByZero excluded from arithChecks.
-  result = defaultSymexSettings()
-  result.arithChecks = {acOverflow, acRange}
-
 suite "symex Phase 16 R16-3 — acDivByZero gate":
-
-  test "R16-3-6: acDivByZero off (disagrees with the build) → tainted, never a DivByZeroDefect raise":
-    ## RFC-0016 W1-d2 (rule a): `arithChecks` derives from the build; a value
-    ## without `acDivByZero` on this checked build taints every path.
-    let r = symexFind(sd_off, tRaisedExn("DivByZeroDefect"), noAcDivByZeroSettings())
-    check not r.trusted
-    var tainted = false
-    for e in r.errors:
-      if e.kind == feCheckOption: tainted = true
-    check tainted
-    if r.status == sxRaised:
-      check r.raisedTypeId != "DivByZeroDefect"
 
   test "R16-3-6b: DivByZeroDefect excluded → no DivByZeroDefect raise (honest-incomplete)":
     ## RFC-0016 W1-d2 (rule b): the old R16-3-6 property, kept at full

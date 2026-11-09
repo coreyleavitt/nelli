@@ -630,6 +630,28 @@
   (the K7 walk-cap `beBudgetExhaustedPrune` site was never counted),
   `tsymex_0016_w1d3_undefined` (mask 64 is `ubTailUnverified`, valid; 128 is
   the first invalid), universe ledger regenerated for `call/opaqueBody`.
+  K10d (`rfc-0016-k10d` on `rfc-0016-k10b`, walker 301->302): `SymexSettings.arithChecks`
+  and `SymexResult.fromCache` deleted (INT-39, INT-41 closed). The build is the
+  only source of the check gates: `checked(ac)` (`runtime.nim`) reads
+  `arithChecksFor()` plus the pushed-checked routine case, so the gated drains
+  and the `acRange` narrowing fork follow the build, and a drain for a check
+  the build lacks returns the path (the undefined side is the definedness
+  axis's). `noteArithChecksDisagreement`, `effectiveArithChecks`,
+  `arithChecksDisagree`, the merge line, the two `validateSymexSettings`
+  warnings and the `arithChecks=` canonical key are gone (`ArithCheck` and
+  `arithChecksFor` stay as the build gate). The cache number moved only for the
+  key's shape (CR2 pin 302). Tests that used the setting as a lever were
+  removed with it (R16-1 parts 4-7, the opt-out tests of R16-2/3/4, phase2
+  overflow's signed opt-out, s8cu push/cl_over settings tests, 161's two
+  unchecked-setting tests, w1d2's three settings tests, w1_parity WA-11,
+  `phase14_c1_fromcache`); the rest read `arithChecksFor(buildSemantics)`.
+  New: `tsymex_0016_k10d_removals` (RED: four `compiles` pins and the
+  version floor; GREEN after). `docs/migration/0.10.0.md` written. TWO FACTS
+  THE SLICE BRIEF GOT WRONG: the walk-units log has three columns on this
+  base (the K10b tail walk adds `k10b-tail` lines, no fourth column), and the
+  "`Admit`-taking IR constructors" (`mkMagicCall(a: Admit..)`) do not exist
+  in code; the note says so rather than documenting them. The universe ledger
+  is unchanged.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

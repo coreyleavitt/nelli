@@ -103,34 +103,19 @@ suite "symex Phase 16 R16-2 — in-range no false positive":
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
-# Behavior 4: acRange-off — no RangeDefect when acRange excluded from arithChecks
+# Behavior 4: the range check follows the build (the `arithChecks` opt-out
+# went in RFC-0016 K10d; the checks-off build is its own suite)
 # ---------------------------------------------------------------------------
 
 proc rd_acRangeOff(f: float) =
   discard Natural(f)
   symexTarget("rdAcRangeOffHit")
 
-proc noAcRangeSettings(): SymexSettings =
-  ## Settings with acRange excluded from arithChecks — disables RangeDefect forks.
-  result = defaultSymexSettings()
-  result.arithChecks = {acOverflow, acDivByZero}
-
 suite "symex Phase 16 R16-2 — acRange gate":
 
   test "R16-2-4: acRange on → Natural(f) raises RangeDefect":
     let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
-
-  test "R16-2-4b: acRange off (disagrees with the build) → tainted, never a raise":
-    ## RFC-0016 W1-d2 (rule a): `arithChecks` derives from the build; a value
-    ## without `acRange` on this range-checked build taints every path.
-    let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"), noAcRangeSettings())
-    check r.status != sxRaised
-    check not r.trusted
-    var tainted = false
-    for e in r.errors:
-      if e.kind == feCheckOption: tainted = true
-    check tainted
 
   test "R16-2-4c: RangeDefect excluded → no RangeDefect raise":
     ## RFC-0016 W1-d2 (rule b): the old 4b property (no RangeDefect finding),

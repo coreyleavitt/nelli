@@ -1,6 +1,7 @@
 ## RFC-0016 code-review M1. `symexFind` expands, in the caller's module, to a
-## `SymexResult` construction. That expansion must not name the deprecated
-## `fromCache` field, or every user call site warns and a consumer building
+## `SymexResult` construction. That expansion must not name a deprecated
+## field (K10d removed the two the pin was written for; this stays as the
+## guard for any later one), or every user call site warns and a consumer building
 ## with `--warningAsError:Deprecated` cannot compile. The pragma below turns
 ## the warning into an error for THIS module only (a global
 ## `--warningAsError:Deprecated` would also trip nelli's own internals), so

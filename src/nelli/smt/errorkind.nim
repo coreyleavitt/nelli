@@ -920,10 +920,10 @@ type
                           ## reaching it declines. Unchecked semantics are not
                           ## modelled. sevError.
     feOverflowCheckOption ## RFC-0005 S8cu. `overflowChecks` off on a routine
-                          ## while the settings model it on. With `acOverflow`
-                          ## out of `arithChecks` the walker models the wrap
-                          ## and the trap (S8w, S8aa), and the marker is passed
-                          ## through. sevError.
+                          ## in a build that checks overflow. In a checks-off
+                          ## build the marker is the build's own and is passed
+                          ## through (the unchecked operation is undefined and
+                          ## the definedness axis answers it). sevError.
     heNilDerefMayBeCaught ## RFC-0005 S8cu. A nil dereference under a `try`
                           ## (an `except` or a `finally`) in a build with
                           ## `--exceptions:setjmp`, where `std/segfaults` makes

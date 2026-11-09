@@ -55,10 +55,8 @@ suite "W1-d2 checks-off build":
   test "the build is checks-off and the default settings follow it":
     check coOverflow notin buildSemantics.checks
     check buildWraps()
-    check acOverflow notin defaultSymexSettings().arithChecks
-    check acDivByZero notin defaultSymexSettings().arithChecks
-    check defaultSymexSettings().arithChecks == arithChecksFor(buildSemantics)
-    check not arithChecksDisagree(defaultSymexSettings())
+    check acOverflow notin arithChecksFor(buildSemantics)
+    check acDivByZero notin arithChecksFor(buildSemantics)
     check validateSymexSettings(defaultSymexSettings()).len == 0
 
   test "native: v + 1 > v at high(int) is compiler-dependent (undefined)":

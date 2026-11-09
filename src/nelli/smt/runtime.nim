@@ -8922,12 +8922,14 @@ proc wrapIntToWidth(r: SymVal): SymVal =
   SymVal(kind: svInt, zi: ite(inWin, r.zi, wrapped), ziWidth: r.ziWidth,
          ziSigned: r.ziSigned, ziIvl: win.ivl)
 
-proc checked(ac: ArithCheck; settings: SymexSettings): bool =
-  ## RFC-0016 W1-d2c / D1a. Is `ac`'s check emitted? The settings describe the
-  ## build; a routine that pushed `overflowChecks: on` in a checks-off build
-  ## (`waChecked` under `buildWraps()`) raises `OverflowDefect` and
-  ## `DivByZeroDefect` whatever the settings say: the routine is not the build.
-  ac in effectiveArithChecks(settings) or
+proc checked(ac: ArithCheck): bool =
+  ## RFC-0016 W1-d2c / D1a, K10d. Is `ac`'s check emitted? The build decides
+  ## (`arithChecksFor`); a routine that pushed `overflowChecks: on` in a
+  ## checks-off build (`waChecked` under `buildWraps()`) raises
+  ## `OverflowDefect` and `DivByZeroDefect` all the same: the routine is not
+  ## the build. A check the build does not compile in is not forked: the
+  ## unchecked operation is undefined and the definedness axis answers it.
+  ac in arithChecksFor() or
     (ac in {acOverflow, acDivByZero} and buildWraps() and not wraps())
 
 proc defProfile(): DefProfile =
@@ -17112,19 +17114,6 @@ proc takeLoweringPendingDegrade(): Degrade =
   loweringPendingTaint = {}
   loweringPendingUb = {}
 
-proc noteArithChecksDisagreement(settings: SymexSettings) =
-  ## RFC-0016 W1-d2. An explicit `arithChecks` that is not what this build
-  ## compiles in (`arithChecksDisagree`) taints the run `feCheckOption`: the
-  ## gated drains skip an unlisted check and return the path clean, and the
-  ## build's own arithmetic is what runs natively. Queued here, it joins the
-  ## initial path through `initialWalkPath`, so every path carries it. An
-  ## agreeing setting taints nothing.
-  if arithChecksDisagree(settings):
-    lowerDegrade(feCheckOption,
-      "arithChecks " & $effectiveArithChecks(settings) & " disagrees with the build's " &
-      "checks " & $arithChecksFor() & ": the verdict is not the native " &
-      "program's -- path degraded to sxUnknown")
-
 proc initialWalkPath(pc: seq[Z3Bool]; env: Env): Path =
   ## RFC-0005 review R3 (leak fix), R4. THE constructor of a walk driver's
   ## initial path (`runSymexImpl`, `runConcolicCollectImpl`): the parameters'
@@ -19373,9 +19362,9 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
   ##    (probe-path `lower()` calls, where no drain runs). Both stores are
   ##    reset so a subsequent lower() starts clean (idempotent).
   ##  - `gate` is `none(ArithCheck)` for an unconditional drain (parseInt/
-  ##    str-index — no opt-out) or `some(acFoo)` for a settings-gated drain
-  ##    (div-by-zero/overflow). When `gate` is `some` and its value is NOT in
-  ##    `w.settings.arithChecks`, or there are no drained predicates, returns
+  ##    str-index — no opt-out) or `some(acFoo)` for a build-gated drain
+  ##    (div-by-zero/overflow). When `gate` is `some` and the build does NOT
+  ##    check it (`checked`), or there are no drained predicates, returns
   ##    `@[p]` unchanged — honest-incomplete.
   ##  - otherwise forks each predicate `c` into its own RAISES sub-path
   ##    (`p.pc & @[c]`), routed via E3's `routeRaise(…, defectType, msg, w)`
@@ -19402,9 +19391,9 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
         c
     # `gate` is a compile-time `static[Option[ArithCheck]]`. `none(ArithCheck)`
     # means "unconditional drain" (parseInt/str-index) — never early-returns on
-    # the gate. `some(acFoo)` (div-by-zero/overflow) is settings-gated: skip
+    # the gate. `some(acFoo)` (div-by-zero/overflow) is build-gated: skip
     # (honest-incomplete) unless that check is enabled.
-    if (gate.isSome and not checked(gate.get, w.settings)) or conds.len == 0:
+    if (gate.isSome and not checked(gate.get)) or conds.len == 0:
       return @[p]
     for c in conds:
       let raisePath = forkPath(p, p.pc & @[c], p.env)
@@ -19531,7 +19520,7 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
     return cp   ## `av`'s kind carries no bound assertion (e.g. a degrade
                 ## placeholder reaching an itInt target) — honest-incomplete,
                 ## matching `bvRangeConds`'s own `else` contract.
-  if acRange notin effectiveArithChecks(w.settings):
+  if not checked(acRange):
     # Same gate `drainRangeRaises` uses, but this site's OWN
     # off-behaviour matches `genRaiseForkDrain`'s family instead of
     # float→int's: when the check is disabled the assignment is not
@@ -19564,14 +19553,14 @@ genRaiseForkDrain(drainOverflowRaises, overflowConds, some(acOverflow),
 ## out-of-bounds predicates from `lowerStrArm`'s `iekStrAt` arm — parity with
 ## the seq/array/Table indexing arms' unconditional `forkDefect` (Phase 16
 ## D1a), which already model `IndexDefect` for every OTHER container index;
-## `s[i]` was the sole gap. Unconditional (no `arithChecks`-style opt-out
+## `s[i]` was the sole gap. Unconditional (no build-check opt-out
 ## gate) — mirrors the seq/array `isIndex` arm's `forkDefect` call.
 genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, none(ArithCheck),
                    "IndexDefect", "string index out of bounds")
 
 ## N14 (RFC-chapulin-hardening bucket-2). seq `del(i)` out-of-bounds
 ## predicates from `lower`'s `iekSeqDel` arm. Unconditional (no
-## `arithChecks`-style opt-out gate) — mirrors `drainStrIndexRaises`'s own
+## build-check opt-out gate) — mirrors `drainStrIndexRaises`'s own
 ## unconditional IndexDefect parity argument (every OTHER container mutation
 ## site with a bounds check, `isIndexAssign`, forks unconditionally too).
 genRaiseForkDrain(drainSeqOobRaises, seqOobConds, none(ArithCheck),
@@ -19620,7 +19609,7 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8i. Drain the arithmetic-trap sink (see the `arithTrapConds`
   ## threadvar): the continuation `p` gains each trap predicate's negation
   ## and nothing is forked -- a SIGFPE aborts the process, so there is no
-  ## raise to route and no execution past it. Ungated: `arithChecks` models
+  ## raise to route and no execution past it. Ungated: the build's checks model
   ## Nim's runtime checks, and this is the hardware's, which no check setting
   ## removes.
   ##
@@ -29632,7 +29621,7 @@ proc runSymexImpl(prog: SymexProgram,
     if p.ty.kind == itInt:
       intParamNames.incl p.name
   # ISSUE #161 slice 3. Under UNCHECKED arithmetic (`acOverflow` absent from
-  # `arithChecks` — the `-d:danger` / `--overflowChecks:off` build), signed
+  # `arithChecksFor` — the `-d:danger` / `--overflowChecks:off` build), signed
   # overflow is not a defect, it WRAPS. Suppressing the raise fork is only
   # half of modelling that: an unbounded `Z3Int` still does not wrap, so a
   # promoted param would report `a * b` as 1.6e19 for a product the program
@@ -29946,7 +29935,6 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
-  noteArithChecksDisagreement(settings)
   let initial = initialWalkPath(initialPC, env)
   let exitClock = newExitClock()
   var w = WalkCtx(
@@ -30876,7 +30864,6 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                            globals: globalsTable(prog.globals)),  ## S8as
   )
   currentWalkCtxPtr = addr w
-  noteArithChecksDisagreement(settings)
   let initial = initialWalkPath(initialPC, env)
   # RFC-0005 S8j: a path that left through the SUT's own `return` is a
   # normal exit too; its constraints join the soundness pin below.

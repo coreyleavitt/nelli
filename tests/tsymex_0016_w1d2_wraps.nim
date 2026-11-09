@@ -1,5 +1,6 @@
-## RFC-0016 W1-d2 (W-07), the push route and the settings route, on a
-## checks-ON build (the default).
+## RFC-0016 W1-d2 (W-07), the push route, on a checks-ON build (the
+## default). (The settings route, an explicit `arithChecks` that disagreed
+## with the build, went with the setting in K10d.)
 ##
 ## Native, probed on the pinned toolchain (c and cpp identical, x86-64 Linux,
 ## default optimisation; MSVC differs, see the native test): under `{.push overflowChecks: off.}`,
@@ -8,10 +9,7 @@
 ## with the operand through a `noinline` identity or not; `id(high(int)) + 1`
 ## computes `low(int)`. A walker `sxSat` at `high(int)` is a witness the
 ## binary does not reach, and nothing in the arithmetic knows which routine
-## it sits in, so a pushed-off routine declines on every setting: the S8cu
-## early return that passed it where `arithChecks` lacked `acOverflow` is gone.
-## An explicit `arithChecks` that disagrees with the build taints
-## `feCheckOption`; an agreeing one does not.
+## it sits in, so a pushed-off routine declines on every setting.
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -33,10 +31,6 @@ proc sutPushedViaId(v: int) =
 proc sutPlain(x: int) =
   if x == 7: symexTarget("hit")
 
-const optOutSettings = SymexSettings(arithChecks: {acDivByZero})
-const emptySettings = SymexSettings(arithChecks: {})
-const agreeSettings = SymexSettings(arithChecks: arithChecksFor(buildSemantics))
-
 suite "W1-d2 push route and explicit settings":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 282
@@ -44,8 +38,7 @@ suite "W1-d2 push route and explicit settings":
   test "the build is checks-on":
     check coOverflow in buildSemantics.checks
     check not buildWraps()
-    check defaultSymexSettings().arithChecks ==
-      {acOverflow, acDivByZero, acRange}
+    check arithChecksFor(buildSemantics) == {acOverflow, acDivByZero, acRange}
 
   test "native: a pushed-off v + 1 > v is compiler-dependent (undefined)":
     # gcc and clang fold the comparison and never reach "hit"; MSVC wraps
@@ -67,31 +60,10 @@ suite "W1-d2 push route and explicit settings":
                feOverflowCheckOption)
 
   test "push: an explicit opt-out no longer passes the marker":
-    let r = symexFind(sutPushed, tLabel("hit"), emptySettings)
+    let r = symexFind(sutPushed, tLabel("hit"), defaultSymexSettings())
     check not r.trusted
     check r.status != sxSat
     check r.errors.named(feOverflowCheckOption)
-
-  test "explicit arithChecks = {acDivByZero} on a checks-on build taints":
-    let r = symexFind(sutPlain, tLabel("hit"), optOutSettings)
-    checkpoint show(r.errors)
-    check not r.trusted
-    check r.errors.named(feCheckOption)
-    check arithChecksDisagree(optOutSettings)
-    check validateSymexSettings(optOutSettings).len > 0
-
-  test "explicit arithChecks = {} on a checks-on build taints":
-    let r = symexFind(sutPlain, tLabel("hit"), emptySettings)
-    check not r.trusted
-    check r.errors.named(feCheckOption)
-
-  test "an explicit setting that agrees with the build does not taint":
-    let r = symexFind(sutPlain, tLabel("hit"), agreeSettings)
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    check r.trusted
-    check not r.errors.named(feCheckOption)
-    check not arithChecksDisagree(agreeSettings)
 
   test "the default settings agree with the build":
     let r = pinExact(sutPlain, cellKey(axDefinedness, "arithChecks/default"))

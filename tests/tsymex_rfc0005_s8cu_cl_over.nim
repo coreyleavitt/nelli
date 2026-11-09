@@ -12,9 +12,8 @@ const declKey = cellKey(faGeneric, "s8cu_cl_over")
 ## RFC-0016 W1-d2 (W-07). This build is checks-off, so the default settings
 ## follow it (`acOverflow` out) and there is no routine-level decline to make:
 ## the build is the program. A signed overflow is undefined, not a wrap, so the
-## rows that decided a wrap now halt; an explicit setting that models what the
-## build does not do taints `feCheckOption`.
-const clSettings = SymexSettings(arithChecks: {acDivByZero, acRange})
+## rows that decided a wrap now halt. (A setting that modelled what the build
+## does not do, and tainted `feCheckOption`, went with `arithChecks` in K10d.)
 
 suite "S8cu: --overflowChecks:off":
 
@@ -23,25 +22,9 @@ suite "S8cu: --overflowChecks:off":
     ## modelled the check; the settings now agree with the build, and the
     ## overflowing `+` is the ubSignedOverflow halt.
     check native(clOver(high(int))) == "hit"
-    check not arithChecksDisagree(defaultSymexSettings())
+    check validateSymexSettings(defaultSymexSettings()).len == 0
     pinDecline(clOver, declKey, ubSignedOverflow)
     check not symexFind(clOver, tLabel("hit")).errors.named(feOverflowCheckOption)
-
-  test "settings that model the wrap disagree with the build and are not trusted":
-    ## Rule (a): was a trusted sxSat/sxRaised/sxSat (S8w). The explicit
-    ## arithChecks differs from this build's ({acRange}).
-    let r = symexFind(clOver, tLabel("hit"), clSettings)
-    checkpoint show(r.errors)
-    check not r.trusted
-    check r.errors.named(feCheckOption)
-    let f = symexFind(clField, tLabel("hit"), clSettings)
-    checkpoint show(f.errors)
-    check not f.trusted
-    check f.errors.named(feCheckOption)
-    let p = symexFind(clPure, tLabel("hit"), clSettings)
-    checkpoint show(p.errors)
-    check not p.trusted
-    check p.errors.named(feCheckOption)
 
   test "no routine declines for the build's own checks: one that never meets the check decides":
     ## Rule (c), premise changed: the old "per routine" decline existed because

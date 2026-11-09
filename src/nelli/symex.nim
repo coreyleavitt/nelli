@@ -3688,11 +3688,10 @@ proc warnIncoherentSettings(settings: SymexSettings, entry: string) =
   ## configuration, which is this RFC's own pattern sitting inside the RFC that
   ## exists to end it. §5 required a decision: wire it in or delete it.
   ##
-  ## Wire it in. Its warning (b) is "arithChecks is empty: no arithmetic defect
-  ## forks will be emitted" -- precisely the defect round B found in the ten
-  ## const literals, which had been running release-like for as long as they
-  ## had existed. The one mechanism that could have caught it was already
-  ## written; it was simply never called.
+  ## Wire it in. (Its warning for an empty `arithChecks` -- the defect round B
+  ## found in the ten const literals -- went with that setting in RFC-0016
+  ## K10d: the build alone decides which checks run.) The mechanism that could
+  ## have caught that defect was already written; it was simply never called.
   ##
   ## RFC-0010 review round 2: this proc is no longer called directly from
   ## any entry macro. Every macro that reaches the walker under a
@@ -3745,9 +3744,9 @@ proc parseEntryImplWarned(fn: NimNode, apiName: string,
   ## (`symexCacheKeyForFn`/`saveSymexWitness`/`loadSymexWitnesses`/
   ## `saveSymexVerdict`/`loadSymexVerdict`) parse through the same
   ## `entryParse` with `warn = false`: they don't run the walker
-  ## themselves, they key or persist results computed elsewhere, so an
-  ## arithChecks-empty warning at a cache lookup would be noise pointing at
-  ## the wrong call site. (Review R1-11: they once called `parseEntryImpl`
+  ## themselves, they key or persist results computed elsewhere, so a
+  ## warning at a cache lookup would be noise pointing at the wrong call
+  ## site. (Review R1-11: they once called `parseEntryImpl`
   ## directly and so skipped `methodPrelude` too.)
   ##
   ## `settings` is `static SymexSettings` at every call site (an entry

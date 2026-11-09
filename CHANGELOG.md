@@ -12,6 +12,20 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
+## [Unreleased] — 0.10.0
+
+Breaking. Upgrading: `docs/migration/0.10.0.md`.
+
+- Removed `SymexSettings.arithChecks` and `SymexResult.fromCache` (deprecated
+  in 0.9.2, INT-39). The build alone decides which arithmetic checks run; the
+  cache-hit flag is `SymexFinding.fromCache`. RFC-0016 K10d.
+- `SymexErrorKind` gains `ubTailUnverified`, `feHostUnadmitted`,
+  `feUnadmitted` and `feDefectExcluded`; `SymexTargetKind` gains
+  `stkUndefined` (`tUndefined`); `Soundness` gains `buildSegment` and
+  `buildRow`; `UbKind` widens and `ubFloatToIntRange` moves.
+- New settings `wholeRunDefinedness` (default on) and `budget.walkRLimit`.
+- Walker `"287"` to `"302"`: every cached verdict is recomputed once.
+
 ## [0.9.2] — 2026-11-07
 
 This release is Wave 1 of RFC-0016 (native-parity hardening): the seven clean

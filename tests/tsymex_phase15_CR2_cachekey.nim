@@ -1131,7 +1131,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 K6 (K6a-c): 298->299.
     ## RFC-0016 K10a-axis: 299->300.
     ## RFC-0016 K10b: 300->301.
-    check symexWalkerVersion == "301"
+    ## RFC-0016 K10d: 301->302 (`SymexSettings.arithChecks` removed; the
+    ## canonical settings string loses its key).
+    check symexWalkerVersion == "302"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

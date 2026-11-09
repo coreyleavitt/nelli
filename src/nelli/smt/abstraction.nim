@@ -379,7 +379,7 @@ type
 
 proc wrapProvable(e: IRExpr, pol: BanPolicy): bool =
   ## Issue #161 slice 3. Under UNCHECKED arithmetic semantics (`acOverflow`
-  ## absent from `SymexSettings.arithChecks`, i.e. `-d:danger` /
+  ## absent from `arithChecksFor`, i.e. `-d:danger` /
   ## `--overflowChecks:off`), signed overflow WRAPS instead of raising. An
   ## unbounded `Z3Int` does not wrap, so promotion is sound only where the
   ## result provably never leaves the type's window — there is no dynamic

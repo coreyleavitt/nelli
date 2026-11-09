@@ -9,7 +9,7 @@
 ##          render layer, cold and from the cache alike.
 ##   WA-10  a cached `sfRaised` hit is the cold finding: `targetDesc`,
 ##          `defectTypeId` and the witness.
-##   WA-11  `SymexResult.fromCache` is false: `symexFind` has no cache.
+##   WA-11  (`SymexResult.fromCache`, removed in K10d; `tsymex_0016_k10d_removals`)
 ##   WA-12  the no-targets finding carries `soundness`, `gaps` and
 ##          `annotationViolations`, as every finding does (§8.1, S11).
 import std/[unittest, strutils, json, tables]
@@ -264,17 +264,6 @@ suite "WA-10 -- a cached sfRaised hit matches the cold finding":
     check w.defectTypeId == c.defectTypeId
     check w.hints == c.hints
     check w.diagnostics == c.diagnostics
-
-# =============================================================================
-# WA-11 -- SymexResult.fromCache
-# =============================================================================
-
-suite "WA-11 -- symexFind has no cache, so its result is never fromCache":
-
-  test "every status reports fromCache = false":
-    check not symexFind(w1Guarded, tRaisedExn("AssertionDefect")).fromCache
-    check not symexFind(w1Escapes, tRaisedExn("W1Err")).fromCache
-    check not symexFind(w1SiblingOverflow, tLabel("w1_hit")).fromCache
 
 # =============================================================================
 # WA-12 -- the no-targets finding

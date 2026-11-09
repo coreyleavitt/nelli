@@ -30,7 +30,7 @@ suite "#163 review R16 D2 -- signed narrow width, checks-off build":
 
   test "the build is checks-off and the default settings agree":
     check buildWraps()
-    check not arithChecksDisagree(defaultSymexSettings())
+    check validateSymexSettings(defaultSymexSettings()).len == 0
 
   test "D2 wmExplore (rule a): the wrap at a=100, b=100 is a trusted sat (int8 wraps)":
     let r = symexFind(addI8UncheckedGateAt100_100, tLabel("i8_wrapped_100_100"))

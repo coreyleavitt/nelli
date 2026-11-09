@@ -6,8 +6,8 @@
 ## Background: the bug this test exists to prevent from recurring
 ## ----------------------------------------------------------------------------
 ## The round found `warnIncoherentSettings` (the macro-time check that warns
-## when a `SymexSettings` is incoherent -- notably `arithChecks == {}`, which
-## silently disables every arithmetic-defect fork) wired into only 2 of the 6
+## when a `SymexSettings` is incoherent -- notably a zero
+## `maxCallDepth`, which exhausts at the first call) wired into only 2 of the 6
 ## symex entry macros. The fix introduced a chokepoint, `parseEntryImplWarned`
 ## (~symex.nim:1123), which wraps `warnIncoherentSettings` +
 ## `dsl_parser.parseEntryImpl`. The five WALKER-RUNNING entry macros

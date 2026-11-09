@@ -13,7 +13,7 @@ import ./errorkind   ## RFC-0016 §8.1: `SymexErrorKind`, a leaf (admission name
 export errorkind
 import ./budget      ## review R1-17: `ResourceBudget`, a Z3-free leaf
 export budget
-import ./buildprofile   ## RFC-0016 W1-d2: `arithChecks` derives from the build
+import ./buildprofile   ## RFC-0016 W1-d2: the arithmetic checks derive from the build
 export buildprofile
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
@@ -2012,17 +2012,15 @@ type
     dkDivByZeroDefect    ## R16-1 (Phase 16 ADR-0011 F3): div/mod by zero
 
   ArithCheck* = enum
-    ## R16-1 (Phase 16 ADR-0011 F2). Gates which arithmetic defect forks the
-    ## walker EMITS. This is the "policy" axis: an unchecked kind is never
-    ## forked so it never pays path-multiplicative cost. Empty set = release-like
-    ## (all arithmetic is unchecked / wrapping). Default = all-on (debug-like).
-    ## `defectExclusions` is the orthogonal "surfacing" axis: the fork is
+    ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks the walker
+    ## EMITS. RFC-0016 K10d: the build alone decides (`arithChecksFor`); the
+    ## `SymexSettings.arithChecks` setting that used to override it is gone.
+    ## An unchecked kind is never forked so it never pays path-multiplicative
+    ## cost. `defectExclusions` is the orthogonal "surfacing" axis: the fork is
     ## emitted but the finding is suppressed when the kind is excluded.
     ##
-    ## ⚠ CR-16 ORDINAL-STABILITY RULE: ALWAYS APPEND new members at the END
-    ## of this enum. `arithChecks` is a `set[ArithCheck]` rendered into the
-    ## cache key (`;ac=`); inserting or reordering silently changes every cached
-    ## digest. Never reorder — only append.
+    ## ORDINAL-STABILITY RULE: ALWAYS APPEND new members at the END of this
+    ## enum; the ordinals are the order the build profile reads.
     acOverflow   ## fork +/-/* overflow → OverflowDefect raise
     acDivByZero  ## fork div/mod-by-zero → DivByZeroDefect raise. Only with
                  ## `acOverflow` also on (RFC-0005 S8aa): Nim emits its zero
@@ -2263,9 +2261,8 @@ type
       ## interval analysis or handed to the solver. The audit trail for
       ## the ADR-0001 amendment: a verifier that silently chooses which
       ## obligations to prove itself is not one you can check. Like
-      ## `abstractions`, it records this run's exploration (were a result
-      ## ever served from a cache it would be empty; `fromCache` is always
-      ## false today).
+      ## `abstractions`, it records this run's exploration (`symexFind`
+      ## has no cache, so every result is a fresh walk).
     callStats*:    CallStats   ## per-callee walk + cache-hit counts
     heapSnapshot*: seq[HeapSnapshotEntry]
       ## Phase 15 R12. The heap-snapshot witness (one entry per ref/ptr param)
@@ -2282,8 +2279,7 @@ type
       ## promise (today: `{.symexTransparent.}`) was found false. Loud and
       ## verdict-NEUTRAL: it never changes `status`, and a call it names is
       ## still tainted through its own `feOpaqueCallUnmodelled` entry in
-      ## `errors`. (`fromCache` is always false today, so it is never
-      ## served from a cache.)
+      ## `errors`.
     soundness*:    Soundness
       ## RFC-0005 S11 (§8.1). The winning path's taint, the run coordinate
       ## and how a SAT claim was settled -- one common field, so every status
@@ -2294,22 +2290,6 @@ type
       ## used, on every status. An `sxUnsat` is a proof only under these
       ## bounds -- and by §2.3 it has no under-approximating error to say
       ## so, so the settings are the one carrier (RFC-0011 / RFC-0008).
-    fromCache* {.deprecated.}: bool
-      ## DEPRECATED (RFC-0016 W1-z; removed in 0.10.0, INT-39). Nim's
-      ## `deprecated` pragma takes no message on an object field, so the
-      ## path forward is here: the cache-hit flag is
-      ## `SymexFinding.fromCache` (`symexFindAllWitnesses`, `symexForAll`);
-      ## this field has no producer. See docs/migration/0.9.2.md.
-      ##
-      ## Always `false` today. `symexFind`, the one producer of a
-      ## `SymexResult`, takes no `ExampleDatabase`, so it never serves a
-      ## cached result: every call walks. The content-addressed cache is
-      ## `symexFindAllWitnesses`'s (hence `symexForAll`'s), and its hit
-      ## flag is `SymexFinding.fromCache`. Phase 14 cycle C1 planned a
-      ## cache cascade for `symexFind` and added this field for it; the
-      ## cascade never landed (RFC-0005 W1, WA-11). Were it to, a served
-      ## result would carry `abstractions`/`callStats` `@[]` (they record
-      ## a run's exploration) and no `diagnostics` beyond what is stored.
     diagnostics*:  seq[DefectFinding[T]]
       ## ADR-0012 D2. Incidentally-discovered defect/exception raises found
       ## while searching for the primary target. Populated by the reduction
@@ -2362,29 +2342,6 @@ type
       ## Phase 15 Z3. Defect families the walker must NOT model as
       ## raise-paths. Default excludes OOM + stack-overflow (modelling
       ## those yields spurious sxRaised for virtually all real SUTs).
-    arithChecks* {.deprecated.}: set[ArithCheck] =
-      (when coOverflow in buildSemantics.checks: {acOverflow, acDivByZero}
-       else: default(set[ArithCheck])) +
-      (when coRange in buildSemantics.checks: {acRange}
-       else: default(set[ArithCheck]))
-      ## DEPRECATED (RFC-0016 W1-z; removed in 0.10.0, INT-39). Nim's
-      ## `deprecated` pragma takes no message on an object field, so the
-      ## path forward is here: do not set it. The build decides, via
-      ## `--overflowChecks` / `--rangeChecks` (see `nelli/smt/buildprofile`
-      ## and `arithChecksFor`); an explicit disagreeing value taints the
-      ## run `feCheckOption`. See docs/migration/0.9.2.md.
-      ##
-      ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks to EMIT.
-      ## RFC-0016 W1-d2: the default is DERIVED from the build
-      ## (`arithChecksFor(buildSemantics)`): a debug build is all-on
-      ## `{acOverflow, acDivByZero, acRange}`, `--overflowChecks:off` drops
-      ## `acOverflow` and `acDivByZero` (Nim emits the zero check under
-      ## `overflowChecks` alone), `--rangeChecks:off` drops `acRange`. A value
-      ## that disagrees with the build is explicit, and the run taints
-      ## `feCheckOption` (`arithChecksDisagree`): the program the build
-      ## compiles does not do what the setting says. Orthogonal to
-      ## `defectExclusions`: `arithChecks` gates fork emission (2^N cost lever);
-      ## `defectExclusions` gates finding surfacing after the fork. In cache key.
     inlinePolicy*: InlinePolicy = ipHybrid
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
@@ -5092,9 +5049,9 @@ proc defaultResourceBudget*(): ResourceBudget =
   ResourceBudget()
 
 func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
-  ## RFC-0016 W1-d2. The `arithChecks` a build `b` implies: the checks its
-  ## compiled code performs. `SymexSettings.arithChecks`' default is this for
-  ## `buildSemantics`.
+  ## RFC-0016 W1-d2. The arithmetic checks a build `b` implies: the checks its
+  ## compiled code performs. The one source the walker's check gates read
+  ## (K10d removed the `SymexSettings.arithChecks` override).
   if coOverflow in b.checks: result.incl {acOverflow, acDivByZero}
   if coRange in b.checks: result.incl acRange
 
@@ -5105,8 +5062,7 @@ func buildWraps*(b: BuildSemantics = buildSemantics): bool =
   ## which `signedWrapDefined` reports), so the walker does not model a wrap
   ## and a trusted answer for 32 and 64 bit. The ONE predicate
   ## `wraps()`, the wrap scan and the exact-offset promotion read;
-  ## settings never feed it (the build is what the native program does; a
-  ## setting that disagrees taints, `arithChecksDisagree`). A routine under
+  ## settings never feed it (the build is what the native program does). A routine under
   ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
   coOverflow notin b.checks
 
@@ -5117,20 +5073,6 @@ func signedWrapDefined*(width: int; b: BuildSemantics = buildSemantics): bool =
   ## and at 32 and 64 bit only when the build compiles with `-fwrapv`
   ## (`-d:nelliFwrapv`). `low(T) div -1` and `mod -1` are not covered by it.
   width in {8, 16} or b.fwrapv
-
-func effectiveArithChecks*(s: SymexSettings): set[ArithCheck] =
-  ## RFC-0016 code review M3. The internal read of the deprecated
-  ## `SymexSettings.arithChecks`: the one place a read is allowed to be quiet,
-  ## so no module has to switch the Deprecated warning off wholesale. Every
-  ## nelli-internal consumer goes through this, never the field.
-  {.push warning[Deprecated]: off.}
-  result = s.arithChecks
-  {.pop.}
-
-func arithChecksDisagree*(s: SymexSettings;
-                          b: BuildSemantics = buildSemantics): bool =
-  ## RFC-0016 W1-d2. `s.arithChecks` is not what build `b` compiles in.
-  effectiveArithChecks(s) != arithChecksFor(b)
 
 proc defaultSymexSettings*(): SymexSettings =
   ## Phase 2 endpoint: `isOptimised` is now the default. Range-typed
@@ -5207,10 +5149,6 @@ proc `+`*(a, b: SymexSettings): SymexSettings {.deprecated:
   if b.acceptUnknownAsCovered != d.acceptUnknownAsCovered:
     result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
-  if effectiveArithChecks(b) != effectiveArithChecks(d):   ## R16-1
-    {.push warning[Deprecated]: off.}
-    result.arithChecks = b.arithChecks
-    {.pop.}
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
   if b.replay != d.replay: result.replay = b.replay   ## RFC-0005 S10
   if b.replayTimeoutMs != d.replayTimeoutMs:   ## RFC-0005 S8be
@@ -5225,13 +5163,6 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ##   (a) `seqInlineThreshold` is only meaningful under `ipHybrid`
   ##       (ADR-0009); a non-default value paired with
   ##       `ipAlwaysInline`/`ipAlwaysAxiomatize` is silently ignored.
-  ##   (b) R16-1: `arithChecks` is empty → no arithmetic forks will be
-  ##       emitted; OverflowDefect/DivByZeroDefect/RangeDefect are unreachable.
-  ##   (c) R16-1: an arithmetic check is ENABLED in `arithChecks` but its
-  ##       corresponding `DefectKind` is in `defectExclusions` → the fork is
-  ##       emitted (paying path cost) but the finding is always suppressed.
-  ##       This is pure waste; the user likely intended to disable the check
-  ##       via `arithChecks` instead.
   ##   (d) RFC-0010 B4 round 2: `budget.maxCallDepth == 0` does NOT mean
   ##       unlimited (unlike most `ResourceBudget` fields) — it exhausts the
   ##       call-depth budget on the very first call. A caller who wrote `0`
@@ -5248,16 +5179,6 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
     result.add "seqInlineThreshold (" & $s.budget.seqInlineThreshold &
       ") is set but inlinePolicy is " & $s.inlinePolicy &
       " (not ipHybrid); the threshold is ignored under this policy."
-  # R16-1 (b): all arith checks disabled → no arithmetic defects can be found.
-  if effectiveArithChecks(s) == {}:
-    result.add "arithChecks is empty: no arithmetic defect forks will be " &
-      "emitted (OverflowDefect, DivByZeroDefect, and RangeDefect are all " &
-      "unreachable). Set acOverflow/acDivByZero/acRange to re-enable."
-  # RFC-0016 W1-d2: `arithChecks` that is not what the build compiles in.
-  if arithChecksDisagree(s):
-    result.add "arithChecks (" & $effectiveArithChecks(s) & ") disagrees with this " &
-      "build's checks (" & $arithChecksFor() & "): the program does not do " &
-      "what the setting models, so every verdict is tainted feCheckOption."
   # RFC-0010 B4 round 2 (d): maxCallDepth == 0 exhausts immediately rather
   # than meaning unlimited -- a native-stack SIGSEGV was the alternative
   # (see ResourceBudget's umbrella doc comment above), so this field keeps
@@ -5279,20 +5200,6 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
       "fields, this does NOT mean unlimited -- it exhausts after zero loop " &
       "iterations (an unlimited cap cannot terminate for an ordinary while " &
       "loop). Write an explicit bound instead, e.g. maxLoopUnwind: 5."
-  # R16-1 (c): check enabled in arithChecks but its DefectKind is suppressed
-  # by defectExclusions → fork cost paid, finding always suppressed — pure waste.
-  const arithCheckToDefectKind: array[ArithCheck, DefectKind] = [
-    acOverflow:  dkOverflowDefect,
-    acDivByZero: dkDivByZeroDefect,
-    acRange:     dkRangeDefect,
-  ]
-  for ac in effectiveArithChecks(s):
-    let dk = arithCheckToDefectKind[ac]
-    if dk in s.defectExclusions:
-      result.add $ac & " is enabled in arithChecks but " & $dk &
-        " is in defectExclusions: the fork will be emitted (paying path cost)" &
-        " but the finding will always be suppressed. Either remove " & $dk &
-        " from defectExclusions or remove " & $ac & " from arithChecks."
 
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)

@@ -26,13 +26,12 @@ import std/unittest
 import nelli/symex
 
 # ---------------------------------------------------------------------------
-# A SUT whose verdict depends on `arithChecks`, which is the field that makes
-# the defect observable. `arithChecks` gates whether arithmetic defect forks
-# are emitted at all: all-on by default, empty (release-like, wrap/unchecked)
-# when zero-filled. So an unconstrained signed add is `sxRaised` under the
-# defaults and `sxUnsat` under a zero-filled literal — the ten const literals
-# in the symex suite have been running release-like without anybody choosing
-# that.
+# A SUT whose verdict depends on the arithmetic checks being modelled, which
+# is what makes the defect observable. A partial literal that dropped a
+# default (a zero-filled field) would change the answer: an unconstrained
+# signed add is `sxRaised` under the defaults. (Until RFC-0016 K10d the
+# settings carried an `arithChecks` field that a zero-filled literal emptied;
+# the build alone decides now, so the literal cannot silently go release-like.)
 # ---------------------------------------------------------------------------
 proc mayOverflow(a, b: int) =
   let c = a + b
@@ -100,7 +99,6 @@ suite "RFC-0010 B2 — SymexSettings: the empty literal IS the default":
     check lit.integerSemantics == isOptimised
     check lit.budget == want.budget
     check lit.defectExclusions == want.defectExclusions
-    check lit.arithChecks == want.arithChecks
     check lit.inlinePolicy == want.inlinePolicy
     check not lit.acceptUnknownAsCovered   # its default genuinely is the zero
 
@@ -119,7 +117,6 @@ suite "RFC-0010 B2 — SymexSettings: the empty literal IS the default":
     check lit.budget.maxLoopUnwind == 2
     check lit.budget.maxCallDepth == defaultResourceBudget().maxCallDepth
     check lit.budget.maxHeapDepth == defaultResourceBudget().maxHeapDepth
-    check lit.arithChecks == defaultSymexSettings().arithChecks
 
   test "the defaults reach const/VM evaluation":
     # Not optional here: `symexFind`'s settings parameter is a
@@ -128,17 +125,14 @@ suite "RFC-0010 B2 — SymexSettings: the empty literal IS the default":
     # this surface.
     const lit = SymexSettings(integerSemantics: isExact)
     check lit.budget.maxCallDepth == 3
-    check lit.arithChecks == {acOverflow, acDivByZero, acRange}
     check lit.inlinePolicy == ipHybrid
 
 suite "RFC-0010 B2 — behaviour through the real entry point":
 
   test "a partial literal finds the overflow the defaults find":
-    # The end-to-end assertion. `arithChecks` gates arithmetic defect-fork
-    # emission; zero-filled it is empty, so the raise path does not exist and
-    # the target is unreachable. Under the defaults the fork is opened and the
-    # same query is sxRaised. Structural equality could not have caught this
-    # on its own — the settings travel into a macro and become a cache key.
+    # The end-to-end assertion. Under the defaults the arithmetic fork is
+    # opened and the query is sxRaised. Structural equality could not have
+    # caught a dropped default on its own — the settings travel into a macro and become a cache key.
     let viaLiteral = symexFind(mayOverflow, tRaisedExn("OverflowDefect"),
                                SymexSettings(integerSemantics: isOptimised))
     check viaLiteral.status == sxRaised
@@ -180,14 +174,13 @@ proc fieldCount[T](): int =
 suite "RFC-0010 B3 — the deprecated merge still covers every field":
 
   test "a fully-overriding merge reproduces the override exactly":
-    # Every one of ResourceBudget's 14 fields and SymexSettings' 7 non-budget
+    # Every one of ResourceBudget's 14 fields and SymexSettings' 6 non-budget
     # fields set away from its default, so a `+` body missing a line drops that
     # field back and this fails naming it.
     let b = SymexSettings(
       integerSemantics: isExact,
       acceptUnknownAsCovered: true,
       defectExclusions: {dkIndexDefect},
-      arithChecks: {acDivByZero},
       inlinePolicy: ipAlwaysAxiomatize,
       replay: false,                     # RFC-0005 S10
       replayTimeoutMs: 1234,             # RFC-0005 S8be
@@ -221,10 +214,11 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
                                                # K7 `walkRLimit` (its merge
                                                # line is in `+`, and the
                                                # override above sets it)
-    check fieldCount[SymexSettings]() == 9   # 8 scalars plus `budget`
+    check fieldCount[SymexSettings]() == 8   # 7 scalars plus `budget`
                                              # (RFC-0005 S10 added `replay`,
                                              # S8be `replayTimeoutMs`, RFC-0016 K10b
-                                             # `wholeRunDefinedness`)
+                                             # `wholeRunDefinedness`; K10d
+                                             # deleted `arithChecks`)
 
   test "composing two different nested budget overrides keeps both":
     # `a` and `b` each change ONE, different, budget subfield. A whole-object

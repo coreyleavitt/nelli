@@ -14,7 +14,7 @@ proc wrapNeeded(x: int8) =
 
 suite "symex Phase 2 -- ADR-0001, checks-off build (signed overflow is undefined)":
   test "the default settings follow the build":
-    check not arithChecksDisagree(defaultSymexSettings())
+    check validateSymexSettings(defaultSymexSettings()).len == 0
 
   test "isExact (rule a): the int8 wrap is an exact witness (RFC-0016 WA-B, P1)":
     let r = symexFind(wrapNeeded, tLabel("wrap-needed"),

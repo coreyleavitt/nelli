@@ -61,10 +61,6 @@ proc wrapProbeU(a, b: range[0'u64..5_000_000_000'u64]) =
 const UncheckedU = SymexSettings(integerSemantics: isOptimised)
 const UncheckedUExact = SymexSettings(integerSemantics: isExact)
 
-const Unchecked = SymexSettings(integerSemantics: isOptimised,
-                                arithChecks: {acDivByZero, acRange})
-const UncheckedExact = SymexSettings(integerSemantics: isExact,
-                                     arithChecks: {acDivByZero, acRange})
 const Exact = SymexSettings(integerSemantics: isExact)
 
 # Slice 4. The obligation is about the OPERATION, not about multiplication:
@@ -149,11 +145,9 @@ suite "#161 — promotion keeps the overflow obligation live":
     check anyLive
 
   test "the oracle -- unchecked multiplication wraps to a negative int64":
-    ## Ground truth for both "under unchecked arithmetic the two integer
-    ## modes still agree" and "unchecked arithmetic raises no
-    ## OverflowDefect" below. `{.overflowChecks: off.}` reproduces what
-    ## `Unchecked`/`UncheckedExact`'s `arithChecks` (acOverflow excluded)
-    ## model: under that mode Nim does NOT raise, and the same witness as
+    ## Ground truth for "under unchecked arithmetic the two integer
+    ## modes still agree" below. `{.overflowChecks: off.}` reproduces what
+    ## the checks-off build models: under that mode Nim does NOT raise, and the same witness as
     ## `mul64` above wraps to a negative int64 -- exactly the branch
     ## `wrapProbe` targets. True product: 1.6e19; two's-complement wraps
     ## that to -2_446_744_073_709_551_616, matching this file's own header
@@ -177,24 +171,6 @@ suite "#161 — promotion keeps the overflow obligation live":
     check oracle.trusted
     check opt.status == oracle.status
     check opt.trusted
-
-  test "a signed unchecked model that disagrees with the build is not trusted":
-    ## Rule (a): the old signed `wrapProbe` under an explicit
-    ## `arithChecks` lacking acOverflow. Signed wrap with checks off is
-    ## undefined, so the model's wrap is no longer a trusted witness: the
-    ## run is tainted feCheckOption (this build checks overflow).
-    let oracle = symexFind(wrapProbe, tLabel("wrapped"), UncheckedExact)
-    let opt = symexFind(wrapProbe, tLabel("wrapped"), Unchecked)
-    check not oracle.trusted
-    check not opt.trusted
-    check oracle.errors.named(feCheckOption)
-    check opt.errors.named(feCheckOption)
-
-  test "unchecked arithmetic raises no OverflowDefect":
-    ## The other half of the same setting: with `acOverflow` off there is
-    ## no defect to find, because overflow is defined behaviour.
-    let r = symexFind(wrapProbe, tRaisedExn("OverflowDefect"), Unchecked)
-    check r.status != sxRaised
 
   test "the unchecked ban does not leak into checked runs":
     ## Non-regression for slices 1-2: the wrap scan is gated on the

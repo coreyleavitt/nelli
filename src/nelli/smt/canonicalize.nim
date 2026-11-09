@@ -308,8 +308,14 @@ const renderAsChoicesVersion* = "12"
   ##   `mod` decline, the latter was an internal walker fault);
   ##   `unicode.toLower` and `typedthreads.createThread` calls decline by their
   ##   `never` rows.
+  ## - RFC-0016 K10d (301->302): `SymexSettings.arithChecks` is removed. The
+  ##   build alone decides which arithmetic checks the walker forks
+  ##   (`arithChecksFor`), so the `arithChecks=` key leaves the canonical
+  ##   settings string and no run taints `feCheckOption` for a setting that
+  ##   disagrees with the build. Walker semantics are unchanged for a default
+  ##   settings value; the number moves because the key's shape did.
 
-const symexWalkerVersion* = "301"
+const symexWalkerVersion* = "302"
   ## RFC-0016 K10b (300->301): whole-run definedness (section 9.1 item 3). A
   ## trusted `sxSat` needs the whole run defined: under
   ## `SymexSettings.wholeRunDefinedness` (on by default, keyed) the winner is
@@ -6674,8 +6680,8 @@ proc canonicalize*(s: SymexSettings): string =
   ## `fieldPairs` (the nested `budget` too), as `path=value`, except those
   ## named in `symexSettingsNeutral`. Replaces the audited hand list of the
   ## CR-2 close-out: a field is keyed unless it is excluded by name with a
-  ## reason, so a new setting cannot be silently unkeyed. The deprecated
-  ## `arithChecks` is keyed too (`effectiveArithChecks` reads the same field).
+  ## reason, so a new setting cannot be silently unkeyed. A removed
+  ## field (`arithChecks`, K10d) is simply absent; the walker number moved.
   result = "St2<"
   {.push warning[Deprecated]: off.}
   addKeyed(result, "", s)

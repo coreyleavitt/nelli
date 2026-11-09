@@ -6,15 +6,10 @@
 ##   * `typeIdToDefectKind` maps "OverflowDefect" and "DivByZeroDefect" to the
 ##     new kinds.
 ##   * `ArithCheck` enum `{acOverflow, acDivByZero, acRange}` is new.
-##   * `SymexSettings.arithChecks` defaults to ALL-ON `{acOverflow, acDivByZero,
-##     acRange}`.
-##   * Two `SymexSettings` differing ONLY in `arithChecks` produce DIFFERENT
-##     cache keys.
-##   * `validateSymexSettings` emits a warning when `arithChecks` is empty
-##     ("no arithmetic checks visible").
-##   * `validateSymexSettings` emits a warning when a check is enabled in
-##     `arithChecks` but its corresponding `DefectKind` is in `defectExclusions`
-##     ("fork cost paid, finding suppressed").
+##   * (RFC-0016 K10d: the `SymexSettings.arithChecks` setting, its cache-key
+##     key, its default and its `validateSymexSettings` warnings were part of
+##     this slice and are removed; the build decides. See
+##     `tsymex_0016_k10d_removals`.)
 ##   * `symexWalkerVersion` is bumped to "21".
 ##   * NO new defect forks — no behavior change; existing suite stays green.
 ##
@@ -89,132 +84,6 @@ suite "R16-1 — ArithCheck enum":
     check acDivByZero.ord == 1
     check acRange.ord     == 2
 
-# ---- Part 4: SymexSettings.arithChecks default --------------------------------
-
-suite "R16-1 — SymexSettings.arithChecks default":
-
-  test "defaultSymexSettings has arithChecks == {acOverflow, acDivByZero, acRange}":
-    ## ADR-0011 F2 decision: default is ALL-ON (debug-like). Empty set is the
-    ## release-like opt-out — not the default.
-    let s = defaultSymexSettings()
-    check s.arithChecks == {acOverflow, acDivByZero, acRange}
-
-  test "arithChecks field is present and assignable":
-    var s = defaultSymexSettings()
-    s.arithChecks = {acDivByZero}
-    check s.arithChecks == {acDivByZero}
-    s.arithChecks = {}
-    check s.arithChecks == {}
-
-# ---- Part 5: arithChecks in cache key ----------------------------------------
-
-suite "R16-1 — arithChecks participates in cache key":
-
-  test "two settings differing ONLY in arithChecks produce DIFFERENT canonical forms":
-    ## The main R16-1 cache-key DoD: arithChecks gates fork emission and thus
-    ## changes verdicts. Two settings that differ only in arithChecks must not
-    ## hash to the same key.
-    var s0 = defaultSymexSettings()
-    var s1 = s0
-    s1.arithChecks = {}    ## all checks off — different from default (all-on)
-    check canonicalize(s0) != canonicalize(s1)
-
-  test "arithChecks == {acOverflow} vs {acDivByZero} produces DIFFERENT canonical forms":
-    var s0 = defaultSymexSettings()
-    var s1 = s0
-    s0.arithChecks = {acOverflow}
-    s1.arithChecks = {acDivByZero}
-    check canonicalize(s0) != canonicalize(s1)
-
-  test "canonical form contains the arithChecks field":
-    let s = defaultSymexSettings()
-    check ";arithChecks=" in canonicalize(s)
-
-# ---- Part 6: SymexSettings + merge threads arithChecks ----------------------
-
-suite "R16-1 — SymexSettings + merge threads arithChecks":
-
-  test "merging a non-default arithChecks overrides the base":
-    let base = defaultSymexSettings()
-    var override = defaultSymexSettings()
-    override.arithChecks = {acOverflow}
-    let merged = base + override
-    check merged.arithChecks == {acOverflow}
-
-  test "merging a default arithChecks keeps the base value":
-    var base = defaultSymexSettings()
-    base.arithChecks = {acDivByZero}
-    let override = defaultSymexSettings()  ## arithChecks == default (all-on)
-    let merged = base + override
-    ## override's arithChecks equals the default, so base's value is kept
-    check merged.arithChecks == {acDivByZero}
-
-# ---- Part 7: validateSymexSettings warnings ----------------------------------
-
-suite "R16-1 — validateSymexSettings arithChecks warnings":
-
-  test "(b) empty arithChecks emits 'no arithmetic checks' warning":
-    ## ADR-0011 R16-1: when arithChecks is empty, no arithmetic defect forks
-    ## are ever emitted. Warn the user — this is almost certainly a mistake.
-    var s = defaultSymexSettings()
-    s.arithChecks = {}
-    let warns = validateSymexSettings(s)
-    check warns.len >= 1
-    check warns.anyIt("arithChecks" in it and "empty" in it)
-
-  test "(b) all-on arithChecks emits NO 'empty' warning":
-    let s = defaultSymexSettings()
-    let warns = validateSymexSettings(s)
-    check warns.allIt("arithChecks" notin it or "empty" notin it)
-
-  test "(c) acOverflow on but dkOverflowDefect excluded → 'waste' warning":
-    ## Fork is emitted (paying path cost) but finding is always suppressed.
-    var s = defaultSymexSettings()
-    s.arithChecks = {acOverflow}
-    s.defectExclusions.incl dkOverflowDefect
-    let warns = validateSymexSettings(s)
-    check warns.len >= 1
-    check warns.anyIt("acOverflow" in it and "dkOverflowDefect" in it)
-
-  test "(c) acDivByZero on but dkDivByZeroDefect excluded → 'waste' warning":
-    var s = defaultSymexSettings()
-    s.arithChecks = {acDivByZero}
-    s.defectExclusions.incl dkDivByZeroDefect
-    let warns = validateSymexSettings(s)
-    check warns.len >= 1
-    check warns.anyIt("acDivByZero" in it and "dkDivByZeroDefect" in it)
-
-  test "(c) acRange on but dkRangeDefect excluded → 'waste' warning":
-    var s = defaultSymexSettings()
-    s.arithChecks = {acRange}
-    s.defectExclusions.incl dkRangeDefect
-    let warns = validateSymexSettings(s)
-    check warns.len >= 1
-    check warns.anyIt("acRange" in it and "dkRangeDefect" in it)
-
-  test "(c) acOverflow OFF — no waste warning even if dkOverflowDefect excluded":
-    ## When the check is disabled (not in arithChecks), there is no fork cost to
-    ## waste; the excluded kind is redundant but not wasteful. No warning.
-    var s = defaultSymexSettings()
-    s.arithChecks = {acDivByZero, acRange}   ## acOverflow is OFF
-    s.defectExclusions.incl dkOverflowDefect
-    let warns = validateSymexSettings(s)
-    ## RFC-0016 W1-d2: the build-disagreement warning prints the whole set
-    ## (so it may name "acOverflow"); the claim is about the WASTE warning.
-    check warns.allIt(not ("acOverflow" in it and "dkOverflowDefect" in it))
-
-  test "pre-existing seqInlineThreshold warning still fires alongside R16-1 warnings":
-    ## Regression: the new warnings must coexist with the pre-existing
-    ## seqInlineThreshold warning from Phase 15 C4.
-    var s = defaultSymexSettings()
-    s.budget.seqInlineThreshold = 42
-    s.inlinePolicy = ipAlwaysInline   ## seqInlineThreshold warning trigger
-    s.arithChecks = {}                ## R16-1 empty warning trigger
-    let warns = validateSymexSettings(s)
-    check warns.len >= 2
-    check warns.anyIt("seqInlineThreshold" in it)
-    check warns.anyIt("arithChecks" in it and "empty" in it)
-
 # ---- Part 8: walker version --------------------------------------------------
 
 suite "R16-1 — walker version bump to 21 (now superseded by R16-2b bump to 23)":
@@ -227,8 +96,7 @@ suite "R16-1 — walker version bump to 21 (now superseded by R16-2b bump to 23)
     ## → A7-S3 concrete runes/runeLen + symbolic degrade "37"
     ## → SND-1 isUnsupported taints Path.uncertain "38"
     ## → SND-1b closure ground-axiom uncertain-drop "39".
-    ## The arithChecks cache-key invariant from R16-1 is preserved — the
-    ## version just moved forward. SW pin idiom (RFC §Version-pin discipline,
+    ## SW pin idiom (RFC §Version-pin discipline,
     ## Corey-decided synthesis 2026-07-12): this incidental feature-test pin
     ## migrates to a tolerant `>=` floor (only the canonical
     ## tsymex_phase15_CR2_cachekey.nim keeps brittle `==`).

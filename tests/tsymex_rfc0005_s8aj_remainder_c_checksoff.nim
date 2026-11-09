@@ -41,7 +41,7 @@ const exactSigned = SymexSettings(integerSemantics: isExact)
 
 suite "S8aj (2): a signed sum that wraps, checks-off build":
   test "(rule a) the overflow side halts; no trusted verdict on any of the three":
-    check not arithChecksDisagree(exactSigned)
+    check validateSymexSettings(exactSigned).len == 0
     let r1 = symexFind(sAddWrap, tLabel("t"), exactSigned)
     let r2 = symexFind(sAddWrapSat, tLabel("t"), exactSigned)
     let r3 = symexFind(sSubWrap, tLabel("t"), exactSigned)

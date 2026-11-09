@@ -11,11 +11,12 @@
 ##                     This is the **false negative** ADR-0001 warns
 ##                     about: real overflow bugs go undetected.
 ##
-## R16-4 / ADR-0012 NOTE: under the default arithChecks=all-on settings,
-## x+1 at x=127 (int8.high) now RAISES OverflowDefect instead of wrapping
-## silently. The BV wrap-soundness demonstration therefore uses `arithChecks={}`
-## explicitly — a deliberate test-regime choice to observe silent-wrap SEMANTICS.
-## The default-regime behaviour (the wrap raises) is pinned by the final test.
+## R16-4 / ADR-0012 NOTE: on this checks-on build x+1 at x=127 (int8.high)
+## RAISES OverflowDefect instead of wrapping silently. The BV
+## wrap-soundness demonstration therefore uses the unsigned twin, whose wrap
+## is defined. (The explicit `arithChecks={}` regime that once observed the
+## signed silent wrap went with the setting in RFC-0016 K10d; the build decides.)
+## The checks-on behaviour (the signed wrap raises) is pinned by the final test.
 import std/unittest
 import nelli/symex
 import ./s8cu_helpers
@@ -34,14 +35,8 @@ proc wrapNeededU(x: uint8) =
 
 ## Settings helpers — pure procs so they evaluate as `static SymexSettings`
 ## at the `symexFind` macro boundary (R16-4 / ADR-0012 reconciliation).
-proc exactNoOverflowSettings(): SymexSettings =
-  ## isExact BV mode, arithChecks off: observe silent int8 wrap semantics.
-  result = defaultSymexSettings()
-  result.integerSemantics = isExact
-  result.arithChecks = {}
-
 proc exactSettings(): SymexSettings =
-  ## isExact, arithChecks as the build derives them (agree: nothing taints).
+  ## isExact, the build's checks.
   result = defaultSymexSettings()
   result.integerSemantics = isExact
 
@@ -50,17 +45,6 @@ proc optimisedAgreeSettings(): SymexSettings =
 
 proc looseAgreeSettings(): SymexSettings =
   result = looseSymexSettingsPreset
-  result.arithChecks = defaultSymexSettings().arithChecks
-
-proc optimisedNoOverflowSettings(): SymexSettings =
-  ## isOptimised (no range info → stays BV), arithChecks off: same wrap regime.
-  result = optimisedSymexSettings()
-  result.arithChecks = {}
-
-proc looseNoOverflowSettings(): SymexSettings =
-  ## isLoose (Z3Int), arithChecks off: Z3Int still says x+1 > x — false negative.
-  result = looseSymexSettingsPreset
-  result.arithChecks = {}
 
 suite "symex Phase 2 — ADR-0001 soundness validation":
   test "isExact finds the BV-only witness":
@@ -84,18 +68,8 @@ suite "symex Phase 2 — ADR-0001 soundness validation":
     let r = symexFind(wrapNeededU, tLabel("wrap-needed"), looseAgreeSettings())
     check r.status == sxUnsat   ## ← UNSOUND: Int says x+1 > x always
 
-  test "signed int8 with an opt-out that disagrees with the build is not trusted":
-    ## Rule (a): the former signed form of the three tests above. The
-    ## explicit arithChecks={} no longer yields a trusted wrap witness: signed
-    ## wrap with checks off is undefined, and this build checks.
-    for r in [symexFind(wrapNeeded, tLabel("wrap-needed"), exactNoOverflowSettings()),
-              symexFind(wrapNeeded, tLabel("wrap-needed"), optimisedNoOverflowSettings()),
-              symexFind(wrapNeeded, tLabel("wrap-needed"), looseNoOverflowSettings())]:
-      check not r.trusted
-      check r.errors.named(feCheckOption)
-
   test "overflow-on default: the wrap now RAISES (R16-4)":
-    ## Under default arithChecks=all-on, x+1 at x=127 raises OverflowDefect
+    ## On a checks-on build, x+1 at x=127 raises OverflowDefect
     ## instead of wrapping silently. ADR-0012 target-aware shouldStop + unified
     ## verdict reduction means the sxRaised(OverflowDefect) is the headline;
     ## the label is not reachable without the wrap, so no sxSat is found.

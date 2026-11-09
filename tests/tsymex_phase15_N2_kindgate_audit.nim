@@ -574,6 +574,13 @@ proc scanForGenericParamLocationProbes(fname, contents: string,
     if trimmed.len == 0 or isCommentLine(trimmed) or
        isGenericParamsNodeBodyLine(trimmed):
       continue
+    # K6c (W-10): an exhaustive `case n.kind` lists every leaf kind, one
+    # comma-separated `nnk*` run per line with no `of`, no `.kind`, no
+    # comparison. That names the kind to dismiss it; it probes no location.
+    var bareKindList = trimmed.startsWith("nnk")
+    for ch in trimmed:
+      if ch notin IdentChars + {',', ' '}: bareKindList = false
+    if bareKindList: continue
     if trimmed.contains("nnkGenericParams"):
       violations.add Violation(file: fname, lineNo: lineNo, lineText: rawLine)
 

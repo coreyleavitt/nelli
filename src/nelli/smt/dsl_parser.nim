@@ -17039,10 +17039,14 @@ const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkSym, nnkIdent,
   nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr,
   nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkChckRange,
   nnkStringToCString, nnkCStringToString, nnkObjUpConv, nnkObjDownConv,
-  nnkRange}
+  nnkRange, nnkPragmaBlock}
   ## RFC-0016 K6a. The node kinds proved to write nothing of their own: what
   ## they may write is what their children may. The read-only axis of
   ## RFC-0016 §8.1; every other kind reads as may-write.
+  ## `nnkPragmaBlock` (`{.line.}:`, which `doAssert` expands to) writes nothing
+  ## of its own: its pragma list and body are children, so an `emit` or a `cast`
+  ## in either still answers true. `mixin` and `bind` are name-lookup
+  ## declarations (the expansion of `doAssert` opens with one).
 
 proc mayWrite(n: NimNode; st: var MayWriteState): bool =
   ## RFC-0016 K6a (W-08). Evaluating `n` may write memory no variable of the
@@ -17089,6 +17093,7 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
            argHoldsCell(n[j].getTypeInst):
           return true
   of nnkPragma: discard  # `emit` is `foreignWriteNode`'s
+  of nnkMixinStmt, nnkBindStmt: return false  # symbol names, no code
   of mayWriteReadOnlyKinds: discard
   else: return true
   for c in n:

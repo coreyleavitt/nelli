@@ -128,6 +128,9 @@ roShape(rLocal, "rLocal_new", "rLocal_old"):
 roShape(rPeek, "rPeek_new", "rPeek_old"): discard peek()
 roShape(rReadDeref, "rReadDeref_new", "rReadDeref_old"):
   discard gother
+# `doAssert` expands to a pragma block (`{.line.}:`), which writes nothing
+roShape(rAssert, "rAssert_new", "rAssert_old"):
+  doAssert x < 100000
 
 suite "K6a: version floor":
   test "K6a changed the decline set: walker 293 or later":
@@ -181,6 +184,7 @@ suite "K6a: the write-shape corpus (mayWrite == false decides)":
     nativeSees(rLocal, "rLocal_old", "rLocal_new")
     nativeSees(rPeek, "rPeek_old", "rPeek_new")
     nativeSees(rReadDeref, "rReadDeref_old", "rReadDeref_new")
+    nativeSees(rAssert, "rAssert_old", "rAssert_new")
   test "a walked pure callee, a nest of them":
     readOnlyDecides(rPure, "rPure_old", "rPure_new")
     readOnlyDecides(rPureDeep, "rPureDeep_old", "rPureDeep_new")
@@ -189,3 +193,5 @@ suite "K6a: the write-shape corpus (mayWrite == false decides)":
   test "a read of the container, direct or in a walked callee":
     readOnlyDecides(rPeek, "rPeek_old", "rPeek_new")
     readOnlyDecides(rReadDeref, "rReadDeref_old", "rReadDeref_new")
+  test "a pragma block (`doAssert`) is read-only, its children decide":
+    readOnlyDecides(rAssert, "rAssert_old", "rAssert_new")

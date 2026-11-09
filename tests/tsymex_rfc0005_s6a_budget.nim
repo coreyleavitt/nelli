@@ -450,7 +450,17 @@ suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
     let src = readFile(rtSrc)
     for (k, n) in [(beBudgetExhausted, 2),            # k-unroll, both modes
                    (beBudgetExhaustedAssumedBound, 1),
-                   (beBudgetExhaustedPrune, 1),        # walkBlock
+                   # haltFrontier (walkBlock / capLoopFrontier), and, since
+                   # RFC-0016 K7 (`6f56f584`), the walk-work cap's halt after
+                   # `walk` returns (`ckWalkWork`, walkRLimit). S6a audit of the
+                   # second site: class dcOmitted. Its act is `w.halted`, which
+                   # discards the token, after the walk has ended and `shouldStop`
+                   # has dropped every undecided path, so no path survives it to
+                   # carry the omission as a clean survivor; the run is
+                   # {scIncomplete} (sxUnknown unless a sound witness was already
+                   # found), as for ckFrontier. The next test pins that it is a
+                   # `halted` site.
+                   (beBudgetExhaustedPrune, 2),
                    (beBudgetExhaustedUnmodelled, 3),   # maxCallDepth + 2 vcs
                    # budget guard + no-walk guard (both `closureDegrade`
                    # since RFC-0005 S7; the no-walk guard was a hand-written

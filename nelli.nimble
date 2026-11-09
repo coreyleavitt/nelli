@@ -1738,6 +1738,7 @@ task test, "Run the test suite":
             "tsymex_0016_k10b_round",
             "tsymex_0016_admir",
             "tsymex_0016_k10d_removals",
+            "tsymex_0016_k10d_drain_checksoff",
             "tsymex_0016_k7_twosearch",
             "tsymex_0016_adm1_admission",
             "tsymex_0016_k4a_table",

@@ -12075,6 +12075,14 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
   else:
     discard
 
+proc inputHeapNamed(key, name: string): Z3AnyAst =
+  ## The free constant `name` over the sort of heap `key`'s array.
+  let post = currentVariantHeaps[key]
+  let ctx = post.ctx
+  let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, post.raw)
+  let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+
 proc inputHeap(key: string): Z3AnyAst =
   ## RFC-0005 S8h. The INPUT heap for `key`: the free constant `heap_<key>`
   ## every path's `heaps[key]` is built on (`mkHeapArrayVar`), re-made by
@@ -12712,7 +12720,9 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
   # pointee) -- the typed witness's `resolveRef` reads them there.
   result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
-proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
+proc heapEpochCount(p: Path; k: string): int
+
+proc modelPins(m: Z3Model, env: Env, params: seq[IRParam], path: Path):
     tuple[pins: seq[Z3Bool], complete: bool] =
   ## RFC-0016 K10b. `RawWitness.pins`: `leaf == model(leaf)` for every leaf
   ## term of every parameter's initial value the model can evaluate. A
@@ -12781,16 +12791,18 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
   # own store term). Only the initial arrays are constants: a write the walk
   # makes is a `store` over them and follows from them.
   let ctx = m.ctx
-  for i in 0 ..< m.numConsts:
-    try:
-      let d = m.constDecl(i)
-      let nm = $Z3_get_symbol_string(ctx.raw, Z3_get_decl_name(ctx.raw, d.raw))
-      if not nm.startsWith("heap_"): continue
-      let c = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_app(ctx.raw, d.raw, 0, nil))
-      let v = m.eval(c, modelCompletion = false)
-      if $v != $c: result.pins.add bsEqZ(c, v)
-    except CatchableError:
-      result.complete = false
+  # Driven from the heaps the walk created, not from every model constant:
+  # enumerating the model's declarations (`constDecl` per constant) kept the
+  # run's whole Z3 context alive past the run (`tsymex_0016_s8cj_runctx`).
+  for k in currentVariantHeaps.keys:
+    for n in 0 .. heapEpochCount(path, k):
+      try:
+        let nm = if n == 0: "heap_" & k else: "heap_" & k & "@ep" & $n
+        let c = inputHeapNamed(k, nm)
+        let v = m.eval(c, modelCompletion = false)
+        if $v != $c: result.pins.add bsEqZ(c, v)
+      except CatchableError:
+        result.complete = false
 
 var symexTargetSolveStats* {.threadvar.}:
     tuple[budgetOut, declined, slowSat, units: int]
@@ -16149,7 +16161,7 @@ proc trySolve(ctx: Z3Context,
     for k in path.env.keys:
       if isGlobalEnvName(k): currentWinningGlobals.add k
     var wit = extractWitness(m, envForExtract, params)
-    (wit.pins, wit.pinsComplete) = modelPins(m, envForExtract, params)   ## RFC-0016 K10b
+    (wit.pins, wit.pinsComplete) = modelPins(m, envForExtract, params, path)   ## RFC-0016 K10b
     (status: sxSat, witness: wit, undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
@@ -18340,6 +18352,13 @@ func heapKeyOfId(k, id: string): bool =
   ## scalar heap itself, or one of its field / discriminator / leaf heaps
   ## (`<id>__...`).
   k == id or k.startsWith(id & "__")
+
+proc heapEpochCount(p: Path; k: string): int =
+  ## The havoc count `heapInputName` reads for `k` on `p`.
+  for ck, c in p.allocCounters:
+    if ck.startsWith(heapEpochPrefix):
+      let id = ck[heapEpochPrefix.len .. ^1]
+      if id == "*" or heapKeyOfId(k, id): result += c
 
 proc heapInputName(p: Path; k: string): string =
   ## RFC-0005 S8ax. The name of the heap array `k` is read from when `p`
@@ -29339,6 +29358,12 @@ proc runSymex*(prog: SymexProgram,
   let prevCtx = currentContext()
   result = runSymexCaught(prog, target, settings)
   dropWitnessPins(result)
+  # The caller path-condition stacks hold Z3 terms and are read only by the
+  # walk that pushed them. The tail check's walk leaves its last entries in
+  # them, and left in the threadvars they kept the run's whole context alive
+  # past the run (`tsymex_0016_s8cj_runctx`).
+  currentCallerPc = @[]
+  closureBodyCallerPc = @[]
   setCurrentContext(prevCtx)
   # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
   # (the C backend loses a raise unwinding through the walk) has no verdict.

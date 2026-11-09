@@ -236,6 +236,8 @@ proc sutTailRefNil(p: TailRef; x: int64) =
 suite "K10b: an unconstrained ref's nil constant is pinned by completion":
   test "version floor (the pins complete an unmentioned nil at 304)":
     check parseInt(symexWalkerVersion) >= 304
+  test "version floor (modelPins over the path's own heaps at 308)":
+    check parseInt(symexWalkerVersion) >= 308
   test "(j) a tail branch on a ref param's nil-ness decides; native agrees":
     let r = symexFind(sutTailRefNil, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)

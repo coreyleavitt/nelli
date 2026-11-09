@@ -1140,7 +1140,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 K7 (walker-side charge): 304->305.
     ## RFC-0016 K10b pins (set parameter pinned): 305->306.
     ## RFC-0016 K10b containment (pins and tail walk leave no degrade): 306->307.
-    check symexWalkerVersion == "307"
+    ## RFC-0016 int5 (modelPins over the path's own heaps): 307->308.
+    check symexWalkerVersion == "308"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

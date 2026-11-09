@@ -321,7 +321,10 @@ const renderAsChoicesVersion* = "12"
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "307"
+const symexWalkerVersion* = "308"
+  ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the
+  ## winning path's own heaps (`heap_<key>` and its havoc epochs), not every
+  ## model constant named `heap_*`, so a havoc'd copy (`@hv`) is not pinned.
   ## RFC-0016 K10b containment (306->307): building the witness's pins
   ## (`modelPins`) and the tail walk no longer leave their in-band lowering
   ## degrades in the sink the explore verdict drains, so a pin the walker could

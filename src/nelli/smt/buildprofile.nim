@@ -596,4 +596,9 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
     "--rangeChecks:off compiles the plain C cast: signed narrowing and " &
     "`chr` truncate, a `range` or enum conversion keeps its value, and an " &
     "array indexed by its own out-of-range type is an unchecked access, " &
-    "declined (`feCheckOption`; PRC-07)"))])
+    "halted as undefined (`ubArrayOutOfBounds`; PRC-07)")),
+  ("boundChecks=off", modelled[BuildSite, bool](true, {bsBuild},
+    "--boundChecks:off compiles `s[i]` and `a[i]` of a seq, string, " &
+    "openArray or array as a plain C subscript: an index outside the " &
+    "container is undefined, halted (`ubArrayOutOfBounds`), where a checked " &
+    "build raises `IndexDefect`; the in-bounds side is exact (PRC-07)"))])

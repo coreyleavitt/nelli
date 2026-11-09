@@ -81,6 +81,51 @@ else: quit(3)
   ## `-fsanitize=float-cast-overflow`, which gcc does not include in
   ## `-fsanitize=undefined`.
 
+const indexProbeSrc* = """
+import std/[os, strutils]
+
+type
+  R = range[0 .. 10]
+  E = enum ea, eb, ec
+
+var gR: array[R, int]
+var gI: array[11, int]
+var gE: array[E, int]
+
+proc idv(x: int): int {.noinline.} = x
+proc rdR(i: int): int {.noinline.} = gR[R(i)]
+proc wrR(i: int) {.noinline.} = gR[R(i)] = 1
+proc rdE(i: int): int {.noinline.} = gE[E(i)]
+proc rdI(i: int): int {.noinline.} = gI[i]
+proc wrI(i: int) {.noinline.} = gI[i] = 1
+proc rdS(s: seq[int]; i: int): int {.noinline.} = s[i]
+proc wrS(s: var seq[int]; i: int) {.noinline.} = s[i] = 1
+proc rdO(s: openArray[int]; i: int): int {.noinline.} = s[i]
+proc rdT(s: string; i: int): char {.noinline.} = s[i]
+proc wrT(s: var string; i: int) {.noinline.} = s[i] = 'x'
+
+let ty = paramStr(1)          # the container
+let op = paramStr(2)          # "rd" or "wr"
+let k = cast[int](parseBiggestUInt(paramStr(3)))
+var sq = newSeq[int](3)
+var st = newString(3)
+case ty
+of "arrR": (if op == "rd": echo rdR(idv(k)) else: wrR(idv(k)))
+of "arrE": echo rdE(idv(k))
+of "arrI": (if op == "rd": echo rdI(idv(k)) else: wrI(idv(k)))
+of "seq": (if op == "rd": echo rdS(sq, idv(k)) else: wrS(sq, idv(k)))
+of "oa": echo rdO(sq, idv(k))
+of "str": (if op == "rd": echo ord(rdT(st, idv(k))) else: wrT(st, idv(k)))
+else: quit(3)
+"""
+  ## RFC-0016 PRC-07, the `index/unchecked` cell. One element access of one
+  ## container, at an index from the command line (the bit pattern of an
+  ## `int`), through `noinline` routines so no optimisation folds it away. The
+  ## arrays are globals: gcc's `-fsanitize=bounds` sees a C array object, never
+  ## a parameter (which decays to a pointer). A seq's, an openArray's and a
+  ## string's elements are heap memory behind a pointer, which only
+  ## AddressSanitizer over `malloc` (`-d:useMalloc`) bounds.
+
 type
   UbExpect* = enum
     ueClean   ## the C operation is defined for these operands: exit 0
@@ -129,6 +174,27 @@ proc buildFloatToIntProbe*(who: string): UbsanProbe =
     raise newException(PinFailure, who & ": the float-cast probe did not " &
                        "build:\n" & cout)
 
+func indexBoundsFlags*(extra: openArray[string]): seq[string] =
+  ## The index probe's build: the option under test (`extra`), UBSan's
+  ## `bounds` check made fatal (it sees an indexed C array object).
+  @extra & @["--passC:-fsanitize=bounds", "--passL:-fsanitize=bounds",
+             "--passC:-fno-sanitize-recover=all"]
+
+func indexAsanFlags*(extra: openArray[string]): seq[string] =
+  ## The index probe's build for heap containers: Nim's allocator is its own
+  ## arena AddressSanitizer cannot see into, so `-d:useMalloc` puts a seq's and
+  ## a string's data on `malloc`'s redzones.
+  @extra & @["-d:useMalloc", "--passC:-fsanitize=address",
+             "--passL:-fsanitize=address", "--passC:-fno-omit-frame-pointer"]
+
+proc buildIndexProbe*(who: string; flags: openArray[string]): UbsanProbe =
+  ## Compiles the index probe once with `flags`.
+  result.build = prepareProbe(who, indexProbeSrc, flags)
+  let (cout, crc) = execCmdEx(result.build.cmd)
+  if crc != 0:
+    raise newException(PinFailure, who & ": the index probe did not build:\n" &
+                       cout)
+
 proc dispose*(p: UbsanProbe) = removeDir(p.build.dir)
 
 proc runCase*(p: UbsanProbe; c: UbCase): tuple[rc: int, output: string] =
@@ -137,7 +203,7 @@ proc runCase*(p: UbsanProbe; c: UbCase): tuple[rc: int, output: string] =
   (rc, o)
 
 func tripped(rc: int; output: string): bool =
-  rc != 0 and "runtime error:" in output
+  rc != 0 and ("runtime error:" in output or "AddressSanitizer" in output)
 
 func hardTrapped(rc: int; output: string): bool =
   ## SIGFPE from the divide instruction: `-fwrapv` retires the signed-overflow

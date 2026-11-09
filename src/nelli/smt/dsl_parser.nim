@@ -1625,8 +1625,10 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # `rangeChecks: on` is the deviation.
   let rangePushedOn = c.rangeOn and c.why.len == 0 and
                       coRange notin buildSemantics.checks
+  let boundPushedOn = c.boundOn and c.why.len == 0 and
+                      coBound notin buildSemantics.checks
   if c.checks == {} and stamp.isNone and c.unadmitted.len == 0 and
-     restrictParams.len == 0 and not rangePushedOn:
+     restrictParams.len == 0 and not rangePushedOn and not boundPushedOn:
     return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
@@ -1646,6 +1648,11 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
     decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
       "`rangeChecks: on` in a build whose range checks are off: its range " &
       "conversions raise `RangeDefect` there, which the walker, following " &
+      "the build, does not model -- path degraded to sxUnknown")
+  if boundPushedOn:
+    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
+      "`boundChecks: on` in a build whose bound checks are off: its index " &
+      "operations raise `IndexDefect` there, which the walker, following " &
       "the build, does not model -- path degraded to sxUnknown")
   if c.why.len > 0:
     decl.add ctx.declineMarker(feCheckOption, where &
@@ -4467,7 +4474,14 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
       # field. Any other index of a container is checked at run time.
       if tk in {ntySequence, ntyString, ntyOpenArray, ntyVarargs,
                 ntyUncheckedArray} or tk == ntyArray and not literal:
-        add "IndexDefect"
+        # RFC-0016 PRC-07: an access Nim emits unchecked (`boundChecks` off, or
+        # an array's own `range`/enum index under `rangeChecks: off`) is
+        # undefined out of the container, not an `IndexDefect`.
+        if coBound notin buildSemantics.checks or
+           (tk == ntyArray and uncheckedTypedIndex(n[1])):
+          addUb admitDefined(aoIndex, ocUncheckedAccess, dsIndex), dpChecked
+        else:
+          add "IndexDefect"
       # The index's hidden conversion to the array's range is the index
       # check itself (`IndexDefect`), not a `RangeDefect`.
       scanOpaqueDefects(n[0], scan, seen, depth, ctx, owner, memo)
@@ -11913,7 +11927,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let synth = freshSynth(ctx, "idx")
       # RFC-0005 S8z: the array's first index (`array[1..3, T]`: 1). It was
       # dropped, so `a[1]` read position 1 -- the second element.
-      preamble.add mkIndexStmt(synth, arrIR, idxIR, lhsCls.ty.elemTy, "",
+      preamble.add mkIndexStmt(synth, arrIR, idxIR, lhsCls.ty.elemTy,
+                               siteLoc(n),   # PRC-07: an undefined access names it
                                arrayIndexLow(n[0]),
                                unchecked = uncheckedTypedIndex(n[1]))
       mkVar(synth)

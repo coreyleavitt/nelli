@@ -983,6 +983,15 @@ type
                           ## replay cannot lift it. Never a halt of the
                           ## explore walk and never a `tUndefined` hit.
                           ## Appended so every earlier ordinal holds.
+    ubArrayOutOfBounds    ## RFC-0016 PRC-07. An element access emitted with no
+                          ## bound check: an array indexed by a value of its
+                          ## own `range`/enum type with `--rangeChecks:off`
+                          ## (Nim never checks that index), and any `s[i]` /
+                          ## `a[i]` of a seq, string, openArray or array with
+                          ## `--boundChecks:off`. An index outside the
+                          ## container reads or writes memory outside it in C:
+                          ## undefined. Row `index/unchecked`. Appended so
+                          ## every earlier ordinal holds.
     feHostUnadmitted      ## RFC-0016 K5a (section 8.3). The host half of the
                           ## build profile is not a verified one: the loaded
                           ## libz3 is not 4.13.4 or 5.1, or no build row
@@ -1015,7 +1024,7 @@ type
                           ## after `feUnadmitted`, so every earlier ordinal
                           ## holds.
 
-  UbKind* = range[ubUnsignedDivZero .. ubTailUnverified]
+  UbKind* = range[ubUnsignedDivZero .. ubArrayOutOfBounds]
     ## RFC-0016 W1-d1a (section 9.1 item 4). The undefined-behaviour kinds:
     ## the contiguous `ub*` members of `SymexErrorKind`.
 static:
@@ -1029,4 +1038,5 @@ static:
            ord(ubIndeterminateRead) + 1 == ord(ubSignedDivZero) and
            ord(ubSignedDivZero) + 1 == ord(ubFloatToIntRange) and
            ord(ubFloatToIntRange) + 1 == ord(ubTailUnverified) and
+           ord(ubTailUnverified) + 1 == ord(ubArrayOutOfBounds) and
            ord(high(UbKind)) - ord(low(UbKind)) < 30

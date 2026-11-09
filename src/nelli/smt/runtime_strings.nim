@@ -662,8 +662,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let inLoCond = idxZi >= mkInt(0)
     let inHiCond = idxZi < strLenZi
     let oob = not (inLoCond and inHiCond)
-    strIndexOobConds.add oob
-    syncStrIndexOobCond(oob)
+    depositStrIndexOob(oob)
     let code = toCode(at(recv.str, idxZi))
     liftBV(intToBv[8](code, Z3BitVec[8]), false)
   of iekStrSubstr:
@@ -1471,8 +1470,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # The write's own IndexDefect (`iekStrAt`'s sink): a field's `o.s[i] = c`
     # has no read before it (`dottedFieldMutate`); after one, it is false.
     let oob = not (i >= mkInt(0) and i < len(s))
-    strIndexOobConds.add oob
-    syncStrIndexOobCond(oob)
+    depositStrIndexOob(oob)
     let lenFold = simplify(len(s))
     if getAstKind(lenFold) == akNumeral:
       # A string of known length (at most `strSetAtUnroll`): one splice per

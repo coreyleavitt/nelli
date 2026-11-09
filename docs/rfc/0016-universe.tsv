@@ -6,16 +6,17 @@
 # axis pragma: 181 cells
 # axis magic: 244 cells
 # axis stdlib: 88 cells
-# axis build: 26 cells (pcre libs and build cells; rows below)
+# axis build: 27 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
-# axis defined: 21 cells
+# axis defined: 22 cells
 # build rows: 5
-# error kinds: 103
+# error kinds: 104
 # cap kinds: 10
 cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
 build:8.37 2015-04-28|jit	modelled	-
 build:8.45 2021-06-15|interp	modelled	-
+build:boundChecks=off	modelled	-
 build:cflags/fpContract	never	-
 build:cflags/sanitize	never	-
 build:cpu=arm64	declined	-
@@ -65,6 +66,7 @@ defined:div/lowByMinusOneWide	modelled	-
 defined:div/zeroDivisorSigned	modelled	-
 defined:div/zeroDivisorUnsigned	modelled	-
 defined:grow/elemAddr	never	-
+defined:index/unchecked	modelled	-
 defined:mod/lowByMinusOneNarrow	modelled	-
 defined:mod/lowByMinusOneWide	modelled	-
 defined:mod/zeroDivisorSigned	modelled	-
@@ -168,6 +170,7 @@ errorkind:seUnsupportedTableValType	kind	dcNoAnswer
 errorkind:seVariantFieldOnDeclinedCtor	kind	dcOmitted
 errorkind:seZ3StringIncomplete	kind	dcFreshSymbol
 errorkind:seZ3VersionMissing	kind	dcFreshSymbol
+errorkind:ubArrayOutOfBounds	kind	dcOmitted
 errorkind:ubFloatToIntRange	kind	dcOmitted
 errorkind:ubIndeterminateRead	kind	dcOmitted
 errorkind:ubIntMinModMinusOne	kind	dcOmitted

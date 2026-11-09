@@ -14,6 +14,8 @@
 ##   `div`/`mod` zero-divisor and `low(T) by -1` rows (`definedness`);
 ## * `runtime.unwrittenUb`: the `read/uninitialised` row;
 ## * `runtime.refEqOrder`: `order/pointer` (STY-03, `never`);
+## * the index sites (`walkIndexArm`, `walkIndexAssignArm`, the string and
+##   `pop` arms and the two raise-fork drains): `index/unchecked` (PRC-07);
 ## * `runtime.drainConvFloatToIntFresh`: `convert/floatToInt` and `convert/floatToIntVia` (K10a-float);
 ## * `dsl_parser`'s stale element pointer marker: `grow/elemAddr` (STY-07,
 ##   `never`);
@@ -37,6 +39,7 @@ type
     aoGrow                            ## a resize while an element address lives
     aoCall                            ## a call through a declared contract
     aoConvert                         ## a float converted to an integer type
+    aoIndex                           ## an element access with no bound check
   OperandClass* = enum                ## what the operand is, for this op
     ocSignedWide                      ## signed, 32 or 64 bits
     ocSignedNarrow                    ## signed, 8 or 16 bits: C computes in `int`
@@ -59,6 +62,11 @@ type
                                       ## body the defect scan cannot read
                                       ## (foreign, a closure, a method, too
                                       ## deep): what it does is not modelled
+    ocUncheckedAccess                 ## RFC-0016 PRC-07: an element access
+                                      ## Nim emits with no check (an array
+                                      ## indexed by its own `range`/enum type
+                                      ## under `rangeChecks: off`; any index
+                                      ## under `boundChecks: off`)
   DefProfile* = enum                  ## the build's arithmetic
     dpChecked                         ## Nim's overflow and zero checks are on
     dpUnchecked                       ## checks off, the C operation as is
@@ -78,6 +86,7 @@ type
     dsRoutine                         ## a routine's parameters
     dsConvert                         ## the float -> int conversion drain
     dsOpaque                          ## RFC-0016 K10b: the opaque-call scan
+    dsIndex                           ## RFC-0016 PRC-07: the index sites
   DefKey = tuple[key: string, row: Row[DefSite, DefRule]]
 
 func defined(): Definedness = Definedness(kind: dkDefined)
@@ -96,6 +105,7 @@ func opKey(op: ArithOp): string =
   of aoGrow: "grow"
   of aoCall: "call"
   of aoConvert: "convert"
+  of aoIndex: "index"
 
 func classKey(c: OperandClass): string =
   case c
@@ -112,6 +122,7 @@ func classKey(c: OperandClass): string =
   of ocFloatToInt: "floatToInt"
   of ocFloatToIntVia: "floatToIntVia"
   of ocOpaqueBody: "opaqueBody"
+  of ocUncheckedAccess: "unchecked"
 
 func defKey*(op: ArithOp; c: OperandClass): string =
   opKey(op) & "/" & classKey(c)
@@ -203,6 +214,19 @@ func defRows(): seq[DefKey] =
       "included. Under the whole-run gate it answers `may be undefined`; the " &
       "explore walk forks its Defects as before and walks on"))
 
+  result.add (defKey(aoIndex, ocUncheckedAccess),
+    modelled[DefSite, DefRule](
+      [undef(ubArrayOutOfBounds), undef(ubArrayOutOfBounds),
+       undef(ubArrayOutOfBounds)], {dsIndex},
+      "RFC-0016 PRC-07: Nim emits no bound check for an array indexed by " &
+      "its own `range`/enum type (a checked build bounds the VALUE at the " &
+      "conversion instead, and `rangeChecks: off` removes that), nor for any " &
+      "`s[i]` / `a[i]` under `boundChecks: off`. The access is a plain C " &
+      "subscript: outside the container it reads or writes memory the " &
+      "object does not own, which is undefined. Whether a site is unchecked " &
+      "is decided by the build's own option, so the row answers the same " &
+      "under every profile"))
+
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())
 
 func admitDefined*(op: ArithOp; c: OperandClass; site: DefSite):
@@ -259,6 +283,14 @@ func opaqueBodyDefinedness*(p: DefProfile): Definedness =
   let a = admitDefined(aoCall, ocOpaqueBody, dsOpaque)
   doAssert a.admitted, "definedness: no dsOpaque row"
   a.payload[p]
+
+func uncheckedIndexUb*(): UbKind =
+  ## RFC-0016 PRC-07. The kind of an out-of-container access at a site Nim
+  ## emits without a bound check: the admitted `dsIndex` row, the same under
+  ## every profile.
+  let a = admitDefined(aoIndex, ocUncheckedAccess, dsIndex)
+  doAssert a.admitted, "definedness: no dsIndex row"
+  a.payload[dpChecked].ub
 
 func readUb*(): UbKind =
   ## The kind of an uninitialised read, from its row (`dsRead`).

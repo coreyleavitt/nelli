@@ -326,8 +326,13 @@ const symexWalkerVersion* = "309"
   ## walked as compiled (range conversions are the plain C cast; a routine's
   ## options no longer decline `feCheckOption` for the build's own bit), and an
   ## array indexed by a value of its own range/enum type is an unchecked access
-  ## there (`isIndex.ixUnchecked`): its out-of-range side is declined, never an
-  ## `IndexDefect`.
+  ## there (`isIndex.ixUnchecked`): never an `IndexDefect`. PRC-07, definedness
+  ## half: that access, and every `s[i]` / `a[i]` / `pop` / `del` / slice bound
+  ## of a `--boundChecks:off` build (no `boundChecks` bit in the walker: a
+  ## build-level predicate), is `UbKind` `ubArrayOutOfBounds` (row
+  ## `index/unchecked`, appended to the `ub*` range): the out-of-container side
+  ## halts through `haltUndefined`, so the in-range witness stays exact and a
+  ## `boundChecks` build no longer declines every routine (`feCheckOption`).
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the
   ## winning path's own heaps (`heap_<key>` and its havoc epochs), not every
   ## model constant named `heap_*`, so a havoc'd copy (`@hv`) is not pinned.

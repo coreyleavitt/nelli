@@ -728,6 +728,11 @@ type RoutineChecks* = object
     ## `push rangeChecks: on`, which the walker does not model (it follows the
     ## build's bit). `checks` never carries `coRange` in such a build: the
     ## option being off is the build, not a deviation.
+  boundOn*: bool
+    ## RFC-0016 PRC-07. `rangeOn`'s twin for `boundChecks`: in a build whose
+    ## own bound checks are off, the routine pushed them back on (not
+    ## modelled: its `s[i]` raises `IndexDefect`, the walker follows the
+    ## build). `checks` never carries `coBound` in such a build.
   overflowOn*: bool
     ## RFC-0016 W1-d2c. The routine's position was read and `overflowChecks`
     ## is on there on every reading (no `coOverflow` deviation): in a build
@@ -798,3 +803,6 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if coRange notin buildSemantics.checks:
     result.rangeOn = coRange notin result.checks
     result.checks = result.checks - {coRange}
+  if coBound notin buildSemantics.checks:
+    result.boundOn = coBound notin result.checks
+    result.checks = result.checks - {coBound}

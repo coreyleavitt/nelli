@@ -2460,6 +2460,32 @@ proc syncArithTrapCond*(cond: ArithTrap)
   ## survivor-only arithmetic-trap sink). No-op when no active walk. Defined
   ## after `WalkCtx`.
 
+func boundsUnchecked(): bool =
+  ## RFC-0016 PRC-07. The build compiles no `boundChecks`: `s[i]` and `a[i]`
+  ## (seq, string, openArray, array) are plain C subscripts, so an index
+  ## outside the container is undefined (`index/unchecked`), not an
+  ## `IndexDefect`.
+  coBound notin buildSemantics.checks
+
+proc uncheckedIndexSite(loc: string): string =
+  ## RFC-0016 PRC-07. The omission's text for an out-of-container access.
+  opSite("an element access outside its container (no bound check emitted)",
+         loc)
+
+proc depositStrIndexOob(oob: Z3Bool) =
+  ## RFC-0016 PRC-07. The out-of-bounds predicate of a string element read or
+  ## write, lowered in an expression (no path to fork): the checked build's
+  ## `IndexDefect` sink, or, with `boundChecks` off, the undefined-access
+  ## deposit `drainArithTraps` halts.
+  if boundsUnchecked():
+    let tr = ArithTrap(cond: oob, ub: some(uncheckedIndexUb()),
+                       site: uncheckedIndexSite(""))
+    arithTrapConds.add tr
+    syncArithTrapCond(tr)
+  else:
+    strIndexOobConds.add oob
+    syncStrIndexOobCond(oob)
+
 proc syncExtractionError*(info: SymexErrorInfo)
   ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
   ## appends `info` to `WalkCtx.extractionErrors`. No-op when no active walk
@@ -19484,8 +19510,30 @@ proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
     before.add c.cond
   @[forkPath(cur, cur.pc & @[inDomain], cur.env)]
 
+proc decideUndefined(cur: Path; ub: UbKind; cond: Z3Bool; site: string;
+                     w: var WalkCtx) =
+  ## RFC-0016 W1-d1a / PRC-07. The undefined side `cond` of an op on `cur`,
+  ## decided at the op: provably unreachable under `loopPruneRLimit` is
+  ## dropped and logged in the current call's prune window (`logPrune`),
+  ## anything else ends through `haltUndefined`. Under concolic follow the
+  ## flip solve must keep the op defined (`definedFacts`). The caller
+  ## continues the defined side itself.
+  if guardLiteral(cond) == glFalse: return
+  if w.mode == wmFollowConcrete:
+    # RFC-0016 K10a-concolic: the flip solve must keep this op defined.
+    w.definedFacts.add ConcolicDefinedFact(
+      cond: cond, kind: ub, site: site, at: w.branchTrace.len)
+  let unsat = guardLiteral(cond) != glTrue and
+    checkCapped(w.z3, pathRoots(cur, [cond]), w.settings,
+                loopPruneRLimit(w.settings)).status == zsUnsat
+  if unsat:
+    logPrune(cur, [cond])
+  else:
+    haltUndefined(cur, ub, cond, site, w)
+
 template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCheck]];
-                            defectType, msg: string) =
+                            defectType, msg: string;
+                            boundSite: string = "") =
   ## R5 dedup. Generates a scalar-raise-fork drain proc of the shape shared by
   ## `drainParseIntRaises`/`drainDivByZeroRaises`/`drainOverflowRaises`/
   ## `drainStrIndexRaises` (was 4 near-identical bodies differing only in the
@@ -19530,6 +19578,16 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
     # (honest-incomplete) unless that check is enabled.
     if (gate.isSome and not checked(gate.get)) or conds.len == 0:
       return @[p]
+    if boundSite.len > 0:
+      # RFC-0016 PRC-07: a drain of bound checks. With `boundChecks` off no
+      # `IndexDefect` exists: each out-of-container side is an undefined
+      # access, decided at the op, and the defined side continues.
+      if boundsUnchecked():
+        var cur = forkPath(p, p.pc, p.env)
+        for c in conds:
+          decideUndefined(cur, uncheckedIndexUb(), c, boundSite, w)
+          cur = forkPath(cur, cur.pc & @[not c], cur.env)
+        return @[cur]
     for c in conds:
       let raisePath = forkPath(p, p.pc & @[c], p.env)
       discard routeRaise(raisePath, defectType, some(msg), w)
@@ -19691,7 +19749,8 @@ genRaiseForkDrain(drainOverflowRaises, overflowConds, some(acOverflow),
 ## `s[i]` was the sole gap. Unconditional (no build-check opt-out
 ## gate) — mirrors the seq/array `isIndex` arm's `forkDefect` call.
 genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, none(ArithCheck),
-                   "IndexDefect", "string index out of bounds")
+                   "IndexDefect", "string index out of bounds",
+                   "a string index or slice bound outside the string")
 
 ## N14 (RFC-chapulin-hardening bucket-2). seq `del(i)` out-of-bounds
 ## predicates from `lower`'s `iekSeqDel` arm. Unconditional (no
@@ -19699,7 +19758,8 @@ genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, none(ArithCheck),
 ## unconditional IndexDefect parity argument (every OTHER container mutation
 ## site with a bounds check, `isIndexAssign`, forks unconditionally too).
 genRaiseForkDrain(drainSeqOobRaises, seqOobConds, none(ArithCheck),
-                   "IndexDefect", "index out of bounds")
+                   "IndexDefect", "index out of bounds",
+                   "a seq slice bound or `del` index outside the seq")
 
 ## RFC-0005 S8g. `RangeDefect` predicates from a lowering: a `range`
 ## target's check on a float -> int conversion (`Natural(f)`), a negative
@@ -19775,18 +19835,7 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   var cur = forkPath(p, p.pc, p.env)
   for t in conds:
     if t.ub.isSome:
-      if w.mode == wmFollowConcrete and guardLiteral(t.cond) != glFalse:
-        # RFC-0016 K10a-concolic: the flip solve must keep this op defined.
-        w.definedFacts.add ConcolicDefinedFact(
-          cond: t.cond, kind: t.ub.get, site: t.site, at: w.branchTrace.len)
-      if guardLiteral(t.cond) != glFalse:
-        let unsat = guardLiteral(t.cond) != glTrue and
-          checkCapped(w.z3, pathRoots(cur, [t.cond]), w.settings,
-                      loopPruneRLimit(w.settings)).status == zsUnsat
-        if unsat:
-          logPrune(cur, [t.cond])
-        else:
-          haltUndefined(cur, t.ub.get, t.cond, t.site, w)
+      decideUndefined(cur, t.ub.get, t.cond, t.site, w)
       let nxt = forkPath(cur, cur.pc & @[not t.cond], cur.env)
       cur = nxt
     else:
@@ -20495,27 +20544,6 @@ proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
                             conds, settings) == zsUnsat
 
-proc uncheckedIndexReachable(cp: Path; oob: Z3Bool; w: var WalkCtx): bool =
-  ## RFC-0016 PRC-07. Whether the out-of-array side of an unchecked typed index
-  ## is not provably unreachable: decided at the op, as `drainArithTraps`
-  ## decides a trap (provably unreachable under `loopPruneRLimit` is dropped
-  ## and logged, anything else is declined by the caller).
-  if guardLiteral(oob) == glFalse: return false
-  let unsat = guardLiteral(oob) != glTrue and
-    checkCapped(w.z3, pathRoots(cp, [oob]), w.settings,
-                loopPruneRLimit(w.settings)).status == zsUnsat
-  if unsat:
-    logPrune(cp, [oob])
-    return false
-  true
-
-proc uncheckedIndexMsg(loc: string): string =
-  (if loc.len > 0: loc & ": " else: "") &
-    "an array indexed by a value of its own `range`/enum type, with " &
-    "`rangeChecks` off: Nim emits no bound check, so an out-of-range value " &
-    "accesses memory outside the array in C (undefined, not modelled) -- " &
-    "path degraded to sxUnknown (feCheckOption)"
-
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
   ## RFC-fuzzer-nextgen R14: `wmFollowConcrete` counterpart to the
@@ -20552,6 +20580,20 @@ proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
     if outcome.isSome and not outcome.get():
       return
   discard forkDefect(p, defectCond, typeId, msg, w)
+
+proc indexOobSide(cp: Path; oob: Z3Bool; unchecked: bool; loc: string;
+                  w: var WalkCtx) =
+  ## RFC-0016 PRC-07. The out-of-container side `oob` of an index op on `cp`.
+  ## A checked access forks `IndexDefect` (`maybeForkDefect`). One Nim emits
+  ## with no check -- an array indexed by a value of its own type under
+  ## `rangeChecks: off` (`unchecked`, from the parser), or any index under
+  ## `boundChecks: off` -- is a plain C subscript, undefined outside the
+  ## container: decided at the op and halted (`ubArrayOutOfBounds`), so the
+  ## in-range continuation stays exact.
+  if unchecked or boundsUnchecked():
+    decideUndefined(cp, uncheckedIndexUb(), oob, uncheckedIndexSite(loc), w)
+  else:
+    maybeForkDefect(cp, oob, "IndexDefect", none(string), w)
 
 proc followConcreteTag(mode: WalkMode, ctx: Z3Context, concreteEq: seq[Z3Bool],
                        settings: SymexSettings, eq: proc (tagOrd: int64): Z3Bool,
@@ -22339,8 +22381,7 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
         let inHiCond = idxZi <  lenZi
         ## Phase 16 D1a unconditional under `wmExplore`; R14 narrows the
         ## `wmFollowConcrete` case — see `maybeForkDefect`'s doc comment.
-        maybeForkDefect(cp, not (inLoCond and inHiCond),
-                        "IndexDefect", none(string), w)
+        indexOobSide(cp, not (inLoCond and inHiCond), false, stmt.ixLoc, w)
         # Bind retName = select(seqData, idx) at element type
         var indexed: SymVal
         # Issue #163 wiring-audit W2: a `seq[range[lo..hi]]` element read
@@ -22491,8 +22532,13 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
         let strLenZi = len(arrSV.str)
         let inLoCond = idxZi >= mkInt(0)
         let inHiCond = idxZi <  strLenZi
-        discard forkDefect(cp, not (inLoCond and inHiCond),
-                           "IndexDefect", none(string), w)
+        if boundsUnchecked():
+          decideUndefined(cp, uncheckedIndexUb(),
+                          not (inLoCond and inHiCond),
+                          uncheckedIndexSite(stmt.ixLoc), w)
+        else:
+          discard forkDefect(cp, not (inLoCond and inHiCond),
+                             "IndexDefect", none(string), w)
         let code = toCode(at(arrSV.str, idxZi))
         var newEnv = cp.env
         newEnv[stmt.ixRetName] = liftBV(intToBv[8](code, Z3BitVec[8]), false)
@@ -22533,17 +22579,10 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
       let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.ixLo, n)
       # OOB defect fork — Phase 16 D1a unconditional under `wmExplore`;
       # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
-      if stmt.ixUnchecked:
-        # RFC-0016 PRC-07: no check is emitted, so out of range is an access
-        # outside the array in C (undefined), not an `IndexDefect`.
-        let oob = not (inLoCond and inHiCond)
-        if uncheckedIndexReachable(cp, oob, w):
-          survivors.add forkPathTainted(cp, cp.pc & @[oob],
-            declinedIndexEnv(cp.env, stmt, stmt.ixElemTy),
-            w.degrade(feCheckOption, uncheckedIndexMsg(stmt.ixLoc)))
-      else:
-        maybeForkDefect(cp, not (inLoCond and inHiCond),
-                        "IndexDefect", none(string), w)
+      # RFC-0016 PRC-07: a site Nim emits unchecked (`ixUnchecked`, or the
+      # build's `boundChecks: off`) halts its out-of-array side.
+      indexOobSide(cp, not (inLoCond and inHiCond), stmt.ixUnchecked,
+                   stmt.ixLoc, w)
       # RFC-0005 S8ct: an index that may name more positions than a term walk
       # takes reads a fresh value instead (`arrayAccessTooWide`).
       if arrayAccessTooWide(idxSV, stmt.ixLo, n):
@@ -22627,14 +22666,8 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
       let idxSV = coerceArrayBoolIndex(idxSVraw)
       for cp in drainScalarRaiseForks(idxP, w):
         let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.iaLo, n)
-        if stmt.iaUnchecked:
-          let oob = not (inLoCond and inHiCond)
-          if uncheckedIndexReachable(cp, oob, w):
-            survivors.add forkPathTainted(cp, cp.pc & @[oob], cp.env,
-              w.degrade(feCheckOption, uncheckedIndexMsg(stmt.iaLoc)))
-        else:
-          maybeForkDefect(cp, not (inLoCond and inHiCond),
-                          "IndexDefect", none(string), w)
+        indexOobSide(cp, not (inLoCond and inHiCond), stmt.iaUnchecked,
+                     stmt.iaLoc, w)
         let elemTy = recvSV.arrElemTy
         let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w,
                                         seqElemLitProto(elemTy))
@@ -22717,8 +22750,7 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
       let idxZi = toZ3Int(idxSV)
       let inLoCond = idxZi >= mkInt(0)
       let inHiCond = idxZi <  lenZi
-      discard forkDefect(cp, not (inLoCond and inHiCond),   ## Phase 16 D1a
-                         "IndexDefect", none(string), w)
+      indexOobSide(cp, not (inLoCond and inHiCond), false, stmt.iaLoc, w)
       # In-bounds survivor: lower the RHS with a proto matching the
       # declared element type (`seqElemLitProto`), then `storeSeqElem` —
       # `isBackedSeqElemTy` (checked by construction: any placeholder
@@ -22817,7 +22849,13 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
                                     lenDecline.get)
       continue
     let emptyCond = not (lenZi > mkInt(0))
-    discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
+    if boundsUnchecked():
+      # RFC-0016 PRC-07: `pop` reads `s[len - 1]`, unchecked with `boundChecks`
+      # off: an empty seq reads before its data.
+      decideUndefined(p, uncheckedIndexUb(), emptyCond,
+                      uncheckedIndexSite(stmt.spLoc), w)
+    else:
+      discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
     let newLenZi = lenZi - mkInt(1)
     let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
     let elemDecline = observeRecvPart(p, popped, w)

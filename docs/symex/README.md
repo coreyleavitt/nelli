@@ -453,7 +453,8 @@ Two things can happen to the omission, by kind:
   witness whose pins are incomplete); the others carry their own kind. Set the field `false` for the
   prefix-only verdict of 0.9.2.
 - The arithmetic kinds (`ubUnsignedDivZero`, `ubIntMinModMinusOne`,
-  `ubSignedOverflow`, `ubSignedDivZero`) and `ubFloatToIntRange` halt the path
+  `ubSignedOverflow`, `ubSignedDivZero`), `ubFloatToIntRange` and
+  `ubArrayOutOfBounds` halt the path
   at the operation. The
   halted side reaches no label and no Defect; the omission shows in the
   verdict's gaps, so an `sxUnsat` is not trusted past it. A witness found
@@ -496,6 +497,7 @@ Two things can happen to the omission, by kind:
 | `ubSignedDivZero` | `x div 0` or `x mod 0` on a signed type in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`). Nim emits its zero check under `overflowChecks` alone, so the C division is reached and is undefined (SIGFPE on x86-64). With the checks on it is a `DivByZeroDefect`. | Guard the divisor, or build with overflow checks on. |
 | `ubFloatToIntRange` | a float to int conversion whose operand is NaN, infinite or whose truncation does not fit the target type. Nim 2.2.10 emits a plain C cast and range-checks the cast value, so no check profile raises and the cast is undefined (the value differs by platform). | Bound the operand before the conversion. |
 | `ubTailUnverified` | the whole-run definedness gate (RFC-0016 K10b) could not show the witness's run defined past the label: an opaque call whose body the walker cannot read (a foreign routine, a closure, a method, a re-raise, a body too deep to scan), a decline or a budget on the second walk, or a witness that renders lossily. The `sxSat` stands and is not `trusted()`. | Mark the callee `{.symexTransparent.}` or give it a body the walker can read; raise the budget; or set `wholeRunDefinedness = false` to accept a prefix-only verdict. |
+| `ubArrayOutOfBounds` | an element access Nim emits with no bound check, reached outside its container: an array indexed by a value of its own `range` or enum type in a `--rangeChecks:off` build (Nim never checks that index; the check was on the conversion that made the value), or any `s[i]`, `a[i]`, `pop`, `del` or slice bound of a seq, string, openArray or array in a `--boundChecks:off` build. The C subscript reads or writes memory the object does not own. With the checks on the same input is a `RangeDefect` at the conversion or an `IndexDefect`. The in-range side stays exact and `trusted()`. A string index equal to `len` is halted although C reads the terminator there. | Guard the index, or build with the checks on. |
 
 ### Build and check taints
 

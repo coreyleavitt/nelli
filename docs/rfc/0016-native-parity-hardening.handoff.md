@@ -495,10 +495,43 @@
   all defined, exact. An array indexed by its own range/enum type has no check
   emitted, so an out-of-range value is an out-of-array access (UB in C):
   declined where reachable (`isIndex.ixUnchecked`, `isIndexAssign.iaUnchecked`).
-  REMAINDER: model that access as an undefined kind of the definedness axis
-  (`UbKind` + soundness codec + a UBSan `array-bounds` pin) so the in-range
-  witness of an unguarded access stays trusted. New build cell
-  `build:rangeChecks=off`; test `tsymex_0016_rangeoff`.
+  PRC-07 definedness half (same branch, walker 306 kept, unreleased): that access
+  is `ubArrayOutOfBounds` (appended LAST in the `ub*` range, after
+  `ubTailUnverified`; `UbKind = range[ubUnsignedDivZero .. ubArrayOutOfBounds]`;
+  the codec stores `ord - ord(low)` bits, so no `soundnessMetaVersion` bump),
+  row `defined:index/unchecked` (`aoIndex`/`ocUncheckedAccess`/`dsIndex`, undefined
+  under every profile: whether a site is unchecked is the build's option, not the
+  arithmetic profile). One decision proc, `decideUndefined` (runtime.nim, factored
+  out of `drainArithTraps`, which now calls it), is shared by the index sites:
+  `indexOobSide` (seq read/write, array read/write; `ixUnchecked`/`iaUnchecked`
+  stay the parser's own-type-under-rangeChecks-off flag), the string arm, `pop`,
+  the string-index and seq-OOB raise drains (`genRaiseForkDrain`'s `boundSite`),
+  and `depositStrIndexOob` (`s[i]` / `s[i] = c` lowered in an expression deposit an
+  `ArithTrap` with the kind). With the walker's `boundsUnchecked()` (the build's
+  `coBound`) false everything is the `IndexDefect` fork as before. `--boundChecks:off`
+  (`routineChecks` strips `coBound` as it does `coRange`; `RoutineChecks.boundOn`
+  declines a `push boundChecks: on`): a bound-checks-off build no longer declines
+  every routine, the in-bounds witness is exact and trusted, the out-of-bounds side
+  is an `UndefinedFinding` (site; arrays carry the source line, a string expression
+  read does not). The opaque-call scan answers the kind for an index in a scanned
+  body under either option. Native: arrays by `-fsanitize=bounds` (a global or local
+  array object; a PARAMETER array decays to a pointer and is invisible to it),
+  seq/openArray/string by `-fsanitize=address` over `-d:useMalloc` (Nim's own arena is
+  invisible to ASan; index `len` and `len + 1` trip, a negative index reads the block
+  header and does not); probe `ubsan_support.indexProbeSrc`. Pins:
+  `tsymex_0016_rangeoff` (updated), `tsymex_0016_boundoff` (new, `--boundChecks:off`
+  cfg; RED shown by forcing `boundsUnchecked()` false: the seven halt tests fail).
+  Known imprecision: a string `s[len]` is halted although C reads the NUL terminator.
+  NOT DONE (separate follow-up, learned from the generated C): `--fieldChecks:off`
+  makes `v.b` on a variant a plain union member access: no UB, the inactive arm's bytes
+  are read (and a write to it leaves the discriminant), which needs a byte-level
+  union model, not a `UbKind`, and UBSan cannot see it. `--objChecks:off` removes the
+  `isObjDisplayCheck` from `Derived(b)` entirely (a `ref` downcast, nil passes): a
+  base object converted to a larger derived reads fields past its allocation, UB
+  detectable by ASan over `-d:useMalloc` only when the derived type is larger; the
+  fork is the parser's (`dsl_parser.nim` ~11061-11083, `mkRaise("ObjectConversionDefect")`),
+  so it needs the same build-bit split as `uncheckedTypedIndex`, a row, and a kind.
+  Both builds still decline every routine with `feCheckOption`.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

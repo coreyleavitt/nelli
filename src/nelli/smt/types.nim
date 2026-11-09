@@ -2839,7 +2839,7 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # RFC-0016 K5a: the run never started; there is no modelled program.
   of ubUnsignedDivZero, ubIntMinModMinusOne, ubSignedOverflow,
      ubIndeterminateRead, ubSignedDivZero, ubFloatToIntRange,
-     ubTailUnverified: dcOmitted
+     ubTailUnverified, ubArrayOutOfBounds: dcOmitted
     # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
     # successor, a pure omission. K10b: `ubTailUnverified` rides the winner's
     # `witnessUndefined` only (the second walk's unverified tail); as a

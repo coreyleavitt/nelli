@@ -582,6 +582,13 @@ type
       ## at least one iteration — the direct, campaign-level observable for
       ## "stacking happened" that a caller/test can check without needing
       ## per-iteration introspection.
+    undefinedFindings*: seq[ConcolicUndefined]
+      ## RFC-0016 K10a-concolic. Operations of a branch condition the
+      ## concolic bridge's solver can drive into undefined behaviour (kind,
+      ## site, and the witnessing input), one per distinct (kind, site).
+      ## Empty without an assist. A finding about the property, not a
+      ## crash: the witness is never run as a seed, so it is verdict-neutral
+      ## and never in `irCrashes`. `formatUndefinedFindings` renders it.
     annotationViolations*: seq[AnnotationViolation]
       ## RFC-0016 K8-0 (INT-33). False user-annotation claims
       ## (`{.symexTransparent.}` on a call whose result is used or whose
@@ -1195,6 +1202,11 @@ type
       ## the property on every flip, so the same site is reported once per
       ## attempt. Read back via `annotationViolations*` for
       ## `FuzzReport.annotationViolations`.
+    undefinedFindings: seq[ConcolicUndefined]
+      ## RFC-0016 K10a-concolic. Every distinct (kind, site) any
+      ## `concolicBridge` call reported in `ConcolicFlipResult.undefinedReached`,
+      ## first witness kept. Read back via `undefinedFindings*` for
+      ## `FuzzReport.undefinedFindings`.
     concolicBridge: ConcolicBridgeEntry
       ## RFC-fuzzer-nextgen G3: the call-site concolic bridge (see
       ## `ConcolicBridgeEntry`'s doc) — `nil` (the default) makes
@@ -1487,6 +1499,23 @@ proc recordAnnotationViolations[T](o: Orchestrator[T];
         seen = true
         break
     if not seen: o.annotationViolations.add av
+
+proc undefinedFindings*[T](o: Orchestrator[T]): seq[ConcolicUndefined] =
+  ## RFC-0016 K10a-concolic: the de-duplicated undefined-behaviour findings
+  ## the concolic bridge reported over this orchestrator's lifetime, in
+  ## first-seen order.
+  o.undefinedFindings
+
+proc recordUndefinedFindings[T](o: Orchestrator[T];
+                                found: seq[ConcolicUndefined]) =
+  ## RFC-0016 K10a-concolic: fold one flip's findings into the campaign set.
+  for u in found:
+    var seen = false
+    for have in o.undefinedFindings:
+      if have.kind == u.kind and have.site == u.site:
+        seen = true
+        break
+    if not seen: o.undefinedFindings.add u
 
 proc recordSpawnOutcome[T](o: Orchestrator[T]; obs: Observation[T];
                            firstSubmitSinceSpawn: bool) =
@@ -1842,6 +1871,7 @@ proc tryConcolicBridge*[T](o: Orchestrator[T]; trace: ChoiceSeq
     # independent of admission outcome.
     foldFlipResult(o.concolicYield, bridged.flip, bridged.construct)
     recordAnnotationViolations(o, bridged.flip.annotationViolations)
+    recordUndefinedFindings(o, bridged.flip.undefinedReached)
     if bridged.flip.outcome notin {cfoSolvedExact, cfoSolvedOptimistic} or
        bridged.flip.materialized.len == 0: continue
     let obs = o.run(bridged.flip.materialized)
@@ -2557,6 +2587,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # see `CampaignStats`'s doc for the full per-field sourcing.
   let elapsedDur = getMonoTime() - started
   result.annotationViolations = orchestrator.annotationViolations
+  result.undefinedFindings = orchestrator.undefinedFindings
   result.stats = CampaignStats(
     execs: iter,
     elapsed: elapsedDur,
@@ -2798,6 +2829,18 @@ proc replayInput*[T](s: Strategy[T]; choices: seq[ChoiceNode]): Option[T] =
   var ds = newReplaySource(choices)
   try: some(s.generate(ds))
   except CatchableError, Defect: none(T)
+
+proc formatUndefinedFindings*(r: FuzzReport): string =
+  ## RFC-0016 K10a-concolic: the human summary of `r.undefinedFindings`, one
+  ## line per finding (`kind at site: input`), empty when there are none. Like
+  ## `formatCampaignSummary`, the caller decides whether to print it.
+  var lines: seq[string] = @[]
+  for f in r.undefinedFindings:
+    var vals: seq[string] = @[]
+    for n in f.input: vals.add $n
+    lines.add("undefined behaviour reachable: " & $f.kind & " at " & f.site &
+              ", input [" & vals.join(", ") & "]")
+  result = lines.join("\n")
 
 proc exportCrashes*(dir: string; report: FuzzReport; s: Strategy[seq[byte]]) =
   ## Write each retained crash's bytes to `dir` (created if absent) for repro.

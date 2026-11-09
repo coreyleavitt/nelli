@@ -485,6 +485,13 @@
   (the walk had put it in `pc`). Checked-build signed `div`/`mod` by zero and
   overflow stay Defect forks (raise), not UB, so they are not
   facts. Pins: `tsymex_0016_k10ac_concolic{,_checksoff}`.
+  Reader (same slice): `tryConcolicBridge` folds each flip's
+  `undefinedReached` into the orchestrator (deduplicated per (kind, site),
+  first witness kept) the way `annotationViolations` is, and
+  `FuzzReport.undefinedFindings` hands them to the caller;
+  `formatUndefinedFindings(report)` is the human summary. Pin:
+  `tfuzzconcolicundefined` (registered in `nelli.nimble`; a `fuzzConcolic`
+  campaign over `a div b > a` with `b == 0` at one magic draw).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

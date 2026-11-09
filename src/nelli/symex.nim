@@ -58,7 +58,7 @@ import ./engine/types as engineTypes
 from ./engine/frame import recordSymexFinding, FindingOrigin   ## review R2 (DD3)
 import ./smt/sha256   ## review R5 (3d): `fnIdLit` hashes a non-symbol `fn`
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
-       engineTypes.FindingGap, engineTypes.trusted   ## RFC-0005 S11
+       engineTypes.FindingGap, engineTypes.FindingUndefined, engineTypes.trusted   ## RFC-0005 S11
 
 # ---- Witness → ChoiceNode bridge -------------------------------------------
 #
@@ -230,6 +230,12 @@ proc describeTarget*(t: SymexTarget): string =
     if t.typeFilter.len == 0: "raised-exn(any)"
     else:                     "raised-exn(" & t.typeFilter & ")"
   of stkNilAccess:          "nil-access"                 ## Phase 15 R5
+  of stkUndefined:                                       ## RFC-0016 K10a-target
+    if t.ubKinds == allUbKinds: "undefined(all)"
+    else:
+      var names: seq[string]
+      for k in t.ubKinds: names.add $k
+      "undefined(" & names.join(",") & ")"
 
 # ---- Content-addressed DB persistence ---------------------------------------
 #
@@ -318,7 +324,8 @@ type
     ## witness as `renderAsChoices` rendered it (what `SymexFinding.
     ## witnessChoices` carries), `@[]` when the writer passed none.
   CachedNotes* = tuple[hints: seq[FindingHint],
-                      diagnostics: seq[FindingDiagnostic]]
+                      diagnostics: seq[FindingDiagnostic],
+                      undefined: seq[FindingUndefined]]
     ## RFC-0005 W1. The `:notes` record of a cached verdict: the run's hints
     ## and its non-winning diagnostics (`SymexFinding.hints`/`.diagnostics`).
     ## Both `@[]` when the record is absent, the same best-effort rule as
@@ -511,6 +518,13 @@ proc findingDiagnostics[T](ds: seq[DefectFinding[T]]): seq[FindingDiagnostic] =
                                  isDefect: d.isDefect, raisedMsg: d.raisedMsg.get(""),
                                  witnessChoices: renderAsChoices(d.witness))
 
+proc findingUndefined[T](us: seq[UndefinedFinding[T]]): seq[FindingUndefined] =
+  ## RFC-0016 K10a-target. `SymexResult.undefined` projected onto the Z3-free
+  ## `FindingUndefined`, the witness rendered as `witnessChoices` is.
+  for u in us:
+    result.add FindingUndefined(kind: $u.kind, site: u.site,
+                                witnessChoices: renderAsChoices(u.witness))
+
 type
   SymexCoverageDefect* = object of AssertionDefect
     ## Review R1-10. What `assertCoveredBy` raises when coverage is not
@@ -572,6 +586,7 @@ proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
                          target: SymexTarget, settings: SymexSettings,
                          hints: seq[FindingHint],
                          diagnostics: seq[FindingDiagnostic],
+                         undefined: seq[FindingUndefined],
                          errors: var seq[string]) =
   ## RFC-0005 W1. Persist a cold run's hints and diagnostics beside its
   ## verdict (see the section comment). Save errors are appended to `errors`
@@ -590,7 +605,14 @@ proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
     meta["hints" & $i] = h.severity
     meta["hintm" & $i] = h.msg
   meta["diagn"] = $diagnostics.len
+  meta["undefn"] = $undefined.len   # RFC-0016 K10a-target
   try:
+    for i, u in undefined:
+      var um = initTable[string, string]()
+      um["kind"] = u.kind
+      um["site"] = u.site
+      db.save(notesKey(baseKey, i).replace(":diag:", ":undef:"),
+              u.witnessChoices, um, verdictCacheMaxEntries)
     for i, d in diagnostics:
       var dm = initTable[string, string]()
       dm["tid"] = d.raisedTypeId
@@ -620,11 +642,20 @@ proc loadSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
     if head.len != 1: return
     let meta = head[0].meta
     if meta.getOrDefault(notesVersionMetaKey, "") != notesVersion: return
-    var nh, nd: int
+    var nh, nd, nu: int
     try:
       nh = parseInt(meta.getOrDefault("hintn", ""))
       nd = parseInt(meta.getOrDefault("diagn", ""))
+      nu = parseInt(meta.getOrDefault("undefn", "0"))
     except ValueError: return
+    for i in 0 ..< nu:
+      let e = db.loadPrimaryWithMeta(
+        notesKey(baseKey, i).replace(":diag:", ":undef:"))
+      if e.len != 1 or "kind" notin e[0].meta: break
+      result.undefined.add FindingUndefined(
+        kind: e[0].meta["kind"],
+        site: e[0].meta.getOrDefault("site", ""),
+        witnessChoices: e[0].choices)
     for i in 0 ..< nh:
       if ("hintk" & $i) notin meta: break
       result.hints.add FindingHint(kind: meta["hintk" & $i],
@@ -640,7 +671,7 @@ proc loadSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
         witnessChoices: e[0].choices)
   except CatchableError as e:
     errors.add "loadSymexNotesImpl: " & $e.name & ": " & e.msg
-    result = (hints: @[], diagnostics: @[])
+    result = (hints: @[], diagnostics: @[], undefined: @[])
 
 proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
@@ -2389,6 +2420,9 @@ func replayInScope*(target: SymexTarget): bool =
   of stkLabel, stkAssertionViolation, stkIndexError, stkFieldDefect: true
   of stkRaisedExn: target.typeFilter != "NilAccessDefect"
   of stkNilAccess: false
+  of stkUndefined: false   ## RFC-0016 K10a-target: a witness that reaches
+                           ## undefined behaviour is never run (section 9.1
+                           ## item 6); the replay would cross it for real.
 
 func replayReached*(target: SymexTarget; hits: HashSet[string];
                     escaped: ref Exception): bool =
@@ -2410,6 +2444,7 @@ func replayReached*(target: SymexTarget; hits: HashSet[string];
     not escaped.isNil and
       (target.typeFilter.len == 0 or $escaped.name == target.typeFilter)
   of stkNilAccess:          false   ## out of scope; never executed
+  of stkUndefined:          false   ## RFC-0016 K10a-target: never executed
 
 type WitnessFidelity = enum
   ## RFC-0005 §4.2 "Un-replayable witnesses". How faithfully `emitTyAndReader`
@@ -2980,6 +3015,7 @@ proc wireTarget*(w: var WireWriter; t: SymexTarget) =
   case t.kind
   of stkLabel: wirePut(w, t.label)
   of stkRaisedExn: wirePut(w, t.typeFilter)
+  of stkUndefined: wirePut(w, t.ubKinds)   ## RFC-0016 K10a-target
   else: discard
 
 proc readTarget*(r: var WireReader): SymexTarget =
@@ -2999,6 +3035,10 @@ proc readTarget*(r: var WireReader): SymexTarget =
   of stkIndexError: SymexTarget(kind: stkIndexError)
   of stkFieldDefect: SymexTarget(kind: stkFieldDefect)
   of stkNilAccess: SymexTarget(kind: stkNilAccess)
+  of stkUndefined:
+    var ks: set[UbKind]
+    wireGet(r, ks)
+    SymexTarget(kind: stkUndefined, ubKinds: ks)
 
 func targetLabelOf*(t: SymexTarget): string =
   ## RFC-0005 S8ct. The label a child reports as it is hit, or none.
@@ -3692,6 +3732,7 @@ proc targetLit(t: SymexTarget): NimNode =
   case t.kind
   of stkLabel: newCall(bindSym"tLabel", newLit(t.label))
   of stkRaisedExn: newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
+  of stkUndefined: newCall(bindSym"tUndefined", newLit(t.ubKinds))
   else: nnkObjConstr.newTree(bindSym"SymexTarget",
                              newColonExpr(ident"kind", newLit(t.kind)))
 
@@ -3772,6 +3813,9 @@ macro symexFind*(fn: typed,
   # shadowing concern with the outer `witId` binding.
   let diagWitId = genSym(nskLet, "diagRawWit")
   let (_, diagWitnessTup) = emitWitnessTuple(parsed.params, diagWitId)
+  # RFC-0016 K10a-target: the same reader for each `UndefinedFinding`.
+  let undefWitId = genSym(nskLet, "undefRawWit")
+  let (_, undefWitnessTup) = emitWitnessTuple(parsed.params, undefWitId)
 
   # `(int,)` is a syntactic 1-tuple; nnkTupleConstr with one child
   # renders correctly for both the type and the value.
@@ -3803,6 +3847,14 @@ macro symexFind*(fn: typed,
             witness:      `diagWitnessTup`,
             heapSnapshot: readHeapSnapshot(`diagWitId`))
         diagSeq
+      let undefResult = block:
+        var undefSeq: seq[UndefinedFinding[`tupleTy`]]
+        for undefEntry in raw.undefined:
+          let `undefWitId` = undefEntry.witness
+          undefSeq.add UndefinedFinding[`tupleTy`](
+            kind: undefEntry.kind, site: undefEntry.site,
+            witness: `undefWitnessTup`)
+        undefSeq
       case raw.status
       of sxSat:
         let `witId` = raw.witness
@@ -3815,7 +3867,8 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               diagnostics: diagResult)
+                               diagnostics: diagResult,
+                               undefined: undefResult)
       of sxUnsat:
         SymexResult[`tupleTy`](status: sxUnsat,
                                abstractions: raw.abstractions,
@@ -3825,7 +3878,8 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               diagnostics: diagResult)
+                               diagnostics: diagResult,
+                               undefined: undefResult)
       of sxUnknown:
         SymexResult[`tupleTy`](status: sxUnknown,
                                abstractions: raw.abstractions,
@@ -3835,7 +3889,8 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               diagnostics: diagResult)
+                               diagnostics: diagResult,
+                               undefined: undefResult)
       of sxRaised:
         # Phase 15 E2b. The walker reached a reachable `raise`; surface the
         # raised type id PLUS the reconstructed witness that reaches it (solved
@@ -3854,7 +3909,8 @@ macro symexFind*(fn: typed,
                                annotationViolations: raw.annotationViolations,
                                soundness: raw.soundness,   ## RFC-0005 S11
                                bounds: raw.bounds,         ## RFC-0005 S11
-                               diagnostics: diagResult)
+                               diagnostics: diagResult,
+                               undefined: undefResult)
 
 # ---- concolicCollect (RFC-fuzzer-nextgen G1b) -------------------------------
 
@@ -4064,6 +4120,8 @@ macro assertCoveredBy*(fn: typed,
       quote do: `anyRaisedId`   ## Phase 15 E2a: covered iff the SUT raised
     of stkNilAccess:
       quote do: `anyRaisedId`   ## Phase 15 R5: covered iff the SUT nil-derefed
+    of stkUndefined:
+      quote do: false           ## RFC-0016 K10a-target: never run in the host
   let failMsg =
     case target.kind
     of stkLabel:
@@ -4084,6 +4142,9 @@ macro assertCoveredBy*(fn: typed,
     of stkNilAccess:
       newLit("assertCoveredBy: testFn did not raise NilAccessDefect " &
              "on the symex witness (target was tNilAccess)")
+    of stkUndefined:
+      newLit("assertCoveredBy: a tUndefined witness reaches undefined " &
+             "behaviour and is never run in the host")
   let targetDescLit = newLit(describeTarget(target))
 
   # Rebuild the target node from its kind so the spliced AST is
@@ -4096,10 +4157,12 @@ macro assertCoveredBy*(fn: typed,
     of stkFieldDefect:     newCall(bindSym"tFieldDefect")
     of stkRaisedExn:       newCall(bindSym"tRaisedExn", newLit(target.typeFilter))
     of stkNilAccess:       newCall(bindSym"tNilAccess")
+    of stkUndefined:       newCall(bindSym"tUndefined", newLit(target.ubKinds))
 
   let gapsSym = bindSym"findingGaps"   ## RFC-0005 S11 (private helper)
   let hintsSym = bindSym"findingHints"         ## RFC-0005 W1 (private helper)
   let diagsSym = bindSym"findingDiagnostics"   ## RFC-0005 W1 (private helper)
+  let undefSym = bindSym"findingUndefined"     ## RFC-0016 K10a-target
   # RFC-0005 0.9.1 (WA-2). A witness whose confirming replay ended its child
   # after the target (`witnessUnsafe`) is never splatted here: it would end or
   # hang this process. With no `testFn`, the replay already ran `fn` on it and
@@ -4224,7 +4287,8 @@ macro assertCoveredBy*(fn: typed,
         gaps:           `gapsSym`(`rId`.errors),
         annotationViolations: `rId`.annotationViolations,
         hints: `hintsSym`(`rId`.errors),                 ## RFC-0005 W1
-        diagnostics: `diagsSym`(`rId`.diagnostics))
+        diagnostics: `diagsSym`(`rId`.diagnostics),
+        undefined: `undefSym`(`rId`.undefined))
       `failureId` = failure
   let satArm = claimArm(newDotExpr(rId, ident"witness"), bindSym"sfSat", true)
   # Phase 16 D1a: defect targets (tAssertionViolation, tIndexError,
@@ -4250,7 +4314,8 @@ macro assertCoveredBy*(fn: typed,
           gaps:       `gapsSym`(`rId`.errors),
           annotationViolations: `rId`.annotationViolations,
           hints: `hintsSym`(`rId`.errors),                 ## RFC-0005 W1
-          diagnostics: `diagsSym`(`rId`.diagnostics))
+          diagnostics: `diagsSym`(`rId`.diagnostics),
+        undefined: `undefSym`(`rId`.undefined))
         # A vacuous pass.
       of sxUnknown:
         `findingId` = SymexFinding(
@@ -4261,7 +4326,8 @@ macro assertCoveredBy*(fn: typed,
           gaps:       `gapsSym`(`rId`.errors),
           annotationViolations: `rId`.annotationViolations,
           hints: `hintsSym`(`rId`.errors),                 ## RFC-0005 W1
-          diagnostics: `diagsSym`(`rId`.diagnostics))
+          diagnostics: `diagsSym`(`rId`.diagnostics),
+        undefined: `undefSym`(`rId`.undefined))
         let s: SymexSettings = `settings`
         if not s.acceptUnknownAsCovered:
           `failureId` = "assertCoveredBy: symex returned UNKNOWN; cannot " &
@@ -4295,6 +4361,7 @@ macro assertCoveredBy*(fn: typed,
       of stkFieldDefect:        newCall(bindSym"tFieldDefect")
       of stkRaisedExn:          newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
       of stkNilAccess:          newCall(bindSym"tNilAccess")   ## Phase 15 R5
+      of stkUndefined:          newCall(bindSym"tUndefined", newLit(t.ubKinds))
     let settingsNode = newLit(settings)
     let inner = newCall(ident"assertCoveredBy", fn, tNode, testFn, settingsNode)
     result.add quote do:
@@ -4329,6 +4396,7 @@ proc rebuildTargetNode(target: SymexTarget): NimNode =
   of stkFieldDefect:        newCall(bindSym"tFieldDefect")
   of stkRaisedExn:          newCall(bindSym"tRaisedExn", newLit(target.typeFilter))
   of stkNilAccess:          newCall(bindSym"tNilAccess")   ## Phase 15 R5
+  of stkUndefined:          newCall(bindSym"tUndefined", newLit(target.ubKinds))
 
 macro symexCacheKeyForFn*(fn: typed,
                            target: static SymexTarget,
@@ -4579,6 +4647,7 @@ macro symexFindAllWitnesses*(fn: typed,
         of "tIndexError":         excludedKinds.incl stkIndexError
         of "tFieldDefect":        excludedKinds.incl stkFieldDefect
         of "tRaisedExn":          excludedKinds.incl stkRaisedExn
+        of "tUndefined":          excludedKinds.incl stkUndefined
         else: discard
     else: discard
   collectKinds(excludeTargets)
@@ -4602,10 +4671,14 @@ macro symexFindAllWitnesses*(fn: typed,
     else:
       quote do:
         let `name`: `tupleTy` = `tup`
+  let undefWitId = genSym(nskLet, "undefRawWit")   # RFC-0016 K10a-target
+  let (_, undefWitnessTup) = emitWitnessTuple(parsed.params, undefWitId)
+  let typedUndefWitId = genSym(nskLet, "typedUndefWit")
   let typedDiagWitId = genSym(nskLet, "typedDiagWit")
   let typedWitId = genSym(nskLet, "typedWit")
   let typedRaisedWitId = genSym(nskLet, "typedRaisedWit")
   let typedDiagWitDeclNode = witnessDecl(typedDiagWitId, diagWitnessTup)
+  let typedUndefWitDeclNode = witnessDecl(typedUndefWitId, undefWitnessTup)
   let typedWitDeclNode = witnessDecl(typedWitId, witnessTup)
   let typedRaisedWitDeclNode = witnessDecl(typedRaisedWitId, witnessTup)
 
@@ -4781,6 +4854,14 @@ macro symexFindAllWitnesses*(fn: typed,
                   isDefect:       diagEntry.isDefect,
                   raisedMsg:      diagEntry.raisedMsg.get(""),
                   witnessChoices: renderAsChoices(`typedDiagWitId`))
+              # RFC-0016 K10a-target: the undefined behaviours reached, with
+              # the witness that reaches each, rendered the same way.
+              for undefEntry in raw.undefined:
+                let `undefWitId` {.used.} = undefEntry.witness
+                `typedUndefWitDeclNode`
+                f.undefined.add FindingUndefined(
+                  kind: $undefEntry.kind, site: undefEntry.site,
+                  witnessChoices: renderAsChoices(`typedUndefWitId`))
               var verdictSaved = false
               case raw.status
               of sxSat:
@@ -4817,7 +4898,7 @@ macro symexFindAllWitnesses*(fn: typed,
               if verdictSaved:
                 saveSymexNotesImpl(`db`, `progId`, `loopTarget`,
                                    `symexSettings`, f.hints, f.diagnostics,
-                                   `dbErrorsId`)
+                                   f.undefined, `dbErrorsId`)
           if f.fromCache:
             # RFC-0005 W1: every hit above serves the cold run's hints and
             # diagnostics too, from the `:notes` record the cold arm wrote.
@@ -4825,6 +4906,7 @@ macro symexFindAllWitnesses*(fn: typed,
                                            `symexSettings`, `dbErrorsId`)
             f.hints = notes.hints
             f.diagnostics = notes.diagnostics
+            f.undefined = notes.undefined   # RFC-0016 K10a-target
           `stampSym`(f.soundness)   ## RFC-0016 K5a: a cache hit's too
           `findingsId`.add f
 

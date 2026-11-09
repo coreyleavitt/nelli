@@ -139,6 +139,27 @@
   sNaN `never` cell is not created here (needs the admission-table `never`
   machinery of K3a/K4c). K3a also takes the walker to 291: expect a conflict
   in `canonicalize.nim` and the CR2 pin.
+  K10a-target (`rfc-0016-k10at`, walker 292 to 293):
+  `stkUndefined` and `tUndefined(kinds = allUbKinds)` (`types.nim`), the
+  `UndefinedFinding[T]` list `SymexResult.undefined`, and `FindingUndefined` /
+  `SymexFinding.undefined` (`engine/types.nim`). The one producer is
+  `haltUndefined` (`runtime.nim`): the undefined side is solved on the path
+  plus its condition. Under `tUndefined` a listed kind is the hit (a clean
+  `sxSat`, `witnessUndefined` set, so never `trusted()` and never run in the
+  host); under any other target it is listed, once per (kind, site), at most
+  `maxUndefinedFindings` (8) per run, clean paths only, and the halt message
+  names `tUndefined()` as the next query. The path ends either way, so a
+  `tUndefined` `sxUnsat` is trusted only where no undefined side was reachable.
+  Consumers: `describeTarget`, `canonicalize(SymexTarget)` (`Tg<UD:...>`),
+  `wireTarget`/`readTarget`, `replayInScope` and `replayReached` (false: replay
+  never runs the witness), `assertCoveredBy` (never covered), `targetLit` and
+  the `bindSym` splices, the `:notes` record (`:undef:<i>` entries, `undefn`),
+  so a cache hit serves the cold run's list. `symexForAll` does not discover a
+  `tUndefined` target. K10a-axis extends the producers: every new definedness
+  row calls `haltUndefined` with its `UbKind` and gets the target, the list and
+  the cache for free. Traps: `UbKind` is a range that omits 0, so a field of it
+  needs a declared default (`= ubUnsignedDivZero`) or `setLen` warns; a doc
+  comment after `discard` in a variant branch breaks indentation.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

@@ -282,7 +282,12 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "292"
+const symexWalkerVersion* = "293"
+  ## RFC-0016 K10a-target (292->293): `haltUndefined` also files the undefined
+  ## side as a finding: under `tUndefined` a listed kind is the target's hit
+  ## (`sxSat`, witness, `witnessUndefined`); under any other target it is listed
+  ## on `SymexResult.undefined`, and the halt names `tUndefined` as the next
+  ## query. `stkUndefined` joins the target key (`Tg<UD:...>`).
   ## RFC-0016 K3a (290->291): `holdsSharedMemory` reads the type x memory-op
   ## axis (`typeaxes`) and looks through a variant's plain fields and arms, a
   ## multi-variant's axes and a distinct base, so `let c = gV` over a case
@@ -6497,6 +6502,10 @@ proc canonicalize*(t: SymexTarget): string =
   of stkFieldDefect:        "Tg<FD>"
   of stkRaisedExn:          "Tg<RX:" & t.typeFilter.escape & ">"   ## Phase 15 E2a
   of stkNilAccess:          "Tg<NA>"                                ## Phase 15 R5
+  of stkUndefined:                                                    ## RFC-0016 K10a-target
+    var ks = "Tg<UD:"
+    for k in t.ubKinds: ks.add $ord(k) & ","
+    ks & ">"
 
 # ---- SymexSettings ---------------------------------------------------------
 

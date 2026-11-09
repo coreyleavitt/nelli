@@ -263,6 +263,7 @@ proc hitsTarget*(nr: NativeRun; t: SymexTarget): bool =
   of stkIndexError: nr.raised == "IndexDefect"
   of stkFieldDefect: nr.raised == "FieldDefect"
   of stkNilAccess: nr.raised == "NilAccessDefect"
+  of stkUndefined: false   # a witness that reaches undefined behaviour is not run
 
 func describeNative(nr: NativeRun): string =
   var h: seq[string]

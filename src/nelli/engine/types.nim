@@ -103,12 +103,26 @@ type
       ## process, naming how and on what input), `feReplayDeclined` (the replay
       ## did not run, and why), `feReplayTimedOut` and `feReplayRefuted`.
       ## Persisted with the verdict, so a cache hit serves the cold run's.
+    undefined*:      seq[FindingUndefined]
+      ## RFC-0016 K10a-target. The undefined behaviours the run reached
+      ## (`SymexResult.undefined`), each with the witness that reaches it.
+      ## Persisted with the verdict (the `:notes` record), so a cache hit
+      ## serves the cold run's.
     diagnostics*:    seq[FindingDiagnostic]
       ## RFC-0005 W1 (0.9.1). The raises the run reached on the way that did
       ## not decide the verdict (`SymexResult.diagnostics`, ADR-0012 D2), each
       ## with the witness that reaches it. Best-effort: the walk may stop at
       ## the first answer. Persisted with the verdict, so a cache hit serves
       ## the cold run's.
+
+  FindingUndefined* = object
+    ## RFC-0016 K10a-target (section 9.1 item 5). One entry of
+    ## `SymexFinding.undefined`: an undefined behaviour the run reached
+    ## (`SymexResult.undefined`), projected to strings like `FindingGap`.
+    ## Never a `diagnostics` entry: those are raised Defects.
+    kind*:           string   ## the `UbKind`, by name (e.g. "ubUnsignedDivZero")
+    site*:           string   ## the op's anchor
+    witnessChoices*: seq[ChoiceNode]
 
   FindingHint* = object
     ## RFC-0005 W1. One entry of `SymexFinding.hints`: a recorded diagnostic

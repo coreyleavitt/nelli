@@ -1882,6 +1882,11 @@ type
                            ## NilAccessDefect. The nil-fork's defect path is gated
                            ## on this target; under any other target only the
                            ## non-nil deref continuation surfaces.
+    stkUndefined           ## RFC-0016 K10a-target (section 9.1 item 5): find an
+                           ## input on which the SUT reaches undefined behaviour
+                           ## of one of the listed `UbKind`s. A target, not a
+                           ## status: `sxSat` comes with a witness, `sxUnsat`
+                           ## means none of the LISTED kinds is reachable.
 
   SymexTarget* = object
     case kind*: SymexTargetKind
@@ -1896,7 +1901,9 @@ type
     of stkRaisedExn:
       typeFilter*: string  ## Phase 15 E2a. Empty = any raised exception.
     of stkNilAccess:
-      discard              ## Phase 15 R5. No payload — the witness carries `p == nil`.
+      discard              # Phase 15 R5. No payload — the witness carries `p == nil`.
+    of stkUndefined:
+      ubKinds*: set[UbKind]  ## RFC-0016 K10a-target. The kinds that count as a hit.
 
   SymexStatusKind* = enum
     sxSat       ## witness found
@@ -2213,6 +2220,16 @@ type
     witness*:      T
     heapSnapshot*: seq[HeapSnapshotEntry]
 
+  UndefinedFinding*[T] = object
+    ## RFC-0016 K10a-target (section 9.1 item 5). One undefined behaviour the
+    ## run reached: its kind, the source anchor of the op, and the input that
+    ## reaches it. Listed on `SymexResult.undefined` whatever the target; under
+    ## `tUndefined` the winning one is also the verdict's witness. Not a
+    ## `DefectFinding`: `diagnostics` is typed for raised Defects.
+    kind*:    UbKind = ubUnsignedDivZero   ## a default: the range omits 0
+    site*:    string   ## the op's anchor, as the halt names it
+    witness*: T
+
   SymexResult*[T] = object
     abstractions*: AbstractionLog
     obligations*:  ObligationLog
@@ -2275,6 +2292,12 @@ type
       ## `DefectFinding[T]` here. Best-effort, not exhaustive (the walk may
       ## stop on the first `sxSat` before all paths are explored). Always
       ## empty for `sxUnsat`/`sxUnknown` results.
+    undefined*:    seq[UndefinedFinding[T]]
+      ## RFC-0016 K10a-target. Every undefined behaviour the run reached and
+      ## solved, under any target (best-effort, bounded by
+      ## `maxUndefinedFindings`, like `diagnostics`). Each rhymes with
+      ## `FindingUndefined` on `SymexFinding`. A halt under another target
+      ## names `tUndefined` as the next query.
     case status*: SymexStatusKind
     of sxSat:
       witness*: T
@@ -5227,6 +5250,22 @@ proc tNilAccess*(): SymexTarget =
   ## continuation is searched. A freshly `new`-allocated (provably non-nil) ref
   ## is short-circuited — its nil fork is UNSAT by construction and skipped.
   SymexTarget(kind: stkNilAccess)
+
+const allUbKinds* = {low(UbKind) .. high(UbKind)}
+  ## RFC-0016 K10a-target. `tUndefined`'s default: every kind.
+
+const maxUndefinedFindings* = 8
+  ## RFC-0016 K10a-target. The most `UndefinedFinding`s one run solves under a
+  ## target that is not `tUndefined`: each costs one solve, and the list is
+  ## best-effort (the halt itself is recorded whatever the cap).
+
+proc tUndefined*(kinds: set[UbKind] = allUbKinds): SymexTarget =
+  ## RFC-0016 K10a-target (section 9.1 item 5). Symex searches for an input on
+  ## which the SUT reaches undefined behaviour of one of `kinds`. `sxSat`
+  ## carries the witness; `sxUnsat` means none of the LISTED kinds is
+  ## reachable, never "no undefined behaviour". The witness is never run in
+  ## the host (`hostRunnable`) and replay does not run it (`replayInScope`).
+  SymexTarget(kind: stkUndefined, ubKinds: kinds)
 
 proc optimisedSymexSettings*(): SymexSettings {.deprecated:
     "RFC-0010: byte-identical to defaultSymexSettings() since isOptimised " &

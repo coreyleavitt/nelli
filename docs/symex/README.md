@@ -32,6 +32,7 @@ satisfiable.
 | `tAssertionViolation()` | Find an input that fails any `symexAssert(cond)`. | Bug-hunting for invariants. |
 | `tIndexError()` | Find an input that drives any `arr[i]` out of bounds. | Memory-safety witnesses. |
 | `tFieldDefect()` | Find an input that drives a variant arm-field access whose discriminator is outside that field's arm set. | Memory-safety / soundness witnesses on variant types. Phase 11. |
+| `tUndefined(kinds)` | Find an input that reaches undefined behaviour of one of the listed `UbKind`s (default: all). | The input a halted `ub*` operation hides. The witness is never run in the host. RFC-0016. |
 
 ## Public surface
 
@@ -427,9 +428,16 @@ Two things can happen to the omission, by kind:
   `symexForAll`.
 - The arithmetic kinds (`ubUnsignedDivZero`, `ubIntMinModMinusOne`,
   `ubSignedOverflow`, `ubSignedDivZero`) halt the path at the operation. The
-  halted side reaches no target and carries no witness; the omission shows in
-  the verdict's gaps, so an `sxUnsat` is not trusted past it. A witness found
-  through a different, defined path is unaffected.
+  halted side reaches no label and no Defect; the omission shows in the
+  verdict's gaps, so an `sxUnsat` is not trusted past it. A witness found
+  through a different, defined path is unaffected. To ask for the input that
+  reaches the operation, search for it: `tUndefined()` (or
+  `tUndefined({ubUnsignedDivZero})`) returns `sxSat` with that input, which is
+  never `trusted()` and never run in your process; `sxUnsat` means none of the
+  *listed* kinds is reachable. Under any other target the same inputs are
+  listed on `SymexResult.undefined` (`UndefinedFinding`: kind, site, witness;
+  `SymexFinding.undefined` as `FindingUndefined`), at most eight per run,
+  and the halt names `tUndefined()` as the next query.
 - `ubFloatToIntRange` is declared and has no emission site yet.
 
 | Kind | The operation | What to do |

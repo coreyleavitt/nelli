@@ -739,6 +739,13 @@ type
     raisedMsg*:     Option[string]
     raisedWitness*: RawWitness
 
+  RawUndefined* = object
+    ## RFC-0016 K10a-target. One undefined behaviour the walk reached and
+    ## solved, before typing (`UndefinedFinding[T]`).
+    kind*:    UbKind = ubUnsignedDivZero   ## a default: the range omits 0
+    site*:    string
+    witness*: RawWitness
+
   SatCandidate* = object
     ## RFC-0005 S10 (§2.3 rule 3, §4.2 "Plumbing"). A SOLVED finding on an
     ## `scSpurious`-tainted path -- the enlarged program reaches the target,
@@ -797,6 +804,9 @@ type
       ## target `SymexFinding.errors` by the macro-emitted runtime
       ## in `symex.nim`. `ValueError` and `AssertionDefect` from
       ## walker logic are NOT caught — those are real walker bugs.
+    undefined*:    seq[RawUndefined]
+      ## RFC-0016 K10a-target. Every undefined behaviour the walk reached and
+      ## solved (`SymexResult.undefined`).
     diagnostics*:  seq[RawDiagnostic]
       ## ADR-0012 D2. Non-winning sxRaised findings from the walk, collected
       ## by the reduction. Typed into `DefectFinding[T]` by the `symexFind`
@@ -16436,6 +16446,11 @@ type
     mode:      WalkMode   ## RFC-fuzzer-nextgen G1a. Zero-value `wmExplore` —
                            ## every existing construction site (`runSymexImpl`)
                            ## is unchanged and gets `wmExplore` for free.
+    undefinedFound: seq[RawUndefined]
+                ## RFC-0016 K10a-target. The undefined behaviours `haltUndefined`
+                ## reached and solved (`SymexResult.undefined`), at most
+                ## `maxUndefinedFindings` per run under a target that is not
+                ## `tUndefined`.
     found:     seq[RawResult]   ## Phase 15 Z4: was Option[RawResult]. Accumulated
                                 ## findings; shouldStop halts on the first sxSat
                                 ## (sxRaised added to the stop set in E2a).
@@ -26396,9 +26411,44 @@ proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
      concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc & @[cond],
                           w.settings):
     return
+  # RFC-0016 K10a-target (section 9.1 item 5): the side is also a FINDING. Under
+  # `tUndefined` a listed kind is the target's hit (a winner, solved on the
+  # path with the undefined side's condition); under any other target it is
+  # listed on `SymexResult.undefined` (clean paths only, a bounded number).
+  # The path ends either way: nothing past the op is modelled.
+  let tgt = w.target
+  let isHit = tgt.kind == stkUndefined and kind in tgt.ubKinds
+  var listIt = tgt.kind != stkUndefined and scSpurious notin p.taint and
+               w.undefinedFound.len < maxUndefinedFindings
+  for u in w.undefinedFound:
+    if u.kind == kind and u.site == site: listIt = false   # one per op
+  if (isHit and not w.shouldStop) or listIt:
+    let atOp = forkPath(p, p.pc & @[cond], p.env)
+    let solveOn = if closureBodyCallerPc.len == 0: atOp
+                  else: forkPath(atOp, closureBodyCallerPc & atOp.pc, atOp.env)
+    let (st, wit, candErrs, why) = solveTargetHit(w, solveOn)
+    case st
+    of sxSat:
+      if isHit:
+        w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
+          soundness: Soundness(pathTaint: p.taint,
+                               witnessUndefined: ubOrdinals(p.undefined + {kind})),
+          nilDerefOnPath: p.nilDeref, errors: candErrs))
+      else:
+        w.undefinedFound.add RawUndefined(kind: kind, site: site, witness: wit)
+    of sxUnknown:
+      if isHit:
+        w.halted(beSolverUndef,
+          "solver returned unknown on a path reaching " & $kind & " at " &
+          site & ": " & why & " (beSolverUndef)")
+    of sxUnsat, sxRaised: discard
+  let next =
+    if tgt.kind == stkUndefined: ""
+    else: "; query `tUndefined()` to ask for an input that reaches it"
   w.halted(kind,
     "undefined behaviour at " & site & " (" & $kind & "): the path ends " &
-    "here, what follows is not modelled")
+    "here, what follows is not modelled" & next)
+
 
 # ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------
 
@@ -29768,6 +29818,7 @@ proc runSymexImpl(prog: SymexProgram,
                                 raisedMsg:    f.raisedMsg,
                                 raisedWitness: f.raisedWitness)
     r.diagnostics = diags
+    r.undefined = w.undefinedFound   # RFC-0016 K10a-target
     # CR-9 Stage 5: read from WalkCtx.extractionErrors (LIVE store during walk)
     # and union with threadvar fallback. extractionErrors is SAT-branch-only.
     let extractionErrorsLive = w.extractionErrors & extractionErrors
@@ -29807,12 +29858,13 @@ proc runSymexImpl(prog: SymexProgram,
         scope: DeclineScope(kind: dskUnplaced))
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
               callStats: statsSeq, errors: unknownErrs,
+              undefined: w.undefinedFound,   # RFC-0016 K10a-target
               candidates: toCandidates(w.candidates))
   else:
     # RFC-0005 S1c: `decideVerdict` rule 5 -- no solved SAT anywhere (so no
     # candidates to hand out) and `scIncomplete notin runTaint`.
     RawResult(status: sxUnsat, abstractions: log, obligations: obligationLog,
-              callStats: statsSeq,
+              callStats: statsSeq, undefined: w.undefinedFound,   # K10a-target
               errors: exnWarnings & parseErrs & closureErrs)
 
 # ---- RFC-fuzzer-nextgen G1b: concolic draw-symbolication + concrete-trace --

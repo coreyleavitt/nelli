@@ -41,6 +41,7 @@ import std/hashes      ## Phase 15 C1: lambda-site body-hash (lineInfo fallback)
 import std/unicode     ## Phase 16 A7-S3: toRunes/runeLen for literal decode at parse time
 import ./types
 import ./admission   ## RFC-0016 ADM-1: `Admit`, `AxisTable`
+import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./dsl_typebridge
 from ./abstraction import collectVarRefs   ## RFC-0005 S8bl: `writesName`
 import ./stdlib_models
@@ -8108,10 +8109,11 @@ proc typeCopiedByValue(ty: NimNode; depth = 0): bool =
   ## its type (`ccgIntroducedPtr`). Anything else is not known to be copied: an
   ## unknown type falls to `byValueWritten`, never to a verdict.
   if depth > 8 or ty == nil: return false
+  # RFC-0016 K3a: the kind's by-value class is a row of the type-class axis.
+  let cls = admitTypeClass(ty.typeKind, tcByValueFormal)
+  if not cls.admitted: return false
+  if cls.payload == tmLeaf: return true
   case ty.typeKind
-  of ntyBool, ntyChar, ntyEnum, ntyRange, ntyRef, ntyPtr, ntyPointer, ntyProc,
-     ntyCString, ntyInt .. ntyInt64, ntyUInt .. ntyUInt64, ntyFloat .. ntyFloat64:
-    true
   of ntyDistinct, ntyAlias:
     let base = ty.getTypeImpl
     base.kind == nnkDistinctTy and base.len == 1 and
@@ -16889,18 +16891,6 @@ proc markCheckOnly(st: IRStmt): IRStmt =
     for c in st.stmts: discard markCheckOnly(c)
   elif st.kind == isIndex:
     st.ixCheckOnly = true
-
-func holdsSharedMemory(t: IRType): bool =
-  ## RFC-0005 S8cn. `t` is, or holds, a seq, a string or a Table.
-  if t == nil: return false
-  case t.kind
-  of itSeq, itString, itTable, itSet: true
-  of itTuple:
-    for f in t.fields:
-      if holdsSharedMemory(f): return true
-    false
-  of itArray: holdsSharedMemory(t.elemTy)
-  else: false
 
 proc routineWritesHeap(sym: NimNode; seen: var seq[NimNode]): bool
 proc nodeWritesHeap(n: NimNode; seen: var seq[NimNode]): bool =

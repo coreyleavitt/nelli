@@ -89,6 +89,17 @@
   `tests/0016-allowlist/census.txt` (unlisted site and stale entry both fail;
   the K2-s script totals are cross-checked on Linux). K2a-fail (Wave 4) turns
   the bare `skip(` rows from listed into failing.
+  K3a (`rfc-0016-k3a`, walker 290 to 291): `smt/typeaxes.nim` holds the
+  type-class axis (`typeClassTable`, one row per `NimTypeKind` plus the named
+  features, `admitTypeClass`; `typeCopiedByValue` reads it) and the type x
+  memory-op axis (`typeOpTable`, `letCursor/<IR kind>`, `admitTypeOp`;
+  `holdsSharedMemory` moved there and now fails closed: it looks through a
+  variant, a multi-variant and a distinct, so `let c = gV` over a case object
+  holding a seq arm declines like its plain-object twin, B-04). STY-04 is
+  `never` (`typeclass:owned`, `typeclass:atomic`); STY-06 stays open with its
+  K3a cells (`typeclass:float128`, `typeclass:float/sNaNPayload`). `fieldDefault/*`
+  is K3b's; `cast/`, `not/`, `ptr/lt`, `set/char/*` are not memory operations and
+  stay orphans for the construct and definedness axes.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

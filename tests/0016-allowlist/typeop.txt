@@ -1,0 +1,15 @@
+# RFC-0016 K3a allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
+# (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
+typeop:letCursor/array	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/bitSet	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/bool	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/distinct	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/float32	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/float64	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/int	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/multiVariant	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/ptr	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/ref	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/set	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/table	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/uninterp	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus

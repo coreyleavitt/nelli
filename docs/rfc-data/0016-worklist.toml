@@ -2139,11 +2139,12 @@ cells = []
 id = "STY-04"
 table = "5.9"
 title = "`owned T`, `Atomic[T]` (HRV-18)"
-state = "open"
-note = ""
+state = "never"
+note = ": done (2026-11-08, K3a): `typeclass:owned` and `typeclass:atomic` are `never` rows of the type-class axis"
 slice = "K3a"
 home = "K3a (`never` cell of the type × memory axis)"
-cells = []
+never_reason = "stays by design: no ownership state, one thread of control"
+cells = ["typeclass:owned", "typeclass:atomic"]
 
 [[row]]
 id = "STY-05"
@@ -2160,10 +2161,10 @@ id = "STY-06"
 table = "5.9"
 title = "concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105)"
 state = "open"
-note = ""
+note = "K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`); K2b and K4c own the rest"
 slice = "K4c"
 home = "K3a, K2b, K4c (one `never` cell each)"
-cells = []
+cells = ["typeclass:float/sNaNPayload", "typeclass:float128"]
 
 [[row]]
 id = "STY-07"

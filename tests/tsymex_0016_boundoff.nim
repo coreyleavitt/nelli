@@ -104,7 +104,7 @@ proc sutGuarded(v: int) =
 
 suite "PRC-07: --boundChecks:off":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 306
+    check parseInt(symexWalkerVersion) >= 309
 
   test "the build has the bound check off and the others on":
     check coBound notin buildSemantics.checks

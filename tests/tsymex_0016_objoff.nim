@@ -71,7 +71,7 @@ proc sutPushedOn(v: int) =
 
 suite "PRC-07: --objChecks:off":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 306
+    check parseInt(symexWalkerVersion) >= 309
 
   test "the build has the object check off and the others on":
     check coObj notin buildSemantics.checks

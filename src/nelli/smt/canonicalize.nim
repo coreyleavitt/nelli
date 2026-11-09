@@ -348,7 +348,7 @@ const symexWalkerVersion* = "309"
   ## branch-changing discriminator write is the `dwmHavoc` model (slice B
   ## below replaces it on c where the layout is derived). Neither
   ## build declines every routine (`feCheckOption`) any more.
-  ## PRC-07 slice B (306 kept: the checked path is unchanged): under
+  ## PRC-07 slice B (the checked path is unchanged): under
   ## `--fieldChecks:off` only, a c-backend value variant carries the union's
   ## bytes as one image (`SymVal.vImage`, a 64-bit cell per 8 bytes over
   ## `variant_layout`; a `{.packed.}` object at alignment 1) that every arm

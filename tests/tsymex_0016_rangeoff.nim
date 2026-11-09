@@ -112,7 +112,7 @@ proc sutArrIdx(v: int) =
 
 suite "PRC-07: range conversions with --rangeChecks:off":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 306
+    check parseInt(symexWalkerVersion) >= 309
 
   test "the build has the range check off and the others on":
     check coRange notin buildSemantics.checks

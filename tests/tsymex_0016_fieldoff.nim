@@ -346,7 +346,7 @@ else:
 
 suite "PRC-07: --fieldChecks:off":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 306
+    check parseInt(symexWalkerVersion) >= 309
 
   test "the walker's variant layout is the compiler's":
     var a = Wd(k: kwa, x: 1)

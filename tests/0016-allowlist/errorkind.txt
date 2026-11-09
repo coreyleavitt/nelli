@@ -31,11 +31,8 @@ errorkind:feReplayCrashed	K9c	no pinDecline asserts this kind; K9c finds each ki
 errorkind:feReplayDeclined	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feReplayRefuted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feReplayTimedOut	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feTableIterOrder	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feTransparentArgNotInert	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feTransparentResultUsed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feUnsupportedOpAborted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feUnsupportedWitnessType	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geConceptViolation	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geDistinctBarrier	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geDistinctBijectivitySkipped	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
@@ -62,7 +59,6 @@ errorkind:seRecursiveValueDepth	K9c	no pinDecline asserts this kind; K9c finds e
 errorkind:seRuneDecodeSymbolic	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seUnsupportedCompoundSortLeaf	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seUnsupportedSetCharInterop	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:seUnsupportedStringOp	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seUnsupportedTableKeyType	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seUnsupportedTableValType	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seVariantFieldOnDeclinedCtor	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer

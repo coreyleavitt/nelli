@@ -325,6 +325,11 @@ const symexWalkerVersion* = "298"
   ## Also K2c (CRH-01 residue, K7): a nonzero `maxFrontierSize` now applies
   ## inside a `while` k-unroll too (its active and exit sets, `ckFrontier`),
   ## not only between statements. Default 0, so only runs that opted in move.
+  ## Also K7: `walkRLimit` bounds the SUM of Z3 units every check of one
+  ## walk spends; at the limit the walk stops (`ckWalkWork`,
+  ## `beBudgetExhaustedPrune`, `sxUnknown` unless a sound witness was already
+  ## found). A walk that ran unbounded before (a nested-loop unroll that never
+  ## ended) now ends in that halt under a nonzero limit.
   ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case
   ## objects, in a witness and in a variable the SUT reaches, where it declined
   ## as not marshallable. A cached `:unk` that was that decline is stale.

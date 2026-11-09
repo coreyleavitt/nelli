@@ -1127,8 +1127,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 K4a-dispatch: 294->295.
     ## RFC-0016 PRC-01: 295->296.
     ## RFC-0016 K4c: 296->297.
-    ## RFC-0016 K2c: 297->298.
+    ## RFC-0016 K2c: 297->298 (and K7's `walkRLimit` halt, same number).
     check symexWalkerVersion == "298"
+
+  test "CR-2 sub-test 5b: walkRLimit changes canonical form":
+    ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends
+    ## in a verdict or in the `ckWalkWork` halt, so two settings differing
+    ## ONLY in `walkRLimit` must hash differently.
+    var s0 = defaultSymexSettings()
+    var s1 = s0
+    s1.budget.walkRLimit = s0.budget.walkRLimit + 1
+    check canonicalize(s0) != canonicalize(s1)
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

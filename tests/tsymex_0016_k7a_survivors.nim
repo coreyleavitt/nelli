@@ -118,6 +118,21 @@ proc k7aWideWrite(i: int) =
     if a[0] == 7:
       symexTarget("k7a_wide_write")
 
+proc k7aWork(n, x: int) =
+  if n >= 0 and n <= 3:
+    var acc = 0
+    var i = 0
+    while i < n:
+      if x > i: acc = acc + 1 else: acc = acc + 2
+      i = i + 1
+    if acc == 100:
+      symexTarget("k7a_work")
+
+const workTiny = block:
+  var s = defaultSymexSettings()
+  s.budget.walkRLimit = 100
+  s
+
 const depthZero = block:
   var s = defaultSymexSettings()
   s.budget.maxCallDepth = 0
@@ -169,6 +184,20 @@ suite "RFC-0016 K7a (c) -- a cut run is never trusted":
 
   test "a too-wide array write cut (ckTermWalkWrite)":
     pinCap(k7aWideWrite, "ckTermWalkWrite", tLabel("k7a_wide_write"))
+
+  test "the walk's total solver work cut (ckWalkWork)":
+    ## RFC-0016 K7: the sum of every check's Z3 units is bounded, not only
+    ## each check. The same SUT with the default (0, unbounded) completes.
+    let r = symexFind(k7aWork, tLabel("k7a_work"), workTiny)
+    check r.status == sxUnknown
+    check not r.trusted()
+    pinCap(k7aWork, "ckWalkWork", tLabel("k7a_work"), workTiny)
+
+  test "the same SUT without a walk work cap completes":
+    let r = symexFind(k7aWork, tLabel("k7a_work"))
+    check r.status == sxUnsat
+    for e in r.errors:
+      check "walk work cap" notin e.msg
 
   test "RED: pinCap fails when the run was not cut by that cap":
     expect PinFailure:

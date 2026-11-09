@@ -74,6 +74,19 @@ if [ -n "${NELLI_PIN_DIR:-}" ]; then
   esac
 fi
 
+# NELLI_WALK_UNITS_LOG (a file the walker appends one line per finished walk
+# to: units, target, status -- RFC-0016 K7, how `walkRLimit`'s default is
+# measured). An absolute path in the repo is rewritten to its /work path; one
+# outside is reached by bind-mounting its directory at the same path.
+if [ -n "${NELLI_WALK_UNITS_LOG:-}" ]; then
+  wl_dir="$(cd "$(dirname "$NELLI_WALK_UNITS_LOG")" && pwd -P)"
+  wl_abs="$wl_dir/$(basename "$NELLI_WALK_UNITS_LOG")"
+  case "$wl_abs" in
+    "$PWD"/*) pin_args+=(-e "NELLI_WALK_UNITS_LOG=/work${wl_abs#"$PWD"}") ;;
+    *)        pin_args+=(-e "NELLI_WALK_UNITS_LOG=$wl_abs" -v "$wl_dir:$wl_dir") ;;
+  esac
+fi
+
 # NELLI_PIN_NOW (unix seconds) fixes the pin clock (RFC-0016 K1a-last).
 [ -n "${NELLI_PIN_NOW:-}" ] && pin_args+=(-e "NELLI_PIN_NOW=$NELLI_PIN_NOW")
 # NELLI_UNIVERSE_ROW / NELLI_UNIVERSE_PARTIAL scope the universe join to one CI

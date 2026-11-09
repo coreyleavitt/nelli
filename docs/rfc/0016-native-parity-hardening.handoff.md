@@ -337,6 +337,15 @@
   fixed, declines over a bounded string (pinned); over an UNBOUNDED string it does not
   terminate (loop cap, K7), so CRH-01 stays open on that residue. The `case n.kind` census row in
   `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
+  K7 total work (`rfc-0016-k2c`, walker 292, same number): `budget.walkRLimit`
+  (default 0 until the corpus maximum is measured) bounds the Z3 units of every
+  check of one walk (`ownContextCheck` charges, `checkCapped` runs each query
+  under what is left, `shouldStop` ends the walk, `runSymexImpl` records the one
+  `ckWalkWork` halt as `beBudgetExhaustedPrune`). `NELLI_WALK_UNITS_LOG=<file>`
+  appends `<units>\t<target>\t<status>` per walk (`dt-bounded.sh` forwards it);
+  that is how the default is measured. `tsymex_0016_k7_splitlines_unbounded`
+  (registered) pins the typed cap under an explicit 20M limit (20,033,527 units
+  consumed before the cap).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

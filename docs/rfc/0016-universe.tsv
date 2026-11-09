@@ -11,7 +11,7 @@
 # axis defined: 0 cells
 # build rows: 5
 # error kinds: 102
-# cap kinds: 9
+# cap kinds: 10
 cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
 build:8.37 2015-04-28|jit	modelled	-
@@ -50,6 +50,7 @@ capkind:ckTermWalkRead	cap	-
 capkind:ckTermWalkWrite	cap	-
 capkind:ckVariantFieldAllocs	cap	-
 capkind:ckVariantForks	cap	-
+capkind:ckWalkWork	cap	-
 errorkind:beBudgetExhausted	kind	dcFabricated
 errorkind:beBudgetExhaustedAssumedBound	kind	dcFabricated
 errorkind:beBudgetExhaustedPrune	kind	dcOmitted

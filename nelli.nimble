@@ -1722,6 +1722,8 @@ task test, "Run the test suite":
             "tsymex_0016_k7a_survivors",
             "tsymex_0016_k7b_unsupported",
             "tsymex_0016_k10at_target",
+            # RFC-0016 K7: a walk's total solver work is bounded (walkRLimit).
+            "tsymex_0016_k7_splitlines_unbounded",
             "tsymex_0016_adm1_admission",
             "tsymex_0016_k4a_table",
             "tsymex_0016_k4a_dispatch",

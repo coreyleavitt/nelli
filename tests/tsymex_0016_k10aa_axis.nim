@@ -63,7 +63,7 @@ proc sutNoinit(k: int) =
 
 suite "K10a-axis: the definedness axis":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 294
+    check parseInt(symexWalkerVersion) >= 300
 
   test "the table: profile x row answers the build's arithmetic":
     check definedness(aoAdd, ocSignedWide, dpChecked).kind == dkDefect

@@ -81,7 +81,7 @@ proc sutHalf(f: float) =
 
 suite "K10a-float: float -> int is undefined out of range":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 294
+    check parseInt(symexWalkerVersion) >= 300
 
   test "the table: every profile is undefined, and the kind is appended":
     for p in DefProfile:

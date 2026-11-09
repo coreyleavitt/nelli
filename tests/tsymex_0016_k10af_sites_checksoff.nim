@@ -27,7 +27,7 @@ proc lineOf(site: string): int =
 
 suite "K10a-float: one site per undefined arithmetic op":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 294
+    check parseInt(symexWalkerVersion) >= 300
 
   test "two overflowing ops give two findings with distinct sites":
     let r = symexFind(sutTwo, tLabel("hit"))

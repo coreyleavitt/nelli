@@ -187,7 +187,7 @@ proc cellOf(r: Row): CellKey = parseCellKey("defined:" & r.key).get
 
 suite "K10c: the walker half (checks-off profile)":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 294
+    check parseInt(symexWalkerVersion) >= 300
 
   test "the build is the unchecked profile":
     check coOverflow notin buildSemantics.checks

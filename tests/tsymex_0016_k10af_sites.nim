@@ -32,7 +32,7 @@ proc lineOf(site: string): int =
 
 suite "K10a-float: one site per undefined conversion":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 294
+    check parseInt(symexWalkerVersion) >= 300
 
   test "two conversions give two findings with distinct sites":
     let r = symexFind(sutTwo, tLabel("hit"))

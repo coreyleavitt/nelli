@@ -116,7 +116,9 @@ suite "K10a-axis: the definedness axis":
 
   when defined(cpp) or replayReexecs:
     test "skipped: the replay stack is not the scrubbed one":
-      skip()
+      skipCell(cellKey(axDefinedness, "read/uninitialised"),
+        "a cpp build or a re-executing replay child does not run on the " &
+        "scrubbed stack the {.noinit.} read pin needs")
   else:
     test "the {.noinit.} read rides the witness (ubIndeterminateRead)":
       scrub()

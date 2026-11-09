@@ -54,12 +54,6 @@ name: fuzzer-msvc
 # compile, and `C:\z3\bin` on `$env:GITHUB_PATH` for the dlopen'd
 # `libz3.dll` at run time, which a container would not have inherited.
 #
-# TWO JOBS, in parallel on separate runners: `fuzzer-msvc` (the fuzzer + db
-# suite) and `walker-msvc` (every tsymex_0016_* file under --cc:vcc). They were
-# one job until 2026-11-09, when the two together outgrew the 90-minute job
-# timeout. Each job repeats the checkout, Z3, deps, vcvars and Nim setup it
-# needs; a change to one of those steps must be made in both.
-#
 # Deps are cloned at the EXACT commit SHAs recorded in milpa.lock, into
 # `_deps` -- same discipline, same regex, as the other two Windows legs.
 
@@ -94,11 +88,11 @@ on:
         required: false
         default: ''
       tests_glob:
-        description: 'Walker test glob for the walker-msvc job'
+        description: 'Walker test glob for the vcc step'
         required: false
         default: 'tests/tsymex_0016_*.nim'
       nim_flags:
-        description: 'Extra nim flags for the walker-msvc job (e.g. --debugger:native -d:nelliReplayReexec)'
+        description: 'Extra nim flags for the vcc step (e.g. --debugger:native -d:nelliReplayReexec)'
         required: false
         default: ''
 
@@ -411,121 +405,6 @@ jobs:
           pwsh -NoProfile -ExecutionPolicy Bypass -File _ci\run-msvc-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "MSVC suite failed (exit $LASTEXITCODE) -- see the diagnostics block above for env/Z3/cl.exe state" }
 
-      # NO cpp/MSVC STEP -- it was added here on 2026-09-02 and REMOVED the
-      # same day, because it answered its own question in the negative.
-      #
-      # RFC-0001 carried "the Windows container's cpp/MSVC pairing is
-      # unverified" as an open item. Adding `nim cpp --cc:vcc` here verified
-      # it: the pairing is BROKEN, and the failure is upstream of nelli.
-      # Measured, run 33699124168:
-      #
-      #   @pz3@sffi.nim.cpp(10025): error C2664: 'bool Z3_global_param_get(
-      #       Z3_string,Z3_string_ptr)' -- Conversion from 'void*' to pointer
-      #       to non-'void' type
-      #   @pz3@sffi.nim.cpp(10025): error C2955: 'softlink_strip_ptr_const':
-      #       use of class template requires template argument list
-      #   @pz3@sffi.nim.cpp(10026): error C2057: expected constant expression
-      #
-      # C++ does not implicitly convert `void*` to a typed pointer the way C
-      # does, and `softlink_strip_ptr_const` is a class template used without
-      # a template argument list. The defect is in SOFTLINK's generated FFI
-      # shim (via nim-z3), not in this repo -- which is why it reproduces
-      # nowhere else and why no amount of work here would fix it.
-      #
-      # FILED UPSTREAM: coreyleavitt/softlink#17 (the primary error is C2664 --
-      # the emitted static_assert wraps a call whose dummy args are `void*`,
-      # which C accepts implicitly and C++ does not; C2955/C2057 are fallout).
-      #
-      # Re-add this step when softlink's shim is C++-clean; it is three lines
-      # of git history away. Keeping it red in the meantime would block every
-      # push for an upstream reason, which is how skip-lists are born.
-
-  # RFC-0016 W1-m / W2-z: the walker on MSVC, as its own job so it runs in
-  # parallel with fuzzer-msvc on a separate runner. Run serially after the
-  # fuzzer steps, the two together outgrew 90 minutes (runs 42543282381 and
-  # 42525878891 were both cancelled at the job timeout; nothing hung).
-  # Measured serial walker time: about 50 minutes for 45 files on 2026-11-09
-  # (run 42543282381), so 90 minutes leaves headroom for new tsymex_0016_*
-  # files. It needs only checkout, Z3, deps, the MSVC env and the patched
-  # Nim; the fuzzer job's runner script and NELLI_NO_COV_BACKEND are not
-  # used here.
-  walker-msvc:
-    runs-on: windows-2025
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          # Empty on push (the triggering ref); the dispatch input otherwise.
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-
-      - name: Install Z3 4.13.4 (x64-win)
-        shell: pwsh
-        run: |
-          $v = '4.13.4'
-          curl.exe -L -o C:\z3.zip "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip"
-          if ($LASTEXITCODE -ne 0) { throw 'z3 download failed' }
-          $want = '0a36dd5654fe423d23a727c4570c9db9a315926a4301189b868b6eb9bfd5979d'
-          $got = (Get-FileHash C:\z3.zip -Algorithm SHA256).Hash.ToLower()
-          if ($got -ne $want) { throw "z3 zip sha256 mismatch: $got" }
-          Expand-Archive -Path C:\z3.zip -DestinationPath C:\ -Force
-          Move-Item "C:\z3-$v-x64-win" C:\z3
-          if (!(Test-Path C:\z3\bin\libz3.dll)) { throw 'libz3.dll missing' }
-          if (!(Test-Path C:\z3\include\z3.h))  { throw 'z3.h missing' }
-          Add-Content $env:GITHUB_PATH 'C:\z3\bin'
-
-      - name: Clone deps at milpa.lock provenance SHAs
-        shell: pwsh
-        run: |
-          $lock = Get-Content milpa.lock -Raw
-          New-Item -ItemType Directory -Force _deps | Out-Null
-          $pattern = 'dep "(?<name>[^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "(?<url>[^"]+)"[\s\S]*?commit_sha "(?<sha>[0-9a-f]{40})"'
-          foreach ($m in [regex]::Matches($lock, $pattern)) {
-            $name = $m.Groups['name'].Value
-            $url  = $m.Groups['url'].Value
-            $sha  = $m.Groups['sha'].Value
-            Write-Host "dep $name -> $url @ $sha"
-            git clone $url "_deps/$name"
-            git -C "_deps/$name" checkout --detach $sha
-            if ($LASTEXITCODE -ne 0) { throw "checkout failed for $name" }
-          }
-          if (!(Test-Path _deps/z3) -or !(Test-Path _deps/softlink)) {
-            throw 'expected deps z3 + softlink not resolved from milpa.lock'
-          }
-
-      - name: Import the MSVC developer environment (puts cl.exe on PATH)
-        shell: pwsh
-        run: |
-          # The container used to supply this. On a bare runner Visual Studio
-          # is installed but its toolset is NOT on PATH, and `nim --cc:vcc`
-          # shells out to `cl.exe` by bare name -- so vcvars must be imported
-          # into the job environment first. vswhere is the supported way to
-          # locate it; hard-coding a VS path breaks on every runner-image bump.
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) { throw 'vswhere.exe not found -- no Visual Studio on this runner' }
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'vswhere found no installation carrying the VC++ x64 toolset' }
-          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat missing at $vcvars" }
-          cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
-            if ($_ -match '^([^=]+)=(.*)$') {
-              "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            }
-          }
-          Write-Host "imported MSVC env from $vs"
-
-      - name: Verify cl.exe is reachable
-        shell: pwsh
-        run: |
-          $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
-          if (-not $cl) { throw 'cl.exe still not on PATH after importing vcvars64 -- --cc:vcc would fail' }
-          Write-Host "cl.exe: $($cl.Source)"
-
-      - name: Install the patched Nim toolchain (OCI artifact, no container)
-        uses: ./.github/actions/setup-nim-artifact
-        with:
-          tag: 2.2.10-windows-x64
-
       # RFC-0016 W1-m: the walker on MSVC. mingw (symex-mingw) cannot catch
       # MSVC-only defect classes, so every tsymex_0016_* file is compiled with
       # --cc:vcc and run against the installed Z3 4.13.4. Driven by a glob, not
@@ -534,6 +413,7 @@ jobs:
       # Nim picks up each file's sibling .nim.cfg itself (project config is
       # not skipped here).
       - name: Run RFC-0016 walker tests under MSVC (vcc)
+        if: ${{ !cancelled() }}
         shell: pwsh
         env:
           TESTS_GLOB: ${{ inputs.tests_glob || 'tests/tsymex_0016_*.nim' }}
@@ -570,3 +450,32 @@ jobs:
             exit 1
           }
           Write-Host "All $($tests.Count) RFC-0016 walker tests passed under vcc."
+
+      # NO cpp/MSVC STEP -- it was added here on 2026-09-02 and REMOVED the
+      # same day, because it answered its own question in the negative.
+      #
+      # RFC-0001 carried "the Windows container's cpp/MSVC pairing is
+      # unverified" as an open item. Adding `nim cpp --cc:vcc` here verified
+      # it: the pairing is BROKEN, and the failure is upstream of nelli.
+      # Measured, run 33699124168:
+      #
+      #   @pz3@sffi.nim.cpp(10025): error C2664: 'bool Z3_global_param_get(
+      #       Z3_string,Z3_string_ptr)' -- Conversion from 'void*' to pointer
+      #       to non-'void' type
+      #   @pz3@sffi.nim.cpp(10025): error C2955: 'softlink_strip_ptr_const':
+      #       use of class template requires template argument list
+      #   @pz3@sffi.nim.cpp(10026): error C2057: expected constant expression
+      #
+      # C++ does not implicitly convert `void*` to a typed pointer the way C
+      # does, and `softlink_strip_ptr_const` is a class template used without
+      # a template argument list. The defect is in SOFTLINK's generated FFI
+      # shim (via nim-z3), not in this repo -- which is why it reproduces
+      # nowhere else and why no amount of work here would fix it.
+      #
+      # FILED UPSTREAM: coreyleavitt/softlink#17 (the primary error is C2664 --
+      # the emitted static_assert wraps a call whose dummy args are `void*`,
+      # which C accepts implicitly and C++ does not; C2955/C2057 are fallout).
+      #
+      # Re-add this step when softlink's shim is C++-clean; it is three lines
+      # of git history away. Keeping it red in the meantime would block every
+      # push for an upstream reason, which is how skip-lists are born.

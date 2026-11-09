@@ -94,7 +94,7 @@ NELLI_PIN_DIR="$merged" NELLI_UNIVERSE_ROW="$row" \
   NELLI_UNIVERSE_PARTIAL="$([ $partial = 1 ] && echo 1)" \
   scripts/dt-bounded.sh c tests/tsymex_0016_universe.nim "${UNIVERSE_JOIN_TIMEOUT:-900}" > "$out" 2>&1
 rc=$?
-command grep -E 'universe:|unclassified cell|stale allowlist|empty record directory|days old|records\)' "$out" | head -80
+command grep -E 'universe:|universe census:|census: |unclassified cell|stale allowlist|empty record directory|days old|records\)' "$out" | head -80
 if [ "$rc" -ne 0 ]; then
   echo "--- the failing part of the universe test ---"
   command grep -n -B2 -A12 -E '\[FAILED\]|Error:' "$out" | head -120

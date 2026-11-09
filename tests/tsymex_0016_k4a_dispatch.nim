@@ -150,7 +150,10 @@ sutU2(sLtU, a < b and b == 3)
 sutF2(sAddF, a + b == 7.5)
 sutF2(sSubF, a - b == 7.5)
 sutF2(sMulF, a * b == 6.0 and a == 2.0)
-sutF2(sDivF, b != 0.0 and a / b == 2.0)
+# b is pinned like sMulF pins a: the division circuit over two free operands is
+# a query some Z3 builds answer unknown (CI Z3 5.1.0.0 did); b == 2.5 leaves
+# a / 2.5 == 2.0, witness a == 5.0, inside fDom.
+sutF2(sDivF, b == 2.5 and a / b == 2.0)
 sutF1(sNegF, -a == 2.5)
 sutF1(sPlusF, +a == 2.5)
 sutF2(sEqF, a == b and a == 2.5)

@@ -34,7 +34,6 @@ errorkind:feReplayTimedOut	K9c	no pinDecline asserts this kind; K9c finds each k
 errorkind:feTableIterOrder	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feTransparentArgNotInert	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feTransparentResultUsed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feUnadmitted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feUnsupportedOpAborted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feUnsupportedWitnessType	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geConceptViolation	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer

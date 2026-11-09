@@ -127,6 +127,7 @@ import nelli/smt/types
 import nelli/smt/dsl_parser
 import nelli/smt/typeaxes
 import nelli/smt/definedness
+import nelli/smt/errorkind
 import nelli/smt/magic_rows
 import nelli/smt/stdlib_rows
 
@@ -471,6 +472,7 @@ proc fieldwiseEq(a, b: IRStmt): bool =
       a.dwField == b.dwField and fieldwiseEqTypeOpt(a.dwObjTy, b.dwObjTy)
   of isUnsupported: a.unKind == b.unKind and a.reason == b.reason
   of isUnsafeCast: a.ucReason == b.ucReason
+  of isUndefined: a.udKind == b.udKind and a.udSite == b.udSite   # RFC-0016 PRC-07
 
 # ---------------------------------------------------------------------------
 # IRType sentinels + round-trip tests
@@ -995,6 +997,10 @@ proc sUnsupportedStmt(): IRStmt =
   ## cannot round-trip by coincidence.
   mkUnsupported(seNestedSeqUnsupported, "sentinel unsupported reason", 7)
 proc sUnsafeCast(): IRStmt = mkUnsafeCast("cast[ptr T]", 9)
+proc sUndefined(): IRStmt =
+  ## RFC-0016 PRC-07: a non-default kind, so a dropped `udKind` in the
+  ## emitter cannot round-trip by coincidence.
+  mkUndefined(ubInvalidObjConversion, "sentinel site: Der(b) past the object")
 
 suite "R6 emit round-trip -- IRStmt kinds":
   test "isBlock":
@@ -1080,6 +1086,8 @@ suite "R6 emit round-trip -- IRStmt kinds":
     check fieldwiseEq(sUnsupportedStmt(), roundtripStmt(sUnsupportedStmt()))
   test "isUnsafeCast":
     check fieldwiseEq(sUnsafeCast(), roundtripStmt(sUnsafeCast()))
+  test "isUndefined":
+    check fieldwiseEq(sUndefined(), roundtripStmt(sUndefined()))
 
   test "exhaustiveness gate: every IRStmtKind is covered above (no `else` -- a new kind fails to compile)":
     proc auditIRStmtKindCoverage(k: IRStmtKind) =
@@ -1112,4 +1120,5 @@ suite "R6 emit round-trip -- IRStmt kinds":
       of isDerefWrite: discard                    ## "isDerefWrite" (2 tests: bare + field)
       of isUnsupported: discard                   ## "isUnsupported"
       of isUnsafeCast: discard                    ## "isUnsafeCast"
+      of isUndefined: discard                     ## "isUndefined" (RFC-0016 PRC-07)
     auditIRStmtKindCoverage(isBlock)  ## formality: silence the unused-proc warning

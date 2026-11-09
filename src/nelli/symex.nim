@@ -2995,6 +2995,28 @@ proc routineFootprint(r: NimNode): RoutineFootprint =
           break
   routineFootprints[key] = result
 
+proc addressable(r: NimNode): bool =
+  ## RFC-0016 PRC-02. `r` can be a proc value: a routine with a body of its own.
+  ## A `{.borrow.}` (whose body is the base type's operation, often a magic), a
+  ## `magic`, `importc` or `compilerproc` routine, or a generic one has none the
+  ## compiler can take the address of (`cast[pointer](==)` is an internal error
+  ## for a borrowed `==`), so it is not in the table and a proc value naming it
+  ## declines, as one naming any routine the scan did not read does.
+  let impl =
+    try: r.getImpl
+    except CatchableError: return false
+  if impl.kind notin {nnkProcDef, nnkFuncDef} or impl.len <= 6: return false
+  if impl[6].kind == nnkEmpty: return false
+  if impl[2].kind != nnkEmpty: return false
+  if impl[4].kind == nnkPragma:
+    for p in impl[4]:
+      let id = if p.kind == nnkExprColonExpr: p[0] else: p
+      if id.kind in {nnkIdent, nnkSym} and
+         id.strVal.normalize in ["magic", "importc", "compilerproc", "borrow",
+                                 "importcpp", "importobjc", "dynlib"]:
+        return false
+  true
+
 proc replayFootprint(fn: NimNode): ReplayFootprint =
   ## RFC-0005 S8cb. The state a replay of `fn` may reach. A replay's parameters
   ## and locals are its own, and it reaches anything else through a module-level
@@ -3023,7 +3045,8 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     if f.open and not result.open:
       result.open = true
       result.why = f.why
-    if symKind(r) in {nskProc, nskFunc} and not isStdlibDecl(r):
+    if symKind(r) in {nskProc, nskFunc} and not isStdlibDecl(r) and
+       addressable(r):
       let ro = owner(r)
       if ro.kind != nnkSym or symKind(ro) notin userRoutineSymKinds:
         result.routines.add r      # top level: its address can be named

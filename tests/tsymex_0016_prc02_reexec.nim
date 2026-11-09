@@ -196,6 +196,28 @@ suite "PRC-02: a routine's {.global.}":
     checkpoint r.detail
     check r.outcome == roConfirmed
 
+# ---- borrowed and system operators in the footprint ------------------------------
+# A `{.borrow.}` routine (and the system `==`/`<`/`+` it forwards to) has no body
+# whose address the table can take; it must be left out, not crash the build.
+
+type Dist = distinct int
+proc `==`(a, b: Dist): bool {.borrow.}
+proc `<`(a, b: Dist): bool {.borrow.}
+proc `+`(a, b: Dist): Dist {.borrow.}
+
+var gSysOp: proc (c: char): char = strutils.toLowerAscii
+
+proc sutBorrow(v: int) =
+  symexAssume(v == 3)
+  let a = Dist(v)
+  if a + Dist(1) == Dist(4) and a < Dist(10) and v + 1 < 5 and v == 3 and
+     gG == 0:
+    symexTarget("t")
+
+proc sutSysProcValue(v: int) =
+  symexAssume(v == 3)
+  if gSysOp('A') == 'a' and gG == 0: symexTarget("t")
+
 suite "INT-13: runtime hooks":
   test "a hook naming a routine the code names is reinstalled":
     globalRaiseHook = namedHook
@@ -223,3 +245,15 @@ suite "INT-13: runtime hooks":
 
   test "the walker's version floor":
     check parseInt(symexWalkerVersion) >= 292
+
+suite "borrowed and system routines":
+  test "borrowed and system operators compile and replay":
+    let r = replayWitness(sutBorrow, (3,), tLabel("t"), {})
+    checkpoint r.detail
+    check r.outcome == roConfirmed
+
+  test "a proc value naming a system routine compiles and declines or replays":
+    let r = replayWitness(sutSysProcValue, (3,), tLabel("t"), {})
+    checkpoint r.detail
+    check r.outcome in {roConfirmed, roDeclined}
+

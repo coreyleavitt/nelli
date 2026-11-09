@@ -360,19 +360,13 @@ suite "S8ct: §2.3 rule 3 still holds":
     check r.soundness.replay == rsConfirmed
     check nativeRun("routineGlobal", 3).hit
 
-  test "state the wire cannot carry: Linux decides, re-exec names why not":
-    ## RFC-0016 W1-m: a routine global named from ANOTHER routine still makes
-    ## the re-exec replay decline.
+  test "a routine's {.global.} named from a nested routine is carried":
+    ## RFC-0016 PRC-02: the declaring routine is one the child runs, so the
+    ## global is the child's own; this was a re-exec decline under W1-m.
     let r = symexFind(routineGlobalOther, tLabel("t"))
     checkpoint(show(r.errors))
-    when replayReexecs:
-      check r.status == sxUnknown
-      check hasKind(r.errors, feReplayDeclined)
-      check "replay not marshallable" in show(r.errors)
-      check "a Linux or macOS run forks and replays it" in show(r.errors)
-    else:
-      check r.status == sxSat
-      check r.soundness.replay == rsConfirmed
+    check r.status == sxSat
+    check r.soundness.replay == rsConfirmed
     check nativeRun("routineGlobalOther", 3).hit
 
   test "the walker's version floor":

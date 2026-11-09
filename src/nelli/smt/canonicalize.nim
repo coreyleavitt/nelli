@@ -329,7 +329,9 @@ const symexWalkerVersion* = "298"
   ## walk spends; at the limit the walk stops (`ckWalkWork`,
   ## `beBudgetExhaustedPrune`, `sxUnknown` unless a sound witness was already
   ## found). A walk that ran unbounded before (a nested-loop unroll that never
-  ## ended) now ends in that halt under a nonzero limit.
+  ## ended) now ends in that halt under a nonzero limit. The default is
+  ## 1_000_000_000 units (about 5.7x the largest decided walk in the corpus,
+  ## see `walkRLimit`), so an unmodified setting is bounded.
   ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case
   ## objects, in a witness and in a variable the SUT reaches, where it declined
   ## as not marshallable. A cached `:unk` that was that decline is stale.

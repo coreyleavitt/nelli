@@ -107,7 +107,7 @@ SymexSettings(
   integerSemantics:        isOptimised,  # ADR-0001
   queryTimeoutMs:          5000,
   maxFrontierSize:         256,
-  budget.walkRLimit:       0,     # total Z3 units per walk; 0 = unbounded (cap ckWalkWork)
+  budget.walkRLimit:       1_000_000_000, # total Z3 units per walk; 0 = unbounded (cap ckWalkWork)
   maxCallDepth:            3,
   maxLoopUnwind:           5,
   acceptUnknownAsCovered:  false)
@@ -343,7 +343,8 @@ setting a positive value.
 **Total work per walk.** `budget.walkRLimit` bounds the sum of Z3
 resource units (`rlimit`) every solver check of one walk spends, which the
 per-query bounds do not (thousands of fast checks over multiplying unrolled
-paths). `0` is unbounded. At the limit the walk stops and records the cap
+paths). The default is `1_000_000_000` (about 5.7x the largest decided walk
+in the suite); `0` opts out. At the limit the walk stops and records the cap
 `ckWalkWork` (`beBudgetExhaustedPrune`): paths not yet decided are
 `sxUnknown`, while a target already reached with a sound witness stays a hit.
 Deterministic and part of the cache key. To measure it, set the environment

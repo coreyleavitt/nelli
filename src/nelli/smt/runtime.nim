@@ -8334,6 +8334,9 @@ proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
        of bSub: a.fp32 - b.fp32
        of bMul: a.fp32 * b.fp32
        of bDiv: a.fp32 / b.fp32
+       of bMod: raise (ref SymexUnsupportedOpError)(op: "math.mod",
+         msg: "math.mod is not modeled by the symex engine -- " &
+              floatCallDecline("mod", 2))   # RFC-0016 K4c (PRC-09): `mod` on floats is `math.mod` (fmod), a row
        else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))  # [raise-audited: category-c: op-narrowed by caller dispatch; Nim also has no mod for floats]
   else:
     SymVal(kind: svFloat64, fp64:
@@ -8342,6 +8345,9 @@ proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
        of bSub: a.fp64 - b.fp64
        of bMul: a.fp64 * b.fp64
        of bDiv: a.fp64 / b.fp64
+       of bMod: raise (ref SymexUnsupportedOpError)(op: "math.mod",
+         msg: "math.mod is not modeled by the symex engine -- " &
+              floatCallDecline("mod", 2))
        else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))  # [raise-audited: category-c: op-narrowed by caller dispatch (see arithFloat above)]
 
 proc truncDivInt(a, b: Z3Int): tuple[q, r: Z3Int] =

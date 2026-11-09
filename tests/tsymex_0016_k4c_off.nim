@@ -43,3 +43,23 @@ suite "K4c (overflowChecks off): the user routine is as unchecked as the stdlib"
     let r = pinExact(sFloorDiv, cellKey(axStdlibBody, "math.floorDiv"),
                      domain = sampled([-7, -1, 0, 1, 2, 7, 8]))
     check r.status == sxSat
+
+proc sNextPow2(a: int) =
+  if nextPowerOfTwo(a) == 8 and a == 5: symexTarget("hit")
+proc sNextPow2Min(a: int) =
+  if nextPowerOfTwo(a) == 1 and a == low(int): symexTarget("hit")
+proc sEuclMod(a: int) =
+  if euclMod(a, 3) == 2 and a == -7: symexTarget("hit")
+
+suite "K4c PRC-09 (overflowChecks off): the other walked math rows agree":
+  const smallInts = sampled([-7, -5, -3, -1, 0, 1, 2, 3, 5, 7, 8, 9])
+  test "math.nextPowerOfTwo decides, and halts on `low(int) - 1`":
+    let r = pinExact(sNextPow2, cellKey(axStdlibBody, "math.nextPowerOfTwo"),
+                     domain = smallInts)
+    check r.status == sxSat
+    pinDecline(sNextPow2Min, cellKey(axStdlibBody, "math.nextPowerOfTwo"),
+               ubSignedOverflow)
+  test "math.euclMod decides":
+    let r = pinExact(sEuclMod, cellKey(axStdlibBody, "math.euclMod"),
+                     domain = smallInts)
+    check r.status == sxSat

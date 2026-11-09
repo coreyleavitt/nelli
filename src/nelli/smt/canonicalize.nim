@@ -299,6 +299,15 @@ const renderAsChoicesVersion* = "12"
   ##   divisor are `ArithTrap`s, as in a checks-off build) instead of
   ##   declining `feCheckOption` (`math.floorDiv`, `isPowerOfTwo`, `floorMod`,
   ##   `euclDiv`). A routine with no row declines as before.
+  ##   Extended in the same slice: absent is a decline for every stdlib body
+  ##   (a routine of `lib/` outside `stdlibAxis` and the corpus ledger
+  ##   declines `feUnadmitted`); `math.nextPowerOfTwo`, `euclMod`, `sgn` are
+  ##   walked with their delta, `ceilDiv` and `divmod` decline by their rows;
+  ##   a float-first `std/math` call reads its row (`math.round` is C `round`,
+  ##   ties away from zero, no longer banker's; `round(x, places)` and float
+  ##   `mod` decline, the latter was an internal walker fault);
+  ##   `unicode.toLower` and `typedthreads.createThread` calls decline by their
+  ##   `never` rows.
 
 const symexWalkerVersion* = "296"
   ## RFC-0016 PRC-01 (295->296): a re-executed replay (Windows) marshals case

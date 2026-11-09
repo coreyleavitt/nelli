@@ -29,11 +29,9 @@ proc sUserDiv(a, b: int) =
   if a div b == 3 and b == 0: symexTarget("hit")
 proc sFloorDivZero(a, b: int) =
   if floorDiv(a, b) == 3 and b == 0: symexTarget("hit")
-# A routine in the same pushed region with no row keeps declining.
-proc sSgn(a: int) =
-  if sgn(a) == -1 and a == -5: symexTarget("hit")
-proc sNextPow2(a: int) =
-  if nextPowerOfTwo(a) == 8 and a == 5: symexTarget("hit")
+# A routine in the same pushed region whose row declines keeps declining.
+proc sCeilDiv(a: int) =
+  if ceilDiv(a, 3) == 3 and a == 7: symexTarget("hit")
 
 const smallInts = sampled([-7, -5, -3, -1, 0, 1, 2, 3, 5, 7, 8, 9])
 
@@ -50,7 +48,7 @@ suite "K4c: the rows":
     check "stdlib:math.floorDiv" in a.decline[1]
 
   test "a routine with no row is absent, a decline":
-    let a = admitStdlibBody("math.sgn", ssBodyWalk)
+    let a = admitStdlibBody("math.noSuchRoutine", ssBodyWalk)
     check not a.admitted
     check a.decline[0] == some(feUnadmitted)
 
@@ -96,11 +94,8 @@ suite "K4c: the delta pinned both ways (user routine checked, stdlib body not)":
     let r = symexFind(sFloorDivZero, tLabel("hit"))
     check r.status != sxRaised
 
-suite "K4c: a routine with no row keeps declining":
-  test "math.sgn is in the pushed region and has no row":
-    check native(sSgn(-5)) == "hit"
-    pinDecline(sSgn, cellKey(axStdlibBody, "math.sgn"), feCheckOption)
-  test "math.nextPowerOfTwo has no row either":
-    check native(sNextPow2(5)) == "hit"
-    pinDecline(sNextPow2, cellKey(axStdlibBody, "math.nextPowerOfTwo"),
-               feCheckOption)
+suite "K4c: a declined row keeps declining":
+  test "math.ceilDiv is in the pushed region and its row declines":
+    check native(sCeilDiv(7)) == "hit"
+    let c = cellKey(axStdlibBody, "math.ceilDiv")
+    pinDecline(sCeilDiv, c, feCheckOption, needle = render(c))

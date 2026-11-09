@@ -450,11 +450,12 @@ cells = []
 id = "PRC-09"
 table = "5.2b"
 title = "S8cu: `math.nim`'s pushed regions now decline Mechanism: K4c `admitStdlibBody`."
-state = "open"
-note = ": partly done (2026-11-09, K4c): four `std/math` routines have rows with their check-option delta and decide (walked under the push's unchecked arithmetic); every other routine of a pushed region has no row and keeps declining `feCheckOption`. Remainder: seed rows as pins land"
+state = "closed"
+note = ": done (2026-11-09, K4c): every routine of `std/math`'s pushed `checks: off` region (math.nim:157-1116) has a row. Walked by body with the check-option delta: `isPowerOfTwo`, `nextPowerOfTwo`, `floorDiv`, `floorMod`, `euclDiv`, `euclMod`, `sgn` (the push's unchecked arithmetic is modelled; a zero divisor or `low(int) - 1` halts as undefined). Declined with a named reason: `ceilDiv` (unsigned conversions, range checks off: `feCheckOption`), `divmod` (an opaque tuple-returning generic: `feOpaqueCallUnmodelled`), and the float family, which is never walked by body (a float-first call is lowered by name): `sqrt`, `floor`, `ceil`, `trunc`, `round` (ties away from zero; was banker's), `signbit`, `isNaN`, `copySign`, `classify` are modelled, every libm function and composition, `frexp`, `splitDecimal`, `degToRad`, `radToDeg`, `almostEqual`, `mod` and `round(x, places)` decline `feUnsupportedOpAborted` naming the cell. Excluded: the JS-only and `windowsCC89`-only helpers of the region (`toBitsImpl`, `jsSetSign`, `truncImpl`, `log2Impl`, `jsRound`), which no build row compiles"
 source = "S8cu"
 evidence = "every routine in a pushed region of `std/math` declines"
-cells = ["stdlib:math.isPowerOfTwo", "stdlib:math.floorDiv", "stdlib:math.floorMod", "stdlib:math.euclDiv"]
+slice = "K4c"
+cells = ["stdlib:math.almostEqual", "stdlib:math.arccos", "stdlib:math.arccosh", "stdlib:math.arccot", "stdlib:math.arccoth", "stdlib:math.arccsc", "stdlib:math.arccsch", "stdlib:math.arcsec", "stdlib:math.arcsech", "stdlib:math.arcsin", "stdlib:math.arcsinh", "stdlib:math.arctan", "stdlib:math.arctan2", "stdlib:math.arctanh", "stdlib:math.cbrt", "stdlib:math.ceil", "stdlib:math.ceilDiv", "stdlib:math.classify", "stdlib:math.copySign", "stdlib:math.cos", "stdlib:math.cosh", "stdlib:math.cot", "stdlib:math.coth", "stdlib:math.csc", "stdlib:math.csch", "stdlib:math.degToRad", "stdlib:math.divmod", "stdlib:math.erf", "stdlib:math.erfc", "stdlib:math.euclDiv", "stdlib:math.euclMod", "stdlib:math.exp", "stdlib:math.floor", "stdlib:math.floorDiv", "stdlib:math.floorMod", "stdlib:math.frexp", "stdlib:math.gamma", "stdlib:math.hypot", "stdlib:math.isNaN", "stdlib:math.isPowerOfTwo", "stdlib:math.lgamma", "stdlib:math.ln", "stdlib:math.log", "stdlib:math.log10", "stdlib:math.log2", "stdlib:math.mod", "stdlib:math.nextPowerOfTwo", "stdlib:math.pow", "stdlib:math.radToDeg", "stdlib:math.round", "stdlib:math.round/places", "stdlib:math.sec", "stdlib:math.sech", "stdlib:math.sgn", "stdlib:math.signbit", "stdlib:math.sin", "stdlib:math.sinh", "stdlib:math.splitDecimal", "stdlib:math.sqrt", "stdlib:math.tan", "stdlib:math.tanh", "stdlib:math.trunc"]
 
 [[row]]
 id = "PRC-10"

@@ -1,4 +1,2 @@
 # RFC-0016 K4c allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-stdlib:typedthreads.createThread/concurrency	K4c	no declining site to pin: createThread is a walker fault (ptrPointeeTy, W-19b), which pinDecline refuses, so the never row is a ledger cell until W-19b makes it a decline
-stdlib:unicode.toLower/fullCaseFold	K4c	no declining site to pin: toLower on a symbolic Rune did not terminate in a 900 s probe (a finding, not a decline), and strutils toUpper declines seUnsupportedStringOp as an ASCII op, not a Unicode fold

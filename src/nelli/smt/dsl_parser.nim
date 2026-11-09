@@ -1505,20 +1505,43 @@ func arithStamp(c: RoutineChecks; inherit: bool): ArithScope =
   if (not buildWraps() and not c.overflowModelled) or inherit: asInherit
   else: arithScopeFor(c, asBuild, false)
 
-proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks) =
-  ## RFC-0016 K4c (section 8.1). The stdlib-body axis's check-option delta.
-  ## A stdlib routine walked by body whose module turns checks off
-  ## (`math.nim`: `push checks: off`) has a row naming the checks its body can
-  ## trip (`exercises`). An option the push turns off that the body cannot
-  ## trip is no deviation. `overflowChecks` that the body trips is modelled
-  ## (`overflowModelled`: the body is walked under `asUnchecked`). Anything
-  ## else stays a deviation and declines (`withCheckDeclines`), as does a
-  ## routine with no row. A routine with no deviation is not read.
-  if c.why.len > 0 or c.checks == {}: return
+const nelliStdlibLedger {.strdefine.} = ""
+  ## RFC-0016 K4c. With `-d:nelliStdlibLedger=<file>`, the parser appends the
+  ## key of every stdlib routine it reads a body of to `<file>`: the corpus run
+  ## that seeds `stdlib_ledger` (`scripts/stdlib-ledger.sh`). Off by default.
+
+proc ledgerNote(key: string) =
+  when nelliStdlibLedger.len > 0:
+    discard gorge("echo '" & key.replace("'", "'\\''") & "' >> '" &
+            nelliStdlibLedger & "'")
+
+proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
+  ## RFC-0016 K4c (section 8.1). The stdlib-body axis, read for a routine of
+  ## the toolchain's `lib/` the walker is about to walk by its body.
+  ##
+  ## Absent is a decline (section 6): a routine with no row, or a declined one,
+  ## is walked behind a marker naming its cell (`RoutineChecks.unadmitted`).
+  ## A magic is the magic axis's (`isMagic`).
+  ##
+  ## The check-option delta: a row names the checks its body can trip
+  ## (`exercises`). A stdlib routine whose module turns checks off
+  ## (`math.nim`: `push checks: off`) deviates; an option the push turns off
+  ## that the body cannot trip is no deviation, and `overflowChecks` that the
+  ## body trips is modelled (`overflowModelled`: the body is walked under
+  ## `asUnchecked`). Anything else stays a deviation and declines
+  ## (`withCheckDeclines`), as does a ledger row, whose delta is unknown.
   let key = stdlibRoutineKey(impl)
   if key.len == 0: return
+  ledgerNote(key)
+  if isMagic: return
   let adm = admitStdlibBody(key, ssBodyWalk)
+  if not adm.admitted:
+    let (kind, why) = adm.decline
+    c.unadmitted = why
+    c.unadmittedKind = kind.get(feUnadmitted)
+    return
   if not adm.admitted: return
+  if c.why.len > 0 or c.checks == {} or not adm.payload.deltaKnown: return
   let ex = adm.payload.exercises
   c.checks = (c.checks * ex) + (c.checks * defaultOff)
   c.overflowModelled = coOverflow in c.checks
@@ -1534,7 +1557,8 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # `overflowChecks: on`. A checks-on build needs no stamp (nothing to override
   # but the `off` push, which declines below).
   let scope = arithStamp(c, inherit)
-  if c.checks == {} and scope == asInherit: return body
+  if c.checks == {} and scope == asInherit and c.unadmitted.len == 0:
+    return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
   let others = c.checks - {coOverflow}
@@ -1554,6 +1578,11 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
       " is compiled with overflowChecks off: its signed `+`, `-` and `*` are " &
       "undefined on overflow, which no setting models -- path degraded to " &
       "sxUnknown")
+  # RFC-0016 K4c: the stdlib-body axis does not admit the body (absent is a
+  # decline); the reason names the cell.
+  if c.unadmitted.len > 0:
+    decl.add ctx.declineMarker(c.unadmittedKind, where & ": " & c.unadmitted &
+      " -- path degraded to sxUnknown")
   if body != nil: decl.add body
   result = mkBlock(decl)
   if body != nil: result.blkArith = scope
@@ -21625,6 +21654,14 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     if varMagic.isSome:
       return ctx.varMagicDecline(name, implMagic(impl), varMagic.get,
                                  name & "#varMagic")
+    # RFC-0016 K4c (STY-06). A routine a `never` facet of the stdlib axis
+    # names (`callDeclineFacet`) is declined at the call, by the row's name.
+    block:
+      let facet = callDeclineFacet(stdlibRoutineKey(impl))
+      if facet.len > 0:
+        return ctx.declineCallee(feUnsupportedOp,
+          "routine `" & name & "` is not modelled -- " & facetNote(facet) &
+          " -- path degraded to sxUnknown (feUnsupportedOp)", name & "#facet")
     # RFC-0005 S8cl (item 2). A routine whose formals are not `nnkIdentDefs`
     # (the compiler's generated hooks) cannot be read: it declines, so
     # `parseCalleeImpl`'s `expectKind` never fails the build on one.
@@ -21936,7 +21973,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ## membership-only assertion, so it routes onto `walkableRoutineKinds`.
   impl.expectKind walkableRoutineKinds
   var checkOpts = routineChecks(impl)   ## RFC-0005 S8cu: at the definition
-  applyStdlibDelta(impl, checkOpts)     ## RFC-0016 K4c
+  applyStdlibDelta(impl, checkOpts, implMagic(impl).len > 0)  ## RFC-0016 K4c
   ctx.assertsOff.add checkOpts.assertsMaybeOff
   defer: discard ctx.assertsOff.pop()
   # RFC-0016 WA-A: a magic's arithmetic is the call site's (`abs`, whose

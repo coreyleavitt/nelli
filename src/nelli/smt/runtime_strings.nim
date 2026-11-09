@@ -1588,7 +1588,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       return lowerRegexDecline(env, e)   # RFC-0005 S8ay
     let opName = if e.strOp.len > 0: e.strOp else: $e.kind
     raise (ref SymexUnsupportedStringOpError)(op: opName,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-      msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")
+      msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle" &
+           # RFC-0016 K4c (STY-06): `unicode.toLower` is a `never` facet.
+           (if opName == "toLower": " -- " & facetNote("unicode.toLower/fullCaseFold")
+            else: ""))
   else:
     # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a bare
     # `raise newException(ValueError, ...)` -- category (c) TODAY (`lower`'s

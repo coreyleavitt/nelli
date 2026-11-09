@@ -44,6 +44,7 @@
 ## is hidden too (or that never pops), and an importer outside that graph.
 import std/[macros, os, strutils, tables, compilesettings]
 import ./buildprofile
+import ./errorkind
 export buildprofile.CheckOption   ## moved to buildprofile (RFC-0016 W1-c1a)
 
 {.warning[Deprecated]: off.}   # `NimNode.owner`: no replacement in 2.2.10
@@ -709,6 +710,13 @@ type RoutineChecks* = object
     ## RFC-0016 K4c. A `stdlibAxis` row covers the routine's overflow delta:
     ## its body exercises `overflowChecks` and the push turns them off, and
     ## the walker models that (`asUnchecked`). Set by the parser, never here.
+  unadmitted*: string
+    ## RFC-0016 K4c. The stdlib-body axis does not admit this routine's body
+    ## (`admitStdlibBody`: no row, or a declined one), and the reason names the
+    ## cell. Set by the parser, never here; the routine is walked behind a
+    ## `unadmittedKind` marker.
+  unadmittedKind*: SymexErrorKind
+    ## The kind of that decline (`feUnadmitted` for an absent row).
   overflowOn*: bool
     ## RFC-0016 W1-d2c. The routine's position was read and `overflowChecks`
     ## is on there on every reading (no `coOverflow` deviation): in a build

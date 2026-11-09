@@ -35,6 +35,7 @@ import std/options
 import ./admission
 import ./errorkind
 import ./buildprofile
+import ./stdlib_ledger
 
 type
   StdlibSite* = enum
@@ -43,18 +44,24 @@ type
     ssInfix       ## the unsigned operators spelled infix (`dispatchMagic` site)
     ssType        ## `classifyType`'s catch-all for a stdlib generic object
     ssFacet       ## a property the walker declines; the declining site names it
+    ssFloatCall   ## a float-first `std/math` call, intercepted by name and
+                  ## lowered by `lowerMathCall` (never walked by body)
 
   StdlibBody* = object
     exercises*: set[CheckOption]
       ## The checks the routine's body can trip (its check-option delta).
       ## Empty for a row that is not walked by body.
+    deltaKnown*: bool
+      ## `exercises` was worked out for this body. A ledger row (the corpus's
+      ## walked routines, `stdlib_ledger`) says only that the body is walked
+      ## where no option deviates; under a push it keeps declining.
 
   StdlibRow = tuple[key: string, row: Row[StdlibSite, StdlibBody]]
 
 func walked(key, note: string; exercises: set[CheckOption]): StdlibRow =
-  (key, modelled[StdlibSite, StdlibBody](StdlibBody(exercises: exercises),
-                                          {ssBodyWalk}, note,
-                                          elsewhere = some(feUnsupportedOp)))
+  (key, modelled[StdlibSite, StdlibBody](
+    StdlibBody(exercises: exercises, deltaKnown: true), {ssBodyWalk}, note,
+    elsewhere = some(feUnsupportedOp)))
 
 func unsignedOp(key, note: string): StdlibRow =
   (key, modelled[StdlibSite, StdlibBody](StdlibBody(), {ssCallSwitch, ssInfix},
@@ -69,9 +76,22 @@ func neverFacet(key, note: string; why: NeverReason;
   (key, refused[StdlibSite, StdlibBody](some(kind), note, intent = iNever,
                                          never = why))
 
+func floatModelled(name, note: string): StdlibRow =
+  ("math." & name, modelled[StdlibSite, StdlibBody](StdlibBody(),
+    {ssFloatCall}, note, elsewhere = some(feUnsupportedOp)))
+
+func floatDeclined(names: openArray[string]; note: string): seq[StdlibRow] =
+  ## One declined row per routine of a family, all with the same reason.
+  for n in names:
+    result.add ("math." & n, refused[StdlibSite, StdlibBody](
+      some(feUnsupportedOpAborted), note))
+
+func checkDeclined(key, note: string): StdlibRow =
+  (key, refused[StdlibSite, StdlibBody](some(feCheckOption), note))
+
 const ovf = {coOverflow}
 
-const stdlibAxis* = axisTable[StdlibSite, StdlibBody](axStdlibBody, [
+const explicitRows: seq[StdlibRow] = @[
   # PRC-09. std/math pushes `checks: off` from math.nim:157. Each body below
   # is integer arithmetic: the only check it can trip is `overflowChecks`
   # (the signed `-`, `+`, `div`, `mod` and `dec`, and the zero divisor).
@@ -153,18 +173,128 @@ const stdlibAxis* = axisTable[StdlibSite, StdlibBody](axStdlibBody, [
     "today (W-19b)", nrTheory),
   neverFacet("unicode.toLower/fullCaseFold",
     "full Unicode case folding is not modelled (HRV-105); the string model " &
-    "is byte-faithful (Cluster S)", nrTheory)])
+    "is byte-faithful (Cluster S)", nrTheory)]
+
+# PRC-09 (RFC section 8.1). std/math pushes `checks: off` from math.nim:157 to
+# its `{.pop.}` at math.nim:1116. Every routine of that region has a row. The
+# integer routines are walked by body and carry their delta (above). A float
+# routine is never walked by body: `mathInterception` (dsl_parser) lowers a
+# call with a float first argument by name (`lowerMathCall`), so the push
+# changes nothing for it; the row says whether that lowering models it.
+const mathRows: seq[StdlibRow] = block:
+  var r: seq[StdlibRow] = @[
+    walked("math.nextPowerOfTwo",
+      "math.nim:339: `x - 1`, shifts, `result += 1 + ord(x <= 0)`: overflow " &
+      "(`low(int) - 1`)", ovf),
+    walked("math.euclMod",
+      "math.nim:912: `x mod y`, `result += abs(y)`: overflow (`abs`) and the " &
+      "zero divisor", ovf),
+    (key: "math.divmod", row: refused[StdlibSite, StdlibBody](
+      some(feOpaqueCallUnmodelled),
+      "math.nim:832: a tuple-returning generic that writes `result[0]` and " &
+      "`result[1]`: the walker does not inline it (an opaque call), whatever " &
+      "the push")),
+    walked("math.sgn",
+      "math.nim:1102: `ord(T(0) < x) - ord(x < T(0))`: the difference of two " &
+      "booleans' ordinals cannot overflow", {}),
+    checkDeclined("math.ceilDiv",
+      "math.nim:925: converts through `x.UT` and `.T` (unsigned), whose range " &
+      "checks the push turns off; the walker models range checks on only, so " &
+      "the routine keeps declining"),
+    floatModelled("sqrt", "IEEE sqrt (fp.sqrt, RNE), exact"),
+    floatModelled("floor", "roundToIntegral toward negative, exact"),
+    floatModelled("ceil", "roundToIntegral toward positive, exact"),
+    floatModelled("trunc", "roundToIntegral toward zero, exact"),
+    floatModelled("round",
+      "roundToIntegral to nearest, ties away from zero (C `round`); the " &
+      "one-argument overload only"),
+    floatModelled("signbit", "the sign bit, exact"),
+    floatModelled("isNaN", "fp.isNaN, exact"),
+    floatModelled("copySign", "the sign of the second operand on the " &
+      "magnitude of the first, exact"),
+    floatModelled("classify", "FloatClass from the FP predicates, exact"),
+    ("math.round/places", refused[StdlibSite, StdlibBody](
+      some(feUnsupportedOpAborted),
+      "`round(x, places)` is `round(x * 10^places) / 10^places` through " &
+      "`pow`, which is not modelled")),
+  ]
+  r.add floatDeclined(["cbrt", "ln", "log10", "log2", "exp", "sin", "cos",
+      "tan", "sinh", "cosh", "tanh", "arcsin", "arccos", "arctan", "arctan2",
+      "arcsinh", "arccosh", "arctanh", "hypot", "pow", "erf", "erfc", "gamma",
+      "lgamma"],
+    "a libm function (importc): no SMT-LIB floating-point primitive models " &
+    "it, so its result is not computed")
+  r.add floatDeclined(["log", "cot", "sec", "csc", "coth", "sech", "csch",
+      "arccot", "arcsec", "arccsc", "arccoth", "arcsech", "arccsch"],
+    "a reciprocal or composition of libm functions the walker does not model")
+  r.add floatDeclined(["frexp", "splitDecimal", "degToRad", "radToDeg",
+      "almostEqual", "mod"],
+    "a float-first call is lowered by name (`lowerMathCall`), which has no " &
+    "arm for it, and its body is not walked")
+  r
+
+const stdlibAxis* = axisTable[StdlibSite, StdlibBody](axStdlibBody,
+                                                      explicitRows & mathRows)
+
+func ledgerRows(): seq[StdlibRow] =
+  for k in ledgerKeys:
+    if not stdlibAxis.hasRow(k):
+      result.add (k, modelled[StdlibSite, StdlibBody](StdlibBody(), {ssBodyWalk},
+        "in the corpus ledger (`stdlib_ledger`): walked by its body wherever " &
+        "no check option deviates; its check-option delta is not worked out",
+        elsewhere = some(feUnsupportedOp)))
+
+const ledgerAxis = axisTable[StdlibSite, StdlibBody](axStdlibBody, ledgerRows())
+  ## The routines the corpus walked (RFC section 8.1: the axis is seeded from a
+  ## `feStdlibBodyWalked` ledger). Not part of `stdlibAxis`, whose rows are the
+  ## universe's cells: a ledger row is admitted at `ssBodyWalk` only, and
+  ## declines the moment a check option deviates (`deltaKnown` is false).
 
 proc admitStdlibBody*(key: string; site: StdlibSite;
                       absent = some(feUnadmitted)): Admit[StdlibBody] =
-  ## The stdlib-body axis, for every key. `absent` is what a key with no row
-  ## declines with.
+  ## The stdlib-body axis, for every key: an explicit row first, then the
+  ## ledger. `absent` is what a key in neither declines with (absent is a
+  ## decline).
+  if not stdlibAxis.hasRow(key) and ledgerAxis.hasRow(key):
+    return ledgerAxis.admit(key, site, absent)
   stdlibAxis.admit(key, site, absent)
+
+func hasStdlibRow*(key: string): bool =
+  ## `key` is an explicit row of the axis (the ledger's rows are not).
+  stdlibAxis.hasRow(key)
+
+proc floatCallDecline*(op: string; nargs: int): string =
+  ## PRC-09. Why `lowerMathCall` declines a float-first call of `std/math`'s
+  ## `op`: the reason of its row (naming the cell), or "" when it has no row
+  ## or the row is admitted at `ssFloatCall`. `round(x, places)` is a facet.
+  let key = if op == "round" and nargs == 2: "math.round/places"
+            else: "math." & op
+  if stdlibAxis.hasRow(key):
+    let adm = admitStdlibBody(key, ssFloatCall)
+    if not adm.admitted: return adm.decline[1]
 
 proc facetNote*(key: string): string =
   ## The reason text of a refused facet row, which names its cell
   ## (`stdlib:sets.HashSet/iterationOrder: ...`): what a decline appends.
   admitStdlibBody(key, ssFacet).decline[1]
+
+const callDeclines*: array[2, tuple[routine, facet: string]] = [
+  ## The routines whose CALL declines by a `never` facet's name, before the
+  ## body is registered (`ensureProcRegistered`): STY-06's full Unicode case
+  ## fold and concurrency. A walked body here would either not end
+  ## (`toLower`: a binary search over the case tables) or fault the walker
+  ## (`createThread`, W-19b).
+  ("unicode.toLower", "unicode.toLower/fullCaseFold"),
+  ("typedthreads.createThread", "typedthreads.createThread/concurrency")]
+
+static:
+  for d in callDeclines:
+    doAssert stdlibAxis.hasRow(d.facet), "callDeclines names a missing facet " & d.facet
+
+func callDeclineFacet*(routineKey: string): string =
+  ## The facet whose row declines a call of `routineKey`, or "".
+  for d in callDeclines:
+    if d.routine == routineKey: return d.facet
 
 const stdlibDispatchSites* = {ssCallSwitch, ssInfix}
   ## The sites whose `case` goes through `dispatchMagic`.

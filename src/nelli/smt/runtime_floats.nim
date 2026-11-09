@@ -80,6 +80,13 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
   if e.mathArgs.len == 0:
     raise (ref SymexUnsupportedOpError)(op: "math." & op,
       msg: "math." & op & ": zero-arg float op is unsupported")
+  # RFC-0016 K4c (PRC-09): a `std/math` routine with a row is governed by it.
+  # A row this lowering models is admitted at `ssFloatCall`; any other row
+  # declines, naming its cell (`round(x, places)` is a facet of `round`).
+  let why = floatCallDecline(op, e.mathArgs.len)
+  if why.len > 0:
+    raise (ref SymexUnsupportedOpError)(op: "math." & op,
+      msg: "math." & op & " is not modeled by the symex engine -- " & why)
   let a = lower(env, e.mathArgs[0])
   doAssert a.kind in {svFloat32, svFloat64},
     "lowerMathCall: first arg is not a float — got " & $a.kind
@@ -121,8 +128,9 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
     return (if a.kind == svFloat32: f32(roundToIntegral(rmRTP(), a.fp32))
             else: f64(roundToIntegral(rmRTP(), a.fp64)))
   of "round":
-    return (if a.kind == svFloat32: f32(roundToIntegral(rmRNE(), a.fp32))
-            else: f64(roundToIntegral(rmRNE(), a.fp64)))
+    # C `round`: to nearest, ties away from zero (RNA), not banker's.
+    return (if a.kind == svFloat32: f32(roundToIntegral(rmRNA(), a.fp32))
+            else: f64(roundToIntegral(rmRNA(), a.fp64)))
   of "trunc":
     return (if a.kind == svFloat32: f32(roundToIntegral(rmRTZ(), a.fp32))
             else: f64(roundToIntegral(rmRTZ(), a.fp64)))

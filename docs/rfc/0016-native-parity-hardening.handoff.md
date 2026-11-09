@@ -100,6 +100,8 @@
   K3a cells (`typeclass:float128`, `typeclass:float/sNaNPayload`). `fieldDefault/*`
   is K3b's; `cast/`, `not/`, `ptr/lt`, `set/char/*` are not memory operations and
   stay orphans for the construct and definedness axes.
+  The named-feature rows (`tcFeature`) have no consumer yet: `classifyType`
+  does not consult them. K2c, which owns `classifyType`, wires them.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

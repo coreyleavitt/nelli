@@ -86,8 +86,8 @@ const charged = block:
   s
 
 suite "RFC-0016 K7: walkRLimit bounds wall time on table-heavy walks":
-  test "the walker-side charge changed the walk: walker 300 or later":
-    check parseInt(symexWalkerVersion) >= 300
+  test "the walker-side charge changed the walk: walker 305 or later":
+    check parseInt(symexWalkerVersion) >= 305
 
   test "10M units end in ckWalkWork within N / rate floor + slack":
     let t0 = getMonoTime()

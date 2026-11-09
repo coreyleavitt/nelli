@@ -337,7 +337,7 @@
   fixed, declines over a bounded string (pinned); over an UNBOUNDED string it ended in
   a typed `ckWalkWork` cap once K7 landed (below), so CRH-01 is closed. The `case n.kind` census row in
   `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
-  K7 hang, FIXED by the walker-side charge (`rfc-0016-k7charge`, walker 300; finding from `rfc-0016-k7hang`): two sequential binary searches over a
+  K7 hang, FIXED by the walker-side charge (`rfc-0016-k7charge`, walker 305; finding from `rfc-0016-k7hang`): two sequential binary searches over a
   450-entry const table (`unicode.toLower`'s shape; `tests/tsymex_0016_k7_twosearch.nim`) DO end
   as `ckWalkWork` under an explicit `walkRLimit`, but 20M units took 190-260 s, ~88k units/s
   against ~1M/s for arithmetic: the default 1e9 is hours. Wall time is walker-side, not Z3

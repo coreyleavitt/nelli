@@ -29,9 +29,8 @@
 #     note, not a disposition). never: AUD-01, AUD-09, AUD-11 (the K1a-test
 #     `never` cell is their evidence form). moved: INT-28..INT-38 to slice
 #     rv0005-lows. open, slice K8c: CRH-07 (the walker-under-sanitizers job).
-#     W-12: open, slice K3b: its decline half is done (W1-f found the walker
-#     already agrees with native), but the Home cell still names K3b for the
-#     exact half, so the row stays open for K3b.
+#     W-12: open, slice K3b until K3b: its decline half was done by W1-f (the
+#     walker already agreed with native) and its exact half by K3b, which closed it.
 #  3. F-0001..F-0007 are the same findings as W-01..W-07: the W rows are
 #     closed with the ledger's sha and carry aliases = ["F-000N"]. They are not
 #     separate rows. The section 5.0 table gains a State column to show it.
@@ -1723,11 +1722,11 @@ cells = []
 id = "W-12"
 table = "5.9"
 title = "object field defaults (with W-20)"
-state = "open"
-note = "(2026-11-07, W1-z): W1-f found the decline premise wrong; the walker already agreed with native in every shape (see the W1-f row)"
+state = "closed"
+note = "(2026-11-07, W1-z): W1-f found the decline premise wrong; the walker already agreed with native in every shape (see the W1-f row). (2026-11-09) K3b: the zero side reads the `typeop:fieldDefault/<kind>` rows; `wasMoved`, `reset` and `move` pinned at the bitwise zero"
 slice = "K3b"
 home = "W1-f (decline), K3b (exact)"
-cells = []
+cells = ["typeop:fieldDefault/int", "typeop:fieldDefault/float64", "typeop:fieldDefault/string", "typeop:fieldDefault/seq", "typeop:fieldDefault/tuple"]
 
 [[row]]
 id = "W-14"

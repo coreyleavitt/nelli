@@ -1796,6 +1796,8 @@ task test, "Run the test suite":
             "tsymex_0016_k3a_typeaxes",
             "tsymex_0016_k3a_letcursor",
             "tsymex_0016_k3c_pragmaaxis",
+            # RFC-0016 K3b: the field-default row of the type x memory-op axis (zeroValueForType reads it), and wasMoved/reset/move zero pins.
+            "tsymex_0016_k3b_fielddefault",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user
             # exception hierarchy, hints, diagnostics and a cached raise reach
             # symexFindAllWitnesses / symexForAll; the no-targets finding

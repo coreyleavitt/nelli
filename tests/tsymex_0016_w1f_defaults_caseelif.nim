@@ -107,7 +107,7 @@ suite "W1-f field defaults agree with the native run":
 
   test "default(O), O(), omission, new and ref omission are exact (sat)":
     template sat(fn, nm: untyped) =
-      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/" & nm),
+      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/int"),
                      target = tLabel("h"), domain = dom).status == sxSat
     sat(sutDefault, "default")
     sat(sutEmptyCtor, "emptyCtor")
@@ -117,7 +117,7 @@ suite "W1-f field defaults agree with the native run":
 
   test "var, result, nested and array zero fields are exact (unsat)":
     template unsat(fn, nm: untyped) =
-      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/zero" & nm),
+      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/int"),
                      target = tLabel("h"), domain = dom).status == sxUnsat
     unsat(sutVar, "var")
     unsat(sutResult, "result")
@@ -125,15 +125,15 @@ suite "W1-f field defaults agree with the native run":
     unsat(sutArray, "array")
 
   test "explicit construction stays exact":
-    check pinExact(sutExplicit, cellKey(axConstruct, "fieldDefault/explicit"),
+    check pinExact(sutExplicit, cellKey(axTypeOp, "fieldDefault/int"),
                    target = tLabel("h"), domain = dom).status == sxSat
     check pinExact(sutExplicitAll,
-                   cellKey(axConstruct, "fieldDefault/explicitAll"),
+                   cellKey(axTypeOp, "fieldDefault/int"),
                    target = tLabel("h"), domain = dom).status == sxSat
     check pinExact(sutExplicitRef,
-                   cellKey(axConstruct, "fieldDefault/explicitRef"),
+                   cellKey(axTypeOp, "fieldDefault/int"),
                    target = tLabel("h"), domain = dom).status == sxSat
-    check pinExact(sutPlainTuple, cellKey(axTypeOp, "fieldDefault/noDefault"),
+    check pinExact(sutPlainTuple, cellKey(axTypeOp, "fieldDefault/int"),
                    target = tLabel("h"), domain = dom).status == sxSat
 
 # --- case with elif ------------------------------------------------------------
@@ -378,10 +378,19 @@ proc rCtor(k: int) =
   if o.x == 5 and o.n.a == 3: symexTarget("h")
 
 
+func shapeKind(fn: string): string =
+  ## K3b: the `typeop:fieldDefault/<IR kind>` row of the field the SUT reads.
+  case fn
+  of "sVar", "sDef", "sCtor", "qDef", "qIdx", "qeDef": "seq"
+  of "tsDef": "string"
+  of "eVar", "eDef", "eCtor": "float64"
+  of "tVar", "tDef", "tCtor": "tuple"
+  else: "int"
+
 suite "W1-f field defaults across field shapes":
   test "default(T), T(), new apply the default (sat)":
     template sat(fn: untyped) =
-      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/shape/" & astToStr(fn)),
+      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/" & shapeKind(astToStr(fn))),
                      target = tLabel("h"), domain = dom).status == sxSat
     sat(vDef)
     sat(vCtor)
@@ -407,7 +416,7 @@ suite "W1-f field defaults across field shapes":
 
   test "var o: T reads zero (unsat)":
     template unsat(fn: untyped) =
-      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/shape/" & astToStr(fn)),
+      check pinExact(fn, cellKey(axTypeOp, "fieldDefault/" & shapeKind(astToStr(fn))),
                      target = tLabel("h"), domain = dom).status == sxUnsat
     unsat(vVar)
     unsat(iVar)

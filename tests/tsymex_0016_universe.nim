@@ -389,7 +389,7 @@ suite "RFC-0016 K1a-cells: the universe is derived":
     check universe.countIn("magic:") >= 10
     check universe.countIn("typeclass:") == toSeq(typeClassTable.cells).len
     check universe.countIn("pragma:") == toSeq(pragmaAxis.cells).len
-    check universe.countIn("typeop:") == ord(high(IRTypeKind)) + 1
+    check universe.countIn("typeop:") == toSeq(typeOpTable.cells).len
     check universe.countIn("build:") >= 3 + 5
     check universe.countIn("build:row/") == ord(high(BuildRow)) + 1
     check universe.countIn("errorkind:") == ord(high(SymexErrorKind)) + 1

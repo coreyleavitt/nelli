@@ -921,7 +921,7 @@ state (§8.2).
 | W-08 | `nodeWritesHeap` is a fail-open denylist | K6a | |
 | W-09 | the hook copy-proof defaults to "copied" | K6b | |
 | W-10 | `ptrUsesStayLocal`, `routeStoresThroughDeref`, `bindsViewWhole` share the denylist shape | K6c | |
-| W-12 | object field defaults (with W-20) | W1-f (decline), K3b (exact) | (2026-11-07, W1-z): W1-f found the decline premise wrong; the walker already agreed with native in every shape (see the W1-f row) |
+| W-12 | object field defaults (with W-20) | W1-f (decline), K3b (exact) | closed (2026-11-07, W1-z): W1-f found the decline premise wrong; the walker already agreed with native in every shape (see the W1-f row). (2026-11-09) K3b: the zero side reads the `typeop:fieldDefault/<kind>` rows; `wasMoved`, `reset` and `move` pinned at the bitwise zero |
 | W-14 | `int` hard-coded as BV64; i386 unread | K5b (32-bit refused) | |
 | W-17 | `nimOldCaseObjects`/`strictCaseObjects` unread | K5a (`caseObjects` field) | |
 | W-22 | `parseBool` with `len 4` hangs | K2-0 (with CRH-09) | K2-0 (2026-11-08) reproduces: the walk is still running after 25 s (child process, marker file shows it entered `symexFind`); pinned in `tests/tsymex_0016_k20_probes_child.nim` (CRH-08 hangs the same way). |

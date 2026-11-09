@@ -20,10 +20,16 @@
 ##   function ended in `else: false`, which is how a variant holding a seq arm
 ##   passed as a value (B-04).
 ##
-## The `fieldDefault/*` cells (W-12, K3b) and the conversion, comparison and
-## set-membership cells the K2-0 probes name (`cast/int32`, `ptr/lt`,
-## `set/char/in`) are not memory operations on a type; they belong to K3b and
-## to the construct and definedness axes.
+## * K3b adds the `fieldDefault` operation to the same table: how a value of
+##   an IR kind is zeroed (`fieldDefault/int`, `fieldDefault/seq`).
+##   `zeroValueForType` (`var o: T`, `wasMoved`, `reset`, `move`, a
+##   constructor's omitted field) reads the row. A field's `= default` is
+##   never applied here: Nim writes it into the typed AST of `default(T)`,
+##   `T()` and `new`, and a `wasMoved` leaves the bitwise zero.
+##
+## The conversion, comparison and set-membership cells the K2-0 probes name
+## (`cast/int32`, `ptr/lt`, `set/char/in`) are not memory operations on a
+## type; they belong to the construct and definedness axes.
 import std/[macros, options, strutils]
 import ./admission
 import ./errorkind
@@ -41,13 +47,26 @@ type
 
   MemOp* = enum
     moLetCursor         ## `let c = lv`: a copy, or a view of lv's memory
+    moFieldDefault      ## the zero a value of the kind starts as (K3b)
   TypeOpSite* = enum
     toHoldsSharedMemory
+    toZeroValue         ## `zeroValueForType`
   MemShare* = enum
     msValue             ## the value is the whole of it: the `let` is a copy
     msShared            ## owns heap memory a `let` may view (seq, string, ...)
     msComponents        ## decided by the components
-  OpKey = tuple[key: string, row: Row[TypeOpSite, MemShare]]
+  ZeroModel* = enum
+    zmLiteral           ## a scalar, string or handle: its zero is a literal
+    zmZeroValue         ## an aggregate or container: the walker's `iekZeroValue`
+                        ## (every field and element zeroed, a seq empty)
+    zmBase              ## a distinct: its base type's zero
+  TypeOpModel* = object
+    ## One payload type for the table; the variant keeps each operation's
+    ## answer apart.
+    case op*: MemOp
+    of moLetCursor: share*: MemShare
+    of moFieldDefault: zero*: ZeroModel
+  OpKey = tuple[key: string, row: Row[TypeOpSite, TypeOpModel]]
   ClassKey = tuple[key: string, row: Row[TypeClassSite, TypeClassModel]]
 
 # ---------------------------------------------------------------------------
@@ -159,16 +178,43 @@ func letCursorShare(k: IRTypeKind): tuple[m: MemShare, note: string] =
   of itTuple, itArray, itVariant, itMultiVariant, itDistinct:
     (msComponents, "shares memory when a component does")
 
+func fieldDefaultZero(k: IRTypeKind): tuple[ok: bool, z: ZeroModel,
+                                           note: string] =
+  ## Exhaustive: a new `IRTypeKind` does not compile until it is answered.
+  case k
+  of itInt, itBool, itFloat32, itFloat64, itString, itRef, itPtr:
+    (true, zmLiteral, "its bitwise zero is a literal: 0, false, 0.0, \"\", nil")
+  of itTable, itSet, itBitSet, itTuple, itArray, itSeq, itVariant,
+     itMultiVariant:
+    (true, zmZeroValue, "the zero of every field and element; a seq, table " &
+      "and set start empty. A field's `= default` is not applied: Nim " &
+      "writes it into default(T), T() and new, and wasMoved leaves zero")
+  of itDistinct:
+    (true, zmBase, "a distinct is its base value in the IR")
+  of itUninterp:
+    (false, zmLiteral, "a placeholder sort (`__ownership:*`, `__closure`, " &
+      "`__unsupported:*`) has no representation to build a zero of: the " &
+      "caller declines with the placeholder's own kind")
+
 func opRows(): seq[OpKey] =
   for k in IRTypeKind:
     let s = letCursorShare(k)
     result.add (opKey(moLetCursor, k),
-                modelled[TypeOpSite, MemShare](s.m, {toHoldsSharedMemory}, s.note))
+                modelled[TypeOpSite, TypeOpModel](
+                  TypeOpModel(op: moLetCursor, share: s.m),
+                  {toHoldsSharedMemory}, s.note))
+    let z = fieldDefaultZero(k)
+    result.add (opKey(moFieldDefault, k),
+      if z.ok:
+        modelled[TypeOpSite, TypeOpModel](
+          TypeOpModel(op: moFieldDefault, zero: z.z), {toZeroValue}, z.note)
+      else:
+        refused[TypeOpSite, TypeOpModel](none(SymexErrorKind), z.note))
 
-const typeOpTable* = axisTable[TypeOpSite, MemShare](axTypeOp, opRows())
+const typeOpTable* = axisTable[TypeOpSite, TypeOpModel](axTypeOp, opRows())
 
 func admitTypeOp*(k: IRTypeKind; op: MemOp; site = toHoldsSharedMemory):
-    Admit[MemShare] =
+    Admit[TypeOpModel] =
   typeOpTable.admit(opKey(op, k), site, absent = none(SymexErrorKind))
 
 func holdsSharedMemory*(t: IRType): bool =
@@ -179,7 +225,7 @@ func holdsSharedMemory*(t: IRType): bool =
   if t == nil: return false
   let a = admitTypeOp(t.kind, moLetCursor)
   if not a.admitted: return true
-  case a.payload
+  case a.payload.share
   of msValue: false
   of msShared: true
   of msComponents:

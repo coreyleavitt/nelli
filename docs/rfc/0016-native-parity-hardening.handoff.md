@@ -306,6 +306,16 @@
   the query timeout does not bound it. `toLower` is therefore declined at the
   call by its `never` row rather than walked; the hang itself needs a
   K2c-style cap on whatever the second search multiplies.
+  K3b (`rfc-0016-k3b`, walker unchanged): the `fieldDefault` operation joins
+  the type x memory-op axis (`typeop:fieldDefault/<IR kind>`, payload
+  `ZeroModel`: literal, `iekZeroValue`, or the distinct's base; `itUninterp`
+  is a refused row). `zeroValueForType` reads it, so a new `IRTypeKind` or a
+  changed row moves the zero. A field's `= default` is never applied on the
+  zero side (Nim writes it into `default(T)`, `T()` and `new`); `wasMoved`,
+  `reset` and `move` are pinned at the bitwise zero for int, float, string,
+  seq and tuple fields. `routeScan` no longer asks for the type of an untyped
+  callee symbol (`wasMoved`'s own `=wasMoved(obj)` in a generic body was a hard
+  "node has no type" error). W-12 closed.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

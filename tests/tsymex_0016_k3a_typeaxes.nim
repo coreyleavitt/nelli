@@ -94,7 +94,7 @@ suite "RFC-0016 K3a: the type x memory-op axis":
       if not a.admitted:
         check "no row" notin a.decline[1]
       else:
-        check a.payload in {msValue, msShared, msComponents}
+        check a.payload.share in {msValue, msShared, msComponents}
 
   test "cells are keyed op first, then the IR kind":
     check render(admitTypeOp(itVariant, moLetCursor).cell) == "typeop:letCursor/variant"
@@ -127,5 +127,5 @@ suite "RFC-0016 K3a: the type x memory-op axis":
   test "a recursive-by-component row has a component walk, never a bare answer":
     for k in IRTypeKind:
       let a = admitTypeOp(k, moLetCursor)
-      if a.admitted and a.payload == msComponents:
+      if a.admitted and a.payload.share == msComponents:
         check k in {itTuple, itArray, itVariant, itMultiVariant, itDistinct}

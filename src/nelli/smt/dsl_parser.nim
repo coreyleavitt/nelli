@@ -16385,79 +16385,72 @@ proc zeroValueForType(ty: IRType): IRExpr =
   ## classified `sxUnknown` — sound, never a wrong verdict). Zero-init (NOT a
   ## fresh free symbol) is the sound model: a read-before-write must observe
   ## Nim's guaranteed default, not an arbitrary value (Invariant 3).
-  case ty.kind
-  of itInt: mkIntLit(0)               ## int (and char, modeled as itInt): 0 / '\0'
-  of itBool: mkBoolLit(false)
-  of itFloat32: mkFloatLit(0.0, 32)
-  of itFloat64: mkFloatLit(0.0, 64)
-  of itString: mkStrLit("")           ## Nim `string` default is the empty string
-  of itRef, itPtr: mkNil(ty)           ## RFC-0005 S8m: a `ref`/`ptr` is nil. An
-                                       ## uninitialised `var p: ref T` local was
-                                       ## a decline, and every catch-all dummy of
-                                       ## a ref type was an int that crashed the
-                                       ## first `p != nil` (`eqBV`'s kind assert).
-  of itTable, itSet, itBitSet:
-    ## RFC-0005 S8u: the empty container. An uninitialised `var t: Table[K,
-    ## V]` was a decline that left `t` unbound, and the first `t[k] = v` hit
-    ## `lower`'s `recv.kind == svTable` assertion (`weInternalWalkerFault`).
-    ## RFC-0005 S8bq: a builtin set's is `{}`.
-    mkZeroValue(ty)
-  of itDistinct:                       ## RFC-0005 S8u: the base type's zero. A
-    zeroValueForType(ty.distinctBase)  ## distinct value is its base value in
-                                       ## the IR (`D(x)` is the identity).
-  of itArray, itTuple, itSeq, itVariant, itMultiVariant:
-    ## RFC-0005 S8aj: an aggregate's zero is its elements' and fields'
-    ## zeros, and a seq's is the empty seq: `defaultZero`'s recursion, the
-    ## walker's lowering of `iekZeroValue` (a shape it cannot zero, such as
-    ## a variant whose ordinal-0 tag is not legal, is allocated and
-    ## degraded there, never left unbound). An uninitialised
-    ## `var a: array[3, int]` was declined here and left `a` unbound, so the
-    ## first `a[0] = ...` bound it to a scalar and the next `a[i]` asserted
-    ## (`weInternalWalkerFault`, "iekIndex on non-array kind=svBV64"); an
-    ## object holding an array or a seq, and a local seq, did the same.
-    ## S8z independently fixed `itArray`/`itTuple`/`itVariant`/
-    ## `itMultiVariant` at the single call site that needed them then (the
-    ## uninitialised-`var` statement), special-cased there instead of here;
-    ## that call site now just delegates to this proc, which is this one
-    ## mechanism for every caller (construction-time field omission
-    ## included — `itSeq` was not covered by S8z's special case).
-    mkZeroValue(ty)
-  else:
-    ## RFC-0005 S8ao (S8aj's remainder): `itUninterp` STAYS a decline --
-    ## every value reaching here is a sort the walker chose not to give a
-    ## REAL Z3 representation to in the first place, not merely a shape
-    ## whose zero "isn't written down yet" (`itArray`/`itTuple`/`itSeq`/
-    ## `itVariant`/`itMultiVariant`, just above). `classifyType`
-    ## (`dsl_typebridge.nim`) builds `itUninterp` for exactly three
-    ## placeholder prefixes, and none has a sound zero to fabricate here:
-    ##   - `__ownership:*` (`owned T` / `Atomic[T]`, ADR-0010
-    ##     Breadth-LOW-L4): deliberately out of scope for the ref cluster
-    ##     -- no sort was ever allocated for these, so there is nothing to
-    ##     build a zero constant OF.
-    ##   - `__closure` (a proc-typed local with no initializer, e.g.
-    ##     `var f: proc(x: int): int`): Nim's real zero is a nil closure,
-    ##     but `svClosure` (`runtime.nim`) carries a SITE KEY into real
-    ##     lambda-body IR (`runtime_closures.nim`) -- there is no "nil
-    ##     closure" sentinel value today that a later `f(...)` call could
-    ##     soundly degrade through; minting one is a new SymVal shape
-    ##     (plus every call/compare site that would need to recognise it),
-    ##     out of proportion for a single caller's zero-init.
-    ##   - `__unsupported:<X>` (`classifyType`'s catch-all for a type name
-    ##     no structural arm recognises): `X` names some real Nim type the
-    ##     classifier never identified, so its actual shape -- and
-    ##     therefore its actual zero -- is UNKNOWN here. Fabricating a
-    ##     zero for an unidentified shape is exactly the "launder a gap
-    ##     into a sound-looking value" move RFC-0005 §3.1 rules out; the
-    ##     caller's classified decline is the only sound answer.
-    ## Pinned by `tests/tsymex_rfc0005_s8ao_remainder.nim` and, since
-    ## RFC-0005 S8ap, `tests/tsymex_rfc0005_s8ap_remainder.nim` (all three
-    ## prefixes, reached through an uninitialized-`var` local -- the one
-    ## caller of `zeroValueForType` this arm's `nil` return still visibly
-    ## degrades -- never a crash, never a guessed value). S8ap gives that
-    ## decline each prefix's own kind (`uninterpVarDecline`, below):
-    ## `heUnsupportedOwnership`, `ceUnsupportedHof`,
-    ## `feUnsupportedParamType`.
-    nil
+  ## RFC-0016 K3b: the kind's row of the type x memory-op axis
+  ## (`typeop:fieldDefault/<kind>`) decides whether and how it is zeroed; a
+  ## kind with no model (`itUninterp`, below) is the decline. The literal a
+  ## scalar's zero is, and the notes on each kind, live here and in the row.
+  let a = admitTypeOp(ty.kind, moFieldDefault, toZeroValue)
+  if a.admitted:
+    case a.payload.zero
+    of zmLiteral:
+      case ty.kind
+      of itInt: return mkIntLit(0)        ## int (and char, modeled as itInt): 0 / '\0'
+      of itBool: return mkBoolLit(false)
+      of itFloat32: return mkFloatLit(0.0, 32)
+      of itFloat64: return mkFloatLit(0.0, 64)
+      of itString: return mkStrLit("")    ## Nim `string` default is the empty string
+      of itRef, itPtr:
+        ## RFC-0005 S8m: a `ref`/`ptr` is nil. An uninitialised `var p: ref T`
+        ## local was a decline, and every catch-all dummy of a ref type was an
+        ## int that crashed the first `p != nil` (`eqBV`'s kind assert).
+        return mkNil(ty)
+      else: return nil     # a literal row for a kind with no literal: fail closed
+    of zmZeroValue:
+      ## RFC-0005 S8u: the empty container (`Table`, `set`; S8bq: a builtin
+      ## set's is `{}`). RFC-0005 S8aj: an aggregate's zero is its elements'
+      ## and fields' zeros, and a seq's is the empty seq: `defaultZero`'s
+      ## recursion, the walker's lowering of `iekZeroValue` (a shape it
+      ## cannot zero, such as a variant whose ordinal-0 tag is not legal, is
+      ## allocated and degraded there, never left unbound).
+      return mkZeroValue(ty)
+    of zmBase:
+      ## RFC-0005 S8u: the base type's zero (`D(x)` is the identity in the IR).
+      return zeroValueForType(ty.distinctBase)
+  ## RFC-0005 S8ao (S8aj's remainder): `itUninterp` STAYS a decline --
+  ## every value reaching here is a sort the walker chose not to give a
+  ## REAL Z3 representation to in the first place, not merely a shape
+  ## whose zero "isn't written down yet" (`itArray`/`itTuple`/`itSeq`/
+  ## `itVariant`/`itMultiVariant`, just above). `classifyType`
+  ## (`dsl_typebridge.nim`) builds `itUninterp` for exactly three
+  ## placeholder prefixes, and none has a sound zero to fabricate here:
+  ##   - `__ownership:*` (`owned T` / `Atomic[T]`, ADR-0010
+  ##     Breadth-LOW-L4): deliberately out of scope for the ref cluster
+  ##     -- no sort was ever allocated for these, so there is nothing to
+  ##     build a zero constant OF.
+  ##   - `__closure` (a proc-typed local with no initializer, e.g.
+  ##     `var f: proc(x: int): int`): Nim's real zero is a nil closure,
+  ##     but `svClosure` (`runtime.nim`) carries a SITE KEY into real
+  ##     lambda-body IR (`runtime_closures.nim`) -- there is no "nil
+  ##     closure" sentinel value today that a later `f(...)` call could
+  ##     soundly degrade through; minting one is a new SymVal shape
+  ##     (plus every call/compare site that would need to recognise it),
+  ##     out of proportion for a single caller's zero-init.
+  ##   - `__unsupported:<X>` (`classifyType`'s catch-all for a type name
+  ##     no structural arm recognises): `X` names some real Nim type the
+  ##     classifier never identified, so its actual shape -- and
+  ##     therefore its actual zero -- is UNKNOWN here. Fabricating a
+  ##     zero for an unidentified shape is exactly the "launder a gap
+  ##     into a sound-looking value" move RFC-0005 §3.1 rules out; the
+  ##     caller's classified decline is the only sound answer.
+  ## Pinned by `tests/tsymex_rfc0005_s8ao_remainder.nim` and, since
+  ## RFC-0005 S8ap, `tests/tsymex_rfc0005_s8ap_remainder.nim` (all three
+  ## prefixes, reached through an uninitialized-`var` local -- the one
+  ## caller of `zeroValueForType` this arm's `nil` return still visibly
+  ## degrades -- never a crash, never a guessed value). S8ap gives that
+  ## decline each prefix's own kind (`uninterpVarDecline`, below):
+  ## `heUnsupportedOwnership`, `ceUnsupportedHof`,
+  ## `feUnsupportedParamType`.
+  nil
 
 proc uninterpVarDecline(ty: IRType): (SymexErrorKind, string) =
   ## RFC-0005 S8ap (S8ao's remainder). The classified kind and reason for an
@@ -22906,7 +22899,10 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
      nnkHiddenCallConv:
     # The result: a temporary, destroyed by a hook, that nothing names.
     if n.len > 0 and n[0].kind == nnkSym and
-       symKind(n[0]) in userRoutineSymKinds:
+       symKind(n[0]) in userRoutineSymKinds and n[0].typeKind != ntyNone:
+      # RFC-0016 K3b. The callee a generic body names (`wasMoved`'s own
+      # `=wasMoved(obj)`) can be an untyped symbol; `getTypeInst` on it is a
+      # hard "node has no type" error, as at the `nskVar` arm above.
       let pt = n[0].getTypeInst
       if pt.kind == nnkProcTy and pt.len > 0 and pt[0].kind == nnkFormalParams and
          pt[0].len > 0 and pt[0][0].kind != nnkEmpty:

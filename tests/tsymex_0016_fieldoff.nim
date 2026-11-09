@@ -701,3 +701,110 @@ when not defined(cpp):
       checkpoint show(r.errors)
       check r.status == sxUnknown
       check r.errors.named(feUncheckedDiscBytes)
+
+# PRC-07 slice B, zero-fill. Native, from the generated C (debug and release,
+# c and cpp alike): `var x: V`, `default(V)` and a `result` that is not
+# constructed in place are `nimZeroMem` first; an object constructor that
+# names every field of its arm (`V(k: ka, a: v)`) is `x.k = 0; x.a = v` with
+# NO zeroing, whether bound to a `let`/`var`, assigned over an existing
+# variable or to `result`; a constructor that omits a field zeroes first.
+# So the bytes the written fields do not own are the zero of the
+# initialisation only for the zeroed constructions, and unspecified for the
+# rest: a read that depends on them is the `{.noinit.}` finding, not a value.
+type
+  Kx = enum kxa, kxb, kxc
+  Vx = object            ## int32 / int8 / int64: the arms overlap unevenly
+    case k: Kx
+    of kxa: a: int32
+    of kxb: b: int8
+    of kxc: r: int64
+
+proc sutCtorProbe(v: int32) =
+  # the previous agent's probe: native read 0x340_7FFFFFFF, the walker said
+  # 0x7FFFFFFF, because the high half of `r` is no byte the constructor wrote
+  var y = Vx(k: kxa, a: v)
+  y.k = kxc
+  if y.r == 0x7FFFFFFF'i64 and v == 0x7FFFFFFF: symexTarget("hit")
+
+proc sutVarZero(v: int32) =
+  # `var y: Vx` is zeroed, so the high half of `r` is zero
+  var y: Vx
+  y.a = v
+  y.k = kxc
+  if y.r == 0x7FFFFFFF'i64 and v == 0x7FFFFFFF: symexTarget("hit")
+
+proc sutDefaultZero(v: int32) =
+  var y = default(Vx)
+  y.a = v
+  y.k = kxc
+  if y.r == 0x7FFFFFFF'i64 and v == 0x7FFFFFFF: symexTarget("hit")
+
+proc sutOmitZero(v: int32) =
+  # an omitted field makes Nim zero the object first
+  var y = Vx(k: kxb)
+  y.k = kxc
+  if y.r == 0 and v == 1: symexTarget("hit")
+
+proc sutCtorWriteBefore(v: int32) =
+  # the field written before the read is defined again: its bytes are the
+  # write's, the rest of `r` the constructor's
+  var y = Vx(k: kxa, a: v)
+  y.k = kxc
+  y.r = 0x1122334455667788'i64
+  if y.r == 0x1122334455667788'i64 and v == 1: symexTarget("hit")
+
+proc sutCtorOverVar(v: int32) =
+  # `x = V(...)` over an existing variable writes the named fields in place
+  var y = Vx(k: kxc, r: 0)
+  y = Vx(k: kxa, a: v)
+  y.k = kxc
+  if y.r == 0x7FFFFFFF'i64 and v == 0x7FFFFFFF: symexTarget("hit")
+
+proc sutCtorResult(v: int32) =
+  # the read through the other arm of an object built by a callee's `result`
+  proc mk(a: int32): Vx = Vx(k: kxa, a: a)
+  var y = mk(v)
+  y.k = kxc
+  if y.r == 0x7FFFFFFF'i64 and v == 0x7FFFFFFF: symexTarget("hit")
+
+when not defined(cpp):
+  suite "PRC-07 slice B: the zero of initialisation is the zeroed constructions'":
+    template indeterminate(fn: untyped) =
+      let r = symexFind(fn, tLabel("hit"))
+      checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
+      check r.status == sxSat
+      check not r.trusted
+      check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
+
+    test "a constructor's unwritten bytes are indeterminate: the probe case":
+      indeterminate(sutCtorProbe)
+
+    test "x = V(...) over an existing variable leaves the others unspecified":
+      indeterminate(sutCtorOverVar)
+
+    test "an object a callee built with a constructor is the same":
+      indeterminate(sutCtorResult)
+
+    test "var x: V is zeroed: the probe case is exact":
+      let r = pinExact(sutVarZero, fk, domain = sampled(
+        [0x7FFFFFFF'i32, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+      check int32(r.witness[0]) == 0x7FFFFFFF
+      check r.soundness.undefinedKinds.len == 0
+
+    test "default(V) is zeroed too":
+      let r = pinExact(sutDefaultZero, fk, domain = sampled(
+        [0x7FFFFFFF'i32, 0, 1, -1]))
+      check r.status == sxSat
+      check r.trusted
+
+    test "a constructor that omits a field zeroes the object first":
+      let r = pinExact(sutOmitZero, fk, domain = sampled([1'i32, 0, 2, -1]))
+      check r.status == sxSat
+      check r.trusted
+
+    test "a field written after the constructor owns its own bytes":
+      let r = pinExact(sutCtorWriteBefore, fk, domain = sampled([1'i32, 0, 2, -1]))
+      check r.status == sxSat
+      check r.trusted

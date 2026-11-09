@@ -123,6 +123,16 @@
   fixed, declines over a bounded string (pinned); over an UNBOUNDED string it ended in
   a typed `ckWalkWork` cap once K7 landed (below), so CRH-01 is closed. The `case n.kind` census row in
   `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
+  K7 hang, OPEN (`rfc-0016-k7hang`, no source change): two sequential binary searches over a
+  450-entry const table (`unicode.toLower`'s shape; `tests/tsymex_0016_k7_twosearch.nim`) DO end
+  as `ckWalkWork` under an explicit `walkRLimit`, but 20M units took 190-260 s, ~88k units/s
+  against ~1M/s for arithmetic: the default 1e9 is hours. Wall time is walker-side, not Z3
+  (of 258 s: Z3 `check` 3.6 s; own-context query build/translate 49 s; `divRangeFacts` 36 s,
+  `bvOffsetLinks` 15 s, `bvIntInverseFacts` 16 s, `mergeMemberships` ~51 s, `seqLenCaps` 19 s,
+  all inside `checkExact`). Each query is ~2000 DAG terms (8.66M terms over 4029 checks): the
+  path condition carries each table as a 450-deep `store` chain (`select(store(...))`, 1.4 MB as
+  text, DAG-shared), re-walked by about ten per-query passes. Paths stay few (max 64, usually 1-2),
+  so it is per-query cost, not path explosion. Units do not see it: each query is ~5k units.
   K7 total work (`rfc-0016-k2c`, walker 292, same number): `budget.walkRLimit`
   bounds the Z3 units of every check of one walk (`ownContextCheck` charges,
   `checkCapped` runs each query under what is left, `shouldStop` ends the walk,

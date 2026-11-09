@@ -35,6 +35,7 @@
 import std/[tables, strutils]
 import ../choice
 import ./soundness
+import ./errorkind
 
 type
   WalkerConstructKind* = enum
@@ -263,6 +264,20 @@ type
     relaxationAttemptsUsed*: int
       ## How many optimistic attempts this call actually ran (0 when the
       ## exact attempt already solved, or when there was nothing to target).
+    undefinedReached*: int
+      ## RFC-0016 K10a-concolic. How many operations the flip found an input
+      ## for that drives them into undefined behaviour (`undefinedReached`
+      ## on the result), each kept out of the seed.
+
+  ConcolicUndefined* = object
+    ## RFC-0016 K10a-concolic (section 9.1 item 5). One operation of the
+    ## target decision's condition (or its prefix, on a relaxed solve) the
+    ## definedness axis calls undefined, with an input that reaches it. A
+    ## FINDING about the property, never a seed: a native run of this input
+    ## executes the undefined operation.
+    kind*: UbKind = ubUnsignedDivZero
+    site*: string
+    input*: seq[ChoiceNode]
 
   ConcolicFlipResult* = object
     outcome*:         ConcolicFlipOutcome
@@ -279,6 +294,12 @@ type
       ## onto `FuzzReport.annotationViolations`. Verdict-neutral, so it is not
       ## folded into the yield counters.
     flipCounters*:    ConcolicFlipCounters
+    undefinedReached*: seq[ConcolicUndefined]
+      ## RFC-0016 K10a-concolic. The second disjunct of the flip solve: the
+      ## solve's seed (`materialized`) keeps every operation on the prefix
+      ## and in the target's condition defined; an input that instead drives
+      ## one of them undefined is reported here, once per (kind, site) and
+      ## at most `maxConcolicUndefined` of them.
 
   ConstructTally* = object
     ## Per-construct-kind slice of a campaign's yield taxonomy —
@@ -364,6 +385,7 @@ proc foldFlipResult*(y: var ConcolicYield, r: ConcolicFlipResult,
     y.collect.ambiguousByConstruct.mgetOrPut(k, 0) += v
     y.byConstruct.mgetOrPut(k, ConstructTally()).ambiguousBranches += v
   y.flip.relaxationAttemptsUsed += r.flipCounters.relaxationAttemptsUsed
+  y.flip.undefinedReached += r.flipCounters.undefinedReached
   for o in ConcolicFlipOutcome:
     y.flip.byOutcome[o] += r.flipCounters.byOutcome[o]
     y.byConstruct.mgetOrPut(construct, ConstructTally()).flipOutcomes[o] += r.flipCounters.byOutcome[o]

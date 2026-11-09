@@ -321,6 +321,11 @@ const symexWalkerVersion* = "300"
   ## `ubIndeterminateRead` and `ubSignedDivZero` are ordinal 3 and 4 in the
   ## persisted `witnessUndefined` (codec 4 is not released; the walker version
   ## is in every cache key).
+  ## K10a-concolic (299->300, with K10a-axis): the concolic flip solve carries the
+  ## definedness facts (operations on the prefix and in the target's
+  ## condition) in every attempt, relaxed ones included, and reports an input
+  ## that drives one undefined as `ConcolicFlipResult.undefinedReached`, never
+  ## as a seed.
   ## RFC-0016 K10a-float (299->300, with K10a-axis): a float -> int conversion of NaN, an
   ## infinity or an operand outside the target's range is undefined behaviour
   ## (`ubFloatToIntRange`, appended to `UbKind`; row `convert/floatToInt`), so

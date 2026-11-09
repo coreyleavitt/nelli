@@ -707,7 +707,7 @@ name what moves and what stays.
 <!-- worklist:begin 5.3 -->
 | ID | Item | Source | Evidence | Owner |
 |---|---|---|---|---|
-| CRH-01 | Compile stops in `classifyType`: `splitLines` (INT-09) and the generic-param `.len/.add` stop (HRV-44, zero corpus coverage) | sort S13 | the `sort` stop this row first named is gone at 83c1d304: `s.sort()` and `s.sort(system.cmp[int], Descending)` compile and decline (C-06), now precision row W-36. The other two are not re-probed at head. One `classifyType` row; mechanism K2a/K2c. | |
+| CRH-01 | Compile stops in `classifyType`: `splitLines` (INT-09) and the generic-param `.len/.add` stop (HRV-44, zero corpus coverage) | sort S13 | the `sort` stop this row first named is gone at 83c1d304: `s.sort()` and `s.sort(system.cmp[int], Descending)` compile and decline (C-06), now precision row W-36. The other two are not re-probed at head. One `classifyType` row; mechanism K2a/K2c. K2c (2026-11-09): a top-level `Atomic[T]` or `owned T` parameter was a further compile stop (`emitTyAndReader` raised on the `__ownership:` placeholder); it now declines `heUnsupportedOwnership`, pinned in `tests/tsymex_0016_k2c_typeclass.nim`. | |
 | CRH-02 | Compile stop on `create` and `GC_ref` | sort S12 | `s8cl_lifetime_b.nim:193-201`; models remain PRC-18/PRC-20. | closed |
 | CRH-03 | A ref-local merge runs out of memory and is killed Includes INT-02's figures (8.36 GB under an 8 GB limit, killed at 124-135 s, same on `main`); no `iteDeep` pin in `tests/`; borders RFC-0017 P1 (path merging), which does not cite it. | S8ct | an OOM kill that matches `main`; earlier measured as a 250 s merge, and a silent exit at 300 merges under audit. Bound it to a decline within budget; that bounded decline stays here as a `declined` cell, and only the merge itself moves to RFC-0017 (MOV-01) | |
 | CRH-04 | A regex literal of 2600 nested groups | S8ct | fixed in 0.9.1 (review R1-22; `c9682ebc`, `9663105d`): `tests/tsymex_rfc0005_r1_pcrelimits.nim`. Includes INT-03. | closed |
@@ -966,7 +966,7 @@ state (§8.2).
 | STY-03 | pointer order `<` (C-10, W-28) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-04 | `owned T`, `Atomic[T]` (HRV-18) | K3a (`never` cell of the type × memory axis) | never: done (2026-11-08, K3a): `typeclass:owned` and `typeclass:atomic` are `never` rows of the type-class axis |
 | STY-05 | `nextafter` (HRV-27) | K4a-table (`never` cell of the magic axis) | |
-| STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`); K2b and K4c own the rest |
+| STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`); K2b and K4c own the rest. K2c (2026-11-09): `classifyType` reads the `float128` row, so a `c_longdouble` parameter declines `feUnsupportedParamType` (it was modelled as a double); the sNaN payload row waits on K4c's cast decision point |
 | STY-07 | `addr s[0]` then growth (B §1.2) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | K5b (`never` cell of the build axis) | |
 | STY-09 | the AUD-01, AUD-09 and AUD-11 records | K5b (AUD-01), K2a (AUD-09), K4c (AUD-11) | |

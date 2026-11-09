@@ -282,7 +282,14 @@ const renderAsChoicesVersion* = "12"
   ##   instead of halting `ubSignedOverflow`; a crash claim's `witnessUnsafe`
   ##   survives the replay settle (and so the cache).
 
-const symexWalkerVersion* = "291"
+const symexWalkerVersion* = "292"
+  ## RFC-0016 K2c (291->292): `classifyType` reads the type-class axis. A
+  ## `c_longdouble` (STY-06) is refused by the `float128` row and declines
+  ## (`feUnsupportedParamType`) where it was modelled as an IEEE double
+  ## (`sxSat` on a value of the C target's `long double`); `owned T` and
+  ## `Atomic[T]` read their `never` rows (STY-04), and as a top-level
+  ## parameter they decline `heUnsupportedOwnership` where they were a
+  ## compile stop (CRH-01); an omitted variant field reads its HRV-06 row.
   ## RFC-0016 K3a (290->291): `holdsSharedMemory` reads the type x memory-op
   ## axis (`typeaxes`) and looks through a variant's plain fields and arms, a
   ## multi-variant's axes and a distinct base, so `let c = gV` over a case

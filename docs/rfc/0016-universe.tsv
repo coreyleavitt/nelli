@@ -154,7 +154,7 @@ magic:WasMoved	modelled	-
 typeclass:alias	modelled	-
 typeclass:and	declined	-
 typeclass:anything	declined	-
-typeclass:array	declined	-
+typeclass:array	modelled	-
 typeclass:array/enumIndex	modelled	-
 typeclass:atomic	never	-
 typeclass:bool	modelled	-
@@ -188,7 +188,7 @@ typeclass:nil	declined	-
 typeclass:none	declined	-
 typeclass:not	declined	-
 typeclass:object	modelled	-
-typeclass:openArray	declined	-
+typeclass:openArray	modelled	-
 typeclass:optDeprecated	declined	-
 typeclass:or	declined	-
 typeclass:ordinal	declined	-
@@ -198,11 +198,11 @@ typeclass:proc	modelled	-
 typeclass:ptr	modelled	-
 typeclass:range	modelled	-
 typeclass:ref	modelled	-
-typeclass:sequence	declined	-
-typeclass:set	declined	-
+typeclass:sequence	modelled	-
+typeclass:set	modelled	-
 typeclass:static	declined	-
 typeclass:stmt	declined	-
-typeclass:string	declined	-
+typeclass:string	modelled	-
 typeclass:tuple	modelled	-
 typeclass:typeDesc	declined	-
 typeclass:uint	modelled	-
@@ -216,7 +216,7 @@ typeclass:unused1	declined	-
 typeclass:unused2	declined	-
 typeclass:userTypeClass	declined	-
 typeclass:userTypeClassInst	declined	-
-typeclass:var	declined	-
+typeclass:var	modelled	-
 typeclass:varargs	declined	-
 typeclass:variant/omittedField/HashSet	declined	-
 typeclass:variant/omittedField/Table	declined	-

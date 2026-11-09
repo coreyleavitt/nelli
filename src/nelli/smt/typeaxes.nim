@@ -32,8 +32,11 @@ import ./types
 type
   TypeClassSite* = enum
     tcByValueFormal     ## `typeCopiedByValue`: a by-value formal of this kind
-    tcFeature           ## a named feature of a type, read by no dispatch
-                        ## point: classifyType is a chain of guards (K2c)
+    tcClassify          ## `classifyType`: a type of this kind becomes an IR
+                        ## type (modelled) or the `__unsupported:` placeholder
+    tcFeature           ## a named feature of a type (`owned`, `Atomic`,
+                        ## an omitted variant field of a kind): read through
+                        ## `admitTypeFeature` by the decision point naming it
   TypeClassModel* = enum
     tmLeaf              ## the value is its own bytes; nothing to look through
     tmStructural        ## copied when its components are (distinct, object, tuple)
@@ -70,6 +73,16 @@ func classKey*(k: NimTypeKind): string =
   else: lowerLead(s)
 
 const
+  ## The kinds `classifyType` turns into an IR type (pinned per kind in
+  ## tsymex_0016_k2c_typeclass). A leaf kind outside it (`cstring`, `pointer`,
+  ## `proc`) is on the by-value allowlist but classifies to the
+  ## `__unsupported:`/`__closure` placeholder.
+  classified = {ntyBool, ntyChar, ntyEnum, ntyRange, ntyRef, ntyPtr} +
+               {ntyInt .. ntyInt64} + {ntyUInt .. ntyUInt64} +
+               {ntyFloat, ntyFloat32, ntyFloat64} +
+               {ntyString, ntySequence, ntyOpenArray, ntyArray, ntySet,
+                ntyTuple, ntyObject, ntyDistinct, ntyAlias, ntyGenericInst,
+                ntyVar}
   byValueLeaf = {ntyBool, ntyChar, ntyEnum, ntyRange, ntyRef, ntyPtr,
                  ntyPointer, ntyProc, ntyCString} +
                 {ntyInt .. ntyInt64} + {ntyUInt .. ntyUInt64} +
@@ -80,27 +93,39 @@ const
 func classRows(): seq[ClassKey] =
   for k in NimTypeKind:
     let key = classKey(k)
+    var sites: set[TypeClassSite]
+    if k in byValueLeaf or k in byValueStructural: sites.incl tcByValueFormal
+    if k in classified: sites.incl tcClassify
     if k in byValueLeaf:
       result.add (key, modelled[TypeClassSite, TypeClassModel](
-        tmLeaf, {tcByValueFormal},
+        tmLeaf, sites,
         "a scalar, handle or routine value: its own bytes on every setting " &
-        "pinned in tsymex_rfc0005_s8cq_native"))
+        "pinned in tsymex_rfc0005_s8cq_native",
+        elsewhere = some(feUnsupportedParamType)))
     elif k in byValueStructural:
       result.add (key, modelled[TypeClassSite, TypeClassModel](
-        tmStructural, {tcByValueFormal},
+        tmStructural, sites,
         "copied when its components are, at most three words, final, " &
-        "no pragma on the type (ccgIntroducedPtr)"))
+        "no pragma on the type (ccgIntroducedPtr)",
+        elsewhere = some(feUnsupportedParamType)))
+    elif k in classified:
+      result.add (key, modelled[TypeClassSite, TypeClassModel](
+        tmNone, sites,
+        "classifyType gives it an IR type; not on the by-value allowlist, " &
+        "so a by-value formal falls to `byValueWritten`, never to a verdict",
+        elsewhere = some(feUnsupportedParamType)))
     elif k == ntyFloat128:
       result.add (key, refused[TypeClassSite, TypeClassModel](
-        none(SymexErrorKind),
+        some(feUnsupportedParamType),
         "STY-06: `c_long_double` is x87 80-bit on x86-64 and 64-bit on " &
         "MSVC and some ARM targets, so its value is the C target's, not Nim's",
         iNever, nrPlatform))
     else:
       result.add (key, refused[TypeClassSite, TypeClassModel](
-        none(SymexErrorKind),
-        "not on the by-value allowlist: not known to be copied, so a by-value " &
-        "formal falls to `byValueWritten`, never to a verdict"))
+        some(feUnsupportedParamType),
+        "not modelled: classifyType gives it the `__unsupported:` placeholder " &
+        "(or a closure placeholder), and it is not on the by-value " &
+        "allowlist, so a by-value formal falls to `byValueWritten`"))
   for f in ["array", "distinct", "tuple"]:
     result.add ("variant/omittedField/" & f,
       modelled[TypeClassSite, TypeClassModel](tmNone, {tcFeature},
@@ -134,6 +159,23 @@ func admitTypeClass*(k: NimTypeKind; site: TypeClassSite):
     Admit[TypeClassModel] =
   ## Whether a type of this kind is modelled at `site`, and how.
   typeClassTable.admit(classKey(k), site, absent = none(SymexErrorKind))
+
+func admitTypeFeature*(feature: string): Admit[TypeClassModel] =
+  ## Whether a named type feature (`owned`, `atomic`, `variant/omittedField/
+  ## Table`, `array/enumIndex`) is modelled. A feature with no row is refused
+  ## (fail closed): the decision point declines.
+  typeClassTable.admit(feature, tcFeature, absent = none(SymexErrorKind))
+
+func omittedFieldFeature*(k: IRTypeKind): string =
+  ## The feature row that decides an omitted variant field of IR kind `k`
+  ## (HRV-06), or "" when the zero of that kind is not in question.
+  case k
+  of itTable: "variant/omittedField/Table"
+  of itSet: "variant/omittedField/HashSet"
+  of itArray: "variant/omittedField/array"
+  of itDistinct: "variant/omittedField/distinct"
+  of itTuple: "variant/omittedField/tuple"
+  else: ""
 
 # ---------------------------------------------------------------------------
 # The type x memory-op axis.

@@ -918,9 +918,9 @@ state (§8.2).
 <!-- worklist:begin 5.9 -->
 | ID | Item | Home | Owner |
 |---|---|---|---|
-| W-08 | `nodeWritesHeap` is a fail-open denylist | K6a | closed K6a (`rfc-0016-k6a`, walker 293, 2026-11-09) |
-| W-09 | the hook copy-proof defaults to "copied" | K6b | closed K6b (`rfc-0016-k6b`, walker 293, 2026-11-09) |
-| W-10 | `ptrUsesStayLocal`, `routeStoresThroughDeref`, `bindsViewWhole` share the denylist shape | K6c | |
+| W-08 | `nodeWritesHeap` is a fail-open denylist | K6a | closed K6a (`rfc-0016-k6a`, walker 299, 2026-11-09) |
+| W-09 | the hook copy-proof defaults to "copied" | K6b | closed K6b (`rfc-0016-k6b`, walker 299, 2026-11-09) |
+| W-10 | `ptrUsesStayLocal`, `routeStoresThroughDeref`, `bindsViewWhole` share the denylist shape | K6c | closed K6c (`rfc-0016-k6c`, walker 299, 2026-11-09): `routeStoresThroughDeref` is `mayWrite`; `bindsViewWhole` is an exhaustive case; `ptrUsesStayLocal` is an escape predicate sharing D-05's foreign-write facts (`foreignWriteNode`, `opaqueRoutine`), not built over `mayWrite`, because a store of the pointer to a global by name is an escape and not a write through it; it is now fail-closed (an exhaustive case, an address through a deref or returned or passed to an unwalked callee escapes), so its two misjudged shapes no longer rely on the `nnkAddr` expression gate; no SUT got a false trusted verdict from any of the three |
 | W-12 | object field defaults (with W-20) | W1-f (decline), K3b (exact) | closed (2026-11-07, W1-z): W1-f found the decline premise wrong; the walker already agreed with native in every shape (see the W1-f row). (2026-11-09) K3b: the zero side reads the `typeop:fieldDefault/<kind>` rows; `wasMoved`, `reset` and `move` pinned at the bitwise zero |
 | W-14 | `int` hard-coded as BV64; i386 unread | K5b (32-bit refused) | |
 | W-17 | `nimOldCaseObjects`/`strictCaseObjects` unread | K5a (`caseObjects` field) | |
@@ -966,7 +966,7 @@ state (§8.2).
 | STY-03 | pointer order `<` (C-10, W-28) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-04 | `owned T`, `Atomic[T]` (HRV-18) | K3a (`never` cell of the type × memory axis) | never: done (2026-11-08, K3a): `typeclass:owned` and `typeclass:atomic` are `never` rows of the type-class axis |
 | STY-05 | `nextafter` (HRV-27) | K4a-table (`never` cell of the magic axis) | never: no SMT-LIB FP-theory primitive for nextafter: `never` cell `magic:nextafter` (K4a-table) |
-| STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | never: K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`). K4c (2026-11-09): symbolic-length sort, concurrency and full Unicode case fold are `never` rows (`stdlib:algorithm.sort/symbolicLength`, `stdlib:typedthreads.createThread/concurrency`, `stdlib:unicode.toLower/fullCaseFold`); the sort decline names its cell, the other two have no declining site to name it (createThread is a walker fault, W-19b; toLower on a symbolic Rune did not terminate in a 900 s probe) |
+| STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | never: K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`). K4c (2026-11-09): symbolic-length sort, concurrency and full Unicode case fold are `never` rows (`stdlib:algorithm.sort/symbolicLength`, `stdlib:typedthreads.createThread/concurrency`, `stdlib:unicode.toLower/fullCaseFold`); the sort decline names its cell, the other two have no declining site to name it (createThread is a walker fault, W-19b; toLower on a symbolic Rune did not terminate in a 900 s probe). K2c (2026-11-09): `classifyType` reads the `float128` row, so a `c_longdouble` parameter declines `feUnsupportedParamType` (it was modelled as a double) |
 | STY-07 | `addr s[0]` then growth (B §1.2) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | K5b (`never` cell of the build axis) | never: stays by design: `never(reason)` cell, written by K5b |
 | STY-09 | the AUD-01, AUD-09 and AUD-11 records | K5b (AUD-01), K2a (AUD-09), K4c (AUD-11) | |

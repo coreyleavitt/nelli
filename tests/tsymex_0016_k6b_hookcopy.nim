@@ -139,8 +139,8 @@ copyShape(work1, WorkC, "work1")
 copyShape(pure1, PureC, "pure1")
 
 suite "K6b: version floor":
-  test "K6b changed the decline set: walker 293 or later":
-    check parseInt(symexWalkerVersion) >= 293
+  test "K6b changed the decline set: walker 299 or later":
+    check parseInt(symexWalkerVersion) >= 299
 
 suite "K6b: a hook that is not the plain copy declines":
   test "native: the hook's copy differs from the plain one":

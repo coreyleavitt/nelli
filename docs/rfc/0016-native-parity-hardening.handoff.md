@@ -251,7 +251,7 @@
   (re-exec on Linux via its `.cfg`) pins case-object globals (both arms), a
   case-object and an aliased-`ref` witness through `replayWitness`, a SUT with
   type symbols in its footprint, and the `ptr` decline.
-  K4c (`rfc-0016-k4c`, walker stays 292, comment extended): `smt/stdlib_rows.nim`
+  K4c (`rfc-0016-k4c`, walker 296 to 297): `smt/stdlib_rows.nim`
   holds the stdlib-body axis (`stdlibAxis`, key `<module>.<name>[/<facet>]`,
   `admitStdlibBody`). Walked rows carry their check-option delta (`exercises`);
   `applyStdlibDelta` (dsl_parser) reads it for a routine whose options deviate:
@@ -316,7 +316,7 @@
   seq and tuple fields. `routeScan` no longer asks for the type of an untyped
   callee symbol (`wasMoved`'s own `=wasMoved(obj)` in a generic body was a hard
   "node has no type" error). W-12 closed.
-  K2c (`rfc-0016-k2c`, walker 291 to 292, renumbered at landing): `classifyType`
+  K2c (`rfc-0016-k2c`, walker 297 to 298): `classifyType`
   reads the type-class axis. New site `tcClassify` (kinds that become an IR
   type); `admitTypeFeature` reads the named rows. `owned T` and `Atomic[T]`
   read their `never` rows; a top-level `Atomic`/`owned` parameter was a compile
@@ -337,7 +337,7 @@
   fixed, declines over a bounded string (pinned); over an UNBOUNDED string it ended in
   a typed `ckWalkWork` cap once K7 landed (below), so CRH-01 is closed. The `case n.kind` census row in
   `dsl_typebridge.nim` is not converted: K2c adds no dispatch to it.
-  K7 total work (`rfc-0016-k2c`, walker 292, same number): `budget.walkRLimit`
+  K7 total work (`rfc-0016-k2c`, walker 298, with K2c): `budget.walkRLimit`
   bounds the Z3 units of every check of one walk (`ownContextCheck` charges,
   `checkCapped` runs each query under what is left, `shouldStop` ends the walk,
   `runSymexImpl` records the one `ckWalkWork` halt as `beBudgetExhaustedPrune`).
@@ -359,7 +359,7 @@
   (98 min). The cap bounds work, not wall time, and a `queryTimeoutMs` or
   harness timeout still ends a walk first. CRH-01 closed (pins:
   `k7_splitlines_unbounded`, `augmented_assign`, `k2c_typeclass`).
-  K6a (`rfc-0016-k6a`, walker 292->293; W-08 closed): `mayWrite(n)` in
+  K6a (`rfc-0016-k6a`, walker 298->299; W-08 closed): `mayWrite(n)` in
   `dsl_parser.nim` replaces `nodeWritesHeap` / `routineWritesHeap`. It is an
   allowlist of read-only node kinds (`mayWriteReadOnlyKinds`); every other
   kind (asm, a `cast`, a lambda, ...) and an `emit` pragma read as may-write.
@@ -377,7 +377,7 @@
   K6b hook copy-proof (W-09/W-10), K6c `ptrUsesStayLocal` /
   `routeStoresThroughDeref` / `bindsViewWhole`; `scanOpaqueEffects` is still
   a separate scanner (D-05's "one rule" is not yet one function).
-  K6b (`rfc-0016-k6b`, walker 293, extends K6a's; W-09 closed): the hook
+  K6b (`rfc-0016-k6b`, walker 299, extends K6a's; W-09 closed): the hook
   copy-proof `routeHookCopies` is fail-closed. A field copy `dst.f = src.f`
   counts only as a top-level statement of the hook body; every other
   statement must not name the destination, hold a `return` / `raise`, or
@@ -394,7 +394,7 @@
   `tests/tsymex_0016_k6b_hookcopy.nim`. `tsymex_0016_k6a_maywrite` exits 0
   on c and cpp under `dt-bounded.sh` (the non-zero exit K6a's agent saw did
   not reproduce).
-  K6c (`rfc-0016-k6c`, walker 293, extends K6a/b's; W-10 closed):
+  K6c (`rfc-0016-k6c`, walker 299, extends K6a/b's; W-10 closed):
   `routeStoresThroughDeref` is now `routineMayWrite` (the one rule; `mayWrite`'s
   stdlib-argument rule takes `argHoldsCell`, the union of the two scans it
   replaces, and exempts a lifetime hook, which `readHooks` walks as its own).
@@ -416,6 +416,9 @@
   container is a copy and decided. So `tests/tsymex_0016_k6c_round.nim` pins
   precision and declines with native runs, no RED. Open: `scanOpaqueEffects`
   is still a separate summary.
+  Chain note (int4a): `smt/stdlib_ledger.nim` was seeded by K4c at 07dc23ab on an older
+  main; K3b, K2c and K6 add no stdlib bodies. Reseed it (`scripts/stdlib-ledger.sh`) if
+  the CI corpus run shows `feUnadmitted` stdlib declines.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

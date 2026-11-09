@@ -207,5 +207,5 @@ suite "RFC-0016 K2c: classifyType reads the named-feature rows":
     pinDecline(pf128, cellKey(axTypeClass, "float128"), feUnsupportedParamType)
 
 suite "RFC-0016 K2c: walker version":
-  test "version floor: K2c bumped the walker to 292":
-    check parseInt(symexWalkerVersion) >= 292
+  test "version floor: K2c bumped the walker to 298":
+    check parseInt(symexWalkerVersion) >= 298

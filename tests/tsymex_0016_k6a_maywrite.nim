@@ -133,7 +133,7 @@ roShape(rAssert, "rAssert_new", "rAssert_old"):
   doAssert x < 100000
 
 suite "K6a: version floor":
-  test "K6a changed the decline set: walker 293 or later":
+  test "K6a changed the decline set: walker 299 or later":
     check parseInt(symexWalkerVersion) >= 299
 
 suite "K6a: the write-shape corpus (mayWrite == true declines)":

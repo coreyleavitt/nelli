@@ -2,10 +2,10 @@
 # regenerate: scripts/dt-bounded.sh c tests/tsymex_0016_universe.nim 900 && cp tests/.pins/universe.derived.tsv docs/rfc/0016-universe.tsv
 # axis construct: 0 cells
 # axis typeclass: 73 cells
-# axis typeop: 17 cells
+# axis typeop: 34 cells
 # axis pragma: 181 cells
-# axis magic: 249 cells
-# axis stdlib: 0 cells
+# axis magic: 242 cells
+# axis stdlib: 79 cells
 # axis build: 23 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
 # axis defined: 0 cells
@@ -153,13 +153,6 @@ errorkind:ubUnsignedDivZero	kind	dcOmitted
 errorkind:weBreakOutsideLoop	kind	dcOmitted
 errorkind:weInternalWalkerFault	kind	dcNoAnswer
 errorkind:weRecursionCycleCut	kind	dcSubstituted
-magic:%%	modelled	-
-magic:*%	modelled	-
-magic:+%	modelled	-
-magic:-%	modelled	-
-magic:/%	modelled	-
-magic:<%	modelled	-
-magic:<=%	modelled	-
 magic:AbsI	modelled	-
 magic:AddF64	modelled	-
 magic:AddI	modelled	-
@@ -583,6 +576,85 @@ pragma:type/stdcall	modelled	-
 pragma:type/syscall	modelled	-
 pragma:type/tags	modelled	-
 pragma:type/union	declined	-
+stdlib:algorithm.sort/symbolicLength	never	-
+stdlib:deques.Deque	declined	-
+stdlib:math.almostEqual	declined	-
+stdlib:math.arccos	declined	-
+stdlib:math.arccosh	declined	-
+stdlib:math.arccot	declined	-
+stdlib:math.arccoth	declined	-
+stdlib:math.arccsc	declined	-
+stdlib:math.arccsch	declined	-
+stdlib:math.arcsec	declined	-
+stdlib:math.arcsech	declined	-
+stdlib:math.arcsin	declined	-
+stdlib:math.arcsinh	declined	-
+stdlib:math.arctan	declined	-
+stdlib:math.arctan2	declined	-
+stdlib:math.arctanh	declined	-
+stdlib:math.cbrt	declined	-
+stdlib:math.ceil	modelled	-
+stdlib:math.ceilDiv	declined	-
+stdlib:math.classify	modelled	-
+stdlib:math.copySign	modelled	-
+stdlib:math.cos	declined	-
+stdlib:math.cosh	declined	-
+stdlib:math.cot	declined	-
+stdlib:math.coth	declined	-
+stdlib:math.csc	declined	-
+stdlib:math.csch	declined	-
+stdlib:math.degToRad	declined	-
+stdlib:math.divmod	declined	-
+stdlib:math.erf	declined	-
+stdlib:math.erfc	declined	-
+stdlib:math.euclDiv	modelled	-
+stdlib:math.euclMod	modelled	-
+stdlib:math.exp	declined	-
+stdlib:math.floor	modelled	-
+stdlib:math.floorDiv	modelled	-
+stdlib:math.floorMod	modelled	-
+stdlib:math.frexp	declined	-
+stdlib:math.gamma	declined	-
+stdlib:math.hypot	declined	-
+stdlib:math.isNaN	modelled	-
+stdlib:math.isPowerOfTwo	modelled	-
+stdlib:math.lgamma	declined	-
+stdlib:math.ln	declined	-
+stdlib:math.log	declined	-
+stdlib:math.log10	declined	-
+stdlib:math.log2	declined	-
+stdlib:math.mod	declined	-
+stdlib:math.nextPowerOfTwo	modelled	-
+stdlib:math.pow	declined	-
+stdlib:math.radToDeg	declined	-
+stdlib:math.round	modelled	-
+stdlib:math.round/places	declined	-
+stdlib:math.sec	declined	-
+stdlib:math.sech	declined	-
+stdlib:math.sgn	modelled	-
+stdlib:math.signbit	modelled	-
+stdlib:math.sin	declined	-
+stdlib:math.sinh	declined	-
+stdlib:math.splitDecimal	declined	-
+stdlib:math.sqrt	modelled	-
+stdlib:math.tan	declined	-
+stdlib:math.tanh	declined	-
+stdlib:math.trunc	modelled	-
+stdlib:options.Option	declined	-
+stdlib:sets.HashSet/iterationOrder	never	-
+stdlib:strutils.rfind/indexofLink	never	-
+stdlib:system.%%	modelled	-
+stdlib:system.*%	modelled	-
+stdlib:system.+%	modelled	-
+stdlib:system.-%	modelled	-
+stdlib:system./%	modelled	-
+stdlib:system.<%	modelled	-
+stdlib:system.<=%	modelled	-
+stdlib:tables.CountTable	declined	-
+stdlib:tables.OrderedTable	declined	-
+stdlib:tables.Table/iterationOrder	never	-
+stdlib:typedthreads.createThread/concurrency	never	-
+stdlib:unicode.toLower/fullCaseFold	never	-
 typeclass:alias	modelled	-
 typeclass:and	declined	-
 typeclass:anything	declined	-
@@ -656,6 +728,23 @@ typeclass:variant/omittedField/array	modelled	-
 typeclass:variant/omittedField/distinct	modelled	-
 typeclass:variant/omittedField/tuple	modelled	-
 typeclass:void	declined	-
+typeop:fieldDefault/array	modelled	-
+typeop:fieldDefault/bitSet	modelled	-
+typeop:fieldDefault/bool	modelled	-
+typeop:fieldDefault/distinct	modelled	-
+typeop:fieldDefault/float32	modelled	-
+typeop:fieldDefault/float64	modelled	-
+typeop:fieldDefault/int	modelled	-
+typeop:fieldDefault/multiVariant	modelled	-
+typeop:fieldDefault/ptr	modelled	-
+typeop:fieldDefault/ref	modelled	-
+typeop:fieldDefault/seq	modelled	-
+typeop:fieldDefault/set	modelled	-
+typeop:fieldDefault/string	modelled	-
+typeop:fieldDefault/table	modelled	-
+typeop:fieldDefault/tuple	modelled	-
+typeop:fieldDefault/uninterp	declined	-
+typeop:fieldDefault/variant	modelled	-
 typeop:letCursor/array	modelled	-
 typeop:letCursor/bitSet	modelled	-
 typeop:letCursor/bool	modelled	-

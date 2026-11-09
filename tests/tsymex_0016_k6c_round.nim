@@ -129,8 +129,8 @@ plainShape(plain1, PlainC, "plain1")
 plainShape(work1, WorkC, "work1")
 
 suite "K6c: version floor":
-  test "walker 293 or later":
-    check parseInt(symexWalkerVersion) >= 293
+  test "walker 299 or later":
+    check parseInt(symexWalkerVersion) >= 299
 
 suite "K6c: routeStoresThroughDeref is mayWrite":
   test "native: the hooks store through the ref, the plain ones do not":

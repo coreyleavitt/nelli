@@ -12698,15 +12698,16 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
         result.pins.add bsEqZ(leaf, m.eval(leaf))
       except CatchableError:
         result.complete = false
-  # Each ref sort's `nil` constant the model interprets. A pinned ref leaf
-  # (`p == Ref!val!0`) says nothing of `p != nil` unless `nil` is pinned too:
-  # the tail walk's `p != nil` read as undecided. Without completion: a `nil`
-  # the model does not mention is left free (a completed value could equal a
-  # live ref's, which a real nil never does), and an undecided branch on it
-  # fails the tail check closed.
+  # Each ref sort's `nil` constant. A pinned ref leaf (`p == Ref!val!0`) says
+  # nothing of `p != nil` unless `nil` is pinned too: the tail walk's
+  # `p != nil` read as undecided. A `nil` the explore model never mentions is
+  # unconstrained, so any value is consistent with the witness and it is
+  # pinned by model completion, as the mentioned ones are (the witness reader
+  # completes the same way, so a ref parameter's own nil-ness agrees with the
+  # replay). Only a constant the model cannot evaluate at all stays free.
   for tid, nc in currentNilConsts:
     try:
-      let v = m.eval(nc, modelCompletion = false)
+      let v = m.eval(nc)
       if $v != $nc: result.pins.add bsEqZ(nc, v)
     except CatchableError:
       discard

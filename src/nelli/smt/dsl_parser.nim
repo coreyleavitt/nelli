@@ -4526,7 +4526,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
           if coInf in on: scan.noteMagicDefect defFloat, "FloatOverflowDefect"
         let defRange = admitMagic(magic, msDefRange)
         if defRange.admitted:
-          if magic == "Chr" or n.len > 1 and
+          if magicIs(magic, "Chr") or n.len > 1 and
              n[1].typeKind in {ntyEnum, ntyRange, ntyChar, ntyVar}:
             scan.noteMagicDefect defRange, "RangeDefect"
       elif fDef.kind == nnkMethodDef:
@@ -5521,7 +5521,7 @@ proc cgPotentialWrites(n: NimNode; mutate: bool; acc: var seq[NimNode]) =
     if m in cgMutatingMagics and n.len > 1:
       cgPotentialWrites(n[1], true, acc)
       for i in 2 ..< n.len: cgPotentialWrites(n[i], mutate, acc)
-    elif m == "Swap":
+    elif magicIs(m, "Swap"):
       for i in 1 ..< n.len: cgPotentialWrites(n[i], true, acc)
     else:
       for i in 1 ..< n.len: cgPotentialWrites(n[i], mutate, acc)
@@ -10575,8 +10575,9 @@ proc userOrMethodCallStmt(n, calleeSym: NimNode; preamble: var seq[IRStmt];
   # RFC-0005 batch 10: `procCall`'s formal is `untyped`, so the actual of
   # `procCall f(x)` with a void `f` has no type for `userCallStmt` to read, and
   # the compile stopped. The call declines on its key; nothing is walked.
-  if routineMagic(calleeSym) == "ProcCall":
-    return mkCall(callKey, "", @[], tBool())
+  if magicIs(routineMagic(calleeSym), "ProcCall"):
+    declinedMagic(admitMagic("ProcCall", msProcRegister)):
+      return mkCall(callKey, "", @[], tBool())
   userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
 
 proc isOfTest(n: NimNode): bool =
@@ -12213,9 +12214,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `pointer`, `cstring`, `proc` or closure) is `x == nil`, lowered by the
     # same code. A type that lowering does not model falls through to the
     # bodiless-magic decline (`ensureProcRegistered`), never a constant.
-    if n.len == 2 and routineMagic(calleeSym) == "IsNil":
-      let cmp = parseNilCompare(bEq, n[1], false, n, preamble, ctx)
-      if cmp != nil: return cmp
+    if n.len == 2:
+      whenMagic(routineMagic(calleeSym), "IsNil"):
+        let cmp = parseNilCompare(bEq, n[1], false, n, preamble, ctx)
+        if cmp != nil: return cmp
     # Phase 15 E8: the two no-arg exception-query magic intrinsics. Recognised
     # by callee symbol name and intercepted BEFORE the user-proc fall-through
     # (`ensureProcRegistered`), which would otherwise try to parse their stdlib
@@ -12422,14 +12424,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # operand whose `$` is a system magic. `repr` of a bool, an enum and an
     # int are the same magics. `$` of a seq or an object keeps its body.
     if n.len == 2 and not isUserCallee(calleeSym) and
-       n[1].typeKind != ntyNone and
-       (calleeSym.strVal == "$" and
-        (isRuneTyped(n[1]) or classifyType(n[1]).ty.kind in {itInt, itBool, itString} or
-         n[1].typeKind in {ntyEnum, ntyChar}) or
-        calleeSym.strVal == "repr" and
-        routineMagic(calleeSym) in ["BoolToStr", "EnumToStr", "IntToStr",
-                                    "Int64ToStr"]):
-      return parseToStr(n[1], n, preamble, ctx)
+       n[1].typeKind != ntyNone:
+      if calleeSym.strVal == "$" and
+         (isRuneTyped(n[1]) or
+          classifyType(n[1]).ty.kind in {itInt, itBool, itString} or
+          n[1].typeKind in {ntyEnum, ntyChar}):
+        return parseToStr(n[1], n, preamble, ctx)
+      if calleeSym.strVal == "repr":
+        # ADM-IR: the `repr` magics are read from the table.
+        whenMagicIn(routineMagic(calleeSym),
+                    @["BoolToStr", "EnumToStr", "IntToStr", "Int64ToStr"]):
+          return parseToStr(n[1], n, preamble, ctx)
     # RFC-0005 S8cb (item 5). Any other `repr` is an escaping pretty-printer
     # the model has no form for: it declines at the call. (`repr(s)` of a string
     # first failed the compile, and with that fixed its stdlib body's loops
@@ -17244,7 +17249,7 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
     if symKind(head) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
       return true
     let m = routineMagic(head)
-    if m == "Swap":
+    if magicIs(m, "Swap"):
       for i in 1 ..< n.len:
         if lvalueEscapes(n[i]): return true
     elif m in mayWriteMagics and n.len > 1 and lvalueEscapes(n[1]):
@@ -18502,7 +18507,7 @@ proc parseSetLen(n: NimNode; magic: string; preamble: var seq[IRStmt];
   let lenIR = parseNewSeqLen(n[2], n[0].strVal, preamble, ctx)
   if lenFirst:
     preamble.add mkLet(oldTmp, ty, parseExpr(n[1], preamble, ctx))
-  if magic == "SetLengthSeqUninit":
+  whenMagic(magic, "SetLengthSeqUninit"):
     preamble.add mkIf(@[mkBranch(
       mkBinop(bGt, lenIR, mkSeqLen(mkVar(oldTmp), siteLoc(n))),
       ctx.declineAtSite(feUnsupportedOp,
@@ -18632,15 +18637,17 @@ proc parseMoveExpr(n, calleeSym: NimNode; preamble: var seq[IRStmt];
   ## seq or a string is empty). The value is read and bound, then the zero
   ## written back. nil for any other call; an argument shape this does not
   ## accept reaches `ensureProcRegistered`'s magic decline.
-  if n.len != 2 or callMagic(n) != "Move": return nil
-  let target = pureLvalueTarget(n[1])
-  let ty = classifyType(n).ty
-  let zero = zeroValueForType(ty)
-  if target == nil or zero == nil: return nil
-  let tmp = freshSynth(ctx, "moved")
-  preamble.add mkLet(tmp, ty, parseExpr(n[1], preamble, ctx))
-  preamble.add writeBack(target, zero, preamble, ctx)
-  mkVar(tmp)
+  if n.len != 2: return nil
+  whenMagic(callMagic(n), "Move"):
+    let target = pureLvalueTarget(n[1])
+    let ty = classifyType(n).ty
+    let zero = zeroValueForType(ty)
+    if target == nil or zero == nil: return nil
+    let tmp = freshSynth(ctx, "moved")
+    preamble.add mkLet(tmp, ty, parseExpr(n[1], preamble, ctx))
+    preamble.add writeBack(target, zero, preamble, ctx)
+    return mkVar(tmp)
+  nil
 
 
 proc parseNewStringExpr(n: NimNode; preamble: var seq[IRStmt];

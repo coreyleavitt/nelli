@@ -296,6 +296,10 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
     "symmetricDifference (std/setutils.nim:80): symmetricDifference (std/setutils) is a bodiless magic -> stubBody decline P:21225 (\"has no symbolic model\")"),
   mModelled("BoolToStr",
     "$,repr (system/dollars.nim:47): parseToStr P:7444 (enum hole declines)"),
+  mModelled("IntToStr",
+    "$,repr (system/dollars.nim:11): parseToStr P:7444 (iekIntToStr)"),
+  mModelled("Int64ToStr",
+    "$,repr (system/dollars.nim:15): parseToStr P:7444 (iekIntToStr)"),
   mModelled("EnumToStr",
     "$,repr (system/dollars.nim:67): parseToStr P:7444 (enum hole declines)"),
   mModelled("CharToStr",
@@ -613,6 +617,40 @@ template lowerMagic*(proof: Admit[MagicModel] | Admit[StdlibBody];
   ## proof is a type error. The census in `tests/tsymex_0016_admir.nim`
   ## counts the magic arms outside a dispatch.
   doAssert proof.admitted, "lowerMagic: " & proof.decline[1]
+  body
+
+template magicIs*(magic: string; name: static string): bool =
+  ## ADM-IR. An expression-form read of a magic's name: `magic == name`, with
+  ## `name` checked against the table at compile time (a name with no row does
+  ## not compile), so no site spells a magic the table does not know.
+  static: doAssert magicAxis.hasRow(name), "magicIs: no row for " & name
+  magic == name
+
+template magicIn*(magic: string; names: static seq[string]): bool =
+  ## `magicIs` over a group.
+  static:
+    for nm in names: doAssert magicAxis.hasRow(nm), "magicIn: no row for " & nm
+  magic in names
+
+template whenMagic*(magic: string; name: static string; body: untyped) =
+  ## ADM-IR. The expression-form twin of a `dispatchMagic` arm: `body` runs
+  ## when `magic` is `name`, under that row's proof at `msArm`
+  ## (`lowerMagic`), so a node is built only for a magic the table admits.
+  if magicIs(magic, name):
+    lowerMagic(admitMagic(magic, msArm), body)
+
+template whenMagicIn*(magic: string; names: static seq[string];
+                      body: untyped) =
+  ## `whenMagic` over a group of magics that share one lowering.
+  if magicIn(magic, names):
+    lowerMagic(admitMagic(magic, msArm), body)
+
+template declinedMagic*(proof: Admit[MagicModel]; body: untyped) =
+  ## ADM-IR. A site that stands for a magic's DECLINE, not its model: `body`
+  ## builds the carrier of the decline the callee's registration recorded.
+  ## It runs only under a proof that is not admitted, so a magic that later
+  ## gains a model cannot keep a stale marker.
+  doAssert not proof.admitted, "declinedMagic: the row is admitted"
   body
 
 macro dispatchMagic*(site: static MagicSite; body: untyped): untyped =

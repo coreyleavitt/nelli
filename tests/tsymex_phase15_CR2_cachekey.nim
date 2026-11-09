@@ -1135,7 +1135,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## canonical settings string loses its key).
     ## RFC-0016 ADM-IR: 302->303 (a declined float row is declined at parse
     ## time, by a marker, not by the walker's abort).
-    check symexWalkerVersion == "303"
+    ## RFC-0016 K10b precision: 303->304 (the tail walk's pins complete an
+    ## unmentioned ref `nil`).
+    check symexWalkerVersion == "304"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

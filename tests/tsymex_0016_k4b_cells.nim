@@ -40,6 +40,10 @@ proc sAsgn(a: int) =
   if x == 5: symexTarget("hit")
 proc sBoolToStr(a: int) =
   if $(a > 3) == "true" and a == 9: symexTarget("hit")
+proc sIntToStr(a: int) =
+  if $a == "42" and a == 42: symexTarget("hit")
+proc sInt64ToStr(a: int) =
+  if $int64(a) == "42" and a == 42: symexTarget("hit")
 proc sCard(c: char) =
   if card({c, 'a'}) == 2: symexTarget("hit")
 proc sDefault(a: int) =
@@ -215,6 +219,8 @@ suite "K4b: the reachable magic cells, through symexFind":
   exactCell(sDotDot, "DotDot")
   exactCell(sEcho, "Echo")
   exactCell(sEnumToStr, "EnumToStr")
+  exactCell(sIntToStr, "IntToStr")
+  exactCell(sInt64ToStr, "Int64ToStr")
   exactCell(sEqEnum, "EqEnum")
   exactCell(sLeEnum, "LeEnum")
   exactCell(sLtEnum, "LtEnum")

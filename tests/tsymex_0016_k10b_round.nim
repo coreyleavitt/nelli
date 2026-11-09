@@ -219,3 +219,32 @@ suite "K10b: an undecided branch in the tail fails closed":
     check r.status == sxSat
     check not r.trusted
     check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
+
+type TailRef = ref object
+  v: int
+
+proc sutTailRefNil(p: TailRef; x: int64) =
+  ## The label, then a branch on a ref param's nil-ness. The explore path
+  ## (`x == 5`) never mentions `p`, so the model leaves `p` and the sort's
+  ## `nil` constant unconstrained. An unconstrained constant takes any value
+  ## consistent with the witness, so the branch is decided under the pins
+  ## and is not an undecided one.
+  if x == 5: symexTarget("hit")
+  if p == nil:
+    let y {.used.} = x + high(int64)
+
+suite "K10b: an unconstrained ref's nil constant is pinned by completion":
+  test "version floor (the pins complete an unmentioned nil at 304)":
+    check parseInt(symexWalkerVersion) >= 304
+  test "(j) a tail branch on a ref param's nil-ness decides; native agrees":
+    let r = symexFind(sutTailRefNil, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    # Never undecided: the branch follows the witness's own `p`.
+    check UbKind(ubTailUnverified) notin r.soundness.undefinedKinds
+    # Native agreement: the overflow (undefined, checks off) is reached
+    # exactly when the witness's `p` is nil.
+    let pNil = r.witness[0] == nil
+    check r.trusted == not pNil
+    if pNil:
+      check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds

@@ -4,7 +4,7 @@
 # axis typeclass: 73 cells
 # axis typeop: 34 cells
 # axis pragma: 181 cells
-# axis magic: 242 cells
+# axis magic: 244 cells
 # axis stdlib: 88 cells
 # axis build: 25 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
@@ -266,6 +266,8 @@ magic:InSet	modelled	-
 magic:Inc	modelled	-
 magic:Incl	modelled	-
 magic:InstantiationInfo	modelled	-
+magic:Int64ToStr	modelled	-
+magic:IntToStr	modelled	-
 magic:Is	modelled	-
 magic:IsMainModule	modelled	-
 magic:IsNil	modelled	-

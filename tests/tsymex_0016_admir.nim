@@ -259,6 +259,35 @@ suite "ADM-IR: the magic axis (lowerMagic)":
     check not compiles(lowerMagic(admitTypeClass(ntyInt, tcClassify), 0))
     check not compiles(lowerMagic(admitPragma(ppRoutine, "inline", psRoutineDecl), 0))
 
+suite "ADM-IR: expression-form magic reads (whenMagic)":
+  test "a name with no row does not compile; a row's name does":
+    check not compiles(magicIs("x", "NoSuchMagic"))
+    check compiles(magicIs("x", "IsNil"))
+    check not compiles(whenMagic("x", "NoSuchMagic", (let z = 1)))
+  test "the body runs for its magic, under the row's proof":
+    var ran = 0
+    whenMagic("IsNil", "IsNil"): inc ran
+    whenMagic("Move", "IsNil"): inc ran
+    check ran == 1
+    whenMagicIn("IntToStr", @["BoolToStr", "IntToStr"]): inc ran
+    whenMagicIn("Move", @["BoolToStr", "IntToStr"]): inc ran
+    check ran == 2
+  test "a magic the table declines does not run its body":
+    var ran = false
+    expect AssertionDefect:
+      whenMagic("ProcCall", "ProcCall"): ran = true
+    check not ran
+  test "declinedMagic runs only under a declined proof":
+    var ran = false
+    declinedMagic(admitMagic("ProcCall", msProcRegister)): ran = true
+    check ran
+    expect AssertionDefect:
+      declinedMagic(admitMagic("IsNil", msArm)): ran = false
+    check ran
+  test "the to-string magics have rows, admitted where the walker models them":
+    for k in ["IntToStr", "Int64ToStr", "BoolToStr", "EnumToStr"]:
+      check admitMagic(k, msArm).admitted
+
 proc magicInc(a: int) =
   var x = a
   inc x
@@ -306,6 +335,41 @@ proc magicArmsOutsideDispatch(): int =
       for k in magicAxis.keys:
         if ("\"" & k & "\"") in t: inc result
 
+proc magicReadsOutsideDispatch(): int =
+  ## Expression-form reads of a magic's name in dsl_parser.nim outside a
+  ## `dispatchMagic`: `<magic> == "K"`, `!=`, or `<magic> in [..."K"...]`,
+  ## where `<magic>` is `routineMagic(..)`, `callMagic(..)`, `magic` or `m`.
+  ## Each is a node built, or a decision taken, on a magic's name without
+  ## the table (`whenMagic` / `magicIs` read it).
+  var inside = false
+  var ind = 0
+  for l in srcLines("dsl_parser.nim"):
+    let t = l.strip
+    if t.len == 0: continue
+    let cur = l.len - l.strip(trailing = false).len
+    if inside and cur <= ind: inside = false
+    if not inside and "dispatchMagic(" in l:
+      inside = true
+      ind = cur
+      continue
+    if inside: continue
+    proc isMagicRef(tok: string): bool =
+      tok in ["m", "magic"] or tok.startsWith("routineMagic(") or
+        tok.startsWith("callMagic(")
+    for op in [" == \"", " != \""]:
+      let i = l.find(op)
+      if i < 0: continue
+      let lhs = l[0 ..< i].strip.splitWhitespace
+      if lhs.len == 0 or not isMagicRef(lhs[^1]): continue
+      let k = l[i + op.len ..< l.len].split('"')[0]
+      if magicAxis.hasRow(k): inc result
+    for ref0 in ["routineMagic(", "callMagic("]:
+      let j = l.find(ref0)
+      if j >= 0 and " in [" in l[j ..< l.len]:
+        inc result
+    if " in [" in l and (t.startsWith("magic in") or t.startsWith("m in")):
+      inc result
+
 suite "ADM-IR: censuses (allowlist zero unless named)":
   test "no raw scan, math, or arithmetic-stamp construction outside the IR module":
     check countOutside("opaqueDefects:", ["types.nim"]) == 0
@@ -324,3 +388,5 @@ suite "ADM-IR: censuses (allowlist zero unless named)":
   test "every dispatched site goes through the macro; no magic arm sits outside it":
     check countIn("dsl_parser.nim", "dispatchMagic(") == card(magicDispatchSites)
     check magicArmsOutsideDispatch() == 0
+  test "no expression-form magic read sits outside the table (allowlist zero)":
+    check magicReadsOutsideDispatch() == 0

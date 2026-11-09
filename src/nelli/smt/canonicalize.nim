@@ -321,7 +321,12 @@ const renderAsChoicesVersion* = "12"
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "303"
+const symexWalkerVersion* = "304"
+  ## RFC-0016 K10b precision (303->304): the tail walk's pins cover each ref
+  ## sort's `nil` constant by model completion, also where the explore model
+  ## never mentions it (an unconstrained constant takes any value the witness
+  ## is consistent with), so a tail branch on it decides instead of failing
+  ## closed. A branch the pins genuinely leave open still does.
   ## RFC-0016 K10b (300->301): whole-run definedness (section 9.1 item 3). A
   ## trusted `sxSat` needs the whole run defined: under
   ## `SymexSettings.wholeRunDefinedness` (on by default, keyed) the winner is

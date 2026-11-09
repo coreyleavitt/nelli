@@ -148,10 +148,14 @@ proc wildWrite(k: int) =
   symexTarget("t")
 
 proc allocationLoop(k: int) =
+  ## `newSeqUninit` maps each chunk without zeroing it, so the child meets
+  ## the replay's address-space ceiling at the mapping, in about 128 steps,
+  ## rather than after touching every page: a zeroing loop under a loaded
+  ## runner ran past `replayTimeoutMs` (`feReplayTimedOut`, not a crash).
   if gG == 0:
     var hold: seq[seq[byte]]
     while true:
-      hold.add newSeq[byte](1 shl 24)
+      hold.add newSeqUninit[byte](1 shl 24)
   symexTarget("t")
 
 proc hugeAllocation(k: int) =

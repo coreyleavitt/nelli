@@ -1712,6 +1712,7 @@ task test, "Run the test suite":
             "tsymex_0016_k7b_unsupported",
             # RFC-0016 K7: a walk's total solver work is bounded (walkRLimit).
             "tsymex_0016_k7_splitlines_unbounded",
+            "tsymex_0016_k7_twosearch",
             "tsymex_0016_adm1_admission",
             "tsymex_0016_w1c1a_buildprofile",
             "tsymex_0016_w1c1b_reads",

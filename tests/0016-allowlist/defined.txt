@@ -1,16 +1,2 @@
 # RFC-0016 K10a-axis allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-defined:add/signedWide	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:add/signedNarrow	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:sub/signedWide	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:sub/signedNarrow	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:mul/signedWide	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:mul/signedNarrow	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:div/zeroDivisorUnsigned	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:div/zeroDivisorSigned	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:div/lowByMinusOneWide	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:div/lowByMinusOneNarrow	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:mod/zeroDivisorUnsigned	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:mod/zeroDivisorSigned	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:mod/lowByMinusOneWide	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)
-defined:mod/lowByMinusOneNarrow	K10c	no pin record: the row is read by lowerArith and pinned by errors in the W1-d and K5a suites; K10c adds the native pin per row (UBSan, Linux)

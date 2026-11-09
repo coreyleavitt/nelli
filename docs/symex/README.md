@@ -546,6 +546,22 @@ meaning.
 `scripts/check-readme-kinds.sh` fails if a `fe*` or `ub*` member of
 `SymexErrorKind` (other than a retired one) is not named in this file.
 
+### C flags the walker cannot see
+
+`querySetting` does not report `--passC`, so the walker cannot tell which C
+flags a build passes. `BuildProvenance.assumedAbsent` (`smt/buildprofile.nim`)
+lists what it assumes absent, and an undefined-behaviour halt says so in its
+message (`assumedAbsentNote`):
+
+| Flag | What the walker assumes | Evidence |
+|---|---|---|
+| `-fwrapv` | absent, except under `-d:nelliFwrapv` (which passes it) | K5b cfg suite; K10c UBSan sweep of the `-fwrapv` profile |
+| `-ftrapv` | absent: signed overflow does not abort | not pinned |
+| `-ffast-math` | absent: float operations are IEEE | not pinned |
+| `-fsanitize=*` | absent: a sanitizer only makes an undefined operation fault, so the definedness table holds under UBSan | K10c: every arithmetic row of `definednessTable` checked against `-fsanitize=undefined` on Linux (`tests/tsymex_0016_k10c_ubsan.nim`); no UBSan runtime on mingw or MSVC |
+| `-ffp-contract=fast` | present as gcc's default but inert on baseline x86-64 (no fused multiply-add), so `a * b + c` is two roundings | K10c: a `-ffp-contract=off` build equals the default build, and `-mfma` differs (`tests/tsymex_0016_k10c_fma.nim`); a build with `-march=native` or `-mfma` is outside the row |
+| `-fno-strict-aliasing` | absent: strict aliasing is on | not pinned |
+
 ## Local variable pragmas
 
 A pragma on a local `var` or `let` is either admitted or declined. Admitted:

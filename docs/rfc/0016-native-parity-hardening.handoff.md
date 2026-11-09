@@ -202,6 +202,17 @@
   DrNim magics, and `nextafter`, which std/math does not export), and 52
   reachable ones (modelled, declined, unverified, bodied) are re-owned to
   K4b, whose round pins each.
+  K4a-guard (`rfc-0016-k4ag`, walker stays 292): the opaque-call defect scan
+  reads the magic axis. Which Defect a magic raises is a property of its row,
+  four more `MagicSite`s (`msDefOverflow`, `msDefDivZero`, `msDefRange`,
+  `msDefFloat`, `magicDefectSites`) read with `admitMagic`; `overflowMagics`,
+  `divMagics`, `rangeMagics` and `floatArithMagics` are gone. `AddI64`,
+  `SubI64`, `MulI64`, `DivI64`, `ModI64` were on the old lists but are not
+  `TMagic` members in Nim 2.2.10 (no row, never matched). The guard is the
+  K4a-table lib-wide row guard (a magic the scan meets has a row) plus
+  `tsymex_0016_k4a_guard`, which pins each site's rows and that no unsigned
+  divisor, refused or absent magic carries a defect. No allowlist entry was
+  owned by K4a-guard; `cgMutatingMagics` and the `repr` list stay (K6).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

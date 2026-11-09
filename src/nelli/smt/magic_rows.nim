@@ -47,6 +47,14 @@ type
     msInfix         ## the unsigned operators spelled infix (a
                     ## `dispatchMagic` site)
     msNewString     ## `parseNewStringExpr` (a `dispatchMagic` site)
+    msDefOverflow   ## K4a-guard: the opaque-call defect scan lists
+                    ## `OverflowDefect` for a call of this magic
+    msDefDivZero    ## ... `DivByZeroDefect` (signed `div`/`mod` only; an
+                    ## unsigned zero divisor is a C trap, no Defect)
+    msDefRange      ## ... `RangeDefect` (`chr`, a step past an enum's or a
+                    ## subrange's end)
+    msDefFloat      ## ... the float-check Defects, where the owning routine
+                    ## was compiled with `nanChecks`/`infChecks`
 
 type MagicRow = tuple[key: string, row: Row[MagicSite, MagicModel]]
 
@@ -61,7 +69,8 @@ func mModelled(key, note: string; also: set[MagicSite] = {}): MagicRow =
   admittedRow(key, mmModelled, note, also)
 func mPartial(key, note: string): MagicRow = admittedRow(key, mmPartial, note, {})
 func mFolded(key, note: string): MagicRow = admittedRow(key, mmFolded, note, {})
-func mBody(key, note: string): MagicRow = admittedRow(key, mmBody, note, {})
+func mBody(key, note: string; also: set[MagicSite] = {}): MagicRow =
+  admittedRow(key, mmBody, note, also)
 
 func mDeclined(key, note: string): MagicRow =
   (key, refused[MagicSite, MagicModel](some(feUnsupportedOp), note))
@@ -76,35 +85,35 @@ func mNever(key, note: string): MagicRow =
 
 const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("AddI",
-    "+ (system/arithmetics.nim:75): binopForInfix P:3291; lowerArith RT:8800-8910 (overflowConds S8bv; width wrap S8w)"),
+    "+ (system/arithmetics.nim:75): binopForInfix P:3291; lowerArith RT:8800-8910 (overflowConds S8bv; width wrap S8w)", also = {msDefOverflow}),
   mModelled("SubI",
-    "- (system/arithmetics.nim:82): binopForInfix P:3291; lowerArith RT:8800-8910 (overflowConds S8bv; width wrap S8w)"),
+    "- (system/arithmetics.nim:82): binopForInfix P:3291; lowerArith RT:8800-8910 (overflowConds S8bv; width wrap S8w)", also = {msDefOverflow}),
   mModelled("MulI",
-    "* (system/arithmetics.nim:89): binopForInfix P:3291; lowerArith RT:8800-8910 (overflowConds S8bv; width wrap S8w)"),
+    "* (system/arithmetics.nim:89): binopForInfix P:3291; lowerArith RT:8800-8910 (overflowConds S8bv; width wrap S8w)", also = {msDefOverflow}),
   mModelled("DivI",
-    "div (system/arithmetics.nim:96): RT:8856-8870 divLowByMinusOne (div OverflowDefect; mod = C trap at 32/64 bits); divisorIsZero RT:8801"),
+    "div (system/arithmetics.nim:96): RT:8856-8870 divLowByMinusOne (div OverflowDefect; mod = C trap at 32/64 bits); divisorIsZero RT:8801", also = {msDefDivZero, msDefOverflow}),
   mModelled("ModI",
-    "mod (system/arithmetics.nim:113): RT:8856-8870 divLowByMinusOne (div OverflowDefect; mod = C trap at 32/64 bits); divisorIsZero RT:8801"),
+    "mod (system/arithmetics.nim:113): RT:8856-8870 divLowByMinusOne (div OverflowDefect; mod = C trap at 32/64 bits); divisorIsZero RT:8801", also = {msDefDivZero, msDefOverflow}),
   mModelled("UnaryMinusI",
-    "- (system/arithmetics.nim:56): nnkPrefix \"-\" P:11196 (uNeg); overflowMagics P:4020"),
+    "- (system/arithmetics.nim:56): nnkPrefix \"-\" P:11196 (uNeg); overflowMagics P:4020", also = {msDefOverflow}),
   mModelled("UnaryMinusI64",
-    "- (system/arithmetics.nim:61): nnkPrefix \"-\" P:11196 (uNeg); overflowMagics P:4020"),
+    "- (system/arithmetics.nim:61): nnkPrefix \"-\" P:11196 (uNeg); overflowMagics P:4020", also = {msDefOverflow}),
   mModelled("UnaryPlusI",
     "+ (system/arithmetics.nim:49): nnkPrefix \"+\" P:11194 identity"),
   mBody("AbsI",
-    "abs (system.nim:1373): abs has a real body (system.nim:1373-1381); walked; uNeg overflow"),
+    "abs (system.nim:1373): abs has a real body (system.nim:1373-1381); walked; uNeg overflow", also = {msDefOverflow}),
   mBody("MinI",
     "min (system/comparisons.nim:238): if-expr body (comparisons.nim:238-265) walked, P:12762"),
   mBody("MaxI",
     "max (system/comparisons.nim:257): if-expr body (comparisons.nim:238-265) walked, P:12762"),
   mModelled("Succ",
-    "succ (system/arithmetics.nim:1): P:12691 (+/- step; R1-02 enum/char/range bounds)"),
+    "succ (system/arithmetics.nim:1): P:12691 (+/- step; R1-02 enum/char/range bounds)", also = {msDefOverflow, msDefRange}),
   mModelled("Pred",
-    "pred (system/arithmetics.nim:10): P:12691 (+/- step; R1-02 enum/char/range bounds)"),
+    "pred (system/arithmetics.nim:10): P:12691 (+/- step; R1-02 enum/char/range bounds)", also = {msDefOverflow, msDefRange}),
   mModelled("Inc",
-    "+=,inc (system/arithmetics.nim:19): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026", also = {msVarStmt}),
+    "+=,inc (system/arithmetics.nim:19): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026", also = {msVarStmt, msDefOverflow, msDefRange}),
   mModelled("Dec",
-    "-=,dec (system/arithmetics.nim:31): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026", also = {msVarStmt}),
+    "-=,dec (system/arithmetics.nim:31): varParamMagics P:4278 (R8/S8bc arms); rangeMagics P:4026", also = {msVarStmt, msDefOverflow, msDefRange}),
   mModelled("BitnotI",
     "bitnot,not (system/arithmetics.nim:63): nnkPrefix \"not\" on an int operand P:11186 (uNot; runtime picks bitnot by kind)"),
   mModelled("BitandI",
@@ -130,13 +139,13 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("ModU",
     "mod (system/arithmetics.nim:298): uint operands: lowerArith wrapIntToWidth RT:8890 (unsigned always wraps); divisorIsZero"),
   mModelled("AddF64",
-    "+ (system/arithmetics.nim:322): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)"),
+    "+ (system/arithmetics.nim:322): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)", also = {msDefFloat}),
   mModelled("SubF64",
-    "- (system/arithmetics.nim:323): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)"),
+    "- (system/arithmetics.nim:323): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)", also = {msDefFloat}),
   mModelled("MulF64",
-    "* (system/arithmetics.nim:324): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)"),
+    "* (system/arithmetics.nim:324): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)", also = {msDefFloat}),
   mModelled("DivF64",
-    "/ (system/arithmetics.nim:325): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)"),
+    "/ (system/arithmetics.nim:325): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)", also = {msDefFloat}),
   mModelled("UnaryMinusF64",
     "- (system/arithmetics.nim:321): arithFloat RT:8905 (Z3 FP); floatArithMagics P:4029 (S8be float checks)"),
   mModelled("UnaryPlusF64",
@@ -206,7 +215,7 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("Xor",
     "xor (system/basic_types.nim:89): P:11080-11180 (D1c short-circuit; A2b)"),
   mModelled("Chr",
-    "chr (system.nim:728): P:11879 (RangeDefect via hidden range conv)", also = {msCallSwitch}),
+    "chr (system.nim:728): P:11879 (RangeDefect via hidden range conv)", also = {msCallSwitch, msDefRange}),
   mModelled("Ord",
     "ord (system.nim:717): P:11874 (bool); other ordinals: identity through the conv arm P:12629", also = {msCallSwitch}),
   mModelled("High",
@@ -592,6 +601,10 @@ proc admitMagic*(magic: string; site: MagicSite): Admit[MagicModel] =
   ## The magic axis, for every magic. The `var`-parameter subset is
   ## `dsl_parser.admitVarMagic`, which agrees.
   magicAxis.admit(magic, site)
+
+const magicDefectSites* = {msDefOverflow, msDefDivZero, msDefRange, msDefFloat}
+  ## K4a-guard. The sites that are a defect property of a row, read by the
+  ## opaque-call defect scan with `admitMagic`; no `case` dispatches on them.
 
 const magicDispatchSites* = {msVarStmt, msCallSwitch, msInfix, msNewString}
   ## The sites whose `case` goes through `dispatchMagic`. `msArm` names no

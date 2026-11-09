@@ -4166,25 +4166,14 @@ proc routineMagic(sym: NimNode): string =
   implMagic(impl)
 
 const
-  overflowMagics = ["AddI", "SubI", "MulI", "DivI", "ModI", "AddI64",
-                    "SubI64", "MulI64", "DivI64", "ModI64", "UnaryMinusI",
-                    "UnaryMinusI64", "AbsI", "Inc", "Dec", "Succ", "Pred"]
-    ## RFC-0005 S8be. Overflow-checked integer magics (`OverflowDefect`).
-  divMagics = ["DivI", "ModI", "DivI64", "ModI64"]
-    ## RFC-0005 S8be. Signed integer division magics (`DivByZeroDefect`).
-    ## RFC-0016 W1-d1b: the unsigned ones (`DivU`, `ModU`, `DivU64`,
-    ## `ModU64`) are not here. Nim emits no zero check for an unsigned
-    ## `div`/`mod` (the C division traps, SIGFPE, probed c and cpp), so the
-    ## zero divisor is undefined behaviour, not a `DivByZeroDefect`; the scan
-    ## lists no `Defect` for it. An opaque body is not walked, so there is no
-    ## divisor predicate to halt on; the call is not forked as a Defect.
-  rangeMagics = ["Chr", "Inc", "Dec", "Succ", "Pred"]
-    ## RFC-0005 S8be. Magics that check a range or enum bound
-    ## (`RangeDefect`): `chr`, and a step past an enum's or a subrange's end.
-  floatArithMagics = ["AddF64", "SubF64", "MulF64", "DivF64"]
-    ## RFC-0005 W3 (WA-4). The float arithmetic the float checks guard
-    ## (`nanChecks`: `FloatInvalidOpDefect`, `infChecks`:
-    ## `FloatOverflowDefect`).
+  # RFC-0016 K4a-guard: which magics raise which Defect is a property of
+  # the rows of `magicAxis` (`msDefOverflow`, `msDefDivZero`, `msDefRange`,
+  # `msDefFloat`), read with `admitMagic`; the parallel lists are gone.
+  # `DivU`, `ModU`, `DivU64`, `ModU64` carry no zero-divisor row: Nim emits
+  # no zero check for an unsigned `div`/`mod` (the C division traps,
+  # SIGFPE, probed c and cpp), so the zero divisor is undefined behaviour,
+  # not a `DivByZeroDefect`. An opaque body is not walked, so there is no
+  # divisor predicate to halt on.
   maxDefectScanDepth = 8
     ## RFC-0005 S8be. How many routines deep `scanOpaqueDefects` reads; a
     ## deeper call counts as `anyDefect`.
@@ -4302,16 +4291,16 @@ proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
     if fDef != nil:
       let magic = routineMagic(f)
       if magic.len > 0:
-        if magic in overflowMagics: add "OverflowDefect"
-        if magic in divMagics: add "DivByZeroDefect"
+        if admitMagic(magic, msDefOverflow).admitted: add "OverflowDefect"
+        if admitMagic(magic, msDefDivZero).admitted: add "DivByZeroDefect"
         # RFC-0005 W3 (WA-4): float arithmetic raises under the float
         # checks, which are off by default; on where the routine whose body
         # holds the operation was compiled with them (`floatChecksOn`).
-        if magic in floatArithMagics and owner != nil:
+        if admitMagic(magic, msDefFloat).admitted and owner != nil:
           let on = floatChecksOn(owner, memo)
           if coNan in on: add "FloatInvalidOpDefect"
           if coInf in on: add "FloatOverflowDefect"
-        if magic in rangeMagics:
+        if admitMagic(magic, msDefRange).admitted:
           if magic == "Chr" or n.len > 1 and
              n[1].typeKind in {ntyEnum, ntyRange, ntyChar, ntyVar}:
             add "RangeDefect"

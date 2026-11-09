@@ -1724,6 +1724,7 @@ task test, "Run the test suite":
             "tsymex_0016_adm1_admission",
             "tsymex_0016_k4a_table",
             "tsymex_0016_k4a_dispatch",
+            "tsymex_0016_k4a_guard",
             "tsymex_0016_w1c1a_buildprofile",
             "tsymex_0016_w1c1b_reads",
             "tsymex_0016_w1c3_splat_defect",

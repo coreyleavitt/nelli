@@ -286,6 +286,11 @@ const renderAsChoicesVersion* = "12"
   ##   `{.magic.}` with no row declines `feUnadmitted` (was `feUnsupportedOp`)
   ##   and its message carries the row's note; the `var`-parameter table is
   ##   the magic axis. Every magic in `lib/` keeps its verdict and kind.
+  ## - RFC-0016 K4b (stays 292; the control loop renumbers at landing): a
+  ##   `{.magic.}` routine with a real body is walked through it only where
+  ##   its row is admitted at `msBodyWalk` (the `mmBody` rows); any other
+  ##   row declines with its kind (was: the body inlined as the semantics),
+  ##   a magic with no row `feUnadmitted`.
 
 const symexWalkerVersion* = "295"
   ## RFC-0016 K3c (293->294): the pragma axis (`pragmaaxes`). A local,

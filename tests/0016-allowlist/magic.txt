@@ -1,19 +1,13 @@
 # RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-magic:Addr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:AlignOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:AppType	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
-magic:ArrToSeq	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:Array	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:Asgn	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:AstToStr	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:Bool	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:BoolToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:BuildCPU	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:BuildOS	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:BuiltinType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:CStrToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
-magic:Card	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:CompileDate	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:CompileOption	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:CompileOptionArg	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
@@ -22,35 +16,17 @@ magic:Compiles	K4a-dispatch	no SUT reaches it: a compile-time constant or switch
 magic:CpuEndian	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:Declared	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:DeclaredInScope	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
-magic:DeepCopy	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
-magic:Default	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:DeepCopy	K4a-dispatch	no SUT reaches it: `deepCopy` does not compile under the default --mm:orc without --deepcopy:on, a flag a test file cannot set (K4b)
 magic:Defined	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
-magic:Destroy	K4b	reachable from a SUT (an explicit hook call) and refused; K4b pins the declines per row
-magic:DotDot	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:Dup	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
-magic:Echo	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:EnumToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:EqCString	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining body row
-magic:EqEnum	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:EqIdent	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:EqNimrodNode	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:EqProc	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
-magic:EqRef	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:EqSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:Exception	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Exists	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:Exit	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:ExpandToAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:FieldPairs	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
-magic:Fields	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
-magic:Finished	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
 magic:Forall	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:GCref	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
-magic:GCunref	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
 magic:GetImpl	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:GetImplTransf	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:GetTypeInfo	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
-magic:GetTypeInfoV2	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
+magic:GetTypeInfoV2	K4a-dispatch	no SUT reaches it: `getDynamicTypeInfo` lives in system/cyclebreaker, which `system` does not export (K4b)
 magic:HostCPU	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:HostOS	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:Iff	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
@@ -59,16 +35,6 @@ magic:InstantiationInfo	K4a-dispatch	no SUT reaches it: a compile-time constant 
 magic:Is	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:IsMainModule	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:Isolate	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:LeEnum	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:LePtr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
-magic:LeSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:LengthOpenArray	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:Low	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:LtEnum	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:LtPtr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining unverified row
-magic:LtSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:MinusSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:MulSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:NAdd	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:NAddMultiple	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:NBindSym	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
@@ -111,54 +77,40 @@ magic:NctHasNext	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or
 magic:NctLen	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:NctNext	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:NctPut	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:NewFinalize	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
-magic:NewSeqOfCap	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
+magic:NewFinalize	K4a-dispatch	no SUT reaches it: under --mm:orc a `new(r, finalizer)` finalizer must have the `=destroy` signature, which a plain proc literal cannot (K4b)
 magic:Nil	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Nimvm	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:NodeId	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:Of	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:OffsetOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:Old	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:OmpParFor	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:OpenArray	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:OpenArrayToSeq	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:PNimrodNode	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Parallel	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:ParseBiggestFloat	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
 magic:ParseExprToAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:ParseStmtToAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Plugin	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:PlusSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:PrivateAccess	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:ProcCall	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
 magic:QuoteAst	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Range	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:Repr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
 magic:RunnableExamples	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:SameNodeType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Seq	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Set	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:SetLengthSeqUninit	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
-magic:ShallowCopy	K4b	reachable from a SUT (an explicit hook call) and refused; K4b pins the declines per row
+magic:ShallowCopy	K4a-dispatch	no SUT reaches it: `shallowCopy` is declared only for the refc/markAndSweep memory managers, not --mm:orc (K4b)
 magic:SizeOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
-magic:Slice	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining partial row
 magic:Slurp	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:Spawn	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Static	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:StaticExec	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:StrToIdent	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:StrToStr	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:SymIsInstantiationOf	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:SymOwner	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:Trace	K4b	reachable from a SUT (an explicit hook call) and refused; K4b pins the declines per row
 magic:Type	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:TypeOf	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
 magic:TypeTrait	K4a-dispatch	no SUT reaches it: a compile-time constant or switch the compiler folds before the walker reads the call
-magic:UnaryMinusI64	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:UncheckedArray	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Unown	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:Varargs	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:VoidType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
-magic:XorSet	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining declined row
-magic:ZeroDefault	K4b	reachable from a SUT; not pinned in K4a-dispatch (its family pins cover the dispatched sites); K4b pins each remaining modelled row
 magic:nextafter	K4a-dispatch	no SUT reaches it: Nim 2.2 std/math has no nextafter to call (tsymex_phase15_F6_float_math), so the never cell is a name the walker recognises and no program expresses

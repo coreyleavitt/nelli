@@ -12,8 +12,8 @@
 ##   * `mModelled`, `mPartial`, `mFolded`, `mBody`: admitted at `msArm`. A
 ##     partial one is modelled for the shapes its arm accepts and declines the
 ##     rest at the call; a folded one never reaches the walker as a call (the
-##     compiler folds it); a bodied one is walked through its Nim body (K4b
-##     decides which bodied magics stay admitted).
+##     compiler folds it); a bodied one is walked through its Nim body (K4b:
+##     admitted at `msBodyWalk`, which no other row is).
 ##   * `mDeclined`, `mUnverified`: refused, intent `iModel` (open work), kind
 ##     `feUnsupportedOp`. An unverified row is one the research table could
 ##     not show modelled or declined by running it.
@@ -22,6 +22,10 @@
 ##   * `nextafter` (STY-05, HRV-27) is not a `TMagic` member but the math
 ##     routine the walker recognises by name and cannot model: no SMT-LIB FP
 ##     primitive. A `never` cell (`nrTheory`).
+## K4b. A magic with a real body (not a stub) reaches `ensureProcRegistered`
+## and is walked through that body only where its row is admitted at
+## `msBodyWalk`, which only the `mmBody` rows are; every other bodied magic
+## declines with its row's kind.
 ## K4a-dispatch. `dispatchMagic` checks a site's hand-written `case` against
 ## the table at compile time, and `varParamMagics` is gone: a routine with a
 ## `var` formal and a `{.magic.}` is declined at `msProcRegister` from its row.
@@ -55,6 +59,11 @@ type
                     ## subrange's end)
     msDefFloat      ## ... the float-check Defects, where the owning routine
                     ## was compiled with `nanChecks`/`infChecks`
+    msBodyWalk      ## K4b: `ensureProcRegistered`, a magic with a real Nim
+                    ## body (not a stub): admitted only for the `mmBody`
+                    ## rows, whose body is the semantics; any other row
+                    ## declines with its kind, a magic with no row
+                    ## `feUnadmitted`. Read with `admitMagic`
 
 type MagicRow = tuple[key: string, row: Row[MagicSite, MagicModel]]
 
@@ -70,7 +79,7 @@ func mModelled(key, note: string; also: set[MagicSite] = {}): MagicRow =
 func mPartial(key, note: string): MagicRow = admittedRow(key, mmPartial, note, {})
 func mFolded(key, note: string): MagicRow = admittedRow(key, mmFolded, note, {})
 func mBody(key, note: string; also: set[MagicSite] = {}): MagicRow =
-  admittedRow(key, mmBody, note, also)
+  admittedRow(key, mmBody, note, also + {msBodyWalk})
 
 func mDeclined(key, note: string): MagicRow =
   (key, refused[MagicSite, MagicModel](some(feUnsupportedOp), note))

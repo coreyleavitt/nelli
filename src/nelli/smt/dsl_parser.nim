@@ -21680,6 +21680,21 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
       "\".}) has no symbolic model -- " & why & " -- the call is degraded " &
       "to sxUnknown (RFC-0005 S8bo, " & $kind.get(feUnadmitted) & ")",
       "magic:" & name)
+  # RFC-0016 K4b. A magic WITH a real body. The body is documentation or a
+  # VM fallback unless the row says it is the semantics (`mmBody`, admitted
+  # at `msBodyWalk`): `succ`'s `x + 1000` would otherwise be inlined as what
+  # the call does. Any other row declines with its kind; no row,
+  # `feUnadmitted`.
+  if magic.len > 0 and not hasBorrowPragma(impl):
+    let adm = admitMagic(magic, msBodyWalk)
+    if not adm.admitted:
+      let (kind, why) = adm.decline
+      return ctx.declineCallee(kind.get(feUnadmitted),
+        "the compiler magic `" & name & "` ({.magic: \"" & magic &
+        "\".}) has a body that is not its semantics -- " & why & " -- the " &
+        "call is degraded to sxUnknown (RFC-0016 K4b, " &
+        $kind.get(feUnadmitted) & ")",
+        "magic:" & name)
   # Detect generic procs. In typed AST, the generic-params live in
   # impl[2] (untyped) or nested in impl[5] (typed). Either way, we
   # use the call's `getType` reads to derive the substitution.

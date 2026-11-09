@@ -5010,7 +5010,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # RHS, so the RHS lower is irrelevant here — matching D2 read path).
           if fieldsUnchecked():
             survivors.add inactiveFieldSide(forkPath(cpDW, basePcW, cpDW.env),
-                                            not inArmCondW, cpDW.env, "", w)
+                                            not inArmCondW, cpDW.env, "", w,
+                                            isWrite = true)
           else:
             discard forkDefect(forkPath(cpDW, basePcW, cpDW.env),
                                not inArmCondW, "FieldDefect", none(string), w)

@@ -341,7 +341,8 @@ const symexWalkerVersion* = "309"
   ## field as a plain union member access, so outside its branch it is
   ## `ubInactiveVariantField` on the cpp backend (row `field/inactiveBranch`)
   ## and declined path-locally on the c backend (`fieldChecksOffLayout`, row
-  ## `field/inactiveBytes`: no per-target layout of a variant), and a
+  ## `field/inactiveBytes`: no per-target layout of a variant; a cpp WRITE
+  ## outside the branch is declined the same way, being defined there), and a
   ## branch-changing discriminator write is the `dwmHavoc` model. Neither
   ## build declines every routine (`feCheckOption`) any more.
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the

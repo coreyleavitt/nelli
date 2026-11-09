@@ -259,15 +259,18 @@ func defRows(): seq[DefKey] =
       [undef(ubInactiveVariantField), undef(ubInactiveVariantField),
        undef(ubInactiveVariantField)], {dsField},
       "RFC-0016 PRC-07: with `fieldChecks: off` a variant field is a plain " &
-      "union member access. Outside its branch it reads (or writes) a member " &
-      "that is not the active one, which C++ calls undefined (cpp backend). " &
+      "union member access. Outside its branch it READS a member that is not " &
+      "the active one, which C++ calls undefined (cpp backend); a write is " &
+      "defined there (the member becomes active) and is declined, row " &
+      "`field/inactiveBytes`. " &
       "No sanitizer sees it and gcc defines it as punning, so the cell has " &
       "no native pin"))
   result.add (defKey(aoField, ocInactiveBytes),
     refused[DefSite, DefRule](some(feUnsupportedOp),
       "RFC-0016 PRC-07 (`fieldChecksOffLayout`): with `fieldChecks: off` on " &
       "the c backend the same access is defined, as the overlapping bytes of " &
-      "the active branch (C11 6.5.2.3 note 95). The walker keeps one slot " &
+      "the active branch (C11 6.5.2.3 note 95), and on cpp a write is " &
+      "defined (the member becomes active). The walker keeps one slot " &
       "per field and has no per-target byte layout of a variant, so the " &
       "wrong-branch side is declined path-locally"))
 

@@ -552,6 +552,27 @@
   `coField` in such a build (`objOn`/`fieldOn`; a push back on declines). Pins:
   `tsymex_0016_objoff`, `tsymex_0016_fieldoff` (both backends). PRC-07 stays open:
   the c-backend decline, nil checks, float checks (PRC-08).
+  PRC-07 fieldoff follow-up (`rfc-0016-rangeoff`, walker 306 kept; RED first:
+  `[FAILED] a write outside its branch is no finding on either backend` and the
+  ref twin, on cpp): a cpp WRITE to an inactive union member is defined (it makes
+  the member active), so it is no longer `ubInactiveVariantField`; it is declined
+  path-locally (`fieldChecksOffLayout`, row `field/inactiveBytes`), as on c.
+  `IRStmt.vfWrite` (identity only, set by the assignment parser on the write's
+  own branch check) selects it; the heap write site passes `isWrite`. NOT DONE
+  (blocker, needs a fork): the exact c-backend overlapping-bytes model and the
+  cpp "write then read through the discriminator's branch is UB" halt. The
+  value variant holds one SymVal slot per arm field (`vArmFields`) and a ref
+  variant one heap array per tag; there is no union byte storage, so a wrong-
+  branch write has nowhere to put bytes the active arm's slots do not cover, and
+  "active member differs from the discriminator" has no state to live in (a new
+  `SymVal`/heap field, merged by `iteSV`, `svPartsOf`, retBindEq, hashing: ~100
+  sites). A narrower sound slice is available: reads and writes whose extent lies
+  inside the active arm's own fields (int-family, bool, char widths) done as
+  bit-insert/extract on those slots, with layout from the C ABI (struct `{disc;
+  union{struct{..}_k1;..}}`, offsets verified by a native `offsetof` probe) and
+  anything touching uncovered bytes (a shorter active arm, padding) or a float,
+  set, enum, nested object, string or seq declined. The layout table is therefore
+  not produced; the `field/inactiveBytes` row keeps its consumers.
   K10a-axis (`rfc-0016-k10aa` on `rfc-0016-k10at`, walker 299 to 300 in int4b, was 293 to 294;
   at landing): `smt/definedness.nim`, an `AxisTable` keyed `<op>/<class>`
   (`ArithOp` x `OperandClass`, `noalias` among the classes) answering by

@@ -942,7 +942,7 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkVariantFieldStmt",
             newLit(s.vfRetName), emitExpr(s.vfRecv),
             newLit(s.vfFieldName), emitIRType(s.vfFieldTy),
-            prefix(tagsLit, "@"), newLit(s.vfLoc))
+            prefix(tagsLit, "@"), newLit(s.vfLoc), newLit(s.vfWrite))
   of isVariantReassign:
     newCall(bindSym"mkVariantReassign",
             newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName),
@@ -19820,6 +19820,12 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
       # (`gA[k].x = v`). A branch's own check reads its discriminator
       # (`isVariantField`), which does observe.
       markCopyRead(checkRead, preamble, checkLo)
+      # RFC-0016 PRC-07: the last branch check of that read is the write's
+      # own (an assignment to an inactive union member is defined in C++).
+      for ci in countdown(preamble.len - 1, checkLo):
+        if preamble[ci].kind == isVariantField:
+          preamble[ci].vfWrite = true
+          break
     let val = asgnRhs()
     if not (fieldTy.kind == itInt and fieldTy.hasRange and
             not carriesRangeCheck(val, fieldTy)):

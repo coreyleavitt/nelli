@@ -15,10 +15,10 @@
 ##     is exact and trusted, and nothing taints the routine.
 ##   * cpp backend: reading a union member that is not the active one is
 ##     undefined in C++: that side halts as `ubInactiveVariantField` (row
-##     `field/inactiveBranch`) and is an `UndefinedFinding`. A write to the
-##     inactive branch halts too: C++ defines the assignment, but the walker
-##     cannot hold a branch whose active member is not its discriminator's, so
-##     halting (an omission) is the sound answer.
+##     `field/inactiveBranch`) and is an `UndefinedFinding`. A WRITE to the
+##     inactive branch is defined in C++ (the member becomes active), so it
+##     is no finding: it is declined on its own path like the c backend's
+##     (`fieldChecksOffLayout`), the walker holding no active-member state.
 ##   * either: an assignment to the discriminator that changes branch leaves
 ##     the new branch holding the old bytes, the `dwmHavoc` model
 ##     (`feUncheckedDiscBytes`, replay-confirmed).
@@ -164,13 +164,19 @@ suite "PRC-07: --fieldChecks:off":
       pinDecline(sutWrongRead, wrongKey, feUnsupportedOp, tLabel("hit"),
                  "fieldChecksOffLayout", excluding = {feCheckOption})
 
-  test "a write outside its branch":
-    when defined(cpp):
-      pinDecline(sutWrongWrite, wrongKey, ubInactiveVariantField,
-                 excluding = {feCheckOption})
-    else:
-      pinDecline(sutWrongWrite, wrongKey, feUnsupportedOp, tLabel("hit"),
-                 "fieldChecksOffLayout", excluding = {feCheckOption})
+  test "a write outside its branch is no finding on either backend":
+    # C++ defines the assignment (the member becomes active), so it is not
+    # `ubInactiveVariantField`; the walker holds no active-member state, so
+    # the side is declined on its own path (`fieldChecksOffLayout`) on both.
+    let r = symexFind(sutWrongWrite, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 0
+    check not r.trusted
+    check r.errors.named(feUnsupportedOp)
+    check "fieldChecksOffLayout" in show(r.errors)
+    check not r.errors.named(feCheckOption)
+    check symexFind(sutWrongWrite,
+                    tUndefined({UbKind(ubInactiveVariantField)})).status != sxSat
 
   test "a ref variant read outside its branch":
     when defined(cpp):
@@ -180,13 +186,15 @@ suite "PRC-07: --fieldChecks:off":
       pinDecline(sutRefWrongRead, wrongKey, feUnsupportedOp, tLabel("hit"),
                  "fieldChecksOffLayout", excluding = {feCheckOption})
 
-  test "a ref variant write outside its branch":
-    when defined(cpp):
-      pinDecline(sutRefWrongWrite, wrongKey, ubInactiveVariantField,
-                 excluding = {feCheckOption})
-    else:
-      pinDecline(sutRefWrongWrite, wrongKey, feUnsupportedOp, tLabel("hit"),
-                 "fieldChecksOffLayout", excluding = {feCheckOption})
+  test "a ref variant write outside its branch is no finding on either backend":
+    let r = symexFind(sutRefWrongWrite, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 0
+    check not r.trusted
+    check r.errors.named(feUnsupportedOp)
+    check "fieldChecksOffLayout" in show(r.errors)
+    check symexFind(sutRefWrongWrite,
+                    tUndefined({UbKind(ubInactiveVariantField)})).status != sxSat
 
   test "a ref variant in-branch read is exact":
     let r = pinExact(sutRefIn, fk, domain = sampled([7, 0, 1]))

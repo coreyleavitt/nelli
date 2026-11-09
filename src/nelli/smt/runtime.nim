@@ -20551,19 +20551,21 @@ func fieldsUnchecked(): bool =
   coField notin buildSemantics.checks
 
 proc inactiveFieldSide(cp: Path; outOfArm: Z3Bool; env: Env; loc: string;
-                       w: var WalkCtx): seq[Path] =
+                       w: var WalkCtx; isWrite = false): seq[Path] =
   ## RFC-0016 PRC-07. The out-of-branch side `outOfArm` of a variant field
   ## access on `cp` in a `fieldChecks: off` build. On the cpp backend reading a
   ## union member that is not the active one is undefined: decided at the op
-  ## and halted (`ubInactiveVariantField`, row `field/inactiveBranch`; a write
-  ## halts too, conservatively: C++ defines the assignment but the walker
-  ## cannot hold a branch whose active member is not its discriminator's). On
+  ## and halted (`ubInactiveVariantField`, row `field/inactiveBranch`). A
+  ## WRITE (`isWrite`) is not a finding: C++ defines the assignment (the
+  ## member becomes active), so it is declined on its own path like the c
+  ## backend's, the walker holding no state for a member other than its
+  ## discriminator's. On
   ## the c backend C defines it as the overlapping bytes of the active branch,
   ## which the walker has no per-target layout for (`fieldChecksOffLayout`): the
   ## side is declined, on its own path only. Returns the declined child (`env`
   ## its environment) for the caller to add to its survivors, or nothing.
   if guardLiteral(outOfArm) == glFalse: return
-  if buildSemantics.backend == beCpp:
+  if buildSemantics.backend == beCpp and not isWrite:
     decideUndefined(cp, inactiveFieldUb(),  outOfArm,
       opSite("a variant field accessed outside its branch (a plain union " &
              "member, no check emitted)", loc), w)
@@ -23788,7 +23790,8 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
       var scratch: seq[Z3Bool]
       denv[stmt.vfRetName] = allocateSym(stmt.vfFieldTy,
         freshDegradeName("__declinedFieldRead"), scratch)
-      declinedSide = inactiveFieldSide(p, outOfArmCond, denv, stmt.vfLoc, w)
+      declinedSide = inactiveFieldSide(p, outOfArmCond, denv, stmt.vfLoc, w,
+                                       stmt.vfWrite)
     else:
       maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
     if w.shouldStop: return

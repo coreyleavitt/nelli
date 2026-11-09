@@ -1666,6 +1666,9 @@ type
       vfLoc*:           string    ## RFC-0016 PRC-07: the source position, for
                                   ## the access's undefined-behaviour site
                                   ## (identity only, not canonicalised)
+      vfWrite*:         bool      ## RFC-0016 PRC-07: the access is the check
+                                  ## of a write `v.f = x` (the same
+                                  ## identity-only status as `vfLoc`)
     of isVariantReassign:
       vrObjName*:       string    ## the variant variable in env
       vrNewTag*:        int       ## the new tag ordinal
@@ -4895,10 +4898,10 @@ proc mkVarCopy*(name: string): IRExpr =
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
                          fieldTy: IRType, matchingTags: seq[int];
-                         loc: string = ""): IRStmt =
+                         loc: string = ""; write: bool = false): IRStmt =
   IRStmt(kind: isVariantField, vfRetName: retName, vfRecv: recv,
          vfFieldName: fieldName, vfFieldTy: fieldTy,
-         vfMatchingTags: matchingTags, vfLoc: loc)
+         vfMatchingTags: matchingTags, vfLoc: loc, vfWrite: write)
 
 func branchGroups*(arms: seq[VariantArm]): seq[seq[int]] =
   ## RFC-0005 S8f. The explicit (`of`) tag ordinals of one variant axis,

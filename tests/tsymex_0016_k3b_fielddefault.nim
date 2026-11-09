@@ -8,7 +8,7 @@
 ## `zeroValueForType`'s own `case`. K3b makes that `case` read the type x
 ## memory-op axis (`typeop:fieldDefault/<IR kind>`): the row says how a value
 ## of the kind is zeroed, and a kind with no model declines.
-import std/[unittest, strutils, options]
+import std/[unittest, strutils, options, tables, sets]
 import nelli
 import nelli/symex
 import nelli/smt/admission
@@ -142,3 +142,130 @@ suite "RFC-0016 K3b: zeroValueForType reads the row (an uninitialised var)":
                    target = tLabel("h"), domain = dom).status == sxSat
     check pinExact(topStringNonEmpty, cellKey(axTypeOp, "fieldDefault/string"),
                    target = tLabel("h"), domain = dom).status == sxUnsat
+
+# Every other modelled kind's row, reached through an uninitialised `var`: the
+# row says how the kind is zeroed, and each pin below is that zero observed
+# natively and by the walker. `itUninterp` is the one refused row.
+type
+  Meters = distinct int
+  VK = enum vkA, vkB
+  Var1 = object
+    n: int
+    case k: VK
+    of vkA: a: int
+    of vkB: b: bool
+  Multi = object
+    case p: bool
+    of true: pa: int
+    of false: pb: bool
+    case q: VK
+    of vkA: qa: int
+    of vkB: discard
+
+proc zBool(k: int) =
+  var b: bool
+  if not b: symexTarget("h")
+proc zBoolSet(k: int) =
+  var b: bool
+  if b: symexTarget("h")
+proc zFloat32(k: int) =
+  var f: float32
+  if f == 0.0'f32: symexTarget("h")
+proc zFloat32Non(k: int) =
+  var f: float32
+  if f != 0.0'f32: symexTarget("h")
+proc zArray(k: int) =
+  var a: array[3, int]
+  if a[1] == 0: symexTarget("h")
+proc zArrayNon(k: int) =
+  var a: array[3, int]
+  if a[1] != 0: symexTarget("h")
+proc zBitSet(k: int) =
+  var s: set[char]
+  if 'a' notin s: symexTarget("h")
+proc zBitSetNon(k: int) =
+  var s: set[char]
+  if 'a' in s: symexTarget("h")
+proc zSet(k: int) =
+  var s: HashSet[int]
+  if s.len == 0: symexTarget("h")
+proc zSetNon(k: int) =
+  var s: HashSet[int]
+  if s.len > 0: symexTarget("h")
+proc zTable(k: int) =
+  var t: Table[int, int]
+  if t.len == 0: symexTarget("h")
+proc zTableNon(k: int) =
+  var t: Table[int, int]
+  if t.len > 0: symexTarget("h")
+proc zRef(k: int) =
+  var p: ref int
+  if p == nil: symexTarget("h")
+proc zRefNon(k: int) =
+  var p: ref int
+  if p != nil: symexTarget("h")
+proc zPtr(k: int) =
+  var p: ptr int
+  if p == nil: symexTarget("h")
+proc zPtrNon(k: int) =
+  var p: ptr int
+  if p != nil: symexTarget("h")
+proc zDistinct(k: int) =
+  var m: Meters
+  if int(m) == 0: symexTarget("h")
+proc zDistinctNon(k: int) =
+  var m: Meters
+  if int(m) != 0: symexTarget("h")
+proc zVariant(k: int) =
+  var v: Var1
+  if v.k == vkA and v.a == 0 and v.n == 0: symexTarget("h")
+proc zVariantNon(k: int) =
+  var v: Var1
+  if v.k != vkA or v.a != 0 or v.n != 0: symexTarget("h")
+proc zMulti(k: int) =
+  var m: Multi
+  if m.p == false and m.pb == false and m.q == vkA and m.qa == 0:
+    symexTarget("h")
+proc zMultiNon(k: int) =
+  var m: Multi
+  if m.p or m.pb or m.q != vkA or m.qa != 0: symexTarget("h")
+proc zClosure(k: int) =
+  var f: proc (x: int): int
+  if f == nil: symexTarget("h")
+
+suite "RFC-0016 K3b: each modelled kind's zero, and the refused row":
+  test "an uninitialised var is its kind's zero (native)":
+    for (fn, want) in [(nativeRun(zBool(0)), true), (nativeRun(zBoolSet(0)), false),
+                       (nativeRun(zFloat32(0)), true), (nativeRun(zFloat32Non(0)), false),
+                       (nativeRun(zArray(0)), true), (nativeRun(zArrayNon(0)), false),
+                       (nativeRun(zBitSet(0)), true), (nativeRun(zBitSetNon(0)), false),
+                       (nativeRun(zSet(0)), true), (nativeRun(zSetNon(0)), false),
+                       (nativeRun(zTable(0)), true), (nativeRun(zTableNon(0)), false),
+                       (nativeRun(zRef(0)), true), (nativeRun(zRefNon(0)), false),
+                       (nativeRun(zPtr(0)), true), (nativeRun(zPtrNon(0)), false),
+                       (nativeRun(zDistinct(0)), true), (nativeRun(zDistinctNon(0)), false),
+                       (nativeRun(zVariant(0)), true), (nativeRun(zVariantNon(0)), false),
+                       (nativeRun(zMulti(0)), true), (nativeRun(zMultiNon(0)), false)]:
+      check ("h" in fn.hits) == want
+
+  test "the zero of each modelled kind (sat, and its negation unsat)":
+    template both(pos, neg: untyped; kind: string) =
+      check pinExact(pos, cellKey(axTypeOp, "fieldDefault/" & kind),
+                     target = tLabel("h"), domain = dom).status == sxSat
+      check pinExact(neg, cellKey(axTypeOp, "fieldDefault/" & kind),
+                     target = tLabel("h"), domain = dom).status == sxUnsat
+    both(zBool, zBoolSet, "bool")
+    both(zFloat32, zFloat32Non, "float32")
+    both(zArray, zArrayNon, "array")
+    both(zBitSet, zBitSetNon, "bitSet")
+    both(zSet, zSetNon, "set")
+    both(zTable, zTableNon, "table")
+    both(zRef, zRefNon, "ref")
+    both(zPtr, zPtrNon, "ptr")
+    both(zDistinct, zDistinctNon, "distinct")
+    both(zVariant, zVariantNon, "variant")
+    both(zMulti, zMultiNon, "multiVariant")
+
+  test "a placeholder sort has no zero: a pinned decline":
+    pinDecline(zClosure, cellKey(axTypeOp, "fieldDefault/uninterp"),
+               ceUnsupportedHof)

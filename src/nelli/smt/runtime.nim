@@ -21460,7 +21460,15 @@ proc bindsViewWhole(s: IRStmt; names: var seq[string]): bool =
         names.add s.ixRetName
   of isTabKeys:
     return exprLocRoot(s.tkRecv) in names
-  else: discard
+  # RFC-0016 K6c (W-10). No `else`: a statement kind is listed here as one that
+  # binds no view of a container's memory, so a kind added to `IRStmtKind` does
+  # not compile until its author decides (the fail-open `else: discard` this
+  # replaced let a new binder through as "holds nothing").
+  of isAssign, isBreak, isContinue, isReturn, isAssert, isAssume,
+     isCall, isVariantField, isVariantReassign, isVariantReassignSymbolic,
+     isVariantConstructSym, isIndexAssign, isSeqPop, isTargetLabel, isRaise,
+     isDeref, isNew, isDerefWrite, isUnsupported, isUnsafeCast, isSetLen:
+    discard
   false
 
 proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;

@@ -3810,6 +3810,15 @@ proc scanArgHoldsPtr(t: NimNode): bool =
   for h in acc.heapTys:
     if h.getTypeImpl.kind == nnkPtrTy: return true
 
+proc argHoldsCell(t: NimNode): bool =
+  ## RFC-0016 K6c. A value of type `t` may address a cell (a `ptr`, a `ref`, a
+  ## proc, or a shape not recognised), in any part of it. What `mayWrite` takes
+  ## a stdlib routine given such a value to write through.
+  var acc: OpaqueEffects
+  var seen: seq[string]
+  reachPointees(t, acc, seen)
+  acc.heapAll or acc.heapTys.len > 0
+
 proc mayWriteAnyVariable(acc: var OpaqueEffects) =
   ## RFC-0005 S8cs. A store a summary cannot aim: any module-level variable and
   ## any heap cell. A `ref` addresses only heap cells; a `ptr` may address a
@@ -16965,13 +16974,17 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
       return true
     if isUserRoutine(head):
       if routineMayWrite(head, st): return true
-    elif macros.strVal(head) notin ["==", "!=", "isNil"]:
+    elif macros.strVal(head) notin ["==", "!=", "isNil"] and
+         not (macros.strVal(head).startsWith("=") and
+              macros.strVal(head) != "="):
       # A stdlib body is not read: what it writes through an address it is
-      # given (`copyMem`, `zeroMem`) or calls back is not visible here.
+      # given (`copyMem`, `zeroMem`) or calls back is not visible here. A
+      # lifetime hook (`=destroy`, `=wasMoved`, ...) is the exception: its own
+      # body is a hook of its own, walked by `readHooks`.
       for j in 1 ..< n.len:
         if n[j].kind in {nnkEmpty, nnkNilLit}: continue
         if n[j].typeKind in {ntyPtr, ntyPointer, ntyCString, ntyRef, ntyProc} or
-           scanArgHoldsPtr(n[j].getTypeInst):
+           argHoldsCell(n[j].getTypeInst):
           return true
   of nnkPragma: discard  # `emit` is `foreignWriteNode`'s
   of mayWriteReadOnlyKinds: discard
@@ -23083,44 +23096,13 @@ proc routeThroughDeref(lv: NimNode): bool =
     lv.len < 2 or routeThroughDeref(lv[1])
   else: true
 
-proc routeHoldsPointer(t: NimNode): bool =
-  ## A value of type `t` may address a cell, or nothing shows that it cannot.
-  var acc: OpaqueEffects
-  var seen: seq[string]
-  reachPointees(t, acc, seen)
-  acc.heapAll or acc.heapTys.len > 0
-
-proc routeStoresThroughDeref(n: NimNode; seen: var seq[string]): bool =
-  ## `n`, or a routine it names, may store through a `ref` or a `ptr`. A call
-  ## through a value, and a stdlib routine given something that addresses a cell,
-  ## may store anywhere.
-  case n.kind
-  of nnkAsgn, nnkFastAsgn:
-    if routeThroughDeref(n[0]): return true
-  of nnkHiddenAddr, nnkAddr:
-    if n.len > 0 and routeThroughDeref(n[0]): return true
-  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
-     nnkHiddenCallConv:
-    if n.len < 1 or n[0].kind != nnkSym or
-       symKind(n[0]) notin userRoutineSymKinds:
-      return true
-    let head = macros.strVal(n[0])
-    if not isUserRoutine(n[0]) and not head.startsWith("=") and
-       head notin ["==", "!=", "isNil"]:
-      for i in 1 ..< n.len:
-        if n[i].kind notin {nnkEmpty, nnkNilLit} and routeHoldsPointer(n[i].getTypeInst):
-          return true
-  of nnkSym:
-    if symKind(n) in userRoutineSymKinds and isUserRoutine(n):
-      let key = routeRoutineKey(n)
-      if key in seen: return false
-      seen.add key
-      let impl = n.getImpl
-      if impl.kind notin RoutineNodes or impl.len <= 6: return true
-      return routeStoresThroughDeref(impl[6], seen)
-  else: discard
-  for c in n:
-    if routeStoresThroughDeref(c, seen): return true
+proc routeStoresThroughDeref(h: NimNode): bool =
+  ## The hook `h`, or a routine it runs, may store through a `ref` or a `ptr`.
+  ## RFC-0016 K6c (W-10, D-05): this is `mayWrite`'s question, answered by the
+  ## one rule -- a call through a value, a stdlib routine given something that
+  ## addresses a cell, a walked callee's body, a cycle -- not a second scan.
+  var st: MayWriteState
+  routineMayWrite(h, st)
 
 proc routeFieldNames(rec: NimNode; acc: var seq[string]): bool =
   ## The fields of a plain object's record, or false for a shape whose fields
@@ -23245,8 +23227,7 @@ proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
       addRoute(run, routeOpenValue, "the lifetime hook " & name &
                " cannot be summarised: " & s.why)
     block:
-      var seenStores: seq[string]
-      if routeStoresThroughDeref(h, seenStores):
+      if routeStoresThroughDeref(h):
         addRoute(run, routeOpenValue, "the lifetime hook " & name &
                  " may store through a `ref` or a `ptr`, at a call the compiler " &
                  "inserts")

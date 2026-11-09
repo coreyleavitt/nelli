@@ -1717,10 +1717,11 @@ pins = ["tsymex_0016_k6b_hookcopy"]
 id = "W-10"
 table = "5.9"
 title = "`ptrUsesStayLocal`, `routeStoresThroughDeref`, `bindsViewWhole` share the denylist shape"
-state = "open"
-note = ""
+state = "closed"
+note = "K6c (`rfc-0016-k6c`, walker 293, 2026-11-09): `routeStoresThroughDeref` is `mayWrite`; `bindsViewWhole` is an exhaustive case; `ptrUsesStayLocal` is an escape question and unchanged; no false trusted verdict found for any of the three"
 home = "K6c"
 cells = []
+pins = ["tsymex_0016_k6c_round"]
 
 [[row]]
 id = "W-12"

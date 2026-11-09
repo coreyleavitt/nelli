@@ -394,6 +394,20 @@
   `tests/tsymex_0016_k6b_hookcopy.nim`. `tsymex_0016_k6a_maywrite` exits 0
   on c and cpp under `dt-bounded.sh` (the non-zero exit K6a's agent saw did
   not reproduce).
+  K6c (`rfc-0016-k6c`, walker 293, extends K6a/b's; W-10 closed):
+  `routeStoresThroughDeref` is now `routineMayWrite` (the one rule; `mayWrite`'s
+  stdlib-argument rule takes `argHoldsCell`, the union of the two scans it
+  replaces, and exempts a lifetime hook, which `readHooks` walks as its own).
+  `bindsViewWhole`'s `else: discard` is an exhaustive `case` over
+  `IRStmtKind` (a new kind must decide). `ptrUsesStayLocal` is unchanged: it
+  asks whether a pointer escapes, which is not `mayWrite`'s question (a store
+  to a global by name is not one). No SUT gave any of the three a false
+  trusted verdict: `addr p[].f` and a `var` actual returning its address are
+  declined earlier (`feUnsupportedExprKind` on `nnkAddr`), a `var c = t`, a
+  `lent` loop and a `lent`-returning call are declined, a tuple built from the
+  container is a copy and decided. So `tests/tsymex_0016_k6c_round.nim` pins
+  precision and declines with native runs, no RED. Open: `scanOpaqueEffects`
+  is still a separate summary.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

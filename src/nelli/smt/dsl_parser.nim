@@ -16988,6 +16988,9 @@ proc rootReachedByPointer(root: NimNode; heapSteps: seq[NimNode]): bool =
   ## RFC-0005 S8cn. A pointer may reach the memory of `root`: the location is
   ## behind one already, or `root` is a global or a formal (who knows what its
   ## caller holds), or its routine takes its address.
+  # RFC-0016 K6b: a `const` is static read-only data; no pointer writes it, so
+  # a stdlib call given a `Regex` (a pointer inside) cannot reach `let s = k`.
+  if symKind(root) == nskConst and heapSteps.len == 0: return false
   if heapSteps.len > 0 or isModuleGlobal(root) or symKind(root) == nskParam:
     return true
   let impl = resolveRoutineImpl(root.owner)

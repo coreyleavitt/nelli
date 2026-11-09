@@ -125,6 +125,7 @@
 import std/unittest
 import nelli/smt/types
 import nelli/smt/dsl_parser
+import nelli/smt/typeaxes
 
 # ---------------------------------------------------------------------------
 # Round-trip macros. `static[T]` forces the compiler to evaluate the
@@ -642,10 +643,10 @@ proc sVariantFieldSetPlain(): IRExpr =
                     mkBoolLit(true))
 proc sZeroValueTable(): IRExpr =
   ## RFC-0005 S8u. An uninitialised local `Table[string, int]`.
-  mkZeroValue(tTable(tString(), tInt(64, true)))
+  mkZeroValue(admitZeroValue(itTable), tTable(tString(), tInt(64, true)))
 proc sZeroValueSet(): IRExpr =
   ## RFC-0005 S8u. An uninitialised local `HashSet[int]`.
-  mkZeroValue(tSet(tInt(64, true)))
+  mkZeroValue(admitZeroValue(itSet), tSet(tInt(64, true)))
 proc sSeqNew(): IRExpr =
   ## RFC-0005 S8bi. `newSeqOfCap[int](n)`: length 0, `n` range-checked.
   mkSeqNew(mkVar("n"), tInt(64, true), zeroed = true, ofCap = true)

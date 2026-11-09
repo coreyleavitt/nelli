@@ -579,7 +579,11 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekNil:              ## Phase 15 R5
     newCall(bindSym"mkNil", emitIRType(e.nilPointee))
   of iekZeroValue:        ## RFC-0005 S8u
-    newCall(bindSym"mkZeroValue", emitIRType(e.zvTy))
+    ## ADM-IR: the node needs its proof; the emitted code asks the same verb
+    ## for the same kind, so the round trip re-proves what the parse proved.
+    newCall(bindSym"mkZeroValue",
+            newCall(bindSym"admitZeroValue", newLit(e.zvTy.kind)),
+            emitIRType(e.zvTy))
   of iekSeqNew:           ## RFC-0005 S8bi
     newCall(bindSym"mkSeqNew", emitExpr(e.snArg), emitIRType(e.snElemTy),
             newLit(e.snZeroed), newLit(e.snOfCap))
@@ -16695,7 +16699,7 @@ proc zeroValueForType(ty: IRType): IRExpr =
       ## recursion, the walker's lowering of `iekZeroValue` (a shape it
       ## cannot zero, such as a variant whose ordinal-0 tag is not legal, is
       ## allocated and degraded there, never left unbound).
-      return mkZeroValue(ty)
+      return mkZeroValue(a, ty)
     of zmBase:
       ## RFC-0005 S8u: the base type's zero (`D(x)` is the identity in the IR).
       return zeroValueForType(ty.distinctBase)

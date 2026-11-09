@@ -34,6 +34,7 @@ import std/[macros, options, strutils]
 import ./admission
 import ./errorkind
 import ./types
+export MemOp, MemShare, ZeroModel, TypeOpModel   ## ADM-IR: they live in types.nim
 
 type
   TypeClassSite* = enum
@@ -48,27 +49,9 @@ type
     tmStructural        ## copied when its components are (distinct, object, tuple)
     tmNone              ## a feature row: no by-value meaning
 
-  MemOp* = enum
-    moLetCursor         ## `let c = lv`: a copy, or a view of lv's memory
-    moFieldDefault      ## the zero a value of the kind starts as (K3b)
   TypeOpSite* = enum
     toHoldsSharedMemory
     toZeroValue         ## `zeroValueForType`
-  MemShare* = enum
-    msValue             ## the value is the whole of it: the `let` is a copy
-    msShared            ## owns heap memory a `let` may view (seq, string, ...)
-    msComponents        ## decided by the components
-  ZeroModel* = enum
-    zmLiteral           ## a scalar, string or handle: its zero is a literal
-    zmZeroValue         ## an aggregate or container: the walker's `iekZeroValue`
-                        ## (every field and element zeroed, a seq empty)
-    zmBase              ## a distinct: its base type's zero
-  TypeOpModel* = object
-    ## One payload type for the table; the variant keeps each operation's
-    ## answer apart.
-    case op*: MemOp
-    of moLetCursor: share*: MemShare
-    of moFieldDefault: zero*: ZeroModel
   OpKey = tuple[key: string, row: Row[TypeOpSite, TypeOpModel]]
   ClassKey = tuple[key: string, row: Row[TypeClassSite, TypeClassModel]]
 
@@ -258,6 +241,12 @@ const typeOpTable* = axisTable[TypeOpSite, TypeOpModel](axTypeOp, opRows())
 func admitTypeOp*(k: IRTypeKind; op: MemOp; site = toHoldsSharedMemory):
     Admit[TypeOpModel] =
   typeOpTable.admit(opKey(op, k), site, absent = none(SymexErrorKind))
+
+func admitZeroValue*(k: IRTypeKind): Admit[TypeOpModel] =
+  ## RFC-0016 ADM-IR. The proof `mkZeroValue` takes: the kind's
+  ## `fieldDefault` row, read at the zero-value site. The parser's
+  ## `zeroValueForType` and the IR emitter's generated code both ask here.
+  admitTypeOp(k, moFieldDefault, toZeroValue)
 
 func holdsSharedMemory*(t: IRType): bool =
   ## RFC-0005 S8cn. `t` is, or holds, a seq, a string, a Table or a HashSet,

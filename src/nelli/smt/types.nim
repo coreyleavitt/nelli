@@ -10,6 +10,7 @@ export tables, options
 import ./soundness   ## RFC-0005 S11: the Z3-free soundness vocabulary
 export soundness
 import ./errorkind   ## RFC-0016 §8.1: `SymexErrorKind`, a leaf (admission names it)
+import ./admission   ## RFC-0016 ADM-IR: `Admit`, the proof a keyed-axis constructor takes
 export errorkind
 import ./budget      ## review R1-17: `ResourceBudget`, a Z3-free leaf
 export budget
@@ -33,6 +34,28 @@ export buildprofile
 ## construct them with ordinary heap allocation; the runtime walks
 ## them without ever needing to mutate the structure (it's an
 ## immutable view).
+
+type
+  MemOp* = enum
+    moLetCursor         ## `let c = lv`: a copy, or a view of lv's memory
+    moFieldDefault      ## the zero a value of the kind starts as (K3b)
+  MemShare* = enum
+    msValue             ## the value is the whole of it: the `let` is a copy
+    msShared            ## owns heap memory a `let` may view (seq, string, ...)
+    msComponents        ## decided by the components
+  ZeroModel* = enum
+    zmLiteral           ## a scalar, string or handle: its zero is a literal
+    zmZeroValue         ## an aggregate or container: the walker's `iekZeroValue`
+                        ## (every field and element zeroed, a seq empty)
+    zmBase              ## a distinct: its base type's zero
+  TypeOpModel* = object
+    ## RFC-0016 K3a. The type x memory-op axis's payload, one type for the
+    ## table; the variant keeps each operation's answer apart. It lives here,
+    ## below the IR constructors, because `mkZeroValue` takes the proof
+    ## (`Admit[TypeOpModel]`, ADM-IR); `typeaxes` holds the rows and the verbs.
+    case op*: MemOp
+    of moLetCursor: share*: MemShare
+    of moFieldDefault: zero*: ZeroModel
 
 type
   IRBinop* = enum
@@ -3150,10 +3173,18 @@ proc mkNil*(pointee: IRType): IRExpr =
   ## per-sort `nilConst`.
   IRExpr(kind: iekNil, nilPointee: pointee)
 
-proc mkZeroValue*(ty: IRType): IRExpr =
+proc mkZeroValue*(zero: Admit[TypeOpModel]; ty: IRType): IRExpr =
   ## RFC-0005 S8u. Nim's zero value of `ty` (`default(T)`), for an
   ## uninitialised local whose type has no literal zero in the IR (a `Table`,
   ## a `HashSet`). Lowers to the walker's `defaultZero`.
+  ## RFC-0016 ADM-IR: `zero` is the type x memory-op axis's proof for the
+  ## `fieldDefault` operation, and its row says the kind's zero is this node
+  ## (`zmZeroValue`). A declined proof, or one for another operation or
+  ## model, is the parser's bug: it declines before it builds.
+  doAssert zero.admitted and zero.payload.op == moFieldDefault and
+           zero.payload.zero == zmZeroValue,
+    "mkZeroValue: needs an admitted typeop:fieldDefault row whose zero is " &
+    "a zero-value node, got " & render(zero.cell)
   IRExpr(kind: iekZeroValue, zvTy: ty)
 
 proc mkSeqNew*(arg: IRExpr; elemTy: IRType; zeroed, ofCap: bool): IRExpr =

@@ -859,6 +859,8 @@ type
     of iekUnop:
       uop*: IRUnop
       operand*: IRExpr
+      usite*: string      ## `file:line:col` of a signed negation, the name of
+                          ## its undefined-behaviour finding ("" when unknown)
     of iekField:
       obj*:        IRExpr
       fieldIx*:    int
@@ -1003,6 +1005,9 @@ type
       borrowOp*:           IRBinop   ## the BASE operator (e.g. bAdd / bLt)
       borrowLhs*:          IRExpr
       borrowRhs*:          IRExpr
+      borrowSite*:         string    ## `file:line:col` of the borrowed signed
+                                     ## operator, the name of its
+                                     ## undefined-behaviour finding
       borrowReturnsDistinct*: bool   ## true → re-box the base result as a fresh
                                      ## `svDistinct` (arithmetic); false →
                                      ## comparison, return the raw bool.
@@ -3079,8 +3084,13 @@ proc mkBinop*(op: IRBinop, lhs, rhs: IRExpr): IRExpr =
   IRExpr(kind: iekBinop, bop: op, lhs: lhs, rhs: rhs)
 
 proc withSite*(e: IRExpr, site: string): IRExpr =
-  ## K10a-float: stamp a binop with its source site.
-  e.bsite = site
+  ## K10a-float: stamp a binop, a negation or a borrowed operator with its
+  ## source site.
+  case e.kind
+  of iekBinop: e.bsite = site
+  of iekUnop: e.usite = site
+  of iekBorrowOp: e.borrowSite = site
+  else: discard
   e
 
 proc mkUnop*(op: IRUnop, operand: IRExpr): IRExpr =

@@ -418,11 +418,15 @@ proc emitExpr*(e: IRExpr): NimNode =
     if e.bsite.len > 0: newCall(bindSym"withSite", bn, newLit(e.bsite))
     else: bn
   of iekUnop:
-    newCall(bindSym"mkUnop", emitUnop(e.uop), emitExpr(e.operand))
+    let un = newCall(bindSym"mkUnop", emitUnop(e.uop), emitExpr(e.operand))
+    if e.usite.len > 0: newCall(bindSym"withSite", un, newLit(e.usite))
+    else: un
   of iekBorrowOp:   ## Phase 15 G5
-    newCall(bindSym"mkBorrowOp", emitBinop(e.borrowOp),
+    let bw = newCall(bindSym"mkBorrowOp", emitBinop(e.borrowOp),
             emitExpr(e.borrowLhs), emitExpr(e.borrowRhs),
             newLit(e.borrowReturnsDistinct), emitIRType(e.borrowDistinctTy))
+    if e.borrowSite.len > 0: newCall(bindSym"withSite", bw, newLit(e.borrowSite))
+    else: bw
   of iekField:
     newCall(bindSym"mkField", emitExpr(e.obj),
             newLit(e.fieldIx), newLit(e.fieldName))
@@ -11484,7 +11488,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         if bi.isBorrow:
           let bop = binopForInfix(n[0].strVal)
           let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (borrow intercept); RFC-0005 S8ax order
-          return mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctTy)
+          let bw = mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctTy)
+          if bop in {bAdd, bSub, bMul, bDiv, bMod}: bw.borrowSite = srcSite(n)
+          return bw
     # Phase 15 R5 (Cluster R). A `nil` ref/ptr comparison `p == nil` / `nil == p`
     # (`==`/`!=`). One operand is an `nnkNilLit`; the OTHER is the ref/ptr whose
     # type supplies the pointee for the per-sort `nilConst`. Lower the nil side to
@@ -11689,7 +11695,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if n[1].kind in {nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit}:
         mkFloatLit(-n[1].floatVal, if n[1].kind == nnkFloat32Lit: 32 else: 64)
       else:
-        mkUnop(uNeg, parseAtomicOperand(n[1], preamble, ctx))  ## A2a chokepoint (unary minus)
+        withSite(mkUnop(uNeg, parseAtomicOperand(n[1], preamble, ctx)),
+                 srcSite(n))  ## A2a chokepoint (unary minus)
     of "@":
       # Phase 15 C4: a seq literal `@[a, b, c]` (incl. empty `@[]`). The typed
       # form is `Prefix(Sym "@", Bracket)`. Lower to a CONCRETE-length `svSeq`

@@ -75,3 +75,36 @@ suite "K10a-float: rebuilt binops keep their source site":
     if r.undefined.len == 2:
       check {lineOf(r.undefined[0].site), lineOf(r.undefined[1].site)} ==
             {59, 60}
+
+type Cnt = distinct int
+proc `+`(a, b: Cnt): Cnt {.borrow.}
+
+proc sutTwoNeg(a, b: int) =
+  let x = -a
+  let y = -b
+  if x == 5 and y == 6: symexTarget("hit")
+
+proc sutTwoBorrow(a, b: int) =
+  let x = Cnt(a) + Cnt(1)
+  let y = Cnt(b) + Cnt(2)
+  if int(x) == 5 and int(y) == 6: symexTarget("hit")
+
+suite "K10a-float: negation and borrow keep their source site":
+  test "two negations give two findings with distinct sites":
+    let r = symexFind(sutTwoNeg, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 2
+    if r.undefined.len == 2:
+      check r.undefined[0].site.len > 0
+      check {lineOf(r.undefined[0].site), lineOf(r.undefined[1].site)} ==
+            {83, 84}
+      for u in r.undefined:
+        check u.kind == UbKind(ubSignedOverflow)
+  test "two borrowed `+` give two findings with distinct sites":
+    let r = symexFind(sutTwoBorrow, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.undefined.len == 2
+    if r.undefined.len == 2:
+      check r.undefined[0].site.len > 0
+      check {lineOf(r.undefined[0].site), lineOf(r.undefined[1].site)} ==
+            {88, 89}

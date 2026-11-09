@@ -10739,7 +10739,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       if inner.kind == svInt and inner.ziWidth != 0 and inner.ziSigned:
         let zero = SymVal(kind: svInt, zi: mkInt(0), ziWidth: inner.ziWidth,
                           ziSigned: true, ziIvl: some(interval(0, 0)))
-        lowerArith(zero, inner, bSub)
+        lowerArith(zero, inner, bSub, e.usite)
       elif inner.kind == svInt: SymVal(kind: svInt, zi: -inner.zi)
       elif inner.kind == svFloat32: SymVal(kind: svFloat32, fp32: -inner.fp32)  # Phase 15 F3
       elif inner.kind == svFloat64: SymVal(kind: svFloat64, fp64: -inner.fp64)  # Phase 15 F3
@@ -10749,7 +10749,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
           of svBV16: liftBV(mkBitVec[16](0), true)
           of svBV32: liftBV(mkBitVec[32](0), true)
           else:      liftBV(mkBitVec[64](0'i64), true)
-        lowerArith(zero, inner, bSub)
+        lowerArith(zero, inner, bSub, e.usite)
       else: negBV(inner)
     of uNot:
       let inner = lower(env, e.operand, some(ofBool(mkBool(true))))
@@ -10980,7 +10980,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # Arithmetic borrow → apply the base op, then re-box as the distinct type.
       # CR-9(c) D4: delegate to lowerArith; preserve ejectBase (above) +
       # reboxDistinct wrap (below).
-      let baseRes = lowerArith(l, r, e.borrowOp)
+      let baseRes = lowerArith(l, r, e.borrowOp, e.borrowSite)
       if e.borrowReturnsDistinct:
         reboxDistinct(e.borrowDistinctTy, baseRes)
       else:

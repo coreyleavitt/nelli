@@ -326,7 +326,8 @@ const symexWalkerVersion* = "300"
   ## condition) in every attempt, relaxed ones included, and reports an input
   ## that drives one undefined as `ConcolicFlipResult.undefinedReached`, never
   ## as a seed.
-  ## RFC-0016 K10a-float (299->300, with K10a-axis): a float -> int conversion of NaN, an
+  ## RFC-0016 K10a-float (299->300, with K10a-axis; every undefined finding names its
+  ## own source site, a signed negation and a borrowed operator included): a float -> int conversion of NaN, an
   ## infinity or an operand outside the target's range is undefined behaviour
   ## (`ubFloatToIntRange`, appended to `UbKind`; row `convert/floatToInt`), so
   ## `drainConvFloatToIntFresh` decides that side through `haltUndefined`
@@ -6110,12 +6111,15 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       (if e.bsite.len > 0: e.bsite & ";" else: "") &
       canonicalize(e.lhs, env) & ";" & canonicalize(e.rhs, env) & ">"
   of iekUnop:
-    "Ex<Un:" & unopTag(e.uop) & ";" & canonicalize(e.operand, env) & ">"
+    "Ex<Un:" & unopTag(e.uop) & ";" &
+      (if e.usite.len > 0: e.usite & ";" else: "") &
+      canonicalize(e.operand, env) & ">"
   of iekBorrowOp:   ## Phase 15 G5: the distinct name + base op + operands
                     ## content-address the borrow distinctly.
     "Ex<Bw:" & (if e.borrowDistinctTy == nil: ""
                 else: $e.borrowDistinctTy) & ";" & binopTag(e.borrowOp) & ";" &
       $e.borrowReturnsDistinct & ";" &
+      (if e.borrowSite.len > 0: e.borrowSite & ";" else: "") &
       canonicalize(e.borrowLhs, env) & ";" & canonicalize(e.borrowRhs, env) & ">"
   of iekField:
     "Ex<F:" & $e.fieldIx & ";" & canonicalize(e.obj, env) & ">"

@@ -22782,7 +22782,11 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
     if formalParams[0].kind != nnkEmpty: tys.add formalParams[0]
     for i in 1 ..< formalParams.len:
       let f = formalParams[i]
-      if f.len > 2: tys.add f[0].getTypeInst
+      if f.len > 2:
+        # A formal declared `a {.inject.}` (a template-made routine) is a
+        # pragma expression around the symbol; the typed node is inside.
+        let nm = if f[0].kind == nnkPragmaExpr: f[0][0] else: f[0]
+        tys.add nm.getTypeInst
     for t in tys:
       let why = typePragmaReason(t)
       if why.len > 0:

@@ -991,6 +991,25 @@
   types moved to `types.nim` (typeaxes re-exports), `admitZeroValue(kind)` is
   the verb, the emitter re-asks it. Census: zero raw `iekZeroValue` builds
   outside `types.nim`. Test `tsymex_0016_admir`. ADM-IR remaining axes (walker 303): `mkOpaqueCall` takes an `OpaqueScan` (definedness and magic-defect rows, via `noteUndefined` / `noteMagicDefect`; `unscanned` for the three arms that never scan); `mkMathCall(Admit[StdlibBody]; ...)` with the parser declining a declined or absent float row at parse time (rows added for abs/min/max/isInf/isFinite/isNormal/toFloat32/toFloat64, nextafter declined; absent declines `feUnsupportedOpAborted`; this is why the walker bumps: such a program's IR carries a marker, not an `iekMathCall`); `mkArithBlock(ArithScopeProof; ...)` (pragma row, stdlib row, or the build); magics: `lowerMagic(proof, body)` wraps every `dispatchMagic` arm, census of `of "<magic>"` arms outside a dispatch is zero. Expression-form magic reads (walker 303, no change): `whenMagic` / `whenMagicIn` (`magic_rows.nim`) read the row at `msArm` and lower through `lowerMagic` for `IsNil`, the `repr` group (`BoolToStr`, `EnumToStr`, `IntToStr`, `Int64ToStr`), `Move`, `SetLengthSeqUninit`; `declinedMagic` carries `ProcCall`'s decline under its declined row; `magicIs` is the table-checked name compare (`Chr`, `Swap` in the analysis procs). Rows added: `IntToStr`, `Int64ToStr` (modelled, pinned in `tsymex_0016_k4b_cells`). Census `magicReadsOutsideDispatch` counted 8 before (the five plus `Chr` and the two `Swap` compares), 0 after, no allowlist. PCRE documented as enforced at its runtime consumer. K10b precision (walker 303->304, in the same branch): `modelPins` pins each ref sort's `nil` by model completion, so an explore-unmentioned `nil` no longer leaves a tail branch undecided. The RED named in the brief did not reproduce: in every shape tried (ref param unconstrained, two ref types, `seq`/object fields, `ptr`, empty `pc`) Z3's model already interprets `nil`, so the branch decided before the change; `tsymex_0016_k10b_round` (j) pins the decided, natively-agreeing behaviour and the 304 floor. A global ref stays `ubTailUnverified`. `docs/migration/0.10.0.md` updated.
+  PRC-02 (`rfc-0016-prc02`, walker still 292, with INT-13): a proc value now
+  crosses a re-executed replay by identity. `replaywire.nim` writes it as the
+  index of a routine in a table (`procs`) that both ends build from the
+  program's own top-level routines the footprint scan read (the child is the
+  same binary), so a global, a field or a hook holding one replays, and
+  `scanFootprint` no longer opens on a proc-typed symbol or a call through one:
+  a routine named in code it reads is scanned, and the wire writes no other. A
+  closure with an environment, and a routine the code does not name, decline
+  naming which. A `{.global.}` named by a routine nested in (or called by) the
+  one that declares it is the child's own, as the declaring routine's use
+  already was (`ownGlobals`, checked against the set of routines scanned). The
+  six runtime hooks go through the same wire (`putHostHooks`/`readHostHooks`
+  in `replayproc.nim`; the child keeps its own `outOfMemHook` and chains the
+  host's), so a hook naming a routine the SUT names is reinstalled and any
+  other still declines naming the hook; `setControlCHook` stays INT-15. A
+  `method` still declines ("a method, whose overrides the scan cannot list"):
+  the macro API cannot enumerate overrides (the dispatcher is built after
+  sem), so no table could cover them; closing it needs a different mechanism.
+  `tests/tsymex_0016_prc02_reexec.nim` pins each kind on Linux via its `.cfg`.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

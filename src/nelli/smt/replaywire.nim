@@ -4,9 +4,18 @@
 ## it carries no type information and has no compatibility to keep.
 ##
 ## What cannot cross a process raises `WireError` at the host's end and the
-## replay declines: a non-nil `ptr`, `pointer`, proc value or `cstring`. A `ref`
+## replay declines: a non-nil `ptr`, `pointer` or `cstring`, a closure with a
+## captured environment, and a proc value naming no routine of `procs`. A `ref`
 ## crosses with its identity kept (two references to one cell are one cell in
 ## the child, and a cycle closes), so that a graph of them means what it did.
+##
+## A proc value crosses by identity (RFC-0016 PRC-02): an address differs
+## between two processes of one binary (ASLR), but the child is the same
+## binary, so both ends are given the same `procs`, a table of the routines the
+## replayed code names, in one order. A proc value is written as its index, and
+## read as the routine at that index. Those routines are the ones the footprint
+## scan has read, so what a proc value runs is code whose state the child was
+## handed.
 ##
 ## `isWireableType` is the compile-time half: a type that cannot be encoded
 ## whatever its value holds (an imported C struct, whose fields Nim does not
@@ -22,13 +31,15 @@ type
   WireWriter* = object
     data*: string
     cells: Table[pointer, int]
+    procs*: seq[pointer]
   WireReader* = object
     data*: string
     pos: int
     cells: seq[pointer]
+    procs*: seq[pointer]
 
-proc initWireReader*(data: string): WireReader =
-  WireReader(data: data)
+proc initWireReader*(data: string; procs: seq[pointer] = @[]): WireReader =
+  WireReader(data: data, procs: procs)
 
 proc putRaw(w: var WireWriter; p: pointer; n: int) =
   if n > 0:
@@ -105,8 +116,26 @@ proc wirePut*[T](w: var WireWriter; x: T) =
     if not x.isNil:
       raise newException(WireError, "a non-nil `" & (when T is pointer: "pointer" else: "cstring") & "`, whose target the child cannot be given")
   elif (T is proc):
-    if not x.isNil:
-      raise newException(WireError, "a live proc value")
+    # RFC-0016 PRC-02. By identity: the index of the routine in `procs`. A
+    # closure type is a code pointer and an environment; one with an
+    # environment holds the host's heap, which has no routine to name.
+    if x.isNil:
+      w.putLen(-1)
+    else:
+      when sizeof(T) > sizeof(pointer):
+        if rawEnv(x) != nil:
+          raise newException(WireError, "a closure with a captured environment, which the child cannot be given")
+        let code = rawProc(x)
+      else:
+        let code = cast[pointer](x)
+      var at = -1
+      for i, p in w.procs:
+        if p == code:
+          at = i
+          break
+      if at < 0:
+        raise newException(WireError, "a proc value naming no routine the replayed code names, so the child could not run it")
+      w.putLen(at)
   else:
     raise newException(WireError, "a value of an unmarshallable type")
 
@@ -152,8 +181,22 @@ proc wireGet*[T](r: var WireReader; x: var T) =
   elif T is tuple:
     for _, v in fieldPairs(x):
       r.wireGet(v)
-  elif T is (ptr | pointer | cstring) or (T is proc):
+  elif T is (ptr | pointer | cstring):
     x = nil
+  elif (T is proc):
+    let at = r.getLen()
+    if at < 0:
+      x = nil
+    elif at < r.procs.len:
+      when sizeof(T) > sizeof(pointer):
+        # A code pointer and no environment.
+        var c: array[2, pointer]
+        c[0] = r.procs[at]
+        copyMem(addr x, addr c[0], sizeof(T))
+      else:
+        x = cast[T](r.procs[at])
+    else:
+      raise newException(WireError, "the replay's witness is malformed")
   else:
     raise newException(WireError, "a value of an unmarshallable type")
 

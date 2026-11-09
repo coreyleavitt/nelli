@@ -2390,6 +2390,9 @@ type ReplayFootprint = object
   open: bool
   why: string
   globals: seq[NimNode]
+  routines: seq[NimNode]
+    ## RFC-0016 PRC-02. The program's own top-level routines the scan read: the
+    ## table a proc value crosses by (`replaywire.nim`).
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -2764,6 +2767,9 @@ type RoutineFootprint = object
   ## RFC-0005 S8ct: `why` names what made it open.
   globals: seq[NimNode]
   callees: seq[NimNode]
+  ownGlobals: seq[NimNode]
+    ## RFC-0016 PRC-02. A `{.global.}` of another routine, which is the child's
+    ## own if that routine is one the child runs (`replayFootprint` decides).
   open: bool
   why: string
 
@@ -2870,15 +2876,21 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
           # models as any value of its type. (Declining here refused every
           # re-executed replay of such a SUT, so on Windows its SAT stayed
           # `sxUnknown` where a fork confirmed it.)
+          # RFC-0016 PRC-02: the same of a routine nested in, or called by, the
+          # one that declares it, as long as the child runs the declaring
+          # routine: `replayFootprint` checks that once it has the whole set.
           let o = owner(n)
-          if not (user and o.kind == nnkSym and routineKey(o) == selfKey):
+          if not user or o.kind != nnkSym:
             acc.markOpen("`" & n.strVal & "`, a routine's `{.global.}`")
+          elif routineKey(o) != selfKey:
+            acc.ownGlobals.add n
         elif user or symKind(n) == nskVar:
           acc.globals.add n
-      # A proc value the program holds, so may hand to the stdlib: code this
-      # scan does not see.
-      if user and n.typeKind == ntyProc:
-        acc.markOpen("`" & n.strVal & "`, a proc value")
+      # RFC-0016 PRC-02. A proc value the program holds names code this scan
+      # reads, or came to it through state the wire carries: a routine named
+      # in code the scan reads is itself scanned, and the wire writes a proc
+      # value only as a routine of the scan (`replaywire.nim`), declining any
+      # other, a closure with an environment included.
       # RFC-0016 INT-47. A template body's `except T as e` binds an `e` the
       # semchecker never typed (see `routeScan`): `getTypeInst` on it is a hard
       # "node has no type" error, reached only where a replay is re-executed
@@ -2891,7 +2903,10 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
         if typeMayHaveHook(n.getTypeInst, seen):
           acc.markOpen("`" & n.strVal & "`, of a type whose module declares a hook")
     of nskMethod:
-      acc.markOpen("a method: any override may run")
+      # RFC-0016 PRC-02. Not closable: the override that runs depends on the
+      # receiver's dynamic type, and the macro API cannot list a method's
+      # overrides (they are collected into the dispatcher after this scan).
+      acc.markOpen("a method, whose overrides the scan cannot list")
     of nskType:
       # RFC-0005 batch 11. A value no variable holds still has its hooks run: a
       # constructor's or a conversion's temporary, passed on to a callee that
@@ -2926,23 +2941,8 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
       if t.kind != nnkEmpty and typeMayHaveHook(t, seen):
         acc.markOpen("a call in `" & owner & "` whose result is of a type " &
                      "whose module declares a hook")
-    if n.len > 0:
-      # A proc value: code this scan does not see. The stdlib's generic bodies
-      # spell an instantiation as a call head, and it calls a proc parameter
-      # only with what the program handed it (above).
-      let h = n[0]
-      if h.kind == nnkSym:
-        if user and
-           symKind(h) in {nskParam, nskLet, nskVar, nskResult, nskForVar}:
-          acc.markOpen("a call through `" & h.strVal & "`, a proc value")
-      elif h.kind in {nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr,
-                      nnkHiddenDeref}:
-        acc.markOpen("a call through a proc value")
-      elif user and h.kind notin {nnkIdent, nnkOpenSymChoice,
-                                  nnkClosedSymChoice} and
-           not (h.kind == nnkBracketExpr and h[0].kind in
-                {nnkOpenSymChoice, nnkClosedSymChoice}):
-        acc.markOpen("a call through a proc value")
+    # RFC-0016 PRC-02: a call through a proc value is read as a call of the
+    # routines the scan reads (see the symbol case above).
     for c in n: scanFootprint(c, user, owner, selfKey, acc)
   of nnkAsmStmt:
     if user: acc.markOpen("`asm` in `" & owner & "`")
@@ -3011,6 +3011,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     return ReplayFootprint(open: true, why: "a routine that is not a plain symbol")
   var seen: seq[string]
   var routines: seq[NimNode]
+  var ownerGlobals: seq[(NimNode, string)]
   var stack = @[fn]
   while stack.len > 0:
     let r = stack.pop()
@@ -3022,6 +3023,13 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     if f.open and not result.open:
       result.open = true
       result.why = f.why
+    if symKind(r) in {nskProc, nskFunc} and not isStdlibDecl(r):
+      let ro = owner(r)
+      if ro.kind != nnkSym or symKind(ro) notin userRoutineSymKinds:
+        result.routines.add r      # top level: its address can be named
+    for g in f.ownGlobals:
+      let o = owner(g)
+      if o.kind == nnkSym: ownerGlobals.add (g, routineKey(o))
     for g in f.globals:
       var have = false
       for h in result.globals:
@@ -3030,6 +3038,10 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
           break
       if not have: result.globals.add g
     for c in f.callees: stack.add c
+  for (g, ok) in ownerGlobals:
+    if ok notin seen and not result.open:
+      result.open = true
+      result.why = "`" & g.strVal & "`, a routine's `{.global.}`"
   for r in routines:
     let o = owner(r)
     if o.kind == nnkSym and
@@ -3234,6 +3246,17 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           quote do:
             let `wid` {.used.} = `b`
       let body = runBody(wid, childTgt)
+      # RFC-0016 PRC-02. The routines a proc value may name, in one order for
+      # both ends (the child is this binary): a slot a routine cannot fill
+      # (one whose address cannot be taken) holds nil, which no value matches.
+      var regItems = nnkBracket.newTree()
+      for r in fp.routines:
+        regItems.add quote do:
+          (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
+           else: pointer(nil))
+      let registry =
+        if regItems.len == 0: quote do: newSeq[pointer]()
+        else: quote do: @`regItems`
       var getGlobals = newStmtList()
       var putGlobals = newStmtList()
       for g in fp.globals:
@@ -3256,13 +3279,14 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           ReplayReport()
       preamble = quote do:
         proc `childProc`(`payload`: string): ReplayReport {.nimcall.} =
-          var `rd` = initWireReader(`payload`)
+          var `rd` = initWireReader(`payload`, `registry`)
           var `stackId`: int64
           wireGet(`rd`, `stackId`)
           let `childTgt` = readTarget(`rd`)
           var `blobId`: `blobTy`
           wireGet(`rd`, `blobId`)
           `getGlobals`
+          readHostHooks(`rd`)
           `decl`
           result = (block:
             `guarded`)
@@ -3270,6 +3294,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       runChild = quote do:
         block:
           var `wr`: WireWriter
+          `wr`.procs = `registry`
           var refused = ""
           try:
             wirePut(`wr`, int64(callerStackSize()))
@@ -3281,9 +3306,10 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           if refused.len > 0: refusedNotMarshallable(refused)
           else:
             # RFC-0005 batch 11: what the host installed at run time, which the
-            # child would start without (`hostRuntimeHook`). RFC-0005 0.9.1
-            # (WA-7): set at this moment only, so the decline is not cached.
-            let hook = hostRuntimeHook()
+            # child would start without (`putHostHooks`: RFC-0016 INT-13 hands
+            # it the ones it can). RFC-0005 0.9.1 (WA-7): set at this moment
+            # only, so the decline is not cached.
+            let hook = putHostHooks(`wr`)
             if hook.len > 0: refusedHostHook(hook)
             else: runReplayReexec(`site`, `wr`.data, `timeoutMs`)
   else:

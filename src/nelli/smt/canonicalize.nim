@@ -321,7 +321,13 @@ const renderAsChoicesVersion* = "12"
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
 
-const symexWalkerVersion* = "309"
+const symexWalkerVersion* = "310"
+  ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
+  ## proc value naming a routine the replayed code names, a `{.global.}` a
+  ## nested routine names, and a runtime hook of that kind, where each
+  ## declined; a method declines with a message naming its unlistable
+  ## overrides, and `procCall m(...)` scans `m` as a plain routine. A cached
+  ## `:unk` that was one of those declines is stale.
   ## RFC-0016 PRC-07 (309, hooks half): the union image is carried only for a
   ## variant type that is plain bits (`IRType.vNoCopyMem`, the compiler's
   ## `not supportsCopyMem(T)` emitted by the parser); a type with lifetime

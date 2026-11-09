@@ -28,6 +28,7 @@ import std/[strutils, monotimes, times]
 when defined(windows) or defined(nelliReplayReexec):
   import std/os
 import ../engine/markers
+import ./replaywire   ## RFC-0016 INT-13
 
 const
   replayForks* = defined(posix) and not defined(nelliReplayReexec)
@@ -158,22 +159,29 @@ proc refusedHostHook*(why: string): ReplayChild =
           "reaches; a Linux or macOS run forks and replays it)",
           runDependent = true)
 
-proc hostRuntimeHook*(): string =
-  ## RFC-0005 batch 11. A runtime hook of the stdlib's that the program set,
-  ## named for a decline, or "". The hook is a proc value the host installed at
-  ## run time, and it changes what the SUT does (a `raise` runs it, an
-  ## allocation failure, an exception nothing catches). A re-executed child runs
-  ## none of the host's top-level code, so it starts without it, and no wire can
-  ## hand a proc value over: a replay there would run a different program.
-  template check(h: untyped) =
+proc putHostHooks*(w: var WireWriter): string =
+  ## RFC-0005 batch 11, RFC-0016 INT-13. The runtime hooks of the stdlib's that
+  ## the program set, handed to a re-executed child, which starts without
+  ## them: a hook is a proc value the host installed at run time, and it
+  ## changes what the SUT does (a `raise` runs it, an allocation failure, an
+  ## exception nothing catches). Each is written as a proc value
+  ## (`replaywire.nim`), so one naming a routine the replayed code names (whose
+  ## state the child is then handed) is installed in the child, and any other
+  ## declines. Returns "", or the hook that declines, named.
+  ## `setControlCHook` is not among them (INT-15).
+  template put(h: untyped) =
     when declared(h):
-      if h != nil: return "`" & astToStr(h) & "`, a runtime hook the host set"
-  check globalRaiseHook
-  check localRaiseHook
-  check outOfMemHook
-  check unhandledExceptionHook
-  check onUnhandledException
-  check errorMessageWriter
+      try:
+        w.wirePut(h)
+      except WireError as e:
+        return "`" & astToStr(h) & "`, a runtime hook the host set, holding " &
+               e.msg
+  put globalRaiseHook
+  put localRaiseHook
+  put outOfMemHook
+  put unhandledExceptionHook
+  put onUnhandledException
+  put errorMessageWriter
   ""
 
 
@@ -1191,6 +1199,20 @@ when replayReexecs:
           except Exception:
             discard
         if hostOomHookR != nil: hostOomHookR()
+
+  proc readHostHooks*(r: var WireReader) =
+    ## RFC-0016 INT-13. The child's half of `putHostHooks`, in its order. The
+    ## child's own `outOfMemHook` stays installed and the host's runs after it
+    ## (`hostOomHookR`).
+    template get(h: untyped) =
+      when declared(h):
+        r.wireGet(h)
+    get globalRaiseHook
+    get localRaiseHook
+    r.wireGet(hostOomHookR)
+    get unhandledExceptionHook
+    get onUnhandledException
+    get errorMessageWriter
 
   proc childOut(b: char) {.nimcall, gcsafe.} =
     {.cast(gcsafe).}:

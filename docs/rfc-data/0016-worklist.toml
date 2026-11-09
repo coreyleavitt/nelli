@@ -2150,11 +2150,12 @@ cells = ["typeclass:owned", "typeclass:atomic"]
 id = "STY-05"
 table = "5.9"
 title = "`nextafter` (HRV-27)"
-state = "open"
-note = ""
+state = "never"
+note = ": no SMT-LIB FP-theory primitive for nextafter: `never` cell `magic:nextafter` (K4a-table)"
+never_reason = "no SMT-LIB FP-theory primitive (HRV-27)"
 slice = "K4a-table"
 home = "K4a-table (`never` cell of the magic axis)"
-cells = []
+cells = ["magic:nextafter"]
 
 [[row]]
 id = "STY-06"

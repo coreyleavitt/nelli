@@ -965,7 +965,7 @@ state (§8.2).
 | STY-02 | Table/HashSet iteration order, hash- and build-dependent (C-13) | K4c (`never` cell of the stdlib-body axis) | |
 | STY-03 | pointer order `<` (C-10, W-28) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-04 | `owned T`, `Atomic[T]` (HRV-18) | K3a (`never` cell of the type × memory axis) | never: done (2026-11-08, K3a): `typeclass:owned` and `typeclass:atomic` are `never` rows of the type-class axis |
-| STY-05 | `nextafter` (HRV-27) | K4a-table (`never` cell of the magic axis) | |
+| STY-05 | `nextafter` (HRV-27) | K4a-table (`never` cell of the magic axis) | never: no SMT-LIB FP-theory primitive for nextafter: `never` cell `magic:nextafter` (K4a-table) |
 | STY-06 | concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105) | K3a, K2b, K4c (one `never` cell each) | K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`); K2b and K4c own the rest |
 | STY-07 | `addr s[0]` then growth (B §1.2) | K10a-axis (`never` cell of the definedness axis) | |
 | STY-08 | Z3-version-dependent `deepUnsat` (HRV-63) | K5b (`never` cell of the build axis) | |

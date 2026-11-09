@@ -102,6 +102,16 @@
   stay orphans for the construct and definedness axes.
   The named-feature rows (`tcFeature`) have no consumer yet: `classifyType`
   does not consult them. K2c, which owns `classifyType`, wires them.
+  K4a-table (`rfc-0016-k4at`): the magic
+  axis is `smt/magic_rows.nim`'s `magicAxis`, 216 rows keyed by `TMagic` name
+  (from `0016-research/magic_table.md`) plus `nextafter` (STY-05, a `never`
+  cell, `nrTheory`); `varParamMagics` is a subset with the same verdict, and
+  the universe derives its `magic:` cells from `magicAxis`. The lib-wide guard
+  (`tsymex_0016_k4a_table`) fails on a `magic:` pragma anywhere in `lib/` with
+  no row. The `vsArm` site stays unconsumed: the per-site dispatch is
+  K4a-dispatch's. All 217 `magic:` cells are allowlisted under K4a-dispatch
+  (no pin writes a record for them yet; `skipCell` on `magic:DivU` is not a
+  classifying verdict).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

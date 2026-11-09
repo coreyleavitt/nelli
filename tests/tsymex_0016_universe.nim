@@ -1,7 +1,7 @@
 ## RFC-0016 K1a-cells (section 8.2) -- the universe ledger as an output.
 ##
 ## The universe is DERIVED, never hand-listed:
-##   * every cell of every admission table that exists (`varParamMagics`,
+##   * every cell of every admission table that exists (`magicAxis`,
 ##     the magic axis; `pcreLibs`, the PCRE-library cells of the build axis;
 ##     `typeClassTable` and `typeOpTable`, K3a's type-class and type x
 ##     memory-op axes), read through `cells()`;
@@ -68,7 +68,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/admission
 import nelli/smt/pcre_engine
-import nelli/smt/dsl_parser
+import nelli/smt/magic_rows
 import nelli/smt/buildprofile
 import nelli/smt/typeaxes
 import nelli/smt/soundness
@@ -118,7 +118,7 @@ proc capMembers(): seq[string] =
       if word != "ckNone": result.add word
 
 proc deriveUniverse(): seq[UCell] =
-  for c in varParamMagics.cells:
+  for c in magicAxis.cells:
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-")
   for c in pcreLibs.cells:

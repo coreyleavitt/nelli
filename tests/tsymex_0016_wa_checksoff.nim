@@ -33,6 +33,11 @@ proc sutClosureLoop(k: int) =
     if x == 2: symexTarget("hit")
 
 proc sutClosureWhile(n: int) =
+  # `n` is bounded so the winner's whole run is short: RFC-0016 K10b trusts a
+  # label only when its tail is shown defined, and the tail check follows the
+  # model's own trip count (an unbounded `n` came back as 2^62 iterations,
+  # past any unwind bound, so the verdict was correctly not trusted).
+  if n < 0 or n > 4: return
   for x in countUp(n):
     if x == 1: symexTarget("hit")
 

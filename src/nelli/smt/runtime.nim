@@ -26481,7 +26481,9 @@ proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
     else: "; query `tUndefined()` to ask for an input that reaches it"
   w.halted(kind,
     "undefined behaviour at " & site & " (" & $kind & "): the path ends " &
-    "here, what follows is not modelled" & next)
+    "here, what follows is not modelled" & next &
+    # RFC-0016 K10c: what the verdict assumes of the C flags nelli cannot see.
+    "; " & bprof.assumedAbsentNote())
 
 
 # ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------

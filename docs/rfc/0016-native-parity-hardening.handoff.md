@@ -175,6 +175,27 @@
   K10a-float re-adds it, at the END of the range (after `ubSignedDivZero`),
   with its halt site and a row (codec 4 is unreleased, so the ordinal shift
   here needs no meta bump). `pinUndefined`
+  K10c (`rfc-0016-k10c` on `rfc-0016-k10aa`, no walker change, 294):
+  `tests/tsymex_0016_k10c_ubsan.nim` (+ `.nim.cfg` `--overflowChecks:off`, the
+  `dpUnchecked` profile) pins the 14 arithmetic `defined:` cells twice, tied by
+  the table: the walker through `symexFind` (`pinDecline` with the row's `ub`,
+  or `pinExact` for the defined narrow rows) and C through
+  `tests/ubsan_support.nim`, a child built once with `-fsanitize=undefined
+  -fno-sanitize-recover=all` that runs one `(type, op, a, b)` per process.
+  Each case's expectation is derived from `definedness(op, class, profile)`
+  and an operand oracle that does not use C (`pinUbsanCell`, a `pvCrashed`
+  record, entry `pinUbsan`, never evidence by itself). A second child adds
+  `-fwrapv` (`dpFwrapv`; `low(T) div -1` may end in SIGFPE there). The
+  14 `defined.txt` lines are gone (the walker pins evidence them on every
+  leg). `tests/tsymex_0016_k10c_fma.nim`: the walker's unfused `a*b+c` hits
+  natively, a `-ffp-contract=off` child equals the default child, a `-mfma`
+  child (CPU permitting) computes the fused bits. New build cells
+  `cflags/sanitize` and `cflags/fpContract` (`never(unobservable)`); the
+  Windows rows are allowlisted `rows=` with a reason, UBSan parts are
+  `skipCell`. `CFlag` gains `cfFpContract`, `cfNoStrictAliasing`;
+  `assumedAbsentNote` is appended to every `haltUndefined` message and the
+  flags are tabulated in `docs/symex/README.md`. Trap: `-O0` gcc never
+  contracts, so the FMA probe builds at `-O2`.
   (`s8cu_helpers`) evidences a kind that rides a witness instead of halting.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes

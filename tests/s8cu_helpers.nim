@@ -726,12 +726,12 @@ proc nelliVeh(p: pointer): int32 {.stdcall.} =
 discard nelliAddVeh(1, cast[pointer](nelliVeh))
 """ else: ""
 
-type ProbeBuild = object
-  dir, exe, backend: string
-  args: seq[string]
-  cmd: string
+type ProbeBuild* = object
+  dir*, exe*, backend*: string
+  args*: seq[string]
+  cmd*: string
 
-proc prepareProbe(who: string; probe: string; flags: openArray[string]
+proc prepareProbe*(who: string; probe: string; flags: openArray[string]
                  ): ProbeBuild =
   ## The child build shared by `pinCrash` and `pinRefused`: the host's
   ## build-relevant defines plus `flags`; `probe` is a path or, with a newline,

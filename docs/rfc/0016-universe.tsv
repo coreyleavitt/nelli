@@ -6,7 +6,7 @@
 # axis pragma: 0 cells
 # axis magic: 242 cells
 # axis stdlib: 0 cells
-# axis build: 23 cells (pcre libs and build cells; rows below)
+# axis build: 25 cells (pcre libs and build cells; rows below)
 # axis readonly: 0 cells
 # axis defined: 18 cells
 # build rows: 5
@@ -16,6 +16,8 @@ cell	state	detail
 build:8.37 2015-04-28|interp	modelled	-
 build:8.37 2015-04-28|jit	modelled	-
 build:8.45 2021-06-15|interp	modelled	-
+build:cflags/fpContract	never	-
+build:cflags/sanitize	never	-
 build:cpu=arm64	declined	-
 build:endian=big	never	-
 build:exceptions/setjmp	modelled	-

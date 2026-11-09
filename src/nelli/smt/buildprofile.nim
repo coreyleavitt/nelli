@@ -102,7 +102,8 @@ type
     ## C compiler flags that change what a signed or float operation means and
     ## that nelli cannot see (`querySetting` does not report `--passC`).
     cfFwrapv = "-fwrapv", cfTrapv = "-ftrapv", cfFastMath = "-ffast-math",
-    cfSanitize = "-fsanitize"
+    cfSanitize = "-fsanitize", cfFpContract = "-ffp-contract=fast",
+    cfNoStrictAliasing = "-fno-strict-aliasing"
 
   BuildRow* = enum
     ## The rows a cell claims. Z3 5.1 is the Z3 of the two Linux rows, so it is
@@ -303,7 +304,8 @@ const buildProvenance*: BuildProvenance = block:
   p.stockNim = patches.len < 2
   # nelli cannot read the C flags a build passes; it assumes none of these is
   # present, except the one it produces itself.
-  p.assumedAbsent = {cfFwrapv, cfTrapv, cfFastMath, cfSanitize}
+  p.assumedAbsent = {cfFwrapv, cfTrapv, cfFastMath, cfSanitize, cfFpContract,
+                     cfNoStrictAliasing}
   when defined(nelliFwrapv) and not defined(vcc): p.assumedAbsent.excl cfFwrapv
   p
 
@@ -487,6 +489,17 @@ func refusalMessage*(a: BuildRefusal): string =
   ## The compile-time error text for a refused build.
   "nelli/symex: this build is refused: " & a.reason & " [field: " & $a.field & "]"
 
+func assumedAbsentNote*(p: BuildProvenance = buildProvenance): string =
+  ## RFC-0016 K10c (section 8.1, C flags). The C flags nelli cannot see and
+  ## assumes the build does not pass, as one sentence for a finding or a
+  ## message that states a verdict about the C the build compiles. Empty when
+  ## nothing is assumed absent.
+  var names: seq[string]
+  for f in p.assumedAbsent: names.add $f
+  if names.len == 0: return ""
+  "assumes the C build passes none of " & names.join(", ") &
+    " (nelli cannot read --passC)"
+
 # ---------------------------------------------------------------------------
 # RFC-0016 K5b: the build axis's own cells (section 8.1, 8.2).
 # ---------------------------------------------------------------------------
@@ -551,6 +564,19 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
     "W-52: `sizeof` and shift widths are facts of the host the walker " &
     "reads from its own build, not modelled per target",
     iNever, nrPlatform)),
+  # C flags `querySetting` cannot see (K10c): nelli assumes them absent
+  # (`BuildProvenance.assumedAbsent`), so no SUT-level pin can observe them.
+  ("cflags/sanitize", refused[BuildSite, bool](none(SymexErrorKind),
+    "-fsanitize=* is invisible to `querySetting`; a UBSan build changes only " &
+    "what C does when an undefined operation runs (it faults), never the " &
+    "defined ones, so the table is checked under it (K10c). mingw gcc and " &
+    "MSVC have no UBSan runtime", iNever, nrUnobservable)),
+  ("cflags/fpContract", refused[BuildSite, bool](none(SymexErrorKind),
+    "-ffp-contract=fast is gcc's default but only fuses `a * b + c` on a " &
+    "target with a fused multiply-add: baseline x86-64 has none, so the " &
+    "Linux row computes two roundings, as the walker does; `-mfma` would " &
+    "differ and is not claimed (K10c pins the row against " &
+    "-ffp-contract=off)", iNever, nrUnobservable)),
   # The cross-build cfg suites (W-58): `rowOf` calls each of these neutral,
   # and each is pinned by exact verdicts under that configuration.
   ("mm=arc", modelled[BuildSite, bool](true, {bsBuild},

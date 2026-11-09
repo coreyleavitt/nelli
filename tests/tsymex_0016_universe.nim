@@ -245,6 +245,33 @@ proc orphanCells(u: seq[UCell]; recs: seq[PinRecord]): seq[string] =
       result.add k
   result.sort()
 
+type RecordCensus = object
+  ## W2-z: what a leg's records cover beyond cells. A SUT is a distinct
+  ## `target` (skipped cells name none); `verdicts` counts every record.
+  suts: int
+  verdicts: array[PinVerdict, int]
+
+proc recordCensus(recs: seq[PinRecord]): RecordCensus =
+  var targets = initHashSet[string]()
+  for r in recs:
+    inc result.verdicts[r.verdict]
+    if r.target.len > 0: targets.incl r.target
+  result.suts = targets.len
+
+proc censusProblems(c: RecordCensus; partial: bool): seq[string] =
+  ## A join whose records reach no SUT evaluated nothing. A full join must
+  ## also reproduce at least one walker verdict natively (`pvExact`); a
+  ## narrowed run may select only declining cells.
+  if c.suts == 0:
+    result.add "census: the records name no SUT (no record has a target)"
+  if not partial and c.verdicts[pvExact] == 0:
+    result.add "census: a full join with no exact verdict proved nothing"
+
+proc `$`(c: RecordCensus): string =
+  result = $c.suts & " SUTs, verdicts"
+  for v in PinVerdict:
+    result.add " " & ($v)[2 .. ^1] & "=" & $c.verdicts[v]
+
 const maxEvidenceAgeDays = 7
 
 proc freshnessProblems(recs: seq[PinRecord]; now: Time;
@@ -598,10 +625,41 @@ suite "RFC-0016 K1a-cells: the join over this run's records":
       checkpoint "NELLI_PIN_DIR=" & pinDirEnv & " (" & $recs.len &
                  " records)\n" & fails.join("\n")
       check fails.len == 0
+      let census = recordCensus(recs)
+      let censusFails = censusProblems(census, partialEnv)
+      checkpoint censusFails.join("\n")
+      check censusFails.len == 0
+      echo "universe census: " & $census
       let orphans = orphanCells(universe, recs)
       echo "universe: " & $universe.len & " cells, " & $recs.len &
            " records, " & $orphans.len & " cells that records name and no " &
            "table has yet (K1a-ids joins them): " & orphans.join(", ")
+
+suite "RFC-0016 W2-z: the record census":
+  proc rec(target: string; v: PinVerdict): PinRecord =
+    PinRecord(target: target, verdict: v, row: "linux-c")
+
+  test "SUTs are distinct targets and every verdict is counted":
+    let c = recordCensus(@[rec("a", pvExact), rec("a", pvDeclined),
+                           rec("b", pvExact), rec("", pvSkipped)])
+    check c.suts == 2
+    check c.verdicts[pvExact] == 2
+    check c.verdicts[pvDeclined] == 1
+    check c.verdicts[pvSkipped] == 1
+    check c.verdicts[pvCrashed] == 0
+    check censusProblems(c, partial = false).len == 0
+
+  test "RED: a full join with no SUT or no exact verdict fails":
+    let none = recordCensus(@[rec("", pvSkipped)])
+    let p = censusProblems(none, partial = false)
+    check p.len == 2
+    check p.anyIt("no SUT" in it)
+    check p.anyIt("no exact verdict" in it)
+
+  test "a partial join needs a SUT but not an exact verdict":
+    let c = recordCensus(@[rec("a", pvDeclined)])
+    check censusProblems(c, partial = true).len == 0
+    check censusProblems(c, partial = false).len == 1
 
 suite "RFC-0016 K1a-last: empty and stale record directories fail":
   let now = fromUnix(1_800_000_000)

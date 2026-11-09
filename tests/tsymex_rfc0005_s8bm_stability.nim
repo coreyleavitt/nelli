@@ -29,6 +29,15 @@ proc opDataStyleSlice(data: seq[byte]) =
   if payload.len > 3 and payload[0] == 42'u8:
     symexTarget("opdata_slice_sat")
 
+proc targetQuery(stats: seq[SymexQueryStat]): SymexQueryStat =
+  ## The walk's target query: the search that found the label. RFC-0016 K10b
+  ## walks the winner a second time under its pins, which appends a cheap
+  ## SAT query after it, so the target is no longer the last stat; it is the
+  ## one that searched (the most decisions).
+  result = stats[0]
+  for q in stats:
+    if q.decisions > result.decisions: result = q
+
 proc walkB11(factsFirst: bool): tuple[status: SymexStatusKind,
                                       stats: seq[SymexQueryStat]] =
   ## B1-1's walk, recorded, with or without the facts-first check.
@@ -49,10 +58,9 @@ suite "S8bm (1): step 1 is independent of the facts-first check":
     check a.status == sxSat and b.status == sxSat
     check a.stats.len > 0 and b.stats.len > 0
     if a.stats.len > 0 and b.stats.len > 0:
-      # The target query is the walk's last, SAT at step 1: the same text,
-      # the same search.
-      let qa = a.stats[^1]
-      let qb = b.stats[^1]
+      # The target query, SAT at step 1: the same text, the same search.
+      let qa = targetQuery(a.stats)
+      let qb = targetQuery(b.stats)
       check qa.status == "sat" and qb.status == "sat"
       check qa.query == qb.query
       check qa.decisions == qb.decisions
@@ -76,8 +84,8 @@ suite "S8bm (1): step 1 is independent of the facts-first check":
     check w.status == sxSat
     if w.stats.len > 0:
       checkpoint "hit units " & $symexTargetSolveStats.units & ", query " &
-        $w.stats[^1].rlimitDelta
-      check symexTargetSolveStats.units >= w.stats[^1].rlimitDelta
+        $targetQuery(w.stats).rlimitDelta
+      check symexTargetSolveStats.units >= targetQuery(w.stats).rlimitDelta
 
 suite "S8bm (2): B1-1 under a tight unit ceiling":
 
@@ -90,7 +98,7 @@ suite "S8bm (2): B1-1 under a tight unit ceiling":
     if w.stats.len > 0:
       # The target query decides the byte test as a one-character string
       # equality, not as `int2bv(str.to_code(..)) == 42`.
-      check "str.to_code" notin w.stats[^1].query
+      check "str.to_code" notin targetQuery(w.stats).query
     ## A ceiling per linked Z3, about 2x the measurement on 621af8f + S8bm:
     ## 46,533 units on 5.1 and 79,494 on 4.13.4 (the same as the process's
     ## first walk and as its third). Before S8bm: 3,383,332 on 5.1 (and

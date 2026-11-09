@@ -293,6 +293,15 @@ const symexWalkerVersion* = "294"
   ## `ubIndeterminateRead` and `ubSignedDivZero` are ordinal 3 and 4 in the
   ## persisted `witnessUndefined` (codec 4 is not released; the walker version
   ## is in every cache key).
+  ## RFC-0016 K10a-float (still 294): a float -> int conversion of NaN, an
+  ## infinity or an operand outside the target's range is undefined behaviour
+  ## (`ubFloatToIntRange`, appended to `UbKind`; row `convert/floatToInt`), so
+  ## `drainConvFloatToIntFresh` decides that side through `haltUndefined`
+  ## instead of continuing on a tainted fresh value
+  ## (`feConvFloatToIntUndefined`, no longer produced). Verdicts that were an
+  ## `sxUnsat` over that taint, or an `sxSat` on a platform-defined native
+  ## value (`int(NaN) == low(int)`, `int8(300.0) == 44`), are an untrusted
+  ## `sxUnknown` carrying the kind; in-range conversions are unchanged.
   ## RFC-0016 K10a-target (292->293): `haltUndefined` also files the undefined
   ## side as a finding: under `tUndefined` a listed kind is the target's hit
   ## (`sxSat`, witness, `witnessUndefined`); under any other target it is listed

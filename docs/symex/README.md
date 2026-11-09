@@ -427,7 +427,8 @@ Two things can happen to the omission, by kind:
   `trusted()` and is not run in your process by `assertCoveredBy` or
   `symexForAll`.
 - The arithmetic kinds (`ubUnsignedDivZero`, `ubIntMinModMinusOne`,
-  `ubSignedOverflow`, `ubSignedDivZero`) halt the path at the operation. The
+  `ubSignedOverflow`, `ubSignedDivZero`) and `ubFloatToIntRange` halt the path
+  at the operation. The
   halted side reaches no label and no Defect; the omission shows in the
   verdict's gaps, so an `sxUnsat` is not trusted past it. A witness found
   through a different, defined path is unaffected. To ask for the input that
@@ -440,8 +441,13 @@ Two things can happen to the omission, by kind:
   and the halt names `tUndefined()` as the next query.
 - Every kind is read from the definedness table (`smt/definedness.nim`):
   `(operation, operand class)` to *defined*, *Defect* or *undefined* by build
-  profile. A float to int conversion out of range is not a `ub*` kind yet: it
-  still records `feConvFloatToIntUndefined`.
+  profile. A float to int conversion (`int(f)`, `int32(f)`, `uint8(f)`) of NaN,
+  an infinity or a value whose truncation does not fit the target is
+  `ubFloatToIntRange` under every profile: Nim emits a plain C cast and no
+  check raises. In range the truncation toward zero is exact. (A `range`
+  target such as `Natural(f)` still raises `RangeDefect` for a converted
+  value outside the range.) It no longer records `feConvFloatToIntUndefined`,
+  which nothing produces now.
 - Three cases stay declines, not kinds: `<` over `ptr` (the order of two
   addresses is the allocator's), a use of `addr s[i]` after `s` may have
   resized, and a routine that declares a `{.noalias.}` parameter beside another
@@ -455,6 +461,7 @@ Two things can happen to the omission, by kind:
 | `ubSignedOverflow` | signed `+`, `-`, `*` or negation that overflows, in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`) at 32 and 64 bits and no `-d:nelliFwrapv` (8 and 16 bit wrap). The compiler may assume it never happens (`v + 1 > v` folds to true). | Build with overflow checks on, or bound the operands. (Or build with `-d:nelliFwrapv`, which passes `-fwrapv` to every C unit, so signed `+`, `-`, `*` and negation wrap at every width and the walker models the wrap; `low(T) div -1` and `mod -1` stay undefined. Not available under `vcc`, which is refused.) |
 | `ubIndeterminateRead` | a read of a `{.noinit.}` local before any write. | Initialise it. |
 | `ubSignedDivZero` | `x div 0` or `x mod 0` on a signed type in a build with overflow checks off (`--overflowChecks:off`, `-d:danger`, `-d:release`). Nim emits its zero check under `overflowChecks` alone, so the C division is reached and is undefined (SIGFPE on x86-64). With the checks on it is a `DivByZeroDefect`. | Guard the divisor, or build with overflow checks on. |
+| `ubFloatToIntRange` | a float to int conversion whose operand is NaN, infinite or whose truncation does not fit the target type. Nim 2.2.10 emits a plain C cast and range-checks the cast value, so no check profile raises and the cast is undefined (the value differs by platform). | Bound the operand before the conversion. |
 
 ### Build and check taints
 
@@ -477,7 +484,7 @@ rest of the run is unchanged.
 | `feHostUnadmitted` | The host half of the build profile is not a verified one: the loaded libz3 is not 4.13.4 or 5.1, or no build row covers this build under it. Read once, at the first run (`symexFind`, `symexFindAllWitnesses`, `symexForAll`, `concolicCollect`, `concolicFlip`); the run decides nothing and is `sxUnknown` (a concolic collect carries it in `parseErrors`). It is not a raise. The message names the field and the value (`z3 4.12.2 is not a verified Z3 (4.13.4, 5.1)`). A libpcre outside the verified builds does not raise it: each regex call declines on its own (`psUnverifiedLib`). | Run against Z3 4.13.4 or 5.1. |
 | `feUnadmitted` | A cell with no row in its admission table: the code reached a construct, type, pragma, magic or build cell that the axis was never asked to classify. It declines, never a silent model, with `dcOmitted`: the path is dropped, so no target past the cell is claimed and a run that needed it is not trusted. sevError. Produced today by the magic axis for a `var`-parameter magic with no row. | Add the cell's row to its admission table, or avoid the construct. |
 | `feDefectExcluded` | A `Defect` raised on a feasible path reached the SUT boundary, and its `DefectKind` is in `settings.defectExclusions` (the default excludes `OutOfMemDefect` and `StackOverflowDefect`). The path ends with no finding, `dcOmitted`, so a search that raise could have answered is `sxUnknown`, never a trusted `sxUnsat`. sevError. | Remove the kind from `defectExclusions` to have the raise reported as a finding, or keep the exclusion and accept that runs reaching it are not trusted. |
-| `feConvFloatToIntUndefined` | A float to int conversion whose operand may lie outside the target range (NaN, infinity, or a value that does not fit). Nim never raises there; the C cast is undefined. The result is a fresh symbol, so a hit is replayed. | Bound the operand before the conversion. |
+| `feConvFloatToIntUndefined` | No longer produced (K10a-float): an out-of-range float to int conversion is `ubFloatToIntRange`. | Bound the operand before the conversion. |
 | `feUnsupportedOp` | An unmodelled operation; its result is a substituted value. | Mark the callee `{.symexOpaque.}` or `{.symexTransparent.}`, or extend the model. |
 | `feUnsupportedOpHavoc` | As above where the result is a fresh unconstrained symbol (a superset). | None needed for an `sxUnsat`; an `sxSat` is replayed. |
 | `feUnsupportedOpAborted` | An unmodelled `math.<name>` or float operation aborted the whole walk. `sxUnknown` with no path. | Avoid the operation under analysis, or wrap it in an opaque callee. |

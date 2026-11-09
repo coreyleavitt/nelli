@@ -14,6 +14,7 @@
 ##   `div`/`mod` zero-divisor and `low(T) by -1` rows (`definedness`);
 ## * `runtime.unwrittenUb`: the `read/uninitialised` row;
 ## * `runtime.refEqOrder`: `order/pointer` (STY-03, `never`);
+## * `runtime.drainConvFloatToIntFresh`: `convert/floatToInt` (K10a-float);
 ## * `dsl_parser`'s stale element pointer marker: `grow/elemAddr` (STY-07,
 ##   `never`);
 ## * `dsl_parser.withCheckDeclines`: `call/noalias`, the routine that declares
@@ -34,6 +35,7 @@ type
     aoOrder                           ## `<`, `<=` over addresses
     aoGrow                            ## a resize while an element address lives
     aoCall                            ## a call through a declared contract
+    aoConvert                         ## a float converted to an integer type
   OperandClass* = enum                ## what the operand is, for this op
     ocSignedWide                      ## signed, 32 or 64 bits
     ocSignedNarrow                    ## signed, 8 or 16 bits: C computes in `int`
@@ -45,6 +47,8 @@ type
     ocPointer                         ## a `ptr` or `ref` value
     ocElemAddr                        ## `addr s[i]` of a seq
     ocNoalias                         ## a parameter declared `{.noalias.}`
+    ocFloatToInt                      ## `int(f)`, `int32(f)`, `uint8(f)`: NaN,
+                                      ## infinite or out of the target's range
   DefProfile* = enum                  ## the build's arithmetic
     dpChecked                         ## Nim's overflow and zero checks are on
     dpUnchecked                       ## checks off, the C operation as is
@@ -62,6 +66,7 @@ type
     dsOrder                           ## the ref/ptr comparison
     dsGrow                            ## the stale element pointer marker
     dsRoutine                         ## a routine's parameters
+    dsConvert                         ## the float -> int conversion drain
   DefKey = tuple[key: string, row: Row[DefSite, DefRule]]
 
 func defined(): Definedness = Definedness(kind: dkDefined)
@@ -79,6 +84,7 @@ func opKey(op: ArithOp): string =
   of aoOrder: "order"
   of aoGrow: "grow"
   of aoCall: "call"
+  of aoConvert: "convert"
 
 func classKey(c: OperandClass): string =
   case c
@@ -92,6 +98,7 @@ func classKey(c: OperandClass): string =
   of ocPointer: "pointer"
   of ocElemAddr: "elemAddr"
   of ocNoalias: "noalias"
+  of ocFloatToInt: "floatToInt"
 
 func defKey*(op: ArithOp; c: OperandClass): string =
   opKey(op) & "/" & classKey(c)
@@ -153,6 +160,16 @@ func defRows(): seq[DefKey] =
       "track which parameters may alias. A routine that declares one beside " &
       "another pointer-like parameter is declined"))
 
+  result.add (defKey(aoConvert, ocFloatToInt),
+    modelled[DefSite, DefRule](
+      [undef(ubFloatToIntRange), undef(ubFloatToIntRange),
+       undef(ubFloatToIntRange)], {dsConvert},
+      "float -> int of NaN, an infinity or a value whose truncation does not " &
+      "fit the target: Nim 2.2.10 emits a plain C cast and range-checks the " &
+      "cast value (a tautology), so no check profile raises and the cast is " &
+      "undefined. Inside a `range` target the converted value's own range " &
+      "check still raises, and that is a separate fork"))
+
 const definednessTable* = axisTable[DefSite, DefRule](axDefinedness, defRows())
 
 func admitDefined*(op: ArithOp; c: OperandClass; site: DefSite):
@@ -174,6 +191,13 @@ func arithClass*(signedWide: bool): OperandClass =
 
 func ubOf*(d: Definedness): Option[UbKind] =
   if d.kind == dkUndefined: some(d.ub) else: none(UbKind)
+
+func convertDefinedness*(p: DefProfile): Definedness =
+  ## The float -> int drain's read: the answer of the admitted `dsConvert`
+  ## row for the build's profile (undefined under every one).
+  let a = admitDefined(aoConvert, ocFloatToInt, dsConvert)
+  doAssert a.admitted, "definedness: no dsConvert row"
+  a.payload[p]
 
 func readUb*(): UbKind =
   ## The kind of an uninitialised read, from its row (`dsRead`).

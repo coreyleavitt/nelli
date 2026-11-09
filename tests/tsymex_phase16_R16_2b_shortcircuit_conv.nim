@@ -105,5 +105,7 @@ suite "symex Phase 16 R16-2b — unguarded float→Natural":
 suite "symex Phase 16 R16-2b — int(f) itself never raises (S8g)":
 
   test "R16-2b-5: unconstrained int(f) has no RangeDefect path":
+    ## K10a-float: sxUnknown, the out-of-range side is a halted undefined op.
     let r = symexFind(r2b_intNever, tRaisedExn("RangeDefect"))
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check not r.trusted

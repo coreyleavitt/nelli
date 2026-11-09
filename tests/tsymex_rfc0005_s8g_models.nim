@@ -117,26 +117,33 @@ proc f2iNaturalOk(f: float) =
 
 suite "S8g (1) float -> int: no RangeDefect, exact in range, fresh outside":
   test "int(f) never raises RangeDefect (was a false sxRaised)":
+    ## K10a-float: the out-of-range side is undefined behaviour and halts, so
+    ## the verdict is an untrusted sxUnknown, never sxRaised.
     let r = symexFind(f2iNever, tRaisedExn("RangeDefect"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check r.errors.hasKind(ubFloatToIntRange)
 
   test "an except RangeDefect around int(f) is dead (was a false sxSat)":
     let r = symexFind(f2iCaught, tLabel("s8g_f2i_caught"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnsat
+    check r.status == sxUnknown        # K10a-float: never sxSat; the halt voids sxUnsat
+    check r.errors.hasKind(ubFloatToIntRange)
 
-  test "int(NaN) == low(int) is reachable: a replay-confirmed candidate":
+  test "int(NaN) == low(int) is not claimed: the value is platform-defined":
+    ## K10a-float: the conversion is undefined behaviour, the path ends
+    ## there. (The native value is low(int) on x86-64; the walker no longer
+    ## claims it.)
     let r = symexFind(f2iNanIsLow, tLabel("s8g_f2i_nanlow"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxSat
-    check reproduces(f2iNanIsLow(r.witness[0]), "s8g_f2i_nanlow")
+    check r.status == sxUnknown
+    check r.errors.hasKind(ubFloatToIntRange)
 
-  test "int(NaN) == 7 is a fresh-value candidate that replay refutes, never a claim":
+  test "int(NaN) == 7 is never a claim":
     let r = symexFind(f2iNanIs7, tLabel("s8g_f2i_nan7"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
-    check r.errors.hasKind(feConvFloatToIntUndefined)
+    check r.errors.hasKind(ubFloatToIntRange)
 
   test "in range, the conversion is exact and clean":
     let r = symexFind(f2iExact, tLabel("s8g_f2i_exact"))
@@ -147,11 +154,13 @@ suite "S8g (1) float -> int: no RangeDefect, exact in range, fresh outside":
     checkpoint($miss.status & " " & show(miss.errors))
     check miss.status == sxUnsat
 
-  test "int8(f) of an out-of-range f is not unreachable (was a false sxUnsat)":
+  test "int8(f) of an out-of-range f is not a false sxUnsat":
+    ## K10a-float: the C cast is undefined there (the low byte on x86-64);
+    ## the path halts, so the verdict is an untrusted sxUnknown.
     let r = symexFind(f2iI8Wrap, tLabel("s8g_f2i_i8wrap"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxSat
-    check reproduces(f2iI8Wrap(r.witness[0]), "s8g_f2i_i8wrap")
+    check r.status == sxUnknown
+    check r.errors.hasKind(ubFloatToIntRange)
 
   test "int8(f) in range is exact at width 8":
     let r = symexFind(f2iI8InRange, tLabel("s8g_f2i_i8inrange"))
@@ -159,11 +168,11 @@ suite "S8g (1) float -> int: no RangeDefect, exact in range, fresh outside":
     check r.status == sxSat
     check reproduces(f2iI8InRange(r.witness[0]), "s8g_f2i_i8inrange")
 
-  test "uint8(f) of a negative f is not unreachable (was a false sxUnsat)":
+  test "uint8(f) of a negative f is not a false sxUnsat":
     let r = symexFind(f2iU8Neg, tLabel("s8g_f2i_u8neg"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxSat
-    check reproduces(f2iU8Neg(r.witness[0]), "s8g_f2i_u8neg")
+    check r.status == sxUnknown        # K10a-float: undefined, halted
+    check r.errors.hasKind(ubFloatToIntRange)
 
   test "Natural(f) raises RangeDefect on a negative f (was a false sxUnsat)":
     let r = symexFind(f2iNatural, tRaisedExn("RangeDefect"))

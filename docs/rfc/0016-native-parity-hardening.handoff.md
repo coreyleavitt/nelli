@@ -176,6 +176,24 @@
   with its halt site and a row (codec 4 is unreleased, so the ordinal shift
   here needs no meta bump). `pinUndefined`
   (`s8cu_helpers`) evidences a kind that rides a witness instead of halting.
+  K10a-float (`rfc-0016-k10af` on `rfc-0016-k10aa`, walker stays 294, its
+  comment extended; renumber at landing): `ubFloatToIntRange` is back at the
+  END of `UbKind` (ordinal after `ubSignedDivZero`; `static` pin extended).
+  Row `convert/floatToInt` (`ArithOp.aoConvert`, `OperandClass.ocFloatToInt`,
+  site `dsConvert`) answers undefined under every profile: Nim 2.2.10 emits a
+  plain C cast and range-checks the cast value, so no check profile raises.
+  Consumer: `drainConvFloatToIntFresh` (`runtime.nim`) reads
+  `convertDefinedness(defProfile())` and decides the out-of-domain side as
+  `drainArithTraps` does (provably unreachable: `logPrune`; else
+  `haltUndefined`); the in-range continuation carries the domain in `pc`
+  (it was `defectSurvivorPc`). The tainted fresh-value fork is gone, so
+  `feConvFloatToIntUndefined` has no producer (still allowlisted to K9c, W-64
+  deletes it). Precision change: `int(NaN) == low(int)` is no longer a
+  reachable label (the halt does not claim a platform value); it is a
+  `tUndefined` finding. A `range` target (`Natural(f)`) still raises through
+  `rangeDefectConds`. Site string is one per drain ("float -> int
+  conversion"), so two conversions in one SUT list as one finding.
+  Pins: `tests/tsymex_0016_k10af_float.nim`.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

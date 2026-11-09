@@ -22,7 +22,8 @@ suite "symex Phase 15 — F5 int<->float conversions":
   test "float->int: unconstrained int(x) never raises; int(x)==3 is sat (S8g)":
     ## RFC-0005 S8g: Nim's int(f) never raises (probed: int(1e30), int(NaN),
     ## int(Inf) give low(int)); the R16-2 RangeDefect fork was fictional.
-    check symexFind(f2i, tRaisedExn("RangeDefect")).status == sxUnsat
+    ## K10a-float: the out-of-range side halts (undefined), so sxUnknown.
+    check symexFind(f2i, tRaisedExn("RangeDefect")).status == sxUnknown
     let r = symexFind(f2i, tLabel("f2i"))
     check r.status == sxSat
     if r.status == sxSat: check int(r.witness[0]) == 3

@@ -63,5 +63,8 @@ suite "symex Phase 15 — F5 hang regression: p[]=int(f) ordering goal":
     ## to int64 range for the sat path), but no raise-fork is opened.
     ## The old feConvDomainExcluded hint is retired; raise detection at
     ## isDerefWrite is deferred to a future slice.
+    ## K10a-float: no RangeDefect either way; the out-of-range side of the
+    ## conversion is undefined behaviour and halts, so the run is sxUnknown.
     let r = symexFind(f5HangSut, tRaisedExn("RangeDefect"))
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check not r.trusted

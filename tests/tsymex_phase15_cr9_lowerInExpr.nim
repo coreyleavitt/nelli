@@ -70,8 +70,11 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
   test "CR-9 S1: float→int in let never raises (S8g: int(f) has no RangeDefect)":
     ## RFC-0005 S8g: Nim's int(f) never raises (int(1e30), int(NaN) give
     ## low(int)), so no RangeDefect path exists.
+    ## K10a-float: the out-of-range side halts (`ubFloatToIntRange`), so the
+    ## run is an untrusted sxUnknown rather than an sxUnsat.
     let r = symexFind(cr9_floatIntLet, tRaisedExn("RangeDefect"))
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check not r.trusted
 
   test "CR-9 S1: float→int let — tLabel search returns sxSat (ADR-0012: label wins)":
     ## The label `cr9_floatIntLet_hit` (v==7 at x=7.0) is cleanly reachable,

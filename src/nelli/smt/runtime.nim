@@ -19135,29 +19135,25 @@ proc forkDefect(p: Path, defectCond: Z3Bool, typeId: string,
   routeRaise(defectPath, typeId, msg, w)
 
 proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
-  ## RFC-0005 S8g (ADR-0011 R16-2 reversed). Fork the continuation of an
-  ## expression that lowered float -> int conversions on their DOMAIN (the
-  ## `convFloatToIntBoundConds` sink: each operand's truncation fits its
-  ## target type). The lowered value is `ite(domain, exact, fresh)`, so:
-  ##   * the IN-RANGE continuation is `p` with the conjunction of the
-  ##     domains among its defect-survivor facts -- clean, and exact;
-  ##   * the OUT-OF-RANGE continuation (some conversion's operand is NaN,
-  ##     +-Inf or too large) is `p` with the negated conjunction, tainted
-  ##     `feConvFloatToIntUndefined` (`dcFreshSymbol`): its value is a fresh
-  ##     symbol of the target type, since Nim's cast there is C-level
-  ##     undefined and never raises.
-  ## Both are returned; `drainScalarRaiseForks` runs every later raise drain
-  ## on each. The facts ride in `defectSurvivorPc`, as `drainParseIntRaises`'
-  ## clean/lax split does: they select between two models of ONE execution,
-  ## not a branch of the program. The error is recorded once per drain whose
-  ## out-of-range half does not simplify to `false` (a literal operand, or
-  ## one the path already confines, forks nothing).
-  ##
-  ## Until S8g this sink NARROWED `p.pc` to the domain inside
-  ## `drainPendingLowerEffects`, and a parallel sink forked `RangeDefect`
-  ## outside it (`drainConvFloatToIntRaises`, deleted): a false `sxRaised`,
-  ## a live `except RangeDefect`, and a false `sxUnsat` for every target
-  ## reachable only out of range.
+  ## RFC-0005 S8g, rerouted by RFC-0016 K10a-float (section 9.1 item 2).
+  ## Decide the continuation of an expression that lowered float -> int
+  ## conversions on their DOMAIN (the `convFloatToIntBoundConds` sink: each
+  ## operand's truncation fits its target type). Nim 2.2.10 emits a plain C
+  ## cast and range-checks the CAST value (a tautology), so no check profile
+  ## raises, and a NaN, infinite or too-large operand is undefined behaviour:
+  ## the `convert/floatToInt` row of the definedness axis (every profile alike).
+  ##   * the OUT-OF-DOMAIN side (some conversion's operand is outside) is
+  ##     decided at the op, as `drainArithTraps` decides a trap: provably
+  ##     unreachable under `loopPruneRLimit` is dropped and logged
+  ##     (`logPrune`), anything else ends through `haltUndefined`
+  ##     (`ubFloatToIntRange`: a finding under `tUndefined`, listed under
+  ##     another target, never a value);
+  ##   * the IN-RANGE continuation is `p` with the conjunction of the domains
+  ##     in its `pc` -- clean, and exact (the lowered `ite(domain, exact,
+  ##     fresh)` can no longer select the fresh arm there).
+  ## Before K10a-float the other side continued on a path tainted
+  ## `feConvFloatToIntUndefined` with a fresh value; under the time-travel
+  ## rule that was not sound for a trusted `sxUnsat` either.
   let conds = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
@@ -19173,19 +19169,18 @@ proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
     return @[p]
   var inDomain = conds[0]
   for i in 1 ..< conds.len: inDomain = inDomain and conds[i]
-  let surv = forkPath(p, p.pc, p.env)
-  surv.defectSurvivorPc.add inDomain
-  result = @[surv]
+  let cur = forkPath(p, p.pc, p.env)
   let outside = not inDomain
-  if $simplify(outside) != "false":
-    let tok = w.degrade(feConvFloatToIntUndefined,
-      "float -> int conversion of an operand outside the target type's " &
-      "range (NaN, +-Inf or too large): Nim does not raise, and the value " &
-      "is platform-defined -- a fresh value on its own path " &
-      "(feConvFloatToIntUndefined; replay-gated candidates)")
-    let alt = forkPathTainted(p, p.pc, p.env, tok)
-    alt.defectSurvivorPc.add outside
-    result.add alt
+  let convUb = convertDefinedness(defProfile()).ubOf
+  if convUb.isSome and guardLiteral(outside) != glFalse:
+    let unsat = guardLiteral(outside) != glTrue and
+      checkCapped(w.z3, pathRoots(cur, [outside]), w.settings,
+                  loopPruneRLimit(w.settings)).status == zsUnsat
+    if unsat:
+      logPrune(cur, [outside])
+    else:
+      haltUndefined(cur, convUb.get, outside, "float -> int conversion", w)
+  @[forkPath(cur, cur.pc & @[inDomain], cur.env)]
 
 template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCheck]];
                             defectType, msg: string) =

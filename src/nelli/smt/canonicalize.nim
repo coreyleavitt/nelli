@@ -327,7 +327,12 @@ const symexWalkerVersion* = "302"
   ## `Soundness.witnessUndefined`; `ubTailUnverified` is appended to `UbKind`
   ## (ordinal 6) for the unanswerable ones and row `call/opaqueBody` joins the
   ## definedness axis. The 0.9.2 known gap (an undefined op after the label
-  ## did not untrust an `sxSat`) is closed.
+  ## did not untrust an `sxSat`) is closed. The tail walk asks a branch the
+  ## parameter pins leave open again under the path's `pc` and closure facts
+  ## (`followBranchOutcome`; the pins alone left a call's result constant
+  ## free, so `$enum` of a call was an "ambiguous" branch and the walk went
+  ## on without the arm's bindings: `weInternalWalkerFault`). The fuzzer's
+  ## replay is unchanged.
   ## RFC-0016 K10a-axis (299->300; was 293->294 on its branch): the definedness axis
   ## (`smt/definedness`)
   ## answers the arithmetic undefined-behaviour sites (same answers, one

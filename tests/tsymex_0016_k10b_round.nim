@@ -69,6 +69,17 @@ proc sutLossyOverflow(v: LossyStub; x: int64): int64 =
   if x == 7: symexTarget("hit")
   result = x + high(int64)
 
+type TailColor = enum tcRed, tcGreen, tcBlue
+
+proc tailCol(a: int): TailColor =
+  if a > 3: tcBlue elif a > 0: tcGreen else: tcRed
+
+proc sutTailCallBranch(a: int) =
+  ## The label, then a branch on a routine's result (`$tailCol(a)` matches the
+  ## call's result against each member, and then compares the name). The pins
+  ## cover `a` only; the result constant is bound in the path's `pc`.
+  if $tailCol(a) == "tcGreen" and a == 2: symexTarget("hit")
+
 suite "K10b: whole-run definedness":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 301
@@ -169,3 +180,17 @@ suite "K10b: whole-run definedness":
       if f.len >= 2 and f[1] == "k10b-tail": tail = parseInt(f[0])
     checkpoint "tail units: " & $tail
     check tail >= 0 and tail < 20_000
+
+  test "(h) a branch on a call's result in the tail is decided by the pc: no walker fault":
+    # The tail walk asked the pins alone whether `tailCol(a) == tcGreen`; the
+    # call's result is a fresh constant bound in the path's `pc`, so the
+    # branch read as undecided and the walk went on without the arm's
+    # bindings: `weInternalWalkerFault` (`eqBV` on an unbound string).
+    let r = symexFind(sutTailCallBranch, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    check r.soundness.undefinedKinds == {}
+    check r.witness[0] == 2
+    for e in r.errors:
+      check e.kind != weInternalWalkerFault

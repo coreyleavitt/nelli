@@ -21322,6 +21322,28 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
     merged.defectSurvivorPc = base.defectSurvivorPc & @[cond.implies(facts.get)]
   @[merged]
 
+proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
+                         facts: seq[Z3Bool];
+                         construct: WalkerConstructKind): Option[bool] =
+  ## RFC-0016 K10b. The concrete outcome of `cond` for a follow-mode branch,
+  ## or none when the pins do not decide it. The fuzzer's replay pins every
+  ## draw, so `concreteEq` alone decides a branch there. The tail gate's pins
+  ## cover only the parameters, and a branch on a routine's result (`$tailCol(a)`
+  ## branches on the call's fresh result constant) is decided by the path's
+  ## own `pc`, where the taken arms and the result's binding sit. A branch the
+  ## pins and the closure facts leave open is asked again under the `pc`
+  ## (true of the followed execution, so it prunes nothing the pins describe).
+  ## Only then: the `pc` of a path that built a string or a heap joins Int and
+  ## bit-vector terms a solve may not close, so the first ask stays cheap.
+  ## Without the second ask the branch read as undecided and the walk went on
+  ## without the arm's bindings: a later read of a name the arm binds was the
+  ## unbound-name stand-in, an `eqBV` kind assertion (`weInternalWalkerFault`).
+  result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings, facts)
+  if result.isNone and w.tailGate:
+    result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings,
+                                   dp.pc & dp.defectSurvivorPc & facts)
+  if result.isNone: markAmbiguous(w, construct)
+
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
@@ -21392,15 +21414,13 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
         if newFacts.len > 0 and
            concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
           continue
-        let outcome = concreteBranchOutcome(w.z3, w.concreteEq, condBool,
-                                            w.settings, newFacts)
+        let outcome = followBranchOutcome(w, dp, condBool, newFacts, wckIf)
         if outcome.isNone:
           # Walker-boundary concretization for control flow: `cond` isn't
           # pinned by the symbolicated draws alone. Graceful degrade — stop
           # following this path past the ambiguous branch rather than guess
           # (guessing could collect an UNSOUND constraint); counted, not
           # silently dropped — attributed to `wckIf` (R28).
-          markAmbiguous(w, wckIf)
           return survivors & dp
         if outcome.get():
           # RFC-fuzzer-nextgen G2: the taken arm's own condition.
@@ -21471,7 +21491,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
     for p in active:
       let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
       for dp in drainScalarRaiseForks(pb, w):
-        let outcome = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings)
+        let outcome = followBranchOutcome(w, dp, cond, @[], wckWhile)
         if outcome.isNone:
           # Walker-boundary concretization for control flow — same shape as
           # `walkIfFollowConcrete`'s degrade: stop following THIS guard
@@ -21480,7 +21500,6 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
           # `walkIfFollowConcrete`), not just a `continue` to the next
           # active path — `defer` still pops the loop frame. Attributed to
           # `wckWhile` (R28).
-          markAmbiguous(w, wckWhile)
           return survivors & dp
         if outcome.get():
           # Concretely continued this iteration: fold cond=true, walk the

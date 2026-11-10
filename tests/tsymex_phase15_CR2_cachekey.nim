@@ -1151,41 +1151,49 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z R2 (a replay candidate's tail is walked): 312->313.
     ## RFC-0016 W3-z P1 (opaque scan polarity): 313->314.
     ## RFC-0016 W3-z R3 (the main walk reads the opaque scan): 314->315.
-    ## RFC-0016 W3-z R5 (a diagnostic raise carries its soundness in the
-    ## notes record): 315->316.
-    check symexWalkerVersion == "319"
-    ## RFC-0016 W3-z R4 (concolic float -> int conversion is a defined fact): 315->316.
-    ## RFC-0016 W3-z R6 (the winner's tail walk forks an open branch): 316->317.
+    ## RFC-0016 W3-z R5 (a diagnostic raise carries its soundness in the notes
+    ## record): 315->316.
+    ## RFC-0016 W3-z R4 (concolic float -> int conversion is a defined fact):
+    ## 316->317.
+    ## RFC-0016 W3-z R6 (the winner's tail walk forks an open branch):
+    ## 317->318.
     ## RFC-0016 W3-z P8/P9 (`isMainModule` folds from the using module;
-    ## `offsetof` in expression position folds to its literal): 311->312.
-    ## RFC-0016 P10 (isInf/isFinite/isNormal leave the by-name lowering): 311->312.
-    ## RFC-0016 W3-z P1 (opaque scan polarity): 311->312.
-    ## RFC-0016 W3-z P2 (closure iterator check scope): 312->313.
-    ## RFC-0016 W3-z P3 (stdlib axis on iterators and proc values): 313->314.
-    ## RFC-0016 W3-z P4 (field place of the pragma axis): 314->315.
-    ## RFC-0016 W3-z P5 (an and/or operand reading a noinit local is guarded): 315->316.
-    ## RFC-0016 W3-z K2F-2 (type pragma walk shapes): 315->316.
+    ## `offsetof` in expression position folds to its literal): 318->319.
+    ## RFC-0016 P10 (isInf/isFinite/isNormal leave the by-name lowering):
+    ## 319->320.
+    ## RFC-0016 W3-z P2 (closure iterator check scope): 320->321.
+    ## RFC-0016 W3-z P3 (stdlib axis on iterators and proc values): 321->322.
+    ## RFC-0016 W3-z P4 (field place of the pragma axis): 322->323.
+    ## RFC-0016 W3-z P5 (an and/or operand reading a noinit local is guarded):
+    ## 323->324.
+    ## RFC-0016 W3-z K2F-2 (type pragma walk shapes): 324->325.
     ## RFC-0016 K2F-1 (the "may" analyses answer "may" for what they did not
-    ## read; a writing magic in a `lent` loop body declines): 311->312.
+    ## read; a writing magic in a `lent` loop body declines): 325->326.
     ## RFC-0016 K2F-4 (sentinel polarity: an inline iterator's array or set
-    ## constructor argument is re-read at each use): 312->313.
+    ## constructor argument is re-read at each use): 326->327.
     ## RFC-0016 K2F-5 (a `var`/`lent` call result passed to a by-value formal
-    ## is the location the call returns, not a fresh value): 313->314.
-    ## RFC-0016 K2F-3 (the footprint and effect scanners over-approximate
-    ## what they did not read; a call through a proc value in an opaque body
-    ## writes any variable): 312->313.
-    ## RFC-0016 W3-z P7 (float-check gate reads inline iterator bodies): 314->315.
-    ## RFC-0016 W3-z P11 (inline iterator inside an inline iterator): 315->316.
-    ## RFC-0016 W3-z P13 (break/continue in an inline-iterator for-body): 316->317.
-    ## RFC-0016 W3-z P6 (declined nil placeholder degrades in a composite slot): 315->316.
-    ## RFC-0016 W3-z P6b (a nil case-expression arm binds its temp): 316->317.
+    ## is the location the call returns, not a fresh value): 327->328.
+    ## RFC-0016 K2F-3 (the footprint and effect scanners over-approximate what
+    ## they did not read; a call through a proc value in an opaque body writes
+    ## any variable): 328->329.
+    ## RFC-0016 W3-z P7 (float-check gate reads inline iterator bodies):
+    ## 329->330.
+    ## RFC-0016 W3-z P11 (inline iterator inside an inline iterator): 330->331.
+    ## RFC-0016 W3-z P13 (break/continue in an inline-iterator for-body):
+    ## 331->332.
+    ## RFC-0016 W3-z P6 (declined nil placeholder degrades in a composite
+    ## slot): 332->333.
+    ## RFC-0016 W3-z P6b (a nil case-expression arm binds its temp): 333->334.
     ## RFC-0016 W3-z P14 (Conv of a nil literal builds the target's nil; a
-    ## block expression lowers as a scoped statement-list expression): 317->318.
-    ## RFC-0016 W3-z P16 (cast of zero/nil to a ptr is the target's nil): 318->319.
-    ## RFC-0016 W3-z P3b (declined rows for countup, countdown): 314->315.
-    ## RFC-0016 W3-z P15 (countup/countdown modelled natively): 315->316.
-    ## RFC-0016 W3-z P17 (a `..` bound read once; unsigned counters): 316->317.
-    ## RFC-0016 W3-z P18 (signed narrow counters): 317->318.
+    ## block expression lowers as a scoped statement-list expression):
+    ## 334->335.
+    ## RFC-0016 W3-z P16 (cast of zero/nil to a ptr is the target's nil):
+    ## 335->336.
+    ## RFC-0016 W3-z P3b (declined rows for countup, countdown): 336->337.
+    ## RFC-0016 W3-z P15 (countup/countdown modelled natively): 337->338.
+    ## RFC-0016 W3-z P17 (a `..` bound read once; unsigned counters): 338->339.
+    ## RFC-0016 W3-z P18 (signed narrow counters): 339->340.
+    check symexWalkerVersion == "340"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

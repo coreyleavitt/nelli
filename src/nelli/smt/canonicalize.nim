@@ -363,128 +363,176 @@ const renderAsChoicesVersion* = "12"
   ##   declines `feCheckOption`: its asserts follow `assertions` at the site
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
-  ## - RFC-0016 W3-z R1 (311->312): under `tUndefined` a `{.noinit.}` read of
-  ##   an unwritten slot is the target's hit. The read rides the path as `ub`
-  ##   on a `feGlobalHavoc` degrade and never halts, so the only hit test
-  ##   (`haltUndefined`) missed it and `tUndefined` answered a trusted
-  ##   `sxUnsat` over a reachable indeterminate read. Every fork that newly
-  ##   puts a requested kind on a path now solves the hit there
-  ##   (`noteUbAtFork`). `tUndefined`'s default no longer lists
+  ## - RFC-0016 W3-z R1 (311->312; lane `rfc-0016-w3z-runtime`): under
+  ##   `tUndefined` a `{.noinit.}` read of an unwritten slot is the target's
+  ##   hit. The read rides the path as `ub` on a `feGlobalHavoc` degrade and
+  ##   never halts, so the only hit test (`haltUndefined`) missed it and
+  ##   `tUndefined` answered a trusted `sxUnsat` over a reachable indeterminate
+  ##   read. Every fork that newly puts a requested kind on a path now solves
+  ##   the hit there (`noteUbAtFork`). `tUndefined`'s default no longer lists
   ##   `ubTailUnverified` (never a walk's hit), and naming it is refused.
-  ## - RFC-0016 W3-z R2 (312->313): a label candidate the replay may confirm
-  ##   is held to the whole-run gate. Its tail was never walked, so a
-  ##   replay-confirmed `sxSat` with an undefined op after the label was
-  ##   trusted. `runSymexImpl` now walks each `sxSat` candidate's tail under
-  ##   its model pins (`verifyTailDefined`, `overApprox`: an open branch forks
-  ##   both arms, a fresh-symbol record is not a reason) and the kinds join
-  ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
-  ## - 316 (RFC-0016 W3-z P11): an inline iterator called from another inline
-  ##   iterator's body is expanded (a `yield` under the body's nested `for`
-  ##   binds to the innermost iterator being expanded); it declined.
-  ## - 317 (RFC-0016 W3-z P13): a `break` / `continue` in the body of a `for`
-  ##   over an inline iterator leaves the whole expansion / resumes after the
-  ##   current `yield`; both declined.
+  ## - RFC-0016 W3-z R2 (312->313; lane `rfc-0016-w3z-runtime2`): a label
+  ##   candidate the replay may confirm is held to the whole-run gate. Its tail
+  ##   was never walked, so a replay-confirmed `sxSat` with an undefined op
+  ##   after the label was trusted. `runSymexImpl` now walks each `sxSat`
+  ##   candidate's tail under its model pins (`verifyTailDefined`, `overApprox`:
+  ##   an open branch forks both arms, a fresh-symbol record is not a reason)
+  ##   and the kinds join the candidate's `witnessUndefined`, which
+  ##   `settleCandidate` carries.
+  ## - RFC-0016 W3-z P1 (313->314; lane `rfc-0016-w3z-parser`): the
+  ##   opaque-call scan reads the callee's own `overflowChecks`
+  ##   (`RoutineChecks.overflowOn`) and a pushed-off check (`ownerChecked`), not
+  ##   the deviation set, and a `-fwrapv` build defines the signed wrap. A
+  ##   checks-on callee no longer reads as unchecked; a checks-off one now
+  ##   carries `ubSignedOverflow` into `witnessUndefined`.
+  ## - RFC-0016 W3-z R3 (314->315; lane `rfc-0016-w3z-runtime3`): the main
+  ##   walk reads `IRStmt.opaqueUndefined`. Under `tUndefined` a requested kind
+  ##   is the target's hit at the opaque call; otherwise it is listed on
+  ##   `SymexResult.undefined`; the path goes on carrying the kinds, so a sat
+  ##   through it is never trusted.
+  ## - RFC-0016 W3-z R5 (315->316; lane `rfc-0016-w3z-runtime5`): a diagnostic
+  ##   raise's `witnessUndefined` and `witnessUnsafe` ride the `:notes` record
+  ##   (`wu` / `wx`), so a cache hit serves them. Records written under 315 lack
+  ##   them and are not read. R5b (same version) removed the dormant
+  ##   per-diagnostic undefined bit and its `wu` key again; `wx` stays.
+  ## - RFC-0016 W3-z R4 (316->317; lane `rfc-0016-w3z-runtime4`): the concolic
+  ##   float-to-int conversion decides its out-of-domain side through
+  ##   `decideUndefined`, so a replay records the defined fact and the flip
+  ##   solve keeps the conversion in range; `ConcolicFlipResult.soundness`
+  ##   carries the run taint and `witnessUndefined`, and `fromFlip` claims it.
+  ## - RFC-0016 W3-z R6 (317->318; lane `rfc-0016-w3z-runtime6`): the winner's
+  ##   tail walk over-approximates as a replay candidate's does (R2). A branch
+  ##   the pins and the `pc` leave open after the label (a global havoc, say)
+  ##   was read as undecided and failed the whole-run gate closed
+  ##   (`ubTailUnverified`), so a winner whose tail is defined on every arm was
+  ##   untrusted. Both arms are now walked, and an undefined op on one of them
+  ##   carries its own kind.
+  ## - RFC-0016 W3-z P8/P9 (318->319; lane `rfc-0016-w3z-magic2`):
+  ##   `isMainModule` folds true only in the `projectFull` file and declines
+  ##   elsewhere (it was read from its declared `false`, a false unsat);
+  ##   `offsetof(T, f)` in an expression or assignment folds to its literal (it
+  ##   declined `feUnsupportedStmtKind`).
+  ## - RFC-0016 W3-z P10 (319->320; lane `rfc-0016-w3z-parser10`):
+  ##   `isInf`/`isFinite`/`isNormal` are no longer lowered by name (std/math
+  ##   here has none; a SUT routine of the name is walked as its own body), so a
+  ##   stdlib float call of those names declines.
+  ## - RFC-0016 W3-z P2 (320->321; lane `rfc-0016-w3z-parser2`): a closure
+  ##   iterator is inlined under the check scope of its own definition (float
+  ##   checks at parse time, range, bound, field and object checks as a scoped
+  ##   block), its for-body under the caller's. Before, the body ran under the
+  ##   caller's scope.
+  ## - RFC-0016 W3-z P3 (321->322; lane `rfc-0016-w3z-parser3`): the
+  ##   stdlib-body axis reaches the iterator inliner (an iterator of `lib/` is
+  ##   keyed `<module>.<name>/iterator`) and a stdlib proc taken as a value
+  ##   (`parseProcAsValue`); absent declines `feUnadmitted`. Before, both walked
+  ##   an unadmitted stdlib body.
+  ## - RFC-0016 W3-z P4 (322->323; lane `rfc-0016-w3z-parser4`): a field has a
+  ##   place on the pragma axis: `bitsize` and `align` on a field decline, the
+  ##   other field pragmas are pinned exact or never.
+  ## - RFC-0016 W3-z P5 (323->324; lane `rfc-0016-w3z-parser5b`): the flat
+  ##   form of an `and`/`or` operand applies only to a positive whitelist
+  ##   (`readsOnlyDefinedValues`); any other right operand is lowered under the
+  ##   left operand's guard, so a dead `{.noinit.}`, global or index read is
+  ##   neither UB nor a raise.
+  ## - RFC-0016 W3-z K2F-2 (324->325; lane `rfc-0016-w3z-k2f2`): the type
+  ##   pragma walk (`typePragmaHit`) reaches a `var T` formal's target, an
+  ##   alias, an object field list under a `when`, and any type kind it has no
+  ##   arm for (their children), so a `var` parameter or `var seq` of a
+  ##   `{.union.}` / `{.packed.}` type declines `feUnsupportedOp` where it was
+  ##   admitted; a pragma entry of a shape `pragmaName` cannot name declines on
+  ##   a type as on every other place; `layoutPragmaOf` reads every entry (a
+  ##   `packed` type with an `align` field is not the packed layout).
+  ## - RFC-0016 W3-z K2F-1 (325->326; lane `rfc-0016-w3z-k2f1`): the "may"
+  ##   analyses answer "may" for what they did not read (RFC section 8.1).
+  ##   `mayWriteRoot` reads a writing magic (`inc`, `+=`, `swap`, `setLen`: the
+  ##   whole `FakeVarParams` set, which `mayWriteMagics` now holds), so a `lent`
+  ##   `for` whose body writes the container that way declines where it gave
+  ##   sxSat on the dead label; `mayResizeSeq`/`mayRearm` take a call through a
+  ##   proc field as a call through a proc value; `scanShapeReceiverMutated`
+  ##   reads any write rooted at the param; each scan lists its inert leaves,
+  ##   recurses through the structural kinds and answers "may" for any other
+  ##   kind.
+  ## - RFC-0016 W3-z K2F-4 (326->327; lane `rfc-0016-w3z-k2f4`): sentinel
+  ##   polarity. An inline iterator's formal given an array or set constructor
+  ##   of direct operands (`[v, 0]`) is that expression, re-read at each use as
+  ##   `transf.putArgInto` maps it, not a copy taken where the loop starts; a
+  ##   "rooted at x?" question over `lvalueRoot` reads an unread shape that
+  ##   names `x` as yes (`mayBeRootedAt`: `addrTakenIn`, `formalAddressTaken`,
+  ##   `scanShapeReceiverMutated`); `byValueWritten` compares another `var`
+  ##   actual with a path actual by root.
+  ## - RFC-0016 W3-z K2F-5 (327->328; lane `rfc-0016-w3z-k2f5`): a call
+  ##   returning `var T` or `lent T` passed to a by-value formal is the location
+  ##   the call returns, not a fresh value: Nim passes a formal over three words
+  ##   by address, so the callee reads a write it makes to that location (a
+  ##   global, a table entry) through the formal. `byValueWritten` now asks
+  ##   about it; a stdlib accessor over a local (`t[k]` on a local `Table`) is
+  ##   still a local's own memory.
+  ## - RFC-0016 W3-z K2F-3 (328->329; lane `rfc-0016-w3z-k2f3`): the footprint
+  ##   and effect scanners over-approximate what they did not read (RFC section
+  ##   8.1). An opaque call's write summary takes a call through a proc value (a
+  ##   variable, a field, a parameter, a value a stdlib routine is given) as a
+  ##   write of any variable; its Defect scan raises `ObjectConversionDefect`
+  ##   for an object down-conversion; a `for (k, v)` tuple's names are each
+  ##   claimed (the loop's `v` shared an outer `v`'s slot); an
+  ##   `import m {.all.}` under a push leaks into `m`. Each scan lists its leaves,
+  ##   recurses through the structural kinds and answers conservatively for any
+  ##   other kind.
+  ## - RFC-0016 W3-z P7 (329->330; lane `rfc-0016-w3z-parser7`): touchesFloat
+  ##   reads inline iterator bodies.
+  ## - RFC-0016 W3-z P11 (330->331; lane `rfc-0016-w3z-parser11`): an inline
+  ##   iterator called from another inline iterator's body is expanded (a
+  ##   `yield` under the body's nested `for` binds to the innermost iterator
+  ##   being expanded); it declined.
+  ## - RFC-0016 W3-z P13 (331->332; lane `rfc-0016-w3z-parser13`): a `break` /
+  ##   `continue` in the body of a `for` over an inline iterator leaves the
+  ##   whole expansion / resumes after the current `yield`; both declined.
+  ## - RFC-0016 W3-z P6 (332->333; lane `rfc-0016-w3z-parser6`): a declined
+  ##   nil placeholder in a composite slot degrades, not a walker fault.
+  ## - RFC-0016 W3-z P6b (333->334; lane `rfc-0016-w3z-parser6b`): a `nil` arm
+  ##   of a case-expression yields a value, so its temp is bound.
+  ## - RFC-0016 W3-z P14 (334->335; lane `rfc-0016-w3z-parser14`): a
+  ##   conversion of a `nil` literal builds the target's nil (`ref` and `ptr` to
+  ##   object), and a block expression (`nnkBlockExpr`) lowers as a scoped
+  ##   statement-list expression; a `break` out of one declines.
+  ## - RFC-0016 W3-z P16 (335->336; lane `rfc-0016-w3z-parser16`):
+  ##   `cast[ptr T](0)` / `cast[ptr T](nil)` is the target's nil, not an unsafe
+  ##   pointer materialisation.
+  ## - RFC-0016 W3-z P3b (336->337; lane `rfc-0016-w3z-parser3b`): the system
+  ##   `countup`/`countdown` iterators have a declined row
+  ##   (`feUnsupportedExprKind`, their body casts `T(res)`), so the decline
+  ##   names its real cause instead of `feUnadmitted`. The inventory found no
+  ##   iterator of the corpus's SUTs that P3 turned from exact to unknown: the
+  ##   rest are walked by their own arms.
+  ## - RFC-0016 W3-z P15 (337->338; lane `rfc-0016-w3z-parser15`): `for i in
+  ##   countup(a, b[, step])` and `countdown` over an `int`-like counter (the
+  ##   stdlib's `IntLikeForCount`, and `int64`) are modelled by the `for` arm
+  ##   beside `..`: `a`, `b` and `step` are read once, a step below 1 raises
+  ##   `RangeDefect`, the counter steps as an `int` (overflow checked), as the
+  ##   inlined body does. Before, the generic body (`cast[T](res)`) declined
+  ##   `feUnsupportedExprKind`.
+  ## - RFC-0016 W3-z P17 (338->339; lane `rfc-0016-w3z-parser17`): SOUNDNESS.
+  ##   The `..` / `..<` arm re-read a non-symbol bound (`0 ..< s.len`, `0 .. m +
+  ##   0`) on every iteration where Nim evaluates it once (a symbol bound is
+  ##   still read each iteration), so a body that moved the bound gave a trusted
+  ##   false sxUnsat. Also: an `uint`, `uint32` or `uint64` counter of
+  ##   `..`/`..<` (and of `countup`/`countdown` with a literal step) is held in
+  ##   its own type, so `i - 1` wraps in the body and the counter wraps as `inc`
+  ##   does; an `int32` counter's `inc` overflows at int32; `uint`/`uint64`
+  ##   `countdown` stops at `b` before stepping; an `uint8`/`uint16` loop
+  ##   variable is its own type in the body.
+  ## - RFC-0016 W3-z P18 (339->340; lane `rfc-0016-w3z-parser18`): SOUNDNESS.
+  ##   An `int8` or `int16` loop variable of `..`, `..<`, `countup` or
+  ##   `countdown` was bound as a 64-bit signed int in the body, so `i + 125'i8`
+  ##   never raised `OverflowDefect`: a trusted false sxUnsat for a label
+  ##   reached by (or a raise at) the native overflow. It is now its own type,
+  ##   as the unsigned narrow counters are.
 
-const symexWalkerVersion* = "319"
-  ## RFC-0016 W3-z R5 (315->316): a diagnostic raise's `witnessUndefined` and
-  ## `witnessUnsafe` ride the `:notes` record (`wu` / `wx`), so a cache hit
-  ## serves them. Records written under 315 lack them and are not read.
-  ## RFC-0016 W3-z R6 (316->317): the winner's tail walk over-approximates as a
-  ## replay candidate's does (R2). A branch the pins and the `pc` leave open
-  ## after the label (a global havoc, say) was read as undecided and failed the
-  ## whole-run gate closed (`ubTailUnverified`), so a winner whose tail is
-  ## defined on every arm was untrusted. Both arms are now walked, and an
-  ## undefined op on one of them carries its own kind.
-  ## RFC-0016 W3-z R3 (314->315): the main walk reads `IRStmt.opaqueUndefined`.
-  ## Under `tUndefined` a requested kind is the target's hit at the opaque
-  ## call; otherwise it is listed on `SymexResult.undefined`; the path goes on
-  ## carrying the kinds, so a sat through it is never trusted.
-  ## RFC-0016 W3-z P1 (313->314, landed after R1/R2): the opaque-call scan reads the callee's own
-  ## RFC-0016 W3-z K2F-2 (315->316): the type pragma walk (`typePragmaHit`)
-  ## reaches a `var T` formal's target, an alias, an object field list under
-  ## a `when`, and any type kind it has no arm for (their children), so a
-  ## `var` parameter or `var seq` of a `{.union.}` / `{.packed.}` type
-  ## declines `feUnsupportedOp` where it was admitted; a pragma entry of a
-  ## shape `pragmaName` cannot name declines on a type as on every other
-  ## place; `layoutPragmaOf` reads every entry (a `packed` type with an
-  ## `align` field is not the packed layout).
-    ## RFC-0016 W3-z P16 (`cast[ptr T](0)` / `cast[ptr T](nil)` is the target's
-    ## nil, not an unsafe pointer materialisation): 318->319.
-    ## RFC-0016 W3-z P6b (a `nil` arm of a case-expression yields a value, so its temp is bound): 316->317.
-    ## RFC-0016 W3-z P6 (a declined nil placeholder in a composite slot degrades, not a walker fault): 315->316.
-    ## RFC-0016 W3-z P7 (touchesFloat reads inline iterator bodies): 314->315.
-  ## RFC-0016 W3-z P18 (317->318): SOUNDNESS. An `int8` or `int16` loop
-  ## variable of `..`, `..<`, `countup` or `countdown` was bound as a 64-bit
-  ## signed int in the body, so `i + 125'i8` never raised `OverflowDefect`: a
-  ## trusted false sxUnsat for a label reached by (or a raise at) the native
-  ## overflow. It is now its own type, as the unsigned narrow counters are.
-  ## RFC-0016 W3-z P17 (316->317): SOUNDNESS. The `..` / `..<` arm re-read a
-  ## non-symbol bound (`0 ..< s.len`, `0 .. m + 0`) on every iteration where
-  ## Nim evaluates it once (a symbol bound is still read each iteration), so a
-  ## body that moved the bound gave a trusted false sxUnsat. Also: an `uint`,
-  ## `uint32` or `uint64` counter of `..`/`..<` (and of `countup`/`countdown`
-  ## with a literal step) is held in its own type, so `i - 1` wraps in the
-  ## body and the counter wraps as `inc` does; an `int32` counter's `inc`
-  ## overflows at int32; `uint`/`uint64` `countdown` stops at `b` before
-  ## stepping; an `uint8`/`uint16` loop variable is its own type in the body.
-  ## RFC-0016 W3-z P15 (315->316): `for i in countup(a, b[, step])` and
-  ## `countdown` over an `int`-like counter (the stdlib's `IntLikeForCount`,
-  ## and `int64`) are modelled by the `for` arm beside `..`: `a`, `b` and
-  ## `step` are read once, a step below 1 raises `RangeDefect`, the counter
-  ## steps as an `int` (overflow checked), as the inlined body does. Before,
-  ## the generic body (`cast[T](res)`) declined `feUnsupportedExprKind`.
-  ## RFC-0016 W3-z P3b (314->315): the system `countup`/`countdown` iterators
-  ## have a declined row (`feUnsupportedExprKind`, their body casts `T(res)`),
-  ## so the decline names its real cause instead of `feUnadmitted`. The
-  ## inventory found no iterator of the corpus's SUTs that P3 turned from
-  ## exact to unknown: the rest are walked by their own arms.
-  ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
-  ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a
-  ## stdlib proc taken as a value (`parseProcAsValue`); absent declines
-  ## `feUnadmitted`. Before, both walked an unadmitted stdlib body.
-  ## RFC-0016 W3-z P2 (312->313): a closure iterator is inlined under the
-  ## check scope of its own definition (float checks at parse time, range,
-  ## bound, field and object checks as a scoped block), its for-body under the
-  ## caller's. Before, the body ran under the caller's scope.
-  ## `overflowChecks` (`RoutineChecks.overflowOn`) and a pushed-off check
-  ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the
-  ## signed wrap. A checks-on callee no longer reads as unchecked; a checks-off
-  ## one now carries `ubSignedOverflow` into `witnessUndefined`.
-  ## RFC-0016 P10 (311->312): `isInf`/`isFinite`/`isNormal` are no longer
-  ## lowered by name (std/math here has none; a SUT routine of the name is
-  ## walked as its own body), so a stdlib float call of those names declines.
-  ## RFC-0016 K2F-5 (313->314): a call returning `var T` or `lent T` passed to
-  ## a by-value formal is the location the call returns, not a fresh value:
-  ## Nim passes a formal over three words by address, so the callee reads a
-  ## write it makes to that location (a global, a table entry) through the
-  ## formal. `byValueWritten` now asks about it; a stdlib accessor over a
-  ## local (`t[k]` on a local `Table`) is still a local's own memory.
-  ## RFC-0016 K2F-4 (312->313): sentinel polarity. An inline iterator's formal
-  ## given an array or set constructor of direct operands (`[v, 0]`) is that
-  ## expression, re-read at each use as `transf.putArgInto` maps it, not a
-  ## copy taken where the loop starts; a "rooted at x?" question over
-  ## `lvalueRoot` reads an unread shape that names `x` as yes
-  ## (`mayBeRootedAt`: `addrTakenIn`, `formalAddressTaken`,
-  ## `scanShapeReceiverMutated`); `byValueWritten` compares another `var`
-  ## actual with a path actual by root.
-  ## RFC-0016 K2F-3 (312->313): the footprint and effect scanners
-  ## over-approximate what they did not read (RFC section 8.1). An opaque
-  ## call's write summary takes a call through a proc value (a variable, a
-  ## field, a parameter, a value a stdlib routine is given) as a write of any
-  ## variable; its Defect scan raises `ObjectConversionDefect` for an object
-  ## down-conversion; a `for (k, v)` tuple's names are each claimed (the loop's
-  ## `v` shared an outer `v`'s slot); an `import m {.all.}` under a push leaks
-  ## into `m`. Each scan lists its leaves, recurses through the structural
-  ## kinds and answers conservatively for any other kind.
-  ## RFC-0016 K2F-1 (311->312): the "may" analyses answer "may" for what they
-  ## did not read (RFC section 8.1). `mayWriteRoot` reads a writing magic
-  ## (`inc`, `+=`, `swap`, `setLen`: the whole `FakeVarParams` set, which
-  ## `mayWriteMagics` now holds), so a `lent` `for` whose body writes the
-  ## container that way declines where it gave sxSat on the dead label;
-  ## `mayResizeSeq`/`mayRearm` take a call through a proc field as a call
-  ## through a proc value; `scanShapeReceiverMutated` reads any write rooted
-  ## at the param; each scan lists its inert leaves, recurses through the
-  ## structural kinds and answers "may" for any other kind.
+const symexWalkerVersion* = "340"
+  ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
+  ## base; integration renumbers them into one sequence (311 + one per
+  ## lane bump, in merge order), so 340 is the first walker of the merged
+  ## tree. A version-floor pin a lane wrote names its lane-local number,
+  ## which is at or below 340.
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

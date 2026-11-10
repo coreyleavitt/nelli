@@ -869,11 +869,18 @@ proc emitStmt*(s: IRStmt): NimNode =
       seqLit.add emitStmt(st)
     if s.blkLabel.len > 0:   # RFC-0005 S8m: a break target
       newCall(bindSym"mkLabelledBlock", newLit(s.blkLabel), prefix(seqLit, "@"))
-    elif s.blkArith != asInherit:   # RFC-0016 W1-d2c: a routine body's arithmetic
-      newCall(bindSym"mkArithBlock", newCall(bindSym"replayArith", newLit(s.blkArith)),
-              prefix(seqLit, "@"))   # ADM-IR: the stamp, replayed
     else:
-      newCall(bindSym"mkBlock", prefix(seqLit, "@"))
+      let blk =
+        if s.blkArith != asInherit:   # RFC-0016 W1-d2c: a routine body's arithmetic
+          newCall(bindSym"mkArithBlock", newCall(bindSym"replayArith", newLit(s.blkArith)),
+                  prefix(seqLit, "@"))   # ADM-IR: the stamp, replayed
+        else:
+          newCall(bindSym"mkBlock", prefix(seqLit, "@"))
+      if s.blkScoped:   # RFC-0016 PRC-07: the checks the body is compiled with
+        var onSet = newTree(nnkCurly)
+        for co in s.blkOn: onSet.add newLit(co)
+        newCall(bindSym"withCheckScope", blk, onSet)
+      else: blk
   of isIf:
     var seqLit = newTree(nnkBracket)
     for br in s.branches:
@@ -1313,6 +1320,13 @@ type
                                    ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
+    checkScopes*: seq[set[CheckOption]]
+                                   ## RFC-0016 PRC-07. Per routine being
+                                   ## parsed, innermost last: the checks of
+                                   ## `rangeChecks`, `boundChecks`,
+                                   ## `fieldChecks`, `objChecks` its own
+                                   ## options turn on in a build with them
+                                   ## off. Read through `checkedHere`.
     arithScopes*: seq[ArithScope]
                                    ## RFC-0016 WA-A. Per routine being parsed,
                                    ## innermost last: the RESOLVED
@@ -1549,9 +1563,36 @@ func ordinalUnchecked(ctx: ParseCtx): bool =
   ## no enclosing routine is pushed `overflowChecks: on`.
   not ctx.overflowChecked
 
+func checkedHere(ctx: ParseCtx; co: CheckOption): bool =
+  ## RFC-0016 PRC-07. Whether the C compiler emits check `co` (`coRange`,
+  ## `coBound`, `coField`, `coObj`) for the routine being parsed: the build's
+  ## option, or the routine's own `push` turning it back on.
+  co in buildSemantics.checks or
+    (ctx.checkScopes.len > 0 and co in ctx.checkScopes[^1])
+
+func pushedOn(c: RoutineChecks): set[CheckOption] =
+  ## The checks of the four a routine turns back on in a build with them off,
+  ## where its position was read. Where it was not (`c.why`), none: the
+  ## routine declines whole.
+  if c.why.len > 0: return
+  if c.rangeOn: result.incl coRange
+  if c.boundOn: result.incl coBound
+  if c.fieldOn: result.incl coField
+  if c.objOn: result.incl coObj
+
+func hasCheckOff(): bool =
+  ## A build with one of the four checks off: every routine body is scoped.
+  {coRange, coBound, coField, coObj} - buildSemantics.checks != {}
+
 proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
-  ## Opens the routine's arithmetic scope for its parse.
+  ## Opens the routine's arithmetic scope for its parse, and its check scope.
   ctx.arithScopes.add arithScopeFor(c, ctx.currentArith, inherit)
+  ctx.checkScopes.add(if inherit and ctx.checkScopes.len > 0: ctx.checkScopes[^1]
+                      else: pushedOn(c))
+
+proc popArithScope(ctx: ParseCtx) =
+  discard ctx.arithScopes.pop()
+  discard ctx.checkScopes.pop()
 
 func arithStamp(c: RoutineChecks; inherit: bool): Option[ArithScopeProof] =
   ## The IR stamp of a routine body: `arithScopeFor`'s answer, but only where a
@@ -1631,12 +1672,18 @@ proc noaliasWithPeers(impl: NimNode): seq[string] =
             names.add $id[j][0]
   if names.len > 0 and peers >= 2: result = names
 
-proc uncheckedTypedIndex(idx: NimNode): bool =
+proc ownerChecked(owner: NimNode; co: CheckOption): bool =
+  ## RFC-0016 PRC-07. `checkedHere` for a scan of the routine definition
+  ## `owner`: the build's option, or the routine's own `push` turning it on.
+  co in buildSemantics.checks or
+    (owner != nil and co in pushedOn(routineChecks(owner)))
+
+proc uncheckedTypedIndex(checkedRange: bool; idx: NimNode): bool =
   ## RFC-0016 PRC-07. An array index that Nim leaves unchecked in C: in a
   ## build whose range checks are off, a value already of a `range` or enum
   ## type (not the hidden conversion Nim wraps an `int` index in, which it
   ## checks as an index). An out-of-range such value is an out-of-array access.
-  if coRange in buildSemantics.checks: return false
+  if checkedRange: return false
   if idx.kind in {nnkHiddenStdConv, nnkHiddenSubConv}: return false
   idx.typeKind in {ntyRange, ntyEnum}
 
@@ -1652,20 +1699,17 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # but the `off` push, which declines below).
   let stamp = arithStamp(c, inherit)
   let restrictParams = noaliasWithPeers(impl)
-  # RFC-0016 PRC-07: a build whose own range checks are off is walked as
-  # compiled (`checks` never names `coRange` there); a routine pushed back to
-  # `rangeChecks: on` is the deviation.
-  let rangePushedOn = c.rangeOn and c.why.len == 0 and
-                      coRange notin buildSemantics.checks
-  let boundPushedOn = c.boundOn and c.why.len == 0 and
-                      coBound notin buildSemantics.checks
-  let objPushedOn = c.objOn and c.why.len == 0 and
-                    coObj notin buildSemantics.checks
-  let fieldPushedOn = c.fieldOn and c.why.len == 0 and
-                      coField notin buildSemantics.checks
+  # RFC-0016 PRC-07: a build whose own range, bound, field or object checks
+  # are off is walked as compiled (`checks` never names them there). A routine
+  # that pushes one back on is walked checked: its body block carries the
+  # checks it is compiled with (`withCheckScope`), which the walker reads for
+  # the access, conversion and index checks (`boundsUnchecked`,
+  # `fieldsUnchecked`); every routine of such a build is scoped, so a callee
+  # that pushes nothing does not inherit its caller's. Where the routine's
+  # options could not be read (`c.why`) it declines below.
+  let scoped = hasCheckOff() and not inherit
   if c.checks == {} and stamp.isNone and c.unadmitted.len == 0 and
-     restrictParams.len == 0 and not rangePushedOn and not boundPushedOn and
-     not objPushedOn and not fieldPushedOn:
+     restrictParams.len == 0 and not scoped:
     return body
   let where = routinePlace(impl)
   var decl: seq[IRStmt]
@@ -1681,27 +1725,6 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
       "alias, which is not modelled (" & naWhy & ")",
       "a `noalias` parameter beside another pointer-like parameter")
   let others = c.checks - {coOverflow}
-  if rangePushedOn:
-    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
-      "`rangeChecks: on` in a build whose range checks are off: its range " &
-      "conversions raise `RangeDefect` there, which the walker, following " &
-      "the build, does not model -- path degraded to sxUnknown")
-  if boundPushedOn:
-    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
-      "`boundChecks: on` in a build whose bound checks are off: its index " &
-      "operations raise `IndexDefect` there, which the walker, following " &
-      "the build, does not model -- path degraded to sxUnknown")
-  if fieldPushedOn:
-    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
-      "`fieldChecks: on` in a build whose field checks are off: its variant " &
-      "accesses raise `FieldDefect` there, which the walker, following the " &
-      "build, does not model -- path degraded to sxUnknown")
-  if objPushedOn:
-    decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " &
-      "`objChecks: on` in a build whose object checks are off: its " &
-      "down-conversions raise `ObjectConversionDefect` there, which the " &
-      "walker, following the build, does not model -- path degraded to " &
-      "sxUnknown")
   if c.why.len > 0:
     decl.add ctx.declineMarker(feCheckOption, where &
       ": its check options cannot be read (" & c.why & ") -- path degraded to sxUnknown")
@@ -1726,6 +1749,7 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   if body != nil: decl.add body
   result = if body != nil and stamp.isSome: mkArithBlock(stamp.get, decl)
            else: mkBlock(decl)
+  if scoped: result = result.withCheckScope(pushedOn(c))
 
 proc srcSite(n: NimNode): string =
   ## K10a-float: `file:line:col` of `n`, the name of an undefined-behaviour
@@ -3594,7 +3618,7 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
   ctx.assertsOff.add checkOpts.assertsMaybeOff
   ctx.pushArithScope(checkOpts)
   let bodyParsed = parseStmt(bodyNode, ctx)
-  discard ctx.arithScopes.pop()
+  ctx.popArithScope()
   discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, n, checkOpts, bodyParsed)
   # RFC-0005 S8bh: with the summary a call through it needs to apply its
@@ -4525,8 +4549,8 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # RFC-0016 PRC-07: an access Nim emits unchecked (`boundChecks` off, or
         # an array's own `range`/enum index under `rangeChecks: off`) is
         # undefined out of the container, not an `IndexDefect`.
-        if coBound notin buildSemantics.checks or
-           (tk == ntyArray and uncheckedTypedIndex(n[1])):
+        if not ownerChecked(owner, coBound) or
+           (tk == ntyArray and uncheckedTypedIndex(ownerChecked(owner, coRange), n[1])):
           addUb admitDefined(aoIndex, ocUncheckedAccess, dsIndex), dpChecked
         else:
           add "IndexDefect"
@@ -4540,7 +4564,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
     # RFC-0016 PRC-07: with `fieldChecks` off the access is a plain union
     # member access: undefined outside its branch on the cpp backend, the
     # overlapping bytes (nothing raised, nothing undefined) on the c backend.
-    if coField in buildSemantics.checks: add "FieldDefect"
+    if ownerChecked(owner, coField): add "FieldDefect"
     elif buildSemantics.backend == beCpp:
       addUb admitDefined(aoField, ocInactiveBranch, dsField), dpChecked
     for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
@@ -11143,7 +11167,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # RFC-0016 PRC-07: with `objChecks` off Nim emits no display check, so
         # the failing side is type confusion, undefined, not a raise.
         let failing =
-          if coObj in buildSemantics.checks:
+          if ctx.checkedHere(coObj):
             mkRaise("ObjectConversionDefect", nil)
           else:
             mkUndefined(objDowncastUb(),
@@ -11999,7 +12023,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       preamble.add mkIndexStmt(synth, arrIR, idxIR, lhsCls.ty.elemTy,
                                siteLoc(n),   # PRC-07: an undefined access names it
                                arrayIndexLow(n[0]),
-                               unchecked = uncheckedTypedIndex(n[1]))
+                               unchecked = uncheckedTypedIndex(ctx.checkedHere(coRange), n[1]))
       mkVar(synth)
     of itSeq:
       # v67 (dev item 1) / round-6 B1: `data[a..b]` (slice, array-lambda
@@ -18201,7 +18225,7 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
       preamble.add mkIndexAssignStmt(tmp, idxIR, newVal, siteLoc(step.recv),
                                      step.lo,
                                      unchecked = step.recvTy.kind == itArray and
-                                                 uncheckedTypedIndex(step.idx))
+                                                 uncheckedTypedIndex(ctx.checkedHere(coRange), step.idx))
       mkVar(tmp)
     elif step.recvTy.kind == itArray:
       # RFC-0005 S8u: the other elements are constant-index reads of the old
@@ -18280,7 +18304,7 @@ proc discWriteMode(ty: IRType; ctx: ParseCtx): DiscWriteMode =
     # RFC-0016 PRC-07: with `fieldChecks` off Nim emits no branch-change
     # check, so the assignment is a plain store of the tag and the new
     # branch's fields are the old bytes: not modelled (`dwmHavoc`).
-    return if coField in buildSemantics.checks: dwmChecked else: dwmHavoc
+    return if ctx.checkedHere(coField): dwmChecked else: dwmHavoc
   var managed, nominal: bool
   case ty.kind
   of itVariant:
@@ -22542,7 +22566,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # `-x` the compiler expands inline under the caller's options).
   let inheritScope = implMagic(impl).len > 0
   ctx.pushArithScope(checkOpts, inheritScope)
-  defer: discard ctx.arithScopes.pop()
+  defer: ctx.popArithScope()
   var monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
   # RFC-0005 S8bd: a generic callee is specialised to its by-reference
@@ -23137,7 +23161,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
           "the module-level variable `" & macros.strVal(g) & "`: " & why &
           " (feUnsupportedOp)"), parsed])
         break
-  discard ctx.arithScopes.pop()
+  ctx.popArithScope()
   discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, procDef, checkOpts,
     if parsed != nil and parsed.kind == isBlock: parsed

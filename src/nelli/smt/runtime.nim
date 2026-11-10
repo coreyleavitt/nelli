@@ -2108,8 +2108,21 @@ var arithScopes {.threadvar.}: seq[WalkArith]
   ## `ubSignedOverflow` `ArithTrap` and the surviving side carries its negation.
   ## Unsigned results still wrap (`wrapIntToWidth`).
 
+var checkScopes {.threadvar.}: seq[set[CheckOption]]
+  ## RFC-0016 PRC-07. A lexical stack beside `arithScopes`: the top is the
+  ## set of checks of `rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks`
+  ## that the routine body being walked turns back on in a build with them
+  ## off (`IRStmt.blkOn`). Read only through `checkedNow`.
+
 proc resetArith() =
   arithScopes = @[(if buildWraps(): waWraps else: waChecked)]
+  checkScopes = @[{}]
+
+proc checkedNow(co: CheckOption): bool =
+  ## Whether the C compiler emitted check `co` for the routine being walked:
+  ## the build's option, or the routine's own `push` turning it back on.
+  co in buildSemantics.checks or
+    (checkScopes.len > 0 and co in checkScopes[^1])
 
 proc pushArith(sc: ArithScope) =
   doAssert sc != asInherit, "an inheriting block opens no arith scope"
@@ -2468,12 +2481,12 @@ proc syncArithTrapCond*(cond: ArithTrap)
   ## survivor-only arithmetic-trap sink). No-op when no active walk. Defined
   ## after `WalkCtx`.
 
-func boundsUnchecked(): bool =
+proc boundsUnchecked(): bool =
   ## RFC-0016 PRC-07. The build compiles no `boundChecks`: `s[i]` and `a[i]`
   ## (seq, string, openArray, array) are plain C subscripts, so an index
   ## outside the container is undefined (`index/unchecked`), not an
   ## `IndexDefect`.
-  coBound notin buildSemantics.checks
+  not checkedNow(coBound)
 
 proc uncheckedIndexSite(loc: string): string =
   ## RFC-0016 PRC-07. The omission's text for an out-of-container access.
@@ -20850,11 +20863,11 @@ proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
                             conds, settings) == zsUnsat
 
-func fieldsUnchecked(): bool =
+proc fieldsUnchecked(): bool =
   ## RFC-0016 PRC-07. The build compiles no `fieldChecks`: a variant field is
   ## a plain union member access, so one outside its branch raises no
   ## `FieldDefect`.
-  coField notin buildSemantics.checks
+  not checkedNow(coField)
 
 proc inactiveFieldSide(cp: Path; outOfArm: Z3Bool; env: Env; loc: string;
                        w: var WalkCtx; isWrite = false): seq[Path] =
@@ -25062,14 +25075,17 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
-    if stmt.blkArith != asInherit:
+    if stmt.blkArith != asInherit or stmt.blkScoped:
       # RFC-0016 W1-d2c. A routine body: its arithmetic is its own, whoever
-      # called it, and the caller's resumes after it.
-      pushArith(stmt.blkArith)
+      # called it, and the caller's resumes after it. RFC-0016 PRC-07: so are
+      # the checks its options turn back on in a build with them off.
+      if stmt.blkArith != asInherit: pushArith(stmt.blkArith)
+      if stmt.blkScoped: checkScopes.add stmt.blkOn
       let plain = IRStmt(kind: isBlock, stmts: stmt.stmts,
                          blkLabel: stmt.blkLabel)
       result = walkStmt(plain, paths, w)
-      popArith()
+      if stmt.blkScoped: checkScopes.setLen(checkScopes.len - 1)
+      if stmt.blkArith != asInherit: popArith()
       return
     if stmt.blkLabel.len == 0:
       return walkBlock(stmt.stmts, paths, w)

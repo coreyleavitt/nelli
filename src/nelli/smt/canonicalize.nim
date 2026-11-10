@@ -379,6 +379,18 @@ const symexWalkerVersion* = "309"
   ## wrong-branch write included, halts `ubInactiveVariantField`. A build with
   ## field checks on builds neither term (`unionImageGate`,
   ## `activeMemberTracked`): no new term on the checked path.
+  ## PRC-07, per routine: the walker's "checks off" for range, bound, field and
+  ## object checks is the effective option of the routine being walked, not
+  ## the build's alone. In a build with one of them off every routine body is
+  ## a scoped block (`IRStmt.blkScoped`/`blkOn`, `withCheckScope`) naming the
+  ## checks its own `push` turns back on; the walker keeps them in a stack
+  ## beside the arith scopes (`checkedNow`) and the parser in `checkScopes`
+  ## (`checkedHere`). A routine pushed back to `checks: on` (or one of the
+  ## four) is walked checked (`FieldDefect`, `IndexDefect`,
+  ## `ObjectConversionDefect` raise, `RangeDefect` indexes are checked) and no
+  ## longer declines `feCheckOption`; it declines only where its options could
+  ## not be read (`RoutineChecks.why`). The union image and the cpp active
+  ## member stay the build's (representation, not a check).
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the
   ## winning path's own heaps (`heap_<key>` and its havoc epochs), not every
   ## model constant named `heap_*`, so a havoc'd copy (`@hv`) is not pinned.
@@ -6402,7 +6414,9 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     for x in s.stmts: parts.add canonicalize(x, env)
     # RFC-0016 W1-d2c: a routine body's arithmetic scope is part of its meaning.
     let ar = if s.blkArith != asInherit: "@" & $s.blkArith & ":" else: ""
-    "St<Bk:" & lbl & ar & "[" & parts.join(",") & "]>"
+    # RFC-0016 PRC-07: the checks a routine body is compiled with are its meaning.
+    let ck = if s.blkScoped: "@on" & $s.blkOn & ":" else: ""
+    "St<Bk:" & lbl & ar & ck & "["& parts.join(",") & "]>"
   of isIf:
     var parts: seq[string]
     for br in s.branches:

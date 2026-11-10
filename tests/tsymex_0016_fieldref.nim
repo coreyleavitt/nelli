@@ -129,7 +129,7 @@ proc scrub() {.noinline.} =
   for i in 0 ..< a.len: a[i] = 0
 
 template exact(fn: untyped; want: untyped) =
-  let r = symexFind(fn, tLabel("hit"))
+  let r = symexFind(fn, tLabel("hit"), pinSettingsConst)
   checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
   check r.status == sxSat
   check r.trusted
@@ -139,7 +139,7 @@ template exact(fn: untyped; want: untyped) =
 
 template indeterminateOrRefuted(fn: untyped) =
   scrub()
-  let r = symexFind(fn, tLabel("hit"))
+  let r = symexFind(fn, tLabel("hit"), pinSettingsConst)
   checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
   check not r.trusted
   check r.status in {sxSat, sxUnknown}
@@ -161,7 +161,7 @@ when not defined(cpp):
       exact(sutNewZero, 5)
 
     test "a discriminator store keeps the old arm's bytes it no longer names":
-      let r = symexFind(sutKeepWide, tLabel("hit"))
+      let r = symexFind(sutKeepWide, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status == sxSat
       check r.trusted
@@ -169,14 +169,14 @@ when not defined(cpp):
       check (r.witness[0] shr 32) == 2
 
     test "an input ref's bytes are free":
-      let r = symexFind(sutParam, tLabel("hit"))
+      let r = symexFind(sutParam, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status == sxSat
       check r.trusted
       check not r.errors.named(feUnsupportedOp)
 
     test "an out-of-arm write is read back through the active arm's field":
-      let r = symexFind(sutOutArmWrite, tLabel("hit"))
+      let r = symexFind(sutOutArmWrite, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status == sxSat
       check r.trusted
@@ -185,27 +185,27 @@ when not defined(cpp):
       check (r.witness[0] and 0xFFFF_FFFF'i64) == 5
 
     test "an out-of-arm write is read back whole through the same field":
-      let r = symexFind(sutOutArmWriteHigh, tLabel("hit"))
+      let r = symexFind(sutOutArmWriteHigh, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status == sxSat
       check r.trusted
       check r.witness[0] == 0x2_0000_0005'i64
 
     test "an out-of-arm write keeps the bytes it does not cover":
-      let r = symexFind(sutOutArmWriteNarrow, tLabel("hit"))
+      let r = symexFind(sutOutArmWriteNarrow, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status == sxSat
       check r.trusted
       check r.witness[0] == 7
 
     test "a ref variant fully written by its constructor stays determinate over an opaque call":
-      let r = symexFind(sutOpaqueCtor, tLabel("hit"))
+      let r = symexFind(sutOpaqueCtor, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.undefined.len == 0
       check UbKind(ubIndeterminateRead) notin r.soundness.undefinedKinds
 
     test "a hooked pointee keeps the havoc model":
-      let r = symexFind(sutHooked, tLabel("hit"))
+      let r = symexFind(sutHooked, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check not r.trusted
       check r.status != sxSat or r.errors.named(feUncheckedDiscBytes)
@@ -215,15 +215,15 @@ else:
       exact(sutWrongWrite, 3)
 
     test "a read through the discriminator's branch after a wrong-branch write":
-      let r = symexFind(sutWrongWriteReadOwn, tLabel("hit"))
+      let r = symexFind(sutWrongWriteReadOwn, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status != sxSat
       check symexFind(sutWrongWriteReadOwn,
-                      tUndefined({UbKind(ubInactiveVariantField)})).status == sxSat
+                      tUndefined({UbKind(ubInactiveVariantField)}), pinSettingsConst).status == sxSat
 
     test "a branch-changing discriminator write leaves the old member active":
-      let r = symexFind(sutDisc, tLabel("hit"))
+      let r = symexFind(sutDisc, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status != sxSat
       check symexFind(sutDisc,
-                      tUndefined({UbKind(ubInactiveVariantField)})).status == sxSat
+                      tUndefined({UbKind(ubInactiveVariantField)}), pinSettingsConst).status == sxSat

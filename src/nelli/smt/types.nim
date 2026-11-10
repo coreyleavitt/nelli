@@ -1392,6 +1392,13 @@ type
       blkArith*: ArithScope
         ## RFC-0016 W1-d2c. `asInherit` except on a routine's body block in a
         ## checks-off build (`withCheckDeclines`).
+      blkScoped*: bool
+        ## RFC-0016 PRC-07. A routine body in a build with a check off
+        ## (`rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks`): the body
+        ## is walked under `blkOn`, the checks its own options turn back on
+        ## (`withCheckScope`). A routine that turns none on is scoped with the
+        ## empty set, which keeps it from inheriting its caller's.
+      blkOn*: set[CheckOption]
       blkLabel*: string
         ## RFC-0005 S8m. "" for a plain statement sequence. Non-empty: a
         ## BREAK TARGET -- a source `block` some `break` leaves, or the
@@ -3493,6 +3500,15 @@ proc mkArithBlock*(proof: ArithScopeProof; stmts: seq[IRStmt]): IRStmt =
   ## RFC-0016 W1-d2c. A routine body walked under `proof`'s arithmetic;
   ## ADM-IR: the scope rides a proof of the axis that stamped it.
   IRStmt(kind: isBlock, stmts: stmts, blkArith: proof.scope)
+
+proc withCheckScope*(b: IRStmt; on: set[CheckOption]): IRStmt =
+  ## RFC-0016 PRC-07. `b`, a routine body block, walked under the checks `on`
+  ## (those of `rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks` its
+  ## own options turn on in a build with them off); each other check of the
+  ## four follows the build.
+  b.blkScoped = true
+  b.blkOn = on
+  b
 
 proc mkLabelledBlock*(label: string; stmts: seq[IRStmt]): IRStmt =
   ## RFC-0005 S8m. A break target: `break label` resumes after it.
@@ -5653,6 +5669,7 @@ proc render*(s: IRStmt): string =
   of isBlock:
     (if s.blkLabel.len > 0: s.blkLabel & ":" else: "") &
       (if s.blkArith != asInherit: $s.blkArith else: "") &
+      (if s.blkScoped: "@on" & $s.blkOn else: "") &
       "{" & s.stmts.mapIt(render(it)).join(";") & "}"
   of isIf:
     var arms = ""

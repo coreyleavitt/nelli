@@ -122,10 +122,13 @@ suite "PRC-07: --objChecks:off":
     check not r.trusted
     check r.soundness.undefinedKinds == {UbKind(ubInvalidObjConversion)}
 
-  test "a routine pushed back to objChecks: on declines (the build is walked as compiled)":
-    let r = symexFind(sutPushedOn, tLabel("hit"))
-    check r.errors.named(feCheckOption)
-    check not r.trusted
+  test "a routine pushed back to objChecks: on is walked checked (its own options)":
+    ## its down-conversion raises natively, so the build's unchecked model must not apply
+    let r = symexFind(sutPushedOn, tRaisedExn("ObjectConversionDefect"))
+    checkpoint show(r.errors)
+    check r.status == sxRaised
+    check not r.errors.named(feCheckOption)
+    check r.undefined.len == 0
 
 suite "PRC-07: conv/objDowncast against C (objChecks:off)":
   when defined(windows):

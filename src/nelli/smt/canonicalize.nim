@@ -364,7 +364,11 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "312"
+const symexWalkerVersion* = "313"
+  ## RFC-0016 W3-z P2 (312->313): a closure iterator is inlined under the
+  ## check scope of its own definition (float checks at parse time, range,
+  ## bound, field and object checks as a scoped block), its for-body under the
+  ## caller's. Before, the body ran under the caller's scope.
   ## RFC-0016 W3-z P1 (311->312): the opaque-call scan reads the callee's own
   ## `overflowChecks` (`RoutineChecks.overflowOn`) and a pushed-off check
   ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the

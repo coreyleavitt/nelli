@@ -118,6 +118,16 @@
     routine's push-off, and a `-fwrapv` build defines the signed wrap.
     Tests: `tsymex_0016_w3z_p1_off` (checks-off build) and
     `tsymex_0016_w3z_p1_default`.
+  - W3-z P2 (`rfc-0016-w3z-parser2`, walker 312 to 313, finding A2): the
+    closure-iterator inliner parsed the body under the caller's check scope.
+    It now pushes the iterator's own (`pushedOn` + `floatOn`, and a scoped
+    block for range/bound/field/object checks); the for-body keeps the
+    caller's (`parseForBody`). An `{.inline.}` iterator takes the caller's
+    options, as Nim does (probed natively). Tests: `tsymex_0016_w3z_p2_iter`,
+    `_iter_off` (`--boundChecks:off`) and `_fwrapv` (P1's `-fwrapv` guard).
+    New gap, not fixed: `touchesFloat` (check_options.nim) is syntactic, so a
+    routine whose only float arithmetic is inside an inline iterator or
+    template it expands reads its float checks as off.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

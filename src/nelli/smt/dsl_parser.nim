@@ -1330,6 +1330,13 @@ type
                                    ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
+    iterBodies*: seq[tuple[own: bool, caller: set[CheckOption]]]
+                                   ## RFC-0016 W3-z P2. Per iterator being
+                                   ## inlined, innermost last: `own` where it
+                                   ## was walked under its own check scope (a
+                                   ## closure iterator), with the caller's
+                                   ## top scope, which its `yield` hands back
+                                   ## to the for-body.
     checkScopes*: seq[set[CheckOption]]
                                    ## RFC-0016 PRC-07. Per routine being
                                    ## parsed, innermost last: the checks of
@@ -4662,7 +4669,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         let defDivZero = admitMagic(magic, msDefDivZero)
         if defDivZero.admitted:
           scan.noteMagicDefect defDivZero, "DivByZeroDefect"
-          if not overflowOn:
+          if not overflowOn and not buildSemantics.fwrapv:
             addUb admitDefined(aoDiv, ocZeroDivisorSigned, dsArith), dpUnchecked
           if magic.startsWith("Mod"):
             addUb admitDefined(aoMod, ocLowByMinusOneWide, dsArith), dpChecked
@@ -16836,6 +16843,22 @@ proc bindIterArg(impl, formalSym, tyNode, arg: NimNode;
   body = substIterArg(body, f, stripFieldChecks(fixed))
   true
 
+proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0016 W3-z P2. The for-body of an inlined iterator belongs to the
+  ## caller: it is parsed (and walked) under the caller's checks, not the
+  ## closure iterator's own that `yield` was reached under.
+  if ctx.iterBodies.len == 0 or not ctx.iterBodies[^1].own:
+    return parseStmt(forBodyNode, ctx)
+  # The for-body is outside the iterator: its own entry leaves the stack.
+  let entry = ctx.iterBodies.pop()
+  let caller = entry.caller
+  ctx.checkScopes.add caller
+  result = parseStmt(forBodyNode, ctx)
+  discard ctx.checkScopes.pop()
+  ctx.iterBodies.add entry
+  if hasCheckOff():
+    result = mkBlock(@[result]).withCheckScope(caller)
+
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
                        forBodyNode: NimNode,
@@ -16871,7 +16894,7 @@ proc parseIterBodyStmt(n: NimNode,
       var yp: seq[IRStmt]
       let yieldIR = parseExpr(n[0], yp, ctx)
       let bindStmt = mkLet(iterVarBindings[0][0], iterVarBindings[0][1], yieldIR)
-      let bodyIR = parseStmt(forBodyNode, ctx)
+      let bodyIR = parseForBody(forBodyNode, ctx)
       var stmts = yp
       stmts.add bindStmt
       stmts.add bodyIR
@@ -16900,7 +16923,7 @@ proc parseIterBodyStmt(n: NimNode,
         let elemIR = parseExpr(tupleConstr[k], elemPre, ctx)
         for s in elemPre: stmts.add s
         stmts.add mkLet(iterVarBindings[k][0], iterVarBindings[k][1], elemIR)
-      let bodyIR = parseStmt(forBodyNode, ctx)
+      let bodyIR = parseForBody(forBodyNode, ctx)
       stmts.add bodyIR
       if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkStmtList, nnkStmtListExpr:
@@ -20707,9 +20730,12 @@ proc parseStmtInner(n: NimNode,
         let implBody = body(impl)
         # RFC-0005 S8cu: an inline iterator takes the checks of the routine it
         # lands in; a closure iterator is compiled at its definition's.
-        if impl[4].kind == nnkPragma and impl[4].findChild(
-             it.kind in {nnkIdent, nnkSym} and it.strVal == "closure") != nil:
+        let isClosureIter = impl[4].kind == nnkPragma and impl[4].findChild(
+             it.kind in {nnkIdent, nnkSym} and it.strVal == "closure") != nil
+        var iterChecks: RoutineChecks
+        if isClosureIter:
           let c = routineChecks(impl)
+          iterChecks = c
           # RFC-0016 WA-A (S1): a pure `overflowChecks` deviation that is the
           # build's own (a checks-off build) is no deviation: the iterator is
           # inlined. Anything else declines (the nil body keeps the marker).
@@ -20844,7 +20870,21 @@ proc parseStmtInner(n: NimNode,
               $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
           for k, name in loopVarNames:
             iterVarBindings.add (name, yieldElemTyTop.fields[k])
-        let bodyIR = parseIterBodyStmt(iterBody, iterVarBindings, bodyNode, ctx)
+        # RFC-0016 W3-z P2: a closure iterator is compiled at its definition,
+        # so its body is parsed (float checks) and walked (range, bound, field,
+        # object checks) under the options there; its for-body keeps the
+        # caller's (`parseForBody`). An inline iterator is expanded at the call
+        # site and takes the caller's.
+        let ownScope = isClosureIter
+        let callerTop = if ctx.checkScopes.len > 0: ctx.checkScopes[^1] else: {}
+        ctx.iterBodies.add (own: ownScope, caller: callerTop)
+        if ownScope: ctx.checkScopes.add(pushedOn(iterChecks) + floatOn(iterChecks))
+        var bodyIR = parseIterBodyStmt(iterBody, iterVarBindings, bodyNode, ctx)
+        if ownScope:
+          discard ctx.checkScopes.pop()
+          if hasCheckOff():
+            bodyIR = mkBlock(@[bodyIR]).withCheckScope(pushedOn(iterChecks))
+        discard ctx.iterBodies.pop()
         ctx.activeIterators.excl itSymName
         # Combine preamble + inlined body
         if preambleStmts.len > 0:

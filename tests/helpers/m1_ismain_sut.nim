@@ -1,5 +1,5 @@
 ## RFC-0016 W3-z P8: SUTs that live in an imported module, where `isMainModule`
-## is false (the compiler folds it per using module).
+## is false natively; the walker declines (the use is not in the main file).
 import nelli
 import nelli/symex
 

@@ -11121,15 +11121,26 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         if symKind(n) == nskConst:
           # RFC-0016 W3-z P8 (soundness). `isMainModule` is a magic const
           # (`mIsMainModule`) the compiler folds per USING module; its
-          # declared default (`false`) is not its value. Fold it the way the
-          # compiler does: true exactly when the module holding this use is
-          # the build's main module.
+          # declared default (`false`) is not its value. The use's line-info
+          # file names that module only when it IS the build's main file: any
+          # other file may be an `include`d file or a template expanded into
+          # the main module, where the true value is `true`. So fold to
+          # `true` for the main file and decline everywhere else.
           if s == "isMainModule":
             let decl = n.getImpl.lineInfoObj.filename.replace('\\', '/')
             if decl.endsWith("system/compilation.nim") or
                decl.endsWith("system.nim"):
-              return mkBoolLit(n.lineInfoObj.filename.replace('\\', '/') ==
-                               querySetting(projectFull).replace('\\', '/'))
+              let useFile = n.lineInfoObj.filename.replace('\\', '/')
+              if useFile == querySetting(projectFull).replace('\\', '/'):
+                return mkBoolLit(true)
+              preamble.add ctx.declineAtSite(
+                feUnsupportedOp,
+                siteMsg(n, "isMainModule outside the main module's own file (" &
+                  useFile & "): the value depends on the module the code " &
+                  "is compiled into, and an included file or an expanded " &
+                  "template is the main module's"),
+                "isMainModule outside the main module's own file")
+              return mkBoolLit(false)
           let cImpl = n.getImpl
           if cImpl.kind == nnkConstDef and cImpl.len >= 3 and
              cImpl[2].kind != nnkEmpty:

@@ -7,7 +7,8 @@ import std/[unittest, typetraits]
 import nelli/symex
 import nelli/smt/errorkind
 import ./s8cu_helpers
-import helpers/m1_ismain_sut   # SUTs in an imported module: isMainModule is false there
+import helpers/m1_ismain_sut   # SUTs in an imported module: isMainModule is not the main file
+include helpers/m1_ismain_incl # SUTs in an included file: the main module's, but another file
 
 type M1Obj = object
   x: int64
@@ -116,8 +117,6 @@ suite "M1: the folded magic rows, through symexFind":
   foldedCell(sOffsetOfInline, "OffsetOf")
   foldedCell(sOffsetOfAssign, "OffsetOf")
   foldedCell(sIsMainModule, "IsMainModule")
-  foldedCell(sutIsMainImported, "IsMainModule")
-  foldedCell(sutNotMainImported, "IsMainModule")
   foldedCell(sIsMainModuleNot, "IsMainModule")
   foldedCell(sIs, "Is")
   foldedCell(sTypeOf, "TypeOf")
@@ -139,6 +138,18 @@ suite "M1: the folded magic rows, through symexFind":
   foldedCell(sAppType, "AppType")
   foldedCell(sCompileDate, "CompileDate")
   foldedCell(sCompileTime, "CompileTime")
+
+suite "M1: isMainModule outside the main module's own file declines":
+  test "IsMainModule imported":
+    pinDecline(sutIsMainImported, cellKey(axMagic, "IsMainModule"), feUnsupportedOp)
+  test "IsMainModule imported, negated (the compiler folds `not <const>` itself)":
+    # No isMainModule symbol reaches the walker: semfold already turned
+    # `not isMainModule` into the right literal, so the verdict is exact.
+    let r = pinExact(sutNotMainImported, cellKey(axMagic, "IsMainModule"),
+                     domain = m1Dom)
+    check r.status == sxSat
+  test "IsMainModule included":
+    pinDecline(sutIsMainIncluded, cellKey(axMagic, "IsMainModule"), feUnsupportedOp)
 
 suite "M1: the declined row of the compile-time group":
   test "Nimvm":

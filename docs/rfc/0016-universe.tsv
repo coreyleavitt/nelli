@@ -523,7 +523,7 @@ pragma:field/codegenDecl	never	-
 pragma:field/cursor	modelled	-
 pragma:field/deprecated	modelled	-
 pragma:field/dynlib	never	-
-pragma:field/exportc	declined	-
+pragma:field/exportc	modelled	-
 pragma:field/extern	declined	-
 pragma:field/guard	declined	-
 pragma:field/header	never	-

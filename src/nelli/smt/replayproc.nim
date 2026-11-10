@@ -29,22 +29,21 @@ when defined(windows) or defined(nelliReplayReexec):
   import std/os
 import ../engine/markers
 import ./replaywire   ## RFC-0016 INT-13
+from ./buildprofile import buildIsExecutable
 
 const
   replayForks* = defined(posix) and not defined(nelliReplayReexec)
   replayReexecs* = defined(windows) or
                    (defined(posix) and defined(nelliReplayReexec))
   hasMethodTable* = defined(nimHasMethodDispatchTable) and
-                    not (compileOption("app", "lib") or
-                         compileOption("app", "staticlib"))
+                    buildIsExecutable
     ## RFC-0016 PRC-02b. The toolchain's method dispatch table exists, and this
     ## build can import it: the patched compiler writes the accessor for
     ## executables only (a library build would export a symbol every other Nim
     ## binary linking it also defines), so a library build keeps the stock
     ## decline.
   hasSubtypeTable* = defined(nimHasSubtypeHookTable) and
-                     not (compileOption("app", "lib") or
-                          compileOption("app", "staticlib"))
+                     buildIsExecutable
     ## RFC-0016 PRC-02m. The toolchain's subtype-hook table exists, and this
     ## build can import it (executables only, as `hasMethodTable`).
   replayMemoryLimit* = 2 shl 30

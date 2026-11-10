@@ -147,6 +147,14 @@ type
     stockNim*: bool                 ## RFC-0016 K5b: the probes saw an unpatched Nim
     assumedAbsent*: set[CFlag]      ## flags nelli assumes the build does not pass
 
+const buildIsExecutable* = not (compileOption("app", "lib") or
+                                compileOption("app", "staticlib"))
+  ## RFC-0016 PRC-02b/02m. This build links as an executable. The patched
+  ## compiler writes the method dispatch and subtype-hook table accessors for
+  ## executables only, so a library build must not import them
+  ## (`replayproc.hasMethodTable`, `hasSubtypeTable`). Read here with every
+  ## other build read (K5a).
+
 when defined(nelliFwrapv) and not defined(vcc):
   {.passC: "-fwrapv".}
 

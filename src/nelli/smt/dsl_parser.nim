@@ -23744,7 +23744,7 @@ proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
     let key = "hook:" & routeRoutineKey(h)
     if key in run.seenRoutines: continue
     run.seenRoutines.add key
-    if symKind(h) in {nskProc, nskFunc}: run.hooks.add h
+    if resolveRoutineImpl(h) != nil: run.hooks.add h
     let name = "`" & macros.strVal(h) & "`"
     let s = opaqueWriteSummary(h)
     if not s.inert:

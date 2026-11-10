@@ -114,3 +114,5 @@ magic:Unown	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type
 magic:Varargs	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:VoidType	K4a-dispatch	no SUT reaches it: a compile-time, macro, DrNim or type-constructor magic that a typed runtime body cannot carry
 magic:nextafter	K4a-dispatch	no SUT reaches it: Nim 2.2 std/math has no nextafter to call (tsymex_phase15_F6_float_math), so the never cell is a name the walker recognises and no program expresses
+magic:GCref	W4-z	E1: the table row declines feUnsupportedOp (mDeclined) but the K4b pin observes the walker declining feUnsupportedExprKind, so the kind-matched join does not accept it; the table kind or the pin's expectation is wrong and the closing slice decides which
+magic:Repr	W4-z	E1: mPartial row (admitted) whose only pin is declineCell(feUnsupportedOp) on repr(int); no exact pin of the bool/enum/int shapes the row claims is recorded

@@ -13,3 +13,7 @@ typeop:letCursor/ref	K2c	no pin record: the letCursor row exists (K3a); K3a pins
 typeop:letCursor/set	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
 typeop:letCursor/table	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
 typeop:letCursor/uninterp	K2c	no pin record: the letCursor row exists (K3a); K3a pins variant, tuple, seq and string; the remaining kinds need a let-cursor snippet each in the K2c corpus
+typeop:letCursor/seq	W4-z	E1: modelled as a share-detection row whose only pin is the pvDeclined letCursor decline of the shared shape; no exact record of the non-shared outcome
+typeop:letCursor/string	W4-z	E1: modelled as a share-detection row whose only pin is the pvDeclined letCursor decline of the shared shape; no exact record of the non-shared outcome
+typeop:letCursor/tuple	W4-z	E1: modelled as a share-detection row whose only pin is the pvDeclined letCursor decline of the shared shape; no exact record of the non-shared outcome
+typeop:letCursor/variant	W4-z	E1: modelled as a share-detection row whose only pin is the pvDeclined letCursor decline of the shared shape; no exact record of the non-shared outcome

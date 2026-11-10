@@ -29,3 +29,6 @@ typeclass:unused2	W4-z	K2c: no concrete parameter type has this kind (a compiler
 typeclass:userTypeClass	W4-z	K2c: no concrete parameter type has this kind (a compiler-internal, generic-constraint or meta kind), so no snippet reaches classifyType with it; the closing slice decides never or a pin
 typeclass:userTypeClassInst	W4-z	K2c: no concrete parameter type has this kind (a compiler-internal, generic-constraint or meta kind), so no snippet reaches classifyType with it; the closing slice decides never or a pin
 typeclass:void	W4-z	K2c: no concrete parameter type has this kind (a compiler-internal, generic-constraint or meta kind), so no snippet reaches classifyType with it; the closing slice decides never or a pin
+typeclass:cstring	W4-z	E1: admitted at the by-value-formal site only; its sole pin is the decline at the parameter site, so no exact record exists; the closing slice pins the formal or flips the row
+typeclass:pointer	W4-z	E1: admitted at the by-value-formal site only; its sole pin is the decline at the parameter site, so no exact record exists; the closing slice pins the formal or flips the row
+typeclass:proc	W4-z	E1: admitted at the by-value-formal site only; its sole pin is the decline at the parameter site, so no exact record exists; the closing slice pins the formal or flips the row

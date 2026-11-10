@@ -102,6 +102,7 @@ const
 type
   UCell = object
     key: string      ## rendered: `magic:Swap`, `errorkind:feX`, `build:row/msvc`
+    kind: string     ## a declined/never cell's SymexErrorKind ("" when none)
     state: string    ## modelled | declined | never | row | cap | the DegradeClass
     detail: string
 
@@ -124,31 +125,42 @@ proc capMembers(): seq[string] =
       if not word.startsWith("ck"): break
       if word != "ckNone": result.add word
 
+func kindOf(k: Option[SymexErrorKind]): string =
+  if k.isSome: $k.get else: ""
+
 proc deriveUniverse(): seq[UCell] =
   for c in magicAxis.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for c in pcreLibs.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for c in typeClassTable.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for c in typeOpTable.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for c in definednessTable.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for c in buildCells.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for c in pragmaAxis.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for c in stdlibAxis.cells:
     result.add UCell(key: render(c.cell),
-                     state: stateOf(c.admitted, c.intent), detail: "-")
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
   for r in BuildRow:
     result.add UCell(key: "build:row/" & $r, state: "row", detail: "-")
   for k in SymexErrorKind:
@@ -189,7 +201,16 @@ proc lineDiff(committed, derived: string): string =
 
 # --- records and the join --------------------------------------------------
 
-func evidences(u: UCell; r: PinRecord): bool =
+func sampledUnsat(r: PinRecord): bool =
+  ## RFC-0016 section 10: an `sxUnsat` is `exact` only when the native check
+  ## covered an exhaustive domain. A sampled one is evidence of a kind (it is
+  ## counted, section 12 item 1) but classifies no cell.
+  r.verdict == pvExact and r.walker == "sxUnsat" and not r.exhaustive
+
+func evidences(u: UCell; r: PinRecord; legRow = ""): bool =
+  ## Section 8.2: a record evidences a cell only from the leg's row (when the
+  ## leg has one) and only with a verdict that fits the cell's state.
+  if legRow.len > 0 and r.row != legRow: return false
   case scopeOf(u.key)
   of "errorkind":
     r.verdict == pvDeclined and "errorkind:" & r.declineKind == u.key
@@ -199,17 +220,28 @@ func evidences(u: UCell; r: PinRecord): bool =
   else:
     if u.key.startsWith("build:row/"):
       r.verdict != pvSkipped and r.row == u.key[10 .. ^1]
+    elif render(r.cell) != u.key: false
     else:
-      if render(r.cell) != u.key: false
-      else:
-        let strong = r.verdict in {pvExact, pvRaised, pvDeclined} and
-                     r.entry in publicEntries
-        let weak = (r.verdict == pvCrashed and r.entry == "pinCrash") or
-                   r.entry == "admitBuild"
-        # K5b: a `never` cell stays as it is; `pinNever` records the native
-        # fact that says so. Only a `never` cell accepts it.
-        strong or (u.state in ["declined", "never"] and weak) or
+      let pub = r.entry in publicEntries
+      case u.state
+      of "modelled":
+        pub and r.verdict in {pvExact, pvRaised} and not r.sampledUnsat
+      of "declined", "never":
+        # a decline names the kind the table declares (none: the axis reports
+        # in its own vocabulary, so any decline fits). K5b: a `never` cell
+        # stays as it is; `pinNever` records the native fact that says so.
+        (pub and r.verdict == pvDeclined and
+           (u.kind.len == 0 or r.declineKind == u.kind)) or
+          (r.verdict == pvCrashed and r.entry == "pinCrash") or
+          r.entry == "admitBuild" or
           (u.state == "never" and r.entry == "pinNever")
+      else: false
+
+func sampledOnlyBy(u: UCell; r: PinRecord; legRow: string): bool =
+  ## `r` would evidence `u` if its unsat domain were exhaustive.
+  var e = r
+  e.exhaustive = true
+  r.sampledUnsat and u.evidences(e, legRow)
 
 proc loadAllow(dir: string): seq[Allow] =
   for s in scopes:
@@ -255,10 +287,13 @@ proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow];
     if legRow.len > 0 and c.key.startsWith("build:row/") and
        c.key != "build:row/" & legRow:
       continue
-    let covered = recs.anyIt(c.evidences(it))
+    let covered = recs.anyIt(c.evidences(it, legRow))
     if not covered and not partial and c.key notin allowed:
-      result.add "unclassified cell " & c.key & " (" & c.state &
-        "): no pin record evidences it and no allowlist entry names it"
+      var why = "no pin record evidences it"
+      if c.state == "modelled" and recs.anyIt(c.sampledOnlyBy(it, legRow)):
+        why = "only sampled unsat records evidence it (not exhaustive)"
+      result.add "unclassified cell " & c.key & " (" & c.state & "): " & why &
+        " and no allowlist entry names it"
     if covered and c.key in allowed:
       result.add "stale allowlist entry " & c.key &
         ": a pin record evidences it now; remove the line"
@@ -280,11 +315,14 @@ type RecordCensus = object
   ## `target` (skipped cells name none); `verdicts` counts every record.
   suts: int
   verdicts: array[PinVerdict, int]
+  exhaustiveUnsat, sampledUnsat: int
 
 proc recordCensus(recs: seq[PinRecord]): RecordCensus =
   var targets = initHashSet[string]()
   for r in recs:
     inc result.verdicts[r.verdict]
+    if r.verdict == pvExact and r.walker == "sxUnsat":
+      if r.exhaustive: inc result.exhaustiveUnsat else: inc result.sampledUnsat
     if r.target.len > 0: targets.incl r.target
   result.suts = targets.len
 
@@ -301,6 +339,8 @@ proc `$`(c: RecordCensus): string =
   result = $c.suts & " SUTs, verdicts"
   for v in PinVerdict:
     result.add " " & ($v)[2 .. ^1] & "=" & $c.verdicts[v]
+  result.add "; sampled-unsat=" & $c.sampledUnsat & " exhaustive-unsat=" &
+             $c.exhaustiveUnsat
 
 const maxEvidenceAgeDays = 7
 
@@ -373,7 +413,9 @@ proc synth(c: UCell): PinRecord =
       result.row = c.key[10 .. ^1]
     else:
       result.cell = parseCellKey(c.key).get
-      if c.state in ["declined", "never"]: result.verdict = pvDeclined
+      if c.state in ["declined", "never"]:
+        result.verdict = pvDeclined
+        result.declineKind = c.kind
 
 proc synthAll(skip: string = ""): seq[PinRecord] =
   ## Records for every cell, except `skip`.
@@ -511,8 +553,10 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
     for r in recs.mitems: r.row = "linux-c"
     let fails = joinUniverse(universe, recs, allowFor(@["build:row/mingw"]),
                              "mingw")
-    check fails.len == 1
-    check "build:row/mingw" in fails[0] and "unclassified" in fails[0]
+    # E1: nothing a linux-c record names is the mingw leg's evidence, so the
+    # row cell fails with every other cell the leg has no record for.
+    check fails.anyIt("build:row/mingw" in it and "unclassified" in it)
+    check fails.len > 1
 
   test "RED: a scoped leg still fails an unclassified non-row cell":
     var recs = synthAll("errorkind:feUnadmitted")
@@ -644,6 +688,91 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
     let swap = universe.filterIt(it.key == "magic:Swap")[0]
     check recs.anyIt(swap.evidences(it))
     check recs[0].row == "linux-c"
+
+suite "RFC-0016 W3-z E1: the join demands a verdict that fits the cell":
+  proc firstCell(state: string; withKind = false): UCell =
+    for c in universe:
+      if c.state == state and scopeOf(c.key) == "magic" and
+         (not withKind or c.kind.len > 0): return c
+    raise newException(ValueError, "no " & state & " magic cell")
+
+  proc recFor(c: UCell; v: PinVerdict; kind = ""; walker = "";
+              exhaustive = false; row = "linux-c"): PinRecord =
+    PinRecord(testFile: "synth.nim", entry: "symexFind",
+              cell: parseCellKey(c.key).get, target: "t", domain: "-",
+              verdict: v, declineKind: kind, walker: walker,
+              exhaustive: exhaustive, row: row)
+
+  test "RED: a decline record does not classify a modelled cell":
+    let c = firstCell("modelled")
+    check c.evidences(recFor(c, pvExact))
+    check c.evidences(recFor(c, pvRaised))
+    check not c.evidences(recFor(c, pvDeclined))
+
+  test "RED: an exact record does not classify a declined cell":
+    let c = firstCell("declined", withKind = true)
+    check c.evidences(recFor(c, pvDeclined, c.kind))
+    check not c.evidences(recFor(c, pvExact))
+    check not c.evidences(recFor(c, pvRaised))
+
+  test "RED: a decline of another kind does not classify a declined cell":
+    let c = firstCell("declined", withKind = true)
+    let other = if c.kind == "feUnsupportedOp": "feUnadmitted"
+                else: "feUnsupportedOp"
+    check not c.evidences(recFor(c, pvDeclined, other))
+    check not c.evidences(recFor(c, pvDeclined, ""))
+
+  test "RED: a sampled unsat does not classify; an exhaustive one does":
+    let c = firstCell("modelled")
+    check not c.evidences(recFor(c, pvExact, walker = "sxUnsat"))
+    check c.evidences(recFor(c, pvExact, walker = "sxUnsat", exhaustive = true))
+    # a sat witness is reproduced natively whatever the domain was
+    check c.evidences(recFor(c, pvExact, walker = "sxSat"))
+
+  test "RED: a sampled-only modelled cell fails the join and says why":
+    let c = firstCell("modelled")
+    var recs = synthAll(c.key)
+    recs.add recFor(c, pvExact, walker = "sxUnsat")
+    let fails = joinUniverse(universe, recs, allowFor(@[]), "linux-c")
+    check fails.len == 1
+    if fails.len == 1: check c.key in fails[0] and "sampled" in fails[0]
+    recs.add recFor(c, pvExact, walker = "sxUnsat", exhaustive = true)
+    check joinUniverse(universe, recs, allowFor(@[]), "linux-c").len == 0
+
+  test "RED: on a leg, a record from another row or from no row evidences nothing":
+    let c = firstCell("modelled")
+    for row in ["", "mingw"]:
+      var recs = synthAll(c.key)
+      recs.add recFor(c, pvExact, row = row)
+      let fails = joinUniverse(universe, recs, allowFor(@[]), "linux-c")
+      check fails.len == 1
+      if fails.len == 1: check c.key in fails[0]
+    # without a leg the row does not scope
+    var any = synthAll(c.key)
+    any.add recFor(c, pvExact, row = "")
+    check joinUniverse(universe, any, allowFor(@[])).len == 0
+
+  test "RED: the same row rule holds for error-kind and cap-kind cells":
+    for victim in ["errorkind:feUnadmitted", "capkind:ckFrontier"]:
+      let c = universe.filterIt(it.key == victim)[0]
+      var recs = synthAll(c.key)
+      var r = synth(c)
+      r.row = ""
+      recs.add r
+      let fails = joinUniverse(universe, recs, allowFor(@[]), "linux-c")
+      check fails.len == 1
+      if fails.len == 1: check c.key in fails[0]
+
+  test "RED: the census counts sampled and exhaustive unsat separately":
+    let c = firstCell("modelled")
+    let census = recordCensus(@[recFor(c, pvExact, walker = "sxUnsat"),
+                                recFor(c, pvExact, walker = "sxUnsat"),
+                                recFor(c, pvExact, walker = "sxUnsat",
+                                       exhaustive = true),
+                                recFor(c, pvExact, walker = "sxSat")])
+    check census.sampledUnsat == 2
+    check census.exhaustiveUnsat == 1
+    check "sampled-unsat=2" in $census and "exhaustive-unsat=1" in $census
 
 suite "RFC-0016 K1a-cells: the join over this run's records":
   test "the committed allowlists against NELLI_PIN_DIR":

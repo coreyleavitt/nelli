@@ -7119,7 +7119,37 @@ proc dropVarIndirection(n, f: NimNode): NimNode =
   result = copyNimNode(n)
   for c in n: result.add dropVarIndirection(c, f)
 
-proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
+proc ptrFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                    sh: var WriteShape): bool   ## RFC-0016 E3c fwd decl
+proc viewFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                     sh: var WriteShape): bool  ## RFC-0016 E3c fwd decl
+
+proc addrOperandShape*(n: NimNode): WriteShape =
+  ## RFC-0016 E3c. The `ptrformal` shape of an `addr` expression `n`. The
+  ## address of a `var` formal (`addr x`, spelled over `nnkHiddenDeref(x)`) is
+  ## `wsVarReturn`: handed on, it is the caller's pointee. The address of a
+  ## path through a dereference (`addr p[].a`) is `wsFieldAddr`; the whole
+  ## pointee (`addr p[]`) is `wsVarReturn` too.
+  ## Any other operand is `wsUnlisted`, which no row names.
+  if n.kind notin {nnkAddr, nnkHiddenAddr} or n.len != 1: return wsUnlisted
+  var o = n[0]
+  while o.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and o.len > 0:
+    o = o[^1]
+  var t = o
+  while t.kind in {nnkDotExpr, nnkCheckedFieldExpr, nnkBracketExpr} and
+        t.len > 0:
+    t = t[0]
+  if t.kind == nnkDerefExpr:
+    # `addr p[]` is the pointee itself: what a `var` formal handed on is once
+    # the callee is read with the formal replaced by `p[]`.
+    return (if t == o: wsVarReturn else: wsFieldAddr)
+  if t.kind == nnkHiddenDeref and t.len == 1 and t[0].kind == nnkSym and
+     symKind(t[0]) == nskParam:
+    return wsVarReturn
+  wsUnlisted
+
+proc ptrUsesShape(n, f: NimNode; seen: var seq[string];
+                  sh: var WriteShape): bool =
   ## RFC-0005 S8an, RFC-0016 K6c (W-10). True when every use of the pointer
   ## `f` in `n` is one that cannot let it outlive the call: a dereference
   ## `f[]` (read, write) that is not under `addr`, a comparison (`==`, `!=`,
@@ -7137,26 +7167,41 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
   ## (an opaque routine, a non-magic stdlib one) or returned by one that
   ## reads the walked body (`proc g(x: var int): ptr int = addr x`), and `f`
   ## inside inline assembly, a `cast` or an `emit`.
+  ##
+  ## RFC-0016 E3c. Each use is a SHAPE of the `ptrformal` route
+  ## (`WriteShape`): `sh` is the first one that does not stay local, and
+  ## `ptrUsesStayLocal` asks the read-only table about it. A use the
+  ## classifier cannot name is `wsUnlisted`, which has no row.
   case n.kind
   of nnkSym:
-    return not containsSym(@[f], n)
+    if containsSym(@[f], n):
+      sh = wsGlobalStore   # the pointer itself stored, returned or captured
+      return false
+    return true
   of nnkDerefExpr, nnkHiddenDeref:
     if n.len == 1 and isSymOf(n[0], f): return true
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
   of nnkAddr, nnkHiddenAddr:
     # A call's `var` actuals are read in the call arm below; any other
     # address of something built from `f` is a pointer that can outlive it.
-    return not mentionsSym(n, f)
+    if mentionsSym(n, f):
+      sh = addrOperandShape(n)
+      return false
+    return true
   of nnkAsmStmt, nnkCast:
+    sh = wsUnlisted
     return not mentionsSym(n, f)   # `foreignWriteNode`
   of nnkPragma:
-    if foreignWriteNode(n): return not mentionsSym(n, f)
+    if foreignWriteNode(n):
+      sh = wsUnlisted
+      return not mentionsSym(n, f)
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
   of RoutineNodes:
+    sh = wsUnlisted
     return not mentionsSym(n, f)
   of nnkInfix, nnkCall, nnkCommand, nnkPrefix, nnkPostfix, nnkHiddenCallConv,
      nnkCallStrLit, nnkDotCall:
@@ -7171,30 +7216,38 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
         let a = n[j]
         if isSymOf(a, f):
           if builtinCmp: continue
-          if opaque or not user or not ptrFormalStaysLocal(head, j - 1, seen):
+          if opaque or not user:
+            sh = wsUnlisted
             return false
+          if not ptrFormalShape(head, j - 1, seen, sh): return false
         elif a.kind == nnkHiddenAddr and a.len == 1 and isSymOf(a[0], f):
           # RFC-0005 S8au: the pointer variable itself passed to a `var
           # ptr` formal. It stays local when that formal only ever
           # dereferences it (never rebinds or stores it).
-          if opaque or not user or not ptrFormalStaysLocal(head, j - 1, seen):
+          if opaque or not user:
+            sh = wsUnlisted
             return false
+          if not ptrFormalShape(head, j - 1, seen, sh): return false
         elif a.kind == nnkHiddenAddr and mentionsSym(a, f):
           # The pointee (or a part of it) as a `var` actual: its address
           # goes to the callee. Local only when the callee keeps it so; a
           # compiler magic does not retain or return it.
-          if opaque: return false
+          if opaque:
+            sh = wsUnlisted
+            return false
           if user:
-            if not viewFormalStaysLocal(head, j - 1, seen): return false
-          elif magic.len == 0 or "Addr" in magic: return false
+            if not viewFormalShape(head, j - 1, seen, sh): return false
+          elif magic.len == 0 or "Addr" in magic:
+            sh = wsUnlisted
+            return false
           else:
             for c in a:
-              if not ptrUsesStayLocal(c, f, seen): return false
-        elif not ptrUsesStayLocal(a, f, seen):
+              if not ptrUsesShape(c, f, seen, sh): return false
+        elif not ptrUsesShape(a, f, seen, sh):
           return false
       return true
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
   of nnkNone, nnkEmpty, nnkIdent, nnkType, nnkCharLit, nnkIntLit, nnkInt8Lit,
      nnkInt16Lit, nnkInt32Lit, nnkInt64Lit, nnkUIntLit, nnkUInt8Lit,
@@ -7212,6 +7265,7 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
      nnkEnumFieldDef, nnkError, nnkModuleRef, nnkReplayAction, nnkNilRodNode:
     # A leaf, a type, or a declaration a typed body does not hold: a pointer
     # named in one is not shown local.
+    sh = wsUnlisted
     return not mentionsSym(n, f)
   of nnkExprEqExpr, nnkExprColonExpr, nnkIdentDefs, nnkVarTuple, nnkPar,
      nnkObjConstr, nnkCurly, nnkCurlyExpr, nnkBracket, nnkBracketExpr,
@@ -7229,16 +7283,27 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
      nnkTypeOfExpr, nnkArgList, nnkPattern, nnkHiddenTryStmt, nnkClosure,
      nnkGotoState, nnkState, nnkBreakState, nnkTupleConstr:
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
 
-proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
-                          seen: var seq[string]): bool =
+proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
+  ## RFC-0016 E3c. The read-only table decides: every use must classify as
+  ## `wsLocalUse`, the shape `ptrformal/local` admits. A use that does not stay
+  ## local is a shape of its own (`ptrUsesShape`): a pointer stored in a global
+  ## is an escape the walk decides, the address of a pointee's field or of a
+  ## `var` formal is refused, and a use the classifier cannot name has no row.
+  var sh = wsLocalUse
+  if not ptrUsesShape(n, f, seen, sh): return false
+  admitShape(rrPtrFormal, wsLocalUse).admitted
+
+proc ptrFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                    sh: var WriteShape): bool =
   ## RFC-0005 S8an. True when user routine `callee`'s `idx`-th formal is a
   ## `ptr` whose every use stays local (`ptrUsesStayLocal`). A routine
   ## already being checked is assumed to (the check is a greatest fixed
   ## point: recursion passes the pointer to itself, which escapes only if
   ## some other use does).
+  sh = wsUnlisted   # E3c: a formal the structure checks reject has no row
   if callee.kind != nnkSym: return false
   let key = macros.strVal(callee) & "@" & callee.lineInfo & "#" & $idx
   if key in seen: return true
@@ -7275,16 +7340,25 @@ proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
     # does, and the same rule applies: `p[]` stays local, a bare `p`
     # (a rebind `p = q`, a store, a return) does not. A `var ptr` formal
     # that only dereferences is a `ptr` formal; the `var` is never used.
-    return ptrUsesStayLocal(dropVarIndirection(body(impl), fsym), fsym, seen)
-  ptrUsesStayLocal(body(impl), fsym, seen)
+    return ptrUsesShape(dropVarIndirection(body(impl), fsym), fsym, seen, sh)
+  ptrUsesShape(body(impl), fsym, seen, sh)
 
-proc viewFormalStaysLocal(callee: NimNode; idx: int;
+proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
                           seen: var seq[string]): bool =
+  ## RFC-0005 S8an; RFC-0016 E3c: the shape of every use of the formal, asked
+  ## of the read-only table (`ptrUsesStayLocal`).
+  var sh = wsLocalUse
+  if not ptrFormalShape(callee, idx, seen, sh): return false
+  admitShape(rrPtrFormal, wsLocalUse).admitted
+
+proc viewFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                     sh: var WriteShape): bool =
   ## RFC-0016 K6c. True when user routine `callee`'s `idx`-th formal is a `var`
   ## whose every use keeps the address of its argument local
   ## (`ptrUsesStayLocal` on the formal, whose body spelling `x` is the typed
   ## AST's `nnkHiddenDeref(x)`): a callee that returns or stores `addr x`
   ## hands the caller's pointee address on. False for anything else.
+  sh = wsUnlisted
   if callee.kind != nnkSym: return false
   let key = macros.strVal(callee) & "@" & callee.lineInfo & "#v" & $idx
   if key in seen: return true
@@ -7306,7 +7380,13 @@ proc viewFormalStaysLocal(callee: NimNode; idx: int;
   if fsym == nil or fsym.kind != nnkSym: return false
   fsym = formalInBody(impl, fsym)
   if fsym == nil: return false
-  ptrUsesStayLocal(body(impl), fsym, seen)
+  ptrUsesShape(body(impl), fsym, seen, sh)
+
+proc viewFormalStaysLocal(callee: NimNode; idx: int;
+                          seen: var seq[string]): bool =
+  var sh = wsLocalUse
+  if not viewFormalShape(callee, idx, seen, sh): return false
+  admitShape(rrPtrFormal, wsLocalUse).admitted
 
 proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
                         heapSteps: seq[NimNode];
@@ -11712,10 +11792,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if fc.root != nil:
       return lowerArmFieldCell(n, fc.root, fc.lv, fc.field, preamble, ctx)
     let dummyTy = classifyType(n).ty
+    # RFC-0016 E3c: the address of a pointee's field, or of a `var` formal,
+    # is a refused shape of the `ptrformal` route: the decline names its row.
+    let addrShape = addrOperandShape(n)
+    let addrRow = admitShape(rrPtrFormal, addrShape)
+    let addrNote =
+      if addrShape in {wsFieldAddr, wsVarReturn} and not addrRow.admitted:
+        " [" & addrRow.decline[1] & "]"
+      else: ""
     preamble.add ctx.declineAtSite(
       feUnsupportedExprKind,
       "CR-2a: unsupported expression kind " & $n.kind & " in `" &
-             n.repr & "` — not in the supported expression fragment",
+             n.repr & "` — not in the supported expression fragment" &
+             addrNote,
       "CR-2a: unsupported expression kind " &
                                   $n.kind & " (feUnsupportedExprKind)")
     let dummy = zeroValueForType(dummyTy)

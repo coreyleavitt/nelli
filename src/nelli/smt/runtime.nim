@@ -33,6 +33,7 @@ from ./buildprofile import buildSemantics, exSetjmp   ## RFC-0016 W1-c1b
 import ./buildprofile as bprof   ## RFC-0016 K5a: the host half, the segment, the row
 import ./types
 import ./admission
+import ./readonlyaxes   ## RFC-0016 E3c: `routeDeclines`, the view-whole route
 import ./definedness   ## RFC-0016 K10a-axis: the definedness axis
 import ./variant_layout as vl   ## RFC-0016 PRC-07 slice A: a variant's C layout
 import ./abstraction
@@ -22253,7 +22254,8 @@ func exprLocRoot(e: IRExpr): string =
   of iekIndex: exprLocRoot(e.arr)
   else: ""
 
-proc bindsViewWhole(s: IRStmt; names: var seq[string]): bool =
+proc bindsViewWholeShape(s: IRStmt; names: var seq[string];
+                         sh: var WriteShape): bool =
   ## RFC-0005 S8cn. `s` holds the memory of one of `names` in a way the walk
   ## takes for a copy. A local bound to a whole seq, Table or string: Nim's
   ## cursor inference (ARC/ORC) shares the memory when the local is never
@@ -22265,31 +22267,45 @@ proc bindsViewWhole(s: IRStmt; names: var seq[string]): bool =
   case s.kind
   of isBlock:
     for c in s.stmts:
-      if bindsViewWhole(c, names): return true
+      if bindsViewWholeShape(c, names, sh): return true
   of isIf:
     for b in s.branches:
-      if bindsViewWhole(b.body, names): return true
-    return bindsViewWhole(s.elseBody, names)
+      if bindsViewWholeShape(b.body, names, sh): return true
+    return bindsViewWholeShape(s.elseBody, names, sh)
   of isWhile:
-    return bindsViewWhole(s.wbody, names)
+    return bindsViewWholeShape(s.wbody, names, sh)
   of isTry:
-    if bindsViewWhole(s.tryBody, names): return true
+    if bindsViewWholeShape(s.tryBody, names, sh): return true
     for h in s.tryHandlers:
-      if bindsViewWhole(h.body, names): return true
-    return bindsViewWhole(s.tryFinally, names)
+      if bindsViewWholeShape(h.body, names, sh): return true
+    return bindsViewWholeShape(s.tryFinally, names, sh)
   of isLet:
     # A synthetic `let` is the walk's own (a `var` actual's temporary).
-    return s.lty != nil and not s.lname.startsWith("__sym_") and
-      s.lty.kind notin {itInt, itBool, itFloat32, itFloat64} and
-      exprLocRoot(s.lvalue) in names
+    if s.lty == nil or s.lname.startsWith("__sym_"): return false
+    if s.lty.kind in {itInt, itBool, itFloat32, itFloat64}:
+      # A scalar binding holds no memory of the container. The route lets it
+      # through; the table says which decline this shape's verdict carries.
+      sh = wsScalarRead
+      return routeDeclines(rrViewWhole, sh)
+    if s.lvalue != nil and s.lvalue.kind == iekTupleLit:
+      sh = wsTupleCopy   # a constructor copies what it is given
+      return routeDeclines(rrViewWhole, sh)
+    if exprLocRoot(s.lvalue) in names:
+      sh = wsVarCopy
+      return routeDeclines(rrViewWhole, sh)
+    return false
   of isIndex:
     if exprLocRoot(s.ixArr) in names:
-      if s.ixRetName.startsWith("__sym_fs_"): return true   # the `for` lowering
+      if s.ixRetName.startsWith("__sym_fs_"):   # the `for` lowering
+        sh = wsLentLoop
+        return routeDeclines(rrViewWhole, sh)
       if s.ixElemTy != nil and
          s.ixElemTy.kind notin {itInt, itBool, itFloat32, itFloat64}:
         names.add s.ixRetName
   of isTabKeys:
-    return exprLocRoot(s.tkRecv) in names
+    if exprLocRoot(s.tkRecv) in names:
+      sh = wsLentLoop
+      return routeDeclines(rrViewWhole, sh)
   # RFC-0016 K6c (W-10). No `else`: a statement kind is listed here as one that
   # binds no view of a container's memory, so a kind added to `IRStmtKind` does
   # not compile until its author decides (the fail-open `else: discard` this
@@ -22355,9 +22371,11 @@ proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
       if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
       return "the view by value (not modelled for a " & $vf.ty.kind & ")"
     var held = @[vf.name, sig.params[a.tabArg].name]
-    if bindsViewWhole(sig.body, held):
+    var heldShape = wsUnlisted
+    if bindsViewWholeShape(sig.body, held, heldShape):
       return "a local or a `for` holding the whole of one (Nim may share its " &
-             "memory or copy it, by what its cursor inference proved)"
+             "memory or copy it, by what its cursor inference proved) [" &
+             admitShape(rrViewWhole, heldShape).decline[1] & "]"
     w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: a.path,
                            ixs: @[a.key], bound: true, view: false,
                            slot: sig.params[a.tabArg].name)

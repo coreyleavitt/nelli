@@ -8,7 +8,7 @@
 ## private allowlist would not name the row. The structural half pins that
 ## every shape of every route reads a row or the absent `<route>/unlisted`
 ## key (the default is a decline).
-import std/[unittest, strutils, options]
+import std/[unittest, strutils, options, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/readonlyaxes
@@ -131,8 +131,89 @@ suite "E3b: the decline names the table's row":
                feGlobalRouteUnproved, tLabel("cond1_changed"),
                needle = "readonly:hookcopy/conditional: ")
 
+# ---- E3c: the escape and aliasing routes ------------------------------------
+type Pr = object
+  a: int
+  b: int
+var gq: ptr int
+proc leakVar(x: var int): ptr int = addr x
+proc keepFld(p: ptr Pr) = gq = addr p[].a
+proc keepViaVar(p: ptr int) = gq = leakVar(p[])
+proc sFld(v: int) =
+  symexAssume(v > -1000 and v < 1000)
+  var x = Pr(a: 1, b: 2)
+  keepFld(addr x)
+  gq[] = v
+  if x.a == v and v != 1: symexTarget("pf_live")
+proc sVia(v: int) =
+  symexAssume(v > -1000 and v < 1000)
+  var x = 1
+  keepViaVar(addr x)
+  gq[] = v
+  if x == v and v != 1: symexTarget("pv_live")
+
+template guardT(): untyped {.dirty.} =
+  if t0.len != 1 or "a" notin t0: return
+  let x = t0["a"]
+  if x > 1000 or x < -1000: return
+proc holdVar(v: var int; t: Table[string, int]; k: string): int =
+  var c = t
+  v = 77
+  c[k]
+proc sHoldVar(t0: Table[string, int]) =
+  guardT()
+  if x == 77: return
+  var t = t0
+  for k, v in t.mpairs:
+    if holdVar(v, t, k) == 77: symexTarget("hv_shared")
+proc holdLoop(v: var int; t: Table[string, int]; k: string): int =
+  var r = 0
+  for w in t.values:
+    v = 77
+    r = w
+  r
+proc sHoldLoop(t0: Table[string, int]) =
+  guardT()
+  if x == 77: return
+  var t = t0
+  for k, v in t.mpairs:
+    if holdLoop(v, t, k) == 77: symexTarget("hl_shared")
+proc holdNone(v: var int; t: Table[string, int]; k: string): int =
+  let c = t.getOrDefault("zz")
+  v = 77
+  t[k] + c
+proc sHoldNone(t0: Table[string, int]) =
+  guardT()
+  if x == 77: return
+  var t = t0
+  for k, v in t.mpairs:
+    if holdNone(v, t, k) == 77: symexTarget("hn_shared")
+
+suite "E3c: the decline names the table's row":
+  test "ptrformal: the address of a pointee's field, stored":
+    pinDecline(sFld, cellKey(axReadOnly, "ptrformal/field-addr"),
+               feUnsupportedExprKind, tLabel("pf_live"),
+               needle = "readonly:ptrformal/field-addr: ")
+  test "ptrformal: a pointee passed var to a callee returning its address":
+    pinDecline(sVia, cellKey(axReadOnly, "ptrformal/var-return"),
+               feUnsupportedExprKind, tLabel("pv_live"),
+               needle = "readonly:ptrformal/var-return: ")
+  test "viewwhole: a var copy, a lent loop":
+    pinDecline(sHoldVar, cellKey(axReadOnly, "viewwhole/var-copy"),
+               feUnsupportedOp, tLabel("hv_shared"),
+               needle = "readonly:viewwhole/var-copy: ")
+    pinDecline(sHoldLoop, cellKey(axReadOnly, "viewwhole/lent-loop"),
+               feUnsupportedOp, tLabel("hl_shared"),
+               needle = "readonly:viewwhole/lent-loop: ")
+  test "viewwhole: a scalar read is another path's decline (table order)":
+    # The route lets the shape through; the loop over `mpairs` is what
+    # declines, and it names the stdlib facet, not the route's row.
+    pinDecline(sHoldNone, cellKey(axReadOnly, "viewwhole/scalar-read"),
+               feTableIterOrder, tLabel("hn_shared"),
+               needle = "tables.Table/iterationOrder")
+
 suite "E3b: every shape reads the table":
-  const routes = [rrLent, rrHookCopy, rrHookStore]
+  const routes = [rrLent, rrHookCopy, rrHookStore, rrPtrFormal, rrViewWhole]
   test "a shape reads a row or the absent unlisted key":
     for r in routes:
       for s in WriteShape:
@@ -143,12 +224,21 @@ suite "E3b: every shape reads the table":
       let a = admitShape(r, wsUnlisted)
       check not a.admitted
       check a.decline[0] == some(feUnadmitted)
-  test "every row of the three mayWrite routes is read by some shape":
+  test "every row of every route is read by some shape":
     for k in readOnlyAxis.keys:
-      if k.startsWith("lent/") or k.startsWith("hookcopy/") or
-         k.startsWith("hookstore/"):
-        var read = false
-        for r in routes:
-          for s in WriteShape:
-            if shapeKey(r, s) == k: read = true
-        check read
+      var read = false
+      for r in routes:
+        for s in WriteShape:
+          if shapeKey(r, s) == k: read = true
+      check read
+  test "the route stops at a refused shape, except the table-order one":
+    check routeDeclines(rrViewWhole, wsVarCopy)
+    check routeDeclines(rrViewWhole, wsLentLoop)
+    check not routeDeclines(rrViewWhole, wsTupleCopy)
+    check not routeDeclines(rrViewWhole, wsScalarRead)
+    check routeDeclines(rrViewWhole, wsUnlisted)
+  test "the classifier names the address shapes":
+    check admitShape(rrPtrFormal, wsLocalUse).admitted
+    check admitShape(rrPtrFormal, wsGlobalStore).admitted
+    check not admitShape(rrPtrFormal, wsFieldAddr).admitted
+    check not admitShape(rrPtrFormal, wsVarReturn).admitted

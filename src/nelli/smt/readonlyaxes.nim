@@ -119,11 +119,15 @@ type
     rrLent          ## `mayWriteRoot`: the body of a `for` over a container
     rrHookCopy      ## `routeHookCopies`
     rrHookStore     ## `routeStoresThroughDeref`
+    rrPtrFormal     ## `ptrUsesStayLocal`: the uses of a `ptr` formal (E3c)
+    rrViewWhole     ## `bindsViewWhole`: a callee holding a container (E3c)
   WriteShape* = enum
     wsPlain, wsLocalWork, wsWalkedPure, wsGlobalRead, wsPragmaBlock,
     wsDerefStore, wsVarFormal, wsStdlibPointerArg, wsCastEmit, wsWalkedWrite,
     wsRecursiveWrite, wsOpaqueCallee, wsRecursivePure, wsProcValue,
     wsConditional, wsEarlyReturn, wsLoop,
+    wsLocalUse, wsGlobalStore, wsFieldAddr, wsVarReturn,   ## rrPtrFormal
+    wsTupleCopy, wsVarCopy, wsLentLoop, wsScalarRead,      ## rrViewWhole
     wsUnlisted      ## a node the classifier cannot name
 
 func routeSite*(r: ReadOnlyRoute): ReadOnlySite =
@@ -131,6 +135,8 @@ func routeSite*(r: ReadOnlyRoute): ReadOnlySite =
   of rrLent: rsLentBody
   of rrHookCopy: rsHookCopy
   of rrHookStore: rsHookStore
+  of rrPtrFormal: rsPtrFormal
+  of rrViewWhole: rsViewWhole
 
 func shapeKey*(route: ReadOnlyRoute; shape: WriteShape): string =
   ## The row `shape` reads on `route`. A pairing with no row is
@@ -151,7 +157,9 @@ func shapeKey*(route: ReadOnlyRoute; shape: WriteShape): string =
     of wsOpaqueCallee: "lent/opaque-callee"
     of wsRecursivePure: "lent/recursive-pure"
     of wsProcValue: "lent/proc-value"
-    of wsConditional, wsEarlyReturn, wsLoop, wsUnlisted: "lent/unlisted"
+    of wsConditional, wsEarlyReturn, wsLoop, wsUnlisted, wsLocalUse, wsGlobalStore, wsFieldAddr, wsVarReturn,
+       wsTupleCopy, wsVarCopy, wsLentLoop, wsScalarRead:
+      "lent/unlisted"
   of rrHookCopy:
     case shape
     of wsPlain: "hookcopy/plain"
@@ -164,7 +172,9 @@ func shapeKey*(route: ReadOnlyRoute; shape: WriteShape): string =
     of wsConditional: "hookcopy/conditional"
     of wsEarlyReturn: "hookcopy/early-return"
     of wsLoop: "hookcopy/loop"
-    of wsUnlisted: "hookcopy/unlisted"
+    of wsUnlisted, wsLocalUse, wsGlobalStore, wsFieldAddr, wsVarReturn,
+       wsTupleCopy, wsVarCopy, wsLentLoop, wsScalarRead:
+      "hookcopy/unlisted"
   of rrHookStore:
     case shape
     of wsPlain: "hookstore/plain"
@@ -174,9 +184,42 @@ func shapeKey*(route: ReadOnlyRoute; shape: WriteShape): string =
        wsProcValue: "hookstore/direct-store"
     of wsWalkedWrite, wsRecursiveWrite, wsOpaqueCallee, wsRecursivePure:
       "hookstore/walked-store"
-    of wsConditional, wsEarlyReturn, wsLoop, wsUnlisted: "hookstore/unlisted"
+    of wsConditional, wsEarlyReturn, wsLoop, wsUnlisted, wsLocalUse, wsGlobalStore, wsFieldAddr, wsVarReturn,
+       wsTupleCopy, wsVarCopy, wsLentLoop, wsScalarRead:
+      "hookstore/unlisted"
+  of rrPtrFormal:
+    case shape
+    of wsLocalUse: "ptrformal/local"
+    of wsGlobalStore: "ptrformal/global-store"
+    of wsFieldAddr: "ptrformal/field-addr"
+    of wsVarReturn: "ptrformal/var-return"
+    of wsPlain, wsLocalWork, wsWalkedPure, wsGlobalRead, wsPragmaBlock,
+       wsDerefStore, wsVarFormal, wsStdlibPointerArg, wsCastEmit,
+       wsWalkedWrite, wsRecursiveWrite, wsOpaqueCallee, wsRecursivePure,
+       wsProcValue, wsConditional, wsEarlyReturn, wsLoop, wsTupleCopy,
+       wsVarCopy, wsLentLoop, wsScalarRead, wsUnlisted: "ptrformal/unlisted"
+  of rrViewWhole:
+    case shape
+    of wsTupleCopy: "viewwhole/tuple-copy"
+    of wsVarCopy: "viewwhole/var-copy"
+    of wsLentLoop: "viewwhole/lent-loop"
+    of wsScalarRead: "viewwhole/scalar-read"
+    of wsPlain, wsLocalWork, wsWalkedPure, wsGlobalRead, wsPragmaBlock,
+       wsDerefStore, wsVarFormal, wsStdlibPointerArg, wsCastEmit,
+       wsWalkedWrite, wsRecursiveWrite, wsOpaqueCallee, wsRecursivePure,
+       wsProcValue, wsConditional, wsEarlyReturn, wsLoop, wsLocalUse,
+       wsGlobalStore, wsFieldAddr, wsVarReturn, wsUnlisted:
+      "viewwhole/unlisted"
 
 func admitShape*(route: ReadOnlyRoute; shape: WriteShape):
     Admit[ReadOnlyModel] =
   ## Whether `route` proves `shape` read-only: the table's answer.
   admitReadOnly(shapeKey(route, shape), routeSite(route))
+
+func routeDeclines*(route: ReadOnlyRoute; shape: WriteShape): bool =
+  ## Whether the route itself stops at `shape`. A refusal of kind
+  ## `feTableIterOrder` is not the route's: it lets the shape through and the
+  ## walk of the `Table` loop raises that decline (`viewwhole/scalar-read`).
+  ## A shape with no row declines (`feUnadmitted`).
+  let a = admitShape(route, shape)
+  not a.admitted and a.decline[0] != some(feTableIterOrder)

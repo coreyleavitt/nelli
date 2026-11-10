@@ -189,10 +189,10 @@ proc s9TwinClassA(x: int) =
 
 proc s9TwinClassB(x: int) =
   ## Two Class-B declines with one message, both reached.
-  var f = float(x)
-  f /= 2.0
-  f /= 2.0
-  if f > 1.0:
+  var qq = @[@[x, x]]
+  qq[0][x and 1] += 2
+  qq[0][x and 1] += 2
+  if qq[0][0] > 1:
     symexTarget("s9_twin_b")
 
 proc s9Clean(x: int) =

@@ -60,13 +60,24 @@ import nelli/smt/canonicalize
 # whole run to `sxUnknown`.
 proc closureDivMutate(t: var float) =
   let f = proc(s: float): int =
+    var r = @[@[s]]
+    r[0][0] *= 2.0  # a nested seq element LHS: a bare `mkUnsupported`
+    if r[0][0] == 10.0:
+      return 1
+    return 0
+  if f(t) == 1:
+    symexTarget("closure_concat")
+
+# RFC-0016 PRC-07 models float `/=`: the old vehicle decides exactly.
+proc closureDivModelled(t: var float) =
+  let f = proc(s: float): int =
     var r = s
     r /= 2.0
     if r == 5.0:
       return 1
     return 0
   if f(t) == 1:
-    symexTarget("closure_concat")
+    symexTarget("closure_div_modelled")
 
 # ---- SUT 2: a closure body whose internal call bails on maxCallDepth -------
 # `alwaysRecurse` has NO base case — every call recurses unconditionally, so
@@ -100,7 +111,12 @@ proc closureCleanCapture(x: int) =
 
 suite "symex SND-1b — closure ground-axiom path drops uncertain sub-paths (walker v39)":
 
-  test "SND-1b: `/=` dropped INSIDE a closure body degrades to sxUnknown (no false sxSat)":
+  test "PRC-07: float `/=` INSIDE a closure body is modelled: exact sxSat, witness 10.0":
+    let r = symexFind(closureDivModelled, tLabel("closure_div_modelled"))
+    check r.status == sxSat
+    check r.witness[0] / 2.0 == 5.0
+
+  test "SND-1b: a nested-seq element `*=` dropped INSIDE a closure body degrades to sxUnknown (no false sxSat)":
     let r = symexFind(closureDivMutate, tLabel("closure_concat"))
     check r.status == sxUnknown
     var sawBodyUncertain = false

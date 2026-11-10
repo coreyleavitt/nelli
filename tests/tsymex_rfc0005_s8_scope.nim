@@ -141,10 +141,20 @@ proc castDeadS8(x: int) =
 proc classBS8(x: int) =
   ## Class B: an augmented assignment outside the modelled set -- a marker
   ## with no parse record (its reach record is its only record).
+  ## (A NESTED seq element's LHS: `unwrapHidden(lhs[0])` is itself a
+  ## bracket expression, so no augmented-assign arm takes it. Float `/=` was
+  ## this exhibit until RFC-0016 PRC-07 modelled it.)
+  var qq = @[@[x, x]]
+  qq[0][x and 1] += 2
+  if qq[0][0] > 1:
+    symexTarget("s8_classb")
+
+proc floatDivAssignS8(x: int) =
+  ## The former Class B exhibit: float `/=` is modelled (PRC-07), no marker.
   var f = float(x)
   f /= 2.0
   if f > 1.0:
-    symexTarget("s8_classb")
+    symexTarget("s8_floatdiv")
 
 proc unsafeCastS8(x: int) =
   ## The `isUnsafeCast` sibling of Class A. A `cast` to a pointer type:
@@ -265,6 +275,14 @@ suite "RFC-0005 S8 (b) -- every decline names its scope; bucket 4 is the enumera
     check sc.len >= 1
     for s in sc: check s.kind == dskSiteAnchored
     check unplacedNames(r.errors) == bucket4
+
+  test "float `/=` is modelled: no Class B marker, an exact verdict":
+    let prog = progOf(floatDivAssignS8)
+    check prog.parseErrors.len == 0
+    let r = runSymex(prog, tLabel("s8_floatdiv"))
+    checkpoint($r.status & " " & show(r.errors))
+    check r.status == sxSat
+    check scopesOf(r.errors, feUnsupportedStmtKind).len == 0
 
   test "unsafe cast (site-anchored at the isUnsafeCast marker)":
     let prog = progOf(unsafeCastS8)

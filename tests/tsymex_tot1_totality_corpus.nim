@@ -224,23 +224,24 @@ proc corpusNestedTupleWitness(x: tuple[a: seq[Widget], n: int], y: int) =
 
 # ---- Surface 3: internal-fault / uncertain-taint (SND-1 / SND-1b / CR-1c) -
 
-# `acc /= 2.0` is a bare Class-B `mkUnsupported` statement (no accompanying
+# `q[0][0] *= 2.0` is a bare Class-B `mkUnsupported` statement (no accompanying
 # `sevError` parseError) — SND-1's `isUnsupported` taint-and-continue must
 # demote the downstream target to sxUnknown, never let the walk falsely
 # "solve" against the stale (un-divided) value.
 proc corpusDivAssignTaint(acc: var float) =
-  acc /= 2.0
-  if acc == 5.0:
+  var q = @[@[acc]]
+  q[0][0] *= 2.0  # a nested seq element LHS (float `/=` is modelled, PRC-07)
+  if q[0][0] == 10.0:
     symexTarget("div_assign_taint")
 
-# A closure body that drops a mutation via the same still-unsupported `/=`.
+# A closure body that drops a mutation via the same still-unsupported nested element `*=`.
 # `applyClosureGround` must skip axiomatizing an uncertain sub-path (SND-1b)
 # rather than assert a possibly-wrong ground fact for the rest of the run.
 proc corpusClosureBodyTaint(t: var float) =
   let f = proc(s: float): int =
-    var r = s
-    r /= 2.0
-    if r == 5.0:
+    var r = @[@[s]]
+    r[0][0] *= 2.0
+    if r[0][0] == 10.0:
       return 1
     return 0
   if f(t) == 1:
@@ -458,13 +459,13 @@ let corpus = @[
              status: rNestedTuple.status, errors: rNestedTuple.errors,
              expectedKind: feUnsupportedWitnessType, hasKindCheck: true),
 
-  CorpusItem(label: "SND-1: `acc /= 2.0` dropped-mutation taint",
+  CorpusItem(label: "SND-1: nested-seq element `*=` dropped-mutation taint",
              surface: "3. internal-fault / uncertain-taint",
              backstops: "SND-1 (isUnsupported taints Path.uncertain)",
              status: rDivAssign.status, errors: rDivAssign.errors,
              expectedKind: feUnsupportedOp, hasKindCheck: false),
 
-  CorpusItem(label: "SND-1b: closure body drops `/=` mutation",
+  CorpusItem(label: "SND-1b: closure body drops a nested-seq `*=` mutation",
              surface: "3. internal-fault / uncertain-taint",
              backstops: "SND-1b (applyClosureGround skips uncertain sub-paths)",
              status: rClosureBody.status, errors: rClosureBody.errors,

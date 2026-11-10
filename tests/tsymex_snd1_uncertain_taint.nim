@@ -64,9 +64,17 @@ proc concatMutate(t: var string) =
 # Untouched by M4 — still demonstrates the generic taint-and-continue
 # mechanism for an op M4 did not model.
 proc divMutate(acc: var float) =
+  var q = @[@[acc]]
+  q[0][0] *= 2.0  # a nested seq element LHS: still a bare `mkUnsupported`
+  if q[0][0] == 10.0:
+    symexTarget("div")
+
+# RFC-0016 PRC-07 models float `/=` (`x = x / y`), so the original vehicle
+# `acc /= 2.0` now decides exactly; kept as the positive pin.
+proc divModelled(acc: var float) =
   acc /= 2.0
   if acc == 5.0:
-    symexTarget("div")
+    symexTarget("div_modelled")
 
 # ---- SUT 3: target reached BEFORE the drop, same straight-line path --------
 # The target fires (and records its witness) BEFORE the drop occurs further
@@ -81,7 +89,8 @@ proc divMutate(acc: var float) =
 proc targetBeforeDrop(x: int, acc: var float) =
   if x == 5:
     symexTarget("before")
-  acc /= 2.0  # unrelated-drop-after-target
+  var q = @[@[acc]]
+  q[0][0] *= 2.0  # unrelated-drop-after-target
 
 # ---- SUT 4: branch isolation across an `isIf` merge -------------------------
 # Only the x==1 branch executes the unsupported `/=` drop; the x==5 branch
@@ -92,7 +101,8 @@ proc targetBeforeDrop(x: int, acc: var float) =
 # a still-unsupported drop.
 proc branchIsolation(x: int, acc: var float) =
   if x == 1:
-    acc /= 2.0  # drop-only-on-this-branch
+    var q = @[@[acc]]
+    q[0][0] *= 2.0  # drop-only-on-this-branch
   else:
     if x == 5:
       symexTarget("branch_clean")
@@ -105,9 +115,14 @@ suite "symex SND-1 — isUnsupported taints Path.uncertain (walker v38)":
     check r.witness[0] == "a"
     check r.witness[0] & "x" == "ax"  ## round-trips against real Nim `&`
 
-  test "SND-1: `acc /= 2.0; if acc == 5.0` degrades to sxUnknown (no false sxSat)":
+  test "SND-1: a nested-seq element `*=` drop then a compare degrades to sxUnknown (no false sxSat)":
     let r = symexFind(divMutate, tLabel("div"))
     check r.status == sxUnknown
+
+  test "PRC-07: `acc /= 2.0; if acc == 5.0` is modelled: exact sxSat, witness 10.0":
+    let r = symexFind(divModelled, tLabel("div_modelled"))
+    check r.status == sxSat
+    check r.witness[0] / 2.0 == 5.0
 
   test "SND-1 regression: target reached BEFORE the drop still yields a valid sxSat":
     let r = symexFind(targetBeforeDrop, tLabel("before"))

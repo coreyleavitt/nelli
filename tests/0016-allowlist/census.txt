@@ -121,6 +121,7 @@ platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):	K2a-fail	platfor
 platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):#3	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_checksoff.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
+platform:tests/tsymex_0016_fieldoff.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_k5a_fwrapv.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_k5b_cfg_fwrapv.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_k5a_profile.nim:when defined(linux): check buildSemantics.os == osLinux	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm

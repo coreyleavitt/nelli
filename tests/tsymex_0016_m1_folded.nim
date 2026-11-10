@@ -7,6 +7,7 @@ import std/[unittest, typetraits]
 import nelli/symex
 import nelli/smt/errorkind
 import ./s8cu_helpers
+import helpers/m1_ismain_sut   # SUTs in an imported module: isMainModule is false there
 
 type M1Obj = object
   x: int64
@@ -19,6 +20,19 @@ proc sAlignOf(a: int) =
 proc sOffsetOf(a: int) =
   const o = offsetof(M1Obj, y)
   if o == 8 and a == 3: symexTarget("hit")
+proc sOffsetOfLet(a: int) =
+  let o = offsetof(M1Obj, y)
+  if a == o: symexTarget("hit")
+proc sOffsetOfInline(a: int) =
+  if a == offsetof(M1Obj, y): symexTarget("hit")
+proc sOffsetOfAssign(a: int) =
+  var o = 0
+  o = offsetof(M1Obj, y)
+  if a == o: symexTarget("hit")
+proc sIsMainModule(a: int) =
+  if isMainModule and a == 3: symexTarget("hit")
+proc sIsMainModuleNot(a: int) =
+  if not isMainModule and a == 3: symexTarget("hit")
 proc sIs(a: int) =
   if (a is int) and not (a is string) and a == 3: symexTarget("hit")
 proc sTypeOf(a: int) =
@@ -87,7 +101,7 @@ proc sNewFinalizer(k: int) =
   b.v = k
   if b.v == 3: symexTarget("hit")
 
-const m1Dom = sampled([-3, 0, 2, 3, 4, 9])
+const m1Dom = sampled([-3, 0, 2, 3, 4, 8, 9])
 
 template foldedCell(sut: untyped; cell: static string) =
   test cell:
@@ -98,6 +112,13 @@ suite "M1: the folded magic rows, through symexFind":
   foldedCell(sSizeOf, "SizeOf")
   foldedCell(sAlignOf, "AlignOf")
   foldedCell(sOffsetOf, "OffsetOf")
+  foldedCell(sOffsetOfLet, "OffsetOf")
+  foldedCell(sOffsetOfInline, "OffsetOf")
+  foldedCell(sOffsetOfAssign, "OffsetOf")
+  foldedCell(sIsMainModule, "IsMainModule")
+  foldedCell(sutIsMainImported, "IsMainModule")
+  foldedCell(sutNotMainImported, "IsMainModule")
+  foldedCell(sIsMainModuleNot, "IsMainModule")
   foldedCell(sIs, "Is")
   foldedCell(sTypeOf, "TypeOf")
   foldedCell(sTypeTrait, "TypeTrait")

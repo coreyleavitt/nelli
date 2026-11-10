@@ -1,3 +1,2 @@
 # RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-magic:IsMainModule	W4-z	SOUNDNESS (W3-z M1): walker reports sxUnsat for `if isMainModule and a == 3: symexTarget("hit")` where the proc lives in the main module and the native run hits at a = 3; the cause is not yet traced (the walker may read the magic const's declared default, false). Not pinned: a wrong verdict. Needs a fix (fold isMainModule from the SUT module) before a pin

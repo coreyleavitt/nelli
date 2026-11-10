@@ -45,6 +45,7 @@ export choice
 import ./smt/dsl
 export dsl
 import ./smt/scan
+import ./smt/scan_kinds   ## RFC-0016 K2F-3: the shared scan kind lists
 import ./smt/impl_digest   ## RFC-0005 review R1-09
 import ./smt/replayproc   ## RFC-0005 S8ct
 import ./smt/replaywire   ## RFC-0005 S8ct
@@ -2832,12 +2833,19 @@ proc typeMayHaveHook(t: NimNode; seen: var seq[string]): bool =
     result = fileDeclaresHook(at.filename)
     if not result: result = typeMayHaveHook(impl[2], seen)
     typeHookMemo[key] = result
-  of nnkIdent, nnkEmpty, nnkNilLit, nnkIntLit .. nnkFloat64Lit,
-     nnkStrLit .. nnkTripleStrLit:
+  of nnkIdent, nnkEmpty, nnkNilLit, nnkCharLit .. nnkFloat128Lit,
+     nnkStrLit .. nnkTripleStrLit, nnkType, nnkCommentStmt:
     discard
-  else:
+  of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes + {nnkRecList,
+     nnkRecCase, nnkRecWhen, nnkOfInherit, nnkEnumFieldDef}:
+    # RFC-0016 K2F-3: a type's structure, or an expression inside one (a range
+    # bound): a hook is a type symbol's, read above.
     for c in t:
       if typeMayHaveHook(c, seen): return true
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a type shape not listed may hold a
+    # program type this scan cannot see.
+    return true
 
 proc isImportedVar(n: NimNode): bool =
   ## RFC-0005 S8ct. `n` is a C variable, as opposed to storage of this program.
@@ -2857,6 +2865,12 @@ proc isImportedVar(n: NimNode): bool =
 proc markOpen(acc: var RoutineFootprint; why: string) =
   acc.open = true
   if acc.why.len == 0: acc.why = why
+
+proc unlistedOpen(acc: var RoutineFootprint; n: NimNode; owner: string) =
+  ## RFC-0016 K2F-3. A node kind `scanFootprint` does not list: what it may
+  ## reach is not named, so the replay declines.
+  acc.markOpen("a `" & $n.kind & "` in `" & owner & "`, which the footprint " &
+               "does not read")
 
 proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
                    acc: var RoutineFootprint) =
@@ -2952,7 +2966,10 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
           acc.markOpen("`" & n.strVal & "`, a type whose module declares a hook")
     else:
       if symKind(n) in userRoutineSymKinds: acc.callees.add n
-  of nnkCall, nnkCommand:
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    # RFC-0016 K2F-3: every call syntax, an operator's and a converter's too:
+    # its result is a temporary just the same.
     if user and n.len > 0 and n[0].kind == nnkSym and
        symKind(n[0]) in userRoutineSymKinds:
       # RFC-0005 batch 11. A call's result is a value no variable need hold.
@@ -2997,7 +3014,16 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
       let emits = p.kind == nnkExprColonExpr and
                   p[0].kind in {nnkIdent, nnkSym} and p[0].strVal == "emit"
       if emits and user: acc.markOpen("`emit` in `" & owner & "`")
+  of mayScanLeafKinds:
+    discard
+  of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes - {nnkCall,
+     nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv, nnkPragma}:
+    for c in n: scanFootprint(c, user, owner, selfKey, acc)
   else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a kind not listed may reach state the
+    # footprint does not name.
+    if user: acc.unlistedOpen(n, owner)
     for c in n: scanFootprint(c, user, owner, selfKey, acc)
 
 proc isRuntimeCode(impl: NimNode): bool =

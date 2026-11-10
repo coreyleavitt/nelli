@@ -39,6 +39,7 @@
 import std/macros
 import std/tables
 import std/sets
+import ./scan_kinds   ## RFC-0016 K2F-3
 from ./types import globalEnvPrefix
 
 type
@@ -234,6 +235,17 @@ proc claimDecl(n: NimNode) =
 
 proc claimRoutine*(routine: NimNode)
 
+proc claimScopedNames*(n: NimNode)
+
+proc unlistedClaim(n: NimNode) =
+  ## RFC-0016 K2F-3. A node kind `claimScopedNames` does not list: its
+  ## children are claimed as a structural kind's, and a symbol it holds
+  ## directly is claimed as a declaration, which can only rename it (a fresh
+  ## name is never wrong; a shared one is).
+  for c in n:
+    if c.kind == nnkSym: claimDecl(c)
+    else: claimScopedNames(c)
+
 proc claimScopedNames*(n: NimNode) =
   ## Claim, in source (pre-)order, every declaration in `n` that shares the
   ## current scope's env: `let`/`var` names (incl. tuple unpacking),
@@ -249,13 +261,30 @@ proc claimScopedNames*(n: NimNode) =
     for i in 0 ..< n.len - 2: claimDecl(n[i])
     claimScopedNames(n[n.len - 1])
   of nnkForStmt:
-    for i in 0 ..< n.len - 2: claimDecl(n[i])
+    # RFC-0016 K2F-3: a `for (k, v) in` tuple holds only names (no type or
+    # value slot, as a `let` tuple's), so each is claimed. `claimDecl` read
+    # it as a `let` tuple and left its last two names unclaimed: the loop's
+    # `v` shared an outer `v`'s slot and overwrote it.
+    for i in 0 ..< n.len - 2:
+      if n[i].kind == nnkVarTuple:
+        for c in n[i]: claimDecl(c)
+      else:
+        claimDecl(n[i])
     claimScopedNames(n[n.len - 2])
     claimScopedNames(n[n.len - 1])
   of nnkLambda, nnkDo:
     claimRoutine(n)
-  else:
+  of nnkSym, mayScanLeafKinds, mayScanNoCodeKinds - {nnkTypeSection}:
+    # RFC-0016 K2F-3: no declaration of an env slot. (`nnkTypeSection` is
+    # listed above.)
+    discard
+  of mayScanStructuralKinds - {nnkIdentDefs, nnkVarTuple, nnkConstDef,
+                               nnkForStmt} - RoutineNodes:
     for c in n: claimScopedNames(c)
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a kind not listed may declare a name
+    # this scope shares.
+    unlistedClaim(n)
 
 proc claimRoutine*(routine: NimNode) =
   ## Claim a routine's formal params (first, so they keep their spelling)

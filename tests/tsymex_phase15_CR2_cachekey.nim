@@ -1149,7 +1149,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## 310->311.
     ## RFC-0016 K2F-1 (the "may" analyses answer "may" for what they did not
     ## read; a writing magic in a `lent` loop body declines): 311->312.
-    check symexWalkerVersion == "312"
+    ## RFC-0016 K2F-3 (the footprint and effect scanners over-approximate
+    ## what they did not read; a call through a proc value in an opaque body
+    ## writes any variable): 312->313.
+    check symexWalkerVersion == "313"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

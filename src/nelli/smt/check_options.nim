@@ -49,6 +49,7 @@ import ./buildprofile
 import ./errorkind
 import ./admission     ## RFC-0016 ADM-IR: `Admit`
 import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`
+import ./scan_kinds    ## RFC-0016 K2F-3: the shared scan kind lists
 export buildprofile.CheckOption   ## moved to buildprofile (RFC-0016 W1-c1a)
 
 {.warning[Deprecated]: off.}   # `NimNode.owner`: no replacement in 2.2.10
@@ -361,6 +362,10 @@ proc scanInclude(sc: var Scanner; n: NimNode) =
     return
   scanFile(sc, path, text)
 
+const unlistedImport = "\0unknown-import"
+  ## RFC-0016 K2F-3. An import whose path the scan cannot read: the module's
+  ## options are unknown (`noteImport`, `recordImports`).
+
 proc importedNames(n: NimNode; into: var seq[string]) =
   case n.kind
   of nnkIdent, nnkSym, nnkStrLit, nnkRStrLit, nnkTripleStrLit:
@@ -373,7 +378,15 @@ proc importedNames(n: NimNode; into: var seq[string]) =
     if n.len == 2: importedNames(n[1], into)
   of nnkBracket:
     for c in n: importedNames(c, into)
-  else: discard
+  of nnkPragmaExpr:
+    # RFC-0016 K2F-3: `import ./m {.all.}`. Dropped before, so a push the
+    # import was under did not leak into `m`.
+    if n.len > 0: importedNames(n[0], into)
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): an import shape not listed. Its name
+    # cannot be read, so the leak lands on the empty name, which no module
+    # has: `unlistedImport` makes the module's options unknown instead.
+    into.add unlistedImport
 
 proc noteImport(sc: var Scanner; n: NimNode) =
   ## What is pushed here reaches a module first compiled by this import, and what
@@ -385,7 +398,13 @@ proc noteImport(sc: var Scanner; n: NimNode) =
     for c in n: importedNames(c, names)
   elif n.len > 0:
     importedNames(n[0], names)
-  for nm in names: sc.res.importLeak.add (name: nm, opts: opts)
+  for nm in names:
+    if nm == unlistedImport:
+      if sc.res.unknown.len == 0:
+        sc.res.unknown = "an import under a push whose module cannot be named: `" &
+                         n.repr & "`"
+      continue
+    sc.res.importLeak.add (name: nm, opts: opts)
 
 proc isOwnSource(path: string): bool =
   ## Nelli itself: `src/nelli.nim` and everything under `src/nelli/`.
@@ -404,6 +423,7 @@ proc isLibraryFile(path: string): bool =
 
 proc importPathOf(n: NimNode): string =
   ## `a`, `./a`, `../a`, `a/b`, `"a.nim"`; "" for a bracket or an `as`.
+  ## RFC-0016 K2F-3: `a {.all.}` is `a`; any other shape is `unlistedImport`.
   case n.kind
   of nnkInfix:
     if n.len == 3 and nameOf(n[0]) == "as": importPathOf(n[1])
@@ -413,7 +433,14 @@ proc importPathOf(n: NimNode): string =
       let b = includePathOf(n[1])
       if b.len > 0: "../" & b else: ""
     else: includePathOf(n)
-  else: includePathOf(n)
+  of nnkPragmaExpr:
+    if n.len > 0: importPathOf(n[0]) else: unlistedImport
+  of nnkIdent, nnkSym, nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    includePathOf(n)
+  of nnkBracket:
+    ""    # `recordImports` reads `a/[b, c]` itself
+  else:
+    unlistedImport
 
 proc recordImports(sc: var Scanner; n: NimNode) =
   ## The user modules this file imports, for the import graph.
@@ -422,6 +449,9 @@ proc recordImports(sc: var Scanner; n: NimNode) =
     for c in n:
       if c.kind == nnkInfix and c.len == 3 and c[2].kind == nnkBracket:
         let head = importPathOf(c[1])
+        if head == unlistedImport:
+          rels.add unlistedImport
+          continue
         for b in c[2]:
           let tail = includePathOf(b)
           if head.len > 0 and tail.len > 0: rels.add head & "/" & tail
@@ -431,6 +461,12 @@ proc recordImports(sc: var Scanner; n: NimNode) =
     rels.add importPathOf(n[0])
   let dir = sc.including[^1].parentDir
   for rel in rels:
+    if rel == unlistedImport:
+      # RFC-0016 K2F-3: an import edge the graph cannot draw; an importer it
+      # would reach is not read, so the module's options are unknown.
+      if sc.res.unknown.len == 0:
+        sc.res.unknown = "an import whose module cannot be named: `" & n.repr & "`"
+      continue
     if rel.len == 0 or rel.startsWith("std/") or rel.startsWith("system/"): continue
     let name = if rel.endsWith(".nim"): rel else: rel & ".nim"
     var found = ""
@@ -492,6 +528,13 @@ proc walkWhen(sc: var Scanner; n: NimNode) =
   sc.ambiguous = ambiguous
   sc.pending = true
 
+proc unlistedStatement(sc: var Scanner; n: NimNode) =
+  ## RFC-0016 K2F-3. A module-level statement `walk` does not list: the
+  ## module's options are unknown (each check reads as possibly off).
+  if sc.res.unknown.len == 0:
+    sc.res.unknown = "a module-level `" & $n.kind & "` the check scan does " &
+                     "not read at line " & $n.lineInfoObj.line
+
 proc walk(sc: var Scanner; n: NimNode) =
   case n.kind
   of nnkStmtList, nnkStmtListExpr:
@@ -508,8 +551,11 @@ proc walk(sc: var Scanner; n: NimNode) =
   of nnkImportStmt, nnkImportExceptStmt, nnkFromStmt:
     noteImport(sc, n)
     recordImports(sc, n)
-  of nnkCall, nnkCommand, nnkCallStrLit:
+  of nnkCall, nnkCommand, nnkCallStrLit, nnkIdent, nnkSym, nnkAccQuoted,
+     nnkDotExpr, nnkInfix, nnkPrefix, nnkPostfix, nnkBracketExpr:
     # A call statement before a pop the scan cannot match may be what pushed.
+    # RFC-0016 K2F-3: so may a call spelled without parentheses (`pushOff`,
+    # `x.pushOff`, an operator), which the scan skipped.
     if not sc.candOpen:
       let li = n.lineInfoObj
       let file = sc.res.visits[sc.visit].file
@@ -528,8 +574,41 @@ proc walk(sc: var Scanner; n: NimNode) =
   of nnkBlockStmt, nnkIfStmt, nnkElifBranch, nnkElse, nnkTryStmt, nnkExceptBranch,
      nnkFinally, nnkForStmt, nnkWhileStmt, nnkCaseStmt, nnkOfBranch, nnkStaticStmt:
     for c in n: walk(sc, c)
-  else:
+  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkConverterDef, nnkMethodDef,
+     nnkTypeSection, nnkVarSection, nnkLetSection, nnkConstSection,
+     nnkCommentStmt, nnkEmpty, nnkDiscardStmt, nnkAsgn, nnkExportStmt,
+     nnkMixinStmt, nnkBindStmt, nnkUsingStmt, nnkReturnStmt, nnkBreakStmt,
+     nnkContinueStmt, nnkRaiseStmt, nnkDefer, nnkAsmStmt, nnkYieldStmt,
+     nnkStrLit .. nnkTripleStrLit, nnkCharLit .. nnkFloat128Lit, nnkNilLit,
+     nnkPar, nnkTupleConstr, nnkBracket, nnkCurly, nnkTableConstr, nnkObjConstr,
+     nnkExprColonExpr, nnkExprEqExpr, nnkCast, nnkLambda, nnkDo, nnkVarTuple,
+     nnkRange, nnkIfExpr, nnkElifExpr, nnkElseExpr, nnkTypeOfExpr,
+     nnkPragmaExpr:
+    # RFC-0016 K2F-3: no check pragma at this module's level. A routine's
+    # body is its own: a push in it declines by its statement (the parser).
+    # An expression (a condition, a loop's range, a pattern) pushes nothing.
     discard
+  of nnkBlockExpr:
+    for c in n: walk(sc, c)
+  of nnkPragmaBlock:
+    # RFC-0016 K2F-3: `{.cast(gcsafe).}: ...` runs its body here; a check
+    # option on the block itself holds for the block only, which this scan
+    # does not model.
+    var checks = false
+    if n.len > 0 and n[0].kind == nnkPragma:
+      for it in n[0]:
+        let nm = if it.kind == nnkExprColonExpr: nameOf(it[0]) else: nameOf(it)
+        if checksNamed(nm) != {}: checks = true
+    if checks:
+      if sc.res.unknown.len == 0:
+        sc.res.unknown = "a check option on a pragma block at " &
+                         $n.lineInfoObj.line
+    elif n.len > 1:
+      walk(sc, n[1])
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a module-level statement this scan
+    # does not list may hold a check pragma it does not see.
+    unlistedStatement(sc, n)
 
 const maxForkConds = 4
   ## `when c: {.push ....}` then `when c: {.pop.}` balance in each world, not in
@@ -647,10 +726,16 @@ proc touchesFloat(n: NimNode): bool =
     of nskProc, nskFunc, nskConverter, nskMethod:
       typeHasFloat(n.getType, false)
     else: false
-  else:
+  of mayScanLeafKinds - {nnkFloatLit .. nnkFloat64Lit}:
+    false
+  of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes:
     for c in n:
       if touchesFloat(c): return true
     false
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a kind not listed may compute with
+    # floats (`asm` included), so the float checks may matter to it.
+    true
 
 var moduleScans {.compileTime.}: Table[string, ModuleScan]
 var runLeaks {.compileTime.}: seq[tuple[root, name: string; opts: set[CheckOption]]]

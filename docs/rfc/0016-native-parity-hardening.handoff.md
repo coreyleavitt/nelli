@@ -1417,6 +1417,25 @@
     (`ubTailUnverified`), now pinned with pinUndefined. Precision follow-up:
     a replay that knows the proc value's routine could lift it, which
     `witnessUndefined` does not allow today.
+  - W3-z R7 (`rfc-0016-w3z-r7`, walker 341 to 342, the int2 precision
+    follow-up): a replay-confirmed sxSat names the routine a module-level
+    proc-valued variable held on the replayed run. The opaque scan keeps the
+    variable (`OpaqueScan.via`, `IRStmt.opaqueUndefinedVia`) apart from the
+    body's fixed kinds (`opaqueUndefinedFixed`); the path carries the kinds
+    only it put there (`Path.undefinedViaOnly`, `SatCandidate.
+    witnessUndefinedViaOnly`) and the tail walk goes on past such a call. The
+    settle (`symex.nim`'s `emitProcValueLift`) reads, in the host before the
+    child starts, each variable's routine, and replaces those kinds by what
+    its body (and any routine the run's code assigns to it) may reach, only
+    when the replay footprint is closed, every use of the variable in it is
+    a call, a comparison or an assignment of a routine symbol, and every
+    proc value the run's state holds names a footprint routine (a scratch
+    wire). PRC-02 `reexec/procValueGlobal` is exact again; an `overflowChecks:
+    off` routine in the variable (`procValueGlobalUnchecked`) and one the run
+    assigns before the call (`procValueReassigned`) carry
+    `ubSignedOverflow`; a closure with an environment and a nil value lift
+    nothing. A closure-typed variable still stops at `feGlobalRouteUnproved`
+    before any replay (not R7's).
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **W3-z E4b (`rfc-0016-w3z-evidence4b`):** the soundness rows SND-01..06, SND-08..11, PRC-27 and CRH-02 leave `closed-legacy.txt`: their pre-K9 suites now call `pinExact`/`pinDecline` beside every existing assertion (records keyed to the magic cell the fix lives on where one exists, else to a `family:callshape` cell). A closed row cannot name a declined cell, so SND-06 (`magic:ProcCall`), CRH-02 (`magic:GCref`) and the decline-only rows carry the pin file, not the cell. PRC-01 and PRC-02 are pinned on Linux (`pinExact` under `-d:nelliReplayReexec`, the same marshalling path as Windows); their legacy entries said the suites skip on Linux, which has been false since PRC-01 and PRC-02m. PRC-41 and PRC-42 are homed at W4-z (the id the other open precision rows use; the Wave 4 table's "W-32 and the precision rows" line has no slice id). `closed-legacy.txt` is 24 rows.
 - **W3-z E2c (`rfc-0016-w3z-evidence2c`):** the construct axis grows 61 -> 70 cells. `k8a-gen/DivLit` and `k8a-gen/Udiv` ship exact records from two hand-seeded sat-by-construction anchor programs (`anchorPrograms`, ids from 1000000, in the batch that starts the stream), whatever the seed or count. The six sampled-unsat-only keys gain an exhaustive (int8/uint8) or sat-sibling pin and become modelled cells. `threads/createThread` is a declined cell (`pinDecline`, `feUnsupportedOp`). Not cells: `hook/=trace/cycleCollector` and `hook/=destroy/dynamicSubtype` (walker faults, `coerceIntLit`, P6: a fault is not a decline) and `quit/afterTarget/assertCoveredBy` (a clean `sxSat`; the host ends at the splat, INT-22): they stay `skipCell`.

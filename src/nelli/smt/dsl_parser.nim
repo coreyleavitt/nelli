@@ -935,7 +935,8 @@ proc emitStmt*(s: IRStmt): NimNode =
               # the defect names and a bit mask (`ubSetOf`/`ubMaskOf`); a
               # `set[UbKind]` literal does not.
               newCall(bindSym"replayScan", newLit(s.opaqueDefects),
-                      newLit(ubMaskOf(s.opaqueUndefined))),
+                      newLit(ubMaskOf(s.opaqueUndefinedFixed)),
+                      newLit(s.opaqueUndefinedVia)),   # RFC-0016 W3-z R7
               newLit(s.opaqueInert),
               newLit(s.opaqueHavoc),   ## RFC-0005 S8as, same trap
               emitIRTypeSeq(s.opaqueHeapTys),   ## RFC-0005 S8ax, same trap
@@ -4645,6 +4646,17 @@ proc hierarchyConv(n, operand: NimNode): tuple[isHier: bool;
     tgtTy, tgtPointee: IRType; srcChain, tgtChain: seq[string]]
   ## RFC-0016 K2F-3 fwd decl
 
+var procValueSites* {.compileTime.}: Table[string, NimNode]
+  ## RFC-0016 W3-z R7. The module-level proc-valued variables an opaque body
+  ## calls through (`OpaqueScan.via`), by their IR name (`globalIRName`): the
+  ## replay settle reads each one's value on the run it confirms.
+
+proc isProcValueSite(f: NimNode): bool =
+  ## RFC-0016 W3-z R7. `f`, the head of a call, is a module-level `var` of a
+  ## proc type (a `{.global.}` of a routine is not: it is the routine's own).
+  f.kind == nnkSym and symKind(f) == nskVar and f.typeKind == ntyProc and
+    owner(f).kind == nnkSym and symKind(owner(f)) == nskModule
+
 proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
                        seen: var seq[NimNode]; depth: int; ctx: ParseCtx;
                        owner: NimNode; memo: var FloatCheckMemo) =
@@ -4818,6 +4830,15 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
           # RFC-0016 K10b: and may do anything, so the gate's answer is "may
           # be undefined" (row `call/opaqueBody`).
           addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+    elif isProcValueSite(f):
+      # RFC-0016 W3-z R7. A module-level proc-valued variable: any code at
+      # all here, as below, but a replay knows which routine the variable
+      # held on its run (`symex.nim`'s `procValueLift`), so the gate's
+      # answer names the variable instead of the bare kind.
+      add anyDefect
+      let key = globalIRName(f)
+      procValueSites[key] = f
+      scan.noteVia key, admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
     elif f.kind != nnkSym or f.symKind notin {nskTemplate, nskMacro}:
       # A closure or a routine-valued variable: any code at all.
       if f.typeKind in {ntyProc, ntyVar} or f.kind != nnkSym:
@@ -4880,6 +4901,12 @@ proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
     result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
     return
   scanOpaqueDefects(impl[6], result, seen, 0, ctx, impl, memo)
+proc routineUndefinedKinds*(r: NimNode): set[UbKind] =
+  ## RFC-0016 W3-z R7. What the gate's scan says the routine `r`'s body may
+  ## reach (`opaqueDefectScan`), a call through a proc-valued variable in it
+  ## included (`ubTailUnverified`): what a call that ran `r` contributes.
+  opaqueDefectScan(r, newParseCtx()).undefinedKinds
+
 proc hasVarFormal(impl: NimNode): bool =
   ## RFC-0005 S8bl (item 1). `impl` declares a `var` parameter.
   if impl == nil or impl.kind notin walkableRoutineKinds: return false

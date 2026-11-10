@@ -2403,6 +2403,10 @@ type ReplayFootprint = object
   dispatched: seq[NimNode]
     ## RFC-0016 PRC-02b. The methods the code calls through a dispatcher: the
     ## dispatchers the table is asked about (`methodDispatchRefusal`).
+  userRoutines: seq[NimNode]
+    ## RFC-0016 W3-z R7. Every routine of the program the scan read, nested
+    ## and generic ones included: the code a replay may run that can name a
+    ## module-level variable (`procValueUses`).
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -3114,6 +3118,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     if key in seen: continue
     seen.add key
     routines.add r
+    if not isStdlibDecl(r): result.userRoutines.add r
     if symKind(r) == nskMethod: result.methods.add r
     let f = routineFootprint(r)
     for d in f.dispatched: result.dispatched.add d
@@ -3577,8 +3582,32 @@ func candidateLossy*(c: SatCandidate): bool =
     if e.kind == feExtractionFailed: return true
   false
 
+type ProcValueLift = object
+  ## RFC-0016 W3-z R7. What the replayed run's proc-valued variables held
+  ## (`emitProcValueLift`): `named`, every variable the walk reported
+  ## (`RawResult.procValueSites`) held, when the run started, a routine of
+  ## the replay's footprint, and no code the run may execute writes it but
+  ## with a routine named there, while every proc value the run's state holds
+  ## is one of the footprint's routines (so no code the scan did not read can
+  ## run); `kinds`, what those routines' bodies may reach
+  ## (`routineUndefinedKinds`). Not `named`: nothing is replaced.
+  named: bool
+  kinds: set[UbKind]
+
+func liftedUndefined(c: SatCandidate; lift: ProcValueLift): set[UbOrdinal] =
+  ## RFC-0016 W3-z R7. The confirmed claim's `witnessUndefined`: the kinds only
+  ## a call through a proc-valued variable put there
+  ## (`witnessUndefinedViaOnly`, "may be undefined": the variable may hold any
+  ## routine of its type) are replaced by what the routines the replayed run's
+  ## variables held reach. Run-dependent by construction: it reads the state
+  ## the replay ran from.
+  if not lift.named or c.witnessUndefinedViaOnly == {}:
+    return c.witnessUndefined
+  (c.witnessUndefined - c.witnessUndefinedViaOnly) + ubOrdinals(lift.kinds)
+
 proc settleCandidate(raw: RawResult; c: SatCandidate;
-                     replayed: ReplayResult; input: string): RawResult =
+                     replayed: ReplayResult; input: string;
+                     lift: ProcValueLift): RawResult =
   ## RFC-0005 S10 (§2.3 rule 3). Applies ONE candidate's replay to the
   ## `sxUnknown` result `raw`, by its `outcome`:
   ##   * `roConfirmed` -- the verdict becomes the candidate's claim
@@ -3622,7 +3651,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   result.soundness    = Soundness(pathTaint: c.pathTaint,
                                   buildSegment: raw.soundness.buildSegment,   # RFC-0016 K5a
                                   buildRow: raw.soundness.buildRow,
-                                  witnessUndefined: c.witnessUndefined,   # RFC-0016 W1-d3
+                                  witnessUndefined: liftedUndefined(c, lift),   # RFC-0016 W1-d3, W3-z R7
                                   runTaint: runTaintOf(result.errors),
                                   replay: replayed.replayStatus,
                                   witnessUnsafe: c.witnessUnsafe or replayed.endsChild,   # RFC-0016 WA-B (S4)
@@ -3716,9 +3745,191 @@ proc markLossyWinnerUnreplayed(raw: RawResult; staticLossy: bool): RawResult =
     result.soundness.replay = rsUnconfirmed
     result.errors.add winnerUnreplayedHint(rawClaimText(raw))
 
+proc procValueCode[T: proc](x: T): pointer =
+  ## RFC-0016 W3-z R7. The routine a proc value names, as the address the
+  ## replay's routine table holds; nil for a nil value and for a closure with
+  ## a captured environment (which names no routine of the table).
+  if x.isNil: return nil
+  when sizeof(T) > sizeof(pointer):
+    if rawEnv(x) != nil: return nil
+    rawProc(x)
+  else:
+    cast[pointer](x)
+
+proc procValueUses(n, g: NimNode; assigned: var seq[NimNode]): bool =
+  ## RFC-0016 W3-z R7. Every use of the module-level variable `g` in `n` is
+  ## one the replay settle understands: a call through it, a comparison of it
+  ## (`==`, `!=`, `isNil`), or an assignment of a routine's own symbol to it
+  ## (added to `assigned`). Anything else (an address taken, a `var`
+  ## argument, an assignment of any other value, a read into another
+  ## variable) is false: what `g` holds at a call is then not known.
+  proc isG(x: NimNode): bool =
+    var x = x
+    while x.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and x.len > 0:
+      x = x[^1]
+    x.kind == nnkSym and x == g
+  case n.kind
+  of nnkSym:
+    return n != g
+  of nnkAsgn, nnkFastAsgn:
+    if n.len == 2 and isG(n[0]):
+      var v = n[1]
+      while v.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+            v.len > 0:
+        v = v[^1]
+      if v.kind == nnkSym and symKind(v) in procValueSymKinds:
+        assigned.add v
+        return true
+      return false
+  of nnkCallKinds:
+    if n.len > 0 and isG(n[0]):
+      for i in 1 ..< n.len:
+        if not procValueUses(n[i], g, assigned): return false
+      return true
+    if n.len > 0 and n[0].kind == nnkSym and
+       n[0].strVal in ["==", "!=", "isNil"]:
+      for i in 1 ..< n.len:
+        if not isG(n[i]) and not procValueUses(n[i], g, assigned):
+          return false
+      return true
+  else: discard
+  for c in n:
+    if not procValueUses(c, g, assigned): return false
+  true
+
+var routineUndefinedMemo {.compileTime.}: Table[string, set[UbKind]]
+
+proc routineUndefinedMemoised(r: NimNode): set[UbKind] =
+  ## RFC-0016 W3-z R7. `routineUndefinedKinds`, once per routine.
+  let key = routineKey(r)
+  if key notin routineUndefinedMemo:
+    routineUndefinedMemo[key] = routineUndefinedKinds(r)
+  routineUndefinedMemo[key]
+
+proc formalsShape(t: NimNode): string =
+  ## RFC-0016 W3-z R7. A proc type's formals and result, without its calling
+  ## convention: a nimcall routine converts to a closure type of the same
+  ## shape, so the two hold the same routines.
+  if t.kind == nnkProcTy and t.len > 0 and t[0].kind == nnkFormalParams:
+    var parts: seq[string]
+    for i in 0 ..< t[0].len:
+      let d = t[0][i]
+      if d.kind == nnkIdentDefs:
+        for _ in 0 ..< d.len - 2: parts.add d[^2].repr
+      else: parts.add d.repr
+    parts.join("|")
+  else: "?" & t.repr
+
+proc emitProcValueLift(fn: NimNode; keys: seq[string]; sites: NimNode): NimNode =
+  ## RFC-0016 W3-z R7. An expression of type `ProcValueLift`: which routine
+  ## each proc-valued variable the walk reported (`sites`, the run's
+  ## `RawResult.procValueSites`) held when the replay ran, read in the host
+  ## before the child starts (a forked child copies the host; a re-executed
+  ## one is handed these values), and what the routine's body may reach.
+  ##
+  ## A variable's value at the run's start is the routine a call through it
+  ## runs when no code the run may execute writes it otherwise: the code is
+  ## the replay's footprint (`replayFootprint`; open, nothing is named), every
+  ## use of the variable in it is a call, a comparison, or an assignment of a
+  ## routine's symbol (`procValueUses`), whose routine joins the variable's,
+  ## and the run cannot reach code the footprint did not read, which holds
+  ## when every proc value the run's state holds names a routine of the
+  ## footprint: the state is written to a scratch wire whose routine table is
+  ## the footprint's (`replaywire.nim`, the check a re-executed child's hand-
+  ## over makes), and a value it cannot carry (a closure with an
+  ## environment, a routine the code does not name) names nothing. `keys`
+  ## are the variables the SUT's IR names (`irCollectProcValueSites`); a
+  ## reported variable with no reading here names nothing either.
+  let liftT = bindSym"ProcValueLift"
+  if keys.len == 0:
+    return quote do: `liftT`()
+  let fp = replayFootprint(fn)
+  if fp.open:
+    return quote do: `liftT`()
+  for g in fp.globals:
+    if not isWireableType(g.getTypeInst):
+      return quote do: `liftT`()
+  let okId = genSym(nskVar, "procValuesNamed")
+  let ksId = genSym(nskVar, "procValueKinds")
+  let siteId = genSym(nskForVar, "procValueSite")
+  let codeId = genSym(nskLet, "procValueCode")
+  let wr = genSym(nskVar, "procValueWire")
+  var regItems = nnkBracket.newTree()
+  for r in fp.routines:
+    regItems.add quote do:
+      (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
+       else: pointer(nil))
+  let registry =
+    if regItems.len == 0: quote do: newSeq[pointer]()
+    else: quote do: @`regItems`
+  var putGlobals = newStmtList()
+  for g in fp.globals:
+    putGlobals.add quote do:
+      wirePut(`wr`, `g`)
+  let codeOf = bindSym"procValueCode"
+  let setOf = bindSym"ubSetOf"
+  var caseStmt = nnkCaseStmt.newTree(siteId)
+  for key in keys:
+    if key notin procValueSites: continue
+    let g = procValueSites[key]
+    var assigned: seq[NimNode]
+    var understood = true
+    for r in fp.userRoutines:
+      let impl =
+        try: r.getImpl
+        except CatchableError: newEmptyNode()
+      if impl.kind in RoutineNodes and impl.len > 6 and
+         not procValueUses(impl[6], g, assigned):
+        understood = false
+        break
+    if not understood: continue
+    var staticKinds: set[UbKind]
+    for a in assigned: staticKinds = staticKinds + routineUndefinedMemoised(a)
+    let staticMask = newLit(ubMaskOf(staticKinds))
+    var chain = nnkIfStmt.newTree(nnkElifBranch.newTree(
+      infix(codeId, "==", newNilLit()),
+      newAssignment(okId, newLit(false))))
+    # A value of `g`'s type names a routine of its shape (a cast to another
+    # is undefined already); only those are asked about, and read.
+    let shape = formalsShape(g.getTypeImpl)
+    for r in fp.routines:
+      if formalsShape(r.getTypeImpl) != shape: continue
+      let mask = newLit(ubMaskOf(routineUndefinedMemoised(r)))
+      chain.add nnkElifBranch.newTree(
+        quote do:
+          (when compiles(cast[pointer](`r`)): `codeId` == cast[pointer](`r`)
+           else: false),
+        quote do:
+          `ksId` = `ksId` + `setOf`(`mask`))
+    chain.add nnkElse.newTree(newAssignment(okId, newLit(false)))
+    caseStmt.add nnkOfBranch.newTree(newLit(key), quote do:
+      `ksId` = `ksId` + `setOf`(`staticMask`)
+      let `codeId` = `codeOf`(`g`)
+      `chain`)
+  if caseStmt.len == 1:
+    return quote do: `liftT`()
+  caseStmt.add nnkElse.newTree(newAssignment(okId, newLit(false)))
+  result = quote do:
+    block:
+      var `okId` = `sites`.len > 0
+      var `ksId`: set[UbKind]
+      if `okId`:
+        var `wr`: WireWriter
+        `wr`.procs = `registry`
+        try:
+          `putGlobals`
+          if putHostHooks(`wr`).len > 0: `okId` = false
+        except WireError:
+          `okId` = false
+      if `okId`:
+        for `siteId` in `sites`:
+          `caseStmt`
+      `liftT`(named: `okId`, kinds: `ksId`)
+
 proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
                           prog, target, settings: NimNode;
-                          replayOn: bool): NimNode =
+                          replayOn: bool;
+                          procValueKeys: seq[string] = @[]): NimNode =
   ## RFC-0005 S10. THE `runSymex` call of every entry macro (`symexFind`,
   ## and `symexFindAllWitnesses` -- hence `symexForAll`): emits a block
   ## expression of type `RawResult` that runs the walker and then settles
@@ -3774,6 +3985,9 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   let winnerCandSym = bindSym"winnerCandidate"
   let lossyWinId = genSym(nskLet, "lossyWinner")
   let jobsId = genSym(nskLet, "replayJobs")
+  let liftId = genSym(nskLet, "procValueLift")   # RFC-0016 W3-z R7
+  let liftExpr = emitProcValueLift(fn, procValueKeys,
+                                   newDotExpr(rawId, ident"procValueSites"))
   # A zero-param `fn` has the empty tuple `()` as its witness, which is a
   # value but not a type annotation -- so annotate only a non-empty one.
   let typedDecl =
@@ -3817,6 +4031,7 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
         let `jobsId` =
           if `lossyWinId`: @[`winnerCandSym`(`rawId`)]
           else: `rawId`.candidates
+        let `liftId` = `liftExpr`
         block replayPass:
           for `claimId` in [sxSat, sxRaised]:
             for `candId` in `jobsId`:
@@ -3831,7 +4046,8 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
               `settledId` =
                 if `lossyWinId`:
                   `winnerSettleSym`(`settledId`, `replayedId`, shown)
-                else: `settleSym`(`settledId`, `candId`, `replayedId`, shown)
+                else: `settleSym`(`settledId`, `candId`, `replayedId`, shown,
+                                  `liftId`)
               if `replayedId`.outcome == roConfirmed: break replayPass
       `settledId`
 
@@ -4031,7 +4247,9 @@ macro symexFind*(fn: typed,
   let progId = genSym(nskLet, "prog")
   let runReplayed = emitRunSymexReplayed(fn, parsed.params, progId,
                                          newLit(target), newLit(settings),
-                                         settings.replay)
+                                         settings.replay,
+                                         irCollectProcValueSites(parsed.body,
+                                                                 parsed.procs))
 
   result = quote do:
     block:
@@ -4955,7 +5173,9 @@ macro symexFindAllWitnesses*(fn: typed,
   let loopTarget = genSym(nskForVar, "t")  ## the runtime loop variable below
   let runReplayed = emitRunSymexReplayed(fn, parsed.params, progId,
                                          loopTarget, newLit(symexSettings),
-                                         symexSettings.replay)
+                                         symexSettings.replay,
+                                         irCollectProcValueSites(parsed.body,
+                                                                 parsed.procs))
   let gapsSym = bindSym"findingGaps"   ## RFC-0005 S11 (private helper)
   let hintsSym = bindSym"findingHints"   ## RFC-0005 W1 (private helper)
   let stampSym = bindSym"stampBuild"     ## RFC-0016 K5a

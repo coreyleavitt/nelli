@@ -535,8 +535,18 @@ const renderAsChoicesVersion* = "12"
   ##   and bound a 64-bit integer whatever the type, so a case-object global's
   ##   field read halted it and a replay-confirmed sxSat failed closed
   ##   (`ubTailUnverified`; PRC-01's `reexec/caseObjectGlobal*` cells).
+  ## - RFC-0016 W3-z R7 (341->342): PRECISION. An opaque body that calls
+  ##   through a module-level proc-valued variable keeps the variable
+  ##   (`IRStmt.opaqueUndefinedVia`; its `ubTailUnverified` apart from the
+  ##   body's fixed kinds, `opaqueUndefinedFixed`, both in the canonical
+  ##   form), the walk carries the kinds only it put on a path
+  ##   (`Path.undefinedViaOnly`) and the tail walk goes on past such a call.
+  ##   A replay-confirmed sxSat replaces those kinds by what the routine each
+  ##   variable held on the replayed run reaches (`symex.nim`'s
+  ##   `emitProcValueLift`): PRC-02's `reexec/procValueGlobal` is exact again
+  ##   (W3-z int2 had pinned it `ubTailUnverified`).
 
-const symexWalkerVersion* = "341"
+const symexWalkerVersion* = "342"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -6729,6 +6739,10 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
        else: "") &
       (if s.opaqueUndefined != {}:   # RFC-0016 K10b
          ";undef=" & $ubMaskOf(s.opaqueUndefined)
+       else: "") &
+      (if s.opaqueUndefinedVia.len > 0:   # RFC-0016 W3-z R7
+         ";undefFixed=" & $ubMaskOf(s.opaqueUndefinedFixed) &
+           ";via=[" & s.opaqueUndefinedVia.join(",") & "]"
        else: "") &
       (if s.opaqueDefects.len > 0:   # RFC-0005 S8be
          ";defects=[" & s.opaqueDefects.join(",") & "]"

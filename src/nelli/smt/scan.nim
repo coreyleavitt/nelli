@@ -168,3 +168,40 @@ proc irHasAssertDefect*(body: IRStmt,
 proc irCollectLabels*(body: IRStmt,
                       procs: Table[string, ProcSig]): seq[string] =
   scanAll(body, procs).labels
+
+proc collectProcValueSites(s: IRStmt; procs: Table[string, ProcSig];
+                           visited: var HashSet[string];
+                           sites: var seq[string]) =
+  if s.isNil: return
+  case s.kind
+  of isBlock:
+    for c in s.stmts: collectProcValueSites(c, procs, visited, sites)
+  of isIf:
+    for br in s.branches: collectProcValueSites(br.body, procs, visited, sites)
+    if s.elseBody != nil:
+      collectProcValueSites(s.elseBody, procs, visited, sites)
+  of isWhile:
+    collectProcValueSites(s.wbody, procs, visited, sites)
+  of isTry:
+    collectProcValueSites(s.tryBody, procs, visited, sites)
+    for h in s.tryHandlers:
+      collectProcValueSites(h.body, procs, visited, sites)
+    if s.tryFinally != nil:
+      collectProcValueSites(s.tryFinally, procs, visited, sites)
+  of isCall:
+    if s.opaque:
+      for k in s.opaqueUndefinedVia:
+        if k notin sites: sites.add k
+    elif s.callee notin visited and s.callee in procs:
+      visited.incl s.callee
+      collectProcValueSites(procs[s.callee].body, procs, visited, sites)
+  else: discard
+
+proc irCollectProcValueSites*(body: IRStmt,
+                              procs: Table[string, ProcSig]): seq[string] =
+  ## RFC-0016 W3-z R7. The proc-valued variables the opaque calls of the SUT
+  ## call through (`IRStmt.opaqueUndefinedVia`), for the replay settle to
+  ## generate a reading of. One this misses is never named: a site the walk
+  ## reports and the settle has no reading of keeps its kinds.
+  var visited: HashSet[string]
+  collectProcValueSites(body, procs, visited, result)

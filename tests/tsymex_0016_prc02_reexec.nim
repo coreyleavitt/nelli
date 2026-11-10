@@ -27,6 +27,7 @@ from nelli/smt/runtime import hostAdmission
 import ./s8cu_helpers except show
 import helpers/prc03_sut     # imports an override module this file cannot see
 import helpers/r8_hooked     # W3-z R8: a closure environment with a hook
+import helpers/r10_closenv_sut   # W3-z R10: a start value with an environment
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -356,7 +357,7 @@ suite "W3-z R7: the replayed run's proc-value callee":
                    UbKind(ubSignedOverflow), tLabel("t"))
 
   test "the walker's version floor (R7)":
-    check parseInt(symexWalkerVersion) >= 344
+    check parseInt(symexWalkerVersion) >= 346
 
 suite "W3-z R8: a closure global, and the routine a variable holds at its call":
   test "the walker's version floor (R8)":
@@ -398,6 +399,41 @@ suite "W3-z R8: a closure global, and the routine a variable holds at its call":
     else:
       discard pinExact(sutOrdB, cellKey(faCallShape,
                        "reexec/procValueOrderStoredAfter"), tLabel("t"))
+
+suite "W3-z R10: a start-value closure with an environment (re-exec)":
+  test "the walker's version floor (R10)":
+    check parseInt(symexWalkerVersion) >= 346
+
+  test "a captured int crosses the wire, a checked routine: exact":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      mkStartEnv()
+      discard pinExact(sutStartEnv, cellKey(faCallShape,
+                       "reexec/procValueClosureStartEnv"), tLabel("t"))
+      gStartEnv = nil
+
+  test "a captured int that makes an unchecked routine overflow":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      mkStartOvf()
+      pinUndefined(sutStartOvf, cellKey(faCallShape,
+                   "reexec/procValueClosureStartEnvUnchecked"),
+                   UbKind(ubSignedOverflow), tLabel("t"))
+      gStartEnvOvf = nil
+
+  test "a captured ptr does not cross, and the decline says why":
+    mkStartPtr()
+    let r = symexFind(sutStartPtr, tLabel("t"))
+    gStartEnvPtr = nil
+    checkpoint show(r.errors)
+    check not r.trusted
+    var named = false
+    for e in r.errors:
+      if e.kind == feReplayDeclined and "not its bytes alone" in e.msg:
+        named = true
+    check named
 
 suite "PRC-02: a method":
   test "a dynamic call over a visible hierarchy":

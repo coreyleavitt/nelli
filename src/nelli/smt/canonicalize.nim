@@ -568,8 +568,15 @@ const renderAsChoicesVersion* = "12"
   ##   proc-valued variable is ordered (`heldAtCalls`): what it may hold AT
   ##   each call through it, so a routine stored after the last call, or a
   ##   start value replaced before every call, is not read.
+  ## - RFC-0016 W3-z R10 (345->346; 343->344 on its branch): a closure WITH a captured environment
+  ##   that a module-level proc-valued variable holds when the run starts is
+  ##   named by the replay settle: its nested routine's address is taken in
+  ##   module-level code (`nestedRoutineAddrs`), and an environment whose
+  ##   captured values are their bytes alone crosses the re-exec wire
+  ##   (`envRefusal`, `putEnv`/`getEnv`). One the settle cannot name leaves a
+  ##   `feReplayDeclined` hint saying why on the confirmed claim.
 
-const symexWalkerVersion* = "345"
+const symexWalkerVersion* = "346"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

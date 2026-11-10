@@ -9,11 +9,18 @@
 ##   * `pins`: a registered test file (in `tests/`, listed in `nelli.nimble`).
 ## An entry may end in a fourth field `rows=<row>,<row>`: it then applies to
 ## those build rows only (a cell that only some rows can evidence).
-## Only an `open` row needs evidence. An open row with none must be in
+## A `closed` row needs the same, but stricter (section 8.2): a cell that is
+## not open work (a `declined` cell is, so naming one fails), or a registered
+## pin file that writes records (its source calls a K9 verb). A `never` row
+## names a `never` cell and a `never_reason` that is a `NeverReason` member.
+## A closed row from before the K9 era with truly neither is listed in
+## `tests/0016-allowlist/closed-legacy.txt` (`id<TAB>reason`); that list only
+## shrinks (an entry for a row that has evidence, or is not closed, is stale).
+## Only an `open` row needs evidence in the sense of ids.txt. An open row with none must be in
 ## `tests/0016-allowlist/ids.txt` (`id<TAB>slice<TAB>reason`); an entry for a
 ## row that is not open, or is evidenced, is stale and fails, so entries ratchet
 ## out. An alias (`F-0001` for W-01) resolves to its row.
-import std/[os, strutils, sets, options]
+import std/[os, strutils, sets, options, tables]
 import nelli/smt/admission
 import ./worklist_toml
 
@@ -55,6 +62,14 @@ proc parseAllow*(text: string): seq[Allow] =
         if r.strip.len > 0: rows.add r.strip
     result.add Allow(key: f[0], slice: (if f.len > 1: f[1].strip else: ""),
                      reason: (if f.len > 2: f[2].strip else: ""), rows: rows)
+
+proc parseLegacy*(text: string): seq[Allow] =
+  ## `closed-legacy.txt`: `id<TAB>reason`.
+  for raw in text.splitLines():
+    let l = raw.strip(trailing = true)
+    if l.len == 0 or l.startsWith("#"): continue
+    let f = l.split('\t', maxsplit = 1)
+    result.add Allow(key: f[0], reason: (if f.len > 1: f[1].strip else: ""))
 
 proc entryProblems*(a: Allow; slices: HashSet[string]): seq[string] =
   ## The rules every allowlist line obeys: a real slice id (never UNASSIGNED)
@@ -100,11 +115,69 @@ proc pinProblems*(r: WRow; registered: HashSet[string]; testsDir: string):
 func evidenced*(r: WRow): bool =
   r.list("cells").len > 0 or r.list("pins").len > 0
 
+const pinVerbs* = ["pinExact", "pinExactOn", "pinDecline", "pinUndefined",
+                   "pinCap", "pinRefused", "pinCrash", "pinAdmission",
+                   "pinNever", "skipCell", "writePinRecord"]
+
+func isIdent(c: char): bool = c in IdentChars
+
+proc callsVerb*(src: string): bool =
+  ## True when the source names a K9 pin verb as a whole word (a static check:
+  ## a file that never names one writes no records).
+  for v in pinVerbs:
+    var i = 0
+    while true:
+      i = src.find(v, i)
+      if i < 0: break
+      let e = i + v.len
+      if (i == 0 or not src[i - 1].isIdent) and (e >= src.len or not src[e].isIdent):
+        return true
+      i = e
+
+proc writesRecords*(testsDir, pin: string): bool =
+  let f = testsDir / (pin & ".nim")
+  fileExists(f) and callsVerb(readFile(f))
+
+proc validNeverReason*(s: string): bool =
+  for m in NeverReason:
+    if $m == s: return true
+
+type CellStates* = Table[string, string]  ## key -> modelled|declined|never|row|cap|kind
+
+proc closedProblems*(r: WRow; states: CellStates; testsDir: string):
+    tuple[problems: seq[string], evidenced, silentPin: bool] =
+  ## Section 8.2 for a `closed` row. `evidenced`: it names a cell that is not
+  ## open work, or a pin file that writes records. `silentPin`: it names pin
+  ## files and none writes a record (and no cell evidences it).
+  var goodCell = false
+  for c in r.list("cells"):
+    let st = states.getOrDefault(c, "")
+    if st == "declined":
+      result.problems.add r.id & ": closed row names declined cell \"" & c &
+                          "\" (open work, not exact or never)"
+    elif st.len > 0: goodCell = true
+  var goodPin = false
+  for p in r.list("pins"):
+    if writesRecords(testsDir, p): goodPin = true
+  result.silentPin = r.list("pins").len > 0 and not goodPin and not goodCell
+  result.evidenced = goodCell or goodPin
+
+proc neverProblems*(r: WRow; states: CellStates): seq[string] =
+  ## Section 8.2 for a `never` row.
+  var has = false
+  for c in r.list("cells"):
+    if states.getOrDefault(c, "") == "never": has = true
+  if not has:
+    result.add r.id & ": never row names no `never` cell"
+  if not validNeverReason(r.get("never_reason")):
+    result.add r.id & ": never_reason \"" & r.get("never_reason") &
+               "\" is not a NeverReason member"
+
 func needsEvidence*(r: WRow): bool = r.get("state") == "open"
 
 proc joinIds*(w: Worklist; allow: seq[Allow]; slices: HashSet[string];
-              universeKeys, registered: HashSet[string]; testsDir: string):
-    seq[string] =
+              universeKeys, registered: HashSet[string]; testsDir: string;
+              states: CellStates; legacy: seq[Allow]): seq[string] =
   ## One message per failing id or entry.
   result.add w.validate()
   for r in w.rows:
@@ -133,3 +206,35 @@ proc joinIds*(w: Worklist; allow: seq[Allow]; slices: HashSet[string];
   for r in w.rows:
     if r.needsEvidence and not r.evidenced and r.id notin listed:
       result.add "open id " & r.id & " has no cell or pin and no ids.txt entry"
+  var legacyListed = initHashSet[string]()
+  for a in legacy:
+    if a.reason.len == 0:
+      result.add "closed-legacy entry " & a.key & " has no reason"
+    let row = w.resolve(a.key)
+    if row.isNone:
+      result.add "closed-legacy entry " & a.key & " names no work-list id"
+    elif row.get.id in legacyListed:
+      result.add "closed-legacy entry " & a.key & " is listed twice"
+    else:
+      legacyListed.incl row.get.id
+      if row.get.get("state") != "closed":
+        result.add "stale closed-legacy entry " & a.key & ": row is " &
+                   row.get.get("state") & "; remove the line"
+  for r in w.rows:
+    case r.get("state")
+    of "closed":
+      let (ps, ev, silent) = closedProblems(r, states, testsDir)
+      result.add ps
+      if r.id in legacyListed:
+        if ev and ps.len == 0:
+          result.add "stale closed-legacy entry " & r.id &
+                     ": the row has evidence now; remove the line"
+      elif silent:
+        result.add r.id & ": closed row's only pin file(s) " &
+          r.list("pins").join(", ") & " write no pin records (no K9 verb " &
+          "called); add records or list the row in closed-legacy.txt"
+      elif not ev and ps.len == 0:
+        result.add r.id & ": closed row names no exact/never cell and no pin " &
+                   "file that writes records, and is not in closed-legacy.txt"
+    of "never": result.add neverProblems(r, states)
+    else: discard

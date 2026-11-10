@@ -79,6 +79,7 @@ type
     annotations*: int
 
 const
+  anchorBase* = 1_000_000  ## first id of `anchorPrograms`
   signedTs = ["int", "int8", "int16", "int32", "int64"]
   unsignedTs = ["uint", "uint8", "uint16", "uint32", "uint64"]
   cmps = ["==", "!=", "<", ">", "<=", ">="]
@@ -307,6 +308,17 @@ proc genPrograms*(seed, count: int; first = 0): seq[Prog] =
   for i in 0 ..< first + count:
     let p = genProg(r, i)
     if i >= first: result.add p
+
+func anchorPrograms*(): seq[Prog] =
+  ## One hand-seeded instance per shape whose seeded stream may reach no sat
+  ## witness in a small batch (`mod`/`div` by a literal, guarded unsigned
+  ## `div`): each is sat by construction (`a mod 2 == 0`; `a div b == 1`), so
+  ## the smoke ships an exact `construct:k8a-gen/<Shape>` record for every
+  ## shape whatever the seed or count. Ids sit above any stream's.
+  @[Prog(id: anchorBase, shape: shDivLit, ty: "int", op: "mod",
+         lit: Lit(kind: lkNum, n: 2), cmp: "==", k: Lit(kind: lkNum, n: 0)),
+    Prog(id: anchorBase + 1, shape: shUdiv, ty: "uint", op: "div",
+         cmp: "==", k: Lit(kind: lkNum, n: 1))]
 
 # --- the emitted check -------------------------------------------------------
 

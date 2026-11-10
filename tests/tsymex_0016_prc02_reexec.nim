@@ -24,6 +24,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/replayproc
 from nelli/smt/runtime import hostAdmission
+import ./s8cu_helpers except show
 import helpers/prc03_sut     # imports an override module this file cannot see
 
 proc show(errs: seq[SymexErrorInfo]): string =
@@ -160,6 +161,7 @@ suite "PRC-02: proc values cross to the re-executed child":
       checkpoint show(r.errors)
       check r.status == sxSat
       check r.soundness.replay == rsConfirmed
+      discard pinExact(sutNimcall, cellKey(faCallShape, "reexec/procValueGlobal"), tLabel("t"))
 
   test "a proc held in a field of a global object":
     # The walker leaves a closure-typed store unproved (no SAT path to

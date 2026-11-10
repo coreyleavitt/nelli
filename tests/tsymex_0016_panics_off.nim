@@ -1,12 +1,18 @@
 ## RFC-0016 W1-c2 -- the panics-off twin of `tsymex_0016_panics`: on the
 ## default build a Defect IS catchable, so `except Defect` still catches the
 ## overflow and the handler label is reachable, checked against the native run.
-import std/[unittest, strutils]
+import std/[unittest, strutils, sequtils]
 import nelli
 import nelli/symex
 import ./s8cu_helpers
 
 proc sutCatchDefect(v: int) =
+  try:
+    discard v + 1
+  except Defect:
+    symexTarget("h")
+
+proc sutCatchDefect8(v: int8) =
   try:
     discard v + 1
   except Defect:
@@ -40,4 +46,10 @@ suite "W1-c2: a Defect is caught on a panics-off build":
   test "the caught overflow is not an escaping raise":
     let r = pinExact(sutCatchDefect, cellKey(axConstruct, "nopanic-defect-not-escaping"),
                      target = tRaisedExn("OverflowDefect"))
+    check r.status == sxUnsat
+
+  test "no int8 input lets the overflow escape (exhaustive)":
+    let r = pinExact(sutCatchDefect8, cellKey(axConstruct, "nopanic-defect-not-escaping"),
+                     target = tRaisedExn("OverflowDefect"),
+                     domain = exhaustive(toSeq(low(int8) .. high(int8))))
     check r.status == sxUnsat

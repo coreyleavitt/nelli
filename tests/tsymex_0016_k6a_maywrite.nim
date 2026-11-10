@@ -13,49 +13,37 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
-
-proc show(errs: seq[SymexErrorInfo]): string =
-  for e in errs:
-    if e.severity == sevError: result.add $e.kind & ": " & e.msg & "\n"
+import ./s8cu_helpers
 
 const ns = [-5, -1, 1, 3, 4, 7, 12, 49, 51]
 
-template hits(call: untyped): untyped =
-  block:
-    symexCaptureBegin()
-    try:
-      call
-    except Defect, CatchableError:
-      discard
-    symexCaptureEnd()
-
 template nativeSees(fn: typed; live, dead: static string) =
+  ## The may-write shapes are not decided, so the native run is checked here;
+  ## the read-only ones are checked by `pinExact`'s witness and domain.
   block:
     var l = false
     var d = false
     for n in ns:
-      let h = hits(fn(n))
+      let h = nativeRun(fn(n)).hits
       if live in h: l = true
       if dead in h: d = true
     check l
     check not d
 
-template mayWriteDeclines(fn: typed; lbl: static string) =
+template mayWriteDeclines(fn: typed; lbl: static string; cell: static string) =
   ## The verdict that follows from `mayWrite == true`.
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
-    check r.status == sxUnknown
-    check "written through a pointer or a ref" in show(r.errors)
+  pinDecline(fn, cellKey(axReadOnly, cell), feUnsupportedOp, tLabel(lbl),
+             needle = "written through a pointer or a ref")
 
-template readOnlyDecides(fn: typed; live, dead: static string) =
-  ## The verdict that follows from `mayWrite == false`.
+template readOnlyDecides(fn: typed; live, dead: static string;
+                         cell: static string) =
+  ## The verdict that follows from `mayWrite == false`: the live label is
+  ## reached (the witness hits natively), the dead one is not (no domain value
+  ## hits it natively).
   block:
-    let a = symexFind(fn, tLabel(live))
-    checkpoint live & " " & $a.status & "\n" & show(a.errors)
+    let a = pinExact(fn, cellKey(axReadOnly, cell), tLabel(live))
     check a.status == sxSat
-    let b = symexFind(fn, tLabel(dead))
-    checkpoint dead & " " & $b.status & "\n" & show(b.errors)
+    let b = pinExact(fn, cellKey(axReadOnly, cell), tLabel(dead))
     check b.status == sxUnsat
 
 var gs: seq[int]
@@ -151,47 +139,42 @@ suite "K6a: the write-shape corpus (mayWrite == true declines)":
     nativeSees(wOpaque, "wOpaque_new", "wOpaque_old")
     nativeSees(wProcValue, "wProcValue_new", "wProcValue_old")
   test "a direct store through the pointer":
-    mayWriteDeclines(wDeref, "wDeref_new")
+    mayWriteDeclines(wDeref, "wDeref_new", "lent/deref-store")
   test "a stdlib `var`-formal routine fed a dereference":
-    mayWriteDeclines(wInc, "wInc_new")
-    mayWriteDeclines(wSwap, "wSwap_new")
+    mayWriteDeclines(wInc, "wInc_new", "lent/var-formal")
+    mayWriteDeclines(wSwap, "wSwap_new", "lent/var-formal")
   test "a stdlib routine given a pointer":
-    mayWriteDeclines(wCopyMem, "wCopyMem_new")
-    mayWriteDeclines(wZeroMem, "wZeroMem_new")
+    mayWriteDeclines(wCopyMem, "wCopyMem_new", "lent/stdlib-pointer-arg")
+    mayWriteDeclines(wZeroMem, "wZeroMem_new", "lent/stdlib-pointer-arg")
   test "a cast, an emit":
-    mayWriteDeclines(wCast, "wCast_new")
-    mayWriteDeclines(wEmit, "wEmit_new")
+    mayWriteDeclines(wCast, "wCast_new", "lent/cast-emit")
+    mayWriteDeclines(wEmit, "wEmit_new", "lent/cast-emit")
   test "a walked callee recurses":
-    mayWriteDeclines(wWalked, "wWalked_new")
-    mayWriteDeclines(wWalkedDeep, "wWalkedDeep_new")
+    mayWriteDeclines(wWalked, "wWalked_new", "lent/walked-write")
+    mayWriteDeclines(wWalkedDeep, "wWalkedDeep_new", "lent/walked-write")
   test "a recursive pair that writes":
-    mayWriteDeclines(wRecPair, "wRecPair_new")
+    mayWriteDeclines(wRecPair, "wRecPair_new", "lent/recursive-write")
   test "an opaque callee may write anything":
-    mayWriteDeclines(wOpaque, "wOpaque_new")
+    mayWriteDeclines(wOpaque, "wOpaque_new", "lent/opaque-callee")
   test "a proc value may write anything":
     # declined by the by-name scan before the pointer branch is reached
-    let r = symexFind(wProcValue, tLabel("wProcValue_new"))
-    check r.status == sxUnknown
-    check "may write it" in show(r.errors)
+    pinDecline(wProcValue, cellKey(axReadOnly, "lent/proc-value"),
+               feUnsupportedOp, tLabel("wProcValue_new"),
+               needle = "may write it")
   test "a cycle defaults to may-write (conservative: nothing in it writes)":
     nativeSees(wRecPure, "wRecPure_old", "wRecPure_new")
-    mayWriteDeclines(wRecPure, "wRecPure_old")
+    mayWriteDeclines(wRecPure, "wRecPure_old", "lent/recursive-pure")
 
 suite "K6a: the write-shape corpus (mayWrite == false decides)":
-  test "native: the element is unchanged":
-    nativeSees(rPure, "rPure_old", "rPure_new")
-    nativeSees(rPureDeep, "rPureDeep_old", "rPureDeep_new")
-    nativeSees(rLocal, "rLocal_old", "rLocal_new")
-    nativeSees(rPeek, "rPeek_old", "rPeek_new")
-    nativeSees(rReadDeref, "rReadDeref_old", "rReadDeref_new")
-    nativeSees(rAssert, "rAssert_old", "rAssert_new")
   test "a walked pure callee, a nest of them":
-    readOnlyDecides(rPure, "rPure_old", "rPure_new")
-    readOnlyDecides(rPureDeep, "rPureDeep_old", "rPureDeep_new")
+    readOnlyDecides(rPure, "rPure_old", "rPure_new", "lent/walked-pure")
+    readOnlyDecides(rPureDeep, "rPureDeep_old", "rPureDeep_new",
+                    "lent/walked-pure")
   test "local scalar work":
-    readOnlyDecides(rLocal, "rLocal_old", "rLocal_new")
+    readOnlyDecides(rLocal, "rLocal_old", "rLocal_new", "lent/local-work")
   test "a read of the container, direct or in a walked callee":
-    readOnlyDecides(rPeek, "rPeek_old", "rPeek_new")
-    readOnlyDecides(rReadDeref, "rReadDeref_old", "rReadDeref_new")
+    readOnlyDecides(rPeek, "rPeek_old", "rPeek_new", "lent/global-read")
+    readOnlyDecides(rReadDeref, "rReadDeref_old", "rReadDeref_new",
+                    "lent/global-read")
   test "a pragma block (`doAssert`) is read-only, its children decide":
-    readOnlyDecides(rAssert, "rAssert_old", "rAssert_new")
+    readOnlyDecides(rAssert, "rAssert_old", "rAssert_new", "lent/pragma-block")

@@ -266,8 +266,8 @@ suite "RFC-0016 K2-0: crashes and faults (CRH-06, INT-11, W-19b)":
       if e.kind == feUnsupportedOp and "routine `createThread` is not modelled" in e.msg:
         named = true
     check named
-    skipCell(cellKey(axConstruct, "threads/createThread"),
-             "K2-0 W-19b, re-pinned by K4c: feUnsupportedOp (the call declines by its never row), sxUnknown")
+    pinDecline(thrSut, cellKey(axConstruct, "threads/createThread"),
+               feUnsupportedOp, needle = "routine `createThread` is not modelled")
 
   when defined(posix):
     test "W-19b: a signal handler writing a global declines (not a fault)":

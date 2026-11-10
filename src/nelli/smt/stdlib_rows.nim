@@ -247,9 +247,12 @@ const mathRows: seq[StdlibRow] = block:
   r.add floatDeclined(["log", "cot", "sec", "csc", "coth", "sech", "csch",
       "arccot", "arcsec", "arccsc", "arccoth", "arcsech", "arccsch"],
     "a reciprocal or composition of libm functions the walker does not model")
-  r.add floatDeclined(["nextafter"],
-    "no SMT-LIB FP-theory primitive for the next representable value " &
-    "(a documented Z3 bound)")
+  r.add neverFacet("math.nextafter",
+    "std/math on this toolchain (Nim 2.2.10) has no `nextafter`, so no SUT " &
+    "can name it (`compiles(nextafter(x, y))` is false; the cell's native " &
+    "fact). The name stays recognised (`mathFpDeferredOps`) and declined: " &
+    "SMT-LIB's FP theory has no next-representable-value primitive either",
+    nrPlatform, feUnsupportedOpAborted)
   r.add floatDeclined(["frexp", "splitDecimal", "degToRad", "radToDeg",
       "almostEqual", "mod"],
     "a float-first call is lowered by name (`lowerMathCall`), which has no " &

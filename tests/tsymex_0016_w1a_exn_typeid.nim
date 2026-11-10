@@ -1,6 +1,6 @@
 ## RFC-0016 W1-a -- one exception type id for raise sites and handlers
 ## (W-01, W-33), checked against the native run.
-import std/[unittest, strutils]
+import std/[unittest, strutils, sequtils]
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -12,6 +12,12 @@ proc sutAsE(k: int) =
     symexTarget("h")
 
 proc sutAsEOnly(k: int) =
+  try:
+    if k == 3: raise newException(ValueError, "x")
+  except ValueError as e:
+    discard
+
+proc sutAsEOnly8(k: int8) =
   try:
     if k == 3: raise newException(ValueError, "x")
   except ValueError as e:
@@ -55,6 +61,12 @@ suite "W1-a exception type id":
   test "except T as e: the raise is caught, not escaping":
     let r = pinExact(sutAsEOnly, cellKey(axConstruct, "except-as-raise"),
                      target = tRaisedExn("ValueError"), domain = dom3)
+    check r.status == sxUnsat
+
+  test "except T as e: no int8 input escapes (exhaustive)":
+    let r = pinExact(sutAsEOnly8, cellKey(axConstruct, "except-as-raise"),
+                     target = tRaisedExn("ValueError"),
+                     domain = exhaustive(toSeq(low(int8) .. high(int8))))
     check r.status == sxUnsat
 
   test "except T (no binding) agrees":

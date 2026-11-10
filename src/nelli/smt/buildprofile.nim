@@ -568,6 +568,10 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
   ("setting/isLoose", refused[BuildSite, bool](none(SymexErrorKind),
     "AUD-01: `isLoose` leaves an `isIntOffset` parameter unstamped; opt-in " &
     "unsound by ADR-0001 and carrying its banner", iNever, nrByDesign)),
+  ("semantics/globalLiteralEntry", refused[BuildSite, bool](none(SymexErrorKind),
+    "AUD-09 (S8as item 3): a `var` global initialised by a literal is not " &
+    "read at its initialiser; the walker answers `sxUnknown`, never a trusted " &
+    "verdict, and no build axis moves it", iNever, nrByDesign)),
   ("sizeof/host", refused[BuildSite, bool](none(SymexErrorKind),
     "W-52: `sizeof` and shift widths are facts of the host the walker " &
     "reads from its own build, not modelled per target",

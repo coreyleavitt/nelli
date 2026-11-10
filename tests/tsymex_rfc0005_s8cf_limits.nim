@@ -7,6 +7,7 @@ import std/[unittest, re, strutils]
 import pcre
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers except show
 
 const
   a30 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -90,6 +91,16 @@ suite "S8cf: PCRE's own limits":
 
   test "a miss past MATCH_LIMIT is not a witness":
     check symexFind(missOnLong, tLabel("cf_miss_long")).status != sxSat
+
+  test "the stopped calls are K9 decline pins":
+    # RFC-0016 SND-10, SND-11: the walker neither refutes the stopped match nor
+    # offers the stopped miss as a witness; both are solver-undecided (the
+    # limit is the library's, so the exact model is PRC-33 item 10). The JIT's
+    # own accounting is a separate build row.
+    if not jitBuild():
+      let k = cellKey(faCallShape, "pcre/limitStop")
+      pinDecline(matchHit, k, beSolverUndef, tLabel("cf_match_hit"))
+      pinDecline(missOnLong, k, beSolverUndef, tLabel("cf_miss_long"))
 
   test "within the safe length both outcomes stand":
     check symexFind(shortMatch, tLabel("cf_short_match")).status == sxUnsat

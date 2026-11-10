@@ -17,55 +17,31 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
-
-proc show(errs: seq[SymexErrorInfo]): string =
-  for e in errs:
-    if e.severity == sevError: result.add $e.kind & ": " & e.msg & "\n"
+import ./s8cu_helpers
 
 const ns = [-5, -1, 1, 3, 4, 7, 12, 49, 51]
 
-template hits(call: untyped): untyped =
-  block:
-    symexCaptureBegin()
-    try:
-      call
-    except Defect, CatchableError:
-      discard
-    symexCaptureEnd()
-
-template nativeSees(fn: typed; live, dead: static string) =
-  block:
-    var l = false
-    var d = false
-    for n in ns:
-      let h = hits(fn(n))
-      if live in h: l = true
-      if dead in h: d = true
-    check l
-    check not d
-
 template nativeDiffers(fn: typed; live: static string) =
-  ## For some input the hook's copy is not the plain one.
+  ## For some input the hook's copy is not the plain one. The declined shapes
+  ## are not decided, so this native run is checked here; the plain ones are
+  ## checked by `pinExact`'s witness and domain.
   block:
     var l = false
     for n in ns:
-      if live in hits(fn(n)): l = true
+      if live in nativeRun(fn(n)).hits: l = true
     check l
 
-template declinesCopy(fn: typed; lbl: static string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
-    check r.status == sxUnknown
-    check "does not make the plain copy" in show(r.errors)
+template declinesCopy(fn: typed; lbl: static string; cell: static string;
+                      why = "does not make the plain copy") =
+  pinDecline(fn, cellKey(axReadOnly, cell), feGlobalRouteUnproved,
+             tLabel(lbl), needle = why)
 
-template decides(fn: typed; live, dead: static string) =
+template decidesCopy(fn: typed; live, dead: static string;
+                     cell: static string) =
   block:
-    let a = symexFind(fn, tLabel(live))
-    checkpoint live & " " & $a.status & "\n" & show(a.errors)
+    let a = pinExact(fn, cellKey(axReadOnly, cell), tLabel(live))
     check a.status == sxSat
-    let b = symexFind(fn, tLabel(dead))
-    checkpoint dead & " " & $b.status & "\n" & show(b.errors)
+    let b = pinExact(fn, cellKey(axReadOnly, cell), tLabel(dead))
     check b.status == sxUnsat
 
 var gq: int
@@ -150,27 +126,21 @@ suite "K6b: a hook that is not the plain copy declines":
     nativeDiffers(emit1, "emit1_changed")
     nativeDiffers(loop1, "loop1_changed")
   test "a field copy under an `if`":
-    declinesCopy(cond1, "cond1_changed")
+    declinesCopy(cond1, "cond1_changed", "hookcopy/conditional")
   test "a field copy behind an early `return`":
-    declinesCopy(early1, "early1_changed")
+    declinesCopy(early1, "early1_changed", "hookcopy/early-return")
   test "a callee writes the destination after the copy":
-    declinesCopy(zap1, "zap1_changed")
+    declinesCopy(zap1, "zap1_changed", "hookcopy/callee-write")
   test "foreign code writes the destination after the copy":
     # declined before K6b too (the hook's effect summary reads the `emit`)
-    let r = symexFind(emit1, tLabel("emit1_changed"))
-    check r.status == sxUnknown
-    check "feGlobalRouteUnproved" in show(r.errors)
+    declinesCopy(emit1, "emit1_changed", "hookcopy/foreign-write", "")
   test "a field copy in a loop is not a top-level copy":
-    declinesCopy(loop1, "loop1_changed")
+    declinesCopy(loop1, "loop1_changed", "hookcopy/loop")
 
 suite "K6b: a hook proved the plain copy decides":
-  test "native: the hook's copy is the plain one":
-    nativeSees(plain1, "plain1_same", "plain1_changed")
-    nativeSees(work1, "work1_same", "work1_changed")
-    nativeSees(pure1, "pure1_same", "pure1_changed")
   test "the bare copy":
-    decides(plain1, "plain1_same", "plain1_changed")
+    decidesCopy(plain1, "plain1_same", "plain1_changed", "hookcopy/plain")
   test "local work around the copy that writes nothing shared":
-    decides(work1, "work1_same", "work1_changed")
+    decidesCopy(work1, "work1_same", "work1_changed", "hookcopy/local-work")
   test "a walked pure callee around the copy":
-    decides(pure1, "pure1_same", "pure1_changed")
+    decidesCopy(pure1, "pure1_same", "pure1_changed", "hookcopy/walked-pure")

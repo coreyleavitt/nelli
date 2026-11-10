@@ -43,7 +43,7 @@ template declines(fn: typed, lbl, why: string): untyped =
       if why in e.msg: named = true
     check named
 
-from ./s8cu_helpers import nativeHits
+import ./s8cu_helpers except show
 
 const ks = [-3, 0, 1, 2, 3, 4, 5, 7, 8]
 
@@ -213,10 +213,16 @@ suite "S8cl (1b): a magic with no body declines":
   test "ensureMove is decided, as the native run has it":
     clean(sutEnsureMove, "em", sxSat)
     clean(sutEnsureMove, "em_dead", sxUnsat)
+    # RFC-0016 SND-05: the same two verdicts as exact K9 pins.
+    discard pinExact(sutEnsureMove, cellKey(axMagic, "EnsureMove"), tLabel("em"))
+    discard pinExact(sutEnsureMove, cellKey(axMagic, "EnsureMove"), tLabel("em_dead"))
 
   test "procCall declines, each label":
     declines(sutProcCall, "pc", "ProcCall")
     declines(sutProcCall, "pc_dead", "ProcCall")
+    # RFC-0016 SND-06: the decline as K9 pins (exact model: PRC-21).
+    pinDecline(sutProcCall, cellKey(axMagic, "ProcCall"), feUnsupportedOp, tLabel("pc"))
+    pinDecline(sutProcCall, cellKey(axMagic, "ProcCall"), feUnsupportedOp, tLabel("pc_dead"))
 
 suite "S8cl: walker version":
   test "symexWalkerVersion >= 248":

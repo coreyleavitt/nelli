@@ -139,6 +139,7 @@ cause = "`dsl_parser.nim:20460-20461` stores the `repr` as the type id"
 sha = "c0e8bd44"
 aliases = ["F-0001"]
 cells = []
+pins = ["tsymex_0016_w1a_exn_typeid"]
 
 [[row]]
 id = "W-02"
@@ -153,6 +154,7 @@ cause = "`dsl_parser.nim:19771-19792` drops every local pragma but `noinit`"
 sha = "2b5a1f8e"
 aliases = ["F-0002"]
 cells = []
+pins = ["tsymex_0016_w1b_localpragma"]
 
 [[row]]
 id = "W-03"
@@ -167,6 +169,7 @@ cause = "the walker never reads `nimPanics` (only `symex.nim:2343`)"
 sha = "6d40f03c"
 aliases = ["F-0003"]
 cells = []
+pins = ["tsymex_0016_panics"]
 
 [[row]]
 id = "W-04"
@@ -181,6 +184,7 @@ cause = "transparent `else: parseExpr(operand)` at `dsl_parser.nim:10658`, `:108
 sha = "86536fa9"
 aliases = ["F-0004"]
 cells = []
+pins = ["tsymex_0016_w1e_floatwidth"]
 
 [[row]]
 id = "W-05"
@@ -195,6 +199,7 @@ cause = "`runtime.nim:8862-8870` traps regardless of divisor or target"
 sha = "e044a290"
 aliases = ["F-0005"]
 cells = []
+pins = ["tsymex_0016_w1d1a_intminmod"]
 
 [[row]]
 id = "W-06"
@@ -209,6 +214,7 @@ cause = "`dsl_parser.nim:4023-4025` lists unsigned beside signed"
 sha = "682de5a4"
 aliases = ["F-0006"]
 cells = []
+pins = ["tsymex_0016_w1d1b_udivzero"]
 
 [[row]]
 id = "W-07"
@@ -223,6 +229,7 @@ cause = "`runtime.nim:24500-24502` consumes the marker with no token; the settin
 sha = "0aa6b3bb"
 aliases = ["F-0007"]
 cells = []
+pins = ["tsymex_0016_w1d2_wraps", "tsymex_0016_checksoff"]
 
 [[row]]
 id = "SND-01"
@@ -233,6 +240,7 @@ note = "(decline; exact model PRC-36)"
 source = "sort S1; S8cq item 2"
 evidence = "Closed as a decline at head: `tests/tsymex_rfc0005_s8cq_varret.nim:84,158-159` pins `rab(t[\"a\"], t, \"a\")` (`p01_r50` native hit, walker `sxUnknown`); `tests/tsymex_rfc0005_s8cq_byvalue.nim:126,162-163` (`vc_rx1`). S8cq landed in batch 11 (`47e3363e`). Exact model: PRC-36."
 cells = []
+pins = ["tsymex_rfc0005_s8cq_varret", "tsymex_rfc0005_s8cq_byvalue"]
 
 [[row]]
 id = "SND-02"
@@ -242,7 +250,8 @@ state = "closed"
 note = ""
 source = "sort S2; S8cb"
 evidence = "`tests/tsymex_rfc0005_s8cb_tostr.nim:37-41` native values; `:62-63` (`negs`/`negsu`), `:74-80` (char), `:81-99` (enum, string-named enum), `:116-118` (`repr`). S8cb merged `72b2c2b8`."
-cells = []
+cells = ["magic:IntToStr"]
+pins = ["tsymex_rfc0005_s8cb_tostr"]
 
 [[row]]
 id = "SND-03"
@@ -252,7 +261,8 @@ state = "closed"
 note = ""
 source = "sort S3; S8cb"
 evidence = "`tests/tsymex_rfc0005_s8cb_tostr.nim:37-41` native values; `:62-63` (`negs`/`negsu`), `:74-80` (char), `:81-99` (enum, string-named enum), `:116-118` (`repr`). S8cb merged `72b2c2b8`."
-cells = []
+cells = ["magic:CharToStr"]
+pins = ["tsymex_rfc0005_s8cb_tostr"]
 
 [[row]]
 id = "SND-04"
@@ -262,7 +272,8 @@ state = "closed"
 note = ""
 source = "sort S4; S8cb"
 evidence = "`tests/tsymex_rfc0005_s8cb_tostr.nim:37-41` native values; `:62-63` (`negs`/`negsu`), `:74-80` (char), `:81-99` (enum, string-named enum), `:116-118` (`repr`). S8cb merged `72b2c2b8`."
-cells = []
+cells = ["magic:EnumToStr"]
+pins = ["tsymex_rfc0005_s8cb_tostr"]
 
 [[row]]
 id = "SND-05"
@@ -272,7 +283,8 @@ state = "closed"
 note = ""
 source = "sort S5; S8cb"
 evidence = "`tests/tsymex_rfc0005_s8cl_magics.nim:208-218`: `nativeHits(sutEnsureMove)` then `clean(..., \"em_dead\", sxUnsat)`."
-cells = []
+cells = ["magic:EnsureMove"]
+pins = ["tsymex_rfc0005_s8cl_magics"]
 
 [[row]]
 id = "SND-06"
@@ -283,6 +295,7 @@ note = "(decline; exact model PRC-21)"
 source = "sort S6; S8cl"
 evidence = "`s8cl_magics.nim:210,220-222` `declines(sutProcCall, \"pc\"/\"pc_dead\", \"ProcCall\")` after the native run; also `tests/tsymex_rfc0005_b10_integration_b.nim:9-12`."
 cells = []
+pins = ["tsymex_rfc0005_s8cl_magics"]
 
 [[row]]
 id = "SND-07"
@@ -303,6 +316,7 @@ note = "(decline; exact model PRC-04)"
 source = "sort S8"
 evidence = "`tests/tsymex_rfc0005_s8cs_routes.nim:525-526,542-549` (`HeapH` `=destroy` writes `d.r[]`), native `:603`, hits `:616,622`; walker `tests/tsymex_rfc0005_s8cs_routes_c.nim:292-293` `declined(heap1, …)`."
 cells = []
+pins = ["tsymex_rfc0005_s8cs_routes_c"]
 
 [[row]]
 id = "SND-09"
@@ -313,6 +327,7 @@ note = "(decline; exact model PRC-04)"
 source = "sort S9"
 evidence = "`s8cs_routes.nim:110-113` (`w2`), native `:590`, hits `:608,622`, `declined(w2, …)` `:642-643`."
 cells = []
+pins = ["tsymex_rfc0005_s8cs_routes"]
 
 [[row]]
 id = "SND-10"
@@ -323,6 +338,7 @@ note = ""
 source = "sort S10; S8cf"
 evidence = "`tests/tsymex_rfc0005_s8cf_limits.nim:71-85`: native `std/re` first, then `status != sxUnsat` for `cf_match_hit`. S8cf merged `d08fe846`. One-sided pin; exactness is PRC-33 item 10."
 cells = []
+pins = ["tsymex_rfc0005_s8cf_limits"]
 
 [[row]]
 id = "SND-11"
@@ -333,6 +349,7 @@ note = ""
 source = "sort S11; S8cf"
 evidence = "same file `:92`, `!= sxSat` for `cf_miss_long`."
 cells = []
+pins = ["tsymex_rfc0005_s8cf_limits"]
 
 [[row]]
 id = "SND-12"
@@ -374,6 +391,7 @@ note = "`rfc-0016-prc01` (2026-11-09), walker 292"
 source = "S8ct (coordinator ledger, 2026-11-02)"
 evidence = "S8ct moved replay to a child process; on Windows a witness of these kinds declines with a named reason, documented in the 0.9.0 migration note and pinned on Linux by the re-exec pin"
 cells = []
+pins = ["tsymex_0016_prc01_reexec"]
 
 [[row]]
 id = "PRC-02"
@@ -445,6 +463,7 @@ note = ": done (2026-11-09, rfc-0016-rangeoff, rfc-0016-prc0708): `--rangeChecks
 source = "S8cu"
 evidence = "S8cu's fail-closed decline (`feCheckOption`, `feOverflowCheckOption`) closed a false `sxRaised`. (2026-11-07, W1-z): a `--rangeChecks:off` build declines every routine `feCheckOption`"
 cells = []
+pins = ["tsymex_0016_rangeoff", "tsymex_0016_fieldrangeoff", "tsymex_0016_boundoff", "tsymex_0016_fieldoff", "tsymex_0016_objoff", "tsymex_0016_floatchecks", "tsymex_0016_checksoff"]
 
 [[row]]
 id = "PRC-08"
@@ -455,6 +474,7 @@ note = ": done (2026-11-09, rfc-0016-prc0708): a `-d:danger` build reads every c
 source = "S8cu"
 evidence = "follows from the source scan; depends on PRC-07"
 cells = []
+pins = ["tsymex_0016_danger"]
 
 [[row]]
 id = "PRC-09"
@@ -465,7 +485,30 @@ note = ": done (2026-11-09, K4c): every routine of `std/math`'s pushed `checks: 
 source = "S8cu"
 evidence = "every routine in a pushed region of `std/math` declines"
 slice = "K4c"
-cells = ["stdlib:math.almostEqual", "stdlib:math.arccos", "stdlib:math.arccosh", "stdlib:math.arccot", "stdlib:math.arccoth", "stdlib:math.arccsc", "stdlib:math.arccsch", "stdlib:math.arcsec", "stdlib:math.arcsech", "stdlib:math.arcsin", "stdlib:math.arcsinh", "stdlib:math.arctan", "stdlib:math.arctan2", "stdlib:math.arctanh", "stdlib:math.cbrt", "stdlib:math.ceil", "stdlib:math.ceilDiv", "stdlib:math.classify", "stdlib:math.copySign", "stdlib:math.cos", "stdlib:math.cosh", "stdlib:math.cot", "stdlib:math.coth", "stdlib:math.csc", "stdlib:math.csch", "stdlib:math.degToRad", "stdlib:math.divmod", "stdlib:math.erf", "stdlib:math.erfc", "stdlib:math.euclDiv", "stdlib:math.euclMod", "stdlib:math.exp", "stdlib:math.floor", "stdlib:math.floorDiv", "stdlib:math.floorMod", "stdlib:math.frexp", "stdlib:math.gamma", "stdlib:math.hypot", "stdlib:math.isNaN", "stdlib:math.isPowerOfTwo", "stdlib:math.lgamma", "stdlib:math.ln", "stdlib:math.log", "stdlib:math.log10", "stdlib:math.log2", "stdlib:math.mod", "stdlib:math.nextPowerOfTwo", "stdlib:math.pow", "stdlib:math.radToDeg", "stdlib:math.round", "stdlib:math.round/places", "stdlib:math.sec", "stdlib:math.sech", "stdlib:math.sgn", "stdlib:math.signbit", "stdlib:math.sin", "stdlib:math.sinh", "stdlib:math.splitDecimal", "stdlib:math.sqrt", "stdlib:math.tan", "stdlib:math.tanh", "stdlib:math.trunc"]
+cells = ["stdlib:math.ceil", "stdlib:math.ceilDiv", "stdlib:math.classify", "stdlib:math.copySign", "stdlib:math.euclDiv", "stdlib:math.euclMod", "stdlib:math.floor", "stdlib:math.floorDiv", "stdlib:math.floorMod", "stdlib:math.isNaN", "stdlib:math.isPowerOfTwo", "stdlib:math.nextPowerOfTwo", "stdlib:math.round", "stdlib:math.sgn", "stdlib:math.signbit", "stdlib:math.sqrt", "stdlib:math.trunc"]
+pins = ["tsymex_0016_k4c_math"]
+
+[[row]]
+id = "PRC-41"
+table = "5.2b"
+title = "The libm family and `math` composition routines have no exact model: every one declines `feUnsupportedOpAborted` naming its cell (split from PRC-09, which closed on the classification)"
+state = "open"
+note = "open: split out of PRC-09 on 2026-11-10 (W3-z E4), which had been closed while naming these 45 declined cells; `frexp`, `splitDecimal`, `degToRad`, `radToDeg`, `almostEqual`, `mod`, `round(x, places)`, `divmod` and the transcendental functions"
+slice = "W4-z"
+source = "S8cu"
+evidence = "the `declined` `stdlib:math.*` rows of `stdlib_rows.nim`"
+cells = ["stdlib:math.almostEqual", "stdlib:math.arccos", "stdlib:math.arccosh", "stdlib:math.arccot", "stdlib:math.arccoth", "stdlib:math.arccsc", "stdlib:math.arccsch", "stdlib:math.arcsec", "stdlib:math.arcsech", "stdlib:math.arcsin", "stdlib:math.arcsinh", "stdlib:math.arctan", "stdlib:math.arctan2", "stdlib:math.arctanh", "stdlib:math.cbrt", "stdlib:math.cos", "stdlib:math.cosh", "stdlib:math.cot", "stdlib:math.coth", "stdlib:math.csc", "stdlib:math.csch", "stdlib:math.degToRad", "stdlib:math.divmod", "stdlib:math.erf", "stdlib:math.erfc", "stdlib:math.exp", "stdlib:math.frexp", "stdlib:math.gamma", "stdlib:math.hypot", "stdlib:math.lgamma", "stdlib:math.ln", "stdlib:math.log", "stdlib:math.log10", "stdlib:math.log2", "stdlib:math.mod", "stdlib:math.pow", "stdlib:math.radToDeg", "stdlib:math.round/places", "stdlib:math.sec", "stdlib:math.sech", "stdlib:math.sin", "stdlib:math.sinh", "stdlib:math.splitDecimal", "stdlib:math.tan", "stdlib:math.tanh"]
+
+[[row]]
+id = "PRC-42"
+table = "5.2b"
+title = "The stdlib generic objects `Option`, `OrderedTable`, `CountTable` and `Deque` have no exact model: each declines `feUnsupportedParamType` by its row (split from W-47, which closed on the typed decline)"
+state = "open"
+note = "open: split out of W-47 on 2026-11-10 (W3-z E4), which had been closed while naming these four declined cells"
+slice = "W4-z"
+source = "B-11, HRV-62"
+evidence = "the four `declined` rows of `stdlib_rows.nim`"
+cells = ["stdlib:options.Option", "stdlib:tables.OrderedTable", "stdlib:tables.CountTable", "stdlib:deques.Deque"]
 
 [[row]]
 id = "PRC-10"
@@ -646,6 +689,7 @@ note = ""
 source = "batch 8 integrator"
 evidence = "`tests/tsymex_rfc0005_s8bt_limit_langs_b.nim:76-79` `verdict(replaceTarget, \"bt_limit_replace\")` with default `want = sxSat` (`:59`); closed by S8cn step 1e. The pin runs only under `pcreSearchEngine() == peInterp` (`:70`), so the JIT rows (the Windows legs) assert nothing: a JIT build-row cell, not a reopen."
 cells = []
+pins = ["tsymex_rfc0005_s8bt_limit_langs_b"]
 
 [[row]]
 id = "PRC-28"
@@ -797,6 +841,7 @@ note = ""
 source = "sort S12"
 evidence = "`s8cl_lifetime_b.nim:193-201`; models remain PRC-18/PRC-20."
 cells = []
+pins = ["tsymex_rfc0005_s8cl_lifetime_b"]
 
 [[row]]
 id = "CRH-03"
@@ -817,6 +862,7 @@ note = ""
 source = "S8ct"
 evidence = "fixed in 0.9.1 (review R1-22; `c9682ebc`, `9663105d`): `tests/tsymex_rfc0005_r1_pcrelimits.nim`. Includes INT-03."
 cells = []
+pins = ["tsymex_rfc0005_r1_pcrelimits"]
 
 [[row]]
 id = "CRH-05"
@@ -1106,11 +1152,10 @@ cells = []
 id = "PND-13"
 table = "5.7"
 title = "Z3's own internal recursion depth, not audited when S8ct bounded the walker's term walks"
-state = "never"
+state = "closed"
 note = ": unreachable from a SUT (K2-0)"
 source = "S8ct (B19 disposition)"
 why = "to be checked at disposition. **K2-0 probe (2026-11-08): not reachable from a SUT.** A straight-line SUT of 3000 additions stops the compile in the parser (the VM iteration cap in `parseDeferList`), far below Z3's own recursion depth; 1500 additions then an equality do not finish in 25 s, but 40 finish in about a second, so the cost is superlinear in the walk, not a Z3 stack. Probe and a `skipCell` record: `tests/tsymex_0016_k20_probes_child.nim` (`PND-13`)."
-never_reason = "unreachable from a SUT (K2-0)"
 cells = []
 pins = ["tsymex_0016_k20_probes_child"]
 
@@ -1589,6 +1634,7 @@ state = "closed"
 note = ""
 source = "CI-B, run 42487154319"
 cells = []
+pins = ["tsymex_0016_k9a_pins"]
 
 [[row]]
 id = "AUD-01"
@@ -1598,7 +1644,7 @@ class = "soundness, opt-in and documented; not worse than `main`"
 state = "never"
 note = ": stays by design: `never(reason)` cell, written by K1a-test"
 source = "S8w"
-never_reason = "stays by design"
+never_reason = "nrByDesign"
 cells = ["build:setting/isLoose"]
 
 [[row]]
@@ -1679,8 +1725,8 @@ class = "precision"
 state = "never"
 note = ": stays by design: `never(reason)` cell, written by K1a-test"
 source = "S8as"
-never_reason = "stays by design"
-cells = []
+never_reason = "nrByDesign"
+cells = ["build:semantics/globalLiteralEntry"]
 
 [[row]]
 id = "AUD-10"
@@ -1700,7 +1746,7 @@ class = "precision"
 state = "never"
 note = ": stays by design: `never(reason)` cell, written by K1a-test"
 source = "S8au"
-never_reason = "stays by design"
+never_reason = "nrByDesign"
 cells = ["stdlib:strutils.rfind/indexofLink"]
 
 [[row]]
@@ -1711,7 +1757,7 @@ state = "closed"
 note = "K6a (`rfc-0016-k6a`, walker 299, 2026-11-09)"
 slice = "K6a"
 home = "K6a"
-cells = []
+cells = ["readonly:lent/global-read", "readonly:lent/local-work", "readonly:lent/pragma-block", "readonly:lent/walked-pure"]
 pins = ["tsymex_0016_k6a_maywrite"]
 
 [[row]]
@@ -1721,7 +1767,7 @@ title = "the hook copy-proof defaults to \"copied\""
 state = "closed"
 note = "K6b (`rfc-0016-k6b`, walker 299, 2026-11-09)"
 home = "K6b"
-cells = []
+cells = ["readonly:hookcopy/local-work", "readonly:hookcopy/plain", "readonly:hookcopy/walked-pure"]
 pins = ["tsymex_0016_k6b_hookcopy"]
 
 [[row]]
@@ -1731,7 +1777,7 @@ title = "`ptrUsesStayLocal`, `routeStoresThroughDeref`, `bindsViewWhole` share t
 state = "closed"
 note = "K6c (`rfc-0016-k6c`, walker 299, 2026-11-09): `routeStoresThroughDeref` is `mayWrite`; `bindsViewWhole` is an exhaustive case; `ptrUsesStayLocal` is an escape predicate sharing D-05's foreign-write facts (`foreignWriteNode`, `opaqueRoutine`), not built over `mayWrite`, because a store of the pointer to a global by name is an escape and not a write through it; it is now fail-closed (an exhaustive case, an address through a deref or returned or passed to an unwalked callee escapes), so its two misjudged shapes no longer rely on the `nnkAddr` expression gate; no SUT got a false trusted verdict from any of the three"
 home = "K6c"
-cells = []
+cells = ["readonly:hookstore/local-work", "readonly:hookstore/plain", "readonly:ptrformal/global-store", "readonly:ptrformal/local", "readonly:viewwhole/tuple-copy"]
 pins = ["tsymex_0016_k6c_round"]
 
 [[row]]
@@ -2015,7 +2061,8 @@ state = "closed"
 note = ": done (2026-11-09, K4c): the four heads are `declined` rows of the stdlib-body axis (`options.Option`, `tables.OrderedTable`, `tables.CountTable`, `deques.Deque`); any other stdlib generic object is the axis's absent case with the same kind"
 slice = "K4c"
 home = "K4c"
-cells = ["stdlib:options.Option", "stdlib:tables.OrderedTable", "stdlib:tables.CountTable", "stdlib:deques.Deque"]
+cells = ["errorkind:feUnsupportedParamType"]
+pins = ["tsymex_0016_k4c_cells"]
 
 [[row]]
 id = "W-48"
@@ -2109,8 +2156,8 @@ cells = []
 id = "W-69"
 table = "5.9"
 title = "\"not green on a good day\" wording in CLAUDE.md and `sweep-diff.sh`"
-state = "never"
-note = ": repository wording, outside this RFC"
+state = "moved"
+note = ": repository wording (CLAUDE.md, scripts/sweep-diff.sh), outside this RFC; no engine cell"
 cells = []
 
 [[row]]
@@ -2132,7 +2179,7 @@ note = ": stays by design: `never(reason)` cell, written by K5b"
 slice = "K5b"
 home = "K5b (`never` cell of the build axis)"
 cells = ["build:finally/returnOnRaise"]
-never_reason = "c and cpp disagree natively on a return in a finally on a raised path"
+never_reason = "nrPlatform"
 
 [[row]]
 id = "STY-02"
@@ -2142,7 +2189,7 @@ state = "never"
 note = ": done (2026-11-09, K4c): `stdlib:tables.Table/iterationOrder` and `stdlib:sets.HashSet/iterationOrder` are `never` rows; the declines name them"
 slice = "K4c"
 home = "K4c (`never` cell of the stdlib-body axis)"
-never_reason = "hash order is build-sensitive (Nim version, -d:nimStringHash2, -d:nimPreviewHashRef): replay-gated for Table, declined for HashSet"
+never_reason = "nrPlatform"
 cells = ["stdlib:tables.Table/iterationOrder", "stdlib:sets.HashSet/iterationOrder"]
 
 [[row]]
@@ -2153,7 +2200,7 @@ state = "never"
 note = ": done (2026-11-09, K10a-axis): `defined:order/pointer` is a `never` row of the definedness axis; the ref/ptr comparison reads it"
 slice = "K10a-axis"
 home = "K10a-axis (`never` cell of the definedness axis)"
-never_reason = "stays by design: the order of two addresses is the allocator's, not a value of the program"
+never_reason = "nrUnobservable"
 cells = ["defined:order/pointer"]
 
 [[row]]
@@ -2164,7 +2211,7 @@ state = "never"
 note = ": done (2026-11-08, K3a): `typeclass:owned` and `typeclass:atomic` are `never` rows of the type-class axis"
 slice = "K3a"
 home = "K3a (`never` cell of the type × memory axis)"
-never_reason = "stays by design: no ownership state, one thread of control"
+never_reason = "nrByDesign"
 cells = ["typeclass:owned", "typeclass:atomic"]
 
 [[row]]
@@ -2173,7 +2220,7 @@ table = "5.9"
 title = "`nextafter` (HRV-27)"
 state = "never"
 note = ": no SMT-LIB FP-theory primitive for nextafter: `never` cell `magic:nextafter` (K4a-table)"
-never_reason = "no SMT-LIB FP-theory primitive (HRV-27)"
+never_reason = "nrTheory"
 slice = "K4a-table"
 home = "K4a-table (`never` cell of the magic axis)"
 cells = ["magic:nextafter"]
@@ -2184,7 +2231,7 @@ table = "5.9"
 title = "concurrency inside the SUT, sNaN payloads, float80, full Unicode case fold, symbolic-length sort (HRV-105)"
 state = "never"
 note = ": K3a done (2026-11-08): sNaN payloads and float80 are `never` rows (`typeclass:float/sNaNPayload`, `typeclass:float128`). K4c (2026-11-09): symbolic-length sort, concurrency and full Unicode case fold are `never` rows (`stdlib:algorithm.sort/symbolicLength`, `stdlib:typedthreads.createThread/concurrency`, `stdlib:unicode.toLower/fullCaseFold`); the sort decline names its cell, the other two have no declining site to name it (createThread is a walker fault, W-19b; toLower on a symbolic Rune did not terminate in a 900 s probe). K2c (2026-11-09): `classifyType` reads the `float128` row, so a `c_longdouble` parameter declines `feUnsupportedParamType` (it was modelled as a double)"
-never_reason = "stays by design: no thread interleaving, no symbolic-length sort, no payload-exact NaN, no float80, no full Unicode fold"
+never_reason = "nrByDesign"
 slice = "K4c"
 home = "K3a, K2b, K4c (one `never` cell each)"
 cells = ["typeclass:float/sNaNPayload", "typeclass:float128", "stdlib:algorithm.sort/symbolicLength", "stdlib:typedthreads.createThread/concurrency", "stdlib:unicode.toLower/fullCaseFold"]
@@ -2197,7 +2244,7 @@ state = "never"
 note = ": done (2026-11-09, K10a-axis): `defined:grow/elemAddr` is a `never` row of the definedness axis; the stale element pointer decline reads it"
 slice = "K10a-axis"
 home = "K10a-axis (`never` cell of the definedness axis)"
-never_reason = "stays by design: whether Nim moves the elements depends on the seq's capacity, so the use after a resize is declined"
+never_reason = "nrUnobservable"
 cells = ["defined:grow/elemAddr"]
 
 [[row]]
@@ -2209,7 +2256,7 @@ note = ": stays by design: `never(reason)` cell, written by K5b"
 slice = "K5b"
 home = "K5b (`never` cell of the build axis)"
 cells = ["build:z3/deepUnsat"]
-never_reason = "the verdict on a deep term depends on the Z3 version's own recursion; each verified Z3 is its own row"
+never_reason = "nrUnobservable"
 
 [[row]]
 id = "STY-09"

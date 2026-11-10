@@ -1,6 +1,6 @@
 ## RFC-0016 W1-g -- `x in a..b` / `x notin a..b` (W-31). Each SUT is run
 ## natively beside the walker's verdict by `pinExact`.
-import std/[unittest, os, strutils]
+import std/[unittest, os, strutils, sequtils]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
@@ -60,6 +60,14 @@ proc inVarBounds(x, a, b: int) =
 
 proc inVarBoundsEmpty(x, a, b: int) =
   if a == 5 and b == 3 and x in a .. b: symexTarget("t")
+
+proc inEmptyU8(x: uint8) =
+  var a = 5'u8
+  var b = 3'u8
+  if x in a .. b: symexTarget("t")
+
+proc inExclVarU8Raise(b: uint8) =
+  if 5'u8 in 0'u8 ..< b: symexTarget("t")
 
 proc inExclVar(x, a, b: int) =
   if x in a ..< b and x == 5: symexTarget("t")
@@ -136,6 +144,9 @@ suite "RFC-0016 W1-g: x in a..b":
     check pinExact(inVarBoundsEmpty, cellKey(axConstruct, "in/slice/empty"),
                    target = tLabel("t"),
                    domain = sampled(@[3, 4, 5, 7])).status == sxUnsat
+    check pinExact(inEmptyU8, cellKey(axConstruct, "in/slice/empty"),
+                   target = tLabel("t"),
+                   domain = exhaustive(toSeq(0'u8 .. 255'u8))).status == sxUnsat
 
   test "..< with a variable bound: sat, boundary raise":
     check pinExact(inExclVar, cellKey(axConstruct, "in/slice/excl/var"),
@@ -151,3 +162,6 @@ suite "RFC-0016 W1-g: x in a..b":
     check pinExact(inExclVarU8, cellKey(axConstruct, "in/slice/excl/var/u8/raise"),
                    target = tRaisedExn("OverflowDefect"),
                    domain = dom).status == sxUnsat
+    check pinExact(inExclVarU8Raise, cellKey(axConstruct, "in/slice/excl/var/u8/raise"),
+                   target = tRaisedExn("OverflowDefect"),
+                   domain = exhaustive(toSeq(0'u8 .. 255'u8))).status == sxUnsat

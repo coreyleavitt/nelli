@@ -10,12 +10,17 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers except show
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs:
     if e.severity != sevHint: parts.add $e.kind & ": " & e.msg
   "[" & parts.join(", ") & "]"
+
+# RFC-0016 SND-02..04: each decided verdict is also a K9 pin, keyed to the magic
+# row the `$` lowers through. `curKey` is set between groups of `c` calls.
+var curKey = CellKey(scope: axMagic, key: "IntToStr")
 
 template c(name: untyped, want: SymexStatusKind, body: untyped) {.dirty.} =
   proc name(x: int, y: int) =
@@ -24,6 +29,7 @@ template c(name: untyped, want: SymexStatusKind, body: untyped) {.dirty.} =
     let r = symexFind(name, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == want
+    discard pinExact(name, curKey, tLabel("t"))
 
 type
   E = enum ea, eb, ec
@@ -72,12 +78,14 @@ suite "RFC-0005 S8cb tostr: dollar of a negative int":
     if $u == "-1" or $u == "-2": symexTarget("t")
 
 suite "RFC-0005 S8cb tostr: dollar of a char, enum, bool, string":
+  curKey = CellKey(scope: axMagic, key: "CharToStr")
   c(charname, sxSat):
     let a = if x > 0: 'a' else: 'b'
     if $a == "a": symexTarget("t")
   c(charordu, sxUnsat):
     let a = if x > 0: 'a' else: 'b'
     if $a == "97": symexTarget("t")
+  curKey = CellKey(scope: axMagic, key: "EnumToStr")
   c(enumname, sxSat):
     let a = if x > 0: ea else: eb
     if $a == "ea" and x > 0: symexTarget("t")
@@ -99,23 +107,28 @@ suite "RFC-0005 S8cb tostr: dollar of a char, enum, bool, string":
   c(enumstrnamec, sxSat):
     let a = if x > 0: fa else: fc
     if $a == "fc" and x <= 0: symexTarget("t")
+  curKey = CellKey(scope: axMagic, key: "BoolToStr")
   c(booltrue, sxSat): (if $(x > 0) == "true" and x == 1: symexTarget("t"))
   c(booltrueu, sxUnsat): (if $(x > 0) == "true" and x == 0: symexTarget("t"))
   c(boolfalse, sxSat): (if $(x > 0) == "false" and x == 0: symexTarget("t"))
   c(boolother, sxUnsat): (if $(x > 0) == "1": symexTarget("t"))
+  curKey = CellKey(scope: axMagic, key: "StrToStr")
   c(strid, sxSat):
     let s = if x > 0: "a" else: "b"
     if $s == "a" and x == 1: symexTarget("t")
   c(stridu, sxUnsat):
     let s = if x > 0: "a" else: "b"
     if $s == "a" and x == 0: symexTarget("t")
+  curKey = CellKey(scope: axMagic, key: "CharToStr")
   c(callformchar, sxUnsat):
     let a = if x > 0: 'a' else: 'b'
     if `$`(a) == "97": symexTarget("t")
+  curKey = CellKey(scope: faCallShape, key: "repr")
   c(reprbool, sxUnsat): (if repr(x > 0) == "true" and x == 0: symexTarget("t"))
   c(reprenum, sxUnsat):
     let a = if x > 0: ea else: eb
     if repr(a) == "ea" and x <= 0: symexTarget("t")
+  curKey = CellKey(scope: axMagic, key: "Echo")
   c(echochar, sxSat):
     let a = if x > 0: 'a' else: 'b'
     echo a

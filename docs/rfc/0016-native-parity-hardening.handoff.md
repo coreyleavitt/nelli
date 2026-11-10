@@ -1526,6 +1526,48 @@
     routine was generated is an internal compiler error (the captured
     local "not init"); `nestedRoutineAddrs` now takes the enclosing
     routine's address first, which lifts the captures.
+  - W3-z R12 (`rfc-0016-w3z-r12`, walker 345 to 346, precision): R11's
+    three limits. (1) Re-exec of an environment of two or more captured
+    values: LIFTED for values of one type, PROVEN UNLIFTABLE for mixed
+    types. The child is the same binary (`replayproc.nim`
+    spawns `getAppFilename()`), so the layout is the host's, but no source names
+    the field order: lambda lifting adds a field per captured local as it
+    meets it (`detectCapturedVars` over the transformed body) after every
+    macro has run, `getTypeImpl` of a closure gives only its proc type, and
+    ARC's `TNimTypeV2` holds a destructor, size, alignment and trace, no
+    field table (`typeInfoV1` is filled only for types that request V1
+    RTTI). Values of one type need no order: every order is an array of
+    that type after the header, so slot i crosses to slot i whichever
+    local it is (`envCodecs` mirror `array[N, T]`; `envField`'s size check
+    refuses a miscount or an `{.align.}` that moves a field). Mixed types
+    decline with the reason, now per slot (`WireWriter.envWhy`). (2) Types
+    declared outside the check's module: LIFTED for library types
+    (`HSlice[string, string]` exact, `Table[int, string]` route proved and
+    replay confirmed; its hash arithmetic is unchecked, so the claim keeps
+    `ubSignedOverflow` open). `envBenignType` reads a library type's shape
+    and `symexEnvHooksFree` drops R11's site-module rule: `=destroy` and
+    `=trace` resolve at the probe to the hook attached to the type
+    (`replaceHookMagic`), exported or not; a type's hooks must be declared
+    in its module (`semstmts` "type bound operation ... can be defined only
+    in the same module"), which is complete before any importer; a
+    library hook now counts (`collectEnvHooks`; a library hook such as
+    `Task`'s may run a user callback). PROVEN UNLIFTABLE for an object of
+    another user module: the builder the scan must read to name the
+    routine holds a value of that type, and the route scan's S8cs rule
+    (`routeProbeRead`, `mayHideTypes`) declines it, since `=copy`/`=sink`
+    resolve by overload and a module-private one is invisible to any probe
+    outside its module (the macro API gives no attached ops; reading the
+    module's text misses a hook a template declares). (3) A closure of a
+    routine nested in a nested one: LIFTED on fork. `nestedRoutineAddrs`
+    names the whole enclosing chain outermost first (naming only the
+    immediate owner is the R11 "var not init" internal error, reproduced);
+    `envBenignWhy` reads every routine of the chain (`envBenignLevelWhy`).
+    Re-exec declines it, named (`envLinked`: the environment's `up` field
+    is a host address). Pins: `tests/tsymex_0016_w3z_r12_closenv.nim`
+    (fork: StrPair, ForeignBox decline, HSlice, Table, Nested, SeqTrio UB,
+    hidden-`=destroy` decline), `tsymex_0016_prc02_reexec.nim` (re-exec
+    StrPair, SeqTrio, HSlice exact, Table confirmed, Nested declined, R11's
+    StartTwo declined "more than one type").
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **W3-z E4b (`rfc-0016-w3z-evidence4b`):** the soundness rows SND-01..06, SND-08..11, PRC-27 and CRH-02 leave `closed-legacy.txt`: their pre-K9 suites now call `pinExact`/`pinDecline` beside every existing assertion (records keyed to the magic cell the fix lives on where one exists, else to a `family:callshape` cell). A closed row cannot name a declined cell, so SND-06 (`magic:ProcCall`), CRH-02 (`magic:GCref`) and the decline-only rows carry the pin file, not the cell. PRC-01 and PRC-02 are pinned on Linux (`pinExact` under `-d:nelliReplayReexec`, the same marshalling path as Windows); their legacy entries said the suites skip on Linux, which has been false since PRC-01 and PRC-02m. PRC-41 and PRC-42 are homed at W4-z (the id the other open precision rows use; the Wave 4 table's "W-32 and the precision rows" line has no slice id). `closed-legacy.txt` is 24 rows.
 - **W3-z E2c (`rfc-0016-w3z-evidence2c`):** the construct axis grows 61 -> 70 cells. `k8a-gen/DivLit` and `k8a-gen/Udiv` ship exact records from two hand-seeded sat-by-construction anchor programs (`anchorPrograms`, ids from 1000000, in the batch that starts the stream), whatever the seed or count. The six sampled-unsat-only keys gain an exhaustive (int8/uint8) or sat-sibling pin and become modelled cells. `threads/createThread` is a declined cell (`pinDecline`, `feUnsupportedOp`). Not cells: `hook/=trace/cycleCollector` and `hook/=destroy/dynamicSubtype` (walker faults, `coerceIntLit`, P6: a fault is not a decline) and `quit/afterTarget/assertCoveredBy` (a clean `sxSat`; the host ends at the splat, INT-22): they stay `skipCell`.

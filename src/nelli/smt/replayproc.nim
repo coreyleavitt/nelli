@@ -315,20 +315,27 @@ macro nestedRoutineAddrs*(probe: typed; rs: varargs[typed]): untyped =
   ## routine enclosing it; naming the nested one first, from module-level
   ## code of the same module, generates it unlifted (an internal compiler
   ## error: its captured local "not init").
+  ## RFC-0016 W3-z R12: every routine enclosing it is, outermost first. A
+  ## routine nested in a nested one is lifted when the outermost is
+  ## generated; naming only the routine enclosing it is the same failure.
+  ## A capturing enclosing routine is named through `rawProc`, as `rs` are.
   let top = owner(probe).kind == nnkSym and symKind(owner(probe)) == nskModule
   var items = nnkBracket.newTree()
   for r in rs:
     if top:
-      let o = owner(r)
-      let first =
-        if o.kind == nnkSym and symKind(o) in {nskProc, nskFunc, nskMethod,
-                                               nskConverter}:
-          let held = genSym(nskLet, "enclosingFirst")
-          quote do:
-            when compiles(cast[pointer](`o`)):
-              let `held` {.used.} = cast[pointer](`o`)
-        else:
-          newEmptyNode()
+      var chain: seq[NimNode]
+      var o = owner(r)
+      while o.kind == nnkSym and symKind(o) in {nskProc, nskFunc, nskMethod,
+                                                nskConverter} and chain.len < 64:
+        chain.insert(o, 0)
+        o = owner(o)
+      var first = newStmtList()
+      for e in chain:
+        let held = genSym(nskLet, "enclosingFirst")
+        first.add quote do:
+          let `held` {.used.} =
+            (when compiles(cast[pointer](`e`)): cast[pointer](`e`)
+             else: rawProc(`e`))
       items.add quote do:
         (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
          else: (block:

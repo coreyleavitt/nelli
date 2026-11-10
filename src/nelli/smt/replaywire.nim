@@ -47,9 +47,12 @@ type
       ## and runs no user code (`dsl_parser.envBenignExpr`): it holds strings,
       ## seqs and objects of plain values. Missing: it does not.
     envPut*: seq[EnvPut]
-      ## RFC-0016 W3-z R11. Per slot of `envBenign`: the writer of the one
-      ## value the environment holds, or nil when it holds more than one (the
-      ## order of an environment's fields is the compiler's).
+      ## RFC-0016 W3-z R11. Per slot of `envBenign`: the writer of the values
+      ## the environment holds, or nil (`envWhy` says why). W3-z R12: values
+      ## of one type have one (the order of an environment's fields is the
+      ## compiler's, and only values of one type need none).
+    envWhy*: seq[string]
+      ## RFC-0016 W3-z R12. Per slot of `envPut`: why it is nil.
     scratch*: bool
       ## RFC-0016 W3-z R11. The settle's check that every proc value names a
       ## routine of the table (`symex.emitProcValueLift`): nothing is handed
@@ -290,8 +293,10 @@ proc wirePut*[T](w: var WireWriter; x: T) =
             skip = true
           elif at < w.envPut.len and w.envPut[at] != nil:
             put = w.envPut[at]
+          elif at < w.envWhy.len and w.envWhy[at].len > 0:
+            raise newException(WireError, w.envWhy[at])
           else:
-            raise newException(WireError, "a closure whose captured environment holds more than one value, a string or seq among them: the child rebuilds such an environment value by value, and the order of its values is the compiler's, which the child cannot be given")
+            raise newException(WireError, "a closure whose captured environment has no codec, which the child cannot be given")
         elif not plain:
           raise newException(WireError, "a closure with a captured environment holding a value that is not its bytes alone (an address, a buffer or a type header), which the child cannot be given")
         else:

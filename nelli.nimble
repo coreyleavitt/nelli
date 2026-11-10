@@ -1686,6 +1686,7 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_r10_closenv",
             "tsymex_0016_w3z_r11_closstr",
             "tsymex_0016_w3z_r11_hooked",
+            "tsymex_0016_w3z_r12_closenv",
             "tsymex_rfc0005_b11_hoststate",
             "tsymex_rfc0005_b11_hoststate_reexec",
             "tsymex_rfc0005_s8ct_deepterm",

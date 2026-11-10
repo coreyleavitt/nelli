@@ -3243,21 +3243,67 @@ proc envPlainWhy(r: NimNode): string =
              "type that is not its bytes alone (" & t.repr & ")"
   ""
 
-proc envCodecs(r: NimNode): tuple[put, get: NimNode] =
+proc envCodecs(r: NimNode): tuple[put, get: NimNode; why: string] =
   ## RFC-0016 W3-z R11. The wire's writer and reader of the environment of a
   ## closure of the nested routine `r` (`replaywire.EnvPut`/`EnvGet`), or nil
-  ## literals. Only an environment of one captured value has them: the value
-  ## follows the type header as it follows a pointer in an object of the two
-  ## (`envField` checks the environment's size against that object's), and
-  ## the order of two or more is the compiler's. The value is of a type
+  ## literals and why not. The values follow the type header as they follow
+  ## a pointer in a mirror object of the two (`envField` checks the
+  ## environment's size against the mirror's). The values are of types
   ## `envBenignWhy` admits and the wire carries.
-  result = (newNilLit(), newNilLit())
+  ## RFC-0016 W3-z R12: two or more captured values of one type. The compiler
+  ## orders an environment's fields as lambda lifting meets the captured
+  ## locals, after every macro has run, and no type, `getTypeImpl` or
+  ## run-time type header (`TNimTypeV2`: a destructor, a size, an alignment,
+  ## no field table) says that order. Values of one type need none: every
+  ## order lays them out as an array of that type after the header (a C
+  ## struct of N members of one type has no padding between them), and the
+  ## child, the same binary, has the same layout, so the value at each slot
+  ## crosses to the same slot whichever local it is. A captured local whose
+  ## `{.align.}` moves its field, or a capture this read miscounts, gives the
+  ## environment another size than the mirror's, which `envField` refuses. Values of two or more
+  ## types decline, saying so; so does an environment linked to the one of
+  ## the routine enclosing its own (`envLinked`: its first field is an
+  ## address in the host).
+  result = (newNilLit(), newNilLit(), "")
   var nominal, caps: seq[NimNode]
-  if envBenignWhy(r, nominal, caps).len > 0 or caps.len != 1: return
+  let benign = envBenignWhy(r, nominal, caps)
+  if benign.len > 0:
+    result.why = benign
+    return
+  if envLinked(r):
+    result.why = "a closure of a routine nested in a nested one, whose " &
+      "environment links to the environment of the routine enclosing it (an " &
+      "address in the host), which the child cannot be given"
+    return
+  if caps.len == 0:
+    result.why = "a closure whose environment captures no value this check " &
+      "reads, which the child cannot be given"
+    return
   let t =
     try: caps[0].getTypeInst
     except CatchableError: newEmptyNode()
-  if t.kind == nnkEmpty or not isWireableType(t): return
+  if t.kind == nnkEmpty:
+    result.why = "a closure whose captured value's type cannot be read, which " &
+      "the child cannot be given"
+    return
+  for c in caps:
+    let ct =
+      try: c.getTypeInst
+      except CatchableError: newEmptyNode()
+    if ct.kind == nnkEmpty or not sameType(ct, t):
+      result.why = "a closure whose captured environment holds values of more " &
+        "than one type, a string or seq among them: the child rebuilds such " &
+        "an environment value by value, and the order of its values is the " &
+        "compiler's (lambda lifting lays the fields out after every macro has " &
+        "run, and no type or run-time type header names that order), which " &
+        "the child cannot be given"
+      return
+  if not isWireableType(t):
+    result.why = "a closure whose environment captures a value of `" & t.repr &
+      "`, a type the replay's wire does not carry, which the child cannot " &
+      "be given"
+    return
+  let n = newLit(caps.len)
   # Each lambda its own symbols: a symbol is owned by the routine that
   # declares it, and one shared would be a capture in the other.
   let mirror = genSym(nskType, "EnvMirror")
@@ -3272,20 +3318,23 @@ proc envCodecs(r: NimNode): tuple[put, get: NimNode] =
     `putT`(proc (`w`: var WireWriter; `env`: pointer) {.nimcall.} =
       type `mirror` = object
         envMirrorHead: pointer
-        envMirrorValue: `t`
-      wirePut(`w`, cast[ptr `t`](envField(`env`, offsetOf(`mirror`, envMirrorValue),
-                                          sizeof(`mirror`)))[]))
+        envMirrorValue: array[`n`, `t`]
+      let vals = cast[ptr array[`n`, `t`]](envField(`env`,
+        offsetOf(`mirror`, envMirrorValue), sizeof(`mirror`)))
+      for i in 0 ..< `n`: wirePut(`w`, vals[i]))
   result.get = quote do:
     `getT`(proc (`rd`: var WireReader; `envG`: pointer) {.nimcall.} =
       type `mirrorG` = object
         envMirrorHead: pointer
-        envMirrorValue: `t`
-      wireGet(`rd`, cast[ptr `t`](envField(`envG`, offsetOf(`mirrorG`, envMirrorValue),
-                                          sizeof(`mirrorG`)))[]))
+        envMirrorValue: array[`n`, `t`]
+      let vals = cast[ptr array[`n`, `t`]](envField(`envG`,
+        offsetOf(`mirrorG`, envMirrorValue), sizeof(`mirrorG`)))
+      for i in 0 ..< `n`: wireGet(`rd`, vals[i]))
 
 type RoutineTable = object
   ## RFC-0016 PRC-02, W3-z R10/R11. `emitRoutineTable`'s expressions.
-  procs, envOk, envBenign, envPut, envGet: NimNode
+  ## W3-z R12: `envWhy`, per slot, why a benign environment has no codec.
+  procs, envOk, envBenign, envPut, envGet, envWhy: NimNode
 
 proc emitRoutineTable(fp: ReplayFootprint): RoutineTable =
   ## RFC-0016 PRC-02, W3-z R10. The routine table a proc value crosses by
@@ -3301,6 +3350,7 @@ proc emitRoutineTable(fp: ReplayFootprint): RoutineTable =
   var benign = nnkBracket.newTree()
   var puts = nnkBracket.newTree()
   var gets = nnkBracket.newTree()
+  var whys = nnkBracket.newTree()
   for r in fp.routines:
     items.add quote do:
       (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
@@ -3309,15 +3359,17 @@ proc emitRoutineTable(fp: ReplayFootprint): RoutineTable =
     benign.add newLit(false)
     puts.add newCall(bindSym"EnvPut", newNilLit())
     gets.add newCall(bindSym"EnvGet", newNilLit())
+    whys.add newLit("")
   let probe = genSym(nskVar, "routineTableProbe")
   var nested = newCall(bindSym"nestedRoutineAddrs", probe)
   for r in fp.nested:
     nested.add r
     ok.add newLit(envPlainWhy(r).len == 0)
     benign.add envBenignExpr(r)
-    let (p, g) = envCodecs(r)
+    let (p, g, why) = envCodecs(r)
     puts.add(if p.kind == nnkNilLit: newCall(bindSym"EnvPut", p) else: p)
     gets.add(if g.kind == nnkNilLit: newCall(bindSym"EnvGet", g) else: g)
+    whys.add newLit(why)
   let top =
     if items.len == 0: quote do: newSeq[pointer]()
     else: quote do: @`items`
@@ -3339,6 +3391,9 @@ proc emitRoutineTable(fp: ReplayFootprint): RoutineTable =
   result.envGet =
     if gets.len == 0: quote do: newSeq[`getT`]()
     else: quote do: @`gets`
+  result.envWhy =
+    if whys.len == 0: quote do: newSeq[string]()
+    else: quote do: @`whys`
 
 proc wireTarget*(w: var WireWriter; t: SymexTarget) =
   ## RFC-0005 S8ct. A case object, so outside the generic encoding.
@@ -3547,6 +3602,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       let envBenignExpr = table.envBenign
       let envPutExpr = table.envPut
       let envGetExpr = table.envGet
+      let envWhyExpr = table.envWhy
       let registry = genSym(nskVar, "replayRoutines")
       var getGlobals = newStmtList()
       var putGlobals = newStmtList()
@@ -3613,6 +3669,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           `wr`.envOk = `envOkExpr`
           `wr`.envBenign = `envBenignExpr`
           `wr`.envPut = `envPutExpr`
+          `wr`.envWhy = `envWhyExpr`
           var refused = ""
           try:
             wirePut(`wr`, int64(callerStackSize()))

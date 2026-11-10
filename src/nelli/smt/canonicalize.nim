@@ -566,8 +566,14 @@ const renderAsChoicesVersion* = "12"
   ##   routes (`closureEnvRefusal`'s benign set), is named by the settle's
   ##   scratch wire, and crosses the re-exec wire when it holds one value
   ##   (`envCodecs`, `envField`).
+  ## - RFC-0016 W3-z R12 (345->346): that environment may capture values of a
+  ##   type declared outside the check's module, the library's included (the
+  ##   type-bound hook probe, `symexEnvHooksFree`), and may be the linked one
+  ##   of a routine nested in a nested one (`envBenignWhy`, the enclosing
+  ##   chain's addresses in `nestedRoutineAddrs`); two or more captured values
+  ##   of one type cross the re-exec wire (`envCodecs`).
 
-const symexWalkerVersion* = "345"
+const symexWalkerVersion* = "346"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

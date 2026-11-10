@@ -4246,7 +4246,7 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
   elif n.kind in nnkCallKinds:
     let h = if n.len > 0: stripConv(n[0]) else: newEmptyNode()
     if w.heldIsG(h):
-      let before = s
+      var before = s                 # var, not let: the VM aliases a let to the var param
       for i in 1 ..< n.len: heldWalk(w, n[i], s)
       if not s.dead:
         w.atCalls = joinHeld(w.atCalls, joinHeld(before, s))

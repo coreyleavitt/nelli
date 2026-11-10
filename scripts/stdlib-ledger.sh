@@ -52,7 +52,7 @@ lint || exit 1
 
 img="localhost/nelli-dev:${NELLI_IMAGE:-latest}"
 dir="tests/.pins/stdlib-ledger.d"
-rm -rf "$dir"; mkdir -p "$dir"
+rm -rf "$dir" "$dir.failed"; mkdir -p "$dir"
 corpus=()
 for t in "$@"; do
   if command grep -qF "$marker" "$t"; then echo "probe, skipped: $t" >&2
@@ -67,11 +67,19 @@ one() {
     nim c --compileOnly:on --threads:on --hints:off \
       --nimcache:/tmp/ledger-nimcache-$$ \
       -d:nelliStdlibLedger=/work/$dir/$(basename "$t") "$t" \
-    > /dev/null 2>&1 || echo "FAILED $t" >&2
+    > "$dir/$(basename "$t").log" 2>&1 || { echo "FAILED $t" >&2; echo "$t" >> "$dir.failed"; }
 }
 export -f one
 export PWD img dir
 printf '%s\n' "${corpus[@]}" | xargs -P "$jobs" -I{} bash -c 'one {}'
+# A test that does not compile contributes no keys, so the ledger would be
+# silently short: refuse to write or compare anything (the compiler output is
+# kept beside each key file as <test>.log, which the key concatenation skips).
+if [ -s "$dir.failed" ]; then
+  echo "stdlib ledger: $(wc -l < "$dir.failed") test(s) failed to compile (see $dir/<test>.log):" >&2
+  cat "$dir.failed" >&2
+  exit 1
+fi
 out="$ledger"; [ "$check" = 1 ] && out="tests/.pins/stdlib-ledger.regen.nim"
 {
   echo "## RFC-0016 K4c (section 8.1): the corpus ledger of the stdlib-body axis, the"
@@ -81,7 +89,7 @@ out="$ledger"; [ "$check" = 1 ] && out="tests/.pins/stdlib-ledger.regen.nim"
   echo "## A routine outside it, and outside \`stdlibAxis\`, declines \`feUnadmitted\`."
   echo "## Tests marked \`# stdlib-ledger: probe\` are not part of the corpus."
   echo "const ledgerKeys*: seq[string] = @["
-  cat "$dir"/* | sort -u | sed 's/\\/\\\\/g; s/"/\\"/g; s/.*/  "&",/'
+  cat "$dir"/*.nim | sort -u | sed 's/\\/\\\\/g; s/"/\\"/g; s/.*/  "&",/'
   echo "]"
 } > "$out"
 echo "ledger: $(command grep -c '^  "' "$out") routines from ${#corpus[@]} files"

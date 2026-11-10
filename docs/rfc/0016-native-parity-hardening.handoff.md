@@ -136,6 +136,16 @@
     `tsymex_0016_p7_floatinline`. Not fixed, a precision gap: an inline
     iterator called from another inline iterator declines
     `feUnsupportedStmtKind`.
+  - W3-z P6 (`rfc-0016-w3z-parser6`, walker 315 to 316): the parser's
+    placeholder for a declined `nil` (`cstring`, `pointer`) is the literal 0,
+    which `lowerExpr` lowered against the sibling arm's prototype;
+    `coerceIntLit` raised `weInternalWalkerFault`. The `iekIntLit` arm now
+    degrades in-band (`feUnsupportedExprKind`) on a composite or uninterp
+    prototype. Tests: `tsymex_0016_p6_nillit`; the two K2-0 probes in
+    `tsymex_0016_k20_probes` (`hook/=trace/cycleCollector`,
+    `hook/=destroy/dynamicSubtype`) are now `pinDecline`. Not fixed (P6b): a
+    `case` expression whose nil arm is declined faults with "parser temporary
+    `__sym_caseexpr_N` is read but no statement bound it".
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

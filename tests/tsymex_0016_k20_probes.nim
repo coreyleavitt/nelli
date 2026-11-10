@@ -233,21 +233,19 @@ suite "RFC-0016 K2-0: crashes and faults (CRH-06, INT-11, W-19b)":
     skipCell(cellKey(axMagic, "zeroMem/copyMem(addr x)"),
              "K2-0 CRH-06 reproduces: weInternalWalkerFault (FieldDefect, ptrPointeeTy of an itUninterp), sxUnknown; a fault, not a named decline")
 
-  test "INT-11: the =trace hook only the cycle collector runs is a walker fault":
+  test "INT-11: the =trace hook only the cycle collector runs declines":
     check "hit" in nativeRun(trace1(3)).hits
     let r = symexFind(trace1, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
-    check r.faulted("coerceIntLit")
-    skipCell(cellKey(axConstruct, "hook/=trace/cycleCollector"),
-             "K2-0 INT-11 reproduces: weInternalWalkerFault (coerceIntLit, composite prototype for svPtr), sxUnknown")
+    check not r.faulted("coerceIntLit")
+    pinDecline(trace1, cellKey(axConstruct, "hook/=trace/cycleCollector"), feUnsupportedExprKind)
 
   test "W-19b: a dynamic-subtype =destroy hook is the same fault as INT-11":
     check "hit" in nativeRun(dynSut(1)).hits
     let r = symexFind(dynSut, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
-    check r.faulted("coerceIntLit")
-    skipCell(cellKey(axConstruct, "hook/=destroy/dynamicSubtype"),
-             "K2-0 W-19b reproduces: weInternalWalkerFault (coerceIntLit), sxUnknown")
+    check not r.faulted("coerceIntLit")
+    pinDecline(dynSut, cellKey(axConstruct, "hook/=destroy/dynamicSubtype"), feUnsupportedExprKind)
 
   test "W-19b: createThread declines by name at the call, never a verdict":
     check "hit" in nativeRun(thrSut(1)).hits

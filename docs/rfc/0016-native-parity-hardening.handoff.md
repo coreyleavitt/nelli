@@ -1160,6 +1160,26 @@
   Open: a read inside an `and`/`or` operand is lowered unguarded
   (`shortCircuitPartIsPure` sees no hoist and no inline fork), so
   `tUndefined` reports it reachable when only the other operand guards it.
+  W3-z R2 (`rfc-0016-w3z-runtime2`, walker 312 to 313, finding U1): a
+  replay-confirmed candidate is held to the whole-run gate. Its tail was
+  never walked, so `symexFind` of a label on a havoc-tainted path followed by
+  a signed overflow was `sxSat`, `rsConfirmed`, `trusted()`. `runSymexImpl`'s
+  `sxUnknown` branch now walks each `sxSat` label candidate's tail
+  (`verifyTailDefined`, gate and replay on) while its model pins are live,
+  and the kinds join the existing `SatCandidate.witnessUndefined`, which
+  `settleCandidate` already carries and the soundness codec already stores
+  (no new field). The walk runs with `overApprox`
+  (`WalkCtx.tailOverApprox`): a candidate's path carries a fresh symbol the
+  pins do not fix, so a branch the pins and `pc` leave open forks both arms
+  (`walkIfFollowConcrete`, `walkWhileFollowConcrete`) instead of setting
+  `tailUndecided`, and a `dcFreshSymbol` record is not a reason for
+  `ubTailUnverified`. Without that, every candidate would answer
+  `ubTailUnverified` and none would be trusted. Pins:
+  `tsymex_0016_w3z_r2_candtail`. Open: the winner's tail walk keeps the
+  strict mode, so a post-label havoc on a clean winner is still
+  `ubTailUnverified` (precision only). An opaque call's result is
+  `feOpaqueCallUnmodelled` (⊤), never a candidate, so only havoc-tainted
+  candidates reach this path.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

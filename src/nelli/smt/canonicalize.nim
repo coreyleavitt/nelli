@@ -371,8 +371,15 @@ const renderAsChoicesVersion* = "12"
   ##   puts a requested kind on a path now solves the hit there
   ##   (`noteUbAtFork`). `tUndefined`'s default no longer lists
   ##   `ubTailUnverified` (never a walk's hit), and naming it is refused.
+  ## - RFC-0016 W3-z R2 (312->313): a label candidate the replay may confirm
+  ##   is held to the whole-run gate. Its tail was never walked, so a
+  ##   replay-confirmed `sxSat` with an undefined op after the label was
+  ##   trusted. `runSymexImpl` now walks each `sxSat` candidate's tail under
+  ##   its model pins (`verifyTailDefined`, `overApprox`: an open branch forks
+  ##   both arms, a fresh-symbol record is not a reason) and the kinds join
+  ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
 
-const symexWalkerVersion* = "312"
+const symexWalkerVersion* = "313"
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

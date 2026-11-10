@@ -1739,6 +1739,8 @@ task test, "Run the test suite":
             "tsymex_0016_k10c_ubsan",
             "tsymex_0016_k10c_fma",
             "tsymex_0016_k10b_round",
+            # RFC-0016 W3-z R2: a replay candidate's tail is walked.
+            "tsymex_0016_w3z_r2_candtail",
             "tsymex_0016_admir",
             "tsymex_0016_k10d_removals",
             "tsymex_0016_k10d_drain_checksoff",

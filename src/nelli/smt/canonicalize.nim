@@ -529,7 +529,12 @@ const renderAsChoicesVersion* = "12"
   ## - RFC-0016 W3-z int2 fixups (340->341): an `{.exportc.}` field is inert
   ##   on the pragma axis (P4 declined it, and with it every local holding an
   ##   exception, `system.Exception.msg` carrying the pragma: W1-a's exact
-  ##   `raise-let-value` cell came back sxUnknown).
+  ##   `raise-let-value` cell came back sxUnknown). The whole-run gate's
+  ##   tail walk reads a module-level variable as the explore walk does (its
+  ##   entry value, `isConcolicFollowWalk`): it took the concolic safety net
+  ##   and bound a 64-bit integer whatever the type, so a case-object global's
+  ##   field read halted it and a replay-confirmed sxSat failed closed
+  ##   (`ubTailUnverified`; PRC-01's `reexec/caseObjectGlobal*` cells).
 
 const symexWalkerVersion* = "341"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

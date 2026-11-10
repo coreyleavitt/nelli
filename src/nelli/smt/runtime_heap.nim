@@ -3348,7 +3348,7 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   # ones lost the alias: `let a = g; p[] = 7; if g != a` came back `sxUnsat`
   # for the `p` that addresses `g`. A name a callee holds withheld for its
   # own copy-in/copy-out stays withheld (`callGuardedNames`).
-  if not isFollowConcreteWalk():
+  if not isConcolicFollowWalk():   # int2: the tail walk too
     var unbound: seq[string]
     for name, g in w.statics.globals.pairs:
       if g.isVar and not p.env.hasKey(name) and name notin callGuardedNames and

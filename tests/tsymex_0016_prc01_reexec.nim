@@ -140,3 +140,6 @@ suite "PRC-01: case objects cross to the re-executed child":
 
   test "the walker's version floor":
     check parseInt(symexWalkerVersion) >= 296
+    # Integration W3-z int2: the whole-run gate's tail walk reads a global as
+    # the explore walk does (the case-object global pins above).
+    check parseInt(symexWalkerVersion) >= 341

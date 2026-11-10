@@ -2602,6 +2602,16 @@ proc isFollowConcreteWalk*(): bool
   ## `WalkCtx` parameter — mirrors the `syncXxx`/`currentWalkCtxPtr` idiom
   ## above. Defined after `WalkCtx` (needs the cast).
 
+proc isConcolicFollowWalk(): bool
+  ## RFC-0016 W3-z int2. `isFollowConcreteWalk()` and not the whole-run
+  ## gate's tail walk (`WalkCtx.tailGate`): a concolic collection replaying an
+  ## executed trace. The tail walk is also `wmFollowConcrete`, but it
+  ## over-approximates the run as the explore walk does, so it reads a global
+  ## as the explore walk does (its entry value); before, the concolic safety
+  ## net bound it a 64-bit integer whatever its type, and a case-object
+  ## global's field read halted the tail walk (`seVariantFieldOnDeclinedCtor`),
+  ## failing a replay-confirmed sxSat closed (`ubTailUnverified`).
+
 proc programGlobal(name: string): Option[IRGlobal]  ## RFC-0005 S8as fwd decl
 proc globalHiddenRoute(name: string): string  ## RFC-0005 S8cs fwd decl
 proc entryValueOf(name: string): SymVal  ## RFC-0005 S8as fwd decl
@@ -10116,7 +10126,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     # the walk does not see may reach it, so whatever the walk holds for it may
     # be stale: an entry value, a value the walk wrote, an opaque call's fresh
     # one. A rebuild's copy (`vCopy`) carries the value back and observes nothing.
-    if not e.vCopy and not isFollowConcreteWalk():
+    if not e.vCopy and not isConcolicFollowWalk():   # int2: the tail walk too
       let anyValue = globalHiddenRoute(routeAnyValue)
       let hidden = if anyValue.len > 0: anyValue
                    elif isGlobalEnvName(e.vname): globalHiddenRoute(e.vname)
@@ -10149,7 +10159,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       unwrittenResultZero().get
     elif e.vname.startsWith(noinitReadPrefix):
       noinitValue(e)   ## RFC-0005 S8bz (item 7)
-    elif not isFollowConcreteWalk() and e.vname notin callGuardedNames and
+    elif not isConcolicFollowWalk() and e.vname notin callGuardedNames and
          isGlobalEnvName(e.vname) and programGlobal(e.vname).isSome:
       # RFC-0005 S8as: a global read before the walk wrote it holds its
       # ENTRY value -- what it holds when the property runs. An immutable
@@ -10163,7 +10173,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # entry value, so it stands. Before S8as the read declined
       # (`feGlobalReadUnmodelled`).
       entryValueOf(e.vname)
-    elif not isFollowConcreteWalk():
+    elif not isConcolicFollowWalk():
       # Issues #161/#163 handoff: `wmExplore` (the default whole-proc
       # symbolic walker) reaching a name absent from `env` is NEVER a
       # parser/walker gap -- the parser deliberately lets a free/global
@@ -18198,6 +18208,14 @@ proc isFollowConcreteWalk*(): bool =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp.mode == wmFollowConcrete
+  else:
+    false
+
+proc isConcolicFollowWalk(): bool =
+  ## RFC-0016 W3-z int2. See the fwd-decl above.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp.mode == wmFollowConcrete and not wp.tailGate
   else:
     false
 

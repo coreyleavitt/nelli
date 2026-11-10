@@ -286,7 +286,7 @@ suite "INT-13: runtime hooks":
     check r.outcome == roConfirmed
 
   test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 308
+    check parseInt(symexWalkerVersion) >= 310
 
 suite "borrowed and system routines":
   test "borrowed and system operators compile and replay":

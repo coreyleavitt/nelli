@@ -57,6 +57,7 @@ import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
 import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejected `re"..."` is a raise site
 import ./check_options   ## RFC-0005 S8cu: a routine compiled with other checks
 from ./replayproc import hasMethodTable, hasSubtypeTable   ## RFC-0016 PRC-02m
+from ./replayproc import closureEnvRefusal, closureRouteGuard   ## RFC-0016 W3-z R8
 when hasMethodTable:
   from ./replayproc import methodRouteGuard
 when hasSubtypeTable:
@@ -333,6 +334,21 @@ proc resolveRoutineImpl*(sym: NimNode): NimNode =
       result = nil   ## totality clause: unreachable for real compiler output
   else:
     result = impl    ## already nnkProcDef
+
+proc resolveRoutineOrLambdaImpl*(sym: NimNode): NimNode =
+  ## RFC-0016 W3-z R8. `resolveRoutineImpl`, and for an anonymous routine
+  ## (`proc (..) = ..` as a value, a `do` block) its own node, whose children
+  ## sit at a routine's indices. Only the scans that read what a routine's
+  ## body may do take it: such a routine is never called by its symbol, so
+  ## the walk never resolves one.
+  result = resolveRoutineImpl(sym)
+  if result == nil and sym.kind == nnkSym:
+    let impl =
+      try: sym.getImpl
+      except CatchableError: newEmptyNode()
+    if impl.kind in {nnkLambda, nnkDo} and impl.len > 6 and
+       impl[6].kind != nnkEmpty:
+      result = impl
 
 proc resolveEntryImpl*(fn: NimNode, apiName: string): NimNode =
   ## The hard-error policy wrapper over `resolveRoutineImpl`, used by every
@@ -4362,7 +4378,7 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
       seen.add n
       if inMarkersModule(n): return   # RFC-0005 batch 11
       block:
-        let impl = resolveRoutineImpl(n)
+        let impl = resolveRoutineOrLambdaImpl(n)   # RFC-0016 W3-z R8
         if impl == nil:
           acc.notInert("`" & macros.strVal(n) & "` has no body to read")
           return
@@ -4896,7 +4912,7 @@ proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
   ## body at all is foreign code: no Defect, and "may be undefined".
   var seen = @[calleeSym]
   var memo: FloatCheckMemo
-  let impl = resolveRoutineImpl(calleeSym)
+  let impl = resolveRoutineOrLambdaImpl(calleeSym)   # RFC-0016 W3-z R8
   if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty:
     result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
     return
@@ -24198,6 +24214,7 @@ type
     callees: seq[NimNode]
     dispatched: seq[NimNode]   ## PRC-02m: the methods it calls through a dispatcher
     open: string       ## non-empty: why the code it may run cannot be listed
+    closureGlobals: seq[NimNode]   ## W3-z R8: module-level closure variables it names
 
   RouteRun = object
     ## One entry macro's analysis.
@@ -24208,6 +24225,7 @@ type
     waiting: seq[tuple[key: string; t: NimNode]]  ## probed, not yet read
     routes: seq[string]                           ## `name|why`, or `*|why`
     siteModule: NimNode    ## the module the probes are semchecked in (`symexHookMayHide`)
+    closureGlobals: seq[NimNode]  ## W3-z R8: read at run time (`closureRouteGuard`)
 
 var routeBodies {.compileTime.}: Table[string, RouteBody]
   ## Per routine, so a file's entry macros read each routine once.
@@ -24449,7 +24467,21 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
       # this scan misses: the handler's exception type is the `except`
       # branch's own, and the expanded copy of the body carries a typed `e`.
       if n.typeKind != ntyNone:
-        acc.types.add (n.getTypeInst, isModuleGlobal(n))
+        let global = isModuleGlobal(n)
+        let ti = n.getTypeImpl
+        if global and ti.kind == nnkProcTy and isClosureProcTy(ti) and
+           owner(n).kind == nnkSym and symKind(owner(n)) == nskModule:
+          # RFC-0016 W3-z R8. A module-level closure variable: what it holds
+          # when the run starts is read at run time (`closureRouteGuard`), so
+          # the type is not opened here. A closure the run stores in it is
+          # built by code this scan reads, whose captures it routes.
+          var known = false
+          for c in acc.closureGlobals:
+            if c == n: known = true
+          if not known: acc.closureGlobals.add n
+          acc.types.add (n.getTypeInst, false)
+        else:
+          acc.types.add (n.getTypeInst, global)
     of nskParam, nskForVar, nskResult, nskConst, nskTemp:
       if n.typeKind != ntyNone:
         acc.types.add (n.getTypeInst, false)
@@ -24559,6 +24591,11 @@ proc routeWalk(run: var RouteRun; root: NimNode) =
       addRoute(run, routeOpenAll, "`" & macros.strVal(root) & "` may run code " &
                "that cannot be read: " & b.open)
     for (t, storage) in b.types: routeType(run, t, storage)
+    for g in b.closureGlobals:
+      var known = false
+      for c in run.closureGlobals:
+        if c == g: known = true
+      if not known: run.closureGlobals.add g
     for c in b.callees: stack.add c
 
 proc routeThroughDeref(lv: NimNode): bool =
@@ -24870,6 +24907,14 @@ proc routeContinue(id: int; resume: NimNode): NimNode =
           scanned.add nnkCast.newTree(ident"pointer", m)
         routes = newCall(bindSym"methodRouteGuard", routes, prefix(names, "@"),
                          prefix(called, "@"), prefix(scanned, "@"))
+    if routeRuns[id].closureGlobals.len > 0:
+      # RFC-0016 W3-z R8: the run's check of what each module-level closure
+      # variable holds when it starts: an environment whose hooks the scan
+      # cannot list opens every global (`closureEnvRefusal`).
+      var why = nnkBracket.newTree()
+      for g in routeRuns[id].closureGlobals:
+        why.add newCall(bindSym"closureEnvRefusal", newLit(macros.strVal(g)), g)
+      routes = newCall(bindSym"closureRouteGuard", routes, prefix(why, "@"))
     when hasSubtypeTable:
       # RFC-0016 PRC-02m: the run's check of the subtype hooks the scan assumed.
       if routeRuns[id].refBases.len > 0:

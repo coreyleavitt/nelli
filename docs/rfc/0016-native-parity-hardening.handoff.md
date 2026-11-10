@@ -1485,6 +1485,31 @@
     moves 151 -> 152, as int2 did for the lanes it merged. The universe
     ledger needed no regeneration (int2's d635cb71 already had
     `pragma:field/exportc` modelled, the cell R9 saw declined at its base).
+  - W3-z R8 (`rfc-0016-w3z-r8`, walker 342 to 343, R7's two precision
+    limits). (a) The route scan no longer opens every global for a
+    module-level closure variable (`routeScan`'s `closureGlobals`): what it
+    holds when the run starts is read at run time (`closureRouteGuard`,
+    `closureEnvRefusal` in `replayproc.nim`): nil, no environment, or an
+    environment whose type has no destructor (ARC/ORC's `TNimTypeV2`) keeps
+    the routes; any other opens them, naming the variable. A closure the run
+    builds is read by the scans (`resolveRoutineOrLambdaImpl`), and the
+    settle names an anonymous routine stored in the variable. (b) The
+    settle's answer is ordered (`heldAtCalls` in `symex.nim`): a walk of the
+    run's direct calls in execution order (branches joined, loops to a fixed
+    point, `try`/`defer` and any call the walk cannot follow joining R7's
+    unordered answer) gives what the variable may hold at each call through
+    it; the start value is read only when a call may run it. PRC-02:
+    `reexec/procValueClosureGlobal`, `procValueClosureEnv` (an int
+    captured, built by the run), `procValueOrderStoredFirst`,
+    `procValueOrderStoredAfter` exact; `procValueReassigned` still
+    `ubSignedOverflow`; a start value whose environment runs a hook declines
+    `feGlobalRouteUnproved` naming the variable. Limits: a closure WITH an
+    environment held when the run starts is not lifted (its routine is
+    nested, so the settle's table cannot name it; the re-exec wire declines
+    it, named; a fork confirms the hit but the kinds stay). The ordering is
+    static over the footprint, not a per-call record: the replay runs the
+    compiled routines, which carry no hook at a call through a variable.
+- W3-z integration 3b (`rfc-0016-w3z-int3`, walker 345, 2026-11-10): int3 plus R8 b811cdb9 merged `--no-ff` (R8's 342->343 renumbered to 345; its floor pin and the CR2 pin say 345). The census ratchet is restored: `procValueUses` (`symex.nim`) is an `if` chain over the kind with the same default (descend into the children, so a use of the variable under any unlisted kind is still found), not a `case` with `else: discard`; its `census.txt` line is removed and the census ceiling returns 152 -> 151.
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **W3-z E4b (`rfc-0016-w3z-evidence4b`):** the soundness rows SND-01..06, SND-08..11, PRC-27 and CRH-02 leave `closed-legacy.txt`: their pre-K9 suites now call `pinExact`/`pinDecline` beside every existing assertion (records keyed to the magic cell the fix lives on where one exists, else to a `family:callshape` cell). A closed row cannot name a declined cell, so SND-06 (`magic:ProcCall`), CRH-02 (`magic:GCref`) and the decline-only rows carry the pin file, not the cell. PRC-01 and PRC-02 are pinned on Linux (`pinExact` under `-d:nelliReplayReexec`, the same marshalling path as Windows); their legacy entries said the suites skip on Linux, which has been false since PRC-01 and PRC-02m. PRC-41 and PRC-42 are homed at W4-z (the id the other open precision rows use; the Wave 4 table's "W-32 and the precision rows" line has no slice id). `closed-legacy.txt` is 24 rows.
 - **W3-z E2c (`rfc-0016-w3z-evidence2c`):** the construct axis grows 61 -> 70 cells. `k8a-gen/DivLit` and `k8a-gen/Udiv` ship exact records from two hand-seeded sat-by-construction anchor programs (`anchorPrograms`, ids from 1000000, in the batch that starts the stream), whatever the seed or count. The six sampled-unsat-only keys gain an exhaustive (int8/uint8) or sat-sibling pin and become modelled cells. `threads/createThread` is a declined cell (`pinDecline`, `feUnsupportedOp`). Not cells: `hook/=trace/cycleCollector` and `hook/=destroy/dynamicSubtype` (walker faults, `coerceIntLit`, P6: a fault is not a decline) and `quit/afterTarget/assertCoveredBy` (a clean `sxSat`; the host ends at the splat, INT-22): they stay `skipCell`.

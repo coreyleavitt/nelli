@@ -560,8 +560,16 @@ const renderAsChoicesVersion* = "12"
   ##   variable held on the replayed run reaches (`symex.nim`'s
   ##   `emitProcValueLift`): PRC-02's `reexec/procValueGlobal` is exact again
   ##   (W3-z int2 had pinned it `ubTailUnverified`).
+  ## - RFC-0016 W3-z R8 (344->345): a module-level closure variable no longer
+  ##   opens every global in the route scan (`feGlobalRouteUnproved`): what it
+  ##   holds when the run starts is read at run time (`closureRouteGuard`), and
+  ##   only an environment whose type has a destructor (a hook dropping it
+  ##   runs) opens them, naming the variable. The replay settle's answer for a
+  ##   proc-valued variable is ordered (`heldAtCalls`): what it may hold AT
+  ##   each call through it, so a routine stored after the last call, or a
+  ##   start value replaced before every call, is not read.
 
-const symexWalkerVersion* = "344"
+const symexWalkerVersion* = "345"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

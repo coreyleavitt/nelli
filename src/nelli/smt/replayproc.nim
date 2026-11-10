@@ -270,6 +270,42 @@ when hasSubtypeTable:
     if why.len > 0:
       result.add "!|" & why & " (the subtype table and the scan disagree)"
 
+proc closureEnvRefusal*[T: proc](name: string; x: T): string =
+  ## RFC-0016 W3-z R8. Empty when the closure the module-level variable `name`
+  ## holds as the run starts runs no lifetime hook when it is dropped: it is
+  ## nil, it has no environment, or its environment's type has no destructor
+  ## (every captured value is plain bits). Otherwise the decline, naming the
+  ## variable: the scan never read the code that built the environment, so
+  ## the hooks dropping it runs cannot be listed. Read under ARC/ORC, where
+  ## an environment is an object whose first field is its type's
+  ## `TNimTypeV2`, whose first field is the destructor; any other memory
+  ## manager declines.
+  when sizeof(T) <= sizeof(pointer):
+    ""
+  else:
+    if x.isNil or rawEnv(x).isNil: return ""
+    let why = "the closure `" & name & "` holds when the run starts has a " &
+              "captured environment"
+    when defined(gcArc) or defined(gcOrc) or defined(gcAtomicArc):
+      let rti = cast[ptr pointer](rawEnv(x))[]
+      if rti != nil and cast[ptr pointer](rti)[] == nil: return ""
+      why & " whose lifetime hooks the scan cannot list (dropping it runs them)"
+    else:
+      why & ", whose type this memory manager does not describe"
+
+proc closureRouteGuard*(routes: seq[string]; refusals: openArray[string]):
+    seq[string] =
+  ## RFC-0016 W3-z R8. The route scan of a SUT that names a module-level
+  ## closure variable left its type closed, a hypothesis: what each holds when
+  ## the run starts runs no hook when dropped (`closureEnvRefusal`). Refused,
+  ## every writable global is open (`*`, the scan's own answer for a closure
+  ## it cannot read), with the variable named.
+  result = @routes
+  for why in refusals:
+    if why.len > 0:
+      result.add "*|" & why
+      return
+
 proc refusedHostHook*(why: string): ReplayChild =
   ## RFC-0005 0.9.1 (WA-7). As `refusedNotMarshallable`, for a runtime hook the
   ## host had set at the time (`hostRuntimeHook`): a run without it replays,

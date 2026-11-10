@@ -1199,7 +1199,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z R9 (the tail walk's own budget): 342->343.
     ## RFC-0016 W3-z R7 (a replay names a proc-valued variable's routine):
     ## 343->344.
-    check symexWalkerVersion == "344"
+    ## RFC-0016 W3-z R8 (a closure global's start value read at run time; a
+    ## proc-valued variable's callee ordered): 344->345.
+    check symexWalkerVersion == "345"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

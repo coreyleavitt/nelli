@@ -1564,6 +1564,7 @@ task test, "Run the test suite":
             "tsymex_0016_e3b_readonly_wiring",
             "tsymex_0016_k2f1_may",
             "tsymex_0016_k2f4_sentinel",
+            "tsymex_0016_k2f5_varret_byvalue",
             # RFC-0005 S8cq: by-value sharing, var-returning actuals, a call in
             # a location lowered twice.
             "tsymex_rfc0005_s8cq_argorder",

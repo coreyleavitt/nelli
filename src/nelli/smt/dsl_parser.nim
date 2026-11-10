@@ -8731,12 +8731,35 @@ proc formalPassedByAddress(calleeSym: NimNode; k: int): bool =
       inc pos
   false
 
+proc varCallResult(n: NimNode): NimNode =
+  ## RFC-0016 K2F-5. The call returning `var T` or `lent T` that the path `n`
+  ## (`getVar()`, `getVar().a`, `t[k].b`) reads a location of, or nil. Its
+  ## result is not fresh memory: it is the location the call hands out.
+  var t = n
+  while true:
+    case t.kind
+    of nnkCall, nnkCommand:
+      if t.len > 0 and (t.typeKind == ntyVar or typeIsLent(t.getTypeInst)):
+        return t
+      return nil
+    of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenDeref,
+       nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0: return nil
+      t = (if t.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv}: t[^1]
+           else: t[0])
+    else: return nil  # k2: fail-closed: nil: no var call; lvalueRoot's own reading stands
+
 proc byValueActual(a: NimNode): NimNode =
   ## RFC-0005 S8cq. The lvalue the by-value actual `a` may share memory with
   ## (S8cn: an openArray formal is the same memory, whatever its conversion or
   ## `toOpenArray` spells it as), or nil when it has its own: a by-address
   ## actual, a literal, a call's fresh result, or a `let` or a `const` no code
   ## writes (`letCursorDecline` takes a `let` over another variable).
+  ## RFC-0016 K2F-5: a call returning `var T` or `lent T` is not a fresh
+  ## result. Nim passes a by-value formal larger than three words by address
+  ## (`ccgIntroducedPtr`), so `f(getVar())` hands `f` the location `getVar`
+  ## returns, and a write the callee makes to it (through a global, a table)
+  ## is read through the formal (`tsymex_0016_k2f5_varret_byvalue`).
   var bare = a
   while bare.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenCallConv,
                       nnkConv} and bare.len > 0:
@@ -8748,7 +8771,7 @@ proc byValueActual(a: NimNode): NimNode =
   var steps: seq[NimNode]
   let root = lvalueRoot(bare, steps)
   if root == nil and steps.len == 0 and bare.typeKind != ntyVar and
-     not typeIsLent(bare.getTypeInst):
+     not typeIsLent(bare.getTypeInst) and varCallResult(bare).isNil:
     return nil
   if root != nil and root.kind == nnkSym and steps.len == 0 and
      symKind(root) notin {nskVar, nskParam, nskForVar, nskTemp, nskResult}:
@@ -8793,6 +8816,18 @@ proc localOwnedActual(bare: NimNode): bool =
     of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr:
       if t.len == 0: return false
       t = t[0]
+    of nnkHiddenDeref:
+      # RFC-0016 K2F-5: a stdlib accessor returning `var T` (`Table.[]`,
+      # `mgetOrPut`) hands out a location in its first argument's own value,
+      # so the path is local when that argument is. A user routine's `var`
+      # result may be any global (`proc g(): var T = gT`): not proved local.
+      # The first argument must be passed by address (a `var` formal): over a
+      # `TableRef` the location is a heap cell any alias of the ref reaches.
+      let c = varCallResult(t)
+      if c.isNil or c.len < 2 or c[0].kind != nnkSym or isUserCallee(c[0]) or
+         c[1].kind != nnkHiddenAddr or c[1].len != 1:
+        return false
+      t = c[1][0]
     else: return false  # k2: fail-closed: false: not proved local; the heap answer stands
 
 proc formalAddressTaken(impl: NimNode): bool =
@@ -8869,7 +8904,23 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
   scanOpaqueEffects(calleeSym, acc, seen, stack)
   for j in 1 ..< n.len:
     if n[j].kind notin {nnkHiddenAddr, nnkAddr}:
-      scanRead(n[j], acc, seen, stack)
+      # RFC-0016 K2F-5: the actual's own `var` call has run, and handed its
+      # location over, before the callee starts: its body (`getVar(): var T
+      # = gT` names `gT`, read as escaping) writes nothing the formal reads
+      # afterwards. Its operands, and the indices above it, are still read.
+      let vc = if j - 1 == k: varCallResult(n[j]) else: nil
+      if vc.isNil:
+        scanRead(n[j], acc, seen, stack)
+      else:
+        var t = n[j]
+        while t != vc:
+          if t.kind == nnkBracketExpr:
+            for c in 1 ..< t.len: scanRead(t[c], acc, seen, stack)
+          t = (if t.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv}: t[^1]
+               else: t[0])
+        for c in 1 ..< vc.len:
+          if vc[c].kind notin {nnkHiddenAddr, nnkAddr}:
+            scanRead(vc[c], acc, seen, stack)
   if not acc.inert: return "memory the callee may write: " & acc.why
   # A local's memory has no other name but a pointer to it, and S8bs keeps that
   # cell and the formal one location (`byValueLoc`): what the callee writes is

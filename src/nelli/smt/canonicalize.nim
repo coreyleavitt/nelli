@@ -364,7 +364,13 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "313"
+const symexWalkerVersion* = "314"
+  ## RFC-0016 K2F-5 (313->314): a call returning `var T` or `lent T` passed to
+  ## a by-value formal is the location the call returns, not a fresh value:
+  ## Nim passes a formal over three words by address, so the callee reads a
+  ## write it makes to that location (a global, a table entry) through the
+  ## formal. `byValueWritten` now asks about it; a stdlib accessor over a
+  ## local (`t[k]` on a local `Table`) is still a local's own memory.
   ## RFC-0016 K2F-4 (312->313): sentinel polarity. An inline iterator's formal
   ## given an array or set constructor of direct operands (`[v, 0]`) is that
   ## expression, re-read at each use as `transf.putArgInto` maps it, not a

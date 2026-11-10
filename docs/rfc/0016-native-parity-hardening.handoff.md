@@ -170,6 +170,14 @@
     `uint32` to `high(uint32)` and `countdown` over `uint32` to 0 never end
     (the counter wraps): the model wraps too and ends untrusted at the unwind
     bound. Test: `tsymex_0016_w3z_p17_dotdot`.
+  - W3-z P18 (`rfc-0016-w3z-parser18`, walker 317 to 318, soundness): an
+    `int8` or `int16` loop variable of `..`, `..<`, `countup`, `countdown` was
+    bound as an int64 in the body, so `i + 125'i8` never raised
+    `OverflowDefect` (probed: trusted false sxUnsat on `OverflowDefect` for
+    int8 and int16 in all four forms; `int32`, `char`, an `int8` proc argument
+    and an in-range body already agreed with native). `smallUnsignedBind` is
+    now `smallCounterBind`, one helper for the four narrow types. Test:
+    `tsymex_0016_w3z_p18_signed_counter`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

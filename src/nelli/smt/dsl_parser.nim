@@ -18759,16 +18759,17 @@ proc parseIncDecLvalue(n: NimNode; preamble: var seq[IRStmt];
   let newVal = siteBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR, n)
   parseAsgn(nnkAsgn.newTree(target, newEmptyNode()), newVal, preamble, ctx)
 
-proc smallUnsignedBind(iterVar: NimNode; iterName, ivName: string;
-                       intTy: IRType): IRStmt =
-  ## RFC-0016 W3-z P17. The loop variable's binding: `i = iv`. A `uint8` or
-  ## `uint16` counter is stepped as an `int` (system's `IntLikeForCount`
-  ## branch) and yielded as `T(res)`, so `i` is the unsigned type in the body
-  ## (`i - 1` wraps), not the 64-bit signed `iv`.
-  if iterVar.typeKind in {ntyUInt8, ntyUInt16}:
+proc smallCounterBind(iterVar: NimNode; iterName, ivName: string;
+                      intTy: IRType): IRStmt =
+  ## RFC-0016 W3-z P17/P18. The loop variable's binding: `i = iv`. A narrow
+  ## counter (`int8`, `int16`, `uint8`, `uint16`) is stepped as an `int`
+  ## (system's `IntLikeForCount` branch) and yielded as `T(res)`, so `i` is
+  ## that type in the body (`i - 1` wraps for an unsigned one, `i + 125'i8`
+  ## raises `OverflowDefect` for a signed one), not the 64-bit signed `iv`.
+  if iterVar.typeKind in {ntyInt8, ntyInt16, ntyUInt8, ntyUInt16}:
     let t = classifyType(iterVar).ty
     mkLet(iterName, t, mkConvIntWidth(mkVar(ivName), intTy.width, intTy.signed,
-                                      t.width, false))
+                                      t.width, t.signed))
   else:
     mkLet(iterName, intTy, mkVar(ivName))
 
@@ -20521,7 +20522,7 @@ proc parseStmtInner(n: NimNode,
           stepIR = mkVar(stepName)
       let body = parseLoopBody(bodyNode, ctx).body
       let cond = mkBinop(if down: bGe else: bLe, mkVar(ivName), hiRead)
-      let bindIter = smallUnsignedBind(iterVar, iterName, ivName, intTy)
+      let bindIter = smallCounterBind(iterVar, iterName, ivName, intTy)
       let stepIv = mkAssign(ivName,
         mkBinop(if down: bSub else: bAdd, mkVar(ivName), stepIR))
       var allStmts = preamble3
@@ -20562,7 +20563,7 @@ proc parseStmtInner(n: NimNode,
       let cmpOp = if inclusive: bLe else: bLt
       let cond = mkBinop(cmpOp, mkVar(ivName), hiIR)
       # Wrap body with: let i = __iv; <body>; __iv = __iv + 1
-      let bindIter = smallUnsignedBind(iterVar, iterName, ivName, intTy)
+      let bindIter = smallCounterBind(iterVar, iterName, ivName, intTy)
       let incIv = mkAssign(ivName,
         mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
       let loopBody = mkBlock(@[bindIter, body, incIv])

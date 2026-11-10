@@ -364,7 +364,12 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "317"
+const symexWalkerVersion* = "318"
+  ## RFC-0016 W3-z P18 (317->318): SOUNDNESS. An `int8` or `int16` loop
+  ## variable of `..`, `..<`, `countup` or `countdown` was bound as a 64-bit
+  ## signed int in the body, so `i + 125'i8` never raised `OverflowDefect`: a
+  ## trusted false sxUnsat for a label reached by (or a raise at) the native
+  ## overflow. It is now its own type, as the unsigned narrow counters are.
   ## RFC-0016 W3-z P17 (316->317): SOUNDNESS. The `..` / `..<` arm re-read a
   ## non-symbol bound (`0 ..< s.len`, `0 .. m + 0`) on every iteration where
   ## Nim evaluates it once (a symbol bound is still read each iteration), so a

@@ -320,6 +320,17 @@ const renderAsChoicesVersion* = "12"
   ##   a libm routine), where the walker used to abort the whole walk at the
   ##   lowering. The canonical IR of such a program carries the marker and not
   ##   an `iekMathCall`; rows were added for the modelled names that had none.
+  ## - RFC-0016 PRC-02m (extends 310): the global route scan of an entry that
+  ##   dispatches a method. Under the toolchain's dispatch table
+  ##   (`hasMethodTable`) the scan reads the methods registered at the entry
+  ##   as the dispatcher's targets instead of opening every global
+  ##   (`feGlobalRouteUnproved`). That set is a HYPOTHESIS at macro time (the
+  ##   table exists only in the running binary): the entry's route list is
+  ##   wrapped in `methodRouteGuard`, which at run time asks the table whether
+  ##   a body outside the scanned set can run, and if so adds a `!` route, so
+  ##   every variable read declines (the precise decline, a verdict demoted
+  ##   to `sxUnknown`). Stock and lib builds keep the open scan. This is the
+  ##   replay's check (`methodDispatchRefusal`) lifted to the verdict.
 
 const symexWalkerVersion* = "310"
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a

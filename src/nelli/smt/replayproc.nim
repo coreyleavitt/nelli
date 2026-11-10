@@ -206,6 +206,20 @@ when hasMethodTable:
         return "an override of `" & bucketName[b] & "` for `" & recv &
                "` the entry could not see"
 
+when hasMethodTable:
+  proc methodRouteGuard*(routes: seq[string]; names: openArray[string];
+                         called, scanned: openArray[pointer]): seq[string] =
+    ## RFC-0016 PRC-02m. The route scan of a SUT that dispatches a method read
+    ## the methods registered at the entry as the override set, a hypothesis.
+    ## This run's table confirms it (`methodDispatchRefusal`): confirmed, the
+    ## routes stand; refused, every read of a variable declines, as the walk's
+    ## dispatch over the overrides the entry saw cannot stand for the body the
+    ## binary runs (`!` is `routeOpenValue`; this module cannot import it).
+    result = @routes
+    let why = methodDispatchRefusal(names, called, scanned)
+    if why.len > 0:
+      result.add "!|" & why & " (the dispatch table and the scan disagree)"
+
 proc refusedHostHook*(why: string): ReplayChild =
   ## RFC-0005 0.9.1 (WA-7). As `refusedNotMarshallable`, for a runtime hook the
   ## host had set at the time (`hostRuntimeHook`): a run without it replays,

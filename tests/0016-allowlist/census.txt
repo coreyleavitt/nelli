@@ -153,3 +153,4 @@ survivors:src/nelli/smt/runtime.nim:Survivors(live: @[])	K7c	Survivors literal; 
 survivors:src/nelli/smt/runtime.nim:Survivors(live: ps)	K7c	Survivors literal; K7c brings every walkStmt arm to Survivors through the sanctioned constructors
 survivors:src/nelli/smt/runtime.nim:Survivors(live: ps)#2	K7c	Survivors literal; K7c brings every walkStmt arm to Survivors through the sanctioned constructors
 survivors:src/nelli/smt/runtime.nim:result = Survivors(live: @[])	K7c	Survivors literal; K7c brings every walkStmt arm to Survivors through the sanctioned constructors
+bare_skip:tests/tsymex_0016_prc02_reexec.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind

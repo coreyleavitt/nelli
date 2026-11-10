@@ -1675,6 +1675,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ct_reexec_e",
             "tsymex_0016_prc01_reexec",
             "tsymex_0016_prc02_reexec",
+            "tsymex_0016_prc02m_find",
             "tsymex_rfc0005_b11_hoststate",
             "tsymex_rfc0005_b11_hoststate_reexec",
             "tsymex_rfc0005_s8ct_deepterm",

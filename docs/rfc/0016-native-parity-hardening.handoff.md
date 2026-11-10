@@ -98,6 +98,18 @@
     (`feGlobalRouteUnproved`); the cpp "nimcall-typed global" pin in
     `tsymex_0016_prc02_reexec` fails `feHostUnadmitted` under both compilers;
     tail-walk witness loop count above `maxLoopUnwind` fails closed.
+  - PRC-02m `rfc-0016-prc02m` (walker 310, comment extended): under
+    `hasMethodTable` the route scan reads a dispatched method's registered
+    overrides as callees (a hypothesis at macro time) and the entry's route
+    list is wrapped in `methodRouteGuard`, which asks the run's table and adds
+    a `!` route (every variable read declines) when a body outside the scan
+    can run. This closes an unsound trusted `sxUnsat` for a hidden override
+    (`tsymex_0016_prc02m_find`). BLOCKER for the `feGlobalRouteUnproved`
+    follow-up: it is not the method open alone. `routeType` opens every global
+    for any `ref` of an inheritance hierarchy ("may hold a subtype, whose
+    lifetime hooks cannot be listed"), and the table lists method receivers,
+    not subtypes, so a global read beside a method SUT still declines. Stock
+    builds still trust a hidden override when the SUT reads no global.
   - Resume: `/loop implement the next unimplemented rfc-0016 slice with /tdd ...`
     (the standing prompt); re-read this file and MEMORY.md first.
 - **Wave 3 progress (2026-11-08):** K2a (`rfc-0016-k2a`):

@@ -53,6 +53,9 @@ import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
 import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
 import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejected `re"..."` is a raise site
 import ./check_options   ## RFC-0005 S8cu: a routine compiled with other checks
+from ./replayproc import hasMethodTable   ## RFC-0016 PRC-02m
+when hasMethodTable:
+  from ./replayproc import methodRouteGuard
 
 template typeKind(n: NimNode): NimTypeKind = viewTypeKind(n)
   ## RFC-0005 S8bl: every type query of the parser reads a borrowed
@@ -23240,11 +23243,13 @@ type
     ## What one routine's own text names (`routeScan`).
     types: seq[tuple[t: NimNode; storage: bool]]
     callees: seq[NimNode]
+    dispatched: seq[NimNode]   ## PRC-02m: the methods it calls through a dispatcher
     open: string       ## non-empty: why the code it may run cannot be listed
 
   RouteRun = object
     ## One entry macro's analysis.
     seenRoutines, seenTypes: seq[string]
+    dispatched, methods: seq[NimNode]   ## PRC-02m: called through a dispatcher; read
     waiting: seq[tuple[key: string; t: NimNode]]  ## probed, not yet read
     routes: seq[string]                           ## `name|why`, or `*|why`
     siteModule: NimNode    ## the module the probes are semchecked in (`symexHookMayHide`)
@@ -23482,8 +23487,21 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
       acc.types.add (n, false)
     of userRoutineSymKinds:
       if symKind(n) == nskMethod:
-        acc.open = "it may dispatch `" & macros.strVal(n) & "`, whose overrides " &
-                   "cannot be listed"
+        # RFC-0016 PRC-02m. With the toolchain's dispatch table the override set
+        # is a hypothesis, the methods registered under the name at the entry
+        # (`registeredMethods`): each is read as a callee, and the run confirms
+        # the table lists no body outside them (`methodRouteGuard`). Otherwise
+        # the overrides cannot be listed.
+        var listed = false
+        when hasMethodTable:
+          if isUserRoutine(n):
+            listed = true
+            acc.callees.add n
+            acc.dispatched.add n
+            for o in registeredMethods(macros.strVal(n)): acc.callees.add o
+        if not listed:
+          acc.open = "it may dispatch `" & macros.strVal(n) & "`, whose " &
+                     "overrides cannot be listed"
       elif isUserRoutine(n):
         # `symexTarget`'s capture is the library's own, and no user's type. The
         # path is normalised as `isMarkerCall` does: on Windows it has `\`.
@@ -23549,6 +23567,8 @@ proc routeWalk(run: var RouteRun; root: NimNode) =
     if key in run.seenRoutines: continue
     run.seenRoutines.add key
     let b = routeBodyOf(r)
+    if symKind(r) == nskMethod: run.methods.add r
+    for d in b.dispatched: run.dispatched.add d
     if b.open.len > 0:
       addRoute(run, routeOpenAll, "`" & macros.strVal(root) & "` may run code " &
                "that cannot be read: " & b.open)
@@ -23805,9 +23825,23 @@ proc routeContinue(id: int; resume: NimNode): NimNode =
   if routeRuns[id].waiting.len == 0:
     var lit = newTree(nnkBracket)
     for r in routeRuns[id].routes: lit.add newLit(r)
-    if lit.len == 0:
-      return newCall(nnkBracketExpr.newTree(ident"newSeq", ident"string"))
-    return prefix(lit, "@")
+    var routes =
+      if lit.len == 0: newCall(nnkBracketExpr.newTree(ident"newSeq", ident"string"))
+      else: prefix(lit, "@")
+    when hasMethodTable:
+      # RFC-0016 PRC-02m: the run's check of the override set the scan assumed.
+      if routeRuns[id].dispatched.len > 0:
+        var names = nnkBracket.newTree()
+        var called = nnkBracket.newTree()
+        var scanned = nnkBracket.newTree()
+        for m in routeRuns[id].dispatched:
+          names.add newLit(macros.strVal(m))
+          called.add nnkCast.newTree(ident"pointer", m)
+        for m in routeRuns[id].methods:
+          scanned.add nnkCast.newTree(ident"pointer", m)
+        routes = newCall(bindSym"methodRouteGuard", routes, prefix(names, "@"),
+                         prefix(called, "@"), prefix(scanned, "@"))
+    return routes
   result = newStmtList()
   for (k, t) in routeRuns[id].waiting:
     result.add newCall(bindSym"symexHookProbe", newLit(k), hookProbes(t))

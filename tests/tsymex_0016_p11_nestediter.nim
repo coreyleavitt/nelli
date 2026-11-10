@@ -80,7 +80,7 @@ proc sutDefault(n: int) =
     if b: symexTarget("hit")
 
 template decided(body: untyped) =
-  if hostAdmission().isSome: skip() else: body
+  if hostAdmission().isSome: skipUnadmitted() else: body
 
 suite "W3-z P11: an inline iterator inside an inline iterator":
   test "version floor":

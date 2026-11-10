@@ -46,7 +46,7 @@ proc itDivOffDef(n: int) =
 {.pop.}
 
 template decided(body: untyped) =
-  if hostAdmission().isSome: skip() else: body
+  if hostAdmission().isSome: skipUnadmitted() else: body
 
 suite "W3-z P7: float checks reach inline iterators and templates":
   test "version floor":

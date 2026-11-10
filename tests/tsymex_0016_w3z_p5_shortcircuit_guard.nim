@@ -9,7 +9,8 @@
 ## `k > 3 or k < 10`), so no path may carry its side condition.
 import std/[unittest, strutils]
 import nelli/symex
-import nelli/smt/[canonicalize, types, replayproc]
+import nelli/smt/[canonicalize, types, replayproc, admission]
+import ./s8cu_helpers
 
 proc scrub() {.noinline.} =
   ## Zero the stack where the replay's frames land, so the `{.noinit.}` slot
@@ -67,7 +68,9 @@ suite "W3-z P5: the right operand of and/or is lowered under the left guard":
 
   when defined(cpp) or replayReexecs:
     test "skipped: the replay stack is not the scrubbed one":
-      skip()
+      skipCell(cellKey(axDefinedness, "read/uninitialised"),
+        "a cpp build or a re-executing replay child does not run on the " &
+        "scrubbed stack the dead {.noinit.} read pins need")
   else:
     test "and: a dead right-hand read carries no UB":
       scrub()

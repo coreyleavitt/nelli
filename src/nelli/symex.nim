@@ -2845,7 +2845,7 @@ proc typeMayHaveHook(t: NimNode; seen: var seq[string]): bool =
     # bound): a hook is a type symbol's, read above.
     for c in t:
       if typeMayHaveHook(c, seen): return true
-  else:
+  else:  # k2: fail-closed: true: the type may have a hook, so the routine's footprint is opened
     # RFC-0016 K2F-3 (RFC section 8.1): a type shape not listed may hold a
     # program type this scan cannot see.
     return true

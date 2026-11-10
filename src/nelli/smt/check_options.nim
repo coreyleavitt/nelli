@@ -751,7 +751,7 @@ proc touchesFloat(n: NimNode; seen: var seq[string]): bool =
     for c in n:
       if touchesFloat(c, seen): return true
     false
-  else:
+  else:  # k2: fail-closed: true: read as touching floats, so the routine keeps its float checks
     # RFC-0016 K2F-3 (RFC section 8.1): a kind not listed may compute with
     # floats (`asm` included), so the float checks may matter to it.
     true

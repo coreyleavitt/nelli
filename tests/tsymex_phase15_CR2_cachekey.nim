@@ -1150,7 +1150,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z R1 (`tUndefined` hits the `{.noinit.}` read): 311->312.
     ## RFC-0016 W3-z R2 (a replay candidate's tail is walked): 312->313.
     ## RFC-0016 W3-z P1 (opaque scan polarity): 313->314.
-    check symexWalkerVersion == "314"
+    ## RFC-0016 W3-z R3 (the main walk reads the opaque scan): 314->315.
+    check symexWalkerVersion == "315"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

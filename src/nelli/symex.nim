@@ -3600,6 +3600,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
                                   runDependence: raw.soundness.runDependence +
                                                  replayed.runDependence)
   result.bounds       = raw.bounds
+  result.undefined    = raw.undefined   # RFC-0016 W3-z R3: the run's own findings
   result.candidates   = raw.candidates
   result.annotationViolations = raw.annotationViolations   # RFC-0005 S8
 

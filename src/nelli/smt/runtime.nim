@@ -19698,6 +19698,9 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx)
   ## RFC-0005 S8cu fwd decl (defined beside `routeRaise`).
 proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
                    w: var WalkCtx)
+proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
+                         stmt: IRStmt): seq[Path]
+  ## RFC-0016 W3-z R3 fwd decl (defined beside `haltUndefined`).
   ## RFC-0016 W1-d1a fwd decl (defined beside `crashRaise`).
 
 proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
@@ -24447,6 +24450,11 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       # raise forks), so each name its effect summary lists
       # (`IRStmt.opaqueHavoc`) may hold anything of its type now.
       # RFC-0005 S8ax: and each heap cell it reaches; and it may raise.
+      # RFC-0016 W3-z R3 (finding U2): the main walk reads the scan of the
+      # callee's body, before the call's own havoc taints the paths (the
+      # listing takes clean paths only).
+      if not w.tailGate and stmt.opaqueUndefined != {}:
+        out1 = noteOpaqueUndefined(w, out1, stmt)
       for sp in out1: havocOpaqueWrites(w, sp, stmt)
       return opaqueRaiseForks(w, out1, stmt)
     # Don't resolve a body; allocate fresh retSym; mark path
@@ -27573,6 +27581,57 @@ proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
     "here, what follows is not modelled" & next &
     # RFC-0016 K10c: what the verdict assumes of the C flags nelli cannot see.
     "; " & bprof.assumedAbsentNote())
+
+proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
+                         stmt: IRStmt): seq[Path] =
+  ## RFC-0016 W3-z R3 (finding U2). The main walk's reading of
+  ## `IRStmt.opaqueUndefined`, which only the K10b tail walk read before: an
+  ## opaque call whose body may be undefined was invisible to `tUndefined`
+  ## (a trusted `sxUnsat` over a reachable overflow inside the callee) and to
+  ## `SymexResult.undefined`. The body is not walked, so the behaviour is
+  ## POSSIBLE, not shown: under `tUndefined` a requested kind is the target's
+  ## hit, solved on the path at the call (its `witnessUndefined` carries the
+  ## kind, so the sat is never trusted); under any other target the kind is
+  ## listed, as `haltUndefined` lists a reached op (clean paths, bounded, one
+  ## per kind and callee). The path CONTINUES (the call is not a halt, a target
+  ## after it stays reachable) but carries the kinds in `Path.undefined`, as
+  ## the tail gate's halt does for the run: a sat through it is never trusted.
+  let tgt = w.target
+  let site = "opaque call `" & stmt.callee & "` (its body may be undefined)"
+  for p in paths:
+    if w.mode == wmFollowConcrete and
+       concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                            w.settings):
+      result.add p
+      continue
+    for k in stmt.opaqueUndefined:
+      let isHit = tgt.kind == stkUndefined and k in tgt.ubKinds
+      var listIt = tgt.kind != stkUndefined and scSpurious notin p.taint and
+                   w.undefinedFound.len < maxUndefinedFindings
+      for u in w.undefinedFound:
+        if u.kind == k and u.site == site: listIt = false
+      if (isHit and not w.shouldStop) or listIt:
+        let solveOn = if closureBodyCallerPc.len == 0: p
+                      else: forkPath(p, closureBodyCallerPc & p.pc, p.env)
+        let (st, wit, candErrs, why) = solveTargetHit(w, solveOn)
+        case st
+        of sxSat:
+          if isHit:
+            w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
+              soundness: Soundness(pathTaint: p.taint,
+                                   witnessUndefined: ubOrdinals(p.undefined + {k})),
+              nilDerefOnPath: p.nilDeref, errors: candErrs))
+          else:
+            w.undefinedFound.add RawUndefined(kind: k, site: site, witness: wit)
+        of sxUnknown:
+          if isHit:
+            w.halted(beSolverUndef,
+              "solver returned unknown on a path reaching " & $k & " in " &
+              site & ": " & why & " (beSolverUndef)")
+        of sxUnsat, sxRaised: discard
+    let np = forkPath(p, p.pc, p.env)
+    np.undefined = p.undefined + stmt.opaqueUndefined
+    result.add np
 
 
 # ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------

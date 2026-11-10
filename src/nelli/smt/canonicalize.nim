@@ -379,7 +379,11 @@ const renderAsChoicesVersion* = "12"
   ##   both arms, a fresh-symbol record is not a reason) and the kinds join
   ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
 
-const symexWalkerVersion* = "314"
+const symexWalkerVersion* = "315"
+  ## RFC-0016 W3-z R3 (314->315): the main walk reads `IRStmt.opaqueUndefined`.
+  ## Under `tUndefined` a requested kind is the target's hit at the opaque
+  ## call; otherwise it is listed on `SymexResult.undefined`; the path goes on
+  ## carrying the kinds, so a sat through it is never trusted.
   ## RFC-0016 W3-z P1 (313->314, landed after R1/R2): the opaque-call scan reads the callee's own
   ## `overflowChecks` (`RoutineChecks.overflowOn`) and a pushed-off check
   ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the

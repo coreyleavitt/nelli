@@ -1186,6 +1186,18 @@
   `ubTailUnverified` (precision only). An opaque call's result is
   `feOpaqueCallUnmodelled` (⊤), never a candidate, so only havoc-tainted
   candidates reach this path.
+  W3-z R3 (`rfc-0016-w3z-runtime3`, walker 314 to 315, finding U2): the main
+  walk reads `IRStmt.opaqueUndefined` (`noteOpaqueUndefined`, called before the
+  call's havoc so the listing sees clean paths). Under `tUndefined` a requested
+  kind is the target's hit at the call (a possible one: the body is not
+  walked; `witnessUndefined` carries the kind, so the sat is never trusted);
+  under any other target it is listed on `SymexResult.undefined`. The path
+  goes on carrying the kinds in `Path.undefined`, so a label sat through it is
+  untrusted. `settleCandidate` now keeps `raw.undefined`. Pins:
+  `tsymex_0016_w3z_r3_opaque` (checks-off), `tsymex_0016_w3z_r3_default`.
+  Note: on today's base the pre-fix `tUndefined` answer was `sxUnknown` (the
+  callee also forks `OverflowDefect`), not a trusted unsat; the hit was missing
+  either way. A stray `|||||||` marker sits just below this entry (from base).
 ||||||| 32ae1cf0
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen

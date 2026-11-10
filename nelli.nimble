@@ -1743,6 +1743,8 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_r2_candtail",
             "tsymex_0016_w3z_p1_off",
             "tsymex_0016_w3z_p1_default",
+            "tsymex_0016_w3z_r3_opaque",
+            "tsymex_0016_w3z_r3_default",
             "tsymex_0016_admir",
             "tsymex_0016_k10d_removals",
             "tsymex_0016_k10d_drain_checksoff",

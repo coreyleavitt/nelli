@@ -1167,6 +1167,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z K2F-2 (type pragma walk shapes): 315->316.
     ## RFC-0016 K2F-1 (the "may" analyses answer "may" for what they did not
     ## read; a writing magic in a `lent` loop body declines): 311->312.
+    ## RFC-0016 K2F-4 (sentinel polarity: an inline iterator's array or set
+    ## constructor argument is re-read at each use): 312->313.
+    ## RFC-0016 K2F-5 (a `var`/`lent` call result passed to a by-value formal
+    ## is the location the call returns, not a fresh value): 313->314.
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

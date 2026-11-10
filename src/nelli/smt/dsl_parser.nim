@@ -2005,7 +2005,7 @@ proc typeIdOf*(sym: NimNode; ctx: ParseCtx = nil): Option[string] =
         cur = init[0]
       elif canon.kind == nnkIdent: return some(macros.strVal(canon))
       else: return none(string)
-    else:
+    else:  # k2: fail-closed: none: the caller declines eeUnknownExnType
       return none(string)
   none(string)
 
@@ -2185,7 +2185,7 @@ proc regexCapturesLvalue(n: NimNode): bool =
       (n[1].kind in nnkCharLit..nnkUInt64Lit or
        (n[1].kind == nnkSym and symKind(n[1]) in {nskVar, nskLet, nskParam,
                                                   nskConst, nskForVar}))
-  else: false
+  else: false  # k2: fail-closed: false: the captures call declines seUnsupportedRegex
 
 proc regexCallForks(e: IRExpr): bool =
   ## RFC-0005 S8ay. A regex call forks a raise of its own: `RegexError` for
@@ -2708,7 +2708,7 @@ proc lvalueIndexGrowable(lv: NimNode): seq[bool] =
     of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
       if t.len == 0: break
       t = t[^1]
-    else: break
+    else: break  # k2: fail-closed: a short list: placeLateAddr's count check reads it inexact
   for k in countdown(rev.high, 0): result.add rev[k]
 
 proc stmtDefines(s: IRStmt): string =
@@ -2822,7 +2822,7 @@ proc lvalueAddrStatic(lv: NimNode): bool =
     of nnkHiddenStdConv, nnkHiddenSubConv:
       if e.len != 2: return false
       e = e[1]
-    else: return false
+    else: return false  # k2: fail-closed: false: may move; the call declines feEvalOrderUnmodelled
 
 proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
                    irs: var seq[IRExpr]; tys: seq[IRType]; mode: OrderMode;
@@ -3052,7 +3052,7 @@ proc itemsArgDirect(n: NimNode): bool =
     for c in n:
       if not itemsArgDirect(c): return false
     true
-  else: false
+  else: false  # k2: n/a: transf.putArgInto's paFastAsgn: the temp IS Nim's
 
 proc parseLoopBody(bodyNode: NimNode; ctx: ParseCtx; unrolled = false):
     tuple[body: IRStmt, brkLabel: string] =
@@ -3223,7 +3223,7 @@ proc scanDelimiterChar(litNodeRaw: NimNode, byteBacked: bool): Option[char] =
       some(char(lit.intVal))
     else:
       none(char)
-  else: none(char)
+  else: none(char)  # k2: n/a: none: not the scan idiom; the loop is walked
 
 proc parseStrSliceBound(boundNode: NimNode, recvIR: IRExpr,
                         preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -3759,7 +3759,7 @@ proc hasSymexPragma(calleeSym: NimNode, pragmaName: string): bool =
       of nnkIdent, nnkSym: p.strVal
       of nnkExprColonExpr, nnkCall:
         if p[0].kind in {nnkIdent, nnkSym}: p[0].strVal else: ""
-      else: ""
+      else: ""  # k2: n/a: an entry with no name is not the pragma
     if name == pragmaName:
       return true
   false
@@ -3893,7 +3893,7 @@ proc hasBorrowPragma(impl: NimNode): bool =
       of nnkIdent, nnkSym: p.strVal
       of nnkExprColonExpr, nnkCall:
         if p[0].kind in {nnkIdent, nnkSym}: p[0].strVal else: ""
-      else: ""
+      else: ""  # k2: n/a: an entry with no name is not `borrow`
     if name == "borrow":
       return true
   false
@@ -4025,7 +4025,7 @@ proc isNoReturnRoutine(sym: NimNode): bool =
       of nnkIdent, nnkSym: macros.strVal(p)
       of nnkExprColonExpr, nnkCall:
         if p[0].kind in {nnkIdent, nnkSym}: macros.strVal(p[0]) else: ""
-      else: ""
+      else: ""  # k2: n/a: an entry with no name is not `noreturn`
     if name == "noreturn": return true
   false
 
@@ -4072,7 +4072,7 @@ proc foreignWriteNode(n: NimNode): bool =
                  else: p
       if head.kind in {nnkSym, nnkIdent} and eqIdent(head, "emit"): return true
     false
-  else: false
+  else: false  # k2: n/a: membership in asm/cast/emit; callers recurse, their own else declines
 
 proc opaqueRoutine(sym: NimNode): bool =
   ## RFC-0016 K6b (D-05). A call of `sym` may run code the walk cannot read: a
@@ -5041,7 +5041,7 @@ proc isMarkerCall(n: NimNode, name: string): bool =
     let impl = callee.getImpl
     impl.kind != nnkNilLit and
       impl.lineInfoObj.filename.replace('\\', '/').endsWith(markersModuleSuffix)
-  else:
+  else:  # k2: n/a: false walks the call as the routine it is
     false
 
 proc isMarkerCall(n: NimNode): bool =
@@ -5709,7 +5709,7 @@ proc cgSkipTrivialIndirections(n: NimNode): NimNode =
     of nnkHiddenStdConv, nnkHiddenSubConv:
       if result.len < 2: return
       result = result[1]
-    else: return
+    else: return  # k2: n/a: ccgcalls.skipTrivialIndirections stops there too
 
 const cgMutatingMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
   "AppendStrStr", "AppendSeqElem", "Addr", "New", "NewFinalize", "WasMoved",
@@ -5820,7 +5820,7 @@ proc cgBitsAreValue(ty: NimNode; depth = 0): bool =
         let ft = if f.kind == nnkIdentDefs: f[^2] else: f
         if not cgBitsAreValue(ft, depth + 1): return false
       true
-    else: false
+    else: false  # k2: fail-closed: false keeps atUnknown: feEvalOrderUnmodelled
   else: false
 
 proc cgFormalTypes(call: NimNode): seq[NimNode] =
@@ -6504,7 +6504,7 @@ proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
     of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
       if t.len == 0: return nil
       t = t[^1]
-    else: return nil
+    else: return nil  # k2: fail-closed: nil declines `has no root variable`; rooted-at asks mayBeRootedAt
 
 proc byRefRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
   ## RFC-0005 S8bd. `lvalueRoot`, except that a lvalue reached through a
@@ -6531,7 +6531,7 @@ proc byRefRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
     of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
       if t.len == 0: return nil
       t = t[^1]
-    else: return nil
+    else: return nil  # k2: fail-closed: nil: no by-ref path; lvalueRoot's nil declines
 
 proc lvalueCastBlocks(lv: NimNode): bool =
   ## RFC-0005 S8bg. True when `lvalueRoot`'s chain (a dot/bracket/deref walk
@@ -6559,7 +6559,7 @@ proc lvalueCastBlocks(lv: NimNode): bool =
       t = t[^1]
     of nnkCast:
       return true
-    else: return false
+    else: return false  # k2: fail-closed: lvalueRoot's peel set: its nil declines the actual
 
 proc mentionsSym(n, sym: NimNode): bool =
   ## RFC-0005 S8ac. True when `sym` (by symbol identity) occurs in `n`.
@@ -6567,6 +6567,17 @@ proc mentionsSym(n, sym: NimNode): bool =
   for c in n:
     if mentionsSym(c, sym): return true
   false
+
+proc mayBeRootedAt(lv, sym: NimNode): bool =
+  ## RFC-0016 K2F-4. The location `lv` may lie in `sym`'s memory. `lvalueRoot`'s
+  ## nil means both "rooted elsewhere" (a call result, a literal) and "a shape
+  ## it does not read" (a call returning `var T`, `gv(x)`, between the `addr`
+  ## and `x`); a "rooted at `sym`?" question must not read the second as no.
+  ## So: the root `lvalueRoot` reads, else whether `sym` occurs in `lv` at all.
+  var steps: seq[NimNode]
+  let r = lvalueRoot(lv, steps)
+  if r != nil: r.kind == nnkSym and containsSym(@[sym], r)
+  else: mentionsSym(lv, sym)
 
 proc formalInBody(impl, f: NimNode): NimNode =
   ## RFC-0005 S8bd. The symbol the body of `impl` uses for its formal `f`.
@@ -6705,7 +6716,7 @@ proc typeReachesCell(t: NimNode; cells: seq[NimNode];
     typeReachesCell(impl[0], cells, seen)
   of nnkEnumTy, nnkRange, nnkInfix:
     false
-  else:
+  else:  # k2: fail-closed: true: may reach
     true
 
 proc lvalueVarSyms(lv: NimNode; into: var seq[NimNode]) =
@@ -6722,32 +6733,6 @@ proc lvalueVarSyms(lv: NimNode; into: var seq[NimNode]) =
   for c in lv: lvalueVarSyms(c, into)
 
 
-proc lvaluePath(lv: NimNode; steps: var seq[string]): NimNode =
-  ## RFC-0005 S8as. The root variable of an lvalue that is a plain PATH into
-  ## it -- object or tuple fields (`o.a.b`) and constant indices (`a[2]`) --
-  ## with the steps from the root outward; nil for anything else (a
-  ## dereference, a computed index, a variant arm's field, a conversion).
-  var t = lv
-  var rev: seq[string]
-  while true:
-    case t.kind
-    of nnkSym:
-      for k in countdown(rev.high, 0): steps.add rev[k]
-      return t
-    of nnkDotExpr:
-      if t.len != 2 or t[1].kind != nnkSym: return nil
-      rev.add "." & macros.strVal(t[1])
-      t = t[0]
-    of nnkBracketExpr:
-      if t.len != 2: return nil
-      var ix = t[1]
-      while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ix.len > 0:
-        ix = ix[^1]
-      if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: return nil
-      rev.add "[" & $ix.intVal & "]"
-      t = t[0]
-    else: return nil
-
 type
   AliasIndexPairs = seq[tuple[a, b: NimNode]]
     ## RFC-0005 S8ax. Index pairs whose values all being equal makes two
@@ -6757,7 +6742,9 @@ type
 proc stableIndex(ix: NimNode; rest: openArray[NimNode]): bool  ## RFC-0005 S8ax fwd decl
 
 proc aliasSteps(lv: NimNode; steps: var seq[PathStep]): NimNode =
-  ## RFC-0005 S8ax. `lvaluePath` with a variant arm's field (Nim's
+  ## RFC-0005 S8ax. The root variable of an lvalue that is a plain PATH into
+  ## it -- object or tuple fields (`o.a.b`), constant indices (`a[2]`) --
+  ## with the steps from the root outward (S8as), and a variant arm's field (Nim's
   ## `nnkCheckedFieldExpr`) as a field step and a computed index of a value
   ## array or the variable's seq that is free of side effects
   ## (`stableIndex`) as an index step (`ix`; `field` is "" there). nil for
@@ -6788,7 +6775,7 @@ proc aliasSteps(lv: NimNode; steps: var seq[PathStep]): NimNode =
         rev.add (field: "", ix: t[1])
       else: return nil
       t = t[0]
-    else: return nil
+    else: return nil  # k2: fail-closed: nil: aliasPath false, never disjoint, so may alias
 
 proc aliasPath(a, b: NimNode; pairs: var AliasIndexPairs): bool =
   ## RFC-0005 S8ax. `a` and `b` are paths into one variable (`aliasSteps`)
@@ -6820,7 +6807,7 @@ proc aliasPath(a, b: NimNode; pairs: var AliasIndexPairs): bool =
 
 proc lvaluesDisjoint(a, b: NimNode): bool =
   ## RFC-0005 S8as. `a` and `b` are paths into one variable
-  ## (`lvaluePath`) that part at some step -- two different fields, or two
+  ## (`aliasSteps`) that part at some step -- two different fields, or two
   ## different constant indices -- so they are two locations no write to
   ## one can reach the other through. Neither is a prefix of the other (a
   ## whole and its part overlap).
@@ -6862,7 +6849,7 @@ proc heapCellTail(lv: NimNode): tuple[deref: NimNode, path: seq[string]] =
       for k in countdown(rev.high, 0): result.path.add rev[k]
       result.deref = t
       return
-    else: return
+    else: return  # k2: fail-closed: no deref: left to varActualMayAlias's root check, which declines
 
 proc derefIsPtr(d: NimNode): bool =
   ## RFC-0005 S8bf. `d` (a heap dereference) is through a `ptr`/`pointer`,
@@ -7120,7 +7107,7 @@ proc fieldCellOf(e: NimNode): tuple[root, lv: NimNode; field: string] =
     if t.getTypeImpl.kind != nnkTupleConstr and t.getTypeImpl.kind != nnkTupleTy:
       return
     field = "#" & $lv[1].intVal
-  else:
+  else:  # k2: n/a: not a field-cell actual; the generic address cell follows
     return
   if isVarIndirection(t): t = t[0]
   if t.kind != nnkSym or
@@ -8007,7 +7994,7 @@ proc lvalueStepKid(a: NimNode; k: int): bool =
     k == 0
   of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
     k == a.len - 1
-  else: false
+  else: false  # k2: fail-closed: false: an index, its call hoisted; lvalueHasCall says may-call
 
 proc hasIndexCall(a: NimNode; inIndex: bool): bool =
   ## RFC-0005 S8br. Whether `hoistIndexCalls` would evaluate a call in an
@@ -8574,10 +8561,10 @@ proc addrTakenIn(n, sym: NimNode): bool =
   elif n.kind in {nnkCall, nnkCommand} and n.len == 2 and
        n[0].kind == nnkSym and macros.strVal(n[0]) in ["addr", "unsafeAddr"]:
     operand = n[1]
-  if operand != nil:
-    var steps: seq[NimNode]
-    let r = lvalueRoot(operand, steps)
-    if r != nil and r.kind == nnkSym and containsSym(@[sym], r): return true
+  # RFC-0016 K2F-4: an operand whose root `lvalueRoot` does not read
+  # (`addr gv(x)`, a call returning `var T`) takes `x`'s address when it names
+  # `x` (`mayBeRootedAt`); before, it read as no address taken.
+  if operand != nil and mayBeRootedAt(operand, sym): return true
   for c in n:
     if addrTakenIn(c, sym): return true
   false
@@ -8699,7 +8686,7 @@ proc plainActual(a: NimNode): bool =
     for c in a:
       if not plainActual(c): return false
     true
-  else: false
+  else: false  # k2: fail-closed: false: the var actual declines; seqViewPeer skips none
 
 proc typeCopiedByValue(ty: NimNode; depth = 0): bool =
   ## RFC-0005 S8cq. The allowlist: a by-value formal of type `ty` is its own
@@ -8743,7 +8730,7 @@ proc typeCopiedByValue(ty: NimNode; depth = 0): bool =
         let ft = if f.kind == nnkIdentDefs: f[^2] else: f
         if not typeCopiedByValue(ft, depth + 1): return false
       true
-    else: false
+    else: false  # k2: fail-closed: false: shared memory; byValueWritten keeps checking
   else: false
 
 proc typeHoldsRef(ty: NimNode; depth = 0): bool =
@@ -8771,7 +8758,7 @@ proc typeHoldsRef(ty: NimNode; depth = 0): bool =
         let ft = if f.kind == nnkIdentDefs: f[^2] else: f
         if typeHoldsRef(ft, depth + 1): return true
       false
-    else: true
+    else: true  # k2: fail-closed: true: may hold a ref
   else: false
 
 proc refActualHeld(bare: NimNode; outer: seq[NimNode]): bool =
@@ -8805,12 +8792,35 @@ proc formalPassedByAddress(calleeSym: NimNode; k: int): bool =
       inc pos
   false
 
+proc varCallResult(n: NimNode): NimNode =
+  ## RFC-0016 K2F-5. The call returning `var T` or `lent T` that the path `n`
+  ## (`getVar()`, `getVar().a`, `t[k].b`) reads a location of, or nil. Its
+  ## result is not fresh memory: it is the location the call hands out.
+  var t = n
+  while true:
+    case t.kind
+    of nnkCall, nnkCommand:
+      if t.len > 0 and (t.typeKind == ntyVar or typeIsLent(t.getTypeInst)):
+        return t
+      return nil
+    of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenDeref,
+       nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0: return nil
+      t = (if t.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv}: t[^1]
+           else: t[0])
+    else: return nil  # k2: fail-closed: nil: no var call; lvalueRoot's own reading stands
+
 proc byValueActual(a: NimNode): NimNode =
   ## RFC-0005 S8cq. The lvalue the by-value actual `a` may share memory with
   ## (S8cn: an openArray formal is the same memory, whatever its conversion or
   ## `toOpenArray` spells it as), or nil when it has its own: a by-address
   ## actual, a literal, a call's fresh result, or a `let` or a `const` no code
   ## writes (`letCursorDecline` takes a `let` over another variable).
+  ## RFC-0016 K2F-5: a call returning `var T` or `lent T` is not a fresh
+  ## result. Nim passes a by-value formal larger than three words by address
+  ## (`ccgIntroducedPtr`), so `f(getVar())` hands `f` the location `getVar`
+  ## returns, and a write the callee makes to it (through a global, a table)
+  ## is read through the formal (`tsymex_0016_k2f5_varret_byvalue`).
   var bare = a
   while bare.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenCallConv,
                       nnkConv} and bare.len > 0:
@@ -8822,7 +8832,7 @@ proc byValueActual(a: NimNode): NimNode =
   var steps: seq[NimNode]
   let root = lvalueRoot(bare, steps)
   if root == nil and steps.len == 0 and bare.typeKind != ntyVar and
-     not typeIsLent(bare.getTypeInst):
+     not typeIsLent(bare.getTypeInst) and varCallResult(bare).isNil:
     return nil
   if root != nil and root.kind == nnkSym and steps.len == 0 and
      symKind(root) notin {nskVar, nskParam, nskForVar, nskTemp, nskResult}:
@@ -8867,11 +8877,29 @@ proc localOwnedActual(bare: NimNode): bool =
     of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr:
       if t.len == 0: return false
       t = t[0]
-    else: return false
+    of nnkHiddenDeref:
+      # RFC-0016 K2F-5: a stdlib accessor returning `var T` (`Table.[]`,
+      # `mgetOrPut`) hands out a location in its first argument's own value,
+      # so the path is local when that argument is. A user routine's `var`
+      # result may be any global (`proc g(): var T = gT`): not proved local.
+      # The first argument must be passed by address (a `var` formal): over a
+      # `TableRef` the location is a heap cell any alias of the ref reaches.
+      let c = varCallResult(t)
+      if c.isNil or c.len < 2 or c[0].kind != nnkSym or isUserCallee(c[0]) or
+         c[1].kind != nnkHiddenAddr or c[1].len != 1:
+        return false
+      t = c[1][0]
+    else: return false  # k2: fail-closed: false: not proved local; the heap answer stands
 
 proc formalAddressTaken(impl: NimNode): bool =
   ## RFC-0005 S8cq. The routine `impl` takes the address of a by-value formal. A
   ## `var` formal's `nnkHiddenAddr` hands on what the call already passed.
+  proc byValueFormalIn(n: NimNode): bool =
+    if n.kind == nnkSym:
+      return symKind(n) == nskParam and n.typeKind != ntyVar
+    for c in n:
+      if byValueFormalIn(c): return true
+    false
   proc walk(n: NimNode): bool =
     if n.kind in {nnkAddr, nnkHiddenAddr} or
        (n.kind == nnkCall and n.len > 1 and n[0].kind == nnkSym and
@@ -8881,6 +8909,9 @@ proc formalAddressTaken(impl: NimNode): bool =
       if r != nil and r.kind == nnkSym and symKind(r) == nskParam and
          r.typeKind != ntyVar:
         return true
+      # RFC-0016 K2F-4: a shape `lvalueRoot` does not read takes a by-value
+      # formal's address when it names one (`mayBeRootedAt`'s reading).
+      if r == nil and byValueFormalIn(n[^1]): return true
     for c in n:
       if walk(c): return true
     false
@@ -8907,12 +8938,18 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
     if refActualHeld(bare, outer):
       # Another actual may overwrite it: its own address, or any pointer.
       var viaAddr = false
+      # RFC-0016 K2F-4: the other actual's location is compared by ROOT. It
+      # was `lvalueRoot(actual) == bare`, which no path `bare` (`o.r` beside
+      # `var o`) and no shape `lvalueRoot` does not read could ever equal.
+      var bs: seq[NimNode]
+      let bareRoot = lvalueRoot(bare, bs)
       for j in 1 ..< n.len:
         if j - 1 == k: continue
         if n[j].typeKind in {ntyPtr, ntyPointer}: viaAddr = true
         elif n[j].kind in {nnkHiddenAddr, nnkAddr}:
-          var hs: seq[NimNode]
-          if lvalueRoot(n[j], hs) == bare: viaAddr = true
+          if bareRoot == nil or bareRoot.kind != nnkSym or
+             mayBeRootedAt(n[j], bareRoot):
+            viaAddr = true
       if not viaAddr: return ""
   var syms: seq[NimNode]
   lvalueVarSyms(bare, syms)
@@ -8928,7 +8965,23 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
   scanOpaqueEffects(calleeSym, acc, seen, stack)
   for j in 1 ..< n.len:
     if n[j].kind notin {nnkHiddenAddr, nnkAddr}:
-      scanRead(n[j], acc, seen, stack)
+      # RFC-0016 K2F-5: the actual's own `var` call has run, and handed its
+      # location over, before the callee starts: its body (`getVar(): var T
+      # = gT` names `gT`, read as escaping) writes nothing the formal reads
+      # afterwards. Its operands, and the indices above it, are still read.
+      let vc = if j - 1 == k: varCallResult(n[j]) else: nil
+      if vc.isNil:
+        scanRead(n[j], acc, seen, stack)
+      else:
+        var t = n[j]
+        while t != vc:
+          if t.kind == nnkBracketExpr:
+            for c in 1 ..< t.len: scanRead(t[c], acc, seen, stack)
+          t = (if t.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv}: t[^1]
+               else: t[0])
+        for c in 1 ..< vc.len:
+          if vc[c].kind notin {nnkHiddenAddr, nnkAddr}:
+            scanRead(vc[c], acc, seen, stack)
   if not acc.inert: return "memory the callee may write: " & acc.why
   # A local's memory has no other name but a pointer to it, and S8bs keeps that
   # cell and the formal one location (`byValueLoc`): what the callee writes is
@@ -9768,7 +9821,7 @@ proc simpleRefExpr(e: NimNode): bool =
   of nnkDotExpr: e.len == 2 and simpleRefExpr(e[0])
   of nnkHiddenDeref, nnkDerefExpr, nnkHiddenStdConv, nnkHiddenSubConv:
     e.len >= 1 and simpleRefExpr(e[^1])
-  else: false
+  else: false  # k2: fail-closed: false: no by-ref heap form or ref-equality guard
 
 proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
                    preamble: var seq[IRStmt]; ctx: ParseCtx;
@@ -10308,7 +10361,7 @@ proc isConstSetElem(n: NimNode): bool =
   of nnkSym: e.symKind == nskEnumField
   of nnkRange:
     e.len == 2 and isConstSetElem(e[0]) and isConstSetElem(e[1])
-  else: false
+  else: false  # k2: n/a: false lowers the set literal element by element
 
 proc parseSetLitMember(setNode, keyNode: NimNode; preamble: var seq[IRStmt];
                        ctx: ParseCtx): IRExpr =
@@ -10537,7 +10590,7 @@ proc scanProcFieldAssigns*(fn: NimNode) =
       return
     of mayScanStructuralKinds - {nnkAsgn, nnkObjConstr, nnkPragma}:
       discard
-    else:
+    else:  # k2: fail-closed: K2F-1: a missed proc codes -1, the call declines
       # RFC-0016 K2F-1: an unlisted kind is not read. That is fail-closed: a
       # proc it would add is missing from `procFieldAssigns`, so a store of
       # it codes -1 (`pfCode`) and a call through the field declines.
@@ -10689,7 +10742,7 @@ proc bitSetElemPure(n: NimNode): bool =
          not bitSetElemPure(c):
         return false
     true
-  else: false
+  else: false  # k2: fail-closed: false: incl/excl declines feUnsupportedOp
 
 proc bitSetLvalueStable(n: NimNode): bool =
   ## RFC-0005 S8bq. `regexCapturesLvalue`'s locations, an index under the
@@ -10707,7 +10760,7 @@ proc bitSetLvalueStable(n: NimNode): bool =
       (ix.kind in nnkCharLit..nnkUInt64Lit or
        (ix.kind == nnkSym and symKind(ix) in {nskVar, nskLet, nskParam,
                                               nskConst, nskForVar}))
-  else: false
+  else: false  # k2: fail-closed: false: incl/excl declines feUnsupportedOp
 
 proc parseBitSetInclExcl(n: NimNode; preamble: var seq[IRStmt];
                          ctx: ParseCtx): IRStmt =
@@ -13431,7 +13484,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
               if b.strVal == "true": into = true; true
               elif b.strVal == "false": into = false; true
               else: false
-            else: false
+            else: false  # k2: fail-closed: false: strip declines seUnsupportedStringOp
           if n.len >= 3 and not boolLit(n[2], leading): literalOk = false
           if n.len >= 4 and not boolLit(n[3], trailing): literalOk = false
           if literalOk and n.len >= 5:
@@ -14566,7 +14619,7 @@ proc unsafeCastReason(n: NimNode): string =
     # `addr x` and `unsafeAddr x` are indistinguishable in the typed AST (both
     # `nnkAddr`); the reason string names the pointer-taking operation.
     "addr"
-  else:
+  else:  # k2: n/a: "": no raw-pointer guard; the lowering that follows decides
     ""
 
 # ---- A3 (ADR-0014): closure/inline iterator inlining -------------------------
@@ -15820,9 +15873,7 @@ proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
   ## leaves are listed, structural kinds recurse, and any other kind answers
   ## "mutated", the over-approximation this veto already takes.
   proc rootedAtParam(lv: NimNode): bool =
-    var steps: seq[NimNode]
-    let r = lvalueRoot(lv, steps)
-    r != nil and r.kind == nnkSym and sameSym(r, paramSym)
+    mayBeRootedAt(lv, paramSym)   # RFC-0016 K2F-4: an unread shape that names it
   proc scan(n: NimNode): bool =
     if n == nil: return false
     case n.kind
@@ -15861,7 +15912,7 @@ proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
                                  nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
                                  nnkCallStrLit, nnkHiddenCallConv}:
       discard
-    else: return true
+    else: return true  # k2: fail-closed: K2F-1: true, may mutate
     for child in n:
       if scan(child): return true
     false
@@ -16999,7 +17050,7 @@ proc iterArgPath(a: NimNode; hasIx: var bool): bool =
       ix = ix[^1]
     if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: hasIx = true
     iterArgPath(a[0], hasIx)
-  else: false
+  else: false  # k2: n/a: putArgInto's paFastAsgn: the caller's let IS Nim's copy
 
 proc hoistIterIndices(a: NimNode; preamble: var seq[IRStmt];
                       ctx: ParseCtx; ok: var bool): NimNode =
@@ -17077,6 +17128,18 @@ proc bindIterArg(impl, formalSym, tyNode, arg: NimNode;
   if src != arg and not isToOpenArray(src):
     let k = classifyType(src).ty.kind
     if k == itSeq or (k == itArray and arrayIndexLow(src) == 0): arg = src
+  if arg.kind in {nnkBracket, nnkCurly}:
+    # RFC-0016 K2F-4. `transf.putArgInto` maps an array or set constructor of
+    # direct operands (`[v, 0]`, `{a, 'x'}`: `itemsArgDirect`) DIRECTLY, so
+    # the body re-reads it at each use and sees a write to `v` between two.
+    # `iterArgPath`'s `else` bound it as a copy: the body read `v` as it was
+    # when the loop started. Any other constructor is Nim's copy (paFastAsgn),
+    # as is one passed to an `openArray`/`varargs` formal.
+    if formalSym.typeKind in {ntyOpenArray, ntyVarargs} or
+       not itemsArgDirect(arg):
+      return false
+    body = substIterArg(body, f, arg)
+    return true
   if not iterArgPath(arg, hasIx): return false
   if not hasIx:
     body = substIterArg(body, f, arg)
@@ -17546,7 +17609,7 @@ proc stableIndex(ix: NimNode; rest: openArray[NimNode]): bool =
       macros.strVal(ix[0]) in ["+", "-", "*", "div", "mod"] and
       not isUserCallee(ix[0]) and
       stableIndex(ix[1], rest) and stableIndex(ix[2], rest)
-  else: false
+  else: false  # k2: fail-closed: false: no index step, so never disjoint
 
 proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
     tuple[addrNode, seqRoot, armRoot: NimNode] =
@@ -17662,7 +17725,7 @@ proc mayRearm(n, o: NimNode): bool =
   of mayScanStructuralKinds - {nnkPragmaBlock, nnkPragma, nnkDotExpr,
                                nnkCheckedFieldExpr} - RoutineNodes:
     discard
-  else: return true
+  else: return true  # k2: fail-closed: K2F-1: true, may rearm
   for c in n:
     if mayRearm(c, o): return true
   false
@@ -17702,7 +17765,7 @@ proc mayResizeSeq(n, s: NimNode): bool =
   of mayScanStructuralKinds - {nnkPragma, nnkBracketExpr, nnkCall, nnkCommand,
                                nnkInfix, nnkPrefix} - RoutineNodes:
     discard
-  else: return true
+  else: return true  # k2: fail-closed: K2F-1: true, may resize
   for c in n:
     if mayResizeSeq(c, s): return true
   false
@@ -18557,7 +18620,7 @@ proc pureIndexExpr(n: NimNode): bool =
     for i in 1 ..< n.len:
       if not pureIndexExpr(n[i]): return false
     true
-  else: false
+  else: false  # k2: fail-closed: false: the write declines
 
 proc isTableElemCall(n: NimNode): bool =
   ## RFC-0005 S8bz (item 2). `n` is `t[k]` on a value `Table` (`std/tables`'
@@ -19079,7 +19142,7 @@ proc lvalueHasCall(n: NimNode): bool =
       if n[0].strVal notin ["[]", "mgetOrPut"] and
          implMagic(resolveRoutineImpl(n[0])).len == 0:
         return true
-  else:
+  else:  # k2: fail-closed: true: may call
     return true
   for c in n:
     if lvalueHasCall(c): return true
@@ -22770,7 +22833,7 @@ proc stubBody(body: NimNode): bool =
   of nnkCall, nnkCommand:
     body.len > 0 and body[0].kind in {nnkIdent, nnkSym} and
       macros.strVal(body[0]) == "runnableExamples"
-  else: false
+  else: false  # k2: fail-closed: false: K4b walks only an admitted mmBody row, else declines
 
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil;
@@ -23364,7 +23427,7 @@ func isLiteralInit(v: NimNode): bool =
   of nnkCharLit .. nnkFloat128Lit, nnkStrLit .. nnkTripleStrLit: true
   of nnkHiddenStdConv, nnkConv:
     v.len == 2 and isLiteralInit(v[1])
-  else: false
+  else: false  # k2: fail-closed: false: the global's entry value is free
 
 proc collectGlobals(ctx: ParseCtx): seq[IRGlobal] =
   ## RFC-0005 S8as. The module-level variables the parse named, each with
@@ -23508,7 +23571,7 @@ proc callNameOf(n: NimNode): string =
   of nnkSym, nnkIdent: c.strVal
   of nnkClosedSymChoice, nnkOpenSymChoice:
     if c.len > 0: c[0].strVal else: ""
-  else: ""
+  else: ""  # k2: n/a: "": not a marker; the collector recurses on
 
 proc collectEmittedAnchors(n: NimNode; markers: var HashSet[int];
                            keys: var HashSet[string]) =
@@ -24177,7 +24240,7 @@ proc routeThroughDeref(lv: NimNode): bool =
       routeThroughDeref(lv[0])
   of nnkHiddenStdConv, nnkConv:
     lv.len < 2 or routeThroughDeref(lv[1])
-  else: true
+  else: true  # k2: fail-closed: true: may be behind a ref or ptr
 
 proc routeStoresThroughDeref(h: NimNode): string =
   ## The hook `h`, or a routine it runs, may store through a `ref` or a `ptr`.
@@ -24204,7 +24267,7 @@ proc routeFieldNames(rec: NimNode; acc: var seq[string]): bool =
     for c in rec:
       if not routeFieldNames(c, acc): return false
   of nnkEmpty: discard
-  else: result = false
+  else: result = false  # k2: fail-closed: false: the hook route is unread()
 
 proc routeHookCopies(h: NimNode): string =
   ## The hook `h` makes the plain copy the walk models for an assignment: `=copy`
@@ -24394,7 +24457,7 @@ proc probeShapeKnown(n: NimNode): bool =
     n.len > 0 and n[0].kind == nnkSym and macros.strVal(n[0]) != "symexHookUnproved"
   of nnkWhenStmt, nnkIfStmt, nnkElifBranch, nnkElse:
     true
-  else: false
+  else: false  # k2: fail-closed: false: the type stays unproved
 
 proc probeNames(n: NimNode; name: string): bool =
   if n.kind == nnkSym and macros.strVal(n) == name: return true

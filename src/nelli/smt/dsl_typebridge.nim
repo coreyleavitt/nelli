@@ -619,7 +619,7 @@ proc tagOrdOf(tagNode: NimNode;
     case tagNode.kind
     of nnkSym, nnkIdent: tagNode.strVal
     of nnkIntLit..nnkInt64Lit: ""  # unusual but legal
-    else: ""
+    else: ""  # k2: fail-closed: "": the literal's ordinal, else a compile error
   # Resolve ordinal from enumOrdinals or, if missing, from the literal.
   var tagOrd = -1
   for eo in enumOrdinals:

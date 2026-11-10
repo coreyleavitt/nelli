@@ -278,10 +278,10 @@ proc wireableImpl(t: NimNode; seen: var seq[NimNode]): bool =
           discard
         of nnkRecCase:
           if not wireableCase(d, seen): return false
-        else:
+        else:  # k2: fail-closed: false: not wireable, no wire replay
           return false    # a `when` in it
     true
-  else:
+  else:  # k2: fail-closed: false: not wireable, no wire replay
     false
 
 proc wireableRecList(l: NimNode; seen: var seq[NimNode]): bool =
@@ -296,7 +296,7 @@ proc wireableRecList(l: NimNode; seen: var seq[NimNode]): bool =
     wireableCase(l, seen)
   of nnkEmpty, nnkNilLit:
     true
-  else:
+  else:  # k2: fail-closed: false: not wireable, no wire replay
     false     # a `when` in it
 
 proc wireableCase(c: NimNode; seen: var seq[NimNode]): bool =

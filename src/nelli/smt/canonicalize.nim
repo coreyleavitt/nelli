@@ -417,6 +417,20 @@ const symexWalkerVersion* = "317"
   ## RFC-0016 P10 (311->312): `isInf`/`isFinite`/`isNormal` are no longer
   ## lowered by name (std/math here has none; a SUT routine of the name is
   ## walked as its own body), so a stdlib float call of those names declines.
+  ## RFC-0016 K2F-5 (313->314): a call returning `var T` or `lent T` passed to
+  ## a by-value formal is the location the call returns, not a fresh value:
+  ## Nim passes a formal over three words by address, so the callee reads a
+  ## write it makes to that location (a global, a table entry) through the
+  ## formal. `byValueWritten` now asks about it; a stdlib accessor over a
+  ## local (`t[k]` on a local `Table`) is still a local's own memory.
+  ## RFC-0016 K2F-4 (312->313): sentinel polarity. An inline iterator's formal
+  ## given an array or set constructor of direct operands (`[v, 0]`) is that
+  ## expression, re-read at each use as `transf.putArgInto` maps it, not a
+  ## copy taken where the loop starts; a "rooted at x?" question over
+  ## `lvalueRoot` reads an unread shape that names `x` as yes
+  ## (`mayBeRootedAt`: `addrTakenIn`, `formalAddressTaken`,
+  ## `scanShapeReceiverMutated`); `byValueWritten` compares another `var`
+  ## actual with a path actual by root.
   ## RFC-0016 K2F-1 (311->312): the "may" analyses answer "may" for what they
   ## did not read (RFC section 8.1). `mayWriteRoot` reads a writing magic
   ## (`inc`, `+=`, `swap`, `setLen`: the whole `FakeVarParams` set, which

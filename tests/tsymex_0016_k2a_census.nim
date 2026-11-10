@@ -34,11 +34,20 @@
 ##   decline      the body calls a decline: `decline*`, `degrade`, `addError`,
 ##                `error(`, `raise`, `fail(`, `notInert`, `unlisted`,
 ##                `unsupported`, `quit(`, `assert false`;
-##   sentinel     the whole body is one literal the caller reads as "not this
-##                construct / do not trust": `false`, `true`, `nil`, `""`,
-##                `-1`, `none(..)`, a bare `return` or `break`, with an
+##   sentinel     the whole body is one literal: `false`, `true`, `nil`,
+##                `""`, `-1`, `none(..)`, a bare `return` or `break`, with an
 ##                optional `return ` / `result = ` in front. The test cannot
-##                see the caller, so the polarity of a sentinel is review's;
+##                see the caller, so a sentinel carries its audited polarity
+##                in a comment on its `else` lines (RFC-0016 K2F-4):
+##                `# k2: fail-closed: <who reads it how>` (every caller takes
+##                the literal as decline / unknown / may) or `# k2: n/a:
+##                <why>` (a utility whose literal only means "no name" or
+##                "not this idiom", and what follows is the exact path).
+##                A sentinel with no tag, or with any other polarity, fails:
+##                a fail-open sentinel is fixed, never listed. The tag lives
+##                at the site, not in census.txt: it is a classification of
+##                the caller contract, not owed work, so it stays out of the
+##                debt ratchet (ceilings.txt);
 ##   transparent  anything else (`discard`, a recursion over the children, a
 ##                value computed from the node, a delegate): the node kind
 ##                falls through to whatever follows. Transparent is the
@@ -118,6 +127,7 @@ type
     line: int            ## 1-based line of the `case`
     subject, owner: string   ## the dotted subject; the enclosing routine
     disp: Disp
+    audit: string        ## a sentinel's `k2:` tag text ("" when untagged)
 
 const declineToks = ["decline", "degrade", "addError", "error(", "raise ",
                      "fail(", "notInert", "unlisted", "nsupported",
@@ -157,6 +167,32 @@ proc routineAt(lines: seq[string]; i: int): string =
         return l[j ..< e]
   "?"
 
+proc auditTag(line: string): string =
+  ## The `k2:` tag in a raw line's comment, from `k2:` on; "" when none.
+  let c = line.find('#')
+  if c < 0: return ""
+  let t = line.find("k2:", c)
+  if t < 0: "" else: line[t .. ^1].strip()
+
+const auditPolarities = ["fail-closed", "n/a"]
+  ## RFC-0016 K2F-4. The polarities a sentinel may carry. `fail-open` is not
+  ## one: such a sentinel is fixed in the commit that finds it.
+
+proc auditProblem(c: NimCase; path: string): string =
+  ## "" when `c` needs no audit or carries a valid one, else the failure.
+  if c.disp != dSentinel: return ""
+  let at = path & ":" & $c.line & " (case " & c.subject & ".kind in " &
+           c.owner & ")"
+  if c.audit.len == 0:
+    return "unaudited sentinel else at " & at & ": tag it `# k2: " &
+           "fail-closed: <how the caller reads it>` or `# k2: n/a: <why>`"
+  let body = c.audit[3 .. ^1].strip()
+  for p in auditPolarities:
+    if body.startsWith(p & ":") and body[p.len + 1 .. ^1].strip().len > 0:
+      return ""
+  "sentinel else at " & at & " has tag `" & c.audit & "`: the polarity " &
+    "must be fail-closed or n/a, then `:` and how the caller reads it"
+
 proc caseSubject(s: string): string =
   ## The subject of a `case <subject>.kind` header on this (comment-free)
   ## line, or "". The subject has no blanks and ends at the `.kind`.
@@ -180,7 +216,8 @@ proc caseSubject(s: string): string =
 
 proc nimCases(text: string): seq[NimCase] =
   ## Every `case <expr>.kind` of the file whose labels name `nnk*` members.
-  let lines = text.splitLines().mapIt(stripComment(it).strip(
+  let raw = text.splitLines()
+  let lines = raw.mapIt(stripComment(it).strip(
     leading = false, chars = {'\r', ' ', '\t'}))
   for i in 0 ..< lines.len:
     let subj = caseSubject(lines[i])
@@ -192,11 +229,14 @@ proc nimCases(text: string): seq[NimCase] =
     var labels: seq[string]
     var elseBody: seq[string]
     var hasElse = false
+    var audit = ""
     var cur = ""
     var k = j
     while k < lines.len:
       let t = lines[k]
       if t.strip().len == 0:
+        # A comment-only line inside the `else` body (indented past it).
+        if cur == "else" and indentOf(raw[k]) > col: audit.add auditTag(raw[k])
         inc k
         continue
       let ind = indentOf(t)
@@ -214,13 +254,16 @@ proc nimCases(text: string): seq[NimCase] =
           cur = "else"
           hasElse = true
           elseBody = @[st]
+          audit.add auditTag(raw[k])
         else: break
-      elif cur == "else": elseBody.add st
+      elif cur == "else":
+        elseBody.add st
+        audit.add auditTag(raw[k])
       inc k
     if labels.anyIt(it.contains("nnk")):
       result.add NimCase(line: i + 1, subject: subj,
                          owner: routineAt(lines, i),
-                         disp: classifyElse(elseBody, hasElse))
+                         disp: classifyElse(elseBody, hasElse), audit: audit)
 
 const platformToks = ["defined(windows)", "defined(linux)", "defined(macosx)",
                       "defined(posix)", "defined(mingw)", "defined(vcc)",
@@ -360,6 +403,22 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
     check dispOf(head & "  else:\n    for c in n: h(c)\n") == @[dTransparent]
     check dispOf(head & "  else: n.repr\n") == @[dTransparent]
 
+  test "K2F-4: a sentinel else carries an audited polarity":
+    let head = "proc h(n: NimNode): bool =\n  case n.kind\n  of nnkA: true\n"
+    proc probs(src: string): seq[string] =
+      for c in nimCases(src):
+        let p = auditProblem(c, "src/nelli/x.nim")
+        if p.len > 0: result.add p
+    check probs(head & "  else: false\n").len == 1
+    check "unaudited sentinel" in probs(head & "  else: false\n")[0]
+    check probs(head & "  else: false  # k2: fail-closed: f declines\n").len == 0
+    check probs(head & "  else:\n    # k2: n/a: no name\n    return false\n").len == 0
+    check probs(head & "  else: false  # k2: fail-open: trusted\n").len == 1
+    check probs(head & "  else: false  # k2: fail-closed\n").len == 1   # no reading
+    check probs(head & "  else: false\n  # k2: n/a: a later line's\n").len == 1
+    check probs(head & "  else: discard\n").len == 0   # transparent: census.txt's
+    check probs(head & "  else: decline(n)\n").len == 0
+
   test "the case ends where the layout says: a later else is not its else":
     check dispOf("proc h(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n" &
                  "  if x: discard\n  else: false\n") == @[dNone]
@@ -429,6 +488,20 @@ suite "RFC-0016 K2a: dispatch census (the tree)":
     let t = tally(found)
     for k in ["survivors", "degrade", "bare_skip"]:
       check t.getOrDefault(k) > 0
+
+  test "K2F-4: every sentinel else carries its audited polarity":
+    var problems: seq[string]
+    var audited = 0
+    for f in files:
+      if not f.path.startsWith("src/nelli/"): continue
+      for c in nimCases(f.text):
+        let p = auditProblem(c, f.path)
+        if p.len > 0: problems.add p
+        elif c.disp == dSentinel: inc audited
+    if problems.len > 0: echo problems.join("\n")
+    check problems.len == 0
+    check audited > 0
+    echo "K2F-4 audited sentinels: ", audited
 
   test "every case over a NimNode kind is classified (the dispositions)":
     var by = initCountTable[Disp]()

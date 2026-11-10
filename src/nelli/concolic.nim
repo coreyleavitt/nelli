@@ -193,7 +193,7 @@ proc affineOf(e: NimNode, paramName: string): Option[tuple[a, b: int64]] =
       elif rhs.get.a == 0: some((rhs.get.b * lhs.get.a, rhs.get.b * lhs.get.b))
       else: none((int64, int64))
     else: none((int64, int64))
-  else: none((int64, int64))
+  else: none((int64, int64))  # k2: fail-closed: none: the caller degrades to dkOpaque
 
 proc flipPredOp(op: PredOp): PredOp =
   case op

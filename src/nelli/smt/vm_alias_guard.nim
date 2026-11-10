@@ -175,10 +175,14 @@ proc calleeReturnsVar*(callNode: NimNode): bool =
 
 proc rootSym*(n: NimNode): NimNode =
   ## The base symbol of a `.field`/`[i]`/aliasing-call chain.
+  ## RFC-0016 K2F-4: an explicit dereference (`h[].x`), a variant arm's field
+  ## and an object conversion are steps of the chain too. Any other node is
+  ## returned as it stands: not a symbol, which `rootMayBe` reads as "may be".
   result = unwrapHidden(n)
   while true:
     case result.kind
-    of nnkBracketExpr, nnkDotExpr:
+    of nnkBracketExpr, nnkDotExpr, nnkDerefExpr, nnkCheckedFieldExpr,
+       nnkObjUpConv, nnkObjDownConv:
       if result.len == 0: return
       result = unwrapHidden(result[0])
     of nnkCall:
@@ -186,8 +190,21 @@ proc rootSym*(n: NimNode): NimNode =
         result = unwrapHidden(result[1])
       else:
         return
-    else:
+    else:  # k2: fail-closed: a non-symbol stop: rootMayBe and walkLets read may-be
       return
+
+proc namesSym(n, s: NimNode): bool =
+  if n.kind == nnkSym: return n == s
+  for c in n:
+    if namesSym(c, s): return true
+  false
+
+proc rootMayBe(n, target: NimNode): bool =
+  ## RFC-0016 K2F-4. The chain `n` may be rooted at `target`: `rootSym` reaches
+  ## it, or stops at a node it does not read (`get(h).x`, a call returning the
+  ## ref) and `target` occurs in `n`.
+  let r = rootSym(n)
+  r == target or (r.kind != nnkSym and namesSym(n, target))
 
 proc rhsAliasKind*(n: NimNode): NimNode =
   ## nil: not one of the hazard shapes. Otherwise the (unwrapped) RHS node
@@ -242,7 +259,7 @@ proc calleeName(n: NimNode): string =
     if n.len > 0: calleeName(n[0]) else: ""
   of nnkPostfix:
     if n.len > 1: calleeName(n[1]) else: ""
-  else: ""
+  else: ""  # k2: n/a: "": no name, so no mutating method
 
 const mutOperators* = ["+=", "-=", "*=", "/=", "&="]
   ## RFC-0016 K2F-1. The in-place operators: `x.f += 1` writes `x.f`, and its
@@ -286,7 +303,10 @@ proc bodyMutatesRoot*(n: NimNode; target: NimNode): bool =
   case n.kind
   of nnkAsgn, nnkFastAsgn:
     let lhs = unwrapHidden(n[0])
-    if lhs.kind in {nnkBracketExpr, nnkDotExpr} and rootSym(lhs) == target:
+    # RFC-0016 K2F-4: `h[] = ...`, `h.armField = ...` and a chain `rootSym`
+    # does not read are writes under `target` too (`rootMayBe`).
+    if lhs.kind in {nnkBracketExpr, nnkDotExpr, nnkDerefExpr,
+                    nnkCheckedFieldExpr} and rootMayBe(lhs, target):
       return true
   of nnkCall, nnkCommand, nnkInfix:
     if n.len > 0:
@@ -294,17 +314,17 @@ proc bodyMutatesRoot*(n: NimNode; target: NimNode): bool =
       # RFC-0005 S8be: a method name may be a symbol choice or an
       # accent-quoted name (`x.`=destroy``), which has no `strVal`.
       if callee.kind == nnkDotExpr and callee.len == 2 and
-         calleeName(callee[1]) in mutMethods and rootSym(callee[0]) == target:
+         calleeName(callee[1]) in mutMethods and rootMayBe(callee[0], target):
         return true
       if callee.kind in {nnkSym, nnkIdent, nnkOpenSymChoice,
                          nnkClosedSymChoice, nnkAccQuoted} and n.len > 1 and
          (calleeName(callee) in mutMethods or
           calleeName(callee) in mutOperators) and
-         rootSym(n[1]) == target:
+         rootMayBe(n[1], target):
         return true
   of mutScanInertKinds: return false
   of mutScanStructuralKinds: discard
-  else: return true
+  else: return true  # k2: fail-closed: K2F-1: true, may mutate
   for c in n:
     if bodyMutatesRoot(c, target): return true
   false
@@ -548,7 +568,7 @@ proc routineDefName*(nameNode: NimNode): string =
     for part in nn:
       s.add(if part.kind in {nnkIdent, nnkSym}: part.strVal else: part.repr)
     s
-  else: ""
+  else: ""  # k2: n/a: "": an unnamed def is not a name to audit by
 
 proc extractTopLevelNames*(path: string): seq[string] =
   ## RFC-0005 S8ak: every top-level `proc`/`func`/`macro`/`template`/

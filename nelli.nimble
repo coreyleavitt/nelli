@@ -1751,6 +1751,7 @@ task test, "Run the test suite":
             "tsymex_0016_floatchecks",
             "tsymex_0016_p7_floatinline",
             "tsymex_0016_p11_nestediter",
+            "tsymex_0016_p13_iterbreak",
             "tsymex_0016_danger",
             "tsymex_0016_boundoff",
             "tsymex_0016_objoff",

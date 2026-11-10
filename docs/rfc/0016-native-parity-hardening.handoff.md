@@ -146,9 +146,19 @@
     already declined by name. `touchesFloat` keyed its seen set by signature
     hash, so two iterators of one signature (`fouter` over `fdiv`) read as
     one and the inner body's floats were missed; the key now includes name
-    and definition line. Test: `tsymex_0016_p11_nestediter`. Still declined
-    (pre-existing, `hasBreakContinueShallow`): `break`/`continue` directly in
-    a for-body over an inline iterator.
+    and definition line. Test: `tsymex_0016_p11_nestediter`. Fixed by P13:
+    `break`/`continue` directly in a for-body over an inline iterator.
+  - W3-z P13 (`rfc-0016-w3z-parser13`, walker 316 to 317): `break` /
+    `continue` in the for-body of an inline iterator. `hasBreakContinueShallow`
+    is gone: the expansion is a jump-target block (`ParseCtx.yieldHandlers`
+    now records its index), and `parseForBody` parses the for-body as a loop
+    body of the caller: the iterator body's own loops are hidden from it,
+    `break` redirects (`JumpTarget.brkTo`) to the expansion block and
+    `continue` leaves a per-yield-site block. A labelled `break` to a caller
+    block resolves by symbol as before. No shape is left declined. Also: the
+    recursion guard no longer reads `for x in it(n): for y in it(n)` as
+    recursion (the for-body is outside the iterator). Test:
+    `tsymex_0016_p13_iterbreak`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

@@ -125,7 +125,7 @@ const nestedRoutineScanBoundary* = RoutineNodes - {nnkDo}
   ## RFC-parser-normalization N3. Answers: "does this node start a NESTED
   ## scope the A3 (ADR-0014) shallow scanners — `hasYieldShallow`,
   ## and `hasReturnShallow`, `hasKindShallow` (and so
-  ## `hasBreakContinueShallow`) — must not descend into". A `yield`/`return`/
+  ## `hasContinueShallow`) — must not descend into". A `yield`/`return`/
   ## `break`/`continue` occurrence inside a nested routine
   ## definition belongs to THAT routine, not to the iterator body being
   ## characterized for A3's inline transform, so descent stops here.
@@ -1095,6 +1095,10 @@ type
       ## False: the walker's own `continue`, back to the guard.
     brkLabel*: string    ## minted when a jump first names it; "" = unused
     contLabel*: string   ## likewise
+    brkTo*: int
+      ## RFC-0016 W3-z P13. 0: a `break` leaves this target. N > 0: it leaves
+      ## the target at index N-1 instead (a for-body's `break` leaves the
+      ## iterator expansion, which encloses the yield site).
 
   ProcScopedCollectors* = object
     ## D4 (design finding, accepted). Every field below is proc-scoped parse
@@ -1426,7 +1430,8 @@ type
                                    ## lambda-site key, disambiguating two lambdas
                                    ## with identical bodies.
     yieldHandlers*: seq[tuple[bindings: seq[(string, IRType)],
-                              forBody: NimNode]]
+                              forBody: NimNode, expansion: int,
+                              name: string]]
                                    ## RFC-0016 W3-z P11. One entry per inline
                                    ## iterator body being parsed: the loop
                                    ## variables and the for-body its `yield`s
@@ -2065,6 +2070,8 @@ proc sameBlockLabel(a, b: NimNode): bool =
 
 proc breakVia(ctx: ParseCtx; i: int): IRStmt =
   ## A `break` that leaves jump target `i`.
+  if ctx.procScoped.jumpTargets[i].brkTo > 0:
+    return breakVia(ctx, ctx.procScoped.jumpTargets[i].brkTo - 1)
   template t: untyped = ctx.procScoped.jumpTargets[i]
   if not t.brkViaBlock: return mkBreak()      # the walker's innermost loop
   if t.brkLabel.len == 0: t.brkLabel = freshSynth(ctx, "brk")
@@ -14417,14 +14424,6 @@ proc hasKindShallow(n: NimNode, kinds: set[NimNodeKind]): bool =
       if hasKindShallow(c, kinds): return true
     false
 
-proc hasBreakContinueShallow(n: NimNode): bool =
-  ## True iff `n` (the raw for-body) contains `break`/`continue` outside
-  ## nested loops or routines. Pre-scan 0(c): for a finite (straight-yield)
-  ## iterator the inlined body has no enclosing while, so `break` hits
-  ## loopStack.len==0 → path dropped while later inlined yields still run →
-  ## wrong surviving state → false positive (CRIT-2/SF-1, ADR-0014 D4-2).
-  hasKindShallow(n, {nnkBreakStmt, nnkContinueStmt})
-
 proc sameSym(a, b: NimNode): bool =
   ## RFC-chapulin-hardening R6 (ADR-0025 hardening). True iff `a` and `b` are
   ## BOTH `nnkSym` nodes denoting the SAME BINDING (true symbol identity), not
@@ -16496,7 +16495,7 @@ proc collectPairLoopCounterConsumedAfter(procDef: NimNode): seq[NimNode] =
 
 proc hasContinueShallow(n: NimNode): bool =
   ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine
-  ## boundary (mirrors `hasBreakContinueShallow`'s nesting rules, but
+  ## boundary (mirrors `hasKindShallow`'s nesting rules, but
   ## continue-only — R14: only `continue` can skip a trailing guard-refresh
   ## statement; `break` exits the loop outright, so a stale post-break guard
   ## is never checked again and is harmless).
@@ -16860,6 +16859,11 @@ proc bindIterArg(impl, formalSym, tyNode, arg: NimNode;
 const maxIteratorNesting = 8
   ## RFC-0016 W3-z P11: inline iterators expanded inside one another.
 
+proc parseJumpedBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
+  ## The for-body, its `continue` target (pushed by `parseForBody`) popped.
+  let body = parseStmt(forBodyNode, ctx)
+  wrapJumpBlock(ctx.popJumpTarget().contLabel, body)
+
 proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0016 W3-z P2. The for-body of an inlined iterator belongs to the
   ## caller: it is parsed (and walked) under the caller's checks, not the
@@ -16868,13 +16872,27 @@ proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
   # iterator's caller loop) answers to the handler beneath this iterator's.
   let handler = ctx.yieldHandlers.pop()
   defer: ctx.yieldHandlers.add handler
+  # P13. The for-body is outside the iterator: it may expand the same one
+  # again (`for x in it(n): for y in it(n): ...` is no recursion).
+  ctx.activeIterators.excl handler.name
+  defer: ctx.activeIterators.incl handler.name
+  # P13. The for-body is a loop body of the caller: its `break` leaves the
+  # whole expansion, its `continue` this yield site. The loops of the
+  # iterator body between the expansion and here are not its jump targets.
+  let keep = ctx.procScoped.jumpTargets[handler.expansion + 1 .. ^1]
+  ctx.procScoped.jumpTargets.setLen(handler.expansion + 1)
+  ctx.pushJumpTarget(isLoop = true, contViaBlock = true)
+  ctx.procScoped.jumpTargets[^1].brkTo = handler.expansion + 1
+  defer:
+    ctx.procScoped.jumpTargets.setLen(handler.expansion + 1)
+    for t in keep: ctx.procScoped.jumpTargets.add t
   if ctx.iterBodies.len == 0 or not ctx.iterBodies[^1].own:
-    return parseStmt(forBodyNode, ctx)
+    return parseJumpedBody(forBodyNode, ctx)
   # The for-body is outside the iterator: its own entry leaves the stack.
   let entry = ctx.iterBodies.pop()
   let caller = entry.caller
   ctx.checkScopes.add caller
-  result = parseStmt(forBodyNode, ctx)
+  result = parseJumpedBody(forBodyNode, ctx)
   discard ctx.checkScopes.pop()
   ctx.iterBodies.add entry
   if hasCheckOff():
@@ -20790,10 +20808,6 @@ proc parseStmtInner(n: NimNode,
         if hasReturnShallow(implBody):
           return ctx.declineMarker(feUnsupportedStmtKind, "iterator " & itSym.strVal & " contains `return` " &
             "— early-finish not yet modeled in A3-S1 (ADR-0014 D2-0b, CRIT-1)")
-        # (c) No break/continue in the raw for-body (unsound for finite iterators)
-        if hasBreakContinueShallow(bodyNode):
-          return ctx.declineMarker(feUnsupportedStmtKind, "for-body contains `break`/`continue` — unsound " &
-            "for finite iterators in A3-S1; lifted in S2 (ADR-0014 D2-0c, CRIT-2)")
         # (d) Recursion guard: if this iterator is already being inlined, degrade
         let itSymName = itSym.strVal
         if itSymName in ctx.activeIterators:
@@ -20913,9 +20927,15 @@ proc parseStmtInner(n: NimNode,
         let callerTop = if ctx.checkScopes.len > 0: ctx.checkScopes[^1] else: {}
         ctx.iterBodies.add (own: ownScope, caller: callerTop)
         if ownScope: ctx.checkScopes.add(pushedOn(iterChecks) + floatOn(iterChecks))
-        ctx.yieldHandlers.add (bindings: iterVarBindings, forBody: bodyNode)
+        # RFC-0016 W3-z P13. The expansion is a block a for-body's `break`
+        # leaves (`parseForBody`); the iterator's own loops bind their own.
+        ctx.pushJumpTarget(isLoop = false)
+        ctx.yieldHandlers.add (bindings: iterVarBindings, forBody: bodyNode,
+                               expansion: ctx.procScoped.jumpTargets.high,
+                               name: itSymName)
         var bodyIR = parseIterBodyStmt(iterBody, iterVarBindings, bodyNode, ctx)
         discard ctx.yieldHandlers.pop()
+        bodyIR = wrapJumpBlock(ctx.popJumpTarget().brkLabel, bodyIR)
         if ownScope:
           discard ctx.checkScopes.pop()
           if hasCheckOff():

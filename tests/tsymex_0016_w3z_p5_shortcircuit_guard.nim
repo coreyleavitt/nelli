@@ -106,3 +106,45 @@ suite "W3-z P5: the right operand of and/or is lowered under the left guard":
     check symexFind(andLiveIndex, tRaisedExn("IndexDefect")).status == sxRaised
   test "or: a live unguarded index still raises":
     check symexFind(orLiveIndex, tRaisedExn("IndexDefect")).status == sxRaised
+
+# ---- a degrade that is not a `{.noinit.}` read: an unwritten module global ----
+var p5g = 0
+var p5arr: array[4, int]
+
+proc andDeadGlobal(k: int) =
+  if k > 3 and p5g == 0: discard
+  else: symexTarget("clean")
+
+proc orDeadGlobal(k: int) =
+  if k > 3: return
+  if k <= 3 or p5g == 0: symexTarget("clean")
+
+proc andDeadGlobalElem(k: int) =
+  if k > 3 and p5arr[1] == 0: discard
+  else: symexTarget("clean")
+
+proc andLiveGlobal(k: int) =
+  if k > 3 and p5g == 0: symexTarget("live")
+
+suite "W3-z P5b: any lowering-time degrade in a dead right operand":
+  ## An unwritten module global is read on the right; the degrade it records
+  ## (feGlobalHavoc, a spurious-path taint) must reach only the paths where
+  ## the left operand lets the read happen; the run-level error list still
+  ## names it, because the live branch is walked. Not a `{.noinit.}` read, so the parser
+  ## cannot name it by a local's pragma.
+  test "and: a dead global read taints nothing":
+    let r = symexFind(andDeadGlobal, tLabel("clean"))
+    check r.status == sxSat
+    check r.soundness.pathTaint == {}
+  test "or: a dead global read taints nothing":
+    let r = symexFind(orDeadGlobal, tLabel("clean"))
+    check r.status == sxSat
+    check r.soundness.pathTaint == {}
+  test "and: a dead global array element read taints nothing":
+    let r = symexFind(andDeadGlobalElem, tLabel("clean"))
+    check r.status == sxSat
+    check r.soundness.pathTaint == {}
+  test "and: a live global read still taints the path":
+    let r = symexFind(andLiveGlobal, tLabel("live"))
+    check r.status == sxSat
+    check scSpurious in r.soundness.pathTaint

@@ -5491,27 +5491,44 @@ type ShortCircuitPart = tuple[pre: seq[IRStmt], ir: IRExpr]
   ## RFC-0005 S8t. One parsed operand of a short-circuit chain: the
   ## statements its evaluation hoisted, and its value.
 
+proc readsOnlyDefinedValues(e: IRExpr; ctx: ParseCtx): bool =
+  ## RFC-0016 W3-z P5. True iff lowering `e` can record nothing: it is built
+  ## only from literals, ordinary locals and parameters, and comparison /
+  ## boolean / bitwise operators over them. Every other node (an index, a
+  ## field, a call, a global, a `{.noinit.}` local) is out: lowering it may
+  ## record a degrade, a UB note or a raise site (an unwritten global or
+  ## array element, an indeterminate read, an inactive variant field), and
+  ## the walker records those through sinks with no path in hand, so they
+  ## cannot be made conditional there. This is a positive list, so a new
+  ## degrading node is guarded until someone proves it quiet.
+  if e == nil: return true
+  case e.kind
+  of iekIntLit, iekBoolLit: true
+  of iekVar:
+    e.vGlobalTy == nil and not isGlobalEnvName(e.vname) and
+      not e.vname.startsWith(noinitReadPrefix) and
+      (ctx == nil or e.vname notin ctx.noinitNames)
+  of iekBinop:
+    readsOnlyDefinedValues(e.lhs, ctx) and readsOnlyDefinedValues(e.rhs, ctx)
+  of iekUnop: readsOnlyDefinedValues(e.operand, ctx)
+  of iekSeqLen: readsOnlyDefinedValues(e.lenObj, ctx)
+  else: false
+
 proc shortCircuitPartIsPure(p: ShortCircuitPart; ctx: ParseCtx): bool =
   ## D1c's fast-path test for a non-first operand: nothing hoisted, no
-  ## inline defect fork, and no read that records a side condition when it is
-  ## lowered, so evaluating it unconditionally changes nothing.
+  ## inline defect fork, and nothing recorded when it is lowered, so
+  ## evaluating it unconditionally changes nothing.
   ##
-  ## RFC-0016 W3-z P5. The last clause was missing: a read of an unwritten
-  ## `{.noinit.}` local hoists nothing and forks nothing at parse time; the
-  ## walker records its indeterminate-read degrade when it lowers the read.
-  ## Joined flat, that degrade was recorded on paths where the left operand
+  ## RFC-0016 W3-z P5. The last clause was missing. A read of an unwritten
+  ## `{.noinit.}` local or global hoists nothing and forks nothing at parse
+  ## time; the walker records its degrade when it lowers the read. Joined
+  ## flat, that degrade was recorded on paths where the left operand
   ## short-circuits and Nim never reads the slot (`k > 3 and x == 0` at
-  ## k = 0). The parser cannot see a walker-time degrade, so it names the one
-  ## operand shape that records one here: a mention of a `{.noinit.}` local
-  ## (`ctx.noinitNames`). Guarding every operand instead would turn each flat
-  ## `a and b` into a joined `if`, a cost on every chain for one shape.
-  if p.pre.len != 0 or rhsHasInlineDefectFork(p.ir): return false
-  if ctx != nil and ctx.noinitNames.len > 0:
-    var refs: HashSet[string]
-    collectVarRefs(p.ir, refs)
-    for n in refs:
-      if n in ctx.noinitNames: return false
-  true
+  ## k = 0). What lowering records is known only to the walker, so the parser
+  ## keeps the flat form to operands `readsOnlyDefinedValues` proves quiet and
+  ## lowers the rest inside the guard.
+  p.pre.len == 0 and not rhsHasInlineDefectFork(p.ir) and
+    readsOnlyDefinedValues(p.ir, ctx)
 
 proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
                             preamble: var seq[IRStmt],

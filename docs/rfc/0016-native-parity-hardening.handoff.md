@@ -125,9 +125,17 @@
     caller's (`parseForBody`). An `{.inline.}` iterator takes the caller's
     options, as Nim does (probed natively). Tests: `tsymex_0016_w3z_p2_iter`,
     `_iter_off` (`--boundChecks:off`) and `_fwrapv` (P1's `-fwrapv` guard).
-    New gap, not fixed: `touchesFloat` (check_options.nim) is syntactic, so a
-    routine whose only float arithmetic is inside an inline iterator or
-    template it expands reads its float checks as off.
+    New gap (fixed by P7): `touchesFloat` (check_options.nim) was syntactic, so a
+    routine whose only float arithmetic is inside an inline iterator
+    it expands read its float checks as off.
+  - W3-z P7 (`rfc-0016-w3z-parser7`, walker 314 to 315): `touchesFloat` follows
+    an iterator symbol into its `getImpl` body, transitively and with a seen
+    set, since an inline iterator takes the caller's options (probed natively:
+    a `nanChecks` push in the routine raises for an iterator defined outside
+    it). Templates were already right (typed bodies are expanded). Test:
+    `tsymex_0016_p7_floatinline`. Not fixed, a precision gap: an inline
+    iterator called from another inline iterator declines
+    `feUnsupportedStmtKind`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

@@ -148,7 +148,10 @@ suite "K6a: the write-shape corpus (mayWrite == true declines)":
     mayWriteDeclines(wZeroMem, "wZeroMem_new", "lent/stdlib-pointer-arg")
   test "a cast, an emit":
     mayWriteDeclines(wCast, "wCast_new", "lent/cast-emit")
-    mayWriteDeclines(wEmit, "wEmit_new", "lent/cast-emit")
+    # K2F-1: the loop-variable scan reads the `emit` pragma itself and names
+    # it, where it used to fall through to the pointer-reach judgement.
+    pinDecline(wEmit, cellKey(axReadOnly, "lent/cast-emit"), feUnsupportedOp,
+               tLabel("wEmit_new"), needle = "foreign code (an `emit`)")
   test "a walked callee recurses":
     mayWriteDeclines(wWalked, "wWalked_new", "lent/walked-write")
     mayWriteDeclines(wWalkedDeep, "wWalkedDeep_new", "lent/walked-write")

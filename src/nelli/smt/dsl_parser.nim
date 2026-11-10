@@ -15738,8 +15738,12 @@ proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
           return true
       if n.len >= 1 and n[0].kind == nnkSym:
         let m = routineMagic(n[0])
+        # Only the written operands count: both of `swap`'s, the first (the
+        # `var` argument) of every other magic. `s.add char(data[i])` writes
+        # `s` and merely reads `data`.
         if magicIs(m, "Swap") or m in mayWriteMagics:
-          for i in 1 ..< n.len:
+          let written = if magicIs(m, "Swap"): n.len else: min(2, n.len)
+          for i in 1 ..< written:
             if rootedAtParam(n[i]): return true
         let calleeImpl = resolveRoutineImpl(n[0])
         if calleeImpl != nil:

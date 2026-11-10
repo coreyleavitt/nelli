@@ -1155,7 +1155,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z P6b (a nil case-expression arm binds its temp): 316->317.
     ## RFC-0016 W3-z P14 (Conv of a nil literal builds the target's nil; a
     ## block expression lowers as a scoped statement-list expression): 317->318.
-    check symexWalkerVersion == "318"
+    ## RFC-0016 W3-z P16 (cast of zero/nil to a ptr is the target's nil): 318->319.
+    check symexWalkerVersion == "319"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

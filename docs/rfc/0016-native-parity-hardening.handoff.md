@@ -169,6 +169,13 @@
     the value, a `break` out of the block declines `feUnsupportedExprKind`.
     Test: `tsymex_0016_p14_convnil_blockexpr`; pins use `construct:
     blockExpr/*` (no `constructaxes.nim` on the base).
+  - W3-z P16 (`rfc-0016-w3z-parser16`, walker 318 to 319): a ptr to a scalar
+    local was already modelled exactly (`ptr int`/`char`/`float`: nil literal,
+    `isNil`, `== nil`, `!= nil`, `addr x`, params, fields, `ptr T(nil)`); the
+    P14 note that it declines was wrong. The one real gap was
+    `cast[ptr T](0)` / `cast[ptr T](nil)`, which declined `heUnsafeCast`; it
+    is now the target nil. A nonzero address stays declined. Test:
+    `tsymex_0016_w3z_p16_ptrscalar`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

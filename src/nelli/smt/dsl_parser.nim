@@ -1526,6 +1526,8 @@ proc declineMarker(ctx: ParseCtx; kind: SymexErrorKind; reason: string): IRStmt 
   ## (S8bc's `pathInfeasible` drop in the walker's `isUnsupported` arm).
   mkUnsupported(kind, reason, ctx.nextMarker())
 
+proc isNilPtrCast(n: NimNode): bool   ## RFC-0016 W3-z P16 (defined with unsafeCastReason)
+
 proc declineUnsafeCast(ctx: ParseCtx; msg, reason: string): IRStmt =
   ## RFC-0005 S8. `heUnsafeCast`'s `declineAtSite`: the marker is the
   ## `isUnsafeCast` node the walker halts on.
@@ -11267,6 +11269,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
              ctx.declineMarker(ceNotImplemented, "closure iterators not yet supported"),
              captures, tBool(), mutCaptures)
   of nnkCast:
+    # RFC-0016 W3-z P16. `cast[ptr T](0)` is the target's nil (no address).
+    if isNilPtrCast(n):
+      return mkNil(classifyType(n).ty)
     # RFC-0005 S8m. `cast[ref Obj](p)` with `p: ref Obj` reinterprets a ref as
     # the very type it already has: the same address, the same `Ref_<id>`
     # sort, so it is the identity and keeps `p`'s heap identity. Before, the
@@ -14366,6 +14371,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
 
 # ---- Statement parser --------------------------------------------------------
 
+proc isNilPtrCast(n: NimNode): bool =
+  ## RFC-0016 W3-z P16. `cast[ptr T](0)` / `cast[ptr T](nil)`: the integer
+  ## zero (or the nil literal) reinterpreted as a pointer IS the nil pointer,
+  ## whatever the pointee. It names no address, so it is not an unsafe
+  ## pointer materialisation: it is the target type's nil.
+  if n.kind != nnkCast or n.len != 2: return false
+  let o = n[1]
+  if o.kind == nnkNilLit: return true
+  o.kind in {nnkIntLit .. nnkUInt64Lit} and o.intVal == 0 and
+    classifyType(n).ty.kind == itPtr
+
 proc unsafeCastReason(n: NimNode): string =
   ## Phase 15 R11 (ADR-0010, RFC §R11 — Open Question 7 CLOSED). Classify an RHS
   ## expression as an unsafe POINTER MATERIALISATION when it is unmodelable in
@@ -14385,7 +14401,8 @@ proc unsafeCastReason(n: NimNode): string =
   ## over-trigger).
   case n.kind
   of nnkCast:
-    if n.len >= 1 and n[0].kind == nnkPtrTy:
+    if isNilPtrCast(n): ""
+    elif n.len >= 1 and n[0].kind == nnkPtrTy:
       "cast[ptr T]"
     else:
       ""

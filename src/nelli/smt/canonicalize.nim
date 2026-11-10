@@ -355,6 +355,14 @@ const renderAsChoicesVersion* = "12"
   ##   does): the generated C's order, ordinary catchable raises
   ##   (`depositFloatChecks`, drained in order through `arithTrapConds`).
   ##   Unary minus and conversions stay unchecked, as in the C.
+  ##   Same version, the PRC-07/08 remainder: a float `x /= y` is lowered as
+  ##   `x = x / y` (it declined `feUnsupportedStmtKind`), with the build's
+  ##   float checks as the other compound assignments. `math.ceilDiv` is
+  ##   lowered by name (`parseCeilDiv`, row at `ssNameCall`; it declined
+  ##   `feCheckOption`): exact inside its precondition, a path outside it
+  ##   declines `feCheckOption`: its asserts follow `assertions` at the site
+  ##   that first instantiates the generic (probed natively), which the
+  ##   walker cannot see.
 
 const symexWalkerVersion* = "311"
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a

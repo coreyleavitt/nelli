@@ -224,6 +224,8 @@ suite "ADM-IR: the arithmetic stamp (mkArithBlock)":
     expect AssertionDefect:   # admitted, but not the overflowChecks row
       discard arithFromPragma(admitPragma(ppRoutine, "inline", psRoutineDecl))
     expect AssertionDefect:   # declined row
+      discard arithFromStdlib(admitStdlibBody("math.divmod", ssBodyWalk))
+    expect AssertionDefect:   # lowered by name (PRC-09), not walked by body
       discard arithFromStdlib(admitStdlibBody("math.ceilDiv", ssBodyWalk))
     expect AssertionDefect:   # admitted, but its body trips no overflow check
       discard arithFromStdlib(admitStdlibBody("math.sgn", ssBodyWalk))

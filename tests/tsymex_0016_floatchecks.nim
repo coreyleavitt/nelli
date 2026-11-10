@@ -83,6 +83,21 @@ proc bothCaught(a: float) =
     symexTarget("hit")
 {.pop.}
 
+{.push nanChecks: on, infChecks: on.}
+proc pushedCompound(a: float) =
+  ## `x /= 0.0` runs system's generic `/=`, which takes the options of its
+  ## definition (the build's: off here), not this routine's push. Native,
+  ## c and cpp (Nim 2.2.10): no raise, the NaN and the inf run on.
+  var x = a
+  x /= 0.0
+  if x != x: symexTarget("hit")
+
+proc pushedCompoundInf(a: float) =
+  var x = a
+  x *= 10.0
+  if x == Inf: symexTarget("hit")
+{.pop.}
+
 proc plainDiv(a: float) =
   ## No push: the default build checks no float operation.
   let r = a / 0.0
@@ -186,6 +201,21 @@ suite "PRC-07: float checks are walked as compiled":
       let q = pinExact(bothCaught, floatK, target = tLabel("quarter"),
                        domain = floats)
       check q.status == sxSat
+
+  test "a compound assignment takes the build's checks, not the push":
+    decided:
+      check native(pushedCompound(0.0)) == "hit"
+      let r = pinExact(pushedCompound, floatK, domain = floats)
+      check r.status == sxSat
+      let x = pinExact(pushedCompound, floatK, target = tRaisedExn(),
+                       domain = floats)
+      check x.status == sxUnsat
+      check native(pushedCompoundInf(1e308)) == "hit"
+      let i = pinExact(pushedCompoundInf, floatK, domain = floats)
+      check i.status == sxSat
+      let j = pinExact(pushedCompoundInf, floatK, target = tRaisedExn(),
+                       domain = floats)
+      check j.status == sxUnsat
 
   test "no push: the default build checks no float operation":
     decided:

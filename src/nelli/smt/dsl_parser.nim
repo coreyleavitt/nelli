@@ -8075,6 +8075,62 @@ proc parseUnsignedOp(n, a, b: NimNode; op: string;
   if bop in {bLt, bLe}: mkBinop(bop, ul, ur)
   else: mkConvIntReinterpret(mkBinop(bop, ul, ur), ty.width, true)
 
+proc parseCeilDiv(n: NimNode; proof: Admit[StdlibBody];
+                  preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0016 PRC-09. `math.ceilDiv(x, y)` (math.nim:925), by name. It
+  ## computes `((x.UT + (y.UT - 1)) div y.UT).T`: same-width
+  ## reinterpretations and wrapping unsigned arithmetic. Before that it
+  ## asserts `x >= 0 and y > 0`, and `x + y - 1 >= x` for an unsigned `T`.
+  ## A generic's instance is semantically checked once, at the site that
+  ## FIRST instantiates it (Nim 2.2.10 `seminst.generateInstance`, "TODO:
+  ## consider fixing options as well"), and `assert` reads
+  ## `compileOption("assertions")` there, not under math.nim's `checks: off`
+  ## push. Probed natively: a first `ceilDiv[int]` call under `push
+  ## assertions: off` leaves every later call unasserted, a first call with
+  ## them on asserts every later one. (The checks the C generator emits follow
+  ## the definition's push: `floorDiv(low(int), -1)` traps with SIGFPE.) The
+  ## walker cannot see that first site. Inside the precondition no assert
+  ## fails and no conversion leaves its range, so the lowering is exact
+  ## whatever the options; a path outside it (an `AssertionDefect`, or with
+  ## the asserts off the wrapped value or, at `y == 0`, the unsigned division
+  ## by zero) is declined path-locally (`feCheckOption`, naming the cell).
+  let ty = classifyType(n).ty
+  if ty.kind != itInt or ty.width notin [8, 16, 32, 64]:
+    preamble.add ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "`ceilDiv` on a " & $ty.kind & " of width " & $ty.width &
+              " is not modelled (feUnsupportedOp)"),
+      "`ceilDiv` on an unmodelled operand (feUnsupportedOp)")
+    return mkIntLit(0)
+  lowerMagic(proof):
+    let (xe, ye) = parseOperandPair(n[1], n[2], preamble, ctx)
+    let xn = freshSynth(ctx, "ceilDivX")
+    let yn = freshSynth(ctx, "ceilDivY")
+    preamble.add mkLet(xn, ty, xe)
+    preamble.add mkLet(yn, ty, ye)
+    let x = mkVar(xn)
+    let y = mkVar(yn)
+    var pre = mkBinop(bAnd, mkBinop(bGe, x, mkIntLit(0)),
+                      mkBinop(bGt, y, mkIntLit(0)))
+    if not ty.signed:
+      pre = mkBinop(bAnd, pre, mkBinop(bGe,
+        mkBinop(bSub, mkBinop(bAdd, x, y), mkIntLit(1)), x))
+    let cell = "stdlib:math.ceilDiv"
+    preamble.add mkIf(@[mkBranch(mkUnop(uNot, pre),
+      ctx.declineAtSite(feCheckOption,
+        siteMsg(n, cell & ": outside its precondition (`x >= 0 and y > 0`" &
+                (if ty.signed: "" else: ", `x + y - 1 >= x`") & ") whether " &
+                "the assert runs depends on the options where `ceilDiv` was " &
+                "first instantiated, which the walker cannot see " &
+                "(feCheckOption)"),
+        cell & ": outside its precondition (feCheckOption)"))])
+    let w = ty.width
+    let ux = mkConvIntReinterpret(x, w, false)
+    let uy = mkConvIntReinterpret(y, w, false)
+    let q = withSite(mkBinop(bDiv, mkBinop(bAdd, ux,
+                                           mkBinop(bSub, uy, mkIntLit(1))), uy),
+                     srcSite(n))
+    result = mkConvIntReinterpret(q, w, ty.signed)
+
 proc bindBoolChoice(cond: IRExpr; ty: IRType; onTrue, onFalse: IRExpr;
                     preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8cb. A temp holding `onTrue` when `cond`, else `onFalse`: the
@@ -13425,6 +13481,14 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
               let dummy = zeroValueForType(classifyType(n).ty)
               return (if dummy != nil: dummy else: mkIntLit(0))
             return mkMathCall(adm, cn, mArgs)
+    # RFC-0016 PRC-09: an integer `std/math` routine whose row is admitted at
+    # `ssNameCall` is lowered by name, before its body is registered.
+    if n.len == 3 and isStdMathProc(calleeSym):
+      let impl = resolveRoutineImpl(calleeSym)
+      if impl != nil and stdlibRoutineKey(impl) == "math.ceilDiv":
+        let adm = admitNameCall("math.ceilDiv")
+        if adm.admitted:
+          return parseCeilDiv(n, adm, preamble, ctx)
     # A7 (ADR-0017 Path B): `ord(r)` where `r` classifies as tInt (Rune → tInt).
     # `ord` is a magic intrinsic with no parseable body; for a type already
     # classified to tInt (e.g. Rune after A7 intercept), `ord` is the identity
@@ -21598,12 +21662,16 @@ proc parseStmtInner(n: NimNode,
     #   * field LHS (`obj.f += y`) other than a value tuple/object field
     #     (RFC-0005 S8p models that one: `valueFieldWrite`)
     #   * index LHS (`a[i] += y`) — non-nnkSym after unwrap
-    #   * any other `<op>=` not in {+=, -=, *=, &=}
+    #   * any other `<op>=` not in {+=, -=, *=, &=}, or `/=` (floats only)
     #   * (a user-defined `op=` proc is an `nnkInfix` too; RFC-0005 S8c routes
     #     it to `parseRoutineCallStmt` at the top of this arm)
     let augOp = n[0]
+    # RFC-0016 PRC-07: system's `/=` is defined on floats alone, and lowers as
+    # `x = x / y` does (`siteBinop`, the build's float checks).
     if n.len == 3 and augOp.kind == nnkSym and
-       augOp.strVal in ["+=", "-=", "*=", "&="]:
+       (augOp.strVal in ["+=", "-=", "*=", "&="] or
+        augOp.strVal == "/=" and
+          classifyType(n[1]).ty.kind in {itFloat32, itFloat64}):
       let lhs = unwrapHidden(n[1])
       # RFC-0005 S8cq: every arm below reads the lvalue and writes it back, each
       # lowering it (`lvalueHasCall`), but for a seq variable's element, whose

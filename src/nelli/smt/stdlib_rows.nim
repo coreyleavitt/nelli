@@ -46,6 +46,9 @@ type
     ssFacet       ## a property the walker declines; the declining site names it
     ssFloatCall   ## a float-first `std/math` call, intercepted by name and
                   ## lowered by `lowerMathCall` (never walked by body)
+    ssNameCall    ## an integer `std/math` call intercepted by name and
+                  ## lowered by a hand-written arm (`parseCeilDiv`), never
+                  ## walked by body
 
   StdlibBody* = object
     exercises*: set[CheckOption]
@@ -85,6 +88,10 @@ func floatDeclined(names: openArray[string]; note: string): seq[StdlibRow] =
   for n in names:
     result.add ("math." & n, refused[StdlibSite, StdlibBody](
       some(feUnsupportedOpAborted), note))
+
+func loweredByName(key, note: string): StdlibRow =
+  (key, modelled[StdlibSite, StdlibBody](StdlibBody(), {ssNameCall}, note,
+                                          elsewhere = some(feUnsupportedOp)))
 
 func checkDeclined(key, note: string): StdlibRow =
   (key, refused[StdlibSite, StdlibBody](some(feCheckOption), note))
@@ -197,10 +204,13 @@ const mathRows: seq[StdlibRow] = block:
     walked("math.sgn",
       "math.nim:1102: `ord(T(0) < x) - ord(x < T(0))`: the difference of two " &
       "booleans' ordinals cannot overflow", {}),
-    checkDeclined("math.ceilDiv",
-      "math.nim:925: converts through `x.UT` and `.T` (unsigned), whose range " &
-      "checks the push turns off; the walker models range checks on only, so " &
-      "the routine keeps declining"),
+    loweredByName("math.ceilDiv",
+      "math.nim:925: `((x.UT + (y.UT - 1)) div y.UT).T`, a same-width " &
+      "reinterpretation and wrapping unsigned arithmetic, lowered by name " &
+      "(`parseCeilDiv`), exact at every width inside its precondition; its " &
+      "asserts follow `assertions` where the generic is first instantiated, " &
+      "not the push, so a path outside the precondition declines " &
+      "`feCheckOption`"),
     floatModelled("abs", "clears the sign bit (fp.abs), exact"),
     floatModelled("min", "fp.min, exact"),
     floatModelled("max", "fp.max, exact"),
@@ -314,6 +324,11 @@ const callDeclines*: array[2, tuple[routine, facet: string]] = [
 static:
   for d in callDeclines:
     doAssert stdlibAxis.hasRow(d.facet), "callDeclines names a missing facet " & d.facet
+
+proc admitNameCall*(routineKey: string): Admit[StdlibBody] =
+  ## RFC-0016 PRC-09. The stdlib-body axis at `ssNameCall`: the proof an
+  ## integer `std/math` call lowered by name takes.
+  admitStdlibBody(routineKey, ssNameCall, absent = some(feUnsupportedOp))
 
 func callDeclineFacet*(routineKey: string): string =
   ## The facet whose row declines a call of `routineKey`, or "".

@@ -6,8 +6,10 @@
 ##     (the user's `x - 1` raises in a checks-on build, the stdlib body is
 ##     unchecked and halts on the undefined overflow);
 ##   * `divmod` is an opaque call (a tuple-returning generic the walker does
-##     not inline) and `ceilDiv` converts through unsigned types, whose range checks the push
-##     turns off: a declined row, `feCheckOption`, naming its cell;
+##     not inline): a declined row, `feOpaqueCallUnmodelled`, naming its cell;
+##   * `ceilDiv` is lowered by name: exact inside its precondition; outside it
+##     the asserts run or not by the options of its first instantiation, which
+##     the walker cannot see, so such a path declines `feCheckOption`;
 ##   * a float-first call is lowered by name, never walked: the modelled
 ##     routines are pinned exact, and every other routine of the region is a
 ##     declined row (`feUnsupportedOp`) naming its cell, one pin each.
@@ -40,6 +42,79 @@ proc sSgn(a: int) =
 proc sCeilDiv(a: int) =
   if ceilDiv(a, 3) == 3 and a == 7: symexTarget("hit")
 
+# RFC-0016 PRC-09 `math.ceilDiv` (math.nim:925) computes
+# `((x.UT + (y.UT - 1)) div y.UT).T`, a same-width reinterpretation and
+# wrapping unsigned arithmetic, after asserting its precondition. It is a
+# generic: its asserts follow `assertions` at the site that first
+# instantiates it, not math.nim's `checks: off` push, so in this (debug)
+# module they run. Lowered by name (`parseCeilDiv`): exact inside the precondition, a
+# path outside it declined. One SUT per width; `b > 2` keeps the witness off
+# the trivial divisors.
+proc cdI8(a, b: int8) =
+  if a > 0 and b > 2 and ceilDiv(a, b) == 3: symexTarget("hit")
+proc cdI16(a, b: int16) =
+  if a > 0 and b > 2 and ceilDiv(a, b) == 3: symexTarget("hit")
+proc cdI32(a, b: int32) =
+  if a > 0 and b > 2 and ceilDiv(a, b) == 3: symexTarget("hit")
+proc cdI64(a: int) =
+  if a > 0 and ceilDiv(a, 7) == 3: symexTarget("hit")
+proc cdU8(a, b: uint8) =
+  if a > 0 and b > 2 and ceilDiv(a, b) == 3: symexTarget("hit")
+proc cdU16(a, b: uint16) =
+  if a > 0 and b > 2 and ceilDiv(a, b) == 3: symexTarget("hit")
+proc cdU32(a, b: uint32) =
+  if a > 0 and b > 2 and ceilDiv(a, b) == 3: symexTarget("hit")
+proc cdU64(a: uint64) =
+  if a > 0 and ceilDiv(a, 7'u64) == 3: symexTarget("hit")
+# Within the precondition it is the ceiling: no input breaks the law.
+proc cdI32Law(a: int32) =
+  ## A constant divisor keeps the query linear.
+  if a >= 0:
+    let q = ceilDiv(a, 7'i32).int64
+    if q * 7 < a.int64 or (q - 1) * 7 >= a.int64: symexTarget("hit")
+proc cdU8Law(a, b: uint8) =
+  if b > 0 and a.int + b.int - 1 <= 255:
+    let q = ceilDiv(a, b).int
+    if q * b.int < a.int or (q - 1) * b.int >= a.int: symexTarget("hit")
+# The unsigned precondition's boundary, `x + y - 1 <= high(T)`: 254 is the
+# last `a` it admits for `b == 2`; at 255 the sum wraps to 0.
+proc cdU8Edge(a: uint8) =
+  if a >= 254 and ceilDiv(a, 2'u8) == 127: symexTarget("hit")
+proc cdU8Wrap(a: uint8) =
+  if a > 0 and ceilDiv(a, 2'u8) == 0: symexTarget("hit")
+# Outside the precondition: the assert, or with it off the wrapped value.
+proc cdNeg(a: int) =
+  if a < 0 and a > -10 and ceilDiv(a, 3) == 6148914691236517203:
+    symexTarget("hit")
+proc cdI8NegDivisor(a, b: int8) =
+  if a == 7 and b < 0 and ceilDiv(a, b) == 0 and b == -2: symexTarget("hit")
+proc cdI8Min(a: int8) =
+  if a < 0 and ceilDiv(a, 1'i8) == -128: symexTarget("hit")
+# `y == 0`: the assert, or with it off the unsigned division by zero.
+proc cdZeroU(a, b: uint32) =
+  if ceilDiv(a, b) == 1 and b == 0: symexTarget("hit")
+proc cdZeroI(a, b: int) =
+  if ceilDiv(a, b) == 1 and b == 0: symexTarget("hit")
+
+const
+  cdKey = cellKey(axStdlibBody, "math.ceilDiv")
+  i8s = sampled([low(int8), -2'i8, -1, 0, 1, 2, 3, 7, 9, high(int8)])
+  i16s = sampled([low(int16), -1'i16, 0, 1, 3, 7, 9, high(int16)])
+  i32s = sampled([low(int32), -1'i32, 0, 1, 2, 3, 7, 9, high(int32) - 1,
+                  high(int32)])
+  u8s = sampled([0'u8, 1, 2, 3, 7, 9, 127, 128, 253, 254, 255])
+  u16s = sampled([0'u16, 1, 3, 7, 9, high(uint16)])
+  u32s = sampled([0'u32, 1, 3, 7, 9, high(uint32)])
+  u64s = sampled([0'u64, 1, 15, 21, 22, high(uint64)])
+
+template decided(body: untyped) =
+  ## A verdict is decided only on a verified build row; cpp under Z3 4.13.4
+  ## has none by design (`feHostUnadmitted`).
+  if hostAdmission().isSome:
+    skip()
+  else:
+    body
+
 suite "K4c PRC-09: the integer routines are walked, with their delta":
   test "math.nextPowerOfTwo":
     let r = pinExact(sNextPow2, cellKey(axStdlibBody, "math.nextPowerOfTwo"),
@@ -67,10 +142,66 @@ suite "K4c PRC-09: the integer routines are walked, with their delta":
     let r = pinExact(sSgn, cellKey(axStdlibBody, "math.sgn"),
                      domain = smallInts)
     check r.status == sxSat
-  test "math.ceilDiv is a declined row (unsigned conversions, range checks)":
-    check native(sCeilDiv(7)) == "hit"
-    let c = cellKey(axStdlibBody, "math.ceilDiv")
-    pinDecline(sCeilDiv, c, feCheckOption, needle = render(c))
+
+suite "PRC-09: math.ceilDiv is lowered by name, as compiled":
+  test "native: inside the precondition it is the ceiling":
+    check ceilDiv(7, 3) == 3
+    check ceilDiv(6, 3) == 2
+    check ceilDiv(0, 3) == 0
+    check ceilDiv(254'u8, 2'u8) == 127
+
+  test "native: outside it the assert runs (instantiated here, debug)":
+    expect AssertionDefect: discard ceilDiv(255'u8, 2'u8)
+    expect AssertionDefect: discard ceilDiv(-7, 3)
+    expect AssertionDefect: discard ceilDiv(7'i8, -2'i8)
+    expect AssertionDefect: discard ceilDiv(-128'i8, 1'i8)
+    expect AssertionDefect: discard ceilDiv(1'u32, 0'u32)
+
+  test "the row is admitted at the call, not walked by body":
+    check admitStdlibBody("math.ceilDiv", ssNameCall).admitted
+    check not admitStdlibBody("math.ceilDiv", ssBodyWalk).admitted
+
+  test "exact at every width":
+    decided:
+      check native(sCeilDiv(7)) == "hit"
+      check pinExact(sCeilDiv, cdKey, domain = smallInts).status == sxSat
+      check pinExact(cdI8, cdKey, domain = i8s).status == sxSat
+      check pinExact(cdI16, cdKey, domain = i16s).status == sxSat
+      check pinExact(cdI32, cdKey, domain = i32s).status == sxSat
+      check pinExact(cdI64, cdKey, domain = smallInts).status == sxSat
+      check pinExact(cdU8, cdKey, domain = u8s).status == sxSat
+      check pinExact(cdU16, cdKey, domain = u16s).status == sxSat
+      check pinExact(cdU32, cdKey, domain = u32s).status == sxSat
+      check pinExact(cdU64, cdKey, domain = u64s).status == sxSat
+
+  test "within the precondition it is the ceiling":
+    decided:
+      check pinExact(cdI32Law, cdKey, domain = i32s).status == sxUnsat
+      check pinExact(cdU8Law, cdKey, domain = u8s).status == sxUnsat
+
+  test "the unsigned precondition's boundary":
+    decided:
+      check native(cdU8Edge(254)) == "hit"
+      let e = pinExact(cdU8Edge, cdKey, domain = u8s)
+      check e.status == sxSat
+      check native(cdU8Wrap(255)) == "AssertionDefect"
+      pinDecline(cdU8Wrap, cdKey, feCheckOption, needle = render(cdKey))
+
+  test "outside the precondition a path declines, naming the cell":
+    decided:
+      check native(cdNeg(-7)) == "AssertionDefect"
+      pinDecline(cdNeg, cdKey, feCheckOption, needle = render(cdKey))
+      check native(cdI8NegDivisor(7, -2)) == "AssertionDefect"
+      pinDecline(cdI8NegDivisor, cdKey, feCheckOption, needle = render(cdKey))
+      check native(cdI8Min(-128)) == "AssertionDefect"
+      pinDecline(cdI8Min, cdKey, feCheckOption, needle = render(cdKey))
+
+  test "y == 0 is outside the precondition: declined":
+    decided:
+      check native(cdZeroU(1, 0)) == "AssertionDefect"
+      pinDecline(cdZeroU, cdKey, feCheckOption, needle = render(cdKey))
+      check native(cdZeroI(1, 0)) == "AssertionDefect"
+      pinDecline(cdZeroI, cdKey, feCheckOption, needle = render(cdKey))
 
 proc fSqrt(a: float) =
   if sqrt(a) == 3.0 and a == 9.0: symexTarget("hit")

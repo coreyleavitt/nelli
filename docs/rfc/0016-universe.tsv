@@ -632,7 +632,7 @@ stdlib:math.arctan2	declined	-
 stdlib:math.arctanh	declined	-
 stdlib:math.cbrt	declined	-
 stdlib:math.ceil	modelled	-
-stdlib:math.ceilDiv	declined	-
+stdlib:math.ceilDiv	modelled	-
 stdlib:math.classify	modelled	-
 stdlib:math.copySign	modelled	-
 stdlib:math.cos	declined	-

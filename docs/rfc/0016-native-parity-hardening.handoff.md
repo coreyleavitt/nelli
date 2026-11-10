@@ -1093,9 +1093,27 @@
   `-inf` (`depositFloatChecks`, drained as raises through `arithTrapConds`
   so one expression's checks stay ordered). The opaque scan also notes
   `FloatUnderflowDefect`. nilChecks closed as not applicable (no such option
-  in 2.2.10; regression pin). Pin `tsymex_0016_floatchecks`. Not done:
-  `-d:danger` per-UB-kind pins (PRC-08), `math.ceilDiv` (still a declined
-  row).
+  in 2.2.10; regression pin). Pin `tsymex_0016_floatchecks`. Remainder,
+  same walker: the compound-assignment claim was probed natively (c, cpp):
+  `x /= 0.0` in a routine pushed `nanChecks: on` runs on in a default build
+  and raises in a `--nanChecks:on` build even under `push nanChecks: off`, so
+  it takes the build's checks; a float `/=` is lowered now (it declined
+  `feUnsupportedStmtKind`); pins in `tsymex_0016_floatchecks` and
+  `tsymex_rfc0005_s8cu_cl_float`. PRC-08 closed: `tsymex_0016_danger`
+  (`-d:danger --opt:none`) reads every option off through `buildSemantics`
+  and `routineChecks`, and pins one SUT per kind (range exact, bound
+  `ubArrayOutOfBounds`, field exact on c / `ubInactiveVariantField` on cpp,
+  object `ubInvalidObjConversion`, `{.noinit.}` `ubIndeterminateRead`, float
+  unchecked unless pushed). `math.ceilDiv` lowered by name (`parseCeilDiv`,
+  row at the new `ssNameCall` site): its asserts are NOT compiled out. A
+  generic's asserts follow `assertions` at the site that first instantiates
+  it (native: `ceilDiv(-7, 3)` raises `AssertionDefect` in a debug module;
+  under a first `push assertions: off` call every later call returns
+  6148914691236517203), while its generated checks follow the definition's
+  push (`floorDiv(low(int), -1)` SIGFPEs). So it is exact inside the
+  precondition and a path outside it (`y == 0` included) declines
+  `feCheckOption` naming the cell. The `pragma.txt` entries for
+  `routine/nanChecks`, `infChecks`, `floatChecks` are removed (pinned exact).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

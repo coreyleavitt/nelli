@@ -30,7 +30,7 @@ proc sUserDiv(a, b: int) =
   if a div b == 3 and b == 0: symexTarget("hit")
 proc sFloorDivZero(a, b: int) =
   if floorDiv(a, b) == 3 and b == 0: symexTarget("hit")
-# A routine in the same pushed region whose row declines keeps declining.
+# A routine in the same pushed region lowered by name (PRC-09).
 proc sCeilDiv(a: int) =
   if ceilDiv(a, 3) == 3 and a == 7: symexTarget("hit")
 
@@ -95,11 +95,17 @@ suite "K4c: the delta pinned both ways (user routine checked, stdlib body not)":
     let r = symexFind(sFloorDivZero, tLabel("hit"))
     check r.status != sxRaised
 
-suite "K4c: a declined row keeps declining":
-  test "math.ceilDiv is in the pushed region and its row declines":
-    check native(sCeilDiv(7)) == "hit"
-    let c = cellKey(axStdlibBody, "math.ceilDiv")
-    pinDecline(sCeilDiv, c, feCheckOption, needle = render(c))
+suite "K4c: a routine of the pushed region lowered by name":
+  test "math.ceilDiv is in the pushed region and is lowered as compiled":
+    ## RFC-0016 PRC-09: its row was declined (`feCheckOption`); it is now
+    ## lowered by name (`parseCeilDiv`), `tsymex_0016_k4c_math` pins it.
+    if hostAdmission().isSome:
+      skip()
+    else:
+      check native(sCeilDiv(7)) == "hit"
+      let c = cellKey(axStdlibBody, "math.ceilDiv")
+      let r = pinExact(sCeilDiv, c, domain = smallInts)
+      check r.status == sxSat
 
 suite "K4c: the walker version":
   test "the walker version floor":

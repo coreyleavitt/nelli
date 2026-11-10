@@ -582,9 +582,17 @@ proc isExemptedLine(fname, trimmed: string): bool =
   ## that value directly as the assignment's (never through
   ## `parseAtomicOperand`), and a hoisted one would only make the view
   ## decline (no step logged), never a wrong verdict.
+  ##
+  ## RFC-0016 W3-z E3c: `bindsViewWholeShape`'s `let` arm reads a user
+  ## `let`'s own value (`s.lvalue.kind == iekTupleLit`, a tuple constructor
+  ## copying what it is given). A `let`'s value is parsed by `parseExpr`
+  ## directly, never through `parseAtomicOperand`; the one `let` that holds a
+  ## hoisted operand is the parser's own `__sym_` temporary, which the arm
+  ## returns on before this peek.
   fname == "src/nelli/smt/runtime.nim" and
     (trimmed == "if formal.isVar and stmt.cargs[i].kind == iekVar:" or
-     trimmed == "stmt.avalue.kind == iekStrSetAt):   # a character, by name")
+     trimmed == "stmt.avalue.kind == iekStrSetAt):   # a character, by name" or
+     trimmed == "if s.lvalue != nil and s.lvalue.kind == iekTupleLit:")
 
 proc scanForSubfieldIekShapePeeks(fname, contents: string,
                                    violations: var seq[KindViolation]) =

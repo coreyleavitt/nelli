@@ -294,6 +294,15 @@ type
       ## onto `FuzzReport.annotationViolations`. Verdict-neutral, so it is not
       ## folded into the yield counters.
     flipCounters*:    ConcolicFlipCounters
+    soundness*: Soundness
+      ## RFC-0016 W3-z R4 (U5). What the verdict stands on, as every other
+      ## result type states it: `runTaint` is `runTaintOf` over the collect
+      ## pass's parse-time declines, joined with `scIncomplete` when
+      ## `undefinedReached` is non-empty, and `witnessUndefined` is those
+      ## kinds. `replay` is `rsNotNeeded` on every outcome (a flip runs
+      ## nothing natively). A consumer reads `trustedUnsat` / `trustedSat`
+      ## off it, so an `cfoUnsat` taken over a decline or a reachable
+      ## undefined operation is not a trusted `sxUnsat`.
     undefinedReached*: seq[ConcolicUndefined]
       ## RFC-0016 K10a-concolic. The second disjunct of the flip solve: the
       ## solve's seed (`materialized`) keeps every operation on the prefix

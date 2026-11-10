@@ -379,7 +379,7 @@ const renderAsChoicesVersion* = "12"
   ##   both arms, a fresh-symbol record is not a reason) and the kinds join
   ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
 
-const symexWalkerVersion* = "315"
+const symexWalkerVersion* = "316"
   ## RFC-0016 W3-z R3 (314->315): the main walk reads `IRStmt.opaqueUndefined`.
   ## Under `tUndefined` a requested kind is the target's hit at the opaque
   ## call; otherwise it is listed on `SymexResult.undefined`; the path goes on

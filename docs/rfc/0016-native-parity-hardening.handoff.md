@@ -1198,6 +1198,14 @@
   Note: on today's base the pre-fix `tUndefined` answer was `sxUnknown` (the
   callee also forks `OverflowDefect`), not a trusted unsat; the hit was missing
   either way. A stray `|||||||` marker sits just below this entry (from base).
+  W3-z R4 (`rfc-0016-w3z-runtime4`, walker 315 to 316, findings U4 and U5):
+  `drainConvFloatToIntFresh` decides the out-of-domain side through
+  `decideUndefined`, so a concolic replay records the defined fact and the flip
+  solve keeps the conversion in range (the reach filter also matches a
+  conjunct to a fact in either polarity). `ConcolicFlipResult.soundness` carries
+  `runTaintOf(parseErrors)`, `scIncomplete` and `witnessUndefined` when
+  `undefinedReached` is non-empty; `fromFlip` claims it. Pin:
+  `tsymex_0016_w3z_r4_concolic_undefined`.
 ||||||| 32ae1cf0
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen

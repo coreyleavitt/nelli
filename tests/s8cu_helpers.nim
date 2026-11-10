@@ -350,11 +350,12 @@ proc fromVerdict*[T](v: Option[CachedVerdict]; entry: string): Claimed[T] =
   Claimed[T](res: statusResult(st, default(T), v.get.soundness), entry: entry)
 
 proc fromFlip*[T](r: ConcolicFlipResult; entry: string): Claimed[T] =
-  ## A `concolicFlip` outcome. It carries no soundness record, so the claim is
-  ## `rsNotNeeded` and the pin's native run is its only evidence: a solved
-  ## flip is a witness, a proven-infeasible one an `sxUnsat`, anything else
-  ## (an optimistic relaxation included) is `sxUnknown`.
-  let s = Soundness(replay: rsNotNeeded)
+  ## A `concolicFlip` outcome. The result's own `soundness` is the claim's
+  ## (RFC-0016 W3-z R4): the collect pass's declines and the undefined
+  ## operations the flip reached are in it, so an `sxUnsat` over either is not
+  ## trusted. A solved flip is a witness, a proven-infeasible one an `sxUnsat`,
+  ## anything else (an optimistic relaxation included) is `sxUnknown`.
+  let s = r.soundness
   case r.outcome
   of cfoSolvedExact:
     Claimed[T](res: statusResult(sxSat, decodeWitness[T](r.materialized), s),

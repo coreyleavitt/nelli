@@ -19848,6 +19848,27 @@ proc forkDefect(p: Path, defectCond: Z3Bool, typeId: string,
   let defectPath = forkPath(p, p.pc & @[defectCond], p.env)
   routeRaise(defectPath, typeId, msg, w)
 
+proc decideUndefined(cur: Path; ub: UbKind; cond: Z3Bool; site: string;
+                     w: var WalkCtx) =
+  ## RFC-0016 W1-d1a / PRC-07. The undefined side `cond` of an op on `cur`,
+  ## decided at the op: provably unreachable under `loopPruneRLimit` is
+  ## dropped and logged in the current call's prune window (`logPrune`),
+  ## anything else ends through `haltUndefined`. Under concolic follow the
+  ## flip solve must keep the op defined (`definedFacts`). The caller
+  ## continues the defined side itself.
+  if guardLiteral(cond) == glFalse: return
+  if w.mode == wmFollowConcrete:
+    # RFC-0016 K10a-concolic: the flip solve must keep this op defined.
+    w.definedFacts.add ConcolicDefinedFact(
+      cond: cond, kind: ub, site: site, at: w.branchTrace.len)
+  let unsat = guardLiteral(cond) != glTrue and
+    checkCapped(w.z3, pathRoots(cur, [cond]), w.settings,
+                loopPruneRLimit(w.settings)).status == zsUnsat
+  if unsat:
+    logPrune(cur, [cond])
+  else:
+    haltUndefined(cur, ub, cond, site, w)
+
 proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8g, rerouted by RFC-0016 K10a-float (section 9.1 item 2).
   ## Decide the continuation of an expression that lowered float -> int
@@ -19893,41 +19914,15 @@ proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
     let outside = not c.cond
     let convUb = convertDefinedness(c.cls, profile).ubOf
     if convUb.isSome and guardLiteral(outside) != glFalse:
-      let side = before & @[outside]
-      let unsat = guardLiteral(outside) != glTrue and
-        checkCapped(w.z3, pathRoots(cur, side), w.settings,
-                    loopPruneRLimit(w.settings)).status == zsUnsat
-      if unsat:
-        logPrune(cur, side)
-      else:
-        var sideCond = outside
-        for b in before: sideCond = b and sideCond
-        haltUndefined(cur, convUb.get, sideCond,
+      # Through `decideUndefined` so a concolic replay records the
+      # defined-fact the flip solve must keep (RFC-0016 W3-z R4 / U4). The
+      # earlier conversions' domains ride in the side's own path, so the
+      # fact is this conversion's `outside` alone.
+      decideUndefined(forkPath(cur, cur.pc & before, cur.env), convUb.get, outside,
                       (if c.site.len > 0: "float -> int conversion at " & c.site
                        else: "float -> int conversion"), w)
     before.add c.cond
   @[forkPath(cur, cur.pc & @[inDomain], cur.env)]
-
-proc decideUndefined(cur: Path; ub: UbKind; cond: Z3Bool; site: string;
-                     w: var WalkCtx) =
-  ## RFC-0016 W1-d1a / PRC-07. The undefined side `cond` of an op on `cur`,
-  ## decided at the op: provably unreachable under `loopPruneRLimit` is
-  ## dropped and logged in the current call's prune window (`logPrune`),
-  ## anything else ends through `haltUndefined`. Under concolic follow the
-  ## flip solve must keep the op defined (`definedFacts`). The caller
-  ## continues the defined side itself.
-  if guardLiteral(cond) == glFalse: return
-  if w.mode == wmFollowConcrete:
-    # RFC-0016 K10a-concolic: the flip solve must keep this op defined.
-    w.definedFacts.add ConcolicDefinedFact(
-      cond: cond, kind: ub, site: site, at: w.branchTrace.len)
-  let unsat = guardLiteral(cond) != glTrue and
-    checkCapped(w.z3, pathRoots(cur, [cond]), w.settings,
-                loopPruneRLimit(w.settings)).status == zsUnsat
-  if unsat:
-    logPrune(cur, [cond])
-  else:
-    haltUndefined(cur, ub, cond, site, w)
 
 template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCheck]];
                             defectType, msg: string;
@@ -32181,6 +32176,11 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   template finish(o: ConcolicFlipOutcome, c: ConcolicCoverageOutcome) =
     result.outcome = o
     result.coverage = c
+    result.soundness = Soundness(replay: rsNotNeeded,
+      runTaint: runTaintOf(collected.parseErrors) +
+        (if result.undefinedReached.len > 0: {scIncomplete} else: {}))
+    for u in result.undefinedReached:
+      result.soundness.witnessUndefined.incl ubOrdinals({u.kind})
     inc result.flipCounters.byOutcome[o]
     inc result.flipCounters.byCoverage[c]
     return result
@@ -32265,7 +32265,7 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     for c in target.prefixPc:
       var own = false
       for g in targetOps[i .. ^1]:
-        if astEqual(c, not g.cond): own = true
+        if astEqual(c, not g.cond) or astEqual(not c, g.cond): own = true
       if not own: reach.add c
     let (st, sv) = z3CheckBounded(ctx, reach, f.cond, z3TimeoutMs,
                                   settings.budget.queryRLimit)

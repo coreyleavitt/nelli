@@ -19,6 +19,9 @@ on:
     paths: &ledger-paths
       - docs/rfc-data/0016-worklist.toml
       - docs/rfc/0016-universe.tsv
+      - scripts/stdlib-ledger.sh
+      - src/nelli/smt/stdlib_ledger.nim
+      - tests/tsymex_0016_*.nim
       - docs/rfc/0016-native-parity-hardening.md
       - docs/rfc/0016-native-parity-hardening.handoff.md
       - .github/workflows/rfc0016-ledger.yaml
@@ -68,3 +71,11 @@ jobs:
       - name: Watchdog reads the F ledger from the TOML (self-test)
         if: ${{ !cancelled() }}
         run: bash scripts/rfc0016-watchdog.sh --self-test
+
+      # A test that proves "no row declines" must be marked a probe, or the
+      # next stdlib-ledger regeneration seeds its probe and admits it. The
+      # full drift guard (`scripts/stdlib-ledger.sh --check tests/t*.nim`)
+      # compiles the whole suite and runs where the dev container does.
+      - name: Stdlib-ledger probe tests are marked (stdlib-ledger.sh --lint)
+        if: ${{ !cancelled() }}
+        run: bash scripts/stdlib-ledger.sh --lint

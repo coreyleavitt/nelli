@@ -176,7 +176,11 @@ suite "K9a":
     const allowed: seq[string] = @[
       # Names a kind only to exclude weInternalWalkerFault; kindless otherwise,
       # so it migrates with the other kindless declines (K9c).
-      "tsymex_rfc0005_s8cd_globals_b.nim"]
+      "tsymex_rfc0005_s8cd_globals_b.nim",
+      # W3-z P3: `declinesUnadmitted` judges a stdlib routine with no row,
+      # which is absent from the stdlib-body axis, so there is no cell for
+      # `pinDecline` to record against (a record needs a row).
+      "tsymex_0016_w3z_p3_iter.nim"]
     let markers = ["hasKind(", "named(", ".kind ==", ".kind in", "SymexErrorKind"]
     var offenders: seq[string]
     for f in walkFiles(probeDir / "*.nim"):

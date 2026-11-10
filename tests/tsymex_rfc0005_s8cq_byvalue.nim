@@ -16,6 +16,7 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
+import ./s8cu_helpers except show
 
 var natHits: HashSet[string]
 
@@ -161,3 +162,13 @@ suite "tsymex_rfc0005_s8cq_byvalue":
     pin(sOuter, "ou_rx", false, sxUnknown)
     pin(sVc, "vc_rx1", true, sxUnknown)
     pin(sVc, "vc_rx", false, sxUnknown)
+
+  test "the native-hit side of each shape is a K9 decline pin":
+    # RFC-0016 SND-01: a by-value actual aliased by a var actual is declined
+    # (exact model: PRC-36).
+    let k = cellKey(faCallShape, "varReturnActual")
+    pinDecline(sVc, k, feUnsupportedOp, tLabel("vc_rx1"))
+    pinDecline(sDirect, k, feUnsupportedOp, tLabel("dg_r50"))
+    pinDecline(sBig, k, feUnsupportedOp, tLabel("bg_r50"))
+    pinDecline(sInner, k, feUnsupportedOp, tLabel("in_r50"))
+    pinDecline(sOuter, k, feUnsupportedOp, tLabel("ou_r50"))

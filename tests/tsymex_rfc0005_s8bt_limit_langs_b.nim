@@ -16,6 +16,7 @@ import nelli/smt/types
 import nelli/smt/[pcre_syntax, pcre_select, regex_parser]
 import nelli/smt/pcre_engine
 import ./s8bt_harness/[member, stepref, limit_oracle]
+import ./s8cu_helpers
 
 proc findErrTarget(s: string) =
   if s.len <= 4 and s.find(re"(*LIMIT_MATCH=6)(?:a|b)*c") == -8:
@@ -76,6 +77,11 @@ suite "S8bt: a limit between, through the walker":
       # A subject that is free but for its length: Z3 5.1 finds "c", Z3 4.13.4
       # in the query's own context (S8bp) through step 1e (RFC-0005 S8cn).
       verdict(replaceTarget, "bt_limit_replace")
+      # RFC-0016 PRC-27: the same verdict as an exact K9 pin (the witness
+      # replays natively through std/re).
+      discard pinExact(replaceTarget, cellKey(faCallShape, "pcre/limitReplace"),
+                       tLabel("bt_limit_replace"),
+                       domain = sampled(["", "a", "c", "ac", "bc"]))
       verdict(replaceConcreteTarget, "bt_limit_replace_c")
       check "c".replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == "-"
       verdict(replaceErrTarget, "bt_limit_replace_err", sxUnsat)

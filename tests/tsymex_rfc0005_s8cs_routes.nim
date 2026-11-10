@@ -14,6 +14,7 @@ import std/[unittest, strutils, sets, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/engine/markers
+import ./s8cu_helpers except show
 
 var nh: HashSet[string]
 template nat(call: untyped) =
@@ -641,6 +642,11 @@ suite "RFC-0005 S8cs: B23, a hook writes a global the path wrote":
     declined(w1, "w1_dead")
     declined(w2, "w2_live")
     declined(w2, "w2_dead")
+    # RFC-0016 SND-09: the decline as K9 pins.
+    pinDecline(w2, cellKey(faCallShape, "hook/overwriteGlobalWrittenFirst"),
+               feGlobalRouteUnproved, tLabel("w2_live"))
+    pinDecline(w2, cellKey(faCallShape, "hook/overwriteGlobalWrittenFirst"),
+               feGlobalRouteUnproved, tLabel("w2_dead"))
   test "sxRaised needs the read too":
     # Nim never raises here (the hook has written 1): the raise is the stale
     # value's.

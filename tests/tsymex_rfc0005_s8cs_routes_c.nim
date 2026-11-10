@@ -13,6 +13,7 @@ import std/[unittest, strutils, sets, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/engine/markers
+import ./s8cu_helpers except show
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -291,6 +292,11 @@ suite "RFC-0005 S8cs: no global at all":
   test "a heap cell":
     declined(heap1, "heap1_live")
     declined(heap1, "heap1_dead")
+    # RFC-0016 SND-08: the decline as K9 pins.
+    pinDecline(heap1, cellKey(faCallShape, "hook/destroyWritesThroughRef"),
+               feGlobalRouteUnproved, tLabel("heap1_live"))
+    pinDecline(heap1, cellKey(faCallShape, "hook/destroyWritesThroughRef"),
+               feGlobalRouteUnproved, tLabel("heap1_dead"))
     declined(heap2, "heap2_live")
     declined(heap2, "heap2_dead")
   test "the copy a value hook makes":

@@ -6,6 +6,7 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
+import ./s8cu_helpers except show
 
 var natHits: HashSet[string]
 
@@ -173,3 +174,17 @@ suite "tsymex_rfc0005_s8cq_varret":
     pin(p08, "p08_ne", false, sxUnknown)
     pin(p09, "p09_once", true, sxUnknown)
     pin(p09, "p09_ne", false, sxUnknown)
+
+  test "the native-hit side of each shape is a K9 decline pin":
+    # RFC-0016 SND-01: a var-returning actual is never decided (exact model:
+    # PRC-36); each shape's native-hit label is declined, not refuted.
+    let k = cellKey(faCallShape, "varReturnActual")
+    pinDecline(p01, k, feUnsupportedOp, tLabel("p01_r50"))
+    pinDecline(p02, k, feUnsupportedOp, tLabel("p02_r50"))
+    pinDecline(p03, k, feUnsupportedOp, tLabel("p03_rx"))
+    pinDecline(p04, k, feUnsupportedOp, tLabel("p04_one"))
+    pinDecline(p05, k, feUnsupportedStmtKind, tLabel("p05_once"))
+    pinDecline(p06, k, feUnsupportedOp, tLabel("p06_once"))
+    pinDecline(p07, k, feUnsupportedOp, tLabel("p07_once"))
+    pinDecline(p08, k, feUnsupportedOp, tLabel("p08_once"))
+    pinDecline(p09, k, feUnsupportedOp, tLabel("p09_once"))

@@ -11,6 +11,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/replayproc
 from nelli/smt/runtime import hostAdmission
+import ./s8cu_helpers except show
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -80,6 +81,7 @@ suite "PRC-01: case objects cross to the re-executed child":
       checkpoint show(r.errors)
       check r.status == sxSat
       check r.soundness.replay == rsConfirmed
+      discard pinExact(caseGlobal, cellKey(faCallShape, "reexec/caseObjectGlobal"), tLabel("t"))
 
   test "a case-object global is handed over (kA branch)":
     # A symexFind run is decided only on a verified build row; cpp under Z3
@@ -91,6 +93,7 @@ suite "PRC-01: case objects cross to the re-executed child":
       checkpoint show(r.errors)
       check r.status == sxSat
       check r.soundness.replay == rsConfirmed
+      discard pinExact(caseGlobalA, cellKey(faCallShape, "reexec/caseObjectGlobalOtherArm"), tLabel("t"))
 
   test "a case-object witness given to replayWitness replays":
     let hit = replayWitness(caseObj, (Shape(kind: kB, b: "hi"),),
@@ -121,6 +124,7 @@ suite "PRC-01: case objects cross to the re-executed child":
       checkpoint show(r.errors)
       check r.status == sxSat
       check r.soundness.replay == rsConfirmed
+      discard pinExact(typeSyms, cellKey(faCallShape, "reexec/typeSymbolFootprint"), tLabel("t"))
 
   test "a non-nil ptr global still declines, naming the ptr":
     # `replayWitness` is the direct form: the walker does not model `gPtr`, so

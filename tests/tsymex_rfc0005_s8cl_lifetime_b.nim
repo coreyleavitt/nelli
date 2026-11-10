@@ -49,7 +49,7 @@ template declines(fn: typed, lbl, why: string): untyped =
       if why in e.msg: named = true
     check named
 
-from ./s8cu_helpers import nativeHits
+import ./s8cu_helpers except show
 
 const ks = [-3, 0, 1, 2, 3, 4, 5, 7, 8]
 
@@ -196,6 +196,9 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     declines(sutCreate, "cr", "create")
     declines(sutGcRef, "gr", "nnkCast")
     declines(sutWhenMember, "wn", "WhenMember")
+    # RFC-0016 CRH-02: the two compile stops as K9 pins.
+    pinDecline(sutCreate, cellKey(faCallShape, "lifetime/create"), feUnsupportedOp, tLabel("cr"))
+    pinDecline(sutGcRef, cellKey(axMagic, "GCref"), feUnsupportedExprKind, tLabel("gr"), needle = "nnkCast")
 
 suite "S8cl (3): setLen":
   test "nim":

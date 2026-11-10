@@ -10,7 +10,17 @@ const
   cfgApplies = buildSemantics.fwrapv and buildProvenance.ccFamily != ccVcc
   cfgWhy = "-d:nelliFwrapv is refused under vcc, which has no -fwrapv"
 when defined(vcc):
-  import ./s8cu_helpers
-  skipCell(cellKey(axBuild, cfgName), cfgWhy)
+  # This arm cannot import `nelli/symex` (nor `s8cu_helpers`, which does): the
+  # build is refused at compile time. It asserts the refusal through
+  # `admitBuild`, as `tsymex_0016_k5a_fwrapv` does; the msvc row's cell is
+  # allowlisted (`tests/0016-allowlist/build.txt`, `rows=msvc`).
+  import std/[unittest, strutils, options]
+  suite "K5b: -d:nelliFwrapv cfg suite (vcc)":
+    test "symex refuses the build by name":
+      let refusal = admitBuild(buildSemantics, buildProvenance)
+      check refusal.isSome
+      if refusal.isSome:
+        check refusal.get.field == bfFwrapv
+        check "-fwrapv" in refusal.get.reason
 else:
   include ./k5b_cfg_body

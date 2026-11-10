@@ -1395,6 +1395,16 @@
     `nnkDotExpr`, `nnkCallStrLit` and `nnkBracketExpr` entries and answers
     `unnamedPragma` for any other shape, which a type now declines. Pins:
     `tests/tsymex_0016_k2f2_pragmashape.nim`.
+  - W3-z integration (`rfc-0016-w3z-int2`, walker 340, 2026-11-10): every W3-z
+    lane merged onto main db6c3da6 (runtime5b, runtime6, magic2, evidence2c,
+    parser10, parser5b, k2f2, k2f1b, k2f5, k2f3, parser13, parser16,
+    parser18). The lanes' 29 walker bumps were renumbered 312..340 in merge
+    order (history in `canonicalize.nim`). Fixups: `drainRunTaint` is the
+    one run drain for both run entries (S1 and S7 pins); the census and
+    ceilings were reconciled with the merged lanes; the construct axis gained
+    blockExpr, inline-iterator break/continue and counted-loop cells, and the
+    P13, P14, P15, P17, P18 and P3b pins moved onto them; A2a exempts E3c's
+    peek at a let's own value; the universe ledger was regenerated.
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **W3-z E4b (`rfc-0016-w3z-evidence4b`):** the soundness rows SND-01..06, SND-08..11, PRC-27 and CRH-02 leave `closed-legacy.txt`: their pre-K9 suites now call `pinExact`/`pinDecline` beside every existing assertion (records keyed to the magic cell the fix lives on where one exists, else to a `family:callshape` cell). A closed row cannot name a declined cell, so SND-06 (`magic:ProcCall`), CRH-02 (`magic:GCref`) and the decline-only rows carry the pin file, not the cell. PRC-01 and PRC-02 are pinned on Linux (`pinExact` under `-d:nelliReplayReexec`, the same marshalling path as Windows); their legacy entries said the suites skip on Linux, which has been false since PRC-01 and PRC-02m. PRC-41 and PRC-42 are homed at W4-z (the id the other open precision rows use; the Wave 4 table's "W-32 and the precision rows" line has no slice id). `closed-legacy.txt` is 24 rows.
 - **W3-z E2c (`rfc-0016-w3z-evidence2c`):** the construct axis grows 61 -> 70 cells. `k8a-gen/DivLit` and `k8a-gen/Udiv` ship exact records from two hand-seeded sat-by-construction anchor programs (`anchorPrograms`, ids from 1000000, in the batch that starts the stream), whatever the seed or count. The six sampled-unsat-only keys gain an exhaustive (int8/uint8) or sat-sibling pin and become modelled cells. `threads/createThread` is a declined cell (`pinDecline`, `feUnsupportedOp`). Not cells: `hook/=trace/cycleCollector` and `hook/=destroy/dynamicSubtype` (walker faults, `coerceIntLit`, P6: a fault is not a decline) and `quit/afterTarget/assertCoveredBy` (a clean `sxSat`; the host ends at the splat, INT-22): they stay `skipCell`.
@@ -1865,3 +1875,17 @@ resolved by recommendation; no fork reached Corey.
   `compiles` fact), the three names leave `mathFpModeledOps` and the
   `lowerMathCall`/proto arms, and E2b's SUT-defined pins moved to the user-proc
   suite. Every other by-name arm was already owner-gated (see the commit).
+
+### Session checkpoint 2026-11-10 ~06:00 (W3-z integration)
+- Stage: W3-z integration. All 45 fix slices are done (P1-P18, R1-R6+R5b, M1, P8/P9, E1-E6, K2F-1..5).
+- Running: rfc-0016-w3z-int2 merges the 13 lane tips plus parser18 onto main db6c3da6, renumbers the walker and applies fixups 1-18 (scratchpad int-brief.md). Its 74-test eos batch is in progress.
+- Remaining after it returns:
+  1. full sweep and sweep-diff on eos at the int2 sha;
+  2. re-time the P5 suites;
+  3. CI (symex-linux, symex-mingw, fuzzer-msvc, rfc0016-ledger), plus a k1lite recheck;
+  4. land via the protocol;
+  5. /code-review;
+  6. the 0.10.0 publication and tag;
+  7. Wave 4.
+- Open forks: none (patch 0009 republish blocked on Corey).
+- Resume: the standing `/loop implement the next unimplemented rfc-0016 slice with /tdd, ...`; lane status lives in scratchpad w3z-plan.md.

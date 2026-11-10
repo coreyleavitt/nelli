@@ -832,6 +832,17 @@ proc skipCell*(key: CellKey; why: string) =
     entry: "skipCell", cell: key, target: "-", domain: "-",
     verdict: pvSkipped, why: why))
 
+proc skipUnadmitted*() =
+  ## Not run on this host: `hostAdmission` refused it (a Z3 outside 4.13.4/5.1,
+  ## or a build no verified row covers, e.g. cpp under Z3 4.13.4), so a
+  ## `symexFind` verdict is `feHostUnadmitted` by design. Recorded as a
+  ## `skipCell` on the refusal's own build cell (`z3/unverified` for the Z3,
+  ## `profile/unprojectable` for the row), never a bare `skip(`.
+  let r = hostAdmission()
+  if r.isNone: return
+  let k = if r.get.field == bfZ3: "z3/unverified" else: "profile/unprojectable"
+  skipCell(CellKey(scope: axBuild, key: k), "host unadmitted by design: " & r.get.reason)
+
 proc pinAdmission*(key: CellKey; refusal: Option[BuildRefusal];
                    field: BuildField; mustMention: string) =
   ## RFC-0016 K5b. The build-cell form of a decline for a configuration this

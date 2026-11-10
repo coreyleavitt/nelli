@@ -111,7 +111,7 @@ template decided(body: untyped) =
   ## A verdict is decided only on a verified build row; cpp under Z3 4.13.4
   ## has none by design (`feHostUnadmitted`).
   if hostAdmission().isSome:
-    skip()
+    skipUnadmitted()
   else:
     body
 

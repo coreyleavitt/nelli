@@ -12,7 +12,7 @@ template raisesFloat(fn: untyped; name: string) =
   ## RFC-0016 PRC-07: a float check the routine is compiled with is walked,
   ## its raise decided exactly. Decided only on a verified build row.
   if hostAdmission().isSome:
-    skip()
+    skipUnadmitted()
   else:
     let r = pinExact(fn, declKey, target = tRaisedExn(),
                      domain = sampled([1e308, 0.0, 1.0, Inf, NaN]))

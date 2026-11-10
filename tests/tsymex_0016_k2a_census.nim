@@ -1,9 +1,11 @@
 ## RFC-0016 K2a (section 8.2, the rule for introducing an axis): the dispatch
 ## census, as a test over the sites K2-s (`scripts/census-k2.sh`) counts.
 ##
-## Four kinds of site are counted:
-##   case_n_kind  every `case n.kind` in `src/nelli/**/*.nim` (the construct
-##                axis's dispatch sites);
+## Five kinds of site are counted:
+##   nimcase      every `case <expr>.kind` in `src/nelli/**/*.nim` whose subject
+##                is a NimNode (see "NimNode cases" below), classified by its
+##                `else`; only the TRANSPARENT ones are sites (kind
+##                `nimcase_transparent`);
 ##   survivors    every `Survivors(` literal in `src/nelli` (AUD-09);
 ##   degrade      every `Degrade(` literal in `src/nelli` (word boundary:
 ##                `allocDegrade(` and `lowerDegrade(` do not count);
@@ -12,21 +14,53 @@
 ##   platform     every platform arm (`defined(windows)`, `hostOS`, ...) in a
 ##                `tests/` file that never mentions `skipCell`: such a file
 ##                has no way to record that an arm did not run.
-## The first four kinds use K2-s's rules exactly (comment text after the first
+## The literal `case n.kind` total is still cross-checked against
+## `scripts/census-k2.sh` (K2-s); it is no longer an allowlist kind.
+##
+## NimNode cases (RFC section 8.1, Constructs). A dispatch is found by text:
+## a line holding `case <subject>.kind` (the subject is any dotted expression,
+## not only `n`), whose first branch is an `of`. Its subject is a NimNode when
+## a branch label names an `nnk*` member: the label is typed by the language,
+## so it cannot be an IR, type or value enum. This replaces a `parseStmt` walk
+## at compile time: that walk has no types either (it cannot tell a NimNode
+## `.kind` from an `IRStmt` `.kind`), and it would run a 30k-line parse in the
+## VM per file. The labels decide the type exactly where the parse could not.
+## Branch columns follow Nim's layout rule: the first `of` sets the column;
+## `of` and `else` at that column belong to the case; the first other line at
+## or left of it ends it.
+##
+## The `else` disposition, by its body (comments dropped):
+##   none         no `else`: the case lists its kinds (the `classOf` shape);
+##   decline      the body calls a decline: `decline*`, `degrade`, `addError`,
+##                `error(`, `raise`, `fail(`, `notInert`, `unlisted`,
+##                `unsupported`, `quit(`, `assert false`;
+##   sentinel     the whole body is one literal the caller reads as "not this
+##                construct / do not trust": `false`, `true`, `nil`, `""`,
+##                `-1`, `none(..)`, a bare `return` or `break`, with an
+##                optional `return ` / `result = ` in front. The test cannot
+##                see the caller, so the polarity of a sentinel is review's;
+##   transparent  anything else (`discard`, a recursion over the children, a
+##                value computed from the node, a delegate): the node kind
+##                falls through to whatever follows. Transparent is the
+##                disposition section 8.1 forbids, so it is an allowlisted
+##                finding: each one is a census entry tagged `[transparent]`,
+##                and a new one is an unlisted site.
+##
+## The survivors, degrade and bare_skip kinds use K2-s's rules exactly (comment text after the first
 ## `#` is dropped; a hit needs a non-identifier character before it). The
-## fifth is K2a's own: K2-s does not count platform arms.
+## platform kind is K2a's own: K2-s does not count platform arms.
 ##
 ## The ratchet. `tests/0016-allowlist/census.txt` lists every site, one line
 ## `site<TAB>slice<TAB>reason`. A site is `kind:file:context`, where context is
 ## the comment-stripped trimmed line (a second identical line in one file gets
 ## `#2`, and so on), so a refactor that moves a line does not churn it. The test
 ## fails on
-##   * an UNLISTED site: a new dispatch, `Survivors(`/`Degrade(` literal, bare
+##   * an UNLISTED site: a new transparent NimNode case, `Survivors(`/`Degrade(` literal, bare
 ##     `skip(` or platform arm must be classified in the commit that adds it;
 ##   * a STALE entry: a listed site that no longer exists, so the list cannot
 ##     rot the other way;
 ##   * a duplicate entry, `UNASSIGNED` or an unknown slice id, or no reason.
-## On Linux the four K2-s kinds are also cross-checked against the totals
+## On Linux the K2-s kinds are also cross-checked against the totals
 ## `scripts/census-k2.sh` prints, when bash is on the PATH.
 ##
 ## K2a-fail (Wave 4) turns the bare `skip(` rows from listed into failing.
@@ -42,7 +76,7 @@ const
   selfName = "tsymex_0016_k2a_census.nim"
   # Built by concatenation so this file's own text never matches a census rule.
   skTok = "ski" & "p("
-  kinds = ["case_n_kind", "survivors", "degrade", "bare_skip", "platform"]
+  kinds = ["nimcase_transparent", "survivors", "degrade", "bare_skip", "platform"]
 
 type SrcFile = tuple[path, text: string]  ## repo-relative, forward slashes
 
@@ -62,7 +96,8 @@ proc countTok(s, tok: string): int =
     i += tok.len
 
 proc countCaseNKind(s: string): int =
-  ## `case n.kind` with one or more blanks, then a non-identifier or EOL.
+  ## The literal `case n.kind` (K2-s's `case_n_kind` row), kept for the
+  ## cross-check against `scripts/census-k2.sh`.
   var i = 0
   while true:
     i = s.find("case", i)
@@ -75,6 +110,117 @@ proc countCaseNKind(s: string): int =
       let e = j + 6
       if e >= s.len or not isIdent(s[e]): inc result
     i += 4
+
+type
+  Disp = enum dNone = "none", dDecline = "decline", dSentinel = "sentinel",
+              dTransparent = "transparent"
+  NimCase = object
+    line: int            ## 1-based line of the `case`
+    subject, owner: string   ## the dotted subject; the enclosing routine
+    disp: Disp
+
+const declineToks = ["decline", "degrade", "addError", "error(", "raise ",
+                     "fail(", "notInert", "unlisted", "nsupported",
+                     "wsUnlisted", "quit(", "assert false"]
+
+proc indentOf(l: string): int =
+  while result < l.len and l[result] == ' ': inc result
+
+proc isSentinel(body: string): bool =
+  var t = body.strip()
+  for pre in ["return ", "result = "]:
+    if t.startsWith(pre):
+      t = t[pre.len .. ^1].strip()
+      break
+  if t in ["false", "true", "nil", "\"\"", "-1", "return", "break"]: return true
+  t.startsWith("none(") and t.endsWith(")")
+
+proc classifyElse(body: seq[string]; hasElse: bool): Disp =
+  if not hasElse: return dNone
+  var t = body.mapIt(it.strip()).join(" ").strip()
+  if t.startsWith("else"): t = t[4 .. ^1].strip()
+  if t.startsWith(":"): t = t[1 .. ^1].strip()
+  for d in declineToks:
+    if d in t: return dDecline
+  if isSentinel(t): dSentinel else: dTransparent
+
+proc routineAt(lines: seq[string]; i: int): string =
+  for k in countdown(i, 0):
+    let l = lines[k]
+    for kw in ["proc ", "func ", "method ", "iterator ", "template ", "macro ",
+               "converter "]:
+      if l.startsWith(kw):
+        var j = kw.len
+        if j < l.len and l[j] == '`': inc j
+        var e = j
+        while e < l.len and (isIdent(l[e]) or l[e] == '`'): inc e
+        return l[j ..< e]
+  "?"
+
+proc caseSubject(s: string): string =
+  ## The subject of a `case <subject>.kind` header on this (comment-free)
+  ## line, or "". The subject has no blanks and ends at the `.kind`.
+  var i = 0
+  while true:
+    i = s.find("case", i)
+    if i < 0: return ""
+    let startOk = i == 0 or s[i - 1] in {' ', '\t', '=', '('}
+    var j = i + 4
+    let from0 = j
+    while j < s.len and s[j] in {' ', '\t'}: inc j
+    if startOk and j > from0:
+      var e = j
+      while e < s.len and s[e] notin {' ', '\t', ':'}: inc e
+      let word = s[j ..< e]
+      if word.endsWith(".kind") and word.len > 5:
+        let rest = s[e .. ^1].strip()
+        if rest.len == 0 or rest == ":":
+          return word[0 .. ^6]
+    i += 4
+
+proc nimCases(text: string): seq[NimCase] =
+  ## Every `case <expr>.kind` of the file whose labels name `nnk*` members.
+  let lines = text.splitLines().mapIt(stripComment(it).strip(
+    leading = false, chars = {'\r', ' ', '\t'}))
+  for i in 0 ..< lines.len:
+    let subj = caseSubject(lines[i])
+    if subj.len == 0: continue
+    var j = i + 1
+    while j < lines.len and lines[j].strip().len == 0: inc j
+    if j >= lines.len or not lines[j].strip().startsWith("of "): continue
+    let col = indentOf(lines[j])
+    var labels: seq[string]
+    var elseBody: seq[string]
+    var hasElse = false
+    var cur = ""
+    var k = j
+    while k < lines.len:
+      let t = lines[k]
+      if t.strip().len == 0:
+        inc k
+        continue
+      let ind = indentOf(t)
+      let st = t.strip()
+      if ind < col: break
+      if ind == col:
+        if st.startsWith("of "):
+          cur = "of"
+          var lab = st
+          while lab.endsWith(",") and k + 1 < lines.len:
+            inc k
+            lab.add " " & lines[k].strip()
+          labels.add lab
+        elif st.startsWith("else"):
+          cur = "else"
+          hasElse = true
+          elseBody = @[st]
+        else: break
+      elif cur == "else": elseBody.add st
+      inc k
+    if labels.anyIt(it.contains("nnk")):
+      result.add NimCase(line: i + 1, subject: subj,
+                         owner: routineAt(lines, i),
+                         disp: classifyElse(elseBody, hasElse))
 
 const platformToks = ["defined(windows)", "defined(linux)", "defined(macosx)",
                       "defined(posix)", "defined(mingw)", "defined(vcc)",
@@ -100,7 +246,6 @@ proc sites*(files: seq[SrcFile]): seq[string] =
       let s = stripComment(line)
       var hits: seq[string]
       if inSrc:
-        for _ in 1 .. countCaseNKind(s): hits.add "case_n_kind"
         for _ in 1 .. countTok(s, "Survivors("): hits.add "survivors"
         for _ in 1 .. countTok(s, "Degrade("): hits.add "degrade"
       elif inTests:
@@ -109,6 +254,13 @@ proc sites*(files: seq[SrcFile]): seq[string] =
           for _ in 1 .. countPlatform(s): hits.add "platform"
       for k in hits:
         let base = k & ":" & f.path & ":" & context(line)
+        seen.inc base
+        result.add (if seen[base] == 1: base else: base & "#" & $seen[base])
+    if inSrc:
+      for c in nimCases(f.text):
+        if c.disp != dTransparent: continue
+        let base = "nimcase_transparent:" & f.path & ":case " & c.subject &
+                   ".kind in " & c.owner
         seen.inc base
         result.add (if seen[base] == 1: base else: base & "#" & $seen[base])
 
@@ -122,6 +274,11 @@ proc census*(sites: seq[string]; allow: seq[Allow]; slices: HashSet[string]):
   for a in allow:
     result.add entryProblems(a, slices)
     if a.key in listed: result.add "allowlist entry " & a.key & " is listed twice"
+    if kindOf(a.key) == "nimcase_transparent" and
+       not a.reason.startsWith("[transparent"):
+      result.add "allowlist entry " & a.key &
+                 ": a transparent else is listed as a finding; the reason " &
+                 "must start with `[transparent:<role>]`"
     listed.incl a.key
     if a.key notin have:
       result.add "stale allowlist entry (the site no longer exists; remove the line): " & a.key
@@ -145,10 +302,12 @@ proc tally(sites: seq[string]): CountTable[string] =
 suite "RFC-0016 K2a: dispatch census (synthetic sources)":
   let slices = toHashSet(["K2a", "K2a-fail", "K7c", "K4a-dispatch"])
   proc ent(key: string; slice = "K2a-fail"; reason = "r"): Allow =
-    Allow(key: key, slice: slice, reason: reason)
+    Allow(key: key, slice: slice, reason:
+          (if reason == "r" and key.startsWith("nimcase_transparent"):
+             "[transparent:t] r" else: reason))
 
   let srcA: SrcFile = ("src/nelli/a.nim",
-    "proc f(n: Node) =\n  case n.kind\n  of nkA: discard\n" &
+    "proc f(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n  else: discard\n" &
     "  # case n.kind in a comment\n  let s = Survivors(live: @[])\n" &
     "  let d = Degrade(path: p)\n  allocDegrade(k, m)\n" &
     "  lowerDegrade(k, m)\n  case xn.kind\n  of a: discard\n")
@@ -161,16 +320,68 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
 
   test "the rules count what K2-s counts and ignore what it ignores":
     let t = tally(sites(@[srcA, tstA, plat, platOk]))
-    check t.getOrDefault("case_n_kind") == 1   # comment and `xn.kind` ignored
+    check t.getOrDefault("nimcase_transparent") == 1  # comment and `xn.kind` ignored
     check t.getOrDefault("survivors") == 1
     check t.getOrDefault("degrade") == 1       # allocDegrade/lowerDegrade not
     check t.getOrDefault("bare_skip") == 1     # skipCell and the comment not
     check t.getOrDefault("platform") == 2      # q.nim has skipCell: not counted
 
-  test "a repeated line in one file gets #n and stays distinct":
-    let s = sites(@[("src/nelli/b.nim", "case n.kind\ncase n.kind\n")])
-    check s == @["case_n_kind:src/nelli/b.nim:case n.kind",
-                 "case_n_kind:src/nelli/b.nim:case n.kind#2"]
+  test "a repeated case in one routine gets #n and stays distinct":
+    let two = "proc g(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n" &
+              "  else: discard\n  case n.kind\n  of nnkB: discard\n  else: discard\n"
+    let s = sites(@[("src/nelli/b.nim", two)])
+    check s == @["nimcase_transparent:src/nelli/b.nim:case n.kind in g",
+                 "nimcase_transparent:src/nelli/b.nim:case n.kind in g#2"]
+
+  proc dispOf(src: string): seq[Disp] =
+    nimCases(src).mapIt(it.disp)
+
+  test "every case over a NimNode kind is found, whatever the subject is called":
+    let src = "proc h(lhs, impl: NimNode) =\n" &
+              "  case lhs.kind\n  of nnkIdent: discard\n" &
+              "  case impl.kind\n  of nnkSym, nnkIdent: discard\n" &
+              "  let w = case p.ty.kind\n    of nnkCall: 1\n    else: 2\n"
+    check nimCases(src).mapIt(it.subject) == @["lhs", "impl", "p.ty"]
+
+  test "a case whose labels are not NimNodeKind members is not a NimNode case":
+    check nimCases("proc h(s: IRStmt) =\n  case s.kind\n  of isBlock: discard\n" &
+                   "  else: discard\n").len == 0
+
+  test "the else disposition: none, decline, sentinel, transparent":
+    let head = "proc h(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n"
+    check dispOf(head) == @[dNone]
+    check dispOf(head & "  else: ctx.declineAtSite(feX, \"m\")\n") == @[dDecline]
+    check dispOf(head & "  else:\n    error(\"x\", n)\n") == @[dDecline]
+    check dispOf(head & "  else: raise newSymexError(\"x\")\n") == @[dDecline]
+    check dispOf(head & "  else: false\n") == @[dSentinel]
+    check dispOf(head & "  else:\n    return nil\n") == @[dSentinel]
+    check dispOf(head & "  else: none(string)\n") == @[dSentinel]
+    check dispOf(head & "  else: discard\n") == @[dTransparent]
+    check dispOf(head & "  else:\n    for c in n: h(c)\n") == @[dTransparent]
+    check dispOf(head & "  else: n.repr\n") == @[dTransparent]
+
+  test "the case ends where the layout says: a later else is not its else":
+    check dispOf("proc h(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n" &
+                 "  if x: discard\n  else: false\n") == @[dNone]
+    check dispOf("proc h(n: NimNode) =\n  if q:\n    case n.kind\n" &
+                 "    of nnkA: discard\n  else: discard\n") == @[dNone]
+
+  test "RED: a new transparent else is an unlisted site":
+    let src = "proc h(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n" &
+              "  else: discard\n"
+    let s = sites(@[("src/nelli/c.nim", src)])
+    check s.len == 1
+    let problems = census(s, @[], slices)
+    check problems.len == 1 and "unlisted census site" in problems[0]
+
+  test "a transparent entry must say it is transparent":
+    let src = "proc h(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n" &
+              "  else: discard\n"
+    let s = sites(@[("src/nelli/c.nim", src)])
+    check census(s, @[ent(s[0], reason = "benign")], slices).anyIt(
+      "[transparent" in it)
+    check census(s, @[ent(s[0], reason = "[transparent:ignore] r")],
+                 slices).len == 0
 
   test "RED: a new site with no allowlist entry fails as unlisted":
     let s = sites(@[srcA])
@@ -216,8 +427,37 @@ suite "RFC-0016 K2a: dispatch census (the tree)":
 
   test "every kind is counted (a rule that finds nothing is broken)":
     let t = tally(found)
-    for k in ["case_n_kind", "survivors", "degrade", "bare_skip"]:
+    for k in ["survivors", "degrade", "bare_skip"]:
       check t.getOrDefault(k) > 0
+
+  test "every case over a NimNode kind is classified (the dispositions)":
+    var by = initCountTable[Disp]()
+    var total = 0
+    for f in files:
+      if f.path.startsWith("src/nelli/"):
+        for c in nimCases(f.text):
+          by.inc c.disp
+          inc total
+    echo "NimNode cases: ", total, " ", by
+    check total > 100                       # the literal `case n.kind` is 53
+    check by.getOrDefault(dNone) > 0        # the classOf shape exists
+    check by.getOrDefault(dDecline) > 0
+    check by.getOrDefault(dTransparent) > 0
+    var transparent = 0
+    for s in found:
+      if kindOf(s) == "nimcase_transparent": inc transparent
+    check transparent == by.getOrDefault(dTransparent)
+
+  test "the literal `case n.kind` is one NimNode case or a non-NimNode enum":
+    # The 53 sites of K2-s's case_n_kind row: each is found as a NimNode case
+    # here, or its labels are an IR/choice enum (4 sites today).
+    var literal, nim = 0
+    for f in files:
+      if not f.path.startsWith("src/nelli/"): continue
+      for raw in f.text.splitLines(): literal += countCaseNKind(stripComment(raw))
+      for c in nimCases(f.text):
+        if c.subject == "n": inc nim
+    check literal > 0 and nim <= literal
 
   test "the totals agree with scripts/census-k2.sh (K2-s)":
     let bash = findExe("bash")
@@ -234,5 +474,11 @@ suite "RFC-0016 K2a: dispatch census (the tree)":
         if f.len >= 3 and f[0] == "summary" and ':' notin f[1]:
           want[f[1]] = parseInt(f[2])
       let t = tally(found)
-      for k in ["case_n_kind", "survivors", "degrade", "bare_skip"]:
+      for k in ["survivors", "degrade", "bare_skip"]:
         check t.getOrDefault(k) == want.getOrDefault(k)
+      var literal = 0
+      for f in files:
+        if f.path.startsWith("src/nelli/"):
+          for raw in f.text.splitLines():
+            literal += countCaseNKind(stripComment(raw))
+      check literal == want.getOrDefault("case_n_kind")

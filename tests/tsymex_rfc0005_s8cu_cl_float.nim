@@ -38,7 +38,7 @@ suite "S8cu: --floatChecks:on":
   test "float arithmetic is walked with the checks (RFC-0016 PRC-07)":
     check native(clFloat(1e308)) == "FloatOverflowDefect"
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = pinExact(clFloat, declKey, target = tRaisedExn(),
                        domain = sampled([1e308, 0.0, 1.0, Inf, NaN]))
@@ -51,7 +51,7 @@ suite "S8cu: --floatChecks:on":
     check native(plainCompound(1e308)) == "FloatOverflowDefect"
     check native(plainCompound(-1e308)) == "FloatUnderflowDefect"
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let c = pinExact(offCompound, declKey, target = tRaisedExn(),
                        domain = floats)

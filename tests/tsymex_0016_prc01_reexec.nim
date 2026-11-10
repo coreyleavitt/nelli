@@ -74,7 +74,7 @@ suite "PRC-01: case objects cross to the re-executed child":
     # A symexFind run is decided only on a verified build row; cpp under Z3
     # 4.13.4 has none by design (`feHostUnadmitted`), so the pin skips there.
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(caseGlobal, tLabel("t"))
       checkpoint show(r.errors)
@@ -85,7 +85,7 @@ suite "PRC-01: case objects cross to the re-executed child":
     # A symexFind run is decided only on a verified build row; cpp under Z3
     # 4.13.4 has none by design (`feHostUnadmitted`), so the pin skips there.
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(caseGlobalA, tLabel("t"))
       checkpoint show(r.errors)
@@ -115,7 +115,7 @@ suite "PRC-01: case objects cross to the re-executed child":
     # A symexFind run is decided only on a verified build row; cpp under Z3
     # 4.13.4 has none by design (`feHostUnadmitted`), so the pin skips there.
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(typeSyms, tLabel("t"))
       checkpoint show(r.errors)

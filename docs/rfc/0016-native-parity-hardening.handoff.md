@@ -1180,6 +1180,8 @@
   `ubTailUnverified` (precision only). An opaque call's result is
   `feOpaqueCallUnmodelled` (⊤), never a candidate, so only havoc-tainted
   candidates reach this path.
+||||||| 32ae1cf0
+- **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

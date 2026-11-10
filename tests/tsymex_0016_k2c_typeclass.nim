@@ -210,3 +210,44 @@ suite "RFC-0016 K2c: classifyType reads the named-feature rows":
 suite "RFC-0016 K2c: walker version":
   test "version floor: K2c bumped the walker to 298":
     check parseInt(symexWalkerVersion) >= 298
+
+# E2 (W3-z): `cstring`, `pointer` and `proc` are modelled at the by-value-formal
+# site (`typeCopiedByValue`): the formal is the caller's bytes, so a callee that
+# overwrites the global it was handed a copy of does not change what it holds.
+# The parameter site declines (pinned above); these pin the modelled site, where
+# the walk's copy is Nim's and the verdict is exact against native. A `pointer`
+# value is built only from a `ptr` (the walk has no `nil` or `cast` for it), and
+# a `proc` value is a local (a global one is held by name and declines).
+var
+  gByCs: cstring
+  gByPtr: ptr int
+
+proc incByProc(a: int): int = a + 1
+
+proc rewriteCs(c: cstring): bool =
+  gByCs = "zz"
+  c == "abc"
+proc dropPtr(p: pointer): bool =
+  gByPtr = nil
+  true
+proc callF(f: proc (a: int): int; x: int): bool = f(x) == 6
+
+proc bvCs(x: int) =
+  gByCs = (if x > 3: "abc" else: "x")
+  if rewriteCs(gByCs) and x == 5: symexTarget("hit")
+proc bvPtr(q: ptr int) =
+  gByPtr = q
+  let r = dropPtr(gByPtr)
+  if r and gByPtr == nil: symexTarget("hit")
+proc bvProc(x: int) =
+  let f = incByProc
+  if callF(f, x): symexTarget("hit")
+
+suite "RFC-0016 W3-z E2: the by-value-formal site of cstring, pointer, proc":
+  test "the leaf kinds are admitted at the by-value formal and decided":
+    for k in [ntyCString, ntyPointer, ntyProc]:
+      check admitTypeClass(k, tcByValueFormal).admitted
+    discard pinExact(bvCs, cellKey(axTypeClass, "cstring"), domain = sampled([5, 2]))
+    discard pinExact(bvPtr, cellKey(axTypeClass, "pointer"),
+                     domain = sampled([cast[ptr int](nil), addr gInt]))
+    discard pinExact(bvProc, cellKey(axTypeClass, "proc"), domain = sampled([5, 2]))

@@ -108,3 +108,9 @@ suite "K4c AUD-11: the indexof link covers native terms only":
     let r = pinExact(sRfind, cellKey(axStdlibBody, "strutils.rfind/indexofLink"),
                      domain = sampled([0, 3, 4, 5, 6]))
     check r.status == sxSat
+    # The cell is a `never` facet: it stays as it is, and the join accepts
+    # only the record that says so (a decided `rfind` is the coverage note).
+    pinNever(cellKey(axStdlibBody, "strutils.rfind/indexofLink"),
+             r.status == sxSat,
+             "rfind is decided exactly; the walker emits neither " &
+             "seq.last_indexof nor str.indexof for it")

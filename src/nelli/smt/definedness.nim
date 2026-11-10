@@ -384,6 +384,14 @@ type
     ## answers either axis without its table does not type-check.
     undef: set[UbKind]
     defs: seq[string]
+    via: seq[string]
+      ## RFC-0016 W3-z R7. The module-level proc-valued variables (by
+      ## `procValueSiteKey`) the body calls through. Each is "may be undefined"
+      ## (`ubTailUnverified`) for the gate, as any unreadable call is, but a
+      ## replay can say which routine the variable held on its run
+      ## (`symex.nim`'s `procValueLift`), so the kind it contributes is kept
+      ## apart from `undef`: `undefinedKinds` includes it, `fixedUndefinedKinds`
+      ## does not.
 
 func ubMaskOf*(ks: set[UbKind]): int =
   ## RFC-0016 K10b. A `set[UbKind]` as a bit mask over `ord(k) - ord(low)`:
@@ -402,7 +410,26 @@ const unscanned* = OpaqueScan()
   ## The two expression-position and annotation-violation arms that never
   ## ran the scan name it, and `tests/tsymex_0016_admir.nim` counts the uses.
 
-func undefinedKinds*(s: OpaqueScan): set[UbKind] = s.undef
+func undefinedKinds*(s: OpaqueScan): set[UbKind] =
+  ## Every kind the body may reach, a proc-value call's included.
+  if s.via.len > 0: s.undef + {UbKind(ubTailUnverified)} else: s.undef
+func fixedUndefinedKinds*(s: OpaqueScan): set[UbKind] = s.undef
+  ## RFC-0016 W3-z R7. The kinds the body may reach whatever routine a
+  ## proc-valued variable it calls through holds (`viaKeys`).
+func viaKeys*(s: OpaqueScan): seq[string] = s.via
+  ## RFC-0016 W3-z R7. See `OpaqueScan.via`.
+
+proc noteVia*(s: var OpaqueScan; key: string; a: Admit[DefRule];
+              p: DefProfile) =
+  ## RFC-0016 W3-z R7. The body calls through the module-level proc-valued
+  ## variable `key` names: unreadable here, as any proc-value call is (the
+  ## admitted row `a`, `call/opaqueBody`, whose kind under `p` must be
+  ## `ubTailUnverified`), until a replay names the routine it held.
+  doAssert a.admitted, "noteVia: " & a.decline[1]
+  let u = ubOf(a.payload[p])
+  doAssert u.isSome and u.get == UbKind(ubTailUnverified),
+    "noteVia: " & render(a.cell) & " is not ubTailUnverified under " & $p
+  if key notin s.via: s.via.add key
 func defectNames*(s: OpaqueScan): seq[string] = s.defs
 
 proc noteUndefined*(s: var OpaqueScan; a: Admit[DefRule]; p: DefProfile) =
@@ -426,8 +453,11 @@ proc noteDefect*(s: var OpaqueScan; name: string) =
   ## for what it cannot read. No axis keys these.
   if name notin s.defs: s.defs.add name
 
-func replayScan*(defects: seq[string]; mask: int): OpaqueScan =
+func replayScan*(defects: seq[string]; mask: int;
+                 via: seq[string] = @[]): OpaqueScan =
   ## The IR emit's rebuild of a scan it already read (the macro-time
   ## `IRStmt` is written out as constructor calls). The parser's emit is
   ## the only caller; `tests/tsymex_0016_admir.nim` counts the uses.
-  OpaqueScan(undef: ubSetOf(mask), defs: defects)
+  ## `mask` is the fixed kinds (`fixedUndefinedKinds`), `via` the
+  ## proc-valued variables (RFC-0016 W3-z R7).
+  OpaqueScan(undef: ubSetOf(mask), defs: defects, via: via)

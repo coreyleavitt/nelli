@@ -579,6 +579,13 @@ type
       ## is unchanged for every non-closure path; `forkPath` inherits the field so
       ## the named-proc return-merge propagates it to the caller for free.
     env:       Env
+    undefinedViaOnly: set[UbKind]
+                      ## RFC-0016 W3-z R7. The kinds of `undefined` that only
+                      ## an opaque call through a module-level proc-valued
+                      ## variable put there (`IRStmt.opaqueUndefinedVia`): a
+                      ## replay that names the routine the variable held may
+                      ## replace them (`symex.nim`'s `procValueLift`). Empty
+                      ## (the default) claims nothing: every kind is fixed.
     undefined: set[UbKind]
                       ## RFC-0016 W1-d3 (section 9.1 item 4). The undefined
                       ## behaviours this path has read through (today the
@@ -811,6 +818,12 @@ type
     witnessUndefined*: set[UbOrdinal]
       ## RFC-0016 W1-d3. The claim's `Soundness.witnessUndefined`, carried to
       ## `settleCandidate` (replay cannot lift it).
+    witnessUndefinedViaOnly*: set[UbOrdinal]
+      ## RFC-0016 W3-z R7. The kinds of `witnessUndefined` that only a call
+      ## through a module-level proc-valued variable put there
+      ## (`Path.undefinedViaOnly`): a replay that names the routine each such
+      ## variable held on its run replaces them by what those routines reach
+      ## (`symex.nim`'s `procValueLift`). Empty claims nothing.
     witnessUnsafe*: bool
       ## RFC-0016 WA-B (S4). The claim's own `Soundness.witnessUnsafe` (a
       ## crash claim: its witness ends the process wherever it runs), carried
@@ -845,6 +858,15 @@ type
       ## by the reduction. Typed into `DefectFinding[T]` by the `symexFind`
       ## macro. Empty for sxUnsat/sxUnknown; also empty when the winner is
       ## the only sxRaised in w.found.
+    procValueSites*: seq[string]
+      ## RFC-0016 W3-z R7. Every module-level proc-valued variable an opaque
+      ## call the walk noted calls through (`WalkCtx.procValueSites`): the
+      ## variables a replay settle must name the routines of before it may
+      ## replace a candidate's `undefinedViaOnly` kinds.
+    undefinedViaOnly*: set[UbOrdinal]
+      ## RFC-0016 W3-z R7. The kinds of `soundness.witnessUndefined` that only
+      ## a call through a module-level proc-valued variable put there
+      ## (`Path.undefinedViaOnly`); carried to `SatCandidate`.
     nilDerefOnPath*: bool
       ## RFC-0005 S8k. The path that produced this finding took the walker's
       ## nil dereference edge (`Path.nilDeref`), recorded at target-hit time
@@ -966,7 +988,8 @@ func sameHeapTerm(a, b: HeapTerm): bool =
 
 template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                                 taintExpr: Taint;
-                                undefExpr: set[UbKind]): Path =
+                                undefExpr: set[UbKind];
+                                viaOnlyExpr: set[UbKind]): Path =
   ## Phase 15 H1 / R3 hardening / RFC-0005 S1: construct a CHILD `Path` from
   ## `parent`, deep-copying the logical-heap state (heaps / heapDepth /
   ## allocCounters) so the fork is isolated — the single enforcement point for
@@ -984,6 +1007,7 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   let hs = deepCopyHeapState(parent)
   Path(pc: pcExpr, env: envExpr, taint: taintExpr,
        undefined: undefExpr,                             ## RFC-0016 W1-d3
+       undefinedViaOnly: viaOnlyExpr,                    ## RFC-0016 W3-z R7
        defectSurvivorPc: parent.defectSurvivorPc,        ## Phase 16 ADR-0012
        heaps: hs.heaps, heapDepth: parent.heapDepth,
        allocCounters: hs.allocCounters,
@@ -1004,7 +1028,7 @@ template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## to the child — there is no taint parameter to silently drop or forget.
   ## Use `forkPathTainted` at sites that deliberately INTRODUCE taint.
   forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint,
-                          parent.undefined)
+                          parent.undefined, parent.undefinedViaOnly)
 
 proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind])
   ## RFC-0016 W3-z R1 fwd decl (defined beside `admitSolvedHit`). Under
@@ -1026,7 +1050,8 @@ template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
     let tok = d
     let child = forkPathTaintPrimitive(parent, pcExpr, envExpr,
                                        parent.taint + tok.path,
-                                       parent.undefined + tok.ub)
+                                       parent.undefined + tok.ub,
+                                       parent.undefinedViaOnly - tok.ub)
     noteUbAtFork(parent.taint, child, tok.ub - parent.undefined)
     child
 
@@ -1044,7 +1069,13 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   block:
     let merged = forkPathTaintPrimitive(callee, pcExpr, envExpr,
                                         callee.taint + caller.taint,
-                                        callee.undefined + caller.undefined)
+                                        callee.undefined + caller.undefined,
+                                        (callee.undefinedViaOnly +
+                                         caller.undefinedViaOnly) -
+                                        (callee.undefined -
+                                         callee.undefinedViaOnly) -
+                                        (caller.undefined -
+                                         caller.undefinedViaOnly))
     merged.nilDeref = callee.nilDeref or caller.nilDeref
     # RFC-0005 S8y: a closure body's descent starts from a fresh root, so
     # the caller's loop depths are joined back in (the deeper of the two).
@@ -1106,6 +1137,7 @@ proc taintInPlace(p: Path; d: Degrade) =
   let priorUb = p.undefined
   p.taint = p.taint + d.path
   p.undefined = p.undefined + d.ub     ## RFC-0016 W1-d3
+  p.undefinedViaOnly = p.undefinedViaOnly - d.ub   ## RFC-0016 W3-z R7
   noteUbAtFork(priorTaint, p, d.ub - priorUb)   ## RFC-0016 W3-z R1
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
@@ -17510,6 +17542,17 @@ type
                       ## free closures). Written by `applyClosureGround`,
                       ## read by `drainClosureExitHeap`, reset by
                       ## `seedCallerHeapInWalkCtx` (per-call reset, NI-1).
+    procValueSites: seq[string]
+                      ## RFC-0016 W3-z R7. Every proc-valued variable
+                      ## (`IRStmt.opaqueUndefinedVia`) an opaque call this walk
+                      ## noted calls through: the run-wide set a replay must
+                      ## name the routines of (`RawResult.procValueSites`).
+    tailVia: set[UbKind]
+                      ## RFC-0016 W3-z R7. On the tail walk (`tailGate`): the
+                      ## kinds an opaque call reached under the pins added
+                      ## only through its proc-valued variables
+                      ## (`IRStmt.opaqueUndefinedVia`); the walk went on past
+                      ## it, and `verifyTailDefined` reports them apart.
     tailGate: bool
                       ## RFC-0016 K10b. This is the whole-run gate's second
                       ## walk (`verifyTailDefined`): `wmFollowConcrete` under
@@ -18665,11 +18708,13 @@ func toCandidate(r: RawResult): SatCandidate =
   of sxSat:
     SatCandidate(status: sxSat, pathTaint: r.soundness.pathTaint, errors: r.errors,
                  witnessUndefined: r.soundness.witnessUndefined,
+                 witnessUndefinedViaOnly: r.undefinedViaOnly,   # W3-z R7
                  witnessUnsafe: r.soundness.witnessUnsafe,
                  nilDerefOnPath: r.nilDerefOnPath, input: r.witness)
   of sxRaised:
     SatCandidate(status: sxRaised, pathTaint: r.soundness.pathTaint, errors: r.errors,
                  witnessUndefined: r.soundness.witnessUndefined,
+                 witnessUndefinedViaOnly: r.undefinedViaOnly,   # W3-z R7
                  witnessUnsafe: r.soundness.witnessUnsafe,
                  nilDerefOnPath: r.nilDerefOnPath,
                  raisedTypeId: r.raisedTypeId, isDefect: r.isDefect,
@@ -19837,7 +19882,15 @@ proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
       if not concretelyInfeasible(w.z3, w.concreteEq,
                                   p.pc & p.defectSurvivorPc, w.settings):
         reached = true
-    if reached:
+    # RFC-0016 W3-z R7: a body that is undefined only through the proc-valued
+    # variables it calls through is walked past, as the explore walk does
+    # (`noteOpaqueUndefined`); the kinds are reported apart (`tailVia`), and
+    # a replay that names the routines the variables held may replace them.
+    if reached and stmt.opaqueUndefinedFixed == {}:
+      w.tailVia = w.tailVia + stmt.opaqueUndefined
+      for k in stmt.opaqueUndefinedVia:
+        if k notin w.procValueSites: w.procValueSites.add k
+    elif reached:
       var kinds: seq[string]
       for k in stmt.opaqueUndefined: kinds.add $k
       for k in stmt.opaqueUndefined:
@@ -25803,6 +25856,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of sxSat:    w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
                                                 soundness: Soundness(pathTaint: p.taint,
                                                      witnessUndefined: ubOrdinals(p.undefined)),
+                                                undefinedViaOnly: ubOrdinals(p.undefinedViaOnly),   # W3-z R7
                                                 nilDerefOnPath: p.nilDeref,
                                                 errors: candErrs))
         of sxUnknown:
@@ -27492,6 +27546,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       var r = toPublic(iv)
       r.soundness.pathTaint = rp.taint
       r.soundness.witnessUndefined = ubOrdinals(rp.undefined)
+      r.undefinedViaOnly = ubOrdinals(rp.undefinedViaOnly)   # W3-z R7
       r.nilDerefOnPath = rp.nilDeref   # RFC-0005 S8k
       r.errors.add candErrs
       w.admitSolvedHit(r)
@@ -27555,6 +27610,7 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
     var r = toPublic(iv)
     r.soundness.pathTaint = p.taint
     r.soundness.witnessUndefined = ubOrdinals(p.undefined)
+    r.undefinedViaOnly = ubOrdinals(p.undefinedViaOnly)   # W3-z R7
     r.nilDerefOnPath = p.nilDeref
     # RFC-0016 W1-c2: the witness ends the process wherever it runs, so no
     # consumer runs it in the host (`hostRunnable`).
@@ -27711,6 +27767,13 @@ proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
         of sxUnsat, sxRaised: discard
     let np = forkPath(p, p.pc, p.env)
     np.undefined = p.undefined + stmt.opaqueUndefined
+    for k in stmt.opaqueUndefinedVia:
+      if k notin w.procValueSites: w.procValueSites.add k
+    # RFC-0016 W3-z R7: what the call's proc-value variables alone add stays
+    # apart (`Path.undefinedViaOnly`); a fixed kind is fixed from here on.
+    let viaKinds = stmt.opaqueUndefined - stmt.opaqueUndefinedFixed
+    np.undefinedViaOnly = (p.undefinedViaOnly - stmt.opaqueUndefinedFixed) +
+                          (viaKinds - (p.undefined - p.undefinedViaOnly))
     result.add np
 
 
@@ -30622,9 +30685,10 @@ template drainSinkUnion(dst: var seq[SymexErrorInfo]; w: WalkCtx;
   ## buys real signature documentation plus type-checking at the call site.
   drainDedupedByMsg(dst, w.walkField & threadVarSrc)
 
-proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
-                       ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
-                       pins: seq[Z3Bool]): set[UbKind] =
+proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
+                            ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
+                            pins: seq[Z3Bool]; via: var set[UbKind];
+                            viaSites: var seq[string]): set[UbKind] =
   ## RFC-0016 K10b (section 9.1 item 3). The whole-run gate's second walk:
   ## from the entry, in concrete-follow mode under the winner's model `pins`
   ## (`RawWitness.pins`), past the label to a routine exit. The target is a
@@ -30728,6 +30792,22 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   # errors (`tsymex_r6_n13_reassign_seqarm`).
   if loweringDegradeErrors.len > lowerBase:
     loweringDegradeErrors.setLen(lowerBase)
+  via = w.tailVia
+  viaSites = w.procValueSites
+
+proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
+                       ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
+                       pins: seq[Z3Bool]):
+                       tuple[all, viaOnly: set[UbKind]; sites: seq[string]] =
+  ## RFC-0016 W3-z R7. `verifyTailDefinedKinds`, with the kinds an opaque
+  ## call added only through the proc-valued variables it calls through
+  ## (`WalkCtx.tailVia`) reported apart: `all` is every kind the run is not
+  ## shown defined in, `viaOnly` the part of it no other record put there.
+  var via: set[UbKind]
+  var sites: seq[string]
+  let fixed = verifyTailDefinedKinds(prog, settings, ctx, env, initialPC,
+                                     pins, via, sites)
+  (all: fixed + via, viaOnly: via - fixed, sites: sites)
 
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
@@ -31312,8 +31392,8 @@ proc runSymexImpl(prog: SymexProgram,
        target.kind == stkLabel and r.soundness.witnessUndefined == {}:
       let tail = verifyTailDefined(prog, settings, ctx, env, initialPC,
                                    r.witness.pins)
-      if tail != {}:
-        r.soundness.witnessUndefined = ubOrdinals(tail)
+      if tail.all != {}:
+        r.soundness.witnessUndefined = ubOrdinals(tail.all)
     r
   elif decision.status == sxUnknown:
     # v64 (chapulin catalog #5(b)): Invariant-7 BACKSTOP. Every sxUnknown
@@ -31353,14 +31433,23 @@ proc runSymexImpl(prog: SymexProgram,
     if settings.wholeRunDefinedness and settings.replay and
        target.kind == stkLabel:
       for c in w.candidates.mitems:
-        if c.status == sxSat and c.soundness.witnessUndefined == {}:
+        # RFC-0016 W3-z R7: a candidate whose kinds all came through
+        # proc-valued variables (`undefinedViaOnly`) is walked too: a replay
+        # may replace those, and then the tail must have been looked at.
+        let fixed = c.soundness.witnessUndefined - c.undefinedViaOnly
+        if c.status == sxSat and fixed == {}:
           let tail = verifyTailDefined(prog, settings, ctx, env, initialPC,
                                        c.witness.pins)
-          if tail != {}:
-            c.soundness.witnessUndefined = ubOrdinals(tail)
+          let all = c.soundness.witnessUndefined + ubOrdinals(tail.all)
+          let allFixed = fixed + ubOrdinals(tail.all - tail.viaOnly)
+          c.soundness.witnessUndefined = all
+          c.undefinedViaOnly = all - allFixed
+          for k in tail.sites:
+            if k notin w.procValueSites: w.procValueSites.add k
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
               callStats: statsSeq, errors: unknownErrs,
               undefined: w.undefinedFound,   # RFC-0016 K10a-target
+              procValueSites: w.procValueSites,   # RFC-0016 W3-z R7
               candidates: toCandidates(w.candidates))
   else:
     # RFC-0005 S1c: `decideVerdict` rule 5 -- no solved SAT anywhere (so no

@@ -18,7 +18,7 @@ import ./buildprofile   ## RFC-0016 W1-d2: the arithmetic checks derive from the
 export buildprofile
 import ./definedness   ## RFC-0016 ADM-IR: `OpaqueScan`, the proof `mkOpaqueCall` takes
 export OpaqueScan, unscanned, undefinedKinds, defectNames, ubMaskOf, ubSetOf,
-       replayScan
+       replayScan, fixedUndefinedKinds, viaKeys
 import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`, the proof `mkMathCall` / `mkArithBlock` take
 import ./pragmaaxes    ## RFC-0016 ADM-IR: `PragmaModel`, the proof `mkArithBlock` takes
 ##
@@ -1592,6 +1592,16 @@ type
                          ## conversion, `ubTailUnverified` for a body it
                          ## cannot read). Read only by the gate's second walk;
                          ## the explore walk forks `opaqueDefects` as before.
+      opaqueUndefinedFixed*: set[UbKind]
+                         ## RFC-0016 W3-z R7. The part of `opaqueUndefined`
+                         ## that holds whatever routine a proc-valued variable
+                         ## the body calls through holds (`opaqueUndefinedVia`
+                         ## adds `ubTailUnverified` to it, which a replay may
+                         ## replace by what the routine it ran reaches).
+      opaqueUndefinedVia*: seq[string]
+                         ## RFC-0016 W3-z R7. The module-level proc-valued
+                         ## variables the body calls through, by IR name
+                         ## (`dsl_parser.procValueSites`).
       cGuardRoots*: seq[string]
                          ## RFC-0005 S8an. The IR names of the ROOT
                          ## variables of this call's `var` and `addr`
@@ -4879,7 +4889,9 @@ proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
          retName: retName, retTy: retTy, opaque: true, opaqueInert: inert,
          opaqueHavoc: havoc, opaqueHeapTys: heapTys, opaqueHeapAll: heapAll,
          opaqueRaises: raises, opaqueDefects: scan.defectNames, opaqueWhy: why,
-         opaqueUndefined: scan.undefinedKinds)
+         opaqueUndefined: scan.undefinedKinds,
+         opaqueUndefinedFixed: scan.fixedUndefinedKinds,   # RFC-0016 W3-z R7
+         opaqueUndefinedVia: scan.viaKeys)
 
 proc mkIRGlobal*(name: string, ty: IRType, isVar: bool,
                  init: IRExpr): IRGlobal =

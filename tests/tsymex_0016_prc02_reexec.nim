@@ -161,15 +161,14 @@ suite "PRC-02: proc values cross to the re-executed child":
       checkpoint show(r.errors)
       check r.status == sxSat
       check r.soundness.replay == rsConfirmed
-      # The replay carries the proc value and confirms the hit, but the
-      # opaque body calls through it: the routine it holds is any of its
-      # type, one compiled with `overflowChecks: off` included, whose body is
-      # undefined (natively `gNimcall = ovf` runs the unchecked add, no
-      # Defect). The main walk reads the scan's "may be undefined" (W3-z R3),
-      # which a replay cannot lift, so the sxSat is untrusted; E4b's exact pin
-      # predates R3 (integration W3-z int2).
-      pinUndefined(sutNimcall, cellKey(faCallShape, "reexec/procValueGlobal"),
-                   UbKind(ubTailUnverified), tLabel("t"))
+      # RFC-0016 W3-z R7. The opaque body calls through `gNimcall`, which may
+      # hold any routine of its type (one with `overflowChecks: off`
+      # included), so the walk carries "may be undefined" for the call
+      # (W3-z R3). The replayed run is concrete: the global held `dbl` when it
+      # started, no code the run executes writes it, and `dbl` is checked, so
+      # the call ran no undefined behaviour and the confirmed sxSat is exact.
+      discard pinExact(sutNimcall, cellKey(faCallShape, "reexec/procValueGlobal"),
+                       tLabel("t"))
 
   test "a proc held in a field of a global object":
     # The walker leaves a closure-typed store unproved (no SAT path to
@@ -210,6 +209,108 @@ proc sutProcCall(v: int) =
   symexAssume(v == 3)
   runProcCall(v)
   if gOut == 4: symexTarget("t")
+
+# ---- RFC-0016 W3-z R7: the callee a replayed run executed ---------------------
+
+{.push overflowChecks: off.}
+proc ovfAdd(x: int): int = x + (high(int) - 2)   # unchecked: undefined past high
+{.pop.}
+
+var gOvf: proc (v: int): int {.nimcall.} = ovfAdd
+proc runOvf(v: int) {.symexOpaque.} =
+  gOut = gOvf(v)                  # the opaque body names no routine
+proc sutOvf(v: int) =
+  symexAssume(v == 3)
+  if v == 99: gOut = ovfAdd(v)    # names it (the replay's routine table)
+  runOvf(v)
+  if gOut < 0: symexTarget("t")
+
+var gClosR7: proc (v: int): int = dbl
+proc runClosR7(v: int) {.symexOpaque.} =
+  if v == 99: discard dbl(v)
+  gOut = gClosR7(v)
+proc sutClosR7(v: int) =
+  symexAssume(v == 3)
+  runClosR7(v)
+  if gOut == 6: symexTarget("t")
+
+var gEnvR7: proc (v: int): int
+proc runEnvR7(v: int) {.symexOpaque.} =
+  if v == 99: discard dbl(v)
+  gOut = gEnvR7(v)
+proc sutEnvR7(v: int) =
+  symexAssume(v == 3)
+  runEnvR7(v)
+  if gOut == 8: symexTarget("t")
+proc mkEnvR7() =
+  var n = 5
+  gEnvR7 = proc (v: int): int = v + n
+
+var gNilR7: proc (v: int): int {.nimcall.}
+proc runNilR7(v: int) {.symexOpaque.} =
+  if v == 99: discard dbl(v)
+  gOut = gNilR7(v)
+proc sutNilR7(v: int) =
+  symexAssume(v == 3)
+  runNilR7(v)
+  if gOut == 6: symexTarget("t")
+
+var gRe: proc (v: int): int {.nimcall.} = dbl
+proc runRe(v: int) {.symexOpaque.} =
+  if v == 99: discard dbl(v)
+  gRe = ovfAdd                    # reassigned during the run, before the call
+  gOut = gRe(v)
+proc sutRe(v: int) =
+  symexAssume(v == 3)
+  runRe(v)
+  if gOut < 0: symexTarget("t")
+
+suite "W3-z R7: the replayed run's proc-value callee":
+  test "an overflowChecks: off routine in the global stays undefined":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      let r = symexFind(sutOvf, tLabel("t"))
+      checkpoint show(r.errors)
+      check r.status == sxSat
+      check r.soundness.replay == rsConfirmed
+      # The run held `ovfAdd`, whose add is undefined past `high(int)`.
+      pinUndefined(sutOvf, cellKey(faCallShape, "reexec/procValueGlobalUnchecked"),
+                   UbKind(ubSignedOverflow), tLabel("t"))
+
+  test "a closure-typed global holding a routine with no environment":
+    # The walk leaves a read past a closure-typed variable's call unproved
+    # (`feGlobalRouteUnproved`: the closure may hold an environment whose
+    # hooks cannot be listed), so no candidate reaches the replay settle and
+    # nothing is lifted: the verdict stays untrusted.
+    let r = symexFind(sutClosR7, tLabel("t"))
+    checkpoint show(r.errors)
+    check not r.trusted
+    check r.errors.named(feGlobalRouteUnproved)
+
+  test "a closure with a captured environment is not cleared":
+    mkEnvR7()
+    let r = symexFind(sutEnvR7, tLabel("t"))
+    gEnvR7 = nil
+    checkpoint show(r.errors)
+    check not r.trusted
+
+  test "a nil proc value: the call does not return, nothing is cleared":
+    let r = symexFind(sutNilR7, tLabel("t"))
+    checkpoint show(r.errors)
+    check not r.trusted
+
+  test "a proc value reassigned during the run before the call":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      # It held `dbl` when the run started, but the run itself wrote
+      # `ovfAdd` into it before the call: the start value is not the callee.
+      pinUndefined(sutRe, cellKey(faCallShape, "reexec/procValueReassigned"),
+                   UbKind(ubSignedOverflow), tLabel("t"))
+
+  test "the walker's version floor (R7)":
+    check parseInt(symexWalkerVersion) >= 344
 
 suite "PRC-02: a method":
   test "a dynamic call over a visible hierarchy":

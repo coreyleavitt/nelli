@@ -1197,7 +1197,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z int2 fixups (a string-backed seq[byte] param is
     ## pinned): 341->342.
     ## RFC-0016 W3-z R9 (the tail walk's own budget): 342->343.
-    check symexWalkerVersion == "343"
+    ## RFC-0016 W3-z R7 (a replay names a proc-valued variable's routine):
+    ## 343->344.
+    check symexWalkerVersion == "344"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

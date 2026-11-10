@@ -17338,7 +17338,7 @@ proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
     return parseJumpedBody(forBodyNode, ctx)
   # The for-body is outside the iterator: its own entry leaves the stack.
   let entry = ctx.iterBodies.pop()
-  let caller = entry.caller
+  var caller = entry.caller   # a copy: the body below may push iterator bodies (VM let-aliasing, S8ab)
   ctx.checkScopes.add caller
   result = parseJumpedBody(forBodyNode, ctx)
   discard ctx.checkScopes.pop()
@@ -21656,7 +21656,7 @@ proc parseStmtInner(n: NimNode,
       ctx.declineMarker(feUnsupportedStmtKind,
         "`yield` outside an inlinable iterator body")
     else:
-      let h = ctx.yieldHandlers[^1]
+      var h = ctx.yieldHandlers[^1]   # a copy: the body below may push yield handlers (VM let-aliasing, S8ab)
       parseIterBodyStmt(n, h.bindings, h.forBody, ctx)
   of nnkBreakStmt:
     resolveBreak(n, ctx)        # RFC-0005 S8m

@@ -260,6 +260,7 @@ task test, "Run the test suite":
             "tsymex_q1_sibling_collision",
             "tsymex_g1a_mode",
             "tsymex_g1b_concolic",
+            "tsymex_0016_w3z_r4_concolic_undefined",
             "tsymex_g2_flip",
             "tsymex_g3fix_walkergap",
             "tsymex_g4_cmpwalk",

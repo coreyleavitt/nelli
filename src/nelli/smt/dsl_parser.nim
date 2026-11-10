@@ -20450,7 +20450,57 @@ proc parseStmtInner(n: NimNode,
     # RFC-0005 S8c: the range and container desugarings below model the
     # STDLIB iterators; a user iterator that shares the name (a non-generic
     # `items` beating `system.items[T]`, a user `..`) is not one of them.
-    if iterExpr.kind == nnkInfix and iterExpr[0].kind == nnkSym and
+    # RFC-0016 W3-z P15: `countup(a, b[, step])` / `countdown(a, b[, step])`
+    # over a counter type whose stdlib body steps an `int` (`IntLikeForCount`,
+    # plus `int64`, whose `inc`/`dec` overflows at the same width) are modelled
+    # natively beside `..`; their generic body (`cast[T](res)`) is not walked.
+    let isCountCall = iterExpr.kind == nnkCall and iterExpr.len in {3, 4} and
+      iterExpr[0].kind == nnkSym and
+      isBuiltinNamed(iterExpr[0], ["countup", "countdown"]) and
+      iterVar.typeKind in {ntyBool, ntyChar, ntyEnum, ntyInt, ntyInt8,
+                           ntyInt16, ntyInt32, ntyInt64, ntyUInt8, ntyUInt16}
+    if isCountCall:
+      let down = iterExpr[0].strVal == "countdown"
+      var preamble3: seq[IRStmt]
+      let intTy = tInt(64, signed = true)
+      let ivName = freshSynth(ctx, "iv")
+      preamble3.add mkLet(ivName, intTy, parseExpr(iterExpr[1], preamble3, ctx))
+      let hiIR = parseExpr(iterExpr[2], preamble3, ctx)
+      # `a`, `b` and `step` are evaluated in order, before the loop.
+      # Nim's inliner substitutes a symbol argument for the parameter (the
+      # bound is read every iteration, so a body that assigns it moves it) and
+      # binds any other expression to a temporary, once.
+      var hiRead = hiIR
+      if iterExpr[2].kind != nnkSym:
+        let hiName = freshSynth(ctx, "cuhi")
+        preamble3.add mkLet(hiName, intTy, hiIR)
+        hiRead = mkVar(hiName)
+      var stepIR = mkIntLit(1)
+      if iterExpr.len == 4:
+        var lit = iterExpr[3]
+        while lit.kind == nnkHiddenStdConv and lit.len >= 1:
+          lit = lit[lit.len - 1]
+        if lit.kind in nnkCharLit..nnkUInt64Lit and lit.intVal >= 1:
+          stepIR = mkIntLit(lit.intVal)
+        else:
+          # `step: Positive`: the argument's hidden conversion raises
+          # `RangeDefect` below 1, before the first iteration.
+          let stepName = freshSynth(ctx, "custep")
+          preamble3.add mkLet(stepName, intTy,
+                              parseAtomicOperand(lit, preamble3, ctx))
+          preamble3.add mkIf(@[mkBranch(
+            mkBinop(bLt, mkVar(stepName), mkIntLit(1)),
+            mkRaise("RangeDefect", nil))])
+          stepIR = mkVar(stepName)
+      let body = parseLoopBody(bodyNode, ctx).body
+      let cond = mkBinop(if down: bGe else: bLe, mkVar(ivName), hiRead)
+      let bindIter = mkLet(iterName, intTy, mkVar(ivName))
+      let stepIv = mkAssign(ivName,
+        mkBinop(if down: bSub else: bAdd, mkVar(ivName), stepIR))
+      var allStmts = preamble3
+      allStmts.add mkWhile(cond, mkBlock(@[bindIter, body, stepIv]))
+      mkBlock(allStmts)
+    elif iterExpr.kind == nnkInfix and iterExpr[0].kind == nnkSym and
        isBuiltinNamed(iterExpr[0], [".." , "..<"]):
       let inclusive = iterExpr[0].strVal == ".."
       var preamble3: seq[IRStmt]

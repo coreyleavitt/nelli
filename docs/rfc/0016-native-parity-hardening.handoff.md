@@ -137,6 +137,22 @@
     walked by their own arms and never reach the axis (guarded exact).
     `strutils.split`/`splitWhitespace` stay unadmitted (body walk declines
     `seUnsupportedStringOp`). Test: `tsymex_0016_w3z_p3b_iterrows`.
+  - W3-z P15 (`rfc-0016-w3z-parser15`, walker 315 to 316, precision): the
+    `for` arm that walks `..` also walks `countup(a, b[, step])` and
+    `countdown(a, b[, step])` over an `int`-like counter (bool, char, enums,
+    int8..int64, uint8, uint16), as the inlined stdlib body does: the counter
+    steps as an `int` (overflow raises `OverflowDefect`, e.g. `countup(high(int)
+    - 1, high(int))`), a step below 1 raises `RangeDefect` before the loop, a
+    symbol bound is read every iteration (Nim substitutes a symbol argument),
+    any other bound expression is evaluated once into a temporary. The P3b
+    rows stay for the counters outside that set (`uint`, `uint32`, `uint64`,
+    floats), which still decline `feUnsupportedExprKind` through the
+    iterator inliner. Test: `tsymex_0016_w3z_p15_countup` (25 differential
+    pins, family cells `p15/countup`, `p15/countdown`). Trap: a loop of 5 or
+    more iterations is `sxSat` but untrusted (`ubTailUnverified`: the tail
+    walk's unwind), for `..` and `countup` alike. Open, unprobed: the `..` arm
+    appears to re-read a non-symbol bound (`0 .. f(x)`) every iteration where Nim
+    evaluates it once.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

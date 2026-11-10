@@ -1743,6 +1743,7 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_p2_iter",
             "tsymex_0016_w3z_p3_iter",
             "tsymex_0016_w3z_p3b_iterrows",
+            "tsymex_0016_w3z_p15_countup",
             "tsymex_0016_w3z_p2_iter_off",
             "tsymex_0016_w3z_p2_fwrapv",
             "tsymex_0016_admir",

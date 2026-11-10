@@ -364,7 +364,13 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "315"
+const symexWalkerVersion* = "316"
+  ## RFC-0016 W3-z P15 (315->316): `for i in countup(a, b[, step])` and
+  ## `countdown` over an `int`-like counter (the stdlib's `IntLikeForCount`,
+  ## and `int64`) are modelled by the `for` arm beside `..`: `a`, `b` and
+  ## `step` are read once, a step below 1 raises `RangeDefect`, the counter
+  ## steps as an `int` (overflow checked), as the inlined body does. Before,
+  ## the generic body (`cast[T](res)`) declined `feUnsupportedExprKind`.
   ## RFC-0016 W3-z P3b (314->315): the system `countup`/`countdown` iterators
   ## have a declined row (`feUnsupportedExprKind`, their body casts `T(res)`),
   ## so the decline names its real cause instead of `feUnadmitted`. The

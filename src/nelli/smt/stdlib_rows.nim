@@ -158,19 +158,24 @@ const explicitRows: seq[StdlibRow] = @[
   declinedType("deques.Deque",
     "a stdlib generic object: its ring buffer is not modelled"),
 
-  # W3-z P3b. The system counting iterators are keyed `<name>/iterator` (P3)
-  # and, inlined, were never walked exactly: the body of each is generic over
-  # `T`, steps with `cast[T](res)` (an unsupported expression kind) and loops
-  # on a guard the unwind bound cannot close. The decline is the same with or
-  # without a row; the row names it instead of leaving it to "absent".
+  # W3-z P3b / P15. The system counting iterators are keyed
+  # `<name>/iterator` (P3). Over an `int`-like counter (the stdlib's
+  # `IntLikeForCount`, and `int64`) the `for` loop is modelled by its own arm
+  # (`dsl_parser`, beside `..`), which never reaches this key. Any other
+  # counter (`uint`, `uint32`, `uint64`, a float, ...) is the iterator's
+  # generic body: it steps with `cast[T](res)` (an unsupported expression
+  # kind) inside a loop the unwind bound does not close, and declines. The row
+  # names that instead of leaving it to "absent".
   declinedIterator("system.countup/iterator",
-    "iterators.nim `countup`: the body steps with `cast[T](res)` over a " &
-    "generic ordinal, which the walker does not support (nnkCast), inside a " &
-    "loop the unwind bound does not close; open precision"),
+    "iterators_1.nim `countup` over a counter outside the `int`-like set: " &
+    "the body steps with `cast[T](res)` over a generic ordinal, which the " &
+    "walker does not support (nnkCast), inside a loop the unwind bound " &
+    "does not close; open precision"),
   declinedIterator("system.countdown/iterator",
-    "iterators.nim `countdown`: the body steps with `cast[T](res)` over a " &
-    "generic ordinal, which the walker does not support (nnkCast), inside a " &
-    "loop the unwind bound does not close; open precision"),
+    "iterators_1.nim `countdown` over a counter outside the `int`-like set: " &
+    "the body steps with `cast[T](res)` over a generic ordinal, which the " &
+    "walker does not support (nnkCast), inside a loop the unwind bound " &
+    "does not close; open precision"),
 
   # STY-02 (C-13): iteration order is the hash order, which depends on the
   # build (Nim version, `-d:nimStringHash2`, `-d:nimPreviewHashRef`).

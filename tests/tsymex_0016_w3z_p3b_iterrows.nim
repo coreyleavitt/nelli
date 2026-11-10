@@ -11,20 +11,23 @@ import nelli/smt/admission
 import nelli/smt/stdlib_rows
 import ./s8cu_helpers
 
+# P15: over a counter of `int`-like type the loop is walked by its own arm
+# (tsymex_0016_w3z_p15_countup); the ROW is what an `uint32`/`uint64`/`uint`
+# counter reaches, whose body is not the `int` stepping.
 proc sCountup(a: int) =
-  var n = 0
-  for i in countup(1, 4): n += i
-  if n == 10 and a == 1: symexTarget("hit")
+  var n = 0'u32
+  for i in countup(1'u32, 4'u32): n += i
+  if n == 10'u32 and a == 1: symexTarget("hit")
 
 proc sCountdown(a: int) =
-  var n = 0
-  for i in countdown(4, 1): n = n * 2 + i
-  if n == 26 and a == 1: symexTarget("hit")
+  var n = 0'u32
+  for i in countdown(4'u32, 1'u32): n = n * 2'u32 + i
+  if n == 26'u32 and a == 1: symexTarget("hit")
 
 proc sCountupStep(a: int) =
-  var n = 0
-  for i in countup(0, 9, 3): n += i
-  if n == 18 and a == 1: symexTarget("hit")
+  var n = 0'u32
+  for i in countup(0'u32, 9'u32, 3'u32): n += i
+  if n == 18'u32 and a == 1: symexTarget("hit")
 
 proc sDotDot(a: int) =
   var n = 0
@@ -127,7 +130,8 @@ suite "W3-z P3b: the system counting iterators decline for their real cause":
   # Walking the body of `countup`/`countdown` (generic over `T`, stepping with
   # `cast[T](res)`) was never exact; P3 turned the decline into `feUnadmitted`
   # "no row". The row names the cause. Both overloads of each (two and three
-  # arguments) share the key.
+  # arguments) share the key. P15: only a counter outside the `int`-like set
+  # reaches it now.
   test "system.countup":
     check hasStdlibRow("system.countup/iterator")
     pinDecline(sCountup, cellKey(axStdlibBody, "system.countup/iterator"),

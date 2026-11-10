@@ -4504,7 +4504,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # Phase 15 F6: predicates produce svBool; float ops produce a float of
     # the first arg's width; deferred ops have no proto (they raise on lower).
     # Phase 16 A5: classify → svBV64 (signed); copySign → float of first arg's width.
-    if e.mathOp in ["signbit", "isNaN", "isInf", "isFinite", "isNormal"]:
+    if e.mathOp in ["signbit", "isNaN"]:
       some(SymVal(kind: svBool, bo: mkBool(false)))
     elif e.mathOp == "toFloat32":
       some(SymVal(kind: svFloat32, fp32: mkFloat32(0'f32)))   # RFC-0016 K2b

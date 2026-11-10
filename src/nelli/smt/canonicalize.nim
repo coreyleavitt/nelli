@@ -398,6 +398,9 @@ const symexWalkerVersion* = "317"
   ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the
   ## signed wrap. A checks-on callee no longer reads as unchecked; a checks-off
   ## one now carries `ubSignedOverflow` into `witnessUndefined`.
+  ## RFC-0016 P10 (311->312): `isInf`/`isFinite`/`isNormal` are no longer
+  ## lowered by name (std/math here has none; a SUT routine of the name is
+  ## walked as its own body), so a stdlib float call of those names declines.
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

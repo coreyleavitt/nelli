@@ -70,7 +70,7 @@ const mathFpModeledOps* = [
   ## with a Z3-FP-native model. Routed to `iekMathCall`; lowered in runtime.nim.
   "abs", "sqrt", "min", "max",
   "floor", "ceil", "round", "trunc",
-  "signbit", "isNaN", "isInf", "isFinite", "isNormal",
+  "signbit", "isNaN",
   "classify", "copySign",   ## Phase 16 A5
 ]
 

@@ -335,13 +335,11 @@ suite "K4c PRC-09: the modelled names agree with the lowering":
 #
 # `abs`, `min` and `max` are std/system routines. `isInf`, `isFinite` and
 # `isNormal` are NOT in std/math on this toolchain (see the `compiles` facts
-# below): the lowering recognises the NAME of a float-first call, so the SUT
-# defines the predicate itself with its IEEE meaning and the native run
-# executes that body while the walker lowers the name to the FP predicate.
+# below), so their rows are never cells; a SUT routine of that name is a user
+# routine, walked as its own body (tsymex_0016_p10_floatnames).
 # `toFloat32`/`toFloat64` are the lowering's names for `float32(x)` and
 # `float(x)` on a float operand (dsl_parser `convertFloatWidth`), not routines.
 const
-  wide = sampled([-Inf, -2.5, -0.0, 0.0, 5e-324, 0.5, 2.5, Inf, NaN])
   narrow = sampled([-2.5'f32, -0.0'f32, 0.0'f32, 0.5'f32, 2.5'f32, 9.0'f32])
 
 proc fAbs(a: float) =
@@ -351,15 +349,6 @@ proc fMin(a, b: float) =
 proc fMax(a, b: float) =
   if max(a, b) == 2.5 and b == 0.5: symexTarget("hit")
 
-proc isInf(x: float): bool = x == Inf or x == -Inf
-proc isFinite(x: float): bool = x == x and not isInf(x)
-proc isNormal(x: float): bool = classify(x) == fcNormal
-proc fIsInf(a: float) =
-  if isInf(a) and a < 0.0: symexTarget("hit")
-proc fIsFinite(a: float) =
-  if isFinite(a) and a < -1.0: symexTarget("hit")
-proc fIsNormal(a: float) =
-  if isNormal(a) and a > 1.0: symexTarget("hit")
 proc fTo32Exact(a: float) =
   if float32(a) == 2.5'f32 and a == 2.5: symexTarget("hit")
 proc fTo64(a: float32) =
@@ -375,21 +364,25 @@ suite "W3-z E2b: the allowlisted float rows are pinned exact":
   test "math.max":
     check pinExact(fMax, cellKey(axStdlibBody, "math.max"),
                    domain = floats).status == sxSat
-  test "math.isInf (named, defined in the SUT)":
-    check pinExact(fIsInf, cellKey(axStdlibBody, "math.isInf"),
-                   domain = wide).status == sxSat
-  test "math.isFinite (named, defined in the SUT)":
-    check pinExact(fIsFinite, cellKey(axStdlibBody, "math.isFinite"),
-                   domain = wide).status == sxSat
-  test "math.isNormal (named, defined in the SUT)":
-    check pinExact(fIsNormal, cellKey(axStdlibBody, "math.isNormal"),
-                   domain = wide).status == sxSat
   test "math.toFloat32 (float32(x) on a float operand)":
     check pinExact(fTo32Exact, cellKey(axStdlibBody, "math.toFloat32"),
                    domain = floats).status == sxSat
   test "math.toFloat64 (float(x) on a float32 operand)":
     check pinExact(fTo64, cellKey(axStdlibBody, "math.toFloat64"),
                    domain = narrow).status == sxSat
+
+suite "W3-z P10: math.isInf/isFinite/isNormal are not in std/math here":
+  test "the three are never cells, nrPlatform":
+    var x = 1.5
+    pinNever(cellKey(axStdlibBody, "math.isInf"), not compiles(isInf(x)),
+             "std/math (Nim 2.2.10) has no isInf")
+    pinNever(cellKey(axStdlibBody, "math.isFinite"), not compiles(isFinite(x)),
+             "std/math (Nim 2.2.10) has no isFinite")
+    pinNever(cellKey(axStdlibBody, "math.isNormal"), not compiles(isNormal(x)),
+             "std/math (Nim 2.2.10) has no isNormal")
+    for n in ["isInf", "isFinite", "isNormal"]:
+      check not admitFloatCall(n, 1).admitted
+      check n notin mathFpModeledOps
 
 suite "W3-z E2b: math.nextafter is not in std/math here":
   test "math.nextafter is a never cell, nrPlatform":

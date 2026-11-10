@@ -3223,12 +3223,11 @@ const capturableLocalKinds = {nskVar, nskLet, nskParam, nskResult, nskForVar,
 
 proc collectCaptures(n, o: NimNode; inNested: bool; acc: var seq[NimNode]) =
   ## The locals of the routine `o` that code nested in it names.
-  case n.kind
-  of nnkSym:
+  if n.kind == nnkSym:
     if inNested and symKind(n) in capturableLocalKinds and owner(n) == o and
        n notin acc:
       acc.add n
-  of RoutineNodes:
+  elif n.kind in RoutineNodes:
     for c in n: collectCaptures(c, o, true, acc)
   else:
     for c in n: collectCaptures(c, o, inNested, acc)

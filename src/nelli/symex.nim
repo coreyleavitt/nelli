@@ -3216,7 +3216,7 @@ proc plainBitsType(t: NimNode; depth = 0): bool =
     else:
       let impl = t.getTypeImpl
       impl != t and plainBitsType(impl, depth + 1)
-  else: false
+  else: false  # k2: fail-closed: false: not plain bits, so the env is refused and the replay declines
 
 const capturableLocalKinds = {nskVar, nskLet, nskParam, nskResult, nskForVar,
                               nskTemp}

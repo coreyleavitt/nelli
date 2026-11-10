@@ -22,18 +22,11 @@
 ## walkers and counters. So the table is a ledger (as the readonly axis was
 ## before E3b), joined to its records by `tsymex_0016_universe`.
 ##
-## `k8a-gen/DivLit` and `k8a-gen/Udiv` are not cells yet: the smoke batch's
-## programs of those shapes reach no sat witness, so no exact record ships.
-##
-## Recorded but not cells yet, because no record evidences them on a leg:
-## the skipped faults (`hook/=trace/cycleCollector`, `hook/=destroy/
-## dynamicSubtype`, `threads/createThread`, `quit/afterTarget/...`: a
-## walker fault or a platform skip is not a verdict), and the keys whose only
-## exact record is a sampled unsat (`case/elif/orderExpr`, `case/elif/
-## orderStmt`, `except-as-raise`, `in/slice/empty`, `in/slice/excl/var/u8/
-## raise`, `nopanic-defect-not-escaping`): a sampled unsat classifies no cell
-## (section 10), so they stay orphans until a witness or an exhaustive domain
-## pins them.
+## Recorded but not cells, because no record can evidence them on a leg: the
+## two `=trace`/`=destroy` hook keys are walker faults (`coerceIntLit`, P6) and
+## a fault is not a decline, and `quit/afterTarget/assertCoveredBy` is a clean
+## `sxSat` whose host ends at the splat (INT-22: a harness hazard, not a
+## verdict); each stays a `skipCell` in `tsymex_0016_k20_probes*`.
 import std/options
 import ./admission
 import ./errorkind
@@ -57,17 +50,19 @@ func declines(kind: Option[SymexErrorKind]; names: openArray[string];
 
 func constructRows(): seq[ConstructKey] =
   result.add decided(
-    ["k8a-gen/Ovf", "k8a-gen/Neg", "k8a-gen/F32", "k8a-gen/Except"],
+    ["k8a-gen/DivLit", "k8a-gen/Udiv", "k8a-gen/Ovf", "k8a-gen/Neg",
+     "k8a-gen/F32", "k8a-gen/Except"],
     "K8a-gen (section 10): a generated program of the shape and its " &
     "metamorphic twins agree with the native run")
   result.add decided(
-    ["except-as-label", "except-plain-label", "raise-let-value",
+    ["except-as-label", "except-as-raise", "except-plain-label", "raise-let-value",
      "k8a1-plain", "k8a1-as", "k8a1-nested", "k8a1-module", "k8a1-iter"],
     "an `except T as e` handler, a plain one, a raise of a `let` value, and " &
     "the same handlers through a template, a nested try, a module-level " &
     "try and an iterator")
   result.add decided(
-    ["nopanic-catch-defect", "nopanic-finally-defect",
+    ["nopanic-catch-defect", "nopanic-defect-not-escaping",
+     "nopanic-finally-defect",
      "mitems/int16/assertionsOff"],
     "a build with panics or assertions off: a Defect is catchable, a " &
     "`finally` runs, an unchecked write is the native one")
@@ -78,7 +73,8 @@ func constructRows(): seq[ConstructKey] =
     "expression, the argument drain order, a nested try in a proc")
   result.add decided(
     ["case/elif/chain", "case/elif/chainElse", "case/elif/expr",
-     "case/elif/exprCond", "case/elif/hoisted", "case/elif/stmt"],
+     "case/elif/exprCond", "case/elif/hoisted", "case/elif/orderExpr", "case/elif/orderStmt",
+     "case/elif/stmt"],
     "a `case` with `elif` branches, as a statement and as an expression")
   result.add decided(
     ["conv/float32<-float64", "conv/float64<-float32/arg",
@@ -86,9 +82,9 @@ func constructRows(): seq[ConstructKey] =
     "a float width or int/float conversion, explicit or inserted by the " &
     "compiler (`convertFloatWidth`)")
   result.add decided(
-    ["in/slice/char", "in/slice/enum", "in/slice/enum/out", "in/slice/excl",
+    ["in/slice/char", "in/slice/enum", "in/slice/empty", "in/slice/enum/out", "in/slice/excl",
      "in/slice/excl/unsat", "in/slice/excl/var", "in/slice/excl/var/lowRaise",
-     "in/slice/excl/var/u8", "in/slice/int", "in/slice/int/unsat",
+     "in/slice/excl/var/u8", "in/slice/excl/var/u8/raise", "in/slice/int", "in/slice/int/unsat",
      "in/slice/int/upper", "in/slice/uint8", "in/slice/uint8/hi",
      "in/slice/varbounds", "notin/slice/char", "notin/slice/enum",
      "notin/slice/int", "notin/slice/int/unsat"],
@@ -113,6 +109,8 @@ func constructRows(): seq[ConstructKey] =
   result.add declines(some(beBudgetExhaustedPrune),
     ["cap/ckFrontier", "cap/ckWalkWork"],
     "the path frontier or the walk work cap prunes the run")
+  result.add declines(some(feUnsupportedOp), ["threads/createThread"],
+    "`createThread` declines at the call by its stdlib `never` row")
   result.add declines(some(feUnsupportedOpHavoc), ["cap/ckTermWalkRead"],
     "an array read wider than the term walk's cap")
   result.add declines(some(feUnsupportedStmtKind), ["cap/ckTermWalkWrite"],

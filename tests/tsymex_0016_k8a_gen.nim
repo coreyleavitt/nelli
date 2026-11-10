@@ -32,7 +32,10 @@ const redProgs = @[
        lit: Lit(kind: lkNum, n: 2), cmp: "==", k: Lit(kind: lkNum, n: 0))]
 genBatch(redProgs, true, "red")
 
-const progs = genPrograms(k8aSeed, k8aCount, k8aFirst)
+# The anchors ride the batch that starts the stream, so a run split by
+# k8aFirst holds each exactly once (the batch-equivalence check diffs them).
+const progs = (when k8aFirst == 0: anchorPrograms() else: newSeq[Prog]()) &
+              genPrograms(k8aSeed, k8aCount, k8aFirst)
 genBatch(progs, false, "run")
 
 suite "K8a-gen":

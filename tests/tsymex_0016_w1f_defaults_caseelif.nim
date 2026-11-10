@@ -2,7 +2,7 @@
 ## decline the slice planned is not needed, see the suite note), and
 ## `case` takes `elif` arms in all three forms (W-21), checked against the
 ## native run.
-import std/[unittest, strutils]
+import std/[unittest, strutils, sequtils]
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -187,6 +187,13 @@ proc caseExprOrder(x: int) =
     else: 30
   if y == 11: symexTarget("big")
 
+proc caseExprOrderOf(x: int) =
+  let y = case x
+    of 1: 10
+    elif x == 1: 11
+    else: 30
+  if y == 10: symexTarget("of")
+
 const domC = sampled([-7, -1, 0, 1, 2, 5, 6, 7, 100])
 
 suite "W1-f case with elif":
@@ -229,6 +236,17 @@ suite "W1-f case with elif":
     let r = pinExact(caseExprOrder, cellKey(axConstruct, "case/elif/orderExpr"),
                      target = tLabel("big"), domain = domC)
     check r.status == sxUnsat
+
+  test "the of arm wins the value an elif repeats (sat siblings of the order cells)":
+    # A sampled unsat classifies no cell; the same construct's sat witness does.
+    let s = pinExact(caseStmtOrder, cellKey(axConstruct, "case/elif/orderStmt"),
+                     target = tLabel("one"), domain = domC)
+    check s.status == sxSat
+    check s.witness[0] == 1
+    let e = pinExact(caseExprOrderOf, cellKey(axConstruct, "case/elif/orderExpr"),
+                     target = tLabel("of"), domain = domC)
+    check e.status == sxSat
+    check e.witness[0] == 1
 
   test "elif arms are tried in order, else last":
     let rn = pinExact(caseStmtLast, cellKey(axConstruct, "case/elif/chain"),

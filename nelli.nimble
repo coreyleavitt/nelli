@@ -1854,6 +1854,11 @@ task test, "Run the test suite":
             "tsymex_0016_allowlist_ceilings",
             # RFC-0016 K2c: one snippet per NimTypeKind through symexFind, and classifyType reading the named-feature rows (owned, Atomic, c_longdouble).
             "tsymex_0016_k2c_typeclass",
+            "tsymex_0016_p6_nillit",
+            # RFC-0016 W3-z P12: isNil on a NimNode answers true for a nnkNilLit; a nil literal in each expression position agrees with native.
+            "tsymex_0016_p12_nilpos",
+            "tsymex_0016_p14_convnil_blockexpr",
+            "tsymex_0016_w3z_p16_ptrscalar",
             # RFC-0016 K3a: the type-class and type x memory-op axes (tables, verbs), and the let-cursor x type pins through the walker.
             "tsymex_0016_k3a_typeaxes",
             "tsymex_0016_k3a_letcursor",

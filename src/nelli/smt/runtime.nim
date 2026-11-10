@@ -10074,7 +10074,22 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     raise newException(ValueError, "lower: nil expression")  # [raise-audited: category-c: documented defensive invariant (nil-expression entry guard; moderate confidence, no specific unreachability argument beyond the general defensive pattern)]
   case e.kind
   of iekIntLit:
-    if proto.isSome and proto.get.kind != svBool:
+    if proto.isSome and proto.get.kind in {svUninterpRef, svTuple, svArray,
+        svString, svSeq, svTable, svSet, svVariant, svMultiVariant, svClosure,
+        svRef, svPtr, svBitSet}:
+      # RFC-0016 W3-z P6. Nim never types a written integer literal against a
+      # composite slot, but the parser's own placeholder for a declined `nil`
+      # (`cstring`, `pointer`: `g = (if c: cstring"a" else: nil)`) is the
+      # literal 0, and it is lowered against its sibling arm's prototype.
+      # `coerceIntLit` raised on it (weInternalWalkerFault); the parse-time
+      # decline marker already owns the verdict, so degrade in-band here and
+      # hand back the prototype as the inert value of that slot.
+      lowerDegrade(feUnsupportedExprKind,
+        "a placeholder for a declined literal met a " & $proto.get.kind &
+        " slot (a `nil` of a type the walk holds no nil for) -- degraded " &
+        "to sxUnknown (feUnsupportedExprKind)")
+      proto.get
+    elif proto.isSome and proto.get.kind != svBool:
       coerceIntLit(proto.get, e.ival)
     else:
       bvConst(tInt(64, true), e.ival)

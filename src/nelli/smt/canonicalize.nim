@@ -385,7 +385,7 @@ const renderAsChoicesVersion* = "12"
   ##   over an inline iterator leaves the whole expansion / resumes after the
   ##   current `yield`; both declined.
 
-const symexWalkerVersion* = "317"
+const symexWalkerVersion* = "319"
   ## RFC-0016 W3-z R5 (315->316): a diagnostic raise's `witnessUndefined` and
   ## `witnessUnsafe` ride the `:notes` record (`wu` / `wx`), so a cache hit
   ## serves them. Records written under 315 lack them and are not read.
@@ -408,6 +408,10 @@ const symexWalkerVersion* = "317"
   ## shape `pragmaName` cannot name declines on a type as on every other
   ## place; `layoutPragmaOf` reads every entry (a `packed` type with an
   ## `align` field is not the packed layout).
+    ## RFC-0016 W3-z P16 (`cast[ptr T](0)` / `cast[ptr T](nil)` is the target's
+    ## nil, not an unsafe pointer materialisation): 318->319.
+    ## RFC-0016 W3-z P6b (a `nil` arm of a case-expression yields a value, so its temp is bound): 316->317.
+    ## RFC-0016 W3-z P6 (a declined nil placeholder in a composite slot degrades, not a walker fault): 315->316.
     ## RFC-0016 W3-z P7 (touchesFloat reads inline iterator bodies): 314->315.
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
   ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a

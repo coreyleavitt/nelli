@@ -1153,7 +1153,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z R3 (the main walk reads the opaque scan): 314->315.
     ## RFC-0016 W3-z R5 (a diagnostic raise carries its soundness in the
     ## notes record): 315->316.
-    check symexWalkerVersion == "317"
+    check symexWalkerVersion == "319"
     ## RFC-0016 W3-z R4 (concolic float -> int conversion is a defined fact): 315->316.
     ## RFC-0016 W3-z R6 (the winner's tail walk forks an open branch): 316->317.
     ## RFC-0016 W3-z P8/P9 (`isMainModule` folds from the using module;
@@ -1177,6 +1177,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z P7 (float-check gate reads inline iterator bodies): 314->315.
     ## RFC-0016 W3-z P11 (inline iterator inside an inline iterator): 315->316.
     ## RFC-0016 W3-z P13 (break/continue in an inline-iterator for-body): 316->317.
+    ## RFC-0016 W3-z P6 (declined nil placeholder degrades in a composite slot): 315->316.
+    ## RFC-0016 W3-z P6b (a nil case-expression arm binds its temp): 316->317.
+    ## RFC-0016 W3-z P14 (Conv of a nil literal builds the target's nil; a
+    ## block expression lowers as a scoped statement-list expression): 317->318.
+    ## RFC-0016 W3-z P16 (cast of zero/nil to a ptr is the target's nil): 318->319.
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

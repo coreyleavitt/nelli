@@ -1550,6 +1550,8 @@ proc declineMarker(ctx: ParseCtx; kind: SymexErrorKind; reason: string): IRStmt 
   ## (S8bc's `pathInfeasible` drop in the walker's `isUnsupported` arm).
   mkUnsupported(kind, reason, ctx.nextMarker())
 
+proc isNilPtrCast(n: NimNode): bool   ## RFC-0016 W3-z P16 (defined with unsafeCastReason)
+
 proc declineUnsafeCast(ctx: ParseCtx; msg, reason: string): IRStmt =
   ## RFC-0005 S8. `heUnsafeCast`'s `declineAtSite`: the marker is the
   ## `isUnsafeCast` node the walker halts on.
@@ -6495,7 +6497,11 @@ proc armYieldsValue(body: NimNode): bool =
   ## Structural kinds are tested FIRST and `typeKind` consulted only as a
   ## fallback — A5's lesson: a monomorphised node can be genuinely typeless,
   ## and `getTypeInst` on one is a hard, non-catchable compile error.
-  if body.isNil: return false
+  # RFC-0016 W3-z P6b. In a macro, `isNil` is also true of a `nil` LITERAL
+  # node (the VM stores the literal as a nil node), so `else: nil` was read
+  # as "no body", parsed as a statement and bound no temp: the temp's read
+  # then faulted as an unbound parser temporary. A nil literal is a value.
+  if body.isNil: return body.kind == nnkNilLit
   case body.kind
   of nnkRaiseStmt, nnkReturnStmt, nnkBreakStmt, nnkContinueStmt:
     return false
@@ -11558,6 +11564,36 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     for i in 0 ..< n.len - 1:
       preamble.add parseStmt(n[i], ctx)
     parseExpr(n[n.len - 1], preamble, ctx)
+  of nnkBlockExpr:
+    # RFC-0016 W3-z P14. `block: (var t = a; t += 1; t)` as an expression is
+    # an `nnkStmtListExpr` under a (possibly labelled) block: the leading
+    # statements run in the preamble, the tail is the value. Its locals are
+    # symbols of their own (the typed AST renames them), so they stay scoped
+    # by name exactly as a `block` statement's do. The block is a jump
+    # target while it parses: a `break` out of it (carrying no value) would
+    # leave the tail unevaluated, a value this lowering does not model, so
+    # it declines rather than reads the tail.
+    let body = n[n.len - 1]
+    ctx.pushJumpTarget(isLoop = false,
+      blockSym = (if n[0].kind in {nnkSym, nnkIdent}: n[0] else: nil))
+    var inner: seq[IRStmt]
+    var tailIR: IRExpr
+    if body.kind == nnkStmtListExpr and body.len > 0:
+      for i in 0 ..< body.len - 1:
+        inner.add parseStmt(body[i], ctx)
+      tailIR = parseExpr(body[body.len - 1], inner, ctx)
+    else:
+      tailIR = parseExpr(body, inner, ctx)
+    let jt = ctx.popJumpTarget()
+    if jt.brkLabel.len > 0:
+      preamble.add ctx.declineAtSite(feUnsupportedExprKind,
+        siteMsg(n, "a `break` out of a block expression (the value it " &
+          "yields is not modelled) (RFC-0016 P14; feUnsupportedExprKind)"),
+        "break out of a block expression (feUnsupportedExprKind)")
+      let dummy = zeroValueForType(classifyType(n).ty)
+      return (if dummy != nil: dummy else: mkIntLit(0))
+    for st in inner: preamble.add st
+    tailIR
   of nnkLambda:
     # Phase 15 Cluster C (C1, ADR-0009). A lambda in expression position →
     # iekLambda (walker-stubbed `ceNotImplemented` in C1).
@@ -11589,6 +11625,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
              ctx.declineMarker(ceNotImplemented, "closure iterators not yet supported"),
              captures, tBool(), mutCaptures)
   of nnkCast:
+    # RFC-0016 W3-z P16. `cast[ptr T](0)` is the target's nil (no address).
+    if isNilPtrCast(n):
+      return mkNil(classifyType(n).ty)
     # RFC-0005 S8m. `cast[ref Obj](p)` with `p: ref Obj` reinterprets a ref as
     # the very type it already has: the same address, the same `Ref_<id>`
     # sort, so it is the identity and keeps `p`'s heap identity. Before, the
@@ -11619,6 +11658,14 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
     let operand = n[n.len - 1]
+    # RFC-0016 W3-z P14. `RefO(nil)` / `PtrT(nil)`: the nil literal's own type
+    # is `nil`, so `classifyType(operand)` names no ref; the conversion's
+    # TARGET type picks the nil. A target the walk holds no nil for (cstring,
+    # proc, pointer where unmodelled) keeps the `nnkNilLit` arm's decline.
+    if operand.kind == nnkNilLit:
+      let tt = classifyType(n).ty
+      if tt != nil and tt.kind in {itRef, itPtr}:
+        return mkNil(tt)
     # RFC-0005 S8bc: an inlined iterator's parameter is its typed formal
     # symbol (the S8at untyped-ident decline here is gone with the
     # substitution that produced the ident).
@@ -14689,6 +14736,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
 
 # ---- Statement parser --------------------------------------------------------
 
+proc isNilPtrCast(n: NimNode): bool =
+  ## RFC-0016 W3-z P16. `cast[ptr T](0)` / `cast[ptr T](nil)`: the integer
+  ## zero (or the nil literal) reinterpreted as a pointer IS the nil pointer,
+  ## whatever the pointee. It names no address, so it is not an unsafe
+  ## pointer materialisation: it is the target type's nil.
+  if n.kind != nnkCast or n.len != 2: return false
+  let o = n[1]
+  if o.kind == nnkNilLit: return true
+  o.kind in {nnkIntLit .. nnkUInt64Lit} and o.intVal == 0 and
+    classifyType(n).ty.kind == itPtr
+
 proc unsafeCastReason(n: NimNode): string =
   ## Phase 15 R11 (ADR-0010, RFC §R11 — Open Question 7 CLOSED). Classify an RHS
   ## expression as an unsafe POINTER MATERIALISATION when it is unmodelable in
@@ -14708,7 +14766,8 @@ proc unsafeCastReason(n: NimNode): string =
   ## over-trigger).
   case n.kind
   of nnkCast:
-    if n.len >= 1 and n[0].kind == nnkPtrTy:
+    if isNilPtrCast(n): ""
+    elif n.len >= 1 and n[0].kind == nnkPtrTy:
       "cast[ptr T]"
     else:
       ""

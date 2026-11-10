@@ -18759,6 +18759,19 @@ proc parseIncDecLvalue(n: NimNode; preamble: var seq[IRStmt];
   let newVal = siteBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR, n)
   parseAsgn(nnkAsgn.newTree(target, newEmptyNode()), newVal, preamble, ctx)
 
+proc smallUnsignedBind(iterVar: NimNode; iterName, ivName: string;
+                       intTy: IRType): IRStmt =
+  ## RFC-0016 W3-z P17. The loop variable's binding: `i = iv`. A `uint8` or
+  ## `uint16` counter is stepped as an `int` (system's `IntLikeForCount`
+  ## branch) and yielded as `T(res)`, so `i` is the unsigned type in the body
+  ## (`i - 1` wraps), not the 64-bit signed `iv`.
+  if iterVar.typeKind in {ntyUInt8, ntyUInt16}:
+    let t = classifyType(iterVar).ty
+    mkLet(iterName, t, mkConvIntWidth(mkVar(ivName), intTy.width, intTy.signed,
+                                      t.width, false))
+  else:
+    mkLet(iterName, intTy, mkVar(ivName))
+
 proc callMagic(n: NimNode): string =
   ## RFC-0005 S8bl. The magic of the system routine call `n` resolves to, or
   ## "" (a user routine, an unresolved head, a routine with no magic).
@@ -20454,15 +20467,29 @@ proc parseStmtInner(n: NimNode,
     # over a counter type whose stdlib body steps an `int` (`IntLikeForCount`,
     # plus `int64`, whose `inc`/`dec` overflows at the same width) are modelled
     # natively beside `..`; their generic body (`cast[T](res)`) is not walked.
+    # RFC-0016 W3-z P17. An `uint`, `uint32` or `uint64` counter is the
+    # generic body's `else` branch (`uint`/`uint64` countdown stops at `b`
+    # before stepping): it steps in its own type and wraps. A variable step
+    # is converted by `inc`'s own overload, which is not modelled, so only a
+    # literal step reaches this arm for them.
+    proc literalStep(e: NimNode): NimNode =
+      var lit = e
+      while lit.kind == nnkHiddenStdConv and lit.len >= 1:
+        lit = lit[lit.len - 1]
+      if lit.kind in nnkCharLit..nnkUInt64Lit: lit else: nil
+    let unsignedCount = iterVar.typeKind in {ntyUInt, ntyUInt32, ntyUInt64}
     let isCountCall = iterExpr.kind == nnkCall and iterExpr.len in {3, 4} and
       iterExpr[0].kind == nnkSym and
       isBuiltinNamed(iterExpr[0], ["countup", "countdown"]) and
-      iterVar.typeKind in {ntyBool, ntyChar, ntyEnum, ntyInt, ntyInt8,
-                           ntyInt16, ntyInt32, ntyInt64, ntyUInt8, ntyUInt16}
+      (iterVar.typeKind in {ntyBool, ntyChar, ntyEnum, ntyInt, ntyInt8,
+                            ntyInt16, ntyInt32, ntyInt64, ntyUInt8, ntyUInt16} or
+       (unsignedCount and (iterExpr.len == 3 or
+                           literalStep(iterExpr[3]) != nil)))
     if isCountCall:
       let down = iterExpr[0].strVal == "countdown"
       var preamble3: seq[IRStmt]
-      let intTy = tInt(64, signed = true)
+      let intTy = if unsignedCount: classifyType(iterVar).ty
+                  else: tInt(64, signed = true)
       let ivName = freshSynth(ctx, "iv")
       preamble3.add mkLet(ivName, intTy, parseExpr(iterExpr[1], preamble3, ctx))
       let hiIR = parseExpr(iterExpr[2], preamble3, ctx)
@@ -20486,7 +20513,7 @@ proc parseStmtInner(n: NimNode,
           # `step: Positive`: the argument's hidden conversion raises
           # `RangeDefect` below 1, before the first iteration.
           let stepName = freshSynth(ctx, "custep")
-          preamble3.add mkLet(stepName, intTy,
+          preamble3.add mkLet(stepName, tInt(64, signed = true),
                               parseAtomicOperand(lit, preamble3, ctx))
           preamble3.add mkIf(@[mkBranch(
             mkBinop(bLt, mkVar(stepName), mkIntLit(1)),
@@ -20494,33 +20521,54 @@ proc parseStmtInner(n: NimNode,
           stepIR = mkVar(stepName)
       let body = parseLoopBody(bodyNode, ctx).body
       let cond = mkBinop(if down: bGe else: bLe, mkVar(ivName), hiRead)
-      let bindIter = mkLet(iterName, intTy, mkVar(ivName))
+      let bindIter = smallUnsignedBind(iterVar, iterName, ivName, intTy)
       let stepIv = mkAssign(ivName,
         mkBinop(if down: bSub else: bAdd, mkVar(ivName), stepIR))
       var allStmts = preamble3
-      allStmts.add mkWhile(cond, mkBlock(@[bindIter, body, stepIv]))
+      if down and iterVar.typeKind in {ntyUInt, ntyUInt64}:
+        # `if res == b: break` before `dec(res, step)`: no wrap at `b == 0`.
+        let stopAtB = mkIf(@[mkBranch(mkBinop(bEq, mkVar(ivName), hiRead),
+                                      mkBreak())])
+        allStmts.add mkWhile(cond, mkBlock(@[bindIter, body, stopAtB, stepIv]))
+      else:
+        allStmts.add mkWhile(cond, mkBlock(@[bindIter, body, stepIv]))
       mkBlock(allStmts)
     elif iterExpr.kind == nnkInfix and iterExpr[0].kind == nnkSym and
        isBuiltinNamed(iterExpr[0], [".." , "..<"]):
       let inclusive = iterExpr[0].strVal == ".."
       var preamble3: seq[IRStmt]
       let loIR = parseExpr(iterExpr[1], preamble3, ctx)
-      let hiIR = parseExpr(iterExpr[2], preamble3, ctx)
+      var hiIR = parseExpr(iterExpr[2], preamble3, ctx)
       let body = parseLoopBody(bodyNode, ctx).body   # RFC-0005 S8m
       # Build: { var __iv = lo; while __iv <op> hi: { let i = __iv; body; __iv = __iv + 1 } }
       let ivName = freshSynth(ctx, "iv")
-      let intTy = tInt(64, signed = true)
+      # RFC-0016 W3-z P17. system's `..` for `int32`, `uint`, `uint32` and
+      # `uint64` steps `res` in its own type (`inc` overflows at int32, wraps
+      # for an unsigned one), and `i` is that type in the body.
+      let intTy =
+        if iterVar.typeKind in {ntyInt32, ntyUInt, ntyUInt32, ntyUInt64}:
+          classifyType(iterVar).ty
+        else: tInt(64, signed = true)
       let initStmt = mkLet(ivName, intTy, loIR)
+      # RFC-0016 W3-z P17. `..` is an inlined iterator: a symbol bound is the
+      # parameter itself (read each iteration, so a body that assigns it moves
+      # it), any other bound is bound to a temporary once. Re-reading
+      # `0 ..< s.len` or `0 .. m + 0` was a trusted false sxUnsat.
+      if iterExpr[2].kind != nnkSym:
+        let hiName = freshSynth(ctx, "ddhi")
+        preamble3.add initStmt
+        preamble3.add mkLet(hiName, intTy, hiIR)
+        hiIR = mkVar(hiName)
       let cmpOp = if inclusive: bLe else: bLt
       let cond = mkBinop(cmpOp, mkVar(ivName), hiIR)
       # Wrap body with: let i = __iv; <body>; __iv = __iv + 1
-      let bindIter = mkLet(iterName, intTy, mkVar(ivName))
+      let bindIter = smallUnsignedBind(iterVar, iterName, ivName, intTy)
       let incIv = mkAssign(ivName,
         mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
       let loopBody = mkBlock(@[bindIter, body, incIv])
       let whileSt = mkWhile(cond, loopBody)
       var allStmts = preamble3
-      allStmts.add initStmt
+      if iterExpr[2].kind == nnkSym: allStmts.add initStmt
       allStmts.add whileSt
       mkBlock(allStmts)
     elif iterExpr.kind == nnkCall and iterExpr.len == 2 and

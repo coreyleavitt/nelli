@@ -158,22 +158,25 @@ const explicitRows: seq[StdlibRow] = @[
   declinedType("deques.Deque",
     "a stdlib generic object: its ring buffer is not modelled"),
 
-  # W3-z P3b / P15. The system counting iterators are keyed
-  # `<name>/iterator` (P3). Over an `int`-like counter (the stdlib's
-  # `IntLikeForCount`, and `int64`) the `for` loop is modelled by its own arm
-  # (`dsl_parser`, beside `..`), which never reaches this key. Any other
-  # counter (`uint`, `uint32`, `uint64`, a float, ...) is the iterator's
-  # generic body: it steps with `cast[T](res)` (an unsupported expression
-  # kind) inside a loop the unwind bound does not close, and declines. The row
-  # names that instead of leaving it to "absent".
+  # W3-z P3b / P15 / P17. The system counting iterators are keyed
+  # `<name>/iterator` (P3). Over an `int`-like counter, and over an `uint`,
+  # `uint32` or `uint64` counter with a literal step, the `for` loop is
+  # modelled by its own arm (`dsl_parser`, beside `..`), which never reaches
+  # this key. What does: a variable step over an unsigned counter (the
+  # generic body's `inc(res, step)` converts the step to the counter's type)
+  # and a counter outside the ordinal types, which step with `cast[T](res)`
+  # (an unsupported expression kind) inside a loop the unwind bound does not
+  # close, and decline. The row names that instead of leaving it to "absent".
   declinedIterator("system.countup/iterator",
-    "iterators_1.nim `countup` over a counter outside the `int`-like set: " &
-    "the body steps with `cast[T](res)` over a generic ordinal, which the " &
+    "iterators_1.nim `countup` over an unsigned counter with a variable step, " &
+    "or a counter outside the ordinal types: the body steps with " &
+    "`cast[T](res)` / `inc(res, step)` over a generic type, which the " &
     "walker does not support (nnkCast), inside a loop the unwind bound " &
     "does not close; open precision"),
   declinedIterator("system.countdown/iterator",
-    "iterators_1.nim `countdown` over a counter outside the `int`-like set: " &
-    "the body steps with `cast[T](res)` over a generic ordinal, which the " &
+    "iterators_1.nim `countdown` over an unsigned counter with a variable " &
+    "step, or a counter outside the ordinal types: the body steps with " &
+    "`cast[T](res)` / `dec(res, step)` over a generic type, which the " &
     "walker does not support (nnkCast), inside a loop the unwind bound " &
     "does not close; open precision"),
 

@@ -153,6 +153,23 @@
     walk's unwind), for `..` and `countup` alike. Open, unprobed: the `..` arm
     appears to re-read a non-symbol bound (`0 .. f(x)`) every iteration where Nim
     evaluates it once.
+  - W3-z P17 (`rfc-0016-w3z-parser17`, walker 316 to 317, soundness then
+    precision): the `..` / `..<` arm re-read a non-symbol bound every
+    iteration (`0 ..< s.len`, `0 .. m + 0` with a body that moves it): a
+    trusted false sxUnsat. Nim evaluates it once, and re-reads only a symbol
+    bound (probed: `.. m` and `..< m` re-read, as `countup` does); the arm now
+    binds any other bound to a temporary. A call in the bound was already
+    hoisted, so `0 .. bump()` was right. Also exact now: an `uint`, `uint32`,
+    `uint64` counter of `..`/`..<` and of `countup`/`countdown` with a literal
+    step is held in its own type (the body's `i - 1'u32` wraps; it was an
+    int64, a false sxUnsat), `uint`/`uint64` `countdown` stops at `b` before
+    stepping (no wrap at 0), an `int32` `..` counter overflows at int32, an
+    `uint8`/`uint16` loop variable is its own type in the body. A variable
+    step over an unsigned counter still declines through the P3b rows
+    (`inc`'s step conversion is not modelled). Natively, `countup` over
+    `uint32` to `high(uint32)` and `countdown` over `uint32` to 0 never end
+    (the counter wraps): the model wraps too and ends untrusted at the unwind
+    bound. Test: `tsymex_0016_w3z_p17_dotdot`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

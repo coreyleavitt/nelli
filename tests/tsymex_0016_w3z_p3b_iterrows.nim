@@ -11,9 +11,11 @@ import nelli/smt/admission
 import nelli/smt/stdlib_rows
 import ./s8cu_helpers
 
-# P15: over a counter of `int`-like type the loop is walked by its own arm
-# (tsymex_0016_w3z_p15_countup); the ROW is what an `uint32`/`uint64`/`uint`
-# counter reaches, whose body is not the `int` stepping.
+# P15/P17: over a counter of `int`-like type, and over an `uint`, `uint32` or
+# `uint64` counter with a literal step, the loop is walked by its own arm
+# (tsymex_0016_w3z_p15_countup, tsymex_0016_w3z_p17_dotdot); the ROW is what
+# a variable step over an unsigned counter reaches (`inc`'s conversion of the
+# step to the counter's type is not modelled).
 proc sCountup(a: int) =
   var n = 0'u32
   for i in countup(1'u32, 4'u32): n += i
@@ -43,6 +45,16 @@ proc sDotDotSym(a: int) =
   var n = 0
   for i in 0 .. (a and 3): n += 1
   if n == 3 and a == 2: symexTarget("hit")
+
+proc sCountupVarStep(a: int) =
+  var n = 0'u32
+  for i in countup(0'u32, 9'u32, a): n += i
+  if n == 18'u32 and a == 3: symexTarget("hit")
+
+proc sCountdownVarStep(a: int) =
+  var n = 0'u32
+  for i in countdown(9'u32, 3'u32, a): n += i
+  if n == 18'u32 and a == 3: symexTarget("hit")
 
 proc sItems(a: int) =
   let xs = [1, 2, 3]
@@ -124,7 +136,7 @@ proc sFieldPairs(a: int) =
 
 suite "W3-z P3b: the walker version":
   test "the walker version floor":
-    check parseInt(symexWalkerVersion) >= 315
+    check parseInt(symexWalkerVersion) >= 317
 
 suite "W3-z P3b: the system counting iterators decline for their real cause":
   # Walking the body of `countup`/`countdown` (generic over `T`, stepping with
@@ -134,14 +146,18 @@ suite "W3-z P3b: the system counting iterators decline for their real cause":
   # reaches it now.
   test "system.countup":
     check hasStdlibRow("system.countup/iterator")
-    pinDecline(sCountup, cellKey(axStdlibBody, "system.countup/iterator"),
-               feUnsupportedExprKind, excluding = {feUnadmitted})
-    pinDecline(sCountupStep, cellKey(axStdlibBody, "system.countup/iterator"),
+    pinDecline(sCountupVarStep, cellKey(axStdlibBody, "system.countup/iterator"),
                feUnsupportedExprKind, excluding = {feUnadmitted})
   test "system.countdown":
     check hasStdlibRow("system.countdown/iterator")
-    pinDecline(sCountdown, cellKey(axStdlibBody, "system.countdown/iterator"),
+    pinDecline(sCountdownVarStep,
+               cellKey(axStdlibBody, "system.countdown/iterator"),
                feUnsupportedExprKind, excluding = {feUnadmitted})
+  test "an uint32 counter with a literal step is walked exactly (P17)":
+    const c = cellKey(faCallShape, "p17/unsigned")
+    discard pinExact(sCountup, c)
+    discard pinExact(sCountdown, c)
+    discard pinExact(sCountupStep, c)
 
 suite "W3-z P3b: split iterators stay unadmitted":
   # `strutils.split`/`splitWhitespace` are not in the corpus's SUTs and their

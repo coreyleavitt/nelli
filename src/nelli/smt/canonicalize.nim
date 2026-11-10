@@ -364,7 +364,16 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "316"
+const symexWalkerVersion* = "317"
+  ## RFC-0016 W3-z P17 (316->317): SOUNDNESS. The `..` / `..<` arm re-read a
+  ## non-symbol bound (`0 ..< s.len`, `0 .. m + 0`) on every iteration where
+  ## Nim evaluates it once (a symbol bound is still read each iteration), so a
+  ## body that moved the bound gave a trusted false sxUnsat. Also: an `uint`,
+  ## `uint32` or `uint64` counter of `..`/`..<` (and of `countup`/`countdown`
+  ## with a literal step) is held in its own type, so `i - 1` wraps in the
+  ## body and the counter wraps as `inc` does; an `int32` counter's `inc`
+  ## overflows at int32; `uint`/`uint64` `countdown` stops at `b` before
+  ## stepping; an `uint8`/`uint16` loop variable is its own type in the body.
   ## RFC-0016 W3-z P15 (315->316): `for i in countup(a, b[, step])` and
   ## `countdown` over an `int`-like counter (the stdlib's `IntLikeForCount`,
   ## and `int64`) are modelled by the `for` arm beside `..`: `a`, `b` and

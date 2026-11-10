@@ -832,13 +832,17 @@ proc stdlibRoutineKey*(impl: NimNode): string =
   ## `<module>.<name>`, or "" for a routine outside the toolchain's `lib/`.
   ## The module is the one the routine belongs to (`system` for a routine of
   ## `system/arithmetics.nim`, which `system.nim` includes).
-  if impl.kind notin {nnkProcDef, nnkFuncDef} or impl.len == 0: return
+  ## RFC-0016 W3-z P3: an iterator is `<module>.<name>/iterator`, a key of its
+  ## own, so a proc row never admits an iterator of the same name.
+  if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef} or
+     impl.len == 0: return
   let li = impl.lineInfoObj
   let rootAt = anchored(moduleFileOf(impl[0], li.filename))
   let root = normalPath(if rootAt.len > 0: rootAt
                         else: moduleFileOf(impl[0], li.filename))
   if not isStdlibFile(root): return
-  root.extractFilename.changeFileExt("") & "." & impl[0].strVal
+  result = root.extractFilename.changeFileExt("") & "." & impl[0].strVal
+  if impl.kind == nnkIteratorDef: result.add "/iterator"
 
 proc routineChecks*(impl: NimNode): RoutineChecks =
   ## How `impl` (a typed routine definition) differs from the model.

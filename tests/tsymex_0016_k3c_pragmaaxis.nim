@@ -170,7 +170,7 @@ suite "RFC-0016 K3c: the pragma axis":
       for p in PragmaPlace:
         if render(c.cell).startsWith("pragma:" & placeKey(p) & "/"):
           places.incl p
-    check places == {ppLocal, ppRoutine, ppParam, ppType}
+    check places == {ppLocal, ppRoutine, ppParam, ppType, ppField}
 
   test "every pragma lib/ declares has a row in some place (the lib-wide guard)":
     let found = libPragmaNames()

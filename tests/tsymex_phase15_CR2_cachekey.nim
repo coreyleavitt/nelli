@@ -1159,6 +1159,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z P8/P9 (`isMainModule` folds from the using module;
     ## `offsetof` in expression position folds to its literal): 311->312.
     ## RFC-0016 P10 (isInf/isFinite/isNormal leave the by-name lowering): 311->312.
+    ## RFC-0016 W3-z P1 (opaque scan polarity): 311->312.
+    ## RFC-0016 W3-z P2 (closure iterator check scope): 312->313.
+    ## RFC-0016 W3-z P3 (stdlib axis on iterators and proc values): 313->314.
+    ## RFC-0016 W3-z P4 (field place of the pragma axis): 314->315.
+    ## RFC-0016 W3-z P5 (an and/or operand reading a noinit local is guarded): 315->316.
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -394,6 +394,14 @@ const symexWalkerVersion* = "317"
   ## call; otherwise it is listed on `SymexResult.undefined`; the path goes on
   ## carrying the kinds, so a sat through it is never trusted.
   ## RFC-0016 W3-z P1 (313->314, landed after R1/R2): the opaque-call scan reads the callee's own
+  ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
+  ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a
+  ## stdlib proc taken as a value (`parseProcAsValue`); absent declines
+  ## `feUnadmitted`. Before, both walked an unadmitted stdlib body.
+  ## RFC-0016 W3-z P2 (312->313): a closure iterator is inlined under the
+  ## check scope of its own definition (float checks at parse time, range,
+  ## bound, field and object checks as a scoped block), its for-body under the
+  ## caller's. Before, the body ran under the caller's scope.
   ## `overflowChecks` (`RoutineChecks.overflowOn`) and a pushed-off check
   ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the
   ## signed wrap. A checks-on callee no longer reads as unchecked; a checks-off

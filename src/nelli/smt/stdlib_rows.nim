@@ -21,6 +21,10 @@
 ##         routine with no row, declines (`feCheckOption`) as before.
 ##     The row is read only for a routine whose options deviate from the model:
 ##     a routine with no deviation is walked, row or no row.
+##     The same site covers every path that walks a stdlib body: a call
+##     (`parseCalleeImpl`), a proc taken as a value (`parseProcAsValue`) and an
+##     inlined iterator (W3-z P3); an iterator's key is
+##     `<module>.<name>/iterator`, distinct from a proc of the same name.
 ##   * `ssCallSwitch`, `ssInfix`: the unsigned operators (`+%` ...) are `system`
 ##     routines over `cast[uint]`, not magics. A hand-written arm models them
 ##     (`parseUnsignedOp`); the arm is dispatched through `dispatchMagic`, which
@@ -39,7 +43,7 @@ import ./stdlib_ledger
 
 type
   StdlibSite* = enum
-    ssBodyWalk    ## `parseCalleeImpl`: the routine is walked by its body
+    ssBodyWalk    ## a call, a proc value or an inlined iterator: walked by body
     ssCallSwitch  ## the stdlib call switch (`dispatchMagic` site)
     ssInfix       ## the unsigned operators spelled infix (`dispatchMagic` site)
     ssType        ## `classifyType`'s catch-all for a stdlib generic object

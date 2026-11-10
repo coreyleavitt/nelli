@@ -1746,6 +1746,10 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_p1_default",
             "tsymex_0016_w3z_r3_opaque",
             "tsymex_0016_w3z_r3_default",
+            "tsymex_0016_w3z_p2_iter",
+            "tsymex_0016_w3z_p3_iter",
+            "tsymex_0016_w3z_p2_iter_off",
+            "tsymex_0016_w3z_p2_fwrapv",
             "tsymex_0016_admir",
             "tsymex_0016_k10d_removals",
             "tsymex_0016_k10d_drain_checksoff",
@@ -1831,6 +1835,8 @@ task test, "Run the test suite":
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",
+            # RFC-0016 W3-z P5: the right operand of and/or lowers under the left operand's guard (a dead read is not UB, a dead index not a raise).
+            "tsymex_0016_w3z_p5_shortcircuit_guard",
             # RFC-0016 K1a-cells: the universe ledger (derived cells, the pin-record join, allowlists, the committed TSV).
             "tsymex_0016_universe",
             # RFC-0016 K2a: the dispatch census (case n.kind, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.
@@ -1841,6 +1847,7 @@ task test, "Run the test suite":
             "tsymex_0016_k3a_typeaxes",
             "tsymex_0016_k3a_letcursor",
             "tsymex_0016_k3c_pragmaaxis",
+            "tsymex_0016_p4_fieldpragma",
             # RFC-0016 K3b: the field-default row of the type x memory-op axis (zeroValueForType reads it), and wasMoved/reset/move zero pins.
             "tsymex_0016_k3b_fielddefault",
             # RFC-0005 W1 (0.9.1 wiring) -- entry-point parity: the user

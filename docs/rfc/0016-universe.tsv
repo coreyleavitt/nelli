@@ -3,7 +3,7 @@
 # axis construct: 70 cells
 # axis typeclass: 73 cells
 # axis typeop: 34 cells
-# axis pragma: 181 cells
+# axis pragma: 198 cells
 # axis magic: 244 cells
 # axis stdlib: 88 cells
 # axis build: 30 cells (pcre libs and build cells; rows below)
@@ -503,6 +503,23 @@ magic:Xor	modelled	-
 magic:XorSet	declined	-
 magic:ZeroDefault	modelled	-
 magic:nextafter	never	-
+pragma:field/align	declined	-
+pragma:field/atomic	never	-
+pragma:field/bitsize	declined	-
+pragma:field/codegenDecl	never	-
+pragma:field/cursor	modelled	-
+pragma:field/deprecated	modelled	-
+pragma:field/dynlib	never	-
+pragma:field/exportc	declined	-
+pragma:field/extern	declined	-
+pragma:field/guard	declined	-
+pragma:field/header	never	-
+pragma:field/importc	declined	-
+pragma:field/nodecl	never	-
+pragma:field/requiresInit	modelled	-
+pragma:field/size	never	-
+pragma:field/used	modelled	-
+pragma:field/volatile	never	-
 pragma:local/align	declined	-
 pragma:local/bitsize	declined	-
 pragma:local/byaddr	declined	-

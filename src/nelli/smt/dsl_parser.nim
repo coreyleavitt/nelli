@@ -1331,6 +1331,13 @@ type
                                    ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
+    iterBodies*: seq[tuple[own: bool, caller: set[CheckOption]]]
+                                   ## RFC-0016 W3-z P2. Per iterator being
+                                   ## inlined, innermost last: `own` where it
+                                   ## was walked under its own check scope (a
+                                   ## closure iterator), with the caller's
+                                   ## top scope, which its `yield` hands back
+                                   ## to the for-body.
     checkScopes*: seq[set[CheckOption]]
                                    ## RFC-0016 PRC-07. Per routine being
                                    ## parsed, innermost last: the checks of
@@ -1364,6 +1371,13 @@ type
                                    ## index (`IndexDefect`), which `isIndex`
                                    ## already forks.
     procs*:      Table[string, ProcSig]
+    noinitNames*: HashSet[string]
+                                   ## RFC-0016 W3-z P5. The names of the
+                                   ## `{.noinit.}` locals declared so far: a
+                                   ## read of one records an indeterminate-read
+                                   ## degrade when it is lowered, so an `and`/
+                                   ## `or` operand that mentions one is never
+                                   ## pure (`shortCircuitPartIsPure`).
     parsing*:    HashSet[string]   ## currently-being-parsed callees
                                    ## (cycle break for mutual recursion)
     keySyms*:    Table[string, NimNode]
@@ -1642,6 +1656,8 @@ proc ledgerNote(key: string) =
   when nelliStdlibLedger.len > 0:
     discard gorge("echo '" & key.replace("'", "'\\''") & "' >> '" &
             nelliStdlibLedger & "'")
+
+proc implMagic*(impl: NimNode): string  ## defined below (RFC-0005 S8be)
 
 proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
   ## RFC-0016 K4c (section 8.1). The stdlib-body axis, read for a routine of
@@ -3619,7 +3635,10 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
   # before reading any. A no-op for a lambda its enclosing routine already
   # claimed; for an expression-position `nnkProcDef` it is the claim.
   claimRoutine(n)
-  let checkOpts = routineChecks(n)   ## RFC-0005 S8cu
+  var checkOpts = routineChecks(n)   ## RFC-0005 S8cu
+  # RFC-0016 W3-z P3 (A4): a stdlib proc taken as a value (`map(s, parseInt)`)
+  # is walked by its body, so the stdlib-body axis admits it as a call does.
+  applyStdlibDelta(n, checkOpts, implMagic(n).len > 0)
   let formal = n[3]
   formal.expectKind nnkFormalParams
   var params: seq[IRParam]
@@ -4663,7 +4682,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         let defDivZero = admitMagic(magic, msDefDivZero)
         if defDivZero.admitted:
           scan.noteMagicDefect defDivZero, "DivByZeroDefect"
-          if not overflowOn:
+          if not overflowOn and not buildSemantics.fwrapv:
             addUb admitDefined(aoDiv, ocZeroDivisorSigned, dsArith), dpUnchecked
           if magic.startsWith("Mod"):
             addUb admitDefined(aoMod, ocLowByMinusOneWide, dsArith), dpChecked
@@ -5473,10 +5492,44 @@ type ShortCircuitPart = tuple[pre: seq[IRStmt], ir: IRExpr]
   ## RFC-0005 S8t. One parsed operand of a short-circuit chain: the
   ## statements its evaluation hoisted, and its value.
 
-proc shortCircuitPartIsPure(p: ShortCircuitPart): bool =
-  ## D1c's fast-path test for a non-first operand: nothing hoisted and no
-  ## inline defect fork, so evaluating it unconditionally changes nothing.
-  p.pre.len == 0 and not rhsHasInlineDefectFork(p.ir)
+proc readsOnlyDefinedValues(e: IRExpr; ctx: ParseCtx): bool =
+  ## RFC-0016 W3-z P5. True iff lowering `e` can record nothing: it is built
+  ## only from literals, ordinary locals and parameters, and comparison /
+  ## boolean / bitwise operators over them. Every other node (an index, a
+  ## field, a call, a global, a `{.noinit.}` local) is out: lowering it may
+  ## record a degrade, a UB note or a raise site (an unwritten global or
+  ## array element, an indeterminate read, an inactive variant field), and
+  ## the walker records those through sinks with no path in hand, so they
+  ## cannot be made conditional there. This is a positive list, so a new
+  ## degrading node is guarded until someone proves it quiet.
+  if e == nil: return true
+  case e.kind
+  of iekIntLit, iekBoolLit: true
+  of iekVar:
+    e.vGlobalTy == nil and not isGlobalEnvName(e.vname) and
+      not e.vname.startsWith(noinitReadPrefix) and
+      (ctx == nil or e.vname notin ctx.noinitNames)
+  of iekBinop:
+    readsOnlyDefinedValues(e.lhs, ctx) and readsOnlyDefinedValues(e.rhs, ctx)
+  of iekUnop: readsOnlyDefinedValues(e.operand, ctx)
+  of iekSeqLen: readsOnlyDefinedValues(e.lenObj, ctx)
+  else: false
+
+proc shortCircuitPartIsPure(p: ShortCircuitPart; ctx: ParseCtx): bool =
+  ## D1c's fast-path test for a non-first operand: nothing hoisted, no
+  ## inline defect fork, and nothing recorded when it is lowered, so
+  ## evaluating it unconditionally changes nothing.
+  ##
+  ## RFC-0016 W3-z P5. The last clause was missing. A read of an unwritten
+  ## `{.noinit.}` local or global hoists nothing and forks nothing at parse
+  ## time; the walker records its degrade when it lowers the read. Joined
+  ## flat, that degrade was recorded on paths where the left operand
+  ## short-circuits and Nim never reads the slot (`k > 3 and x == 0` at
+  ## k = 0). What lowering records is known only to the walker, so the parser
+  ## keeps the flat form to operands `readsOnlyDefinedValues` proves quiet and
+  ## lowers the rest inside the guard.
+  p.pre.len == 0 and not rhsHasInlineDefectFork(p.ir) and
+    readsOnlyDefinedValues(p.ir, ctx)
 
 proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
                             preamble: var seq[IRStmt],
@@ -5499,7 +5552,7 @@ proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
   preamble.add parts[0].pre
   var acc = parts[0].ir
   var k = 1
-  while k < parts.len and shortCircuitPartIsPure(parts[k]):
+  while k < parts.len and shortCircuitPartIsPure(parts[k], ctx):
     acc = mkBinop(op, acc, parts[k].ir)
     inc k
   if k == parts.len:
@@ -5513,7 +5566,7 @@ proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
     result = parts[k].pre
     var cur = parts[k].ir
     var j = k + 1
-    while j < parts.len and shortCircuitPartIsPure(parts[j]):
+    while j < parts.len and shortCircuitPartIsPure(parts[j], ctx):
       cur = mkBinop(op, cur, parts[j].ir)
       inc j
     result.add mkAssign(sc, cur)
@@ -16696,7 +16749,7 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
       var k0 = 0
       if parts[0].pre.len == 0:
         k0 = 1
-        while k0 < parts.len and shortCircuitPartIsPure(parts[k0]):
+        while k0 < parts.len and shortCircuitPartIsPure(parts[k0], ctx):
           inc k0
       if k0 >= 1 and k0 < parts.len:
         # Case 1: faithful and-split. Continue-safe by construction.
@@ -16875,6 +16928,22 @@ proc bindIterArg(impl, formalSym, tyNode, arg: NimNode;
   body = substIterArg(body, f, stripFieldChecks(fixed))
   true
 
+proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0016 W3-z P2. The for-body of an inlined iterator belongs to the
+  ## caller: it is parsed (and walked) under the caller's checks, not the
+  ## closure iterator's own that `yield` was reached under.
+  if ctx.iterBodies.len == 0 or not ctx.iterBodies[^1].own:
+    return parseStmt(forBodyNode, ctx)
+  # The for-body is outside the iterator: its own entry leaves the stack.
+  let entry = ctx.iterBodies.pop()
+  let caller = entry.caller
+  ctx.checkScopes.add caller
+  result = parseStmt(forBodyNode, ctx)
+  discard ctx.checkScopes.pop()
+  ctx.iterBodies.add entry
+  if hasCheckOff():
+    result = mkBlock(@[result]).withCheckScope(caller)
+
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
                        forBodyNode: NimNode,
@@ -16910,7 +16979,7 @@ proc parseIterBodyStmt(n: NimNode,
       var yp: seq[IRStmt]
       let yieldIR = parseExpr(n[0], yp, ctx)
       let bindStmt = mkLet(iterVarBindings[0][0], iterVarBindings[0][1], yieldIR)
-      let bodyIR = parseStmt(forBodyNode, ctx)
+      let bodyIR = parseForBody(forBodyNode, ctx)
       var stmts = yp
       stmts.add bindStmt
       stmts.add bodyIR
@@ -16939,7 +17008,7 @@ proc parseIterBodyStmt(n: NimNode,
         let elemIR = parseExpr(tupleConstr[k], elemPre, ctx)
         for s in elemPre: stmts.add s
         stmts.add mkLet(iterVarBindings[k][0], iterVarBindings[k][1], elemIR)
-      let bodyIR = parseStmt(forBodyNode, ctx)
+      let bodyIR = parseForBody(forBodyNode, ctx)
       stmts.add bodyIR
       if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkStmtList, nnkStmtListExpr:
@@ -17715,6 +17784,32 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
         if not a.admitted and a.decline[0] == some(feUnsupportedOp):
           return TypePragmaHit(found: true, pragma: pragmaName(p),
                                typeName: head.strVal, adm: a)
+  # The pragmas on its own fields (W3-z P4): `getImpl` keeps a field's
+  # `nnkPragmaExpr`; `getTypeImpl` below does not.
+  proc fieldPragmaHit(n: NimNode; owner: string): TypePragmaHit =
+    case n.kind
+    of nnkIdentDefs:
+      for j in 0 ..< n.len - 2:
+        if n[j].kind == nnkPragmaExpr and n[j].len > 1:
+          for p in n[j][1]:
+            let a = admitPragma(ppField, pragmaName(p), psFieldDecl)
+            if not a.admitted:
+              return TypePragmaHit(found: true, pragma: pragmaName(p),
+                                   typeName: owner, adm: a)
+    of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse, nnkObjectTy, nnkRefTy,
+       nnkPtrTy:
+      for c in n:
+        let r = fieldPragmaHit(c, owner)
+        if r.found: return r
+    else: discard
+  if head.kind == nnkSym and ty.typeKind in {ntyObject, ntyGenericInst,
+                                              ntyRef, ntyPtr}:
+    let d =
+      try: head.getImpl
+      except CatchableError: newEmptyNode()
+    if d.kind == nnkTypeDef and d.len > 2:
+      let r = fieldPragmaHit(d[2], head.strVal)
+      if r.found: return r
   # Its components.
   proc inField(f: NimNode; seen: var seq[string]; depth: int): TypePragmaHit =
     case f.kind
@@ -20746,9 +20841,21 @@ proc parseStmtInner(n: NimNode,
         let implBody = body(impl)
         # RFC-0005 S8cu: an inline iterator takes the checks of the routine it
         # lands in; a closure iterator is compiled at its definition's.
-        if impl[4].kind == nnkPragma and impl[4].findChild(
-             it.kind in {nnkIdent, nnkSym} and it.strVal == "closure") != nil:
+        let isClosureIter = impl[4].kind == nnkPragma and impl[4].findChild(
+             it.kind in {nnkIdent, nnkSym} and it.strVal == "closure") != nil
+        var iterChecks: RoutineChecks
+        # RFC-0016 W3-z P3 (A4): the stdlib-body axis, for an iterator of the
+        # toolchain's `lib/` walked by its body (inline or closure). Absent is
+        # a decline, as for a proc (`applyStdlibDelta`).
+        var iterAdm = RoutineChecks()
+        applyStdlibDelta(impl, iterAdm, false)
+        if iterAdm.unadmitted.len > 0:
+          return ctx.declineMarker(iterAdm.unadmittedKind,
+            routinePlace(impl) & ": " & iterAdm.unadmitted &
+            " -- path degraded to sxUnknown")
+        if isClosureIter:
           let c = routineChecks(impl)
+          iterChecks = c
           # RFC-0016 WA-A (S1): a pure `overflowChecks` deviation that is the
           # build's own (a checks-off build) is no deviation: the iterator is
           # inlined. Anything else declines (the nil body keeps the marker).
@@ -20883,7 +20990,21 @@ proc parseStmtInner(n: NimNode,
               $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
           for k, name in loopVarNames:
             iterVarBindings.add (name, yieldElemTyTop.fields[k])
-        let bodyIR = parseIterBodyStmt(iterBody, iterVarBindings, bodyNode, ctx)
+        # RFC-0016 W3-z P2: a closure iterator is compiled at its definition,
+        # so its body is parsed (float checks) and walked (range, bound, field,
+        # object checks) under the options there; its for-body keeps the
+        # caller's (`parseForBody`). An inline iterator is expanded at the call
+        # site and takes the caller's.
+        let ownScope = isClosureIter
+        let callerTop = if ctx.checkScopes.len > 0: ctx.checkScopes[^1] else: {}
+        ctx.iterBodies.add (own: ownScope, caller: callerTop)
+        if ownScope: ctx.checkScopes.add(pushedOn(iterChecks) + floatOn(iterChecks))
+        var bodyIR = parseIterBodyStmt(iterBody, iterVarBindings, bodyNode, ctx)
+        if ownScope:
+          discard ctx.checkScopes.pop()
+          if hasCheckOff():
+            bodyIR = mkBlock(@[bodyIR]).withCheckScope(pushedOn(iterChecks))
+        discard ctx.iterBodies.pop()
         ctx.activeIterators.excl itSymName
         # Combine preamble + inlined body
         if preambleStmts.len > 0:
@@ -20970,6 +21091,7 @@ proc parseStmtInner(n: NimNode,
             # (`noinitPlain`).
             let nty = classifyType(d[0]).ty
             if noinitPlain(nty):
+              ctx.noinitNames.incl d[0].strVal
               stmts.add mkLet(d[0].strVal, nty,
                               mkGlobalVar(noinitReadPrefix & d[0].strVal, nty))
             else:

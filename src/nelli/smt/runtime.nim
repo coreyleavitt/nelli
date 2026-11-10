@@ -20896,12 +20896,7 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   ## its bit-blasting stage above 100 MB: 72k against 876k / 5.85M units
   ## on this query), so the spend is the query's AND the process's; what a
   ## bound above both figures decides is the query's alone.
-  let dbgU0 = ownContextUnits
   result = ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
-  if ownContextUnits - dbgU0 > 20000:
-    var dbgS = ""
-    for r in roots: dbgS.add $r & "\n"
-    echo "DBGSCRATCH ", ownContextUnits - dbgU0, " ", result, "\n", dbgS[0 ..< min(dbgS.len, 3000)]
 
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,

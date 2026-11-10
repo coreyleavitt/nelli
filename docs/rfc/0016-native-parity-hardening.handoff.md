@@ -112,6 +112,12 @@
     pushes skip the evidence gates, and allowlists grew. The full list is
     in the scratchpad `wa3-findings.md`; the admission/BuildProfile lens is
     still out. Next: verify, slice and fix, then /code-review, then tag.
+  - W3-z P1 (`rfc-0016-w3z-parser`, walker 311 to 312, finding A1): the
+    opaque-call scan read `RoutineChecks.checks` (the deviation set) as "on".
+    It now reads `RoutineChecks.overflowOn`, `ownerChecked` honours a
+    routine's push-off, and a `-fwrapv` build defines the signed wrap.
+    Tests: `tsymex_0016_w3z_p1_off` (checks-off build) and
+    `tsymex_0016_w3z_p1_default`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

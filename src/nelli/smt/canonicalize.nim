@@ -364,7 +364,12 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "311"
+const symexWalkerVersion* = "312"
+  ## RFC-0016 W3-z P1 (311->312): the opaque-call scan reads the callee's own
+  ## `overflowChecks` (`RoutineChecks.overflowOn`) and a pushed-off check
+  ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the
+  ## signed wrap. A checks-on callee no longer reads as unchecked; a checks-off
+  ## one now carries `ubSignedOverflow` into `witnessUndefined`.
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

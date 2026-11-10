@@ -24010,12 +24010,15 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
   of mayScanLeafKinds:
     discard
   of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes + {nnkRecList,
-     nnkRecCase, nnkRecWhen, nnkOfInherit, nnkEnumFieldDef} -
+     nnkRecCase, nnkRecWhen, nnkOfInherit, nnkEnumFieldDef, nnkAsmStmt} -
      {nnkBracketExpr, nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
       nnkCallStrLit, nnkHiddenCallConv}:
     # RFC-0016 K2F-3: no value or routine of its own; a type it names is a
     # symbol (above), read even where no value of it is built (over-
-    # approximation). `asm` is not listed: it may call any routine.
+    # approximation). `asm` (and `emit`, a pragma) is foreign code: what it
+    # may write is judged where it runs (`foreignWriteNode`: an opaque's
+    # summary writes any variable, a walked body declines), so S8cs reads
+    # only the symbols it names.
     for c in n: routeScan(c, acc)
   else:
     # RFC-0016 K2F-3 (RFC section 8.1): a kind not listed may build a value

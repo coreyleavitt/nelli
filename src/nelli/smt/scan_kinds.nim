@@ -36,7 +36,8 @@ const mayScanStructuralKinds* = {nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
   nnkObjUpConv, nnkObjDownConv, nnkRange, nnkAsgn, nnkFastAsgn, nnkCall,
   nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
   nnkHiddenCallConv, nnkPragma, nnkPragmaBlock, nnkPragmaExpr,
-  nnkOpenSymChoice, nnkClosedSymChoice} + RoutineNodes
+  nnkOpenSymChoice, nnkClosedSymChoice,
+  nnkArgList} + RoutineNodes   # K2F-3: an argument container (`emit`'s)
   ## RFC-0016 K2F-1 (RFC section 8.1). The kinds that have no effect of their
   ## own: what they may do is what their children may, so a "may" scan
   ## recurses into them. A routine definition runs nothing, but its body is

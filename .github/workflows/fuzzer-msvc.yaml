@@ -56,6 +56,25 @@ name: fuzzer-msvc
 #
 # Deps are cloned at the EXACT commit SHAs recorded in milpa.lock, into
 # `_deps` -- same discipline, same regex, as the other two Windows legs.
+#
+# SHARDING (2026-11-09). The leg was one serial job: the fuzzer + db suite
+# (~37 min) followed by every tsymex_0016_* walker test (~50 s each, 89 and
+# growing), which hit the 90-minute timeout on every main push. It is now a
+# matrix:
+#   suites       the fuzzer + db suite and the named contract tests
+#   shards       Linux job; derives the walker-test list and partitions it
+#                (scripts/shard-walker-tests.py: sorted by file name, test i
+#                to shard i % N) and FAILS if the union of the shards is not
+#                exactly the glob, so a test can be neither dropped nor run
+#                twice
+#   walker       one job per shard, each running only its own tests
+#   fuzzer-msvc  the join: needs everything above and keeps the leg's old
+#                job name, so anything keyed on that check name still works
+# To change the shard count, edit WALKER_SHARDS in the `shards` job. Pick it so
+# a shard stays near 20-25 min (tests x ~50 s / N), well under its 60-minute
+# timeout. Setup per job is cheap: the Z3 prefix and the deps clones are
+# restored from actions/cache (.github/actions/setup-msvc-leg), and the Nim
+# artifact is a ~22MB digest-verified download.
 
 on:
   push:
@@ -103,10 +122,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/rfc-') }}
 
+
+env:
+  WALKER_SHARDS: "4"
+
 jobs:
-  fuzzer-msvc:
+  suites:
+    name: suites (fuzzer + db)
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
         with:
@@ -114,60 +138,7 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      - name: Install Z3 4.13.4 (x64-win)
-        uses: ./.github/actions/setup-z3-windows
-
-      - name: Clone deps at milpa.lock provenance SHAs
-        shell: pwsh
-        run: |
-          $lock = Get-Content milpa.lock -Raw
-          New-Item -ItemType Directory -Force _deps | Out-Null
-          $pattern = 'dep "(?<name>[^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "(?<url>[^"]+)"[\s\S]*?commit_sha "(?<sha>[0-9a-f]{40})"'
-          foreach ($m in [regex]::Matches($lock, $pattern)) {
-            $name = $m.Groups['name'].Value
-            $url  = $m.Groups['url'].Value
-            $sha  = $m.Groups['sha'].Value
-            Write-Host "dep $name -> $url @ $sha"
-            git clone $url "_deps/$name"
-            git -C "_deps/$name" checkout --detach $sha
-            if ($LASTEXITCODE -ne 0) { throw "checkout failed for $name" }
-          }
-          if (!(Test-Path _deps/z3) -or !(Test-Path _deps/softlink)) {
-            throw 'expected deps z3 + softlink not resolved from milpa.lock'
-          }
-
-      - name: Import the MSVC developer environment (puts cl.exe on PATH)
-        shell: pwsh
-        run: |
-          # The container used to supply this. On a bare runner Visual Studio
-          # is installed but its toolset is NOT on PATH, and `nim --cc:vcc`
-          # shells out to `cl.exe` by bare name -- so vcvars must be imported
-          # into the job environment first. vswhere is the supported way to
-          # locate it; hard-coding a VS path breaks on every runner-image bump.
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) { throw 'vswhere.exe not found -- no Visual Studio on this runner' }
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'vswhere found no installation carrying the VC++ x64 toolset' }
-          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
-          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat missing at $vcvars" }
-          cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
-            if ($_ -match '^([^=]+)=(.*)$') {
-              "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            }
-          }
-          Write-Host "imported MSVC env from $vs"
-
-      - name: Verify cl.exe is reachable
-        shell: pwsh
-        run: |
-          $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
-          if (-not $cl) { throw 'cl.exe still not on PATH after importing vcvars64 -- --cc:vcc would fail' }
-          Write-Host "cl.exe: $($cl.Source)"
-
-      - name: Install the patched Nim toolchain (OCI artifact, no container)
-        uses: ./.github/actions/setup-nim-artifact
-        with:
-          tag: 2.2.10-windows-x64
+      - uses: ./.github/actions/setup-msvc-leg
       - name: Write the MSVC test-runner script
         shell: pwsh
         run: |
@@ -393,18 +364,57 @@ jobs:
           pwsh -NoProfile -ExecutionPolicy Bypass -File _ci\run-msvc-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "MSVC suite failed (exit $LASTEXITCODE) -- see the diagnostics block above for env/Z3/cl.exe state" }
 
-      # RFC-0016 W1-m: the walker on MSVC. mingw (symex-mingw) cannot catch
-      # MSVC-only defect classes, so every tsymex_0016_* file is compiled with
-      # --cc:vcc and run against the installed Z3 4.13.4. Driven by a glob, not
-      # a list, so a new RFC-0016 file is covered on arrival; a glob matching
-      # zero files FAILS (a renamed prefix must not read as a green leg).
-      # Nim picks up each file's sibling .nim.cfg itself (project config is
-      # not skipped here).
-      - name: Run RFC-0016 walker tests under MSVC (vcc)
-        if: ${{ !cancelled() }}
-        shell: pwsh
+  # Partition the walker-test glob once, on Linux, and hand each shard its list.
+  # The script's self-check fails this job (and so the whole leg) when the
+  # union of the shards is not exactly the glob.
+  shards:
+    name: walker shard plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      shard_ids: ${{ steps.plan.outputs.shard_ids }}
+      shards_json: ${{ steps.plan.outputs.shards_json }}
+      total: ${{ steps.plan.outputs.total }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Partition the walker tests and self-check the partition
+        id: plan
         env:
           TESTS_GLOB: ${{ inputs.tests_glob || 'tests/tsymex_0016_*.nim' }}
+        run: python3 -I scripts/shard-walker-tests.py "$TESTS_GLOB" "$WALKER_SHARDS"
+
+  # RFC-0016 W1-m: the walker on MSVC. mingw (symex-mingw) cannot catch
+  # MSVC-only defect classes, so every tsymex_0016_* file is compiled with
+  # --cc:vcc and run against the installed Z3 4.13.4. Driven by a glob, not
+  # a list, so a new RFC-0016 file is covered on arrival; a glob matching
+  # zero files FAILS (a renamed prefix must not read as a green leg).
+  # Nim picks up each file's sibling .nim.cfg itself (project config is
+  # not skipped here).
+  walker:
+    name: walker (vcc shard ${{ matrix.shard }})
+    needs: shards
+    runs-on: windows-2025
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.shards.outputs.shard_ids) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-msvc-leg
+
+      - name: Run RFC-0016 walker tests under MSVC (vcc)
+        shell: pwsh
+        env:
+          SHARDS_JSON: ${{ needs.shards.outputs.shards_json }}
+          SHARD: ${{ matrix.shard }}
           NIM_FLAGS: ${{ inputs.nim_flags || '' }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -414,18 +424,16 @@ jobs:
           $ErrorActionPreference = 'Continue'
           & cmd /c "cl.exe 2>&1" | Select-Object -First 2 | ForEach-Object { Write-Host $_ }
           $ErrorActionPreference = $prev
-          Write-Host "glob: $env:TESTS_GLOB"
-          # TESTS_GLOB may name several globs, separated by commas or spaces.
-          $globs = @($env:TESTS_GLOB -split '[,\s]+' | Where-Object { $_ })
           $extra = @($env:NIM_FLAGS -split '\s+' | Where-Object { $_ })
           Write-Host "extra flags: $($extra -join ' ')"
-          $tests = @(Get-ChildItem -Path $globs -File -ErrorAction SilentlyContinue | Sort-Object Name -Unique)
-          Write-Host "matched $($tests.Count) test files"
-          if ($tests.Count -eq 0) {
-            throw "glob '$env:TESTS_GLOB' matched 0 files -- refusing to report a false green"
+          $names = @(($env:SHARDS_JSON | ConvertFrom-Json).$($env:SHARD))
+          Write-Host "shard $($env:SHARD): $($names.Count) test files"
+          if ($names.Count -eq 0) {
+            throw "shard $($env:SHARD) has an empty test list -- refusing to report a false green"
           }
           $failed = @()
-          foreach ($t in $tests) {
+          foreach ($n in $names) {
+            $t = Get-Item $n
             Write-Host "==> $($t.Name) [vcc]"
             nim c -r --cc:vcc --threads:on --hints:off --colors:off @extra `
               --nimcache:_nimcache-0016 `
@@ -437,7 +445,27 @@ jobs:
             Write-Host "FAILED under vcc: $($failed -join ', ')"
             exit 1
           }
-          Write-Host "All $($tests.Count) RFC-0016 walker tests passed under vcc."
+          Write-Host "All $($names.Count) shard-$($env:SHARD) RFC-0016 walker tests passed under vcc."
+
+  # The join. Keeps the leg's original job name so a required-check rule or
+  # anything else keyed on `fuzzer-msvc` keeps working.
+  fuzzer-msvc:
+    needs: [suites, shards, walker]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every part of the leg succeeded
+        env:
+          NEEDS: ${{ toJson(needs) }}
+        run: |
+          echo "$NEEDS" | python3 -I -c '
+          import json, sys
+          needs = json.load(sys.stdin)
+          bad = {k: v["result"] for k, v in needs.items() if v["result"] != "success"}
+          print({k: v["result"] for k, v in needs.items()})
+          sys.exit(1 if bad else 0)'
+
 
       # NO cpp/MSVC STEP -- it was added here on 2026-09-02 and REMOVED the
       # same day, because it answered its own question in the negative.

@@ -1,0 +1,75 @@
+name: setup-msvc-leg
+description: >
+  The fuzzer-msvc toolchain: Z3 4.13.4 (cached prefix), the milpa.lock deps at
+  their provenance SHAs (cached by milpa.lock hash), the MSVC developer
+  environment (cl.exe on PATH) and the patched Nim OCI artifact. Shared by
+  every fuzzer-msvc job so each shard pays one cache restore, not a rebuild.
+  The Nim artifact (~22MB, digest-verified) is cheaper to fetch than to cache.
+runs:
+  using: composite
+  steps:
+    - name: Install Z3 4.13.4 (x64-win)
+      uses: ./.github/actions/setup-z3-windows
+
+    - name: Restore the deps clones
+      id: deps-cache
+      uses: actions/cache@v4
+      with:
+        path: _deps
+        key: msvc-deps-${{ hashFiles('milpa.lock') }}
+
+    - name: Clone deps at milpa.lock provenance SHAs
+      if: steps.deps-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $lock = Get-Content milpa.lock -Raw
+        New-Item -ItemType Directory -Force _deps | Out-Null
+        $pattern = 'dep "(?<name>[^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "(?<url>[^"]+)"[\s\S]*?commit_sha "(?<sha>[0-9a-f]{40})"'
+        foreach ($m in [regex]::Matches($lock, $pattern)) {
+          $name = $m.Groups['name'].Value
+          $url  = $m.Groups['url'].Value
+          $sha  = $m.Groups['sha'].Value
+          Write-Host "dep $name -> $url @ $sha"
+          git clone $url "_deps/$name"
+          git -C "_deps/$name" checkout --detach $sha
+          if ($LASTEXITCODE -ne 0) { throw "checkout failed for $name" }
+        }
+
+    - name: Verify the deps
+      shell: pwsh
+      run: |
+        if (!(Test-Path _deps/z3) -or !(Test-Path _deps/softlink)) {
+          throw 'expected deps z3 + softlink not resolved from milpa.lock'
+        }
+
+    - name: Import the MSVC developer environment (puts cl.exe on PATH)
+      shell: pwsh
+      run: |
+        # On a bare runner Visual Studio is installed but its toolset is NOT on
+        # PATH, and `nim --cc:vcc` shells out to `cl.exe` by bare name, so
+        # vcvars must be imported into the job environment first. vswhere is
+        # the supported locator; a hard-coded VS path breaks on image bumps.
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (-not (Test-Path $vswhere)) { throw 'vswhere.exe not found -- no Visual Studio on this runner' }
+        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'vswhere found no installation carrying the VC++ x64 toolset' }
+        $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+        if (-not (Test-Path $vcvars)) { throw "vcvars64.bat missing at $vcvars" }
+        cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+          if ($_ -match '^([^=]+)=(.*)$') {
+            "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+        }
+        Write-Host "imported MSVC env from $vs"
+
+    - name: Verify cl.exe is reachable
+      shell: pwsh
+      run: |
+        $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+        if (-not $cl) { throw 'cl.exe still not on PATH after importing vcvars64 -- --cc:vcc would fail' }
+        Write-Host "cl.exe: $($cl.Source)"
+
+    - name: Install the patched Nim toolchain (OCI artifact, no container)
+      uses: ./.github/actions/setup-nim-artifact
+      with:
+        tag: 2.2.10-windows-x64

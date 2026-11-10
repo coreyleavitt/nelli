@@ -1470,6 +1470,21 @@
     `ubSignedOverflow`; a closure with an environment and a nil value lift
     nothing. A closure-typed variable still stops at `feGlobalRouteUnproved`
     before any replay (not R7's).
+  - W3-z integration 3 (`rfc-0016-w3z-int3`, walker 344, 2026-11-10): int2
+    41574a72 plus R9 a6460066 (which carries int2-b7r 9aadec96), S8ct
+    af6022af and R7 587338d7, merged `--no-ff` in that order. Walker
+    sequence: b7r 342, R9 343, R7 344 (R7 bumped 341->342 on its branch; its
+    floor pin in `tsymex_0016_prc02_reexec` and the CR2 pin now say 344).
+    S8ct's DBGSCRATCH removal was already in b7r: its one conflict resolved
+    to R9's `concreteScratchCheck` (no content change). R7's
+    `procValueUses` (`symex.nim`) is a new `case n.kind` whose `else:
+    discard` descends into the children, which the K2a census reads as
+    transparent: it is listed in `census.txt` (`[transparent:traversal]`,
+    fail-closed in effect, since any use of the variable under an unlisted
+    kind reaches the `nnkSym` arm and answers false) and the census ceiling
+    moves 151 -> 152, as int2 did for the lanes it merged. The universe
+    ledger needed no regeneration (int2's d635cb71 already had
+    `pragma:field/exportc` modelled, the cell R9 saw declined at its base).
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **W3-z E4b (`rfc-0016-w3z-evidence4b`):** the soundness rows SND-01..06, SND-08..11, PRC-27 and CRH-02 leave `closed-legacy.txt`: their pre-K9 suites now call `pinExact`/`pinDecline` beside every existing assertion (records keyed to the magic cell the fix lives on where one exists, else to a `family:callshape` cell). A closed row cannot name a declined cell, so SND-06 (`magic:ProcCall`), CRH-02 (`magic:GCref`) and the decline-only rows carry the pin file, not the cell. PRC-01 and PRC-02 are pinned on Linux (`pinExact` under `-d:nelliReplayReexec`, the same marshalling path as Windows); their legacy entries said the suites skip on Linux, which has been false since PRC-01 and PRC-02m. PRC-41 and PRC-42 are homed at W4-z (the id the other open precision rows use; the Wave 4 table's "W-32 and the precision rows" line has no slice id). `closed-legacy.txt` is 24 rows.
 - **W3-z E2c (`rfc-0016-w3z-evidence2c`):** the construct axis grows 61 -> 70 cells. `k8a-gen/DivLit` and `k8a-gen/Udiv` ship exact records from two hand-seeded sat-by-construction anchor programs (`anchorPrograms`, ids from 1000000, in the batch that starts the stream), whatever the seed or count. The six sampled-unsat-only keys gain an exhaustive (int8/uint8) or sat-sibling pin and become modelled cells. `threads/createThread` is a declined cell (`pinDecline`, `feUnsupportedOp`). Not cells: `hook/=trace/cycleCollector` and `hook/=destroy/dynamicSubtype` (walker faults, `coerceIntLit`, P6: a fault is not a decline) and `quit/afterTarget/assertCoveredBy` (a clean `sxSat`; the host ends at the splat, INT-22): they stay `skipCell`.

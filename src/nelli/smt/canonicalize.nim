@@ -364,7 +364,16 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "311"
+const symexWalkerVersion* = "312"
+  ## RFC-0016 K2F-1 (311->312): the "may" analyses answer "may" for what they
+  ## did not read (RFC section 8.1). `mayWriteRoot` reads a writing magic
+  ## (`inc`, `+=`, `swap`, `setLen`: the whole `FakeVarParams` set, which
+  ## `mayWriteMagics` now holds), so a `lent` `for` whose body writes the
+  ## container that way declines where it gave sxSat on the dead label;
+  ## `mayResizeSeq`/`mayRearm` take a call through a proc field as a call
+  ## through a proc value; `scanShapeReceiverMutated` reads any write rooted
+  ## at the param; each scan lists its inert leaves, recurses through the
+  ## structural kinds and answers "may" for any other kind.
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

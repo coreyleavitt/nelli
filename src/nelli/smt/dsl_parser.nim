@@ -10372,6 +10372,45 @@ proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
                         ctx: ParseCtx): IRStmt
   ## RFC-0005 S8bn fwd decl
 
+const mayScanLeafKinds = {nnkEmpty, nnkIdent, nnkType, nnkCharLit .. nnkNilLit,
+                          nnkCommentStmt}
+  ## RFC-0016 K2F-1. The leaves a "may" scan (`mayRearm`, `mayResizeSeq`,
+  ## `mayWriteRoot`, `scanShapeReceiverMutated`) reads as inert: a literal, a
+  ## name that is not a symbol (a pragma word), a type. A symbol is each scan's
+  ## own arm.
+
+const mayScanNoCodeKinds = {nnkTypeSection, nnkTypeDef, nnkMixinStmt,
+  nnkBindStmt, nnkTypeOfExpr, nnkUsingStmt, nnkStaticStmt, nnkRefTy, nnkPtrTy,
+  nnkVarTy, nnkProcTy, nnkTupleTy, nnkObjectTy, nnkDistinctTy, nnkEnumTy,
+  nnkIteratorTy, nnkStaticTy, nnkConstTy, nnkTupleClassTy, nnkTypeClassTy,
+  nnkMutableTy, nnkFormalParams, nnkGenericParams}
+  ## RFC-0016 K2F-1. Kinds that hold names but run no code at run time: a type
+  ## or its declaration, a name-lookup declaration, an unevaluated `typeof`, a
+  ## `static:` block, a routine's parameter list.
+
+const mayScanStructuralKinds = {nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
+  nnkBlockExpr, nnkIfStmt, nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse,
+  nnkElseExpr, nnkWhenStmt, nnkCaseStmt, nnkOfBranch, nnkWhileStmt, nnkForStmt,
+  nnkReturnStmt, nnkBreakStmt, nnkContinueStmt, nnkDiscardStmt, nnkYieldStmt,
+  nnkVarSection, nnkLetSection, nnkConstSection, nnkConstDef, nnkIdentDefs,
+  nnkVarTuple, nnkTryStmt, nnkHiddenTryStmt, nnkExceptBranch, nnkFinally,
+  nnkDefer, nnkRaiseStmt, nnkBracket, nnkCurly, nnkPar, nnkTupleConstr,
+  nnkObjConstr, nnkExprColonExpr, nnkExprEqExpr, nnkBracketExpr, nnkDotExpr,
+  nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr, nnkHiddenAddr,
+  nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkCast, nnkChckRange,
+  nnkChckRange64, nnkChckRangeF, nnkStringToCString, nnkCStringToString,
+  nnkObjUpConv, nnkObjDownConv, nnkRange, nnkAsgn, nnkFastAsgn, nnkCall,
+  nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+  nnkHiddenCallConv, nnkPragma, nnkPragmaBlock, nnkPragmaExpr,
+  nnkOpenSymChoice, nnkClosedSymChoice} + RoutineNodes
+  ## RFC-0016 K2F-1 (RFC section 8.1). The kinds that have no effect of their
+  ## own: what they may do is what their children may, so a "may" scan
+  ## recurses into them. A routine definition runs nothing, but its body is
+  ## scanned all the same (each scan's own `RoutineNodes` arm, or the
+  ## children): over-approximating a body that never runs costs only
+  ## precision. A kind in none of the three sets (`asm`, a closure-iterator
+  ## state node, any kind Nim adds) answers "may": the scan never looked at it.
+
 var procFieldAssigns {.compileTime.}: Table[string, seq[NimNode]]
   ## RFC-0005 S8bn (item 6). Per proc field of an object type (`pfKey`), the
   ## procs the entry's routines assign to it (`o.f = p`, `T(f: p)`), in
@@ -10433,9 +10472,15 @@ proc scanProcFieldAssigns*(fn: NimNode) =
            c[1].kind != nnkNilLit and c[1].getTypeInst.kind == nnkProcTy:
           let ps = pfProcSym(c[1])
           if ps != nil: pfAdd(pfObjKey(n) & "." & macros.strVal(c[0]), ps)
-    of nnkTypeSection, nnkTypeDef, nnkPragma, nnkCommentStmt:
+    of mayScanLeafKinds, mayScanNoCodeKinds, nnkPragma:
       return
-    else: discard
+    of mayScanStructuralKinds - {nnkAsgn, nnkObjConstr, nnkPragma}:
+      discard
+    else:
+      # RFC-0016 K2F-1: an unlisted kind is not read. That is fail-closed: a
+      # proc it would add is missing from `procFieldAssigns`, so a store of
+      # it codes -1 (`pfCode`) and a call through the field declines.
+      return
     for c in n: scan(c, work)
   var i = 0
   while i < work.len:
@@ -15610,6 +15655,17 @@ proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
   let memberCond = mkStrOp(iekStrInOptionRegion, "optregion", @[sIR, iIR, boundIR])
   some(mkIf(@[mkBranch(memberCond, mkBlock(@[]))], fallback))
 
+const mayWriteMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
+  "AppendStrStr", "AppendSeqElem", "New", "NewFinalize", "WasMoved",
+  "Destroy", "Swap", "SetLengthStr", "SetLengthSeq", "NewSeq", "Reset",
+  "ShallowCopy", "DeepCopy", "Move"]
+  ## RFC-0016 K6a (W-08). The magics that write the location of a `var`
+  ## argument: `cgMutatingMagics` (`ccgcalls.getPotentialWrites`) without
+  ## `Addr`, which takes an address and writes nothing, plus `Swap`.
+  ## RFC-0016 K2F-1: and the rest of `semexprs.FakeVarParams`, the magics
+  ## whose `var` argument carries no `nnkHiddenAddr` (`setLen`, `reset`,
+  ## `move`, ...): nothing else in the typed tree marks it written.
+
 proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
   ## Round-6 B1a mutation-fallback guard (ADR-0028 Leg 1): true iff `body`
   ## contains ANY syntactic mutation site targeting the symbol `paramName`
@@ -15656,23 +15712,35 @@ proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
   ## closing since the collectors it feeds (`considerCandidate`,
   ## `markSymOrRootParam`) were already migrated to symbol identity in R4.
   ## `sameSym` throughout, never `strVal`.
+  ##
+  ## RFC-0016 K2F-1: a mutation is any write ROOTED at the param, not only
+  ## the two spelled shapes: an assignment to any path under it (`data[i]`,
+  ## `data`), a writing magic (`inc data[0]`, `data[0] += 1`, `swap`,
+  ## `setLen`: `mayWriteMagics`, which carry no `nnkHiddenAddr`), a `var`
+  ## actual rooted at it, under any call syntax (infix included). Inert
+  ## leaves are listed, structural kinds recurse, and any other kind answers
+  ## "mutated", the over-approximation this veto already takes.
+  proc rootedAtParam(lv: NimNode): bool =
+    var steps: seq[NimNode]
+    let r = lvalueRoot(lv, steps)
+    r != nil and r.kind == nnkSym and sameSym(r, paramSym)
   proc scan(n: NimNode): bool =
-    if n == nil or n.kind == nnkEmpty: return false
+    if n == nil: return false
     case n.kind
-    of nnkAsgn:
-      if n.len == 2:
-        let lhs = unwrapHidden(n[0])
-        if lhs.kind == nnkBracketExpr and lhs.len == 2:
-          let recv = unwrapHidden(lhs[0])
-          if recv.kind == nnkSym and sameSym(recv, paramSym):
-            return true
-    of nnkCall, nnkCommand:
+    of nnkAsgn, nnkFastAsgn, nnkHiddenAddr:
+      if n.len >= 1 and rootedAtParam(n[0]): return true
+    of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+       nnkHiddenCallConv:
       if n.len >= 2 and n[0].kind in {nnkSym, nnkIdent} and
          n[0].strVal in ["add", "del", "insert"]:
         let recv = unwrapHidden(n[1])
         if recv.kind == nnkSym and sameSym(recv, paramSym):
           return true
       if n.len >= 1 and n[0].kind == nnkSym:
+        let m = routineMagic(n[0])
+        if magicIs(m, "Swap") or m in mayWriteMagics:
+          for i in 1 ..< n.len:
+            if rootedAtParam(n[i]): return true
         let calleeImpl = resolveRoutineImpl(n[0])
         if calleeImpl != nil:
           let calleeFormals = calleeImpl[3]
@@ -15682,12 +15750,15 @@ proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
             let isVarFormal = id[id.len - 2].kind == nnkVarTy
             for j in 0 ..< id.len - 2:
               let argPos = idx + 1   ## n[0] is the callee sym itself
-              if isVarFormal and argPos < n.len:
-                let arg = unwrapHidden(n[argPos])
-                if arg.kind == nnkSym and sameSym(arg, paramSym):
-                  return true
+              if isVarFormal and argPos < n.len and rootedAtParam(n[argPos]):
+                return true
               inc idx
-    else: discard
+    of mayScanLeafKinds, mayScanNoCodeKinds, nnkSym: return false
+    of mayScanStructuralKinds - {nnkAsgn, nnkFastAsgn, nnkHiddenAddr, nnkCall,
+                                 nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
+                                 nnkCallStrLit, nnkHiddenCallConv}:
+      discard
+    else: return true
     for child in n:
       if scan(child): return true
     false
@@ -17445,25 +17516,34 @@ proc mayRearm(n, o: NimNode): bool =
   ## proc value, which may reach `o` by name.
   ## RFC-0005 S8cp (item 2): or `o` occurs under `{.cast(uncheckedAssign).}`,
   ## where `o.k = v` changes arm rather than raise.
+  ## RFC-0016 K2F-1: a proc value includes a proc-typed field (`h.cb()`), and
+  ## `o.f` is skipped only when `f` is data, not a proc `o` holds. Inert leaves
+  ## are listed, structural kinds recurse, and any other kind may rearm.
   case n.kind
   of nnkPragmaBlock:
     if isUncheckedAssignBlock(n) and mentionsSym(n, o): return true
+  of nnkPragma:
+    if foreignWriteNode(n): return true   # `emit`
   of nnkSym:
     if containsSym(@[o], n): return true
     if isNestedRoutine(n): return true
-    if symKind(n) in {nskVar, nskLet, nskParam} and
-       n.getTypeInst.kind == nnkProcTy:
+    if symKind(n) in procValueHeadKinds and n.getTypeInst.kind == nnkProcTy:
       return true
     return false
   of nnkDotExpr:
-    if n.len == 2 and isRootOf(n[0], o): return false
+    if n.len == 2 and isRootOf(n[0], o) and n.typeKind != ntyProc:
+      return false
   of nnkCheckedFieldExpr:
     if n.len >= 1 and n[0].kind == nnkDotExpr and n[0].len == 2 and
-       isRootOf(n[0][0], o):
+       isRootOf(n[0][0], o) and n.typeKind != ntyProc:
       return false
   of RoutineNodes:
     return mentionsSym(n, o)
-  else: discard
+  of mayScanLeafKinds, mayScanNoCodeKinds: return false
+  of mayScanStructuralKinds - {nnkPragmaBlock, nnkPragma, nnkDotExpr,
+                               nnkCheckedFieldExpr} - RoutineNodes:
+    discard
+  else: return true
   for c in n:
     if mayRearm(c, o): return true
   false
@@ -17474,12 +17554,16 @@ proc mayResizeSeq(n, s: NimNode): bool =
   ## argument of a read-only builtin (`len`, `high`, `low`, iteration,
   ## `contains`, `find`, `$`, `==`); or `n` calls a nested routine or a
   ## proc value, which may reach `s` by name.
+  ## RFC-0016 K2F-1: a proc value includes a proc-typed field (`h.cb()`, a
+  ## closure that may resize `s` by name). Inert leaves are listed, structural
+  ## kinds recurse, and any other kind may resize.
   case n.kind
+  of nnkPragma:
+    if foreignWriteNode(n): return true   # `emit`
   of nnkSym:
     if containsSym(@[s], n): return true
     if isNestedRoutine(n): return true
-    if symKind(n) in {nskVar, nskLet, nskParam} and
-       n.getTypeInst.kind == nnkProcTy:
+    if symKind(n) in procValueHeadKinds and n.getTypeInst.kind == nnkProcTy:
       return true
     return false
   of nnkBracketExpr:
@@ -17495,7 +17579,11 @@ proc mayResizeSeq(n, s: NimNode): bool =
       return false
   of RoutineNodes:
     return mentionsSym(n, s)
-  else: discard
+  of mayScanLeafKinds, mayScanNoCodeKinds: return false
+  of mayScanStructuralKinds - {nnkPragma, nnkBracketExpr, nnkCall, nnkCommand,
+                               nnkInfix, nnkPrefix} - RoutineNodes:
+    discard
+  else: return true
   for c in n:
     if mayResizeSeq(c, s): return true
   false
@@ -17568,13 +17656,6 @@ proc containsForeign(n: NimNode): bool =
   if foreignWriteNode(n): return true
   for c in n:
     if containsForeign(c): return true
-
-const mayWriteMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
-  "AppendStrStr", "AppendSeqElem", "New", "NewFinalize", "WasMoved",
-  "Destroy", "Swap"]
-  ## RFC-0016 K6a (W-08). The magics that write the location of a `var`
-  ## argument: `cgMutatingMagics` (`ccgcalls.getPotentialWrites`) without
-  ## `Addr`, which takes an address and writes nothing, plus `Swap`.
 
 const mayWriteMaxDepth = 64
   ## RFC-0016 K6a. Walked callees nested deeper than this read as may-write.
@@ -17734,17 +17815,34 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
   ## by name, as a `var` actual, through `addr`, by a callee that reaches
   ## `root` by name (`calleeOuterSyms`), or, when a pointer may reach it
   ## (`rootReachedByPointer`), through any `ptr` or `ref`.
+  ## RFC-0016 K2F-1: a writing magic (`inc`, `+=`, `swap`, `add`, ...) takes
+  ## its `var` argument with no `nnkHiddenAddr` (Nim's `FakeVarParams`), so it
+  ## is read here by its magic (`mayWriteMagics`). Inert leaves are listed,
+  ## structural kinds recurse, and any other kind (`asm`, an unlisted kind)
+  ## may write.
+  proc rootedHere(lv: NimNode): bool =
+    var lv = lv
+    if lv.kind == nnkHiddenAddr and lv.len > 0: lv = lv[0]
+    if isVarIndirection(lv): lv = lv[0]
+    var steps: seq[NimNode]
+    let r = lvalueRoot(lv, steps)
+    r != nil and r.kind == nnkSym and containsSym(@[root], r)
   proc scan(x: NimNode): string =
     if x == nil: return ""
     case x.kind
     of nnkAsgn, nnkFastAsgn, nnkHiddenAddr:
-      var lv = x[0]
-      if x.kind == nnkHiddenAddr and isVarIndirection(lv): lv = lv[0]
-      var steps: seq[NimNode]
-      let r = lvalueRoot(lv, steps)
-      if r != nil and r.kind == nnkSym and containsSym(@[root], r):
+      if x.len > 0 and rootedHere(x[0]):
         return "written by name"
-    of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix:
+    of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+       nnkHiddenCallConv:
+      if x.len > 0 and x[0].kind == nnkSym:
+        let m = routineMagic(x[0])
+        let writes = if magicIs(m, "Swap"): 1 ..< x.len
+                     elif m in mayWriteMagics: 1 ..< min(2, x.len)
+                     else: 1 ..< 1
+        for i in writes:
+          if rootedHere(x[i]):
+            return "written by name, through `" & x[0].strVal & "`"
       if x.len > 0 and x[0].kind == nnkSym and isUserRoutine(x[0]) and
          containsSym(calleeOuterSyms(x[0]), root):
         return "written by `" & x[0].strVal & "`, which reaches it by name"
@@ -17754,7 +17852,14 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
         if not a.admitted:
           return "reachable by a call through a proc value (" &
                  a.decline[1] & ")"
-    else: discard
+    of mayScanLeafKinds, mayScanNoCodeKinds, nnkSym: return ""
+    of mayScanStructuralKinds - {nnkAsgn, nnkFastAsgn, nnkHiddenAddr, nnkCall,
+                                 nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
+                                 nnkCallStrLit, nnkHiddenCallConv}:
+      if x.kind == nnkPragma and foreignWriteNode(x):
+        return "foreign code (an `emit`)"
+    else:
+      return "an unlisted node kind (`" & $x.kind & "`) the scan cannot read"
     if addrTakenIn(newTree(nnkStmtList, x), root) and
        x.kind in {nnkAddr, nnkCall, nnkCommand}:
       return "its address is taken"

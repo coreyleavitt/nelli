@@ -244,14 +244,51 @@ proc calleeName(n: NimNode): string =
     if n.len > 1: calleeName(n[1]) else: ""
   else: ""
 
+const mutOperators* = ["+=", "-=", "*=", "/=", "&="]
+  ## RFC-0016 K2F-1. The in-place operators: `x.f += 1` writes `x.f`, and its
+  ## typed tree is an `nnkInfix` whose `var` operand carries no `nnkHiddenAddr`.
+
+const mutScanInertKinds = {nnkEmpty, nnkIdent, nnkSym, nnkType,
+  nnkCharLit .. nnkNilLit, nnkCommentStmt, nnkTypeSection, nnkTypeDef,
+  nnkMixinStmt, nnkBindStmt, nnkTypeOfExpr, nnkUsingStmt, nnkStaticStmt,
+  nnkRefTy, nnkPtrTy, nnkVarTy, nnkProcTy, nnkTupleTy, nnkObjectTy,
+  nnkDistinctTy, nnkEnumTy, nnkIteratorTy, nnkStaticTy, nnkConstTy,
+  nnkTupleClassTy, nnkTypeClassTy, nnkMutableTy}
+  ## RFC-0016 K2F-1. Leaves, and kinds that hold names but run no code at run
+  ## time (a type, a declaration, a `static:` block).
+
+const mutScanStructuralKinds = {nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
+  nnkBlockExpr, nnkIfStmt, nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse,
+  nnkElseExpr, nnkWhenStmt, nnkCaseStmt, nnkOfBranch, nnkWhileStmt, nnkForStmt,
+  nnkReturnStmt, nnkBreakStmt, nnkContinueStmt, nnkDiscardStmt, nnkYieldStmt,
+  nnkVarSection, nnkLetSection, nnkConstSection, nnkConstDef, nnkIdentDefs,
+  nnkVarTuple, nnkTryStmt, nnkHiddenTryStmt, nnkExceptBranch, nnkFinally,
+  nnkDefer, nnkRaiseStmt, nnkBracket, nnkCurly, nnkPar, nnkTupleConstr,
+  nnkObjConstr, nnkExprColonExpr, nnkExprEqExpr, nnkBracketExpr, nnkDotExpr,
+  nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr, nnkHiddenAddr,
+  nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkCast, nnkChckRange,
+  nnkChckRange64, nnkChckRangeF, nnkStringToCString, nnkCStringToString,
+  nnkObjUpConv, nnkObjDownConv, nnkRange, nnkPrefix, nnkPostfix,
+  nnkCallStrLit, nnkHiddenCallConv, nnkPragma, nnkPragmaBlock, nnkPragmaExpr,
+  nnkOpenSymChoice, nnkClosedSymChoice, nnkFormalParams, nnkGenericParams} +
+  RoutineNodes
+  ## RFC-0016 K2F-1 (RFC section 8.1). The kinds with no write of their own:
+  ## `bodyMutatesRoot` recurses into them. Any other kind may mutate.
+
 proc bodyMutatesRoot*(n: NimNode; target: NimNode): bool =
+  ## Whether `n` may mutate, in place, the object the ref `target` names: an
+  ## assignment under it, a mutating method (`mutMethods`) or in-place
+  ## operator (`mutOperators`) on a path under it.
+  ## RFC-0016 K2F-1: `nnkFastAsgn` and the infix call syntax (`h.c.n += 1`)
+  ## are read too; inert kinds are listed, structural kinds recurse, and any
+  ## other kind answers "mutates" (the lint then checks its siblings).
   if n == nil: return false
   case n.kind
-  of nnkAsgn:
+  of nnkAsgn, nnkFastAsgn:
     let lhs = unwrapHidden(n[0])
     if lhs.kind in {nnkBracketExpr, nnkDotExpr} and rootSym(lhs) == target:
       return true
-  of nnkCall, nnkCommand:
+  of nnkCall, nnkCommand, nnkInfix:
     if n.len > 0:
       let callee = n[0]
       # RFC-0005 S8be: a method name may be a symbol choice or an
@@ -259,10 +296,15 @@ proc bodyMutatesRoot*(n: NimNode; target: NimNode): bool =
       if callee.kind == nnkDotExpr and callee.len == 2 and
          calleeName(callee[1]) in mutMethods and rootSym(callee[0]) == target:
         return true
-      if callee.kind == nnkSym and calleeName(callee) in mutMethods and
-         n.len > 1 and rootSym(n[1]) == target:
+      if callee.kind in {nnkSym, nnkIdent, nnkOpenSymChoice,
+                         nnkClosedSymChoice, nnkAccQuoted} and n.len > 1 and
+         (calleeName(callee) in mutMethods or
+          calleeName(callee) in mutOperators) and
+         rootSym(n[1]) == target:
         return true
-  else: discard
+  of mutScanInertKinds: return false
+  of mutScanStructuralKinds: discard
+  else: return true
   for c in n:
     if bodyMutatesRoot(c, target): return true
   false

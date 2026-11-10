@@ -1562,6 +1562,7 @@ task test, "Run the test suite":
             "tsymex_0016_k6b_hookcopy",
             "tsymex_0016_k6c_round",
             "tsymex_0016_e3b_readonly_wiring",
+            "tsymex_0016_k2f1_may",
             # RFC-0005 S8cq: by-value sharing, var-returning actuals, a call in
             # a location lowered twice.
             "tsymex_rfc0005_s8cq_argorder",

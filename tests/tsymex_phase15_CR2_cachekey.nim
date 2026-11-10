@@ -1147,7 +1147,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 PRC-07 float half (a routine with `nanChecks`/`infChecks` on
     ## is walked as compiled, its float `+ - * /` forking the float checks):
     ## 310->311.
-    check symexWalkerVersion == "311"
+    ## RFC-0016 K2F-1 (the "may" analyses answer "may" for what they did not
+    ## read; a writing magic in a `lent` loop body declines): 311->312.
+    check symexWalkerVersion == "312"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

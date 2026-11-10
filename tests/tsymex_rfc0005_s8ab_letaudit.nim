@@ -375,6 +375,20 @@ proc fxParamAliasShape(h: FxHolder; xs: seq[int]): int =
   h.c.xs.add 3
   xs.len
 
+type
+  FxCounted = object
+    n: int
+  FxCountHolder = ref object
+    c: FxCounted
+
+proc fxParamAliasInfixShape(h: FxCountHolder; c: FxCounted): int =
+  ## RFC-0016 K2F-1. `fxParamAliasShape` with the mutation spelled as an
+  ## in-place operator: `h.c.n += 1` is an `nnkInfix` (the `Inc` magic, no
+  ## `nnkHiddenAddr`), which `bodyMutatesRoot` skipped as an unlisted kind,
+  ## so `c` (which may be `h.c`) was never checked.
+  h.c.n += 1
+  c.n
+
 # ---- RFC-0005 S8af RED fixtures ----------------------------------------
 
 proc fxTableBracketAliasShape(): int =
@@ -523,7 +537,8 @@ macro s8akFxZeroArgDirectGenericCall(): untyped =
   newLit(0)
 
 const fixtureNames = @["preFixResolveBreakShape", "preFixEnsureProcRegisteredShape",
-                       "fxParamAliasShape", "fxTableBracketAliasShape",
+                       "fxParamAliasShape", "fxParamAliasInfixShape",
+                       "fxTableBracketAliasShape",
                        "fxStringSliceNotFlagged", "fxTableLentNotFlagged",
                        "fxParamAliasViaTypeAlias", "fxGenericAliasShape",
                        "fxParamAliasDeepShape", "fxParamAliasCyclicShape",
@@ -671,6 +686,9 @@ suite "S8ab: type-aware guard for the compile-time VM let-aliasing hazard":
 
   test "RED: the walker flags a non-var param aliased through a mutated ref sibling":
     check fixtureParamHits.anyIt(it.contains("fxParamAliasShape") and it.contains("param xs"))
+
+  test "K2F-1 RED: a ref sibling mutated by an in-place operator is a mutation":
+    check fixtureParamHits.anyIt(it.contains("fxParamAliasInfixShape") and it.contains("param c"))
 
   test "S8af RED: Table's var-returning `[]` (nnkCall) is flagged, string slicing and the lent overload are not":
     check fixtureLetHits.anyIt(it.contains("fxTableBracketAliasShape") and

@@ -112,6 +112,12 @@
     pushes skip the evidence gates, and allowlists grew. The full list is
     in the scratchpad `wa3-findings.md`; the admission/BuildProfile lens is
     still out. Next: verify, slice and fix, then /code-review, then tag.
+  - W3-z P1 (`rfc-0016-w3z-parser`, walker 311 to 312, finding A1): the
+    opaque-call scan read `RoutineChecks.checks` (the deviation set) as "on".
+    It now reads `RoutineChecks.overflowOn`, `ownerChecked` honours a
+    routine's push-off, and a `-fwrapv` build defines the signed wrap.
+    Tests: `tsymex_0016_w3z_p1_off` (checks-off build) and
+    `tsymex_0016_w3z_p1_default`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.
@@ -1147,6 +1153,75 @@
   precondition and a path outside it (`y == 0` included) declines
   `feCheckOption` naming the cell. The `pragma.txt` entries for
   `routine/nanChecks`, `infChecks`, `floatChecks` are removed (pinned exact).
+  W3-z R1 (`rfc-0016-w3z-runtime`, walker 311 to 312, finding U3):
+  `tUndefined` hits the `{.noinit.}` read. The read rides the path as `ub` on a
+  `feGlobalHavoc` degrade and never halts, so `haltUndefined`, the only hit
+  test, missed it and `symexFind(f, tUndefined())` was a trusted `sxUnsat`.
+  `noteUbAtFork` (beside `haltUndefined`) is called from `forkPathTainted` and
+  `taintInPlace` for each kind a degrade newly puts on a path, and solves the
+  hit under `stkUndefined`; its taint is the parent's, so the carrying degrade
+  does not demote the finding to a replay-only candidate. `ubTailUnverified` is
+  out of `allUbKinds` (the default) and `tUndefined` refuses it (`doAssert`; a
+  compile error for a static call). Pins: `tsymex_0016_w3z_r1_noinit_target`.
+  Open: a read inside an `and`/`or` operand is lowered unguarded
+  (`shortCircuitPartIsPure` sees no hoist and no inline fork), so
+  `tUndefined` reports it reachable when only the other operand guards it.
+  W3-z R2 (`rfc-0016-w3z-runtime2`, walker 312 to 313, finding U1): a
+  replay-confirmed candidate is held to the whole-run gate. Its tail was
+  never walked, so `symexFind` of a label on a havoc-tainted path followed by
+  a signed overflow was `sxSat`, `rsConfirmed`, `trusted()`. `runSymexImpl`'s
+  `sxUnknown` branch now walks each `sxSat` label candidate's tail
+  (`verifyTailDefined`, gate and replay on) while its model pins are live,
+  and the kinds join the existing `SatCandidate.witnessUndefined`, which
+  `settleCandidate` already carries and the soundness codec already stores
+  (no new field). The walk runs with `overApprox`
+  (`WalkCtx.tailOverApprox`): a candidate's path carries a fresh symbol the
+  pins do not fix, so a branch the pins and `pc` leave open forks both arms
+  (`walkIfFollowConcrete`, `walkWhileFollowConcrete`) instead of setting
+  `tailUndecided`, and a `dcFreshSymbol` record is not a reason for
+  `ubTailUnverified`. Without that, every candidate would answer
+  `ubTailUnverified` and none would be trusted. Pins:
+  `tsymex_0016_w3z_r2_candtail`. Open: the winner's tail walk keeps the
+  strict mode, so a post-label havoc on a clean winner is still
+  `ubTailUnverified` (precision only). An opaque call's result is
+  `feOpaqueCallUnmodelled` (⊤), never a candidate, so only havoc-tainted
+  candidates reach this path.
+  W3-z R3 (`rfc-0016-w3z-runtime3`, walker 314 to 315, finding U2): the main
+  walk reads `IRStmt.opaqueUndefined` (`noteOpaqueUndefined`, called before the
+  call's havoc so the listing sees clean paths). Under `tUndefined` a requested
+  kind is the target's hit at the call (a possible one: the body is not
+  walked; `witnessUndefined` carries the kind, so the sat is never trusted);
+  under any other target it is listed on `SymexResult.undefined`. The path
+  goes on carrying the kinds in `Path.undefined`, so a label sat through it is
+  untrusted. `settleCandidate` now keeps `raw.undefined`. Pins:
+  `tsymex_0016_w3z_r3_opaque` (checks-off), `tsymex_0016_w3z_r3_default`.
+  Note: on today's base the pre-fix `tUndefined` answer was `sxUnknown` (the
+  callee also forks `OverflowDefect`), not a trusted unsat; the hit was missing
+  either way. A stray `|||||||` marker sits just below this entry (from base).
+  W3-z R5 (`rfc-0016-w3z-runtime5`, walker 315 to 316, findings U6, U7):
+  `SymexFinding.undefined` is rendered (text line `undefined <kind> at <site>`,
+  JSON `undefined` array), and a diagnostic raise carries its own
+  `witnessUndefined`/`witnessUnsafe` (`RawDiagnostic` to `DefectFinding` /
+  `FindingDiagnostic`, persisted in the `:notes` record as `wu`/`wx`, hence the
+  bump); `hostRunnable(d)` reads them and the report shows them. Pin:
+  `tsymex_0016_w3z_r5_render`. Observation: under a `tLabel` search a raise
+  on an undefined path did not reach `diagnostics` in any SUT shape tried
+  (it wins only when it is the first raise); not investigated, may be
+  candidate routing.
+  W3-z R5b (`rfc-0016-w3z-runtime5b`, walker stays 316): that observation was
+  candidate routing, by construction. A path carries `Path.undefined` only
+  through a `dcFreshSymbol` degrade token (`{.noinit.}` read, havoc'd global,
+  opaque call), which taints it `scSpurious`; `admitSolvedHit` files its raise
+  in `w.candidates` (`runtime.nim` ~18586), and only a clean finding reaches
+  `RawDiagnostic` (`runtime.nim` ~31181; `settleCandidate` documents "no
+  diagnostics"). A replay-confirmed candidate is the verdict, with its own
+  `witnessUndefined` (`allRaiseFindings(r)[0]`), so R5's winner field stays.
+  The per-diagnostic undefined bit was dormant and is removed
+  (`RawDiagnostic`, `FindingDiagnostic`, the `wu` notes key, the render);
+  `witnessUnsafe` is reachable (a nil-deref crash raise is clean) and is kept.
+  Pin: `tsymex_0016_w3z_r5b_diag`.
+||||||| 32ae1cf0
+- **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

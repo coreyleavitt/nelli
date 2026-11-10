@@ -139,6 +139,10 @@ type
     isDefect*:       bool
     raisedMsg*:      string   ## the message when the walker knew it, else ""
     witnessChoices*: seq[ChoiceNode]
+    witnessUnsafe*: bool
+      ## RFC-0016 W3-z R5 (U7). As `Soundness.witnessUnsafe`, for this raise:
+      ## whether its witness may be run in-process. No `witnessUndefined`: a
+      ## diagnostic is a clean finding, never past undefined behaviour (R5b).
 
   FindingGap* = object
     ## RFC-0005 S11. One entry of `SymexFinding.gaps`: a decline that built

@@ -162,11 +162,15 @@ func hasRow*[S: enum; P](t: AxisTable[S, P]; key: string): bool =
     if r.key == key: return true
 
 iterator cells*[S: enum; P](t: AxisTable[S, P]):
-    tuple[cell: CellKey, admitted: bool, intent: Intent] =
-  ## What K1 reads: every row's identity and whether it models the cell.
+    tuple[cell: CellKey, admitted: bool, intent: Intent,
+          kind: Option[SymexErrorKind]] =
+  ## What K1 reads: every row's identity, whether it models the cell, and for
+  ## a refused row the kind it declines with (`none` for an admitted row or
+  ## an axis that reports in its own vocabulary).
   for r in t.rows:
     yield (t.cellOf(r.key), r.row.admitted,
-           (if r.row.admitted: iModel else: r.row.intent))
+           (if r.row.admitted: iModel else: r.row.intent),
+           (if r.row.admitted: none(SymexErrorKind) else: r.row.kind))
 
 func admitted*[P](a: Admit[P]): bool = a.ok
 func cell*[P](a: Admit[P]): CellKey = a.cell

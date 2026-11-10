@@ -363,8 +363,35 @@ const renderAsChoicesVersion* = "12"
   ##   declines `feCheckOption`: its asserts follow `assertions` at the site
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
+  ## - RFC-0016 W3-z R1 (311->312): under `tUndefined` a `{.noinit.}` read of
+  ##   an unwritten slot is the target's hit. The read rides the path as `ub`
+  ##   on a `feGlobalHavoc` degrade and never halts, so the only hit test
+  ##   (`haltUndefined`) missed it and `tUndefined` answered a trusted
+  ##   `sxUnsat` over a reachable indeterminate read. Every fork that newly
+  ##   puts a requested kind on a path now solves the hit there
+  ##   (`noteUbAtFork`). `tUndefined`'s default no longer lists
+  ##   `ubTailUnverified` (never a walk's hit), and naming it is refused.
+  ## - RFC-0016 W3-z R2 (312->313): a label candidate the replay may confirm
+  ##   is held to the whole-run gate. Its tail was never walked, so a
+  ##   replay-confirmed `sxSat` with an undefined op after the label was
+  ##   trusted. `runSymexImpl` now walks each `sxSat` candidate's tail under
+  ##   its model pins (`verifyTailDefined`, `overApprox`: an open branch forks
+  ##   both arms, a fresh-symbol record is not a reason) and the kinds join
+  ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
 
-const symexWalkerVersion* = "311"
+const symexWalkerVersion* = "316"
+  ## RFC-0016 W3-z R5 (315->316): a diagnostic raise's `witnessUndefined` and
+  ## `witnessUnsafe` ride the `:notes` record (`wu` / `wx`), so a cache hit
+  ## serves them. Records written under 315 lack them and are not read.
+  ## RFC-0016 W3-z R3 (314->315): the main walk reads `IRStmt.opaqueUndefined`.
+  ## Under `tUndefined` a requested kind is the target's hit at the opaque
+  ## call; otherwise it is listed on `SymexResult.undefined`; the path goes on
+  ## carrying the kinds, so a sat through it is never trusted.
+  ## RFC-0016 W3-z P1 (313->314, landed after R1/R2): the opaque-call scan reads the callee's own
+  ## `overflowChecks` (`RoutineChecks.overflowOn`) and a pushed-off check
+  ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the
+  ## signed wrap. A checks-on callee no longer reads as unchecked; a checks-off
+  ## one now carries `ubSignedOverflow` into `witnessUndefined`.
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

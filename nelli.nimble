@@ -1729,6 +1729,7 @@ task test, "Run the test suite":
             "tsymex_0016_k7a_survivors",
             "tsymex_0016_k7b_unsupported",
             "tsymex_0016_k10at_target",
+            "tsymex_0016_w3z_r1_noinit_target",
             # RFC-0016 K7: a walk's total solver work is bounded (walkRLimit).
             "tsymex_0016_k7_splitlines_unbounded",
             "tsymex_0016_k10aa_axis",
@@ -1738,6 +1739,12 @@ task test, "Run the test suite":
             "tsymex_0016_k10c_ubsan",
             "tsymex_0016_k10c_fma",
             "tsymex_0016_k10b_round",
+            # RFC-0016 W3-z R2: a replay candidate's tail is walked.
+            "tsymex_0016_w3z_r2_candtail",
+            "tsymex_0016_w3z_p1_off",
+            "tsymex_0016_w3z_p1_default",
+            "tsymex_0016_w3z_r3_opaque",
+            "tsymex_0016_w3z_r3_default",
             "tsymex_0016_admir",
             "tsymex_0016_k10d_removals",
             "tsymex_0016_k10d_drain_checksoff",
@@ -1817,6 +1824,8 @@ task test, "Run the test suite":
             "tsymex_0016_s8cj_runctx",
             "tsymex_0016_s8cj_mkunique",
             "tsymex_0016_wa_undefined_e2e",
+            "tsymex_0016_w3z_r5_render",
+            "tsymex_0016_w3z_r5b_diag",
             # RFC-0016 K1a-cells: the universe ledger (derived cells, the pin-record join, allowlists, the committed TSV).
             "tsymex_0016_universe",
             # RFC-0016 K2a: the dispatch census (case n.kind, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.

@@ -764,6 +764,12 @@ type
     isDefect*:      bool
     raisedMsg*:     Option[string]
     raisedWitness*: RawWitness
+    witnessUnsafe*: bool
+      ## RFC-0016 W3-z R5 (U7). This raise's own `Soundness.witnessUnsafe`:
+      ## which diagnostic witness is safe to run in-process is per raise, never
+      ## the winner's. There is no `witnessUndefined`: a raise past undefined
+      ## behaviour is on a spurious path, so it is a candidate and never a
+      ## diagnostic (R5b, `tsymex_0016_w3z_r5b_diag`).
 
   RawUndefined* = object
     ## RFC-0016 K10a-target. One undefined behaviour the walk reached and
@@ -999,6 +1005,11 @@ template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint,
                           parent.undefined)
 
+proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind])
+  ## RFC-0016 W3-z R1 fwd decl (defined beside `admitSolvedHit`). Under
+  ## `tUndefined`, an undefined behaviour a degrade token newly puts on a path
+  ## (the `{.noinit.}` read) is the target's hit.
+
 template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                          d: Degrade): Path =
   ## R3 hardening / RFC-0005 S1: the explicit-INTRODUCE counterpart to
@@ -1012,8 +1023,11 @@ template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
     # `d` is bound once: a template argument is substituted where it is named,
     # and `takeLoweringPendingDegrade()` drains what it reads.
     let tok = d
-    forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint + tok.path,
-                           parent.undefined + tok.ub)
+    let child = forkPathTaintPrimitive(parent, pcExpr, envExpr,
+                                       parent.taint + tok.path,
+                                       parent.undefined + tok.ub)
+    noteUbAtFork(parent.taint, child, tok.ub - parent.undefined)
+    child
 
 template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                         caller: Path): Path =
@@ -1087,8 +1101,11 @@ proc taintInPlace(p: Path; d: Degrade) =
   ## field). Joins, never replaces. A halted path needs no carrier at all
   ## (its contribution is run-global by construction), so halt sites call
   ## `w.halted(…)` and do not come here.
+  let priorTaint = p.taint
+  let priorUb = p.undefined
   p.taint = p.taint + d.path
   p.undefined = p.undefined + d.ub     ## RFC-0016 W1-d3
+  noteUbAtFork(priorTaint, p, d.ub - priorUb)   ## RFC-0016 W3-z R1
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
 # `Path` is a private `ref object`, so the H1 RED test cannot name it. These two
@@ -17452,6 +17469,19 @@ type
                       ## on without either arm, so the run is not shown
                       ## defined. `verifyTailDefined` answers
                       ## `ubTailUnverified`.
+    tailOverApprox: bool
+                      ## RFC-0016 W3-z R2. Set under `tailGate` when the walk
+                      ## follows a replay CANDIDATE (`SatCandidate`): its path
+                      ## carries a fresh symbol (a global havoc, an opaque
+                      ## call's result) the pins do not fix, so the walk
+                      ## over-approximates the run instead of following it.
+                      ## A branch the pins and the `pc` leave open forks both
+                      ## arms (`walkIfFollowConcrete`,
+                      ## `walkWhileFollowConcrete`) rather than setting
+                      ## `tailUndecided`, and a `dcFreshSymbol` record does
+                      ## not by itself untrust the tail: a fresh symbol is a
+                      ## superset of what the real run computes, and every
+                      ## undefined side it opens is still decided at the op.
     concreteEq: seq[Z3Bool]
                       ## RFC-fuzzer-nextgen G1b. Only meaningful when
                       ## `mode == wmFollowConcrete`: one `drawVar == concreteLit`
@@ -19674,6 +19704,9 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx)
   ## RFC-0005 S8cu fwd decl (defined beside `routeRaise`).
 proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
                    w: var WalkCtx)
+proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
+                         stmt: IRStmt): seq[Path]
+  ## RFC-0016 W3-z R3 fwd decl (defined beside `haltUndefined`).
   ## RFC-0016 W1-d1a fwd decl (defined beside `crashRaise`).
 
 proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
@@ -22005,7 +22038,9 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
     # witness does not take (`setLen`'s shrink arm of a grow, say) has a `pc`
     # that contradicts the pins, so both asks read unsat and the replayed run
     # is not on it. Nothing it skips is part of the run.
-    if w.tailGate and
+    # A candidate's walk (`tailOverApprox`) forks both arms at the caller
+    # instead, so nothing is skipped.
+    if w.tailGate and not w.tailOverApprox and
        not concretelyInfeasible(w.z3, w.concreteEq,
                                 dp.pc & dp.defectSurvivorPc & facts, w.settings):
       w.tailUndecided = true
@@ -22081,6 +22116,14 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
            concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
           continue
         let outcome = followBranchOutcome(w, dp, condBool, newFacts, wckIf)
+        if outcome.isNone and w.tailOverApprox:
+          # RFC-0016 W3-z R2: a candidate's tail walk over-approximates the
+          # run (a fresh symbol the pins do not fix), so an open branch is
+          # walked both ways, as the explore walk does.
+          let armPath = forkPath(dp, dp.pc & accumNegated & @[condBool], dp.env)
+          survivors.add walk(stmt.branches[i].body, @[armPath], w)
+          states.add (i + 1, dp, accumNegated & @[not condBool])
+          continue
         if outcome.isNone:
           # Walker-boundary concretization for control flow: `cond` isn't
           # pinned by the symbolicated draws alone. Graceful degrade — stop
@@ -22158,6 +22201,16 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
       let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
       for dp in drainScalarRaiseForks(pb, w):
         let outcome = followBranchOutcome(w, dp, cond, @[], wckWhile)
+        if outcome.isNone and w.tailOverApprox:
+          # RFC-0016 W3-z R2: an open guard on a candidate's tail walk
+          # forks both ways, as the explore walk's unroll does.
+          let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
+          let afterBody = walk(stmt.wbody, @[truePath], w)
+          let cps = w.loopStack[frameIx].exits.continuePaths.takeAll()
+          for cp in cps: nextActive.add cp
+          for ap in afterBody: nextActive.add ap
+          survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
+          continue
         if outcome.isNone:
           # Walker-boundary concretization for control flow — same shape as
           # `walkIfFollowConcrete`'s degrade: stop following THIS guard
@@ -24403,6 +24456,11 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       # raise forks), so each name its effect summary lists
       # (`IRStmt.opaqueHavoc`) may hold anything of its type now.
       # RFC-0005 S8ax: and each heap cell it reaches; and it may raise.
+      # RFC-0016 W3-z R3 (finding U2): the main walk reads the scan of the
+      # callee's body, before the call's own havoc taints the paths (the
+      # listing takes clean paths only).
+      if not w.tailGate and stmt.opaqueUndefined != {}:
+        out1 = noteOpaqueUndefined(w, out1, stmt)
       for sp in out1: havocOpaqueWrites(w, sp, stmt)
       return opaqueRaiseForks(w, out1, stmt)
     # Don't resolve a body; allocate fresh retSym; mark path
@@ -27436,6 +27494,41 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
            "): " & why & " (beSolverUndef)")
   of sxUnsat, sxRaised: discard
 
+proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind]) =
+  ## RFC-0016 W3-z R1 (finding U3). A `{.noinit.}` read does not halt: it rides
+  ## the path as `ub` on a `feGlobalHavoc` degrade, so `haltUndefined`, the only
+  ## other hit test, never saw it and `tUndefined` returned a trusted `sxUnsat`
+  ## over a reachable indeterminate read. Every fork that newly puts a kind of
+  ## the requested set on a path comes here (`forkPathTainted`, `taintInPlace`;
+  ## a kind already on the parent was tested where it arrived): the hit is
+  ## solved on the child's constraints. The finding's taint is the PARENT's:
+  ## the degrade that carries the kind is the finding itself, not a reason to
+  ## doubt it, so it does not turn the hit into a replay-only candidate.
+  ## Unlike `haltUndefined` the path continues: the read is not a halt.
+  if newUb == {} or currentWalkCtxPtr == nil: return
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  if wp[].target.kind != stkUndefined or wp[].shouldStop or wp[].tailGate:
+    return
+  if newUb * wp[].target.ubKinds == {}: return
+  if wp[].mode == wmFollowConcrete and
+     concretelyInfeasible(wp[].z3, wp[].concreteEq,
+                          child.pc & child.defectSurvivorPc, wp[].settings):
+    return
+  let solveOn = if closureBodyCallerPc.len == 0: child
+                else: forkPath(child, closureBodyCallerPc & child.pc, child.env)
+  let (st, wit, candErrs, why) = solveTargetHit(wp[], solveOn)
+  case st
+  of sxSat:
+    wp[].admitSolvedHit(RawResult(status: sxSat, witness: wit,
+      soundness: Soundness(pathTaint: parentTaint,
+                           witnessUndefined: ubOrdinals(child.undefined)),
+      nilDerefOnPath: child.nilDeref, errors: candErrs))
+  of sxUnknown:
+    wp[].halted(beSolverUndef,
+      "solver returned unknown on a path reading an indeterminate value: " &
+      why & " (beSolverUndef)")
+  of sxUnsat, sxRaised: discard
+
 proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
                    w: var WalkCtx) =
   ## RFC-0016 W1-d1a (section 9.1 item 2). The undefined side of an op, when
@@ -27494,6 +27587,57 @@ proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
     "here, what follows is not modelled" & next &
     # RFC-0016 K10c: what the verdict assumes of the C flags nelli cannot see.
     "; " & bprof.assumedAbsentNote())
+
+proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
+                         stmt: IRStmt): seq[Path] =
+  ## RFC-0016 W3-z R3 (finding U2). The main walk's reading of
+  ## `IRStmt.opaqueUndefined`, which only the K10b tail walk read before: an
+  ## opaque call whose body may be undefined was invisible to `tUndefined`
+  ## (a trusted `sxUnsat` over a reachable overflow inside the callee) and to
+  ## `SymexResult.undefined`. The body is not walked, so the behaviour is
+  ## POSSIBLE, not shown: under `tUndefined` a requested kind is the target's
+  ## hit, solved on the path at the call (its `witnessUndefined` carries the
+  ## kind, so the sat is never trusted); under any other target the kind is
+  ## listed, as `haltUndefined` lists a reached op (clean paths, bounded, one
+  ## per kind and callee). The path CONTINUES (the call is not a halt, a target
+  ## after it stays reachable) but carries the kinds in `Path.undefined`, as
+  ## the tail gate's halt does for the run: a sat through it is never trusted.
+  let tgt = w.target
+  let site = "opaque call `" & stmt.callee & "` (its body may be undefined)"
+  for p in paths:
+    if w.mode == wmFollowConcrete and
+       concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                            w.settings):
+      result.add p
+      continue
+    for k in stmt.opaqueUndefined:
+      let isHit = tgt.kind == stkUndefined and k in tgt.ubKinds
+      var listIt = tgt.kind != stkUndefined and scSpurious notin p.taint and
+                   w.undefinedFound.len < maxUndefinedFindings
+      for u in w.undefinedFound:
+        if u.kind == k and u.site == site: listIt = false
+      if (isHit and not w.shouldStop) or listIt:
+        let solveOn = if closureBodyCallerPc.len == 0: p
+                      else: forkPath(p, closureBodyCallerPc & p.pc, p.env)
+        let (st, wit, candErrs, why) = solveTargetHit(w, solveOn)
+        case st
+        of sxSat:
+          if isHit:
+            w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
+              soundness: Soundness(pathTaint: p.taint,
+                                   witnessUndefined: ubOrdinals(p.undefined + {k})),
+              nilDerefOnPath: p.nilDeref, errors: candErrs))
+          else:
+            w.undefinedFound.add RawUndefined(kind: k, site: site, witness: wit)
+        of sxUnknown:
+          if isHit:
+            w.halted(beSolverUndef,
+              "solver returned unknown on a path reaching " & $k & " in " &
+              site & ": " & why & " (beSolverUndef)")
+        of sxUnsat, sxRaised: discard
+    let np = forkPath(p, p.pc, p.env)
+    np.undefined = p.undefined + stmt.opaqueUndefined
+    result.add np
 
 
 # ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------
@@ -30388,7 +30532,8 @@ template drainSinkUnion(dst: var seq[SymexErrorInfo]; w: WalkCtx;
 
 proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
                        ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
-                       pins: seq[Z3Bool]): set[UbKind] =
+                       pins: seq[Z3Bool];
+                       overApprox = false): set[UbKind] =
   ## RFC-0016 K10b (section 9.1 item 3). The whole-run gate's second walk:
   ## from the entry, in concrete-follow mode under the winner's model `pins`
   ## (`RawWitness.pins`), past the label to a routine exit. The target is a
@@ -30404,6 +30549,12 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   ##     reached. Fail closed: a tail the walk could not model is not defined.
   ## Empty: every undefined side was `concretelyInfeasible` under the pins and
   ## nothing declined, so the witness's whole run is defined.
+  ##
+  ## RFC-0016 W3-z R2: `overApprox` is a replay candidate's walk
+  ## (`WalkCtx.tailOverApprox`). Its path carries a fresh symbol, so the walk
+  ## forks the branches the pins leave open, and a `dcFreshSymbol` record (the
+  ## fresh symbol itself) is not a reason the tail is unverified; every other
+  ## record still is.
   let lowerBase = loweringDegradeErrors.len
   if walkWorkExhausted:
     return {UbKind(ubTailUnverified)}   # no budget left to look with
@@ -30428,6 +30579,7 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_k10b_tail_unreached__"),
     params: prog.params, mode: wmFollowConcrete, tailGate: true,
+    tailOverApprox: overApprox,
     found: @[], settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
     callCache: initTable[string, seq[CallCacheEntry]](),
@@ -30463,7 +30615,7 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   for e in errs:
     if ord(e.kind) >= ord(low(UbKind)) and ord(e.kind) <= ord(high(UbKind)):
       result.incl UbKind(e.kind)
-    elif taintsRun(e):
+    elif taintsRun(e) and not (overApprox and classOf(e.kind) == dcFreshSymbol):
       result.incl UbKind(ubTailUnverified)
   # The second walk is a check, not part of the verdict: what it recorded in
   # the lowering sink was read above, and must not reach the explore walk's
@@ -31032,7 +31184,8 @@ proc runSymexImpl(prog: SymexProgram,
         diags.add RawDiagnostic(raisedTypeId: f.raisedTypeId,
                                 isDefect:     f.isDefect,
                                 raisedMsg:    f.raisedMsg,
-                                raisedWitness: f.raisedWitness)
+                                raisedWitness: f.raisedWitness,
+                                witnessUnsafe: f.soundness.witnessUnsafe)
     r.diagnostics = diags
     r.undefined = w.undefinedFound   # RFC-0016 K10a-target
     # CR-9 Stage 5: read from WalkCtx.extractionErrors (LIVE store during walk)
@@ -31085,6 +31238,22 @@ proc runSymexImpl(prog: SymexProgram,
         # fires only when no site recorded anything, so there is no site to
         # name. Bucket 4 by construction; the S8 pin enumerates it by name.
         scope: DeclineScope(kind: dskUnplaced))
+    # RFC-0016 W3-z R2 (section 9: replay is no evidence for undefined
+    # behaviour). A label candidate the replay may confirm is held to the
+    # whole-run gate the winner is: its tail is walked here, while its model
+    # pins are live (`dropWitnessPins` clears them at the boundary), and the
+    # kinds it is not shown defined in join its `witnessUndefined`, which
+    # `settleCandidate` carries onto the confirmed verdict. Its path carries
+    # a fresh symbol the pins do not fix, so the walk over-approximates
+    # (`overApprox`). Replay off: no candidate is ever confirmed.
+    if settings.wholeRunDefinedness and settings.replay and
+       target.kind == stkLabel:
+      for c in w.candidates.mitems:
+        if c.status == sxSat and c.soundness.witnessUndefined == {}:
+          let tail = verifyTailDefined(prog, settings, ctx, env, initialPC,
+                                       c.witness.pins, overApprox = true)
+          if tail != {}:
+            c.soundness.witnessUndefined = ubOrdinals(tail)
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
               callStats: statsSeq, errors: unknownErrs,
               undefined: w.undefinedFound,   # RFC-0016 K10a-target

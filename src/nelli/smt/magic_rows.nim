@@ -85,6 +85,11 @@ func mBody(key, note: string; also: set[MagicSite] = {}): MagicRow =
 func mDeclined(key, note: string): MagicRow =
   (key, refused[MagicSite, MagicModel](some(feUnsupportedOp), note))
 
+func mDeclinedAs(key: string; kind: SymexErrorKind; note: string): MagicRow =
+  ## A declined row whose decline is not the generic `feUnsupportedOp`: the
+  ## kind the walker reports on the path that reaches the cell.
+  (key, refused[MagicSite, MagicModel](some(kind), note))
+
 func mUnverified(key, note: string): MagicRow =
   (key, refused[MagicSite, MagicModel](some(feUnsupportedOp),
                                        "unverified: " & note))
@@ -308,8 +313,8 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
     "$ (system/dollars.nim:62): parseToStr P:7444 (enum hole declines)"),
   mDeclined("CStrToStr",
     "$,cstrToStrBuiltin (system/dollars.nim:58): parseToStr fall-through: \"$ of a <kind> operand is not modelled\""),
-  mPartial("Repr",
-    "repr (system.nim:1266): bool/enum/int via parseToStr; any other repr declines P:11850"),
+  mDeclined("Repr",
+    "repr (system.nim:1266): the generic `Repr` magic is never lowered; `repr` of a bool and of an enum are the BoolToStr and EnumToStr magics (parseToStr), while `repr` of an int, a string and any other operand declines at P:12687 (W3-z E2: the row was admitted as partial with int in the shape; repr(int) declines)"),
   mModelled("New",
     "new,unsafeNew (system.nim:567): parseNew/parseUnsafeNew P:17756; new(p, finalizer) is NewFinalize", also = {msVarStmt}),
   mDeclined("NewFinalize",
@@ -338,8 +343,8 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
     "addr,unsafeAddr (system.nim:99): addr/unsafeAddr arms P:7706,8008,8404 (cluster R, S8ch); global in a walked callee declines (heUnsafeCast)"),
   mDeclined("DeepCopy",
     "deepCopy (system.nim:2768): stubBody magic decline P:21225 (S8bo); GC_ref also via the type bridge nnkRecWhen"),
-  mDeclined("GCref",
-    "GC_ref (system/gc_interface.nim:42): stubBody magic decline P:21225 (S8bo); GC_ref also via the type bridge nnkRecWhen"),
+  mDeclinedAs("GCref", feUnsupportedExprKind,
+    "GC_ref (system/gc_interface.nim:42): the `GCref` magic exists only under --mm:refc, which is refused by name at the import (D-0016-7); under the verified orc and arc builds GC_ref is arc.nim's body (`nimIncRef` through `cast[pointer]`), which the walk declines at the nnkCast (feUnsupportedExprKind, W3-z E2)"),
   mDeclined("GCunref",
     "GC_unref (system/gc_interface.nim:50): stubBody magic decline P:21225 (S8bo); GC_ref also via the type bridge nnkRecWhen"),
   mFolded("SizeOf",

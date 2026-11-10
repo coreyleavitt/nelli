@@ -1699,8 +1699,12 @@ proc noaliasWithPeers(impl: NimNode): seq[string] =
 proc ownerChecked(owner: NimNode; co: CheckOption): bool =
   ## RFC-0016 PRC-07. `checkedHere` for a scan of the routine definition
   ## `owner`: the build's option, or the routine's own `push` turning it on.
-  co in buildSemantics.checks or
-    (owner != nil and co in pushedOn(routineChecks(owner)))
+  if co in buildSemantics.checks:
+    # `RoutineChecks.checks` holds the options that DEVIATE from the walker's
+    # model (on): a routine that pushed `co` off carries it there.
+    owner == nil or co notin routineChecks(owner).checks
+  else:
+    owner != nil and co in pushedOn(routineChecks(owner))
 
 proc uncheckedTypedIndex(checkedRange: bool; idx: NimNode): bool =
   ## RFC-0016 PRC-07. An array index that Nim leaves unchecked in C: in a
@@ -4645,12 +4649,15 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # profile (`mod/lowByMinusOneWide`, `div/zeroDivisorUnsigned`). The
         # Defect answer `acc` is unchanged: a fork the explore walk cannot
         # take carries `feOpaqueEffectHavoc` and its replay refutes a hit.
-        let overflowOn = owner == nil or
-                         coOverflow in ownerChecksOn(owner, memo)
+        # RFC-0016 W3-z P1: `overflowOn` is the routine's own reading
+        # (`RoutineChecks.overflowOn`: on at its position on every reading,
+        # the build's or a push's), not membership in the deviation set. The
+        # unchecked `+ - *` is a defined wrap under `-fwrapv`.
+        let overflowOn = owner == nil or routineChecks(owner).overflowOn
         let defOverflow = admitMagic(magic, msDefOverflow)
         if defOverflow.admitted:
           scan.noteMagicDefect defOverflow, "OverflowDefect"
-          if not overflowOn:
+          if not overflowOn and not buildSemantics.fwrapv:
             addUb admitDefined(aoAdd, ocSignedWide, dsArith), dpUnchecked
         let defDivZero = admitMagic(magic, msDefDivZero)
         if defDivZero.admitted:

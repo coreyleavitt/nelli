@@ -516,7 +516,8 @@ proc findingDiagnostics[T](ds: seq[DefectFinding[T]]): seq[FindingDiagnostic] =
   for d in ds:
     result.add FindingDiagnostic(raisedTypeId: d.raisedTypeId,
                                  isDefect: d.isDefect, raisedMsg: d.raisedMsg.get(""),
-                                 witnessChoices: renderAsChoices(d.witness))
+                                 witnessChoices: renderAsChoices(d.witness),
+                                 witnessUnsafe: d.witnessUnsafe)
 
 proc findingUndefined[T](us: seq[UndefinedFinding[T]]): seq[FindingUndefined] =
   ## RFC-0016 K10a-target. `SymexResult.undefined` projected onto the Z3-free
@@ -618,6 +619,7 @@ proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
       dm["tid"] = d.raisedTypeId
       dm["def"] = (if d.isDefect: "1" else: "0")
       dm["msg"] = d.raisedMsg
+      dm["wx"] = (if d.witnessUnsafe: "1" else: "0")
       db.save(notesKey(baseKey, i), d.witnessChoices, dm,
               verdictCacheMaxEntries)
     # The count last: a reader never trusts a count whose entries were not
@@ -668,7 +670,8 @@ proc loadSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
         raisedTypeId: e[0].meta["tid"],
         isDefect: e[0].meta.getOrDefault("def", "") == "1",
         raisedMsg: e[0].meta.getOrDefault("msg", ""),
-        witnessChoices: e[0].choices)
+        witnessChoices: e[0].choices,
+        witnessUnsafe: e[0].meta.getOrDefault("wx", "") == "1")
   except CatchableError as e:
     errors.add "loadSymexNotesImpl: " & $e.name & ": " & e.msg
     result = (hints: @[], diagnostics: @[], undefined: @[])
@@ -3600,6 +3603,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
                                   runDependence: raw.soundness.runDependence +
                                                  replayed.runDependence)
   result.bounds       = raw.bounds
+  result.undefined    = raw.undefined   # RFC-0016 W3-z R3: the run's own findings
   result.candidates   = raw.candidates
   result.annotationViolations = raw.annotationViolations   # RFC-0005 S8
 
@@ -4019,7 +4023,8 @@ macro symexFind*(fn: typed,
             isDefect:     diagEntry.isDefect,
             raisedMsg:    diagEntry.raisedMsg,
             witness:      `diagWitnessTup`,
-            heapSnapshot: readHeapSnapshot(`diagWitId`))
+            heapSnapshot: readHeapSnapshot(`diagWitId`),
+            witnessUnsafe:    diagEntry.witnessUnsafe)
         diagSeq
       let undefResult = block:
         var undefSeq: seq[UndefinedFinding[`tupleTy`]]
@@ -4164,7 +4169,9 @@ proc allRaiseFindings*[T](r: SymexResult[T]): seq[DefectFinding[T]] =
       isDefect:     r.raisedTypeId.endsWith("Defect"),
       raisedMsg:    none(string),
       witness:      r.raisedWitness,
-      heapSnapshot: r.heapSnapshot)
+      heapSnapshot: r.heapSnapshot,
+      witnessUndefined: r.soundness.witnessUndefined,   # W3-z R5 (U7)
+      witnessUnsafe:    r.soundness.witnessUnsafe)
     @[winning] & r.diagnostics
   else:
     r.diagnostics
@@ -5027,7 +5034,8 @@ macro symexFindAllWitnesses*(fn: typed,
                   raisedTypeId:   diagEntry.raisedTypeId,
                   isDefect:       diagEntry.isDefect,
                   raisedMsg:      diagEntry.raisedMsg.get(""),
-                  witnessChoices: renderAsChoices(`typedDiagWitId`))
+                  witnessChoices: renderAsChoices(`typedDiagWitId`),
+                  witnessUnsafe:    diagEntry.witnessUnsafe)
               # RFC-0016 K10a-target: the undefined behaviours reached, with
               # the witness that reaches each, rendered the same way.
               for undefEntry in raw.undefined:

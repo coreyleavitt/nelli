@@ -203,6 +203,12 @@ func hostRunnable*(s: Soundness): bool =
   s.replay != rsUnsettled and not s.witnessUnsafe and
     s.witnessUndefined == {}   # RFC-0016 W1-d3: undefined behaviour is never run in the host
 
+func hostRunnable*(witnessUndefined: set[UbOrdinal], witnessUnsafe: bool): bool =
+  ## RFC-0016 W3-z R5 (U7). `hostRunnable` for a claim that carries the two
+  ## flags without a `Soundness` (a diagnostic raise: never replayed, so
+  ## never `rsUnsettled`-refused, but never runnable past either flag).
+  not witnessUnsafe and witnessUndefined == {}
+
 func cacheable*(s: Soundness): bool =
   ## Review R2 (DD7). Whether a claim (`sxSat` / `sxRaised`) settled under
   ## `s` may be stored for good. Not a lossy winner the replay left

@@ -1,0 +1,10 @@
+# RFC-0016 W3-z: the entries each cell scope's allowlist held in the commit that introduced it (scope, count, sha; `git show <sha>:tests/0016-allowlist/<scope>.txt`). Derived from git log; never edited to pass: a scope must end shorter than this, or be named in over-intro.txt.
+build	7	29d96543
+capkind	9	29d96543
+defined	14	d9ac3d21
+errorkind	78	29d96543
+magic	19	29d96543
+pragma	171	d0fe2a94
+stdlib	2	fe020772
+typeclass	67	58495207
+typeop	13	58495207

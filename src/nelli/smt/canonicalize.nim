@@ -364,7 +364,7 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "314"
+const symexWalkerVersion* = "315"
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
   ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a
   ## stdlib proc taken as a value (`parseProcAsValue`); absent declines

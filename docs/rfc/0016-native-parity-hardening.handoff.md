@@ -128,6 +128,17 @@
     New gap, not fixed: `touchesFloat` (check_options.nim) is syntactic, so a
     routine whose only float arithmetic is inside an inline iterator or
     template it expands reads its float checks as off.
+  - W3-z P4 (`rfc-0016-w3z-parser4`, walker 314 to 315, finding A3 + A6
+    probe): the pragma axis gained a field place (`field/<name>`,
+    `ppField`). `typePragmaHit` reads each field's own pragma list from the
+    type's `getImpl` (plain records, nested records, variant arms, parent
+    types; `getTypeImpl` drops them). `bitsize`, `align`, `size`, `volatile`,
+    `codegenDecl`, `importc`, `exportc`, `extern`, `header`, `nodecl`,
+    `dynlib`, `guard`, `atomic` decline `feUnsupportedOp`; `deprecated`,
+    `requiresInit`, `used`, `cursor` are inert. A6 is refuted: `getImpl`
+    expands a `{.pragma: lay, union.}` alias at both the type and the field
+    place, and a user pragma with no body vanishes from the list, so no
+    absent name reaches the type place. Test: `tsymex_0016_p4_fieldpragma`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

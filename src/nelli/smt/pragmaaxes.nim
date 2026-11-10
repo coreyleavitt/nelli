@@ -16,6 +16,10 @@
 ##   a layout the object model does not have, `byref` / `bycopy` fix how a
 ##   value is passed (and so whether a callee's write shows in the caller):
 ##   `union`, `packed`, `byref` and `bycopy` decline until modelled.
+## * `field/<name>`: a pragma on one field of an object (W3-z P4), read where
+##   the type is walked (`typePragmaHit`). `bitsize` and `align` change what a
+##   store keeps, so they decline; a name with no row declines too (a field
+##   pragma is not read by macros the way a type's is).
 ##
 ## `noalias` (C `restrict`) is declined too: it asserts the formals do not
 ## overlap, which is a precondition on the caller (undefined behaviour when
@@ -35,11 +39,12 @@ import ./errorkind
 
 type
   PragmaPlace* = enum
-    ppLocal, ppRoutine, ppParam, ppType
+    ppLocal, ppRoutine, ppParam, ppType, ppField
   PragmaSite* = enum
     psLocalDecl       ## `var` / `let` section of a routine body
     psRoutineDecl     ## a callee's pragma list and its formals' (registration)
     psTypeDecl        ## a type reaching a local, a formal or a result
+    psFieldDecl       ## a field of an object reached through its type
   PragmaModel* = enum
     pmInert           ## no effect on any value the walk computes
     pmRead            ## the walker reads it at a site of its own
@@ -51,12 +56,14 @@ func placeKey*(p: PragmaPlace): string =
   of ppRoutine: "routine"
   of ppParam: "param"
   of ppType: "type"
+  of ppField: "field"
 
 func siteOf(p: PragmaPlace): PragmaSite =
   case p
   of ppLocal: psLocalDecl
   of ppRoutine, ppParam: psRoutineDecl
   of ppType: psTypeDecl
+  of ppField: psFieldDecl
 
 func inert(p: PragmaPlace; names: openArray[string]; why: string):
     seq[PragmaKey] =
@@ -157,6 +164,19 @@ func pragmaRows(): seq[PragmaKey] =
     feUnsupportedOp,
     "changes the layout or the passing of the type, which the object model " &
     "(independent fields, passed by copy) does not represent")
+
+  # --- the field list (W3-z P4) ---------------------------------------------------
+  result.add inert(ppField, ["deprecated", "requiresInit", "used"],
+    "a diagnostic or an initialisation rule: no effect on the field's value")
+  result.add inert(ppField, ["cursor"],
+    "a non-owning field: the value read is the same while its owner lives")
+  result.add declined(ppField,
+    ["bitsize", "align", "size", "volatile", "codegenDecl", "importc",
+     "exportc", "extern", "header", "nodecl", "dynlib", "guard", "atomic"],
+    feUnsupportedOp,
+    "fixes the width, alignment or storage of the field (`bitsize: 3` wraps " &
+    "a store to 3 bits), which the object model (one full-width slot per " &
+    "field) does not represent")
 
 func buildTable(): AxisTable[PragmaSite, PragmaModel] =
   var rows: seq[PragmaKey]

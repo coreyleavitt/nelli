@@ -17704,6 +17704,32 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
         if not a.admitted and a.decline[0] == some(feUnsupportedOp):
           return TypePragmaHit(found: true, pragma: pragmaName(p),
                                typeName: head.strVal, adm: a)
+  # The pragmas on its own fields (W3-z P4): `getImpl` keeps a field's
+  # `nnkPragmaExpr`; `getTypeImpl` below does not.
+  proc fieldPragmaHit(n: NimNode; owner: string): TypePragmaHit =
+    case n.kind
+    of nnkIdentDefs:
+      for j in 0 ..< n.len - 2:
+        if n[j].kind == nnkPragmaExpr and n[j].len > 1:
+          for p in n[j][1]:
+            let a = admitPragma(ppField, pragmaName(p), psFieldDecl)
+            if not a.admitted:
+              return TypePragmaHit(found: true, pragma: pragmaName(p),
+                                   typeName: owner, adm: a)
+    of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse, nnkObjectTy, nnkRefTy,
+       nnkPtrTy:
+      for c in n:
+        let r = fieldPragmaHit(c, owner)
+        if r.found: return r
+    else: discard
+  if head.kind == nnkSym and ty.typeKind in {ntyObject, ntyGenericInst,
+                                              ntyRef, ntyPtr}:
+    let d =
+      try: head.getImpl
+      except CatchableError: newEmptyNode()
+    if d.kind == nnkTypeDef and d.len > 2:
+      let r = fieldPragmaHit(d[2], head.strVal)
+      if r.found: return r
   # Its components.
   proc inField(f: NimNode; seen: var seq[string]; depth: int): TypePragmaHit =
     case f.kind

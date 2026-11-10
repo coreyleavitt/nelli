@@ -168,3 +168,16 @@ pragma:type/size	K8b	no pin record: the row exists (K3c); K3c pins the local, ty
 pragma:type/stdcall	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:type/syscall	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:type/tags	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
+pragma:field/used	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/cursor	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/size	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/volatile	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/codegenDecl	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/importc	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/exportc	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/extern	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/header	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/nodecl	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/dynlib	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/guard	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest
+pragma:field/atomic	K8b	no pin record: the row exists (W3-z P4); P4 pins field/bitsize, field/align, field/deprecated and field/requiresInit through symexFind; K8b's pragma family exercises the rest

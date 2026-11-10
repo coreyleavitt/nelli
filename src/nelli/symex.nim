@@ -3886,11 +3886,10 @@ proc heldTouchesNode(w: var HeldWalk; n: NimNode): bool =
   ## `n` may store into the variable, call through it, or run code the walk
   ## cannot follow (an indirect call, a dispatch, foreign code handed a
   ## routine).
-  case n.kind
-  of heldDefs: return false          # a definition runs nothing
-  of nnkAsgn, nnkFastAsgn, nnkSinkAsgn:
+  if n.kind in heldDefs: return false          # a definition runs nothing
+  elif n.kind in {nnkAsgn, nnkFastAsgn, nnkSinkAsgn}:
     if n.len == 2 and w.heldIsG(n[0]): return true
-  of nnkCallKinds:
+  elif n.kind in nnkCallKinds:
     if n.len > 0:
       let h = stripConv(n[0])
       if w.heldIsG(h): return true
@@ -3904,7 +3903,6 @@ proc heldTouchesNode(w: var HeldWalk; n: NimNode): bool =
       elif h.kind != nnkSym or symKind(h) notin {nskTemplate, nskMacro}:
         # An indirect call runs a routine some value holds.
         if h.typeKind == ntyProc and w.valueTouch: return true
-  else: discard
   for c in n:
     if w.heldTouchesNode(c): return true
   false
@@ -3960,9 +3958,8 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
   ## every call through the variable. A point where code the walk does not
   ## follow may run joins `top` in; a shape it does not order fails the walk.
   if n.isNil or w.failed: return
-  case n.kind
-  of heldDefs: discard
-  of nnkAsgn, nnkFastAsgn, nnkSinkAsgn:
+  if n.kind in heldDefs: discard
+  elif n.kind in {nnkAsgn, nnkFastAsgn, nnkSinkAsgn}:
     if n.len == 2 and w.heldIsG(n[0]):
       heldWalk(w, n[1], s)
       let r = storedRoutine(n[1])
@@ -3970,7 +3967,7 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
       elif not s.dead: s = HeldSet(routines: @[r])
     else:
       for c in n: heldWalk(w, c, s)
-  of nnkCallKinds:
+  elif n.kind in nnkCallKinds:
     let h = if n.len > 0: stripConv(n[0]) else: newEmptyNode()
     if w.heldIsG(h):
       let before = s
@@ -3996,7 +3993,7 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
       for c in n: heldWalk(w, c, s)
       if h.kind != nnkSym or symKind(h) notin {nskTemplate, nskMacro}:
         if h.typeKind == ntyProc and w.valueTouch: s = joinHeld(s, w.top)
-  of nnkIfStmt, nnkIfExpr:
+  elif n.kind in {nnkIfStmt, nnkIfExpr}:
     var cur = s
     var outs = deadHeld()
     var hadElse = false
@@ -4014,7 +4011,7 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
       else:
         w.failed = true
     s = if hadElse: outs else: joinHeld(outs, cur)
-  of nnkCaseStmt:
+  elif n.kind in {nnkCaseStmt}:
     if n.len == 0:
       w.failed = true
       return
@@ -4025,9 +4022,9 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
       if n[i].len > 0: heldWalk(w, n[i][^1], b)
       outs = joinHeld(outs, b)
     s = outs
-  of nnkWhileStmt:
+  elif n.kind in {nnkWhileStmt}:
     heldLoop(w, n[0], n[1], false, s)
-  of nnkForStmt:
+  elif n.kind in {nnkForStmt}:
     let it = n[^2]
     var havoc = false
     if it.kind in nnkCallKinds and it.len > 0:
@@ -4037,13 +4034,13 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
     else:
       heldWalk(w, it, s)
     heldLoop(w, nil, n[^1], havoc, s)
-  of nnkBlockStmt, nnkBlockExpr:
+  elif n.kind in {nnkBlockStmt, nnkBlockExpr}:
     w.targets.add HeldTarget(label: n[0], loop: false,
                              brk: deadHeld(), cont: deadHeld())
     heldWalk(w, n[1], s)
     let t = w.targets.pop()
     s = joinHeld(s, t.brk)
-  of nnkBreakStmt:
+  elif n.kind in {nnkBreakStmt}:
     var at = -1
     for i in countdown(w.targets.high, 0):
       if n.len == 0 or n[0].kind == nnkEmpty or
@@ -4056,7 +4053,7 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
       return
     w.targets[at].brk = joinHeld(w.targets[at].brk, s)
     s = deadHeld()
-  of nnkContinueStmt:
+  elif n.kind in {nnkContinueStmt}:
     var at = -1
     for i in countdown(w.targets.high, 0):
       if w.targets[i].loop:
@@ -4067,15 +4064,15 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
       return
     w.targets[at].cont = joinHeld(w.targets[at].cont, s)
     s = deadHeld()
-  of nnkReturnStmt:
+  elif n.kind in {nnkReturnStmt}:
     for c in n: heldWalk(w, c, s)
     if w.returns.len > 0:
       w.returns[^1] = joinHeld(w.returns[^1], s)
     s = deadHeld()
-  of nnkRaiseStmt:
+  elif n.kind in {nnkRaiseStmt}:
     for c in n: heldWalk(w, c, s)
     s = deadHeld()
-  of nnkTryStmt:
+  elif n.kind in {nnkTryStmt}:
     # A handler or `finally` starts from any point of the body, or of a
     # routine it calls: from `top`. So does what follows.
     heldWalk(w, n[0], s)
@@ -4083,24 +4080,22 @@ proc heldWalk(w: var HeldWalk; n: NimNode; s: var HeldSet) =
       var h = w.top
       heldWalk(w, n[i], h)
     s = w.top
-  of nnkDefer:
+  elif n.kind in {nnkDefer}:
     var d = w.top
     for c in n: heldWalk(w, c, d)
     s = joinHeld(s, w.top)
-  of nnkYieldStmt:
+  elif n.kind in {nnkYieldStmt}:
     w.failed = true
   else:
     for c in n: heldWalk(w, c, s)
 
 proc heldCalls(n, g: NimNode): bool =
   ## `n` (a routine's body) calls through `g`, outside its nested routines.
-  case n.kind
-  of heldDefs: return false
-  of nnkCallKinds:
+  if n.kind in heldDefs: return false
+  elif n.kind in nnkCallKinds:
     if n.len > 0:
       let h = stripConv(n[0])
       if h.kind == nnkSym and h == g: return true
-  else: discard
   for c in n:
     if heldCalls(c, g): return true
   false
@@ -4108,14 +4103,13 @@ proc heldCalls(n, g: NimNode): bool =
 proc collectRoutineValues(n: NimNode; acc: var seq[string]) =
   ## Every routine `n` names other than as the head of a call: one a value
   ## may hold, run where the walk does not follow.
-  case n.kind
-  of nnkLambda, nnkDo:
+  if n.kind in {nnkLambda, nnkDo}:
     if n.len > 0 and n[0].kind == nnkSym: acc.add routineKey(n[0])
-  of routineShapedForClosureDetect:
+  elif n.kind in routineShapedForClosureDetect:
     discard
-  of nnkSym:
+  elif n.kind in {nnkSym}:
     if symKind(n) in procValueSymKinds: acc.add routineKey(n)
-  of nnkCallKinds:
+  elif n.kind in nnkCallKinds:
     if n.len > 0 and not isRoutineHead(stripConv(n[0])):
       collectRoutineValues(n[0], acc)
     for i in 1 ..< n.len: collectRoutineValues(n[i], acc)

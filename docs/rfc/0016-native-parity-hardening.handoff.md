@@ -83,7 +83,7 @@
   toolchain incident reruns; awaiting its agent's handoff.
   K1a-ci (`rfc-0016-k1aci`): post-shard universe joins on symex-linux, symex-mingw and symex-nightly; allowlist entries take an optional `rows=` scope (`heNilDerefMayBeCaught` is scoped to mingw, msvc, linux-cpp: setjmp is INT-12 on Windows and unbuildable on cpp); five stale `errorkind` entries deleted. Planted-RED nightly https://github.com/coreyleavitt/nelli/actions/runs/42532198619; green: linux https://github.com/coreyleavitt/nelli/actions/runs/42537270847, mingw https://github.com/coreyleavitt/nelli/actions/runs/42537270688, nightly (cpp, z3-4.13.4, msvc) https://github.com/coreyleavitt/nelli/actions/runs/42537276403.
 - **Session state (2026-11-10):** Wave 3, slice 21/22 done, 1 remaining
-  (W3-z); no forks open for Corey. main b2644983 (walker 311): PRC-07
+  (W3-z, held by the wiring-audit gaps below); no forks open for Corey. main b2644983 (walker 311): PRC-07
   (e6b3362e), then PRC-02, PRC-02b, PRC-02m parts 1-3 and the PRC-07/08
   remainder (float checks, float `/=`, `-d:danger`, `math.ceilDiv`,
   nilChecks n/a), symex-linux 42758660494 and symex-mingw 42758660691 green.
@@ -97,7 +97,21 @@
     cannot republish; dispatch returns "Actions has been disabled for this
     repository" while the permissions API reports enabled. Until then nelli
     CI exercises the table-less pins.
-  - Next: W3-z (0.10.0) after /wiring-audit and then /code-review.
+  - W3-z /wiring-audit (2026-11-10, worktree at e707b09c, 3 opus lenses)
+    found gaps, so W3-z is NOT taggable yet. Soundness first:
+    U1 replay-confirmed sat candidates skip `verifyTailDefined`
+    (`runtime.nim:30384`, `symex.nim:3551-3604`); U2 `opaqueUndefined` is
+    read only by the tail walk (`runtime.nim:19747`), so `tUndefined` can
+    return a trusted unsat; U3 `tUndefined` can never hit
+    `ubIndeterminateRead`. Evidence side: F1 the W3-z per-axis check does
+    not exist (construct/readonly axes have 0 cells); F2 K6 tests write no
+    pin records; F3 `joinIds` checks only open rows; F4 the join ignores
+    verdict versus cell state. Also: concolic float-to-int bypasses
+    `decideUndefined`, `fromFlip` ignores `undefinedReached`, freshness and
+    dead-leg checks never fire, the F-ledger is frozen at 7 rows, docs-only
+    pushes skip the evidence gates, and allowlists grew. The full list is
+    in the scratchpad `wa3-findings.md`; the admission/BuildProfile lens is
+    still out. Next: verify, slice and fix, then /code-review, then tag.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

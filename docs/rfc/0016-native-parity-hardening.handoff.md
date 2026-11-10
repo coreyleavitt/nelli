@@ -1083,6 +1083,19 @@
   is not published, so no CI leg has the define yet; `symexFind` over a method
   SUT stays `sxUnknown` through the route scan (`routeScan`, `feGlobalRoute
   Unproved`), which is compile-time and which the table cannot answer.
+  PRC-07/08 remainder (`rfc-0016-prc0708`, walker 311): float checks are
+  walked as compiled. `RoutineChecks.nanOn`/`infOn` (`check_options.nim`)
+  mark a routine whose position has the option on at every reading; the
+  parser stamps each float infix `+ - * /` with them (`IRExpr.bFloatChecks`,
+  a compound assignment with the build's, as system's generic `+=`), and
+  `lowerArith` deposits, in the generated C's order, `FloatInvalidOpDefect`
+  on NaN, then `FloatOverflowDefect` on `+inf` / `FloatUnderflowDefect` on
+  `-inf` (`depositFloatChecks`, drained as raises through `arithTrapConds`
+  so one expression's checks stay ordered). The opaque scan also notes
+  `FloatUnderflowDefect`. nilChecks closed as not applicable (no such option
+  in 2.2.10; regression pin). Pin `tsymex_0016_floatchecks`. Not done:
+  `-d:danger` per-UB-kind pins (PRC-08), `math.ceilDiv` (still a declined
+  row).
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

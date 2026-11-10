@@ -2228,6 +2228,12 @@ type ArithTrap* = object
   cond*: Z3Bool
   ub*: Option[UbKind]
   site*: string
+  raiseName*: string
+    ## RFC-0016 PRC-07 (float half). Non-empty: not a trap but Nim's float
+    ## check after a float `+ - * /` (`FloatInvalidOpDefect`,
+    ## `FloatOverflowDefect`), an ordinary catchable raise forked on `cond`.
+    ## It rides this sink so the checks of one expression stay in evaluation
+    ## order: each deposit's raise is forked after the earlier ones' negations.
 
 var arithTrapConds* {.threadvar.}: seq[ArithTrap]
   ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
@@ -9343,7 +9349,30 @@ proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop; site: string) =
     overflowConds.add oc
     syncOverflowCond(oc)
 
-proc lowerArith(a, b: SymVal, op: IRBinop, site = ""): SymVal =
+proc depositFloatChecks(r: SymVal; on: set[CheckOption]) =
+  ## RFC-0016 PRC-07 (float half). What the C code generator emits after a
+  ## float `+ - * /` in a routine compiled with `nanChecks` / `infChecks` on
+  ## (read from the generated C of the pinned toolchain): the NaN check first,
+  ## `if (r != r) raiseFloatInvalidOp()`, then `if (r != 0.0 && r*0.5 == r)
+  ## raiseFloatOverflow(r)`, which holds exactly for an infinite `r`.
+  ## `raiseFloatOverflow` (system/integerops.nim) raises `FloatOverflowDefect`
+  ## for `r > 0.0` and `FloatUnderflowDefect` otherwise: `-inf` underflows.
+  let nan = if r.kind == svFloat32: isNaN(r.fp32) else: isNaN(r.fp64)
+  let inf = if r.kind == svFloat32: isInf(r.fp32) else: isInf(r.fp64)
+  let neg = if r.kind == svFloat32: isNegative(r.fp32) else: isNegative(r.fp64)
+  for (co, cond, name, msg) in [
+      (coNan, nan, "FloatInvalidOpDefect", "FPU operation caused a NaN result"),
+      (coInf, inf and not neg, "FloatOverflowDefect",
+       "FPU operation caused an overflow"),
+      (coInf, inf and neg, "FloatUnderflowDefect",
+       "FPU operations caused an underflow")]:
+    if co in on:
+      let t = ArithTrap(cond: cond, site: msg, raiseName: name)
+      arithTrapConds.add t
+      syncArithTrapCond(t)
+
+proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
+                floatChecks: set[CheckOption] = {}): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
   ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
   ## Same op-pair order; same signed/unsigned selection (via binBV/divBV/modBV).
@@ -9546,7 +9575,10 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = ""): SymVal =
     else:
       r
   elif a.kind in {svFloat32, svFloat64}:
-    arithFloat(a, b, op)        # Phase 15 F3
+    let r = arithFloat(a, b, op)        # Phase 15 F3
+    if floatChecks != {} and op in {bAdd, bSub, bMul, bDiv}:
+      depositFloatChecks(r, floatChecks)
+    r
   else:
     case op
     of bAdd: binBV(a, b, `+`)
@@ -11368,7 +11400,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let r = ejectBase(lower(env, e.rhs, pp))
       when defined(symexTestInjectWalkerFault):
         injectShapeFault("term")   # RFC-0005 S8ce: both operands built
-      lowerArith(l, r, e.bop, e.bsite)
+      lowerArith(l, r, e.bop, e.bsite, e.bFloatChecks)
   of iekBorrowOp:
     # Phase 15 G5. A `{.borrow.}` operator on a `distinct T`: EJECT both operands
     # to their base SymVals (G4's `distinctBaseSym`, via `ejectBase`), apply the
@@ -20173,7 +20205,12 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
     return @[p]
   var cur = forkPath(p, p.pc, p.env)
   for t in conds:
-    if t.ub.isSome:
+    if t.raiseName.len > 0:
+      # RFC-0016 PRC-07 (float half): Nim's float check, a catchable raise.
+      let rp = forkPath(cur, cur.pc & @[t.cond], cur.env)
+      discard routeRaise(rp, t.raiseName, some(t.site), w)
+      cur.defectSurvivorPc.add(not t.cond)
+    elif t.ub.isSome:
       decideUndefined(cur, t.ub.get, t.cond, t.site, w)
       let nxt = forkPath(cur, cur.pc & @[not t.cond], cur.env)
       cur = nxt

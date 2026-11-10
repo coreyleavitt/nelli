@@ -26,7 +26,9 @@
 ##   pushed, or the module ends. `{.push checks: off.}` before an `import` reaches
 ##   a module first compiled there, and what that module imports.
 ## - `checks: on` and `floatChecks: on` turn the float checks ON, which are off by
-##   default, and the walker does not model them.
+##   default. Where they are on at every reading the walker models them
+##   (`RoutineChecks.nanOn`/`infOn`, RFC-0016 PRC-07); where a reading leaves
+##   them either way the routine declines.
 ## - `nilChecks` is no option: `{.nilChecks: off.}` does not compile and
 ##   `{.push nilChecks: off.}` changes nothing. It is not read.
 ##
@@ -743,6 +745,13 @@ type RoutineChecks* = object
     ## them back on in a build whose own field checks are off (not modelled:
     ## its variant access raises `FieldDefect`). `checks` never carries
     ## `coField` in such a build.
+  nanOn*, infOn*: bool
+    ## RFC-0016 PRC-07 (float half). The routine's position was read and
+    ## `nanChecks` (`infChecks`) is on there on every reading, from the build
+    ## or a push, with no importer's push reaching it: the walker models the
+    ## check (a `FloatInvalidOpDefect` / `FloatOverflowDefect` fork after a
+    ## float `+ - * /`), so `checks` no longer carries it. Where it may be on
+    ## and may be off, `checks` keeps it and the routine declines.
   overflowOn*: bool
     ## RFC-0016 W1-d2c. The routine's position was read and `overflowChecks`
     ## is on there on every reading (no `coOverflow` deviation): in a build
@@ -861,6 +870,7 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
     if runUnknown.len > 0:
       return RoutineChecks(checks: allChecks, assertsMaybeOff: true, why: runUnknown)
   let moduleName = root.extractFilename.changeFileExt("")
+  var leaked: set[CheckOption]
   for l in runLeaks:
     if l.root == root: continue
     let rk = l.root & "|" & l.name
@@ -871,8 +881,16 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
       else: true          # the named module was not found: any may be under it
     if reaches:
       result.checks = result.checks + l.opts
+      leaked = leaked + l.opts
   if result.checks * defaultOff != {} and not touchesFloat(impl[6]):
     result.checks = result.checks - defaultOff
+  # RFC-0016 PRC-07 (float half): a float check on at every reading is walked.
+  if coNan in result.checks and coNan notin st.maybeOff and coNan notin leaked:
+    result.nanOn = true
+    result.checks.excl coNan
+  if coInf in result.checks and coInf notin st.maybeOff and coInf notin leaked:
+    result.infOn = true
+    result.checks.excl coInf
   result.overflowOn = coOverflow notin result.checks
   let unreadable = positionUnreadable(impl, file, li.line, st)
   if unreadable.len > 0:

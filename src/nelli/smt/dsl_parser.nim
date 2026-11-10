@@ -422,8 +422,13 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekBinop:
     let bn = newCall(bindSym"mkBinop", emitBinop(e.bop), emitExpr(e.lhs),
                      emitExpr(e.rhs))
-    if e.bsite.len > 0: newCall(bindSym"withSite", bn, newLit(e.bsite))
-    else: bn
+    let sited = if e.bsite.len > 0: newCall(bindSym"withSite", bn, newLit(e.bsite))
+                else: bn
+    if e.bFloatChecks != {}:   # RFC-0016 PRC-07 (float half)
+      var fc = newTree(nnkCurly)
+      for co in e.bFloatChecks: fc.add newLit(co)
+      newCall(bindSym"withFloatChecks", sited, fc)
+    else: sited
   of iekUnop:
     let un = newCall(bindSym"mkUnop", emitUnop(e.uop), emitExpr(e.operand))
     if e.usite.len > 0: newCall(bindSym"withSite", un, newLit(e.usite))
@@ -1575,6 +1580,20 @@ func checkedHere(ctx: ParseCtx; co: CheckOption): bool =
   co in buildSemantics.checks or
     (ctx.checkScopes.len > 0 and co in ctx.checkScopes[^1])
 
+func floatCheckedHere(ctx: ParseCtx): set[CheckOption] =
+  ## RFC-0016 PRC-07 (float half). Of `coNan` and `coInf`, the checks the
+  ## routine being parsed is compiled with (`RoutineChecks.nanOn`/`infOn`,
+  ## the build's options included). Its own scope alone answers: a routine
+  ## pushed `nanChecks: off` in a `--nanChecks:on` build is unchecked.
+  if ctx.checkScopes.len > 0: ctx.checkScopes[^1] * {coNan, coInf}
+  else: {}
+
+func floatOn(c: RoutineChecks): set[CheckOption] =
+  ## The float checks a routine is compiled with, where its position was read.
+  if c.why.len > 0: return
+  if c.nanOn: result.incl coNan
+  if c.infOn: result.incl coInf
+
 func pushedOn(c: RoutineChecks): set[CheckOption] =
   ## The checks of the four a routine turns back on in a build with them off,
   ## where its position was read. Where it was not (`c.why`), none: the
@@ -1593,7 +1612,7 @@ proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
   ## Opens the routine's arithmetic scope for its parse, and its check scope.
   ctx.arithScopes.add arithScopeFor(c, ctx.currentArith, inherit)
   ctx.checkScopes.add(if inherit and ctx.checkScopes.len > 0: ctx.checkScopes[^1]
-                      else: pushedOn(c))
+                      else: pushedOn(c) + floatOn(c))
 
 proc popArithScope(ctx: ParseCtx) =
   discard ctx.arithScopes.pop()
@@ -1768,6 +1787,11 @@ proc siteBinop(op: IRBinop; l, r: IRExpr; n: NimNode): IRExpr =
   ## infix form does, so each names its own undefined finding.
   result = mkBinop(op, l, r)
   if op in {bAdd, bSub, bMul, bDiv, bMod}: result.bsite = srcSite(n)
+  # RFC-0016 PRC-07 (float half): a compound assignment (`x += y` on a float)
+  # runs system's `+=`, `-=`, `*=`, `/=`, which take the options of their
+  # definition: the build's (system pushes no float check).
+  if op in {bAdd, bSub, bMul, bDiv}:
+    result.bFloatChecks = buildSemantics.checks * {coNan, coInf}
 
 proc annotationViolation(ctx: ParseCtx; n: NimNode;
                          kind: AnnotationViolationKind; callee, msg: string) =
@@ -4492,7 +4516,13 @@ proc ownerChecksOn(def: NimNode; memo: var FloatCheckMemo): set[CheckOption] =
   ## body does arithmetic the options decide.
   for m in memo:
     if m.def == def: return m.on
-  result = routineChecks(def).checks
+  let c = routineChecks(def)
+  result = c.checks
+  # RFC-0016 PRC-07: a float check on at every reading is modelled for a
+  # walked routine, so `checks` no longer names it; the opaque scan still
+  # forks its raise.
+  if c.nanOn: result.incl coNan
+  if c.infOn: result.incl coInf
   memo.add (def: def, on: result)
 
 proc floatChecksOn(def: NimNode; memo: var FloatCheckMemo): set[CheckOption] =
@@ -4640,7 +4670,10 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         if defFloat.admitted and owner != nil:
           let on = floatChecksOn(owner, memo)
           if coNan in on: scan.noteMagicDefect defFloat, "FloatInvalidOpDefect"
-          if coInf in on: scan.noteMagicDefect defFloat, "FloatOverflowDefect"
+          if coInf in on:
+            scan.noteMagicDefect defFloat, "FloatOverflowDefect"
+            # RFC-0016 PRC-07: `raiseFloatOverflow` raises this for `-inf`.
+            scan.noteMagicDefect defFloat, "FloatUnderflowDefect"
         let defRange = admitMagic(magic, msDefRange)
         if defRange.admitted:
           if magicIs(magic, "Chr") or n.len > 1 and
@@ -11904,7 +11937,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # above in the `if op in {bAnd, bOr}` block and never fall through here;
       # constraint 1 is satisfied structurally by this branch's exclusivity).
       let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (general infix); RFC-0005 S8ax order
-      if op in {bAdd, bSub, bMul, bDiv, bMod}: withSite(mkBinop(op, l, r), srcSite(n))
+      if op in {bAdd, bSub, bMul, bDiv, bMod}:
+        withFloatChecks(withSite(mkBinop(op, l, r), srcSite(n)),
+                        (if op == bMod: {} else: ctx.floatCheckedHere()))
       else: mkBinop(op, l, r)
   of nnkPrefix:
     # RFC-0005 S8c: a user prefix operator (`-`/`not`/`$`/`@` on a user type)

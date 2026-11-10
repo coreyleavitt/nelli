@@ -898,6 +898,12 @@ type
       bsite*: string      ## K10a-float: `file:line:col` of a signed `+`, `-`
                           ## or `*` / `div` / `mod`, the name of its
                           ## undefined-behaviour finding ("" when unknown)
+      bFloatChecks*: set[CheckOption]
+        ## RFC-0016 PRC-07 (float half). Of `coNan` and `coInf`, the checks
+        ## the C code generator emits after this `+ - * /` when its operands
+        ## are floats: the options at the routine's position for an infix
+        ## operator, the build's for a compound assignment (system's generic
+        ## `+=` takes the options of its definition). Empty: unchecked.
     of iekUnop:
       uop*: IRUnop
       operand*: IRExpr
@@ -3182,6 +3188,11 @@ proc withSite*(e: IRExpr, site: string): IRExpr =
 
 proc mkUnop*(op: IRUnop, operand: IRExpr): IRExpr =
   IRExpr(kind: iekUnop, uop: op, operand: operand)
+
+proc withFloatChecks*(e: IRExpr, on: set[CheckOption]): IRExpr =
+  ## RFC-0016 PRC-07: stamp a binop with the float checks it is compiled with.
+  if e.kind == iekBinop: e.bFloatChecks = on
+  e
 
 proc mkBorrowOp*(op: IRBinop, lhs, rhs: IRExpr,
                  returnsDistinct: bool, distinctTy: IRType): IRExpr =

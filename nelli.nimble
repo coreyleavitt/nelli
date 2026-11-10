@@ -1742,6 +1742,7 @@ task test, "Run the test suite":
             "tsymex_0016_k10d_removals",
             "tsymex_0016_k10d_drain_checksoff",
             "tsymex_0016_rangeoff",
+            "tsymex_0016_floatchecks",
             "tsymex_0016_boundoff",
             "tsymex_0016_objoff",
             "tsymex_0016_fieldoff",

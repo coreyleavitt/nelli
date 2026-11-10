@@ -2,10 +2,22 @@
 ## the float checks.
 ##
 ## Each row runs the routine natively on this build beside the walker's verdict.
-import std/[unittest, sets]
+import std/[unittest, sets, options]
 import nelli
 import nelli/symex
 import ./s8cu_helpers
+import nelli/smt/admission
+
+template raisesFloat(fn: untyped; name: string) =
+  ## RFC-0016 PRC-07: a float check the routine is compiled with is walked,
+  ## its raise decided exactly. Decided only on a verified build row.
+  if hostAdmission().isSome:
+    skip()
+  else:
+    let r = pinExact(fn, declKey, target = tRaisedExn(),
+                     domain = sampled([1e308, 0.0, 1.0, Inf, NaN]))
+    check r.status == sxRaised
+    check r.raisedTypeId == name
 
 const declKey = cellKey(faGeneric, "s8cu_kinds")
 
@@ -220,16 +232,16 @@ suite "S8cu: the float checks":
     check native(floatDefault(1e308)) == "hit"
     decides(floatDefault, sxSat)
 
-  test "on, the walker has no such raise":
+  test "on, the walker forks the raise (RFC-0016 PRC-07, was a decline)":
     check native(floatOn(1e308)) == "FloatOverflowDefect"
-    pinDecline(floatOn, declKey, feCheckOption)
+    raisesFloat(floatOn, "FloatOverflowDefect")
     check native(infOn(1e308)) == "FloatOverflowDefect"
-    pinDecline(infOn, declKey, feCheckOption)
+    raisesFloat(infOn, "FloatOverflowDefect")
     check native(nanOn(Inf)) == "FloatInvalidOpDefect"
-    pinDecline(nanOn, declKey, feCheckOption)
+    raisesFloat(nanOn, "FloatInvalidOpDefect")
 
   test "`checks: on` turns them on, and matters only to float code":
     check native(checksOnFloat(1e308)) == "FloatOverflowDefect"
-    pinDecline(checksOnFloat, declKey, feCheckOption)
+    raisesFloat(checksOnFloat, "FloatOverflowDefect")
     check native(checksOnNoFloat(4)) == "FieldDefect"
     decides(checksOnNoFloat, sxRaised)

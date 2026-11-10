@@ -163,3 +163,6 @@ bare_skip:tests/tsymex_0016_prc02m_find.nim:skip()#6	K2a-fail	bare skip() record
 bare_skip:tests/tsymex_0016_prc01_reexec.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
 bare_skip:tests/tsymex_0016_prc01_reexec.nim:skip()#2	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
 bare_skip:tests/tsymex_0016_prc01_reexec.nim:skip()#3	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_0016_floatchecks.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_s8cu_kinds.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind
+bare_skip:tests/tsymex_rfc0005_s8cu_cl_float.nim:skip()	K2a-fail	bare skip() records no pin; K9c and K2a-fail convert it to skipCell with a kind

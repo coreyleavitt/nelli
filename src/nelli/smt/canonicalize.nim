@@ -344,8 +344,19 @@ const renderAsChoicesVersion* = "12"
   ##   lifetime hook outside them (or holds a closure); if so it adds the `!`
   ##   route. A generic-instance base, and a build without the table, keep the
   ##   open route ("may hold a subtype").
+  ## - RFC-0016 PRC-07 float half (310->311): a routine whose position has
+  ##   `nanChecks` or `infChecks` on at every reading (`RoutineChecks.nanOn`/
+  ##   `infOn`) no longer declines `feCheckOption`. Each float `+ - * /` it
+  ##   compiles is stamped with those checks (`IRExpr.bFloatChecks`, in the
+  ##   canonical form as `@fc`; a compound assignment takes the build's, as
+  ##   system's generic `+=` does) and forks, after the operation, a
+  ##   `FloatInvalidOpDefect` on a NaN result, then a `FloatOverflowDefect` on
+  ##   `+inf` (`FloatUnderflowDefect` on `-inf`, as `raiseFloatOverflow`
+  ##   does): the generated C's order, ordinary catchable raises
+  ##   (`depositFloatChecks`, drained in order through `arithTrapConds`).
+  ##   Unary minus and conversions stay unchecked, as in the C.
 
-const symexWalkerVersion* = "310"
+const symexWalkerVersion* = "311"
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each
@@ -6283,6 +6294,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekBinop:
     "Ex<Bn:" & binopTag(e.bop) & ";" &
       (if e.bsite.len > 0: e.bsite & ";" else: "") &
+      (if e.bFloatChecks != {}: "@fc" & $e.bFloatChecks & ";" else: "") &
       canonicalize(e.lhs, env) & ";" & canonicalize(e.rhs, env) & ">"
   of iekUnop:
     "Ex<Un:" & unopTag(e.uop) & ";" &

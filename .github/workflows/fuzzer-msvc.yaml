@@ -71,7 +71,7 @@ name: fuzzer-msvc
 #   fuzzer-msvc  the join: needs everything above and keeps the leg's old
 #                job name, so anything keyed on that check name still works
 # To change the shard count, edit WALKER_SHARDS in the `shards` job. Pick it so
-# a shard stays near 20-25 min (tests x ~50 s / N), well under its 60-minute
+# a shard stays under ~30 min (4 shards measured 14-35 min, run 42725930944), well under its 60-minute
 # timeout. Setup per job is cheap: the Z3 prefix and the deps clones are
 # restored from actions/cache (.github/actions/setup-msvc-leg), and the Nim
 # artifact is a ~22MB digest-verified download.
@@ -124,7 +124,7 @@ concurrency:
 
 
 env:
-  WALKER_SHARDS: "4"
+  WALKER_SHARDS: "5"
 
 jobs:
   suites:

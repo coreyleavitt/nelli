@@ -177,8 +177,12 @@ func pragmaRows(): seq[PragmaKey] =
     "a diagnostic or an initialisation rule: no effect on the field's value")
   result.add inert(ppField, ["cursor"],
     "a non-owning field: the value read is the same while its owner lives")
+  result.add inert(ppField, ["exportc"],
+    "names the field's C member: the value stored and read is the same " &
+    "(`system.Exception.msg` carries it, so every exception object does; " &
+    "`tsymex_0016_w1a_exn_typeid`, `tsymex_0016_p4_fieldpragma`)")
   result.add declined(ppField,
-    ["bitsize", "align", "importc", "exportc", "extern", "guard"],
+    ["bitsize", "align", "importc", "extern", "guard"],
     feUnsupportedOp,
     "fixes the width, alignment or storage of the field (`bitsize: 3` wraps " &
     "a store to 3 bits), which the object model (one full-width slot per " &

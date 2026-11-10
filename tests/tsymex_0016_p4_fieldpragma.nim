@@ -128,6 +128,7 @@ proc guardField(x: int) =
 suite "RFC-0016 W3-z P4: the field place of the pragma axis":
   test "the walker version floor":
     check parseInt(symexWalkerVersion) >= 315
+    check parseInt(symexWalkerVersion) >= 341   # int2: exportc field inert
 
   test "native: a 3-bit field loses a store of 8 (the hit the walk must not refute)":
     var o: BitObj
@@ -173,15 +174,19 @@ suite "RFC-0016 W3-z P4: the field place of the pragma axis":
     pinDecline(aliasUnion, cellKey(axPragma, "type/union"), feUnsupportedOp,
                needle = "pragma:type/union")
 
+  test "an exportc field is exact (it names the C member only)":
+    # Integration W3-z: P4 declined it, which declined every local holding an
+    # exception (`system.Exception.msg {.exportc: "message".}`); natively the
+    # value round-trips, as `pinExact` checks.
+    discard pinExact(exportcField, cellKey(axPragma, "field/exportc"))
+
   test "a used and a cursor field are exact":
     discard pinExact(usedField, cellKey(axPragma, "field/used"))
     discard pinExact(cursorField, cellKey(axPragma, "field/cursor"))
 
-  test "an importc, exportc, extern and guard field declines":
+  test "an importc, extern and guard field declines":
     pinDecline(importcField, cellKey(axPragma, "field/importc"),
                feUnsupportedOp, needle = "pragma:field/importc")
-    pinDecline(exportcField, cellKey(axPragma, "field/exportc"),
-               feUnsupportedOp, needle = "pragma:field/exportc")
     pinDecline(externField, cellKey(axPragma, "field/extern"),
                feUnsupportedOp, needle = "pragma:field/extern")
     pinDecline(guardField, cellKey(axPragma, "field/guard"),

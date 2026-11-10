@@ -344,6 +344,148 @@ else:
   const wrongKind = feUnsupportedOp
   const wrongKey = bk
 
+# RFC-0016 PRC-07 (gap 2): a routine pushed back to `fieldChecks: on` in this
+# build is compiled with the check, so a variant access outside the active arm
+# raises `FieldDefect`, exactly as in a build with the check on, and a branch
+# changing discriminator write raises it too ("assignment to discriminant
+# changes object branch"). The byte image the build's unchecked model keeps
+# answers none of them.
+{.push fieldChecks: on.}
+proc chkIn(v: int) =
+  let x = V(k: ka, a: v)
+  if x.a == 7: symexTarget("hit")
+
+proc chkWrongRead(v: int) =
+  let x = V(k: ka, a: v)
+  if x.b == x.b and v == 3: symexTarget("hit")
+
+proc chkWrongWrite(v: int) =
+  var x = V(k: ka, a: v)
+  x.b = 5
+  if v == 3: symexTarget("hit")
+
+proc chkDiscChange(v: int) =
+  var x = V(k: ka, a: v)
+  x.k = kb
+  if v == 3: symexTarget("hit")
+
+proc chkDiscSame(v: int) =
+  var x = V(k: ka, a: v)
+  x.k = ka
+  if x.a == 7: symexTarget("hit")
+
+proc chkRefIn(v: int) =
+  let x = RV(k: ka, a: v)
+  if x.a == 7: symexTarget("hit")
+
+proc chkRefWrongRead(v: int) =
+  let x = RV(k: ka, a: v)
+  if x.b == x.b and v == 3: symexTarget("hit")
+
+proc chkRefWrongWrite(v: int) =
+  let x = RV(k: ka, a: v)
+  x.b = 5
+  if v == 3: symexTarget("hit")
+
+proc chkRefDiscChange(v: int) =
+  let x = RV(k: ka, a: v)
+  x.k = kb
+  if v == 3: symexTarget("hit")
+{.pop.}
+
+
+{.push fieldChecks: on.}
+proc chkReadB(x: V): int = x.b
+proc chkReadBRef(x: RV): int = x.b
+proc chkSetA(x: var V; n: int) = x.a = n
+proc chkSetARef(x: RV; n: int) = x.a = n
+proc chkSetB(x: var V; n: int) = x.b = n
+proc chkSetK(x: var V) = x.k = kb
+proc chkSymDisc(v: int; kk: K) =
+  var x = V(k: ka, a: v)
+  x.k = kk
+  if v == 3: symexTarget("hit")
+
+proc chkRefSymDisc(v: int; kk: K) =
+  let x = RV(k: ka, a: v)
+  x.k = kk
+  if v == 3: symexTarget("hit")
+
+proc chkParamRead(p: RV) =
+  if p != nil and p.k == ka and p.b == 7: symexTarget("hit")
+{.pop.}
+
+proc ucCallsChkRead(v: int) =
+  let x = V(k: ka, a: v)
+  if chkReadB(x) == 3: symexTarget("hit")
+
+proc ucCallsChkReadRef(v: int) =
+  let x = RV(k: ka, a: v)
+  if chkReadBRef(x) == 3: symexTarget("hit")
+
+proc ucCallsChkSetB(v: int) =
+  var x = V(k: ka, a: v)
+  chkSetB(x, 5)
+  if v == 3: symexTarget("hit")
+
+proc ucCallsChkSetK(v: int) =
+  var x = V(k: ka, a: v)
+  chkSetK(x)
+  if v == 3: symexTarget("hit")
+
+proc ucReadsChkSetA(v: int) =
+  var x = V(k: ka, a: 0)
+  chkSetA(x, v)
+  if x.a == 7: symexTarget("hit")
+
+proc ucReadsChkSetARef(v: int) =
+  let x = RV(k: ka, a: 0)
+  chkSetARef(x, v)
+  if x.a == 7: symexTarget("hit")
+
+template raises(fn: untyped) =
+  let r = symexFind(fn, tRaisedExn("FieldDefect"), pinSettingsConst)
+  checkpoint show(r.errors)
+  check r.status == sxRaised
+  check r.undefined.len == 0
+  check not r.errors.named(feCheckOption)
+
+template exactSeven(fn: untyped) =
+  let r = symexFind(fn, tLabel("hit"), pinSettingsConst)
+  checkpoint show(r.errors)
+  check r.status == sxSat
+  check r.trusted
+  check r.undefined.len == 0
+  check r.witness[0] == 7
+
+suite "PRC-07: a routine pushed back to fieldChecks: on in a --fieldChecks:off build":
+  test "a read outside the branch raises FieldDefect":
+    raises(chkWrongRead)
+    raises(chkRefWrongRead)
+  test "a write outside the branch raises FieldDefect":
+    raises(chkWrongWrite)
+    raises(chkRefWrongWrite)
+  test "a branch-changing discriminator write raises FieldDefect":
+    raises(chkDiscChange)
+    raises(chkRefDiscChange)
+  test "an in-branch access stays exact":
+    exactSeven(chkIn)
+    exactSeven(chkRefIn)
+    exactSeven(chkDiscSame)
+  test "a checked callee of an unchecked caller raises on a wrong-branch access":
+    raises(ucCallsChkRead)
+    raises(ucCallsChkReadRef)
+    raises(ucCallsChkSetB)
+    raises(ucCallsChkSetK)
+    raises(chkParamRead)
+  test "a symbolic discriminator write that changes branch raises FieldDefect":
+    raises(chkSymDisc)
+    raises(chkRefSymDisc)
+  test "a checked callee's in-branch store is what the unchecked caller reads":
+    exactSeven(ucReadsChkSetA)
+    exactSeven(ucReadsChkSetARef)
+
+
 suite "PRC-07: --fieldChecks:off":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 309

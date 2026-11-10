@@ -391,6 +391,13 @@ const symexWalkerVersion* = "309"
   ## longer declines `feCheckOption`; it declines only where its options could
   ## not be read (`RoutineChecks.why`). The union image and the cpp active
   ## member stay the build's (representation, not a check).
+  ## A routine whose four checks are not one answer (a `{.push rangeChecks:
+  ## on.}` inside its body, or a position the scan reads as both pushed on and
+  ## off, as a `when defined(x)` push that cannot be decided) is no longer
+  ## taken as the build's setting: it declines `feCheckOption`, naming the
+  ## option (`check_options.positionUnreadable`). A field-checks-on routine
+  ## reads and writes a variant outside its arm, and changes its branch, as a
+  ## checked build does (`FieldDefect`) although the byte image is the build's.
   ## RFC-0016 int5 (307->308): `modelPins` pins the heap input arrays of the
   ## winning path's own heaps (`heap_<key>` and its havoc epochs), not every
   ## model constant named `heap_*`, so a havoc'd copy (`@hv`) is not pinned.

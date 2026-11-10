@@ -110,6 +110,54 @@ proc sutArrIdx(v: int) =
   arr[R(v)] = 1
   if v == 5: symexTarget("hit")
 
+proc sutPartlyChecked(v: int) =
+  ## Checked at one position only: the `push` turns `rangeChecks` on for the
+  ## middle of the body, where `R(v)` raises `RangeDefect` natively at 300. The
+  ## build's unchecked reading would keep 300 and never raise.
+  {.push rangeChecks: on.}
+  discard R(v)
+  {.pop.}
+  if v == 300: symexTarget("hit")
+
+proc sutUncheckedPart(v: int) =
+  ## Unchecked up to a checked tail: the unchecked head is the build's.
+  let r = R(v)
+  {.push rangeChecks: on.}
+  discard R(v)
+  {.pop.}
+  if int(r) == 300: symexTarget("hit")
+
+when defined(rangeoffPushed):
+  {.push rangeChecks: on.}
+proc sutAmbiguous(v: int) =
+  ## `rangeoffPushed` is set by this file's `.cfg`, so natively the routine is
+  ## checked and `R(v)` raises at 300. The scan cannot decide `defined(...)`:
+  ## the position reads as both pushed on and off, and was taken as the
+  ## build's setting (unchecked), which keeps 300 and never raises.
+  discard R(v)
+  if v == 300: symexTarget("hit")
+when defined(rangeoffPushed):
+  {.pop.}
+
+suite "PRC-07: range checks that differ within a routine (never the build's)":
+  test "a push around part of a body declines, it is not read as unchecked":
+    let r = symexFind(sutPartlyChecked, tRaisedExn("RangeDefect"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.named(feCheckOption)
+    check not r.trusted
+  test "a position that is both pushed on and off declines, it is not read as unchecked":
+    let r = symexFind(sutAmbiguous, tRaisedExn("RangeDefect"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.named(feCheckOption)
+    check not r.trusted
+  test "an unchecked head before a checked tail declines whole":
+    let r = symexFind(sutUncheckedPart, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.named(feCheckOption)
+
 suite "PRC-07: range conversions with --rangeChecks:off":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 309

@@ -749,6 +749,70 @@ type RoutineChecks* = object
     ## whose own checks are off, a `push overflowChecks: on`. False wherever
     ## the position was not read (own runtime, `why`) or may be off.
 
+const fourChecks = {coRange, coBound, coField, coObj}
+
+var bodyAsts {.compileTime.}: Table[string, NimNode]
+
+proc routineNameOf(n: NimNode): string =
+  var h = n
+  while h.kind in {nnkPostfix, nnkPragmaExpr} and h.len > 0:
+    h = h[if h.kind == nnkPostfix: 1 else: 0]
+  nameOf(h)
+
+proc findRoutineDef(n: NimNode; name: string; line: int): NimNode =
+  ## The parsed definition of the routine `name` written at `line`, or nil.
+  if n.kind in {nnkProcDef, nnkFuncDef, nnkMethodDef, nnkIteratorDef,
+                nnkConverterDef} and n.len > 0 and
+     (n.lineInfoObj.line == line or n[0].lineInfoObj.line == line):
+    if routineNameOf(n[0]) == name: return n
+  for c in n:
+    let r = findRoutineDef(c, name, line)
+    if r != nil: return r
+
+proc inRoutineChecks(n: NimNode; off: set[CheckOption]): string =
+  ## "" or the first check pragma under `n` that names a check of `off` with a
+  ## value other than a literal `off`: `{.push rangeChecks: on.}` in a body, or
+  ## the routine's own `{.rangeChecks: on.}`. Neither is seen by the scan of
+  ## the module's statements, which does not enter a routine.
+  if n.kind == nnkExprColonExpr and n.len == 2:
+    let opts = checksNamed(nameOf(n[0])) * off
+    if opts != {} and turnsOn(n[1]) != 0:
+      return "`" & nameOf(n[0]) & ": " & n[1].repr & "` at line " &
+             $n.lineInfoObj.line
+  for c in n:
+    let r = inRoutineChecks(c, off)
+    if r.len > 0: return r
+
+proc positionUnreadable(impl: NimNode; file: string; line: int;
+                        st: CheckState): string =
+  ## RFC-0016 PRC-07. Why the routine's check state at the options its build has
+  ## off cannot be taken as one answer: "" when it can. The walker models a
+  ## routine compiled with such an option off as unchecked (the build's bit) or
+  ## walks it checked where it was pushed on; a routine that is checked at some
+  ## positions only, or whose position is ambiguous, is neither, and is never
+  ## assumed to be the build's setting.
+  let off = fourChecks - buildSemantics.checks
+  if off == {}: return
+  let both = off * st.maybeOn * st.maybeOff
+  if both != {}:
+    return "its position is both pushed on and off for " & $both
+  if not isStdlibFile(file):
+    var ast: NimNode
+    if file in bodyAsts: ast = bodyAsts[file]
+    else:
+      var text: string
+      if readSource(file, text).len == 0:
+        try: ast = parseStmt(text, file)
+        except ValueError: discard
+      bodyAsts[file] = ast
+    if ast != nil:
+      let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
+      if def != nil:
+        let hit = inRoutineChecks(def, off)
+        if hit.len > 0:
+          return "it carries " & hit & " inside its own definition, so it is " &
+                 "checked at some positions and not others"
+
 proc routinePlace*(impl: NimNode): string =
   ## For a message: the routine, its file and line.
   let li = impl.lineInfoObj
@@ -810,6 +874,10 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if result.checks * defaultOff != {} and not touchesFloat(impl[6]):
     result.checks = result.checks - defaultOff
   result.overflowOn = coOverflow notin result.checks
+  let unreadable = positionUnreadable(impl, file, li.line, st)
+  if unreadable.len > 0:
+    result.why = "the routine's range, bound, field or object checks differ " &
+      "within it, not modelled as one setting: " & unreadable
   if coRange notin buildSemantics.checks:
     result.rangeOn = coRange notin result.checks
     result.checks = result.checks - {coRange}

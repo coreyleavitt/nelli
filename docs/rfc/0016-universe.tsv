@@ -7,7 +7,7 @@
 # axis magic: 244 cells
 # axis stdlib: 88 cells
 # axis build: 29 cells (pcre libs and build cells; rows below)
-# axis readonly: 0 cells
+# axis readonly: 33 cells
 # axis defined: 25 cells
 # build rows: 5
 # error kinds: 106
@@ -613,6 +613,39 @@ pragma:type/stdcall	modelled	-
 pragma:type/syscall	modelled	-
 pragma:type/tags	modelled	-
 pragma:type/union	declined	-
+readonly:hookcopy/callee-write	declined	-
+readonly:hookcopy/conditional	declined	-
+readonly:hookcopy/early-return	declined	-
+readonly:hookcopy/foreign-write	declined	-
+readonly:hookcopy/local-work	modelled	-
+readonly:hookcopy/loop	declined	-
+readonly:hookcopy/plain	modelled	-
+readonly:hookcopy/walked-pure	modelled	-
+readonly:hookstore/direct-store	declined	-
+readonly:hookstore/local-work	modelled	-
+readonly:hookstore/plain	modelled	-
+readonly:hookstore/walked-store	declined	-
+readonly:lent/cast-emit	declined	-
+readonly:lent/deref-store	declined	-
+readonly:lent/global-read	modelled	-
+readonly:lent/local-work	modelled	-
+readonly:lent/opaque-callee	declined	-
+readonly:lent/pragma-block	modelled	-
+readonly:lent/proc-value	declined	-
+readonly:lent/recursive-pure	declined	-
+readonly:lent/recursive-write	declined	-
+readonly:lent/stdlib-pointer-arg	declined	-
+readonly:lent/var-formal	declined	-
+readonly:lent/walked-pure	modelled	-
+readonly:lent/walked-write	declined	-
+readonly:ptrformal/field-addr	declined	-
+readonly:ptrformal/global-store	modelled	-
+readonly:ptrformal/local	modelled	-
+readonly:ptrformal/var-return	declined	-
+readonly:viewwhole/lent-loop	declined	-
+readonly:viewwhole/scalar-read	declined	-
+readonly:viewwhole/tuple-copy	modelled	-
+readonly:viewwhole/var-copy	declined	-
 stdlib:algorithm.sort/symbolicLength	never	-
 stdlib:deques.Deque	declined	-
 stdlib:math.abs	modelled	-

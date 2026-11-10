@@ -75,6 +75,7 @@ import nelli/smt/magic_rows
 import nelli/smt/buildprofile
 import nelli/smt/typeaxes
 import nelli/smt/pragmaaxes
+import nelli/smt/readonlyaxes
 import nelli/smt/stdlib_rows
 import nelli/smt/definedness
 import nelli/smt/soundness
@@ -177,6 +178,10 @@ proc deriveUniverse(): seq[UCell] =
                      state: stateOf(c.admitted, c.intent), detail: "-",
                      kind: kindOf(c.kind))
   for c in pragmaAxis.cells:
+    result.add UCell(key: render(c.cell),
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
+  for c in readOnlyAxis.cells:
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-",
                      kind: kindOf(c.kind))
@@ -444,8 +449,6 @@ proc axisExactProblems(u: seq[UCell]; recs: seq[PinRecord]; legRow: string;
 const
   ## Axes with no cells yet: the slice that gives each some.
   pendingAxes = {
-    "readonly": "E3 (the W3-z evidence lane moves the K6 pins onto readonly: " &
-                "cells, which gives the axis cells; remove this entry there)",
     "construct": "blocker: the axis has no site table; its pins are filed " &
                  "under construct:* keys that no table derives (orphan cells)"}.toTable
 
@@ -591,6 +594,7 @@ suite "RFC-0016 K1a-cells: the universe is derived":
     check universe.countIn("typeclass:") == toSeq(typeClassTable.cells).len
     check universe.countIn("pragma:") == toSeq(pragmaAxis.cells).len
     check universe.countIn("typeop:") == toSeq(typeOpTable.cells).len
+    check universe.countIn("readonly:") == toSeq(readOnlyAxis.cells).len
     check universe.countIn("defined:") == toSeq(definednessTable.cells).len
     check universe.countIn("build:") >= 3 + 5
     check universe.countIn("build:row/") == ord(high(BuildRow)) + 1

@@ -24,53 +24,46 @@
 ## declined for another, earlier reason or was decided correctly. So these are
 ## precision pins: what each predicate must still prove, what it must still
 ## decline, each with a native run.
-import std/[unittest, strutils, tables]
+import std/[unittest, strutils, tables, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/dsl_parser
 import std/macros
-
-proc show(errs: seq[SymexErrorInfo]): string =
-  for e in errs:
-    if e.severity == sevError: result.add $e.kind & ": " & e.msg & "\n"
+import ./s8cu_helpers
 
 const ns = [-5, -1, 0, 1, 3, 4, 7, 12, 49, 51]
 
-template hits(call: untyped): untyped =
-  block:
-    symexCaptureBegin()
-    try:
-      call
-    except Defect, CatchableError:
-      discard
-    symexCaptureEnd()
-
 template nativeLiveI(fn: typed; lbl: static string; want: bool) =
+  ## The declined shapes are not decided, so this native run is checked here;
+  ## the decided ones are checked by `pinExact`'s witness and domain.
   block:
     var live = false
     for n in ns:
-      if lbl in hits(fn(n)): live = true
+      if lbl in nativeRun(fn(n)).hits: live = true
     check live == want
 
 template nativeLiveT(fn: typed; lbl: static string; want: bool) =
   block:
     var live = false
     for n in ns:
-      if lbl in hits(fn({"a": n}.toTable)): live = true
+      if lbl in nativeRun(fn({"a": n}.toTable)).hits: live = true
     check live == want
 
-template statusIs(fn: typed; lbl: static string; want: SymexStatusKind) =
+template roDecided(fn: typed; want: SymexStatusKind; lbl: static string;
+                   cell: static string; dom: untyped = boundaryInts) =
+  ## The route proves the shape read-only: the walker decides the label and the
+  ## native run agrees (the witness hits, or no domain value does).
   block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
+    let r = pinExact(fn, cellKey(axReadOnly, cell), tLabel(lbl), dom)
     check r.status == want
 
-template declinedWith(fn: typed; lbl: static string; why: static string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
-    check r.status == sxUnknown
-    check why in show(r.errors)
+template roDeclined(fn: typed; kind: SymexErrorKind; lbl: static string;
+                    cell: static string; why: static string) =
+  pinDecline(fn, cellKey(axReadOnly, cell), kind, tLabel(lbl), needle = why)
+
+# Every input of interest: `guardT` returns before any label for a table that is
+# not the single key "a" with a value in -1000 .. 1000.
+let tableDom = exhaustive(toSeq(-1000 .. 1000).mapIt({"a": it}.toTable))
 
 # ---- routeStoresThroughDeref --------------------------------------------------
 
@@ -139,15 +132,17 @@ suite "K6c: routeStoresThroughDeref is mayWrite":
     nativeLiveI(plain1, "plain1_stored", false)
     nativeLiveI(work1, "work1_stored", false)
   test "a hook storing through a global ref declines":
-    declinedWith(store1, "store1_stored", "may store through a `ref` or a `ptr`")
+    roDeclined(store1, feGlobalRouteUnproved, "store1_stored",
+               "hookstore/direct-store", "may store through a `ref` or a `ptr`")
   test "a hook whose walked callee stores through a ref declines":
-    declinedWith(call1, "call1_stored", "may store through a `ref` or a `ptr`")
+    roDeclined(call1, feGlobalRouteUnproved, "call1_stored",
+               "hookstore/walked-store", "may store through a `ref` or a `ptr`")
   test "a plain copy is decided":
-    statusIs(plain1, "plain1_stored", sxUnsat)
-    statusIs(plain1, "plain1_clean", sxSat)
+    roDecided(plain1, sxUnsat, "plain1_stored", "hookstore/plain")
+    roDecided(plain1, sxSat, "plain1_clean", "hookstore/plain")
   test "local work around the copy is decided":
-    statusIs(work1, "work1_stored", sxUnsat)
-    statusIs(work1, "work1_clean", sxSat)
+    roDecided(work1, sxUnsat, "work1_stored", "hookstore/local-work")
+    roDecided(work1, sxSat, "work1_clean", "hookstore/local-work")
 
 # ---- bindsViewWhole -----------------------------------------------------------
 
@@ -209,13 +204,20 @@ suite "K6c: bindsViewWhole":
     nativeLiveT(sHoldTuple, "ht_shared", false)
     nativeLiveT(sHoldVar, "hv_shared", false)
   test "a `var` copy of the whole declines":
-    declinedWith(sHoldVar, "hv_shared", "holding the whole of one")
+    roDeclined(sHoldVar, feUnsupportedOp, "hv_shared", "viewwhole/var-copy",
+               "holding the whole of one")
   test "a `lent` loop over the whole declines":
-    declinedWith(sHoldLoop, "hl_shared", "holding the whole of one")
+    roDeclined(sHoldLoop, feUnsupportedOp, "hl_shared", "viewwhole/lent-loop",
+               "holding the whole of one")
   test "a scalar read out of the container is decided (precision)":
-    statusIs(sHoldNone, "hn_shared", sxSat)
+    # The route lets it through (sat), but the loop is over a `Table`'s
+    # `mpairs`, whose order is not modelled: the verdict is untrusted, so the
+    # cell declines with `feTableIterOrder` and is pinned as a decline.
+    check symexFind(sHoldNone, tLabel("hn_shared")).status == sxSat
+    roDeclined(sHoldNone, feTableIterOrder, "hn_shared",
+               "viewwhole/scalar-read", "")
   test "a tuple built from the container is a copy (precision)":
-    statusIs(sHoldTuple, "ht_shared", sxUnsat)
+    roDecided(sHoldTuple, sxUnsat, "ht_shared", "viewwhole/tuple-copy", tableDom)
 
 # ---- ptrUsesStayLocal ---------------------------------------------------------
 
@@ -304,12 +306,12 @@ suite "K6c: ptrUsesStayLocal":
     nativeLiveI(sLocal, "pl_live", true)
     nativeLiveI(sLocal, "pl_dead", false)
   test "a pointer that stays local is a cell (precision)":
-    statusIs(sLocal, "pl_live", sxSat)
-    statusIs(sLocal, "pl_dead", sxUnsat)
+    roDecided(sLocal, sxSat, "pl_live", "ptrformal/local")
+    roDecided(sLocal, sxUnsat, "pl_dead", "ptrformal/local")
   test "a pointer stored in a global is decided by the escape":
-    statusIs(sWhole, "pw_live", sxSat)
-    statusIs(sWhole, "pw_dead", sxUnsat)
+    roDecided(sWhole, sxSat, "pw_live", "ptrformal/global-store")
+    roDecided(sWhole, sxUnsat, "pw_dead", "ptrformal/global-store")
   test "the address of a pointee's field, stored, is not decided":
-    statusIs(sFld, "pf_live", sxUnknown)
+    roDeclined(sFld, feUnsupportedExprKind, "pf_live", "ptrformal/field-addr", "")
   test "a pointee passed as `var` to a callee returning its address is not decided":
-    statusIs(sVia, "pv_live", sxUnknown)
+    roDeclined(sVia, feUnsupportedExprKind, "pv_live", "ptrformal/var-return", "")

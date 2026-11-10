@@ -1711,7 +1711,7 @@ state = "closed"
 note = "K6a (`rfc-0016-k6a`, walker 299, 2026-11-09)"
 slice = "K6a"
 home = "K6a"
-cells = []
+cells = ["readonly:lent/cast-emit", "readonly:lent/deref-store", "readonly:lent/global-read", "readonly:lent/local-work", "readonly:lent/opaque-callee", "readonly:lent/pragma-block", "readonly:lent/proc-value", "readonly:lent/recursive-pure", "readonly:lent/recursive-write", "readonly:lent/stdlib-pointer-arg", "readonly:lent/var-formal", "readonly:lent/walked-pure", "readonly:lent/walked-write"]
 pins = ["tsymex_0016_k6a_maywrite"]
 
 [[row]]
@@ -1721,7 +1721,7 @@ title = "the hook copy-proof defaults to \"copied\""
 state = "closed"
 note = "K6b (`rfc-0016-k6b`, walker 299, 2026-11-09)"
 home = "K6b"
-cells = []
+cells = ["readonly:hookcopy/callee-write", "readonly:hookcopy/conditional", "readonly:hookcopy/early-return", "readonly:hookcopy/foreign-write", "readonly:hookcopy/local-work", "readonly:hookcopy/loop", "readonly:hookcopy/plain", "readonly:hookcopy/walked-pure"]
 pins = ["tsymex_0016_k6b_hookcopy"]
 
 [[row]]
@@ -1731,7 +1731,7 @@ title = "`ptrUsesStayLocal`, `routeStoresThroughDeref`, `bindsViewWhole` share t
 state = "closed"
 note = "K6c (`rfc-0016-k6c`, walker 299, 2026-11-09): `routeStoresThroughDeref` is `mayWrite`; `bindsViewWhole` is an exhaustive case; `ptrUsesStayLocal` is an escape predicate sharing D-05's foreign-write facts (`foreignWriteNode`, `opaqueRoutine`), not built over `mayWrite`, because a store of the pointer to a global by name is an escape and not a write through it; it is now fail-closed (an exhaustive case, an address through a deref or returned or passed to an unwalked callee escapes), so its two misjudged shapes no longer rely on the `nnkAddr` expression gate; no SUT got a false trusted verdict from any of the three"
 home = "K6c"
-cells = []
+cells = ["readonly:hookstore/direct-store", "readonly:hookstore/local-work", "readonly:hookstore/plain", "readonly:hookstore/walked-store", "readonly:ptrformal/field-addr", "readonly:ptrformal/global-store", "readonly:ptrformal/local", "readonly:ptrformal/var-return", "readonly:viewwhole/lent-loop", "readonly:viewwhole/scalar-read", "readonly:viewwhole/tuple-copy", "readonly:viewwhole/var-copy"]
 pins = ["tsymex_0016_k6c_round"]
 
 [[row]]

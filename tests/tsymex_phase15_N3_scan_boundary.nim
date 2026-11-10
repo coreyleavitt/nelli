@@ -100,8 +100,12 @@
 ## No `symexWalkerVersion` bump (N3 is behavior-identical — RFC Cluster N
 ## acceptance). The floor pin matches N2's.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, options, sets]
+import nelli
 import nelli/symex
+import nelli/smt/errorkind
+import nelli/smt/admission
+import ./s8cu_helpers
 
 # ===========================================================================
 # Iterator/proc definitions (module scope so getImpl can resolve them)
@@ -182,8 +186,9 @@ proc sutLambdaBreakBoundary(n: int) =
   if sum == 3:
     symexTarget("lambdaBreakSum3")
 
-# T-toplevel-break (contrast): a real for-body-level break still degrades
-# the finite iterator (mirrors T3 of tsymex_a3_closure_iterators.nim).
+# T-toplevel-break (contrast): a real for-body-level break is now modelled
+# (RFC-0016 W3-z P13) and leaves the whole expansion; the lambda's own break
+# above is a different loop's. Mirrors T3 of tsymex_a3_closure_iterators.nim.
 proc sutTopLevelBreakDegrades(n: int) =
   var sum = 0
   for elem in twoElemsIterN3():
@@ -212,9 +217,19 @@ suite "symex N3 — nestedRoutineScanBoundary characterization (RFC-parser-norma
     let r = symexFind(sutLambdaBreakBoundary, tLabel("lambdaBreakSum3"))
     check r.status == sxSat
 
-  test "hasBreakContinueShallow contrast: a real for-body break still degrades — sxUnknown":
-    let r = symexFind(sutTopLevelBreakDegrades, tLabel("topLevelBreakSum3"))
-    check r.status == sxUnknown
+  test "contrast: a real for-body break is modelled (W3-z P13) — exact sxSat, native agrees":
+    ## Pre-P13 this declined (`hasBreakContinueShallow`). The break now leaves
+    ## the whole expansion; the witness must reach the label natively, and a
+    ## smaller n (break fires at the second yield) must not.
+    if hostAdmission().isSome: skipUnadmitted()
+    else:
+      check "topLevelBreakSum3" in nativeHits(sutTopLevelBreakDegrades(2))
+      check "topLevelBreakSum3" notin nativeHits(sutTopLevelBreakDegrades(1))
+      let r = pinExact(sutTopLevelBreakDegrades,
+                       cellKey(axConstruct, "for/inlineIter/break"),
+                       target = tLabel("topLevelBreakSum3"),
+                       domain = sampled([0, 1, 2, 3, -1, 5]))
+      check r.status == sxSat
 
   test "walker version floor: symexWalkerVersion >= 71 (N3 is behavior-identical, no bump)":
     check parseInt(symexWalkerVersion) >= 71

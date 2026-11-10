@@ -9,7 +9,9 @@
 ##
 ##   False-positive direction (pre-scans MUST prevent spurious sxSat):
 ##     * T3: FINITE iterator (straight yields, no while) with `break` in the
-##       for-body → MUST be sxUnknown (CRIT-2, D2-0c).
+##       for-body. Was sxUnknown (CRIT-2, D2-0c); RFC-0016 W3-z P13 models
+##       the break (it leaves the whole expansion), so it is now an exact sxSat
+##       pinned against the native run.
 ##     * T4: iterator containing `return` → MUST be sxUnknown (CRIT-1, D2-0b).
 ##     * T5: label AFTER the `for` over a `return`-bearing iterator → the
 ##       degraded `for` does not DROP the path (`paths.len` is preserved), but
@@ -29,8 +31,12 @@
 ## their test comments; this is a soundness correction, not a regression.
 ## Walker version bumped 31→32 (A3-S2a tuple-yield). Pin tests updated.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, options, sets]
+import nelli
 import nelli/symex
+import nelli/smt/errorkind
+import nelli/smt/admission
+import ./s8cu_helpers
 
 # ===========================================================================
 # Iterator definitions (module scope so getImpl can resolve them)
@@ -209,13 +215,27 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     let r = symexFind(sutA3BeyondBound, tLabel("impossible"))
     check r.status == sxUnknown
 
-  # ---- T3: false-positive guard — break in for-body (CRIT-2 / D2-0c) ----
-  test "T3: break in for-body over finite iterator → sxUnknown (pre-scan 0c)":
-    ## Without pre-scan 0(c): break hits loopStack.len==0 → path dropped
-    ## while later inlined yields still run → wrong surviving state → spurious
-    ## sxSat. Pre-scan 0(c) degrades the whole for to isUnsupported → sxUnknown.
-    let r = symexFind(sutA3BreakInBody, tLabel("sum3"))
-    check r.status == sxUnknown
+  # ---- T3: break in for-body (CRIT-2 / D2-0c; modelled since W3-z P13) ----
+  test "T3: break in for-body over finite iterator → exact sxSat (P13)":
+    ## Pre-P13 a for-body `break` over a finite iterator was declined (pre-scan
+    ## 0c) because the expansion had no loop for it to leave. P13 makes the
+    ## expansion a jump-target block: `break` leaves all of it. The verdict is
+    ## now an exact sxSat, and its witness must reach the label natively.
+    if hostAdmission().isSome: skipUnadmitted()
+    else:
+      check "sum3" in nativeHits(sutA3BreakInBody(2))
+      let r = pinExact(sutA3BreakInBody, cellKey(axConstruct, "for/inlineIter/break"),
+                       target = tLabel("sum3"),
+                       domain = sampled([0, 1, 2, 3, -1, 5]))
+      check r.status == sxSat
+
+  test "T3b: a break that fires before the sum completes keeps the label unreachable natively":
+    ## The break leaves the whole expansion: with n == 1 the second yield (2)
+    ## breaks, so the sum stays 1 and the label is not reached.
+    if hostAdmission().isSome: skipUnadmitted()
+    else:
+      check "sum3" notin nativeHits(sutA3BreakInBody(1))
+      check "sum3" notin nativeHits(sutA3BreakInBody(0))
 
   # ---- T4: false-positive guard — return in iterator (CRIT-1 / D2-0b) ----
   test "T4: iterator containing `return` → sxUnknown (pre-scan 0b)":

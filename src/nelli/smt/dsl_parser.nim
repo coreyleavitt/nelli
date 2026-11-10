@@ -10627,6 +10627,18 @@ proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
   ## takes the dereference edge (Nim's dispatcher reads its type). nil
   ## when the call is not dispatchable this way (the caller then declines,
   ## as before).
+  # RFC-0016 PRC-02m. Without the toolchain's dispatch table (a compiler
+  # lacking patch 0008, or a library build) nothing confirms the override set:
+  # an override in a module the entry cannot see is not among `methodOverrides`.
+  # A walk that reaches this dispatch declines whatever it reads, as the route
+  # scan does for a global (`feGlobalRouteUnproved`).
+  when not hasMethodTable:
+    preamble.add ctx.declineAtSite(feGlobalRouteUnproved,
+      siteMsg(n, "a call to method `" & macros.strVal(calleeSym) & "`, whose " &
+              "overrides cannot be listed (one may be declared in a module " &
+              "the entry cannot see; the toolchain has no dispatch table to " &
+              "confirm the set) (feGlobalRouteUnproved)"),
+      "a method call whose overrides cannot be listed")
   if n.len < 2: return nil
   let recv = n[1]
   var recvNode = recv

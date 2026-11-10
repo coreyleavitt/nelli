@@ -331,6 +331,11 @@ const renderAsChoicesVersion* = "12"
   ##   every variable read declines (the precise decline, a verdict demoted
   ##   to `sxUnknown`). Stock and lib builds keep the open scan. This is the
   ##   replay's check (`methodDispatchRefusal`) lifted to the verdict.
+  ##   Without the table nothing can confirm the override set, so the parser
+  ##   declines at every method dispatch it builds (`methodDispatchStmt`,
+  ##   `feGlobalRouteUnproved`, "whose overrides cannot be listed"), with or
+  ##   without a global read: a verdict over the visible overrides alone is
+  ##   never trusted.
 
 const symexWalkerVersion* = "310"
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a

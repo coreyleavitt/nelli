@@ -542,8 +542,16 @@ const renderAsChoicesVersion* = "12"
   ##   ways, so a pair-loop over the receiver multiplied capped checks past
   ##   any test bound (B7R-6, B7r2-1a), and an arm the witness does not take
   ##   was walked as if it might be.
+  ## - RFC-0016 W3-z R9 (342->343): the whole-run gate's tail walk has its own
+  ##   budget (`tailWalkCappedChecks`, five capped scratch checks' worth of
+  ##   units by default); past it the walk stops and the tail fails closed
+  ##   (`ubTailUnverified`), where only `walkRLimit` stopped it. A scratch
+  ##   check that spends its whole bound undecided is not asked again for the
+  ##   same branch, and every scratch check runs under at most what the walk
+  ##   (and the tail) has left. A tail that spent past the budget was trusted
+  ##   before and is not now; a cached verdict from before is stale.
 
-const symexWalkerVersion* = "342"
+const symexWalkerVersion* = "343"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

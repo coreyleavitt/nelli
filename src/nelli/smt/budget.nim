@@ -204,6 +204,28 @@ type
       ## to the cap. The largest walks overall (175.3M, then 120,601,918
       ## `label:ti_tuple` and 103,233,480 `label:t`, both `sxUnknown`) were
       ## undecided anyway. Re-measure when the corpus or the solver changes.
+    tailWalkCappedChecks*: int = 5
+      ## RFC-0016 W3-z R9. The work units the whole-run gate's tail walk
+      ## (`verifyTailDefined`, one per label `sxSat` and per replay candidate)
+      ## may spend together, counted in capped scratch checks: the tail walk
+      ## stops once its checks spent this many times the rlimit one of its
+      ## scratch checks runs under (`concreteBranchRLimit`, 20M units unless
+      ## `queryRLimit` is set). Past it the tail fails closed: the `sxSat`
+      ## stands but is untrusted (`ubTailUnverified`). `0` opts out (only
+      ## `walkRLimit` bounds it).
+      ##
+      ## Why: a branch the witness's pins leave open (a global havoc, an
+      ## opaque call's result) is forked both ways (W3-z R6), and each fork
+      ## asked its scratch checks at the cap when the query was hard; in a
+      ## nested loop the forks multiplied the capped checks until `walkRLimit`
+      ## (about 50 capped checks, over 20 minutes; `tsymex_r6_b7r_bytescan`
+      ## B7R-6 ran past 1500 s). Why `5`: one undecided branch used to cost
+      ## four capped checks (two asks, each both ways) and now costs one (a
+      ## capped check is not asked again), so five covers the old worst
+      ## branch with one to spare; under the defaults it is 100M units, a
+      ## tenth of `walkRLimit`, and 200 times the largest decided tail walk
+      ## measured (499,300 units, `tsymex_0016_k10b_round`). Part of the
+      ## cache key: it decides whether a verdict is trusted.
     maxFrontierSize*: int = 0
       ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
       ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path

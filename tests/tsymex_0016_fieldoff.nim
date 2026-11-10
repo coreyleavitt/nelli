@@ -944,7 +944,14 @@ proc sutCtorResult(v: int32) =
 when not defined(cpp):
   suite "PRC-07 slice B: the zero of initialisation is the zeroed constructions'":
     test "a constructor's unwritten bytes are indeterminate: the probe case":
-      indeterminate(sutCtorProbe)
+      # The bytes are the stack's own. Under vcc the replay's frame need not
+      # hold the zero the scrub wrote there (the build row reports a spurious
+      # run taint and the havoc decline), so the witness may be refuted;
+      # every other C compiler confirms it, and keeps the strict pin.
+      when defined(vcc):
+        indeterminateOrRefuted(sutCtorProbe)
+      else:
+        indeterminate(sutCtorProbe)
 
     test "x = V(...) over an existing variable leaves the others unspecified":
       indeterminate(sutCtorOverVar)

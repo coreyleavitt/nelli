@@ -379,7 +379,12 @@ const renderAsChoicesVersion* = "12"
   ##   both arms, a fresh-symbol record is not a reason) and the kinds join
   ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
 
-const symexWalkerVersion* = "313"
+const symexWalkerVersion* = "314"
+  ## RFC-0016 W3-z P1 (313->314, landed after R1/R2): the opaque-call scan reads the callee's own
+  ## `overflowChecks` (`RoutineChecks.overflowOn`) and a pushed-off check
+  ## (`ownerChecked`), not the deviation set, and a `-fwrapv` build defines the
+  ## signed wrap. A checks-on callee no longer reads as unchecked; a checks-off
+  ## one now carries `ubSignedOverflow` into `witnessUndefined`.
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

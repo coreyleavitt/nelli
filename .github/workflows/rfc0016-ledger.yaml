@@ -1,0 +1,70 @@
+name: rfc0016-ledger
+
+# RFC-0016 W3-z (F8): the ledger files the structural checks read are all under
+# docs/**, which symex-linux and symex-mingw ignore (a prose-only push must not
+# burn a Windows runner), so an edit to ONLY the work list, the universe TSV,
+# the RFC or the handoff would never run the checks that read them. This small
+# workflow runs those checks on exactly those files (the readme-kinds.yaml
+# pattern). It runs check-worklist (the RFC tables are the render of the TOML)
+# and the universe test with no pin directory, which is its structural suites:
+# the allowlists against the derived universe, the work-list id join, the F
+# ledger, the committed TSV against the derivation, and the RFC/handoff slice
+# ids. The pin-record join and the freshness check need a record directory and
+# stay in the legs that produce one.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'rfc-*']
+    paths: &ledger-paths
+      - docs/rfc-data/0016-worklist.toml
+      - docs/rfc/0016-universe.tsv
+      - docs/rfc/0016-native-parity-hardening.md
+      - docs/rfc/0016-native-parity-hardening.handoff.md
+      - .github/workflows/rfc0016-ledger.yaml
+  pull_request:
+    paths: *ledger-paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # The patched Nim artifact, Z3, PCRE and the milpa.lock deps: the
+      # universe test imports nelli/symex to derive the universe.
+      - uses: ./.github/actions/setup-symex-linux
+
+      - name: Work-list tables are the render of the TOML (scripts/check-worklist.sh)
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+          NELLI_NIM_FLAGS: "--cc:gcc --colors:off"
+        run: |
+          bash scripts/check-worklist.sh
+          bash scripts/check-worklist.sh --self-test
+
+      - name: Universe test, structural suites (no NELLI_PIN_DIR)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          NELLI_HOST: "1"
+        run: |
+          set -uo pipefail
+          unset NELLI_PIN_DIR
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          bash scripts/dt-bounded.sh c tests/tsymex_0016_universe.nim 900
+
+      - name: Watchdog reads the F ledger from the TOML (self-test)
+        if: ${{ !cancelled() }}
+        run: bash scripts/rfc0016-watchdog.sh --self-test

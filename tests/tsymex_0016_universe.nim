@@ -91,7 +91,6 @@ const
   introPath = root / "tests" / "0016-allowlist" / "intro-counts.txt"
   overPath = root / "tests" / "0016-allowlist" / "over-intro.txt"
   rfcPath = root / "docs" / "rfc" / "0016-native-parity-hardening.md"
-  handoffPath = root / "docs" / "rfc" / "0016-native-parity-hardening.handoff.md"
   worklistPath = root / "docs" / "rfc-data" / "0016-worklist.toml"
   nimblePath = root / "nelli.nimble"
   testsDir = root / "tests"
@@ -1233,22 +1232,29 @@ suite "RFC-0016 K1a-ids: the work list is data":
                  else: r.get("state")
       check c.startsWith(word)
 
-  test "F ledger ids are aliases of the W rows, with the ledger's sha":
-    var n = 0
-    for l in readFile(handoffPath).splitLines():
-      if l.startsWith("| F-0"):
-        let f = l.split('|').mapIt(it.strip())
-        let row = wl.resolve(f[1])
-        check row.isSome
-        if row.isSome:
-          inc n
-          check row.get.id.startsWith("W-")
-          check row.get.get("state") == "closed"
-          check ("`" & row.get.get("sha") & "`") in f[^2]
-          check ("(" & row.get.id & ")") in f[6]
-    check n == 7
+  test "the F ledger is read from the work list: well-formed and unique":
+    check fLedgerProblems(wl).len == 0
     check wl.resolve("F-0001").get.id == "W-01"
     check wl.resolve("F-9999").isNone
+    check fLedger(wl).anyIt(it == ("F-0007", "W-07"))
+
+  test "RED: a malformed or duplicated F id fails the ledger check":
+    let bad = parseWorklist("[[row]]\nid = \"W-90\"\naliases = [\"F-12\"]\n" &
+      "[[row]]\nid = \"W-91\"\naliases = [\"F-0090\"]\n" &
+      "[[row]]\nid = \"W-92\"\naliases = [\"F-0090\"]\n")
+    let p = fLedgerProblems(bad)
+    check p.len == 2
+    check p.anyIt("F-12" in it and "F-NNNN" in it)
+    check p.anyIt("F-0090" in it and "two rows" in it)
+
+  test "an F row may be its own open row or alias an open row":
+    let ok = parseWorklist("[[row]]\nid = \"W-90\"\nstate = \"open\"\n" &
+      "source = \"F-0008\"\n" &
+      "[[row]]\nid = \"W-91\"\nstate = \"open\"\naliases = [\"F-0009\"]\n" &
+      "[[row]]\nid = \"F-0010\"\nstate = \"open\"\nsource = \"F-0010\"\n" &
+      "[[row]]\nid = \"W-93\"\nsource = \"research lens A\"\n")
+    check fLedgerProblems(ok).len == 0
+    check fLedger(ok).len == 3
 
   test "the renumbered rows keep their notes and the old ids are the 5.2 rows":
     check wl.resolve("PRC-39").get.get("note").contains("renumbered from PRC-36")

@@ -82,6 +82,25 @@
   shm sweep fix `c39b770c` (below). CI-B (`rfc-0016-cib2`) green after the
   toolchain incident reruns; awaiting its agent's handoff.
   K1a-ci (`rfc-0016-k1aci`): post-shard universe joins on symex-linux, symex-mingw and symex-nightly; allowlist entries take an optional `rows=` scope (`heNilDerefMayBeCaught` is scoped to mingw, msvc, linux-cpp: setjmp is INT-12 on Windows and unbuildable on cpp); five stale `errorkind` entries deleted. Planted-RED nightly https://github.com/coreyleavitt/nelli/actions/runs/42532198619; green: linux https://github.com/coreyleavitt/nelli/actions/runs/42537270847, mingw https://github.com/coreyleavitt/nelli/actions/runs/42537270688, nightly (cpp, z3-4.13.4, msvc) https://github.com/coreyleavitt/nelli/actions/runs/42537276403.
+- **Session state (2026-11-10):** Wave 3, slice 21/22 done, 1 remaining
+  (W3-z); no forks open for Corey. main b2644983 (walker 311): PRC-07
+  (e6b3362e), then PRC-02, PRC-02b, PRC-02m parts 1-3 and the PRC-07/08
+  remainder (float checks, float `/=`, `-d:danger`, `math.ceilDiv`,
+  nilChecks n/a), symex-linux 42758660494 and symex-mingw 42758660691 green.
+  In flight:
+  - `rfc-0016-msvcshard` 0cd412ac: the MSVC leg in 5 walker shards (46 min
+    wall against the 90 min timeout); k5b fwrapv asserts the vcc refusal;
+    the fieldoff probe accepts a refuted indeterminate read under vcc only.
+    fuzzer-msvc run 42760274142 in flight; land when green (main's MSVC leg
+    is red on that probe until then).
+  - BLOCKED on Corey: Nim fork patch 0009 (f27f1b164, subtype-hook table)
+    cannot republish; dispatch returns "Actions has been disabled for this
+    repository" while the permissions API reports enabled. Until then nelli
+    CI exercises the table-less pins.
+  - Next: W3-z (0.10.0) after /wiring-audit and then /code-review.
+  - Resume: re-read this block and the scratchpad `restack-todo.md`; land
+    msvcshard via the `$S/hand` protocol (push to main in a separate call),
+    then /wiring-audit and /code-review for W3-z.
 - **Session state (2026-11-09):** Wave 3, slice 18/22 done, 4 remaining
   (PRC-07, PRC-02/02b, PRC-07/08 remainder, W3-z); no forks open for Corey.
   main 6490a48b (walker 308). In flight:

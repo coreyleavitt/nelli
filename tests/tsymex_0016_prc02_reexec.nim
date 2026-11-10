@@ -28,6 +28,7 @@ import ./s8cu_helpers except show
 import helpers/prc03_sut     # imports an override module this file cannot see
 import helpers/r8_hooked     # W3-z R8: a closure environment with a hook
 import helpers/r10_closenv_sut   # W3-z R10: a start value with an environment
+import helpers/r11_closstr_sut   # W3-z R11: an environment holding buffers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -433,6 +434,54 @@ suite "W3-z R10: a start-value closure with an environment (re-exec)":
     for e in r.errors:
       if e.kind == feReplayDeclined and "not its bytes alone" in e.msg:
         named = true
+    check named
+
+suite "W3-z R11: a start-value closure whose environment holds buffers (re-exec)":
+  test "the walker's version floor (R11)":
+    check parseInt(symexWalkerVersion) >= 345
+
+  test "a captured string crosses the wire, a checked routine: exact":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      mkStartStr()
+      discard pinExact(sutStartStr, cellKey(faCallShape,
+                       "reexec/procValueClosureStartStr"), tLabel("t"))
+      gStartStr = nil
+
+  test "a captured seq[int] whose element makes an unchecked routine overflow":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      mkStartSeqOvf()
+      pinUndefined(sutStartSeqOvf, cellKey(faCallShape,
+                   "reexec/procValueClosureStartSeqUnchecked"),
+                   UbKind(ubSignedOverflow), tLabel("t"))
+      gStartSeqOvf = nil
+
+  test "the run appends to the captured string the child was handed: exact":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      mkStartStrMut()
+      discard pinExact(sutStartStrMut, cellKey(faCallShape,
+                       "reexec/procValueClosureStartStrMut"), tLabel("t"))
+      gStartStrMut = nil
+
+  test "two captured values, a string among them, do not cross, and say why":
+    # A precision limit: the child rebuilds an environment value by value,
+    # and the order of two or more is the compiler's. The route stands (the
+    # destructor runs no user code); the replay is not marshallable.
+    mkStartTwo()
+    let r = symexFind(sutStartTwo, tLabel("t"))
+    gStartTwo = nil
+    checkpoint show(r.errors)
+    check not r.trusted
+    var named = false
+    for e in r.errors:
+      if e.kind == feReplayDeclined and "more than one value" in e.msg:
+        named = true
+      check e.kind != feGlobalRouteUnproved
     check named
 
 suite "PRC-02: a method":

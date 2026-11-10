@@ -29,6 +29,10 @@ import std/typetraits
 
 type
   WireError* = object of CatchableError
+  EnvPut* = proc (w: var WireWriter; env: pointer) {.nimcall.}
+    ## RFC-0016 W3-z R11. Writes the one value a closure environment holds.
+  EnvGet* = proc (r: var WireReader; env: pointer) {.nimcall.}
+    ## RFC-0016 W3-z R11. Reads it into the child's environment.
   WireWriter* = object
     data*: string
     cells: Table[pointer, int]
@@ -37,11 +41,26 @@ type
       ## RFC-0016 W3-z R10. Per slot of `procs`: a closure of that routine
       ## may carry its environment (its captured values are their bytes
       ## alone; `symex.nim`'s `envPlainWhy`). Missing: it may not.
+    envBenign*: seq[bool]
+      ## RFC-0016 W3-z R11. Per slot of `procs`: a closure of that routine
+      ## carries an environment whose destructor, if any, is the compiler's
+      ## and runs no user code (`dsl_parser.envBenignExpr`): it holds strings,
+      ## seqs and objects of plain values. Missing: it does not.
+    envPut*: seq[EnvPut]
+      ## RFC-0016 W3-z R11. Per slot of `envBenign`: the writer of the one
+      ## value the environment holds, or nil when it holds more than one (the
+      ## order of an environment's fields is the compiler's).
+    scratch*: bool
+      ## RFC-0016 W3-z R11. The settle's check that every proc value names a
+      ## routine of the table (`symex.emitProcValueLift`): nothing is handed
+      ## to a child, so an `envBenign` environment is not written.
   WireReader* = object
     data*: string
     pos: int
     cells: seq[pointer]
     procs*: seq[pointer]
+    envGet*: seq[EnvGet]
+      ## RFC-0016 W3-z R11. Per slot of `procs`, `WireWriter.envPut`'s reader.
 
 proc initWireReader*(data: string; procs: seq[pointer] = @[]): WireReader =
   WireReader(data: data, procs: procs)
@@ -102,44 +121,89 @@ proc envRefusal*(env: pointer): string =
     "a closure with a captured environment, whose type this memory manager " &
       "does not describe"
 
-proc putEnv(w: var WireWriter; code, env: pointer) =
-  ## RFC-0016 W3-z R10. A closure's environment, by its bytes (`envRefusal`),
-  ## with the host's addresses of its routine and of its type, from which
-  ## the child finds its own type (`getEnv`).
+proc envTypedRefusal*(env: pointer): string =
+  ## RFC-0016 W3-z R11. Empty when a closure environment `env` names its type
+  ## (ARC/ORC's `TNimTypeV2`, with a size), whatever its destructor.
+  when defined(gcArc) or defined(gcOrc) or defined(gcAtomicArc):
+    let rti = cast[ptr pointer](env)[]
+    if rti == nil:
+      return "a closure whose environment has no type header"
+    if cast[ptr UncheckedArray[int]](rti)[1] < sizeof(pointer):
+      return "a closure whose environment's type gives no size"
+    ""
+  else:
+    "a closure with a captured environment, whose type this memory manager " &
+      "does not describe"
+
+proc envField*(env: pointer; offset, size: int): pointer =
+  ## RFC-0016 W3-z R11. The address of the one value an environment holds, at
+  ## `offset` of an object of `size` bytes: its type header, then the value
+  ## (the mirror the generated codec lays out). An environment whose type
+  ## gives another size is not the one the codec was made for.
   let rti = cast[ptr pointer](env)[]
-  let size = cast[ptr UncheckedArray[int]](rti)[1]
+  if rti == nil or cast[ptr UncheckedArray[int]](rti)[1] != size:
+    raise newException(WireError, "a closure environment whose type is not " &
+                       "the one its routine's capture describes")
+  cast[pointer](cast[uint](env) + uint(offset))
+
+proc putEnv(w: var WireWriter; code, env: pointer; put: EnvPut = nil) =
+  ## RFC-0016 W3-z R10. A closure's environment, by its bytes (`envRefusal`),
+  ## with the host's addresses of its routine, of its type and of the type's
+  ## destructor, from which the child finds its own type (`getEnv`).
+  ## RFC-0016 W3-z R11: an environment with a destructor is written by `put`,
+  ## the codec of the one value it holds, never by its bytes (a buffer is an
+  ## address in the host).
+  let rti = cast[ptr pointer](env)[]
+  let f = cast[ptr UncheckedArray[int]](rti)
+  let size = f[1]
   w.putLen(size)
   var c = cast[int64](code)
   var t = cast[int64](rti)
+  var d = cast[int64](f[0])
   w.putRaw(addr c, 8)
   w.putRaw(addr t, 8)
-  w.putRaw(cast[pointer](cast[uint](env) + uint(sizeof(pointer))),
-           size - sizeof(pointer))
+  w.putRaw(addr d, 8)
+  if d == 0:
+    w.putRaw(cast[pointer](cast[uint](env) + uint(sizeof(pointer))),
+             size - sizeof(pointer))
+  else:
+    put(w, env)
 
-proc getEnv(r: var WireReader; code: pointer): pointer =
+proc getEnv(r: var WireReader; code: pointer; at: int): pointer =
   ## RFC-0016 W3-z R10. The child's copy of a closure environment `putEnv`
   ## wrote, or nil. The child is the same binary, loaded elsewhere: the
   ## environment's type lies where the host's did, moved as the routine
   ## moved (one image, one load offset), and must say what the host's said
-  ## (no destructor, the same size), or the witness is not the host's.
+  ## (the same size, and a destructor moved the same way, or none), or the
+  ## witness is not the host's. RFC-0016 W3-z R11: an environment with a
+  ## destructor is filled by the slot's codec (`envGet`) in a zeroed object
+  ## of the child's type.
   let size = r.getLen()
   if size < 0: return nil
   if size < sizeof(pointer) or size - sizeof(pointer) > r.data.len - r.pos:
     raise newException(WireError, "the replay's witness is malformed")
-  var hc, ht: int64
+  var hc, ht, hd: int64
   r.getRaw(addr hc, 8)
   r.getRaw(addr ht, 8)
-  let rti = cast[pointer](cast[uint](ht) + (cast[uint](code) - cast[uint](hc)))
+  r.getRaw(addr hd, 8)
+  let delta = cast[uint](code) - cast[uint](hc)
+  let rti = cast[pointer](cast[uint](ht) + delta)
   let f = cast[ptr UncheckedArray[int]](rti)
-  if f[0] != 0 or f[1] != size:
+  let dtor = if hd == 0: 0 else: cast[int](cast[uint](hd) + delta)
+  if f[0] != dtor or f[1] != size:
     raise newException(WireError, "a closure environment whose type the " &
                        "child does not find where the host's was")
+  if dtor != 0 and (at >= r.envGet.len or r.envGet[at] == nil):
+    raise newException(WireError, "the replay's witness is malformed")
   var e: ref RootObj
   unsafeNew(e, size)
   let p = cast[pointer](e)
-  r.getRaw(cast[pointer](cast[uint](p) + uint(sizeof(pointer))),
-           size - sizeof(pointer))
   cast[ptr pointer](p)[] = rti
+  if dtor == 0:
+    r.getRaw(cast[pointer](cast[uint](p) + uint(sizeof(pointer))),
+             size - sizeof(pointer))
+  else:
+    r.envGet[at](r, p)
   GC_ref(e)
   p
 
@@ -204,20 +268,40 @@ proc wirePut*[T](w: var WireWriter; x: T) =
         if p == code:
           at = i
           break
+      # RFC-0016 W3-z R11: an environment whose destructor runs no user code
+      # (`envBenign`) is named by the settle's scratch wire (a forked child
+      # copies it) and written by its one value's codec (`envPut`) to a
+      # re-executed child.
+      var put: EnvPut = nil
+      var skip = false
       if env != nil:
         if at < 0:
           raise newException(WireError, "a closure with a captured environment, whose routine the replayed code does not name (or names only inside a routine, where its address cannot be taken), which the child cannot be given")
-        if at >= w.envOk.len or not w.envOk[at]:
-          raise newException(WireError, "a closure with a captured environment holding a value that is not its bytes alone (an address, a buffer or a type header), which the child cannot be given")
+        let plain = at < w.envOk.len and w.envOk[at]
+        let benign = at < w.envBenign.len and w.envBenign[at]
         let why = envRefusal(env)
-        if why.len > 0:
+        if plain and why.len == 0:
+          discard
+        elif benign:
+          let typed = envTypedRefusal(env)
+          if typed.len > 0:
+            raise newException(WireError, typed & ", which the child cannot be given")
+          if w.scratch:
+            skip = true
+          elif at < w.envPut.len and w.envPut[at] != nil:
+            put = w.envPut[at]
+          else:
+            raise newException(WireError, "a closure whose captured environment holds more than one value, a string or seq among them: the child rebuilds such an environment value by value, and the order of its values is the compiler's, which the child cannot be given")
+        elif not plain:
+          raise newException(WireError, "a closure with a captured environment holding a value that is not its bytes alone (an address, a buffer or a type header), which the child cannot be given")
+        else:
           raise newException(WireError, why & ", which the child cannot be given")
       if at < 0:
         raise newException(WireError, "a proc value naming no routine the replayed code names, so the child could not run it")
       w.putLen(at)
       when sizeof(T) > sizeof(pointer):
-        if env == nil: w.putLen(-1)
-        else: w.putEnv(code, env)
+        if env == nil or skip: w.putLen(-1)
+        else: w.putEnv(code, env, put)
   else:
     raise newException(WireError, "a value of an unmarshallable type")
 
@@ -276,7 +360,7 @@ proc wireGet*[T](r: var WireReader; x: var T) =
         c[0] = r.procs[at]
         if c[0] == nil:
           raise newException(WireError, "the replay's witness is malformed")
-        c[1] = r.getEnv(c[0])
+        c[1] = r.getEnv(c[0], at)
         copyMem(addr x, addr c[0], sizeof(T))
       else:
         x = cast[T](r.procs[at])

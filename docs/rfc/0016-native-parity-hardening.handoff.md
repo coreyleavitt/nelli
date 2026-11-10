@@ -1489,6 +1489,43 @@
     `tsymex_0016_prc02_reexec.nim`. Limit: a symexFind expanded inside a
     routine (not module level) cannot name a nested routine; it declines
     with the reason.
+  - W3-z R11 (`rfc-0016-w3z-r11`, walker 344 to 345, precision): a
+    start-value closure whose environment captures a `string`, a `seq` of
+    plain values, or an object of them. Route guard: the scan keeps the
+    nested routines of the routines it reads (`RouteBody.nested`,
+    `collectNestedRoutines`); one nested directly in a top-level proc whose
+    every captured local is of a type with no user hook (`envBenignWhy`/
+    `envBenignType`: plain values, `string`, `seq`/`array`/tuples of such,
+    objects and distincts of such declared in the probe site's module whose
+    hook probe finds no user hook, `symexEnvHooksFree`) is a benign
+    environment; its code address (`nestedRoutineAddrs`, now in
+    `replayproc.nim`) joins the set `closureEnvRefusal` accepts beside a
+    destructor-free environment. Any other destructor still declines with
+    R8's reason. Settle: the scratch wire names a benign environment's
+    routine without writing it (`WireWriter.envBenign`, `scratch`); a fork
+    copies it. Re-exec wire: an environment of ONE captured value crosses
+    by that value's codec (`envCodecs`: a mirror object of a pointer and
+    the value gives the offset, `envField` checks the size against the
+    environment's type), and the child allocates a zeroed object of its own
+    environment type (found as R10 finds it, the destructor checked moved
+    the same way) and reads the value into it (`WireReader.envGet`). Two
+    or more captured values decline on re-exec, named (the field order is
+    the compiler's); a fork is exact. Captured state the run mutates is the
+    run's (the routine runs in the child on its copy; the walker's view of
+    the call is havoc either way). Pins: `fork/` and
+    `reexec/procValueClosureStartStr` and `...StartStrMut` exact,
+    `...StartSeqUnchecked` `ubSignedOverflow`, `fork/procValueClosureStartBox`
+    and `fork/procValueClosureStartTwo` (a string and an int) exact, the
+    re-exec of the latter declined `feReplayDeclined` saying why (a
+    precision limit, not a fork), a captured object with a user `=destroy` declines
+    `feGlobalRouteUnproved` naming the variable
+    (`tests/tsymex_0016_w3z_r11_closstr.nim`, `tsymex_0016_w3z_r11_hooked.nim`
+    (the hook probe sees a same-module user `=destroy`), and
+    `tsymex_0016_prc02_reexec.nim`). Found on the way: naming a capturing
+    routine from module-level code of its own module before its enclosing
+    routine was generated is an internal compiler error (the captured
+    local "not init"); `nestedRoutineAddrs` now takes the enclosing
+    routine's address first, which lifts the captures.
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **W3-z E4b (`rfc-0016-w3z-evidence4b`):** the soundness rows SND-01..06, SND-08..11, PRC-27 and CRH-02 leave `closed-legacy.txt`: their pre-K9 suites now call `pinExact`/`pinDecline` beside every existing assertion (records keyed to the magic cell the fix lives on where one exists, else to a `family:callshape` cell). A closed row cannot name a declined cell, so SND-06 (`magic:ProcCall`), CRH-02 (`magic:GCref`) and the decline-only rows carry the pin file, not the cell. PRC-01 and PRC-02 are pinned on Linux (`pinExact` under `-d:nelliReplayReexec`, the same marshalling path as Windows); their legacy entries said the suites skip on Linux, which has been false since PRC-01 and PRC-02m. PRC-41 and PRC-42 are homed at W4-z (the id the other open precision rows use; the Wave 4 table's "W-32 and the precision rows" line has no slice id). `closed-legacy.txt` is 24 rows.
 - **W3-z E2c (`rfc-0016-w3z-evidence2c`):** the construct axis grows 61 -> 70 cells. `k8a-gen/DivLit` and `k8a-gen/Udiv` ship exact records from two hand-seeded sat-by-construction anchor programs (`anchorPrograms`, ids from 1000000, in the batch that starts the stream), whatever the seed or count. The six sampled-unsat-only keys gain an exhaustive (int8/uint8) or sat-sibling pin and become modelled cells. `threads/createThread` is a declined cell (`pinDecline`, `feUnsupportedOp`). Not cells: `hook/=trace/cycleCollector` and `hook/=destroy/dynamicSubtype` (walker faults, `coerceIntLit`, P6: a fault is not a decline) and `quit/afterTarget/assertCoveredBy` (a clean `sxSat`; the host ends at the splat, INT-22): they stay `skipCell`.

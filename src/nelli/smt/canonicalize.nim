@@ -560,8 +560,14 @@ const renderAsChoicesVersion* = "12"
   ##   captured values are their bytes alone crosses the re-exec wire
   ##   (`envRefusal`, `putEnv`/`getEnv`). One the settle cannot name leaves a
   ##   `feReplayDeclined` hint saying why on the confirmed claim.
+  ## - RFC-0016 W3-z R11 (344->345): a start-value closure whose environment
+  ##   has a destructor the compiler generated over strings, seqs and objects
+  ##   of plain values (no user hook, `envBenignExpr`) keeps the route scan's
+  ##   routes (`closureEnvRefusal`'s benign set), is named by the settle's
+  ##   scratch wire, and crosses the re-exec wire when it holds one value
+  ##   (`envCodecs`, `envField`).
 
-const symexWalkerVersion* = "344"
+const symexWalkerVersion* = "345"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

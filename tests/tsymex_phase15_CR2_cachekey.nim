@@ -1200,7 +1200,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## proc-valued variable's callee ordered): 342->343.
     ## RFC-0016 W3-z R10 (a start-value closure with an environment named
     ## by the replay settle): 343->344.
-    check symexWalkerVersion == "344"
+    ## RFC-0016 W3-z R11 (a start-value closure whose environment holds
+    ## strings or seqs keeps the routes and crosses the wire): 344->345.
+    check symexWalkerVersion == "345"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

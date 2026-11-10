@@ -413,6 +413,31 @@ const symexWalkerVersion* = "319"
     ## RFC-0016 W3-z P6b (a `nil` arm of a case-expression yields a value, so its temp is bound): 316->317.
     ## RFC-0016 W3-z P6 (a declined nil placeholder in a composite slot degrades, not a walker fault): 315->316.
     ## RFC-0016 W3-z P7 (touchesFloat reads inline iterator bodies): 314->315.
+  ## RFC-0016 W3-z P18 (317->318): SOUNDNESS. An `int8` or `int16` loop
+  ## variable of `..`, `..<`, `countup` or `countdown` was bound as a 64-bit
+  ## signed int in the body, so `i + 125'i8` never raised `OverflowDefect`: a
+  ## trusted false sxUnsat for a label reached by (or a raise at) the native
+  ## overflow. It is now its own type, as the unsigned narrow counters are.
+  ## RFC-0016 W3-z P17 (316->317): SOUNDNESS. The `..` / `..<` arm re-read a
+  ## non-symbol bound (`0 ..< s.len`, `0 .. m + 0`) on every iteration where
+  ## Nim evaluates it once (a symbol bound is still read each iteration), so a
+  ## body that moved the bound gave a trusted false sxUnsat. Also: an `uint`,
+  ## `uint32` or `uint64` counter of `..`/`..<` (and of `countup`/`countdown`
+  ## with a literal step) is held in its own type, so `i - 1` wraps in the
+  ## body and the counter wraps as `inc` does; an `int32` counter's `inc`
+  ## overflows at int32; `uint`/`uint64` `countdown` stops at `b` before
+  ## stepping; an `uint8`/`uint16` loop variable is its own type in the body.
+  ## RFC-0016 W3-z P15 (315->316): `for i in countup(a, b[, step])` and
+  ## `countdown` over an `int`-like counter (the stdlib's `IntLikeForCount`,
+  ## and `int64`) are modelled by the `for` arm beside `..`: `a`, `b` and
+  ## `step` are read once, a step below 1 raises `RangeDefect`, the counter
+  ## steps as an `int` (overflow checked), as the inlined body does. Before,
+  ## the generic body (`cast[T](res)`) declined `feUnsupportedExprKind`.
+  ## RFC-0016 W3-z P3b (314->315): the system `countup`/`countdown` iterators
+  ## have a declined row (`feUnsupportedExprKind`, their body casts `T(res)`),
+  ## so the decline names its real cause instead of `feUnadmitted`. The
+  ## inventory found no iterator of the corpus's SUTs that P3 turned from
+  ## exact to unknown: the rest are walked by their own arms.
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
   ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a
   ## stdlib proc taken as a value (`parseProcAsValue`); absent declines

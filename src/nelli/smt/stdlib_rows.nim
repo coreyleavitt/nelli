@@ -78,6 +78,9 @@ func unsignedOp(key, note: string): StdlibRow =
 func declinedType(key, note: string): StdlibRow =
   (key, refused[StdlibSite, StdlibBody](some(feUnsupportedParamType), note))
 
+func declinedIterator(key, note: string): StdlibRow =
+  (key, refused[StdlibSite, StdlibBody](some(feUnsupportedExprKind), note))
+
 func neverFacet(key, note: string; why: NeverReason;
                 kind = feUnsupportedOp): StdlibRow =
   (key, refused[StdlibSite, StdlibBody](some(kind), note, intent = iNever,
@@ -154,6 +157,28 @@ const explicitRows: seq[StdlibRow] = @[
     "a stdlib generic object: its hash-table layout is not modelled"),
   declinedType("deques.Deque",
     "a stdlib generic object: its ring buffer is not modelled"),
+
+  # W3-z P3b / P15 / P17. The system counting iterators are keyed
+  # `<name>/iterator` (P3). Over an `int`-like counter, and over an `uint`,
+  # `uint32` or `uint64` counter with a literal step, the `for` loop is
+  # modelled by its own arm (`dsl_parser`, beside `..`), which never reaches
+  # this key. What does: a variable step over an unsigned counter (the
+  # generic body's `inc(res, step)` converts the step to the counter's type)
+  # and a counter outside the ordinal types, which step with `cast[T](res)`
+  # (an unsupported expression kind) inside a loop the unwind bound does not
+  # close, and decline. The row names that instead of leaving it to "absent".
+  declinedIterator("system.countup/iterator",
+    "iterators_1.nim `countup` over an unsigned counter with a variable step, " &
+    "or a counter outside the ordinal types: the body steps with " &
+    "`cast[T](res)` / `inc(res, step)` over a generic type, which the " &
+    "walker does not support (nnkCast), inside a loop the unwind bound " &
+    "does not close; open precision"),
+  declinedIterator("system.countdown/iterator",
+    "iterators_1.nim `countdown` over an unsigned counter with a variable " &
+    "step, or a counter outside the ordinal types: the body steps with " &
+    "`cast[T](res)` / `dec(res, step)` over a generic type, which the " &
+    "walker does not support (nnkCast), inside a loop the unwind bound " &
+    "does not close; open precision"),
 
   # STY-02 (C-13): iteration order is the hash order, which depends on the
   # build (Nim version, `-d:nimStringHash2`, `-d:nimPreviewHashRef`).

@@ -214,6 +214,56 @@
     `cast[ptr T](0)` / `cast[ptr T](nil)`, which declined `heUnsafeCast`; it
     is now the target nil. A nonzero address stays declined. Test:
     `tsymex_0016_w3z_p16_ptrscalar`.
+  - W3-z P3b (`rfc-0016-w3z-parser3b`, walker 314 to 315, precision): P3's
+    risk that system `countup`/`countdown` "used to walk exactly" is refuted:
+    their generic body steps with `cast[T](res)` (nnkCast, unsupported), so
+    the walk was `sxUnknown` before P3 too. They get declined rows
+    (`feUnsupportedExprKind`) with `pinDecline`; `..`/`..<`, items/pairs/
+    mitems/mpairs, runes, tables keys/values/pairs and fields/fieldPairs are
+    walked by their own arms and never reach the axis (guarded exact).
+    `strutils.split`/`splitWhitespace` stay unadmitted (body walk declines
+    `seUnsupportedStringOp`). Test: `tsymex_0016_w3z_p3b_iterrows`.
+  - W3-z P15 (`rfc-0016-w3z-parser15`, walker 315 to 316, precision): the
+    `for` arm that walks `..` also walks `countup(a, b[, step])` and
+    `countdown(a, b[, step])` over an `int`-like counter (bool, char, enums,
+    int8..int64, uint8, uint16), as the inlined stdlib body does: the counter
+    steps as an `int` (overflow raises `OverflowDefect`, e.g. `countup(high(int)
+    - 1, high(int))`), a step below 1 raises `RangeDefect` before the loop, a
+    symbol bound is read every iteration (Nim substitutes a symbol argument),
+    any other bound expression is evaluated once into a temporary. The P3b
+    rows stay for the counters outside that set (`uint`, `uint32`, `uint64`,
+    floats), which still decline `feUnsupportedExprKind` through the
+    iterator inliner. Test: `tsymex_0016_w3z_p15_countup` (25 differential
+    pins, family cells `p15/countup`, `p15/countdown`). Trap: a loop of 5 or
+    more iterations is `sxSat` but untrusted (`ubTailUnverified`: the tail
+    walk's unwind), for `..` and `countup` alike. Open, unprobed: the `..` arm
+    appears to re-read a non-symbol bound (`0 .. f(x)`) every iteration where Nim
+    evaluates it once.
+  - W3-z P17 (`rfc-0016-w3z-parser17`, walker 316 to 317, soundness then
+    precision): the `..` / `..<` arm re-read a non-symbol bound every
+    iteration (`0 ..< s.len`, `0 .. m + 0` with a body that moves it): a
+    trusted false sxUnsat. Nim evaluates it once, and re-reads only a symbol
+    bound (probed: `.. m` and `..< m` re-read, as `countup` does); the arm now
+    binds any other bound to a temporary. A call in the bound was already
+    hoisted, so `0 .. bump()` was right. Also exact now: an `uint`, `uint32`,
+    `uint64` counter of `..`/`..<` and of `countup`/`countdown` with a literal
+    step is held in its own type (the body's `i - 1'u32` wraps; it was an
+    int64, a false sxUnsat), `uint`/`uint64` `countdown` stops at `b` before
+    stepping (no wrap at 0), an `int32` `..` counter overflows at int32, an
+    `uint8`/`uint16` loop variable is its own type in the body. A variable
+    step over an unsigned counter still declines through the P3b rows
+    (`inc`'s step conversion is not modelled). Natively, `countup` over
+    `uint32` to `high(uint32)` and `countdown` over `uint32` to 0 never end
+    (the counter wraps): the model wraps too and ends untrusted at the unwind
+    bound. Test: `tsymex_0016_w3z_p17_dotdot`.
+  - W3-z P18 (`rfc-0016-w3z-parser18`, walker 317 to 318, soundness): an
+    `int8` or `int16` loop variable of `..`, `..<`, `countup`, `countdown` was
+    bound as an int64 in the body, so `i + 125'i8` never raised
+    `OverflowDefect` (probed: trusted false sxUnsat on `OverflowDefect` for
+    int8 and int16 in all four forms; `int32`, `char`, an `int8` proc argument
+    and an in-range body already agreed with native). `smallUnsignedBind` is
+    now `smallCounterBind`, one helper for the four narrow types. Test:
+    `tsymex_0016_w3z_p18_signed_counter`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

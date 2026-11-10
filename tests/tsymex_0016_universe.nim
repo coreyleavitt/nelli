@@ -76,6 +76,7 @@ import nelli/smt/buildprofile
 import nelli/smt/typeaxes
 import nelli/smt/pragmaaxes
 import nelli/smt/readonlyaxes
+import nelli/smt/constructaxes
 import nelli/smt/stdlib_rows
 import nelli/smt/definedness
 import nelli/smt/soundness
@@ -182,6 +183,10 @@ proc deriveUniverse(): seq[UCell] =
                      state: stateOf(c.admitted, c.intent), detail: "-",
                      kind: kindOf(c.kind))
   for c in readOnlyAxis.cells:
+    result.add UCell(key: render(c.cell),
+                     state: stateOf(c.admitted, c.intent), detail: "-",
+                     kind: kindOf(c.kind))
+  for c in constructAxis.cells:
     result.add UCell(key: render(c.cell),
                      state: stateOf(c.admitted, c.intent), detail: "-",
                      kind: kindOf(c.kind))
@@ -370,8 +375,12 @@ proc parseOver(text: string): seq[Over] =
                       reason: f[3])
 
 proc allowCount(allow: seq[Allow]; scope: string): int =
+  ## The scope's debt: its entries that name work somebody still owes. An
+  ## entry with a `rows=` scope is a platform classification (another leg's
+  ## row cannot evidence the cell, and that is permanent, not owed), so it is
+  ## in neither this count nor the introduction count (W3-z decision (a)).
   for a in allow:
-    if scopeOf(a.key) == scope: inc result
+    if scopeOf(a.key) == scope and a.rows.len == 0: inc result
 
 proc shrinkProblems(allow: seq[Allow]; intro: seq[IntroCount];
                     over: seq[Over]; ids: HashSet[string]): seq[string] =
@@ -447,10 +456,9 @@ proc axisExactProblems(u: seq[UCell]; recs: seq[PinRecord]; legRow: string;
                  "record" & (if legRow.len > 0: " on row " & legRow else: "")
 
 const
-  ## Axes with no cells yet: the slice that gives each some.
-  pendingAxes = {
-    "construct": "blocker: the axis has no site table; its pins are filed " &
-                 "under construct:* keys that no table derives (orphan cells)"}.toTable
+  ## Axes with no cells yet: the slice that gives each some. None: the
+  ## construct axis gained its pinned-subset table in W3-z E2b.
+  pendingAxes = initTable[string, string]()
 
 proc orphanCells(u: seq[UCell]; recs: seq[PinRecord]): seq[string] =
   ## The distinct cells records name that no table derives, sorted. Not a
@@ -595,6 +603,8 @@ suite "RFC-0016 K1a-cells: the universe is derived":
     check universe.countIn("pragma:") == toSeq(pragmaAxis.cells).len
     check universe.countIn("typeop:") == toSeq(typeOpTable.cells).len
     check universe.countIn("readonly:") == toSeq(readOnlyAxis.cells).len
+    check universe.countIn("construct:") == toSeq(constructAxis.cells).len
+    check universe.countIn("construct:") > 0
     check universe.countIn("defined:") == toSeq(definednessTable.cells).len
     check universe.countIn("build:") >= 3 + 5
     check universe.countIn("build:row/") == ord(high(BuildRow)) + 1
@@ -1027,6 +1037,9 @@ suite "RFC-0016 W3-z E2: the per-axis criterion":
     check axisCellProblems(universe, pendingAxes).len == 0
     check axisCellProblems(universe, initTable[string, string]()).len ==
       pendingAxes.len
+    let bare = universe.filterIt(not it.key.startsWith("construct:"))
+    check axisCellProblems(bare, pendingAxes).anyIt(
+      "construct" in it and "not pending" in it)
     var stale = pendingAxes
     stale["magic"] = "x"
     let fails = axisCellProblems(universe, stale)
@@ -1065,6 +1078,23 @@ suite "RFC-0016 W3-z E2: the per-axis criterion":
     let allow = allowFor(@["magic:Swap"])
     check shrinkProblems(allow, intro, parseOver("magic\t1\tW4-z\tr\n"),
                          ids).anyIt("remove it from over-intro.txt" in it)
+
+  test "a rows-scoped platform entry is a classification, not debt":
+    let intro = parseIntro("build\t2\tabcdef0\n")
+    let keys = @["build:a", "build:b", "build:c|x", "build:d|y"]
+    var allow = allowFor(keys[0 .. 1])
+    check allow.allowCount("build") == 2
+    allow.add parseAllow("build:c|x\tCI-B\tr\trows=msvc\n" &
+                         "build:d|y\tCI-B\tr\trows=mingw\n")
+    check allow.len == 4
+    check allow.allowCount("build") == 2
+    # two debt entries are not shorter than 2 whatever the platform entries
+    check shrinkProblems(allow, intro, @[], ids).anyIt(
+      it.startsWith("scope build") and "does not name it" in it)
+    allow = allowFor(@["build:a"]) & allow[2 .. 3]
+    check allow.allowCount("build") == 1
+    check not shrinkProblems(allow, intro, @[], ids).anyIt(
+      it.startsWith("scope build"))
 
   test "RED: an introduction line without a commit fails":
     let intro = parseIntro("magic\t5\tab\n")

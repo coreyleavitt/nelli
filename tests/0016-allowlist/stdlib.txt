@@ -1,11 +1,2 @@
 # RFC-0016 K4c allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-stdlib:math.abs	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.min	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.max	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.isInf	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.isFinite	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.isNormal	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.toFloat32	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.toFloat64	K4c	no cell pin: the row (ADM-IR) states a name the float lowering already models; tsymex_phase15_F6_float_math and tsymex_0016_admir decide it
-stdlib:math.nextafter	K4c	no cell pin: the row (ADM-IR) declines a name the parser already recognised (mathFpDeferredOps); std/math has no nextafter on this toolchain, so no SUT can name it

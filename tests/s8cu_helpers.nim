@@ -225,6 +225,17 @@ proc writePinRecord*(r: PinRecord): string {.discardable.} =
       finally: f.close()
       result = pinFile
 
+proc appendPinRecordTo*(dir: string; r: PinRecord) =
+  ## Appends an already-complete record (its run id, build and row kept) to
+  ## `dir/<testFile stem>-reemitted.jsonl`. For a test that runs its probes
+  ## against a private pin directory and ships the verdicts that evidence a
+  ## cell to the leg's directory.
+  createDir(dir)
+  let f = open(dir / (splitFile(r.testFile).name & "-reemitted-" &
+                      $getCurrentProcessId() & ".jsonl"), fmAppend)
+  try: f.writeLine($toJson(r))
+  finally: f.close()
+
 iterator pinRecords*(dir: string): PinRecord =
   ## Every record under `dir`, file by file in name order, line by line.
   var files: seq[string]

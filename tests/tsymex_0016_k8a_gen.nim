@@ -17,6 +17,7 @@ const
   k8aCount {.intdefine.} = 6
   k8aFirst {.intdefine.} = 0
 
+let realPins = pinDir()   ## the leg's record directory, before the redirect
 let pinTmp = getTempDir() / ("k8a_gen_" & $getCurrentProcessId())
 createDir(pinTmp)
 putEnv("NELLI_PIN_DIR", pinTmp)
@@ -98,6 +99,18 @@ suite "K8a-gen":
       echo "FINDING ", f
     check findings(progs, outs, k8aSeed).len == 0
     check d.exact + d.sampledExact > 0
+    # W3-z E2b: the probes pin into a private directory (the red fixtures and
+    # a nightly's thousands of programs must not flood the leg's records), so
+    # the cells `construct:k8a-gen/<Shape>` would have no record on the leg.
+    # Ship one exact record per shape that proved a sat witness, the verdict
+    # the cell's evidence rule accepts (a sampled unsat evidences nothing).
+    var shipped: seq[string]
+    for r in pinRecords(pinTmp):
+      if r.cell.scope == axConstruct and r.cell.key.startsWith("k8a-gen/") and
+         r.verdict == pvExact and r.walker == "sxSat" and
+         r.cell.key notin shipped:
+        shipped.add r.cell.key
+        appendPinRecordTo(realPins, r)
     # Programs take shapes round-robin (`id mod` the shape count), so a run of
     # at least one program per shape must reach every shape; a smaller batch
     # covers only the shapes of the ids it holds.

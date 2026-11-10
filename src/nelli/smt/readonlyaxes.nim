@@ -89,10 +89,10 @@ func readOnlyRows(): seq[ReadOnlyKey] =
   # --- viewwhole/: a callee holding a container's memory (K6c, W-10) ---------
   result.add proved(rsViewWhole, ["viewwhole/tuple-copy"],
     "a tuple built from the container is a copy of it, not a view")
-  result.add may(feTableIterOrder, ["viewwhole/scalar-read"],
-    "a scalar read out of the container is no view and the route lets it " &
-    "through, but the pinned shape iterates `Table.mpairs`, whose order is " &
-    "not modelled: the verdict is sat and untrusted")
+  result.add proved(rsViewWhole, ["viewwhole/scalar-read"],
+    "a scalar read out of the container is no view; a `Table` loop around " &
+    "it is replay-gated (`feTableIterOrder`), and a replayed witness whose " &
+    "tail is defined is trusted (W3-z R6)")
   result.add may(feUnsupportedOp, ["viewwhole/var-copy", "viewwhole/lent-loop"],
     "a `var` copy of the whole, or a `lent` loop over it, holds the " &
     "container's memory")
@@ -217,9 +217,6 @@ func admitShape*(route: ReadOnlyRoute; shape: WriteShape):
   admitReadOnly(shapeKey(route, shape), routeSite(route))
 
 func routeDeclines*(route: ReadOnlyRoute; shape: WriteShape): bool =
-  ## Whether the route itself stops at `shape`. A refusal of kind
-  ## `feTableIterOrder` is not the route's: it lets the shape through and the
-  ## walk of the `Table` loop raises that decline (`viewwhole/scalar-read`).
-  ## A shape with no row declines (`feUnadmitted`).
-  let a = admitShape(route, shape)
-  not a.admitted and a.decline[0] != some(feTableIterOrder)
+  ## Whether the route itself stops at `shape`: the table refuses it. A shape
+  ## with no row declines (`feUnadmitted`).
+  not admitShape(route, shape).admitted

@@ -205,12 +205,13 @@ suite "E3c: the decline names the table's row":
     pinDecline(sHoldLoop, cellKey(axReadOnly, "viewwhole/lent-loop"),
                feUnsupportedOp, tLabel("hl_shared"),
                needle = "readonly:viewwhole/lent-loop: ")
-  test "viewwhole: a scalar read is another path's decline (table order)":
-    # The route lets the shape through; the loop over `mpairs` is what
-    # declines, and it names the stdlib facet, not the route's row.
-    pinDecline(sHoldNone, cellKey(axReadOnly, "viewwhole/scalar-read"),
-               feTableIterOrder, tLabel("hn_shared"),
-               needle = "tables.Table/iterationOrder")
+  test "viewwhole: a scalar read is decided (the table loop is replay-gated)":
+    # The route lets the shape through. The loop over `mpairs` is tainted
+    # `feTableIterOrder` (replay-gated); since W3-z R6 a replayed witness
+    # whose tail is defined is trusted, so the verdict is exact.
+    discard pinExact(sHoldNone, cellKey(axReadOnly, "viewwhole/scalar-read"),
+                     tLabel("hn_shared"),
+                     domain = sampled([toTable({"a": 5})]))
 
 suite "E3b: every shape reads the table":
   const routes = [rrLent, rrHookCopy, rrHookStore, rrPtrFormal, rrViewWhole]
@@ -231,7 +232,7 @@ suite "E3b: every shape reads the table":
         for s in WriteShape:
           if shapeKey(r, s) == k: read = true
       check read
-  test "the route stops at a refused shape, except the table-order one":
+  test "the route stops at a refused shape":
     check routeDeclines(rrViewWhole, wsVarCopy)
     check routeDeclines(rrViewWhole, wsLentLoop)
     check not routeDeclines(rrViewWhole, wsTupleCopy)

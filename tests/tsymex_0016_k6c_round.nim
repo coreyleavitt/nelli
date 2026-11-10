@@ -210,12 +210,10 @@ suite "K6c: bindsViewWhole":
     roDeclined(sHoldLoop, feUnsupportedOp, "hl_shared", "viewwhole/lent-loop",
                "holding the whole of one")
   test "a scalar read out of the container is decided (precision)":
-    # The route lets it through (sat), but the loop is over a `Table`'s
-    # `mpairs`, whose order is not modelled: the verdict is untrusted, so the
-    # cell declines with `feTableIterOrder` and is pinned as a decline.
-    check symexFind(sHoldNone, tLabel("hn_shared")).status == sxSat
-    roDeclined(sHoldNone, feTableIterOrder, "hn_shared",
-               "viewwhole/scalar-read", "")
+    # The route lets it through (sat). The loop over a `Table`'s `mpairs` is
+    # tainted `feTableIterOrder`, which is replay-gated: since W3-z R6 a
+    # replayed witness whose tail is defined is trusted, so the cell decides.
+    roDecided(sHoldNone, sxSat, "hn_shared", "viewwhole/scalar-read", tableDom)
   test "a tuple built from the container is a copy (precision)":
     roDecided(sHoldTuple, sxUnsat, "ht_shared", "viewwhole/tuple-copy", tableDom)
 

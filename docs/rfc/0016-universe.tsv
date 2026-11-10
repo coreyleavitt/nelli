@@ -744,7 +744,7 @@ readonly:ptrformal/global-store	modelled	-
 readonly:ptrformal/local	modelled	-
 readonly:ptrformal/var-return	declined	-
 readonly:viewwhole/lent-loop	declined	-
-readonly:viewwhole/scalar-read	declined	-
+readonly:viewwhole/scalar-read	modelled	-
 readonly:viewwhole/tuple-copy	modelled	-
 readonly:viewwhole/var-copy	declined	-
 stdlib:algorithm.sort/symbolicLength	never	-

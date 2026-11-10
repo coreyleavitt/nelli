@@ -2029,6 +2029,16 @@ proc checkedIte*(ctx: Z3Context; c, t, e: RawZ3Ast): RawZ3Ast =
     return freshOfSort(ctx, tSort)
   ctx.checkErr Z3_mk_ite(ctx.raw, c, t, e)
 
+proc iteFolded*[T: Z3Term](cond: Z3Bool; t, e: T): T =
+  ## `ite(cond, t, e)`, or the arm `cond` picks when it is a Boolean literal.
+  ## A union-image merge over a constructed object's own discriminator tests
+  ## `#x00 == #x00`; left as an `ite`, the solver must see through it before
+  ## `bvIntInverseFacts` can pair an `int2bv` with the view it inverts.
+  case Z3_get_bool_value(cond.ctx.raw, cond.raw)
+  of Z3_L_TRUE: t
+  of Z3_L_FALSE: e
+  else: ite(cond, t, e)
+
 proc checkedEq*(ctx: Z3Context; a, b: RawZ3Ast): RawZ3Ast =
   ## RFC-0005 S8m. `Z3_mk_eq` over two same-sort operands.
   if sortFault(ctx, "equality", sortOfRaw(ctx, a), sortOfRaw(ctx, b)):
@@ -3514,6 +3524,16 @@ proc allocDistinctSym(ty: IRType, baseName: string,
   SymVal(kind: svDistinct, distinctAst: dAny, distinctName: name,
          distinctBaseSym: boxed)
 
+proc discEqBV[W: static int](bv: Z3BitVec[W]; tagOrd: int64): Z3Bool =
+  ## `bv == tagOrd`; a numeral `bv` (a constructed object's own discriminator)
+  ## is a Boolean literal, so a merge on it folds (`iteFolded`, `checkedIte`).
+  let eq = bv == mkBitVec[W](tagOrd)
+  if not isNumeralAst(bv.ctx, bv.raw): return eq
+  let ctx = bv.ctx
+  let r = ctx.checkErr Z3_simplify(ctx.raw, eq.raw)
+  if Z3_get_bool_value(ctx.raw, r) == Z3_L_UNDEF: eq
+  else: wrap[Z3Bool](ctx, r)
+
 proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
   ## `disc == tagOrd` over a variant discriminator's SymVal, whatever BV
   ## width (or `svInt`/`svBool` fallback) it was allocated at. Round-6 A2
@@ -3523,10 +3543,10 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
   ## `retBindEq`'s `svVariant` arm (per-arm implication guard) — collapsed
   ## here so a future 4th site does not become a 4th copy.
   case d.kind
-  of svBV8:  d.bv8  == mkBitVec[8](tagOrd)
-  of svBV16: d.bv16 == mkBitVec[16](tagOrd)
-  of svBV32: d.bv32 == mkBitVec[32](tagOrd)
-  of svBV64: d.bv64 == mkBitVec[64](tagOrd)
+  of svBV8:  discEqBV(d.bv8, tagOrd)
+  of svBV16: discEqBV(d.bv16, tagOrd)
+  of svBV32: discEqBV(d.bv32, tagOrd)
+  of svBV64: discEqBV(d.bv64, tagOrd)
   of svInt:  d.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
   of svBool: d.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc
   else:
@@ -5941,7 +5961,7 @@ proc variantImage(lay: vl.VariantLayout; disc: SymVal;
     if ai.isNone: return @[]
     let sel = variantDiscEq(disc, int64(tag))
     for i in 0 ..< result.len:
-      result[i] = ite(sel, ai.get[i], result[i])
+      result[i] = iteFolded(sel, ai.get[i], result[i])
 
 proc overlaps(f, g: vl.Place): bool =
   f.off < g.off + g.size and g.off < f.off + f.size

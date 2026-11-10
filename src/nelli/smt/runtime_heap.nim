@@ -1164,6 +1164,12 @@ proc heapCellIte(ctx: Z3Context; cond: Z3Bool; t, e: SymVal;
   ## one heap type have the same leaf sorts, so the merge is an `ite` per
   ## leaf. Used where a heap read selects among several arms' cells (an arm
   ## field shared by several tags, a discriminator write's carry).
+  # a literal condition (a constructed object's own discriminator) picks its
+  # arm, so the merge adds no `ite` for the solver to see through
+  case Z3_get_bool_value(ctx.raw, cond.raw)
+  of Z3_L_TRUE: return t
+  of Z3_L_FALSE: return e
+  else: discard
   if t.kind == svString and e.kind == svString:
     return SymVal(kind: svString, str: wrap[Z3String](ctx,
       checkedIte(ctx, cond.raw, t.str.raw, e.str.raw)))
@@ -1565,7 +1571,7 @@ proc cellImage(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
       seeded = true
     else:
       let c = variantDiscEq(disc, int64(arm.tagOrdinal))
-      for i in 0 ..< img.len: result[i] = ite(c, img[i], result[i])
+      for i in 0 ..< img.len: result[i] = iteFolded(c, img[i], result[i])
   if not seeded: result = stored
 
 proc heapActiveTracked(ty: IRType): bool =

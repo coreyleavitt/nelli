@@ -146,6 +146,11 @@ template indeterminateOrRefuted(fn: untyped) =
   check r.errors.named(feGlobalHavoc) or
         UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
 
+const tightRLimit = block:
+  var s = pinSettingsConst
+  s.budget.queryRLimit = 500_000
+  s
+
 when not defined(cpp):
   suite "PRC-07 ref variants: the union image in the heap (c backend)":
     test "a branch-changing discriminator write through a ref reinterprets the bytes":
@@ -189,6 +194,16 @@ when not defined(cpp):
       checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
       check r.status == sxSat
       check r.trusted
+      check r.witness[0] == 0x2_0000_0005'i64
+
+    test "an out-of-arm write read back whole is a cheap query":
+      # the merge on a constructed object's own discriminator is folded, so
+      # the field's `int2bv` meets the view it inverts: 12k solver steps. As
+      # an `ite` over `#x00 == #x00` it took 6.3M (16s here, a runner's
+      # 900s kill), which a 500k budget turns into a decline
+      let r = symexFind(sutOutArmWriteHigh, tLabel("hit"), tightRLimit)
+      checkpoint $r.status & " " & $r.soundness & " " & show(r.errors)
+      check r.status == sxSat
       check r.witness[0] == 0x2_0000_0005'i64
 
     test "an out-of-arm write keeps the bytes it does not cover":

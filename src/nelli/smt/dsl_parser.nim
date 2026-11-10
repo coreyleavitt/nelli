@@ -1370,6 +1370,13 @@ type
                                    ## index (`IndexDefect`), which `isIndex`
                                    ## already forks.
     procs*:      Table[string, ProcSig]
+    noinitNames*: HashSet[string]
+                                   ## RFC-0016 W3-z P5. The names of the
+                                   ## `{.noinit.}` locals declared so far: a
+                                   ## read of one records an indeterminate-read
+                                   ## degrade when it is lowered, so an `and`/
+                                   ## `or` operand that mentions one is never
+                                   ## pure (`shortCircuitPartIsPure`).
     parsing*:    HashSet[string]   ## currently-being-parsed callees
                                    ## (cycle break for mutual recursion)
     keySyms*:    Table[string, NimNode]
@@ -5484,10 +5491,27 @@ type ShortCircuitPart = tuple[pre: seq[IRStmt], ir: IRExpr]
   ## RFC-0005 S8t. One parsed operand of a short-circuit chain: the
   ## statements its evaluation hoisted, and its value.
 
-proc shortCircuitPartIsPure(p: ShortCircuitPart): bool =
-  ## D1c's fast-path test for a non-first operand: nothing hoisted and no
-  ## inline defect fork, so evaluating it unconditionally changes nothing.
-  p.pre.len == 0 and not rhsHasInlineDefectFork(p.ir)
+proc shortCircuitPartIsPure(p: ShortCircuitPart; ctx: ParseCtx): bool =
+  ## D1c's fast-path test for a non-first operand: nothing hoisted, no
+  ## inline defect fork, and no read that records a side condition when it is
+  ## lowered, so evaluating it unconditionally changes nothing.
+  ##
+  ## RFC-0016 W3-z P5. The last clause was missing: a read of an unwritten
+  ## `{.noinit.}` local hoists nothing and forks nothing at parse time; the
+  ## walker records its indeterminate-read degrade when it lowers the read.
+  ## Joined flat, that degrade was recorded on paths where the left operand
+  ## short-circuits and Nim never reads the slot (`k > 3 and x == 0` at
+  ## k = 0). The parser cannot see a walker-time degrade, so it names the one
+  ## operand shape that records one here: a mention of a `{.noinit.}` local
+  ## (`ctx.noinitNames`). Guarding every operand instead would turn each flat
+  ## `a and b` into a joined `if`, a cost on every chain for one shape.
+  if p.pre.len != 0 or rhsHasInlineDefectFork(p.ir): return false
+  if ctx != nil and ctx.noinitNames.len > 0:
+    var refs: HashSet[string]
+    collectVarRefs(p.ir, refs)
+    for n in refs:
+      if n in ctx.noinitNames: return false
+  true
 
 proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
                             preamble: var seq[IRStmt],
@@ -5510,7 +5534,7 @@ proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
   preamble.add parts[0].pre
   var acc = parts[0].ir
   var k = 1
-  while k < parts.len and shortCircuitPartIsPure(parts[k]):
+  while k < parts.len and shortCircuitPartIsPure(parts[k], ctx):
     acc = mkBinop(op, acc, parts[k].ir)
     inc k
   if k == parts.len:
@@ -5524,7 +5548,7 @@ proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
     result = parts[k].pre
     var cur = parts[k].ir
     var j = k + 1
-    while j < parts.len and shortCircuitPartIsPure(parts[j]):
+    while j < parts.len and shortCircuitPartIsPure(parts[j], ctx):
       cur = mkBinop(op, cur, parts[j].ir)
       inc j
     result.add mkAssign(sc, cur)
@@ -16669,7 +16693,7 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
       var k0 = 0
       if parts[0].pre.len == 0:
         k0 = 1
-        while k0 < parts.len and shortCircuitPartIsPure(parts[k0]):
+        while k0 < parts.len and shortCircuitPartIsPure(parts[k0], ctx):
           inc k0
       if k0 >= 1 and k0 < parts.len:
         # Case 1: faithful and-split. Continue-safe by construction.
@@ -21011,6 +21035,7 @@ proc parseStmtInner(n: NimNode,
             # (`noinitPlain`).
             let nty = classifyType(d[0]).ty
             if noinitPlain(nty):
+              ctx.noinitNames.incl d[0].strVal
               stmts.add mkLet(d[0].strVal, nty,
                               mkGlobalVar(noinitReadPrefix & d[0].strVal, nty))
             else:

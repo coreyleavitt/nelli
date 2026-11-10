@@ -1823,6 +1823,8 @@ task test, "Run the test suite":
             "tsymex_0016_s8cj_runctx",
             "tsymex_0016_s8cj_mkunique",
             "tsymex_0016_wa_undefined_e2e",
+            # RFC-0016 W3-z P5: the right operand of and/or lowers under the left operand's guard (a dead read is not UB, a dead index not a raise).
+            "tsymex_0016_w3z_p5_shortcircuit_guard",
             # RFC-0016 K1a-cells: the universe ledger (derived cells, the pin-record join, allowlists, the committed TSV).
             "tsymex_0016_universe",
             # RFC-0016 K2a: the dispatch census (case n.kind, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.

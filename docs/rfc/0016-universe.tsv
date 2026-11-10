@@ -212,8 +212,8 @@ magic:BitorI	modelled	-
 magic:BitxorI	modelled	-
 magic:Bool	never	-
 magic:BoolToStr	modelled	-
-magic:BuildCPU	modelled	-
-magic:BuildOS	modelled	-
+magic:BuildCPU	never	-
+magic:BuildOS	never	-
 magic:BuiltinType	never	-
 magic:CStrToStr	declined	-
 magic:Card	modelled	-
@@ -229,7 +229,7 @@ magic:CpuEndian	modelled	-
 magic:Dec	modelled	-
 magic:Declared	modelled	-
 magic:DeclaredInScope	modelled	-
-magic:DeepCopy	declined	-
+magic:DeepCopy	never	-
 magic:Default	modelled	-
 magic:Defined	modelled	-
 magic:Destroy	never	-
@@ -267,7 +267,7 @@ magic:GCunref	declined	-
 magic:GetImpl	never	-
 magic:GetImplTransf	never	-
 magic:GetTypeInfo	declined	-
-magic:GetTypeInfoV2	declined	-
+magic:GetTypeInfoV2	never	-
 magic:High	modelled	-
 magic:HostCPU	modelled	-
 magic:HostOS	modelled	-
@@ -365,7 +365,7 @@ magic:NewSeqOfCap	modelled	-
 magic:NewString	modelled	-
 magic:NewStringOfCap	modelled	-
 magic:Nil	never	-
-magic:Nimvm	modelled	-
+magic:Nimvm	declined	-
 magic:NodeId	never	-
 magic:Not	modelled	-
 magic:Of	modelled	-

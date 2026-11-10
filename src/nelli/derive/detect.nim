@@ -57,7 +57,7 @@ proc isSelfType*(t: NimNode, selfName: string): bool =
   ## detectors short-circuit on.
   case t.kind
   of nnkSym, nnkIdent: $t == selfName
-  else: false
+  else: false  # k2: n/a: derive's name test, no symex verdict
 
 proc reachesTypeViaFields*(t: NimNode, target: string,
                            visited: var HashSet[string],

@@ -364,7 +364,15 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "312"
+const symexWalkerVersion* = "313"
+  ## RFC-0016 K2F-4 (312->313): sentinel polarity. An inline iterator's formal
+  ## given an array or set constructor of direct operands (`[v, 0]`) is that
+  ## expression, re-read at each use as `transf.putArgInto` maps it, not a
+  ## copy taken where the loop starts; a "rooted at x?" question over
+  ## `lvalueRoot` reads an unread shape that names `x` as yes
+  ## (`mayBeRootedAt`: `addrTakenIn`, `formalAddressTaken`,
+  ## `scanShapeReceiverMutated`); `byValueWritten` compares another `var`
+  ## actual with a path actual by root.
   ## RFC-0016 K2F-1 (311->312): the "may" analyses answer "may" for what they
   ## did not read (RFC section 8.1). `mayWriteRoot` reads a writing magic
   ## (`inc`, `+=`, `swap`, `setLen`: the whole `FakeVarParams` set, which

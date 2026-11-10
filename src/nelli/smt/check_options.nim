@@ -229,7 +229,7 @@ proc decide(c: NimNode): int =
         else: return -1
       if (here == c[2].strVal) == (nameOf(c[0]) == "=="): 1 else: 0
     else: -1
-  else: -1
+  else: -1  # k2: fail-closed: -1 is undecided; walkWhen walks every branch and joins
 
 proc lastLine(n: NimNode): int =
   result = n.lineInfoObj.line
@@ -266,7 +266,7 @@ proc movesState(n: NimNode): bool =
     for c in n:
       if movesState(c): return true
     false
-  else: false
+  else: false  # k2: fail-closed: false only skips forkConds; walkWhen still joins the branch
 
 proc anchored(p: string): string =
   ## `p`, absolute. A search path given on the command line (`--path:src`, as
@@ -326,7 +326,7 @@ proc includePathOf(n: NimNode): string =
     else: ""
   of nnkPrefix:
     if n.len == 2 and nameOf(n[0]) == "./": includePathOf(n[1]) else: ""
-  else: ""
+  else: ""  # k2: fail-closed: "": scanInclude sets res.unknown
 
 proc resolveInclude(fromFile, rel: string): string =
   ## Beside the including file, then under each directory above it (`include

@@ -95,7 +95,7 @@ proc isRoutineGlobal*(n: NimNode): bool =
       of nnkIdent, nnkSym: macros.strVal(p)
       of nnkExprColonExpr:
         if p[0].kind in {nnkIdent, nnkSym}: macros.strVal(p[0]) else: ""
-      else: ""
+      else: ""  # k2: n/a: an entry with no name is not `global`
     if nm == "global": return true
   false
 

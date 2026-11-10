@@ -1175,6 +1175,16 @@
   precondition and a path outside it (`y == 0` included) declines
   `feCheckOption` naming the cell. The `pragma.txt` entries for
   `routine/nanChecks`, `infChecks`, `floatChecks` are removed (pinned exact).
+  - K2F-2 (`rfc-0016-w3z-k2f2`, walker 316): `typePragmaHit` read no pointee of a
+    `var T` formal, so a `var Un` or `var seq[Un]` parameter of a `{.union.}`
+    type was admitted (trusted `sxSat`); it now reads `nnkVarTy`, an alias, an
+    object body under a `when`, and the children of any kind it has no arm
+    for. `layoutPragmaOf` returned the first layout pragma (a `packed` type
+    with an `align` field or `union` beside it read as packed) and skipped a
+    body that is one `case`; it reads every entry. `pragmaName` names
+    `nnkDotExpr`, `nnkCallStrLit` and `nnkBracketExpr` entries and answers
+    `unnamedPragma` for any other shape, which a type now declines. Pins:
+    `tests/tsymex_0016_k2f2_pragmashape.nim`.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

@@ -17697,12 +17697,16 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
     if d.kind == nnkTypeDef and d.len > 0 and d[0].kind == nnkPragmaExpr and
        d[0].len > 1:
       for p in d[0][1]:
-        let a = admitPragma(ppType, pragmaName(p), psTypeDecl)
+        let pn = pragmaName(p)
+        let a = admitPragma(ppType, pn, psTypeDecl)
         # Only a row the table declines: a type pragma with no row (a name
         # a macro or a template reads, `RootObj`'s `compilerproc`) changes
-        # no value the walk computes.
-        if not a.admitted and a.decline[0] == some(feUnsupportedOp):
-          return TypePragmaHit(found: true, pragma: pragmaName(p),
+        # no value the walk computes. An entry of a shape `pragmaName`
+        # cannot name is not such a name: it may be any of the declined
+        # ones (RFC-0016 K2F-2), so it declines.
+        if not a.admitted and (a.decline[0] == some(feUnsupportedOp) or
+                               pn == unnamedPragma):
+          return TypePragmaHit(found: true, pragma: pn,
                                typeName: head.strVal, adm: a)
   # The pragmas on its own fields (W3-z P4): `getImpl` keeps a field's
   # `nnkPragmaExpr`; `getTypeImpl` below does not.
@@ -17716,8 +17720,8 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
             if not a.admitted:
               return TypePragmaHit(found: true, pragma: pragmaName(p),
                                    typeName: owner, adm: a)
-    of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse, nnkObjectTy, nnkRefTy,
-       nnkPtrTy:
+    of nnkRecList, nnkRecCase, nnkRecWhen, nnkElifBranch, nnkOfBranch,
+       nnkElse, nnkObjectTy, nnkRefTy, nnkPtrTy:
       for c in n:
         let r = fieldPragmaHit(c, owner)
         if r.found: return r
@@ -17735,7 +17739,8 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
     case f.kind
     of nnkIdentDefs:
       typePragmaHit(f[^2], seen, depth + 1)
-    of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse, nnkElifBranch:
+    of nnkRecList, nnkRecCase, nnkRecWhen, nnkOfBranch, nnkElse,
+       nnkElifBranch:
       for c in f:
         let r = inField(c, seen, depth)
         if r.found: return r
@@ -17754,7 +17759,9 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
     for f in impl:
       let r = inField(f, seen, depth)
       if r.found: return r
-  of nnkDistinctTy, nnkRefTy, nnkPtrTy:
+  of nnkDistinctTy, nnkRefTy, nnkPtrTy, nnkVarTy:
+    # `nnkVarTy` (RFC-0016 K2F-2): a `var T` formal reaches the type's
+    # pragma through its target, as a `ref` does.
     for c in impl:
       let r = typePragmaHit(c, seen, depth + 1)
       if r.found: return r
@@ -17762,7 +17769,20 @@ proc typePragmaHit(ty: NimNode; seen: var seq[string]; depth = 0):
     for i in 1 ..< impl.len:
       let r = typePragmaHit(impl[i], seen, depth + 1)
       if r.found: return r
-  else: discard
+  of nnkSym:
+    # An alias (`type U = T`): the type it names.
+    if not (ty.kind == nnkSym and ty.strVal == impl.strVal):
+      return typePragmaHit(impl, seen, depth + 1)
+  of nnkEmpty, nnkIdent, nnkEnumTy, nnkProcTy, nnkIteratorTy,
+     nnkRange, nnkInfix, nnkIntLit, nnkStrLit, nnkCommentStmt:
+    discard           # a type with no component that can carry a pragma
+  else:
+    # A kind this walk has no arm for (`sink`, `lent`, `owned` wrappers, a
+    # type a later Nim adds): read its children as components, never as a
+    # type without any.
+    for c in impl:
+      let r = typePragmaHit(c, seen, depth + 1)
+      if r.found: return r
 
 proc typePragmaReason(ty: NimNode): string =
   ## "" when no type reachable from `ty` carries a declined pragma; else the

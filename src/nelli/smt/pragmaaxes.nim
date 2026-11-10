@@ -224,12 +224,22 @@ func admittedNames*(place: PragmaPlace): seq[string] =
        pragmaAxis.admit(k, siteOf(place)).admitted:
       result.add k[head.len .. ^1]
 
+const unnamedPragma* = "?"
+  ## What `pragmaName` answers for a pragma entry of a shape it cannot name.
+  ## It has no row, so every list but the type list declines it (absent is a
+  ## decline); the type list ignores a name with no row, so its readers test
+  ## for this name and decline (RFC-0016 K2F-2).
+
 proc pragmaName*(p: NimNode): string =
   ## The name of one pragma entry (`cursor`, `align: 8` -> `align`,
-  ## `raises: [IOError]` -> `raises`), "?" for a shape with no name.
+  ## `align(8)` -> `align`, `raises: [IOError]` -> `raises`, `m.cursor` ->
+  ## `cursor`), `unnamedPragma` ("?") for a shape with no name: never a name
+  ## that could match a row.
   case p.kind
   of nnkIdent, nnkSym: p.strVal
-  of nnkExprColonExpr, nnkCall, nnkCommand, nnkOpenSymChoice,
-     nnkClosedSymChoice:
-    if p.len > 0: pragmaName(p[0]) else: "?"
-  else: "?"
+  of nnkExprColonExpr, nnkCall, nnkCommand, nnkCallStrLit, nnkBracketExpr,
+     nnkOpenSymChoice, nnkClosedSymChoice:
+    if p.len > 0: pragmaName(p[0]) else: unnamedPragma
+  of nnkDotExpr:
+    if p.len == 2: pragmaName(p[1]) else: unnamedPragma
+  else: unnamedPragma

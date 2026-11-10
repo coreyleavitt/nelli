@@ -84,3 +84,68 @@ suite "RFC-0016 K3a: let-cursor x type":
   test "a variant of scalars is a value: still decided":
     let r = symexFind(vcVariantScalar, tLabel("copied"), pinSettingsConst)
     check r.status == sxUnsat
+
+# E2 (W3-z): the share-detection rows are modelled, and the other side of the
+# decline is the exact one. The same `let c = g` over the same types, with no
+# write to `g` while `c` is read, is a value whether the memory manager shares
+# or copies, so the walker decides it and the native run agrees.
+proc ncVariantSeq(x: int) =
+  gV = V(k: true, s: @[x, 1])
+  let c = gV
+  if c.s[0] == 7: symexTarget("hit")
+
+proc ncPlainSeq(x: int) =
+  gP = Plain(s: @[x, 1])
+  let c = gP
+  if c.s[0] == 7: symexTarget("hit")
+
+proc ncSeq(x: int) =
+  gSq = @[x, 1]
+  let c = gSq
+  if c[0] == 7: symexTarget("hit")
+
+proc ncString(x: int) =
+  gSt = "ab"
+  let c = gSt
+  if c[0] == 'a' and x == 1: symexTarget("hit")
+
+suite "RFC-0016 W3-z E2: let-cursor rows, the exact side":
+  test "a let that nothing writes under is decided, and agrees with the C":
+    check pinExact(ncPlainSeq, cellKey(axTypeOp, "letCursor/tuple")).status == sxSat
+    check pinExact(ncVariantSeq, cellKey(axTypeOp, "letCursor/variant")).status == sxSat
+    check pinExact(ncSeq, cellKey(axTypeOp, "letCursor/seq")).status == sxSat
+    check pinExact(ncString, cellKey(axTypeOp, "letCursor/string")).status == sxSat
+
+# The value kinds copy on every memory manager, so a `let` over them is a
+# value even with a write while it is read: decided, and exact against native.
+var
+  gInt: int
+  gBool: bool
+  gF64: float64
+
+proc ncInt(x: int) =
+  gInt = x
+  let c = gInt
+  gInt = 9
+  if c == 7: symexTarget("hit")
+
+proc ncBool(x: int) =
+  gBool = x > 3
+  let c = gBool
+  gBool = false
+  if c: symexTarget("hit")
+
+proc ncF64(x: int) =
+  gF64 = float64(x)
+  let c = gF64
+  gF64 = 0.0
+  if c > 1.5: symexTarget("hit")
+
+suite "RFC-0016 W3-z E2: let-cursor rows of the value kinds":
+  test "a let over a number is a copy: decided and exact":
+    check pinExact(ncInt, cellKey(axTypeOp, "letCursor/int"),
+                   domain = sampled([7, 0])).status == sxSat
+    check pinExact(ncBool, cellKey(axTypeOp, "letCursor/bool"),
+                   domain = sampled([5, 0])).status == sxSat
+    check pinExact(ncF64, cellKey(axTypeOp, "letCursor/float64"),
+                   domain = sampled([5, 0])).status == sxSat

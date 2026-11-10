@@ -388,7 +388,7 @@ magic:PrivateAccess	never	-
 magic:ProcCall	declined	-
 magic:QuoteAst	never	-
 magic:Range	never	-
-magic:Repr	modelled	-
+magic:Repr	declined	-
 magic:RunnableExamples	modelled	-
 magic:SameNodeType	never	-
 magic:Seq	never	-

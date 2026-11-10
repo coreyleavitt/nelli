@@ -5415,8 +5415,10 @@ proc tNilAccess*(): SymexTarget =
   ## is short-circuited — its nil fork is UNSAT by construction and skipped.
   SymexTarget(kind: stkNilAccess)
 
-const allUbKinds* = {low(UbKind) .. high(UbKind)}
-  ## RFC-0016 K10a-target. `tUndefined`'s default: every kind.
+const allUbKinds* = {low(UbKind) .. high(UbKind)} - {UbKind(ubTailUnverified)}
+  ## RFC-0016 K10a-target. `tUndefined`'s default: every kind a walk can HIT.
+  ## W3-z R1: not `ubTailUnverified`, which only the whole-run gate sets on a
+  ## verdict (`errorkind.nim`: never a halt, never a `tUndefined` hit).
 
 const maxUndefinedFindings* = 8
   ## RFC-0016 K10a-target. The most `UndefinedFinding`s one run solves under a
@@ -5429,6 +5431,13 @@ proc tUndefined*(kinds: set[UbKind] = allUbKinds): SymexTarget =
   ## carries the witness; `sxUnsat` means none of the LISTED kinds is
   ## reachable, never "no undefined behaviour". The witness is never run in
   ## the host (`hostRunnable`) and replay does not run it (`replayInScope`).
+  ## `ubTailUnverified` is refused: it labels a verdict the whole-run gate
+  ## could not complete, so no walk reaches it, and a search for it would be a
+  ## trusted `sxUnsat` for the wrong reason (W3-z R1). A static call is a
+  ## compile error.
+  doAssert UbKind(ubTailUnverified) notin kinds,
+    "tUndefined: ubTailUnverified is not a reachable kind (it marks a " &
+    "verdict the whole-run gate could not complete); omit it"
   SymexTarget(kind: stkUndefined, ubKinds: kinds)
 
 proc optimisedSymexSettings*(): SymexSettings {.deprecated:

@@ -363,8 +363,16 @@ const renderAsChoicesVersion* = "12"
   ##   declines `feCheckOption`: its asserts follow `assertions` at the site
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
+  ## - RFC-0016 W3-z R1 (311->312): under `tUndefined` a `{.noinit.}` read of
+  ##   an unwritten slot is the target's hit. The read rides the path as `ub`
+  ##   on a `feGlobalHavoc` degrade and never halts, so the only hit test
+  ##   (`haltUndefined`) missed it and `tUndefined` answered a trusted
+  ##   `sxUnsat` over a reachable indeterminate read. Every fork that newly
+  ##   puts a requested kind on a path now solves the hit there
+  ##   (`noteUbAtFork`). `tUndefined`'s default no longer lists
+  ##   `ubTailUnverified` (never a walk's hit), and naming it is refused.
 
-const symexWalkerVersion* = "311"
+const symexWalkerVersion* = "312"
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

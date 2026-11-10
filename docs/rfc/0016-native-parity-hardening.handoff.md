@@ -1147,6 +1147,19 @@
   precondition and a path outside it (`y == 0` included) declines
   `feCheckOption` naming the cell. The `pragma.txt` entries for
   `routine/nanChecks`, `infChecks`, `floatChecks` are removed (pinned exact).
+  W3-z R1 (`rfc-0016-w3z-runtime`, walker 311 to 312, finding U3):
+  `tUndefined` hits the `{.noinit.}` read. The read rides the path as `ub` on a
+  `feGlobalHavoc` degrade and never halts, so `haltUndefined`, the only hit
+  test, missed it and `symexFind(f, tUndefined())` was a trusted `sxUnsat`.
+  `noteUbAtFork` (beside `haltUndefined`) is called from `forkPathTainted` and
+  `taintInPlace` for each kind a degrade newly puts on a path, and solves the
+  hit under `stkUndefined`; its taint is the parent's, so the carrying degrade
+  does not demote the finding to a replay-only candidate. `ubTailUnverified` is
+  out of `allUbKinds` (the default) and `tUndefined` refuses it (`doAssert`; a
+  compile error for a static call). Pins: `tsymex_0016_w3z_r1_noinit_target`.
+  Open: a read inside an `and`/`or` operand is lowered unguarded
+  (`shortCircuitPartIsPure` sees no hoist and no inline fork), so
+  `tUndefined` reports it reachable when only the other operand guards it.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen
   defect, not nelli. `compiler/cbuilder.nim` `addFieldWithStructType` writes
   a packed case object's branch `#pragma pack(pop)` into the enclosing

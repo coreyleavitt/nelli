@@ -999,6 +999,11 @@ template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint,
                           parent.undefined)
 
+proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind])
+  ## RFC-0016 W3-z R1 fwd decl (defined beside `admitSolvedHit`). Under
+  ## `tUndefined`, an undefined behaviour a degrade token newly puts on a path
+  ## (the `{.noinit.}` read) is the target's hit.
+
 template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                          d: Degrade): Path =
   ## R3 hardening / RFC-0005 S1: the explicit-INTRODUCE counterpart to
@@ -1012,8 +1017,11 @@ template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
     # `d` is bound once: a template argument is substituted where it is named,
     # and `takeLoweringPendingDegrade()` drains what it reads.
     let tok = d
-    forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint + tok.path,
-                           parent.undefined + tok.ub)
+    let child = forkPathTaintPrimitive(parent, pcExpr, envExpr,
+                                       parent.taint + tok.path,
+                                       parent.undefined + tok.ub)
+    noteUbAtFork(parent.taint, child, tok.ub - parent.undefined)
+    child
 
 template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                         caller: Path): Path =
@@ -1087,8 +1095,11 @@ proc taintInPlace(p: Path; d: Degrade) =
   ## field). Joins, never replaces. A halted path needs no carrier at all
   ## (its contribution is run-global by construction), so halt sites call
   ## `w.halted(…)` and do not come here.
+  let priorTaint = p.taint
+  let priorUb = p.undefined
   p.taint = p.taint + d.path
   p.undefined = p.undefined + d.ub     ## RFC-0016 W1-d3
+  noteUbAtFork(priorTaint, p, d.ub - priorUb)   ## RFC-0016 W3-z R1
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
 # `Path` is a private `ref object`, so the H1 RED test cannot name it. These two
@@ -27434,6 +27445,41 @@ proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
       "solver returned unknown on a path raising `" & typeId &
            "` (queryRLimit=" & $w.settings.budget.queryRLimit &
            "): " & why & " (beSolverUndef)")
+  of sxUnsat, sxRaised: discard
+
+proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind]) =
+  ## RFC-0016 W3-z R1 (finding U3). A `{.noinit.}` read does not halt: it rides
+  ## the path as `ub` on a `feGlobalHavoc` degrade, so `haltUndefined`, the only
+  ## other hit test, never saw it and `tUndefined` returned a trusted `sxUnsat`
+  ## over a reachable indeterminate read. Every fork that newly puts a kind of
+  ## the requested set on a path comes here (`forkPathTainted`, `taintInPlace`;
+  ## a kind already on the parent was tested where it arrived): the hit is
+  ## solved on the child's constraints. The finding's taint is the PARENT's:
+  ## the degrade that carries the kind is the finding itself, not a reason to
+  ## doubt it, so it does not turn the hit into a replay-only candidate.
+  ## Unlike `haltUndefined` the path continues: the read is not a halt.
+  if newUb == {} or currentWalkCtxPtr == nil: return
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  if wp[].target.kind != stkUndefined or wp[].shouldStop or wp[].tailGate:
+    return
+  if newUb * wp[].target.ubKinds == {}: return
+  if wp[].mode == wmFollowConcrete and
+     concretelyInfeasible(wp[].z3, wp[].concreteEq,
+                          child.pc & child.defectSurvivorPc, wp[].settings):
+    return
+  let solveOn = if closureBodyCallerPc.len == 0: child
+                else: forkPath(child, closureBodyCallerPc & child.pc, child.env)
+  let (st, wit, candErrs, why) = solveTargetHit(wp[], solveOn)
+  case st
+  of sxSat:
+    wp[].admitSolvedHit(RawResult(status: sxSat, witness: wit,
+      soundness: Soundness(pathTaint: parentTaint,
+                           witnessUndefined: ubOrdinals(child.undefined)),
+      nilDerefOnPath: child.nilDeref, errors: candErrs))
+  of sxUnknown:
+    wp[].halted(beSolverUndef,
+      "solver returned unknown on a path reading an indeterminate value: " &
+      why & " (beSolverUndef)")
   of sxUnsat, sxRaised: discard
 
 proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,

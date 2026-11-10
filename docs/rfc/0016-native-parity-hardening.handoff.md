@@ -152,6 +152,15 @@
     parsed as a statement and bound no temp; the temp's read faulted. A nil
     literal now yields a value (the temp is bound, the nil declines by name). The `if`-expression form never shared the fault.
     Test: `tsymex_0016_p6_nillit` pins the case form as a decline.
+  - W3-z P12 (`rfc-0016-w3z-parser12`, walker 317, no change): audit of every
+    `isNil` on a NimNode under `src/nelli`. A tree-extracted `nnkNilLit`
+    answers `isNil` true (a macro argument or `newNilLit()` does not). Every
+    site but `armYieldsValue` takes a symbol, type, implementation, lvalue
+    root or a scanner whose nil-literal result equals its absent result, so
+    none changes. Test: `tsymex_0016_p12_nilpos` pins `nil` in 21 expression
+    positions against native. Open, not isNil: `RefO(nil)` (a `Conv` of a
+    `nil`-typed literal) declines with a secondary `heUnresolvedRef`; a
+    `block:` expression declines `nnkBlockExpr`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

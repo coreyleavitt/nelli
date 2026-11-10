@@ -214,6 +214,12 @@ type
       ## stands but is untrusted (`ubTailUnverified`). `0` opts out (only
       ## `walkRLimit` bounds it).
       ##
+      ## The budget is the run's (RFC-0016 W3-z int4r): every tail walk of one
+      ## run draws on it, the winner's or one per replay candidate, and a walk
+      ## that starts with none left fails closed at once. Per walk, a run with
+      ## eleven candidates spent up to eleven budgets
+      ## (`tsymex_r6_n36_raise_degrade`, past 900 s).
+      ##
       ## Why: a branch the witness's pins leave open (a global havoc, an
       ## opaque call's result) is forked both ways (W3-z R6), and each fork
       ## asked its scratch checks at the cap when the query was hard; in a

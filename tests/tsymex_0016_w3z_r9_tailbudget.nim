@@ -70,6 +70,33 @@ proc sutNestedCheap(x: int64): int64 =
     inc i
   result += x
 
+var gFresh = false
+  ## A module-level `var` nothing writes: a fresh symbol at its read, so a
+  ## label behind it is a replay candidate, not a clean winner.
+
+proc sutCandidatesCapped(a: bool; x: int64): int64 =
+  ## Three label sites on the havoc-tainted path, so three replay candidates,
+  ## each with the capped nested loop of `sutNestedCapped` in its tail.
+  let o = gFresh and (a or not a)
+  if not o:
+    if x == 5: symexTarget("hit")
+    if x == 6: symexTarget("hit")
+    if x == 7: symexTarget("hit")
+  var i = 0
+  while i < 2:
+    var j = 0
+    while j < 2:
+      if gA * gA * gA == 0x123456789ABCDEF'u64 + uint64(i * 2 + j):
+        result += 1
+      inc j
+    inc i
+  result += x
+
+proc tailUnitLines(log: string): seq[int] =
+  for line in readFile(log).splitLines:
+    let f = line.split('\t')
+    if f.len >= 2 and f[1] == "k10b-tail": result.add parseInt(f[0])
+
 proc tailUnits(log: string): int =
   result = -1
   for line in readFile(log).splitLines:
@@ -91,6 +118,9 @@ template withUnitsLog(name: string; body: untyped): int =
 suite "W3-z R9: the tail walk's own budget":
   test "version floor (the tail walk has its own budget at 343)":
     check parseInt(symexWalkerVersion) >= 343
+
+  test "version floor (the tail budget is the run's, shared by its tail walks, at 350)":
+    check parseInt(symexWalkerVersion) >= 350
 
   test "the default budget: five capped checks, a tenth of walkRLimit":
     let b = ResourceBudget()
@@ -145,3 +175,31 @@ suite "W3-z R9: the tail walk's own budget":
     check r.status == sxSat
     check r.trusted
     check tail > r9Budget
+
+  test "(d) replay candidates share the run's tail budget: N candidates do not spend N budgets":
+    # W3-z int4r. A run walks one tail per replay candidate (R2); with a
+    # budget per walk each capped tail spent a whole budget, so a run with
+    # many candidates spent many (`tsymex_r6_n36_raise_degrade` ran past
+    # 900 s). The first capped tail spends the run's budget; every later one
+    # starts with nothing left and fails closed without walking.
+    let log = getTempDir() / "r9_d_units.log"
+    removeFile(log)
+    putEnv("NELLI_WALK_UNITS_LOG", log)
+    var r: typeof(symexFind(sutCandidatesCapped, tLabel("hit"), r9Settings))
+    try:
+      r = symexFind(sutCandidatesCapped, tLabel("hit"), r9Settings)
+    finally:
+      delEnv("NELLI_WALK_UNITS_LOG")
+    let tails = tailUnitLines(log)
+    removeFile(log)
+    checkpoint show(r.errors)
+    checkpoint $r.status & " " & $r.soundness
+    checkpoint "tail walks: " & $tails
+    # Three candidates, each tail capped: on a budget per walk they spent
+    # three budgets between them.
+    check tails.len >= 1
+    var spent = 0
+    for t in tails: spent += t
+    check spent >= r9Budget
+    check spent < r9Budget + r9Budget div 10
+    check not r.trusted

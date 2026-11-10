@@ -593,8 +593,18 @@ const renderAsChoicesVersion* = "12"
   ##   snapshot could follow later stores and the held set differ. No
   ##   verdict change is demonstrated on the cases pinned; the bump keeps the
   ##   cache key honest for the changed walker code.
+  ## - RFC-0016 W3-z int4r (349->350): the tail budget
+  ##   (`tailWalkCappedChecks`) is the run's, shared by every tail walk it
+  ##   makes (the winner's, or one per replay candidate since R2), where each
+  ##   walk had a budget of its own; a walk that starts with none left fails
+  ##   closed (`ubTailUnverified`). A candidate whose tail was walked on a
+  ##   fresh budget was trusted before and is not now. Also: `buildClosure`
+  ##   keeps the representatives that hold its raw parameter and range sorts
+  ##   alive until the decl is made over them; a sort freed with its
+  ##   representative was read and handed to `Z3_mk_func_decl`, and the
+  ##   run's context faulted in `Z3_del_context` (`tsymex_r6_n40`, `n43`).
 
-const symexWalkerVersion* = "349"
+const symexWalkerVersion* = "350"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

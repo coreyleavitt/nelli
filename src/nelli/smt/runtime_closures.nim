@@ -27,15 +27,20 @@ proc sortFingerprint(sorts: openArray[RawZ3Sort]): string =
   for s in sorts: parts.add $sortId(ctx, s)
   parts.join(",")
 
-proc paramSorts(params: seq[IRParam]): seq[RawZ3Sort] =
+proc paramSorts(params: seq[IRParam]; reps: var seq[SymVal]): seq[RawZ3Sort] =
   ## The Z3 sorts of a lambda's parameters. A throwaway representative SymVal is
   ## allocated per param to read its sort (G4 `baseRep` pattern — the init
   ## constraints are discarded; the decl only needs the sort).
-  let ctx = requireCurrentContext()
+  ##
+  ## The sorts are raw: nothing counts a reference to them but the
+  ## representative's own terms. A sort no other live term uses (the array
+  ## sorts of a Table placeholder, say) is freed with the representative, so
+  ## each one is appended to `reps`, which the caller keeps until the
+  ## `Z3_mk_func_decl` built over the sorts holds them.
   for p in params:
     var scratchPC: seq[Z3Bool]
-    let rep = allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC)
-    for s in sortOfTuple(rep): result.add s
+    reps.add allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC)
+    for s in sortOfTuple(reps[^1]): result.add s
 
 proc currentFrameId(): int
   ## RFC-0005 S9 fwd-decl (body after `WalkCtx`, in runtime.nim): the live
@@ -80,7 +85,14 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
       "env, got " & $envRecord.fields.len & " fields"
   # 2. Get-or-create the per-site funcSym.
   let envLeafSorts = sortOfTuple(envRecord)
-  let pSorts = paramSorts(e.lambdaParams)
+  # The representatives whose terms are all that hold the raw sorts below,
+  # alive until the decl is made over them (`paramSorts`). A sort freed
+  # before that was read again by `sortFingerprint` and handed to
+  # `Z3_mk_func_decl`, which wrote its count into freed memory: the run's
+  # context then faulted in `Z3_del_context` once a second walk (the
+  # whole-run gate's tail walk) built the same closure again.
+  var sortReps: seq[SymVal]
+  let pSorts = paramSorts(e.lambdaParams, sortReps)
   let key: ClosureSymKey = (siteHash: e.lambdaSite.siteHash,
                             declOrder: e.lambdaSite.declOrder,
                             envSortId: sortFingerprint(envLeafSorts),
@@ -103,7 +115,9 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     let structuredRet = closureRetStructured(e.lambdaRetTy)
     let rangeSorts =
       if structuredRet: @[mkBoolSort(ctx).raw]
-      else: sortOfTuple(allocateSym(e.lambdaRetTy, "__closureRet", retPC))
+      else:
+        sortReps.add allocateSym(e.lambdaRetTy, "__closureRet", retPC)
+        sortOfTuple(sortReps[^1])
     let rangeSort =
       if rangeSorts.len == 1:
         rangeSorts[0]

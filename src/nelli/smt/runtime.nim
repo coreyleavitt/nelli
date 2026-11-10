@@ -14856,6 +14856,12 @@ var tailUnitsCeil {.threadvar.}: int
 var tailWorkExhausted {.threadvar.}: bool
   ## RFC-0016 W3-z R9. The running tail walk spent `tailUnitsCeil`
   ## (`chargeWalkWork`): `shouldStop` ends it and the tail fails closed.
+var tailUnitsRun {.threadvar.}: int
+  ## RFC-0016 W3-z int4r. The units every tail walk of the current run has
+  ## spent so far (`verifyTailDefinedKinds`); reset by `resetSymexRunState`.
+  ## The tail budget (`tailWalkCappedChecks`) is the run's, not each walk's:
+  ## a run walks one tail per replay candidate, and a per-walk budget let N
+  ## candidates spend N budgets.
 
 proc walkUnitsSpent(): int {.inline.} =
   ## RFC-0016 K7. The Z3 units every own-context check of this run has spent.
@@ -30464,6 +30470,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   walkWorkExhausted = false
   tailUnitsCeil = 0                                    ## RFC-0016 W3-z R9
   tailWorkExhausted = false
+  tailUnitsRun = 0                                     ## RFC-0016 W3-z int4r
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
@@ -30718,17 +30725,30 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
   ## the walk stops (`tailWorkExhausted`, read by `shouldStop`) and the tail
   ## fails closed (`ubTailUnverified`). The forks of open branches multiplied
   ## capped checks, bounded before only by `walkRLimit`.
+  ##
+  ## RFC-0016 W3-z int4r: that budget is the run's, shared by every tail walk
+  ## the run makes (`tailUnitsRun`): the winner's, or one per replay
+  ## candidate (R2). Each walk may spend what the walks before it left, and a
+  ## walk that starts with nothing left fails closed at once. A per-walk
+  ## budget let a run with many candidates spend one budget per candidate:
+  ## `tsymex_r6_n36_raise_degrade` walked eleven candidate tails of a pair loop
+  ## past 900 s, where the explore walk took seconds.
   let lowerBase = loweringDegradeErrors.len
   if walkWorkExhausted:
     return {UbKind(ubTailUnverified)}   # no budget left to look with
   let unitsBefore = walkUnitsSpent()
   let tailChecks = settings.budget.tailWalkCappedChecks
   let oneCheck = concreteBranchRLimit(settings)
-  tailUnitsCeil =
-    if tailChecks <= 0 or oneCheck > uint(high(int) div 2 div tailChecks): 0
-    else: unitsBefore + tailChecks * int(oneCheck)
+  if tailChecks > 0 and oneCheck <= uint(high(int) div 2 div tailChecks):
+    let left = tailChecks * int(oneCheck) - tailUnitsRun
+    if left <= 0:
+      return {UbKind(ubTailUnverified)}   # the run's tail budget is spent
+    tailUnitsCeil = unitsBefore + left
+  else:
+    tailUnitsCeil = 0
   tailWorkExhausted = false
   defer:
+    tailUnitsRun += max(walkUnitsSpent() - unitsBefore, 0)
     tailUnitsCeil = 0
     tailWorkExhausted = false
     # The K10b perf reading: the tail walk's own units, as a line of the

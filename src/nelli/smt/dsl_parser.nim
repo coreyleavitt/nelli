@@ -58,6 +58,7 @@ import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejecte
 import ./check_options   ## RFC-0005 S8cu: a routine compiled with other checks
 from ./replayproc import hasMethodTable, hasSubtypeTable   ## RFC-0016 PRC-02m
 from ./replayproc import closureEnvRefusal, closureRouteGuard   ## RFC-0016 W3-z R8
+from ./replayproc import nestedRoutineAddrs, benignEnvCodes   ## RFC-0016 W3-z R11
 when hasMethodTable:
   from ./replayproc import methodRouteGuard
 when hasSubtypeTable:
@@ -24215,6 +24216,7 @@ type
     dispatched: seq[NimNode]   ## PRC-02m: the methods it calls through a dispatcher
     open: string       ## non-empty: why the code it may run cannot be listed
     closureGlobals: seq[NimNode]   ## W3-z R8: module-level closure variables it names
+    nested: seq[NimNode]   ## W3-z R11: the routines declared in its body (`collectNestedRoutines`)
 
   RouteRun = object
     ## One entry macro's analysis.
@@ -24226,6 +24228,7 @@ type
     routes: seq[string]                           ## `name|why`, or `*|why`
     siteModule: NimNode    ## the module the probes are semchecked in (`symexHookMayHide`)
     closureGlobals: seq[NimNode]  ## W3-z R8: read at run time (`closureRouteGuard`)
+    nested: seq[NimNode]   ## W3-z R11: the nested routines of the routines read
 
 var routeBodies {.compileTime.}: Table[string, RouteBody]
   ## Per routine, so a file's entry macros read each routine once.
@@ -24556,6 +24559,16 @@ proc routeHasPragma(impl: NimNode; name: string): bool =
     let h = if p.kind in {nnkExprColonExpr, nnkCall} and p.len > 0: p[0] else: p
     if h.kind in {nnkIdent, nnkSym} and macros.strVal(h) == name: return true
 
+proc collectNestedRoutines(n: NimNode; acc: var seq[NimNode]) =
+  ## RFC-0016 W3-z R11. The procs and funcs declared in the body `n`, at any
+  ## depth (a closure's code is one): what a closure variable may hold that
+  ## code the scan read built.
+  if n.kind in RoutineNodes:
+    if n.len > 0 and n[0].kind == nnkSym and symKind(n[0]) in {nskProc, nskFunc} and
+       n[0] notin acc:
+      acc.add n[0]
+  for c in n: collectNestedRoutines(c, acc)
+
 proc routeBodyOf(r: NimNode): RouteBody =
   let key = routeRoutineKey(r)
   if key in routeBodies: return routeBodies[key]
@@ -24573,6 +24586,7 @@ proc routeBodyOf(r: NimNode): RouteBody =
     let ty = r.getTypeInst
     if ty.kind == nnkProcTy and ty.len > 0: routeScan(ty[0], result)
     routeScan(impl[6], result)
+    collectNestedRoutines(impl[6], result.nested)
   routeBodies[key] = result
 
 proc routeWalk(run: var RouteRun; root: NimNode) =
@@ -24596,6 +24610,8 @@ proc routeWalk(run: var RouteRun; root: NimNode) =
       for c in run.closureGlobals:
         if c == g: known = true
       if not known: run.closureGlobals.add g
+    for n in b.nested:
+      if n notin run.nested: run.nested.add n
     for c in b.callees: stack.add c
 
 proc routeThroughDeref(lv: NimNode): bool =
@@ -24886,6 +24902,222 @@ proc hookProbes(t: NimNode): NimNode =
                           nnkDiscardStmt.newTree(newEmptyNode())),
     nnkElse.newTree(newCall(bindSym"symexHookMayHide")))
 
+const closureCaptureKinds = {nskVar, nskLet, nskParam, nskResult, nskForVar,
+                             nskTemp}
+
+proc collectClosureCaptures*(n, o: NimNode; inNested: bool;
+                             acc: var seq[NimNode]) =
+  ## RFC-0016 W3-z R10. The locals of the routine `o` that code nested in it
+  ## names: the fields of the environment `o` builds.
+  if n.kind == nnkSym:
+    if inNested and symKind(n) in closureCaptureKinds and owner(n) == o and
+       n notin acc:
+      acc.add n
+  elif n.kind in RoutineNodes:
+    for c in n: collectClosureCaptures(c, o, true, acc)
+  else:
+    for c in n: collectClosureCaptures(c, o, inNested, acc)
+
+const envScalarKinds = {ntyBool, ntyChar, ntyEnum, ntyInt, ntyInt8, ntyInt16,
+                        ntyInt32, ntyInt64, ntyUInt, ntyUInt8, ntyUInt16,
+                        ntyUInt32, ntyUInt64, ntyFloat, ntyFloat32, ntyFloat64,
+                        ntySet, ntyRange}
+
+proc envBenignType(t: NimNode; nominal: var seq[NimNode]; depth = 0): string =
+  ## RFC-0016 W3-z R11. Empty when dropping a value of type `t` runs only
+  ## hooks the compiler generated over hook-free parts: plain values, a
+  ## `string`, a `seq` or `array` of such, a tuple of them, and an object or
+  ## distinct type of them whose own hooks are not the user's. Each object or
+  ## distinct type met is added to `nominal`, whose hooks a probe reads where
+  ## the check is semchecked (`symexEnvHooksFree`). Otherwise why not.
+  let what = "`" & t.repr & "`"
+  if depth > 24:
+    return what & ", a type that nests too deeply to read"
+  if t.kind == nnkSym:
+    let k = t.typeKind
+    if k in envScalarKinds or k == ntyString: return ""
+    if k in {ntyObject, ntyDistinct, ntyTuple, ntyArray, ntySequence,
+             ntyAlias, ntyGenericInst}:
+      # RFC-0016 W3-z R12: a library type is read as any other: its shape
+      # here, its hooks by the probe (`symexEnvHooksFree`, which counts a
+      # library hook as one).
+      if symKind(t) == nskType and k in {ntyObject, ntyDistinct}:
+        if t notin nominal: nominal.add t
+      let impl = t.getTypeImpl
+      if impl.kind == nnkSym and impl == t:
+        return what & ", a type with no shape to read"
+      return envBenignType(impl, nominal, depth + 1)
+    return what & ", which holds an address, or a value whose drop may run " &
+           "code"
+  elif t.kind == nnkBracketExpr:
+    if t.len == 0 or t[0].kind != nnkSym:
+      return what & ", a type this check cannot read"
+    let h = t[0].strVal
+    if h == "seq" and t.len == 2: return envBenignType(t[1], nominal, depth + 1)
+    if h == "array" and t.len == 3: return envBenignType(t[2], nominal, depth + 1)
+    if h == "set" or h == "range": return ""
+    if symKind(t[0]) == nskType:
+      # RFC-0016 W3-z R12: a library generic instance too (`Table[K, V]`).
+      let impl = t.getTypeImpl
+      if impl.kind in {nnkObjectTy, nnkDistinctTy}:
+        if t notin nominal: nominal.add t
+        return envBenignType(impl, nominal, depth + 1)
+      if impl.kind in {nnkBracketExpr, nnkTupleTy, nnkTupleConstr, nnkSym} and
+         impl.repr != t.repr:
+        return envBenignType(impl, nominal, depth + 1)
+    return what & ", which may hold an address, or a value whose drop may " &
+           "run code"
+  elif t.kind == nnkObjectTy:
+    if t.len > 1 and t[1].kind != nnkEmpty:
+      return what & ", an object that inherits"
+    if t.len > 0 and t[0].kind == nnkPragma:
+      return what & ", an object with a type pragma"
+    if t.len > 2: return envBenignType(t[2], nominal, depth + 1)
+    return ""
+  elif t.kind in {nnkRecList, nnkTupleTy, nnkTupleConstr, nnkRecCase}:
+    for c in t:
+      let why = envBenignType(c, nominal, depth + 1)
+      if why.len > 0: return why
+    return ""
+  elif t.kind in {nnkOfBranch, nnkElse}:
+    if t.len == 0: return ""
+    return envBenignType(t[^1], nominal, depth + 1)
+  elif t.kind == nnkIdentDefs:
+    if t.len < 2: return what & ", a field this check cannot read"
+    return envBenignType(t[^2], nominal, depth + 1)
+  elif t.kind == nnkDistinctTy:
+    if t.len < 1: return what & ", a type this check cannot read"
+    return envBenignType(t[0], nominal, depth + 1)
+  elif t.kind in {nnkEnumTy, nnkEmpty, nnkNilLit}:
+    return ""
+  what & ", a type this check cannot read"
+
+proc envBenignLevelWhy(o: NimNode; nominal, caps: var seq[NimNode]): string =
+  ## RFC-0016 W3-z R11/R12. Empty when every local of the routine `o` that
+  ## code nested in it captures (`caps`, the fields of the environment `o`
+  ## builds) is of a type `envBenignType` admits; otherwise why not.
+  let impl =
+    try: o.getImpl
+    except CatchableError: newEmptyNode()
+  if impl.kind notin RoutineNodes or impl.len <= 6:
+    return "the routine `" & macros.strVal(o) & "` has no body to read"
+  if impl[2].kind != nnkEmpty:
+    return "the routine `" & macros.strVal(o) & "` is generic"
+  collectClosureCaptures(impl[6], o, false, caps)
+  for c in caps:
+    let t =
+      try: c.getTypeInst
+      except CatchableError: newEmptyNode()
+    if t.kind == nnkEmpty:
+      return "its environment captures `" & macros.strVal(c) & "`, whose " &
+             "type cannot be read"
+    let why = envBenignType(t, nominal)
+    if why.len > 0:
+      return "its environment captures `" & macros.strVal(c) & "`, of " & why
+  ""
+
+proc envLinked*(r: NimNode): bool =
+  ## RFC-0016 W3-z R12. The routine enclosing the nested routine `r` is itself
+  ## nested: a closure of `r` carries an environment whose first field links
+  ## to the environment of the routine enclosing that one (the compiler's
+  ## `up` field).
+  let o = owner(r)
+  o.kind == nnkSym and owner(o).kind == nnkSym and
+    symKind(owner(o)) in {nskProc, nskFunc, nskMethod, nskConverter}
+
+proc envBenignWhy*(r: NimNode; nominal, caps: var seq[NimNode]): string =
+  ## RFC-0016 W3-z R11. Empty when a closure of the nested routine `r` carries
+  ## an environment whose destructor, if it has one, is the compiler's and
+  ## runs no user code: `r` is a non-generic proc nested in a routine, and
+  ## every local of that routine which nested code captures (`caps`, the
+  ## environment's fields) is of a type `envBenignType` admits. The object
+  ## and distinct types met are left in `nominal` for the hook probe
+  ## (`envBenignExpr`). Otherwise why not, naming the value.
+  ## RFC-0016 W3-z R12: the routine enclosing `r` may itself be nested. Its
+  ## environment then links to the one of the routine enclosing it, whose
+  ## destructor the compiler generates too: every routine of the chain up to
+  ## the top-level one is read the same way (its captured locals are left
+  ## in `nominal`; `caps` stays the fields of `r`'s own environment).
+  let rn = "`" & macros.strVal(r) & "`"
+  if r.kind != nnkSym or symKind(r) notin {nskProc, nskFunc}:
+    return rn & " is not a proc"
+  let o = owner(r)
+  if o.kind != nnkSym or symKind(o) notin {nskProc, nskFunc, nskMethod,
+                                            nskConverter}:
+    return rn & " is not nested in a proc"
+  let rImpl =
+    try: r.getImpl
+    except CatchableError: newEmptyNode()
+  if rImpl.kind notin RoutineNodes or rImpl.len <= 6:
+    return "the routine enclosing " & rn & " has no body to read"
+  if rImpl[2].kind != nnkEmpty:
+    return rn & " or the routine enclosing it is generic"
+  let why = envBenignLevelWhy(o, nominal, caps)
+  if why.len > 0: return why
+  var up = owner(o)
+  var steps = 0
+  while up.kind == nnkSym and symKind(up) != nskModule:
+    if symKind(up) notin {nskProc, nskFunc, nskMethod, nskConverter}:
+      return "the routine enclosing " & rn & " is nested in `" &
+             macros.strVal(up) & "`, which is not a proc"
+    inc steps
+    if steps > 16:
+      return "the routine enclosing " & rn & " is nested too deeply to read"
+    var upCaps: seq[NimNode]
+    let w = envBenignLevelWhy(up, nominal, upCaps)
+    if w.len > 0: return w
+    up = owner(up)
+  if up.kind != nnkSym:
+    return "the routines enclosing " & rn & " lead to no module"
+  ""
+
+proc collectEnvHooks(n: NimNode; acc: var seq[NimNode]) =
+  ## RFC-0016 W3-z R12. The hooks a probe's semcheck resolved that the
+  ## compiler did not generate, a library's counted with the user's: an
+  ## environment's drop runs no code but the compiler's only when there is
+  ## none (a library hook, such as `Task`'s, may run a user's callback).
+  if n.kind in {nnkCall, nnkCommand} and n.len > 0 and n[0].kind == nnkSym:
+    let h = n[0]
+    let name = macros.strVal(h)
+    if name.len > 1 and name[0] == '=':
+      let impl = h.getImpl
+      if impl.kind in RoutineNodes and implMagic(impl) == "" and
+         not isGeneratedHook(h) and h notin acc:
+        acc.add h
+  for c in n: collectEnvHooks(c, acc)
+
+macro symexEnvHooksFree*(probes: typed; types: varargs[typed]): untyped =
+  ## RFC-0016 W3-z R11. True when no type of `types` has a lifetime hook the
+  ## compiler did not generate: the probes (`hookProbes`) resolve to none.
+  ## RFC-0016 W3-z R12: wherever the type is declared, its library's
+  ## included. R11 required the probe site's module, where a hook the type's
+  ## module does not export is still visible to an overload. The hooks an
+  ## environment's drop runs are type-bound: `=destroy` and `=trace` (and
+  ## `=wasMoved`, `=dup`) resolve at the probe to the hook attached to the
+  ## type (the compiler's `replaceHookMagic`), exported or not, and a type's
+  ## hooks are declared in its own module, which is semchecked before any
+  ## module that names the type. A hidden `=copy` or `=sink` the probe may
+  ## miss is not run by a drop.
+  for t in types:
+    let head = if t.kind == nnkBracketExpr and t.len > 0: t[0] else: t
+    if head.kind != nnkSym: return newLit(false)
+  var hooks: seq[NimNode]
+  collectEnvHooks(probes, hooks)
+  newLit(hooks.len == 0 and probeShapeKnown(probes) and
+         not probeNames(probes, "symexHookUnproved"))
+
+proc envBenignExpr*(r: NimNode): NimNode =
+  ## RFC-0016 W3-z R11. A `bool` expression: a closure of the nested routine
+  ## `r` carries an environment whose destructor runs no user code
+  ## (`envBenignWhy`, then the hook probe of each object type it holds).
+  var nominal, caps: seq[NimNode]
+  if envBenignWhy(r, nominal, caps).len > 0: return newLit(false)
+  if nominal.len == 0: return newLit(true)
+  var probes = newStmtList()
+  for t in nominal: probes.add hookProbes(t)
+  result = newCall(bindSym"symexEnvHooksFree", probes)
+  for t in nominal: result.add t
+
 proc routeContinue(id: int; resume: NimNode): NimNode =
   ## The next stage: the literal, or the probes the run is waiting for.
   if routeRuns[id].waiting.len == 0:
@@ -24911,10 +25143,38 @@ proc routeContinue(id: int; resume: NimNode): NimNode =
       # RFC-0016 W3-z R8: the run's check of what each module-level closure
       # variable holds when it starts: an environment whose hooks the scan
       # cannot list opens every global (`closureEnvRefusal`).
+      # W3-z R11: an environment whose destructor is the compiler's and runs
+      # no user code (`envBenignExpr`) keeps the routes too, when its routine
+      # is a nested one the scan read (the closure's code names its
+      # environment's type); the addresses only module-level code can take
+      # (`nestedRoutineAddrs`).
+      let codes = genSym(nskVar, "benignEnvCodes")
+      let probe = genSym(nskVar, "routeTableProbe")
+      var addrs = newCall(bindSym"nestedRoutineAddrs", probe)
+      var oks = nnkBracket.newTree()
+      for r in routeRuns[id].nested:
+        var nominal, caps: seq[NimNode]
+        if envBenignWhy(r, nominal, caps).len > 0: continue
+        addrs.add r
+        oks.add envBenignExpr(r)
+      let okSeq =
+        if oks.len == 0: newCall(nnkBracketExpr.newTree(ident"newSeq", ident"bool"))
+        else: prefix(oks, "@")
       var why = nnkBracket.newTree()
       for g in routeRuns[id].closureGlobals:
-        why.add newCall(bindSym"closureEnvRefusal", newLit(macros.strVal(g)), g)
-      routes = newCall(bindSym"closureRouteGuard", routes, prefix(why, "@"))
+        why.add newCall(bindSym"closureEnvRefusal", newLit(macros.strVal(g)), g,
+                        codes)
+      let guard = newCall(bindSym"closureRouteGuard", routes, prefix(why, "@"))
+      let codesOf = bindSym"benignEnvCodes"
+      # In a `{.global.}`'s initialiser, as the replay's routine table is
+      # (`emitReplayWitness`): module-level code naming a capturing routine
+      # of the same module elsewhere is a lambda-lifting failure.
+      routes = quote do:
+        (block:
+          var `codes` {.global.} = (block:
+            var `probe` {.used.}: int
+            `codesOf`(`addrs`, `okSeq`))
+          `guard`)
     when hasSubtypeTable:
       # RFC-0016 PRC-02m: the run's check of the subtype hooks the scan assumed.
       if routeRuns[id].refBases.len > 0:

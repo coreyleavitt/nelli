@@ -24,7 +24,7 @@
 ##
 ## A platform with neither runs no replay at all.
 
-import std/[strutils, monotimes, times]
+import std/[strutils, monotimes, times, macros]
 when defined(windows) or defined(nelliReplayReexec):
   import std/os
 import ../engine/markers
@@ -270,7 +270,8 @@ when hasSubtypeTable:
     if why.len > 0:
       result.add "!|" & why & " (the subtype table and the scan disagree)"
 
-proc closureEnvRefusal*[T: proc](name: string; x: T): string =
+proc closureEnvRefusal*[T: proc](name: string; x: T;
+                                 benign: openArray[pointer] = []): string =
   ## RFC-0016 W3-z R8. Empty when the closure the module-level variable `name`
   ## holds as the run starts runs no lifetime hook when it is dropped: it is
   ## nil, it has no environment, or its environment's type has no destructor
@@ -279,7 +280,11 @@ proc closureEnvRefusal*[T: proc](name: string; x: T): string =
   ## the hooks dropping it runs cannot be listed. Read under ARC/ORC, where
   ## an environment is an object whose first field is its type's
   ## `TNimTypeV2`, whose first field is the destructor; any other memory
-  ## manager declines.
+  ## manager declines. RFC-0016 W3-z R11: an environment with a destructor
+  ## is no hook the scan misses when the closure's routine is in `benign`,
+  ## the code addresses of the nested routines whose environment holds only
+  ## values whose drop runs the compiler's hooks (`dsl_parser.envBenignExpr`,
+  ## `benignEnvCodes`): a routine's code names its environment's type.
   when sizeof(T) <= sizeof(pointer):
     ""
   else:
@@ -289,9 +294,68 @@ proc closureEnvRefusal*[T: proc](name: string; x: T): string =
     when defined(gcArc) or defined(gcOrc) or defined(gcAtomicArc):
       let rti = cast[ptr pointer](rawEnv(x))[]
       if rti != nil and cast[ptr pointer](rti)[] == nil: return ""
+      # RFC-0016 W3-z R11: or its routine is one whose environment's
+      # destructor is the compiler's and runs no user code (`benign`).
+      if rti != nil and rawProc(x) in benign: return ""
       why & " whose lifetime hooks the scan cannot list (dropping it runs them)"
     else:
       why & ", whose type this memory manager does not describe"
+
+macro nestedRoutineAddrs*(probe: typed; rs: varargs[typed]): untyped =
+  ## RFC-0016 W3-z R10. The code addresses of the nested routines `rs`, in
+  ## order. A nested routine that captures is a closure: code that names it
+  ## builds one with its enclosing routine's environment, which only that
+  ## routine and module-level code (where it has none) can do. So the
+  ## addresses are taken only where `probe` (a variable declared beside this
+  ## call) is module-level; inside a routine every slot a capturing routine
+  ## holds is nil, which no value matches (the settle and the wire then name
+  ## nothing for it).
+  ## RFC-0016 W3-z R11: the enclosing routine's address is taken first. The
+  ## code generator lifts a nested routine's captures when it generates the
+  ## routine enclosing it; naming the nested one first, from module-level
+  ## code of the same module, generates it unlifted (an internal compiler
+  ## error: its captured local "not init").
+  ## RFC-0016 W3-z R12: every routine enclosing it is, outermost first. A
+  ## routine nested in a nested one is lifted when the outermost is
+  ## generated; naming only the routine enclosing it is the same failure.
+  ## A capturing enclosing routine is named through `rawProc`, as `rs` are.
+  let top = owner(probe).kind == nnkSym and symKind(owner(probe)) == nskModule
+  var items = nnkBracket.newTree()
+  for r in rs:
+    if top:
+      var chain: seq[NimNode]
+      var o = owner(r)
+      while o.kind == nnkSym and symKind(o) in {nskProc, nskFunc, nskMethod,
+                                                nskConverter} and chain.len < 64:
+        chain.insert(o, 0)
+        o = owner(o)
+      var first = newStmtList()
+      for e in chain:
+        let held = genSym(nskLet, "enclosingFirst")
+        first.add quote do:
+          let `held` {.used.} =
+            (when compiles(cast[pointer](`e`)): cast[pointer](`e`)
+             else: rawProc(`e`))
+      items.add quote do:
+        (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
+         else: (block:
+           `first`
+           rawProc(`r`)))
+    else:
+      items.add quote do:
+        (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
+         else: pointer(nil))
+  if items.len == 0:
+    result = quote do: newSeq[pointer]()
+  else:
+    result = quote do: @`items`
+
+proc benignEnvCodes*(codes: seq[pointer]; ok: openArray[bool]): seq[pointer] =
+  ## RFC-0016 W3-z R11. The code addresses of `codes` (`nestedRoutineAddrs`)
+  ## whose slot of `ok` holds: the routines whose environment runs no user
+  ## hook when dropped. A nil address (one not taken) names nothing.
+  for i, c in codes:
+    if c != nil and i < ok.len and ok[i]: result.add c
 
 proc closureRouteGuard*(routes: seq[string]; refusals: openArray[string]):
     seq[string] =

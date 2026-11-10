@@ -1,0 +1,14 @@
+# Routines the stdlib-body ledger must never contain (one `<module>.<name>` key
+# per line). The ledger generator records every body the parser reads, and a
+# test that exists to prove "a routine with no row declines" reads the body of
+# its probe too, so a regeneration would seed the probe and defeat the test.
+# Each key here is read by such a probe, not walked by the corpus.
+#
+# tsymex_0016_w3z_p3_iter, tsymex_0016_w3z_p3b_iterrows (P3b: the split
+# iterators' slice bounds are bitvector-represented, so their body walk is not
+# exact; they stay unadmitted):
+strutils.split/iterator
+strutils.splitWhitespace
+strutils.splitWhitespace/iterator
+# tsymex_0016_w3z_p3_iter (a stdlib proc taken as a value, no row):
+strutils.isAlphaAscii

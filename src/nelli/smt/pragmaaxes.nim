@@ -83,6 +83,13 @@ func declined(p: PragmaPlace; names: openArray[string]; kind: SymexErrorKind;
     result.add (placeKey(p) & "/" & n,
                 refused[PragmaSite, PragmaModel](some(kind), why))
 
+func neverField(names: openArray[string]; why: string): seq[PragmaKey] =
+  ## A field pragma the toolchain refuses: a `never` cell (`nrPlatform`).
+  for n in names:
+    result.add (placeKey(ppField) & "/" & n,
+                refused[PragmaSite, PragmaModel](some(feUnsupportedOp), why,
+                                                 iNever, nrPlatform))
+
 func pragmaRows(): seq[PragmaKey] =
   # --- the local list (W1-b) ------------------------------------------------
   result.add read(ppLocal, ["noinit"],
@@ -171,12 +178,16 @@ func pragmaRows(): seq[PragmaKey] =
   result.add inert(ppField, ["cursor"],
     "a non-owning field: the value read is the same while its owner lives")
   result.add declined(ppField,
-    ["bitsize", "align", "size", "volatile", "codegenDecl", "importc",
-     "exportc", "extern", "header", "nodecl", "dynlib", "guard", "atomic"],
+    ["bitsize", "align", "importc", "exportc", "extern", "guard"],
     feUnsupportedOp,
     "fixes the width, alignment or storage of the field (`bitsize: 3` wraps " &
     "a store to 3 bits), which the object model (one full-width slot per " &
     "field) does not represent")
+  result.add neverField(
+    ["size", "volatile", "codegenDecl", "header", "nodecl", "dynlib",
+     "atomic"],
+    "Nim rejects it on a field (`not compiles`, `tsymex_0016_p4_fieldpragma`), " &
+    "so no program carries it; the row stays a decline if a toolchain accepts it")
 
 func buildTable(): AxisTable[PragmaSite, PragmaModel] =
   var rows: seq[PragmaKey]

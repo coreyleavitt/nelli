@@ -132,10 +132,11 @@
     probe): the pragma axis gained a field place (`field/<name>`,
     `ppField`). `typePragmaHit` reads each field's own pragma list from the
     type's `getImpl` (plain records, nested records, variant arms, parent
-    types; `getTypeImpl` drops them). `bitsize`, `align`, `size`, `volatile`,
-    `codegenDecl`, `importc`, `exportc`, `extern`, `header`, `nodecl`,
-    `dynlib`, `guard`, `atomic` decline `feUnsupportedOp`; `deprecated`,
-    `requiresInit`, `used`, `cursor` are inert. A6 is refuted: `getImpl`
+    types; `getTypeImpl` drops them). `bitsize`, `align`, `importc`, `exportc`,
+    `extern`, `guard` decline `feUnsupportedOp` (pinDecline); `size`, `volatile`,
+    `codegenDecl`, `header`, `nodecl`, `dynlib`, `atomic` are `never`
+    (`nrPlatform`: `not compiles` on a field, pinNever); `deprecated`,
+    `requiresInit`, `used`, `cursor` are inert (pinExact). No allowlist entries. A6 is refuted: `getImpl`
     expands a `{.pragma: lay, union.}` alias at both the type and the field
     place, and a user pragma with no body vanishes from the list, so no
     absent name reaches the type place. Test: `tsymex_0016_p4_fieldpragma`.

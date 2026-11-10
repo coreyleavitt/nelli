@@ -1748,6 +1748,8 @@ task test, "Run the test suite":
             "tsymex_0016_k10b_round",
             # RFC-0016 W3-z R2: a replay candidate's tail is walked.
             "tsymex_0016_w3z_r2_candtail",
+            # RFC-0016 W3-z R9: the tail walk has its own budget.
+            "tsymex_0016_w3z_r9_tailbudget",
             "tsymex_0016_w3z_p1_off",
             "tsymex_0016_w3z_p1_default",
             "tsymex_0016_w3z_r3_opaque",

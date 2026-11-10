@@ -535,8 +535,23 @@ const renderAsChoicesVersion* = "12"
   ##   and bound a 64-bit integer whatever the type, so a case-object global's
   ##   field read halted it and a replay-confirmed sxSat failed closed
   ##   (`ubTailUnverified`; PRC-01's `reexec/caseObjectGlobal*` cells).
+  ## - RFC-0016 W3-z int2 fixups (341->342): the witness pins a string-backed
+  ##   `seq[byte]` parameter (`modelPins`). It was left free (its one Z3
+  ##   String fits no seq cell), so every tail-walk branch on its bytes was
+  ##   open: each was asked at the scratch-check cap, and since R6 forked both
+  ##   ways, so a pair-loop over the receiver multiplied capped checks past
+  ##   any test bound (B7R-6, B7r2-1a), and an arm the witness does not take
+  ##   was walked as if it might be.
+  ## - RFC-0016 W3-z R9 (342->343): the whole-run gate's tail walk has its own
+  ##   budget (`tailWalkCappedChecks`, five capped scratch checks' worth of
+  ##   units by default); past it the walk stops and the tail fails closed
+  ##   (`ubTailUnverified`), where only `walkRLimit` stopped it. A scratch
+  ##   check that spends its whole bound undecided is not asked again for the
+  ##   same branch, and every scratch check runs under at most what the walk
+  ##   (and the tail) has left. A tail that spent past the budget was trusted
+  ##   before and is not now; a cached verdict from before is stale.
 
-const symexWalkerVersion* = "341"
+const symexWalkerVersion* = "343"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

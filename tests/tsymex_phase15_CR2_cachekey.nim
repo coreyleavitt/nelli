@@ -1194,7 +1194,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z P17 (a `..` bound read once; unsigned counters): 338->339.
     ## RFC-0016 W3-z P18 (signed narrow counters): 339->340.
     ## RFC-0016 W3-z int2 fixups (exportc field inert, ...): 340->341.
-    check symexWalkerVersion == "341"
+    ## RFC-0016 W3-z int2 fixups (a string-backed seq[byte] param is
+    ## pinned): 341->342.
+    ## RFC-0016 W3-z R9 (the tail walk's own budget): 342->343.
+    check symexWalkerVersion == "343"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends
@@ -1203,6 +1206,15 @@ suite "Phase 15 CR-2 — version bumps":
     var s0 = defaultSymexSettings()
     var s1 = s0
     s1.budget.walkRLimit = s0.budget.walkRLimit + 1
+    check canonicalize(s0) != canonicalize(s1)
+
+  test "CR-2 sub-test 5c: tailWalkCappedChecks changes canonical form":
+    ## RFC-0016 W3-z R9. The tail walk's budget decides whether a label
+    ## `sxSat` is trusted or fails closed (`ubTailUnverified`), so two
+    ## settings differing ONLY in `tailWalkCappedChecks` must hash differently.
+    var s0 = defaultSymexSettings()
+    var s1 = s0
+    s1.budget.tailWalkCappedChecks = s0.budget.tailWalkCappedChecks + 1
     check canonicalize(s0) != canonicalize(s1)
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

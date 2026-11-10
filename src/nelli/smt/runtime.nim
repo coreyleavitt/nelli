@@ -13182,12 +13182,21 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam], path: Path):
     # vector itself, so the witness pins it like any scalar.
     let bitSetParam = p.ty != nil and p.ty.kind == itBitSet and
                       sv.kind == svBitSet
-    if not bitSetParam and not svFitsHeapTy(sv, p.ty):
+    # A string-backed `seq[byte]` parameter (round-6 B1) is one Z3 String,
+    # which `svFitsHeapTy` (a seq cell's data-array fit) does not name; its
+    # leaf is the string itself. Left free, every branch on its bytes was
+    # open under the pins: the tail walk asked each one twice at the
+    # scratch-check cap and, since W3-z R6, forked it both ways, so a
+    # pair-loop over the receiver multiplied capped checks past any test
+    # bound (`tsymex_r6_b7r_bytescan` B7R-6, `tsymex_r6_b7r2_pathscope`
+    # B7r2-1a).
+    let stringBackedParam = p.isStringBacked and sv.kind == svString
+    if not bitSetParam and not stringBackedParam and not svFitsHeapTy(sv, p.ty):
       result.complete = false
       continue
     var leaves: seq[Z3AnyAst]
     try:
-      leaves = if bitSetParam:
+      leaves = if bitSetParam or stringBackedParam:
                  @[wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))]
                else: svLeafTerms(sv, p.ty, pinForm = true)
     except CatchableError:
@@ -14808,9 +14817,32 @@ var walkWorkExhausted {.threadvar.}: bool
   ## (`chargeWalkWork`); reset by `resetSymexRunState`. `shouldStop` reads it,
   ## `runSymexImpl` records the `ckWalkWork` halt.
 
+var tailUnitsCeil {.threadvar.}: int
+  ## RFC-0016 W3-z R9. While a tail walk runs (`verifyTailDefined`), the
+  ## `walkUnitsSpent` at which its own budget (`tailWalkCappedChecks`) is
+  ## spent; `0` otherwise (no tail budget).
+var tailWorkExhausted {.threadvar.}: bool
+  ## RFC-0016 W3-z R9. The running tail walk spent `tailUnitsCeil`
+  ## (`chargeWalkWork`): `shouldStop` ends it and the tail fails closed.
+
 proc walkUnitsSpent(): int {.inline.} =
   ## RFC-0016 K7. The Z3 units every own-context check of this run has spent.
   ownContextUnits - walkUnitsBase + walkerWorkUnits - walkerWorkBase
+
+proc workLeftRLimit(rlimit: uint): uint =
+  ## RFC-0016 K7 / W3-z R9. `rlimit` (`0` none) lowered to what the walk has
+  ## left under `walkRLimit` and, in a tail walk, under its own budget (at
+  ## least 1: the work is spent and the walk stops, so a check decides
+  ## nothing it need not), so one check cannot overshoot either total.
+  result = rlimit
+  let spent = walkUnitsSpent()
+  if walkRLimitCur != 0:
+    let left = if spent < 0 or uint(spent) >= walkRLimitCur: 1'u
+               else: walkRLimitCur - uint(spent)
+    if result == 0 or left < result: result = left
+  if tailUnitsCeil != 0:
+    let left = if spent >= tailUnitsCeil: 1'u else: uint(tailUnitsCeil - spent)
+    if result == 0 or left < result: result = left
 
 proc chargeWalkWork() =
   ## RFC-0016 K7. Called after every own-context check (`ownContextCheck`,
@@ -14819,6 +14851,8 @@ proc chargeWalkWork() =
   let spent = walkUnitsSpent()
   if walkRLimitCur != 0 and spent >= 0 and uint(spent) >= walkRLimitCur:
     walkWorkExhausted = true
+  if tailUnitsCeil != 0 and spent >= tailUnitsCeil:   ## RFC-0016 W3-z R9
+    tailWorkExhausted = true
 
 const walkUnitsLogEnv* = "NELLI_WALK_UNITS_LOG"
 
@@ -16428,12 +16462,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0016 K7. Under a `walkRLimit` the query runs under at most what the
   # walk has left (at least 1: the work is spent and the walk stops, so it
   # decides nothing it need not), so one query cannot overshoot the total.
-  var rlimit = rlimit0
-  if walkRLimitCur != 0:
-    let spent = walkUnitsSpent()
-    let left = if spent < 0 or uint(spent) >= walkRLimitCur: 1'u
-               else: walkRLimitCur - uint(spent)
-    if rlimit == 0 or left < rlimit: rlimit = left
+  # RFC-0016 W3-z R9: and, in a tail walk, under what its own budget has left.
+  let rlimit = workLeftRLimit(rlimit0)
   let sites = limitSitesIn(ctx, query)
   let points = pointSitesIn(ctx, query)
   var decided = false
@@ -18353,6 +18383,7 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
   ## label's sxSat is never computed. All raise-flavoured targets: an sxRaised IS
   ## the terminal answer (unchanged).
   if walkWorkExhausted: return true   ## RFC-0016 K7: out of solver work
+  if tailWorkExhausted: return true   ## RFC-0016 W3-z R9: the tail's budget
   for r in w.found:
     if r.status == sxSat: return true
     if r.status == sxRaised and w.target.kind != stkLabel: return true
@@ -20877,6 +20908,12 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
+var scratchCapped {.threadvar.}: bool
+  ## RFC-0016 W3-z R9. A concolic scratch check (`concreteScratchCheck`) spent
+  ## its whole rlimit without deciding since the flag was last cleared: the
+  ## cap signal `followBranchOutcome` reads so it does not ask the same
+  ## branch again at the cap.
+
 proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
                           settings: SymexSettings): Z3Status =
   ## RFC-0005 S8by. One of concolic collection's scratch solves
@@ -20896,12 +20933,15 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   ## its bit-blasting stage above 100 MB: 72k against 876k / 5.85M units
   ## on this query), so the spend is the query's AND the process's; what a
   ## bound above both figures decides is the query's alone.
-  let dbgU0 = ownContextUnits
-  result = ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
-  if ownContextUnits - dbgU0 > 20000:
-    var dbgS = ""
-    for r in roots: dbgS.add $r & "\n"
-    echo "DBGSCRATCH ", ownContextUnits - dbgU0, " ", result, "\n", dbgS[0 ..< min(dbgS.len, 3000)]
+  ##
+  ## RFC-0016 W3-z R9: in a tail walk the bound is also what the tail's own
+  ## budget has left (`workLeftRLimit`), and a check that spent its whole
+  ## bound undecided sets `scratchCapped`, so its branch is not asked again.
+  let rlimit = workLeftRLimit(concreteBranchRLimit(settings))
+  let before = ownContextUnits
+  result = ownContextCheck(ownContextSolver(ctx, roots, rlimit))
+  if result == zsUnknown and uint(max(ownContextUnits - before, 0)) >= rlimit:
+    scratchCapped = true
 
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,
@@ -20953,6 +20993,9 @@ proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
   let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
                                    settings)
+  # RFC-0016 W3-z R9: an undecided first solve decides the answer (`none`)
+  # whatever the second says, so the second is not asked.
+  if rTrue == zsUnknown: return none(bool)
   let rFalse = concreteScratchCheck(ctx,
     concreteEq & pools & facts & @[not cond], settings)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
@@ -22043,8 +22086,13 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
   ## Without the second ask the branch read as undecided and the walk went on
   ## without the arm's bindings: a later read of a name the arm binds was the
   ## unbound-name stand-in, an `eqBV` kind assertion (`weInternalWalkerFault`).
+  ##
+  ## RFC-0016 W3-z R9: a first ask whose check spent its whole bound
+  ## undecided (`scratchCapped`) is not asked again under the `pc`: the same
+  ## query with more terms in it, at the same bound.
+  scratchCapped = false
   result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings, facts)
-  if result.isNone and w.tailGate:
+  if result.isNone and w.tailGate and not scratchCapped:
     result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings,
                                    dp.pc & dp.defectSurvivorPc & facts)
   if result.isNone:
@@ -30351,6 +30399,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   walkerWorkBase = walkerWorkUnits
   walkRLimitCur = settings.budget.walkRLimit
   walkWorkExhausted = false
+  tailUnitsCeil = 0                                    ## RFC-0016 W3-z R9
+  tailWorkExhausted = false
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
@@ -30597,11 +30647,26 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   ## the walk forks the branches the pins leave open, and a `dcFreshSymbol`
   ## record (the fresh symbol itself) is not a reason the tail is unverified;
   ## every other record still is.
+  ##
+  ## RFC-0016 W3-z R9: the walk has its own budget, `tailWalkCappedChecks`
+  ## times the rlimit of one of its scratch checks (`concreteBranchRLimit`).
+  ## Each check runs under at most what is left of it, and once it is spent
+  ## the walk stops (`tailWorkExhausted`, read by `shouldStop`) and the tail
+  ## fails closed (`ubTailUnverified`). The forks of open branches multiplied
+  ## capped checks, bounded before only by `walkRLimit`.
   let lowerBase = loweringDegradeErrors.len
   if walkWorkExhausted:
     return {UbKind(ubTailUnverified)}   # no budget left to look with
   let unitsBefore = walkUnitsSpent()
+  let tailChecks = settings.budget.tailWalkCappedChecks
+  let oneCheck = concreteBranchRLimit(settings)
+  tailUnitsCeil =
+    if tailChecks <= 0 or oneCheck > uint(high(int) div 2 div tailChecks): 0
+    else: unitsBefore + tailChecks * int(oneCheck)
+  tailWorkExhausted = false
   defer:
+    tailUnitsCeil = 0
+    tailWorkExhausted = false
     # The K10b perf reading: the tail walk's own units, as a line of the
     # `NELLI_WALK_UNITS_LOG` file beside the explore walk's.
     if getEnv(walkUnitsLogEnv).len > 0:
@@ -30646,7 +30711,7 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
   stampLoweringPendingLeak(w)
-  if walkWorkExhausted:
+  if walkWorkExhausted or tailWorkExhausted:   # RFC-0016 W3-z R9: or its own
     result.incl UbKind(ubTailUnverified)
   var errs = w.walkDegradeErrors & w.heapDepthErrors & w.newFieldZeroErrors &
              w.closureCallErrors

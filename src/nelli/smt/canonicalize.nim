@@ -364,7 +364,10 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "311"
+const symexWalkerVersion* = "312"
+  ## RFC-0016 P10 (311->312): `isInf`/`isFinite`/`isNormal` are no longer
+  ## lowered by name (std/math here has none; a SUT routine of the name is
+  ## walked as its own body), so a stdlib float call of those names declines.
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a
   ## proc value naming a routine the replayed code names, a `{.global.}` a
   ## nested routine names, and a runtime hook of that kind, where each

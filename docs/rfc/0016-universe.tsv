@@ -749,10 +749,10 @@ stdlib:math.floorMod	modelled	-
 stdlib:math.frexp	declined	-
 stdlib:math.gamma	declined	-
 stdlib:math.hypot	declined	-
-stdlib:math.isFinite	modelled	-
-stdlib:math.isInf	modelled	-
+stdlib:math.isFinite	never	-
+stdlib:math.isInf	never	-
 stdlib:math.isNaN	modelled	-
-stdlib:math.isNormal	modelled	-
+stdlib:math.isNormal	never	-
 stdlib:math.isPowerOfTwo	modelled	-
 stdlib:math.lgamma	declined	-
 stdlib:math.ln	declined	-

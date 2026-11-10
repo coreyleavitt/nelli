@@ -167,7 +167,7 @@ suite "ADM-IR: the stdlib-body axis, float calls (mkMathCall)":
     let e = mkMathCall(admitFloatCall("sqrt", 1), "sqrt", @[mkIntLit(1)])
     check e.kind == iekMathCall
     check e.mathOp == "sqrt"
-    for op in ["abs", "min", "max", "isInf", "isFinite", "isNormal",
+    for op in ["abs", "min", "max",
                "toFloat32", "toFloat64"]:
       check admitFloatCall(op, 1).admitted
   test "a declined or absent row, or another op's row, asserts":

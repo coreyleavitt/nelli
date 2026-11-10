@@ -214,9 +214,6 @@ const mathRows: seq[StdlibRow] = block:
     floatModelled("abs", "clears the sign bit (fp.abs), exact"),
     floatModelled("min", "fp.min, exact"),
     floatModelled("max", "fp.max, exact"),
-    floatModelled("isInf", "fp.isInfinite, exact"),
-    floatModelled("isFinite", "not NaN and not infinite, exact"),
-    floatModelled("isNormal", "fp.isNormal, exact"),
     floatModelled("toFloat32", "a float64 -> float32 conversion, fp.to_fp in " &
       "round-nearest-even (K2b); not a std/math routine, the lowering's name"),
     floatModelled("toFloat64", "a float32 -> float64 conversion, fp.to_fp, " &
@@ -247,6 +244,14 @@ const mathRows: seq[StdlibRow] = block:
   r.add floatDeclined(["log", "cot", "sec", "csc", "coth", "sech", "csch",
       "arccot", "arcsec", "arccsc", "arccoth", "arcsech", "arccsch"],
     "a reciprocal or composition of libm functions the walker does not model")
+  for name in ["isInf", "isFinite", "isNormal"]:
+    r.add neverFacet("math." & name,
+      "std/math on this toolchain (Nim 2.2.10) has no `" & name & "`, so no " &
+      "stdlib call can name it (`compiles(" & name & "(x))` is false after " &
+      "`import std/math`; the cell's native fact). A SUT routine of that name " &
+      "is a user routine, which the parser walks as its own body before any " &
+      "by-name lowering (`isUserCallee`); the name is not a lowering's",
+      nrPlatform, feUnsupportedOpAborted)
   r.add neverFacet("math.nextafter",
     "std/math on this toolchain (Nim 2.2.10) has no `nextafter`, so no SUT " &
     "can name it (`compiles(nextafter(x, y))` is false; the cell's native " &

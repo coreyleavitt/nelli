@@ -102,9 +102,6 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
   case op
   of "signbit": return pred(isNegative)
   of "isNaN":   return pred(isNaN)
-  of "isInf":   return pred(isInf)
-  of "isFinite":return pred(isFinite)
-  of "isNormal":return pred(isNormal)
   else: discard
 
   # ----- unary float -> float ops -----

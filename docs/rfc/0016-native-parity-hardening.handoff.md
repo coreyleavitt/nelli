@@ -1597,3 +1597,14 @@ resolved by recommendation; no fork reached Corey.
 
 **Next:** `/tdd rfc-0016 wave 1`, INF-05 first. The RFC is ready for `/tdd`;
 `state` stays `in-progress`.
+- **W3-z P10 (`rfc-0016-w3z-parser10`, walker 312):** the finding as filed
+  (a user `isInf`/`isFinite`/`isNormal` lowered as the IEEE predicate) did not
+  reproduce: `isUserCallee` (S8c) gates the expression and statement call arms
+  before `mathInterception`, so a user routine of any name is walked as its own
+  body (`tests/tsymex_0016_p10_floatnames.nim` pins false-sat and false-unsat
+  forms green on the unchanged walker). The defect was the dead stdlib side:
+  `stdlib:math.isInf/isFinite/isNormal` were `modelled` rows for routines this
+  toolchain's std/math does not have. They are now `never` (`nrPlatform`, with a
+  `compiles` fact), the three names leave `mathFpModeledOps` and the
+  `lowerMathCall`/proto arms, and E2b's SUT-defined pins moved to the user-proc
+  suite. Every other by-name arm was already owner-gated (see the commit).

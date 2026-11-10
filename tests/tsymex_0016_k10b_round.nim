@@ -308,3 +308,53 @@ suite "K10b: an unconstrained ref's nil constant is pinned by completion":
     check r.trusted == not pNil
     if pNil:
       check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds
+
+proc sutTailByteScan(data: seq[byte]; x: int64) =
+  ## The label, then a NUL scan over a `seq[byte]` the scan makes
+  ## string-backed (round-6 B1: one Z3 String, not a seq cell), then an
+  ## overflow on a branch the scan's result decides. The explore path never
+  ## mentions `data`, so only the witness's pin on it decides the branch.
+  if x == 5: symexTarget("hit")
+  var i = 0
+  while i < data.len and data[i] != 0'u8:
+    inc i
+  if i > 3:
+    let y {.used.} = x + high(int64)
+
+proc nativeScanLen(data: seq[byte]): int =
+  while result < data.len and data[result] != 0'u8:
+    inc result
+
+suite "W3-z int2: a string-backed seq[byte] parameter is pinned":
+  test "version floor (modelPins pins the string at 342)":
+    check parseInt(symexWalkerVersion) >= 342
+  test "(k) a tail branch on a string-backed param's bytes decides; native agrees":
+    # The parameter was left out of the pins (its String fits no seq cell),
+    # so the branch was open and the tail walk, forking it (R6), walked the
+    # overflow arm the witness does not take: untrusted. Each such branch
+    # was also asked at the scratch-check cap, which a pair-loop over the
+    # receiver multiplied past any bound (`tsymex_r6_b7r_bytescan` B7R-6).
+    let log = getTempDir() / "k10b_k_units.log"
+    removeFile(log)
+    putEnv("NELLI_WALK_UNITS_LOG", log)
+    defer:
+      delEnv("NELLI_WALK_UNITS_LOG")
+      removeFile(log)
+    let r = symexFind(sutTailByteScan, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    checkpoint $r.soundness
+    check r.status == sxSat
+    check r.witness[1] == 5
+    check UbKind(ubTailUnverified) notin r.soundness.undefinedKinds
+    # Native agreement: the overflow is reached exactly when the witness's
+    # scan runs past index 3.
+    let past = nativeScanLen(r.witness[0]) > 3
+    check r.trusted == not past
+    if past:
+      check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds
+    var tail = -1
+    for line in readFile(log).splitLines:
+      let f = line.split('\t')
+      if f.len >= 2 and f[1] == "k10b-tail": tail = parseInt(f[0])
+    checkpoint "tail units: " & $tail
+    check tail >= 0 and tail < 2_000_000

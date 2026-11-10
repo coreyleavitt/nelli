@@ -13182,12 +13182,21 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam], path: Path):
     # vector itself, so the witness pins it like any scalar.
     let bitSetParam = p.ty != nil and p.ty.kind == itBitSet and
                       sv.kind == svBitSet
-    if not bitSetParam and not svFitsHeapTy(sv, p.ty):
+    # A string-backed `seq[byte]` parameter (round-6 B1) is one Z3 String,
+    # which `svFitsHeapTy` (a seq cell's data-array fit) does not name; its
+    # leaf is the string itself. Left free, every branch on its bytes was
+    # open under the pins: the tail walk asked each one twice at the
+    # scratch-check cap and, since W3-z R6, forked it both ways, so a
+    # pair-loop over the receiver multiplied capped checks past any test
+    # bound (`tsymex_r6_b7r_bytescan` B7R-6, `tsymex_r6_b7r2_pathscope`
+    # B7r2-1a).
+    let stringBackedParam = p.isStringBacked and sv.kind == svString
+    if not bitSetParam and not stringBackedParam and not svFitsHeapTy(sv, p.ty):
       result.complete = false
       continue
     var leaves: seq[Z3AnyAst]
     try:
-      leaves = if bitSetParam:
+      leaves = if bitSetParam or stringBackedParam:
                  @[wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))]
                else: svLeafTerms(sv, p.ty, pinForm = true)
     except CatchableError:
@@ -20896,12 +20905,7 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   ## its bit-blasting stage above 100 MB: 72k against 876k / 5.85M units
   ## on this query), so the spend is the query's AND the process's; what a
   ## bound above both figures decides is the query's alone.
-  let dbgU0 = ownContextUnits
-  result = ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
-  if ownContextUnits - dbgU0 > 20000:
-    var dbgS = ""
-    for r in roots: dbgS.add $r & "\n"
-    echo "DBGSCRATCH ", ownContextUnits - dbgU0, " ", result, "\n", dbgS[0 ..< min(dbgS.len, 3000)]
+  ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
 
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,

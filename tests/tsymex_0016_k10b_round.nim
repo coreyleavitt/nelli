@@ -213,12 +213,70 @@ proc sutTailUndecided(x: int64) =
 suite "K10b: an undecided branch in the tail fails closed":
   test "(i) a branch the pins and the pc leave open untrusts the sxSat":
     # RFC section 9.1 item 3: an undecided side counts as undefined. Taking
-    # neither arm's bindings and walking on would skip the overflow.
+    # neither arm's bindings and walking on would skip the overflow. Since
+    # W3-z R6 the tail walk forks the open branch and walks both arms, so the
+    # verdict carries the overflow's own kind, not `ubTailUnverified`.
     let r = symexFind(sutTailUndecided, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     check r.status == sxSat
     check not r.trusted
-    check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
+    check r.soundness.undefinedKinds == {UbKind(ubSignedOverflow)}
+    check r.witness[0] == 5
+
+proc sutTailUndecidedDefined(x: int64): int64 =
+  ## The label, then the same open branch on `tailGlobal`, defined on both
+  ## arms: natively the run is defined whatever an earlier call left there.
+  if x == 5: symexTarget("hit")
+  if tailGlobal > 5: result = x + 1
+  else: result = x - 1
+
+proc sutTailUndecidedLoop(x: int64): int64 =
+  ## The label, then a loop whose guard reads `tailGlobal`: the pins leave
+  ## the guard open on every unrolled step, and the body is defined.
+  if x == 5: symexTarget("hit")
+  var i = 0
+  while i < tailGlobal and i < 3:
+    inc i
+  result = x + int64(i)
+
+proc nativeDefinedOnBothArms(f: proc (x: int64): int64 {.nimcall.};
+                             x: int64; lo, hi: int64): bool =
+  ## Natively, under every global an earlier call can leave (`0` and `6`),
+  ## the run's result stays in `x + lo .. x + hi`: no arm wrapped.
+  result = true
+  for g in [0, 6]:
+    setTailGlobal(g)
+    let v = f(x)
+    if v < x + lo or v > x + hi: result = false
+  setTailGlobal(0)
+
+suite "W3-z R6: the winner's tail walk over-approximates an open branch":
+  test "version floor":
+    check parseInt(symexWalkerVersion) >= 317
+
+  test "(i2) an open branch in the tail, defined on both arms: trusted":
+    # The winner's tail walk forks the open branch both ways, as a
+    # candidate's does (R2), and finds no undefined arm. Before R6 it read
+    # the branch as undecided and failed closed (`ubTailUnverified`).
+    let r = symexFind(sutTailUndecidedDefined, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    checkpoint $r.soundness
+    check r.status == sxSat
+    check r.witness[0] == 5
+    check r.trusted
+    check r.soundness.undefinedKinds == {}
+    # Native agreement: defined whatever the global holds.
+    check nativeDefinedOnBothArms(sutTailUndecidedDefined, r.witness[0], -1, 1)
+
+  test "(i3) an open loop guard in the tail, defined body: trusted":
+    let r = symexFind(sutTailUndecidedLoop, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    checkpoint $r.soundness
+    check r.status == sxSat
+    check r.witness[0] == 5
+    check r.trusted
+    check r.soundness.undefinedKinds == {}
+    check nativeDefinedOnBothArms(sutTailUndecidedLoop, r.witness[0], 0, 3)
 
 type TailRef = ref object
   v: int

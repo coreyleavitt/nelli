@@ -379,7 +379,13 @@ const renderAsChoicesVersion* = "12"
   ##   both arms, a fresh-symbol record is not a reason) and the kinds join
   ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
 
-const symexWalkerVersion* = "316"
+const symexWalkerVersion* = "317"
+  ## RFC-0016 W3-z R6 (316->317): the winner's tail walk over-approximates as a
+  ## replay candidate's does (R2). A branch the pins and the `pc` leave open
+  ## after the label (a global havoc, say) was read as undecided and failed the
+  ## whole-run gate closed (`ubTailUnverified`), so a winner whose tail is
+  ## defined on every arm was untrusted. Both arms are now walked, and an
+  ## undefined op on one of them carries its own kind.
   ## RFC-0016 W3-z R3 (314->315): the main walk reads `IRStmt.opaqueUndefined`.
   ## Under `tUndefined` a requested kind is the target's hit at the opaque
   ## call; otherwise it is listed on `SymexResult.undefined`; the path goes on

@@ -1206,6 +1206,17 @@
   `runTaintOf(parseErrors)`, `scIncomplete` and `witnessUndefined` when
   `undefinedReached` is non-empty; `fromFlip` claims it. Pin:
   `tsymex_0016_w3z_r4_concolic_undefined`.
+  W3-z R6 (`rfc-0016-w3z-runtime6`, walker 316 to 317, R2's open precision
+  follow-up): the winner's tail walk over-approximates as a candidate's does.
+  `verifyTailDefined` lost its `overApprox` parameter and `WalkCtx` lost
+  `tailOverApprox` and `tailUndecided`: every tail walk (`tailGate`) forks a
+  branch the pins and the `pc` leave open, and no tail walk counts a
+  `dcFreshSymbol` record as a reason. A clean winner whose post-label tail
+  branches on a module global was `ubTailUnverified` (untrusted) though both
+  arms are defined; it is now trusted, and an undefined arm carries its own
+  kind. Re-pinned K10b (i) (`sutTailUndecided`): `{ubSignedOverflow}` where
+  it was `ubTailUnverified`. Pins: K10b (i2) branch, (i3) loop guard, both
+  with a native run under both global values.
 ||||||| 32ae1cf0
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen

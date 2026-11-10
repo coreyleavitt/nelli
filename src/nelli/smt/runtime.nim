@@ -17451,31 +17451,20 @@ type
     tailGate: bool
                       ## RFC-0016 K10b. This is the whole-run gate's second
                       ## walk (`verifyTailDefined`): `wmFollowConcrete` under
-                      ## the winner's model pins, past the label. The one
-                      ## reader is `opaqueRaiseForks`, which ends a path at an
-                      ## opaque call whose body may be undefined
-                      ## (`IRStmt.opaqueUndefined`); the concolic collect
-                      ## driver, also `wmFollowConcrete`, never sets it.
-    tailUndecided: bool
-                      ## RFC-0016 K10b. Set under `tailGate` by
-                      ## `followBranchOutcome` when a branch stays undecided
-                      ## after the retry under the path's `pc`: the walk went
-                      ## on without either arm, so the run is not shown
-                      ## defined. `verifyTailDefined` answers
-                      ## `ubTailUnverified`.
-    tailOverApprox: bool
-                      ## RFC-0016 W3-z R2. Set under `tailGate` when the walk
-                      ## follows a replay CANDIDATE (`SatCandidate`): its path
-                      ## carries a fresh symbol (a global havoc, an opaque
-                      ## call's result) the pins do not fix, so the walk
-                      ## over-approximates the run instead of following it.
-                      ## A branch the pins and the `pc` leave open forks both
-                      ## arms (`walkIfFollowConcrete`,
-                      ## `walkWhileFollowConcrete`) rather than setting
-                      ## `tailUndecided`, and a `dcFreshSymbol` record does
-                      ## not by itself untrust the tail: a fresh symbol is a
-                      ## superset of what the real run computes, and every
-                      ## undefined side it opens is still decided at the op.
+                      ## a sat's model pins, past the label. `opaqueRaiseForks`
+                      ## ends a path at an opaque call whose body may be
+                      ## undefined (`IRStmt.opaqueUndefined`); the concolic
+                      ## collect driver, also `wmFollowConcrete`, never sets it.
+                      ## RFC-0016 W3-z R2/R6: the walk over-approximates the
+                      ## run. A branch the pins and the `pc` leave open (a
+                      ## global havoc, an opaque call's result: a fresh symbol
+                      ## the pins do not fix) forks both arms
+                      ## (`walkIfFollowConcrete`, `walkWhileFollowConcrete`),
+                      ## as the explore walk does, and a `dcFreshSymbol`
+                      ## record does not by itself untrust the tail: a fresh
+                      ## symbol is a superset of what the real run computes,
+                      ## and every undefined side it opens is still decided at
+                      ## the op. The winner and a replay candidate walk alike.
     concreteEq: seq[Z3Bool]
                       ## RFC-fuzzer-nextgen G1b. Only meaningful when
                       ## `mode == wmFollowConcrete`: one `drawVar == concreteLit`
@@ -22020,19 +22009,10 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
                                    dp.pc & dp.defectSurvivorPc & facts)
   if result.isNone:
     markAmbiguous(w, construct)
-    # Section 9.1 item 3: an undecided side counts as undefined. The walk
-    # goes on without either arm's bindings and effects, so an undefined
-    # operation inside an arm is skipped; the tail check fails closed.
-    # Except on a path the pins rule out: an arm of an earlier fork the
-    # witness does not take (`setLen`'s shrink arm of a grow, say) has a `pc`
-    # that contradicts the pins, so both asks read unsat and the replayed run
-    # is not on it. Nothing it skips is part of the run.
-    # A candidate's walk (`tailOverApprox`) forks both arms at the caller
-    # instead, so nothing is skipped.
-    if w.tailGate and not w.tailOverApprox and
-       not concretelyInfeasible(w.z3, w.concreteEq,
-                                dp.pc & dp.defectSurvivorPc & facts, w.settings):
-      w.tailUndecided = true
+    # Section 9.1 item 3: an undecided side counts as undefined, so the tail
+    # walk (`tailGate`) forks both arms at the caller and walks each; nothing
+    # an arm does is skipped. An arm whose `pc` the pins contradict is not
+    # the run, and its undefined sides read `concretelyInfeasible` at the op.
 
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
@@ -22105,10 +22085,10 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
            concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
           continue
         let outcome = followBranchOutcome(w, dp, condBool, newFacts, wckIf)
-        if outcome.isNone and w.tailOverApprox:
-          # RFC-0016 W3-z R2: a candidate's tail walk over-approximates the
-          # run (a fresh symbol the pins do not fix), so an open branch is
-          # walked both ways, as the explore walk does.
+        if outcome.isNone and w.tailGate:
+          # RFC-0016 W3-z R2/R6: the tail walk over-approximates the run (a
+          # fresh symbol the pins do not fix), so an open branch is walked
+          # both ways, as the explore walk does.
           let armPath = forkPath(dp, dp.pc & accumNegated & @[condBool], dp.env)
           survivors.add walk(stmt.branches[i].body, @[armPath], w)
           states.add (i + 1, dp, accumNegated & @[not condBool])
@@ -22190,9 +22170,9 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
       let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
       for dp in drainScalarRaiseForks(pb, w):
         let outcome = followBranchOutcome(w, dp, cond, @[], wckWhile)
-        if outcome.isNone and w.tailOverApprox:
-          # RFC-0016 W3-z R2: an open guard on a candidate's tail walk
-          # forks both ways, as the explore walk's unroll does.
+        if outcome.isNone and w.tailGate:
+          # RFC-0016 W3-z R2/R6: an open guard on the tail walk forks both
+          # ways, as the explore walk's unroll does.
           let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
           let afterBody = walk(stmt.wbody, @[truePath], w)
           let cps = w.loopStack[frameIx].exits.continuePaths.takeAll()
@@ -30521,8 +30501,7 @@ template drainSinkUnion(dst: var seq[SymexErrorInfo]; w: WalkCtx;
 
 proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
                        ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
-                       pins: seq[Z3Bool];
-                       overApprox = false): set[UbKind] =
+                       pins: seq[Z3Bool]): set[UbKind] =
   ## RFC-0016 K10b (section 9.1 item 3). The whole-run gate's second walk:
   ## from the entry, in concrete-follow mode under the winner's model `pins`
   ## (`RawWitness.pins`), past the label to a routine exit. The target is a
@@ -30539,11 +30518,12 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   ## Empty: every undefined side was `concretelyInfeasible` under the pins and
   ## nothing declined, so the witness's whole run is defined.
   ##
-  ## RFC-0016 W3-z R2: `overApprox` is a replay candidate's walk
-  ## (`WalkCtx.tailOverApprox`). Its path carries a fresh symbol, so the walk
-  ## forks the branches the pins leave open, and a `dcFreshSymbol` record (the
-  ## fresh symbol itself) is not a reason the tail is unverified; every other
-  ## record still is.
+  ## RFC-0016 W3-z R2/R6: the walk over-approximates the run (`tailGate`),
+  ## for the winner and a replay candidate alike. A path may carry a fresh
+  ## symbol the pins do not fix (a global havoc, an opaque call's result), so
+  ## the walk forks the branches the pins leave open, and a `dcFreshSymbol`
+  ## record (the fresh symbol itself) is not a reason the tail is unverified;
+  ## every other record still is.
   let lowerBase = loweringDegradeErrors.len
   if walkWorkExhausted:
     return {UbKind(ubTailUnverified)}   # no budget left to look with
@@ -30568,7 +30548,6 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_k10b_tail_unreached__"),
     params: prog.params, mode: wmFollowConcrete, tailGate: true,
-    tailOverApprox: overApprox,
     found: @[], settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
     callCache: initTable[string, seq[CallCacheEntry]](),
@@ -30594,7 +30573,7 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
   stampLoweringPendingLeak(w)
-  if walkWorkExhausted or w.tailUndecided:
+  if walkWorkExhausted:
     result.incl UbKind(ubTailUnverified)
   var errs = w.walkDegradeErrors & w.heapDepthErrors & w.newFieldZeroErrors &
              w.closureCallErrors
@@ -30604,7 +30583,7 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
   for e in errs:
     if ord(e.kind) >= ord(low(UbKind)) and ord(e.kind) <= ord(high(UbKind)):
       result.incl UbKind(e.kind)
-    elif taintsRun(e) and not (overApprox and classOf(e.kind) == dcFreshSymbol):
+    elif taintsRun(e) and classOf(e.kind) != dcFreshSymbol:
       result.incl UbKind(ubTailUnverified)
   # The second walk is a check, not part of the verdict: what it recorded in
   # the lowering sink was read above, and must not reach the explore walk's
@@ -31232,14 +31211,14 @@ proc runSymexImpl(prog: SymexProgram,
     # pins are live (`dropWitnessPins` clears them at the boundary), and the
     # kinds it is not shown defined in join its `witnessUndefined`, which
     # `settleCandidate` carries onto the confirmed verdict. Its path carries
-    # a fresh symbol the pins do not fix, so the walk over-approximates
-    # (`overApprox`). Replay off: no candidate is ever confirmed.
+    # a fresh symbol the pins do not fix, which the walk over-approximates,
+    # as it does the winner's. Replay off: no candidate is ever confirmed.
     if settings.wholeRunDefinedness and settings.replay and
        target.kind == stkLabel:
       for c in w.candidates.mitems:
         if c.status == sxSat and c.soundness.witnessUndefined == {}:
           let tail = verifyTailDefined(prog, settings, ctx, env, initialPC,
-                                       c.witness.pins, overApprox = true)
+                                       c.witness.pins)
           if tail != {}:
             c.soundness.witnessUndefined = ubOrdinals(tail)
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,

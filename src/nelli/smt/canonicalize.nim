@@ -378,6 +378,12 @@ const renderAsChoicesVersion* = "12"
   ##   its model pins (`verifyTailDefined`, `overApprox`: an open branch forks
   ##   both arms, a fresh-symbol record is not a reason) and the kinds join
   ##   the candidate's `witnessUndefined`, which `settleCandidate` carries.
+  ## - 316 (RFC-0016 W3-z P11): an inline iterator called from another inline
+  ##   iterator's body is expanded (a `yield` under the body's nested `for`
+  ##   binds to the innermost iterator being expanded); it declined.
+  ## - 317 (RFC-0016 W3-z P13): a `break` / `continue` in the body of a `for`
+  ##   over an inline iterator leaves the whole expansion / resumes after the
+  ##   current `yield`; both declined.
 
 const symexWalkerVersion* = "317"
   ## RFC-0016 W3-z R5 (315->316): a diagnostic raise's `witnessUndefined` and
@@ -402,6 +408,7 @@ const symexWalkerVersion* = "317"
   ## shape `pragmaName` cannot name declines on a type as on every other
   ## place; `layoutPragmaOf` reads every entry (a `packed` type with an
   ## `align` field is not the packed layout).
+    ## RFC-0016 W3-z P7 (touchesFloat reads inline iterator bodies): 314->315.
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
   ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a
   ## stdlib proc taken as a value (`parseProcAsValue`); absent declines

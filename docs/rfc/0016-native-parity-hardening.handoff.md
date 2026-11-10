@@ -140,6 +140,40 @@
     expands a `{.pragma: lay, union.}` alias at both the type and the field
     place, and a user pragma with no body vanishes from the list, so no
     absent name reaches the type place. Test: `tsymex_0016_p4_fieldpragma`.
+    New gap (fixed by P7): `touchesFloat` (check_options.nim) was syntactic, so a
+    routine whose only float arithmetic is inside an inline iterator
+    it expands read its float checks as off.
+  - W3-z P7 (`rfc-0016-w3z-parser7`, walker 314 to 315): `touchesFloat` follows
+    an iterator symbol into its `getImpl` body, transitively and with a seen
+    set, since an inline iterator takes the caller's options (probed natively:
+    a `nanChecks` push in the routine raises for an iterator defined outside
+    it). Templates were already right (typed bodies are expanded). Test:
+    `tsymex_0016_p7_floatinline`. Gap left, fixed by P11: an inline
+    iterator called from another inline iterator declined
+    `feUnsupportedStmtKind`.
+  - W3-z P11 (`rfc-0016-w3z-parser11`, walker 315 to 316): an inline iterator
+    inside another's body is expanded. `ParseCtx.yieldHandlers` holds, per
+    iterator being expanded, its loop variables and for-body; a `yield` under
+    a nested `for` of the body (`parseStmtInner`'s new `nnkYieldStmt` arm)
+    answers to the innermost, and `parseForBody` lifts that handler while the
+    for-body parses so the outer `yield` binds to the caller's loop. Depth is
+    capped at `maxIteratorNesting` (8, `feUnsupportedStmtKind`); recursion was
+    already declined by name. `touchesFloat` keyed its seen set by signature
+    hash, so two iterators of one signature (`fouter` over `fdiv`) read as
+    one and the inner body's floats were missed; the key now includes name
+    and definition line. Test: `tsymex_0016_p11_nestediter`. Fixed by P13:
+    `break`/`continue` directly in a for-body over an inline iterator.
+  - W3-z P13 (`rfc-0016-w3z-parser13`, walker 316 to 317): `break` /
+    `continue` in the for-body of an inline iterator. `hasBreakContinueShallow`
+    is gone: the expansion is a jump-target block (`ParseCtx.yieldHandlers`
+    now records its index), and `parseForBody` parses the for-body as a loop
+    body of the caller: the iterator body's own loops are hidden from it,
+    `break` redirects (`JumpTarget.brkTo`) to the expansion block and
+    `continue` leaves a per-yield-site block. A labelled `break` to a caller
+    block resolves by symbol as before. No shape is left declined. Also: the
+    recursion guard no longer reads `for x in it(n): for y in it(n)` as
+    recursion (the for-body is outside the iterator). Test:
+    `tsymex_0016_p13_iterbreak`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

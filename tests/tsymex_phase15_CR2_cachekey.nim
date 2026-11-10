@@ -1174,6 +1174,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 K2F-3 (the footprint and effect scanners over-approximate
     ## what they did not read; a call through a proc value in an opaque body
     ## writes any variable): 312->313.
+    ## RFC-0016 W3-z P7 (float-check gate reads inline iterator bodies): 314->315.
+    ## RFC-0016 W3-z P11 (inline iterator inside an inline iterator): 315->316.
+    ## RFC-0016 W3-z P13 (break/continue in an inline-iterator for-body): 316->317.
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

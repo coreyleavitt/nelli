@@ -715,8 +715,12 @@ proc typeHasFloat(t: NimNode; generic: bool; depth = 0): bool =
     for c in t:
       if typeHasFloat(c, generic, depth + 1): return true
 
-proc touchesFloat(n: NimNode): bool =
-  ## The float checks guard float arithmetic alone.
+proc touchesFloat(n: NimNode; seen: var seq[string]): bool =
+  ## The float checks guard float arithmetic alone. An inline iterator a loop
+  ## runs is compiled into the loop with the options of the routine holding it
+  ## (read from the generated C: an iterator defined outside a `push nanChecks`
+  ## still raises under one), so its body counts as the routine's own,
+  ## transitively. Typed bodies already carry expanded templates.
   case n.kind
   of nnkFloatLit .. nnkFloat64Lit: true
   of nnkSym:
@@ -725,17 +729,36 @@ proc touchesFloat(n: NimNode): bool =
       typeHasFloat(n.getType, true)
     of nskProc, nskFunc, nskConverter, nskMethod:
       typeHasFloat(n.getType, false)
+    of nskIterator:
+      # Inline and closure alike: a closure iterator's body is a separate
+      # routine, but a body that cannot be told apart is read as touching.
+      # RFC-0016 W3-z P11: the key is the iterator's own, not its signature's:
+      # two iterators of one signature (`fouter` over `fdiv`, both
+      # `(int): bool`) were one, and the inner one's body was never read.
+      let body = n.getImpl
+      let key = n.signatureHash & "@" & n.strVal &
+                (if body.kind != nnkEmpty: body.lineInfo else: "")
+      if key in seen: false
+      else:
+        seen.add key
+        if typeHasFloat(n.getType, false): true
+        else:
+          body.kind != nnkEmpty and body.len > 6 and touchesFloat(body[6], seen)
     else: false
   of mayScanLeafKinds - {nnkFloatLit .. nnkFloat64Lit}:
     false
   of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes:
     for c in n:
-      if touchesFloat(c): return true
+      if touchesFloat(c, seen): return true
     false
   else:
     # RFC-0016 K2F-3 (RFC section 8.1): a kind not listed may compute with
     # floats (`asm` included), so the float checks may matter to it.
     true
+
+proc touchesFloat(n: NimNode): bool =
+  var seen: seq[string]
+  touchesFloat(n, seen)
 
 var moduleScans {.compileTime.}: Table[string, ModuleScan]
 var runLeaks {.compileTime.}: seq[tuple[root, name: string; opts: set[CheckOption]]]

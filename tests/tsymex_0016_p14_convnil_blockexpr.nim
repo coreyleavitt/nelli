@@ -57,6 +57,17 @@ proc e4(a: int) =
   let x = (block: (n += 10; n))
   if x == 11: symexTarget("hit")
 
+proc e5(a: int) =
+  ## A `break` out of the block expression itself: its value is never
+  ## computed on that path, which the lowering does not model.
+  var n = 0
+  let x = block foo:
+    if a > 3:
+      n = 1
+      break foo
+    a * 2
+  if x == 6 and n == 0: symexTarget("hit")
+
 suite "RFC-0016 W3-z P14: Conv of nil, and block expressions":
   test "RefO(nil) agrees with native":
     discard pinExact(c1, cellKey(axTypeClass, "ref"), domain = sampled([true, false]))
@@ -71,3 +82,6 @@ suite "RFC-0016 W3-z P14: Conv of nil, and block expressions":
     discard pinExact(e2, cellKey(axConstruct, "blockExpr/scoped"), domain = sampled([3, 4, 5]))
     discard pinExact(e3, cellKey(axConstruct, "blockExpr/labelled"), domain = sampled([1, 2, 3, 4, 9]))
     discard pinExact(e4, cellKey(axConstruct, "blockExpr/afterBreak"), domain = sampled([1, 4, 9]))
+  test "a break out of a block expression declines":
+    pinDecline(e5, cellKey(axConstruct, "blockExpr/breakOut"),
+               feUnsupportedExprKind, needle = "break out of a block expression")

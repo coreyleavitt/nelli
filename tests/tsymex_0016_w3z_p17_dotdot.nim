@@ -91,7 +91,7 @@ suite "W3-z P17: the walker version":
   test "floor":
     check parseInt(symexWalkerVersion) >= 317
 
-const dd = cellKey(faCallShape, "p17/dotdot")
+const dd = cellKey(axConstruct, "for/dotdot/boundOnce")
 
 suite "W3-z P17: a non-symbol bound is read once":
   test "..< s.len, body grows s": discard pinExact(sLenGrow, dd)
@@ -224,7 +224,7 @@ proc dd32Wrap(a: int) =
     if i - 1'u32 > 100'u32: n += 1
   if n == 1 and a == 1: symexTarget("hit")
 
-const uc = cellKey(faCallShape, "p17/unsigned")
+const uc = cellKey(axConstruct, "for/counter/unsigned")
 
 suite "W3-z P17: countup over an unsigned counter":
   test "uint32": discard pinExact(uUp32, uc)

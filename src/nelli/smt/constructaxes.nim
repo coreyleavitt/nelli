@@ -72,6 +72,35 @@ func constructRows(): seq[ConstructKey] =
     "control flow and evaluation order: a labelled break, a statement-list " &
     "expression, the argument drain order, a nested try in a proc")
   result.add decided(
+    ["blockExpr/tail", "blockExpr/scoped", "blockExpr/labelled",
+     "blockExpr/afterBreak"],
+    "a `block` used as an expression (W3-z P14): lowered as a statement-list " &
+    "expression in its own scope, labelled or not, and after a `break` out " &
+    "of an earlier block statement")
+  result.add declines(some(feUnsupportedExprKind), ["blockExpr/breakOut"],
+    "a `break` out of a block expression leaves its value unevaluated, which " &
+    "the lowering does not model (W3-z P14)")
+  result.add decided(
+    ["for/inlineIter/break", "for/inlineIter/continue",
+     "for/inlineIter/labelledBreak"],
+    "a `break`, `continue` or labelled `break` in the body of a `for` over " &
+    "an inline iterator: it leaves the whole expansion, resumes after the " &
+    "current `yield`, or leaves the labelled block (W3-z P13)")
+  result.add decided(
+    ["for/countup", "for/countdown"],
+    "`for i in countup(a, b[, step])` / `countdown` over an `int`-like " &
+    "counter, modelled by the `for` arm beside `..`: bounds and step read " &
+    "once, a step below 1 raises `RangeDefect` (W3-z P15)")
+  result.add decided(
+    ["for/dotdot/boundOnce"],
+    "a `..` / `..<` (or counting iterator) bound that is not a symbol is " &
+    "evaluated once, before the loop (W3-z P17)")
+  result.add decided(
+    ["for/counter/unsigned", "for/counter/narrowSigned"],
+    "a loop counter of `..`, `..<`, `countup` or `countdown` is held in its " &
+    "own type: an unsigned one wraps, an `int8`/`int16`/`int32` one " &
+    "overflows at its own width (W3-z P17, P18)")
+  result.add decided(
     ["case/elif/chain", "case/elif/chainElse", "case/elif/expr",
      "case/elif/exprCond", "case/elif/hoisted", "case/elif/orderExpr", "case/elif/orderStmt",
      "case/elif/stmt"],

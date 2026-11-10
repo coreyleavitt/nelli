@@ -144,8 +144,8 @@ proc sUnsatLoop(a: int) =
   for i in countup(1, 4): n += i
   if n == 11: symexTarget("hit")
 
-const up = cellKey(faCallShape, "p15/countup")
-const dn = cellKey(faCallShape, "p15/countdown")
+const up = cellKey(axConstruct, "for/countup")
+const dn = cellKey(axConstruct, "for/countdown")
 
 suite "W3-z P15: the walker version":
   test "floor":

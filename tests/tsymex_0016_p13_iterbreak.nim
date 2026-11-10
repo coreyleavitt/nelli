@@ -116,26 +116,30 @@ proc sutContinueIn(k: int) =
   if s == 4 and k == 5: symexTarget("hit")
 
 template decided(body: untyped) =
-  if hostAdmission().isSome: skip() else: body
+  if hostAdmission().isSome: skipUnadmitted() else: body
 
-template sat(sut: untyped, call: untyped) =
+template sat(sut: untyped, call: untyped, key: CellKey) =
+  ## Filed under the construct cell (`for/inlineIter/*`) and under the
+  ## routine float-check cell the expansion reads (P7: the iterator's body is
+  ## the routine's own).
   decided:
     check native(call) == "hit"
-    let r = pinExact(sut, nanK, target = tLabel("hit"), domain = ints)
+    let r = pinExact(sut, key, target = tLabel("hit"), domain = ints)
     check r.status == sxSat
+    discard pinExact(sut, nanK, target = tLabel("hit"), domain = ints)
 
 suite "W3-z P13: break / continue in an inline-iterator for-body":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 317
-  test "break over a while iterator": sat(sutBreakWhile, sutBreakWhile(5))
-  test "break over a finite iterator": sat(sutBreakFinite, sutBreakFinite(0))
-  test "continue over a while iterator": sat(sutContinue, sutContinue(5))
-  test "continue over a finite iterator": sat(sutContinueFinite, sutContinueFinite(0))
+  test "break over a while iterator": sat(sutBreakWhile, sutBreakWhile(5), cellKey(axConstruct, "for/inlineIter/break"))
+  test "break over a finite iterator": sat(sutBreakFinite, sutBreakFinite(0), cellKey(axConstruct, "for/inlineIter/break"))
+  test "continue over a while iterator": sat(sutContinue, sutContinue(5), cellKey(axConstruct, "for/inlineIter/continue"))
+  test "continue over a finite iterator": sat(sutContinueFinite, sutContinueFinite(0), cellKey(axConstruct, "for/inlineIter/continue"))
   test "labelled block break out of a nested iterator for":
-    sat(sutLabelled, sutLabelled(0))
+    sat(sutLabelled, sutLabelled(0), cellKey(axConstruct, "for/inlineIter/labelledBreak"))
   test "break in the body of a nested iterator's caller":
-    sat(sutNestedBody, sutNestedBody(5))
-  test "break inside a nested iterator": sat(sutBreakInIter, sutBreakInIter(5))
-  test "break leaves the expansion once": sat(sutBreakInner, sutBreakInner(3))
+    sat(sutNestedBody, sutNestedBody(5), cellKey(axConstruct, "for/inlineIter/break"))
+  test "break inside a nested iterator": sat(sutBreakInIter, sutBreakInIter(5), cellKey(axConstruct, "for/inlineIter/break"))
+  test "break leaves the expansion once": sat(sutBreakInner, sutBreakInner(3), cellKey(axConstruct, "for/inlineIter/break"))
   test "a caller's inner loop keeps its own continue":
-    sat(sutContinueIn, sutContinueIn(5))
+    sat(sutContinueIn, sutContinueIn(5), cellKey(axConstruct, "for/inlineIter/continue"))

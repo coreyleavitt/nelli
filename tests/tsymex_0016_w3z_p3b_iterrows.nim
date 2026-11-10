@@ -154,7 +154,7 @@ suite "W3-z P3b: the system counting iterators decline for their real cause":
                cellKey(axStdlibBody, "system.countdown/iterator"),
                feUnsupportedExprKind, excluding = {feUnadmitted})
   test "an uint32 counter with a literal step is walked exactly (P17)":
-    const c = cellKey(faCallShape, "p17/unsigned")
+    const c = cellKey(axConstruct, "for/counter/unsigned")
     discard pinExact(sCountup, c)
     discard pinExact(sCountdown, c)
     discard pinExact(sCountupStep, c)

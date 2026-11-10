@@ -70,7 +70,7 @@ suite "W3-z P18: the walker version":
   test "floor":
     check parseInt(symexWalkerVersion) >= 318
 
-const sc = cellKey(faCallShape, "p18/signed")
+const sc = cellKey(axConstruct, "for/counter/narrowSigned")
 
 suite "W3-z P18: a signed narrow counter is its own type":
   test "int8 ..": discard pinExact(dd8, sc, tRaisedExn("OverflowDefect"))

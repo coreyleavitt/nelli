@@ -363,8 +363,11 @@ const renderAsChoicesVersion* = "12"
   ##   declines `feCheckOption`: its asserts follow `assertions` at the site
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
+  ## - 316 (RFC-0016 W3-z P11): an inline iterator called from another inline
+  ##   iterator's body is expanded (a `yield` under the body's nested `for`
+  ##   binds to the innermost iterator being expanded); it declined.
 
-const symexWalkerVersion* = "315"
+const symexWalkerVersion* = "316"
     ## RFC-0016 W3-z P7 (touchesFloat reads inline iterator bodies): 314->315.
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
   ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a

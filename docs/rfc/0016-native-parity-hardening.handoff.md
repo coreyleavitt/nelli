@@ -133,9 +133,22 @@
     set, since an inline iterator takes the caller's options (probed natively:
     a `nanChecks` push in the routine raises for an iterator defined outside
     it). Templates were already right (typed bodies are expanded). Test:
-    `tsymex_0016_p7_floatinline`. Not fixed, a precision gap: an inline
-    iterator called from another inline iterator declines
+    `tsymex_0016_p7_floatinline`. Gap left, fixed by P11: an inline
+    iterator called from another inline iterator declined
     `feUnsupportedStmtKind`.
+  - W3-z P11 (`rfc-0016-w3z-parser11`, walker 315 to 316): an inline iterator
+    inside another's body is expanded. `ParseCtx.yieldHandlers` holds, per
+    iterator being expanded, its loop variables and for-body; a `yield` under
+    a nested `for` of the body (`parseStmtInner`'s new `nnkYieldStmt` arm)
+    answers to the innermost, and `parseForBody` lifts that handler while the
+    for-body parses so the outer `yield` binds to the caller's loop. Depth is
+    capped at `maxIteratorNesting` (8, `feUnsupportedStmtKind`); recursion was
+    already declined by name. `touchesFloat` keyed its seen set by signature
+    hash, so two iterators of one signature (`fouter` over `fdiv`) read as
+    one and the inner body's floats were missed; the key now includes name
+    and definition line. Test: `tsymex_0016_p11_nestediter`. Still declined
+    (pre-existing, `hasBreakContinueShallow`): `break`/`continue` directly in
+    a for-body over an inline iterator.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

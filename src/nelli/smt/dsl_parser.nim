@@ -1425,6 +1425,15 @@ type
                                    ## during parse — the `declOrder` half of the
                                    ## lambda-site key, disambiguating two lambdas
                                    ## with identical bodies.
+    yieldHandlers*: seq[tuple[bindings: seq[(string, IRType)],
+                              forBody: NimNode]]
+                                   ## RFC-0016 W3-z P11. One entry per inline
+                                   ## iterator body being parsed: the loop
+                                   ## variables and the for-body its `yield`s
+                                   ## bind to. A `yield` reached through a
+                                   ## statement the body-walker does not
+                                   ## recurse into (a nested `for`) answers to
+                                   ## the top entry.
     activeIterators*: HashSet[string]
                                    ## A3 (ADR-0014 D2-0d). Iterator sym names
                                    ## currently being inlined. Guards against
@@ -16848,10 +16857,17 @@ proc bindIterArg(impl, formalSym, tyNode, arg: NimNode;
   body = substIterArg(body, f, stripFieldChecks(fixed))
   true
 
+const maxIteratorNesting = 8
+  ## RFC-0016 W3-z P11: inline iterators expanded inside one another.
+
 proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0016 W3-z P2. The for-body of an inlined iterator belongs to the
   ## caller: it is parsed (and walked) under the caller's checks, not the
   ## closure iterator's own that `yield` was reached under.
+  # P11: the for-body is outside the iterator, so a `yield` in it (a nested
+  # iterator's caller loop) answers to the handler beneath this iterator's.
+  let handler = ctx.yieldHandlers.pop()
+  defer: ctx.yieldHandlers.add handler
   if ctx.iterBodies.len == 0 or not ctx.iterBodies[^1].own:
     return parseStmt(forBodyNode, ctx)
   # The for-body is outside the iterator: its own entry leaves the stack.
@@ -20783,6 +20799,10 @@ proc parseStmtInner(n: NimNode,
         if itSymName in ctx.activeIterators:
           return ctx.declineMarker(feUnsupportedStmtKind, "recursive iterator " & itSymName &
             " — cannot inline (ADR-0014 D2-0d, CRIT-3)")
+        if ctx.activeIterators.len >= maxIteratorNesting:
+          return ctx.declineMarker(feUnsupportedStmtKind, "inline iterators nested " &
+            "deeper than " & $maxIteratorNesting & " (`" & itSymName &
+            "`) — cannot inline (RFC-0016 W3-z P11)")
         # (e) Non-trivial default params that can't safely be evaluated out-of-scope
         let formal = impl[3]  # nnkFormalParams: [retTy, IdentDefs…]
         block checkDefaults:
@@ -20893,7 +20913,9 @@ proc parseStmtInner(n: NimNode,
         let callerTop = if ctx.checkScopes.len > 0: ctx.checkScopes[^1] else: {}
         ctx.iterBodies.add (own: ownScope, caller: callerTop)
         if ownScope: ctx.checkScopes.add(pushedOn(iterChecks) + floatOn(iterChecks))
+        ctx.yieldHandlers.add (bindings: iterVarBindings, forBody: bodyNode)
         var bodyIR = parseIterBodyStmt(iterBody, iterVarBindings, bodyNode, ctx)
+        discard ctx.yieldHandlers.pop()
         if ownScope:
           discard ctx.checkScopes.pop()
           if hasCheckOff():
@@ -20911,6 +20933,16 @@ proc parseStmtInner(n: NimNode,
           "resolvable direct iterator call (ADR-0014 D1)")
     else:
       ctx.declineMarker(feUnsupportedStmtKind, &"unsupported for-loop iterable shape: {iterExpr.kind}")
+  of nnkYieldStmt:
+    # RFC-0016 W3-z P11. A `yield` the iterator-body walker did not reach
+    # itself: it sits under a nested loop of the body (`for i in inner(n):
+    # yield i`). It binds to the innermost inline iterator being expanded.
+    if ctx.yieldHandlers.len == 0:
+      ctx.declineMarker(feUnsupportedStmtKind,
+        "`yield` outside an inlinable iterator body")
+    else:
+      let h = ctx.yieldHandlers[^1]
+      parseIterBodyStmt(n, h.bindings, h.forBody, ctx)
   of nnkBreakStmt:
     resolveBreak(n, ctx)        # RFC-0005 S8m
   of nnkContinueStmt:

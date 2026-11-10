@@ -653,13 +653,17 @@ proc touchesFloat(n: NimNode; seen: var seq[string]): bool =
     of nskIterator:
       # Inline and closure alike: a closure iterator's body is a separate
       # routine, but a body that cannot be told apart is read as touching.
-      let key = n.signatureHash
+      # RFC-0016 W3-z P11: the key is the iterator's own, not its signature's:
+      # two iterators of one signature (`fouter` over `fdiv`, both
+      # `(int): bool`) were one, and the inner one's body was never read.
+      let body = n.getImpl
+      let key = n.signatureHash & "@" & n.strVal &
+                (if body.kind != nnkEmpty: body.lineInfo else: "")
       if key in seen: false
       else:
         seen.add key
         if typeHasFloat(n.getType, false): true
         else:
-          let body = n.getImpl
           body.kind != nnkEmpty and body.len > 6 and touchesFloat(body[6], seen)
     else: false
   else:

@@ -30,6 +30,7 @@
 # `getTypeImpl` read a borrowed routine's argument at its base type.
 import std/macros except strVal, typeKind, getTypeInst, getTypeImpl
 from std/typetraits import supportsCopyMem   ## RFC-0005 S8cs: a type with no copy hook to hide
+import std/compilesettings   ## RFC-0016 W3-z P8: `projectFull`, the main module of the build
 import std/effecttraits   ## RFC-0005 S8ax: an opaque routine's inferred `raises`
 import std/options    ## RFC-chapulin-hardening Q1: tryRecognizeScanIdiom's Option[IRStmt]
 import std/strformat
@@ -11125,6 +11126,28 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # node reuses every literal/expression arm the parser already has.
         # Unresolvable shapes fall through to mkVar (prior behavior).
         if symKind(n) == nskConst:
+          # RFC-0016 W3-z P8 (soundness). `isMainModule` is a magic const
+          # (`mIsMainModule`) the compiler folds per USING module; its
+          # declared default (`false`) is not its value. The use's line-info
+          # file names that module only when it IS the build's main file: any
+          # other file may be an `include`d file or a template expanded into
+          # the main module, where the true value is `true`. So fold to
+          # `true` for the main file and decline everywhere else.
+          if s == "isMainModule":
+            let decl = n.getImpl.lineInfoObj.filename.replace('\\', '/')
+            if decl.endsWith("system/compilation.nim") or
+               decl.endsWith("system.nim"):
+              let useFile = n.lineInfoObj.filename.replace('\\', '/')
+              if useFile == querySetting(projectFull).replace('\\', '/'):
+                return mkBoolLit(true)
+              preamble.add ctx.declineAtSite(
+                feUnsupportedOp,
+                siteMsg(n, "isMainModule outside the main module's own file (" &
+                  useFile & "): the value depends on the module the code " &
+                  "is compiled into, and an included file or an expanded " &
+                  "template is the main module's"),
+                "isMainModule outside the main module's own file")
+              return mkBoolLit(false)
           let cImpl = n.getImpl
           if cImpl.kind == nnkConstDef and cImpl.len >= 3 and
              cImpl[2].kind != nnkEmpty:
@@ -11187,6 +11210,22 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # (`parseCalleeImpl`'s `resultRhs` path, `isLet`/`isAssign` RHS parsing,
     # …) already thread `preamble` ahead of the expression's consumer, so
     # the binding flows into the tail expression's environment at walk time.
+    # RFC-0016 W3-z P9. `offsetof(T, f)` is a system template whose typed
+    # expansion is `(var tmp {.noinit.}: ptr T; <IntLit offset>)`: the
+    # compiler already folded the offset to the tail literal, and the
+    # leading `tmp` is a dead scratch variable nothing reads. Fold it to the
+    # literal, as the `const o = offsetof(...)` form (already a literal) is.
+    if n.kind == nnkStmtListExpr and n.len == 2 and
+       n[1].kind in {nnkIntLit .. nnkInt64Lit} and
+       n[0].kind == nnkVarSection and n[0].len == 1 and
+       n[0][0].kind == nnkIdentDefs and n[0][0][0].kind == nnkPragmaExpr and
+       n[0][0][0][0].kind == nnkSym and
+       n[0][0][0][0].strVal.startsWith("tmp`gensym") and
+       n[0][0][0][1].kind == nnkPragma and n[0][0][0][1].len == 1 and
+       n[0][0][0][1][0].kind == nnkIdent and
+       n[0][0][0][1][0].strVal == "noinit" and
+       n[0][0][2].kind == nnkEmpty:
+      return parseExpr(n[1], preamble, ctx)
     for i in 0 ..< n.len - 1:
       preamble.add parseStmt(n[i], ctx)
     parseExpr(n[n.len - 1], preamble, ctx)

@@ -1,4 +1,3 @@
 # RFC-0016 W3-z blocker list: scopes whose allowlist is not yet shorter than at its introduction (intro-counts.txt). Line: scope<TAB>ceiling<TAB>slice<TAB>reason. The ceiling equals the current count, so the scope can only shrink; the line goes when the scope is shorter than its introduction count.
 build	11	W4-z	platform-scoped entries (the JIT and interp PCRE rows, the other legs' build rows, setjmp, fwrapv, the two cflags cells) that only another leg can evidence, and an introduction count (7) that predates them; they stay until a leg can evidence each
-magic	114	W4-z	95 more magic rows are declared with no pin than at introduction (the K4a-table census listed every magic); each needs a snippet through symexFind or a never decision
 stdlib	9	W4-z	nine math rows stated by ADM-IR with no cell pin (the float lowering models them; tsymex_phase15_F6_float_math decides them); each needs an exact pin keyed stdlib:math.<name>

@@ -98,6 +98,12 @@ func mNever(key, note: string): MagicRow =
   (key, refused[MagicSite, MagicModel](some(feUnsupportedOp), note,
                                        intent = iNever, never = nrByDesign))
 
+func mNeverBecause(key, note: string; why: NeverReason): MagicRow =
+  ## A `never` row whose reason is not "by design": here, a routine this
+  ## toolchain does not offer a SUT (`nrPlatform`).
+  (key, refused[MagicSite, MagicModel](some(feUnsupportedOp), note,
+                                       intent = iNever, never = why))
+
 const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("AddI",
     "+ (system/arithmetics.nim:75): binopForInfix P:3291; lowerArith RT:8800-8910 (overflowConds S8bv; width wrap S8w)", also = {msDefOverflow}),
@@ -341,8 +347,8 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
     "isNil (system.nim:1455): P:11629 (S8bo)"),
   mModelled("Addr",
     "addr,unsafeAddr (system.nim:99): addr/unsafeAddr arms P:7706,8008,8404 (cluster R, S8ch); global in a walked callee declines (heUnsafeCast)"),
-  mDeclined("DeepCopy",
-    "deepCopy (system.nim:2768): stubBody magic decline P:21225 (S8bo); GC_ref also via the type bridge nnkRecWhen"),
+  mNeverBecause("DeepCopy",
+    "deepCopy (system.nim:2768): under the default --mm:orc it needs --deepcopy:on, a flag a test file cannot set (the compile stops: 'deepcopy support has to be enabled'), so no SUT reaches it (W3-z M1: pinned never; a build with --deepcopy:on would reach the stubBody decline P:21225)", nrPlatform),
   mDeclinedAs("GCref", feUnsupportedExprKind,
     "GC_ref (system/gc_interface.nim:42): the `GCref` magic exists only under --mm:refc, which is refused by name at the import (D-0016-7); under the verified orc and arc builds GC_ref is arc.nim's body (`nimIncRef` through `cast[pointer]`), which the walk declines at the nnkCast (feUnsupportedExprKind, W3-z E2)"),
   mDeclined("GCunref",
@@ -355,8 +361,8 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
     "offsetOfDotExpr (system.nim:600): semfold folds sizeof(T)/sizeof(x) to an nnkIntLit before getImpl; a size the compiler cannot fold (an ..."),
   mDeclined("GetTypeInfo",
     "getTypeInfo (system.nim:2033): stubBody magic decline P:21225 (S8bo); GC_ref also via the type bridge nnkRecWhen"),
-  mDeclined("GetTypeInfoV2",
-    "getDynamicTypeInfo (system/cyclebreaker.nim:152): stubBody magic decline P:21225 (S8bo); GC_ref also via the type bridge nnkRecWhen"),
+  mNeverBecause("GetTypeInfoV2",
+    "getDynamicTypeInfo (system/cyclebreaker.nim:152): declared in system/cyclebreaker, which `system` does not export, so no SUT names it (W3-z M1: pinned never)", nrPlatform),
   mModelled("Echo",
     "debugEcho,echo (system.nim:1743): OpaqueEffectfulProcs (stdlib_models.nim:86): body skipped, fresh result, path uncertain"),
   mModelled("Exit",
@@ -572,20 +578,20 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
   mFolded("CpuEndian",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
-  mFolded("BuildCPU",
-    "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
+  mNeverBecause("BuildCPU",
+    "buildCPU (system/nimscript.nim:20): declared by system/nimscript only, so native code cannot name it (W3-z M1: pinned never; was mFolded)", nrPlatform),
   mFolded("HostOS",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
   mFolded("AppType",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
-  mFolded("BuildOS",
-    "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
+  mNeverBecause("BuildOS",
+    "buildOS (system/nimscript.nim:16): declared by system/nimscript only, so native code cannot name it (W3-z M1: pinned never; was mFolded)", nrPlatform),
   mFolded("IsMainModule",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
   mFolded("CompileDate",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
-  mFolded("Nimvm",
-    "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
+  mDeclinedAs("Nimvm", feUnsupportedStmtKind,
+    "nimvm (system/compilation.nim:18): `when nimvm` reaches the walker as a statement it does not read and declines at feUnsupportedStmtKind (W3-z M1: pinned; was mFolded, which no program shows)"),
   mFolded("CompileTime",
     "a compile-time constant or switch (system/compilation.nim, system.nim): the compiler folds it before getImpl"),
 

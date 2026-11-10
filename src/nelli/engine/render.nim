@@ -87,6 +87,14 @@ func boundsJson(b: ResourceBudget): string =
     result &= "\"" & name & "\":" & $v
   result &= "}"
 
+func kindsJson(ws: set[UbOrdinal]): string =
+  ## RFC-0016 W3-z R5 (U7). A raise's `witnessUndefined` as JSON kind names.
+  var first = true
+  for k in undefinedKinds(Soundness(witnessUndefined: ws)):
+    if not first: result &= ","
+    first = false
+    result &= "\"" & $k & "\""
+
 func undefinedNames(f: SymexFinding): seq[string] =
   ## RFC-0016 WA-B (P4). `Soundness.witnessUndefined` by `UbKind` name, in
   ## ordinal order.
@@ -128,11 +136,18 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
                ".} " & av.callee & " at " & av.site & ": " & av.msg
   for h in f.hints:
     result.add "  hint " & h.kind & ": " & h.msg
+  for u in f.undefined:   # RFC-0016 W3-z R5 (U6)
+    result.add "  undefined " & u.kind & " at " & u.site &
+               " witness=" & $u.witnessChoices.len & " choices"
   for d in f.diagnostics:
     result.add "  also raised " & d.raisedTypeId &
                (if d.isDefect: " (defect)" else: "") &
                (if d.raisedMsg.len > 0: ": " & d.raisedMsg else: "") &
-               " witness=" & $d.witnessChoices.len & " choices"
+               " witness=" & $d.witnessChoices.len & " choices" &
+               (if d.witnessUndefined != {}: " witnessUndefined=" & kindsJson(d.witnessUndefined).replace("\"", "") else: "") &
+               (if d.witnessUnsafe: " witnessUnsafe" else: "") &
+               (if hostRunnable(d.witnessUndefined, d.witnessUnsafe): ""
+                else: " (not host-runnable)")
 
 proc symexSection(findings: seq[SymexFinding]): string =
   result = "[symex]\n"
@@ -282,13 +297,24 @@ proc symexFindingJson(f: SymexFinding): string =
               jsonEscape(h.severity) & "\",\"msg\":\"" & jsonEscape(h.msg) &
               "\"}"
   result &= "]"
+  result &= ",\"undefined\":["   # RFC-0016 W3-z R5 (U6)
+  for i, u in f.undefined:
+    if i > 0: result &= ","
+    result &= "{\"kind\":\"" & jsonEscape(u.kind) & "\",\"site\":\"" &
+              jsonEscape(u.site) & "\",\"witnessChoiceCount\":" &
+              $u.witnessChoices.len & "}"
+  result &= "]"
   result &= ",\"diagnostics\":["   # RFC-0005 W1
   for i, d in f.diagnostics:
     if i > 0: result &= ","
     result &= "{\"raisedTypeId\":\"" & jsonEscape(d.raisedTypeId) &
               "\",\"isDefect\":" & $d.isDefect &
               ",\"raisedMsg\":\"" & jsonEscape(d.raisedMsg) &
-              "\",\"witnessChoiceCount\":" & $d.witnessChoices.len & "}"
+              "\",\"witnessChoiceCount\":" & $d.witnessChoices.len &
+              ",\"witnessUndefined\":[" & kindsJson(d.witnessUndefined) &
+              "],\"witnessUnsafe\":" & $d.witnessUnsafe &
+              ",\"hostRunnable\":" &
+              $hostRunnable(d.witnessUndefined, d.witnessUnsafe) & "}"
   result &= "]}"
 
 proc renderJson[T](r: Report[T]): string =

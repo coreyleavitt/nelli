@@ -2342,7 +2342,18 @@ type
     raisedMsg*:    Option[string]
     witness*:      T
     heapSnapshot*: seq[HeapSnapshotEntry]
+    witnessUndefined*: set[UbOrdinal]
+      ## RFC-0016 W3-z R5 (U7). The undefined behaviours this raise's path
+      ## read through (`Soundness.witnessUndefined`); read with `hostRunnable`.
+    witnessUnsafe*: bool
+      ## This raise's own `Soundness.witnessUnsafe`.
 
+func hostRunnable*[T](d: DefectFinding[T]): bool =
+  ## RFC-0016 W3-z R5 (U7). Whether this raise's witness may be run in the
+  ## caller's process.
+  hostRunnable(d.witnessUndefined, d.witnessUnsafe)
+
+type
   UndefinedFinding*[T] = object
     ## RFC-0016 K10a-target (section 9.1 item 5). One undefined behaviour the
     ## run reached: its kind, the source anchor of the op, and the input that

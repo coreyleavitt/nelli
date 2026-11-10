@@ -764,6 +764,11 @@ type
     isDefect*:      bool
     raisedMsg*:     Option[string]
     raisedWitness*: RawWitness
+    witnessUndefined*: set[UbOrdinal]
+      ## RFC-0016 W3-z R5 (U7). This raise's own `Soundness.witnessUndefined`.
+    witnessUnsafe*: bool
+      ## ... and its own `witnessUnsafe`: which diagnostic witness is safe to
+      ## run in-process is per raise, never the winner's.
 
   RawUndefined* = object
     ## RFC-0016 K10a-target. One undefined behaviour the walk reached and
@@ -31178,7 +31183,9 @@ proc runSymexImpl(prog: SymexProgram,
         diags.add RawDiagnostic(raisedTypeId: f.raisedTypeId,
                                 isDefect:     f.isDefect,
                                 raisedMsg:    f.raisedMsg,
-                                raisedWitness: f.raisedWitness)
+                                raisedWitness: f.raisedWitness,
+                                witnessUndefined: f.soundness.witnessUndefined,
+                                witnessUnsafe: f.soundness.witnessUnsafe)
     r.diagnostics = diags
     r.undefined = w.undefinedFound   # RFC-0016 K10a-target
     # CR-9 Stage 5: read from WalkCtx.extractionErrors (LIVE store during walk)

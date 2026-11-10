@@ -1198,6 +1198,16 @@
   Note: on today's base the pre-fix `tUndefined` answer was `sxUnknown` (the
   callee also forks `OverflowDefect`), not a trusted unsat; the hit was missing
   either way. A stray `|||||||` marker sits just below this entry (from base).
+  W3-z R5 (`rfc-0016-w3z-runtime5`, walker 315 to 316, findings U6, U7):
+  `SymexFinding.undefined` is rendered (text line `undefined <kind> at <site>`,
+  JSON `undefined` array), and a diagnostic raise carries its own
+  `witnessUndefined`/`witnessUnsafe` (`RawDiagnostic` to `DefectFinding` /
+  `FindingDiagnostic`, persisted in the `:notes` record as `wu`/`wx`, hence the
+  bump); `hostRunnable(d)` reads them and the report shows them. Pin:
+  `tsymex_0016_w3z_r5_render`. Observation: under a `tLabel` search a raise
+  on an undefined path did not reach `diagnostics` in any SUT shape tried
+  (it wins only when it is the first raise); not investigated, may be
+  candidate routing.
 ||||||| 32ae1cf0
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen

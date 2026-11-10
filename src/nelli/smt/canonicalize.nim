@@ -394,6 +394,14 @@ const symexWalkerVersion* = "317"
   ## call; otherwise it is listed on `SymexResult.undefined`; the path goes on
   ## carrying the kinds, so a sat through it is never trusted.
   ## RFC-0016 W3-z P1 (313->314, landed after R1/R2): the opaque-call scan reads the callee's own
+  ## RFC-0016 W3-z K2F-2 (315->316): the type pragma walk (`typePragmaHit`)
+  ## reaches a `var T` formal's target, an alias, an object field list under
+  ## a `when`, and any type kind it has no arm for (their children), so a
+  ## `var` parameter or `var seq` of a `{.union.}` / `{.packed.}` type
+  ## declines `feUnsupportedOp` where it was admitted; a pragma entry of a
+  ## shape `pragmaName` cannot name declines on a type as on every other
+  ## place; `layoutPragmaOf` reads every entry (a `packed` type with an
+  ## `align` field is not the packed layout).
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
   ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a
   ## stdlib proc taken as a value (`parseProcAsValue`); absent declines

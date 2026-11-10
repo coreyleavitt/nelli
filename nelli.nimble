@@ -1846,7 +1846,7 @@ task test, "Run the test suite":
             # RFC-0016 K3a: the type-class and type x memory-op axes (tables, verbs), and the let-cursor x type pins through the walker.
             "tsymex_0016_k3a_typeaxes",
             "tsymex_0016_k3a_letcursor",
-            "tsymex_0016_k3c_pragmaaxis",
+            "tsymex_0016_k3c_pragmaaxis", "tsymex_0016_k2f2_pragmashape",
             "tsymex_0016_p4_fieldpragma",
             # RFC-0016 K3b: the field-default row of the type x memory-op axis (zeroValueForType reads it), and wasMoved/reset/move zero pins.
             "tsymex_0016_k3b_fielddefault",

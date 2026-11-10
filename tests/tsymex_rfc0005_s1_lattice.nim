@@ -354,17 +354,35 @@ suite "RFC-0005 S1 (d) -- the .taint / .runTaint writer grep-pin":
       "runtime.nim:taintInPlace",            # the mutation-shaped join
     ]
 
-  test "WalkCtx.runTaint is written ONLY at runSymexImpl's drain (derived, never at a site)":
+  test "WalkCtx.runTaint is written ONLY at the run drain (derived, never at a site)":
     let ws = allWriters("runTaint")
     checkpoint(report(ws))
     check routinesOf(ws) == @[
+      "runtime.nim:drainRunTaint",           # the ONE drain: `w.runTaint` (the verdict input) and the flip's soundness
       # RFC-0005 S11: the PUBLIC run coordinate, `RawResult.soundness.runTaint`
       # -- derived (`runTaintOf`) from the final error list at the one public
       # exit, after the boundary overrides. Still derived, still not a site.
       "runtime.nim:hostRefusedResult",      # RFC-0016 K5a: the refused-host verdict, same derivation
       "runtime.nim:runSymex",
-      "runtime.nim:runSymexImpl",            # `w.runTaint`, the verdict input
     ]
+
+  test "each run entry drains once, through drainRunTaint":
+    ## RFC-0016 W3-z R4 gave the concolic flip (`runConcolicFlipImpl`) its own
+    ## run coordinate. It is a second run entry, not a second drain: both
+    ## entries call the one drain, each exactly once.
+    var calls: seq[string]
+    for path in walkFiles(smtDir / "runtime*.nim"):
+      var routine = "<top-level>"
+      for raw in readFile(path).splitLines():
+        let r = routineName(raw)
+        if r.len > 0: routine = r
+        let t = raw.strip()
+        if t.len == 0 or isCommentLine(t): continue
+        let code = stripTrailingComment(raw)
+        if "drainRunTaint(" in code and not t.startsWith("proc "):
+          calls.add path.extractFilename & ":" & routine
+    calls.sort()
+    check calls == @["runtime.nim:runConcolicFlipImpl", "runtime.nim:runSymexImpl"]
 
   test "scanner demonstration: an injected site-level write trips the pin; reads and declarations do not":
     check isTaintWrite("    p.taint = {}", "taint")

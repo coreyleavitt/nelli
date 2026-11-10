@@ -29737,6 +29737,22 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
 
 # ---- Public driver ----------------------------------------------------------
 
+proc drainRunTaint[T](dst: var T; drained: openArray[seq[SymexErrorInfo]];
+                      extra: Taint = {}) =
+  ## RFC-0005 S1 (§2.2 "the run coordinate is derived, not written"). The ONE
+  ## writer of a run's drain-time coordinate, for both run entries:
+  ## `runSymexImpl` (`WalkCtx.runTaint`, the verdict input) and
+  ## `runConcolicFlipImpl` (`ConcolicFlipResult.soundness.runTaint`, RFC-0016
+  ## W3-z R4). The union, over every DRAINED `sevError` entry, of
+  ## `runTaint(classOf(kind))`; RFC-0005 S1c: nothing else. `extra` is a run
+  ## coordinate the entry derived from its own drained record rather than an
+  ## error (the flip's reached undefined operations, `scIncomplete`); a walk
+  ## site never passes one.
+  var t = extra
+  for errs in drained:
+    t = t + runTaintOf(errs)
+  dst.runTaint = t
+
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult
@@ -31146,13 +31162,11 @@ proc runSymexImpl(prog: SymexProgram,
   #     the reach question, so it blocks both directions (`reachUnknown`) --
   #     a walker-completeness defect, pinned empty by the S8 battery.
   let parseErrs = reachJoinParseErrors(prog.parseErrors, exnWarnings)
-  # RFC-0005 S1 (§2.2 "the run coordinate is derived, not written"). The ONE
-  # writer of `w.runTaint`: the union, over every DRAINED `sevError` entry
-  # (the walk/heap-depth/new-field-zero/lowering sinks in `exnWarnings`, the
-  # reach-joined parse-time errors, the closure sink), of
-  # `runTaint(classOf(kind))`. RFC-0005 S1c: nothing else.
-  w.runTaint = runTaintOf(exnWarnings) + runTaintOf(parseErrs) +
-               runTaintOf(closureErrs)
+  # RFC-0005 S1 (§2.2 "the run coordinate is derived, not written"). The run's
+  # drain (`drainRunTaint`, the one writer): the walk/heap-depth/
+  # new-field-zero/lowering sinks in `exnWarnings`, the reach-joined
+  # parse-time errors, the closure sink.
+  drainRunTaint(w, [exnWarnings, parseErrs, closureErrs])
   let reachUnknown = unplacedDeclines(exnWarnings).len > 0 or
                      unplacedDeclines(parseErrs).len > 0 or
                      unplacedDeclines(closureErrs).len > 0
@@ -32195,9 +32209,9 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   template finish(o: ConcolicFlipOutcome, c: ConcolicCoverageOutcome) =
     result.outcome = o
     result.coverage = c
-    result.soundness = Soundness(replay: rsNotNeeded,
-      runTaint: runTaintOf(collected.parseErrors) +
-        (if result.undefinedReached.len > 0: {scIncomplete} else: {}))
+    result.soundness = Soundness(replay: rsNotNeeded)
+    drainRunTaint(result.soundness, [collected.parseErrors],
+      extra = (if result.undefinedReached.len > 0: {scIncomplete} else: {}))
     for u in result.undefinedReached:
       result.soundness.witnessUndefined.incl ubOrdinals({u.kind})
     inc result.flipCounters.byOutcome[o]

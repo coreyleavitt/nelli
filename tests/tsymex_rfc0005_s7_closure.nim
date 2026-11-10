@@ -567,12 +567,12 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
           targets.add t[helper.len ..< t.find(',')]
     check targets.len >= 9
     for x in targets: check x in ["exnWarnings", "closureErrs"]
-    let rt = body.filterIt(it.startsWith("w.runTaint = "))
+    # The run drain (`drainRunTaint`, shared with the concolic flip entry)
+    # is handed all three sinks.
+    let rt = body.filterIt(it.startsWith("drainRunTaint(w, "))
     check rt.len == 1
-    check "runTaintOf(exnWarnings)" in rt[0]
-    check "runTaintOf(parseErrs)" in rt[0]
+    check rt == @["drainRunTaint(w, [exnWarnings, parseErrs, closureErrs])"]
     check body.anyIt("let parseErrs = reachJoinParseErrors(prog.parseErrors, exnWarnings)" in it)
-    check body.anyIt("runTaintOf(closureErrs)" in it)
 
 suite "RFC-0005 S7 -- walker version pin":
 

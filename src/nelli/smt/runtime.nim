@@ -764,11 +764,12 @@ type
     isDefect*:      bool
     raisedMsg*:     Option[string]
     raisedWitness*: RawWitness
-    witnessUndefined*: set[UbOrdinal]
-      ## RFC-0016 W3-z R5 (U7). This raise's own `Soundness.witnessUndefined`.
     witnessUnsafe*: bool
-      ## ... and its own `witnessUnsafe`: which diagnostic witness is safe to
-      ## run in-process is per raise, never the winner's.
+      ## RFC-0016 W3-z R5 (U7). This raise's own `Soundness.witnessUnsafe`:
+      ## which diagnostic witness is safe to run in-process is per raise, never
+      ## the winner's. There is no `witnessUndefined`: a raise past undefined
+      ## behaviour is on a spurious path, so it is a candidate and never a
+      ## diagnostic (R5b, `tsymex_0016_w3z_r5b_diag`).
 
   RawUndefined* = object
     ## RFC-0016 K10a-target. One undefined behaviour the walk reached and
@@ -31184,7 +31185,6 @@ proc runSymexImpl(prog: SymexProgram,
                                 isDefect:     f.isDefect,
                                 raisedMsg:    f.raisedMsg,
                                 raisedWitness: f.raisedWitness,
-                                witnessUndefined: f.soundness.witnessUndefined,
                                 witnessUnsafe: f.soundness.witnessUnsafe)
     r.diagnostics = diags
     r.undefined = w.undefinedFound   # RFC-0016 K10a-target

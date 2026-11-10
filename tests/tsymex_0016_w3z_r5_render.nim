@@ -61,17 +61,17 @@ suite "W3-z R5 U7: a raise carries its own soundness":
     check all[0].witnessUndefined == {}
     check hostRunnable(all[0])
 
-  test "the flags are rendered, and survive the notes record":
-    let d = FindingDiagnostic(raisedTypeId: "AssertionDefect", isDefect: true,
-      witnessUndefined: ubOrdinals({UbKind(ubIndeterminateRead)}))
+  test "the flag is rendered, and survives the notes record":
+    let d = FindingDiagnostic(raisedTypeId: "SIGSEGV", isDefect: true,
+      witnessUnsafe: true)
     var f = SymexFinding(targetDesc: "label(\"hit\")", status: sfSat,
                          diagnostics: @[d])
     let t = renderReport(report(f), ofText)
-    check "witnessUndefined=ubIndeterminateRead" in t
+    check "witnessUnsafe" in t
     check "(not host-runnable)" in t
     let j = parseJson(renderReport(report(f), ofJson))
     let jd = j["symexFindings"][0]["diagnostics"][0]
-    check jd["witnessUndefined"][0].getStr == "ubIndeterminateRead"
+    check jd["witnessUnsafe"].getBool
     check not jd["hostRunnable"].getBool
     let db = inMemoryDatabase()
     let prog = SymexProgram(body: IRStmt(kind: isBlock))
@@ -83,5 +83,5 @@ suite "W3-z R5 U7: a raise carries its own soundness":
                                errs)
     check errs.len == 0
     check n.diagnostics.len == 2
-    check n.diagnostics[0].witnessUndefined == d.witnessUndefined
-    check n.diagnostics[1].witnessUndefined == {}
+    check n.diagnostics[0].witnessUnsafe
+    check not n.diagnostics[1].witnessUnsafe

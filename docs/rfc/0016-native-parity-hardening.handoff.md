@@ -1208,6 +1208,18 @@
   on an undefined path did not reach `diagnostics` in any SUT shape tried
   (it wins only when it is the first raise); not investigated, may be
   candidate routing.
+  W3-z R5b (`rfc-0016-w3z-runtime5b`, walker stays 316): that observation was
+  candidate routing, by construction. A path carries `Path.undefined` only
+  through a `dcFreshSymbol` degrade token (`{.noinit.}` read, havoc'd global,
+  opaque call), which taints it `scSpurious`; `admitSolvedHit` files its raise
+  in `w.candidates` (`runtime.nim` ~18586), and only a clean finding reaches
+  `RawDiagnostic` (`runtime.nim` ~31181; `settleCandidate` documents "no
+  diagnostics"). A replay-confirmed candidate is the verdict, with its own
+  `witnessUndefined` (`allRaiseFindings(r)[0]`), so R5's winner field stays.
+  The per-diagnostic undefined bit was dormant and is removed
+  (`RawDiagnostic`, `FindingDiagnostic`, the `wu` notes key, the render);
+  `witnessUnsafe` is reachable (a nil-deref crash raise is clean) and is kept.
+  Pin: `tsymex_0016_w3z_r5b_diag`.
 ||||||| 32ae1cf0
 - **W3-z E2 (`rfc-0016-w3z-evidence2`):** the join evidences a UB-modelled `defined:` row by a public-entry record reporting its UB kind; the 23 E1 allowlist entries are cleared (the GCref table kind is now `feUnsupportedExprKind`, because the `GCref` magic exists only under the refused `--mm:refc`; `Repr` is declined, since repr(bool) and repr(enum) are the BoolToStr/EnumToStr rows; exact pins added for the cstring/pointer/proc by-value formals and the letCursor rows). Per-axis criterion: `tests/0016-allowlist/intro-counts.txt` (from git log) and `over-intro.txt` (build, magic, stdlib not yet shorter; ceilings only fall). Blockers: `construct` has no site table (its pins are orphan `construct:*` keys), `readonly` waits on E3.
 - **INT-45 `s8bz_overlap` root cause (2026-11-08):** a Nim 2.2.10 codegen

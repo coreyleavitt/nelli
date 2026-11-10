@@ -1825,6 +1825,7 @@ task test, "Run the test suite":
             "tsymex_0016_s8cj_mkunique",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
+            "tsymex_0016_w3z_r5b_diag",
             # RFC-0016 K1a-cells: the universe ledger (derived cells, the pin-record join, allowlists, the committed TSV).
             "tsymex_0016_universe",
             # RFC-0016 K2a: the dispatch census (case n.kind, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.

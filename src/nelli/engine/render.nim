@@ -144,9 +144,8 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
                (if d.isDefect: " (defect)" else: "") &
                (if d.raisedMsg.len > 0: ": " & d.raisedMsg else: "") &
                " witness=" & $d.witnessChoices.len & " choices" &
-               (if d.witnessUndefined != {}: " witnessUndefined=" & kindsJson(d.witnessUndefined).replace("\"", "") else: "") &
                (if d.witnessUnsafe: " witnessUnsafe" else: "") &
-               (if hostRunnable(d.witnessUndefined, d.witnessUnsafe): ""
+               (if hostRunnable({}, d.witnessUnsafe): ""
                 else: " (not host-runnable)")
 
 proc symexSection(findings: seq[SymexFinding]): string =
@@ -311,10 +310,9 @@ proc symexFindingJson(f: SymexFinding): string =
               "\",\"isDefect\":" & $d.isDefect &
               ",\"raisedMsg\":\"" & jsonEscape(d.raisedMsg) &
               "\",\"witnessChoiceCount\":" & $d.witnessChoices.len &
-              ",\"witnessUndefined\":[" & kindsJson(d.witnessUndefined) &
-              "],\"witnessUnsafe\":" & $d.witnessUnsafe &
+              ",\"witnessUnsafe\":" & $d.witnessUnsafe &
               ",\"hostRunnable\":" &
-              $hostRunnable(d.witnessUndefined, d.witnessUnsafe) & "}"
+              $hostRunnable({}, d.witnessUnsafe) & "}"
   result &= "]}"
 
 proc renderJson[T](r: Report[T]): string =

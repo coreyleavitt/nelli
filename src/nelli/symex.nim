@@ -517,7 +517,6 @@ proc findingDiagnostics[T](ds: seq[DefectFinding[T]]): seq[FindingDiagnostic] =
     result.add FindingDiagnostic(raisedTypeId: d.raisedTypeId,
                                  isDefect: d.isDefect, raisedMsg: d.raisedMsg.get(""),
                                  witnessChoices: renderAsChoices(d.witness),
-                                 witnessUndefined: d.witnessUndefined,
                                  witnessUnsafe: d.witnessUnsafe)
 
 proc findingUndefined[T](us: seq[UndefinedFinding[T]]): seq[FindingUndefined] =
@@ -620,7 +619,6 @@ proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
       dm["tid"] = d.raisedTypeId
       dm["def"] = (if d.isDefect: "1" else: "0")
       dm["msg"] = d.raisedMsg
-      dm["wu"] = $undefinedBits(d.witnessUndefined)   # W3-z R5 (U7)
       dm["wx"] = (if d.witnessUnsafe: "1" else: "0")
       db.save(notesKey(baseKey, i), d.witnessChoices, dm,
               verdictCacheMaxEntries)
@@ -673,13 +671,6 @@ proc loadSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
         isDefect: e[0].meta.getOrDefault("def", "") == "1",
         raisedMsg: e[0].meta.getOrDefault("msg", ""),
         witnessChoices: e[0].choices,
-        witnessUndefined: block:   # W3-z R5 (U7); absent or malformed: none
-          var wu: set[UbOrdinal]
-          let bits = try: parseInt(e[0].meta.getOrDefault("wu", "0"))
-                     except ValueError: 0
-          for o in UbOrdinal.low .. UbOrdinal.high:
-            if (bits and (1 shl int(o))) != 0: wu.incl o
-          wu,
         witnessUnsafe: e[0].meta.getOrDefault("wx", "") == "1")
   except CatchableError as e:
     errors.add "loadSymexNotesImpl: " & $e.name & ": " & e.msg
@@ -4033,7 +4024,6 @@ macro symexFind*(fn: typed,
             raisedMsg:    diagEntry.raisedMsg,
             witness:      `diagWitnessTup`,
             heapSnapshot: readHeapSnapshot(`diagWitId`),
-            witnessUndefined: diagEntry.witnessUndefined,   # W3-z R5 (U7)
             witnessUnsafe:    diagEntry.witnessUnsafe)
         diagSeq
       let undefResult = block:
@@ -5045,7 +5035,6 @@ macro symexFindAllWitnesses*(fn: typed,
                   isDefect:       diagEntry.isDefect,
                   raisedMsg:      diagEntry.raisedMsg.get(""),
                   witnessChoices: renderAsChoices(`typedDiagWitId`),
-                  witnessUndefined: diagEntry.witnessUndefined,
                   witnessUnsafe:    diagEntry.witnessUnsafe)
               # RFC-0016 K10a-target: the undefined behaviours reached, with
               # the witness that reaches each, rendered the same way.

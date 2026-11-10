@@ -26,6 +26,7 @@ import nelli/smt/replayproc
 from nelli/smt/runtime import hostAdmission
 import ./s8cu_helpers except show
 import helpers/prc03_sut     # imports an override module this file cannot see
+import helpers/r8_hooked     # W3-z R8: a closure environment with a hook
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -265,6 +266,50 @@ proc sutRe(v: int) =
   runRe(v)
   if gOut < 0: symexTarget("t")
 
+# ---- RFC-0016 W3-z R8 ------------------------------------------------------
+
+var gCapRun: proc (v: int): int
+proc runCapRun(v: int) {.symexOpaque.} =
+  var n = 5
+  gCapRun = proc (w: int): int = w + n   # a checked closure, an int captured
+  gOut = gCapRun(v)
+proc sutCapRun(v: int) =
+  symexAssume(v == 3)
+  runCapRun(v)
+  if gOut == 8: symexTarget("t")
+
+var gCapHook: proc (v: int): int
+proc runCapHook(v: int) {.symexOpaque.} =
+  if v == 99: discard dbl(v)
+  gOut = gCapHook(v)
+proc sutCapHook(v: int) =
+  symexAssume(v == 3)
+  runCapHook(v)
+  if gOut == 4: symexTarget("t")
+proc mkCapHook() =
+  gCapHook = mkHooked()           # dropping the environment runs a hook
+
+var gOrdA: proc (v: int): int {.nimcall.} = ovfAdd
+proc runOrdA(v: int) {.symexOpaque.} =
+  if v == 99: discard dbl(v)
+  gOrdA = dbl                     # the unchecked start value is replaced
+  gOut = gOrdA(v)                 # before the only call
+proc sutOrdA(v: int) =
+  symexAssume(v == 3)
+  if v == 98: gOut = ovfAdd(v)
+  runOrdA(v)
+  if gOut == 6: symexTarget("t")
+
+var gOrdB: proc (v: int): int {.nimcall.} = dbl
+proc runOrdB(v: int) {.symexOpaque.} =
+  if v == 99: discard dbl(v)
+  gOut = gOrdB(v)                 # the call runs the start value
+  gOrdB = ovfAdd                  # the unchecked one is stored after it
+proc sutOrdB(v: int) =
+  symexAssume(v == 3)
+  runOrdB(v)
+  if gOut == 6: symexTarget("t")
+
 suite "W3-z R7: the replayed run's proc-value callee":
   test "an overflowChecks: off routine in the global stays undefined":
     if hostAdmission().isSome:
@@ -279,14 +324,15 @@ suite "W3-z R7: the replayed run's proc-value callee":
                    UbKind(ubSignedOverflow), tLabel("t"))
 
   test "a closure-typed global holding a routine with no environment":
-    # The walk leaves a read past a closure-typed variable's call unproved
-    # (`feGlobalRouteUnproved`: the closure may hold an environment whose
-    # hooks cannot be listed), so no candidate reaches the replay settle and
-    # nothing is lifted: the verdict stays untrusted.
-    let r = symexFind(sutClosR7, tLabel("t"))
-    checkpoint show(r.errors)
-    check not r.trusted
-    check r.errors.named(feGlobalRouteUnproved)
+    # RFC-0016 W3-z R8 (a). The route scan reads a module-level closure
+    # variable as a hypothesis (`closureRouteGuard`): what it holds when the
+    # run starts has no environment, so dropping it runs no hook, and the
+    # read past the call stands. The replay names `dbl`, which is checked.
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      discard pinExact(sutClosR7, cellKey(faCallShape,
+                       "reexec/procValueClosureGlobal"), tLabel("t"))
 
   test "a closure with a captured environment is not cleared":
     mkEnvR7()
@@ -311,6 +357,47 @@ suite "W3-z R7: the replayed run's proc-value callee":
 
   test "the walker's version floor (R7)":
     check parseInt(symexWalkerVersion) >= 342
+
+suite "W3-z R8: a closure global, and the routine a variable holds at its call":
+  test "the walker's version floor (R8)":
+    check parseInt(symexWalkerVersion) >= 343
+
+  test "a closure with a captured int, built by the run":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      discard pinExact(sutCapRun, cellKey(faCallShape,
+                       "reexec/procValueClosureEnv"), tLabel("t"))
+
+  test "a closure whose captured environment runs a hook stays untrusted":
+    mkCapHook()
+    let r = symexFind(sutCapHook, tLabel("t"))
+    gCapHook = nil
+    checkpoint show(r.errors)
+    check not r.trusted
+    # Dropping the environment runs the destructor of `HookedCap`, which the scan
+    # never read: the route stays open, and the decline names the variable.
+    check r.errors.named(feGlobalRouteUnproved)
+    var named = false
+    for e in r.errors:
+      if e.kind == feGlobalRouteUnproved and "`gCapHook`" in e.msg and
+         "environment" in e.msg:
+        named = true
+    check named
+
+  test "unchecked when the run starts, checked at the call":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      discard pinExact(sutOrdA, cellKey(faCallShape,
+                       "reexec/procValueOrderStoredFirst"), tLabel("t"))
+
+  test "checked at the call, unchecked stored after it":
+    if hostAdmission().isSome:
+      skipUnadmitted()
+    else:
+      discard pinExact(sutOrdB, cellKey(faCallShape,
+                       "reexec/procValueOrderStoredAfter"), tLabel("t"))
 
 suite "PRC-02: a method":
   test "a dynamic call over a visible hierarchy":

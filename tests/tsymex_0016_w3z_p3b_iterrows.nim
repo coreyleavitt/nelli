@@ -1,3 +1,4 @@
+# stdlib-ledger: probe
 ## RFC-0016 W3-z P3b: the stdlib iterators the corpus walks by their bodies.
 ## P3 keyed an iterator `<module>.<name>/iterator` and declined any without a
 ## row (`feUnadmitted`), so system `countup`/`countdown`/`..` -- inlined and
@@ -159,17 +160,20 @@ suite "W3-z P3b: the system counting iterators decline for their real cause":
     discard pinExact(sCountdown, c)
     discard pinExact(sCountupStep, c)
 
-suite "W3-z P3b: split iterators stay unadmitted":
-  # `strutils.split`/`splitWhitespace` are not in the corpus's SUTs and their
-  # body walk is not exact (slice bounds are bitvector-represented,
-  # seUnsupportedStringOp), so they have no row: absent is a decline.
-  test "no row, declines naming the cell":
-    for (fn, cell) in [("split", "strutils.split/iterator"),
-                       ("splitWhitespace", "strutils.splitWhitespace/iterator")]:
-      check not hasStdlibRow(cell)
-      check not admitStdlibBody(cell, ssBodyWalk).admitted
+suite "W3-z P3b: split iterators are not trusted":
+  # `strutils.split`'s body walk is not exact (slice bounds are
+  # bitvector-represented, seUnsupportedStringOp): it has no row, so absent is
+  # a decline. `splitWhitespace` is in the corpus ledger (the replay driver
+  # reads its body), so it is admitted at the body walk, and the walker itself
+  # declines it for the same real cause: neither verdict is trusted.
+  test "split has no row, declines naming the cell":
+    check not hasStdlibRow("strutils.split/iterator")
+    check not admitStdlibBody("strutils.split/iterator", ssBodyWalk).admitted
     let r1 = symexFind(sSplit, tLabel("hit"), pinSettingsConst)
     check not r1.trusted
+  test "splitWhitespace is a ledger row but its verdict is untrusted":
+    check not hasStdlibRow("strutils.splitWhitespace/iterator")
+    check admitStdlibBody("strutils.splitWhitespace/iterator", ssBodyWalk).admitted
     let r2 = symexFind(sSplitWs, tLabel("hit"), pinSettingsConst)
     check not r2.trusted
 

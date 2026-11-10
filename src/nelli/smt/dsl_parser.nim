@@ -45,6 +45,7 @@ import ./magic_rows  ## RFC-0016 K4a: `magicAxis`, `dispatchMagic`
 import ./stdlib_rows ## RFC-0016 K4c: `stdlibAxis`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
+import ./readonlyaxes ## RFC-0016 E3b: `admitShape`, the read-only axis
 import ./definedness ## RFC-0016 K10a-axis: the stale element address and `noalias` rows
 import ./dsl_typebridge
 from ./abstraction import collectVarRefs   ## RFC-0005 S8bl: `writesName`
@@ -17446,8 +17447,38 @@ proc markCheckOnly(st: IRStmt): IRStmt =
 
 type MayWriteState = object
   ## RFC-0016 K6a. The routines being analysed (a hit is a cycle) and the ones
-  ## already proved read-only.
+  ## already proved read-only. E3b: the route asking, the first shape the
+  ## read-only table declined (`found`, `shape`), whether a cycle was met (read
+  ## as pure until the walk ends, `cycle`) and the verdict per shape (0 unasked,
+  ## 1 proved, 2 declined).
   stack, clean: seq[NimNode]
+  route: ReadOnlyRoute
+  found, cycle: bool
+  shape: WriteShape
+  asked: array[WriteShape, int8]
+
+proc decide(st: var MayWriteState; shape: WriteShape): bool =
+  ## RFC-0016 E3b. `shape` is met on `st.route`: true when the read-only table
+  ## declines it (a shape with no row declines), and the first such shape is
+  ## kept for the message.
+  if st.asked[shape] == 0:
+    st.asked[shape] = if admitShape(st.route, shape).admitted: 1 else: 2
+  if st.asked[shape] == 2:
+    if not st.found:
+      st.found = true
+      st.shape = shape
+    return true
+  false
+
+proc declineReason(st: MayWriteState): string =
+  ## The table's reason for the declined shape, naming its cell.
+  if st.found: admitShape(st.route, st.shape).decline[1] else: ""
+
+proc containsForeign(n: NimNode): bool =
+  if n == nil: return false
+  if foreignWriteNode(n): return true
+  for c in n:
+    if containsForeign(c): return true
 
 const mayWriteMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
   "AppendStrStr", "AppendSeqElem", "New", "NewFinalize", "WasMoved",
@@ -17471,23 +17502,35 @@ proc lvalueEscapes(lv: NimNode): bool =
 
 proc mayWrite(n: NimNode; st: var MayWriteState): bool
 
-proc routineMayWrite(sym: NimNode; st: var MayWriteState): bool =
+proc routineMayWrite(sym: NimNode; st: var MayWriteState;
+                     top = false): bool =
   ## RFC-0016 K6a. A walked user routine's body may write; a routine met while
   ## its own analysis is open (a cycle), a method, a body outside Nim and one
   ## with no impl to read may write anything.
-  if opaqueRoutine(sym): return true
+  ## E3b: a routine met again while its analysis is open reads as pure and sets
+  ## `cycle`; the walk ends by asking the table about the cycle
+  ## (`wsRecursivePure`, or `wsRecursiveWrite` when something wrote).
+  if opaqueRoutine(sym): return st.decide(wsOpaqueCallee)
   if containsSym(st.clean, sym): return false
-  if containsSym(st.stack, sym) or st.stack.len >= mayWriteMaxDepth:
-    return true
+  if containsSym(st.stack, sym):
+    st.cycle = true
+    return false
+  if st.stack.len >= mayWriteMaxDepth: return st.decide(wsRecursivePure)
   let impl = resolveRoutineImpl(sym)
-  if impl == nil or impl.len < 7: return true
+  if impl == nil or impl.len < 7: return st.decide(wsOpaqueCallee)
   st.stack.add sym
   result = mayWrite(impl[6], st)
   st.stack.setLen(st.stack.len - 1)
-  if not result: st.clean.add sym
+  if result and not top and st.shape notin {wsOpaqueCallee, wsRecursivePure}:
+    # the callee writes: the shape is the call's, not the store inside it
+    st.found = false
+    result = st.decide(if st.cycle: wsRecursiveWrite else: wsWalkedWrite)
+  if not result:
+    st.clean.add sym
+    if not top: result = st.decide(wsWalkedPure)
 
-const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkSym, nnkIdent,
-  nnkEmpty, nnkCommentStmt, nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
+const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkIdent,
+  nnkStmtListExpr, nnkBlockStmt,
   nnkIfStmt, nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse, nnkElseExpr,
   nnkWhenStmt, nnkCaseStmt, nnkOfBranch, nnkWhileStmt, nnkForStmt,
   nnkReturnStmt, nnkBreakStmt, nnkContinueStmt, nnkDiscardStmt, nnkVarSection,
@@ -17497,10 +17540,13 @@ const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkSym, nnkIdent,
   nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr,
   nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkChckRange,
   nnkStringToCString, nnkCStringToString, nnkObjUpConv, nnkObjDownConv,
-  nnkRange, nnkPragmaBlock}
-  ## RFC-0016 K6a. The node kinds proved to write nothing of their own: what
-  ## they may write is what their children may. The read-only axis of
-  ## RFC-0016 §8.1; every other kind reads as may-write.
+  nnkRange}
+  ## RFC-0016 K6a. The node kinds that write nothing of their own: what they
+  ## may write is what their children may. `mayWrite` classifies them
+  ## `wsLocalWork` and the read-only table decides (RFC-0016 §8.1, E3b); the
+  ## structural kinds it names itself (`nnkSym`, `nnkStmtList`, `nnkEmpty`,
+  ## `nnkCommentStmt`, `nnkPragmaBlock`) are not in this set; every other
+  ## kind is `wsUnlisted`, which has no row.
   ## `nnkPragmaBlock` (`{.line.}:`, which `doAssert` expands to) writes nothing
   ## of its own: its pragma list and body are children, so an `emit` or a `cast`
   ## in either still answers true. `mixin` and `bind` are name-lookup
@@ -17510,32 +17556,36 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
   ## RFC-0016 K6a (W-08). Evaluating `n` may write memory no variable of the
   ## routine names -- through a `ptr` or a `ref`, through a `var` formal fed
   ## such a location, in foreign code (`asm`, `emit`, a `cast`), or in a
-  ## callee that does. An allowlist: a node kind not in
-  ## `mayWriteReadOnlyKinds` answers true. A walked user callee is analysed
-  ## by its body (a cycle answers true, `routineMayWrite`); an opaque one, a
+  ## callee that does. E3b: each node is classified into a `WriteShape` and the
+  ## read-only table (`admitShape`) decides it; a node kind the classifier
+  ## cannot name is `wsUnlisted`, which has no row and so declines. A walked
+  ## user callee is analysed by its body (`routineMayWrite`); an opaque one, a
   ## proc value and a callback argument may write anything. A write to a
   ## variable by name is not this question (`mayWriteRoot` scans those).
   if n == nil: return false
-  if foreignWriteNode(n): return true
+  if foreignWriteNode(n): return st.decide(wsCastEmit)
+  template escapes(lv: NimNode): WriteShape =
+    if containsForeign(n): wsCastEmit else: wsVarFormal
   case n.kind
   of nnkAsgn, nnkFastAsgn:
-    if lvalueEscapes(n[0]): return true
+    if lvalueEscapes(n[0]):
+      return st.decide(if containsForeign(n): wsCastEmit else: wsDerefStore)
   of nnkHiddenAddr:
-    if n.len > 0 and lvalueEscapes(n[0]): return true
+    if n.len > 0 and lvalueEscapes(n[0]): return st.decide(escapes(n[0]))
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
      nnkHiddenCallConv:
-    if n.len == 0 or n[0].kind != nnkSym: return true
+    if n.len == 0 or n[0].kind != nnkSym: return st.decide(wsProcValue)
     let head = n[0]
     # The markers' runtime side touches only its own capture state.
     if isMarkerCall(n): return false
     if symKind(head) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
-      return true
+      return st.decide(wsProcValue)
     let m = routineMagic(head)
     if magicIs(m, "Swap"):
       for i in 1 ..< n.len:
-        if lvalueEscapes(n[i]): return true
+        if lvalueEscapes(n[i]): return st.decide(escapes(n[i]))
     elif m in mayWriteMagics and n.len > 1 and lvalueEscapes(n[1]):
-      return true
+      return st.decide(escapes(n[1]))
     if isUserRoutine(head):
       if routineMayWrite(head, st): return true
     elif macros.strVal(head) notin ["==", "!=", "isNil"] and
@@ -17549,18 +17599,33 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
         if n[j].kind in {nnkEmpty, nnkNilLit}: continue
         if n[j].typeKind in {ntyPtr, ntyPointer, ntyCString, ntyRef, ntyProc} or
            argHoldsCell(n[j].getTypeInst):
-          return true
-  of nnkPragma: discard  # `emit` is `foreignWriteNode`'s
+          return st.decide(wsStdlibPointerArg)
+    if st.decide(wsLocalWork): return true
+  of nnkPragma:  # `emit` is `foreignWriteNode`'s
+    if st.decide(wsPlain): return true
   of nnkMixinStmt, nnkBindStmt: return false  # symbol names, no code
-  of mayWriteReadOnlyKinds: discard
-  else: return true
+  of nnkPragmaBlock:
+    if st.decide(wsPragmaBlock): return true
+  of nnkStmtList, nnkEmpty, nnkCommentStmt:
+    if st.decide(wsPlain): return true
+  of nnkSym:
+    if symKind(n) in {nskVar, nskLet} and isModuleGlobal(n):
+      if st.decide(wsGlobalRead): return true
+    elif st.decide(wsLocalWork): return true
+  of mayWriteReadOnlyKinds:
+    if st.decide(wsLocalWork): return true
+  else: return st.decide(wsUnlisted)
   for c in n:
     if mayWrite(c, st): return true
   false
 
-proc mayWrite(n: NimNode): bool =
-  var st: MayWriteState
-  mayWrite(n, st)
+proc mayWriteWhy(n: NimNode; route: ReadOnlyRoute): string =
+  ## RFC-0016 E3b. "" when `n` is proved to write nothing shared on `route`,
+  ## else the read-only table's reason for the shape that was not.
+  var st = MayWriteState(route: route)
+  var w = mayWrite(n, st)
+  if not w and st.cycle: w = st.decide(wsRecursivePure)
+  if w: st.declineReason else: ""
 
 proc rootReachedByPointer(root: NimNode; heapSteps: seq[NimNode]): bool =
   ## RFC-0005 S8cn. A pointer may reach the memory of `root`: the location is
@@ -17596,7 +17661,10 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
         return "written by `" & x[0].strVal & "`, which reaches it by name"
       if x.len > 0 and (x[0].kind != nnkSym or symKind(x[0]) in
          {nskVar, nskLet, nskParam, nskForVar, nskTemp}):
-        return "reachable by a call through a proc value"
+        let a = admitShape(rrLent, wsProcValue)
+        if not a.admitted:
+          return "reachable by a call through a proc value (" &
+                 a.decline[1] & ")"
     else: discard
     if addrTakenIn(newTree(nnkStmtList, x), root) and
        x.kind in {nnkAddr, nnkCall, nnkCommand}:
@@ -17607,8 +17675,9 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
     ""
   result = scan(n)
   if result.len == 0 and rootReachedByPointer(root, heapSteps):
-    if mayWrite(n):
-      result = "written through a pointer or a ref"
+    let why = mayWriteWhy(n, rrLent)
+    if why.len > 0:
+      result = "written through a pointer or a ref (" & why & ")"
 
 func alwaysCopied(t: IRType): bool =
   ## RFC-0005 S8cn. A scalar: a loop variable or `let` of it is its own memory.
@@ -23724,13 +23793,17 @@ proc routeThroughDeref(lv: NimNode): bool =
     lv.len < 2 or routeThroughDeref(lv[1])
   else: true
 
-proc routeStoresThroughDeref(h: NimNode): bool =
+proc routeStoresThroughDeref(h: NimNode): string =
   ## The hook `h`, or a routine it runs, may store through a `ref` or a `ptr`.
   ## RFC-0016 K6c (W-10, D-05): this is `mayWrite`'s question, answered by the
   ## one rule -- a call through a value, a stdlib routine given something that
   ## addresses a cell, a walked callee's body, a cycle -- not a second scan.
-  var st: MayWriteState
-  routineMayWrite(h, st)
+  ## E3b: "" when the hook stores nothing through one, else the read-only
+  ## table's reason (`hookstore/` rows).
+  var st = MayWriteState(route: rrHookStore)
+  var w = routineMayWrite(h, st, top = true)
+  if not w and st.cycle: w = st.decide(wsRecursivePure)
+  if w: st.declineReason else: ""
 
 proc routeFieldNames(rec: NimNode; acc: var seq[string]): bool =
   ## The fields of a plain object's record, or false for a shape whose fields
@@ -23747,7 +23820,7 @@ proc routeFieldNames(rec: NimNode; acc: var seq[string]): bool =
   of nnkEmpty: discard
   else: result = false
 
-proc routeHookCopies(h: NimNode): bool =
+proc routeHookCopies(h: NimNode): string =
   ## The hook `h` makes the plain copy the walk models for an assignment: `=copy`
   ## and `=sink` store each field of the source in the same field of the
   ## destination, `=dup` in the result's, and nothing else touches the
@@ -23762,23 +23835,30 @@ proc routeHookCopies(h: NimNode): bool =
   ## must not `mayWrite` (a store through a pointer, foreign code, a callee
   ## that does). The check used to default to "copied" for what it did not
   ## recognise.
+  ##
+  ## RFC-0016 E3b: "" when the hook is the plain copy, else the reason, which is
+  ## the read-only table's for the shape that was not (`hookcopy/` rows; a hook
+  ## shape the proof cannot read is `hookcopy/unlisted`, which has no row).
   let name = macros.strVal(h)
-  if name notin ["=copy", "=sink", "=dup", "=wasMoved"]: return true
+  if name notin ["=copy", "=sink", "=dup", "=wasMoved"]: return ""
+  var reason = ""
+  proc unread(): string =
+    admitShape(rrHookCopy, wsUnlisted).decline[1]
   let impl = h.getImpl
-  if impl.kind notin RoutineNodes or impl.len <= 6: return false
+  if impl.kind notin RoutineNodes or impl.len <= 6: return unread()
   let ty = h.getTypeInst
-  if ty.kind != nnkProcTy or ty.len < 1: return false
+  if ty.kind != nnkProcTy or ty.len < 1: return unread()
   let formals = ty[0]
   var dst, src = ""
   if name == "=dup":
     dst = "result"
-    if formals.len < 2: return false
+    if formals.len < 2: return unread()
     src = macros.strVal(formals[1][0])
   else:
-    if formals.len < 2: return false
+    if formals.len < 2: return unread()
     dst = macros.strVal(formals[1][0])
     if name != "=wasMoved":
-      if formals.len < 3: return false
+      if formals.len < 3: return unread()
       src = macros.strVal(formals[2][0])
   var fields: seq[string]
   if name != "=wasMoved":
@@ -23786,7 +23866,7 @@ proc routeHookCopies(h: NimNode): bool =
     let ti = t.getTypeImpl
     if ti.kind != nnkObjectTy or ti.len < 3 or ti[1].kind == nnkOfInherit or
        not routeFieldNames(ti[2], fields):
-      return false
+      return unread()
   var copied: seq[string]
   proc rootName(n: NimNode): string =
     var r = n
@@ -23826,6 +23906,10 @@ proc routeHookCopies(h: NimNode): bool =
     else: discard
     let f = fieldCopy(n)
     if f.len > 0:
+      let a = admitShape(rrHookCopy, wsPlain)
+      if not a.admitted:
+        reason = a.decline[1]
+        return false
       copied.add f
       return true
     # A lifetime call stores no value the copy keeps (its own body is walked
@@ -23833,11 +23917,33 @@ proc routeHookCopies(h: NimNode): bool =
     if n.kind in {nnkCall, nnkCommand} and n.len > 0 and n[0].kind == nnkSym and
        macros.strVal(n[0]).startsWith("=") and macros.strVal(n[0]) != "=":
       return true
-    not (namesDst(n) or leavesHook(n) or mayWrite(n))
-  if not check(impl[6]): return false
+    # The shape that is not the plain copy, named for the table to decide.
+    let shape =
+      if leavesHook(n): wsEarlyReturn
+      elif containsForeign(n): wsCastEmit
+      elif namesDst(n):
+        if n.kind in {nnkWhileStmt, nnkForStmt}: wsLoop
+        elif n.kind in {nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix}:
+          wsWalkedWrite
+        elif n.kind in {nnkIfStmt, nnkWhenStmt, nnkCaseStmt, nnkBlockStmt,
+                        nnkTryStmt}: wsConditional
+        else: wsUnlisted
+      else: wsPlain
+    if shape != wsPlain:
+      let a = admitShape(rrHookCopy, shape)
+      if not a.admitted:
+        reason = a.decline[1]
+        return false
+      return true
+    let why = mayWriteWhy(n, rrHookCopy)
+    if why.len > 0:
+      reason = why
+      return false
+    true
+  if not check(impl[6]): return reason
   for f in fields:
-    if f notin copied: return false
-  true
+    if f notin copied: return unread()
+  ""
 
 proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
   ## What `hooks` may write has no proof; and whatever they run is reachable too.
@@ -23856,13 +23962,16 @@ proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
       addRoute(run, routeOpenValue, "the lifetime hook " & name &
                " cannot be summarised: " & s.why)
     block:
-      if routeStoresThroughDeref(h):
+      let why = routeStoresThroughDeref(h)
+      if why.len > 0:
         addRoute(run, routeOpenValue, "the lifetime hook " & name &
                  " may store through a `ref` or a `ptr`, at a call the compiler " &
-                 "inserts")
-    if not routeHookCopies(h):
+                 "inserts (" & why & ")")
+    let copyWhy = routeHookCopies(h)
+    if copyWhy.len > 0:
       addRoute(run, routeOpenValue, "the lifetime hook " & name &
-               " does not make the plain copy an assignment is modelled by")
+               " does not make the plain copy an assignment is modelled by (" &
+               copyWhy & ")")
     for nm in s.havoc:
       if nm == havocAllGlobals:
         addRoute(run, routeOpenAll, "the lifetime hook " & name &

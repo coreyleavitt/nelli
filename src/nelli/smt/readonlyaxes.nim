@@ -14,10 +14,10 @@
 ## * a refused cell is a shape the route cannot prove, so the walk declines
 ##   with the kind the route reports.
 ##
-## The table is a ledger: the predicates are node-kind allowlists that are not
-## asked per cell, so the rows are evidenced by the K6 corpus (each SUT pins its
-## shape's cell through `pinExact` or `pinDecline`) rather than read by a
-## consumer. `tsymex_0016_universe` joins them.
+## The routes read the table (E3b): `mayWrite` classifies each node it meets
+## into a `WriteShape`, `admitShape` asks the row, and a shape with no row is
+## declined. Each SUT of the K6 corpus pins its shape's cell through `pinExact`
+## or `pinDecline`. `tsymex_0016_universe` joins them.
 import std/options
 import ./admission
 import ./errorkind
@@ -106,3 +106,77 @@ func admitReadOnly*(key: string; site: ReadOnlySite): Admit[ReadOnlyModel] =
   ## Whether the shape `key` is proved read-only at `site`. An unknown key
   ## declines `feUnadmitted`.
   readOnlyAxis.admit(key, site)
+
+# --- the consumers' vocabulary (E3b) ---------------------------------------
+# A route classifies each write SHAPE it meets, and the table decides it. The
+# shape names are the routes' own; the key a shape reads is the route's (a
+# store in the body of a `for` is `lent/deref-store`, in a hook
+# `hookstore/direct-store`). A shape a route has no row for reads the
+# `<route>/unlisted` key, which is absent: the default is a decline.
+
+type
+  ReadOnlyRoute* = enum
+    rrLent          ## `mayWriteRoot`: the body of a `for` over a container
+    rrHookCopy      ## `routeHookCopies`
+    rrHookStore     ## `routeStoresThroughDeref`
+  WriteShape* = enum
+    wsPlain, wsLocalWork, wsWalkedPure, wsGlobalRead, wsPragmaBlock,
+    wsDerefStore, wsVarFormal, wsStdlibPointerArg, wsCastEmit, wsWalkedWrite,
+    wsRecursiveWrite, wsOpaqueCallee, wsRecursivePure, wsProcValue,
+    wsConditional, wsEarlyReturn, wsLoop,
+    wsUnlisted      ## a node the classifier cannot name
+
+func routeSite*(r: ReadOnlyRoute): ReadOnlySite =
+  case r
+  of rrLent: rsLentBody
+  of rrHookCopy: rsHookCopy
+  of rrHookStore: rsHookStore
+
+func shapeKey*(route: ReadOnlyRoute; shape: WriteShape): string =
+  ## The row `shape` reads on `route`. A pairing with no row is
+  ## `<route>/unlisted`, which no table row names.
+  case route
+  of rrLent:
+    case shape
+    of wsPlain, wsLocalWork: "lent/local-work"
+    of wsWalkedPure: "lent/walked-pure"
+    of wsGlobalRead: "lent/global-read"
+    of wsPragmaBlock: "lent/pragma-block"
+    of wsDerefStore: "lent/deref-store"
+    of wsVarFormal: "lent/var-formal"
+    of wsStdlibPointerArg: "lent/stdlib-pointer-arg"
+    of wsCastEmit: "lent/cast-emit"
+    of wsWalkedWrite: "lent/walked-write"
+    of wsRecursiveWrite: "lent/recursive-write"
+    of wsOpaqueCallee: "lent/opaque-callee"
+    of wsRecursivePure: "lent/recursive-pure"
+    of wsProcValue: "lent/proc-value"
+    of wsConditional, wsEarlyReturn, wsLoop, wsUnlisted: "lent/unlisted"
+  of rrHookCopy:
+    case shape
+    of wsPlain: "hookcopy/plain"
+    of wsLocalWork, wsGlobalRead, wsPragmaBlock: "hookcopy/local-work"
+    of wsWalkedPure: "hookcopy/walked-pure"
+    of wsDerefStore, wsVarFormal, wsStdlibPointerArg, wsCastEmit:
+      "hookcopy/foreign-write"
+    of wsWalkedWrite, wsRecursiveWrite, wsOpaqueCallee, wsRecursivePure,
+       wsProcValue: "hookcopy/callee-write"
+    of wsConditional: "hookcopy/conditional"
+    of wsEarlyReturn: "hookcopy/early-return"
+    of wsLoop: "hookcopy/loop"
+    of wsUnlisted: "hookcopy/unlisted"
+  of rrHookStore:
+    case shape
+    of wsPlain: "hookstore/plain"
+    of wsLocalWork, wsGlobalRead, wsPragmaBlock, wsWalkedPure:
+      "hookstore/local-work"
+    of wsDerefStore, wsVarFormal, wsStdlibPointerArg, wsCastEmit,
+       wsProcValue: "hookstore/direct-store"
+    of wsWalkedWrite, wsRecursiveWrite, wsOpaqueCallee, wsRecursivePure:
+      "hookstore/walked-store"
+    of wsConditional, wsEarlyReturn, wsLoop, wsUnlisted: "hookstore/unlisted"
+
+func admitShape*(route: ReadOnlyRoute; shape: WriteShape):
+    Admit[ReadOnlyModel] =
+  ## Whether `route` proves `shape` read-only: the table's answer.
+  admitReadOnly(shapeKey(route, shape), routeSite(route))

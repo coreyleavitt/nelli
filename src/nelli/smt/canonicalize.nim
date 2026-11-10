@@ -364,7 +364,12 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "314"
+const symexWalkerVersion* = "315"
+  ## RFC-0016 W3-z P3b (314->315): the system `countup`/`countdown` iterators
+  ## have a declined row (`feUnsupportedExprKind`, their body casts `T(res)`),
+  ## so the decline names its real cause instead of `feUnadmitted`. The
+  ## inventory found no iterator of the corpus's SUTs that P3 turned from
+  ## exact to unknown: the rest are walked by their own arms.
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator
   ## inliner (an iterator of `lib/` is keyed `<module>.<name>/iterator`) and a
   ## stdlib proc taken as a value (`parseProcAsValue`); absent declines

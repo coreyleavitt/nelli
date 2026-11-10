@@ -78,6 +78,9 @@ func unsignedOp(key, note: string): StdlibRow =
 func declinedType(key, note: string): StdlibRow =
   (key, refused[StdlibSite, StdlibBody](some(feUnsupportedParamType), note))
 
+func declinedIterator(key, note: string): StdlibRow =
+  (key, refused[StdlibSite, StdlibBody](some(feUnsupportedExprKind), note))
+
 func neverFacet(key, note: string; why: NeverReason;
                 kind = feUnsupportedOp): StdlibRow =
   (key, refused[StdlibSite, StdlibBody](some(kind), note, intent = iNever,
@@ -154,6 +157,20 @@ const explicitRows: seq[StdlibRow] = @[
     "a stdlib generic object: its hash-table layout is not modelled"),
   declinedType("deques.Deque",
     "a stdlib generic object: its ring buffer is not modelled"),
+
+  # W3-z P3b. The system counting iterators are keyed `<name>/iterator` (P3)
+  # and, inlined, were never walked exactly: the body of each is generic over
+  # `T`, steps with `cast[T](res)` (an unsupported expression kind) and loops
+  # on a guard the unwind bound cannot close. The decline is the same with or
+  # without a row; the row names it instead of leaving it to "absent".
+  declinedIterator("system.countup/iterator",
+    "iterators.nim `countup`: the body steps with `cast[T](res)` over a " &
+    "generic ordinal, which the walker does not support (nnkCast), inside a " &
+    "loop the unwind bound does not close; open precision"),
+  declinedIterator("system.countdown/iterator",
+    "iterators.nim `countdown`: the body steps with `cast[T](res)` over a " &
+    "generic ordinal, which the walker does not support (nnkCast), inside a " &
+    "loop the unwind bound does not close; open precision"),
 
   # STY-02 (C-13): iteration order is the hash order, which depends on the
   # build (Nim version, `-d:nimStringHash2`, `-d:nimPreviewHashRef`).

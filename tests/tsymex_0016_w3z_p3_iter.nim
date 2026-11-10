@@ -10,11 +10,12 @@ import nelli/smt/admission
 import nelli/smt/stdlib_rows
 import ./s8cu_helpers
 
-# An iterator of `system` with no row.
+# An iterator of `strutils` with no row. (P3b: `system.countdown` has a
+# declined row now.)
 proc sNoRowIter(a: int) =
   var n = 0
-  for i in countdown(3, 1): n += i
-  if n == 6 and a == 1: symexTarget("hit")
+  for w in "a,b".split(','): inc n
+  if n == 2 and a == 1: symexTarget("hit")
 
 proc apply(f: proc (c: char): bool; c: char): bool = f(c)
 proc apply2(f: proc (c: int): bool; c: int): bool = f(c)
@@ -50,14 +51,14 @@ suite "W3-z P3: the walker version":
 
 suite "W3-z P3: the stdlib-body axis reaches the iterator inliner":
   test "the key of an iterator names its kind":
-    check not hasStdlibRow("system.countdown/iterator")
+    check not hasStdlibRow("strutils.split/iterator")
   test "a ledger iterator (the corpus walks it) is admitted":
     check admitStdlibBody("strutils.splitLines/iterator", ssBodyWalk).admitted
     # The K7 SUT walks it to a cap: no `feUnadmitted` on the way.
     let r = symexFind(sSplit, tLabel("hit"), pinSettingsConst)
     for e in r.errors: check e.kind != feUnadmitted
   test "an iterator with no row declines, naming its cell":
-    declinesUnadmitted(sNoRowIter, "system.countdown/iterator")
+    declinesUnadmitted(sNoRowIter, "strutils.split/iterator")
 
 suite "W3-z P3: the stdlib-body axis reaches a stdlib proc taken as a value":
   test "a proc with no row declines":

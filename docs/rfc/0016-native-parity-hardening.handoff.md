@@ -128,6 +128,15 @@
     New gap, not fixed: `touchesFloat` (check_options.nim) is syntactic, so a
     routine whose only float arithmetic is inside an inline iterator or
     template it expands reads its float checks as off.
+  - W3-z P3b (`rfc-0016-w3z-parser3b`, walker 314 to 315, precision): P3's
+    risk that system `countup`/`countdown` "used to walk exactly" is refuted:
+    their generic body steps with `cast[T](res)` (nnkCast, unsupported), so
+    the walk was `sxUnknown` before P3 too. They get declined rows
+    (`feUnsupportedExprKind`) with `pinDecline`; `..`/`..<`, items/pairs/
+    mitems/mpairs, runes, tables keys/values/pairs and fields/fieldPairs are
+    walked by their own arms and never reach the axis (guarded exact).
+    `strutils.split`/`splitWhitespace` stay unadmitted (body walk declines
+    `seUnsupportedStringOp`). Test: `tsymex_0016_w3z_p3b_iterrows`.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

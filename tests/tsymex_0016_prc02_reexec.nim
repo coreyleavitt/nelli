@@ -161,7 +161,15 @@ suite "PRC-02: proc values cross to the re-executed child":
       checkpoint show(r.errors)
       check r.status == sxSat
       check r.soundness.replay == rsConfirmed
-      discard pinExact(sutNimcall, cellKey(faCallShape, "reexec/procValueGlobal"), tLabel("t"))
+      # The replay carries the proc value and confirms the hit, but the
+      # opaque body calls through it: the routine it holds is any of its
+      # type, one compiled with `overflowChecks: off` included, whose body is
+      # undefined (natively `gNimcall = ovf` runs the unchecked add, no
+      # Defect). The main walk reads the scan's "may be undefined" (W3-z R3),
+      # which a replay cannot lift, so the sxSat is untrusted; E4b's exact pin
+      # predates R3 (integration W3-z int2).
+      pinUndefined(sutNimcall, cellKey(faCallShape, "reexec/procValueGlobal"),
+                   UbKind(ubTailUnverified), tLabel("t"))
 
   test "a proc held in a field of a global object":
     # The walker leaves a closure-typed store unproved (no SAT path to

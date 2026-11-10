@@ -1,0 +1,40 @@
+# RFC-0016 section 8.2 (W3-z E4): closed work-list rows from before the K9 era that truly name no cell and no pin file that writes records.
+# Line: id<TAB>reason. The list only shrinks: a row that gains a cell or a recording pin fails as stale until its line is removed.
+SND-01	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-02	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-03	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-04	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-05	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-06	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-08	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-09	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-10	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+SND-11	pre-K9 regression suite named in the row; it writes no pin records and no cell models the behaviour
+PRC-01	Windows-only re-exec replay: the suite skips on Linux and writes no pin records; no cell models a replay
+PRC-02	Windows-only re-exec replay: the pin file replays in a child process and writes no pin records; no cell models a replay
+PRC-27	a PCRE limit verdict pinned by a pre-K9 suite (tsymex_rfc0005_s8bt_limit_langs_b) that writes no pin records
+CRH-02	a compile stop pinned by a pre-K9 suite (s8cl_lifetime_b) that writes no pin records; the models remain PRC-18/PRC-20
+CI-03	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INF-02	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INF-03	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INF-05	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+UPS-01	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+UPS-03	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+PND-01	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+PND-02	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+PND-05	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+PND-07	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+PND-08	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+PND-09	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INT-08	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INT-16	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INT-24	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INT-39	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INT-41	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+INT-44	a CI-run observation (symex-nightly cpp); no engine cell
+INT-45	MSVC-portability test edits (fuzzer-msvc run); the suites they touch pin no cell of their own
+INT-46	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+AUD-04	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+AUD-10	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+W-63	a CI-leg observation (the Windows legs are the JIT rows); K2a rechecks the skip census
+MOV-01	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record

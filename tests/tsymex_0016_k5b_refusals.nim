@@ -27,6 +27,10 @@ base.cpu = cpuAmd64; base.ptrBits = 64; base.endian = enLittle
 base.caseObjects = cmStrict; base.fwrapv = false
 let gcc = BuildProvenance(ccFamily: ccGcc, nimVersion: "2.2.10")
 
+var gLit = 5
+proc sLitGlobal(x: int) =
+  if gLit == 6 and x == 1: symexTarget("hit")
+
 proc cell(k: static string): CellKey = cellKey(axBuild, k)
 
 suite "K5b: the build axis has a cell for every refusal":
@@ -36,7 +40,7 @@ suite "K5b: the build axis has a cell for every refusal":
     for want in ["mm=refc", "ptrBits=32", "endian=big", "cpu=arm64",
                  "os=macosx", "fwrapv/vcc", "nim/unpatched", "z3/unverified", "pcre/unverified",
                  "profile/unprojectable", "finally/returnOnRaise", "z3/deepUnsat",
-                 "setting/isLoose", "sizeof/host", "mm=arc", "mm=atomicArc",
+                 "setting/isLoose", "semantics/globalLiteralEntry", "sizeof/host", "mm=arc", "mm=atomicArc",
                  "useMalloc", "exceptions/setjmp", "release", "fwrapv"]:
       check want in have
 
@@ -144,6 +148,14 @@ suite "K5b: the hazards that stay (never cells)":
   test "AUD-01: isLoose stays opt-in (ADR-0001)":
     pinNever(cell"setting/isLoose", true,
              "opt-in unsound, banner on main (ADR-0001); no build axis moves it")
+
+  test "AUD-09: a literal-initialised var global is not read at its initialiser":
+    # Natively `gLit` is 5 on entry, so the target is unreachable; the walker
+    # does not claim that: it answers sxUnknown, never a trusted verdict.
+    let r = symexFind(sLitGlobal, tLabel("hit"), pinSettingsConst)
+    pinNever(cell"semantics/globalLiteralEntry",
+             gLit == 5 and r.status == sxUnknown and not r.trusted,
+             "native entry value " & $gLit & "; walker verdict " & $r.status)
 
   test "W-52: sizeof is the host's":
     pinNever(cell"sizeof/host",

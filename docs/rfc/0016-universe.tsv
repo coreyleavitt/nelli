@@ -6,7 +6,7 @@
 # axis pragma: 181 cells
 # axis magic: 244 cells
 # axis stdlib: 88 cells
-# axis build: 29 cells (pcre libs and build cells; rows below)
+# axis build: 30 cells (pcre libs and build cells; rows below)
 # axis readonly: 33 cells
 # axis defined: 25 cells
 # build rows: 5
@@ -42,6 +42,7 @@ build:row/linux-c-z3-4.13.4	row	-
 build:row/linux-cpp	row	-
 build:row/mingw	row	-
 build:row/msvc	row	-
+build:semantics/globalLiteralEntry	never	-
 build:setting/isLoose	never	-
 build:sizeof/host	never	-
 build:useMalloc	modelled	-

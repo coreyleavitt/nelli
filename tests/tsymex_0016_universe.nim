@@ -1179,6 +1179,9 @@ proc firstWith(w: Worklist; pred: proc (r: WRow): bool): WRow =
     if pred(r): return r
   raise newException(ValueError, "no such row")
 
+proc cellStates(): CellStates =
+  for c in universe: result[c.key] = c.state
+
 suite "RFC-0016 K1a-ids: the work list is data":
   let
     wl = parseWorklist(readFile(worklistPath), worklistPath)
@@ -1186,9 +1189,10 @@ suite "RFC-0016 K1a-ids: the work list is data":
     ukeys = universe.mapIt(it.key).toHashSet
     registered = registeredTests(readFile(nimblePath))
     idsAllow = parseAllow(readFile(allowDir / "ids.txt"))
+    legacy = parseLegacy(readFile(allowDir / "closed-legacy.txt"))
 
   proc join(w: Worklist; a: seq[Allow]): seq[string] =
-    joinIds(w, a, slices, ukeys, registered, testsDir)
+    joinIds(w, a, slices, ukeys, registered, testsDir, cellStates(), legacy)
 
   test "the committed work list, ids.txt and slice ids agree":
     let fails = join(wl, idsAllow)
@@ -1263,13 +1267,14 @@ suite "RFC-0016 K1a-ids: the id join (RED self-tests)":
     ukeys = universe.mapIt(it.key).toHashSet
     registered = registeredTests(readFile(nimblePath))
     idsAllow = parseAllow(readFile(allowDir / "ids.txt"))
+    legacy = parseLegacy(readFile(allowDir / "closed-legacy.txt"))
     openRow = wl.firstWith(proc (r: WRow): bool = r.get("state") == "open" and
                                                   not r.evidenced)
     closedRow = wl.firstWith(proc (r: WRow): bool = r.get("state") == "closed")
     aKind = universe.mustFirst("errorkind").key
 
   proc join(w: Worklist; a: seq[Allow]): seq[string] =
-    joinIds(w, a, slices, ukeys, registered, testsDir)
+    joinIds(w, a, slices, ukeys, registered, testsDir, cellStates(), legacy)
   proc entry(id: string; slice = "K9c"; reason = "r"): Allow =
     Allow(key: id, slice: slice, reason: reason)
 
@@ -1298,12 +1303,14 @@ suite "RFC-0016 K1a-ids: the id join (RED self-tests)":
   test "RED: a closing open id leaves its entry stale":
     let w = wl.setState(openRow.id, "closed")
     let fails = join(w, idsAllow)
-    check fails.len == 1
-    check "stale" in fails[0] and openRow.id in fails[0]
+    # the closed row also fails the E4 evidence rule: that is the point
+    check fails.anyIt("stale" in it and openRow.id in it)
+    check fails.anyIt("closed row" in it and openRow.id in it)
 
   test "an alias resolves to its row (an entry naming it counts for the row)":
     let r = wl.firstWith(proc (x: WRow): bool = x.list("aliases").len > 0)
-    let w = wl.setState(r.id, "open")
+    let w = wl.setState(r.id, "open").mutate(r.id, "pins", @[]).mutate(
+      r.id, "cells", @[])
     check join(w, idsAllow).anyIt("open id " & r.id in it)
     let a = idsAllow & entry(r.list("aliases")[0])
     check join(w, a).len == 0
@@ -1342,3 +1349,70 @@ suite "RFC-0016 K1a-ids: the id join (RED self-tests)":
     let w = parseWorklist("[[row]]\nid = \"a\\\\|b \\\"q\\\"\"\ncells = [\"x\", \"y\"]\n")
     check w.rows[0].id == "a\\|b \"q\""
     check w.rows[0].list("cells") == @["x", "y"]
+
+
+suite "RFC-0016 W3-z E4: closed and never rows are evidenced (section 8.2)":
+  ## Synthetic work lists: the rules, not the committed data.
+  let
+    registered = ["tpin_writes", "tpin_silent"].toHashSet
+    dir = getTempDir() / "nelli_e4_ids"
+  var
+    states: CellStates
+    ukeys: HashSet[string]
+  setup:
+    createDir(dir)
+    writeFile(dir / "tpin_writes.nim", "pinExact(f, k, x)\n")
+    writeFile(dir / "tpin_silent.nim", "echo \"pinExactly nothing\"\n")
+    states = {"magic:Mod": "modelled", "magic:Sort": "declined",
+              "magic:Hash": "never", "errorkind:feX": "kind"}.toTable
+    ukeys = toSeq(states.keys).toHashSet
+
+  proc row(body: string): Worklist =
+    parseWorklist("[[table]]\nname = \"t\"\ncolumns = [\"ID\"]\nfields = [\"id\"]\n" &
+                  "[[row]]\nid = \"T-01\"\ntable = \"t\"\ntitle = \"t\"\n" & body)
+
+  proc j(w: Worklist; legacy: seq[Allow] = @[]): seq[string] =
+    joinIds(w, @[], initHashSet[string](), ukeys, registered, dir, states, legacy)
+
+  test "a closed row with an exact cell, a never cell, or a recording pin passes":
+    check j(row("state = \"closed\"\ncells = [\"magic:Mod\"]\n")).len == 0
+    check j(row("state = \"closed\"\ncells = [\"magic:Hash\"]\n")).len == 0
+    check j(row("state = \"closed\"\npins = [\"tpin_writes\"]\n")).len == 0
+
+  test "RED: a closed row naming nothing fails":
+    let f = j(row("state = \"closed\"\n"))
+    check f.len == 1 and "T-01" in f[0] and "closed-legacy" in f[0]
+
+  test "RED: a closed row naming a declined (open-work) cell fails":
+    let f = j(row("state = \"closed\"\ncells = [\"magic:Sort\", \"magic:Mod\"]\n"))
+    check f.len == 1 and "declined" in f[0] and "magic:Sort" in f[0]
+
+  test "RED: a closed row whose only pin writes no records fails":
+    let f = j(row("state = \"closed\"\npins = [\"tpin_silent\"]\n"))
+    check f.len == 1 and "write no pin records" in f[0]
+    check j(row("state = \"closed\"\npins = [\"tpin_silent\", \"tpin_writes\"]\n")).len == 0
+
+  test "RED: a never row with no never cell fails":
+    let f = j(row("state = \"never\"\nnever_reason = \"nrByDesign\"\ncells = [\"magic:Mod\"]\n"))
+    check f.len == 1 and "no `never` cell" in f[0]
+    check j(row("state = \"never\"\nnever_reason = \"nrByDesign\"\n")).len == 1
+
+  test "RED: a never_reason outside the enum fails":
+    let f = j(row("state = \"never\"\nnever_reason = \"stays by design\"\ncells = [\"magic:Hash\"]\n"))
+    check f.len == 1 and "NeverReason" in f[0]
+    check j(row("state = \"never\"\nnever_reason = \"nrTheory\"\ncells = [\"magic:Hash\"]\n")).len == 0
+    check j(row("state = \"never\"\ncells = [\"magic:Hash\"]\n")).len == 1
+
+  test "the legacy list covers a bare closed row, and ratchets out":
+    let a = Allow(key: "T-01", reason: "pre-K9")
+    check j(row("state = \"closed\"\n"), @[a]).len == 0
+    let f = j(row("state = \"closed\"\ncells = [\"magic:Mod\"]\n"), @[a])
+    check f.len == 1 and "stale" in f[0]
+    check j(row("state = \"open\"\n"), @[a]).anyIt("stale" in it)
+    check j(row("state = \"closed\"\n"), @[Allow(key: "T-01")]).anyIt("no reason" in it)
+    check j(row("state = \"closed\"\n"), @[Allow(key: "Z-9", reason: "r")]).anyIt("Z-9" in it)
+
+  test "callsVerb is a whole-word match":
+    check callsVerb("  pinNever(k, true, \"x\")")
+    check not callsVerb("let myskipCellx = 1")
+    check not callsVerb("# no verbs here")

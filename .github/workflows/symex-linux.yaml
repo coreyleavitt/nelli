@@ -221,7 +221,7 @@ jobs:
       - name: Watchdog self-test
         run: bash scripts/rfc0016-watchdog.sh --self-test
 
-      - name: K8a heartbeat and rfc-0016-intake issue age
+      - name: K8a heartbeat, intake issue age, and each leg's last success on main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}

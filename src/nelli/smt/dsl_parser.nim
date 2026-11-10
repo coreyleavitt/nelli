@@ -46,6 +46,7 @@ import ./magic_rows  ## RFC-0016 K4a: `magicAxis`, `dispatchMagic`
 import ./stdlib_rows ## RFC-0016 K4c: `stdlibAxis`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
+import ./readonlyaxes ## RFC-0016 E3b: `admitShape`, the read-only axis
 import ./definedness ## RFC-0016 K10a-axis: the stale element address and `noalias` rows
 import ./dsl_typebridge
 from ./abstraction import collectVarRefs   ## RFC-0005 S8bl: `writesName`
@@ -7179,7 +7180,37 @@ proc dropVarIndirection(n, f: NimNode): NimNode =
   result = copyNimNode(n)
   for c in n: result.add dropVarIndirection(c, f)
 
-proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
+proc ptrFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                    sh: var WriteShape): bool   ## RFC-0016 E3c fwd decl
+proc viewFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                     sh: var WriteShape): bool  ## RFC-0016 E3c fwd decl
+
+proc addrOperandShape*(n: NimNode): WriteShape =
+  ## RFC-0016 E3c. The `ptrformal` shape of an `addr` expression `n`. The
+  ## address of a `var` formal (`addr x`, spelled over `nnkHiddenDeref(x)`) is
+  ## `wsVarReturn`: handed on, it is the caller's pointee. The address of a
+  ## path through a dereference (`addr p[].a`) is `wsFieldAddr`; the whole
+  ## pointee (`addr p[]`) is `wsVarReturn` too.
+  ## Any other operand is `wsUnlisted`, which no row names.
+  if n.kind notin {nnkAddr, nnkHiddenAddr} or n.len != 1: return wsUnlisted
+  var o = n[0]
+  while o.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and o.len > 0:
+    o = o[^1]
+  var t = o
+  while t.kind in {nnkDotExpr, nnkCheckedFieldExpr, nnkBracketExpr} and
+        t.len > 0:
+    t = t[0]
+  if t.kind == nnkDerefExpr:
+    # `addr p[]` is the pointee itself: what a `var` formal handed on is once
+    # the callee is read with the formal replaced by `p[]`.
+    return (if t == o: wsVarReturn else: wsFieldAddr)
+  if t.kind == nnkHiddenDeref and t.len == 1 and t[0].kind == nnkSym and
+     symKind(t[0]) == nskParam:
+    return wsVarReturn
+  wsUnlisted
+
+proc ptrUsesShape(n, f: NimNode; seen: var seq[string];
+                  sh: var WriteShape): bool =
   ## RFC-0005 S8an, RFC-0016 K6c (W-10). True when every use of the pointer
   ## `f` in `n` is one that cannot let it outlive the call: a dereference
   ## `f[]` (read, write) that is not under `addr`, a comparison (`==`, `!=`,
@@ -7197,26 +7228,41 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
   ## (an opaque routine, a non-magic stdlib one) or returned by one that
   ## reads the walked body (`proc g(x: var int): ptr int = addr x`), and `f`
   ## inside inline assembly, a `cast` or an `emit`.
+  ##
+  ## RFC-0016 E3c. Each use is a SHAPE of the `ptrformal` route
+  ## (`WriteShape`): `sh` is the first one that does not stay local, and
+  ## `ptrUsesStayLocal` asks the read-only table about it. A use the
+  ## classifier cannot name is `wsUnlisted`, which has no row.
   case n.kind
   of nnkSym:
-    return not containsSym(@[f], n)
+    if containsSym(@[f], n):
+      sh = wsGlobalStore   # the pointer itself stored, returned or captured
+      return false
+    return true
   of nnkDerefExpr, nnkHiddenDeref:
     if n.len == 1 and isSymOf(n[0], f): return true
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
   of nnkAddr, nnkHiddenAddr:
     # A call's `var` actuals are read in the call arm below; any other
     # address of something built from `f` is a pointer that can outlive it.
-    return not mentionsSym(n, f)
+    if mentionsSym(n, f):
+      sh = addrOperandShape(n)
+      return false
+    return true
   of nnkAsmStmt, nnkCast:
+    sh = wsUnlisted
     return not mentionsSym(n, f)   # `foreignWriteNode`
   of nnkPragma:
-    if foreignWriteNode(n): return not mentionsSym(n, f)
+    if foreignWriteNode(n):
+      sh = wsUnlisted
+      return not mentionsSym(n, f)
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
   of RoutineNodes:
+    sh = wsUnlisted
     return not mentionsSym(n, f)
   of nnkInfix, nnkCall, nnkCommand, nnkPrefix, nnkPostfix, nnkHiddenCallConv,
      nnkCallStrLit, nnkDotCall:
@@ -7231,30 +7277,38 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
         let a = n[j]
         if isSymOf(a, f):
           if builtinCmp: continue
-          if opaque or not user or not ptrFormalStaysLocal(head, j - 1, seen):
+          if opaque or not user:
+            sh = wsUnlisted
             return false
+          if not ptrFormalShape(head, j - 1, seen, sh): return false
         elif a.kind == nnkHiddenAddr and a.len == 1 and isSymOf(a[0], f):
           # RFC-0005 S8au: the pointer variable itself passed to a `var
           # ptr` formal. It stays local when that formal only ever
           # dereferences it (never rebinds or stores it).
-          if opaque or not user or not ptrFormalStaysLocal(head, j - 1, seen):
+          if opaque or not user:
+            sh = wsUnlisted
             return false
+          if not ptrFormalShape(head, j - 1, seen, sh): return false
         elif a.kind == nnkHiddenAddr and mentionsSym(a, f):
           # The pointee (or a part of it) as a `var` actual: its address
           # goes to the callee. Local only when the callee keeps it so; a
           # compiler magic does not retain or return it.
-          if opaque: return false
+          if opaque:
+            sh = wsUnlisted
+            return false
           if user:
-            if not viewFormalStaysLocal(head, j - 1, seen): return false
-          elif magic.len == 0 or "Addr" in magic: return false
+            if not viewFormalShape(head, j - 1, seen, sh): return false
+          elif magic.len == 0 or "Addr" in magic:
+            sh = wsUnlisted
+            return false
           else:
             for c in a:
-              if not ptrUsesStayLocal(c, f, seen): return false
-        elif not ptrUsesStayLocal(a, f, seen):
+              if not ptrUsesShape(c, f, seen, sh): return false
+        elif not ptrUsesShape(a, f, seen, sh):
           return false
       return true
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
   of nnkNone, nnkEmpty, nnkIdent, nnkType, nnkCharLit, nnkIntLit, nnkInt8Lit,
      nnkInt16Lit, nnkInt32Lit, nnkInt64Lit, nnkUIntLit, nnkUInt8Lit,
@@ -7272,6 +7326,7 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
      nnkEnumFieldDef, nnkError, nnkModuleRef, nnkReplayAction, nnkNilRodNode:
     # A leaf, a type, or a declaration a typed body does not hold: a pointer
     # named in one is not shown local.
+    sh = wsUnlisted
     return not mentionsSym(n, f)
   of nnkExprEqExpr, nnkExprColonExpr, nnkIdentDefs, nnkVarTuple, nnkPar,
      nnkObjConstr, nnkCurly, nnkCurlyExpr, nnkBracket, nnkBracketExpr,
@@ -7289,16 +7344,27 @@ proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
      nnkTypeOfExpr, nnkArgList, nnkPattern, nnkHiddenTryStmt, nnkClosure,
      nnkGotoState, nnkState, nnkBreakState, nnkTupleConstr:
     for c in n:
-      if not ptrUsesStayLocal(c, f, seen): return false
+      if not ptrUsesShape(c, f, seen, sh): return false
     return true
 
-proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
-                          seen: var seq[string]): bool =
+proc ptrUsesStayLocal*(n, f: NimNode; seen: var seq[string]): bool =
+  ## RFC-0016 E3c. The read-only table decides: every use must classify as
+  ## `wsLocalUse`, the shape `ptrformal/local` admits. A use that does not stay
+  ## local is a shape of its own (`ptrUsesShape`): a pointer stored in a global
+  ## is an escape the walk decides, the address of a pointee's field or of a
+  ## `var` formal is refused, and a use the classifier cannot name has no row.
+  var sh = wsLocalUse
+  if not ptrUsesShape(n, f, seen, sh): return false
+  admitShape(rrPtrFormal, wsLocalUse).admitted
+
+proc ptrFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                    sh: var WriteShape): bool =
   ## RFC-0005 S8an. True when user routine `callee`'s `idx`-th formal is a
   ## `ptr` whose every use stays local (`ptrUsesStayLocal`). A routine
   ## already being checked is assumed to (the check is a greatest fixed
   ## point: recursion passes the pointer to itself, which escapes only if
   ## some other use does).
+  sh = wsUnlisted   # E3c: a formal the structure checks reject has no row
   if callee.kind != nnkSym: return false
   let key = macros.strVal(callee) & "@" & callee.lineInfo & "#" & $idx
   if key in seen: return true
@@ -7335,16 +7401,25 @@ proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
     # does, and the same rule applies: `p[]` stays local, a bare `p`
     # (a rebind `p = q`, a store, a return) does not. A `var ptr` formal
     # that only dereferences is a `ptr` formal; the `var` is never used.
-    return ptrUsesStayLocal(dropVarIndirection(body(impl), fsym), fsym, seen)
-  ptrUsesStayLocal(body(impl), fsym, seen)
+    return ptrUsesShape(dropVarIndirection(body(impl), fsym), fsym, seen, sh)
+  ptrUsesShape(body(impl), fsym, seen, sh)
 
-proc viewFormalStaysLocal(callee: NimNode; idx: int;
+proc ptrFormalStaysLocal*(callee: NimNode; idx: int;
                           seen: var seq[string]): bool =
+  ## RFC-0005 S8an; RFC-0016 E3c: the shape of every use of the formal, asked
+  ## of the read-only table (`ptrUsesStayLocal`).
+  var sh = wsLocalUse
+  if not ptrFormalShape(callee, idx, seen, sh): return false
+  admitShape(rrPtrFormal, wsLocalUse).admitted
+
+proc viewFormalShape(callee: NimNode; idx: int; seen: var seq[string];
+                     sh: var WriteShape): bool =
   ## RFC-0016 K6c. True when user routine `callee`'s `idx`-th formal is a `var`
   ## whose every use keeps the address of its argument local
   ## (`ptrUsesStayLocal` on the formal, whose body spelling `x` is the typed
   ## AST's `nnkHiddenDeref(x)`): a callee that returns or stores `addr x`
   ## hands the caller's pointee address on. False for anything else.
+  sh = wsUnlisted
   if callee.kind != nnkSym: return false
   let key = macros.strVal(callee) & "@" & callee.lineInfo & "#v" & $idx
   if key in seen: return true
@@ -7366,7 +7441,13 @@ proc viewFormalStaysLocal(callee: NimNode; idx: int;
   if fsym == nil or fsym.kind != nnkSym: return false
   fsym = formalInBody(impl, fsym)
   if fsym == nil: return false
-  ptrUsesStayLocal(body(impl), fsym, seen)
+  ptrUsesShape(body(impl), fsym, seen, sh)
+
+proc viewFormalStaysLocal(callee: NimNode; idx: int;
+                          seen: var seq[string]): bool =
+  var sh = wsLocalUse
+  if not viewFormalShape(callee, idx, seen, sh): return false
+  admitShape(rrPtrFormal, wsLocalUse).admitted
 
 proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
                         heapSteps: seq[NimNode];
@@ -10352,6 +10433,45 @@ proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
                         ctx: ParseCtx): IRStmt
   ## RFC-0005 S8bn fwd decl
 
+const mayScanLeafKinds = {nnkEmpty, nnkIdent, nnkType, nnkCharLit .. nnkNilLit,
+                          nnkCommentStmt}
+  ## RFC-0016 K2F-1. The leaves a "may" scan (`mayRearm`, `mayResizeSeq`,
+  ## `mayWriteRoot`, `scanShapeReceiverMutated`) reads as inert: a literal, a
+  ## name that is not a symbol (a pragma word), a type. A symbol is each scan's
+  ## own arm.
+
+const mayScanNoCodeKinds = {nnkTypeSection, nnkTypeDef, nnkMixinStmt,
+  nnkBindStmt, nnkTypeOfExpr, nnkUsingStmt, nnkStaticStmt, nnkRefTy, nnkPtrTy,
+  nnkVarTy, nnkProcTy, nnkTupleTy, nnkObjectTy, nnkDistinctTy, nnkEnumTy,
+  nnkIteratorTy, nnkStaticTy, nnkConstTy, nnkTupleClassTy, nnkTypeClassTy,
+  nnkMutableTy, nnkFormalParams, nnkGenericParams}
+  ## RFC-0016 K2F-1. Kinds that hold names but run no code at run time: a type
+  ## or its declaration, a name-lookup declaration, an unevaluated `typeof`, a
+  ## `static:` block, a routine's parameter list.
+
+const mayScanStructuralKinds = {nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
+  nnkBlockExpr, nnkIfStmt, nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse,
+  nnkElseExpr, nnkWhenStmt, nnkCaseStmt, nnkOfBranch, nnkWhileStmt, nnkForStmt,
+  nnkReturnStmt, nnkBreakStmt, nnkContinueStmt, nnkDiscardStmt, nnkYieldStmt,
+  nnkVarSection, nnkLetSection, nnkConstSection, nnkConstDef, nnkIdentDefs,
+  nnkVarTuple, nnkTryStmt, nnkHiddenTryStmt, nnkExceptBranch, nnkFinally,
+  nnkDefer, nnkRaiseStmt, nnkBracket, nnkCurly, nnkPar, nnkTupleConstr,
+  nnkObjConstr, nnkExprColonExpr, nnkExprEqExpr, nnkBracketExpr, nnkDotExpr,
+  nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr, nnkHiddenAddr,
+  nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkCast, nnkChckRange,
+  nnkChckRange64, nnkChckRangeF, nnkStringToCString, nnkCStringToString,
+  nnkObjUpConv, nnkObjDownConv, nnkRange, nnkAsgn, nnkFastAsgn, nnkCall,
+  nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+  nnkHiddenCallConv, nnkPragma, nnkPragmaBlock, nnkPragmaExpr,
+  nnkOpenSymChoice, nnkClosedSymChoice} + RoutineNodes
+  ## RFC-0016 K2F-1 (RFC section 8.1). The kinds that have no effect of their
+  ## own: what they may do is what their children may, so a "may" scan
+  ## recurses into them. A routine definition runs nothing, but its body is
+  ## scanned all the same (each scan's own `RoutineNodes` arm, or the
+  ## children): over-approximating a body that never runs costs only
+  ## precision. A kind in none of the three sets (`asm`, a closure-iterator
+  ## state node, any kind Nim adds) answers "may": the scan never looked at it.
+
 var procFieldAssigns {.compileTime.}: Table[string, seq[NimNode]]
   ## RFC-0005 S8bn (item 6). Per proc field of an object type (`pfKey`), the
   ## procs the entry's routines assign to it (`o.f = p`, `T(f: p)`), in
@@ -10413,9 +10533,15 @@ proc scanProcFieldAssigns*(fn: NimNode) =
            c[1].kind != nnkNilLit and c[1].getTypeInst.kind == nnkProcTy:
           let ps = pfProcSym(c[1])
           if ps != nil: pfAdd(pfObjKey(n) & "." & macros.strVal(c[0]), ps)
-    of nnkTypeSection, nnkTypeDef, nnkPragma, nnkCommentStmt:
+    of mayScanLeafKinds, mayScanNoCodeKinds, nnkPragma:
       return
-    else: discard
+    of mayScanStructuralKinds - {nnkAsgn, nnkObjConstr, nnkPragma}:
+      discard
+    else:
+      # RFC-0016 K2F-1: an unlisted kind is not read. That is fail-closed: a
+      # proc it would add is missing from `procFieldAssigns`, so a store of
+      # it codes -1 (`pfCode`) and a call through the field declines.
+      return
     for c in n: scan(c, work)
   var i = 0
   while i < work.len:
@@ -11810,10 +11936,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if fc.root != nil:
       return lowerArmFieldCell(n, fc.root, fc.lv, fc.field, preamble, ctx)
     let dummyTy = classifyType(n).ty
+    # RFC-0016 E3c: the address of a pointee's field, or of a `var` formal,
+    # is a refused shape of the `ptrformal` route: the decline names its row.
+    let addrShape = addrOperandShape(n)
+    let addrRow = admitShape(rrPtrFormal, addrShape)
+    let addrNote =
+      if addrShape in {wsFieldAddr, wsVarReturn} and not addrRow.admitted:
+        " [" & addrRow.decline[1] & "]"
+      else: ""
     preamble.add ctx.declineAtSite(
       feUnsupportedExprKind,
       "CR-2a: unsupported expression kind " & $n.kind & " in `" &
-             n.repr & "` — not in the supported expression fragment",
+             n.repr & "` — not in the supported expression fragment" &
+             addrNote,
       "CR-2a: unsupported expression kind " &
                                   $n.kind & " (feUnsupportedExprKind)")
     let dummy = zeroValueForType(dummyTy)
@@ -15619,6 +15754,17 @@ proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
   let memberCond = mkStrOp(iekStrInOptionRegion, "optregion", @[sIR, iIR, boundIR])
   some(mkIf(@[mkBranch(memberCond, mkBlock(@[]))], fallback))
 
+const mayWriteMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
+  "AppendStrStr", "AppendSeqElem", "New", "NewFinalize", "WasMoved",
+  "Destroy", "Swap", "SetLengthStr", "SetLengthSeq", "NewSeq", "Reset",
+  "ShallowCopy", "DeepCopy", "Move"]
+  ## RFC-0016 K6a (W-08). The magics that write the location of a `var`
+  ## argument: `cgMutatingMagics` (`ccgcalls.getPotentialWrites`) without
+  ## `Addr`, which takes an address and writes nothing, plus `Swap`.
+  ## RFC-0016 K2F-1: and the rest of `semexprs.FakeVarParams`, the magics
+  ## whose `var` argument carries no `nnkHiddenAddr` (`setLen`, `reset`,
+  ## `move`, ...): nothing else in the typed tree marks it written.
+
 proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
   ## Round-6 B1a mutation-fallback guard (ADR-0028 Leg 1): true iff `body`
   ## contains ANY syntactic mutation site targeting the symbol `paramName`
@@ -15665,23 +15811,39 @@ proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
   ## closing since the collectors it feeds (`considerCandidate`,
   ## `markSymOrRootParam`) were already migrated to symbol identity in R4.
   ## `sameSym` throughout, never `strVal`.
+  ##
+  ## RFC-0016 K2F-1: a mutation is any write ROOTED at the param, not only
+  ## the two spelled shapes: an assignment to any path under it (`data[i]`,
+  ## `data`), a writing magic (`inc data[0]`, `data[0] += 1`, `swap`,
+  ## `setLen`: `mayWriteMagics`, which carry no `nnkHiddenAddr`), a `var`
+  ## actual rooted at it, under any call syntax (infix included). Inert
+  ## leaves are listed, structural kinds recurse, and any other kind answers
+  ## "mutated", the over-approximation this veto already takes.
+  proc rootedAtParam(lv: NimNode): bool =
+    var steps: seq[NimNode]
+    let r = lvalueRoot(lv, steps)
+    r != nil and r.kind == nnkSym and sameSym(r, paramSym)
   proc scan(n: NimNode): bool =
-    if n == nil or n.kind == nnkEmpty: return false
+    if n == nil: return false
     case n.kind
-    of nnkAsgn:
-      if n.len == 2:
-        let lhs = unwrapHidden(n[0])
-        if lhs.kind == nnkBracketExpr and lhs.len == 2:
-          let recv = unwrapHidden(lhs[0])
-          if recv.kind == nnkSym and sameSym(recv, paramSym):
-            return true
-    of nnkCall, nnkCommand:
+    of nnkAsgn, nnkFastAsgn, nnkHiddenAddr:
+      if n.len >= 1 and rootedAtParam(n[0]): return true
+    of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+       nnkHiddenCallConv:
       if n.len >= 2 and n[0].kind in {nnkSym, nnkIdent} and
          n[0].strVal in ["add", "del", "insert"]:
         let recv = unwrapHidden(n[1])
         if recv.kind == nnkSym and sameSym(recv, paramSym):
           return true
       if n.len >= 1 and n[0].kind == nnkSym:
+        let m = routineMagic(n[0])
+        # Only the written operands count: both of `swap`'s, the first (the
+        # `var` argument) of every other magic. `s.add char(data[i])` writes
+        # `s` and merely reads `data`.
+        if magicIs(m, "Swap") or m in mayWriteMagics:
+          let written = if magicIs(m, "Swap"): n.len else: min(2, n.len)
+          for i in 1 ..< written:
+            if rootedAtParam(n[i]): return true
         let calleeImpl = resolveRoutineImpl(n[0])
         if calleeImpl != nil:
           let calleeFormals = calleeImpl[3]
@@ -15691,12 +15853,15 @@ proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
             let isVarFormal = id[id.len - 2].kind == nnkVarTy
             for j in 0 ..< id.len - 2:
               let argPos = idx + 1   ## n[0] is the callee sym itself
-              if isVarFormal and argPos < n.len:
-                let arg = unwrapHidden(n[argPos])
-                if arg.kind == nnkSym and sameSym(arg, paramSym):
-                  return true
+              if isVarFormal and argPos < n.len and rootedAtParam(n[argPos]):
+                return true
               inc idx
-    else: discard
+    of mayScanLeafKinds, mayScanNoCodeKinds, nnkSym: return false
+    of mayScanStructuralKinds - {nnkAsgn, nnkFastAsgn, nnkHiddenAddr, nnkCall,
+                                 nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
+                                 nnkCallStrLit, nnkHiddenCallConv}:
+      discard
+    else: return true
     for child in n:
       if scan(child): return true
     false
@@ -17470,25 +17635,34 @@ proc mayRearm(n, o: NimNode): bool =
   ## proc value, which may reach `o` by name.
   ## RFC-0005 S8cp (item 2): or `o` occurs under `{.cast(uncheckedAssign).}`,
   ## where `o.k = v` changes arm rather than raise.
+  ## RFC-0016 K2F-1: a proc value includes a proc-typed field (`h.cb()`), and
+  ## `o.f` is skipped only when `f` is data, not a proc `o` holds. Inert leaves
+  ## are listed, structural kinds recurse, and any other kind may rearm.
   case n.kind
   of nnkPragmaBlock:
     if isUncheckedAssignBlock(n) and mentionsSym(n, o): return true
+  of nnkPragma:
+    if foreignWriteNode(n): return true   # `emit`
   of nnkSym:
     if containsSym(@[o], n): return true
     if isNestedRoutine(n): return true
-    if symKind(n) in {nskVar, nskLet, nskParam} and
-       n.getTypeInst.kind == nnkProcTy:
+    if symKind(n) in procValueHeadKinds and n.getTypeInst.kind == nnkProcTy:
       return true
     return false
   of nnkDotExpr:
-    if n.len == 2 and isRootOf(n[0], o): return false
+    if n.len == 2 and isRootOf(n[0], o) and n.typeKind != ntyProc:
+      return false
   of nnkCheckedFieldExpr:
     if n.len >= 1 and n[0].kind == nnkDotExpr and n[0].len == 2 and
-       isRootOf(n[0][0], o):
+       isRootOf(n[0][0], o) and n.typeKind != ntyProc:
       return false
   of RoutineNodes:
     return mentionsSym(n, o)
-  else: discard
+  of mayScanLeafKinds, mayScanNoCodeKinds: return false
+  of mayScanStructuralKinds - {nnkPragmaBlock, nnkPragma, nnkDotExpr,
+                               nnkCheckedFieldExpr} - RoutineNodes:
+    discard
+  else: return true
   for c in n:
     if mayRearm(c, o): return true
   false
@@ -17499,12 +17673,16 @@ proc mayResizeSeq(n, s: NimNode): bool =
   ## argument of a read-only builtin (`len`, `high`, `low`, iteration,
   ## `contains`, `find`, `$`, `==`); or `n` calls a nested routine or a
   ## proc value, which may reach `s` by name.
+  ## RFC-0016 K2F-1: a proc value includes a proc-typed field (`h.cb()`, a
+  ## closure that may resize `s` by name). Inert leaves are listed, structural
+  ## kinds recurse, and any other kind may resize.
   case n.kind
+  of nnkPragma:
+    if foreignWriteNode(n): return true   # `emit`
   of nnkSym:
     if containsSym(@[s], n): return true
     if isNestedRoutine(n): return true
-    if symKind(n) in {nskVar, nskLet, nskParam} and
-       n.getTypeInst.kind == nnkProcTy:
+    if symKind(n) in procValueHeadKinds and n.getTypeInst.kind == nnkProcTy:
       return true
     return false
   of nnkBracketExpr:
@@ -17520,7 +17698,11 @@ proc mayResizeSeq(n, s: NimNode): bool =
       return false
   of RoutineNodes:
     return mentionsSym(n, s)
-  else: discard
+  of mayScanLeafKinds, mayScanNoCodeKinds: return false
+  of mayScanStructuralKinds - {nnkPragma, nnkBracketExpr, nnkCall, nnkCommand,
+                               nnkInfix, nnkPrefix} - RoutineNodes:
+    discard
+  else: return true
   for c in n:
     if mayResizeSeq(c, s): return true
   false
@@ -17561,15 +17743,38 @@ proc markCheckOnly(st: IRStmt): IRStmt =
 
 type MayWriteState = object
   ## RFC-0016 K6a. The routines being analysed (a hit is a cycle) and the ones
-  ## already proved read-only.
+  ## already proved read-only. E3b: the route asking, the first shape the
+  ## read-only table declined (`found`, `shape`), whether a cycle was met (read
+  ## as pure until the walk ends, `cycle`) and the verdict per shape (0 unasked,
+  ## 1 proved, 2 declined).
   stack, clean: seq[NimNode]
+  route: ReadOnlyRoute
+  found, cycle: bool
+  shape: WriteShape
+  asked: array[WriteShape, int8]
 
-const mayWriteMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
-  "AppendStrStr", "AppendSeqElem", "New", "NewFinalize", "WasMoved",
-  "Destroy", "Swap"]
-  ## RFC-0016 K6a (W-08). The magics that write the location of a `var`
-  ## argument: `cgMutatingMagics` (`ccgcalls.getPotentialWrites`) without
-  ## `Addr`, which takes an address and writes nothing, plus `Swap`.
+proc decide(st: var MayWriteState; shape: WriteShape): bool =
+  ## RFC-0016 E3b. `shape` is met on `st.route`: true when the read-only table
+  ## declines it (a shape with no row declines), and the first such shape is
+  ## kept for the message.
+  if st.asked[shape] == 0:
+    st.asked[shape] = if admitShape(st.route, shape).admitted: 1 else: 2
+  if st.asked[shape] == 2:
+    if not st.found:
+      st.found = true
+      st.shape = shape
+    return true
+  false
+
+proc declineReason(st: MayWriteState): string =
+  ## The table's reason for the declined shape, naming its cell.
+  if st.found: admitShape(st.route, st.shape).decline[1] else: ""
+
+proc containsForeign(n: NimNode): bool =
+  if n == nil: return false
+  if foreignWriteNode(n): return true
+  for c in n:
+    if containsForeign(c): return true
 
 const mayWriteMaxDepth = 64
   ## RFC-0016 K6a. Walked callees nested deeper than this read as may-write.
@@ -17586,23 +17791,35 @@ proc lvalueEscapes(lv: NimNode): bool =
 
 proc mayWrite(n: NimNode; st: var MayWriteState): bool
 
-proc routineMayWrite(sym: NimNode; st: var MayWriteState): bool =
+proc routineMayWrite(sym: NimNode; st: var MayWriteState;
+                     top = false): bool =
   ## RFC-0016 K6a. A walked user routine's body may write; a routine met while
   ## its own analysis is open (a cycle), a method, a body outside Nim and one
   ## with no impl to read may write anything.
-  if opaqueRoutine(sym): return true
+  ## E3b: a routine met again while its analysis is open reads as pure and sets
+  ## `cycle`; the walk ends by asking the table about the cycle
+  ## (`wsRecursivePure`, or `wsRecursiveWrite` when something wrote).
+  if opaqueRoutine(sym): return st.decide(wsOpaqueCallee)
   if containsSym(st.clean, sym): return false
-  if containsSym(st.stack, sym) or st.stack.len >= mayWriteMaxDepth:
-    return true
+  if containsSym(st.stack, sym):
+    st.cycle = true
+    return false
+  if st.stack.len >= mayWriteMaxDepth: return st.decide(wsRecursivePure)
   let impl = resolveRoutineImpl(sym)
-  if impl == nil or impl.len < 7: return true
+  if impl == nil or impl.len < 7: return st.decide(wsOpaqueCallee)
   st.stack.add sym
   result = mayWrite(impl[6], st)
   st.stack.setLen(st.stack.len - 1)
-  if not result: st.clean.add sym
+  if result and not top and st.shape notin {wsOpaqueCallee, wsRecursivePure}:
+    # the callee writes: the shape is the call's, not the store inside it
+    st.found = false
+    result = st.decide(if st.cycle: wsRecursiveWrite else: wsWalkedWrite)
+  if not result:
+    st.clean.add sym
+    if not top: result = st.decide(wsWalkedPure)
 
-const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkSym, nnkIdent,
-  nnkEmpty, nnkCommentStmt, nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
+const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkIdent,
+  nnkStmtListExpr, nnkBlockStmt,
   nnkIfStmt, nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse, nnkElseExpr,
   nnkWhenStmt, nnkCaseStmt, nnkOfBranch, nnkWhileStmt, nnkForStmt,
   nnkReturnStmt, nnkBreakStmt, nnkContinueStmt, nnkDiscardStmt, nnkVarSection,
@@ -17612,10 +17829,13 @@ const mayWriteReadOnlyKinds = {nnkCharLit .. nnkNilLit, nnkSym, nnkIdent,
   nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr,
   nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkChckRange,
   nnkStringToCString, nnkCStringToString, nnkObjUpConv, nnkObjDownConv,
-  nnkRange, nnkPragmaBlock}
-  ## RFC-0016 K6a. The node kinds proved to write nothing of their own: what
-  ## they may write is what their children may. The read-only axis of
-  ## RFC-0016 §8.1; every other kind reads as may-write.
+  nnkRange}
+  ## RFC-0016 K6a. The node kinds that write nothing of their own: what they
+  ## may write is what their children may. `mayWrite` classifies them
+  ## `wsLocalWork` and the read-only table decides (RFC-0016 §8.1, E3b); the
+  ## structural kinds it names itself (`nnkSym`, `nnkStmtList`, `nnkEmpty`,
+  ## `nnkCommentStmt`, `nnkPragmaBlock`) are not in this set; every other
+  ## kind is `wsUnlisted`, which has no row.
   ## `nnkPragmaBlock` (`{.line.}:`, which `doAssert` expands to) writes nothing
   ## of its own: its pragma list and body are children, so an `emit` or a `cast`
   ## in either still answers true. `mixin` and `bind` are name-lookup
@@ -17625,32 +17845,36 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
   ## RFC-0016 K6a (W-08). Evaluating `n` may write memory no variable of the
   ## routine names -- through a `ptr` or a `ref`, through a `var` formal fed
   ## such a location, in foreign code (`asm`, `emit`, a `cast`), or in a
-  ## callee that does. An allowlist: a node kind not in
-  ## `mayWriteReadOnlyKinds` answers true. A walked user callee is analysed
-  ## by its body (a cycle answers true, `routineMayWrite`); an opaque one, a
+  ## callee that does. E3b: each node is classified into a `WriteShape` and the
+  ## read-only table (`admitShape`) decides it; a node kind the classifier
+  ## cannot name is `wsUnlisted`, which has no row and so declines. A walked
+  ## user callee is analysed by its body (`routineMayWrite`); an opaque one, a
   ## proc value and a callback argument may write anything. A write to a
   ## variable by name is not this question (`mayWriteRoot` scans those).
   if n == nil: return false
-  if foreignWriteNode(n): return true
+  if foreignWriteNode(n): return st.decide(wsCastEmit)
+  template escapes(lv: NimNode): WriteShape =
+    if containsForeign(n): wsCastEmit else: wsVarFormal
   case n.kind
   of nnkAsgn, nnkFastAsgn:
-    if lvalueEscapes(n[0]): return true
+    if lvalueEscapes(n[0]):
+      return st.decide(if containsForeign(n): wsCastEmit else: wsDerefStore)
   of nnkHiddenAddr:
-    if n.len > 0 and lvalueEscapes(n[0]): return true
+    if n.len > 0 and lvalueEscapes(n[0]): return st.decide(escapes(n[0]))
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
      nnkHiddenCallConv:
-    if n.len == 0 or n[0].kind != nnkSym: return true
+    if n.len == 0 or n[0].kind != nnkSym: return st.decide(wsProcValue)
     let head = n[0]
     # The markers' runtime side touches only its own capture state.
     if isMarkerCall(n): return false
     if symKind(head) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
-      return true
+      return st.decide(wsProcValue)
     let m = routineMagic(head)
     if magicIs(m, "Swap"):
       for i in 1 ..< n.len:
-        if lvalueEscapes(n[i]): return true
+        if lvalueEscapes(n[i]): return st.decide(escapes(n[i]))
     elif m in mayWriteMagics and n.len > 1 and lvalueEscapes(n[1]):
-      return true
+      return st.decide(escapes(n[1]))
     if isUserRoutine(head):
       if routineMayWrite(head, st): return true
     elif macros.strVal(head) notin ["==", "!=", "isNil"] and
@@ -17664,18 +17888,33 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
         if n[j].kind in {nnkEmpty, nnkNilLit}: continue
         if n[j].typeKind in {ntyPtr, ntyPointer, ntyCString, ntyRef, ntyProc} or
            argHoldsCell(n[j].getTypeInst):
-          return true
-  of nnkPragma: discard  # `emit` is `foreignWriteNode`'s
+          return st.decide(wsStdlibPointerArg)
+    if st.decide(wsLocalWork): return true
+  of nnkPragma:  # `emit` is `foreignWriteNode`'s
+    if st.decide(wsPlain): return true
   of nnkMixinStmt, nnkBindStmt: return false  # symbol names, no code
-  of mayWriteReadOnlyKinds: discard
-  else: return true
+  of nnkPragmaBlock:
+    if st.decide(wsPragmaBlock): return true
+  of nnkStmtList, nnkEmpty, nnkCommentStmt:
+    if st.decide(wsPlain): return true
+  of nnkSym:
+    if symKind(n) in {nskVar, nskLet} and isModuleGlobal(n):
+      if st.decide(wsGlobalRead): return true
+    elif st.decide(wsLocalWork): return true
+  of mayWriteReadOnlyKinds:
+    if st.decide(wsLocalWork): return true
+  else: return st.decide(wsUnlisted)
   for c in n:
     if mayWrite(c, st): return true
   false
 
-proc mayWrite(n: NimNode): bool =
-  var st: MayWriteState
-  mayWrite(n, st)
+proc mayWriteWhy(n: NimNode; route: ReadOnlyRoute): string =
+  ## RFC-0016 E3b. "" when `n` is proved to write nothing shared on `route`,
+  ## else the read-only table's reason for the shape that was not.
+  var st = MayWriteState(route: route)
+  var w = mayWrite(n, st)
+  if not w and st.cycle: w = st.decide(wsRecursivePure)
+  if w: st.declineReason else: ""
 
 proc rootReachedByPointer(root: NimNode; heapSteps: seq[NimNode]): bool =
   ## RFC-0005 S8cn. A pointer may reach the memory of `root`: the location is
@@ -17695,24 +17934,51 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
   ## by name, as a `var` actual, through `addr`, by a callee that reaches
   ## `root` by name (`calleeOuterSyms`), or, when a pointer may reach it
   ## (`rootReachedByPointer`), through any `ptr` or `ref`.
+  ## RFC-0016 K2F-1: a writing magic (`inc`, `+=`, `swap`, `add`, ...) takes
+  ## its `var` argument with no `nnkHiddenAddr` (Nim's `FakeVarParams`), so it
+  ## is read here by its magic (`mayWriteMagics`). Inert leaves are listed,
+  ## structural kinds recurse, and any other kind (`asm`, an unlisted kind)
+  ## may write.
+  proc rootedHere(lv: NimNode): bool =
+    var lv = lv
+    if lv.kind == nnkHiddenAddr and lv.len > 0: lv = lv[0]
+    if isVarIndirection(lv): lv = lv[0]
+    var steps: seq[NimNode]
+    let r = lvalueRoot(lv, steps)
+    r != nil and r.kind == nnkSym and containsSym(@[root], r)
   proc scan(x: NimNode): string =
     if x == nil: return ""
     case x.kind
     of nnkAsgn, nnkFastAsgn, nnkHiddenAddr:
-      var lv = x[0]
-      if x.kind == nnkHiddenAddr and isVarIndirection(lv): lv = lv[0]
-      var steps: seq[NimNode]
-      let r = lvalueRoot(lv, steps)
-      if r != nil and r.kind == nnkSym and containsSym(@[root], r):
+      if x.len > 0 and rootedHere(x[0]):
         return "written by name"
-    of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix:
+    of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+       nnkHiddenCallConv:
+      if x.len > 0 and x[0].kind == nnkSym:
+        let m = routineMagic(x[0])
+        let writes = if magicIs(m, "Swap"): 1 ..< x.len
+                     elif m in mayWriteMagics: 1 ..< min(2, x.len)
+                     else: 1 ..< 1
+        for i in writes:
+          if rootedHere(x[i]):
+            return "written by name, through `" & x[0].strVal & "`"
       if x.len > 0 and x[0].kind == nnkSym and isUserRoutine(x[0]) and
          containsSym(calleeOuterSyms(x[0]), root):
         return "written by `" & x[0].strVal & "`, which reaches it by name"
       if x.len > 0 and (x[0].kind != nnkSym or symKind(x[0]) in
          {nskVar, nskLet, nskParam, nskForVar, nskTemp}):
-        return "reachable by a call through a proc value"
-    else: discard
+        let a = admitShape(rrLent, wsProcValue)
+        if not a.admitted:
+          return "reachable by a call through a proc value (" &
+                 a.decline[1] & ")"
+    of mayScanLeafKinds, mayScanNoCodeKinds, nnkSym: return ""
+    of mayScanStructuralKinds - {nnkAsgn, nnkFastAsgn, nnkHiddenAddr, nnkCall,
+                                 nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
+                                 nnkCallStrLit, nnkHiddenCallConv}:
+      if x.kind == nnkPragma and foreignWriteNode(x):
+        return "foreign code (an `emit`)"
+    else:
+      return "an unlisted node kind (`" & $x.kind & "`) the scan cannot read"
     if addrTakenIn(newTree(nnkStmtList, x), root) and
        x.kind in {nnkAddr, nnkCall, nnkCommand}:
       return "its address is taken"
@@ -17722,8 +17988,9 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
     ""
   result = scan(n)
   if result.len == 0 and rootReachedByPointer(root, heapSteps):
-    if mayWrite(n):
-      result = "written through a pointer or a ref"
+    let why = mayWriteWhy(n, rrLent)
+    if why.len > 0:
+      result = "written through a pointer or a ref (" & why & ")"
 
 func alwaysCopied(t: IRType): bool =
   ## RFC-0005 S8cn. A scalar: a loop variable or `let` of it is its own memory.
@@ -23912,13 +24179,17 @@ proc routeThroughDeref(lv: NimNode): bool =
     lv.len < 2 or routeThroughDeref(lv[1])
   else: true
 
-proc routeStoresThroughDeref(h: NimNode): bool =
+proc routeStoresThroughDeref(h: NimNode): string =
   ## The hook `h`, or a routine it runs, may store through a `ref` or a `ptr`.
   ## RFC-0016 K6c (W-10, D-05): this is `mayWrite`'s question, answered by the
   ## one rule -- a call through a value, a stdlib routine given something that
   ## addresses a cell, a walked callee's body, a cycle -- not a second scan.
-  var st: MayWriteState
-  routineMayWrite(h, st)
+  ## E3b: "" when the hook stores nothing through one, else the read-only
+  ## table's reason (`hookstore/` rows).
+  var st = MayWriteState(route: rrHookStore)
+  var w = routineMayWrite(h, st, top = true)
+  if not w and st.cycle: w = st.decide(wsRecursivePure)
+  if w: st.declineReason else: ""
 
 proc routeFieldNames(rec: NimNode; acc: var seq[string]): bool =
   ## The fields of a plain object's record, or false for a shape whose fields
@@ -23935,7 +24206,7 @@ proc routeFieldNames(rec: NimNode; acc: var seq[string]): bool =
   of nnkEmpty: discard
   else: result = false
 
-proc routeHookCopies(h: NimNode): bool =
+proc routeHookCopies(h: NimNode): string =
   ## The hook `h` makes the plain copy the walk models for an assignment: `=copy`
   ## and `=sink` store each field of the source in the same field of the
   ## destination, `=dup` in the result's, and nothing else touches the
@@ -23950,23 +24221,30 @@ proc routeHookCopies(h: NimNode): bool =
   ## must not `mayWrite` (a store through a pointer, foreign code, a callee
   ## that does). The check used to default to "copied" for what it did not
   ## recognise.
+  ##
+  ## RFC-0016 E3b: "" when the hook is the plain copy, else the reason, which is
+  ## the read-only table's for the shape that was not (`hookcopy/` rows; a hook
+  ## shape the proof cannot read is `hookcopy/unlisted`, which has no row).
   let name = macros.strVal(h)
-  if name notin ["=copy", "=sink", "=dup", "=wasMoved"]: return true
+  if name notin ["=copy", "=sink", "=dup", "=wasMoved"]: return ""
+  var reason = ""
+  proc unread(): string =
+    admitShape(rrHookCopy, wsUnlisted).decline[1]
   let impl = h.getImpl
-  if impl.kind notin RoutineNodes or impl.len <= 6: return false
+  if impl.kind notin RoutineNodes or impl.len <= 6: return unread()
   let ty = h.getTypeInst
-  if ty.kind != nnkProcTy or ty.len < 1: return false
+  if ty.kind != nnkProcTy or ty.len < 1: return unread()
   let formals = ty[0]
   var dst, src = ""
   if name == "=dup":
     dst = "result"
-    if formals.len < 2: return false
+    if formals.len < 2: return unread()
     src = macros.strVal(formals[1][0])
   else:
-    if formals.len < 2: return false
+    if formals.len < 2: return unread()
     dst = macros.strVal(formals[1][0])
     if name != "=wasMoved":
-      if formals.len < 3: return false
+      if formals.len < 3: return unread()
       src = macros.strVal(formals[2][0])
   var fields: seq[string]
   if name != "=wasMoved":
@@ -23974,7 +24252,7 @@ proc routeHookCopies(h: NimNode): bool =
     let ti = t.getTypeImpl
     if ti.kind != nnkObjectTy or ti.len < 3 or ti[1].kind == nnkOfInherit or
        not routeFieldNames(ti[2], fields):
-      return false
+      return unread()
   var copied: seq[string]
   proc rootName(n: NimNode): string =
     var r = n
@@ -24014,6 +24292,10 @@ proc routeHookCopies(h: NimNode): bool =
     else: discard
     let f = fieldCopy(n)
     if f.len > 0:
+      let a = admitShape(rrHookCopy, wsPlain)
+      if not a.admitted:
+        reason = a.decline[1]
+        return false
       copied.add f
       return true
     # A lifetime call stores no value the copy keeps (its own body is walked
@@ -24021,11 +24303,33 @@ proc routeHookCopies(h: NimNode): bool =
     if n.kind in {nnkCall, nnkCommand} and n.len > 0 and n[0].kind == nnkSym and
        macros.strVal(n[0]).startsWith("=") and macros.strVal(n[0]) != "=":
       return true
-    not (namesDst(n) or leavesHook(n) or mayWrite(n))
-  if not check(impl[6]): return false
+    # The shape that is not the plain copy, named for the table to decide.
+    let shape =
+      if leavesHook(n): wsEarlyReturn
+      elif containsForeign(n): wsCastEmit
+      elif namesDst(n):
+        if n.kind in {nnkWhileStmt, nnkForStmt}: wsLoop
+        elif n.kind in {nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix}:
+          wsWalkedWrite
+        elif n.kind in {nnkIfStmt, nnkWhenStmt, nnkCaseStmt, nnkBlockStmt,
+                        nnkTryStmt}: wsConditional
+        else: wsUnlisted
+      else: wsPlain
+    if shape != wsPlain:
+      let a = admitShape(rrHookCopy, shape)
+      if not a.admitted:
+        reason = a.decline[1]
+        return false
+      return true
+    let why = mayWriteWhy(n, rrHookCopy)
+    if why.len > 0:
+      reason = why
+      return false
+    true
+  if not check(impl[6]): return reason
   for f in fields:
-    if f notin copied: return false
-  true
+    if f notin copied: return unread()
+  ""
 
 proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
   ## What `hooks` may write has no proof; and whatever they run is reachable too.
@@ -24044,13 +24348,16 @@ proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
       addRoute(run, routeOpenValue, "the lifetime hook " & name &
                " cannot be summarised: " & s.why)
     block:
-      if routeStoresThroughDeref(h):
+      let why = routeStoresThroughDeref(h)
+      if why.len > 0:
         addRoute(run, routeOpenValue, "the lifetime hook " & name &
                  " may store through a `ref` or a `ptr`, at a call the compiler " &
-                 "inserts")
-    if not routeHookCopies(h):
+                 "inserts (" & why & ")")
+    let copyWhy = routeHookCopies(h)
+    if copyWhy.len > 0:
       addRoute(run, routeOpenValue, "the lifetime hook " & name &
-               " does not make the plain copy an assignment is modelled by")
+               " does not make the plain copy an assignment is modelled by (" &
+               copyWhy & ")")
     for nm in s.havoc:
       if nm == havocAllGlobals:
         addRoute(run, routeOpenAll, "the lifetime hook " & name &

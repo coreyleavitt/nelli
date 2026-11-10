@@ -100,7 +100,7 @@ suite "K4c: a routine of the pushed region lowered by name":
     ## RFC-0016 PRC-09: its row was declined (`feCheckOption`); it is now
     ## lowered by name (`parseCeilDiv`), `tsymex_0016_k4c_math` pins it.
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       check native(sCeilDiv(7)) == "hit"
       let c = cellKey(axStdlibBody, "math.ceilDiv")

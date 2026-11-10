@@ -20,7 +20,7 @@
 ## `tests/0016-allowlist/ids.txt` (`id<TAB>slice<TAB>reason`); an entry for a
 ## row that is not open, or is evidenced, is stale and fails, so entries ratchet
 ## out. An alias (`F-0001` for W-01) resolves to its row.
-import std/[os, strutils, sets, options, tables]
+import std/[os, strutils, sets, options, sequtils, tables]
 import nelli/smt/admission
 import ./worklist_toml
 
@@ -238,3 +238,36 @@ proc joinIds*(w: Worklist; allow: seq[Allow]; slices: HashSet[string];
                    "file that writes records, and is not in closed-legacy.txt"
     of "never": result.add neverProblems(r, states)
     else: discard
+
+# --- the F ledger (RFC section 8.2) ----------------------------------------
+
+proc isFId*(s: string): bool =
+  ## `F-` and exactly four digits.
+  s.len == 6 and s.startsWith("F-") and s[2 .. 5].allIt(it in {'0' .. '9'})
+
+proc fLedger*(w: Worklist): seq[(string, string)] =
+  ## Every (F id, row id) the work list names: a row id of the form F-NNNN, an
+  ## alias of that form, or a `source` that is exactly one. The F ledger lives
+  ## in the TOML (a finding is its own open row, or an alias of the row it
+  ## duplicates); the handoff's markdown table is history, not a source.
+  for r in w.rows:
+    var ids: seq[string]
+    if r.id.startsWith("F-"): ids.add r.id
+    for a in r.list("aliases"):
+      if a.startsWith("F-"): ids.add a
+    if r.get("source").startsWith("F-") and ' ' notin r.get("source"):
+      ids.add r.get("source")
+    for f in ids.deduplicate: result.add (f, r.id)
+
+proc fLedgerProblems*(w: Worklist): seq[string] =
+  ## Each F id is well-formed and names exactly one row. Nothing else: an F
+  ## row may alias a closed row, alias an open one, or be its own open row.
+  var owner = initTable[string, string]()
+  for (f, row) in fLedger(w):
+    if not f.isFId:
+      result.add "F ledger id \"" & f & "\" (row " & row &
+                 ") is not of the form F-NNNN"
+    elif f in owner:
+      result.add "F ledger id " & f & " names two rows: " & owner[f] &
+                 " and " & row
+    else: owner[f] = row

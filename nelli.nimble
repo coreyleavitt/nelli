@@ -1562,6 +1562,8 @@ task test, "Run the test suite":
             "tsymex_0016_k6a_maywrite",
             "tsymex_0016_k6b_hookcopy",
             "tsymex_0016_k6c_round",
+            "tsymex_0016_e3b_readonly_wiring",
+            "tsymex_0016_k2f1_may",
             # RFC-0005 S8cq: by-value sharing, var-returning actuals, a call in
             # a location lowered twice.
             "tsymex_rfc0005_s8cq_argorder",
@@ -1839,8 +1841,10 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_p5_shortcircuit_guard",
             # RFC-0016 K1a-cells: the universe ledger (derived cells, the pin-record join, allowlists, the committed TSV).
             "tsymex_0016_universe",
-            # RFC-0016 K2a: the dispatch census (case n.kind, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.
+            # RFC-0016 K2a: the dispatch census (every NimNode case and its else, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.
             "tsymex_0016_k2a_census",
+            # RFC-0016 W3-z E6: the allowlist ratchet (a committed ceiling per allowlist file; growth and unlowered shrinkage both fail).
+            "tsymex_0016_allowlist_ceilings",
             # RFC-0016 K2c: one snippet per NimTypeKind through symexFind, and classifyType reading the named-feature rows (owned, Atomic, c_longdouble).
             "tsymex_0016_k2c_typeclass",
             # RFC-0016 K3a: the type-class and type x memory-op axes (tables, verbs), and the let-cursor x type pins through the walker.

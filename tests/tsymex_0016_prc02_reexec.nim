@@ -155,7 +155,7 @@ suite "PRC-02: proc values cross to the re-executed child":
     # buildprofile.nim), so cpp under 4.13.4 is `feHostUnadmitted` by design.
     # Not a defect: `replayWitness` does not read the row.
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(sutNimcall, tLabel("t"))
       checkpoint show(r.errors)

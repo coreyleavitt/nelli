@@ -93,7 +93,7 @@ suite "PRC-02m: symexFind over a dynamic call":
   # Not a defect: the pins below skip on such a host.
   test "a witness reaching the first override":
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(sutHit, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
@@ -102,7 +102,7 @@ suite "PRC-02m: symexFind over a dynamic call":
 
   test "a witness reaching the second override":
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(sutHit2, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
@@ -111,7 +111,7 @@ suite "PRC-02m: symexFind over a dynamic call":
 
   test "a property no override violates is unsat":
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(sutNever, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
@@ -122,7 +122,7 @@ suite "PRC-02m: symexFind over a dynamic call":
 
   test "an override the scan cannot see still declines":
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       let r = symexFind(sutHiddenFind, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
@@ -136,7 +136,7 @@ suite "PRC-02m: symexFind over a dynamic call":
 
   test "a global read beside a ref hierarchy decides with the subtype table":
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       # `routeType` takes the hooks of the subtypes the scan reads as those a
       # `ref` of the hierarchy may run; the run's subtype table confirms no
@@ -159,7 +159,7 @@ suite "PRC-02m: symexFind over a dynamic call":
 
   test "a subtype with a hook the scan cannot see declines":
     if hostAdmission().isSome:
-      skip()
+      skipUnadmitted()
     else:
       # `HSub` is built only at module init and has a `=destroy` no scan of
       # `sutHeld` reads: the table names it, so every read declines.

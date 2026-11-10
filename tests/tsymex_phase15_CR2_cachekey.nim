@@ -1165,6 +1165,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z P4 (field place of the pragma axis): 314->315.
     ## RFC-0016 W3-z P5 (an and/or operand reading a noinit local is guarded): 315->316.
     ## RFC-0016 W3-z K2F-2 (type pragma walk shapes): 315->316.
+    ## RFC-0016 K2F-1 (the "may" analyses answer "may" for what they did not
+    ## read; a writing magic in a `lent` loop body declines): 311->312.
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

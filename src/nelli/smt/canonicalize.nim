@@ -336,6 +336,14 @@ const renderAsChoicesVersion* = "12"
   ##   `feGlobalRouteUnproved`, "whose overrides cannot be listed"), with or
   ##   without a global read: a verdict over the visible overrides alone is
   ##   never trusted.
+  ##   Subtype hooks (also 310): under the toolchain's subtype-hook table
+  ##   (`hasSubtypeTable`, patch 0009) a `ref` of an object hierarchy no
+  ##   longer opens every global (`routeType`): the hooks of the subtypes the
+  ##   scan reads are the hypothesis, and `subtypeRouteGuard` asks the table at
+  ##   run time whether a subtype of the hierarchy in the binary has a user
+  ##   lifetime hook outside them (or holds a closure); if so it adds the `!`
+  ##   route. A generic-instance base, and a build without the table, keep the
+  ##   open route ("may hold a subtype").
 
 const symexWalkerVersion* = "310"
   ## RFC-0016 PRC-02 (309->310): a re-executed replay (Windows) also carries a

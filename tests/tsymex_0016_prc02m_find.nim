@@ -30,7 +30,9 @@ var gBias = 0
 
 proc sutBiased(v: int) =
   symexAssume(v > -100 and v < 100)
-  if pick(v) + gBias == 10: symexTarget("hit")
+  # `gBias` is havocked (it may hold any value when the property runs), so the
+  # hit names its value: a witness the solver picks then replays as found.
+  if gBias == 0 and pick(v) == 10: symexTarget("hit")
 
 proc sutHit(v: int) =
   symexAssume(v > -100 and v < 100)
@@ -48,6 +50,23 @@ proc sutHiddenFind(v: int) =
   symexAssume(v > -100 and v < 100)
   let b: Base = Sub()
   if area(b, v) == v + 1: symexTarget("hit")
+
+type
+  HBaseObj = object of RootObj
+    k: int
+  HBase = ref HBaseObj
+  HSubObj = object of HBaseObj
+  HSub = ref HSubObj
+
+proc `=destroy`(x: HSubObj) = discard
+
+var gHeld: HBase = HSub(k: 1)
+  ## The one place `HSub` is built: module init, which no SUT's scan reads.
+
+proc sutHeld(v: int) =
+  symexAssume(v > -100 and v < 100)
+  let h = HBase(k: v)
+  if gBias == 0 and h.k == 10: symexTarget("hit")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs: result.add $e.kind & ": " & e.msg & "; "
@@ -115,19 +134,40 @@ suite "PRC-02m: symexFind over a dynamic call":
       check r.status == sxUnknown
       check not r.trusted
 
-  test "a global read beside a ref hierarchy still declines (blocker pin)":
+  test "a global read beside a ref hierarchy decides with the subtype table":
     if hostAdmission().isSome:
       skip()
     else:
-      # PRC-02m's override set is proved, but `routeType` also opens every global
-      # for any `ref` of an inheritance hierarchy: a subtype (declared where no
-      # scan sees it) may carry a lifetime hook, and the dispatch table lists
-      # receivers of methods, not subtypes. Not closable from the table.
+      # `routeType` takes the hooks of the subtypes the scan reads as those a
+      # `ref` of the hierarchy may run; the run's subtype table confirms no
+      # subtype in the binary has another (`subtypeRouteGuard`). `MSub` and
+      # `MSub2` have none. Without the table a subtype declared where no scan
+      # sees it may carry a hook, so the global's route stays open.
       let r = symexFind(sutBiased, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
-      check r.status == sxUnknown
-      check r.errors.named(feGlobalRouteUnproved)
-      when hasMethodTable:
-        check "may hold a subtype" in show(r.errors)
+      when hasSubtypeTable:
+        check r.status == sxSat
+        check r.trusted
+        if r.status == sxSat: check r.witness[0] == 9
       else:
-        check "whose overrides cannot be listed" in show(r.errors)
+        check r.status == sxUnknown
+        check r.errors.named(feGlobalRouteUnproved)
+        when hasMethodTable:
+          check "may hold a subtype" in show(r.errors)
+        else:
+          check "whose overrides cannot be listed" in show(r.errors)
+
+  test "a subtype with a hook the scan cannot see declines":
+    if hostAdmission().isSome:
+      skip()
+    else:
+      # `HSub` is built only at module init and has a `=destroy` no scan of
+      # `sutHeld` reads: the table names it, so every read declines.
+      let r = symexFind(sutHeld, tLabel("hit"), pinSettingsConst)
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      check not r.trusted
+      when hasSubtypeTable:
+        check "a lifetime hook the entry could not see" in show(r.errors)
+      else:
+        check "may hold a subtype" in show(r.errors)

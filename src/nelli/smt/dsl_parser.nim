@@ -53,9 +53,11 @@ import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
 import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
 import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejected `re"..."` is a raise site
 import ./check_options   ## RFC-0005 S8cu: a routine compiled with other checks
-from ./replayproc import hasMethodTable   ## RFC-0016 PRC-02m
+from ./replayproc import hasMethodTable, hasSubtypeTable   ## RFC-0016 PRC-02m
 when hasMethodTable:
   from ./replayproc import methodRouteGuard
+when hasSubtypeTable:
+  from ./replayproc import subtypeRouteGuard
 
 template typeKind(n: NimNode): NimTypeKind = viewTypeKind(n)
   ## RFC-0005 S8bl: every type query of the parser reads a borrowed
@@ -23262,6 +23264,8 @@ type
     ## One entry macro's analysis.
     seenRoutines, seenTypes: seq[string]
     dispatched, methods: seq[NimNode]   ## PRC-02m: called through a dispatcher; read
+    refBases: seq[string]   ## PRC-02m: `module.Type` of each hierarchy a `ref` may hold
+    hooks: seq[NimNode]     ## PRC-02m: every lifetime hook read (`readHooks`)
     waiting: seq[tuple[key: string; t: NimNode]]  ## probed, not yet read
     routes: seq[string]                           ## `name|why`, or `*|why`
     siteModule: NimNode    ## the module the probes are semchecked in (`symexHookMayHide`)
@@ -23440,8 +23444,23 @@ proc routeType(run: var RouteRun; t: NimNode; storage: bool) =
       addRoute(run, routeOpenAll, "a `ref` of an unreadable type may run any hook")
       return
     if objectInherits(impl[0]) and not isExceptionObject(impl[0]):
-      addRoute(run, routeOpenAll, "the `ref` type `" & t.repr & "` may hold a " &
-               "subtype, whose lifetime hooks cannot be listed")
+      # RFC-0016 PRC-02m. With the toolchain's subtype table the hooks a
+      # subtype may run are a hypothesis, those of the subtypes this scan
+      # reads: the run confirms no subtype of the hierarchy in the binary has
+      # another (`subtypeRouteGuard`). A base the table cannot name (a generic
+      # instance) stays open.
+      var listed = false
+      when hasSubtypeTable:
+        let b = impl[0]
+        let m = routeModuleOf(b)
+        if b.kind == nnkSym and symKind(b) == nskType and m.kind == nnkSym and
+           not routeUninstantiated(b):
+          let name = macros.strVal(m) & "." & macros.strVal(b)
+          if name notin run.refBases: run.refBases.add name
+          listed = true
+      if not listed:
+        addRoute(run, routeOpenAll, "the `ref` type `" & t.repr & "` may hold " &
+                 "a subtype, whose lifetime hooks cannot be listed")
     routeType(run, impl[0], true)
   of nnkPtrTy:
     if impl.len > 0: routeType(run, impl[0], storage)
@@ -23725,6 +23744,7 @@ proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
     let key = "hook:" & routeRoutineKey(h)
     if key in run.seenRoutines: continue
     run.seenRoutines.add key
+    if symKind(h) in {nskProc, nskFunc}: run.hooks.add h
     let name = "`" & macros.strVal(h) & "`"
     let s = opaqueWriteSummary(h)
     if not s.inert:
@@ -23853,6 +23873,18 @@ proc routeContinue(id: int; resume: NimNode): NimNode =
           scanned.add nnkCast.newTree(ident"pointer", m)
         routes = newCall(bindSym"methodRouteGuard", routes, prefix(names, "@"),
                          prefix(called, "@"), prefix(scanned, "@"))
+    when hasSubtypeTable:
+      # RFC-0016 PRC-02m: the run's check of the subtype hooks the scan assumed.
+      if routeRuns[id].refBases.len > 0:
+        var bases = nnkBracket.newTree()
+        var scanned = nnkBracket.newTree()
+        for b in routeRuns[id].refBases: bases.add newLit(b)
+        for h in routeRuns[id].hooks:
+          scanned.add nnkCast.newTree(ident"pointer", h)
+        routes = newCall(bindSym"subtypeRouteGuard", routes, prefix(bases, "@"),
+                         if scanned.len == 0:
+                           newCall(nnkBracketExpr.newTree(ident"newSeq", ident"pointer"))
+                         else: prefix(scanned, "@"))
     return routes
   result = newStmtList()
   for (k, t) in routeRuns[id].waiting:

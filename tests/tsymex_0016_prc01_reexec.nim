@@ -10,6 +10,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/replayproc
+from nelli/smt/runtime import hostAdmission
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -70,16 +71,26 @@ proc typeSyms(k: int) =
 
 suite "PRC-01: case objects cross to the re-executed child":
   test "a case-object global is handed over (kB branch with a string)":
-    let r = symexFind(caseGlobal, tLabel("t"))
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    check r.soundness.replay == rsConfirmed
+    # A symexFind run is decided only on a verified build row; cpp under Z3
+    # 4.13.4 has none by design (`feHostUnadmitted`), so the pin skips there.
+    if hostAdmission().isSome:
+      skip()
+    else:
+      let r = symexFind(caseGlobal, tLabel("t"))
+      checkpoint show(r.errors)
+      check r.status == sxSat
+      check r.soundness.replay == rsConfirmed
 
   test "a case-object global is handed over (kA branch)":
-    let r = symexFind(caseGlobalA, tLabel("t"))
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    check r.soundness.replay == rsConfirmed
+    # A symexFind run is decided only on a verified build row; cpp under Z3
+    # 4.13.4 has none by design (`feHostUnadmitted`), so the pin skips there.
+    if hostAdmission().isSome:
+      skip()
+    else:
+      let r = symexFind(caseGlobalA, tLabel("t"))
+      checkpoint show(r.errors)
+      check r.status == sxSat
+      check r.soundness.replay == rsConfirmed
 
   test "a case-object witness given to replayWitness replays":
     let hit = replayWitness(caseObj, (Shape(kind: kB, b: "hi"),),
@@ -101,10 +112,15 @@ suite "PRC-01: case objects cross to the re-executed child":
     check miss.outcome == roRefuted
 
   test "type symbols in the footprint do not decline":
-    let r = symexFind(typeSyms, tLabel("t"))
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    check r.soundness.replay == rsConfirmed
+    # A symexFind run is decided only on a verified build row; cpp under Z3
+    # 4.13.4 has none by design (`feHostUnadmitted`), so the pin skips there.
+    if hostAdmission().isSome:
+      skip()
+    else:
+      let r = symexFind(typeSyms, tLabel("t"))
+      checkpoint show(r.errors)
+      check r.status == sxSat
+      check r.soundness.replay == rsConfirmed
 
   test "a non-nil ptr global still declines, naming the ptr":
     # `replayWitness` is the direct form: the walker does not model `gPtr`, so

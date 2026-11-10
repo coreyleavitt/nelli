@@ -42,6 +42,11 @@ const
     ## executables only (a library build would export a symbol every other Nim
     ## binary linking it also defines), so a library build keeps the stock
     ## decline.
+  hasSubtypeTable* = defined(nimHasSubtypeHookTable) and
+                     not (compileOption("app", "lib") or
+                          compileOption("app", "staticlib"))
+    ## RFC-0016 PRC-02m. The toolchain's subtype-hook table exists, and this
+    ## build can import it (executables only, as `hasMethodTable`).
   replayMemoryLimit* = 2 shl 30
     ## What a replay may allocate past the address space it starts with. An
     ## allocation loop then fails in the child ("out of memory", a real exit)
@@ -219,6 +224,52 @@ when hasMethodTable:
     let why = methodDispatchRefusal(names, called, scanned)
     if why.len > 0:
       result.add "!|" & why & " (the dispatch table and the scan disagree)"
+
+when hasSubtypeTable:
+  type SubtypeHookRow = object
+    base, sub: cstring
+    hook: pointer
+    open: int
+
+  proc nimSubtypeHookTable(count: ptr int): pointer
+    {.importc: "nimSubtypeHookTable", cdecl.}
+    ## RFC-0016 PRC-02m. The patched toolchain's per-binary table: per proper
+    ## ancestor of every inheriting object type the binary writes a header for,
+    ## each user lifetime hook a value of the subtype may run.
+
+  proc subtypeHookRefusal*(bases: openArray[string];
+                           scanned: openArray[pointer]): string =
+    ## RFC-0016 PRC-02m. Empty when every user lifetime hook a subtype of one of
+    ## `bases` (`module.Type`) may run in this binary is one of `scanned`, the
+    ## hooks the route scan read; else the decline. The table lists every
+    ## subtype the binary can construct, one declared in a module the entry
+    ## cannot see included, so a subtype whose hooks the scan never read is
+    ## named here.
+    var n = 0
+    let rows = cast[ptr UncheckedArray[SubtypeHookRow]](nimSubtypeHookTable(addr n))
+    if n < 0:
+      return "lifetime hooks do not run on this memory manager's path, so the " &
+             "toolchain's subtype table lists none"
+    for r in 0 ..< n:
+      if $rows[r].base notin bases: continue
+      if rows[r].open != 0:
+        return "the subtype `" & $rows[r].sub & "` of `" & $rows[r].base &
+               "` holds a closure, whose environment's hooks cannot be listed"
+      if rows[r].hook != nil and rows[r].hook notin scanned:
+        return "the subtype `" & $rows[r].sub & "` of `" & $rows[r].base &
+               "` has a lifetime hook the entry could not see"
+
+  proc subtypeRouteGuard*(routes: seq[string]; bases: openArray[string];
+                          scanned: openArray[pointer]): seq[string] =
+    ## RFC-0016 PRC-02m. The route scan of a SUT that holds a `ref` of an
+    ## object hierarchy read the hooks of the subtypes it could see, a
+    ## hypothesis: no other subtype runs a hook. This run's table confirms it
+    ## (`subtypeHookRefusal`); refused, every read of a variable declines
+    ## (`!`, as `methodRouteGuard`).
+    result = @routes
+    let why = subtypeHookRefusal(bases, scanned)
+    if why.len > 0:
+      result.add "!|" & why & " (the subtype table and the scan disagree)"
 
 proc refusedHostHook*(why: string): ReplayChild =
   ## RFC-0005 0.9.1 (WA-7). As `refusedNotMarshallable`, for a runtime hook the

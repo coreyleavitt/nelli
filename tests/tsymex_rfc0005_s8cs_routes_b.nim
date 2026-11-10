@@ -13,6 +13,7 @@ import std/[unittest, strutils, sets, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/engine/markers
+from nelli/smt/replayproc import hasMethodTable, hasSubtypeTable
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -400,4 +401,15 @@ suite "RFC-0005 S8cs: code the analysis cannot list":
   test "a stored closure, a dynamic subtype, a method":
     declined(open1, "open1")
     declined(open2, "open2")
-    declined(open3, "open3")
+    when hasMethodTable and hasSubtypeTable:
+      # RFC-0016 PRC-02m: the toolchain's tables prove both the override set
+      # (`mw` for `MSub` is read as a callee) and the subtypes' hooks (none),
+      # so the route of `gH3` stands and the walk reaches the label the native
+      # run reaches.
+      block:
+        let r = symexFind(open3, tLabel("open3"))
+        checkpoint "open3 " & $r.status & " " & show(r.errors)
+        check r.status == sxSat
+        check r.trusted
+    else:
+      declined(open3, "open3")

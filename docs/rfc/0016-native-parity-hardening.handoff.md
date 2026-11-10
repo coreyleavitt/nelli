@@ -110,6 +110,22 @@
     lifetime hooks cannot be listed"), and the table lists method receivers,
     not subtypes, so a global read beside a method SUT still declines. Stock
     builds still trust a hidden override when the SUT reads no global.
+    (That last line was closed by db30cbf6: without the table every method
+    dispatch declines.)
+  - PRC-02m part 3 (walker 310, comment extended): the blocker above is
+    closed under the toolchain's subtype-hook table (Nim fork patch 0009,
+    `nimHasSubtypeHookTable`, `nimSubtypeHookTable`: per proper ancestor of
+    every inheriting object type the binary writes a header for, each user
+    lifetime hook a value of the subtype may run, transitively through what
+    it holds; a closure field marks the row open). `routeType` records the
+    hierarchy's `module.Type` instead of opening every global, and
+    `subtypeRouteGuard` (`replayproc.nim`) adds the `!` route when a subtype
+    in the binary has a hook outside the hooks the scan read. A global read
+    beside a method SUT now decides (`sxSat`, witness 9); a subtype built only
+    at module init with a `=destroy` still declines. Generic-instance bases
+    and table-less builds keep "may hold a subtype". The patched compiler
+    must be republished (fork `toolchain`, patch 0009) before CI sees it;
+    until then CI runs the table-less pins.
   - Resume: `/loop implement the next unimplemented rfc-0016 slice with /tdd ...`
     (the standing prompt); re-read this file and MEMORY.md first.
 - **Wave 3 progress (2026-11-08):** K2a (`rfc-0016-k2a`):

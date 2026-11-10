@@ -146,6 +146,12 @@
     `hook/=destroy/dynamicSubtype`) are now `pinDecline`. Not fixed (P6b): a
     `case` expression whose nil arm is declined faults with "parser temporary
     `__sym_caseexpr_N` is read but no statement bound it".
+  - W3-z P6b (`rfc-0016-w3z-parser6b`, walker 316 to 317): the P6 residual.
+    `armYieldsValue` opened with `body.isNil`, which a macro also answers
+    true for a `nil` LITERAL node, so `else: nil` of a case expression was
+    parsed as a statement and bound no temp; the temp's read faulted. A nil
+    literal now yields a value (the temp is bound, the nil declines by name). The `if`-expression form never shared the fault.
+    Test: `tsymex_0016_p6_nillit` pins the case form as a decline.
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

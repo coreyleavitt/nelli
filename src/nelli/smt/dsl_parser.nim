@@ -6317,7 +6317,11 @@ proc armYieldsValue(body: NimNode): bool =
   ## Structural kinds are tested FIRST and `typeKind` consulted only as a
   ## fallback — A5's lesson: a monomorphised node can be genuinely typeless,
   ## and `getTypeInst` on one is a hard, non-catchable compile error.
-  if body.isNil: return false
+  # RFC-0016 W3-z P6b. In a macro, `isNil` is also true of a `nil` LITERAL
+  # node (the VM stores the literal as a nil node), so `else: nil` was read
+  # as "no body", parsed as a statement and bound no temp: the temp's read
+  # then faulted as an unbound parser temporary. A nil literal is a value.
+  if body.isNil: return body.kind == nnkNilLit
   case body.kind
   of nnkRaiseStmt, nnkReturnStmt, nnkBreakStmt, nnkContinueStmt:
     return false

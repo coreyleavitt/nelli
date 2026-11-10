@@ -1152,7 +1152,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z P3 (stdlib axis on iterators and proc values): 313->314.
     ## RFC-0016 W3-z P7 (float-check gate reads inline iterator bodies): 314->315.
     ## RFC-0016 W3-z P6 (declined nil placeholder degrades in a composite slot): 315->316.
-    check symexWalkerVersion == "316"
+    ## RFC-0016 W3-z P6b (a nil case-expression arm binds its temp): 316->317.
+    check symexWalkerVersion == "317"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

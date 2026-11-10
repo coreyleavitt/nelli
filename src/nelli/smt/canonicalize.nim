@@ -364,7 +364,8 @@ const renderAsChoicesVersion* = "12"
   ##   that first instantiates the generic (probed natively), which the
   ##   walker cannot see.
 
-const symexWalkerVersion* = "316"
+const symexWalkerVersion* = "317"
+    ## RFC-0016 W3-z P6b (a `nil` arm of a case-expression yields a value, so its temp is bound): 316->317.
     ## RFC-0016 W3-z P6 (a declined nil placeholder in a composite slot degrades, not a walker fault): 315->316.
     ## RFC-0016 W3-z P7 (touchesFloat reads inline iterator bodies): 314->315.
   ## RFC-0016 W3-z P3 (313->314): the stdlib-body axis reaches the iterator

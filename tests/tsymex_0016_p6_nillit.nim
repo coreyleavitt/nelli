@@ -60,19 +60,18 @@ proc pprocG(c: bool) =
 
 suite "RFC-0016 W3-z P6: nil in a composite slot":
   test "cstring and pointer nil arms decline by name (were a walker fault)":
-    check parseInt(symexWalkerVersion) >= 316
+    check parseInt(symexWalkerVersion) >= 317
     pinDecline(pcsGlobal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
     pinDecline(pcsLocal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
     pinDecline(pptr, cellKey(axTypeClass, "pointer"), feUnsupportedExprKind)
     pinDecline(pptrG, cellKey(axTypeClass, "pointer"), feUnsupportedExprKind)
 
-  test "the case-expression form no longer faults in coerceIntLit":
-    # A different fault remains here (P6b): the case-expression temp is read
-    # unbound after the declined nil arm. It is recorded, not pinned.
+  test "the case-expression form declines by name (was an unbound temp fault)":
+    pinDecline(pcsCase, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
     let r = symexFind(pcsCase, tLabel("hit"), pinSettingsConst)
-    check r.status == sxUnknown
     for e in r.errors:
       check "coerceIntLit" notin e.msg
+      check "no statement bound it" notin e.msg
 
   test "a ref nil arm is modelled and agrees with native":
     discard pinExact(pref, cellKey(axTypeClass, "ref"), domain = sampled([true, false]))

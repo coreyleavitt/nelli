@@ -431,6 +431,15 @@ const symexWalkerVersion* = "317"
   ## (`mayBeRootedAt`: `addrTakenIn`, `formalAddressTaken`,
   ## `scanShapeReceiverMutated`); `byValueWritten` compares another `var`
   ## actual with a path actual by root.
+  ## RFC-0016 K2F-3 (312->313): the footprint and effect scanners
+  ## over-approximate what they did not read (RFC section 8.1). An opaque
+  ## call's write summary takes a call through a proc value (a variable, a
+  ## field, a parameter, a value a stdlib routine is given) as a write of any
+  ## variable; its Defect scan raises `ObjectConversionDefect` for an object
+  ## down-conversion; a `for (k, v)` tuple's names are each claimed (the loop's
+  ## `v` shared an outer `v`'s slot); an `import m {.all.}` under a push leaks
+  ## into `m`. Each scan lists its leaves, recurses through the structural
+  ## kinds and answers conservatively for any other kind.
   ## RFC-0016 K2F-1 (311->312): the "may" analyses answer "may" for what they
   ## did not read (RFC section 8.1). `mayWriteRoot` reads a writing magic
   ## (`inc`, `+=`, `swap`, `setLen`: the whole `FakeVarParams` set, which

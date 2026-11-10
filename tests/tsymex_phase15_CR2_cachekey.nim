@@ -1171,6 +1171,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## constructor argument is re-read at each use): 312->313.
     ## RFC-0016 K2F-5 (a `var`/`lent` call result passed to a by-value formal
     ## is the location the call returns, not a fresh value): 313->314.
+    ## RFC-0016 K2F-3 (the footprint and effect scanners over-approximate
+    ## what they did not read; a call through a proc value in an opaque body
+    ## writes any variable): 312->313.
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

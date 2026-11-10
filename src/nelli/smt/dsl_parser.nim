@@ -49,6 +49,7 @@ import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
 import ./readonlyaxes ## RFC-0016 E3b: `admitShape`, the read-only axis
 import ./definedness ## RFC-0016 K10a-axis: the stale element address and `noalias` rows
 import ./dsl_typebridge
+import ./scan_kinds   ## RFC-0016 K2F-1/K2F-3: the shared scan kind lists
 from ./abstraction import collectVarRefs   ## RFC-0005 S8bl: `writesName`
 import ./stdlib_models
 import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
@@ -4115,8 +4116,24 @@ proc scanReadPath(e: NimNode; acc: var OpaqueEffects;
     for i in 1 ..< e.len: scanRead(e[i], acc, seen, stack)
   of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkPar:
     scanReadPath(e[^1], acc, seen, stack)
-  else:
+  of mayScanLeafKinds, mayScanNoCodeKinds, mayScanStructuralKinds +
+     RoutineNodes - {nnkDotExpr, nnkHiddenDeref, nnkDerefExpr, nnkBracketExpr,
+     nnkCheckedFieldExpr, nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkPar}:
+    # RFC-0016 K2F-3: not a path: an expression read by value.
     scanRead(e, acc, seen, stack)
+  else:
+    acc.notInert("it reads a `" & $e.kind & "`, which the summary does not " &
+                 "read")
+
+proc namesRoutineDirectly(e: NimNode): bool =
+  ## RFC-0016 K2F-3. The proc-typed expression `e` is a routine's own symbol or
+  ## a lambda, whose body the scan reads where it is named; not a proc value
+  ## (a variable, a parameter, a field, a call's result).
+  var e = e
+  while e.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and e.len > 0:
+    e = e[^1]
+  (e.kind == nnkSym and symKind(e) notin procValueHeadKinds) or
+    e.kind in {nnkLambda, nnkDo}
 
 proc scanCall(n: NimNode; acc: var OpaqueEffects;
               seen, stack: var seq[NimNode]) =
@@ -4129,6 +4146,13 @@ proc scanCall(n: NimNode; acc: var OpaqueEffects;
      (n[0].kind != nnkSym or symKind(n[0]) in procValueHeadKinds):
     acc.notInert("`" & n.repr & "` calls through a proc value")
     return
+  # RFC-0016 K2F-3: a call through a proc value (a variable, a parameter, a
+  # field) runs a routine this scan never named, so it never read the body:
+  # it may write any variable and any cell. Before, the value's own symbol was
+  # all that counted, and a global the routine wrote kept its value (a false
+  # sxUnsat through a global proc variable, a proc field or a proc parameter).
+  if n.len > 0 and (n[0].kind != nnkSym or symKind(n[0]) in procValueHeadKinds):
+    mayWriteAnyVariable(acc)
   if n.len == 0 or n[0].kind != nnkSym:
     for c in n: scanOpaqueEffects(c, acc, seen, stack)
     return
@@ -4141,6 +4165,12 @@ proc scanCall(n: NimNode; acc: var OpaqueEffects;
     for i in 1 ..< n.len:
       if n[i].kind notin {nnkEmpty, nnkNilLit} and
          scanArgHoldsPtr(n[i].getTypeInst):
+        mayWriteAnyVariable(acc)
+      # RFC-0016 K2F-3: a stdlib routine's body is not read, and it may call a
+      # proc VALUE it is given (`apply(s, cb)`): the routine that value names
+      # was never read either. A routine named here is read where it is named.
+      elif n[i].kind notin {nnkEmpty, nnkNilLit} and
+           n[i].typeKind == ntyProc and not namesRoutineDirectly(n[i]):
         mayWriteAnyVariable(acc)
   var byValue: seq[bool]
   # A routine's declared formals (a magic's `var` is on its declaration); a
@@ -4194,8 +4224,18 @@ proc scanRead(e: NimNode; acc: var OpaqueEffects;
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
      nnkHiddenCallConv:
     scanCall(e, acc, seen, stack)
-  else:
+  of mayScanLeafKinds, mayScanNoCodeKinds, nnkAsmStmt, mayScanStructuralKinds +
+     RoutineNodes - {nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr,
+     nnkHiddenDeref, nnkDerefExpr, nnkHiddenStdConv, nnkHiddenSubConv, nnkConv,
+     nnkPar, nnkBracket, nnkTupleConstr, nnkCurly, nnkObjConstr,
+     nnkExprColonExpr, nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
+     nnkCallStrLit, nnkHiddenCallConv}:
+    # RFC-0016 K2F-3: no read-only form of it is listed: what it may write is
+    # summarised as anywhere else in the body (`scanOpaqueEffects`).
     scanOpaqueEffects(e, acc, seen, stack)
+  else:
+    acc.notInert("it reads a `" & $e.kind & "`, which the summary does not " &
+                 "read")
 
 proc scanWrite(lhs: NimNode; acc: var OpaqueEffects;
                seen, stack: var seq[NimNode]) =
@@ -4208,8 +4248,14 @@ proc scanWrite(lhs: NimNode; acc: var OpaqueEffects;
     for i in 1 ..< lhs.len: scanRead(lhs[i], acc, seen, stack)
   of nnkDotExpr:
     scanWrite(lhs[0], acc, seen, stack)
-  else:
+  of nnkSym, mayScanLeafKinds, mayScanNoCodeKinds, mayScanStructuralKinds +
+     RoutineNodes - {nnkBracketExpr, nnkDotExpr}:
+    # RFC-0016 K2F-3: a root, or a location no path form is listed for: every
+    # symbol in it counts as written (`scanOpaqueEffects`).
     scanOpaqueEffects(lhs, acc, seen, stack)
+  else:
+    acc.notInert("it writes a `" & $lhs.kind & "`, which the summary does " &
+                 "not read")
 
 proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
                        seen, stack: var seq[NimNode]) =
@@ -4346,8 +4392,24 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
           acc.notInert("its body holds an `emit`")
     else:
       for c in n: scanOpaqueEffects(c, acc, seen, stack)
-  else:
+  of mayScanLeafKinds, mayScanNoCodeKinds, nnkTemplateDef, nnkMacroDef:
+    # RFC-0016 K2F-3: a literal, a type, a declaration that runs nothing; an
+    # untyped template or macro body is expanded where it is used.
+    discard
+  of mayScanStructuralKinds + RoutineNodes - {nnkTemplateDef, nnkMacroDef,
+      nnkDerefExpr, nnkHiddenDeref, nnkAsgn, nnkFastAsgn, nnkIdentDefs,
+      nnkVarTuple, nnkElifBranch, nnkElifExpr, nnkCaseStmt, nnkCall,
+      nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+      nnkHiddenCallConv, nnkAddr, nnkCast, nnkWhileStmt, nnkPragma}:
+    # No effect of its own: its children's. A nested routine's body is read
+    # though it may never run (over-approximation); a call of it is read by
+    # its symbol above.
     for c in n: scanOpaqueEffects(c, acc, seen, stack)
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a kind this scan does not list has no
+    # bound on what it may do.
+    acc.notInert("its body holds a `" & $n.kind & "`, which the summary " &
+                 "does not read")
 
 proc opaqueWriteSummary(calleeSym: NimNode): OpaqueEffects =
   ## RFC-0005 S8as. The effect summary of an inert-shaped opaque call
@@ -4561,6 +4623,10 @@ const unsignedDivMagics = ["DivU", "ModU"]
   ## under the gate they answer through the definedness axis's
   ## `div/zeroDivisorUnsigned` row.
 
+proc hierarchyConv(n, operand: NimNode): tuple[isHier: bool;
+    tgtTy, tgtPointee: IRType; srcChain, tgtChain: seq[string]]
+  ## RFC-0016 K2F-3 fwd decl
+
 proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
                        seen: var seq[NimNode]; depth: int; ctx: ParseCtx;
                        owner: NimNode; memo: var FloatCheckMemo) =
@@ -4590,6 +4656,18 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
   template addUnreadable() =
     add anyDefect
     addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+  template unlistedKind() =
+    addUnreadable()   # RFC-0016 K2F-3: an unlisted node kind
+  template downConv(src: NimNode) =
+    # RFC-0016 K2F-3: `Derived(b)` of a `ref` checks `b`'s dynamic type: a
+    # checked build raises `ObjectConversionDefect`, an unchecked one is type
+    # confusion (row `conv/objDowncast`), as the walked conversion says
+    # (`hierarchyConv`). The scan read it as a conversion that cannot fail, so
+    # a handler around the call was unreachable: a false sxUnsat.
+    let h = hierarchyConv(n, src)
+    if h.isHier and h.tgtChain.len > h.srcChain.len:
+      if ownerChecked(owner, coObj): add "ObjectConversionDefect"
+      else: addUb admitDefined(aoConv, ocObjDowncast, dsConv), dpChecked
   if n == nil or anyDefect in scan.defectNames and scan.defectNames.len > 12: return
   if isRoutineDefNode(n): return   # a routine declared here is not run here
   case n.kind
@@ -4647,6 +4725,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
                         ntyBool} and
          src.typeKind in {ntyFloat .. ntyFloat128}:
         addUb admitDefined(aoConvert, ocFloatToInt, dsConvert), dpChecked
+      if n.kind == nnkConv: downConv(src)
       scanOpaqueDefects(src, scan, seen, depth, ctx, owner, memo)
   of nnkRaiseStmt:
     if n.len == 0 or n[0].kind == nnkEmpty:
@@ -4727,8 +4806,28 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         addUnreadable()
     for i in 1 ..< n.len:
       scanOpaqueDefects(n[i], scan, seen, depth, ctx, owner, memo)
-  else:
+  of nnkObjDownConv:
+    if n.len >= 1:
+      downConv(n[0])
+      scanOpaqueDefects(n[0], scan, seen, depth, ctx, owner, memo)
+  of nnkAsmStmt:
+    # RFC-0016 K2F-3: foreign code inline raises no Nim exception and may do
+    # anything (row `call/opaqueBody`, as a routine with no body).
+    addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+  of nnkPragma:
+    if foreignWriteNode(n):   # `emit`: as `asm`
+      addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+  of nnkSym, mayScanLeafKinds, mayScanNoCodeKinds:
+    discard
+  of mayScanStructuralKinds + RoutineNodes - {nnkBracketExpr,
+      nnkCheckedFieldExpr, nnkConv, nnkHiddenStdConv, nnkHiddenSubConv,
+      nnkRaiseStmt, nnkCall, nnkInfix, nnkPrefix, nnkPostfix, nnkCommand,
+      nnkCallStrLit, nnkHiddenCallConv, nnkObjDownConv, nnkPragma}:
     for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a kind this scan does not list may
+    # raise anything.
+    unlistedKind()
 
 proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
   ## RFC-0005 S8be. The `Defect` types an inert opaque call may raise, which
@@ -5717,46 +5816,62 @@ const cgMutatingMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
   ## RFC-0005 S8cq. The magics `ccgcalls.getPotentialWrites` reads as writing
   ## their first argument (`mSwap` writes both).
 
-proc cgPotentialWrites(n: NimNode; mutate: bool; acc: var seq[NimNode]) =
+proc cgPotentialWrites(n: NimNode; mutate: bool; acc: var seq[NimNode];
+                       unlisted: var bool) =
   ## RFC-0005 S8cq. `ccgcalls.getPotentialWrites`: the symbols at the root of
   ## a location `n` may write -- under `addr`, a `var` actual (`nkHiddenAddr`),
   ## an assignment's left side, a mutating magic's first argument. A call's
   ## body is not read: what it writes through a global is not here.
+  ## RFC-0016 K2F-3 (RFC section 8.1): the compiler recurses through every
+  ## other kind of the tree it sees after `transf`; this reads the typed tree
+  ## before it, so only the kinds listed are taken to recurse alike. Any other
+  ## kind sets `unlisted` (the argument's place is `atUnknown`).
   case n.kind
-  of nnkCharLit .. nnkNilLit, nnkIdent, nnkFormalParams, nnkEmpty:
+  of nnkCharLit .. nnkNilLit, nnkIdent, nnkFormalParams, nnkEmpty, nnkType,
+     nnkCommentStmt:
     discard
   of nnkSym:
     if mutate and not containsSym(acc, n): acc.add n
   of nnkAsgn, nnkFastAsgn:
-    cgPotentialWrites(n[0], true, acc)
-    cgPotentialWrites(n[1], mutate, acc)
+    cgPotentialWrites(n[0], true, acc, unlisted)
+    cgPotentialWrites(n[1], mutate, acc, unlisted)
   of nnkAddr, nnkHiddenAddr:
-    cgPotentialWrites(n[0], true, acc)
+    cgPotentialWrites(n[0], true, acc, unlisted)
   of nnkBracketExpr, nnkDotExpr, nnkCheckedFieldExpr:
-    if n.len > 0: cgPotentialWrites(n[0], mutate, acc)
+    if n.len > 0: cgPotentialWrites(n[0], mutate, acc, unlisted)
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
      nnkHiddenCallConv:
     if n.len == 0: return
     let m = routineMagic(n[0])
     if m in cgMutatingMagics and n.len > 1:
-      cgPotentialWrites(n[1], true, acc)
-      for i in 2 ..< n.len: cgPotentialWrites(n[i], mutate, acc)
+      cgPotentialWrites(n[1], true, acc, unlisted)
+      for i in 2 ..< n.len: cgPotentialWrites(n[i], mutate, acc, unlisted)
     elif magicIs(m, "Swap"):
-      for i in 1 ..< n.len: cgPotentialWrites(n[i], true, acc)
+      for i in 1 ..< n.len: cgPotentialWrites(n[i], true, acc, unlisted)
     else:
-      for i in 1 ..< n.len: cgPotentialWrites(n[i], mutate, acc)
+      for i in 1 ..< n.len: cgPotentialWrites(n[i], mutate, acc, unlisted)
+  of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes -
+     {nnkFormalParams, nnkAsgn, nnkFastAsgn, nnkAddr, nnkHiddenAddr,
+      nnkBracketExpr, nnkDotExpr, nnkCheckedFieldExpr, nnkCall, nnkCommand,
+      nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit, nnkHiddenCallConv}:
+    for c in n: cgPotentialWrites(c, mutate, acc, unlisted)
   else:
-    for c in n: cgPotentialWrites(c, mutate, acc)
+    unlisted = true
 
-proc cgPotentialReads(n: NimNode; acc: var seq[NimNode]) =
+proc cgPotentialReads(n: NimNode; acc: var seq[NimNode]; unlisted: var bool) =
   ## RFC-0005 S8cq. `ccgcalls.getPotentialReads`: every symbol `n` names.
+  ## RFC-0016 K2F-3: an unlisted kind sets `unlisted`, as above.
   case n.kind
-  of nnkCharLit .. nnkNilLit, nnkIdent, nnkFormalParams, nnkEmpty:
+  of nnkCharLit .. nnkNilLit, nnkIdent, nnkFormalParams, nnkEmpty, nnkType,
+     nnkCommentStmt:
     discard
   of nnkSym:
     if not containsSym(acc, n): acc.add n
+  of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes -
+     {nnkFormalParams}:
+    for c in n: cgPotentialReads(c, acc, unlisted)
   else:
-    for c in n: cgPotentialReads(c, acc)
+    unlisted = true
 
 proc cgMayBeLifted(s: NimNode): bool =
   ## RFC-0005 S8cq. The variable `s` may live in a closure's environment after
@@ -5875,21 +5990,25 @@ proc nimArgTemps(call: NimNode): seq[ArgTemp] =
   var lifted: seq[NimNode]       # and the roots lambda lifting may add
   var laterSink = false
   var laterAny = false
+  var writesUnread = false   # RFC-0016 K2F-3: a later argument's writes not read
   for i in countdown(nArgs, 1):
     let a = call[i]
     let k = i - 1
     let st = cgSkipTrivialIndirections(a)
     var reads: seq[NimNode]
     var tmp = false
+    var unread = false   # RFC-0016 K2F-3: a kind the mirror does not list
     if st.kind == nnkSym:
       reads.add st
       tmp = containsSym(writes, st)
     else:
-      cgPotentialReads(a, reads)
+      cgPotentialReads(a, reads, unread)
       for r in reads:
         if containsSym(writes, r): tmp = true
     var r = atNone
-    if tmp:
+    if unread or writesUnread:
+      r = atUnknown
+    elif tmp:
       var ty = a
       while ty.kind in {nnkHiddenAddr, nnkAddr} and ty.len > 0: ty = ty[0]
       let byAddr = a.kind in {nnkHiddenAddr, nnkAddr}
@@ -5920,7 +6039,7 @@ proc nimArgTemps(call: NimNode): seq[ArgTemp] =
         r = atUnknown
     result[k] = r
     if st.kind != nnkSym:
-      cgPotentialWrites(a, false, writes)
+      cgPotentialWrites(a, false, writes, writesUnread)
     elif a.kind in {nnkHiddenAddr, nnkAddr} and not containsSym(lifted, st):
       # Lifted, the symbol is a field of its environment and no longer
       # skips: `getPotentialWrites` then records the environment.
@@ -10486,44 +10605,6 @@ proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
                         ctx: ParseCtx): IRStmt
   ## RFC-0005 S8bn fwd decl
 
-const mayScanLeafKinds = {nnkEmpty, nnkIdent, nnkType, nnkCharLit .. nnkNilLit,
-                          nnkCommentStmt}
-  ## RFC-0016 K2F-1. The leaves a "may" scan (`mayRearm`, `mayResizeSeq`,
-  ## `mayWriteRoot`, `scanShapeReceiverMutated`) reads as inert: a literal, a
-  ## name that is not a symbol (a pragma word), a type. A symbol is each scan's
-  ## own arm.
-
-const mayScanNoCodeKinds = {nnkTypeSection, nnkTypeDef, nnkMixinStmt,
-  nnkBindStmt, nnkTypeOfExpr, nnkUsingStmt, nnkStaticStmt, nnkRefTy, nnkPtrTy,
-  nnkVarTy, nnkProcTy, nnkTupleTy, nnkObjectTy, nnkDistinctTy, nnkEnumTy,
-  nnkIteratorTy, nnkStaticTy, nnkConstTy, nnkTupleClassTy, nnkTypeClassTy,
-  nnkMutableTy, nnkFormalParams, nnkGenericParams}
-  ## RFC-0016 K2F-1. Kinds that hold names but run no code at run time: a type
-  ## or its declaration, a name-lookup declaration, an unevaluated `typeof`, a
-  ## `static:` block, a routine's parameter list.
-
-const mayScanStructuralKinds = {nnkStmtList, nnkStmtListExpr, nnkBlockStmt,
-  nnkBlockExpr, nnkIfStmt, nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse,
-  nnkElseExpr, nnkWhenStmt, nnkCaseStmt, nnkOfBranch, nnkWhileStmt, nnkForStmt,
-  nnkReturnStmt, nnkBreakStmt, nnkContinueStmt, nnkDiscardStmt, nnkYieldStmt,
-  nnkVarSection, nnkLetSection, nnkConstSection, nnkConstDef, nnkIdentDefs,
-  nnkVarTuple, nnkTryStmt, nnkHiddenTryStmt, nnkExceptBranch, nnkFinally,
-  nnkDefer, nnkRaiseStmt, nnkBracket, nnkCurly, nnkPar, nnkTupleConstr,
-  nnkObjConstr, nnkExprColonExpr, nnkExprEqExpr, nnkBracketExpr, nnkDotExpr,
-  nnkCheckedFieldExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr, nnkHiddenAddr,
-  nnkConv, nnkHiddenStdConv, nnkHiddenSubConv, nnkCast, nnkChckRange,
-  nnkChckRange64, nnkChckRangeF, nnkStringToCString, nnkCStringToString,
-  nnkObjUpConv, nnkObjDownConv, nnkRange, nnkAsgn, nnkFastAsgn, nnkCall,
-  nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
-  nnkHiddenCallConv, nnkPragma, nnkPragmaBlock, nnkPragmaExpr,
-  nnkOpenSymChoice, nnkClosedSymChoice} + RoutineNodes
-  ## RFC-0016 K2F-1 (RFC section 8.1). The kinds that have no effect of their
-  ## own: what they may do is what their children may, so a "may" scan
-  ## recurses into them. A routine definition runs nothing, but its body is
-  ## scanned all the same (each scan's own `RoutineNodes` arm, or the
-  ## children): over-approximating a body that never runs costs only
-  ## precision. A kind in none of the three sets (`asm`, a closure-iterator
-  ## state node, any kind Nim adds) answers "may": the scan never looked at it.
 
 var procFieldAssigns {.compileTime.}: Table[string, seq[NimNode]]
   ## RFC-0005 S8bn (item 6). Per proc field of an object type (`pfKey`), the
@@ -24181,8 +24262,24 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
          pt[0].len > 0 and pt[0][0].kind != nnkEmpty:
         acc.types.add (pt[0][0], false)
     for c in n: routeScan(c, acc)
-  else:
+  of mayScanLeafKinds:
+    discard
+  of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes + {nnkRecList,
+     nnkRecCase, nnkRecWhen, nnkOfInherit, nnkEnumFieldDef, nnkAsmStmt} -
+     {nnkBracketExpr, nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
+      nnkCallStrLit, nnkHiddenCallConv}:
+    # RFC-0016 K2F-3: no value or routine of its own; a type it names is a
+    # symbol (above), read even where no value of it is built (over-
+    # approximation). `asm` (and `emit`, a pragma) is foreign code: what it
+    # may write is judged where it runs (`foreignWriteNode`: an opaque's
+    # summary writes any variable, a walked body declines), so S8cs reads
+    # only the symbols it names.
     for c in n: routeScan(c, acc)
+  else:
+    # RFC-0016 K2F-3 (RFC section 8.1): a kind not listed may build a value
+    # or run a routine this scan does not see.
+    acc.open = "it holds a `" & $n.kind & "`, a node kind this analysis " &
+               "does not read (unlisted)"
 
 proc routeHasPragma(impl: NimNode; name: string): bool =
   if impl.len <= 4 or impl[4].kind != nnkPragma: return false
@@ -24346,13 +24443,15 @@ proc routeHookCopies(h: NimNode): string =
       macros.strVal(l[1])
     else: ""
   proc check(n: NimNode): bool =
-    case n.kind
-    of nnkStmtList:
+    # RFC-0016 K2F-3: a statement list is read statement by statement, and
+    # nothing is nothing; every other kind is proved below (a field copy, a
+    # lifetime call, a shape the table decides, then `mayWrite`), so no kind
+    # is passed over.
+    if n.kind == nnkStmtList:
       for c in n:
         if not check(c): return false
       return true
-    of nnkEmpty, nnkCommentStmt: return true
-    else: discard
+    if n.kind in {nnkEmpty, nnkCommentStmt}: return true
     let f = fieldCopy(n)
     if f.len > 0:
       let a = admitShape(rrHookCopy, wsPlain)

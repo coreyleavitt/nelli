@@ -24564,7 +24564,7 @@ proc collectNestedRoutines(n: NimNode; acc: var seq[NimNode]) =
   ## depth (a closure's code is one): what a closure variable may hold that
   ## code the scan read built.
   if n.kind in RoutineNodes:
-    if n.len > 0 and n[0].kind == nnkSym and symKind(n[0]) in {nskProc, nskFunc} and
+    if n.len > 0 and n[0].kind == nnkSym and symKind(n[0]) in procValueSymKinds and
        n[0] notin acc:
       acc.add n[0]
   for c in n: collectNestedRoutines(c, acc)
@@ -25023,7 +25023,7 @@ proc envLinked*(r: NimNode): bool =
   ## `up` field).
   let o = owner(r)
   o.kind == nnkSym and owner(o).kind == nnkSym and
-    symKind(owner(o)) in {nskProc, nskFunc, nskMethod, nskConverter}
+    symKind(owner(o)) in envOwnerSymKinds
 
 proc envBenignWhy*(r: NimNode; nominal, caps: var seq[NimNode]): string =
   ## RFC-0016 W3-z R11. Empty when a closure of the nested routine `r` carries
@@ -25039,11 +25039,10 @@ proc envBenignWhy*(r: NimNode; nominal, caps: var seq[NimNode]): string =
   ## the top-level one is read the same way (its captured locals are left
   ## in `nominal`; `caps` stays the fields of `r`'s own environment).
   let rn = "`" & macros.strVal(r) & "`"
-  if r.kind != nnkSym or symKind(r) notin {nskProc, nskFunc}:
+  if r.kind != nnkSym or symKind(r) notin procValueSymKinds:
     return rn & " is not a proc"
   let o = owner(r)
-  if o.kind != nnkSym or symKind(o) notin {nskProc, nskFunc, nskMethod,
-                                            nskConverter}:
+  if o.kind != nnkSym or symKind(o) notin envOwnerSymKinds:
     return rn & " is not nested in a proc"
   let rImpl =
     try: r.getImpl
@@ -25057,7 +25056,7 @@ proc envBenignWhy*(r: NimNode; nominal, caps: var seq[NimNode]): string =
   var up = owner(o)
   var steps = 0
   while up.kind == nnkSym and symKind(up) != nskModule:
-    if symKind(up) notin {nskProc, nskFunc, nskMethod, nskConverter}:
+    if symKind(up) notin envOwnerSymKinds:
       return "the routine enclosing " & rn & " is nested in `" &
              macros.strVal(up) & "`, which is not a proc"
     inc steps

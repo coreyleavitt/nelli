@@ -72,6 +72,11 @@ proc isStdlibDecl*(sym: NimNode): bool =
 const userRoutineSymKinds* = {nskProc, nskFunc, nskMethod, nskConverter,
                              nskIterator}
 
+const envOwnerSymKinds* = {nskProc, nskFunc, nskMethod, nskConverter}
+  ## RFC-0016 W3-z R11/R12. The routines that can enclose a nested routine and
+  ## so own a closure environment: `procValueSymKinds` plus methods and
+  ## converters.
+
 const procValueSymKinds* = {nskProc, nskFunc}
   ## RFC-0005 S8bn (item 6). The routines a proc-typed value (a proc field's
   ## assignment, `dsl_parser.pfProcSym`) can name directly.

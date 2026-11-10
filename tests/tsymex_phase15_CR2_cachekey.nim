@@ -1209,7 +1209,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W3-z R12 (a start-value closure of a foreign or library type,
     ## or nested twice, keeps the routes; values of one type cross): 347->348
     ## (345->346 on its branch).
-    check symexWalkerVersion == "348"
+    ## RFC-0016 W3-z R8 follow-up (`heldWalk`'s held-set snapshot is a `var`,
+    ## not a `let` the VM aliases): 348->349.
+    check symexWalkerVersion == "349"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

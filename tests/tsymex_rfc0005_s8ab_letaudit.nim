@@ -790,7 +790,7 @@ suite "S8ah: macro-by-macro reachability of the 37 generics":
     # `symexRegisterNoMethods` (the method registry the entry macros emit).
     # RFC-0005 S8cs: 24 -> 27, `dsl_parser`'s `symexGlobalRoutes`,
     # `symexHookProbe` and `symexRouteResume` (the staged route analysis).
-    # RFC-0016 W3-z R10-R12: 27 -> 28, `dsl_parser`'s `symexEnvHooksFree`
+    # RFC-0016 W3-z R11 (778b9b6a; used by R12): 27 -> 28, `dsl_parser`'s `symexEnvHooksFree`
     # (the closure-environment hook probe the entry macros emit).
     check realScopeMacroNames.len == 28
 

@@ -587,8 +587,14 @@ const renderAsChoicesVersion* = "12"
   ##   of a routine nested in a nested one (`envBenignWhy`, the enclosing
   ##   chain's addresses in `nestedRoutineAddrs`); two or more captured values
   ##   of one type cross the re-exec wire (`envCodecs`).
+  ## - RFC-0016 W3-z R8 follow-up (348->349): `heldWalk` snapshots the held set
+  ##   at a call through the variable in a `var`, not a `let` (82542773). The
+  ##   compile-time VM can alias a `let` copy of a `var` parameter, so the
+  ##   snapshot could follow later stores and the held set differ. No
+  ##   verdict change is demonstrated on the cases pinned; the bump keeps the
+  ##   cache key honest for the changed walker code.
 
-const symexWalkerVersion* = "348"
+const symexWalkerVersion* = "349"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

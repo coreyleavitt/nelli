@@ -1833,6 +1833,7 @@ task test, "Run the test suite":
             "tsymex_0016_p6_nillit",
             # RFC-0016 W3-z P12: isNil on a NimNode answers true for a nnkNilLit; a nil literal in each expression position agrees with native.
             "tsymex_0016_p12_nilpos",
+            "tsymex_0016_p14_convnil_blockexpr",
             # RFC-0016 K3a: the type-class and type x memory-op axes (tables, verbs), and the let-cursor x type pins through the walker.
             "tsymex_0016_k3a_typeaxes",
             "tsymex_0016_k3a_letcursor",

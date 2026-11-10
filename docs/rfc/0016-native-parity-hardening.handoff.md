@@ -161,6 +161,14 @@
     positions against native. Open, not isNil: `RefO(nil)` (a `Conv` of a
     `nil`-typed literal) declines with a secondary `heUnresolvedRef`; a
     `block:` expression declines `nnkBlockExpr`.
+  - W3-z P14 (`rfc-0016-w3z-parser14`, walker 317 to 318): both P12 residuals.
+    A `Conv` of a nil literal builds the TARGET type's nil (ref, and a ptr
+    the walk models, i.e. to an object; a ptr to a scalar local, cstring,
+    proc and pointer keep the nil-literal decline). `nnkBlockExpr` lowers
+    like `nnkStmtListExpr`: leading statements to the preamble, the tail is
+    the value, a `break` out of the block declines `feUnsupportedExprKind`.
+    Test: `tsymex_0016_p14_convnil_blockexpr`; pins use `construct:
+    blockExpr/*` (no `constructaxes.nim` on the base).
   - Resume: re-read this block and the scratchpad `restack-todo.md`; land
     msvcshard via the `$S/hand` protocol (push to main in a separate call),
     then /wiring-audit and /code-review for W3-z.

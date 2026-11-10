@@ -20,6 +20,7 @@ const ledgerKeys*: seq[string] = @[
   "strutils.cmpIgnoreStyle",
   "strutils.normalize",
   "strutils.parseBool",
+  "strutils.splitLines/iterator",
   "system.abs",
   "system.add",
   "system.addChunkToMatrix",

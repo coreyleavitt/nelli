@@ -1649,6 +1649,8 @@ proc ledgerNote(key: string) =
     discard gorge("echo '" & key.replace("'", "'\\''") & "' >> '" &
             nelliStdlibLedger & "'")
 
+proc implMagic*(impl: NimNode): string  ## defined below (RFC-0005 S8be)
+
 proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
   ## RFC-0016 K4c (section 8.1). The stdlib-body axis, read for a routine of
   ## the toolchain's `lib/` the walker is about to walk by its body.
@@ -3625,7 +3627,10 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
   # before reading any. A no-op for a lambda its enclosing routine already
   # claimed; for an expression-position `nnkProcDef` it is the claim.
   claimRoutine(n)
-  let checkOpts = routineChecks(n)   ## RFC-0005 S8cu
+  var checkOpts = routineChecks(n)   ## RFC-0005 S8cu
+  # RFC-0016 W3-z P3 (A4): a stdlib proc taken as a value (`map(s, parseInt)`)
+  # is walked by its body, so the stdlib-body axis admits it as a call does.
+  applyStdlibDelta(n, checkOpts, implMagic(n).len > 0)
   let formal = n[3]
   formal.expectKind nnkFormalParams
   var params: seq[IRParam]
@@ -20733,6 +20738,15 @@ proc parseStmtInner(n: NimNode,
         let isClosureIter = impl[4].kind == nnkPragma and impl[4].findChild(
              it.kind in {nnkIdent, nnkSym} and it.strVal == "closure") != nil
         var iterChecks: RoutineChecks
+        # RFC-0016 W3-z P3 (A4): the stdlib-body axis, for an iterator of the
+        # toolchain's `lib/` walked by its body (inline or closure). Absent is
+        # a decline, as for a proc (`applyStdlibDelta`).
+        var iterAdm = RoutineChecks()
+        applyStdlibDelta(impl, iterAdm, false)
+        if iterAdm.unadmitted.len > 0:
+          return ctx.declineMarker(iterAdm.unadmittedKind,
+            routinePlace(impl) & ": " & iterAdm.unadmitted &
+            " -- path degraded to sxUnknown")
         if isClosureIter:
           let c = routineChecks(impl)
           iterChecks = c

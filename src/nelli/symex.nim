@@ -2407,6 +2407,11 @@ type ReplayFootprint = object
     ## RFC-0016 W3-z R7. Every routine of the program the scan read, nested
     ## and generic ones included: the code a replay may run that can name a
     ## module-level variable (`procValueUses`).
+  nested: seq[NimNode]
+    ## RFC-0016 W3-z R10. The program's nested routines the scan read inside
+    ## a routine it also read (a closure's code): the table's slots after
+    ## `routines`, whose addresses only top-level code can take
+    ## (`nestedRoutineAddrs`).
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -2774,7 +2779,19 @@ proc routineKey(r: NimNode): string =
   ## RFC-0005 S8cb. Tells routines apart, including generic instances:
   ## `signatureHash` alone is the same for every routine of a module with the
   ## same parameter types, so a scan keyed by it read only the first of them.
-  r.strVal & "#" & r.symBodyHash
+  ## RFC-0016 W3-z R10: and the declaration's position. `symBodyHash` is the
+  ## same for two routines of one name whose bodies read alike (every
+  ## anonymous routine is `:anonymous`): `proc (v: int): int = v + n` in two
+  ## routines, one under `push overflowChecks: off`, shared one memoised
+  ## answer (`routineUndefinedMemoised`), so the unchecked one read as checked.
+  ## The position is the definition's (`getImpl`), not the node's: a symbol
+  ## node carries the position of its use.
+  let at =
+    try:
+      let impl = r.getImpl
+      if impl.kind in RoutineNodes: impl.lineInfo else: ""
+    except CatchableError: ""
+  r.strVal & "#" & r.symBodyHash & "@" & at
 
 type RoutineFootprint = object
   ## RFC-0005 S8cb. What one routine's own body names (`scanFootprint`).
@@ -3081,7 +3098,8 @@ proc addressable(r: NimNode): bool =
   ## compiler can take the address of (`cast[pointer](==)` is an internal error
   ## for a borrowed `==`), so it is not in the table and a proc value naming it
   ## declines, as one naming any routine the scan did not read does.
-  let impl = resolveRoutineImpl(r)
+  ## RFC-0016 W3-z R10: an anonymous routine (a closure's code) is read too.
+  let impl = resolveRoutineOrLambdaImpl(r)
   if impl.isNil or impl.len <= 6: return false
   if impl[6].kind == nnkEmpty: return false
   if impl[2].kind != nnkEmpty: return false
@@ -3111,6 +3129,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
   var seen: seq[string]
   var routines: seq[NimNode]
   var ownerGlobals: seq[(NimNode, string)]
+  var nestedSeen: seq[NimNode]
   var stack = @[fn]
   while stack.len > 0:
     let r = stack.pop()
@@ -3130,6 +3149,8 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
       let ro = owner(r)
       if ro.kind != nnkSym or symKind(ro) notin userRoutineSymKinds:
         result.routines.add r      # top level: its address can be named
+      else:
+        nestedSeen.add r           # W3-z R10: kept when its owner was read
     for g in f.ownGlobals:
       let o = owner(g)
       if o.kind == nnkSym: ownerGlobals.add (g, routineKey(o))
@@ -3153,6 +3174,144 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
       result.open = true
       if result.why.len == 0:
         result.why = "`" & r.strVal & "`, nested in a routine it may capture from"
+  for r in nestedSeen:
+    if routineKey(owner(r)) in seen: result.nested.add r
+
+proc plainBitsType(t: NimNode; depth = 0): bool =
+  ## RFC-0016 W3-z R10. A value of type `t` is its bytes alone: no address
+  ## (`ref`, `ptr`, `pointer`, `cstring`, a proc value, a string's or seq's
+  ## buffer) and no type header (an inheritable object's), so a copy of the
+  ## bytes into another process of the same binary is the same value.
+  if depth > 24: return false
+  case t.kind
+  of nnkSym:
+    case t.typeKind
+    of ntyBool, ntyChar, ntyEnum, ntyInt, ntyInt8, ntyInt16, ntyInt32,
+       ntyInt64, ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64,
+       ntyFloat, ntyFloat32, ntyFloat64, ntySet, ntyRange:
+      true
+    of ntyDistinct, ntyObject, ntyTuple, ntyArray, ntyGenericInst, ntyAlias:
+      let impl = t.getTypeImpl
+      impl != t and plainBitsType(impl, depth + 1)
+    else: false
+  of nnkObjectTy:
+    # An inheritable object starts with its type's header, an address.
+    if t.len > 1 and t[1].kind != nnkEmpty: return false
+    if t.len > 0 and t[0].kind == nnkPragma: return false
+    t.len > 2 and plainBitsType(t[2], depth + 1)
+  of nnkRecList, nnkTupleTy, nnkTupleConstr:
+    for c in t:
+      if not plainBitsType(c, depth + 1): return false
+    true
+  of nnkIdentDefs:
+    t.len >= 2 and plainBitsType(t[^2], depth + 1)
+  of nnkDistinctTy:
+    t.len > 0 and plainBitsType(t[0], depth + 1)
+  of nnkEnumTy: true
+  of nnkBracketExpr:
+    if t.len == 0 or t[0].kind notin {nnkSym, nnkIdent}: return false
+    case t[0].strVal
+    of "set", "range": true
+    of "array": t.len == 3 and plainBitsType(t[2], depth + 1)
+    else:
+      let impl = t.getTypeImpl
+      impl != t and plainBitsType(impl, depth + 1)
+  else: false
+
+const capturableLocalKinds = {nskVar, nskLet, nskParam, nskResult, nskForVar,
+                              nskTemp}
+
+proc collectCaptures(n, o: NimNode; inNested: bool; acc: var seq[NimNode]) =
+  ## The locals of the routine `o` that code nested in it names.
+  case n.kind
+  of nnkSym:
+    if inNested and symKind(n) in capturableLocalKinds and owner(n) == o and
+       n notin acc:
+      acc.add n
+  of RoutineNodes:
+    for c in n: collectCaptures(c, o, true, acc)
+  else:
+    for c in n: collectCaptures(c, o, inNested, acc)
+
+proc envPlainWhy(r: NimNode): string =
+  ## RFC-0016 W3-z R10. Empty when a closure of the nested routine `r` carries
+  ## an environment whose captured values are their bytes alone
+  ## (`plainBitsType`): the environment is the one the routine enclosing `r`
+  ## builds, which holds every local of it that any routine nested in it
+  ## names. Otherwise why not, naming the value.
+  let o = owner(r)
+  if o.kind != nnkSym or symKind(o) notin userRoutineSymKinds:
+    return "`" & r.strVal & "` is not nested in a routine"
+  let impl =
+    try: o.getImpl
+    except CatchableError: newEmptyNode()
+  if impl.kind notin RoutineNodes or impl.len <= 6:
+    return "the routine enclosing `" & r.strVal & "` has no body to read"
+  var caps: seq[NimNode]
+  collectCaptures(impl[6], o, false, caps)
+  for c in caps:
+    let t =
+      try: c.getTypeInst
+      except CatchableError: newEmptyNode()
+    if t.kind == nnkEmpty or not plainBitsType(t):
+      return "its environment captures `" & c.strVal & "`, a value of a " &
+             "type that is not its bytes alone (" & t.repr & ")"
+  ""
+
+macro nestedRoutineAddrs(probe: typed; rs: varargs[typed]): untyped =
+  ## RFC-0016 W3-z R10. The code addresses of the nested routines `rs`, in
+  ## order. A nested routine that captures is a closure: code that names it
+  ## builds one with its enclosing routine's environment, which only that
+  ## routine and module-level code (where it has none) can do. So the
+  ## addresses are taken only where `probe` (a variable declared beside this
+  ## call) is module-level; inside a routine every slot a capturing routine
+  ## holds is nil, which no value matches (the settle and the wire then name
+  ## nothing for it).
+  let top = owner(probe).kind == nnkSym and symKind(owner(probe)) == nskModule
+  var items = nnkBracket.newTree()
+  for r in rs:
+    if top:
+      items.add quote do:
+        (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
+         else: (block: rawProc(`r`)))
+    else:
+      items.add quote do:
+        (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
+         else: pointer(nil))
+  if items.len == 0:
+    result = quote do: newSeq[pointer]()
+  else:
+    result = quote do: @`items`
+
+proc emitRoutineTable(fp: ReplayFootprint): tuple[procs, envOk: NimNode] =
+  ## RFC-0016 PRC-02, W3-z R10. The routine table a proc value crosses by
+  ## (`replaywire.nim`), in one order for both ends: the top-level routines
+  ## (`fp.routines`; a slot whose address cannot be taken holds nil), then
+  ## the nested ones (`fp.nested`, `nestedRoutineAddrs`). `envOk` is, per
+  ## slot, whether a closure of that routine may carry its environment
+  ## (`envPlainWhy`): only a nested routine's can.
+  var items = nnkBracket.newTree()
+  var ok = nnkBracket.newTree()
+  for r in fp.routines:
+    items.add quote do:
+      (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
+       else: pointer(nil))
+    ok.add newLit(false)
+  let probe = genSym(nskVar, "routineTableProbe")
+  var nested = newCall(bindSym"nestedRoutineAddrs", probe)
+  for r in fp.nested:
+    nested.add r
+    ok.add newLit(envPlainWhy(r).len == 0)
+  let top =
+    if items.len == 0: quote do: newSeq[pointer]()
+    else: quote do: @`items`
+  result.procs = quote do:
+    (block:
+      var `probe` {.used.}: int
+      `top` & `nested`)
+  result.envOk =
+    if ok.len == 0: quote do: newSeq[bool]()
+    else: quote do: @`ok`
 
 proc wireTarget*(w: var WireWriter; t: SymexTarget) =
   ## RFC-0005 S8ct. A case object, so outside the generic encoding.
@@ -3352,14 +3511,11 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       # RFC-0016 PRC-02. The routines a proc value may name, in one order for
       # both ends (the child is this binary): a slot a routine cannot fill
       # (one whose address cannot be taken) holds nil, which no value matches.
-      var regItems = nnkBracket.newTree()
-      for r in fp.routines:
-        regItems.add quote do:
-          (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
-           else: pointer(nil))
-      let registry =
-        if regItems.len == 0: quote do: newSeq[pointer]()
-        else: quote do: @`regItems`
+      # RFC-0016 W3-z R10: held in a `{.global.}` beside the child's entry, so
+      # both ends take a nested routine's address where it can be taken
+      # (module-level code, `nestedRoutineAddrs`), the child before it runs.
+      let (tableExpr, envOkExpr) = emitRoutineTable(fp)
+      let registry = genSym(nskVar, "replayRoutines")
       var getGlobals = newStmtList()
       var putGlobals = newStmtList()
       for g in fp.globals:
@@ -3399,6 +3555,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
         else:
           ReplayReport()
       preamble = quote do:
+        var `registry` {.global.}: seq[pointer]
         proc `childProc`(`payload`: string): ReplayReport {.nimcall.} =
           var `rd` = initWireReader(`payload`, `registry`)
           var `stackId`: int64
@@ -3411,11 +3568,16 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           `decl`
           result = (block:
             `guarded`)
-        var `regId` {.global, used.} = replayChildEntry(`site`, `childProc`)
+        # The table is filled by the entry's own initialiser, so whenever
+        # that runs (in the child, before the SUT), it is filled first.
+        var `regId` {.global, used.} = (block:
+          `registry` = `tableExpr`
+          replayChildEntry(`site`, `childProc`))
       runChild = quote do:
         block:
           var `wr`: WireWriter
-          `wr`.procs = `registry`
+          `wr`.procs = `tableExpr`
+          `wr`.envOk = `envOkExpr`
           var refused = ""
           try:
             wirePut(`wr`, int64(callerStackSize()))
@@ -3593,6 +3755,9 @@ type ProcValueLift = object
   ## (`routineUndefinedKinds`). Not `named`: nothing is replaced.
   named: bool
   kinds: set[UbKind]
+  why: string
+    ## RFC-0016 W3-z R10. Not `named`: why, naming what (the hint a confirmed
+    ## claim whose kinds stay carries, `procValueUnliftedHint`).
 
 func liftedUndefined(c: SatCandidate; lift: ProcValueLift): set[UbOrdinal] =
   ## RFC-0016 W3-z R7. The confirmed claim's `witnessUndefined`: the kinds only
@@ -3604,6 +3769,20 @@ func liftedUndefined(c: SatCandidate; lift: ProcValueLift): set[UbOrdinal] =
   if not lift.named or c.witnessUndefinedViaOnly == {}:
     return c.witnessUndefined
   (c.witnessUndefined - c.witnessUndefinedViaOnly) + ubOrdinals(lift.kinds)
+
+func procValueUnliftedHint(c: SatCandidate; lift: ProcValueLift): SymexErrorInfo =
+  ## RFC-0016 W3-z R10. A confirmed claim whose kinds a call through a
+  ## module-level proc-valued variable put there (`witnessUndefinedViaOnly`)
+  ## stay: the settle could not name the routine the variable held
+  ## (`ProcValueLift.why`). The re-executed child's decline is the same kind.
+  var kinds: seq[string]
+  for o in c.witnessUndefinedViaOnly: kinds.add $UbKind(ord(low(UbKind)) + int(o))
+  let why = if lift.why.len > 0: lift.why else: "no reason was recorded"
+  SymexErrorInfo(kind: feReplayDeclined, severity: sevHint,
+    msg: "replay confirmed the claim, but did not name the routine a " &
+         "proc-valued variable held, so what the call through it may reach " &
+         "stays (" & kinds.join(", ") & "): " & why & " (" &
+         $feReplayDeclined & ")")
 
 proc settleCandidate(raw: RawResult; c: SatCandidate;
                      replayed: ReplayResult; input: string;
@@ -3645,6 +3824,10 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   result.callStats    = raw.callStats
   let ended = confirmedEnding(replayed, c.status, c.raisedTypeId, input)
   result.errors       = raw.errors & c.errors & ended   # RFC-0005 0.9.1 WA-2
+  # RFC-0016 W3-z R10: kinds a call through a proc-valued variable put there,
+  # which the settle could not replace, say why (never a bare kind).
+  if not lift.named and c.witnessUndefinedViaOnly != {}:
+    result.errors.add procValueUnliftedHint(c, lift)
   # RFC-0005 S11: the claim's soundness -- its own path, the run's
   # coordinate (re-derived: the candidate's extraction errors are now part
   # of this result's error list), and the replay that confirmed it.
@@ -3747,11 +3930,12 @@ proc markLossyWinnerUnreplayed(raw: RawResult; staticLossy: bool): RawResult =
 
 proc procValueCode[T: proc](x: T): pointer =
   ## RFC-0016 W3-z R7. The routine a proc value names, as the address the
-  ## replay's routine table holds; nil for a nil value and for a closure with
-  ## a captured environment (which names no routine of the table).
+  ## replay's routine table holds; nil for a nil value. RFC-0016 W3-z R10: a
+  ## closure with a captured environment names its routine too (a nested
+  ## one, `ReplayFootprint.nested`); what the environment holds was checked
+  ## by the scratch wire (`envRefusal`, `WireWriter.envOk`).
   if x.isNil: return nil
   when sizeof(T) > sizeof(pointer):
-    if rawEnv(x) != nil: return nil
     rawProc(x)
   else:
     cast[pointer](x)
@@ -4226,31 +4410,37 @@ proc emitProcValueLift(fn: NimNode; keys: seq[string]; sites: NimNode): NimNode 
   ## are the variables the SUT's IR names (`irCollectProcValueSites`); a
   ## reported variable with no reading here names nothing either.
   let liftT = bindSym"ProcValueLift"
+  proc unnamed(why: string): NimNode =
+    nnkObjConstr.newTree(bindSym"ProcValueLift",
+                         nnkExprColonExpr.newTree(ident"why", newLit(why)))
   if keys.len == 0:
-    return quote do: `liftT`()
+    return unnamed("the program names no proc-valued variable the run calls through")
   let fp = replayFootprint(fn)
   if fp.open:
-    return quote do: `liftT`()
+    return unnamed("the replayed code is open: " & fp.why)
   for g in fp.globals:
     if not isWireableType(g.getTypeInst):
-      return quote do: `liftT`()
+      return unnamed("`" & g.strVal & "`, of a type the wire cannot carry")
   let okId = genSym(nskVar, "procValuesNamed")
+  let whyId = genSym(nskVar, "procValuesWhy")
   let ksId = genSym(nskVar, "procValueKinds")
   let siteId = genSym(nskForVar, "procValueSite")
   let codeId = genSym(nskLet, "procValueCode")
   let wr = genSym(nskVar, "procValueWire")
-  var regItems = nnkBracket.newTree()
-  for r in fp.routines:
-    regItems.add quote do:
-      (when compiles(cast[pointer](`r`)): cast[pointer](`r`)
-       else: pointer(nil))
-  let registry =
-    if regItems.len == 0: quote do: newSeq[pointer]()
-    else: quote do: @`regItems`
+  let tabId = genSym(nskLet, "procValueTable")
+  # RFC-0016 W3-z R10: the table names nested routines too (a closure's code),
+  # where module-level code can take their addresses (`nestedRoutineAddrs`).
+  let (tableExpr, envOkExpr) = emitRoutineTable(fp)
+  let slots = fp.routines & fp.nested
   var putGlobals = newStmtList()
   for g in fp.globals:
+    let gLit = newLit("`" & g.strVal & "` holds ")
     putGlobals.add quote do:
-      wirePut(`wr`, `g`)
+      if `okId`:
+        try: wirePut(`wr`, `g`)
+        except WireError as e:
+          `okId` = false
+          `whyId` = `gLit` & e.msg
   let codeOf = bindSym"procValueCode"
   let setOf = bindSym"ubSetOf"
   var caseStmt = nnkCaseStmt.newTree(siteId)
@@ -4280,45 +4470,63 @@ proc emitProcValueLift(fn: NimNode; keys: seq[string]; sites: NimNode): NimNode 
       caseStmt.add nnkOfBranch.newTree(newLit(key), quote do:
         `ksId` = `ksId` + `setOf`(`staticMask`))
       continue
+    let gName = newLit("`" & g.strVal & "`")
     var chain = nnkIfStmt.newTree(nnkElifBranch.newTree(
       infix(codeId, "==", newNilLit()),
-      newAssignment(okId, newLit(false))))
+      quote do:
+        `okId` = false
+        `whyId` = `gName` & " is nil when the run starts"))
     # A value of `g`'s type names a routine of its shape (a cast to another
     # is undefined already); only those are asked about, and read.
     let shape = formalsShape(g.getTypeImpl)
-    for r in fp.routines:
+    for i, r in slots:
       if formalsShape(r.getTypeImpl) != shape: continue
       let mask = newLit(ubMaskOf(routineUndefinedMemoised(r)))
+      let at = newLit(i)
       chain.add nnkElifBranch.newTree(
-        quote do:
-          (when compiles(cast[pointer](`r`)): `codeId` == cast[pointer](`r`)
-           else: false),
+        quote do: `codeId` == `tabId`[`at`],
         quote do:
           `ksId` = `ksId` + `setOf`(`mask`))
-    chain.add nnkElse.newTree(newAssignment(okId, newLit(false)))
+    let notFound = newLit(" holds a routine the replayed code does not " &
+      "name, or names only nested in a routine where the settle cannot " &
+      "take its address (it runs inside a routine, not at module level)")
+    chain.add nnkElse.newTree(quote do:
+      `okId` = false
+      `whyId` = `gName` & `notFound`)
     caseStmt.add nnkOfBranch.newTree(newLit(key), quote do:
       `ksId` = `ksId` + `setOf`(`staticMask`)
       let `codeId` = `codeOf`(`g`)
       `chain`)
   if caseStmt.len == 1:
-    return quote do: `liftT`()
-  caseStmt.add nnkElse.newTree(newAssignment(okId, newLit(false)))
+    return unnamed("no proc-valued variable the run calls through is read " &
+                   "only by calls, comparisons and stores of a routine")
+  let unread = newLit(" is called through by the run, but a use of it is " &
+    "not a call, a comparison or a store of a routine")
+  caseStmt.add nnkElse.newTree(quote do:
+    `okId` = false
+    `whyId` = "`" & `siteId` & "`" & `unread`)
   result = quote do:
     block:
       var `okId` = `sites`.len > 0
+      var `whyId` = ""
       var `ksId`: set[UbKind]
+      let `tabId` = `tableExpr`
       if `okId`:
         var `wr`: WireWriter
-        `wr`.procs = `registry`
-        try:
-          `putGlobals`
-          if putHostHooks(`wr`).len > 0: `okId` = false
-        except WireError:
-          `okId` = false
+        `wr`.procs = `tabId`
+        `wr`.envOk = `envOkExpr`
+        `putGlobals`
+        if `okId`:
+          let hook = putHostHooks(`wr`)
+          if hook.len > 0:
+            `okId` = false
+            `whyId` = "the host set a runtime hook the replayed code does " &
+                      "not name: " & hook
       if `okId`:
         for `siteId` in `sites`:
           `caseStmt`
-      `liftT`(named: `okId`, kinds: `ksId`)
+          if not `okId`: break
+      `liftT`(named: `okId`, kinds: `ksId`, why: `whyId`)
 
 proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
                           prog, target, settings: NimNode;

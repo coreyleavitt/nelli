@@ -5,7 +5,10 @@
 ## `tests/0016-allowlist/ceilings.txt` holds one line per allowlist file,
 ## `file<TAB>ceiling`. A file's DEBT is its count of non-comment lines that
 ## carry no `rows=` scope (a `rows=` entry is a platform classification, not
-## owed work: decision (a) of intro-counts.txt). The test fails when
+## owed work: decision (a) of intro-counts.txt). The `rows=`-scoped entries
+## are not free: all of them together sit under their own ceiling (the
+## `rowsKey` line), so a scope cannot be added to dodge the debt ceiling and
+## the figure only falls (L-M1). The test fails when
 ##   * the debt is above the ceiling (the list grew);
 ##   * the debt is below the ceiling (the list shrank and the ceiling did not
 ##     follow, so a later commit could refill the gap);
@@ -19,6 +22,9 @@ const
   root = currentSourcePath().parentDir() / ".."
   dir = root / "tests" / "0016-allowlist"
   ceilingsName = "ceilings.txt"
+  noProducerKey* = "no-producer=marked"   ## the ceilings.txt line for L-M3's marker
+  noProducerMarker* = "[no-producer]"
+  rowsKey* = "rows=scoped"   ## the ceilings.txt line for every rows= entry, all files
   # Not allowlists: these hold other ledgers (introduction counts, the
   # over-introduction blockers, and the ceilings themselves).
   meta = ["ceilings.txt", "intro-counts.txt", "over-intro.txt"]
@@ -31,6 +37,23 @@ proc isDebt*(line: string): bool =
   for i in 1 .. f.high:
     if f[i].strip.startsWith("rows="): return false
   true
+
+proc isRowScoped*(line: string): bool =
+  ## A countable line that carries a `rows=` scope.
+  let l = line.strip(trailing = true)
+  if l.len == 0 or l.startsWith("#"): return false
+  let f = l.split('\t')
+  for i in 1 .. f.high:
+    if f[i].strip.startsWith("rows="): return true
+
+proc rowScoped*(text: string): int =
+  for l in text.splitLines():
+    if isRowScoped(l): inc result
+
+proc noProducer*(text: string): int =
+  ## Reasons that carry the L-M3 marker (tsymex_0016_noproducer derives the set).
+  for l in text.splitLines():
+    if isDebt(l) and noProducerMarker in l: inc result
 
 proc debt*(text: string): int =
   for l in text.splitLines():
@@ -67,6 +90,20 @@ suite "RFC-0016 E6: the allowlist ratchet (synthetic lists)":
     check debt("# c\n\na\tS\tr\nb\tS\tr\trows=mingw\nc\tS\tr\n") == 2
     check debt("name only\n") == 1
 
+  test "L-M1: rows= entries are counted apart from the debt":
+    check rowScoped("# c\n\na\tS\tr\nb\tS\tr\trows=mingw\nc\tS\tr\trows=a,b\n") == 2
+    check not isRowScoped("a\tS\tr")
+
+  test "L-M1 RED: a new rows= entry lifts the rows= count above its ceiling":
+    let p = ceilingProblems({rowsKey: 13}.toTable, {rowsKey: 12}.toTable)
+    check p.len == 1 and "above the ceiling" in p[0]
+
+  test "L-M3 RED: a new no-producer marker lifts the count above its ceiling":
+    check noProducer("a\tS\tr [no-producer]\nb\tS\tr\n# [no-producer]\n") == 1
+    let p = ceilingProblems({noProducerKey: 13}.toTable,
+                            {noProducerKey: 12}.toTable)
+    check p.len == 1 and "above the ceiling" in p[0]
+
   test "RED: a list that grew fails":
     let p = ceilingProblems({"x.txt": 4}.toTable, {"x.txt": 3}.toTable)
     check p.len == 1 and "above the ceiling" in p[0]
@@ -89,6 +126,9 @@ suite "RFC-0016 E6: the allowlist ratchet (the tree)":
       let n = p.extractFilename
       if n in meta: continue
       counts[n] = debt(readFile(p))
+      if n == "errorkind.txt":
+        counts[noProducerKey] = noProducer(readFile(p))
+      counts[rowsKey] = counts.getOrDefault(rowsKey) + rowScoped(readFile(p))
     let ceilings = parseCeilings(readFile(dir / ceilingsName))
     let problems = ceilingProblems(counts, ceilings)
     if problems.len > 0: echo problems.join("\n")

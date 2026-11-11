@@ -1,12 +1,13 @@
 # RFC-0016 W3-z E6 (F9): the allowlist ratchet. Line: file<TAB>ceiling. The ceiling is the file's DEBT now: its non-comment lines without a `rows=` scope (a `rows=` entry is a platform classification, not owed work; intro-counts.txt decision (a)).
 # tests/tsymex_0016_allowlist_ceilings.nim fails a file ABOVE its ceiling (it grew) and BELOW it (it shrank and the ceiling did not follow), so a ceiling only moves down.
+# The `rows=scoped` line is the count of `rows=` entries over every file (L-M1): a scope is a platform classification, but it is not unlimited, so it has its own ceiling, which only falls.
 # THE RULE (RFC section 8.2; not checkable in a test): a ceiling is raised only in the commit that introduces a new cell, scope or file whose own entries are added. That bump and the entries land together in one commit, and the commit message names the cell. Raising a ceiling for a skipped test (record it with skipCell), for an entry added after its scope's introduction, or to absorb a regression is the failure this file exists to stop: evidence the cell or fix the cause. A shrunk list lowers its ceiling in the same commit.
 build.txt	5
 capkind.txt	4
 closed-legacy.txt	24
-ceiling-offenders-cpp.txt	784
-ceiling-offenders-msvc.txt	423
-ceiling-offenders-z3-4.13.4.txt	745
+ceiling-offenders-cpp.txt	783
+ceiling-offenders-msvc.txt	422
+ceiling-offenders-z3-4.13.4.txt	744
 census.txt	152
 defined.txt	0
 errorkind.txt	66
@@ -20,3 +21,5 @@ pragma.txt	168
 stdlib.txt	0
 typeclass.txt	29
 typeop.txt	10
+rows=scoped	12
+no-producer=marked	14

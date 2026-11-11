@@ -536,9 +536,11 @@ jobs:
           bash scripts/check-ceiling.sh --self-test
           mkdir -p findings
           rc=0
+          legs=0
           for dir in merged/nightly-*-merged; do
             leg="${dir#merged/nightly-}"; leg="${leg%-merged}"
             [ -r "$dir/merged.log.times" ] || continue   # vm-alias writes no times
+            legs=$((legs + 1))
             out="$(bash scripts/check-ceiling.sh --offenders "tests/0016-allowlist/ceiling-offenders-$leg.txt" "$dir/merged.log.times")" || rc=1
             # the FAIL and WARN blocks have the shape the intake extractor reads
             # (a line is `  <seconds> <name>` or `  <name>`: the key is the last word);
@@ -548,6 +550,15 @@ jobs:
             printf '%s\n' "$out" | command grep -q '^WARN' && echo "::warning::$leg: ceiling ratchet warnings (not a failure); see the step summary"
             { echo "### $leg: 60 s ceiling ratchet"; echo '```'; printf '%s\n' "$out" | command grep -v '^[0-9.]* ' ; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
+          # No leg's times readable (every merge failed to download, or the
+          # artifacts were renamed) is a failure, not a clean report: the loop
+          # above would have checked nothing and rc would still be 0.
+          if [ "$legs" = 0 ]; then
+            echo "::error::CI-D: no leg's merged.log.times was readable; the ceiling ratchet checked nothing"
+            echo "CI-D: no leg's times were readable; the ceiling ratchet checked nothing" >> "$GITHUB_STEP_SUMMARY"
+            printf 'workflow\tceiling\tno leg wall times were readable\n' >> findings/findings-ceiling.tsv
+            rc=1
+          fi
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           [ "$rc" = 0 ]
 

@@ -63,6 +63,23 @@ proc parseAllow*(text: string): seq[Allow] =
     result.add Allow(key: f[0], slice: (if f.len > 1: f[1].strip else: ""),
                      reason: (if f.len > 2: f[2].strip else: ""), rows: rows)
 
+proc evidencedOn*(a: Allow): seq[string] =
+  ## The rows a `rows=`-scoped entry says DO evidence its cell: the
+  ## `evidenced-on=<row>,<row>` token of its reason (L-M1). A scope excuses a
+  ## cell on the rows that cannot run it; this names the rows that can.
+  const tag = "evidenced-on="
+  let i = a.reason.find(tag)
+  if i < 0: return
+  var j = i + tag.len
+  var cur = ""
+  while j < a.reason.len and a.reason[j] notin {' ', '\t', ';', ']', ')'}:
+    if a.reason[j] == ',':
+      if cur.len > 0: result.add cur
+      cur = ""
+    else: cur.add a.reason[j]
+    inc j
+  if cur.len > 0: result.add cur
+
 proc parseLegacy*(text: string): seq[Allow] =
   ## `closed-legacy.txt`: `id<TAB>reason`.
   for raw in text.splitLines():

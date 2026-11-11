@@ -129,7 +129,8 @@ type
                            ## Real pointer arithmetic goes through `cast`,
                            ## which records `heUnsafeCast`.
     hePtrFamily,
-    heFreshnessCapExceeded, heUnsupportedVarRef,
+    heFreshnessCapExceeded,
+    heUnsupportedVarRef,   ## reserved/unused: nothing emits it; the ordinal is kept.
     # `heRefVariantUnsupported` stood here until RFC-0005 S8m: S8l modelled
     # every ref-variant shape it declined, and S8m retired it; its six
     # unreachable carriers raise `weInternalWalkerFault` now.
@@ -799,7 +800,7 @@ type
                           ## is not carried back to the caller). `classOf` is
                           ## `dcSubstituted`: a stale value is forced, or a
                           ## write is dropped. sevError, via `closureDegrade`.
-    feConvFloatToIntUndefined ## RFC-0005 S8g. A float -> int conversion
+    feConvFloatToIntUndefined ## reserved/unused (nothing produces it now). RFC-0005 S8g. A float -> int conversion
                           ## whose operand may lie outside the target type's
                           ## range (NaN, +-Inf, or a finite value whose
                           ## truncation does not fit). Nim 2.2.10 never
@@ -932,7 +933,7 @@ type
                           ## read, so the path declines. Every other build
                           ## crashes there (SIGSEGV) and no handler runs.
                           ## sevError.
-    feFloatWidth          ## RFC-0016 W1-e (W-04). A conversion between
+    feFloatWidth          ## reserved/unused (nothing produces it since K2b). RFC-0016 W1-e (W-04). A conversion between
                           ## `float32` and `float64`, explicit (`float32(x)`,
                           ## `float64(y)`) or one the compiler inserts (a
                           ## `float32` passed or assigned where a `float64`

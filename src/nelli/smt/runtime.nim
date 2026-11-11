@@ -21002,6 +21002,25 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   if result == zsUnknown and uint(max(ownContextUnits - before, 0)) >= rlimit:
     scratchCapped = true
 
+proc concreteBranchAsk(ctx: Z3Context, concreteEq: seq[Z3Bool],
+                       cond: Z3Bool, settings: SymexSettings,
+                       facts: seq[Z3Bool]): (Z3Status, Z3Status) =
+  ## The two scratch solves `concreteBranchOutcome` reads: `cond`, then
+  ## `not cond`, each under the pins, the run-wide pools and `facts`.
+  var reach = concreteEq
+  reach.add facts
+  reach.add cond
+  let pools = globalRoots(reach)
+  # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
+  let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
+                                   settings)
+  # RFC-0016 W3-z R9: an undecided first solve decides the answer (`none`)
+  # whatever the second says, so the second is not asked.
+  if rTrue == zsUnknown: return (zsUnknown, zsUnknown)
+  let rFalse = concreteScratchCheck(ctx,
+    concreteEq & pools & facts & @[not cond], settings)
+  (rTrue, rFalse)
+
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,
                            facts: seq[Z3Bool] = @[]): Option[bool] =
@@ -21045,18 +21064,7 @@ proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## under the pins, and an `if` on a closure that returned normally was
   ## always ambiguous. The pools are definitional (or true of every real
   ## input), so they prune no execution the draws describe.
-  var reach = concreteEq
-  reach.add facts
-  reach.add cond
-  let pools = globalRoots(reach)
-  # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
-  let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
-                                   settings)
-  # RFC-0016 W3-z R9: an undecided first solve decides the answer (`none`)
-  # whatever the second says, so the second is not asked.
-  if rTrue == zsUnknown: return none(bool)
-  let rFalse = concreteScratchCheck(ctx,
-    concreteEq & pools & facts & @[not cond], settings)
+  let (rTrue, rFalse) = concreteBranchAsk(ctx, concreteEq, cond, settings, facts)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
@@ -22205,9 +22213,17 @@ proc definingSlice(ctx: Z3Context; pins: seq[Z3Bool]; seeds: seq[Z3Bool];
   for i, c in conjuncts:
     if taken[i]: result.add c
 
+type FollowOutcome = enum
+  ## RFC-0016 W3-z int6. What a follow-mode branch's scratch asks say.
+  foTrue    ## the pins (and the `pc` the walk asked with) decide `cond` true
+  foFalse   ## ... decide it false
+  foOpen    ## they do not decide it
+  foOffRun  ## tail walk only: both sides are UNSAT, so the pins contradict
+            ## the path itself and it is not the followed run
+
 proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
                          facts: seq[Z3Bool];
-                         construct: WalkerConstructKind): Option[bool] =
+                         construct: WalkerConstructKind): FollowOutcome =
   ## RFC-0016 K10b. The concrete outcome of `cond` for a follow-mode branch,
   ## or none when the pins do not decide it. The fuzzer's replay pins every
   ## draw, so `concreteEq` alone decides a branch there. The tail gate's pins
@@ -22241,18 +22257,36 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
   ## followed execution satisfies, so `some(...)` from it is that
   ## execution's outcome. A slice that is the whole `pc` makes the second
   ## ask a repeat of the first, so it is not made.
+  ##
+  ## RFC-0016 W3-z int6: on the tail walk, both sides UNSAT is `foOffRun`.
+  ## The asks carry a subset of the path's `pc` and facts, so the pins
+  ## contradict the path itself: it is an arm an earlier open fork walked
+  ## that the run did not take. It was read as open, so every later branch
+  ## on it forked both ways again, each arm as dead as the path: a
+  ## `tsymex_rfc0005_s8cn_views_f` tail walk asked 1,967 branches, 1,324 of
+  ## them both-UNSAT, and took 65 s where the explore walk took seconds.
+  ## The caller drops the path, as `concretelyInfeasible` drops one whose new
+  ## facts the pins contradict. Only definite UNSATs say so (an undecided
+  ## ask is `foOpen`), so no path the run can take is dropped. The fuzzer's
+  ## replay pins every draw, where both-UNSAT is a bug, not a dead arm: it
+  ## stays `foOpen` there, and degrades as before.
   scratchCapped = false
   let wholePc = dp.pc & dp.defectSurvivorPc
   let defs =
     if w.tailGate: definingSlice(w.z3, w.concreteEq, facts & @[cond], wholePc)
     else: newSeq[Z3Bool]()
-  result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings,
-                                 defs & facts)
-  if result.isNone and w.tailGate and not scratchCapped and
+  proc read(st: (Z3Status, Z3Status); tail: bool): FollowOutcome =
+    if st[0] == zsSat and st[1] == zsUnsat: foTrue
+    elif st[0] == zsUnsat and st[1] == zsSat: foFalse
+    elif tail and st[0] == zsUnsat and st[1] == zsUnsat: foOffRun
+    else: foOpen
+  result = read(concreteBranchAsk(w.z3, w.concreteEq, cond, w.settings,
+                                  defs & facts), w.tailGate)
+  if result == foOpen and w.tailGate and not scratchCapped and
      defs.len < wholePc.len:
-    result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings,
-                                   wholePc & facts)
-  if result.isNone:
+    result = read(concreteBranchAsk(w.z3, w.concreteEq, cond, w.settings,
+                                    wholePc & facts), w.tailGate)
+  if result == foOpen:
     markAmbiguous(w, construct)
     # Section 9.1 item 3: an undecided side counts as undefined, so the tail
     # walk (`tailGate`) forks both arms at the caller and walks each; nothing
@@ -22329,29 +22363,33 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
         if newFacts.len > 0 and
            concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
           continue
-        let outcome = followBranchOutcome(w, dp, condBool, newFacts, wckIf)
-        if outcome.isNone and w.tailGate:
-          # RFC-0016 W3-z R2/R6: the tail walk over-approximates the run (a
-          # fresh symbol the pins do not fix), so an open branch is walked
-          # both ways, as the explore walk does.
-          let armPath = forkPath(dp, dp.pc & accumNegated & @[condBool], dp.env)
-          survivors.add walk(stmt.branches[i].body, @[armPath], w)
-          states.add (i + 1, dp, accumNegated & @[not condBool])
+        case followBranchOutcome(w, dp, condBool, newFacts, wckIf)
+        of foOffRun:
+          # RFC-0016 W3-z int6: the pins contradict this path (tail walk):
+          # not the run, so not followed.
           continue
-        if outcome.isNone:
+        of foOpen:
+          if w.tailGate:
+            # RFC-0016 W3-z R2/R6: the tail walk over-approximates the run (a
+            # fresh symbol the pins do not fix), so an open branch is walked
+            # both ways, as the explore walk does.
+            let armPath = forkPath(dp, dp.pc & accumNegated & @[condBool], dp.env)
+            survivors.add walk(stmt.branches[i].body, @[armPath], w)
+            states.add (i + 1, dp, accumNegated & @[not condBool])
+            continue
           # Walker-boundary concretization for control flow: `cond` isn't
           # pinned by the symbolicated draws alone. Graceful degrade — stop
           # following this path past the ambiguous branch rather than guess
           # (guessing could collect an UNSOUND constraint); counted, not
           # silently dropped — attributed to `wckIf` (R28).
           return survivors & dp
-        if outcome.get():
+        of foTrue:
           # RFC-fuzzer-nextgen G2: the taken arm's own condition.
           w.branchTrace.add ConcolicBranchRecord(
             prefixPc: branchPrefixPc, observedTruth: condBool, armTaken: i)
           let armPath = forkPath(dp, dp.pc & accumNegated & @[condBool], dp.env)
           survivors.add walk(stmt.branches[i].body, @[armPath], w)
-        else:
+        of foFalse:
           states.add (i + 1, dp, accumNegated & @[not condBool])
   survivors
 
@@ -22414,18 +22452,22 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
     for p in active:
       let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
       for dp in drainScalarRaiseForks(pb, w):
-        let outcome = followBranchOutcome(w, dp, cond, @[], wckWhile)
-        if outcome.isNone and w.tailGate:
-          # RFC-0016 W3-z R2/R6: an open guard on the tail walk forks both
-          # ways, as the explore walk's unroll does.
-          let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
-          let afterBody = walk(stmt.wbody, @[truePath], w)
-          let cps = w.loopStack[frameIx].exits.continuePaths.takeAll()
-          for cp in cps: nextActive.add cp
-          for ap in afterBody: nextActive.add ap
-          survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
+        case followBranchOutcome(w, dp, cond, @[], wckWhile)
+        of foOffRun:
+          # RFC-0016 W3-z int6: the pins contradict this path (tail walk):
+          # not the run, so it neither iterates nor leaves the loop.
           continue
-        if outcome.isNone:
+        of foOpen:
+          if w.tailGate:
+            # RFC-0016 W3-z R2/R6: an open guard on the tail walk forks both
+            # ways, as the explore walk's unroll does.
+            let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
+            let afterBody = walk(stmt.wbody, @[truePath], w)
+            let cps = w.loopStack[frameIx].exits.continuePaths.takeAll()
+            for cp in cps: nextActive.add cp
+            for ap in afterBody: nextActive.add ap
+            survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
+            continue
           # Walker-boundary concretization for control flow — same shape as
           # `walkIfFollowConcrete`'s degrade: stop following THIS guard
           # rather than guess which way it went (guessing could collect an
@@ -22434,7 +22476,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
           # active path — `defer` still pops the loop frame. Attributed to
           # `wckWhile` (R28).
           return survivors & dp
-        if outcome.get():
+        of foTrue:
           # Concretely continued this iteration: fold cond=true, walk the
           # body, feed its continuations into the NEXT iteration's active
           # set. No cond=false exit fork here — the trace did not exit.
@@ -22443,7 +22485,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
           let cps = w.loopStack[frameIx].exits.continuePaths.takeAll()
           for cp in cps: nextActive.add cp
           for ap in afterBody: nextActive.add ap
-        else:
+        of foFalse:
           # Concretely exited this iteration: fold cond=false, no further
           # iterations for this path. No cond=true continuation here — the
           # trace did not continue.

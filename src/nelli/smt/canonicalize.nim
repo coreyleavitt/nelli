@@ -617,8 +617,13 @@ const renderAsChoicesVersion* = "12"
   ##   whole bound undecided, and its capped answer kept the `pc` ask from
   ##   being made: a tail-walk fork that was undecided is decided now, and
   ##   the tail budget it spent is not spent.
+  ## - RFC-0016 W3-z int6 (352->353): a tail-walk branch whose scratch asks
+  ##   are both UNSAT is on a path the pins contradict (`foOffRun`), which the
+  ##   walk no longer follows; it read as open and forked both ways at every
+  ##   later branch. A tail that reached a decline or a spent budget only on
+  ##   such a path is no longer unverified for it.
 
-const symexWalkerVersion* = "352"
+const symexWalkerVersion* = "353"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

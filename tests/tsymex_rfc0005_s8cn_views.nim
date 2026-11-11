@@ -532,6 +532,41 @@ when s8cnViewsPart == 4:
 
 
 when s8cnViewsPart == 5:
+  import std/os
+  import nelli/smt/runtime
+
+  proc tailUnitLines(log: string): seq[int] =
+    ## The units of each tail walk (`k10b-tail` lines of the K7 units log).
+    for line in readFile(log).splitLines:
+      let f = line.split('\t')
+      if f.len >= 2 and f[1] == "k10b-tail": result.add parseInt(f[0])
+
+  suite "S8cn (4): the live witness's tail walk":
+    # RFC-0016 W3-z int6. The tail walk forks a branch the pins leave open
+    # (`__tabKeys`, the iteration's key slot, is not pinned). An arm the run
+    # did not take then asked every later branch with both sides UNSAT, read
+    # that as open, and forked both ways again: 1,379 branch asks (948 both
+    # UNSAT) and 43 s for this tail alone, where main's whole check took 5 s,
+    # and the file passed the Windows legs' 240 s bound (killed on mingw). A path the pins
+    # contradict is not the run and is no longer followed.
+    test "walker 353: a tail walk does not follow a path the pins contradict":
+      check parseInt(symexWalkerVersion) >= 353
+      let log = getTempDir() / ("s8cn_rc_live_units_" & $getCurrentProcessId() & ".log")
+      removeFile(log)
+      putEnv(walkUnitsLogEnv, log)
+      let r = try: symexFind(sRemCallee, tLabel("rc_live"))
+              finally: delEnv(walkUnitsLogEnv)
+      checkpoint $r.status & "\n" & show(r.errors)
+      check r.status == sxSat
+      let tails = if fileExists(log): tailUnitLines(log) else: @[]
+      removeFile(log)
+      checkpoint "tail walk units: " & $tails
+      check tails.len > 0
+      # Red at 52dc9769: one tail of 43,054,950 units, past two whole
+      # `concreteBranchRLimit`s of cheap asks. Green: 509,854.
+      for u in tails:
+        check u < int(concreteBranchRLimit(defaultSymexSettings())) div 10
+
   suite "S8cn (4): a key removed under a live view":
     test "removed by the callee, seen in the body":
       decided(sRemCallee, "rc_live", sxSat)

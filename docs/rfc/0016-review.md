@@ -73,7 +73,7 @@ Four lenses ran: correctness, security, design and liveness. Adversarial verifie
 
 **Precondition:** the Wave 3 wiring audit ran this session over `v0.9.2..e707b09c`. Its findings were fixed in W3-z (int..int7), and `0016/wiring` stays `proven`.
 
-**Mandate:** pending the operator's approval of the round 1 table.
+**Mandate:** everything through Medium, including the design findings D1-D6 (operator, 2026-11-11). Fix order: soundness Highs and gate Mediums first (slices CR-1 to CR-6, walker versions 355-358 reserved per slice and set finally at integration), then the design refactors in sequence.
 
 ## Round 1 (base a72c7334)
 

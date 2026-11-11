@@ -13,7 +13,9 @@
 ## `char` range) declines the layout. A 4-byte enum whose ordinal range is
 ## narrower than 32 bits reads foreign bytes only as a value its own write
 ## stored (`pkEnumWide`): foreign bytes may be no value of it, so that read
-## declines; its own bytes, read through another arm, are exact.
+## declines; its own bytes, read through another arm, are exact on the c
+## backend. On cpp, reading a member that is not the active one is undefined
+## in C++ and halts the path as `ubInactiveVariantField`.
 import std/[unittest, strutils, macros]
 import nelli
 import nelli/symex
@@ -133,19 +135,32 @@ suite "CR-4 H6: an enum's C size in a variant layout is Nim's":
     check nativeWriteNeg(en1) == 0
     let r = symexFind(sutWriteNeg, tLabel("hit"))
     checkpoint show(r.errors) & " " & $r.status
-    check r.status == sxSat
-    check r.trusted
-    if r.status == sxSat:
-      check r.witness[0] == enM
-      check nativeWriteNeg(r.witness[0]) == -1
     let r2 = symexFind(sutWriteNegZero, tLabel("hit"))
     checkpoint show(r2.errors) & " " & $r2.status
-    check r2.status == sxUnsat
-    check r2.trusted
+    when defined(cpp):
+      # cpp: reading a union member that is not the active one is undefined
+      # in C++ (`tsymex_0016_fieldoff`), so the read halts the path.
+      for x in [r, r2]:
+        check x.status != sxUnsat
+        check not x.trusted
+        check "ubInactiveVariantField" in show(x.errors)
+    else:
+      check r.status == sxSat
+      check r.trusted
+      if r.status == sxSat:
+        check r.witness[0] == enM
+        check nativeWriteNeg(r.witness[0]) == -1
+      check r2.status == sxUnsat
+      check r2.trusted
 
   test "a one-byte enum keeps its exact read":
     let r = symexFind(sutReadByte, tLabel("hit"))
     checkpoint show(r.errors) & " " & $r.status
-    check r.status == sxSat
-    check r.trusted
-    if r.status == sxSat: check r.witness[0] == 2
+    when defined(cpp):
+      check r.status != sxUnsat
+      check not r.trusted
+      check "ubInactiveVariantField" in show(r.errors)
+    else:
+      check r.status == sxSat
+      check r.trusted
+      if r.status == sxSat: check r.witness[0] == 2

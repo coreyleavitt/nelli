@@ -87,6 +87,14 @@ proc deprecatedField(x: int) =
   o.g = x
   if o.f != o.g: symexTarget("hit")
 
+proc deprecatedFieldLive(x: int) =
+  # A sat over the deprecated field: `deprecatedField`'s unsat is over a
+  # sampled domain, which does not evidence the cell on its own.
+  var o: DepObj
+  o.f = x
+  o.g = x
+  if o.f == 5 and o.g == 5: symexTarget("hit")
+
 proc requiresInitField(x: int) =
   let o = InitObj(f: x)
   if o.f == 5: symexTarget("hit")
@@ -166,6 +174,7 @@ suite "RFC-0016 W3-z P4: the field place of the pragma axis":
 
   test "a deprecated field and an exported field are exact":
     discard pinExact(deprecatedField, cellKey(axPragma, "field/deprecated"))
+    discard pinExact(deprecatedFieldLive, cellKey(axPragma, "field/deprecated"))
 
   test "a requiresInit field is exact":
     discard pinExact(requiresInitField, cellKey(axPragma, "field/requiresInit"))

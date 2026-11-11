@@ -47,7 +47,10 @@ proc sDeclared(a: int) =
   if declared(a) and not declared(m1NoSuchName) and a == 3:
     symexTarget("hit")
 proc sDeclaredInScope(a: int) =
-  if declaredInScope(a) and a == 3: symexTarget("hit")
+  # The live input is 3 or 4 by the folded value (a parameter is not in the
+  # body's own scope), so the record is a sat whichever it is: a sampled
+  # unsat does not evidence a cell, and the witness must replay natively.
+  if a == 3 + ord(declaredInScope(a)): symexTarget("hit")
 proc sCompiles(a: int) =
   if compiles(a + 1) and not compiles(a + "x") and a == 3:
     symexTarget("hit")
@@ -70,8 +73,9 @@ proc sRunnableExamples(a: int) =
     discard 1
   if a == 3: symexTarget("hit")
 proc sInstantiationInfo(a: int) =
+  # As `sDeclaredInScope`: live at 3 or 4 by the folded value.
   const line = instantiationInfo().line
-  if line > 0 and a == 3: symexTarget("hit")
+  if a == 3 + ord(line > 0): symexTarget("hit")
 proc sCpuEndian(a: int) =
   if (cpuEndian == littleEndian) == defined(littleEndian) and a == 3:
     symexTarget("hit")

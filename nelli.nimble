@@ -1757,6 +1757,8 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_r9_tailbudget",
             # RFC-0016 0.10.0 review H2: the tail walk keeps a noinit read's kind.
             "tsymex_0016_cr2_h2_noinit_tail",
+            # RFC-0016 0.10.0 review H3: modelPins pins no opaque-call havoc epoch.
+            "tsymex_0016_cr2_h3_epochpin",
             "tsymex_0016_w3z_p1_off",
             "tsymex_0016_w3z_p1_default",
             "tsymex_0016_w3z_r3_opaque",

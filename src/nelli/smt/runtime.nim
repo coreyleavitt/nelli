@@ -13179,9 +13179,7 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
   # pointee) -- the typed witness's `resolveRef` reads them there.
   result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
-proc heapEpochCount(p: Path; k: string): int
-
-proc modelPins(m: Z3Model, env: Env, params: seq[IRParam], path: Path):
+proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
     tuple[pins: seq[Z3Bool], complete: bool] =
   ## RFC-0016 K10b. `RawWitness.pins`: `leaf == model(leaf)` for every leaf
   ## term of every parameter's initial value the model can evaluate. A
@@ -13258,19 +13256,23 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam], path: Path):
   # the model interprets is pinned whole (an array equality over the model's
   # own store term). Only the initial arrays are constants: a write the walk
   # makes is a `store` over them and follows from them.
-  let ctx = m.ctx
+  # RFC-0016 0.10.0 review H3: only the INPUT array `heap_<k>`. An opaque
+  # call's havoc epoch `heap_<k>@ep<n>` (`havocOpaqueHeaps`) is a constant
+  # too, but it is what a callee the walk does not model left in the heap,
+  # not an input: the tail walk recreates the same-named constant, so a pin
+  # on it fixed the callee's effect to the explore model's choice, and a tail
+  # the real callee drives into undefined behaviour read as defined. Left
+  # free it is a superset of what the callee writes, as on the explore walk.
   # Driven from the heaps the walk created, not from every model constant:
   # enumerating the model's declarations (`constDecl` per constant) kept the
   # run's whole Z3 context alive past the run (`tsymex_0016_s8cj_runctx`).
   for k in currentVariantHeaps.keys:
-    for n in 0 .. heapEpochCount(path, k):
-      try:
-        let nm = if n == 0: "heap_" & k else: "heap_" & k & "@ep" & $n
-        let c = inputHeapNamed(k, nm)
-        let v = m.eval(c, modelCompletion = false)
-        if $v != $c: result.pins.add bsEqZ(c, v)
-      except CatchableError:
-        result.complete = false
+    try:
+      let c = inputHeapNamed(k, "heap_" & k)
+      let v = m.eval(c, modelCompletion = false)
+      if $v != $c: result.pins.add bsEqZ(c, v)
+    except CatchableError:
+      result.complete = false
 
 var symexTargetSolveStats* {.threadvar.}:
     tuple[budgetOut, declined, slowSat, units: int]
@@ -16656,7 +16658,7 @@ proc trySolve(ctx: Z3Context,
     for k in path.env.keys:
       if isGlobalEnvName(k): currentWinningGlobals.add k
     var wit = extractWitness(m, envForExtract, params)
-    (wit.pins, wit.pinsComplete) = modelPins(m, envForExtract, params, path)   ## RFC-0016 K10b
+    (wit.pins, wit.pinsComplete) = modelPins(m, envForExtract, params)   ## RFC-0016 K10b
     (status: sxSat, witness: wit, undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
@@ -18879,13 +18881,6 @@ func heapKeyOfId(k, id: string): bool =
   ## scalar heap itself, or one of its field / discriminator / leaf heaps
   ## (`<id>__...`).
   k == id or k.startsWith(id & "__")
-
-proc heapEpochCount(p: Path; k: string): int =
-  ## The havoc count `heapInputName` reads for `k` on `p`.
-  for ck, c in p.allocCounters:
-    if ck.startsWith(heapEpochPrefix):
-      let id = ck[heapEpochPrefix.len .. ^1]
-      if id == "*" or heapKeyOfId(k, id): result += c
 
 proc heapInputName(p: Path; k: string): string =
   ## RFC-0005 S8ax. The name of the heap array `k` is read from when `p`

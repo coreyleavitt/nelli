@@ -563,9 +563,11 @@ when s8cnViewsPart == 5:
       checkpoint "tail walk units: " & $tails
       check tails.len > 0
       # Red at 52dc9769: one tail of 43,054,950 units, past two whole
-      # `concreteBranchRLimit`s of cheap asks. Green: 509,854.
+      # `concreteBranchRLimit`s of cheap asks. Green: 509,854 on Linux,
+      # 4,084,848 on mingw (the same asks; the spend is the process's too,
+      # see `concreteScratchCheck`), so the bound is one whole limit.
       for u in tails:
-        check u < int(concreteBranchRLimit(defaultSymexSettings())) div 10
+        check u < int(concreteBranchRLimit(defaultSymexSettings()))
 
   suite "S8cn (4): a key removed under a live view":
     test "removed by the callee, seen in the body":

@@ -17559,6 +17559,14 @@ type
                       ## only through its proc-valued variables
                       ## (`IRStmt.opaqueUndefinedVia`); the walk went on past
                       ## it, and `verifyTailDefined` reports them apart.
+    tailUb: set[UbKind]
+                      ## RFC-0016 0.10.0 review H2. On the tail walk
+                      ## (`tailGate`): the kinds a degrade token newly put on
+                      ## a path the pins do not rule out (`noteUbAtFork`), the
+                      ## `{.noinit.}` read's `ubIndeterminateRead`. The token
+                      ## is the only carrier of such a kind: its record is a
+                      ## `dcFreshSymbol` one with no kind of its own, so
+                      ## `verifyTailDefinedKinds` reads the kinds here.
     tailGate: bool
                       ## RFC-0016 K10b. This is the whole-run gate's second
                       ## walk (`verifyTailDefined`): `wmFollowConcrete` under
@@ -27781,9 +27789,21 @@ proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind]) =
   ## the degrade that carries the kind is the finding itself, not a reason to
   ## doubt it, so it does not turn the hit into a replay-only candidate.
   ## Unlike `haltUndefined` the path continues: the read is not a halt.
+  ##
+  ## RFC-0016 0.10.0 review H2. On the tail walk (`tailGate`) the kinds are
+  ## what the run is not shown defined in: a child the pins do not rule out
+  ## records them in `WalkCtx.tailUb`, which `verifyTailDefinedKinds` reads.
+  ## Before, the tail walk returned here and the read was a trusted `sxSat`.
   if newUb == {} or currentWalkCtxPtr == nil: return
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-  if wp[].target.kind != stkUndefined or wp[].shouldStop or wp[].tailGate:
+  if wp[].tailGate:
+    if newUb - wp[].tailUb != {} and
+       not concretelyInfeasible(wp[].z3, wp[].concreteEq,
+                                child.pc & child.defectSurvivorPc,
+                                wp[].settings):
+      wp[].tailUb.incl newUb
+    return
+  if wp[].target.kind != stkUndefined or wp[].shouldStop:
     return
   if newUb * wp[].target.ubKinds == {}: return
   if wp[].mode == wmFollowConcrete and
@@ -30857,7 +30877,9 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
   ## symbol the pins do not fix (a global havoc, an opaque call's result), so
   ## the walk forks the branches the pins leave open, and a `dcFreshSymbol`
   ## record (the fresh symbol itself) is not a reason the tail is unverified;
-  ## every other record still is.
+  ## every other record still is. RFC-0016 0.10.0 review H2: the undefined
+  ## behaviour such a record's token carries (a `{.noinit.}` read's
+  ## `ubIndeterminateRead`) is a kind of the result (`WalkCtx.tailUb`).
   ##
   ## RFC-0016 W3-z R9: the walk has its own budget, `tailWalkCappedChecks`
   ## times the rlimit of one of its scratch checks (`concreteBranchRLimit`).
@@ -30937,6 +30959,9 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
   stampLoweringPendingLeak(w)
   if walkWorkExhausted or tailWorkExhausted:   # RFC-0016 W3-z R9: or its own
     result.incl UbKind(ubTailUnverified)
+  # RFC-0016 0.10.0 review H2: the kinds the walk's degrade tokens put on a
+  # path the pins allow. A `dcFreshSymbol` record below carries none itself.
+  result.incl w.tailUb
   var errs = w.walkDegradeErrors & w.heapDepthErrors & w.newFieldZeroErrors &
              w.closureCallErrors
   if loweringDegradeErrors.len > lowerBase:

@@ -1755,6 +1755,8 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_r2_candtail",
             # RFC-0016 W3-z R9: the tail walk has its own budget.
             "tsymex_0016_w3z_r9_tailbudget",
+            # RFC-0016 0.10.0 review H2: the tail walk keeps a noinit read's kind.
+            "tsymex_0016_cr2_h2_noinit_tail",
             "tsymex_0016_w3z_p1_off",
             "tsymex_0016_w3z_p1_default",
             "tsymex_0016_w3z_r3_opaque",

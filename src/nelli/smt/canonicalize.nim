@@ -628,8 +628,15 @@ const renderAsChoicesVersion* = "12"
   ##   earlier walks left of the run's tail budget read `ubTailUnverified`
   ##   when that budget ran out; it now carries the answer of the walk under
   ##   its pins, and distinct pins keep more of the budget.
+  ## - RFC-0016 0.10.0 review H2+H3 (354->355): the tail walk reads the kinds
+  ##   a degrade token puts on a path the pins allow (`WalkCtx.tailUb`), so a
+  ##   `{.noinit.}` read past the label is `ubIndeterminateRead` in
+  ##   `witnessUndefined`, not a trusted sat; and `modelPins` pins only a
+  ##   heap's initial array, not an opaque call's havoc epoch
+  ##   (`heap_<k>@ep<n>`), so the tail walk no longer fixes a callee's effect
+  ##   to the explore model's value.
 
-const symexWalkerVersion* = "354"
+const symexWalkerVersion* = "355"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

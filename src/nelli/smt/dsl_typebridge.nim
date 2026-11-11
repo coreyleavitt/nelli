@@ -37,6 +37,7 @@ import ./errorkind
 import ./pragmaaxes   ## RFC-0016 K2F-2: `pragmaName`, `unnamedPragma`
 import ./admission   ## RFC-0016 K2c: `Admit` verbs (`admitted`, `decline`)
 import ./typeaxes   ## RFC-0016 K2c: the type-class axis `classifyType` reads
+import ./variant_layout   ## RFC-0016 0.10.0 review H6: `scalarSize`
 
 # ---- RFC-0005 S8c: callee resolution by SYMBOL, not by name ------------------
 #
@@ -567,6 +568,36 @@ proc fieldNameStr(n: NimNode, fallbackIx: int): string =
   if nameNode.kind in {nnkIdent, nnkSym}: nameNode.strVal
   else: "__field" & $fallbackIx
 
+proc fieldSizeMismatchOf(recList: NimNode; names: openArray[string];
+                         tys: openArray[IRType]): string =
+  ## RFC-0016 0.10.0 review H6. `variant_layout.fieldSizeMismatch` & the
+  ## name of the first field among `names` (typed `tys`) whose C size the
+  ## layout derives (`scalarSize`) is not the compiler's (`macros.getSize`
+  ## of its declared type): a `{.size: N.}` enum, a `char` range (whose size
+  ## is its base's). "" when every leaf the layout sizes agrees. A field the
+  ## layout does not size (0) is left to the layout, which declines it.
+  var nodes: seq[(string, NimNode)]
+  proc collect(n: NimNode) =
+    case n.kind
+    of nnkRecList, nnkRecCase, nnkRecWhen, nnkElifBranch, nnkOfBranch,
+       nnkElse:
+      for c in n: collect(c)
+    of nnkIdentDefs:
+      for i in 0 ..< n.len - 2:
+        nodes.add (fieldNameStr(n[i], i), n[^2])
+    else: discard
+  collect(recList)
+  for i, nm in names:
+    if i >= tys.len: break
+    let want = scalarSize(tys[i])
+    if want == 0: continue
+    for (fn, tyNode) in nodes:
+      if fn != nm: continue
+      let got = (if tyNode.kind == nnkEmpty: -1 else: getSize(tyNode))
+      if got != want: return fieldSizeMismatch & nm
+      break
+  ""
+
 proc fieldDeclineMsg(n: NimNode, note: string): string =
   ## Round-6 Bug #2 (scoped decline). Mirrors `dsl_parser.siteMsg`'s EXACT
   ## format (`<file>:<line>:<col>: {note} in \`{n.repr}\``) — duplicated
@@ -880,7 +911,16 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         plainFieldTypes = plainFieldTypes,
         discTags = axes[0].discTags,
         nominalId = nominalId(nameSym),                       # RFC-0005 S8j
-        layoutPragma = layoutPragmaOf(nameSym, recList)       # RFC-0016 PRC-07 B
+        # RFC-0016 0.10.0 review H6: a field the compiler sizes otherwise
+        # than the layout declines it, ahead of any pragma.
+        layoutPragma = block:
+          var ns = plainFieldNames & @[axes[0].discName]
+          var ts = plainFieldTypes & @[axes[0].discTy]
+          for arm in axes[0].arms:
+            ns.add arm.fieldNames
+            ts.add arm.fieldTypes
+          let mis = fieldSizeMismatchOf(recList, ns, ts)
+          if mis.len > 0: mis else: layoutPragmaOf(nameSym, recList)
         ).keyedBySym(nameSym)
     else:
       return mkMultiVariant(objectName = s,

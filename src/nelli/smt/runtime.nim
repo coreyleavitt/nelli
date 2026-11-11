@@ -5945,10 +5945,13 @@ proc bitsPlace(bits: Z3BitVec[64]; p: vl.Place;
   ## the value of its IEEE bits. A bool or a `range` holds only its own
   ## values, so arbitrary bytes are no value of it: `none` (the caller
   ## declines), unless `writer`, a field of the same place and kind, just
-  ## wrote them: its value then. A `range` under `--rangeChecks:off` is
-  ## every bit pattern of its base integer (`rangeUnchecked`).
+  ## wrote them: its value then. So is an enum stored wider than its
+  ## ordinal width (`pkEnumWide`, RFC-0016 0.10.0 review H6): `ord` of its
+  ## four bytes may be a value its width does not hold. A `range` under
+  ## `--rangeChecks:off` is every bit pattern of its base integer
+  ## (`rangeUnchecked`).
   case p.kind
-  of vl.pkBool, vl.pkRestricted:
+  of vl.pkBool, vl.pkRestricted, vl.pkEnumWide:
     if writer.isSome and samePlace(p, writer.get[0]):
       return some(normSlot(writer.get[1], p.ty))
     if p.kind == vl.pkRestricted and rangeUnchecked():

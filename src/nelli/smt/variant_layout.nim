@@ -35,6 +35,10 @@ type
     pkEnum        ## an enum: its C width and raw value (slice B; an
                   ## out-of-range one is a plain value, as under
                   ## `--rangeChecks:off`)
+    pkEnumWide    ## an enum whose C storage is wider than its ordinal
+                  ## width (a negative first ordinal makes it 4 bytes):
+                  ## foreign bytes may be no value of its width, so it reads
+                  ## only bytes its own write stored, as a `range` does
     pkBool        ## a bool: the byte is 0 or 1
     pkOpaque      ## a float: its IEEE bits (slice B reinterprets them)
 
@@ -57,7 +61,24 @@ type
     ## into its arm's places) to byte `targetByte` of the accessed field.
     field*, fieldByte*, targetByte*, len*: int
 
+const fieldSizeMismatch* = "sizeof:"
+  ## `IRType.vLayoutPragma`'s prefix for a field (named after it) whose C
+  ## size the compiler gives differently from `scalarSize`
+  ## (`dsl_typebridge.layoutPragmaOf`): the layout declines.
+
 func alignUp(n, a: int): int = (n + a - 1) div a * a
+
+func enumCSize*(lo, hi: int64): int =
+  ## The C size Nim gives an enum whose ordinals span `[lo, hi]` and that
+  ## carries no `{.size.}` (`sizealignoffsetimpl.nim`, `tyEnum`): a negative
+  ## first ordinal makes it a 4-byte `int32`; otherwise the smallest of 1, 2,
+  ## 4 and 8 bytes whose unsigned window holds the last ordinal. Its
+  ## alignment is its size on every target derived here.
+  if lo < 0: 4
+  elif hi < (1'i64 shl 8): 1
+  elif hi < (1'i64 shl 16): 2
+  elif hi < (1'i64 shl 32): 4
+  else: 8
 
 func scalar(t: IRType): tuple[size: int, kind: PlaceKind] =
   ## The size (0: not derived) and kind of a leaf field of type `t`.
@@ -65,14 +86,26 @@ func scalar(t: IRType): tuple[size: int, kind: PlaceKind] =
   case t.kind
   of itInt:
     if t.width notin [8, 16, 32, 64]: return (0, pkOpaque)
-    (t.width div 8,
-     if t.enumName.len > 0: pkEnum   # an enum's ordinal range is not a `range`
-     elif t.hasRange: pkRestricted
-     else: pkInt)
+    if t.enumName.len > 0:
+      # RFC-0016 0.10.0 review H6. An enum's ordinal range is not a `range`,
+      # and its C size is Nim's rule, not its ordinal width: `enM = -1, en0,
+      # en1` is 8 bits wide and 4 bytes in memory.
+      if not t.hasRange: return (0, pkOpaque)
+      let sz = enumCSize(t.rangeLo, t.rangeHi)
+      if sz * 8 == t.width: return (sz, pkEnum)
+      if sz * 8 > t.width: return (sz, pkEnumWide)
+      return (0, pkOpaque)
+    (t.width div 8, if t.hasRange: pkRestricted else: pkInt)
   of itBool: (1, pkBool)
   of itFloat32: (4, pkOpaque)
   of itFloat64: (8, pkOpaque)
   else: (0, pkOpaque)
+
+func scalarSize*(t: IRType): int =
+  ## The C size the layout gives a leaf field of type `t` (0: not derived).
+  ## `dsl_typebridge.layoutPragmaOf` sets it against the compiler's own
+  ## (`macros.getSize`) and declines the layout where they differ.
+  scalar(t).size
 
 func variantLayout*(ty: IRType; cpu: Cpu; endian: Endian;
                     ptrBits: int): VariantLayout =
@@ -91,6 +124,11 @@ func variantLayout*(ty: IRType; cpu: Cpu; endian: Endian;
   # layout pragma (`union`, `align`, `bitsize`, an imported struct) is a
   # layout the walker has not derived: declined, never exact-and-wrong.
   let packed = ty.vLayoutPragma == "packed"
+  if ty.vLayoutPragma.startsWith(fieldSizeMismatch):
+    return no("field `" & ty.vLayoutPragma[fieldSizeMismatch.len .. ^1] &
+              "` has a C size (the compiler's `sizeof`) other than the one " &
+              "the layout derives for its type (a `{.size.}` enum, a `char` " &
+              "range)")
   if ty.vLayoutPragma.len > 0 and not packed:
     return no("a `{." & ty.vLayoutPragma & ".}` object whose C layout is " &
               "not derived")

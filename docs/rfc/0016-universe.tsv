@@ -6,7 +6,7 @@
 # axis pragma: 198 cells
 # axis magic: 244 cells
 # axis stdlib: 90 cells
-# axis build: 30 cells (pcre libs and build cells; rows below)
+# axis build: 31 cells (pcre libs and build cells; rows below)
 # axis readonly: 33 cells
 # axis defined: 25 cells
 # build rows: 5
@@ -22,6 +22,7 @@ build:cflags/sanitize	never	-
 build:cpu=arm64	declined	-
 build:endian=big	never	-
 build:exceptions/setjmp	modelled	-
+build:exceptions/setjmp/windows	declined	-
 build:fieldChecks=off	modelled	-
 build:finally/returnOnRaise	never	-
 build:fwrapv	modelled	-

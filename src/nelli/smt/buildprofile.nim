@@ -346,6 +346,7 @@ type
     bfPtrBits = "ptrBits"
     bfEndian = "endian"
     bfFwrapv = "fwrapv"
+    bfExceptions = "exceptions"
     bfRow = "row"
     bfOs = "os"
     bfCpu = "cpu"
@@ -400,6 +401,7 @@ func rowOf*(b: BuildSemantics; h: HostSemantics; p: BuildProvenance
   of exGoto, exSetjmp, exCpp, exDefault: discard
   of exQuirky: return none(BuildRow)
   if b.fwrapv and p.ccFamily == ccVcc: return none(BuildRow)
+  if b.exceptions == exSetjmp and b.os == osWindows: return none(BuildRow)
   case b.os
   of osLinux:
     # gcc and clang: rows are keyed by OS and backend, not by the Linux C
@@ -460,6 +462,11 @@ func admitBuild*(b: BuildSemantics = buildSemantics;
     return some(BuildRefusal(field: bfFwrapv,
       reason: "-d:nelliFwrapv has no effect under vcc, which has no " &
               "-fwrapv; signed overflow stays undefined there"))
+  if b.exceptions == exSetjmp and b.os == osWindows:
+    return some(BuildRefusal(field: bfExceptions,
+      reason: "--exceptions:setjmp on Windows is refused (INT-12): the walk " &
+              "crashes entering its 16 MB fiber, so no verdict is given; " &
+              "use the default goto exceptions"))
   if p.stockNim:
     return some(BuildRefusal(field: bfNim,
       reason: "an unpatched Nim " & p.nimVersion & " is an unverified " &
@@ -543,6 +550,10 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
   ("fwrapv/vcc", refused[BuildSite, bool](none(SymexErrorKind),
     "-d:nelliFwrapv under vcc: cl.exe has no -fwrapv, so the wrap would be " &
     "claimed and not given", iNever, nrPlatform)),
+  ("exceptions/setjmp/windows", refused[BuildSite, bool](none(SymexErrorKind),
+    "--exceptions:setjmp on Windows: the walk crashes entering its 16 MB " &
+    "fiber (INT-12, open), so admission refuses the build by name until the " &
+    "crash is fixed")),
   ("nim/unpatched", refused[BuildSite, bool](none(SymexErrorKind),
     "an unpatched Nim 2.2.10 is an unverified toolchain: the cells were " &
     "decided on the patched one (the macro VM the parser runs in included)")),
@@ -598,8 +609,9 @@ const buildCells* = axisTable[BuildSite, bool](axBuild, [
   ("useMalloc", modelled[BuildSite, bool](true, {bsBuild},
     "-d:useMalloc swaps the allocator, not the value semantics")),
   ("exceptions/setjmp", modelled[BuildSite, bool](true, {bsBuild},
-    "setjmp exceptions: c backend, Linux only (the cpp backend cannot build " &
-    "them; the Windows walk crashes entering the fiber, INT-12)")),
+    "setjmp exceptions: c backend on Linux only (the cpp backend cannot build " &
+    "them); `admitBuild` refuses them on Windows (INT-12, the " &
+    "exceptions/setjmp/windows cell)")),
   ("release", modelled[BuildSite, bool](true, {bsBuild},
     "-d:release acts only through `checks`, which it leaves on")),
   ("fwrapv", modelled[BuildSite, bool](true, {bsBuild},

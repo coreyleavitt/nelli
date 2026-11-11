@@ -38,7 +38,7 @@ suite "K5b: the build axis has a cell for every refusal":
     var have: seq[string]
     for k in buildCells.keys: have.add k
     for want in ["mm=refc", "ptrBits=32", "endian=big", "cpu=arm64",
-                 "os=macosx", "fwrapv/vcc", "nim/unpatched", "z3/unverified", "pcre/unverified",
+                 "os=macosx", "fwrapv/vcc", "exceptions/setjmp/windows", "nim/unpatched", "z3/unverified", "pcre/unverified",
                  "profile/unprojectable", "finally/returnOnRaise", "z3/deepUnsat",
                  "setting/isLoose", "semantics/globalLiteralEntry", "sizeof/host", "mm=arc", "mm=atomicArc",
                  "useMalloc", "exceptions/setjmp", "release", "fwrapv"]:
@@ -77,6 +77,20 @@ suite "K5b: refusals through the decision function (synthetic builds)":
                  admitBuild(b, BuildProvenance(ccFamily: ccVcc)), bfFwrapv, "vcc")
     # The same build under mingw is a row.
     check rowOf(b, unreadHost, BuildProvenance(ccFamily: ccGcc)) == some(brMingw)
+
+  test "--exceptions:setjmp on Windows (INT-12)":
+    var b = base
+    b.os = osWindows; b.exceptions = exSetjmp
+    for p in [gcc, BuildProvenance(ccFamily: ccVcc, nimVersion: "2.2.10")]:
+      pinAdmission(cell"exceptions/setjmp/windows", admitBuild(b, p),
+                   bfExceptions, "INT-12")
+      check rowOf(b, unreadHost, p).isNone
+    # The same build on Linux, and goto exceptions on Windows, are rows.
+    check rowOf(base, unreadHost, gcc) == some(brLinuxC)
+    b.exceptions = exGoto
+    check admitBuild(b, gcc).isNone
+    b.os = osLinux; b.exceptions = exSetjmp
+    check admitBuild(b, gcc).isNone
 
   test "an unpatched Nim":
     var p = gcc

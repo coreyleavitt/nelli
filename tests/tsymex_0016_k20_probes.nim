@@ -380,10 +380,6 @@ suite "RFC-0016 K2-0: CRH-09 items":
     pinCrash(cellKey(axBuild, "pcre/interpreter/longSubject"), src, [], ceSegv)
 
 suite "RFC-0016 K2-0: probes this build cannot run":
-  test "INT-12: setjmp exceptions on Windows (no Windows host)":
-    skipCell(cellKey(axBuild, "exceptions/setjmp/windows"),
-             "K2-0 INT-12: the crash is Windows-only (the 16 MB fiber under setjmp); " &
-             "tsymex_rfc0005_s8cu_nil_setjmp runs the Linux c arm green and carries the Windows pin")
   test "INT-15: setControlCHook is not in hostRuntimeHook (Windows re-exec only)":
     skipCell(cellKey(axBuild, "replay/hostHook/setControlCHook"),
              "K2-0 INT-15: a fork replay (Linux, macOS) copies the hook, so there is no divergence to probe; " &

@@ -126,7 +126,7 @@
 ## No walker bump: this is compile-time reflection over already-compiled
 ## modules, same as S8ab/S8af/S8ah/S8ak -- it never touches the SMT IR.
 
-import std/[macros, os, strutils, tables]
+import std/[macros, os, strutils, tables, sets]
 
 # RFC-0005 S8ak: `vmGuardAuditNames` resolves each discovered name via
 # `bindSym(nm, brForceOpen)` where `nm` is a runtime-computed `seq[string]`
@@ -470,7 +470,7 @@ proc calleeMatchesGeneric*(callee: NimNode; spec: GenericRoutineSpec): bool =
 
 proc vmGuardWalkForGenericCallsAux(n: NimNode; macroTag: string;
                                     specs: seq[GenericRoutineSpec];
-                                    visitedProcs: var seq[string];
+                                    visitedProcs: var HashSet[string];
                                     hits: var seq[string]) =
   if n == nil: return
   if n.kind in {nnkCall, nnkCommand} and n.len > 0:
@@ -520,7 +520,7 @@ proc vmGuardWalkForGenericCallsAux(n: NimNode; macroTag: string;
           let key = calleeImpl.lineInfoObj.filename & ":" & macros.strVal(callee) &
                     "@" & $calleeImpl.lineInfoObj.line
           if key notin visitedProcs:
-            visitedProcs.add key
+            visitedProcs.incl key
             vmGuardWalkForGenericCallsAux(calleeImpl, macroTag, specs, visitedProcs, hits)
   for c in n:
     vmGuardWalkForGenericCallsAux(c, macroTag, specs, visitedProcs, hits)
@@ -541,7 +541,12 @@ proc vmGuardWalkForGenericCalls*(n: NimNode; macroTag: string;
   ## at its own small fixture list, independent of the real 37-routine
   ## registry -- see `tests/tsymex_rfc0005_s8ab_letaudit.nim`'s own
   ## reachability fixtures.
-  var visitedProcs: seq[string]
+  # RFC-0016 W3-z R10 follow-up: a set, not a list. The walk reaches a few
+  # thousand procs from `symex.nim`'s largest macros, and a list's membership
+  # test made it quadratic in them, at the compile-time VM's default
+  # iteration limit (`tsymex_rfc0005_s8ab_letaudit` under
+  # `-d:nelliVmAliasAudit`).
+  var visitedProcs: HashSet[string]
   vmGuardWalkForGenericCallsAux(n, macroTag, specs, visitedProcs, hits)
 
 # ---- name discovery (RFC-0005 S8ak: parsed from the module AST) -------------

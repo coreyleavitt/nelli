@@ -29,7 +29,7 @@
 ##                            but does not yet restrict the SUT's
 ##                            normal-run input domain
 
-import std/[macros, sets, tables, algorithm, options, strutils, importutils]
+import std/[macros, sets, tables, algorithm, options, strutils, importutils, macrocache]
 from std/os import extractFilename
 # RFC-0016 W1-c1b: the build is admitted (or refused, by name) BEFORE `z3` is
 # imported. Under `--mm:refc` nim-z3's `=destroy` hooks do not compile, and
@@ -3062,23 +3062,34 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
     if user: acc.unlistedOpen(n, owner)
     for c in n: scanFootprint(c, user, owner, selfKey, acc)
 
-proc isRuntimeCode(impl: NimNode): bool =
-  ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
-  ## nelli's replay markers, whose state is per-thread, or synchronised, or of
-  ## no consequence to what the program computes. A variable of it the program
-  ## names is still the program's footprint (`scanFootprint`).
-  ## RFC-0016 W3-z R10 follow-up: `/lib/system/` is looked for by
-  ## `continuesWith` at each `/`, not `in`, whose skip table costs the
-  ## compile-time VM 256 iterations a call before it reads the path, once per
-  ## routine a replay's footprint reads (`tsymex_0016_w3z_r10_nestedreplay`).
-  let f = impl.lineInfoObj.filename.replace('\\', '/')
+const runtimeFileMemo = CacheTable"nelli.symex.runtimeFile"
+  ## RFC-0016 W3-z R10 follow-up. `isRuntimeCode`'s answer per file, as 1 or
+  ## 0. A compiler table, so a lookup is one VM operation, not a loop.
+
+proc isRuntimeFile(path: string): bool =
+  ## `isRuntimeCode`, of the file a routine is declared in.
+  if path in runtimeFileMemo: return runtimeFileMemo[path].intVal == 1
+  let f = path.replace('\\', '/')
   var inSystem = false
   var i = f.find('/')
   while i >= 0 and not inSystem:
     inSystem = f.continuesWith("/lib/system/", i)
     i = f.find('/', i + 1)
-  inSystem or f.endsWith("/lib/system.nim") or
+  result = inSystem or f.endsWith("/lib/system.nim") or
     f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
+  runtimeFileMemo[path] = newLit(ord(result))
+
+proc isRuntimeCode(impl: NimNode): bool =
+  ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
+  ## nelli's replay markers, whose state is per-thread, or synchronised, or of
+  ## no consequence to what the program computes. A variable of it the program
+  ## names is still the program's footprint (`scanFootprint`).
+  ## RFC-0016 W3-z R10 follow-up: answered once per file (`runtimeFileMemo`),
+  ## and `/lib/system/` is looked for by `continuesWith` at each `/`, not
+  ## `in`, whose skip table costs the compile-time VM 256 iterations a call
+  ## before it reads the path. A replay's footprint asks it of every routine
+  ## it reads (`tsymex_0016_w3z_r10_nestedreplay`).
+  isRuntimeFile(impl.lineInfoObj.filename)
 
 proc routineFootprint(r: NimNode): RoutineFootprint =
   ## RFC-0005 S8cb. The routine `r`'s own footprint (`routineFootprints`).

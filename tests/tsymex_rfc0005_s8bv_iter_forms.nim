@@ -106,6 +106,8 @@ proc itCap(s: set[int16]; k: int) =
 suite "S8bv: walker version":
   test "the walker version floor":
     check parseInt(symexWalkerVersion) >= 250
+  test "walker 351: a set's items is not a lent loop (int4s)":
+    check parseInt(symexWalkerVersion) >= 351
 
 suite "S8bv (1): for x in a builtin set":
   test "no member of a signed set precedes a negative one":

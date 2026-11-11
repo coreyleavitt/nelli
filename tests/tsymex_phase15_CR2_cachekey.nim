@@ -1213,7 +1213,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## not a `let` the VM aliases): 348->349.
     ## RFC-0016 W3-z int4r (the tail budget is the run's, shared by its tail
     ## walks; closure sorts held until the decl holds them): 349->350.
-    check symexWalkerVersion == "350"
+    ## RFC-0016 W3-z int4s (the S8cn lent-loop decline is a seq's or an
+    ## array's, never a builtin set's): 350->351.
+    check symexWalkerVersion == "351"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -17371,7 +17371,7 @@ proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
   # P13. The for-body is a loop body of the caller: its `break` leaves the
   # whole expansion, its `continue` this yield site. The loops of the
   # iterator body between the expansion and here are not its jump targets.
-  let keep = ctx.procScoped.jumpTargets[handler.expansion + 1 .. ^1]
+  var keep = ctx.procScoped.jumpTargets[handler.expansion + 1 .. ^1]   # a copy (S8x)
   ctx.procScoped.jumpTargets.setLen(handler.expansion + 1)
   ctx.pushJumpTarget(isLoop = true, contViaBlock = true)
   ctx.procScoped.jumpTargets[^1].brkTo = handler.expansion + 1
@@ -21293,11 +21293,14 @@ proc parseStmtInner(n: NimNode,
             "not a byte/codepoint mismatch — ADR-0006)")
       # RFC-0005 S8cn: `items` over a seq is the element's memory; `pairs`, and
       # `items` over an array, copy a scalar on every setting, but share anything
-      # else.
-      block:
+      # else. Only a seq or an array has element memory the variable can hold:
+      # `items` over a builtin set yields `T(i)`, an ordinal it computes (the
+      # `itBitSet` arm binds a literal per step), so a body that `incl`s or
+      # `excl`s the set never shows through the variable. Every other kind
+      # declines below.
+      if recvCls.ty.kind in {itSeq, itArray}:
         let elemTy = if recvCls.ty.kind == itArray: recvCls.ty.elemTy
-                     elif recvCls.ty.kind == itSeq: recvCls.ty.seqElemTy
-                     else: nil
+                     else: recvCls.ty.seqElemTy
         if recvCls.ty.kind == itSeq and not isPairs or not alwaysCopied(elemTy):
           let d = lentLoopDecline(n, container, (if isPairs: n[1] else: iterVar),
                                   bodyNode, ctx, iterExpr[0].strVal)

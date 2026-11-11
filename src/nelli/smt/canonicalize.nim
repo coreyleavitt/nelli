@@ -603,8 +603,14 @@ const renderAsChoicesVersion* = "12"
   ##   alive until the decl is made over them; a sort freed with its
   ##   representative was read and handed to `Z3_mk_func_decl`, and the
   ##   run's context faulted in `Z3_del_context` (`tsymex_r6_n40`, `n43`).
+  ## - RFC-0016 W3-z int4s (350->351): the S8cn `lent`-loop decline of a
+  ##   `for` over `items`/`pairs` applies only to a seq or an array. K2F-1's
+  ##   magic-aware write scan reached it for a builtin set (`incl`/`excl` in
+  ##   the body), whose `items` yields a computed ordinal the variable cannot
+  ##   alias, and declined `tsymex_rfc0005_s8bv_iter_forms`' re-read pin:
+  ##   sxUnknown there is sxSat again.
 
-const symexWalkerVersion* = "350"
+const symexWalkerVersion* = "351"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

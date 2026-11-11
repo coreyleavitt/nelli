@@ -76,3 +76,36 @@ Four lenses ran: correctness, security, design and liveness. Adversarial verifie
 **Mandate:** pending the operator's approval of the round 1 table.
 
 ## Round 1 (base a72c7334)
+
+Six lenses ran: runtime soundness, parser soundness, replay and cache (opus); security, design, liveness (sonnet). Adversarial verifiers then ran on every Critical/High and on R-M1/R-M2. The soundness verifiers reproduced their findings with scratch tests at a72c7334 on linux-c.
+
+| id | sev | status | finding | evidence |
+|---|---|---|---|---|
+| H1 | High | open | Closures that share an environment get split copies on the re-exec wire, so re-exec (the Windows default) can confirm a trusted false sxSat that fork refutes. | `replaywire.nim:157-216,255-316`: envs are not interned like refs at :237-243/:339-344. Reproduced with `-d:nelliReplayReexec`: sxSat trusted, while fork gives sxUnknown feReplayRefuted. |
+| H2 | High | open | The tail walk drops `ubIndeterminateRead`. A `{.noinit.}` read after the label gives a trusted sxSat, rsNotNeeded, witnessUndefined {}. Regression from R2/R6. | `runtime.nim` ~30935 (`discard walk`), ~30948 (dcFreshSymbol exempt), :27786 (`noteUbAtFork` early return). Reproduced at x=0. |
+| H3 | High | open | `modelPins` pins the opaque-call havoc epochs `heap_<k>@ep<n>` for n >= 1, so the candidate tail walk fixes a callee effect to the explore model's value. This hides UB the real run executes: trusted sxSat, rsConfirmed. | `runtime.nim:13266` (6490a48b, in the surface). A/B: pinning epoch 0 only gives untrusted with ubSignedOverflow. The cell has to be read before the label too. |
+| H4 | High | open | The P17 guard snapshots any non-symbol loop bound. Nim re-reads field paths and var params on every iteration, so the trip count is wrong and trusted. | `dsl_parser.nim` ~21227 and ~21274. Var param n: native g(5)=1, the engine proves "one" UNSAT, trusted. `o.n` and `countup(0,o.n)` likewise. `p[]` is modelled correctly. |
+| H5 | High (raised from Medium: trusted false proof) | open | A routine `{.noinit.}` is admitted as read, but `result` is still zero-initialised. | `pragmaaxes.nim` routine read row. f(false) natively 4663; the engine proves `v == 0` trusted. |
+| H6 | High (raised from Medium: trusted false proof) | open | An enum with a negative ordinal is sized by bit width, but Nim makes it 4 bytes. A cross-arm read of such a field reads 1 byte, sign-extended. | `variant_layout.nim` scalar; `dsl_typebridge.nim:440`. Native ord(o.e)=255; the engine proves it UNSAT, trusted. The discriminator form does not compile (refuted). |
+| H7 | High (raised from Low-Medium: trusted false proof) | open | `mayWriteMagics` omits `mSetLengthSeqUninit`, so `lentLoopDecline` misses `setLenUninit(s, 0)` in a `for x in s` body. | `dsl_parser.nim:16002`. With `seq[string]`, native reaches "other"; the engine finds "one", trusted. |
+| R-M1 | Medium | open | `rowOf` admits `--exceptions:setjmp` on Windows (brMingw/brMsvc), although the build cell says Windows crashes (INT-12). | `buildprofile.nim:399-400`, `:600-602`; INT-12 is open in the RFC at :833. The result is a crash, not a wrong verdict. |
+| L-M1 | Medium | open | A `rows=`-scoped allowlist entry is outside the ratchet. Nothing caps the entries, requires a proper subset of rows, or requires the evidencing row to be named. | `tsymex_0016_allowlist_ceilings.nim:34`; `tsymex_0016_universe.nim:296-310,377`. 12 entries. |
+| L-M2 | Medium | open | The wall-time ceiling is one-sided: a listed offender has no upper bound, and the nightly report passes when zero merged legs download. | `check-ceiling.sh:109-124`; `symex-nightly.yaml:539-541`. |
+| L-M3 | Medium | open | 12 producer-less error kinds carry the misleading allowlist reason "no pinDecline asserts this kind" (deletion is deferred to W-64). | `types.nim` classOf rows; `0016-allowlist/errorkind.txt:8,39,40,49,50`. |
+| L-M4 | Medium | open | A `never` cell is evidenced by a literal `holds = true`, and `evidences` accepts any pvCrashed record for any declined/never cell regardless of kind. | `tsymex_0016_k5b_refusals.nim:149`; `s8cu_helpers.nim:881-891`; `tsymex_0016_universe.nim:268-275`. |
+| D1 | High (design) | open | The arithmetic-regime decision is made in several places under four vocabularies (`ArithScope`, `WalkArith`, `DefProfile`, `buildWraps`). | `types.nim:1379`; `dsl_parser.nim:1598,1672,21585`; `runtime.nim:2152,2187,9369`; 18 `buildWraps()` sites. |
+| D2 | Medium (design) | open | `ArithScopeProof` can be minted by anyone through `replayArith`. | `types.nim:3498-3530,5266`. |
+| D3 | High (design) | open | `dsl_parser.nim` (25k lines) and `runtime.nim` (33.5k lines) keep growing. The UB-deposit policy is inline, the walk-units log I/O is in the walker, and the `include` files share one namespace. | `dsl_parser.nim:4701-4817`; `runtime.nim:14905,30896`. |
+| D4 | Medium (design) | open | Error-kind properties (class, severity) live away from the enum, and severity is set by each caller. | `errorkind.nim`; `types.nim:2203,2505`. |
+| D5 | Medium (design) | open | The axis modules re-implement keys and verbs, and have lateral dependencies (`definedness` imports `magic_rows`). `check_options` mixes the pure scan with compile-time I/O. | `magic_rows.nim:32-35`; `check_options.nim:254,763-871`. |
+| D6 | Medium (design) | open | `symex.nim` (6.2k lines) is both the facade and the implementation (held-set walk, routine table). | `symex.nim` diff. |
+| R-M2 | Low | refuted as stated | The layout pragma is missing from the cache key. A packed or union variant is declined, and the decline text is keyed. Residual: `{.align.}`/`size` may change a verdict without changing the key, under fieldChecks:off c only; untraced. | `pragmaaxes.nim:170`; `dsl_parser.nim:18352-18467`. |
+| L1 | Low | open | ccFamily (mingw vs msvc) is not in the cache key, and a hit is stamped with the current row. | `buildprofile.nim` buildSegment. |
+| L2 | Low | open | A non-closure proc slot read back as nil is not rejected (hardening). | `replaywire.nim` wireGet proc arm. |
+| L3 | Low | open | `RawWitness.pinsComplete` is computed and never read. | `runtime.nim:13184,16659`. |
+| L4 | Low | open | `isNilPtrCast` accepts any target type; `routinePragmaReason` calls `get` on an option that may be none. | `dsl_parser.nim`. |
+| L5 | Low | open | Dead exports: `opaqueBodyDefinedness`, `admitConstruct`, `magicIn`, `checkNames`. | `definedness.nim:335`; `constructaxes.nim:156`. |
+| L6 | Low | open | Fuzz `undefinedFindings`/`annotationViolations` are not in the default campaign summary. | `fuzz.nim:836,2589-2590,2833`. |
+| L7 | Low | open | The walker bumps 344 and 349 have no floor pin; `orphanCells` is report-only; the cpp/z3/msvc rows are nightly-only on main. | `canonicalize.nim:590-595`; `tsymex_0016_universe.nim:454`. |
+| S1 | Low | open | The `k8a-nightly.sh` workflow_dispatch `tag` input is passed to git unvalidated (needs dispatch rights). | `k8a-nightly.sh:233`. |
+| S2 | Low | open | First-party actions are pinned by major tag, not by SHA. | `.github/workflows/*`. |

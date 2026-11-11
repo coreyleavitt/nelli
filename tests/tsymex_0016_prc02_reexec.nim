@@ -433,7 +433,8 @@ suite "W3-z R10: a start-value closure with an environment (re-exec)":
     check not r.trusted
     var named = false
     for e in r.errors:
-      if e.kind == feReplayDeclined and "not its bytes alone" in e.msg:
+      if e.kind == feReplayDeclined and "not its bytes alone" in e.msg and
+         "`gStartEnvPtr` holds" in e.msg:
         named = true
     check named
 
@@ -480,7 +481,8 @@ suite "W3-z R11: a start-value closure whose environment holds buffers (re-exec)
     check not r.trusted
     var named = false
     for e in r.errors:
-      if e.kind == feReplayDeclined and "more than one type" in e.msg:
+      if e.kind == feReplayDeclined and "more than one type" in e.msg and
+         "`gStartTwo` holds" in e.msg:
         named = true
       check e.kind != feGlobalRouteUnproved
     check named
@@ -540,7 +542,8 @@ suite "W3-z R12: a start-value closure R11 declined (re-exec)":
     check not r.trusted
     var named = false
     for e in r.errors:
-      if e.kind == feReplayDeclined and "nested in a nested one" in e.msg:
+      if e.kind == feReplayDeclined and "nested in a nested one" in e.msg and
+         "`gStartNested` holds" in e.msg:
         named = true
       check e.kind != feGlobalRouteUnproved
     check named

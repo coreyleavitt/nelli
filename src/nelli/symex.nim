@@ -3609,8 +3609,14 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       for g in fp.globals:
         getGlobals.add quote do:
           wireGet(`rd`, cast[ptr typeof(`g`)](unsafeAddr `g`)[])
+        # RFC-0016 W3-z R10 follow-up: the decline names the variable whose
+        # value cannot cross, as a forked run's unlifted hint does.
+        let gName = newLit("`" & g.strVal & "` holds ")
         putGlobals.add quote do:
-          wirePut(`wr`, `g`)
+          try:
+            wirePut(`wr`, `g`)
+          except WireError as e:
+            raise newException(WireError, `gName` & e.msg)
       let blob = if child.blob != nil: child.blob else: witId
       # RFC-0016 PRC-02b. The child is this binary, so the toolchain's table of
       # what each method dispatcher can run says what it would run: a body no

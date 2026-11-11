@@ -628,8 +628,14 @@ const renderAsChoicesVersion* = "12"
   ##   earlier walks left of the run's tail budget read `ubTailUnverified`
   ##   when that budget ran out; it now carries the answer of the walk under
   ##   its pins, and distinct pins keep more of the budget.
+  ## - RFC-0016 0.10.0 review H1 (354->358, the slice's reserved number):
+  ##   closures sharing one environment share it on the re-exec replay wire
+  ##   (`replaywire.putEnv`/`getEnv` intern environments with the `ref`
+  ##   cells). The wire wrote a copy per closure, and a re-executed replay
+  ##   confirmed a trusted `sxSat` a forked one refutes. A cached witness
+  ##   carries the replay's confirmation in its soundness, so the key moves.
 
-const symexWalkerVersion* = "354"
+const symexWalkerVersion* = "358"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

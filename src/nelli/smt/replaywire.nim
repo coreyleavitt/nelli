@@ -9,6 +9,12 @@
 ## proc value naming no routine of `procs`. A `ref`
 ## crosses with its identity kept (two references to one cell are one cell in
 ## the child, and a cycle closes), so that a graph of them means what it did.
+## So does a closure's environment (RFC-0016 0.10.0 review H1): two closures
+## sharing one environment on the host share one in the child, whether they
+## are held by variables, by the fields of a `ref`, or both. An environment
+## linked to an enclosing routine's (its `up` field) does not cross at all
+## (`envRefusal`'s destructor, `symex.envCodecs`), so no sharing through that
+## link is lost.
 ##
 ## A proc value crosses by identity (RFC-0016 PRC-02): an address differs
 ## between two processes of one binary (ASLR), but the child is the same
@@ -41,6 +47,12 @@ type
   WireWriter* = object
     data*: string
     cells: Table[pointer, int]
+      ## Every `ref` cell and closure environment written, by address: its
+      ## identity on the wire. One table for both, so the child numbers them
+      ## as the host did (`WireReader.cells`).
+    envCells: seq[bool]
+      ## RFC-0016 0.10.0 review H1. Per id of `cells`: an environment, not a
+      ## `ref` cell. An address met as both is not one the encoding can name.
     procs*: seq[pointer]
     envOk*: seq[bool]
       ## RFC-0016 W3-z R10. Per slot of `procs`: a closure of that routine
@@ -66,6 +78,8 @@ type
     data*: string
     pos: int
     cells: seq[pointer]
+    envCells: seq[bool]
+      ## RFC-0016 0.10.0 review H1. Per id of `cells`, as the writer's.
     procs*: seq[pointer]
     envGet*: seq[EnvGet]
       ## RFC-0016 W3-z R11. Per slot of `procs`, `WireWriter.envPut`'s reader.
@@ -161,6 +175,19 @@ proc putEnv(w: var WireWriter; code, env: pointer; put: EnvPut = nil) =
   ## RFC-0016 W3-z R11: an environment with a destructor is written by `put`,
   ## the codec of the one value it holds, never by its bytes (a buffer is an
   ## address in the host).
+  ## RFC-0016 0.10.0 review H1: an environment is written once. One met again
+  ## (another closure sharing it) is written as `-2 - id`, its id in `cells`,
+  ## which the child reads as the environment it built for that id, so a
+  ## closure that writes a captured value and one that reads it still meet.
+  if env in w.cells:
+    let id = w.cells[env]
+    if not w.envCells[id]:
+      raise newException(WireError, "a closure environment at the address " &
+                         "of a `ref` cell, which the child cannot be given")
+    w.putLen(-2 - id)
+    return
+  w.cells[env] = w.envCells.len
+  w.envCells.add true
   let rti = cast[ptr pointer](env)[]
   let f = cast[ptr UncheckedArray[int]](rti)
   let size = f[1]
@@ -186,8 +213,19 @@ proc getEnv(r: var WireReader; code: pointer; at: int): pointer =
   ## witness is not the host's. RFC-0016 W3-z R11: an environment with a
   ## destructor is filled by the slot's codec (`envGet`) in a zeroed object
   ## of the child's type.
+  ## RFC-0016 0.10.0 review H1: `-2 - id` names the environment already built
+  ## for that id of `cells` (`putEnv`).
   let size = r.getLen()
-  if size < 0: return nil
+  if size == -1: return nil
+  if size < -1:
+    let id = -2 - size
+    if id >= r.cells.len or not r.envCells[id]:
+      raise newException(WireError, "the replay's witness is malformed")
+    let p = r.cells[id]
+    # One more closure holds it (`wireGet` copies a closure in without
+    # counting a reference): one more reference the child keeps.
+    GC_ref(cast[ref RootObj](p))
+    return p
   if size < sizeof(pointer) or size - sizeof(pointer) > r.data.len - r.pos:
     raise newException(WireError, "the replay's witness is malformed")
   var hc, ht, hd: int64
@@ -207,6 +245,9 @@ proc getEnv(r: var WireReader; code: pointer; at: int): pointer =
   unsafeNew(e, size)
   let p = cast[pointer](e)
   cast[ptr pointer](p)[] = rti
+  # Numbered before it is filled, as the writer numbered it before writing.
+  r.cells.add p
+  r.envCells.add true
   if dtor == 0:
     r.getRaw(cast[pointer](cast[uint](p) + uint(sizeof(pointer))),
              size - sizeof(pointer))
@@ -235,10 +276,15 @@ proc wirePut*[T](w: var WireWriter; x: T) =
     else:
       let key = cast[pointer](x)
       if key in w.cells:
-        w.putLen(w.cells[key])
+        let id = w.cells[key]
+        if w.envCells[id]:
+          raise newException(WireError, "a `ref` at the address of a " &
+                             "closure environment, which the child cannot be given")
+        w.putLen(id)
       else:
-        let id = w.cells.len
+        let id = w.envCells.len
         w.cells[key] = id
+        w.envCells.add false
         w.putLen(id)
         w.wirePut(x[])
   elif T is (tuple | object):
@@ -337,12 +383,17 @@ proc wireGet*[T](r: var WireReader; x: var T) =
     if id < 0:
       x = nil
     elif id < r.cells.len:
+      if r.envCells[id]:
+        raise newException(WireError, "the replay's witness is malformed")
       x = cast[T](r.cells[id])
-    else:
+    elif id == r.cells.len:
       new(x)
       GC_ref(x)       # the graph may hold it only through a later cycle
       r.cells.add cast[pointer](x)
+      r.envCells.add false
       r.wireGet(x[])
+    else:
+      raise newException(WireError, "the replay's witness is malformed")
   elif T is object:
     # RFC-0016 PRC-01. A case object: `fieldPairs` yields the discriminator and
     # then the fields of the branch it selects, so the writer's order (the

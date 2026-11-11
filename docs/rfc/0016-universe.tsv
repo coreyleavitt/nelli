@@ -562,7 +562,7 @@ pragma:param/byref	declined	-
 pragma:param/inject	modelled	-
 pragma:param/noalias	declined	-
 pragma:param/used	modelled	-
-pragma:routine/asmNoStackFrame	modelled	-
+pragma:routine/asmNoStackFrame	declined	-
 pragma:routine/assertions	modelled	-
 pragma:routine/async	modelled	-
 pragma:routine/auditDelete	modelled	-
@@ -575,11 +575,11 @@ pragma:routine/callsite	modelled	-
 pragma:routine/cdecl	modelled	-
 pragma:routine/checks	modelled	-
 pragma:routine/closure	modelled	-
-pragma:routine/codegenDecl	modelled	-
+pragma:routine/codegenDecl	declined	-
 pragma:routine/compileTime	modelled	-
 pragma:routine/compilerRtl	modelled	-
 pragma:routine/compilerproc	modelled	-
-pragma:routine/constructor	modelled	-
+pragma:routine/constructor	declined	-
 pragma:routine/core	modelled	-
 pragma:routine/debugger	modelled	-
 pragma:routine/deprecated	modelled	-
@@ -587,7 +587,7 @@ pragma:routine/dirty	modelled	-
 pragma:routine/discardable	modelled	-
 pragma:routine/dynlib	modelled	-
 pragma:routine/effectsOf	modelled	-
-pragma:routine/emit	modelled	-
+pragma:routine/emit	declined	-
 pragma:routine/enforceNoRaises	modelled	-
 pragma:routine/ensures	modelled	-
 pragma:routine/epollPacked	modelled	-
@@ -609,7 +609,7 @@ pragma:routine/gcsafe	modelled	-
 pragma:routine/hcrInline	modelled	-
 pragma:routine/header	modelled	-
 pragma:routine/hints	modelled	-
-pragma:routine/importCompilerProc	modelled	-
+pragma:routine/importCompilerProc	declined	-
 pragma:routine/importIconv	modelled	-
 pragma:routine/importObjC	modelled	-
 pragma:routine/importc	modelled	-
@@ -634,7 +634,7 @@ pragma:routine/noSideEffect	modelled	-
 pragma:routine/noWeirdTarget	modelled	-
 pragma:routine/noconv	modelled	-
 pragma:routine/nodecl	modelled	-
-pragma:routine/nodestroy	modelled	-
+pragma:routine/nodestroy	declined	-
 pragma:routine/noinit	modelled	-
 pragma:routine/noinline	modelled	-
 pragma:routine/nonReloadable	modelled	-
@@ -667,7 +667,7 @@ pragma:routine/tags	modelled	-
 pragma:routine/thread	modelled	-
 pragma:routine/tlsEmulation	modelled	-
 pragma:routine/used	modelled	-
-pragma:routine/varargs	modelled	-
+pragma:routine/varargs	declined	-
 pragma:routine/warnings	modelled	-
 pragma:type/acyclic	modelled	-
 pragma:type/align	modelled	-

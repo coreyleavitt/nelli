@@ -18489,6 +18489,31 @@ proc routinePragmaReason(impl: NimNode): tuple[kind: SymexErrorKind, msg: string
               return (a.decline[0].get, a.decline[1])
   (feUnadmitted, "")
 
+proc routineIsNoinit(impl: NimNode): bool =
+  ## The routine `impl` carries `{.noinit.}` (style-insensitive).
+  if impl.len > 4 and impl[4].kind == nnkPragma:
+    for p in impl[4]:
+      if nimIdentNormalize(pragmaName(p)) == "noinit": return true
+  false
+
+proc noinitResultPrologue(impl: NimNode; retTy: IRType; isVoid: bool;
+                          ctx: ParseCtx): IRStmt =
+  ## RFC-0016 0.10.0 review H5. Under a routine `{.noinit.}` Nim does not
+  ## initialise `result`, so a read before a write sees whatever the stack
+  ## held. `result` then starts as a `{.noinit.}` local does (`noinitValue`:
+  ## a read of a part no write reached is `ubIndeterminateRead`); a managed
+  ## result type declines, as such a local does (`noinitPlain`). nil when
+  ## the routine is void or carries no `{.noinit.}`. The caller adds
+  ## `result` to `ctx.noinitNames` while the body parses.
+  if isVoid or not routineIsNoinit(impl): return nil
+  if noinitPlain(retTy):
+    mkLet("result", retTy, mkGlobalVar(noinitReadPrefix & "result", retTy))
+  else:
+    ctx.declineMarker(feUnsupportedStmtKind,
+      "the routine `" & impl[0].repr & "` is `{.noinit.}` with a " &
+      "managed result type: Nim leaves `result` uninitialised, and its " &
+      "destructor reads the garbage it holds")
+
 proc letCursorDecline(c: NimNode; rest: seq[NimNode]; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8cn. The decline of `let c = lv` over a seq, a string, a Table
   ## or an object holding one, where a later statement of its list reads `c`
@@ -23735,7 +23760,13 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
     else:
       nil
   let rhs = if isVoid: nil else: resultRhs(bodyNode)
-  let body =
+  # RFC-0016 0.10.0 review H5: a `{.noinit.}` routine's `result` starts
+  # unwritten (`noinitResultPrologue`).
+  let noinitPro = noinitResultPrologue(monoImpl, retTy, isVoid, ctx)
+  let hadResultNoinit = "result" in ctx.noinitNames
+  if noinitPro != nil: ctx.noinitNames.incl "result"
+  elif hadResultNoinit: ctx.noinitNames.excl "result"
+  var body =
     if rhs != nil:
       # `proc f(...): T = expr` shape: rewrite as `return expr`.
       var preamble: seq[IRStmt]
@@ -23750,6 +23781,9 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
         mkBlock(preamble & @[mkReturnVal(valIR)])
     else:
       parseStmt(bodyNode, ctx)
+  if hadResultNoinit: ctx.noinitNames.incl "result"
+  else: ctx.noinitNames.excl "result"
+  if noinitPro != nil: body = mkBlock(@[noinitPro, body])
   let nameStr = monoImpl.name.strVal
   ProcSig(name: nameStr, params: params,
           body: withCheckDeclines(ctx, impl, checkOpts, body, inheritScope),
@@ -24159,7 +24193,30 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # and bypass the prune entirely.
   ctx.assertsOff.add checkOpts.assertsMaybeOff
   ctx.pushArithScope(checkOpts)
+  # RFC-0016 0.10.0 review H5: the target's own `{.noinit.}` `result`, and
+  # its routine pragmas, read as a callee's are (`routinePragmaReason`).
+  let sutRetTy = if formalParams[0].kind != nnkEmpty:
+                   classifyType(formalParams[0]).ty
+                 else: nil
+  let noinitPro = noinitResultPrologue(procDef, sutRetTy, sutRetTy == nil, ctx)
+  if noinitPro != nil: ctx.noinitNames.incl "result"
   var parsed = parseStmt(devirtProcLets(procDef[6]), ctx)   # RFC-0005 S8cn
+  ctx.noinitNames.excl "result"
+  if noinitPro != nil: parsed = mkBlock(@[noinitPro, parsed])
+  # A routine pragma the axis declines by row (`nodestroy`, `codegenDecl`
+  # ...) changes what the target's body does. A name with no row is not
+  # declined here: the target's own pragma list is the caller's to write
+  # (a marker a macro reads), and a callee's absent name declines where it
+  # is registered.
+  if procDef.len > 4 and procDef[4].kind == nnkPragma:
+    for p in procDef[4]:
+      let pn = pragmaName(p)
+      let a = admitPragma(ppRoutine, pn, psRoutineDecl)
+      if not a.admitted and a.decline[0].get(feUnadmitted) != feUnadmitted:
+        parsed = mkBlock(@[ctx.declineMarker(a.decline[0].get,
+          "the target routine carries the pragma `{." & pn & ".}`: " &
+          a.decline[1] & " (" & $a.decline[0].get & ")"), parsed])
+        break
   # RFC-0016 K3c: a formal or the result of the target whose type (or a
   # component) carries `{.union.}`, `{.packed.}`, `{.byref.}` or `{.bycopy.}`.
   block:

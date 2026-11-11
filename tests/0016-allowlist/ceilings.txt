@@ -16,7 +16,7 @@ magic.txt	0
 nightly-cpp-known-red.txt	1
 nightly-msvc-known-red.txt	0
 nightly-z3-4.13.4-known-red.txt	0
-pragma.txt	168
+pragma.txt	166
 stdlib.txt	0
 typeclass.txt	29
 typeop.txt	10

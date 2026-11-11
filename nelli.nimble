@@ -1848,6 +1848,8 @@ task test, "Run the test suite":
             "tsymex_0016_wa_runtime_panics",
             # RFC-0016 CR-A: a generic exception type declines rather than being identified by its last type argument.
             "tsymex_0016_cr_generic_exn",
+            # RFC-0016 CR-4 (review H5): a routine {.noinit.} result starts unwritten; routine pragmas with no reader decline.
+            "tsymex_0016_cr4_routine_noinit",
             # RFC-0016 S8cj: a run's Z3 context does not outlive the run (PRC-32, CI-03);
             # a verdict after Z3 5.1's mk_unique message is never a trusted sat/unsat (UPS-02, PND-10).
             "tsymex_0016_s8cj_runctx",

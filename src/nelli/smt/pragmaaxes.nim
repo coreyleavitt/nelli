@@ -138,12 +138,38 @@ func pragmaRows(): seq[PragmaKey] =
      "exportJs", "tlsEmulation"],
     "a compiler diagnostic or code-generation switch with no effect on a value")
   result.add read(ppRoutine,
-    ["magic", "borrow", "importCompilerProc", "importc", "importcpp", "importjs", "exportc",
-     "header", "dynlib", "nodecl", "extern", "error", "thread", "noinit",
-     "constructor", "varargs", "noreturn", "compileTime", "asmNoStackFrame",
-     "nodestroy", "codegenDecl", "emit"],
-    "decided where the callee is resolved: a magic, a foreign body, an " &
-    "opaque call, a thread entry")
+    ["magic", "borrow", "importc", "importcpp", "importjs", "dynlib"],
+    "decided where the callee is resolved: a magic (`implMagic`), a borrow " &
+    "(`hasBorrowPragma`), a foreign body routed to the opaque-call arm " &
+    "(`isBodilessForeign`)")
+  result.add read(ppRoutine, ["noreturn"],
+    "a call to it ends the path (`isNoReturnRoutine`)")
+  result.add read(ppRoutine, ["thread"],
+    "a thread's entry (`routeBodyOf`); a direct call runs its body as written")
+  result.add read(ppRoutine, ["noinit"],
+    "`result` starts unwritten, as a `{.noinit.}` local does: a read before " &
+    "a write is indeterminate (`noinitResultPrologue`); a managed result " &
+    "declines")
+  result.add inert(ppRoutine, ["exportc", "extern", "header", "nodecl"],
+    "names the routine's C symbol, adds an `#include` or leaves out its " &
+    "prototype: the Nim body runs as written (a foreign body is decided by " &
+    "`importc`)")
+  result.add inert(ppRoutine, ["error", "compileTime"],
+    "a call to it in run-time code does not compile, so no walked program " &
+    "reaches it")
+  result.add declined(ppRoutine, ["nodestroy"], feUnsupportedOp,
+    "no destructor or hook is injected in the body: an assignment is a " &
+    "bitwise copy and nothing is destroyed, which the copy model (hooks " &
+    "run) does not represent")
+  result.add declined(ppRoutine,
+    ["codegenDecl", "constructor", "asmNoStackFrame", "emit", "varargs"],
+    feUnsupportedOp,
+    "changes the routine's generated C/C++ (its declaration, a C++ " &
+    "constructor, a frameless assembler body, emitted code, C varargs), " &
+    "which the walk does not read")
+  result.add declined(ppRoutine, ["importCompilerProc"], feUnsupportedOp,
+    "a body supplied by the compiler's runtime, not by the declaration: an " &
+    "empty body walked would answer the zero default")
   # --- the parameter list -------------------------------------------------------
   result.add inert(ppParam, ["inject", "used"],
     "template hygiene or a hint; no run-time effect")

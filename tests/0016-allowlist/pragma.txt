@@ -38,7 +38,6 @@ pragma:routine/callsite	K8b	no pin record: the row exists (K3c); K3c pins the lo
 pragma:routine/cdecl	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/checks	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/closure	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
-pragma:routine/codegenDecl	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/compileTime	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/compilerRtl	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/compilerproc	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
@@ -93,7 +92,6 @@ pragma:routine/noSideEffect	K8b	no pin record: the row exists (K3c); K3c pins th
 pragma:routine/noWeirdTarget	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/noconv	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/nodecl	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
-pragma:routine/nodestroy	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/noinit	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/noinline	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest
 pragma:routine/nonReloadable	K8b	no pin record: the row exists (K3c); K3c pins the local, type and routine rows its test names; K8b's pragma family exercises the rest

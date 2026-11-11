@@ -4,13 +4,23 @@
 ## owner has overflow checks off, unless the build wraps: under `-fwrapv` the
 ## signed `+` is a defined wrap and the sat carries no such kind. The opposite
 ## case (no `-fwrapv`, checks off) is `tsymex_0016_w3z_p1_off`. Under vcc the
-## build is refused by design and cannot import `nelli/symex`
-## (`tsymex_0016_k5a_fwrapv` holds the refusal); the cell is recorded skipped.
+## build is refused by design and cannot import `nelli/symex`, so this arm
+## asserts the refusal through `admitBuild`, as `tsymex_0016_k5a_fwrapv` and
+## `tsymex_0016_k5b_cfg_fwrapv` do; the msvc row's `build:fwrapv` cell is
+## allowlisted (`tests/0016-allowlist/build.txt`, `rows=msvc`).
 import nelli/smt/buildprofile
 when defined(vcc):
-  import ./s8cu_helpers
-  skipCell(cellKey(axBuild, "fwrapv"),
-           "-d:nelliFwrapv is refused under vcc, which has no -fwrapv")
+  # Neither `nelli/symex` nor `s8cu_helpers` (which imports it) compiles here:
+  # the build is refused at compile time.
+  import std/[unittest, strutils, options]
+  suite "W3-z P2: opaque scan, -fwrapv build (vcc)":
+    test "symex refuses the build by name":
+      check buildSemantics.fwrapv
+      let refusal = admitBuild(buildSemantics, buildProvenance)
+      check refusal.isSome
+      if refusal.isSome:
+        check refusal.get.field == bfFwrapv
+        check "-fwrapv" in refusal.get.reason
 else:
   import std/[unittest, strutils]
   import nelli

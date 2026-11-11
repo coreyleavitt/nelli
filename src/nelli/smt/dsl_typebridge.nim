@@ -57,6 +57,20 @@ const nimLibDirForCmp = block:
   if not d.endsWith("/"): d.add '/'
   d
 
+proc underNimLib(path: string): bool =
+  ## `path`, normalised as `nimLibDirForCmp` is, starts with it. RFC-0016 W3-z
+  ## R10 follow-up: compared a character at a time, stopping at the first that
+  ## differs (a program's file, at its first few), where normalising the whole
+  ## path first (`replace`, `toLowerAscii`, three passes and two copies) cost
+  ## the compile-time VM a few hundred iterations a call, and the parse and a
+  ## replay's footprint ask `isStdlibDecl` of every symbol they read
+  ## (`tsymex_0016_w3z_r10_nestedreplay`).
+  if path.len < nimLibDirForCmp.len: return false
+  for i in 0 ..< nimLibDirForCmp.len:
+    let c = if path[i] == '\\': '/' else: path[i].toLowerAscii
+    if c != nimLibDirForCmp[i]: return false
+  true
+
 proc isStdlibDecl*(sym: NimNode): bool =
   ## RFC-0005 S8c. True iff `sym` is a symbol whose declaration lives in the
   ## compiler's own `lib/` tree (`system` and its includes, `std/*`,
@@ -66,8 +80,7 @@ proc isStdlibDecl*(sym: NimNode): bool =
   if sym.kind != nnkSym: return false
   let impl = sym.getImpl
   if impl.kind == nnkNilLit: return false
-  impl.lineInfoObj.filename.replace('\\', '/').toLowerAscii.startsWith(
-    nimLibDirForCmp)
+  underNimLib(impl.lineInfoObj.filename)
 
 const userRoutineSymKinds* = {nskProc, nskFunc, nskMethod, nskConverter,
                              nskIterator}

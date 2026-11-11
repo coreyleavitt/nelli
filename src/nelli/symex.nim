@@ -2814,6 +2814,21 @@ var routineFootprints {.compileTime.}: Table[string, RoutineFootprint]
 var fileHookMemo {.compileTime.}: Table[string, bool]
 var typeHookMemo {.compileTime.}: Table[string, bool]
 
+proc textNamesHook(text: string): bool =
+  ## RFC-0005 S8ct. `text` holds `=destroy`, `=sink`, `=copy`, `=dup` or
+  ## `=trace`. RFC-0016 W3-z R10 follow-up: in one pass over the text, from
+  ## one `=` to the next, stopping at the first. Five whole-text searches (one
+  ## per hook, none stopping) cost the compile-time VM five iterations a byte,
+  ## and a replay's scan reads every module of the program it reaches
+  ## (`types.nim` alone is 330 kB): past the VM's default iteration limit
+  ## (`tsymex_0016_w3z_r10_nestedreplay`).
+  var i = text.find('=')
+  while i >= 0:
+    for h in ["destroy", "sink", "copy", "dup", "trace"]:
+      if text.continuesWith(h, i + 1): return true
+    i = text.find('=', i + 1)
+  false
+
 proc fileDeclaresHook(path: string): bool =
   ## RFC-0005 S8ct. A type's hooks must be declared in its module. The macro API
   ## cannot ask a type for its hooks, so the module's text is what is read; one
@@ -2821,10 +2836,7 @@ proc fileDeclaresHook(path: string): bool =
   if path in fileHookMemo: return fileHookMemo[path]
   result = true
   try:
-    let text = readFile(path)
-    result = false
-    for h in ["=destroy", "=sink", "=copy", "=dup", "=trace"]:
-      if h in text: result = true
+    result = textNamesHook(readFile(path))
   except CatchableError:
     discard
   fileHookMemo[path] = result
@@ -3055,8 +3067,17 @@ proc isRuntimeCode(impl: NimNode): bool =
   ## nelli's replay markers, whose state is per-thread, or synchronised, or of
   ## no consequence to what the program computes. A variable of it the program
   ## names is still the program's footprint (`scanFootprint`).
+  ## RFC-0016 W3-z R10 follow-up: `/lib/system/` is looked for by
+  ## `continuesWith` at each `/`, not `in`, whose skip table costs the
+  ## compile-time VM 256 iterations a call before it reads the path, once per
+  ## routine a replay's footprint reads (`tsymex_0016_w3z_r10_nestedreplay`).
   let f = impl.lineInfoObj.filename.replace('\\', '/')
-  "/lib/system/" in f or f.endsWith("/lib/system.nim") or
+  var inSystem = false
+  var i = f.find('/')
+  while i >= 0 and not inSystem:
+    inSystem = f.continuesWith("/lib/system/", i)
+    i = f.find('/', i + 1)
+  inSystem or f.endsWith("/lib/system.nim") or
     f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
 
 proc routineFootprint(r: NimNode): RoutineFootprint =
@@ -3126,7 +3147,10 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
   if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds or
      symKind(fn) == nskMethod:
     return ReplayFootprint(open: true, why: "a routine that is not a plain symbol")
-  var seen: seq[string]
+  # RFC-0016 W3-z R10 follow-up: a set, not a list. A replay nested in the
+  # routine reaches a thousand routines, and a list's membership test made
+  # the scan quadratic in them (`tsymex_0016_w3z_r10_nestedreplay`).
+  var seen: HashSet[string]
   var routines: seq[NimNode]
   var ownerGlobals: seq[(NimNode, string)]
   var nestedSeen: seq[NimNode]
@@ -3135,7 +3159,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     let r = stack.pop()
     let key = routineKey(r)
     if key in seen: continue
-    seen.add key
+    seen.incl key
     routines.add r
     if not isStdlibDecl(r): result.userRoutines.add r
     if symKind(r) == nskMethod: result.methods.add r
@@ -3648,8 +3672,9 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           `body`
         else:
           ReplayReport()
+      let slotsTy = bindSym"RoutineSlots"
       preamble = quote do:
-        var `registry` {.global.}: seq[pointer]
+        var `registry` {.global.}: `slotsTy`
         proc `childProc`(`payload`: string): ReplayReport {.nimcall.} =
           var `rd` = initWireReader(`payload`, `registry`)
           `rd`.envGet = `envGetExpr`

@@ -622,8 +622,14 @@ const renderAsChoicesVersion* = "12"
   ##   walk no longer follows; it read as open and forked both ways at every
   ##   later branch. A tail that reached a decline or a spent budget only on
   ##   such a path is no longer unverified for it.
+  ## - RFC-0016 W3-z int7 (353->354): a run walks the tail once per distinct
+  ##   pins (`verifyTailDefinedOnce`): replay candidates with the same model
+  ##   pins share one walk and its answer. A repeat walked again on what the
+  ##   earlier walks left of the run's tail budget read `ubTailUnverified`
+  ##   when that budget ran out; it now carries the answer of the walk under
+  ##   its pins, and distinct pins keep more of the budget.
 
-const symexWalkerVersion* = "353"
+const symexWalkerVersion* = "354"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

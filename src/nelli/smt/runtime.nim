@@ -30969,6 +30969,49 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
                                      pins, via, sites)
   (all: fixed + via, viaOnly: via - fixed, sites: sites)
 
+type TailWalked = seq[tuple[pins: seq[Z3Bool];
+                            tail: tuple[all, viaOnly: set[UbKind];
+                                        sites: seq[string]]]]
+  ## RFC-0016 W3-z int7. The tail walks one run has made, by their pins.
+
+proc samePins(ctx: Z3Context; a, b: seq[Z3Bool]): bool =
+  ## The same pin terms in the same order. Z3 hash-conses its terms, so two
+  ## structurally equal terms of one context are one node with one id, and
+  ## `TailWalked` holds every term it compares, so no id is freed and reused.
+  if a.len != b.len: return false
+  for i in 0 ..< a.len:
+    if astId(ctx, a[i].raw) != astId(ctx, b[i].raw): return false
+  true
+
+proc verifyTailDefinedOnce(prog: SymexProgram; settings: SymexSettings;
+                           ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
+                           pins: seq[Z3Bool]; walked: var TailWalked):
+                           tuple[all, viaOnly: set[UbKind]; sites: seq[string]] =
+  ## RFC-0016 W3-z int7. `verifyTailDefined`, walked once per distinct pins
+  ## within one run. Every input of the tail walk other than the pins --
+  ## `prog`, `settings`, `ctx`, `env`, `initialPC` -- is the run's and the
+  ## same for each of its candidates, so the walk is the same check under
+  ## the same pins, and its answer is that check's answer. Replay
+  ## candidates of one run often share their pins: `q10_once` in
+  ## `tsymex_rfc0005_s8cq_twice11` hands out 24 with the one model `x = 0`.
+  ## Walked per candidate, 13 identical walks of 8,014,309 units spent the
+  ## run's whole tail budget (`tailUnitsRun`, R9/int4r), and the other 11
+  ## failed closed on the spent budget: 138 s on Linux for one check that
+  ## took 6 s before R2 (7dbb8566), killed at the 240 s bound on mingw.
+  ##
+  ## Sound: the answer returned for a repeat is one a whole walk under those
+  ## very pins gave, kinds, `viaOnly` split and proc-value sites alike, so a
+  ## candidate is trusted only if a walk under its pins showed the tail
+  ## defined, and every kind that walk named stays named. Only a fail-closed
+  ## artifact goes: a repeat is not walked again on the budget its
+  ## predecessors left, so it cannot read `ubTailUnverified` for want of
+  ## budget the first walk under its pins did not lack. Distinct pins are
+  ## walked as before, on what the run's budget has left.
+  for e in walked:
+    if samePins(ctx, e.pins, pins): return e.tail
+  result = verifyTailDefined(prog, settings, ctx, env, initialPC, pins)
+  walked.add (pins: pins, tail: result)
+
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult =
@@ -31592,14 +31635,16 @@ proc runSymexImpl(prog: SymexProgram,
     # as it does the winner's. Replay off: no candidate is ever confirmed.
     if settings.wholeRunDefinedness and settings.replay and
        target.kind == stkLabel:
+      # RFC-0016 W3-z int7: one walk per distinct pins (`verifyTailDefinedOnce`).
+      var walked: TailWalked
       for c in w.candidates.mitems:
         # RFC-0016 W3-z R7: a candidate whose kinds all came through
         # proc-valued variables (`undefinedViaOnly`) is walked too: a replay
         # may replace those, and then the tail must have been looked at.
         let fixed = c.soundness.witnessUndefined - c.undefinedViaOnly
         if c.status == sxSat and fixed == {}:
-          let tail = verifyTailDefined(prog, settings, ctx, env, initialPC,
-                                       c.witness.pins)
+          let tail = verifyTailDefinedOnce(prog, settings, ctx, env,
+                                           initialPC, c.witness.pins, walked)
           let all = c.soundness.witnessUndefined + ubOrdinals(tail.all)
           let allFixed = fixed + ubOrdinals(tail.all - tail.viaOnly)
           c.soundness.witnessUndefined = all

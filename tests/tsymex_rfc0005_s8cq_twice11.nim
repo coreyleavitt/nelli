@@ -144,3 +144,44 @@ suite "tsymex_rfc0005_s8cq_twice11":
     pin(q17, "q17_ne", false, sxUnknown)
     pin(q18, "q18_two", true, sxSat)
     pin(q18, "q18_ne", false, sxUnsat)
+
+import std/os
+import nelli/smt/runtime
+
+proc tailUnitLines(log: string): seq[int] =
+  ## The units of each tail walk (`k10b-tail` lines of the K7 units log).
+  for line in readFile(log).splitLines:
+    let f = line.split('\t')
+    if f.len >= 2 and f[1] == "k10b-tail": result.add parseInt(f[0])
+
+suite "tsymex_rfc0005_s8cq_twice11: the replay candidates' tail walks":
+  # RFC-0016 W3-z int7. `q10_once` is reached only past a havoc (the
+  # table's declined internals), so the run hands out replay candidates, and
+  # R2 walks each one's tail before a replay may trust it. All 24 carry the
+  # same model pins (`x = 0`), so their tails are one check: a tail walk is
+  # a function of the run and the pins alone. Walked once per candidate, 13
+  # walks of 8,014,309 units spent the run's whole tail budget (100M units,
+  # `tailWalkCappedChecks` times `concreteBranchRLimit`), the other 11 failed
+  # closed on the spent budget, and the check took 138 s on Linux against
+  # 6 s at main db6c3da6 (killed at the 240 s bound on mingw). The
+  # requirement: a run walks the tail once per distinct pins, so here one
+  # walk, and the run's tail budget is not spent on repeats of it.
+  test "walker 354: candidates with the same pins share one tail walk":
+    check parseInt(symexWalkerVersion) >= 354
+    let log = getTempDir() / ("s8cq_q10_units_" & $getCurrentProcessId() & ".log")
+    removeFile(log)
+    putEnv(walkUnitsLogEnv, log)
+    let r = try: symexFind(q10, tLabel("q10_once"))
+            finally: delEnv(walkUnitsLogEnv)
+    check r.status == sxUnknown
+    let tails = if fileExists(log): tailUnitLines(log) else: @[]
+    removeFile(log)
+    checkpoint "tail walk units: " & $tails
+    # Red at 7808bc79: 13 walks (8,014,309 units each but the last), summing
+    # to the whole budget.
+    check tails.len == 1
+    let budget = defaultSymexSettings().budget.tailWalkCappedChecks *
+                 int(concreteBranchRLimit(defaultSymexSettings()))
+    var spent = 0
+    for u in tails: spent += u
+    check spent < budget

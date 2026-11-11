@@ -22129,6 +22129,82 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
     merged.defectSurvivorPc = base.defectSurvivorPc & @[cond.implies(facts.get)]
   @[merged]
 
+var uninterpDeclKind {.threadvar.}: int
+  ## RFC-0016 W3-z int4x. `Z3_get_decl_kind` of an uninterpreted symbol (a
+  ## constant or a function), plus one; 0 until first read.
+
+proc uninterpSymbols(ctx: Z3Context; root: Z3Bool): HashSet[int] =
+  ## RFC-0016 W3-z int4x. The uninterpreted symbols `root` mentions -- its
+  ## free constants and uninterpreted functions, each by its declaration's
+  ## id. Bound variables (a quantifier's, a lambda's) are not symbols.
+  if uninterpDeclKind == 0:
+    let pc = probeContext()
+    let c = mkIntVar(pc, "__int4x_uninterp_probe")
+    uninterpDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, c.raw)))) + 1
+  var seen: HashSet[int]
+  var stack = @[root.raw]
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    case Z3_get_ast_kind(ctx.raw, t)
+    of Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, t)
+      let decl = Z3_get_app_decl(ctx.raw, app)
+      if ord(Z3_get_decl_kind(ctx.raw, decl)) + 1 == uninterpDeclKind:
+        result.incl astId(ctx, Z3_func_decl_to_ast(ctx.raw, decl))
+      for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+        stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+    of Z3_QUANTIFIER_AST:
+      stack.add Z3_get_quantifier_body(ctx.raw, t)
+    else: discard
+
+proc definingSlice(ctx: Z3Context; pins: seq[Z3Bool]; seeds: seq[Z3Bool];
+                   conjuncts: seq[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0016 W3-z int4x. The conjuncts of `conjuncts` (a path's `pc` and
+  ## defect-survivor facts) that constrain the symbols `seeds` (a branch
+  ## condition and its facts) mention which the pins leave free, closed
+  ## transitively: one that shares such a symbol with the seeds or with a
+  ## conjunct already taken is taken, and its own free symbols join the
+  ## reach. A symbol a pin fixes to a ground value (`x == v`, the pin's only
+  ## symbol) does not connect: under the pins it is that value. In order.
+  ##
+  ## This is the constraint-independence slice of a symbolic executor's
+  ## query cache (KLEE's independent-constraint set). The conjuncts it leaves
+  ## out share no free symbol with the condition, so on a path the pins do
+  ## not contradict, `pins & slice & cond` is satisfiable iff
+  ## `pins & conjuncts & cond` is: a model of the first extends by a model
+  ## of the rest, over disjoint free symbols. It is also a subset of the
+  ## `pc`, which the followed execution satisfies, so an answer it decides
+  ## holds of that execution whatever the rest says.
+  var pinned: HashSet[int]
+  for p in pins:
+    let syms = uninterpSymbols(ctx, p)
+    if syms.len == 1:
+      for s in syms: pinned.incl s
+  var reach: HashSet[int]
+  for s in seeds:
+    for x in uninterpSymbols(ctx, s):
+      if x notin pinned: reach.incl x
+  if reach.len == 0: return
+  var free = newSeq[HashSet[int]](conjuncts.len)
+  for i, c in conjuncts:
+    for x in uninterpSymbols(ctx, c):
+      if x notin pinned: free[i].incl x
+  var taken = newSeq[bool](conjuncts.len)
+  var grew = true
+  while grew:
+    grew = false
+    for i in 0 ..< conjuncts.len:
+      if taken[i] or free[i].len == 0 or disjoint(free[i], reach): continue
+      taken[i] = true
+      reach.incl free[i]
+      grew = true
+  for i, c in conjuncts:
+    if taken[i]: result.add c
+
 proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
                          facts: seq[Z3Bool];
                          construct: WalkerConstructKind): Option[bool] =
@@ -22149,11 +22225,33 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
   ## RFC-0016 W3-z R9: a first ask whose check spent its whole bound
   ## undecided (`scratchCapped`) is not asked again under the `pc`: the same
   ## query with more terms in it, at the same bound.
+  ##
+  ## RFC-0016 W3-z int4x: on the tail walk the first ask also carries the
+  ## part of the `pc` that defines the condition's free symbols
+  ## (`definingSlice`). A symbol the pins leave free -- a grown string
+  ## `__setLenStr` = `s ++ pad`, an opaque call's result -- was free in it
+  ## though the `pc` defines it, so the ask was about any string at all, not
+  ## the run's: `t[0] == 'q'` over a free `t` spent the whole 20M-unit bound
+  ## undecided (about 268 s under Z3 5.1) three times in one
+  ## `tsymex_rfc0005_s8bx_setlenstr` run, and the capped first ask then kept
+  ## the second ask, which decides it at once, from being made. Pinned
+  ## symbols alone, the slice is empty and the first ask is what it was.
+  ## Only the tail walk reads the `pc` here (K10b): the fuzzer's replay pins
+  ## every draw. Fail-closed: the slice is a subset of the `pc`, which the
+  ## followed execution satisfies, so `some(...)` from it is that
+  ## execution's outcome. A slice that is the whole `pc` makes the second
+  ## ask a repeat of the first, so it is not made.
   scratchCapped = false
-  result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings, facts)
-  if result.isNone and w.tailGate and not scratchCapped:
+  let wholePc = dp.pc & dp.defectSurvivorPc
+  let defs =
+    if w.tailGate: definingSlice(w.z3, w.concreteEq, facts & @[cond], wholePc)
+    else: newSeq[Z3Bool]()
+  result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings,
+                                 defs & facts)
+  if result.isNone and w.tailGate and not scratchCapped and
+     defs.len < wholePc.len:
     result = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings,
-                                   dp.pc & dp.defectSurvivorPc & facts)
+                                   wholePc & facts)
   if result.isNone:
     markAmbiguous(w, construct)
     # Section 9.1 item 3: an undecided side counts as undefined, so the tail

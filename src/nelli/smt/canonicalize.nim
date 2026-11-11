@@ -609,8 +609,16 @@ const renderAsChoicesVersion* = "12"
   ##   the body), whose `items` yields a computed ordinal the variable cannot
   ##   alias, and declined `tsymex_rfc0005_s8bv_iter_forms`' re-read pin:
   ##   sxUnknown there is sxSat again.
+  ## - RFC-0016 W3-z int4x (351->352): a tail-walk branch's first scratch
+  ##   check carries the part of the path's `pc` that defines the condition's
+  ##   free symbols (`definingSlice`, the constraint-independence slice), so a
+  ##   grown string's byte (`__setLenStr` = `s ++ pad`) is asked about the
+  ##   run's string, not any string. The check over a free string spent its
+  ##   whole bound undecided, and its capped answer kept the `pc` ask from
+  ##   being made: a tail-walk fork that was undecided is decided now, and
+  ##   the tail budget it spent is not spent.
 
-const symexWalkerVersion* = "351"
+const symexWalkerVersion* = "352"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

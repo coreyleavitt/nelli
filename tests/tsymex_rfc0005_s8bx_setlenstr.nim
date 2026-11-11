@@ -9,9 +9,22 @@
 ## only. Each label below reads a byte of the result of a symbolic string
 ## and must decide: the dead ones `sxUnsat`, the live ones `sxSat` with a
 ## witness that replays.
-import std/[unittest, strutils]
+##
+## RFC-0016 W3-z int4x: the live witness's tail walk (`verifyTailDefined`)
+## asks `t[0] == 'q'` of the grown string. Its scratch check left out the
+## `pc` conjunct that defines `t` (`s ++ pad`), so it asked about any string
+## and spent its whole bound undecided, three times: 849 s for this check,
+## past CI's 900 s for the file, where main took 0.9 s.
+import std/[unittest, strutils, os]
 import nelli
 import nelli/symex
+import nelli/smt/runtime
+
+proc tailUnitLines(log: string): seq[int] =
+  ## The units of each tail walk (`k10b-tail` lines of the K7 units log).
+  for line in readFile(log).splitLines:
+    let f = line.split('\t')
+    if f.len >= 2 and f[1] == "k10b-tail": result.add parseInt(f[0])
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -53,13 +66,31 @@ proc shrinkKeep(s: string, n: int) =
 
 suite "S8bx (5): setLen over a symbolic string decides":
 
+  test "walker 352: a tail check carries its free symbols' definitions (int4x)":
+    check parseInt(symexWalkerVersion) >= 352
+
   test "a grown byte is NUL":
     let d = symexFind(growPad, tLabel("grow_pad_dead"))
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnsat
-    let r = symexFind(growPad, tLabel("grow_pad_live"))
+    let log = getTempDir() / "s8bx_grow_pad_live_units.log"
+    removeFile(log)
+    putEnv(walkUnitsLogEnv, log)
+    let r = try: symexFind(growPad, tLabel("grow_pad_live"))
+            finally: delEnv(walkUnitsLogEnv)
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
+    # int4x: every branch of the witness's tail is decided by the pins and
+    # the `pc` that defines the grown string, so no scratch check of it may
+    # spend its whole bound (`concreteBranchRLimit`). A check that does makes
+    # its tail walk spend at least that bound, so each tail walk is pinned
+    # below one.
+    let tails = tailUnitLines(log)
+    removeFile(log)
+    checkpoint "tail walk units: " & $tails
+    check tails.len >= 1
+    for u in tails:
+      check u < int(concreteBranchRLimit(defaultSymexSettings()))
     if r.status == sxSat:
       check reproduces(growPad(r.witness[0], r.witness[1]), "grow_pad_live")
 

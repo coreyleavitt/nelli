@@ -28,6 +28,7 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+from nelli/smt/replayproc import replayForks
 
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs: result.add $e.kind & "/" & $e.severity & ": " & e.msg & "\n"
@@ -53,6 +54,29 @@ template confirmed(fn: typed; lbl: static string) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxSat
+
+template confirmedOnFork(fn: typed; lbl: static string; holder: static string) =
+  ## A hit through a proc value whose routine the replayed code does not name
+  ## (`setK` is named only by the start value of `holder`). A forked child
+  ## runs it: confirmed. A re-executed child (Windows) is handed the routine
+  ## by its index in the table of routines the replayed code names
+  ## (`replaywire.nim`, PRC-02), which `setK` is not in, so the replay
+  ## declines, naming the variable. The returned path is still the
+  ## candidate the decline names: never sxUnsat, and the hit is not lost.
+  block:
+    when replayForks:
+      confirmed(fn, lbl)
+    else:
+      let r = symexFind(fn, tLabel(lbl))
+      checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
+      check r.status == sxUnknown
+      var named = false
+      for e in r.errors:
+        if e.kind == feReplayDeclined and
+           "replay of a sxSat candidate (target hit)" in e.msg and
+           "`" & holder & "` holds a proc value naming no routine" in e.msg:
+          named = true
+      check named
 
 # ---- scanOpaqueEffects: a call through a proc value -------------------------
 var gK: int
@@ -135,10 +159,10 @@ suite "K2F-3: scanOpaqueEffects reads a call through a proc value":
     # the value names) and only the Defect fork (`anyDefect` for a call
     # through a proc value) was a candidate, which replay refuted: sxUnknown,
     # resting on a returned path that read as unreachable.
-    confirmed(sutGlobalCb, "gcb")
-    confirmed(sutFieldCb, "fcb")
-    confirmed(sutParamCb, "pcb")
-    confirmed(sutPassCb, "lcb")
+    confirmedOnFork(sutGlobalCb, "gcb", "gCb")
+    confirmedOnFork(sutFieldCb, "fcb", "gH")
+    confirmed(sutParamCb, "pcb")      # the SUT names `setK`: both modes
+    confirmedOnFork(sutPassCb, "lcb", "gCb")
   test "precision: no proc value, the summary stays empty":
     check "ncb" in hits(sutNoCb(1))
     check symexFind(sutNoCb, tLabel("ncb")).status == sxSat

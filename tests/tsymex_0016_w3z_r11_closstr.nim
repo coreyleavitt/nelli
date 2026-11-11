@@ -11,11 +11,16 @@
 ## the variable (`tsymex_0016_w3z_r11_hooked`: a module that declares a hook
 ## declines the replay of a value of any type it declares, so the hooked type
 ## is kept apart from this module's object).
+##
+## A build without `fork` (Windows) re-executes: the same tests pin re-exec
+## cells there (`mode`), and a cell only a fork reaches asserts the re-exec
+## child's named decline instead.
 import std/[unittest, strutils, options]
 import nelli
 import nelli/symex
 import nelli/smt/types
 from nelli/smt/runtime import hostAdmission
+from nelli/smt/replayproc import replayForks
 import ./s8cu_helpers except show
 import helpers/r11_closstr_sut
 
@@ -42,6 +47,10 @@ proc sutStartBox(v: int) =
   if gStrOut == 8: symexTarget("t")
 
 
+const mode = when replayForks: "fork/" else: "reexec/"
+  ## The replay mode this build runs: a build with no `fork` (Windows)
+  ## re-executes, and its verdicts are re-exec cells.
+
 suite "W3-z R11: a start-value closure whose environment holds buffers (fork)":
   test "the walker's version floor (R11)":
     check parseInt(symexWalkerVersion) >= 347
@@ -52,7 +61,7 @@ suite "W3-z R11: a start-value closure whose environment holds buffers (fork)":
     else:
       mkStartStr()
       discard pinExact(sutStartStr, cellKey(faCallShape,
-                       "fork/procValueClosureStartStr"), tLabel("t"))
+                       mode & "procValueClosureStartStr"), tLabel("t"))
       gStartStr = nil
 
   test "a captured seq[int] whose element makes an unchecked routine overflow":
@@ -61,7 +70,7 @@ suite "W3-z R11: a start-value closure whose environment holds buffers (fork)":
     else:
       mkStartSeqOvf()
       pinUndefined(sutStartSeqOvf, cellKey(faCallShape,
-                   "fork/procValueClosureStartSeqUnchecked"),
+                   mode & "procValueClosureStartSeqUnchecked"),
                    UbKind(ubSignedOverflow), tLabel("t"))
       gStartSeqOvf = nil
 
@@ -71,7 +80,7 @@ suite "W3-z R11: a start-value closure whose environment holds buffers (fork)":
     else:
       mkStartStrMut()
       discard pinExact(sutStartStrMut, cellKey(faCallShape,
-                       "fork/procValueClosureStartStrMut"), tLabel("t"))
+                       mode & "procValueClosureStartStrMut"), tLabel("t"))
       gStartStrMut = nil
 
   test "a captured object of a string and an int, no user hook: exact":
@@ -80,14 +89,35 @@ suite "W3-z R11: a start-value closure whose environment holds buffers (fork)":
     else:
       mkStartBox()
       discard pinExact(sutStartBox, cellKey(faCallShape,
-                       "fork/procValueClosureStartBox"), tLabel("t"))
+                       mode & "procValueClosureStartBox"), tLabel("t"))
       gStartBox = nil
 
   test "two captured values, a string among them: a fork copies them, exact":
     if hostAdmission().isSome:
       skipUnadmitted()
     else:
-      mkStartTwo()
-      discard pinExact(sutStartTwo, cellKey(faCallShape,
-                       "fork/procValueClosureStartTwo"), tLabel("t"))
-      gStartTwo = nil
+      when replayForks:
+        mkStartTwo()
+        discard pinExact(sutStartTwo, cellKey(faCallShape,
+                         mode & "procValueClosureStartTwo"), tLabel("t"))
+        gStartTwo = nil
+      else:
+        # No fork (Windows): a precision limit of the re-executed child,
+        # pinned in `tsymex_0016_prc02_reexec`. The child rebuilds an
+        # environment value by value, and the order of values of two types
+        # is the compiler's, so the replay is not marshallable. The route
+        # stands; the hit is not confirmed, and the decline names the
+        # variable and why.
+        mkStartTwo()
+        let r = symexFind(sutStartTwo, tLabel("t"))
+        gStartTwo = nil
+        checkpoint show(r.errors)
+        check not r.trusted
+        check r.status == sxUnknown
+        var named = false
+        for e in r.errors:
+          if e.kind == feReplayDeclined and "`gStartTwo` holds" in e.msg and
+             "more than one type" in e.msg:
+            named = true
+          check e.kind != feGlobalRouteUnproved
+        check named

@@ -29,7 +29,7 @@
 ##                            but does not yet restrict the SUT's
 ##                            normal-run input domain
 
-import std/[macros, sets, tables, algorithm, options, strutils, importutils]
+import std/[macros, sets, tables, algorithm, options, strutils, importutils, macrocache]
 from std/os import extractFilename
 # RFC-0016 W1-c1b: the build is admitted (or refused, by name) BEFORE `z3` is
 # imported. Under `--mm:refc` nim-z3's `=destroy` hooks do not compile, and
@@ -2814,6 +2814,21 @@ var routineFootprints {.compileTime.}: Table[string, RoutineFootprint]
 var fileHookMemo {.compileTime.}: Table[string, bool]
 var typeHookMemo {.compileTime.}: Table[string, bool]
 
+proc textNamesHook(text: string): bool =
+  ## RFC-0005 S8ct. `text` holds `=destroy`, `=sink`, `=copy`, `=dup` or
+  ## `=trace`. RFC-0016 W3-z R10 follow-up: in one pass over the text, from
+  ## one `=` to the next, stopping at the first. Five whole-text searches (one
+  ## per hook, none stopping) cost the compile-time VM five iterations a byte,
+  ## and a replay's scan reads every module of the program it reaches
+  ## (`types.nim` alone is 330 kB): past the VM's default iteration limit
+  ## (`tsymex_0016_w3z_r10_nestedreplay`).
+  var i = text.find('=')
+  while i >= 0:
+    for h in ["destroy", "sink", "copy", "dup", "trace"]:
+      if text.continuesWith(h, i + 1): return true
+    i = text.find('=', i + 1)
+  false
+
 proc fileDeclaresHook(path: string): bool =
   ## RFC-0005 S8ct. A type's hooks must be declared in its module. The macro API
   ## cannot ask a type for its hooks, so the module's text is what is read; one
@@ -2821,10 +2836,7 @@ proc fileDeclaresHook(path: string): bool =
   if path in fileHookMemo: return fileHookMemo[path]
   result = true
   try:
-    let text = readFile(path)
-    result = false
-    for h in ["=destroy", "=sink", "=copy", "=dup", "=trace"]:
-      if h in text: result = true
+    result = textNamesHook(readFile(path))
   except CatchableError:
     discard
   fileHookMemo[path] = result
@@ -3050,14 +3062,34 @@ proc scanFootprint(n: NimNode; user: bool; owner: string; selfKey: string;
     if user: acc.unlistedOpen(n, owner)
     for c in n: scanFootprint(c, user, owner, selfKey, acc)
 
+const runtimeFileMemo = CacheTable"nelli.symex.runtimeFile"
+  ## RFC-0016 W3-z R10 follow-up. `isRuntimeCode`'s answer per file, as 1 or
+  ## 0. A compiler table, so a lookup is one VM operation, not a loop.
+
+proc isRuntimeFile(path: string): bool =
+  ## `isRuntimeCode`, of the file a routine is declared in.
+  if path in runtimeFileMemo: return runtimeFileMemo[path].intVal == 1
+  let f = path.replace('\\', '/')
+  var inSystem = false
+  var i = f.find('/')
+  while i >= 0 and not inSystem:
+    inSystem = f.continuesWith("/lib/system/", i)
+    i = f.find('/', i + 1)
+  result = inSystem or f.endsWith("/lib/system.nim") or
+    f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
+  runtimeFileMemo[path] = newLit(ord(result))
+
 proc isRuntimeCode(impl: NimNode): bool =
   ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
   ## nelli's replay markers, whose state is per-thread, or synchronised, or of
   ## no consequence to what the program computes. A variable of it the program
   ## names is still the program's footprint (`scanFootprint`).
-  let f = impl.lineInfoObj.filename.replace('\\', '/')
-  "/lib/system/" in f or f.endsWith("/lib/system.nim") or
-    f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
+  ## RFC-0016 W3-z R10 follow-up: answered once per file (`runtimeFileMemo`),
+  ## and `/lib/system/` is looked for by `continuesWith` at each `/`, not
+  ## `in`, whose skip table costs the compile-time VM 256 iterations a call
+  ## before it reads the path. A replay's footprint asks it of every routine
+  ## it reads (`tsymex_0016_w3z_r10_nestedreplay`).
+  isRuntimeFile(impl.lineInfoObj.filename)
 
 proc routineFootprint(r: NimNode): RoutineFootprint =
   ## RFC-0005 S8cb. The routine `r`'s own footprint (`routineFootprints`).
@@ -3126,7 +3158,10 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
   if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds or
      symKind(fn) == nskMethod:
     return ReplayFootprint(open: true, why: "a routine that is not a plain symbol")
-  var seen: seq[string]
+  # RFC-0016 W3-z R10 follow-up: a set, not a list. A replay nested in the
+  # routine reaches a thousand routines, and a list's membership test made
+  # the scan quadratic in them (`tsymex_0016_w3z_r10_nestedreplay`).
+  var seen: HashSet[string]
   var routines: seq[NimNode]
   var ownerGlobals: seq[(NimNode, string)]
   var nestedSeen: seq[NimNode]
@@ -3135,7 +3170,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
     let r = stack.pop()
     let key = routineKey(r)
     if key in seen: continue
-    seen.add key
+    seen.incl key
     routines.add r
     if not isStdlibDecl(r): result.userRoutines.add r
     if symKind(r) == nskMethod: result.methods.add r
@@ -3609,8 +3644,14 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       for g in fp.globals:
         getGlobals.add quote do:
           wireGet(`rd`, cast[ptr typeof(`g`)](unsafeAddr `g`)[])
+        # RFC-0016 W3-z R10 follow-up: the decline names the variable whose
+        # value cannot cross, as a forked run's unlifted hint does.
+        let gName = newLit("`" & g.strVal & "` holds ")
         putGlobals.add quote do:
-          wirePut(`wr`, `g`)
+          try:
+            wirePut(`wr`, `g`)
+          except WireError as e:
+            raise newException(WireError, `gName` & e.msg)
       let blob = if child.blob != nil: child.blob else: witId
       # RFC-0016 PRC-02b. The child is this binary, so the toolchain's table of
       # what each method dispatcher can run says what it would run: a body no
@@ -3642,8 +3683,9 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           `body`
         else:
           ReplayReport()
+      let slotsTy = bindSym"RoutineSlots"
       preamble = quote do:
-        var `registry` {.global.}: seq[pointer]
+        var `registry` {.global.}: `slotsTy`
         proc `childProc`(`payload`: string): ReplayReport {.nimcall.} =
           var `rd` = initWireReader(`payload`, `registry`)
           `rd`.envGet = `envGetExpr`

@@ -28,6 +28,7 @@ import std/options   ## RFC-0005 S8bv: `classifyEnumSubrange`
 import std/sequtils
 import std/tables     ## RFC-0005 S8e: the witness type-symbol registry
 import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
+import std/macrocache   ## RFC-0016 W3-z R10 follow-up: `stdlibFileMemo`
 import ./types
 import ./check_options   ## RFC-0016 K4c: `moduleStemOf`
 import ./stdlib_rows     ## RFC-0016 K4c: the stdlib-body axis
@@ -57,6 +58,29 @@ const nimLibDirForCmp = block:
   if not d.endsWith("/"): d.add '/'
   d
 
+const stdlibFileMemo = CacheTable"nelli.dsl_typebridge.stdlibFile"
+  ## RFC-0016 W3-z R10 follow-up. `underNimLib`'s answer per file, as 1 or 0.
+  ## A compiler table, so a lookup is one VM operation, not a loop.
+
+proc underNimLib(path: string): bool =
+  ## `path`, normalised as `nimLibDirForCmp` is, starts with it. RFC-0016 W3-z
+  ## R10 follow-up: answered once per file (`stdlibFileMemo`) and compared a
+  ## character at a time, where normalising the whole path on every call
+  ## (`replace`, `toLowerAscii`, three passes and two copies) cost the
+  ## compile-time VM a loop iteration a character, the stdlib's path is ~50
+  ## characters on a Windows runner, and the parse and a replay's footprint
+  ## ask `isStdlibDecl` of some 20 000 symbols in a SUT holding a replay
+  ## (`tsymex_0016_w3z_r10_nestedreplay`).
+  if path in stdlibFileMemo: return stdlibFileMemo[path].intVal == 1
+  result = path.len >= nimLibDirForCmp.len
+  if result:
+    for i in 0 ..< nimLibDirForCmp.len:
+      let c = if path[i] == '\\': '/' else: path[i].toLowerAscii
+      if c != nimLibDirForCmp[i]:
+        result = false
+        break
+  stdlibFileMemo[path] = newLit(ord(result))
+
 proc isStdlibDecl*(sym: NimNode): bool =
   ## RFC-0005 S8c. True iff `sym` is a symbol whose declaration lives in the
   ## compiler's own `lib/` tree (`system` and its includes, `std/*`,
@@ -66,8 +90,7 @@ proc isStdlibDecl*(sym: NimNode): bool =
   if sym.kind != nnkSym: return false
   let impl = sym.getImpl
   if impl.kind == nnkNilLit: return false
-  impl.lineInfoObj.filename.replace('\\', '/').toLowerAscii.startsWith(
-    nimLibDirForCmp)
+  underNimLib(impl.lineInfoObj.filename)
 
 const userRoutineSymKinds* = {nskProc, nskFunc, nskMethod, nskConverter,
                              nskIterator}

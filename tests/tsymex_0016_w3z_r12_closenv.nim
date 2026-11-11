@@ -10,11 +10,16 @@
 ##   another user module still declines, at the route scan (its copy hooks).
 ## * A closure of a routine nested in a nested one: its environment links to
 ##   the enclosing routine's, whose destructor the compiler generates too.
+##
+## A build without `fork` (Windows) re-executes: the same tests pin re-exec
+## cells there (`mode`), and a cell only a fork reaches asserts the re-exec
+## child's named decline instead.
 import std/[unittest, strutils, options]
 import nelli
 import nelli/symex
 import nelli/smt/types
 from nelli/smt/runtime import hostAdmission
+from nelli/smt/replayproc import replayForks
 import ./s8cu_helpers except show
 import helpers/r12_closenv_sut
 import helpers/r12_hooked
@@ -23,6 +28,10 @@ proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs: parts.add $e.kind & ": " & e.msg
   parts.join("\n")
+
+const mode = when replayForks: "fork/" else: "reexec/"
+  ## The replay mode this build runs: a build with no `fork` (Windows)
+  ## re-executes, and its verdicts are re-exec cells.
 
 suite "W3-z R12: a start-value closure R11 declined (fork)":
   test "the walker's version floor (R12)":
@@ -34,7 +43,7 @@ suite "W3-z R12: a start-value closure R11 declined (fork)":
     else:
       mkStartStrPair()
       discard pinExact(sutStartStrPair, cellKey(faCallShape,
-                       "fork/procValueClosureStartStrPair"), tLabel("t"))
+                       mode & "procValueClosureStartStrPair"), tLabel("t"))
       gStartStrPair = nil
 
   test "three captured seqs, one making an unchecked routine overflow":
@@ -43,7 +52,7 @@ suite "W3-z R12: a start-value closure R11 declined (fork)":
     else:
       mkStartSeqTrio()
       pinUndefined(sutStartSeqTrio, cellKey(faCallShape,
-                   "fork/procValueClosureStartSeqTrio"),
+                   mode & "procValueClosureStartSeqTrio"),
                    UbKind(ubSignedOverflow), tLabel("t"))
       gStartSeqTrio = nil
 
@@ -53,7 +62,7 @@ suite "W3-z R12: a start-value closure R11 declined (fork)":
     else:
       mkStartSlice()
       discard pinExact(sutStartSlice, cellKey(faCallShape,
-                       "fork/procValueClosureStartSlice"), tLabel("t"))
+                       mode & "procValueClosureStartSlice"), tLabel("t"))
       gStartSlice = nil
 
   test "a captured library Table[int, string]: the route stands, confirmed":
@@ -90,10 +99,30 @@ suite "W3-z R12: a start-value closure R11 declined (fork)":
     if hostAdmission().isSome:
       skipUnadmitted()
     else:
-      mkStartNested()
-      discard pinExact(sutStartNested, cellKey(faCallShape,
-                       "fork/procValueClosureStartNested"), tLabel("t"))
-      gStartNested = nil
+      when replayForks:
+        mkStartNested()
+        discard pinExact(sutStartNested, cellKey(faCallShape,
+                         mode & "procValueClosureStartNested"), tLabel("t"))
+        gStartNested = nil
+      else:
+        # No fork (Windows): a precision limit of the re-executed child,
+        # pinned in `tsymex_0016_prc02_reexec`. The environment's first
+        # field is the address of the enclosing routine's environment in the
+        # host, so the replay is not marshallable. The route stands; the hit
+        # is not confirmed, and the decline names the variable and why.
+        mkStartNested()
+        let r = symexFind(sutStartNested, tLabel("t"))
+        gStartNested = nil
+        checkpoint show(r.errors)
+        check not r.trusted
+        check r.status == sxUnknown
+        var named = false
+        for e in r.errors:
+          if e.kind == feReplayDeclined and "`gStartNested` holds" in e.msg and
+             "nested in a nested one" in e.msg:
+            named = true
+          check e.kind != feGlobalRouteUnproved
+        check named
 
   test "a captured object whose module hides a =destroy still declines":
     mkStartForeignHooked()

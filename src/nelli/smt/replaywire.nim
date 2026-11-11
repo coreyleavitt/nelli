@@ -29,6 +29,11 @@ import std/typetraits
 
 type
   WireError* = object of CatchableError
+  RoutineSlots* = seq[pointer]
+    ## RFC-0016 W3-z R10 follow-up. The routine table's type, by one symbol:
+    ## a replay's child entry declares its table `{.global.}`, and spelled
+    ## `seq[pointer]` inside a routine that declaration's type is a call of
+    ## every `[]` in scope, which a scan of that routine then reads.
   EnvPut* = proc (w: var WireWriter; env: pointer) {.nimcall.}
     ## RFC-0016 W3-z R11. Writes the one value a closure environment holds.
   EnvGet* = proc (r: var WireReader; env: pointer) {.nimcall.}

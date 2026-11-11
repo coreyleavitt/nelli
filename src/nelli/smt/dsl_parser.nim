@@ -16463,9 +16463,48 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
     if not scanShapeReceiverMutated(procDef[6], paramSyms[name]):
       result.add paramSyms[name]
 
+type CollectorMemo[T] = Table[string, seq[tuple[def: NimNode; got: T]]]
+  ## RFC-0016 W3-z R10 follow-up. A whole-call-graph collector's answer per
+  ## routine body. `parseProc` and every callee `ensureProcRegistered` parses
+  ## asks the three collectors below of its own body, and each walks the
+  ## whole call graph under it from a fresh cycle guard, so a parse of `n`
+  ## routines walked the graph `3n` times (and `collectIntOffsetLiteralLocals`
+  ## once more per call site). The answer is a function of the body alone (a
+  ## fresh guard each time, and every callee reached through its symbol), so
+  ## it is kept, keyed by the routine's name and position and confirmed by
+  ## `==`, which compares two bodies structurally, symbols by identity (a
+  ## monomorphised copy with fresh symbols is another body). A replay nested
+  ## in a routine (R10's routine table and environment codecs) reached enough
+  ## routines that the walks ran the compile-time VM past its default
+  ## iteration limit (`tsymex_0016_w3z_r10_nestedreplay`).
+
+proc memoKey(procDef: NimNode): string =
+  (if procDef.len > 0 and procDef[0].kind == nnkSym: procDef[0].strVal
+   else: "") & "@" & procDef.lineInfo
+
+proc memoFind[T](memo: CollectorMemo[T]; key: string; procDef: NimNode;
+                 got: var T): bool =
+  if key notin memo: return false
+  for e in memo[key]:
+    if e.def == procDef:
+      got = e.got
+      return true
+  false
+
+proc memoKeep[T](memo: var CollectorMemo[T]; key: string; procDef: NimNode;
+                 got: T) =
+  memo.mgetOrPut(key, @[]).add (def: procDef, got: got)
+
+var stringBackedMemo {.compileTime.}: CollectorMemo[seq[NimNode]]
+var intOffsetMemo {.compileTime.}: CollectorMemo[HashSet[string]]
+var scanOffsetMemo {.compileTime.}: CollectorMemo[HashSet[string]]
+
 proc collectStringBackedByteSeqParams(procDef: NimNode): seq[NimNode] =
+  let key = memoKey(procDef)
+  if stringBackedMemo.memoFind(key, procDef, result): return
   let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
-  collectStringBackedByteSeqParamsImpl(procDef, visiting)
+  result = collectStringBackedByteSeqParamsImpl(procDef, visiting)
+  stringBackedMemo.memoKeep(key, procDef, result)
 
 proc offsetShapedElem(n: NimNode, iNode: NimNode): bool =
   ## Round-6 B5 (ADR-0028 Leg 1, chained composition). True iff `n` is the
@@ -16691,8 +16730,11 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
   marked
 
 proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
+  let key = memoKey(procDef)
+  if intOffsetMemo.memoFind(key, procDef, result): return
   let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
-  collectIntOffsetParamsImpl(procDef, visiting)
+  result = collectIntOffsetParamsImpl(procDef, visiting)
+  intOffsetMemo.memoKeep(key, procDef, result)
 
 proc collectScanOffsetParams(procDef: NimNode): HashSet[string] =
   ## RFC-0005 S8q. The entry proc's `int` params that reach a scan's loop
@@ -16709,8 +16751,12 @@ proc collectScanOffsetParams(procDef: NimNode): HashSet[string] =
   ## stamped with its Nim width and bounded by its type's range
   ## (`IRParam.isScanOffset`), which is the bit-vector's value set, so
   ## it loses no overflow obligation.
+  ## RFC-0016 W3-z R10 follow-up: kept per body (`CollectorMemo`).
+  let key = memoKey(procDef)
+  if scanOffsetMemo.memoFind(key, procDef, result): return
   let visiting = newCollectorVisiting()
-  collectIntOffsetParamsImpl(procDef, visiting, scanOffsetIndex)
+  result = collectIntOffsetParamsImpl(procDef, visiting, scanOffsetIndex)
+  scanOffsetMemo.memoKeep(key, procDef, result)
 
 proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   ## Round-6 B7r2 (walker v88). A COMPANION to `collectIntOffsetParams` for

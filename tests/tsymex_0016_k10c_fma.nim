@@ -1,4 +1,4 @@
-## RFC-0016 K10c -- `-ffp-contract`: the Linux x86-64 row does not contract.
+## RFC-0016 K10c -- `-ffp-contract`: the gcc x86-64 rows (Linux, mingw) do not contract.
 ##
 ## gcc's default is `-ffp-contract=fast`: it MAY fuse `a * b + c` into one
 ## rounding. Whether it does depends on the target having a fused multiply-add
@@ -82,24 +82,22 @@ suite "K10c: -ffp-contract":
                       domain = sampled([0.0, 1.0, aLit, cLit]))
       check r.status == sxSat
 
-    when defined(windows):
-      test "mingw: the one-off builds are the Linux row's":
-        skipCell(cellKey(axBuild, cell), "the -ffp-contract one-off builds are " &
-          "pinned on the Linux x86-64 legs; mingw is covered by the walker pin")
-    else:
-      test "-ffp-contract=off equals the default build":
-        let dflt = runProbe(@[])
-        let off = runProbe(@["--passC:-ffp-contract=off"])
-        check dflt == unfusedBits
-        check off == dflt
-        pinNever(cellKey(axBuild, cell), dflt == unfusedBits and off == dflt,
-          "default and -ffp-contract=off both compute " & $dflt &
-          " (a*b rounded, then +c)")
+    # Both gcc rows (Linux and mingw) run the one-off builds: the cell is
+    # `never`, which a walker pin cannot evidence, only the native fact.
+    test "-ffp-contract=off equals the default build":
+      let dflt = runProbe(@[])
+      let off = runProbe(@["--passC:-ffp-contract=off"])
+      check dflt == unfusedBits
+      check off == dflt
+      pinNever(cellKey(axBuild, cell), dflt == unfusedBits and off == dflt,
+        "default and -ffp-contract=off both compute " & $dflt &
+        " (a*b rounded, then +c)")
 
-      test "-mfma -ffp-contract=fast computes the fused bits":
-        if hasFma():
-          let fused = runProbe(@["--passC:-mfma", "--passC:-ffp-contract=fast"])
-          check fused == fusedBits
-        else:
-          skipCell(cellKey(axBuild, cell), "this CPU has no FMA, so the " &
-            "contracting build cannot run; the default/off equality above stands")
+    test "-mfma -ffp-contract=fast computes the fused bits":
+      if hasFma():
+        let fused = runProbe(@["--passC:-mfma", "--passC:-ffp-contract=fast"])
+        check fused == fusedBits
+      else:
+        skipCell(cellKey(axBuild, cell), "no FMA detected (" &
+          (when defined(linux): "this CPU has none" else: "read from /proc/cpuinfo, Linux only") &
+          "), so the contracting build is not run; the default/off equality above stands")

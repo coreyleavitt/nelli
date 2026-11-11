@@ -6,8 +6,7 @@
 ## row with `pinExact` or `pinDecline`. Rows: SND-13, CRH-06, CRH-09, INT-11,
 ## INT-12, INT-15, W-19b, W-19c, W-24.
 import std/[unittest, os, strutils, sets, tables, macros, sequtils]
-when defined(posix):
-  import std/posix
+import system/ansi_c
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -79,14 +78,19 @@ proc thrSut(v: int) =
   joinThread(thr)
   if gT == 7: symexTarget("hit")
 
-when defined(posix):
-  var gS: int
-  proc sigH(sig: cint) {.noconv.} = gS = 9
-  proc sigSut(v: int) =
-    gS = 0
-    signal(SIGUSR1, sigH)
-    discard kill(getpid(), SIGUSR1)
-    if gS == 9: symexTarget("hit")
+# ISO C <signal.h> through the stdlib's `system/ansi_c` (POSIX `kill` has no
+# Windows form), so the probe runs on every row: `c_raise` delivers SIGTERM to
+# this process synchronously, through the handler `c_signal` registered.
+# `ansi_c` declares SIGTERM on Windows without exporting it; 15 is its value
+# in the Windows CRT's <signal.h>, as in glibc's.
+const sigTerm = when declared(SIGTERM): SIGTERM else: cint(15)
+var gS: int
+proc sigH(sig: cint) {.noconv.} = gS = 9
+proc sigSut(v: int) =
+  gS = 0
+  c_signal(sigTerm, sigH)
+  discard c_raise(sigTerm)
+  if gS == 9: symexTarget("hit")
 
 proc cmemset(p: var int; c: cint; n: csize_t): pointer
   {.importc: "memset", header: "<string.h>", discardable.}
@@ -267,10 +271,9 @@ suite "RFC-0016 K2-0: crashes and faults (CRH-06, INT-11, W-19b)":
     pinDecline(thrSut, cellKey(axConstruct, "threads/createThread"),
                feUnsupportedOp, needle = "routine `createThread` is not modelled")
 
-  when defined(posix):
-    test "W-19b: a signal handler writing a global declines (not a fault)":
-      check "hit" in nativeRun(sigSut(1)).hits
-      pinDecline(sigSut, cellKey(axConstruct, "signals/handler"), feOpaqueCallUnmodelled)
+  test "W-19b: a signal handler writing a global declines (not a fault)":
+    check "hit" in nativeRun(sigSut(1)).hits
+    pinDecline(sigSut, cellKey(axConstruct, "signals/handler"), feOpaqueCallUnmodelled)
 
   test "W-19b: an opaque proc with a var T parameter havocs it (no stale environment)":
     check "hit" in nativeRun(opqZero(3)).hits

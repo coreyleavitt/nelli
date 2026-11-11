@@ -10,4 +10,4 @@ build:row/msvc	K1a-ci	only a Windows msvc leg runs the msvc row; its records now
 build:exceptions/setjmp	K5b	setjmp exceptions cannot be built on the cpp backend, and a Windows setjmp walk crashes entering its fiber (INT-12), so only linux-c rows run the cfg suite (the suite records skipCell elsewhere)	rows=linux-cpp,mingw,msvc
 build:fwrapv	K5b	-d:nelliFwrapv is refused under vcc (no -fwrapv), so the msvc row cannot run the cfg suite; the refusal is the fwrapv/vcc cell	rows=msvc
 build:cflags/sanitize	K10c	no UBSan runtime exists for mingw gcc or MSVC; the Linux legs run the sweep (tests/tsymex_0016_k10c_ubsan.nim) and record this cell, the Windows legs declare each defined: cell skipped	rows=mingw,msvc
-build:cflags/fpContract	K10c	cl.exe has no -ffp-contract flag and no leg pins its contraction default; mingw runs the walker pin, the Linux legs add the -ffp-contract=off one-off build	rows=msvc
+build:cflags/fpContract	K10c	cl.exe has no -ffp-contract flag and no leg pins its contraction default; the gcc rows (Linux, mingw) run the -ffp-contract=off one-off build that evidences the never cell	rows=msvc

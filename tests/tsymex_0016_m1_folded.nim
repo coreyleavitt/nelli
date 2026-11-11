@@ -66,8 +66,12 @@ proc sSlurp(a: int) =
   const src = slurp("tsymex_0016_m1_folded.nim")
   if src.len > 0 and a == 3: symexTarget("hit")
 proc sStaticExec(a: int) =
+  # As `sDeclaredInScope`: live at 3 or 4 by the folded value. The output is
+  # the host's: `m1` on Linux; on Windows `echo` is a cmd.exe builtin and the
+  # folded value differs, so the old `out1 == "m1" and a == 3` was a sampled
+  # unsat on the mingw row, which classifies no cell.
   const out1 = staticExec("echo m1")
-  if out1 == "m1" and a == 3: symexTarget("hit")
+  if a == 3 + ord(out1 == "m1"): symexTarget("hit")
 proc sRunnableExamples(a: int) =
   runnableExamples:
     discard 1

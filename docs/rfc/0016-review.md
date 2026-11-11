@@ -1,8 +1,8 @@
 +++
 type = "review"
 id = "0016-review"
-title = "RFC-0016 Wave 1 (0.9.2) code review ledger"
-state = "floor"
+title = "RFC-0016 code review ledger (0.9.2 Wave 1; 0.10.0 Waves 2-3)"
+state = "pending"
 profile = "rfc-flow@6"
 +++
 
@@ -66,3 +66,13 @@ Four lenses ran: correctness, security, design and liveness. Adversarial verifie
 | R2-10 | Low | open | `k1lite.sh -b` is not validated against `c|cpp`. Developer-run only; no privilege boundary. | `scripts/k1lite.sh`. |
 
 **Floor reached at round 2:** 0 Critical, 0 High and 0 Medium inside the surface. The 12 touched suites returned rc=0 at 6a242791. The open Lows (R2-03 to R2-08, R2-10, L9, SC3, D8) carry into Wave 2 under INT-42.
+
+# 0.10.0 review (Waves 2-3)
+
+**Surface:** `882a6f73..a72c7334` (`v0.9.2` to main after W3-z int7): `src/`, `scripts/`, `.github/workflows/`, `tests/0016-allowlist/`, and the tests those changes added.
+
+**Precondition:** the Wave 3 wiring audit ran this session over `v0.9.2..e707b09c`. Its findings were fixed in W3-z (int..int7), and `0016/wiring` stays `proven`.
+
+**Mandate:** pending the operator's approval of the round 1 table.
+
+## Round 1 (base a72c7334)

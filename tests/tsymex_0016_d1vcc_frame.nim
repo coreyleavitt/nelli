@@ -29,7 +29,11 @@ import ./s8cu_helpers
 # The C++ backend's frames are larger: measured at the fix, the builder build
 # runs down to about 160 KB and dies below it, the inline one needs 256 KB; the
 # bound sits between them (c: 138 vs 187, see above).
-const probeStackKb = when defined(cpp): 192 else: 160
+const probeStackKb = hostStackBoundKb(defined(cpp), 160, 192, 16, 1024)
+  ## c 160 / cpp 192 at gcc. On MSVC the same model is re-derived (see
+  ## `stackBoundKb`): 128 + 16 * 1024 / 91 = 308, rounded down to 304 (c), 336
+  ## (cpp). Builder needs about 128 + 9.6 * 5.3 = 179 there, the inline shape
+  ## about 128 + 58.7 * 5.3 = 439, so 304 keeps over 120 KB either side.
 
 proc mainModuleBody(c: string): string =
   ## The text of the C function `NimMainModule`: to the next declaration at
@@ -46,7 +50,8 @@ proc mainModuleBody(c: string): string =
 
 suite "RFC-0016 D1: the IR is built outside the caller's frame":
   test "a top level of symexFind sites builds each IR in its own proc":
-    let pb = prepareProbe("d1vcc", "tests" / "s0016_d1vcc_probe.nim", [])
+    let pb = prepareProbe("d1vcc", "tests" / "s0016_d1vcc_probe.nim",
+                          hostStackLinkFlags(probeStackKb))
     defer: removeDir(pb.dir)
     let (cout, crc) = execCmdEx(pb.cmd)
     if crc != 0: checkpoint cout
@@ -67,11 +72,24 @@ suite "RFC-0016 D1: the IR is built outside the caller's frame":
     check not inlineFacts
 
     # Behavioural: the child runs on a reduced main stack and does not die of
-    # it (a stack overflow is a signal exit, rc >= 128). `ulimit` is the shell's:
-    # where there is no `sh` the structural half above is the guard.
-    if findExe("sh").len > 0:
-      let (o, rc) = execCmdEx("ulimit -s " & $probeStackKb & " && exec " &
-                              quoteShell(pb.exe), options = {poStdErrToStdOut},
-                              workingDir = getCurrentDir())
-      checkpoint o[0 ..< min(o.len, 400)]
-      check rc < 128
+    # it (a stack overflow is a signal exit on POSIX, 0xC00000FD on Windows;
+    # both are rc >= 128). The bound is `ulimit -s` on POSIX and the link-time
+    # reserve elsewhere, see `stackLinkFlags` (it is in the probe's build above).
+    let (o, rc) = runBoundedStack(pb.exe, probeStackKb)
+    checkpoint o[0 ..< min(o.len, 400)]
+    check rc < 128
+
+  test "the bound is built faithfully for every OS and compiler":
+    check stackBoundKb(false, false, false, 160, 192, 16, 1024) == 160
+    check stackBoundKb(false, false, true, 160, 192, 16, 1024) == 192
+    check stackBoundKb(true, false, false, 160, 192, 16, 1024) == 160
+    check stackBoundKb(true, true, false, 160, 192, 16, 1024) == 304
+    check stackBoundKb(true, true, true, 160, 192, 16, 1024) == 336
+    check stackLinkFlags(false, false, 160).len == 0
+    check stackLinkFlags(true, false, 160) == @["--passL:-Wl,--stack,163840"]
+    check stackLinkFlags(true, true, 304) == @["--passL:/F311296"]
+    check stackRunCommand(true, "C:\\t\\probe.exe", 160) ==
+      (exe: "C:\\t\\probe.exe", args: newSeq[string]())
+    let p = stackRunCommand(false, "/t/probe", 160)
+    check p.exe == "sh"
+    check p.args == @["-c", "ulimit -s 160 && exec \"$0\"", "/t/probe"]

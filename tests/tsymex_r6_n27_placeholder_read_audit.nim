@@ -120,7 +120,7 @@ const
   ## Marked lines per family file (RFC-0016 R2-6). Their sum is the family
   ## total this audit pins.
   markerPins = [("runtime.nim", 102), ("runtime_strings.nim", 4),
-                ("heap_model.nim", 20), ("runtime_heap.nim", 10)]
+                ("heap_model.nim", 20), ("runtime_heap.nim", 13)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"
@@ -336,7 +336,10 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## and `runtime_strings.nim` (4) are the old pins unchanged (119); the
     ## marked sites in the files code moved into add `heap_model.nim` (7) and
     ## `runtime_heap.nim` (10), which the old two-file scan never read:
-    ## 119 + 7 + 10 = 136. Five of the runtime_heap.nim ten (lines 882,
+    ## 119 + 7 + 10 = 136. R3-7 adds three marked lines to runtime_heap.nim
+    ## (10 -> 13): the `isUnsupportedFieldPlaceholder` guards on the current
+    ## value of a `seqIdx` pointer target (the resize check, the load, the
+    ## store); the family total is 136 + 3 = 139. Five of the runtime_heap.nim ten (lines 882,
     ## 1671, 1675, 3017, 3018 at R2-6) were already marked; the other five
     ## (the `lf.seqIdx` pointer-leaf reads: `cur.seqLen`/`ini.seqLen` in the
     ## resize check, and the `sq.seqDataRaw` load and store) were bare and
@@ -358,7 +361,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     checkpoint("family markers:" & got & " total " & $total)
     var pinnedTotal = 0
     for (_, pn) in markerPins: pinnedTotal += pn
-    check pinnedTotal == 136
+    check pinnedTotal == 139
     check total == pinnedTotal
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

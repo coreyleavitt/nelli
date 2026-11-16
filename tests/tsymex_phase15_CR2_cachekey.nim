@@ -1238,7 +1238,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## width): 359->361 (360 is the int8 integration's).
     ## RFC-0016 review D1-F2 (every routine body stamps its regime): 361->362.
     ## RFC-0016 review R2-1 (lambda alias bodies are stamped): 362->363.
-    check symexWalkerVersion == "363"
+    ## RFC-0016 review R3-1 (a labelled block is reconciled again): 363->364.
+    check symexWalkerVersion == "364"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

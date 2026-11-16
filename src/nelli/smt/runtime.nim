@@ -21544,7 +21544,17 @@ func syncedByItsParts(stmt: IRStmt): bool =
   ## term) as a write by name and a write through the cell. `isIf`/`isWhile`
   ## are not in this set: a condition's calls are effects of the statement
   ## itself, which no inner statement synced.
-  stmt.kind == isBlock
+  ##
+  ## R3-1: not a LABELLED block (a source `block L:`, or a loop body a
+  ## `continue` leaves). `walkStmt` adds its `break` paths to its survivors,
+  ## and a path that took `break L` from inside an `if` was parked before any
+  ## enclosing statement's post-sync saw it; the block's own pass is the one
+  ## reconcile that reaches it. Its effects are not just its statements'
+  ## synced outs. Only the unlabelled stamped bodies (D1-F2) are skipped. The
+  ## pass could be narrowed to the break-path survivors, but they are not
+  ## told apart from the fall-through outs once merged, and re-running the
+  ## ordinary pass over them is what ran before R2-2.
+  stmt.kind == isBlock and stmt.blkLabel.len == 0
 
 proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =

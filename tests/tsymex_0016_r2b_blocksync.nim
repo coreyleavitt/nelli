@@ -10,6 +10,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
+import nelli/smt/canonicalize
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -228,3 +229,170 @@ suite "R2-2: the rule is one named predicate":
     check procBody("walkCapSynced").contains("syncedByItsParts(stmt)")
   test "no per-entry isBlock skip is left in syncAddrCells":
     check not procBody("syncAddrCells").contains("stmt.kind == isBlock")
+
+# RFC-0016 review R3-1. A LABELLED block is not synced by its parts: a path
+# that took `break L` from inside an `if` is parked before any enclosing
+# statement's post-sync sees it, and the block's own pass is the one reconcile
+# that reaches it. The condition's call writes a captured or address-taken
+# variable; the verdict after the block must read that write.
+proc r3Cap(v: int): int =
+  var cnt = v
+  proc cntr(): int =
+    cnt += 1
+    cnt
+  block L:
+    if cntr() > 0: break L
+    cnt = cnt + 100
+  result = cnt
+
+proc sutR3Cap(v: int) =
+  if v != 1: return
+  let r = r3Cap(v)
+  if r == 2: symexTarget("ok")
+  if r != 2: symexTarget("bad")
+
+proc r3Bump(p: ptr int): int =
+  p[] += 5
+  p[]
+
+proc r3Addr(v: int): int =
+  var x = v
+  block L:
+    if r3Bump(addr x) > 0: break L
+    x = x + 100
+  result = x
+
+proc sutR3Addr(v: int) =
+  if v != 1: return
+  let r = r3Addr(v)
+  if r == 6: symexTarget("ok")
+  if r != 6: symexTarget("bad")
+
+proc r3Ptr(v: int): int =
+  var x = v
+  let p = addr x
+  block L:
+    if r3Bump(p) > 0: break L
+    x = x + 100
+  result = x
+
+proc sutR3Ptr(v: int) =
+  if v != 1: return
+  let r = r3Ptr(v)
+  if r == 6: symexTarget("ok")
+  if r != 6: symexTarget("bad")
+
+proc r3Cont(v: int): int =
+  var x = v
+  var i = 0
+  while i < 3:
+    inc i
+    if r3Bump(addr x) > 0: continue
+    x = x + 100
+  result = x
+
+proc sutR3Cont(v: int) =
+  if v != 1: return
+  let r = r3Cont(v)
+  if r == 16: symexTarget("ok")
+  if r != 16: symexTarget("bad")
+
+proc r3ContCap(v: int): int =
+  var cnt = v
+  proc cntr(): int =
+    cnt += 1
+    cnt
+  var i = 0
+  while i < 3:
+    inc i
+    if cntr() > 0: continue
+    cnt = cnt + 100
+  result = cnt
+
+proc sutR3ContCap(v: int) =
+  if v != 1: return
+  let r = r3ContCap(v)
+  if r == 4: symexTarget("ok")
+  if r != 4: symexTarget("bad")
+
+# A call under a short-circuit stays in the condition: the `if` statement's
+# own effect, which no inner statement synced.
+proc r3CapSc(v: int): int =
+  var cnt = v
+  proc cntr(): int =
+    cnt += 1
+    cnt
+  block L:
+    if v > 0 and cntr() > 0: break L
+    cnt = cnt + 100
+  result = cnt
+
+proc sutR3CapSc(v: int) =
+  if v != 1: return
+  let r = r3CapSc(v)
+  if r == 2: symexTarget("ok")
+  if r != 2: symexTarget("bad")
+
+proc r3AddrSc(v: int): int =
+  var x = v
+  block L:
+    if v > 0 and r3Bump(addr x) > 0: break L
+    x = x + 100
+  result = x
+
+proc sutR3AddrSc(v: int) =
+  if v != 1: return
+  let r = r3AddrSc(v)
+  if r == 6: symexTarget("ok")
+  if r != 6: symexTarget("bad")
+
+proc r3ContSc(v: int): int =
+  var x = v
+  var i = 0
+  while i < 3:
+    inc i
+    if i > 0 and r3Bump(addr x) > 0: continue
+    x = x + 100
+  result = x
+
+proc sutR3ContSc(v: int) =
+  if v != 1: return
+  let r = r3ContSc(v)
+  if r == 16: symexTarget("ok")
+  if r != 16: symexTarget("bad")
+
+suite "R3-1: a labelled block reconciles its break paths":
+  test "break L from an if whose condition mutates a capture":
+    verdict(sutR3Cap, "ok", sxSat)
+    verdict(sutR3Cap, "bad", sxUnsat)
+  test "break L from an if whose condition writes through addr":
+    verdict(sutR3Addr, "ok", sxSat)
+    verdict(sutR3Addr, "bad", sxUnsat)
+  test "break L through a stored pointer":
+    verdict(sutR3Ptr, "ok", sxSat)
+    verdict(sutR3Ptr, "bad", sxUnsat)
+  test "continue from an if whose condition writes through addr":
+    verdict(sutR3Cont, "ok", sxSat)
+    verdict(sutR3Cont, "bad", sxUnsat)
+  test "continue from an if whose condition mutates a capture":
+    verdict(sutR3ContCap, "ok", sxSat)
+    verdict(sutR3ContCap, "bad", sxUnsat)
+  test "break L under a short-circuit condition, capture":
+    verdict(sutR3CapSc, "ok", sxSat)
+    verdict(sutR3CapSc, "bad", sxUnsat)
+  test "break L under a short-circuit condition, addr":
+    verdict(sutR3AddrSc, "ok", sxSat)
+    verdict(sutR3AddrSc, "bad", sxUnsat)
+  test "continue under a short-circuit condition, addr":
+    verdict(sutR3ContSc, "ok", sxSat)
+    verdict(sutR3ContSc, "bad", sxUnsat)
+
+suite "R3-1: the predicate keeps a labelled block":
+  test "syncedByItsParts excludes a labelled block":
+    let a = runtimeSrc.find("\nfunc syncedByItsParts(")
+    doAssert a >= 0
+    let b = runtimeSrc.find("\nproc ", a + 1)
+    check runtimeSrc[a ..< b].contains(
+      "stmt.kind == isBlock and stmt.blkLabel.len == 0")
+  test "walker version floor (R3-1)":
+    check symexWalkerVersion.parseInt >= 364

@@ -577,16 +577,23 @@ proc fieldSizeMismatchOf(recList: NimNode; names: openArray[string];
   ## is its base's). "" when every leaf the layout sizes agrees. A field the
   ## layout does not size (0) is left to the layout, which declines it.
   var nodes: seq[(string, NimNode)]
-  proc collect(n: NimNode) =
+  proc collect(n: NimNode): bool =
+    ## false at a record node it does not read (the caller declines).
     case n.kind
-    of nnkRecList, nnkRecCase, nnkRecWhen, nnkElifBranch, nnkOfBranch,
-       nnkElse:
-      for c in n: collect(c)
+    of nnkRecList, nnkRecCase, nnkRecWhen, nnkElse:
+      for c in n:
+        if not collect(c): return false
+      true
+    of nnkOfBranch, nnkElifBranch:
+      # the branch values / the condition, then the branch's fields
+      n.len == 0 or collect(n[^1])
     of nnkIdentDefs:
       for i in 0 ..< n.len - 2:
         nodes.add (fieldNameStr(n[i], i), n[^2])
-    else: discard
-  collect(recList)
+      true
+    of nnkEmpty, nnkNilLit, nnkCommentStmt: true
+    else: false  # k2: fail-closed: false: fieldSizeMismatchOf reports a mismatch and the layout declines
+  if not collect(recList): return fieldSizeMismatch & "<an unread record node>"
   for i, nm in names:
     if i >= tys.len: break
     let want = scalarSize(tys[i])

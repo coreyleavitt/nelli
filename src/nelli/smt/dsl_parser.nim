@@ -20939,8 +20939,11 @@ proc boundRead(arg: NimNode): BoundRead =
   ## field, a dereference and a `var` formal's hidden dereference take their
   ## operand's answer; a conversion between types equal up to range and
   ## distinctness takes its operand's, any other is copied; `s[k]` is bound
-  ## through its address; anything else is copied. `nnkCheckedFieldExpr` (a
-  ## variant field) is not among the passed-through kinds: copied.
+  ## through its address; a call, an operator, a constructor, a cast and a
+  ## variant field (`nnkCheckedFieldExpr`, not among the passed-through
+  ## kinds) are copied. Any other kind is `brUndecided`: `boundAction` then
+  ## copies it only when the body cannot write its location.
+  result = brUndecided
   case arg.kind
   of nnkNone, nnkEmpty, nnkIdent, nnkSym, nnkType, nnkCharLit .. nnkNilLit:
     brDirect
@@ -20973,7 +20976,10 @@ proc boundRead(arg: NimNode): BoundRead =
       if boundRead(c) != brDirect: return brOnce
     brDirect
   of nnkBracketExpr: brIndirect
-  else: brOnce
+  of nnkCheckedFieldExpr, nnkCall, nnkCommand, nnkCallStrLit, nnkInfix,
+     nnkPrefix, nnkPostfix, nnkObjConstr, nnkTupleConstr, nnkCast:
+    brOnce              # `paFastAsgn`: copied to a temporary
+  else: return  # k2: fail-closed: brUndecided: boundAction copies it only when the body cannot write its location, else declines
 
 proc boundChainHasDeref(n: NimNode): bool =
   ## RFC-0016 CR3 H4. Some dereference on `n`'s lvalue chain: the location is
@@ -20987,7 +20993,12 @@ proc boundChainHasDeref(n: NimNode): bool =
       if t.len == 0: return false
       t = if t.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv}: t[^1]
           else: t[0]
-    else: return false
+    of nnkCall, nnkCommand, nnkCallStrLit, nnkInfix, nnkPrefix, nnkPostfix,
+       nnkSym, nnkIdent, nnkCharLit .. nnkNilLit:
+      # the chain ends at a call's temporary or a leaf: no pointer on it
+      # (a `var` result is the `nnkHiddenDeref` arm above)
+      return false
+    else: return true  # k2: fail-closed: true: an unread chain node; boundAction declines the bound
 
 proc boundAddressStable(n, body: NimNode): bool =
   ## RFC-0016 CR3 H4. The location `n` names is the one Nim took the address
@@ -21003,7 +21014,7 @@ proc boundAddressStable(n, body: NimNode): bool =
     case i.kind
     of nnkCharLit .. nnkUInt64Lit: true
     of nnkSym: mayWriteRoot(body, i, @[]).len == 0
-    else: false
+    else: false  # k2: fail-closed: false: not stable; boundAction declines unless the body writes nothing
   var t = n
   while true:
     case t.kind
@@ -21028,7 +21039,7 @@ proc boundAddressStable(n, body: NimNode): bool =
           return false
       else: return false
       t = t[0]
-    else: return false
+    else: return false  # k2: fail-closed: false: not stable; boundAction declines unless the body writes nothing
 
 proc boundAction(bound, body: NimNode): tuple[act: BoundAction, why: string] =
   ## RFC-0016 CR3 H4. How the `for` arm reads `bound`: as Nim does where

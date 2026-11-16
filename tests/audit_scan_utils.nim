@@ -64,3 +64,153 @@ proc runtimeFamilySources*(exclude: openArray[string] = []):
   for f in runtimeFamilyFiles:
     if f in exclude: continue
     result.add (label: "src/nelli/smt/" & f, path: smtSrcDir / f)
+
+# ---------------------------------------------------------------------------
+# Comment/string-blind source reading (RFC-0016 review round 4, Low findings).
+# ---------------------------------------------------------------------------
+
+proc codeOf*(text: string): string =
+  ## `text` with every comment and every string/char literal body removed and
+  ## line structure kept (one output line per input line, so a line index in
+  ## the result is the same line in the source). A small lexer over the whole
+  ## text, because a per-line scan cannot see state that spans lines. It
+  ## understands: `#` line comments (doc comments included); nested `#[ ]#`
+  ## and `##[ ]##` block comments, multi-line; `"..."` strings with
+  ## backslash escapes; `"""..."""` triple-quoted strings, multi-line; raw
+  ## strings (`r"..."`, any `ident"..."`) where a backslash escapes nothing
+  ## and `""` is a quote; and the character literals `'"'`, `'\''`, `'\"'`
+  ## (a `'` after an identifier character or digit is a numeric suffix, not a
+  ## literal). Removed text leaves nothing behind (not a blank).
+  var i = 0
+  let n = text.len
+  while i < n:
+    let c = text[i]
+    if c == '#':
+      if i + 1 < n and text[i + 1] == '[' or
+         (i + 2 < n and text[i + 1] == '#' and text[i + 2] == '['):
+        let doc = text[i + 1] == '#'
+        i += (if doc: 3 else: 2)
+        var depth = 1
+        while i < n and depth > 0:
+          if text[i] == '#' and i + 1 < n and text[i + 1] == '[':
+            inc depth
+            i += 2
+          elif text[i] == ']' and i + 1 < n and text[i + 1] == '#':
+            dec depth
+            i += 2
+            if doc and depth == 0 and i < n and text[i] == '#': inc i
+          else:
+            if text[i] == '\n': result.add '\n'
+            inc i
+      else:
+        while i < n and text[i] != '\n': inc i
+    elif c == '"':
+      if i + 2 < n and text[i + 1] == '"' and text[i + 2] == '"':
+        i += 3
+        while i < n:
+          if text[i] == '"' and i + 2 < n and text[i + 1] == '"' and
+             text[i + 2] == '"':
+            i += 3
+            while i < n and text[i] == '"': inc i   # `""""` closes on the last three
+            break
+          if text[i] == '\n': result.add '\n'
+          inc i
+      else:
+        let raw = i > 0 and isIdentChar(text[i - 1])
+        inc i
+        while i < n and text[i] != '\n':
+          if raw:
+            if text[i] == '"':
+              if i + 1 < n and text[i + 1] == '"': i += 2; continue
+              inc i
+              break
+          else:
+            if text[i] == '\\' and i + 1 < n and text[i + 1] != '\n':
+              i += 2
+              continue
+            if text[i] == '"':
+              inc i
+              break
+          inc i
+    elif c == '\'' and (i == 0 or not (isIdentChar(text[i - 1]))):
+      if i + 2 < n and text[i + 1] != '\\' and text[i + 2] == '\'':
+        i += 3                                  # 'x', '"', '#'
+      elif i + 3 < n and text[i + 1] == '\\':
+        var j = i + 3                           # '\n', '\'', '\"', '\x41'...
+        while j < n and j < i + 8 and text[j] != '\'' and text[j] != '\n': inc j
+        if j < n and text[j] == '\'': i = j + 1
+        else:
+          result.add c
+          inc i
+      else:
+        result.add c
+        inc i
+    else:
+      result.add c
+      inc i
+
+proc stripLine*(line: string): string =
+  ## One line's code: `codeOf` on that line alone. A line cannot know whether
+  ## it sits inside a block comment or a triple-quoted string; a scan that must
+  ## respect those goes through `codeOf` on the whole file and indexes lines.
+  codeOf(line)
+
+proc relImports*(text: string): seq[string] =
+  ## The `./name` modules a file imports: `import ./a`, `import ./a as b`,
+  ## `import ./a except x`, `import ./a, ./b` (also split over lines), the
+  ## bracket form `import ./[a, b as c]` (also split over lines), a bare
+  ## `import` whose list is on the indented lines below, and
+  ## `from ./a import ...`. Comments and strings are not read.
+  let lines = codeOf(text).splitLines
+  var li = 0
+  while li < lines.len:
+    let t = lines[li].strip()
+    inc li
+    var rest = ""
+    var isFrom = false
+    if t == "import": rest = ""
+    elif t.startsWith("import "): rest = t[7 .. ^1].strip()
+    elif t.startsWith("from "):
+      rest = t[5 .. ^1].strip()
+      isFrom = true
+    else: continue
+    var specs: seq[string]
+    if isFrom:
+      let w = rest.splitWhitespace
+      if w.len > 0: specs.add w[0]
+    else:
+      # continuation: an open `[`, a trailing `,`, or a bare `import`
+      template depthOf(s: string): int =
+        s.count('[') - s.count(']')
+      while li < lines.len and
+            (depthOf(rest) > 0 or rest.endsWith(",") or rest.len == 0):
+        let nx = lines[li].strip()
+        if rest.len == 0 and lines[li].len > 0 and lines[li][0] != ' ': break
+        inc li
+        rest.add " " & nx
+      let ex = rest.find(" except ")
+      if ex >= 0: rest = rest[0 ..< ex]
+      var depth = 0
+      var cur = ""
+      var parts: seq[string]
+      for c in rest:
+        if c == '[': inc depth
+        elif c == ']': dec depth
+        if c == ',' and depth == 0:
+          parts.add cur
+          cur = ""
+        else: cur.add c
+      parts.add cur
+      for p in parts:
+        let q = p.strip()
+        let lb = q.find("/[")
+        if lb >= 0 and q.endsWith("]"):
+          let dir = q[0 .. lb]
+          for m in q[lb + 2 ..< q.len - 1].split(','):
+            specs.add dir & m.strip()
+        else: specs.add q
+    for m in specs:
+      var x = m.strip()
+      let k = x.find(" as ")
+      if k >= 0: x = x[0 ..< k]
+      if x.startsWith("./"): result.add x[2 .. ^1]

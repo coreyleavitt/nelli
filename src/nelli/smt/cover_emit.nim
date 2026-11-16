@@ -6,33 +6,15 @@
 ## re-exported by `symex.nim`; the macro itself (its documented signature)
 ## stays there and delegates to `assertCoveredByImpl`.
 
-import std/[macros, sets, tables, algorithm, options, strutils, importutils]
-import ../choice
-import ../db
+import std/[macros, strutils]
 import ./dsl
-import ./scan
-import ./scan_kinds
-import ./impl_digest
-import ./replayproc
-import ./replaywire
-import ./replayresult
-from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
 import ../engine/types as engineTypes
 from ../engine/frame import recordSymexFinding, FindingOrigin
-import ./sha256
-import ./canonicalize
 import ./witness_render
-import ./witness_emit
-import ./replay_emit
-import ./replay_settle
-import ./run_replayed
 import ./symex_cache
 import ./entry_parse
 import ./witness_fidelity
 import ./replay_footprint
-import ./heldset
-import ./proc_lift
-import ./routine_table
 
 type
   SymexCoverageDefect* = object of AssertionDefect

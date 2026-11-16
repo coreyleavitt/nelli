@@ -13,7 +13,6 @@
 import std/options
 import ./admission
 import ./definedness
-import ./errorkind   ## `UbKind`
 import ./magic_rows
 
 const unsignedDivMagics = ["DivU", "ModU"]

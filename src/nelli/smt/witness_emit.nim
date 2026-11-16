@@ -6,11 +6,8 @@
 ## re-exported by `symex.nim`; the `{.compileTime.}` ref-witness context lives
 ## here and nowhere else.
 
-import std/[macros, sets, tables, algorithm, options, strutils]
-import ../choice
+import std/[macros, sets, tables, algorithm, strutils]
 import ./dsl
-import ./scan
-import ./scan_kinds
 
 # ---- Macro helpers (at module scope so they can recurse cleanly) ----------
 

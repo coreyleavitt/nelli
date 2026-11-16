@@ -6,10 +6,8 @@
 ## RFC-0016 D6: moved out of `symex.nim` unchanged. Both entry points are
 ## compile-time only; the walk's own helpers stay private.
 
-import std/[macros, sets, tables, algorithm, options, strutils]
+import std/[macros, tables, strutils]
 import ./dsl
-import ./scan
-import ./scan_kinds
 import ./replay_footprint
 
 proc procValueUses*(n, g: NimNode; assigned: var seq[NimNode]): bool =

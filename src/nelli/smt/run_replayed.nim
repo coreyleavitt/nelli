@@ -6,18 +6,13 @@
 ## the settle helpers (`replay_settle`) and the lift (`proc_lift`) by
 ## `bindSym`, so they are resolved from this module's scope.
 
-import std/[macros, sets, tables, algorithm, options, strutils]
+import std/[macros, sets, tables, options]
 import ../choice
 import ./dsl
-import ./scan
 import ./replayresult
 import ./replayproc
-import ./replaywire
-import ./impl_digest
 import ./replay_settle
 import ./proc_lift
-import ./replay_footprint
-import ./heldset
 import ./witness_emit
 import ./witness_fidelity
 import ./replay_emit

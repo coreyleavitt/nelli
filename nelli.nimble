@@ -1882,6 +1882,7 @@ task test, "Run the test suite":
             "tsymex_0016_universe",
             # RFC-0016 K2a: the dispatch census (every NimNode case and its else, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.
             "tsymex_0016_k2a_census",
+            "tsymex_0016_d6_facade",
             # RFC-0016 W3-z E6: the allowlist ratchet (a committed ceiling per allowlist file; growth and unlowered shrinkage both fail).
             "tsymex_0016_allowlist_ceilings",
             "tsymex_0016_noproducer",

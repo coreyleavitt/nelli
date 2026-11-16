@@ -4795,19 +4795,24 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         let prof = ownerProfile(
           if owner == nil: RoutineArithFacts(overflowOn: true)
           else: arithFacts(routineChecks(owner)))
+        # RFC-0016 review D1 S3: the class follows the operand's width, as
+        # `wrapDefined` does: below `int` C computes in the promoted `int` and
+        # the narrowing wraps (rows `signedNarrow`, `lowByMinusOneNarrow`).
+        let narrow = n.len > 1 and n[1].typeKind in {ntyInt8, ntyInt16}
         template arithUb(op: ArithOp; c: OperandClass) =
           let row = admitDefined(op, c, dsArith)
           if ubOf(definedness(op, c, prof)).isSome: addUb row, prof
         let defOverflow = admitMagic(magic, msDefOverflow)
         if defOverflow.admitted:
           scan.noteMagicDefect defOverflow, "OverflowDefect"
-          arithUb(aoAdd, ocSignedWide)
+          arithUb(aoAdd, arithClass(not narrow))
         let defDivZero = admitMagic(magic, msDefDivZero)
         if defDivZero.admitted:
           scan.noteMagicDefect defDivZero, "DivByZeroDefect"
           let isMod = magic.startsWith("Mod")
           arithUb(if isMod: aoMod else: aoDiv, ocZeroDivisorSigned)
-          arithUb(if isMod: aoMod else: aoDiv, ocLowByMinusOneWide)
+          arithUb(if isMod: aoMod else: aoDiv,
+                  if narrow: ocLowByMinusOneNarrow else: ocLowByMinusOneWide)
         if magic in unsignedDivMagics:
           arithUb(aoDiv, ocZeroDivisorUnsigned)
         # RFC-0005 W3 (WA-4): float arithmetic raises under the float

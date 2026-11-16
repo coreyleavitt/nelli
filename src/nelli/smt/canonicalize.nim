@@ -663,8 +663,14 @@ const renderAsChoicesVersion* = "12"
   ##   zero divisor, so an opaque `div`/`mod` in a `-d:nelliFwrapv` build with
   ##   overflow checks off answered a trusted sat where the native run raises
   ##   SIGFPE; it now carries `ubSignedDivZero`.
+  ## - RFC-0016 review D1 S3 (359->361; 360 is the int8 integration's): the
+  ##   opaque-routine scan classes an arithmetic magic's operand by its width.
+  ##   It asked the `signedWide` and `lowByMinusOneWide` rows for every width,
+  ##   so an opaque `int8`/`int16` `+ - * div mod` reported `ubSignedOverflow`
+  ##   or `ubIntMinModMinusOne` where C computes in the promoted `int` (rows
+  ##   `signedNarrow`, `lowByMinusOneNarrow`: defined). An over-report removed.
 
-const symexWalkerVersion* = "359"
+const symexWalkerVersion* = "361"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

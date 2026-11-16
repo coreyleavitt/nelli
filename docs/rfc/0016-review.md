@@ -111,3 +111,9 @@ Six lenses ran: runtime soundness, parser soundness, replay and cache (opus); se
 | S2 | Low | open | First-party actions are pinned by major tag, not by SHA. | `.github/workflows/*`. |
 
 **Round 1 fixes integrated** on `rfc-0016-int8` (walker 358). The soundness and gate rows are closed by the tests named; D1-D6 follow in sequence, then the round 2 re-review of the delta.
+
+## Round 1 follow-ups
+
+| id | sev | status | finding | evidence |
+|---|---|---|---|---|
+| F1 | High | fixed | The opaque-routine scan guarded the signed zero divisor with `not buildSemantics.fwrapv`, a copy of the signed-add guard. `-fwrapv` defines signed overflow only: row `div/zeroDivisorSigned` (and `mod/`) under `dpFwrapv` is `ubSignedDivZero`. Found while designing D1. | `dsl_parser.nim` ~4812 against `definedness.nim` ~165. Reproduced at 31d94909 (`--overflowChecks:off -d:nelliFwrapv`, linux-c): an opaque `a div b` answered `undefinedKinds = {ubSignedOverflow}` and `a mod b` `{ubIntMinModMinusOne}`, neither with `ubSignedDivZero`. The sat was already untrusted there, through the `low(T) div/mod -1` kind the scan adds for every signed division magic, so the trusted false sat the finding predicted did not appear; the missing kind is a wrong `witnessUndefined`. **Fix** (CR-7 d0b166a9, walker 359): the scan reads every arithmetic row under the routine's profile (`dpChecked`/`dpUnchecked`/`dpFwrapv`) from the definedness table; the other guards already agreed with it. Test `tsymex_0016_cr7_fwrapv_divzero` (c and cpp). |

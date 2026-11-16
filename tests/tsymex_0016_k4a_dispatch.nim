@@ -1,6 +1,6 @@
 ## RFC-0016 K4a-dispatch (section 8.1): the magic axis is consumed per site.
 ##
-## `dispatchMagic` (smt/magic_rows) checks a site's `case` against the table
+## `dispatchMagic` (smt/magic_dispatch) checks a site's `case` against the table
 ## at compile time. This file pins
 ##   * the once-per-site registry: every dispatched site was expanded in this
 ##     compilation (the parser is imported, so its expansions have run), none
@@ -15,7 +15,7 @@ import nelli
 import nelli/symex
 import nelli/smt/admission
 import nelli/smt/errorkind
-import nelli/smt/magic_rows
+import nelli/smt/magic_dispatch
 import nelli/smt/stdlib_rows
 import nelli/smt/dsl_parser
 import nelli/smt/canonicalize

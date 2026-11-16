@@ -28,7 +28,7 @@
 import std/options
 import ./admission
 import ./errorkind
-import ./magic_rows   ## RFC-0016 ADM-IR: `MagicModel`, the magic axis's proof type
+import ./axis_key     ## RFC-0016 ADM-IR: `MagicModel`, the magic axis's proof type
 
 type
   ArithOp* = enum                     ## the operation a row is about
@@ -99,7 +99,7 @@ type
     dsIndex                           ## RFC-0016 PRC-07: the index sites
     dsConv                            ## RFC-0016 PRC-07: the object conversion
     dsField                           ## RFC-0016 PRC-07: the variant field sites
-  DefKey = tuple[key: string, row: Row[DefSite, DefRule]]
+  DefKey = AxisRow[DefSite, DefRule]
 
 func defined(): Definedness = Definedness(kind: dkDefined)
 func defect(): Definedness = Definedness(kind: dkDefect)

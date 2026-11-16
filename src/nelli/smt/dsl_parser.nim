@@ -42,7 +42,7 @@ import std/hashes      ## Phase 15 C1: lambda-site body-hash (lineInfo fallback)
 import std/unicode     ## Phase 16 A7-S3: toRunes/runeLen for literal decode at parse time
 import ./types
 import ./admission   ## RFC-0016 ADM-1: `Admit`, `AxisTable`
-import ./magic_rows  ## RFC-0016 K4a: `magicAxis`, `dispatchMagic`
+import ./magic_dispatch  ## RFC-0016 K4a: `magicAxis`, `dispatchMagic`
 import ./stdlib_rows ## RFC-0016 K4c: `stdlibAxis`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis

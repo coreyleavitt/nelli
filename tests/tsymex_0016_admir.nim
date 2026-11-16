@@ -22,7 +22,7 @@ import nelli/smt/errorkind
 import nelli/smt/types
 import nelli/smt/typeaxes
 import nelli/smt/definedness
-import nelli/smt/magic_rows
+import nelli/smt/magic_dispatch
 import nelli/smt/stdlib_rows
 import nelli/smt/pragmaaxes
 import nelli/smt/canonicalize

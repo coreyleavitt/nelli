@@ -33,6 +33,7 @@
 import std/[macros, options, strutils]
 import ./admission
 import ./errorkind
+import ./axis_key
 import ./types
 export MemOp, MemShare, ZeroModel, TypeOpModel   ## ADM-IR: they live in types.nim
 
@@ -52,8 +53,8 @@ type
   TypeOpSite* = enum
     toHoldsSharedMemory
     toZeroValue         ## `zeroValueForType`
-  OpKey = tuple[key: string, row: Row[TypeOpSite, TypeOpModel]]
-  ClassKey = tuple[key: string, row: Row[TypeClassSite, TypeClassModel]]
+  OpKey = AxisRow[TypeOpSite, TypeOpModel]
+  ClassKey = AxisRow[TypeClassSite, TypeClassModel]
 
 # ---------------------------------------------------------------------------
 # The type-class axis.

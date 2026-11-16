@@ -5945,10 +5945,13 @@ proc bitsPlace(bits: Z3BitVec[64]; p: vl.Place;
   ## the value of its IEEE bits. A bool or a `range` holds only its own
   ## values, so arbitrary bytes are no value of it: `none` (the caller
   ## declines), unless `writer`, a field of the same place and kind, just
-  ## wrote them: its value then. A `range` under `--rangeChecks:off` is
-  ## every bit pattern of its base integer (`rangeUnchecked`).
+  ## wrote them: its value then. So is an enum stored wider than its
+  ## ordinal width (`pkEnumWide`, RFC-0016 0.10.0 review H6): `ord` of its
+  ## four bytes may be a value its width does not hold. A `range` under
+  ## `--rangeChecks:off` is every bit pattern of its base integer
+  ## (`rangeUnchecked`).
   case p.kind
-  of vl.pkBool, vl.pkRestricted:
+  of vl.pkBool, vl.pkRestricted, vl.pkEnumWide:
     if writer.isSome and samePlace(p, writer.get[0]):
       return some(normSlot(writer.get[1], p.ty))
     if p.kind == vl.pkRestricted and rangeUnchecked():
@@ -10038,6 +10041,11 @@ func unwrittenUb(part: string): set[UbKind] =
   if part.startsWith(noinitReadPrefix): {readUb()} else: {}
 
 const variantBytesPart = noinitReadPrefix & "<variant bytes>"
+
+const noinitResultPart = noinitReadPrefix & "result"
+  ## RFC-0016 0.10.0 review H5. The part a `{.noinit.}` routine's `result`
+  ## starts as (`dsl_parser.noinitResultPrologue`).
+
 
 proc unwrittenMsg(part: string): string =
   ## RFC-0005 batch 6. `unwrittenKind`'s message.
@@ -21446,6 +21454,18 @@ proc unwrittenDisc(sv: SymVal): string =
     ""
   else: ""
 
+proc noinitReturnDegrade(retVal: SymVal; w: var WalkCtx): Option[Degrade] =
+  ## RFC-0016 0.10.0 review H5. A callee returning a `{.noinit.}` `result`
+  ## (or a part of it) no path wrote: the caller reads an indeterminate
+  ## value. The returning path is tainted with the read (`feGlobalHavoc`,
+  ## `ubIndeterminateRead`) and the call's value left free (any value of
+  ## the type, which is what it is).
+  if unwrittenIn(retVal, simplified = true) != noinitResultPart:
+    return none(Degrade)
+  some(w.degrade(unwrittenKind(noinitResultPart),
+                 unwrittenMsg(noinitResultPart),
+                 ub = unwrittenUb(noinitResultPart)))
+
 proc observeRecvPart(p: Path; part: SymVal; w: var WalkCtx): Option[Degrade] =
   ## RFC-0005 S8cd. A receiver arm reads `part` of its receiver (`recvValue`
   ## observes none of it). An unwritten part taints `p` when its global's
@@ -21563,6 +21583,12 @@ proc completeReturn(p: Path, w: var WalkCtx) =
   # of #135 range propagation while retSym was allocated svBV*).
   # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
   # then works on same-kind operands (bv2int was applied if needed).
+  if p.env.hasKey("result"):
+    let nd = noinitReturnDegrade(retVal, w)
+    if nd.isSome:
+      w.callStack[frameIx].exits.returnedPaths.park(
+        forkPathTainted(p, p.pc, p.env, nd.get))
+      return
   if not noteUninitReturn(retSym, retVal, p.pc) and svMentionsUninit(retVal):
     # RFC-0005 S8bq: a seq result is bound with its alias recorded
     # (`noteUninitReturn`). One nested in a composite is not: bound by
@@ -25225,6 +25251,9 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
                        plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
                        "to sxUnknown (feUnsupportedOp)")
                 fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+              elif (let nd = noinitReturnDegrade(retVal, w); nd.isSome):
+                # RFC-0016 0.10.0 review H5: as `completeReturn`'s.
+                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, nd.get)
               elif not noteUninitReturn(retSym, retVal, cp.pc) and
                    svMentionsUninit(retVal):
                 # RFC-0005 S8bq: as `completeReturn`'s.

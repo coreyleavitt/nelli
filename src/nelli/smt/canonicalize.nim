@@ -628,8 +628,13 @@ const renderAsChoicesVersion* = "12"
   ##   earlier walks left of the run's tail budget read `ubTailUnverified`
   ##   when that budget ran out; it now carries the answer of the walk under
   ##   its pins, and distinct pins keep more of the budget.
+  ## - RFC-0016 CR-4 (354->357, the version reserved for the slice): a
+  ##   routine `{.noinit.}` leaves `result` unwritten (a read before a write
+  ##   is `ubIndeterminateRead`, H5); routine `nodestroy`, `codegenDecl`,
+  ##   `constructor`, `asmNoStackFrame`, `emit`, `varargs` and
+  ##   `importCompilerProc` decline.
 
-const symexWalkerVersion* = "354"
+const symexWalkerVersion* = "357"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -47,6 +47,7 @@ import ./stdlib_rows ## RFC-0016 K4c: `stdlibAxis`
 import ./typeaxes    ## RFC-0016 K3a: `admitTypeClass`, `holdsSharedMemory`
 import ./pragmaaxes  ## RFC-0016 K3c: `admitPragma`, the pragma axis
 import ./readonlyaxes ## RFC-0016 E3b: `admitShape`, the read-only axis
+import ./ub_deposit  ## RFC-0016 D3a: the opaque-body UB deposit policy
 import ./definedness ## RFC-0016 K10a-axis: the stale element address and `noalias` rows
 import ./dsl_typebridge
 import ./scan_kinds   ## RFC-0016 K2F-1/K2F-3: the shared scan kind lists
@@ -4644,12 +4645,6 @@ proc floatChecksOn(def: NimNode; memo: var FloatCheckMemo): set[CheckOption] =
   ## off by default) may be on in the routine definition `def`.
   ownerChecksOn(def, memo) * {coNan, coInf}
 
-const unsignedDivMagics = ["DivU", "ModU"]
-  ## RFC-0016 K10b. The unsigned division magics: no zero-divisor row on the
-  ## magic axis (K4a-guard: the C division is undefined, not a Defect), so
-  ## under the gate they answer through the definedness axis's
-  ## `div/zeroDivisorUnsigned` row.
-
 proc hierarchyConv(n, operand: NimNode): tuple[isHier: bool;
     tgtTy, tgtPointee: IRType; srcChain, tgtChain: seq[string]]
   ## RFC-0016 K2F-3 fwd decl
@@ -4791,33 +4786,18 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # (`RoutineChecks.overflowOn`: on at its position on every reading,
         # the build's or a push's), not membership in the deviation set. The
         # unchecked `+ - *` is a defined wrap under `-fwrapv`.
-        # RFC-0016 0.10.0 review F1: every kind is the definedness table's
-        # answer under the routine's profile (`arithUb`), never a guard
-        # written here: `-fwrapv` defines the signed wrap only, and a signed
-        # zero divisor stays `ubSignedDivZero` under it.
+        # RFC-0016 D3a: which kinds the magic deposits is `ub_deposit`'s
+        # policy (F1, D1 S3, W3-z P1); this scan gathers its inputs.
         let prof = ownerProfile(
           if owner == nil: RoutineArithFacts(overflowOn: true)
           else: arithFacts(routineChecks(owner)))
-        # RFC-0016 review D1 S3: the class follows the operand's width, as
-        # `wrapDefined` does: below `int` C computes in the promoted `int` and
-        # the narrowing wraps (rows `signedNarrow`, `lowByMinusOneNarrow`).
         let narrow = n.len > 1 and n[1].typeKind in {ntyInt8, ntyInt16}
-        template arithUb(op: ArithOp; c: OperandClass) =
-          let row = admitDefined(op, c, dsArith)
-          if ubOf(definedness(op, c, prof)).isSome: addUb row, prof
-        let defOverflow = admitMagic(magic, msDefOverflow)
-        if defOverflow.admitted:
-          scan.noteMagicDefect defOverflow, "OverflowDefect"
-          arithUb(aoAdd, arithClass(not narrow))
-        let defDivZero = admitMagic(magic, msDefDivZero)
-        if defDivZero.admitted:
-          scan.noteMagicDefect defDivZero, "DivByZeroDefect"
-          let isMod = magic.startsWith("Mod")
-          arithUb(if isMod: aoMod else: aoDiv, ocZeroDivisorSigned)
-          arithUb(if isMod: aoMod else: aoDiv,
-                  if narrow: ocLowByMinusOneNarrow else: ocLowByMinusOneWide)
-        if magic in unsignedDivMagics:
-          arithUb(aoDiv, ocZeroDivisorUnsigned)
+        if admitMagic(magic, msDefOverflow).admitted:
+          scan.noteMagicDefect admitMagic(magic, msDefOverflow), "OverflowDefect"
+        if admitMagic(magic, msDefDivZero).admitted:
+          scan.noteMagicDefect admitMagic(magic, msDefDivZero), "DivByZeroDefect"
+        for d in arithDeposits(magic, narrow, prof):
+          scan.noteUndefined d.row, d.profile
         # RFC-0005 W3 (WA-4): float arithmetic raises under the float
         # checks, which are off by default; on where the routine whose body
         # holds the operation was compiled with them (`floatChecksOn`).

@@ -1787,6 +1787,8 @@ task test, "Run the test suite":
             "tsymex_0016_d1_regime_checksoff",
             # RFC-0016 review D1 S3: the opaque scan classes an operand by its width (walker 361).
             "tsymex_0016_d1_narrow_opaque",
+            # RFC-0016 review D3a: the opaque-scan UB deposit policy, extracted (no walker change).
+            "tsymex_0016_d3a_ubdeposit",
             "tsymex_0016_k10d_removals",
             "tsymex_0016_k10d_drain_checksoff",
             "tsymex_0016_rangeoff",

@@ -54,6 +54,7 @@ import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
 import ./stdlib_rows   ## RFC-0016 K4c: the facet cells a decline names
 import ./runtime_floats   ## RFC-0016 review D3c-4: Cluster F, `lowerFloatArm`
 import ./runtime_exceptions   ## RFC-0016 review D3c-3: Cluster E, `lowerExnArm`
+import ./runtime_closures   ## RFC-0016 review D3c-5: Cluster C, `lowerClosureArm`
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
@@ -2054,21 +2055,6 @@ proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast
 # declOrder)`. At the call, the resolved `svClosure`'s site keys back into this
 # map to reach the body. (Same threadvar idiom as `currentClosureSyms` — `lower`
 # has no `WalkCtx`. Reset at `runSymexImpl` entry.)
-
-func closureRetStructured(t: IRType): bool =
-  ## RFC-0005 S8n. A closure return type whose per-occurrence result is a
-  ## fresh structured value (`allocateSym`) rather than a fresh constant of
-  ## the funcSym's range sort: a variant object, which has no single-leaf
-  ## Z3 sort. `buildClosure` gives such a funcSym a placeholder range and
-  ## `applyClosureGround` never reads it. RFC-0005 S8p widens it to every
-  ## return type the funcSym range cannot carry or `symValFromRawAst` cannot
-  ## wrap: a multi-variant, a tuple/object, a `string` and a `seq`. RFC-0005
-  ## S8s adds an `array` (`retBindEq` binds it element-wise). RFC-0005 S8cd
-  ## adds a `Table`, `HashSet` and `set` (`retBindEq`'s arms), so `f(k).len`
-  ## over a proc value of each resolves as a seq result's does.
-  t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq,
-                          itArray, itTable, itSet, itBitSet}
-
 
 var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 C2b (ADR-0009 D6). The GROUND per-call-site closure axioms
@@ -8739,7 +8725,6 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     # callers are NOT uniformly string-shaped, has its own arm above.)
     allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
 
-include "runtime_closures.nim"  # Stage 8 CR-7 Cluster C: lowerClosureArm
 
 # ---- RFC-0005 S8bw (item 2): a global's unwritten parts ---------------------
 #
@@ -16928,14 +16913,14 @@ proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
     currentInFlightMsg = none(string)
 
 proc currentFrameId(): int =
-  ## RFC-0005 S9 (fwd-declared in `runtime_closures.nim`). The live walk's
+  ## RFC-0005 S9 (a `lowerHooks` field, read by `runtime_closures.nim`). The live walk's
   ## `CallFrameCtx.frameId`; -1 outside a walk (a probe), which no walk frame
   ## ever equals.
   if currentWalkCtxPtr == nil: -1
   else: cast[ptr WalkCtx](currentWalkCtxPtr)[].frame.frameId
 
 proc registerCapCell(local: string; v: SymVal) =
-  ## RFC-0005 S8ax (fwd-declared in `runtime_closures.nim`). A closure built
+  ## RFC-0005 S8ax (a `lowerHooks` field, read by `runtime_closures.nim`). A closure built
   ## in the current frame captures the local `local` by reference: from now
   ## on the frame keeps it in its env cell too (`capCellName`, bound to `v`,
   ## the local's value, through `closureEnvWrites`). Outside a walk (a
@@ -32088,4 +32073,6 @@ proc c2aClosureProbeRelowered*(): C2aClosureProbe =
 lowerHooks = LowerHooks(
   lower: lower, lowerClosureCall: lowerClosureCall, seqElemAt: seqElemAt,
   storeSeqElem: storeSeqElem, sameSymVal: sameSymVal,
-  entryValueOf: entryValueOf, iteSV: iteSV)
+  entryValueOf: entryValueOf, iteSV: iteSV, allocateSym: allocateSym,
+  sortOfTuple: sortOfTuple, currentFrameId: currentFrameId,
+  registerCapCell: registerCapCell)

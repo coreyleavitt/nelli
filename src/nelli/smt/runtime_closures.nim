@@ -1,21 +1,38 @@
-# runtime_closures.nim — Cluster C include fragment of runtime.nim
+# runtime_closures.nim -- Cluster C: closure construction and the `lower()`
+# dispatch arm for `iekLambda` and `iekClosureCall`.
 #
-# THIS FILE IS NOT A STANDALONE MODULE. It is textually included into
-# runtime.nim via `include "runtime_closures.nim"` and CANNOT be compiled
-# independently. It inherits ALL imports, types, threadvars, helpers, and
-# forward-declared procs from runtime.nim's lexical scope; do NOT add
-# `import` statements here.
-#
-# Contents (CR-7-deeper Stage 8+):
-#   sortFingerprint, paramSorts, buildClosure — Cluster C construction
-#   helpers (moved from runtime.nim; only used within this cluster).
-#   `lowerClosureArm(env, e)` — the `lower()` dispatch arm for
-#   `iekLambda` and `iekClosureCall` (Cluster C, Stage 7 / Stage 8, CR-7).
-# Both arms are single-line dispatches to `buildClosure` / `lowerClosureCall`
-# (buildClosure defined here; lowerClosureCall forward-declared in runtime.nim).
-# Placement in runtime.nim: immediately after `include "runtime_exceptions.nim"`
-# and immediately before `lower`'s body, between `lower`'s forward-decl
-# and body.
+# A real module (RFC-0016 review D3c-5): it imports `./symval` and
+# `./walk_state` and names no `runtime.nim` symbol. `runtime.nim` imports it
+# before `lower`'s body and calls `lowerClosureArm` directly; the verbs it
+# needs that `runtime.nim` defines later (`allocateSym`, `sortOfTuple`,
+# `currentFrameId`, `registerCapCell`, `lowerClosureCall`) go through
+# `lowerHooks`.
+#   sortFingerprint, paramSorts, buildClosure -- construction helpers (only
+#   used within this module).
+#   `lowerClosureArm(env, e)` -- the dispatch arm.
+#   `refreshByRefCaptures` -- re-reads the by-reference captures at a read.
+#   `closureRetStructured` -- whether a closure's result is a fresh structured
+#   value (read by `runtime.nim` too).
+import std/tables
+import std/strutils
+import z3
+import ./types
+import ./symval
+import ./walk_state
+
+func closureRetStructured*(t: IRType): bool =
+  ## RFC-0005 S8n. A closure return type whose per-occurrence result is a
+  ## fresh structured value (`allocateSym`) rather than a fresh constant of
+  ## the funcSym's range sort: a variant object, which has no single-leaf
+  ## Z3 sort. `buildClosure` gives such a funcSym a placeholder range and
+  ## `applyClosureGround` never reads it. RFC-0005 S8p widens it to every
+  ## return type the funcSym range cannot carry or `symValFromRawAst` cannot
+  ## wrap: a multi-variant, a tuple/object, a `string` and a `seq`. RFC-0005
+  ## S8s adds an `array` (`retBindEq` binds it element-wise). RFC-0005 S8cd
+  ## adds a `Table`, `HashSet` and `set` (`retBindEq`'s arms), so `f(k).len`
+  ## over a proc value of each resolves as a seq result's does.
+  t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq,
+                          itArray, itTable, itSet, itBitSet}
 
 proc sortFingerprint(sorts: openArray[RawZ3Sort]): string =
   ## A stable per-context fingerprint of a sort list (the `Z3_get_sort_id`s,
@@ -39,15 +56,9 @@ proc paramSorts(params: seq[IRParam]; reps: var seq[SymVal]): seq[RawZ3Sort] =
   ## `Z3_mk_func_decl` built over the sorts holds them.
   for p in params:
     var scratchPC: seq[Z3Bool]
-    reps.add allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC)
-    for s in sortOfTuple(reps[^1]): result.add s
-
-proc currentFrameId(): int
-  ## RFC-0005 S9 fwd-decl (body after `WalkCtx`, in runtime.nim): the live
-  ## walk's `CallFrameCtx.frameId`, or -1 outside a walk.
-
-proc registerCapCell(local: string; v: SymVal)
-  ## RFC-0005 S8ax fwd-decl (body after `WalkCtx`, in runtime.nim).
+    reps.add lowerHooks.allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC,
+                                      false, @[])
+    for s in lowerHooks.sortOfTuple(reps[^1]): result.add s
 
 proc buildClosure(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C2a (ADR-0009 D1/D2/D4). Construct an `svClosure` from an
@@ -84,7 +95,7 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
       "buildClosure: no-capture lambda (unit-env, C3) must have a zero-field " &
       "env, got " & $envRecord.fields.len & " fields"
   # 2. Get-or-create the per-site funcSym.
-  let envLeafSorts = sortOfTuple(envRecord)
+  let envLeafSorts = lowerHooks.sortOfTuple(envRecord)
   # The representatives whose terms are all that hold the raw sorts below,
   # alive until the decl is made over them (`paramSorts`). A sort freed
   # before that was read again by `sortFingerprint` and handed to
@@ -116,8 +127,9 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     let rangeSorts =
       if structuredRet: @[mkBoolSort(ctx).raw]
       else:
-        sortReps.add allocateSym(e.lambdaRetTy, "__closureRet", retPC)
-        sortOfTuple(sortReps[^1])
+        sortReps.add lowerHooks.allocateSym(e.lambdaRetTy, "__closureRet", retPC,
+                                      false, @[])
+        lowerHooks.sortOfTuple(sortReps[^1])
     let rangeSort =
       if rangeSorts.len == 1:
         rangeSorts[0]
@@ -191,15 +203,15 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     if name in capNames: mutCaps.add name
   # RFC-0005 S8ax: each lives in an env cell from here on, which a call of
   # the closure away from this frame reads and writes (`registerCapCell`).
-  for name in mutCaps: registerCapCell(name, env[name])
+  for name in mutCaps: lowerHooks.registerCapCell(name, env[name])
   SymVal(kind: svClosure,
          closureSite: e.lambdaSite,
          closureEnv: boxedEnv,
          closureRawFD: fd,
          closureMutCaptures: mutCaps,
-         closureFrame: currentFrameId())
+         closureFrame: lowerHooks.currentFrameId())
 
-proc refreshByRefCaptures(v: SymVal; env: Env): SymVal =
+proc refreshByRefCaptures*(v: SymVal; env: Env): SymVal =
   ## RFC-0005 S9. Nim captures a mutable local BY REFERENCE: a closure reads
   ## the variable as it stands at the CALL, not at construction. `buildClosure`
   ## snapshots every capture; this re-reads the by-reference ones from `env`
@@ -211,7 +223,7 @@ proc refreshByRefCaptures(v: SymVal; env: Env): SymVal =
   ## returns `v` unchanged, and `applyClosureGround` declines the application
   ## (`ceCaptureByRefUnmodelled`). Non-closures pass through.
   if v.kind != svClosure or v.closureMutCaptures.len == 0 or
-     v.closureFrame != currentFrameId() or v.closureEnv == nil or
+     v.closureFrame != lowerHooks.currentFrameId() or v.closureEnv == nil or
      v.closureEnv[].kind != svTuple:
     return v
   var rec = v.closureEnv[]
@@ -223,7 +235,7 @@ proc refreshByRefCaptures(v: SymVal; env: Env): SymVal =
   result = v
   result.closureEnv = boxed
 
-proc lowerClosureArm(env: Env, e: IRExpr): SymVal =
+proc lowerClosureArm*(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster C extraction. Called from `lower`'s case arm for
   ## `iekLambda` and `iekClosureCall`. Both arms are already single-line
   ## dispatches to `buildClosure` / `lowerClosureCall` — extracting them here
@@ -251,7 +263,7 @@ proc lowerClosureArm(env: Env, e: IRExpr): SymVal =
     # the `currentWalkCtxPtr` threadvar (`lower` has no `WalkCtx`); the body is
     # defined after `walk`, so this dispatches to the forward-declared
     # `lowerClosureCall`.
-    lowerClosureCall(env, e)
+    lowerHooks.lowerClosureCall(env, e)
   else:
     raise newException(ValueError,
       "lowerClosureArm: unexpected e.kind=" & $e.kind &

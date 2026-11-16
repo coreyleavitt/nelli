@@ -615,6 +615,21 @@ type LowerHooks* = object
     ## The merge of two SymVals under a condition. Heavy (it reaches
     ## `allocateSym` and the degrade chokepoints), so it stays in
     ## `runtime.nim` and the float conversion calls it through here.
+  allocateSym*: proc(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
+                     stringBacked: bool, intOffsetPositions: seq[int]):
+                     SymVal {.nimcall.}
+    ## The type-directed allocator (RFC-0016 review D3c-5). Heavy: it reaches
+    ## every value kind and the heap model. The closure builder reads sorts
+    ## off throwaway representatives it makes.
+  sortOfTuple*: proc(sv: SymVal): seq[RawZ3Sort] {.nimcall.}
+    ## The flattened per-leaf sorts of a value; it reads the heap leaves
+    ## (`svLeafAsts`), so it stays with the heap model.
+  currentFrameId*: proc(): int {.nimcall.}
+    ## The live walk's `CallFrameCtx.frameId`, or -1 outside a walk. It reads
+    ## `WalkCtx`, which `runtime.nim` defines.
+  registerCapCell*: proc(local: string; v: SymVal) {.nimcall.}
+    ## Keeps a by-reference capture in the frame's env cell (RFC-0005 S8ax);
+    ## it writes the frame of `WalkCtx`.
 
 var lowerHooks*: LowerHooks
   ## Written once at `runtime.nim` module init; read-only afterwards.

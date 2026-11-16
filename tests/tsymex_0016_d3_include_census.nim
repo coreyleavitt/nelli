@@ -32,16 +32,17 @@ const
   smt = root / "src" / "nelli" / "smt"
 
   expectedIncludes = [
-    "runtime_strings.nim", "runtime_closures.nim", "runtime_heap.nim"]
+    "runtime_strings.nim", "runtime_heap.nim"]
 
-  ## Includes that became real modules (D3c-3: exceptions, D3c-4: floats).
-  movedToModules = ["runtime_exceptions.nim", "runtime_floats.nim"]
+  ## Includes that became real modules (D3c-3: exceptions, D3c-4: floats,
+  ## D3c-5: closures).
+  movedToModules = ["runtime_exceptions.nim", "runtime_floats.nim",
+                    "runtime_closures.nim"]
 
   ## Ratchet-down only: the measured count of distinct runtime-private
   ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1: 52/14/6/23/146; D3c-2, once the walk state left runtime.nim: as below).
   ceilings = {
     "runtime_strings.nim": 21,
-    "runtime_closures.nim": 9,
     "runtime_heap.nim": 136}.toTable
 
   fwdFirst = "proc allocRefSort*("
@@ -116,6 +117,41 @@ proc referenced(text: string, names: HashSet[string]): HashSet[string] =
 
 proc readSmt(f: string): string = readFile(smt / f)
 
+proc boundHere(text: string): HashSet[string] =
+  ## Names a module binds or labels itself, which a same-named `runtime.nim`
+  ## top-level symbol does not make a dependency: a `let`/`var`/`const`/`for`
+  ## binder, a parameter or tuple-constructor label (`name:` after `(`, `,`
+  ## or at the start of a line), and a field read (`x.name`). Used for the
+  ## modules only; the include ceilings are measured without it.
+  for raw in text.splitLines:
+    let l = stripLine(raw)
+    let t = l.strip()
+    let ws = t.splitWhitespace
+    if ws.len > 1 and ws[0] in ["let", "var", "const"]:
+      result.incl leadIdent(ws[1])
+    if ws.len > 1 and ws[0] == "for":
+      for w in t[4 .. ^1].split(" in ")[0].split(','):
+        result.incl leadIdent(w.strip())
+    var prev = ' '   # the last non-space character before the identifier
+    var i = 0
+    while i < l.len:
+      if l[i] in IdentStartChars:
+        var j = i
+        while j < l.len and l[j] in IdentChars: inc j
+        let name = l[i ..< j]
+        var k = j
+        while k < l.len and l[k] == ' ': inc k
+        let labelled = k < l.len and l[k] == ':' and
+                       (k + 1 >= l.len or l[k + 1] != ':')
+        if prev == '.' or
+           (labelled and (prev in {'(', ','} or l[0 ..< i].strip().len == 0)):
+          result.incl name
+        prev = 'a'
+        i = j
+      else:
+        if l[i] != ' ': prev = l[i]
+        inc i
+
 proc viaHooks(text: string): string =
   ## A call through the hook table (`lowerHooks.lower(`) names a field of the
   ## table, not the `runtime.nim` proc of the same name: drop the member name.
@@ -157,7 +193,8 @@ suite "RFC-0016 D3: the include surface":
       check rt.contains("\nimport ./" & m)
       let text = readSmt(f)
       check text.contains("\nimport ./symval")
-      let named = referenced(viaHooks(text), priv - definedNames(text))
+      let named = referenced(viaHooks(text),
+                             priv - definedNames(text) - boundHere(text))
       checkpoint $named
       check named.len == 0
 
@@ -336,8 +373,10 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
   test "the lower hooks are declared and a module is live through them":
     let ws = readSmt("walk_state.nim")
     for h in ["lower", "lowerClosureCall", "seqElemAt", "storeSeqElem",
-              "sameSymVal", "entryValueOf", "iteSV"]:
+              "sameSymVal", "entryValueOf", "iteSV", "allocateSym",
+              "sortOfTuple", "currentFrameId", "registerCapCell"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
     check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")
+    check readSmt("runtime_closures.nim").contains("lowerHooks.allocateSym(")
     check readSmt("runtime.nim").contains("\nlowerHooks = LowerHooks(")

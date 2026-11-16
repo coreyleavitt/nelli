@@ -661,10 +661,16 @@ const renderAsChoicesVersion* = "12"
   ##   definedness table for an arithmetic magic's kinds under the routine's
   ##   profile. It had copied the signed-add `-fwrapv` guard onto the signed
   ##   zero divisor, so an opaque `div`/`mod` in a `-d:nelliFwrapv` build with
-  ##   overflow checks off answered a trusted sat where the native run raises
-  ##   SIGFPE; it now carries `ubSignedDivZero`.
+  ##   overflow checks off left `ubSignedDivZero` out of `witnessUndefined`
+  ##   (the sat stayed untrusted only through the `low(T) div -1` kind the
+  ##   scan adds for every signed division).
+  ## - RFC-0016 0.10.0 review int8 (359->360): `boundRead` answers
+  ##   `brUndecided` (copied only when the body cannot write the location)
+  ##   for a node kind it does not list, where it had copied it; and
+  ##   `boundChainHasDeref` answers "behind a pointer" (declined) for one,
+  ##   where it had answered no. Both had been fail-open sentinels (K2F-4).
 
-const symexWalkerVersion* = "359"
+const symexWalkerVersion* = "360"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

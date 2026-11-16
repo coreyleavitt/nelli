@@ -194,6 +194,8 @@ proc hCallOnce(a: int) =
 suite "CR3 H4: the walker version":
   test "floor":
     check parseInt(symexWalkerVersion) >= 356
+  test "floor: an unlisted bound node fails closed (int8)":
+    check parseInt(symexWalkerVersion) >= 360
 
 const rr = cellKey(axConstruct, "for/dotdot/boundReread")
 const dd = cellKey(axConstruct, "for/dotdot/boundOnce")

@@ -93,8 +93,19 @@ func constructRows(): seq[ConstructKey] =
     "once, a step below 1 raises `RangeDefect` (W3-z P15)")
   result.add decided(
     ["for/dotdot/boundOnce"],
-    "a `..` / `..<` (or counting iterator) bound that is not a symbol is " &
-    "evaluated once, before the loop (W3-z P17)")
+    "a `..` / `..<` (or counting iterator) bound Nim's inliner copies (a " &
+    "call, arithmetic, a widening conversion, a variant field) is " &
+    "evaluated once, before the loop (W3-z P17, CR3 H4)")
+  result.add decided(
+    ["for/dotdot/boundReread"],
+    "a `..` / `..<` / `countup` / `countdown` bound Nim's inliner " &
+    "substitutes (a symbol, a field path, a `var` formal, a same-type " &
+    "conversion) or binds through its address (`s[k]`) is read on every " &
+    "iteration, so a body that writes it moves it (CR3 H4)")
+  result.add declines(some(feUnsupportedOp), ["for/dotdot/boundUnstable"],
+    "a `for` bound read through an address the body may move (a seq it may " &
+    "resize, an index it writes beside the container) is not modelled " &
+    "(CR3 H4)")
   result.add decided(
     ["for/counter/unsigned", "for/counter/narrowSigned"],
     "a loop counter of `..`, `..<`, `countup` or `countdown` is held in its " &

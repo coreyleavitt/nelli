@@ -1221,6 +1221,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## on a path the pins contradict, and is not followed): 352->353.
     ## RFC-0016 W3-z int7 (a run walks the tail once per distinct pins; replay
     ## candidates with the same pins share one walk): 353->354.
+    ## RFC-0016 CR3 (H7 `setLenUninit` is a may-write magic; H4 a `for`
+    ## bound is read as Nim's inliner binds it): 354->356.
     ## RFC-0016 0.10.0 review H2+H3 (the tail walk reads a token's ub kinds;
     ## `modelPins` pins no havoc epoch): 354->355.
     ## RFC-0016 CR-4 (a routine `{.noinit.}` result starts unwritten; the

@@ -40,10 +40,9 @@ const
   movedToModules = ["runtime_exceptions.nim", "runtime_floats.nim",
                     "runtime_closures.nim", "runtime_strings.nim"]
 
-  ## Ratchet-down only: the measured count of distinct runtime-private
-  ## symbols the heap include references.
-  ceilings = {"runtime_heap.nim": 105}.toTable
-
+  ## D3c-8: the exact set of `runtime.nim`-private names the heap include
+  ## (the walker's statement arm) references, sorted. The scan is textual: a
+  ## local that shares a name with a `runtime.nim` symbol (`exact`) is counted.
   ## What slice D3c-6 made real modules below `runtime.nim`: the heap algebra
   ## and the sort-checked Z3 term builders it rests on.
   hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
@@ -54,6 +53,30 @@ const
   ## probe context (`probeContext`), so `resetHeapModel` leaves them alone.
   hmProcessStable = ["storeDeclKind", "selectDeclKind", "constArrayDeclKind",
                      "iteDeclKind", "heapChainKinds"]
+
+  heapPinned = [
+    "AddrCellEntry", "Degrade", "ElemCell", "Path", "PtrLeafAim",
+    "PtrStore", "WalkCtx", "activeMemberTracked", "activeOf", "allocateSym",
+    "bitsPlace", "callGuardedNames", "cellOf", "cellValue", "coerceIntLit",
+    "crashRaise", "deadElemRefs", "defaultZero", "defaultZeroTotal",
+    "degrade", "discConst", "drainPendingLowerEffects",
+    "drainScalarRaiseForks", "effectiveHeapDepthLimit", "entryValueOf",
+    "exact", "fieldsUnchecked", "forkAssignRangeCheck", "forkDefect",
+    "forkPath", "forkPathTainted", "freshnessCapHints", "globalEntryVals",
+    "globalHiddenRoute", "globalInitValue", "guardLiteral", "halted",
+    "heapInputName", "heapKeyValTy", "heapStepsOf", "imgReadDef",
+    "imgWrite", "inactiveFieldSide", "isConcolicFollowWalk", "iteFolded",
+    "iteSV", "liveFrame", "loopArmInfeasible", "lowerInExpr",
+    "lowerLeafInExpr", "maybeForkDefect", "noteTableKey", "overlaps",
+    "pathInfeasible", "placeBits", "programGlobal", "ptrFamilyHints",
+    "ptrFamilyKey", "ptrIdxKey", "ptrKeyKey", "ptrLeafAims",
+    "ptrLeafPathStr", "ptrObjKey", "ptrScalarPointee", "ptrSelKey",
+    "ptrTargetCode", "sameBranchSymCond", "sameSymVal", "seqArrs",
+    "seqElemAt", "seqElemProto", "seqStoreArrs", "shouldStop",
+    "stampHeapSteps", "storeSeqElem", "symEq", "tabValAt", "tabValTerms",
+    "taintInPlace", "unionCellCount", "unionImageGate", "unwrittenImage",
+    "unwrittenIn", "unwrittenKind", "unwrittenMsg", "unwrittenReadMsg",
+    "unwrittenUb", "withSeqArrsOf", "writeExactArm", "zeroImage"]
 
   ## The imports `symval.nim` may have: stdlib, `z3`, and the existing leaves.
   symvalAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
@@ -132,7 +155,7 @@ proc boundHere(text: string): HashSet[string] =
   ## top-level symbol does not make a dependency: a `let`/`var`/`const`/`for`
   ## binder, a parameter or tuple-constructor label (`name:` after `(`, `,`
   ## or at the start of a line), and a field read (`x.name`). Used for the
-  ## modules only; the include ceilings are measured without it.
+  ## modules only; the heap pin is measured with it.
   for raw in text.splitLines:
     let l = stripLine(raw)
     let t = l.strip()
@@ -231,14 +254,24 @@ suite "RFC-0016 D3: the include surface":
       checkpoint $named
       check named.len == 0
 
-  test "per-include runtime-private symbol ceilings only go down":
+  test "the heap include references exactly the pinned runtime.nim names":
+    # D3c-8: the walker arm stays an include (see the header of
+    # `runtime_heap.nim`). Its surface is an EXACT set, not a ceiling: a new
+    # name fails (add it to `heapPinned` only after deciding it belongs), and
+    # a removed one fails too (shrink the list).
     let priv = definedNames(rt)
-    for f in expectedIncludes:
-      let text = readSmt(f)
-      let own = definedNames(text)
-      let n = referenced(text, priv - own).len
-      checkpoint f & " references " & $n & " (ceiling " & $ceilings[f] & ")"
-      check n <= ceilings[f]
+    let text = readSmt("runtime_heap.nim")
+    let got = referenced(text, priv - definedNames(text))
+    var pinned: HashSet[string]
+    for n in heapPinned: pinned.incl n
+    check pinned.len == heapPinned.len   # no duplicate in the list
+    let added = got - pinned
+    let gone = pinned - got
+    checkpoint "new names the heap include now references: " & $added
+    checkpoint "pinned names it no longer references (shrink heapPinned): " &
+               $gone
+    check added.len == 0
+    check gone.len == 0
 
   test "no forward declaration of a heap_model or z3check proc is left":
     check not rt.contains("proc allocRefSort*(")

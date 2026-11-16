@@ -1,10 +1,34 @@
-# runtime_heap.nim — Cluster R include fragment of runtime.nim
+# runtime_heap.nim -- Cluster R: the heap walker arm, an include of runtime.nim
 #
-# THIS FILE IS NOT A STANDALONE MODULE. It is textually included into
-# runtime.nim via `include "runtime_heap.nim"` and CANNOT be compiled
-# independently. It inherits ALL imports, types, threadvars, helpers, and
-# forward-declared procs from runtime.nim's lexical scope; do NOT add
-# `import` statements here.
+# THIS FILE IS NOT A STANDALONE MODULE, BY DESIGN (RFC-0016 review D3c-8). It
+# is textually included into runtime.nim via `include "runtime_heap.nim"` and
+# inherits runtime.nim's imports and top-level names; do NOT add `import`
+# statements here.
+#
+# Why it stays an include: it is the walker's own statement arm
+# (`isDeref` / `isNew` / `isDerefWrite`). It reads and writes the fields of
+# `WalkCtx` directly and forks paths through the `forkPath` template, which
+# cannot be called through a hook; a hook on the per-statement path would add
+# an indirect call for no boundary gain. Every other include of runtime.nim
+# became a module (D3c-3 .. D3c-7); this is the one that cannot, yet.
+#
+# Its imported surface is pinned as an EXACT set of runtime.nim-private names
+# by `heapPinned` in tests/tsymex_0016_d3_include_census.nim (a new name fails,
+# a removed one fails: shrink the list). The load-bearing names:
+#   walker core:   WalkCtx, Path, Degrade, forkPath, forkPathTainted, degrade,
+#                  shouldStop, halted, pathInfeasible, loopArmInfeasible,
+#                  liveFrame, isConcolicFollowWalk
+#   expression:    lowerInExpr, lowerLeafInExpr, drainPendingLowerEffects,
+#                  drainScalarRaiseForks
+#   values:        allocateSym, iteSV, sameSymVal, entryValueOf, seqElemAt,
+#                  storeSeqElem, seqArrs, seqStoreArrs, taintInPlace
+#   raise:         crashRaise
+# The rest are the per-run tables and cell helpers the arm shares with the
+# value model and the walker (see the list in the census).
+#
+# Follow-up, not done here: moving `WalkCtx`, `Path`, `forkPath`, `degrade` and
+# `shouldStop` into a `walker_core.nim` leaf would let this file become a
+# module (it is also what extracting the walk log I/O wants).
 #
 # RFC-0016 review D3c-6: the heap ALGEBRA (ref sorts, heap keys, the leaf
 # split, `heapSelect`, the cells, `svCellWf`, `heapChainDepth`, ...) is the

@@ -3036,6 +3036,13 @@ proc mkArithBlock*(stamp: ArithStamp; stmts: seq[IRStmt];
   ## ADM-IR / D2: the stamp is made by `arith_regime.stampFor` alone.
   IRStmt(kind: isBlock, stmts: stmts, blkArith: stamp, blkFacts: facts)
 
+proc mkRoutineBlock*(facts: RoutineArithFacts; stmts: seq[IRStmt]): IRStmt =
+  ## RFC-0016 D1. A routine body walked under the stamp `facts` decide: the
+  ## stamp is derived here, so the generated code states the facts ONCE per
+  ## body (`mkArithBlock(stampFor(f), s, f)` built the constructor twice, and
+  ## nothing could make the two disagree but the emitter).
+  mkArithBlock(stampFor(facts), stmts, facts)
+
 proc withCheckScope*(b: IRStmt; on: set[CheckOption]): IRStmt =
   ## RFC-0016 PRC-07. `b`, a routine body block, walked under the checks `on`
   ## (those of `rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks` its

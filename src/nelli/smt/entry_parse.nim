@@ -154,11 +154,30 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
   let peExpr = p.parseErrorsNimNode
   let avExpr = p.annotationViolationsNimNode
   let digest = newLit(implDigest(fn))
+  # RFC-0016 D1 (stack): the IR is built in a proc of its own. Inline, every
+  # temporary of every IR node lands in the CALLER's frame, and a module top
+  # level with many entry calls is one C function (`NimMainModule`); an MSVC
+  # debug build gives each temporary its own slot, which overran the 1 MB
+  # reserve of a Windows main thread. `noinline` keeps the temporaries in the
+  # builder's frame, live only for the build.
+  #
+  # `globals` stays at the call site: it carries the run's route checks
+  # (`routeContinue`), which read the caller's module-level closures and name
+  # its nested routines, and are only the same evaluated from the caller's own
+  # scope (PRC-02's re-exec suite pins it). The rest is literals and IR
+  # constructors, so a capture is a compile error (`nimcall`), not a change.
+  let build = genSym(nskProc, "irBuild")
+  let progSym = genSym(nskVar, "irProg")
   result.prog = quote do:
-    SymexProgram(params: `paramsExpr`, body: `bodyExpr`, procs: `procsExpr`,
-                 globals: `glExpr`, retTy: `rtExpr`,
-                 userExnHierarchy: `uxhExpr`, parseErrors: `peExpr`,
-                 annotationViolations: `avExpr`, implDigest: `digest`)
+    block:
+      proc `build`(): SymexProgram {.nimcall, noinline.} =
+        SymexProgram(params: `paramsExpr`, body: `bodyExpr`, procs: `procsExpr`,
+                     retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
+                     parseErrors: `peExpr`, annotationViolations: `avExpr`,
+                     implDigest: `digest`)
+      var `progSym` = `build`()
+      `progSym`.globals = `glExpr`
+      `progSym`
 
 proc describeTarget*(t: SymexTarget): string =
   case t.kind

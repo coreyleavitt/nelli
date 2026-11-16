@@ -651,11 +651,25 @@ proc hasIdent(line, ident: string): bool =
     i = line.find(ident, i + 1)
   false
 
+proc stripTrailingComment(t: string): string =
+  ## `t` without a trailing `# ...` comment (a `#` outside a string literal),
+  ## so a classification marker on a code line (`# [raise-audited: ...]`) is
+  ## not read as an emission site.
+  var inStr = false
+  var i = 0
+  while i < t.len:
+    let c = t[i]
+    if c == '\\' and inStr: inc i
+    elif c == '"': inStr = not inStr
+    elif c == '#' and not inStr: return t[0 ..< i].strip()
+    inc i
+  t
+
 proc codeLinesWith(path, ident: string): seq[string] =
   ## Non-comment lines naming `ident` as a whole identifier (message strings
   ## spell kinds as `(kind)`, which is excluded).
   for raw in readFile(path).splitLines():
-    let t = raw.strip()
+    let t = stripTrailingComment(raw.strip())
     if t.len == 0 or isCommentLine(t): continue
     if ("(" & ident & ")") in t: continue
     if t.hasIdent(ident): result.add t

@@ -722,6 +722,10 @@ proc appTestFile(): string = splitFile(getAppFilename()).name & ".nim"
 
 var probeCounter {.threadvar.}: int
 const hostSearchPaths = querySettingSeq(searchPaths)  ## the host build's `--path`s
+const hostCIncludes = querySettingSeq(cincludes)
+  ## the host build's `--cincludes`: where it found `z3.h`. CI passes the Z3
+  ## prefix's include dir on the command line (Linux artifact, mingw, MSVC),
+  ## so a child that does not carry it dies on `fatal error: z3.h`.
 
 const winProbePrologue = when defined(windows): """
 # A first-chance vectored handler: a divide trap, integer overflow trap or
@@ -776,6 +780,7 @@ proc prepareProbe*(who: string; probe: string; flags: openArray[string]
                "--panics:" & (when defined(nimPanics): "on" else: "off"),
                "--mm:" & $buildSemantics.mm]
   for q in paths: result.args.add "--path:" & q
+  for q in hostCIncludes: result.args.add "--cincludes:" & absolutePath(q)
   when defined(nelliFwrapv): result.args.add "-d:nelliFwrapv"
   when defined(release): result.args.add "-d:release"
   when defined(danger): result.args.add "-d:danger"

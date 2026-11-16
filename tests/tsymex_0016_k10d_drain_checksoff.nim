@@ -1,6 +1,6 @@
 ## RFC-0016 K10d follow-up: a drain for a check the build lacks returns the
 ## path. Built with `--overflowChecks:off` (its `.nim.cfg`): the build does not
-## compile in the overflow check, so `arithChecksFor()` has no `acOverflow` and
+## compile in the overflow check, so the build has no `acOverflow` and
 ## the overflow drain must leave the path as it found it. No `OverflowDefect`
 ## fork exists to reach: a search for the raise is a clean `sxUnsat`, and the
 ## surviving continuation is the ordinary one.
@@ -10,6 +10,7 @@
 ## halt to confuse with a Defect fork: what is pinned is the drain, not the
 ## axis.
 import std/unittest
+import nelli/smt/arith_regime
 import nelli/symex
 import nelli/smt/types
 import ./s8cu_helpers
@@ -27,7 +28,7 @@ proc sutAddHandler(x: int8) =
 
 suite "K10d: a drain for a check the build lacks returns the path (checks off)":
   test "the build has no overflow check":
-    check acOverflow notin arithChecksFor()
+    check not ArithFrames.init().emits(acOverflow)
 
   test "no OverflowDefect is reachable: a clean unsat, no Defect fork":
     let r = symexFind(sutAddInt8, tRaisedExn("OverflowDefect"))

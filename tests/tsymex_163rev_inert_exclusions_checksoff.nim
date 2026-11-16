@@ -1,7 +1,7 @@
 ## RFC-0016 W1-d2 (W-07), the checks-off build half of
 ## `tsymex_163rev_inert_exclusions` R14c. This file builds with
 ## `--overflowChecks:off` (its `.nim.cfg`): the wrap scan reads the BUILD
-## (`buildWraps()`), not an `arithChecks` opt-out, so the whole-program ban of
+## (`the build regime`), not an `arithChecks` opt-out, so the whole-program ban of
 ## an unprovable add/sub/mul is only meaningful here. Moved, not weakened: the
 ## per-variable-banning regression pin is the same.
 import std/unittest

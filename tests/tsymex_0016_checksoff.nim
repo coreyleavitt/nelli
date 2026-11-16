@@ -13,6 +13,7 @@
 ## witness the binary does not reach. The overflow is undefined, so the
 ## walker answers neither way: the overflow side halts (`ubSignedOverflow`).
 import std/[unittest, strutils]
+import nelli/smt/arith_regime
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -54,9 +55,9 @@ suite "W1-d2 checks-off build":
 
   test "the build is checks-off and the default settings follow it":
     check coOverflow notin buildSemantics.checks
-    check buildWraps()
-    check acOverflow notin arithChecksFor(buildSemantics)
-    check acDivByZero notin arithChecksFor(buildSemantics)
+    check buildRegime() == rgUnchecked
+    check not ArithFrames.init().emits(acOverflow)
+    check not ArithFrames.init().emits(acDivByZero)
     check validateSymexSettings(defaultSymexSettings()).len == 0
 
   test "native: v + 1 > v at high(int) is compiler-dependent (undefined)":

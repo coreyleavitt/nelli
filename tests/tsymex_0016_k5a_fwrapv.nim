@@ -32,6 +32,7 @@ else:
   import std/[unittest, strutils]
   import nelli
   import nelli/symex
+  import nelli/smt/arith_regime
   import ./s8cu_helpers
 
   proc sutWrap32(v: int32) =
@@ -61,7 +62,7 @@ else:
     test "the build declares the wrap and produces the flag":
       check buildSemantics.fwrapv
       check coOverflow notin buildSemantics.checks
-      check buildWraps()
+      check buildRegime() == rgUnchecked
 
     test "native: -fwrapv defines the 32 and 64 bit wrap":
       check "hit" in nativeRun(sutWrap32(high(int32))).hits

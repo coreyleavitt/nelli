@@ -7,6 +7,7 @@
 ## The width/sign binding property itself is pinned, trusted, in the checked
 ## file through an in-window sum.
 import std/unittest
+import nelli/smt/arith_regime
 import nelli/smt/canonicalize
 import nelli/symex
 import ./s8cu_helpers
@@ -29,7 +30,7 @@ suite "#163 review R16 D2 -- signed narrow width, checks-off build":
     check c < 100'i8
 
   test "the build is checks-off and the default settings agree":
-    check buildWraps()
+    check buildRegime() == rgUnchecked
     check validateSymexSettings(defaultSymexSettings()).len == 0
 
   test "D2 wmExplore (rule a): the wrap at a=100, b=100 is a trusted sat (int8 wraps)":

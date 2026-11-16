@@ -310,7 +310,7 @@ const renderAsChoicesVersion* = "12"
   ##   `never` rows.
   ## - RFC-0016 K10d (301->302): `SymexSettings.arithChecks` is removed. The
   ##   build alone decides which arithmetic checks the walker forks
-  ##   (`arithChecksFor`), so the `arithChecks=` key leaves the canonical
+  ##   (the build's checks), so the `arithChecks=` key leaves the canonical
   ##   settings string and no run taints `feCheckOption` for a setting that
   ##   disagrees with the build. Walker semantics are unchanged for a default
   ##   settings value; the number moves because the key's shape did.

@@ -31069,7 +31069,7 @@ proc runSymexImpl(prog: SymexProgram,
     if p.ty.kind == itInt:
       intParamNames.incl p.name
   # ISSUE #161 slice 3. Under UNCHECKED arithmetic (`acOverflow` absent from
-  # `arithChecksFor` — the `-d:danger` / `--overflowChecks:off` build), signed
+  # the build's checks — the `-d:danger` / `--overflowChecks:off` build), signed
   # overflow is not a defect, it WRAPS. Suppressing the raise fork is only
   # half of modelling that: an unbounded `Z3Int` still does not wrap, so a
   # promoted param would report `a * b` as 1.6e19 for a product the program

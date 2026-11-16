@@ -16,7 +16,7 @@
 ## them off: `compileOption` is all the compiler offers a library, and it
 ## answers for the push. The profile is NOT a fail-closed disagreement and the
 ## walker does not decline (`feCheckOption`) for it; it takes the push as the
-## build. For `overflowChecks` that means `buildWraps()` holds and the walker
+## build. For `overflowChecks` that means the build's regime is unchecked and the walker
 ## models the unchecked arithmetic of a checks-off build (`ubSignedOverflow`),
 ## for every routine of a program whose real build checks overflow. Pinned by
 ## `tsymex_0016_wa_importpush`. Import nelli before the push.

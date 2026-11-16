@@ -22,8 +22,7 @@ export OpaqueScan, unscanned, undefinedKinds, defectNames, ubMaskOf, ubSetOf,
 import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`, the proof `mkMathCall` / `mkArithBlock` take
 import ./pragmaaxes    ## RFC-0016 ADM-IR: `PragmaModel`, the proof `mkArithBlock` takes
 import ./arith_regime  ## RFC-0016 review D1 S2: `ArithScope`, `ArithCheck`, the proofs and the build predicates live there
-export ArithScope, ArithCheck, arithChecksFor, buildWraps,
-  signedWrapDefined, ArithStamp, RoutineArithFacts, stampFor, provenance, claims, keyText
+export ArithScope, ArithCheck, ArithStamp, RoutineArithFacts, stampFor, provenance, claims, keyText
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:

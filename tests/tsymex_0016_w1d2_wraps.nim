@@ -11,6 +11,7 @@
 ## binary does not reach, and nothing in the arithmetic knows which routine
 ## it sits in, so a pushed-off routine declines on every setting.
 import std/[unittest, strutils]
+import nelli/smt/arith_regime
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -37,8 +38,9 @@ suite "W1-d2 push route and explicit settings":
 
   test "the build is checks-on":
     check coOverflow in buildSemantics.checks
-    check not buildWraps()
-    check arithChecksFor(buildSemantics) == {acOverflow, acDivByZero, acRange}
+    check buildRegime() == rgChecked
+    check ArithFrames.init().emits(acOverflow) and ArithFrames.init().emits(acDivByZero) and
+      ArithFrames.init().emits(acRange)
 
   test "native: a pushed-off v + 1 > v is compiler-dependent (undefined)":
     # gcc and clang fold the comparison and never reach "hit"; MSVC wraps

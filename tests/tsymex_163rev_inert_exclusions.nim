@@ -213,7 +213,7 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
 ## instant an unrelated, unprovable sibling shares the same program.
 
 # RFC-0016 W1-d2: the wrap-scan ban is a property of a checks-OFF build (it
-# reads `buildWraps()`, not the settings), so the two whole-program-ban tests
+# reads `the build regime`, not the settings), so the two whole-program-ban tests
 # below moved to `tsymex_163rev_inert_exclusions_checksoff.nim`, which builds
 # with `--overflowChecks:off`. What stays here is the checked-build control:
 # no wrap scan runs, so an unprovable sibling bans nothing.

@@ -2,7 +2,7 @@
 ##
 ## Which signed arithmetic a routine body is parsed and walked under used to be
 ## decided at a dozen sites in `dsl_parser.nim` and `runtime.nim`, each reading
-## `buildWraps()`, `RoutineChecks.overflowOn`, the inherit flag and the IR stamp
+## the build's overflow checks, `RoutineChecks.overflowOn`, the inherit flag and the IR stamp
 ## in its own way. This module is the single decision and the single query
 ## surface; the sites migrate onto it in slices S3 to S6, and S1 adds nothing
 ## but the module and its tests, so no walker semantics and no key byte moves.
@@ -17,10 +17,11 @@
 ##     `ArithStamp`, whose scope is private: only `decide` mints one, and it
 ##     does so by consulting the admission tables itself (D2).
 ##
-## S2: the vocabulary (`ArithScope`, `ArithCheck`, `buildWraps`, `arithChecksFor`, `signedWrapDefined`) is defined
-## here, and `types` imports and re-exports it under the same names; this
-## module imports no `types`. Nothing here is read by a parser or walker site
-## through the `Regime` surface yet.
+## S6: this module is the only owner. `ArithScope` and `ArithCheck` are
+## defined here and `types` re-exports them (the parser, walker and cache key
+## name them); the old build predicates (`buildWraps`, `arithChecksFor`,
+## `signedWrapDefined`) and the walker's own scope stack are gone, and every
+## site asks `buildRegime`, `programMayWrap`, `wrapDefined`, `emits`, `profile`.
 import ./buildprofile
 import ./admission
 import ./definedness
@@ -30,7 +31,7 @@ import ./stdlib_rows
 type
   ArithScope* = enum
     ## RFC-0016 W1-d2c. Which arithmetic a routine body is walked under, in a
-    ## build whose own overflow checks are off (`buildWraps()`). Checked-ness is
+    ## build whose own overflow checks are off (`buildRegime() == rgUnchecked`). Checked-ness is
     ## per routine: the build's setting unless an enclosing `push overflowChecks:
     ## on` says otherwise. The parser stamps the routine's body block; the
     ## walker pushes it for the block and pops it after, so a
@@ -45,7 +46,7 @@ type
 
   ArithCheck* = enum
     ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks the walker
-    ## EMITS. RFC-0016 K10d: the build alone decides (`arithChecksFor`); the
+    ## EMITS. RFC-0016 K10d: the build alone decides (`emits`); the
     ## `SymexSettings.arithChecks` setting that used to override it is gone.
     ## An unchecked kind is never forked so it never pays path-multiplicative
     ## cost. `defectExclusions` is the orthogonal "surfacing" axis: the fork is
@@ -62,32 +63,6 @@ type
     acRange      ## fork float→int out-of-range → RangeDefect raise (R16-2);
                  ## also int-width narrowing (R16-5, deferred). Scope in R16-1:
                  ## float→int domain checks only (RD2) — no fork emitted yet.
-
-func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
-  ## RFC-0016 W1-d2. The arithmetic checks a build `b` implies: the checks its
-  ## compiled code performs. The one source the walker's check gates read
-  ## (K10d removed the `SymexSettings.arithChecks` override).
-  if coOverflow in b.checks: result.incl {acOverflow, acDivByZero}
-  if coRange in b.checks: result.incl acRange
-
-func buildWraps*(b: BuildSemantics = buildSemantics): bool =
-  ## RFC-0016 W1-d2 (W-07). Whether signed `+`, `-`, `*` (and `div`) in this
-  ## build are UNCHECKED: with `overflowChecks` off the C operation is
-  ## undefined on overflow (not a wrap, unless the build is `-d:nelliFwrapv`,
-  ## which `signedWrapDefined` reports), so the walker does not model a wrap
-  ## and a trusted answer for 32 and 64 bit. The ONE predicate
-  ## `wraps()`, the wrap scan and the exact-offset promotion read;
-  ## settings never feed it (the build is what the native program does). A routine under
-  ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
-  coOverflow notin b.checks
-
-func signedWrapDefined*(width: int; b: BuildSemantics = buildSemantics): bool =
-  ## RFC-0016 K5a. Whether an unchecked signed `+`, `-`, `*` or negation at
-  ## `width` bits is a DEFINED wrap in build `b`: always below `int`'s width
-  ## (8 and 16 bit: C computes in the promoted `int` and the narrowing wraps),
-  ## and at 32 and 64 bit only when the build compiles with `-fwrapv`
-  ## (`-d:nelliFwrapv`). `low(T) div -1` and `mod -1` are not covered by it.
-  width in {8, 16} or b.fwrapv
 
 type
   Regime* = enum
@@ -132,13 +107,13 @@ const noRowKey* = ""
   ## `RoutineArithFacts.overflowRowKey` of a routine no stdlib row models.
 
 func buildRegime*(b: BuildSemantics = buildSemantics): Regime =
-  ## The build's own arithmetic. `coOverflow` off is `buildWraps()`.
+  ## The build's own arithmetic. `coOverflow` off is `rgUnchecked`.
   if coOverflow in b.checks: rgChecked else: rgUnchecked
 
 func programMayWrap*(b: BuildSemantics = buildSemantics): bool =
   ## Whether any part of the program may run unchecked signed arithmetic. The
   ## abstraction asks about the whole program (F-5): in D1 it is the build's
-  ## own regime, so it equals `buildWraps()`.
+  ## own regime, so it is `buildRegime() == rgUnchecked`.
   buildRegime(b) == rgUnchecked
 
 func modelled(f: RoutineArithFacts): bool = f.overflowRowKey.len > 0
@@ -284,7 +259,7 @@ const anyProfile* = dpChecked
 func wrapDefined*(r: Regime; op: ArithOp; width: int;
                   b: BuildSemantics = buildSemantics): bool =
   ## Whether an unchecked signed `+`, `-` or `*` at `width` bits is a DEFINED
-  ## wrap (`signedWrapDefined(width) and wraps()`, `runtime.nim:9632`): 8 and
+  ## wrap (the walker's wrap decision, `runtime.nim:9632`): 8 and
   ## 16 bit always, 32 and 64 bit under `-fwrapv`; never where checked. It
   ## reads the definedness table, whose rows say exactly that.
   doAssert op in {aoAdd, aoSub, aoMul}, "wrapDefined: not a wrapping op"

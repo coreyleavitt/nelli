@@ -2,9 +2,12 @@
 ## share: the oracles (transcriptions of the CURRENT parser and walker rules,
 ## each line citing where it lives) and the checks run against `arith_regime`.
 ##
-## An oracle is either a live exported proc (`buildWraps`, `signedWrapDefined`,
-## `definedness`, `mkArithBlock`, `canonicalize`) or a transcription of a
-## private rule, with its file:line. The three suites differ only in the build
+## An oracle is either a live exported proc (`definedness`, `mkArithBlock`,
+## `canonicalize`) or a transcription of a rule, with its file:line. The
+## retired build predicates (`buildWraps`, `signedWrapDefined`,
+## `arithChecksFor`) survive here as the literal transcriptions `refWraps`,
+## `refWrapDefined` and `refChecks`: the property stays pinned against the
+## module alone. The three suites differ only in the build
 ## they are compiled for (their `.nim.cfg`), which fixes `buildSemantics`; the
 ## synthetic builds below cover every combination in each of them, so the
 ## default-argument path is checked against the compiled build and the
@@ -47,29 +50,43 @@ iterator allFacts*(): RoutineArithFacts =
 
 # ---- oracles: the current rules, transcribed -------------------------------
 
+func refWraps(b: BuildSemantics): bool =
+  ## The retired `buildWraps`: signed arithmetic is unchecked in this build.
+  coOverflow notin b.checks
+
+func refWrapDefined(width: int; b: BuildSemantics): bool =
+  ## The retired `signedWrapDefined` (K5a): below `int`'s width always, at 32
+  ## and 64 bit only under `-fwrapv`.
+  width in {8, 16} or b.fwrapv
+
+func refChecks(b: BuildSemantics): set[ArithCheck] =
+  ## The retired `arithChecksFor`: the checks the build compiles in.
+  if coOverflow in b.checks: result.incl {acOverflow, acDivByZero}
+  if coRange in b.checks: result.incl acRange
+
 func refScope(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
   ## dsl_parser.nim:1598 `arithScopeFor(c, caller, inherit = false)`.
-  if buildWraps(b) and f.overflowOn and f.readable: asChecked
-  elif f.overflowRowKey.len > 0 and not buildWraps(b): asUnchecked
+  if refWraps(b) and f.overflowOn and f.readable: asChecked
+  elif f.overflowRowKey.len > 0 and not refWraps(b): asUnchecked
   else: asBuild
 
 func refStamp(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
   ## dsl_parser.nim:1672 `arithStamp`: no claim in a build that checks unless
   ## a row models the routine, and none by an inherit routine.
-  if (not buildWraps(b) and f.overflowRowKey.len == 0) or f.inherit: asInherit
+  if (not refWraps(b) and f.overflowRowKey.len == 0) or f.inherit: asInherit
   else: refScope(f, b)
 
 func refDecline(f: RoutineArithFacts; b: BuildSemantics): bool =
   ## dsl_parser.nim:1819 (`coOverflow in c.checks and c.why.len == 0 and not
   ## buildWraps() and not c.overflowModelled`).
-  f.overflowDeviates and f.readable and not buildWraps(b) and
+  f.overflowDeviates and f.readable and not refWraps(b) and
     f.overflowRowKey.len == 0
 
 func refParseChecked(f: RoutineArithFacts; b: BuildSemantics): bool =
   ## dsl_parser.nim:1662 `pushArithScope` (non-inherit) then :1614
   ## `overflowChecked`.
   let sc = refScope(f, b)
-  (not buildWraps(b) and sc != asUnchecked) or sc == asChecked
+  (not refWraps(b) and sc != asUnchecked) or sc == asChecked
 
 func refDefProfile(wraps: bool; b: BuildSemantics): DefProfile =
   ## runtime.nim:9372 `defProfile`.
@@ -77,8 +94,8 @@ func refDefProfile(wraps: bool; b: BuildSemantics): DefProfile =
 
 func refChecked(ac: ArithCheck; wraps: bool; b: BuildSemantics): bool =
   ## runtime.nim:9362 `checked`, over `arithChecksFor` (types.nim:5248).
-  ac in arithChecksFor(b) or
-    (ac in {acOverflow, acDivByZero} and buildWraps(b) and not wraps)
+  ac in refChecks(b) or
+    (ac in {acOverflow, acDivByZero} and refWraps(b) and not wraps)
 
 # ---- the checks -------------------------------------------------------------
 
@@ -105,14 +122,14 @@ proc checkLiterals*() =
       overflowDeviates: dev, overflowRowKey: key, inherit: inh)
   # checks-off build: every non-inherit routine claims (dsl_parser.nim:1676
   # `buildWraps()` lets it through), asChecked only for a read `push on`
-  # (:1608 is not reached: `not buildWraps()` is false; :1605 is).
+  # (:1608 is not reached: `not refWraps()` is false; :1605 is).
   check stampFor(fx(true, false, true, ""), off).provenance == asBuild
   check stampFor(fx(true, true, false, ""), off).provenance == asChecked
   check stampFor(fx(false, true, false, ""), off).provenance == asBuild  # :1605 needs why.len == 0
-  check stampFor(fx(true, false, true, rowKey), off).provenance == asBuild  # :1608 needs `not buildWraps()`
+  check stampFor(fx(true, false, true, rowKey), off).provenance == asBuild  # :1608 needs `not refWraps()`
   check stampFor(fx(true, true, true, rowKey), off).provenance == asChecked
   check stampFor(fx(true, true, false, "", true), off).provenance == asInherit  # :1676 `or inherit`
-  check not decide(fx(true, false, true, ""), off).declineOverflow  # :1820 `not buildWraps()`
+  check not decide(fx(true, false, true, ""), off).declineOverflow  # :1820 `not refWraps()`
   # checks-on build: a claim only for a modelled routine (:1676), as
   # asUnchecked (:1608); a deviating unmodelled routine declines (:1819-1821).
   check stampFor(fx(true, false, true, ""), on).provenance == asInherit
@@ -131,15 +148,15 @@ proc checkLiterals*() =
 proc checkProfiles*() =
   for (nm, b) in builds():
     checkpoint nm
-    check buildRegime(b) == (if buildWraps(b): rgUnchecked else: rgChecked)
-    check programMayWrap(b) == buildWraps(b)           # F-5, D1
+    check buildRegime(b) == (if refWraps(b): rgUnchecked else: rgChecked)
+    check programMayWrap(b) == refWraps(b)           # F-5, D1
     for r in [rgChecked, rgUnchecked]:
       check profile(r, b) == refDefProfile(r == rgUnchecked, b)
       for op in [aoAdd, aoSub, aoMul]:
         for w in [8, 16, 32, 64]:
-          # runtime.nim:9632: `signedWrapDefined(width) and wraps()`
+          # runtime.nim:9632: `refWrapDefined(width) and wraps()`
           check wrapDefined(r, op, w, b) ==
-                (r == rgUnchecked and signedWrapDefined(w, b))
+                (r == rgUnchecked and refWrapDefined(w, b))
           # and the table agrees (runtime.nim:9402)
           let ans = definedness(op, (if w in {32, 64}: ocSignedWide
                                      else: ocSignedNarrow), profile(r, b))
@@ -157,7 +174,7 @@ proc checkFrames*() =
     var w = ArithFrames.init(b)
     check w.regime == buildRegime(b)                    # runtime.nim:2178
     for ac in ArithCheck:
-      check w.emits(ac, b) == refChecked(ac, buildWraps(b), b)
+      check w.emits(ac, b) == refChecked(ac, refWraps(b), b)
     # the walk: every stamp a routine can carry, entered and left
     for f in allFacts():
       let s = stampFor(f, b)
@@ -194,9 +211,9 @@ proc checkFrames*() =
     # overflow checks to be the build's
     for f in allFacts():
       for caller in [rgChecked, rgUnchecked]:
-        let sameScope = (not buildWraps(b)) or
+        let sameScope = (not refWraps(b)) or
           ((if refScope(f, b) == asChecked: rgChecked else: rgUnchecked) == caller)
-        let agrees = f.readable and (not f.overflowDeviates or buildWraps(b))
+        let agrees = f.readable and (not f.overflowDeviates or refWraps(b))
         check inlinableIterator(f, caller, b) == (agrees and sameScope)
 
 proc checkConstPure*() =
@@ -242,7 +259,7 @@ proc checkKeyBytes*() =
     check blk.blkArith.provenance == s.provenance
     check key.startsWith("St<Bk:@" & s.keyText & ":[")
     seen.add s.keyText
-  if buildWraps():
+  if coOverflow notin buildSemantics.checks:
     check seen.len >= 2 and "asBuild" in seen and "asChecked" in seen
   else:
     check seen == @["asUnchecked"]

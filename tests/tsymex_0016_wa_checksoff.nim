@@ -9,6 +9,7 @@
 ##   P2  a routine pushed `overflowChecks: on` in this build is checked, magic
 ##       bodies (`abs`) included; a closure iterator keeps its own scope.
 import std/[unittest, strutils]
+import nelli/smt/arith_regime
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -99,7 +100,7 @@ suite "WA-A checks-off build":
     check parseInt(symexWalkerVersion) >= 285
 
   test "the build is checks-off":
-    check buildWraps()
+    check buildRegime() == rgUnchecked
 
   test "S1 native: the closure loop runs":
     check native(sutClosureLoop(0)) == "hit"

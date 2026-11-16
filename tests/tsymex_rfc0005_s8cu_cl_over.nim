@@ -31,7 +31,7 @@ suite "S8cu: --overflowChecks:off":
     ## the settings modelled checks the build did not have. They now agree with
     ## the build, so a routine that never reaches the check is decided and
     ## carries no marker (W1-d2a's `withCheckDeclines` emits only when not
-    ## `buildWraps()`; not a src defect).
+    ## `the build regime`; not a src defect).
     check native(clField(4)) == "FieldDefect"
     decides(clField, sxRaised)
     check native(clPure(7)) == "hit"

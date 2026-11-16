@@ -6,6 +6,7 @@
 ## the walker), so such a routine is modelled as a checked build models it, and
 ## a call across the boundary keeps each side's own arithmetic.
 import std/[unittest, strutils]
+import nelli/smt/arith_regime
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -54,7 +55,7 @@ suite "W1-d2c push overflowChecks: on in a checks-off build":
     check parseInt(symexWalkerVersion) >= 283
 
   test "the build is checks-off":
-    check buildWraps()
+    check buildRegime() == rgUnchecked
 
   test "native: the pushed-on routine raises, the plain one is not checked":
     check native(checkedOver(high(int))) == "OverflowDefect"

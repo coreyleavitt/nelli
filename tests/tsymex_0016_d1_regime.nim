@@ -4,6 +4,7 @@
 import std/[unittest, os, strutils]
 import nelli/smt/buildprofile
 import nelli/smt/arith_regime
+from nelli/smt/types import nil
 import ./d1_regime_helpers
 
 suite "D1 S1: arith_regime (default build)":
@@ -27,19 +28,30 @@ suite "D1 S1: arith_regime (default build)":
     check buildRegime() == rgChecked
     check not programMayWrap()
 
-  test "S3 census: the parser names no build predicate and no profile literal":
-    let src = readFile(currentSourcePath().parentDir() / ".." / "src" /
-                       "nelli" / "smt" / "dsl_parser.nim")
-    check "buildWraps(" notin src
-    for lit in ["dpChecked", "dpUnchecked", "dpFwrapv"]:
-      check lit notin src
+  test "S6 census: arith_regime owns the regime; no old vocabulary or profile literal elsewhere":
+    let root = currentSourcePath().parentDir() / ".." / "src"
+    var scanned = 0
+    var offenders: seq[string]
+    for f in walkDirRec(root):
+      if not f.endsWith(".nim"): continue
+      let name = extractFilename(f)
+      inc scanned
+      let src = readFile(f)
+      if name != "arith_regime.nim":
+        for pat in ["buildWraps", "signedWrapDefined", "WalkArith",
+                    "arithChecksFor", "ArithScopeProof"]:
+          if pat in src: offenders.add name & ": " & pat
+      if name notin ["arith_regime.nim", "definedness.nim"]:
+        for lit in ["dpChecked", "dpUnchecked", "dpFwrapv"]:
+          if lit in src: offenders.add name & ": " & lit
+    check offenders == newSeq[string]()
+    check scanned > 20
 
-  test "S4 census: the walker names no build predicate, scope stack or profile literal":
-    let dir = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt"
-    for f in ["runtime.nim", "runtime_closures.nim", "runtime_exceptions.nim",
-              "runtime_floats.nim", "runtime_heap.nim", "runtime_strings.nim"]:
-      let src = readFile(dir / f)
-      for pat in ["buildWraps(", "WalkArith", "signedWrapDefined"]:
-        check pat notin src
-      for lit in ["dpChecked", "dpUnchecked", "dpFwrapv"]:
-        check lit notin src
+  test "S6 census: nelli/smt/types exports none of the old vocabulary":
+    check not declared(types.buildWraps)
+    check not declared(types.signedWrapDefined)
+    check not declared(types.arithChecksFor)
+    check not declared(types.WalkArith)
+    check not declared(types.ArithScopeProof)
+    check declared(types.ArithScope)   # its names are cache-key bytes
+    check declared(types.ArithCheck)   # the walker's gate type

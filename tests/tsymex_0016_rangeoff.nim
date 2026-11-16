@@ -24,6 +24,7 @@
 ## (`ubArrayOutOfBounds`): the out-of-array side halts at the access, the
 ## in-range side stays exact (UBSan `-fsanitize=bounds` pins the row below).
 import std/[unittest, strutils]
+import nelli/smt/arith_regime
 import nelli
 import nelli/symex
 import nelli/smt/definedness
@@ -164,7 +165,7 @@ suite "PRC-07: range conversions with --rangeChecks:off":
 
   test "the build has the range check off and the others on":
     check coRange notin buildSemantics.checks
-    check acRange notin arithChecksFor()
+    check not ArithFrames.init().emits(acRange)
     check coOverflow in buildSemantics.checks
 
   test "int8(v) truncates":

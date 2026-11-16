@@ -5,6 +5,7 @@
 import std/[unittest, strutils]
 {.push overflowChecks: off.}
 import nelli
+import nelli/smt/arith_regime
 import nelli/symex
 {.pop.}
 
@@ -16,5 +17,5 @@ suite "WA-A import under a push":
     # Documented in `buildprofile.nim`: there is no decline for this, only the
     # advice to import nelli before the push.
     check coOverflow notin buildSemantics.checks
-    check buildWraps()
-    check acOverflow notin arithChecksFor(buildSemantics)
+    check buildRegime() == rgUnchecked
+    check not ArithFrames.init().emits(acOverflow)

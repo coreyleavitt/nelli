@@ -4,6 +4,7 @@
 ## check, and the signed overflow itself is undefined, a `ubSignedOverflow`
 ## halt rather than the old trusted sxUnsat.
 import std/unittest
+import nelli/smt/arith_regime
 import nelli/symex
 import ./s8cu_helpers
 
@@ -14,7 +15,7 @@ proc sa_off(a, b: int) =
 
 suite "symex Phase 16 R16-4 -- acOverflow gate, checks-off build":
   test "R16-4-8 (rule a): checks off -> no OverflowDefect raise; the overflow halts":
-    check acOverflow notin arithChecksFor(buildSemantics)
+    check not ArithFrames.init().emits(acOverflow)
     let r = symexFind(sa_off, tRaisedExn("OverflowDefect"))
     check r.status != sxRaised
     check not r.trusted

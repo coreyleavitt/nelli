@@ -14,6 +14,7 @@
 ## (`symexFind`): a declined row still declines, and an admitted one still
 ## decides as before.
 import std/[unittest, strutils, os, tables, math, options]
+import nelli/smt/arith_regime
 import nelli
 import nelli/symex
 import nelli/smt/admission
@@ -177,7 +178,7 @@ suite "ADM-IR: the stdlib-body axis, float calls (mkMathCall)":
     # beside-the-point row asserts in `decide`.
     let f = RoutineArithFacts(readable: true, overflowDeviates: true,
                               overflowRowKey: "math.floorDiv")
-    if not buildWraps():
+    if buildRegime() == rgChecked:
       check mkArithBlock(stampFor(f), @[mkBreak()]).blkArith.provenance ==
         asUnchecked
       for key in ["math.divmod", "math.ceilDiv", "math.sgn"]:

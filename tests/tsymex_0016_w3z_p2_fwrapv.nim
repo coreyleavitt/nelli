@@ -22,7 +22,7 @@ when defined(vcc):
         check refusal.get.field == bfFwrapv
         check "-fwrapv" in refusal.get.reason
 else:
-  import std/[unittest, strutils]
+  import std/[unittest, strutils, tables]
   import nelli
   import nelli/symex
   import nelli/smt/errorkind
@@ -164,12 +164,100 @@ else:
     test "the plain call does not reach the label":
       let r = symexFind(sutAdderPlain, tLabel("hit"))
       checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
+      check r.status == sxRaised
+      check not r.errors.named(feUnsupportedOp)
     test "walker version floor (R2-1: alias bodies are stamped)":
       check parseInt(symexWalkerVersion) >= 363
     test "the aliased call answers as the plain call does":
       let p = symexFind(sutAdderPlain, tLabel("hit"))
       let r = symexFind(sutAdderAliased, tLabel("hit"))
       checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxRaised
       check r.status == p.status
-      check r.status != sxSat
+      check not r.errors.named(feUnsupportedOp)
+
+  # RFC-0016 round-3 R3-2: the same alias bodies, on the other halves of
+  # `parseRoutineBody`. (a) a lambda compiled with `boundChecks` pushed off,
+  # in a build that checks them: the check-option decline
+  # (`withCheckDeclines`) must reach the aliased body as it reaches the plain
+  # one. (b) a lambda body with a proc-typed `let`: alias bodies go through
+  # `devirtProcLets`, so the aliased verdict is the plain one.
+  # The maker is pushed with its lambda: a push inside a routine body is a
+  # statement the walker does not model, and a module-level proc `let` is not
+  # a modelled global. So the maker declines at entry as well; the alias body's
+  # own decline follows from `parseRoutineBody` (an alias body parsed without
+  # it carries no marker); this case pins the equal verdict and kind.
+  {.push boundChecks: off.}
+  proc mkIndexer(): proc (a, b: var int) =
+    result = proc (a, b: var int) =
+      let tab = [10, 20, 30, 40]
+      a = tab[b and 3]
+  {.pop.}
+
+  proc sutIdxPlain(k: int) =
+    var x = k
+    var y = k
+    let f = mkIndexer()
+    f(x, y)
+    if k == 1 and x == 20: symexTarget("hit")
+
+  proc sutIdxAliased(k: int) =
+    var x = k
+    let f = mkIndexer()
+    f(x, x)
+    if k == 1 and x == 20: symexTarget("hit")
+
+  # A `let` proc value called with a Table, the form `devirtProcLets` spells as
+  # the direct call. Pins that the aliased verdict is the plain one and exact;
+  # with the rewrite bypassed for alias bodies the walker still models this
+  # call, so the case guards the verdict, not the rewrite itself.
+  proc lookOne(t: Table[int, int]; i: int): int = t[i]
+
+  proc mkLetter(): proc (a, b: var int) =
+    result = proc (a, b: var int) =
+      var t = initTable[int, int]()
+      t[1] = 10
+      let g = lookOne
+      a = g(t, 1) + b
+
+  proc sutLetPlain(k: int) =
+    var x = k
+    var y = k
+    let f = mkLetter()
+    f(x, y)
+    if x == 13: symexTarget("hit")
+
+  proc sutLetAliased(k: int) =
+    var x = k
+    let f = mkLetter()
+    f(x, x)
+    if x == 13: symexTarget("hit")
+
+  suite "R3-2: alias bodies take the check-option declines and the proc-let rewrite":
+    test "walker version floor":
+      check parseInt(symexWalkerVersion) >= 363
+    test "a lambda pushed boundChecks off declines on the plain call":
+      let r = symexFind(sutIdxPlain, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      check r.errors.named(feCheckOption)
+    test "the aliased call declines exactly as the plain call does":
+      let p = symexFind(sutIdxPlain, tLabel("hit"))
+      let r = symexFind(sutIdxAliased, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      check r.status == p.status
+      check r.errors.named(feCheckOption)
+      check not r.errors.named(feUnsupportedOp)
+    test "a proc-typed let in the body: the plain call finds the label":
+      let r = symexFind(sutLetPlain, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxSat
+      check not r.errors.named(feUnsupportedOp)
+    test "a proc-typed let in the body: the aliased call answers as the plain":
+      let p = symexFind(sutLetPlain, tLabel("hit"))
+      let r = symexFind(sutLetAliased, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxSat
+      check r.status == p.status
+      check not r.errors.named(feUnsupportedOp)

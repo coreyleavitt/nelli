@@ -267,21 +267,66 @@ proc viaHooks(text: string): string =
       result.add text[i]
       inc i
 
+proc codeOf(text: string): string =
+  ## `text` with every line's comment and string literals dropped
+  ## (`stripLine`): what a "does the code call X" check may read, so a
+  ## commented-out call does not count.
+  for l in text.splitLines: result.add stripLine(l) & "\n"
+
 proc relImports(text: string): seq[string] =
   ## The `./name` modules a file imports (`import ./a`, `import ./a as b`,
+  ## `import ./a, ./b`, the bracket form `import ./[a, b as c]`,
   ## `from ./a import ...`).
   for l in text.splitLines:
     let t = stripLine(l).strip()
     var rest = ""
-    if t.startsWith("import "): rest = t[7 .. ^1]
-    elif t.startsWith("from "): rest = t[5 .. ^1]
+    if t.startsWith("import "): rest = t[7 .. ^1].strip()
+    elif t.startsWith("from "): rest = t[5 .. ^1].strip()
     else: continue
-    for m in (if t.startsWith("from "): @[rest.splitWhitespace[0]]
-              else: rest.split(',')):
+    var specs: seq[string]
+    if t.startsWith("from "): specs.add rest.splitWhitespace[0]
+    else:
+      # split on commas outside `[...]`; a `./[a, b]` group expands
+      var depth = 0
+      var cur = ""
+      var parts: seq[string]
+      for c in rest:
+        if c == '[': inc depth
+        elif c == ']': dec depth
+        if c == ',' and depth == 0:
+          parts.add cur
+          cur = ""
+        else: cur.add c
+      parts.add cur
+      for p in parts:
+        let q = p.strip()
+        let lb = q.find("/[")
+        if lb >= 0 and q.endsWith("]"):
+          let dir = q[0 .. lb]
+          for m in q[lb + 2 ..< q.len - 1].split(','):
+            specs.add dir & m.strip()
+        else: specs.add q
+    for m in specs:
       var x = m.strip()
       let k = x.find(" as ")
       if k >= 0: x = x[0 ..< k]
       if x.startsWith("./"): result.add x[2 .. ^1]
+
+proc familyImports(): HashSet[string] =
+  ## The union of the `./` imports of EVERY runtime-family file, iterated to a
+  ## fixpoint: a module the walk reaches only through a leaf (not through
+  ## `runtime.nim` or `walk_state.nim`) is found, and a family member found
+  ## that way is scanned in its turn.
+  var scanned: HashSet[string]
+  var work: seq[string] = @runtimeFamilyFiles
+  while work.len > 0:
+    let f = work.pop()
+    if f in scanned: continue
+    scanned.incl f
+    for m in relImports(readSmt(f)):
+      let g = m & ".nim"
+      result.incl g
+      if g in runtimeFamilyFiles and g notin scanned: work.add g
 
 const
   ## Smt modules `runtime.nim`/`walk_state.nim` import that hold no walker
@@ -308,6 +353,13 @@ const
     ("errorkind.nim", "the error-kind classification table"),
     ("exits.nim", "the exit channels, called by the walker not part of it"),
     ("concolictaxonomy.nim", "the concolic taxonomy (data)")]
+
+suite "RFC-0016 D3: relImports reads every import form":
+  test "plain, aliased, comma, bracket and from forms; comments are not imports":
+    let r = relImports("import ./a\nimport ./b as bb, std/os, ./c\n" &
+      "import ./[d, e as ee]\nfrom ./f import x\n# import ./g\n" &
+      "import std/[os, strutils], ./h\n")
+    check r == @["a", "b", "c", "d", "e", "f", "h"]
 
 suite "RFC-0016 D3: definedNames sees enum members and every declared name":
   # R2-5: the scanner used to record the first name after a column-0 keyword
@@ -387,13 +439,11 @@ suite "RFC-0016 D3: the include surface":
       check fileExists(smt / f)
 
   test "every smt module the walker imports is in the family or reasoned out":
-    # L1 (R2-5): the expected leaf set is DERIVED from the `./` imports of
-    # `runtime.nim` and `walk_state.nim`, not kept by hand. A newly imported
+    # L1 (R2-5, R3-5): the expected leaf set is DERIVED from the `./` imports
+    # of every family file (to a fixpoint), not kept by hand. A newly imported
     # module is either a family member (it holds walker sites a source audit
     # must read) or is named, with a reason, in `noWalkerSites`.
-    var imported: HashSet[string]
-    for f in ["runtime.nim", "walk_state.nim"]:
-      for m in relImports(readSmt(f)): imported.incl m & ".nim"
+    let imported = familyImports()
     var listed, reasoned: HashSet[string]
     for f in runtimeFamilyFiles: listed.incl f
     for (f, why) in noWalkerSites:
@@ -611,7 +661,8 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     var callers = ""   # every smt/ module but runtime.nim and the table itself
     for p in walkFiles(smt / "*.nim"):
       let f = extractFilename(p)
-      if f notin ["runtime.nim", "walk_state.nim"]: callers.add readFile(p)
+      if f notin ["runtime.nim", "walk_state.nim"]:
+        callers.add codeOf(readFile(p))   # a comment is not a caller
     for h in ["lower", "lowerClosureCall",
               "currentFrameId", "registerCapCell", "depositStrIndexOob"]:
       checkpoint h
@@ -622,9 +673,57 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
               "allocateSym", "seqElemAt"]:
       check not ws.contains("\n  " & h & "*: proc(")
     check not ws.contains("sortOfTuple*:")   # D3c-6: read directly from heap_model
-    check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")
-    check readSmt("runtime_closures.nim").contains("lowerHooks.lowerClosureCall(")
+    check codeOf(readSmt("runtime_floats.nim")).contains("lowerHooks.lower(")
+    check codeOf(readSmt("runtime_closures.nim")).contains(
+      "lowerHooks.lowerClosureCall(")
     check readSmt("runtime.nim").contains("\nlowerHooks = LowerHooks(")
+
+  test "a commented-out hook call is not a caller (self-test)":
+    let src = "proc a() =\n  # lowerHooks.lower(env, e, p)\n  discard\n" &
+              "  ## lowerHooks.registerCapCell(x, v)\n  discard 1 # lowerHooks.currentFrameId()\n"
+    for h in ["lower", "registerCapCell", "currentFrameId"]:
+      check not codeOf(src).contains("lowerHooks." & h & "(")
+    check codeOf("  lowerHooks.lower(env, e, p)\n").contains("lowerHooks.lower(")
+
+  test "the lowerHooks init assigns every declared field and no other":
+    # R3-4: a field the init leaves nil is a nil-call at the first hook use.
+    let ws = readSmt("walk_state.nim")
+    var declared, assigned: HashSet[string]
+    let t = ws.find("type LowerHooks* = object")
+    check t >= 0
+    for l in ws[t ..< ws.len].splitLines[1 .. ^1]:
+      if l.len > 0 and l[0] != ' ': break
+      if l.startsWith("  ") and not l.startsWith("   "):
+        let s = l.strip()
+        let c = s.find(":")
+        if c > 0 and not s.startsWith("#"):
+          declared.incl s[0 ..< c].strip().strip(chars = {'*'})
+    let rt = readSmt("runtime.nim")
+    let i = rt.find("\nlowerHooks = LowerHooks(")
+    check i >= 0
+    var j = rt.find('(', i)
+    let start = j + 1
+    var depth = 1
+    inc j
+    while j < rt.len and depth > 0:
+      if rt[j] == '(': inc depth
+      elif rt[j] == ')': dec depth
+      inc j
+    var item = ""
+    var d = 0
+    for c in codeOf(rt[start ..< j - 1]):
+      if c in {'(', '['}: inc d
+      elif c in {')', ']'}: dec d
+      if c == ',' and d == 0:
+        let k = item.find(":")
+        if k > 0: assigned.incl item[0 ..< k].strip()
+        item = ""
+      else: item.add c
+    let k = item.find(":")
+    if k > 0: assigned.incl item[0 ..< k].strip()
+    checkpoint $declared & " vs " & $assigned
+    check declared.len >= 5
+    check declared == assigned
 
 proc importsOf(text: string): seq[string] =
   for l in text.splitLines:

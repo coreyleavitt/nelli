@@ -1,4 +1,6 @@
-## RFC-0016 review D3c-6: the heap ALGEBRA, a real leaf module.
+## RFC-0016 review D3c-6, R2-4: the heap model, a real leaf module: the heap
+## algebra, the `iteSV` merge, and the type-directed allocator
+## (`allocateSym`/`seqElemAt`), which are mutually recursive.
 ##
 ## The ref sorts and their nil consts, the heap keys, the leaf split of a
 ## compound value (`svLeafAsts` / `svWithLeaves` / `svPartsOf`), `heapSelect`
@@ -2156,7 +2158,8 @@ proc heapStepsOf*(sv: SymVal): int =
 # `svSeq` whose element type `allocateSym`'s `itSeq` arm could not back with
 # a real Z3 array (e.g. `seq[(string,string)]`) — allocated with `seqLen`
 # HARD-FORCED `== 0` and an INERT data array nothing may legitimately select
-# from (see `allocateSym`'s `itSeq` arm doc, ~line 1849). A verdict-affecting
+# from (see the `itSeq` arm of `allocateSym` below, where the placeholder is
+# built with `isUnsupportedFieldPlaceholder: true`). A verdict-affecting
 # READ of such a value (via its real, forced-0 `seqLen`, or its inert
 # `seqDataRaw`) must NEVER be trusted — doing so silently proves a verdict
 # against the fake length/content instead of honestly declining. R1 found
@@ -2166,8 +2169,9 @@ proc heapStepsOf*(sv: SymVal): int =
 # `declinePlaceholderInLower` (the in-`lower()` recording half) — is the
 # structural chokepoint every svSeq-consuming lowering arm must call FIRST,
 # so a future arm added to `lower()` inherits totality by construction
-# instead of needing its own hand-rolled check. `isIndex`'s walk-time arm
-# (runtime.nim, below) is the analogous AT-WALK half — it cannot share
+# instead of needing its own hand-rolled check. The `isIndex` walk-time arm
+# (runtime.nim: the `w.degrade(placeholderReadDeclineKind(arrSV), ...
+# "index read")` site) is the analogous AT-WALK half — it cannot share
 # `declinePlaceholderInLower`'s threadvar-sink recording (it has `w`/`Path`
 # and must fork `uncertain = true` on the SURVIVING PATH, not merely flag a
 # threadvar for `drainPendingLowerEffects` to pick up later), but shares
@@ -3229,8 +3233,8 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # never the real `ty.seqElemTy` — because it structurally can never
       # be selected from; a declared-FIELD read is intercepted at PARSE
       # time (`dsl_parser.nim`'s `nnkDotExpr` arm); a bare local/param/
-      # return-value INDEXED read is intercepted at WALK time (`isIndex`'s
-      # `svSeq` arm, below — the generalization this slice adds, since a
+      # return-value INDEXED read is intercepted at WALK time (the `isIndex` arm
+      # in runtime.nim, `"index read"` — the generalization this slice adds, since a
       # bare value has no static field-access site for the parser to
       # intercept). `isUnsupportedFieldPlaceholder: true` lets `retBindEq`
       # (below), witness extraction (`extractFromSymVal`), and `isIndex`

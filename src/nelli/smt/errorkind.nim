@@ -1526,11 +1526,8 @@ const kindInfo*: array[SymexErrorKind, KindInfo] = [
     # raise ends its path.
   ]
 
-static:
-  # Every kind has a row (also enforced by the keyed constructor above).
-  doAssert kindInfo.len == ord(high(SymexErrorKind)) + 1
-  for k in SymexErrorKind:
-    doAssert kindInfo[k].severity in {sevHint, sevWarning, sevError}
+# Row totality is the keyed constructor's (above); the severity set is pinned
+# by the independent table in `tests/tsymex_0016_d4_errorkind`.
 
 func classOf*(k: SymexErrorKind): DegradeClass =
   ## What an emission site of `k` substitutes (`kindInfo[k].class`).

@@ -223,10 +223,11 @@ proc procBody(name: string): string =
   runtimeSrc[a ..< b]
 
 suite "R2-2: the rule is one named predicate":
-  test "syncAddrCells and walkCapSynced read syncedByItsParts":
-    check runtimeSrc.count("\nfunc syncedByItsParts(") == 1
-    check procBody("syncAddrCells").contains("syncedByItsParts(stmt)")
-    check procBody("walkCapSynced").contains("syncedByItsParts(stmt)")
+  # RFC-0016 review R4-1 renamed it `reconciledHere`, read per survivor.
+  test "syncAddrCells and walkCapSynced read reconciledHere":
+    check runtimeSrc.count("\nfunc reconciledHere(") == 1
+    check procBody("syncAddrCells").contains("reconciledHere(stmt, joined[i])")
+    check procBody("walkCapSynced").contains("reconciledHere(stmt, joined[i])")
   test "no per-entry isBlock skip is left in syncAddrCells":
     check not procBody("syncAddrCells").contains("stmt.kind == isBlock")
 
@@ -387,12 +388,13 @@ suite "R3-1: a labelled block reconciles its break paths":
     verdict(sutR3ContSc, "ok", sxSat)
     verdict(sutR3ContSc, "bad", sxUnsat)
 
-suite "R3-1: the predicate keeps a labelled block":
-  test "syncedByItsParts excludes a labelled block":
-    let a = runtimeSrc.find("\nfunc syncedByItsParts(")
+suite "R3-1: the predicate keeps a labelled block's exits":
+  # RFC-0016 review R4-1: only the survivors that rejoined the block from a
+  # parked exit; the verdicts are pinned in `tsymex_0016_r5a_exitsync`.
+  test "reconciledHere keeps a block's joined exits":
+    let a = runtimeSrc.find("\nfunc reconciledHere(")
     doAssert a >= 0
     let b = runtimeSrc.find("\nproc ", a + 1)
-    check runtimeSrc[a ..< b].contains(
-      "stmt.kind == isBlock and stmt.blkLabel.len == 0")
+    check runtimeSrc[a ..< b].contains("stmt.kind != isBlock or joinedExit")
   test "walker version floor (R3-1)":
     check symexWalkerVersion.parseInt >= 364

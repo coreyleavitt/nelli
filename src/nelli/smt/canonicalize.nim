@@ -688,8 +688,13 @@ const renderAsChoicesVersion* = "12"
   ## - RFC-0016 review R3-1 (363->364): a labelled block is reconciled
   ##   after as before R2-2 (`syncedByItsParts` excludes it): its `break`
   ##   paths are survivors no inner statement synced. No key bytes change.
+  ## - RFC-0016 review R4-1 (364->365): a labelled block reconciles only the
+  ##   survivors that rejoined it from a parked exit (`reconciledHere`), not its
+  ##   fall-through, which its statements synced: a callee that removes an
+  ##   `mpairs` view's key inside a labelled block declined (sxUnknown) and now
+  ##   answers. No key bytes change.
 
-const symexWalkerVersion* = "364"
+const symexWalkerVersion* = "365"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

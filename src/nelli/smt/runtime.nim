@@ -12572,6 +12572,11 @@ type
                                 ## on return. See pushFrame/popFrame below.
     capSyncDepth: int           ## RFC-0005 S8ax: the statement nesting depth
                                 ## `walk` snapshots capture cells at
+    blockJoinedExits: int       ## RFC-0016 review R4-1: how many of a
+                                ## labelled block's survivors, the last ones,
+                                ## rejoined it from its `breakPaths`; set by
+                                ## `walkStmt`, read by `walkCapSynced`
+                                ## (`reconciledHere`)
     frameIdCounter: int         ## RFC-0005 S9: the last `CallFrameCtx.frameId`
                                 ## `pushFrame` minted (ids are never reused
                                 ## within a walk).
@@ -20525,8 +20530,13 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                               hsDepth: w.frame.handlerStack.len)
     let frameIx = w.loopStack.high
     var survivors = walkBlock(stmt.stmts, paths, w)
-    survivors.add w.loopStack[frameIx].exits.breakPaths.contents
+    # RFC-0016 review R4-1: the parked exits rejoin last, and are counted, so
+    # the block's post-statement pass reconciles them and not its fall-through
+    # (`reconciledHere`).
+    let joined = w.loopStack[frameIx].exits.breakPaths.contents
+    survivors.add joined
     discard w.loopStack.pop()
+    w.blockJoinedExits = joined.len
     survivors
   of isIf:
     case w.mode
@@ -21534,30 +21544,60 @@ proc linkCapAddrCells(paths: seq[Path]; w: WalkCtx): seq[Path] =
           changed = true
     result.add(if changed: forkPath(p, p.pc, env2) else: p)
 
-func syncedByItsParts(stmt: IRStmt): bool =
-  ## R2-2. A `isBlock` has no effect of its own: its effects are exactly its
-  ## statements', and each of them synced one by one (`walkCapSynced`). D1-F2
-  ## made every routine and lambda body a stamped block, so the post-statement
-  ## reconciliations (`syncAddrCells`, `walkCapSynced`'s capture loop) would
-  ## otherwise run once more for the whole body, against a snapshot from
-  ## before it, and read the two sides' terms (equal in value, not always in
-  ## term) as a write by name and a write through the cell. `isIf`/`isWhile`
-  ## are not in this set: a condition's calls are effects of the statement
-  ## itself, which no inner statement synced.
+func reconciledHere(stmt: IRStmt; joinedExit: bool): bool =
+  ## RFC-0016 review R4-1. Whether `stmt`'s post-statement pass reconciles
+  ## one of its survivors. The invariant: every path is reconciled exactly
+  ## once for the effects it carries, at the statement whose snapshot
+  ## brackets them, and a parked exit is reconciled where it rejoins.
   ##
-  ## R3-1: not a LABELLED block (a source `block L:`, or a loop body a
-  ## `continue` leaves). `walkStmt` adds its `break` paths to its survivors,
-  ## and a path that took `break L` from inside an `if` was parked before any
-  ## enclosing statement's post-sync saw it; the block's own pass is the one
-  ## reconcile that reaches it. Its effects are not just its statements'
-  ## synced outs. Only the unlabelled stamped bodies (D1-F2) are skipped. The
-  ## pass could be narrowed to the break-path survivors, but they are not
-  ## told apart from the fall-through outs once merged, and re-running the
-  ## ordinary pass over them is what ran before R2-2.
-  stmt.kind == isBlock and stmt.blkLabel.len == 0
+  ## * A block has no effect of its own (R2-2): a fall-through survivor left
+  ##   its last statement synced, and each statement before that synced too.
+  ##   A second pass over the whole body, against a snapshot from before it,
+  ##   reads the two sides' terms (equal in value, not always in term) as a
+  ##   write by name and a write through the cell: a callee that removes an
+  ##   `mpairs` view's key in a labelled block declined (`r5a_exitsync`).
+  ## * A survivor `joinedExit` rejoined a labelled block (a source `block L:`,
+  ##   or a loop body a `continue` leaves) from its `breakPaths` (`walkStmt`).
+  ##   It was parked from inside a statement of the block, before that
+  ##   statement's own pass saw it, so a condition's effect on it was synced
+  ##   by nothing (R3-1): the block's pass, against the block's snapshot, is
+  ##   its one reconcile.
+  ## * Every other statement reconciles every survivor: an `isIf` (a `case`
+  ##   is one), `isWhile` or `isTry` carries its conditions' effects.
+  ##
+  ## Both reconcile loops read this, per survivor: `syncAddrCells` (address
+  ## cells, `slot` views) and `walkCapSynced`'s capture loop; each was
+  ## checked. `syncElemCells` takes no snapshot for a compound statement
+  ## (S8be), so it has neither pass to skip.
+  ##
+  ## The other exit channels, each reconciled once:
+  ## * a `break` out of a loop (`isWhile`'s `breakPaths`) and a `continue`
+  ##   into the next iteration (`continuePaths`) rejoin inside the `isWhile`,
+  ##   whose pass reconciles all its survivors, as it does the body's
+  ##   fall-through;
+  ## * a `return` (`returnedPaths`) leaves the frame whose cells these keep;
+  ##   it rejoins as a survivor of the caller's call statement, which
+  ##   reconciles the caller's cells (and a `var` formal's write-back is the
+  ##   call's own);
+  ## * a raise is reconciled where it resumes in the frame, the cell winning
+  ##   (`syncCapCellsFromCells`, `syncAddrCellsFromHeap`,
+  ##   `syncElemCellsFromHeap`), and the handler's survivors are the `isTry`'s;
+  ## * a jump or a `return` leaving a `finally` (or a `defer`, lowered to
+  ##   one) is held (`pendingJump`, `pendingReturn`) until the `isTry` walks
+  ##   the finally, then parked on one of the channels above.
+  stmt.kind != isBlock or joinedExit
+
+proc joinedExitMask(stmt: IRStmt; n: int; w: WalkCtx): seq[bool] =
+  ## RFC-0016 review R4-1. Per survivor of `stmt`, whether it rejoined a
+  ## labelled block from a parked exit (`reconciledHere`): the last
+  ## `blockJoinedExits` of a labelled block's survivors.
+  result = newSeq[bool](n)
+  if stmt.kind == isBlock and stmt.blkLabel.len > 0:
+    doAssert w.blockJoinedExits <= n
+    for i in n - w.blockJoinedExits ..< n: result[i] = true
 
 proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
-                   w: var WalkCtx): seq[Path] =
+                   joined: seq[bool]; w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. After `stmt`, each address-taken variable of the
   ## current frame (`CallFrameCtx.addrCells`) and the heap at its cell are
   ## made equal again. The side that changed since the statement began wins
@@ -21583,7 +21623,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
       if w.frame.addrCells[j].local == c.local: passes = 2
       # RFC-0005 S8cn: two views into one seq or Table may be one location.
       if c.slot.len > 0 and w.frame.addrCells[j].slot == c.slot: passes = 2
-  for p in outs:
+  for i, p in outs:
     var env2 = p.env
     var q: Path = nil
     var writtenThrough: seq[string]   ## RFC-0005 S8cn: seqs a view wrote into
@@ -21599,10 +21639,11 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         env2.del(viewFreedPrefix & c.local)
         if q == nil: q = forkPath(p, p.pc, p.env)
         freed.add displayName(c.local)
-    # A block's statements synced one by one; its own pass reconciles nothing
-    # (a callee that removes a view's key would read as having written the
-    # view and the Table in one statement: `s8cn_views`, `rc_live`).
-    for pass in 0 ..< (if syncedByItsParts(stmt): 0 else: passes):
+    # A block's statements synced one by one; its own pass reconciles only a
+    # parked exit that rejoined it (a callee that removes a view's key would
+    # read as having written the view and the Table in one statement:
+    # `s8cn_views`, `rc_live`, `r5a_exitsync`).
+    for pass in 0 ..< (if reconciledHere(stmt, joined[i]): passes else: 0):
       for c in w.frame.addrCells:
         if c.slot.len > 0:
           # RFC-0005 S8bx (item 3): the location is the Table's value at the
@@ -22252,17 +22293,25 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         env2[addrSnapName(depth, c.slot)] = env2[c.slot]
         changed = true
     ins.add(if changed: forkPath(p, p.pc, env2) else: p)
+  w.blockJoinedExits = 0
   let outs0 = walkStmt(stmt, ins, w)
   dec w.capSyncDepth
   let outs = syncElemCells(stmt, outs0, depth, w)   # RFC-0005 S8be
+  # RFC-0016 review R4-1: which survivors are parked exits that rejoined a
+  # labelled block. `syncElemCells` keeps a compound statement's survivors
+  # one for one, in order, and so does the capture loop below, so the mask
+  # stays aligned through to `syncAddrCells`.
+  doAssert outs.len == outs0.len or stmt.kind != isBlock
+  let joined = joinedExitMask(stmt, outs.len, w)
   if w.frame.capCells.len == 0:
-    return syncAddrCells(stmt, outs, depth, w)
-  let toReconcile = if syncedByItsParts(stmt): @[] else: w.frame.capCells
+    return syncAddrCells(stmt, outs, depth, joined, w)
   var byAddr: seq[string]
   if stmt.kind == isCall:
     for (local, _) in w.frame.capCells:
       if local in stmt.cGuardRoots: byAddr.add displayName(local)
-  for p in outs:
+  for i, p in outs:
+    let toReconcile = if reconciledHere(stmt, joined[i]): w.frame.capCells
+                      else: @[]
     var env2 = p.env
     var touched = false
     var clash = byAddr
@@ -22310,7 +22359,8 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "(ceCaptureByRefUnmodelled)"))
     result.add q
   if w.frame.addrCells.len > 0:
-    result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
+    doAssert result.len == joined.len
+    result = syncAddrCells(stmt, result, depth, joined, w)   # RFC-0005 S8ax
     result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
 
 template forEachExitGroup(w, g, body: untyped) =

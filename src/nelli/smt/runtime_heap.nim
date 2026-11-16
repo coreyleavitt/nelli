@@ -2126,6 +2126,13 @@ proc ptrFamSeq(ctx: Z3Context; p: Path; t: PtrTarget): SymVal =
     cell.add (sfx, p.heaps[t.famKey & sfx])
   heapCellSelect(ctx, cell, t.objAddr, t.famElemTy)
 
+proc ptrPlaceholderMsg(pointee: IRType): string =
+  ## R3-7. The seq a `ptr` addresses an element of is an unsupported-field
+  ## placeholder on this path now (its payload is not a value).
+  "a `ptr " & $pointee & "` addresses an element of a seq that holds an " &
+    "unsupported-field placeholder on this path -- not modelled (R3-7; " &
+    "feUnsupportedOp)"
+
 proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                 pointee: IRType; refSort: RawZ3Sort; typeId: string):
     tuple[sel: Z3AnyAst; targets: seq[PtrTarget]; decline: string] =
@@ -2204,9 +2211,14 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         let cur = svAtPath(vsv, lf.path)
         let ini = ptrInputOf(w, vnm, lf.path)
         # R3-7: the leaf-time value (`ini`) was guarded by `ptrVarLeaves`;
-        # `cur` is the path's value now, read here, so it is guarded here.
+        # `cur` is the path's value now, read here, so it is guarded here,
+        # the one guard the load and the store through this target rely on.
+        # Defensive: placeholder-ness follows the static type, which `cur`
+        # shares with the non-placeholder `ini` a leaf exists for.
+        if cur.kind == svSeq and cur.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+          result.decline = ptrPlaceholderMsg(pointee)
+          return
         if ini.kind != svSeq or cur.kind != svSeq or
-           cur.isUnsupportedFieldPlaceholder or # [placeholder-audited]
            cur.seqLen.raw != ini.seqLen.raw: # [placeholder-audited]
           result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
             "address an element of the seq " & vwhat & ", whose length " &
@@ -2700,13 +2712,6 @@ proc ptrAggregateMsg(pointee: IRType): string =
     "whose layout the value does not fit -- not modelled (RFC-0005 S8bz; " &
     "feUnsupportedOp)"
 
-proc ptrPlaceholderMsg(pointee: IRType): string =
-  ## R3-7. The seq a `ptr` addresses an element of is an unsupported-field
-  ## placeholder on this path now (its payload is not a value).
-  "a `ptr " & $pointee & "` addresses an element of a seq that holds an " &
-    "unsupported-field placeholder on this path -- not modelled (R3-7; " &
-    "feUnsupportedOp)"
-
 proc ptrStoredPart(ctx: Z3Context; c: SymVal; t: PtrTarget;
                    val: SymVal): Option[SymVal] =
   ## RFC-0005 S8bz (items 1, 2). The seq or table `c` with the part
@@ -2928,11 +2933,8 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
           elemValueOf(ctx, checkedSelect(ctx, data.raw, t.idx.raw), pointee)
       elif t.famKey.len > 0: heapSelect(ctx, p.heaps[t.famKey], t.objAddr, pointee)
       elif t.seqIdx:
+        # R3-7, R4: `ptrTargets` declined a placeholder current value.
         let sq = svAtPath(p.env[t.envName], t.path)
-        # R3-7: the current value.
-        if sq.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-          result.decline = ptrPlaceholderMsg(pointee)
-          return
         elemValueOf(ctx, checkedSelect(ctx, sq.seqDataRaw.raw, t.idx.raw), # [placeholder-audited]
                     pointee)
       elif t.tabKey:
@@ -3024,10 +3026,8 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                                                           stored.raw, arr.raw))
     elif t.seqIdx:
       let root = p.env[t.envName]
+      # R3-7, R4: `ptrTargets` declined a placeholder current value.
       var sq = svAtPath(root, t.path)
-      # R3-7: the current value.
-      if sq.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-        return ptrPlaceholderMsg(pointee)
       let data2 = wrap[Z3AnyAst](ctx, checkedStore(ctx, sq.seqDataRaw.raw, # [placeholder-audited]
                                                    t.idx.raw,
                                                    elemTermIn(ctx, val, sq.seqDataRaw))) # [placeholder-audited]

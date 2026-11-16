@@ -107,6 +107,21 @@ func scalarSize*(t: IRType): int =
   ## (`macros.getSize`) and declines the layout where they differ.
   scalar(t).size
 
+func place(packed: bool; at: var int; al: var int; name: string;
+           t: IRType; dst: var seq[Place]; base: int): bool =
+  ## Lay one leaf field at `at`. A routine of its own, not a closure over
+  ## `packed`: `variantLayout` runs in the compiler's VM (the layout probes of
+  ## `dsl_typebridge` and the tests' macros), which cannot evaluate a closure's
+  ## environment (`cannot evaluate at compile time: :env`).
+  let (sz, kind) = scalar(t)
+  if sz == 0: return false
+  let a = if packed: 1 else: sz
+  at = alignUp(at, a)
+  dst.add Place(name: name, off: base + at, size: sz, kind: kind, ty: t)
+  at += sz
+  al = max(al, a)
+  true
+
 func variantLayout*(ty: IRType; cpu: Cpu; endian: Endian;
                     ptrBits: int): VariantLayout =
   func no(why: string): VariantLayout = VariantLayout(ok: false, why: why)
@@ -134,19 +149,9 @@ func variantLayout*(ty: IRType; cpu: Cpu; endian: Endian;
               "not derived")
   var off = 0
   var align = 1
-  proc place(at: var int; al: var int; name: string;
-             t: IRType; dst: var seq[Place]; base: int): bool =
-    let (sz, kind) = scalar(t)
-    if sz == 0: return false
-    let a = if packed: 1 else: sz
-    at = alignUp(at, a)
-    dst.add Place(name: name, off: base + at, size: sz, kind: kind, ty: t)
-    at += sz
-    al = max(al, a)
-    true
   var res = VariantLayout(ok: true)
   for i, n in ty.vPlainFieldNames:
-    if not place(off, align, n, ty.vPlainFieldTypes[i], res.plain, 0):
+    if not place(packed, off, align, n, ty.vPlainFieldTypes[i], res.plain, 0):
       return no("plain field `" & n & "` of a type whose size is not derived")
   let (dsz, _) = scalar(ty.vDiscTy)
   if dsz == 0: return no("a discriminator whose size is not derived")
@@ -160,7 +165,7 @@ func variantLayout*(ty: IRType; cpu: Cpu; endian: Endian;
     var al = 1
     var ps: seq[Place]
     for j, n in arm.fieldNames:
-      if not place(at, al, n, arm.fieldTypes[j], ps, 0):
+      if not place(packed, at, al, n, arm.fieldTypes[j], ps, 0):
         return no("field `" & n & "` of a type whose size is not derived")
     unionAlign = max(unionAlign, al)
     unionSize = max(unionSize, alignUp(at, al))

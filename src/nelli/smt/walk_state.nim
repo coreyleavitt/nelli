@@ -17,7 +17,7 @@
 ##     dropped;
 ##   * `LowerHooks`, a record of `{.nimcall.}` procs for the verbs an include
 ##     calls that are defined later than it (`lower`, `lowerClosureCall`,
-##     `seqElemAt`, ...). A field exists only while an include or leaf calls
+##     `registerCapCell`, ...). A field exists only while an include or leaf calls
 ##     it through the table (the census pins that). It is
 ##     filled once, at `runtime.nim` module init, before any walk.
 ##

@@ -675,7 +675,9 @@ proc codeLinesWith(path, ident: string): seq[string] =
     if t.hasIdent(ident): result.add t
 
 proc runtimeFiles(): seq[string] =
-  for f in walkFiles(smtDir / "runtime*.nim"): result.add f
+  ## The whole runtime family (R2-4): code moves between these files, so the
+  ## site totals below are counted over the set, never over `runtime*.nim`.
+  for f in runtimeFamilyFiles: result.add smtDir / f
 
 suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
 

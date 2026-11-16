@@ -119,8 +119,8 @@ const
 
   ## Marked lines per family file (RFC-0016 R2-6). Their sum is the family
   ## total this audit pins.
-  markerPins = [("runtime.nim", 115), ("runtime_strings.nim", 4),
-                ("heap_model.nim", 7), ("runtime_heap.nim", 10)]
+  markerPins = [("runtime.nim", 102), ("runtime_strings.nim", 4),
+                ("heap_model.nim", 20), ("runtime_heap.nim", 10)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"
@@ -327,6 +327,10 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## asking whether a term mentions a base. 116 - 5 + 4 = 115.
     ## RFC-0005 S8bz (on batch 9) counted the same S8cb and S8ca steps; it
     ## adds no marked line of its own here.
+    ##
+    ## R2-4: `allocateSym` and `seqElemAt` moved into `heap_model.nim`, taking
+    ## 13 marked lines with them: `runtime.nim` 115 -> 102, `heap_model.nim`
+    ## 7 -> 20. The family total is unchanged (136).
     ##
     ## R2-6: counted over the runtime family, per file. `runtime.nim` (115)
     ## and `runtime_strings.nim` (4) are the old pins unchanged (119); the

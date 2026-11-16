@@ -30,7 +30,7 @@
 ##                            normal-run input domain
 
 import std/[macros, sets, tables, algorithm, options, strutils, importutils, macrocache]
-from std/os import extractFilename
+from std/os import extractFilename, parentDir, `/`
 # RFC-0016 W1-c1b: the build is admitted (or refused, by name) BEFORE `z3` is
 # imported. Under `--mm:refc` nim-z3's `=destroy` hooks do not compile, and
 # that error names `z3/ast.nim`, not the build; this one names the field.
@@ -823,26 +823,75 @@ macro symexFindAllWitnesses*(fn: typed,
 # self-audited (no `{.all.}}` import needed to reflect on your own module).
 when defined(nelliVmAliasAudit):
   import ./smt/vm_alias_guard
+  import ./smt/witness_render {.all.}
+  import ./smt/symex_cache {.all.}
+  import ./smt/witness_emit {.all.}
+  import ./smt/replay_footprint {.all.}
+  import ./smt/routine_table {.all.}
+  import ./smt/witness_fidelity {.all.}
+  import ./smt/heldset {.all.}
+  import ./smt/replay_emit {.all.}
+  import ./smt/replay_settle {.all.}
+  import ./smt/proc_lift {.all.}
+  import ./smt/run_replayed {.all.}
+  import ./smt/entry_parse {.all.}
+  import ./smt/cover_emit {.all.}
+  import ./smt/find_emit {.all.}
+  import ./smt/findall_emit {.all.}
+
+  # RFC-0016 D6: the implementation `symex.nim` used to hold lives in these
+  # modules now. They are audited here, by the same mechanism and under their
+  # own file tag, so a move out of this file never takes code out of the audit.
+  const symexSmtDir = currentSourcePath().parentDir / "smt"
+  const symexMovedFiles = ["witness_render.nim", "symex_cache.nim", "witness_emit.nim", "replay_footprint.nim", "routine_table.nim", "witness_fidelity.nim", "heldset.nim", "replay_emit.nim", "replay_settle.nim", "proc_lift.nim", "run_replayed.nim", "entry_parse.nim", "cover_emit.nim", "find_emit.nim", "findall_emit.nim"]
+
+  template auditMoved(fname: string) =
+    const movedPath = symexSmtDir / fname
+    const movedNames = extractTopLevelNames(movedPath)
+    vmGuardAuditNames(movedNames, fname)
+
+  auditMoved "witness_render.nim"
+  auditMoved "symex_cache.nim"
+  auditMoved "witness_emit.nim"
+  auditMoved "replay_footprint.nim"
+  auditMoved "routine_table.nim"
+  auditMoved "witness_fidelity.nim"
+  auditMoved "heldset.nim"
+  auditMoved "replay_emit.nim"
+  auditMoved "replay_settle.nim"
+  auditMoved "proc_lift.nim"
+  auditMoved "run_replayed.nim"
+  auditMoved "entry_parse.nim"
+  auditMoved "cover_emit.nim"
+  auditMoved "find_emit.nim"
+  auditMoved "findall_emit.nim"
 
   const symexSelfNames = extractTopLevelNames(currentSourcePath())
   vmGuardAuditNames(symexSelfNames, "symex.nim")
 
+  proc symexOwnTag(h: string): bool =
+    ## A hit key is `<file>:<routine>...`: this module's own or a moved one's.
+    if h.startsWith("symex.nim:"): return true
+    for f in symexMovedFiles:
+      if h.startsWith(f & ":"): return true
+    false
+
   const symexSelfLetHits = block:
     var dedup: seq[string]
     for h in vmGuardLetHits:
-      if h.startsWith("symex.nim:") and h notin dedup: dedup.add h
+      if symexOwnTag(h) and h notin dedup: dedup.add h
     dedup
 
   const symexSelfParamHits = block:
     var dedup: seq[string]
     for h in vmGuardParamHits:
-      if h.startsWith("symex.nim:") and h notin dedup: dedup.add h
+      if symexOwnTag(h) and h notin dedup: dedup.add h
     dedup
 
   const symexSelfReachHits = block:
     var dedup: seq[string]
     for h in vmGuardReachHits:
-      if h.startsWith("symex.nim:") and h notin dedup: dedup.add h
+      if symexOwnTag(h) and h notin dedup: dedup.add h
     dedup
 
   # The one historical hazard S8x/S8ab/S8af already reviewed and allowlisted
@@ -851,8 +900,8 @@ when defined(nelliVmAliasAudit):
   # nothing written while the binding is live (the `types.nim:==` twin of
   # this same finding is allowlisted in `vm_alias_guard.nim`'s own block).
   const symexSelfLetAllowlist = [
-    "symex.nim:emitTyAndReaderShared: let ax : VariantAxis (ntyObject) <- ty.mvAxes[axisIdx]",
-    "symex.nim:emitTyAndReaderShared: let elseArm : VariantArm (ntyObject) <- ax.arms[elseArmIx]",
+    "witness_emit.nim:emitTyAndReaderShared: let ax : VariantAxis (ntyObject) <- ty.mvAxes[axisIdx]",
+    "witness_emit.nim:emitTyAndReaderShared: let elseArm : VariantArm (ntyObject) <- ax.arms[elseArmIx]",
   ]
 
   # RFC-0005 S8ah: symex.nim's own macros (`symexFindAllWitnesses`) call

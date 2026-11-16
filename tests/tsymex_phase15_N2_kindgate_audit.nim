@@ -295,9 +295,20 @@ const
     ## read_audit.nim`/`tsymex_r6_n36_raise_class_audit.nim` already
     ## established for the same MSVC constraint.
 
+## RFC-0016 D6: `symex.nim` is the public facade; its implementation lives in
+## `smt/`. The audit reads the facade AND those modules, as one source.
+const symexImplFiles = ["witness_render.nim", "symex_cache.nim", "witness_emit.nim", "replay_footprint.nim", "routine_table.nim", "witness_fidelity.nim", "heldset.nim", "replay_emit.nim", "replay_settle.nim", "proc_lift.nim", "run_replayed.nim", "entry_parse.nim", "cover_emit.nim", "find_emit.nim", "findall_emit.nim"]
+
+proc readSymexSources(facade: string): string =
+  result = readFile(facade)
+  let smtDir = facade.parentDir() / "smt"
+  for f in symexImplFiles:
+    result.add "\n"
+    result.add readFile(smtDir / f)
+
 let
   dslParserSrc  = readFile(dslParserPath)
-  symexSrc      = readFile(symexPath)
+  symexSrc      = readSymexSources(symexPath)
   canonicalizeSrc = readFile(canonicalizePath)
 
 type

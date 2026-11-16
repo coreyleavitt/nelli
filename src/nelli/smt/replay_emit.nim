@@ -15,6 +15,7 @@ import ./replayproc
 import ./replaywire
 import ./replayresult
 import ./impl_digest
+from std/os import extractFilename
 from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
 import ./replay_footprint
 import ./routine_table

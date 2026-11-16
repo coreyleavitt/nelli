@@ -467,14 +467,22 @@ suite "RFC-0005 S10 (e) -- the opt-out: SymexSettings.replay = false":
 const symexSrcPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
                      "symex.nim"
 
+const symexImplFiles = ["witness_render.nim", "symex_cache.nim", "witness_emit.nim", "replay_footprint.nim", "routine_table.nim", "witness_fidelity.nim", "heldset.nim", "replay_emit.nim", "replay_settle.nim", "proc_lift.nim", "run_replayed.nim", "entry_parse.nim", "cover_emit.nim", "find_emit.nim", "findall_emit.nim"]
+  ## RFC-0016 D6: `symex.nim` is the facade; the codegen the pins below are
+  ## about lives in these `smt/` modules. The pins read all of them.
+
 proc codeLinesNaming(path, ident: string): seq[string] =
-  ## Non-comment lines of `path` containing `ident` followed by `(` or `"`
-  ## (a call, or a `bindSym"ident"`), excluding its own declaration.
-  for raw in readFile(path).splitLines():
-    let t = raw.strip()
-    if t.len == 0 or isCommentLine(t): continue
-    if t.startsWith("proc " & ident) or t.startsWith("func " & ident): continue
-    if (ident & "(") in t or (ident & "\"") in t: result.add t
+  ## Non-comment lines of `path` (the facade) and of the `smt/` modules it
+  ## delegates to, containing `ident` followed by `(` or `"` (a call, or a
+  ## `bindSym"ident"`), excluding its own declaration.
+  var paths = @[path]
+  for f in symexImplFiles: paths.add path.parentDir() / "smt" / f
+  for pth in paths:
+    for raw in readFile(pth).splitLines():
+      let t = raw.strip()
+      if t.len == 0 or isCommentLine(t): continue
+      if t.startsWith("proc " & ident) or t.startsWith("func " & ident): continue
+      if (ident & "(") in t or (ident & "\"") in t: result.add t
 
 suite "RFC-0005 S10 (d) -- candidacy is unspellable as sat":
 

@@ -310,8 +310,8 @@ const realScopeMacroNames = block:
 const allowlist = [
   "types.nim:==: let bx : VariantAxis (ntyObject) <- b.mvAxes[i]",
   "types.nim:==: let barm : VariantArm (ntyObject) <- bx.arms[k]",
-  "symex.nim:emitTyAndReaderShared: let ax : VariantAxis (ntyObject) <- ty.mvAxes[axisIdx]",
-  "symex.nim:emitTyAndReaderShared: let elseArm : VariantArm (ntyObject) <- ax.arms[elseArmIx]",
+  "witness_emit.nim:emitTyAndReaderShared: let ax : VariantAxis (ntyObject) <- ty.mvAxes[axisIdx]",
+  "witness_emit.nim:emitTyAndReaderShared: let elseArm : VariantArm (ntyObject) <- ax.arms[elseArmIx]",
 ]
 
 # RFC-0005 S8ak: a reachable/forced-generic key's `file:name` identity,

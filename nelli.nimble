@@ -1884,6 +1884,7 @@ task test, "Run the test suite":
             "tsymex_0016_universe",
             # RFC-0016 K2a: the dispatch census (every NimNode case and its else, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.
             "tsymex_0016_k2a_census",
+            "tsymex_0016_d3b_walklog",
             "tsymex_0016_d6_facade",
             # RFC-0016 0.10.0 review D5: no lateral import between axis modules, the pure check scan is I/O free, and it runs on literal inputs.
             "tsymex_0016_d5_axisdeps",

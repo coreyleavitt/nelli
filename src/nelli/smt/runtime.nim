@@ -17,7 +17,8 @@
 ## place, so cycle 5 only adds the promotion logic, not new families.
 
 import std/tables
-from std/os import getEnv
+import ./walk_log
+export walk_log.walkUnitsLogEnv
 import std/options
 from std/typetraits import nil   ## RFC-0005 S8ar: `readCellField`'s distinct arm
 import std/sets
@@ -14881,26 +14882,14 @@ proc chargeWalkWork() =
   if tailUnitsCeil != 0 and spent >= tailUnitsCeil:   ## RFC-0016 W3-z R9
     tailWorkExhausted = true
 
-const walkUnitsLogEnv* = "NELLI_WALK_UNITS_LOG"
-
 proc logWalkUnits(target, status: string) =
-  ## RFC-0016 K7. When the environment names a file, appends one line
-  ## `<units>\t<target>\t<status>\t<walker>` for the walk that just finished:
-  ## the units it spent (RFC-0016 K7: its Z3 checks AND the walker-side charge,
-  ## the budget `walkRLimit` bounds) and, last, the part of them that is the
-  ## walker-side charge (`units - walker` is the Z3 share). Append mode and one write per line, so
-  ## concurrent test processes interleave whole lines. Off when unset. This
-  ## is how `walkRLimit`'s default is measured (the maximum over the corpus).
-  let path = getEnv(walkUnitsLogEnv)
-  if path.len == 0: return
-  try:
-    var f: File
-    if open(f, path, fmAppend):
-      f.write($walkUnitsSpent() & "\t" & target & "\t" & status & "\t" &
-              $(walkerWorkUnits - walkerWorkBase) & "\n")
-      f.close()
-  except IOError, OSError:
-    discard
+  ## RFC-0016 K7. Hands the walk that just finished to the walk-units log
+  ## sink (`walk_log`, which owns the destination and the format): the units
+  ## it spent (its Z3 checks AND the walker-side charge, the budget
+  ## `walkRLimit` bounds) and the part of them that is the walker-side charge.
+  appendWalkUnits(WalkUnitsLine(
+    units: walkUnitsSpent(), target: target, status: status,
+    walkerUnits: walkerWorkUnits - walkerWorkBase, hasWalkerUnits: true))
 
 proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
   ## RFC-0005 S8bu. `s.check()` (under `assumptions`, `checkWith`), noting
@@ -30917,15 +30906,9 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
     tailWorkExhausted = false
     # The K10b perf reading: the tail walk's own units, as a line of the
     # `NELLI_WALK_UNITS_LOG` file beside the explore walk's.
-    if getEnv(walkUnitsLogEnv).len > 0:
-      let spent = walkUnitsSpent() - unitsBefore
-      try:
-        var f: File
-        if open(f, getEnv(walkUnitsLogEnv), fmAppend):
-          f.write($spent & "\tk10b-tail\t" & $result & "\n")
-          f.close()
-      except IOError, OSError:
-        discard
+    appendWalkUnits(WalkUnitsLine(
+      units: walkUnitsSpent() - unitsBefore, target: "k10b-tail",
+      status: $result))
   let exitClock = newExitClock()
   var w = WalkCtx(
     extHardMark: -1,

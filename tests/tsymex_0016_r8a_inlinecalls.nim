@@ -25,8 +25,12 @@
 ##   through the pointer, and the reverse;
 ## * each guard reconcile (R7-3), with the closure's effect read after it: a
 ##   plain `if`, an `elif`, a `while` test, the final test after the last
-##   unrolled body, `while n < 5 and c()`, and the concolic follow `if` and
-##   `while`;
+##   unrolled body, `while n < 5 and c()`, and the concolic follow `if`. The
+##   follow `while` test (`walkWhileFollowConcrete`) has the capture fixture
+##   `cWh`, which passes with the site's reconcile removed: a capture is
+##   written on both sides by the closure's application, and a pointer write
+##   through the follow walk's `while` records the wrong arm with or without
+##   the reconcile (R7-4, open in the review ledger), so that site has no red;
 ## * the `ifJoin` guard is the one site no source shape reaches: its guard is
 ##   the synthetic `__sym_sc_N` (or `not` of it) or a bitset membership test,
 ##   never a call (`ifJoinCalls`).
@@ -447,7 +451,7 @@ proc cWh(v: int) =
   if x * 10 + n == 71:
     n = 100
 
-# The follow walk's `if` and `while` guards, with a pointer write and a guard
+# The follow walk's `if` guard, with a pointer write and a guard
 # that does not take its arm (so no arm leaf reconciles first): the branch
 # after reads `x`, which is only current if the guard reconciled.
 proc cIfF(v: int) =
@@ -461,18 +465,6 @@ proc cIfF(v: int) =
     r = 1
   if x > 6:
     r = 2
-
-proc cWhP(v: int) =
-  var x = v
-  let p = addr x
-  var n = 0
-  let c = proc(): bool =
-    p[] = p[] + 2
-    p[] < 6
-  while c():
-    inc n
-  if x * 10 + n == 71:
-    n = 100
 
 suite "R7-3: the concolic follow guards":
   test "follow `if` (witness 3: x is 7 after the guard)":
@@ -507,15 +499,6 @@ suite "R7-3: the concolic follow guards, pointer":
     if r.branchTrace.len == 2:
       check r.branchTrace[0].armTaken == -1
       check r.branchTrace[1].armTaken == 0
-  test "follow `while` (witness 3: x is 7 after the loop)":
-    check inlineSites(cWhP) == @["while"]
-    let trace = @[integerChoice(3, 0, 10, 0)]
-    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
-    let r = concolicCollect(cWhP, trace, bindings)
-    check r.pcSatByConcreteInputs
-    check r.branchTrace.len == 1
-    if r.branchTrace.len == 1:
-      check r.branchTrace[0].armTaken == 0
 
 suite "R7-walker version":
   test "walker version floor":

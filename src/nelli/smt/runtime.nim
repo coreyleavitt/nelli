@@ -22274,22 +22274,30 @@ proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
   ##   if-chain: its statement-level arm embeds the scrutinee in each `of`
   ##   guard (it is not let-bound), so each `of` test is one of these. A
   ##   `try` evaluates nothing itself: an `except` match reads the
-  ##   in-flight exception's type only. THESE ARE DEFENSIVE. The parser
-  ##   A-normalises every call into a statement of its own (`call(__sym_f_N
-  ##   := f(..))`, a leaf) whatever its position -- a test, an operand of a
-  ##   short-circuit, an `if`/`case` expression, a scrutinee (evaluated once,
-  ##   however many `of` arms) -- so a guard holds no call and produces no
-  ##   effect, and its reconcile finds nothing to do. Removing each of them
-  ##   (and the final test, and both follow variants) left every test green
-  ##   (R6-1, R6-2). `tsymex_0016_r7a_liveness` pins the A-normalisation
-  ##   (`noInlineCall`), so a parser that leaves a call in a guard fails
-  ##   there, where the guard needs a test with an effect at it. A guard
-  ##   hands `reconcileCells` a default `CellProducer`, no statement;
-  ## * not a `return`'s value: its calls are statements before it, reconciled
-  ##   as leaves, and the `return` itself writes no cell. It had a reconcile
-  ##   of its own, a synthesised assignment of `result` (R5-2); no
-  ##   `return a and f()`, `return (if .. f() ..)` or `return (case ..)`
-  ##   reached it (R6-3), so it was deleted with the depth it read.
+  ##   in-flight exception's type only;
+  ## * a `return`'s value (`evalReturnSynced`), before the path parks in
+  ##   `exitReturn` and a `finally` or a `var` write-back reads the frame.
+  ##
+  ## Which of these produce an effect. The parser hoists a call into a
+  ## statement of its own (`call(__sym_f_N := f(..))`, a leaf) when it is an
+  ## operand: `c() * 10`, `c() > 0`, `v > 0 and c()`, a scrutinee, an
+  ## `if`/`case` expression. It leaves a by-value closure call (`closureCallIR`:
+  ## a lambda, a proc-valued `let`, a proc field) in place when the call is the
+  ## WHOLE expression: a bare `return c()`, a bare `if c():` / `elif c():`, a
+  ## bare `while c():` (and `while n < 5 and c():`, which lowers to a guard
+  ## `if` in the body). Those are the shapes that stay inline, and the
+  ## guard and `return` points reconcile the effect where it is produced.
+  ## Their tests are `tsymex_0016_r8a_inlinecalls`; each point was made to
+  ## fail by removing it: the `if`/`elif` guard, the `while` test and the final
+  ## test, the follow `if` and the `return` value (R7-1, R7-3). Two have no red:
+  ## the `ifJoin` guard is a synthetic `__sym_sc_N` (or its `not`) or a bitset
+  ## membership test, never a call, so no source shape reaches it (pinned over
+  ## the rendered IR, `ifJoinCalls`); the follow `while` test passes with its
+  ## reconcile removed on its one live fixture, a capture, which the closure's
+  ## application writes on both sides, and the pointer shape records the wrong
+  ## arm with or without it (the review ledger, R7-4). A guard hands
+  ## `reconcileCells` a default `CellProducer`, no statement; a `return` value
+  ## the assignment of `result`.
   ##
   ## A parked exit (`break`, `continue`, a `return` or a jump held for a
   ## `finally`) needs nothing more where it rejoins: it was reconciled at
@@ -22386,7 +22394,8 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Likewise each address-taken variable and its heap cell
   ## (`syncAddrCells`), and each element cell and its element
   ## (`syncElemCells`, RFC-0005 S8be). Reconciled where an effect is
-  ## produced: each leaf statement (here) and each guard (`evalCondSynced`).
+  ## produced: each leaf statement (here), each guard (`evalCondSynced`) and
+  ## each `return` value (`evalReturnSynced`).
   ## Only a leaf statement is bracketed: a compound one is walked bare, its
   ## leaves and guards reconciling themselves (`reconcileCells`). It still takes a depth, so a path that
   ## leaves it early (a `break`) carrying an inner leaf's snapshots rejoins
@@ -22415,7 +22424,10 @@ proc evalCondSynced(p: Path; cond: IRExpr;
   ## against a snapshot from just before the evaluation. A closure the
   ## guard applies may write a capture or, through a pointer, an
   ## address-taken variable; the arms, a `break` out of them, and the next
-  ## guard read the frame after it. The guard's value is the term lowered
+  ## guard read the frame after it. A bare by-value closure call
+  ## (`if c():`, `elif c():`, `while c():`) stays in the guard, so this is
+  ## where its effect is produced; a call that is an operand of the guard is
+  ## a leaf before it (`reconcileCells`). The guard's value is the term lowered
   ## before the reconcile, which renames no term it reads.
   if not frameHasCells(@[p], w):
     let (b, p2) = lowerBoolInExpr(p, cond, w)

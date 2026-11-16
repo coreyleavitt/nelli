@@ -168,7 +168,7 @@ proc assertFreshness*(ctx: Z3Context, path: Path, typeId: string,
     path.pc.add mkNeq(newRef, prior)
   if capHitThisAlloc:
     let capHint = SymexErrorInfo(
-      kind: heFreshnessCapExceeded, severity: sevHint,
+      kind: heFreshnessCapExceeded, severity: severity(heFreshnessCapExceeded),
       msg: "freshness-assertion cap (" & $cap & ") reached on this path for " &
            "ref type `" & typeId & "`: distinctness inequalities for further " &
            "`new T` allocations are skipped (sound over-approximation — Z3 may " &
@@ -4409,7 +4409,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # lowered ref.
         if heapDepthExhausted(p, w, step, refAst): continue
         if refSV.kind == svPtr:
-          let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
+          let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: severity(hePtrFamily),
             msg: "witness involves unmanaged ptr")
           ptrFamilyHints.add ptrHint
           w.ptrFamilyHints.add ptrHint
@@ -4682,7 +4682,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # `hePtrFamily` hint so a consumer can distinguish unmanaged ptr from
       # managed ref in the finding. A `ref T` deref emits NOTHING.
       if refSV.kind == svPtr:
-        let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
+        let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: severity(hePtrFamily),
           msg: "witness involves unmanaged ptr")
         ptrFamilyHints.add ptrHint   # threadvar: fallback
         w.ptrFamilyHints.add ptrHint # CR-9 Stage 5: LIVE WalkCtx field
@@ -5237,7 +5237,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # lowered ref.
         if heapDepthExhausted(p, w, heapStepsOf(refSV) + 1, refAst): continue
         if refSV.kind == svPtr:
-          let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
+          let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: severity(hePtrFamily),
             msg: "witness involves unmanaged ptr")
           ptrFamilyHints.add ptrHintAW
           w.ptrFamilyHints.add ptrHintAW
@@ -5483,7 +5483,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).
       if refSV.kind == svPtr:
-        let ptrHintW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
+        let ptrHintW = SymexErrorInfo(kind: hePtrFamily, severity: severity(hePtrFamily),
           msg: "witness involves unmanaged ptr")
         ptrFamilyHints.add ptrHintW   # threadvar: fallback
         w.ptrFamilyHints.add ptrHintW # CR-9 Stage 5: LIVE WalkCtx field

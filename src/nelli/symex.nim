@@ -3912,7 +3912,7 @@ func procValueUnliftedHint(c: SatCandidate; lift: ProcValueLift): SymexErrorInfo
   var kinds: seq[string]
   for o in c.witnessUndefinedViaOnly: kinds.add $UbKind(ord(low(UbKind)) + int(o))
   let why = if lift.why.len > 0: lift.why else: "no reason was recorded"
-  SymexErrorInfo(kind: feReplayDeclined, severity: sevHint,
+  SymexErrorInfo(kind: feReplayDeclined, severity: severity(feReplayDeclined),
     msg: "replay confirmed the claim, but did not name the routine a " &
          "proc-valued variable held, so what the call through it may reach " &
          "stays (" & kinds.join(", ") & "): " & why & " (" &

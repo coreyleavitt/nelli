@@ -1571,7 +1571,7 @@ proc declineAtSite(ctx: ParseCtx; kind: SymexErrorKind; msg, reason: string):
   ## place it in the IR at the point of substitution (the walker taints and
   ## records every path that reaches it).
   let m = ctx.nextMarker()
-  ctx.parseErrors.add SymexErrorInfo(kind: kind, severity: sevError, msg: msg,
+  ctx.parseErrors.add SymexErrorInfo(kind: kind, severity: declineSeverity, msg: msg,
                                      scope: siteAnchored(m))
   mkUnsupported(kind, reason, m)
 
@@ -1588,7 +1588,7 @@ proc declineUnsafeCast(ctx: ParseCtx; msg, reason: string): IRStmt =
   ## RFC-0005 S8. `heUnsafeCast`'s `declineAtSite`: the marker is the
   ## `isUnsafeCast` node the walker halts on.
   let m = ctx.nextMarker()
-  ctx.parseErrors.add SymexErrorInfo(kind: heUnsafeCast, severity: sevError,
+  ctx.parseErrors.add SymexErrorInfo(kind: heUnsafeCast, severity: declineSeverity,
                                      msg: msg, scope: siteAnchored(m))
   mkUnsafeCast(reason, m)
 
@@ -1600,7 +1600,7 @@ proc declineCallee(ctx: ParseCtx; kind: SymexErrorKind; msg,
   ## `mkCall`; the walker's missing-callee arm records its reach under the
   ## same key.
   let k = unregisteredCalleeKey(kind, key)
-  ctx.parseErrors.add SymexErrorInfo(kind: kind, severity: sevError, msg: msg,
+  ctx.parseErrors.add SymexErrorInfo(kind: kind, severity: declineSeverity, msg: msg,
                                      scope: calleeKeyed(k))
   k
 

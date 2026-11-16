@@ -1780,6 +1780,8 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_p2_fwrapv",
             # RFC-0016 code review 0.10.0: F1 (opaque signed div/mod under -fwrapv).
             "tsymex_0016_admir",
+            # RFC-0016 review D4: the error-kind properties (class, severity) in one table beside the enum.
+            "tsymex_0016_d4_errorkind",
             # RFC-0016 review D1 S1: arith_regime, the one owner of the arithmetic regime (module + tests; no walker change).
             "tsymex_0016_d1_regime",
             "tsymex_0016_d1_regime_checksoff",

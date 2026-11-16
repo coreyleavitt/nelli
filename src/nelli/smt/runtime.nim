@@ -12572,11 +12572,6 @@ type
                                 ## on return. See pushFrame/popFrame below.
     capSyncDepth: int           ## RFC-0005 S8ax: the statement nesting depth
                                 ## `walk` snapshots capture cells at
-    leafSyncDepth: int          ## RFC-0016 review R5-2: the depth of the
-                                ## snapshots bracketing the leaf statement
-                                ## `walkStmt` is walking (`walkCapSynced`), 0
-                                ## when it took none; read by `isReturn`,
-                                ## which reconciles before it parks
     frameIdCounter: int         ## RFC-0005 S9: the last `CallFrameCtx.frameId`
                                 ## `pushFrame` minted (ids are never reused
                                 ## within a walk).
@@ -14825,7 +14820,21 @@ const compoundStmtKinds = {isBlock, isIf, isWhile, isTry}
 proc evalCondSynced(p: Path; cond: IRExpr;
                     w: var WalkCtx): (Z3Bool, seq[Path])
   ## RFC-0016 review R5-2 fwd decl (defined beside `walkCapSynced`).
-proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
+type CellProducer = object
+  ## RFC-0016 review R6. What `reconcileCells` reads of whatever produced the
+  ## effect it reconciles: a leaf statement (`producerOf`) or a guard a
+  ## compound evaluates itself (the default value: no call, no store, no
+  ## write by name). No `IRStmt` is built for a guard.
+  isCall: bool
+  cargs: seq[IRExpr]          ## a call's actuals
+  cVarLocs: seq[VarLoc]       ## a call's `var` and `addr` actuals
+  cGuardRoots: seq[string]    ## a call's by-address roots
+  indexRecv: string           ## the receiver an element store writes ("" none)
+  assigned: string            ## the name an assignment or `let` writes ("" none)
+  strSetAtOf: string          ## the string an assignment of one character
+                              ## writes by name ("" none)
+
+proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
                     w: var WalkCtx): seq[Path]
   ## RFC-0016 review R5-2 fwd decl (defined beside `walkCapSynced`).
 proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int)
@@ -20946,14 +20955,6 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         newEnv["result"] = retVal
         bound.add forkPath(cp, cp.pc, newEnv)
-      # RFC-0016 review R5-2: the path parks before this statement's own
-      # pass, and a `finally` or a `var` write-back reads the frame after
-      # it, so the value's effects are reconciled here, as the assignment of
-      # `result` they end with (`reconcileCells`).
-      if w.leafSyncDepth > 0:
-        bound = reconcileCells(IRStmt(kind: isAssign, aname: "result",
-                                      avalue: stmt.retExpr),
-                               bound, w.leafSyncDepth, w)
       for bp in bound: exitReturn(bp, w)
     @[]
   of isCall:
@@ -21405,11 +21406,30 @@ const addrSnapPrefix = "__addrsnap#"
 func addrSnapName(depth: int; local: string): string =
   addrSnapPrefix & $depth & "#" & local
 
-func lastWriteTo(stmt: IRStmt; local: string): bool =
+func lastWriteTo(src: CellProducer; local: string): bool =
   ## RFC-0005 S8ax. The statement's last effect is the write of `local` by
   ## name (an assignment or declaration of it): its value is the later one.
-  stmt.kind == isAssign and stmt.aname == local or
-    stmt.kind == isLet and stmt.lname == local
+  local.len > 0 and src.assigned == local
+
+func indexesInto(src: CellProducer; name: string): bool =
+  ## The producer stores an element of `name` (`name[i] = v`).
+  name.len > 0 and src.indexRecv == name
+
+func producerOf(stmt: IRStmt): CellProducer =
+  ## RFC-0016 review R6. The facts `reconcileCells` reads of a leaf statement
+  ## (`walkCapSynced`); a compound one is never reconciled.
+  doAssert stmt.kind notin compoundStmtKinds   # `reconcileCells`
+  case stmt.kind
+  of isCall:
+    CellProducer(isCall: true, cargs: stmt.cargs, cVarLocs: stmt.cVarLocs,
+                 cGuardRoots: stmt.cGuardRoots)
+  of isIndexAssign: CellProducer(indexRecv: stmt.iaRecvName)
+  of isAssign:
+    CellProducer(assigned: stmt.aname,
+                 strSetAtOf: if stmt.avalue.kind == iekStrSetAt: stmt.aname
+                             else: "")
+  of isLet: CellProducer(assigned: stmt.lname)
+  else: CellProducer()
 
 proc dropSnapshots(env: var Env; prefix: string; depth: int): bool =
   ## RFC-0005 S8ax. Delete `env`'s snapshots under `prefix` taken at `depth`
@@ -21563,7 +21583,7 @@ proc linkCapAddrCells(paths: seq[Path]; w: WalkCtx): seq[Path] =
           changed = true
     result.add(if changed: forkPath(p, p.pc, env2) else: p)
 
-proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
+proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. After `stmt`, each address-taken variable of the
   ## current frame (`CallFrameCtx.addrCells`) and the heap at its cell are
@@ -21579,7 +21599,6 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## at the key for the heap at the cell; a table write that may have removed
   ## the key leaves the view on a slot Nim's `del` refills from another
   ## entry, and declines too.
-  doAssert stmt.kind notin compoundStmtKinds   # `reconcileCells`
   let ctx = w.z3
   # RFC-0005 S8bu: a local with two entries (an `addr` actual's local,
   # `addrPartName`: a part of a variable's cell, and the call's cell) takes
@@ -21619,9 +21638,9 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
           # The holder's Table went to this call through a temporary: the
           # callee kept the view and it equal, and the write-back that follows
           # brings the Table here.
-          if stmt.kind == isCall and c.path.len > 0:
+          if src.isCall and c.path.len > 0:
             var pending = false
-            for l in stmt.cVarLocs:
+            for l in src.cVarLocs:
               if l.mode == "var" and l.root == c.slot and l.path == c.path:
                 pending = true
             if pending: continue
@@ -21639,15 +21658,15 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
             let snapQ = if env2.hasKey(snapS): locGet(env2[snapS], c.path, @[])
                         else: none(SymVal)
             var pairedCall = false
-            if stmt.kind == isCall:
+            if src.isCall:
               var hasV, hasS = false
-              for arg in stmt.cargs:
+              for arg in src.cargs:
                 if arg.kind == iekVar and arg.vname == c.local: hasV = true
                 elif irFieldPath(arg) == c.slot: hasS = true
               pairedCall = hasV and hasS
             if snapQ.isSome and not sameSymVal(tabV, snapQ.get) and
                not pairedCall and c.slot notin writtenThrough and
-               not (stmt.kind == isIndexAssign and stmt.iaRecvName == c.slot):
+               not src.indexesInto(c.slot):
               if q == nil: q = forkPath(p, p.pc, p.env)
               viewWhy = "the seq was resized or assigned whole while its " &
                         "element was held"
@@ -21663,9 +21682,9 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
             let tCh = snapQ.isSome and not sameSymVal(tabV, snapQ.get)
             if not vCh and not tCh: continue
             if q == nil: q = forkPath(p, p.pc, p.env)
-            let tabLast = lastWriteTo(stmt, c.slot) or
-              stmt.kind == isIndexAssign and stmt.iaRecvName == c.slot
-            if vCh and tCh and not lastWriteTo(stmt, c.local) and not tabLast:
+            let tabLast = lastWriteTo(src, c.slot) or
+              src.indexesInto(c.slot)
+            if vCh and tCh and not lastWriteTo(src, c.local) and not tabLast:
               viewWhy = "the view and the seq were both written in one statement"
             elif vCh and not tabLast:
               let nv = locSet(tabV, @["["], c.ixs, xv)
@@ -21727,9 +21746,8 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
           # f(t)` the view's write, `t[k] = f(v)` the table's store (a call's
           # argument is evaluated first). Two calls in one expression are not
           # two statements here, and stay declined (`twoCalls`).
-          let tabLast = lastWriteTo(stmt, c.slot) or
-            stmt.kind == isIndexAssign and stmt.iaRecvName == c.slot
-          if vCh and tCh and not lastWriteTo(stmt, c.local) and not tabLast:
+          let tabLast = lastWriteTo(src, c.slot) or src.indexesInto(c.slot)
+          if vCh and tCh and not lastWriteTo(src, c.local) and not tabLast:
             viewWhy = "the view and the table were both written in one statement"
           elif vCh and not tabLast:
             # On the emptied slot a write stays in the slot: the key is not
@@ -21799,19 +21817,18 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         let capCell = capCellOf(w, c.local)
         if capCell.len > 0 and env2.hasKey(capBoundName(capCell)) and
            hasSnap and not sameSymVal(cur, env2[snap]) and
-           not lastWriteTo(stmt, c.local):
+           not lastWriteTo(src, c.local):
           env2[c.local] = cur
           continue
         if not (hasSnap and sameSymVal(cur, env2[snap])) and
-           not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
+           not lastWriteTo(src, c.local) and displayName(c.local) notin clash:
           clash.add displayName(c.local)
         # RFC-0005 S8ca: an element of the variable written by name is
         # written in its memory; its store is an in-place step.
         let heapsBefore = q.heaps
         let st = addrEntryStore(ctx, q, c, refAst, xv)
-        if (stmt.kind == isIndexAssign and stmt.iaRecvName == c.local) or
-           (stmt.kind == isAssign and stmt.aname == c.local and
-            stmt.avalue.kind == iekStrSetAt):   # a character, by name
+        if src.indexesInto(c.local) or
+           (c.local.len > 0 and src.strSetAtOf == c.local):   # a character, by name
           logInPlace(q, heapsBefore, q)
         if st.isSome: env2[c.local] = keepStrBuf(st.get, xv)   # S8ca
         elif displayName(c.local) notin lost: lost.add displayName(c.local)
@@ -22014,9 +22031,9 @@ proc withCellElem(p: Path; ks: seq[int]; k: int; sv: SymVal;
   if f.isSome and f.get: return sv
   withElem(sv, e.idx, iteSV(sh.get, seqElemAt(sv, e.idx), cur))
 
-proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
+proc syncElemCells(src: CellProducer; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =
-  ## RFC-0005 S8be. After `stmt`, each seq of the current frame with element
+  ## RFC-0005 S8be. After the producer, each seq of the current frame with element
   ## cells and the heap at those cells are made equal again, the side that
   ## changed since the statement began winning (`elemSnapName`):
   ##
@@ -22034,7 +22051,6 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## is a seq a closure also captures (its env cell is a third copy).
   ##
   ## Run only where effects are produced (`reconcileCells`).
-  doAssert stmt.kind notin compoundStmtKinds
   let ctx = w.z3
   for p in outs:
     let ks = frameElemCells(p, w.frame.frameId)
@@ -22086,7 +22102,7 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
             live.add k
         if seqCh:
           for k in written:
-            if k in live and stmt.kind != isCall and
+            if k in live and not src.isCall and
                displayName(root) notin clash:
               clash.add displayName(root)
           for k in live:
@@ -22109,7 +22125,7 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
       # too, so a whole assignment of an equal value (or a cached callee's)
       # left the cells live: a read through one was a confirmed `sxSat` on
       # memory Nim had freed.
-      if lastWriteTo(stmt, root) or
+      if lastWriteTo(src, root) or
          seqCh and not sameSeqLen(sNow, env2[sKey]):
         for k in ks:
           if q.elemCells[k].root == root: q.elemCells[k].dead = true
@@ -22117,7 +22133,7 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
       if sNow.kind != svSeq: continue
       var sNew = sNow
       if seqCh:
-        if written.len > 0 and stmt.kind != isCall and
+        if written.len > 0 and not src.isCall and
            displayName(root) notin clash:
           clash.add displayName(root)
       else:
@@ -22230,7 +22246,7 @@ proc snapCells(paths: seq[Path]; depth: int; w: WalkCtx): seq[Path] =
         changed = true
     result.add(if changed: forkPath(p, p.pc, env2) else: p)
 
-proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
+proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
                     w: var WalkCtx): seq[Path] =
   ## RFC-0016 review R5-1/R5-2. Make each of the frame's two-sided
   ## locations equal again after an evaluation that began at `depth`
@@ -22240,7 +22256,8 @@ proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
   ## changed is a clash, declined.
   ##
   ## The invariant: every effect is reconciled exactly once, where it is
-  ## produced, against a snapshot taken just before it. A compound
+  ## produced, against a snapshot taken just before it. What it reads of the
+  ## producer is a `CellProducer`. A compound
   ## statement (`compoundStmtKinds`: a block, labelled or not, an `if` --
   ## a `case` is one --, a `while`, a `try`) produces no effect of its own
   ## beyond the expressions it evaluates itself, so it is never reconciled
@@ -22257,14 +22274,29 @@ proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
   ##   caller's cells only through its statement);
   ## * every guard a compound evaluates itself (`evalCondSynced`): each
   ##   `if`/`elif` condition, a short-circuit chain's joined guard
-  ##   (`ifJoin`), each `while` guard test, the final one after the last
-  ##   unrolled body included, in both walk modes. A `case` discriminator is
-  ##   bound to a `let` by the parser, a leaf, and its `of` tests are `if`
-  ##   conditions. A `try` evaluates nothing itself: an `except` match reads
-  ##   the in-flight exception's type only;
-  ## * a `return`'s value (`isReturn`, at `leafSyncDepth`): the path parks
-  ##   before its statement's own pass, and a `finally` or the caller's
-  ##   `var` write-back reads the frame after it.
+  ##   (`ifJoin`), each `while` test, the final one after the last unrolled
+  ##   body included (explore walk; the follow walk has none: it degrades
+  ##   `beBudgetExhausted` instead), and the follow-mode variants
+  ##   (`walkIfFollowConcrete`, `walkWhileFollowConcrete`). A `case` is an
+  ##   if-chain: its statement-level arm embeds the scrutinee in each `of`
+  ##   guard (it is not let-bound), so each `of` test is one of these. A
+  ##   `try` evaluates nothing itself: an `except` match reads the
+  ##   in-flight exception's type only. THESE ARE DEFENSIVE. The parser
+  ##   A-normalises every call into a statement of its own (`call(__sym_f_N
+  ##   := f(..))`, a leaf) whatever its position -- a test, an operand of a
+  ##   short-circuit, an `if`/`case` expression, a scrutinee (evaluated once,
+  ##   however many `of` arms) -- so a guard holds no call and produces no
+  ##   effect, and its reconcile finds nothing to do. Removing each of them
+  ##   (and the final test, and both follow variants) left every test green
+  ##   (R6-1, R6-2). `tsymex_0016_r7a_liveness` pins the A-normalisation
+  ##   (`noInlineCall`), so a parser that leaves a call in a guard fails
+  ##   there, where the guard needs a test with an effect at it. A guard
+  ##   hands `reconcileCells` a default `CellProducer`, no statement;
+  ## * not a `return`'s value: its calls are statements before it, reconciled
+  ##   as leaves, and the `return` itself writes no cell. It had a reconcile
+  ##   of its own, a synthesised assignment of `result` (R5-2); no
+  ##   `return a and f()`, `return (if .. f() ..)` or `return (case ..)`
+  ##   reached it (R6-3), so it was deleted with the depth it read.
   ##
   ## A parked exit (`break`, `continue`, a `return` or a jump held for a
   ## `finally`) needs nothing more where it rejoins: it was reconciled at
@@ -22274,14 +22306,13 @@ proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
   ## body it runs is walked statement by statement, and an exhausted path
   ## leaves tainted. A closure applied in an expression runs its body's
   ## statements through `walk`, so its own leaves reconcile them.
-  doAssert stmt.kind notin compoundStmtKinds
-  let outs = syncElemCells(stmt, outs0, depth, w)   # RFC-0005 S8be
+  let outs = syncElemCells(src, outs0, depth, w)   # RFC-0005 S8be
   if w.frame.capCells.len == 0:
-    return syncAddrCells(stmt, outs, depth, w)
+    return syncAddrCells(src, outs, depth, w)
   var byAddr: seq[string]
-  if stmt.kind == isCall:
+  if src.isCall:
     for (local, _) in w.frame.capCells:
-      if local in stmt.cGuardRoots: byAddr.add displayName(local)
+      if local in src.cGuardRoots: byAddr.add displayName(local)
   for p in outs:
     var env2 = p.env
     var touched = false
@@ -22301,7 +22332,7 @@ proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
       # write to both (`applyClosureGround`).
       let agree = sameSymVal(env2[local], env2[cell])
       if lCh and cCh and not agree or
-         cCh and not lCh and stmt.kind != isCall:
+         cCh and not lCh and not src.isCall:
         if displayName(local) notin clash: clash.add displayName(local)
       if lCh:
         env2[cell] = env2[local]
@@ -22332,7 +22363,7 @@ proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
   # The capture pass keeps its survivors one for one.
   doAssert result.len == outs.len
   if w.frame.addrCells.len > 0:
-    result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
+    result = syncAddrCells(src, result, depth, w)   # RFC-0005 S8ax
     result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
 
 proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -22361,33 +22392,26 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ##
   ## Likewise each address-taken variable and its heap cell
   ## (`syncAddrCells`), and each element cell and its element
-  ## (`syncElemCells`, RFC-0005 S8be). Only a leaf statement is bracketed:
-  ## a compound one is walked bare, its leaves and guards reconciling
-  ## themselves (`reconcileCells`). It still takes a depth, so a path that
+  ## (`syncElemCells`, RFC-0005 S8be). Reconciled where an effect is
+  ## produced: each leaf statement (here) and each guard (`evalCondSynced`).
+  ## Only a leaf statement is bracketed: a compound one is walked bare, its
+  ## leaves and guards reconciling themselves (`reconcileCells`). It still takes a depth, so a path that
   ## leaves it early (a `break`) carrying an inner leaf's snapshots rejoins
   ## where every snapshot is shallower, and the next one drops them
   ## (`dropSnapshots`) rather than reading them as its own.
-  let outer = w.leafSyncDepth
   if stmt == nil or paths.len == 0 or not frameHasCells(paths, w):
-    w.leafSyncDepth = 0
-    result = walkStmt(stmt, paths, w)
-    w.leafSyncDepth = outer
-    return
+    return walkStmt(stmt, paths, w)
   if stmt.kind in compoundStmtKinds:
     inc w.capSyncDepth
-    w.leafSyncDepth = 0
     result = walkStmt(stmt, paths, w)
-    w.leafSyncDepth = outer
     dec w.capSyncDepth
     return
   inc w.capSyncDepth
   let depth = w.capSyncDepth
   let ins = snapCells(paths, depth, w)
-  w.leafSyncDepth = depth
   let outs0 = walkStmt(stmt, ins, w)
-  w.leafSyncDepth = outer
   dec w.capSyncDepth
-  reconcileCells(stmt, outs0, depth, w)
+  reconcileCells(producerOf(stmt), outs0, depth, w)
 
 proc evalCondSynced(p: Path; cond: IRExpr;
                     w: var WalkCtx): (Z3Bool, seq[Path]) =
@@ -22409,8 +22433,7 @@ proc evalCondSynced(p: Path; cond: IRExpr;
   let (b, p2) = lowerBoolInExpr(ins[0], cond, w)
   let cont = drainScalarRaiseForks(p2, w)
   dec w.capSyncDepth
-  let asLeaf = IRStmt(kind: isLet, lname: "", lvalue: cond)
-  (b, reconcileCells(asLeaf, cont, depth, w))
+  (b, reconcileCells(CellProducer(), cont, depth, w))
 
 template forEachExitGroup(w, g, body: untyped) =
   ## RFC-0005 review R5. Run `body` with `g` naming each exit group a walk

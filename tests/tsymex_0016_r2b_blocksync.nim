@@ -219,18 +219,27 @@ suite "R2-2: more shapes":
 let runtimeCode = codeOf(readFile(smtSrcDir / "runtime.nim"))
 
 proc procBody(name: string): string =
-  ## The definition: the last `proc name(`, after any forward declaration.
-  let a = runtimeCode.rfind("\nproc " & name & "(")
+  ## The definition: the last `proc name(` or `func name(`, after any forward
+  ## declaration, to the next routine.
+  let a = max(runtimeCode.rfind("\nproc " & name & "("),
+              runtimeCode.rfind("\nfunc " & name & "("))
   doAssert a >= 0, name
-  let b = runtimeCode.find("\nproc ", a + 1)
-  doAssert b > a, name
+  var b = runtimeCode.len
+  for kw in ["\nproc ", "\nfunc "]:
+    let k = runtimeCode.find(kw, a + 1)
+    if k > a and k < b: b = k
   runtimeCode[a ..< b]
 
 suite "R5-2: reconciled only where effects are produced":
   test "no compound statement reaches the reconcile":
     check runtimeCode.count("const compoundStmtKinds = {isBlock, isIf, isWhile, isTry}") == 1
+    # R6: the three syncs take a `CellProducer`, never a statement; the one
+    # place a statement becomes one is `producerOf`, which refuses a compound.
     for p in ["reconcileCells", "syncAddrCells", "syncElemCells"]:
-      check procBody(p).contains("doAssert stmt.kind notin compoundStmtKinds")
+      check procBody(p).contains("src: CellProducer")
+      check not procBody(p).contains("IRStmt")
+    check procBody("producerOf").contains("doAssert stmt.kind notin compoundStmtKinds")
+    check procBody("walkCapSynced").contains("reconcileCells(producerOf(stmt),")
     check procBody("walkCapSynced").contains("if stmt.kind in compoundStmtKinds:")
   test "the per-span machinery is gone":
     for id in ["reconciledHere", "joinedExitMask", "blockJoinedExits"]:
@@ -244,8 +253,19 @@ suite "R5-2: reconciled only where effects are produced":
     # are the leaves `isAssert` and `isAssume`.
     check procBody("walkStmt").count("evalCondSynced(") == 4
     check procBody("walkStmt").count("lowerBoolInExpr(") == 2
-  test "a `return` reconciles its value before it parks":
-    check procBody("walkStmt").contains("reconcileCells(IRStmt(kind: isAssign, aname:")
+    # R6: each site is anchored to its own guard (the `ifJoin` guard, the
+    # `if`/`elif` condition, the `while` test and the final test after the
+    # last unrolled body), not to a whole-body count. All are defensive: the
+    # parser leaves no call in a guard (`tsymex_0016_r7a_liveness`).
+    check procBody("walkStmt").contains("evalCondSynced(p, br.cond, w)")
+    check procBody("walkStmt").contains("evalCondSynced(cp0, br.cond, w)")
+    check procBody("walkStmt").count("evalCondSynced(p, stmt.wcond, w)") == 2
+  test "a guard hands the reconcile no statement":
+    check procBody("evalCondSynced").contains("reconcileCells(CellProducer(),")
+    check not procBody("evalCondSynced").contains("IRStmt(")
+  test "a `return` is no reconcile point (R6-3: unreachable, deleted)":
+    check "leafSyncDepth" notin runtimeCode
+    check not procBody("walkStmt").contains("reconcileCells(")
 
 # RFC-0016 review R3-1. A path that took `break L` from inside an `if` is
 # parked before any enclosing statement's post-sync sees it. The condition's

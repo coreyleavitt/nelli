@@ -15,6 +15,7 @@
 ##     that now also audits the moved modules). Ceiling 970, a little over,
 ##     so a doc-comment edit is not a failure; a new body in the facade is.
 import std/[unittest, strutils]
+import audit_scan_utils
 import nelli/symex
 import nelli   ## the union of both: a name hidden here is hidden under each
 
@@ -139,7 +140,13 @@ suite "D6: symex.nim is the facade":
 # green. This pin needs no define: it reads the block's text and requires that
 # each std module whose symbols the block names is imported somewhere in the
 # file.
-proc gatedBlock(src: string): string =
+#
+# It is a textual approximation (R6-5): it reads `codeOf` (comments and string
+# bodies removed, so prose naming a symbol never counts), and the symbol map
+# below lists only what the block is known to use. The real guard is the
+# `s8ab_letaudit` leg, which compiles the block under the define in CI.
+proc gatedBlock(src0: string): string =
+  let src = codeOf(src0)
   let marker = "when defined(nelliVmAliasAudit):"
   let at = src.find(marker)
   if at < 0: return ""
@@ -149,8 +156,8 @@ proc gatedBlock(src: string): string =
     lines.add l
   lines.join("\n")
 
-proc importsStd(src, module: string): bool =
-  for l in src.splitLines:
+proc importsStd(src0, module: string): bool =
+  for l in codeOf(src0).splitLines:
     let s = l.strip
     if (s.startsWith("import std/") or s.startsWith("from std/")) and module in s.split({'/', '[', ']', ',', ' ', '\t'}):
       return true
@@ -160,7 +167,7 @@ suite "D6: the self-audit block's imports resolve without the define":
     let blk = gatedBlock(facadeSrc)
     check blk.len > 0
     # (module, the symbols of it a guarded block could be using)
-    let needs = [("os", @["parentDir", "extractFilename", "joinPath", "splitFile", "fileExists"]),
+    let needs = [("os", @["parentDir", "extractFilename", "joinPath", "splitFile", "splitPath", "fileExists", " / "]),
                  ("algorithm", @["sort(", "sorted(", "reversed("]),
                  ("importutils", @["privateAccess"]),
                  ("sequtils", @["mapIt", "filterIt", "toSeq"])]

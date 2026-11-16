@@ -1548,6 +1548,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cn_views_f",
             "tsymex_0016_r2b_blocksync",
             "tsymex_0016_r5a_exitsync",
+            "tsymex_0016_r7a_liveness",
             "tsymex_rfc0005_s8cn_seqview",
             "tsymex_rfc0005_s8cn_seqview_b",
             "tsymex_rfc0005_s8cn_seqview_c",

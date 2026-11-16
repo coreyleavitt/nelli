@@ -19,8 +19,8 @@ suite "D1 S1: arith_regime (checks off)":
     checkConstPure()
   test "the cache-key bytes of a stamped block":
     checkKeyBytes()
-  test "F-2 census: every overflow-exercising stdlib row calls only magics":
-    checkOverflowRowCensus()
+  test "D1-F2 + F-3: every routine body stamps its own regime; checking and wrapping are one regime":
+    checkTotalStamp()
   test "the compiled build":
     check not buildSemantics.fwrapv
     check coOverflow notin buildSemantics.checks

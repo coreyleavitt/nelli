@@ -71,9 +71,8 @@ func refScope(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
   else: asBuild
 
 func refStamp(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
-  ## dsl_parser.nim:1672 `arithStamp`: no claim in a build that checks unless
-  ## a row models the routine, and none by an inherit routine.
-  if (not refWraps(b) and f.overflowRowKey.len == 0) or f.inherit: asInherit
+  ## D1-F2: every routine body claims, and none by an inherit routine.
+  if f.inherit: asInherit
   else: refScope(f, b)
 
 func refDecline(f: RoutineArithFacts; b: BuildSemantics): bool =
@@ -93,9 +92,10 @@ func refDefProfile(wraps: bool; b: BuildSemantics): DefProfile =
   if not wraps: dpChecked elif b.fwrapv: dpFwrapv else: dpUnchecked
 
 func refChecked(ac: ArithCheck; wraps: bool; b: BuildSemantics): bool =
-  ## runtime.nim:9362 `checked`, over `arithChecksFor` (types.nim:5248).
-  ac in refChecks(b) or
-    (ac in {acOverflow, acDivByZero} and refWraps(b) and not wraps)
+  ## runtime.nim:9362 `checked`: the overflow and zero-divisor checks follow
+  ## the regime where the walk stands (F-3, D1-F2), the range check the build.
+  if ac in {acOverflow, acDivByZero}: not wraps
+  else: ac in refChecks(b)
 
 # ---- the checks -------------------------------------------------------------
 
@@ -130,10 +130,11 @@ proc checkLiterals*() =
   check stampFor(fx(true, true, true, rowKey), off).provenance == asChecked
   check stampFor(fx(true, true, false, "", true), off).provenance == asInherit  # :1676 `or inherit`
   check not decide(fx(true, false, true, ""), off).declineOverflow  # :1820 `not refWraps()`
-  # checks-on build: a claim only for a modelled routine (:1676), as
-  # asUnchecked (:1608); a deviating unmodelled routine declines (:1819-1821).
-  check stampFor(fx(true, false, true, ""), on).provenance == asInherit
-  check stampFor(fx(true, true, false, ""), on).provenance == asInherit
+  # checks-on build (D1-F2): every body claims; a modelled routine as
+  # asUnchecked (:1608), any other as asBuild (checked); a deviating
+  # unmodelled routine declines (:1819-1821).
+  check stampFor(fx(true, false, true, ""), on).provenance == asBuild
+  check stampFor(fx(true, true, false, ""), on).provenance == asBuild
   check stampFor(fx(true, false, true, rowKey), on).provenance == asUnchecked
   check stampFor(fx(true, false, true, rowKey, true), on).provenance == asInherit
   check decide(fx(true, false, true, ""), on).declineOverflow
@@ -179,8 +180,11 @@ proc checkFrames*() =
     for f in allFacts():
       let s = stampFor(f, b)
       if not s.claims: continue                         # runtime.nim:25498
-      check enterBody(w, s)
-      let wraps = s.provenance != asChecked              # runtime.nim:2189
+      check enterBody(w, s, b)
+      let wraps = (case s.provenance
+                   of asChecked: false
+                   of asUnchecked: true
+                   else: refWraps(b))                    # runtime.nim:2189
       check (w.regime == rgUnchecked) == wraps
       for ac in ArithCheck:
         check w.emits(ac, b) == refChecked(ac, wraps, b)
@@ -237,7 +241,8 @@ proc checkConstPure*() =
 
 proc checkKeyBytes*() =
   ## The cache key of a stamped block: `canonicalize.nim:6772` renders
-  ## `"@" & $blkArith & ":"` for a claim and nothing for `asInherit`.
+  ## `"@" & $blkArith & ":"` for a claim and nothing for `asInherit`. D1-F2: a
+  ## body claims in every build.
   let body = @[mkBreak()]
   let plain = canonicalize(mkBlock(body))
   check "@as" notin plain
@@ -262,73 +267,47 @@ proc checkKeyBytes*() =
   if coOverflow notin buildSemantics.checks:
     check seen.len >= 2 and "asBuild" in seen and "asChecked" in seen
   else:
-    check seen == @["asUnchecked"]
+    check seen == @["asBuild", "asBuild", "asUnchecked"]
 
-const overflowRowBodyIdents = [
-  # the vocabulary of the six bodies, all operators and compiler magics
-  "func", "result", "x", "y", "r", "T", "abs", "ord", "dec", "inc", "div",
-  "mod", "shr", "or", "and", "not", "if", "elif", "else", "when", "defined",
-  "sizeof", "cpu64", "int", "return", "let", "SomeInteger", "SomeNumber",
-  "since", "true", "false", "isPowerOfTwo", "nextPowerOfTwo", "floorDiv",
-  "floorMod", "euclDiv", "euclMod", "bool"]
-
-proc bodyOf(src, name: string): string =
-  ## The text of `func <name>*` up to the next top-level line, with its doc
-  ## comments and `runnableExamples` block removed.
-  let lines = src.splitLines
-  var i = 0
-  while i < lines.len and not (lines[i].startsWith("func " & name & "*") or
-                               lines[i].startsWith("proc " & name & "*")): inc i
-  doAssert i < lines.len, "no routine " & name
-  let sig = lines[i]
-  inc i
-  var skipping = false
-  result = sig.substr(sig.find("=") + 1) & "\n"   # past the signature
-  while i < lines.len and (lines[i].len == 0 or lines[i][0] in {' ', '\t'}):
-    let l = lines[i]
-    inc i
-    let t = l.strip
-    if t.startsWith("##"): continue
-    if t.startsWith("runnableExamples:"):
-      skipping = true
-      continue
-    if skipping:
-      if l.len > 0 and not l.startsWith("    ") and t.len > 0: skipping = false
-      else: continue
-    result.add l & "\n"
-
-proc identsOf(s: string): seq[string] =
-  var cur = ""
-  for c in s & " ":
-    if c in IdentChars + {'_'}:
-      cur.add c
-    else:
-      if cur.len > 0 and cur[0] notin Digits: result.add cur
-      cur = ""
-
-proc checkOverflowRowCensus*() =
-  ## F-2's guard until D1-F2 stamps every body. A deviating routine walked
-  ## under `asUnchecked` in a build that checks calls only magics, so the
-  ## parser/walker disagreement about an unstamped non-magic callee cannot be
-  ## reached. The set of rows that can trip `overflowChecks` is pinned to the
-  ## six audited at 31d94909, and each body's identifiers to the magic and
-  ## operator vocabulary: a new row, or a body that calls another routine,
-  ## fails here and needs D1-F2 first.
-  const mathSrc = staticRead(querySetting(libPath) / "pure" / "math.nim")
-  var keys: seq[string]
-  for k in stdlibAxis.keys:
-    let a = admitStdlibBody(k, ssBodyWalk)
-    if a.admitted and a.payload.deltaKnown and coOverflow in a.payload.exercises:
-      keys.add k
-  check keys.len == 6
-  for want in ["math.isPowerOfTwo", "math.floorDiv", "math.floorMod",
-               "math.euclDiv", "math.euclMod", "math.nextPowerOfTwo"]:
-    check want in keys
-  for k in keys:
-    checkpoint k
-    let name = k["math.".len .. ^1]
-    check k.startsWith("math.")
-    for id in identsOf(bodyOf(mathSrc, name)):
-      if id notin overflowRowBodyIdents:
-        checkpoint "callee outside the magic vocabulary: " & id & " in " & k
-        check id in overflowRowBodyIdents
+proc checkTotalStamp*() =
+  ## D1-F2 (F-2): no body's regime comes from inheritance. Every non-magic
+  ## routine body claims, in every build, so a callee entered from an
+  ## `asUnchecked` body is walked under its own regime (the parse rule's), as
+  ## natively; only a magic stays `asInherit`. The cache key then carries the
+  ## claim (`@asBuild:` for a body that used to render nothing).
+  ## F-3: the overflow check and the defined wrap read one regime, so they are
+  ## never both on, in any build, in any stamped body.
+  for (nm, b) in builds():
+    checkpoint nm
+    for f in allFacts():
+      let s = stampFor(f, b)
+      check s.claims == (not f.inherit)
+    # a caller under `asUnchecked` (a modelled stdlib body, checks-on build),
+    # then an ordinary non-magic callee: the callee's own claim, not the caller's
+    let caller = stampFor(RoutineArithFacts(readable: true,
+      overflowDeviates: true, overflowRowKey: rowKey), b)
+    let callee = stampFor(RoutineArithFacts(readable: true), b)
+    check callee.claims
+    var w = ArithFrames.init(b)
+    check enterBody(w, caller, b)
+    check enterBody(w, callee, b)
+    check w.regime == buildRegime(b)       # the callee is the build's, natively
+    w.leave
+    check w.regime == (if caller.provenance == asUnchecked: rgUnchecked
+                       else: buildRegime(b))
+    w.leave
+    # F-3
+    for s in [caller, callee]:
+      var v = ArithFrames.init(b)
+      check enterBody(v, s, b)
+      for op in [aoAdd, aoSub, aoMul]:
+        for width in [8, 16, 32, 64]:
+          check not (v.emits(acOverflow, b) and wrapDefined(v.regime, op, width, b))
+      check v.emits(acOverflow, b) == (v.regime == rgChecked)
+      check v.emits(acDivByZero, b) == (v.regime == rgChecked)
+      v.leave
+  # the key bytes: the claim of a body that used to be unstamped
+  let key = canonicalize(mkArithBlock(
+    stampFor(RoutineArithFacts(readable: true), withBuild(true, false)),
+    @[mkBreak()]))
+  check key.startsWith("St<Bk:@asBuild:[")

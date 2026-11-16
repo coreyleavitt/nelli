@@ -2,6 +2,7 @@
 ## arithmetic regime, against the current parser and walker rules.
 ## The default build (checks on, no `-fwrapv`).
 import std/[unittest, os, strutils]
+import nelli/smt/canonicalize
 import nelli/smt/buildprofile
 import nelli/smt/arith_regime
 from nelli/smt/types import nil
@@ -20,8 +21,10 @@ suite "D1 S1: arith_regime (default build)":
     checkConstPure()
   test "the cache-key bytes of a stamped block":
     checkKeyBytes()
-  test "F-2 census: every overflow-exercising stdlib row calls only magics":
-    checkOverflowRowCensus()
+  test "D1-F2 + F-3: every routine body stamps its own regime; checking and wrapping are one regime":
+    checkTotalStamp()
+  test "walker version floor (D1-F2: every body stamps its regime)":
+    check parseInt(symexWalkerVersion) >= 362
   test "the compiled build":
     check not buildSemantics.fwrapv
     check coOverflow in buildSemantics.checks

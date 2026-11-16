@@ -1763,11 +1763,11 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   ## RFC-0005 S8cu. `body` behind the markers for what `c` says of the routine
   ## (`routineChecks`, read before its body is parsed). Overflow has a marker of
   ## its own: the walker passes it where the settings model the wrap.
-  # RFC-0016 W1-d2c: in a build whose own overflow checks are off every
-  # routine body is stamped with the arithmetic it is compiled under: the
-  # build's (unchecked), or `OverflowDefect`-raising for one read as pushed
-  # `overflowChecks: on`. A checks-on build needs no stamp (nothing to override
-  # but the `off` push, which declines below).
+  # RFC-0016 W1-d2c, D1-F2: every non-magic routine body is stamped with the
+  # arithmetic it is compiled under, in every build: the build's, or
+  # `OverflowDefect`-raising for one read as pushed `overflowChecks: on`, or
+  # (a stdlib row) unchecked in a build that checks. A body never takes its
+  # caller's regime, as natively; only a magic's does.
   let facts = arithFacts(c, inherit)
   let arith = decide(facts)
   let restrictParams = noaliasWithPeers(impl)

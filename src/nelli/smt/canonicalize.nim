@@ -675,8 +675,14 @@ const renderAsChoicesVersion* = "12"
   ##   so an opaque `int8`/`int16` `+ - * div mod` reported `ubSignedOverflow`
   ##   or `ubIntMinModMinusOne` where C computes in the promoted `int` (rows
   ##   `signedNarrow`, `lowByMinusOneNarrow`: defined). An over-report removed.
+  ## - RFC-0016 review D1-F2 (361->362): every non-magic routine body carries
+  ##   an arithmetic stamp. A body in a build that checks was unstamped, so a
+  ##   callee of an `asUnchecked` body walked unchecked (it inherited) where
+  ##   natively it is checked (F-2); `emits(acOverflow)` and the defined wrap
+  ##   now read one regime (F-3). Key bytes: such a body's block renders
+  ##   `@asBuild:` where it rendered no stamp.
 
-const symexWalkerVersion* = "361"
+const symexWalkerVersion* = "362"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -1236,7 +1236,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## kind it does not list): 359->360.
     ## RFC-0016 review D1 S3 (the opaque scan classes an operand by its
     ## width): 359->361 (360 is the int8 integration's).
-    check symexWalkerVersion == "361"
+    ## RFC-0016 review D1-F2 (every routine body stamps its regime): 361->362.
+    check symexWalkerVersion == "362"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

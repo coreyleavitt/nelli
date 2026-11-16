@@ -36,8 +36,14 @@ type
     ## on` says otherwise. The parser stamps the routine's body block; the
     ## walker pushes it for the block and pops it after, so a
     ## caller's scope never leaks into a callee and back.
-    asInherit   ## no claim (every block but a routine body; any body in a checks-on build)
-    asBuild     ## unchecked signed arithmetic: the build's (`ubSignedOverflow`)
+    asInherit   ## no claim: every block that is not a routine body, and the
+                ## body of a magic (expanded at its call site, under the
+                ## caller's options). D1-F2: NO other routine body is
+                ## unclaimed; each states its own regime.
+    asBuild     ## the build's own arithmetic: unchecked (`ubSignedOverflow`)
+                ## in a build whose overflow checks are off, checked in one
+                ## that checks (D1-F2: a routine body in a checks-on build
+                ## carries this claim, so a caller pushed off does not leak)
     asChecked   ## `push overflowChecks: on` in a checks-off build: `OverflowDefect`
     asUnchecked ## RFC-0016 K4c. A stdlib body under a push that turns its
                 ## overflow checks off (`math.nim`'s `checks: off`) in a build
@@ -139,15 +145,15 @@ func scopeRegime(s: ArithScope; b: BuildSemantics): Regime =
 proc decide*(f: RoutineArithFacts;
              b: BuildSemantics = buildSemantics): ArithDecision =
   ## The one decision: the stamp of a routine's body block and whether it
-  ## declines. A claim is made only in a build that is unchecked or where a
-  ## stdlib row models the routine (`arithStamp`, `dsl_parser.nim:1672`), and
-  ## never by an inherit routine. The stamp is a proof of the axis that made
+  ## declines. D1-F2: every routine body claims its regime, in every build
+  ## (an unstamped body once ran under its caller's regime in the walk but
+  ## under the build's in the parse); only a magic (inherit) does not claim. The stamp is a proof of the axis that made
   ## the claim, so the pragma row and the stdlib row are consulted here.
   let wraps = buildRegime(b) == rgUnchecked
   # `withCheckDeclines` (`dsl_parser.nim:1819`).
   result.declineOverflow = f.overflowDeviates and f.readable and not wraps and
                            not f.modelled
-  if f.inherit or (not wraps and not f.modelled):
+  if f.inherit:
     result.stamp = ArithStamp(scope: asInherit)
     return
   case parseScope(f, b)
@@ -164,7 +170,6 @@ proc decide*(f: RoutineArithFacts;
       " does not exercise overflowChecks"
     result.stamp = ArithStamp(scope: asUnchecked)
   of asBuild:
-    doAssert wraps, "decide: a build claim in a build that checks"
     result.stamp = ArithStamp(scope: asBuild)
   of asInherit:
     raiseAssert "decide: parseScope never answers asInherit"
@@ -193,21 +198,21 @@ func regime*(f: ArithFrames; b: BuildSemantics = buildSemantics): Regime =
 proc ensureBase(f: var ArithFrames; b: BuildSemantics) =
   if f.frames.len == 0: f.frames.add buildRegime(b)
 
-proc enterBody*(f: var ArithFrames; st: ArithStamp): bool =
+proc enterBody*(f: var ArithFrames; st: ArithStamp;
+                b: BuildSemantics = buildSemantics): bool =
   ## The walk rule (`pushArith`, `runtime.nim:2187`): a stamp that claims
-  ## pushes its regime (`asBuild` and `asUnchecked` unchecked, `asChecked`
-  ## checked); `asInherit` pushes NOTHING, so the callee runs under the
-  ## caller's regime. Answers whether it pushed: the walker calls `leave` only
-  ## then (the parser's `enterParse` always pushes and always leaves).
-  ## F-2: in a build that checks, the parse rule (`enterParse`) gives an
-  ## unstamped non-magic callee the build's regime where this one gives it the
-  ## caller's; harmless while every stdlib row that deviates calls only magics
-  ## (the census in `tsymex_0016_d1_regime`), fixed by D1-F2's total stamp.
-  f.ensureBase buildSemantics
+  ## pushes its regime (`asBuild` the build's, `asUnchecked` unchecked,
+  ## `asChecked` checked). `asInherit` pushes NOTHING: it is a block that is
+  ## not a routine body, or a magic's, which runs under the enclosing
+  ## regime. F-2 (D1-F2): every other routine body claims, so no callee takes
+  ## its caller's regime by inheritance, as natively. Answers whether it
+  ## pushed: the walker calls `leave` only then.
+  f.ensureBase b
   case st.scope
   of asInherit: return false
   of asChecked: f.frames.add rgChecked
-  of asBuild, asUnchecked: f.frames.add rgUnchecked
+  of asBuild: f.frames.add buildRegime(b)
+  of asUnchecked: f.frames.add rgUnchecked
   true
 
 proc enterParse*(f: var ArithFrames; facts: RoutineArithFacts;
@@ -226,16 +231,14 @@ proc leave*(f: var ArithFrames) =
 func emits*(f: ArithFrames; ac: ArithCheck;
             b: BuildSemantics = buildSemantics): bool =
   ## Whether check `ac` is emitted where the walk now stands (`checked`,
-  ## `runtime.nim:9362`): the build's checks, or a routine pushed on in a build
-  ## that is off (so the routine is not the build). F-3: in a build that
-  ## checks, an `asUnchecked` body still answers true for `acOverflow` while
-  ## its regime is unchecked; not observable today, kept.
-  let buildChecks =
-    (ac in {acOverflow, acDivByZero} and coOverflow in b.checks) or
-    (ac == acRange and coRange in b.checks)
-  buildChecks or
-    (ac in {acOverflow, acDivByZero} and buildRegime(b) == rgUnchecked and
-     f.regime == rgChecked)
+  ## `runtime.nim:9362`). F-3 (D1-F2): the overflow and zero-divisor checks
+  ## follow the REGIME alone (`f.regime == rgChecked`), the one value
+  ## `wrapDefined` and `profile` also read, so an `asUnchecked` body in a
+  ## build that checks neither emits the check nor ever has it and a defined
+  ## wrap together. The range check is the build's.
+  case ac
+  of acOverflow, acDivByZero: f.regime(b) == rgChecked
+  of acRange: coRange in b.checks
 
 func profile*(r: Regime; b: BuildSemantics = buildSemantics): DefProfile =
   ## The definedness table's column for a regime (`defProfile`,

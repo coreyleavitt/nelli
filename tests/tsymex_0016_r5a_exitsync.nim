@@ -1,18 +1,22 @@
-## RFC-0016 review R4-1. A labelled block (a source `block L:`, or a loop body
-## a `continue` leaves) reconciles, in its post-statement pass, only the
-## survivors that rejoined it from a parked exit (`reconciledHere`), never its
-## fall-through, whose statements each synced already.
+## RFC-0016 review R4-1, R5-1 and R5-2. Reconciliation happens only where
+## effects are produced: at each leaf statement, at each guard a compound
+## statement evaluates itself, and at a `return`'s value before it parks
+## (`reconcileCells`). No compound statement is reconciled over its span.
 ##
-## R3-1 ran the whole pass over every survivor of a labelled block. In a
-## callee that holds an `mpairs` view and its Table, the block's pass compared
-## the fall-through against a snapshot from before the body: the view and the
-## Table both differ from it (each was synced, statement by statement), so it
-## read as two writes in one statement and declined (sxUnknown, red at
-## 1502cad1). Every label is checked natively over `xs`.
+## A pass over a compound's span compared effects its statements had already
+## synced against a snapshot from before it. In a callee that holds an
+## `mpairs` view and its Table, the view and the Table both differ from that
+## snapshot (each was synced, statement by statement), so it read as two
+## writes in one statement and declined (sxUnknown): a labelled block's
+## fall-through (R4-1, red at 1502cad1), a `break` taken after the writes
+## (R5-1), the same writes under an `if` or in a loop body a `continue` leaves
+## (R5-2; red at 3a808b7e). Every label is checked natively over `xs`.
 ##
-## The parked exits are still reconciled: each `h*` program leaves a labelled
-## block from a condition that writes an address-taken variable by name or
-## through its pointer, then reads it both ways.
+## The guards' effects are still reconciled: each `h*` program leaves a
+## labelled block from a condition that writes an address-taken variable by
+## name or through its pointer, then reads it both ways; the R5 programs read
+## a capture a guard's closure wrote, after an `if`, across `while` tests, and
+## in a `finally` after a `return` whose value wrote it.
 
 import std/[unittest, strutils, tables]
 import nelli/symex
@@ -105,13 +109,56 @@ proc sWrDelC(t0: Table[string, int]) =
   except AssertionDefect:
     discard
 
-template loopDeclined(fn: typed; lbl: static string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
-    check r.status == sxUnknown
-    check "the view and the table were both written in one statement" in
-      show(r.errors)
+proc wrBrkL(v: var int; t: var Table[string, int]; k: string) =
+  block L:
+    v = 9
+    t.del("zz")
+    if k.len > 100: break L
+
+proc sWrBrkL(t0: Table[string, int]) =
+  guardT()
+  var t = t0
+  try:
+    for k, v in t.mpairs:
+      wrBrkL(v, t, k)
+      if v == 9 and t[k] == 9: symexTarget("wb_live")
+      if v != 9 or t[k] != 9: symexTarget("wb_dead")
+  except AssertionDefect:
+    discard
+
+proc wrBrkT(v: var int; t: var Table[string, int]; k: string) =
+  block L:
+    v = 9
+    t.del("zz")
+    if k.len > 0: break L
+    v = 1
+
+proc sWrBrkT(t0: Table[string, int]) =
+  guardT()
+  var t = t0
+  try:
+    for k, v in t.mpairs:
+      wrBrkT(v, t, k)
+      if v == 9 and t[k] == 9: symexTarget("wt_live")
+      if v != 9 or t[k] != 9: symexTarget("wt_dead")
+  except AssertionDefect:
+    discard
+
+proc wrDelI(v: var int; t: var Table[string, int]; k: string) =
+  if k.len < 100:
+    v = 9
+    t.del("zz")
+
+proc sWrDelI(t0: Table[string, int]) =
+  guardT()
+  var t = t0
+  try:
+    for k, v in t.mpairs:
+      wrDelI(v, t, k)
+      if v == 9 and t[k] == 9: symexTarget("wi_live")
+      if v != 9 or t[k] != 9: symexTarget("wi_dead")
+  except AssertionDefect:
+    discard
 
 suite "R4-1: a labelled block's fall-through is synced by its statements":
   test "a callee removes the view's key inside `block L:`":
@@ -121,15 +168,23 @@ suite "R4-1: a labelled block's fall-through is synced by its statements":
   test "a callee writes the view and removes another key inside `block L:`":
     decided(sWrDelL, "wl_live", sxSat)
     decided(sWrDelL, "wl_dead", sxUnsat)
-  test "the same in a loop body a `continue` leaves: the loop's own pass declines":
-    # The body block no longer reconciles its fall-through, but the enclosing
-    # loop is an `isWhile`, whose pass spans the whole loop (its guard's
-    # effects are its own) and reads the view's and the Table's synced writes
-    # as two writes in one statement. So does an `if` around them: a compound
-    # statement other than a block, outside this finding. It stays a
-    # decline, never a wrong verdict.
-    loopDeclined(sWrDelC, "wc_live")
-    loopDeclined(sWrDelC, "wc_dead")
+  test "the same in a loop body a `continue` leaves":
+    # R5-2: the enclosing `isWhile` ran a pass over its whole span against a
+    # snapshot from before the loop, and read the view's and the Table's
+    # synced writes as two writes in one statement. A compound statement
+    # runs no pass now: its leaves and its guard evaluations reconcile.
+    decided(sWrDelC, "wc_live", sxSat)
+    decided(sWrDelC, "wc_dead", sxUnsat)
+  test "a callee writes the view and the Table, then breaks out of `block L:`":
+    # R5-1: the parked `break` carried effects its statements had synced,
+    # and the block's pass compared it against the block-entry snapshot.
+    decided(sWrBrkL, "wb_live", sxSat)
+    decided(sWrBrkL, "wb_dead", sxUnsat)
+    decided(sWrBrkT, "wt_live", sxSat)
+    decided(sWrBrkT, "wt_dead", sxUnsat)
+  test "a callee writes the view and the Table under an `if`":
+    decided(sWrDelI, "wi_live", sxSat)
+    decided(sWrDelI, "wi_dead", sxUnsat)
 
 # ---- the parked exits of a labelled block are reconciled where they rejoin --
 
@@ -248,6 +303,111 @@ suite "R4-1: a parked exit is reconciled where it rejoins":
   test "break L from a short-circuit `or` whose closure writes by name":
     exitVerdict(sH6)
 
-suite "R4-1: walker version":
-  test "walker version floor (R4-1)":
-    check symexWalkerVersion.parseInt >= 365
+# ---- a compound's own evaluations reconcile where they run (R5) ----------
+
+template nsut(nm, rn: untyped; want: int) =
+  proc nm(v: int) =
+    if v != 1: return
+    let r = rn(v)
+    if r == want: symexTarget("ok")
+    if r != want: symexTarget("bad")
+
+proc rSc(v: int): int =
+  var x = v
+  proc bump(): bool =
+    x = x + 4
+    true
+  if v > 0 and bump():
+    result = x * 10
+  result += x
+nsut(sSc, rSc, 55)
+
+proc rScP(v: int): int =
+  var x = v
+  let p = addr x
+  proc bump(): bool =
+    x = x + 4
+    true
+  if v > 0 and bump():
+    result = p[] * 10
+  result += x
+nsut(sScP, rScP, 55)
+
+proc rWg(v: int): int =
+  var x = v
+  var n = 0
+  proc bump(): bool =
+    x = x + 2
+    x < 6
+  while bump():
+    inc n
+  result = x * 10 + n
+nsut(sWg, rWg, 72)
+
+proc rWgP(v: int): int =
+  var x = v
+  let p = addr x
+  var n = 0
+  proc bump(): bool =
+    x = x + 2
+    x < 6
+  while bump():
+    n = n * 10 + p[]
+  result = p[] * 100 + n
+nsut(sWgP, rWgP, 735)
+
+proc rRetFin(v: int): int =
+  var x = v
+  let p = addr x
+  proc c(): int =
+    p[] = 5
+    1
+  try:
+    return c() * 10
+  finally:
+    result = result + x
+nsut(sRetFin, rRetFin, 15)
+
+proc rRetFinCap(v: int): int =
+  var x = v
+  proc c(): int =
+    x = x + 4
+    1
+  try:
+    return c() * 10
+  finally:
+    result = result + x
+nsut(sRetFinCap, rRetFinCap, 15)
+
+proc retThrough(x: var int): int =
+  let p = addr x
+  proc c(): int =
+    p[] = 5
+    1
+  return c()
+
+proc rRet(v: int): int =
+  var y = v
+  let r = retThrough(y)
+  result = y * 10 + r
+nsut(sRet, rRet, 51)
+
+suite "R5: a compound's guard evaluations reconcile where they run":
+  test "a short-circuit guard whose closure writes a capture":
+    exitVerdict(sSc)
+  test "a short-circuit guard whose closure writes an address-taken capture":
+    exitVerdict(sScP)
+  test "a while guard whose closure writes a capture":
+    exitVerdict(sWg)
+  test "a while guard whose closure writes an address-taken capture":
+    exitVerdict(sWgP)
+  test "a `return` whose closure writes a `var` formal through its pointer":
+    exitVerdict(sRet)
+  test "a `finally` reads what a `return`'s closure wrote through a pointer":
+    exitVerdict(sRetFin)
+  test "a `finally` reads the capture a `return`'s closure wrote":
+    exitVerdict(sRetFinCap)
+
+suite "R5: walker version":
+  test "walker version floor (R5-1/R5-2)":
+    check symexWalkerVersion.parseInt >= 366

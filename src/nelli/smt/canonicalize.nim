@@ -693,8 +693,15 @@ const renderAsChoicesVersion* = "12"
   ##   fall-through, which its statements synced: a callee that removes an
   ##   `mpairs` view's key inside a labelled block declined (sxUnknown) and now
   ##   answers. No key bytes change.
+  ## - RFC-0016 review R5-1/R5-2 (365->366): reconciliation happens only where
+  ##   effects are produced -- each leaf statement, each guard a compound
+  ##   evaluates itself (`evalCondSynced`), and a `return`'s value before it
+  ##   parks -- and no compound statement is reconciled over its span
+  ##   (`reconcileCells`). A view and its Table written before a `break`, under
+  ##   an `if`, or in a loop body a `continue` leaves declined (sxUnknown) and
+  ##   now answer. No key bytes change.
 
-const symexWalkerVersion* = "365"
+const symexWalkerVersion* = "366"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

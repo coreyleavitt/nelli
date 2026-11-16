@@ -12572,11 +12572,11 @@ type
                                 ## on return. See pushFrame/popFrame below.
     capSyncDepth: int           ## RFC-0005 S8ax: the statement nesting depth
                                 ## `walk` snapshots capture cells at
-    blockJoinedExits: int       ## RFC-0016 review R4-1: how many of a
-                                ## labelled block's survivors, the last ones,
-                                ## rejoined it from its `breakPaths`; set by
-                                ## `walkStmt`, read by `walkCapSynced`
-                                ## (`reconciledHere`)
+    leafSyncDepth: int          ## RFC-0016 review R5-2: the depth of the
+                                ## snapshots bracketing the leaf statement
+                                ## `walkStmt` is walking (`walkCapSynced`), 0
+                                ## when it took none; read by `isReturn`,
+                                ## which reconciles before it parks
     frameIdCounter: int         ## RFC-0005 S9: the last `CallFrameCtx.frameId`
                                 ## `pushFrame` minted (ids are never reused
                                 ## within a walk).
@@ -14819,6 +14819,15 @@ proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool;
     w.ifSites[site] = st
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
+const compoundStmtKinds = {isBlock, isIf, isWhile, isTry}
+  ## RFC-0016 review R5-2. The statements with statements inside: walked
+  ## bare, never reconciled over their span (`reconcileCells`).
+proc evalCondSynced(p: Path; cond: IRExpr;
+                    w: var WalkCtx): (Z3Bool, seq[Path])
+  ## RFC-0016 review R5-2 fwd decl (defined beside `walkCapSynced`).
+proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
+                    w: var WalkCtx): seq[Path]
+  ## RFC-0016 review R5-2 fwd decl (defined beside `walkCapSynced`).
 proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int)
   ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
 proc liveViewMarks(p: Path; w: WalkCtx)
@@ -17396,8 +17405,8 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
       # exit facts, a drained raise's negation): they must hold on the
       # replay, and they define a closure call's result in `condBool`.
       let factBase = sp.defectSurvivorPc.len
-      let (condBool, cp2) = lowerBoolInExpr(sp, stmt.branches[i].cond, w)
-      for dp in drainScalarRaiseForks(cp2, w):
+      let (condBool, conds) = evalCondSynced(sp, stmt.branches[i].cond, w)
+      for dp in conds:
         if w.shouldStop: return survivors
         let newFacts =
           if dp.defectSurvivorPc.len > factBase: dp.defectSurvivorPc[factBase .. ^1]
@@ -17492,8 +17501,8 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
     if active.len == 0: break
     var nextActive: seq[Path]
     for p in active:
-      let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
-      for dp in drainScalarRaiseForks(pb, w):
+      let (cond, conds) = evalCondSynced(p, stmt.wcond, w)
+      for dp in conds:
         case followBranchOutcome(w, dp, cond, @[], wckWhile)
         of foOffRun:
           # RFC-0016 W3-z int6: the pins contradict this path (tail walk):
@@ -20530,13 +20539,10 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                               hsDepth: w.frame.handlerStack.len)
     let frameIx = w.loopStack.high
     var survivors = walkBlock(stmt.stmts, paths, w)
-    # RFC-0016 review R4-1: the parked exits rejoin last, and are counted, so
-    # the block's post-statement pass reconciles them and not its fall-through
-    # (`reconciledHere`).
-    let joined = w.loopStack[frameIx].exits.breakPaths.contents
-    survivors.add joined
+    # The parked exits were reconciled at the leaves and guards they passed
+    # through (`reconcileCells`), and rejoin as they are.
+    survivors.add w.loopStack[frameIx].exits.breakPaths.contents
     discard w.loopStack.pop()
-    w.blockJoinedExits = joined.len
     survivors
   of isIf:
     case w.mode
@@ -20557,10 +20563,10 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let br = stmt.branches[0]
       for p in paths:
         if w.shouldStop: return
-        let (condBool, cp2) = lowerBoolInExpr(p, br.cond, w)
+        # RFC-0016 review R5-2: reconciled where it is evaluated.
+        let (condBool, cont) = evalCondSynced(p, br.cond, w)
         # RFC-0005 S8bb: no continuation (the guard raised on every path,
         # a rejected pattern) walks no arm and no skip path.
-        let cont = drainScalarRaiseForks(cp2, w)
         # RFC-0005 S8bl: a guard that folds to a literal takes one side
         # only (`guardLiteral`).
         let lit = guardLiteral(condBool)
@@ -20597,11 +20603,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
           ## NI-1 semantics preserved: lowerBoolInExpr seeds from the CURRENT
           ## cp (the path passed to the wrapper), NOT the original p.
-          let (condBool, cp2) = lowerBoolInExpr(cp0, br.cond, w)
+          # RFC-0016 review R5-2: the drain and the reconcile, where the
+          # guard is evaluated (`evalCondSynced`).
+          let (condBool, cont) = evalCondSynced(cp0, br.cond, w)
           # DES-4 invariant: `condBool` was computed from the pre-drain
-          # `cp.env` and is a Z3 AST; the drains below never touch `env`, so
-          # it stays valid on every continuation.
-          let cont = drainScalarRaiseForks(cp2, w)  ## closure/conv/parseInt/div/overflow/index/range forks
+          # `cp.env` and is a Z3 AST; neither the drain nor the reconcile
+          # renames a term it reads, so it stays valid on every continuation.
           # RFC-0005 S8bb: the guard raised on every path (a rejected
           # pattern, `drainRegexRaises`): no arm, no later guard and no
           # else is walked. This re-added the pre-drain path as a
@@ -20731,7 +20738,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var nextActive: seq[Path]
       for p in active:
         ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
-        let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
+        ## RFC-0016 review R5-2: reconciled where it is evaluated
+        ## (`evalCondSynced`), each test.
+        let (cond, conds) = evalCondSynced(p, stmt.wcond, w)
         ## R1 (Invariant-3 soundness fix): the guard `stmt.wcond` may itself
         ## deposit scalar-raise-fork predicates (e.g. `s[i]` OOB, `x div 0`)
         ## into the sinks `lowerBoolInExpr` reset at entry. Undrained, those
@@ -20742,7 +20751,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         ## both the true (body) and false (exit) continuations. `cond` was
         ## built from `pb`'s (pre-drain) env, which the drain does not
         ## mutate, so it stays a valid Z3 AST against each drained survivor.
-        for dp in drainScalarRaiseForks(pb, w):
+        for dp in conds:
           # RFC-0005 S8k: each arm is walked only if it is not provably
           # infeasible on `dp` (`loopArmInfeasible`: a literal guard is
           # decided without the solver, an undecided one is walked). Before
@@ -20780,8 +20789,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if active.len > 0 and not w.shouldStop:
       var undecided: seq[Path]
       for p in active:
-        let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
-        for dp in drainScalarRaiseForks(pb, w):
+        let (cond, conds) = evalCondSynced(p, stmt.wcond, w)
+        for dp in conds:
           if loopArmInfeasible(w.z3, dp, cond, w.settings):
             survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
           elif not pathInfeasible(w.z3, dp, w.settings):
@@ -20932,10 +20941,20 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## `x div 0`). Undrained, those were silently discarded — no
       ## raise fork, no bounds narrowing. Drain and thread the
       ## survivor(s) forward, mirroring `isLet`/`isAssign`.
+      var bound: seq[Path]
       for cp in drainScalarRaiseForks(pr, w):
         var newEnv = cp.env
         newEnv["result"] = retVal
-        exitReturn(forkPath(cp, cp.pc, newEnv), w)
+        bound.add forkPath(cp, cp.pc, newEnv)
+      # RFC-0016 review R5-2: the path parks before this statement's own
+      # pass, and a `finally` or a `var` write-back reads the frame after
+      # it, so the value's effects are reconciled here, as the assignment of
+      # `result` they end with (`reconcileCells`).
+      if w.leafSyncDepth > 0:
+        bound = reconcileCells(IRStmt(kind: isAssign, aname: "result",
+                                      avalue: stmt.retExpr),
+                               bound, w.leafSyncDepth, w)
+      for bp in bound: exitReturn(bp, w)
     @[]
   of isCall:
     walkCallArm(stmt, paths, w)
@@ -21544,60 +21563,8 @@ proc linkCapAddrCells(paths: seq[Path]; w: WalkCtx): seq[Path] =
           changed = true
     result.add(if changed: forkPath(p, p.pc, env2) else: p)
 
-func reconciledHere(stmt: IRStmt; joinedExit: bool): bool =
-  ## RFC-0016 review R4-1. Whether `stmt`'s post-statement pass reconciles
-  ## one of its survivors. The invariant: every path is reconciled exactly
-  ## once for the effects it carries, at the statement whose snapshot
-  ## brackets them, and a parked exit is reconciled where it rejoins.
-  ##
-  ## * A block has no effect of its own (R2-2): a fall-through survivor left
-  ##   its last statement synced, and each statement before that synced too.
-  ##   A second pass over the whole body, against a snapshot from before it,
-  ##   reads the two sides' terms (equal in value, not always in term) as a
-  ##   write by name and a write through the cell: a callee that removes an
-  ##   `mpairs` view's key in a labelled block declined (`r5a_exitsync`).
-  ## * A survivor `joinedExit` rejoined a labelled block (a source `block L:`,
-  ##   or a loop body a `continue` leaves) from its `breakPaths` (`walkStmt`).
-  ##   It was parked from inside a statement of the block, before that
-  ##   statement's own pass saw it, so a condition's effect on it was synced
-  ##   by nothing (R3-1): the block's pass, against the block's snapshot, is
-  ##   its one reconcile.
-  ## * Every other statement reconciles every survivor: an `isIf` (a `case`
-  ##   is one), `isWhile` or `isTry` carries its conditions' effects.
-  ##
-  ## Both reconcile loops read this, per survivor: `syncAddrCells` (address
-  ## cells, `slot` views) and `walkCapSynced`'s capture loop; each was
-  ## checked. `syncElemCells` takes no snapshot for a compound statement
-  ## (S8be), so it has neither pass to skip.
-  ##
-  ## The other exit channels, each reconciled once:
-  ## * a `break` out of a loop (`isWhile`'s `breakPaths`) and a `continue`
-  ##   into the next iteration (`continuePaths`) rejoin inside the `isWhile`,
-  ##   whose pass reconciles all its survivors, as it does the body's
-  ##   fall-through;
-  ## * a `return` (`returnedPaths`) leaves the frame whose cells these keep;
-  ##   it rejoins as a survivor of the caller's call statement, which
-  ##   reconciles the caller's cells (and a `var` formal's write-back is the
-  ##   call's own);
-  ## * a raise is reconciled where it resumes in the frame, the cell winning
-  ##   (`syncCapCellsFromCells`, `syncAddrCellsFromHeap`,
-  ##   `syncElemCellsFromHeap`), and the handler's survivors are the `isTry`'s;
-  ## * a jump or a `return` leaving a `finally` (or a `defer`, lowered to
-  ##   one) is held (`pendingJump`, `pendingReturn`) until the `isTry` walks
-  ##   the finally, then parked on one of the channels above.
-  stmt.kind != isBlock or joinedExit
-
-proc joinedExitMask(stmt: IRStmt; n: int; w: WalkCtx): seq[bool] =
-  ## RFC-0016 review R4-1. Per survivor of `stmt`, whether it rejoined a
-  ## labelled block from a parked exit (`reconciledHere`): the last
-  ## `blockJoinedExits` of a labelled block's survivors.
-  result = newSeq[bool](n)
-  if stmt.kind == isBlock and stmt.blkLabel.len > 0:
-    doAssert w.blockJoinedExits <= n
-    for i in n - w.blockJoinedExits ..< n: result[i] = true
-
 proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
-                   joined: seq[bool]; w: var WalkCtx): seq[Path] =
+                   w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. After `stmt`, each address-taken variable of the
   ## current frame (`CallFrameCtx.addrCells`) and the heap at its cell are
   ## made equal again. The side that changed since the statement began wins
@@ -21612,6 +21579,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## at the key for the heap at the cell; a table write that may have removed
   ## the key leaves the view on a slot Nim's `del` refills from another
   ## entry, and declines too.
+  doAssert stmt.kind notin compoundStmtKinds   # `reconcileCells`
   let ctx = w.z3
   # RFC-0005 S8bu: a local with two entries (an `addr` actual's local,
   # `addrPartName`: a part of a variable's cell, and the call's cell) takes
@@ -21639,11 +21607,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         env2.del(viewFreedPrefix & c.local)
         if q == nil: q = forkPath(p, p.pc, p.env)
         freed.add displayName(c.local)
-    # A block's statements synced one by one; its own pass reconciles only a
-    # parked exit that rejoined it (a callee that removes a view's key would
-    # read as having written the view and the Table in one statement:
-    # `s8cn_views`, `rc_live`, `r5a_exitsync`).
-    for pass in 0 ..< (if reconciledHere(stmt, joined[i]): passes else: 0):
+    for pass in 0 ..< passes:
       for c in w.frame.addrCells:
         if c.slot.len > 0:
           # RFC-0005 S8bx (item 3): the location is the Table's value at the
@@ -21669,8 +21633,8 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
             # seq other memory, and the formal still points at the old: not
             # modelled. Told by the statement, not by the term's shape (S8ca's
             # point, `viewInPlace`: `s = c` may be a store chain over `s`). Only
-            # an element store is in place. A compound statement's leaves were
-            # checked as they ran, and a call given both formals checks its own.
+            # an element store is in place. A call given both formals checks
+            # its own.
             let snapS = addrSnapName(depth, c.slot)
             let snapQ = if env2.hasKey(snapS): locGet(env2[snapS], c.path, @[])
                         else: none(SymVal)
@@ -21682,7 +21646,6 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                 elif irFieldPath(arg) == c.slot: hasS = true
               pairedCall = hasV and hasS
             if snapQ.isSome and not sameSymVal(tabV, snapQ.get) and
-               stmt.kind notin {isBlock, isIf, isWhile, isTry} and
                not pairedCall and c.slot notin writtenThrough and
                not (stmt.kind == isIndexAssign and stmt.iaRecvName == c.slot):
               if q == nil: q = forkPath(p, p.pc, p.env)
@@ -22070,13 +22033,11 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## call, whose callee kept the two equal itself (`inheritElemCells`). So
   ## is a seq a closure also captures (its env cell is a third copy).
   ##
-  ## A statement with statements inside (a block, `if`, `while`, `try`) is
-  ## not synced as a whole: each statement inside was, and the two sides it
-  ## leaves are equal in value though not in term.
+  ## Run only where effects are produced (`reconcileCells`).
+  doAssert stmt.kind notin compoundStmtKinds
   let ctx = w.z3
-  let compound = stmt.kind in {isBlock, isIf, isWhile, isTry}
   for p in outs:
-    let ks = if compound: @[] else: frameElemCells(p, w.frame.frameId)
+    let ks = frameElemCells(p, w.frame.frameId)
     if ks.len == 0:
       var env0 = p.env
       if dropSnapshots(env0, elemSnapPrefix, depth):
@@ -22236,48 +22197,23 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
   q.env = env2
   drainPendingLowerEffects(q)
 
-proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
-  ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
-  ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
-  ##
-  ## Nim keeps a variable a closure captures by reference in a heap env the
-  ## closure shares with its frame: a write through either is seen by the
-  ## other, wherever the closure is applied. The walk keeps the local as
-  ## the frame's own binding and the cell (`capCellName`, a `__gl:` name, so
-  ## every call threads it as it threads a global) as the one the closure
-  ## reads and writes away from the frame. After each statement the side
-  ## that changed since it began wins: a write to the local is copied to
-  ## the cell; a write to the cell (a call applied the closure) is copied
-  ## to the local. Declined (`ceCaptureByRefUnmodelled`), the local's value
-  ## winning:
-  ##
-  ## * both written, to different values: two writes the walk cannot order;
-  ## * the cell written by anything but a call statement (an expression's
-  ##   closure call applied the closure away from here): the statement may
-  ##   have read the local before the write;
-  ## * a call statement passing a capture by address (`var`, `addr`): Nim's
-  ##   parameter IS the cell, which the callee's copy is not.
-  ##
-  ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
-  ##
-  ## Likewise each address-taken variable and its heap cell
-  ## (`syncAddrCells`), and each element cell and its element
-  ## (`syncElemCells`, RFC-0005 S8be).
-  if stmt == nil or paths.len == 0:
-    return walkStmt(stmt, paths, w)
-  var elems = false
+proc frameHasCells(paths: seq[Path]; w: WalkCtx): bool =
+  ## RFC-0005 S8ax. Whether the current frame keeps anything
+  ## `reconcileCells` reconciles: a by-reference capture, an address-taken
+  ## variable, or a live element cell on one of `paths`.
+  if w.frame.capCells.len > 0 or w.frame.addrCells.len > 0: return true
   for p in paths:
     for e in p.elemCells:
-      if e.frame == w.frame.frameId and not e.dead: elems = true
-  if w.frame.capCells.len == 0 and w.frame.addrCells.len == 0 and
-     not elems:
-    return walkStmt(stmt, paths, w)
-  inc w.capSyncDepth
-  let depth = w.capSyncDepth
-  var ins: seq[Path]
+      if e.frame == w.frame.frameId and not e.dead: return true
+  false
+
+proc snapCells(paths: seq[Path]; depth: int; w: WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. `paths` with each of the frame's captures, address-taken
+  ## variables (and a `slot` view's Table) and element cells recorded as an
+  ## evaluation at `depth` begins, for `reconcileCells` to tell which side
+  ## it wrote.
   for p0 in paths:
-    let p = if stmt.kind in {isBlock, isIf, isWhile, isTry}: p0
-            else: snapElemCells(p0, depth, w)   # RFC-0005 S8be
+    let p = snapElemCells(p0, depth, w)   # RFC-0005 S8be
     var env2 = p.env
     var changed = false
     for (local, cell) in w.frame.capCells:
@@ -22292,30 +22228,65 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         env2[addrSnapName(depth, c.local)] = env2[c.local]   # RFC-0005 S8bx
         env2[addrSnapName(depth, c.slot)] = env2[c.slot]
         changed = true
-    ins.add(if changed: forkPath(p, p.pc, env2) else: p)
-  w.blockJoinedExits = 0
-  let outs0 = walkStmt(stmt, ins, w)
-  dec w.capSyncDepth
+    result.add(if changed: forkPath(p, p.pc, env2) else: p)
+
+proc reconcileCells(stmt: IRStmt; outs0: seq[Path]; depth: int;
+                    w: var WalkCtx): seq[Path] =
+  ## RFC-0016 review R5-1/R5-2. Make each of the frame's two-sided
+  ## locations equal again after an evaluation that began at `depth`
+  ## (`snapCells`): element cells (`syncElemCells`), by-reference captures
+  ## (the loop below), address-taken variables and `slot` views
+  ## (`syncAddrCells`). The side that changed since the snapshot wins; both
+  ## changed is a clash, declined.
+  ##
+  ## The invariant: every effect is reconciled exactly once, where it is
+  ## produced, against a snapshot taken just before it. A compound
+  ## statement (`compoundStmtKinds`: a block, labelled or not, an `if` --
+  ## a `case` is one --, a `while`, a `try`) produces no effect of its own
+  ## beyond the expressions it evaluates itself, so it is never reconciled
+  ## over its span. A pass over its span compared its children's synced
+  ## effects -- the two sides equal in value, not always in term -- against
+  ## a snapshot from before them and declined two writes that never clashed
+  ## (D1-F2, R2-2, R3-1, R4-1, R5-1/R5-2: a view and its Table written in a
+  ## loop body, under an `if`, or before a `break`). The reconcile points,
+  ## complete because they are every place the walker evaluates source code
+  ## in a frame:
+  ##
+  ## * every leaf statement (`walkCapSynced`): every `IRStmtKind` outside
+  ##   `compoundStmtKinds`, `isCall` included (a callee's effects reach the
+  ##   caller's cells only through its statement);
+  ## * every guard a compound evaluates itself (`evalCondSynced`): each
+  ##   `if`/`elif` condition, a short-circuit chain's joined guard
+  ##   (`ifJoin`), each `while` guard test, the final one after the last
+  ##   unrolled body included, in both walk modes. A `case` discriminator is
+  ##   bound to a `let` by the parser, a leaf, and its `of` tests are `if`
+  ##   conditions. A `try` evaluates nothing itself: an `except` match reads
+  ##   the in-flight exception's type only;
+  ## * a `return`'s value (`isReturn`, at `leafSyncDepth`): the path parks
+  ##   before its statement's own pass, and a `finally` or the caller's
+  ##   `var` write-back reads the frame after it.
+  ##
+  ## A parked exit (`break`, `continue`, a `return` or a jump held for a
+  ## `finally`) needs nothing more where it rejoins: it was reconciled at
+  ## each leaf and guard it passed. A raise resumes with the cell winning
+  ## (`syncCapCellsFromCells`, `syncAddrCellsFromHeap`,
+  ## `syncElemCellsFromHeap`). The k-unroll summarises no iteration: every
+  ## body it runs is walked statement by statement, and an exhausted path
+  ## leaves tainted. A closure applied in an expression runs its body's
+  ## statements through `walk`, so its own leaves reconcile them.
+  doAssert stmt.kind notin compoundStmtKinds
   let outs = syncElemCells(stmt, outs0, depth, w)   # RFC-0005 S8be
-  # RFC-0016 review R4-1: which survivors are parked exits that rejoined a
-  # labelled block. `syncElemCells` keeps a compound statement's survivors
-  # one for one, in order, and so does the capture loop below, so the mask
-  # stays aligned through to `syncAddrCells`.
-  doAssert outs.len == outs0.len or stmt.kind != isBlock
-  let joined = joinedExitMask(stmt, outs.len, w)
   if w.frame.capCells.len == 0:
-    return syncAddrCells(stmt, outs, depth, joined, w)
+    return syncAddrCells(stmt, outs, depth, w)
   var byAddr: seq[string]
   if stmt.kind == isCall:
     for (local, _) in w.frame.capCells:
       if local in stmt.cGuardRoots: byAddr.add displayName(local)
-  for i, p in outs:
-    let toReconcile = if reconciledHere(stmt, joined[i]): w.frame.capCells
-                      else: @[]
+  for p in outs:
     var env2 = p.env
     var touched = false
     var clash = byAddr
-    for (local, cell) in toReconcile:
+    for (local, cell) in w.frame.capCells:
       let snap = capSnapName(depth, cell)
       if not env2.hasKey(local) or not env2.hasKey(cell): continue
       if not env2.hasKey(snap):
@@ -22358,10 +22329,88 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "closure may run; the order of the two is not modelled " &
              "(ceCaptureByRefUnmodelled)"))
     result.add q
+  # The capture pass keeps its survivors one for one.
+  doAssert result.len == outs.len
   if w.frame.addrCells.len > 0:
-    doAssert result.len == joined.len
-    result = syncAddrCells(stmt, result, depth, joined, w)   # RFC-0005 S8ax
+    result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
     result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
+
+proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
+  ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
+  ##
+  ## Nim keeps a variable a closure captures by reference in a heap env the
+  ## closure shares with its frame: a write through either is seen by the
+  ## other, wherever the closure is applied. The walk keeps the local as
+  ## the frame's own binding and the cell (`capCellName`, a `__gl:` name, so
+  ## every call threads it as it threads a global) as the one the closure
+  ## reads and writes away from the frame. After each statement the side
+  ## that changed since it began wins: a write to the local is copied to
+  ## the cell; a write to the cell (a call applied the closure) is copied
+  ## to the local. Declined (`ceCaptureByRefUnmodelled`), the local's value
+  ## winning:
+  ##
+  ## * both written, to different values: two writes the walk cannot order;
+  ## * the cell written by anything but a call statement (an expression's
+  ##   closure call applied the closure away from here): the statement may
+  ##   have read the local before the write;
+  ## * a call statement passing a capture by address (`var`, `addr`): Nim's
+  ##   parameter IS the cell, which the callee's copy is not.
+  ##
+  ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
+  ##
+  ## Likewise each address-taken variable and its heap cell
+  ## (`syncAddrCells`), and each element cell and its element
+  ## (`syncElemCells`, RFC-0005 S8be). Only a leaf statement is bracketed:
+  ## a compound one is walked bare, its leaves and guards reconciling
+  ## themselves (`reconcileCells`). It still takes a depth, so a path that
+  ## leaves it early (a `break`) carrying an inner leaf's snapshots rejoins
+  ## where every snapshot is shallower, and the next one drops them
+  ## (`dropSnapshots`) rather than reading them as its own.
+  let outer = w.leafSyncDepth
+  if stmt == nil or paths.len == 0 or not frameHasCells(paths, w):
+    w.leafSyncDepth = 0
+    result = walkStmt(stmt, paths, w)
+    w.leafSyncDepth = outer
+    return
+  if stmt.kind in compoundStmtKinds:
+    inc w.capSyncDepth
+    w.leafSyncDepth = 0
+    result = walkStmt(stmt, paths, w)
+    w.leafSyncDepth = outer
+    dec w.capSyncDepth
+    return
+  inc w.capSyncDepth
+  let depth = w.capSyncDepth
+  let ins = snapCells(paths, depth, w)
+  w.leafSyncDepth = depth
+  let outs0 = walkStmt(stmt, ins, w)
+  w.leafSyncDepth = outer
+  dec w.capSyncDepth
+  reconcileCells(stmt, outs0, depth, w)
+
+proc evalCondSynced(p: Path; cond: IRExpr;
+                    w: var WalkCtx): (Z3Bool, seq[Path]) =
+  ## RFC-0016 review R5-2. A guard a compound statement evaluates itself
+  ## (an `if` condition, a `while` guard test): `lowerBoolInExpr`, its
+  ## scalar raises drained (`drainScalarRaiseForks`), and the continuations
+  ## reconciled as a leaf `let` of the guard would be (`reconcileCells`),
+  ## against a snapshot from just before the evaluation. A closure the
+  ## guard applies may write a capture or, through a pointer, an
+  ## address-taken variable; the arms, a `break` out of them, and the next
+  ## guard read the frame after it. The guard's value is the term lowered
+  ## before the reconcile, which renames no term it reads.
+  if not frameHasCells(@[p], w):
+    let (b, p2) = lowerBoolInExpr(p, cond, w)
+    return (b, drainScalarRaiseForks(p2, w))
+  inc w.capSyncDepth
+  let depth = w.capSyncDepth
+  let ins = snapCells(@[p], depth, w)
+  let (b, p2) = lowerBoolInExpr(ins[0], cond, w)
+  let cont = drainScalarRaiseForks(p2, w)
+  dec w.capSyncDepth
+  let asLeaf = IRStmt(kind: isLet, lname: "", lvalue: cond)
+  (b, reconcileCells(asLeaf, cont, depth, w))
 
 template forEachExitGroup(w, g, body: untyped) =
   ## RFC-0005 review R5. Run `body` with `g` naming each exit group a walk

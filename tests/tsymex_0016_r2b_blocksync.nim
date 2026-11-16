@@ -7,10 +7,11 @@
 ## closure in another, inside a called routine: the verdict must be the
 ## native one, with no clash decline.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -210,32 +211,47 @@ suite "R2-2: more shapes":
     verdict(sutCapVar, "ok", sxSat)
     verdict(sutCapVar, "bad", sxUnsat)
 
-# No program was found whose block-level pass declines spuriously: the inner
-# statements' syncs leave local and cell equal, so the passes were no-ops by
-# accident. The rule is pinned structurally: one named predicate, read by
-# every reconcile loop of both sync procs, and no per-entry `isBlock` skips.
-const runtimeSrc = staticRead("../src/nelli/smt/runtime.nim")
+# The rule is pinned behaviourally above and in `tsymex_0016_r5a_exitsync`
+# (R4-1, R5-1, R5-2), and structurally here over the walker's code with its
+# comments and strings removed (`codeOf`): one reconcile, which no compound
+# statement reaches, and every guard a compound evaluates itself goes through
+# `evalCondSynced`.
+let runtimeCode = codeOf(readFile(smtSrcDir / "runtime.nim"))
 
 proc procBody(name: string): string =
-  let a = runtimeSrc.find("\nproc " & name & "(")
+  ## The definition: the last `proc name(`, after any forward declaration.
+  let a = runtimeCode.rfind("\nproc " & name & "(")
   doAssert a >= 0, name
-  let b = runtimeSrc.find("\nproc ", a + 1)
-  runtimeSrc[a ..< b]
+  let b = runtimeCode.find("\nproc ", a + 1)
+  doAssert b > a, name
+  runtimeCode[a ..< b]
 
-suite "R2-2: the rule is one named predicate":
-  # RFC-0016 review R4-1 renamed it `reconciledHere`, read per survivor.
-  test "syncAddrCells and walkCapSynced read reconciledHere":
-    check runtimeSrc.count("\nfunc reconciledHere(") == 1
-    check procBody("syncAddrCells").contains("reconciledHere(stmt, joined[i])")
-    check procBody("walkCapSynced").contains("reconciledHere(stmt, joined[i])")
-  test "no per-entry isBlock skip is left in syncAddrCells":
-    check not procBody("syncAddrCells").contains("stmt.kind == isBlock")
+suite "R5-2: reconciled only where effects are produced":
+  test "no compound statement reaches the reconcile":
+    check runtimeCode.count("const compoundStmtKinds = {isBlock, isIf, isWhile, isTry}") == 1
+    for p in ["reconcileCells", "syncAddrCells", "syncElemCells"]:
+      check procBody(p).contains("doAssert stmt.kind notin compoundStmtKinds")
+    check procBody("walkCapSynced").contains("if stmt.kind in compoundStmtKinds:")
+  test "the per-span machinery is gone":
+    for id in ["reconciledHere", "joinedExitMask", "blockJoinedExits"]:
+      check id notin runtimeCode
+  test "every guard a compound evaluates is reconciled where it runs":
+    for p in ["walkIfFollowConcrete", "walkWhileFollowConcrete"]:
+      check procBody(p).contains("evalCondSynced(")
+      check not procBody(p).contains("lowerBoolInExpr(")
+    # `walkStmt`: the `ifJoin` guard, each `if` condition, and the `while`
+    # guard's per-iteration and final tests. Its two other boolean lowerings
+    # are the leaves `isAssert` and `isAssume`.
+    check procBody("walkStmt").count("evalCondSynced(") == 4
+    check procBody("walkStmt").count("lowerBoolInExpr(") == 2
+  test "a `return` reconciles its value before it parks":
+    check procBody("walkStmt").contains("reconcileCells(IRStmt(kind: isAssign, aname:")
 
-# RFC-0016 review R3-1. A LABELLED block is not synced by its parts: a path
-# that took `break L` from inside an `if` is parked before any enclosing
-# statement's post-sync sees it, and the block's own pass is the one reconcile
-# that reaches it. The condition's call writes a captured or address-taken
-# variable; the verdict after the block must read that write.
+# RFC-0016 review R3-1. A path that took `break L` from inside an `if` is
+# parked before any enclosing statement's post-sync sees it. The condition's
+# call writes a captured or address-taken variable; the verdict after the
+# block must read that write. Since R5-2 the condition is reconciled where it
+# is evaluated (a hoisted call is a leaf; a guard is `evalCondSynced`).
 proc r3Cap(v: int): int =
   var cnt = v
   proc cntr(): int =
@@ -388,13 +404,6 @@ suite "R3-1: a labelled block reconciles its break paths":
     verdict(sutR3ContSc, "ok", sxSat)
     verdict(sutR3ContSc, "bad", sxUnsat)
 
-suite "R3-1: the predicate keeps a labelled block's exits":
-  # RFC-0016 review R4-1: only the survivors that rejoined the block from a
-  # parked exit; the verdicts are pinned in `tsymex_0016_r5a_exitsync`.
-  test "reconciledHere keeps a block's joined exits":
-    let a = runtimeSrc.find("\nfunc reconciledHere(")
-    doAssert a >= 0
-    let b = runtimeSrc.find("\nproc ", a + 1)
-    check runtimeSrc[a ..< b].contains("stmt.kind != isBlock or joinedExit")
-  test "walker version floor (R3-1)":
-    check symexWalkerVersion.parseInt >= 364
+suite "R3-1: walker version":
+  test "walker version floor (R5-2)":
+    check symexWalkerVersion.parseInt >= 366

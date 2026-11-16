@@ -1240,7 +1240,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 review R2-1 (lambda alias bodies are stamped): 362->363.
     ## RFC-0016 review R3-1 (a labelled block is reconciled again): 363->364.
     ## RFC-0016 review R4-1 (a labelled block reconciles its exits only): 364->365.
-    check symexWalkerVersion == "365"
+    ## RFC-0016 review R5-1/R5-2 (reconciled only where effects are
+    ## produced: leaves, a compound's own guards, a `return`'s value): 365->366.
+    check symexWalkerVersion == "366"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

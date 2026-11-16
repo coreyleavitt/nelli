@@ -1,20 +1,21 @@
-# runtime_floats.nim — Cluster F include fragment of runtime.nim
+# runtime_floats.nim -- Cluster F: the float helpers and the `lower()`
+# dispatch arm for `iekFloatLit`, `iekConvIntToFloat`, `iekConvFloatToInt`,
+# `iekMathCall` (Cluster F, Stage 7 / Stage 8, CR-7).
 #
-# THIS FILE IS NOT A STANDALONE MODULE. It is textually included into
-# runtime.nim via `include "runtime_floats.nim"` and CANNOT be compiled
-# independently. It inherits ALL imports, types, threadvars, helpers, and
-# forward-declared procs from runtime.nim's lexical scope; do NOT add
-# `import` statements here.
-#
-# Contents (CR-7-deeper Stage 8+):
-#   mkFloatLitSym, toBv64ForFp, lowerMathCall — Cluster F float helpers
-#   (moved from runtime.nim; only used by lowerFloatArm or each other).
-#   `lowerFloatArm(env, e)` — the `lower()` dispatch arm for
-#   `iekFloatLit`, `iekConvIntToFloat`, `iekConvFloatToInt`, `iekMathCall`
-#   (Cluster F, Stage 7 / Stage 8, CR-7).
-# Placement in runtime.nim: immediately after `include "runtime_strings.nim"`
-# and immediately before `lowerExnArm`, between `lower`'s forward-decl
-# and `lower`'s body.
+# A real module (RFC-0016 review D3c-4): it imports `./symval` and
+# `./walk_state` and names no `runtime.nim` symbol. `runtime.nim` imports it
+# before `lower`'s body and calls `lowerFloatArm` directly; the verbs it
+# needs that `runtime.nim` defines later (`lower`, `iteSV`) go through
+# `lowerHooks`.
+#   mkFloatLitSym, toBv64ForFp, lowerMathCall -- Cluster F float helpers
+#   (only used by lowerFloatArm or each other).
+import std/options
+import std/math
+import z3
+import ./types
+import ./symval
+import ./walk_state
+import ./definedness
 
 proc mkFloatLitSym(v: float64, width: int): SymVal =
   ## Phase 15 F2: lower a float literal to a Z3 FP numeral, honoring
@@ -128,7 +129,7 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
             else: f64(roundToIntegral(rmRTZ(), a.fp64)))
   of "min", "max":
     doAssert e.mathArgs.len == 2, "math." & op & " expects two args"
-    let b = lower(env, e.mathArgs[1])
+    let b = lowerHooks.lower(env, e.mathArgs[1], none(SymVal))
     doAssert b.kind == a.kind, "math." & op & ": float-width mismatch"
     if op == "min":
       return (if a.kind == svFloat32: f32(min(a.fp32, b.fp32))
@@ -169,7 +170,7 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
     # abs clears the sign bit (exact, no rounding); unary `-` flips it (exact).
     # Returns a float of x's width; sign comes entirely from y (2nd arg).
     doAssert e.mathArgs.len == 2, "math.copySign expects two args"
-    let b = lower(env, e.mathArgs[1])
+    let b = lowerHooks.lower(env, e.mathArgs[1], none(SymVal))
     doAssert b.kind == a.kind, "math.copySign: float-width mismatch"
     if a.kind == svFloat32:
       return f32(ite(isNegative(b.fp32), -abs(a.fp32), abs(a.fp32)))
@@ -179,7 +180,7 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
     raise (ref SymexUnsupportedOpError)(op: "math." & op,
       msg: "math." & op & " is not modeled by the symex engine")
 
-proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
+proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster F extraction. Called from `lower`'s case arm for
   ## `iekFloatLit`, `iekConvIntToFloat`, `iekConvFloatToInt`, `iekMathCall`.
   ## `proto` is NOT used by any float arm. `cmpFloat`/`arithFloat`/
@@ -204,7 +205,7 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     # modelled as `-9.2e18`; Nim gives `9.223372036854776e+18`, probed on
     # the pinned toolchain). Narrower unsigned operands are zero-extended by
     # `toBv64ForFp`, so the signed conversion of their pattern was exact.
-    let sv = lower(env, e.convOperand)
+    let sv = lowerHooks.lower(env, e.convOperand, none(SymVal))
     let bv64 = toBv64ForFp(sv)
     let unsigned64 = sv.kind == svBV64 and not sv.signed
     if e.convWidth == 32:
@@ -260,7 +261,7 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     # raise (`Natural(-5.0)`: "value out of range: -5 notin 0 .. ..."), so
     # its negation goes to the `rangeDefectConds` sink (acRange-gated, like
     # every range check).
-    let sv = lower(env, e.convOperand)
+    let sv = lowerHooks.lower(env, e.convOperand, none(SymVal))
     let w = e.convWidth
     let signed = e.convSigned
     let lowering = floatToIntLowering(
@@ -284,25 +285,24 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
           else: liftBV(toUbv[E, S, 64](rmRTZ(), fpv), false)
       if iw == w: viaBv else: truncBV(viaBv, w, signed)
     var domainCond: Z3Bool
-    var exact: SymVal
+    var exactV: SymVal
     case sv.kind
     of svFloat64:
       let loExact = not signed or iw <= 32
       let loOk = if loExact: sv.fp64 > mkFloat64(loF - 1.0)
                  else: sv.fp64 >= mkFloat64(loF)
       domainCond = loOk and (sv.fp64 < mkFloat64(hiExclF))
-      exact = convAt(sv.fp64, 11, 53)
+      exactV = convAt(sv.fp64, 11, 53)
     of svFloat32:
       let loExact = not signed or iw <= 16
       let loOk = if loExact: sv.fp32 > mkFloat32(float32(loF - 1.0))
                  else: sv.fp32 >= mkFloat32(float32(loF))
       domainCond = loOk and (sv.fp32 < mkFloat32(float32(hiExclF)))
-      exact = convAt(sv.fp32, 8, 24)
+      exactV = convAt(sv.fp32, 8, 24)
     else: raise newException(ValueError, "int(): operand is not a float")
     let fresh = bvVar(tInt(w, signed), freshDegradeName("__convFloatToIntFresh"))
-    let value = iteSV(domainCond, exact, fresh)
-    let bound = ConvBound(cond: domainCond, site: e.convSite,
-                         cls: lowering.cls)
+    let value = lowerHooks.iteSV(domainCond, exactV, fresh)
+    let bound = convBoundOf(domainCond, e.convSite, lowering.cls)
     convFloatToIntBoundConds.add bound               # threadvar fallback
     syncConvFloatToIntBoundCond(bound)               # CR-9 Stage 6 Group-1
     if e.convHasRange:
@@ -311,8 +311,8 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
       # subrange membership is the CONDITION of a RangeDefect fork (Nim checks
       # the cast value against the target subrange), not a constraint
       # asserted on the path, so `rangeCondsIfNeeded` does not apply.]
-      for c in bvRangeConds(value, e.convLo, e.convHi, signed):  # [range-invariant: range-defect-check]
-        inRange = inRange and c
+      for bc in bvRangeConds(value, e.convLo, e.convHi, signed):  # [range-invariant: range-defect-check]
+        inRange = inRange and bc
       rangeDefectConds.add(not inRange)              # threadvar fallback
       syncRangeDefectCond(not inRange)
     value

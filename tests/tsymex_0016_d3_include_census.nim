@@ -32,19 +32,17 @@ const
   smt = root / "src" / "nelli" / "smt"
 
   expectedIncludes = [
-    "runtime_strings.nim", "runtime_floats.nim", "runtime_closures.nim",
-    "runtime_heap.nim"]
+    "runtime_strings.nim", "runtime_closures.nim", "runtime_heap.nim"]
 
-  ## Includes that became real modules (D3c-3: exceptions).
-  movedToModules = ["runtime_exceptions.nim"]
+  ## Includes that became real modules (D3c-3: exceptions, D3c-4: floats).
+  movedToModules = ["runtime_exceptions.nim", "runtime_floats.nim"]
 
   ## Ratchet-down only: the measured count of distinct runtime-private
   ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1: 52/14/6/23/146; D3c-2, once the walk state left runtime.nim: as below).
   ceilings = {
-    "runtime_strings.nim": 22,
-    "runtime_floats.nim": 7,
+    "runtime_strings.nim": 21,
     "runtime_closures.nim": 9,
-    "runtime_heap.nim": 137}.toTable
+    "runtime_heap.nim": 136}.toTable
 
   fwdFirst = "proc allocRefSort*("
   fwdLast = "proc allocateSeqDataRaw("
@@ -57,7 +55,8 @@ const
   ## What slice D3c-1 moved out of `runtime.nim`.
   movedNames = [
     "SVKind", "SymVal", "Env", "plainEnglishSymValKind", "liftBV", "ofBool",
-    "bvVar", "bvRangeConds", "lowerDegrade", "StrBuf", "VariantAxisSym"]
+    "bvVar", "bvRangeConds", "lowerDegrade", "StrBuf", "VariantAxisSym",
+    "truncBV"]
 
 proc stripLine(line: string): string =
   ## Drops string literals and the `#` comment; keeps identifiers.
@@ -117,6 +116,19 @@ proc referenced(text: string, names: HashSet[string]): HashSet[string] =
 
 proc readSmt(f: string): string = readFile(smt / f)
 
+proc viaHooks(text: string): string =
+  ## A call through the hook table (`lowerHooks.lower(`) names a field of the
+  ## table, not the `runtime.nim` proc of the same name: drop the member name.
+  const tag = "lowerHooks."
+  var i = 0
+  while i < text.len:
+    if text.continuesWith(tag, i):
+      i += tag.len
+      while i < text.len and text[i] in IdentChars: inc i
+    else:
+      result.add text[i]
+      inc i
+
 suite "RFC-0016 D3: the include surface":
   let rt = readSmt("runtime.nim")
 
@@ -145,7 +157,7 @@ suite "RFC-0016 D3: the include surface":
       check rt.contains("\nimport ./" & m)
       let text = readSmt(f)
       check text.contains("\nimport ./symval")
-      let named = referenced(text, priv - definedNames(text))
+      let named = referenced(viaHooks(text), priv - definedNames(text))
       checkpoint $named
       check named.len == 0
 
@@ -233,7 +245,8 @@ const
     "regexPointSites", "regexLimitSites", "stripDecompConds",
     "stripSynthCounter", "DistinctSortEntry", "ConvBound", "ArithTrap",
     "ParseIntRaise", "ClosureSymKey", "ClosureBody", "RegexPointSite",
-    "RegexLimitSite", "RaiseSinkKind", "LowerSinks", "LowerHooks"]
+    "RegexLimitSite", "RaiseSinkKind", "LowerSinks", "LowerHooks", "degradeSymCounter",
+    "freshDegradeName", "convBoundOf"]
 
   syncProcs = [
     "syncRefSortEntry", "syncDistinctSortEntry", "syncClosureSymEntry",
@@ -278,7 +291,7 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     for l in ws.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 25
+    check tvs.len == 26
     for n in tvs:
       checkpoint n
       check resetBody.contains("\n  " & n & " = ")
@@ -320,10 +333,10 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     check setSinks == sets
     check clearSinks == clears
 
-  test "the lower hooks are declared and one include is live through them":
+  test "the lower hooks are declared and a module is live through them":
     let ws = readSmt("walk_state.nim")
     for h in ["lower", "lowerClosureCall", "seqElemAt", "storeSeqElem",
-              "sameSymVal", "entryValueOf"]:
+              "sameSymVal", "entryValueOf", "iteSV"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
     check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")

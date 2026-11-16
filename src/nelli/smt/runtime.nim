@@ -52,6 +52,7 @@ import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds
 import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
 import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
 import ./stdlib_rows   ## RFC-0016 K4c: the facet cells a decline names
+import ./runtime_floats   ## RFC-0016 review D3c-4: Cluster F, `lowerFloatArm`
 import ./runtime_exceptions   ## RFC-0016 review D3c-3: Cluster E, `lowerExnArm`
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
@@ -4171,43 +4172,6 @@ var currentBorrowReboxCounter* {.threadvar.}: int
   ## E8/G4's threadvar mechanism), so the per-occurrence const name is uniquified
   ## from this counter. Reset at `runSymexImpl` entry.
 
-var degradeSymCounter* {.threadvar.}: int
-  ## Round-6 re-review (item 3, walker v115; consolidated round-6 item 1).
-  ## Single per-run unique-name counter shared by EVERY fixed-name degrade
-  ## fresh-placeholder allocation site (`iteSV`'s merge/uninterp arms,
-  ## `eqBV`/`neBV`'s catch-alls, `cmpBV`, `svLeafEq`, `boolOrder`, `strArm`,
-  ## the seq-slice/set/contains/uNot/strCmpOrdering/lowerBool/refEqOrder/
-  ## strOrdering/seqLitUnsupported sites, ...). Z3 interns consts by
-  ## `(name, sort)`; a fixed name would let two DIFFERENT degrade occurrences
-  ## in the same run (same site, hit twice on two sibling paths, or two
-  ## unrelated sites that happen to share a base name) silently alias the
-  ## same Z3 symbol -- unsound cross-linking between two logically distinct
-  ## placeholders. One shared int is sufficient (rather than one threadvar
-  ## per site) because every call site routes through `freshDegradeName`,
-  ## which embeds the site's own tag in the returned name -- the counter only
-  ## needs to be monotonically unique WITHIN a run, not per-tag. Mirrors
-  ## `currentBorrowReboxCounter`/`currentExnRefCounter`. Reset at
-  ## `runSymexImpl` entry.
-  ##
-  ## NOT cache-key-relevant: `symexCacheKey` (canonicalize.nim) hashes only
-  ## `canonicalize(prog)`/`canonicalize(target)`/`canonicalize(settings)` --
-  ## the pre-walk IR/target/settings -- plus explicit z3/nim/walker/rendering
-  ## version strings. These names are allocated inside the WALK (`lower`,
-  ## reached only once Z3 solving is already underway) and never flow back
-  ## into any of those four canonicalized values, so uniquifying them (or
-  ## reordering the counter across all sites, as this consolidation does)
-  ## cannot change any cache key. No walker-version bump.
-
-proc freshDegradeName(tag: string): string =
-  ## Per-run-unique Z3 const name for a fixed-name degrade site: `tag` is the
-  ## site's own base name (e.g. `"__cmpBVDegrade"`), and the returned name
-  ## appends `"#" & <counter>` so repeat hits of the SAME site (or of two
-  ## different sites in the same run) never collide on `(name, sort)`. See
-  ## `degradeSymCounter`'s doc for the collision rationale and the proof that
-  ## this is display/solver-internal only (not cache-key-relevant).
-  inc degradeSymCounter
-  tag & "#" & $degradeSymCounter
-
 proc degradeAlloc(ty: IRType, kind: SymexErrorKind, msg: string,
                    tag: string): SymVal =
   ## Fix-slice item 9 (round-6 re-review): pairs `allocDegrade` (the taint
@@ -4628,9 +4592,6 @@ proc stampedIntToBV(sv: SymVal): SymVal =
   result = svIntToBV(sv, k)
   result.signed = sv.ziSigned
 
-proc truncBV(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal
-  ## RFC-0005 S8be fwd decl (`lowerConvIntWidth`); defined below.
-
 proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## Round-6 B2: WIDENING-only int-family width conversion. Every fixed-width
   ## Nim int (including plain `int`/`uint`, width 64) allocates as an svBV*
@@ -4760,26 +4721,6 @@ proc lowerConvIntReinterpret(operandSV: SymVal, cirWidth: int,
 proc intBounds(width: int): (int64, int64)
   ## RFC-0005 S8i fwd-decl (`lowerConvIntRange`); defined beside
   ## `overflowCondInt`.
-
-proc truncBV(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
-  ## RFC-0005 S8i. The low `tgtWidth` bits of a wider BV (C's truncating
-  ## integer conversion). `lowerConvIntRange` reaches it only for a value
-  ## its range check has confined to the target, where the low bits ARE the
-  ## value. `extract`'s bounds are static, so each pair has its own arm.
-  case v.kind
-  of svBV64:
-    case tgtWidth
-    of 8:  SymVal(kind: svBV8,  signed: tgtSigned, bv8:  extract(v.bv64, 7, 0))
-    of 16: SymVal(kind: svBV16, signed: tgtSigned, bv16: extract(v.bv64, 15, 0))
-    else:  SymVal(kind: svBV32, signed: tgtSigned, bv32: extract(v.bv64, 31, 0))
-  of svBV32:
-    case tgtWidth
-    of 8:  SymVal(kind: svBV8,  signed: tgtSigned, bv8:  extract(v.bv32, 7, 0))
-    else:  SymVal(kind: svBV16, signed: tgtSigned, bv16: extract(v.bv32, 15, 0))
-  of svBV16:
-    SymVal(kind: svBV8, signed: tgtSigned, bv8: extract(v.bv16, 7, 0))
-  else:
-    raiseAssert "truncBV: unsupported operand kind: " & $v.kind
 
 proc cellOf(v: SymVal; ty: IRType): Option[Z3BitVec[64]] =
   ## RFC-0005 S8z. A `Table` value / `HashSet` element of the fixed-width
@@ -8797,8 +8738,6 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     # here. (`iekStrUnsupported`, the genuine "not modeled" catch-all whose
     # callers are NOT uniformly string-shaped, has its own arm above.)
     allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
-
-include "runtime_floats.nim"  # Stage 8 CR-7 Cluster F: lowerFloatArm
 
 include "runtime_closures.nim"  # Stage 8 CR-7 Cluster C: lowerClosureArm
 
@@ -29341,7 +29280,6 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
   currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
-  degradeSymCounter = 0                  ## Round-6 item 3 (consolidated item 1): reset shared degrade-name counter
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
   intHeapIsInt = false   ## RFC-0005 S8as: set by runSymexImpl before any param is allocated
   intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()  ## RFC-0005 S8ax
@@ -32150,4 +32088,4 @@ proc c2aClosureProbeRelowered*(): C2aClosureProbe =
 lowerHooks = LowerHooks(
   lower: lower, lowerClosureCall: lowerClosureCall, seqElemAt: seqElemAt,
   storeSeqElem: storeSeqElem, sameSymVal: sameSymVal,
-  entryValueOf: entryValueOf)
+  entryValueOf: entryValueOf, iteSV: iteSV)

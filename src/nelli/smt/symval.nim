@@ -627,3 +627,23 @@ proc resetLoweringSink*() =
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
   loweringPendingUb = {}
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
+
+proc truncBV*(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
+  ## RFC-0005 S8i. The low `tgtWidth` bits of a wider BV (C's truncating
+  ## integer conversion). `lowerConvIntRange` reaches it only for a value
+  ## its range check has confined to the target, where the low bits ARE the
+  ## value. `extract`'s bounds are static, so each pair has its own arm.
+  case v.kind
+  of svBV64:
+    case tgtWidth
+    of 8:  SymVal(kind: svBV8,  signed: tgtSigned, bv8:  extract(v.bv64, 7, 0))
+    of 16: SymVal(kind: svBV16, signed: tgtSigned, bv16: extract(v.bv64, 15, 0))
+    else:  SymVal(kind: svBV32, signed: tgtSigned, bv32: extract(v.bv64, 31, 0))
+  of svBV32:
+    case tgtWidth
+    of 8:  SymVal(kind: svBV8,  signed: tgtSigned, bv8:  extract(v.bv32, 7, 0))
+    else:  SymVal(kind: svBV16, signed: tgtSigned, bv16: extract(v.bv32, 15, 0))
+  of svBV16:
+    SymVal(kind: svBV8, signed: tgtSigned, bv8: extract(v.bv16, 7, 0))
+  else:
+    raiseAssert "truncBV: unsupported operand kind: " & $v.kind

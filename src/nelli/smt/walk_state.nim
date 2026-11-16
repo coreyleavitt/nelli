@@ -60,6 +60,9 @@ type ConvBound* = object
   site*: string
   cls*: OperandClass   ## the `convert/` row (`floatToIntLowering`)
 
+proc convBoundOf*(domain: Z3Bool, site: string, cls: OperandClass): ConvBound =
+  ConvBound(cond: domain, site: site, cls: cls)
+
 type ArithTrap* = object
   ## RFC-0016 W1-d1a. One `arithTrapConds` deposit: the trap predicate, and
   ## whether the C division is UNDEFINED there rather than a definite
@@ -556,6 +559,43 @@ proc syncArithTrapCond*(cond: ArithTrap) =
 
 # ---- the upward verbs -----------------------------------------------------
 
+var degradeSymCounter*  {.threadvar.}: int
+  ## Round-6 re-review (item 3, walker v115; consolidated round-6 item 1).
+  ## Single per-run unique-name counter shared by EVERY fixed-name degrade
+  ## fresh-placeholder allocation site (`iteSV`'s merge/uninterp arms,
+  ## `eqBV`/`neBV`'s catch-alls, `cmpBV`, `svLeafEq`, `boolOrder`, `strArm`,
+  ## the seq-slice/set/contains/uNot/strCmpOrdering/lowerBool/refEqOrder/
+  ## strOrdering/seqLitUnsupported sites, ...). Z3 interns consts by
+  ## `(name, sort)`; a fixed name would let two DIFFERENT degrade occurrences
+  ## in the same run (same site, hit twice on two sibling paths, or two
+  ## unrelated sites that happen to share a base name) silently alias the
+  ## same Z3 symbol -- unsound cross-linking between two logically distinct
+  ## placeholders. One shared int is sufficient (rather than one threadvar
+  ## per site) because every call site routes through `freshDegradeName`,
+  ## which embeds the site's own tag in the returned name -- the counter only
+  ## needs to be monotonically unique WITHIN a run, not per-tag. Mirrors
+  ## `currentBorrowReboxCounter`/`currentExnRefCounter`. Reset at
+  ## `runSymexImpl` entry.
+  ##
+  ## NOT cache-key-relevant: `symexCacheKey` (canonicalize.nim) hashes only
+  ## `canonicalize(prog)`/`canonicalize(target)`/`canonicalize(settings)` --
+  ## the pre-walk IR/target/settings -- plus explicit z3/nim/walker/rendering
+  ## version strings. These names are allocated inside the WALK (`lower`,
+  ## reached only once Z3 solving is already underway) and never flow back
+  ## into any of those four canonicalized values, so uniquifying them (or
+  ## reordering the counter across all sites, as this consolidation does)
+  ## cannot change any cache key. No walker-version bump.
+
+proc freshDegradeName*(tag: string): string =
+  ## Per-run-unique Z3 const name for a fixed-name degrade site: `tag` is the
+  ## site's own base name (e.g. `"__cmpBVDegrade"`), and the returned name
+  ## appends `"#" & <counter>` so repeat hits of the SAME site (or of two
+  ## different sites in the same run) never collide on `(name, sort)`. See
+  ## `degradeSymCounter`'s doc for the collision rationale and the proof that
+  ## this is display/solver-internal only (not cache-key-relevant).
+  inc degradeSymCounter
+  tag & "#" & $degradeSymCounter
+
 type LowerHooks* = object
   ## The verbs an include calls that `runtime.nim` defines after it. Each is a
   ## `{.nimcall.}` proc (no closure environment), filled once by `runtime.nim`
@@ -571,6 +611,10 @@ type LowerHooks* = object
                       val: SymVal): Z3AnyAst {.nimcall.}
   sameSymVal*: proc(a, b: SymVal): bool {.nimcall.}
   entryValueOf*: proc(name: string): SymVal {.nimcall.}
+  iteSV*: proc(cond: Z3Bool, t, e: SymVal): SymVal {.nimcall.}
+    ## The merge of two SymVals under a condition. Heavy (it reaches
+    ## `allocateSym` and the degrade chokepoints), so it stays in
+    ## `runtime.nim` and the float conversion calls it through here.
 
 var lowerHooks*: LowerHooks
   ## Written once at `runtime.nim` module init; read-only afterwards.
@@ -578,6 +622,7 @@ var lowerHooks*: LowerHooks
 # ---- the per-run reset ----------------------------------------------------
 
 proc resetWalkState*(maxSplitParts: int) =
+  degradeSymCounter = 0                  ## the shared degrade-name counter
   ## RFC-0016 review D3c-2. The per-run reset of every threadvar of this
   ## module, called by `resetSymexRunState` before the run's context is
   ## built. `maxSplitParts` is the run's `budget.maxSplitParts` (0: no cap).

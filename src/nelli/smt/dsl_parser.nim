@@ -2476,7 +2476,7 @@ proc irKids(e: IRExpr): seq[IRExpr] =
      iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
     @[]
 
-proc irHasCall(e: IRExpr): bool =
+proc irHasCall*(e: IRExpr): bool =
   ## RFC-0005 S8ax. `e` applies a closure somewhere (`iekClosureCall`,
   ## `iekHofCall`): lowering it may write a capture or a global.
   if e == nil: return false

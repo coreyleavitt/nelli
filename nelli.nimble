@@ -1778,6 +1778,8 @@ task test, "Run the test suite":
             "tsymex_0016_cr3_maywrite",
             "tsymex_0016_w3z_p2_iter_off",
             "tsymex_0016_w3z_p2_fwrapv",
+            # RFC-0016 code review 0.10.0: F1 (opaque signed div/mod under -fwrapv).
+            "tsymex_0016_cr7_fwrapv_divzero",
             "tsymex_0016_admir",
             # RFC-0016 review D1 S1: arith_regime, the one owner of the arithmetic regime (module + tests; no walker change).
             "tsymex_0016_d1_regime",

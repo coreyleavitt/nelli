@@ -628,6 +628,13 @@ const renderAsChoicesVersion* = "12"
   ##   earlier walks left of the run's tail budget read `ubTailUnverified`
   ##   when that budget ran out; it now carries the answer of the walk under
   ##   its pins, and distinct pins keep more of the budget.
+  ## - RFC-0016 0.10.0 review H2+H3 (354->355): the tail walk reads the kinds
+  ##   a degrade token puts on a path the pins allow (`WalkCtx.tailUb`), so a
+  ##   `{.noinit.}` read past the label is `ubIndeterminateRead` in
+  ##   `witnessUndefined`, not a trusted sat; and `modelPins` pins only a
+  ##   heap's initial array, not an opaque call's havoc epoch
+  ##   (`heap_<k>@ep<n>`), so the tail walk no longer fixes a callee's effect
+  ##   to the explore model's value.
   ## - RFC-0016 CR-4 (354->357, the version reserved for the slice): a
   ##   routine `{.noinit.}` leaves `result` unwritten (a read before a write
   ##   is `ubIndeterminateRead`, H5); routine `nodestroy`, `codegenDecl`,

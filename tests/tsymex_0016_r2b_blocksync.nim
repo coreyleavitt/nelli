@@ -255,17 +255,32 @@ suite "R5-2: reconciled only where effects are produced":
     check procBody("walkStmt").count("lowerBoolInExpr(") == 2
     # R6: each site is anchored to its own guard (the `ifJoin` guard, the
     # `if`/`elif` condition, the `while` test and the final test after the
-    # last unrolled body), not to a whole-body count. All are defensive: the
-    # parser leaves no call in a guard (`tsymex_0016_r7a_liveness`).
+    # last unrolled body), not to a whole-body count. Each guard is live
+    # except `ifJoin`'s (R7-3, `tsymex_0016_r8a_inlinecalls`): a bare
+    # by-value closure call stays inline in an `if`/`elif`/`while` guard, and
+    # no source shape puts a call in the join guard.
     check procBody("walkStmt").contains("evalCondSynced(p, br.cond, w)")
     check procBody("walkStmt").contains("evalCondSynced(cp0, br.cond, w)")
     check procBody("walkStmt").count("evalCondSynced(p, stmt.wcond, w)") == 2
   test "a guard hands the reconcile no statement":
     check procBody("evalCondSynced").contains("reconcileCells(CellProducer(),")
     check not procBody("evalCondSynced").contains("IRStmt(")
-  test "a `return` is no reconcile point (R6-3: unreachable, deleted)":
+  test "a `return` value reconciles where it is evaluated (R7-1)":
     check "leafSyncDepth" notin runtimeCode
+    check procBody("walkStmt").contains("evalReturnSynced(p, stmt.retExpr, proto, w)")
     check not procBody("walkStmt").contains("reconcileCells(")
+    # (the literal `"result"` is gone from `codeOf`'s view)
+    check procBody("evalReturnSynced").contains(
+      "reconcileCells(CellProducer(assigned:")
+    check procBody("evalReturnSynced").contains("snapCells(@[p], depth, w)")
+  test "`CellProducer` is declared beside the producers that build it":
+    check runtimeCode.count("\ntype CellProducer = object") == 1
+    check runtimeCode.find("\ntype CellProducer = object") <
+      runtimeCode.find("\nfunc lastWriteTo(")
+    check runtimeCode.find("\nfunc lastWriteTo(") <
+      runtimeCode.find("\nfunc producerOf(")
+    check "strSetAtOf" notin runtimeCode
+    check procBody("producerOf").contains("assignsChar: stmt.avalue.kind == iekStrSetAt")
 
 # RFC-0016 review R3-1. A path that took `break L` from inside an `if` is
 # parked before any enclosing statement's post-sync sees it. The condition's

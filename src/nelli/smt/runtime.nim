@@ -14820,23 +14820,9 @@ const compoundStmtKinds = {isBlock, isIf, isWhile, isTry}
 proc evalCondSynced(p: Path; cond: IRExpr;
                     w: var WalkCtx): (Z3Bool, seq[Path])
   ## RFC-0016 review R5-2 fwd decl (defined beside `walkCapSynced`).
-type CellProducer = object
-  ## RFC-0016 review R6. What `reconcileCells` reads of whatever produced the
-  ## effect it reconciles: a leaf statement (`producerOf`) or a guard a
-  ## compound evaluates itself (the default value: no call, no store, no
-  ## write by name). No `IRStmt` is built for a guard.
-  isCall: bool
-  cargs: seq[IRExpr]          ## a call's actuals
-  cVarLocs: seq[VarLoc]       ## a call's `var` and `addr` actuals
-  cGuardRoots: seq[string]    ## a call's by-address roots
-  indexRecv: string           ## the receiver an element store writes ("" none)
-  assigned: string            ## the name an assignment or `let` writes ("" none)
-  strSetAtOf: string          ## the string an assignment of one character
-                              ## writes by name ("" none)
-
-proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
-                    w: var WalkCtx): seq[Path]
-  ## RFC-0016 review R5-2 fwd decl (defined beside `walkCapSynced`).
+proc evalReturnSynced(p: Path; value: IRExpr; proto: Option[SymVal];
+                      w: var WalkCtx): seq[Path]
+  ## RFC-0016 review R7-1 fwd decl (defined beside `evalCondSynced`).
 proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int)
   ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
 proc liveViewMarks(p: Path; w: WalkCtx)
@@ -20943,18 +20929,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         continue
       let proto = if w.callStack.len == 0: envLitProto(p.env, "result")
                   else: some(w.callStack[w.callStack.high].retSym)
-      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-      let (retVal, pr) = lowerInExpr(p, stmt.retExpr, w, proto)
-      ## R1 (Invariant-3 soundness fix): `stmt.retExpr` may itself
-      ## deposit scalar-raise-fork predicates (e.g. `s[i]` OOB,
-      ## `x div 0`). Undrained, those were silently discarded — no
-      ## raise fork, no bounds narrowing. Drain and thread the
-      ## survivor(s) forward, mirroring `isLet`/`isAssign`.
-      var bound: seq[Path]
-      for cp in drainScalarRaiseForks(pr, w):
-        var newEnv = cp.env
-        newEnv["result"] = retVal
-        bound.add forkPath(cp, cp.pc, newEnv)
+      ## RFC-0016 review R7-1: lowered, drained, bound to `result` and
+      ## reconciled where the value is evaluated (`evalReturnSynced`): a
+      ## bare closure call in it (`return c()`) may write a capture or an
+      ## address-taken variable a `finally` or a `var` write-back then reads.
+      let bound = evalReturnSynced(p, stmt.retExpr, proto, w)
       for bp in bound: exitReturn(bp, w)
     @[]
   of isCall:
@@ -21406,6 +21385,20 @@ const addrSnapPrefix = "__addrsnap#"
 func addrSnapName(depth: int; local: string): string =
   addrSnapPrefix & $depth & "#" & local
 
+type CellProducer = object
+  ## RFC-0016 review R6. What `reconcileCells` reads of whatever produced the
+  ## effect it reconciles: a leaf statement (`producerOf`) or a guard a
+  ## compound evaluates itself (the default value: no call, no store, no
+  ## write by name). No `IRStmt` is built for a guard.
+  isCall: bool
+  cargs: seq[IRExpr]          ## a call's actuals
+  cVarLocs: seq[VarLoc]       ## a call's `var` and `addr` actuals
+  cGuardRoots: seq[string]    ## a call's by-address roots
+  indexRecv: string           ## the receiver an element store writes ("" none)
+  assigned: string            ## the name an assignment or `let` writes ("" none)
+  assignsChar: bool           ## the assignment writes one character of the
+                              ## variable it names (`s[i] = c`)
+
 func lastWriteTo(src: CellProducer; local: string): bool =
   ## RFC-0005 S8ax. The statement's last effect is the write of `local` by
   ## name (an assignment or declaration of it): its value is the later one.
@@ -21426,8 +21419,7 @@ func producerOf(stmt: IRStmt): CellProducer =
   of isIndexAssign: CellProducer(indexRecv: stmt.iaRecvName)
   of isAssign:
     CellProducer(assigned: stmt.aname,
-                 strSetAtOf: if stmt.avalue.kind == iekStrSetAt: stmt.aname
-                             else: "")
+                 assignsChar: stmt.avalue.kind == iekStrSetAt)
   of isLet: CellProducer(assigned: stmt.lname)
   else: CellProducer()
 
@@ -21828,7 +21820,8 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
         let heapsBefore = q.heaps
         let st = addrEntryStore(ctx, q, c, refAst, xv)
         if src.indexesInto(c.local) or
-           (c.local.len > 0 and src.strSetAtOf == c.local):   # a character, by name
+           (c.local.len > 0 and src.assignsChar and
+            src.assigned == c.local):   # a character, by name
           logInPlace(q, heapsBefore, q)
         if st.isSome: env2[c.local] = keepStrBuf(st.get, xv)   # S8ca
         elif displayName(c.local) notin lost: lost.add displayName(c.local)
@@ -22434,6 +22427,37 @@ proc evalCondSynced(p: Path; cond: IRExpr;
   let cont = drainScalarRaiseForks(p2, w)
   dec w.capSyncDepth
   (b, reconcileCells(CellProducer(), cont, depth, w))
+
+proc evalReturnSynced(p: Path; value: IRExpr; proto: Option[SymVal];
+                      w: var WalkCtx): seq[Path] =
+  ## RFC-0016 review R7-1. A `return`'s value: `lowerInExpr`, its scalar
+  ## raises drained (`drainScalarRaiseForks`, R1: `s[i]` out of bounds,
+  ## `x div 0`), each survivor bound to `result`, and the survivors
+  ## reconciled as the assignment of `result` they end with
+  ## (`reconcileCells`), against a snapshot from just before the
+  ## evaluation. The path leaves through `exitReturn`, which runs every
+  ## enclosing `finally`; those and a `var` write-back read the frame after
+  ## the closure call the value applied (a bare `return c()`, by value,
+  ## stays inline in the value). The value is the term lowered before the
+  ## reconcile, which renames no term it reads.
+  if not frameHasCells(@[p], w):
+    let (retVal, pr) = lowerInExpr(p, value, w, proto)
+    for cp in drainScalarRaiseForks(pr, w):
+      var newEnv = cp.env
+      newEnv["result"] = retVal
+      result.add forkPath(cp, cp.pc, newEnv)
+    return
+  inc w.capSyncDepth
+  let depth = w.capSyncDepth
+  let ins = snapCells(@[p], depth, w)
+  let (retVal, pr) = lowerInExpr(ins[0], value, w, proto)
+  var bound: seq[Path]
+  for cp in drainScalarRaiseForks(pr, w):
+    var newEnv = cp.env
+    newEnv["result"] = retVal
+    bound.add forkPath(cp, cp.pc, newEnv)
+  dec w.capSyncDepth
+  reconcileCells(CellProducer(assigned: "result"), bound, depth, w)
 
 template forEachExitGroup(w, g, body: untyped) =
   ## RFC-0005 review R5. Run `body` with `g` naming each exit group a walk

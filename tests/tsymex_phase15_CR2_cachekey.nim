@@ -1242,7 +1242,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 review R4-1 (a labelled block reconciles its exits only): 364->365.
     ## RFC-0016 review R5-1/R5-2 (reconciled only where effects are
     ## produced: leaves, a compound's own guards, a `return`'s value): 365->366.
-    check symexWalkerVersion == "366"
+    ## RFC-0016 review R7-1 (a bare `return` of a closure call reconciles the
+    ## cells it wrote before it parks): 366->367.
+    check symexWalkerVersion == "367"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

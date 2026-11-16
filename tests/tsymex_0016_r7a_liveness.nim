@@ -1,25 +1,29 @@
-## RFC-0016 review R6-1 .. R6-4. The liveness of each `reconcileCells` point.
+## RFC-0016 review R6-1 .. R6-4. The liveness of each `reconcileCells` point,
+## for the shapes whose closure is a NAMED LOCAL PROC.
 ##
-## A closure call is never inside an expression the walker evaluates: the
-## parser A-normalises every call into its own statement (`call(__sym_f_N :=
-## f(..))`, a leaf), whatever its position -- a `while` test, an `if`/`elif`
-## condition, a short-circuit operand, a `return` value, an `if`/`case`
-## expression, a `case` scrutinee. So an effect on a capture, an address-taken
-## variable or an element is produced at a leaf statement, and that is the
-## only place a reconcile can matter. The guard points (`evalCondSynced`) are
-## defensive: removing any of them (each `while` test including the final one,
-## the `ifJoin` guard, the `if`/`elif` guard, and the concolic follow variants)
-## left every test of `r5a_exitsync` and this file green (R6-1, R6-2, R6-3
-## scratch mutations). The `return` value's own reconcile was deleted with the
-## synthesised statement it needed.
+## The parser hoists a named local proc's call into a statement of its own
+## (`call(__sym_f_N := f(..))`, a leaf), wherever it stands in an expression:
+## a `while` test, an `if`/`elif` condition, a short-circuit operand, a
+## `return` value that is not the call itself, an `if`/`case` expression, a
+## `case` scrutinee. So for these shapes an effect on a capture, an
+## address-taken variable or an element is produced at a leaf statement, and
+## that is the only place a reconcile can matter. This file pins exactly that.
+##
+## It is NOT true of every call. A by-value closure call (a lambda, a
+## proc-valued `let`, a proc field) stays INLINE when it is the whole
+## expression of a `return` or of a bare guard (`if c():`, `elif c():`,
+## `while c():`, and `while n < 5 and c():`, which lowers to a guard `if`).
+## Those are reconcile points that matter (R7-1, R7-3), each with a red-able
+## test in `tsymex_0016_r8a_inlinecalls`. The one guard no source shape reaches
+## is the `ifJoin` guard (pinned there). The invariant: every evaluation point
+## that can produce an effect reconciles where it produces it.
 ##
 ## What these tests pin:
 ##
-## * the A-normalisation itself (`noInlineCall`): the parsed IR of each shape
-##   below has exactly as many `call(__sym_bump_N := bump#..)` statements as
-##   `bump#` mentions, so no guard, return value or scrutinee carries a call.
-##   If the parser ever leaves one in place this fails, and the guard points
-##   need a test with an effect at them;
+## * `noInlineCall`: the parsed IR of each shape below has no site whose
+##   expression applies a call (`inlineSites` is empty), and the closure is
+##   still called (`bump#` is mentioned), so each shape's call is a leaf and the
+##   reconcile there is the one that matters;
 ## * the end-to-end verdicts of the same shapes, a final `while` test after the
 ##   last unrolled body included (an exhausted loop is tainted, not wrong);
 ## * a raise resumed in its handler (`syncCapCellsFromCells`,
@@ -34,17 +38,18 @@ import std/[unittest, strutils, macros]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/dsl_parser
+import "./inline_sites"
 
 macro irOf(p: typed): untyped =
   newLit(render(parseProc(p.getImpl).body))
 
 template noInlineCall(fn: typed; callee: static string) =
-  ## Every mention of the closure is a hoisted call statement.
+  ## The closure is called, and no guard or return value applies a call.
   block:
     let ir = irOf(fn)
     checkpoint ir
     check ir.count(callee & "#") > 0
-    check ir.count(callee & "#") == ir.count("call(__sym_" & callee & "_")
+    check inlineSites(fn) == newSeq[string]()
 
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs:

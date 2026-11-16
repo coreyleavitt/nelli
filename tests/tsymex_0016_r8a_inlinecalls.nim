@@ -1,63 +1,44 @@
 ## RFC-0016 review R7-1 .. R7-3. The closure calls the parser leaves INLINE.
 ##
 ## The parser hoists a named local proc's call into a statement of its own
-## (`call(__sym_f_N := f(..))`, a leaf). It does not hoist every closure
-## application: `closureCallIR` leaves an `iekClosureCall` in the expression
-## for a by-value call with no `var` formal and no `addr` actual (a lambda, a
-## proc-valued `let`, a proc field of a by-value object), `mkHofCall` builds a
-## `map`/`filter`/`fold` with a closure inline, and a `return` value or a
-## guard under `inGuardCond` is not hoisted. A guard cannot be: short-circuit
-## and the loop re-test must re-evaluate it. So a closure's effect on a
-## capture or an address-taken variable is produced INSIDE a guard or a
-## `return` value, and each of those is a reconcile point
-## (`reconcileCells`): `evalCondSynced` for a guard, `isReturn` for the value.
+## (`call(__sym_f_N := f(..))`, a leaf), and an operand of a larger
+## expression (`c() * 10`, `c() > 0`, `v > 0 and c()`) with it. It does NOT
+## hoist a value that IS the call: `closureCallIR` leaves an `iekClosureCall`
+## in the expression for a by-value call with no `var` formal and no `addr`
+## actual (a lambda, a proc-valued `let`, a proc field of a by-value object),
+## and a bare `return c()`, a bare `if c():` / `elif c():` and a bare
+## `while c():` keep it in `retExpr` / `branches.cond` / `wcond`. A guard
+## cannot be hoisted anyway: short-circuit and the loop re-test must
+## re-evaluate it. So a closure's effect on a capture or an address-taken
+## variable is produced INSIDE the guard or the `return` value, and each of
+## those is a reconcile point (`reconcileCells`): `evalCondSynced` for a guard,
+## `evalReturnSynced` for the value.
 ##
 ## What these tests pin:
 ##
-## * `inlineSites`: the parsed IR of each shape, walked structurally, names the
-##   sites (`if`, `while`, `return`) whose expression still applies a closure.
-##   It documents that an inline call occurs, so each site needs an effect
-##   test; the expected list per fixture is exact;
-## * a `return` value's reconcile (R7-1), for a lambda, a proc-valued `let`, a
-##   proc field, `map`/`filter` and an address-taken variable;
-## * each guard reconcile (R7-3), with the lambda's effect read after it: the
-##   plain `if`, an `elif`, the short-circuit join, a `while` test, the final
-##   test after the last unrolled body, and the concolic follow `if` and
-##   `while`.
+## * `inlineSites`: the parsed IR of each fixture, walked structurally, names
+##   the sites (`if`, `while`, `return`) whose expression still applies a
+##   closure. The list is exact per fixture: `@[]` for the shapes the parser
+##   hoists (the controls), the one site for each bare shape;
+## * a `return` value's reconcile (R7-1): a lambda, a proc-valued `let`, a
+##   proc field, and an address-taken variable written by name and read
+##   through the pointer, and the reverse;
+## * each guard reconcile (R7-3), with the closure's effect read after it: a
+##   plain `if`, an `elif`, a `while` test, the final test after the last
+##   unrolled body, `while n < 5 and c()`, and the concolic follow `if` and
+##   `while`;
+## * the `ifJoin` guard is the one site no source shape reaches: its guard is
+##   the synthetic `__sym_sc_N` (or `not` of it) or a bitset membership test,
+##   never a call (`ifJoinCalls`).
 ##
 ## Every label is checked natively as well (`exitVerdict`).
 
-import std/[unittest, strutils, macros, sequtils]
+import std/unittest
+import std/strutils
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
-import nelli/smt/dsl_parser
-
-proc collectSites(s: IRStmt; acc: var seq[string]) =
-  if s == nil: return
-  case s.kind
-  of isBlock:
-    for c in s.stmts: collectSites(c, acc)
-  of isIf:
-    for b in s.branches:
-      if irHasCall(b.cond): acc.add "if"
-      collectSites(b.body, acc)
-    collectSites(s.elseBody, acc)
-  of isWhile:
-    if irHasCall(s.wcond): acc.add "while"
-    collectSites(s.wbody, acc)
-  of isTry:
-    collectSites(s.tryBody, acc)
-    for h in s.tryHandlers: collectSites(h.body, acc)
-    collectSites(s.tryFinally, acc)
-  of isReturn:
-    if irHasCall(s.retExpr): acc.add "return"
-  else: discard
-
-macro inlineSites(p: typed): untyped =
-  var acc: seq[string]
-  collectSites(parseProc(p.getImpl).body, acc)
-  newLit(acc)
+import "./inline_sites"
 
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs:
@@ -99,7 +80,7 @@ template exhausted(fn: typed) =
     checkpoint "bad " & $bad.status & "\n" & show(bad.errors)
     check bad.status == sxUnknown
 
-# ---- R7-1: a `return` value that applies a closure -------------------------
+# ---- R7-1: a bare `return` of a closure call -------------------------------
 
 proc rA1(v: int): int =
   var x = v
@@ -107,10 +88,10 @@ proc rA1(v: int): int =
     x = x + 4
     10
   try:
-    return c() * 10
+    return c()
   finally:
     result = result + x
-nsut(sA1, rA1, 105)
+nsut(sA1, rA1, 15)
 
 proc rA2(v: int): int =
   var x = v
@@ -119,10 +100,10 @@ proc rA2(v: int): int =
     10
   let c = bump
   try:
-    return c() * 10
+    return c()
   finally:
     result = result + x
-nsut(sA2, rA2, 105)
+nsut(sA2, rA2, 15)
 
 type Holder = object
   f: proc(): int {.closure.}
@@ -133,60 +114,48 @@ proc rA3(v: int): int =
     x = x + 4
     10)
   try:
-    return h.f() * 10
+    return h.f()
   finally:
     result = result + x
-nsut(sA3, rA3, 105)
+nsut(sA3, rA3, 15)
 
 proc rA4(v: int): int =
-  var x = v
-  let s = @[1, 2]
-  let f = proc(a: int): int =
-    x = x + a
-    a
-  try:
-    return s.map(f).len * 10
-  finally:
-    result = result + x
-nsut(sA4, rA4, 24)
-
-proc rA5(v: int): int =
-  var x = v
-  let s = @[1, 2]
-  let f = proc(a: int): bool =
-    x = x + a
-    true
-  try:
-    return s.filter(f).len * 10
-  finally:
-    result = result + x
-nsut(sA5, rA5, 24)
-
-proc rA6(v: int): int =
-  var x = v
-  let p = addr x
-  let c = proc(): int =
-    p[] = p[] + 4
-    10
-  try:
-    return c() * 10
-  finally:
-    result = result + p[]
-nsut(sA6, rA6, 105)
-
-proc rA7(v: int): int =
   var x = v
   let p = addr x
   let c = proc(): int =
     x = x + 4
     10
   try:
-    return c() * 10
+    return c()
   finally:
     result = result + p[]
-nsut(sA7, rA7, 105)
+nsut(sA4, rA4, 15)
 
-suite "R7-1: a return value applying a closure reconciles":
+proc rA5(v: int): int =
+  var x = v
+  let p = addr x
+  let c = proc(): int =
+    p[] = p[] + 4
+    10
+  try:
+    return c()
+  finally:
+    result = result + x
+nsut(sA5, rA5, 15)
+
+# Control: the call is an operand, so the parser hoists it to a leaf.
+proc rH1(v: int): int =
+  var x = v
+  let c = proc(): int =
+    x = x + 4
+    10
+  try:
+    return c() * 10
+  finally:
+    result = result + x
+nsut(sH1, rH1, 105)
+
+suite "R7-1: a bare `return` of a closure call reconciles":
   test "lambda":
     check inlineSites(rA1) == @["return"]
     exitVerdict(sA1)
@@ -196,27 +165,24 @@ suite "R7-1: a return value applying a closure reconciles":
   test "proc field of a by-value object":
     check inlineSites(rA3) == @["return"]
     exitVerdict(sA3)
-  test "map with a closure":
+  test "address-taken local written by name, read through the pointer":
     check inlineSites(rA4) == @["return"]
     exitVerdict(sA4)
-  test "filter with a closure":
+  test "address-taken local written through the pointer, read by name":
     check inlineSites(rA5) == @["return"]
     exitVerdict(sA5)
-  test "address-taken local written through the pointer":
-    check inlineSites(rA6) == @["return"]
-    exitVerdict(sA6)
-  test "address-taken local written by name, read through the pointer":
-    check inlineSites(rA7) == @["return"]
-    exitVerdict(sA7)
+  test "control: an operand call is hoisted":
+    check inlineSites(rH1) == newSeq[string]()
+    exitVerdict(sH1)
 
-# ---- R7-3: guards that apply a closure --------------------------------------
+# ---- R7-3: bare guards that apply a closure ---------------------------------
 
 proc rI1(v: int): int =
   var x = v
-  let c = proc(): int =
+  let c = proc(): bool =
     x = x + 4
-    1
-  if c() > 0:
+    true
+  if c():
     result = 10
   result += x
 nsut(sI1, rI1, 15)
@@ -224,27 +190,38 @@ nsut(sI1, rI1, 15)
 proc rI1P(v: int): int =
   var x = v
   let p = addr x
-  let c = proc(): int =
+  let c = proc(): bool =
     p[] = p[] + 4
-    1
-  if c() > 0:
+    true
+  if c():
     result = 10
   result += x
 nsut(sI1P, rI1P, 15)
 
 proc rI2(v: int): int =
   var x = v
-  let c = proc(): int =
+  let c = proc(): bool =
     x = x + 4
-    1
+    true
   if v < 0:
     result = 1
-  elif c() > 0:
+  elif c():
     result = 10
   result += x
 nsut(sI2, rI2, 15)
 
-proc rI3(v: int): int =
+# Controls: hoisted, so no guard holds a call.
+proc rH2(v: int): int =
+  var x = v
+  let c = proc(): int =
+    x = x + 4
+    1
+  if c() > 0:
+    result = 10
+  result += x
+nsut(sH2, rH2, 15)
+
+proc rH3(v: int): int =
   var x = v
   let c = proc(): bool =
     x = x + 4
@@ -252,7 +229,17 @@ proc rI3(v: int): int =
   if v > 0 and c():
     result = 10
   result += x
-nsut(sI3, rI3, 15)
+nsut(sH3, rH3, 15)
+
+proc rH4(v: int): int =
+  var x = v
+  let c = proc(): bool =
+    x = x + 4
+    true
+  if c() and v > 0:
+    result = 10
+  result += x
+nsut(sH4, rH4, 15)
 
 proc rW1(v: int): int =
   var x = v
@@ -322,7 +309,7 @@ proc rW4(v: int): int =
   result = x * 10 + n
 nsut(sW4, rW4, 72)
 
-suite "R7-3: a guard applying a closure reconciles":
+suite "R7-3: a bare guard applying a closure reconciles":
   test "if guard (capture)":
     check inlineSites(rI1) == @["if"]
     exitVerdict(sI1)
@@ -332,9 +319,13 @@ suite "R7-3: a guard applying a closure reconciles":
   test "elif guard":
     check inlineSites(rI2) == @["if"]
     exitVerdict(sI2)
-  test "short-circuit join":
-    check inlineSites(rI3) == @["if"]
-    exitVerdict(sI3)
+  test "controls: an operand call is hoisted out of the guard":
+    check inlineSites(rH2) == newSeq[string]()
+    exitVerdict(sH2)
+    check inlineSites(rH3) == newSeq[string]()
+    exitVerdict(sH3)
+    check inlineSites(rH4) == newSeq[string]()
+    exitVerdict(sH4)
   test "while test (capture)":
     check inlineSites(rW1) == @["while"]
     exitVerdict(sW1)
@@ -350,19 +341,62 @@ suite "R7-3: a guard applying a closure reconciles":
   test "a loop still active after the bound is tainted":
     check inlineSites(rW3) == @["while"]
     exhausted(sW3)
-  test "short-circuit while test":
-    check inlineSites(rW4) == @["while"]
+  test "`while n < 5 and c()` lowers to a guard `if` in the body":
+    check inlineSites(rW4) == @["if"]
     exitVerdict(sW4)
+
+# ---- the `ifJoin` guard: no source shape puts a call in it -------------------
+
+proc jAnd(v: int): int =
+  var x = v
+  let c = proc(): bool =
+    x = x + 4
+    true
+  if v > 0 and c() and x > 0:
+    result = 10
+  result += x
+
+proc jOr(v: int): int =
+  var x = v
+  let c = proc(): bool =
+    x = x + 4
+    true
+  if v < 0 or c() or x < 0:
+    result = 10
+  result += x
+
+proc jNest(v: int): int =
+  var x = v
+  let c = proc(): bool =
+    x = x + 4
+    true
+  if (v < 0 or c()) and (c() or v > 3):
+    result = 10
+  result += x
+
+type Digit = range[0 .. 3]
+
+proc jSet(v: int): int =
+  var s: set[Digit] = {1, 3}
+  for d in s:
+    result += d.int
+
+suite "R7-3: the ifJoin guard holds no call":
+  test "short-circuit chains and a bitset loop: every join guard is call-free":
+    for (joins, withCall) in [ifJoinCalls(jAnd), ifJoinCalls(jOr),
+                              ifJoinCalls(jNest), ifJoinCalls(jSet)]:
+      check joins > 0
+      check withCall == 0
 
 # ---- the concolic follow walks ----------------------------------------------
 
 proc cIf(v: int) =
   var x = v
   var r = 0
-  let c = proc(): int =
+  let c = proc(): bool =
     x = x + 4
-    1
-  if c() > 0:
+    true
+  if c():
     r = 1
   if x > 6:
     r = r + 2

@@ -700,8 +700,19 @@ const renderAsChoicesVersion* = "12"
   ##   (`reconcileCells`). A view and its Table written before a `break`, under
   ##   an `if`, or in a loop body a `continue` leaves declined (sxUnknown) and
   ##   now answer. No key bytes change.
+  ## - RFC-0016 review R7-1 (366->367): a `return` value reconciles where it is
+  ##   evaluated (`evalReturnSynced`), as a guard does (`evalCondSynced`) and a
+  ##   leaf statement does (`walkCapSynced`): every evaluation point that can
+  ##   produce an effect reconciles where it produces it. The parser hoists a
+  ##   call that is an operand into a statement of its own, but leaves a bare
+  ##   by-value closure call (a lambda, a proc-valued `let`, a proc field) in
+  ##   a `return` value or a bare guard (`if c():`, `elif c():`,
+  ##   `while c():`). The 366 walker deleted the `return` reconcile on the
+  ##   premise that every call is hoisted; a closure writing an address-taken
+  ##   variable through its pointer, applied in `return c()`, left the frame's
+  ##   local stale for a `finally` or a `var` write-back. No key bytes change.
 
-const symexWalkerVersion* = "366"
+const symexWalkerVersion* = "367"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

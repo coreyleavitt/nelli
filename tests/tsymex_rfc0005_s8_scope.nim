@@ -542,7 +542,9 @@ suite "RFC-0005 S8 (e) -- structural totality pin":
         # D4: severity is the kind's table row. A literal kind is a decline
         # iff its row is `sevError`; a variable kind is one, except in
         # `tagged`, the replay-hint funnel (every `feReplay*` row is a hint).
-        var decline = "sevError" in t
+        # `declineSeverity` is the parser's named override: a parse-time
+        # decline halts whatever its kind's row says, so it is a decline.
+        var decline = "sevError" in t or "declineSeverity" in t
         if "severity: severity(" in t:
           let i = t.find("kind:")
           var j = i + 5

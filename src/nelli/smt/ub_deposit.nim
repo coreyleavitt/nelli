@@ -49,9 +49,3 @@ func arithDeposits*(magic: string; narrow: bool;
     deposit(op, if narrow: ocLowByMinusOneNarrow else: ocLowByMinusOneWide)
   if magic in unsignedDivMagics:
     deposit(aoDiv, ocZeroDivisorUnsigned)
-
-func arithUbKinds*(magic: string; narrow: bool; prof: DefProfile): set[UbKind] =
-  ## The kinds `arithDeposits` names, for a caller that wants the answer and
-  ## not the proofs.
-  for d in arithDeposits(magic, narrow, prof):
-    result.incl ubOf(d.row.payload[d.profile]).get

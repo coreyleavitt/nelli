@@ -22,12 +22,14 @@ when defined(vcc):
         check refusal.get.field == bfFwrapv
         check "-fwrapv" in refusal.get.reason
 else:
-  import std/[unittest, strutils]
+  import std/[unittest, strutils, tables, macros]
   import nelli
   import nelli/symex
   import nelli/smt/errorkind
   import nelli/smt/definedness
   import ./s8cu_helpers
+  import nelli/smt/types
+  import nelli/smt/dsl_parser
 
   proc oAdd(a: int64) {.symexOpaque.} =
     discard a + 1
@@ -164,12 +166,159 @@ else:
     test "the plain call does not reach the label":
       let r = symexFind(sutAdderPlain, tLabel("hit"))
       checkpoint $r.status & " " & show(r.errors)
-      check r.status != sxSat
+      check r.status == sxRaised
+      check not r.errors.named(feUnsupportedOp)
     test "walker version floor (R2-1: alias bodies are stamped)":
       check parseInt(symexWalkerVersion) >= 363
     test "the aliased call answers as the plain call does":
       let p = symexFind(sutAdderPlain, tLabel("hit"))
       let r = symexFind(sutAdderAliased, tLabel("hit"))
       checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxRaised
       check r.status == p.status
-      check r.status != sxSat
+      check not r.errors.named(feUnsupportedOp)
+
+  # RFC-0016 round-3 R3-2: the same alias bodies, on the other halves of
+  # `parseRoutineBody`. (a) a lambda compiled with `boundChecks` pushed off,
+  # in a build that checks them: the check-option decline
+  # (`withCheckDeclines`) must reach the aliased body as it reaches the plain
+  # one. (b) a lambda body with a proc-typed `let`: alias bodies go through
+  # `devirtProcLets`, so the aliased verdict is the plain one.
+  # The maker is pushed with its lambda: a push inside a routine body is a
+  # statement the walker does not model, and a module-level proc `let` is not
+  # a modelled global. So the maker declines at entry as well; the alias body's
+  # own decline follows from `parseRoutineBody` (an alias body parsed without
+  # it carries no marker); this case pins the equal verdict and kind.
+  {.push boundChecks: off.}
+  proc mkIndexer(): proc (a, b: var int) =
+    result = proc (a, b: var int) =
+      let tab = [10, 20, 30, 40]
+      a = tab[b and 3]
+  {.pop.}
+
+  proc sutIdxPlain(k: int) =
+    var x = k
+    var y = k
+    let f = mkIndexer()
+    f(x, y)
+    if k == 1 and x == 20: symexTarget("hit")
+
+  proc sutIdxAliased(k: int) =
+    var x = k
+    let f = mkIndexer()
+    f(x, x)
+    if k == 1 and x == 20: symexTarget("hit")
+
+  # A `let` proc value called with a Table, the form `devirtProcLets` spells as
+  # the direct call. Pins that the aliased verdict is the plain one and exact;
+  # with the rewrite bypassed for alias bodies the walker still models this
+  # call, so the case guards the verdict, not the rewrite itself.
+  proc lookOne(t: Table[int, int]; i: int): int = t[i]
+
+  proc mkLetter(): proc (a, b: var int) =
+    result = proc (a, b: var int) =
+      var t = initTable[int, int]()
+      t[1] = 10
+      let g = lookOne
+      a = g(t, 1) + b
+
+  proc sutLetPlain(k: int) =
+    var x = k
+    var y = k
+    let f = mkLetter()
+    f(x, y)
+    if x == 13: symexTarget("hit")
+
+  proc sutLetAliased(k: int) =
+    var x = k
+    let f = mkLetter()
+    f(x, x)
+    if x == 13: symexTarget("hit")
+
+  suite "R3-2: alias bodies take the check-option declines and the proc-let rewrite":
+    test "walker version floor":
+      check parseInt(symexWalkerVersion) >= 363
+    test "a lambda pushed boundChecks off declines on the plain call":
+      let r = symexFind(sutIdxPlain, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      check r.errors.named(feCheckOption)
+    test "the aliased call declines exactly as the plain call does":
+      let p = symexFind(sutIdxPlain, tLabel("hit"))
+      let r = symexFind(sutIdxAliased, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      check r.status == p.status
+      check r.errors.named(feCheckOption)
+      check not r.errors.named(feUnsupportedOp)
+    test "a proc-typed let in the body: the plain call finds the label":
+      let r = symexFind(sutLetPlain, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxSat
+      check not r.errors.named(feUnsupportedOp)
+    test "a proc-typed let in the body: the aliased call answers as the plain":
+      let p = symexFind(sutLetPlain, tLabel("hit"))
+      let r = symexFind(sutLetAliased, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxSat
+      check r.status == p.status
+      check not r.errors.named(feUnsupportedOp)
+
+  # R3-2, structural half. The verdict cases above cannot tell an alias body
+  # parsed through `parseRoutineBody` from one parsed bare (the maker declines
+  # on entry; the walker models the proc-let call either way), so the parsed
+  # lambda is read directly: every alias body's root is a claiming stamped
+  # routine block, as the main body's is, and carries the check-option decline
+  # marker whenever the main body does (`checkTotalStamp`'s claim, applied to
+  # `lambdaAliasBodies`).
+  macro lambdaShape(maker: typed): untyped =
+    ## "main=<claims>,<declines>;alias=<claims>,<declines>;..." for the lambda
+    ## `maker` builds.
+    let parsed = parseProc(maker.getImpl)
+    var lam: IRExpr
+    proc visit(s: IRStmt) =
+      if s == nil: return
+      case s.kind
+      of isBlock:
+        for c in s.stmts: visit(c)
+      of isLet:
+        if lam == nil and s.lvalue != nil and s.lvalue.kind == iekLambda:
+          lam = s.lvalue
+      of isAssign:
+        if lam == nil and s.avalue != nil and s.avalue.kind == iekLambda:
+          lam = s.avalue
+      else: discard
+    visit(parsed.body)
+    if lam == nil: error("no lambda found in " & maker.repr)
+    proc shape(b: IRStmt): string =
+      if b == nil or b.kind != isBlock: return "notblock"
+      var declines = false
+      for c in b.stmts:
+        if c != nil and c.kind == isUnsupported and c.unKind == feCheckOption:
+          declines = true
+      $b.blkArith.claims & "," & $declines
+    var r = "main=" & shape(lam.lambdaBody)
+    for b in lam.lambdaAliasBodies: r.add ";alias=" & shape(b)
+    newLit(r)
+
+  proc checkAliasShape(shape: string) =
+    let parts = shape.split(';')
+    check parts.len >= 2                      # the lambda has an alias body
+    let main = parts[0]["main=".len .. ^1]
+    check main.startsWith("true,")            # the main body is a claiming block
+    for a in parts[1 .. ^1]:
+      let v = a["alias=".len .. ^1]
+      check v.startsWith("true,")             # so is every alias body
+      check v == main                         # and it declines iff the main does
+
+  suite "R3-2: every alias body is a stamped routine block like the main body":
+    test "the pushed-on adder":
+      let sh = lambdaShape(mkAdder)
+      checkpoint sh
+      checkAliasShape(sh)
+    test "the boundChecks-off indexer carries the decline in main and alias":
+      let sh = lambdaShape(mkIndexer)
+      checkpoint sh
+      checkAliasShape(sh)
+      check sh.endsWith("true,true")
+      check sh.contains("main=true,true")

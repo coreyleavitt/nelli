@@ -1,19 +1,34 @@
-# runtime_strings.nim — Cluster S include fragment of runtime.nim
+# runtime_strings.nim -- Cluster S: the `lower()` dispatch arm for
+# `iekStrLit` and `StrOpKinds` (Cluster S, Stage 7 / Stage 8, CR-7).
 #
-# THIS FILE IS NOT A STANDALONE MODULE. It is textually included into
-# runtime.nim via `include "runtime_strings.nim"` and CANNOT be compiled
-# independently. It inherits ALL imports, types, threadvars, helpers, and
-# forward-declared procs from runtime.nim's lexical scope; do NOT add
-# `import` statements here.
-#
-# Contents (CR-7-deeper Stage 8+):
-#   mkConcreteStrSeq, joinStrSeq — Cluster S string-seq helpers (moved
-#   from runtime.nim; only used by lowerStrArm).
-#   `lowerStrArm(env, e)` — the `lower()` dispatch arm for
-#   `iekStrLit` and `StrOpKinds` (Cluster S, Stage 7 / Stage 8, CR-7).
-# Placement in runtime.nim: immediately after `coerceToBoolSV` and
-# immediately before `lowerFloatArm`, between `lower`'s forward-decl
-# and `lower`'s body.
+# A real module (RFC-0016 review D3c-7): it imports the leaves and names no
+# `runtime.nim` symbol. `runtime.nim` imports it before `lower`'s body and
+# calls `lowerStrArm` directly, inside the single try/except at `lower`'s
+# dispatch (`degradeStrArm`). The verbs it needs that `runtime.nim` defines
+# later (`lower`, `seqElemAt`, `allocateSym`, `depositStrIndexOob`) go through
+# `lowerHooks`.
+#   mkConcreteStrSeq, joinStrSeq -- Cluster S string-seq helpers.
+#   `lowerStrArm(env, e)` -- the dispatch arm.
+#   `regexFreshName` -- read by `runtime.nim` too.
+#   `resetStringLowering` -- the per-run reset of `strCharsCounter`.
+import std/tables
+import std/options
+import std/sets
+import std/strutils
+import z3
+import ./types
+import ./abstraction
+import ./symval
+import ./walk_state
+import ./z3check
+import ./heap_model
+import ./string_lower_support
+import ./regex_parser
+import ./pcre_select
+import ./pcre_engine
+import ./pcre_syntax
+import ./errorkind
+import ./stdlib_rows
 
 template requireStr(sv: SymVal, opName: string) =
   ## v65: classified totality guard for the string-op operand sites. A
@@ -141,7 +156,7 @@ proc lowerStrOperand(env: Env, e: IRExpr,
   ## pass-through (Nim's `string(d)`), so the operand arrives as the
   ## `svDistinct`. It met `requireStr` and declined (`seUnsupportedStringOp`).
   ## The identity for every other operand (`ejectBase`).
-  ejectBase(lower(env, e, proto))
+  ejectBase(lowerHooks.lower(env, e, proto))
 
 # ---- RFC-0005 S8aw: regex replace, the walker's own lowering ---------------
 #
@@ -272,7 +287,7 @@ proc regexReplaceUnrolled(s, by: Z3String; sh: RegexReplaceShape;
                       ite(start, by, ite(covered, empty, at(s, mkInt(k)))), empty)
       result = if k == 0: piece else: concat(result, piece)
 
-proc regexFreshName(tag: string): string =
+proc regexFreshName*(tag: string): string =
   ## RFC-0005 S8ay. A per-run-unique name for a constant the regex lowering
   ## fixes by definitional constraints (`stripDecompConds`; the
   ## `stripSynthCounter` precedent -- two sites must never share one).
@@ -479,7 +494,7 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
     return regexRejected(pr.errMsg, kind)
   var start = mkInt(0)
   if e.strArgs.len >= 2:
-    start = toZ3Int(lower(env, e.strArgs[1]))
+    start = toZ3Int(lowerHooks.lower(env, e.strArgs[1], none(SymVal)))
   # RFC-0005 S8bb: a captures overload's group reads the call's own
   # operands (atoms the parser bound) after the call: the call's
   # `RangeDefect` is already forked, so the group adds none.
@@ -503,8 +518,8 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
   var old = mkString("")
   var oldI = mkInt(0)
   if capture:
-    arrLen = toZ3Int(lower(env, e.strArgs[2]))
-    let o = lower(env, e.strArgs[3])
+    arrLen = toZ3Int(lowerHooks.lower(env, e.strArgs[2], none(SymVal)))
+    let o = lowerHooks.lower(env, e.strArgs[3], none(SymVal))
     if e.kind == iekStrCaptureRe:
       requireStr(o, $e.kind)
       old = o.str
@@ -575,7 +590,7 @@ proc lowerRegexDecline(env: Env, e: IRExpr): SymVal =
     regexRaiseMsgs.add pr.errMsg
     syncRegexRaiseMsg(pr.errMsg)
     var unused: seq[Z3Bool]
-    return allocateSym(e.strRetTy, freshDegradeName("__regexRejected"), unused)
+    return lowerHooks.allocateSym(e.strRetTy, freshDegradeName("__regexRejected"), unused, false, @[])
   regexOutcomeGate(sp, pr)
   let what = "regex " & sp.entry & "(s, " & sp.flag & "\"" & sp.pattern & "\")"
   if not sp.entry.endsWith("Captures"):
@@ -611,7 +626,7 @@ proc replaceAtPointsPlain(sp: RegexSpec; pr: PcreParse;
   regexPointSite(sp, pr, recv, by, mkInt(0), r, @[], declined = true)
   SymVal(kind: svString, str: r)
 
-proc lowerStrArm(env: Env, e: IRExpr): SymVal =
+proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for
   ## `iekStrLit` and `StrOpKinds`. Params: `env` and `e` are the same as
   ## `lower`'s; `proto` is NOT used by any string arm. Calls `lower`
@@ -662,7 +677,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let inLoCond = idxZi >= mkInt(0)
     let inHiCond = idxZi < strLenZi
     let oob = not (inLoCond and inHiCond)
-    depositStrIndexOob(oob)
+    lowerHooks.depositStrIndexOob(oob)
     let code = toCode(at(recv.str, idxZi))
     liftBV(intToBv[8](code, Z3BitVec[8]), false)
   of iekStrSubstr:
@@ -742,7 +757,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
              "(CR-17 class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
       var fresh: seq[Z3Bool]
-      return allocateSym(tString(), "__strSubstrBoundDegrade", fresh)
+      return lowerHooks.allocateSym(tString(), "__strSubstrBoundDegrade", fresh, false, @[])
     let lo = loSV.zi
     let hi = hiSV.zi
     let lenS = len(recv.str)
@@ -947,7 +962,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let sepIR  = e.strArgs[1]
     if sepIR.kind == iekStrLit and sepIR.sval.len == 0:
       # (a) empty-sep: the one-element seq holding the receiver itself.
-      let recvSym = lower(env, recvIR)
+      let recvSym = lowerHooks.lower(env, recvIR, none(SymVal))
       requireStr(recvSym, "iekStrSplit")
       let arr = store(mkConstArray[Z3Int, Z3String](mkString("")), mkInt(0),
                       recvSym.str)
@@ -974,9 +989,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # RFC-0005 S5: lower receiver AND separator BEFORE declining -- the
       # kind is `dcFreshSymbol`, so neither operand's raise forks may be
       # dropped with the op (`s.split($(a div b))`).
-      let recvSym = lower(env, recvIR)
+      let recvSym = lowerHooks.lower(env, recvIR, none(SymVal))
       requireStr(recvSym, "iekStrSplit")
-      let sepSym = lower(env, sepIR)
+      let sepSym = lowerHooks.lower(env, sepIR, none(SymVal))
       requireStr(sepSym, "iekStrSplit")
       raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "general symbolic string.split is not bounded-encodable " &
@@ -1353,9 +1368,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # Fresh byte-faithful strings (allocateSym's itString arm adds the
       # ADR-0006 ≤0xFF char-range membership into `alloc`).
       var alloc: seq[Z3Bool]
-      let coreSV = allocateSym(tString(), tag & "_core", alloc)
-      let preSV  = allocateSym(tString(), tag & "_pre",  alloc)
-      let sufSV  = allocateSym(tString(), tag & "_suf",  alloc)
+      let coreSV = lowerHooks.allocateSym(tString(), tag & "_core", alloc, false, @[])
+      let preSV  = lowerHooks.allocateSym(tString(), tag & "_pre",  alloc, false, @[])
+      let sufSV  = lowerHooks.allocateSym(tString(), tag & "_suf",  alloc, false, @[])
       let (core, pre, suf) = (coreSV.str, preSV.str, sufSV.str)
       # (union chars)* — a finite union of single-char literal regexes.
       var charRes: seq[Z3Regex[Z3String]]
@@ -1470,7 +1485,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # The write's own IndexDefect (`iekStrAt`'s sink): a field's `o.s[i] = c`
     # has no read before it (`dottedFieldMutate`); after one, it is false.
     let oob = not (i >= mkInt(0) and i < len(s))
-    depositStrIndexOob(oob)
+    lowerHooks.depositStrIndexOob(oob)
     let lenFold = simplify(len(s))
     if getAstKind(lenFold) == akNumeral:
       # A string of known length (at most `strSetAtUnroll`): one splice per
@@ -1548,7 +1563,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     inc strCharsCounter
     let iVar = mkIntVar("__strchars_i" & $strCharsCounter)
     let xVar = mkCharVar("__strchars_x" & $strCharsCounter)
-    let el = seqElemAt(a, iVar)
+    let el = lowerHooks.seqElemAt(a, iVar)
     if el.kind != svBV8:
       raise (ref SymexUnsupportedStringOpError)(op: "iekStrFromChars",  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "iekStrFromChars: an element lowered to " &
@@ -1607,3 +1622,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     raise (ref SymexUnsupportedStringOpError)(op: $e.kind,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36); hardened N46 from a bare ValueError the chokepoint's catch list did not cover]
       msg: "lowerStrArm: unexpected e.kind=" & $e.kind &
            " (not iekStrLit or StrOpKinds)")
+
+proc resetStringLowering*() =
+  ## The per-run reset of this module's threadvars. `regexReachCache` is a
+  ## pure function of the pattern text (a `LimitReach` holds no Z3 term), so
+  ## it is process-stable and stays.
+  strCharsCounter = 0                    ## RFC-0005 S8ca: bound-var names

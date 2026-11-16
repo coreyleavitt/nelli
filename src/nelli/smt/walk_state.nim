@@ -627,6 +627,11 @@ type LowerHooks* = object
   registerCapCell*: proc(local: string; v: SymVal) {.nimcall.}
     ## Keeps a by-reference capture in the frame's env cell (RFC-0005 S8ax);
     ## it writes the frame of `WalkCtx`.
+  depositStrIndexOob*: proc(oob: Z3Bool) {.nimcall.}
+    ## A string element access outside its bounds (RFC-0016 PRC-07): the
+    ## checked build's `IndexDefect` sink or the undefined-access deposit. It
+    ## reads the build's check options and `arithTrapConds`, which
+    ## `runtime.nim` owns.
 
 var lowerHooks*: LowerHooks
   ## Written once at `runtime.nim` module init; read-only afterwards.

@@ -647,3 +647,12 @@ proc truncBV*(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
     SymVal(kind: svBV8, signed: tgtSigned, bv8: extract(v.bv16, 7, 0))
   else:
     raiseAssert "truncBV: unsupported operand kind: " & $v.kind
+
+proc mkSeqSV*(len: Z3Int; arrs: seq[Z3AnyAst]; elemTy: IRType): SymVal =
+  ## RFC-0005 S8bc. A backed seq value of `elemTy` from its length and its
+  ## data arrays (`seqArrs`' order).
+  ## RFC-0005 batch 4: the value's element type is the CELL type
+  ## (`seqCellTy`, S8ba): a `distinct` element is held as its base, and a
+  ## read at the distinct static type re-boxes.
+  SymVal(kind: svSeq, seqLen: len, seqDataRaw: arrs[0],
+         seqDataMore: arrs[1 .. ^1], seqElemTy: seqCellTy(elemTy))

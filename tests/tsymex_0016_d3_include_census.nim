@@ -33,30 +33,22 @@ const
   root = currentSourcePath().parentDir() / ".."
   smt = root / "src" / "nelli" / "smt"
 
-  expectedIncludes = [
-    "runtime_strings.nim", "runtime_heap.nim"]
+  expectedIncludes = ["runtime_heap.nim"]
 
   ## Includes that became real modules (D3c-3: exceptions, D3c-4: floats,
-  ## D3c-5: closures).
+  ## D3c-5: closures, D3c-7: strings).
   movedToModules = ["runtime_exceptions.nim", "runtime_floats.nim",
-                    "runtime_closures.nim"]
+                    "runtime_closures.nim", "runtime_strings.nim"]
 
   ## Ratchet-down only: the measured count of distinct runtime-private
-  ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1: 52/14/6/23/146; D3c-2, once the walk state left runtime.nim: 21/136; D3c-6, once the heap algebra became a module: heap 105, strings 17).
-  ceilings = {
-    "runtime_strings.nim": 17,
-    "runtime_heap.nim": 105}.toTable
+  ## symbols the heap include references.
+  ceilings = {"runtime_heap.nim": 105}.toTable
 
   ## What slice D3c-6 made real modules below `runtime.nim`: the heap algebra
   ## and the sort-checked Z3 term builders it rests on.
   hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
                "./types", "./symval", "./walk_state", "./z3check"]
   zcAllowed = ["z3", "./types", "./symval"]
-
-  ## Parameter names (`c, t, e: RawZ3Ast`, `s: RawZ3Sort`, `cond: Z3Bool`)
-  ## that coincide with a field line of a `runtime.nim` block; `boundHere`
-  ## sees only the last name of a comma list.
-  hmParamNames = ["c", "s", "cond"]
 
   ## The decl-kind caches of the linked Z3: the same in every run, read in a
   ## probe context (`probeContext`), so `resetHeapModel` leaves them alone.
@@ -96,7 +88,7 @@ proc leadIdent(s: string): string =
 proc definedNames(text: string): HashSet[string] =
   ## Top-level definitions: `proc|func|template|macro|iterator|converter|
   ## method|type|var|let|const NAME` at column 0, and the NAME lines
-  ## (indent 2) of a `type`/`var`/`let`/`const` block.
+  ## (indent 2) of a bare `type`/`var`/`let`/`const` block.
   var inBlock = false
   for raw in text.splitLines:
     if raw.strip().len == 0 or raw[0] == '#': continue
@@ -112,7 +104,10 @@ proc definedNames(text: string): HashSet[string] =
           let n = leadIdent(ws[1])
           if n.len > 0: result.incl n
       of "type", "var", "let", "const":
-        inBlock = true
+        # only a bare keyword opens a block of definitions; after
+        # `type Foo = object` the indent-2 lines are its FIELDS, which no
+        # other module can name as a bare identifier
+        inBlock = ws.len == 1
         if ws.len > 1:
           let n = leadIdent(ws[1])
           if n.len > 0: result.incl n
@@ -143,10 +138,18 @@ proc boundHere(text: string): HashSet[string] =
     let t = l.strip()
     let ws = t.splitWhitespace
     if ws.len > 1 and ws[0] in ["let", "var", "const"]:
-      result.incl leadIdent(ws[1])
+      # `let a, b = ...` and `var a, b: T`: every name of the comma list
+      var lhs = t[ws[0].len .. ^1]
+      for stop in [" = ", ":"]:
+        let q = lhs.find(stop)
+        if q >= 0: lhs = lhs[0 ..< q]
+      for w in lhs.split(','):
+        result.incl leadIdent(w.strip().strip(chars = {'*'}))
     if ws.len > 1 and ws[0] == "for":
       for w in t[4 .. ^1].split(" in ")[0].split(','):
         result.incl leadIdent(w.strip())
+    let isSig = ws.len > 0 and ws[0] in ["proc", "func", "template", "macro",
+                                          "iterator", "converter", "method"]
     var prev = ' '   # the last non-space character before the identifier
     var i = 0
     while i < l.len:
@@ -159,8 +162,23 @@ proc boundHere(text: string): HashSet[string] =
         let labelled = k < l.len and l[k] == ':' and
                        (k + 1 >= l.len or l[k + 1] != ':')
         if prev == '.' or
-           (labelled and (prev in {'(', ','} or l[0 ..< i].strip().len == 0)):
+           (labelled and (prev in {'(', ',', ';'} or l[0 ..< i].strip().len == 0)):
           result.incl name
+          if labelled and (isSig or l[0 ..< i].strip().allCharsInSet(
+                                       IdentChars + {',', ' '})):
+            # `a, b: T`: walk back over the bare names before the label
+            var b = i
+            while true:
+              var m = b
+              while m > 0 and l[m - 1] == ' ': dec m
+              if m == 0 or l[m - 1] != ',': break
+              dec m
+              while m > 0 and l[m - 1] == ' ': dec m
+              var n0 = m
+              while n0 > 0 and l[n0 - 1] in IdentChars: dec n0
+              if n0 == m: break
+              result.incl l[n0 ..< m]
+              b = n0
         prev = 'a'
         i = j
       else:
@@ -387,7 +405,7 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     let ws = readSmt("walk_state.nim")
     for h in ["lower", "lowerClosureCall", "seqElemAt", "storeSeqElem",
               "sameSymVal", "entryValueOf", "iteSV", "allocateSym",
-              "currentFrameId", "registerCapCell"]:
+              "currentFrameId", "registerCapCell", "depositStrIndexOob"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
     check not ws.contains("sortOfTuple*:")   # D3c-6: read directly from heap_model
@@ -431,7 +449,6 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
       checkpoint f
       let text = readSmt(f)
       var allowed = definedNames(text) + boundHere(text)
-      for n in hmParamNames: allowed.incl n
       let named = referenced(viaHooks(text), priv - allowed)
       checkpoint $named
       check named.len == 0
@@ -474,3 +491,84 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
       check hp.contains("\nproc " & n)
     for n in ["heapSelect", "svLeafAsts", "mkHeapArrayVar", "svCellWf"]:
       check not hp.contains("\nproc " & n)
+
+const
+  ## D3c-7: what `string_lower_support.nim` may import, and the names that
+  ## moved into it, `symval.nim` and `z3check.nim`.
+  slsAllowed = ["std/tables", "std/options", "std/sets", "std/algorithm",
+                "std/strutils", "z3", "./types"]
+  strAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
+                "./types", "./abstraction", "./symval", "./walk_state",
+                "./z3check", "./heap_model", "./string_lower_support",
+                "./regex_parser", "./pcre_select", "./pcre_engine",
+                "./pcre_syntax", "./errorkind", "./stdlib_rows"]
+  d3c7Moved = ["literalStringBytes", "IndexSplit", "indexSplits",
+               "indexSplitOf", "indexSplitCounter", "splitNeedle",
+               "literalLen", "NotInForm", "notInForm", "NotIn",
+               "indexSplitAxioms", "indexSplitChain", "indexSplitLastLink",
+               "lowerIndexSplit", "registeredIndexSplit", "indexSplitRoots",
+               "lambdaOver", "mkSeqSV"]
+
+suite "RFC-0016 D3c-7: the strings module and string_lower_support leaf":
+  test "string_lower_support.nim and runtime_strings.nim import only leaves":
+    let sls = importsOf(readSmt("string_lower_support.nim"))
+    checkpoint $sls
+    for s in sls: check s in slsAllowed
+    let str = importsOf(readSmt("runtime_strings.nim"))
+    checkpoint $str
+    for s in str: check s in strAllowed
+    check "./string_lower_support" in str and "./symval" in str
+
+  test "string_lower_support names no runtime.nim symbol":
+    let priv = definedNames(readSmt("runtime.nim"))
+    let text = readSmt("string_lower_support.nim")
+    let named = referenced(viaHooks(text),
+                           priv - definedNames(text) - boundHere(text))
+    checkpoint $named
+    check named.len == 0
+
+  test "runtime.nim imports string_lower_support and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./string_lower_support")
+    check rt.contains("\nexport string_lower_support")
+    let defs = definedNames(rt)
+    for n in d3c7Moved:
+      checkpoint n
+      check n notin defs
+    for n in definedNames(readSmt("string_lower_support.nim")):
+      checkpoint n
+      check n notin defs
+
+  test "every run-state threadvar of the string leaves is reset":
+    let sls = readSmt("string_lower_support.nim")
+    let at = sls.find("proc resetStringSupport*(")
+    check at >= 0
+    let body = sls[at .. ^1]
+    var tvs: seq[string]
+    for l in sls.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    # the test hook and the linked-Z3 probe are the same in every run
+    check tvs.len == 5
+    for n in tvs:
+      checkpoint n
+      if n in ["notInFormOverride", "linkedNotInForm"]:
+        check not body.contains("\n  " & n & " = ")
+      else:
+        check body.contains("\n  " & n & " = ")
+    # `runtime_strings.nim`: strCharsCounter is reset; `regexReachCache` is a
+    # pure function of the pattern text (no Z3 term) and stays
+    let st = readSmt("runtime_strings.nim")
+    let at2 = st.find("proc resetStringLowering*(")
+    check at2 >= 0
+    var tvs2: seq[string]
+    for l in st.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs2.add leadIdent(l[4 .. ^1])
+    check tvs2 == @["strCharsCounter", "regexReachCache"]
+    check st[at2 .. ^1].contains("\n  strCharsCounter = 0")
+    let rt = readSmt("runtime.nim")
+    let ar = rt.find("proc resetSymexRunState(")
+    check ar >= 0
+    check rt[ar .. ^1].contains("\n  resetStringSupport()")
+    check rt[ar .. ^1].contains("\n  resetStringLowering()")

@@ -14,5 +14,5 @@ suite "RFC-0016 D3c-2: lowerHooks":
       checkpoint name
       check not f.isNil
       inc n
-    check n == 10
+    check n == 11
 

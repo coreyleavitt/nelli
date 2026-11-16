@@ -281,3 +281,9 @@ const termWalkMaxDepth* = 256
   ## 256 levels is under the `nimFrameReserve` a solve keeps, at 1 or 2 frames a
   ## level.
 
+proc lambdaOver*(ctx: Z3Context; iVar: Z3Int; body: Z3AnyAst): Z3AnyAst =
+  ## RFC-0005 S8bc. `lambda iVar. body`, as `iekSeqSlice` builds its view
+  ## (beta-reduced by Z3 at every select; no quantifier). Wrapped at once.
+  var iApp = ctx.checkErr Z3_to_app(ctx.raw, iVar.raw)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw, 1'u32,
+    cast[ptr UncheckedArray[RawZ3App]](addr iApp), body.raw))

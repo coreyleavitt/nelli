@@ -15999,16 +15999,35 @@ proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
   let memberCond = mkStrOp(iekStrInOptionRegion, "optregion", @[sIR, iIR, boundIR])
   some(mkIf(@[mkBranch(memberCond, mkBlock(@[]))], fallback))
 
-const mayWriteMagics = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
+const mayWriteMagics* = ["Incl", "Excl", "Inc", "Dec", "AppendStrCh",
   "AppendStrStr", "AppendSeqElem", "New", "NewFinalize", "WasMoved",
-  "Destroy", "Swap", "SetLengthStr", "SetLengthSeq", "NewSeq", "Reset",
-  "ShallowCopy", "DeepCopy", "Move"]
+  "Destroy", "Swap", "SetLengthStr", "SetLengthSeq", "SetLengthSeqUninit",
+  "NewSeq", "Reset", "ShallowCopy", "DeepCopy", "Move"]
   ## RFC-0016 K6a (W-08). The magics that write the location of a `var`
   ## argument: `cgMutatingMagics` (`ccgcalls.getPotentialWrites`) without
   ## `Addr`, which takes an address and writes nothing, plus `Swap`.
   ## RFC-0016 K2F-1: and the rest of `semexprs.FakeVarParams`, the magics
   ## whose `var` argument carries no `nnkHiddenAddr` (`setLen`, `reset`,
   ## `move`, ...): nothing else in the typed tree marks it written.
+  ## RFC-0016 CR3 H7: `SetLengthSeqUninit` (`setLenUninit`), the member of
+  ## Nim 2.2.10's `FakeVarParams` the list had missed.
+
+const mayWriteMagicsExempt*: seq[tuple[magic, reason: string]] = @[
+  (magic: "ParseBiggestFloat",
+   reason: "writes its second argument (`number: var BiggestFloat`), not " &
+     "its first; it is not in `FakeVarParams`, so that argument carries " &
+     "`nnkHiddenAddr`, which the scans read"),
+  (magic: "Asgn",
+   reason: "`=copy` / `=sink` / `=`, called by name, write their first " &
+     "argument; `Asgn` is not in `FakeVarParams`, so that argument carries " &
+     "`nnkHiddenAddr`, which the scans read"),
+  (magic: "Trace",
+   reason: "`=trace` reads its `var` argument for the cycle collector and " &
+     "writes nothing; it is not in `FakeVarParams`, so that argument " &
+     "carries `nnkHiddenAddr`, which the scans read regardless")]
+  ## RFC-0016 CR3 H7. The magics with a `var` formal that `mayWriteMagics`
+  ## does not list, each with the reason its write is read some other way
+  ## (`tsymex_0016_cr3_maywrite` cross-checks the list against `lib/`).
 
 proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
   ## Round-6 B1a mutation-fallback guard (ADR-0028 Leg 1): true iff `body`

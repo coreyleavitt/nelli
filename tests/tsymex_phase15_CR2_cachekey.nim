@@ -1221,7 +1221,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## on a path the pins contradict, and is not followed): 352->353.
     ## RFC-0016 W3-z int7 (a run walks the tail once per distinct pins; replay
     ## candidates with the same pins share one walk): 353->354.
-    check symexWalkerVersion == "354"
+    ## RFC-0016 CR3 (H7 `setLenUninit` is a may-write magic; H4 a `for`
+    ## bound is read as Nim's inliner binds it): 354->356.
+    check symexWalkerVersion == "356"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

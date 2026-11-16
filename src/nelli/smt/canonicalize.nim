@@ -628,8 +628,16 @@ const renderAsChoicesVersion* = "12"
   ##   earlier walks left of the run's tail budget read `ubTailUnverified`
   ##   when that budget ran out; it now carries the answer of the walk under
   ##   its pins, and distinct pins keep more of the budget.
+  ## - RFC-0016 CR3 (354->356; 355 is another slice's): H7, `setLenUninit`
+  ##   (`SetLengthSeqUninit`) is a may-write magic, so a `lent` loop over a
+  ##   seq the body shrinks with it declines where the walk had kept the
+  ##   element read. H4, a `..` / `..<` / `countup` / `countdown` bound is
+  ##   read as Nim's inliner binds it (`transf.putArgInto`): a field path, a
+  ##   `var` formal and a same-type conversion are re-read on every
+  ##   iteration, `s[k]` through its address (declined when the body may
+  ##   move that address), anything else copied once.
 
-const symexWalkerVersion* = "354"
+const symexWalkerVersion* = "356"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

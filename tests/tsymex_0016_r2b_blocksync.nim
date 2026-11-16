@@ -271,7 +271,7 @@ suite "R5-2: reconciled only where effects are produced":
     check not procBody("walkStmt").contains("reconcileCells(")
     # (the literal `"result"` is gone from `codeOf`'s view)
     check procBody("evalReturnSynced").contains(
-      "evalReconciled(p, w, CellProducer(assigned: \"result\"), q)")
+      "evalReconciled(p, w, CellProducer(assigned:")
   test "both evaluation points share one skeleton (R8-2)":
     # The snapshot, the lowering and the reconcile live in `evalReconciled`;
     # `result` is bound once, in the return's lowering.
@@ -286,7 +286,7 @@ suite "R5-2: reconciled only where effects are produced":
     for p in ["evalCondSynced", "evalReturnSynced"]:
       check not procBody(p).contains("snapCells(")
       check not procBody(p).contains("reconcileCells(")
-    check procBody("evalReturnSynced").count("newEnv[\"result\"]") == 1
+    check procBody("evalReturnSynced").count("newEnv[") == 1
   test "`CellProducer` is declared beside the producers that build it":
     check runtimeCode.count("\ntype CellProducer = object") == 1
     check runtimeCode.find("\ntype CellProducer = object") <

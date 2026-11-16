@@ -23594,6 +23594,18 @@ proc linkCapAddrCells(paths: seq[Path]; w: WalkCtx): seq[Path] =
           changed = true
     result.add(if changed: forkPath(p, p.pc, env2) else: p)
 
+func syncedByItsParts(stmt: IRStmt): bool =
+  ## R2-2. A `isBlock` has no effect of its own: its effects are exactly its
+  ## statements', and each of them synced one by one (`walkCapSynced`). D1-F2
+  ## made every routine and lambda body a stamped block, so the post-statement
+  ## reconciliations (`syncAddrCells`, `walkCapSynced`'s capture loop) would
+  ## otherwise run once more for the whole body, against a snapshot from
+  ## before it, and read the two sides' terms (equal in value, not always in
+  ## term) as a write by name and a write through the cell. `isIf`/`isWhile`
+  ## are not in this set: a condition's calls are effects of the statement
+  ## itself, which no inner statement synced.
+  stmt.kind == isBlock
+
 proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. After `stmt`, each address-taken variable of the
@@ -23637,16 +23649,12 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         env2.del(viewFreedPrefix & c.local)
         if q == nil: q = forkPath(p, p.pc, p.env)
         freed.add displayName(c.local)
-    for pass in 0 ..< passes:
+    # A block's statements synced one by one; its own pass reconciles nothing
+    # (a callee that removes a view's key would read as having written the
+    # view and the Table in one statement: `s8cn_views`, `rc_live`).
+    for pass in 0 ..< (if syncedByItsParts(stmt): 0 else: passes):
       for c in w.frame.addrCells:
         if c.slot.len > 0:
-          # D1-F2 gave every routine body a stamped block, and `walk` syncs a
-          # block as a statement: against the snapshot from before the body,
-          # after each of its statements synced. A callee that removes the
-          # view's key then reads as having written the view and the Table in
-          # one statement (`s8cn_views`, `rc_live`). A block has no effect of
-          # its own, so its statements' syncs are the whole of it.
-          if stmt.kind == isBlock: continue
           # RFC-0005 S8bx (item 3): the location is the Table's value at the
           # key. A statement nested in this one has synced already, and left
           # the view the same term as the table's value at the key.
@@ -24299,6 +24307,7 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   let outs = syncElemCells(stmt, outs0, depth, w)   # RFC-0005 S8be
   if w.frame.capCells.len == 0:
     return syncAddrCells(stmt, outs, depth, w)
+  let toReconcile = if syncedByItsParts(stmt): @[] else: w.frame.capCells
   var byAddr: seq[string]
   if stmt.kind == isCall:
     for (local, _) in w.frame.capCells:
@@ -24307,7 +24316,7 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var env2 = p.env
     var touched = false
     var clash = byAddr
-    for (local, cell) in w.frame.capCells:
+    for (local, cell) in toReconcile:
       let snap = capSnapName(depth, cell)
       if not env2.hasKey(local) or not env2.hasKey(cell): continue
       if not env2.hasKey(snap):

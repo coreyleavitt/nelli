@@ -329,8 +329,31 @@ suite "RFC-0016 D3: codeOf reads code, not comments or strings":
     check c.contains("lowerHooks.lower(")
     check not codeOf("p = r\"a \"\" lowerHooks.lower( b\" + w\n").contains("lowerHooks")
     check codeOf("p = r\"a \"\" lowerHooks.lower( b\" + w\n").contains("w")
-  test "stripLine is one line of codeOf":
-    check stripLine("a # b") == "a "
+  test "the '#' char literal does not start a comment":
+    let c = codeOf("var h = '#'; d = 1\nlowerHooks.lower(x)\n")
+    check c.contains("d = 1")
+    check c.contains("lowerHooks.lower(")
+  test "a #[ or ##[ inside a string opens no block comment":
+    let c = codeOf("s = \"#[ not a comment\"\nlowerHooks.lower(x)\nt = \"##[\"\nw\n")
+    check c.contains("lowerHooks.lower(")
+    check c.contains("w")
+  test "a four-quote close of a triple string ends it on the last three":
+    let c = codeOf("x = \"\"\"a\"\"\"\"\nlowerHooks.lower(y)\n")
+    check c.contains("lowerHooks.lower(")
+    check not c.contains("a\"")
+    check codeOf("x = \"\"\"a \"\"\" + q\n").contains("q")
+  test "an unterminated char literal swallows nothing past its line":
+    check codeOf("var c = 'a\nlowerHooks.lower(x)\n").contains("lowerHooks.lower(")
+    check codeOf("var c = '\\nfoo\nlowerHooks.lower(x)\n").contains("lowerHooks.lower(")
+    check codeOf("var c = '\n").contains("var c")
+  test "]## closes at nested depth as ]# and leaves a lone #":
+    let c = codeOf("##[ a #[ b ]## c ]##\nz\n")
+    check c.contains("z")
+    check not c.contains("c ")
+    check c.splitLines.len == 3
+    let d = codeOf("#[ a #[ b ]# c ]#\nz\n")
+    check d.contains("z")
+    check not d.contains("c ")
 
 suite "RFC-0016 D3: relImports reads every import form":
   test "plain, aliased, comma, bracket and from forms; comments are not imports":

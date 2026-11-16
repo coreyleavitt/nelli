@@ -132,3 +132,41 @@ suite "D6: symex.nim is the facade":
     check n <= facadeLineCeiling
     if n > facadeLineCeiling:
       echo "symex.nim is ", n, " lines; ceiling ", facadeLineCeiling
+
+# R5-H1 (0.10.0 review, round 5): `when defined(nelliVmAliasAudit):` is
+# semantically checked only under that define, so pruning an "unused" file-level
+# import (`std/os`) broke the audit block while every ordinary compile stayed
+# green. This pin needs no define: it reads the block's text and requires that
+# each std module whose symbols the block names is imported somewhere in the
+# file.
+proc gatedBlock(src: string): string =
+  let marker = "when defined(nelliVmAliasAudit):"
+  let at = src.find(marker)
+  if at < 0: return ""
+  var lines: seq[string]
+  for l in src[at + marker.len .. ^1].splitLines()[1 .. ^1]:
+    if l.len > 0 and l[0] notin {' ', '#'}: break   # the next column-0 code line ends the block
+    lines.add l
+  lines.join("\n")
+
+proc importsStd(src, module: string): bool =
+  for l in src.splitLines:
+    let s = l.strip
+    if (s.startsWith("import std/") or s.startsWith("from std/")) and module in s.split({'/', '[', ']', ',', ' ', '\t'}):
+      return true
+
+suite "D6: the self-audit block's imports resolve without the define":
+  test "every std module the nelliVmAliasAudit block names is imported":
+    let blk = gatedBlock(facadeSrc)
+    check blk.len > 0
+    # (module, the symbols of it a guarded block could be using)
+    let needs = [("os", @["parentDir", "extractFilename", "joinPath", "splitFile", "fileExists"]),
+                 ("algorithm", @["sort(", "sorted(", "reversed("]),
+                 ("importutils", @["privateAccess"]),
+                 ("sequtils", @["mapIt", "filterIt", "toSeq"])]
+    for (module, syms) in needs:
+      for s in syms:
+        if s in blk:
+          check importsStd(facadeSrc, module)
+          if not importsStd(facadeSrc, module):
+            echo "the nelliVmAliasAudit block uses ", s, " but nothing imports std/", module

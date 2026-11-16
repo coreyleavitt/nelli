@@ -828,6 +828,9 @@ macro symexFindAllWitnesses*(fn: typed,
 # cycle). This block covers the 16th: symex.nim's OWN top-level routines,
 # self-audited (no `{.all.}}` import needed to reflect on your own module).
 when defined(nelliVmAliasAudit):
+  # The audit block's own need (`symexSmtDir` below). Nim checks this block
+  # only under the define, so the file-level import was pruned unseen (R5-H1).
+  from std/os import parentDir, `/`
   import ./smt/vm_alias_guard
   import ./smt/witness_render {.all.}
   import ./smt/symex_cache {.all.}

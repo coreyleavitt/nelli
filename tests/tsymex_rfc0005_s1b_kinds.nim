@@ -291,7 +291,7 @@ proc routineName(line: string): string =
       return name
   ""
 
-proc codeOf(line: string): string =
+proc lineCode(line: string): string =
   let ix = line.find(" #")
   if ix >= 0: line[0 ..< ix] else: line
 
@@ -316,7 +316,7 @@ proc scanSites(ident: string): seq[Site] =
       if r == ident: continue   # the routine's own definition line
       let trimmed = raw.strip()
       if trimmed.len == 0 or isCommentLine(trimmed): continue
-      if hasIdentCall(codeOf(raw), ident):
+      if hasIdentCall(lineCode(raw), ident):
         result.add (path.extractFilename, routine, trimmed)
 
 proc routinesOf(ss: seq[Site]): seq[string] =

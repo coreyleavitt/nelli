@@ -1,18 +1,26 @@
 ## Shared scan primitives for the source-level regression-audit test suites
 ## (the "house scan-and-marker technique" `tsymex_r6_n27_placeholder_read_
-## audit.nim`'s header describes). Round-6 mechanical-debt slice: these two
-## procs were byte-identical, independently copy-pasted, across five audit
-## suites (`tsymex_r6_n27_placeholder_read_audit`, `tsymex_phase15_N2_
-## kindgate_audit`, `tsymex_phase15_A2a_atomicir_audit`, `tsymex_phase15_A2a_
-## chokepoint_audit`, `tsymex_r6_n36_raise_class_audit`). Extracted here so a
-## future fix to either applies once instead of drifting across five copies.
+## audit.nim`'s header describes). What it holds:
+##   * `isCommentLine`, `isIdentChar`: the two byte-identical per-line
+##     primitives that were copy-pasted across five audit suites;
+##   * `smtSrcDir`, `runtimeFamilyFiles`, `runtimeFamilySources`: the one list
+##     of files every source audit of the walker reads;
+##   * `codeOf`: the comment- and string-blind whole-text lexer, and
+##     `relImports`, the `./module` import reader built on it.
 ##
-## Deliberately NOT a home for every scan helper the audits use: each suite's
-## other primitives (`fieldNameAt`, `routineVocabWordLenAt`, `matchesAt`, ...)
-## look superficially similar but encode different word-boundary/marker rules
-## for that suite's own vocabulary -- forcing them into one shared proc would
-## couple suites that should stay independently editable. Only genuinely
-## byte-identical pieces belong here.
+## Rules:
+##   * Read source through `codeOf` on the WHOLE text and index lines in the
+##     result (it keeps one output line per input line). A per-line strip
+##     cannot know it sits inside a `#[ ]#` block comment or a triple-quoted
+##     string, which is why no per-line `codeOf` wrapper is exported.
+##   * `isCommentLine` users stay per-line deliberately where a
+##     `# [placeholder-audited]`-style marker is counted: the marker lives IN
+##     a comment, so a comment-blind read would erase the thing being counted.
+##   * Not a home for every scan helper: each suite's other primitives
+##     (`fieldNameAt`, `routineVocabWordLenAt`, `matchesAt`, ...) encode
+##     different word-boundary/marker rules for that suite's own vocabulary,
+##     and stay local so suites remain independently editable. Only genuinely
+##     shared pieces belong here.
 
 import std/strutils
 
@@ -148,12 +156,6 @@ proc codeOf*(text: string): string =
     else:
       result.add c
       inc i
-
-proc stripLine*(line: string): string =
-  ## One line's code: `codeOf` on that line alone. A line cannot know whether
-  ## it sits inside a block comment or a triple-quoted string; a scan that must
-  ## respect those goes through `codeOf` on the whole file and indexes lines.
-  codeOf(line)
 
 proc relImports*(text: string): seq[string] =
   ## The `./name` modules a file imports: `import ./a`, `import ./a as b`,

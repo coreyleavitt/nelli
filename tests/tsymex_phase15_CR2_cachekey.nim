@@ -1228,7 +1228,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 CR-4 (a routine `{.noinit.}` result starts unwritten; the
     ## routine pragmas with no reader decline): 354->357 (the slice's
     ## reserved version).
-    check symexWalkerVersion == "357"
+    ## RFC-0016 0.10.0 review H1 (closures sharing one environment share it
+    ## on the re-exec replay wire): 354->358, the slice's reserved number.
+    check symexWalkerVersion == "358"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -1688,6 +1688,10 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_r11_closstr",
             "tsymex_0016_w3z_r11_hooked",
             "tsymex_0016_w3z_r12_closenv",
+            # RFC-0016 0.10.0 review H1: closures sharing one environment
+            # share it in the replay's child, forked and re-executed.
+            "tsymex_0016_cr1_sharedenv",
+            "tsymex_0016_cr1_sharedenv_reexec",
             "tsymex_rfc0005_b11_hoststate",
             "tsymex_rfc0005_b11_hoststate_reexec",
             "tsymex_rfc0005_s8ct_deepterm",

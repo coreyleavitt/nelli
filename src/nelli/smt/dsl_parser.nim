@@ -916,9 +916,9 @@ proc emitStmt*(s: IRStmt): NimNode =
         if s.blkArith.claims:   # RFC-0016 W1-d2c: a routine body's arithmetic
           # D2: the stamp is re-decided from the facts it was decided from
           # (`stampFor` is const-pure), never replayed from its scope.
-          let facts = emitArithFacts(s.blkFacts)
-          newCall(bindSym"mkArithBlock", newCall(bindSym"stampFor", facts),
-                  prefix(seqLit, "@"), facts)
+          # D1: the facts are stated once; `mkRoutineBlock` derives the stamp.
+          newCall(bindSym"mkRoutineBlock", emitArithFacts(s.blkFacts),
+                  prefix(seqLit, "@"))
         else:
           newCall(bindSym"mkBlock", prefix(seqLit, "@"))
       if s.blkScoped:   # RFC-0016 PRC-07: the checks the body is compiled with

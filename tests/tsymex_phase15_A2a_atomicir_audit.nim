@@ -577,8 +577,10 @@ proc isExemptedLine(fname, trimmed: string): bool =
   ## audit (never a line number, which rots the moment the file is edited
   ## above it).
   ##
-  ## RFC-0005 S8ca: `syncAddrCells`' in-place check on a character write by
-  ## name (`s[i] = c`, an `isAssign` of `iekStrSetAt`). The parser emits
+  ## RFC-0005 S8ca: the in-place check on a character write by name
+  ## (`s[i] = c`, an `isAssign` of `iekStrSetAt`), recorded by `producerOf`
+  ## as `assignsChar` (the peek moved there from `syncAddrCells` when the
+  ## producer facts were factored out). The parser emits
   ## that value directly as the assignment's (never through
   ## `parseAtomicOperand`), and a hoisted one would only make the view
   ## decline (no step logged), never a wrong verdict.
@@ -591,7 +593,7 @@ proc isExemptedLine(fname, trimmed: string): bool =
   ## returns on before this peek.
   fname == "src/nelli/smt/runtime.nim" and
     (trimmed == "if formal.isVar and stmt.cargs[i].kind == iekVar:" or
-     trimmed == "stmt.avalue.kind == iekStrSetAt):   # a character, by name" or
+     trimmed == "assignsChar: stmt.avalue.kind == iekStrSetAt)" or
      trimmed == "if s.lvalue != nil and s.lvalue.kind == iekTupleLit:")
 
 proc scanForSubfieldIekShapePeeks(fname, contents: string,

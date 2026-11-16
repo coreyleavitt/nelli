@@ -26550,6 +26550,13 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
     for pass in 0 ..< passes:
       for c in w.frame.addrCells:
         if c.slot.len > 0:
+          # D1-F2 gave every routine body a stamped block, and `walk` syncs a
+          # block as a statement: against the snapshot from before the body,
+          # after each of its statements synced. A callee that removes the
+          # view's key then reads as having written the view and the Table in
+          # one statement (`s8cn_views`, `rc_live`). A block has no effect of
+          # its own, so its statements' syncs are the whole of it.
+          if stmt.kind == isBlock: continue
           # RFC-0005 S8bx (item 3): the location is the Table's value at the
           # key. A statement nested in this one has synced already, and left
           # the view the same term as the table's value at the key.

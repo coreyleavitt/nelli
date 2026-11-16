@@ -452,11 +452,18 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
 
   test "the lower hooks are declared and a module is live through them":
     let ws = readSmt("walk_state.nim")
-    for h in ["lower", "lowerClosureCall", "seqElemAt", "storeSeqElem",
-              "sameSymVal", "entryValueOf", "iteSV", "allocateSym",
+    var callers = ""   # every smt/ module but runtime.nim and the table itself
+    for p in walkFiles(smt / "*.nim"):
+      let f = extractFilename(p)
+      if f notin ["runtime.nim", "walk_state.nim"]: callers.add readFile(p)
+    for h in ["lower", "lowerClosureCall", "seqElemAt", "iteSV", "allocateSym",
               "currentFrameId", "registerCapCell", "depositStrIndexOob"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
+      # a field no module outside runtime.nim calls is dead: delete it
+      check callers.contains("lowerHooks." & h & "(")
+    for h in ["storeSeqElem", "sameSymVal", "entryValueOf"]:
+      check not ws.contains("\n  " & h & "*: proc(")
     check not ws.contains("sortOfTuple*:")   # D3c-6: read directly from heap_model
     check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")
     check readSmt("runtime_closures.nim").contains("lowerHooks.allocateSym(")

@@ -30598,8 +30598,7 @@ proc c2aClosureProbeRelowered*(): C2aClosureProbe =
 # field is left nil.
 lowerHooks = LowerHooks(
   lower: lower, lowerClosureCall: lowerClosureCall, seqElemAt: seqElemAt,
-  storeSeqElem: storeSeqElem, sameSymVal: sameSymVal,
-  entryValueOf: entryValueOf, iteSV: iteSV, allocateSym: allocateSym,
+  iteSV: iteSV, allocateSym: allocateSym,
   currentFrameId: currentFrameId,
   registerCapCell: registerCapCell,
   depositStrIndexOob: depositStrIndexOob)

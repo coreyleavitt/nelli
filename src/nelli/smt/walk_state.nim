@@ -17,7 +17,8 @@
 ##     dropped;
 ##   * `LowerHooks`, a record of `{.nimcall.}` procs for the verbs an include
 ##     calls that are defined later than it (`lower`, `lowerClosureCall`,
-##     `seqElemAt`, `storeSeqElem`, `sameSymVal`, `entryValueOf`). It is
+##     `seqElemAt`, ...). A field exists only while an include or leaf calls
+##     it through the table (the census pins that). It is
 ##     filled once, at `runtime.nim` module init, before any walk.
 ##
 ## A threadvar added here MUST be reset in `resetWalkState`: a value left over
@@ -607,10 +608,6 @@ type LowerHooks* = object
   lower*: proc(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal {.nimcall.}
   lowerClosureCall*: proc(env: Env, e: IRExpr): SymVal {.nimcall.}
   seqElemAt*: proc(seqSV: SymVal, idx: Z3Int): SymVal {.nimcall.}
-  storeSeqElem*: proc(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
-                      val: SymVal): Z3AnyAst {.nimcall.}
-  sameSymVal*: proc(a, b: SymVal): bool {.nimcall.}
-  entryValueOf*: proc(name: string): SymVal {.nimcall.}
   iteSV*: proc(cond: Z3Bool, t, e: SymVal): SymVal {.nimcall.}
     ## The merge of two SymVals under a condition. Heavy (it reaches
     ## `allocateSym` and the degrade chokepoints), so it stays in

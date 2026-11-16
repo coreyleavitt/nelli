@@ -33,13 +33,13 @@ const
     "runtime_closures.nim", "runtime_heap.nim"]
 
   ## Ratchet-down only: the measured count of distinct runtime-private
-  ## symbols each include references (D3c-0).
+  ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1, once the value core left runtime.nim: as below).
   ceilings = {
-    "runtime_strings.nim": 62,
-    "runtime_floats.nim": 21,
-    "runtime_exceptions.nim": 9,
-    "runtime_closures.nim": 26,
-    "runtime_heap.nim": 151}.toTable
+    "runtime_strings.nim": 52,
+    "runtime_floats.nim": 14,
+    "runtime_exceptions.nim": 6,
+    "runtime_closures.nim": 23,
+    "runtime_heap.nim": 146}.toTable
 
   fwdFirst = "proc allocRefSort*("
   fwdLast = "proc allocateSeqDataRaw("
@@ -52,7 +52,7 @@ const
   ## What slice D3c-1 moved out of `runtime.nim`.
   movedNames = [
     "SVKind", "SymVal", "Env", "plainEnglishSymValKind", "liftBV", "ofBool",
-    "bvVar", "bvRangeConds", "taintInPlace", "lowerDegrade"]
+    "bvVar", "bvRangeConds", "lowerDegrade", "StrBuf", "VariantAxisSym"]
 
 proc stripLine(line: string): string =
   ## Drops string literals and the `#` comment; keeps identifiers.
@@ -154,3 +154,47 @@ suite "RFC-0016 D3: the include surface":
       checkpoint n
       check heap.contains("\nproc " & n & "*(") or
             heap.contains("\nproc " & n & "(")
+
+suite "RFC-0016 D3c-1: the symval leaf":
+  test "symval.nim imports only the allowed leaves":
+    let sv = readSmt("symval.nim")
+    var seen: seq[string]
+    for l in sv.splitLines:
+      let t = stripLine(l).strip()
+      if t.startsWith("import "):
+        for m in t[7 .. ^1].split(','):
+          var s = m.strip()
+          let k = s.find(" as ")
+          if k >= 0: s = s[0 ..< k]
+          seen.add s
+      elif t.startsWith("from "):
+        seen.add t.splitWhitespace[1]
+    checkpoint $seen
+    for s in seen: check s in symvalAllowed
+    check "./types" in seen
+
+  test "runtime.nim defines none of the moved names":
+    let defs = definedNames(readSmt("runtime.nim"))
+    for n in movedNames:
+      checkpoint n
+      check n notin defs
+
+  test "every threadvar of symval.nim is reset by resetLoweringSink":
+    let sv = readSmt("symval.nim")
+    let at = sv.find("proc resetLoweringSink*()")
+    check at >= 0
+    let resetBody = sv[at .. ^1]
+    var tvs: seq[string]
+    for l in sv.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs.len == 3
+    for n in tvs:
+      checkpoint n
+      check resetBody.contains("\n  " & n & " = ")
+
+  test "resetSymexRunState calls resetLoweringSink":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    check rt[at .. ^1].contains("\n  resetLoweringSink()")

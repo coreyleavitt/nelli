@@ -210,6 +210,33 @@ proc rI2(v: int): int =
   result += x
 nsut(sI2, rI2, 15)
 
+# A guard that is FALSE: no arm follows, so nothing but the guard's own
+# reconcile brings the local up to the pointer's write before `result += x`
+# reads it (a true guard's arm is a leaf, which reconciles it first).
+proc rI1F(v: int): int =
+  var x = v
+  let p = addr x
+  let c = proc(): bool =
+    p[] = p[] + 4
+    false
+  if c():
+    result = 10
+  result += x
+nsut(sI1F, rI1F, 5)
+
+proc rI2F(v: int): int =
+  var x = v
+  let p = addr x
+  let c = proc(): bool =
+    p[] = p[] + 4
+    false
+  if v < 0:
+    result = 1
+  elif c():
+    result = 10
+  result += x
+nsut(sI2F, rI2F, 5)
+
 # Controls: hoisted, so no guard holds a call.
 proc rH2(v: int): int =
   var x = v
@@ -319,6 +346,12 @@ suite "R7-3: a bare guard applying a closure reconciles":
   test "elif guard":
     check inlineSites(rI2) == @["if"]
     exitVerdict(sI2)
+  test "if guard that is false (pointer)":
+    check inlineSites(rI1F) == @["if"]
+    exitVerdict(sI1F)
+  test "elif guard that is false (pointer)":
+    check inlineSites(rI2F) == @["if"]
+    exitVerdict(sI2F)
   test "controls: an operand call is hoisted out of the guard":
     check inlineSites(rH2) == newSeq[string]()
     exitVerdict(sH2)
@@ -414,6 +447,33 @@ proc cWh(v: int) =
   if x * 10 + n == 71:
     n = 100
 
+# The follow walk's `if` and `while` guards, with a pointer write and a guard
+# that does not take its arm (so no arm leaf reconciles first): the branch
+# after reads `x`, which is only current if the guard reconciled.
+proc cIfF(v: int) =
+  var x = v
+  let p = addr x
+  var r = 0
+  let c = proc(): bool =
+    p[] = p[] + 4
+    false
+  if c():
+    r = 1
+  if x > 6:
+    r = 2
+
+proc cWhP(v: int) =
+  var x = v
+  let p = addr x
+  var n = 0
+  let c = proc(): bool =
+    p[] = p[] + 2
+    p[] < 6
+  while c():
+    inc n
+  if x * 10 + n == 71:
+    n = 100
+
 suite "R7-3: the concolic follow guards":
   test "follow `if` (witness 3: x is 7 after the guard)":
     check inlineSites(cIf) == @["if"]
@@ -431,6 +491,27 @@ suite "R7-3: the concolic follow guards":
     let trace = @[integerChoice(3, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
     let r = concolicCollect(cWh, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 1
+    if r.branchTrace.len == 1:
+      check r.branchTrace[0].armTaken == 0
+
+suite "R7-3: the concolic follow guards, pointer":
+  test "follow `if` that takes no arm (witness 3: x is 7 after the guard)":
+    check inlineSites(cIfF) == @["if"]
+    let trace = @[integerChoice(3, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(cIfF, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 2
+    if r.branchTrace.len == 2:
+      check r.branchTrace[0].armTaken == -1
+      check r.branchTrace[1].armTaken == 0
+  test "follow `while` (witness 3: x is 7 after the loop)":
+    check inlineSites(cWhP) == @["while"]
+    let trace = @[integerChoice(3, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(cWhP, trace, bindings)
     check r.pcSatByConcreteInputs
     check r.branchTrace.len == 1
     if r.branchTrace.len == 1:

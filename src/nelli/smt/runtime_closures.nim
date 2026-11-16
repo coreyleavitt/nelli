@@ -4,7 +4,7 @@
 # A real module (RFC-0016 review D3c-5): it imports `./symval` and
 # `./walk_state` and names no `runtime.nim` symbol. `runtime.nim` imports it
 # before `lower`'s body and calls `lowerClosureArm` directly; the verbs it
-# needs that `runtime.nim` defines later (`allocateSym`, `sortOfTuple`,
+# needs that `runtime.nim` defines later (`allocateSym`,
 # `currentFrameId`, `registerCapCell`, `lowerClosureCall`) go through
 # `lowerHooks`.
 #   sortFingerprint, paramSorts, buildClosure -- construction helpers (only
@@ -19,6 +19,7 @@ import z3
 import ./types
 import ./symval
 import ./walk_state
+import ./heap_model   ## RFC-0016 review D3c-6: `sortOfTuple`, read directly
 
 func closureRetStructured*(t: IRType): bool =
   ## RFC-0005 S8n. A closure return type whose per-occurrence result is a
@@ -58,7 +59,7 @@ proc paramSorts(params: seq[IRParam]; reps: var seq[SymVal]): seq[RawZ3Sort] =
     var scratchPC: seq[Z3Bool]
     reps.add lowerHooks.allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC,
                                       false, @[])
-    for s in lowerHooks.sortOfTuple(reps[^1]): result.add s
+    for s in sortOfTuple(reps[^1]): result.add s
 
 proc buildClosure(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C2a (ADR-0009 D1/D2/D4). Construct an `svClosure` from an
@@ -95,7 +96,7 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
       "buildClosure: no-capture lambda (unit-env, C3) must have a zero-field " &
       "env, got " & $envRecord.fields.len & " fields"
   # 2. Get-or-create the per-site funcSym.
-  let envLeafSorts = lowerHooks.sortOfTuple(envRecord)
+  let envLeafSorts = sortOfTuple(envRecord)
   # The representatives whose terms are all that hold the raw sorts below,
   # alive until the decl is made over them (`paramSorts`). A sort freed
   # before that was read again by `sortFingerprint` and handed to
@@ -129,7 +130,7 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
       else:
         sortReps.add lowerHooks.allocateSym(e.lambdaRetTy, "__closureRet", retPC,
                                       false, @[])
-        lowerHooks.sortOfTuple(sortReps[^1])
+        sortOfTuple(sortReps[^1])
     let rangeSort =
       if rangeSorts.len == 1:
         rangeSorts[0]

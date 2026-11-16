@@ -54,6 +54,18 @@ import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
 import ./stdlib_rows   ## RFC-0016 K4c: the facet cells a decline names
 import ./runtime_floats   ## RFC-0016 review D3c-4: Cluster F, `lowerFloatArm`
 import ./runtime_exceptions   ## RFC-0016 review D3c-3: Cluster E, `lowerExnArm`
+import ./z3check   ## RFC-0016 review D3c-6: the sort-checked Z3 term builders
+import ./heap_model   ## RFC-0016 review D3c-6: the heap algebra (replaces the forward-declaration block)
+export z3check.checkedStore, z3check.checkedSelect, z3check.checkedIte,
+       z3check.checkedEq, z3check.termWalkMaxDepth
+export heap_model.distinctBijectivityHints, heap_model.distinctSortNames,
+       heap_model.ContainerCardRegistry, heap_model.containerCard,
+       heap_model.discriminatorDomain, heap_model.axisDiscriminatorDomain,
+       heap_model.currentBorrowReboxCounter, heap_model.bvTermToZ3Int,
+       heap_model.refPointeeTypeId, heap_model.allocRefSort,
+       heap_model.fieldHeapKey, heap_model.inheritTagKey,
+       heap_model.heapChainDepth, heap_model.heapDerefsPerPathCap,
+       heap_model.heapDerefDecline, heap_model.sortOfTuple
 import ./runtime_closures   ## RFC-0016 review D3c-5: Cluster C, `lowerClosureArm`
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
@@ -779,74 +791,6 @@ proc envLitProto(env: Env, name: string): Option[SymVal] =
   else:
     none(SymVal)
 
-proc mkZ3IntLit(v: int64): Z3Int {.inline.}
-  ## Issue #163 W8 fwd-decl (Phase 14 A6; real definition below, beside
-  ## `allocRefSort`'s own fwd-decl just under this proc) —
-  ## `rangeCondsIfNeeded`'s `svInt` arm needs it before its real definition
-  ## appears.
-
-var allocEnumZeroLegal {.threadvar.}: bool
-  ## RFC-0005 S8z. Set by `freshRetSym` for the duration of its allocation:
-  ## a call's return value can hold an enum's ordinal 0 even when no member
-  ## has it (Nim zero-fills an untouched `result`, probed), so the range
-  ## conditions of an enum without ordinal 0 admit 0 there. Inputs (params)
-  ## keep the exact member range: their witness must render as a member.
-
-proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
-  ## Issue #163 review R11. The CONSTRAINT half of the two-obligation
-  ## contract every `range[lo..hi]`-typed value carries wherever it is
-  ## materialized from a backing store: (a) here — assert the symbol lies
-  ## in `[lo,hi]` on the solver path, or a free model can pick an illegal
-  ## value and produce a false `sxSat`; (b) `clampWitnessField`, below near
-  ## `clampToDeclaredRange` — clamp the WITNESS value read back out of an
-  ## already-solved model, or an unconstrained/unread cell's default (`0`)
-  ## can fall outside the range and raise a real `RangeDefect` reconstructing
-  ## it in the caller's own process.
-  ##
-  ## Before this helper existed, every new backing-store shape re-derived
-  ## the guard-and-call by hand, and every one of them shipped the bug at
-  ## least once before someone noticed: W2 (seq elements), W4 (ref-object
-  ## fields), R3 (ref-to-variant arm fields), R4 (Table values) are the SAME
-  ## missing abstraction, found one shape at a time. A NEW materialization
-  ## path (another container kind, another heap shape) inherits the
-  ## obligation by construction ONLY if it calls this proc instead of
-  ## re-deriving the guard — that is the whole reason this exists.
-  ##
-  ## Signedness comes from the TYPE, matching `cmpBV`'s own split: comparing
-  ## an unsigned BV with signed predicates reads `0xFF` as -1 and would
-  ## reject a legal value for `range[0'u8..255'u8]`.
-  ##
-  ## Issue #163 W8: `v` is not always BV-sorted. `allocateSym`'s two
-  ## `isIntOffset` arms (bare scan-offset return, traced tuple position)
-  ## allocate a Z3-Int-sorted `svInt` directly rather than the type-driven
-  ## BV default (`bvVar`) — the exact promotion `runSymexImpl`'s own
-  ## top-level-param `isIntOffset` branch already makes, and that branch
-  ## re-asserts the declared range as `zi >= lo`/`zi <= hi` (Z3Int
-  ## comparisons, since a Z3Int has no BV predicate to reuse). `bvRangeConds`
-  ## dispatches on `v.kind` and returns `@[]` for anything that isn't one of
-  ## the four BV kinds — by design for a BV-allocated value (dropping a
-  ## refinement only over-approximates), but WRONG here: silently applying
-  ## that same fallback to an `svInt` would make this call a no-op for
-  ## exactly the case it exists to cover. Handle `svInt` here, before
-  ## falling through to `bvRangeConds` for the BV kinds.
-  if ty.kind == itInt and ty.hasRange:
-    let conds =
-      if v.kind == svInt:
-        @[v.zi >= mkZ3IntLit(ty.rangeLo), v.zi <= mkZ3IntLit(ty.rangeHi)]
-      else:
-        bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed)
-    if allocEnumZeroLegal and ty.enumName.len > 0 and conds.len == 2 and
-        not (ty.rangeLo <= 0 and 0 <= ty.rangeHi):
-      # RFC-0005 S8z: see `allocEnumZeroLegal`.
-      let zero =
-        if v.kind == svInt: @[v.zi >= mkZ3IntLit(0), v.zi <= mkZ3IntLit(0)]
-        else: bvRangeConds(v, 0, 0, ty.signed)
-      if zero.len == 2:
-        return @[(conds[0] and conds[1]) or (zero[0] and zero[1])]
-    conds
-  else:
-    @[]
-
 proc seqStrElemConds(v: SymVal): seq[Z3Bool] =
   ## RFC-0005 S8ar. The well-formedness of a string read out of a backing
   ## store (a `seq[string]` element): it is a string of bytes, the fact
@@ -856,47 +800,6 @@ proc seqStrElemConds(v: SymVal): seq[Z3Bool] =
     @[matches(v.str, star(range(mkString("\x00"), mkString("\xff"))))]
   else: @[]
 
-proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
-  ## Phase 15 R3 fwd-decl (defined below) — `allocateSeqDataRaw` needs the
-  ## per-walker `Ref_T` sort to build a `seq[ref T]` backing array before the
-  ## R1 definition appears.
-proc refPointeeTypeId*(pointeeTy: IRType): string
-  ## Phase 15 R3 fwd-decl (defined below).
-proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
-                pointeeTy: IRType): SymVal
-  ## ADR-0013 Slice 2 fwd-decl (defined in runtime_heap.nim, included below).
-  ## `extractFromSymVal` (D5 witness serialization) selects the active arm's
-  ## fields out of `currentVariantHeaps` before the heap cluster is included.
-proc inheritTagKey*(objTy: IRType, level: int): string
-  ## RFC-0005 S8bn fwd-decl (defined in runtime_heap.nim, included below).
-  ## `allocateSym` ties a hierarchy ref's run-type tags to its static type.
-proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
-                    pointeeTy: IRType, name: string,
-                    variantTy: IRType = nil, leaf = 0): Z3AnyAst
-  ## RFC-0005 S8bn fwd-decl (defined in runtime_heap.nim, included below).
-proc fieldHeapKey*(objTy: IRType, field: string): string
-  ## Cluster H H_witness fwd-decl (defined in runtime_heap.nim, included
-  ## below). `buildHeapSnapshot`'s recursive descent needs the field-split
-  ## heap key before the heap cluster is included.
-proc variantDiscHeapKey(objTy: IRType): string
-  ## RFC-0005 S8l fwd-decl (defined in runtime_heap.nim, included below).
-  ## `renderCell` names each axis's discriminator heap.
-proc mvAxisView(mv: IRType; axisIx: int): IRType
-  ## RFC-0005 S8l fwd-decl (defined in runtime_heap.nim, included below).
-proc heapLeafSuffixes(ty: IRType): seq[string]
-  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
-proc svFitsHeapTy(sv: SymVal; ty: IRType): bool
-  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
-  ## `renderHeapValue` renders a case object cell.
-proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
-                  ty: IRType = nil): SymVal
-proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast]
-proc svLeafTerms(sv: SymVal; ty: IRType; pinForm = false): seq[Z3AnyAst]
-  ## RFC-0005 S8bc fwd-decl (defined in runtime_heap.nim, included below).
-  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
-  ## A container `Table` value is held leaf-split (`tabValLeaves`).
-proc svCellWf(sv: SymVal; ty: IRType; nested: bool; bounded = true): seq[Z3Bool]
-  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
@@ -977,44 +880,6 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
            plainEnglishTypeKind(elemTy.kind) &
            " (nested seq element type is not supported)")
 
-proc mkZ3IntLit(v: int64): Z3Int =
-  ## Phase 14 A6 (moved earlier from the abstraction layer block).
-  ## Build a Z3Int from an `int64`. `mkInt` truncates to `cint`
-  ## (32 bits on Linux); for values that don't fit, route through
-  ## `mkBigInt`'s decimal-string ctor.
-  if v >= int64(low(int32)) and v <= int64(high(int32)):
-    mkInt(int(v))
-  else:
-    mkBigInt($v)
-
-# ---- Phase 15 G4: `distinct T` fresh-uninterpreted-sort machinery -----------
-#
-# A `distinct T` is a TYPE WALL: a fresh uninterpreted Z3 sort, NOT the base
-# sort. Two uninterpreted functions per distinct type model the round-trip —
-# `inject_T: Base→Distinct` and `eject_T: Distinct→Base`. Bijectivity axioms
-# (`∀x:Base. eject(inject(x))==x` and `∀y:Distinct. inject(eject(y))==y`) are
-# asserted ONLY when the base is in the decidable fragment {int, BV, bool}; for
-# {float32, float64, string} the universally-quantified axioms over FP/string
-# sorts push Z3 into the incomplete quantified fragment (a hang risk), so they
-# are SKIPPED and a `geDistinctBijectivitySkipped` (sevHint) is emitted.
-#
-# `allocateSym` has no `WalkCtx` access (it is a pure type→SymVal allocator), so
-# the per-run distinct-sort cache + the inject/eject func-decls live in
-# threadvars reset at `runSymexImpl` entry — exactly E8's in-flight-exn-mirror
-# mechanism. `WalkerStatics.distinctSorts` (ADR-0008 D4) records the same map
-# for post-walk inspection; the threadvar is the live populator.
-
-var distinctBijectivityHints* {.threadvar.}: seq[SymexErrorInfo]
-  ## Phase 15 G4. Accumulator for `geDistinctBijectivitySkipped` (sevHint),
-  ## emitted when a distinct type's base is FP/String (bijectivity elided).
-  ## Reset at `runSymexImpl` entry; drained into `RawResult.errors` on every
-  ## verdict branch (a hint never changes the verdict). Mirrors E4's
-  ## `unknownExnWarnings` threadvar.
-
-var distinctSortNames* {.threadvar.}: seq[string]
-  ## Phase 15 G4 test hook: the order distinct sorts were first allocated this
-  ## run (so a test can assert "two sorts allocated" for a nested chain).
-
 var freshnessCapHints* {.threadvar.}: seq[SymexErrorInfo]
   ## Phase 15 R2. Accumulator for `heFreshnessCapExceeded` (sevHint), emitted
   ## when a `new T` on a path would push the freshness-assertion count past
@@ -1056,36 +921,6 @@ var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
   ## branch, exactly the R2 `freshnessCapHints` idiom. Reset at `runSymexImpl`
   ## entry.
 
-func cellDomain(ty: IRType): tuple[bounded: bool, lo, hi: int64] =
-  ## RFC-0005 S8z. The cells a `HashSet[ty]` element can occupy, as an
-  ## interval of the cell read with `ty`'s signedness: the declared range,
-  ## else the width's. `bounded` is false for a full 64-bit type, whose every
-  ## cell is a value.
-  ## RFC-0005 S8at: a float `Table` key's cell is its IEEE bit pattern
-  ## (`floatKeyCell`): every 64-bit cell for a `float64`, the low 32 bits for
-  ## a `float32`.
-  if ty.kind == itFloat64: (false, 0'i64, 0'i64)
-  elif ty.kind == itFloat32: (true, 0'i64, 0xFFFF_FFFF'i64)
-  elif ty.kind == itBool: (true, 0'i64, 1'i64)
-  elif ty.hasRange: (true, ty.rangeLo, ty.rangeHi)
-  elif ty.width == 64: (false, 0'i64, 0'i64)
-  elif ty.signed:
-    let h = (1'i64 shl (ty.width - 1)) - 1
-    (true, -h - 1, h)
-  else: (true, 0'i64, (1'i64 shl ty.width) - 1)
-
-func cellDomainSize(ty: IRType): int64 =
-  ## RFC-0005 S8z. The number of cells in `cellDomain(ty)`, capped at
-  ## `high(int64)` (only compared against the 1024 size ceiling).
-  let d = cellDomain(ty)
-  if not d.bounded: return high(int64)
-  if (ty.kind == itInt and ty.signed) or (d.lo >= 0 and d.hi >= 0):
-    let span = d.hi -% d.lo
-    if span < 0 or span == high(int64): high(int64) else: span + 1
-  else:
-    let span = cast[uint64](d.hi) - cast[uint64](d.lo)
-    if span >= uint64(high(int64)): high(int64) else: int64(span) + 1
-
 proc inCellDomain(c: Z3BitVec[64]; ty: IRType): Option[Z3Bool] =
   ## RFC-0005 S8z. `c` is the cell of a value of `ty`; `none` when every
   ## cell is.
@@ -1099,87 +934,6 @@ proc inCellDomain(c: Z3BitVec[64]; ty: IRType): Option[Z3Bool] =
                            d.lo, d.hi, sgn)
   if conds.len != 2: return none(Z3Bool)
   some(conds[0] and conds[1])
-
-type ContainerCardRegistry* = object
-  ## RFC-0005 S8f. What ties a `Table`'s / `HashSet`'s `len` to its content.
-  ##
-  ## The model of a `Table[string, int]` is a present array, a data array
-  ## and a size integer (`allocateSym`'s `itTable` arm); a `HashSet[int]` is a
-  ## member array and a size. Before S8f nothing related the size to the
-  ## array: `len` was a free integer in `[0, 1024]`. Two defects followed.
-  ##   * The MODEL admitted states no real table has. `t.len == 0 and
-  ##     t.hasKey("a")` was a clean, false `sxSat`, and a `[]=`/`incl`
-  ##     growing a table/set that already held another key could leave
-  ##     `len == 1`.
-  ##   * The EXTRACTOR ignored `len`: a `t.len == 2` witness rendered `{:}`,
-  ##     a clean `sxSat` whose witness does not reach the target.
-  ## Z3 has no cardinality over arrays, but none is needed. The program
-  ## observes an array only by `select`ing it at KEY TERMS, and the run
-  ## records every one here (`noteTableKey` / `noteSetKey`, at each
-  ## `select`/`store` site). A model is realizable iff, for every allocated
-  ## table/set (`registerTableBase` / `registerSetBase`, at allocation),
-  ## `size >=` the number of DISTINCT key-term values at which the array is
-  ## present: the real content is then those keys plus `size - count` keys
-  ## no term names, which no `select` can observe. `containerCardConds`
-  ## asserts exactly that inequality into every `trySolve`. It is a fact
-  ## about every real table for ANY values of the terms, including terms
-  ## recorded on another path (their symbols are then free), so it prunes
-  ## only unrealizable models -- never a real input, never a false
-  ## `sxUnsat`. The extractors (`extractTableEntries` /
-  ## `extractSetMembers`) render that same content, so a clean witness
-  ## reproduces by construction.
-  ##
-  ## Registries are global to the run, not per array: a store makes a new
-  ## array handle, and the key of every store and select on any array
-  ## derived from a base is a select on the base (store(a, k, v)[j] is
-  ## a[j] for j != k). Reset at `runSymexImpl` entry. Entries are deduped
-  ## by Z3 AST handle (Z3 hash-conses equal terms).
-  tabBases*: seq[tuple[present: Z3AnyAst, size: Z3Int]]
-  tabKeys*:  seq[Z3String]
-  setBases*: seq[tuple[members: Z3AnyAst, size: Z3Int, elemTy: IRType]]
-    ## RFC-0005 S8z: `elemTy` bounds the cells a member can occupy
-    ## (`cellDomain`) for a narrower element type.
-  setKeys*:  seq[Z3BitVec[64]]
-  tabTreeBases*: seq[SymVal]
-    ## RFC-0005 S8at. Every INPUT table whose value is a container
-    ## (`tvTree`): the facts a free value of its value type has
-    ## (`svCellWf`) hold at every key, and are stated at every key term.
-  seen:      HashSet[pointer]
-
-var containerCard* {.threadvar.}: ContainerCardRegistry
-  ## RFC-0005 S8f. The run's `ContainerCardRegistry`. Replaces v65's
-  ## per-array `setMembershipKeyTerms`, which keyed on the membership
-  ## array's handle and so lost every key tested after an `incl`/`excl`.
-
-proc firstSighting(raw: pointer): bool =
-  ## RFC-0005 S8f. True the first time `raw` is registered this run.
-  if raw in containerCard.seen: return false
-  containerCard.seen.incl raw
-  true
-
-proc registerSetBase(members: Z3AnyAst; size: Z3Int; elemTy: IRType)
-
-proc registerTableBase(present: Z3AnyAst; size: Z3Int; keyTy: IRType) =
-  ## RFC-0005 S8f. An allocated `Table[string, int]`: its present array and
-  ## size (see `ContainerCardRegistry`). RFC-0005 S8ar: a table keyed by a
-  ## 64-bit cell (`isTableKeyTy`) has the present array a `HashSet` of its
-  ## key type has, and the same facts: it is registered as one.
-  if keyTy.kind != itString:
-    registerSetBase(present, size, keyTy)
-  elif firstSighting(cast[pointer](present.raw)):
-    containerCard.tabBases.add (present: present, size: size)
-
-proc registerSetBase(members: Z3AnyAst; size: Z3Int; elemTy: IRType) =
-  ## RFC-0005 S8f. An allocated `HashSet[T]`: its member array and size.
-  if firstSighting(cast[pointer](members.raw)):
-    containerCard.setBases.add (members: members, size: size, elemTy: elemTy)
-
-proc registerTabTreeBase(sv: SymVal) =
-  ## RFC-0005 S8at. An input table holding container values (see
-  ## `ContainerCardRegistry.tabTreeBases`); any other value is ignored.
-  if sv.kind == svTable and isTableContainerValTy(sv.tabValTy) and
-     firstSighting(cast[pointer](sv.tabDataRaw.raw)):
-    containerCard.tabTreeBases.add sv
 
 proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal
   ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
@@ -1435,57 +1189,6 @@ when defined(symexTestInjectWalkerFault):
       raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8ce raise-shape test)]
         "S8ce synthetic " & shape & " fault (symexTestInjectWalkerFault)")
 
-proc sortFault(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
-  ## RFC-0005 S8m. True, after recording the walker fault, when `got` is not
-  ## `want`. Z3 hash-conses sorts, so pointer identity is sort equality (what
-  ## `Z3_is_eq_sort` computes).
-  if want == got: return false
-  lowerDegrade(weInternalWalkerFault,
-    "Z3 sort mismatch at " & op & ": expected " &
-      $Z3_sort_to_string(ctx.raw, want) & ", got " &
-      $Z3_sort_to_string(ctx.raw, got) & " -- the walker built an ill-sorted " &
-      "term; a fresh term stands in and the path is tainted " &
-      "(RFC-0005 S8m; weInternalWalkerFault)")
-  true
-
-proc sortOfRaw(ctx: Z3Context; a: RawZ3Ast): RawZ3Sort =
-  ctx.checkErr Z3_get_sort(ctx.raw, a)
-
-proc freshOfSort(ctx: Z3Context; s: RawZ3Sort): RawZ3Ast =
-  ctx.checkErr Z3_mk_fresh_const(ctx.raw, "__sortFault", s)
-
-proc checkedStore*(ctx: Z3Context; arr, idx, val: RawZ3Ast): RawZ3Ast =
-  ## RFC-0005 S8m. `Z3_mk_store` with the index and value sorts checked
-  ## against the array's domain and range.
-  let arrSort = sortOfRaw(ctx, arr)
-  if sortFault(ctx, "array store index",
-               ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort),
-               sortOfRaw(ctx, idx)) or
-     sortFault(ctx, "array store value",
-               ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort),
-               sortOfRaw(ctx, val)):
-    return freshOfSort(ctx, arrSort)
-  ctx.checkErr Z3_mk_store(ctx.raw, arr, idx, val)
-
-proc checkedSelect*(ctx: Z3Context; arr, idx: RawZ3Ast): RawZ3Ast =
-  ## RFC-0005 S8m. `Z3_mk_select` with the index sort checked against the
-  ## array's domain.
-  let arrSort = sortOfRaw(ctx, arr)
-  if sortFault(ctx, "array select index",
-               ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort),
-               sortOfRaw(ctx, idx)):
-    return freshOfSort(ctx, ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort))
-  ctx.checkErr Z3_mk_select(ctx.raw, arr, idx)
-
-proc checkedIte*(ctx: Z3Context; c, t, e: RawZ3Ast): RawZ3Ast =
-  ## RFC-0005 S8m. `Z3_mk_ite` with a Bool condition and two same-sort arms.
-  let tSort = sortOfRaw(ctx, t)
-  if sortFault(ctx, "ite condition", ctx.checkErr Z3_mk_bool_sort(ctx.raw),
-               sortOfRaw(ctx, c)) or
-     sortFault(ctx, "ite else-arm", tSort, sortOfRaw(ctx, e)):
-    return freshOfSort(ctx, tSort)
-  ctx.checkErr Z3_mk_ite(ctx.raw, c, t, e)
-
 proc iteFolded*[T: Z3Term](cond: Z3Bool; t, e: T): T =
   ## `ite(cond, t, e)`, or the arm `cond` picks when it is a Boolean literal.
   ## A union-image merge over a constructed object's own discriminator tests
@@ -1495,12 +1198,6 @@ proc iteFolded*[T: Z3Term](cond: Z3Bool; t, e: T): T =
   of Z3_L_TRUE: t
   of Z3_L_FALSE: e
   else: ite(cond, t, e)
-
-proc checkedEq*(ctx: Z3Context; a, b: RawZ3Ast): RawZ3Ast =
-  ## RFC-0005 S8m. `Z3_mk_eq` over two same-sort operands.
-  if sortFault(ctx, "equality", sortOfRaw(ctx, a), sortOfRaw(ctx, b)):
-    return freshOfSort(ctx, ctx.checkErr Z3_mk_bool_sort(ctx.raw))
-  ctx.checkErr Z3_mk_eq(ctx.raw, a, b)
 
 var arithFrames {.threadvar.}: ArithFrames
   ## RFC-0005 S8w, RFC-0016 W1-d2 / D1a. A lexical stack: the top is the scope
@@ -1638,120 +1335,6 @@ var arithTrapConds* {.threadvar.}: seq[ArithTrap]
 # new kind is a new arm of the RECONSTRUCTION column, not a new row).
 # ----------------------------------------------------------------------------
 
-proc allocDegrade(kind: SymexErrorKind, msg: string) =
-  ## N40 (round-6 fix round 6, walker v104) — TOTALITY AT THE ALLOCATOR.
-  ## Shared in-band degrade recorder for every classified-decline arm inside
-  ## `allocateSym` (far below, and every OTHER caller that has no `Path`/
-  ## `w: WalkCtx` in scope — `rawAnyAstOf` immediately below this proc,
-  ## reached from `sortOfTuple`/`heapValueSort`, is one such caller;
-  ## Round-6 N41): previously each of these arms `raise`d a dedicated
-  ## `Symex*Error`/`SymexClassifiedDegradeError` carrier directly. Three
-  ## successive slices (N36/N37/N39) tried to guard `allocateSym`'s
-  ## individual raw-raise sites at each CALLER instead — every slice found a
-  ## further unguarded caller (`isVariantConstructSym`, `lowerVariantLit`,
-  ## then N40's own spot-check: `runtime_heap.nim`'s heap-deref-read/write
-  ## paths, `runtime_closures.nim`'s lambda param/return allocation,
-  ## `freshRetSym`'s call-return sites, `lowerHofCall`'s fold accumulator —
-  ## an open-ended list `allocateSym` has ~70 call sites across this
-  ## codebase). Per-caller guarding does not scale and is not auditable by
-  ## construction (nothing stops a 71st caller from being added unguarded).
-  ## This slice retires that strategy: `allocateSym` itself never raises for
-  ## classifiable input again (see its own doc-comment addendum at its
-  ## definition) — totality lives at the ONE place that can enforce it for
-  ## every caller at once.
-  ##
-  ## LAYOUT (item 3, round-6 re-review): this proc used to sit far below —
-  ## right above `allocateSym` — while a separate one-line forward
-  ## declaration lived here (immediately after `syncAllocDegradeSawUnknown`'s
-  ## own forward declaration) purely so `rawAnyAstOf` could call it before
-  ## reaching the real definition. `allocDegrade`'s own body has no
-  ## dependency on anything declared between here and `allocateSym`
-  ## (`loweringDegradeErrors`/`loweringDidDegrade` are threadvars declared
-  ## above this point; `syncAllocDegradeSawUnknown` is the SAME
-  ## `WalkCtx`-circularity forward declaration immediately above) — so the
-  ## fwd-decl/definition split was pure layout debt, not a real dependency
-  ## cycle. Consolidated: this IS the definition now, living beside every
-  ## other early-foundations `sync*` forward declaration it depends on; no
-  ## second declaration of this proc exists anywhere else in the file.
-  ##
-  ## SINK CHOICE (the open design question this slice had to resolve): two
-  ## existing in-band sinks precede this one, reached from two DIFFERENT
-  ## calling contexts --
-  ##   (a) `loweringDegradeErrors`/`loweringDidDegrade` (ADR-0023/SND-3) --
-  ##       drained by `drainPendingLowerEffects` at every `lower()`/
-  ##       `lowerBool()` call site inside `walk`, forking the SURVIVING
-  ##       PATH's `uncertain = true` (SND-1's precise per-path taint) in
-  ##       addition to `w.sawUnknown`. Correct for `allocateSym` callers
-  ##       reached FROM INSIDE `lower()` (`lowerVariantLit`, `buildClosure`/
-  ##       `paramSorts`, `lowerHofCall`'s fold-accumulator degrade, etc.) --
-  ##       the NEXT `lower()` call at that same statement drains it.
-  ##   (b) `w.walkDegradeErrors`/`w.sawUnknown` (+ `forkPathTainted`) --
-  ##       written directly by WALK-level statement handlers
-  ##       (`isVariantConstructSym`'s two budget checks) that have `w`/
-  ##       `Path` in scope but never call `lower()` around the allocation
-  ##       itself.
-  ## `allocateSym` has NEITHER a `Path` NOR (in most callers) a `lower()`
-  ## wrapper in scope -- it is a bare recursive allocator. Auditing every
-  ## walk-time DIRECT caller (`isVariantConstructSym`'s per-fork field loop,
-  ## `runtime_heap.nim`'s three sites, `freshRetSym`'s five call-return
-  ## sites) confirmed NONE of them wrap the allocation in a `lower()` call
-  ## that would drain sink (a) afterward -- sink (a) alone would leak the
-  ## taint un-drained into whatever unrelated `lower()` call happens next
-  ## (misattributed to the wrong statement/path) or, if none follows before
-  ## the walk ends, LOST entirely -- exactly the silent-loss hazard this
-  ## whole fix class exists to close. Sink (b) is unusable here for the
-  ## opposite reason: `allocateSym` has no `w`/`Path` parameter and adding
-  ## one would ripple through all ~70 call sites, defeating the point of
-  ## fixing totality in ONE place.
-  ##
-  ## RESOLUTION: write BOTH effects directly, unconditionally, at the
-  ## instant of degrade (this proc) --
-  ##   1. `loweringDegradeErrors`/`loweringDidDegrade` still fire, so a
-  ##      `lower()`-context caller keeps the PRECISE per-path SND-1 taint
-  ##      it already had (no regression for `lowerVariantLit`'s own shape).
-  ##   2. `currentWalkCtxPtr` (the threadvar every walk sets to `addr w` for
-  ##      exactly this "no `w` in scope but a walk is active" situation --
-  ##      the SAME idiom already used at `lowerHofCall`'s filter/map/fold
-  ##      degrade sites, runtime.nim ~9348/9366/9387/9414) has
-  ##      `.sawUnknown` set to `true` DIRECTLY, IMMEDIATELY, synchronously
-  ##      -- not deferred to a later drain. This is "immediate-degrade-on-
-  ##      alloc" semantics (sanctioned for non-`itSeq` kinds per this
-  ##      slice's own design brief): the run is marked degraded the MOMENT
-  ##      an unallocatable value is allocated, regardless of whether
-  ##      anything ever reads it. This is NOT a new precision loss relative
-  ##      to the pre-N40 status quo -- `isVariantConstructSym`'s own N39
-  ##      guard and `lowerVariantLit`'s own N39 guard ALREADY degrade
-  ##      unconditionally on allocation (never gated on a later read), so
-  ##      this matches established, audited precedent rather than
-  ##      introducing a new over-approximation.
-  ## Effect (2) makes silent loss STRUCTURALLY IMPOSSIBLE: `currentWalkCtxPtr`
-  ## is non-nil for the ENTIRE duration of every walk-time reachable code
-  ## path (set immediately before `walk` begins, cleared only after
-  ## `runSymexImpl` returns -- see its own threadvar doc comment), and the
-  ## ONLY other `allocateSym`-calling context (the pre-walk param-entry
-  ## boundary) no longer reaches these arms at all as of this slice (item 3
-  ## of the design: a `unallocatableFieldIssue` pre-check RAISES directly,
-  ## before `currentWalkCtxPtr` is even set -- see `raiseParamAllocIssue`
-  ## below). So whichever of the two sinks actually applies, `w.sawUnknown`
-  ## ends up `true` before the walk can report a verdict -- Invariant 3 is
-  ## satisfied unconditionally, not contingent on a caller remembering to
-  ## drain anything. Deliberately NOT a `raise`: unwinding from inside
-  ## `allocateSym` (itself often called from deep inside `lower()`'s own
-  ## recursion, or straight from a `walk`-level statement handler) is
-  ## EXACTLY the C-backend goto-exception hazard ADR-0023/SND-3 exists to
-  ## ban, and B7r2 additionally confirmed even a NON-top-level `try`/`except`
-  ## around a walk-reachable recursive call silently ELIDES the exception on
-  ## this toolchain -- ordinary control flow (no raise, no catch) is the
-  ## only form proven safe.
-  ## RFC-0005 S1: effect (2) below is now DERIVED rather than written — the
-  ## `loweringDegradeErrors` entry `lowerDegrade` records is a drained
-  ## `sevError`, and `runSymexImpl` derives `w.runTaint` from exactly those
-  ## entries, so the immediate/global run mark this proc used to sync through
-  ## `currentWalkCtxPtr` (`syncAllocDegradeSawUnknown`, retired) holds by
-  ## construction the instant the error is recorded — still unconditional,
-  ## still not contingent on any drain.
-  lowerDegrade(kind, msg)
-
 proc boundsUnchecked(): bool =
   ## RFC-0016 PRC-07. The build compiles no `boundChecks`: `s[i]` and `a[i]`
   ## (seq, string, openArray, array) are plain C subscripts, so an index
@@ -1842,44 +1425,6 @@ var currentWinningGlobals {.threadvar.}: seq[string]
   ## the initial env, which holds none, and `buildHeapSnapshot` matches a
   ## pointer's `sel` against each (`ptrTargets`' variable candidates).
   ## Reset at `runSymexImpl` entry.
-
-type
-  HeapKeyShape = object
-    ## RFC-0005 S8h. What `mkHeapArrayVar` knew about a heap it introduced.
-    valTy:     IRType  ## the heap's value type: a field's, a discriminator's,
-                       ## or a whole scalar pointee's
-    variantTy: IRType  ## the variant object, for its `__@disc` and
-                       ## `__@<ord>__<field>` heaps; nil otherwise
-
-var intHeapIsInt {.threadvar.}: bool
-  ## RFC-0005 S8as. A heap of plain `int` (`intHeapCell`) is Int-sorted:
-  ## the run's `integerSemantics` is not `isExact` and every signed 64-bit
-  ## int parameter is bound to an Int. Cleared by `resetSymexRunState`, set
-  ## by `runSymexImpl` once the parameters are bound.
-
-func intHeapCell(ty: IRType): bool =
-  ## RFC-0005 S8as. `ty` is Nim's `int` (64-bit, signed, no declared range)
-  ## and the run's ints are Int-sorted (`intHeapIsInt`): its heap -- a
-  ## `ref int` / `ptr int` cell, an `int` field -- is `(Array Ref Int)`.
-  ## It was `(Array Ref (_ BitVec 64))`, and under `isOptimised` a param
-  ## with an asserted range is an Int (`promoteSound`), so storing it went
-  ## through `int2bv` and reading it back through `bv2int`: with `v` in
-  ## `(-1000, 1000)`, `let r = new int; r[] = v; r[] += 1; r[] != v + 1`
-  ## took Z3 55 s for its UNSAT. A width-stamped Int (`ziWidth = 64`) keeps
-  ## every overflow obligation (`overflowCondInt`), so the values and the
-  ## defects are the bit-vector's. A BV value is stored through `bv2int`
-  ## (`heapStoreValue`). Otherwise the heap stays a bit-vector: a BV value
-  ## stored through `bv2int` and read back into a BV comparison is the F5
-  ## `int2bv(bv2int(v))` shape, which is the slow direction the other way.
-  {.cast(noSideEffect).}:
-    intHeapIsInt and ty != nil and ty.kind == itInt and ty.signed
-
-var heapKeyShapes {.threadvar.}: Table[string, HeapKeyShape]
-  ## RFC-0005 S8h. Heap key -> `HeapKeyShape`, written by `mkHeapArrayVar`.
-  ## `buildHeapSnapshot` renders a cell's fields from the heaps themselves:
-  ## the IR pointee of a recursive field is an empty placeholder by
-  ## construction (`namedRefPlaceholder`), so it cannot say which fields a
-  ## cell has or what their types are. Reset at `runSymexImpl` entry.
 
 var heapWitnessNominalRegistry* {.threadvar.}: Table[string, IRType]
   ## Cluster H H_witness (ADR-0022, ADR-0010 invariant #4). Maps a named
@@ -2028,33 +1573,6 @@ proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   currentClosureExitPc = @[]                              ## Phase 16 ADR-0012
   # CR-9 Stage 6 Groups 3+4: mirror into WalkCtx fields (dual-write).
   seedCallerHeapInWalkCtx(p)
-
-proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast
-  ## Phase 15 R2: forward decl (defined below) — `freshRef` mints its fresh
-  ## `Ref_T` const through it before its definition appears. Bodies of
-  ## `refPointeeTypeId`, `allocRefSort`, `freshRef`, `assertFreshness`,
-  ## `pcImpliesNonNil` moved to runtime_heap.nim (CR-7-deeper Stage 8+).
-
-# ---- Phase 15 Cluster C (C2a): per-site closure funcSym memoization ----------
-#
-# A lambda site's uninterpreted `funcSym` is declared ONCE per
-# `((siteHash, declOrder), envSortId, paramsSortTupleId)` and reused across
-# every construction of that closure on the run. Like G4's distinct sorts, the
-# decl is built where there is no `WalkCtx` (closure construction runs in
-# `lower`, a pure env→SymVal evaluator), so the cache lives in a threadvar reset
-# at `runSymexImpl` entry — the exact `currentDistinctSorts` idiom.
-# `WalkerStatics.closureSyms` mirrors it after the walk for inspection.
-
-# ---- Phase 15 Cluster C (C2b): closure-CALL descent plumbing -----------------
-#
-# `lower(iekClosureCall)` must descend the lambda BODY to collect its return
-# sub-paths and assert the GROUND per-call axiom (ADR-0009 D6). But the body is
-# in `iekLambda.lambdaBody`, NOT carried on `svClosure` (which holds only the
-# site key + env + funcSym). So at CONSTRUCTION (`buildClosure`) we stash the
-# lambda's body + signature in `currentClosureBodies`, keyed by `(siteHash,
-# declOrder)`. At the call, the resolved `svClosure`'s site keys back into this
-# map to reach the body. (Same threadvar idiom as `currentClosureSyms` — `lower`
-# has no `WalkCtx`. Reset at `runSymexImpl` entry.)
 
 var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 C2b (ADR-0009 D6). The GROUND per-call-site closure axioms
@@ -2286,31 +1804,6 @@ proc constSeqArrs(elemTy: IRType; elem: SymVal): seq[Z3AnyAst] =
     result.add wrap[Z3AnyAst](ctx,
       ctx.checkErr Z3_mk_const_array(ctx.raw, idxSort, leaf.raw))
 
-proc baseIsDecidable(base: IRType): bool =
-  ## Phase 15 G4. The bijectivity-axiom fragment: int / BV / bool. Anything
-  ## else (FP, string, and — conservatively — composite bases) is skipped.
-  ## A nested distinct base is decidable iff ITS base is (recurse).
-  case base.kind
-  of itInt, itBool: true
-  of itDistinct: baseIsDecidable(base.distinctBase)
-  else: false
-
-proc realBaseKind(base: IRType): IRTypeKind =
-  ## RFC-0005 S8bg. `base`'s kind, walked through every `distinct` wrapper
-  ## to the first non-`itDistinct` kind: for `Km = distinct Meters`,
-  ## `Meters = distinct int` (so `Km`'s own `distinctBase` is `itDistinct`
-  ## itself), this is `itInt`, not `itDistinct` -- the kind the
-  ## `geDistinctBijectivitySkipped` hint names, and the one
-  ## `baseIsDecidable` actually judges.
-  case base.kind
-  of itDistinct: realBaseKind(base.distinctBase)
-  else: base.kind
-
-proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast =
-  ## Fresh named const of a (possibly uninterpreted) sort.
-  let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
-  ctx.checkErr Z3_mk_const(ctx.raw, sym, sort)
-
 proc rawApp1(ctx: Z3Context, fd: RawZ3FuncDecl, arg: Z3AnyAst): Z3AnyAst =
   ## Apply a unary func-decl to one argument. Both the argument and the result
   ## are wrapped `Z3AnyAst`s (ref-counted): intermediate application results MUST
@@ -2322,31 +1815,6 @@ proc rawApp1(ctx: Z3Context, fd: RawZ3FuncDecl, arg: Z3AnyAst): Z3AnyAst =
   let raw = ctx.checkErr Z3_mk_app(ctx.raw, fd, 1,
     cast[ptr UncheckedArray[RawZ3Ast]](addr args[0]))
   wrap[Z3AnyAst](ctx, raw)
-
-proc isBijectivityBaseSym(sv: SymVal): bool {.inline.} =
-  ## Phase 15 G4. The SymVal kinds over which the bijectivity axioms are
-  ## decidable: bool, the genuine Z3Int, AND the BV families (Nim `int` and the
-  ## fixed-width ints allocate as `svBV*` by default — `bvVar`). Anything else
-  ## (FP, string, composite) skips bijectivity.
-  sv.kind in {svBool, svInt, svBV8, svBV16, svBV32, svBV64}
-
-proc rawAstOf(sv: SymVal): RawZ3Ast =
-  ## The raw ast of a decidable-base primitive SymVal (bool / int / BV).
-  case sv.kind
-  of svInt:  sv.zi.raw
-  of svBool: sv.bo.raw
-  of svBV8:  sv.bv8.raw
-  of svBV16: sv.bv16.raw
-  of svBV32: sv.bv32.raw
-  of svBV64: sv.bv64.raw
-  else:
-    raise newException(ValueError, "rawAstOf: unsupported base kind " & $sv.kind)  # [raise-audited: category-c: bijectivity-guarded (both call sites pre-check isBijectivityBaseSym)]
-
-proc rawSortOf(sv: SymVal): RawZ3Sort =
-  ## The Z3 sort underlying a decidable-base primitive SymVal. Used to declare
-  ## the inject/eject domains/ranges and bind the base-side quantified variable.
-  let ctx = requireCurrentContext()
-  ctx.checkErr Z3_get_sort(ctx.raw, rawAstOf(sv))
 
 proc heapStepsOf(sv: SymVal): int =
   ## RFC-0005 S8ar. A ref's or ptr's heap steps from a root (`refSteps`);
@@ -2403,106 +1871,6 @@ proc svWithRaw*(ctx: Z3Context; sv: SymVal; raw: Z3AnyAst): SymVal =
     ## fails loudly rather than substitute silently.
     doAssert false, "svWithRaw: " & $sv.kind & " is not a scalar or string"
 
-proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
-  ## The raw ast of ANY base SymVal that may underlie a distinct type — used
-  ## only to derive the base sort for the inject/eject func-decl signatures
-  ## (works for FP/String bases too, where bijectivity is skipped).
-  case sv.kind
-  of svInt:     sv.zi.raw
-  of svBool:    sv.bo.raw
-  of svBV8:     sv.bv8.raw
-  of svBV16:    sv.bv16.raw
-  of svBV32:    sv.bv32.raw
-  of svBV64:    sv.bv64.raw
-  of svFloat32: sv.fp32.raw
-  of svFloat64: sv.fp64.raw
-  of svString:  sv.str.raw
-  of svDistinct: sv.distinctAst.raw   ## nested distinct base
-  of svRef:     sv.refAst.raw         ## Phase 15 R9: ref-typed heap field value
-  of svPtr:     sv.ptrAst.raw         ## Phase 15 R9: ptr-typed heap field value
-  of svBitSet:  sv.bsRaw.raw          ## RFC-0005 S8bq: one bit-vector
-  of svTable, svSet, svSeq, svArray, svTuple, svVariant, svMultiVariant,
-     svClosure, svUninterpRef:
-    # Round-6 N41: `svTable`/`svSet` are COMPOUND values (a data `Z3Array`
-    # plus a separate present `Z3Array` — see `allocateSym`'s `itTable`/
-    # `itSet` arms — never a single scalar ast), so there is no sound
-    # representative leaf here, REGARDLESS of whether the underlying
-    # Table/Set shape itself is otherwise supported: this arm is reached for
-    # a perfectly VALID `Table[string, int]`/`HashSet[int]` too, not just an
-    # unsupported key/value/element shape (N40's `allocDegrade` calls inside
-    # `allocateSym` classify THAT gap already — this is a DIFFERENT,
-    # downstream one: sort-DERIVATION for a closure param/return leaf
-    # (`sortOfTuple`) or a heap array's value sort (`heapValueSort`,
-    # `runtime_heap.nim`) fundamentally cannot flatten a compound value to a
-    # single leaf). Previously an untagged `raise newException(ValueError,
-    # ...)` here crashed UNCAUGHT all the way to the top-level
-    # `runSymexImpl` catch-all (`weInternalWalkerFault`, a WHOLE-RUN degrade
-    # with no per-path precision) for both the lambda-param/return family
-    # and the heap-deref family, masking the itTable/itSet family behind the
-    # walker's generic "the walker itself hit a bug" carrier. `allocDegrade`
-    # (N40's own chokepoint) reports the classified kind instead of
-    # raising — per-path SND-1 taint when reached from inside `lower()`
-    # (`sortOfTuple`'s closure-construction callers), immediate whole-walk
-    # `sawUnknown` otherwise (see `allocDegrade`'s own doc comment) — and
-    # `allocDegrade` never raises, so control returns here normally. The
-    # BV64-zero fallback ast is the SAME "safe unconstrained filler" shape
-    # `lowerClosureCall`'s own `ceClosureUnknownCallee` arm already returns
-    # elsewhere in this file: its CONTENT is never trustworthy, only its
-    # SORT needs to be well-formed enough for the caller's `Z3_get_sort`/
-    # `Z3_mk_array_sort`/`Z3_mk_func_decl` to complete without a Z3-level
-    # error — `allocDegrade` has already forced the verdict to `sxUnknown`
-    # regardless of what happens with it downstream (Invariant 3).
-    #
-    # N47 (round-6 raise-class-audit category-d closure): the remaining
-    # composite kinds `svSeq`/`svArray`/`svTuple`/`svVariant`/
-    # `svMultiVariant`/`svClosure`/`svUninterpRef` were previously an
-    # untagged bare `raise newException(ValueError, ...)` in this proc's
-    # `else` arm, category-d "uncertain reachability" pending a dedicated
-    # check. CONFIRMED live via a container probe: an ordinary
-    # `type SeqId = distinct seq[int]` PARAMETER (no heap/ref involvement at
-    # all) reaches `allocDistinctSym`'s composite-base branch (`runtime.nim`,
-    # `baseIsDecidable` is false for `itSeq`), which calls
-    # `rawAnyAstOf(baseRep)` on the `svSeq` base representative to derive its
-    # Z3 sort for the (bijectivity-skipped) inject/eject func-decls — the
-    # SAME "no single-leaf sort" shape `svTable`/`svSet` already handle
-    # above, just reached from a *different* caller (`allocDistinctSym`
-    # rather than `sortOfTuple`/`heapValueSort`). Folded into this arm rather
-    # than kept as a separate raise: identical hazard, identical fix.
-    allocDegrade(seUnsupportedCompoundSortLeaf,
-      "closure/heap/distinct-base sort derivation reached a compound value (" &
-      plainEnglishSymValKind(sv.kind) &
-      ") with no single-leaf Z3 sort representation " &
-      "(seUnsupportedCompoundSortLeaf)")
-    mkBitVec[64](0'i64).raw
-
-proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
-  ## Phase 15 Cluster C (C1, ADR-0009 D5). Derive the FLATTENED sequence of
-  ## per-leaf Z3 sorts of an `svTuple` env at walk time. Because the closure
-  ## environment is a Nim-side `svTuple` (NOT a Z3 record sort — there is no Z3
-  ## aggregate sort anywhere in this engine, ADR-0009 D2), the closure's
-  ## `funcSym` domain is the CONCATENATION of these per-leaf sorts ++ the
-  ## parameter sorts. Nested tuples flatten recursively; each scalar leaf
-  ## contributes one sort via `Z3_get_sort`. Consumed by the C2b application
-  ## path (raw `Z3_mk_func_decl` / `Z3_mk_app`, D4). Non-tuple input is treated
-  ## as a single leaf (the degenerate one-element env).
-  ## RFC-0005 S8ca: a seq, table or set (a capture, or a parameter of a
-  ## proc value, `paramSorts`) contributes the sort of each of its leaves
-  ## (`svLeafAsts`), as a nested tuple does, and an array its elements'. It had no single-leaf sort, and
-  ## a proc value taking a seq declined (`seUnsupportedCompoundSortLeaf`).
-  let ctx = requireCurrentContext()
-  case sv.kind
-  of svTuple:
-    for f in sv.fields:
-      for s in sortOfTuple(f): result.add s
-  of svSeq, svTable, svSet:
-    for leaf in svLeafAsts(sv):
-      result.add ctx.checkErr Z3_get_sort(ctx.raw, leaf)
-  of svArray:   # RFC-0005 S8ca: its elements, as a tuple's fields
-    for e in sv.arrElems:
-      for s in sortOfTuple(e): result.add s
-  else:
-    result.add ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(sv))
-
 proc c1ClosurePoCApply*(): bool =
   ## Phase 15 Cluster C (C1) PoC fixture (Feas-H2 / ADR-0009 D4). Validate the
   ## raw `Z3_mk_app` application path over RUNTIME-constructed sorts BEFORE C2b
@@ -2543,111 +1911,6 @@ proc c1ClosurePoCApply*(): bool =
   result = appSort == rangeSort
 
 # ---- Phase 15 Cluster C (C2a): closure CONSTRUCTION --------------------------
-
-proc ensureDistinctSort(ty: IRType): DistinctSortEntry =
-  ## Phase 15 G4 (ADR-0008 D4), factored out of `allocDistinctSym` by
-  ## RFC-0005 S8ad. The "DistinctName" uninterpreted sort, its inject/eject
-  ## func-decls, and (decidable base) the bijectivity bookkeeping, created
-  ## AT MOST ONCE per (name, run) -- guarded by the `currentDistinctSorts`
-  ## cache. `reboxDistinct` calls it too: a borrowed arithmetic result of a
-  ## distinct type that no parameter carries (`var m = Meters(0); m = m +
-  ## Meters(1)`) found no sort and faulted the walker before S8ad.
-  let ctx = requireCurrentContext()
-  let name = ty.distinctName
-  if not currentDistinctSorts.hasKey(name):
-    let sort = mkUninterpretedSort(ctx, name)        # ADR D4: fresh sort
-    # Pin the uninterpreted sort with a Z3 ref: without it, the heavy ast
-    # allocation that follows (baseRep + func-decls + axioms) lets Z3
-    # garbage-collect the un-referenced sort, corrupting every func-decl whose
-    # domain/range names it (an earlier SIGSEGV: the sort read back as
-    # Z3_UNKNOWN_SORT). The ref is held for the whole run (never dec'd — the
-    # context is torn down at run end).
-    Z3_inc_ref(ctx.raw, Z3_sort_to_ast(ctx.raw, sort.raw))
-    distinctSortNames.add name
-    # Declare inject_T / eject_T over the BASE sort. We need a representative
-    # base SymVal to read its Z3 sort; allocate a throwaway (its init
-    # constraints are discarded — the func-decls only need the sort).
-    var scratchPC: seq[Z3Bool]
-    let baseRep = allocateSym(ty.distinctBase, name & ".__baseSort", scratchPC)
-    if baseIsDecidable(ty.distinctBase) and isBijectivityBaseSym(baseRep):
-      let baseSort = rawSortOf(baseRep)
-      var injDom = @[baseSort]
-      let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("inject_" & name).cstring)
-      let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
-      var ejDom = @[sort.raw]
-      let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("eject_" & name).cstring)
-      let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
-      incRefFD(ctx, inject)   # keep the decls alive for the run's lifetime
-      incRefFD(ctx, eject)
-      let dentry = DistinctSortEntry(sort: sort, inject: inject, eject: eject)
-      currentDistinctSorts[name] = dentry
-      # CR-9 Stage 4: also populate WalkerStatics when a walk is active so
-      # the live WalkerStatics is the authoritative source and the post-walk
-      # mirror loop for distinctSorts becomes redundant.
-      syncDistinctSortEntry(name, dentry)
-      # Decidable base: the round-trip is realised as a GROUND `eject(dConst)
-      # == baseSym` pin per occurrence (asserted below in step 3), NOT as a
-      # universal quantifier (which HANGS — see step 3's note). No skip hint.
-    else:
-      # FP / String / composite base → bijectivity SKIPPED (hang risk). Still
-      # declare inject/eject so explicit conversions have func-decls, but assert
-      # NO quantified axioms. Emit the classified sevHint (Invariant 3).
-      #
-      # RFC-0005 S8at: a COMPOSITE base (`distinct seq[int]`, `distinct
-      # (int, bool)`, a distinct object) has no single Z3 sort, so no
-      # inject/eject decl can be declared over it; deriving one recorded
-      # `seUnsupportedCompoundSortLeaf` and declined every such parameter.
-      # Neither decl is ever APPLIED for a non-decidable base (only the
-      # decidable branch's ground eject pin applies `eject`), so a
-      # composite base simply has none: the distinct value is its boxed base
-      # (`distinctBaseSym`), which every read ejects to (`ejectBase`).
-      var dentry = DistinctSortEntry(sort: sort)
-      if baseRep.kind notin {svTable, svSet, svSeq, svArray, svTuple,
-                             svVariant, svMultiVariant}:
-        let baseSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(baseRep))
-        var injDom = @[baseSort]
-        let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-          ("inject_" & name).cstring)
-        let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
-          cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
-        var ejDom = @[sort.raw]
-        let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-          ("eject_" & name).cstring)
-        let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
-          cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
-        incRefFD(ctx, inject)
-        incRefFD(ctx, eject)
-        dentry.inject = inject
-        dentry.eject = eject
-      currentDistinctSorts[name] = dentry
-      # CR-9 Stage 4: also populate WalkerStatics when a walk is active.
-      syncDistinctSortEntry(name, dentry)
-      # RFC-0005 S8bg: this branch is also reached for a distinct-of-a-
-      # distinct whose REAL base is decidable (`Km = distinct Meters`,
-      # `Meters = distinct int`): `ty.distinctBase` is itself `itDistinct`,
-      # so `isBijectivityBaseSym(baseRep)` above is false (`baseRep` is a
-      # nested `svDistinct`, not a primitive) even though
-      # `baseIsDecidable` (which recurses) says the chain's true base is
-      # fine. No axiom is asserted either way here (the ground eject pin
-      # above needs a primitive `baseRep`, which a nested distinct is
-      # not -- a precision gap, not fixed by this hint), but the hint
-      # claiming a non-decidable base is wrong for that case and is
-      # skipped; it still fires for a genuinely non-decidable real base
-      # (FP/string) and for a composite one (S8at).
-      if not baseIsDecidable(ty.distinctBase):
-        let bijHint = SymexErrorInfo(
-          kind: geDistinctBijectivitySkipped, severity: severity(geDistinctBijectivitySkipped),
-          msg: "bijectivity axiom skipped for distinct `" & name &
-               "` over non-decidable base " & $realBaseKind(ty.distinctBase) &
-               " (FP/String): the distinct sort is modeled without the " &
-               "inject/eject round-trip guarantee")
-        distinctBijectivityHints.add bijHint      # threadvar: fallback
-        syncDistinctBijectivityHint(bijHint)      # CR-9 Stage 5: also WalkCtx
-  currentDistinctSorts[name]
 
 proc allocDistinctSym(ty: IRType, baseName: string,
                       pcOut: var seq[Z3Bool]): SymVal =
@@ -2697,116 +1960,6 @@ proc allocDistinctSym(ty: IRType, baseName: string,
   boxed[] = baseSym
   SymVal(kind: svDistinct, distinctAst: dAny, distinctName: name,
          distinctBaseSym: boxed)
-
-proc discEqBV[W: static int](bv: Z3BitVec[W]; tagOrd: int64): Z3Bool =
-  ## `bv == tagOrd`; a numeral `bv` (a constructed object's own discriminator)
-  ## is a Boolean literal, so a merge on it folds (`iteFolded`, `checkedIte`).
-  let eq = bv == mkBitVec[W](tagOrd)
-  if not isNumeralAst(bv.ctx, bv.raw): return eq
-  let ctx = bv.ctx
-  let r = ctx.checkErr Z3_simplify(ctx.raw, eq.raw)
-  if Z3_get_bool_value(ctx.raw, r) == Z3_L_UNDEF: eq
-  else: wrap[Z3Bool](ctx, r)
-
-proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
-  ## `disc == tagOrd` over a variant discriminator's SymVal, whatever BV
-  ## width (or `svInt`/`svBool` fallback) it was allocated at. Round-6 A2
-  ## (ADR-0029) extraction: this file previously carried the identical
-  ## closure as three separate copies — `allocateSym`'s `itVariant` arm
-  ## (arm-disjunction), `isVariantField`'s walker arm (in-arm guard), and
-  ## `retBindEq`'s `svVariant` arm (per-arm implication guard) — collapsed
-  ## here so a future 4th site does not become a 4th copy.
-  case d.kind
-  of svBV8:  discEqBV(d.bv8, tagOrd)
-  of svBV16: discEqBV(d.bv16, tagOrd)
-  of svBV32: discEqBV(d.bv32, tagOrd)
-  of svBV64: discEqBV(d.bv64, tagOrd)
-  of svInt:  d.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
-  of svBool: d.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc
-  else:
-    raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (allocateSym's itVariant/itMultiVariant arms only ever allocate a BV/Int/Bool discriminator)]
-      "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
-      $d.kind & ")")
-
-proc discDomainOf(arms: seq[VariantArm];
-                  discTags: seq[tuple[name: string, ord: int]];
-                  discTy: IRType): tuple[minOrd, maxOrd: int64, ordSet: seq[int]] =
-  ## The body of `discriminatorDomain` (below), over one `case` section's
-  ## arms, enum domain and discriminator type. RFC-0005 S8s split it out so
-  ## a multi-variant axis (`axisDiscriminatorDomain`) shares it.
-  var hasElse = false
-  for arm in arms:
-    if arm.isElse:
-      hasElse = true
-      break
-  let rangeAliasElseDomain =
-    hasElse and discTags.len == 0 and discTy.hasRange
-  if rangeAliasElseDomain:
-    return (discTy.rangeLo, discTy.rangeHi, newSeq[int]())
-  var minOrd = high(int64)
-  var maxOrd = low(int64)
-  var ordSet: seq[int]
-  for arm in arms:
-    if arm.tagOrdinal < 0: continue  # else sentinel
-    if int64(arm.tagOrdinal) < minOrd: minOrd = int64(arm.tagOrdinal)
-    if int64(arm.tagOrdinal) > maxOrd: maxOrd = int64(arm.tagOrdinal)
-    ordSet.add arm.tagOrdinal
-  for dt in discTags:
-    if int64(dt.ord) < minOrd: minOrd = int64(dt.ord)
-    if int64(dt.ord) > maxOrd: maxOrd = int64(dt.ord)
-    if dt.ord notin ordSet: ordSet.add dt.ord
-  if minOrd == high(int64):
-    # No non-else arms AND no discTags -- degenerate.
-    minOrd = 0
-    maxOrd = 0
-  (minOrd, maxOrd, ordSet)
-
-proc discriminatorDomain*(ty: IRType):
-    tuple[minOrd, maxOrd: int64, ordSet: seq[int]] =
-  ## Issue #163 review R12 extraction. THE single decision of what values a
-  ## variant discriminator may legally take -- previously computed
-  ## independently in two places: `allocateSym`'s `itVariant` arm (the
-  ## BV-disc disjunction) and `runSymexImpl`'s `isOptimised` disc-promotion
-  ## (the Z3Int bound + disjunction). Both re-derived the same
-  ## `rangeAliasElseDomain` guard by hand, which is how issue #163 W6 (a
-  ## range-alias `else:` arm's domain wrongly narrowed to just the explicit
-  ## `of N:` literals, making every else-covered value unreachable) had to
-  ## be fixed twice.
-  ##
-  ## `ty` is the *variant's* own IRType (it carries `vArms`, `vDiscTags`,
-  ## `vDiscTy`) -- not the discriminator field's IRType.
-  ##
-  ## Exported (unlike its two callers) specifically so this decision can be
-  ## unit-tested directly -- pure, no Z3 context -- see
-  ## `tests/tsymex_163rev_disc_domain.nim`.
-  ##
-  ## `ordSet.len == 0` on return means "assert no explicit per-ordinal
-  ## disjunction" -- either because the range-alias-else-domain case
-  ## applies (a non-enum, e.g. `range[lo..hi]`, discriminator with an
-  ## `else:` arm: its legal domain IS its own declared range, which is
-  ## asserted separately by the discriminator's own allocation, so an
-  ## explicit disjunction over just the `of N:` literals would falsely
-  ## exclude every else-covered value), or because the variant is
-  ## degenerate (no arms, no tags -- `minOrd`/`maxOrd` collapse to 0).
-  ##
-  ## `hasElse` is derived here from `arm.isElse` rather than taken as a
-  ## parameter: both call sites already had this fact on hand only by
-  ## re-scanning `vArms` themselves (one via `arm.isElse`, the other via
-  ## the equivalent `arm.tagOrdinal < 0` sentinel check -- the two are
-  ## paired at construction time in `dsl_typebridge.nim` and can't
-  ## diverge), so folding the scan in here removes that third small
-  ## duplication too.
-  discDomainOf(ty.vArms, ty.vDiscTags, ty.vDiscTy)
-
-proc axisDiscriminatorDomain*(ax: VariantAxis):
-    tuple[minOrd, maxOrd: int64, ordSet: seq[int]] =
-  ## RFC-0005 S8s. `discriminatorDomain` for one axis of a multi-variant.
-  ## `allocateSym`'s multi-variant arm used to build its own disjunction
-  ## over the axis's arm ordinals, the `else` arm's sentinel (-1) among
-  ## them, so an ordinal an `else` arm covers was never a value of an
-  ## allocated discriminator (a false `sxUnsat`), and -1 was. The same
-  ## decision as a single `case` now, from the same code.
-  discDomainOf(ax.arms, ax.discTags, ax.discTy)
 
 proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
                  stringBacked: bool = false,
@@ -4142,89 +3295,6 @@ var variantConstructSymFreshCounter* {.threadvar.}: int
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
-proc ejectBase(sv: SymVal): SymVal =
-  ## Phase 15 G4. When a `distinct T` value is USED in a base-typed context
-  ## (an explicit `T(distinctVal)` conversion, which the parser passes through
-  ## to the bare distinct var, or any arith/compare against a base value), it
-  ## ejects to its base SymVal. The base was bound `== eject_T(distinctConst)`
-  ## at allocation, so this is the sound round-trip value (Nim's `T(d)`). For
-  ## any non-distinct SymVal this is the identity. Nested distinct chains
-  ## (`distinct (distinct U)`) eject all the way down to the ground base.
-  if sv.kind == svDistinct: ejectBase(sv.distinctBaseSym[]) else: sv
-
-var currentBorrowReboxCounter* {.threadvar.}: int
-  ## Phase 15 G5. Fresh-name counter for re-boxed distinct consts produced by a
-  ## borrowed arithmetic operator. `lower` has no `WalkCtx` access (mirroring
-  ## E8/G4's threadvar mechanism), so the per-occurrence const name is uniquified
-  ## from this counter. Reset at `runSymexImpl` entry.
-
-proc degradeAlloc(ty: IRType, kind: SymexErrorKind, msg: string,
-                   tag: string): SymVal =
-  ## Fix-slice item 9 (round-6 re-review): pairs `allocDegrade` (the taint
-  ## record) with `allocateSym(ty, freshDegradeName(tag), ...)` (the
-  ## uniquified fresh placeholder) into ONE call. The two are meant to
-  ## ALWAYS travel together at a site shaped like this — the taint record
-  ## and the placeholder's collision-safe name are two halves of the same
-  ## decline — but nothing enforced the pairing before this slice (item 3/4
-  ## of this same re-review found TWO sites where `freshDegradeName` had
-  ## been dropped, reverting to a bare fixed name that collides across
-  ## repeat hits within one run). `tests/tsymex_r6_n38_degrade_pairing_audit.nim`
-  ## (this item's own audit, n36-style) greps the source for exactly this
-  ## shape going forward.
-  ##
-  ## `allocDegrade` remains directly callable on its own for the sites that
-  ## do NOT fit this shape:
-  ##   - the `.unalloc`-suffixed `baseName` placeholders (the param/witness/
-  ##     table/set catch-alls just above this proc in the file) — those key
-  ##     off the ALLOCATION's own name, never a fresh counter, so pairing
-  ##     with `freshDegradeName` would be a no-op at best and a naming
-  ##     regression at worst (losing the `.unalloc` convention downstream
-  ##     tooling may key on).
-  ##   - the vacuous `mkBool(true)`/forwarded-operand sites (`retBindEq`'s
-  ##     svSeq/composite arms, `iteSV`'s svClosure arm, `lowerBorrowOp`'s
-  ##     catch-all) — no name is allocated at all; the existing value (or a
-  ##     no-op `true`) is reused directly.
-  ##   - the ONE documented `rawConstOf` exception (`iteSV`'s `svUninterpRef`
-  ##     arm — see the CR-1c table's own doc, above) — still pairs with
-  ##     `freshDegradeName`, but through `rawConstOf` rather than
-  ##     `allocateSym`, so it does not fit this proc's `ty`-driven signature.
-  ##   - `runtime_heap.nim`'s sites, which "handle their own" pairing: heap
-  ##     degrades follow `allocDegrade` + a fresh `allocateSym` with an
-  ##     env-rebind + `forkPathTainted`/`drainPendingLowerEffects` (`Path`-
-  ##     scoped fork/drain machinery), a different taint sink than the bare
-  ##     `freshDegradeName` counter this helper wraps.
-  allocDegrade(kind, msg)  # [pairing-audited: this IS the pairing helper's own body]
-  var fresh: seq[Z3Bool]
-  allocateSym(ty, freshDegradeName(tag), fresh)
-
-proc reboxDistinct(distinctTy: IRType, base: SymVal): SymVal =
-  ## Phase 15 G5. Re-box a BASE SymVal as a fresh `svDistinct` of `distinctName`
-  ## — the result of a borrowed ARITHMETIC operator (`+`/`-`/`*`/`/` returning
-  ## the distinct type). A fresh opaque const of the distinct sort carries the
-  ## type-wall identity; the COMPUTED base value is boxed underneath so it ejects
-  ## back correctly and the witness renders through the eject-reader chain.
-  ##
-  ## This operates entirely on the G4 boxed base — it does NOT apply the Z3
-  ## `inject_T` function (which HANGS on the uninterpreted-fn-over-BV / MBQI
-  ## combination, per the G4 finding).
-  ##
-  ## RFC-0005 S8ad: the sort comes from `ensureDistinctSort`. It used to be
-  ## ASSUMED present because "the operands were already allocated as this
-  ## distinct type", but `D(x)` is the parser's identity (S8p), so a local
-  ## `var m = Meters(0); m = m + Meters(1)` re-boxes a distinct type no
-  ## allocation ever saw: `weInternalWalkerFault` ("distinct sort not
-  ## allocated") at the base.
-  let ctx = requireCurrentContext()
-  let distinctName = distinctTy.distinctName
-  let entry = ensureDistinctSort(distinctTy)
-  inc currentBorrowReboxCounter
-  let constName = "borrow_" & distinctName & "#" & $currentBorrowReboxCounter
-  let dAny = wrap[Z3AnyAst](ctx, rawConstOf(ctx, entry.sort.raw, constName))
-  let boxed = new(SymVal)
-  boxed[] = base
-  SymVal(kind: svDistinct, distinctAst: dAny, distinctName: distinctName,
-         distinctBaseSym: boxed)
-
 proc reboxSeqCell(elemTy: IRType, cell: SymVal): SymVal =
   ## RFC-0005 S8ba. A seq element read at static type `elemTy`: a `distinct`
   ## element's cell holds its base (`seqCellTy`), re-boxed here as a fresh
@@ -4232,9 +3302,6 @@ proc reboxSeqCell(elemTy: IRType, cell: SymVal): SymVal =
   ## (or a nil type from a pre-S8ba IR) is the cell itself.
   if elemTy == nil or elemTy.kind != itDistinct: return cell
   reboxDistinct(elemTy, reboxSeqCell(elemTy.distinctBase, cell))
-proc svPartsOf(sv: SymVal; ty: IRType): seq[SymVal]
-proc svWithParts(proto: SymVal; ty: IRType; parts: seq[SymVal]): SymVal
-  ## RFC-0005 S8bc fwd-decls (defined in runtime_heap.nim, included below).
 
 func hasDepthBound(ty: IRType): bool =
   ## RFC-0005 S8bc. `ty` holds, at some depth, the placeholder seq at a
@@ -4420,54 +3487,6 @@ proc seqStoreDecline(op: string; elemTy: IRType; val: SymVal): SymVal =
   allocateSym(tUnsupportedFieldSeq(elemTy, msg, kind = kind),
               freshDegradeName("__seqStoreDecline"), fresh)
 
-proc bvTermToZ3Int*[W: static int](bv: Z3BitVec[W], signed: bool): Z3Int =
-  ## `bv` as a Z3 Int, read as signed or unsigned. RFC-0005 S8o: a NUMERAL
-  ## is folded here, to the Int numeral of its Nim value. Z3 builds a signed
-  ## `bv2int` of a constant as `ite(bvslt c 0, bv2int c - 2^W, bv2int c)`
-  ## and leaves it unevaluated, so every constant string index (`s[3]`)
-  ## used to reach the solver in that form (S8k's As-landed note). A
-  ## symbolic `bv` keeps Z3's `bv2int`.
-  let ctx = bv.ctx
-  if isNumeralAst(ctx, bv.raw):
-    let u = parseBiggestUInt(getNumeralString(bv))   # 0 ..< 2^W, W <= 64
-    let text =
-      if signed and W < 64 and u >= (1'u64 shl (W - 1)):
-        "-" & $((1'u64 shl W) - u)
-      elif signed and W == 64 and u >= (1'u64 shl 63):
-        "-" & $((not u) + 1)
-      else: $u
-    return wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring,
-                                                      ctx.checkErr Z3_mk_int_sort(ctx.raw)))
-  wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, bv.raw, signed))
-
-proc bvToZ3Int(sv: SymVal): Z3Int =
-  ## Z3-level conversion of a typed BV SymVal to Z3Int. Used when a
-  ## BV-shaped value (e.g. a Nim `int` param `i`) meets a Z3Int-shaped
-  ## operand (e.g. `s.len`). Z3's `bv2int` is the canonical conversion;
-  ## a constant is folded first (`bvTermToZ3Int`, RFC-0005 S8o).
-  case sv.kind
-  of svBV8:  bvTermToZ3Int(sv.bv8, sv.signed)
-  of svBV16: bvTermToZ3Int(sv.bv16, sv.signed)
-  of svBV32: bvTermToZ3Int(sv.bv32, sv.signed)
-  of svBV64: bvTermToZ3Int(sv.bv64, sv.signed)
-  else:
-    raise newException(ValueError,  # [raise-audited: category-c: bijectivity-guarded (only reached from toZ3Int's own BV-kind-guarded arm)]
-      "bvToZ3Int: not a BV — got " & $sv.kind)
-
-proc toZ3Int(sv: SymVal): Z3Int =
-  ## Coerce an int-typed SymVal (svInt or BV) to Z3Int.
-  case sv.kind
-  of svInt: sv.zi
-  of svBV8, svBV16, svBV32, svBV64: bvToZ3Int(sv)
-  of svDistinct:
-    # RFC-0005 S8bc (item 2): a `distinct` int used at its base (a borrowed
-    # `$`/`abs` lowered as the base routine on the unwrapped argument). The
-    # ejected base is the value Nim's `T(d)` gives (`ejectBase`).
-    toZ3Int(ejectBase(sv))
-  else:
-    raise newException(ValueError,  # [raise-audited: category-c: int-family-only reachability (every call site pre-guards to svInt/BV kinds)]
-      "toZ3Int: not an int-typed SymVal — got " & $sv.kind)
-
 proc svIntToBV(sv: SymVal, likeKind: SVKind): SymVal =
   ## CR-1a: coerce a Z3-Int-sorted SymVal (`.len`/`.find`/`.indexOf`/
   ## `parseInt` results — these ALWAYS lower to `svInt` unconditionally;
@@ -4528,17 +3547,6 @@ proc containerRecvDeclined(recv: SymVal; want: SVKind; op: string): bool =
     op & ": receiver lowered to " & plainEnglishSymValKind(recv.kind) &
     ", not a " & plainEnglishSymValKind(want) & " (feUnsupportedOp)")
   true
-
-var intOfBV {.threadvar.}: Table[uint, tuple[zi: Z3Int, bv: SymVal]]
-  ## RFC-0005 S8ax. Each Int a bit-vector was converted to at a sort
-  ## boundary (`toSvIntPreserving`), keyed by the Int term's address, with
-  ## the bit-vector it came from. The entry holds the term, so the address
-  ## is not reused for another term while it is listed. `reconcileInt` and
-  ## `stampedIntToBV` take the bit-vector back instead of converting the
-  ## Int again: `int2bv(bv2int(v))` and `bv2int(r) == bv2int(v)` are exact
-  ## but cost Z3 minutes, and since S8ax every signed `int` heap is
-  ## Int-sorted (`intHeapCell`), so a bit-vector `int` stored and read back
-  ## crosses the boundary twice. Cleared by `resetSymexRunState`.
 
 proc bvOfInt(sv: SymVal): Option[SymVal] =
   ## RFC-0005 S8ax. The bit-vector `sv` (an `svInt`) is the conversion of,
@@ -5263,9 +4271,6 @@ proc bitSetCardFacts(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       result.add ka == both + bsPopcount(bsBin(Z3_mk_bvand, a, bsNot(b)), n)
       result.add kb == both + bsPopcount(bsBin(Z3_mk_bvand, b, bsNot(a)), n)
 
-proc bitSetSV(raw: Z3AnyAst; elemTy: IRType): SymVal =
-  SymVal(kind: svBitSet, bsRaw: raw, bsElemTy: elemTy)
-
 proc lowerBitSet(env: Env, e: IRExpr): SymVal =
   ## RFC-0005 S8bq (item 2). An `iekBitSet` operation. The arguments are
   ## lowered in order; an element is already converted to `T` (its range
@@ -5381,21 +4386,6 @@ var uninitSeqAliases {.threadvar.}: Table[int, seq[tuple[guard: Z3Bool, data: Z3
   ## branch conditions). `retBindEq` makes the two equal there, so element
   ## `k` of `retSym` is unwritten exactly where it is in the data returned.
 var uninitAliasHeld {.threadvar.}: seq[Z3AnyAst]
-proc probeContext(): Z3Context =
-  ## RFC-0005 S8bp. A fresh Z3 context for a per-thread kind probe's terms
-  ## (`seqCapKinds`, `byteDomainKinds`, `intDivDeclKinds`,
-  ## `heapChainKinds`, `theoryFreeSimple`; batch 7: S8bq's `uninitKinds`,
-  ## S8ax's `storeDeclKind` / `iteDeclKind`, batch 4's `constArrayDeclKind`,
-  ## and S8bu's `int2bvDeclKind` / `eqDeclKind` / `selectDeclKind`). A decl kind is the linked Z3's,
-  ## the same in every context, so it is read where it changes nothing:
-  ## built in the walk's context, a probe's terms (and `theoryFreeSimple`'s
-  ## check) made a thread's first walk search differently from its later
-  ## ones (`tsymex_rfc0005_s8bp_isolation`). Not made the thread's current
-  ## context.
-  let prev = currentContext()
-  result = newContext()
-  setCurrentContext(prev)
-
 var uninitArrKinds {.threadvar.}: tuple[ready: bool, store, ite, select, map: int]
   ## The linked Z3's decl kinds of `store`, `ite` and `select` (probed once
   ## per thread, as `seqCapKinds` does: the wrapper's enum binds only a
@@ -5438,13 +4428,6 @@ proc uninitKinds(): tuple[store, ite, select, map: int] =
                       kindOf(ctx, sel.raw), kindOf(ctx, mp.raw))
   (uninitArrKinds.store, uninitArrKinds.ite, uninitArrKinds.select,
    uninitArrKinds.map)
-
-const termWalkMaxDepth* = 256
-  ## RFC-0005 S8ct. The deepest term a recursive walk of a Z3 term takes. A term
-  ## can be far deeper than the stack or Nim's call depth limit allow, and either
-  ## ends the process. Each walk gives the answer that claims nothing past this.
-  ## 256 levels is under the `nimFrameReserve` a solve keeps, at 1 or 2 frames a
-  ## level.
 
 proc termDepth*(ctx: Z3Context; t: RawZ3Ast; cap = termWalkMaxDepth): int =
   ## RFC-0005 S8ct. The levels of applications in `t` (a leaf is 0), or `cap + 1`
@@ -7593,35 +6576,6 @@ proc reconcileFloat*(a, b: SymVal): (SymVal, SymVal) =
   else:
     (a, b)  ## same width — no widening needed
 
-proc bvKindWidth(k: SVKind): int =
-  ## R3 (S2): the fixed width a `svBV*` kind denotes — used by `reconcileInt`
-  ## to seed `ziWidth` on a BV operand it converts to `svInt`, so the
-  ## converted value stays overflow-checkable at its ORIGINAL static width.
-  case k
-  of svBV8:  8
-  of svBV16: 16
-  of svBV32: 32
-  of svBV64: 64
-  else: raise newException(ValueError, "bvKindWidth: not a BV kind " & $k)  # [raise-audited: category-c: BV-family invariant (bvKindWidth is only called with an already-established BV kind)]
-
-proc toSvIntPreserving(sv: SymVal): SymVal =
-  ## R3 (S2): `reconcileInt`'s per-operand conversion step, width-preserving.
-  ## An already-`svInt` operand is returned AS-IS (its own `ziWidth`/
-  ## `ziSigned` — possibly 0/unset, possibly a promoted value's real static
-  ## type — must survive reconciliation untouched). A BV operand converts via
-  ## `toZ3Int` exactly as before, now ALSO stamping `ziWidth`/`ziSigned` from
-  ## the BV kind/its own `signed` field, so the converted value remains
-  ## overflow-checkable at the width it actually was before the mixed-theory
-  ## bridge (e.g. a plain non-promoted `svBV64` operand reconciled against a
-  ## promoted `svInt` sibling must not silently lose its own overflow fork).
-  if sv.kind == svInt:
-    sv
-  else:
-    let zi = toZ3Int(sv)
-    intOfBV[cast[uint](cast[pointer](zi.raw))] = (zi: zi, bv: sv)   # RFC-0005 S8ax
-    SymVal(kind: svInt, zi: zi,
-           ziWidth: bvKindWidth(sv.kind), ziSigned: sv.signed)
-
 proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
   ## CR-9(c) Stage B. When the two operands have DIFFERENT int-family kinds
   ## (e.g. svBV64 vs svInt, or svBV32 vs svBV64), convert both to svInt via
@@ -8851,11 +7805,6 @@ var globalEntryVals {.threadvar.}: Table[string, SymVal]
   ## path and frame (`entryValueOf`). Reset per run. RFC-0005 batch 6: also
   ## S8bw's initial value of a global whose entry value is not modelled
   ## (`globalInitValue`); one store, one set of unwritten leaves.
-var globalEntryFacts {.threadvar.}: seq[Z3Bool]
-  ## RFC-0005 S8as. The allocation facts of those values (a seq's length is
-  ## at least 0, a range's bounds): true of every value of the type, so
-  ## asserted into every check (`globalRoots`), as the values are run-wide.
-
 proc globalInitValue(name: string; ty: IRType): SymVal =
   ## The value the global `name` of declared type `ty` holds before its
   ## first write in the walk: its unwritten leaves. RFC-0005 batch 6: a
@@ -14255,8 +13204,6 @@ var int2bvDeclKind {.threadvar.}: int
 var eqDeclKind {.threadvar.}: int
   ## RFC-0005 S8bu. The same, of `=`.
 
-proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast
-  ## RFC-0005 S8bu. Defined in `runtime_heap.nim`.
 
 proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## RFC-0005 S8bu. Facts that let Z3 invert the signed Int view `sbv2int`
@@ -29207,8 +28154,6 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   resetArith()                                                     ## RFC-0016 W1-d2
   rfc0005RawStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
-  distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
-  distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
   freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
   ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
@@ -29229,12 +28174,10 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   loweringReadNames = @[]                ## RFC-0005 S8as
   lastDrainedClosureExitPc = @[]         ## RFC-0005 S7
   lowerAsReceiver = false                ## RFC-0005 S8bw
-  allocEnumZeroLegal = false             ## RFC-0005 S8z
   glUnwrittenCtx = default(RawZ3Context) ## RFC-0005 batch 6: the run's
                                          ## context is new (`glUnwrittenFresh`)
   seqConformCounter = 0                  ## RFC-0005 S8bc: bound-var names
   strCharsCounter = 0                    ## RFC-0005 S8ca: bound-var names
-  containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms
   bitSetCardIds.clear()
@@ -29259,16 +28202,11 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   glWatched = initHashSet[string]()   ## RFC-0005 S8bz
   glVarGlobal = initTable[string, string]()   ## RFC-0005 batch 11
   noinitSerial = 0                    ## RFC-0005 S8bz
-  globalEntryFacts = @[]                         ## RFC-0005 S8as
   ctxPruneLog = @[]                              ## RFC-0005 S8ax
   currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel
   currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
-  currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
-  heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
-  intHeapIsInt = false   ## RFC-0005 S8as: set by runSymexImpl before any param is allocated
-  intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()  ## RFC-0005 S8ax
-  intCellFactSeen = initHashSet[uint]()  ## RFC-0005 S8ax
+  resetHeapModel()                      ## RFC-0016 D3c-6: heap_model's threadvars (the heap-key shapes, container registry, distinct-sort sinks, int bridge)
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
   currentWinningGlobals = @[]                         ## RFC-0005 S8bn
   ptrLeafAims = initTable[int64, PtrLeafAim]()        ## RFC-0005 S8bn
@@ -32074,5 +31012,5 @@ lowerHooks = LowerHooks(
   lower: lower, lowerClosureCall: lowerClosureCall, seqElemAt: seqElemAt,
   storeSeqElem: storeSeqElem, sameSymVal: sameSymVal,
   entryValueOf: entryValueOf, iteSV: iteSV, allocateSym: allocateSym,
-  sortOfTuple: sortOfTuple, currentFrameId: currentFrameId,
+  currentFrameId: currentFrameId,
   registerCapCell: registerCapCell)

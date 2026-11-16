@@ -18,8 +18,10 @@
 ##     include does not define it itself. Identifiers are matched in comment-
 ##     and string-stripped text, so the count is approximate but monotone in
 ##     the real coupling;
-##   * the forward-declaration block in `runtime.nim` (`allocRefSort` ..
-##     `svCellWf`) names only symbols that `runtime_heap.nim` defines;
+##   * `runtime.nim` has no forward declaration of a `heap_model` or `z3check`
+##     proc (D3c-6 deleted the block: the algebra is imported, not declared),
+##     `heap_model.nim` imports only leaves, names no `runtime.nim` symbol and
+##     resets every run-state threadvar it owns in one proc;
 ##   * the `symval.nim` and `walk_state.nim` leaves import only the allowed
 ##     leaves, `walk_state` resets every threadvar it owns in one proc, its
 ##     `sync*` procs append on the sinks pointer (no forward declaration is
@@ -40,13 +42,26 @@ const
                     "runtime_closures.nim"]
 
   ## Ratchet-down only: the measured count of distinct runtime-private
-  ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1: 52/14/6/23/146; D3c-2, once the walk state left runtime.nim: as below).
+  ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1: 52/14/6/23/146; D3c-2, once the walk state left runtime.nim: 21/136; D3c-6, once the heap algebra became a module: heap 105, strings 17).
   ceilings = {
-    "runtime_strings.nim": 21,
-    "runtime_heap.nim": 136}.toTable
+    "runtime_strings.nim": 17,
+    "runtime_heap.nim": 105}.toTable
 
-  fwdFirst = "proc allocRefSort*("
-  fwdLast = "proc allocateSeqDataRaw("
+  ## What slice D3c-6 made real modules below `runtime.nim`: the heap algebra
+  ## and the sort-checked Z3 term builders it rests on.
+  hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
+               "./types", "./symval", "./walk_state", "./z3check"]
+  zcAllowed = ["z3", "./types", "./symval"]
+
+  ## Parameter names (`c, t, e: RawZ3Ast`, `s: RawZ3Sort`, `cond: Z3Bool`)
+  ## that coincide with a field line of a `runtime.nim` block; `boundHere`
+  ## sees only the last name of a comma list.
+  hmParamNames = ["c", "s", "cond"]
+
+  ## The decl-kind caches of the linked Z3: the same in every run, read in a
+  ## probe context (`probeContext`), so `resetHeapModel` leaves them alone.
+  hmProcessStable = ["storeDeclKind", "selectDeclKind", "constArrayDeclKind",
+                     "iteDeclKind", "heapChainKinds"]
 
   ## The imports `symval.nim` may have: stdlib, `z3`, and the existing leaves.
   symvalAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
@@ -207,20 +222,18 @@ suite "RFC-0016 D3: the include surface":
       checkpoint f & " references " & $n & " (ceiling " & $ceilings[f] & ")"
       check n <= ceilings[f]
 
-  test "the forward-declaration block names only heap symbols":
-    let a = rt.find(fwdFirst)
-    let b = rt.find(fwdLast)
-    check a >= 0 and b > a
-    let heap = readSmt("runtime_heap.nim")
-    var names: seq[string]
-    for l in rt[a ..< b].splitLines:
-      if l.startsWith("proc "):
-        names.add leadIdent(l[5 .. ^1])
-    check names.len == 14
-    for n in names:
-      checkpoint n
-      check heap.contains("\nproc " & n & "*(") or
-            heap.contains("\nproc " & n & "(")
+  test "no forward declaration of a heap_model or z3check proc is left":
+    check not rt.contains("proc allocRefSort*(")
+    let rtDefs = definedNames(rt)
+    for f in ["heap_model.nim", "z3check.nim"]:
+      for n in definedNames(readSmt(f)):
+        # a field or parameter line of a block may share a name; only a
+        # top-level proc/func/template/iterator declaration is a forward decl
+        for kw in ["proc ", "func ", "template ", "iterator "]:
+          checkpoint f & " " & n
+          check not (rt.contains("\n" & kw & n & "(") or
+                     rt.contains("\n" & kw & n & "*(") or
+                     rt.contains("\n" & kw & n & "["))
 
 suite "RFC-0016 D3c-1: the symval leaf":
   test "symval.nim imports only the allowed leaves":
@@ -374,9 +387,90 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     let ws = readSmt("walk_state.nim")
     for h in ["lower", "lowerClosureCall", "seqElemAt", "storeSeqElem",
               "sameSymVal", "entryValueOf", "iteSV", "allocateSym",
-              "sortOfTuple", "currentFrameId", "registerCapCell"]:
+              "currentFrameId", "registerCapCell"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
+    check not ws.contains("sortOfTuple*:")   # D3c-6: read directly from heap_model
     check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")
     check readSmt("runtime_closures.nim").contains("lowerHooks.allocateSym(")
     check readSmt("runtime.nim").contains("\nlowerHooks = LowerHooks(")
+
+proc importsOf(text: string): seq[string] =
+  for l in text.splitLines:
+    let t = stripLine(l).strip()
+    if t.startsWith("import "):
+      for m in t[7 .. ^1].split(','):
+        var s = m.strip()
+        let k = s.find(" as ")
+        if k >= 0: s = s[0 ..< k]
+        result.add s
+    elif t.startsWith("from "):
+      result.add t.splitWhitespace[1]
+
+suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
+  test "heap_model.nim imports only leaves":
+    let seen = importsOf(readSmt("heap_model.nim"))
+    checkpoint $seen
+    for s in seen: check s in hmAllowed
+    check "./symval" in seen and "./walk_state" in seen and "./z3check" in seen
+
+  test "z3check.nim imports only leaves":
+    let seen = importsOf(readSmt("z3check.nim"))
+    checkpoint $seen
+    for s in seen: check s in zcAllowed
+
+  test "runtime.nim imports both and includes neither":
+    let rt = readSmt("runtime.nim")
+    for m in ["heap_model", "z3check"]:
+      check rt.contains("\nimport ./" & m)
+      check not rt.contains("include \"" & m & ".nim\"")
+
+  test "heap_model and z3check name no runtime.nim symbol":
+    let priv = definedNames(readSmt("runtime.nim"))
+    for f in ["heap_model.nim", "z3check.nim"]:
+      checkpoint f
+      let text = readSmt(f)
+      var allowed = definedNames(text) + boundHere(text)
+      for n in hmParamNames: allowed.incl n
+      let named = referenced(viaHooks(text), priv - allowed)
+      checkpoint $named
+      check named.len == 0
+
+  test "runtime.nim defines none of the names that moved":
+    let rtDefs = definedNames(readSmt("runtime.nim"))
+    let hp = definedNames(readSmt("runtime_heap.nim"))
+    for f in ["heap_model.nim", "z3check.nim"]:
+      for n in definedNames(readSmt(f)):
+        checkpoint f & " " & n
+        check n notin rtDefs
+        check n notin hp
+
+  test "every run-state threadvar of heap_model.nim is reset by resetHeapModel":
+    let hm = readSmt("heap_model.nim")
+    let at = hm.find("proc resetHeapModel*(")
+    check at >= 0
+    let resetBody = hm[at .. ^1]
+    var tvs: seq[string]
+    for l in hm.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs.len == 15
+    for n in tvs:
+      checkpoint n
+      if n in hmProcessStable:
+        check not resetBody.contains("\n  " & n & " = ")
+      else:
+        check resetBody.contains("\n  " & n & " = ")
+
+  test "resetSymexRunState calls resetHeapModel":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    check rt[at .. ^1].contains("\n  resetHeapModel()")
+
+  test "the heap include keeps the walker arm, not the algebra":
+    let hp = readSmt("runtime_heap.nim")
+    for n in ["walkHeapArm", "nilDerefFork", "freshRef", "assertFreshness"]:
+      check hp.contains("\nproc " & n)
+    for n in ["heapSelect", "svLeafAsts", "mkHeapArrayVar", "svCellWf"]:
+      check not hp.contains("\nproc " & n)

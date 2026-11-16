@@ -57,6 +57,16 @@ import nelli/smt/canonicalize
 import nelli/smt/types
 import "./inline_sites"
 
+# `test` expands its body inline, so every entry call's result temporaries of
+# the whole file share the frame of the module's main routine: 72 sites cost
+# 113 KB under gcc, about 600 KB at MSVC's debug frames, and with the walker's
+# own depth that overran the 1 MB Windows main stack (0xC00000FD, the first
+# concolic follow walk). Each test body runs in a routine of its own, so its
+# temporaries are released when it ends.
+template frameTest(name: string; body: untyped) =
+  test name:
+    (proc () {.closure, noinline.} = body)()
+
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs:
     if e.severity == sevError: result.add $e.kind & ": " & e.msg & "\n"
@@ -173,22 +183,22 @@ proc rH1(v: int): int =
 nsut(sH1, rH1, 105)
 
 suite "R7-1: a bare `return` of a closure call reconciles":
-  test "lambda":
+  frameTest "lambda":
     check inlineSites(rA1) == @["return"]
     exitVerdict(sA1)
-  test "proc-valued let":
+  frameTest "proc-valued let":
     check inlineSites(rA2) == @["return"]
     exitVerdict(sA2)
-  test "proc field of a by-value object":
+  frameTest "proc field of a by-value object":
     check inlineSites(rA3) == @["return"]
     exitVerdict(sA3)
-  test "address-taken local written by name, read through the pointer":
+  frameTest "address-taken local written by name, read through the pointer":
     check inlineSites(rA4) == @["return"]
     exitVerdict(sA4)
-  test "address-taken local written through the pointer, read by name":
+  frameTest "address-taken local written through the pointer, read by name":
     check inlineSites(rA5) == @["return"]
     exitVerdict(sA5)
-  test "control: an operand call is hoisted":
+  frameTest "control: an operand call is hoisted":
     check inlineSites(rH1) == newSeq[string]()
     exitVerdict(sH1)
 
@@ -354,44 +364,44 @@ proc rW4(v: int): int =
 nsut(sW4, rW4, 72)
 
 suite "R7-3: a bare guard applying a closure reconciles":
-  test "if guard (capture)":
+  frameTest "if guard (capture)":
     check inlineSites(rI1) == @["if"]
     exitVerdict(sI1)
-  test "if guard (pointer)":
+  frameTest "if guard (pointer)":
     check inlineSites(rI1P) == @["if"]
     exitVerdict(sI1P)
-  test "elif guard":
+  frameTest "elif guard":
     check inlineSites(rI2) == @["if"]
     exitVerdict(sI2)
-  test "if guard that is false (pointer)":
+  frameTest "if guard that is false (pointer)":
     check inlineSites(rI1F) == @["if"]
     exitVerdict(sI1F)
-  test "elif guard that is false (pointer)":
+  frameTest "elif guard that is false (pointer)":
     check inlineSites(rI2F) == @["if"]
     exitVerdict(sI2F)
-  test "controls: an operand call is hoisted out of the guard":
+  frameTest "controls: an operand call is hoisted out of the guard":
     check inlineSites(rH2) == newSeq[string]()
     exitVerdict(sH2)
     check inlineSites(rH3) == newSeq[string]()
     exitVerdict(sH3)
     check inlineSites(rH4) == newSeq[string]()
     exitVerdict(sH4)
-  test "while test (capture)":
+  frameTest "while test (capture)":
     check inlineSites(rW1) == @["while"]
     exitVerdict(sW1)
-  test "while test (pointer)":
+  frameTest "while test (pointer)":
     check inlineSites(rW1P) == @["while"]
     exitVerdict(sW1P)
-  test "final test after the last unrolled body (capture)":
+  frameTest "final test after the last unrolled body (capture)":
     check inlineSites(rW2) == @["while"]
     exitVerdict(sW2)
-  test "final test after the last unrolled body (pointer)":
+  frameTest "final test after the last unrolled body (pointer)":
     check inlineSites(rW2P) == @["while"]
     exitVerdict(sW2P)
-  test "a loop still active after the bound is tainted":
+  frameTest "a loop still active after the bound is tainted":
     check inlineSites(rW3) == @["while"]
     exhausted(sW3)
-  test "`while n < 5 and c()` lowers to a guard `if` in the body":
+  frameTest "`while n < 5 and c()` lowers to a guard `if` in the body":
     check inlineSites(rW4) == @["if"]
     exitVerdict(sW4)
 
@@ -432,7 +442,7 @@ proc jSet(v: int): int =
     result += d.int
 
 suite "R7-3: the ifJoin guard holds no call":
-  test "short-circuit chains and a bitset loop: every join guard is call-free":
+  frameTest "short-circuit chains and a bitset loop: every join guard is call-free":
     for (joins, withCall) in [ifJoinCalls(jAnd), ifJoinCalls(jOr),
                               ifJoinCalls(jNest), ifJoinCalls(jSet)]:
       check joins > 0
@@ -506,7 +516,7 @@ proc cWhQ(v: int) =
     n = 100
 
 suite "R7-3: the concolic follow guards":
-  test "follow `if` (witness 3: x is 7 after the guard)":
+  frameTest "follow `if` (witness 3: x is 7 after the guard)":
     check inlineSites(cIf) == @["if"]
     let trace = @[integerChoice(3, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
@@ -517,7 +527,7 @@ suite "R7-3: the concolic follow guards":
       check r.branchTrace[0].armTaken == 0
       check r.branchTrace[1].armTaken == 0
       check r.branchTrace[2].armTaken == 0
-  test "follow `while` (witness 3: x is 7 after the loop)":
+  frameTest "follow `while` (witness 3: x is 7 after the loop)":
     check inlineSites(cWh) == @["while"]
     let trace = @[integerChoice(3, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
@@ -528,7 +538,7 @@ suite "R7-3: the concolic follow guards":
       check r.branchTrace[0].armTaken == 0
 
 suite "R7-3: the concolic follow guards, pointer":
-  test "follow `if` that takes no arm (witness 3: x is 7 after the guard)":
+  frameTest "follow `if` that takes no arm (witness 3: x is 7 after the guard)":
     check inlineSites(cIfF) == @["if"]
     let trace = @[integerChoice(3, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
@@ -540,7 +550,7 @@ suite "R7-3: the concolic follow guards, pointer":
       check r.branchTrace[1].armTaken == 0
 
 suite "R7-4: the concolic follow while, pointer":
-  test "follow `while` (witness 3: two tests, so n is 1)":
+  frameTest "follow `while` (witness 3: two tests, so n is 1)":
     check inlineSites(cWhP) == @["while"]
     let trace = @[integerChoice(3, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
@@ -549,7 +559,7 @@ suite "R7-4: the concolic follow while, pointer":
     check r.branchTrace.len == 1
     if r.branchTrace.len == 1:
       check r.branchTrace[0].armTaken == 0
-  test "follow `while`, `x` read by name after the loop (reconcile live)":
+  frameTest "follow `while`, `x` read by name after the loop (reconcile live)":
     check inlineSites(cWhQ) == @["while"]
     let trace = @[integerChoice(3, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
@@ -577,7 +587,7 @@ proc cWhI(v: int) =
     d = 100
 
 suite "R8: the concolic follow while drops a continuation the pins contradict":
-  test "a drained in-bounds continuation (witness 0: the first test raises)":
+  frameTest "a drained in-bounds continuation (witness 0: the first test raises)":
     let trace = @[integerChoice(0, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
     let r = concolicCollect(cWhI, trace, bindings)
@@ -605,11 +615,11 @@ proc rV1(v: int): int =
 nsut(sV1, rV1, 15)
 
 suite "R8: a bare `return` reconciles before a `var` write-back":
-  test "closure writes the formal's target through a pointer":
+  frameTest "closure writes the formal's target through a pointer":
     exitVerdict(sV1)
 
 suite "R7-walker version":
-  test "walker version floor":
+  frameTest "walker version floor":
     check symexWalkerVersion.parseInt >= 369
 
 # ---- R8-1: a bare closure call as a `case` scrutinee ------------------------
@@ -774,42 +784,42 @@ proc rK12(v: int): int =
 nsut(sK12, rK12, 72)
 
 suite "R8-1: a closure-call `case` scrutinee is applied once":
-  test "lambda":
+  frameTest "lambda":
     exitVerdict(sK1)
-  test "proc-valued let":
+  frameTest "proc-valued let":
     exitVerdict(sK2)
-  test "proc field of a by-value object":
+  frameTest "proc field of a by-value object":
     exitVerdict(sK3)
-  test "multi-label arm":
+  frameTest "multi-label arm":
     exitVerdict(sK4)
-  test "range labels decline, so no second comparison":
+  frameTest "range labels decline, so no second comparison":
     exhausted(sK5)
-  test "case expression":
+  frameTest "case expression":
     exitVerdict(sK6)
-  test "address-taken local":
+  frameTest "address-taken local":
     exitVerdict(sK7)
-  test "control: a plain scrutinee":
+  frameTest "control: a plain scrutinee":
     exitVerdict(sK0)
-  test "set membership under a loop guard":
+  frameTest "set membership under a loop guard":
     exitVerdict(sK8)
-  test "slice membership under a loop guard":
+  frameTest "slice membership under a loop guard":
     exitVerdict(sK9)
-  test "set membership after `and` under a loop guard":
+  frameTest "set membership after `and` under a loop guard":
     exitVerdict(sK10)
-  test "control: set membership under an `if`":
+  frameTest "control: set membership under an `if`":
     exitVerdict(sK11)
-  test "control: slice membership under an `if`":
+  frameTest "control: slice membership under an `if`":
     exitVerdict(sK12)
 
 suite "R8-1: the closure call appears once in the IR":
-  test "case statement, every label shape":
+  frameTest "case statement, every label shape":
     check closureApplications(rK1) == 1
     check closureApplications(rK2) == 1
     check closureApplications(rK3) == 1
     check closureApplications(rK4) == 1
     check closureApplications(rK7) == 1
-  test "case expression":
+  frameTest "case expression":
     check closureApplications(rK6) == 1
-  test "no guard holds the call any longer":
+  frameTest "no guard holds the call any longer":
     check inlineSites(rK1) == newSeq[string]()
     check inlineSites(rK4) == newSeq[string]()

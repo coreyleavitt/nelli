@@ -33,3 +33,13 @@ suite "D1 S1: arith_regime (default build)":
     check "buildWraps(" notin src
     for lit in ["dpChecked", "dpUnchecked", "dpFwrapv"]:
       check lit notin src
+
+  test "S4 census: the walker names no build predicate, scope stack or profile literal":
+    let dir = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt"
+    for f in ["runtime.nim", "runtime_closures.nim", "runtime_exceptions.nim",
+              "runtime_floats.nim", "runtime_heap.nim", "runtime_strings.nim"]:
+      let src = readFile(dir / f)
+      for pat in ["buildWraps(", "WalkArith", "signedWrapDefined"]:
+        check pat notin src
+      for lit in ["dpChecked", "dpUnchecked", "dpFwrapv"]:
+        check lit notin src

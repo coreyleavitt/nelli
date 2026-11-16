@@ -172,7 +172,7 @@ proc checkFrames*() =
     for f in allFacts():
       let s = stampFor(f, b)
       if not s.claims: continue                         # runtime.nim:25498
-      enterBody(w, s)
+      check enterBody(w, s)
       let wraps = s.provenance != asChecked              # runtime.nim:2189
       check (w.regime == rgUnchecked) == wraps
       for ac in ArithCheck:

@@ -258,20 +258,27 @@ func regime*(f: ArithFrames; b: BuildSemantics = buildSemantics): Regime =
 proc ensureBase(f: var ArithFrames; b: BuildSemantics) =
   if f.frames.len == 0: f.frames.add buildRegime(b)
 
-proc enterBody*(f: var ArithFrames; s: ArithStamp) =
+proc enterBody*(f: var ArithFrames; s: ArithScope): bool =
   ## The walk rule (`pushArith`, `runtime.nim:2187`): a stamp that claims
   ## pushes its regime (`asBuild` and `asUnchecked` unchecked, `asChecked`
   ## checked); `asInherit` pushes NOTHING, so the callee runs under the
-  ## caller's regime and the caller pairs `leave` with a claiming stamp only.
+  ## caller's regime. Answers whether it pushed: the walker calls `leave` only
+  ## then (the parser's `enterParse` always pushes and always leaves).
   ## F-2: in a build that checks, the parse rule (`enterParse`) gives an
   ## unstamped non-magic callee the build's regime where this one gives it the
   ## caller's; harmless while every stdlib row that deviates calls only magics
   ## (the census in `tsymex_0016_d1_regime`), fixed by D1-F2's total stamp.
+  ## Takes the scope until S5 seals the IR stamp as an `ArithStamp`; this
+  ## overload only reads it, so it mints nothing.
   f.ensureBase buildSemantics
-  case s.scope
-  of asInherit: discard
+  case s
+  of asInherit: return false
   of asChecked: f.frames.add rgChecked
   of asBuild, asUnchecked: f.frames.add rgUnchecked
+  true
+
+proc enterBody*(f: var ArithFrames; s: ArithStamp): bool =
+  f.enterBody s.scope
 
 proc enterParse*(f: var ArithFrames; facts: RoutineArithFacts;
                  b: BuildSemantics = buildSemantics) =

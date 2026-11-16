@@ -34,6 +34,7 @@ import ./buildprofile as bprof   ## RFC-0016 K5a: the host half, the segment, th
 import ./types
 import ./admission
 import ./readonlyaxes   ## RFC-0016 E3c: `routeDeclines`, the view-whole route
+import ./arith_regime   ## RFC-0016 review D1 S4: the one owner of the arithmetic regime
 import ./definedness   ## RFC-0016 K10a-axis: the definedness axis
 import ./variant_layout as vl   ## RFC-0016 PRC-07 slice A: a variant's C layout
 import ./abstraction
@@ -2147,21 +2148,14 @@ var overflowConds* {.threadvar.}: seq[Z3Bool]
   ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
   ## Reset alongside `divByZeroConds` at every reset site.
 
-type WalkArith* = enum
-  ## RFC-0016 D1a. The arithmetic scope the walker is lowering under; the
-  ## walk-time reading of `ArithScope`, with the sense made positive.
-  waChecked   ## the C operation is checked (overflow and div-by-zero raise)
-  waWraps     ## unchecked: signed overflow is UB, an 8/16-bit result wraps
-              ## (32/64-bit too under `-d:nelliFwrapv`: `signedWrapDefined`)
-
-var arithScopes {.threadvar.}: seq[WalkArith]
+var arithFrames {.threadvar.}: ArithFrames
   ## RFC-0005 S8w, RFC-0016 W1-d2 / D1a. A lexical stack: the top is the scope
   ## of the routine body being walked. `resetSymexRunState` seeds it with the
-  ## build's (`buildWraps()`: `-d:danger`, `--overflowChecks:off`). A routine
-  ## body block pushes its `ArithScope` and pops it on the way out; a leaked
-  ## push is caught by `popArith`'s assert. Deliberately no try/finally (see the
+  ## build's (`buildRegime()`: `-d:danger`, `--overflowChecks:off`). A routine
+  ## body block pushes its `ArithScope` and leaves it on the way out; a leaked
+  ## push is caught by `leave`'s assert. Deliberately no try/finally (see the
   ## `runSymexCaught` note): every escape ends the run, which re-seeds the
-  ## stack. Read only through `wraps()` and `checked()`.
+  ## stack. Read only through `arithFrames.regime` and `emits`.
   ##
   ## Unchecked arithmetic is not a wrap: the C operation is undefined on
   ## overflow, so `lowerArith` deposits the overflow side as an
@@ -2175,7 +2169,7 @@ var checkScopes {.threadvar.}: seq[set[CheckOption]]
   ## off (`IRStmt.blkOn`). Read only through `checkedNow`.
 
 proc resetArith() =
-  arithScopes = @[(if buildWraps(): waWraps else: waChecked)]
+  arithFrames = ArithFrames.init()
   checkScopes = @[{}]
 
 proc checkedNow(co: CheckOption): bool =
@@ -2183,18 +2177,6 @@ proc checkedNow(co: CheckOption): bool =
   ## the build's option, or the routine's own `push` turning it back on.
   co in buildSemantics.checks or
     (checkScopes.len > 0 and co in checkScopes[^1])
-
-proc pushArith(sc: ArithScope) =
-  doAssert sc != asInherit, "an inheriting block opens no arith scope"
-  arithScopes.add(if sc in {asBuild, asUnchecked}: waWraps else: waChecked)
-
-proc popArith() =
-  doAssert arithScopes.len > 1, "arith scope stack underflow"
-  arithScopes.setLen(arithScopes.len - 1)
-
-proc wraps(): bool =
-  ## Is the C operation unchecked (signed overflow UB, 8/16-bit result wraps)?
-  arithScopes.len > 0 and arithScopes[^1] == waWraps
 
 var obligationLog* {.threadvar.}: ObligationLog
   ## Issue #161 slice 2. Audit trail, NOT a raise-fork sink — deliberately
@@ -9360,21 +9342,17 @@ proc wrapIntToWidth(r: SymVal): SymVal =
          ziSigned: r.ziSigned, ziIvl: win.ivl)
 
 proc checked(ac: ArithCheck): bool =
-  ## RFC-0016 W1-d2c / D1a, K10d. Is `ac`'s check emitted? The build decides
-  ## (`arithChecksFor`); a routine that pushed `overflowChecks: on` in a
-  ## checks-off build (`waChecked` under `buildWraps()`) raises
+  ## RFC-0016 W1-d2c / D1a, K10d. Is `ac`'s check emitted? The build decides;
+  ## a routine that pushed `overflowChecks: on` in a checks-off build raises
   ## `OverflowDefect` and `DivByZeroDefect` all the same: the routine is not
   ## the build. A check the build does not compile in is not forked: the
   ## unchecked operation is undefined and the definedness axis answers it.
-  ac in arithChecksFor() or
-    (ac in {acOverflow, acDivByZero} and buildWraps() and not wraps())
+  arithFrames.emits(ac)
 
 proc defProfile(): DefProfile =
   ## RFC-0016 K10a-axis. The build's arithmetic, as the definedness axis keys
-  ## it: `wraps()` is the unchecked scope, `-fwrapv` is K5a's.
-  if not wraps(): dpChecked
-  elif buildSemantics.fwrapv: dpFwrapv
-  else: dpUnchecked
+  ## it, for the regime the walk now stands in.
+  profile(arithFrames.regime)
 
 func arithOpOf(op: IRBinop): ArithOp =
   case op
@@ -9387,7 +9365,7 @@ func arithOpOf(op: IRBinop): ArithOp =
 proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop; site: string) =
   ## RFC-0016 W1-d2 (W-07). A signed `+`, `-` or `*` overflow side. With the
   ## build's overflow checks on it is Nim's `OverflowDefect` fork
-  ## (`overflowConds`). With them off (`wraps()`) the C operation is
+  ## (`overflowConds`). With them off (the unchecked regime) the C operation is
   ## undefined, so it is the `ubSignedOverflow` trap `drainArithTraps` decides
   ## at the op: an unreachable side is pruned, any other halts.
   ##
@@ -9511,10 +9489,10 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
                          else:
                            (if op == bDiv: "`x div 0`" else: "`x mod 0`"), site))
       else: ArithTrap(cond: c)
-    if wraps():
+    if arithFrames.regime == rgUnchecked:
       # RFC-0005 S8aa: Nim's zero-divisor check is part of its overflow
       # checks (the C code generator emits it only under `overflowChecks`),
-      # so with them off -- `acOverflow` excluded, `wraps()` --
+      # so with them off -- `acOverflow` excluded, the unchecked regime --
       # `x div 0` and `x mod 0` reach the C division itself, which traps
       # (x86 `idiv` / `div`, SIGFPE) at every width and signedness. Probed
       # on the pinned toolchain in the debug build a test replays under, c
@@ -9603,15 +9581,15 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
     # RFC-0005 S8w: a width-stamped result wraps where the machine's does:
     # always for an unsigned type (Nim's unsigned arithmetic is modular),
     # and for a signed one when the build's arithmetic is unchecked
-    # (`wraps()`). With checked signed arithmetic the value never
+    # (the unchecked regime). With checked signed arithmetic the value never
     # leaves the window on a surviving path (`overflowCondInt` forks the
     # raise), so there is nothing to wrap. `div` joins for the signed
     # case: `low(T) div -1` at 8 and 16 bits yields `-low(T)` in C's
     # promoted `int` and wraps back to `low(T)` (32 and 64 bits trap,
     # `arithTrapConds` above).
     let r = arithInt(a, b, op)
-    if r.ziWidth in {8, 16, 32, 64} and r.ziSigned and wraps() and
-       op == bDiv:
+    if r.ziWidth in {8, 16, 32, 64} and r.ziSigned and
+       arithFrames.regime == rgUnchecked and op == bDiv:
       # RFC-0005 S8ac: a truncated quotient is never further from zero than
       # its dividend, so the one quotient outside the window is `low(T) div
       # -1` (`-low(T)`), which wraps back to `low(T)` (at 32 and 64 bits the
@@ -9629,8 +9607,9 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
       # raise fork leaves the survivors in the window; unchecked, the
       # `ubSignedOverflow` trap does.
       wrapIntToWidth(r)
-    elif r.ziWidth in {8, 16, 32, 64} and signedWrapDefined(r.ziWidth) and
-         r.ziSigned and wraps() and op in {bAdd, bSub, bMul}:
+    elif r.ziWidth in {8, 16, 32, 64} and r.ziSigned and
+         op in {bAdd, bSub, bMul} and
+         wrapDefined(arithFrames.regime, arithOpOf(op), r.ziWidth):
       # RFC-0016 WA-B (P1): a signed 8 or 16 bit result is computed in `int`
       # and narrowed back, a defined wrap (`depositSignedOverflow` halts
       # nothing there). K5a: so is a 32 or 64 bit one under `-fwrapv`.
@@ -20236,7 +20215,7 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
     return cp   ## `av`'s kind carries no bound assertion (e.g. a degrade
                 ## placeholder reaching an itInt target) — honest-incomplete,
                 ## matching `bvRangeConds`'s own `else` contract.
-  if not checked(acRange):
+  if coRange notin buildSemantics.checks:  ## build-only: range is no regime
     # Same gate `drainRangeRaises` uses, but this site's OWN
     # off-behaviour matches `genRaiseForkDrain`'s family instead of
     # float→int's: when the check is disabled the assignment is not
@@ -25499,13 +25478,13 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # RFC-0016 W1-d2c. A routine body: its arithmetic is its own, whoever
       # called it, and the caller's resumes after it. RFC-0016 PRC-07: so are
       # the checks its options turn back on in a build with them off.
-      if stmt.blkArith != asInherit: pushArith(stmt.blkArith)
+      let pushed = arithFrames.enterBody(stmt.blkArith)
       if stmt.blkScoped: checkScopes.add stmt.blkOn
       let plain = IRStmt(kind: isBlock, stmts: stmt.stmts,
                          blkLabel: stmt.blkLabel)
       result = walkStmt(plain, paths, w)
       if stmt.blkScoped: checkScopes.setLen(checkScopes.len - 1)
-      if stmt.blkArith != asInherit: popArith()
+      if pushed: arithFrames.leave()
       return
     if stmt.blkLabel.len == 0:
       return walkBlock(stmt.stmts, paths, w)
@@ -31104,7 +31083,7 @@ proc runSymexImpl(prog: SymexProgram,
   # to catch is not a raise but a defined result. So promotion must be
   # proven statically or declined — which is what finally puts Phase 2's
   # `tryEvalInterval` to work; it has had no caller in `src/` until now.
-  let wrapScan = settings.integerSemantics == isOptimised and buildWraps()
+  let wrapScan = settings.integerSemantics == isOptimised and programMayWrap()
   var banPol = BanPolicy(intVars: intParamNames, wrapScan: wrapScan)
   if wrapScan:
     # Narrowest int window among the params: a result must fit the tightest
@@ -31265,7 +31244,7 @@ proc runSymexImpl(prog: SymexProgram,
       # an unbounded Int does not, and `isExact` runs no wrap scan
       # (`collectBan`'s `wrapScan` is `isOptimised`-only).
       let offsetExact = settings.integerSemantics == isExact and
-                        isOffsetParam and not buildWraps()
+                        isOffsetParam and not programMayWrap()
       let promoteSound = (settings.integerSemantics == isOptimised or
                           offsetExact) and
                          hasRange and
@@ -31362,7 +31341,7 @@ proc runSymexImpl(prog: SymexProgram,
             derivation: "accumulating-scan offset, " & $p.ty &
               " window, width-stamped" &
               (if not p.ty.signed: " (wraps: unsigned)"
-               elif buildWraps():
+               elif programMayWrap():
                  " (unchecked arithmetic: overflow is undefined)"
                else: " (overflow forks kept)"))
         if promoteSound:

@@ -14,8 +14,8 @@
 ## expression of a `return` or of a bare guard (`if c():`, `elif c():`,
 ## `while c():`, and `while n < 5 and c():`, which lowers to a guard `if`).
 ## Those are reconcile points that matter (R7-1, R7-3), each with a red-able
-## test in `tsymex_0016_r8a_inlinecalls`. The one guard no source shape reaches
-## is the `ifJoin` guard (pinned there). The invariant: every evaluation point
+## test in `tsymex_0016_r8a_inlinecalls`. No shape tried reaches
+## the `ifJoin` guard with a call (pinned there). The invariant: every evaluation point
 ## that can produce an effect reconciles where it produces it.
 ##
 ## What these tests pin:

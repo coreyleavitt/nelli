@@ -8,57 +8,74 @@
 ## call into a statement of its own.
 ##
 ## `ifJoinCalls(proc)`: `(the ifJoin guards, how many of them apply a call)`.
+##
+## `closureApplications(proc)`: how many `iekClosureCall` nodes the routine's
+## parsed IR holds in the expressions of its guards, loop tests, `return`
+## values, `let`s and assignments. A closure the source applies once is
+## applied once in the IR (R8-1: a `case` scrutinee was embedded in every
+## `of` guard).
 
 import std/macros
 import nelli/smt/types
 import nelli/smt/dsl_parser
 
-proc collectSites*(s: IRStmt; acc: var seq[string]) =
+proc walkIR(s: IRStmt; visit: proc (s: IRStmt)) =
+  ## `visit` each statement under `s`, `s` first, in source order: a block's
+  ## statements, an `if`'s branch bodies then its `else`, a loop body, a
+  ## `try`'s body, handlers and `finally`.
   if s == nil: return
+  visit(s)
   case s.kind
   of isBlock:
-    for c in s.stmts: collectSites(c, acc)
+    for c in s.stmts: walkIR(c, visit)
   of isIf:
-    for b in s.branches:
-      if irHasCall(b.cond): acc.add(if s.ifJoin: "ifJoin" else: "if")
-      collectSites(b.body, acc)
-    collectSites(s.elseBody, acc)
+    for b in s.branches: walkIR(b.body, visit)
+    walkIR(s.elseBody, visit)
   of isWhile:
-    if irHasCall(s.wcond): acc.add "while"
-    collectSites(s.wbody, acc)
+    walkIR(s.wbody, visit)
   of isTry:
-    collectSites(s.tryBody, acc)
-    for h in s.tryHandlers: collectSites(h.body, acc)
-    collectSites(s.tryFinally, acc)
-  of isReturn:
-    if irHasCall(s.retExpr): acc.add "return"
+    walkIR(s.tryBody, visit)
+    for h in s.tryHandlers: walkIR(h.body, visit)
+    walkIR(s.tryFinally, visit)
   else: discard
 
 macro inlineSites*(p: typed): untyped =
   var acc: seq[string]
-  collectSites(parseProc(p.getImpl).body, acc)
-  newLit(acc)
-
-proc countJoins(s: IRStmt; joins, withCall: var int) =
-  if s == nil: return
-  case s.kind
-  of isBlock:
-    for c in s.stmts: countJoins(c, joins, withCall)
-  of isIf:
-    if s.ifJoin:
-      inc joins
+  walkIR(parseProc(p.getImpl).body, proc (s: IRStmt) =
+    case s.kind
+    of isIf:
       for b in s.branches:
-        if irHasCall(b.cond): inc withCall
-    for b in s.branches: countJoins(b.body, joins, withCall)
-    countJoins(s.elseBody, joins, withCall)
-  of isWhile: countJoins(s.wbody, joins, withCall)
-  of isTry:
-    countJoins(s.tryBody, joins, withCall)
-    for h in s.tryHandlers: countJoins(h.body, joins, withCall)
-    countJoins(s.tryFinally, joins, withCall)
-  else: discard
+        if irHasCall(b.cond): acc.add(if s.ifJoin: "ifJoin" else: "if")
+    of isWhile:
+      if irHasCall(s.wcond): acc.add "while"
+    of isReturn:
+      if irHasCall(s.retExpr): acc.add "return"
+    else: discard)
+  newLit(acc)
 
 macro ifJoinCalls*(p: typed): untyped =
   var joins, withCall: int
-  countJoins(parseProc(p.getImpl).body, joins, withCall)
+  walkIR(parseProc(p.getImpl).body, proc (s: IRStmt) =
+    if s.kind == isIf and s.ifJoin:
+      inc joins
+      for b in s.branches:
+        if irHasCall(b.cond): inc withCall)
   newLit((joins, withCall))
+
+proc closureNodes(e: IRExpr): int =
+  if e == nil: return 0
+  if e.kind == iekClosureCall: result = 1
+  for k in irKids(e): result += closureNodes(k)
+
+macro closureApplications*(p: typed): untyped =
+  var total: int
+  walkIR(parseProc(p.getImpl).body, proc (s: IRStmt) =
+    case s.kind
+    of isIf:
+      for b in s.branches: total += closureNodes(b.cond)
+    of isWhile: total += closureNodes(s.wcond)
+    of isReturn: total += closureNodes(s.retExpr)
+    of isLet: total += closureNodes(s.lvalue)
+    of isAssign: total += closureNodes(s.avalue)
+    else: discard)
+  newLit(total)

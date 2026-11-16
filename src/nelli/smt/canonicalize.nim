@@ -719,8 +719,16 @@ const renderAsChoicesVersion* = "12"
   ##   undecided, the loop stopped following at the first test, and every
   ##   branch after it recorded against the wrong loop count. No key bytes
   ##   change.
+  ## - RFC-0016 review R8-1 (368->369): a closure call that is a `case`
+  ##   scrutinee, or the key of a set or slice membership test under a loop
+  ##   guard, is applied once. The parser embedded the inline call in every
+  ##   `of` guard (each membership comparison), so the walker applied it once
+  ##   per guard evaluated: a counter it bumped read two or three ahead of
+  ##   Nim's. It is now bound once ahead of the chain (a loop with such a
+  ##   guard takes the rotation). The follow `while` also checks `shouldStop`
+  ##   per continuation, as the follow `if` does (R8-3). No key bytes change.
 
-const symexWalkerVersion* = "368"
+const symexWalkerVersion* = "369"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

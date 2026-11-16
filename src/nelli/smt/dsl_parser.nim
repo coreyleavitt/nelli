@@ -2428,7 +2428,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
 # an eager call argument read late, a constructor element read late. The
 # walk reads a value where `orderOperands` places it.
 
-proc irKids(e: IRExpr): seq[IRExpr] =
+proc irKids*(e: IRExpr): seq[IRExpr] =
   ## RFC-0005 S8ax. The sub-expressions of `e`.
   if e == nil: return @[]
   case e.kind
@@ -6546,6 +6546,22 @@ proc armYieldsValue(body: NimNode): bool =
   else: discard
   body.typeKind notin {ntyNone, ntyVoid}
 
+proc bindCaseScrutinee(scrutNode: NimNode; scrutinee: IRExpr;
+                       preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0016 review R8-1. A `case` evaluates its scrutinee once; the
+  ## lowering compares it in every `of` guard. A scrutinee that applies a
+  ## closure (a bare by-value call, which `closureCallIR` leaves inline) is
+  ## bound once in `preamble`, which runs before the if-chain, and each guard
+  ## compares the variable. Embedded as parsed, the walker applied the closure
+  ## once per guard evaluated: a counter it bumped read two or three ahead of
+  ## Nim's. A scrutinee with no call is pure, so repeating it in each guard
+  ## is the same value and is left as parsed (a byte read `s[i]` stays inline,
+  ## CR-17(a)).
+  if not irHasCall(scrutinee) or scrutNode.typeKind == ntyNone: return scrutinee
+  let tmp = freshSynth(ctx, "scrut")
+  preamble.add mkLet(tmp, classifyType(scrutNode).ty, scrutinee)
+  mkVar(tmp)
+
 proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
                         ctx: ParseCtx): IRExpr =
   ## RFC-0005 s1 — A-normalise a `case`/`if` in EXPRESSION position.
@@ -6604,7 +6620,8 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
 
   # The scrutinee is evaluated unconditionally, so its preamble belongs in the
   # OUTER preamble — before the lowered if-chain.
-  let scrutinee = parseExpr(n[0], preamble, ctx)
+  let scrutinee = bindCaseScrutinee(n[0],
+    parseExpr(n[0], preamble, ctx), preamble, ctx)
   # RFC-0016 W1-f (W-21): the `of` arms by value, then each `elif` in order,
   # then `else`. An `elif` condition's preamble runs only where every earlier
   # arm failed, which is what `lowerCondChain` places.
@@ -10570,9 +10587,13 @@ proc parseSetLitMember(setNode, keyNode: NimNode; preamble: var seq[IRStmt];
   for el in lit:
     if not isConstSetElem(el): allConst = false
   var key = parseExpr(peelConstConv(keyNode), preamble, ctx)
-  if not ctx.inGuardCond and not isAtomicIR(key) and
+  if (not ctx.inGuardCond or irHasCall(key)) and not isAtomicIR(key) and
      keyNode.typeKind != ntyNone:
-    # Read once: every disjunct compares the same value.
+    # Read once: every disjunct compares the same value. A key that applies a
+    # closure is bound under a loop guard too (R8-1): the guard parse leaves
+    # a call inline, so each disjunct would apply it again. The loop then
+    # takes the rotation (`mkShortCircuitWhile`, a guard with a preamble),
+    # which re-runs the binding at every test.
     let tmp = freshSynth(ctx, "setKey")
     preamble.add mkLet(tmp, classifyType(peelConstConv(keyNode)).ty, key)
     key = mkVar(tmp)
@@ -10657,6 +10678,12 @@ proc parseSliceMember(sliceNode, keyNode: NimNode; preamble: var seq[IRStmt];
   var ops = @[lo, hi, key]
   orderOperands(preamble, @[m0, m1k, m2k], ops, @[IRType(nil), nil, nil],
                 omOperands, ctx)
+  if ctx.inGuardCond and irHasCall(ops[2]):
+    # R8-1: the key is compared twice. Under a loop guard `parseAtomicOperand`
+    # leaves a call inline, so bind it once; the loop takes the rotation.
+    let tmp = freshSynth(ctx, "sliceKey")
+    preamble.add mkLet(tmp, kt, ops[2])
+    ops[2] = mkVar(tmp)
   mkBinop(bAnd, mkBinop(bLe, ops[0], ops[2]), mkBinop(bLe, ops[2], ops[1]))
 
 proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
@@ -21341,7 +21368,8 @@ proc parseStmtInner(n: NimNode,
     # Lower to if-elif chain: each `of label: body` becomes
     # `elif scrutinee == label: body`, with multiple labels chained via OR.
     var preamble3: seq[IRStmt]
-    let scrutinee = parseExpr(n[0], preamble3, ctx)
+    let scrutinee = bindCaseScrutinee(n[0],
+      parseExpr(n[0], preamble3, ctx), preamble3, ctx)
     var arms: seq[CondArm]   # RFC-0016 W1-f: `of` arms, then `elif`s
     var elseBody: IRStmt = nil
     for i in 1 ..< n.len:

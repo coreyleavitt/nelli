@@ -33,9 +33,20 @@
 ##   test under the facts its lowering added, as the follow `if` does: a
 ##   pointer write left the closure's result undecided under the pins, so the
 ##   loop stopped at its first test;
-## * the `ifJoin` guard is the one site no source shape reaches: its guard is
-##   the synthetic `__sym_sc_N` (or `not` of it) or a bitset membership test,
-##   never a call (`ifJoinCalls`).
+## * the `ifJoin` guard: no shape tried (4 fixtures: `and`, `or`, a nested
+##   chain, a bitset loop) reaches it with a call. Its guard is the synthetic
+##   `__sym_sc_N` (or `not` of it) or a bitset membership test (`ifJoinCalls`);
+## * R8-1: a closure call that is a `case` scrutinee, or the key of a set or
+##   slice membership test under a loop guard, is applied once, not once per
+##   guard or member compared (`closureApplications` pins the IR, the verdict
+##   fixtures the walk);
+## * the return reconcile's `var` write-back (`rV1`), and the follow `while`'s
+##   skip of a continuation whose new facts the pins contradict (`cWhI`).
+##
+## Which reconcile each fixture needs (checked by removing it in a scratch
+## tree): the `if`/`elif` guard (`rI1F`, `rI2F`), the `while` test (`rW1P`),
+## the final `while` test (`rW2P`), the follow `if` (`cIfF`), the `return`
+## value (`rA5`), the follow `while` test (`cWhQ`).
 ##
 ## Every label is checked natively as well (`exitVerdict`).
 
@@ -384,7 +395,7 @@ suite "R7-3: a bare guard applying a closure reconciles":
     check inlineSites(rW4) == @["if"]
     exitVerdict(sW4)
 
-# ---- the `ifJoin` guard: no source shape puts a call in it -------------------
+# ---- the `ifJoin` guard: no shape tried puts a call in it -------------------
 
 proc jAnd(v: int): int =
   var x = v
@@ -548,6 +559,257 @@ suite "R7-4: the concolic follow while, pointer":
     if r.branchTrace.len == 1:
       check r.branchTrace[0].armTaken == 0
 
+# R8: the follow `while`'s guard divides by a drawn value that may be zero.
+# Drawn 0, the first test raises `DivByZeroDefect` natively and the handler
+# runs. The drain's non-raising continuation carries the new fact `d != 0`,
+# which the pin `d == 0` contradicts: it is not this trace, so it is dropped
+# (`followGuard`). Without that skip the pins read that continuation's guard
+# as undecided, the walk stopped there and counted an ambiguous branch, and
+# the bogus survivor reached the trailing `if` as a second branch record.
+proc cWhI(v: int) =
+  var d = v
+  try:
+    while 100 div d > 3:
+      d += 10
+  except DivByZeroDefect:
+    d = -1
+  if d == -1:
+    d = 100
+
+suite "R8: the concolic follow while drops a continuation the pins contradict":
+  test "a drained in-bounds continuation (witness 0: the first test raises)":
+    let trace = @[integerChoice(0, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(cWhI, trace, bindings)
+    check r.counters.ambiguousBranches == 0
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 1
+    if r.branchTrace.len == 1:
+      check r.branchTrace[0].armTaken == 0
+
+# R8: a `return` whose value applies a closure that writes, through a pointer,
+# the target of the callee's `var` formal. The write-back to the caller's
+# variable reads the frame after the value, so the value's reconcile makes the
+# formal current first.
+proc vCallee(a: var int): int =
+  let p = addr a
+  let c = proc(): int =
+    p[] = p[] + 4
+    10
+  return c()
+
+proc rV1(v: int): int =
+  var x = v
+  let r = vCallee(x)
+  r + x
+nsut(sV1, rV1, 15)
+
+suite "R8: a bare `return` reconciles before a `var` write-back":
+  test "closure writes the formal's target through a pointer":
+    exitVerdict(sV1)
+
 suite "R7-walker version":
   test "walker version floor":
-    check symexWalkerVersion.parseInt >= 368
+    check symexWalkerVersion.parseInt >= 369
+
+# ---- R8-1: a bare closure call as a `case` scrutinee ------------------------
+#
+# Nim applies the scrutinee once. The parser used to embed the inline call in
+# every `of` guard, so the walker applied it once per guard evaluated. Every
+# fixture starts with `n` at 1, so the call returns 2: Nim takes the `2` label
+# and leaves `n` at 2; a per-guard re-application sees 3 at the second guard.
+
+proc rK1(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  case next()
+  of 1: result = 100
+  of 2: result = 200
+  else: result = 300
+  result += n
+nsut(sK1, rK1, 202)
+
+proc rK2(v: int): int =
+  var n = v
+  proc bump(): int =
+    inc n
+    n
+  let next = bump
+  case next()
+  of 1: result = 100
+  of 2: result = 200
+  else: result = 300
+  result += n
+nsut(sK2, rK2, 202)
+
+proc rK3(v: int): int =
+  var n = v
+  let h = Holder(f: proc(): int =
+    inc n
+    n)
+  case h.f()
+  of 1: result = 100
+  of 2: result = 200
+  else: result = 300
+  result += n
+nsut(sK3, rK3, 202)
+
+# Several labels of one arm.
+proc rK4(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  case next()
+  of 1, 2: result = 100
+  else: result = 300
+  result += n
+nsut(sK4, rK4, 102)
+
+# A range label declines (`nnkRange` is not in the expression fragment), so
+# it is not a site where the scrutinee could be compared twice.
+proc rK5(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  case next()
+  of 5 .. 9: result = 100
+  of 2 .. 3: result = 200
+  else: result = 300
+  result += n
+nsut(sK5, rK5, 202)
+
+# A case EXPRESSION (`hoistCaseExpr`).
+proc rK6(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  let r = case next()
+    of 1: 100
+    of 2: 200
+    else: 300
+  result = r + n
+nsut(sK6, rK6, 202)
+
+# The `var` write-back and a capture read after the case, by pointer.
+proc rK7(v: int): int =
+  var n = v
+  let p = addr n
+  let next = proc(): int =
+    p[] = p[] + 1
+    p[]
+  case next()
+  of 1: result = 100
+  of 2: result = 200
+  else: result = 300
+  result += n
+nsut(sK7, rK7, 202)
+
+# Control: a scrutinee that is not a call.
+proc rK0(v: int): int =
+  case v + 1
+  of 1: result = 100
+  of 2: result = 200
+  else: result = 300
+nsut(sK0, rK0, 200)
+
+# Other sites that repeat one parsed expression. A set or a slice membership
+# test compares its key once per member (`k in {2, 3}` is `k == 2 or k == 3`,
+# `k in a .. b` is `a <= k and k <= b`); under a loop guard the parse leaves a
+# call inline (it cannot hoist: the guard re-runs), so the key was applied
+# once per comparison. Bound once per test now, the loop taking the rotation.
+# Under an `if` the key was bound already (controls).
+proc rK8(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  var k = 0
+  while next() in {2, 3}: inc k
+  result = k * 10 + n
+nsut(sK8, rK8, 24)
+
+proc rK9(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  var k = 0
+  while next() in 2 .. 3: inc k
+  result = k * 10 + n
+nsut(sK9, rK9, 24)
+
+proc rK10(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  var k = 0
+  while v > 0 and next() in {2, 3}: inc k
+  result = k * 10 + n
+nsut(sK10, rK10, 24)
+
+proc rK11(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  var r = 0
+  if next() in {1, 2}: r = 7
+  result = r * 10 + n
+nsut(sK11, rK11, 72)
+
+proc rK12(v: int): int =
+  var n = v
+  let next = proc(): int =
+    inc n
+    n
+  var r = 0
+  if next() in 1 .. 2: r = 7
+  result = r * 10 + n
+nsut(sK12, rK12, 72)
+
+suite "R8-1: a closure-call `case` scrutinee is applied once":
+  test "lambda":
+    exitVerdict(sK1)
+  test "proc-valued let":
+    exitVerdict(sK2)
+  test "proc field of a by-value object":
+    exitVerdict(sK3)
+  test "multi-label arm":
+    exitVerdict(sK4)
+  test "range labels decline, so no second comparison":
+    exhausted(sK5)
+  test "case expression":
+    exitVerdict(sK6)
+  test "address-taken local":
+    exitVerdict(sK7)
+  test "control: a plain scrutinee":
+    exitVerdict(sK0)
+  test "set membership under a loop guard":
+    exitVerdict(sK8)
+  test "slice membership under a loop guard":
+    exitVerdict(sK9)
+  test "set membership after `and` under a loop guard":
+    exitVerdict(sK10)
+  test "control: set membership under an `if`":
+    exitVerdict(sK11)
+  test "control: slice membership under an `if`":
+    exitVerdict(sK12)
+
+suite "R8-1: the closure call appears once in the IR":
+  test "case statement, every label shape":
+    check closureApplications(rK1) == 1
+    check closureApplications(rK2) == 1
+    check closureApplications(rK3) == 1
+    check closureApplications(rK4) == 1
+    check closureApplications(rK7) == 1
+  test "case expression":
+    check closureApplications(rK6) == 1
+  test "no guard holds the call any longer":
+    check inlineSites(rK1) == newSeq[string]()
+    check inlineSites(rK4) == newSeq[string]()

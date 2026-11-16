@@ -17339,6 +17339,27 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
     # an arm does is skipped. An arm whose `pc` the pins contradict is not
     # the run, and its undefined sides read `concretelyInfeasible` at the op.
 
+proc followGuard(w: var WalkCtx; dp: Path; cond: Z3Bool; factBase: int;
+                 construct: WalkerConstructKind): FollowOutcome =
+  ## RFC-0016 review R8-3. The outcome of one continuation of a guard a
+  ## follow-mode walk evaluated (`walkIfFollowConcrete`,
+  ## `walkWhileFollowConcrete`), decided under the facts its lowering and
+  ## drain added to `dp.defectSurvivorPc` past `factBase` (a closure call's
+  ## exit facts, a drained raise's negation). They must hold on the replay and
+  ## they define a closure call's result in `cond`, so the pins read the guard
+  ## with them. A continuation whose new facts the pins contradict is not
+  ## this trace: `foOffRun`, as a path the pins contradict on the tail walk
+  ## (`followBranchOutcome`), and the caller drops it. Otherwise
+  ## `followBranchOutcome`.
+  let newFacts =
+    if dp.defectSurvivorPc.len > factBase:
+      dp.defectSurvivorPc[factBase .. ^1]
+    else: newSeq[Z3Bool]()
+  if newFacts.len > 0 and
+     concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
+    return foOffRun
+  followBranchOutcome(w, dp, cond, newFacts, construct)
+
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
@@ -17403,16 +17424,10 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
       let (condBool, conds) = evalCondSynced(sp, stmt.branches[i].cond, w)
       for dp in conds:
         if w.shouldStop: return survivors
-        let newFacts =
-          if dp.defectSurvivorPc.len > factBase: dp.defectSurvivorPc[factBase .. ^1]
-          else: newSeq[Z3Bool]()
-        if newFacts.len > 0 and
-           concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
-          continue
-        case followBranchOutcome(w, dp, condBool, newFacts, wckIf)
+        case followGuard(w, dp, condBool, factBase, wckIf)
         of foOffRun:
-          # RFC-0016 W3-z int6: the pins contradict this path (tail walk):
-          # not the run, so not followed.
+          # The pins contradict this path or its new facts (RFC-0016 W3-z
+          # int6, `followGuard`): not the run, so not followed.
           continue
         of foOpen:
           if w.tailGate:
@@ -17503,17 +17518,15 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
       let factBase = p.defectSurvivorPc.len
       let (cond, conds) = evalCondSynced(p, stmt.wcond, w)
       for dp in conds:
-        let newFacts =
-          if dp.defectSurvivorPc.len > factBase:
-            dp.defectSurvivorPc[factBase .. ^1]
-          else: newSeq[Z3Bool]()
-        if newFacts.len > 0 and
-           concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
-          continue
-        case followBranchOutcome(w, dp, cond, newFacts, wckWhile)
+        # As `walkIfFollowConcrete` checks per continuation: each one walks
+        # a body, so a stop request (budget, deadline) must not wait for the
+        # rest of a drain's continuations (R8-3).
+        if w.shouldStop: return survivors
+        case followGuard(w, dp, cond, factBase, wckWhile)
         of foOffRun:
-          # RFC-0016 W3-z int6: the pins contradict this path (tail walk):
-          # not the run, so it neither iterates nor leaves the loop.
+          # The pins contradict this path or its new facts (RFC-0016 W3-z
+          # int6, `followGuard`): not the run, so it neither iterates nor
+          # leaves the loop.
           continue
         of foOpen:
           if w.tailGate:
@@ -22260,19 +22273,19 @@ proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
   ## (`syncAddrCells`). The side that changed since the snapshot wins; both
   ## changed is a clash, declined.
   ##
-  ## The invariant: every effect is reconciled exactly once, where it is
-  ## produced, against a snapshot taken just before it. What it reads of the
-  ## producer is a `CellProducer`. A compound
-  ## statement (`compoundStmtKinds`: a block, labelled or not, an `if` --
-  ## a `case` is one --, a `while`, a `try`) produces no effect of its own
-  ## beyond the expressions it evaluates itself, so it is never reconciled
-  ## over its span. A pass over its span compared its children's synced
-  ## effects -- the two sides equal in value, not always in term -- against
-  ## a snapshot from before them and declined two writes that never clashed
-  ## (D1-F2, R2-2, R3-1, R4-1, R5-1/R5-2: a view and its Table written in a
-  ## loop body, under an `if`, or before a `break`). The reconcile points,
-  ## complete because they are every place the walker evaluates source code
-  ## in a frame:
+  ## The invariant (the one statement of it; other docs point here): every
+  ## effect is reconciled exactly once, where it is produced, against a
+  ## snapshot taken just before it. What this reads of the producer is a
+  ## `CellProducer`.
+  ##
+  ## A compound statement (`compoundStmtKinds`: a block, labelled or not, an
+  ## `if` -- a `case` is one --, a `while`, a `try`) produces no effect of its
+  ## own beyond the expressions it evaluates itself, so it is never reconciled
+  ## over its span: a pass over its span compared its children's synced
+  ## effects -- the two sides equal in value, not always in term -- against a
+  ## snapshot from before them and declined writes that never clashed. The
+  ## reconcile points are every place the walker evaluates source code in a
+  ## frame:
   ##
   ## * every leaf statement (`walkCapSynced`): every `IRStmtKind` outside
   ##   `compoundStmtKinds`, `isCall` included (a callee's effects reach the
@@ -22283,32 +22296,28 @@ proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
   ##   body included (explore walk; the follow walk has none: it degrades
   ##   `beBudgetExhausted` instead), and the follow-mode variants
   ##   (`walkIfFollowConcrete`, `walkWhileFollowConcrete`). A `case` is an
-  ##   if-chain: its statement-level arm embeds the scrutinee in each `of`
-  ##   guard (it is not let-bound), so each `of` test is one of these. A
-  ##   `try` evaluates nothing itself: an `except` match reads the
-  ##   in-flight exception's type only;
+  ##   if-chain: its scrutinee is evaluated once, ahead of the chain (a
+  ##   scrutinee that applies a closure is let-bound there, a leaf, R8-1), and
+  ##   each `of` test compares it;
   ## * a `return`'s value (`evalReturnSynced`), before the path parks in
   ##   `exitReturn` and a `finally` or a `var` write-back reads the frame.
   ##
-  ## Which of these produce an effect. The parser hoists a call into a
+  ## Both expression points share `evalReconciled` (snapshot, lower, drain,
+  ## reconcile). A guard hands `reconcileCells` a default `CellProducer`, no
+  ## statement; a `return` value the assignment of `result`.
+  ##
+  ## Which of them produce an effect: the parser hoists a call into a
   ## statement of its own (`call(__sym_f_N := f(..))`, a leaf) when it is an
-  ## operand: `c() * 10`, `c() > 0`, `v > 0 and c()`, a scrutinee, an
-  ## `if`/`case` expression. It leaves a by-value closure call (`closureCallIR`:
-  ## a lambda, a proc-valued `let`, a proc field) in place when the call is the
-  ## WHOLE expression: a bare `return c()`, a bare `if c():` / `elif c():`, a
-  ## bare `while c():` (and `while n < 5 and c():`, which lowers to a guard
-  ## `if` in the body). Those are the shapes that stay inline, and the
-  ## guard and `return` points reconcile the effect where it is produced.
-  ## Their tests are `tsymex_0016_r8a_inlinecalls`; each point was made to
-  ## fail by removing it: the `if`/`elif` guard, the `while` test and the final
-  ## test, the follow `if` and the `return` value (R7-1, R7-3). One has no red:
-  ## the `ifJoin` guard is a synthetic `__sym_sc_N` (or its `not`) or a bitset
-  ## membership test, never a call, so no source shape reaches it (pinned over
-  ## the rendered IR, `ifJoinCalls`). The follow `while` test is live: with its
-  ## reconcile removed `cWhQ` (a pointer write, `x` read by name after the
-  ## loop) goes red (R7-4). A guard hands
-  ## `reconcileCells` a default `CellProducer`, no statement; a `return` value
-  ## the assignment of `result`.
+  ## operand (`c() * 10`, `c() > 0`, `v > 0 and c()`), a scrutinee, or an
+  ## `if`/`case` expression. It leaves a by-value closure call
+  ## (`closureCallIR`: a lambda, a proc-valued `let`, a proc field) in place
+  ## when the call is the WHOLE expression: a bare `return c()`, a bare
+  ## `if c():` / `elif c():`, a bare `while c():` (and `while n < 5 and c():`,
+  ## which lowers to a guard `if` in the body). Those guard and `return`
+  ## points reconcile the effect where it is produced. The `ifJoin` guard
+  ## is a synthetic `__sym_sc_N` (or its `not`) or a bitset membership test,
+  ## never a call. Their tests are `tsymex_0016_r8a_inlinecalls` (its header
+  ## records which reconcile each fixture turns red without).
   ##
   ## A parked exit (`break`, `continue`, a `return` or a jump held for a
   ## `finally`) needs nothing more where it rejoins: it was reconciled at
@@ -22426,61 +22435,68 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   dec w.capSyncDepth
   reconcileCells(producerOf(stmt), outs0, depth, w)
 
+template evalReconciled(p: Path; w: var WalkCtx; producer: CellProducer;
+                        q, lowering: untyped): seq[Path] =
+  ## RFC-0016 review R8-2. The skeleton both evaluation points share (a guard,
+  ## a `return` value): evaluate, then reconcile. `lowering` is an expression
+  ## of the continuations (`seq[Path]`, scalar raises drained) with `q` bound
+  ## to the path it lowers from. When the frame keeps no cells it runs on `p`
+  ## as it stands. Otherwise `q` is `p` snapshotted at a fresh depth
+  ## (`snapCells`), and what `lowering` returns is reconciled against that
+  ## snapshot as the effect `producer` names (`reconcileCells`, which states
+  ## the invariant). `lowering` may leave its value in a variable of the
+  ## caller: it renames no term it reads.
+  block:
+    let snapped = frameHasCells(@[p], w)
+    var depth = 0
+    var snap = p
+    if snapped:
+      inc w.capSyncDepth
+      depth = w.capSyncDepth
+      snap = snapCells(@[p], depth, w)[0]
+    let outs = block:
+      let q = snap
+      lowering
+    if snapped:
+      dec w.capSyncDepth
+      reconcileCells(producer, outs, depth, w)
+    else: outs
+
 proc evalCondSynced(p: Path; cond: IRExpr;
                     w: var WalkCtx): (Z3Bool, seq[Path]) =
   ## RFC-0016 review R5-2. A guard a compound statement evaluates itself
   ## (an `if` condition, a `while` guard test): `lowerBoolInExpr`, its
   ## scalar raises drained (`drainScalarRaiseForks`), and the continuations
-  ## reconciled as a leaf `let` of the guard would be (`reconcileCells`),
-  ## against a snapshot from just before the evaluation. A closure the
-  ## guard applies may write a capture or, through a pointer, an
-  ## address-taken variable; the arms, a `break` out of them, and the next
-  ## guard read the frame after it. A bare by-value closure call
+  ## reconciled as a leaf `let` of the guard would be (`evalReconciled`,
+  ## default `CellProducer`: no statement). A bare by-value closure call
   ## (`if c():`, `elif c():`, `while c():`) stays in the guard, so this is
   ## where its effect is produced; a call that is an operand of the guard is
-  ## a leaf before it (`reconcileCells`). The guard's value is the term lowered
-  ## before the reconcile, which renames no term it reads.
-  if not frameHasCells(@[p], w):
-    let (b, p2) = lowerBoolInExpr(p, cond, w)
-    return (b, drainScalarRaiseForks(p2, w))
-  inc w.capSyncDepth
-  let depth = w.capSyncDepth
-  let ins = snapCells(@[p], depth, w)
-  let (b, p2) = lowerBoolInExpr(ins[0], cond, w)
-  let cont = drainScalarRaiseForks(p2, w)
-  dec w.capSyncDepth
-  (b, reconcileCells(CellProducer(), cont, depth, w))
+  ## a leaf before it.
+  var b: Z3Bool
+  let conts = evalReconciled(p, w, CellProducer(), q):
+    let (b0, p2) = lowerBoolInExpr(q, cond, w)
+    b = b0
+    drainScalarRaiseForks(p2, w)
+  (b, conts)
 
 proc evalReturnSynced(p: Path; value: IRExpr; proto: Option[SymVal];
                       w: var WalkCtx): seq[Path] =
   ## RFC-0016 review R7-1. A `return`'s value: `lowerInExpr`, its scalar
   ## raises drained (`drainScalarRaiseForks`, R1: `s[i]` out of bounds,
-  ## `x div 0`), each survivor bound to `result`, and the survivors
+  ## `x div 0`), each survivor bound to `result` once, and the survivors
   ## reconciled as the assignment of `result` they end with
-  ## (`reconcileCells`), against a snapshot from just before the
-  ## evaluation. The path leaves through `exitReturn`, which runs every
-  ## enclosing `finally`; those and a `var` write-back read the frame after
-  ## the closure call the value applied (a bare `return c()`, by value,
-  ## stays inline in the value). The value is the term lowered before the
-  ## reconcile, which renames no term it reads.
-  if not frameHasCells(@[p], w):
-    let (retVal, pr) = lowerInExpr(p, value, w, proto)
+  ## (`evalReconciled`, `CellProducer(assigned: "result")`). The path leaves
+  ## through `exitReturn`, which runs every enclosing `finally`; those and a
+  ## `var` write-back read the frame after the closure call the value applied
+  ## (a bare `return c()`, by value, stays inline in the value).
+  evalReconciled(p, w, CellProducer(assigned: "result"), q):
+    let (retVal, pr) = lowerInExpr(q, value, w, proto)
+    var bound: seq[Path]
     for cp in drainScalarRaiseForks(pr, w):
       var newEnv = cp.env
       newEnv["result"] = retVal
-      result.add forkPath(cp, cp.pc, newEnv)
-    return
-  inc w.capSyncDepth
-  let depth = w.capSyncDepth
-  let ins = snapCells(@[p], depth, w)
-  let (retVal, pr) = lowerInExpr(ins[0], value, w, proto)
-  var bound: seq[Path]
-  for cp in drainScalarRaiseForks(pr, w):
-    var newEnv = cp.env
-    newEnv["result"] = retVal
-    bound.add forkPath(cp, cp.pc, newEnv)
-  dec w.capSyncDepth
-  reconcileCells(CellProducer(assigned: "result"), bound, depth, w)
+      bound.add forkPath(cp, cp.pc, newEnv)
+    bound
 
 template forEachExitGroup(w, g, body: untyped) =
   ## RFC-0005 review R5. Run `body` with `g` naming each exit group a walk

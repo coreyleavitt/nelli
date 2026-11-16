@@ -258,12 +258,12 @@ suite "R5-2: reconciled only where effects are produced":
     # last unrolled body), not to a whole-body count. Each guard is live
     # except `ifJoin`'s (R7-3, `tsymex_0016_r8a_inlinecalls`): a bare
     # by-value closure call stays inline in an `if`/`elif`/`while` guard, and
-    # no source shape puts a call in the join guard.
+    # no shape tried puts a call in the join guard.
     check procBody("walkStmt").contains("evalCondSynced(p, br.cond, w)")
     check procBody("walkStmt").contains("evalCondSynced(cp0, br.cond, w)")
     check procBody("walkStmt").count("evalCondSynced(p, stmt.wcond, w)") == 2
   test "a guard hands the reconcile no statement":
-    check procBody("evalCondSynced").contains("reconcileCells(CellProducer(),")
+    check procBody("evalCondSynced").contains("evalReconciled(p, w, CellProducer(), q)")
     check not procBody("evalCondSynced").contains("IRStmt(")
   test "a `return` value reconciles where it is evaluated (R7-1)":
     check "leafSyncDepth" notin runtimeCode
@@ -271,8 +271,22 @@ suite "R5-2: reconciled only where effects are produced":
     check not procBody("walkStmt").contains("reconcileCells(")
     # (the literal `"result"` is gone from `codeOf`'s view)
     check procBody("evalReturnSynced").contains(
-      "reconcileCells(CellProducer(assigned:")
-    check procBody("evalReturnSynced").contains("snapCells(@[p], depth, w)")
+      "evalReconciled(p, w, CellProducer(assigned: \"result\"), q)")
+  test "both evaluation points share one skeleton (R8-2)":
+    # The snapshot, the lowering and the reconcile live in `evalReconciled`;
+    # `result` is bound once, in the return's lowering.
+    let a = runtimeCode.find("\ntemplate evalReconciled(")
+    let b = runtimeCode.find("\nproc evalCondSynced(", a)
+    check a >= 0 and b > a
+    let skeleton = runtimeCode[a ..< b]
+    check skeleton.contains("frameHasCells(@[p], w)")
+    check skeleton.contains("snapCells(@[p], depth, w)")
+    check skeleton.contains("reconcileCells(producer, outs, depth, w)")
+    check runtimeCode.count("\ntemplate evalReconciled(") == 1
+    for p in ["evalCondSynced", "evalReturnSynced"]:
+      check not procBody(p).contains("snapCells(")
+      check not procBody(p).contains("reconcileCells(")
+    check procBody("evalReturnSynced").count("newEnv[\"result\"]") == 1
   test "`CellProducer` is declared beside the producers that build it":
     check runtimeCode.count("\ntype CellProducer = object") == 1
     check runtimeCode.find("\ntype CellProducer = object") <

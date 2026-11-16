@@ -21,6 +21,7 @@
 import std/options
 import ./admission
 import ./errorkind
+import ./axis_key
 
 type
   ReadOnlySite* = enum
@@ -31,18 +32,16 @@ type
     rsViewWhole     ## a callee holding a container's memory, `bindsViewWhole`
   ReadOnlyModel* = enum
     rmReadOnly      ## proved to write nothing shared
-  ReadOnlyKey = tuple[key: string, row: Row[ReadOnlySite, ReadOnlyModel]]
+  ReadOnlyKey = AxisRow[ReadOnlySite, ReadOnlyModel]
 
 func proved(site: ReadOnlySite; names: openArray[string]; why: string):
     seq[ReadOnlyKey] =
-  for n in names:
-    result.add (n, modelled[ReadOnlySite, ReadOnlyModel](
-                  rmReadOnly, {site}, why))
+  modelledEach[ReadOnlySite, ReadOnlyModel]("", names, rmReadOnly, {site},
+                                            why)
 
 func may(kind: SymexErrorKind; names: openArray[string]; why: string):
     seq[ReadOnlyKey] =
-  for n in names:
-    result.add (n, refused[ReadOnlySite, ReadOnlyModel](some(kind), why))
+  refusedEach[ReadOnlySite, ReadOnlyModel]("", names, some(kind), why)
 
 func readOnlyRows(): seq[ReadOnlyKey] =
   # --- lent/: the body of a `for` over a container (K6a, W-08) ---------------

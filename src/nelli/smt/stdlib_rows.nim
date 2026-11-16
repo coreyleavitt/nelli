@@ -38,6 +38,7 @@
 import std/options
 import ./admission
 import ./errorkind
+import ./axis_key
 import ./buildprofile
 import ./stdlib_ledger
 
@@ -63,7 +64,7 @@ type
       ## walked routines, `stdlib_ledger`) says only that the body is walked
       ## where no option deviates; under a push it keeps declining.
 
-  StdlibRow = tuple[key: string, row: Row[StdlibSite, StdlibBody]]
+  StdlibRow = AxisRow[StdlibSite, StdlibBody]
 
 func walked(key, note: string; exercises: set[CheckOption]): StdlibRow =
   (key, modelled[StdlibSite, StdlibBody](
@@ -92,9 +93,8 @@ func floatModelled(name, note: string): StdlibRow =
 
 func floatDeclined(names: openArray[string]; note: string): seq[StdlibRow] =
   ## One declined row per routine of a family, all with the same reason.
-  for n in names:
-    result.add ("math." & n, refused[StdlibSite, StdlibBody](
-      some(feUnsupportedOpAborted), note))
+  refusedEach[StdlibSite, StdlibBody]("math.", names,
+                                      some(feUnsupportedOpAborted), note)
 
 func loweredByName(key, note: string): StdlibRow =
   (key, modelled[StdlibSite, StdlibBody](StdlibBody(), {ssNameCall}, note,

@@ -36,6 +36,7 @@
 import std/[macros, options, strutils]
 import ./admission
 import ./errorkind
+import ./axis_key
 
 type
   PragmaPlace* = enum
@@ -48,7 +49,7 @@ type
   PragmaModel* = enum
     pmInert           ## no effect on any value the walk computes
     pmRead            ## the walker reads it at a site of its own
-  PragmaKey = tuple[key: string, row: Row[PragmaSite, PragmaModel]]
+  PragmaKey = AxisRow[PragmaSite, PragmaModel]
 
 func placeKey*(p: PragmaPlace): string =
   case p
@@ -67,28 +68,24 @@ func siteOf(p: PragmaPlace): PragmaSite =
 
 func inert(p: PragmaPlace; names: openArray[string]; why: string):
     seq[PragmaKey] =
-  for n in names:
-    result.add (placeKey(p) & "/" & n,
-                modelled[PragmaSite, PragmaModel](pmInert, {siteOf(p)}, why))
+  modelledEach[PragmaSite, PragmaModel](placeKey(p) & "/", names, pmInert,
+                                        {siteOf(p)}, why)
 
 func read(p: PragmaPlace; names: openArray[string]; why: string):
     seq[PragmaKey] =
-  for n in names:
-    result.add (placeKey(p) & "/" & n,
-                modelled[PragmaSite, PragmaModel](pmRead, {siteOf(p)}, why))
+  modelledEach[PragmaSite, PragmaModel](placeKey(p) & "/", names, pmRead,
+                                        {siteOf(p)}, why)
 
 func declined(p: PragmaPlace; names: openArray[string]; kind: SymexErrorKind;
               why: string): seq[PragmaKey] =
-  for n in names:
-    result.add (placeKey(p) & "/" & n,
-                refused[PragmaSite, PragmaModel](some(kind), why))
+  refusedEach[PragmaSite, PragmaModel](placeKey(p) & "/", names, some(kind),
+                                       why)
 
 func neverField(names: openArray[string]; why: string): seq[PragmaKey] =
   ## A field pragma the toolchain refuses: a `never` cell (`nrPlatform`).
-  for n in names:
-    result.add (placeKey(ppField) & "/" & n,
-                refused[PragmaSite, PragmaModel](some(feUnsupportedOp), why,
-                                                 iNever, nrPlatform))
+  refusedEach[PragmaSite, PragmaModel](placeKey(ppField) & "/", names,
+                                       some(feUnsupportedOp), why, iNever,
+                                       nrPlatform)
 
 func pragmaRows(): seq[PragmaKey] =
   # --- the local list (W1-b) ------------------------------------------------

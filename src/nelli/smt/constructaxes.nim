@@ -30,23 +30,22 @@
 import std/options
 import ./admission
 import ./errorkind
+import ./axis_key
 
 type
   ConstructSite* = enum
     csLowering      ## the construct as the walk lowers it
   ConstructModel* = enum
     cmDecided       ## the walk's verdict on this construct is what native does
-  ConstructKey = tuple[key: string, row: Row[ConstructSite, ConstructModel]]
+  ConstructKey = AxisRow[ConstructSite, ConstructModel]
 
 func decided(names: openArray[string]; why: string): seq[ConstructKey] =
-  for n in names:
-    result.add (n, modelled[ConstructSite, ConstructModel](
-                  cmDecided, {csLowering}, why))
+  modelledEach[ConstructSite, ConstructModel]("", names, cmDecided,
+                                              {csLowering}, why)
 
 func declines(kind: Option[SymexErrorKind]; names: openArray[string];
               why: string): seq[ConstructKey] =
-  for n in names:
-    result.add (n, refused[ConstructSite, ConstructModel](kind, why))
+  refusedEach[ConstructSite, ConstructModel]("", names, kind, why)
 
 func constructRows(): seq[ConstructKey] =
   result.add decided(

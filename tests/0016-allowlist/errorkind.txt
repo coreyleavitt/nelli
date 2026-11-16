@@ -5,7 +5,7 @@ errorkind:ceClosureBodyDiverged	K9c	no pinDecline asserts this kind; K9c finds e
 errorkind:ceClosureBodyUncertain	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:ceInlineBudgetExceeded	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:ceNotImplemented	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:ceUnsupportedCapture	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:ceUnsupportedCapture	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:eeFinallyJumpOnRaise	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:eeFinallyReturnOnRaise	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:eeHandlerReraiseUnmodelled	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
@@ -18,42 +18,42 @@ errorkind:ekZ3Error	K9c	no pinDecline asserts this kind; K9c finds each kind by 
 errorkind:ekZ3InternalError	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:ekZ3MemoryError	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:ekZ3SolverError	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feConvDomainExcluded	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feConvFloatToIntUndefined	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:feConvDomainExcluded	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
+errorkind:feConvFloatToIntUndefined	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:feDefectExcluded	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feEnumOrdinalUnresolved	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feExtractionFailed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feFloatWidth	K9c	K2b models every float32/float64 conversion exactly, so nothing produces this kind; W-64 (K10d) deletes a kind with no producer
+errorkind:feFloatWidth	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:feHostUnadmitted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feOpaqueEffectHavoc	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feReplayCrashed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feReplayDeclined	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feReplayRefuted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:feReplayTimedOut	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feTransparentArgNotInert	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:feTransparentResultUsed	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:feTransparentArgNotInert	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
+errorkind:feTransparentResultUsed	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:geConceptViolation	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geDistinctBarrier	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geDistinctBijectivitySkipped	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geInstantiationCapped	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:geUnresolvedGeneric	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:geVtableDispatch	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:geUnresolvedGeneric	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
+errorkind:geVtableDispatch	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:heDepthExhausted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heFreshnessCapExceeded	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heNewFieldZeroUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:hePtrArith	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:hePtrArith	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:hePtrFamily	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heUnresolvedRef	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heUnsafeCast	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heUnsupportedPointeeRead	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:heUnsupportedVarRef	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:seByteIndexUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:heUnsupportedVarRef	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
+errorkind:seByteIndexUnsupported	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:seByteIterUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:seBytesLengthTooLarge	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:seBytesSymbolicLength	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:seBytesLengthTooLarge	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
+errorkind:seBytesSymbolicLength	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:seNestedSeqUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seParseIntLaxSyntax	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:seParseIntPreE	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
+errorkind:seParseIntPreE	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:seRecursiveValueDepth	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seRuneDecodeSymbolic	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seUnsupportedCompoundSortLeaf	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
@@ -66,7 +66,7 @@ errorkind:seZ3VersionMissing	K9c	no pinDecline asserts this kind; K9c finds each
 errorkind:weBreakOutsideLoop	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:weInternalWalkerFault	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:weRecursionCycleCut	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:heNilDerefMayBeCaught	K9c	produced only in an --exceptions:setjmp build (runtime.nim); its sole pin test tsymex_rfc0005_s8cu_nil_setjmp is not defined(windows) because setjmp on Windows crashes the walker fiber (INT-12), and the cpp backend cannot build setjmp; linux-c evidences it, so the entry applies to the rows that cannot	rows=mingw,msvc,linux-cpp
-errorkind:ubIndeterminateRead	K10a-axis	produced by the {.noinit.} read pin (defined:read/uninitialised), which a cpp build and a re-executing replay child skip; linux-c evidences it, so the entry applies to the rows that cannot	rows=mingw,msvc,linux-cpp
-errorkind:ubInactiveVariantField	K10a-axis	only the cpp backend halts a read through the inactive variant arm (tsymex_0016_fieldoff pinDeclines it there); the c backend shares the arm bytes, so every other row has no undefined behaviour to record	rows=linux-c,linux-c-z3-4.13.4,mingw,msvc
-errorkind:beSolverUndef	K9c	its decline pin (tsymex_rfc0005_s8cf_limits, a call stopped past MATCH_LIMIT) runs only under the interpreter PCRE: the Windows legs load Nim's pcre64.dll (8.37, JIT), whose limit accounting is a separate build row, so the test records no decline there; linux-c and linux-cpp evidence it, so the entry applies to the rows that cannot	rows=mingw,msvc
+errorkind:heNilDerefMayBeCaught	K9c	produced only in an --exceptions:setjmp build (runtime.nim); its sole pin test tsymex_rfc0005_s8cu_nil_setjmp is not defined(windows) because setjmp on Windows crashes the walker fiber (INT-12), and the cpp backend cannot build setjmp; linux-c evidences it, so the entry applies to the rows that cannot [evidenced-on=linux-c,linux-c-z3-4.13.4]	rows=mingw,msvc,linux-cpp
+errorkind:ubIndeterminateRead	K10a-axis	produced by the {.noinit.} read pin (defined:read/uninitialised), which a cpp build and a re-executing replay child skip; linux-c evidences it, so the entry applies to the rows that cannot [evidenced-on=linux-c,linux-c-z3-4.13.4]	rows=mingw,msvc,linux-cpp
+errorkind:ubInactiveVariantField	K10a-axis	only the cpp backend halts a read through the inactive variant arm (tsymex_0016_fieldoff pinDeclines it there); the c backend shares the arm bytes, so every other row has no undefined behaviour to record [evidenced-on=linux-cpp]	rows=linux-c,linux-c-z3-4.13.4,mingw,msvc
+errorkind:beSolverUndef	K9c	its decline pin (tsymex_rfc0005_s8cf_limits, a call stopped past MATCH_LIMIT) runs only under the interpreter PCRE: the Windows legs load Nim's pcre64.dll (8.37, JIT), whose limit accounting is a separate build row, so the test records no decline there; linux-c and linux-cpp evidence it, so the entry applies to the rows that cannot [evidenced-on=linux-c,linux-cpp,linux-c-z3-4.13.4]	rows=mingw,msvc

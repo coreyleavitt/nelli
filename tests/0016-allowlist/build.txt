@@ -1,13 +1,13 @@
 # RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
 build:8.37 2015-04-28|interp	CI-B	no CI host runs 8.37's interpreter (the Windows legs run its JIT, the Linux image runs 8.45's interpreter); the S8bj tri-oracle ran it on a local build, and no pin may borrow another library's record
-build:8.37 2015-04-28|jit	CI-B	the JIT PCRE row runs on the Windows legs only; the Linux image's libpcre is 8.45's interpreter, so the Linux rows cannot evidence it (K5b's regex pins record the loaded library's own cell)	rows=linux-c,linux-cpp,linux-c-z3-4.13.4
-build:8.45 2021-06-15|interp	CI-B	the Windows legs load Nim's pcre64.dll (8.37, JIT), so only the Linux rows run 8.45's interpreter	rows=mingw,msvc
+build:8.37 2015-04-28|jit	CI-B	the JIT PCRE row runs on the Windows legs only; the Linux image's libpcre is 8.45's interpreter, so the Linux rows cannot evidence it (K5b's regex pins record the loaded library's own cell) [evidenced-on=mingw,msvc]	rows=linux-c,linux-cpp,linux-c-z3-4.13.4
+build:8.45 2021-06-15|interp	CI-B	the Windows legs load Nim's pcre64.dll (8.37, JIT), so only the Linux rows run 8.45's interpreter [evidenced-on=linux-c,linux-cpp,linux-c-z3-4.13.4]	rows=mingw,msvc
 build:row/linux-c-z3-4.13.4	CI-B	the Z3 4.13.4 run leg is CI-B; a default-image record directory evidences linux-c only
 build:row/linux-cpp	CI-B	the cpp run leg is CI-B; a c-backend record directory evidences linux-c only
 build:row/mingw	K1a-ci	only a Windows symex-mingw leg runs the mingw row; its records now carry rowOf's row (the C compiler family tells mingw from msvc), so the join over that leg's records is K1a-ci
 build:row/msvc	K1a-ci	only a Windows msvc leg runs the msvc row; its records now carry rowOf's row (the C compiler family tells mingw from msvc), so the join over that leg's records is K1a-ci (the leg itself is CI-B)
-build:exceptions/setjmp	K5b	setjmp exceptions cannot be built on the cpp backend, and a Windows setjmp walk crashes entering its fiber (INT-12), so only linux-c rows run the cfg suite (the suite records skipCell elsewhere)	rows=linux-cpp,mingw,msvc
-build:fwrapv	K5b	-d:nelliFwrapv is refused under vcc (no -fwrapv), so the msvc row cannot run the cfg suite; the refusal is the fwrapv/vcc cell	rows=msvc
-build:cflags/sanitize	K10c	no UBSan runtime exists for mingw gcc or MSVC; the Linux legs run the sweep (tests/tsymex_0016_k10c_ubsan.nim) and record this cell, the Windows legs declare each defined: cell skipped	rows=mingw,msvc
-build:cflags/fpContract	K10c	cl.exe has no -ffp-contract flag and no leg pins its contraction default; the gcc rows (Linux, mingw) run the -ffp-contract=off one-off build that evidences the never cell	rows=msvc
+build:exceptions/setjmp	K5b	setjmp exceptions cannot be built on the cpp backend, and a Windows setjmp walk crashes entering its fiber (INT-12), so only linux-c rows run the cfg suite (the suite records skipCell elsewhere) [evidenced-on=linux-c,linux-c-z3-4.13.4]	rows=linux-cpp,mingw,msvc
+build:fwrapv	K5b	-d:nelliFwrapv is refused under vcc (no -fwrapv), so the msvc row cannot run the cfg suite; the refusal is the fwrapv/vcc cell [evidenced-on=linux-c,linux-cpp,linux-c-z3-4.13.4,mingw]	rows=msvc
+build:cflags/sanitize	K10c	no UBSan runtime exists for mingw gcc or MSVC; the Linux legs run the sweep (tests/tsymex_0016_k10c_ubsan.nim) and record this cell, the Windows legs declare each defined: cell skipped [evidenced-on=linux-c,linux-cpp,linux-c-z3-4.13.4]	rows=mingw,msvc
+build:cflags/fpContract	K10c	cl.exe has no -ffp-contract flag and no leg pins its contraction default; the gcc rows (Linux, mingw) run the -ffp-contract=off one-off build that evidences the never cell [evidenced-on=linux-c,linux-cpp,linux-c-z3-4.13.4,mingw]	rows=msvc

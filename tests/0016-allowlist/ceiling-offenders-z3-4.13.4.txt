@@ -1,755 +1,754 @@
 # RFC-0016 CI-D (W-60): tests allowed to run over the 60 s per-test ceiling on the z3-4.13.4 leg of
-# symex-nightly (Linux host, backend c, Z3 4.13.4). One test per line, then the reason; `#` starts a comment.
-# scripts/check-ceiling.sh --offenders fails the leg on an UNLISTED test over 126 s (60 s x 2.1; new offender;
-# between 60 and 126 s it is a warning). A listed test that ran under 60 s is a warning too (stale entry),
-# never a failure. See the script header for the measured run-to-run ratios behind the one-sided gate. A stale
+# symex-nightly (Linux host, backend c, Z3 4.13.4). One test per line: `<name>  <seconds>  <reason>`, the recorded wall time then the reason; `#` starts a comment.
+# scripts/check-ceiling.sh --offenders fails the leg on an UNLISTED test over 150 s (60 s x 2.5; new offender;
+# between 60 and 150 s it is a warning). A listed test that ran under 60 s is a warning too (stale entry),
+# never a failure. A listed test that ran over 2.5 x its recorded seconds FAILS (a regression: the list is a ceiling per test, not an exemption; raise a recorded time only by re-seeding, with the cause). See the script header for the measured run-to-run ratios behind the one-sided gate. A stale
 # entry is deleted at the next re-seed or in the commit that splits or speeds up the test, and no entry is ever
-# added without a reason in this column.
+# added without a time and a reason.
 #
 # Seed: the union of tests over 60 s in ANY of the three full runs, symex-nightly 42487154319, 42494651488 and
-# 42508458773 (leg z3-4.13.4): 745 tests. The reason column is the largest of the measured times.
-tfuzzconcolicannotation  seed: 106.1 s
-tfuzzconcolicassist  seed: 86.3 s
-tfuzzconcolicbridge_g6_affine  seed: 94.0 s
-tfuzzconcolicbridge_g6_predicated  seed: 68.4 s
-tfuzzconcolicbridge_real  seed: 104.3 s
-tfuzzconcolicdegrade  seed: 94.7 s
-tfuzzconcolicmismatch  seed: 131.6 s
-tfuzzmacro_astspike  seed: 83.9 s
-tn45probe  seed: 69.0 s
-tprobe_n45stats  seed: 74.4 s
-tsymex_0016_checksoff  seed: 76.9 s
-tsymex_0016_cr_generic_exn  seed: 82.4 s
-tsymex_0016_cr_zeroarg  seed: 69.1 s
-tsymex_0016_crb_macro_deprecation  seed: 74.3 s
-tsymex_0016_k20_probes  seed: 149.3 s
-tsymex_0016_k20_probes_child  seed: 195.5 s
-tsymex_0016_k5a_fwrapv  seed: 74.7 s
-tsymex_0016_k5a_segment  seed: 84.0 s
-tsymex_0016_k7a_survivors  seed: 80.6 s
-tsymex_0016_k7b_unsupported  seed: 73.5 s
-tsymex_0016_k8a1_template_except_as  seed: 75.4 s
-tsymex_0016_k8a_gen  seed: 117.1 s
-tsymex_0016_k8a_sink  seed: 65.8 s
-tsymex_0016_k9a_pins  seed: 87.4 s
-tsymex_0016_k9d0_entries  seed: 89.7 s
-tsymex_0016_panics  seed: 75.3 s
-tsymex_0016_panics_off  seed: 75.9 s
-tsymex_0016_s8cj_mkunique  seed: 78.2 s
-tsymex_0016_s8cj_runctx  seed: 79.2 s
-tsymex_0016_w1a_exn_typeid  seed: 80.2 s
-tsymex_0016_w1b_localpragma  seed: 78.2 s
-tsymex_0016_w1c3_splat_defect  seed: 71.6 s
-tsymex_0016_w1d1a_intminmod  seed: 91.5 s
-tsymex_0016_w1d1a_intminmod_checksoff  seed: 75.1 s
-tsymex_0016_w1d1b_udivzero  seed: 89.6 s
-tsymex_0016_w1d1c_cachedprune  seed: 79.0 s
-tsymex_0016_w1d2_wraps  seed: 81.1 s
-tsymex_0016_w1d2c_pushon  seed: 77.5 s
-tsymex_0016_w1d3_undefined  seed: 74.2 s
-tsymex_0016_w1e_floatwidth  seed: 77.1 s
-tsymex_0016_w1f_defaults_caseelif  seed: 101.9 s
-tsymex_0016_w1g_inslice  seed: 85.3 s
-tsymex_0016_w1p_probes  seed: 80.9 s
-tsymex_0016_wa_checksoff  seed: 83.8 s
-tsymex_0016_wa_runtime  seed: 73.7 s
-tsymex_0016_wa_runtime_checksoff  seed: 93.7 s
-tsymex_0016_wa_runtime_panics  seed: 72.0 s
-tsymex_0016_wa_undefined_e2e  seed: 79.9 s
-tsymex_161_overflow_obligation  seed: 61.7 s
-tsymex_162_range_base_width  seed: 82.9 s
-tsymex_163_opaque_transparent  seed: 76.6 s
-tsymex_163audit_range_domain  seed: 75.3 s
-tsymex_163audit_range_elem  seed: 79.2 s
-tsymex_163audit_w9  seed: 73.8 s
-tsymex_163audit_wave2  seed: 75.8 s
-tsymex_163rev_armfield_write  seed: 73.6 s
-tsymex_163rev_assign_rangedefect  seed: 77.5 s
-tsymex_163rev_assign_sites  seed: 84.4 s
-tsymex_163rev_concolic_diagnostics  seed: 83.3 s
-tsymex_163rev_concolic_flip_width  seed: 74.9 s
-tsymex_163rev_concolic_modes  seed: 66.5 s
-tsymex_163rev_concolic_modes_checksoff  seed: 76.4 s
-tsymex_163rev_degrade_classification  seed: 82.9 s
-tsymex_163rev_degrade_classification_b  seed: 76.7 s
-tsymex_163rev_degrade_classification_c  seed: 73.7 s
-tsymex_163rev_enum_domain  seed: 82.0 s
-tsymex_163rev_enum_field_witness  seed: 68.8 s
-tsymex_163rev_enum_positions  seed: 79.1 s
-tsymex_163rev_enum_valueshapes  seed: 78.3 s
-tsymex_163rev_inert_argfork  seed: 76.8 s
-tsymex_163rev_inert_exclusions  seed: 67.2 s
-tsymex_163rev_int_literal_width  seed: 80.7 s
-tsymex_163rev_intoffset_range  seed: 75.7 s
-tsymex_163rev_nested_clamp  seed: 69.9 s
-tsymex_163rev_parser_gaps  seed: 74.2 s
-tsymex_163rev_scan_counter_range  seed: 77.5 s
-tsymex_163rev_seqelem_promoted_int  seed: 73.7 s
-tsymex_163rev_table_elem  seed: 72.6 s
-tsymex_163rev_transparent_guard  seed: 73.3 s
-tsymex_163rev_transparent_result  seed: 73.8 s
-tsymex_163rev_variant_armfield  seed: 74.6 s
-tsymex_CR2a_expr_catchall  seed: 72.4 s
-tsymex_CR2b_paramtype_catchall  seed: 74.6 s
-tsymex_CR2c_witnessreader_catchall  seed: 82.9 s
-tsymex_a2_refvariant_fields  seed: 70.3 s
-tsymex_a3_closure_iterators  seed: 76.6 s
-tsymex_a6_symlen_hof  seed: 74.0 s
-tsymex_a7_rune  seed: 77.8 s
-tsymex_a7_runes_iter  seed: 67.0 s
-tsymex_a8_radix  seed: 73.9 s
-tsymex_a9_casefold  seed: 81.3 s
-tsymex_augmented_assign  seed: 79.2 s
-tsymex_configdefaults  seed: 75.2 s
-tsymex_configdefaults_b  seed: 84.4 s
-tsymex_configdefaults_depth  seed: 95.0 s
-tsymex_cr22_label_assert_coexist  seed: 75.6 s
-tsymex_cr9c_intrep  seed: 84.2 s
-tsymex_discard_raise  seed: 71.8 s
-tsymex_funcdef_callee  seed: 69.4 s
-tsymex_g1a_mode  seed: 76.4 s
-tsymex_g1b_concolic  seed: 77.2 s
-tsymex_g2_flip  seed: 90.9 s
-tsymex_g4_cmpwalk  seed: 71.9 s
-tsymex_g6_transform_binding  seed: 69.3 s
-tsymex_h_containers  seed: 70.7 s
-tsymex_h_stepC_heapidentity  seed: 65.1 s
-tsymex_h_verification  seed: 75.8 s
-tsymex_h_witness  seed: 79.0 s
-tsymex_p1_tupleconstr_expr  seed: 71.7 s
-tsymex_p2a_objconstr_expr  seed: 68.7 s
-tsymex_p2b_refobjconstr_expr  seed: 85.1 s
-tsymex_phase11_walker  seed: 79.3 s
-tsymex_phase12_derandomize  seed: 79.4 s
-tsymex_phase12_sugar  seed: 76.5 s
-tsymex_phase12_witnesses  seed: 76.4 s
-tsymex_phase13_layer1_wire  seed: 75.3 s
-tsymex_phase13_rlimit  seed: 69.6 s
-tsymex_phase14_arm_field_zero_init  seed: 74.6 s
-tsymex_phase14_b67_label_filter  seed: 74.3 s
-tsymex_phase14_c1_fromcache  seed: 72.2 s
-tsymex_phase14_c4_z3error  seed: 80.6 s
-tsymex_phase14_disc_promotion  seed: 76.0 s
-tsymex_phase14_else_arms  seed: 69.7 s
-tsymex_phase14_frontier_pruning  seed: 73.1 s
-tsymex_phase14_multivariant_witness  seed: 76.7 s
-tsymex_phase14_nonenum_disc  seed: 67.8 s
-tsymex_phase14_symbolic_disc_reassign  seed: 71.3 s
-tsymex_phase14_var_param  seed: 69.5 s
-tsymex_phase14_var_param_downstream  seed: 82.3 s
-tsymex_phase15_A1_arithmetic  seed: 63.1 s
-tsymex_phase15_A1_assertarg  seed: 74.7 s
-tsymex_phase15_A1_bitwise  seed: 78.2 s
-tsymex_phase15_A1_boolean  seed: 70.7 s
-tsymex_phase15_A1_callarg  seed: 84.4 s
-tsymex_phase15_A1_comparison  seed: 75.0 s
-tsymex_phase15_A1_loopguard  seed: 83.8 s
-tsymex_phase15_A1_unary  seed: 78.3 s
-tsymex_phase15_A2a_atomicir_audit  seed: 75.2 s
-tsymex_phase15_A2a_atomize  seed: 74.5 s
-tsymex_phase15_A2a_guardcond_pin  seed: 70.9 s
-tsymex_phase15_A2b_bitwise  seed: 73.8 s
-tsymex_phase15_C1_canonical_kind  seed: 61.5 s
-tsymex_phase15_C1_ir  seed: 67.3 s
-tsymex_phase15_C2_staticparams  seed: 76.0 s
-tsymex_phase15_C2b_closure_call  seed: 73.8 s
-tsymex_phase15_C3_proc_as_value  seed: 76.3 s
-tsymex_phase15_C4_hof  seed: 75.8 s
-tsymex_phase15_C5_closure_eq  seed: 71.9 s
-tsymex_phase15_C6_smoke  seed: 77.0 s
-tsymex_phase15_CR14_exn_missing  seed: 69.9 s
-tsymex_phase15_CR15_enum_ordinal  seed: 72.3 s
-tsymex_phase15_CR1_CR5_closure_heap  seed: 76.4 s
-tsymex_phase15_CR21_parseintraise_arg  seed: 67.3 s
-tsymex_phase15_CR3_CR4_CR6_float  seed: 78.6 s
-tsymex_phase15_E1_ir  seed: 71.4 s
-tsymex_phase15_E2a_cascade  seed: 75.8 s
-tsymex_phase15_E2b_raise  seed: 70.7 s
-tsymex_phase15_E3_try  seed: 78.2 s
-tsymex_phase15_E4_hierarchy  seed: 69.7 s
-tsymex_phase15_E4a_userexn  seed: 73.2 s
-tsymex_phase15_E5_finally  seed: 71.4 s
-tsymex_phase15_E6_defect  seed: 71.6 s
-tsymex_phase15_E7_smoke  seed: 73.4 s
-tsymex_phase15_E8_getcurrentexn  seed: 78.1 s
-tsymex_phase15_E_roundtrip  seed: 76.7 s
-tsymex_phase15_F1_typebridge  seed: 76.6 s
-tsymex_phase15_F2_float_literals  seed: 74.2 s
-tsymex_phase15_F3_float_arith  seed: 74.7 s
-tsymex_phase15_F4_float_compare  seed: 69.5 s
-tsymex_phase15_F5_float_conv  seed: 73.6 s
-tsymex_phase15_F5_probeproto  seed: 73.6 s
-tsymex_phase15_F5hang_derefwrite  seed: 79.2 s
-tsymex_phase15_F6_float_math  seed: 81.7 s
-tsymex_phase15_F7_float_extract  seed: 73.1 s
-tsymex_phase15_F8_smoke  seed: 85.4 s
-tsymex_phase15_F9a_array_float  seed: 71.6 s
-tsymex_phase15_F9b_seq_float  seed: 73.4 s
-tsymex_phase15_F9c_variant_float  seed: 73.0 s
-tsymex_phase15_G1a_instkey  seed: 76.7 s
-tsymex_phase15_G1c_instcap  seed: 75.8 s
-tsymex_phase15_M1_seq_fixedwidth  seed: 79.6 s
-tsymex_phase15_M2_parsebiggestint  seed: 79.4 s
-tsymex_phase15_N0_kindgate_widen  seed: 82.0 s
-tsymex_phase15_N1_resolution_gates  seed: 76.8 s
-tsymex_phase15_R1a_ir  seed: 68.0 s
-tsymex_phase15_S10a_strconv  seed: 76.7 s
-tsymex_phase15_S10b_strconv  seed: 73.0 s
-tsymex_phase15_S11_mutation  seed: 72.0 s
-tsymex_phase15_S1_typebridge  seed: 73.6 s
-tsymex_phase15_S2_strlit  seed: 77.2 s
-tsymex_phase15_S3_strindex  seed: 75.7 s
-tsymex_phase15_S4_strpred  seed: 78.1 s
-tsymex_phase15_S6b_regex  seed: 73.9 s
-tsymex_phase15_S7a_bytes  seed: 74.9 s
-tsymex_phase15_S7b_smoke  seed: 74.0 s
-tsymex_phase15_S8_concat  seed: 74.5 s
-tsymex_phase15_S9_caseconv  seed: 73.0 s
-tsymex_phase15_cr9_lowerInExpr  seed: 75.1 s
-tsymex_phase15_fieldcontainer  seed: 76.9 s
-tsymex_phase15_g10_smoke  seed: 69.4 s
-tsymex_phase15_g3_type_subst  seed: 78.0 s
-tsymex_phase15_g4_distinct_sort  seed: 73.7 s
-tsymex_phase15_g5_distinct_borrow  seed: 74.1 s
-tsymex_phase15_g6_concept_constraint  seed: 76.1 s
-tsymex_phase15_g7_static_param  seed: 73.9 s
-tsymex_phase15_g8_multi_param  seed: 73.3 s
-tsymex_phase15_l1_boundary  seed: 72.5 s
-tsymex_phase15_l2_untyped_template  seed: 71.5 s
-tsymex_phase15_l3_quote_do  seed: 67.5 s
-tsymex_phase15_r10_budget  seed: 75.9 s
-tsymex_phase15_r11_unsafecast  seed: 78.5 s
-tsymex_phase15_r11b_smoke  seed: 76.3 s
-tsymex_phase15_r13_closure_ref  seed: 67.2 s
-tsymex_phase15_r13_ptr_finally  seed: 71.1 s
-tsymex_phase15_r1_refsort  seed: 66.4 s
-tsymex_phase15_r1b_callheap  seed: 73.8 s
-tsymex_phase15_r2_new  seed: 70.5 s
-tsymex_phase15_r4_deref_write  seed: 78.3 s
-tsymex_phase15_r5_nil  seed: 71.9 s
-tsymex_phase15_r6_refobj  seed: 71.3 s
-tsymex_phase15_r7_alias_chain  seed: 76.6 s
-tsymex_phase15_r8_ptr  seed: 74.6 s
-tsymex_phase15_r8b_varref  seed: 71.0 s
-tsymex_phase15_r9_recursive  seed: 68.2 s
-tsymex_phase15_rereview_drains  seed: 82.3 s
-tsymex_phase15_z3c_classify  seed: 67.8 s
-tsymex_phase15_z4_walkctx  seed: 72.0 s
-tsymex_phase16_A5_float_classify  seed: 78.8 s
-tsymex_phase16_CR1a_bitwise_svint  seed: 76.5 s
-tsymex_phase16_CR1b_tail_local  seed: 73.3 s
-tsymex_phase16_CR1c_internal_fault  seed: 72.3 s
-tsymex_phase16_D1a_defect_routeraise  seed: 72.8 s
-tsymex_phase16_D1c_shortcircuit  seed: 77.7 s
-tsymex_phase16_R16_2_rangedefect  seed: 76.7 s
-tsymex_phase16_R16_2b_shortcircuit_conv  seed: 75.0 s
-tsymex_phase16_R16_3_divzero  seed: 76.2 s
-tsymex_phase16_R16_4_overflow_checksoff  seed: 72.8 s
-tsymex_phase16_R16_5_overflow_thru_closure  seed: 73.7 s
-tsymex_phase16_R16_6_diagnostics_channel  seed: 72.2 s
-tsymex_phase16_m3_rfind  seed: 77.0 s
-tsymex_phase16_m5_ifexpr_minmax  seed: 73.9 s
-tsymex_phase1_arith  seed: 76.4 s
-tsymex_phase1_assert  seed: 70.3 s
-tsymex_phase1_bool  seed: 74.0 s
-tsymex_phase1_let  seed: 70.3 s
-tsymex_phase2_abstraction  seed: 77.1 s
-tsymex_phase2_bv_arith  seed: 78.7 s
-tsymex_phase2_fallback  seed: 77.1 s
-tsymex_phase2_overflow  seed: 78.3 s
-tsymex_phase2_overflow_checksoff  seed: 71.5 s
-tsymex_phase3_inline  seed: 71.0 s
-tsymex_phase3_mutual  seed: 68.2 s
-tsymex_phase3_recursion  seed: 82.1 s
-tsymex_phase3_summarization  seed: 74.2 s
-tsymex_phase4_array  seed: 72.5 s
-tsymex_phase4_oob  seed: 76.8 s
-tsymex_phase5_hashset  seed: 73.9 s
-tsymex_phase5_seq  seed: 74.7 s
-tsymex_phase5_table  seed: 71.1 s
-tsymex_phase6_break  seed: 75.1 s
-tsymex_phase6_case  seed: 73.2 s
-tsymex_phase6_while  seed: 74.0 s
-tsymex_phase7_assertcovered  seed: 90.7 s
-tsymex_q1_scanlift  seed: 78.1 s
-tsymex_q1_sibling_collision  seed: 71.7 s
-tsymex_r14_case2_degrade  seed: 88.1 s
-tsymex_r14_continue_guard  seed: 60.7 s
-tsymex_r1_draingap  seed: 108.4 s
-tsymex_r1b_shortcircuit_oob  seed: 87.8 s
-tsymex_r2_scanbound  seed: 73.5 s
-tsymex_r4_seq_slice  seed: 82.3 s
-tsymex_r4_slice_binding  seed: 74.8 s
-tsymex_r4_strip  seed: 97.0 s
-tsymex_r5_bv32_width  seed: 76.3 s
-tsymex_r5_const_fold  seed: 73.5 s
-tsymex_r5_discard  seed: 65.5 s
-tsymex_r5_neg_bool_conv  seed: 73.2 s
-tsymex_r5_tuple_return  seed: 73.9 s
-tsymex_r6_a0_lowhigh  seed: 75.4 s
-tsymex_r6_a1_variantlit  seed: 72.2 s
-tsymex_r6_a2_retbind_variant  seed: 79.1 s
-tsymex_r6_a3_variantconstruct_sym  seed: 76.6 s
-tsymex_r6_a4_construct_interactions  seed: 75.8 s
-tsymex_r6_a6_exported_field_names  seed: 67.5 s
-tsymex_r6_a6r_callwitness  seed: 78.3 s
-tsymex_r6_b0_scanlift_bound  seed: 72.1 s
-tsymex_r6_b1_stringbacked  seed: 68.3 s
-tsymex_r6_b2_intwidth  seed: 73.3 s
-tsymex_r6_b3_scanpair  seed: 77.6 s
-tsymex_r6_b4_readcstring  seed: 78.0 s
-tsymex_r6_b5_chained  seed: 76.8 s
-tsymex_r6_b6_optionregion  seed: 80.8 s
-tsymex_r6_b7r2_pathscope  seed: 141.2 s
-tsymex_r6_b7r_bytescan  seed: 90.4 s
-tsymex_r6_bug2_scopeddecline  seed: 77.5 s
-tsymex_r6_d2_recursive_budget  seed: 74.3 s
-tsymex_r6_heap_raise_totality  seed: 74.1 s
-tsymex_r6_itesv_mergedegrade  seed: 76.8 s
-tsymex_r6_lows_blockparse  seed: 75.5 s
-tsymex_r6_lows_collectors  seed: 69.9 s
-tsymex_r6_lows_declines  seed: 81.7 s
-tsymex_r6_n10_coverage_matrix  seed: 84.0 s
-tsymex_r6_n13_reassign_seqarm  seed: 74.6 s
-tsymex_r6_n14_seqops  seed: 95.8 s
-tsymex_r6_n16_closure_zerodefault  seed: 76.9 s
-tsymex_r6_n20_boundedloop  seed: 75.1 s
-tsymex_r6_n21_pairloop_member  seed: 79.7 s
-tsymex_r6_n27_hof_placeholder  seed: 78.0 s
-tsymex_r6_n28_shadow_collision  seed: 72.5 s
-tsymex_r6_n29_seqlit_sortmismatch  seed: 73.4 s
-tsymex_r6_n31_block_counter  seed: 75.1 s
-tsymex_r6_n36_raise_degrade  seed: 81.0 s
-tsymex_r6_n36_raise_degrade_b  seed: 73.0 s
-tsymex_r6_n36_raise_degrade_c  seed: 68.9 s
-tsymex_r6_n36_raise_degrade_d  seed: 87.5 s
-tsymex_r6_n37_raise_residue  seed: 84.8 s
-tsymex_r6_n39_variant_field_alloc  seed: 77.6 s
-tsymex_r6_n42_deref_taint  seed: 82.5 s
-tsymex_r6_n43_parity  seed: 71.3 s
-tsymex_r6_n49_dottedfield_mutation  seed: 80.5 s
-tsymex_r6_n9_variant_budget  seed: 66.1 s
-tsymex_r6_nulwitness  seed: 77.6 s
-tsymex_r6_r1_placeholder_totality  seed: 81.7 s
-tsymex_r6_r2_zerodefault_result  seed: 88.1 s
-tsymex_r6_r3_svint_overflow  seed: 74.9 s
-tsymex_r6_r4_collector_scoping  seed: 78.7 s
-tsymex_r6_r5_pairloop_counter  seed: 73.0 s
-tsymex_r7_caseexpr  seed: 73.6 s
-tsymex_r8_omitted_field_degrade  seed: 76.9 s
-tsymex_rectify_cardinality  seed: 76.7 s
-tsymex_rectify_effects  seed: 74.6 s
-tsymex_rectify_generics  seed: 72.3 s
-tsymex_rectify_mutation  seed: 71.8 s
-tsymex_rectify_nested_arrays  seed: 76.4 s
-tsymex_rectify_refs  seed: 65.6 s
-tsymex_rectify_variants  seed: 71.9 s
-tsymex_retest_c11_stack  seed: 73.8 s
-tsymex_retest_c3_bitwise_guard  seed: 64.9 s
-tsymex_retest_c5b_unknown_errors  seed: 73.8 s
-tsymex_retest_c6_tuple_chain  seed: 109.4 s
-tsymex_retest_char_needle  seed: 65.5 s
-tsymex_retest_infix_degrade  seed: 71.2 s
-tsymex_rfc0005_b10_integration  seed: 152.0 s
-tsymex_rfc0005_b10_integration_b  seed: 82.0 s
-tsymex_rfc0005_b10_integration_c  seed: 74.1 s
-tsymex_rfc0005_b11_hoststate  seed: 66.7 s
-tsymex_rfc0005_b11_hoststate_reexec  seed: 68.3 s
-tsymex_rfc0005_b6_globalrecv  seed: 77.8 s
-tsymex_rfc0005_b7_integration  seed: 64.4 s
-tsymex_rfc0005_b8_integration  seed: 82.8 s
-tsymex_rfc0005_b8_integration_b  seed: 91.0 s
-tsymex_rfc0005_b8_integration_c  seed: 75.1 s
-tsymex_rfc0005_b8_integration_d  seed: 64.8 s
-tsymex_rfc0005_b9_calldepth  seed: 62.9 s
-tsymex_rfc0005_b9_integration  seed: 73.9 s
-tsymex_rfc0005_b9_integration_b  seed: 82.9 s
-tsymex_rfc0005_b9_integration_c  seed: 92.8 s
-tsymex_rfc0005_r1_elif_preamble  seed: 79.4 s
-tsymex_rfc0005_r1_findingapi  seed: 109.3 s
-tsymex_rfc0005_r1_keyimpl  seed: 70.4 s
-tsymex_rfc0005_r1_keymethod  seed: 81.3 s
-tsymex_rfc0005_r1_lowertaint  seed: 75.1 s
-tsymex_rfc0005_r1_pcrelimits  seed: 334.0 s
-tsymex_rfc0005_r1_rundependence  seed: 82.8 s
-tsymex_rfc0005_r1_succ_pred  seed: 77.5 s
-tsymex_rfc0005_r1_variantset  seed: 75.3 s
-tsymex_rfc0005_r2_walktaint  seed: 81.5 s
-tsymex_rfc0005_s0_exhibit  seed: 75.4 s
-tsymex_rfc0005_s10_replay_verdict  seed: 86.1 s
-tsymex_rfc0005_s11_surface  seed: 106.6 s
-tsymex_rfc0005_s1_lattice  seed: 72.1 s
-tsymex_rfc0005_s1b_kinds  seed: 81.3 s
-tsymex_rfc0005_s1c_verdict  seed: 86.9 s
-tsymex_rfc0005_s2_replay  seed: 65.3 s
-tsymex_rfc0005_s3_monotonicity  seed: 86.2 s
-tsymex_rfc0005_s4_alloc  seed: 73.8 s
-tsymex_rfc0005_s5_str  seed: 65.9 s
-tsymex_rfc0005_s6a_budget  seed: 79.5 s
-tsymex_rfc0005_s6b_ops  seed: 84.7 s
-tsymex_rfc0005_s7_closure  seed: 87.0 s
-tsymex_rfc0005_s8_scope  seed: 85.5 s
-tsymex_rfc0005_s8aa_remainder  seed: 82.4 s
-tsymex_rfc0005_s8aa_remainder_checksoff  seed: 81.8 s
-tsymex_rfc0005_s8ab_letaudit  seed: 184.8 s
-tsymex_rfc0005_s8ac_remainder  seed: 98.9 s
-tsymex_rfc0005_s8ac_remainder_b  seed: 87.2 s
-tsymex_rfc0005_s8ad_remainder  seed: 90.2 s
-tsymex_rfc0005_s8ae_remainder  seed: 70.2 s
-tsymex_rfc0005_s8ae_remainder_b  seed: 83.4 s
-tsymex_rfc0005_s8ae_remainder_c  seed: 83.9 s
-tsymex_rfc0005_s8ag_indexsplit  seed: 87.8 s
-tsymex_rfc0005_s8ag_indexsplit_b  seed: 80.9 s
-tsymex_rfc0005_s8ag_indexsplit_c  seed: 82.7 s
-tsymex_rfc0005_s8ai_semantic  seed: 76.8 s
-tsymex_rfc0005_s8ai_semantic_b2  seed: 71.6 s
-tsymex_rfc0005_s8ai_semantic_b3  seed: 76.8 s
-tsymex_rfc0005_s8ai_semantic_c  seed: 83.4 s
-tsymex_rfc0005_s8aj_remainder  seed: 79.6 s
-tsymex_rfc0005_s8aj_remainder_b  seed: 83.2 s
-tsymex_rfc0005_s8aj_remainder_c  seed: 77.9 s
-tsymex_rfc0005_s8aj_remainder_c_checksoff  seed: 78.0 s
-tsymex_rfc0005_s8am_remainder  seed: 91.1 s
-tsymex_rfc0005_s8an_remainder  seed: 77.1 s
-tsymex_rfc0005_s8an_remainder_b  seed: 87.1 s
-tsymex_rfc0005_s8an_remainder_b2  seed: 89.1 s
-tsymex_rfc0005_s8an_remainder_c  seed: 94.0 s
-tsymex_rfc0005_s8an_remainder_d  seed: 84.4 s
-tsymex_rfc0005_s8ao_remainder  seed: 85.3 s
-tsymex_rfc0005_s8ap_remainder  seed: 89.4 s
-tsymex_rfc0005_s8ap_remainder_b  seed: 82.7 s
-tsymex_rfc0005_s8ap_remainder_c  seed: 84.9 s
-tsymex_rfc0005_s8ap_remainder_d  seed: 79.8 s
-tsymex_rfc0005_s8aq_remainder  seed: 79.8 s
-tsymex_rfc0005_s8ar_remainder_b  seed: 78.6 s
-tsymex_rfc0005_s8ar_remainder_c  seed: 72.3 s
-tsymex_rfc0005_s8ar_remainder_d  seed: 64.5 s
-tsymex_rfc0005_s8ar_remainder_e  seed: 84.2 s
-tsymex_rfc0005_s8ar_remainder_f  seed: 73.2 s
-tsymex_rfc0005_s8ar_remainder_g  seed: 82.8 s
-tsymex_rfc0005_s8ar_remainder_h  seed: 79.8 s
-tsymex_rfc0005_s8as_remainder  seed: 61.2 s
-tsymex_rfc0005_s8as_remainder_b  seed: 91.6 s
-tsymex_rfc0005_s8as_remainder_c  seed: 88.9 s
-tsymex_rfc0005_s8at_remainder  seed: 83.5 s
-tsymex_rfc0005_s8at_remainder_b  seed: 94.4 s
-tsymex_rfc0005_s8at_remainder_c  seed: 85.5 s
-tsymex_rfc0005_s8at_remainder_d  seed: 81.0 s
-tsymex_rfc0005_s8at_remainder_e  seed: 91.8 s
-tsymex_rfc0005_s8at_remainder_f  seed: 81.4 s
-tsymex_rfc0005_s8au_remainder  seed: 86.6 s
-tsymex_rfc0005_s8au_remainder_b  seed: 101.3 s
-tsymex_rfc0005_s8au_remainder_c  seed: 80.8 s
-tsymex_rfc0005_s8av_remainder  seed: 68.3 s
-tsymex_rfc0005_s8aw_remainder  seed: 94.1 s
-tsymex_rfc0005_s8ax_remainder  seed: 74.2 s
-tsymex_rfc0005_s8ax_remainder2  seed: 79.1 s
-tsymex_rfc0005_s8ax_remainder3  seed: 77.5 s
-tsymex_rfc0005_s8ax_remainder_b  seed: 79.2 s
-tsymex_rfc0005_s8ax_remainder_c  seed: 78.4 s
-tsymex_rfc0005_s8ax_remainder_d  seed: 82.1 s
-tsymex_rfc0005_s8ax_remainder_e  seed: 90.3 s
-tsymex_rfc0005_s8ax_remainder_f  seed: 79.1 s
-tsymex_rfc0005_s8ax_remainder_g  seed: 92.4 s
-tsymex_rfc0005_s8ay_remainder  seed: 82.6 s
-tsymex_rfc0005_s8ay_remainder_b  seed: 83.1 s
-tsymex_rfc0005_s8ay_remainder_c  seed: 67.8 s
-tsymex_rfc0005_s8ay_remainder_d  seed: 85.7 s
-tsymex_rfc0005_s8az_remainder  seed: 75.1 s
-tsymex_rfc0005_s8b_substitutions  seed: 81.7 s
-tsymex_rfc0005_s8ba_remainder  seed: 95.2 s
-tsymex_rfc0005_s8ba_remainder_b  seed: 92.5 s
-tsymex_rfc0005_s8ba_remainder_c  seed: 78.0 s
-tsymex_rfc0005_s8bb_captures  seed: 98.5 s
-tsymex_rfc0005_s8bb_captures_b  seed: 90.8 s
-tsymex_rfc0005_s8bb_captures_c  seed: 87.8 s
-tsymex_rfc0005_s8bb_captures_d  seed: 72.6 s
-tsymex_rfc0005_s8bb_remainder  seed: 86.8 s
-tsymex_rfc0005_s8bb_remainder_b  seed: 95.7 s
-tsymex_rfc0005_s8bb_replace  seed: 78.8 s
-tsymex_rfc0005_s8bb_replace_b  seed: 75.7 s
-tsymex_rfc0005_s8bb_replace_d  seed: 102.1 s
-tsymex_rfc0005_s8bc_remainder_a  seed: 86.7 s
-tsymex_rfc0005_s8bc_remainder_a2  seed: 81.7 s
-tsymex_rfc0005_s8bc_remainder_a3  seed: 65.2 s
-tsymex_rfc0005_s8bc_remainder_b  seed: 80.1 s
-tsymex_rfc0005_s8bc_remainder_b2  seed: 86.6 s
-tsymex_rfc0005_s8bc_remainder_b3  seed: 90.4 s
-tsymex_rfc0005_s8bc_remainder_c  seed: 77.4 s
-tsymex_rfc0005_s8bc_remainder_c2  seed: 263.6 s
-tsymex_rfc0005_s8bc_remainder_c3  seed: 87.7 s
-tsymex_rfc0005_s8bc_remainder_c4  seed: 90.1 s
-tsymex_rfc0005_s8bd_remainder  seed: 89.0 s
-tsymex_rfc0005_s8bd_remainder_b  seed: 82.2 s
-tsymex_rfc0005_s8bd_remainder_c  seed: 81.9 s
-tsymex_rfc0005_s8be_remainder  seed: 89.3 s
-tsymex_rfc0005_s8be_remainder_b  seed: 81.4 s
-tsymex_rfc0005_s8be_remainder_c  seed: 90.4 s
-tsymex_rfc0005_s8bf_alias  seed: 102.8 s
-tsymex_rfc0005_s8bg_remainder  seed: 67.8 s
-tsymex_rfc0005_s8bh_remainder  seed: 84.2 s
-tsymex_rfc0005_s8bh_remainder_b  seed: 88.0 s
-tsymex_rfc0005_s8bh_remainder_c  seed: 81.2 s
-tsymex_rfc0005_s8bh_remainder_d  seed: 87.0 s
-tsymex_rfc0005_s8bh_remainder_e  seed: 84.8 s
-tsymex_rfc0005_s8bh_remainder_f  seed: 78.5 s
-tsymex_rfc0005_s8bi_remainder  seed: 85.5 s
-tsymex_rfc0005_s8bi_remainder_b  seed: 85.5 s
-tsymex_rfc0005_s8bi_remainder_c  seed: 83.6 s
-tsymex_rfc0005_s8bj_entries  seed: 69.2 s
-tsymex_rfc0005_s8bj_entries_multiline  seed: 63.9 s
-tsymex_rfc0005_s8bj_replace_lemmas  seed: 76.9 s
-tsymex_rfc0005_s8bj_walker  seed: 91.1 s
-tsymex_rfc0005_s8bk_argtiming  seed: 75.9 s
-tsymex_rfc0005_s8bk_argtiming_addr  seed: 84.4 s
-tsymex_rfc0005_s8bk_argtiming_checks  seed: 74.3 s
-tsymex_rfc0005_s8bl_borrow  seed: 73.5 s
-tsymex_rfc0005_s8bl_gaps  seed: 72.7 s
-tsymex_rfc0005_s8bl_gaps_b  seed: 81.8 s
-tsymex_rfc0005_s8bl_gaps_c  seed: 82.2 s
-tsymex_rfc0005_s8bl_gaps_d  seed: 80.6 s
-tsymex_rfc0005_s8bl_magics  seed: 79.4 s
-tsymex_rfc0005_s8bl_magicscan  seed: 61.7 s
-tsymex_rfc0005_s8bl_pairloop  seed: 84.7 s
-tsymex_rfc0005_s8bl_seqops  seed: 81.7 s
-tsymex_rfc0005_s8bl_setlen  seed: 93.1 s
-tsymex_rfc0005_s8bm_stability  seed: 64.3 s
-tsymex_rfc0005_s8bn_remainder  seed: 65.2 s
-tsymex_rfc0005_s8bn_remainder_b  seed: 99.3 s
-tsymex_rfc0005_s8bn_remainder_c  seed: 83.4 s
-tsymex_rfc0005_s8bn_remainder_d  seed: 93.8 s
-tsymex_rfc0005_s8bn_remainder_e  seed: 90.9 s
-tsymex_rfc0005_s8bn_remainder_f  seed: 75.0 s
-tsymex_rfc0005_s8bo_cells  seed: 109.0 s
-tsymex_rfc0005_s8bo_nil  seed: 78.4 s
-tsymex_rfc0005_s8bo_replay  seed: 72.2 s
-tsymex_rfc0005_s8bp_isolation  seed: 80.4 s
-tsymex_rfc0005_s8bq_remainder  seed: 93.0 s
-tsymex_rfc0005_s8bq_remainder_b  seed: 94.8 s
-tsymex_rfc0005_s8bq_remainder_c  seed: 90.0 s
-tsymex_rfc0005_s8br_framecond  seed: 87.3 s
-tsymex_rfc0005_s8br_remainder  seed: 90.6 s
-tsymex_rfc0005_s8bs_addrglobal  seed: 95.5 s
-tsymex_rfc0005_s8bs_byref  seed: 101.0 s
-tsymex_rfc0005_s8bs_byvalue  seed: 79.7 s
-tsymex_rfc0005_s8bs_iterparams  seed: 85.4 s
-tsymex_rfc0005_s8bt_caps_c  seed: 78.7 s
-tsymex_rfc0005_s8bt_libversion  seed: 80.0 s
-tsymex_rfc0005_s8bt_limit_langs_b  seed: 87.4 s
-tsymex_rfc0005_s8bt_replace_lemmas  seed: 89.3 s
-tsymex_rfc0005_s8bt_replace_lemmas_b  seed: 82.5 s
-tsymex_rfc0005_s8bt_utf_any_e  seed: 62.6 s
-tsymex_rfc0005_s8bu_byvalseq  seed: 82.9 s
-tsymex_rfc0005_s8bu_calls  seed: 85.9 s
-tsymex_rfc0005_s8bu_mitems  seed: 88.1 s
-tsymex_rfc0005_s8bu_paths  seed: 84.6 s
-tsymex_rfc0005_s8bu_term  seed: 83.4 s
-tsymex_rfc0005_s8bu_varviews  seed: 78.9 s
-tsymex_rfc0005_s8bu_views  seed: 81.5 s
-tsymex_rfc0005_s8bv_card_uninit  seed: 94.5 s
-tsymex_rfc0005_s8bv_iter_char  seed: 79.3 s
-tsymex_rfc0005_s8bv_iter_char_b  seed: 86.2 s
-tsymex_rfc0005_s8bv_iter_char_count  seed: 90.5 s
-tsymex_rfc0005_s8bv_iter_forms  seed: 89.5 s
-tsymex_rfc0005_s8bv_iter_int8  seed: 83.1 s
-tsymex_rfc0005_s8bv_subrange  seed: 82.6 s
-tsymex_rfc0005_s8bv_subrange_sets  seed: 82.8 s
-tsymex_rfc0005_s8bw_remainder  seed: 60.9 s
-tsymex_rfc0005_s8bw_remainder_b  seed: 97.2 s
-tsymex_rfc0005_s8bw_remainder_c  seed: 68.9 s
-tsymex_rfc0005_s8bw_remainder_d  seed: 84.1 s
-tsymex_rfc0005_s8bx_extractraise  seed: 86.2 s
-tsymex_rfc0005_s8bx_extractraise_b  seed: 62.2 s
-tsymex_rfc0005_s8bx_iterchange  seed: 76.0 s
-tsymex_rfc0005_s8bx_mpairs  seed: 102.1 s
-tsymex_rfc0005_s8bx_setlenstr  seed: 76.6 s
-tsymex_rfc0005_s8by_remainder  seed: 83.6 s
-tsymex_rfc0005_s8bz_cells  seed: 83.3 s
-tsymex_rfc0005_s8bz_cells_b  seed: 82.3 s
-tsymex_rfc0005_s8bz_cells_c  seed: 83.4 s
-tsymex_rfc0005_s8bz_cells_d  seed: 75.9 s
-tsymex_rfc0005_s8bz_cells_e  seed: 79.7 s
-tsymex_rfc0005_s8bz_overlap  seed: 90.2 s
-tsymex_rfc0005_s8bz_written  seed: 81.6 s
-tsymex_rfc0005_s8bz_written_b  seed: 88.6 s
-tsymex_rfc0005_s8bz_written_c  seed: 80.6 s
-tsymex_rfc0005_s8c_resolution  seed: 92.6 s
-tsymex_rfc0005_s8ca_calls  seed: 86.2 s
-tsymex_rfc0005_s8ca_closures  seed: 68.9 s
-tsymex_rfc0005_s8ca_closures_heap  seed: 84.2 s
-tsymex_rfc0005_s8ca_derefmut  seed: 67.0 s
-tsymex_rfc0005_s8ca_procvals  seed: 80.3 s
-tsymex_rfc0005_s8ca_resize  seed: 89.2 s
-tsymex_rfc0005_s8ca_stack  seed: 84.2 s
-tsymex_rfc0005_s8ca_strings  seed: 102.7 s
-tsymex_rfc0005_s8ca_strings_b  seed: 80.7 s
-tsymex_rfc0005_s8ca_strings_byvalue  seed: 78.1 s
-tsymex_rfc0005_s8ca_views  seed: 83.0 s
-tsymex_rfc0005_s8cb_cells  seed: 87.7 s
-tsymex_rfc0005_s8cb_magics  seed: 73.6 s
-tsymex_rfc0005_s8cb_order  seed: 91.4 s
-tsymex_rfc0005_s8cb_replay  seed: 104.6 s
-tsymex_rfc0005_s8cb_tostr  seed: 90.1 s
-tsymex_rfc0005_s8cc_cellquery  seed: 84.7 s
-tsymex_rfc0005_s8cc_cellquery_b  seed: 83.7 s
-tsymex_rfc0005_s8cc_remainder  seed: 94.8 s
-tsymex_rfc0005_s8cc_remainder_b  seed: 83.1 s
-tsymex_rfc0005_s8cc_remainder_c  seed: 82.7 s
-tsymex_rfc0005_s8cd_globals  seed: 77.9 s
-tsymex_rfc0005_s8cd_globals_b  seed: 68.9 s
-tsymex_rfc0005_s8cd_ops  seed: 62.9 s
-tsymex_rfc0005_s8cd_ops_b  seed: 65.3 s
-tsymex_rfc0005_s8cd_setorder_by  seed: 107.9 s
-tsymex_rfc0005_s8cd_setorder_large  seed: 95.9 s
-tsymex_rfc0005_s8cd_setorder_md  seed: 103.5 s
-tsymex_rfc0005_s8cd_setorder_small  seed: 106.5 s
-tsymex_rfc0005_s8ce_raiseshapes  seed: 84.3 s
-tsymex_rfc0005_s8cf_classes  seed: 88.0 s
-tsymex_rfc0005_s8cf_jitlimit  seed: 68.2 s
-tsymex_rfc0005_s8cf_jitutf  seed: 76.4 s
-tsymex_rfc0005_s8cf_limitgaps  seed: 69.1 s
-tsymex_rfc0005_s8cf_limits  seed: 78.9 s
-tsymex_rfc0005_s8cf_point  seed: 77.7 s
-tsymex_rfc0005_s8cf_point_b  seed: 67.1 s
-tsymex_rfc0005_s8cf_replace  seed: 80.8 s
-tsymex_rfc0005_s8cf_skipcount  seed: 82.7 s
-tsymex_rfc0005_s8cl_lifetime  seed: 83.9 s
-tsymex_rfc0005_s8cl_lifetime_b  seed: 97.5 s
-tsymex_rfc0005_s8cl_magics  seed: 84.6 s
-tsymex_rfc0005_s8cl_strings  seed: 92.6 s
-tsymex_rfc0005_s8cn_lent  seed: 88.4 s
-tsymex_rfc0005_s8cn_lent_b  seed: 83.7 s
-tsymex_rfc0005_s8cn_lent_c  seed: 84.5 s
-tsymex_rfc0005_s8cn_lent_d  seed: 67.5 s
-tsymex_rfc0005_s8cn_lent_e  seed: 86.6 s
-tsymex_rfc0005_s8cn_lent_f  seed: 73.8 s
-tsymex_rfc0005_s8cn_probe  seed: 75.3 s
-tsymex_rfc0005_s8cn_seqview  seed: 61.9 s
-tsymex_rfc0005_s8cn_seqview_b  seed: 82.7 s
-tsymex_rfc0005_s8cn_seqview_c  seed: 87.4 s
-tsymex_rfc0005_s8cn_seqview_d  seed: 79.6 s
-tsymex_rfc0005_s8cn_seqview_e  seed: 63.0 s
-tsymex_rfc0005_s8cn_seqview_f  seed: 84.1 s
-tsymex_rfc0005_s8cn_step1d  seed: 85.2 s
-tsymex_rfc0005_s8cn_step1d_b  seed: 82.4 s
-tsymex_rfc0005_s8cn_step1d_e  seed: 84.3 s
-tsymex_rfc0005_s8cn_views  seed: 83.7 s
-tsymex_rfc0005_s8cn_views_b  seed: 128.0 s
-tsymex_rfc0005_s8cn_views_c  seed: 106.5 s
-tsymex_rfc0005_s8cn_views_d  seed: 89.0 s
-tsymex_rfc0005_s8cn_views_e  seed: 121.7 s
-tsymex_rfc0005_s8cn_views_f  seed: 98.8 s
-tsymex_rfc0005_s8cp_unchecked  seed: 95.1 s
-tsymex_rfc0005_s8cp_unchecked_decline  seed: 80.8 s
-tsymex_rfc0005_s8cp_unchecked_zero  seed: 87.4 s
-tsymex_rfc0005_s8cq_argorder  seed: 118.3 s
-tsymex_rfc0005_s8cq_byvalue  seed: 79.4 s
-tsymex_rfc0005_s8cq_byvalue10  seed: 89.5 s
-tsymex_rfc0005_s8cq_byvalue11  seed: 75.3 s
-tsymex_rfc0005_s8cq_byvalue12  seed: 87.8 s
-tsymex_rfc0005_s8cq_byvalue13  seed: 144.1 s
-tsymex_rfc0005_s8cq_byvalue2  seed: 80.7 s
-tsymex_rfc0005_s8cq_byvalue3  seed: 89.7 s
-tsymex_rfc0005_s8cq_byvalue4  seed: 63.4 s
-tsymex_rfc0005_s8cq_byvalue5  seed: 79.7 s
-tsymex_rfc0005_s8cq_byvalue6  seed: 86.9 s
-tsymex_rfc0005_s8cq_byvalue7  seed: 73.1 s
-tsymex_rfc0005_s8cq_byvalue8  seed: 90.4 s
-tsymex_rfc0005_s8cq_byvalue9  seed: 66.4 s
-tsymex_rfc0005_s8cq_stops  seed: 73.8 s
-tsymex_rfc0005_s8cq_twice  seed: 84.1 s
-tsymex_rfc0005_s8cq_twice10  seed: 82.3 s
-tsymex_rfc0005_s8cq_twice11  seed: 102.6 s
-tsymex_rfc0005_s8cq_twice12  seed: 88.4 s
-tsymex_rfc0005_s8cq_twice2  seed: 95.3 s
-tsymex_rfc0005_s8cq_twice3  seed: 84.5 s
-tsymex_rfc0005_s8cq_twice4  seed: 111.0 s
-tsymex_rfc0005_s8cq_twice5  seed: 96.6 s
-tsymex_rfc0005_s8cq_twice6  seed: 81.3 s
-tsymex_rfc0005_s8cq_twice7  seed: 88.9 s
-tsymex_rfc0005_s8cq_twice8  seed: 85.5 s
-tsymex_rfc0005_s8cq_twice9  seed: 69.2 s
-tsymex_rfc0005_s8cq_varret  seed: 108.2 s
-tsymex_rfc0005_s8cq_varret2  seed: 100.2 s
-tsymex_rfc0005_s8cq_varret3  seed: 81.9 s
-tsymex_rfc0005_s8cr_flips  seed: 77.1 s
-tsymex_rfc0005_s8cr_flips_str  seed: 105.0 s
-tsymex_rfc0005_s8cr_intro  seed: 86.2 s
-tsymex_rfc0005_s8cr_intro_b  seed: 79.7 s
-tsymex_rfc0005_s8cr_pins  seed: 90.3 s
-tsymex_rfc0005_s8cs_routes  seed: 80.2 s
-tsymex_rfc0005_s8cs_routes2  seed: 104.3 s
-tsymex_rfc0005_s8cs_routes_b  seed: 82.5 s
-tsymex_rfc0005_s8ct_b19  seed: 117.8 s
-tsymex_rfc0005_s8ct_deepterm  seed: 72.3 s
-tsymex_rfc0005_s8ct_deepterm_b  seed: 128.7 s
-tsymex_rfc0005_s8ct_isolation  seed: 82.6 s
-tsymex_rfc0005_s8ct_isolation_b  seed: 85.8 s
-tsymex_rfc0005_s8ct_isolation_c  seed: 86.4 s
-tsymex_rfc0005_s8ct_isolation_d  seed: 168.9 s
-tsymex_rfc0005_s8ct_isolation_e  seed: 62.4 s
-tsymex_rfc0005_s8ct_reexec_b  seed: 83.3 s
-tsymex_rfc0005_s8ct_reexec_c  seed: 95.9 s
-tsymex_rfc0005_s8ct_reexec_d  seed: 201.8 s
-tsymex_rfc0005_s8ct_reexec_e  seed: 82.1 s
-tsymex_rfc0005_s8cu_assert  seed: 75.1 s
-tsymex_rfc0005_s8cu_cl_assert  seed: 74.1 s
-tsymex_rfc0005_s8cu_cl_checks  seed: 71.4 s
-tsymex_rfc0005_s8cu_cl_danger  seed: 73.9 s
-tsymex_rfc0005_s8cu_cl_field  seed: 72.8 s
-tsymex_rfc0005_s8cu_cl_float  seed: 80.7 s
-tsymex_rfc0005_s8cu_cl_over  seed: 71.1 s
-tsymex_rfc0005_s8cu_cl_rbo  seed: 71.7 s
-tsymex_rfc0005_s8cu_forms  seed: 63.5 s
-tsymex_rfc0005_s8cu_hidden  seed: 76.9 s
-tsymex_rfc0005_s8cu_import  seed: 70.7 s
-tsymex_rfc0005_s8cu_kinds  seed: 101.9 s
-tsymex_rfc0005_s8cu_modules  seed: 98.1 s
-tsymex_rfc0005_s8cu_nil  seed: 88.3 s
-tsymex_rfc0005_s8cu_nil_setjmp  seed: 75.4 s
-tsymex_rfc0005_s8cu_push  seed: 61.6 s
-tsymex_rfc0005_s8d_typeheads  seed: 79.5 s
-tsymex_rfc0005_s8e_scoping  seed: 104.4 s
-tsymex_rfc0005_s8f_witness  seed: 74.0 s
-tsymex_rfc0005_s8g_models  seed: 74.0 s
-tsymex_rfc0005_s8h_refwitness  seed: 89.4 s
-tsymex_rfc0005_s8i_models  seed: 93.5 s
-tsymex_rfc0005_s8j_exits  seed: 62.9 s
-tsymex_rfc0005_s8k_bounds  seed: 85.5 s
-tsymex_rfc0005_s8l_exits  seed: 92.8 s
-tsymex_rfc0005_s8l_exits_b  seed: 88.6 s
-tsymex_rfc0005_s8m_exits  seed: 80.9 s
-tsymex_rfc0005_s8m_exits_b  seed: 77.0 s
-tsymex_rfc0005_s8m_exits_c  seed: 82.9 s
-tsymex_rfc0005_s8n_precision  seed: 81.6 s
-tsymex_rfc0005_s8o_termination  seed: 81.4 s
-tsymex_rfc0005_s8p_precision  seed: 91.5 s
-tsymex_rfc0005_s8p_precision_b  seed: 76.3 s
-tsymex_rfc0005_s8p_precision_c  seed: 82.6 s
-tsymex_rfc0005_s8r_theoryfree  seed: 74.7 s
-tsymex_rfc0005_s8s_precision  seed: 77.6 s
-tsymex_rfc0005_s8s_precision_b  seed: 130.7 s
-tsymex_rfc0005_s8s_precision_c  seed: 64.7 s
-tsymex_rfc0005_s8s_precision_e  seed: 61.8 s
-tsymex_rfc0005_s8s_precision_f  seed: 83.9 s
-tsymex_rfc0005_s8s_precision_g  seed: 68.7 s
-tsymex_rfc0005_s8s_precision_h  seed: 75.4 s
-tsymex_rfc0005_s8t_termination  seed: 93.8 s
-tsymex_rfc0005_s8u_precision  seed: 83.8 s
-tsymex_rfc0005_s8u_precision_b  seed: 78.8 s
-tsymex_rfc0005_s8u_precision_c  seed: 70.8 s
-tsymex_rfc0005_s8v_termination  seed: 75.4 s
-tsymex_rfc0005_s8w_remainder  seed: 61.5 s
-tsymex_rfc0005_s8w_remainder_b_checksoff  seed: 61.5 s
-tsymex_rfc0005_s8z_remainder  seed: 65.5 s
-tsymex_rfc0005_s8z_remainder_b  seed: 80.4 s
-tsymex_rfc0005_s8z_remainder_c  seed: 64.7 s
-tsymex_rfc0005_s8z_remainder_d  seed: 65.4 s
-tsymex_rfc0005_w1_parity  seed: 76.3 s
-tsymex_rfc0005_w2_settle  seed: 79.0 s
-tsymex_rfc0005_w2_settle_reexec  seed: 92.1 s
-tsymex_rfc0005_w3_seqiter  seed: 78.5 s
-tsymex_snd1_uncertain_taint  seed: 63.9 s
-tsymex_snd1b_closure_uncertain_axiom  seed: 68.8 s
-tsymex_snd2_assume  seed: 71.4 s
-tsymex_snd3_loopdegrade  seed: 72.7 s
+# 42508458773 (leg z3-4.13.4): 745 tests. The seconds column is the largest of the measured times.
+tfuzzconcolicannotation  106.1  seed: the largest of the three measured times
+tfuzzconcolicassist  86.3  seed: the largest of the three measured times
+tfuzzconcolicbridge_g6_affine  94.0  seed: the largest of the three measured times
+tfuzzconcolicbridge_g6_predicated  68.4  seed: the largest of the three measured times
+tfuzzconcolicbridge_real  104.3  seed: the largest of the three measured times
+tfuzzconcolicdegrade  94.7  seed: the largest of the three measured times
+tfuzzconcolicmismatch  131.6  seed: the largest of the three measured times
+tfuzzmacro_astspike  83.9  seed: the largest of the three measured times
+tn45probe  69.0  seed: the largest of the three measured times
+tprobe_n45stats  74.4  seed: the largest of the three measured times
+tsymex_0016_checksoff  76.9  seed: the largest of the three measured times
+tsymex_0016_cr_generic_exn  82.4  seed: the largest of the three measured times
+tsymex_0016_cr_zeroarg  69.1  seed: the largest of the three measured times
+tsymex_0016_crb_macro_deprecation  74.3  seed: the largest of the three measured times
+tsymex_0016_k20_probes  149.3  seed: the largest of the three measured times
+tsymex_0016_k20_probes_child  195.5  seed: the largest of the three measured times
+tsymex_0016_k5a_fwrapv  74.7  seed: the largest of the three measured times
+tsymex_0016_k5a_segment  84.0  seed: the largest of the three measured times
+tsymex_0016_k7a_survivors  80.6  seed: the largest of the three measured times
+tsymex_0016_k7b_unsupported  73.5  seed: the largest of the three measured times
+tsymex_0016_k8a1_template_except_as  75.4  seed: the largest of the three measured times
+tsymex_0016_k8a_gen  117.1  seed: the largest of the three measured times
+tsymex_0016_k8a_sink  65.8  seed: the largest of the three measured times
+tsymex_0016_k9a_pins  87.4  seed: the largest of the three measured times
+tsymex_0016_k9d0_entries  89.7  seed: the largest of the three measured times
+tsymex_0016_panics  75.3  seed: the largest of the three measured times
+tsymex_0016_panics_off  75.9  seed: the largest of the three measured times
+tsymex_0016_s8cj_mkunique  78.2  seed: the largest of the three measured times
+tsymex_0016_s8cj_runctx  79.2  seed: the largest of the three measured times
+tsymex_0016_w1a_exn_typeid  80.2  seed: the largest of the three measured times
+tsymex_0016_w1b_localpragma  78.2  seed: the largest of the three measured times
+tsymex_0016_w1c3_splat_defect  71.6  seed: the largest of the three measured times
+tsymex_0016_w1d1a_intminmod  91.5  seed: the largest of the three measured times
+tsymex_0016_w1d1a_intminmod_checksoff  75.1  seed: the largest of the three measured times
+tsymex_0016_w1d1b_udivzero  89.6  seed: the largest of the three measured times
+tsymex_0016_w1d1c_cachedprune  79.0  seed: the largest of the three measured times
+tsymex_0016_w1d2_wraps  81.1  seed: the largest of the three measured times
+tsymex_0016_w1d2c_pushon  77.5  seed: the largest of the three measured times
+tsymex_0016_w1d3_undefined  74.2  seed: the largest of the three measured times
+tsymex_0016_w1e_floatwidth  77.1  seed: the largest of the three measured times
+tsymex_0016_w1f_defaults_caseelif  101.9  seed: the largest of the three measured times
+tsymex_0016_w1g_inslice  85.3  seed: the largest of the three measured times
+tsymex_0016_w1p_probes  80.9  seed: the largest of the three measured times
+tsymex_0016_wa_checksoff  83.8  seed: the largest of the three measured times
+tsymex_0016_wa_runtime  73.7  seed: the largest of the three measured times
+tsymex_0016_wa_runtime_checksoff  93.7  seed: the largest of the three measured times
+tsymex_0016_wa_runtime_panics  72.0  seed: the largest of the three measured times
+tsymex_0016_wa_undefined_e2e  79.9  seed: the largest of the three measured times
+tsymex_161_overflow_obligation  61.7  seed: the largest of the three measured times
+tsymex_162_range_base_width  82.9  seed: the largest of the three measured times
+tsymex_163_opaque_transparent  76.6  seed: the largest of the three measured times
+tsymex_163audit_range_domain  75.3  seed: the largest of the three measured times
+tsymex_163audit_range_elem  79.2  seed: the largest of the three measured times
+tsymex_163audit_w9  73.8  seed: the largest of the three measured times
+tsymex_163audit_wave2  75.8  seed: the largest of the three measured times
+tsymex_163rev_armfield_write  73.6  seed: the largest of the three measured times
+tsymex_163rev_assign_rangedefect  77.5  seed: the largest of the three measured times
+tsymex_163rev_assign_sites  84.4  seed: the largest of the three measured times
+tsymex_163rev_concolic_diagnostics  83.3  seed: the largest of the three measured times
+tsymex_163rev_concolic_flip_width  74.9  seed: the largest of the three measured times
+tsymex_163rev_concolic_modes  66.5  seed: the largest of the three measured times
+tsymex_163rev_concolic_modes_checksoff  76.4  seed: the largest of the three measured times
+tsymex_163rev_degrade_classification  82.9  seed: the largest of the three measured times
+tsymex_163rev_degrade_classification_b  76.7  seed: the largest of the three measured times
+tsymex_163rev_degrade_classification_c  73.7  seed: the largest of the three measured times
+tsymex_163rev_enum_domain  82.0  seed: the largest of the three measured times
+tsymex_163rev_enum_field_witness  68.8  seed: the largest of the three measured times
+tsymex_163rev_enum_positions  79.1  seed: the largest of the three measured times
+tsymex_163rev_enum_valueshapes  78.3  seed: the largest of the three measured times
+tsymex_163rev_inert_argfork  76.8  seed: the largest of the three measured times
+tsymex_163rev_inert_exclusions  67.2  seed: the largest of the three measured times
+tsymex_163rev_int_literal_width  80.7  seed: the largest of the three measured times
+tsymex_163rev_intoffset_range  75.7  seed: the largest of the three measured times
+tsymex_163rev_nested_clamp  69.9  seed: the largest of the three measured times
+tsymex_163rev_parser_gaps  74.2  seed: the largest of the three measured times
+tsymex_163rev_scan_counter_range  77.5  seed: the largest of the three measured times
+tsymex_163rev_seqelem_promoted_int  73.7  seed: the largest of the three measured times
+tsymex_163rev_table_elem  72.6  seed: the largest of the three measured times
+tsymex_163rev_transparent_guard  73.3  seed: the largest of the three measured times
+tsymex_163rev_transparent_result  73.8  seed: the largest of the three measured times
+tsymex_163rev_variant_armfield  74.6  seed: the largest of the three measured times
+tsymex_CR2a_expr_catchall  72.4  seed: the largest of the three measured times
+tsymex_CR2b_paramtype_catchall  74.6  seed: the largest of the three measured times
+tsymex_CR2c_witnessreader_catchall  82.9  seed: the largest of the three measured times
+tsymex_a2_refvariant_fields  70.3  seed: the largest of the three measured times
+tsymex_a3_closure_iterators  76.6  seed: the largest of the three measured times
+tsymex_a6_symlen_hof  74.0  seed: the largest of the three measured times
+tsymex_a7_rune  77.8  seed: the largest of the three measured times
+tsymex_a7_runes_iter  67.0  seed: the largest of the three measured times
+tsymex_a8_radix  73.9  seed: the largest of the three measured times
+tsymex_a9_casefold  81.3  seed: the largest of the three measured times
+tsymex_augmented_assign  79.2  seed: the largest of the three measured times
+tsymex_configdefaults  75.2  seed: the largest of the three measured times
+tsymex_configdefaults_b  84.4  seed: the largest of the three measured times
+tsymex_configdefaults_depth  95.0  seed: the largest of the three measured times
+tsymex_cr22_label_assert_coexist  75.6  seed: the largest of the three measured times
+tsymex_cr9c_intrep  84.2  seed: the largest of the three measured times
+tsymex_discard_raise  71.8  seed: the largest of the three measured times
+tsymex_funcdef_callee  69.4  seed: the largest of the three measured times
+tsymex_g1a_mode  76.4  seed: the largest of the three measured times
+tsymex_g1b_concolic  77.2  seed: the largest of the three measured times
+tsymex_g2_flip  90.9  seed: the largest of the three measured times
+tsymex_g4_cmpwalk  71.9  seed: the largest of the three measured times
+tsymex_g6_transform_binding  69.3  seed: the largest of the three measured times
+tsymex_h_containers  70.7  seed: the largest of the three measured times
+tsymex_h_stepC_heapidentity  65.1  seed: the largest of the three measured times
+tsymex_h_verification  75.8  seed: the largest of the three measured times
+tsymex_h_witness  79.0  seed: the largest of the three measured times
+tsymex_p1_tupleconstr_expr  71.7  seed: the largest of the three measured times
+tsymex_p2a_objconstr_expr  68.7  seed: the largest of the three measured times
+tsymex_p2b_refobjconstr_expr  85.1  seed: the largest of the three measured times
+tsymex_phase11_walker  79.3  seed: the largest of the three measured times
+tsymex_phase12_derandomize  79.4  seed: the largest of the three measured times
+tsymex_phase12_sugar  76.5  seed: the largest of the three measured times
+tsymex_phase12_witnesses  76.4  seed: the largest of the three measured times
+tsymex_phase13_layer1_wire  75.3  seed: the largest of the three measured times
+tsymex_phase13_rlimit  69.6  seed: the largest of the three measured times
+tsymex_phase14_arm_field_zero_init  74.6  seed: the largest of the three measured times
+tsymex_phase14_b67_label_filter  74.3  seed: the largest of the three measured times
+tsymex_phase14_c4_z3error  80.6  seed: the largest of the three measured times
+tsymex_phase14_disc_promotion  76.0  seed: the largest of the three measured times
+tsymex_phase14_else_arms  69.7  seed: the largest of the three measured times
+tsymex_phase14_frontier_pruning  73.1  seed: the largest of the three measured times
+tsymex_phase14_multivariant_witness  76.7  seed: the largest of the three measured times
+tsymex_phase14_nonenum_disc  67.8  seed: the largest of the three measured times
+tsymex_phase14_symbolic_disc_reassign  71.3  seed: the largest of the three measured times
+tsymex_phase14_var_param  69.5  seed: the largest of the three measured times
+tsymex_phase14_var_param_downstream  82.3  seed: the largest of the three measured times
+tsymex_phase15_A1_arithmetic  63.1  seed: the largest of the three measured times
+tsymex_phase15_A1_assertarg  74.7  seed: the largest of the three measured times
+tsymex_phase15_A1_bitwise  78.2  seed: the largest of the three measured times
+tsymex_phase15_A1_boolean  70.7  seed: the largest of the three measured times
+tsymex_phase15_A1_callarg  84.4  seed: the largest of the three measured times
+tsymex_phase15_A1_comparison  75.0  seed: the largest of the three measured times
+tsymex_phase15_A1_loopguard  83.8  seed: the largest of the three measured times
+tsymex_phase15_A1_unary  78.3  seed: the largest of the three measured times
+tsymex_phase15_A2a_atomicir_audit  75.2  seed: the largest of the three measured times
+tsymex_phase15_A2a_atomize  74.5  seed: the largest of the three measured times
+tsymex_phase15_A2a_guardcond_pin  70.9  seed: the largest of the three measured times
+tsymex_phase15_A2b_bitwise  73.8  seed: the largest of the three measured times
+tsymex_phase15_C1_canonical_kind  61.5  seed: the largest of the three measured times
+tsymex_phase15_C1_ir  67.3  seed: the largest of the three measured times
+tsymex_phase15_C2_staticparams  76.0  seed: the largest of the three measured times
+tsymex_phase15_C2b_closure_call  73.8  seed: the largest of the three measured times
+tsymex_phase15_C3_proc_as_value  76.3  seed: the largest of the three measured times
+tsymex_phase15_C4_hof  75.8  seed: the largest of the three measured times
+tsymex_phase15_C5_closure_eq  71.9  seed: the largest of the three measured times
+tsymex_phase15_C6_smoke  77.0  seed: the largest of the three measured times
+tsymex_phase15_CR14_exn_missing  69.9  seed: the largest of the three measured times
+tsymex_phase15_CR15_enum_ordinal  72.3  seed: the largest of the three measured times
+tsymex_phase15_CR1_CR5_closure_heap  76.4  seed: the largest of the three measured times
+tsymex_phase15_CR21_parseintraise_arg  67.3  seed: the largest of the three measured times
+tsymex_phase15_CR3_CR4_CR6_float  78.6  seed: the largest of the three measured times
+tsymex_phase15_E1_ir  71.4  seed: the largest of the three measured times
+tsymex_phase15_E2a_cascade  75.8  seed: the largest of the three measured times
+tsymex_phase15_E2b_raise  70.7  seed: the largest of the three measured times
+tsymex_phase15_E3_try  78.2  seed: the largest of the three measured times
+tsymex_phase15_E4_hierarchy  69.7  seed: the largest of the three measured times
+tsymex_phase15_E4a_userexn  73.2  seed: the largest of the three measured times
+tsymex_phase15_E5_finally  71.4  seed: the largest of the three measured times
+tsymex_phase15_E6_defect  71.6  seed: the largest of the three measured times
+tsymex_phase15_E7_smoke  73.4  seed: the largest of the three measured times
+tsymex_phase15_E8_getcurrentexn  78.1  seed: the largest of the three measured times
+tsymex_phase15_E_roundtrip  76.7  seed: the largest of the three measured times
+tsymex_phase15_F1_typebridge  76.6  seed: the largest of the three measured times
+tsymex_phase15_F2_float_literals  74.2  seed: the largest of the three measured times
+tsymex_phase15_F3_float_arith  74.7  seed: the largest of the three measured times
+tsymex_phase15_F4_float_compare  69.5  seed: the largest of the three measured times
+tsymex_phase15_F5_float_conv  73.6  seed: the largest of the three measured times
+tsymex_phase15_F5_probeproto  73.6  seed: the largest of the three measured times
+tsymex_phase15_F5hang_derefwrite  79.2  seed: the largest of the three measured times
+tsymex_phase15_F6_float_math  81.7  seed: the largest of the three measured times
+tsymex_phase15_F7_float_extract  73.1  seed: the largest of the three measured times
+tsymex_phase15_F8_smoke  85.4  seed: the largest of the three measured times
+tsymex_phase15_F9a_array_float  71.6  seed: the largest of the three measured times
+tsymex_phase15_F9b_seq_float  73.4  seed: the largest of the three measured times
+tsymex_phase15_F9c_variant_float  73.0  seed: the largest of the three measured times
+tsymex_phase15_G1a_instkey  76.7  seed: the largest of the three measured times
+tsymex_phase15_G1c_instcap  75.8  seed: the largest of the three measured times
+tsymex_phase15_M1_seq_fixedwidth  79.6  seed: the largest of the three measured times
+tsymex_phase15_M2_parsebiggestint  79.4  seed: the largest of the three measured times
+tsymex_phase15_N0_kindgate_widen  82.0  seed: the largest of the three measured times
+tsymex_phase15_N1_resolution_gates  76.8  seed: the largest of the three measured times
+tsymex_phase15_R1a_ir  68.0  seed: the largest of the three measured times
+tsymex_phase15_S10a_strconv  76.7  seed: the largest of the three measured times
+tsymex_phase15_S10b_strconv  73.0  seed: the largest of the three measured times
+tsymex_phase15_S11_mutation  72.0  seed: the largest of the three measured times
+tsymex_phase15_S1_typebridge  73.6  seed: the largest of the three measured times
+tsymex_phase15_S2_strlit  77.2  seed: the largest of the three measured times
+tsymex_phase15_S3_strindex  75.7  seed: the largest of the three measured times
+tsymex_phase15_S4_strpred  78.1  seed: the largest of the three measured times
+tsymex_phase15_S6b_regex  73.9  seed: the largest of the three measured times
+tsymex_phase15_S7a_bytes  74.9  seed: the largest of the three measured times
+tsymex_phase15_S7b_smoke  74.0  seed: the largest of the three measured times
+tsymex_phase15_S8_concat  74.5  seed: the largest of the three measured times
+tsymex_phase15_S9_caseconv  73.0  seed: the largest of the three measured times
+tsymex_phase15_cr9_lowerInExpr  75.1  seed: the largest of the three measured times
+tsymex_phase15_fieldcontainer  76.9  seed: the largest of the three measured times
+tsymex_phase15_g10_smoke  69.4  seed: the largest of the three measured times
+tsymex_phase15_g3_type_subst  78.0  seed: the largest of the three measured times
+tsymex_phase15_g4_distinct_sort  73.7  seed: the largest of the three measured times
+tsymex_phase15_g5_distinct_borrow  74.1  seed: the largest of the three measured times
+tsymex_phase15_g6_concept_constraint  76.1  seed: the largest of the three measured times
+tsymex_phase15_g7_static_param  73.9  seed: the largest of the three measured times
+tsymex_phase15_g8_multi_param  73.3  seed: the largest of the three measured times
+tsymex_phase15_l1_boundary  72.5  seed: the largest of the three measured times
+tsymex_phase15_l2_untyped_template  71.5  seed: the largest of the three measured times
+tsymex_phase15_l3_quote_do  67.5  seed: the largest of the three measured times
+tsymex_phase15_r10_budget  75.9  seed: the largest of the three measured times
+tsymex_phase15_r11_unsafecast  78.5  seed: the largest of the three measured times
+tsymex_phase15_r11b_smoke  76.3  seed: the largest of the three measured times
+tsymex_phase15_r13_closure_ref  67.2  seed: the largest of the three measured times
+tsymex_phase15_r13_ptr_finally  71.1  seed: the largest of the three measured times
+tsymex_phase15_r1_refsort  66.4  seed: the largest of the three measured times
+tsymex_phase15_r1b_callheap  73.8  seed: the largest of the three measured times
+tsymex_phase15_r2_new  70.5  seed: the largest of the three measured times
+tsymex_phase15_r4_deref_write  78.3  seed: the largest of the three measured times
+tsymex_phase15_r5_nil  71.9  seed: the largest of the three measured times
+tsymex_phase15_r6_refobj  71.3  seed: the largest of the three measured times
+tsymex_phase15_r7_alias_chain  76.6  seed: the largest of the three measured times
+tsymex_phase15_r8_ptr  74.6  seed: the largest of the three measured times
+tsymex_phase15_r8b_varref  71.0  seed: the largest of the three measured times
+tsymex_phase15_r9_recursive  68.2  seed: the largest of the three measured times
+tsymex_phase15_rereview_drains  82.3  seed: the largest of the three measured times
+tsymex_phase15_z3c_classify  67.8  seed: the largest of the three measured times
+tsymex_phase15_z4_walkctx  72.0  seed: the largest of the three measured times
+tsymex_phase16_A5_float_classify  78.8  seed: the largest of the three measured times
+tsymex_phase16_CR1a_bitwise_svint  76.5  seed: the largest of the three measured times
+tsymex_phase16_CR1b_tail_local  73.3  seed: the largest of the three measured times
+tsymex_phase16_CR1c_internal_fault  72.3  seed: the largest of the three measured times
+tsymex_phase16_D1a_defect_routeraise  72.8  seed: the largest of the three measured times
+tsymex_phase16_D1c_shortcircuit  77.7  seed: the largest of the three measured times
+tsymex_phase16_R16_2_rangedefect  76.7  seed: the largest of the three measured times
+tsymex_phase16_R16_2b_shortcircuit_conv  75.0  seed: the largest of the three measured times
+tsymex_phase16_R16_3_divzero  76.2  seed: the largest of the three measured times
+tsymex_phase16_R16_4_overflow_checksoff  72.8  seed: the largest of the three measured times
+tsymex_phase16_R16_5_overflow_thru_closure  73.7  seed: the largest of the three measured times
+tsymex_phase16_R16_6_diagnostics_channel  72.2  seed: the largest of the three measured times
+tsymex_phase16_m3_rfind  77.0  seed: the largest of the three measured times
+tsymex_phase16_m5_ifexpr_minmax  73.9  seed: the largest of the three measured times
+tsymex_phase1_arith  76.4  seed: the largest of the three measured times
+tsymex_phase1_assert  70.3  seed: the largest of the three measured times
+tsymex_phase1_bool  74.0  seed: the largest of the three measured times
+tsymex_phase1_let  70.3  seed: the largest of the three measured times
+tsymex_phase2_abstraction  77.1  seed: the largest of the three measured times
+tsymex_phase2_bv_arith  78.7  seed: the largest of the three measured times
+tsymex_phase2_fallback  77.1  seed: the largest of the three measured times
+tsymex_phase2_overflow  78.3  seed: the largest of the three measured times
+tsymex_phase2_overflow_checksoff  71.5  seed: the largest of the three measured times
+tsymex_phase3_inline  71.0  seed: the largest of the three measured times
+tsymex_phase3_mutual  68.2  seed: the largest of the three measured times
+tsymex_phase3_recursion  82.1  seed: the largest of the three measured times
+tsymex_phase3_summarization  74.2  seed: the largest of the three measured times
+tsymex_phase4_array  72.5  seed: the largest of the three measured times
+tsymex_phase4_oob  76.8  seed: the largest of the three measured times
+tsymex_phase5_hashset  73.9  seed: the largest of the three measured times
+tsymex_phase5_seq  74.7  seed: the largest of the three measured times
+tsymex_phase5_table  71.1  seed: the largest of the three measured times
+tsymex_phase6_break  75.1  seed: the largest of the three measured times
+tsymex_phase6_case  73.2  seed: the largest of the three measured times
+tsymex_phase6_while  74.0  seed: the largest of the three measured times
+tsymex_phase7_assertcovered  90.7  seed: the largest of the three measured times
+tsymex_q1_scanlift  78.1  seed: the largest of the three measured times
+tsymex_q1_sibling_collision  71.7  seed: the largest of the three measured times
+tsymex_r14_case2_degrade  88.1  seed: the largest of the three measured times
+tsymex_r14_continue_guard  60.7  seed: the largest of the three measured times
+tsymex_r1_draingap  108.4  seed: the largest of the three measured times
+tsymex_r1b_shortcircuit_oob  87.8  seed: the largest of the three measured times
+tsymex_r2_scanbound  73.5  seed: the largest of the three measured times
+tsymex_r4_seq_slice  82.3  seed: the largest of the three measured times
+tsymex_r4_slice_binding  74.8  seed: the largest of the three measured times
+tsymex_r4_strip  97.0  seed: the largest of the three measured times
+tsymex_r5_bv32_width  76.3  seed: the largest of the three measured times
+tsymex_r5_const_fold  73.5  seed: the largest of the three measured times
+tsymex_r5_discard  65.5  seed: the largest of the three measured times
+tsymex_r5_neg_bool_conv  73.2  seed: the largest of the three measured times
+tsymex_r5_tuple_return  73.9  seed: the largest of the three measured times
+tsymex_r6_a0_lowhigh  75.4  seed: the largest of the three measured times
+tsymex_r6_a1_variantlit  72.2  seed: the largest of the three measured times
+tsymex_r6_a2_retbind_variant  79.1  seed: the largest of the three measured times
+tsymex_r6_a3_variantconstruct_sym  76.6  seed: the largest of the three measured times
+tsymex_r6_a4_construct_interactions  75.8  seed: the largest of the three measured times
+tsymex_r6_a6_exported_field_names  67.5  seed: the largest of the three measured times
+tsymex_r6_a6r_callwitness  78.3  seed: the largest of the three measured times
+tsymex_r6_b0_scanlift_bound  72.1  seed: the largest of the three measured times
+tsymex_r6_b1_stringbacked  68.3  seed: the largest of the three measured times
+tsymex_r6_b2_intwidth  73.3  seed: the largest of the three measured times
+tsymex_r6_b3_scanpair  77.6  seed: the largest of the three measured times
+tsymex_r6_b4_readcstring  78.0  seed: the largest of the three measured times
+tsymex_r6_b5_chained  76.8  seed: the largest of the three measured times
+tsymex_r6_b6_optionregion  80.8  seed: the largest of the three measured times
+tsymex_r6_b7r2_pathscope  141.2  seed: the largest of the three measured times
+tsymex_r6_b7r_bytescan  90.4  seed: the largest of the three measured times
+tsymex_r6_bug2_scopeddecline  77.5  seed: the largest of the three measured times
+tsymex_r6_d2_recursive_budget  74.3  seed: the largest of the three measured times
+tsymex_r6_heap_raise_totality  74.1  seed: the largest of the three measured times
+tsymex_r6_itesv_mergedegrade  76.8  seed: the largest of the three measured times
+tsymex_r6_lows_blockparse  75.5  seed: the largest of the three measured times
+tsymex_r6_lows_collectors  69.9  seed: the largest of the three measured times
+tsymex_r6_lows_declines  81.7  seed: the largest of the three measured times
+tsymex_r6_n10_coverage_matrix  84.0  seed: the largest of the three measured times
+tsymex_r6_n13_reassign_seqarm  74.6  seed: the largest of the three measured times
+tsymex_r6_n14_seqops  95.8  seed: the largest of the three measured times
+tsymex_r6_n16_closure_zerodefault  76.9  seed: the largest of the three measured times
+tsymex_r6_n20_boundedloop  75.1  seed: the largest of the three measured times
+tsymex_r6_n21_pairloop_member  79.7  seed: the largest of the three measured times
+tsymex_r6_n27_hof_placeholder  78.0  seed: the largest of the three measured times
+tsymex_r6_n28_shadow_collision  72.5  seed: the largest of the three measured times
+tsymex_r6_n29_seqlit_sortmismatch  73.4  seed: the largest of the three measured times
+tsymex_r6_n31_block_counter  75.1  seed: the largest of the three measured times
+tsymex_r6_n36_raise_degrade  81.0  seed: the largest of the three measured times
+tsymex_r6_n36_raise_degrade_b  73.0  seed: the largest of the three measured times
+tsymex_r6_n36_raise_degrade_c  68.9  seed: the largest of the three measured times
+tsymex_r6_n36_raise_degrade_d  87.5  seed: the largest of the three measured times
+tsymex_r6_n37_raise_residue  84.8  seed: the largest of the three measured times
+tsymex_r6_n39_variant_field_alloc  77.6  seed: the largest of the three measured times
+tsymex_r6_n42_deref_taint  82.5  seed: the largest of the three measured times
+tsymex_r6_n43_parity  71.3  seed: the largest of the three measured times
+tsymex_r6_n49_dottedfield_mutation  80.5  seed: the largest of the three measured times
+tsymex_r6_n9_variant_budget  66.1  seed: the largest of the three measured times
+tsymex_r6_nulwitness  77.6  seed: the largest of the three measured times
+tsymex_r6_r1_placeholder_totality  81.7  seed: the largest of the three measured times
+tsymex_r6_r2_zerodefault_result  88.1  seed: the largest of the three measured times
+tsymex_r6_r3_svint_overflow  74.9  seed: the largest of the three measured times
+tsymex_r6_r4_collector_scoping  78.7  seed: the largest of the three measured times
+tsymex_r6_r5_pairloop_counter  73.0  seed: the largest of the three measured times
+tsymex_r7_caseexpr  73.6  seed: the largest of the three measured times
+tsymex_r8_omitted_field_degrade  76.9  seed: the largest of the three measured times
+tsymex_rectify_cardinality  76.7  seed: the largest of the three measured times
+tsymex_rectify_effects  74.6  seed: the largest of the three measured times
+tsymex_rectify_generics  72.3  seed: the largest of the three measured times
+tsymex_rectify_mutation  71.8  seed: the largest of the three measured times
+tsymex_rectify_nested_arrays  76.4  seed: the largest of the three measured times
+tsymex_rectify_refs  65.6  seed: the largest of the three measured times
+tsymex_rectify_variants  71.9  seed: the largest of the three measured times
+tsymex_retest_c11_stack  73.8  seed: the largest of the three measured times
+tsymex_retest_c3_bitwise_guard  64.9  seed: the largest of the three measured times
+tsymex_retest_c5b_unknown_errors  73.8  seed: the largest of the three measured times
+tsymex_retest_c6_tuple_chain  109.4  seed: the largest of the three measured times
+tsymex_retest_char_needle  65.5  seed: the largest of the three measured times
+tsymex_retest_infix_degrade  71.2  seed: the largest of the three measured times
+tsymex_rfc0005_b10_integration  152.0  seed: the largest of the three measured times
+tsymex_rfc0005_b10_integration_b  82.0  seed: the largest of the three measured times
+tsymex_rfc0005_b10_integration_c  74.1  seed: the largest of the three measured times
+tsymex_rfc0005_b11_hoststate  66.7  seed: the largest of the three measured times
+tsymex_rfc0005_b11_hoststate_reexec  68.3  seed: the largest of the three measured times
+tsymex_rfc0005_b6_globalrecv  77.8  seed: the largest of the three measured times
+tsymex_rfc0005_b7_integration  64.4  seed: the largest of the three measured times
+tsymex_rfc0005_b8_integration  82.8  seed: the largest of the three measured times
+tsymex_rfc0005_b8_integration_b  91.0  seed: the largest of the three measured times
+tsymex_rfc0005_b8_integration_c  75.1  seed: the largest of the three measured times
+tsymex_rfc0005_b8_integration_d  64.8  seed: the largest of the three measured times
+tsymex_rfc0005_b9_calldepth  62.9  seed: the largest of the three measured times
+tsymex_rfc0005_b9_integration  73.9  seed: the largest of the three measured times
+tsymex_rfc0005_b9_integration_b  82.9  seed: the largest of the three measured times
+tsymex_rfc0005_b9_integration_c  92.8  seed: the largest of the three measured times
+tsymex_rfc0005_r1_elif_preamble  79.4  seed: the largest of the three measured times
+tsymex_rfc0005_r1_findingapi  109.3  seed: the largest of the three measured times
+tsymex_rfc0005_r1_keyimpl  70.4  seed: the largest of the three measured times
+tsymex_rfc0005_r1_keymethod  81.3  seed: the largest of the three measured times
+tsymex_rfc0005_r1_lowertaint  75.1  seed: the largest of the three measured times
+tsymex_rfc0005_r1_pcrelimits  334.0  seed: the largest of the three measured times
+tsymex_rfc0005_r1_rundependence  82.8  seed: the largest of the three measured times
+tsymex_rfc0005_r1_succ_pred  77.5  seed: the largest of the three measured times
+tsymex_rfc0005_r1_variantset  75.3  seed: the largest of the three measured times
+tsymex_rfc0005_r2_walktaint  81.5  seed: the largest of the three measured times
+tsymex_rfc0005_s0_exhibit  75.4  seed: the largest of the three measured times
+tsymex_rfc0005_s10_replay_verdict  86.1  seed: the largest of the three measured times
+tsymex_rfc0005_s11_surface  106.6  seed: the largest of the three measured times
+tsymex_rfc0005_s1_lattice  72.1  seed: the largest of the three measured times
+tsymex_rfc0005_s1b_kinds  81.3  seed: the largest of the three measured times
+tsymex_rfc0005_s1c_verdict  86.9  seed: the largest of the three measured times
+tsymex_rfc0005_s2_replay  65.3  seed: the largest of the three measured times
+tsymex_rfc0005_s3_monotonicity  86.2  seed: the largest of the three measured times
+tsymex_rfc0005_s4_alloc  73.8  seed: the largest of the three measured times
+tsymex_rfc0005_s5_str  65.9  seed: the largest of the three measured times
+tsymex_rfc0005_s6a_budget  79.5  seed: the largest of the three measured times
+tsymex_rfc0005_s6b_ops  84.7  seed: the largest of the three measured times
+tsymex_rfc0005_s7_closure  87.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8_scope  85.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8aa_remainder  82.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8aa_remainder_checksoff  81.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ab_letaudit  184.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ac_remainder  98.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8ac_remainder_b  87.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ad_remainder  90.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ae_remainder  70.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ae_remainder_b  83.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8ae_remainder_c  83.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8ag_indexsplit  87.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ag_indexsplit_b  80.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8ag_indexsplit_c  82.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8ai_semantic  76.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ai_semantic_b2  71.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8ai_semantic_b3  76.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ai_semantic_c  83.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8aj_remainder  79.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8aj_remainder_b  83.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8aj_remainder_c  77.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8aj_remainder_c_checksoff  78.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8am_remainder  91.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8an_remainder  77.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8an_remainder_b  87.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8an_remainder_b2  89.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8an_remainder_c  94.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8an_remainder_d  84.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8ao_remainder  85.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8ap_remainder  89.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8ap_remainder_b  82.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8ap_remainder_c  84.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8ap_remainder_d  79.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8aq_remainder  79.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ar_remainder_b  78.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8ar_remainder_c  72.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8ar_remainder_d  64.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8ar_remainder_e  84.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ar_remainder_f  73.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ar_remainder_g  82.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ar_remainder_h  79.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8as_remainder  61.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8as_remainder_b  91.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8as_remainder_c  88.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8at_remainder  83.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8at_remainder_b  94.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8at_remainder_c  85.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8at_remainder_d  81.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8at_remainder_e  91.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8at_remainder_f  81.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8au_remainder  86.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8au_remainder_b  101.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8au_remainder_c  80.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8av_remainder  68.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8aw_remainder  94.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder  74.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder2  79.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder3  77.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder_b  79.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder_c  78.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder_d  82.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder_e  90.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder_f  79.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8ax_remainder_g  92.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8ay_remainder  82.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8ay_remainder_b  83.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8ay_remainder_c  67.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ay_remainder_d  85.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8az_remainder  75.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8b_substitutions  81.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8ba_remainder  95.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ba_remainder_b  92.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8ba_remainder_c  78.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_captures  98.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_captures_b  90.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_captures_c  87.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_captures_d  72.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_remainder  86.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_remainder_b  95.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_replace  78.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_replace_b  75.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bb_replace_d  102.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_a  86.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_a2  81.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_a3  65.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_b  80.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_b2  86.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_b3  90.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_c  77.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_c2  263.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_c3  87.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bc_remainder_c4  90.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bd_remainder  89.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bd_remainder_b  82.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bd_remainder_c  81.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8be_remainder  89.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8be_remainder_b  81.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8be_remainder_c  90.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bf_alias  102.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bg_remainder  67.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bh_remainder  84.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bh_remainder_b  88.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bh_remainder_c  81.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bh_remainder_d  87.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bh_remainder_e  84.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bh_remainder_f  78.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bi_remainder  85.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bi_remainder_b  85.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bi_remainder_c  83.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bj_entries  69.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bj_entries_multiline  63.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bj_replace_lemmas  76.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bj_walker  91.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bk_argtiming  75.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bk_argtiming_addr  84.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bk_argtiming_checks  74.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_borrow  73.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_gaps  72.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_gaps_b  81.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_gaps_c  82.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_gaps_d  80.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_magics  79.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_magicscan  61.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_pairloop  84.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_seqops  81.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bl_setlen  93.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bm_stability  64.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8bn_remainder  65.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bn_remainder_b  99.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8bn_remainder_c  83.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bn_remainder_d  93.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bn_remainder_e  90.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bn_remainder_f  75.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bo_cells  109.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bo_nil  78.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bo_replay  72.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bp_isolation  80.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bq_remainder  93.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bq_remainder_b  94.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bq_remainder_c  90.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8br_framecond  87.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8br_remainder  90.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bs_addrglobal  95.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bs_byref  101.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bs_byvalue  79.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bs_iterparams  85.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bt_caps_c  78.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bt_libversion  80.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bt_limit_langs_b  87.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bt_replace_lemmas  89.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8bt_replace_lemmas_b  82.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bt_utf_any_e  62.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bu_byvalseq  82.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bu_calls  85.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bu_mitems  88.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bu_paths  84.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bu_term  83.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bu_varviews  78.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bu_views  81.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_card_uninit  94.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_iter_char  79.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_iter_char_b  86.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_iter_char_count  90.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_iter_forms  89.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_iter_int8  83.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_subrange  82.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bv_subrange_sets  82.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8bw_remainder  60.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bw_remainder_b  97.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bw_remainder_c  68.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bw_remainder_d  84.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bx_extractraise  86.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bx_extractraise_b  62.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bx_iterchange  76.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8bx_mpairs  102.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8bx_setlenstr  76.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8by_remainder  83.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_cells  83.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_cells_b  82.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_cells_c  83.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_cells_d  75.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_cells_e  79.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_overlap  90.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_written  81.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_written_b  88.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8bz_written_c  80.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8c_resolution  92.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_calls  86.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_closures  68.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_closures_heap  84.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_derefmut  67.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_procvals  80.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_resize  89.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_stack  84.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_strings  102.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_strings_b  80.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_strings_byvalue  78.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8ca_views  83.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8cb_cells  87.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cb_magics  73.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cb_order  91.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cb_replay  104.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cb_tostr  90.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cc_cellquery  84.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cc_cellquery_b  83.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cc_remainder  94.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cc_remainder_b  83.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cc_remainder_c  82.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_globals  77.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_globals_b  68.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_ops  62.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_ops_b  65.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_setorder_by  107.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_setorder_large  95.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_setorder_md  103.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cd_setorder_small  106.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8ce_raiseshapes  84.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_classes  88.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_jitlimit  68.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_jitutf  76.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_limitgaps  69.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_limits  78.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_point  77.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_point_b  67.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_replace  80.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cf_skipcount  82.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cl_lifetime  83.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cl_lifetime_b  97.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cl_magics  84.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cl_strings  92.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_lent  88.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_lent_b  83.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_lent_c  84.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_lent_d  67.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_lent_e  86.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_lent_f  73.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_probe  75.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_seqview  61.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_seqview_b  82.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_seqview_c  87.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_seqview_d  79.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_seqview_e  63.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_seqview_f  84.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_step1d  85.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_step1d_b  82.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_step1d_e  84.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_views  83.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_views_b  128.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_views_c  106.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_views_d  89.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_views_e  121.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cn_views_f  98.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cp_unchecked  95.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cp_unchecked_decline  80.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cp_unchecked_zero  87.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_argorder  118.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue  79.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue10  89.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue11  75.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue12  87.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue13  144.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue2  80.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue3  89.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue4  63.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue5  79.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue6  86.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue7  73.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue8  90.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_byvalue9  66.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_stops  73.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice  84.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice10  82.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice11  102.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice12  88.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice2  95.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice3  84.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice4  111.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice5  96.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice6  81.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice7  88.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice8  85.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_twice9  69.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_varret  108.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_varret2  100.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8cq_varret3  81.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cr_flips  77.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cr_flips_str  105.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8cr_intro  86.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8cr_intro_b  79.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cr_pins  90.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cs_routes  80.2  seed: the largest of the three measured times
+tsymex_rfc0005_s8cs_routes2  104.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cs_routes_b  82.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_b19  117.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_deepterm  72.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_deepterm_b  128.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_isolation  82.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_isolation_b  85.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_isolation_c  86.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_isolation_d  168.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_isolation_e  62.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_reexec_b  83.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_reexec_c  95.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_reexec_d  201.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8ct_reexec_e  82.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_assert  75.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_cl_assert  74.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_cl_checks  71.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_cl_danger  73.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_cl_field  72.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_cl_float  80.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_cl_over  71.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_cl_rbo  71.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_forms  63.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_hidden  76.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_import  70.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_kinds  101.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_modules  98.1  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_nil  88.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_nil_setjmp  75.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8cu_push  61.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8d_typeheads  79.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8e_scoping  104.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8f_witness  74.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8g_models  74.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8h_refwitness  89.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8i_models  93.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8j_exits  62.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8k_bounds  85.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8l_exits  92.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8l_exits_b  88.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8m_exits  80.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8m_exits_b  77.0  seed: the largest of the three measured times
+tsymex_rfc0005_s8m_exits_c  82.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8n_precision  81.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8o_termination  81.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8p_precision  91.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8p_precision_b  76.3  seed: the largest of the three measured times
+tsymex_rfc0005_s8p_precision_c  82.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8r_theoryfree  74.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8s_precision  77.6  seed: the largest of the three measured times
+tsymex_rfc0005_s8s_precision_b  130.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8s_precision_c  64.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8s_precision_e  61.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8s_precision_f  83.9  seed: the largest of the three measured times
+tsymex_rfc0005_s8s_precision_g  68.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8s_precision_h  75.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8t_termination  93.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8u_precision  83.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8u_precision_b  78.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8u_precision_c  70.8  seed: the largest of the three measured times
+tsymex_rfc0005_s8v_termination  75.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8w_remainder  61.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8w_remainder_b_checksoff  61.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8z_remainder  65.5  seed: the largest of the three measured times
+tsymex_rfc0005_s8z_remainder_b  80.4  seed: the largest of the three measured times
+tsymex_rfc0005_s8z_remainder_c  64.7  seed: the largest of the three measured times
+tsymex_rfc0005_s8z_remainder_d  65.4  seed: the largest of the three measured times
+tsymex_rfc0005_w1_parity  76.3  seed: the largest of the three measured times
+tsymex_rfc0005_w2_settle  79.0  seed: the largest of the three measured times
+tsymex_rfc0005_w2_settle_reexec  92.1  seed: the largest of the three measured times
+tsymex_rfc0005_w3_seqiter  78.5  seed: the largest of the three measured times
+tsymex_snd1_uncertain_taint  63.9  seed: the largest of the three measured times
+tsymex_snd1b_closure_uncertain_axiom  68.8  seed: the largest of the three measured times
+tsymex_snd2_assume  71.4  seed: the largest of the three measured times
+tsymex_snd3_loopdegrade  72.7  seed: the largest of the three measured times

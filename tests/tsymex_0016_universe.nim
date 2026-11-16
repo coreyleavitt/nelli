@@ -275,7 +275,8 @@ func evidences(u: UCell; r: PinRecord; legRow = ""): bool =
         # stays as it is; `pinNever` records the native fact that says so.
         (pub and r.verdict == pvDeclined and
            (u.kind.len == 0 or r.declineKind == u.kind)) or
-          (r.verdict == pvCrashed and r.entry == "pinCrash") or
+          (r.verdict == pvCrashed and r.entry == "pinCrash" and
+             (u.kind.len == 0 or r.declineKind == u.kind)) or
           r.entry == "admitBuild" or
           (u.state == "never" and r.entry == "pinNever")
       else: false
@@ -293,6 +294,29 @@ proc loadAllow(dir: string): seq[Allow] =
 
 let knownRows = toSeq(BuildRow).mapIt($it)
 
+proc rowScopeProblems(a: Allow): seq[string] =
+  ## L-M1: a `rows=` scope is a platform classification, so it is a PROPER
+  ## subset of the build rows (a scope of every row excuses the cell
+  ## everywhere and is an unscoped entry in disguise), and its reason names
+  ## the rows that DO evidence the cell (`evidenced-on=<rows>`): rows outside
+  ## the scope. The join then holds those rows to it (`joinUniverse`).
+  if a.rows.len == 0: return
+  if knownRows.allIt(it in a.rows):
+    result.add "allowlist entry " & a.key &
+               ": the row scope names every build row; a scope is a proper " &
+               "subset (drop rows= to make it a debt entry, or narrow it)"
+  let ev = evidencedOn(a)
+  if ev.len == 0:
+    result.add "allowlist entry " & a.key & ": a rows= scope's reason must " &
+               "name the rows that evidence the cell (evidenced-on=<row>,<row>)"
+  for r in ev:
+    if r notin knownRows:
+      result.add "allowlist entry " & a.key & ": evidenced-on row \"" & r &
+                 "\" is not a build row"
+    elif r in a.rows:
+      result.add "allowlist entry " & a.key & ": evidenced-on row \"" & r &
+                 "\" is inside the scope that excuses it"
+
 proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
     seq[string] =
   ## Allowlist entries against the universe, with no records involved.
@@ -304,6 +328,7 @@ proc structural(u: seq[UCell]; allow: seq[Allow]; ids: HashSet[string]):
     if a.key in seen: result.add "allowlist entry " & a.key & " is listed twice"
     seen.incl a.key
     result.add entryProblems(a, ids)
+    result.add rowScopeProblems(a)
     for r in a.rows:
       if r notin knownRows:
         result.add "allowlist entry " & a.key & ": row scope \"" & r &
@@ -337,6 +362,11 @@ proc joinUniverse(u: seq[UCell]; recs: seq[PinRecord]; allow: seq[Allow];
         why = "only sampled unsat records evidence it (not exhaustive)"
       result.add "unclassified cell " & c.key & " (" & c.state & "): " & why &
         " and no allowlist entry names it"
+    if not covered and not partial and legRow.len > 0:
+      for a in allow:
+        if a.key == c.key and a.rows.len > 0 and legRow in a.evidencedOn:
+          result.add "allowlist entry " & c.key & " claims row " & legRow &
+            " evidences the cell, but no record from that leg does"
     if covered and c.key in allowed:
       result.add "stale allowlist entry " & c.key &
         ": a pin record evidences it now; remove the line"
@@ -758,11 +788,39 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
   test "K1a-ci: an unknown row name in a scope is an error":
     let ids = sliceIds(readFile(rfcPath))
     let k = universe.mustFirst("magic").key
-    let fails = structural(universe, @[Allow(key: k, slice: "K9c", reason: "r",
+    let fails = structural(universe, @[Allow(key: k, slice: "K9c",
+                                             reason: "r evidenced-on=linux-c",
                                              rows: @["mingw", "winders"])], ids)
     check fails.len == 1 and "winders" in fails[0]
+    check structural(universe, @[Allow(key: k, slice: "K9c",
+                       reason: "r evidenced-on=linux-c",
+                       rows: @["mingw", "msvc"])], ids).len == 0
+
+  test "L-M1 RED: a rows= scope is a proper subset and names who evidences":
+    let ids = sliceIds(readFile(rfcPath))
+    let k = universe.mustFirst("magic").key
+    # every row in scope: an unscoped entry in disguise
+    let all = structural(universe, @[Allow(key: k, slice: "K9c",
+                reason: "r evidenced-on=linux-c", rows: knownRows)], ids)
+    check all.anyIt("every build row" in it)
+    # no evidencing rows named
     check structural(universe, @[Allow(key: k, slice: "K9c", reason: "r",
-                                       rows: @["mingw", "msvc"])], ids).len == 0
+                     rows: @["mingw"])], ids).anyIt("evidenced-on" in it)
+    # an evidencing row that is itself in the scope, or no row at all
+    check structural(universe, @[Allow(key: k, slice: "K9c",
+                     reason: "r evidenced-on=mingw", rows: @["mingw"])],
+                     ids).anyIt("inside the scope" in it)
+    check structural(universe, @[Allow(key: k, slice: "K9c",
+                     reason: "r evidenced-on=winders", rows: @["mingw"])],
+                     ids).anyIt("not a build row" in it)
+
+  test "L-M1 RED: a leg named as evidencing must have a record for the cell":
+    let a = @[Allow(key: "magic:Swap", slice: "K9c",
+                    reason: "r evidenced-on=linux-c", rows: @["mingw"])]
+    var recs = synthAll("magic:Swap")
+    for r in recs.mitems: r.row = "linux-c"
+    let fails = joinUniverse(universe, recs, a, "linux-c")
+    check fails.anyIt("claims row linux-c evidences" in it)
 
   test "K1a-ci: the parser reads an optional rows= field":
     let a = parseAllow("errorkind:heX\tK9c\twhy\trows=mingw,msvc\n" &
@@ -804,6 +862,17 @@ suite "RFC-0016 K1a-cells: the join (self-test over synthetic records)":
     r.verdict = pvDeclined
     r.entry = "admitBuild"
     check d.evidences(r)
+
+  test "L-M4 RED: a crash record names the kind the cell claims":
+    let k = UCell(key: "magic:Destroy", state: "declined", kind: "feX",
+                  detail: "-")
+    var r = PinRecord(cell: cellKey(axMagic, "Destroy"), verdict: pvCrashed,
+                      entry: "pinCrash")
+    check not k.evidences(r)             # a crash that names no kind
+    r.declineKind = "feY"
+    check not k.evidences(r)             # another kind
+    r.declineKind = "feX"
+    check k.evidences(r)
 
   test "a build row is named by the record's row field, not its segment":
     let c = UCell(key: "build:row/mingw", state: "row", detail: "-")

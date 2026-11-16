@@ -797,12 +797,14 @@ proc pinRefused*(key: CellKey; probe: string; flags: openArray[string];
     native: "compile refused", flags: @(pb.args) & @[pb.backend]))
 
 proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
-               expect: CrashExpect) =
+               expect: CrashExpect; kind = "") =
   ## Compiles `probe` in a child with the host's build-relevant defines plus
   ## `flags`, runs it, and asserts the exit class. `probe` is a path to a Nim
   ## file, or the source text itself when it contains a newline. A child that
   ## exits 0 fails. The record is `pvCrashed`: it bypasses every public entry
-  ## point, so K1 may use it for a `declined` or `never` cell only.
+  ## point, so K1 may use it for a `declined` or `never` cell only. `kind`
+  ## is the `SymexErrorKind` the cell declares, when it declares one: a crash
+  ## record evidences a cell with a kind only if it names that kind (L-M4).
   let pb = prepareProbe("pinCrash", probe, flags)
   let dir = pb.dir
   let exe = pb.exe
@@ -835,7 +837,8 @@ proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
             " is not the expected " & $expect & "\n" & output)
   writePinRecord(PinRecord(testFile: appTestFile(),
     entry: "pinCrash", cell: key, target: "-", domain: "-",
-    verdict: pvCrashed, native: "rc=" & $rc & " expected=" & $expect,
+    verdict: pvCrashed, declineKind: kind,
+    native: "rc=" & $rc & " expected=" & $expect,
     flags: @args & @[backend]))
 
 proc skipCell*(key: CellKey; why: string) =

@@ -7,18 +7,23 @@
 #               shape written by a Windows shard.
 #   --offenders FILE  the leg's committed offender list,
 #               tests/0016-allowlist/ceiling-offenders-<leg>.txt: one test per
-#               line, `<name><whitespace><reason>`, `#` starts a comment (the
-#               shape of the other allowlists). Without it the script only
+#               line, `<name><ws><seconds><ws><reason>`: the wall time recorded
+#               when the test was listed, then the reason; `#` starts a comment. Without it the script only
 #               REPORTS (exit 0), as CI-D first did.
 # Env:    CEILING_SECS         the ceiling, default 60
 #         CEILING_FACTOR       the new-offender margin over the ceiling, default 2.5
+#         REGRESS_FACTOR       a listed test may run this many times its recorded seconds, default 2.5
 #         CEILING_TESTS_DIR    where tests/<name>.nim live, default tests
 #
 # Prints every test over the ceiling, slowest first, as `<seconds> <test>`
 # under a total line. With --offenders it is a gate (exit 1) on:
 #   1. NEW offenders: an unlisted test over NEW_ABOVE (60 * 2.5 = 150 s);
 #   2. a listed name with no tests/<name>.nim (a retired test), a duplicate
-#      entry, or an entry with no reason.
+#      entry, an entry with no reason, or an entry with no recorded seconds;
+#   3. a REGRESSION: a listed test that ran over REGRESS_FACTOR x its recorded
+#      seconds (below). Listing a test is a ceiling on it, not an exemption;
+#   4. no readable times: a times file with no test line fails (a leg whose
+#      artifact was empty or malformed must not pass as clean).
 # It WARNS (reported, exit unchanged, and a finding for the intake issues) on:
 #   - an unlisted test over the ceiling but not over NEW_ABOVE;
 #   - a STALE entry: a listed test that ran under the ceiling. A stale entry
@@ -36,6 +41,16 @@
 # new and 0 stale, z3 1 new and 10 stale, msvc 13 new and 43 stale on the third
 # run), so the stale edge is gone and only the new-offender edge fails.
 #
+# THE LISTED EDGE. The new-offender edge alone left a listed test unbounded: a
+# test listed at 80 s could reach 800 s and pass. REGRESS_FACTOR bounds it by
+# the same requirement NEW_ABOVE answers: a run-to-run margin that stays quiet
+# on the measured noise. The recorded seconds are the LARGEST of three runs, so
+# the noise a listed test shows against it is already biased downward; the
+# widest observed p95 ratio is 1.87 (msvc). The factor is the same 2.5 as
+# CEILING_FACTOR (a third above that p95), so a listed and an unlisted test
+# are held to one relative margin and the two edges never disagree about what
+# a noisy runner can do.
+#
 # NEW_ABOVE = ceiling * factor. Each leg's list is seeded with every test over
 # 60 s in ANY of the three runs. Leave-one-out check (seed from two runs, test
 # the third; unlisted tests over the new-offender edge in the held-out run):
@@ -50,6 +65,7 @@
 set -uo pipefail
 ceiling="${CEILING_SECS:-60}"
 factor="${CEILING_FACTOR:-2.5}"
+regress="${REGRESS_FACTOR:-2.5}"   # see THE LISTED EDGE above
 new_above="$(awk -v c="$ceiling" -v n="$factor" 'BEGIN { print c * n }')"   # NEW_ABOVE
 
 
@@ -73,6 +89,11 @@ gate() { # gate <offenders> <times>...
   normalize "$@" > "$d/times"
   sed 's/#.*$//' "$off" | awk 'NF { print $1 }' | LC_ALL=C sort > "$d/listed.all"
   sed 's/#.*$//' "$off" | awk 'NF == 1 { print $1 }' > "$d/noreason"
+  # a listed test needs its recorded seconds (field 2) and a reason (field 3 on)
+  sed 's/#.*$//' "$off" | awk 'NF >= 2 && $2 !~ /^[0-9]+(\.[0-9]+)?$/ { print $1 }' > "$d/notime"
+  sed 's/#.*$//' "$off" | awk 'NF == 2 && $2 ~ /^[0-9]+(\.[0-9]+)?$/ { print $1 }' >> "$d/noreason"
+  sed 's/#.*$//' "$off" | awk 'NF >= 2 && $2 ~ /^[0-9]+(\.[0-9]+)?$/ { print $1, $2 }' | LC_ALL=C sort > "$d/rec"
+  if [ ! -s "$d/times" ]; then echo "FAIL: no test times readable (an empty or malformed times file must not pass)"; rc=1; fi
   LC_ALL=C sort -u "$d/listed.all" > "$d/listed"
   LC_ALL=C awk -v c="$ceiling" '$1 > c { print $2 }' "$d/times" | LC_ALL=C sort > "$d/over"
   LC_ALL=C awk -v c="$new_above" '$1 > c { print $2 }' "$d/times" | LC_ALL=C sort > "$d/over.hard"
@@ -102,6 +123,10 @@ gate() { # gate <offenders> <times>...
   show "listed tests with no ${CEILING_TESTS_DIR:-tests}/<name>.nim (retired; delete the entry)" "$d/gone"
   uniq -d "$d/listed.all" > "$d/dupes"; show "duplicate entries" "$d/dupes"
   show "entries with no reason" "$d/noreason"
+  show "entries with no recorded seconds (the second column is the wall time when listed)" "$d/notime"
+  # REGRESSIONS: a listed test over REGRESS_FACTOR x its recorded seconds
+  LC_ALL=C sort -k2 "$d/times" | LC_ALL=C join -1 1 -2 2 "$d/rec" - | LC_ALL=C awk -v f="$regress" '$3 > $2 * f { printf "%s (recorded %s s, over %s x) %s\n", $3, $2, f, $1 }' | LC_ALL=C sort -rn > "$d/regress.s"
+  if [ -s "$d/regress.s" ]; then echo "FAIL: REGRESSED: listed tests over ${regress} x their recorded seconds in $(basename "$off") (find the cause; re-seed only with it)"; sed 's/^/  /' "$d/regress.s"; rc=1; fi
   echo "ceiling ratchet: listed=$(wc -l < "$d/listed" | tr -d ' ') over=$(wc -l < "$d/over" | tr -d ' ')" \
        "warn=$(wc -l < "$d/warn" | tr -d ' ') new=$(wc -l < "$d/new" | tr -d ' ') stale=$(wc -l < "$d/stale" | tr -d ' ')" \
        "(ceiling ${ceiling} s, new above ${new_above} s; stale entries warn only) -> $([ "$rc" -eq 0 ] && echo PASS || echo FAIL)"
@@ -122,7 +147,7 @@ self_test() {
   mkdir -p "$d/tests"
   : > "$d/tests/tnew.nim"; : > "$d/tests/tstale.nim"; : > "$d/tests/tband.nim"
   : > "$d/tests/tslow.nim"; : > "$d/tests/tfast.nim"; : > "$d/tests/tedge.nim"
-  printf '%s\n' '# header' 'tstale  seed 80.0' 'tband  seed 70.0' 'tslow  seed 90.0' > "$d/off"
+  printf '%s\n' '# header' 'tstale  80.0  seed' 'tband  70.0  seed' 'tslow  300.0  seed' > "$d/off"
   printf '%s\n' '10.0 c tests/tfast.nim' '160.5 c tests/tnew.nim' '35.0 c tests/tstale.nim' \
     '50.0 c tests/tband.nim' '300.2 c tests/tslow.nim' '60.0 c tests/tedge.nim' > "$d/t"
   expect() { # name want-rc pattern...
@@ -141,7 +166,7 @@ self_test() {
   expect gate 1 --offenders "$d/off" "$d/t"
   has 'NEW offenders'; has '160.5 tnew'; has 'WARN: stale'; has 'tstale'; hasnt 'FAIL: STALE'; hasnt '  tslow'; hasnt '  tfast'
   # only a listed-and-fast (warn) and a still-slow case: green
-  printf '%s\n' 'tband  seed' 'tslow  seed' > "$d/off2"
+  printf '%s\n' 'tband  50.0  seed' 'tslow  300.0  seed' > "$d/off2"
   printf '%s\n' '50.0 c tests/tband.nim' '300.2 c tests/tslow.nim' '10.0 c tests/tfast.nim' > "$d/t2"
   expect clean 0 --offenders "$d/off2" "$d/t2"; has 'PASS'
   # a listed test missing from the times (a narrowed run) is not stale
@@ -150,7 +175,7 @@ self_test() {
   expect absent 0 --offenders "$d/off2" "$d/t3"
   # the edges (ceiling 60, factor 2.5: new offender above 150; a stale entry never fails)
   : > "$d/tests/tw.nim"; : > "$d/tests/tl.nim"
-  printf '%s\n' 'tl  seed' > "$d/offl"; : > "$d/offnone"
+  printf '%s\n' 'tl  60.0  seed' > "$d/offl"; : > "$d/offnone"
   printf '%s\n' '75.0 c tests/tw.nim' > "$d/tw75"
   expect warn75 0 --offenders "$d/offnone" "$d/tw75"; has 'WARN: over'; has '75.0 tw'; hasnt 'FAIL'; has 'PASS'
   printf '%s\n' '145.0 c tests/tw.nim' > "$d/tw145"
@@ -166,9 +191,26 @@ self_test() {
   printf '%s\n' '60.0 c tests/tl.nim' > "$d/tl60"
   expect listed60 0 --offenders "$d/offl" "$d/tl60"; hasnt 'WARN'
   # a listed name with no tests/<name>.nim is a retired test; a duplicate and a bare name are malformed
-  printf '%s\n' 'tgone  seed' > "$d/off3"; expect retired 1 --offenders "$d/off3" "$d/t3"; has 'tgone'
-  printf '%s\n' 'tband  a' 'tband  b' > "$d/off4"; expect dupe 1 --offenders "$d/off4" "$d/t3"
+  printf '%s\n' 'tgone  60.0  seed' > "$d/off3"; expect retired 1 --offenders "$d/off3" "$d/t3"; has 'tgone'
+  printf '%s\n' 'tband  50.0  a' 'tband  50.0  b' > "$d/off4"; expect dupe 1 --offenders "$d/off4" "$d/t3"
   printf '%s\n' 'tband' > "$d/off5"; expect noreason 1 --offenders "$d/off5" "$d/t3"
+  printf '%s\n' 'tband  50.0' > "$d/off5b"; expect noreason2 1 --offenders "$d/off5b" "$d/t3"
+  # a listed test with no recorded seconds (the old `<name> <reason>` shape) fails
+  printf '%s\n' 'tband  seed' > "$d/off6"; expect notime 1 --offenders "$d/off6" "$d/t3"; has 'no recorded seconds'
+  # REGRESSION: a listed test over 2.5 x its recorded seconds fails; at the edge it does not
+  printf '%s\n' 'tslow  100.0  seed' > "$d/off7"
+  printf '%s\n' '300.2 c tests/tslow.nim' > "$d/t7"
+  expect regress 1 --offenders "$d/off7" "$d/t7"; has 'REGRESSED'; has '300.2 (recorded 100.0 s'
+  printf '%s\n' '250.0 c tests/tslow.nim' > "$d/t7e"
+  expect regressedge 0 --offenders "$d/off7" "$d/t7e"; hasnt 'REGRESSED'
+  # a listed test that got faster is not a regression
+  printf '%s\n' '70.0 c tests/tslow.nim' > "$d/t7f"
+  expect faster 0 --offenders "$d/off7" "$d/t7f"; hasnt 'REGRESSED'
+  # unreadable times: an empty times file (or one with no test lines) fails the gate
+  : > "$d/empty"
+  expect empty 1 --offenders "$d/off2" "$d/empty"; has 'no test times readable'
+  printf '%s\n' 'garbage' > "$d/garbage"
+  expect garbage 1 --offenders "$d/off2" "$d/garbage"; has 'no test times readable'
   # a Windows shard writes CRLF lines: the name must not carry the CR
   printf '%s\r\n' '50.0 vcc tests/tband.nim' '300.2 vcc tests/tslow.nim' > "$d/t4"
   expect crlf 0 --offenders "$d/off2" "$d/t4"; has 'PASS'

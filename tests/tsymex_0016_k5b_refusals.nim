@@ -13,6 +13,7 @@ import std/[unittest, strutils, options, os, osproc, tempfiles]
 import nelli
 import nelli/symex
 import nelli/smt/buildprofile
+import nelli/smt/canonicalize
 import ./s8cu_helpers
 
 const
@@ -146,8 +147,19 @@ suite "K5b: the hazards that stay (never cells)":
              "the two verified Z3 builds are two cache keys")
 
   test "AUD-01: isLoose stays opt-in (ADR-0001)":
-    pinNever(cell"setting/isLoose", true,
-             "opt-in unsound, banner on main (ADR-0001); no build axis moves it")
+    # The claim: isLoose is never the default (the pins run under the
+    # defaults), so a verdict is only ever the unsound one by the user's own
+    # opt-in, and the opt-in is a distinct setting (a distinct cache key).
+    var loose = defaultSymexSettings()
+    loose.integerSemantics = isLoose
+    pinNever(cell"setting/isLoose",
+             defaultSymexSettings().integerSemantics != isLoose and
+             pinSettingsConst.integerSemantics != isLoose and
+             canonicalize(loose) !=
+               canonicalize(defaultSymexSettings()),
+             "default integerSemantics " &
+             $defaultSymexSettings().integerSemantics &
+             "; opting in changes the settings key")
 
   test "AUD-09: a literal-initialised var global is not read at its initialiser":
     # Natively `gLit` is 5 on entry, so the target is unreachable; the walker

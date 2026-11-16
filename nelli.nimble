@@ -1805,6 +1805,7 @@ task test, "Run the test suite":
             "tsymex_0016_adm1_admission",
             "tsymex_0016_k4a_table",
             "tsymex_0016_k4a_dispatch",
+            "tsymex_0016_d1vcc_frame",
             "tsymex_0016_k4a_guard",
             "tsymex_0016_k4b",
             "tsymex_0016_k4b_cells",

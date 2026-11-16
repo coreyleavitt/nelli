@@ -158,77 +158,33 @@ suite "ADM-IR: the scan's verdicts through the real parser are unchanged":
 # ---------------------------------------------------------------------------
 
 suite "ADM-IR: the stdlib-body axis, float calls (mkMathCall)":
-  test "no proof, no node; a wrong-axis proof is not a proof":
-    check not compiles(mkMathCall("sqrt", @[mkIntLit(1)]))
-    check not compiles(mkMathCall(admitMagic("AddI", msArm), "sqrt", @[mkIntLit(1)]))
-    check not compiles(mkMathCall(admitPragma(ppRoutine, "inline", psRoutineDecl),
-                                  "sqrt", @[mkIntLit(1)]))
-  test "an admitted row builds":
-    let e = mkMathCall(admitFloatCall("sqrt", 1), "sqrt", @[mkIntLit(1)])
-    check e.kind == iekMathCall
-    check e.mathOp == "sqrt"
-    for op in ["abs", "min", "max",
-               "toFloat32", "toFloat64"]:
-      check admitFloatCall(op, 1).admitted
-  test "a declined or absent row, or another op's row, asserts":
-    check not admitFloatCall("sin", 1).admitted
-    check not admitFloatCall("nextafter", 2).admitted
-    check not admitFloatCall("noSuchMath", 1).admitted
-    check admitFloatCall("noSuchMath", 1).decline[0] == some(feUnsupportedOpAborted)
-    expect AssertionDefect:
-      discard mkMathCall(admitFloatCall("sin", 1), "sin", @[mkIntLit(1)])
-    expect AssertionDefect:
-      discard mkMathCall(admitFloatCall("sqrt", 1), "floor", @[mkIntLit(1)])
-
-proc fSin(a: float) =
-  if sin(a) == 0.0: symexTarget("hit")
-proc fAbs(a: float) =
-  if abs(a) == 2.5 and a == -2.5: symexTarget("hit")
-proc fMin(a, b: float) =
-  if min(a, b) == 1.0 and a == 1.0 and b == 2.0: symexTarget("hit")
-
-proc declinedWith(r: SymexResult; cell: string): bool =
-  for e in r.errors:
-    if e.kind == feUnsupportedOpAborted and cell in e.msg: return true
-
-suite "ADM-IR: a declined float row still declines through the parser":
-  test "sin is a declined row, naming its cell":
-    let r = symexFind(fSin, tLabel("hit"))
-    check r.status == sxUnknown
-    check r.declinedWith("stdlib:math.sin")
-  test "modelled names still decide":
-    check symexFind(fAbs, tLabel("hit")).status == sxSat
-    check symexFind(fMin, tLabel("hit")).status == sxSat
-
-# ---------------------------------------------------------------------------
-# pragma / stdlib arithmetic stamp: mkArithBlock
-# ---------------------------------------------------------------------------
-
-suite "ADM-IR: the arithmetic stamp (mkArithBlock)":
-  test "no proof, no node; a wrong-axis proof is not a proof":
+  test "the stamp is sealed: no proof ctor, no replay, no forged stamp":
+    # D2: a stamp is minted by `stampFor`/`decide` and nothing else.
+    check declared(ArithStamp) and declared(stampFor)   # else the compiles checks below are vacuous
+    check not declared(replayArith)
+    check not declared(ArithScopeProof)
+    check not declared(arithFromPragma)
+    check not declared(arithFromStdlib)
+    check not declared(arithFromBuild)
+    check not compiles(ArithStamp(scope: asChecked))
+    check not compiles(IRStmt(kind: isBlock, blkArith: asChecked))
     check not compiles(mkArithBlock(asBuild, @[mkBreak()]))
-    check not compiles(mkArithBlock(arithFromPragma(
-      admitStdlibBody("math.floorDiv", ssBodyWalk)), @[mkBreak()]))
-    check not compiles(mkArithBlock(arithFromStdlib(
-      admitPragma(ppRoutine, "overflowChecks", psRoutineDecl)), @[mkBreak()]))
-    check not compiles(arithFromStdlib(admitMagic("AddI", msArm)))
-  test "each axis's proof stamps its scope":
-    let chk = arithFromPragma(admitPragma(ppRoutine, "overflowChecks", psRoutineDecl))
-    check mkArithBlock(chk, @[mkBreak()]).blkArith == asChecked
-    let unc = arithFromStdlib(admitStdlibBody("math.floorDiv", ssBodyWalk))
-    check mkArithBlock(unc, @[mkBreak()]).blkArith == asUnchecked
-    check replayArith(asBuild).arithScope == asBuild
-  test "a declined or beside-the-point proof asserts":
-    expect AssertionDefect:
-      discard arithFromPragma(admitPragma(ppLocal, "cursor", psLocalDecl))
-    expect AssertionDefect:   # admitted, but not the overflowChecks row
-      discard arithFromPragma(admitPragma(ppRoutine, "inline", psRoutineDecl))
-    expect AssertionDefect:   # declined row
-      discard arithFromStdlib(admitStdlibBody("math.divmod", ssBodyWalk))
-    expect AssertionDefect:   # lowered by name (PRC-09), not walked by body
-      discard arithFromStdlib(admitStdlibBody("math.ceilDiv", ssBodyWalk))
-    expect AssertionDefect:   # admitted, but its body trips no overflow check
-      discard arithFromStdlib(admitStdlibBody("math.sgn", ssBodyWalk))
+    check not compiles(mkArithBlock(asChecked, @[mkBreak()]))
+    # the one way in:
+    check compiles(mkArithBlock(stampFor(RoutineArithFacts()), @[mkBreak()]))
+  test "the decision consults the admission tables":
+    # a claim in a build that checks needs a modelled stdlib row; a declined or
+    # beside-the-point row asserts in `decide`.
+    let f = RoutineArithFacts(readable: true, overflowDeviates: true,
+                              overflowRowKey: "math.floorDiv")
+    if not buildWraps():
+      check mkArithBlock(stampFor(f), @[mkBreak()]).blkArith.provenance ==
+        asUnchecked
+      for key in ["math.divmod", "math.ceilDiv", "math.sgn"]:
+        expect AssertionDefect:
+          discard stampFor(RoutineArithFacts(readable: true,
+                                             overflowDeviates: true,
+                                             overflowRowKey: key))
 
 proc sNextPow2Min(a: int) =
   if nextPowerOfTwo(a) == 1 and a == low(int): symexTarget("hit")
@@ -379,11 +335,13 @@ suite "ADM-IR: censuses (allowlist zero unless named)":
     check countOutside("IRExpr(kind: iekMathCall", ["types.nim"]) == 0
     check countOutside("blkArith:", ["types.nim"]) == 0
     check countOutside(".blkArith =", ["types.nim"]) == 0
+    check countOutside("ArithStamp(", ["arith_regime.nim"]) == 0
+    check countOutside("mkArithBlock(", ["types.nim", "dsl_parser.nim"]) == 0
   test "the emit's replays are the only rebuilds":
     check countIn("dsl_parser.nim", "bindSym\"replayScan\"") == 1
-    check countIn("dsl_parser.nim", "bindSym\"replayArith\"") == 1
+    check countIn("dsl_parser.nim", "replayArith") == 0
     check countOutside("replayScan(", ["definedness.nim", "dsl_parser.nim"]) == 0
-    check countOutside("replayArith(", ["arith_regime.nim", "dsl_parser.nim"]) == 0
+    check countOutside("replayArith", []) == 0
   test "an arm that never ran the scan names `unscanned`: three, allowlisted":
     check countIn("dsl_parser.nim", "unscanned") == 3
     check countOutside("unscanned", ["definedness.nim", "dsl_parser.nim", "types.nim"]) == 0

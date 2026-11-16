@@ -25474,7 +25474,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
-    if stmt.blkArith != asInherit or stmt.blkScoped:
+    if stmt.blkArith.claims or stmt.blkScoped:
       # RFC-0016 W1-d2c. A routine body: its arithmetic is its own, whoever
       # called it, and the caller's resumes after it. RFC-0016 PRC-07: so are
       # the checks its options turn back on in a build with them off.

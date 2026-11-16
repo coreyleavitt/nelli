@@ -17,8 +17,7 @@
 ##     `ArithStamp`, whose scope is private: only `decide` mints one, and it
 ##     does so by consulting the admission tables itself (D2).
 ##
-## S2: the vocabulary (`ArithScope`, `ArithCheck`, `ArithScopeProof` and its
-## constructors, `buildWraps`, `arithChecksFor`, `signedWrapDefined`) is defined
+## S2: the vocabulary (`ArithScope`, `ArithCheck`, `buildWraps`, `arithChecksFor`, `signedWrapDefined`) is defined
 ## here, and `types` imports and re-exports it under the same names; this
 ## module imports no `types`. Nothing here is read by a parser or walker site
 ## through the `Regime` surface yet.
@@ -64,39 +63,6 @@ type
                  ## also int-width narrowing (R16-5, deferred). Scope in R16-1:
                  ## float→int domain checks only (RD2) — no fork emitted yet.
 
-  ArithScopeProof* = object
-    ## RFC-0016 ADM-IR (section 8.1). The proof that a block's arithmetic
-    ## claim was stamped by the axis that owns it: the pragma axis (a `push
-    ## overflowChecks: on` row), the stdlib-body axis (a routine whose
-    ## check-option delta is modelled) or the build (its own arithmetic is
-    ## unchecked). The scope is private, so `mkArithBlock` cannot be handed a
-    ## bare `ArithScope` and the three constructors below are the only way in.
-    scope: ArithScope
-
-func arithScope*(p: ArithScopeProof): ArithScope = p.scope
-
-func arithFromPragma*(a: Admit[PragmaModel]): ArithScopeProof =
-  ## `asChecked`: the admitted `routine/overflowChecks` pragma row (a `push
-  ## overflowChecks: on` in a build whose own checks are off).
-  doAssert a.admitted, "arithFromPragma: " & a.decline[1]
-  doAssert a.cell.scope == axPragma and a.cell.key == "routine/overflowChecks",
-    "arithFromPragma: " & render(a.cell) & " is not the overflowChecks row"
-  ArithScopeProof(scope: asChecked)
-
-func arithFromStdlib*(a: Admit[StdlibBody]): ArithScopeProof =
-  ## `asUnchecked`: an admitted stdlib-body row whose body trips
-  ## `overflowChecks` (`exercises`), which `math.nim`'s push turns off.
-  doAssert a.admitted, "arithFromStdlib: " & a.decline[1]
-  doAssert coOverflow in a.payload.exercises,
-    "arithFromStdlib: " & render(a.cell) & " does not exercise overflowChecks"
-  ArithScopeProof(scope: asUnchecked)
-
-func replayArith*(s: ArithScope): ArithScopeProof =
-  ## The IR emit's rebuild of a stamp it already read. The parser's emit is
-  ## the only caller; `tests/tsymex_0016_admir.nim` counts the uses.
-  doAssert s != asInherit, "replayArith: asInherit is no claim"
-  ArithScopeProof(scope: s)
-
 func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
   ## RFC-0016 W1-d2. The arithmetic checks a build `b` implies: the checks its
   ## compiled code performs. The one source the walker's check gates read
@@ -114,12 +80,6 @@ func buildWraps*(b: BuildSemantics = buildSemantics): bool =
   ## settings never feed it (the build is what the native program does). A routine under
   ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
   coOverflow notin b.checks
-
-func arithFromBuild*(b: BuildSemantics = buildSemantics): ArithScopeProof =
-  ## `asBuild`: the build's own signed arithmetic is unchecked. Not a table
-  ## row: the build axis's claim is the build itself.
-  doAssert buildWraps(b), "arithFromBuild: the build checks its arithmetic"
-  ArithScopeProof(scope: asBuild)
 
 func signedWrapDefined*(width: int; b: BuildSemantics = buildSemantics): bool =
   ## RFC-0016 K5a. Whether an unchecked signed `+`, `-`, `*` or negation at
@@ -258,7 +218,7 @@ func regime*(f: ArithFrames; b: BuildSemantics = buildSemantics): Regime =
 proc ensureBase(f: var ArithFrames; b: BuildSemantics) =
   if f.frames.len == 0: f.frames.add buildRegime(b)
 
-proc enterBody*(f: var ArithFrames; s: ArithScope): bool =
+proc enterBody*(f: var ArithFrames; st: ArithStamp): bool =
   ## The walk rule (`pushArith`, `runtime.nim:2187`): a stamp that claims
   ## pushes its regime (`asBuild` and `asUnchecked` unchecked, `asChecked`
   ## checked); `asInherit` pushes NOTHING, so the callee runs under the
@@ -268,17 +228,12 @@ proc enterBody*(f: var ArithFrames; s: ArithScope): bool =
   ## unstamped non-magic callee the build's regime where this one gives it the
   ## caller's; harmless while every stdlib row that deviates calls only magics
   ## (the census in `tsymex_0016_d1_regime`), fixed by D1-F2's total stamp.
-  ## Takes the scope until S5 seals the IR stamp as an `ArithStamp`; this
-  ## overload only reads it, so it mints nothing.
   f.ensureBase buildSemantics
-  case s
+  case st.scope
   of asInherit: return false
   of asChecked: f.frames.add rgChecked
   of asBuild, asUnchecked: f.frames.add rgUnchecked
   true
-
-proc enterBody*(f: var ArithFrames; s: ArithStamp): bool =
-  f.enterBody s.scope
 
 proc enterParse*(f: var ArithFrames; facts: RoutineArithFacts;
                  b: BuildSemantics = buildSemantics) =

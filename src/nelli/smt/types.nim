@@ -22,9 +22,8 @@ export OpaqueScan, unscanned, undefinedKinds, defectNames, ubMaskOf, ubSetOf,
 import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`, the proof `mkMathCall` / `mkArithBlock` take
 import ./pragmaaxes    ## RFC-0016 ADM-IR: `PragmaModel`, the proof `mkArithBlock` takes
 import ./arith_regime  ## RFC-0016 review D1 S2: `ArithScope`, `ArithCheck`, the proofs and the build predicates live there
-export ArithScope, ArithCheck, ArithScopeProof, arithScope, arithFromPragma,
-  arithFromStdlib, arithFromBuild, replayArith, arithChecksFor, buildWraps,
-  signedWrapDefined
+export ArithScope, ArithCheck, arithChecksFor, buildWraps,
+  signedWrapDefined, ArithStamp, RoutineArithFacts, stampFor, provenance, claims, keyText
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:
@@ -1384,9 +1383,13 @@ type
     case kind*: IRStmtKind
     of isBlock:
       stmts*: seq[IRStmt]
-      blkArith*: ArithScope
-        ## RFC-0016 W1-d2c. `asInherit` except on a routine's body block in a
-        ## checks-off build (`withCheckDeclines`).
+      blkArith*: ArithStamp
+        ## RFC-0016 W1-d2c. No claim except on a routine's body block
+        ## (`withCheckDeclines`). RFC-0016 review D2: sealed, the scope is
+        ## private to `arith_regime`, so only `stampFor` makes a claim.
+      blkFacts*: RoutineArithFacts
+        ## The facts `blkArith` was decided from: the emit writes them as a
+        ## literal and the generated code re-decides (`stampFor` is const-pure).
       blkScoped*: bool
         ## RFC-0016 PRC-07. A routine body in a build with a check off
         ## (`rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks`): the body
@@ -3463,10 +3466,11 @@ proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
 
-proc mkArithBlock*(proof: ArithScopeProof; stmts: seq[IRStmt]): IRStmt =
-  ## RFC-0016 W1-d2c. A routine body walked under `proof`'s arithmetic;
-  ## ADM-IR: the scope rides a proof of the axis that stamped it.
-  IRStmt(kind: isBlock, stmts: stmts, blkArith: arithScope(proof))
+proc mkArithBlock*(stamp: ArithStamp; stmts: seq[IRStmt];
+                   facts = RoutineArithFacts()): IRStmt =
+  ## RFC-0016 W1-d2c. A routine body walked under `stamp`'s arithmetic;
+  ## ADM-IR / D2: the stamp is made by `arith_regime.stampFor` alone.
+  IRStmt(kind: isBlock, stmts: stmts, blkArith: stamp, blkFacts: facts)
 
 proc withCheckScope*(b: IRStmt; on: set[CheckOption]): IRStmt =
   ## RFC-0016 PRC-07. `b`, a routine body block, walked under the checks `on`
@@ -5616,7 +5620,7 @@ proc render*(s: IRStmt): string =
   case s.kind
   of isBlock:
     (if s.blkLabel.len > 0: s.blkLabel & ":" else: "") &
-      (if s.blkArith != asInherit: $s.blkArith else: "") &
+      (if s.blkArith.claims: s.blkArith.keyText else: "") &
       (if s.blkScoped: "@on" & $s.blkOn else: "") &
       "{" & s.stmts.mapIt(render(it)).join(";") & "}"
   of isIf:

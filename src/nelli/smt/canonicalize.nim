@@ -6787,7 +6787,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     var parts: seq[string]
     for x in s.stmts: parts.add canonicalize(x, env)
     # RFC-0016 W1-d2c: a routine body's arithmetic scope is part of its meaning.
-    let ar = if s.blkArith != asInherit: "@" & $s.blkArith & ":" else: ""
+    let ar = if s.blkArith.claims: "@" & keyText(s.blkArith) & ":" else: ""
     # RFC-0016 PRC-07: the checks a routine body is compiled with are its meaning.
     let ck = if s.blkScoped: "@on" & $s.blkOn & ":" else: ""
     "St<Bk:" & lbl & ar & ck & "["& parts.join(",") & "]>"

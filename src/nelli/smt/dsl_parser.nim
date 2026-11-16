@@ -890,6 +890,16 @@ proc emitIRTypeSeq(ts: seq[IRType]): NimNode =
     lit.add emitIRType(t)
   prefix(lit, "@")
 
+proc emitArithFacts(f: RoutineArithFacts): NimNode =
+  ## RFC-0016 review D2. The facts a stamp was decided from, as an object
+  ## constructor the generated code hands to `stampFor`.
+  newTree(nnkObjConstr, bindSym"RoutineArithFacts",
+    newTree(nnkExprColonExpr, ident"readable", newLit(f.readable)),
+    newTree(nnkExprColonExpr, ident"overflowOn", newLit(f.overflowOn)),
+    newTree(nnkExprColonExpr, ident"overflowDeviates", newLit(f.overflowDeviates)),
+    newTree(nnkExprColonExpr, ident"overflowRowKey", newLit(f.overflowRowKey)),
+    newTree(nnkExprColonExpr, ident"inherit", newLit(f.inherit)))
+
 proc emitStmt*(s: IRStmt): NimNode =
   if s == nil:
     return newNilLit()
@@ -902,9 +912,12 @@ proc emitStmt*(s: IRStmt): NimNode =
       newCall(bindSym"mkLabelledBlock", newLit(s.blkLabel), prefix(seqLit, "@"))
     else:
       let blk =
-        if s.blkArith != asInherit:   # RFC-0016 W1-d2c: a routine body's arithmetic
-          newCall(bindSym"mkArithBlock", newCall(bindSym"replayArith", newLit(s.blkArith)),
-                  prefix(seqLit, "@"))   # ADM-IR: the stamp, replayed
+        if s.blkArith.claims:   # RFC-0016 W1-d2c: a routine body's arithmetic
+          # D2: the stamp is re-decided from the facts it was decided from
+          # (`stampFor` is const-pure), never replayed from its scope.
+          let facts = emitArithFacts(s.blkFacts)
+          newCall(bindSym"mkArithBlock", newCall(bindSym"stampFor", facts),
+                  prefix(seqLit, "@"), facts)
         else:
           newCall(bindSym"mkBlock", prefix(seqLit, "@"))
       if s.blkScoped:   # RFC-0016 PRC-07: the checks the body is compiled with
@@ -1660,18 +1673,6 @@ proc popArithScope(ctx: ParseCtx) =
   ctx.arith.leave()
   discard ctx.checkScopes.pop()
 
-func arithStamp(c: RoutineChecks; inherit: bool): Option[ArithScopeProof] =
-  ## The IR stamp of a routine body: `arith_regime`'s decision, as the proof of
-  ## the axis that made the claim (the emit still replays it until D1 S5).
-  let st = decide(arithFacts(c, inherit)).stamp
-  if not st.claims: return none(ArithScopeProof)
-  case st.provenance
-  of asChecked:
-    some(arithFromPragma(admitPragma(ppRoutine, "overflowChecks", psRoutineDecl)))
-  of asUnchecked: some(arithFromStdlib(c.overflowRow))
-  of asBuild: some(arithFromBuild())
-  of asInherit: none(ArithScopeProof)
-
 const nelliStdlibLedger {.strdefine.} = ""
   ## RFC-0016 K4c. With `-d:nelliStdlibLedger=<file>`, the parser appends the
   ## key of every stdlib routine it reads a body of to `<file>`: the corpus run
@@ -1767,7 +1768,8 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # build's (unchecked), or `OverflowDefect`-raising for one read as pushed
   # `overflowChecks: on`. A checks-on build needs no stamp (nothing to override
   # but the `off` push, which declines below).
-  let stamp = arithStamp(c, inherit)
+  let facts = arithFacts(c, inherit)
+  let arith = decide(facts)
   let restrictParams = noaliasWithPeers(impl)
   # RFC-0016 PRC-07: a build whose own range, bound, field or object checks
   # are off is walked as compiled (`checks` never names them there). A routine
@@ -1778,7 +1780,7 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # that pushes nothing does not inherit its caller's. Where the routine's
   # options could not be read (`c.why`) it declines below.
   let scoped = hasCheckOff() and not inherit
-  if c.checks == {} and stamp.isNone and c.unadmitted.len == 0 and
+  if c.checks == {} and not arith.stamp.claims and c.unadmitted.len == 0 and
      restrictParams.len == 0 and not scoped:
     return body
   let where = routinePlace(impl)
@@ -1805,7 +1807,7 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   # (`buildRegime()`) every routine is unchecked, and that is the build route:
   # `lowerArith` deposits the signed overflow as an `ubSignedOverflow` trap.
   # The marker is for a routine pushed off in a build that checks.
-  if decide(arithFacts(c, inherit)).declineOverflow:
+  if arith.declineOverflow:
     decl.add ctx.declineMarker(feOverflowCheckOption, where &
       " is compiled with overflowChecks off: its signed `+`, `-` and `*` are " &
       "undefined on overflow, which no setting models -- path degraded to " &
@@ -1816,7 +1818,8 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
     decl.add ctx.declineMarker(c.unadmittedKind, where & ": " & c.unadmitted &
       " -- path degraded to sxUnknown")
   if body != nil: decl.add body
-  result = if body != nil and stamp.isSome: mkArithBlock(stamp.get, decl)
+  result = if body != nil and arith.stamp.claims:
+             mkArithBlock(arith.stamp, decl, facts)
            else: mkBlock(decl)
   if scoped: result = result.withCheckScope(pushedOn(c))
 

@@ -80,16 +80,6 @@ func refChecked(ac: ArithCheck; wraps: bool; b: BuildSemantics): bool =
   ac in arithChecksFor(b) or
     (ac in {acOverflow, acDivByZero} and buildWraps(b) and not wraps)
 
-proc proofOf*(s: ArithStamp; key = rowKey): ArithScopeProof =
-  ## The existing proof ctors, by the stamp's provenance (S1 only: S5 makes
-  ## `mkArithBlock` take the stamp).
-  case s.provenance
-  of asChecked:
-    arithFromPragma(admitPragma(ppRoutine, "overflowChecks", psRoutineDecl))
-  of asUnchecked: arithFromStdlib(admitStdlibBody(key, ssBodyWalk))
-  of asBuild: arithFromBuild()
-  of asInherit: raiseAssert "no proof for no claim"
-
 # ---- the checks -------------------------------------------------------------
 
 proc checkTruthTable*() =
@@ -246,10 +236,10 @@ proc checkKeyBytes*() =
     if not s.claims:
       check "@as" notin canonicalize(mkBlock(body))
       continue
-    let blk = mkArithBlock(proofOf(s), body)
+    let blk = mkArithBlock(s, body)
     let key = canonicalize(blk)
     check "@" & s.keyText & ":" in key
-    check blk.blkArith == s.provenance
+    check blk.blkArith.provenance == s.provenance
     check key.startsWith("St<Bk:@" & s.keyText & ":[")
     seen.add s.keyText
   if buildWraps():

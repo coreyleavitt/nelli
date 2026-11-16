@@ -22,12 +22,14 @@ when defined(vcc):
         check refusal.get.field == bfFwrapv
         check "-fwrapv" in refusal.get.reason
 else:
-  import std/[unittest, strutils, tables]
+  import std/[unittest, strutils, tables, macros]
   import nelli
   import nelli/symex
   import nelli/smt/errorkind
   import nelli/smt/definedness
   import ./s8cu_helpers
+  import nelli/smt/types
+  import nelli/smt/dsl_parser
 
   proc oAdd(a: int64) {.symexOpaque.} =
     discard a + 1
@@ -261,3 +263,62 @@ else:
       check r.status == sxSat
       check r.status == p.status
       check not r.errors.named(feUnsupportedOp)
+
+  # R3-2, structural half. The verdict cases above cannot tell an alias body
+  # parsed through `parseRoutineBody` from one parsed bare (the maker declines
+  # on entry; the walker models the proc-let call either way), so the parsed
+  # lambda is read directly: every alias body's root is a claiming stamped
+  # routine block, as the main body's is, and carries the check-option decline
+  # marker whenever the main body does (`checkTotalStamp`'s claim, applied to
+  # `lambdaAliasBodies`).
+  macro lambdaShape(maker: typed): untyped =
+    ## "main=<claims>,<declines>;alias=<claims>,<declines>;..." for the lambda
+    ## `maker` builds.
+    let parsed = parseProc(maker.getImpl)
+    var lam: IRExpr
+    proc visit(s: IRStmt) =
+      if s == nil: return
+      case s.kind
+      of isBlock:
+        for c in s.stmts: visit(c)
+      of isLet:
+        if lam == nil and s.lvalue != nil and s.lvalue.kind == iekLambda:
+          lam = s.lvalue
+      of isAssign:
+        if lam == nil and s.avalue != nil and s.avalue.kind == iekLambda:
+          lam = s.avalue
+      else: discard
+    visit(parsed.body)
+    if lam == nil: error("no lambda found in " & maker.repr)
+    proc shape(b: IRStmt): string =
+      if b == nil or b.kind != isBlock: return "notblock"
+      var declines = false
+      for c in b.stmts:
+        if c != nil and c.kind == isUnsupported and c.unKind == feCheckOption:
+          declines = true
+      $b.blkArith.claims & "," & $declines
+    var r = "main=" & shape(lam.lambdaBody)
+    for b in lam.lambdaAliasBodies: r.add ";alias=" & shape(b)
+    newLit(r)
+
+  proc checkAliasShape(shape: string) =
+    let parts = shape.split(';')
+    check parts.len >= 2                      # the lambda has an alias body
+    let main = parts[0]["main=".len .. ^1]
+    check main.startsWith("true,")            # the main body is a claiming block
+    for a in parts[1 .. ^1]:
+      let v = a["alias=".len .. ^1]
+      check v.startsWith("true,")             # so is every alias body
+      check v == main                         # and it declines iff the main does
+
+  suite "R3-2: every alias body is a stamped routine block like the main body":
+    test "the pushed-on adder":
+      let sh = lambdaShape(mkAdder)
+      checkpoint sh
+      checkAliasShape(sh)
+    test "the boundChecks-off indexer carries the decline in main and alias":
+      let sh = lambdaShape(mkIndexer)
+      checkpoint sh
+      checkAliasShape(sh)
+      check sh.endsWith("true,true")
+      check sh.contains("main=true,true")

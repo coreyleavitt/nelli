@@ -4800,23 +4800,30 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # (`RoutineChecks.overflowOn`: on at its position on every reading,
         # the build's or a push's), not membership in the deviation set. The
         # unchecked `+ - *` is a defined wrap under `-fwrapv`.
+        # RFC-0016 0.10.0 review F1: every kind is the definedness table's
+        # answer under the routine's profile (`arithUb`), never a guard
+        # written here: `-fwrapv` defines the signed wrap only, and a signed
+        # zero divisor stays `ubSignedDivZero` under it.
         let overflowOn = owner == nil or routineChecks(owner).overflowOn
+        let prof =
+          if overflowOn: dpChecked
+          elif buildSemantics.fwrapv: dpFwrapv
+          else: dpUnchecked
+        template arithUb(op: ArithOp; c: OperandClass) =
+          let row = admitDefined(op, c, dsArith)
+          if ubOf(definedness(op, c, prof)).isSome: addUb row, prof
         let defOverflow = admitMagic(magic, msDefOverflow)
         if defOverflow.admitted:
           scan.noteMagicDefect defOverflow, "OverflowDefect"
-          if not overflowOn and not buildSemantics.fwrapv:
-            addUb admitDefined(aoAdd, ocSignedWide, dsArith), dpUnchecked
+          arithUb(aoAdd, ocSignedWide)
         let defDivZero = admitMagic(magic, msDefDivZero)
         if defDivZero.admitted:
           scan.noteMagicDefect defDivZero, "DivByZeroDefect"
-          if not overflowOn and not buildSemantics.fwrapv:
-            addUb admitDefined(aoDiv, ocZeroDivisorSigned, dsArith), dpUnchecked
-          if magic.startsWith("Mod"):
-            addUb admitDefined(aoMod, ocLowByMinusOneWide, dsArith), dpChecked
-          elif not overflowOn:
-            addUb admitDefined(aoDiv, ocLowByMinusOneWide, dsArith), dpUnchecked
+          let isMod = magic.startsWith("Mod")
+          arithUb(if isMod: aoMod else: aoDiv, ocZeroDivisorSigned)
+          arithUb(if isMod: aoMod else: aoDiv, ocLowByMinusOneWide)
         if magic in unsignedDivMagics:
-          addUb admitDefined(aoDiv, ocZeroDivisorUnsigned, dsArith), dpChecked
+          arithUb(aoDiv, ocZeroDivisorUnsigned)
         # RFC-0005 W3 (WA-4): float arithmetic raises under the float
         # checks, which are off by default; on where the routine whose body
         # holds the operation was compiled with them (`floatChecksOn`).

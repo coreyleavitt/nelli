@@ -657,8 +657,14 @@ const renderAsChoicesVersion* = "12"
   ## - RFC-0016 0.10.0 review integration (int8): the four fix slices above
   ##   each bumped from 354 to a reserved number (355 to 358), so the merged
   ##   walker is 358 and every slice's version-floor pin holds against it.
+  ## - RFC-0016 0.10.0 review F1 (358->359): the opaque-routine scan asks the
+  ##   definedness table for an arithmetic magic's kinds under the routine's
+  ##   profile. It had copied the signed-add `-fwrapv` guard onto the signed
+  ##   zero divisor, so an opaque `div`/`mod` in a `-d:nelliFwrapv` build with
+  ##   overflow checks off answered a trusted sat where the native run raises
+  ##   SIGFPE; it now carries `ubSignedDivZero`.
 
-const symexWalkerVersion* = "358"
+const symexWalkerVersion* = "359"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

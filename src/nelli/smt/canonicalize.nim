@@ -711,8 +711,16 @@ const renderAsChoicesVersion* = "12"
   ##   premise that every call is hoisted; a closure writing an address-taken
   ##   variable through its pointer, applied in `return c()`, left the frame's
   ##   local stale for a `finally` or a `var` write-back. No key bytes change.
+  ## - RFC-0016 review R7-4 (367->368): the concolic follow `while` asks each
+  ##   test's outcome under the facts its lowering added (a closure call's
+  ##   exit facts), as the follow `if` does. It asked under none, so a
+  ##   by-value closure whose result the pins reach only through a path fact
+  ##   (a write through an address-taken variable's pointer) read as
+  ##   undecided, the loop stopped following at the first test, and every
+  ##   branch after it recorded against the wrong loop count. No key bytes
+  ##   change.
 
-const symexWalkerVersion* = "367"
+const symexWalkerVersion* = "368"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

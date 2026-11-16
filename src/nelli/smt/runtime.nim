@@ -17496,9 +17496,21 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
     if active.len == 0: break
     var nextActive: seq[Path]
     for p in active:
+      # RFC-0016 review R7-4: the facts this guard's lowering and drain add
+      # (a closure call's exit facts, a drained raise's negation), as
+      # `walkIfFollowConcrete` reads them: they define a closure call's
+      # result in `cond`, and a result the pins do not reach is undecided.
+      let factBase = p.defectSurvivorPc.len
       let (cond, conds) = evalCondSynced(p, stmt.wcond, w)
       for dp in conds:
-        case followBranchOutcome(w, dp, cond, @[], wckWhile)
+        let newFacts =
+          if dp.defectSurvivorPc.len > factBase:
+            dp.defectSurvivorPc[factBase .. ^1]
+          else: newSeq[Z3Bool]()
+        if newFacts.len > 0 and
+           concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
+          continue
+        case followBranchOutcome(w, dp, cond, newFacts, wckWhile)
         of foOffRun:
           # RFC-0016 W3-z int6: the pins contradict this path (tail walk):
           # not the run, so it neither iterates nor leaves the loop.
@@ -22289,13 +22301,12 @@ proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
   ## guard and `return` points reconcile the effect where it is produced.
   ## Their tests are `tsymex_0016_r8a_inlinecalls`; each point was made to
   ## fail by removing it: the `if`/`elif` guard, the `while` test and the final
-  ## test, the follow `if` and the `return` value (R7-1, R7-3). Two have no red:
+  ## test, the follow `if` and the `return` value (R7-1, R7-3). One has no red:
   ## the `ifJoin` guard is a synthetic `__sym_sc_N` (or its `not`) or a bitset
   ## membership test, never a call, so no source shape reaches it (pinned over
-  ## the rendered IR, `ifJoinCalls`); the follow `while` test passes with its
-  ## reconcile removed on its one live fixture, a capture, which the closure's
-  ## application writes on both sides, and the pointer shape records the wrong
-  ## arm with or without it (the review ledger, R7-4). A guard hands
+  ## the rendered IR, `ifJoinCalls`). The follow `while` test is live: with its
+  ## reconcile removed `cWhQ` (a pointer write, `x` read by name after the
+  ## loop) goes red (R7-4). A guard hands
   ## `reconcileCells` a default `CellProducer`, no statement; a `return` value
   ## the assignment of `result`.
   ##

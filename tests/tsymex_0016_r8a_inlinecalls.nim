@@ -27,10 +27,12 @@
 ##   plain `if`, an `elif`, a `while` test, the final test after the last
 ##   unrolled body, `while n < 5 and c()`, and the concolic follow `if`. The
 ##   follow `while` test (`walkWhileFollowConcrete`) has the capture fixture
-##   `cWh`, which passes with the site's reconcile removed: a capture is
-##   written on both sides by the closure's application, and a pointer write
-##   through the follow walk's `while` records the wrong arm with or without
-##   the reconcile (R7-4, open in the review ledger), so that site has no red;
+##   `cWh` and two pointer fixtures (R7-4): `cWhP` reads the loop count after
+##   it, `cWhQ` reads `x` by name, which is current only if the test's
+##   reconcile ran (red with it removed). The follow `while` also asks each
+##   test under the facts its lowering added, as the follow `if` does: a
+##   pointer write left the closure's result undecided under the pins, so the
+##   loop stopped at its first test;
 ## * the `ifJoin` guard is the one site no source shape reaches: its guard is
 ##   the synthetic `__sym_sc_N` (or `not` of it) or a bitset membership test,
 ##   never a call (`ifJoinCalls`).
@@ -466,6 +468,32 @@ proc cIfF(v: int) =
   if x > 6:
     r = 2
 
+proc cWhP(v: int) =
+  var x = v
+  let p = addr x
+  var n = 0
+  let c = proc(): bool =
+    p[] = p[] + 2
+    p[] < 6
+  while c():
+    inc n
+  if n == 1:
+    n = 100
+
+# The follow `while` test's reconcile: the branch after the loop reads `x` by
+# name, current only if the last test reconciled.
+proc cWhQ(v: int) =
+  var x = v
+  let p = addr x
+  var n = 0
+  let c = proc(): bool =
+    p[] = p[] + 2
+    p[] < 6
+  while c():
+    inc n
+  if x * 10 + n == 71:
+    n = 100
+
 suite "R7-3: the concolic follow guards":
   test "follow `if` (witness 3: x is 7 after the guard)":
     check inlineSites(cIf) == @["if"]
@@ -500,6 +528,26 @@ suite "R7-3: the concolic follow guards, pointer":
       check r.branchTrace[0].armTaken == -1
       check r.branchTrace[1].armTaken == 0
 
+suite "R7-4: the concolic follow while, pointer":
+  test "follow `while` (witness 3: two tests, so n is 1)":
+    check inlineSites(cWhP) == @["while"]
+    let trace = @[integerChoice(3, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(cWhP, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 1
+    if r.branchTrace.len == 1:
+      check r.branchTrace[0].armTaken == 0
+  test "follow `while`, `x` read by name after the loop (reconcile live)":
+    check inlineSites(cWhQ) == @["while"]
+    let trace = @[integerChoice(3, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(cWhQ, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 1
+    if r.branchTrace.len == 1:
+      check r.branchTrace[0].armTaken == 0
+
 suite "R7-walker version":
   test "walker version floor":
-    check symexWalkerVersion.parseInt >= 367
+    check symexWalkerVersion.parseInt >= 368

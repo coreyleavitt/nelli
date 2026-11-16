@@ -1244,7 +1244,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## produced: leaves, a compound's own guards, a `return`'s value): 365->366.
     ## RFC-0016 review R7-1 (a bare `return` of a closure call reconciles the
     ## cells it wrote before it parks): 366->367.
-    check symexWalkerVersion == "367"
+    ## RFC-0016 review R7-4 (the follow `while` asks under its guard's
+    ## facts): 367->368.
+    check symexWalkerVersion == "368"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

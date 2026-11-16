@@ -28,6 +28,25 @@
 ##   * `symexAssume(cond)`  — no-op; Phase 1 recognizes it in the parser
 ##                            but does not yet restrict the SUT's
 ##                            normal-run input domain
+##
+## Layout (RFC-0016 D6). This module is the public facade: the user-facing
+## macros (their signatures and documentation), `symexForAll`, the DB macro
+## forms, and the re-exports. The implementation lives in `nelli/smt/`:
+##
+##   * `witness_render`   -- a witness as a `seq[ChoiceNode]`
+##   * `symex_cache`      -- the DB record codecs (soundness, gaps, notes,
+##                           witness / verdict / raised entries)
+##   * `witness_emit`     -- the typed witness reader emitters
+##   * `witness_fidelity` -- how faithful a rebuilt witness is; the splat
+##   * `replay_footprint` -- replay eligibility and the footprint scan
+##   * `routine_table`    -- the routine table a replay child carries
+##   * `heldset`          -- the held-set walk (proc-valued globals)
+##   * `replay_emit`      -- the code a replay emits (`emitReplayWitness`)
+##   * `replay_settle`    -- the verdict-side settle of replay results
+##   * `proc_lift`        -- the proc-value lift
+##   * `run_replayed`     -- the replayed-search body of the entry macros
+##   * `entry_parse`      -- what every entry macro does first
+##   * `find_emit`, `findall_emit`, `cover_emit` -- the macro bodies
 
 import std/[macros, sets, tables, algorithm, options, strutils, importutils, macrocache]
 from std/os import extractFilename, parentDir, `/`

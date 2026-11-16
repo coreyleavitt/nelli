@@ -8,13 +8,16 @@
 ##     recorded list below. A move that drops a symbol, or leaves one behind
 ##     in an implementation module, fails to compile here;
 ##   * a line ceiling on the facade. It is a ratchet: it may only fall. The
-##     number is what the facade honestly is after the move (the macro
-##     signatures, the re-exports, the layer-2/3 helpers and the thin
-##     driver macros that delegate to the `smt/` bodies).
+##     number is what the facade honestly is after the move: 961 lines were
+##     the 6186-line file's remainder (the macro signatures and their doc
+##     comments, the re-exports, `forAllWithSymexSeeds`/`symexForAll`, the
+##     small cache macro forms, and the `nelliVmAliasAudit` self-audit block
+##     that now also audits the moved modules). Ceiling 970, a little over,
+##     so a doc-comment edit is not a failure; a new body in the facade is.
 import std/[unittest, strutils]
 import nelli/symex
 
-const facadeLineCeiling = 1500
+const facadeLineCeiling = 970
 
 const facadeSrc = staticRead("../src/nelli/symex.nim")
 

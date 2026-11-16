@@ -1234,7 +1234,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## a signed zero divisor is undefined under `-fwrapv`): 358->359.
     ## RFC-0016 0.10.0 review int8 (the bound walk fails closed at a node
     ## kind it does not list): 359->360.
-    check symexWalkerVersion == "360"
+    ## RFC-0016 review D1 S3 (the opaque scan classes an operand by its
+    ## width): 359->361 (360 is the int8 integration's).
+    check symexWalkerVersion == "361"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

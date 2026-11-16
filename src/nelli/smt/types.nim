@@ -21,6 +21,10 @@ export OpaqueScan, unscanned, undefinedKinds, defectNames, ubMaskOf, ubSetOf,
        replayScan, fixedUndefinedKinds, viaKeys
 import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`, the proof `mkMathCall` / `mkArithBlock` take
 import ./pragmaaxes    ## RFC-0016 ADM-IR: `PragmaModel`, the proof `mkArithBlock` takes
+import ./arith_regime  ## RFC-0016 review D1 S2: `ArithScope`, `ArithCheck`, the proofs and the build predicates live there
+export ArithScope, ArithCheck, ArithScopeProof, arithScope, arithFromPragma,
+  arithFromStdlib, arithFromBuild, replayArith, arithChecksFor, buildWraps,
+  signedWrapDefined
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:
@@ -1376,21 +1380,6 @@ type
     ## the field's name, an index step `[` and the IR name of a `let`
     ## holding the index, and `?` a step the walk cannot follow.
 
-  ArithScope* = enum
-    ## RFC-0016 W1-d2c. Which arithmetic a routine body is walked under, in a
-    ## build whose own overflow checks are off (`buildWraps()`). Checked-ness is
-    ## per routine: the build's setting unless an enclosing `push overflowChecks:
-    ## on` says otherwise. The parser stamps the routine's body block; the
-    ## walker pushes it for the block and pops it after, so a
-    ## caller's scope never leaks into a callee and back.
-    asInherit   ## no claim (every block but a routine body; any body in a checks-on build)
-    asBuild     ## unchecked signed arithmetic: the build's (`ubSignedOverflow`)
-    asChecked   ## `push overflowChecks: on` in a checks-off build: `OverflowDefect`
-    asUnchecked ## RFC-0016 K4c. A stdlib body under a push that turns its
-                ## overflow checks off (`math.nim`'s `checks: off`) in a build
-                ## that checks: unchecked signed arithmetic, as `asBuild` is
-                ## in a checks-off build. Only a `stdlibAxis` row stamps it.
-
   IRStmt* = ref object
     case kind*: IRStmtKind
     of isBlock:
@@ -2120,26 +2109,6 @@ type
     ## silently changes every cached `;de=` digest. Never reorder — only append.
     dkOverflowDefect     ## R16-1 (Phase 16 ADR-0011 F3): integer +/-/* overflow
     dkDivByZeroDefect    ## R16-1 (Phase 16 ADR-0011 F3): div/mod by zero
-
-  ArithCheck* = enum
-    ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks the walker
-    ## EMITS. RFC-0016 K10d: the build alone decides (`arithChecksFor`); the
-    ## `SymexSettings.arithChecks` setting that used to override it is gone.
-    ## An unchecked kind is never forked so it never pays path-multiplicative
-    ## cost. `defectExclusions` is the orthogonal "surfacing" axis: the fork is
-    ## emitted but the finding is suppressed when the kind is excluded.
-    ##
-    ## ORDINAL-STABILITY RULE: ALWAYS APPEND new members at the END of this
-    ## enum; the ordinals are the order the build profile reads.
-    acOverflow   ## fork +/-/* overflow → OverflowDefect raise
-    acDivByZero  ## fork div/mod-by-zero → DivByZeroDefect raise. Only with
-                 ## `acOverflow` also on (RFC-0005 S8aa): Nim emits its zero
-                 ## check under `overflowChecks` alone, so with that off a
-                 ## zero divisor reaches the C division, which traps (SIGFPE);
-                 ## it is then a survivor-only trap, never a raise.
-    acRange      ## fork float→int out-of-range → RangeDefect raise (R16-2);
-                 ## also int-width narrowing (R16-5, deferred). Scope in R16-1:
-                 ## float→int domain checks only (RD2) — no fork emitted yet.
 
   InlinePolicy* = enum
     ## Phase 15 Z3 (def moved here from Cluster C so SymexSettings.inlinePolicy
@@ -3494,44 +3463,10 @@ proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
 
-type
-  ArithScopeProof* = object
-    ## RFC-0016 ADM-IR (section 8.1). The proof that a block's arithmetic
-    ## claim was stamped by the axis that owns it: the pragma axis (a `push
-    ## overflowChecks: on` row), the stdlib-body axis (a routine whose
-    ## check-option delta is modelled) or the build (its own arithmetic is
-    ## unchecked). The scope is private, so `mkArithBlock` cannot be handed a
-    ## bare `ArithScope` and the three constructors below are the only way in.
-    scope: ArithScope
-
-func arithScope*(p: ArithScopeProof): ArithScope = p.scope
-
-func arithFromPragma*(a: Admit[PragmaModel]): ArithScopeProof =
-  ## `asChecked`: the admitted `routine/overflowChecks` pragma row (a `push
-  ## overflowChecks: on` in a build whose own checks are off).
-  doAssert a.admitted, "arithFromPragma: " & a.decline[1]
-  doAssert a.cell.scope == axPragma and a.cell.key == "routine/overflowChecks",
-    "arithFromPragma: " & render(a.cell) & " is not the overflowChecks row"
-  ArithScopeProof(scope: asChecked)
-
-func arithFromStdlib*(a: Admit[StdlibBody]): ArithScopeProof =
-  ## `asUnchecked`: an admitted stdlib-body row whose body trips
-  ## `overflowChecks` (`exercises`), which `math.nim`'s push turns off.
-  doAssert a.admitted, "arithFromStdlib: " & a.decline[1]
-  doAssert coOverflow in a.payload.exercises,
-    "arithFromStdlib: " & render(a.cell) & " does not exercise overflowChecks"
-  ArithScopeProof(scope: asUnchecked)
-
-func replayArith*(s: ArithScope): ArithScopeProof =
-  ## The IR emit's rebuild of a stamp it already read. The parser's emit is
-  ## the only caller; `tests/tsymex_0016_admir.nim` counts the uses.
-  doAssert s != asInherit, "replayArith: asInherit is no claim"
-  ArithScopeProof(scope: s)
-
 proc mkArithBlock*(proof: ArithScopeProof; stmts: seq[IRStmt]): IRStmt =
   ## RFC-0016 W1-d2c. A routine body walked under `proof`'s arithmetic;
   ## ADM-IR: the scope rides a proof of the axis that stamped it.
-  IRStmt(kind: isBlock, stmts: stmts, blkArith: proof.scope)
+  IRStmt(kind: isBlock, stmts: stmts, blkArith: arithScope(proof))
 
 proc withCheckScope*(b: IRStmt; on: set[CheckOption]): IRStmt =
   ## RFC-0016 PRC-07. `b`, a routine body block, walked under the checks `on`
@@ -5244,38 +5179,6 @@ proc defaultResourceBudget*(): ResourceBudget =
   ## RFC-0010: the values now live on the type, so this is `ResourceBudget()`
   ## and a partial literal carries them too. Kept as a name for one release.
   ResourceBudget()
-
-func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
-  ## RFC-0016 W1-d2. The arithmetic checks a build `b` implies: the checks its
-  ## compiled code performs. The one source the walker's check gates read
-  ## (K10d removed the `SymexSettings.arithChecks` override).
-  if coOverflow in b.checks: result.incl {acOverflow, acDivByZero}
-  if coRange in b.checks: result.incl acRange
-
-func buildWraps*(b: BuildSemantics = buildSemantics): bool =
-  ## RFC-0016 W1-d2 (W-07). Whether signed `+`, `-`, `*` (and `div`) in this
-  ## build are UNCHECKED: with `overflowChecks` off the C operation is
-  ## undefined on overflow (not a wrap, unless the build is `-d:nelliFwrapv`,
-  ## which `signedWrapDefined` reports), so the walker does not model a wrap
-  ## and a trusted answer for 32 and 64 bit. The ONE predicate
-  ## `wraps()`, the wrap scan and the exact-offset promotion read;
-  ## settings never feed it (the build is what the native program does). A routine under
-  ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
-  coOverflow notin b.checks
-
-func arithFromBuild*(b: BuildSemantics = buildSemantics): ArithScopeProof =
-  ## `asBuild`: the build's own signed arithmetic is unchecked. Not a table
-  ## row: the build axis's claim is the build itself.
-  doAssert buildWraps(b), "arithFromBuild: the build checks its arithmetic"
-  ArithScopeProof(scope: asBuild)
-
-func signedWrapDefined*(width: int; b: BuildSemantics = buildSemantics): bool =
-  ## RFC-0016 K5a. Whether an unchecked signed `+`, `-`, `*` or negation at
-  ## `width` bits is a DEFINED wrap in build `b`: always below `int`'s width
-  ## (8 and 16 bit: C computes in the promoted `int` and the narrowing wraps),
-  ## and at 32 and 64 bit only when the build compiles with `-fwrapv`
-  ## (`-d:nelliFwrapv`). `low(T) div -1` and `mod -1` are not covered by it.
-  width in {8, 16} or b.fwrapv
 
 proc defaultSymexSettings*(): SymexSettings =
   ## Phase 2 endpoint: `isOptimised` is now the default. Range-typed

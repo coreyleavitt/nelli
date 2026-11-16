@@ -211,20 +211,15 @@ import nelli/smt/canonicalize
 import audit_scan_utils
 
 # The files scanned are `n36Sources()` (tests/audit_scan_utils.
-# nim): `runtime.nim` plus every leaf and module cut out of it. Read at
+# nim): the whole `runtimeFamilyFiles`, including `runtime_exceptions.nim`,
+# `runtime_floats.nim` and `runtime_closures.nim` (RFC-0016 D3-fix-c: they
+# were `include`d files this audit's list never named, and are scanned now:
+# 5 pattern-(A) sites marked `boundary-abort` and 5 pattern-(B) sites marked
+# `category-c`, 10 in all). Read at
 # TEST RUNTIME (see header). Counts are pinned over the whole family: a
 # file move changes which file holds a site, not how many there are.
-const
-  neverScannedModules = ["runtime_exceptions.nim", "runtime_floats.nim",
-                         "runtime_closures.nim"]
-    ## Modules that were `include`d into `runtime.nim` before RFC-0016 D3c-3/-4/-5
-    ## and that this audit's file list never named: they carry bare raises with
-    ## no marker, which is a pre-existing gap, not something a move created.
-    ## Scanning them is new audit scope (it needs a triage of each raise), so
-    ## the audit follows the code that WAS in scope, and leaves these out.
-
 proc n36Sources(): seq[tuple[label, path: string]] =
-  runtimeFamilySources(neverScannedModules)
+  runtimeFamilySources()
 
 const
   refSymexPrefix = "raise (ref Symex"
@@ -352,7 +347,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "pattern (A) site inventory: 32 marked lines across the runtime family (6 runtime.nim + 20 runtime_strings.nim + 6 runtime_heap.nim when pinned)":
+  test "pattern (A) site inventory: 37 marked lines across the runtime family (6 runtime.nim + 20 runtime_strings.nim + 6 runtime_heap.nim + 5 runtime_exceptions/floats when pinned)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -401,9 +396,14 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # longer marked/counted, per this file's own established convention for
     # a converted site) and 6 RECLASSIFIED `verified-unreachable` (still raw
     # raises, still marked -- 13 -> 6).
-    check total == 32
+    ## 32 -> 37 (RFC-0016 D3-fix-c): `runtime_exceptions.nim` (2) and
+    ## `runtime_floats.nim` (3) are scanned now. Each is a `boundary-abort`: a
+    ## `SymexNotInHandlerError` / `SymexUnsupportedOpError` that
+    ## `runSymexCaught` turns into sxUnknown, pinned from nested frames by the
+    ## E8 and F6 suites. No site was added; five were newly scanned.
+    check total == 37
 
-  test "pattern (B) site inventory: 84 marked lines across the runtime family (81 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim when pinned)":
+  test "pattern (B) site inventory: 89 marked lines across the runtime family (81 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim + 5 runtime_exceptions/floats/closures when pinned)":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -464,9 +464,14 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## `injectShapeFault`.
     ## 80 -> 81 (RFC-0005 S8cl). `storeOrdinal`'s range check, the check `F(v)`
     ## made implicitly: category-c.
-    check total == 84
+    ## 84 -> 89 (RFC-0016 D3-fix-c): five newly scanned `category-c` sites, one
+    ## each in `runtime_exceptions.nim` (`lowerExnArm`'s else), `runtime_closures.nim`
+    ## (`lowerClosureArm`'s else) and three in `runtime_floats.nim`
+    ## (`toBv64ForFp`'s else, `int()`'s non-float operand, `lowerFloatArm`'s
+    ## else). No site was added.
+    check total == 89
 
-  test "N46-followup-3: pattern (B) category breakdown -- 81 category-c, 0 category-d (runtime family) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 89 category-c, 0 category-d (runtime family) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -494,7 +499,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 80 -> 82: the same two batch 8 test-injection-only sites added above.
     ## 82 -> 83: the same S8ce `injectShapeFault` site added above.
     ## 83 -> 84: the same `storeOrdinal` site added above (RFC-0005 S8cl).
-    check cCount == 84
+    ## 84 -> 89: the five newly scanned pattern-(B) sites (D3-fix-c).
+    check cCount == 89
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime family)":

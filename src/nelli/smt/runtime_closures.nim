@@ -266,6 +266,6 @@ proc lowerClosureArm*(env: Env, e: IRExpr): SymVal =
     # `lowerClosureCall`.
     lowerHooks.lowerClosureCall(env, e)
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: `lower` dispatches only iekLambda/iekClosureCall to lowerClosureArm (runtime.nim, the single call site), both handled above]
       "lowerClosureArm: unexpected e.kind=" & $e.kind &
       " (not iekLambda/iekClosureCall)")

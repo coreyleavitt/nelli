@@ -64,12 +64,12 @@ proc toBv64ForFp(sv: SymVal): Z3BitVec[64] =
     # parser arm should ever reach (all integer types lower to BV variants via
     # their abstraction layer). Classify sxUnknown (honest) rather than risking
     # the F5 hang shape.
-    raise (ref SymexUnsupportedOpError)(op: "float(svInt)",
+    raise (ref SymexUnsupportedOpError)(op: "float(svInt)",  # [raise-audited: boundary-abort -- caught by runSymexCaught -> sxUnknown + feUnsupportedOpAborted; CR-17 defensive decline, an svInt operand is never silently converted]
       msg: "float() of an unbounded-Int operand (svInt) is not modeled " &
            "(CR-17: emitting int2bv(Z3Int)→FP risks the F5 ordering pathology; " &
            "the integer abstraction layer should lower integer params to BV, not svInt)")
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: float() takes only integer operands (Nim sem), and an integer-typed expression lowers to svBV8/16/32/64 or svInt, all handled above]
       "float(): operand is not an integer — got " & $sv.kind)
 
 proc lowerMathCall(env: Env, e: IRExpr): SymVal =
@@ -79,7 +79,7 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
   ## boundary -> sxUnknown + feUnsupportedOp; never a silent UNSAT).
   let op = e.mathOp
   if e.mathArgs.len == 0:
-    raise (ref SymexUnsupportedOpError)(op: "math." & op,
+    raise (ref SymexUnsupportedOpError)(op: "math." & op,  # [raise-audited: boundary-abort -- caught by runSymexCaught -> sxUnknown + feUnsupportedOpAborted; mkMathCall admits only rows with args, so a defensive decline]
       msg: "math." & op & ": zero-arg float op is unsupported")
   # RFC-0016 ADM-IR: the node exists only for a row admitted at `ssFloatCall`
   # (`mkMathCall`); the parser declines the rest.
@@ -177,7 +177,7 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
     else:
       return f64(ite(isNegative(b.fp64), -abs(a.fp64), abs(a.fp64)))
   else:
-    raise (ref SymexUnsupportedOpError)(op: "math." & op,
+    raise (ref SymexUnsupportedOpError)(op: "math." & op,  # [raise-audited: boundary-abort -- caught by runSymexCaught -> sxUnknown + feUnsupportedOpAborted, never a silent UNSAT; unmodeled math.<op> pinned from nested frames by tsymex_phase15_F6 (D3-fix-c)]
       msg: "math." & op & " is not modeled by the symex engine")
 
 proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
@@ -299,7 +299,7 @@ proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
                  else: sv.fp32 >= mkFloat32(float32(loF))
       domainCond = loOk and (sv.fp32 < mkFloat32(float32(hiExclF)))
       exactV = convAt(sv.fp32, 8, 24)
-    else: raise newException(ValueError, "int(): operand is not a float")
+    else: raise newException(ValueError, "int(): operand is not a float")  # [raise-audited: category-c: the operand of int(float) is float-typed (Nim sem) and a float-typed expression lowers to svFloat32/svFloat64, both handled above]
     let fresh = bvVar(tInt(w, signed), freshDegradeName("__convFloatToIntFresh"))
     let value = lowerHooks.iteSV(domainCond, exactV, fresh)
     let bound = convBoundOf(domainCond, e.convSite, lowering.cls)
@@ -319,6 +319,6 @@ proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
   of iekMathCall:
     lowerMathCall(env, e)
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: `lower` dispatches only iekFloatLit/iekConvIntToFloat/iekConvFloatToInt/iekMathCall to lowerFloatArm (runtime.nim, the single call site), all handled above]
       "lowerFloatArm: unexpected e.kind=" & $e.kind &
       " (not iekFloatLit/iekConvIntToFloat/iekConvFloatToInt/iekMathCall)")

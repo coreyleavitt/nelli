@@ -63,6 +63,17 @@ proc fCopySign(x, y: float) =
 proc fLog(x: float) =
   if ln(x) == 0.0: symexTarget("log")            # math.ln — unmodeled transcendental
 
+# D3-fix-c: the unmodeled-op raise reached from a nested frame.
+proc fLogHelper(x: float): bool =
+  var i = 0
+  while i < 2:
+    if x > float(i):
+      if ln(x) == 0.0: return true
+    inc i
+  false
+proc fLogNested(x: float) =
+  if fLogHelper(x): symexTarget("log")
+
 suite "symex Phase 15 — F6 std/math float ops + FP predicates":
 
   test "sqrt(x) > 2.0 -> sat (witness x > 4.0)":
@@ -109,3 +120,10 @@ suite "symex Phase 15 — F6 std/math float ops + FP predicates":
     check r.status == sxUnknown
     check r.errors[0].kind == feUnsupportedOpAborted
     check r.errors[0].severity == sevError
+
+  test "unmodeled math.ln from nested frames is sxUnknown, never UNSAT":
+    ## D3-fix-c: pins N36's `boundary-abort` classification of
+    ## `lowerMathCall`'s unmodeled-op raise.
+    let r = symexFind(fLogNested, tLabel("log"))
+    check r.status == sxUnknown
+    check r.errors[0].kind == feUnsupportedOpAborted

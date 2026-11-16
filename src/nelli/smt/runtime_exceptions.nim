@@ -28,7 +28,7 @@ proc lowerExnArm*(env: Env, e: IRExpr): SymVal =
     # `currentInFlightMsg` by the handler-body walk; a `none` inFlightId means we
     # are outside any handler → classified `eeNotInHandler` (Invariant 3).
     if currentInFlightTypeId.isNone:
-      raise (ref SymexNotInHandlerError)(
+      raise (ref SymexNotInHandlerError)(  # [raise-audited: boundary-abort -- caught by runSymexCaught -> sxUnknown + eeNotInHandler, never a silent UNSAT; reached outside a handler from nested frames by tsymex_phase15_E8 (D3-fix-c)]
         msg: "getCurrentExceptionMsg")
     SymVal(kind: svString, str: mkString(currentInFlightMsg.get("")))
   of iekGetCurrentExn:
@@ -37,7 +37,7 @@ proc lowerExnArm*(env: Env, e: IRExpr): SymVal =
     # sort is `Exn_<inFlightId>`. Fields are not modeled (extraction emits an
     # `eeUninterpRefExtraction` sevHint). Out of a handler → `eeNotInHandler`.
     if currentInFlightTypeId.isNone:
-      raise (ref SymexNotInHandlerError)(
+      raise (ref SymexNotInHandlerError)(  # [raise-audited: boundary-abort -- caught by runSymexCaught -> sxUnknown + eeNotInHandler, never a silent UNSAT; reached outside a handler from nested frames by tsymex_phase15_E8 (D3-fix-c)]
         msg: "getCurrentException")
     let inFlightId  = currentInFlightTypeId.get
     let srtName = "Exn_" & inFlightId
@@ -53,6 +53,6 @@ proc lowerExnArm*(env: Env, e: IRExpr): SymVal =
     SymVal(kind: svUninterpRef, uninterpAst: anyAst,
            sortName: srtName, typeTag: inFlightId)
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: `lower` dispatches only iekGetCurrentExnMsg/iekGetCurrentExn to lowerExnArm (runtime.nim, the single call site), both handled above]
       "lowerExnArm: unexpected e.kind=" & $e.kind &
       " (not iekGetCurrentExnMsg/iekGetCurrentExn)")

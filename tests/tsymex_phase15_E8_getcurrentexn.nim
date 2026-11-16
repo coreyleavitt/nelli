@@ -46,6 +46,39 @@ proc msgOutsideHandler(x: int): int =
   if getCurrentExceptionMsg() == "":
     symexTarget("never")
 
+# --- 3b. D3-fix-c: the same two raises, reached from nested frames ----------
+# N36 audits `lowerExnArm`'s two `SymexNotInHandlerError` raises as a
+# boundary abort (caught by `runSymexCaught`). A raise lost in a nested frame
+# would let the walk fall through to a false UNSAT, so reach both from a
+# branch inside a loop inside a callee.
+proc nestedMsgHelper(x: int): bool =
+  var i = 0
+  while i < 2:
+    if x > i:
+      if getCurrentExceptionMsg() == "m":
+        return true
+    inc i
+  false
+
+proc msgNestedOutside(x: int): int =
+  result = x
+  if nestedMsgHelper(x):
+    symexTarget("never")
+
+proc nestedExnHelper(x: int): bool =
+  var i = 0
+  while i < 2:
+    if x > i:
+      discard getCurrentException()
+      return true
+    inc i
+  false
+
+proc exnNestedOutside(x: int): int =
+  result = x
+  if nestedExnHelper(x):
+    symexTarget("never")
+
 # --- 4. zero-arg raise (no msg) -> getCurrentExceptionMsg() yields "" --------
 # Nim's no-message raise form is an object construction with no `msg:` field
 # (`newException` itself requires a message). The parser sees an nnkObjConstr
@@ -81,6 +114,22 @@ suite "symex Phase 15 E8 — getCurrentException / getCurrentExceptionMsg":
         check e.severity == sevError
         sawNotInHandler = true
     check sawNotInHandler
+
+  test "E8: getCurrentExceptionMsg outside handler, nested frames -> eeNotInHandler, never UNSAT":
+    let r = symexFind(msgNestedOutside, tLabel("never"))
+    check r.status == sxUnknown
+    var saw = false
+    for e in r.errors:
+      if e.kind == eeNotInHandler: saw = true
+    check saw
+
+  test "E8: getCurrentException outside handler, nested frames -> eeNotInHandler, never UNSAT":
+    let r = symexFind(exnNestedOutside, tLabel("never"))
+    check r.status == sxUnknown
+    var saw = false
+    for e in r.errors:
+      if e.kind == eeNotInHandler: saw = true
+    check saw
 
   test "E8: zero-arg raise -> getCurrentExceptionMsg yields empty string":
     let r = symexFind(msgNoMessage, tLabel("hit"))

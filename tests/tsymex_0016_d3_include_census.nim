@@ -1,6 +1,6 @@
 ## RFC-0016 0.10.0 review D3 (the runtime `include` files share one namespace):
-## the include census. Slice D3c-0 freezes the surface, slice D3c-1 extends it
-## to the `symval.nim` leaf.
+## the include census. Slice D3c-0 freezes the surface, slices D3c-1 and D3c-2 extend it
+## to the `symval.nim` and `walk_state.nim` leaves.
 ##
 ## `src/nelli/smt/runtime.nim` textually includes five files. An include sees
 ## every name `runtime.nim` defines, so the boundary is invisible to the
@@ -20,7 +20,10 @@
 ##     the real coupling;
 ##   * the forward-declaration block in `runtime.nim` (`allocRefSort` ..
 ##     `svCellWf`) names only symbols that `runtime_heap.nim` defines;
-##   * the `symval.nim` leaf imports only the allowed leaves, and `runtime.nim`
+##   * the `symval.nim` and `walk_state.nim` leaves import only the allowed
+##     leaves, `walk_state` resets every threadvar it owns in one proc, its
+##     `sync*` procs append on the sinks pointer (no forward declaration is
+##     left in `runtime.nim`), and `runtime.nim`
 ##     defines none of the names that moved into it.
 import std/[unittest, os, strutils, sets, tables]
 
@@ -33,13 +36,13 @@ const
     "runtime_closures.nim", "runtime_heap.nim"]
 
   ## Ratchet-down only: the measured count of distinct runtime-private
-  ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1, once the value core left runtime.nim: as below).
+  ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1: 52/14/6/23/146; D3c-2, once the walk state left runtime.nim: as below).
   ceilings = {
-    "runtime_strings.nim": 52,
-    "runtime_floats.nim": 14,
-    "runtime_exceptions.nim": 6,
-    "runtime_closures.nim": 23,
-    "runtime_heap.nim": 146}.toTable
+    "runtime_strings.nim": 22,
+    "runtime_floats.nim": 7,
+    "runtime_exceptions.nim": 2,
+    "runtime_closures.nim": 9,
+    "runtime_heap.nim": 137}.toTable
 
   fwdFirst = "proc allocRefSort*("
   fwdLast = "proc allocateSeqDataRaw("
@@ -198,3 +201,115 @@ suite "RFC-0016 D3c-1: the symval leaf":
     let at = rt.find("proc resetSymexRunState(")
     check at >= 0
     check rt[at .. ^1].contains("\n  resetLoweringSink()")
+
+const
+  ## What slice D3c-2 moved into `walk_state.nim`.
+  wsAllowed = ["std/tables", "std/options", "z3", "./types", "./symval",
+               "./definedness", "./errorkind", "./pcre_syntax"]
+
+  wsMoved = [
+    "currentWalkCtxPtr", "currentRefSorts", "currentNilConsts",
+    "currentMaxSplitParts", "currentInFlightTypeId", "currentInFlightMsg",
+    "currentExnRefCounter", "lastGetCurrentExnRef", "currentClosureSyms",
+    "currentClosureBodies", "currentDistinctSorts",
+    "convFloatToIntBoundConds", "rangeDefectConds", "divByZeroConds",
+    "overflowConds", "strIndexOobConds", "regexRaiseMsgs",
+    "parseIntRaiseConds", "regexRecDefConds", "regexRecFactConds",
+    "regexPointSites", "regexLimitSites", "stripDecompConds",
+    "stripSynthCounter", "DistinctSortEntry", "ConvBound", "ArithTrap",
+    "ParseIntRaise", "ClosureSymKey", "ClosureBody", "RegexPointSite",
+    "RegexLimitSite", "RaiseSinkKind", "LowerSinks", "LowerHooks"]
+
+  syncProcs = [
+    "syncRefSortEntry", "syncDistinctSortEntry", "syncClosureSymEntry",
+    "syncClosureBodyEntry", "syncFreshnessCapHint",
+    "syncDistinctBijectivityHint", "syncRangeDefectCond",
+    "syncExtractionError", "syncClosureCallError",
+    "syncConvFloatToIntBoundCond", "syncParseIntRaiseCond",
+    "syncDivByZeroCond", "syncOverflowCond", "syncStrIndexOobCond",
+    "syncSeqOobCond", "syncRegexRaiseMsg", "syncUninitReadCond",
+    "syncArithTrapCond"]
+
+suite "RFC-0016 D3c-2: the walk_state leaf":
+  test "walk_state.nim imports only the allowed leaves":
+    let ws = readSmt("walk_state.nim")
+    var seen: seq[string]
+    for l in ws.splitLines:
+      let t = stripLine(l).strip()
+      if t.startsWith("import "):
+        for m in t[7 .. ^1].split(','):
+          var s = m.strip()
+          let k = s.find(" as ")
+          if k >= 0: s = s[0 ..< k]
+          seen.add s
+      elif t.startsWith("from "):
+        seen.add t.splitWhitespace[1]
+    checkpoint $seen
+    for s in seen: check s in wsAllowed
+    check "./symval" in seen
+
+  test "runtime.nim defines none of the moved names":
+    let defs = definedNames(readSmt("runtime.nim"))
+    for n in wsMoved:
+      checkpoint n
+      check n notin defs
+
+  test "every threadvar of walk_state.nim is reset by resetWalkState":
+    let ws = readSmt("walk_state.nim")
+    let at = ws.find("proc resetWalkState*(")
+    check at >= 0
+    let resetBody = ws[at .. ^1]
+    var tvs: seq[string]
+    for l in ws.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs.len == 25
+    for n in tvs:
+      checkpoint n
+      check resetBody.contains("\n  " & n & " = ")
+
+  test "resetSymexRunState calls resetWalkState":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    check rt[at .. ^1].contains("\n  resetWalkState(")
+
+  test "the sync* forward declarations are gone, the bodies live in the leaf":
+    let rt = readSmt("runtime.nim")
+    let ws = readSmt("walk_state.nim")
+    let rtDefs = definedNames(rt)
+    let wsDefs = definedNames(ws)
+    for n in syncProcs:
+      checkpoint n
+      check n notin rtDefs
+      check n in wsDefs
+      # the body appends on the sinks pointer, not by casting the walk pointer
+      let at = ws.find("proc " & n & "*(")
+      check at >= 0
+      let e = ws.find("\nproc ", at + 1)
+      let body = ws[at ..< (if e < 0: ws.len else: e)]
+      check "currentLowerSinks" in body
+      check "WalkCtx" notin body
+
+  test "WalkCtx embeds the sinks and sets the pointer where it sets the walk":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("    sinks:     LowerSinks")
+    var sets, clears, setSinks, clearSinks = 0
+    for l in rt.splitLines:
+      let t = l.strip()
+      if t.startsWith("currentWalkCtxPtr = addr w"): inc sets
+      if t.startsWith("currentWalkCtxPtr = nil"): inc clears
+      if t.startsWith("currentLowerSinks = addr w.sinks"): inc setSinks
+      if t.startsWith("currentLowerSinks = nil"): inc clearSinks
+    check sets >= 3
+    check setSinks == sets
+    check clearSinks == clears
+
+  test "the lower hooks are declared and one include is live through them":
+    let ws = readSmt("walk_state.nim")
+    for h in ["lower", "lowerClosureCall", "seqElemAt", "storeSeqElem",
+              "sameSymVal", "entryValueOf"]:
+      checkpoint h
+      check ws.contains("\n  " & h & "*: proc(")
+    check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")
+    check readSmt("runtime.nim").contains("\nlowerHooks = LowerHooks(")

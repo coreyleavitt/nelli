@@ -1402,8 +1402,8 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   # CR-9 Stage 4: read nilConsts from live WalkerStatics (nilDerefFork always
   # runs inside a walk arm — currentWalkCtxPtr != nil guaranteed here).
   let nilConst =
-    if currentWalkCtxPtr != nil:
-      cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.nilConsts[typeId]
+    if currentLowerSinks != nil:
+      currentLowerSinks[].nilConsts[typeId]
     else:
       currentNilConsts[typeId]
   # SHORT-CIRCUIT: a pc-implied non-nil ⇒ no nil path, no extra constraint.

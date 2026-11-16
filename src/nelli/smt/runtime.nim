@@ -41,6 +41,8 @@ import ./variant_layout as vl   ## RFC-0016 PRC-07 slice A: a variant's C layout
 import ./abstraction
 import ./symval   ## RFC-0016 review D3c-1: the value core (SymVal, Env, the Symex*Error family)
 export symval
+import ./walk_state   ## RFC-0016 review D3c-2: the per-run walk state, the sinks and the hooks
+export walk_state
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
 import ./pcre_engine   ## RFC-0005 S8bt: the engine of unanchored calls
@@ -292,7 +294,7 @@ type
     dsWalk          ## `w.walkDegradeErrors` (the default)
     dsHeapDepth     ## `heapDepthErrors` threadvar + `w.heapDepthErrors`
     dsNewFieldZero  ## `newFieldZeroErrors` threadvar + `w.newFieldZeroErrors`
-    dsClosure       ## `currentClosureCallErrors` threadvar + `w.closureCallErrors`
+    dsClosure       ## `currentClosureCallErrors` threadvar + `w.sinks.closureCallErrors`
     dsUnknownExn    ## `unknownExnWarnings` threadvar + `w.unknownExnWarnings`,
                     ## recorded at `sevWarning` (RFC-0005 S6b: `routeRaise`'s
                     ## `eeUnknownExnType`, a behaviour substitution whose
@@ -999,17 +1001,6 @@ proc mkZ3IntLit(v: int64): Z3Int =
 # mechanism. `WalkerStatics.distinctSorts` (ADR-0008 D4) records the same map
 # for post-walk inspection; the threadvar is the live populator.
 
-type DistinctSortEntry = object
-  sort:    Z3Sort[stUninterpreted]    ## the fresh "DistinctName" sort
-  inject:  RawZ3FuncDecl              ## inject_T: Base → Distinct
-  eject:   RawZ3FuncDecl              ## eject_T: Distinct → Base
-
-var currentDistinctSorts* {.threadvar.}: Table[string, DistinctSortEntry]
-  ## Phase 15 G4. Per-run cache of distinct sorts + their inject/eject
-  ## func-decls, keyed by distinct type name. Reset at `runSymexImpl` entry.
-  ## Shared across all call frames (one entry per distinct type per run) — the
-  ## sort allocation + bijectivity axioms fire AT MOST ONCE per (name, run).
-
 var distinctBijectivityHints* {.threadvar.}: seq[SymexErrorInfo]
   ## Phase 15 G4. Accumulator for `geDistinctBijectivitySkipped` (sevHint),
   ## emitted when a distinct type's base is FP/String (bijectivity elided).
@@ -1508,58 +1499,6 @@ proc checkedEq*(ctx: Z3Context; a, b: RawZ3Ast): RawZ3Ast =
     return freshOfSort(ctx, ctx.checkErr Z3_mk_bool_sort(ctx.raw))
   ctx.checkErr Z3_mk_eq(ctx.raw, a, b)
 
-type ConvBound* = object
-  ## K10a-float. One `convFloatToIntBoundConds` deposit: the conversion's
-  ## in-range domain, and the source site that names its undefined side.
-  cond*: Z3Bool
-  site*: string
-  cls*: OperandClass   ## the `convert/` row (`floatToIntLowering`)
-
-var convFloatToIntBoundConds* {.threadvar.}: seq[ConvBound]
-  ## Phase 15 CR-3/CR-4; RFC-0005 S8g. The in-range DOMAIN of each float ->
-  ## int conversion lowered by `lower(iekConvFloatToInt)` (the operand's
-  ## truncation fits the target type). The lowered value is
-  ## `ite(domain, exact, fresh)`; `drainConvFloatToIntFresh` (a stage of
-  ## `drainScalarRaiseForks`) forks the continuation on it -- clean in range,
-  ## `feConvFloatToIntUndefined`-tainted out of range. Until S8g the walker
-  ## NARROWED the path to the domain here and raised `RangeDefect` outside it
-  ## (ADR-0011 R16-2, reversed: Nim never raises there). Reset at each
-  ## `lower` call-site in the walker (before the call). Reset at
-  ## `runSymexImpl` entry.
-
-var rangeDefectConds* {.threadvar.}: seq[Z3Bool]
-  ## RFC-0005 S8g. Raise-fork sink for `RangeDefect` predicates deposited by
-  ## a lowering: a `range` target's check on a float -> int conversion
-  ## (`Natural(f)`), a negative slice length (`s[a .. b]` with `b < a - 1`),
-  ## and `del`'s `Natural` index. Drained by `drainRangeRaises` (a
-  ## `genRaiseForkDrain`, gated by `acRange`). The name was R16-2's parallel
-  ## float -> int domain sink, retired with that model; this is a plain
-  ## raise-predicate sink like `seqOobConds`. `syncRangeDefectCond` appends
-  ## here when in a walk.
-
-var divByZeroConds* {.threadvar.}: seq[Z3Bool]
-  ## Phase 16 R16-3. Raise-fork sink for div/mod-by-zero predicates.
-  ## `lowerArith` pushes `divisorIsZero(b)` here for every `bDiv`/`bMod`
-  ## op on svInt or BV operands. `drainDivByZeroRaises` (called via
-  ## `drainScalarRaiseForks`) reads and resets this sink, forking each
-  ## predicate as a `DivByZeroDefect` raise path. The surviving non-zero
-  ## continuation carries the negated predicates in its pc.
-  ## `syncDivByZeroCond` appends to `WalkCtx.divByZeroConds` when in a walk.
-  ## Reset alongside `convFloatToIntBoundConds`/`rangeDefectConds`
-  ## at every reset site.
-
-var overflowConds* {.threadvar.}: seq[Z3Bool]
-  ## Phase 16 R16-4. Raise-fork sink for signed integer overflow predicates.
-  ## `lowerArith` pushes overflow conditions here for bAdd/bSub/bMul ops on
-  ## signed BV operands (int, int8..int64). `drainOverflowRaises` (called via
-  ## `drainScalarRaiseForks`) reads and resets this sink, forking each predicate
-  ## as an `OverflowDefect` raise path. The surviving non-overflow continuation
-  ## carries the negated predicates in its pc.
-  ## `syncOverflowCond` appends to `WalkCtx.overflowConds` when in a walk.
-  ## svInt (unbounded Z3Int) is skipped — overflow is meaningless there AND BV
-  ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
-  ## Reset alongside `divByZeroConds` at every reset site.
-
 var arithFrames {.threadvar.}: ArithFrames
   ## RFC-0005 S8w, RFC-0016 W1-d2 / D1a. A lexical stack: the top is the scope
   ## of the routine body being walked. `resetSymexRunState` seeds it with the
@@ -1599,22 +1538,6 @@ var obligationLog* {.threadvar.}: ObligationLog
   ## Appending it to the per-lower reset list would silently truncate it to
   ## whatever the last expression happened to raise.
 
-var strIndexOobConds* {.threadvar.}: seq[Z3Bool]
-  ## RFC-chapulin-hardening SND-4 (ADR-0024). Raise-fork sink for string-index
-  ## (`s[i]`) out-of-bounds predicates. `lowerStrArm`'s `iekStrAt` arm pushes
-  ## `(idx < 0) or (idx >= len(s))` here for every `s[i]` (char read) lowered.
-  ## `drainStrIndexRaises` (called via `drainScalarRaiseForks`) reads and
-  ## resets this sink, forking each predicate as a routed `IndexDefect` raise
-  ## path — parity with the seq/array/Table indexing arms, which already fork
-  ## `IndexDefect` unconditionally (Phase 16 D1a); `s[i]` was the sole
-  ## container-index site with zero bounds modeling (an OOB read silently
-  ## degraded to a fabricated byte value via Z3's `at`/`toCode` spec instead of
-  ## raising). The surviving in-bounds continuation carries the negated
-  ## predicates as `defectSurvivorPc` facts (ADR-0012), exactly like
-  ## `parseIntRaiseConds`/`divByZeroConds`/`overflowConds`.
-  ## `syncStrIndexOobCond` appends to `WalkCtx.strIndexOobConds` when in a walk.
-  ## Reset alongside `overflowConds` at every reset site.
-
 var seqOobConds* {.threadvar.}: seq[Z3Bool]
   ## N14 (RFC-chapulin-hardening bucket-2). Raise-fork sink for seq `del(i)`
   ## out-of-bounds predicates. `lower`'s `iekSeqDel` arm pushes
@@ -1633,17 +1556,6 @@ var seqOobConds* {.threadvar.}: seq[Z3Bool]
   ## `syncSeqOobCond` appends to `WalkCtx.seqOobConds` when in a walk.
   ## Reset alongside `strIndexOobConds` at every reset site.
 
-var regexRaiseMsgs* {.threadvar.}: seq[string]
-  ## RFC-0005 S8ay. `RegexError` raises of an expression: one message per
-  ## `re"..."` / `rex"..."` whose pattern PCRE rejects (Nim's exact
-  ## `RegexError.msg`, from `pcre_syntax`). The raise is unconditional --
-  ## `re` compiles the pattern each time the call runs -- so the sink holds
-  ## messages, not predicates. `drainRegexRaises` (the LAST stage of
-  ## `drainScalarRaiseForks`) routes the first as a `RegexError` raise and
-  ## ends the continuation. `syncRegexRaiseMsg` appends to
-  ## `WalkCtx.regexRaiseMsgs` when in a walk. Reset alongside
-  ## `arithTrapConds` at every reset site.
-
 var uninitReadConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S8bv (item 4). The conditions under which an inline `map` /
   ## `filter` / `fold` read an unwritten `newSeqUninit` element (`hofElemAt`,
@@ -1659,25 +1571,6 @@ proc opSite(construct, site: string): string =
   ## K10a-float. The trap's site text: the construct, at its source position
   ## when the lowering op carries one.
   if site.len > 0: construct & " at " & site else: construct
-
-type ArithTrap* = object
-  ## RFC-0016 W1-d1a. One `arithTrapConds` deposit: the trap predicate, and
-  ## whether the C division is UNDEFINED there rather than a definite
-  ## hardware outcome. `ub` names the kind the deposit halts with
-  ## (`ubIntMinModMinusOne` for `low(T) mod -1`; `ubSignedOverflow` for
-  ## `low(T) div -1` with overflow checks off, at 32 and 64 bits) and `site`
-  ## the construct for the omission's text; `none` is a definite outcome.
-  ## `drainArithTraps` halts a `some` deposit through `haltUndefined`; the
-  ## rest still confine the survivor.
-  cond*: Z3Bool
-  ub*: Option[UbKind]
-  site*: string
-  raiseName*: string
-    ## RFC-0016 PRC-07 (float half). Non-empty: not a trap but Nim's float
-    ## check after a float `+ - * /` (`FloatInvalidOpDefect`,
-    ## `FloatOverflowDefect`), an ordinary catchable raise forked on `cond`.
-    ## It rides this sink so the checks of one expression stay in evaluation
-    ## order: each deposit's raise is forked after the earlier ones' negations.
 
 var arithTrapConds* {.threadvar.}: seq[ArithTrap]
   ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
@@ -1704,38 +1597,11 @@ var arithTrapConds* {.threadvar.}: seq[ArithTrap]
 # entry and is mirrored into `WalkerStatics.refSorts`/`.nilConsts` after the
 # walk for post-run inspection. The `nil_<typeId>` const rides alongside.
 
-var currentRefSorts* {.threadvar.}: Table[string, RawZ3Sort]
-  ## Phase 15 R1 (ADR-0010). Per-run cache of `Ref_T` uninterpreted sorts,
-  ## keyed by pointee typeId. The LIVE populator (`allocateSym(itRef)` /
-  ## `allocRefSort`); reset at `runSymexImpl` entry; mirrored into
-  ## `WalkerStatics.refSorts`. Allocated AT MOST ONCE per (typeId, run).
-
-var currentNilConsts* {.threadvar.}: Table[string, Z3AnyAst]
-  ## Phase 15 R1 (ADR-0010). The `nil_<typeId>` distinguished constant of each
-  ## `Ref_T` sort. Allocated alongside the sort in `allocRefSort`; reset at
-  ## `runSymexImpl` entry; mirrored into `WalkerStatics.nilConsts`.
-
 # CR-9 Stage 4: `currentWalkCtxPtr` moved here (from the C2b cluster) so that
 # `allocRefSort` and `assertFreshness` — defined before `WalkCtx` — can test
 # the nil-guard and delegate to `syncRefSortEntry` (forward-decl below). The
 # variable is `pointer` (not `ptr WalkCtx`) so no WalkCtx forward-reference is
 # needed; callers cast it after WalkCtx is in scope.
-var currentWalkCtxPtr* {.threadvar.}: pointer
-  ## Phase 15 C2b. A `ptr WalkCtx` to the live walk, set in `runSymexImpl`
-  ## immediately before the top-level `walk` so `lowerClosureCall` (running in
-  ## the `lower` evaluator, which has no `WalkCtx` parameter) can drive a body
-  ## descent through `walk`. Typed `pointer` because `WalkCtx` is declared far
-  ## below `lower`; cast back at use. Nil outside an active walk (the C2a probes
-  ## and `c1ClosurePoCApply` never set it — they don't reach `iekClosureCall`).
-  ## CR-9 Stage 4: also used by `allocRefSort`/`assertFreshness` (pre-WalkCtx
-  ## procs) via `syncRefSortEntry` to populate `WalkerStatics.refSorts/nilConsts`
-  ## during an active walk.
-
-proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst)
-  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `srt`/`nc`
-  ## into `WalkCtx.statics.refSorts[typeId]`/`.nilConsts[typeId]`. No-op when
-  ## no active walk (probe paths). Defined after `WalkCtx` type.
-
 # ----------------------------------------------------------------------------
 # CR-1c carrier-boundary table (round-6 mechanical-debt slice, item 5)
 # ----------------------------------------------------------------------------
@@ -1883,64 +1749,6 @@ proc allocDegrade(kind: SymexErrorKind, msg: string) =
   ## still not contingent on any drain.
   lowerDegrade(kind, msg)
 
-proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry)
-  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `entry`
-  ## into `WalkCtx.statics.distinctSorts[name]` and appends `name` to
-  ## `.distinctSortNames`. No-op when no active walk. Defined after `WalkCtx`.
-
-proc syncFreshnessCapHint*(info: SymexErrorInfo)
-  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `info` to `WalkCtx.freshnessCapHints`. No-op when no active walk
-  ## (assertFreshness can be called from probe paths). Defined after `WalkCtx`.
-
-proc syncDistinctBijectivityHint*(info: SymexErrorInfo)
-  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `info` to `WalkCtx.distinctBijectivityHints`. No-op when no active
-  ## walk (allocDistinctSym can be called from probe/pre-walk paths). Defined
-  ## after `WalkCtx`.
-
-proc syncRangeDefectCond*(cond: Z3Bool)
-  ## RFC-0005 S8g fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `cond` to `WalkCtx.rangeDefectConds` (the LIVE store for the
-  ## `RangeDefect` raise-fork sink). No-op when no active walk (lower() can
-  ## be called from probe paths). Defined after `WalkCtx`.
-
-proc syncDivByZeroCond*(cond: Z3Bool)
-  ## R16-3 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
-  ## `cond` to `WalkCtx.divByZeroConds` (the LIVE store for the div/mod-by-zero
-  ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
-
-proc syncOverflowCond*(cond: Z3Bool)
-  ## R16-4 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
-  ## `cond` to `WalkCtx.overflowConds` (the LIVE store for the signed-integer
-  ## overflow raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
-
-proc syncStrIndexOobCond*(cond: Z3Bool)
-  ## RFC-chapulin-hardening SND-4 fwd-decl. If `currentWalkCtxPtr != nil` (a
-  ## walk is active), appends `cond` to `WalkCtx.strIndexOobConds` (the LIVE
-  ## store for the string-index OOB raise-fork sink). No-op when no active walk
-  ## (lower() can be called from probe paths). Defined after `WalkCtx`.
-
-proc syncSeqOobCond*(cond: Z3Bool)
-  ## N14 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
-  ## `cond` to `WalkCtx.seqOobConds` (the LIVE store for the seq del-OOB
-  ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
-
-proc syncRegexRaiseMsg*(msg: string)
-  ## RFC-0005 S8ay fwd-decl. If `currentWalkCtxPtr != nil` (a walk is
-  ## active), appends `msg` to `WalkCtx.regexRaiseMsgs`. No-op when no
-  ## active walk. Defined after `WalkCtx`.
-
-proc syncUninitReadCond*(cond: Z3Bool)
-  ## RFC-0005 S8bv fwd-decl. Appends `cond` to `WalkCtx.uninitReadConds`
-  ## when a walk is active. Defined after `WalkCtx`.
-
-proc syncArithTrapCond*(cond: ArithTrap)
-  ## RFC-0005 S8i fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `cond` to `WalkCtx.arithTrapConds` (the LIVE store for the
-  ## survivor-only arithmetic-trap sink). No-op when no active walk. Defined
-  ## after `WalkCtx`.
-
 proc boundsUnchecked(): bool =
   ## RFC-0016 PRC-07. The build compiles no `boundChecks`: `s[i]` and `a[i]`
   ## (seq, string, openArray, array) are plain C subscripts, so an index
@@ -1966,48 +1774,6 @@ proc depositStrIndexOob(oob: Z3Bool) =
   else:
     strIndexOobConds.add oob
     syncStrIndexOobCond(oob)
-
-proc syncExtractionError*(info: SymexErrorInfo)
-  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `info` to `WalkCtx.extractionErrors`. No-op when no active walk
-  ## (extractLeaf/extractFromSymVal always run inside trySolve which is called
-  ## inside walk arms, but the guard ensures correctness). Defined after `WalkCtx`.
-
-proc syncClosureCallError*(info: SymexErrorInfo)
-  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `info` to `WalkCtx.closureCallErrors`. No-op when no active walk
-  ## (lowerClosureCall/applyClosureGround/lowerHofCall run in lower() which has
-  ## no WalkCtx). Defined after `WalkCtx`.
-
-proc syncConvFloatToIntBoundCond*(cond: ConvBound)
-  ## CR-9 Stage 6 fwd-decl (Group-1). If `currentWalkCtxPtr != nil` (a walk
-  ## is active), appends `cond` to `WalkCtx.convFloatToIntBoundConds`.
-  ## No-op when no active walk (lower() can be called from probe paths).
-  ## Defined after `WalkCtx`.
-
-type ParseIntRaise* = object
-  ## RFC-0005 S10. One `parseInt(s)` lowering's raise obligation, SPLIT by
-  ## whether the model is Nim's `parseutils.rawParseInt` on the inputs it
-  ## covers. Nim accepts `_` separators after a digit; the model cannot
-  ## compute their value (`str.replace_all` is version-gated), so:
-  ##   * `exact` -- the raise predicate restricted to strings with no `_`:
-  ##     there the model is Nim's (RFC-0005 S8b: one optional `+`/`-` sign,
-  ##     then digits only, in `int` range). Forked CLEAN.
-  ##   * `lax`   -- a `_` anywhere: Nim may raise or parse. Both the raise
-  ##     fork and the continuation (on a fresh value) are `scSpurious`-tainted
-  ##     (`seParseIntLaxSyntax`, `dcFreshSymbol`) -- candidates that only a
-  ##     confirming replay may report (RFC-0005 §2.6).
-  ## S10 had `+` in the lax half too, and the digits survivor carried `not
-  ## lax`: every `+`/`_` string was dropped from the continuation, a false
-  ## `sxUnsat` for a target reachable only through one (S8b).
-  exact*: Z3Bool
-  lax*:   Z3Bool
-
-proc syncParseIntRaiseCond*(cond: ParseIntRaise)
-  ## CR-9 Stage 6 fwd-decl (Group-2). If `currentWalkCtxPtr != nil` (a walk
-  ## is active), appends `cond` to `WalkCtx.parseIntRaiseConds`.
-  ## No-op when no active walk (lower() can be called from probe paths).
-  ## Defined after `WalkCtx`. RFC-0005 S10: one `ParseIntRaise` per lowering.
 
 proc seedCallerHeapInWalkCtx*(p: Path)
   ## CR-9 Stage 6 fwd-decl (Groups 3+4). If `currentWalkCtxPtr != nil` (a
@@ -2276,22 +2042,6 @@ proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast
 # at `runSymexImpl` entry — the exact `currentDistinctSorts` idiom.
 # `WalkerStatics.closureSyms` mirrors it after the walk for inspection.
 
-type ClosureSymKey* = tuple[siteHash: int64, declOrder: int,
-                            envSortId: string, paramsSortTupleId: string]
-  ## Phase 15 C2a (ADR-0009). The memo key: the lambda-site identity PLUS the
-  ## construction-time env/param sort fingerprints (so the SAME site at two
-  ## monomorphizations — distinct leaf/param sorts — gets distinct funcSyms).
-
-var currentClosureSyms* {.threadvar.}: Table[ClosureSymKey, RawZ3FuncDecl]
-  ## Phase 15 C2a. Per-run cache of per-site closure funcSyms. Reset at
-  ## `runSymexImpl` entry; the LIVE populator (`lower(iekLambda)` has no
-  ## `WalkCtx`). Mirrored into `WalkerStatics.closureSyms` after the walk.
-
-proc syncClosureSymEntry*(key: ClosureSymKey, fd: RawZ3FuncDecl)
-  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `fd`
-  ## into `WalkCtx.statics.closureSyms[key]`. No-op when no active walk
-  ## (C2a probe paths, pre-walk lambda lowering). Defined after `WalkCtx`.
-
 # ---- Phase 15 Cluster C (C2b): closure-CALL descent plumbing -----------------
 #
 # `lower(iekClosureCall)` must descend the lambda BODY to collect its return
@@ -2302,18 +2052,6 @@ proc syncClosureSymEntry*(key: ClosureSymKey, fd: RawZ3FuncDecl)
 # declOrder)`. At the call, the resolved `svClosure`'s site keys back into this
 # map to reach the body. (Same threadvar idiom as `currentClosureSyms` — `lower`
 # has no `WalkCtx`. Reset at `runSymexImpl` entry.)
-
-type ClosureBody* = object  ## Phase 15 C2b. The descent payload for a lambda
-                            ## site, stashed at construction so the CALL can
-                            ## reach the body that `svClosure` does not carry.
-  body*:     IRStmt
-  params*:   seq[IRParam]
-  captures*: seq[string]
-  retTy*:    IRType
-  aliasPairs*:  seq[tuple[keep, gone: int]]   ## RFC-0005 S8bh (`lambdaAliasPairs`)
-  aliasBodies*: seq[IRStmt]                   ## RFC-0005 S8bh
-  ptrLocal*:    seq[bool]                     ## RFC-0005 S8bh (`lambdaPtrLocal`)
-  outer*:       seq[string]                   ## RFC-0005 S8bh (`lambdaOuter`)
 
 func closureRetStructured(t: IRType): bool =
   ## RFC-0005 S8n. A closure return type whose per-occurrence result is a
@@ -2328,18 +2066,6 @@ func closureRetStructured(t: IRType): bool =
   ## over a proc value of each resolves as a seq result's does.
   t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq,
                           itArray, itTable, itSet, itBitSet}
-
-var currentClosureBodies* {.threadvar.}: Table[
-    tuple[siteHash: int64, declOrder: int], ClosureBody]
-  ## Phase 15 C2b. Per-run site→body map (the body `svClosure` does not carry).
-  ## Populated by `buildClosure` (C2a construction path), consumed by
-  ## `lowerClosureCall` (C2b application). Reset at `runSymexImpl` entry.
-
-proc syncClosureBodyEntry*(siteKey: tuple[siteHash: int64, declOrder: int],
-                           cb: ClosureBody)
-  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `cb`
-  ## into `WalkCtx.statics.closureBodies[siteKey]`. No-op when no active
-  ## walk (probe paths). Defined after `WalkCtx` type.
 
 
 var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
@@ -3997,27 +3723,6 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
-var currentMaxSplitParts* {.threadvar.}: int
-  ## CR-11/CR-18. The active `SymexSettings.budget.maxSplitParts`, set at the
-  ## top of `runSymexImpl` so the `iekStrSplit` concrete-inline arms in
-  ## `lowerStrArm` can enforce the cap without threading settings through the
-  ## lower() recursion. Mirrors F7's `extractionErrors` threadvar idiom.
-  ## A value of 0 means unlimited (no cap applied). When the computed parts
-  ## count exceeds this cap, the split is classified sxUnknown via
-  ## SymexZ3StringIncompleteError (seZ3StringIncomplete) — the same error
-  ## kind used by the general symbolic split path — rather than emitting
-  ## potentially thousands of Z3 store calls (compile-time DoS prevention).
-
-var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
-  ## RFC-0005 S8bj. The definitions `r == rec(s)` of the `replace` values
-  ## lowered by a recursive function (`runtime_strings.regexReplaceRec`),
-  ## each over its own fresh `r`: definitional, asserted in every query
-  ## (`globalRoots`). `checkCapped` first tries a query WITHOUT them (the
-  ## value's facts, `regex_parser.replaceLemmas`, stay): its models are a
-  ## superset of the real ones, so its UNSAT is the query's own; Z3's
-  ## unfolding of the recursive term never reaches the facts' conflict
-  ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
-
 proc literalStringBytes*(z: Z3String): tuple[ok: bool, s: string] =
   ## RFC-0005 S8cf. `z`'s bytes when it folds to a literal.
   let v = simplify(z)
@@ -4026,77 +3731,6 @@ proc literalStringBytes*(z: Z3String): tuple[ok: bool, s: string] =
     if cp notin 0 .. 255: return
     result.s.add char(cp)
   result.ok = true
-
-type RegexPointSite* = object
-  ## RFC-0005 S8cf. A `std/re` call `checkCapped` reads at the points the
-  ## search proposes before it tries Z3's encoding (`pointCheck`): its value
-  ## as the query reads it (`exact`), the assertions that only define it
-  ## (`defs`, their ids) and its operands. `declined`: the encoding is past
-  ## its size cap, so `exact` is a fresh value with nothing else defining it.
-  ## `light`: Z3 reads this encoding well, so a query only takes its value at
-  ## a subject pinned beside a call that is not (`pointCheck`'s pinned round).
-  exact*: Z3AnyAst
-  defs*: seq[int]
-  subject*, by*: Z3String
-  start*: Z3Int
-  sp*: RegexSpec
-  pr*: PcreParse
-  safe*: int       ## `limitReach`'s safe length (`high(int)`: no limit)
-  declined*: bool
-  light*: bool
-
-var regexPointSites* {.threadvar.}: seq[RegexPointSite]
-  ## RFC-0005 S8cf. Every such call of the walk. Reset per run.
-
-type RegexLimitSite* = object
-  ## RFC-0005 S8cf. One `std/re` call whose subject can be long enough to
-  ## reach one of PCRE's own limits (`pcre_select.LimitReach`): its value as
-  ## the model reads it (`exact`), what std/re surfaces if the limit is hit
-  ## (`err`, with `errConds`), the subject and the length up to which no
-  ## limit can be hit (`safe`), and the assertions true only of `exact`
-  ## (`guarded`: a recursive `replace` value's definition and facts).
-  exact*, err*: Z3AnyAst
-  errConds*: seq[Z3Bool]
-  subject*: Z3String
-  safe*: int
-  guarded*: seq[int]
-  what*: string
-
-var regexLimitSites* {.threadvar.}: seq[RegexLimitSite]
-  ## RFC-0005 S8cf. Every such call of the walk (`checkCapped`). Reset per
-  ## run.
-
-var regexRecFactConds* {.threadvar.}: seq[Z3Bool]
-  ## RFC-0005 S8bt. The facts of the `replace` values in `regexRecDefConds`
-  ## (`regex_parser.replaceLemmas`): each over one occurrence's own `r`,
-  ## its receiver and `by`, and fresh Ints (the match count, the bytes
-  ## removed), and true of every receiver, so they prune no real model.
-  ## `checkCapped` asserts them where it leaves the definitions out, and
-  ## leaves both out of the steps after it (each `r` replaced by its term).
-  ## S8bj put them in `stripDecompConds`.
-
-var stripDecompConds* {.threadvar.}: seq[Z3Bool]
-  ## Round-4 Slice B (ADR-0026). Decomposition constraints emitted by the
-  ## `iekStrStrip` lowering: for `strip(s, leading, trailing, chars)` with a
-  ## literal char set, fresh strings `pre`/`core`/`suf` are allocated and
-  ##   s == pre ++ core ++ suf
-  ##   pre ∈ (union chars)*    (leading; else pre == "")
-  ##   suf ∈ (union chars)*    (trailing; else suf == "")
-  ##   core == "" ∨ (¬startsWith(core, c) ∀c   when leading
-  ##                 ∧ ¬endsWith(core, c) ∀c   when trailing)
-  ## are pushed here and drained into EVERY solver check (`trySolve`) —
-  ## exactly the `currentClosureCallAxioms` idiom.
-  ## GLOBAL assertion is sound because the clauses are DEFINITIONAL: for
-  ## every value of `s` there exists exactly ONE satisfying assignment of
-  ## (pre, core, suf) — the maximal-strip decomposition (maximality is
-  ## forced by the boundary clause: were `suf` non-maximal, `core` would
-  ## end in a stripped char) — so conjoining them never prunes a model of
-  ## any other variable, and `core` is FORCED to `strutils.strip`'s exact
-  ## value (soundness AND completeness, no over-approximation). The
-  ## fragment is quantifier-free string+regex (concat / prefixof /
-  ## suffixof / re.star over a finite literal char union) — the same
-  ## decidable machinery class as S6b regex membership; no Int/BV mixing
-  ## (the CR-17 hang shape). Reset at `runSymexImpl` entry.
 
 type IndexSplit* = object
   ## RFC-0005 S8ag. One `str.indexof(s, c, start)`, lowered (`iekStrFind`)
@@ -4500,12 +4134,6 @@ var sliceViewCounter* {.threadvar.}: int
   ## printed models legible and rule the question out entirely). Reset at
   ## `runSymexImpl` entry.
 
-var stripSynthCounter* {.threadvar.}: int
-  ## Round-4 Slice B. Per-run unique-name counter for `iekStrStrip`'s fresh
-  ## `pre`/`core`/`suf` allocations — two strip occurrences MUST NOT share
-  ## Z3 consts (same name = same const = unsound cross-linking). Reset at
-  ## `runSymexImpl` entry.
-
 var variantLitFreshCounter* {.threadvar.}: int
   ## Round-6 A1 (ADR-0029). Per-run unique-name counter for
   ## `lowerVariantLit`'s FRESH inactive-arm field allocations — two
@@ -4523,43 +4151,6 @@ var variantConstructSymFreshCounter* {.threadvar.}: int
   ## same const = unsound cross-linking — the dedicated "fresh inactive-arm
   ## fields PER FORK" divergence this slice pins). Reset at `runSymexImpl`
   ## entry.
-
-var currentInFlightTypeId* {.threadvar.}: Option[string]
-  ## Phase 15 E8. The in-flight exception's TYPE id while an `except` handler
-  ## body is being walked (mirrors `w.frame.inFlightExn.get.typeId`). `none`
-  ## outside any handler. The two `getCurrent*` magic intrinsics lower in
-  ## `lower` (a pure Env→SymVal function with no WalkCtx/frame access), so the
-  ## walk arms that set/clear `w.frame.inFlightExn` keep this threadvar in
-  ## lockstep. A `none` value at lower time means the intrinsic was called
-  ## out-of-handler → `SymexNotInHandlerError`. Mirrors the F7/S7a/S10 threadvars.
-
-var currentInFlightMsg* {.threadvar.}: Option[string]
-  ## Phase 15 E8. The in-flight exception's MESSAGE (mirrors
-  ## `w.frame.inFlightExn.get.msg`) while an `except` handler body is walked.
-  ## `none` if the raise carried no message (zero-arg object construction);
-  ## `getCurrentExceptionMsg()` returns `currentInFlightMsg.get("")`.
-
-var currentExnRefCounter* {.threadvar.}: int
-  ## Phase 15 E8. Monotonic counter for fresh `getCurrentException()` constant
-  ## names, so distinct call sites get distinct uninterpreted constants. Reset
-  ## per run in `runSymexImpl`.
-
-var lastGetCurrentExnRef* {.threadvar.}: tuple[sortName, typeTag: string]
-  ## Phase 15 E8 (test hook). Records the `sortName`/`typeTag` of the most
-  ## recently produced `getCurrentException()` `svUninterpRef`. The returned
-  ## opaque ref is not witness-extractable through `symexFind`, so E8's test 2
-  ## inspects this threadvar to assert the tagging (`Exn_<typeId>` / `typeId`).
-
-var parseIntRaiseConds* {.threadvar.}: seq[ParseIntRaise]
-  ## Phase 15 S10b. Raise predicates emitted by the `iekStrToInt` (`parseInt`)
-  ## lowering — one `(not isNeg) and (posVal < 0)` clause per `parseInt` lowered
-  ## (the non-digit, non-`-`-prefixed case, where Nim's runtime RAISES
-  ## `ValueError`). `lower` cannot route a raise itself (no WalkCtx/Path), so the
-  ## predicate is surfaced here and DRAINED by the enclosing statement walk arm
-  ## (`drainParseIntRaises`), which forks a routed-`ValueError` raise sub-path and
-  ## a digits continuation. Reset before each lower-and-drain so predicates never
-  ## leak across paths/statements. Closes the S10a `seParseIntPreE` window — that
-  ## hint is no longer emitted.
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
@@ -16315,53 +15906,6 @@ type
                         ## void SUT), from `SymexProgram.retTy`. The SUT frame
                         ## has no `CallFrame`, so `unwrittenResultZero` reads
                         ## its `result`'s zero value from here.
-    distinctSorts: Table[string, DistinctSortEntry]
-                        ## Phase 15 G4 (ADR-0008 D4): the per-walker distinct-
-                        ## sort cache (one full DistinctSortEntry per distinct
-                        ## type name, with sort + inject + eject func-decls).
-                        ## CR-9 Stage 4: now the LIVE store (written by
-                        ## `syncDistinctSortEntry` from `allocDistinctSym` via
-                        ## `currentWalkCtxPtr`); threadvar `currentDistinctSorts`
-                        ## remains the fallback for probe/pre-walk allocations.
-    distinctSortNames: seq[string]
-                        ## Phase 15 G4 alloc-order hook: the ordered list of
-                        ## distinct-sort names first allocated this run (so a
-                        ## test can assert "two sorts allocated" for a chain).
-                        ## CR-9 Stage 4: now the LIVE store in WalkerStatics
-                        ## (mirroring the `distinctSortNames` threadvar).
-                        ## Populated by `syncDistinctSortEntry` when in a walk.
-    closureSyms: Table[ClosureSymKey, RawZ3FuncDecl]
-                        ## Phase 15 C2a (ADR-0009 Consequences): the per-site
-                        ## closure funcSym memo (one uninterpreted decl per
-                        ## (site, env/param sorts)), shared across frames. The
-                        ## LIVE populator is the `currentClosureSyms` threadvar
-                        ## (`lower(iekLambda)` has no WalkCtx); this field mirrors
-                        ## it after the walk for post-run inspection. CR-9 Stage 4c:
-                        ## LIVE store during a walk (written by `syncClosureSymEntry`).
-    closureBodies: Table[tuple[siteHash: int64, declOrder: int], ClosureBody]
-                        ## Phase 15 C2b: per-site lambda body + signature stash,
-                        ## mirroring `currentClosureBodies`. Populated by
-                        ## `syncClosureBodyEntry` (from `buildClosure`) when a walk
-                        ## is active. CR-9 Stage 4d: LIVE store during a walk so
-                        ## `applyClosureGround` reads statics via nil-guard.
-                        ## Threadvar remains fallback for pre-walk paths.
-    refSorts: Table[string, RawZ3Sort]
-                        ## Phase 15 R1 (ADR-0010): the per-walker `Ref_T`
-                        ## uninterpreted sort cache, keyed by pointee typeId
-                        ## (one fresh `mkUninterpretedSort("Ref_" & typeId)`
-                        ## per distinct pointee type, shared across ALL paths —
-                        ## the sort is per-WALKER, not per-path). The LIVE
-                        ## populator is the `currentRefSorts` threadvar
-                        ## (`allocateSym(itRef)` has no WalkCtx); this field
-                        ## mirrors it after the walk for post-run inspection.
-    nilConsts: Table[string, Z3AnyAst]
-                        ## Phase 15 R1 (ADR-0010): the distinguished `nil_<typeId>`
-                        ## constant of each `Ref_T` sort, one per pointee typeId.
-                        ## Allocated alongside the sort in `allocRefSort` and
-                        ## NEVER returned by the freshness mechanism (R2), so a
-                        ## fresh alloc is always distinct from nil. CR-9 Stage 4:
-                        ## LIVE store during a walk (written by `syncRefSortEntry`);
-                        ## pre-walk/probe paths use `currentNilConsts` threadvar.
   EscapedRaise = object
     ## Phase 15 E3. A raise that escaped its OWN call frame's handler stack
     ## without being caught — the per-frame channel the `isCall` descent arm
@@ -16375,19 +15919,6 @@ type
     msg:    Option[string]
     crash:  bool          ## RFC-0005 S8cu: a nil dereference (`crashRaise`),
                           ## re-routed past every handler and `finally`
-
-  RaiseSinkKind = enum
-    ## RFC-0005 S8bb. Which raise sink a deposit went to, in the order
-    ## `drainScalarRaiseForks`'s fixed fallback drains them (see
-    ## `WalkCtx.raiseOrder`).
-    rskClosure, rskConvBound, rskParseInt, rskDivByZero, rskOverflow,
-    rskArithTrap, rskStrIndex, rskSeqOob, rskRange, rskRegex,
-    rskUninitRead,   ## RFC-0005 S8bv: not a raise, a taint fork
-    rskClosureExit
-      ## RFC-0005 S8bi. Not a raise: one closure exit fact
-      ## (`currentClosureExitPc`, one entry per fact), logged where the call
-      ## completed. A raise evaluated before the call is forked without it;
-      ## every survivor of the stages before it gains it.
 
   ClosureRaise = object
     ## RFC-0005 S7. A raise that escaped a closure body, awaiting routing from
@@ -16635,6 +16166,7 @@ type
       ## LOSE a verdict today's engine earns. `shouldStop` never reads this
       ## pool. Consumed by `decideVerdict` (rule 4: any solved SAT blocks
       ## `sxUnsat`) and handed out on `RawResult.candidates` for S10's replay.
+    sinks:     LowerSinks       ## RFC-0016 D3c-2: what the `sync*` family appends to (`walk_state`)
     statics:   WalkerStatics    ## Phase 15 Z4 — populated E1/C2a/R1
     frame:     CallFrameCtx     ## Phase 15 Z4 — populated E1/C2a. The CURRENT
                                 ## call frame's exception context (handler stack
@@ -16700,13 +16232,6 @@ type
                       ## extraction reads the INITIAL param SymVals
                       ## (not values after `isAssign` mutations).
     # CR-9 Stage 5 Group-3 error/hint sinks:
-    freshnessCapHints: seq[SymexErrorInfo]
-                      ## CR-9 Stage 5 (R2). LIVE accumulator for
-                      ## `heFreshnessCapExceeded` (sevHint) during a walk.
-                      ## `syncFreshnessCapHint` appends here when
-                      ## `currentWalkCtxPtr != nil`; verdict-assembly reads
-                      ## this field directly from the WalkCtx local. Threadvar
-                      ## `freshnessCapHints` remains fallback for probe paths.
     heapDepthErrors: seq[SymexErrorInfo]
                       ## CR-9 Stage 5 (R9). LIVE accumulator for
                       ## `heDepthExhausted` (sevError) during a walk.
@@ -16750,117 +16275,6 @@ type
                       ## directly to `w.unknownExnWarnings`; verdict-assembly
                       ## reads this field. Threadvar `unknownExnWarnings`
                       ## remains fallback for any non-walk callers.
-    distinctBijectivityHints: seq[SymexErrorInfo]
-                      ## CR-9 Stage 5 (G4). LIVE accumulator for
-                      ## `geDistinctBijectivitySkipped` (sevHint) during a
-                      ## walk. `syncDistinctBijectivityHint` appends here when
-                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
-                      ## this field. Threadvar `distinctBijectivityHints`
-                      ## remains fallback for probe/pre-walk callers.
-    rangeDefectConds: seq[Z3Bool]
-                      ## RFC-0005 S8g. LIVE accumulator for `RangeDefect`
-                      ## raise predicates deposited by a lowering during a
-                      ## walk (see the threadvar's doc). `syncRangeDefectCond`
-                      ## appends here when `currentWalkCtxPtr != nil`;
-                      ## `drainRangeRaises` reads and resets it. Reset
-                      ## alongside the other raise sinks at every reset site.
-    extractionErrors: seq[SymexErrorInfo]
-                      ## CR-9 Stage 5 (F7/E8). LIVE accumulator for
-                      ## `feExtractionFailed`/`eeUninterpRefExtraction`/
-                      ## `ceNotImplemented` (all sevError or sevHint) during
-                      ## a walk. `syncExtractionError` appends here when
-                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
-                      ## this field (sat-branch only). Threadvar
-                      ## `extractionErrors` remains fallback.
-    closureCallErrors: seq[SymexErrorInfo]
-                      ## CR-9 Stage 5 (C2b). LIVE accumulator for
-                      ## `ceClosureUnknownCallee`/`ceInlineBudgetExceeded`/
-                      ## `ceUnsupportedHof` (all sevError) during a walk.
-                      ## `syncClosureCallError` appends here when
-                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
-                      ## this field (all branches, forces sxUnknown). Threadvar
-                      ## `currentClosureCallErrors` remains fallback.
-    convFloatToIntBoundConds: seq[ConvBound]
-                      ## CR-9 Stage 6 Group-1 (convFloatToIntBoundConds
-                      ## migration). LIVE accumulator for float→int domain-bound
-                      ## constraints deposited by `lower(iekConvFloatToInt)`
-                      ## during a walk. `syncConvFloatToIntBoundCond` appends
-                      ## here when `currentWalkCtxPtr != nil`. Drained by
-                      ## `drainConvFloatToIntFresh` (RFC-0005 S8g: a fork
-                      ## stage of `drainScalarRaiseForks`, no longer a
-                      ## narrowing inside `drainPendingLowerEffects`), which
-                      ## reads this field (not the threadvar) when a walk is
-                      ## active. Threadvar `convFloatToIntBoundConds` remains
-                      ## fallback for probe-path lower() calls. Reset (to @[])
-                      ## in `lowerInExpr`/`lowerBoolInExpr` (via w param) and
-                      ## by the drain.
-    parseIntRaiseConds: seq[ParseIntRaise]
-                      ## CR-9 Stage 6 Group-2 (parseIntRaiseConds migration).
-                      ## LIVE accumulator for parseInt raise predicates deposited
-                      ## by `lower(iekStrToInt)` during a walk.
-                      ## `syncParseIntRaiseCond` appends here when
-                      ## `currentWalkCtxPtr != nil`. Drained by
-                      ## `drainParseIntRaises` which reads this field (not the
-                      ## threadvar) when a walk is active. Threadvar
-                      ## `parseIntRaiseConds` remains fallback for probe paths.
-                      ## Reset in `lowerInExpr`/`lowerBoolInExpr` (via w param)
-                      ## and in `drainParseIntRaises` after drain.
-    divByZeroConds: seq[Z3Bool]
-                      ## R16-3 (divByZeroConds). LIVE accumulator for
-                      ## div/mod-by-zero predicates deposited by `lowerArith`
-                      ## for bDiv/bMod ops during a walk.
-                      ## `syncDivByZeroCond` appends here when
-                      ## `currentWalkCtxPtr != nil`. Drained by
-                      ## `drainDivByZeroRaises` (via `drainScalarRaiseForks`).
-                      ## Reset alongside `parseIntRaiseConds` at every reset site.
-    overflowConds: seq[Z3Bool]
-                      ## R16-4 (overflowConds). LIVE accumulator for signed
-                      ## integer overflow predicates deposited by `lowerArith`
-                      ## for bAdd/bSub/bMul ops on signed BV operands during
-                      ## a walk. `syncOverflowCond` appends here when
-                      ## `currentWalkCtxPtr != nil`. Drained by
-                      ## `drainOverflowRaises` (via `drainScalarRaiseForks`).
-                      ## Reset alongside `divByZeroConds` at every reset site.
-    strIndexOobConds: seq[Z3Bool]
-                      ## RFC-chapulin-hardening SND-4 (ADR-0024). LIVE
-                      ## accumulator for string-index (`s[i]`) out-of-bounds
-                      ## predicates deposited by `lowerStrArm`'s `iekStrAt` arm
-                      ## during a walk. `syncStrIndexOobCond` appends here when
-                      ## `currentWalkCtxPtr != nil`. Drained by
-                      ## `drainStrIndexRaises` (via `drainScalarRaiseForks`).
-                      ## Reset alongside `overflowConds` at every reset site.
-    seqOobConds: seq[Z3Bool]
-                      ## N14 (RFC-chapulin-hardening bucket-2). LIVE accumulator
-                      ## for seq `del(i)` out-of-bounds predicates deposited by
-                      ## `lower`'s `iekSeqDel` arm during a walk.
-                      ## `syncSeqOobCond` appends here when
-                      ## `currentWalkCtxPtr != nil`. Drained by
-                      ## `drainSeqOobRaises` (via `drainScalarRaiseForks`).
-                      ## Reset alongside `strIndexOobConds` at every reset site.
-    regexRaiseMsgs: seq[string]
-                      ## RFC-0005 S8ay. LIVE accumulator for the `RegexError`
-                      ## messages of rejected patterns (see the threadvar's
-                      ## doc). Drained by `drainRegexRaises`.
-    uninitReadConds: seq[Z3Bool]
-                      ## RFC-0005 S8bv. LIVE accumulator for the conditions
-                      ## under which an inline HOF read an unwritten
-                      ## `newSeqUninit` element (see the threadvar's doc).
-                      ## Drained by `drainUninitReads`.
-    arithTrapConds: seq[ArithTrap]
-                      ## RFC-0005 S8i. LIVE accumulator for the survivor-only
-                      ## arithmetic-trap predicates `lowerArith` deposits (see
-                      ## the threadvar's doc). Drained by `drainArithTraps`.
-                      ## Reset alongside `seqOobConds` at every reset site.
-    raiseOrder: seq[RaiseSinkKind]
-                      ## RFC-0005 S8bb. The evaluation-order log of the raise
-                      ## sinks above: every deposit (a `sync*` call, a closure
-                      ## raise) appends the sink it went to, so
-                      ## `drainScalarRaiseForks` forks the expression's raises
-                      ## in the order Nim evaluates them, not in a fixed sink
-                      ## order (which forked a raise written after another
-                      ## without the earlier one's survivor fact, and forked
-                      ## raises after a `RegexError` Nim never reaches). Saved
-                      ## and reset with the sinks.
     stmtStrayTaint: Taint
     stmtStrayUb: set[UbKind]       ## RFC-0016 W1-d3: `stmtStrayTaint`'s undefined
                       ## RFC-0005 review R1-04. Pending lowering taint
@@ -17097,7 +16511,7 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
     w.newFieldZeroErrors.add info       # CR-9-style LIVE WalkCtx field
   of dsClosure:
     currentClosureCallErrors.add info   # threadvar: fallback
-    w.closureCallErrors.add info        # CR-9 Stage 5: LIVE WalkCtx field
+    w.sinks.closureCallErrors.add info        # CR-9 Stage 5: LIVE WalkCtx field
   of dsUnknownExn:
     unknownExnWarnings.add info         # threadvar: fallback
     w.unknownExnWarnings.add info       # CR-9 Stage 5: LIVE WalkCtx field
@@ -17289,7 +16703,7 @@ proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
   w.halted(ceInlineBudgetExceeded, "rfc0005 S1 probe (closure)", sink = dsClosure)
   result.heapDepthSinkKinds = kindsOf(w.heapDepthErrors)
   result.newFieldZeroSinkKinds = kindsOf(w.newFieldZeroErrors)
-  result.closureSinkKinds = kindsOf(w.closureCallErrors)
+  result.closureSinkKinds = kindsOf(w.sinks.closureCallErrors)
   result.closureThreadvarKinds = kindsOf(currentClosureCallErrors)
   result.runTaintBeforeDrain = w.runTaint
   let inPlace = Path(pc: @[], env: initOrderedTable[string, SymVal](),
@@ -17359,183 +16773,6 @@ proc rfc0005S1LeakPinProbe*(): Rfc0005S1LeakPinProbe =
   result.pendingAfterStamp = loweringPendingTaint
   loweringDegradeErrors = savedLowering
   loweringPendingTaint = savedPending
-
-proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst) =
-  ## CR-9 Stage 4 (currentRefSorts/currentNilConsts migration). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), copies `srt` and `nc` into
-  ## `WalkCtx.statics.refSorts[typeId]` and `.nilConsts[typeId]` so that
-  ## `WalkerStatics` becomes the LIVE store for the ref-sort cache during a walk.
-  ## When `currentWalkCtxPtr == nil` (probe paths: C2a construction probes,
-  ## `allocateSym(itRef)` outside a walk), this is a no-op; the threadvar cache
-  ## (`currentRefSorts`/`currentNilConsts`) remains the sole store for those paths.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].statics.refSorts[typeId] = srt
-    wp[].statics.nilConsts[typeId] = nc
-
-proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry) =
-  ## CR-9 Stage 4 (currentDistinctSorts/distinctSortNames migration). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), copies `entry` into
-  ## `WalkCtx.statics.distinctSorts[name]` and appends `name` to
-  ## `.distinctSortNames`. No-op when no active walk (probe paths and pre-walk
-  ## env-setup calls); `currentDistinctSorts`/`distinctSortNames` threadvars
-  ## remain the sole store for those paths.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].statics.distinctSorts[name] = entry
-    wp[].statics.distinctSortNames.add name
-
-proc syncClosureSymEntry*(key: ClosureSymKey, fd: RawZ3FuncDecl) =
-  ## CR-9 Stage 4 (currentClosureSyms migration). If `currentWalkCtxPtr != nil`
-  ## (a walk is active), copies `fd` into `WalkCtx.statics.closureSyms[key]`
-  ## so that `WalkerStatics.closureSyms` is the LIVE store during a walk.
-  ## No-op when no active walk (C2a construction probes and probe functions
-  ## that directly reset/read `currentClosureSyms`); the threadvar remains
-  ## the sole store for those paths.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].statics.closureSyms[key] = fd
-
-proc syncClosureBodyEntry*(siteKey: tuple[siteHash: int64, declOrder: int],
-                           cb: ClosureBody) =
-  ## CR-9 Stage 4 (currentClosureBodies migration). If `currentWalkCtxPtr != nil`
-  ## (a walk is active), copies `cb` into `WalkCtx.statics.closureBodies[siteKey]`
-  ## so that `WalkerStatics.closureBodies` is the LIVE store during a walk.
-  ## No-op when no active walk; `currentClosureBodies` remains the sole store.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].statics.closureBodies[siteKey] = cb
-
-proc syncFreshnessCapHint*(info: SymexErrorInfo) =
-  ## CR-9 Stage 5 (freshnessCapHints migration). If `currentWalkCtxPtr != nil`
-  ## (a walk is active), appends `info` to `WalkCtx.freshnessCapHints` so that
-  ## the WalkCtx field is the LIVE store for this hint during a walk. No-op when
-  ## `currentWalkCtxPtr == nil` (probe paths, pre-walk assertFreshness calls);
-  ## the `freshnessCapHints` threadvar remains the sole store for those paths.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].freshnessCapHints.add info
-
-proc syncDistinctBijectivityHint*(info: SymexErrorInfo) =
-  ## CR-9 Stage 5 (distinctBijectivityHints migration). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), appends `info` to
-  ## `WalkCtx.distinctBijectivityHints`. No-op when `currentWalkCtxPtr == nil`
-  ## (probe paths and pre-walk allocDistinctSym calls from env setup).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].distinctBijectivityHints.add info
-
-proc syncRangeDefectCond*(cond: Z3Bool) =
-  ## RFC-0005 S8g. If `currentWalkCtxPtr != nil`
-  ## (a walk is active), appends `cond` to `WalkCtx.rangeDefectConds`
-  ## so the field is the LIVE store for the raise-fork sink during a walk.
-  ## No-op when `currentWalkCtxPtr == nil` (probe-path lower() calls outside an
-  ## active walk — no raise drain runs on probe paths).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].rangeDefectConds.add cond
-    wp[].raiseOrder.add rskRange   # RFC-0005 S8bb
-
-proc syncExtractionError*(info: SymexErrorInfo) =
-  ## CR-9 Stage 5 (extractionErrors migration). If `currentWalkCtxPtr != nil`
-  ## (a walk is active), appends `info` to `WalkCtx.extractionErrors` so the
-  ## field is the LIVE store for extraction failures during a walk. No-op when
-  ## `currentWalkCtxPtr == nil` (extractLeaf/extractFromSymVal are called from
-  ## trySolve which runs inside walk arms — ptr is always set at these sites —
-  ## but the nil-guard ensures correctness if that assumption ever changes).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].extractionErrors.add info
-
-proc syncClosureCallError*(info: SymexErrorInfo) =
-  ## CR-9 Stage 5 (currentClosureCallErrors migration). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), appends `info` to
-  ## `WalkCtx.closureCallErrors`. No-op when `currentWalkCtxPtr == nil`
-  ## (lowerClosureCall short-circuits early when ptr==nil, but
-  ## applyClosureGround/lowerHofCall have nil-guard checks — this proc
-  ## stays safe for all paths).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].closureCallErrors.add info
-
-proc syncConvFloatToIntBoundCond*(cond: ConvBound) =
-  ## CR-9 Stage 6 Group-1 (convFloatToIntBoundConds migration). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), appends `cond` to
-  ## `WalkCtx.convFloatToIntBoundConds` so the field is the LIVE store for
-  ## float→int domain-bound constraints during a walk. No-op when
-  ## `currentWalkCtxPtr == nil` (lower() can be called from probe paths via
-  ## c1ClosurePoCApply / applyClosureGround outside an active walk).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].convFloatToIntBoundConds.add cond
-    wp[].raiseOrder.add rskConvBound   # RFC-0005 S8bb
-
-# NOTE (R5): these four sync procs share a body modulo the sink field, but each
-# is FORWARD-DECLARED above (~909-943) because the lowering code calls them long
-# before this point — and a template-generated proc does not satisfy a forward
-# declaration in Nim. So they stay as explicit definitions (the ~230-line drain
-# dedup, `genRaiseForkDrain` below, is the substantive R5 consolidation; these
-# 6-liners are not forward-decl-compatible with that pattern). Keep the bodies
-# identical if you edit one.
-proc syncParseIntRaiseCond*(cond: ParseIntRaise) =
-  ## CR-9 Stage 6 Group-2. Appends `cond` to `WalkCtx.parseIntRaiseConds` (the
-  ## LIVE store) when a walk is active; no-op on probe paths (currentWalkCtxPtr
-  ## == nil — no drain runs there).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].parseIntRaiseConds.add cond
-    wp[].raiseOrder.add rskParseInt   # RFC-0005 S8bb
-
-proc syncDivByZeroCond*(cond: Z3Bool) =
-  ## R16-3. div/mod-by-zero raise predicates. See syncParseIntRaiseCond.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].divByZeroConds.add cond
-    wp[].raiseOrder.add rskDivByZero   # RFC-0005 S8bb
-
-proc syncOverflowCond*(cond: Z3Bool) =
-  ## R16-4. signed-integer-overflow raise predicates. See syncParseIntRaiseCond.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].overflowConds.add cond
-    wp[].raiseOrder.add rskOverflow   # RFC-0005 S8bb
-
-proc syncStrIndexOobCond*(cond: Z3Bool) =
-  ## SND-4. string-index OOB raise predicates. See syncParseIntRaiseCond.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].strIndexOobConds.add cond
-    wp[].raiseOrder.add rskStrIndex   # RFC-0005 S8bb
-
-proc syncSeqOobCond*(cond: Z3Bool) =
-  ## N14. seq `del(i)` OOB raise predicates. See syncParseIntRaiseCond.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].seqOobConds.add cond
-    wp[].raiseOrder.add rskSeqOob   # RFC-0005 S8bb
-
-proc syncRegexRaiseMsg*(msg: string) =
-  ## RFC-0005 S8ay. See the forward declaration.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].regexRaiseMsgs.add msg
-    wp[].raiseOrder.add rskRegex   # RFC-0005 S8bb
-
-proc syncUninitReadCond*(cond: Z3Bool) =
-  ## RFC-0005 S8bv. An inline HOF's unwritten-element read condition. See
-  ## syncParseIntRaiseCond.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].uninitReadConds.add cond
-    wp[].raiseOrder.add rskUninitRead
-
-proc syncArithTrapCond*(cond: ArithTrap) =
-  ## RFC-0005 S8i. Survivor-only arithmetic-trap predicates. See
-  ## syncParseIntRaiseCond.
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].arithTrapConds.add cond
-    wp[].raiseOrder.add rskArithTrap   # RFC-0005 S8bb
 
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
@@ -17609,12 +16846,12 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   ## cleared -- the descent reads it.
   result = PendingLowerEffects(
     pendingTaint: loweringPendingTaint, pendingUb: loweringPendingUb,
-    parseInt: w.parseIntRaiseConds, divByZero: w.divByZeroConds,
-    overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
-    seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
-    rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
-    uninitRead: w.uninitReadConds,
-    regexRaise: w.regexRaiseMsgs, raiseOrder: w.raiseOrder,
+    parseInt: w.sinks.parseIntRaiseConds, divByZero: w.sinks.divByZeroConds,
+    overflow: w.sinks.overflowConds, strIndexOob: w.sinks.strIndexOobConds,
+    seqOob: w.sinks.seqOobConds, convBound: w.sinks.convFloatToIntBoundConds,
+    rangeDefect: w.sinks.rangeDefectConds, arithTrap: w.sinks.arithTrapConds,
+    uninitRead: w.sinks.uninitReadConds,
+    regexRaise: w.sinks.regexRaiseMsgs, raiseOrder: w.sinks.raiseOrder,
     closureRaises: w.closureRaises, closureVarOuts: w.closureVarOuts,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
@@ -17626,17 +16863,17 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   loweringReadNames = @[]
   loweringPendingTaint = {}
   loweringPendingUb = {}
-  w.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
-  w.divByZeroConds = @[]; divByZeroConds = @[]
-  w.overflowConds = @[]; overflowConds = @[]
-  w.strIndexOobConds = @[]; strIndexOobConds = @[]
-  w.seqOobConds = @[]; seqOobConds = @[]
-  w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
-  w.rangeDefectConds = @[]; rangeDefectConds = @[]
-  w.arithTrapConds = @[]; arithTrapConds = @[]
-  w.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
-  w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
-  w.raiseOrder = @[]
+  w.sinks.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
+  w.sinks.divByZeroConds = @[]; divByZeroConds = @[]
+  w.sinks.overflowConds = @[]; overflowConds = @[]
+  w.sinks.strIndexOobConds = @[]; strIndexOobConds = @[]
+  w.sinks.seqOobConds = @[]; seqOobConds = @[]
+  w.sinks.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
+  w.sinks.rangeDefectConds = @[]; rangeDefectConds = @[]
+  w.sinks.arithTrapConds = @[]; arithTrapConds = @[]
+  w.sinks.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
+  w.sinks.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
+  w.sinks.raiseOrder = @[]
   w.closureRaises = @[]
   w.closureVarOuts = @[]        ## RFC-0005 S8bh
   currentClosureExitPc = @[]
@@ -17648,18 +16885,18 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   ## descent's own statement arms left behind (they drained their own).
   loweringPendingTaint = s.pendingTaint
   loweringPendingUb = s.pendingUb
-  w.parseIntRaiseConds = s.parseInt; parseIntRaiseConds = s.parseInt
-  w.divByZeroConds = s.divByZero; divByZeroConds = s.divByZero
-  w.overflowConds = s.overflow; overflowConds = s.overflow
-  w.strIndexOobConds = s.strIndexOob; strIndexOobConds = s.strIndexOob
-  w.seqOobConds = s.seqOob; seqOobConds = s.seqOob
-  w.convFloatToIntBoundConds = s.convBound; convFloatToIntBoundConds = s.convBound
-  w.rangeDefectConds = s.rangeDefect
+  w.sinks.parseIntRaiseConds = s.parseInt; parseIntRaiseConds = s.parseInt
+  w.sinks.divByZeroConds = s.divByZero; divByZeroConds = s.divByZero
+  w.sinks.overflowConds = s.overflow; overflowConds = s.overflow
+  w.sinks.strIndexOobConds = s.strIndexOob; strIndexOobConds = s.strIndexOob
+  w.sinks.seqOobConds = s.seqOob; seqOobConds = s.seqOob
+  w.sinks.convFloatToIntBoundConds = s.convBound; convFloatToIntBoundConds = s.convBound
+  w.sinks.rangeDefectConds = s.rangeDefect
   rangeDefectConds = s.rangeDefect
-  w.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
-  w.uninitReadConds = s.uninitRead; uninitReadConds = s.uninitRead
-  w.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
-  w.raiseOrder = s.raiseOrder
+  w.sinks.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
+  w.sinks.uninitReadConds = s.uninitRead; uninitReadConds = s.uninitRead
+  w.sinks.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
+  w.sinks.raiseOrder = s.raiseOrder
   w.closureRaises = s.closureRaises
   w.closureVarOuts = s.closureVarOuts   ## RFC-0005 S8bh
   currentClosureExitPc = s.exitPc
@@ -18037,7 +17274,7 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
   ## stopped a walk solving every deeper one.
   let isCandidate = scSpurious in p.taint
   let exStart = extractionErrors.len
-  let exLiveStart = w.extractionErrors.len
+  let exLiveStart = w.sinks.extractionErrors.len
   var solveSettings = w.settings
   if p.taint != {}:
     solveSettings.budget.queryRLimit = taintedSolveRLimit(w.settings)
@@ -18083,10 +17320,10 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
   of tscCheap: discard
   var errs: seq[SymexErrorInfo]
   if isCandidate:
-    for i in exLiveStart ..< w.extractionErrors.len:
-      errs.add w.extractionErrors[i]
+    for i in exLiveStart ..< w.sinks.extractionErrors.len:
+      errs.add w.sinks.extractionErrors[i]
     extractionErrors.setLen(exStart)
-    w.extractionErrors.setLen(exLiveStart)
+    w.sinks.extractionErrors.setLen(exLiveStart)
   (status: st, witness: wit, candidateErrs: errs, undefWhy: why)
 
 proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
@@ -19400,8 +18637,8 @@ proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
   let conds = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].convFloatToIntBoundConds
-      wp[].convFloatToIntBoundConds = @[]
+      let c = wp[].sinks.convFloatToIntBoundConds
+      wp[].sinks.convFloatToIntBoundConds = @[]
       convFloatToIntBoundConds = @[]   # keep threadvar reset in sync
       c
     else:
@@ -19465,8 +18702,8 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
     let conds = block:
       if currentWalkCtxPtr != nil:
         let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-        let c = wp[].field
-        wp[].field = @[]
+        let c = wp[].sinks.field
+        wp[].sinks.field = @[]
         field = @[]         # keep threadvar reset in sync
         c
       else:
@@ -19528,8 +18765,8 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
   let conds = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].parseIntRaiseConds
-      wp[].parseIntRaiseConds = @[]
+      let c = wp[].sinks.parseIntRaiseConds
+      wp[].sinks.parseIntRaiseConds = @[]
       parseIntRaiseConds = @[]         # keep threadvar reset in sync
       c
     else:
@@ -19681,8 +18918,8 @@ proc drainUninitReads(p: Path, w: var WalkCtx): seq[Path] =
   let conds = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].uninitReadConds
-      wp[].uninitReadConds = @[]
+      let c = wp[].sinks.uninitReadConds
+      wp[].sinks.uninitReadConds = @[]
       uninitReadConds = @[]   # keep threadvar reset in sync
       c
     else:
@@ -19723,8 +18960,8 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   let conds = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].arithTrapConds
-      wp[].arithTrapConds = @[]
+      let c = wp[].sinks.arithTrapConds
+      wp[].sinks.arithTrapConds = @[]
       arithTrapConds = @[]   # keep threadvar reset in sync
       c
     else:
@@ -19761,8 +18998,8 @@ proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
   let msgs = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let m = wp[].regexRaiseMsgs
-      wp[].regexRaiseMsgs = @[]
+      let m = wp[].sinks.regexRaiseMsgs
+      wp[].sinks.regexRaiseMsgs = @[]
       regexRaiseMsgs = @[]   # keep threadvar reset in sync
       m
     else:
@@ -19838,7 +19075,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## feeds the survivors of the previous stage so every combination of
   ## independent defect conditions is explored.
   ##
-  ## RFC-0005 S8bb: the stages run in EVALUATION order. `w.raiseOrder` logs
+  ## RFC-0005 S8bb: the stages run in EVALUATION order. `w.sinks.raiseOrder` logs
   ## the sink of every deposit; the log is cut into runs of consecutive
   ## deposits to one sink, and each run is a stage over exactly its own
   ## deposits. Before S8bb the stages ran in the fixed sink order above
@@ -19869,18 +19106,18 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## survivor only: the second continued with no overflow / index / ... fork
   ## at all.
   let closureSnap = w.closureRaises
-  let convSnap = w.convFloatToIntBoundConds
-  let parseSnap = w.parseIntRaiseConds
-  let divSnap = w.divByZeroConds
-  let ovfSnap = w.overflowConds
-  let strSnap = w.strIndexOobConds
-  let seqSnap = w.seqOobConds
-  let rangeSnap = w.rangeDefectConds
-  let trapSnap = w.arithTrapConds
-  let uninitSnap = w.uninitReadConds
-  let regexSnap = w.regexRaiseMsgs
-  let order = w.raiseOrder
-  w.raiseOrder = @[]
+  let convSnap = w.sinks.convFloatToIntBoundConds
+  let parseSnap = w.sinks.parseIntRaiseConds
+  let divSnap = w.sinks.divByZeroConds
+  let ovfSnap = w.sinks.overflowConds
+  let strSnap = w.sinks.strIndexOobConds
+  let seqSnap = w.sinks.seqOobConds
+  let rangeSnap = w.sinks.rangeDefectConds
+  let trapSnap = w.sinks.arithTrapConds
+  let uninitSnap = w.sinks.uninitReadConds
+  let regexSnap = w.sinks.regexRaiseMsgs
+  let order = w.sinks.raiseOrder
+  w.sinks.raiseOrder = @[]
   # RFC-0005 S8bi: the closure exit facts, placed by the order log when the
   # drained path ends with exactly them (it does whenever this runs on the
   # path `drainPendingLowerEffects` returned).
@@ -19901,16 +19138,16 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   # Every sink starts empty: a run reinstates only its own slice, and a
   # run the regex stage cuts off must not leave its deposits behind.
   w.closureRaises = @[]
-  w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
-  w.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
-  w.divByZeroConds = @[]; divByZeroConds = @[]
-  w.overflowConds = @[]; overflowConds = @[]
-  w.strIndexOobConds = @[]; strIndexOobConds = @[]
-  w.seqOobConds = @[]; seqOobConds = @[]
-  w.rangeDefectConds = @[]; rangeDefectConds = @[]
-  w.arithTrapConds = @[]; arithTrapConds = @[]
-  w.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
-  w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
+  w.sinks.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
+  w.sinks.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
+  w.sinks.divByZeroConds = @[]; divByZeroConds = @[]
+  w.sinks.overflowConds = @[]; overflowConds = @[]
+  w.sinks.strIndexOobConds = @[]; strIndexOobConds = @[]
+  w.sinks.seqOobConds = @[]; seqOobConds = @[]
+  w.sinks.rangeDefectConds = @[]; rangeDefectConds = @[]
+  w.sinks.arithTrapConds = @[]; arithTrapConds = @[]
+  w.sinks.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
+  w.sinks.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
   var total: array[RaiseSinkKind, int]
   total[rskClosure] = closureSnap.len
   total[rskConvBound] = convSnap.len
@@ -19938,7 +19175,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   template stage(inp: seq[Path]; sinkW, sinkT, snap, lo, hi, drain: untyped): seq[Path] =
     var outp: seq[Path]
     for s in inp:
-      w.sinkW = snap[lo ..< hi]
+      w.sinks.sinkW = snap[lo ..< hi]
       sinkT = snap[lo ..< hi]
       outp.add drain(s, w)
     outp
@@ -20242,26 +19479,26 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   ## to reset the exit-heap WalkCtx fields; the remaining sink resets happen here.
   claimStrayPendingTaint()               ## RFC-0005 review R1-04
   parseIntRaiseConds = @[]
-  w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
+  w.sinks.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
-  w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
+  w.sinks.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
   rangeDefectConds = @[]
-  w.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
+  w.sinks.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
   divByZeroConds = @[]
-  w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
+  w.sinks.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   overflowConds = @[]
-  w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
+  w.sinks.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
   strIndexOobConds = @[]
-  w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
+  w.sinks.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seqOobConds = @[]
-  w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
+  w.sinks.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
   uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
-  w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
-  w.uninitReadConds = @[]                ## RFC-0005 S8bv
+  w.sinks.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
   regexRaiseMsgs = @[]
-  w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
-  w.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
+  w.sinks.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
+  w.sinks.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
@@ -20282,26 +19519,26 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   ## threadvar resets so the WalkCtx LIVE store starts clean for each lowerBool() call.
   claimStrayPendingTaint()               ## RFC-0005 review R1-04
   parseIntRaiseConds = @[]
-  w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
+  w.sinks.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
-  w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
+  w.sinks.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
   rangeDefectConds = @[]
-  w.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
+  w.sinks.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
   divByZeroConds = @[]
-  w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
+  w.sinks.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   overflowConds = @[]
-  w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
+  w.sinks.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
   strIndexOobConds = @[]
-  w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
+  w.sinks.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seqOobConds = @[]
-  w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
+  w.sinks.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
   uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
-  w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
-  w.uninitReadConds = @[]                ## RFC-0005 S8bv
+  w.sinks.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
   regexRaiseMsgs = @[]
-  w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
-  w.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
+  w.sinks.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
+  w.sinks.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
@@ -24106,26 +23343,26 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         if w.shouldStop: return
         seedCallerHeapThreadvars(p)
         convFloatToIntBoundConds = @[]
-        w.convFloatToIntBoundConds = @[]
+        w.sinks.convFloatToIntBoundConds = @[]
         rangeDefectConds = @[]
-        w.rangeDefectConds = @[]
+        w.sinks.rangeDefectConds = @[]
         parseIntRaiseConds = @[]
-        w.parseIntRaiseConds = @[]
+        w.sinks.parseIntRaiseConds = @[]
         divByZeroConds = @[]
-        w.divByZeroConds = @[]
+        w.sinks.divByZeroConds = @[]
         overflowConds = @[]
-        w.overflowConds = @[]
+        w.sinks.overflowConds = @[]
         strIndexOobConds = @[]
-        w.strIndexOobConds = @[]
+        w.sinks.strIndexOobConds = @[]
         seqOobConds = @[]
-        w.seqOobConds = @[]
+        w.sinks.seqOobConds = @[]
         arithTrapConds = @[]
         uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
-        w.arithTrapConds = @[]
-        w.uninitReadConds = @[]                ## RFC-0005 S8bv
+        w.sinks.arithTrapConds = @[]
+        w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
         regexRaiseMsgs = @[]
-        w.regexRaiseMsgs = @[]
-        w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
+        w.sinks.regexRaiseMsgs = @[]
+        w.sinks.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
         claimStrayPendingTaint()        ## RFC-0005 review R1-04
         for arg in stmt.cargs:
           discard lower(p.env, arg)
@@ -24320,26 +23557,26 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       # and for callee env construction.
       var argVals: seq[SymVal]
       convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
-      w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
+      w.sinks.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
       rangeDefectConds = @[]   ## RFC-0005 S8g: RangeDefect raise sink reset
-      w.rangeDefectConds = @[] ## R16-2: WalkCtx field
+      w.sinks.rangeDefectConds = @[] ## R16-2: WalkCtx field
       parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
-      w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
+      w.sinks.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
       divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
-      w.divByZeroConds = @[]            ## R16-3: WalkCtx field
+      w.sinks.divByZeroConds = @[]            ## R16-3: WalkCtx field
       overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
-      w.overflowConds = @[]             ## R16-4: WalkCtx field
+      w.sinks.overflowConds = @[]             ## R16-4: WalkCtx field
       strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
-      w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
+      w.sinks.strIndexOobConds = @[]          ## SND-4: WalkCtx field
       seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
-      w.seqOobConds = @[]                ## N14: WalkCtx field
+      w.sinks.seqOobConds = @[]                ## N14: WalkCtx field
       arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
       uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
-      w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
-      w.uninitReadConds = @[]                ## RFC-0005 S8bv
+      w.sinks.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
+      w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
       regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
-      w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
-      w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
+      w.sinks.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
+      w.sinks.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
       claimStrayPendingTaint()          ## RFC-0005 review R1-04
       for i, formal in sig.params:
         ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
@@ -27561,7 +26798,7 @@ proc havocUnknownClosureEffects(e: IRExpr; env: Env) =
       currentClosureExitPc.add f
       # RFC-0005 batch 5 (S8bi's `rskClosureExit` on S8bh's havoc): the
       # fresh value's facts hold once the call completed, in order.
-      wp[].raiseOrder.add rskClosureExit
+      wp[].sinks.raiseOrder.add rskClosureExit
     wp[].closureVarOuts.add (name: e.ccArgs[k].vname, val: v)
   if wp[].callerHeaps.len > 0:
     var fresh = initTable[string, Z3AnyAst]()
@@ -27656,8 +26893,8 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   if e.ccVarTys.len > 0 or e.ccAddrArgs.len > 0 or e.ccTouch.len > 0:
     let siteKey = (clo.closureSite.siteHash, clo.closureSite.declOrder)
     let bodies =
-      if currentWalkCtxPtr != nil:
-        cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.closureBodies
+      if currentLowerSinks != nil:
+        currentLowerSinks[].closureBodies
       else: currentClosureBodies
     if bodies.hasKey(siteKey):
       let cb = bodies[siteKey]
@@ -27764,8 +27001,8 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # practice — lowerClosureCall short-circuits when ptr==nil — but the guard
   # keeps the code correct for any future probe path).
   let closureBodiesLive =
-    if currentWalkCtxPtr != nil:
-      cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.closureBodies
+    if currentLowerSinks != nil:
+      currentLowerSinks[].closureBodies
     else:
       currentClosureBodies
   if not closureBodiesLive.hasKey(siteKey):
@@ -28217,7 +27454,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     w.closureRaises.add ClosureRaise(raised: er,
                                      writes: raiseWrites[ri],  ## RFC-0005 S8as
                                      varOuts: ro)
-    w.raiseOrder.add rskClosure   # RFC-0005 S8bb
+    w.sinks.raiseOrder.add rskClosure   # RFC-0005 S8bb
   # RFC-0005 S8bh: each `var` formal's exit value, merged over the
   # value-bearing exits by their branch conditions (as the exit heaps are,
   # below), for its actual. The caller continues only on those exits (the
@@ -28386,7 +27623,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     addGuardedDefects(cp.pc, cp.defectSurvivorPc)
   for c in mergedDefectPc:
     currentClosureExitPc.add c
-    w.raiseOrder.add rskClosureExit   # RFC-0005 S8bi: logged after the raises
+    w.sinks.raiseOrder.add rskClosureExit   # RFC-0005 S8bi: logged after the raises
   # RFC-0005 S7: exit COVERAGE. The caller continues past the call only on
   # an execution that left the body through a value-bearing exit, so the
   # continuation is confined to the disjunction of the exits' branch
@@ -28412,7 +27649,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       covered = arms[0]
       for k in 1 ..< arms.len: covered = covered or arms[k]
     currentClosureExitPc.add covered
-    w.raiseOrder.add rskClosureExit   # RFC-0005 S8bi
+    w.sinks.raiseOrder.add rskClosureExit   # RFC-0005 S8bi
   # If the body produced NO value-bearing sub-path AND there are no output paths
   # at all (body diverged / was fully stubbed), mark uncertain so a target
   # reached through this result degrades to sxUnknown.
@@ -29370,8 +28607,8 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # CR-9 Stage 4: read closureBodies from live WalkerStatics when in a walk.
       let hofSiteKey = (cloSV.closureSite.siteHash, cloSV.closureSite.declOrder)
       let hofBodiesLive =
-        if currentWalkCtxPtr != nil:
-          cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.closureBodies
+        if currentLowerSinks != nil:
+          currentLowerSinks[].closureBodies
         else:
           currentClosureBodies
       let cb = hofBodiesLive[hofSiteKey]
@@ -30020,7 +29257,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   # nested try blocks are present, so an inner try/finally cannot be used).
   # Resetting it HERE — before any sync*/allocRef* call that checks
   # `currentWalkCtxPtr != nil` — ensures the stale pointer is never dereffed.
-  currentWalkCtxPtr = nil
+  resetWalkState(settings.budget.maxSplitParts)  ## RFC-0016 D3c-2: walk_state's threadvars, the sinks pointer included
   let ctx = newContext()
   setCurrentContext(ctx)
   queryTimeoutMsCur = settings.budget.queryTimeoutMs   ## RFC-0005 S8bu
@@ -30044,15 +29281,9 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the
                            ## threadvar's own doc comment for why it must not
                            ## join the raise-cond sinks' reset list.
-  currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
   resetArith()                                                     ## RFC-0016 W1-d2
-  parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   rfc0005RawStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
-  currentInFlightTypeId = none(string)   ## Phase 15 E8: reset in-flight-exn mirror
-  currentInFlightMsg = none(string)      ## Phase 15 E8
-  currentExnRefCounter = 0               ## Phase 15 E8: reset fresh-ref counter
-  currentDistinctSorts = initTable[string, DistinctSortEntry]()  ## Phase 15 G4
   distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
   distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
   freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
@@ -30081,12 +29312,6 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   seqConformCounter = 0                  ## RFC-0005 S8bc: bound-var names
   strCharsCounter = 0                    ## RFC-0005 S8ca: bound-var names
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
-  stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
-  regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
-  regexRecFactConds = @[]                ## RFC-0005 S8bt: and their facts
-  regexLimitSites = @[]                  ## RFC-0005 S8cf: calls past PCRE's limits
-  regexPointSites = @[]                  ## RFC-0005 S8cf: calls read at points
-  stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms
   bitSetCardIds.clear()
@@ -30100,18 +29325,9 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
   variantLitFreshCounter = 0             ## Round-6 A1: reset variant-lit fresh-field counter
   variantConstructSymFreshCounter = 0    ## Round-6 A3: reset per-fork fresh-field counter
-  convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
-  rangeDefectConds = @[]        ## RFC-0005 S8g: reset RangeDefect raise sink
-  divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
-  overflowConds = @[]                    ## R16-4: reset signed-integer overflow raise-fork sink
-  strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
   seqOobConds = @[]                      ## N14: reset seq del-OOB raise-fork sink
   arithTrapConds = @[]                   ## RFC-0005 S8i: reset arithmetic-trap sink
   uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
-  regexRaiseMsgs = @[]                   ## RFC-0005 S8ay: reset RegexError sink
-  currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
-  currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
-    tuple[siteHash: int64, declOrder: int], ClosureBody]()
   currentClosureCallAxioms = @[]         ## Phase 15 C2b: reset ground-axiom sink
   globalEntryVals = initTable[string, SymVal]()  ## RFC-0005 S8as
   glUnwritten = initTable[int, string]()   ## RFC-0005 batch 6: their
@@ -30125,11 +29341,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel
   currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
-  currentWalkCtxPtr = nil                ## Phase 15 C2b: set just before the walk
   currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
   degradeSymCounter = 0                  ## Round-6 item 3 (consolidated item 1): reset shared degrade-name counter
-  currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
-  currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
   intHeapIsInt = false   ## RFC-0005 S8as: set by runSymexImpl before any param is allocated
   intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()  ## RFC-0005 S8ax
@@ -30336,19 +29549,21 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
                            sutRetTy: prog.retTy,
                            globals: globalsTable(prog.globals)),
   )
-  for tid, srt in currentRefSorts: w.statics.refSorts[tid] = srt
-  for tid, nc in currentNilConsts: w.statics.nilConsts[tid] = nc
+  for tid, srt in currentRefSorts: w.sinks.refSorts[tid] = srt
+  for tid, nc in currentNilConsts: w.sinks.nilConsts[tid] = nc
   for dn, de in currentDistinctSorts:
-    if not w.statics.distinctSorts.hasKey(dn):
-      w.statics.distinctSorts[dn] = de
-      w.statics.distinctSortNames.add dn
+    if not w.sinks.distinctSorts.hasKey(dn):
+      w.sinks.distinctSorts[dn] = de
+      w.sinks.distinctSortNames.add dn
   for ck, fd in currentClosureSyms:
-    if not w.statics.closureSyms.hasKey(ck): w.statics.closureSyms[ck] = fd
+    if not w.sinks.closureSyms.hasKey(ck): w.sinks.closureSyms[ck] = fd
   for sk, cb in currentClosureBodies:
-    if not w.statics.closureBodies.hasKey(sk): w.statics.closureBodies[sk] = cb
+    if not w.sinks.closureBodies.hasKey(sk): w.sinks.closureBodies[sk] = cb
+  currentLowerSinks = addr w.sinks
   currentWalkCtxPtr = addr w
   let initial = initialWalkPath(initialPC, env)
   discard walk(prog.body, @[initial], w)
+  currentLowerSinks = nil
   currentWalkCtxPtr = nil
   stampLoweringPendingLeak(w)
   if walkWorkExhausted or tailWorkExhausted:   # RFC-0016 W3-z R9: or its own
@@ -30357,7 +29572,7 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
   # path the pins allow. A `dcFreshSymbol` record below carries none itself.
   result.incl w.tailUb
   var errs = w.walkDegradeErrors & w.heapDepthErrors & w.newFieldZeroErrors &
-             w.closureCallErrors
+             w.sinks.closureCallErrors
   if loweringDegradeErrors.len > lowerBase:
     errs.add loweringDegradeErrors[lowerBase .. ^1]
   errs.add reachJoinParseErrors(prog.parseErrors, errs)
@@ -30799,6 +30014,7 @@ proc runSymexImpl(prog: SymexProgram,
   # (running in the `lower` evaluator, no `WalkCtx` parameter) can drive the
   # lambda-body descent through `walk`. `w` is a stack local that lives across
   # the whole walk; the pointer is cleared after.
+  currentLowerSinks = addr w.sinks
   currentWalkCtxPtr = addr w
   # CR-13: clear on the normal exit path (see the nil assignment below after
   # walk() returns). On the exception path, the pointer is cleared at the start
@@ -30811,19 +30027,19 @@ proc runSymexImpl(prog: SymexProgram,
   # This seeds WalkerStatics with any sorts allocated before the walk so that
   # in-walk reads from `w.statics.*` find the expected keys.
   for tid, srt in currentRefSorts:
-    w.statics.refSorts[tid] = srt
+    w.sinks.refSorts[tid] = srt
   for tid, nc in currentNilConsts:
-    w.statics.nilConsts[tid] = nc
+    w.sinks.nilConsts[tid] = nc
   for dn, de in currentDistinctSorts:
-    if not w.statics.distinctSorts.hasKey(dn):
-      w.statics.distinctSorts[dn] = de
-      w.statics.distinctSortNames.add dn
+    if not w.sinks.distinctSorts.hasKey(dn):
+      w.sinks.distinctSorts[dn] = de
+      w.sinks.distinctSortNames.add dn
   for ck, fd in currentClosureSyms:
-    if not w.statics.closureSyms.hasKey(ck):
-      w.statics.closureSyms[ck] = fd
+    if not w.sinks.closureSyms.hasKey(ck):
+      w.sinks.closureSyms[ck] = fd
   for sk, cb in currentClosureBodies:
-    if not w.statics.closureBodies.hasKey(sk):
-      w.statics.closureBodies[sk] = cb
+    if not w.sinks.closureBodies.hasKey(sk):
+      w.sinks.closureBodies[sk] = cb
   discard walk(prog.body, @[initial], w)
   if walkWorkExhausted:
     # RFC-0016 K7. The one `ckWalkWork` site: the walk's checks spent
@@ -30835,20 +30051,21 @@ proc runSymexImpl(prog: SymexProgram,
            $walkUnitsSpent() & " spent) ended the walk -- the paths not yet " &
            "decided are unexplored (beBudgetExhaustedPrune)",
       cap = ckWalkWork)
+  currentLowerSinks = nil
   currentWalkCtxPtr = nil   ## (a) normal-path clear: walk() completed without raising
   stampLoweringPendingLeak(w)  ## RFC-0005 S1: pending-taint leak pin (§2.2)
   # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/
   # `.distinctSortNames` are now the LIVE store, populated during the walk by
   # `syncDistinctSortEntry` (called from `allocDistinctSym`). No post-walk
-  # mirror needed; `w.statics.distinctSorts`/`.distinctSortNames` are current.
+  # mirror needed; `w.sinks.distinctSorts`/`.distinctSortNames` are current.
   # Phase 15 C2a (ADR-0009): CR-9 Stage 4 — `WalkerStatics.closureSyms` is now
   # the LIVE store, populated during the walk by `syncClosureSymEntry` (called
-  # from `buildClosure`). No post-walk mirror needed; `w.statics.closureSyms`
+  # from `buildClosure`). No post-walk mirror needed; `w.sinks.closureSyms`
   # already contains the final values.
   # Phase 15 R1 (ADR-0010): CR-9 Stage 4 — `WalkerStatics.refSorts`/`.nilConsts`
   # are now the LIVE store, populated during the walk by `syncRefSortEntry` (called
   # from `allocRefSort` whenever a new sort is allocated). No post-walk mirror copy
-  # needed; `w.statics.refSorts`/`.nilConsts` already contain the final values.
+  # needed; `w.sinks.refSorts`/`.nilConsts` already contain the final values.
   var statsSeq: CallStats
   for name, st in w.callStats:
     statsSeq.add st
@@ -30864,13 +30081,13 @@ proc runSymexImpl(prog: SymexProgram,
   # exnWarnings — appended to `exnWarnings` so the existing append sites carry
   # it on sat/unsat/unknown uniformly.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
-  drainSinkUnion(exnWarnings, w, distinctBijectivityHints, distinctBijectivityHints)
+  drainDedupedByMsg(exnWarnings, w.sinks.distinctBijectivityHints & distinctBijectivityHints)
   # Phase 15 R2. Drain the freshness-cap hint sink, dedup'd by message (one per
   # ref type whose per-path distinctness inequalities hit the cap). sevHint
   # never changes the verdict (Invariant 7) — rides every branch via
   # `exnWarnings`, exactly the G4 bijectivity-skip drain above.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
-  drainSinkUnion(exnWarnings, w, freshnessCapHints, freshnessCapHints)
+  drainDedupedByMsg(exnWarnings, w.sinks.freshnessCapHints & freshnessCapHints)
   # Phase 15 R8. Drain the ptr-family hint sink, dedup'd by message (one entry
   # per run regardless of how many ptr derefs occurred). sevHint never changes
   # the verdict (Invariant 7) — rides every branch via `exnWarnings`, exactly the
@@ -30923,7 +30140,7 @@ proc runSymexImpl(prog: SymexProgram,
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above
   # (threadvar here is `currentClosureCallErrors`, not a same-named field).
   var closureErrs: seq[SymexErrorInfo]
-  drainSinkUnion(closureErrs, w, closureCallErrors, currentClosureCallErrors)
+  drainDedupedByMsg(closureErrs, w.sinks.closureCallErrors & currentClosureCallErrors)
   # RFC-0005 S9 (§2.5) -- the two blanket vetoes are deleted.
   # `capForcedUnknown` forced `sxUnknown` whenever ANY parse-time `sevError`
   # existed, and `closureForcedUnknown` whenever any closure-sink `sevError`
@@ -30996,7 +30213,7 @@ proc runSymexImpl(prog: SymexProgram,
     r.undefined = w.undefinedFound   # RFC-0016 K10a-target
     # CR-9 Stage 5: read from WalkCtx.extractionErrors (LIVE store during walk)
     # and union with threadvar fallback. extractionErrors is SAT-branch-only.
-    let extractionErrorsLive = w.extractionErrors & extractionErrors
+    let extractionErrorsLive = w.sinks.extractionErrors & extractionErrors
     if extractionErrorsLive.len > 0:   ## Phase 15 F7: surface any float-extraction failures
       r.errors.add extractionErrorsLive
     r.errors.add exnWarnings       ## Phase 15 E4
@@ -31728,12 +30945,14 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                            sutRetTy: prog.retTy,
                            globals: globalsTable(prog.globals)),  ## S8as
   )
+  currentLowerSinks = addr w.sinks
   currentWalkCtxPtr = addr w
   let initial = initialWalkPath(initialPC, env)
   # RFC-0005 S8j: a path that left through the SUT's own `return` is a
   # normal exit too; its constraints join the soundness pin below.
   let resultPaths =
     walk(prog.body, @[initial], w) & w.topExits.returnedPaths.contents
+  currentLowerSinks = nil
   currentWalkCtxPtr = nil
   # RFC-0005 S1c: the walk-end pending-taint leak pin, exactly as
   # `runSymexImpl` runs it. This driver used to skip it, so a lowering
@@ -32924,3 +32143,12 @@ proc c2aClosureProbeRelowered*(): C2aClosureProbe =
   result.isClosure = c1.kind == svClosure and c2.kind == svClosure
   result.closureSymsLen = currentClosureSyms.len
   result.assertionCountDuringConstruction = 0
+
+# RFC-0016 review D3c-2. The upward verbs the include files call through
+# `lowerHooks` (`walk_state.nim`): filled once, here, after every one of them is
+# defined and before any walk can run. `tsymex_0016_d3_hooks` pins that no
+# field is left nil.
+lowerHooks = LowerHooks(
+  lower: lower, lowerClosureCall: lowerClosureCall, seqElemAt: seqElemAt,
+  storeSeqElem: storeSeqElem, sameSymVal: sameSymVal,
+  entryValueOf: entryValueOf)

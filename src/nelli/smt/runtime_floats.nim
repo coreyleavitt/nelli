@@ -82,7 +82,7 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
       msg: "math." & op & ": zero-arg float op is unsupported")
   # RFC-0016 ADM-IR: the node exists only for a row admitted at `ssFloatCall`
   # (`mkMathCall`); the parser declines the rest.
-  let a = lower(env, e.mathArgs[0])
+  let a = lowerHooks.lower(env, e.mathArgs[0], none(SymVal))
   doAssert a.kind in {svFloat32, svFloat64},
     "lowerMathCall: first arg is not a float — got " & $a.kind
 

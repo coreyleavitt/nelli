@@ -41,24 +41,21 @@ const rows: seq[Row] = @[
   ("nextafter", false, {}, {}, {}),
   ("", false, {}, {}, {})]
 
+proc kindsOf(magic: string; narrow: bool; prof: DefProfile): set[UbKind] =
+  ## The kinds `arithDeposits` names, read from its rows (the one source of
+  ## truth: a deposit is an admitted row undefined under its own profile).
+  for d in arithDeposits(magic, narrow, prof):
+    check d.row.admitted
+    check d.profile == prof
+    result.incl ubOf(d.row.payload[prof]).get
+
 suite "D3a: ub_deposit policy table":
   test "kinds per (magic, width, profile)":
     for r in rows:
       checkpoint r.magic & " narrow=" & $r.narrow
-      check arithUbKinds(r.magic, r.narrow, dpChecked) == r.checked
-      check arithUbKinds(r.magic, r.narrow, dpUnchecked) == r.unchecked
-      check arithUbKinds(r.magic, r.narrow, dpFwrapv) == r.fwrapv
-
-  test "deposits are admitted rows undefined under their profile":
-    for r in rows:
-      for p in [dpChecked, dpUnchecked, dpFwrapv]:
-        let ds = arithDeposits(r.magic, r.narrow, p)
-        var ks: set[UbKind]
-        for d in ds:
-          check d.row.admitted
-          check d.profile == p
-          ks.incl ubOf(d.row.payload[p]).get
-        check ks == arithUbKinds(r.magic, r.narrow, p)
+      check kindsOf(r.magic, r.narrow, dpChecked) == r.checked
+      check kindsOf(r.magic, r.narrow, dpUnchecked) == r.unchecked
+      check kindsOf(r.magic, r.narrow, dpFwrapv) == r.fwrapv
 
 suite "D3a: the parser keeps only the traversal":
   test "dsl_parser.nim names no UbKind member and no arithUb lookup":

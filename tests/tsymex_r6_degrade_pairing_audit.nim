@@ -56,16 +56,16 @@
 ## ----------------------------------------------------------------------------
 ## `staticRead` vs `readFile` (toolchain note, N27/N36 precedent)
 ## ----------------------------------------------------------------------------
-## Reads `runtime.nim` at TEST RUNTIME (`readFile`), path resolved at compile
-## time (`currentSourcePath`) — same MSVC C2026 avoidance N27/N36 document.
+## Reads the whole runtime family (`runtimeFamilySources()`, tests/audit_scan_
+## utils.nim) at TEST RUNTIME (`readFile`), path resolved at compile time
+## (`currentSourcePath`) — same MSVC C2026 avoidance N27/N36 document. R2-6:
+## it read `runtime.nim` alone, so the `allocDegrade`/`degradeAlloc` sites
+## that moved into `heap_model.nim` and `runtime_strings.nim` were invisible.
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
 import audit_scan_utils
 
 const
-  runtimeNimPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-                   "smt" / "runtime.nim"
-
   pairingAuditMarker = "# [pairing-audited:"
   lookaheadWindow = 20
     ## Generous enough to span the longest real doc-comment gap between an
@@ -76,6 +76,7 @@ const
 
 type
   Violation = object
+    file:     string
     lineNo:   int
     lineText: string
 
@@ -119,6 +120,7 @@ proc scanForUnpairedAllocDegrade(contents: string): seq[Violation] =
         inc j
       if foundPair:
         result.add Violation(lineNo: i + 1, lineText: lines[i])
+        # (`scanFamily` stamps the file label)
     inc i
 
 proc countDegradeAllocCallSites(contents: string): int =
@@ -131,18 +133,30 @@ proc countDegradeAllocCallSites(contents: string): int =
        not trimmed.startsWith("proc degradeAlloc"):
       inc result
 
+proc scanFamily(): seq[Violation] =
+  for (label, path) in runtimeFamilySources():
+    for v in scanForUnpairedAllocDegrade(readFile(path)):
+      var w = v
+      w.file = label
+      result.add w
+
+proc familyCallSites(): tuple[total: int, perFile: string] =
+  for (label, path) in runtimeFamilySources():
+    let n = countDegradeAllocCallSites(readFile(path))
+    result.total += n
+    if n > 0: result.perFile.add " " & label.extractFilename & "=" & $n
+
 suite "symex degrade-pairing — allocDegrade + freshDegradeName audit":
 
   test "zero unpaired allocDegrade+allocateSym(...freshDegradeName...) sites outside degradeAlloc's own body":
-    let src = readFile(runtimeNimPath)
-    let violations = scanForUnpairedAllocDegrade(src)
+    let violations = scanFamily()
     if violations.len > 0:
       var report = "\nFound " & $violations.len &
         " allocDegrade(...) call(s) immediately paired with a raw " &
         "allocateSym(...freshDegradeName(...)...) rather than routed " &
         "through degradeAlloc:\n"
       for v in violations:
-        report.add "  runtime.nim:" & $v.lineNo & ":  " & v.lineText.strip() & "\n"
+        report.add "  " & v.file & ":" & $v.lineNo & ":  " & v.lineText.strip() & "\n"
       report.add "Route through degradeAlloc(ty, kind, msg, tag) instead, " &
         "or -- if genuinely a different carrier -- mark the allocDegrade " &
         "line `# [pairing-audited: <reason>]` after review."
@@ -156,8 +170,11 @@ suite "symex degrade-pairing — allocDegrade + freshDegradeName audit":
     ## regression (sites reverting to the raw two-call form) would drop the
     ## count below the floor -- which the scanner test above would ALSO catch
     ## directly, so this is a redundant, cheap second signal.
-    let count = countDegradeAllocCallSites(readFile(runtimeNimPath))
-    checkpoint("degradeAlloc call sites: " & $count)
+    ## R2-6: counted over the runtime family, not `runtime.nim` alone (sites
+    ## moved into `heap_model.nim` and `runtime_strings.nim`); the floor stays
+    ## 13 because it is a regression floor, not an exact total.
+    let (count, perFile) = familyCallSites()
+    checkpoint("degradeAlloc call sites: " & $count & " (" & perFile & " )")
     check count >= 13
 
   test "sibling carriers never trip this scanner (R1 placeholder funnel, degradeStrArm)":

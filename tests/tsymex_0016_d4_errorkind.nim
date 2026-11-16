@@ -128,6 +128,11 @@ const expected: seq[(SymexErrorKind, DegradeClass, SymexErrorSeverity)] = @[
 suite "D4: error-kind table":
   test "every kind's class is the pre-refactor class":
     check expected.len == ord(high(SymexErrorKind)) + 1
+    var seen: set[SymexErrorKind]
+    for (k, _, _) in expected:
+      check k notin seen     # one literal row per kind: a zero-tuple row in
+      seen.incl k            # the table cannot hide behind a repeated entry
+    check seen == {low(SymexErrorKind) .. high(SymexErrorKind)}
     for (k, c, s) in expected:
       check classOf(k) == c
       check severity(k) == s

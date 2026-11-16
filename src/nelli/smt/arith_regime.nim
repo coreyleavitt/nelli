@@ -125,7 +125,7 @@ func programMayWrap*(b: BuildSemantics = buildSemantics): bool =
 func modelled(f: RoutineArithFacts): bool = f.overflowRowKey.len > 0
 
 func parseScope(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
-  ## `arithScopeFor` of a non-inherit routine (`dsl_parser.nim:1598`): where
+  ## `arithScopeFor` of a non-inherit routine (`dsl_parser.nim`'s `pushArithScope`): where
   ## the build is unchecked but the routine's position was read as `push
   ## overflowChecks: on`, `asChecked`; where a stdlib row models its push off in
   ## a build that checks, `asUnchecked`; else `asBuild`, whose meaning is the
@@ -150,7 +150,7 @@ proc decide*(f: RoutineArithFacts;
   ## under the build's in the parse); only a magic (inherit) does not claim. The stamp is a proof of the axis that made
   ## the claim, so the pragma row and the stdlib row are consulted here.
   let wraps = buildRegime(b) == rgUnchecked
-  # `withCheckDeclines` (`dsl_parser.nim:1819`).
+  # `withCheckDeclines` (`dsl_parser.nim`).
   result.declineOverflow = f.overflowDeviates and f.readable and not wraps and
                            not f.modelled
   if f.inherit:
@@ -200,7 +200,7 @@ proc ensureBase(f: var ArithFrames; b: BuildSemantics) =
 
 proc enterBody*(f: var ArithFrames; st: ArithStamp;
                 b: BuildSemantics = buildSemantics): bool =
-  ## The walk rule (`pushArith`, `runtime.nim:2187`): a stamp that claims
+  ## The walk rule (the `enterBody` call in `runtime.nim`'s block arm): a stamp that claims
   ## pushes its regime (`asBuild` the build's, `asUnchecked` unchecked,
   ## `asChecked` checked). `asInherit` pushes NOTHING: it is a block that is
   ## not a routine body, or a magic's, which runs under the enclosing
@@ -217,7 +217,7 @@ proc enterBody*(f: var ArithFrames; st: ArithStamp;
 
 proc enterParse*(f: var ArithFrames; facts: RoutineArithFacts;
                  b: BuildSemantics = buildSemantics) =
-  ## The parse rule (`pushArithScope`, `dsl_parser.nim:1662`): every routine
+  ## The parse rule (`dsl_parser.nim`'s `pushArithScope`): every routine
   ## opens a frame; an inherit routine repeats its caller's, any other takes
   ## `arithScopeFor`'s answer, claimed or not. `leave` always pairs.
   f.ensureBase b
@@ -231,7 +231,7 @@ proc leave*(f: var ArithFrames) =
 func emits*(f: ArithFrames; ac: ArithCheck;
             b: BuildSemantics = buildSemantics): bool =
   ## Whether check `ac` is emitted where the walk now stands (`checked`,
-  ## `runtime.nim:9362`). F-3 (D1-F2): the overflow and zero-divisor checks
+  ## the walker's `checked(ac: ArithCheck)` in `runtime.nim`). F-3 (D1-F2): the overflow and zero-divisor checks
   ## follow the REGIME alone (`f.regime == rgChecked`), the one value
   ## `wrapDefined` and `profile` also read, so an `asUnchecked` body in a
   ## build that checks neither emits the check nor ever has it and a defined
@@ -242,7 +242,7 @@ func emits*(f: ArithFrames; ac: ArithCheck;
 
 func profile*(r: Regime; b: BuildSemantics = buildSemantics): DefProfile =
   ## The definedness table's column for a regime (`defProfile`,
-  ## `runtime.nim:9372`).
+  ## in `runtime.nim`).
   case r
   of rgChecked: dpChecked
   of rgUnchecked: (if b.fwrapv: dpFwrapv else: dpUnchecked)
@@ -262,7 +262,8 @@ const anyProfile* = dpChecked
 func wrapDefined*(r: Regime; op: ArithOp; width: int;
                   b: BuildSemantics = buildSemantics): bool =
   ## Whether an unchecked signed `+`, `-` or `*` at `width` bits is a DEFINED
-  ## wrap (the walker's wrap decision, `runtime.nim:9632`): 8 and
+  ## wrap (the walker's wrap decision, the `wrapDefined` call in the
+  ## unchecked arm of `runtime.nim`'s signed `+`/`-`/`*` lowering): 8 and
   ## 16 bit always, 32 and 64 bit under `-fwrapv`; never where checked. It
   ## reads the definedness table, whose rows say exactly that.
   doAssert op in {aoAdd, aoSub, aoMul}, "wrapDefined: not a wrapping op"
@@ -273,7 +274,8 @@ func wrapDefined*(r: Regime; op: ArithOp; width: int;
 func inlinableIterator*(f: RoutineArithFacts; caller: Regime;
                         b: BuildSemantics = buildSemantics): bool =
   ## The overflow half of whether a closure iterator may be inlined
-  ## (`dsl_parser.nim:21804-21811`): its position was read, its overflow checks
+  ## (`dsl_parser.nim`'s closure-iterator inlining test, the
+  ## `inlinableIterator` call sites): its position was read, its overflow checks
   ## agree with the build's (no deviation in a build that checks), and where
   ## the build is unchecked the iterator is compiled under the caller's regime
   ## (inlined, it is walked under that one). The other check options stay the

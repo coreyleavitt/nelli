@@ -77,7 +77,10 @@ const
     "stampHeapSteps", "storeSeqElem", "symEq", "tabValAt", "tabValTerms",
     "taintInPlace", "unionCellCount", "unionImageGate", "unwrittenImage",
     "unwrittenIn", "unwrittenKind", "unwrittenMsg", "unwrittenReadMsg",
-    "unwrittenUb", "withSeqArrsOf", "writeExactArm", "zeroImage"]
+    "unwrittenUb", "withSeqArrsOf", "writeExactArm", "zeroImage",
+    # enum members (R2-5: the scan now sees them): `GuardLiteral`, `CapKind`
+    # and `DegradeSink` constructors the arm names directly
+    "ckHeapDepth", "dsHeapDepth", "dsNewFieldZero", "glFalse"]
 
   ## The imports `symval.nim` may have: stdlib, `z3`, and the existing leaves.
   symvalAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
@@ -109,16 +112,51 @@ proc leadIdent(s: string): string =
     if c in IdentChars: result.add c else: break
   if result.len > 0 and result[0] notin IdentStartChars: result = ""
 
+proc declNames(s: string, multi: bool): seq[string] =
+  ## The names a declaration's left-hand side binds. `s` starts at the name
+  ## (after the keyword, or an indent-2 block line). With `multi`, `a, b: T`
+  ## and `a*, b = 1` bind both names; the list ends at the first `=` or `:`.
+  var lhs = s
+  if multi:
+    for stop in ["=", ":"]:
+      let q = lhs.find(stop)
+      if q >= 0: lhs = lhs[0 ..< q]
+    for w in lhs.split(','):
+      let n = leadIdent(w.strip())
+      if n.len > 0: result.add n
+  else:
+    let n = leadIdent(lhs.strip())
+    if n.len > 0: result.add n
+
+proc enumMembers(s: string): seq[string] =
+  ## Members listed in `s` (comma separated, `= value` and pragmas dropped).
+  for w in s.split(','):
+    let n = leadIdent(w.split('=')[0].strip())
+    if n.len > 0: result.add n
+
 proc definedNames(text: string): HashSet[string] =
   ## Top-level definitions: `proc|func|template|macro|iterator|converter|
-  ## method|type|var|let|const NAME` at column 0, and the NAME lines
-  ## (indent 2) of a bare `type`/`var`/`let`/`const` block.
+  ## method|type|var|let|const NAME` at column 0, the NAME lines (indent 2)
+  ## of a bare `type`/`var`/`let`/`const` block, every name of a multi-name
+  ## `var|let|const a, b` declaration, and every member of a top-level enum
+  ## (inline `= enum a, b` or one or more lines below the `= enum`): an enum
+  ## member is a bare identifier any file that sees the type can name.
   var inBlock = false
+  var blockKw = ""
+  var enumIndent = -1      # indent of the `X = enum` line while in its body
   for raw in text.splitLines:
     if raw.strip().len == 0 or raw[0] == '#': continue
+    let l = stripLine(raw)
+    if l.strip().len == 0: continue
+    let indent = raw.len - raw.strip(trailing = false).len
+    if enumIndent >= 0:
+      if indent > enumIndent:
+        for m in enumMembers(l): result.incl m
+        continue
+      enumIndent = -1
+    var decl = ""            # the text of a type/var/const line after its keyword
     if raw[0] != ' ':
       inBlock = false
-      let l = stripLine(raw)
       let ws = l.splitWhitespace
       if ws.len == 0: continue
       case ws[0]
@@ -132,13 +170,19 @@ proc definedNames(text: string): HashSet[string] =
         # `type Foo = object` the indent-2 lines are its FIELDS, which no
         # other module can name as a bare identifier
         inBlock = ws.len == 1
+        blockKw = ws[0]
         if ws.len > 1:
-          let n = leadIdent(ws[1])
-          if n.len > 0: result.incl n
+          decl = l.strip()[ws[0].len .. ^1]
+          for n in declNames(decl, ws[0] != "type"): result.incl n
       else: discard
     elif inBlock and raw.len > 2 and raw[1] == ' ' and raw[2] != ' ':
-      let n = leadIdent(stripLine(raw).strip())
-      if n.len > 0: result.incl n
+      decl = l.strip()
+      for n in declNames(decl, blockKw != "type"): result.incl n
+    if decl.len > 0 and blockKw == "type":
+      let e = decl.find("= enum")
+      if e >= 0 and decl.find('=') == e:
+        for m in enumMembers(decl[e + 6 .. ^1]): result.incl m
+        enumIndent = indent
 
 proc referenced(text: string, names: HashSet[string]): HashSet[string] =
   for raw in text.splitLines:
@@ -222,6 +266,94 @@ proc viaHooks(text: string): string =
       result.add text[i]
       inc i
 
+proc relImports(text: string): seq[string] =
+  ## The `./name` modules a file imports (`import ./a`, `import ./a as b`,
+  ## `from ./a import ...`).
+  for l in text.splitLines:
+    let t = stripLine(l).strip()
+    var rest = ""
+    if t.startsWith("import "): rest = t[7 .. ^1]
+    elif t.startsWith("from "): rest = t[5 .. ^1]
+    else: continue
+    for m in (if t.startsWith("from "): @[rest.splitWhitespace[0]]
+              else: rest.split(',')):
+      var x = m.strip()
+      let k = x.find(" as ")
+      if k >= 0: x = x[0 ..< k]
+      if x.startsWith("./"): result.add x[2 .. ^1]
+
+const
+  ## Smt modules `runtime.nim`/`walk_state.nim` import that hold no walker
+  ## site of the kinds the runtime-family source audits count (raise, degrade,
+  ## placeholder read, include surface), each with the reason.
+  noWalkerSites = [
+    ("walk_log.nim", "the units-log env switch; no lowering"),
+    ("buildprofile.nim", "the host build-profile table (a data row)"),
+    ("types.nim", "the IR type definitions"),
+    ("admission.nim", "the admission verdict model, consulted not walked"),
+    ("readonlyaxes.nim", "an axis decision table, no walk sites"),
+    ("arith_regime.nim", "the arithmetic-regime owner, pure data"),
+    ("definedness.nim", "the definedness axis, pure data"),
+    ("variant_layout.nim", "a variant's C layout arithmetic"),
+    ("abstraction.nim", "the abstraction pre-pass over the IR"),
+    ("regex_parser.nim", "regex parsing to a Z3 regex, no walker state"),
+    ("pcre_select.nim", "the PCRE priority-run model"),
+    ("pcre_engine.nim", "the PCRE matching engine"),
+    ("pcre_syntax.nim", "PCRE syntax tables"),
+    ("exn_hierarchy.nim", "the exception type table"),
+    ("ptraim.nim", "pointer-aim name parsing"),
+    ("nativestack.nim", "a native stack-depth probe"),
+    ("stdlib_rows.nim", "the stdlib facet rows (data)"),
+    ("errorkind.nim", "the error-kind classification table"),
+    ("exits.nim", "the exit channels, called by the walker not part of it"),
+    ("concolictaxonomy.nim", "the concolic taxonomy (data)")]
+
+suite "RFC-0016 D3: definedNames sees enum members and every declared name":
+  # R2-5: the scanner used to record the first name after a column-0 keyword
+  # and nothing else, so `heapPinned` (an "exact set") could not see an enum
+  # member or the second name of `var a, b`.
+  test "an inline enum's members are defined names":
+    let d = definedNames("type GuardLiteral = enum glOpen, glTrue, glFalse\n")
+    check d == toHashSet(["GuardLiteral", "glOpen", "glTrue", "glFalse"])
+
+  test "a multi-line enum's members, with doc comments, values and a block":
+    let d = definedNames("""
+type
+  CapKind = enum
+    ## doc
+    ckNone                ## not a cap
+    ckFrontier, ckDepth   ## two on a line
+    ckValued = 5
+
+  Other = object
+    field: int
+type Pol* = enum
+  polPos,
+  polNeg
+proc after()
+""")
+    for n in ["CapKind", "ckNone", "ckFrontier", "ckDepth", "ckValued",
+              "Other", "Pol", "polPos", "polNeg", "after"]:
+      checkpoint n
+      check n in d
+    check "field" notin d
+    check "doc" notin d
+
+  test "multi-name var/let/const record every name, pragmas included":
+    let d = definedNames("""
+var a, b: int
+const c*, e = 1
+let f {.used.}, g = 2
+var h {.threadvar.}: int
+type Pair[T, U] = object
+  x: int
+""")
+    for n in ["a", "b", "c", "e", "f", "g", "h", "Pair"]:
+      checkpoint n
+      check n in d
+    check "U" notin d
+    check "x" notin d
+
 suite "RFC-0016 D3: the include surface":
   let rt = readSmt("runtime.nim")
 
@@ -250,11 +382,34 @@ suite "RFC-0016 D3: the include surface":
     for p in walkFiles(smt / "runtime*.nim"):
       checkpoint p
       check extractFilename(p) in listed
-    for f in ["symval.nim", "walk_state.nim", "z3check.nim", "heap_model.nim",
-              "string_lower_support.nim"]:
-      check f in listed
     for f in runtimeFamilyFiles:
       check fileExists(smt / f)
+
+  test "every smt module the walker imports is in the family or reasoned out":
+    # L1 (R2-5): the expected leaf set is DERIVED from the `./` imports of
+    # `runtime.nim` and `walk_state.nim`, not kept by hand. A newly imported
+    # module is either a family member (it holds walker sites a source audit
+    # must read) or is named, with a reason, in `noWalkerSites`.
+    var imported: HashSet[string]
+    for f in ["runtime.nim", "walk_state.nim"]:
+      for m in relImports(readSmt(f)): imported.incl m & ".nim"
+    var listed, reasoned: HashSet[string]
+    for f in runtimeFamilyFiles: listed.incl f
+    for (f, why) in noWalkerSites:
+      checkpoint f & ": " & why
+      check why.len > 0
+      check f notin listed          # not both
+      check f in imported           # no stale entry
+      check fileExists(smt / f)
+      reasoned.incl f
+    for f in imported:
+      checkpoint f
+      check f in listed or f in reasoned
+    # and the family's leaves are all reachable from those imports (the
+    # `runtime*.nim` includes/modules are covered by the glob test above)
+    for f in listed:
+      checkpoint f
+      check f in imported or f.startsWith("runtime")
 
   test "a module is imported, never included, and names no runtime symbol":
     let priv = definedNames(rt)

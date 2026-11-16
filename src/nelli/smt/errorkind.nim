@@ -1074,14 +1074,15 @@ type
     ## emission CONTEXT is not a column: it is a named override at its call
     ## site (`declineSeverity`, `demotedSeverity`).
 
-# RFC-0005 §2.2 / §3.4. THE exhaustive table -- one row per kind, and an
-# `array[SymexErrorKind, _]` constructor with no filler: a new
+# RFC-0005 §2.2 / §3.4. THE exhaustive table -- one row per kind, in an
+# `array[SymexErrorKind, KindInfo]` keyed constructor with no filler. Nim
+# rejects a keyed array constructor that omits a key (a missing first, middle
+# or last member each fail to compile, probed on 2.2.10: "invalid order in
+# array constructor" / "type mismatch ... array[0..1, int]"), so a new
 # `SymexErrorKind` member is a compile error here until someone writes its
-# row.
-#
-# RFC-0005 §2.2 / §3.4. THE exhaustive classification -- one word per
-# kind, and deliberately NO `else` arm: a new `SymexErrorKind` member is a
-# compile error here until someone writes its row.
+# row. What the compiler cannot see is a row written as the zero tuple
+# (`dcNoAnswer`-first class, `sevHint`); `tsymex_0016_d4_errorkind` pins every
+# kind's row against an independent literal table, which catches it.
 #
 # RFC-0005 S1 DEFAULT: every kind maps to `dcNoAnswer` (⊤ on both
 # coordinates). That is the conservative choice by construction -- ⊤
@@ -1524,6 +1525,12 @@ const kindInfo*: array[SymexErrorKind, KindInfo] = [
     # `dcNoAnswer` until then). `feDefectExcluded` is W-16: the excluded
     # raise ends its path.
   ]
+
+static:
+  # Every kind has a row (also enforced by the keyed constructor above).
+  doAssert kindInfo.len == ord(high(SymexErrorKind)) + 1
+  for k in SymexErrorKind:
+    doAssert kindInfo[k].severity in {sevHint, sevWarning, sevError}
 
 func classOf*(k: SymexErrorKind): DegradeClass =
   ## What an emission site of `k` substitutes (`kindInfo[k].class`).

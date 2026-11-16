@@ -45,7 +45,9 @@ suite "D5: axis modules do not import one another":
     for dep in importedModules(root / "axis_key.nim"):
       check dep notin axisModules
   test "every axis module with row builders reads them from the leaf":
-    for m in ["constructaxes", "pragmaaxes", "readonlyaxes", "stdlib_rows"]:
+    # every axis module (R2-6/L2: the list was 4 of the 7)
+    for m in axisModules:
+      checkpoint m
       check "axis_key" in importedModules(root / m & ".nim")
 
 suite "D5: the pure scan has no compile-time I/O":
@@ -53,7 +55,9 @@ suite "D5: the pure scan has no compile-time I/O":
     let src = code(root / "check_scan.nim").join("\n")
     for banned in ["staticRead", "querySetting", "readFile", "getEnv",
                    "existsEnv", "fileExists", "dirExists", "compilesettings",
-                   "std/os", "std/[os", ", os,", "[os,"]:
+                   "std/os", "std/[os", ", os,", "[os,",
+                   # R2-6/L2: the other compile-time and process I/O doors
+                   "slurp", "gorge", "staticExec", "open(", "osproc"]:
       check banned notin src
   test "check_options is the adapter: it imports the pure half":
     check "check_scan" in importedModules(root / "check_options.nim")

@@ -110,12 +110,17 @@ import nelli/smt/canonicalize
 import audit_scan_utils
 
 const
-  runtimeNimPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-                   "smt" / "runtime.nim"
-  runtimeStringsNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                          "nelli" / "smt" / "runtime_strings.nim"
-    ## Resolved at COMPILE time (pure path arithmetic on `currentSourcePath`
-    ## -- no file content embedded), read at TEST RUNTIME (see header).
+  ## Scanned: the whole runtime family (`runtimeFamilySources()`, resolved at
+  ## COMPILE time as pure path arithmetic on `currentSourcePath` -- no file
+  ## content embedded -- and read at TEST RUNTIME, see header). R2-6: this
+  ## audit read `runtime.nim` and `runtime_strings.nim` only, so the marked
+  ## sites that moved into `heap_model.nim` and `runtime_heap.nim` (and any
+  ## unmarked read in another moved file) were invisible.
+
+  ## Marked lines per family file (RFC-0016 R2-6). Their sum is the family
+  ## total this audit pins.
+  markerPins = [("runtime.nim", 115), ("runtime_strings.nim", 4),
+                ("heap_model.nim", 7), ("runtime_heap.nim", 10)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"
@@ -178,13 +183,9 @@ proc countMarkers(contents: string): int =
 suite "symex N27 — permanent placeholder-field-read regression audit":
 
   test "zero bare .seqLen / .seqDataRaw / .isUnsupportedFieldPlaceholder reads outside the marked, reviewed sites":
-    let runtimeSrc = readFile(runtimeNimPath)
-    let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     var violations: seq[Violation]
-    scanForBarePlaceholderFieldReads("src/nelli/smt/runtime.nim",
-                                      runtimeSrc, violations)
-    scanForBarePlaceholderFieldReads("src/nelli/smt/runtime_strings.nim",
-                                      runtimeStringsSrc, violations)
+    for (label, path) in runtimeFamilySources():
+      scanForBarePlaceholderFieldReads(label, readFile(path), violations)
     if violations.len > 0:
       var report = "\nFound " & $violations.len &
         " bare placeholder-sensitive field read(s) outside the reviewed, " &
@@ -202,7 +203,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 119 marked lines (115 runtime.nim + 4 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly the pinned marked lines per runtime-family file":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -326,14 +327,35 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## asking whether a term mentions a base. 116 - 5 + 4 = 115.
     ## RFC-0005 S8bz (on batch 9) counted the same S8cb and S8ca steps; it
     ## adds no marked line of its own here.
-    let runtimeSrc = readFile(runtimeNimPath)
-    let runtimeStringsSrc = readFile(runtimeStringsNimPath)
-    let runtimeCount = countMarkers(runtimeSrc)
-    let runtimeStringsCount = countMarkers(runtimeStringsSrc)
-    checkpoint("runtime.nim marker count: " & $runtimeCount &
-               "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 115
-    check runtimeStringsCount == 4
+    ##
+    ## R2-6: counted over the runtime family, per file. `runtime.nim` (115)
+    ## and `runtime_strings.nim` (4) are the old pins unchanged (119); the
+    ## marked sites in the files code moved into add `heap_model.nim` (7) and
+    ## `runtime_heap.nim` (10), which the old two-file scan never read:
+    ## 119 + 7 + 10 = 136. Five of the runtime_heap.nim ten (lines 882,
+    ## 1671, 1675, 3017, 3018 at R2-6) were already marked; the other five
+    ## (the `lf.seqIdx` pointer-leaf reads: `cur.seqLen`/`ini.seqLen` in the
+    ## resize check, and the `sq.seqDataRaw` load and store) were bare and
+    ## are marked by R2-6. They are reached only for a leaf `ptrVarLeaves`
+    ## made, and its svSeq arm makes a `seqIdx` leaf only for a seq that is
+    ## NOT an unsupported-field placeholder (the marked guard at 1671/1675). A family file absent from `markerPins` must have none.
+    var total = 0
+    var got = ""
+    for (label, path) in runtimeFamilySources():
+      let f = label.extractFilename
+      let n = countMarkers(readFile(path))
+      total += n
+      if n > 0: got.add " " & f & "=" & $n
+      var want = 0
+      for (pf, pn) in markerPins:
+        if pf == f: want = pn
+      checkpoint(f & " marker count " & $n & ", pinned " & $want)
+      check n == want
+    checkpoint("family markers:" & got & " total " & $total)
+    var pinnedTotal = 0
+    for (_, pn) in markerPins: pinnedTotal += pn
+    check pinnedTotal == 136
+    check total == pinnedTotal
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":
     ## The marker-count pin above (49 + 3) closes the ADDITIVE half of the

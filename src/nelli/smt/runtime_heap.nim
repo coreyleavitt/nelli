@@ -2204,7 +2204,7 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         let cur = svAtPath(vsv, lf.path)
         let ini = ptrInputOf(w, vnm, lf.path)
         if ini.kind != svSeq or cur.kind != svSeq or
-           cur.seqLen.raw != ini.seqLen.raw:
+           cur.seqLen.raw != ini.seqLen.raw: # [placeholder-audited]
           result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
             "address an element of the seq " & vwhat & ", whose length " &
             "this path changed: a resize may move its elements, so the " &
@@ -2213,7 +2213,7 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
           return
         t.idx = ptrIdxAt(ctx, p, typeId, refSort, ptrAst)
         idxFacts.add (code, ptrIdxInRange(ctx, t.idx,
-                                          wrap[Z3AnyAst](ctx, ini.seqLen.raw)))
+                                          wrap[Z3AnyAst](ctx, ini.seqLen.raw))) # [placeholder-audited]
         if lf.aggregate:
           # RFC-0005 S8bz (item 1): the element's own branch.
           let elemV = seqElemAt(cur, wrap[Z3Int](ctx, t.idx.raw))
@@ -2919,7 +2919,7 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
       elif t.famKey.len > 0: heapSelect(ctx, p.heaps[t.famKey], t.objAddr, pointee)
       elif t.seqIdx:
         let sq = svAtPath(p.env[t.envName], t.path)
-        elemValueOf(ctx, checkedSelect(ctx, sq.seqDataRaw.raw, t.idx.raw),
+        elemValueOf(ctx, checkedSelect(ctx, sq.seqDataRaw.raw, t.idx.raw), # [placeholder-audited]
                     pointee)
       elif t.tabKey:
         let tb = svAtPath(p.env[t.envName], t.path)
@@ -3011,9 +3011,9 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
     elif t.seqIdx:
       let root = p.env[t.envName]
       var sq = svAtPath(root, t.path)
-      let data2 = wrap[Z3AnyAst](ctx, checkedStore(ctx, sq.seqDataRaw.raw,
+      let data2 = wrap[Z3AnyAst](ctx, checkedStore(ctx, sq.seqDataRaw.raw, # [placeholder-audited]
                                                    t.idx.raw,
-                                                   elemTermIn(ctx, val, sq.seqDataRaw)))
+                                                   elemTermIn(ctx, val, sq.seqDataRaw))) # [placeholder-audited]
       sq.seqDataRaw = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw, data2.raw, # [placeholder-audited]
                                                      sq.seqDataRaw.raw)) # [placeholder-audited]
       p.env[t.envName] = svWithPath(root, t.path, sq)

@@ -1783,7 +1783,6 @@ task test, "Run the test suite":
             # RFC-0016 review D1 S1: arith_regime, the one owner of the arithmetic regime (module + tests; no walker change).
             "tsymex_0016_d1_regime",
             "tsymex_0016_d1_regime_checksoff",
-            "tsymex_0016_d1_regime_fwrapv",
             # RFC-0016 review D1 S3: the opaque scan classes an operand by its width (walker 361).
             "tsymex_0016_d1_narrow_opaque",
             "tsymex_0016_k10d_removals",

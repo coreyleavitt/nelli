@@ -103,3 +103,32 @@ else:
       check r.status == sxSat
       check UbKind(ubSignedOverflow) notin r.soundness.undefinedKinds
       check UbKind(ubSignedDivZero) notin r.soundness.undefinedKinds
+
+  # RFC-0016 review D1 (slice S1): `arith_regime` against the current parser
+  # and walker rules under this build (checks off, -fwrapv). Folded here so
+  # the vcc arm above stays this build's one platform site (K2a census).
+  import nelli/smt/arith_regime
+  import ./d1_regime_helpers
+
+  suite "D1 S1: arith_regime (checks off, fwrapv)":
+    test "the truth table: readable x overflowOn x deviates x row x inherit, all four builds":
+      checkTruthTable()
+    test "literal rows, each citing the line it encodes":
+      checkLiterals()
+    test "profile, wrapDefined, ownerProfile against defProfile and signedWrapDefined":
+      checkProfiles()
+    test "frames: the walk rule, the parse rule, emits, the iterator test":
+      checkFrames()
+    test "stampFor is const-pure":
+      checkConstPure()
+    test "the cache-key bytes of a stamped block":
+      checkKeyBytes()
+    test "F-2 census: every overflow-exercising stdlib row calls only magics":
+      checkOverflowRowCensus()
+    test "the compiled build":
+      check buildSemantics.fwrapv
+      check coOverflow notin buildSemantics.checks
+      check buildRegime() == rgUnchecked
+      check programMayWrap()
+      check profile(rgUnchecked) == dpFwrapv
+      check profile(rgChecked) == dpChecked

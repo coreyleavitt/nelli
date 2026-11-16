@@ -28,6 +28,7 @@
 ##     left in `runtime.nim`), and `runtime.nim`
 ##     defines none of the names that moved into it.
 import std/[unittest, os, strutils, sets, tables]
+import audit_scan_utils
 
 const
   root = currentSourcePath().parentDir() / ".."
@@ -239,6 +240,21 @@ suite "RFC-0016 D3: the include surface":
         let t = l.strip()
         check not (t.startsWith("import ") or t.startsWith("from ") or
                    t.startsWith("export "))
+
+  test "the shared runtime-family list names every runtime*.nim and every leaf":
+    ## The source audits read `runtimeFamilyFiles` (tests/audit_scan_utils.nim)
+    ## instead of their own file lists, so a file move cannot break four
+    ## audits at once. This is what keeps the list whole.
+    var listed: HashSet[string]
+    for f in runtimeFamilyFiles: listed.incl f
+    for p in walkFiles(smt / "runtime*.nim"):
+      checkpoint p
+      check extractFilename(p) in listed
+    for f in ["symval.nim", "walk_state.nim", "z3check.nim", "heap_model.nim",
+              "string_lower_support.nim"]:
+      check f in listed
+    for f in runtimeFamilyFiles:
+      check fileExists(smt / f)
 
   test "a module is imported, never included, and names no runtime symbol":
     let priv = definedNames(rt)

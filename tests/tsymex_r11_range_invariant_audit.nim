@@ -174,24 +174,11 @@ import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
 import audit_scan_utils
 
+# The files scanned are `runtimeFamilySources()` (tests/audit_scan_utils.
+# nim): `runtime.nim` plus every leaf and module cut out of it. Read at
+# TEST RUNTIME (the `readFile`-not-`staticRead` MSVC C2026 avoidance
+## N27/N36 already document).
 const
-  runtimeNimPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-                   "smt" / "runtime.nim"
-  runtimeStringsNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                          "nelli" / "smt" / "runtime_strings.nim"
-  runtimeFloatsNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                         "nelli" / "smt" / "runtime_floats.nim"
-  runtimeExceptionsNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                             "nelli" / "smt" / "runtime_exceptions.nim"
-  runtimeClosuresNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                           "nelli" / "smt" / "runtime_closures.nim"
-  runtimeHeapNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                       "nelli" / "smt" / "runtime_heap.nim"
-    ## Resolved at COMPILE time (pure path arithmetic on `currentSourcePath`
-    ## -- no file content embedded), read at TEST RUNTIME (same
-    ## `readFile`-not-`staticRead` MSVC C2026 avoidance N27/N36 already
-    ## document).
-
   bvCallSubstr = "bvRangeConds("
   bvDefPrefix = "proc bvRangeConds("
   clampCallSubstr = "clampToDeclaredRange("
@@ -271,18 +258,11 @@ proc violatingSites(sites: seq[CallSite], primitive: string): seq[CallSite] =
       continue    ## reviewed-proc allowlist path (current inventory).
     result.add s
 
-let allFiles = [
-  ("src/nelli/smt/runtime.nim", runtimeNimPath),
-  ("src/nelli/smt/runtime_strings.nim", runtimeStringsNimPath),
-  ("src/nelli/smt/runtime_floats.nim", runtimeFloatsNimPath),
-  ("src/nelli/smt/runtime_exceptions.nim", runtimeExceptionsNimPath),
-  ("src/nelli/smt/runtime_closures.nim", runtimeClosuresNimPath),
-  ("src/nelli/smt/runtime_heap.nim", runtimeHeapNimPath),
-]
+let allFiles = runtimeFamilySources()
 
 suite "symex R11 — permanent range-invariant regression audit":
 
-  test "zero unadjudicated direct `bvRangeConds(` calls outside the reviewed allowlist (all six files)":
+  test "zero unadjudicated direct `bvRangeConds(` calls outside the reviewed allowlist (the whole runtime family)":
     var allSites: seq[CallSite]
     for (label, path) in allFiles:
       allSites.add scanCallSites(label, readFile(path), bvCallSubstr, bvDefPrefix)
@@ -301,7 +281,7 @@ suite "symex R11 — permanent range-invariant regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "zero unadjudicated direct `clampToDeclaredRange(` calls outside the reviewed allowlist (all six files)":
+  test "zero unadjudicated direct `clampToDeclaredRange(` calls outside the reviewed allowlist (the whole runtime family)":
     var allSites: seq[CallSite]
     for (label, path) in allFiles:
       allSites.add scanCallSites(label, readFile(path), clampCallSubstr, clampDefPrefix)
@@ -364,15 +344,19 @@ suite "symex R11 — permanent range-invariant regression audit":
     ## bounds a narrow container element's 64-bit cell by the element
     ## type's value domain, to count members: marker-exempt
     ## (`container-cell-domain`).
-    check byFile[0][1] == 7               ## runtime.nim
-    check byFile[2][1] == 1               ## runtime_floats.nim
-    for i in 1 ..< byFile.len:
-      if i != 2: check byFile[i][1] == 0  ## the other `include`d siblings
+    ## The totals are the invariant; which file holds a site is not (the
+    ## helper moved to `heap_model.nim` in D3c-6). 7 + 1 = 8 sites, in six
+    ## procs, `rangeCondsIfNeeded` holding two.
+    var total = 0
+    for (label, n) in byFile: total += n
+    check total == 8
     check byProc.len == 6
-    check byProc[0][0] == "rangeCondsIfNeeded"
-    check byProc[0][1] == 2
+    var helperCount = -1
+    for (name, n) in byProc:
+      if name == "rangeCondsIfNeeded": helperCount = n
+    check helperCount == 2
 
-  test "pinned inventory: clampToDeclaredRange 7 calls (clampWitnessField 2, extractTableEntries 1, extractSeqElements 4), all in runtime.nim":
+  test "pinned inventory: clampToDeclaredRange 7 calls (clampWitnessField 2, extractTableEntries 1, extractSeqElements 4), across the runtime family":
     var byFile: seq[(string, int)]
     var byProc: seq[(string, int)]
     for (label, path) in allFiles:
@@ -386,9 +370,9 @@ suite "symex R11 — permanent range-invariant regression audit":
             found = true
         if not found: byProc.add (s.procName, 1)
     checkpoint("clampToDeclaredRange by file: " & $byFile & "  by proc: " & $byProc)
-    check byFile[0][1] == 7                ## runtime.nim
-    for i in 1 ..< byFile.len:
-      check byFile[i][1] == 0              ## the five `include`d siblings
+    var total = 0
+    for (label, n) in byFile: total += n
+    check total == 7
     var perProc: seq[(string, int)]
     for p in byProc: perProc.add p
     var clampWitnessFieldCount, extractTableEntriesCount, extractSeqElementsCount: int
@@ -402,7 +386,7 @@ suite "symex R11 — permanent range-invariant regression audit":
     check extractTableEntriesCount == 1
     check extractSeqElementsCount == 4
     check clampWitnessFieldCount + extractTableEntriesCount +
-          extractSeqElementsCount == byFile[0][1]   ## no fifth proc appeared
+          extractSeqElementsCount == total   ## no fifth proc appeared
 
   test "R11 house scanner demonstration: an injected unmarked call in an unreviewed proc trips the audit; a marker OR allowlisting reverts it clean":
     ## Mirrors N36's own red/green self-demonstration -- in-memory injection

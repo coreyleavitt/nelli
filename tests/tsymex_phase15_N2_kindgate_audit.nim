@@ -340,8 +340,14 @@ proc scanForBareKindGates(fname, contents: string, violations: var seq[Violation
       trimmed.contains("==nnkProcDef") or trimmed.contains("!=nnkProcDef") or
       trimmed.contains("== nnkFuncDef") or trimmed.contains("!= nnkFuncDef") or
       trimmed.contains("==nnkFuncDef") or trimmed.contains("!=nnkFuncDef")
+    # `genSym(nskProc, "name")` CREATES a fresh symbol of that kind (a macro
+    # building a nested routine); it compares no kind and gates nothing. Only
+    # that exact constructor spelling is scrubbed: a gate sharing the line
+    # with it (`symKind(n) == nskProc`) is still seen.
+    let scrubbed = trimmed.replace("genSym(nskProc,", "genSym(").replace(
+                                    "genSym(nskFunc,", "genSym(")
     let isSymKindGate =
-      trimmed.contains("nskProc") or trimmed.contains("nskFunc")
+      scrubbed.contains("nskProc") or scrubbed.contains("nskFunc")
     if isBareSingleKindCompare or isSymKindGate:
       violations.add Violation(file: fname, lineNo: lineNo, lineText: rawLine)
 
@@ -613,6 +619,16 @@ suite "symex N2 — permanent routine-kind bare-gate regression audit":
         "per RFC-parser-normalization Cluster N (#146/#148)."
       checkpoint(report)
     check violations.len == 0
+
+  test "a `genSym(nskProc, ...)` constructor is not a gate; a kind comparison beside it still is":
+    var clean: seq[Violation]
+    scanForBareKindGates("synthetic.nim",
+      "  let build = genSym(nskProc, \"irBuild\")\n", clean)
+    check clean.len == 0
+    var dirty: seq[Violation]
+    scanForBareKindGates("synthetic.nim",
+      "  if symKind(n) == nskProc: discard genSym(nskProc, \"x\")\n", dirty)
+    check dirty.len == 1
 
   test "zero wide inline routine-shaped-node lists outside the N3 consts (RFC N3)":
     ## Multi-line-aware: pattern (d). Pre-N3 this flags exactly 7 sites (the

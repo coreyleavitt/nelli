@@ -256,10 +256,15 @@ suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no co
     check r.status != sxUnsat
 
   test "structural: the site allocates through degradeAlloc (freshDegradeName), never a fixed name":
-    const heapSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-                    "smt" / "runtime_heap.nim"
+    ## The sites live in `heap_model.nim` since D3c-6; the scan reads the
+    ## whole runtime family (tests/audit_scan_utils.nim) so the next move of
+    ## them does not break it.
+    var familySrc = ""
+    for (label, path) in runtimeFamilySources():
+      familySrc.add readFile(path)
+      familySrc.add "\n"
     var emitting: seq[string]
-    for raw in readFile(heapSrc).splitLines():
+    for raw in familySrc.splitLines():
       let t = raw.strip()
       if t.len == 0 or isCommentLine(t): continue
       if "heUnsupportedPointeeRead" in t: emitting.add t
@@ -275,7 +280,7 @@ suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no co
       elif t.startsWith("allocDegrade("): inc stores
     check reads == 2
     check stores == 1
-    check "__liftHeapValueUnsupported\", freshLiftPc" notin readFile(heapSrc)
+    check "__liftHeapValueUnsupported\", freshLiftPc" notin familySrc
 
   test "IR level: the tainted path carries exactly {scSpurious}; unreachable is sxUnsat":
     # RFC-0005 S8ap: a `ref string` pointee is modelled now (the read is the

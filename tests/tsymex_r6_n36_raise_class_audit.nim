@@ -210,16 +210,23 @@ import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
 import audit_scan_utils
 
+# The files scanned are `n36Sources()` (tests/audit_scan_utils.
+# nim): `runtime.nim` plus every leaf and module cut out of it. Read at
+# TEST RUNTIME (see header). Counts are pinned over the whole family: a
+# file move changes which file holds a site, not how many there are.
 const
-  runtimeNimPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-                   "smt" / "runtime.nim"
-  runtimeStringsNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                          "nelli" / "smt" / "runtime_strings.nim"
-  runtimeHeapNimPath = currentSourcePath.parentDir() / ".." / "src" /
-                       "nelli" / "smt" / "runtime_heap.nim"
-    ## Resolved at COMPILE time (pure path arithmetic on `currentSourcePath`
-    ## -- no file content embedded), read at TEST RUNTIME (see header).
+  neverScannedModules = ["runtime_exceptions.nim", "runtime_floats.nim",
+                         "runtime_closures.nim"]
+    ## Modules that were `include`d into `runtime.nim` before RFC-0016 D3c-3/-4/-5
+    ## and that this audit's file list never named: they carry bare raises with
+    ## no marker, which is a pre-existing gap, not something a move created.
+    ## Scanning them is new audit scope (it needs a triage of each raise), so
+    ## the audit follows the code that WAS in scope, and leaves these out.
 
+proc n36Sources(): seq[tuple[label, path: string]] =
+  runtimeFamilySources(neverScannedModules)
+
+const
   refSymexPrefix = "raise (ref Symex"
   newExcSubstr = "raise newException("
   auditMarker = "# [raise-audited:"
@@ -295,19 +302,20 @@ proc countMarkersContaining(contents: string, needle: string): int =
     if rawLine.contains(needle):
       inc result
 
+proc familyMarked(needle: string, newExc: bool): int =
+  for (label, path) in n36Sources():
+    result += countMarked(readFile(path), needle, newExc)
+
+proc familyMarkersContaining(needle: string): int =
+  for (label, path) in n36Sources():
+    result += countMarkersContaining(readFile(path), needle)
+
 suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
 
-  test "zero bare `raise (ref Symex*)` statements outside the reviewed, marked site inventory (all three files)":
-    let runtimeSrc = readFile(runtimeNimPath)
-    let runtimeStringsSrc = readFile(runtimeStringsNimPath)
-    let runtimeHeapSrc = readFile(runtimeHeapNimPath)
+  test "zero bare `raise (ref Symex*)` statements outside the reviewed, marked site inventory (the whole runtime family)":
     var violations: seq[Violation]
-    scanForBareRefSymexRaises("src/nelli/smt/runtime.nim",
-                               runtimeSrc, violations)
-    scanForBareRefSymexRaises("src/nelli/smt/runtime_strings.nim",
-                               runtimeStringsSrc, violations)
-    scanForBareRefSymexRaises("src/nelli/smt/runtime_heap.nim",
-                               runtimeHeapSrc, violations)
+    for (label, path) in n36Sources():
+      scanForBareRefSymexRaises(label, readFile(path), violations)
     if violations.len > 0:
       var report = "\nFound " & $violations.len &
         " bare classified-carrier raise (ref Symex...) statement(s) outside " &
@@ -322,18 +330,11 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "zero bare `raise newException(...)` statements outside the reviewed, marked site inventory (all three files)":
+  test "zero bare `raise newException(...)` statements outside the reviewed, marked site inventory (the whole runtime family)":
     ## N46 (round-6 re-review): the widened pattern (B) scan.
-    let runtimeSrc = readFile(runtimeNimPath)
-    let runtimeStringsSrc = readFile(runtimeStringsNimPath)
-    let runtimeHeapSrc = readFile(runtimeHeapNimPath)
     var violations: seq[Violation]
-    scanForBareNewExceptionRaises("src/nelli/smt/runtime.nim",
-                                   runtimeSrc, violations)
-    scanForBareNewExceptionRaises("src/nelli/smt/runtime_strings.nim",
-                                   runtimeStringsSrc, violations)
-    scanForBareNewExceptionRaises("src/nelli/smt/runtime_heap.nim",
-                                   runtimeHeapSrc, violations)
+    for (label, path) in n36Sources():
+      scanForBareNewExceptionRaises(label, readFile(path), violations)
     if violations.len > 0:
       var report = "\nFound " & $violations.len &
         " bare `raise newException(...)` statement(s) outside the reviewed, " &
@@ -351,7 +352,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "pattern (A) site inventory: 6 runtime.nim + 16 runtime_strings.nim + 13 runtime_heap.nim marked lines":
+  test "pattern (A) site inventory: 32 marked lines across the runtime family (6 runtime.nim + 20 runtime_strings.nim + 6 runtime_heap.nim when pinned)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -363,11 +364,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## `SymexBytesLengthTooLargeError`).
     ## runtime_heap.nim (13) is entirely NEW as of N46 -- this file was never
     ## scanned before this slice.
-    let runtimeCount = countMarked(readFile(runtimeNimPath), refSymexPrefix, false)
-    let runtimeStringsCount = countMarked(readFile(runtimeStringsNimPath), refSymexPrefix, false)
-    let runtimeHeapCount = countMarked(readFile(runtimeHeapNimPath), refSymexPrefix, false)
-    checkpoint("runtime.nim=" & $runtimeCount & " runtime_strings.nim=" &
-               $runtimeStringsCount & " runtime_heap.nim=" & $runtimeHeapCount)
+    let total = familyMarked(refSymexPrefix, false)
+    checkpoint("runtime family total=" & $total)
     ## runtime_strings.nim 18 -> 16 (RFC-0005 S8g, walker 155). `split(s,
     ## "")` is `@[s]` in Nim, so its case (a) no longer declines: the
     ## symbolic-receiver `SymexZ3StringIncompleteError` and the empty-sep
@@ -396,25 +394,21 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## runtime_strings.nim 18 -> 20 (RFC-0005 S8ca): `iekStrFromChars`'s two
     ## (a view that is not a backed seq of chars), reached only from
     ## `lowerStrArm`, through plain proc frames.
-    check runtimeCount == 6
-    check runtimeStringsCount == 20
+    ## 6 (`runtime.nim`) + 20 (`runtime_strings.nim`) + 6 (`runtime_heap.nim`).
     # N46-followup-2 (round-6 re-review, heap-raise totality slice):
     # runtime_heap.nim's 13 LEDGERED-LIVE sites were adjudicated -- 7
     # CONVERTED to the in-band degrade idiom (no longer raw raises, no
     # longer marked/counted, per this file's own established convention for
     # a converted site) and 6 RECLASSIFIED `verified-unreachable` (still raw
     # raises, still marked -- 13 -> 6).
-    check runtimeHeapCount == 6
+    check total == 32
 
-  test "pattern (B) site inventory: 78 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 84 marked lines across the runtime family (81 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim when pinned)":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
-    let runtimeCount = countMarked(readFile(runtimeNimPath), newExcSubstr, true)
-    let runtimeStringsCount = countMarked(readFile(runtimeStringsNimPath), newExcSubstr, true)
-    let runtimeHeapCount = countMarked(readFile(runtimeHeapNimPath), newExcSubstr, true)
-    checkpoint("runtime.nim=" & $runtimeCount & " runtime_strings.nim=" &
-               $runtimeStringsCount & " runtime_heap.nim=" & $runtimeHeapCount)
+    let total = familyMarked(newExcSubstr, true)
+    checkpoint("runtime family total=" & $total)
     ## 75 -> 76 (#163 /code-review round 4, finding R16). One new marked
     ## site: `runtime.nim`'s `bvEqConst`, added when concolic scalar params
     ## began binding at their declared width. It is category-c by the same
@@ -470,11 +464,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## `injectShapeFault`.
     ## 80 -> 81 (RFC-0005 S8cl). `storeOrdinal`'s range check, the check `F(v)`
     ## made implicitly: category-c.
-    check runtimeCount == 81
-    check runtimeStringsCount == 0
-    check runtimeHeapCount == 3
+    check total == 84
 
-  test "N46-followup-3: pattern (B) category breakdown -- 81 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 81 category-c, 0 category-d (runtime family) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -484,12 +476,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## CONVERTED (no longer raw raises, no longer marked); `coerceIntLit`'s
     ## three sites were RECLASSIFIED category-d -> category-c (still marked).
     ## Zero category-d markers remain in the pinned inventory.
-    let runtimeSrc = readFile(runtimeNimPath)
-    let runtimeHeapSrc = readFile(runtimeHeapNimPath)
-    let cCount = countMarkersContaining(runtimeSrc, "[raise-audited: category-c:") +
-                 countMarkersContaining(runtimeHeapSrc, "[raise-audited: category-c:")
-    let dCount = countMarkersContaining(runtimeSrc, categoryDMarker) +
-                 countMarkersContaining(runtimeHeapSrc, categoryDMarker)
+    let cCount = familyMarkersContaining("[raise-audited: category-c:")
+    let dCount = familyMarkersContaining(categoryDMarker)
     checkpoint("category-c=" & $cCount & " category-d=" & $dCount)
     ## 78 -> 79: the same single R16 `bvEqConst` site counted above. No
     ## category-d site was added; that backlog stays closed.
@@ -509,7 +497,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     check cCount == 84
     check dCount == 0
 
-  test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":
+  test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime family)":
     ## The 13-site backlog N46 opened is fully adjudicated as of the
     ## heap-raise totality slice (walker v113): every site is either
     ## CONVERTED (no longer a raw raise, no longer marked) or RECLASSIFIED
@@ -519,9 +507,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## writeup). Mirrors N37's own "zero known-open markers remain" closure
     ## discipline below -- a future regression that reintroduces a
     ## LEDGERED-LIVE marker (e.g. a careless revert) trips this immediately.
-    let runtimeHeapSrc = readFile(runtimeHeapNimPath)
-    let ledgeredCount = countMarkersContaining(runtimeHeapSrc, ledgeredLiveMarker)
-    checkpoint("runtime_heap.nim LEDGERED-LIVE=" & $ledgeredCount)
+    let ledgeredCount = familyMarkersContaining(ledgeredLiveMarker)
+    checkpoint("runtime family LEDGERED-LIVE=" & $ledgeredCount)
     check ledgeredCount == 0
 
   test "N36 house scanner demonstration (pattern A): an injected bare raise trips the audit, then reverts clean":
@@ -588,10 +575,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## from N46's OWN, separately-tracked `LEDGERED-LIVE`/`category-d`
     ## backlog above -- this test's zero-count is about the OLD `known-open`
     ## name specifically, an already-closed adjudication N46 does not reopen.
-    let runtimeSrc = readFile(runtimeNimPath)
-    let runtimeStringsSrc = readFile(runtimeStringsNimPath)
-    let knownOpenCount = countKnownOpenMarkers(runtimeSrc) +
-                          countKnownOpenMarkers(runtimeStringsSrc)
+    var knownOpenCount = 0
+    for (label, path) in n36Sources():
+      knownOpenCount += countKnownOpenMarkers(readFile(path))
     checkpoint("known-open marker count: " & $knownOpenCount)
     check knownOpenCount == 0
 

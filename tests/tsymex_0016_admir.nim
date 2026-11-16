@@ -383,7 +383,7 @@ suite "ADM-IR: censuses (allowlist zero unless named)":
     check countIn("dsl_parser.nim", "bindSym\"replayScan\"") == 1
     check countIn("dsl_parser.nim", "bindSym\"replayArith\"") == 1
     check countOutside("replayScan(", ["definedness.nim", "dsl_parser.nim"]) == 0
-    check countOutside("replayArith(", ["types.nim", "dsl_parser.nim"]) == 0
+    check countOutside("replayArith(", ["arith_regime.nim", "dsl_parser.nim"]) == 0
   test "an arm that never ran the scan names `unscanned`: three, allowlisted":
     check countIn("dsl_parser.nim", "unscanned") == 3
     check countOutside("unscanned", ["definedness.nim", "dsl_parser.nim", "types.nim"]) == 0

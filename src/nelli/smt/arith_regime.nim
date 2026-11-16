@@ -17,15 +17,117 @@
 ##     `ArithStamp`, whose scope is private: only `decide` mints one, and it
 ##     does so by consulting the admission tables itself (D2).
 ##
-## S1 imports `types` for `ArithScope` and `ArithCheck` (their definitions move
-## here in S2, and `types` then imports this module; the `import` below goes
-## with the move). Nothing here is read by a parser or walker site yet.
+## S2: the vocabulary (`ArithScope`, `ArithCheck`, `ArithScopeProof` and its
+## constructors, `buildWraps`, `arithChecksFor`, `signedWrapDefined`) is defined
+## here, and `types` imports and re-exports it under the same names; this
+## module imports no `types`. Nothing here is read by a parser or walker site
+## through the `Regime` surface yet.
 import ./buildprofile
 import ./admission
 import ./definedness
 import ./pragmaaxes
 import ./stdlib_rows
-import ./types
+
+type
+  ArithScope* = enum
+    ## RFC-0016 W1-d2c. Which arithmetic a routine body is walked under, in a
+    ## build whose own overflow checks are off (`buildWraps()`). Checked-ness is
+    ## per routine: the build's setting unless an enclosing `push overflowChecks:
+    ## on` says otherwise. The parser stamps the routine's body block; the
+    ## walker pushes it for the block and pops it after, so a
+    ## caller's scope never leaks into a callee and back.
+    asInherit   ## no claim (every block but a routine body; any body in a checks-on build)
+    asBuild     ## unchecked signed arithmetic: the build's (`ubSignedOverflow`)
+    asChecked   ## `push overflowChecks: on` in a checks-off build: `OverflowDefect`
+    asUnchecked ## RFC-0016 K4c. A stdlib body under a push that turns its
+                ## overflow checks off (`math.nim`'s `checks: off`) in a build
+                ## that checks: unchecked signed arithmetic, as `asBuild` is
+                ## in a checks-off build. Only a `stdlibAxis` row stamps it.
+
+  ArithCheck* = enum
+    ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks the walker
+    ## EMITS. RFC-0016 K10d: the build alone decides (`arithChecksFor`); the
+    ## `SymexSettings.arithChecks` setting that used to override it is gone.
+    ## An unchecked kind is never forked so it never pays path-multiplicative
+    ## cost. `defectExclusions` is the orthogonal "surfacing" axis: the fork is
+    ## emitted but the finding is suppressed when the kind is excluded.
+    ##
+    ## ORDINAL-STABILITY RULE: ALWAYS APPEND new members at the END of this
+    ## enum; the ordinals are the order the build profile reads.
+    acOverflow   ## fork +/-/* overflow → OverflowDefect raise
+    acDivByZero  ## fork div/mod-by-zero → DivByZeroDefect raise. Only with
+                 ## `acOverflow` also on (RFC-0005 S8aa): Nim emits its zero
+                 ## check under `overflowChecks` alone, so with that off a
+                 ## zero divisor reaches the C division, which traps (SIGFPE);
+                 ## it is then a survivor-only trap, never a raise.
+    acRange      ## fork float→int out-of-range → RangeDefect raise (R16-2);
+                 ## also int-width narrowing (R16-5, deferred). Scope in R16-1:
+                 ## float→int domain checks only (RD2) — no fork emitted yet.
+
+  ArithScopeProof* = object
+    ## RFC-0016 ADM-IR (section 8.1). The proof that a block's arithmetic
+    ## claim was stamped by the axis that owns it: the pragma axis (a `push
+    ## overflowChecks: on` row), the stdlib-body axis (a routine whose
+    ## check-option delta is modelled) or the build (its own arithmetic is
+    ## unchecked). The scope is private, so `mkArithBlock` cannot be handed a
+    ## bare `ArithScope` and the three constructors below are the only way in.
+    scope: ArithScope
+
+func arithScope*(p: ArithScopeProof): ArithScope = p.scope
+
+func arithFromPragma*(a: Admit[PragmaModel]): ArithScopeProof =
+  ## `asChecked`: the admitted `routine/overflowChecks` pragma row (a `push
+  ## overflowChecks: on` in a build whose own checks are off).
+  doAssert a.admitted, "arithFromPragma: " & a.decline[1]
+  doAssert a.cell.scope == axPragma and a.cell.key == "routine/overflowChecks",
+    "arithFromPragma: " & render(a.cell) & " is not the overflowChecks row"
+  ArithScopeProof(scope: asChecked)
+
+func arithFromStdlib*(a: Admit[StdlibBody]): ArithScopeProof =
+  ## `asUnchecked`: an admitted stdlib-body row whose body trips
+  ## `overflowChecks` (`exercises`), which `math.nim`'s push turns off.
+  doAssert a.admitted, "arithFromStdlib: " & a.decline[1]
+  doAssert coOverflow in a.payload.exercises,
+    "arithFromStdlib: " & render(a.cell) & " does not exercise overflowChecks"
+  ArithScopeProof(scope: asUnchecked)
+
+func replayArith*(s: ArithScope): ArithScopeProof =
+  ## The IR emit's rebuild of a stamp it already read. The parser's emit is
+  ## the only caller; `tests/tsymex_0016_admir.nim` counts the uses.
+  doAssert s != asInherit, "replayArith: asInherit is no claim"
+  ArithScopeProof(scope: s)
+
+func arithChecksFor*(b: BuildSemantics = buildSemantics): set[ArithCheck] =
+  ## RFC-0016 W1-d2. The arithmetic checks a build `b` implies: the checks its
+  ## compiled code performs. The one source the walker's check gates read
+  ## (K10d removed the `SymexSettings.arithChecks` override).
+  if coOverflow in b.checks: result.incl {acOverflow, acDivByZero}
+  if coRange in b.checks: result.incl acRange
+
+func buildWraps*(b: BuildSemantics = buildSemantics): bool =
+  ## RFC-0016 W1-d2 (W-07). Whether signed `+`, `-`, `*` (and `div`) in this
+  ## build are UNCHECKED: with `overflowChecks` off the C operation is
+  ## undefined on overflow (not a wrap, unless the build is `-d:nelliFwrapv`,
+  ## which `signedWrapDefined` reports), so the walker does not model a wrap
+  ## and a trusted answer for 32 and 64 bit. The ONE predicate
+  ## `wraps()`, the wrap scan and the exact-offset promotion read;
+  ## settings never feed it (the build is what the native program does). A routine under
+  ## `{.push overflowChecks: off.}` is a separate route: its marker declines.
+  coOverflow notin b.checks
+
+func arithFromBuild*(b: BuildSemantics = buildSemantics): ArithScopeProof =
+  ## `asBuild`: the build's own signed arithmetic is unchecked. Not a table
+  ## row: the build axis's claim is the build itself.
+  doAssert buildWraps(b), "arithFromBuild: the build checks its arithmetic"
+  ArithScopeProof(scope: asBuild)
+
+func signedWrapDefined*(width: int; b: BuildSemantics = buildSemantics): bool =
+  ## RFC-0016 K5a. Whether an unchecked signed `+`, `-`, `*` or negation at
+  ## `width` bits is a DEFINED wrap in build `b`: always below `int`'s width
+  ## (8 and 16 bit: C computes in the promoted `int` and the narrowing wraps),
+  ## and at 32 and 64 bit only when the build compiles with `-fwrapv`
+  ## (`-d:nelliFwrapv`). `low(T) div -1` and `mod -1` are not covered by it.
+  width in {8, 16} or b.fwrapv
 
 type
   Regime* = enum

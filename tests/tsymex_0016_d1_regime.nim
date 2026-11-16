@@ -1,7 +1,7 @@
 ## RFC-0016 review D1 (slice S1): `arith_regime`, the one owner of the
 ## arithmetic regime, against the current parser and walker rules.
 ## The default build (checks on, no `-fwrapv`).
-import std/unittest
+import std/[unittest, os, strutils]
 import nelli/smt/buildprofile
 import nelli/smt/arith_regime
 import ./d1_regime_helpers
@@ -26,3 +26,10 @@ suite "D1 S1: arith_regime (default build)":
     check coOverflow in buildSemantics.checks
     check buildRegime() == rgChecked
     check not programMayWrap()
+
+  test "S3 census: the parser names no build predicate and no profile literal":
+    let src = readFile(currentSourcePath().parentDir() / ".." / "src" /
+                       "nelli" / "smt" / "dsl_parser.nim")
+    check "buildWraps(" notin src
+    for lit in ["dpChecked", "dpUnchecked", "dpFwrapv"]:
+      check lit notin src

@@ -55,6 +55,7 @@ import ./stdlib_models
 import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
 import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
 import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejected `re"..."` is a raise site
+import ./arith_regime    ## RFC-0016 review D1 S3: the one owner of the arithmetic regime
 import ./check_options   ## RFC-0005 S8cu: a routine compiled with other checks
 from ./replayproc import hasMethodTable, hasSubtypeTable   ## RFC-0016 PRC-02m
 from ./replayproc import closureEnvRefusal, closureRouteGuard   ## RFC-0016 W3-z R8
@@ -1369,12 +1370,12 @@ type
                                    ## `fieldChecks`, `objChecks` its own
                                    ## options turn on in a build with them
                                    ## off. Read through `checkedHere`.
-    arithScopes*: seq[ArithScope]
-                                   ## RFC-0016 WA-A. Per routine being parsed,
-                                   ## innermost last: the RESOLVED
-                                   ## `arithScopeFor` of each (never
-                                   ## `asInherit`). Its top is the only
-                                   ## parse-time reader (`overflowChecked`).
+    arith*: ArithFrames
+                                   ## RFC-0016 WA-A, D1 S3. Per routine being
+                                   ## parsed, innermost last: the regime of
+                                   ## each (`arith_regime`'s parse rule). Its
+                                   ## top is the only parse-time reader
+                                   ## (`overflowChecked`).
     assertsOff*: seq[bool]
                                    ## RFC-0005 S8cu. Per routine being parsed,
                                    ## innermost last: may its module compile
@@ -1595,29 +1596,19 @@ proc assertsMayBeOff(ctx: ParseCtx): bool =
   ## compiled out in the routine being parsed. The command line is read apart.
   ctx.assertsOff.len > 0 and ctx.assertsOff[^1]
 
-func arithScopeFor(c: RoutineChecks; caller: ArithScope;
-                   inherit: bool): ArithScope =
-  ## RFC-0016 WA-A / W1-d2c. The one decision of which signed arithmetic a
-  ## routine is walked under. Total and pure (`buildWraps()` is the only global
-  ## read); never `asInherit`. An `inherit` routine (a magic: the compiler
-  ## expands it at the call site, under the caller's options) takes `caller`'s.
-  ## Otherwise `asChecked` where the build wraps but the routine's position was
-  ## read as `push overflowChecks: on`, else `asBuild`.
-  if inherit: caller
-  elif buildWraps() and c.overflowOn and c.why.len == 0: asChecked
-  elif c.overflowModelled and not buildWraps(): asUnchecked
-  else: asBuild
-
-func currentArith(ctx: ParseCtx): ArithScope =
-  if ctx.arithScopes.len > 0: ctx.arithScopes[^1] else: asBuild
+func arithFacts(c: RoutineChecks; inherit = false): RoutineArithFacts =
+  ## `RoutineChecks` in `arith_regime`'s terms. `overflowOn` is copied as
+  ## returned, never recomputed (D1 F-4).
+  RoutineArithFacts(readable: c.why.len == 0, overflowOn: c.overflowOn,
+    overflowDeviates: coOverflow in c.checks,
+    overflowRowKey: (if c.overflowModelled: c.overflowRow.cell.key
+                     else: noRowKey),
+    inherit: inherit)
 
 func overflowChecked(ctx: ParseCtx): bool =
   ## Signed arithmetic is `OverflowDefect`-checked where the parse is now: the
   ## build checks it, or an enclosing routine is pushed `overflowChecks: on`.
-  ## `buildWraps()` is folded in here because the stack's `asBuild` means
-  ## "the build's own arithmetic", which is checked in a checks-on build.
-  (not buildWraps() and ctx.currentArith != asUnchecked) or
-    ctx.currentArith == asChecked
+  ctx.arith.regime == rgChecked
 
 func ordinalUnchecked(ctx: ParseCtx): bool =
   ## Signed arithmetic is unchecked where the parse is now: the build wraps and
@@ -1661,22 +1652,20 @@ func hasCheckOff(): bool =
 
 proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
   ## Opens the routine's arithmetic scope for its parse, and its check scope.
-  ctx.arithScopes.add arithScopeFor(c, ctx.currentArith, inherit)
+  ctx.arith.enterParse arithFacts(c, inherit)
   ctx.checkScopes.add(if inherit and ctx.checkScopes.len > 0: ctx.checkScopes[^1]
                       else: pushedOn(c) + floatOn(c))
 
 proc popArithScope(ctx: ParseCtx) =
-  discard ctx.arithScopes.pop()
+  ctx.arith.leave()
   discard ctx.checkScopes.pop()
 
 func arithStamp(c: RoutineChecks; inherit: bool): Option[ArithScopeProof] =
-  ## The IR stamp of a routine body: `arithScopeFor`'s answer, but only where a
-  ## claim is made (a checks-off build, not an `inherit` routine). RFC-0016
-  ## ADM-IR: the stamp is a proof of the axis that made the claim -- the
-  ## pragma row for a `push overflowChecks: on`, the stdlib row for a body
-  ## whose overflow delta is modelled, the build for its own arithmetic.
-  if (not buildWraps() and not c.overflowModelled) or inherit: return none(ArithScopeProof)
-  case arithScopeFor(c, asBuild, false)
+  ## The IR stamp of a routine body: `arith_regime`'s decision, as the proof of
+  ## the axis that made the claim (the emit still replays it until D1 S5).
+  let st = decide(arithFacts(c, inherit)).stamp
+  if not st.claims: return none(ArithScopeProof)
+  case st.provenance
   of asChecked:
     some(arithFromPragma(admitPragma(ppRoutine, "overflowChecks", psRoutineDecl)))
   of asUnchecked: some(arithFromStdlib(c.overflowRow))
@@ -1813,11 +1802,10 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
     decl.add ctx.declineMarker(feCheckOption, where & " is compiled with " & $others &
       " other than the walker models -- path degraded to sxUnknown")
   # RFC-0016 W1-d2: in a build whose own overflow checks are off
-  # (`buildWraps()`) every routine is unchecked, and that is the build route:
+  # (`buildRegime()`) every routine is unchecked, and that is the build route:
   # `lowerArith` deposits the signed overflow as an `ubSignedOverflow` trap.
   # The marker is for a routine pushed off in a build that checks.
-  if coOverflow in c.checks and c.why.len == 0 and not buildWraps() and
-     not c.overflowModelled:
+  if decide(arithFacts(c, inherit)).declineOverflow:
     decl.add ctx.declineMarker(feOverflowCheckOption, where &
       " is compiled with overflowChecks off: its signed `+`, `-` and `*` are " &
       "undefined on overflow, which no setting models -- path degraded to " &
@@ -4702,7 +4690,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
     scan.noteUndefined a, p
   template addUnreadable() =
     add anyDefect
-    addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+    addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
   template unlistedKind() =
     addUnreadable()   # RFC-0016 K2F-3: an unlisted node kind
   template downConv(src: NimNode) =
@@ -4714,7 +4702,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
     let h = hierarchyConv(n, src)
     if h.isHier and h.tgtChain.len > h.srcChain.len:
       if ownerChecked(owner, coObj): add "ObjectConversionDefect"
-      else: addUb admitDefined(aoConv, ocObjDowncast, dsConv), dpChecked
+      else: addUb admitDefined(aoConv, ocObjDowncast, dsConv), anyProfile
   if n == nil or anyDefect in scan.defectNames and scan.defectNames.len > 12: return
   if isRoutineDefNode(n): return   # a routine declared here is not run here
   case n.kind
@@ -4736,7 +4724,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # undefined out of the container, not an `IndexDefect`.
         if not ownerChecked(owner, coBound) or
            (tk == ntyArray and uncheckedTypedIndex(ownerChecked(owner, coRange), n[1])):
-          addUb admitDefined(aoIndex, ocUncheckedAccess, dsIndex), dpChecked
+          addUb admitDefined(aoIndex, ocUncheckedAccess, dsIndex), anyProfile
         else:
           add "IndexDefect"
       # The index's hidden conversion to the array's range is the index
@@ -4751,7 +4739,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
     # overlapping bytes (nothing raised, nothing undefined) on the c backend.
     if ownerChecked(owner, coField): add "FieldDefect"
     elif buildSemantics.backend == beCpp:
-      addUb admitDefined(aoField, ocInactiveBranch, dsField), dpChecked
+      addUb admitDefined(aoField, ocInactiveBranch, dsField), anyProfile
     for c in n: scanOpaqueDefects(c, scan, seen, depth, ctx, owner, memo)
   of nnkConv, nnkHiddenStdConv, nnkHiddenSubConv:
     if n.len >= 2:
@@ -4771,7 +4759,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
          n.typeKind in {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange,
                         ntyBool} and
          src.typeKind in {ntyFloat .. ntyFloat128}:
-        addUb admitDefined(aoConvert, ocFloatToInt, dsConvert), dpChecked
+        addUb admitDefined(aoConvert, ocFloatToInt, dsConvert), anyProfile
       if n.kind == nnkConv: downConv(src)
       scanOpaqueDefects(src, scan, seen, depth, ctx, owner, memo)
   of nnkRaiseStmt:
@@ -4804,11 +4792,9 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # answer under the routine's profile (`arithUb`), never a guard
         # written here: `-fwrapv` defines the signed wrap only, and a signed
         # zero divisor stays `ubSignedDivZero` under it.
-        let overflowOn = owner == nil or routineChecks(owner).overflowOn
-        let prof =
-          if overflowOn: dpChecked
-          elif buildSemantics.fwrapv: dpFwrapv
-          else: dpUnchecked
+        let prof = ownerProfile(
+          if owner == nil: RoutineArithFacts(overflowOn: true)
+          else: arithFacts(routineChecks(owner)))
         template arithUb(op: ArithOp; c: OperandClass) =
           let row = admitDefined(op, c, dsArith)
           if ubOf(definedness(op, c, prof)).isSome: addUb row, prof
@@ -4853,7 +4839,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
           # No body: foreign code, which raises no Nim exception (`acc`).
           # RFC-0016 K10b: and may do anything, so the gate's answer is "may
           # be undefined" (row `call/opaqueBody`).
-          addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+          addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
     elif isProcValueSite(f):
       # RFC-0016 W3-z R7. A module-level proc-valued variable: any code at
       # all here, as below, but a replay knows which routine the variable
@@ -4862,7 +4848,7 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
       add anyDefect
       let key = globalIRName(f)
       procValueSites[key] = f
-      scan.noteVia key, admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+      scan.noteVia key, admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
     elif f.kind != nnkSym or f.symKind notin {nskTemplate, nskMacro}:
       # A closure or a routine-valued variable: any code at all.
       if f.typeKind in {ntyProc, ntyVar} or f.kind != nnkSym:
@@ -4876,10 +4862,10 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
   of nnkAsmStmt:
     # RFC-0016 K2F-3: foreign code inline raises no Nim exception and may do
     # anything (row `call/opaqueBody`, as a routine with no body).
-    addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+    addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
   of nnkPragma:
     if foreignWriteNode(n):   # `emit`: as `asm`
-      addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+      addUb admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
   of nnkSym, mayScanLeafKinds, mayScanNoCodeKinds:
     discard
   of mayScanStructuralKinds + RoutineNodes - {nnkBracketExpr,
@@ -4922,7 +4908,7 @@ proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
   var memo: FloatCheckMemo
   let impl = resolveRoutineOrLambdaImpl(calleeSym)   # RFC-0016 W3-z R8
   if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty:
-    result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), dpChecked
+    result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
     return
   scanOpaqueDefects(impl[6], result, seen, 0, ctx, impl, memo)
 proc routineUndefinedKinds*(r: NimNode): set[UbKind] =
@@ -21808,14 +21794,17 @@ proc parseStmtInner(n: NimNode,
           # RFC-0016 WA-A (S1): a pure `overflowChecks` deviation that is the
           # build's own (a checks-off build) is no deviation: the iterator is
           # inlined. Anything else declines (the nil body keeps the marker).
-          let agrees = c.why.len == 0 and (c.checks - {coOverflow}) == {} and
-                       (coOverflow notin c.checks or buildWraps())
+          # D1 S3: the overflow half is `inlinableIterator`; it agrees for
+          # the iterator when it does for some caller regime.
+          let af = arithFacts(c)
+          let agrees = (c.checks - {coOverflow}) == {} and
+                       (inlinableIterator(af, rgChecked) or
+                        inlinableIterator(af, rgUnchecked))
           if not agrees:
             return withCheckDeclines(ctx, impl, c, nil)
           # (P2) Inlined, the iterator would be walked under the caller's
           # arithmetic, not the one it is compiled with.
-          if buildWraps() and
-             arithScopeFor(c, ctx.currentArith, false) != ctx.currentArith:
+          if not inlinableIterator(af, ctx.arith.regime):
             return ctx.declineMarker(feCheckOption, routinePlace(impl) &
               ": a closure iterator compiled under a different `overflowChecks` " &
               "than its caller -- path degraded to sxUnknown")

@@ -250,7 +250,13 @@ func init*(T: type ArithFrames;
            b: BuildSemantics = buildSemantics): ArithFrames =
   ArithFrames(frames: @[buildRegime(b)])
 
-func regime*(f: ArithFrames): Regime = f.frames[^1]
+func regime*(f: ArithFrames; b: BuildSemantics = buildSemantics): Regime =
+  ## The regime now; a stack nobody has entered is the build's own (a
+  ## zero-initialised `ArithFrames`, as `ParseCtx` holds, has no base frame).
+  if f.frames.len > 0: f.frames[^1] else: buildRegime(b)
+
+proc ensureBase(f: var ArithFrames; b: BuildSemantics) =
+  if f.frames.len == 0: f.frames.add buildRegime(b)
 
 proc enterBody*(f: var ArithFrames; s: ArithStamp) =
   ## The walk rule (`pushArith`, `runtime.nim:2187`): a stamp that claims
@@ -261,6 +267,7 @@ proc enterBody*(f: var ArithFrames; s: ArithStamp) =
   ## unstamped non-magic callee the build's regime where this one gives it the
   ## caller's; harmless while every stdlib row that deviates calls only magics
   ## (the census in `tsymex_0016_d1_regime`), fixed by D1-F2's total stamp.
+  f.ensureBase buildSemantics
   case s.scope
   of asInherit: discard
   of asChecked: f.frames.add rgChecked
@@ -271,6 +278,7 @@ proc enterParse*(f: var ArithFrames; facts: RoutineArithFacts;
   ## The parse rule (`pushArithScope`, `dsl_parser.nim:1662`): every routine
   ## opens a frame; an inherit routine repeats its caller's, any other takes
   ## `arithScopeFor`'s answer, claimed or not. `leave` always pairs.
+  f.ensureBase b
   if facts.inherit: f.frames.add f.frames[^1]
   else: f.frames.add scopeRegime(parseScope(facts, b), b)
 
@@ -306,6 +314,10 @@ func ownerProfile*(f: RoutineArithFacts;
   ## owner is over-tainted, never under-). A nil owner is checked:
   ## `RoutineArithFacts(overflowOn: true)`.
   if f.overflowOn: dpChecked else: profile(rgUnchecked, b)
+
+const anyProfile* = dpChecked
+  ## The column of a definedness row whose answer does not depend on the
+  ## profile (the same under all three), where a caller needs to name one.
 
 func wrapDefined*(r: Regime; op: ArithOp; width: int;
                   b: BuildSemantics = buildSemantics): bool =

@@ -47,7 +47,7 @@ const
   ## What slice D3c-6 made real modules below `runtime.nim`: the heap algebra
   ## and the sort-checked Z3 term builders it rests on.
   hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
-               "./types", "./symval", "./walk_state", "./z3check"]
+               "./types", "./abstraction", "./symval", "./walk_state", "./z3check"]
   zcAllowed = ["z3", "./types", "./symval"]
 
   ## The decl-kind caches of the linked Z3: the same in every run, read in a
@@ -65,19 +65,19 @@ const
     "exact", "fieldsUnchecked", "forkAssignRangeCheck", "forkDefect",
     "forkPath", "forkPathTainted", "freshnessCapHints", "globalEntryVals",
     "globalHiddenRoute", "globalInitValue", "guardLiteral", "halted",
-    "heapInputName", "heapKeyValTy", "heapStepsOf", "imgReadDef",
+    "heapInputName", "heapKeyValTy", "imgReadDef",
     "imgWrite", "inactiveFieldSide", "isConcolicFollowWalk", "iteFolded",
-    "iteSV", "liveFrame", "loopArmInfeasible", "lowerInExpr",
+    "liveFrame", "loopArmInfeasible", "lowerInExpr",
     "lowerLeafInExpr", "maybeForkDefect", "noteTableKey", "overlaps",
     "pathInfeasible", "placeBits", "programGlobal", "ptrFamilyHints",
     "ptrFamilyKey", "ptrIdxKey", "ptrKeyKey", "ptrLeafAims",
     "ptrLeafPathStr", "ptrObjKey", "ptrScalarPointee", "ptrSelKey",
-    "ptrTargetCode", "sameBranchSymCond", "sameSymVal", "seqArrs",
+    "ptrTargetCode", "sameBranchSymCond", "sameSymVal",
     "seqElemAt", "seqElemProto", "seqStoreArrs", "shouldStop",
     "stampHeapSteps", "storeSeqElem", "symEq", "tabValAt", "tabValTerms",
     "taintInPlace", "unionCellCount", "unionImageGate", "unwrittenImage",
     "unwrittenIn", "unwrittenKind", "unwrittenMsg", "unwrittenReadMsg",
-    "unwrittenUb", "withSeqArrsOf", "writeExactArm", "zeroImage"]
+    "unwrittenUb", "writeExactArm", "zeroImage"]
 
   ## The imports `symval.nim` may have: stdlib, `z3`, and the existing leaves.
   symvalAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
@@ -456,13 +456,13 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     for p in walkFiles(smt / "*.nim"):
       let f = extractFilename(p)
       if f notin ["runtime.nim", "walk_state.nim"]: callers.add readFile(p)
-    for h in ["lower", "lowerClosureCall", "seqElemAt", "iteSV", "allocateSym",
+    for h in ["lower", "lowerClosureCall", "seqElemAt", "allocateSym",
               "currentFrameId", "registerCapCell", "depositStrIndexOob"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
       # a field no module outside runtime.nim calls is dead: delete it
       check callers.contains("lowerHooks." & h & "(")
-    for h in ["storeSeqElem", "sameSymVal", "entryValueOf"]:
+    for h in ["storeSeqElem", "sameSymVal", "entryValueOf", "iteSV"]:
       check not ws.contains("\n  " & h & "*: proc(")
     check not ws.contains("sortOfTuple*:")   # D3c-6: read directly from heap_model
     check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")
@@ -586,7 +586,7 @@ suite "RFC-0016 D3c-7: the strings module and string_lower_support leaf":
   test "runtime.nim imports string_lower_support and defines none of its names":
     let rt = readSmt("runtime.nim")
     check rt.contains("\nimport ./string_lower_support")
-    check rt.contains("\nexport string_lower_support")
+    check not rt.contains("\nexport string_lower_support")   # R2-3: not facade API
     let defs = definedNames(rt)
     for n in d3c7Moved:
       checkpoint n

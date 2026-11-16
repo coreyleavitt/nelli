@@ -19,6 +19,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/[dsl, runtime]
+import nelli/smt/[walk_state]   ## R2-3: the leaves are no longer re-exported by the facade
 
 # --- 1. getCurrentExceptionMsg() returns the in-flight message --------------
 # The handler reads the in-flight msg ("hello") and compares it to the param

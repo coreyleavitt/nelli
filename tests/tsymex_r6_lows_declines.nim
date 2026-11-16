@@ -70,6 +70,7 @@ import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
 import nelli/smt/runtime
+import nelli/smt/[symval]   ## R2-3: the leaves are no longer re-exported by the facade
 
 # =============================================================================
 # N15 -- field-sourced placeholder: index vs .len must report the SAME kind.

@@ -608,16 +608,20 @@ type LowerHooks* = object
   lower*: proc(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal {.nimcall.}
   lowerClosureCall*: proc(env: Env, e: IRExpr): SymVal {.nimcall.}
   seqElemAt*: proc(seqSV: SymVal, idx: Z3Int): SymVal {.nimcall.}
-  iteSV*: proc(cond: Z3Bool, t, e: SymVal): SymVal {.nimcall.}
-    ## The merge of two SymVals under a condition. Heavy (it reaches
-    ## `allocateSym` and the degrade chokepoints), so it stays in
-    ## `runtime.nim` and the float conversion calls it through here.
+    ## Stays a hook (R2-4): it builds the element prototype with
+    ## `allocateSym`, so it can move down only after `allocateSym` does.
   allocateSym*: proc(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
                      stringBacked: bool, intOffsetPositions: seq[int]):
                      SymVal {.nimcall.}
     ## The type-directed allocator (RFC-0016 review D3c-5). Heavy: it reaches
     ## every value kind and the heap model. The closure builder reads sorts
-    ## off throwaway representatives it makes.
+    ## off throwaway representatives it makes. Stays a hook (R2-4): it is
+    ## mutually recursive with `heap_model` (it calls `allocRefSort`,
+    ## `inheritTagKey`, ...; `heap_model` calls it for pointee, distinct-base
+    ## and cell prototypes), and its dependency closure is about 1,460 lines
+    ## (41 procs: `defaultZero`, the variant image, the table zero builders).
+    ## It names no `WalkCtx` and no `lower`; moving it means merging that
+    ## closure into `heap_model` or splitting a shared value-algebra leaf.
   currentFrameId*: proc(): int {.nimcall.}
     ## The live walk's `CallFrameCtx.frameId`, or -1 outside a walk. It reads
     ## `WalkCtx`, which `runtime.nim` defines.

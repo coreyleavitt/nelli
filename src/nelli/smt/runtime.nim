@@ -52,6 +52,7 @@ import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds
 import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
 import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
 import ./stdlib_rows   ## RFC-0016 K4c: the facet cells a decline names
+import ./runtime_exceptions   ## RFC-0016 review D3c-3: Cluster E, `lowerExnArm`
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
@@ -8798,8 +8799,6 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
 
 include "runtime_floats.nim"  # Stage 8 CR-7 Cluster F: lowerFloatArm
-
-include "runtime_exceptions.nim"  # Stage 8 CR-7 Cluster E: lowerExnArm
 
 include "runtime_closures.nim"  # Stage 8 CR-7 Cluster C: lowerClosureArm
 

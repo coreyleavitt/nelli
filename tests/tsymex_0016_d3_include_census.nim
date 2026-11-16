@@ -32,15 +32,17 @@ const
   smt = root / "src" / "nelli" / "smt"
 
   expectedIncludes = [
-    "runtime_strings.nim", "runtime_floats.nim", "runtime_exceptions.nim",
-    "runtime_closures.nim", "runtime_heap.nim"]
+    "runtime_strings.nim", "runtime_floats.nim", "runtime_closures.nim",
+    "runtime_heap.nim"]
+
+  ## Includes that became real modules (D3c-3: exceptions).
+  movedToModules = ["runtime_exceptions.nim"]
 
   ## Ratchet-down only: the measured count of distinct runtime-private
   ## symbols each include references (D3c-0: 62/21/9/26/151; D3c-1: 52/14/6/23/146; D3c-2, once the walk state left runtime.nim: as below).
   ceilings = {
     "runtime_strings.nim": 22,
     "runtime_floats.nim": 7,
-    "runtime_exceptions.nim": 2,
     "runtime_closures.nim": 9,
     "runtime_heap.nim": 137}.toTable
 
@@ -127,12 +129,25 @@ suite "RFC-0016 D3: the include surface":
         got.add l[a + 1 ..< b]
     check got == @expectedIncludes
 
-  test "no runtime_*.nim has an import":
-    for f in walkFiles(smt / "runtime_*.nim"):
-      for l in readFile(f).splitLines:
+  test "no remaining include has an import":
+    for f in expectedIncludes:
+      for l in readSmt(f).splitLines:
         let t = l.strip()
         check not (t.startsWith("import ") or t.startsWith("from ") or
                    t.startsWith("export "))
+
+  test "a module is imported, never included, and names no runtime symbol":
+    let priv = definedNames(rt)
+    for f in movedToModules:
+      checkpoint f
+      let m = f[0 ..< f.len - 4]
+      check not rt.contains("include \"" & f & "\"")
+      check rt.contains("\nimport ./" & m)
+      let text = readSmt(f)
+      check text.contains("\nimport ./symval")
+      let named = referenced(text, priv - definedNames(text))
+      checkpoint $named
+      check named.len == 0
 
   test "per-include runtime-private symbol ceilings only go down":
     let priv = definedNames(rt)

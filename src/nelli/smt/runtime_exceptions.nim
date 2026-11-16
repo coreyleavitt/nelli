@@ -1,20 +1,16 @@
-# runtime_exceptions.nim — Cluster E include fragment of runtime.nim
-#
-# THIS FILE IS NOT A STANDALONE MODULE. It is textually included into
-# runtime.nim via `include "runtime_exceptions.nim"` and CANNOT be compiled
-# independently. It inherits ALL imports, types, threadvars, helpers, and
-# forward-declared procs from runtime.nim's lexical scope; do NOT add
-# `import` statements here.
-#
-# Contents: `lowerExnArm(env, e)` — the `lower()` dispatch arm for
+# runtime_exceptions.nim -- Cluster E: the `lower()` dispatch arm for
 # `iekGetCurrentExnMsg` and `iekGetCurrentExn` (Cluster E, Stage 7 / Stage 8,
-# CR-7). `routeRaise`, raise-walker, and try/finally arms are already named
-# procs in `walk` and are NOT moved here.
-# Placement in runtime.nim: immediately after `include "runtime_floats.nim"`
-# and immediately before `lowerClosureArm`, between `lower`'s forward-decl
-# and `lower`'s body.
+# CR-7). A real module (RFC-0016 review D3c-3): it imports `./symval` and
+# `./walk_state` and names no `runtime.nim` symbol. `runtime.nim` imports it
+# before `lower`'s body. `routeRaise`, raise-walker, and try/finally arms are
+# named procs in `walk` and are NOT moved here.
+import std/options
+import z3
+import ./types
+import ./symval
+import ./walk_state
 
-proc lowerExnArm(env: Env, e: IRExpr): SymVal =
+proc lowerExnArm*(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster E extraction. Called from `lower`'s case arm for
   ## `iekGetCurrentExnMsg` and `iekGetCurrentExn`. `proto` is NOT used.
   ## `routeRaise`, raise-walker, try/finally arms are already named procs in
@@ -29,7 +25,7 @@ proc lowerExnArm(env: Env, e: IRExpr): SymVal =
   of iekGetCurrentExnMsg:
     # Phase 15 E8. `getCurrentExceptionMsg()`. Valid only inside an `except`
     # handler body (in-flight exn present). The in-flight msg is mirrored into
-    # `currentInFlightMsg` by the handler-body walk; a `none` typeId means we
+    # `currentInFlightMsg` by the handler-body walk; a `none` inFlightId means we
     # are outside any handler → classified `eeNotInHandler` (Invariant 3).
     if currentInFlightTypeId.isNone:
       raise (ref SymexNotInHandlerError)(
@@ -38,24 +34,24 @@ proc lowerExnArm(env: Env, e: IRExpr): SymVal =
   of iekGetCurrentExn:
     # Phase 15 E8. `getCurrentException()`. Returns an opaque `svUninterpRef`
     # keyed by the in-flight type: a FRESH uninterpreted-sort constant whose
-    # sort is `Exn_<typeId>`. Fields are not modeled (extraction emits an
+    # sort is `Exn_<inFlightId>`. Fields are not modeled (extraction emits an
     # `eeUninterpRefExtraction` sevHint). Out of a handler → `eeNotInHandler`.
     if currentInFlightTypeId.isNone:
       raise (ref SymexNotInHandlerError)(
         msg: "getCurrentException")
-    let typeId  = currentInFlightTypeId.get
-    let srtName = "Exn_" & typeId
+    let inFlightId  = currentInFlightTypeId.get
+    let srtName = "Exn_" & inFlightId
     inc currentExnRefCounter
     let constName = srtName & "#" & $currentExnRefCounter
     # Fresh constant of the (per-type) uninterpreted sort, erased to Z3AnyAst.
-    let ctx = requireCurrentContext()
-    let srt = mkUninterpretedSort(ctx, srtName)
-    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, constName.cstring)
-    let rawConst = ctx.checkErr Z3_mk_const(ctx.raw, sym, srt.raw)
-    let anyAst = wrap[Z3AnyAst](ctx, rawConst)
-    lastGetCurrentExnRef = (sortName: srtName, typeTag: typeId)  ## E8 test hook
+    let z3c = requireCurrentContext()
+    let srt = mkUninterpretedSort(z3c, srtName)
+    let sym = z3c.checkErr Z3_mk_string_symbol(z3c.raw, constName.cstring)
+    let rawConst = z3c.checkErr Z3_mk_const(z3c.raw, sym, srt.raw)
+    let anyAst = wrap[Z3AnyAst](z3c, rawConst)
+    lastGetCurrentExnRef = (sortName: srtName, typeTag: inFlightId)  ## E8 test hook
     SymVal(kind: svUninterpRef, uninterpAst: anyAst,
-           sortName: srtName, typeTag: typeId)
+           sortName: srtName, typeTag: inFlightId)
   else:
     raise newException(ValueError,
       "lowerExnArm: unexpected e.kind=" & $e.kind &

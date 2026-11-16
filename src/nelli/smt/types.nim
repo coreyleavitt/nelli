@@ -20,7 +20,6 @@ import ./definedness   ## RFC-0016 ADM-IR: `OpaqueScan`, the proof `mkOpaqueCall
 export OpaqueScan, unscanned, undefinedKinds, defectNames, ubMaskOf, ubSetOf,
        replayScan, fixedUndefinedKinds, viaKeys
 import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`, the proof `mkMathCall` / `mkArithBlock` take
-import ./pragmaaxes    ## RFC-0016 ADM-IR: `PragmaModel`, the proof `mkArithBlock` takes
 import ./arith_regime  ## RFC-0016 review D1 S2: `ArithScope`, `ArithCheck`, the proofs and the build predicates live there
 export ArithScope, ArithCheck, ArithStamp, RoutineArithFacts, stampFor, provenance, claims, keyText
 ##

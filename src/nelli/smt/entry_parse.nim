@@ -6,27 +6,10 @@
 ## RFC-0016 D6: moved out of `symex.nim` unchanged. The `parseEntryImpl`
 ## call site lives in `parseEntryImplWarned` here (`tentrypointwiring`).
 
-import std/[macros, sets, tables, algorithm, options, strutils, importutils]
-import ../choice
-import ../db
+import std/[macros, strutils]
 import ./dsl
-import ./scan
-import ./scan_kinds
 import ./impl_digest
-import ./replayproc
-import ./replaywire
-import ./replayresult
-from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
-import ../engine/types as engineTypes
-from ../engine/frame import recordSymexFinding, FindingOrigin
-import ./sha256
-import ./canonicalize
-import ./witness_render
-import ./witness_emit
 import ./replay_emit
-import ./replay_settle
-import ./run_replayed
-import ./symex_cache
 
 
 # ---- The driver macro -------------------------------------------------------

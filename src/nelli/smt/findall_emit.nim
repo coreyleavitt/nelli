@@ -5,35 +5,17 @@
 ## signature) stays in `symex.nim` and delegates to `symexFindAllWitnessesImpl`;
 ## the macro passes its own symbol so the re-expansion still names it.
 
-import std/[macros, sets, tables, algorithm, options, strutils, importutils]
+import std/[macros, sets, tables, options]
 import ../choice
-import ../db
 import ./dsl
 import ./scan
-import ./scan_kinds
-import ./impl_digest
-import ./replayproc
-import ./replaywire
-import ./replayresult
-from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
 import ../engine/types as engineTypes
-from ../engine/frame import recordSymexFinding, FindingOrigin
-import ./sha256
-import ./canonicalize
 import ./witness_render
 import ./witness_emit
-import ./replay_emit
-import ./replay_settle
 import ./run_replayed
 import ./symex_cache
 
 import ./entry_parse
-import ./witness_fidelity
-import ./replay_footprint
-import ./heldset
-import ./proc_lift
-import ./routine_table
-import ./cover_emit
 
 proc symexFindAllWitnessesImpl*(self: NimNode; fn: NimNode; db: NimNode; symexSettings: SymexSettings; excludeTargets: NimNode): NimNode =
   ## RFC-0016 D6: the body of the `symexFindAllWitnesses` macro (`symex.nim`); `self` is the macro's symbol.

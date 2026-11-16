@@ -48,8 +48,7 @@
 ##   * `entry_parse`      -- what every entry macro does first
 ##   * `find_emit`, `findall_emit`, `cover_emit` -- the macro bodies
 
-import std/[macros, sets, tables, algorithm, options, strutils, importutils, macrocache]
-from std/os import extractFilename, parentDir, `/`
+import std/[macros, sets, tables, options, strutils, macrocache]
 # RFC-0016 W1-c1b: the build is admitted (or refused, by name) BEFORE `z3` is
 # imported. Under `--mm:refc` nim-z3's `=destroy` hooks do not compile, and
 # that error names `z3/ast.nim`, not the build; this one names the field.
@@ -63,20 +62,13 @@ import ./choice
 export choice
 import ./smt/dsl
 export dsl
-import ./smt/scan
-import ./smt/scan_kinds   ## RFC-0016 K2F-3: the shared scan kind lists
-import ./smt/impl_digest   ## RFC-0005 review R1-09
 import ./smt/replayproc   ## RFC-0005 S8ct
-import ./smt/replaywire   ## RFC-0005 S8ct
 import ./smt/replayresult ## RFC-0005 0.9.1 (review R1-06, R1-14)
 export replayExecutions
 export replayresult.ReplayOutcome, replayresult.ReplayResult,
        replayresult.outcome, replayresult.child,
        replayresult.detail, replayresult.runDependence
-from ./smt/scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
-from ./engine/frame import recordSymexFinding, FindingOrigin   ## review R2 (DD3)
-import ./smt/sha256   ## review R5 (3d): `fnIdLit` hashes a non-symbol `fn`
 import ./smt/witness_render   ## RFC-0016 D6: the witness -> choices bridge
 export witness_render.renderAsChoices
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
@@ -139,16 +131,11 @@ export witness_emit.emitTyAndReader
 import ./smt/replay_footprint   ## RFC-0016 D6: replay eligibility + the footprint scan
 export replay_footprint.replayEligible, replay_footprint.replayInScope,
        replay_footprint.replayReached
-import ./smt/routine_table   ## RFC-0016 D6: the routine table a replay child carries
-import ./smt/witness_fidelity   ## RFC-0016 D6: witness fidelity + the splat
-import ./smt/heldset   ## RFC-0016 D6: the held-set walk
 import ./smt/replay_emit   ## RFC-0016 D6: the replay child emitter
 export replay_emit.wireTarget, replay_emit.readTarget, replay_emit.targetLabelOf,
        replay_emit.emitReplayWitness
 import ./smt/replay_settle   ## RFC-0016 D6: the verdict-side replay settle
 export replay_settle.candidateLossy
-import ./smt/proc_lift   ## RFC-0016 D6: the proc-value lift
-import ./smt/run_replayed   ## RFC-0016 D6: the replayed-search body
 import ./smt/entry_parse   ## RFC-0016 D6: what every entry macro does first
 export entry_parse.describeTarget
 import ./smt/cover_emit   ## RFC-0016 D6: the assertCoveredBy body

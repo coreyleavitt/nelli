@@ -14,7 +14,6 @@ import std/tables
 import std/options
 import std/sets
 import std/algorithm
-import std/strutils
 import z3
 import ./types
 

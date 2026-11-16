@@ -6,7 +6,7 @@
 ## re-exported by `symex.nim` (generated code and the cache tests name them);
 ## the macro forms that call them stay in the facade.
 
-import std/[tables, sets, options, strutils, algorithm]
+import std/[tables, sets, options, strutils]
 from z3 import z3FullVersion
 import ../choice
 import ./witness_render
@@ -14,7 +14,6 @@ import ../db
 import ./dsl
 import ./canonicalize
 import ../engine/types as engineTypes
-from ../engine/frame import FindingOrigin
 
 # ---- RFC-0005 S11 (§7): the cache value carries the Soundness ---------------
 #

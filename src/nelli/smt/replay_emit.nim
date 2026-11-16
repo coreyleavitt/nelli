@@ -7,19 +7,15 @@
 ## `readTarget`, `targetLabelOf` and `emitReplayWitness` are re-exported by
 ## `symex.nim`; the `replayWitness` macro that calls it stays there.
 
-import std/[macros, sets, tables, algorithm, options, strutils]
-import ../choice
+import std/[macros, sets, tables]
+from std/os import extractFilename   # needed: method-call `.extractFilename` in a macro body Nim only checks on expansion
 import ./dsl
-import ./scan
 import ./replayproc
 import ./replaywire
 import ./replayresult
-import ./impl_digest
-from std/os import extractFilename
+import ./routine_table   # needed: `emitRoutineTable`, named in the replay child emitter, which Nim checks only on expansion
 from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
 import ./replay_footprint
-import ./routine_table
-import ./witness_emit
 import ./witness_fidelity
 
 proc wireTarget*(w: var WireWriter; t: SymexTarget) =

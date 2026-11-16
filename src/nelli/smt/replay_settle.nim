@@ -6,8 +6,7 @@
 ## RFC-0016 D6: moved out of `symex.nim` unchanged. `candidateLossy` is
 ## re-exported by `symex.nim`.
 
-import std/[macros, sets, tables, algorithm, options, strutils, importutils]
-import ../choice
+import std/[strutils, importutils]
 import ./dsl
 import ./replayresult
 

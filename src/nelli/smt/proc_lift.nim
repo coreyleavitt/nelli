@@ -6,16 +6,14 @@
 ## RFC-0016 D6: moved out of `symex.nim` unchanged. The `{.compileTime.}`
 ## `routineUndefinedMemo` lives here and nowhere else.
 
-import std/[macros, sets, tables, algorithm, options, strutils]
+import std/[macros, sets, tables, options, strutils]
 import ./dsl
-import ./scan
 import ./replay_footprint
 import ./replay_settle
 import ./heldset
 import ./routine_table
 import ./replaywire
 import ./replayproc
-import ./impl_digest
 
 proc procValueCode[T: proc](x: T): pointer =
   ## RFC-0016 W3-z R7. The routine a proc value names, as the address the

@@ -7,15 +7,11 @@
 ## memo tables (`routineFootprints`, `fileHookMemo`, `typeHookMemo`) and the
 ## `CacheTable` for runtime files live here and nowhere else.
 
-import std/[macros, sets, tables, algorithm, options, strutils, macrocache]
-import ../choice
+import std/[macros, sets, tables, strutils, macrocache]
 import ./dsl
-import ./scan
 import ./scan_kinds
 from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
-import ./replayresult
 import ./replayproc
-import ./impl_digest
 
 # ---- Witness replay (RFC-0005 S2, §4.2) --------------------------------------
 #

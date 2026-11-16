@@ -29,6 +29,7 @@
 ##     defines none of the names that moved into it.
 import std/[unittest, os, strutils, sets, tables]
 import audit_scan_utils
+import nelli/smt/walk_state   ## `LowerHooks`'s declared fields, by `fieldPairs`
 
 const
   root = currentSourcePath().parentDir() / ".."
@@ -94,20 +95,6 @@ const
     "bvVar", "bvRangeConds", "lowerDegrade", "StrBuf", "VariantAxisSym",
     "truncBV"]
 
-proc stripLine(line: string): string =
-  ## Drops string literals and the `#` comment; keeps identifiers.
-  var i = 0
-  var inStr = false
-  while i < line.len:
-    let c = line[i]
-    if inStr:
-      if c == '\\': inc i
-      elif c == '"': inStr = false
-    elif c == '"': inStr = true
-    elif c == '#': break
-    else: result.add c
-    inc i
-
 proc leadIdent(s: string): string =
   for c in s:
     if c in IdentChars: result.add c else: break
@@ -145,9 +132,11 @@ proc definedNames(text: string): HashSet[string] =
   var inBlock = false
   var blockKw = ""
   var enumIndent = -1      # indent of the `X = enum` line while in its body
-  for raw in text.splitLines:
+  let stripped = codeOf(text).splitLines
+  let rawLines = text.splitLines
+  for li, raw in rawLines:
     if raw.strip().len == 0 or raw[0] == '#': continue
-    let l = stripLine(raw)
+    let l = stripped[li]
     if l.strip().len == 0: continue
     let indent = raw.len - raw.strip(trailing = false).len
     if enumIndent >= 0:
@@ -186,9 +175,9 @@ proc definedNames(text: string): HashSet[string] =
         enumIndent = indent
 
 proc referenced(text: string, names: HashSet[string]): HashSet[string] =
-  for raw in text.splitLines:
+  for raw in codeOf(text).splitLines:
     var cur = ""
-    for c in stripLine(raw) & " ":
+    for c in raw & " ":
       if c in IdentChars: cur.add c
       else:
         if cur in names: result.incl cur
@@ -202,8 +191,7 @@ proc boundHere(text: string): HashSet[string] =
   ## binder, a parameter or tuple-constructor label (`name:` after `(`, `,`
   ## or at the start of a line), and a field read (`x.name`). Used for the
   ## modules only; the heap pin is measured with it.
-  for raw in text.splitLines:
-    let l = stripLine(raw)
+  for l in codeOf(text).splitLines:
     let t = l.strip()
     let ws = t.splitWhitespace
     if ws.len > 1 and ws[0] in ["let", "var", "const"]:
@@ -267,56 +255,14 @@ proc viaHooks(text: string): string =
       result.add text[i]
       inc i
 
-proc codeOf(text: string): string =
-  ## `text` with every line's comment and string literals dropped
-  ## (`stripLine`): what a "does the code call X" check may read, so a
-  ## commented-out call does not count.
-  for l in text.splitLines: result.add stripLine(l) & "\n"
-
-proc relImports(text: string): seq[string] =
-  ## The `./name` modules a file imports (`import ./a`, `import ./a as b`,
-  ## `import ./a, ./b`, the bracket form `import ./[a, b as c]`,
-  ## `from ./a import ...`).
-  for l in text.splitLines:
-    let t = stripLine(l).strip()
-    var rest = ""
-    if t.startsWith("import "): rest = t[7 .. ^1].strip()
-    elif t.startsWith("from "): rest = t[5 .. ^1].strip()
-    else: continue
-    var specs: seq[string]
-    if t.startsWith("from "): specs.add rest.splitWhitespace[0]
-    else:
-      # split on commas outside `[...]`; a `./[a, b]` group expands
-      var depth = 0
-      var cur = ""
-      var parts: seq[string]
-      for c in rest:
-        if c == '[': inc depth
-        elif c == ']': dec depth
-        if c == ',' and depth == 0:
-          parts.add cur
-          cur = ""
-        else: cur.add c
-      parts.add cur
-      for p in parts:
-        let q = p.strip()
-        let lb = q.find("/[")
-        if lb >= 0 and q.endsWith("]"):
-          let dir = q[0 .. lb]
-          for m in q[lb + 2 ..< q.len - 1].split(','):
-            specs.add dir & m.strip()
-        else: specs.add q
-    for m in specs:
-      var x = m.strip()
-      let k = x.find(" as ")
-      if k >= 0: x = x[0 ..< k]
-      if x.startsWith("./"): result.add x[2 .. ^1]
-
 proc familyImports(): HashSet[string] =
   ## The union of the `./` imports of EVERY runtime-family file, iterated to a
   ## fixpoint: a module the walk reaches only through a leaf (not through
   ## `runtime.nim` or `walk_state.nim`) is found, and a family member found
-  ## that way is scanned in its turn.
+  ## that way is scanned in its turn. Only family files are traversed: the
+  ## modules listed in `noWalkerSites` are reported as imported but their own
+  ## imports are never read (they hold no walker site, so nothing past them is
+  ## the walker's).
   var scanned: HashSet[string]
   var work: seq[string] = @runtimeFamilyFiles
   while work.len > 0:
@@ -354,12 +300,63 @@ const
     ("exits.nim", "the exit channels, called by the walker not part of it"),
     ("concolictaxonomy.nim", "the concolic taxonomy (data)")]
 
+suite "RFC-0016 D3: codeOf reads code, not comments or strings":
+  test "a # inside a string does not start a comment, and the string is dropped":
+    check not codeOf("x = \"# lowerHooks.lower(\"\n").contains("lowerHooks.lower(")
+    check codeOf("x = \"# a\" + y # tail\n").contains("y")
+    check not codeOf("x = \"a\" # tail\n").contains("tail")
+  test "block comments, single-line and multi-line, nested":
+    check not codeOf("a #[ lowerHooks.lower( ]# b\n").contains("lowerHooks")
+    let c = codeOf("a\n#[ x\n lowerHooks.lower(\n #[ inner ]# still\n]#\nb\n")
+    check not c.contains("lowerHooks")
+    check not c.contains("still")
+    check c.splitLines.len == 7      # line structure is kept
+    check c.contains("b")
+    check not codeOf("##[ doc\nlowerHooks.lower(\n]##\nz\n").contains("lowerHooks")
+    check codeOf("##[ doc ]##\nz\n").contains("z")
+  test "a triple-quoted string spanning lines is dropped, a comment-like line in it too":
+    let c = codeOf("a = \"\"\"\nlowerHooks.lower(\n# not a comment\n\"\"\"\nb\n")
+    check not c.contains("lowerHooks")
+    check c.contains("b")
+    check c.splitLines.len == 6
+  test "the '\"' char literal does not open a string":
+    let c = codeOf("var q = '\"'\nlowerHooks.lower(x)\n")
+    check c.contains("lowerHooks.lower(")
+    check codeOf("c = '\\''; d = 1\n").contains("d = 1")
+    check codeOf("x = 1'u8 + y\n").contains("y")
+  test "a raw string's backslash escapes nothing":
+    let c = codeOf("p = r\"a\\\" + lowerHooks.lower(z)\n")
+    check c.contains("lowerHooks.lower(")
+    check not codeOf("p = r\"a \"\" lowerHooks.lower( b\" + w\n").contains("lowerHooks")
+    check codeOf("p = r\"a \"\" lowerHooks.lower( b\" + w\n").contains("w")
+  test "stripLine is one line of codeOf":
+    check stripLine("a # b") == "a "
+
 suite "RFC-0016 D3: relImports reads every import form":
   test "plain, aliased, comma, bracket and from forms; comments are not imports":
     let r = relImports("import ./a\nimport ./b as bb, std/os, ./c\n" &
       "import ./[d, e as ee]\nfrom ./f import x\n# import ./g\n" &
       "import std/[os, strutils], ./h\n")
     check r == @["a", "b", "c", "d", "e", "f", "h"]
+
+  test "a multi-line bracket group":
+    check relImports("import ./[\n  a,\n  b as bb,\n  c]\nimport ./z\n") ==
+      @["a", "b", "c", "z"]
+
+  test "a multi-line comma list":
+    check relImports("import ./a,\n  std/os,\n  ./b\nimport ./c\n") ==
+      @["a", "b", "c"]
+
+  test "a bare import with its list below":
+    check relImports("import\n  ./a,\n  ./b\nlet x = 1\n") == @["a", "b"]
+
+  test "import ... except yields the module":
+    check relImports("import ./a except x\nimport ./b except y, z\n") ==
+      @["a", "b"]
+
+  test "an import inside a block comment or a string is not read":
+    check relImports("#[\nimport ./a\n]#\nx = \"\"\"\nimport ./b\n\"\"\"\nimport ./c\n") ==
+      @["c"]
 
 suite "RFC-0016 D3: definedNames sees enum members and every declared name":
   # R2-5: the scanner used to record the first name after a column-0 keyword
@@ -512,8 +509,8 @@ suite "RFC-0016 D3c-1: the symval leaf":
   test "symval.nim imports only the allowed leaves":
     let sv = readSmt("symval.nim")
     var seen: seq[string]
-    for l in sv.splitLines:
-      let t = stripLine(l).strip()
+    for l in codeOf(sv).splitLines:
+      let t = l.strip()
       if t.startsWith("import "):
         for m in t[7 .. ^1].split(','):
           var s = m.strip()
@@ -585,8 +582,8 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
   test "walk_state.nim imports only the allowed leaves":
     let ws = readSmt("walk_state.nim")
     var seen: seq[string]
-    for l in ws.splitLines:
-      let t = stripLine(l).strip()
+    for l in codeOf(ws).splitLines:
+      let t = l.strip()
       if t.startsWith("import "):
         for m in t[7 .. ^1].split(','):
           var s = m.strip()
@@ -687,17 +684,9 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
 
   test "the lowerHooks init assigns every declared field and no other":
     # R3-4: a field the init leaves nil is a nil-call at the first hook use.
-    let ws = readSmt("walk_state.nim")
     var declared, assigned: HashSet[string]
-    let t = ws.find("type LowerHooks* = object")
-    check t >= 0
-    for l in ws[t ..< ws.len].splitLines[1 .. ^1]:
-      if l.len > 0 and l[0] != ' ': break
-      if l.startsWith("  ") and not l.startsWith("   "):
-        let s = l.strip()
-        let c = s.find(":")
-        if c > 0 and not s.startsWith("#"):
-          declared.incl s[0 ..< c].strip().strip(chars = {'*'})
+    var probe: LowerHooks
+    for name, _ in fieldPairs(probe): declared.incl name
     let rt = readSmt("runtime.nim")
     let i = rt.find("\nlowerHooks = LowerHooks(")
     check i >= 0
@@ -726,8 +715,8 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     check declared == assigned
 
 proc importsOf(text: string): seq[string] =
-  for l in text.splitLines:
-    let t = stripLine(l).strip()
+  for l in codeOf(text).splitLines:
+    let t = l.strip()
     if t.startsWith("import "):
       for m in t[7 .. ^1].split(','):
         var s = m.strip()

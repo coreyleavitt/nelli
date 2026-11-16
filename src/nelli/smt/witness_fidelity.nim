@@ -4,7 +4,7 @@
 ##
 ## RFC-0016 D6: moved out of `symex.nim` unchanged.
 
-import std/[macros, sets, tables, algorithm, options, strutils]
+import std/[macros, sets, tables]
 import ./dsl
 import ./witness_emit
 

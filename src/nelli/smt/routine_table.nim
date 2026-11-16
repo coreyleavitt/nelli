@@ -5,10 +5,8 @@
 ##
 ## RFC-0016 D6: moved out of `symex.nim` unchanged.
 
-import std/[macros, sets, tables, algorithm, options, strutils]
+import std/[macros, sets, tables]
 import ./dsl
-import ./scan
-import ./scan_kinds
 import ./replay_footprint
 import ./replaywire
 import ./replayproc

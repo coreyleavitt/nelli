@@ -3646,8 +3646,23 @@ proc lambdaBodyHash(lam: NimNode): string =
   let li = lam.lineInfoObj
   li.filename & ":" & $li.line & ":" & $li.column
 
-proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr): IRExpr
+proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr;
+                   checkOpts: RoutineChecks): IRExpr
   ## RFC-0005 S8bh fwd decl
+
+proc parseRoutineBody(ctx: ParseCtx; n: NimNode; checkOpts: RoutineChecks;
+                      bodyNode: NimNode): IRStmt =
+  ## RFC-0016 R2-1. A lambda's body `bodyNode` as the routine `n` compiles it:
+  ## parsed under the routine's own arithmetic and check scope, then behind its
+  ## check-option declines and regime stamp (`withCheckDeclines`). The one path
+  ## for the main body and for each alias specialisation of it
+  ## (`lambdaAliasBodies`), so the two cannot take different regimes.
+  ctx.assertsOff.add checkOpts.assertsMaybeOff
+  ctx.pushArithScope(checkOpts)
+  let parsed = parseStmt(bodyNode, ctx)
+  ctx.popArithScope()
+  discard ctx.assertsOff.pop()
+  withCheckDeclines(ctx, n, checkOpts, parsed)
 
 proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
                           site: tuple[siteHash: int64, declOrder: int],
@@ -3698,17 +3713,12 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
     collectBoundLocals(bodyNode, bound)
     var seen: HashSet[string]
     collectFreeVarRefs(bodyNode, bound, captures, seen, mutCaptures)
-  ctx.assertsOff.add checkOpts.assertsMaybeOff
-  ctx.pushArithScope(checkOpts)
-  let bodyParsed = parseStmt(bodyNode, ctx)
-  ctx.popArithScope()
-  discard ctx.assertsOff.pop()
-  let bodyIR = withCheckDeclines(ctx, n, checkOpts, bodyParsed)
+  let bodyIR = parseRoutineBody(ctx, n, checkOpts, bodyNode)
   # RFC-0005 S8bh: with the summary a call through it needs to apply its
   # `var`/`addr` effects (`lambdaEffects`).
   lambdaEffects(n, ctx,
     mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy,
-             mutCaptures))
+             mutCaptures), checkOpts)
 
 proc parseLambda(n: NimNode, ctx: ParseCtx): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009). Parse an `nnkLambda` / expression-
@@ -7846,7 +7856,8 @@ proc substFormal(n, gone, keep: NimNode): NimNode =
   result = copyNimNode(n)
   for c in n: result.add substFormal(c, gone, keep)
 
-proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr): IRExpr =
+proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr;
+                   checkOpts: RoutineChecks): IRExpr =
   ## RFC-0005 S8bh. `lam` (the `iekLambda` of routine `n`) with what a call
   ## through it needs to apply its `var`/`addr` effects as a direct call
   ## does (`closureCallIR`, `lowerClosureCall`):
@@ -7889,7 +7900,8 @@ proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr): IRExpr =
            gone.kind != nnkSym:
           continue
         pairs.add (keep: i, gone: j)
-        aliasBodies.add parseStmt(substFormal(bodyNode, gone, keep), ctx)
+        aliasBodies.add parseRoutineBody(ctx, n, checkOpts,
+          substFormal(devirtProcLets(bodyNode), gone, keep))
   var ptrLocal: seq[bool]
   for k in 0 ..< syms.len:
     var pl = false

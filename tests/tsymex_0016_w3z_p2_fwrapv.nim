@@ -132,3 +132,44 @@ else:
       check programMayWrap()
       check profile(rgUnchecked) == dpFwrapv
       check profile(rgChecked) == dpChecked
+
+  # RFC-0016 review R2-1: a lambda's alias bodies (`lambdaAliasBodies`, walked
+  # when one call passes one location to two `var` formals) are the lambda's
+  # own, stamped with its regime. Here the lambda is compiled pushed
+  # `overflowChecks: on` (it raises) and called from a routine of the build's
+  # wrapping regime: the aliased call took the caller's, wrapped, and reached
+  # the label the native run never does.
+  {.push overflowChecks: on.}
+  proc mkAdder(): proc (a, b: var int) =
+    result = proc (a, b: var int) = a = a + b
+  {.pop.}
+
+  proc sutAdderPlain(k: int) =
+    var x = k
+    var y = k
+    let f = mkAdder()
+    f(x, y)
+    if k > 0 and x < 0: symexTarget("hit")
+
+  proc sutAdderAliased(k: int) =
+    var x = k
+    let f = mkAdder()
+    f(x, x)
+    if k > 0 and x < 0: symexTarget("hit")
+
+  suite "R2-1: lambda alias bodies take the lambda's regime (-fwrapv build)":
+    test "native: the pushed-on lambda raises on both calls":
+      check native(sutAdderPlain(high(int))) == "OverflowDefect"
+      check native(sutAdderAliased(high(int))) == "OverflowDefect"
+    test "the plain call does not reach the label":
+      let r = symexFind(sutAdderPlain, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status != sxSat
+    test "walker version floor (R2-1: alias bodies are stamped)":
+      check parseInt(symexWalkerVersion) >= 363
+    test "the aliased call answers as the plain call does":
+      let p = symexFind(sutAdderPlain, tLabel("hit"))
+      let r = symexFind(sutAdderAliased, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == p.status
+      check r.status != sxSat

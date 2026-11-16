@@ -3,6 +3,7 @@ import std/sequtils
 import nelli/smt/runtime
 import nelli/smt/types
 import nelli/smt/canonicalize
+import nelli/smt/[symval]   ## R2-3: the leaves are no longer re-exported by the facade
 
 # Phase 15 — Z3 cross-cutting infrastructure (staged; see
 # docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z).

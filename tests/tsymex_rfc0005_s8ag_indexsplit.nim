@@ -49,6 +49,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
+import nelli/smt/[string_lower_support]   ## R2-3: the leaves are no longer re-exported by the facade
 
 proc show(errs: openArray[SymexErrorInfo]): string =
   for e in errs: result.add $e.kind & ": " & e.msg & "\n"

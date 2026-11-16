@@ -21,6 +21,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
+import nelli/smt/[symval]   ## R2-3: the leaves are no longer re-exported by the facade
 
 proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   for e in errs:

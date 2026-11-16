@@ -39,6 +39,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
+import nelli/smt/[symval]   ## R2-3: the leaves are no longer re-exported by the facade
 
 proc kindNames(errs: seq[SymexErrorInfo]): seq[string] =
   for e in errs: result.add $e.kind

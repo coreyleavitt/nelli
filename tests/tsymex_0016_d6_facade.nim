@@ -16,6 +16,7 @@
 ##     so a doc-comment edit is not a failure; a new body in the facade is.
 import std/[unittest, strutils]
 import nelli/symex
+import nelli   ## the union of both: a name hidden here is hidden under each
 
 const facadeLineCeiling = 970
 
@@ -104,6 +105,23 @@ static:
   need ExampleDatabase
   need SymexSettings
   need ChoiceNode
+
+# R2-3 (0.10.0 review, round 2): the walker's internals are not facade API. The
+# value core (`SymVal`, its helpers), the hook table, the per-run threadvars
+# and their resets live in the runtime-family leaves, which the family imports
+# directly; `runtime.nim` no longer re-exports them wholesale.
+static:
+  template hidden(sym: untyped) =
+    doAssert not declared(sym),
+      "walker internal leaked through the facade: " & astToStr(sym)
+  hidden lowerHooks
+  hidden currentWalkCtxPtr
+  hidden currentLowerSinks
+  hidden resetWalkState
+  hidden resetLoweringSink
+  hidden SymVal
+  hidden plainEnglishSymValKind
+  hidden splitNeedle
 
 suite "D6: symex.nim is the facade":
   test "the public API is intact (checked at compile time above)":

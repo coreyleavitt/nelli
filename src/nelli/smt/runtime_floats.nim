@@ -16,6 +16,7 @@ import ./types
 import ./symval
 import ./walk_state
 import ./definedness
+import ./heap_model   ## R2-4: `iteSV`, the SymVal merge
 
 proc mkFloatLitSym(v: float64, width: int): SymVal =
   ## Phase 15 F2: lower a float literal to a Z3 FP numeral, honoring
@@ -301,7 +302,7 @@ proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
       exactV = convAt(sv.fp32, 8, 24)
     else: raise newException(ValueError, "int(): operand is not a float")  # [raise-audited: category-c: the operand of int(float) is float-typed (Nim sem) and a float-typed expression lowers to svFloat32/svFloat64, both handled above]
     let fresh = bvVar(tInt(w, signed), freshDegradeName("__convFloatToIntFresh"))
-    let value = lowerHooks.iteSV(domainCond, exactV, fresh)
+    let value = iteSV(domainCond, exactV, fresh)
     let bound = convBoundOf(domainCond, e.convSite, lowering.cls)
     convFloatToIntBoundConds.add bound               # threadvar fallback
     syncConvFloatToIntBoundCond(bound)               # CR-9 Stage 6 Group-1

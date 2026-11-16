@@ -38,6 +38,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import nelli/smt/[string_lower_support]   ## R2-3: the leaves are no longer re-exported by the facade
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]

@@ -40,9 +40,7 @@ import ./definedness   ## RFC-0016 K10a-axis: the definedness axis
 import ./variant_layout as vl   ## RFC-0016 PRC-07 slice A: a variant's C layout
 import ./abstraction
 import ./symval   ## RFC-0016 review D3c-1: the value core (SymVal, Env, the Symex*Error family)
-export symval
 import ./walk_state   ## RFC-0016 review D3c-2: the per-run walk state, the sinks and the hooks
-export walk_state
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
 import ./pcre_engine   ## RFC-0005 S8bt: the engine of unanchored calls
@@ -67,7 +65,6 @@ export heap_model.distinctBijectivityHints, heap_model.distinctSortNames,
        heap_model.heapChainDepth, heap_model.heapDerefsPerPathCap,
        heap_model.heapDerefDecline, heap_model.sortOfTuple
 import ./string_lower_support   ## RFC-0016 review D3c-7: index splits, `splitNeedle`, `literalStringBytes`
-export string_lower_support
 import ./runtime_strings   ## RFC-0016 review D3c-7: Cluster S, `lowerStrArm`
 import ./runtime_closures   ## RFC-0016 review D3c-5: Cluster C, `lowerClosureArm`
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
@@ -1736,18 +1733,6 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
 # S8bc a seq of such an element was the inert placeholder in every position
 # (`seNestedSeqUnsupported`), and any read of it declined.
 
-proc seqArrs(sv: SymVal): seq[Z3AnyAst] =
-  ## RFC-0005 S8bc. Every data array of a seq, in leaf order: `seqDataRaw`,
-  ## then `seqDataMore` (empty for a scalar element).
-  result = @[sv.seqDataRaw] # [placeholder-audited]
-  for m in sv.seqDataMore: result.add m
-
-proc withSeqArrsOf(sv: SymVal; arrs: seq[Z3AnyAst]): SymVal =
-  ## RFC-0005 S8bc. `sv` with its data arrays replaced (`seqArrs`' order).
-  result = sv
-  result.seqDataRaw = arrs[0] # [placeholder-audited]
-  result.seqDataMore = arrs[1 .. ^1]
-
 proc seqElemProto(elemTy: IRType): SymVal =
   ## RFC-0005 S8bc. A value of a tree element type: the shape (kinds, element
   ## types, a placeholder seq's flag) a read rebuilds from the selects of the
@@ -1809,14 +1794,6 @@ proc rawApp1(ctx: Z3Context, fd: RawZ3FuncDecl, arg: Z3AnyAst): Z3AnyAst =
   let raw = ctx.checkErr Z3_mk_app(ctx.raw, fd, 1,
     cast[ptr UncheckedArray[RawZ3Ast]](addr args[0]))
   wrap[Z3AnyAst](ctx, raw)
-
-proc heapStepsOf(sv: SymVal): int =
-  ## RFC-0005 S8ar. A ref's or ptr's heap steps from a root (`refSteps`);
-  ## 0 for any other value.
-  case sv.kind
-  of svRef: sv.refSteps
-  of svPtr: sv.ptrSteps
-  else: 0
 
 proc stampHeapSteps(sv: var SymVal; steps: int) =
   ## RFC-0005 S8ar. Mark every ref a heap read produced (`sv`, or a ref inside
@@ -2515,116 +2492,6 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
 # (CR-7-deeper Stage 8+). Bodies of refPointeeTypeId/allocRefSort/freshRef/
 # assertFreshness/pcImpliesNonNil also moved there.
 
-proc tyOf(sv: SymVal): IRType =
-  case sv.kind
-  of svUninterpRef: tUninterp(sv.sortName)
-  of svFloat32: tFloat32()
-  of svFloat64: tFloat64()
-  of svDistinct: tDistinct(sv.distinctName, tyOf(sv.distinctBaseSym[]))  ## G4
-  of svClosure:
-    # Phase 15 C1 STUB. There is no `itClosure` IRType in Cluster C (the IR for a
-    # closure is the `iekLambda` EXPRESSION, not a new type). `tyOf` on an
-    # svClosure is diagnostics-only and never reached in C1 (the walker stubs
-    # before any svClosure is built); return the env's type as a placeholder.
-    if sv.closureEnv != nil: tyOf(sv.closureEnv[]) else: tBool()
-  of svRef:
-    # Phase 15 R1. The pointee type is carried on the svRef (`refPointee`).
-    if sv.refPointee != nil: tRef(sv.refPointee) else: tRef(tBool())
-  of svPtr:
-    if sv.ptrPointee != nil: tPtr(sv.ptrPointee) else: tPtr(tBool())
-  of svBitSet: tBitSet(sv.bsElemTy)   ## RFC-0005 S8bq
-  of svBV8:  tInt(8,  sv.signed)
-  of svBV16: tInt(16, sv.signed)
-  of svBV32: tInt(32, sv.signed)
-  of svBV64: tInt(64, sv.signed)
-  of svInt:  tInt(64, true)
-  of svBool: tBool()
-  of svTuple:
-    var ftys: seq[IRType]
-    for f in sv.fields: ftys.add tyOf(f)
-    tTuple(ftys, sv.fieldNames)
-  of svArray:
-    tArray(sv.arrElemTy, sv.arrElems.len)
-  of svString:
-    tString()
-  of svSeq:
-    tSeq(sv.seqElemTy)
-  of svTable:
-    tTable(sv.tabKeyTy, sv.tabValTy)
-  of svSet:
-    tSet(sv.setElemTy)
-  of svVariant:
-    # Reconstruct the IRType from the live SymVal. Used only for
-    # diagnostics; cycle 7's witness emitter consults the SUT's
-    # macro-time IR directly.
-    #
-    # Round-6 re-review (item 2, walker v115): the plain (shared,
-    # always-present) fields ARE fully carried on the SymVal
-    # (`vPlainFields`/`vPlainFieldNames`) and must be threaded through to
-    # `tVariant` here. Previously they were dropped, so `allocateSym`'s
-    # `itVariant` arm built a degrade-placeholder with an EMPTY
-    # `vPlainFieldNames` -- a later plain-field read (`iekField`) couldn't
-    # find the field on the placeholder and fell through to the "parser
-    # should have A-normalised this" `raise`, a real crash-shaped defect
-    # (caught at top level as a classified `sxUnknown`, but blaming a
-    # nonexistent parser bug instead of naming the actual iteSV merge
-    # degrade). Per-arm `tagName` and the disc's full `vDiscTags` domain
-    # genuinely are NOT recoverable from the live SymVal (no `vArmTags`/
-    # `discTags` storage on `SymVal` at all) -- but that gap is inert for
-    # `allocateSym`'s own round-trip: its `hasElse` disc-range expansion
-    # only fires when a reconstructed arm's `isElse` is true, and this arm
-    # never sets `isElse` (default `false`), so the dropped tags are never
-    # consulted by the one caller (`allocateSym`) that matters here.
-    var arms: seq[VariantArm]
-    for tagOrdinal, fields in sv.vArmFields.pairs:
-      var tys: seq[IRType]
-      for f in fields: tys.add tyOf(f)
-      arms.add VariantArm(tagOrdinal: tagOrdinal,
-                          tagName: "",  # not preserved on the SymVal
-                          fieldNames: sv.vArmFieldNames[tagOrdinal],
-                          fieldTypes: tys)
-    var plainTys: seq[IRType]
-    for pf in sv.vPlainFields: plainTys.add tyOf(pf)
-    tVariant(sv.vObjectName, sv.vDiscName, tyOf(sv.vDisc[]), arms,
-             plainFieldNames = sv.vPlainFieldNames,
-             plainFieldTypes = plainTys)
-  of svMultiVariant:
-    # Phase 14 cycle A1c. Diagnostics-only: rebuild the IRType from
-    # the SymVal's axes. Tag names are not preserved on the SymVal
-    # (same gap as svVariant). Round-6 re-review (item 2, walker v115):
-    # plain fields ARE preserved (`mvPlainFields`/`mvPlainFieldNames`) and
-    # are threaded through below -- see the `svVariant` arm's comment
-    # above for the full rationale (same defect, same fix).
-    var axes: seq[VariantAxis]
-    for ax in sv.mvAxes:
-      var arms: seq[VariantArm]
-      for tagOrdinal, fields in ax.armFields.pairs:
-        var tys: seq[IRType]
-        for f in fields: tys.add tyOf(f)
-        arms.add VariantArm(tagOrdinal: tagOrdinal, tagName: "",
-                            fieldNames: ax.armFieldNames[tagOrdinal],
-                            fieldTypes: tys)
-      axes.add VariantAxis(discName: ax.discName,
-                           discTy: tyOf(ax.disc[]), arms: arms)
-    var mvPlainTys: seq[IRType]
-    for pf in sv.mvPlainFields: mvPlainTys.add tyOf(pf)
-    mkMultiVariant(sv.mvObjectName, axes,
-                   plainFieldNames = sv.mvPlainFieldNames,
-                   plainFieldTypes = mvPlainTys)
-
-# ---- Prototype probe over the IR --------------------------------------------
-#
-# Each non-trivial subexpression takes its representation (Z3 BV[W] vs
-# Z3Int) from a "prototype" SymVal — the first env-resident variable
-# its subtree reaches. Literals coerce to match the prototype; arith
-# / comparison ops dispatch on the prototype kind.
-#
-# When no env-resident var is reachable (e.g. `5 + 6`), no prototype
-# exists and the caller defaults to BV[64] signed.
-
-proc bvOfInt(sv: SymVal): Option[SymVal]
-  ## RFC-0005 S8bu fwd decl (`probeProto`); defined below.
-
 proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   if e == nil: return none(SymVal)
   case e.kind
@@ -3132,24 +2999,6 @@ proc containerRecvDeclined(recv: SymVal; want: SVKind; op: string): bool =
     ", not a " & plainEnglishSymValKind(want) & " (feUnsupportedOp)")
   true
 
-proc bvOfInt(sv: SymVal): Option[SymVal] =
-  ## RFC-0005 S8ax. The bit-vector `sv` (an `svInt`) is the conversion of,
-  ## if `intOfBV` lists it and its width and signedness agree.
-  if sv.kind != svInt: return none(SymVal)
-  let k = cast[uint](cast[pointer](sv.zi.raw))
-  if k notin intOfBV: return none(SymVal)
-  let e = intOfBV[k]
-  if cast[pointer](e.zi.raw) != cast[pointer](sv.zi.raw): return none(SymVal)
-  let w = case e.bv.kind
-          of svBV8: 8
-          of svBV16: 16
-          of svBV32: 32
-          else: 64
-  if sv.ziWidth != 0 and (sv.ziWidth != w or
-                          sv.ziSigned != e.bv.signed):
-    return none(SymVal)
-  some(e.bv)
-
 proc stampedIntToBV(sv: SymVal): SymVal =
   ## RFC-0005 S8w: a WIDTH-STAMPED `svInt` (`ziWidth` in 8/16/32/64) is a
   ## Nim int of that width and signedness whose value lies in its type's
@@ -3647,10 +3496,6 @@ template bsBin(f: untyped; a, b: Z3AnyAst): Z3AnyAst =
 proc bsNot(a: Z3AnyAst): Z3AnyAst =
   let c = a.ctx
   wrap[Z3AnyAst](c, c.checkErr Z3_mk_bvnot(c.raw, a.raw))
-
-proc bsIte(cond: Z3Bool; t, e: Z3AnyAst): Z3AnyAst =
-  let c = t.ctx
-  wrap[Z3AnyAst](c, checkedIte(c, cond.raw, t.raw, e.raw))
 
 proc bsEqZ(a, b: Z3AnyAst): Z3Bool =
   let c = a.ctx
@@ -4409,11 +4254,6 @@ proc symEq(a, b: SymVal): Z3Bool =
     raise newException(ValueError,  # [raise-audited: category-c: index-must-be-int invariant (both call sites are the same array-index ite-fold, operands always int-family)]
       "symEq: not a primitive — got " & $a.kind)
 
-proc reconcileInt*(a, b: SymVal): (SymVal, SymVal)
-  ## v69 fwd-decl (defined below, CR-9(c) Stage B) — retBindEq's svTuple arm
-  ## reconciles mixed int reps PER FIELD before recursing (a field can be
-  ## svInt via range propagation while its retSym slot allocated svBV*).
-
 func isClosureTy(t: IRType): bool =
   ## RFC-0005 S8z. The proc-valued type `classifyType` maps to the
   ## `__closure` placeholder.
@@ -5161,421 +5001,6 @@ func defaultZeroTotal(t: IRType): bool =
   of itRef, itPtr: true                         # RFC-0005 S8u: nil
   else: false
 
-# ---------------------------------------------------------------------------
-# R1 (walker v89) — placeholder read-totality CHOKEPOINT.
-#
-# Round-6 (v85-v88) introduced `isUnsupportedFieldPlaceholder`: a marked
-# `svSeq` whose element type `allocateSym`'s `itSeq` arm could not back with
-# a real Z3 array (e.g. `seq[(string,string)]`) — allocated with `seqLen`
-# HARD-FORCED `== 0` and an INERT data array nothing may legitimately select
-# from (see `allocateSym`'s `itSeq` arm doc, ~line 1849). A verdict-affecting
-# READ of such a value (via its real, forced-0 `seqLen`, or its inert
-# `seqDataRaw`) must NEVER be trusted — doing so silently proves a verdict
-# against the fake length/content instead of honestly declining. R1 found
-# this guard hand-placed and incomplete (`isIndex` only) after two Critical
-# false-verdict gaps (`iekSeqLen`, `iekSeqSlice`) were confirmed. This pair —
-# `placeholderReadDeclineMsg` (message/kind, shared by EVERY call site) and
-# `declinePlaceholderInLower` (the in-`lower()` recording half) — is the
-# structural chokepoint every svSeq-consuming lowering arm must call FIRST,
-# so a future arm added to `lower()` inherits totality by construction
-# instead of needing its own hand-rolled check. `isIndex`'s walk-time arm
-# (runtime.nim, below) is the analogous AT-WALK half — it cannot share
-# `declinePlaceholderInLower`'s threadvar-sink recording (it has `w`/`Path`
-# and must fork `uncertain = true` on the SURVIVING PATH, not merely flag a
-# threadvar for `drainPendingLowerEffects` to pick up later), but shares
-# `placeholderReadDeclineMsg` so both halves report the identical
-# `seNestedSeqUnsupported` kind and message shape — one decline idiom, not
-# two parallel ones.
-proc placeholderReadDeclineKind(recv: SymVal): SymexErrorKind =
-  ## N47-followup (walker v110). The classified kind a READ decline for
-  ## `recv` should carry: `recv.seqUnsupportedFieldKind` when `recv` was
-  ## built via `tUnsupportedFieldSeq` (reason non-empty — a declared-field or
-  ## OPERATION-level origin), else the legacy `seNestedSeqUnsupported` a
-  ## bare-value placeholder (no reason to carry) has always used.
-  if recv.seqUnsupportedFieldReason.len > 0: recv.seqUnsupportedFieldKind
-  else: seNestedSeqUnsupported
-
-proc placeholderReadDeclineMsg(recv: SymVal, loc, what: string): string =
-  ## Shared message/kind formatter for every placeholder-seq READ decline
-  ## (in-`lower()` and at-walk-time alike). `loc`, when non-empty, is
-  ## rendered with the SAME `<loc>: ` prefix idiom `isIndex`'s OTHER
-  ## (non-seq) receiver-kind decline already uses (~line 6604) — empty when
-  ## the call site's `IRExpr`/`IRStmt` carries no site location.
-  ##
-  ## Round-6 N12 (message-formatting boundary): this string reaches the user
-  ## through `SymexResult.errors` — there is no further rendering step in
-  ## this codebase (`.msg` IS the user-facing text) — so it must not leak
-  ## internal IR vocabulary. Previously interpolated the bare `IRTypeKind`
-  ## (`$elemKind`, e.g. "itTuple") and the raw `SymexErrorKind` identifier
-  ## ("seNestedSeqUnsupported") verbatim; now routes through
-  ## `plainEnglishTypeKind` and a plain-language decline note. `.kind` (the
-  ## structured `SymexErrorKind` field a caller can match on) is UNCHANGED —
-  ## only the free-form TEXT changes; internal audit/log strings that never
-  ## reach a `SymexResult` may keep using `$elemKind` freely.
-  ##
-  ## N47-followup (walker v110): when `recv.seqUnsupportedFieldReason` is
-  ## set, the placeholder did NOT arise from an unbacked element type — it
-  ## arose from a DECLARED-FIELD-level or OPERATION-level decline (e.g.
-  ## `iekSeqAdd`'s width/elem-support gap) whose `recv.seqElemTy` may be
-  ## perfectly backed in general. Claiming "nested seq element type is not
-  ## supported" in that case is FALSE and misleads a reader of
-  ## `SymexResult.errors` about the actual defect. Reference the ORIGINAL
-  ## decline reason instead — this also lets the drain-time message dedup
-  ## (`drainDedupedByMsg`, at `loweringDegradeErrors`'s drain) collapse a
-  ## cascade of downstream reads on the same tainted receiver into a small,
-  ## honestly-worded set instead of manufacturing new misclassified entries.
-  let locPrefix = if loc.len > 0: loc & ": " else: ""
-  if recv.seqUnsupportedFieldReason.len > 0:
-    locPrefix & what & " of a receiver already declined (" &
-      recv.seqUnsupportedFieldReason & ")"
-  else:
-    locPrefix & what & " of an unsupported-element seq of " &
-      plainEnglishTypeKind(recv.seqElemTy.kind) &
-      " placeholder (nested seq element type is not supported)"
-
-template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
-  ## IN-`lower()` chokepoint half. `lower(env: Env, e: IRExpr, ...)` has no
-  ## `w: var WalkCtx` / `Path` — it is called from deep inside expression
-  ## recursion — so taint rides the SAME in-band threadvar sink every other
-  ## `lower()`-internal degrade in this file uses (`loweringDegradeErrors`/
-  ## `loweringDidDegrade`; SND-3, ADR-0023), drained by
-  ## `drainPendingLowerEffects` into the calling PATH's `uncertain = true`
-  ## (SND-1's per-path taint). Deliberately NEVER a `raise`: unwinding out of
-  ## `lower()` here would propagate past the caller's own `seq[Path]` fork
-  ## loop to the top-level `runSymexImpl` catch-all and poison the WHOLE run
-  ## — exactly Bug #2's original failure mode, which the placeholder
-  ## machinery exists to prevent. Callers build their own type-correct inert
-  ## result after calling this (an `svInt`/`svSeq`/etc — the one piece that
-  ## cannot be centralised, since each arm's result kind differs).
-  lowerDegrade(placeholderReadDeclineKind(recv),
-    placeholderReadDeclineMsg(recv, loc, what))
-
-proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
-  ## Z3-level if-then-else over SymVals. Both branches must share kind.
-  if (t.kind == svDistinct) != (e.kind == svDistinct):
-    # RFC-0005 S8ad: one side a boxed `distinct` value, the other its bare
-    # base. `D(x)` is the parser's identity (S8p) while a borrowed
-    # arithmetic result is re-boxed (`reboxDistinct`), so the two meet
-    # wherever a local distinct value is merged: the element fold of
-    # `var a = [Meters(1), Meters(2)]; a[0] = a[0] + Meters(2)` read at a
-    # symbolic index. The base is the whole observable value (every read
-    # ejects, `retBindEq` binds through it), so the merge is of the bases.
-    # Before S8ad the assertion below faulted the walker.
-    return iteSV(cond, ejectBase(t), ejectBase(e))
-  if t.kind != e.kind and t.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
-     e.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
-    # RFC-0005 S8aj: one side an Int (`svInt`, which carries its Nim width),
-    # the other a bitvector. They meet when an array element is an Int on
-    # one path and a bitvector on the other: a loop writing
-    # `a[0] = a[0] + x` and `a[2] = a[2] + k` under `symexAssume` on `x`
-    # (`var a: array[3, int]` and `var a = [0, 0, 0]` alike; it faulted at
-    # the base too). Both are the same Nim integer, so the merge is of
-    # their Int values (`reconcileInt`, as every mixed operator does); the
-    # assertion below faulted the walker.
-    let (rt, re) = reconcileInt(t, e)
-    return iteSV(cond, rt, re)
-  doAssert t.kind == e.kind, "iteSV: kind mismatch " &
-    $t.kind & " vs " & $e.kind
-  case t.kind
-  of svUninterpRef:
-    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
-    # `raise newException` -- reachable walk-time via the symbolic
-    # array-index ite-fold (`isIndex`/`iekIndex` build `iteSV` over every
-    # element of an `array[N, T]`; `allocateSym`'s `itArray` arm recurses
-    # for ANY element type, so `array[N, SomeUninterpElem]` allocates fine
-    # and a non-constant-indexed read reaches here unguarded). In-band
-    # degrade instead: one operand is a sound stand-in (both `t`/`e` share
-    # `t.kind` by the entry `doAssert`), matching `retBindEq`'s own
-    # placeholder-return idiom for an unmodeled composite merge.
-    # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the result (below) is a
-    # uniquified fresh const of the operands' own sort.
-    allocDegrade(feUnsupportedOpHavoc,
-      "iteSV: svUninterpRef merge lands with cluster E")
-    # Round-6 re-review (item 1, walker v114): was `t` -- a pretend merge
-    # that forwarded ONE OPERAND'S CONCRETE VALUE unconditionally, ignoring
-    # both `cond` and the accumulator `e`. See the `svString`/`svTable`/…
-    # group arm below for the full verification writeup (the index-ite-fold
-    # collapse hazard and why per-path taint alone is not enough). Return a
-    # FRESH, unconstrained const of `t`'s OWN uninterpreted sort — mirrors
-    # `reboxDistinct`/`allocDistinctSym`'s `rawConstOf`-on-an-existing-sort
-    # idiom (item 4, walker v115 correction: NOT the `svRef`/`svPtr` arm
-    # below, which does a genuine `Z3_mk_ite` value merge over two already-
-    # built addresses — a different operation entirely; the real precedent
-    # for "raw fresh same-sort const, not routed through `allocateSym`" is
-    # `reboxDistinct`, ~line 2808, and `allocDistinctSym`, ~line 1826):
-    # `allocateSym`'s `itUninterp` arm only recognises the three synthetic
-    # `__ownership:`/`__unsupported:`/`__unsupported_witness:` name prefixes
-    # and hard-raises (a genuine walker-invariant Defect) for an ordinary
-    # cluster-E sort name like this one, so `allocateSym(tyOf(t), …)` is NOT
-    # a safe route here the way it is for the group arm below.
-    let ctx = t.uninterpAst.ctx
-    let srt = ctx.checkErr Z3_get_sort(ctx.raw, t.uninterpAst.raw)
-    # Item 3 (walker v115): uniquify the fresh const name -- Z3 interns
-    # consts by (name, sort), so a fixed name would let two DIFFERENT
-    # `svUninterpRef` merges in the same run (e.g. two distinct
-    # `array[N, SomeUninterpElem]` locals both index-merged) silently share
-    # one Z3 symbol. Mirrors `reboxDistinct`'s `currentBorrowReboxCounter`
-    # idiom / `runtime_exceptions.nim`'s `currentExnRefCounter`. Item 1
-    # (consolidated): routed through the shared `freshDegradeName`.
-    let freshAst = wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt,
-      freshDegradeName("__iteSVUninterpDegrade")))
-    SymVal(kind: svUninterpRef, uninterpAst: freshAst,
-           sortName: t.sortName, typeTag: t.typeTag)
-  of svFloat32:   ## Phase 15 F9a: IEEE float path-merge over Z3 FP `ite`.
-    SymVal(kind: svFloat32, fp32: ite(cond, t.fp32, e.fp32))
-  of svFloat64:
-    SymVal(kind: svFloat64, fp64: ite(cond, t.fp64, e.fp64))
-  of svBool: ofBool(ite(cond, t.bo, e.bo))
-  of svBitSet:   ## RFC-0005 S8bq: `ite` of the two bit-vectors
-    bitSetSV(bsIte(cond, t.bsRaw, e.bsRaw), t.bsElemTy)
-  of svInt:
-    ## R3 (S2): propagate width metadata through the merge when both
-    ## branches agree (the expected case — a single ternary/if-expression
-    ## has one static Nim type, so both arms should carry the same
-    ## `ziWidth`/`ziSigned`); a mismatch conservatively drops to "unknown"
-    ## (0) rather than guessing, same "skip" `overflowCondInt` already
-    ## applies to any unrecognized-width svInt.
-    let (rw, rs) = if t.ziWidth == e.ziWidth and t.ziSigned == e.ziSigned:
-                      (t.ziWidth, t.ziSigned)
-                    else: (0, false)
-    SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi), ziWidth: rw, ziSigned: rs)
-  of svBV8:  liftBV(ite(cond, t.bv8,  e.bv8),  t.signed)
-  of svBV16: liftBV(ite(cond, t.bv16, e.bv16), t.signed)
-  of svBV32: liftBV(ite(cond, t.bv32, e.bv32), t.signed)
-  of svBV64: liftBV(ite(cond, t.bv64, e.bv64), t.signed)
-  of svTuple:
-    var fs: seq[SymVal]
-    for i, ft in t.fields: fs.add iteSV(cond, ft, e.fields[i])
-    SymVal(kind: svTuple, fields: fs, fieldNames: t.fieldNames)
-  of svArray:
-    var fs: seq[SymVal]
-    for i, ae in t.arrElems: fs.add iteSV(cond, ae, e.arrElems[i])
-    SymVal(kind: svArray, arrElems: fs, arrElemTy: t.arrElemTy)
-  of svDistinct:
-    # Phase 15 G4: merge the opaque distinct ast over Z3's polymorphic `ite`
-    # (uninterpreted-sort ites are fine) and the base recursively.
-    let ctx = t.distinctAst.ctx
-    var args = [cond.raw, t.distinctAst.raw, e.distinctAst.raw]
-    let merged = checkedIte(ctx, args[0], args[1], args[2])
-    let boxed = new(SymVal)
-    boxed[] = iteSV(cond, t.distinctBaseSym[], e.distinctBaseSym[])
-    SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
-           distinctName: t.distinctName, distinctBaseSym: boxed)
-  of svSeq:
-    if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-      # Round-6 re-review (walker v112): guard-before, routed through the
-      # SAME R1 chokepoint `eqBV`/`neBV`/`cmpBV`/`svLeafEq` now use, rather
-      # than the generic catch-all below. Item 4 (round-6 re-review):
-      # previously hand-inlined `declinePlaceholderInLower`'s two-line body
-      # directly (this proc used to sit ABOVE the R1 chokepoint, behind a
-      # two-proc forward declaration, because a `template` cannot be
-      # forward-declared the way `placeholderReadDeclineKind`/
-      # `placeholderReadDeclineMsg` were) — relocated below the chokepoint
-      # (pure code motion; nothing between the old and new position calls
-      # `iteSV`, so no caller needed a forward declaration either) so this
-      # arm can call the template directly, same as `cmpBV`/`eqBV`/`neBV`/
-      # `svLeafEq`. Returning `t` here is fine: `t` is itself an INERT
-      # placeholder (forced `seqLen == 0`, never selected from — see
-      # `allocateSym`'s `itSeq` arm), so no concrete value collapses onto a
-      # comparison target the way the genuine-merge branch below could.
-      declinePlaceholderInLower(t, "", "array-index merge of")
-      t
-    else:
-      # Round-6 re-review (item 1, walker v115): was `allocDegrade(...); t`
-      # -- shared fallthrough with the placeholder branch above, so a GENUINE
-      # (non-placeholder) seq element merge still forwarded ONE OPERAND'S
-      # CONCRETE VALUE unconditionally, the exact class the `svString`/
-      # `svTable`/`svSet`/`svVariant`/`svMultiVariant` group arm below and
-      # the `svUninterpRef` arm above were fixed for at walker v114 — this
-      # arm's own v114 docstring (removed above) claimed the whole `svSeq`
-      # case was closed, but only the placeholder half was.
-      #
-      # Fix: same fresh-placeholder idiom as the group arm below --
-      # `allocateSym(tyOf(t), …)`. `tyOf` is FAITHFUL for `svSeq`: unlike
-      # `svVariant`/`svMultiVariant` (which reconstruct field types by
-      # recursing through live element SymVals, dropping tag names —
-      # diagnostics-only, see item 2), `tyOf`'s `svSeq` arm returns
-      # `tSeq(sv.seqElemTy)` from the STORED `seqElemTy` field directly, a
-      # lossless round-trip of the type this value was allocated at.
-      # `allocateSym`'s own `itSeq` arm already self-guards an elemTy it
-      # cannot back (`not isBackedSeqElemTy(ty.seqElemTy)`) by degrading TO
-      # an inert `isUnsupportedFieldPlaceholder` result instead of raising
-      # (the branch above this `if`), so `allocateSym(tyOf(t), …)` can never
-      # raise here regardless of what `seqElemTy` holds.
-      # RFC-0005 S6b: `feUnsupportedOpHavoc` -- a lossless `tyOf`, a fresh
-      # per-merge name, init facts discarded, both operands already built.
-      # RFC-0005 S8at: two seqs whose element arrays share a sort (the
-      # same backed element type) merge exactly: an `ite` of the element
-      # arrays and of the lengths. A symbolic index into an array of seqs
-      # (`a[i].len`, `p.a[i][1]`) is this merge folded over the elements;
-      # it was the havoc below for every such read.
-      # RFC-0005 S8bc: every data array of a tree element, each an `ite`;
-      # the arrays must agree in number and sort.
-      let ctx = t.seqDataRaw.ctx # [placeholder-audited]
-      let ta = seqArrs(t)
-      let ea = seqArrs(e)
-      var sameSorts = ta.len == ea.len
-      if sameSorts:
-        for i in 0 ..< ta.len:
-          # hash-consed: identity is equality (`sortFault`)
-          if ctx.checkErr(Z3_get_sort(ctx.raw, ta[i].raw)) !=
-             ctx.checkErr(Z3_get_sort(ctx.raw, ea[i].raw)):
-            sameSorts = false
-      if sameSorts:
-        var arrs: seq[Z3AnyAst]
-        for i in 0 ..< ta.len:
-          arrs.add wrap[Z3AnyAst](ctx, checkedIte(ctx, cond.raw,
-            ta[i].raw, ea[i].raw))
-        var r = withSeqArrsOf(t, arrs)
-        r.seqLen = ite(cond, t.seqLen, e.seqLen) # [placeholder-audited]
-        r.seqSteps = max(t.seqSteps, e.seqSteps)
-        return r
-      degradeAlloc(tyOf(t), feUnsupportedOpHavoc,
-        "iteSV: not supported for seq value (Phase 5+)", "__iteSVMergeDegrade")
-  of svString:
-    # RFC-0005 S8bb: a string merge is Z3's `ite` over the two strings --
-    # exact, as for every scalar sort above. It was the fresh-symbol havoc
-    # of the group arm below, so reading an `array[N, string]` element
-    # (the index fold merges every element, a literal index too) was never
-    # decided: the captures overloads' `matches` arrays are such arrays.
-    SymVal(kind: svString, str: ite(cond, t.str, e.str))
-  of svTable, svSet, svVariant, svMultiVariant:
-    # N46: same walk-reachable array-index-merge hazard as the
-    # `svUninterpRef` arm above -- see its comment. `svSeq` is peeled off
-    # above (walker v112) into its own placeholder-aware arm.
-    #
-    # Round-6 re-review (item 1, walker v114) -- VERIFIED finding, fixed
-    # regardless of outcome per the review brief. This arm used to be
-    # `allocDegrade(...); t` -- returning ONE OPERAND'S CONCRETE VALUE
-    # unconditionally, ignoring both `cond` and the accumulator `e`. Every
-    # caller's index-ite-fold is a LEFT FOLD (`res = arrElems[0]; for k in
-    # 1..<n: res = iteSV(cond_k, arrElems[k], res)`, runtime.nim's `iekIndex`
-    # ~4847 and the walk-level `isIndex` ~7944; `isVariantField`'s
-    # arm-fold ~8375 is the same shape over variant arms) that ALWAYS
-    # returns `t` at every step, so the fold's final value is the LAST
-    # operand touched -- structurally independent of `cond` (the symbolic
-    # index / active variant tag), a silent wrong-value substitution.
-    #
-    # Verification (adversarial, container-run probes over
-    # `array[3, string]` with a symbolic index and a target reachable only
-    # when the selected element equals the collapsed-to element): the
-    # expression-level `iekIndex` arm (~4847) is DEAD CODE -- `mkIndex`
-    # (the only constructor for an `iekIndex` IRExpr) has zero callers
-    # anywhere in the parser; `nnkBracketExpr` on an `itArray` receiver
-    # ALWAYS A-normalises to the `isIndex` STATEMENT via `mkIndexStmt`
-    # (dsl_parser.nim, `of itArray:`), so no real SUT can ever reach
-    # `iekIndex`'s `lower()` arm. The one LIVE route, the walk-level
-    # `isIndex` fold (~7944), calls this arm DIRECTLY -- with no
-    # intervening `lower()`/`lowerBoolInExpr` wrapper -- so the
-    # `loweringDidDegrade` taint `allocDegrade` deposits is NOT drained onto
-    # the surviving path's `uncertain` flag until whatever `lower()`/
-    # `lowerBoolInExpr` call happens to run NEXT on that SAME path. Every
-    # constructed probe (single-path; two sibling paths merged before a
-    # shared `isIndex`+comparison; both orderings of which sibling carries
-    # the vulnerable array) reached `isTargetLabel` with `uncertain == true`
-    # and a correctly-classified `sxUnknown` -- Nim's own generated control
-    # flow always threads a subsequent boolean check through the identical
-    # path before a value-dependent target, and `isIf`'s body-walk
-    # (`walk(br.body, @[armPath], w)`, one path at a time) means the walker
-    # never actually batches multiple live siblings through a shared
-    # `isIndex`+consumer pair in practice. So today: ROUTE (a), sound but
-    # via a coincidence of caller shape, not by construction -- the taint
-    # was racing a "does something else drain the leak before the tainted
-    # path resolves its target" bet that nothing currently in this codebase
-    # loses, but nothing GUARANTEES either (a future batched-multi-path
-    # caller, e.g. a closure/HOF fold merging several call-return paths,
-    # could lose that race and let a collapsed value size a verdict).
-    #
-    # Fix: stop relying on the race. Return a genuinely FRESH, unconstrained
-    # placeholder of the operand's OWN kind (the `eqBV`/`neBV` idiom above --
-    # `allocateSym` on the operand's reconstructed type via `tyOf`, which
-    # round-trips cleanly through `allocateSym` for every kind in this
-    # group: `tString()`/`tTable()`/`tSet()`/`tVariant()`/`tMultiVariant()`
-    # all have direct, non-raising `allocateSym` arms). A fresh placeholder
-    # can never accidentally equal a real comparison target the way the
-    # collapsed CONCRETE value could, so soundness no longer depends on the
-    # taint being drained before the target resolves -- only on
-    # Invariant 3's ordinary sawUnknown backstop (still fired immediately,
-    # synchronously, by `allocDegrade` itself). Any init-side constraint
-    # `allocateSym` would deposit (e.g. a table/set cardinality floor) is
-    # discarded via a throwaway `pcOut` sink -- exactly `eqBV`'s own
-    # `var fresh: seq[Z3Bool]` idiom -- because this value is never trusted
-    # once the run is marked degraded.
-    # Item 3 (walker v115): shares the `"__iteSVMergeDegrade"` tag with the
-    # `svSeq` genuine-merge arm above (same "iteSV composite-merge degrade"
-    # concept); see that arm's comment and `degradeSymCounter`'s own doc for
-    # the collision rationale. Item 9 (round-6 re-review): both sites now go
-    # through the shared `degradeAlloc` pairing helper.
-    # RFC-0005 S6b: the kind follows what `tyOf(t)` round-trips. For
-    # svTable / svSet it is lossless (the stored key / value /
-    # element types), so the placeholder is a fresh symbol of the operand's
-    # own type: `feUnsupportedOpHavoc`. For svVariant / svMultiVariant it
-    # rebuilds the arm-field types from live element SymVals and drops the
-    # tag names -- not a faithful round-trip, so it stays `feUnsupportedOp`
-    # (dcSubstituted).
-    let mergeKind =
-      if t.kind in {svVariant, svMultiVariant}: feUnsupportedOp
-      else: feUnsupportedOpHavoc
-    degradeAlloc(tyOf(t), mergeKind,
-      "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)",
-      "__iteSVMergeDegrade")
-  of svClosure:
-    # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
-    # (an ite over the site-keyed funcSym + a recursive env merge). N46:
-    # same walk-reachable array-index-merge hazard as the arms above.
-    #
-    # Round-6 re-review (item 1, walker v114): UNLIKE the group arm above,
-    # a closure cannot express a "fresh unconstrained placeholder of the
-    # same kind" -- `closureSite` (which funcSym a call through this value
-    # invokes) is a plain Nim `tuple[siteHash, declOrder]` picked at PARSE
-    # time per lambda occurrence, not a Z3-modelled value at all, so there
-    # is no symbolic const to allocate fresh over: it is fundamentally
-    # unmergeable with today's C1-stub representation, not merely
-    # inconvenient. Per the review brief, the sanctioned fix for a kind that
-    # cannot express a fresh placeholder is to guard BEFORE the fold at its
-    # call sites instead (skip the fold, decline the whole index/arm read).
-    # No such guard was ADDED here: there is no `itClosure` IRType at all
-    # (a closure is the `iekLambda` EXPRESSION, never a storable element/
-    # field type -- confirmed by grep: `allocateSym` has no arm that ever
-    # constructs an `svClosure`), so neither `isIndex`'s `array[N, T]`
-    # element type nor `isVariantField`'s arm-field types can BE a closure
-    # in the first place -- this arm is unreachable from either fold today,
-    # by construction of the type system, not by an added runtime check.
-    # It remains solely for `case t.kind`'s exhaustiveness and as a
-    # defensive fallback should Cluster C's C2a/C2b closure-merge work ever
-    # let a closure flow into a mergeable position; unchanged (`allocDegrade`
-    # + `t`) until that work defines what a sound closure merge even means.
-    allocDegrade(feUnsupportedOp,
-      "iteSV: svClosure merge lands with Cluster C C2a/C2b")
-    t
-  of svRef, svPtr:
-    # Cluster H H_containers (ADR-0022): a per-position `ite` over the two
-    # `Ref_T` addresses. Needed for `array[N, Node]` INDEXING — the static-
-    # array `isIndex` arm always builds a full ite-merge chain over every
-    # element (even for a compile-time-literal index; there is no fast path,
-    # unlike the Z3Array-backed `seq[Node]`), so a >1-element `array[N,
-    # Node]` reaches this arm. Sound: every element of a homogeneous
-    # `array[N, T]` shares the SAME `Ref_T` sort, so a plain value-level
-    # `Z3_mk_ite` over the two addresses (mirroring the `svBV*`/`svInt` arms
-    # above) is well-typed. This is a distinct axis from R5's nil-fork /
-    # R7's alias-equality machinery (those reason about whether two refs
-    # DENOTE the same address; this just picks one of two already-built
-    # addresses per branch, the same shape as any other primitive merge).
-    let refT = if t.kind == svPtr: t.ptrAst else: t.refAst
-    let refE = if e.kind == svPtr: e.ptrAst else: e.refAst
-    let ctx = refT.ctx
-    let mergedRaw = checkedIte(ctx, cond.raw, refT.raw, refE.raw)
-    let merged = wrap[Z3AnyAst](ctx, mergedRaw)
-    # RFC-0005 S8ar: the merged ref is as many steps from a root as the
-    # deeper of the two.
-    let steps = max(heapStepsOf(t), heapStepsOf(e))
-    if t.kind == svPtr:
-      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee,
-             ptrSteps: steps)
-    else:
-      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee,
-             refSteps: steps)
-
 proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
                  intOffsetPositions: seq[int] = @[]): SymVal =
   ## Phase 15 G3: allocate a fresh, well-typed symbol for a call's return
@@ -6159,41 +5584,6 @@ proc reconcileFloat*(a, b: SymVal): (SymVal, SymVal) =
     (a, SymVal(kind: svFloat64, fp64: toFp(rmRNE(), b.fp32, Z3Float64)))
   else:
     (a, b)  ## same width — no widening needed
-
-proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
-  ## CR-9(c) Stage B. When the two operands have DIFFERENT int-family kinds
-  ## (e.g. svBV64 vs svInt, or svBV32 vs svBV64), convert both to svInt via
-  ## `toZ3Int` (Z3's `bv2int`).  When the kinds match, return them unchanged.
-  ## This is the exact body extracted from the probe-hit comparison arm:
-  ##   if l.kind != r.kind and
-  ##      l.kind in {svInt,svBV8..svBV64} and r.kind in {svInt,svBV8..svBV64}:
-  ##     l = SymVal(kind: svInt, zi: toZ3Int(l))
-  ##     r = SymVal(kind: svInt, zi: toZ3Int(r))
-  ## Additive — no call-site change in this commit (Stage B).
-  ## Mirror of reconcileFloat (~2084): same identity-fast-path, same goal.
-  ## R3 (S2): the conversion step now goes through `toSvIntPreserving` —
-  ## width-preserving instead of the former bare `SymVal(kind: svInt, zi:
-  ## toZ3Int(...))` reconstruction, which silently dropped `ziWidth`/
-  ## `ziSigned` on whichever side was ALREADY `svInt` (both sides were
-  ## unconditionally rebuilt from scratch, even the one needing no
-  ## conversion at all) — see each proc's own doc comment.
-  if a.kind != b.kind and
-     a.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
-     b.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
-    # RFC-0005 S8ax: an Int that is the conversion of a bit-vector of the
-    # other operand's kind and signedness (`intOfBV`) meets it as that
-    # bit-vector, unconverted.
-    if a.kind == svInt:
-      let bv = bvOfInt(a)
-      if bv.isSome and bv.get.kind == b.kind and bv.get.signed == b.signed:
-        return (bv.get, b)
-    if b.kind == svInt:
-      let bv = bvOfInt(b)
-      if bv.isSome and bv.get.kind == a.kind and bv.get.signed == a.signed:
-        return (a, bv.get)
-    (toSvIntPreserving(a), toSvIntPreserving(b))
-  else:
-    (a, b)  ## same kind (or non-int) — identity
 
 proc alignIntKind(v: SymVal; like: SVKind): Option[SymVal] =
   ## RFC-0005 S8z. `v` in the representation `like` of the element it is
@@ -30607,8 +29997,7 @@ proc c2aClosureProbeRelowered*(): C2aClosureProbe =
 # field is left nil.
 lowerHooks = LowerHooks(
   lower: lower, lowerClosureCall: lowerClosureCall, seqElemAt: seqElemAt,
-  storeSeqElem: storeSeqElem, sameSymVal: sameSymVal,
-  entryValueOf: entryValueOf, iteSV: iteSV, allocateSym: allocateSym,
+  allocateSym: allocateSym,
   currentFrameId: currentFrameId,
   registerCapCell: registerCapCell,
   depositStrIndexOob: depositStrIndexOob)

@@ -6,6 +6,7 @@
 ## `LowerHooks` and not filled fails here, not as a nil call mid-walk.
 import std/unittest
 import nelli/smt/runtime
+import nelli/smt/[walk_state]   ## R2-3: the leaves are no longer re-exported by the facade
 
 suite "RFC-0016 D3c-2: lowerHooks":
   test "every hook is filled at module init":
@@ -14,5 +15,5 @@ suite "RFC-0016 D3c-2: lowerHooks":
       checkpoint name
       check not f.isNil
       inc n
-    check n == 11
+    check n == 7
 

@@ -590,7 +590,7 @@ proc lowerRegexDecline(env: Env, e: IRExpr): SymVal =
     regexRaiseMsgs.add pr.errMsg
     syncRegexRaiseMsg(pr.errMsg)
     var unused: seq[Z3Bool]
-    return lowerHooks.allocateSym(e.strRetTy, freshDegradeName("__regexRejected"), unused, false, @[])
+    return allocateSym(e.strRetTy, freshDegradeName("__regexRejected"), unused, false, @[])
   regexOutcomeGate(sp, pr)
   let what = "regex " & sp.entry & "(s, " & sp.flag & "\"" & sp.pattern & "\")"
   if not sp.entry.endsWith("Captures"):
@@ -757,7 +757,7 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
              "(CR-17 class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
       var fresh: seq[Z3Bool]
-      return lowerHooks.allocateSym(tString(), "__strSubstrBoundDegrade", fresh, false, @[])
+      return allocateSym(tString(), "__strSubstrBoundDegrade", fresh, false, @[])
     let lo = loSV.zi
     let hi = hiSV.zi
     let lenS = len(recv.str)
@@ -1368,9 +1368,9 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
       # Fresh byte-faithful strings (allocateSym's itString arm adds the
       # ADR-0006 ≤0xFF char-range membership into `alloc`).
       var alloc: seq[Z3Bool]
-      let coreSV = lowerHooks.allocateSym(tString(), tag & "_core", alloc, false, @[])
-      let preSV  = lowerHooks.allocateSym(tString(), tag & "_pre",  alloc, false, @[])
-      let sufSV  = lowerHooks.allocateSym(tString(), tag & "_suf",  alloc, false, @[])
+      let coreSV = allocateSym(tString(), tag & "_core", alloc, false, @[])
+      let preSV  = allocateSym(tString(), tag & "_pre",  alloc, false, @[])
+      let sufSV  = allocateSym(tString(), tag & "_suf",  alloc, false, @[])
       let (core, pre, suf) = (coreSV.str, preSV.str, sufSV.str)
       # (union chars)* — a finite union of single-char literal regexes.
       var charRes: seq[Z3Regex[Z3String]]
@@ -1563,7 +1563,7 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     inc strCharsCounter
     let iVar = mkIntVar("__strchars_i" & $strCharsCounter)
     let xVar = mkCharVar("__strchars_x" & $strCharsCounter)
-    let el = lowerHooks.seqElemAt(a, iVar)
+    let el = seqElemAt(a, iVar)
     if el.kind != svBV8:
       raise (ref SymexUnsupportedStringOpError)(op: "iekStrFromChars",  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "iekStrFromChars: an element lowered to " &

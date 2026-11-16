@@ -47,7 +47,8 @@ const
   ## What slice D3c-6 made real modules below `runtime.nim`: the heap algebra
   ## and the sort-checked Z3 term builders it rests on.
   hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
-               "./types", "./abstraction", "./symval", "./walk_state", "./z3check"]
+               "./types", "./abstraction", "./symval", "./walk_state", "./z3check",
+               "./variant_layout"]   ## R2-4: the union byte image of the moved allocator
   zcAllowed = ["z3", "./types", "./symval"]
 
   ## The decl-kind caches of the linked Z3: the same in every run, read in a
@@ -57,27 +58,27 @@ const
 
   heapPinned = [
     "AddrCellEntry", "Degrade", "ElemCell", "Path", "PtrLeafAim",
-    "PtrStore", "WalkCtx", "activeMemberTracked", "activeOf", "allocateSym",
-    "bitsPlace", "callGuardedNames", "cellOf", "cellValue", "coerceIntLit",
-    "crashRaise", "deadElemRefs", "defaultZero", "defaultZeroTotal",
+    "PtrStore", "WalkCtx",
+    "bitsPlace", "callGuardedNames", "cellValue", "coerceIntLit",
+    "crashRaise", "deadElemRefs",
     "degrade", "discConst", "drainPendingLowerEffects",
     "drainScalarRaiseForks", "effectiveHeapDepthLimit", "entryValueOf",
     "exact", "fieldsUnchecked", "forkAssignRangeCheck", "forkDefect",
     "forkPath", "forkPathTainted", "freshnessCapHints", "globalEntryVals",
     "globalHiddenRoute", "globalInitValue", "guardLiteral", "halted",
     "heapInputName", "heapKeyValTy", "imgReadDef",
-    "imgWrite", "inactiveFieldSide", "isConcolicFollowWalk", "iteFolded",
+    "inactiveFieldSide", "isConcolicFollowWalk",
     "liveFrame", "loopArmInfeasible", "lowerInExpr",
     "lowerLeafInExpr", "maybeForkDefect", "noteTableKey", "overlaps",
-    "pathInfeasible", "placeBits", "programGlobal", "ptrFamilyHints",
+    "pathInfeasible", "programGlobal", "ptrFamilyHints",
     "ptrFamilyKey", "ptrIdxKey", "ptrKeyKey", "ptrLeafAims",
     "ptrLeafPathStr", "ptrObjKey", "ptrScalarPointee", "ptrSelKey",
     "ptrTargetCode", "sameBranchSymCond", "sameSymVal",
-    "seqElemAt", "seqElemProto", "seqStoreArrs", "shouldStop",
+    "seqStoreArrs", "shouldStop",
     "stampHeapSteps", "storeSeqElem", "symEq", "tabValAt", "tabValTerms",
-    "taintInPlace", "unionCellCount", "unionImageGate", "unwrittenImage",
+    "taintInPlace", "unwrittenImage",
     "unwrittenIn", "unwrittenKind", "unwrittenMsg", "unwrittenReadMsg",
-    "unwrittenUb", "writeExactArm", "zeroImage",
+    "unwrittenUb", "writeExactArm", 
     # enum members (R2-5: the scan now sees them): `GuardLiteral`, `CapKind`
     # and `DegradeSink` constructors the arm names directly
     "ckHeapDepth", "dsHeapDepth", "dsNewFieldZero", "glFalse"]
@@ -611,17 +612,18 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     for p in walkFiles(smt / "*.nim"):
       let f = extractFilename(p)
       if f notin ["runtime.nim", "walk_state.nim"]: callers.add readFile(p)
-    for h in ["lower", "lowerClosureCall", "seqElemAt", "allocateSym",
+    for h in ["lower", "lowerClosureCall",
               "currentFrameId", "registerCapCell", "depositStrIndexOob"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
       # a field no module outside runtime.nim calls is dead: delete it
       check callers.contains("lowerHooks." & h & "(")
-    for h in ["storeSeqElem", "sameSymVal", "entryValueOf", "iteSV"]:
+    for h in ["storeSeqElem", "sameSymVal", "entryValueOf", "iteSV",
+              "allocateSym", "seqElemAt"]:
       check not ws.contains("\n  " & h & "*: proc(")
     check not ws.contains("sortOfTuple*:")   # D3c-6: read directly from heap_model
     check readSmt("runtime_floats.nim").contains("lowerHooks.lower(")
-    check readSmt("runtime_closures.nim").contains("lowerHooks.allocateSym(")
+    check readSmt("runtime_closures.nim").contains("lowerHooks.lowerClosureCall(")
     check readSmt("runtime.nim").contains("\nlowerHooks = LowerHooks(")
 
 proc importsOf(text: string): seq[string] =

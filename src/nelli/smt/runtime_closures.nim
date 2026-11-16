@@ -57,7 +57,7 @@ proc paramSorts(params: seq[IRParam]; reps: var seq[SymVal]): seq[RawZ3Sort] =
   ## `Z3_mk_func_decl` built over the sorts holds them.
   for p in params:
     var scratchPC: seq[Z3Bool]
-    reps.add lowerHooks.allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC,
+    reps.add allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC,
                                       false, @[])
     for s in sortOfTuple(reps[^1]): result.add s
 
@@ -128,7 +128,7 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     let rangeSorts =
       if structuredRet: @[mkBoolSort(ctx).raw]
       else:
-        sortReps.add lowerHooks.allocateSym(e.lambdaRetTy, "__closureRet", retPC,
+        sortReps.add allocateSym(e.lambdaRetTy, "__closureRet", retPC,
                                       false, @[])
         sortOfTuple(sortReps[^1])
     let rangeSort =

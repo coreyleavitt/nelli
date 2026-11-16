@@ -26,7 +26,10 @@
 import std/[unittest, os, osproc, strutils]
 import ./s8cu_helpers
 
-const probeStackKb = 160
+# The C++ backend's frames are larger: measured at the fix, the builder build
+# runs down to about 160 KB and dies below it, the inline one needs 256 KB; the
+# bound sits between them (c: 138 vs 187, see above).
+const probeStackKb = when defined(cpp): 192 else: 160
 
 proc mainModuleBody(c: string): string =
   ## The text of the C function `NimMainModule`: to the next declaration at
@@ -49,9 +52,13 @@ suite "RFC-0016 D1: the IR is built outside the caller's frame":
     if crc != 0: checkpoint cout
     require crc == 0
     var main = ""
-    for f in walkFiles(pb.dir / "cache" / "*s0016_d1vcc_probe.nim.c*"):
+    # The probe's own module, whatever the child named it (`probe_src.nim` when
+    # it was copied into the temp dir, as on Windows): the one that defines
+    # `NimMainModule`.
+    for f in walkFiles(pb.dir / "cache" / "*"):
       if f.endsWith(".nim.c") or f.endsWith(".nim.cpp"):
-        main = mainModuleBody(readFile(f))
+        let c = readFile(f)
+        if "NimMainModule)(void) {" in c: main = mainModuleBody(c)
     require main.len > 0
     # Structural: one builder call per site, and no IR facts built inline.
     let builders = main.count("irBuild__")

@@ -1,4 +1,5 @@
 ## RFC-0005 S8cu. What the suites share: the native check and the decline check.
+import std/compilesettings
 import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
             options, streams, tempfiles]
 import nelli/symex
@@ -720,6 +721,7 @@ when defined(windows):
 proc appTestFile(): string = splitFile(getAppFilename()).name & ".nim"
 
 var probeCounter {.threadvar.}: int
+const hostSearchPaths = querySettingSeq(searchPaths)  ## the host build's `--path`s
 
 const winProbePrologue = when defined(windows): """
 # A first-chance vectored handler: a divide trap, integer overflow trap or
@@ -761,10 +763,19 @@ proc prepareProbe*(who: string; probe: string; flags: openArray[string]
   else:
     src = absolutePath(probe)
   result.exe = result.dir / ("probe" & ExeExt)
+  # The child compiles `probe_src.nim` in a temp dir, so it finds no `nim.cfg`
+  # and nothing resolves `import nelli`. It is given the repo's `src` and every
+  # search path THIS test was compiled with (the dependencies', wherever the
+  # host build got them from), absolute so the child's cwd does not matter.
+  var paths = @[currentSourcePath().parentDir.parentDir / "src"]
+  for q in hostSearchPaths:
+    let a = absolutePath(q)
+    if a notin paths: paths.add a
   result.args = @["--hints:off", "--warnings:off", "--threads:on",
                "--nimcache:" & (result.dir / "cache"), "--out:" & result.exe,
                "--panics:" & (when defined(nimPanics): "on" else: "off"),
                "--mm:" & $buildSemantics.mm]
+  for q in paths: result.args.add "--path:" & q
   when defined(nelliFwrapv): result.args.add "-d:nelliFwrapv"
   when defined(release): result.args.add "-d:release"
   when defined(danger): result.args.add "-d:danger"

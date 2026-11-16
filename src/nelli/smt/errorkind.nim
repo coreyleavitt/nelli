@@ -12,6 +12,9 @@
 ## `pcre_engine`, then `buildprofile`, then `types` (which imports and
 ## re-exports this module, so every name is still reachable where it was).
 
+import ./soundness   ## `DegradeClass` (a leaf that imports nothing)
+export DegradeClass
+
 type
   SymexErrorSeverity* = enum
     ## Phase 15 Z3. Severity contract (cross-cluster invariant 7):
@@ -1061,3 +1064,485 @@ static:
            ord(ubArrayOutOfBounds) + 1 == ord(ubInvalidObjConversion) and
            ord(ubInvalidObjConversion) + 1 == ord(ubInactiveVariantField) and
            ord(high(UbKind)) - ord(low(UbKind)) < 30
+
+type
+  KindInfo* = tuple[class: DegradeClass, severity: SymexErrorSeverity]
+    ## RFC-0016 review D4. Every property of a `SymexErrorKind` that is a pure
+    ## function of the kind, in one row: what its emission sites SUBSTITUTE
+    ## (`class`, RFC-0005 §2.2) and the severity a record of it carries
+    ## (`severity`, cross-cluster invariant 7). A property that depends on the
+    ## emission CONTEXT is not a column: it is a named override at its call
+    ## site (`declineSeverity`, `demotedSeverity`).
+
+# RFC-0005 §2.2 / §3.4. THE exhaustive table -- one row per kind, and an
+# `array[SymexErrorKind, _]` constructor with no filler: a new
+# `SymexErrorKind` member is a compile error here until someone writes its
+# row.
+#
+# RFC-0005 §2.2 / §3.4. THE exhaustive classification -- one word per
+# kind, and deliberately NO `else` arm: a new `SymexErrorKind` member is a
+# compile error here until someone writes its row.
+#
+# RFC-0005 S1 DEFAULT: every kind maps to `dcNoAnswer` (⊤ on both
+# coordinates). That is the conservative choice by construction -- ⊤
+# blocks sxSat on the path and sxUnsat on the run, which is exactly
+# today's "any degrade forces sxUnknown" behaviour, so the carrier and the
+# verdict rule can land as behaviour-preserving refactors (RFC §5
+# sequencing decision 1). An unaudited kind is therefore never wrong in
+# the unsound direction. Slices S4-S6 reclassify one funnel at a time,
+# each flipping only its own pins under its own walker bump.
+#
+# RFC-0005 S4 (walker v142) audited the `allocDegrade` funnel
+# (`runtime.nim`, with its `degradeAlloc` pairing helper and
+# `runtime_heap.nim`'s `heapArmDegrade` wrapper) site by site against
+# §3.1's substitution rule. Rows marked `S4` below carry the verdict of
+# that audit; `dcNoAnswer` on an S4-audited row is the audit's answer,
+# not the unaudited default. The finding: the funnel's name does not
+# decide the class -- most of its arms FORCE a value (a `tabSize == 0`
+# Table/HashSet placeholder, a shared-name 2-valued `svBool` standing in
+# for an arbitrary `itUninterp` type, a concrete BV64 `0` sort filler, a
+# forwarded operand, a vacuous `true` binding) or DROP behaviour (a heap
+# arm that skips the nil-deref fork or the write). Exactly one arm
+# substitutes a fresh unconstrained symbol: `liftHeapValue`'s
+# unsupported-pointee read, split off as `heUnsupportedPointeeRead`.
+#
+# RFC-0005 S5 (walker v143) audited the `degradeStrArm` funnel and the R1
+# placeholder funnel the same way (rows marked `S5`). `degradeStrArm`
+# substitutes a fresh per-read symbol of the result sort, but that alone
+# does not make a kind `dcFreshSymbol`: the declines that raised before
+# lowering their operands DROPPED the operands' raise forks. S5 moved
+# the operand lowering ahead of the `bytes`/`replaceAll`/regex-`replace`/
+# `split` raises and promoted the four kinds whose every site is then
+# fresh and effect-preserving; the parse-time rune decode split off as
+# `seRuneDecodeSymbolic` (a forced `0` / dropped loop). The R1 funnel is
+# NOT fresh (shared placeholder names, dropped `IndexDefect` forks and
+# operands) -- RFC §3.1's table is corrected by its `seNestedSeqUnsupported`
+# row below.
+#
+# RFC-0005 S6a (walker v144) audited the BUDGET family (rows marked
+# `S6a`). `beBudgetExhausted` was one kind at six sites spanning three
+# classes, merged on purpose ("a sibling of the SAME budget family");
+# §3.2 split it: the k-unroll survivor keeps the kind (`dcFabricated`),
+# the frontier prune became `beBudgetExhaustedPrune` (`dcOmitted`, a
+# halt), and the call-depth / variant-constructor bails became
+# `beBudgetExhaustedUnmodelled` (`dcSubstituted`). Every class the family
+# maps to carries `scIncomplete` on the run, so NO budget kind can ever
+# license `sxUnsat`; the slice is verdict-neutral by construction (the
+# payoff is attribution and S10 replay eligibility).
+#
+# RFC-0005 S6b (walker v145) audited `feUnsupportedOp`'s emission sites,
+# the heap/halt sites, `eeUnknownExnType` and every kind still at the
+# default (rows marked `S6b`). `feUnsupportedOp` spanned three classes;
+# §3.2 split it: the majority (a forwarded operand, a vacuous `true`
+# binding, a dropped write / mutation / OOB fork, a stale variant, a
+# statement dropped at parse time, an unregistered callee, and the
+# composite comparisons whose operator the parser resolves BY NAME, so a
+# user overload's raise is dropped) keeps the kind as `dcSubstituted`;
+# the fresh-symbol sites became `feUnsupportedOpHavoc` (`dcFreshSymbol`)
+# and the boundary abort `feUnsupportedOpAborted` (`dcNoAnswer`). Every
+# halt (`discard w.degrade(...)` + no survivor) became `dcOmitted`. The
+# two `dcFreshSymbol` rows are the slice's verdict flips: they no longer
+# carry `scIncomplete` on the run.
+#
+# RFC-0005 S7 (walker v146) audited the closure / HOF declines (rows
+# marked `S7`) -- the precondition for S9 deleting the closure veto. Every
+# value-substituting site now records through `closureDegrade`, which
+# joins its path coordinate onto the consuming path as well as the
+# closure sink the veto read (S9 deleted it): `ceUnsupportedHof` and
+# `ceClosureUnknownCallee` are `dcSubstituted` (the closure is never
+# applied / the stand-in has a fixed name), `ceClosureBodyUncertain` is
+# `dcFreshSymbol` (the call result is fresh per occurrence since S7) and
+# `ceClosureBodyDiverged` is a halt (`dcOmitted`). `ceNotImplemented` and
+# `feExtractionFailed` stay `dcNoAnswer`: the former's sites are all ⊤ by
+# construction; the latter is an extraction / witness sink recorded only
+# on the SAT branch AFTER the verdict, outside `runTaintOf` -- S10's
+# replay gate owns it.
+#
+# STANDING RULE (RFC-0005 §3.2), which no mechanism can check: reusing an
+# EXISTING kind at a NEW emission site asserts that the new site shares
+# that kind's substitution class. If it does not, split the kind
+# (tail-append one sibling for the minority funnel) -- never add a
+# per-site class parameter.
+const kindInfo*: array[SymexErrorKind, KindInfo] = [
+    ekZ3Error: (class: dcNoAnswer, severity: sevError),
+    ekZ3MemoryError: (class: dcNoAnswer, severity: sevError),
+    ekZ3InternalError: (class: dcNoAnswer, severity: sevError),
+    ekZ3SolverError: (class: dcNoAnswer, severity: sevError),
+    feUnsupportedOp: (class: dcSubstituted, severity: sevError),
+    # S6b (split -> feUnsupportedOpHavoc, feUnsupportedOpAborted): the
+    # majority funnel substitutes -- `retBindEq`'s vacuous `true` (also
+    # reached from `applyClosureGround`, where `funcApp` correlates), the
+    # svClosure / svVariant / svMultiVariant `iteSV` merges (a forwarded
+    # operand; `tyOf` is lossy for variants), the dropped `iekSeqSlice` OOB
+    # fork, `iekTableSet` write, `insert`/`pop` mutation and variant
+    # reassignment, the borrow op forwarding its operand, the composite
+    # `==`/`!=`/`<` and `contains` results (fresh, but the parser maps the
+    # operator BY NAME: a user overload's raise is dropped), the multi-leaf
+    # closure return's Bool range sort, the parse-time Class-A sites (typed
+    # zero / dropped statement) and the unregistered-callee arm (fresh
+    # retSym, callee effects dropped).
+    feExtractionFailed: (class: dcNoAnswer, severity: sevError),
+    feConvDomainExcluded: (class: dcNoAnswer, severity: sevError),
+    seUnsupportedStringOp: (class: dcNoAnswer, severity: sevError),
+    # S5 audited, NOT reclassified: `degradeStrArm`'s fresh symbol is fine,
+    # but the kind's sites drop behaviour -- `requireStr` fails in
+    # `iekStrAt`/`iekStrToInt` BEFORE the `IndexDefect`/`ValueError` raise
+    # fork is deposited, the `iekStrUnsupported` catch-all carries ops whose
+    # real counterpart raises (`parseFloat`), `iekStrSubstr`'s bound decline
+    # shares ONE name (`__strSubstrBoundDegrade`) across reads, and the
+    # `strip` parse site forces `""`. ⊤ until a raise-behaviour split.
+    seUnsupportedRegex: (class: dcNoAnswer, severity: sevError),
+    # S5 audited: a MALFORMED pattern raises `RegexError` in reality (`re`
+    # compiles at run time) and the decline drops that raise; `iekStrFindRe`
+    # declines without lowering its receiver (its effects dropped). ⊤.
+    # RFC-0005 S8ay: a pattern PCRE rejects is now the `RegexError` raise
+    # and `find` is lowered; the kind's remaining sites are a pattern whose
+    # validity the reader does not decide (the raise may be dropped) and
+    # the captures overloads (their `matches` write is dropped). Still ⊤.
+    seZ3StringIncomplete: (class: dcFreshSymbol, severity: sevError),
+    # S5 (split -> seRuneDecodeSymbolic): the remaining sites are
+    # `lowerStrArm`'s join/split declines, each converted by `degradeStrArm`
+    # to a fresh per-read symbol of the result sort, AFTER every operand has
+    # been lowered (S5 moved the split receiver/separator lowering ahead of
+    # the raise: a dropped operand raise fork was an under-approximation).
+    seZ3VersionMissing: (class: dcFreshSymbol, severity: sevError),
+    # S5: `strutils.replace` (all-occurrence, RFC-0005 S8c) / regex
+    # `replace` without the Z3 >= 4.15.5 gates --
+    # operands lowered (and the pattern parsed) first, then a fresh per-read
+    # `degradeStrArm` symbol. The op is total in Nim, so nothing is dropped.
+    seBytesSymbolicLength: (class: dcNoAnswer, severity: sevError),
+    seBytesLengthTooLarge: (class: dcNoAnswer, severity: sevError),
+    # RFC-0005 S8c: retired, never emitted -- the `bytes(s)` model they
+    # classified is deleted. The row stays only because `classOf` is total.
+    seByteIndexUnsupported: (class: dcNoAnswer, severity: sevError),
+    seByteIterUnsupported: (class: dcSubstituted, severity: sevError),
+    # S6b: the one site is a parse-time decline of `for c in s` over a
+    # symbolic string -- the loop statement is DROPPED (`mkUnsupported`,
+    # its body's effects never happen): a stale env.
+    seUnsupportedTableValType: (class: dcNoAnswer, severity: sevError),
+    # S4 audited: `allocateSym`'s placeholder FORCES `tabSize == 0`
+    # (dcSubstituted); the param boundary aborts (dcNoAnswer). ⊤.
+    seUnsupportedSetCharInterop: (class: dcNoAnswer, severity: sevError),
+    # S4 audited: `allocateSym`'s placeholder FORCES `setSize == 0`
+    # (dcSubstituted); the param boundary aborts (dcNoAnswer). ⊤.
+    seNestedSeqUnsupported: (class: dcNoAnswer, severity: sevError),
+    # S5 audited, NOT reclassified (RFC §3.1's "R1 placeholder funnel =
+    # fresh symbol" does not survive the audit): `iekSeqLen`'s decline
+    # names every occurrence `__seqLenPlaceholderDecline` (reads correlate),
+    # the `isIndex` decline continues with the destination UNBOUND and no
+    # `IndexDefect` fork, `iekSeqSlice`/`.add`/`.del` return the flagged
+    # receiver without lowering their bound/argument operands, `iteSV`
+    # forwards one operand, the HOF inline arms share fixed names, and the
+    # parse site drops a statement. ⊤.
+    seParseIntPreE: (class: dcNoAnswer, severity: sevError),
+    eeUninterpRefExtraction: (class: dcNoAnswer, severity: sevHint),
+    eeRaiseUnimplemented: (class: dcNoAnswer, severity: sevError),
+    eeTryUnimplemented: (class: dcNoAnswer, severity: sevError),
+    eeRaiseOutsideHandler: (class: dcOmitted, severity: sevError),
+    # S6b: the live site (`isRaise`, a bare `raise` with no in-flight
+    # exception and no handler) is a HALT -- the token is discarded and the
+    # path returns no survivor, where reality raises `ReraiseDefect` (a
+    # caller's handler could catch it): a pure omission. The `runSymex`
+    # boundary arm that also names this kind is dead (nothing raises
+    # `SymexRaiseOutsideHandlerError` since round-6 N37).
+    eeNotInHandler: (class: dcNoAnswer, severity: sevError),
+    eeUnknownExnType: (class: dcSubstituted, severity: sevWarning),
+    # S6b (RFC §3.1's round-2 row): an unknown raised type is matched only
+    # by a bare `except:` -- where reality's subtype match would catch, the
+    # walker skips the named handler (fabricating the continuation past it
+    # and dropping the handler's), and at the SUT boundary its defect-ness
+    # and the `stkRaisedExn` filter are guessed. Behaviour substitution,
+    # recorded at `sevWarning`: the ONE warning `runTaintOf` counts (see its
+    # severity carve-out). `routeRaise` records it through `degrade` and
+    # joins the token onto the path wherever the guess is acted on.
+    geInstantiationCapped: (class: dcSubstituted, severity: sevError),
+    # S6b: the over-cap instantiation is never registered; the walker's
+    # missing-callee arm binds a fresh `retSym` and drops the callee's
+    # var-param / heap writes and raises (its actuals are never lowered).
+    geConceptViolation: (class: dcNoAnswer, severity: sevError),
+    geUnresolvedGeneric: (class: dcNoAnswer, severity: sevError),
+    geDistinctBijectivitySkipped: (class: dcNoAnswer, severity: sevHint),
+    geDistinctBarrier: (class: dcSubstituted, severity: sevError),
+    # S6b: as geInstantiationCapped -- the declined callee key reaches the
+    # same missing-callee arm (fresh retSym, callee effects dropped).
+    ceNotImplemented: (class: dcNoAnswer, severity: sevError),
+    # S7 audited: every site is ⊤ on both coordinates by construction -- the
+    # parse-time closure-iterator `mkUnsupported` marker (the walker's
+    # `isUnsupported` arm), the extraction sink's closure-typed SUT result,
+    # and the `runSymex` boundary abort. None is a value substitution the
+    # veto alone guards: the marker taints its reaching path ⊤ itself.
+    ceUnsupportedCapture: (class: dcNoAnswer, severity: sevError),
+    ceUnsupportedHof: (class: dcSubstituted, severity: sevError),
+    # S7: all four `lowerHofCall` axiom-path declines (symbolic-length
+    # `filter`, capturing / non-int `map`, the `mapArray` map whose function
+    # symbol no axiom constrains, `fold`) stand a value in for a closure that
+    # is NEVER applied -- its raises and captured writes are dropped, so the
+    # stand-in is not a fresh symbol. Recorded through `closureDegrade`, which
+    # joins the ⊤ path coordinate onto the consuming path.
+    ceClosureUnknownCallee: (class: dcSubstituted, severity: sevError),
+    # S7: both sites (unresolved callee in `lowerClosureCall`, unstashed body
+    # in `applyClosureGround`) return a FIXED-name `int64` stand-in whatever
+    # the closure's return type, and the unresolved-callee site returns
+    # before lowering the call's arguments (their raises are dropped).
+    ceInlineBudgetExceeded: (class: dcSubstituted, severity: sevError),
+    # S6a: both sites (`applyClosureGround`'s inline-budget guard and its
+    # no-walk-context guard) return the closure's uninterpreted `funcApp`
+    # WITHOUT descending the body: its captured-variable writes and raises
+    # are dropped (a stale env) and equal arguments correlate where the real
+    # closure need not. Not a fresh symbol -- substituted. Same sites, same
+    # class: no split.
+    heDepthExhausted: (class: dcOmitted, severity: sevError),
+    # S6b: `heapDepthExhausted` is the one emission site; all four callers
+    # (`isDeref` x2, `isDerefWrite` x2) `continue` past the path on a true
+    # return -- a HALT (token discarded, no survivor), a pure omission. Its
+    # `dsHeapDepth` sink is drained into `exnWarnings`, so the run
+    # coordinate `{scIncomplete}` reaches `runTaint`.
+    heUnsafeCast: (class: dcOmitted, severity: sevError),
+    # S6b: recorded at parse time (the `cast[ptr T]`/`addr` binding); the
+    # walker's `isUnsafeCast` arm returns `@[]` -- every path through the
+    # binding is dropped, nothing is bound in its place.
+    hePtrArith: (class: dcNoAnswer, severity: sevError),
+    # RFC-0005 S8c: retired, never emitted -- its producer keyed on a
+    # user-only `inc`/`dec(ptr)` overload. Row kept: `classOf` is total.
+    hePtrFamily: (class: dcNoAnswer, severity: sevHint),
+    heFreshnessCapExceeded: (class: dcNoAnswer, severity: sevHint),
+    heUnsupportedVarRef: (class: dcNoAnswer, severity: sevError),
+    heUnsupportedOwnership: (class: dcNoAnswer, severity: sevError),
+    # S4 audited: `allocateSym`'s `__ownership:` arm substitutes a
+    # `.unalloc` svBool keyed on the allocation's own name (a 2-valued sort
+    # lie, shared across repeat allocations: dcSubstituted); the param
+    # boundary (`raiseParamAllocIssue`) aborts the run (dcNoAnswer). ⊤ both.
+    heUnresolvedRef: (class: dcNoAnswer, severity: sevError),
+    # S4 audited (split -> heUnsupportedPointeeRead): the remaining sites
+    # substitute, they do not havoc -- `walkHeapArm`'s non-ref/ptr-SymVal
+    # deref reads bind a placeholder WITHOUT the NilAccessDefect fork (a
+    # dropped raise branch), its deref writes DROP the write (stale heap),
+    # and `runSymex`'s `SymexRefUnresolvedError` boundary arm aborts the run.
+    geVtableDispatch: (class: dcNoAnswer, severity: sevError),
+    ceClosureBodyUncertain: (class: dcFreshSymbol, severity: sevError),
+    # S7: the tainted body arm is dropped from the ground axioms, so the
+    # call's result -- a fresh constant PER OCCURRENCE since S7 (was a
+    # function application shared by every call with equal arguments) -- is
+    # free under that arm and fully defined under every other. The arm's
+    # operands were lowered before descent, its raises are routed, its heap
+    # and defect-survivor facts still merge: nothing is dropped. The arm's
+    # own degrade taint joins the calling path through the descent join.
+    weInternalWalkerFault: (class: dcNoAnswer, severity: sevError),
+    # S4 audited: a walker bug is never an approximation (§3.1), including
+    # its two `degradeAlloc` seq-element sites. S5: likewise its R1
+    # placeholder-funnel sites (`placeholderReadDeclineKind`).
+    beBudgetExhausted: (class: dcFabricated, severity: sevError),
+    # S6a (split -> beBudgetExhaustedPrune, beBudgetExhaustedUnmodelled):
+    # the remaining sites are the `maxLoopUnwind` k-unroll exhaustion in
+    # BOTH walk modes (`isWhile`'s `wmExplore` arm, `walkWhileFollowConcrete`).
+    # Each still-active path is forked onto the POST-loop continuation with
+    # the guard still satisfiable on its pc -- a continuation reality never
+    # takes there (⊤ on the path) -- and iterations past the bound are never
+    # walked (`{scIncomplete}` on the run). The RFC's flagship dcFabricated.
+    feUnsupportedExprKind: (class: dcNoAnswer, severity: sevError),
+    # S4 audited, NOT reclassified: one `degradeAlloc` site (`iekField` on an
+    # unsupported receiver) plus the Class-A `mkUnsupported` parse sites,
+    # whose typed-zero dummy is §0.2's flagship dcSubstituted example.
+    feUnsupportedParamType: (class: dcNoAnswer, severity: sevError),
+    # S4 audited: signature-scoped (§2.5 item 2) -- dcNoAnswer by the RFC;
+    # the in-walk `allocateSym` arm is the same 2-valued `.unalloc` sort lie.
+    feUnsupportedWitnessType: (class: dcNoAnswer, severity: sevError),
+    # S4 audited: as feUnsupportedParamType (signature-scoped, §2.5 item 2).
+    heNewFieldZeroUnsupported: (class: dcFreshSymbol, severity: sevError),
+    # S6b: `isNew`'s zero-write is SKIPPED for a field with no clean zero
+    # encoding (seq/table/set/array/variant/distinct/uninterp). The field's
+    # cell is then `heap[newRef]` of that field's heap array at the fresh,
+    # freshness-asserted `newRef` -- a read of an index no store has
+    # touched, i.e. unconstrained; reality's zero value is one of its
+    # values. Nothing else is dropped (the other fields are still written,
+    # the path is not forked). `dcFreshSymbol`.
+    seUnsupportedTableKeyType: (class: dcNoAnswer, severity: sevError),
+    # S4 audited: `allocateSym`'s placeholder FORCES `tabSize == 0`
+    # (dcSubstituted); the param boundary aborts (dcNoAnswer). ⊤.
+    seUnsupportedCompoundSortLeaf: (class: dcSubstituted, severity: sevError),
+    # S4: the ONE site (`rawAnyAstOf`) returns a concrete BV64 `0` as the
+    # compound value's ast, and heap stores / closure args consume it as a
+    # VALUE -- a forced value, not a havoc. Same coordinates as the default.
+    beBudgetExhaustedAssumedBound: (class: dcFabricated, severity: sevError),
+    # S6a: the `isWhile` k-unroll site's `wHasAssumedBound` branch -- the
+    # identical survivor fork as `beBudgetExhausted` (one site, one shape).
+    feOpaqueCallUnmodelled: (class: dcSubstituted, severity: sevError),
+    # S6b (RFC §3.1's round-2 correction): the opaque call's result is a
+    # fresh havoc, but the callee's mutations and raises are DROPPED.
+    feEnumOrdinalUnresolved: (class: dcSubstituted, severity: sevError),
+    # S6b: the parser replaces the unresolved enum constant with the literal
+    # `0` -- a forced value.
+    feTransparentArgNotInert: (class: dcNoAnswer, severity: sevError),
+    feTransparentResultUsed: (class: dcNoAnswer, severity: sevError),
+    # RFC-0005 S8 (§13.3, i3): retired, never emitted -- the report rides
+    # the verdict-neutral `AnnotationViolation` channel. The row stays only
+    # because `classOf` is total over the (ordinal-stable) enum.
+    feGlobalReadUnmodelled: (class: dcSubstituted, severity: sevError),
+    # S6b: the read returns `__globalReadHavoc_<name>` -- ONE name per
+    # global, so two reads correlate where a write between them makes them
+    # differ in reality -- at a sort guessed as `tInt(64)` when no prototype
+    # is in scope. Correlated / mis-sorted, not fresh.
+    seVariantFieldOnDeclinedCtor: (class: dcOmitted, severity: sevError),
+    # S6b: `isVariantField` on a receiver whose construction already
+    # declined is a HALT (`discard w.degrade(...)` + `continue`).
+    # RFC-0005 S1b: the minted kinds (classified by S6b).
+    # RFC-0005 S8cu: the routine's unchecked behaviour is not walked, and the
+    # walk that follows stands for the checked one.
+    feUnsupportedStmtKind: (class: dcSubstituted, severity: sevError),
+    # S6b: every site is a parse-time Class-B `mkUnsupported` -- the
+    # statement is dropped (the walker's `isUnsupported` arm forks the path
+    # on unchanged): a stale env.
+    weRecursionCycleCut: (class: dcSubstituted, severity: sevError),
+    # S6b: the cut binds a fresh `_cyc` retSym but does not walk the callee:
+    # its var-param / heap writes and raises are dropped.
+    eeHandlerReraiseUnmodelled: (class: dcOmitted, severity: sevError),
+    # S6b: a HALT -- the bare re-raise inside a handler with no in-flight
+    # exception returns no survivor (token discarded).
+    ceClosureBodyDiverged: (class: dcOmitted, severity: sevError),
+    # S7: a HALT. Since S7 the caller continuation past a body with no
+    # value-bearing exit is infeasible (the exit-coverage fact is `false`),
+    # and the body's raises are routed to the caller, so nothing survives
+    # past the call to carry a coordinate; the token is discarded. The run
+    # keeps `{scIncomplete}` for any body path a budget or halt dropped.
+    weBreakOutsideLoop: (class: dcOmitted, severity: sevError),
+    # S6b: both sites (`isBreak` / `isContinue` outside a loop) are HALTS --
+    # the token is discarded and the walk returns `@[]`.
+    beSolverUndef: (class: dcNoAnswer, severity: sevError),
+    # RFC-0005 S4: the one fresh-symbol arm of the `allocDegrade` funnel.
+    heUnsupportedPointeeRead: (class: dcFreshSymbol, severity: sevError),
+    # RFC-0005 S5: the parse-time rune-decode split of seZ3StringIncomplete.
+    seRuneDecodeSymbolic: (class: dcSubstituted, severity: sevError),
+    # `runeLen(s)` is replaced by the literal `0` (a forced value) and the
+    # `for r in s.runes` statement is dropped (a stale env) -- both substitute.
+    # RFC-0005 S6a: the two minority funnels split off beBudgetExhausted.
+    beBudgetExhaustedPrune: (class: dcOmitted, severity: sevError),
+    # `walkBlock`'s `maxFrontierSize` eviction drops paths and forks none:
+    # a pure under-approximation. Its `{}` path coordinate is sound only
+    # because the site is a HALT (the token is discarded -- pinned).
+    beBudgetExhaustedUnmodelled: (class: dcSubstituted, severity: sevError),
+    # the `maxCallDepth` bail (fresh havoc retSym, callee var-param/heap
+    # writes and raises dropped, actuals never lowered) and the two
+    # `isVariantConstructSym` budgets (destination unbound, operands never
+    # lowered): stale env + dropped raise forks.
+    # RFC-0005 S6b: the two minority funnels split off feUnsupportedOp.
+    feUnsupportedOpHavoc: (class: dcFreshSymbol, severity: sevError),
+    # Fresh per evaluation (`degradeAlloc`'s `freshDegradeName` counter, a
+    # uniquified `rawConstOf`, or a `synthZ3`-numbered `retSym`), its init
+    # facts discarded or type-only, every operand lowered, nothing forked
+    # away and no effect dropped (see the enum member's doc for the sites).
+    feUnsupportedOpAborted: (class: dcNoAnswer, severity: sevError),
+    # The §3.3 boundary abort: the walk never finished, so there is no
+    # approximation in either direction -- ⊤, never "promoted" (§3.3).
+    # RFC-0005 S10.
+    seParseIntLaxSyntax: (class: dcFreshSymbol, severity: sevError),
+    # The lax half of `parseInt`: on every `_`-bearing string the model
+    # both raises and continues on a fresh value, reality does one of the
+    # two with one value -- both forks over-approximate and drop nothing
+    # (the exact half is forked clean alongside them).
+    feReplayTimedOut: (class: dcFreshSymbol, severity: sevHint),
+    # RFC-0005 S8be. As `feReplayRefuted`: verdict-time, never in
+    # `runTaint`, and only a `dcFreshSymbol`-only path is replayed.
+    feReplayCrashed: (class: dcFreshSymbol, severity: sevHint),
+    feReplayDeclined: (class: dcFreshSymbol, severity: sevHint),
+    # RFC-0005 S8ct. As `feReplayRefuted`.
+    # RFC-0005 S8g.
+    feReplayRefuted: (class: dcFreshSymbol, severity: sevHint),
+    # A verdict-time diagnostic, never drained into `runTaint` (see the
+    # enum member): the refuted witness came from a `dcFreshSymbol`-only
+    # path, which is the only taint replay runs on.
+    ceCaptureByRefUnmodelled: (class: dcSubstituted, severity: sevError),
+    # RFC-0005 S9: the body reads the construction-time snapshot of a capture
+    # that may have been written since (a forced, possibly stale value), or
+    # its write to a capture is dropped at the call's exit.
+    feConvFloatToIntUndefined: (class: dcFreshSymbol, severity: sevError),
+    # The out-of-range float -> int continuation: a fresh value of the
+    # target type stands for a platform-defined cast result, every operand
+    # is lowered and the raise drains run on that path too -- nothing is
+    # dropped (the in-range continuation is forked clean beside it).
+    # RFC-0005 S8l.
+    eeFinallyReturnOnRaise: (class: dcOmitted, severity: sevError),
+    # A HALT: the path whose `finally` returns during a raised exit is
+    # dropped (token discarded), because c re-raises and cpp returns.
+    # RFC-0005 S8m.
+    eeFinallyJumpOnRaise: (class: dcOmitted, severity: sevError),
+    feGlobalHavoc: (class: dcFreshSymbol, severity: sevError),
+    # RFC-0005 S8as: a fresh value of the global's type (the entry value, or
+    # after an opaque call that may write it); its operands are none, and
+    # nothing is forked or dropped.
+    feOpaqueEffectHavoc: (class: dcFreshSymbol, severity: sevError),
+    # RFC-0005 S8ax: fresh heap contents after an opaque call, a raise the
+    # call may make, or the return past one: each a superset, nothing
+    # dropped.
+    feUncheckedDiscBytes: (class: dcFreshSymbol, severity: sevError),
+    # RFC-0005 S8cp: a fresh value of the arm field's type, with no range fact,
+    # for bytes Nim leaves or zeroes; nothing is forked away or dropped.
+    feLocalPragma: (class: dcSubstituted, severity: sevError),
+    # RFC-0016 W1-b: the pragma's effect is replaced by none.
+    feEvalOrderUnmodelled: (class: dcNoAnswer, severity: sevError),
+    # RFC-0005 S8ax: a decline; the conservative default.
+    # A HALT: the path whose `break` / `continue` leaves a `finally` during a
+    # raised exit is dropped (token discarded): c re-raises, cpp does not.
+    # RFC-0005 S8bc.
+    feTableIterOrder: (class: dcFreshSymbol, severity: sevError),
+    # A free enumeration of the present keys: every real iteration order is
+    # a model, nothing is forked away or dropped, and a candidate is
+    # replay-gated (see the enum member).
+    seRecursiveValueDepth: (class: dcNoAnswer, severity: sevError),
+    # A scoped decline, as `seNestedSeqUnsupported` (the read of a seq
+    # past the depth bound is not modelled; see the enum member).
+    feGlobalRouteUnproved: (class: dcSubstituted, severity: sevError),
+    # RFC-0005 S8cs: a possibly stale value: modelled neither superset nor
+    # subset of the real one, on the path and across the run.
+    feCheckOption: (class: dcSubstituted, severity: sevError),
+    feOverflowCheckOption: (class: dcSubstituted, severity: sevError),
+    # RFC-0005 S8cu: what runs past a nil dereference in a setjmp build is not
+    # known; the path stops, so nothing is substituted for it.
+    heNilDerefMayBeCaught: (class: dcNoAnswer, severity: sevError),
+    feFloatWidth: (class: dcNoAnswer, severity: sevError),
+    # RFC-0016 W1-e: a parse-site decline with a typed-zero dummy, the class
+    # of `feUnsupportedExprKind`.
+    ubUnsignedDivZero: (class: dcOmitted, severity: sevError),
+    ubIntMinModMinusOne: (class: dcOmitted, severity: sevError),
+    ubSignedOverflow: (class: dcOmitted, severity: sevError),
+    ubIndeterminateRead: (class: dcOmitted, severity: sevError),
+    ubSignedDivZero: (class: dcOmitted, severity: sevError),
+    ubFloatToIntRange: (class: dcOmitted, severity: sevError),
+    ubTailUnverified: (class: dcOmitted, severity: sevError),
+    ubArrayOutOfBounds: (class: dcOmitted, severity: sevError),
+    ubInvalidObjConversion: (class: dcOmitted, severity: sevError),
+    ubInactiveVariantField: (class: dcOmitted, severity: sevError),
+    # RFC-0016 W1-d1a (section 9.1): `haltUndefined` ends the path with no
+    # successor, a pure omission. K10b: `ubTailUnverified` rides the winner's
+    # `witnessUndefined` only (the second walk's unverified tail); as a
+    # recorded kind it is the same omission.
+    feHostUnadmitted: (class: dcNoAnswer, severity: sevError),
+    # RFC-0016 K5a: the run never started; there is no modelled program.
+    feUnadmitted: (class: dcOmitted, severity: sevError),
+    feDefectExcluded: (class: dcOmitted, severity: sevError),
+    # RFC-0016 K7b: `halted` drops the path, so nothing survives the cell
+    # to carry a witness; a pure omission (ADM-1 had `feUnadmitted` as
+    # `dcNoAnswer` until then). `feDefectExcluded` is W-16: the excluded
+    # raise ends its path.
+  ]
+
+func classOf*(k: SymexErrorKind): DegradeClass =
+  ## What an emission site of `k` substitutes (`kindInfo[k].class`).
+  kindInfo[k].class
+
+func severity*(k: SymexErrorKind): SymexErrorSeverity =
+  ## The severity a record of `k` carries (`kindInfo[k].severity`). Only
+  ## `eeUnknownExnType` is a `sevWarning` and only the replay, freshness-cap,
+  ## pointer-family, bijectivity-skipped and uninterpreted-ref-extraction
+  ## kinds are `sevHint`; every other kind halts (`sevError`).
+  kindInfo[k].severity
+
+const declineSeverity*: SymexErrorSeverity = sevError
+  ## A NAMED OVERRIDE of `severity(kind)`. A parse-time decline halts its
+  ## path whatever the kind: `eeUnknownExnType` is a `sevWarning` where the
+  ## walker records an unmodelled exception type and continues, but the
+  ## parser's `declineMarker(eeUnknownExnType, ..)` ends the construct, so the
+  ## parse record is `sevError`.
+
+const demotedSeverity*: SymexErrorSeverity = sevHint
+  ## A NAMED OVERRIDE of `severity(kind)`. A parse-time decline no walked path
+  ## reaches is demoted to a diagnostic (RFC-0005 S9).

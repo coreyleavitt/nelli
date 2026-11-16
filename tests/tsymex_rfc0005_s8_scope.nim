@@ -539,7 +539,24 @@ suite "RFC-0005 S8 (e) -- structural totality pin":
     var unplacedByDesign: seq[string]
     for f in srcFiles():
       for (r, t) in constructions(readFile(f), "SymexErrorInfo"):
-        let decline = "sevError" in t or "severity: severity" in t
+        # D4: severity is the kind's table row. A literal kind is a decline
+        # iff its row is `sevError`; a variable kind is one, except in
+        # `tagged`, the replay-hint funnel (every `feReplay*` row is a hint).
+        var decline = "sevError" in t
+        if "severity: severity(" in t:
+          let i = t.find("kind:")
+          var j = i + 5
+          while j < t.len and t[j] == ' ': inc j
+          var nm = ""
+          while j < t.len and (t[j].isAlphaNumeric or t[j] in {'_', '.'}):
+            nm.add t[j]
+            inc j
+          var lit = false
+          for k in SymexErrorKind:
+            if $k == nm:
+              lit = true
+              decline = severity(k) == sevError
+          if not lit: decline = r != "tagged"
         if not decline: continue
         inc admitted
         checkpoint(f.extractFilename & " " & r & ": " & t.replace("\n", " "))

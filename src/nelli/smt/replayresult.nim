@@ -153,7 +153,7 @@ func hintKind*(o: ReplayOutcome): SymexErrorKind =
 
 func tagged(kind: SymexErrorKind; msg: string): SymexErrorInfo =
   ## A replay hint, its text ending with the kind's own name.
-  SymexErrorInfo(kind: kind, severity: sevHint,
+  SymexErrorInfo(kind: kind, severity: severity(kind),
                  msg: msg & " (" & $kind & ")")
 
 func onInput(input: string): string =

@@ -635,11 +635,6 @@ const renderAsChoicesVersion* = "12"
   ##   heap's initial array, not an opaque call's havoc epoch
   ##   (`heap_<k>@ep<n>`), so the tail walk no longer fixes a callee's effect
   ##   to the explore model's value.
-  ## - RFC-0016 CR-4 (354->357, the version reserved for the slice): a
-  ##   routine `{.noinit.}` leaves `result` unwritten (a read before a write
-  ##   is `ubIndeterminateRead`, H5); routine `nodestroy`, `codegenDecl`,
-  ##   `constructor`, `asmNoStackFrame`, `emit`, `varargs` and
-  ##   `importCompilerProc` decline.
   ## - RFC-0016 CR3 (354->356; 355 is another slice's): H7, `setLenUninit`
   ##   (`SetLengthSeqUninit`) is a may-write magic, so a `lent` loop over a
   ##   seq the body shrinks with it declines where the walk had kept the
@@ -648,12 +643,20 @@ const renderAsChoicesVersion* = "12"
   ##   `var` formal and a same-type conversion are re-read on every
   ##   iteration, `s[k]` through its address (declined when the body may
   ##   move that address), anything else copied once.
+  ## - RFC-0016 CR-4 (354->357, the version reserved for the slice): a
+  ##   routine `{.noinit.}` leaves `result` unwritten (a read before a write
+  ##   is `ubIndeterminateRead`, H5); routine `nodestroy`, `codegenDecl`,
+  ##   `constructor`, `asmNoStackFrame`, `emit`, `varargs` and
+  ##   `importCompilerProc` decline.
   ## - RFC-0016 0.10.0 review H1 (354->358, the slice's reserved number):
   ##   closures sharing one environment share it on the re-exec replay wire
   ##   (`replaywire.putEnv`/`getEnv` intern environments with the `ref`
   ##   cells). The wire wrote a copy per closure, and a re-executed replay
   ##   confirmed a trusted `sxSat` a forked one refutes. A cached witness
   ##   carries the replay's confirmation in its soundness, so the key moves.
+  ## - RFC-0016 0.10.0 review integration (int8): the four fix slices above
+  ##   each bumped from 354 to a reserved number (355 to 358), so the merged
+  ##   walker is 358 and every slice's version-floor pin holds against it.
 
 const symexWalkerVersion* = "358"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

@@ -20881,6 +20881,187 @@ proc seqIterLenChanged(ctx: ParseCtx; n, c: NimNode; iter: string): IRStmt =
               "which is not modelled (feUnsupportedOp)"),
       iter & " over a seq whose length changed (feUnsupportedOp)")
 
+type
+  BoundRead = enum
+    ## RFC-0016 CR3 H4. How Nim's inliner hands a `..` / `..<` / `countup` /
+    ## `countdown` argument to the iterator's formal (`transf.putArgInto`,
+    ## Nim 2.2.10, for a formal that is not `var`, `lent` or `openArray`).
+    brDirect     ## `paDirectMapping`: substituted, read on every iteration
+    brOnce       ## `paFastAsgn`: copied to a temporary before the loop
+    brIndirect   ## `paViaIndirection`: its address is taken once, and the
+                 ## location is read on every iteration
+    brUndecided  ## a conversion whose type equality is not decided here
+  BoundAction = enum
+    baReread, baOnce, baDecline
+
+const boundPlainKinds = {ntyBool, ntyChar, ntyInt, ntyInt8, ntyInt16, ntyInt32,
+  ntyInt64, ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64}
+
+proc boundRangeBase(e: NimNode): NimTypeKind =
+  ## RFC-0016 CR3 H4. The base type kind of `e`'s subrange type
+  ## (`range[lo .. hi]`), `ntyNone` when it is not read.
+  let ti =
+    try: e.getTypeImpl
+    except CatchableError: nil
+  if ti != nil and ti.kind == nnkBracketExpr and ti.len >= 2 and
+     ti[1].kind == nnkInfix and ti[1].len == 3:
+    let k = ti[1][1].typeKind
+    if k in boundPlainKinds: return k
+  ntyNone
+
+proc boundRead(arg: NimNode): BoundRead =
+  ## RFC-0016 CR3 H4. `putArgInto`, case by case: a leaf is substituted; a
+  ## field, a dereference and a `var` formal's hidden dereference take their
+  ## operand's answer; a conversion between types equal up to range and
+  ## distinctness takes its operand's, any other is copied; `s[k]` is bound
+  ## through its address; anything else is copied. `nnkCheckedFieldExpr` (a
+  ## variant field) is not among the passed-through kinds: copied.
+  case arg.kind
+  of nnkNone, nnkEmpty, nnkIdent, nnkSym, nnkType, nnkCharLit .. nnkNilLit:
+    brDirect
+  of nnkDotExpr, nnkDerefExpr, nnkHiddenDeref:
+    if arg.len == 0: brOnce else: boundRead(arg[0])
+  of nnkAddr, nnkHiddenAddr:
+    if arg.len == 0: return brOnce
+    let r = boundRead(arg[0])
+    if r == brIndirect: brOnce else: r
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+    # `transformConv` keeps a conversion that needs no range check, and
+    # `putArgInto` passes it through when its types are equal up to range
+    # and distinctness (`compareTypes(dcEqIgnoreDistinct,
+    # IgnoreRangeShallow)`); a checked one is `nkChckRange`, copied.
+    if arg.len == 0: return brOnce
+    let dk = arg.typeKind
+    let sk = arg[^1].typeKind
+    let sb = if sk == ntyRange: boundRangeBase(arg[^1]) else: sk
+    if dk in boundPlainKinds and sb == dk:
+      boundRead(arg[^1])  # the destination holds every source value
+    elif dk == ntyEnum and sk == ntyEnum:
+      if sameType(arg.getTypeInst, arg[^1].getTypeInst): boundRead(arg[^1])
+      else: brOnce
+    elif dk in boundPlainKinds and sb in boundPlainKinds + {ntyEnum}:
+      brOnce              # different types: copied
+    else:
+      brUndecided         # a range destination, a distinct type, an unread base
+  of nnkCurly, nnkBracket:
+    for c in arg:
+      if boundRead(c) != brDirect: return brOnce
+    brDirect
+  of nnkBracketExpr: brIndirect
+  else: brOnce
+
+proc boundChainHasDeref(n: NimNode): bool =
+  ## RFC-0016 CR3 H4. Some dereference on `n`'s lvalue chain: the location is
+  ## behind a pointer, a `ref` or a `var` result, which outlives the call.
+  var t = n
+  while true:
+    case t.kind
+    of nnkDerefExpr, nnkHiddenDeref: return true
+    of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenStdConv,
+       nnkHiddenSubConv, nnkConv:
+      if t.len == 0: return false
+      t = if t.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv}: t[^1]
+          else: t[0]
+    else: return false
+
+proc boundAddressStable(n, body: NimNode): bool =
+  ## RFC-0016 CR3 H4. The location `n` names is the one Nim took the address
+  ## of before the loop, every time the body has run: its chain is fields,
+  ## `array` elements, a `var` formal's indirection and a local seq or
+  ## string the body cannot resize, from a variable, and every index is a
+  ## literal or a variable the body does not write.
+  proc stableIndex(i: NimNode): bool =
+    var i = i
+    while i.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and i.len > 0:
+      i = i[^1]
+    if isVarIndirection(i): i = i[0]
+    case i.kind
+    of nnkCharLit .. nnkUInt64Lit: true
+    of nnkSym: mayWriteRoot(body, i, @[]).len == 0
+    else: false
+  var t = n
+  while true:
+    case t.kind
+    of nnkSym: return true
+    of nnkDotExpr:
+      if t.len < 2 or t[0].typeKind notin {ntyObject, ntyTuple}: return false
+      t = t[0]
+    of nnkHiddenDeref:
+      if not isVarIndirection(t): return false
+      t = t[0]
+    of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0 or boundRead(t) == brUndecided: return false
+      t = t[^1]
+    of nnkBracketExpr:
+      if t.len != 2 or not stableIndex(t[1]): return false
+      case t[0].typeKind
+      of ntyArray: discard
+      of ntySequence, ntyString:
+        let s = t[0]
+        if s.kind != nnkSym or symKind(s) != nskVar or
+           rootReachedByPointer(s, @[]) or mayResizeSeq(body, s):
+          return false
+      else: return false
+      t = t[0]
+    else: return false
+
+proc boundAction(bound, body: NimNode): tuple[act: BoundAction, why: string] =
+  ## RFC-0016 CR3 H4. How the `for` arm reads `bound`: as Nim does where
+  ## `boundRead` decides it; where it does not (an address, an undecided
+  ## conversion), copied once when the body cannot write the location (both
+  ## readings agree), re-read when the address is stable across the body,
+  ## and declined otherwise.
+  let r = boundRead(bound)
+  case r
+  of brDirect: return (baReread, "")
+  of brOnce: return (baOnce, "")
+  of brIndirect, brUndecided: discard
+  var steps: seq[NimNode]
+  let root = lvalueRoot(bound, steps)
+  if root == nil or root.kind != nnkSym:
+    # rooted at a call's result: its temporary is out of the body's reach
+    # unless a pointer on the chain leads elsewhere.
+    if boundChainHasDeref(bound):
+      return (baDecline, "it is reached through a pointer the loop holds")
+    return (baOnce, "")
+  let w = mayWriteRoot(body, root, steps)
+  if w.len == 0: return (baOnce, "")
+  if r == brIndirect and boundAddressStable(bound, body):
+    return (baReread, "")
+  (baDecline, w)
+
+proc forBound(ctx: ParseCtx; n, bound, bodyNode: NimNode; intTy: IRType;
+              pre: var seq[IRStmt]; tag: string):
+    tuple[decline: IRStmt, hi: IRExpr, hiPre: seq[IRStmt]] =
+  ## RFC-0016 CR3 H4. The loop bound of a `..` / `..<` / `countup` /
+  ## `countdown` `for`, read as `boundAction` says: copied to a `let` in
+  ## `pre`, before the loop; or an expression to read before each test, with
+  ## `hiPre` the statements to run before each read; or the decline.
+  let (act, why) = boundAction(bound, bodyNode)
+  case act
+  of baDecline:
+    result.decline = ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "the bound `" & bound.repr & "` of this `for` is bound to " &
+              "the iterator through its address, taken once, and read on " &
+              "every iteration (Nim's inliner, `transf.putArgInto`); the " &
+              "body may move that location (" & why & "), which is not " &
+              "modelled (feUnsupportedOp)"),
+      "a `for` bound read through an address the body may move")
+  of baOnce:
+    let name = freshSynth(ctx, tag)
+    pre.add mkLet(name, intTy, parseExpr(bound, pre, ctx))
+    result.hi = mkVar(name)
+  of baReread:
+    result.hi = parseExpr(bound, result.hiPre, ctx)
+
+proc boundedWhile(cond: IRExpr; hiPre, inner: seq[IRStmt]): IRStmt =
+  ## RFC-0016 CR3 H4. `while cond: inner`, where reading `cond` first runs
+  ## `hiPre` (a re-read bound's own statements): then the test is the head of
+  ## the body.
+  if hiPre.len == 0: return mkWhile(cond, mkBlock(inner))
+  mkWhile(mkBoolLit(true), mkBlock(hiPre &
+    @[mkIf(@[mkBranch(mkUnop(uNot, cond), mkBreak())])] & inner))
+
 proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bu. `for x in mitems(c)` / `for i, x in mpairs(c)` over a
   ## seq or an array. Nim yields each element by address (`var T`), and its
@@ -21231,17 +21412,17 @@ proc parseStmtInner(n: NimNode,
       let intTy = if unsignedCount: classifyType(iterVar).ty
                   else: tInt(64, signed = true)
       let ivName = freshSynth(ctx, "iv")
-      preamble3.add mkLet(ivName, intTy, parseExpr(iterExpr[1], preamble3, ctx))
-      let hiIR = parseExpr(iterExpr[2], preamble3, ctx)
-      # `a`, `b` and `step` are evaluated in order, before the loop.
-      # Nim's inliner substitutes a symbol argument for the parameter (the
-      # bound is read every iteration, so a body that assigns it moves it) and
-      # binds any other expression to a temporary, once.
-      var hiRead = hiIR
-      if iterExpr[2].kind != nnkSym:
-        let hiName = freshSynth(ctx, "cuhi")
-        preamble3.add mkLet(hiName, intTy, hiIR)
-        hiRead = mkVar(hiName)
+      let loIR = parseExpr(iterExpr[1], preamble3, ctx)
+      # `a`, `b` and `step` are evaluated in order, before the loop, and
+      # `var res = a` reads `a` after them.
+      # RFC-0016 CR3 H4: Nim's inliner substitutes a symbol, a field path, a
+      # `var` formal and a same-type conversion for the parameter (read on
+      # every iteration, so a body that assigns it moves it), binds `s[k]`
+      # through its address, and copies anything else once (`forBound`).
+      let hb = forBound(ctx, n, iterExpr[2], bodyNode, intTy, preamble3, "cuhi")
+      if hb.decline != nil: return hb.decline
+      preamble3.add mkLet(ivName, intTy, loIR)
+      let hiRead = hb.hi
       var stepIR = mkIntLit(1)
       if iterExpr.len == 4:
         var lit = iterExpr[3]
@@ -21267,19 +21448,22 @@ proc parseStmtInner(n: NimNode,
       var allStmts = preamble3
       if down and iterVar.typeKind in {ntyUInt, ntyUInt64}:
         # `if res == b: break` before `dec(res, step)`: no wrap at `b == 0`.
-        let stopAtB = mkIf(@[mkBranch(mkBinop(bEq, mkVar(ivName), hiRead),
+        # A re-read `b` is read again here.
+        var stopPre: seq[IRStmt]
+        let hiStop = if hb.hiPre.len == 0: hiRead
+                     else: parseExpr(iterExpr[2], stopPre, ctx)
+        let stopAtB = mkIf(@[mkBranch(mkBinop(bEq, mkVar(ivName), hiStop),
                                       mkBreak())])
-        allStmts.add mkWhile(cond, mkBlock(@[bindIter, body, stopAtB, stepIv]))
+        allStmts.add boundedWhile(cond, hb.hiPre,
+                                  @[bindIter, body] & stopPre & @[stopAtB, stepIv])
       else:
-        allStmts.add mkWhile(cond, mkBlock(@[bindIter, body, stepIv]))
+        allStmts.add boundedWhile(cond, hb.hiPre, @[bindIter, body, stepIv])
       mkBlock(allStmts)
     elif iterExpr.kind == nnkInfix and iterExpr[0].kind == nnkSym and
        isBuiltinNamed(iterExpr[0], [".." , "..<"]):
       let inclusive = iterExpr[0].strVal == ".."
       var preamble3: seq[IRStmt]
       let loIR = parseExpr(iterExpr[1], preamble3, ctx)
-      var hiIR = parseExpr(iterExpr[2], preamble3, ctx)
-      let body = parseLoopBody(bodyNode, ctx).body   # RFC-0005 S8m
       # Build: { var __iv = lo; while __iv <op> hi: { let i = __iv; body; __iv = __iv + 1 } }
       let ivName = freshSynth(ctx, "iv")
       # RFC-0016 W3-z P17. system's `..` for `int32`, `uint`, `uint32` and
@@ -21290,26 +21474,24 @@ proc parseStmtInner(n: NimNode,
           classifyType(iterVar).ty
         else: tInt(64, signed = true)
       let initStmt = mkLet(ivName, intTy, loIR)
-      # RFC-0016 W3-z P17. `..` is an inlined iterator: a symbol bound is the
-      # parameter itself (read each iteration, so a body that assigns it moves
-      # it), any other bound is bound to a temporary once. Re-reading
-      # `0 ..< s.len` or `0 .. m + 0` was a trusted false sxUnsat.
-      if iterExpr[2].kind != nnkSym:
-        let hiName = freshSynth(ctx, "ddhi")
-        preamble3.add initStmt
-        preamble3.add mkLet(hiName, intTy, hiIR)
-        hiIR = mkVar(hiName)
+      # RFC-0016 W3-z P17. `..` is an inlined iterator: a bound copied to a
+      # temporary is read once (re-reading `0 ..< s.len` or `0 .. m + 0` was
+      # a trusted false sxUnsat). RFC-0016 CR3 H4: a bound substituted for
+      # the parameter (a symbol, a field path, a `var` formal, a same-type
+      # conversion) or bound through its address (`s[k]`) is read on every
+      # iteration (copying `0 ..< o.n` was a trusted wrong trip count).
+      let hb = forBound(ctx, n, iterExpr[2], bodyNode, intTy, preamble3, "ddhi")
+      if hb.decline != nil: return hb.decline
+      preamble3.add initStmt
+      let body = parseLoopBody(bodyNode, ctx).body   # RFC-0005 S8m
       let cmpOp = if inclusive: bLe else: bLt
-      let cond = mkBinop(cmpOp, mkVar(ivName), hiIR)
+      let cond = mkBinop(cmpOp, mkVar(ivName), hb.hi)
       # Wrap body with: let i = __iv; <body>; __iv = __iv + 1
       let bindIter = smallCounterBind(iterVar, iterName, ivName, intTy)
       let incIv = mkAssign(ivName,
         mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
-      let loopBody = mkBlock(@[bindIter, body, incIv])
-      let whileSt = mkWhile(cond, loopBody)
       var allStmts = preamble3
-      if iterExpr[2].kind == nnkSym: allStmts.add initStmt
-      allStmts.add whileSt
+      allStmts.add boundedWhile(cond, hb.hiPre, @[bindIter, body, incIv])
       mkBlock(allStmts)
     elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
          iterExpr[0].kind == nnkSym and

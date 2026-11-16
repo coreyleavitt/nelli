@@ -1765,6 +1765,9 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_p15_countup",
             "tsymex_0016_w3z_p17_dotdot",
             "tsymex_0016_w3z_p18_signed_counter",
+            # RFC-0016 code review 0.10.0: H4 (loop bound reads), H7 (mayWriteMagics).
+            "tsymex_0016_cr3_loopbound",
+            "tsymex_0016_cr3_maywrite",
             "tsymex_0016_w3z_p2_iter_off",
             "tsymex_0016_w3z_p2_fwrapv",
             "tsymex_0016_admir",

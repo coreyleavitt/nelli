@@ -20951,7 +20951,7 @@ proc boundRead(arg: NimNode): BoundRead =
   ## kinds) are copied. Any other kind is `brUndecided`: `boundAction` then
   ## copies it only when the body cannot write its location.
   result = brUndecided
-  case arg.kind
+  result = case arg.kind
   of nnkNone, nnkEmpty, nnkIdent, nnkSym, nnkType, nnkCharLit .. nnkNilLit:
     brDirect
   of nnkDotExpr, nnkDerefExpr, nnkHiddenDeref:

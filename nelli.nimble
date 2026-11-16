@@ -1779,7 +1779,6 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_p2_iter_off",
             "tsymex_0016_w3z_p2_fwrapv",
             # RFC-0016 code review 0.10.0: F1 (opaque signed div/mod under -fwrapv).
-            "tsymex_0016_cr7_fwrapv_divzero",
             "tsymex_0016_admir",
             "tsymex_0016_k10d_removals",
             "tsymex_0016_k10d_drain_checksoff",

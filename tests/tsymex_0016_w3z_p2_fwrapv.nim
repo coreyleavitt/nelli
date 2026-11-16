@@ -48,3 +48,58 @@ else:
       checkpoint show(r.errors) & " " & $r.soundness
       check r.status == sxSat
       check UbKind(ubSignedOverflow) notin r.soundness.undefinedKinds
+
+  # RFC-0016 0.10.0 review F1 (CR-7): `-fwrapv` defines the signed wrap of
+  # `+ - *` and nothing else, so a signed zero divisor stays undefined (rows
+  # `div/zeroDivisorSigned` and `mod/zeroDivisorSigned` under `dpFwrapv`). The
+  # scan had copied the add guard onto the zero divisor and left
+  # `ubSignedDivZero` out of `witnessUndefined`; it now asks the table.
+  proc oDiv(a, b: int64) {.symexOpaque.} =
+    discard a div b
+
+  proc oMod(a, b: int64) {.symexOpaque.} =
+    discard a mod b
+
+  proc oAdd2(a, b: int64) {.symexOpaque.} =
+    discard a + b
+
+  proc sutDiv(x, y: int64) =
+    if x == 5: symexTarget("hit")
+    oDiv(x, y)
+
+  proc sutMod(x, y: int64) =
+    if x == 5: symexTarget("hit")
+    oMod(x, y)
+
+  proc sutAdd(x, y: int64) =
+    if x == 5: symexTarget("hit")
+    oAdd2(x, y)
+
+  suite "CR-7: opaque signed division, -fwrapv build":
+    test "version floor":
+      check parseInt(symexWalkerVersion) >= 359
+
+    test "the build wraps and has overflow checks off":
+      check buildSemantics.fwrapv
+      check definedness(aoDiv, ocZeroDivisorSigned, dpFwrapv).kind == dkUndefined
+
+    test "an opaque signed div under -fwrapv may divide by zero: never a trusted sat":
+      let r = symexFind(sutDiv, tLabel("hit"), pinSettingsConst)
+      checkpoint show(r.errors) & " " & $r.soundness
+      check r.status == sxSat
+      check not r.trusted
+      check UbKind(ubSignedDivZero) in r.soundness.undefinedKinds
+
+    test "an opaque signed mod under -fwrapv may divide by zero: never a trusted sat":
+      let r = symexFind(sutMod, tLabel("hit"), pinSettingsConst)
+      checkpoint show(r.errors) & " " & $r.soundness
+      check r.status == sxSat
+      check not r.trusted
+      check UbKind(ubSignedDivZero) in r.soundness.undefinedKinds
+
+    test "control: an opaque signed add under -fwrapv is a defined wrap":
+      let r = symexFind(sutAdd, tLabel("hit"), pinSettingsConst)
+      checkpoint show(r.errors) & " " & $r.soundness
+      check r.status == sxSat
+      check UbKind(ubSignedOverflow) notin r.soundness.undefinedKinds
+      check UbKind(ubSignedDivZero) notin r.soundness.undefinedKinds

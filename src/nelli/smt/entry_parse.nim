@@ -159,3 +159,20 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
                  globals: `glExpr`, retTy: `rtExpr`,
                  userExnHierarchy: `uxhExpr`, parseErrors: `peExpr`,
                  annotationViolations: `avExpr`, implDigest: `digest`)
+
+proc describeTarget*(t: SymexTarget): string =
+  case t.kind
+  of stkLabel:              "label(\"" & t.label & "\")"
+  of stkAssertionViolation: "assertion-violation"
+  of stkIndexError:         "index-error"
+  of stkFieldDefect:        "field-defect"
+  of stkRaisedExn:                                       ## Phase 15 E2a
+    if t.typeFilter.len == 0: "raised-exn(any)"
+    else:                     "raised-exn(" & t.typeFilter & ")"
+  of stkNilAccess:          "nil-access"                 ## Phase 15 R5
+  of stkUndefined:                                       ## RFC-0016 K10a-target
+    if t.ubKinds == allUbKinds: "undefined(all)"
+    else:
+      var names: seq[string]
+      for k in t.ubKinds: names.add $k
+      "undefined(" & names.join(",") & ")"

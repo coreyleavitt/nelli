@@ -18076,7 +18076,7 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
   ""
 
 proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isIndex` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18093,7 +18093,7 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
   of wmFollowConcrete: discard
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     ## Drain-coverage audit: `stmt.ixArr` is a side-effect-free container
     ## expression. The parser A-normalises most container expressions to named
     ## bindings (iekVar) or field projections (iekField); both are pure (no
@@ -18483,10 +18483,10 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
                             ub = unwrittenUb(unwrittenPart)))
       else:
         survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
-  survivors
+  exact(survivors)
 
 proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isIndexAssign` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18499,7 +18499,7 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
   # use for construction) instead of binding a fresh read result.
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     # The parse site (dsl_parser.nim's `nnkAsgn` arm) only ever emits this
     # statement for a bare `nnkSym` receiver already classified `itSeq`.
     # RFC-0005 batch 6: read through `recvValue`, so a global the walk
@@ -18657,10 +18657,10 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
         newEnv[stmt.iaRecvName] = mkSeqSV(recvSV.seqLen, storedOpt.get, # [placeholder-audited]
           recvSV.seqElemTy)
         survivors.add forkPath(vpRanged, vpRanged.pc & @[inLoCond, inHiCond], newEnv)
-  survivors
+  exact(survivors)
 
 proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isSeqPop` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18677,7 +18677,7 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
   # (no swap-in needed at all).
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     # RFC-0005 batch 6: an unbound global receiver is its entry value
     # (`recvValue`; was a `KeyError`, reported as a walker fault).
     let (recvSV, p) = recvValue(p0, stmt.spRecvName, w)
@@ -18741,10 +18741,10 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
       survivors.add fresh
     else:
       survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
-  survivors
+  exact(survivors)
 
 proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isTabKeys` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18775,7 +18775,7 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
   # entry counts in the size but is never present).
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     let (tsv, p) = lowerInExpr(p0, stmt.tkRecv, w)
     let locPrefix = if stmt.tkLoc.len > 0: stmt.tkLoc & ": " else: ""
     if tsv.kind != svTable or
@@ -18862,10 +18862,10 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
         facetNote("tables.Table/iterationOrder"))
       survivors.add forkPathTainted(p, p.pc & facts & @[not atMostOne],
                                     env2, d)
-  survivors
+  exact(survivors)
 
 proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isSetLen` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18887,7 +18887,7 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
   #     all-NUL content are facts of the path (no quantifier).
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     let (baseSV, p1) = lowerInExpr(p0, stmt.slBase, w)
     let (lenSV0, p) = lowerInExpr(p1, stmt.slLen, w)
     let locPrefix = if stmt.slLoc.len > 0: stmt.slLoc & ": " else: ""
@@ -18969,7 +18969,7 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
       env2[stmt.slRetName] = allocateSym(stmt.slTy,
         freshDegradeName("__setLenDegrade"), fresh)
       survivors.add forkPathTainted(p, p.pc, env2, d)
-  survivors
+  exact(survivors)
 
 proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
     w: var WalkCtx): seq[Path] {.noinline.} =
@@ -20910,15 +20910,15 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
       exitJump(p, target, isCont = true, w)
     exact(@[])
   of isIndex:
-    exact(walkIndexArm(stmt, paths, w))
+    walkIndexArm(stmt, paths, w)
   of isIndexAssign:
-    exact(walkIndexAssignArm(stmt, paths, w))
+    walkIndexAssignArm(stmt, paths, w)
   of isSeqPop:
-    exact(walkSeqPopArm(stmt, paths, w))
+    walkSeqPopArm(stmt, paths, w)
   of isTabKeys:
-    exact(walkTabKeysArm(stmt, paths, w))
+    walkTabKeysArm(stmt, paths, w)
   of isSetLen:
-    exact(walkSetLenArm(stmt, paths, w))
+    walkSetLenArm(stmt, paths, w)
   of isVariantReassign:
     exact(walkVariantReassignArm(stmt, paths, w))
   of isVariantReassignSymbolic:

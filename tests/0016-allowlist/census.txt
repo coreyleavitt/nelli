@@ -64,8 +64,6 @@ platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):#2	K2a-fail	platf
 platform:tests/tfuzzworkerspawnfailshm.nim:when defined(posix):#3	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_checksoff.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_fieldoff.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
-platform:tests/tsymex_0016_k5a_fwrapv.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
-platform:tests/tsymex_0016_k5b_cfg_fwrapv.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_k5a_profile.nim:when defined(linux): check buildSemantics.os == osLinux	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_k5a_profile.nim:when defined(windows): check buildSemantics.os == osWindows	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_k8a_sink.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
@@ -74,7 +72,6 @@ platform:tests/tsymex_0016_s8cj_mkunique.nim:when defined(posix): import std/pos
 platform:tests/tsymex_0016_s8cj_runctx.nim:const names = when defined(windows): ["libz3.dll", "z3.dll"]	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_s8cj_runctx.nim:elif defined(macosx): ["libz3.dylib"]	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_0016_w1d2_wraps.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
-platform:tests/tsymex_0016_w3z_p2_fwrapv.nim:when defined(vcc):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_phase15_CR2_cachekey.nim:row.get == (when defined(vcc): brMsvc else: brMingw)	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_phase15_CR2_cachekey.nim:when defined(windows):	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm
 platform:tests/tsymex_phase15_CR2_cachekey.nim:when defined(windows):#2	K2a-fail	platform arm in a file with no skipCell; K2a-fail requires skipCell or a recorded reason for the arm

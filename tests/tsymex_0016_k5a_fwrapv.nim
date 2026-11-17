@@ -6,28 +6,28 @@
 ## `ubSignedOverflow` halt, and the verdict is trusted and agrees with the
 ## native run. `low(T) div -1` and `mod -1` stay undefined (`-fwrapv` does not
 ## define them), so they still halt.
-when defined(vcc):
-  # Under vcc the build is refused by design: cl.exe has no `-fwrapv`, so
-  # `-d:nelliFwrapv` would claim a wrap the C compiler does not give, and
-  # `nelli/symex` stops at its compile-time admission. This arm cannot import
-  # it; it asserts the refusal through `admitBuild`, the function `symex.nim`
-  # runs, against this build's own profile.
-  import std/[unittest, strutils, options]
-  import nelli/smt/buildprofile
+##
+## The suite keys on the product's own admission of the build, never on the C
+## compiler. `nelli/symex` runs `admitBuild` at compile time and refuses a build
+## it cannot model: under vcc, which has no `-fwrapv`, `-d:nelliFwrapv` would
+## claim a wrap the C compiler does not give. A refused build cannot import
+## `nelli/symex`, so that arm asserts the refusal by name through the same
+## `admitBuild` call, against this build's own profile.
+import std/options
+import nelli/smt/buildprofile
+const admission = admitBuild(buildSemantics, buildProvenance)
+when admission.isSome:
+  import std/[unittest, strutils]
 
-  suite "K5a: -d:nelliFwrapv build (vcc)":
+  suite "K5a: -d:nelliFwrapv build (refused build)":
     test "the build declares the wrap":
       check buildSemantics.fwrapv
-      check buildProvenance.ccFamily == ccVcc
 
     test "symex refuses it by name":
-      let refusal = admitBuild(buildSemantics, buildProvenance)
-      check refusal.isSome
-      if refusal.isSome:
-        check refusal.get.field == bfFwrapv
-        check "vcc" in refusal.get.reason
-        check "-fwrapv" in refusal.get.reason
-        check "[field: fwrapv]" in refusalMessage(refusal.get)
+      check admission.get.field == bfFwrapv
+      check "vcc" in admission.get.reason
+      check "-fwrapv" in admission.get.reason
+      check "[field: fwrapv]" in refusalMessage(admission.get)
 else:
   import std/[unittest, strutils]
   import nelli

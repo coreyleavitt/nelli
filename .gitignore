@@ -45,3 +45,5 @@ tests/.pins/
 # Drop the relevant line when the work is genuinely ready to be tracked.
 # (RFC-0002 parser-normalization shipped in v0.3.5 and is now tracked.)
 docs/RFC-fuzzer-hybrid.md
+tests/asan/plant_*[!.]
+!tests/asan/*.nim

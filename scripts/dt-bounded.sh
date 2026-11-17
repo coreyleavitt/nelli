@@ -25,6 +25,9 @@
 #        fails with an allocation error instead of taking the machine down); a
 #        podman run passes `--memory` (the cgroup OOM-kills the container).
 #        Either way the test exits non-zero and the caller names it.
+#        ASAN_OPTIONS / LSAN_OPTIONS  if set, forwarded (scripts/asan-slice.sh).
+#        NELLI_PODMAN_EXTRA  if set, extra `podman run` words (word-split), e.g.
+#        `-v /p:/p -e LD_LIBRARY_PATH=/p/bin` to run against another libz3.
 #        NELLI_HOST=1  no podman: run scripts/run-one.sh directly on the host
 #        under the same hard-kill timeout (`sweep.sh --host`). The compile
 #        command is scripts/run-one.sh either way.
@@ -143,6 +146,8 @@ else
     ${NELLI_MEM_MB:+--memory=${NELLI_MEM_MB}m --memory-swap=${NELLI_MEM_MB}m} \
     ${pin_args[@]+"${pin_args[@]}"} \
     ${NELLI_NIM_FLAGS:+-e NELLI_NIM_FLAGS} \
+    ${ASAN_OPTIONS:+-e ASAN_OPTIONS} ${LSAN_OPTIONS:+-e LSAN_OPTIONS} \
+    ${NELLI_PODMAN_EXTRA:-} \
     "$img" \
     bash scripts/run-one.sh "$backend" "$test_file"
 fi

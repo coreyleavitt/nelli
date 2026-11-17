@@ -151,6 +151,7 @@ LEGS=(
   "symex-nightly cpp|symex-nightly.yaml|gate (cpp)"
   "symex-nightly z3-4.13.4|symex-nightly.yaml|gate (z3-4.13.4)"
   "symex-nightly msvc|symex-nightly.yaml|gate (msvc)"
+  "symex-nightly asan|symex-nightly.yaml|asan"
   "symex-mingw|symex-mingw.yaml|"
   "symex-linux (main)|symex-linux.yaml|"
 )

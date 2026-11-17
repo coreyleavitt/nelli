@@ -59,7 +59,7 @@ const
 
   heapPinned = [
     "AddrCellEntry", "Degrade", "ElemCell", "Path", "PtrLeafAim",
-    "PtrStore", "WalkCtx",
+    "PtrStore", "Survivors", "WalkCtx",
     "bitsPlace", "callGuardedNames", "cellValue", "coerceIntLit",
     "crashRaise", "deadElemRefs",
     "degrade", "discConst", "drainPendingLowerEffects",

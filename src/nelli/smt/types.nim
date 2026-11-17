@@ -84,7 +84,8 @@ type
     itTuple  ## Records: tuples (anonymous or named) and objects.
              ## Both lower to `svTuple` with per-field SymVals.
     itArray  ## Static `array[N, T]` — Phase 4 supports primitive `T`
-             ## and tuples-of-primitive `T`; nested arrays defer to #142.
+             ## and tuples-of-primitive `T`; nested arrays are `itArray` of
+             ## `itArray` (#142, closed).
     itSeq    ## Phase 5: dynamic `seq[T]` via Z3 array theory.
     itTable  ## Phase 5: `Table[K, V]` via two Z3 arrays (data + present).
     itSet    ## Phase 5: `HashSet[T]` via `Z3Array[T, Z3Bool]`.

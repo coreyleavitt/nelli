@@ -187,6 +187,8 @@ task test, "Run the test suite":
             "tsymex_r6_a1_variantlit",
             "tsymex_r6_a2_retbind_variant",
             "tsymex_r6_a3_variantconstruct_sym",
+            "tsymex_0016_w4h1b_caseexpr_narrow",
+            "tsymex_0016_w4h1b_dead_arms",
             "tsymex_r6_a4_construct_interactions",
             "tsymex_r6_a6_exported_field_names",
             "tsymex_r6_b1_stringbacked",
@@ -1748,6 +1750,10 @@ task test, "Run the test suite":
             # RFC-0016 K7a: Survivors, CapKind and the halted/continued sites.
             "tsymex_0016_k7a_survivors",
             "tsymex_0016_k7b_unsupported",
+            # RFC-0016 K7c: walkStmt has one exit channel, Survivors.
+            "tsymex_0016_k7c_arms",
+            "tsymex_0016_k7c_caps",
+            "tsymex_0016_k7c_followcut",
             "tsymex_0016_k10at_target",
             "tsymex_0016_w3z_r1_noinit_target",
             # RFC-0016 K7: a walk's total solver work is bounded (walkRLimit).
@@ -1894,6 +1900,8 @@ task test, "Run the test suite":
             "tsymex_0016_d3b_walklog",
             # RFC-0016 0.10.0 review D3c: the include surface census (include list, no import in runtime_*.nim, symbol-coupling ceilings, the heap-only forward-declaration block, the symval leaf).
             "tsymex_0016_d3_include_census",
+            "tsymex_0016_h1_runreset",
+            "tsymex_0016_h1_findall_regexerror",
             # RFC-0016 0.10.0 review D3c-2: every field of walk_state's `lowerHooks` is filled once runtime.nim is imported.
             "tsymex_0016_d3_hooks",
             "tsymex_0016_d6_facade",

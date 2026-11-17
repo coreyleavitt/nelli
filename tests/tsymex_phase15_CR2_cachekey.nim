@@ -1248,7 +1248,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## facts): 367->368.
     ## RFC-0016 review R8-1 (a closure-call `case` scrutinee, or a membership
     ## key under a loop guard, is applied once): 368->369.
-    check symexWalkerVersion == "369"
+    ## RFC-0016 K7c (a flip past a follow `while` cut is not offered; a cut
+    ## run's flip carries the collect errors): 369->370.
+    ## RFC-0016 W4 H1b (HRV-32, a variant constructor under a `case`
+    ## expression narrows to the branch's tags): 370->371.
+    check symexWalkerVersion == "371"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

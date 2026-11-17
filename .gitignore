@@ -42,10 +42,8 @@ tests/.pins/
 # 40091e2's own correction one commit later -- so ignore them by name
 # rather than rely on catching it in review a third time.
 #   RFC-fuzzer-hybrid          superseded 2026-08-14 by fuzzer-nextgen
-#   RFC-parser-normalization   in-progress (11/12 slices), code unpushed
 # Drop the relevant line when the work is genuinely ready to be tracked.
+# (RFC-0002 parser-normalization shipped in v0.3.5 and is now tracked.)
 docs/RFC-fuzzer-hybrid.md
-docs/rfc/*-parser-normalization.md
-docs/rfc/*-parser-normalization.handoff.md
 tests/asan/plant_*[!.]
 !tests/asan/*.nim

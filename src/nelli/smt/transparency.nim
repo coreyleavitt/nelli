@@ -34,33 +34,16 @@
 ## stated in this direction; `tests/tsymex_g6_algebra.nim`'s "direction
 ## consistent for a 3+ combinator chain" case is the concrete pin.
 ##
-## ---- The 6 categories -------------------------------------------------
+## ---- The 5 categories -------------------------------------------------
 ##
 ## - `dkIdentity`   — transparent passthrough: value IS the root draw.
 ## - `dkAffine`     — value = a*root + b (map with an affine body).
-## - `dkPredicated` — a transparent `base` (identity/affine/span-composite)
+## - `dkPredicated` — a transparent `base` (identity/affine)
 ##   PLUS a list of extra Z3 conjuncts (`filter`'s accept-path) — every
 ##   conjunct is maintained ROOT-RELATIVE (see below), never relative to
 ##   some intermediate pipeline stage, so it can be asserted directly
 ##   against the root draw variable at Z3-build time with no further
 ##   substitution needed by the runtime.
-## - `dkSpanComposite` — a statically-enumerable UNION of independently
-##   classified strategies (`oneOf`/`frequency`-shaped combinators). The
-##   descriptor set is closed over it in the narrow sense that `compose` has
-##   a total case for every `(dkSpanComposite, second.kind)` pair — it never
-##   falls through undefined — but "closed" here does NOT mean every cell is
-##   a DERIVED rule. `span-composite ∘ {affine, predicated}` distribute per
-##   the RFC's own span rule (genuinely derived, hand-traced). `span-composite
-##   ∘ {span-composite, branching}` are conservative STUBS: `dOpaque()`
-##   unconditionally, not a derivation, because the RFC gives no rule for a
-##   `oneOf(...).flatMap(...)`-shaped chain and this slice's classifier
-##   cannot produce a `dkSpanComposite` to reach them with anyway (see
-##   `spanCompositeStubHits` below — the tripwire that keeps that fact from
-##   going unnoticed once a future classifier CAN reach them). This slice's
-##   AST classifier does not yet PRODUCE a `dkSpanComposite` at all (out of
-##   scope per the RFC's own "Classification from the captured AST" list,
-##   which names only `map`/`filter`/`flatMap`) — a future classifier slice
-##   is its producer.
 ## - `dkOpaque`     — nothing is known; concretize downstream, as today.
 ## - `dkBranching`  — enumerable `flatMap`: the next strategy is chosen from
 ##   the prior draw's value over a small, statically-enumerable case set
@@ -87,7 +70,6 @@ type
     dkIdentity
     dkAffine
     dkPredicated
-    dkSpanComposite
     dkOpaque
     dkBranching
 
@@ -108,10 +90,8 @@ type
     of dkAffine:
       a*, b*: int64                            ## value = a*root + b
     of dkPredicated:
-      base*: TransparencyDescriptor            ## dkIdentity/dkAffine/dkSpanComposite
+      base*: TransparencyDescriptor            ## dkIdentity/dkAffine
       conjuncts*: seq[PredicateSpec]           ## root-relative, ANDed
-    of dkSpanComposite:
-      spans*: seq[TransparencyDescriptor]      ## one per enumerable span
     of dkOpaque: discard
     of dkBranching:
       cases*: seq[BranchingCase]
@@ -132,45 +112,11 @@ proc dPredicated*(base: TransparencyDescriptor,
                   conjuncts: seq[PredicateSpec]): TransparencyDescriptor =
   TransparencyDescriptor(kind: dkPredicated, base: base, conjuncts: conjuncts)
 
-proc dSpanComposite*(spans: seq[TransparencyDescriptor]): TransparencyDescriptor =
-  TransparencyDescriptor(kind: dkSpanComposite, spans: spans)
-
 proc dOpaque*(): TransparencyDescriptor =
   TransparencyDescriptor(kind: dkOpaque)
 
 proc dBranching*(cases: seq[BranchingCase]): TransparencyDescriptor =
   TransparencyDescriptor(kind: dkBranching, cases: cases)
-
-# ---- R36 tripwire: the two conservatively-stubbed composition cells --------
-
-var spanCompositeStubHits* = 0
-  ## RFC-fuzzer-nextgen R36 (code review, LOW): incremented every time
-  ## `compose` actually falls into one of the two STUBBED cells
-  ## (`dkSpanComposite ∘ dkSpanComposite`, `dkSpanComposite ∘ dkBranching` —
-  ## see the module doc's "closed" callout above). Both cells are inert
-  ## today only because no classifier in this slice ever PRODUCES a
-  ## `dkSpanComposite` descriptor for `compose` to be called with — there is
-  ## no real code path that can increment this counter yet. Its entire
-  ## purpose is to survive that becoming false: once a future span
-  ## classifier lands, a real `.oneOf(...).oneOf(...)` or
-  ## `.oneOf(...).flatMap(...)` chain would silently degrade to `dOpaque()`
-  ## (a correct-but-conservative approximation, never unsound) with nothing
-  ## to notice that the "derived rule" half of the algebra's promise no
-  ## longer covers every chain it is asked about. A caller integrating that
-  ## future classifier should check this counter (or call
-  ## `resetSpanCompositeStubHits()` at a suite/campaign boundary and
-  ## re-check) and treat a nonzero result as a prompt to either derive the
-  ## real rule or make the approximation an explicit, tested decision —
-  ## rather than an emergency: this counter deliberately does not raise or
-  ## abort, since `dOpaque()` here is a documented-safe degradation, not a
-  ## bug, and a hot composition path is exactly the wrong place for a
-  ## surprise exception or log line on every hit.
-
-proc resetSpanCompositeStubHits*() =
-  ## Test/harness support: zero the tripwire counter, e.g. between test
-  ## cases that each want to assert their OWN hit/no-hit outcome independent
-  ## of what ran before them in the same process.
-  spanCompositeStubHits = 0
 
 # ---- predicate substitution --------------------------------------------------
 
@@ -200,8 +146,7 @@ proc compose*(first, second: TransparencyDescriptor): TransparencyDescriptor
 
 proc composeBase(base: TransparencyDescriptor,
                   second: TransparencyDescriptor): TransparencyDescriptor =
-  ## `predicated`'s `base` is restricted to {identity, affine,
-  ## span-composite} (never itself predicated/opaque/branching — a filter's
+  ## `predicated`'s `base` is restricted to {identity, affine} (never itself predicated/opaque/branching — a filter's
   ## conjuncts always fold into the OUTER `conjuncts` seq, never nest a
   ## second predicated layer). Composing it forward reuses the same total
   ## `compose` — `base`'s kind is always one `compose` already handles.
@@ -232,8 +177,6 @@ proc compose*(first, second: TransparencyDescriptor): TransparencyDescriptor =
       # mirrored for the affine-then-predicated direction.
       dPredicated(composeBase(first, second.base),
                   second.conjuncts.mapIt(substituteAffine(it, first.a, first.b)))
-    of dkSpanComposite:
-      dSpanComposite(second.spans.mapIt(compose(first, it)))
     of dkBranching:
       # .map(f).flatMap(g): g's guards were classified relative to f's
       # output — re-express them relative to root; each case's OWN
@@ -254,16 +197,13 @@ proc compose*(first, second: TransparencyDescriptor): TransparencyDescriptor =
       # predicated ∘ predicated: conjoin BOTH — the second's own
       # conjuncts are relative to ITS input (== first's base's output),
       # substituted through first.base the same way affine∘predicated
-      # does when first.base is affine; identity/span-composite bases
-      # need no numeric adjustment (identity: a=1,b=0 no-op; span-
-      # composite: distribute per span, approximated below).
+      # does when first.base is affine; an identity base needs no
+      # numeric adjustment (a=1,b=0 no-op).
       let carried =
         case first.base.kind
         of dkAffine: second.conjuncts.mapIt(substituteAffine(it, first.base.a, first.base.b))
-        else: second.conjuncts  # identity, or span-composite (conservative: unchanged)
+        else: second.conjuncts  # identity base: unchanged
       dPredicated(composeBase(first.base, second.base), first.conjuncts & carried)
-    of dkSpanComposite:
-      dSpanComposite(second.spans.mapIt(compose(first, it)))
     of dkBranching:
       # .filter(p).flatMap(g): fold per-case, carrying first's conjuncts
       # forward is not representable in a single-PredicateSpec guard, so
@@ -275,45 +215,6 @@ proc compose*(first, second: TransparencyDescriptor): TransparencyDescriptor =
            BranchingCase(guard: substituteAffine(it.guard, first.base.a, first.base.b), then: it.then)
          else:
            it)))
-
-  of dkSpanComposite:
-    case second.kind
-    of dkIdentity, dkOpaque: return dOpaque()  # unreachable
-    of dkAffine, dkPredicated:
-      # span-composite ∘ t (t transparent/predicated): distribute t across
-      # every span — "select span i, then apply t to whatever span i
-      # produced" (the RFC's own "span rule").
-      dSpanComposite(first.spans.mapIt(compose(it, second)))
-    of dkSpanComposite, dkBranching:
-      # STUBBED, not derived — see the module doc's "closed" callout and
-      # `spanCompositeStubHits`'s own doc above. Not given a precise rule by
-      # the RFC (nor reachable from a real `.oneOf(...).oneOf(...)`/
-      # `.oneOf(...).flatMap(...)`-shaped chain in THIS slice's scope, since
-      # no classifier here produces a `dkSpanComposite` at all) —
-      # conservative absorbing default, keeps the table total and the
-      # approximation sound (never unsound), but a real hit once a future
-      # span classifier lands is a hit against a STUB, not a proven rule —
-      # counted so that fact cannot go silently unnoticed.
-      #
-      # `when nimvm`: this module doubles as MACRO-EXPANSION-TIME code (see
-      # the module doc's own opening paragraph — `fuzzmacro.nim` walks a
-      # captured strategy AST and calls `compose` from inside compile-time
-      # macro code, i.e. the NimVM). A plain top-level `var` mutation is not
-      # something the VM can evaluate at compile time (`cannot evaluate at
-      # compile time: spanCompositeStubHits` — caught by
-      # `tests/tfuzzconcolicbridge_g6_affine.nim`'s real `fuzz(...)` call
-      # site, which forces `compose` through the VM). The tripwire only
-      # needs to observe genuine RUNTIME hits anyway — a hit during macro
-      # expansion is still a hit against an unclassifiable-today cell, but
-      # there is no live campaign runtime path through the VM for the
-      # counter's own doc comment ("check this counter... once a classifier
-      # ships") to ever consult; skip the increment there rather than fail
-      # the compile-time path outright.
-      when nimvm:
-        discard
-      else:
-        inc spanCompositeStubHits
-      dOpaque()
 
   of dkBranching:
     # branching ∘ anything: distribute the continuation across every

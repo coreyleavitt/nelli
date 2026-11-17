@@ -74,11 +74,16 @@ type
                           ## parseInt now RAISES `ValueError`). Variant retained for
                           ## enum/cache stability; the emission is gone.
     eeUninterpRefExtraction,
-    eeRaiseUnimplemented,  ## Phase 15 E1: walker hit an `isRaise` while
-                           ## raise-flow semantics are not yet modeled
-                           ## (structural cycle). sevError → sxUnknown.
-    eeTryUnimplemented,    ## Phase 15 E1: walker hit an `isTry` while
-                           ## try/except semantics are not yet modeled.
+    eeRaiseUnimplemented,  ## retired: Phase 15 E1 declined an `isRaise` while
+                           ## raise-flow was unmodeled. NO LONGER EMITTED
+                           ## (E2b+ models raise; RFC-0016 H1 removed the dead
+                           ## exception and its catch arm). Retained for
+                           ## enum/cache stability.
+    eeTryUnimplemented,    ## retired: Phase 15 E1 declined an `isTry` while
+                           ## try/except was unmodeled. NO LONGER EMITTED
+                           ## (E3+ models it; RFC-0016 H1 removed the dead
+                           ## exception and its catch arm). Retained for
+                           ## enum/cache stability.
     eeRaiseOutsideHandler, ## Phase 15 E2b: a bare `raise` (re-raise) reached
                            ## with an empty handler stack and no in-flight
                            ## exception — nothing to re-raise. sevError →
@@ -1317,8 +1322,7 @@ const kindInfo*: array[SymexErrorKind, KindInfo] = [
     # S4 audited (split -> heUnsupportedPointeeRead): the remaining sites
     # substitute, they do not havoc -- `walkHeapArm`'s non-ref/ptr-SymVal
     # deref reads bind a placeholder WITHOUT the NilAccessDefect fork (a
-    # dropped raise branch), its deref writes DROP the write (stale heap),
-    # and `runSymex`'s `SymexRefUnresolvedError` boundary arm aborts the run.
+    # dropped raise branch), its deref writes DROP the write (stale heap).
     geVtableDispatch: (class: dcNoAnswer, severity: sevError),
     ceClosureBodyUncertain: (class: dcFreshSymbol, severity: sevError),
     # S7: the tainted body arm is dropped from the ground axioms, so the

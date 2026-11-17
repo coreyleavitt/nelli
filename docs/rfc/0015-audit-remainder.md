@@ -141,7 +141,7 @@ Sampled over 36 tests: 603 raw occurrences, **40 distinct**
 test, which is where the raw-count inflation comes from.
 
 The warnings gate is delta-based against
-`nelli-sweep-baselines/base-bbde48c.log.warnings`, so none of this fails
+the current baseline's `.warnings` sidecar (`base-<sha>.log.warnings`), so none of this fails
 anything. It buries any new actionable warning — the `{.jitterPoints.}`
 fallback diagnostic is the motivating case — for anyone reading raw output
 rather than the diff.
@@ -214,7 +214,7 @@ No internal dependencies; any order, any parallelism.
 | S5 | rename the N45 probes + sidecar | #172 | `symex-mingw` runs both on the next push |
 
 Sweep discipline as usual: `scripts/sweep-diff.sh` against
-`nelli-sweep-baselines/base-bbde48c.log` per slice. S4 is the exception that
+the current recorded baseline (`base-<sha>.log`; the pre-0.9.0 `base-bbde48c.log` is superseded) per slice. S4 is the exception that
 proves the rule — it is the one slice whose *purpose* is to move the warnings
 sidecar, so it regenerates the baseline afterwards rather than diffing against
 it.

@@ -24,3 +24,13 @@ AUD-04	process, infrastructure or documentation disposition: no engine behaviour
 AUD-10	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
 W-63	a CI-leg observation (the Windows legs are the JIT rows); K2a rechecks the skip census
 MOV-01	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+W-65	dead-code removal, a parser precision change pinned by tsymex_0016_w4h1b_caseexpr_narrow and structural pins in tsymex_0016_w4h1b_dead_arms: no universe cell
+W-66	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+W-67	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+W-68	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+CI-01	a CI observation (the ceiling ratchet and the slowest symex-mingw shard); no engine behaviour, so no cell and no pin record
+INT-20	the original SUT is lost with the offline worker; S8cl's reconstruction is pinned by a pre-K9 suite (tsymex_rfc0005_s8cl_magics) that writes no record
+INT-26	pinned by tests/tsymex_0016_h1_findall_regexerror.nim, which checks the verdict against the native run by hand rather than through a K9 record verb: the SUT takes a string and the K9 domains are integers
+AUD-03	structural: no clean no-zero type remains after S8z, so the pins stay on the sound sxUnknown arm-field cases, which are pre-K9 suites
+AUD-06	a CI design note (the sampled vm-alias job); no engine behaviour, so no cell and no pin record
+INT-19	a local one-off run against a PCRE 8.37 no-JIT build, recorded in the row; no cell and no pin record

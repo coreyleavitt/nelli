@@ -643,6 +643,7 @@ func capExpectation*(cap: string): tuple[kind: SymexErrorKind, needle: string] =
   of "ckCallDepth": (beBudgetExhaustedUnmodelled, "call-inlining depth budget")
   of "ckLoopUnwind": (beBudgetExhausted, "while-loop k-unroll budget exhausted")
   of "ckLoopUnwindFollow": (beBudgetExhausted, "following a concrete replay")
+  of "ckHeapDepth": (heDepthExhausted, "heap depth budget")
   of "ckVariantForks": (beBudgetExhaustedUnmodelled, "variant constructor fork budget")
   of "ckVariantFieldAllocs": (beBudgetExhaustedUnmodelled, "field-allocation budget")
   of "ckWalkWork": (beBudgetExhaustedPrune, "walk work cap")
@@ -679,6 +680,34 @@ template pinCap*(fn: untyped; cap: static string;
   block:
     let pcRes = symexFind(fn, target, settings)
     pinCapJudge(pcRes, cap, target, instantiationInfo(-1).filename)
+
+proc pinCapConcolicJudge*(errors: seq[SymexErrorInfo]; cap, desc,
+                          file: string) =
+  ## RFC-0016 K7c. A concolic replay was cut by `cap`: the collect result's
+  ## own `errors` hold a tainting error of the cap site's kind and message
+  ## (a collect has no verdict, so there is no `trusted` to read). Writes the
+  ## `pvDeclined` record carrying `cap`, entry `concolic`.
+  let ex = capExpectation(cap)
+  var found = false
+  for e in errors:
+    if e.kind == ex.kind and taintsRun(e) and ex.needle in e.msg: found = true
+  if not found:
+    pinFail("pinCapConcolic " & cap & ": no " & $ex.kind & " message " &
+            "contains \"" & ex.needle & "\"; errors: " & show(errors))
+  writePinRecord(PinRecord(testFile: file, entry: "concolic",
+    cell: CellKey(scope: axConstruct, key: "cap/" & cap),
+    target: desc, domain: "-", verdict: pvDeclined,
+    walker: "concolicCollect", declineKind: $ex.kind, cap: cap,
+    native: "not run: the replay is cut by " & cap))
+
+template pinCapConcolic*(fn: untyped; cap: static string; trace, bindings,
+                         settings: untyped) =
+  ## The `concolicCollect` replay of `fn` over `trace` is cut by `cap`: see
+  ## `pinCapConcolicJudge`.
+  block:
+    let pccRes = concolicCollect(fn, trace, bindings, settings)
+    pinCapConcolicJudge(pccRes.errors, cap, astToStr(fn),
+                        instantiationInfo(-1).filename)
 
 # --- pinCrash and skipCell -------------------------------------------------
 

@@ -364,7 +364,7 @@ proc bindingExprFor(desc: TransparencyDescriptor, drawIndexLit: NimNode): NimNod
     let conjSeq = newTree(nnkBracket, conjNodes)
     quote do: ConcolicParamBinding(kind: cbTransformLinked, tDrawIndex: `drawIndexLit`,
                                    tA: `aLit`, tB: `bLit`, tConjuncts: @(`conjSeq`))
-  of dkOpaque, dkSpanComposite, dkBranching:
+  of dkOpaque, dkBranching:
     quote do: ConcolicParamBinding(kind: cbDrawLinked, drawIndex: `drawIndexLit`)
 
 

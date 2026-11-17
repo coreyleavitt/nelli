@@ -6562,6 +6562,41 @@ proc bindCaseScrutinee(scrutNode: NimNode; scrutinee: IRExpr;
   preamble.add mkLet(tmp, classifyType(scrutNode).ty, scrutinee)
   mkVar(tmp)
 
+proc lowerOfBranchLabels(arm: NimNode, scrutinee: IRExpr,
+                         preamble: var seq[IRStmt], ctx: ParseCtx
+                        ): tuple[cond: IRExpr, narrowTags: seq[int]] =
+  ## Shared by the `case` STATEMENT arm and the `case` EXPRESSION arm
+  ## (`hoistCaseExpr`): lower an `of` branch's labels to the OR of
+  ## `scrutinee == label`, and mine the branch's LITERAL tag ordinals for
+  ## `ctx.procScoped.caseNarrow` (Round-6 A3, ADR-0029).
+  ##
+  ## `narrowTags` is empty when the set is unknowable -- a label that does not
+  ## parse to a plain int literal (e.g. a `low..high` range label) makes the
+  ## whole branch un-narrowable, so nothing is pushed (the variant
+  ## constructor's own fallback to the full declared arm count is always
+  ## sound, just less precise).
+  var narrowOk = true
+  for j in 0 ..< arm.len - 1:
+    let labelIR = parseExpr(arm[j], preamble, ctx)
+    let eq = mkBinop(bEq, scrutinee, labelIR)
+    result.cond = if result.cond == nil: eq else: mkBinop(bOr, result.cond, eq)
+    let labelTag = discTagLit(labelIR)
+    if labelTag.kind == iekIntLit: result.narrowTags.add int(labelTag.ival)
+    else: narrowOk = false
+  if not narrowOk: result.narrowTags = @[]
+
+template withCaseNarrow(ctx: ParseCtx, subject: NimNode, branchTags: seq[int],
+                        body: untyped): untyped =
+  ## Push the branch's narrowing BEFORE parsing its body so a variant
+  ## constructor nested anywhere inside it sees it; pop immediately after so
+  ## a SIBLING branch never inherits it.
+  let pushNarrow = branchTags.len > 0
+  if pushNarrow:
+    ctx.procScoped.caseNarrow.add (subjectRepr: scopedRepr(subject), tags: branchTags)  ## RFC-0005 S8e: symbol-keyed
+  var narrowedResult = body  # `var`: an untyped `let` here has no type for the let audit
+  if pushNarrow: discard ctx.procScoped.caseNarrow.pop()
+  narrowedResult
+
 proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
                         ctx: ParseCtx): IRExpr =
   ## RFC-0005 s1 — A-normalise a `case`/`if` in EXPRESSION position.
@@ -6585,11 +6620,10 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
   ##   `<temp> := zero; <branching STATEMENT assigning temp>; <temp>`
   ##
   ## Scope notes, deliberate:
-  ##   * ADR-0029 `caseNarrow` tag mining is NOT mirrored here. Omitting it is
-  ##     SOUND — the variant constructor's fallback to the full declared arm
-  ##     count is always sound, just less precise (see the `nnkCaseStmt`
-  ##     statement arm's own comment) — and mirroring it would duplicate the
-  ##     label-mining logic. A later slice can lift it into a shared helper.
+  ##   * ADR-0029 `caseNarrow` tag mining is shared with the statement arm
+  ##     (`lowerOfBranchLabels` / `withCaseNarrow`), so a variant constructor
+  ##     under `case op of a, b:` in expression position forks over {a, b}
+  ##     only (RFC-0016 W-65 / HRV-32; walker 371).
   ##   * `of` labels are constant expressions (Nim requires it), so a label's
   ##     preamble is empty and the OUTER preamble is safe for it. A condition
   ##     that may carry one belongs to an `if` chain, which `lowerCondChain`
@@ -6631,12 +6665,10 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
     let arm = n[i]
     case arm.kind
     of nnkOfBranch:
-      var cond: IRExpr = nil
-      for j in 0 ..< arm.len - 1:
-        let labelIR = parseExpr(arm[j], preamble, ctx)
-        let eq = mkBinop(bEq, scrutinee, labelIR)
-        cond = if cond == nil: eq else: mkBinop(bOr, cond, eq)
-      arms.add (newSeq[IRStmt](), mkBranch(cond, armBodyStmt(arm[arm.len - 1])))
+      let (cond, narrowTags) = lowerOfBranchLabels(arm, scrutinee, preamble, ctx)
+      let armBody = withCaseNarrow(ctx, n[0], narrowTags):
+        armBodyStmt(arm[arm.len - 1])
+      arms.add (newSeq[IRStmt](), mkBranch(cond, armBody))
     of nnkElifBranch, nnkElifExpr:
       var condPreamble: seq[IRStmt]
       let condIR = parseExpr(arm[0], condPreamble, ctx)
@@ -11021,7 +11053,7 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   # is the `nnkIdentDefs` of its let/var/param binding) AND its instantiated
   # type is a proc type (`nnkProcTy`). Top-level procs-as-VALUES are C3; C1
   # handles only the proc-valued-variable CALL shape → `iekClosureCall`
-  # (walker-stubbed `ceNotImplemented` in C1; C2b adds application).
+  # (applied by the walker since C2b).
   block closureCallDetect:
     if calleeSym.kind == nnkSym:
       let impl = calleeSym.getImpl
@@ -11660,7 +11692,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     tailIR
   of nnkLambda:
     # Phase 15 Cluster C (C1, ADR-0009). A lambda in expression position →
-    # iekLambda (walker-stubbed `ceNotImplemented` in C1).
+    # iekLambda (constructed by the walker since C2a).
     parseLambda(n, ctx)
   of nnkProcDef, nnkFuncDef:
     # Phase 15 C1. A `proc(...) = ...` / `func(...) = ...` value lowered to an
@@ -13138,9 +13170,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # NOT mis-routed to `iekSeqLen` (which would lower a Z3String operand into
     # the seq-length path → sort-mismatch crash), and BEFORE the user-proc
     # fall-through (which crashes resolving `getImpl` on a built-in like `len`).
-    # In S1 every recognised string op routes to a STUBBED `iekStr*` node that
-    # lowers to a classified `seUnsupportedStringOp` (sxUnknown); S2–S11 give
-    # each its real Z3 String/Seq/Regex lowering. An UNRECOGNISED string call
+    # Every recognised string op routes to an `iekStr*` node with its own Z3
+    # String/Seq/Regex lowering (S1 introduced them as stubs that declined with
+    # `seUnsupportedStringOp`; S2–S11 replaced each). An UNRECOGNISED string call
     # routes to `iekStrUnsupported` (same clean diagnostic) — never a crash.
     # Phase 15 S5: `xs.join(sep)` where `xs` is a `seq[string]` (e.g. the result
     # of `split`). The receiver type is `seq[string]`/`openArray[string]`, which
@@ -21377,31 +21409,9 @@ proc parseStmtInner(n: NimNode,
       case arm.kind
       of nnkOfBranch:
         # arm[0..arm.len-2] = labels; arm[arm.len-1] = body
-        var cond: IRExpr = nil
-        var narrowTags: seq[int] = @[]
-        var narrowOk = true
-        for j in 0 ..< arm.len - 1:
-          let labelIR = parseExpr(arm[j], preamble3, ctx)
-          let eq = mkBinop(bEq, scrutinee, labelIR)
-          if cond == nil: cond = eq
-          else: cond = mkBinop(bOr, cond, eq)
-          # Round-6 A3 (ADR-0029): mine this branch's LITERAL tag ordinals for
-          # `ctx.procScoped.caseNarrow` — a label that doesn't parse to a plain int
-          # literal (e.g. a `low..high` range label) makes this branch's
-          # narrowing set unknowable, so it is simply not pushed (the
-          # constructor's own fallback to the full declared arm count is
-          # always sound, just less precise).
-          let labelTag = discTagLit(labelIR)
-          if labelTag.kind == iekIntLit: narrowTags.add int(labelTag.ival)
-          else: narrowOk = false
-        # Push BEFORE parsing the body so a variant constructor nested
-        # anywhere inside it (not just at the top level) sees the narrowing;
-        # pop immediately after so a SIBLING branch never inherits it.
-        let pushNarrow = narrowOk and narrowTags.len > 0
-        if pushNarrow:
-          ctx.procScoped.caseNarrow.add (subjectRepr: scopedRepr(n[0]), tags: narrowTags)  ## RFC-0005 S8e: symbol-keyed
-        let armBody = parseStmt(arm[arm.len - 1], ctx)
-        if pushNarrow: discard ctx.procScoped.caseNarrow.pop()
+        let (cond, narrowTags) = lowerOfBranchLabels(arm, scrutinee, preamble3, ctx)
+        let armBody = withCaseNarrow(ctx, n[0], narrowTags):
+          parseStmt(arm[arm.len - 1], ctx)
         arms.add (newSeq[IRStmt](), mkBranch(cond, armBody))
       of nnkElifBranch, nnkElifExpr:
         # RFC-0016 W1-f (W-21). Tested in order, after every `of` arm.

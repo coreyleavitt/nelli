@@ -200,7 +200,7 @@ not a silent substitution.
 ## §5 — Gates
 
 Standard whole-suite discipline: `scripts/sweep.sh` against
-`nelli-sweep-baselines/base-bbde48c.log` via `scripts/sweep-diff.sh`, per slice.
+the current recorded baseline (`base-<sha>.log` from a worktree pinned at the release being built on; the pre-0.9.0 `base-bbde48c.log` is superseded) via `scripts/sweep-diff.sh`, per slice.
 Two additions specific to this RFC:
 
 **Timing is a gate here, not a nicety.** Every slice from S1 on changes how

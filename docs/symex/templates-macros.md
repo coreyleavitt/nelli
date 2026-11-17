@@ -83,26 +83,17 @@ site, not at template/macro internals.
   the contradiction would look reachable. This proves untyped-template bodies are
   symexed, not skipped.
 
-### Known limitation — `isUnsupported` statements are skipped, not halted
+### `isUnsupported` statements taint the path (resolved by SND-1)
 
-Discovered during L2: when the parser classifies a *statement* as
-`isUnsupported` (`mkUnsupported(reason)` — e.g. `try`/`except`, not modelled
-until Cluster E), the walker currently handles it with `of isUnsupported:
-discard` and continues the path **without** marking it uncertain. Consequences:
-
-- **Sound** when the skipped construct has no effect on the target's
-  reachability (e.g. a no-op `try: discard except: discard` — the verdict is
-  unchanged and correct).
-- **Conservative-incompleteness risk** if a skipped unsupported statement *did*
-  have a target-relevant effect: the verdict could be wrong rather than
-  `sxUnknown`. This is a **pre-existing** behaviour (not introduced by Phase 15),
-  and the window shrinks as later clusters model these constructs (E: exceptions,
-  R: ref/heap, etc.). The reason string lives on the internal `RawResult`; the
-  public `SymexResult` exposes only `status` (no `errors` surface).
-- **Future work (not L2):** per invariant 3, hitting an `isUnsupported` node
-  should mark the path `sxUnknown`. Changing it requires care — existing tests
-  may rely on the current skip for no-op unsupported constructs — so it is
-  tracked here rather than forced into a verification cycle.
+Discovered during L2: the walker once handled an `isUnsupported` statement
+(`mkUnsupported(reason)`, for a construct the parser does not model) with
+`discard`, continuing the path without marking it uncertain. That was a
+conservative-incompleteness risk, and it is closed: SND-1 makes the walker's
+`of isUnsupported` arm taint the path and fork every path through tainted, so a
+later target label or raise demotes to `sxUnknown` rather than a falsely
+trustable verdict. A no-op unsupported construct (for example
+`try: discard except: discard`) is therefore reported as a tainted, not a
+clean, path. Exception flow itself is modelled (ADR-0007).
 
 ## `getAst` / `quote do` macros (L3)
 
@@ -116,13 +107,12 @@ Verified (`tests/tsymex_phase15_l3_quote_do.nim`):
   before walking, so the inlined concrete body is analysed and the reachable
   target is found (`sxSat`).
 
-### Minor finding — expression-`if` (`nnkIfExpr`) is unsupported
+### Expression-`if` (`nnkIfExpr`) is supported
 
-A generic body written as an expression-`if` (`if a: x elif b: y else: z`,
-`nnkIfExpr`) is rejected by `parseExpr` with a **compile-time** error (not a
-runtime verdict). This is a general expression-parsing limitation (statement-`if`
-is supported; expression-`if` is not), surfaced here because inlined proc bodies
-can contain it. Use statement form in symex-targeted SUTs.
+When L3 was written an expression-`if` in a generic body was rejected by
+`parseExpr` at compile time. That limitation is closed: `nnkIfExpr` is
+A-normalised (a temporary is hoisted and the `if` is emitted as a statement),
+so both the statement and expression forms are walked.
 
 ## Cluster L is verification-only
 

@@ -9,12 +9,12 @@
 | | |
 |---|---|
 | **Plan** | live |
-| **Build status** | Phases 0-7 + 9 + 10 + 11 + 12 shipped on `main`; symex package feature-complete for v1 minus #138 |
+| **Build status** | The engine is at v0.10.0 (see `CHANGELOG.md`). Current work is tracked by RFC-0016 (`docs/rfc/0016-native-parity-hardening.md`); this plan is the historical build record and the home of the ADRs below |
 | **Trigger condition** | **none** — build proceeded without a champion consumer per user direction |
 | **SMT substrate** | [nim-z3](https://github.com/coreyleavitt/nim-z3) v1.0.0 (SemVer-stable, audit-cycle-closed 2026-05-31) |
-| **Test count** | 58 symex test files across all phases, ~222 tests, 0 failures |
-| **Walker version** | `"3"` — last bumped at Phase 11 deferral #5 close-out (plain-fields shared). Phase 12 left it untouched and added a separate `renderAsChoicesVersion` constant for serialisation-encoding bumps. |
-| **Rendering version** | `"2"` — bumped at Phase 12 cycle 6 (continue-boolean encoding for seq / HashSet / Table witnesses, replacing the latently-broken length-prefix encoding). |
+| **Test count** | not tracked here; `tests/tsymex_*.nim` is the corpus and `scripts/sweep.sh` the gate (see `CLAUDE.md`) |
+| **Walker version** | `symexWalkerVersion` in `src/nelli/smt/canonicalize.nim` is authoritative (369 at v0.10.0); it is bumped on every walker-semantics change |
+| **Rendering version** | `renderAsChoicesVersion` in the same file is authoritative (`"12"` at v0.10.0) |
 | **Deferrals** | All Shape-B follow-ups (#133-#145) closed except #138; Phase 11 deferrals: 6 of 12 closed, 6 open await consumer demand; Phase 12 deferrals: 15 entries logged in [`docs/symex/PHASE12_PLAN.md`](symex/PHASE12_PLAN.md) (toolchain bugs + intentional v1 scope cuts + cross-cycle corrections). |
 
 ### Phase-by-phase
@@ -30,7 +30,7 @@
 | 5 — dynamic containers (mutate) | shipped via rectify | `6922f76` |
 | 6 — bounded loops + case | shipped | `d7b5be4` |
 | Rectifications round 1 (#137/#140/#142/#143/#144/#145) | shipped | `6922f76` |
-| Rectifications round 2 (#133/#134/#135/#136/#139/#141) | shipped | `4381404` |
+| Rectifications round 2 (#133/#134/#135/#136/#139/#141) | shipped, with a scope note: #133 (loop-invariant inference) was closed as superseded and does not exist; #134 mines `x op K` assertions for unrefined int params only; #135 is promoted-value binding through inlined calls | `4381404` |
 | 7 — `assertCoveredBy` + Report.symexFindings + DB tag | shipped | `ad9936e` |
 | 9 — docs / examples / extraction prep | shipped | `f7c95f9` |
 | 10 — content-addressed cache key (SHA-1 over canonical IR + target + settings + Z3/Nim/walker versions) | shipped | `d6f8105` |
@@ -764,7 +764,7 @@ one-level-deep field read off ANOTHER node (`otherNode.next`) or an inline
 
 ### ADR-0022 — Named ref-object HEAP IDENTITY (Cluster H; SUPERSEDES ADR-0021's value-model for P2b)
 
-**Status**: PROPOSED (design doc; awaiting implementation). Reopens P2b per Corey
+**Status**: ACCEPTED -- landed as Cluster H (verification and closeout in `46c7b80a`). Reopens P2b per Corey
 (2026-07-23) to model `ref object` construction — and named-ref-alias symbols
 generally — with true heap identity, so aliasing and reference identity yield REAL
 verdicts instead of the `sxUnknown` degrades ADR-0021 produced.
@@ -1800,7 +1800,7 @@ inequality proofs + the BV-bound classified-decline pin).
 
 ### ADR-0028 — Accumulating-scan recognition: the Q2 residue as closed forms, not smarter unrolling (round-5 design)
 
-**Status**: PROPOSED (round-5 design pass; no code this cycle).
+**Status**: ACCEPTED -- landed in round 6 (Leg 1: the string-backed byte-seq scan, `bdfca57b`, runtime.nim B1/B4/B5 sites).
 
 **Context.** With v69's tuple-return wiring, chapulin's headline unprovable
 shape degrades at its TRUE boundary for the first time: the
@@ -2066,7 +2066,7 @@ per-call `maxLoopUnwind` override remains the documented lever.
 
 ### ADR-0029 — Variant-object construction: literal-discriminant values through the existing variant machinery (round-5 design)
 
-**Status**: PROPOSED (round-5 design pass; no code this cycle).
+**Status**: ACCEPTED -- landed in round 6 (`db0138aa` iekVariantLit, `913275c8` isVariantConstructSym).
 
 **Context.** P2b explicitly declines a variant (`case`) object CONSTRUCTOR
 (`dsl_parser` ~2476, classified degrade). Everything downstream of a
@@ -2236,7 +2236,13 @@ in under 30 minutes.
 
 ## Out of scope for v1
 
-Recorded here so the boundary is explicit:
+Recorded here so the boundary is explicit.
+
+> Status note (RFC-0016 H1): this is the original v1 list. Since then
+> `ref`/`ptr` heap identity (ADR-0010, ADR-0022), closures (ADR-0009,
+> ADR-0014) and opaque-call tainting (#163) have shipped. Loop-invariant
+> inference never did. Concurrency stays out of scope. The shipped surface and
+> what still declines are recorded in `docs/symex/README.md` and RFC-0016.
 
 - **`ref T` / `ptr T` / closures with captures** — needs aliasing/identity
   tracking via Z3 array theory + occurs-check. Phase 4 rejects these with a

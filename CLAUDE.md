@@ -42,9 +42,9 @@ the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
   the controlled Status vocabulary, Category slugs, and the Depends-on shape
   that actually produces graph edges — are in `docs/rfc/README.md`. Read it
   before adding or restatusing an RFC.
-- Active RFC: `docs/rfc/0001-chapulin-hardening.md` (round 6 current) with handoff
-  at `docs/rfc/0001-chapulin-hardening.handoff.md`; symex design ADRs live in
-  `docs/SYMEX_PLAN.md`.
+- Active RFC: `docs/rfc/0016-native-parity-hardening.md` (Wave 4 in progress; v0.10.0
+  shipped) with handoff at `docs/rfc/0016-native-parity-hardening.handoff.md`;
+  symex design ADRs live in `docs/SYMEX_PLAN.md`.
 - Work status is tracked by quipu at `quipu.leavitt.dev` (project `nelli`),
   which mounts this repo read-only and never writes to it. Query the hub
   instead of re-auditing the docs tree — see `.claude/skills/tracker/`.

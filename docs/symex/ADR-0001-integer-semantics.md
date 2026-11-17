@@ -252,6 +252,12 @@ for the bit-twiddling kinds skip the abstraction check.
 
 ### Deferred (each gets its own follow-up issue from Phase 0)
 
+> Status note (RFC-0016 H1): item 1 never shipped (#133 was closed as
+> superseded; there is no loop-invariant inference). Items 2 and 3 shipped in
+> reduced form at `4381404` (#134: `x op K` assertions refine unrefined int
+> params; #135: promoted values bind through inlined calls). The list below
+> is the original Phase 0 text.
+
 These would each enable additional abstraction opportunities but are
 not in v1 scope:
 

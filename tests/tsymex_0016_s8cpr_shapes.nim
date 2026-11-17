@@ -185,12 +185,25 @@ proc seqEqBranch(c: bool; t: seq[int]) =
   let s = if c: @[1, 2] else: @[1]
   if s == t and t.len == 2 and t[1] == 2: symexTarget("hit")
 
-proc seqNeBranchDead(c: bool; t: seq[int]) =
-  # Past its length `s` holds no element, so the bounded unroll guards each
-  # index with `i < len`; without the guard `t[1]` (no element either)
-  # would make the two differ.
-  let s = if c: @[1, 2] else: @[1]
-  if not c and t == @[1] and s != t: symexTarget("hit")
+proc seqEqIdx(i: int; t: seq[int]) =
+  let a = [@[1, 2], @[1]]
+  if i >= 0 and i <= 1 and a[i] == t and t.len == 2: symexTarget("hit")
+
+proc seqNeIdx(i: int; t: seq[int]) =
+  # The unroll runs to the larger arm's length: `a[0]` and `t` differ only
+  # at index 1.
+  let a = [@[1, 2], @[1]]
+  if i >= 0 and i <= 1 and t == @[1, 5] and a[i] != t and i == 0:
+    symexTarget("hit")
+
+proc seqNeIdxDead(i: int; t: seq[int]) =
+  # `a[i]` over a symbolic index is an `ite` of the elements, so its length
+  # is `ite(i == 1, 1, 2)`: bounded by 2 but not exact. Past its length the
+  # seq holds no element, so each unrolled index is guarded by `i < len`;
+  # without the guard `t[1]` (no element either) would make the two differ.
+  let a = [@[1, 2], @[1]]
+  if i >= 0 and i <= 1 and t == @[1] and a[i] != t and i == 1:
+    symexTarget("hit")
 
 proc seqNan(f: float) =
   if @[f] == @[f]: discard
@@ -281,8 +294,11 @@ suite "RFC-0016 PRC-34: whole-seq ==":
     check native(seqEqSymLenDead(@[], @[])) == "ran"
     check native(seqEqBranch(true, @[1, 2])) == "hit"
     check native(seqEqBranch(false, @[1])) == "ran"
-    check native(seqNeBranchDead(false, @[1])) == "ran"
-    check native(seqNeBranchDead(true, @[1])) == "ran"
+    check native(seqEqIdx(0, @[1, 2])) == "hit"
+    check native(seqEqIdx(1, @[1])) == "ran"
+    check native(seqNeIdx(0, @[1, 5])) == "hit"
+    check native(seqNeIdxDead(1, @[1])) == "ran"
+    check native(seqNeIdxDead(0, @[1])) == "ran"
     check native(seqNan(NaN)) == "hit"
     check native(seqNan(1.0)) == "ran"
     check native(seqStrEq("ab", 'q')) == "hit"
@@ -316,8 +332,12 @@ suite "RFC-0016 PRC-34: whole-seq ==":
     declines(seqEqSymLenDead)
   test "a branch-merged length bounds the unroll: reached":
     decides(seqEqBranch, sxSat)
-  test "a branch-merged length bounds the unroll: guarded past the length":
-    decides(seqNeBranchDead, sxUnsat)
+  test "an indexed element's `ite` length bounds the unroll: reached":
+    decides(seqEqIdx, sxSat)
+  test "an indexed element's `ite` length: unrolled to the larger arm":
+    decides(seqNeIdx, sxSat)
+  test "an indexed element's `ite` length: guarded past the length":
+    decides(seqNeIdxDead, sxUnsat)
   test "a NaN element: unequal to itself":
     decides(seqNan, sxSat)
   test "string and char elements: reached":

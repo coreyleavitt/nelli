@@ -16,6 +16,22 @@
 # allocations (Nim's own arena is invisible to it), `-fsanitize=address` on
 # compile and link, frame pointers and native debug info for readable traces.
 #
+# libstdc++ is a STARTUP dependency of the executable (`-Wl,--push-state,
+# --no-as-needed,-l:libstdc++.so.6,--pop-state`). ASan resolves the real `__cxa_throw`
+# when the process starts, and the C backend's executable links no C++ runtime
+# (only libz3, loaded later, does), so the first C++ exception libz3 throws
+# internally (ordinary control flow: a probe, an ill-sorted term the API turns
+# into an error code) hit `CHECK failed: asan_interceptors.cpp real___cxa_throw
+# != 0` and killed every test of the first nightly (run 44040495505). Plain
+# `-lstdc++` is not enough: Ubuntu's gcc links with --as-needed and drops it,
+# as nothing the executable itself references is in libstdc++, and it needs the
+# -dev symlink, which a gcc-only image lacks (so the soname is named).
+# The reason the first run on a developer machine passed: openSUSE's
+# libasan.so.8 itself NEEDs libstdc++.so.6, so the container's executable always
+# had it; Ubuntu's libasan does not, so only the CI job hit the abort. The self-test's
+# third plant (tests/asan/plant_z3_throw.nim) fails the job if this link goes
+# missing.
+#
 # Leaks: LeakSanitizer is OFF (detect_leaks=0). nim-z3 still has live leaks
 # that its own slice (S8ck-r items 2 and 12: hooks that never release `ctx`,
 # separating real leaks from live Z3 globals) owns, plus per-process Z3 and
@@ -48,7 +64,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 # One definition of the sanitizer build.
-asan_flags="--mm:orc -d:useMalloc --debugger:native --passC:-fsanitize=address --passC:-fno-omit-frame-pointer --passL:-fsanitize=address"
+asan_flags="--mm:orc -d:useMalloc --debugger:native --passC:-fsanitize=address --passC:-fno-omit-frame-pointer --passL:-fsanitize=address --passL:-Wl,--push-state,--no-as-needed,-l:libstdc++.so.6,--pop-state"
 export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:abort_on_error=0:detect_odr_violation=0:symbolize=1:print_summary=1"
 export NELLI_NIM_FLAGS="${NELLI_NIM_FLAGS:-} $asan_flags"
 
@@ -82,6 +98,12 @@ if [ "${1:-}" = "--self-test" ]; then
   if [ "$rc" != 0 ] && [ "$k" = "AddressSanitizer:heap-use-after-free" ] && command grep -q 'ast_manager::' "$d/z3.out"; then
     echo "asan self-test: plant_z3_overrelease failed as it must (rc=$rc, $k, ast_manager frames in libz3)"
   else echo "asan self-test FAILED: plant_z3_overrelease rc=$rc kind='$k' (libz3 is not ASan-built, or the over-release went unseen)"; tail -n 20 "$d/z3.out"; fail=1; fi
+  # 3. libz3 throws a C++ exception internally and recovers: libstdc++ is linked
+  # into the executable at startup (the CHECK abort of the first nightly)
+  rc="$(run_one tests/asan/plant_z3_throw.nim 600 "$d/throw.out")"
+  if [ "$rc" = 0 ] && command grep -q 'z3 threw and recovered' "$d/throw.out" && ! command grep -q 'Sanitizer' "$d/throw.out"; then
+    echo "asan self-test: plant_z3_throw exited cleanly (an internal Z3 C++ exception passes the interceptor)"
+  else echo "asan self-test FAILED: plant_z3_throw rc=$rc (an internal Z3 exception must not abort: is libstdc++ linked at startup?)"; tail -n 20 "$d/throw.out"; fail=1; fi
   exit "$fail"
 fi
 

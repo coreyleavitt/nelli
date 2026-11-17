@@ -78,7 +78,10 @@ proc `=copy`(a: var ZapC; b: ZapC) =
   zap(a)
 proc `=copy`(a: var EmitC; b: EmitC) =
   a.v = b.v
-  {.emit: "`a`->v = 0;".}
+  when defined(cpp):
+    {.emit: "`a`.v = 0;".}   # `a` is a C++ reference there, a pointer on c
+  else:
+    {.emit: "`a`->v = 0;".}
 proc `=copy`(a: var LoopC; b: LoopC) =
   for i in 0 ..< 2:
     a.v = b.v

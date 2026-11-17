@@ -1668,7 +1668,12 @@ proc normalize[T](items: seq[Item[T]]; costs = false;
     if resolveBarrier(cur, costs, recLimit): continue
     if cur.len > 0 and decidesAtFront(cur[0]):
       return @[cur[0]]
-    var nx: seq[Item[T]]
+    # RFC-0016 S8ck-r: the initializer is load-bearing. Without it Nim 2.2.10
+    # (stock and patched) leaks `nx`: sempass2 forgets the writes made under
+    # the `for` below, marks `nx = pruned` a first write, and compiles it to
+    # a bitwise copy that never destroys the old buffer
+    # (tests/asan/nim_firstwrite_leak.nim).
+    var nx: seq[Item[T]] = @[]
     var cutting = false
     for it in cur:
       if it.kind == ikMarker:

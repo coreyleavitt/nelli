@@ -28,7 +28,7 @@ proc walkStmtBody(): seq[string] =
       let t = raw.strip()
       if t.len > 0 and not t.startsWith("#"): result.add raw
 
-const helperCeiling = 2   ## ratchet: `walkStmt` helpers still on `seq[Path]`
+const helperCeiling = 0   ## ratchet: `walkStmt` helpers still on `seq[Path]`
 
 suite "RFC-0016 K7c -- one exit channel":
 

@@ -19697,7 +19697,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
   exact(survivors)
 
 proc walkCallArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isCall` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19767,7 +19767,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       # arguments' own defect obligations become live.
       var out1: seq[Path]
       for p in paths:
-        if w.shouldStop: return
+        if w.shouldStop: return exact(@[])
         seedCallerHeapThreadvars(p)
         convFloatToIntBoundConds = @[]
         w.sinks.convFloatToIntBoundConds = @[]
@@ -19806,7 +19806,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       if not w.tailGate and stmt.opaqueUndefined != {}:
         out1 = noteOpaqueUndefined(w, out1, stmt)
       for sp in out1: havocOpaqueWrites(w, sp, stmt)
-      return opaqueRaiseForks(w, out1, stmt)
+      return exact(opaqueRaiseForks(w, out1, stmt))
     # Don't resolve a body; allocate fresh retSym; mark path
     # uncertain so any target reached on this path degrades to
     # sxUnknown rather than emitting an unsound witness.
@@ -19837,7 +19837,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         let z3Name = stmt.retName & "_op" & $w.synthZ3
         newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
       out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-    return out2
+    return exact(out2)
   if not w.procs.hasKey(stmt.callee):
     # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
     # (the parser rejected unresolved callees at compile time); G1c adds a
@@ -19867,7 +19867,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         "call to unregistered callee `" & stmt.callee & "` reached at " &
              "walk time -- declined at parse time (" & $declineKind &
              "); the path ends here, what follows is not modelled",
-        scope = calleeKeyed(stmt.callee)).live
+        scope = calleeKeyed(stmt.callee))
     let d =
       if unregisteredCalleeKind(stmt.callee, declineKind):
         w.degrade(declineKind,
@@ -19890,7 +19890,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         let z3Name = stmt.retName & "_cap" & $w.synthZ3
         newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
       out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-    return out2
+    return exact(out2)
   let sig = w.procs[stmt.callee]
   # Statistics
   if not w.callStats.hasKey(stmt.callee):
@@ -19937,7 +19937,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
   if overDepth:
     for p in paths:
       if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
-    if depthLive.len == 0: return depthLive
+    if depthLive.len == 0: return exact(@[])
     extendDepth = stackLeft < 0 and depthMayExtend(w, depthLive.len)
   if overDepth and not extendDepth:
     # The decline, and its history: `depthBail`.
@@ -19945,10 +19945,10 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       w.callStack.len >= hardCallDepth(w.settings)
     if atHard: inc w.depthHardHits
     if stackLeft >= 0: nativeStackCutFlag = true
-    depthBail(w, stmt, depthLive,
+    exact(depthBail(w, stmt, depthLive,
       (if stackLeft >= 0: dcutStack
        elif atHard: dcutHard
-       else: dcutFrontier), stackLeft)
+       else: dcutFrontier), stackLeft))
   else:
     let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
     # RFC-0005 S8ax: the first extended level is the extension's root. A
@@ -19971,7 +19971,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       if w.shouldStop:
         w.extHardMark = outerExtMark
-        return
+        return exact(@[])
       # RFC-0005 S8ax: abandoned (`depthMayExtend`); the root declines.
       if extRoot and w.depthHardHits > hardMark: break
       # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
@@ -20378,7 +20378,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           else: survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
           if w.shouldStop:
             w.extHardMark = outerExtMark   # RFC-0005 S8ax
-            return survivors
+            return exact(survivors)
         let frame = w.callStack[w.callStack.high]
         w.callStack.setLen(w.callStack.high)
         w.activeCalls.excl key
@@ -20501,8 +20501,8 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           survivors.add merged
     w.extHardMark = outerExtMark
     if extRoot and w.depthHardHits > hardMark:
-      return depthBail(w, stmt, paths, dcutHard)
-    survivors
+      return exact(depthBail(w, stmt, paths, dcutHard))
+    exact(survivors)
 
 proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
                      w: var WalkCtx): Survivors =
@@ -20528,6 +20528,20 @@ proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
   let d = w.degrade(stmt.unKind, stmt.reason,
                     scope = siteAnchored(stmt.unMarker))
   surviving(live, d)
+
+proc walkHeapViewed(stmt: IRStmt, paths: seq[Path],
+                    w: var WalkCtx): Survivors =
+  ## `walkHeapArm` one path at a time, for a walk holding a `viewMarks`
+  ## entry: each path's heap writes are logged in place, which needs the
+  ## paths `walkHeapArm` leaves live (the unwrap `walkStmt` does not do).
+  var outs: seq[Path]
+  for p in paths:
+    if w.shouldStop: break
+    let heapsBefore = p.heaps
+    for q in walkHeapArm(stmt, @[p], w).live:
+      if q != p: logInPlace(p, heapsBefore, q)
+      outs.add q
+  exact(outs)
 
 proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   if w.shouldStop or stmt == nil or paths.len == 0:
@@ -20962,7 +20976,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
       for bp in bound: exitReturn(bp, w)
     exact(@[])
   of isCall:
-    exact(walkCallArm(stmt, paths, w))
+    walkCallArm(stmt, paths, w)
   of isAssert:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21295,16 +21309,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         liveViewMarks(p, w)
         if p.viewMarks.len > 0: viewed = true
     if not viewed:
-      exact(walkHeapArm(stmt, paths, w))
+      walkHeapArm(stmt, paths, w)
     else:
-      var outs: seq[Path]
-      for p in paths:
-        if w.shouldStop: break
-        let heapsBefore = p.heaps
-        for q in walkHeapArm(stmt, @[p], w):
-          if q != p: logInPlace(p, heapsBefore, q)
-          outs.add q
-      exact(outs)
+      walkHeapViewed(stmt, paths, w)
   of isUnsupported:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard

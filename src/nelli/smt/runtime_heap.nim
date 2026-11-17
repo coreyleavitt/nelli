@@ -3201,7 +3201,7 @@ proc refVariantWholeStore(ctx: Z3Context; p: Path; refSort: RawZ3Sort;
     let cell = heapCellArrays(ctx, p, s.key, refSort, s.ty, s.variantTy)
     for c in heapCellStore(ctx, cell, refAst, parts[i], s.ty): result.add c
 
-proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for
   ## `isDeref`, `isNew`, `isDerefWrite`. `heapSelect`/`allocRefSort`/`freshRef`/
   ## `assertFreshness`/`nilDerefFork`/`buildHeapSnapshot` are already named procs
@@ -3300,7 +3300,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
       for p0 in paths:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         let step = heapStepOf(p0, stmt.dPtr)   ## RFC-0005 S8ar
         let (refSV, p) = lowerLeafInExpr(p0, stmt.dPtr)   ## RFC-0005 S8bw
         let refAst = case refSV.kind
@@ -3341,7 +3341,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               "__ptrRouteRead", heapArmDegrade(feGlobalRouteUnproved, routeWhy))
             continue
         for cp0 in nilDerefFork(p, refAst, objTy, w):
-          if w.shouldStop: return survivors
+          if w.shouldStop: return exact(survivors)
           # Materialise the disc heap (D1 `__@disc`, value sort = vDiscTy) and
           # `select` the disc; the disc-range disjunction (D4.5) is asserted
           # below — per ADDRESS, before the FieldDefect fork — so Z3 can never
@@ -3483,7 +3483,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           else:
             discard forkDefect(forkPath(cpA, basePc, cpA.env),
                                not inArmCond, "FieldDefect", none(string), w)
-          if w.shouldStop: return survivors
+          if w.shouldStop: return exact(survivors)
           # In-arm continuation: assert inArmCond on the range-constrained base.
           var childPc = basePc & @[inArmCond]
           # Materialise each matching arm's field heap (D1 `__@<ord>__<field>`),
@@ -3546,7 +3546,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                           unwrittenMsg(partIn),
                                           ub = unwrittenUb(partIn)))
           survivors.add child
-      return survivors
+      return exact(survivors)
     let sortTy = if isField: stmt.dObjTy else: stmt.dElemTy
     let typeId = refPointeeTypeId(sortTy)
     # ADR-0013 D1: disc field uses the __@disc heap key (@ prefix is collision
@@ -3558,7 +3558,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       else:           typeId
     var survivors: seq[Path]
     for p0 in paths:
-      if w.shouldStop: return survivors
+      if w.shouldStop: return exact(survivors)
       # Phase 15 R9: bound recursive heap traversal. HALT this path (no
       # survivor → sxUnknown) if the deref's heap step reaches the effective
       # budget BEFORE the select. Per-path: a shallower path continues.
@@ -3624,7 +3624,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for pd in (if refSV.kind == svPtr: danglingFork(p, refAst, w) else: @[p]):
         nilForks.add nilDerefFork(pd, refAst, sortTy, w)
       for cp0 in nilForks:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         if not isField and refVariantWhole(stmt.dElemTy):
           # RFC-0005 S8at: `p[]` of a case object reads its field heaps
           # (`refVariantWholeRead`).
@@ -3811,14 +3811,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var child = forkPath(cp2, childPc, newEnv)
         for c in cell: child.heaps[c.key] = c.arr
         survivors.add child
-    survivors
+    exact(survivors)
   of isNew:
     if stmt.nAddrIdx != nil:
-      return walkElemCell(stmt, paths, w)   # RFC-0005 S8be
+      return exact(walkElemCell(stmt, paths, w))   # RFC-0005 S8be
     if stmt.nAddrField.len > 0:
-      return walkFieldCell(stmt, paths, w)  # RFC-0005 S8bo
+      return exact(walkFieldCell(stmt, paths, w))  # RFC-0005 S8bo
     if stmt.nAddrOf.len > 0:
-      return walkAddrCell(stmt, paths, w)   # RFC-0005 S8ax
+      return exact(walkAddrCell(stmt, paths, w))   # RFC-0005 S8ax
     # Phase 15 R2 (ADR-0010). `new T` allocation semantics. Per surviving path:
     #   1. `freshRef` increments `path.allocCounters[typeId]` (per-path; R1b
     #      threads + max-merges it) and mints a fresh `Ref_T` const
@@ -3841,7 +3841,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     let typeId = refPointeeTypeId(pointee)
     var survivors: seq[Path]
     for p in paths:
-      if w.shouldStop: return survivors
+      if w.shouldStop: return exact(survivors)
       let refSort = allocRefSort(ctx, pointee)
       var child = forkPath(p, p.pc, p.env)
       let newRef = freshRef(ctx, refSort, typeId, child)
@@ -4061,7 +4061,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           child = childAfter
           child.heaps[typeId] = wrap[Z3AnyAst](ctx, storedRaw)
       survivors.add child
-    survivors
+    exact(survivors)
   of isDerefWrite:
     # Phase 15 R4 (ADR-0010). `p[] = v` — a GROUND heap WRITE (store). Promotes
     # R3's no-op stub to the real `path.heaps[typeId] := store(heap, p, v)`. For
@@ -4137,7 +4137,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
       for p0 in paths:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         let (refSV, p) = lowerLeafInExpr(p0, stmt.dwPtr)   ## RFC-0005 S8bw
         let refAst = case refSV.kind
           of svRef: refSV.refAst
@@ -4164,7 +4164,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           ptrFamilyHints.add ptrHintAW
           w.ptrFamilyHints.add ptrHintAW
         for cp in nilDerefFork(p, refAst, objTy, w):
-          if w.shouldStop: return survivors
+          if w.shouldStop: return exact(survivors)
           # Materialise disc heap (D1 `__@disc`) from cp (PRE-lower) and select
           # the disc for THIS address. Matches D2 arm-field read structure:
           # disc work and FieldDefect fork happen BEFORE lowering the RHS so
@@ -4274,7 +4274,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           else:
             discard forkDefect(forkPath(cpDW, basePcW, cpDW.env),
                                not inArmCondW, "FieldDefect", none(string), w)
-          if w.shouldStop: return survivors
+          if w.shouldStop: return exact(survivors)
           # In-arm continuation: build the child path, THEN lower the RHS on it.
           # Disc heap is carried unchanged (D3: the disc is not mutated by an
           # arm-field write — only the arm's data heap changes).
@@ -4359,7 +4359,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               storeActive(ctx, cpInArmRanged, objTy, refAst, some(act))
             let cpInArmDrained = drainPendingLowerEffects(cpInArmRanged)
             survivors.add cpInArmDrained
-      return survivors
+      return exact(survivors)
     let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy
     let typeId = refPointeeTypeId(sortTy)
     # ADR-0013 D1: disc write uses __@disc heap key; plain/non-variant use fieldHeapKey.
@@ -4369,7 +4369,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       else:           typeId
     var survivors: seq[Path]
     for p0 in paths:
-      if w.shouldStop: return survivors
+      if w.shouldStop: return exact(survivors)
       # Phase 15 R9: a deref-WRITE also bounds heap depth (the same step
       # and effective budget as the read). HALT this path before the store if it
       # reaches the budget.
@@ -4415,7 +4415,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for pd in (if refSV.kind == svPtr: danglingFork(p, refAst, w) else: @[p]):
         nilForks.add nilDerefFork(pd, refAst, sortTy, w)
       for cp in nilForks:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         if not isField and refVariantWhole(stmt.dwElemTy):
           # RFC-0005 S8at: `p[] = v` of a case object stores each part into
           # its field heap (`refVariantWholeStore`), the heaps `p.kind` and
@@ -4601,7 +4601,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             else:
               maybeForkDefect(forkPath(cp, basePc, cp.env), not same,
                               "FieldDefect", none(string), w)
-            if w.shouldStop: return survivors
+            if w.shouldStop: return exact(survivors)
             cpS = forkPath(cp, contPc, cp.env)
             if fixImage.len > 0:
               imageStore(ctx, cpS, imageHeapCells(ctx, cpS, refPointeeTypeId(objTy),
@@ -4703,7 +4703,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # degraded).
           child = drainPendingLowerEffects(child)
           survivors.add child
-    survivors
+    exact(survivors)
   else:
     raise newException(ValueError,  # [raise-audited: category-c: documented single-caller dispatch invariant (walk's own case restricts stmt.kind to isDeref/isNew/isDerefWrite before ever calling walkHeapArm)]
       "walkHeapArm: unexpected stmt.kind=" & $stmt.kind &

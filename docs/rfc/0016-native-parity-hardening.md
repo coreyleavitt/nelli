@@ -4,7 +4,7 @@ id      = "0016"
 title   = "RFC — native-parity hardening: the walker agrees with the compiled program, or declines"
 state   = "in-progress"
 wiring  = "proven"
-review  = "pending"
+review  = "floor"
 profile = "rfc-flow@6"
 blocked_by = ["0005"]
 size = "l"
@@ -280,6 +280,16 @@ at = "a72c7334f5218f208f7f04402647b4b8f7b0b4ba"
 owner = "corey"
 date = 2026-11-11
 reason = "0.10.0 code review opened over 882a6f73..a72c7334 (Waves 2-3, W3-z landed at a72c7334); prior floor was the 0.9.2 Wave 1 surface e769b87d..d9086529"
+ledger = "0016-review"
+
+[[audit]]
+id = "review-4"
+closes = "review"
+verdict = "floor"
+at = "ce1b4c38a46a3bdd54877700feb0f05ab9fcb85e"
+owner = "corey"
+date = 2026-11-16
+reason = "round 9, 0 C/H/M at f9315911; release head ce1b4c38 (two test-only CI fixes), CI 5/5 green, sweep vs 3418bd15 no unexplained regression"
 ledger = "0016-review"
 +++
 

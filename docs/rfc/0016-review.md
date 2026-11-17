@@ -2,7 +2,7 @@
 type = "review"
 id = "0016-review"
 title = "RFC-0016 code review ledger (0.9.2 Wave 1; 0.10.0 Waves 2-3)"
-state = "pending"
+state = "floor"
 profile = "rfc-flow@6"
 +++
 
@@ -143,3 +143,29 @@ Six lenses ran: runtime soundness, parser soundness, replay and cache (opus); se
 | R8-1 | High | fixed (rfc-0016-r9a; walker 369) | A bare closure call used as a `case` scrutinee was applied once per `of` label: the statement arm (and `hoistCaseExpr`, which reuses it) embedded the inline `iekClosureCall` that `parseExpr` returns for a by-value call (a lambda, a proc-valued `let`, a proc field) in every guard. `var n = 1; let next = proc(): int = (inc n; n); case next(): of 1: .. of 2: ..` takes `of 2` natively with `n` 2; the walker saw 3 at the second guard and took `else`. Pre-existing on main (0d2b06d8): the lambda, case-expression, and the two loop-guard fixtures below fail there identically. Fix: `bindCaseScrutinee` binds a scrutinee that holds a call (`irHasCall`) once into the preamble that runs before the if-chain; a call-free scrutinee is pure and stays inline (a byte read `s[i]` stays inline, CR-17(a)). Sibling sites that repeat one parsed expression, each probed with a closure-call key (about 35 shapes: `abs`, `min`, `succ`, conversions, array and string index, `div`, `shl`, range-typed `var`, `for` bounds, `if` and `while` guards, set and slice membership): the only other duplicates were `while next() in {..}` and `while next() in a .. b`, where a loop guard parses under `inGuardCond` (no hoist, so the key stayed inline in each disjunct, or in both bounds of a slice). Fixed in `parseSetLitMember` and `parseSliceMember`: a key that holds a call is bound once under a loop guard too, and the loop takes the existing rotation (`mkShortCircuitWhile`, a guard with a preamble). The same shapes under an `if` were bound already (controls). A range label (`of 1 .. 3`) declines (`nnkRange`), so it is not a site; `clamp` and an ordering on `s[i]` decline likewise. | `tests/tsymex_0016_r8a_inlinecalls.nim` (`R8-1`: `rK1`-`rK12`), `tests/inline_sites.nim` (`closureApplications`: the call appears once in the IR). |
 | R8-2 | Medium | fixed (rfc-0016-r9a) | `evalCondSynced` and `evalReturnSynced` duplicated the evaluate-then-reconcile skeleton, and `evalReturnSynced` bound `result` twice. Both are now thin instantiations of one template, `evalReconciled(p, w, producer, q, lowering)`: it snapshots and bumps `capSyncDepth` only when `frameHasCells`, runs `lowering` on the snapshot, and reconciles with the given `CellProducer`; `result` is bound once, in the return's lowering. No verdict change. | `tests/tsymex_0016_r8a_inlinecalls.nim`, `r7a_liveness`, `r5a_exitsync`, `r2b_blocksync`. |
 | R8-3 | Medium | fixed (rfc-0016-r9a) | `walkIfFollowConcrete` and `walkWhileFollowConcrete` copied the `factBase` / new facts / `concretelyInfeasible` / `followBranchOutcome` sequence. One `followGuard(w, dp, cond, factBase, construct)` now decides a continuation (`foOffRun` for new facts the pins contradict, which both callers drop). The two had diverged: the follow `if` checks `w.shouldStop` per continuation, the follow `while` only per iteration. Decided: per continuation in both, because each continuation walks a body (an arm, a loop body), so a stop request (budget, deadline) should not wait for the rest of a drain's continuations; a stop returns the survivors so far, as at the iteration check. The follow-while skip is pinned by `cWhI` (a drained `DivByZeroDefect` continuation whose `d != 0` fact the pin `d == 0` contradicts). Lows closed: the `reconcileCells` doc is the single statement of the invariant (the fixture history moved to the `r8a` header), `tests/inline_sites.nim` has one `walkIR` (`collectSites` is gone), a `var` write-back fixture for the return reconcile (`rV1`), and the `ifJoin` claim reads "no shape tried (4 fixtures) reaches". | `tests/tsymex_0016_r8a_inlinecalls.nim` (`cWhI`, `rV1`). |
+
+## Round history (0.10.0)
+
+| round | delta | in-scope C/H/M | worst finding |
+|---|---|---|---|
+| 1 | base `a72c7334` | see Round 1 | soundness Highs, D1-D6 |
+| 2 | `a72c7334..e0cff130` | 6 | R2-1 aliased lambda body outside the regime wrapper (false sat) |
+| 3 | `e0cff130..1502cad1` | 2 | labelled-block reconcile (fix-induced) |
+| 4 | round-3 fixes | 2 | block exit sync over fall-through survivors (fix-induced) |
+| 5 | `1502cad1..3a808b7e` | 2 (1 H) | R5-H1 the `nelliVmAliasAudit` build lost `std/os` |
+| 6 | `3a808b7e..f114ea35` | 3 | R6-1 to R6-3, test liveness of the reconcile points |
+| 7 | `f114ea35..e831a9b0` | 3 (1 H) | R7-1 the deleted `return` reconcile (fix-induced) |
+| 8 | `e831a9b0..cff2006e` | 3 (1 H) | R8-1 a closure-call `case` scrutinee applied per label (pre-existing on main) |
+| 9 | `cff2006e..f9315911` | 0 | Lows only |
+
+**Floor reached at round 9:** 0 Critical, 0 High and 0 Medium inside the surface, at `f9315911` (walker 369). The release head `ce1b4c38` adds two test-only commits found by its CI: the A2a audit's exemption fingerprint followed the S8ca character-write peek into `producerOf` (`014db92b`), and `tsymex_0016_r8a_inlinecalls` runs each test body in its own routine, so 72 entry sites no longer share one MSVC main frame (`ce1b4c38`). CI is 5/5 green on `ce1b4c38`, and the full Linux sweep of `f9315911` (same `src/`) against the `3418bd15` baseline moved one suite red (A2a, closed by `014db92b` and green in CI) and one green (`s6b_ops`), with 1159 unchanged. The universe join fails identically in both sweeps (pre-existing). `ce1b4c38` landed on main.
+
+**Open Lows carried forward:**
+- Round 9 design:
+  - the bind-once rule is one helper (`bindCaseScrutinee`) plus two inlined copies in `parseSetLitMember`/`parseSliceMember`;
+  - the "call-free scrutinee is pure" wording should say value-identical with idempotent defect forks;
+  - `followGuard`'s `factBase` is order-dependent;
+  - `evalReconciled` hands the guard value out through a caller variable.
+- Round 9 liveness: `rV1` and `cWhI` have no recorded red-on-removal.
+- Round 9 out-of-scope: `orderOperands` may bind a later call operand before an earlier `iekVar` it writes (`next() in lo..hi` with `next` writing `lo`); untraced.
+- Earlier rounds: the facade re-exports `runtime`/`dsl` wholesale; heap_model int-width split; three `WalkCtx` hooks pending `walker_core`; devirtualisation on alias bodies untested; duplicate decline per alias.

@@ -10,3 +10,14 @@
 NIM_ARTIFACT_PACKAGE=coreyleavitt/nim
 NIM_ARTIFACT_TAG=2.2.10-linux-x64
 NIM_ARTIFACT_DIGEST=sha256:aacc9dccde71dbd4576216b569c668d5fbf1a3090e56f73992bffb56c59a588c
+
+# The Z3 CI's symex-linux leg installs (.github/actions/setup-z3-linux and setup-symex-linux
+# defaults) and the local dev image installs from the same official release zip. The 4.13.4
+# row is the Windows legs' version (symex-nightly's z3-4.13.4 leg, scripts/Containerfile.z3-4.13.4).
+# check-toolchain-parity.sh fails when any of those copies, or the image, disagree with these.
+Z3_VERSION=5.1.0
+Z3_ASSET=z3-5.1.0-x64-glibc-2.39
+Z3_SHA256=f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a
+Z3_4134_VERSION=4.13.4
+Z3_4134_ASSET=z3-4.13.4-x64-glibc-2.35
+Z3_4134_SHA256=93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b

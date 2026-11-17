@@ -2278,3 +2278,45 @@ state = "open"
 note = ""
 source = "PRC-02 probe 4"
 cells = []
+
+[[row]]
+id = "INT-49"
+table = "5.8c"
+title = "Intake #176 (`[nightly] msvc:tsymex_0016_k5b_cfg_fwrapv`): the `-d:nelliFwrapv` cfg suite failed to compile under vcc (rc=1). Its vcc arm imported `s8cu_helpers`, which imports `nelli/symex`, whose compile-time `admitBuild` refuses `-d:nelliFwrapv` under vcc (cl.exe has no `-fwrapv`; signed overflow stays undefined there): `symex.nim(58, 10) Error: nelli/symex: this build is refused ... [field: fwrapv]`. Reproduced on Linux with `scripts/dt-vcc-frontend.sh` against the pre-`f6458d10` file. The refusal is the product being native-honest; the test was not. Fixed: `f6458d10` stopped the import under vcc; the fwrapv suites (`k5a_fwrapv`, `k5b_cfg_fwrapv`, `w3z_p2_fwrapv`) now branch on the product's own admission (`when admitBuild(buildSemantics, buildProvenance).isSome`), never on the C compiler, so their three `when defined(vcc)` census entries are gone"
+class = "test portability (the product's refusal is correct)"
+state = "closed"
+note = "`symex-nightly` run 44076804398 (main, 2026-11-17): msvc gate expected=1035 red=0, the suite green under vcc"
+sha = "f6458d10"
+source = "CI-B nightly, run 42608737906 (2026-11-09, sha 8af8f2fe), intake #176"
+evidence = "the msvc gate of run 42608737906 lists `vcc tests/tsymex_0016_k5b_cfg_fwrapv.nim rc=1`; `scripts/dt-vcc-frontend.sh` on the pre-fix file prints the refusal; run 44076804398's msvc gate is green"
+aliases = ["F-0008"]
+cells = []
+pins = ["tsymex_0016_k5b_cfg_fwrapv", "tsymex_0016_k5a_fwrapv", "tsymex_0016_w3z_p2_fwrapv"]
+
+[[row]]
+id = "INT-50"
+table = "5.8c"
+title = "Intake #173, #174 and #175 (`[nightly] ceiling-cpp:*`, `ceiling-msvc:*`, `ceiling-z3-4.13.4:*`), regressions half: listed ceiling offenders now run past 2.5 times their recorded seconds. `tsymex_rfc0005_s8cf_point_b`; and the n36 family `tsymex_r6_n36_raise_degrade`, `tsymex_r6_n36_raise_degrade_d`, `tsymex_rfc0005_s1c_verdict`, `tsymex_rfc0005_s8ag_indexsplit_c`, where R2's per-candidate tail walks exhaust the run budget. Not a verdict change: the CI-D ratchet fails the leg on time alone"
+class = "performance regression (CI-D ceiling); no verdict change"
+state = "open"
+note = ": `s8cf_point_b` is fixed on `rfc-0016-w4perf`; the n36 family is being fixed on `rfc-0016-w4perfb` (a tail walk only for a replay-confirmed candidate). The row closes when both land and a nightly's ceiling step is clean on all three legs"
+slice = "W4-z"
+home = "`rfc-0016-w4perf` (`s8cf_point_b`), `rfc-0016-w4perfb` (the n36 family)"
+source = "CI-B nightly, run 42608737906 (2026-11-09, sha 8af8f2fe), intake #173 #174 #175"
+evidence = "the report job's ceiling ratchet (`scripts/check-ceiling.sh --offenders`) on each leg; 103 (cpp), 226 (msvc) and 312 (z3-4.13.4) ceiling findings in run 42608737906"
+aliases = ["F-0009"]
+cells = []
+
+[[row]]
+id = "INT-51"
+table = "5.8c"
+title = "Intake #173, #174 and #175 (`[nightly] ceiling-cpp:*`, `ceiling-msvc:*`, `ceiling-z3-4.13.4:*`), new-offenders half: unlisted tests over the 150 s fail line (60 s x 2.5). `tsymex_0016_k5b_cfg_release` (cpp 404 s), `tsymex_0016_floatchecks` (281 s), `tfuzzconcolicundefined` (218 s), `tsymex_0016_d1vcc_frame` (msvc 215 s), `tsymex_0016_fieldoff` (msvc 166 s), `tsymex_0016_k4a_dispatch` (z3-4.13.4 182 s). They are split or sped up, never added to `tests/0016-allowlist/ceiling-offenders-*.txt`"
+class = "test harness (CI-D ceiling); no verdict change"
+state = "open"
+note = ": a Wave 4 split slice splits or speeds up each of the six; the row closes when a nightly's ceiling step lists none of them"
+slice = "W4-z"
+home = "a Wave 4 split slice (split or speed up; never list)"
+source = "CI-B nightly, run 42608737906 (2026-11-09, sha 8af8f2fe), intake #173 #174 #175"
+evidence = "the report job's ceiling ratchet on each leg (an unlisted test over 150 s fails the leg)"
+aliases = ["F-0010"]
+cells = []

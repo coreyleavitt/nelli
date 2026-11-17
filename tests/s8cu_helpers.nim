@@ -681,6 +681,34 @@ template pinCap*(fn: untyped; cap: static string;
     let pcRes = symexFind(fn, target, settings)
     pinCapJudge(pcRes, cap, target, instantiationInfo(-1).filename)
 
+proc pinCapConcolicJudge*(errors: seq[SymexErrorInfo]; cap, desc,
+                          file: string) =
+  ## RFC-0016 K7c. A concolic replay was cut by `cap`: the collect result's
+  ## own `errors` hold a tainting error of the cap site's kind and message
+  ## (a collect has no verdict, so there is no `trusted` to read). Writes the
+  ## `pvDeclined` record carrying `cap`, entry `concolic`.
+  let ex = capExpectation(cap)
+  var found = false
+  for e in errors:
+    if e.kind == ex.kind and taintsRun(e) and ex.needle in e.msg: found = true
+  if not found:
+    pinFail("pinCapConcolic " & cap & ": no " & $ex.kind & " message " &
+            "contains \"" & ex.needle & "\"; errors: " & show(errors))
+  writePinRecord(PinRecord(testFile: file, entry: "concolic",
+    cell: CellKey(scope: axConstruct, key: "cap/" & cap),
+    target: desc, domain: "-", verdict: pvDeclined,
+    walker: "concolicCollect", declineKind: $ex.kind, cap: cap,
+    native: "not run: the replay is cut by " & cap))
+
+template pinCapConcolic*(fn: untyped; cap: static string; trace, bindings,
+                         settings: untyped) =
+  ## The `concolicCollect` replay of `fn` over `trace` is cut by `cap`: see
+  ## `pinCapConcolicJudge`.
+  block:
+    let pccRes = concolicCollect(fn, trace, bindings, settings)
+    pinCapConcolicJudge(pccRes.errors, cap, astToStr(fn),
+                        instantiationInfo(-1).filename)
+
 # --- pinCrash and skipCell -------------------------------------------------
 
 proc crashClassOn*(rc: int; output: string; expect: CrashExpect;

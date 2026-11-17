@@ -275,7 +275,7 @@ proc countPlatform(s: string): int =
     result += countTok(s, t)
 
 const sanctionedCtors = ["degrade", "halted", "exact", "surviving", "continued",
-                         "carriedDegrade", "takeLoweringPendingDegrade",
+                         "selfTainted", "carriedDegrade", "takeLoweringPendingDegrade",
                          "heapArmDegrade"]
   ## RFC-0016 K7c. The procs that DEFINE the sanctioned `Degrade`/`Survivors`
   ## constructors (runtime.nim's privacy note). Their own literals are the

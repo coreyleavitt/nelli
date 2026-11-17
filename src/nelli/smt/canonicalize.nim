@@ -727,8 +727,15 @@ const renderAsChoicesVersion* = "12"
   ##   Nim's. It is now bound once ahead of the chain (a loop with such a
   ##   guard takes the rotation). The follow `while` also checks `shouldStop`
   ##   per continuation, as the follow `if` does (R8-3). No key bytes change.
+  ## - RFC-0016 K7c (369->370): a follow `while` cut at `maxLoopUnwind` while
+  ##   the replay is still iterating marks the branch decisions recorded from
+  ##   there on (`ConcolicCollectResult.soundBranches`); a flip targeting one
+  ##   is `cfoUnmodelable`, not a solve against the fabricated continuation
+  ##   (it answered a trusted `cfoUnsat` for a branch a real input flips). A
+  ##   flip's soundness now also carries the collect pass's recorded walk
+  ##   errors, so a cut run is `scIncomplete`. No key bytes change.
 
-const symexWalkerVersion* = "369"
+const symexWalkerVersion* = "370"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

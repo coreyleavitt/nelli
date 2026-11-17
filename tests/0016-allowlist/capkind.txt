@@ -1,3 +1,2 @@
 # RFC-0016 K1a-cells allowlist. Line: cell<TAB>slice<TAB>reason. An entry is removed in the commit whose pins evidence the cell
 # (tsymex_0016_universe fails a stale entry). The slice is the RFC slice expected to fill the cell.
-capkind:ckLoopUnwindFollow	K7c	the cap site exists (the concrete-follow loop) but needs a concolic replay to cut a run on it; no test calls pinCap; K7c left the walk-level degrade as it was (surviving, recorded) and pinned its three sibling caps through symexFind, but concolicCollect returns no error list, so no symexFind-based pinCap reaches this site; it needs a concolic result carrying the recorded errors

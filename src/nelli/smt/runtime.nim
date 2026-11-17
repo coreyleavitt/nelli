@@ -12820,6 +12820,11 @@ type
                       ## `runConcolicFlipImpl` to index by `targetBranchIndex`.
                       ## `wmExplore` never touches this field — byte-identical
                       ## walker behavior, no SW bump.
+    followCutAt: int  ## RFC-0016 K7c. `branchTrace.len` when the follow
+                      ## `while` first hit `maxLoopUnwind` with the replay
+                      ## still iterating (valid when `followCut`): every record
+                      ## from there on is on the fabricated continuation.
+    followCut: bool   ## RFC-0016 K7c. Whether that cut happened.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -12935,6 +12940,16 @@ proc continued(ps: seq[Path]; d: Degrade): Survivors =
   ## RFC-0016 K7a. A fold of `taintInPlace`: the degrade was recorded and
   ## `ps` go on, each now carrying `d`'s path coordinate.
   for p in ps: p.taintInPlace d
+  Survivors(live: ps)
+
+proc selfTainted(ps: seq[Path]): Survivors =
+  ## RFC-0016 K7c. `ps` leave carrying their own taint: each was forked with
+  ## `forkPathTainted` onto a recorded degrade (the variant constructor's
+  ## declined arms, which bind the result to a fresh value on the tainted
+  ## path). The invariant is that EVERY path in `ps` is tainted; nothing
+  ## untainted goes through here (that is `exact`). A debug build asserts it.
+  for p in ps:
+    assert p.taint != {}, "selfTainted: an untainted path"
   Survivors(live: ps)
 
 proc carriedDegrade(taint: Taint; ub: set[UbKind] = {}): Degrade =
@@ -17574,6 +17589,9 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Su
     # leaves the loop with the guard still TRUE on its pc (a continuation
     # the real trace never takes here: ⊤ on the path) and the iterations
     # past the bound are never walked (`{scIncomplete}` on the run).
+    if not w.followCut:
+      w.followCut = true
+      w.followCutAt = w.branchTrace.len
     let d = w.degrade(beBudgetExhausted,
       "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
            $unwind & ") while following a concrete replay that was still " &
@@ -19328,7 +19346,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
       # never rides a bare `w.sawUnknown` alone. RFC-0005 S1: one token
       # `d`, forked onto every path.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return exact(out2)
+    return selfTainted(out2)
   # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
   # remediation). `maxVariantConstructorForks` above only bounds the OUTER
   # fork count (`vcsTagSet.len`); the per-fork field-allocation loop below
@@ -19362,7 +19380,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       # Same safe-degrade idiom as the fork-count budget above.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return exact(out2)
+    return selfTainted(out2)
   # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
   # `paths`/`tag` fork loops (mirrors the two budget checks immediately
   # above — a STRUCTURAL check against `vcsTy` itself, uniform across
@@ -19401,7 +19419,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       # Same safe-degrade idiom as the two budget checks above.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return exact(out2)
+    return selfTainted(out2)
   # RFC-0005 S8f: Nim accepts a runtime discriminator in constructor
   # syntax only when no arm field is set, so every arm field is its
   # type's `default(T)` -- walker <= 153 allocated each one FRESH, and a
@@ -19418,7 +19436,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
                  "` has no modelled default value (" & $ft & ")")
           for p in paths:
             out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-          return exact(out2)
+          return selfTainted(out2)
   for p in paths:
     let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
     proc vcsDiscEq(tagOrd: int64): Z3Bool =
@@ -26923,6 +26941,19 @@ type
     definedFacts*: seq[ConcolicDefinedFact]
       ## RFC-0016 K10a-concolic. The operations with an undefined side this
       ## replay executed, in encounter order (see `ConcolicDefinedFact`).
+    errors*: seq[SymexErrorInfo]
+      ## RFC-0016 K7c. The classified degrades and caps the follow walk
+      ## recorded, deduplicated as `SymexResult.errors` is (the walk,
+      ## heap-depth, new-field and closure-call sinks, and the lowering sink):
+      ## a cap such as `ckLoopUnwindFollow` is here by its kind and message,
+      ## where only `counters.walkDegradeCount` counted it before. Parse-time
+      ## declines stay in `parseErrors`.
+    soundBranches*: int
+      ## RFC-0016 K7c. How many leading `branchTrace` records are on the
+      ## replay's own path: all of them, unless a follow `while` was cut at
+      ## `maxLoopUnwind` while the replay was still iterating, when the
+      ## records from the cut on belong to a continuation the trace never
+      ## takes. A flip of one of those is not a flip of the replay.
     branchTrace*: seq[ConcolicBranchRecord]
       ## RFC-fuzzer-nextgen G2. The `if`-decisions `walkIfFollowConcrete`
       ## resolved along this replay, in encounter order — `runConcolicFlipImpl`
@@ -27546,6 +27577,13 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     pinned & indexSplitRoots(ctx, pinned), settings) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
+  result.soundBranches =
+    if w.followCut: w.followCutAt else: w.branchTrace.len
+  drainDedupedByMsg(result.errors, w.walkDegradeErrors)
+  drainDedupedByMsg(result.errors, w.heapDepthErrors)
+  drainDedupedByMsg(result.errors, w.newFieldZeroErrors)
+  drainDedupedByMsg(result.errors, w.sinks.closureCallErrors)
+  drainDedupedByMsg(result.errors, loweringDegradeErrors)
   result.definedFacts = w.definedFacts
   result.drawVars = drawVars
   result.drawOverrides = drawOverrides
@@ -27750,7 +27788,7 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     result.outcome = o
     result.coverage = c
     result.soundness = Soundness(replay: rsNotNeeded)
-    drainRunTaint(result.soundness, [collected.parseErrors],
+    drainRunTaint(result.soundness, [collected.parseErrors, collected.errors],
       extra = (if result.undefinedReached.len > 0: {scIncomplete} else: {}))
     for u in result.undefinedReached:
       result.soundness.witnessUndefined.incl ubOrdinals({u.kind})
@@ -27758,7 +27796,9 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     inc result.flipCounters.byCoverage[c]
     return result
 
-  if targetBranchIndex < 0 or targetBranchIndex >= collected.branchTrace.len:
+  # RFC-0016 K7c: a decision past a follow cut is on a continuation the
+  # trace never takes; it is not offered as a flip target.
+  if targetBranchIndex < 0 or targetBranchIndex >= collected.soundBranches:
     finish(cfoUnmodelable, ccoNotApplicable)
 
   let target = collected.branchTrace[targetBranchIndex]
@@ -27859,7 +27899,7 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     # whether the SAME decision index now took a DIFFERENT arm. -----------
     let replay = runConcolicCollectImpl(prog, result.materialized, bindings, settings, maxDraws)
     let coverage =
-      if targetBranchIndex < replay.branchTrace.len and
+      if targetBranchIndex < replay.soundBranches and
          replay.branchTrace[targetBranchIndex].armTaken != target.armTaken:
         ccoIntendedCovered
       else:

@@ -1,25 +1,96 @@
 # Dev/test toolchain for nelli.
 #
-# Base: Corey's prebuilt Nim toolchain (ghcr.io/coreyleavitt/nim:latest —
-# Nim 2.2.10 on openSUSE Tumbleweed). nim-z3 v2.0.0 requires Nim >= 2.2.10:
-# Nim 2.2.0/2.2.4 reject nim-z3's tuple-type generic args in funcdecl.nim
-# ("Mixing types and values in tuples"). See docs/symex/RFC-phase15-reconciliation.md §F.
+# Base: Corey's prebuilt Nim image (ghcr.io/coreyleavitt/nim:latest, openSUSE
+# Tumbleweed) -- used for the OS, gcc and zypper ONLY. Its Nim is discarded: the
+# first layer below replaces it with the patched Nim OCI artifact that CI's
+# symex-linux leg runs, fetched by pinned digest (scripts/nim-toolchain.pin).
+# The old image's Nim predated the 0008 dispatch-table patch, so local results
+# silently diverged from CI.
 #
-# We layer on the Z3 shared library that nim-z3 dlopens (via softlink).
+# GLIBC: the artifact is built on rolling Tumbleweed and its nim binary needs
+# GLIBC_2.35 (checked 2026-11-17 with objdump -T). Tumbleweed carries 2.43, so
+# the base is newer. The build re-checks this and fails if the base is older.
+#
+# nim-z3 v2.0.0 requires Nim >= 2.2.10 (see docs/symex/RFC-phase15-reconciliation.md §F).
 #
 # Build:  scripts/build-dev-image.sh   ->   localhost/nelli-dev:latest
+#         (passes the pin file's values as the three ARGs below)
 FROM ghcr.io/coreyleavitt/nim:latest
-# z3-devel: the symex engine's solver (dlopen'd via softlink).
-# mingw64-cross-gcc/-c++: Windows cross-compile CHECK toolchain (Eci) — used by
+
+# Defaults mirror scripts/nim-toolchain.pin; build-dev-image.sh overrides them
+# from it, and check-toolchain-parity.sh fails if the two disagree.
+ARG NIM_ARTIFACT_PACKAGE=coreyleavitt/nim
+ARG NIM_ARTIFACT_TAG=2.2.10-linux-x64
+ARG NIM_ARTIFACT_DIGEST=sha256:aacc9dccde71dbd4576216b569c668d5fbf1a3090e56f73992bffb56c59a588c
+ARG Z3_VERSION=5.1.0
+ARG Z3_ASSET=z3-5.1.0-x64-glibc-2.39
+ARG Z3_SHA256=f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a
+
+# The same protocol as .github/actions/setup-nim-artifact: an anonymous pull
+# token, the manifest BY DIGEST (not the tag), then the one layer blob, whose
+# address is its own sha256 and is verified.
+RUN set -eu; \
+    pkg="$NIM_ARTIFACT_PACKAGE"; \
+    tok="$(curl -fsS "https://ghcr.io/token?scope=repository:${pkg}:pull&service=ghcr.io" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"; \
+    [ -n "$tok" ]; \
+    curl -fsS -H "Authorization: Bearer $tok" \
+      -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+      -o /tmp/manifest.json "https://ghcr.io/v2/${pkg}/manifests/${NIM_ARTIFACT_DIGEST}"; \
+    echo "${NIM_ARTIFACT_DIGEST#sha256:}  /tmp/manifest.json" | sha256sum -c -; \
+    grep -q '"artifactType":"application/x-nim-toolchain"' /tmp/manifest.json; \
+    layer="$(sed -n 's/.*"layers":\[{[^}]*"digest":"\(sha256:[0-9a-f]*\)".*/\1/p' /tmp/manifest.json)"; \
+    [ -n "$layer" ]; \
+    curl -fsSL -H "Authorization: Bearer $tok" -o /tmp/nim.tar.xz "https://ghcr.io/v2/${pkg}/blobs/${layer}"; \
+    echo "${layer#sha256:}  /tmp/nim.tar.xz" | sha256sum -c -; \
+    rm -rf /opt/nim && mkdir -p /opt/nim/2.2.10-patched && tar --no-same-owner --strip-components=1 -xJf /tmp/nim.tar.xz -C /opt/nim/2.2.10-patched; \
+    test -x /opt/nim/2.2.10-patched/bin/nim; \
+    need="$(objdump -T /opt/nim/2.2.10-patched/bin/nim | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"; \
+    have="GLIBC_$(ldd --version | sed -n '1s/.* //p')"; \
+    [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | tail -1)" = "$have" ] || \
+      { echo "base glibc $have is older than the artifact needs ($need)" >&2; exit 1; }; \
+    { echo "artifact_package=$pkg"; echo "artifact_tag=$NIM_ARTIFACT_TAG"; \
+      echo "artifact_digest=$NIM_ARTIFACT_DIGEST"; echo "layer_digest=$layer"; \
+      echo "glibc_needed=$need"; echo "glibc_have=$have"; \
+      echo "nim_version<<EOV"; /opt/nim/2.2.10-patched/bin/nim -v; echo "EOV"; } > /etc/nelli-toolchain; \
+    rm -f /tmp/manifest.json /tmp/nim.tar.xz
+LABEL dev.leavitt.nelli.nim-artifact-digest="${NIM_ARTIFACT_DIGEST}" \
+      dev.leavitt.nelli.nim-artifact-tag="${NIM_ARTIFACT_TAG}"
+
+# mingw64-cross-gcc/-c++: Windows cross-compile CHECK toolchain (Eci) -- used by
 # scripts/dt-crosswin.sh to compile+link nelli for --os:windows locally. This
-# catches Windows API misuse at build time; it cannot RUN Windows binaries —
+# catches Windows API misuse at build time; it cannot RUN Windows binaries --
 # run-verification for Windows-only code goes through the CI Windows leg
 # (see docs/rfc/0003-fuzzer-nextgen.windows-capability.md).
+# Z3 is deliberately NOT a zypper package: rolling Tumbleweed moves it (5.1 -> 5.4)
+# and nelli admits only 4.13.4 and 5.1. It is installed from the next layer.
 RUN zypper --non-interactive --gpg-auto-import-keys refresh && \
-    zypper --non-interactive install --force-resolution z3-devel gawk \
+    zypper --non-interactive install --force-resolution gawk \
         mingw64-cross-gcc mingw64-cross-gcc-c++ && \
     zypper clean -a && \
-    mkdir -p /opt/z3-headers && cp /usr/include/z3*.h /opt/z3-headers/
+    ! rpm -qa | grep -i '^\(lib\)\?z3'
+# Z3: the official release zip CI's symex-linux leg installs
+# (.github/actions/setup-z3-linux), same version and sha256 (scripts/nim-toolchain.pin).
+# libz3.so is installed with the soname layout the distro package had
+# (libz3.so -> libz3.so.<maj.min> -> libz3.so.<maj.min>.0.0) where softlink dlopens it;
+# headers go to /usr/include and /opt/z3-headers (NELLI_Z3_INCLUDE). The zip is unpacked
+# with python3 (no unzip in the base).
+RUN set -eu; \
+    curl -fsSL --retry 5 -o /tmp/z3.zip \
+      "https://github.com/Z3Prover/z3/releases/download/z3-${Z3_VERSION}/${Z3_ASSET}.zip"; \
+    echo "${Z3_SHA256}  /tmp/z3.zip" | sha256sum -c -; \
+    python3 -I -c "import zipfile; zipfile.ZipFile('/tmp/z3.zip').extractall('/tmp/z3')"; \
+    mm="${Z3_VERSION%.*}"; \
+    install -m 0755 /tmp/z3/${Z3_ASSET}/bin/libz3.so /usr/lib64/libz3.so.${mm}.0.0; \
+    ln -s libz3.so.${mm}.0.0 /usr/lib64/libz3.so.${mm}; \
+    ln -s libz3.so.${mm} /usr/lib64/libz3.so; \
+    mkdir -p /opt/z3-headers; \
+    cp /tmp/z3/${Z3_ASSET}/include/z3*.h /usr/include/; \
+    cp /tmp/z3/${Z3_ASSET}/include/z3*.h /opt/z3-headers/; \
+    ldconfig; \
+    { echo "z3_version=$Z3_VERSION"; echo "z3_asset=$Z3_ASSET"; echo "z3_sha256=$Z3_SHA256"; } >> /etc/nelli-toolchain; \
+    rm -rf /tmp/z3 /tmp/z3.zip
+LABEL dev.leavitt.nelli.z3-version="${Z3_VERSION}" \
+      dev.leavitt.nelli.z3-sha256="${Z3_SHA256}"
 # libpcre (PCRE1) for `std/re`: Nim's pcre wrapper dlopens
 # `libpcre.so(.3|.1|)` at start-up of any binary whose generated code calls a
 # regex proc. RFC-0005 S10 made that every symex SUT that uses `re` (replay
@@ -42,3 +113,5 @@ RUN zypper --non-interactive install --force-resolution make gzip && \
     echo /usr/local/lib64 > /etc/ld.so.conf.d/usr-local-lib64.conf && ldconfig && \
     ldconfig -p | grep -q 'libpcre\.so\.1 ' && \
     cd / && rm -rf /tmp/pcre.tar.gz /tmp/pcre-${PCRE_VERSION}
+# No zypper Z3 may have arrived through a later dependency path.
+RUN ! rpm -qa | grep -i '^\(lib\)\?z3'

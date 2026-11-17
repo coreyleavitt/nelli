@@ -2,12 +2,15 @@
 # 4.13.4 release, the version the Windows CI legs install (fuzzer-msvc,
 # fuzzer-mingw, symex-mingw). Everything else (Nim, PCRE1, mingw cross
 # toolchain) is inherited unchanged, so Z3 is the ONLY difference between this
-# row and the default image (which ships whatever Z3 Tumbleweed carries).
+# row and the default image (which ships the pinned Z3 5.1.0 release).
 #
 # Build:  scripts/build-dev-image.sh z3-4.13.4   ->   localhost/nelli-dev:z3-4.13.4
+#         (BASE_IMAGE defaults to localhost/nelli-dev:latest; build-dev-image.sh
+#         z3-4.13.4-parity builds the same file on :parity2 as a trial tag)
 # Use:    scripts/dt-bounded.sh -i z3-4.13.4 c tests/foo.nim
 #         scripts/sweep.sh -i z3-4.13.4 <outlog>
-FROM localhost/nelli-dev:latest
+ARG BASE_IMAGE=localhost/nelli-dev:latest
+FROM ${BASE_IMAGE}
 ARG Z3_VERSION=4.13.4
 ARG Z3_ASSET=z3-4.13.4-x64-glibc-2.35
 ARG Z3_SHA256=93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b
@@ -25,4 +28,8 @@ RUN curl -fsSL -o /tmp/z3.zip \
     cp /tmp/z3/${Z3_ASSET}/include/z3*.h /usr/include/ && \
     cp /tmp/z3/${Z3_ASSET}/include/z3*.h /opt/z3-headers/ && \
     ldconfig && \
+    sed -i '/^z3_/d' /etc/nelli-toolchain && \
+    { echo "z3_version=$Z3_VERSION"; echo "z3_asset=$Z3_ASSET"; echo "z3_sha256=$Z3_SHA256"; } >> /etc/nelli-toolchain && \
     rm -rf /tmp/z3 /tmp/z3.zip
+LABEL dev.leavitt.nelli.z3-version="${Z3_VERSION}" \
+      dev.leavitt.nelli.z3-sha256="${Z3_SHA256}"

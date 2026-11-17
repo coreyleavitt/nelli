@@ -35,6 +35,15 @@ the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
   `vcc` on Windows. (This replaced `chapulin-symex:2.2.10`, a container
   defined in the CHAPULIN repo — nelli no longer depends on a consumer for
   its own toolchain.)
+  **The local dev image runs that same artifact, by digest.**
+  `scripts/nim-toolchain.pin` records the linux-x64 tag and manifest digest;
+  `scripts/Containerfile` fetches exactly that digest (replacing the Nim in its
+  base, which predated the 0008 dispatch-table patch and made local decline
+  kinds diverge from CI), and `setup-symex-linux` reads the same pin. The image
+  carries the digest as a label and in `/etc/nelli-toolchain`.
+  `scripts/check-toolchain-parity.sh [--image TAG] [--live]` fails on drift
+  (`dt.sh` and the CI leg call it); `--live` also catches a republished tag.
+  To bump the toolchain, edit the pin and rerun `scripts/build-dev-image.sh`.
 - Three Windows CI legs, named by C compiler: `fuzzer-msvc`, `fuzzer-mingw`,
   `symex-mingw`. All containerless. New RFC branches must be named `rfc-*` to
   get Windows verification (the triggers are `[main, 'rfc-*']`).

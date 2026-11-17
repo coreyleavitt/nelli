@@ -33,6 +33,10 @@ inputs:
   tag:
     description: "Artifact tag, e.g. 2.2.10-windows-x64"
     required: true
+  digest:
+    description: "Optional manifest digest (sha256:...). When set the manifest is fetched BY DIGEST, so a republished tag cannot change what is installed."
+    required: false
+    default: ""
   package:
     description: "GHCR package path"
     required: false
@@ -53,6 +57,8 @@ runs:
         $ErrorActionPreference = 'Stop'
         $pkg = '${{ inputs.package }}'
         $tag = '${{ inputs.tag }}'
+        $pin = '${{ inputs.digest }}'
+        $ref = if ($pin) { $pin } else { $tag }
 
         Write-Host "=== anonymous pull token for $pkg ==="
         $tok = (Invoke-RestMethod -Uri "https://ghcr.io/token?scope=repository:${pkg}:pull&service=ghcr.io").token
@@ -60,8 +66,8 @@ runs:
         $hdr = @{ Authorization = "Bearer $tok"
                   Accept = 'application/vnd.oci.image.manifest.v1+json' }
 
-        Write-Host "=== manifest for ${pkg}:${tag} ==="
-        $man = Invoke-RestMethod -Uri "https://ghcr.io/v2/$pkg/manifests/$tag" -Headers $hdr
+        Write-Host "=== manifest for ${pkg}:${tag} (ref $ref) ==="
+        $man = Invoke-RestMethod -Uri "https://ghcr.io/v2/$pkg/manifests/$ref" -Headers $hdr
         if ($man.artifactType -ne 'application/x-nim-toolchain') {
           throw "unexpected artifactType '$($man.artifactType)' -- expected application/x-nim-toolchain. Is '$tag' a container image rather than a toolchain artifact?"
         }

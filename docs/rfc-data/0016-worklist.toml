@@ -776,7 +776,7 @@ cells = []
 id = "PRC-34"
 table = "5.2m"
 state = "open"
-note = "S8cp-r (walker 391): record `==` over atom fields and a routine-body `type` section modelled; the alias, `{.inject.}`, nested `addr t[1][0]` and `s[1].b = 7` shapes already decide (pinned with native runs). Open: whole-seq `==` (needs a quantifier or a ground unroll over a known length), `==` on a record with a non-atom field (user `==` through `mixin`), and `s[1][0] = x` (`seNestedSeqUnsupported`, with PRC-23)."
+note = "S8cp-r (walker 391): record `==` over atom fields and a routine-body `type` section modelled; the alias, `{.inject.}`, nested `addr t[1][0]` and `s[1].b = 7` shapes already decide (pinned with native runs). S8cp-r (walker 392): whole-seq `==` over an atom element modelled (`seqEqZ3`: equal lengths and element-wise `==`, a ground unroll when either length is a numeral of at most 64, else one quantified conjunct over a bound index; NaN elements unequal); a seq whose element `==` may be a user's (an enum, a `distinct`, a nested seq) declines in the parser, and an enum field in a record keeps the record decline (both pinned). Open: `==` on a record with a non-atom field (user `==` through `mixin`), and `s[1][0] = x` (`seNestedSeqUnsupported`, with PRC-23)."
 home = "S8cp item 7"
 source = "`jobs/s8cp.md`; S8cb remainder"
 moves = "declined shapes: whole-tuple `==` (`eqBV`); a local `let b = addr o.y` alias on whole assignment; a type section in a routine body (with PRC-22); a parameter pragma `x {.inject.}: int`, a compile error in `collectStringBackedByteSeqParamsImpl`, to fix first; nested `addr t[1][0]`. `s[1].b = 7` and `s[1][0] = x` only if S8bz left them declined Includes PRC-22; add whole-seq `==` (`runtime.nim:8341`, not re-verified)."
@@ -1371,10 +1371,11 @@ id = "INT-21"
 table = "5.8a"
 title = "The check-off probe's `ai_caught` (`mitems` over `int16`, `assertions: off`) decides sxRaised. The raise looks real (int16 overflow at 32767 with overflow checks on), but no native run tried that input. Pin it natively"
 class = "test-harness"
-state = "open"
-note = ""
+state = "closed"
+note = "(S8cp-r) Pinned natively by W1-p: `tests/tsymex_0016_w1p_probes.nim` test `INT-21 ai_caught` runs `aIter(32767'i16)` and checks it raises `OverflowDefect` (neither `ai_hit` nor `ai_caught` reached), runs 0, 7, -1 and 32766 without a raise, and `pinExact`s the walker's `tRaisedExn(\"OverflowDefect\")` verdict over `low(int16)`, -1, 0, 7, 32766, 32767. The raise is real."
 source = "pre-tag probes (S8cp item)"
 cells = []
+pins = ["tsymex_0016_w1p_probes"]
 
 [[row]]
 id = "INT-22"

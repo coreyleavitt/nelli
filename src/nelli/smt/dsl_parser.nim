@@ -3795,6 +3795,16 @@ proc atomRecordFieldTypes(recTy: NimNode): seq[NimNode] =
     if ti.kind != nnkSym or ti.strVal notin atomEqTypeNames: return @[]
   tys
 
+proc isAtomSeqType(seqTy: NimNode): bool =
+  ## RFC-0016 PRC-34. `seqTy` is a `seq[T]` whose element type `T` is an atom
+  ## (`atomEqTypeNames`): system's generic `==` on two such seqs compares the
+  ## elements with system's own `==`.
+  if seqTy == nil or seqTy.kind == nnkNilLit: return false
+  let impl = seqTy.getTypeImpl
+  if impl.kind != nnkBracketExpr or impl.len != 2: return false
+  let et = impl[1].getTypeImpl
+  et.kind == nnkSym and et.strVal in atomEqTypeNames
+
 proc recordAtomEqIR(l, r: IRExpr; recTy: IRType): IRExpr =
   ## RFC-0016 PRC-34. System's `==` on two records of atoms: the
   ## conjunction of the fields' `==` (`true` for a record with none).
@@ -12683,6 +12693,21 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         preamble.add mkLet(lt, recTy, l)
         preamble.add mkLet(rt, recTy, r)
         return recordAtomEqIR(mkVar(lt), mkVar(rt), recTy)
+    # RFC-0016 PRC-34: system's generic `==` on two seqs compares lengths,
+    # then elements with the element type's `==`, reached through `mixin`.
+    # Over an atom element (`isAtomSeqType`) the walker models it whole
+    # (`seqEqZ3`); any other element's `==` may be a user's (an enum or a
+    # `distinct` lifts to a builtin value the walker cannot tell apart), so
+    # the comparison declines here.
+    if n.len == 3 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["=="]) and
+       n[1].typeKind == ntySequence and n[2].typeKind == ntySequence and
+       not isAtomSeqType(n[1].getTypeInst):
+      preamble.add ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "RFC-0016 PRC-34: `==` on two seqs whose element type's " &
+                "`==` may be a user's (`" & n[1].getTypeInst.repr &
+                "`) is not modelled (feUnsupportedOp)"),
+        "seq == over a non-atom element (feUnsupportedOp)")
+      return mkBoolLit(false)
     # Phase 15 S8: `&` string concatenation. Intercept BEFORE binopForInfix
     # (which has no `&` case and would error). Only fire when BOTH operands
     # classify as `itString` — `s & t`, `s & "lit"`, `"lit" & s`. This guard

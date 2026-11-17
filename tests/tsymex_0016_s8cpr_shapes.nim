@@ -38,8 +38,15 @@ type
     i: Inner
   Pt = object
     b: int
+  Hue = enum hRed, hBlue
+  WithHue = object
+    h: Hue
+    k: int
 
 proc `==`(a, b: Meters): bool = int(a) div 10 == int(b) div 10
+proc `==`(a, b: Hue): bool = ord(a) + ord(b) >= 0
+  ## Every two hues are equal: an enum's `==` is overloadable, and system's
+  ## generic `==` on a record or a seq reaches this one through `mixin`.
 
 proc tupEq(a, b: int) =
   let t = (a, b)
@@ -71,6 +78,12 @@ proc distinctField(a, b: int) =
   let l = WithDistinct(m: Meters(a), k: 0)
   let r = WithDistinct(m: Meters(b), k: 0)
   if l == r and a != b: symexTarget("hit")
+
+proc enumField(a: int) =
+  # An enum lifts to an integer, so only the field type's name tells the
+  # user's `==` apart; under it `hRed` equals `hBlue`.
+  let l = WithHue(h: (if a > 0: hRed else: hBlue), k: 0)
+  if l == WithHue(h: hBlue, k: 0) and a > 0: symexTarget("hit")
 
 proc nestedRecord(a: int) =
   if Outer(i: Inner(v: a)) == Outer(i: Inner(v: 4)): symexTarget("hit")
@@ -107,6 +120,51 @@ proc seqFieldWrite(v: int) =
   s[1].b = 7
   if s[1].b == v: symexTarget("hit")
 
+proc seqEqLit(a, b: int) =
+  if @[a, 2] == @[1, b]: symexTarget("hit")
+
+proc seqEqLenDead(a: int) =
+  if @[a] == @[a, a]: symexTarget("hit")
+
+proc seqNe(a: int) =
+  if @[a, 1] != @[3, 1]: discard
+  else: symexTarget("hit")
+
+proc seqEqParam(s: seq[int]) =
+  if s == @[3, 4]: symexTarget("hit")
+
+proc seqEqParamDead(s: seq[int]) =
+  if s == @[3, 4] and s.len != 2: symexTarget("hit")
+
+proc seqEqParamElemDead(s: seq[int]) =
+  if s == @[3, 4] and s[1] != 4: symexTarget("hit")
+
+proc seqEqSym(s, t: seq[int]) =
+  if s.len == 2 and s == t and t[1] == 5: symexTarget("hit")
+
+proc seqEqSymDead(s, t: seq[int]) =
+  if s.len > 1 and s == t and s[1] != t[1]: symexTarget("hit")
+
+proc seqEqSymLenDead(s, t: seq[int]) =
+  if s == t and s.len != t.len: symexTarget("hit")
+
+proc seqNan(f: float) =
+  if @[f] == @[f]: discard
+  else: symexTarget("hit")
+
+proc seqStrEq(s: string; c: char) =
+  if @[s, "x"] == @["ab", "x"] and @[c] == @['q']: symexTarget("hit")
+
+proc seqStrEqDead(s: string) =
+  if @[s, "x"] == @["ab", "y"]: symexTarget("hit")
+
+proc seqEnum(a: int) =
+  let c = if a > 0: hRed else: hBlue
+  if @[c] == @[hBlue] and a > 0: symexTarget("hit")
+
+proc seqNested(a: int) =
+  if @[@[a]] == @[@[4]]: symexTarget("hit")
+
 suite "RFC-0016 PRC-34: record ==":
   test "native":
     check native(tupEq(3, 3)) == "hit"
@@ -121,6 +179,7 @@ suite "RFC-0016 PRC-34: record ==":
     check native(nanEq(1.0)) == "ran"
     check native(distinctField(12, 15)) == "hit"
     check native(nestedRecord(4)) == "hit"
+    check native(enumField(1)) == "hit"
   test "a tuple: reached":
     decides(tupEq, sxSat)
   test "a tuple, `!=`: reached":
@@ -138,11 +197,74 @@ suite "RFC-0016 PRC-34: record ==":
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOp)
+  test "an enum field with a user `==` still declines":
+    let r = symexFind(enumField, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
   test "a nested record still declines":
     let r = symexFind(nestedRecord, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOp)
+
+suite "RFC-0016 PRC-34: whole-seq ==":
+  test "native":
+    check native(seqEqLit(1, 2)) == "hit"
+    check native(seqEqLit(1, 3)) == "ran"
+    for v in [low(int), 0, high(int)]:
+      check native(seqEqLenDead(v)) == "ran"
+    check native(seqNe(3)) == "hit"
+    check native(seqNe(4)) == "ran"
+    check native(seqEqParam(@[3, 4])) == "hit"
+    check native(seqEqParam(@[3, 4, 5])) == "ran"
+    check native(seqEqParam(@[3])) == "ran"
+    check native(seqEqParamDead(@[3, 4])) == "ran"
+    check native(seqEqParamElemDead(@[3, 4])) == "ran"
+    check native(seqEqSym(@[1, 5], @[1, 5])) == "hit"
+    check native(seqEqSym(@[1, 5], @[1, 5, 0])) == "ran"
+    check native(seqEqSymDead(@[1, 5], @[1, 5])) == "ran"
+    check native(seqEqSymLenDead(@[], @[])) == "ran"
+    check native(seqNan(NaN)) == "hit"
+    check native(seqNan(1.0)) == "ran"
+    check native(seqStrEq("ab", 'q')) == "hit"
+    check native(seqStrEq("abc", 'q')) == "ran"
+    check native(seqStrEqDead("ab")) == "ran"
+    check native(seqEnum(1)) == "hit"
+    check native(seqNested(4)) == "hit"
+  test "literals: reached":
+    decides(seqEqLit, sxSat)
+  test "literals of unequal lengths: unreachable":
+    decides(seqEqLenDead, sxUnsat)
+  test "`!=`: reached":
+    decides(seqNe, sxSat)
+  test "a parameter against a literal: reached":
+    decides(seqEqParam, sxSat)
+  test "a parameter against a literal fixes its length":
+    decides(seqEqParamDead, sxUnsat)
+  test "a parameter against a literal fixes its elements":
+    decides(seqEqParamElemDead, sxUnsat)
+  test "two parameters: reached":
+    decides(seqEqSym, sxSat)
+  test "two parameters: equal elements":
+    decides(seqEqSymDead, sxUnsat)
+  test "two parameters: equal lengths":
+    decides(seqEqSymLenDead, sxUnsat)
+  test "a NaN element: unequal to itself":
+    decides(seqNan, sxSat)
+  test "string and char elements: reached":
+    decides(seqStrEq, sxSat)
+  test "string elements: unreachable":
+    decides(seqStrEqDead, sxUnsat)
+  test "an enum element with a user `==` declines":
+    let r = symexFind(seqEnum, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
+  test "a nested seq declines":
+    let r = symexFind(seqNested, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
 
 suite "RFC-0016 PRC-34: a type section in a routine body":
   test "native":
@@ -169,5 +291,5 @@ suite "RFC-0016 PRC-34: shapes later slices modelled":
     decides(seqFieldWrite, sxSat)
 
 suite "RFC-0016 S8cp-r: walker version":
-  test "symexWalkerVersion is at least 391":
-    check parseInt(symexWalkerVersion) >= 391
+  test "symexWalkerVersion is at least 392":
+    check parseInt(symexWalkerVersion) >= 392

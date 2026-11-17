@@ -1270,7 +1270,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## branch asks; 379-380 reserved): 378->381.
     ## RFC-0016 W4 S8cp-r (PRC-34: record `==` over atom fields, a type
     ## section in a routine body; 382-390 reserved): 381->391.
-    check symexWalkerVersion == "391"
+    ## RFC-0016 W4 S8cp-r (PRC-34: whole-seq `==` over an atom element):
+    ## 391->392.
+    check symexWalkerVersion == "392"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -5162,6 +5162,53 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
     of bMod: modBV(a, b)
     else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
 
+const seqEqUnrollMax = 64
+  ## RFC-0016 PRC-34. The longest known length `seqEqZ3` unrolls; a longer
+  ## one takes the quantified form.
+
+var seqEqCounter {.threadvar.}: int
+
+proc seqEqZ3(a, b: SymVal): Option[Z3Bool] =
+  ## RFC-0016 PRC-34. System's `==` on two seqs of a scalar element (the
+  ## parser admits only an element type whose `==` is system's own): equal
+  ## lengths, and each element equal under the element's `==` (IEEE on a
+  ## float, so a NaN element is unequal to itself). When either length folds
+  ## to a numeral `n` (at most `seqEqUnrollMax`), the elements are compared
+  ## at `0 ..< n`, ground; otherwise over a bound index below the length. none
+  ## when the model has no exact form: a placeholder, a tree element, or a
+  ## seq that may hold an unwritten `newSeqUninit` element (native `==`
+  ## reads it).
+  if a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+    return none(Z3Bool)
+  if a.seqElemTy == nil or b.seqElemTy == nil or
+     a.seqElemTy.kind notin {itInt, itBool, itFloat32, itFloat64, itString} or
+     a.seqElemTy.kind != b.seqElemTy.kind or isTreeSeqElemTy(a.seqElemTy) or
+     a.seqDataMore.len > 0 or b.seqDataMore.len > 0:
+    return none(Z3Bool)
+  if a.seqElemTy.kind == itInt and a.seqElemTy.width != b.seqElemTy.width:
+    return none(Z3Bool)
+  if svMentionsUninit(a) or svMentionsUninit(b): return none(Z3Bool)
+  proc known(l: Z3Int): Option[int] =
+    let folded = simplify(l)
+    if getAstKind(folded) != akNumeral: return none(int)
+    try: some(parseInt(getNumeralString(folded)))
+    except CatchableError: none(int)
+  let la = known(a.seqLen) # [placeholder-audited]
+  let lb = known(b.seqLen) # [placeholder-audited]
+  if la.isSome and lb.isSome and la.get != lb.get:
+    return some(mkBool(false))
+  let n = if la.isSome: la else: lb
+  var acc = a.seqLen == b.seqLen # [placeholder-audited]
+  if n.isSome and n.get <= seqEqUnrollMax:
+    for i in 0 ..< n.get:
+      acc = acc and svLeafEq(seqElemAt(a, mkInt(i)), seqElemAt(b, mkInt(i)))
+    return some(acc)
+  inc seqEqCounter
+  let i = mkIntVar("__seqeq_i" & $seqEqCounter)
+  let inRange = (mkInt(0) <= i) and (i < a.seqLen) # [placeholder-audited]
+  some(acc and forall(i, implies(inRange,
+                                 svLeafEq(seqElemAt(a, i), seqElemAt(b, i)))))
+
 proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised comparison dispatch: exact copy of the
   ## inner dispatch body (after closureEq/refEq short-circuits) shared by the
@@ -5198,6 +5245,13 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
     cmpFloat(a, b, op)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
   elif a.kind == svString:
     cmpString(a, b, op)       # Phase 15 S1: Z3 String ==/!= (S3 adds </<=)
+  elif a.kind == svSeq and b.kind == svSeq and op in {bEq, bNe}:
+    # RFC-0016 PRC-34: whole-seq `==` (`seqEqZ3`); a seq it has no exact
+    # form for keeps `eqBV`'s / `neBV`'s decline.
+    let eq = seqEqZ3(a, b)
+    if eq.isSome: ofBool(if op == bEq: eq.get else: not eq.get)
+    elif op == bEq: eqBV(a, b)
+    else: neBV(a, b)
   else:
     case op
     of bEq: eqBV(a, b)

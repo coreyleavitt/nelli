@@ -40,7 +40,6 @@ INT-05	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 INT-06	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-07	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-18	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-INT-21	W1-p	no cell or pin names it yet; section 11 names the id in this slice only
 INT-23	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-25	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-27	W1-c2	no cell or pin names it yet; section 11 names the id in this slice only

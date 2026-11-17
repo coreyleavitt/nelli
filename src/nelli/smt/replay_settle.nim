@@ -17,7 +17,10 @@ import ./replayresult
 # whose only SAT lies on an `scSpurious`-tainted path returns `sxUnknown` with
 # its SOLVED models in `RawResult.candidates` (`SatCandidate`), and the entry
 # macro settles them here, after `runSymex` returns and BEFORE any
-# `SymexResult`/`SymexFinding` is built or anything is persisted.
+# `SymexResult`/`SymexFinding` is built or anything is persisted. RFC-0016 W4
+# perf: the replays themselves run inside the run (`CandidateReplay`, handed
+# to `runSymex` by `emitRunSymexReplayed`), so it walks the tail of the
+# candidate a replay confirmed, and of no other, while its context is live.
 #
 # CANDIDACY IS UNSPELLABLE AS SAT. A `SatCandidate` is not a `RawResult` and
 # has no witness branch; its model is the private `input` field. This module

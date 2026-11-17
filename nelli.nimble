@@ -1770,6 +1770,12 @@ task test, "Run the test suite":
             "tsymex_0016_w3z_r2_candtail",
             # RFC-0016 W3-z R9: the tail walk has its own budget.
             "tsymex_0016_w3z_r9_tailbudget",
+            # RFC-0016 W4 perf: a tail walk's branch asks carry only the
+            # pools they reach (the nightly ceiling ratchet's regression).
+            "tsymex_0016_w4perf_tailpools",
+            # RFC-0016 W4 perf: a replay candidate's tail is walked when a
+            # replay confirms it, and only then.
+            "tsymex_0016_w4perf_demandtail",
             # RFC-0016 0.10.0 review H2: the tail walk keeps a noinit read's kind.
             "tsymex_0016_cr2_h2_noinit_tail",
             # RFC-0016 0.10.0 review H3: modelPins pins no opaque-call havoc epoch.

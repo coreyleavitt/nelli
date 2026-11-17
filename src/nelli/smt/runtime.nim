@@ -16560,7 +16560,7 @@ proc completeReturn(p: Path, w: var WalkCtx) =
     try:
       retVal = defaultZero(w.callStack[frameIx].retTy,
                            w.callStack[frameIx].retName & ".zerodefault")
-    except ValueError, SymexRefUnresolvedError:
+    except ValueError:
       # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as the `isCall` arm's
       # untouched-result twin: the free per-call `retSym` ranges over the
       # whole type, zero included.
@@ -20351,7 +20351,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
                 let (rSym, rVal) = reconcileInt(retSym, zeroVal)
                 fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
                                          cp.env)
-              except ValueError, SymexRefUnresolvedError:
+              except ValueError:
                 # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the free per-call
                 # `retSym` ranges over the whole type, zero included.
                 let d = w.degrade(feUnsupportedOpHavoc,
@@ -24209,7 +24209,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       try:
         let zeroVal = defaultZero(cb.retTy, "__closureRet.zerodefault")
         assertArm(cp.pc, retBindEq(funcApp, zeroVal))
-      except ValueError, SymexRefUnresolvedError:
+      except ValueError:
         # RFC-0005 S7: `feUnsupportedOpHavoc` -- the per-occurrence result is
         # left free on this arm and nothing else is dropped (S6b's composite
         # call-result binding shape); the path carries `{scSpurious}`.
@@ -25393,40 +25393,14 @@ proc runSymexCaught(prog: SymexProgram,
               errors: @[SymexErrorInfo(kind: feUnsupportedOpAborted,
                                        severity: severity(feUnsupportedOpAborted), msg: e.msg,
                                        scope: abortScope())])
-  except SymexUnsupportedStringOpError as e:
-    # Phase 15 Cluster S (S1): an unmodeled string op (in S1, every iekStr*) ->
-    # sxUnknown + seUnsupportedStringOp (Invariant 3 — classified, never silent
-    # UNSAT). The surface op name rides in `msg`. S2–S11 narrow this as each op
-    # gains a real lowering.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: seUnsupportedStringOp,
-                                       severity: severity(seUnsupportedStringOp), msg: e.msg,
-                                       scope: abortScope())])
-  except SymexUnsupportedRegexError as e:
-    # Phase 15 S6b: a `re"…"` pattern S6a rejects (backreference / lookahead /
-    # named group / malformed) or a regex `find` (no Z3 indexOf/regex API) ->
-    # sxUnknown + seUnsupportedRegex (Invariant 3 — classified, never silent
-    # UNSAT). The S6a reason rides in `msg`.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: seUnsupportedRegex,
-                                       severity: severity(seUnsupportedRegex), msg: e.msg,
-                                       scope: abortScope())])
-  except SymexZ3VersionMissingError as e:
-    # Phase 15 S5: a string op whose Z3 FFI symbol is absent on this build
-    # (e.g. replaceAll on Z3 < 4.15.5) -> sxUnknown + seZ3VersionMissing
-    # (Invariant 3 — classified, never a crash, never a silent UNSAT).
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: seZ3VersionMissing,
-                                       severity: severity(seZ3VersionMissing), msg: e.msg,
-                                       scope: abortScope())])
-  except SymexZ3StringIncompleteError as e:
-    # Phase 15 S5: a string-theory decomposition the walker cannot soundly
-    # bound (the general symbolic-split path) -> sxUnknown + seZ3StringIncomplete
-    # (Invariant 3 — structured, never a hang).
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: seZ3StringIncomplete,
-                                       severity: severity(seZ3StringIncomplete), msg: e.msg,
-                                       scope: abortScope())])
+  # RFC-0016 W4 H1b (HRV-99): the boundary arms for the four string carriers
+  # (`SymexUnsupportedStringOpError`, `SymexUnsupportedRegexError`,
+  # `SymexZ3VersionMissingError`, `SymexZ3StringIncompleteError`) were
+  # removed. Every raise of them is inside `lowerStrArm`'s call graph
+  # (`runtime_strings.nim`, whose only exported entry is `lowerStrArm`), and
+  # `lowerStrArm`'s one call site (`lower`) catches all four and degrades
+  # in-band (`degradeStrArm`, N36), so none reaches this boundary.
+  # `tests/tsymex_0016_w4h1b_dead_arms.nim` pins that structure.
   except SymexNotInHandlerError as e:
     # Phase 15 E8: `getCurrentException()` / `getCurrentExceptionMsg()` called
     # outside any `except` handler body (no in-flight exception) -> sxUnknown +
@@ -25435,16 +25409,6 @@ proc runSymexCaught(prog: SymexProgram,
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeNotInHandler,
                                        severity: severity(eeNotInHandler), msg: e.msg,
-                                       scope: abortScope())])
-  except SymexRefUnresolvedError as e:
-    # Phase 15 R1a (ADR-0010): the walker reached an `itRef`/`itPtr`/`isDeref`/
-    # `isNew` while the logical-heap semantics are not yet modeled (structural
-    # cycle) -> sxUnknown + heUnresolvedRef (Invariant 3 — classified, never a
-    # silent UNSAT, never a crash). R1+ replace the stub with real heap
-    # semantics. The diagnostic rides in `msg`.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: heUnresolvedRef,
-                                       severity: severity(heUnresolvedRef), msg: e.msg,
                                        scope: abortScope())])
   except SymexOwnershipUnsupportedError as e:
     # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): an `owned T` /

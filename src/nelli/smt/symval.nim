@@ -77,14 +77,6 @@ type
     ## an `eeNotInHandler` (sevError) classified error (Invariant 3 — never a
     ## panic, never a silent UNSAT). The intrinsic name rides in `msg`.
 
-  SymexRefUnresolvedError* = object of CatchableError
-    ## Phase 15 Cluster R (R1a, ADR-0010). Raised by the `allocateSym(itRef/
-    ## itPtr)` and `walk(isDeref/isNew)` STUBs while the logical-heap semantics
-    ## are not yet modeled (structural cycle). Caught at the `runSymex` boundary
-    ## → `sxUnknown` carrying a `heUnresolvedRef` (sevError) classified error
-    ## (Invariant 3 — never a silent UNSAT, never a crash). R1+ replace the stub
-    ## with real ref-sort / heap-array semantics. The diagnostic rides in `msg`.
-
   SymexOwnershipUnsupportedError* = object of CatchableError
     ## Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). Raised when an
     ## `owned T` / `Atomic[T]` formal is allocated (classifyType

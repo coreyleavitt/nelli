@@ -734,8 +734,14 @@ const renderAsChoicesVersion* = "12"
   ##   (it answered a trusted `cfoUnsat` for a branch a real input flips). A
   ##   flip's soundness now also carries the collect pass's recorded walk
   ##   errors, so a cut run is `scIncomplete`. No key bytes change.
+  ## - RFC-0016 W4 H1b (HRV-32; 370->371): a variant
+  ##   constructor under a `case` EXPRESSION's `of` branch narrows its
+  ##   discriminant to the branch's tag set, as the statement form does, so
+  ##   a wide enum no longer forks over every declared arm (or declines past
+  ##   `maxVariantConstructorForks`). Verdicts that were `sxUnknown` there
+  ##   resolve. No key bytes change.
 
-const symexWalkerVersion* = "370"
+const symexWalkerVersion* = "371"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

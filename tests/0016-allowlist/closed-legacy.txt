@@ -24,6 +24,7 @@ AUD-04	process, infrastructure or documentation disposition: no engine behaviour
 AUD-10	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
 W-63	a CI-leg observation (the Windows legs are the JIT rows); K2a rechecks the skip census
 MOV-01	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+W-65	dead-code removal, a parser precision change pinned by tsymex_0016_w4h1b_caseexpr_narrow and structural pins in tsymex_0016_w4h1b_dead_arms: no universe cell
 W-66	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
 W-67	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
 W-68	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record

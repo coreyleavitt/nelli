@@ -776,8 +776,15 @@ const renderAsChoicesVersion* = "12"
   ##   within half its bound is searched as before; past that, verdicts are
   ##   the query's own either way, but a search cut by its bound can cut
   ##   elsewhere. No key bytes change.
+  ## - RFC-0016 S8ci uneven split (384->389; 385-388 are reserved): Z3's
+  ##   defaults get the first seven eighths of an own-context search's bound
+  ##   (`eqsSplitShare`), not half; only a search that share ran out on goes
+  ##   on without the cheap equality search. At half, two pinned UNSATs were
+  ##   lost to the bound (`s8aq_rfind_before_piece`, `grow_stale_dead`), and
+  ##   at three quarters the first still was. A search cut by its bound can
+  ##   cut elsewhere than at 384. No key bytes change.
 
-const symexWalkerVersion* = "384"
+const symexWalkerVersion* = "389"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

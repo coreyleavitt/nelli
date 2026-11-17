@@ -10383,15 +10383,29 @@ proc queryTermCount(ctx: Z3Context; roots: openArray[Z3Bool]): int =
     if getAstKind(t) == akApp:
       for a in unpackApp(t).args: stack.add a
 
+const eqsSplitShare = (num: 7'u, den: 8'u)
+  ## RFC-0016 S8ci. The share of an own-context search's bound that Z3's
+  ## defaults get before `ownContextCheck` searches on without the cheap
+  ## equality search: seven eighths, the least share tried (one half, three
+  ## quarters, seven eighths) that loses no pinned UNSAT (see
+  ## `ownContextCheck`).
+
+proc eqsSplitFirst(rlimit: uint): uint =
+  ## The part of `rlimit` Z3's defaults get: at least `eqsSplitShare` of
+  ## it, rounded up, and never more than `rlimit`. Written so a large
+  ## bound cannot overflow.
+  rlimit - (rlimit div eqsSplitShare.den) * (eqsSplitShare.den - eqsSplitShare.num)
+
 var eqsSplitCaps {.threadvar.}: Table[pointer, uint]
   ## RFC-0016 S8ci. The whole bound of each `ownContextSolver` solver not
-  ## yet checked, keyed by the solver: the solver itself carries only the
-  ## first half (see `ownContextSolver`), and `ownContextCheck` gives a
-  ## search that half did not decide the rest. Removed when it is checked.
+  ## yet checked, keyed by the solver: the solver itself carries only its
+  ## first share (`eqsSplitFirst`, see `ownContextSolver`), and
+  ## `ownContextCheck` gives a search that share did not decide the rest.
+  ## Removed when it is checked.
 
 when defined(symexQueryStats):
   var symexEqsSplits* {.threadvar.}: int
-    ## RFC-0016 S8ci. The own-context checks whose first half ran out undecided
+    ## RFC-0016 S8ci. The own-context checks whose first share ran out undecided
     ## and were searched on without Z3's cheap equality search
     ## (`ownContextCheck`). Never reset by the engine.
 
@@ -10431,12 +10445,12 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   var inOwn = newSeq[Z3Bool](roots.len)
   for i in 0 ..< roots.len: inOwn[i] = wrap[Z3Bool](own, made[i])
   result = querySolver(own, inOwn, rlimit, seqTheory)
-  # RFC-0016 S8ci: Z3's defaults get the first half of the bound; the rest
-  # is `ownContextCheck`'s, without the cheap equality search.
-  if rlimit > 1'u:
-    let half = newParams(own)
-    half.set("rlimit", (rlimit + 1'u) div 2)
-    result.setParams(half)
+  # RFC-0016 S8ci: Z3's defaults get the first share of the bound; the
+  # rest is `ownContextCheck`'s, without the cheap equality search.
+  if rlimit > 1'u and eqsSplitFirst(rlimit) < rlimit:
+    let first = newParams(own)
+    first.set("rlimit", eqsSplitFirst(rlimit))
+    result.setParams(first)
     eqsSplitCaps[cast[pointer](result)] = rlimit
 
 when defined(symexTestInjectWalkerFault):
@@ -10465,13 +10479,20 @@ proc ownContextCheck(s: Z3Solver;
   ## S8bm's term order, 71 s in S8bp's, the same units). Turning it off
   ## everywhere bounds that, but loses what it decides cheaply
   ## (`s8bb_replace_d` 3.8M units to 26.5M and red). So the search is
-  ## split: Z3's defaults under the first half of the bound
-  ## (`ownContextSolver`), and only a search that half ran out on goes on,
-  ## on the same solver, without the equality search, under what the bound
-  ## has left. A query decided within half its bound is searched exactly as
-  ## before; one that spends its whole bound spends half of it where a unit
-  ## costs about the same wall time in any term order. The units counted
-  ## are the context's whole step count, both halves.
+  ## split: Z3's defaults under the first share of the bound
+  ## (`eqsSplitShare`, `ownContextSolver`), and only a search that share ran
+  ## out on goes on, on the same solver, without the equality search, under
+  ## what the bound has left. A query decided within its first share is
+  ## searched exactly as before; one that spends its whole bound spends the
+  ## rest where a unit costs about the same wall time in any term order. The
+  ## units counted are the context's whole step count, both parts.
+  ##
+  ## The share is seven eighths, by measurement: at one half,
+  ## `s8aq_rfind_before_piece` and `grow_stale_dead` (UNSATs Z3's defaults
+  ## reach only past half the bound) were lost; at three quarters the first
+  ## still was. At seven eighths `r4_strip` runs 82.0 s / 81.6 s against the
+  ## unsplit 108.2 s / 107.5 s and S8bm's 84.0 s / 83.8 s (eos, Z3 5.1, side
+  ## by side, 2 reps; units unchanged).
   when defined(symexTestInjectWalkerFault):
     # RFC-0005 batch 8 fault injection (compiled out of every normal build):
     # a query over a parameter named for the shape raises, as `extractLeaf`'s
@@ -10494,7 +10515,7 @@ proc ownContextCheck(s: Z3Solver;
   var cap: uint
   if eqsSplitCaps.pop(cast[pointer](s), cap) and result == zsUnknown:
     let spent = spentIn(st)
-    if spent >= (cap + 1'u) div 2 and spent < cap:
+    if spent >= eqsSplitFirst(cap) and spent < cap:
       let rest = newParams(s.ctx)
       rest.set("rlimit", cap - spent)
       rest.set("smt.arith.propagate_eqs", false)

@@ -1888,7 +1888,7 @@ task test, "Run the test suite":
             # a verdict after Z3 5.1's mk_unique message is never a trusted sat/unsat (UPS-02, PND-10).
             "tsymex_0016_s8cj_runctx",
             "tsymex_0016_s8cj_mkunique",
-            # RFC-0016 S8ci (PRC-31): an own-context search runs Z3's defaults under half its bound, the rest without the uncharged cheap equality search.
+            # RFC-0016 S8ci (PRC-31): an own-context search runs Z3's defaults under seven eighths of its bound, the rest without the uncharged cheap equality search.
             "tsymex_0016_s8ci_eqsplit",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",

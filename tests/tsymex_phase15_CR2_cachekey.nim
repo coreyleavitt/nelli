@@ -1257,7 +1257,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## 371->373 (372 is CRH-07's).
     ## RFC-0016 K9c-g (the rest of the unbacked-element class, decided at
     ## `seqElemAt` and `seqStoreArrs`): 373->374.
-    check symexWalkerVersion == "374"
+    ## RFC-0016 S8ci (a query's own context makes its terms in Z3's
+    ## translation order): 374->379.
+    check symexWalkerVersion == "379"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

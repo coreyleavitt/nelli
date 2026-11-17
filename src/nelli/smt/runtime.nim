@@ -10367,36 +10367,21 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   result.setParams(solverParams)
   for c in roots: result.add(c)
 
-proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
-    seq[Z3AnyAst] =
-  ## RFC-0005 S8by. Every term of `roots`, each once, children before
-  ## parents: the roots in order, each term's arguments last to first.
-  ## `ownContextSolver` makes a query's terms in its context in this
-  ## order. Z3's units on a query were a function of the query and of the
-  ## process's Z3 memory since S8bp (RFC-0016 S8cj: the default solver's
-  ## strategy reads `memory::get_allocation_size()` as its `memory` probe,
-  ## so a query costs 72k units in a small process and 876k in one holding
-  ## 100 MB of contexts; nothing the context holds, only how much the
-  ## process does), but not the wall time a unit costs: the search a unit
-  ## pays for follows the context's term ids (`r4_strip`'s budget-out step
-  ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
-  ## walk's, S8bp). The order moves the search, so units as well as wall
-  ## time. `r4_strip`'s binary, CPU seconds side by side under one load
-  ## (Z3 5.1): 133 and 122 against 143 and 129 in Z3's own translation
-  ## order, root by root.
+proc queryTermCount(ctx: Z3Context; roots: openArray[Z3Bool]): int =
+  ## RFC-0016 S8ci. The number of distinct terms of `roots`: what
+  ## translating them into a context of their own visits, each once
+  ## (`ownContextSolver`'s K7 charge). A function of the query alone.
   var done: HashSet[int]
-  var stack: seq[tuple[t: Z3AnyAst, expanded: bool]]
-  for i in countdown(roots.len - 1, 0): stack.add (toAnyAst(roots[i]), false)
+  var stack: seq[Z3AnyAst]
+  for c in roots: stack.add toAnyAst(c)
   while stack.len > 0:
-    let (t, expanded) = stack.pop()
+    let t = stack.pop()
     let id = astId(ctx, t.raw)
     if id in done: continue
-    if expanded or getAstKind(t) != akApp:
-      done.incl id
-      result.add t
-      continue
-    stack.add (t, true)
-    for a in unpackApp(t).args: stack.add (a, false)
+    done.incl id
+    inc result
+    if getAstKind(t) == akApp:
+      for a in unpackApp(t).args: stack.add a
 
 proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
                       rlimit: uint; seqTheory = true): Z3Solver =
@@ -10409,26 +10394,30 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   ## walk's is restored. RFC-0005 S8bp: every `checkCapped` step's solver,
   ## the theory-free ones (`seqTheory = false`) included.
   ##
-  ## RFC-0005 S8by: the query's terms are made in the new context in one
-  ## order, a function of the query alone (`queryTermOrder`), and so are
-  ## their ids, which Z3's search reads. Its units were already the
-  ## query's and the process's Z3 memory's (S8bp; RFC-0016 S8cj); the
-  ## wall time a unit costs follows the order too.
+  ## RFC-0016 S8ci: the roots are translated as one vector (one cache), so
+  ## the query's terms are made in the new context in Z3's own translation
+  ## order, a function of the query alone. The order moves the search, so
+  ## the units as well as the wall time a unit costs (and the units follow
+  ## the process's Z3 memory too, RFC-0016 S8cj). Three orders were
+  ## measured over 54 (suite, Z3) cells, the heaviest solver-bound tsymex
+  ## suites on Z3 5.1 and 4.13.4: S8by's (the roots in order, each term's
+  ## arguments last to first) 1,992.7M Z3 units; the walk context's
+  ## creation order (ids ascending) 1,540.9M; Z3's 1,464.7M, the least,
+  ## and the least summed CPU time (967 s against 1,138 s and 990 s). The
+  ## creation order won some cells, but no choice between the two earns a
+  ## rule: picking the better of them per cell would save 2.6%. Z3's
+  ## order costs `r4_strip` wall time (118.7 s against S8by's 108.5 s and
+  ## S8bm's 86.7 s, Z3 5.1, side by side); its units are the same in
+  ## every order (a budget-out step).
   let prev = currentContext()
   let own = newContext()
   setCurrentContext(prev)
-  let order = queryTermOrder(ctx, roots)
-  chargeWalkerTerms(order.len)   ## RFC-0016 K7: one build/translate visit per term
-  var at: Table[int, int]
+  chargeWalkerTerms(queryTermCount(ctx, roots))   ## RFC-0016 K7: one translate visit per term
   let terms = newAstVector(ctx)
-  for i, t in order:
-    at[astId(ctx, t.raw)] = i
-    terms.add t
-  # One translation (one cache), in that order: each term made once, its
-  # arguments before it.
+  for c in roots: terms.add toAnyAst(c)
   let made = translate(terms, own)
   var inOwn = newSeq[Z3Bool](roots.len)
-  for i, c in roots: inOwn[i] = wrap[Z3Bool](own, made[at[astId(ctx, c.raw)]])
+  for i in 0 ..< roots.len: inOwn[i] = wrap[Z3Bool](own, made[i])
   querySolver(own, inOwn, rlimit, seqTheory)
 
 when defined(symexTestInjectWalkerFault):

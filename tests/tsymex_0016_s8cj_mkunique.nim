@@ -13,10 +13,19 @@
 ##       `sxUnknown`: the VERIFY throws, the throw unwinds to the API's
 ##       check, which returns `unknown` (the limit is canceled by then, so
 ##       no `Z3_EXCEPTION` is set), and the walk declines;
-##   (3) a `sxSat` (Z3 4.13.4 decides the query in 191,361 units and prints
-##       nothing) carries a witness that is checked natively.
+##   (3) a `sxSat` carries a witness that is checked natively.
 ## The message itself is a Z3 defect, not pinned: a Z3 that no longer prints
 ## it passes through (3).
+##
+## Measured (RFC-0016 S8ci, walker 374, eos, both Z3 builds, every term
+## order `ownContextSolver` was measured in): neither build decides the
+## query under the 20M bound. The walk spends 20,955,494 Z3 units on 5.1
+## and 21,138,763 on 4.13.4 (the same in every order), Z3 reports
+## "canceled" at the bound, and the walk declines `beSolverUndef`; (1)
+## holds and (3) is not reached. S8cj's figure of 191,361 units for a
+## 4.13.4 decision no longer holds. The term order does not move this
+## query: its spend is the search to the bound, not the order its terms
+## were made in.
 import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types

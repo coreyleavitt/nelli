@@ -194,7 +194,7 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     for l in ["cr", "gr", "wn"]:
       checkpoint l
       check l in h
-    declines(sutCreate, "cr", "create", {beBudgetExhaustedUnmodelled, feGlobalHavoc, feUnsupportedParamType})
+    declines(sutCreate, "cr", "create", {beBudgetExhaustedUnmodelled, feUnsupportedParamType})
     declines(sutGcRef, "gr", "nnkCast", {feLocalPragma})
     declines(sutWhenMember, "wn", "WhenMember", {feUnsupportedExprKind, feUnsupportedParamType, feUnsupportedStmtKind})
     # RFC-0016 CRH-02: the two compile stops as K9 pins.

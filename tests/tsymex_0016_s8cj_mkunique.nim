@@ -20,12 +20,15 @@
 ## Measured (RFC-0016 S8ci, walker 374, eos, both Z3 builds, every term
 ## order `ownContextSolver` was measured in): neither build decides the
 ## query under the 20M bound. The walk spends 20,955,494 Z3 units on 5.1
-## and 21,138,763 on 4.13.4 (the same in every order), Z3 reports
-## "canceled" at the bound, and the walk declines `beSolverUndef`; (1)
-## holds and (3) is not reached. S8cj's figure of 191,361 units for a
-## 4.13.4 decision no longer holds. The term order does not move this
-## query: its spend is the search to the bound, not the order its terms
-## were made in.
+## and 21,138,763 on 4.13.4 (the same in every order). In every run
+## neither Z3 printed the mk_unique message ("no mk_unique message in this
+## process"); the only cause observed is that Z3 reports "canceled" at the
+## 20M bound and the walk declines `beSolverUndef`. So (1) holds, (2) is
+## not exercised and (3) is not reached, and the mk_unique mechanism above
+## (S8cj's reading) is not confirmed by these runs. S8cj's figure of
+## 191,361 units for a 4.13.4 decision no longer holds. The term order
+## does not move this query: its spend is the search to the bound, not
+## the order its terms were made in.
 import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
@@ -36,8 +39,9 @@ proc wideFactoring(p, q: int) =
     symexTarget("s8cj_wide_factoring")
 
 const bounded = SymexSettings(budget: ResourceBudget(queryRLimit: 20_000_000))
-  ## The message appears before 5M units on Z3 5.1; 20M bounds the test's
-  ## wall time on a build that neither prints it nor decides the query.
+  ## S8cj saw the message before 5M units on Z3 5.1 (not seen since, see
+  ## the header); 20M bounds the test's wall time on a build that neither
+  ## prints it nor decides the query.
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]

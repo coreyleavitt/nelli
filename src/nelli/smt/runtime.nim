@@ -1018,18 +1018,34 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
 # `runSymexCaught` on both backends. This module has no lifecycle hook of its
 # own. The in-band sinks those notes describe predate the fix and remain the
 # walker's way to report a decline; they are no longer the only sound one.
+# They stay (S8ck item 6, re-read at S8ck-r against nim-z3 d86efda): raise-free
+# hooks make a raise SURVIVE, they do not make one cheap. A raise ends the
+# whole run at `runSymexCaught` as `sxUnknown` (the boundary-abort class),
+# because the walker has no unwind discipline to resume after one (no
+# try/finally around `arithFrames` and the other per-run stacks; every escape
+# ends the run, which re-seeds them). An in-band degrade (`lowerDegrade`,
+# `degradeStrArm`) instead taints only the path that met it
+# (`drainPendingLowerEffects` (d)), and every other path still decides. So
+# the sinks are kept for precision, and Nim 2.2.10 still loses a raise in any
+# destructor that enters a `try` (UPS-01), which nim-z3's raise-free hooks do
+# not cover.
 
 when defined(symexTestInjectWalkerFault):
   # RFC-0005 S8ce fault injection (compiled out of every normal build;
   # `-d:symexTestInjectWalkerFault` is set for its dedicated test files only,
-  # by their `.nim.cfg`). A raise unwinding through the walk crosses destroys
-  # of Z3-term-holding temporaries (`walkBlock`'s reassigned `seq[Path]`,
-  # `walk`'s `states` / `next`, a term-building helper's local `seq[Z3Bool]`);
-  # on the C backend nim-z3's hooks used to swallow it there. Dispatch
-  # reaching the sentinel label `__inject_s8ce_<shape>__` arms one shape; the
-  # next operation of that shape raises out of the walker's own code with
-  # that operation's Z3 temporaries live (`injectShapeFault`'s call sites
-  # name them). The `dispatch` shape fires at the sentinel statement itself.
+  # by their `.nim.cfg`). Dispatch reaching the sentinel label
+  # `__inject_s8ce_<shape>__` arms one shape; the next operation of that shape
+  # raises out of the walker's own code with that operation's Z3 values live
+  # (`injectShapeFault`'s call sites name them), and the test checks the raise
+  # reaches `runSymexCaught`. The `dispatch` shape fires at the sentinel
+  # statement itself. What this shows, and what it does not: the shapes are
+  # distinct raise ORIGINS, not distinct swallow sites. The only destroy
+  # observed swallowing a raise under nim-z3's old hooks (S8ce: the S8bx case
+  # and the probe's two tracebacks) is in `walkBlock`, its reassigned
+  # `seq[Path]`; most shapes were probably lost there too. That every other
+  # destroy site is safe rests on the generated-C scan (no hook pops the error
+  # flag; nim-z3's hooks are raise-free and `quirky`), with these shapes as
+  # witnesses, not on the shapes alone.
   var injectedShape {.threadvar.}: string
     ## The armed shape; cleared when it fires and by `resetSymexRunState`.
 

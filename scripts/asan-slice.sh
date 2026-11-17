@@ -33,10 +33,10 @@
 # missing.
 #
 # Leaks: LeakSanitizer is ON (detect_leaks=1, S8ck-r). A leak report fails the
-# test like any other sanitizer report. tests/asan/lsan.supp suppresses only
-# frames outside nelli (nim-z3's open INF-04 items), one sourced reason and
-# retirement condition per entry; a leak under src/nelli is fixed, never
-# suppressed. The self-test's fourth plant (tests/asan/plant_nim_leak.nim)
+# test like any other sanitizer report. tests/asan/lsan.supp may suppress only
+# frames outside nelli (nim-z3, libz3), one sourced reason and retirement
+# condition per entry; it is empty since the nim-z3 d86efda lock bump retired
+# its one entry. A leak under src/nelli is fixed, never suppressed. The self-test's fourth plant (tests/asan/plant_nim_leak.nim)
 # fails the job if leak detection is off or swallowed. Nim 2.2.10 itself
 # leaks in three shapes nelli met, each worked around rather than
 # suppressed: a first write that is a bitwise copy

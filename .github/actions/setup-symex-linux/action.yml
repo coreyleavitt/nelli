@@ -31,7 +31,7 @@ runs:
         . scripts/nim-toolchain.pin
         echo "tag=$NIM_ARTIFACT_TAG" >> "$GITHUB_OUTPUT"
         echo "digest=$NIM_ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
-        scripts/check-toolchain-parity.sh
+        bash scripts/check-toolchain-parity.sh
 
     - name: Install the patched Nim toolchain (OCI artifact)
       uses: ./.github/actions/setup-nim-artifact

@@ -6,8 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 backend="${1:?usage: dt.sh <c|cpp> <test.nim>}"; shift
 test_file="${1:?usage: dt.sh <c|cpp> <test.nim>}"
-img=localhost/nelli-dev:latest
-podman image exists "$img" || scripts/build-dev-image.sh
+img="localhost/nelli-dev:${NELLI_IMAGE:-latest}"
+podman image exists "$img" || scripts/build-dev-image.sh "${NELLI_IMAGE:-latest}"
+scripts/check-toolchain-parity.sh --image "${NELLI_IMAGE:-latest}" >&2
 # Mount the milpa CAS at BOTH the canonical path and its host-absolute path so
 # milpa's absolute dep symlinks (_deps/softlink -> ~/.cache/milpa/...) resolve
 # inside the container.

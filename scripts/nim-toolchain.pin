@@ -1,0 +1,12 @@
+# The patched Nim toolchain every nelli test run uses: CI's symex-linux leg
+# (.github/actions/setup-symex-linux) and the local dev image (scripts/Containerfile)
+# both read THIS file, so they cannot silently diverge (a local image with an older Nim
+# lacked the 0008 dispatch-table patch and recorded different decline kinds than CI).
+#
+# The tag is a moving name; the digest is the identity. Bumping the toolchain means
+# editing both lines together, then rebuilding the image (scripts/build-dev-image.sh).
+# scripts/check-toolchain-parity.sh fails when the image, the CI action, or (with --live)
+# the registry tag disagree with the digest below.
+NIM_ARTIFACT_PACKAGE=coreyleavitt/nim
+NIM_ARTIFACT_TAG=2.2.10-linux-x64
+NIM_ARTIFACT_DIGEST=sha256:aacc9dccde71dbd4576216b569c668d5fbf1a3090e56f73992bffb56c59a588c

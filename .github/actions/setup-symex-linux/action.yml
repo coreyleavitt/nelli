@@ -21,10 +21,23 @@ inputs:
 runs:
   using: composite
   steps:
+    # The tag and digest live in scripts/nim-toolchain.pin, which the local dev
+    # image (scripts/Containerfile) reads too, so CI and local runs cannot drift.
+    - name: Read the toolchain pin
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        . scripts/nim-toolchain.pin
+        echo "tag=$NIM_ARTIFACT_TAG" >> "$GITHUB_OUTPUT"
+        echo "digest=$NIM_ARTIFACT_DIGEST" >> "$GITHUB_OUTPUT"
+        scripts/check-toolchain-parity.sh
+
     - name: Install the patched Nim toolchain (OCI artifact)
       uses: ./.github/actions/setup-nim-artifact
       with:
-        tag: 2.2.10-linux-x64
+        tag: ${{ steps.pin.outputs.tag }}
+        digest: ${{ steps.pin.outputs.digest }}
 
     - name: Install Z3 5.1.0
       uses: ./.github/actions/setup-z3-linux

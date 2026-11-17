@@ -1,14 +1,58 @@
 # Dev/test toolchain for nelli.
 #
-# Base: Corey's prebuilt Nim toolchain (ghcr.io/coreyleavitt/nim:latest —
-# Nim 2.2.10 on openSUSE Tumbleweed). nim-z3 v2.0.0 requires Nim >= 2.2.10:
-# Nim 2.2.0/2.2.4 reject nim-z3's tuple-type generic args in funcdecl.nim
-# ("Mixing types and values in tuples"). See docs/symex/RFC-phase15-reconciliation.md §F.
+# Base: Corey's prebuilt Nim image (ghcr.io/coreyleavitt/nim:latest, openSUSE
+# Tumbleweed) -- used for the OS, gcc and zypper ONLY. Its Nim is discarded: the
+# first layer below replaces it with the patched Nim OCI artifact that CI's
+# symex-linux leg runs, fetched by pinned digest (scripts/nim-toolchain.pin).
+# The old image's Nim predated the 0008 dispatch-table patch, so local results
+# silently diverged from CI.
 #
-# We layer on the Z3 shared library that nim-z3 dlopens (via softlink).
+# GLIBC: the artifact is built on rolling Tumbleweed and its nim binary needs
+# GLIBC_2.35 (checked 2026-11-17 with objdump -T). Tumbleweed carries 2.43, so
+# the base is newer. The build re-checks this and fails if the base is older.
+#
+# nim-z3 v2.0.0 requires Nim >= 2.2.10 (see docs/symex/RFC-phase15-reconciliation.md §F).
 #
 # Build:  scripts/build-dev-image.sh   ->   localhost/nelli-dev:latest
+#         (passes the pin file's values as the three ARGs below)
 FROM ghcr.io/coreyleavitt/nim:latest
+
+# Defaults mirror scripts/nim-toolchain.pin; build-dev-image.sh overrides them
+# from it, and check-toolchain-parity.sh fails if the two disagree.
+ARG NIM_ARTIFACT_PACKAGE=coreyleavitt/nim
+ARG NIM_ARTIFACT_TAG=2.2.10-linux-x64
+ARG NIM_ARTIFACT_DIGEST=sha256:aacc9dccde71dbd4576216b569c668d5fbf1a3090e56f73992bffb56c59a588c
+
+# The same protocol as .github/actions/setup-nim-artifact: an anonymous pull
+# token, the manifest BY DIGEST (not the tag), then the one layer blob, whose
+# address is its own sha256 and is verified.
+RUN set -eu; \
+    pkg="$NIM_ARTIFACT_PACKAGE"; \
+    tok="$(curl -fsS "https://ghcr.io/token?scope=repository:${pkg}:pull&service=ghcr.io" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"; \
+    [ -n "$tok" ]; \
+    curl -fsS -H "Authorization: Bearer $tok" \
+      -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+      -o /tmp/manifest.json "https://ghcr.io/v2/${pkg}/manifests/${NIM_ARTIFACT_DIGEST}"; \
+    echo "${NIM_ARTIFACT_DIGEST#sha256:}  /tmp/manifest.json" | sha256sum -c -; \
+    grep -q '"artifactType":"application/x-nim-toolchain"' /tmp/manifest.json; \
+    layer="$(sed -n 's/.*"layers":\[{[^}]*"digest":"\(sha256:[0-9a-f]*\)".*/\1/p' /tmp/manifest.json)"; \
+    [ -n "$layer" ]; \
+    curl -fsSL -H "Authorization: Bearer $tok" -o /tmp/nim.tar.xz "https://ghcr.io/v2/${pkg}/blobs/${layer}"; \
+    echo "${layer#sha256:}  /tmp/nim.tar.xz" | sha256sum -c -; \
+    rm -rf /opt/nim && mkdir -p /opt/nim/2.2.10-patched && tar --no-same-owner --strip-components=1 -xJf /tmp/nim.tar.xz -C /opt/nim/2.2.10-patched; \
+    test -x /opt/nim/2.2.10-patched/bin/nim; \
+    need="$(objdump -T /opt/nim/2.2.10-patched/bin/nim | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"; \
+    have="GLIBC_$(ldd --version | sed -n '1s/.* //p')"; \
+    [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | tail -1)" = "$have" ] || \
+      { echo "base glibc $have is older than the artifact needs ($need)" >&2; exit 1; }; \
+    { echo "artifact_package=$pkg"; echo "artifact_tag=$NIM_ARTIFACT_TAG"; \
+      echo "artifact_digest=$NIM_ARTIFACT_DIGEST"; echo "layer_digest=$layer"; \
+      echo "glibc_needed=$need"; echo "glibc_have=$have"; \
+      echo "nim_version<<EOV"; /opt/nim/2.2.10-patched/bin/nim -v; echo "EOV"; } > /etc/nelli-toolchain; \
+    rm -f /tmp/manifest.json /tmp/nim.tar.xz
+LABEL dev.leavitt.nelli.nim-artifact-digest="${NIM_ARTIFACT_DIGEST}" \
+      dev.leavitt.nelli.nim-artifact-tag="${NIM_ARTIFACT_TAG}"
+
 # z3-devel: the symex engine's solver (dlopen'd via softlink).
 # mingw64-cross-gcc/-c++: Windows cross-compile CHECK toolchain (Eci) — used by
 # scripts/dt-crosswin.sh to compile+link nelli for --os:windows locally. This

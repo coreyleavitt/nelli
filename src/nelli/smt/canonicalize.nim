@@ -745,7 +745,13 @@ const renderAsChoicesVersion* = "12"
   ##   cell, one for the whole walk (`addrCellName`), which every frame keeps
   ##   equal to the global; it halted the path (`heUnsafeCast`). An address
   ##   cell's pointer is its own cell (`sel = 0`, `ptrSelOwnAtAlloc`), as
-  ##   every other allocation's is. No key bytes change.
+  ##   every other allocation's is. A pointer that addresses such a global
+  ##   reads and writes its cell (`ptrTargets`' `inCell`), so `p[] = k` through
+  ##   a callee's returned `addr g` decides. A by-value array formal whose
+  ##   address the callee takes is the actual's location (`addrTakenArrayFormal`,
+  ##   passed as a `var` formal): exact for a `var` actual and a temporary,
+  ##   declined for constant data (SIGSEGV natively) and any other actual.
+  ##   No key bytes change.
 
 const symexWalkerVersion* = "376"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

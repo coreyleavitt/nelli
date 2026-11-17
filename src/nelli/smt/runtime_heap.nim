@@ -1465,6 +1465,9 @@ type PtrTarget = object
                       ## the active one) holds
   overlaps: seq[PtrOverlap]  ## RFC-0005 S8bz (item 6): while another branch
                              ## is active, what the same bytes hold there
+  inCell: bool        ## RFC-0016 S8ch: a module-level variable this frame
+  cellRef: Z3AnyAst   ## keeps in its address cell (`addrCellName`): its
+  cellTy: IRType      ## storage is the cell at `cellRef`, of type `cellTy`
 
 proc svHoldsAggregate(sv: SymVal; pointee: IRType; depth = 0): bool =
   ## RFC-0005 S8bz (item 1). A by-value variable's value `sv` may hold a whole
@@ -2306,6 +2309,25 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   for name, sv in p.env.pairs:
     if not isGlobalEnvName(name): continue
     addVarLeaves(name, sv, "the global `" & displayName(name) & "`")
+  # RFC-0016 S8ch: a module-level variable whose address the walk took lives
+  # in its address cell, which this frame keeps equal to it: a pointer that
+  # addresses it reads and writes that cell, the one location both the
+  # variable and `addr` name. By name, a write through a pointer equal to the
+  # cell only in the path condition (a callee's `ptr` result) also stored
+  # into the variable under a guard the model left open, and the frame saw
+  # the variable written twice in one statement.
+  for t in result.targets.mitems:
+    if t.famKey.len > 0 or t.path.len > 0 or t.seqIdx or t.tabKey or
+       t.aggregate or not isModuleGlobalEnvName(t.envName):
+      continue
+    let cell = addrCellName(t.envName)
+    if not p.env.hasKey(cell) or p.env[cell].kind != svPtr: continue
+    for c in w.frame.addrCells:
+      if c.local == t.envName and not c.bound and c.path.len == 0:
+        t.inCell = true
+        t.cellRef = p.env[cell].ptrAst
+        t.cellTy = c.ty
+        break
   # A callee's `var` formal is a copy of its actual, written back when the
   # callee returns (copy-in/copy-out). Nim passes the location: a store
   # through the pointer into the actual's location is visible through the
@@ -2934,7 +2956,8 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   for i in countdown(tg.targets.high, 0):
     let t = tg.targets[i]
     let tv =
-      if t.aggregate and t.famKey.len > 0 and t.tabKey:
+      if t.inCell: addrCellValue(ctx, p, t.cellTy, t.cellRef)   # RFC-0016 S8ch
+      elif t.aggregate and t.famKey.len > 0 and t.tabKey:
         svAtPath(tabValAt(ctx, ptrFamSeq(ctx, p, t), t.idx.raw),
                  t.elemPath)   # RFC-0005 S8bz (item 2)
       elif t.aggregate and t.famKey.len > 0:
@@ -3077,6 +3100,9 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
       let stored = checkedStore(ctx, arr.raw, t.objAddr.raw, rawAnyAstOf(famVal))
       p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
                                                           stored, arr.raw))
+    elif t.inCell:   # RFC-0016 S8ch: the variable's storage is its cell
+      discard addrCellStore(ctx, p, t.cellTy, t.cellRef, ptrIteSV(ctx, guard,
+                            val, addrCellValue(ctx, p, t.cellTy, t.cellRef)))
     else:
       p.env[t.envName] = ptrIteSV(ctx, guard, val, p.env[t.envName])
   ""

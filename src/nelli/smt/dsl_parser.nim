@@ -9122,9 +9122,11 @@ proc localOwnedActual(bare: NimNode): bool =
       t = c[1][0]
     else: return false  # k2: fail-closed: false: not proved local; the heap answer stands
 
-proc formalAddressTaken(impl: NimNode): bool =
+proc formalAddressTaken(impl: NimNode; skip: seq[string] = @[]): bool =
   ## RFC-0005 S8cq. The routine `impl` takes the address of a by-value formal. A
   ## `var` formal's `nnkHiddenAddr` hands on what the call already passed.
+  ## RFC-0016 S8ch: a formal named in `skip` (an array formal the walk passes
+  ## as the actual's location, `addrTakenArrayFormal`) is not counted.
   proc byValueFormalIn(n: NimNode): bool =
     if n.kind == nnkSym:
       return symKind(n) == nskParam and n.typeKind != ntyVar
@@ -9139,14 +9141,93 @@ proc formalAddressTaken(impl: NimNode): bool =
       let r = lvalueRoot(n[^1], steps)
       if r != nil and r.kind == nnkSym and symKind(r) == nskParam and
          r.typeKind != ntyVar:
-        return true
+        if r.strVal notin skip: return true
       # RFC-0016 K2F-4: a shape `lvalueRoot` does not read takes a by-value
       # formal's address when it names one (`mayBeRootedAt`'s reading).
-      if r == nil and byValueFormalIn(n[^1]): return true
+      elif r == nil and byValueFormalIn(n[^1]): return true
     for c in n:
       if walk(c): return true
     false
   impl.len > 6 and walk(impl[6])
+
+proc formalAt(impl: NimNode; k: int): tuple[sym, ty: NimNode] =
+  ## RFC-0016 S8ch. The `k`th formal of the routine `impl` and its declared
+  ## type node, or nils.
+  if impl == nil or impl.len < 4 or impl[3].kind != nnkFormalParams: return
+  var pos = 0
+  for j in 1 ..< impl[3].len:
+    let d = impl[3][j]
+    if d.kind != nnkIdentDefs: continue
+    for m in 0 ..< d.len - 2:
+      if pos == k: return (d[m], d[^2])
+      inc pos
+
+proc addrTakenArrayFormal(impl: NimNode; k: int): bool =
+  ## RFC-0016 S8ch (PRC-30 item 2). The `k`th formal of `impl` is a by-value
+  ## array whose address the body takes. Nim emits an array formal as a C
+  ## array parameter, which decays to a pointer: the formal IS the actual's
+  ## storage, at any size (`ccgIntroducedPtr` is not consulted), so a write
+  ## through `unsafeAddr x` lands in the caller's variable. The walk passes
+  ## such a formal as a `var` formal (`parseCalleeImpl`), which is exact for
+  ## a `var` actual (copy-in/copy-out) and for a temporary (a copy no one
+  ## reads back); `arrayFormalActualDecline` declines every other actual.
+  let f = formalAt(impl, k)
+  if f.sym == nil or f.sym.kind != nnkSym or f.ty.kind == nnkVarTy: return false
+  if f.sym.typeKind != ntyArray: return false
+  proc walk(n: NimNode; name: string): bool =
+    if n.kind in {nnkAddr, nnkHiddenAddr} or
+       (n.kind == nnkCall and n.len > 1 and n[0].kind == nnkSym and
+        n[0].strVal in ["addr", "unsafeAddr"]):
+      var steps: seq[NimNode]
+      let r = lvalueRoot(n[^1], steps)
+      if r != nil and r.kind == nnkSym and symKind(r) == nskParam and
+         r.strVal == name and steps.len == 0:
+        return true
+    for c in n:
+      if walk(c, name): return true
+    false
+  impl.len > 6 and walk(impl[6], f.sym.strVal)
+
+proc addrTakenArrayFormalNames(impl: NimNode): seq[string] =
+  ## RFC-0016 S8ch. The names of `impl`'s formals `addrTakenArrayFormal` reads.
+  var k = 0
+  while true:
+    let f = formalAt(impl, k)
+    if f.sym == nil: break
+    if addrTakenArrayFormal(impl, k): result.add f.sym.strVal
+    inc k
+
+proc arrayFormalActualDecline(n: NimNode; i: int): string =
+  ## RFC-0016 S8ch. Why the `i`th actual of the call `n` cannot be passed to
+  ## an `addrTakenArrayFormal` as the walk passes it, or "": a `var` variable
+  ## the call names nowhere else (the formal is its location: copy-in and
+  ## copy-out), or a temporary (a copy no one reads back).
+  var bare = n[i]
+  while bare.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+        bare.len > 0:
+    bare = bare[^1]
+  if bare.kind == nnkSym:
+    case symKind(bare)
+    of nskVar:
+      for j in 1 ..< n.len:
+        if j != i and mentionsSym(n[j], bare):
+          return "`" & bare.strVal & "` is also another actual of the call: " &
+            "the formal and that actual are one location natively"
+      return ""
+    of nskConst, nskLet:
+      return "`" & bare.strVal & "` may be constant data (a `const`, or a " &
+        "`let` Nim emits as `NIM_CONST`): the callee writes through the " &
+        "formal's address, which faults natively (SIGSEGV)"
+    else:
+      return "`" & bare.strVal & "` is a location the walk passes as a copy"
+  var steps: seq[NimNode]
+  if lvalueRoot(bare, steps) == nil and steps.len == 0 and
+     bare.typeKind != ntyVar and not typeIsLent(bare.getTypeInst) and
+     varCallResult(bare).isNil and
+     bare.kind in {nnkBracket, nnkCall, nnkCommand, nnkPar, nnkTupleConstr,
+                   nnkObjConstr, nnkStmtListExpr}:
+    return ""
+  "`" & bare.repr & "` is a part of a location the walk passes as a copy"
 
 proc byValueWritten(n, a, calleeSym: NimNode; k: int;
                     outer: seq[NimNode]): string =
@@ -9190,6 +9271,10 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
   if symKind(calleeSym) == nskMethod: return "a method's actual"
   let impl = resolveRoutineImpl(calleeSym)
   if impl == nil or impl.len < 7: return "a routine with no body to read"
+  # RFC-0016 S8ch: an array formal whose address the callee takes is passed
+  # as the actual's location (`addrTakenArrayFormal`), not a copy; an actual
+  # it cannot be passed so declines at the call (`arrayFormalActualDecline`).
+  if addrTakenArrayFormal(impl, k): return ""
   if typeIsLent(impl[3][0]): return "a `lent` result"
   var acc = OpaqueEffects(inert: true, writesOnly: true)
   var seen, stack: seq[NimNode]
@@ -9220,7 +9305,11 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
   # routine actual may capture it, and the formal may hand out its own address.
   let local = localOwnedActual(bare)
   if local:
-    if formalAddressTaken(impl): return "a formal whose address the callee takes"
+    # RFC-0016 S8ch: an array formal whose address the callee takes is the
+    # actual's location (`addrTakenArrayFormal`): not a copy that address
+    # could escape from.
+    if formalAddressTaken(impl, addrTakenArrayFormalNames(impl)):
+      return "a formal whose address the callee takes"
     for j in 1 ..< n.len:
       if n[j].typeKind == ntyProc: return "a routine passed in the same call"
     acc = OpaqueEffects(inert: true, writesOnly: true)
@@ -9422,6 +9511,18 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     # declines the closure call's form).
     # RFC-0005 S8cq: decided only what is proved safe (`byValueWritten`).
     block:
+      # RFC-0016 S8ch (PRC-30 item 2): an array formal whose address the
+      # callee takes is passed as a `var` formal (`addrTakenArrayFormal`).
+      if addrTakenArrayFormal(resolveRoutineImpl(calleeSym), i - 1):
+        let why = arrayFormalActualDecline(n, i)
+        if why.len > 0:
+          preamble.add ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(n, "array argument `" & n[i].repr & "` of `" &
+                    calleeSym.strVal & "`, whose formal's address the " &
+                    "callee takes: " & why & " (RFC-0016 S8ch; " &
+                    "feUnsupportedOp)"),
+            "array argument whose formal's address the callee takes " &
+            "(feUnsupportedOp)")
       let why = byValueWritten(n, n[i], calleeSym, i - 1, outerOf())
       if why.len > 0:
         # Before the call: a target in the body would otherwise be reached
@@ -17875,6 +17976,11 @@ proc addrRootSym(t: NimNode): NimNode =
   ## dereference) -- either names one location for the routine's whole
   ## activation. nil for any other root.
   if t.kind == nnkSym and symKind(t) == nskVar: return t
+  # RFC-0016 S8ch: a by-value array formal is the actual's storage, which the
+  # walk passes as a `var` formal (`addrTakenArrayFormal`).
+  if t.kind == nnkSym and symKind(t) == nskParam and
+     t.typeKind == ntyArray and t.getTypeInst.kind != nnkVarTy:
+    return t
   if t.kind == nnkHiddenDeref and t.len == 1 and t[0].kind == nnkSym and
      symKind(t[0]) == nskParam and t[0].getTypeInst.kind == nnkVarTy:
     return t[0]
@@ -18636,6 +18742,24 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
       let fin = parseStmt(c[c.len - 1], ctx)   # lexically first
       stmts.add mkTry(parseDeferList(items, k + 1, ctx), @[], fin)
       break
+    # RFC-0016 S8ch: a body's implicit tail return, `result = (let p = addr
+    # x; ...; e)`, is the statements then `result = e` (Nim evaluates the
+    # whole right side before it assigns `result`). Spelled so, an address
+    # alias among them takes S8an's route below, which the expression's
+    # statement-at-a-time lowering never offers.
+    if c.kind == nnkAsgn and c.len == 2 and c[0].kind == nnkSym and
+       symKind(c[0]) == nskResult and c[1].kind == nnkStmtListExpr and
+       c[1].len > 1:
+      var anyAlias = false
+      for i in 0 ..< c[1].len - 1:
+        if addrAliasDecl(c[1][i]).p != nil: anyAlias = true
+      if anyAlias:
+        var expanded = items[0 ..< k]
+        for i in 0 ..< c[1].len - 1: expanded.add c[1][i]
+        expanded.add newTree(nnkAsgn, c[0], c[1][^1])
+        expanded.add items[k + 1 ..< items.len]
+        stmts.add parseDeferList(expanded, k, ctx)
+        break
     # RFC-0005 S8cn: `let c = s`, with a later write `c` may see.
     block:
       let lc = letCursorDecline(c, items[k + 1 ..< items.len], ctx)
@@ -23959,13 +24083,17 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
       tyNode = id[id.len - 1].getTypeInst
     let cls = classifyType(tyNode)
     let isVar = tyNode.kind == nnkVarTy
+    let base = flatIx
     flatIx += id.len - 2
     for j in 0 ..< id.len - 2:
       params.add IRParam(name: id[j].strVal, ty: cls.ty,
                          rangeLo: cls.range.lo,
                          rangeHi: cls.range.hi,
                          hasRange: cls.range.hasRange,
-                         isVar: isVar,
+                         # RFC-0016 S8ch: the actual's location.
+                         isVar: isVar or (cls.ty.kind == itArray and
+                                          addrTakenArrayFormal(monoImpl,
+                                                               base + j)),
                          isIntOffset: id[j].strVal in intOffsetParams)
   # Return type
   var retTy = tBool()
@@ -24006,6 +24134,11 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
     let inner = if n.kind == nnkStmtList and n.len == 1: n[0] else: n
     if inner.kind == nnkAsgn and
        inner[0].kind == nnkSym and inner[0].strVal == "result":
+      # RFC-0016 S8ch: a tail with an address alias among its statements is
+      # a statement list (`parseDeferList` spells it `...; result = e`).
+      if inner[1].kind == nnkStmtListExpr:
+        for i in 0 ..< inner[1].len - 1:
+          if addrAliasDecl(inner[1][i]).p != nil: return nil
       inner[1]
     else:
       nil
@@ -24029,6 +24162,11 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
         # element read). Emit the preamble before the return rather than
         # asserting it away — the value is still `valIR`.
         mkBlock(preamble & @[mkReturnVal(valIR)])
+    elif not isVoid and bodyNode.kind == nnkAsgn and
+         bodyNode[0].kind == nnkSym and bodyNode[0].strVal == "result":
+      # RFC-0016 S8ch: a lone `result = (...)` the shortcut left (above) is
+      # a one-statement list, so the list's lowering sees it.
+      parseStmt(newTree(nnkStmtList, bodyNode), ctx)
     else:
       parseStmt(bodyNode, ctx)
   if hadResultNoinit: ctx.noinitNames.incl "result"

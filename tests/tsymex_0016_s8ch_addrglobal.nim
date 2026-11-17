@@ -111,6 +111,7 @@ proc wrByVal(x: array[8, int]; v: int): int =
   x[1]
 
 proc sutByValGlobal(k: int) =
+  gBig = default(array[8, int])   # every element the copy-in reads is known
   gBig[1] = 2
   let r = wrByVal(gBig, k)
   if gBig[1] == k and r == k and k == 5: symexTarget("bv")
@@ -123,15 +124,43 @@ proc sutByValLocal(k: int) =
   if a[1] == k and r == k and k == 6: symexTarget("bl")
   if a[1] != k or r != k: symexTarget("bl_dead")
 
-template declines(fn: typed, lbl: string) =
-  ## Item 2 is not modelled yet: the verdict is untrusted, with the kind.
+proc sutByValTemp(k: int) =
+  ## A temporary actual: the callee writes the temporary, the caller sees
+  ## nothing.
+  var t = 3
+  let r = wrByVal([t, 2, 3, 4, 5, 6, 7, 8], k)
+  if r == k and t == 3 and k == 4: symexTarget("bt")
+  if r != k or t != 3: symexTarget("bt_dead")
+
+type Holder = object
+  a: array[8, int]
+
+proc sutByValField(k: int) =
+  ## A field actual: natively the callee writes the field.
+  var h: Holder
+  h.a[1] = 2
+  let r = wrByVal(h.a, k)
+  if h.a[1] == k and r == k and k == 3: symexTarget("bf")
+
+let gLet = [1, 2, 3, 4, 5, 6, 7, 8]
+  ## Nim emits it as `NIM_CONST` data: a write through the formal's address
+  ## faults (SIGSEGV; `scratchpad/cgen/arr.nim` in the handoff). No native
+  ## run here: it would kill the test binary.
+
+proc sutByValConst(k: int) =
+  let r = wrByVal(gLet, k)
+  if r == k and k == 11: symexTarget("bc")
+
+template declines(fn: typed, lbl: string, why: string) =
+  ## The verdict is untrusted, with the kind and the reason.
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
     var named = false
     for e in r.errors:
-      if e.kind == feUnsupportedOp and e.severity == sevError: named = true
+      if e.kind == feUnsupportedOp and e.severity == sevError and
+         why in e.msg: named = true
     check named
 
 suite "S8ch: native":
@@ -139,8 +168,9 @@ suite "S8ch: native":
     let h = nativeHits(sutAddrWrite, ks) + nativeHits(sutAddrRead, ks) +
             nativeHits(sutByValGlobal, ks) + nativeHits(sutByValLocal, ks) +
             nativeHits(sutAddrReturned, ks) + nativeHits(sutStoredByName, ks) +
-            nativeHits(sutStoredThrough, ks) + nativeHits(sutSameAddr, ks)
-    for l in ["aw", "ar", "bv", "bl", "rp", "sn", "sp", "eq"]:
+            nativeHits(sutStoredThrough, ks) + nativeHits(sutSameAddr, ks) +
+            nativeHits(sutByValTemp, ks) + nativeHits(sutByValField, ks)
+    for l in ["aw", "ar", "bv", "bl", "rp", "sn", "sp", "eq", "bt", "bf"]:
       checkpoint l
       check l in h
       check (l & "_dead") notin h
@@ -154,11 +184,12 @@ suite "S8ch: the address of a global in a walked callee":
     clean(sutAddrRead, "ar_dead", sxUnsat)
 
   test "returned to the caller":
-    ## Open (handoff): the caller's pointer is the call's fresh result, so
-    ## `p[] = k` writes the cell and, through S8bh's target selector, `gi` by
-    ## name; the frame sees both written in one statement and declines.
-    declines(sutAddrReturned, "rp")
-    declines(sutAddrReturned, "rp_dead")
+    ## The caller's pointer is the call's fresh result, equal to the cell
+    ## only in the path condition. Through S8bh's target selector it may
+    ## address `gi`, whose storage is its cell: the write lands there, and
+    ## the frame sees one location written.
+    clean(sutAddrReturned, "rp", sxSat)
+    clean(sutAddrReturned, "rp_dead", sxUnsat)
   test "stored in a global pointer, the global written by name":
     clean(sutStoredByName, "sn", sxSat)
     clean(sutStoredByName, "sn_dead", sxUnsat)
@@ -170,16 +201,22 @@ suite "S8ch: the address of a global in a walked callee":
     clean(sutSameAddr, "eq_dead", sxUnsat)
 
 suite "S8ch: unsafeAddr of a by-value array formal":
-  ## Item 2 is S8ch's open remainder (the handoff has the native reading:
-  ## an array formal is the actual's storage, a write through its address
-  ## lands there, and one into constant data faults). These pin today's
-  ## honest decline; the exact model flips them to `clean`.
+  ## An array formal is a C array parameter: the actual's storage, at any
+  ## size. A write through its address lands in a `var` actual, in a
+  ## temporary the caller never reads, and faults in constant data.
   test "the actual is a global":
-    declines(sutByValGlobal, "bv")
-    declines(sutByValGlobal, "bv_dead")
+    clean(sutByValGlobal, "bv", sxSat)
+    clean(sutByValGlobal, "bv_dead", sxUnsat)
   test "the actual is a local":
-    declines(sutByValLocal, "bl")
-    declines(sutByValLocal, "bl_dead")
+    clean(sutByValLocal, "bl", sxSat)
+    clean(sutByValLocal, "bl_dead", sxUnsat)
+  test "the actual is a temporary":
+    clean(sutByValTemp, "bt", sxSat)
+    clean(sutByValTemp, "bt_dead", sxUnsat)
+  test "the actual is a field (not modelled)":
+    declines(sutByValField, "bf", "a part of a location")
+  test "the actual is constant data":
+    declines(sutByValConst, "bc", "SIGSEGV")
 
 suite "S8ch: walker version":
   test "symexWalkerVersion >= 376":

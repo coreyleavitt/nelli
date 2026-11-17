@@ -10,7 +10,8 @@ name: symex-nightly
 #                                                   task; absorbs W1-m's tsymex_0016_*)
 #
 # plus the parser-VM cell: `vm_alias_guard` over a sampled corpus slice
-# (scripts/vm-alias-slice.sh).
+# (scripts/vm-alias-slice.sh), and the ASan cell (K8c): the walker over an
+# ASan-built libz3, a core set plus a rotating slice (scripts/asan-slice.sh).
 #
 # EACH LEG has its own known-red allowlist, tests/0016-allowlist/nightly-<leg>-known-red.txt,
 # with symex-linux's stale-entry rule (scripts/check-linux-allowlist.sh): a red test
@@ -504,8 +505,90 @@ jobs:
           path: findings/
           if-no-files-found: ignore
 
+  # RFC-0016 K8c (CRH-07): the walker under AddressSanitizer. nelli AND libz3
+  # are ASan-built: a Z3 AST use-after-free is made by libz3 itself, which a
+  # stock libz3 hides (scripts/asan-slice.sh header; the self-test proves it).
+  # The ASan libz3 is built from the tagged source once per (version, build
+  # script) and cached. Any sanitizer report, or a failing/hung test, fails the
+  # job; leaks are not gated (S8ck-r owns nim-z3's).
+  asan:
+    needs: derive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    env:
+      Z3_ASAN_VERSION: "5.1.0"
+      Z3_ASAN_SRC_SHA256: c433e1add0431c5edf1644bd9951c40588024d2d288f0e4215e5fcb6e3b4277d
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      # the stock Z3 here only serves the toolchain version report and the
+      # headers; the slice runs against the ASan libz3 below
+      - uses: ./.github/actions/setup-symex-linux
+
+      - name: Restore the ASan libz3
+        id: z3asan
+        uses: actions/cache@v4
+        with:
+          path: ~/z3-asan-prefix
+          key: z3-asan-${{ env.Z3_ASAN_VERSION }}-${{ env.Z3_ASAN_SRC_SHA256 }}-${{ hashFiles('scripts/build-z3-asan.sh') }}-gcc13
+
+      - name: Build libz3 with AddressSanitizer (scripts/build-z3-asan.sh)
+        if: steps.z3asan.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/z3-asan-src"
+          mkdir -p "$d"
+          curl -fsSL --retry 5 -o "$d/z3.tar.gz" "https://github.com/Z3Prover/z3/archive/refs/tags/z3-$Z3_ASAN_VERSION.tar.gz"
+          echo "$Z3_ASAN_SRC_SHA256  $d/z3.tar.gz" | sha256sum -c -
+          Z3_SRC_TARBALL="$d/z3.tar.gz" Z3_ASAN_JOBS="$(nproc)" \
+            bash scripts/build-z3-asan.sh "$Z3_ASAN_VERSION" "$HOME/z3-asan-prefix" "$RUNNER_TEMP/z3-asan-build"
+          rm -rf "$RUNNER_TEMP/z3-asan-build"
+
+      - name: Self-test, the job fails on planted defects (a plain UAF and an over-released Z3 AST)
+        env:
+          NELLI_HOST: "1"
+        run: |
+          set -uo pipefail
+          export LD_LIBRARY_PATH="$HOME/z3-asan-prefix/bin:$LD_LIBRARY_PATH"
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          bash scripts/asan-slice.sh --self-test
+
+      - name: ASan slice (scripts/asan-slice.sh)
+        env:
+          NELLI_HOST: "1"
+        run: |
+          set -uo pipefail
+          export LD_LIBRARY_PATH="$HOME/z3-asan-prefix/bin:$LD_LIBRARY_PATH"
+          export NELLI_NIM_FLAGS="--cc:gcc --colors:off --path:src --path:_deps/z3/src --path:_deps/softlink/src --cincludes:$NELLI_Z3_INCLUDE"
+          mkdir -p out findings
+          bash scripts/asan-slice.sh -n 12 out/slice.log
+          { echo '### ASan slice'; echo '```'; cat out/slice.log.summary; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # any sanitizer report, any failing or hung test, and any core test that did not run
+          awk '$1 != "0" { n=$3; sub(/^.*\//,"",n); sub(/\.nim$/,"",n); printf "asan\t%s\tasan slice: rc=%s\n", n, $1 }' out/slice.log > findings/findings-asan.tsv
+          awk '{ n=$1; sub(/^.*\//,"",n); sub(/\.nim$/,"",n); printf "asan\t%s\tsanitizer report: %s\n", n, $2 }' out/slice.log.san >> findings/findings-asan.tsv
+          [ ! -s findings/findings-asan.tsv ]
+
+      - name: Upload the slice record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-asan-merged
+          path: out/
+          if-no-files-found: warn
+
+      - name: Upload the findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-findings-asan
+          path: findings/
+          if-no-files-found: ignore
+
   report:
-    needs: [derive, sweep, msvc-sweep, gate, universe, vm-alias]
+    needs: [derive, sweep, msvc-sweep, gate, universe, vm-alias, asan]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -576,7 +659,7 @@ jobs:
           cat findings/*.tsv > findings.tsv 2>/dev/null || : > findings.tsv
           # a job that failed without writing findings (setup broke, a runner was lost)
           # is itself a finding, keyed by job
-          for j in derive sweep msvc-sweep gate universe vm-alias; do
+          for j in derive sweep msvc-sweep gate universe vm-alias asan; do
             r="$(printf '%s' "$NEEDS_JSON" | jq -r --arg j "$j" '.[$j].result')"
             [ "$r" = failure ] && [ ! -s findings.tsv ] && printf 'workflow\t%s\tjob %s result: failure\n' "$j" "$j" >> findings.tsv
           done

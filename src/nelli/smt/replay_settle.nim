@@ -84,7 +84,12 @@ import ./replayresult
 
 privateAccess(SatCandidate)
 
-proc candidateInput*(c: SatCandidate): auto =
+type CandidateInput* = typeof(SatCandidate().input)
+  ## RFC-0016 W4 perf. `candidateInput`'s type, named where no candidate is in
+  ## scope: a re-executed child's entry, hoisted out of the routine that
+  ## replays a candidate (`emitRunSymexReplayed`).
+
+proc candidateInput*(c: SatCandidate): CandidateInput =
   ## RFC-0005 S10. The candidate's model, for the replay codegen to render
   ## into `fn`'s parameter tuple. Private: see the section comment.
   c.input

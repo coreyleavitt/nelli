@@ -106,7 +106,10 @@ proc emitRunSymexReplayed*(fn: NimNode; params: seq[IRParam];
     let childRaw = genSym(nskVar, "childRaw")
     let childWit = genSym(nskLet, "childWitness")
     let (childTy, childTup) = emitWitnessTuple(params, childRaw)
-    child = ChildWitness(blob: witId, blobTy: newCall(bindSym"typeof", witId),
+    # The child's entry is hoisted out of `replayOne` (below), so its blob's
+    # type is named without `witId`, which is `replayOne`'s.
+    let blobTy = bindSym"CandidateInput"
+    child = ChildWitness(blob: witId, blobTy: blobTy,
                          blobId: childRaw, witId: childWit,
                          decl:
                            if params.len == 0:
@@ -115,18 +118,24 @@ proc emitRunSymexReplayed*(fn: NimNode; params: seq[IRParam];
                            else:
                              quote do:
                                let `childWit` {.used.}: `childTy` = `childTup`)
+  # RFC-0016 W4 perf: the replay runs inside `replayOne`, a routine, but a
+  # re-executed child's entry and routine table are built in this block's
+  # scope (`emitReplayWitness`'s `hoist`): built inside a routine, the table
+  # names no nested routine, and a captured closure would not cross.
+  let hoisted = newStmtList()
   let replay = emitReplayWitness(fn, params, typedId, replayTgt,
     newDotExpr(candId, ident"pathTaint"),
     newCall(bindSym"candidateLossy", candId),
     newDotExpr(candId, ident"nilDerefOnPath"),
     newDotExpr(settings, ident"replayTimeoutMs"),   # RFC-0005 S8be
-    child)
+    child, hoisted)
   # RFC-0016 W4 perf: the candidates are replayed inside the run
   # (`CandidateReplay`), which walks the tail of the one a replay confirms
   # while its context is live, and settled here, in the order they ran, once
   # it returns. A lossy clean winner is replayed after the run, as before.
   result = quote do:
     block:
+      `hoisted`
       let `tgtId`: SymexTarget = `target`
       proc `replayOneId`(`candId`: SatCandidate):
           tuple[replayed: ReplayResult; shown: string] =

@@ -77,7 +77,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         nilDeref: NimNode = newLit(false);
                         timeoutMs: NimNode = newLit(
                           SymexSettings().replayTimeoutMs);
-                        child: ChildWitness = ChildWitness()): NimNode =
+                        child: ChildWitness = ChildWitness();
+                        hoist: NimNode = nil): NimNode =
   ## RFC-0005 S2: the macro-time half of `replayWitness`, spliced by S10 into
   ## the entry macros' shared replay emitter (`emitRunSymexReplayed`). Emits
   ## an expression of type `ReplayResult`. `witness` is the typed witness
@@ -97,6 +98,14 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   ## past it the child is killed and the outcome is `roTimedOut`.
   ## RFC-0005 S8ct: the run itself happens in a child process
   ## (`replayproc.nim`), never in this one.
+  ## `hoist` (RFC-0016 W4 perf), when given, is a statement list in the
+  ## caller's scope that receives the re-executed child's entry and routine
+  ## table, where the expression itself is spliced into a routine (the
+  ## `CandidateReplay` of `emitRunSymexReplayed`). The table names a nested
+  ## routine only from module-level code (`nestedRoutineAddrs`), so it must
+  ## not be built inside that routine; both ends read it from the entry's
+  ## `{.global.}` registry. A hoisted `child.blobTy` must not name the
+  ## expression's own symbols.
   let fidelity = paramsFidelity(params)
   if fidelity == wfUnexecutable:
     # Decided at macro time: the splat is not even emitted, so a placeholder
@@ -295,7 +304,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       runChild = quote do:
         block:
           var `wr`: WireWriter
-          `wr`.procs = `tableExpr`
+          `wr`.procs = `registry`
           `wr`.envOk = `envOkExpr`
           `wr`.envBenign = `envBenignExpr`
           `wr`.envPut = `envPutExpr`
@@ -323,6 +332,9 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
     runChild = quote do:
       refusedStatically("this platform has no way to run a replay outside " &
                         "the host process")
+  if hoist != nil:
+    hoist.add preamble
+    preamble = newStmtList()
   result = quote do:
     block:
       `preamble`

@@ -697,6 +697,16 @@ proc tagOrdOf(tagNode: NimNode;
           "for tag `" & tagName & "`", tagNode)
   (tagName, tagOrd)
 
+proc unsupportedRefKey(nameSym: NimNode): string =
+  ## RFC-0016 K9c follow-up. `IRType.uninterpRefKey` of the named object
+  ## `nameSym` when it is declined as `__unsupported:<name>`: the key
+  ## `refPointeeTypeId` gives its recursion placeholder
+  ## (`namedRefPlaceholder`: the nominal id, or the hierarchy root's under
+  ## `of`), so a `ptr` to it is one sort however the type was reached.
+  if nameSym.kind != nnkSym: return ""
+  let info = inheritInfo(nameSym)   # a whole value, not an alias of a field
+  if info.chain.len > 0: info.chain[0] else: nominalId(nameSym)
+
 proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
                                   isRefWrapped: bool = false): IRType =
   ## Cluster H Step C (ADR-0022 Round-2): shared core that builds the FULL
@@ -736,7 +746,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
   # and it stopped the compile before.
   for member in recList:
     if member.kind notin {nnkIdentDefs, nnkRecCase}:
-      return tUninterp("__unsupported:" & s)
+      return tUninterp("__unsupported:" & s, unsupportedRefKey(nameSym))
   # First pass: detect whether this object has any `nnkRecCase`
   # member. If it does, we build an `itVariant` (Phase 11);
   # otherwise the plain-tuple path stays.
@@ -751,7 +761,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
   # routine's effect summary classifies every global it names).
   for member in recList:
     if member.kind == nnkRecWhen:
-      return tUninterp("__unsupported:" & s)
+      return tUninterp("__unsupported:" & s, unsupportedRefKey(nameSym))
   if hasRecCase:
     # ---- Phase 11 single-axis + Phase 14 multi-axis lowering --
     # Each `nnkRecCase` in `recList` becomes one VariantAxis.

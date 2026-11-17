@@ -120,7 +120,7 @@ const
   ## Marked lines per family file (RFC-0016 R2-6). Their sum is the family
   ## total this audit pins.
   markerPins = [("runtime.nim", 102), ("runtime_strings.nim", 4),
-                ("heap_model.nim", 20), ("runtime_heap.nim", 11)]
+                ("heap_model.nim", 21), ("runtime_heap.nim", 11)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"
@@ -364,7 +364,10 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     checkpoint("family markers:" & got & " total " & $total)
     var pinnedTotal = 0
     for (_, pn) in markerPins: pinnedTotal += pn
-    check pinnedTotal == 137
+    ## RFC-0016 K9c-g: `seqElemAt`'s unbacked-element decision reads the
+    ## seq's length once, in the arm that has no array (heap_model.nim 20 ->
+    ## 21): 137 + 1 = 138.
+    check pinnedTotal == 138
     check total == pinnedTotal
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

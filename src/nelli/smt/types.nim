@@ -492,6 +492,17 @@ type
         ## Part of `==` and the canonical form (it changes the walk).
     of itUninterp:
       uninterpName*: string   ## Phase 15 Z3b: Z3 uninterpreted-sort name.
+      uninterpRefKey*: string
+        ## RFC-0016 K9c follow-up. For a NAMED object the classifier could not
+        ## represent (`__unsupported:<name>`: a `when` member), the key its
+        ## `ref`/`ptr` sort carries everywhere else: `namedRefPlaceholder`'s,
+        ## the nominal id of the type (of its hierarchy's root under `of`).
+        ## A `ptr` to it from a field (`owner: ptr MemRegion`, a placeholder
+        ## pointee) and one from `addr a` (`a: var MemRegion`, this type) are
+        ## pointers of one Nim type and must be terms of one `Ref_T` sort
+        ## (`refPointeeTypeId`); they were two, and `c.owner == addr(a)` was
+        ## a Z3 sort mismatch (`weInternalWalkerFault`). "" for every other
+        ## uninterpreted type.
     of itFloat32, itFloat64:
       # Phase 15 F1: sort fully determined by the kind; no payload fields.
       discard
@@ -3154,9 +3165,10 @@ proc tArray*(elemTy: IRType, size: int, lo: int64 = 0): IRType =
 proc tString*(): IRType =
   IRType(kind: itString)
 
-proc tUninterp*(name: string): IRType =
+proc tUninterp*(name: string; refKey = ""): IRType =
   ## Phase 15 Z3b: the IR type of an uninterpreted reference (`svUninterpRef`).
-  IRType(kind: itUninterp, uninterpName: name)
+  ## `refKey`: `uninterpRefKey` (RFC-0016 K9c follow-up).
+  IRType(kind: itUninterp, uninterpName: name, uninterpRefKey: refKey)
 
 proc tFloat32*(): IRType = IRType(kind: itFloat32)   ## Phase 15 F1
 proc tFloat64*(): IRType = IRType(kind: itFloat64)   ## Phase 15 F1
@@ -4042,7 +4054,8 @@ proc `==`*(a, b: IRType): bool =
   if a.kind != b.kind: return false
   case a.kind
   of itBool, itString: true
-  of itUninterp: a.uninterpName == b.uninterpName
+  of itUninterp:
+    a.uninterpName == b.uninterpName and a.uninterpRefKey == b.uninterpRefKey
   of itFloat32, itFloat64: true   ## Phase 15 F1: kind already matched; no payload
   of itDistinct:   ## Phase 15 G4: nominal name + structural base.
     a.distinctName == b.distinctName and a.distinctBase == b.distinctBase

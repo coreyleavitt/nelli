@@ -98,6 +98,29 @@ proc sutCreate(k: int) =
   if p[] == 3: symexTarget("cr")
   dealloc(p)
 
+# RFC-0016 K9c follow-up: a `ptr` to a named object the type bridge declines
+# (a `when` member), reached as a field's pointee and as `addr` of a variable
+# of the type. `MemRegion` is this shape, and the cpp build of `sutCreate`
+# reaches `rawDealloc`'s `c.owner == addr(a)`: two sorts for one pointer
+# type, a Z3 sort mismatch (`weInternalWalkerFault`), on cpp only because only
+# that build's walk reached the comparison. This is the same comparison on
+# every backend.
+type
+  WhenRegion = object
+    when defined(k9cfNeverDefined):
+      y: int
+    a: int
+  RegionChunk = object
+    owner: ptr WhenRegion
+
+var gRegion: WhenRegion
+var gChunk: RegionChunk
+
+proc ownsRegion(a: var WhenRegion): bool = gChunk.owner == addr(a)
+
+proc sutOwner(k: int) =
+  if ownsRegion(gRegion) and k == 3: symexTarget("ow")
+
 proc sutGcRef(k: int) =
   ## `GC_ref` reaches `RefHeader`, an object with a `when` member, which
   ## stopped the compile: "Expected nnkIdentDefs, got nnkRecWhen".
@@ -214,6 +237,21 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     pinDecline(sutCreate, cellKey(faCallShape, "lifetime/create"), feUnsupportedOp, tLabel("cr"))
     pinDecline(sutGcRef, cellKey(axMagic, "GCref"), feUnsupportedExprKind, tLabel("gr"), needle = "nnkCast")
 
+suite "S8cl (2b): a pointer to a type the bridge declines (RFC-0016 K9c follow-up)":
+  test "nim":
+    let h = nativeHits(sutOwner, ks)
+    check "ow" notin h
+
+  test "the field's pointer and `addr` of the variable are one sort":
+    let r = symexFind(sutOwner, tLabel("ow"))
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check not r.errors.named(weInternalWalkerFault)
+    var addrDeclined = false
+    for e in r.errors:
+      if e.kind == feUnsupportedOp and "`addr a`" in e.msg: addrDeclined = true
+    check addrDeclined
+
 suite "S8cl (3): setLen":
   test "nim":
     let h = nativeHits(sutSetLen, ks) + nativeHits(sutSetLenWrites, ks) +
@@ -239,3 +277,6 @@ suite "S8cl (3): setLen":
 suite "S8cl: walker version":
   test "symexWalkerVersion >= 248":
     check parseInt(symexWalkerVersion) >= 248
+
+  test "symexWalkerVersion >= 373 (RFC-0016 K9c follow-up)":
+    check parseInt(symexWalkerVersion) >= 373

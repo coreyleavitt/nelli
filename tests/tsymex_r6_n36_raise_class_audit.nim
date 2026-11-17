@@ -403,7 +403,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## E8 and F6 suites. No site was added; five were newly scanned.
     check total == 37
 
-  test "pattern (B) site inventory: 89 marked lines across the runtime family (81 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim + 5 runtime_exceptions/floats/closures when pinned)":
+  test "pattern (B) site inventory: 88 marked lines across the runtime family (80 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim + 5 runtime_exceptions/floats/closures when pinned)":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -469,9 +469,11 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## (`lowerClosureArm`'s else) and three in `runtime_floats.nim`
     ## (`toBv64ForFp`'s else, `int()`'s non-float operand, `lowerFloatArm`'s
     ## else). No site was added.
-    check total == 89
+    ## 89 -> 88 (RFC-0016 K9c-g): `storeSeqElem`'s unsupported-kind raise is
+    ## gone (an element type the model does not back taints in-band).
+    check total == 88
 
-  test "N46-followup-3: pattern (B) category breakdown -- 89 category-c, 0 category-d (runtime family) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 88 category-c, 0 category-d (runtime family) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -500,7 +502,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 82 -> 83: the same S8ce `injectShapeFault` site added above.
     ## 83 -> 84: the same `storeOrdinal` site added above (RFC-0005 S8cl).
     ## 84 -> 89: the five newly scanned pattern-(B) sites (D3-fix-c).
-    check cCount == 89
+    ## 89 -> 88 (RFC-0016 K9c-g): see the inventory above.
+    check cCount == 88
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime family)":

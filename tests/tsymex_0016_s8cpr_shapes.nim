@@ -322,14 +322,18 @@ suite "RFC-0016 PRC-34: whole-seq ==":
     # No `forall` over an array (the G4 hang lesson): with neither length
     # bounded in the term, the comparison declines. `s.len == 2` in the same
     # guard is a path fact a lowering cannot read.
-    template declines(fn: untyped) =
-      let r = symexFind(fn, tLabel("hit"))
-      checkpoint show(r.errors)
-      check r.status == sxUnknown
-      check r.errors.named(feUnsupportedOp)
-    declines(seqEqSym)
-    declines(seqEqSymDead)
-    declines(seqEqSymLenDead)
+    let r1 = symexFind(seqEqSym, tLabel("hit"))
+    checkpoint show(r1.errors)
+    check r1.status == sxUnknown
+    check r1.errors.named(feUnsupportedOp)
+    let r2 = symexFind(seqEqSymDead, tLabel("hit"))
+    checkpoint show(r2.errors)
+    check r2.status == sxUnknown
+    check r2.errors.named(feUnsupportedOp)
+    let r3 = symexFind(seqEqSymLenDead, tLabel("hit"))
+    checkpoint show(r3.errors)
+    check r3.status == sxUnknown
+    check r3.errors.named(feUnsupportedOp)
   test "a branch-merged length bounds the unroll: reached":
     decides(seqEqBranch, sxSat)
   test "an indexed element's `ite` length bounds the unroll: reached":

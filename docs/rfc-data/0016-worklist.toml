@@ -2320,3 +2320,44 @@ source = "CI-B nightly, run 42608737906 (2026-11-09, sha 8af8f2fe), intake #173 
 evidence = "the report job's ceiling ratchet on each leg (an unlisted test over 150 s fails the leg)"
 aliases = ["F-0010"]
 cells = []
+
+[[row]]
+id = "INT-52"
+table = "5.8c"
+title = "Intake #177 (`[nightly] cpp:tsymex_0016_k6b_hookcopy`): the suite did not compile on the cpp backend (red on every nightly cpp leg from 2026-11-10, run 42804432874, to 2026-11-17, run 44076804398). Its emitted hook body wrote `a->v` for a hook's `var` parameter, which the cpp backend passes as a C++ reference, so the six hookcopy cells had no cpp records and the cpp universe join failed with them. A test emit defect, not a walker one: the c backend and the walker's verdicts are unaffected"
+class = "test portability (cpp emit)"
+state = "open"
+note = ": fixed on `rfc-0016-w4k8cb` (840c3a68): the emit is per backend, and `field/inactiveBytes`, pinned on the c backend only (the cpp layout is the `inactiveBranch` pin), gets a `rows=linux-cpp` entry in `tests/0016-allowlist/defined.txt` (rows= ceiling 12 to 13). The row closes when that branch lands and a nightly cpp leg runs the suite green"
+slice = "W4-z"
+home = "`rfc-0016-w4k8cb` (840c3a68, awaiting landing)"
+source = "CI-B nightly, run 42804432874 (2026-11-10, sha db6c3da6), intake #177"
+evidence = "the cpp gate of every nightly since run 42804432874 lists `tsymex_0016_k6b_hookcopy` under new failures; run 44076804398's cpp universe job fails on its cells"
+aliases = ["F-0011"]
+cells = []
+pins = ["tsymex_0016_k6b_hookcopy"]
+
+[[row]]
+id = "INT-53"
+table = "5.8c"
+title = "Intake #178 (`[nightly] cpp:tsymex_rfc0005_s8cn_step1d`): a mis-filing, not a new failure. The suite is the INT-43 known-red of `tests/0016-allowlist/nightly-cpp-known-red.txt`, and every cpp gate since 2026-11-10 lists it under `known-red (allowlisted, still red; not failing)`. `scripts/rfc0016-intake.sh --extract` kept the FAIL block's title across that header, so on a night with any new cpp failure (#177's, from run 42804432874 on) the known-red test was filed and commented as `red tests NOT in the allowlist (new failures)`; on 2026-11-09, with no FAIL block, it was not. The red itself is INT-43: `grow_stale_dead` returns `sxUnknown` (`Z3: canceled` under `seqQueryRLimit = 20000000`) where the pin wants `sxUnsat`, `N45STATS queries=74 rlimit=745082924`. Reproduced 2026-11-17 with `scripts/dt-bounded.sh` on both backends (c and cpp: the same 74 queries and 745082924 units) in a dev image carrying the official Z3 5.1.0 archive (`rfc-0016-w4devimg` fd32c393), so INT-43 is the Z3 build, not the backend. Fixed: `a555923d` ends the FAIL block at any other unindented line (self-test case added, red before the fix); on run 44076804398's cpp gate output the extractor now yields only `tsymex_0016_k6b_hookcopy`"
+class = "CI intake tooling (no verdict change); the red is INT-43's"
+state = "closed"
+note = "INT-43 stays open for the red itself (a Z3-build-dependent unit count; the verdict is sound)"
+sha = "a555923d"
+source = "CI-B nightly, run 42804432874 (2026-11-10, sha db6c3da6), intake #178"
+evidence = "run 44076804398's cpp gate: `FAIL: red tests NOT in the allowlist` lists only k6b_hookcopy, `known-red` lists s8cn_step1d, `red=2 allowlisted=1`; `rfc0016-intake.sh --self-test` red before `a555923d`, green after; a step-stats probe of `growStale` on cpp: the first reaching path is refuted by step 1d (`1d/zsUnsat`), the second spends its 20M bound undecided in step 1 (`1/zsUnknown=10000327`) and step 3 (`3/zsUnknown=10000312`) and never reaches 1d"
+aliases = ["F-0012"]
+cells = []
+
+[[row]]
+id = "INT-54"
+table = "5.8c"
+title = "Intake #179 and #181 (`[nightly] msvc:tsymex_rfc0005_s8ct_isolation_d`), #180 and #182 (`msvc:tsymex_rfc0005_s8ct_reexec_d`): #181 duplicates #179 and #182 duplicates #180. Both suites failed to compile under vcc in one nightly only (run 42804432874, 2026-11-10, sha db6c3da6) with `interpretation requires too many iterations` at the default `maxLoopIterationsVM` (10M): isolation_d in `check_options.routineChecks` via `isStdlibFile` (`strimpl.endsWith`), reexec_d (`-d:nelliReplayReexec`) in `system/iterators`. Not a flake: the VM iteration count is a deterministic function of the tree, the toolchain and the path lengths, and the PRC-02 and PRC-07 work merged after the green 2026-11-09 nightly (8af8f2fe..db6c3da6) added compile-time parse and scan work that took these two compiles past 10M at Windows path lengths under the CI toolchain. Fixed with no VM-limit raise by 28df0350 (memoised whole-call-graph collectors, a named `RoutineSlots`, single-pass `fileDeclaresHook`, set-visited `replayFootprint`), a12b3ad0 (`isStdlibDecl`/`isRuntimeCode` answered once per file) and fe215c45 (`vm_alias_guard` visits through a set), which reached main in 75b36f5a (2026-11-11). Both suites have compiled and passed on every msvc nightly since (run 43006870598 on 2026-11-11 through run 44076804398 on 2026-11-17: 75 s and 64 s). The duplicate pairs were an intake defect: one key found twice in a run (the gate's new failure and the baseline diff's REGRESSED) opened two issues; `a555923d` collapses findings by (leg, test)"
+class = "build portability (compile-time VM budget on Windows paths); no verdict change"
+state = "closed"
+note = "`symex-nightly` run 44076804398 (2026-11-17): msvc gate red=0, `s8ct_isolation_d` and `s8ct_reexec_d` rc=0"
+sha = "75b36f5a"
+source = "CI-B nightly, run 42804432874 (2026-11-10, sha db6c3da6), intake #179 #180 #181 #182"
+evidence = "the msvc shard logs of run 42804432874 (shards 26 and 16) print the VM-iteration error and `rc=1 (compile failed)`; every later msvc gate is green; the pin `tsymex_0016_w3z_r10_nestedreplay` holds a nested replay's compile under the default limit"
+aliases = ["F-0013"]
+cells = []

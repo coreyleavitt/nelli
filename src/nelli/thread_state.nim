@@ -69,37 +69,55 @@ macro releaseToDefault*(vars: varargs[untyped]): untyped =
     result.add quote do:
       `v` = default(typeof(`v`))
 
+var threadStateArmed {.threadvar.}: bool  # [thread-state: kept -- records whether this thread's onThreadDestruction hook is registered; only disarmThreadStateRelease, which removes the hook, clears it]
+
+proc releaseSymexThreadState*() {.gcsafe, raises: [].}
+
+proc releaseAtThreadExit() {.gcsafe, raises: [].} =
+  releaseSymexThreadState()
+
+proc disarmThreadStateRelease() {.gcsafe, raises: [].} =
+  ## Takes this thread's exit hook back out of Nim's handler list. Nim's list
+  ## is a threadvar too and is never freed, and on a foreign thread no
+  ## handler in it ever runs: a run there armed the hook and so allocated
+  ## the list (24 bytes, tsymex_rfc0005_s8cb_replay under LeakSanitizer).
+  ## The release this precedes leaves the thread in its fresh state, so it
+  ## needs no hook until a later run arms it again. Called from the hook
+  ## itself, the removal is safe: `afterThreadRuns` walks the list down to
+  ## index 0, and deleting entry `i` moves only entries it has already run.
+  when compileOption("threads") and declared(nimThreadDestructionHandlers):
+    if threadStateArmed:
+      threadStateArmed = false
+      {.cast(gcsafe).}:
+        for i in countdown(nimThreadDestructionHandlers.len - 1, 0):
+          if rawProc(nimThreadDestructionHandlers[i]) ==
+             cast[pointer](releaseAtThreadExit):
+            nimThreadDestructionHandlers.delete(i)
+            break
+        if nimThreadDestructionHandlers.len == 0:
+          nimThreadDestructionHandlers = @[]  # frees the payload
+
 proc releaseSymexThreadState*() {.gcsafe, raises: [].} =
   ## Gives back every piece of nelli's per-thread state on the calling
-  ## thread: each registered module release, then a cycle collection (the
-  ## released IR and walker graphs are cyclic, and the collection also frees
-  ## this thread's ORC root buffer once it is empty). Safe to call any number
-  ## of times; a later run on the same thread rebuilds what it needs. A
-  ## foreign thread must call it before it exits (see the module doc).
+  ## thread: this thread's exit hook, each registered module release, then a
+  ## cycle collection (the released IR and walker graphs are cyclic, and the
+  ## collection also frees this thread's ORC root buffer once it is empty).
+  ## Safe to call any number of times; a later run on the same thread
+  ## rebuilds what it needs and re-arms the hook. A foreign thread must call
+  ## it before it exits (see the module doc).
+  disarmThreadStateRelease()
   {.cast(gcsafe).}:
     for i in 0 ..< threadStateReleaseCount:
       threadStateReleases[i]()
   when defined(gcOrc):
     GC_runOrc()
 
-var threadStateArmed {.threadvar.}: bool  # [thread-state: kept -- records that this thread's onThreadDestruction hook is registered; the hook outlives a release, so clearing the flag would register it twice]
-
-proc releaseAtThreadExit() {.gcsafe, raises: [].} =
-  releaseSymexThreadState()
-  when declared(nimThreadDestructionHandlers):
-    # Nim's own handler list is a threadvar too, and is never freed. When
-    # this hook is its first entry it is the last one `afterThreadRuns`
-    # calls (it iterates down to index 0), so the list can be dropped here.
-    if nimThreadDestructionHandlers.len > 0 and
-       rawProc(nimThreadDestructionHandlers[0]) ==
-         cast[pointer](releaseAtThreadExit):
-      nimThreadDestructionHandlers = @[]
-
 proc armThreadStateRelease*() =
   ## Registers `releaseSymexThreadState` to run when the calling thread exits,
-  ## once per thread. Has an effect only on a thread Nim created; on the main
-  ## thread and a foreign thread no handler ever runs (the main thread's
-  ## state is reachable until exit; a foreign thread's owner releases it).
+  ## once per arming (a release disarms). Runs only on a thread Nim created;
+  ## on the main thread and a foreign thread no handler ever runs (the main
+  ## thread's state is reachable until exit; a foreign thread's owner
+  ## releases it, which also takes the hook back out).
   when compileOption("threads"):
     if not threadStateArmed:
       threadStateArmed = true

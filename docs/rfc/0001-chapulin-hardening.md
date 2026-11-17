@@ -12,7 +12,7 @@ reason = "v1 conversion mapped complete->living to satisfy the done role; relabe
 
 # RFC — nelli consumer-hardening (from chapulin v1/v2 harness)
 
-- **Status:** Complete — closed at the 0-Critical/High/Medium review floor.
+- **Status:** Implemented — closed at the 0-Critical/High/Medium review floor.
   Round 6 landed every Track A/B slice (releases 0.3.4–0.5.0); the post-close
   stage-4 review's remediation slate (R1–R6 and the N-series through N49) was
   then fixed to the floor across the review fix loop, the Low-fix extension,

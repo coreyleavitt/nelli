@@ -1,8 +1,10 @@
 # RFC — chapulin consumer-hardening — handoff
 
-> **Read the bottom of this file for current state.** Newest work is appended
-> at the end (the stage-4 ledger section, §824 onward). The round-6 log below
-> is historical and its "awaiting Corey" bullets are all resolved.
+> **Read this file in two places.** The "Decided 2026-08-31" section near the
+> top is the newest dated work (2026-08-31 and 2026-09-01); the stage-4 ledger
+> (§824 onward) is appended at the end but its newest entries are 2026-08-22.
+> The round-6 log below is historical and its "awaiting Corey" bullets are all
+> resolved.
 
 - **Stage:** 4 review — fix loop COMPLETE, floor reached 2026-08-22
   (0 Critical/High/Medium); backlog buckets 1–2 done; releases 0.5.1/0.5.2/

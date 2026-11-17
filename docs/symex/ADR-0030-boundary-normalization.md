@@ -7,7 +7,7 @@
 | **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
-| **Related** | [RFC-parser-normalization.md](../RFC-parser-normalization.md) (#146), [RFC-parser-normalization.handoff.md](../RFC-parser-normalization.handoff.md), [ADR-0008](ADR-0008-generic-instantiation.md) (generic instantiation — D3 threads its `GenericDescriptor` consumers), [ADR-0009](ADR-0009-closure-encoding.md) (closure encoding — shares the amendment-in-place pattern this ADR follows) |
+| **Related** | [RFC-0002 parser-normalization](../rfc/0002-parser-normalization.md) (#146), [RFC-0002 handoff](../rfc/0002-parser-normalization.handoff.md), [ADR-0008](ADR-0008-generic-instantiation.md) (generic instantiation — D3 threads its `GenericDescriptor` consumers), [ADR-0009](ADR-0009-closure-encoding.md) (closure encoding — shares the amendment-in-place pattern this ADR follows) |
 
 ## Context
 

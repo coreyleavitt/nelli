@@ -6373,6 +6373,24 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         arrs.add lambdaOver(ctx, jVar, wrap[Z3AnyAst](ctx,
           checkedIte(ctx, below.raw, here.raw, after.raw)))
       return mkSeqSV(lenZi - mkInt(1), arrs, recv.seqElemTy)
+    if not isBackedSeqElemTy(recv.seqElemTy):
+      # RFC-0016 K9c follow-up: a seq of an element type the model does not
+      # back, not a placeholder (an empty literal, or the stand-in a declined
+      # field read binds). The swap-with-last has no arrays to read or store
+      # (`seqElemAt`/`storeSeqElem` raised, a `weInternalWalkerFault`). Its
+      # defects are modelled above. An empty seq always raises, so its
+      # in-bounds value is never observed: the receiver is returned as is.
+      # Otherwise the in-bounds side declines, as `iekSeqAdd`'s S8bl arm.
+      # `lower` cannot query the solver (`unbackedElemSurvivor`), so empty
+      # is decided on the length term itself.
+      if $simplify(lenZi) == "0": return recv
+      let declineMsg = "iekSeqDel: an element removed from a seq of " &
+        $recv.seqElemTy & ", an element type the model does not back " &
+        "(seNestedSeqUnsupported)"
+      lowerDegrade(seNestedSeqUnsupported, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(tUnsupportedFieldSeq(recv.seqElemTy, declineMsg),
+                         freshDegradeName("__seqDelUnbacked"), fresh)
     let lastVal = seqElemAt(recv, lenZi - mkInt(1)) # [placeholder-audited]
     # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
     let stored = seqStoreArrs(recv, idxZi, lastVal)
@@ -16371,6 +16389,29 @@ proc declinedPopEnv(env: Env; stmt: IRStmt): Env =
   result[stmt.spRetName] = allocateSym(stmt.spElemTy,
     freshDegradeName("__declinedPop"), scratch)
 
+proc unbackedElemSurvivor(p: Path; inPc: seq[Z3Bool]; env: Env;
+                          seqSV: SymVal; loc, what: string;
+                          w: var WalkCtx): seq[Path] =
+  ## RFC-0016 K9c follow-up. The in-bounds side of an element access
+  ## (`what`: a read, a store, a `pop`) on a seq whose element type the
+  ## model does not back (`isBackedSeqElemTy` false) that is not a
+  ## placeholder: a local built from an empty literal
+  ## (`var o: seq[seq[T]] = @[]`), or the empty stand-in a declined field
+  ## read binds. Its length is exact; its elements have no arrays. The
+  ## access's `IndexDefect` side is modelled by the caller. When no
+  ## execution reaches the in-bounds side (`inPc` is UNSAT, as it is for an
+  ## empty seq) the access always raises and nothing is lost: no survivor.
+  ## Otherwise the in-bounds side declines as every other access of such a
+  ## seq does (`seNestedSeqUnsupported`, `iekSeqAdd`'s S8bl arm). These
+  ## accesses reached raw raises and an `seqElemAt` fallback, filed as
+  ## `weInternalWalkerFault`, a walker fault for a known modelling gap.
+  if pathInfeasible(w.z3, forkPath(p, inPc, env), w.settings): return @[]
+  let locPrefix = if loc.len > 0: loc & ": " else: ""
+  let d = w.degrade(seNestedSeqUnsupported, locPrefix & what &
+    " of a seq of " & $seqSV.seqElemTy & ", an element type the model " &
+    "does not back (seNestedSeqUnsupported)")
+  @[forkPathTainted(p, inPc, env, d)]
+
 type DiscOutcome = object
   ## RFC-0005 S8cp (item 2). One way an assignment to a discriminator goes.
   cond: Z3Bool                            ## when it goes this way
@@ -18273,6 +18314,13 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
         # cannot affect one), but NOT for witnesses — `extractSeqElements`
         # below clamps the reported value for exactly that reason.
         var rangeConds: seq[Z3Bool]
+        if not isBackedSeqElemTy(arrSV.seqElemTy):
+          # RFC-0016 K9c follow-up: an element the model does not back (the
+          # dispatch below raised for it).
+          survivors.add unbackedElemSurvivor(cp, cp.pc & @[inLoCond, inHiCond],
+            declinedIndexEnv(cp.env, stmt, stmt.ixElemTy), arrSV, stmt.ixLoc,
+            "an element read", w)
+          continue
         if isTreeSeqElemTy(arrSV.seqElemTy):
           # RFC-0005 S8bc: a tree element, rebuilt from every data array
           # (`seqElemAt`). Its well-formedness is asserted at the read, as
@@ -18631,6 +18679,20 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
       let valProto = seqElemLitProto(recvSV.seqElemTy)
       let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w, valProto)
       for vp in drainScalarRaiseForks(valP, w):
+        if not isBackedSeqElemTy(recvSV.seqElemTy):
+          # RFC-0016 K9c follow-up: no array to store into (`storeSeqElem`
+          # raised). The value is lowered first, so its raises are kept; on
+          # a reachable in-bounds side the receiver becomes a placeholder,
+          # so every later read of it declines too.
+          var envD = vp.env
+          var scratch: seq[Z3Bool]
+          envD[stmt.iaRecvName] = allocateSym(
+            tUnsupportedFieldSeq(recvSV.seqElemTy, "an element stored into a " &
+              "seq of an element type the model does not back"),
+            freshDegradeName("__seqAssignUnbacked"), scratch)
+          survivors.add unbackedElemSurvivor(vp, vp.pc & @[inLoCond, inHiCond],
+            envD, recvSV, stmt.iaLoc, "an element store", w)
+          continue
         # #163 review R22 site 3: a seq element write whose declared
         # element type is `range[lo..hi]` forks exactly like the plain
         # field write (site 1) and `isAssign`'s own local-variable case --
@@ -18729,6 +18791,18 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
     else:
       discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
     let newLenZi = lenZi - mkInt(1)
+    if not isBackedSeqElemTy(recvSV.seqElemTy):
+      # RFC-0016 K9c follow-up: the popped element has no array to be read
+      # from (`seqElemAt`'s fallback, a `weInternalWalkerFault`).
+      var envD = declinedPopEnv(p.env, stmt)
+      var scratch: seq[Z3Bool]
+      envD[stmt.spRecvName] = allocateSym(
+        tUnsupportedFieldSeq(recvSV.seqElemTy, "an element popped from a " &
+          "seq of an element type the model does not back"),
+        freshDegradeName("__seqPopUnbacked"), scratch)
+      survivors.add unbackedElemSurvivor(p, p.pc & @[not emptyCond], envD,
+        recvSV, stmt.spLoc, "`pop`", w)
+      continue
     let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
     let elemDecline = observeRecvPart(p, popped, w)
     if elemDecline.isSome:

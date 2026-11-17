@@ -664,7 +664,8 @@ proc emitIRType*(t: IRType): NimNode =
   of itString:
     newCall(bindSym"tString")
   of itUninterp:
-    newCall(bindSym"tUninterp", newLit(t.uninterpName))
+    newCall(bindSym"tUninterp", newLit(t.uninterpName),
+            newLit(t.uninterpRefKey))   # RFC-0016 K9c follow-up
   of itFloat32: newCall(bindSym"tFloat32")
   of itFloat64: newCall(bindSym"tFloat64")
   of itDistinct:   ## Phase 15 G4: name + recursive base.

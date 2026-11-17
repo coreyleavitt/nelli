@@ -861,6 +861,9 @@ proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## RFC-0005 S8bh (item 3): a type of an inheritance hierarchy keys on the
   ## hierarchy's ROOT (`inheritChain[0]`): every ref of the hierarchy is an
   ## address of one sort, as in Nim, where `Base(d)` is `d`'s own address.
+  ## RFC-0016 K9c follow-up: a named object the classifier could not
+  ## represent (`__unsupported:<name>`) keys on `uninterpRefKey`, the key
+  ## its placeholder pointee carries, for the same reason.
   let base = if pointeeTy.kind == itTuple and pointeeTy.inheritChain.len > 0:
                pointeeTy.inheritChain[0]
              elif pointeeTy.kind == itVariant and
@@ -872,6 +875,9 @@ proc refPointeeTypeId*(pointeeTy: IRType): string =
                pointeeTy.vNominalId
              elif pointeeTy.kind == itMultiVariant and pointeeTy.mvNominalId.len > 0:
                pointeeTy.mvNominalId   # RFC-0005 S8l
+             elif pointeeTy.kind == itUninterp and
+                  pointeeTy.uninterpRefKey.len > 0:
+               pointeeTy.uninterpRefKey   # RFC-0016 K9c follow-up
              else:
                $pointeeTy
   result = sanitizeTypeId(base)

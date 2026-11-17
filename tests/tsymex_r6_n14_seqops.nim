@@ -87,8 +87,8 @@
 ##    `feUnsupportedOp` (unchanged by this slice, confirmed via direct
 ##    probe before writing this suite). Pinned below to prove it stays
 ##    classified.
-from ./s8cu_helpers import named
-import std/[unittest, strutils, sequtils]
+from ./s8cu_helpers import named, nativeHits
+import std/[unittest, strutils, sequtils, sets]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -414,6 +414,12 @@ suite "N14 — seq `==` (decline-with-doctrine)":
 #    declines (N13-3) and binds a placeholder `SymVal` to the local copy —
 #    these pins confirm the SUBSEQUENT mutation on that already-placeholder
 #    value stays classified too, never a wrong verdict, never a crash.
+#    RFC-0016 K9c follow-up: the value the declined read binds is an empty
+#    `seq[seq[string]]` literal, not a flagged placeholder, so the guards
+#    above never fired: each mutation reached a raw raise (`isIndex/seq`,
+#    `storeSeqElem`) or `seqElemAt`'s fallback, filed `weInternalWalkerFault`.
+#    The unbacked-element access now drops its unreachable in-bounds side
+#    (section 8), and the read's own `seNestedSeqUnsupported` is the decline.
 # =============================================================================
 
 type
@@ -457,7 +463,11 @@ suite "N14 — mutation on a placeholder-ized seq (item 1 audit pin, round-6 fix
   test "index-assign on a placeholder receiver classifies sxUnknown, never a crash":
     let r = symexFind(mutIndexAssignOnPlaceholder, tLabel("mut_indexassign_placeholder"))
     check r.status == sxUnknown
-    check r.errors.named(weInternalWalkerFault)
+    # RFC-0016 K9c follow-up: the receiver is a seq of an element type the
+    # model does not back; the store declines as such (it was a raw raise,
+    # filed as `weInternalWalkerFault`).
+    check r.errors.named(seNestedSeqUnsupported)
+    check not r.errors.named(weInternalWalkerFault)
     check r.errors.len > 0
     check r.errors.anyIt(it.severity == sevError)
 
@@ -465,13 +475,90 @@ suite "N14 — mutation on a placeholder-ized seq (item 1 audit pin, round-6 fix
     let r = symexFind(mutPopOnPlaceholder, tLabel("mut_pop_placeholder"))
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
-    check r.errors.named(weInternalWalkerFault)
+    check not r.errors.named(weInternalWalkerFault)
     check r.errors.len > 0
     check r.errors.anyIt(it.severity == sevError)
 
   test "del on a placeholder receiver classifies sxUnknown, never a crash":
     let r = symexFind(mutDelOnPlaceholder, tLabel("mut_del_placeholder"))
     check r.status == sxUnknown
-    check r.errors.named(weInternalWalkerFault)
+    check r.errors.named(seNestedSeqUnsupported)
+    check not r.errors.named(weInternalWalkerFault)
     check r.errors.len > 0
     check r.errors.anyIt(it.severity == sevError)
+
+# =============================================================================
+# 8. RFC-0016 K9c follow-up -- an element access on a seq whose element type
+#    the model does not back, that is NOT a placeholder: a local built from
+#    an empty literal. Its length is exact, so every access's IndexDefect is
+#    modelled, and on an empty seq the in-bounds side is unreachable: the
+#    verdicts are exact. These were raw raises (`isIndex/seq` and
+#    `storeSeqElem`'s "unsupported elem kind") and `seqElemAt`'s fallback,
+#    all filed as `weInternalWalkerFault`.
+# =============================================================================
+
+proc emptyNestedPop(k: int) =
+  var o: seq[seq[int]] = @[]
+  try:
+    discard o.pop()
+    symexTarget("enp_in")
+  except IndexDefect:
+    if k == 3: symexTarget("enp_oob")
+
+proc emptyNestedDel(k: int) =
+  var o: seq[seq[int]] = @[]
+  try:
+    o.del(k)
+    symexTarget("end_in")
+  except IndexDefect, RangeDefect:
+    if k == 3: symexTarget("end_oob")
+
+proc emptyNestedAssign(k: int) =
+  var o: seq[seq[int]] = @[]
+  try:
+    o[k] = @[1]
+    symexTarget("ena_in")
+  except IndexDefect:
+    if k == 3: symexTarget("ena_oob")
+
+proc emptyNestedRead(k: int) =
+  var o: seq[seq[int]] = @[]
+  try:
+    let x = o[k]
+    if x.len == 0: symexTarget("enr_in")
+  except IndexDefect:
+    if k == 3: symexTarget("enr_oob")
+
+const nestedKs = [-2, 0, 1, 3, 5]
+
+template exactNested(fn: typed; lbl: string; want: SymexStatusKind) =
+  block:
+    let r = symexFind(fn, tLabel(lbl))
+    checkpoint lbl & " " & $r.status & " " & $r.errors.mapIt($it.kind & ": " & it.msg)
+    check r.status == want
+    check r.trusted
+    check not r.errors.named(weInternalWalkerFault)
+
+suite "N14 — an element access on an empty seq of an unbacked element (RFC-0016 K9c follow-up)":
+  test "nim: only the IndexDefect side is reached":
+    let h = nativeHits(emptyNestedPop, nestedKs) +
+            nativeHits(emptyNestedDel, nestedKs) +
+            nativeHits(emptyNestedAssign, nestedKs) +
+            nativeHits(emptyNestedRead, nestedKs)
+    for l in ["enp", "end", "ena", "enr"]:
+      checkpoint l
+      check (l & "_oob") in h
+      check (l & "_in") notin h
+
+  test "pop, del, an element store and an element read decide exactly":
+    exactNested(emptyNestedPop, "enp_oob", sxSat)
+    exactNested(emptyNestedPop, "enp_in", sxUnsat)
+    exactNested(emptyNestedDel, "end_oob", sxSat)
+    exactNested(emptyNestedDel, "end_in", sxUnsat)
+    exactNested(emptyNestedAssign, "ena_oob", sxSat)
+    exactNested(emptyNestedAssign, "ena_in", sxUnsat)
+    exactNested(emptyNestedRead, "enr_oob", sxSat)
+    exactNested(emptyNestedRead, "enr_in", sxUnsat)
+
+  test "walker version floor >= 373 (RFC-0016 K9c follow-up)":
+    check parseInt(symexWalkerVersion) >= 373

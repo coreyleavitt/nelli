@@ -104,6 +104,7 @@
 ## float value, so this file's poison tables (`Table[int, string]`,
 ## `Table[string, string]`) became modelled. Each was swapped for a shape
 ## still unbacked: a `float` key and a `seq[int]` value.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables, sets, options, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -373,6 +374,7 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(seUnsupportedTableKeyType)
 
   test "N43-C2: array nesting a bad-key Table field, as a lambda param -- predicted unallocatable (Part 1's itArray recursion), allocator confirms honest sxUnknown, no crash":
     check unallocatableFieldIssue(tArray(tTable(tTuple(@[tInt(), tInt()]), tString()), 2)).isSome
@@ -380,6 +382,7 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(seUnsupportedTableKeyType)
 
 # -----------------------------------------------------------------------------
 # Companion: the two itUninterp prefixes NOT reachable through allocateSym's

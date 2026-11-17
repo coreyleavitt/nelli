@@ -22,6 +22,7 @@
 ## (symbolic start) Q1/B0 use, guarded by loop entry with an entry-read
 ## probe depositing the real IndexDefect fork a negative start raises — B0's
 ## whole not-found/OOB split, reused rather than re-derived.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -191,6 +192,7 @@ suite "symex round-6 B3 — trip wires (recognizer stays narrow)":
   test "B3-4: non-.len bound is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
     let r = symexFind(sutScanPairNonLenBoundImpossible, tLabel("impossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
   test "B3-5 MIGRATED (round-6 B4 landed): the accumulating (3-statement body) shape is B4's own recognized shape -> sxRaised":
     ## Pre-B4 this SUT was UNRECOGNIZED (`sxUnknown`, the k-unroll degrade —

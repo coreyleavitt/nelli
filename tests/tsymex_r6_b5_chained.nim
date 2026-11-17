@@ -46,6 +46,7 @@
 ## corpus. `renderAsChoicesVersion` stays unchanged -- no new witness shape
 ## (a chained scan's `string`/`int` witnesses render exactly as any other
 ## already-modeled `string`/`int` param).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -303,6 +304,7 @@ when not defined(symexCiLeanB5):
       let r = symexFind(sutChainSecondNonLenBoundImpossible, tLabel("impossible"),
                         b5TripWireBudget)
       check r.status == sxUnknown
+      check r.errors.named(beBudgetExhausted)
 
 # ---------------------------------------------------------------------------
 # 5. Mixed sibling composition: B4 (accumulating) then B3 (plain int-result)

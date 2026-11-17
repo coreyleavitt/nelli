@@ -65,6 +65,7 @@
 ## Verdict-affecting for N15/N30/N41 (a previously-crashing shape now reports
 ## its correct classified decline kind instead of the generic internal-fault
 ## one); N12 is message-rendering only. symexWalkerVersion 107->108.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -280,6 +281,7 @@ suite "symex round-6 N41 -- compound-value sort derivation: classified decline, 
     check plainEnglishSymValKind(svClosure) == "closure value"
     let r = symexFind(n41ClosureProcParam, tLabel("n41_closure_proc_param"))
     check r.status == sxUnknown
+    check r.errors.named(ceUnsupportedHof)
     for e in r.errors:
       checkpoint $e.kind & ": " & e.msg
       check "svClosure" notin e.msg
@@ -291,6 +293,8 @@ suite "symex round-6 N41 -- SOUNDNESS: unmasking the compound family never lets 
     let r = symexFind(n41HeapReadBlock, tLabel("n41_heap_read_block"))
     check r.status != sxSat
     check r.status == sxUnknown
+    check r.errors.named(feOpaqueCallUnmodelled)
+    check r.errors.named(heUnsupportedPointeeRead)
 
   test "N41-4 SOUNDNESS: a compound VALID Table param whose sort is not derived, target reached UNCONDITIONALLY, is NEVER sxSat":
     # RFC-0005 S8ca: the closure's table parameter is modelled now (N41-1,
@@ -299,6 +303,7 @@ suite "symex round-6 N41 -- SOUNDNESS: unmasking the compound family never lets 
     let r = symexFind(n41ClosureProcParam, tLabel("n41_closure_proc_param"))
     check r.status != sxSat
     check r.status == sxUnknown
+    check r.errors.named(ceUnsupportedHof)
 
 suite "symex round-6 N41 -- companion: the N40 family this finding builds on stays green (no regression)":
 

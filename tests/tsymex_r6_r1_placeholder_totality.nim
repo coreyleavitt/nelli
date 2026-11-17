@@ -51,6 +51,7 @@
 ## lived unguarded. The bare-value SUTs below are therefore the ones that
 ## demonstrate genuine RED; the field SUTs are regression companions
 ## confirming the pre-existing guard is undisturbed.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -329,6 +330,7 @@ suite "symex R1 — Q1/Q2 (index read coverage + location-prefixed message)":
     ## R1 summary's residual-gaps list).
     let r = symexFind(sutFieldIndexRead, tLabel("field_index_read"))
     check r.status == sxUnknown
+    check r.errors.named(seNestedSeqUnsupported)
     check r.errors.len > 0
 
 suite "symex R1 — equality (walker v112: eqBV/neBV/cmpBV/svLeafEq/iteSV now guard-before on a placeholder operand)":

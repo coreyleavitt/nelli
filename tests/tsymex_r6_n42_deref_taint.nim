@@ -71,6 +71,7 @@
 ## float value, so this file's poison tables (`Table[int, string]`,
 ## `Table[string, string]`) became modelled. Each was swapped for a shape
 ## still unbacked: a `float` key and a `seq[int]` value.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -242,10 +243,16 @@ suite "symex N42 -- itTable heap-deref read (N41 crash stays masked-sound, taint
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(heUnsupportedPointeeRead)
+    check r.errors.named(seUnsupportedCompoundSortLeaf)
+    check r.errors.named(seUnsupportedTableKeyType)
 
   test "N42-6: nested-block first-touch (ADR-0023 depth) -- same masked-sound sxUnknown, not misattributed under nesting":
     let r = symexFind(n42TableAfterNested, tLabel("n42_table_after_nested"))
     check r.status == sxUnknown
+    check r.errors.named(heUnsupportedPointeeRead)
+    check r.errors.named(seUnsupportedCompoundSortLeaf)
+    check r.errors.named(seUnsupportedTableKeyType)
 
 suite "symex N42 -- sound-path companions (no over-taint, verdicts unchanged)":
 
@@ -326,6 +333,10 @@ suite "symex N44 -- shape-independent adversarial taint probes (deref-mechanism-
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(heUnsupportedPointeeRead)
+    check r.errors.named(seUnsupportedCompoundSortLeaf)
+    check r.errors.named(seUnsupportedTableKeyType)
     check r.status != sxSat
 
   test "N44-2: heap deref as a BARE CALL ARGUMENT (no intervening let-binding) -- honest sxUnknown, never sxSat":
@@ -333,6 +344,9 @@ suite "symex N44 -- shape-independent adversarial taint probes (deref-mechanism-
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(heUnsupportedPointeeRead)
+    check r.errors.named(seUnsupportedCompoundSortLeaf)
+    check r.errors.named(seUnsupportedTableKeyType)
     check r.status != sxSat
 
   test "N44-3: heap deref inside a BARE symexAssert condition (no intervening binding) -- honest sxUnknown, never sxSat":
@@ -340,6 +354,9 @@ suite "symex N44 -- shape-independent adversarial taint probes (deref-mechanism-
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(heUnsupportedPointeeRead)
+    check r.errors.named(seUnsupportedCompoundSortLeaf)
+    check r.errors.named(seUnsupportedTableKeyType)
     check r.status != sxSat
 
   test "walker version floor >= 105 (N44: pins the existing N42 mechanism against shape-coincidence regression, no new bump)":

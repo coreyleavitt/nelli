@@ -71,6 +71,7 @@
 ## other escape-needing bytes tested clean; see the rider file's doc for
 ## the full empirical breakdown). B4-8 below now asserts CONTENT, not just
 ## status, and B4-8-cross replays the witness through the real function.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -228,6 +229,7 @@ suite "symex round-6 B4 -- trip wire (recognizer stays narrow)":
   test "B4-6: non-.len bound is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
     let r = symexFind(sutAccNonLenBoundImpossible, tLabel("impossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
 # ---------------------------------------------------------------------------
 # 6. The REAL chapulin delimiter, '\0'. Proves the recognizer genuinely

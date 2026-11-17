@@ -23,6 +23,7 @@
 ## all four shape predicates per loop.
 ##
 ## LEG 2: see the dedicated section below.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -387,6 +388,7 @@ suite "symex round-6 B7-rider -- trip wire (byte receiver, non-.len bound stays 
   test "B7R-8: non-.len bound over a seq[byte] receiver is NOT recognized -> sxUnknown":
     let r = symexFind(sutByteNonLenBoundImpossible, tLabel("b7r_impossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
 # -----------------------------------------------------------------------------
 # 9. Exclusivity: the widening must not let siblings cross-fire on a

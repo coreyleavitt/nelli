@@ -564,7 +564,12 @@ suite "RFC-0005 S8 (e) -- structural totality pin":
         checkpoint(f.extractFilename & " " & r & ": " & t.replace("\n", " "))
         check "scope:" in t
         if "dskUnplaced" in t: unplacedByDesign.add r
-    check admitted >= 30
+    # The floor is the recorded count of live constructions, not a
+    # requirement: it only guards against the scan silently finding none.
+    # It was 30 until RFC-0016 H1/H1b removed nine dead boundary arms (the
+    # four string-carrier arms, the raise/try/closure/outside-handler arms
+    # and the unresolved-ref arm); each survivor still names its scope.
+    check admitted >= 23
     check unplacedByDesign == @["runSymexImpl"]
 
   test "the walker's anchor-bearing arms pass the parse-minted anchor":

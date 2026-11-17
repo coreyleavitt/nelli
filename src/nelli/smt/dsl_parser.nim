@@ -6593,7 +6593,7 @@ template withCaseNarrow(ctx: ParseCtx, subject: NimNode, branchTags: seq[int],
   let pushNarrow = branchTags.len > 0
   if pushNarrow:
     ctx.procScoped.caseNarrow.add (subjectRepr: scopedRepr(subject), tags: branchTags)  ## RFC-0005 S8e: symbol-keyed
-  let narrowedResult = body
+  var narrowedResult = body  # `var`: an untyped `let` here has no type for the let audit
   if pushNarrow: discard ctx.procScoped.caseNarrow.pop()
   narrowedResult
 

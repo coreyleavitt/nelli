@@ -12820,6 +12820,11 @@ type
                       ## `runConcolicFlipImpl` to index by `targetBranchIndex`.
                       ## `wmExplore` never touches this field — byte-identical
                       ## walker behavior, no SW bump.
+    followCutAt: int  ## RFC-0016 K7c. `branchTrace.len` when the follow
+                      ## `while` first hit `maxLoopUnwind` with the replay
+                      ## still iterating (valid when `followCut`): every record
+                      ## from there on is on the fabricated continuation.
+    followCut: bool   ## RFC-0016 K7c. Whether that cut happened.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -12935,6 +12940,16 @@ proc continued(ps: seq[Path]; d: Degrade): Survivors =
   ## RFC-0016 K7a. A fold of `taintInPlace`: the degrade was recorded and
   ## `ps` go on, each now carrying `d`'s path coordinate.
   for p in ps: p.taintInPlace d
+  Survivors(live: ps)
+
+proc selfTainted(ps: seq[Path]): Survivors =
+  ## RFC-0016 K7c. `ps` leave carrying their own taint: each was forked with
+  ## `forkPathTainted` onto a recorded degrade (the variant constructor's
+  ## declined arms, which bind the result to a fresh value on the tainted
+  ## path). The invariant is that EVERY path in `ps` is tainted; nothing
+  ## untainted goes through here (that is `exact`). A debug build asserts it.
+  for p in ps:
+    assert p.taint != {}, "selfTainted: an untainted path"
   Survivors(live: ps)
 
 proc carriedDegrade(taint: Taint; ub: set[UbKind] = {}): Degrade =
@@ -17360,7 +17375,7 @@ proc followGuard(w: var WalkCtx; dp: Path; cond: Z3Bool; factBase: int;
     return foOffRun
   followBranchOutcome(w, dp, cond, newFacts, construct)
 
-proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
   ## lowering and path-forking machinery `wmExplore` uses — but walks ONLY
@@ -17384,7 +17399,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
   ## the concrete draws contradict is not this trace and is not followed.
   var survivors: seq[Path]
   for p in paths:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     # RFC-fuzzer-nextgen G2: snapshot the pc BEFORE this if-statement's own
     # branch predicates are lowered/appended — the "prefix constraints up to
     # that branch" a later flip-solve needs. Side-conditions `lowerBoolInExpr`
@@ -17398,7 +17413,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
     var states: seq[(int, Path, seq[Z3Bool])] = @[(0, p, newSeq[Z3Bool]())]
     var si = 0
     while si < states.len:
-      if w.shouldStop: return survivors
+      if w.shouldStop: return exact(survivors)
       let (i, sp, accumNegated) = states[si]
       inc si
       if i >= stmt.branches.len:
@@ -17423,7 +17438,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
       let factBase = sp.defectSurvivorPc.len
       let (condBool, conds) = evalCondSynced(sp, stmt.branches[i].cond, w)
       for dp in conds:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         case followGuard(w, dp, condBool, factBase, wckIf)
         of foOffRun:
           # The pins contradict this path or its new facts (RFC-0016 W3-z
@@ -17443,7 +17458,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
           # following this path past the ambiguous branch rather than guess
           # (guessing could collect an UNSOUND constraint); counted, not
           # silently dropped — attributed to `wckIf` (R28).
-          return survivors & dp
+          return exact(survivors & dp)
         of foTrue:
           # RFC-fuzzer-nextgen G2: the taken arm's own condition.
           w.branchTrace.add ConcolicBranchRecord(
@@ -17452,9 +17467,9 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
           survivors.add walk(stmt.branches[i].body, @[armPath], w)
         of foFalse:
           states.add (i + 1, dp, accumNegated & @[not condBool])
-  survivors
+  exact(survivors)
 
-proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   ## `wmFollowConcrete` counterpart to `isWhile`'s `wmExplore` k-unroll loop
   ## (below). RFC-fuzzer-nextgen R14: the explore loop forks BOTH cond=true
   ## (continue) and cond=false (exit) at EVERY unrolled iteration regardless
@@ -17507,7 +17522,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
   # other implausibly-tight budget — not silently reinterpreted as infinite.
   let unwind = w.settings.budget.maxLoopUnwind
   for iter in 0 ..< unwind:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     if active.len == 0: break
     var nextActive: seq[Path]
     for p in active:
@@ -17521,7 +17536,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
         # As `walkIfFollowConcrete` checks per continuation: each one walks
         # a body, so a stop request (budget, deadline) must not wait for the
         # rest of a drain's continuations (R8-3).
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         case followGuard(w, dp, cond, factBase, wckWhile)
         of foOffRun:
           # The pins contradict this path or its new facts (RFC-0016 W3-z
@@ -17546,7 +17561,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
           # `walkIfFollowConcrete`), not just a `continue` to the next
           # active path — `defer` still pops the loop frame. Attributed to
           # `wckWhile` (R28).
-          return survivors & dp
+          return exact(survivors & dp)
         of foTrue:
           # Concretely continued this iteration: fold cond=true, walk the
           # body, feed its continuations into the NEXT iteration's active
@@ -17574,6 +17589,9 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
     # leaves the loop with the guard still TRUE on its pc (a continuation
     # the real trace never takes here: ⊤ on the path) and the iterations
     # past the bound are never walked (`{scIncomplete}` on the run).
+    if not w.followCut:
+      w.followCut = true
+      w.followCutAt = w.branchTrace.len
     let d = w.degrade(beBudgetExhausted,
       "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
            $unwind & ") while following a concrete replay that was still " &
@@ -17581,7 +17599,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
            "allows (beBudgetExhausted)", cap = ckLoopUnwindFollow)
     for p in active:
       survivors.add forkPathTainted(p, p.pc, p.env, d)
-  survivors
+  exact(survivors)
 
 proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   ## RFC-0005 batch 6. The value of the receiver `name` a statement arm
@@ -18076,7 +18094,7 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
   ""
 
 proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isIndex` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18093,7 +18111,7 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
   of wmFollowConcrete: discard
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     ## Drain-coverage audit: `stmt.ixArr` is a side-effect-free container
     ## expression. The parser A-normalises most container expressions to named
     ## bindings (iekVar) or field projections (iekField); both are pure (no
@@ -18483,10 +18501,10 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
                             ub = unwrittenUb(unwrittenPart)))
       else:
         survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
-  survivors
+  exact(survivors)
 
 proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isIndexAssign` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18499,7 +18517,7 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
   # use for construction) instead of binding a fresh read result.
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     # The parse site (dsl_parser.nim's `nnkAsgn` arm) only ever emits this
     # statement for a bare `nnkSym` receiver already classified `itSeq`.
     # RFC-0005 batch 6: read through `recvValue`, so a global the walk
@@ -18657,10 +18675,10 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
         newEnv[stmt.iaRecvName] = mkSeqSV(recvSV.seqLen, storedOpt.get, # [placeholder-audited]
           recvSV.seqElemTy)
         survivors.add forkPath(vpRanged, vpRanged.pc & @[inLoCond, inHiCond], newEnv)
-  survivors
+  exact(survivors)
 
 proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isSeqPop` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18677,7 +18695,7 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
   # (no swap-in needed at all).
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     # RFC-0005 batch 6: an unbound global receiver is its entry value
     # (`recvValue`; was a `KeyError`, reported as a walker fault).
     let (recvSV, p) = recvValue(p0, stmt.spRecvName, w)
@@ -18741,10 +18759,10 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
       survivors.add fresh
     else:
       survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
-  survivors
+  exact(survivors)
 
 proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isTabKeys` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18775,7 +18793,7 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
   # entry counts in the size but is never present).
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     let (tsv, p) = lowerInExpr(p0, stmt.tkRecv, w)
     let locPrefix = if stmt.tkLoc.len > 0: stmt.tkLoc & ": " else: ""
     if tsv.kind != svTable or
@@ -18862,10 +18880,10 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
         facetNote("tables.Table/iterationOrder"))
       survivors.add forkPathTainted(p, p.pc & facts & @[not atMostOne],
                                     env2, d)
-  survivors
+  exact(survivors)
 
 proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isSetLen` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -18887,7 +18905,7 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
   #     all-NUL content are facts of the path (no quantifier).
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     let (baseSV, p1) = lowerInExpr(p0, stmt.slBase, w)
     let (lenSV0, p) = lowerInExpr(p1, stmt.slLen, w)
     let locPrefix = if stmt.slLoc.len > 0: stmt.slLoc & ": " else: ""
@@ -18969,10 +18987,10 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
       env2[stmt.slRetName] = allocateSym(stmt.slTy,
         freshDegradeName("__setLenDegrade"), fresh)
       survivors.add forkPathTainted(p, p.pc, env2, d)
-  survivors
+  exact(survivors)
 
 proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantReassign` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19045,7 +19063,7 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
     if stmt.vrMode == dwmChecked:
       maybeForkDefect(p, not sameBranchCond(oldDisc, stmt.vrNewTag, stmt.vrBranches),
                       "FieldDefect", none(string), w)
-      if w.shouldStop: return out2
+      if w.shouldStop: return exact(out2)
     let newDiscBoxed = new(SymVal)
     newDiscBoxed[] = newDiscInner
     let outcomes = discWriteOutcomes(stmt.vrMode, oldSV.vArmFields, oldDisc,
@@ -19073,10 +19091,10 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
                          vActive: oldSV.vActive)   # RFC-0016 PRC-07 B
       child.env[stmt.vrObjName] = newSV
       out2.add child
-  return out2
+  return exact(out2)
 
 proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantReassignSymbolic` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19167,7 +19185,7 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
           if stmt.vrsMode == dwmChecked:
             maybeForkDefect(chosen, not sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches),
                             "FieldDefect", none(string), w)
-            if w.shouldStop: return out2
+            if w.shouldStop: return exact(out2)
           let newDiscConst: SymVal =
             case oldSV.vDisc[].kind
             of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
@@ -19232,7 +19250,7 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
           if stmt.vrsMode == dwmChecked:
             maybeForkDefect(chosen, not sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches),
                             "FieldDefect", none(string), w)
-            if w.shouldStop: return out2
+            if w.shouldStop: return exact(out2)
           let newDiscConst: SymVal =
             case oldAxis.disc[].kind
             of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
@@ -19276,10 +19294,10 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
         # RFC-0005 S8i: a declined construction's placeholder (this was a
         # `doAssert false`, surfacing the decline as an internal fault).
         out2.add degradeUnmodelledReassign(cp, stmt.vrsObjName, oldSV.kind, w)
-  return out2
+  return exact(out2)
 
 proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantConstructSym` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19328,7 +19346,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
       # never rides a bare `w.sawUnknown` alone. RFC-0005 S1: one token
       # `d`, forked onto every path.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return out2
+    return selfTainted(out2)
   # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
   # remediation). `maxVariantConstructorForks` above only bounds the OUTER
   # fork count (`vcsTagSet.len`); the per-fork field-allocation loop below
@@ -19362,7 +19380,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       # Same safe-degrade idiom as the fork-count budget above.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return out2
+    return selfTainted(out2)
   # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
   # `paths`/`tag` fork loops (mirrors the two budget checks immediately
   # above — a STRUCTURAL check against `vcsTy` itself, uniform across
@@ -19401,7 +19419,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       # Same safe-degrade idiom as the two budget checks above.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return out2
+    return selfTainted(out2)
   # RFC-0005 S8f: Nim accepts a runtime discriminator in constructor
   # syntax only when no arm field is set, so every arm field is its
   # type's `default(T)` -- walker <= 153 allocated each one FRESH, and a
@@ -19418,7 +19436,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
                  "` has no modelled default value (" & $ft & ")")
           for p in paths:
             out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-          return out2
+          return selfTainted(out2)
   for p in paths:
     let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
     proc vcsDiscEq(tagOrd: int64): Z3Bool =
@@ -19486,10 +19504,10 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
         var newEnv = cp.env
         newEnv[stmt.vcsResultVar] = newSV
         out2.add forkPath(cp, cp.pc & @[vcsDiscEq(int64(tag))], newEnv)
-  return out2
+  return exact(out2)
 
 proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantField` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19509,7 +19527,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
   # and (under `tFieldDefect`) is solved for a witness.
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     ## Drain-coverage audit: `stmt.vfRecv` is always an env-resident var —
     ## the parser A-normalises so variant object accesses are through named
     ## bindings (no complex expression as receiver). A violation here means
@@ -19664,7 +19682,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
                                            stmt.vfWrite)
     else:
       maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     survivors.add declinedSide
     # In-arm path — bind retName to the ite-chain over arms.
     var bound = armBindings[armBindings.len - 1][1]
@@ -19694,10 +19712,10 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
       envX[stmt.vfRetName] = exactVal
       var exact = forkPath(pM, pM.pc & @[exactCond.get], envX)
       survivors.add (if stmt.vfWrite: exact else: observed(exact, exactVal, w))
-  survivors
+  exact(survivors)
 
 proc walkCallArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isCall` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19767,7 +19785,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       # arguments' own defect obligations become live.
       var out1: seq[Path]
       for p in paths:
-        if w.shouldStop: return
+        if w.shouldStop: return exact(@[])
         seedCallerHeapThreadvars(p)
         convFloatToIntBoundConds = @[]
         w.sinks.convFloatToIntBoundConds = @[]
@@ -19806,7 +19824,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       if not w.tailGate and stmt.opaqueUndefined != {}:
         out1 = noteOpaqueUndefined(w, out1, stmt)
       for sp in out1: havocOpaqueWrites(w, sp, stmt)
-      return opaqueRaiseForks(w, out1, stmt)
+      return exact(opaqueRaiseForks(w, out1, stmt))
     # Don't resolve a body; allocate fresh retSym; mark path
     # uncertain so any target reached on this path degrades to
     # sxUnknown rather than emitting an unsound witness.
@@ -19837,7 +19855,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         let z3Name = stmt.retName & "_op" & $w.synthZ3
         newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
       out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-    return out2
+    return exact(out2)
   if not w.procs.hasKey(stmt.callee):
     # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
     # (the parser rejected unresolved callees at compile time); G1c adds a
@@ -19867,7 +19885,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         "call to unregistered callee `" & stmt.callee & "` reached at " &
              "walk time -- declined at parse time (" & $declineKind &
              "); the path ends here, what follows is not modelled",
-        scope = calleeKeyed(stmt.callee)).live
+        scope = calleeKeyed(stmt.callee))
     let d =
       if unregisteredCalleeKind(stmt.callee, declineKind):
         w.degrade(declineKind,
@@ -19890,7 +19908,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         let z3Name = stmt.retName & "_cap" & $w.synthZ3
         newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
       out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-    return out2
+    return exact(out2)
   let sig = w.procs[stmt.callee]
   # Statistics
   if not w.callStats.hasKey(stmt.callee):
@@ -19937,7 +19955,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
   if overDepth:
     for p in paths:
       if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
-    if depthLive.len == 0: return depthLive
+    if depthLive.len == 0: return exact(@[])
     extendDepth = stackLeft < 0 and depthMayExtend(w, depthLive.len)
   if overDepth and not extendDepth:
     # The decline, and its history: `depthBail`.
@@ -19945,10 +19963,10 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       w.callStack.len >= hardCallDepth(w.settings)
     if atHard: inc w.depthHardHits
     if stackLeft >= 0: nativeStackCutFlag = true
-    depthBail(w, stmt, depthLive,
+    exact(depthBail(w, stmt, depthLive,
       (if stackLeft >= 0: dcutStack
        elif atHard: dcutHard
-       else: dcutFrontier), stackLeft)
+       else: dcutFrontier), stackLeft))
   else:
     let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
     # RFC-0005 S8ax: the first extended level is the extension's root. A
@@ -19971,7 +19989,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       if w.shouldStop:
         w.extHardMark = outerExtMark
-        return
+        return exact(@[])
       # RFC-0005 S8ax: abandoned (`depthMayExtend`); the root declines.
       if extRoot and w.depthHardHits > hardMark: break
       # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
@@ -20378,7 +20396,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           else: survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
           if w.shouldStop:
             w.extHardMark = outerExtMark   # RFC-0005 S8ax
-            return survivors
+            return exact(survivors)
         let frame = w.callStack[w.callStack.high]
         w.callStack.setLen(w.callStack.high)
         w.activeCalls.excl key
@@ -20501,8 +20519,8 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
           survivors.add merged
     w.extHardMark = outerExtMark
     if extRoot and w.depthHardHits > hardMark:
-      return depthBail(w, stmt, paths, dcutHard)
-    survivors
+      return exact(depthBail(w, stmt, paths, dcutHard))
+    exact(survivors)
 
 proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
                      w: var WalkCtx): Survivors =
@@ -20529,9 +20547,23 @@ proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
                     scope = siteAnchored(stmt.unMarker))
   surviving(live, d)
 
-proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkHeapViewed(stmt: IRStmt, paths: seq[Path],
+                    w: var WalkCtx): Survivors =
+  ## `walkHeapArm` one path at a time, for a walk holding a `viewMarks`
+  ## entry: each path's heap writes are logged in place, which needs the
+  ## paths `walkHeapArm` leaves live (the unwrap `walkStmt` does not do).
+  var outs: seq[Path]
+  for p in paths:
+    if w.shouldStop: break
+    let heapsBefore = p.heaps
+    for q in walkHeapArm(stmt, @[p], w).live:
+      if q != p: logInPlace(p, heapsBefore, q)
+      outs.add q
+  exact(outs)
+
+proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   if w.shouldStop or stmt == nil or paths.len == 0:
-    return paths
+    return exact(paths)
   case stmt.kind
   of isBlock:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -20550,7 +20582,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if pushed: arithFrames.leave()
       return
     if stmt.blkLabel.len == 0:
-      return walkBlock(stmt.stmts, paths, w)
+      return exact(walkBlock(stmt.stmts, paths, w))
     # RFC-0005 S8m: a labelled block is a break target (a source `block` a
     # `break` names, or a desugared loop body a `continue` leaves). Paths
     # that `break` it resume after it, beside its fall-through.
@@ -20563,7 +20595,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # through (`reconcileCells`), and rejoin as they are.
     survivors.add w.loopStack[frameIx].exits.breakPaths.contents
     discard w.loopStack.pop()
-    survivors
+    exact(survivors)
   of isIf:
     case w.mode
     of wmExplore: discard
@@ -20602,7 +20634,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             continue
           let skipPath = forkPath(cp, cp.pc & @[not condBool], cp.env)
           survivors.add mergeJoinPaths(cp, condBool, armOut, skipPath)
-      return survivors
+      return exact(survivors)
     for p in paths:
       if w.shouldStop: return
       # Phase 15 S10b: evaluating a branch condition may itself raise (a
@@ -20658,7 +20690,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           survivors.add walk(stmt.elseBody, @[elsePath], w)
         else:
           survivors.add elsePath
-    survivors
+    exact(survivors)
   of isLet:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20694,7 +20726,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         newEnv[stmt.lname] = lv
         out2.add forkPath(cp, cp.pc, newEnv)
-    out2
+    exact(out2)
   of isAssign:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20720,7 +20752,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         newEnv[stmt.aname] = av
         out2.add forkPath(cp, cp.pc, newEnv)
-    out2
+    exact(out2)
   of isWhile:
     case w.mode
     of wmExplore: discard
@@ -20874,7 +20906,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for p in active:
         survivors.add forkPathTainted(p, p.pc, p.env, d)
     discard w.loopStack.pop()
-    survivors
+    exact(survivors)
   of isBreak:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20889,11 +20921,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # act (was a kindless run mark with no error); token discarded.
       return w.halted(weBreakOutsideLoop,
         "`break` reached with no enclosing loop or block to leave — the " &
-             "breaking path is dropped (weBreakOutsideLoop)").live
+             "breaking path is dropped (weBreakOutsideLoop)")
     # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
       exitJump(p, target, isCont = false, w)
-    @[]
+    exact(@[])
   of isContinue:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20904,11 +20936,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # from hand-built IR. RFC-0005 S1b: HALT site, same kind as `break`.
       return w.halted(weBreakOutsideLoop,
         "`continue` reached with no enclosing loop — the path is dropped " &
-             "(weBreakOutsideLoop)").live
+             "(weBreakOutsideLoop)")
     # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
       exitJump(p, target, isCont = true, w)
-    @[]
+    exact(@[])
   of isIndex:
     walkIndexArm(stmt, paths, w)
   of isIndexAssign:
@@ -20935,7 +20967,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # (`raisedFinallyLoops`, this frame) is backend-divergent -- c re-raises the
     # in-flight exception, cpp returns (probed). HALT the path.
     if w.frame.raisedFinallyLoops.len > 0:
-      return w.halted(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)").live
+      return w.halted(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)")
     # RFC-0005 S8j (top level) / R1 (callee): lower `stmt.retExpr` and
     # drain its scalar raises, so a raise in the returned expression routes
     # to its handler (`return 100 div x`, a `Natural` result's range check).
@@ -20960,7 +20992,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## address-taken variable a `finally` or a `var` write-back then reads.
       let bound = evalReturnSynced(p, stmt.retExpr, proto, w)
       for bp in bound: exitReturn(bp, w)
-    @[]
+    exact(@[])
   of isCall:
     walkCallArm(stmt, paths, w)
   of isAssert:
@@ -20977,7 +21009,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for p in drainScalarRaiseForks(pb0, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
         discard forkDefect(p, not cond, "AssertionDefect", none(string), w)   ## Phase 16 D1a
         out2.add forkPath(p, p.pc & @[cond], p.env)
-    out2
+    exact(out2)
   of isAssume:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20996,7 +21028,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     ## path here. Carried on with a false pc, the path would lower what follows
     ## the `quit`, which an arm's stand-in value does not type.
     if stmt.acond.kind == iekBoolLit and not stmt.acond.bval:
-      return @[]
+      return exact(@[])
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return
@@ -21020,7 +21052,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # which satisfies the same equality (`initialEnv` is untouched).
           env2[pin.name] = SymVal(kind: svString, str: mkString(pin.lit))
         out2.add forkPath(p, p.pc & @[cond], env2)
-    out2
+    exact(out2)
   of isTargetLabel:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21093,7 +21125,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                  " (beSolverUndef)")
         of sxUnsat:  discard
         of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
-    paths
+    exact(paths)
   of isRaise:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21143,7 +21175,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # is never empty here — `walk` returns early on an empty frontier).
         return w.halted(eeRaiseOutsideHandler,
           "bare `raise` (re-raise) with no in-flight exception " &
-               "(eeRaiseOutsideHandler)").live
+               "(eeRaiseOutsideHandler)")
       else:
         # Inside a handler with no recorded in-flight exn yet — handler-stack
         # re-raise is E3+. Surface as unknown rather than guess.
@@ -21154,12 +21186,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         return w.halted(eeHandlerReraiseUnmodelled,
           "bare `raise` (re-raise) inside a `try` with no in-flight " &
                "exception — not modelled (real Nim raises ReraiseDefect); " &
-               "the path is dropped (eeHandlerReraiseUnmodelled)").live
+               "the path is dropped (eeHandlerReraiseUnmodelled)")
     var survivors: seq[Path]
     for p in paths:
-      if w.shouldStop: return survivors
+      if w.shouldStop: return exact(survivors)
       survivors.add routeRaise(p, raiseTypeId, raiseMsg, w)
-    survivors
+    exact(survivors)
   of isTry:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21215,9 +21247,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # re-propagate immediately (re-route through the now-popped outer stack).
       var survivors = continuations
       for rc in raisedConts:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         survivors.add routeRaise(rc.path, rc.typeId, rc.msg, w)
-      survivors
+      exact(survivors)
     else:
       # Phase 15 E5 finally composition. The finally runs ONCE per exit
       # continuation (never combinatorially): once on the merged normal-exit
@@ -21232,7 +21264,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       #     NOT an `eeRaiseOutsideHandler`). `inFlightExn` stays untouched (none).
       if continuations.len > 0:
         survivors.add walk(stmt.tryFinally, continuations, w)
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
       # (a') RETURN exits (RFC-0005 S8l): walk the finally on each with
       #     `result` already bound, as Nim runs it. The finally's fall-through
       #     continues the SAME return outward (`exitReturn`: the next-outer
@@ -21244,7 +21276,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if returnConts.len > 0:
         for fp in walk(stmt.tryFinally, returnConts, w):
           exitReturn(fp, w)
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
       # (a'') JUMP exits (RFC-0005 S8m): walk the finally on each `break` /
       #     `continue` that leaves this try, as Nim runs it. Its fall-through
       #     continues the SAME jump outward (`exitJump`: the next-outer
@@ -21255,7 +21287,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for jc in jumpConts:
         for fp in walk(stmt.tryFinally, @[jc.path], w):
           exitJump(fp, jc.target, jc.isCont, w)
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
       # (b) RAISED exits: for each, set `inFlightExn` to the original exn for the
       #     finally's duration (so a bare re-raise inside finally sees it), walk
       #     the finally on the raised path; the survivors are the paths where the
@@ -21264,7 +21296,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       #     new exn was already routed by `routeRaise` and REPLACES the original
       #     (so we do NOT re-raise the original on those sub-paths).
       for rc in raisedConts:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         let savedInFlight = w.frame.inFlightExn
         w.frame.inFlightExn = some(ExnRecord(typeId: rc.typeId, msg: rc.msg))
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
@@ -21276,10 +21308,10 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.frame.inFlightExn = savedInFlight
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
         for fp in finallyNormal:
-          if w.shouldStop: return survivors
+          if w.shouldStop: return exact(survivors)
           # Finally fell through on this sub-path → re-propagate the ORIGINAL.
           survivors.add routeRaise(fp, rc.typeId, rc.msg, w)
-      survivors
+      exact(survivors)
   of isDeref, isNew, isDerefWrite:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21297,14 +21329,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if not viewed:
       walkHeapArm(stmt, paths, w)
     else:
-      var outs: seq[Path]
-      for p in paths:
-        if w.shouldStop: break
-        let heapsBefore = p.heaps
-        for q in walkHeapArm(stmt, @[p], w):
-          if q != p: logInPlace(p, heapsBefore, q)
-          outs.add q
-      outs
+      walkHeapViewed(stmt, paths, w)
   of isUnsupported:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21342,7 +21367,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # signed `+`, `-` and `*` are undefined on overflow in C, not a wrap, and
     # nothing here tells the arithmetic which routine it is in: the marker
     # declines (the degrade below) on every setting.
-    walkUnsupported(stmt, paths, w).live
+    walkUnsupported(stmt, paths, w)
   of isUndefined:
     # RFC-0016 PRC-07. The path performs an operation C leaves undefined: it
     # ends here through `haltUndefined`, decided at the op as the arithmetic
@@ -21351,7 +21376,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       if w.shouldStop: break
       decideUndefined(p, stmt.udKind, w.z3.mkBool(true), stmt.udSite, w)
-    @[]
+    exact(@[])
   of isUnsafeCast:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21377,7 +21402,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # and joins on it. The token is discarded: a halted path needs no carrier.
     w.halted(heUnsafeCast,
       "unsafe pointer materialisation (" & stmt.ucReason & ") reached at " &
-      "walk time -- path halted", scope = siteAnchored(stmt.ucMarker)).live
+      "walk time -- path halted", scope = siteAnchored(stmt.ucMarker))
 
 const capSnapPrefix = "__capsnap#"
   ## RFC-0005 S8ax. A frame-local name (no `__gl:` prefix, so no call
@@ -22422,16 +22447,16 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## where every snapshot is shallower, and the next one drops them
   ## (`dropSnapshots`) rather than reading them as its own.
   if stmt == nil or paths.len == 0 or not frameHasCells(paths, w):
-    return walkStmt(stmt, paths, w)
+    return walkStmt(stmt, paths, w).live
   if stmt.kind in compoundStmtKinds:
     inc w.capSyncDepth
-    result = walkStmt(stmt, paths, w)
+    result = walkStmt(stmt, paths, w).live
     dec w.capSyncDepth
     return
   inc w.capSyncDepth
   let depth = w.capSyncDepth
   let ins = snapCells(paths, depth, w)
-  let outs0 = walkStmt(stmt, ins, w)
+  let outs0 = walkStmt(stmt, ins, w).live
   dec w.capSyncDepth
   reconcileCells(producerOf(stmt), outs0, depth, w)
 
@@ -26884,6 +26909,19 @@ type
     definedFacts*: seq[ConcolicDefinedFact]
       ## RFC-0016 K10a-concolic. The operations with an undefined side this
       ## replay executed, in encounter order (see `ConcolicDefinedFact`).
+    errors*: seq[SymexErrorInfo]
+      ## RFC-0016 K7c. The classified degrades and caps the follow walk
+      ## recorded, deduplicated as `SymexResult.errors` is (the walk,
+      ## heap-depth, new-field and closure-call sinks, and the lowering sink):
+      ## a cap such as `ckLoopUnwindFollow` is here by its kind and message,
+      ## where only `counters.walkDegradeCount` counted it before. Parse-time
+      ## declines stay in `parseErrors`.
+    soundBranches*: int
+      ## RFC-0016 K7c. How many leading `branchTrace` records are on the
+      ## replay's own path: all of them, unless a follow `while` was cut at
+      ## `maxLoopUnwind` while the replay was still iterating, when the
+      ## records from the cut on belong to a continuation the trace never
+      ## takes. A flip of one of those is not a flip of the replay.
     branchTrace*: seq[ConcolicBranchRecord]
       ## RFC-fuzzer-nextgen G2. The `if`-decisions `walkIfFollowConcrete`
       ## resolved along this replay, in encounter order — `runConcolicFlipImpl`
@@ -27507,6 +27545,13 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     pinned & indexSplitRoots(ctx, pinned), settings) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
+  result.soundBranches =
+    if w.followCut: w.followCutAt else: w.branchTrace.len
+  drainDedupedByMsg(result.errors, w.walkDegradeErrors)
+  drainDedupedByMsg(result.errors, w.heapDepthErrors)
+  drainDedupedByMsg(result.errors, w.newFieldZeroErrors)
+  drainDedupedByMsg(result.errors, w.sinks.closureCallErrors)
+  drainDedupedByMsg(result.errors, loweringDegradeErrors)
   result.definedFacts = w.definedFacts
   result.drawVars = drawVars
   result.drawOverrides = drawOverrides
@@ -27711,7 +27756,7 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     result.outcome = o
     result.coverage = c
     result.soundness = Soundness(replay: rsNotNeeded)
-    drainRunTaint(result.soundness, [collected.parseErrors],
+    drainRunTaint(result.soundness, [collected.parseErrors, collected.errors],
       extra = (if result.undefinedReached.len > 0: {scIncomplete} else: {}))
     for u in result.undefinedReached:
       result.soundness.witnessUndefined.incl ubOrdinals({u.kind})
@@ -27719,7 +27764,9 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     inc result.flipCounters.byCoverage[c]
     return result
 
-  if targetBranchIndex < 0 or targetBranchIndex >= collected.branchTrace.len:
+  # RFC-0016 K7c: a decision past a follow cut is on a continuation the
+  # trace never takes; it is not offered as a flip target.
+  if targetBranchIndex < 0 or targetBranchIndex >= collected.soundBranches:
     finish(cfoUnmodelable, ccoNotApplicable)
 
   let target = collected.branchTrace[targetBranchIndex]
@@ -27820,7 +27867,7 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     # whether the SAME decision index now took a DIFFERENT arm. -----------
     let replay = runConcolicCollectImpl(prog, result.materialized, bindings, settings, maxDraws)
     let coverage =
-      if targetBranchIndex < replay.branchTrace.len and
+      if targetBranchIndex < replay.soundBranches and
          replay.branchTrace[targetBranchIndex].armTaken != target.armTaken:
         ccoIntendedCovered
       else:

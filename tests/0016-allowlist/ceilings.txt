@@ -3,12 +3,12 @@
 # The `rows=scoped` line is the count of `rows=` entries over every file (L-M1): a scope is a platform classification, but it is not unlimited, so it has its own ceiling, which only falls.
 # THE RULE (RFC section 8.2; not checkable in a test): a ceiling is raised only in the commit that introduces a new cell, scope or file whose own entries are added. That bump and the entries land together in one commit, and the commit message names the cell. Raising a ceiling for a skipped test (record it with skipCell), for an entry added after its scope's introduction, or to absorb a regression is the failure this file exists to stop: evidence the cell or fix the cause. A shrunk list lowers its ceiling in the same commit.
 build.txt	5
-capkind.txt	4
+capkind.txt	0
 closed-legacy.txt	24
 ceiling-offenders-cpp.txt	783
 ceiling-offenders-msvc.txt	422
 ceiling-offenders-z3-4.13.4.txt	744
-census.txt	152
+census.txt	144
 defined.txt	0
 errorkind.txt	66
 ids.txt	90

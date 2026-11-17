@@ -96,7 +96,7 @@ suite "RFC-0016 K7b (a) -- feUnadmitted is dcOmitted and drops the path":
     let src = readFile(currentSourcePath().parentDir() / ".." / "src" /
                        "nelli" / "smt" / "runtime.nim")
     check "proc walkUnsupported(" in src
-    check "walkUnsupported(stmt, paths, w).live" in src
+    check "    walkUnsupported(stmt, paths, w)\n" in src   ## K7c: no `.live`
 
 suite "RFC-0016 K7b (b) -- W-16: an excluded Defect is recorded, not silent":
 

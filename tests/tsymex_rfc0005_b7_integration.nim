@@ -4,8 +4,9 @@
 ##    argument stands; Nim passes the storage's address, so a later
 ##    argument's call that writes the storage is seen by the callee, and
 ##    the walk's write-back overwrote that write with the stale copy (a
-##    false `sxUnsat` at S8bu's tip, 5729b1a). Batch 7 declines it on S8br's
-##    frame condition (`laterLeavesLvalue`).
+##    false `sxUnsat` at S8bu's tip, 5729b1a). Batch 7 declined it on S8br's
+##    frame condition (`laterLeavesLvalue`); RFC-0016 S8cg reads the view at
+##    the call (`viewAtCall`).
 ## 2. A module-level seq indexed by a call in a `var` actual (S8br's hoist
 ##    beside batch 6's entry values and S8bl's constant-guard fold): at
 ##    S8bu's tip `gw` was a false `sxUnsat` (the copy-out called the index
@@ -17,9 +18,6 @@ import std/[unittest, strutils, times]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
-from ./s8cu_helpers import pinDecline, cellKey, faGeneric
-
-const declKey = cellKey(faGeneric, "b7_integration")
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -165,14 +163,16 @@ suite "RFC-0005 batch 7: integration":
       touchP(addr gArr[j], 0)
       check gArr[1] == k + 5
 
-  test "a var openArray view a later argument writes declines":
+  test "a var openArray view a later argument writes is read at the call":
     ## RED at S8bu's tip: `oa`, `os` a false `sxUnsat`, `oa_dead`,
-    ## `os_dead` a refuted `sxSat`.
-    pinDecline(sutOa, declKey, feEvalOrderUnmodelled, tLabel("oa"), "copied where it stands")
-    pinDecline(sutOa, declKey, feEvalOrderUnmodelled, tLabel("oa_dead"), "copied where it stands")
-    pinDecline(sutOaSlice, declKey, feEvalOrderUnmodelled, tLabel("os"), "copied where it stands")
-    pinDecline(sutOaSlice, declKey, feEvalOrderUnmodelled, tLabel("os_dead"), "copied where it stands")
-    pinDecline(sutOaClosure, declKey, feEvalOrderUnmodelled, tLabel("oc_dead"), "copied where it stands")
+    ## `os_dead` a refuted `sxSat`. Batch 7 declined each
+    ## (`feEvalOrderUnmodelled`); RFC-0016 S8cg reads the view at the call
+    ## (`tsymex_0016_s8cg_views`).
+    replays(sutOa, "oa")
+    discard verdict(sutOa, "oa_dead", sxUnsat)
+    replays(sutOaSlice, "os")
+    discard verdict(sutOaSlice, "os_dead", sxUnsat)
+    discard verdict(sutOaClosure, "oc_dead", sxUnsat)
 
   test "a var openArray view a later argument leaves alone is modelled":
     replays(sutOaOther, "ot")
@@ -204,4 +204,4 @@ suite "RFC-0005 batch 7: integration":
     check el < 300.0
 
   test "walker version floor":
-    check symexWalkerVersion.parseInt >= 237
+    check symexWalkerVersion.parseInt >= 375   # RFC-0016 S8cg

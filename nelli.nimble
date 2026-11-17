@@ -189,6 +189,7 @@ task test, "Run the test suite":
             "tsymex_r6_a3_variantconstruct_sym",
             "tsymex_0016_w4h1b_caseexpr_narrow",
             "tsymex_0016_w4h1b_dead_arms",
+            "tsymex_0016_s8cg_views",
             "tsymex_r6_a4_construct_interactions",
             "tsymex_r6_a6_exported_field_names",
             "tsymex_r6_b1_stringbacked",

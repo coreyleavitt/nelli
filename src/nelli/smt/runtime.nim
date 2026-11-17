@@ -4478,6 +4478,8 @@ proc divisorIsZero(b: SymVal): Z3Bool =
     raise newException(ValueError,  # [raise-audited: category-c: op-narrowed by caller dispatch]
       "divisorIsZero: unexpected divisor kind " & $b.kind)
 
+proc mulOverflowSplit(a, b: SymVal): Option[Z3Bool]  ## RFC-0016 S8cg fwd decl
+
 proc overflowCond(a, b: SymVal, op: IRBinop): Z3Bool =
   ## R16-4: build "this signed BV arithmetic op overflows" predicate.
   ## Returns true (raise) when the operation overflows OR underflows.
@@ -4494,6 +4496,10 @@ proc overflowCond(a, b: SymVal, op: IRBinop): Z3Bool =
   ## overflow of a width-typed value is a plain post-hoc RANGE CHECK — see
   ## `overflowCondInt` below, svInt's sibling to this proc, dispatched
   ## alongside it from `lowerArith`.
+  # RFC-0016 S8cg: a product whose operand takes a few literal values.
+  if op == bMul:
+    let split = mulOverflowSplit(a, b)
+    if split.isSome: return split.get
   case a.kind
   of svBV8:
     case op
@@ -4619,6 +4625,96 @@ proc bvSignedInterval(ctx: Z3Context; t: RawZ3Ast): Interval =
     else: discard
     memo[id] = result
   go(t)
+
+const mulSplitLeafBudget = 16
+  ## RFC-0016 S8cg. The most literal values `mulOverflowSplit` splits a
+  ## product's operand on.
+
+proc mulOverflowSplit(a, b: SymVal): Option[Z3Bool] =
+  ## RFC-0016 S8cg. `overflowCond(a, b, bMul)` split on an operand that is a
+  ## choice among a few literals (`ite` arms ending in numerals, read
+  ## through `Z3_simplify` when it is an array `select`: a `Table`'s keys
+  ## from a literal domain, `isTabKeys`). For a literal `c`, `c * o`
+  ## overflows exactly when `o` lies outside `[low div c, high div c]` (the
+  ## bounds swapped for a negative `c`; `c` in {0, 1} never, `-1` at `low`
+  ## alone), a comparison where `bvsmul_noovfl` / `noudfl` over two free
+  ## terms is a multiplier circuit: `ti_tuple`'s `s += k * v` cost 121M
+  ## units in a context of its own (batch 7), past a tainted path's 20M.
+  ## The same predicate, spelled differently; `none` when neither operand is
+  ## such a choice.
+  let w = case a.kind
+          of svBV8: 8
+          of svBV16: 16
+          of svBV32: 32
+          of svBV64: 64
+          else: return none(Z3Bool)
+  if b.kind != a.kind: return none(Z3Bool)
+  let ctx = requireCurrentContext()
+  discard bvSignedInterval(ctx, rawAnyAstOf(a))   # reads `bvIvlDeclKinds`
+  let kinds = bvIvlDeclKinds
+  if selectDeclKind == 0:
+    discard peelSelect(ctx, rawAnyAstOf(a))       # reads `selectDeclKind`
+  var hold: seq[Z3AnyAst]   # every term built here, referenced until wrapped
+  proc keep(r: RawZ3Ast): RawZ3Ast =
+    hold.add wrap[Z3AnyAst](ctx, r)
+    r
+  proc declOf(t: RawZ3Ast): int =
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return -1
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, t))))
+  proc numeral(t: RawZ3Ast; v: var int64): bool =
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_NUMERAL_AST: return false
+    var u: uint64
+    if not Z3_get_numeral_uint64(ctx.raw, t, addr u): return false
+    v = if w >= 64: cast[int64](u)
+        elif u >= (1'u64 shl (w - 1)): int64(u) - (1'i64 shl w)
+        else: int64(u)
+    true
+  proc leaves(t: RawZ3Ast; budget: var int): bool =
+    ## `t` is an `ite` tree over numerals of at most `budget` leaves.
+    var v: int64
+    if numeral(t, v):
+      dec budget
+      return budget >= 0
+    if declOf(t) != kinds.ite: return false
+    let app = Z3_to_app(ctx.raw, t)
+    if Z3_get_app_num_args(ctx.raw, app) != 3: return false
+    leaves(Z3_get_app_arg(ctx.raw, app, 1), budget) and
+      leaves(Z3_get_app_arg(ctx.raw, app, 2), budget)
+  proc choice(sv: SymVal): Option[RawZ3Ast] =
+    ## The operand as an `ite` tree over numerals, or `none`.
+    var t = rawAnyAstOf(sv)
+    if declOf(t) + 1 == selectDeclKind:
+      t = keep(ctx.checkErr Z3_simplify(ctx.raw, t))
+    var budget = mulSplitLeafBudget
+    if leaves(t, budget): some(t) else: none(RawZ3Ast)
+  var c = choice(a)
+  var o = rawAnyAstOf(b)
+  if c.isNone:
+    c = choice(b)
+    o = rawAnyAstOf(a)
+  if c.isNone: return none(Z3Bool)
+  let srt = ctx.checkErr Z3_get_sort(ctx.raw, o)
+  let (lo, hi) = intBounds(w)
+  proc lit(v: int64): RawZ3Ast = keep(ctx.checkErr Z3_mk_int64(ctx.raw, v, srt))
+  proc orOf(x, y: RawZ3Ast): RawZ3Ast =
+    var args = @[x, y]
+    keep(ctx.checkErr Z3_mk_or(ctx.raw, 2,
+      cast[ptr UncheckedArray[RawZ3Ast]](args[0].addr)))
+  proc ovf(t: RawZ3Ast): RawZ3Ast =
+    var v: int64
+    if numeral(t, v):
+      if v == 0 or v == 1: return keep(ctx.checkErr Z3_mk_false(ctx.raw))
+      if v == -1: return keep(ctx.checkErr Z3_mk_eq(ctx.raw, o, lit(lo)))
+      if v > 1:
+        return orOf(keep(ctx.checkErr Z3_mk_bvsgt(ctx.raw, o, lit(hi div v))),
+                    keep(ctx.checkErr Z3_mk_bvslt(ctx.raw, o, lit(lo div v))))
+      return orOf(keep(ctx.checkErr Z3_mk_bvslt(ctx.raw, o, lit(hi div v))),
+                  keep(ctx.checkErr Z3_mk_bvsgt(ctx.raw, o, lit(lo div v))))
+    let app = Z3_to_app(ctx.raw, t)
+    keep(checkedIte(ctx, Z3_get_app_arg(ctx.raw, app, 0),
+                    ovf(Z3_get_app_arg(ctx.raw, app, 1)),
+                    ovf(Z3_get_app_arg(ctx.raw, app, 2))))
+  some(wrap[Z3Bool](ctx, ovf(c.get)))
 
 proc bvOverflowDischarged(a, b: SymVal, op: IRBinop): bool =
   ## RFC-0005 S8bv. `overflowCond(a, b, op)` is unsatisfiable on structural
@@ -18902,9 +18998,39 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
       continue
     let ctx = requireCurrentContext()
     let keyTy = tsv.tabKeyTy
-    let ks = SymVal(kind: svSeq, seqLen: tsv.tabSize,
+    var ks = SymVal(kind: svSeq, seqLen: tsv.tabSize,
       seqDataRaw: allocateSeqDataRaw(keyTy, freshDegradeName("__tabKeys")),
       seqElemTy: keyTy)
+    let dom = constFalseStoreKeys(ctx, tsv.tabPresentRaw.raw)
+    block literalKeys:
+      # RFC-0016 S8cg. Keys the SUT stored as integer literals: each of the
+      # first `maxLoopUnwind` positions is spelled as a choice among them
+      # (`ite` over fresh selectors), so a product with a key splits on its
+      # literal values before Nim's overflow check (`mulOverflowSplit`).
+      # The domain fact below already confines a key to them, so no model
+      # is pruned: a position past the size is never read.
+      if keyTy.kind != itInt or dom.isNone or dom.get.len == 0 or
+         dom.get.len > mulSplitLeafBudget:
+        break literalKeys
+      var lits: seq[RawZ3Ast]
+      for d in dom.get:
+        if Z3_get_ast_kind(ctx.raw, d) != Z3_NUMERAL_AST: break literalKeys
+        var dup = false
+        for l in lits:
+          if Z3_get_ast_id(ctx.raw, l) == Z3_get_ast_id(ctx.raw, d): dup = true
+        if not dup: lits.add d
+      var hold: seq[Z3AnyAst]
+      var data = ks.seqDataRaw.raw
+      for j in 0 ..< w.settings.budget.maxLoopUnwind:
+        var t = lits[^1]
+        for i in countdown(lits.len - 2, 0):
+          let sel = mkBoolVar(ctx, freshDegradeName("__tabKeyChoice"))
+          hold.add wrap[Z3AnyAst](ctx, sel.raw)
+          t = checkedIte(ctx, sel.raw, lits[i], t)
+          hold.add wrap[Z3AnyAst](ctx, t)
+        data = checkedStore(ctx, data, mkZ3IntLit(int64(j)).raw, t)
+        hold.add wrap[Z3AnyAst](ctx, data)
+      ks.seqDataRaw = wrap[Z3AnyAst](ctx, data)
     var facts: seq[Z3Bool]
     # The position array, built raw (its key sort is runtime, as
     # `tabTreeDataVars`'s arrays are) and wrapped at once so its reference
@@ -18941,7 +19067,6 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
       # 64-bit terms, whose key was bounded only through the presence
       # array: Z3 4.13.4 ran out of its 20M budget on that query from a
       # fresh context (SAT in about 40K units with the keys spelled).
-      let dom = constFalseStoreKeys(ctx, tsv.tabPresentRaw.raw)
       if dom.isSome and dom.get.len > 0:
         var anyKey = wrap[Z3Bool](ctx, checkedEq(ctx, term.get.raw, dom.get[0]))
         for i in 1 ..< dom.get.len:

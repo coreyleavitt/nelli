@@ -6,7 +6,7 @@
 ## S8bl guard, `tsymex_rfc0005_s8bl_magicscan`, covers only the `var`
 ## parameter magics and stays as the narrower check). The axis absorbs
 ## `varParamMagics` (deleted in K4a-dispatch, which dispatches the sites; see
-## `tsymex_0016_k4a_dispatch`).
+## `tsymex_0016_k4a_dispatch_signed`).
 import std/[unittest, os, strutils, compilesettings, sets, options, tables]
 import nelli/smt/admission
 import nelli/smt/errorkind

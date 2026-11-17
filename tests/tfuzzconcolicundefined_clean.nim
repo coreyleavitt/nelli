@@ -9,11 +9,13 @@
 ## `ConcolicUndefined`, one per (kind, site), onto the `Orchestrator`, and
 ## `FuzzReport.undefinedFindings` hands them to the caller with the witnessing
 ## input. Verdict-neutral: the witness is never run, so it is not a crash.
-import std/[unittest, strutils]
+##
+## Split (RFC-0016 INT-51) so each file runs inside the CI ceiling:
+## `tfuzzconcolicundefined_div` holds the campaign that reaches the zero
+## divisor, and this file the campaigns that must report none.
+import std/unittest
 import nelli
 import nelli/concolic
-import nelli/choice
-import nelli/smt/errorkind
 
 
 ## `a div b > a` holds only through `b == 0` (otherwise the quotient is at most
@@ -37,26 +39,6 @@ proc cleanGate(d: int) {.cover.} =
       discard "ok"
 
 suite "K10a-concolic -- undefined behaviour the bridge reaches is reported":
-
-  test "a campaign reports the zero divisor only the undefined side satisfies":
-    let report = fuzzConcolic(integers(0, 0xFFFFFFFF), divGate,
-                              FuzzSettings(seed: 42'u64, maxIterations: 60))
-    check report.undefinedFindings.len == 1          # deduped across flips
-    if report.undefinedFindings.len == 1:
-      let f = report.undefinedFindings[0]
-      check f.kind == ubUnsignedDivZero
-      check f.site.len > 0
-      check f.input.len == 1
-      check f.input[0].intVal == toInt128(0xCAFEBABE'i64)
-    check report.irCrashes.len == 0                  # not a crash
-    check report.stats.concolicYield.flip.undefinedReached > 0
-
-  test "the summary names the finding":
-    let report = fuzzConcolic(integers(0, 0xFFFFFFFF), divGate,
-                              FuzzSettings(seed: 42'u64, maxIterations: 60))
-    let text = formatUndefinedFindings(report)
-    check "ubUnsignedDivZero" in text
-
   test "a property with no undefined side reports none":
     let report = fuzzConcolic(integers(0, 0xFFFFFFFF), cleanGate,
                               FuzzSettings(seed: 42'u64, maxIterations: 60))

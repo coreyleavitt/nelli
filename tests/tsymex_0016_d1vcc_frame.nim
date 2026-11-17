@@ -3,8 +3,8 @@
 ## `symexFind` and its siblings used to build the IR constructor inline, so a
 ## module top level with many calls put every expansion's temporaries into one
 ## C function, `NimMainModule`. An MSVC debug build gives each temporary its
-## own slot: `tsymex_0016_k4a_dispatch` (91 sites) overran the 1 MB reserve of
-## a Windows main thread (0xC00000FD).
+## own slot: `tsymex_0016_k4a_dispatch` (91 sites, one file then) overran the
+## 1 MB reserve of a Windows main thread (0xC00000FD).
 ##
 ## The probe `s0016_d1vcc_probe` is that shape: 16 `symexFind` sites at the top
 ## level over a 24-routine SUT. It is built in a child and
@@ -24,7 +24,7 @@
 ## Measured at the fix: frame 9.6 KB (needs ~138 KB), against 58.7 KB inline
 ## (needs ~187 KB), so the bound sits between the two with 20 KB either side.
 import std/[unittest, os, osproc, strutils]
-import ./s8cu_helpers
+import ./probe_build   # the child build alone: the engine is the probe's, not this suite's
 
 # The C++ backend's frames are larger: measured at the fix, the builder build
 # runs down to about 160 KB and dies below it, the inline one needs 256 KB; the

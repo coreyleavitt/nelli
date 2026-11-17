@@ -2,8 +2,8 @@
 ## (`k9cg_probes.nim`) over all four sources: an empty literal (E), a
 ## non-empty literal (L), `newSeq` (N) and a parameter (P). Each is exact or a
 ## classified decline, never `weInternalWalkerFault`. Split from
-## `tsymex_0016_k9cg_unbacked.nim` so each file fits the bounded runner's
-## default cap.
+## `tsymex_0016_k9cg_unbacked.nim` (since split one source per file,
+## `tsymex_0016_k9cg_unbacked_{e,l,n,p}.nim`) so each file fits.
 import ./k9cg_probes
 
 genProbes("t", "t", "Table[int, int]", "initTable[int, int]()",

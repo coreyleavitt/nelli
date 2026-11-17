@@ -810,8 +810,13 @@ const renderAsChoicesVersion* = "12"
   ##   memberships over a ground subject; a branch it left open is decided,
   ##   so a tail or a replay can fork less and name fewer kinds. No key
   ##   bytes change.
+  ## - RFC-0016 W4 S8cp-r (381->391; 382-390 are reserved for other W4
+  ##   work), PRC-34: system's `==` on two tuples or plain objects of atom
+  ##   fields lowers to the conjunction of the fields' `==` (was `eqBV` on a
+  ##   tuple, declined); a `type` section in a routine body is a no-op (was
+  ##   `feUnsupportedStmtKind`). Verdicts that declined now decide.
 
-const symexWalkerVersion* = "381"
+const symexWalkerVersion* = "391"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -3759,6 +3759,54 @@ proc parseProcAsValue(procSym, impl: NimNode, ctx: ParseCtx): IRExpr =
 
 # ---- Binop / unop helpers ----------------------------------------------------
 
+const atomEqTypeNames = ["int", "int8", "int16", "int32", "int64", "uint",
+                         "uint8", "uint16", "uint32", "uint64", "bool", "char",
+                         "float", "float32", "float64", "string"]
+  ## RFC-0016 PRC-34. The field types whose `==` is system's own: a type
+  ## whose implementation is one of these symbols (an alias resolves to it).
+  ## A `distinct`, an enum, a range or a record may carry a user's `==`,
+  ## which system's generic `==` on a record reaches through `mixin`.
+
+proc atomRecordFieldTypes(recTy: NimNode): seq[NimNode] =
+  ## RFC-0016 PRC-34. The field types of a tuple or of a plain object (no
+  ## parent, no pragma, no case or `when` part), in declaration order; `@[]`
+  ## (with no fields to decide) when `recTy` is neither, or when a field's
+  ## type is not an atom (`atomEqTypeNames`).
+  if recTy == nil or recTy.kind == nnkNilLit: return @[]
+  let impl = recTy.getTypeImpl
+  var tys: seq[NimNode]
+  case impl.kind
+  of nnkTupleConstr:
+    for c in impl: tys.add c
+  of nnkTupleTy:
+    for d in impl:
+      if d.kind != nnkIdentDefs: return @[]
+      for _ in 0 ..< d.len - 2: tys.add d[^2]
+  of nnkObjectTy:
+    if impl.len != 3 or impl[0].kind != nnkEmpty or impl[1].kind != nnkEmpty or
+       impl[2].kind != nnkRecList:
+      return @[]
+    for d in impl[2]:
+      if d.kind != nnkIdentDefs: return @[]
+      for _ in 0 ..< d.len - 2: tys.add d[^2]
+  else: return @[]
+  for t in tys:
+    let ti = t.getTypeImpl
+    if ti.kind != nnkSym or ti.strVal notin atomEqTypeNames: return @[]
+  tys
+
+proc recordAtomEqIR(l, r: IRExpr; recTy: IRType): IRExpr =
+  ## RFC-0016 PRC-34. System's `==` on two records of atoms: the
+  ## conjunction of the fields' `==` (`true` for a record with none).
+  ## `l` and `r` are side-effect free (bound temps): each is read once per
+  ## field.
+  result = nil
+  for i in 0 ..< recTy.fields.len:
+    let eq = mkBinop(bEq, mkField(l, i, recTy.fieldNames[i]),
+                     mkField(r, i, recTy.fieldNames[i]))
+    result = if result == nil: eq else: mkBinop(bAnd, result, eq)
+  if result == nil: result = mkBoolLit(true)
+
 proc binopForInfix(op: string): IRBinop =
   case op
   of "+":   bAdd
@@ -12611,6 +12659,30 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # after `f`'s write (see `isEagerIR`).
       let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
       return mkBitSet(op, @[l, r], setTy)
+    # RFC-0016 PRC-34: system's generic `==` on two tuples or two plain
+    # objects (`!=` reaches here as `not ==`) is `for a, b in fields(x, y):
+    # if a != b: return false`. Over fields whose types are atoms
+    # (`atomRecordFieldTypes`) that is the conjunction of their builtin `==`;
+    # it was `eqBV` on a tuple value, declined. Any other record keeps that
+    # decline: a field's `==` may be a user's, reached through `mixin`.
+    if n.len == 3 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["=="]) and
+       n[1].typeKind in {ntyTuple, ntyObject} and
+       n[2].typeKind == n[1].typeKind:
+      let recTy = classifyType(n[1]).ty
+      let atoms = atomRecordFieldTypes(n[1].getTypeInst)
+      var leaves = recTy.kind == itTuple and atoms.len > 0 and
+                   atoms.len == recTy.fields.len
+      if leaves:
+        for f in recTy.fields:
+          if f.kind notin {itInt, itBool, itFloat32, itFloat64, itString}:
+            leaves = false
+      if leaves:
+        let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
+        let lt = freshSynth(ctx, "receqL")
+        let rt = freshSynth(ctx, "receqR")
+        preamble.add mkLet(lt, recTy, l)
+        preamble.add mkLet(rt, recTy, r)
+        return recordAtomEqIR(mkVar(lt), mkVar(rt), recTy)
     # Phase 15 S8: `&` string concatenation. Intercept BEFORE binopForInfix
     # (which has no `&` case and would error). Only fire when BOTH operands
     # classify as `itString` — `s & t`, `s & "lit"`, `"lit" & s`. This guard
@@ -23328,6 +23400,12 @@ proc parseStmtInner(n: NimNode,
     # is inlined at its `for`, and a template or macro is already expanded
     # at its uses. It was `feUnsupportedStmtKind`, which tainted every path
     # past the declaration.
+    mkBlock(@[])
+  of nnkTypeSection:
+    # RFC-0016 PRC-34: a `type` section in a routine body declares types the
+    # typed body has already resolved at every use (constructors, field
+    # reads, hooks by type); it runs nothing where it stands. It was
+    # `feUnsupportedStmtKind`, which tainted every path past it.
     mkBlock(@[])
   else:
     ctx.declineMarker(feUnsupportedStmtKind, &"statement kind {n.kind} not in supported fragment")

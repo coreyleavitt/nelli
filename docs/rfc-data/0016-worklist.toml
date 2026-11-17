@@ -301,11 +301,12 @@ pins = ["tsymex_rfc0005_s8cl_magics"]
 id = "SND-07"
 table = "5.1"
 title = "`uncheckedAssign`, the other arm's bytes differ: `o.y != v`"
-state = "open"
-note = ""
+state = "closed"
+note = "(decline; exact model PRC-37)"
 source = "sort S7; S8cp item 2"
-evidence = "Walker pinned `sxUnknown` on `diff` (`s8cp_unchecked.nim:229-230`); the file's native run (`:199-206`) covers only the shape where the other arm's bytes coincide (`same`). The sort's shape where they differ (`p_cp ua3_diff`, native HIT) has no SUT in the corpus: port it with its native hit beside the `sxUnknown` pin, then close as a decline. Exact model: PRC-37. (2026-11-07, W1-z): `ua3_diff` is not a native HIT, because native never reaches `diff`; the decline is conservative, so this is a precision row (PRC-37), not a soundness one."
+evidence = "Walker pinned `sxUnknown` on `diff` (`s8cp_unchecked.nim:229-230`); the file's native run (`:199-206`) covers only the shape where the other arm's bytes coincide (`same`). The sort's shape where they differ (`p_cp ua3_diff`, native HIT) has no SUT in the corpus: port it with its native hit beside the `sxUnknown` pin, then close as a decline. Exact model: PRC-37. (2026-11-07, W1-z): `ua3_diff` is not a native HIT, because native never reaches `diff`; the decline is conservative, so this is a precision row (PRC-37), not a soundness one. (S8cp-r) Ported by W1-p: `tests/tsymex_0016_w1p_probes.nim:82-93` runs `ua3` natively over `low(int)`, -1, 0, 1, 7, `high(int)` (`same` always, `diff` never, no raise) beside `pinDecline(ua3Diff, construct:uncheckedAssign/diff, feUncheckedDiscBytes)`."
 cells = []
+pins = ["tsymex_0016_w1p_probes"]
 
 [[row]]
 id = "SND-08"
@@ -775,11 +776,12 @@ cells = []
 id = "PRC-34"
 table = "5.2m"
 state = "open"
-note = ""
+note = "S8cp-r (walker 391): record `==` over atom fields and a routine-body `type` section modelled; the alias, `{.inject.}`, nested `addr t[1][0]` and `s[1].b = 7` shapes already decide (pinned with native runs). Open: whole-seq `==` (needs a quantifier or a ground unroll over a known length), `==` on a record with a non-atom field (user `==` through `mixin`), and `s[1][0] = x` (`seNestedSeqUnsupported`, with PRC-23)."
 home = "S8cp item 7"
 source = "`jobs/s8cp.md`; S8cb remainder"
 moves = "declined shapes: whole-tuple `==` (`eqBV`); a local `let b = addr o.y` alias on whole assignment; a type section in a routine body (with PRC-22); a parameter pragma `x {.inject.}: int`, a compile error in `collectStringBackedByteSeqParamsImpl`, to fix first; nested `addr t[1][0]`. `s[1].b = 7` and `s[1][0] = x` only if S8bz left them declined Includes PRC-22; add whole-seq `==` (`runtime.nim:8341`, not re-verified)."
 cells = []
+pins = ["tsymex_0016_s8cpr_shapes"]
 
 [[row]]
 id = "PRC-35"

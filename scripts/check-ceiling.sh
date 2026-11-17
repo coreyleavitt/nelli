@@ -214,6 +214,21 @@ self_test() {
   # a Windows shard writes CRLF lines: the name must not carry the CR
   printf '%s\r\n' '50.0 vcc tests/tband.nim' '300.2 vcc tests/tslow.nim' > "$d/t4"
   expect crlf 0 --offenders "$d/off2" "$d/t4"; has 'PASS'
+  # the nightly shape (runs 43854752980 and later): one leg carrying a NEW offender, a
+  # REGRESSION of a listed test and warnings at once. Both FAIL blocks must name their
+  # tests with their seconds (the step once showed neither), and the warnings must not
+  # hide them
+  : > "$d/tests/tnewcfg.nim"; : > "$d/tests/tregr.nim"; : > "$d/tests/twarn.nim"
+  printf '%s\n' 'tregr  90.0  seed' 'tstale  80.0  seed' > "$d/off8"
+  printf '%s\n' '283.3 cpp tests/tnewcfg.nim' '234.4 cpp tests/tregr.nim' '70.0 cpp tests/twarn.nim' '35.0 cpp tests/tstale.nim' > "$d/t8"
+  expect nightly 1 --offenders "$d/off8" "$d/t8"
+  has 'FAIL: NEW offenders'; has '  283.3 tnewcfg'; has 'FAIL: REGRESSED'; has '  234.4 (recorded 90.0 s, over 2.5 x) tregr'
+  has 'WARN: over'; has 'WARN: stale'; has 'FAIL$'
+  # a leg whose offenders list does not exist is exit 2 naming the file, never a clean pass
+  # (the workflow turns this into an explicit per-leg error)
+  got=0; out="$(CEILING_TESTS_DIR="$d/tests" bash "$0" --offenders "$d/no-such-list" "$d/t8" 2>&1)" || got=$?
+  [ "$got" = 2 ] || { echo "self-test missing-list: rc $got, want 2"; rc=1; }
+  has 'cannot read the offenders file'; has 'no-such-list'
   rm -rf "$d"
   if [ "$rc" = 0 ]; then echo "check-ceiling self-test: ok"; else echo "check-ceiling self-test FAILED"; fi
   return "$rc"

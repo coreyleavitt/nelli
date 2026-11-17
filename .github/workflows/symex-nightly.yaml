@@ -537,11 +537,25 @@ jobs:
           mkdir -p findings
           rc=0
           legs=0
+          failed=""
           for dir in merged/nightly-*-merged; do
             leg="${dir#merged/nightly-}"; leg="${leg%-merged}"
             [ -r "$dir/merged.log.times" ] || continue   # vm-alias writes no times
             legs=$((legs + 1))
-            out="$(bash scripts/check-ceiling.sh --offenders "tests/0016-allowlist/ceiling-offenders-$leg.txt" "$dir/merged.log.times")" || rc=1
+            list="tests/0016-allowlist/ceiling-offenders-$leg.txt"
+            # a leg with times but no committed list is an explicit failure naming the leg,
+            # never a silent rc=1 with an empty report (check-ceiling.sh exits 2 and the
+            # captured output below would be empty)
+            if [ ! -r "$list" ]; then
+              echo "::error::CI-D: leg $leg has times but no $list; commit a list (empty is a decision) or exclude the leg here"
+              printf 'ceiling-%s\t%s\tno ceiling-offenders list for this leg\n' "$leg" "$leg" >> findings/findings-ceiling.tsv
+              rc=1; continue
+            fi
+            out="$(bash scripts/check-ceiling.sh --offenders "$list" "$dir/merged.log.times" 2>&1)" || { rc=1; failed="$failed $leg"; }
+            # the captured report must reach the job log: until now a red step showed only
+            # the ::warning:: annotations and the FAIL blocks lived in the step summary
+            echo "::group::$leg: 60 s ceiling ratchet"; printf '%s\n' "$out" | command grep -v '^[0-9.]* '; echo "::endgroup::"
+            printf '%s\n' "$out" | command grep -q '^FAIL' && printf '%s\n' "$out" | awk '/^FAIL/ { f = 1; print; next } /^  / { if (f) print; next } { f = 0 }' | sed "s/^/::error::$leg: /"
             # the FAIL and WARN blocks have the shape the intake extractor reads
             # (a line is `  <seconds> <name>` or `  <name>`: the key is the last word);
             # the leg key is `ceiling-<leg>` so a flood of warnings collapses into its own issue
@@ -559,6 +573,7 @@ jobs:
             printf 'workflow\tceiling\tno leg wall times were readable\n' >> findings/findings-ceiling.tsv
             rc=1
           fi
+          [ -z "$failed" ] || echo "::error::CI-D: ceiling ratchet failed on:$failed"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           [ "$rc" = 0 ]
 

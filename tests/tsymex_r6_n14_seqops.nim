@@ -85,8 +85,10 @@
 ##    declines honestly and totally: `lowerCmp`'s catch-all routes svSeq
 ##    operands to `eqBV`/`neBV`, whose `else` arm classifies
 ##    `feUnsupportedOp` (unchanged by this slice, confirmed via direct
-##    probe before writing this suite). Pinned below to prove it stays
-##    classified.
+##    probe before writing this suite). RFC-0016 PRC-34 (walker 392) models
+##    it over an atom element (`seqEqZ3`: the pointwise conjunction, ground
+##    when a length is known, quantified otherwise); the pin below now
+##    checks the decided verdict against the compiled program.
 from ./s8cu_helpers import named, nativeHits
 import std/[unittest, strutils, sequtils, sets]
 import nelli/symex
@@ -388,19 +390,20 @@ suite "N14 — seq `in` / `.contains()` (decline-with-doctrine, ex-crash)":
     check r.errors[0].kind == feUnsupportedOp
 
 # =============================================================================
-# 6. `seq == seq` — DECLINED WITH DOCTRINE (see header doc, item 6)
+# 6. `seq == seq` — modelled by RFC-0016 PRC-34 (see header doc, item 6)
 # =============================================================================
 
 proc seqEquality(xs: seq[int], ys: seq[int]) =
   if xs == ys:
     symexTarget("eq_reached")
 
-suite "N14 — seq `==` (decline-with-doctrine)":
-  test "decline stays CLASSIFIED (feUnsupportedOp), never a crash":
+suite "N14 — seq `==` (RFC-0016 PRC-34: modelled)":
+  test "reached, as the compiled program reaches it":
+    check "eq_reached" in nativeHits(seqEquality(@[1, 2], @[1, 2]))
+    check "eq_reached" notin nativeHits(seqEquality(@[1, 2], @[1]))
     let r = symexFind(seqEquality, tLabel("eq_reached"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors[0].kind == feUnsupportedOp
+    checkpoint $r.errors
+    check r.status == sxSat
 
 # =============================================================================
 # 7. Item 1 audit pin (round-6 fix round 3) -- element-assign/pop/del reaching

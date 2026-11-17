@@ -1,3 +1,4 @@
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -23,7 +24,10 @@ suite "symex Phase 15 — F5 int<->float conversions":
     ## RFC-0005 S8g: Nim's int(f) never raises (probed: int(1e30), int(NaN),
     ## int(Inf) give low(int)); the R16-2 RangeDefect fork was fictional.
     ## K10a-float: the out-of-range side halts (undefined), so sxUnknown.
-    check symexFind(f2i, tRaisedExn("RangeDefect")).status == sxUnknown
+    block:
+      let k9r = symexFind(f2i, tRaisedExn("RangeDefect"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ubFloatToIntRange)
     let r = symexFind(f2i, tLabel("f2i"))
     check r.status == sxSat
     if r.status == sxSat: check int(r.witness[0]) == 3

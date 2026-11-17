@@ -34,6 +34,7 @@
 ## gave outside a loop). `renderAsChoicesVersion` STAYS "7" — the fresh
 ## degrade symbol is never solved-for/rendered; the degrade always demotes to
 ## `sxUnknown`, never produces a new witness shape.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -107,10 +108,14 @@ suite "symex RFC-chapulin-hardening SND-3 — loop-guard lowering degrade (c==cp
   test "SND-3-1 (tracer): digit-scan while-guard char-ordering compare -> sxUnknown (was c=sxUnsat)":
     let r = symexFind(sutDigitScanLoop, tLabel("after_loop"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(seUnsupportedStringOp)
 
   test "SND-3-2: target reachable ONLY via the degraded compare inside a loop -> sxUnknown, NEVER a fabricated sxSat":
     let r = symexFind(sutOnlyViaDegradedCompareInLoop, tLabel("only_via_degrade"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(seUnsupportedStringOp)
     check r.status != sxSat
 
   test "SND-3-3: independent clean sibling path still yields real sxSat (per-path taint, not blunt kill)":
@@ -121,6 +126,7 @@ suite "symex RFC-chapulin-hardening SND-3 — loop-guard lowering degrade (c==cp
   test "SND-3-4 (non-loop regression): same char-ordering compare outside any loop -> sxUnknown (unchanged)":
     let r = symexFind(sutCharOrderingOutsideLoop, tLabel("outside_loop_degrade"))
     check r.status == sxUnknown
+    check r.errors.named(seUnsupportedStringOp)
 
   test "SND-3-5: degraded result carries the classified seUnsupportedStringOp kind (Invariant 3)":
     let r = symexFind(sutDigitScanLoop, tLabel("after_loop"))

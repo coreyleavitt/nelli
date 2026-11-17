@@ -41,6 +41,7 @@
 ## the existing `__ownership:`-style `itUninterp` placeholder idiom at a new
 ## site; it introduces no new mechanism (per RFC judgment call, round-2).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -89,6 +90,7 @@ suite "symex RFC-chapulin-hardening CR-2b — param-type catch-all degrade":
     ## silently-wrong verdict.
     let r = symexFind(sutCstringParam, tLabel("cstring_target"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedParamType)
     check r.status != sxSat
     check r.status != sxUnsat
 

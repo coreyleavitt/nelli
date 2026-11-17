@@ -35,6 +35,7 @@
 ## loops move from `sxUnknown` to real verdicts). `renderAsChoicesVersion`
 ## STAYS unchanged -- no new witness shape (witnesses are strings/ints
 ## already rendered).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -209,14 +210,18 @@ suite "symex RFC-chapulin-hardening Q1 Part 2d -- scope guards (must stay sxUnkn
   test "Q1-4a: ==-guard (skip-while) is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
     let r = symexFind(sutSkipWhileGuardImpossible, tLabel("impossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
   test "Q1-4b: char-class/predicate scan is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
     let r = symexFind(sutCharClassScanImpossible, tLabel("impossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(seUnsupportedStringOp)
 
   test "Q1-4c: non-inc body (extra statement) is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
     let r = symexFind(sutNonIncBodyImpossible, tLabel("impossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
 # ---------------------------------------------------------------------------
 # 5. Regression -- a plain non-scan while loop. The guard `i < n` is not

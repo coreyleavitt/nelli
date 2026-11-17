@@ -1,3 +1,4 @@
+from ./s8cu_helpers import named
 import std/unittest
 import std/sequtils
 import nelli/symex
@@ -74,6 +75,7 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
     ## run is an untrusted sxUnknown rather than an sxUnsat.
     let r = symexFind(cr9_floatIntLet, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
     check not r.trusted
 
   test "CR-9 S1: float→int let — tLabel search returns sxSat (ADR-0012: label wins)":

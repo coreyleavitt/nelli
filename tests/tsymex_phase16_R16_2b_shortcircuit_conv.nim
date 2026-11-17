@@ -1,3 +1,4 @@
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -108,4 +109,5 @@ suite "symex Phase 16 R16-2b — int(f) itself never raises (S8g)":
     ## K10a-float: sxUnknown, the out-of-range side is a halted undefined op.
     let r = symexFind(r2b_intNever, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
     check not r.trusted

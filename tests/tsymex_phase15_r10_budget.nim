@@ -42,6 +42,7 @@
 ## caching below avoids a THIRD, redundant re-deref of `node.next` (Nim would
 ## never actually re-fetch a value it can bind once), keeping the deref count
 ## at exactly 2 — the cleanest re-derivation of the original "2 levels" intent.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -119,5 +120,6 @@ suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
     # cached depth-2 unknown. Distinct keys → distinct cache slots.
     let rUnk = symexFind(reach2, tLabel("two"), depth2)
     check rUnk.status == sxUnknown
+    check rUnk.errors.named(heDepthExhausted)
     let rSat = symexFind(reach2, tLabel("two"), depth3)
     check rSat.status == sxSat

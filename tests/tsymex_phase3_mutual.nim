@@ -9,6 +9,7 @@
 ## The behavioral observable: the call terminates without exhausting
 ## the maxCallDepth budget, and the cycle-broken call shows up as a
 ## `cacheHits` increment.
+from ./s8cu_helpers import named
 import std/unittest
 import std/sequtils
 import nelli/symex
@@ -27,6 +28,7 @@ suite "symex Phase 3 — mutual recursion cycle break":
     # injected a fresh unconstrained retSym), so the verdict is
     # sxUnknown not sxSat.
     check r.status == sxUnknown
+    check r.errors.named(weRecursionCycleCut)
     # And the cycle break was exercised at least once.
     let stats = r.callStats.filterIt(it.name == "selfRef")
     check stats.len == 1

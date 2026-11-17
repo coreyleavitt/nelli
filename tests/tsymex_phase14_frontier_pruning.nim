@@ -18,6 +18,7 @@
 ## back `sxUnknown`. With DEFAULT settings the SUT solves normally —
 ## `sxSat` on a reachable label (its frontier never gets near the default
 ## 256 cap).
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 import nelli/smt/types
@@ -54,6 +55,7 @@ suite "symex Phase 14 cycle C3 — frontier pruning":
       s
     let r = symexFind(multiBranchUnreachable, tLabel("never"), tightSettings)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedPrune)
 
   test "unlimited frontier on UNSAT target: sxUnsat (control)":
     let r = symexFind(multiBranchUnreachable, tLabel("never"))

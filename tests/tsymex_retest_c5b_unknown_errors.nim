@@ -9,6 +9,7 @@
 ## verdict-time backstop (an sxUnknown that would still escape with empty
 ## errors is stamped `weInternalWalkerFault` — a classification-gap signal,
 ## never an empty seq).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -54,6 +55,7 @@ suite "symex re-test C5b — Invariant 7: no sxUnknown with empty errors":
   test "chained dependent scans (chapulin #6 scanlen shape): errors no longer empty":
     let r = symexFind(chainOnly, tIndexError())
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
     check r.errors.len > 0
 
 suite "symex re-test C5b — walker version pin":

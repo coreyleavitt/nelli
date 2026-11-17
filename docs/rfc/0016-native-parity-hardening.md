@@ -197,7 +197,7 @@ state = "done"
 [[slice]]
 id    = "W3"
 title = "Wave 3 / 0.10.0 with Wave 2 (§11): admission tables K2a-c, K3a-c (type class, memory, pragma), K4a-table/dispatch/guard, K4b/c, K5b refusals, K6a-c, K10a-target/axis/float/concolic, K10b (round), K10c/d, PRC-01/02, W3-z"
-state = "in-progress"
+state = "done"
 
 [[slice]]
 id    = "W4"

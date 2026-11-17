@@ -1,7 +1,9 @@
-# UPS-03 (filed 2026-11-07 as Z3Prover/z3#11601): Z3, invalid read in `spacer::pob_queue::reset()` (`Z3_fixedpoint_query`)
+# UPS-03 (filed 2026-11-07 as Z3Prover/z3#11601, fixed upstream 2026-11-09): Z3, invalid read in `spacer::pob_queue::reset()` (`Z3_fixedpoint_query`)
 
 Target: Z3Prover/z3. RFC-0016 section 5.6, decision D-0016-3. Reproduced
-standalone 2026-11-07 (W1-z follow-up). Nothing here has been filed. nelli
+standalone 2026-11-07 (W1-z follow-up). Filed the same day as
+Z3Prover/z3#11601; closed as completed 2026-11-09 by upstream commit
+b2daca7f. nelli
 does not reach the fixedpoint API, so this is an upstream courtesy report.
 
 ## Title

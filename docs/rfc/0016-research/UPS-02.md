@@ -1,10 +1,23 @@
-# UPS-02 (draft, not filed): Z3 5.1.0, `Failed to verify: m_cache.mk_unique(p) == p` (`nlsat_solver.cpp:3178`) on a three-assertion integer factoring problem; `unknown` where 4.13.4 answers `sat`
+# UPS-02 (draft, not filed): Z3 built with GMP (5.1.0 through 5.4.0), `Failed to verify: m_cache.mk_unique(p) == p` (`nlsat_solver.cpp:3178`) on a three-assertion integer factoring problem; `unknown` where 4.13.4 answers `sat`
 
 Target: Z3Prover/z3. RFC-0016 section 5.6, decision D-0016-3 (held until
 S8cj reduced it; reduced 2026-11-07, slice S8cj). Nothing here has been
 filed. nelli reaches this through its default solver on every nonlinear
 integer query, so this is not a courtesy report: on Z3 5.1 a factoring
 branch the 4.13.4 build decides is declined.
+
+## Correction (2026-11-16)
+
+The assertion is a property of **GMP builds**, not of Z3 5.1. A standalone
+rebuild matrix (z3-5.4.0 tag, same compiler and flags) fails the `VERIFY` with
+`-DZ3_USE_LIB_GMP=ON` and does not with `-DZ3_USE_LIB_GMP=OFF`; openSUSE's
+`libz3-5_1` 5.1.0 and `libz3-5_3` 5.3.3 are both GMP builds, which is why the
+`nelli-dev` image reproduces it every run. The internal-mpz build of 5.4.0
+still answers `unknown` at rlimit 50M where 4.13.4 answers `sat`, so the
+precision loss on this factoring shape is separate from the assertion and is
+not GMP-specific. The text below predates the matrix and says "5.1" where it
+means "the 5.1 GMP build". The redrafted issue text is kept outside the repo
+until Corey decides whether to file.
 
 ## Title
 

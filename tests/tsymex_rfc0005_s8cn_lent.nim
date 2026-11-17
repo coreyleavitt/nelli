@@ -166,7 +166,10 @@ suite "S8cn: seq `items` with a write in the body":
     declined(iGlobalName, "in_new", {feUnsupportedOp}); declined(iGlobalName, "in_old", {feUnsupportedOp})
     declined(iGlobalCallee, "ig_new", {feUnsupportedOp}); declined(iGlobalCallee, "ig_old", {feUnsupportedOp})
     declined(iPtrLocal, "ip_new", {feUnsupportedOp}); declined(iPtrLocal, "ip_old", {feUnsupportedOp})
-    declined(iPtrGlobal, "ipg_new", {feUnsupportedExprKind, feUnsupportedOp}); declined(iPtrGlobal, "ipg_old", {feUnsupportedExprKind, feUnsupportedOp})
+    # RFC-0016 S8ch: `addr gs` is modelled (`gs`'s address cell), so only the
+    # `for` decline is left; natively `ipg_new` is reached and `ipg_old` not
+    # (`nativeSees` above).
+    declined(iPtrGlobal, "ipg_new", {feUnsupportedOp}); declined(iPtrGlobal, "ipg_old", {feUnsupportedOp})
     declined(iElemPtr, "ie_new", {feUnsupportedOp}); declined(iElemPtr, "ie_old", {feUnsupportedOp})
     declined(iFormalCall, "if_new", {feUnsupportedOp}); declined(iFormalCall, "if_old", {feUnsupportedOp})
     declined(iOpenArray, "oa_new", {feUnsupportedOp}); declined(iOpenArray, "oa_old", {feUnsupportedOp})

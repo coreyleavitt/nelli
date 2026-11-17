@@ -9197,15 +9197,35 @@ proc addrTakenArrayFormalNames(impl: NimNode): seq[string] =
     if addrTakenArrayFormal(impl, k): result.add f.sym.strVal
     inc k
 
+proc arrayFormalBare(n: NimNode; i: int): NimNode =
+  ## RFC-0016 S8ch. The `i`th actual of the call `n` without the conversions
+  ## that keep its location.
+  result = n[i]
+  while result.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+        result.len > 0:
+    result = result[^1]
+
+proc arrayFormalPath(n: NimNode; i: int): NimNode =
+  ## RFC-0016 S8ch (PRC-30 item 3). The `i`th actual of the call `n` when it
+  ## is a part of a routine's or a module's `var` (`h.a`, `m[j]`, `o.in.a`)
+  ## with no dereference on the way, or nil. Nim passes that part's address
+  ## to an `addrTakenArrayFormal`, as it does to a `var` formal: the walk
+  ## passes it so (`userCallStmt`), copy-in and a write-back to the path.
+  let bare = arrayFormalBare(n, i)
+  if bare.kind == nnkSym: return nil
+  var steps: seq[NimNode]
+  let root = lvalueRoot(bare, steps)
+  if root != nil and root.kind == nnkSym and steps.len == 0 and
+     symKind(root) == nskVar:
+    return bare
+
 proc arrayFormalActualDecline(n: NimNode; i: int): string =
   ## RFC-0016 S8ch. Why the `i`th actual of the call `n` cannot be passed to
   ## an `addrTakenArrayFormal` as the walk passes it, or "": a `var` variable
-  ## the call names nowhere else (the formal is its location: copy-in and
-  ## copy-out), or a temporary (a copy no one reads back).
-  var bare = n[i]
-  while bare.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
-        bare.len > 0:
-    bare = bare[^1]
+  ## or a part of one (`arrayFormalPath`) the call names nowhere else (the
+  ## formal is its location: copy-in and copy-out), or a temporary (a copy
+  ## no one reads back).
+  let bare = arrayFormalBare(n, i)
   if bare.kind == nnkSym:
     case symKind(bare)
     of nskVar:
@@ -9221,7 +9241,20 @@ proc arrayFormalActualDecline(n: NimNode; i: int): string =
     else:
       return "`" & bare.strVal & "` is a location the walk passes as a copy"
   var steps: seq[NimNode]
-  if lvalueRoot(bare, steps) == nil and steps.len == 0 and
+  let root = lvalueRoot(bare, steps)
+  if arrayFormalPath(n, i) != nil:
+    for j in 1 ..< n.len:
+      if j != i and mentionsSym(n[j], root):
+        return "`" & root.strVal & "` is also another actual of the call: " &
+          "the formal and that actual may be one location natively"
+    return ""
+  if root != nil and root.kind == nnkSym and steps.len == 0 and
+     symKind(root) in {nskConst, nskLet}:
+    return "`" & bare.repr & "` is a part of `" & root.strVal & "`, which " &
+      "may be constant data (a `const`, or a `let` Nim emits as " &
+      "`NIM_CONST`): the callee writes through the formal's address, which " &
+      "faults natively (SIGSEGV)"
+  if root == nil and steps.len == 0 and
      bare.typeKind != ntyVar and not typeIsLent(bare.getTypeInst) and
      varCallResult(bare).isNil and
      bare.kind in {nnkBracket, nnkCall, nnkCommand, nnkPar, nnkTupleConstr,
@@ -9510,11 +9543,15 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     # copy. A false `sxUnsat`, clean, on the channel (batch 9's `byValueTouch`
     # declines the closure call's form).
     # RFC-0005 S8cq: decided only what is proved safe (`byValueWritten`).
+    # RFC-0016 S8ch (PRC-30 item 3): a part of a variable passed to such a
+    # formal is that part's location, as a `var` actual is (`arrayFormalPath`).
+    var arrayLv: NimNode = nil
     block:
       # RFC-0016 S8ch (PRC-30 item 2): an array formal whose address the
       # callee takes is passed as a `var` formal (`addrTakenArrayFormal`).
       if addrTakenArrayFormal(resolveRoutineImpl(calleeSym), i - 1):
         let why = arrayFormalActualDecline(n, i)
+        if why.len == 0: arrayLv = arrayFormalPath(n, i)
         if why.len > 0:
           preamble.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "array argument `" & n[i].repr & "` of `" &
@@ -9806,7 +9843,8 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     let irHi = preamble.len
     # RFC-0005 S8bz (item 3): a `var` actual's copy-in observes nothing; the
     # callee's read of its formal does (`glWatched`).
-    if n[i].kind == nnkHiddenAddr: markCopyRead(ir, preamble, irLo)
+    if n[i].kind == nnkHiddenAddr or arrayLv != nil:
+      markCopyRead(ir, preamble, irLo)
     # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
     # memory it shares, is a path the walk may keep equal to a cell.
     byValueLoc(n[i], i - 1, preamble, ctx, locs)
@@ -9824,8 +9862,8 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       # formal (Nim drops the `addr`); read only for a `var` formal.
       varSafe[i - 1] = 2
       anyVarActual = true
-    if n[i].kind == nnkHiddenAddr and n[i].len == 1:
-      var lv = n[i][0]
+    if (n[i].kind == nnkHiddenAddr and n[i].len == 1) or arrayLv != nil:
+      var lv = if arrayLv != nil: arrayLv else: n[i][0]
       if isVarIndirection(lv): lv = lv[0]
       varSafe[i - 1] = varActualPtrSafety(lv)   ## RFC-0005 S8bn
       anyVarActual = true

@@ -732,12 +732,13 @@ cells = []
 [[row]]
 id = "PRC-30"
 table = "5.2m"
-state = "open"
-note = "item 1 done (S8ch, walker 376): `addr g` of a module-level `var` is the global's own address cell in every frame (`tests/tsymex_0016_s8ch_addrglobal.nim`); item 2 open: an array formal is the actual's storage natively (C array decay), so `unsafeAddr x` writes land in a `var` actual and fault in constant data"
+state = "closed"
+note = "S8ch (`rfc-0016-w4s8ch`, walker 376): item 1 `addr g` of a module-level `var` is the global's own address cell in every frame, and a pointer that addresses it reads and writes that cell (a callee's returned `addr g` decides); item 2 a by-value array formal whose address the callee takes is the actual's location (C array decay): exact for a `var` actual, a part of one (`h.a`, `m[j]`, written back to the path) and a temporary, declined for constant data (SIGSEGV natively) and a variable another actual names"
 home = "S8ch"
 source = "`jobs/s8ch.md`; S8cc remainder"
 moves = "both items: the address of a global in a walked callee halts the path; `unsafeAddr` of a by-value array formal declines"
 cells = []
+pins = ["tsymex_0016_s8ch_addrglobal"]
 
 [[row]]
 id = "PRC-31"

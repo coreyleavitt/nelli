@@ -5,7 +5,8 @@
 ## 2. `unsafeAddr` of a by-value array formal in a walked callee declined
 ##    (`feUnsupportedOp`). Nim passes an array by address (`ccgIntroducedPtr`;
 ##    a C array formal decays to a pointer), so the formal is the actual's
-##    storage and a write through its address lands there.
+##    storage and a write through its address lands there: in a `var`, in a
+##    part of one (`h.a`, `m[j]`), or in a temporary.
 ##
 ## Every expectation is Nim's: each "nim" test runs the SUTs natively under a
 ## capture frame.
@@ -136,11 +137,60 @@ type Holder = object
   a: array[8, int]
 
 proc sutByValField(k: int) =
-  ## A field actual: natively the callee writes the field.
+  ## A field actual: natively the callee writes the field, which is the
+  ## formal's storage (the field's address is passed).
   var h: Holder
   h.a[1] = 2
   let r = wrByVal(h.a, k)
   if h.a[1] == k and r == k and k == 3: symexTarget("bf")
+  if h.a[1] != k or r != k: symexTarget("bf_dead")
+
+proc sutByValElem(k: int) =
+  ## An element of an array of arrays: that element is the storage, and its
+  ## neighbour is left alone.
+  var m: array[2, array[8, int]]
+  m[1][1] = 2
+  let r = wrByVal(m[1], k)
+  if m[1][1] == k and m[0][1] == 0 and r == k and k == 7: symexTarget("be")
+  if m[1][1] != k or m[0][1] != 0 or r != k: symexTarget("be_dead")
+
+var gH: Holder
+
+proc sutByValGlobalField(k: int) =
+  ## A field of a module-level `var`: the field's location.
+  gH = default(Holder)
+  gH.a[1] = 2
+  let r = wrByVal(gH.a, k)
+  if gH.a[1] == k and r == k and k == 9: symexTarget("bg")
+  if gH.a[1] != k or r != k: symexTarget("bg_dead")
+
+proc wrReadG(x: array[8, int]; v: int): int =
+  ## Reads the global the actual is a part of, after the write.
+  let p = unsafeAddr x
+  p[][1] = v
+  gH.a[1]
+
+proc sutByValGlobalReach(k: int) =
+  ## The callee reaches the actual's variable by name too: natively one
+  ## location, so it reads what it wrote.
+  gH = default(Holder)
+  let r = wrReadG(gH.a, k)
+  if r == k and k == 10: symexTarget("gr")
+  if r != k: symexTarget("gr_dead")
+
+proc wrAndRead(x: array[8, int]; h: Holder): int =
+  ## `h` is larger than three words: Nim passes it by address too, so the
+  ## write through `x` is seen through `h` when both are one variable.
+  let p = unsafeAddr x
+  p[][1] = 5
+  h.a[1]
+
+proc sutByValFieldAlias(k: int) =
+  var h: Holder
+  h.a[1] = k
+  let r = wrAndRead(h.a, h)
+  if r == 5 and k == 8: symexTarget("ba")
+  if r != 5: symexTarget("ba_dead")
 
 let gLet = [1, 2, 3, 4, 5, 6, 7, 8]
   ## Nim emits it as `NIM_CONST` data: a write through the formal's address
@@ -169,8 +219,12 @@ suite "S8ch: native":
             nativeHits(sutByValGlobal, ks) + nativeHits(sutByValLocal, ks) +
             nativeHits(sutAddrReturned, ks) + nativeHits(sutStoredByName, ks) +
             nativeHits(sutStoredThrough, ks) + nativeHits(sutSameAddr, ks) +
-            nativeHits(sutByValTemp, ks) + nativeHits(sutByValField, ks)
-    for l in ["aw", "ar", "bv", "bl", "rp", "sn", "sp", "eq", "bt", "bf"]:
+            nativeHits(sutByValTemp, ks) + nativeHits(sutByValField, ks) +
+            nativeHits(sutByValElem, ks) + nativeHits(sutByValFieldAlias, ks) +
+            nativeHits(sutByValGlobalField, ks) +
+            nativeHits(sutByValGlobalReach, ks)
+    for l in ["aw", "ar", "bv", "bl", "rp", "sn", "sp", "eq", "bt", "bf",
+              "be", "ba", "bg", "gr"]:
       checkpoint l
       check l in h
       check (l & "_dead") notin h
@@ -213,8 +267,23 @@ suite "S8ch: unsafeAddr of a by-value array formal":
   test "the actual is a temporary":
     clean(sutByValTemp, "bt", sxSat)
     clean(sutByValTemp, "bt_dead", sxUnsat)
-  test "the actual is a field (not modelled)":
-    declines(sutByValField, "bf", "a part of a location")
+  test "the actual is a field":
+    ## The field's own location, written back after the call.
+    clean(sutByValField, "bf", sxSat)
+    clean(sutByValField, "bf_dead", sxUnsat)
+  test "the actual is an element of an array":
+    clean(sutByValElem, "be", sxSat)
+    clean(sutByValElem, "be_dead", sxUnsat)
+  test "the actual is a field of a global":
+    clean(sutByValGlobalField, "bg", sxSat)
+    clean(sutByValGlobalField, "bg_dead", sxUnsat)
+  test "the callee also reaches the actual's global":
+    ## Natively one location (`gr` is reached, "nim" above); the walk copies
+    ## the argument in and out, so the direct read declines.
+    declines(sutByValGlobalReach, "gr", "both through")
+    declines(sutByValGlobalReach, "gr_dead", "both through")
+  test "the actual's variable is also another actual":
+    declines(sutByValFieldAlias, "ba", "also")
   test "the actual is constant data":
     declines(sutByValConst, "bc", "SIGSEGV")
 

@@ -211,14 +211,21 @@ suite "S8cn: mitems and mpairs":
     nativeSees(mGlobalCallee, "mg_live", "mg_dead")
     nativeSees(mPtr, "mq_live", "mq_dead")
     decided(mGlobalCallee, "mg_live", sxSat); decided(mGlobalCallee, "mg_dead", sxUnsat)
+    # RFC-0016 S8ch: `gp = addr gs` is `gs`'s own address cell, and `wp`'s
+    # `gp[][0] = 99` writes it; `mitems` hands out the element's location, so
+    # `x` is 99 after the call and `x == n` never holds (`guardN` returns
+    # for `n == 99`). It declined at `addr gs` (`feUnsupportedExprKind`).
+    # The verdicts are Nim's: `nativeSees` above runs `mPtr` natively and
+    # sees `mq_live` and never `mq_dead`, and `decided` runs it again.
+    decided(mPtr, "mq_live", sxSat); decided(mPtr, "mq_dead", sxUnsat)
     block:
       let k9r = symexFind(mPtr, tLabel("mq_live"))
-      check k9r.status == sxUnknown
-      check k9r.errors.named(feUnsupportedExprKind)
+      checkpoint show(k9r.errors)
+      check show(k9r.errors).len == 0
     block:
       let k9r = symexFind(mPtr, tLabel("mq_dead"))
-      check k9r.status == sxUnknown
-      check k9r.errors.named(feUnsupportedExprKind)
+      checkpoint show(k9r.errors)
+      check show(k9r.errors).len == 0
 
 suite "S8cn: a Table's values and keys":
   test "native":

@@ -749,9 +749,11 @@ const renderAsChoicesVersion* = "12"
   ##   reads and writes its cell (`ptrTargets`' `inCell`), so `p[] = k` through
   ##   a callee's returned `addr g` decides. A by-value array formal whose
   ##   address the callee takes is the actual's location (`addrTakenArrayFormal`,
-  ##   passed as a `var` formal): exact for a `var` actual and a temporary,
-  ##   declined for constant data (SIGSEGV natively) and any other actual.
-  ##   No key bytes change.
+  ##   passed as a `var` formal): exact for a `var` actual, a part of one
+  ##   with no dereference on the way (`h.a`, `m[j]`: `arrayFormalPath`,
+  ##   copied in and written back to the path as a `var` actual is), and a
+  ##   temporary; declined for constant data (SIGSEGV natively), a variable
+  ##   another actual names, and any other actual. No key bytes change.
 
 const symexWalkerVersion* = "376"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

@@ -16,6 +16,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 from ./s8cu_helpers import nativeHits
 
 proc show(errs: seq[SymexErrorInfo]): string =
@@ -201,17 +202,7 @@ proc sutByValConst(k: int) =
   let r = wrByVal(gLet, k)
   if r == k and k == 11: symexTarget("bc")
 
-template declines(fn: typed, lbl: string, why: string) =
-  ## The verdict is untrusted, with the kind and the reason.
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == feUnsupportedOp and e.severity == sevError and
-         why in e.msg: named = true
-    check named
+const declKey = cellKey(faGeneric, "s8ch_addrglobal")
 
 suite "S8ch: native":
   test "nim":
@@ -280,12 +271,12 @@ suite "S8ch: unsafeAddr of a by-value array formal":
   test "the callee also reaches the actual's global":
     ## Natively one location (`gr` is reached, "nim" above); the walk copies
     ## the argument in and out, so the direct read declines.
-    declines(sutByValGlobalReach, "gr", "both through")
-    declines(sutByValGlobalReach, "gr_dead", "both through")
+    pinDecline(sutByValGlobalReach, declKey, feUnsupportedOp, tLabel("gr"), "both through")
+    pinDecline(sutByValGlobalReach, declKey, feUnsupportedOp, tLabel("gr_dead"), "both through")
   test "the actual's variable is also another actual":
-    declines(sutByValFieldAlias, "ba", "also")
+    pinDecline(sutByValFieldAlias, declKey, feUnsupportedOp, tLabel("ba"), "also")
   test "the actual is constant data":
-    declines(sutByValConst, "bc", "SIGSEGV")
+    pinDecline(sutByValConst, declKey, feUnsupportedOp, tLabel("bc"), "SIGSEGV")
 
 suite "S8ch: walker version":
   test "symexWalkerVersion >= 376":

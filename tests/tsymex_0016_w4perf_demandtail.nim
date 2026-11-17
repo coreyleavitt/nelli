@@ -85,6 +85,7 @@ suite "RFC-0016 W4 perf: a candidate's tail is walked when a replay confirms it"
     # Red at dda778a7: two walks, one per distinct pins.
     let tails = tailWalks(allRefuted, "refuted", r)
     check r.status == sxUnknown
+    check r.errors.named(feGlobalHavoc)
     check tails.len == 0
 
   test "one candidate confirmed: its tail alone is walked, and its kinds stand":

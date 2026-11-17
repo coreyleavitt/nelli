@@ -1894,6 +1894,8 @@ task test, "Run the test suite":
             "tsymex_0016_d3b_walklog",
             # RFC-0016 0.10.0 review D3c: the include surface census (include list, no import in runtime_*.nim, symbol-coupling ceilings, the heap-only forward-declaration block, the symval leaf).
             "tsymex_0016_d3_include_census",
+            "tsymex_0016_h1_runreset",
+            "tsymex_0016_h1_findall_regexerror",
             # RFC-0016 0.10.0 review D3c-2: every field of walk_state's `lowerHooks` is filled once runtime.nim is imported.
             "tsymex_0016_d3_hooks",
             "tsymex_0016_d6_facade",

@@ -69,34 +69,6 @@ type
     ## crash, never a silent UNSAT (ADR-0006, Invariant 3). The S6a error
     ## message rides in `msg`.
 
-  SymexRaiseUnimplementedError* = object of CatchableError
-    ## Phase 15 E1. Raised by the `walk(isRaise)` STUB. E1 is purely structural
-    ## — `raise`-flow semantics (in-flight exn, handler dispatch, `sxRaised`)
-    ## land E2b+. Until then the walker classifies any `isRaise` it reaches as
-    ## `eeRaiseUnimplemented` → `sxUnknown` (Invariant 3 — never a silent UNSAT,
-    ## never a crash). The qualified exception type rides in `msg`.
-
-  SymexTryUnimplementedError* = object of CatchableError
-    ## Phase 15 E1. Raised by the `walk(isTry)` STUB. Try/except/finally
-    ## dispatch lands E3+. Until then any `isTry` the walker reaches is
-    ## classified `eeTryUnimplemented` → `sxUnknown` (Invariant 3).
-
-  SymexClosureUnimplementedError* = object of CatchableError
-    ## Phase 15 C1. Raised by the `lower(iekLambda)` / `lower(iekClosureCall)`
-    ## STUBs. C1 is purely structural — closure CONSTRUCTION lands C2a and
-    ## APPLICATION (the ground per-call-site axiom, ADR-0009 D6) lands C2b.
-    ## Until then any lambda/closure-call the walker reaches is classified
-    ## `ceNotImplemented` → `sxUnknown` (Invariant 3 — never a silent UNSAT,
-    ## never a crash). The diagnostic rides in `msg`.
-
-  SymexRaiseOutsideHandlerError* = object of CatchableError
-    ## Phase 15 E2b. Raised by `walk(isRaise)` when a BARE `raise`
-    ## (re-raise) is reached with an EMPTY handler stack AND no in-flight
-    ## exception — i.e. a re-raise at top level with nothing to re-raise.
-    ## Caught at the `runSymex` boundary → `sxUnknown` carrying an
-    ## `eeRaiseOutsideHandler` (sevError) classified error (Invariant 3 —
-    ## never a silent UNSAT, never a crash).
-
   SymexNotInHandlerError* = object of CatchableError
     ## Phase 15 E8. Raised when `getCurrentException()` /
     ## `getCurrentExceptionMsg()` is lowered with NO in-flight exception

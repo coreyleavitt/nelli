@@ -6589,7 +6589,9 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
   ##     SOUND — the variant constructor's fallback to the full declared arm
   ##     count is always sound, just less precise (see the `nnkCaseStmt`
   ##     statement arm's own comment) — and mirroring it would duplicate the
-  ##     label-mining logic. A later slice can lift it into a shared helper.
+  ##     label-mining logic. Mirroring it is a precision change (fewer forks at
+  ##     a variant constructor under a `case` expression), so it needs a walker
+  ##     bump and its own slice; it is not a refactor (RFC-0016 W-65).
   ##   * `of` labels are constant expressions (Nim requires it), so a label's
   ##     preamble is empty and the OUTER preamble is safe for it. A condition
   ##     that may carry one belongs to an `if` chain, which `lowerCondChain`
@@ -11021,7 +11023,7 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   # is the `nnkIdentDefs` of its let/var/param binding) AND its instantiated
   # type is a proc type (`nnkProcTy`). Top-level procs-as-VALUES are C3; C1
   # handles only the proc-valued-variable CALL shape → `iekClosureCall`
-  # (walker-stubbed `ceNotImplemented` in C1; C2b adds application).
+  # (applied by the walker since C2b).
   block closureCallDetect:
     if calleeSym.kind == nnkSym:
       let impl = calleeSym.getImpl
@@ -11660,7 +11662,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     tailIR
   of nnkLambda:
     # Phase 15 Cluster C (C1, ADR-0009). A lambda in expression position →
-    # iekLambda (walker-stubbed `ceNotImplemented` in C1).
+    # iekLambda (constructed by the walker since C2a).
     parseLambda(n, ctx)
   of nnkProcDef, nnkFuncDef:
     # Phase 15 C1. A `proc(...) = ...` / `func(...) = ...` value lowered to an
@@ -13138,9 +13140,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # NOT mis-routed to `iekSeqLen` (which would lower a Z3String operand into
     # the seq-length path → sort-mismatch crash), and BEFORE the user-proc
     # fall-through (which crashes resolving `getImpl` on a built-in like `len`).
-    # In S1 every recognised string op routes to a STUBBED `iekStr*` node that
-    # lowers to a classified `seUnsupportedStringOp` (sxUnknown); S2–S11 give
-    # each its real Z3 String/Seq/Regex lowering. An UNRECOGNISED string call
+    # Every recognised string op routes to an `iekStr*` node with its own Z3
+    # String/Seq/Regex lowering (S1 introduced them as stubs that declined with
+    # `seUnsupportedStringOp`; S2–S11 replaced each). An UNRECOGNISED string call
     # routes to `iekStrUnsupported` (same clean diagnostic) — never a crash.
     # Phase 15 S5: `xs.join(sep)` where `xs` is a `seq[string]` (e.g. the result
     # of `split`). The receiver type is `seq[string]`/`openArray[string]`, which

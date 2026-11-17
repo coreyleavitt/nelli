@@ -696,8 +696,8 @@ proc taintInPlace(p: Path; d: Degrade) =
 
 proc h1PathHasHeapFields*(): bool =
   ## True iff `Path` carries the three H1 heap-state fields. Compile-time
-  ## `compiles` checks on a constructed Path — they fail to compile before
-  ## H1's GREEN lands (the fields do not yet exist), which is the RED signal.
+  ## `compiles` checks on a constructed Path, so the test breaks at compile
+  ## time if a field is renamed or removed.
   var p {.used.} = Path()
   result = compiles(p.heaps) and compiles(p.heapDepth) and
            compiles(p.allocCounters)
@@ -1849,10 +1849,10 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     else:
       some(SymVal(kind: svBool, bo: mkBool(true)))
   of iekLambda, iekClosureCall:
-    # Phase 15 C1 STUB. A closure's representation (the funcSym + env-flattened
-    # leaves) is not a single prototype SymVal, and these nodes are STUBBED in
-    # `lower` anyway — no surrounding subexpression takes its representation from
-    # one. No prototype; the C1 walker never reaches a downstream lowering.
+    # A closure's representation (the funcSym + env-flattened leaves) is not a
+    # single prototype SymVal, so no surrounding subexpression takes its
+    # representation from one. No prototype (`lower` builds and applies the
+    # closure through `lowerClosureArm`).
     none(SymVal)
   of iekSeqLit, iekHofCall:
     # Phase 15 C4. A seq literal / HOF result is a container (svSeq) or a fold
@@ -25402,38 +25402,6 @@ proc runSymexCaught(prog: SymexProgram,
               errors: @[SymexErrorInfo(kind: seZ3StringIncomplete,
                                        severity: severity(seZ3StringIncomplete), msg: e.msg,
                                        scope: abortScope())])
-  except SymexRaiseUnimplementedError as e:
-    # Phase 15 E1: the walker reached an `isRaise` while raise-flow is not yet
-    # modeled (structural cycle) -> sxUnknown + eeRaiseUnimplemented (Invariant 3
-    # — classified, never a silent UNSAT). E2b+ replaces this with real semantics.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: eeRaiseUnimplemented,
-                                       severity: severity(eeRaiseUnimplemented), msg: e.msg,
-                                       scope: abortScope())])
-  except SymexTryUnimplementedError as e:
-    # Phase 15 E1: the walker reached an `isTry` while try/except is not yet
-    # modeled -> sxUnknown + eeTryUnimplemented (Invariant 3). E3+ replaces it.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: eeTryUnimplemented,
-                                       severity: severity(eeTryUnimplemented), msg: e.msg,
-                                       scope: abortScope())])
-  except SymexClosureUnimplementedError as e:
-    # Phase 15 C1: the walker reached an `iekLambda`/`iekClosureCall` while
-    # closure semantics are not yet modeled (structural cycle) -> sxUnknown +
-    # ceNotImplemented (Invariant 3 — classified, never a silent UNSAT). C2a
-    # (construction) / C2b (application) replace this with real semantics.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: ceNotImplemented,
-                                       severity: severity(ceNotImplemented), msg: e.msg,
-                                       scope: abortScope())])
-  except SymexRaiseOutsideHandlerError as e:
-    # Phase 15 E2b: a bare `raise` (re-raise) reached with an empty handler stack
-    # and no in-flight exception -> sxUnknown + eeRaiseOutsideHandler (Invariant 3
-    # — classified, never a silent UNSAT). Handler-stack re-raise lands E3.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: eeRaiseOutsideHandler,
-                                       severity: severity(eeRaiseOutsideHandler), msg: e.msg,
-                                       scope: abortScope())])
   except SymexNotInHandlerError as e:
     # Phase 15 E8: `getCurrentException()` / `getCurrentExceptionMsg()` called
     # outside any `except` handler body (no in-flight exception) -> sxUnknown +
@@ -28585,7 +28553,7 @@ proc readTableAs*[K, V](w: RawWitness, name: string): Table[K, V] =
 #
 # These hooks let a test introspect the CONSTRUCTED `svClosure` (env snapshot +
 # per-site funcSym) WITHOUT a full `symexFind` body descent (`f(3)` would hit
-# the still-stubbed `iekClosureCall`). They set up a fresh context, reset the
+# an `iekClosureCall` application). They set up a fresh context, reset the
 # closure-funcSym memo, build the construction-time env at the `let f = …`
 # binding point, and lower an `iekLambda` against it via the real
 # `lower(env, e)` / `buildClosure` path. The probe returns a plain record so the

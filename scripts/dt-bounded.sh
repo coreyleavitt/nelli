@@ -129,7 +129,13 @@ else
   trap cleanup EXIT
   cleanup
 
+  # RFC-0016 W-62 (HRV-94): `timeout` and the EXIT trap above both die with
+  # this script, so a SIGKILLed script (or a killed sweep worker above it) left
+  # the container running for 19-35 h. `--timeout` is enforced by conmon, which
+  # outlives the client, so it is the backstop: 20 s of slack past the hard
+  # kill above, which wins the race whenever the script is alive.
   timeout --signal=KILL "$timeout_secs" podman run --rm --name "$cname" \
+    --timeout "$((timeout_secs + 20))" \
     -v "$PWD:/work" \
     -v "$HOME/.cache/milpa:/.cache/milpa" \
     -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \

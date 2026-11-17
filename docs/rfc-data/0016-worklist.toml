@@ -1347,8 +1347,8 @@ id = "INT-19"
 table = "5.8a"
 title = "PCRE 8.37 built without JIT, which is on the verified-library list, was not run. U1 and U2 were verified on 8.37 JIT, 8.39 JIT and 8.44 JIT: the candidate declines where `main` gives a false pair"
 class = "test-harness"
-state = "open"
-note = ""
+state = "closed"
+note = ": run against PCRE 8.37 built without JIT (libpcre.so.1 loaded via LD_LIBRARY_PATH in the dev image; confirmed by LD_DEBUG): `tsymex_rfc0005_s8bt_libversion` (the loaded library is a verified cell, match and find, an unverified library declines by name), `tsymex_rfc0005_s8bt_limit`, `tsymex_0016_k5b_pcre` and `tsymex_rfc0005_r1_pcrelimits` all pass. The dev image carries a newer distro libpcre, so the 8.37 build is a local one-off and no CI leg runs it"
 source = "pre-tag probes (U2)"
 cells = []
 

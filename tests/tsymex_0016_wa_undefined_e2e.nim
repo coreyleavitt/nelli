@@ -9,6 +9,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/[canonicalize, replayproc]
+import ./s8cu_helpers
 
 proc scrub() {.noinline.} =
   ## Zero the stack below the caller, where the replay's frames land, so the
@@ -40,7 +41,9 @@ suite "WA-B M2: a real noinit witness":
     ## The replay's frames differ (cpp) or are a fresh stack (re-executed), so
     ## the scrubbed slot is not zero there and the witness is not confirmed.
     test "skipped: the replay stack is not the scrubbed one":
-      skip()
+      skipCell(cellKey(axDefinedness, "read/uninitialised"),
+        "a cpp build or a re-executing replay child does not run on the " &
+        "scrubbed stack the {.noinit.} read pin needs")
   else:
     test "symexFind: the witness carries the kind, and is not host-runnable":
       scrub()

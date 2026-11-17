@@ -72,7 +72,16 @@
 ## On Linux the K2-s kinds are also cross-checked against the totals
 ## `scripts/census-k2.sh` prints, when bash is on the PATH.
 ##
-## K2a-fail (Wave 4) turns the bare `skip(` rows from listed into failing.
+## K2a-fail (Wave 4, RFC section 12 item 3): a bare `skip(` or platform arm is
+## no longer a listed finding, it is a failing one unless it CANNOT go through
+## `skipCell` yet. Those sites live in their own file,
+## `tests/0016-allowlist/skipsites.txt` (own ceiling in ceilings.txt, which only
+## falls), never in census.txt, and each reason is `[cannot-convert:<class>]
+## <why>` with a class from `cannotConvertClasses`. The census fails
+##   * a bare_skip/platform entry in census.txt (it belongs in skipsites.txt);
+##   * a skipsites.txt entry of any other kind;
+##   * an entry whose reason names no class, or a class outside the vocabulary;
+##   * an unlisted site and a stale entry (as for every kind).
 import std/[unittest, os, strutils, sequtils, sets, tables, algorithm,
             osproc]
 import ./rfc0016_ids
@@ -80,6 +89,7 @@ import ./rfc0016_ids
 const
   root = currentSourcePath().parentDir() / ".."
   allowPath = root / "tests" / "0016-allowlist" / "census.txt"
+  skipPath = root / "tests" / "0016-allowlist" / "skipsites.txt"
   rfcPath = root / "docs" / "rfc" / "0016-native-parity-hardening.md"
   scriptPath = root / "scripts" / "census-k2.sh"
   selfName = "tsymex_0016_k2a_census.nim"
@@ -344,6 +354,32 @@ proc sites*(files: seq[SrcFile]): seq[string] =
 
 proc kindOf(site: string): string = site.split(':')[0]
 
+const
+  skipKinds = ["bare_skip", "platform"]
+  cannotConvertClasses* = ["no-cell", "sut-text", "divergent-expectation",
+                           "isolated-arm", "host-plumbing"]
+    ## RFC-0016 K2a-fail. Why a site cannot go through `skipCell` yet:
+    ##   no-cell                no universe cell names the absence (a new cell is
+    ##                          a universe change);
+    ##   sut-text               the text is SUT source, not an arm of the test;
+    ##   divergent-expectation  both arms run; the platform picks the expected
+    ##                          value, so nothing is skipped;
+    ##   isolated-arm           the arm cannot import skipCell's helper;
+    ##   host-plumbing          how the test runs, not whether it does.
+
+proc cannotConvertProblem*(a: Allow): string =
+  ## "" when `a` is a well-formed K2a-fail entry (or not a skip kind at all
+  ## and in census.txt), else the failure.
+  if kindOf(a.key) notin skipKinds: return ""
+  let r = a.reason
+  if not r.startsWith("[cannot-convert:"):
+    return "skip entry " & a.key & ": the reason must start with " &
+           "`[cannot-convert:<class>]`; otherwise convert the site to skipCell"
+  let cls = r[len("[cannot-convert:") ..< max(r.find(']'), len("[cannot-convert:"))]
+  if cls notin cannotConvertClasses:
+    return "skip entry " & a.key & ": class `" & cls & "` is not one of " &
+           cannotConvertClasses.join(", ")
+
 proc census*(sites: seq[string]; allow: seq[Allow]; slices: HashSet[string]):
     seq[string] =
   ## One message per failing site or entry.
@@ -357,6 +393,8 @@ proc census*(sites: seq[string]; allow: seq[Allow]; slices: HashSet[string]):
       result.add "allowlist entry " & a.key &
                  ": a transparent else is listed as a finding; the reason " &
                  "must start with `[transparent:<role>]`"
+    let cp = cannotConvertProblem(a)
+    if cp.len > 0: result.add cp
     listed.incl a.key
     if a.key notin have:
       result.add "stale allowlist entry (the site no longer exists; remove the line): " & a.key
@@ -381,8 +419,10 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
   let slices = toHashSet(["K2a", "K2a-fail", "K7c", "K4a-dispatch"])
   proc ent(key: string; slice = "K2a-fail"; reason = "r"): Allow =
     Allow(key: key, slice: slice, reason:
-          (if reason == "r" and key.startsWith("nimcase_transparent"):
-             "[transparent:t] r" else: reason))
+          (if reason != "r": reason
+           elif key.startsWith("nimcase_transparent"): "[transparent:t] r"
+           elif kindOf(key) in skipKinds: "[cannot-convert:no-cell] r"
+           else: reason))
 
   let srcA: SrcFile = ("src/nelli/a.nim",
     "proc f(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n  else: discard\n" &
@@ -499,6 +539,30 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
     check "unlisted census site" in problems[0]
     check s[0] in problems[0]
 
+  test "RED (K2a-fail): an unlisted bare skip fails, however it is reached":
+    let s = sites(@[tstA])
+    check s == @["bare_skip:tests/t.nim:" & skTok & ")"]
+    let problems = census(s, @[], slices)
+    check problems.len == 1 and "unlisted census site" in problems[0]
+    # An unlisted platform arm in a file with no skipCell fails the same way.
+    check census(sites(@[plat]), @[], slices).len == 2
+
+  test "RED (K2a-fail): a stale skip entry fails":
+    let gone = ent("bare_skip:tests/gone.nim:" & skTok & ")",
+                   reason = "[cannot-convert:no-cell] r")
+    let problems = census(@[], @[gone], slices)
+    check problems.len == 1 and "stale allowlist entry" in problems[0]
+
+  test "RED (K2a-fail): a skip entry must say why it cannot convert":
+    let s = sites(@[tstA])
+    check census(s, @[ent(s[0], reason = "benign")], slices).anyIt(
+      "cannot-convert" in it)
+    check census(s, @[ent(s[0], reason = "[cannot-convert:because] r")],
+                 slices).anyIt("is not one of" in it)
+    check census(s, @[ent(s[0], reason = "[cannot-convert:no-cell] r")],
+                 slices).len == 0
+
+
   test "RED: an entry whose site no longer exists fails as stale":
     let s = sites(@[srcA])
     let gone = "bare_skip:tests/gone.nim:" & skTok & ")"
@@ -523,7 +587,7 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
     check problems.anyIt("listed twice" in it)
 
 suite "RFC-0016 K2a: dispatch census (the tree)":
-  let allow = parseAllow(readFile(allowPath))
+  let allow = parseAllow(readFile(allowPath)) & parseAllow(readFile(skipPath))
   let slices = sliceIds11(readFile(rfcPath))
   let files = collect()
   let found = sites(files)
@@ -533,6 +597,18 @@ suite "RFC-0016 K2a: dispatch census (the tree)":
     if problems.len > 0: echo problems.join("\n")
     check problems.len == 0
     echo "K2a census: ", tally(found), "; allowlist entries: ", allow.len
+
+  test "K2a-fail: skip sites live in skipsites.txt, nothing else does":
+    var problems: seq[string]
+    for a in parseAllow(readFile(allowPath)):
+      if kindOf(a.key) in skipKinds:
+        problems.add "census.txt lists a skip site (move it to skipsites.txt " &
+                     "or convert it to skipCell): " & a.key
+    for a in parseAllow(readFile(skipPath)):
+      if kindOf(a.key) notin skipKinds:
+        problems.add "skipsites.txt lists a non-skip site: " & a.key
+    if problems.len > 0: echo problems.join("\n")
+    check problems.len == 0
 
   test "every kind is counted (a rule that finds nothing is broken)":
     let t = tally(found)

@@ -5163,21 +5163,50 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
     else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
 
 const seqEqUnrollMax = 64
-  ## RFC-0016 PRC-34. The longest known length `seqEqZ3` unrolls; a longer
-  ## one takes the quantified form.
+  ## RFC-0016 PRC-34. The longest length bound `seqEqZ3` unrolls over; a seq
+  ## with no bound this small declines.
 
-var seqEqCounter {.threadvar.}: int
+proc seqLenUpperBound(l: Z3Int): Option[int] =
+  ## RFC-0016 PRC-34. A sound upper bound on the length term `l`, read off
+  ## its structure alone: a numeral is its own bound, an `ite` the larger of
+  ## its two arms' (a seq merged across a branch). Anything else (an input's
+  ## length, a computed one) has none here: the path condition's facts are
+  ## not in reach of a lowering (`lowerCmp` has no path), and the solver's
+  ## `maxSeqLen` cap is a search bound, not a fact about the program.
+  let ctx = l.ctx
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  let probeC = mkBoolVar(ctx, "__s8cpr_len_probe_c")
+  let probeI = mkIntVar(ctx, "__s8cpr_len_probe_i")
+  let iteKind = kindOf(ite(probeC, probeI, probeI).raw)
+  proc bound(a: Z3AnyAst; depth: int): Option[int] =
+    if depth > 16: return none(int)
+    case getAstKind(a)
+    of akNumeral:
+      try: some(parseInt(getNumeralString(a)))
+      except CatchableError: none(int)
+    of akApp:
+      if kindOf(a.raw) != iteKind: return none(int)
+      let (_, args) = unpackApp(a)
+      if args.len != 3: return none(int)
+      let x = bound(args[1], depth + 1)
+      let y = bound(args[2], depth + 1)
+      if x.isNone or y.isNone: none(int) else: some(max(x.get, y.get))
+    else: none(int)
+  bound(toAnyAst(simplify(l)), 0)
 
 proc seqEqZ3(a, b: SymVal): Option[Z3Bool] =
   ## RFC-0016 PRC-34. System's `==` on two seqs of a scalar element (the
   ## parser admits only an element type whose `==` is system's own): equal
   ## lengths, and each element equal under the element's `==` (IEEE on a
-  ## float, so a NaN element is unequal to itself). When either length folds
-  ## to a numeral `n` (at most `seqEqUnrollMax`), the elements are compared
-  ## at `0 ..< n`, ground; otherwise over a bound index below the length. none
-  ## when the model has no exact form: a placeholder, a tree element, or a
-  ## seq that may hold an unwritten `newSeqUninit` element (native `==`
-  ## reads it).
+  ## float, so a NaN element is unequal to itself). Quantifier free (the G4
+  ## hang lesson, `docs/SYMEX_PLAN.md`: no universal over an array): when
+  ## either length has a sound upper bound `n` of at most `seqEqUnrollMax`
+  ## (`seqLenUpperBound`), the elements are compared at `0 ..< n`, each
+  ## conjunct guarded by its index being below the length. none when there
+  ## is no such bound, or the model has no exact form: a placeholder, a tree
+  ## element, or a seq that may hold an unwritten `newSeqUninit` element
+  ## (native `==` reads it); the caller then declines (`eqBV`).
   if a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder: # [placeholder-audited]
     return none(Z3Bool)
   if a.seqElemTy == nil or b.seqElemTy == nil or
@@ -5188,26 +5217,18 @@ proc seqEqZ3(a, b: SymVal): Option[Z3Bool] =
   if a.seqElemTy.kind == itInt and a.seqElemTy.width != b.seqElemTy.width:
     return none(Z3Bool)
   if svMentionsUninit(a) or svMentionsUninit(b): return none(Z3Bool)
-  proc known(l: Z3Int): Option[int] =
-    let folded = simplify(l)
-    if getAstKind(folded) != akNumeral: return none(int)
-    try: some(parseInt(getNumeralString(folded)))
-    except CatchableError: none(int)
-  let la = known(a.seqLen) # [placeholder-audited]
-  let lb = known(b.seqLen) # [placeholder-audited]
-  if la.isSome and lb.isSome and la.get != lb.get:
-    return some(mkBool(false))
-  let n = if la.isSome: la else: lb
+  let la = seqLenUpperBound(a.seqLen) # [placeholder-audited]
+  let lb = seqLenUpperBound(b.seqLen) # [placeholder-audited]
+  let n =
+    if la.isSome and lb.isSome: some(min(la.get, lb.get))
+    elif la.isSome: la
+    else: lb
+  if n.isNone or n.get > seqEqUnrollMax: return none(Z3Bool)
   var acc = a.seqLen == b.seqLen # [placeholder-audited]
-  if n.isSome and n.get <= seqEqUnrollMax:
-    for i in 0 ..< n.get:
-      acc = acc and svLeafEq(seqElemAt(a, mkInt(i)), seqElemAt(b, mkInt(i)))
-    return some(acc)
-  inc seqEqCounter
-  let i = mkIntVar("__seqeq_i" & $seqEqCounter)
-  let inRange = (mkInt(0) <= i) and (i < a.seqLen) # [placeholder-audited]
-  some(acc and forall(i, implies(inRange,
-                                 svLeafEq(seqElemAt(a, i), seqElemAt(b, i)))))
+  for i in 0 ..< n.get:
+    acc = acc and implies(mkInt(i) < a.seqLen, # [placeholder-audited]
+      svLeafEq(seqElemAt(a, mkInt(i)), seqElemAt(b, mkInt(i))))
+  some(acc)
 
 proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised comparison dispatch: exact copy of the

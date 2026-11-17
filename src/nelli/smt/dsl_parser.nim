@@ -3805,6 +3805,19 @@ proc isAtomSeqType(seqTy: NimNode): bool =
   let et = impl[1].getTypeImpl
   et.kind == nnkSym and et.strVal in atomEqTypeNames
 
+proc isSystemRecordEq(sym: NimNode): bool =
+  ## RFC-0016 PRC-34. `sym` is an instance of system's generic `==` on a
+  ## tuple or an object. Its body, as the compiler instantiated it, has the
+  ## `fields` loop unrolled and each field's `a != b` resolved in the
+  ## instantiation's scope (`mixin`): a builtin's `==`, a nested record's
+  ## instance of this same routine, or a user's `==` on the field's type.
+  ## Walked as a routine, it compares each field with the `==` Nim calls;
+  ## a field-by-field model would bypass a user's.
+  if sym.kind != nnkSym or sym.symKind != nskProc: return false
+  let impl = sym.getImpl
+  impl.kind == nnkProcDef and
+    impl.lineInfoObj.filename.replace('\\', '/').endsWith("/lib/system.nim")
+
 proc recordAtomEqIR(l, r: IRExpr; recTy: IRType): IRExpr =
   ## RFC-0016 PRC-34. System's `==` on two records of atoms: the
   ## conjunction of the fields' `==` (`true` for a record with none).
@@ -12673,8 +12686,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # objects (`!=` reaches here as `not ==`) is `for a, b in fields(x, y):
     # if a != b: return false`. Over fields whose types are atoms
     # (`atomRecordFieldTypes`) that is the conjunction of their builtin `==`;
-    # it was `eqBV` on a tuple value, declined. Any other record keeps that
-    # decline: a field's `==` may be a user's, reached through `mixin`.
+    # it was `eqBV` on a tuple value, declined. Any other record walks the
+    # compiler's instance of system's `==` (`isSystemRecordEq`): a field's
+    # `==` may be a user's, reached through `mixin`, and the instance calls
+    # the one Nim resolved.
     if n.len == 3 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["=="]) and
        n[1].typeKind in {ntyTuple, ntyObject} and
        n[2].typeKind == n[1].typeKind:
@@ -12693,6 +12708,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         preamble.add mkLet(lt, recTy, l)
         preamble.add mkLet(rt, recTy, r)
         return recordAtomEqIR(mkVar(lt), mkVar(rt), recTy)
+      if isSystemRecordEq(n[0]):
+        return parseRoutineCallExpr(n, n[0], preamble, ctx)
     # RFC-0016 PRC-34: system's generic `==` on two seqs compares lengths,
     # then elements with the element type's `==`, reached through `mixin`.
     # Over an atom element (`isAtomSeqType`) the walker models it whole

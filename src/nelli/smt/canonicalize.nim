@@ -819,8 +819,16 @@ const renderAsChoicesVersion* = "12"
   ##   an atom element is equal lengths and element-wise `==` (ground when a
   ##   length is known, quantified otherwise; was `eqBV`, declined); a seq
   ##   whose element `==` may be a user's declines in the parser.
+  ## - RFC-0016 W4 S8cp-r (392->394; 393 is reserved), PRC-34: whole-seq
+  ##   `==` is quantifier free (the G4 hang lesson): a ground unroll over a
+  ##   sound length bound of at most 64 read off the length term (a numeral,
+  ##   or an `ite` of bounded arms), each element conjunct guarded by its
+  ##   index being below the length; with no such bound it declines (was one
+  ##   `forall` over the index). `==` on a record with a non-atom field walks
+  ##   the compiler's instance of system's `==`, so each field compares with
+  ##   the `==` Nim resolved for it, a user's included (was `eqBV`, declined).
 
-const symexWalkerVersion* = "392"
+const symexWalkerVersion* = "394"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

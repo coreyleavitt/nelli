@@ -42,11 +42,25 @@ type
   WithHue = object
     h: Hue
     k: int
+  Wrap = object
+    v: int
+  Holder = object
+    w: Wrap
+    k: int
+  Pair = tuple[p: int, q: uint8]
+    ## `uint8` keeps `Pair`'s `==` off the `(int, int)` tuples above: a
+    ## tuple type is structural, so it would bind for every such tuple.
+  HasPair = object
+    t: Pair
 
 proc `==`(a, b: Meters): bool = int(a) div 10 == int(b) div 10
 proc `==`(a, b: Hue): bool = ord(a) + ord(b) >= 0
   ## Every two hues are equal: an enum's `==` is overloadable, and system's
   ## generic `==` on a record or a seq reaches this one through `mixin`.
+proc `==`(a, b: Wrap): bool = a.v div 10 == b.v div 10
+  ## A nested object's own `==`, coarser than field-wise.
+proc `==`(a, b: Pair): bool = a.p == b.p
+  ## A named tuple's own `==`, which ignores `q`.
 
 proc tupEq(a, b: int) =
   let t = (a, b)
@@ -87,6 +101,25 @@ proc enumField(a: int) =
 
 proc nestedRecord(a: int) =
   if Outer(i: Inner(v: a)) == Outer(i: Inner(v: 4)): symexTarget("hit")
+
+proc nestedRecordDead(a: int) =
+  if Outer(i: Inner(v: a)) == Outer(i: Inner(v: 4)) and a != 4:
+    symexTarget("hit")
+
+proc nestedUserEq(a, b: int) =
+  # `Wrap`'s own `==` makes 12 and 15 equal; field-wise they differ.
+  if Holder(w: Wrap(v: a), k: 1) == Holder(w: Wrap(v: b), k: 1) and a != b:
+    symexTarget("hit")
+
+proc nestedUserEqDead(a, b: int) =
+  # Under `Wrap`'s `==`, 12 and 25 differ.
+  if Holder(w: Wrap(v: a), k: 1) == Holder(w: Wrap(v: b), k: 1) and
+     a div 10 != b div 10 and a >= 0 and b >= 0:
+    symexTarget("hit")
+
+proc tupleUserEq(a: int; b: uint8) =
+  # `Pair`'s own `==` ignores `q`.
+  if HasPair(t: (a, 1'u8)) == HasPair(t: (a, b)) and b != 1: symexTarget("hit")
 
 proc typeSection(v: int) =
   type L = object
@@ -148,6 +181,17 @@ proc seqEqSymDead(s, t: seq[int]) =
 proc seqEqSymLenDead(s, t: seq[int]) =
   if s == t and s.len != t.len: symexTarget("hit")
 
+proc seqEqBranch(c: bool; t: seq[int]) =
+  let s = if c: @[1, 2] else: @[1]
+  if s == t and t.len == 2 and t[1] == 2: symexTarget("hit")
+
+proc seqNeBranchDead(c: bool; t: seq[int]) =
+  # Past its length `s` holds no element, so the bounded unroll guards each
+  # index with `i < len`; without the guard `t[1]` (no element either)
+  # would make the two differ.
+  let s = if c: @[1, 2] else: @[1]
+  if not c and t == @[1] and s != t: symexTarget("hit")
+
 proc seqNan(f: float) =
   if @[f] == @[f]: discard
   else: symexTarget("hit")
@@ -179,7 +223,16 @@ suite "RFC-0016 PRC-34: record ==":
     check native(nanEq(1.0)) == "ran"
     check native(distinctField(12, 15)) == "hit"
     check native(nestedRecord(4)) == "hit"
+    check native(nestedRecord(5)) == "ran"
+    for v in [low(int), 4, 5, high(int)]:
+      check native(nestedRecordDead(v)) == "ran"
+    check native(nestedUserEq(12, 15)) == "hit"
+    check native(nestedUserEq(12, 25)) == "ran"
+    check native(nestedUserEqDead(12, 15)) == "ran"
+    check native(nestedUserEqDead(12, 25)) == "ran"
+    check native(tupleUserEq(3, 2)) == "hit"
     check native(enumField(1)) == "hit"
+    check native(enumField(0)) == "ran"
   test "a tuple: reached":
     decides(tupEq, sxSat)
   test "a tuple, `!=`: reached":
@@ -192,21 +245,22 @@ suite "RFC-0016 PRC-34: record ==":
     decides(mixedEq, sxSat)
   test "a NaN field: unequal to itself":
     decides(nanEq, sxSat)
-  test "a field with a user `==` still declines":
-    let r = symexFind(distinctField, tLabel("hit"))
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
-  test "an enum field with a user `==` still declines":
-    let r = symexFind(enumField, tLabel("hit"))
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
-  test "a nested record still declines":
-    let r = symexFind(nestedRecord, tLabel("hit"))
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
+  # Step 5: a record with a non-atom field walks the compiler's instance of
+  # system's `==`, so each field compares with the `==` Nim resolved for it.
+  test "a distinct field follows its user `==`":
+    decides(distinctField, sxSat)
+  test "an enum field follows its user `==`":
+    decides(enumField, sxSat)
+  test "a nested plain record: reached":
+    decides(nestedRecord, sxSat)
+  test "a nested plain record: unreachable":
+    decides(nestedRecordDead, sxUnsat)
+  test "a nested object follows its user `==`: reached":
+    decides(nestedUserEq, sxSat)
+  test "a nested object follows its user `==`: unreachable":
+    decides(nestedUserEqDead, sxUnsat)
+  test "a named tuple field follows its user `==`":
+    decides(tupleUserEq, sxSat)
 
 suite "RFC-0016 PRC-34: whole-seq ==":
   test "native":
@@ -225,6 +279,10 @@ suite "RFC-0016 PRC-34: whole-seq ==":
     check native(seqEqSym(@[1, 5], @[1, 5, 0])) == "ran"
     check native(seqEqSymDead(@[1, 5], @[1, 5])) == "ran"
     check native(seqEqSymLenDead(@[], @[])) == "ran"
+    check native(seqEqBranch(true, @[1, 2])) == "hit"
+    check native(seqEqBranch(false, @[1])) == "ran"
+    check native(seqNeBranchDead(false, @[1])) == "ran"
+    check native(seqNeBranchDead(true, @[1])) == "ran"
     check native(seqNan(NaN)) == "hit"
     check native(seqNan(1.0)) == "ran"
     check native(seqStrEq("ab", 'q')) == "hit"
@@ -244,12 +302,22 @@ suite "RFC-0016 PRC-34: whole-seq ==":
     decides(seqEqParamDead, sxUnsat)
   test "a parameter against a literal fixes its elements":
     decides(seqEqParamElemDead, sxUnsat)
-  test "two parameters: reached":
-    decides(seqEqSym, sxSat)
-  test "two parameters: equal elements":
-    decides(seqEqSymDead, sxUnsat)
-  test "two parameters: equal lengths":
-    decides(seqEqSymLenDead, sxUnsat)
+  test "two parameters with no length bound decline":
+    # No `forall` over an array (the G4 hang lesson): with neither length
+    # bounded in the term, the comparison declines. `s.len == 2` in the same
+    # guard is a path fact a lowering cannot read.
+    template declines(fn: untyped) =
+      let r = symexFind(fn, tLabel("hit"))
+      checkpoint show(r.errors)
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    declines(seqEqSym)
+    declines(seqEqSymDead)
+    declines(seqEqSymLenDead)
+  test "a branch-merged length bounds the unroll: reached":
+    decides(seqEqBranch, sxSat)
+  test "a branch-merged length bounds the unroll: guarded past the length":
+    decides(seqNeBranchDead, sxUnsat)
   test "a NaN element: unequal to itself":
     decides(seqNan, sxSat)
   test "string and char elements: reached":
@@ -292,5 +360,5 @@ suite "RFC-0016 PRC-34: shapes later slices modelled":
     decides(seqFieldWrite, sxSat)
 
 suite "RFC-0016 S8cp-r: walker version":
-  test "symexWalkerVersion is at least 392":
-    check parseInt(symexWalkerVersion) >= 392
+  test "symexWalkerVersion is at least 394":
+    check parseInt(symexWalkerVersion) >= 394

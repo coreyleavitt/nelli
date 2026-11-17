@@ -13,6 +13,7 @@
 ## `FakeVarParams`, every `msVarStmt` row of `magicAxis`, and every magic
 ## declared under `lib/` with a `var` or `out` formal is in `mayWriteMagics`
 ## or carries a reason in `mayWriteMagicsExempt`.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, os, sets, compilesettings]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -63,6 +64,7 @@ suite "CR3 H7: setLenUninit in a lent loop body":
         checkpoint lbl & " " & $r.status & " trusted=" & $r.trusted & "\n" &
                    show(r.errors)
         check r.status == sxUnknown
+        check r.errors.named(feUnsupportedOp)
         check "memory" in show(r.errors)
     declined("slu_one")
     declined("slu_other")

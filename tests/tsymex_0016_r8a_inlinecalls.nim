@@ -50,6 +50,7 @@
 ##
 ## Every label is checked natively as well (`exitVerdict`).
 
+from ./s8cu_helpers import named
 import std/unittest
 import std/strutils
 import nelli/symex
@@ -97,15 +98,17 @@ template exitVerdict(fn: typed) =
     checkpoint "bad " & $bad.status & "\n" & show(bad.errors)
     check bad.status == sxUnsat
 
-template exhausted(fn: typed) =
+template exhausted(fn: typed, kinds: set[SymexErrorKind]) =
   block:
     check "ok" in hits(fn(1))
     let ok = symexFind(fn, tLabel("ok"))
     checkpoint "ok " & $ok.status & "\n" & show(ok.errors)
     check ok.status == sxUnknown
+    for k in kinds: check ok.errors.named(k)
     let bad = symexFind(fn, tLabel("bad"))
     checkpoint "bad " & $bad.status & "\n" & show(bad.errors)
     check bad.status == sxUnknown
+    for k in kinds: check bad.errors.named(k)
 
 # ---- R7-1: a bare `return` of a closure call -------------------------------
 
@@ -400,7 +403,7 @@ suite "R7-3: a bare guard applying a closure reconciles":
     exitVerdict(sW2P)
   frameTest "a loop still active after the bound is tainted":
     check inlineSites(rW3) == @["while"]
-    exhausted(sW3)
+    exhausted(sW3, {beBudgetExhausted})
   frameTest "`while n < 5 and c()` lowers to a guard `if` in the body":
     check inlineSites(rW4) == @["if"]
     exitVerdict(sW4)
@@ -793,7 +796,7 @@ suite "R8-1: a closure-call `case` scrutinee is applied once":
   frameTest "multi-label arm":
     exitVerdict(sK4)
   frameTest "range labels decline, so no second comparison":
-    exhausted(sK5)
+    exhausted(sK5, {feUnsupportedExprKind})
   frameTest "case expression":
     exitVerdict(sK6)
   frameTest "address-taken local":

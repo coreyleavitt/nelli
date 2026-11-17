@@ -60,6 +60,9 @@ suite "RFC-0016 K7: two const-table binary searches terminate":
   test "ends in a typed cap, not a hang":
     let r = symexFind(lower2, tLabel("hit"), bounded)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(beBudgetExhaustedPrune)
+    check r.errors.named(beSolverUndef)
     check not r.trusted()
     pinCap(lower2, "ckWalkWork", tLabel("hit"), bounded)
 

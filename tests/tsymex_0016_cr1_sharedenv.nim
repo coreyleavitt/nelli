@@ -49,6 +49,8 @@ suite "0.10.0 review H1: closures sharing one environment (" & cr1Mode & ")":
       checkpoint show(r.errors)
       check not (r.status == sxSat and r.trusted)
       check r.status == sxUnknown
+      check r.errors.named(feGlobalHavoc)
+      check r.errors.named(feOpaqueEffectHavoc)
       check refuted(r)
 
   test "a string shared by two closures (the codec path): refuted":
@@ -63,6 +65,8 @@ suite "0.10.0 review H1: closures sharing one environment (" & cr1Mode & ")":
       checkpoint show(r.errors)
       check not (r.status == sxSat and r.trusted)
       check r.status == sxUnknown
+      check r.errors.named(feGlobalHavoc)
+      check r.errors.named(feOpaqueEffectHavoc)
       check refuted(r)
 
   test "one environment reached from a closure and a ref's field: not trusted":
@@ -83,3 +87,6 @@ suite "0.10.0 review H1: closures sharing one environment (" & cr1Mode & ")":
       checkpoint show(r.errors)
       check not (r.status == sxSat and r.trusted)
       check r.status == sxUnknown
+      check r.errors.named(feGlobalHavoc)
+      check r.errors.named(feGlobalRouteUnproved)
+      check r.errors.named(feOpaqueEffectHavoc)

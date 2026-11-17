@@ -4,6 +4,7 @@
 ## (`replayNotRun`, `endsChild` false) and used to overwrite the claim's own
 ## `witnessUnsafe`: `hostRunnable` was true and `assertCoveredBy` ran it in the
 ## host, which killed the process.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -82,5 +83,6 @@ suite "WA-B S4: a crash candidate is never settled into a claim":
     let r = symexFind(candidateOverflow, tRaisedExn("OverflowDefect"))
     checkpoint $r.status & " " & $r.soundness
     check r.status == sxUnknown
+    check r.errors.named(feGlobalHavoc)
     check scSpurious in r.soundness.runTaint
     check r.soundness.replay == rsNotNeeded

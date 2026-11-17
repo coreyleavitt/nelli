@@ -190,6 +190,7 @@ suite "RFC-0016 K7a (c) -- a cut run is never trusted":
     ## each check. The same SUT with the default (0, unbounded) completes.
     let r = symexFind(k7aWork, tLabel("k7a_work"), workTiny)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedPrune)
     check not r.trusted()
     pinCap(k7aWork, "ckWalkWork", tLabel("k7a_work"), workTiny)
 

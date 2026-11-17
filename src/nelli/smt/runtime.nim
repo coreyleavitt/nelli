@@ -16045,15 +16045,37 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   if result == zsUnknown and uint(max(ownContextUnits - before, 0)) >= rlimit:
     scratchCapped = true
 
+proc definingSlice(ctx: Z3Context; pins: seq[Z3Bool]; seeds: seq[Z3Bool];
+                   conjuncts: seq[Z3Bool]): seq[Z3Bool]
+
 proc concreteBranchAsk(ctx: Z3Context, concreteEq: seq[Z3Bool],
                        cond: Z3Bool, settings: SymexSettings,
-                       facts: seq[Z3Bool]): (Z3Status, Z3Status) =
+                       facts: seq[Z3Bool];
+                       slicePools = false): (Z3Status, Z3Status) =
   ## The two scratch solves `concreteBranchOutcome` reads: `cond`, then
   ## `not cond`, each under the pins, the run-wide pools and `facts`.
+  ##
+  ## RFC-0016 W4 perf: `slicePools` (the tail walk, `followBranchOutcome`)
+  ## asks with only the pools that constrain a symbol `facts` and `cond`
+  ## reach past the pins (`definingSlice`, the same independence slice the
+  ## first ask takes of the `pc`). The pools are run-wide: every regex,
+  ## strip and index split the run lowered sits in them, each over the
+  ## subject string the pins fix to a ground value. Asked whole, a branch
+  ## on `s == "abcde"` carried every `findBounds` definition of the run and
+  ## spent its whole 20M-unit bound undecided (`tsymex_rfc0005_s8cf_point_b`:
+  ## tails of 60M and 80M units beside explore walks of 111K;
+  ## `tsymex_0016_w4perf_tailpools`). Sound: a pool is definitional or
+  ## true of every real input, so under the pins, which are the followed
+  ## run's input, the pools left out are satisfiable over free symbols
+  ## disjoint from the ones the ask keeps; an UNSAT of the sliced ask is an
+  ## UNSAT of the whole one (a subset of it), and a SAT model extends.
   var reach = concreteEq
   reach.add facts
   reach.add cond
-  let pools = globalRoots(reach)
+  let pools =
+    if slicePools: definingSlice(ctx, concreteEq, facts & @[cond],
+                                 globalRoots(reach))
+    else: globalRoots(reach)
   # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
   let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
                                    settings)
@@ -17342,11 +17364,11 @@ proc followBranchOutcome(w: var WalkCtx; dp: Path; cond: Z3Bool;
     elif tail and st[0] == zsUnsat and st[1] == zsUnsat: foOffRun
     else: foOpen
   result = read(concreteBranchAsk(w.z3, w.concreteEq, cond, w.settings,
-                                  defs & facts), w.tailGate)
+                                  defs & facts, w.tailGate), w.tailGate)
   if result == foOpen and w.tailGate and not scratchCapped and
      defs.len < wholePc.len:
     result = read(concreteBranchAsk(w.z3, w.concreteEq, cond, w.settings,
-                                    wholePc & facts), w.tailGate)
+                                    wholePc & facts, w.tailGate), w.tailGate)
   if result == foOpen:
     markAmbiguous(w, construct)
     # Section 9.1 item 3: an undecided side counts as undefined, so the tail

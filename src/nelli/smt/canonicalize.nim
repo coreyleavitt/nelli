@@ -740,8 +740,15 @@ const renderAsChoicesVersion* = "12"
   ##   a wide enum no longer forks over every declared arm (or declines past
   ##   `maxVariantConstructorForks`). Verdicts that were `sxUnknown` there
   ##   resolve. No key bytes change.
+  ## - RFC-0016 W4 perf (371->377; 372-376 are reserved for other W4 slices):
+  ##   a tail walk's branch asks (`concreteBranchAsk`) carry only the run-wide
+  ##   pools that constrain a symbol the branch reaches past the pins
+  ##   (`definingSlice`), not every pool of the run. A branch over a pinned
+  ##   subject is decided where it spent a capped check undecided and forked,
+  ##   so a tail can name fewer kinds (`ubTailUnverified` from a spent tail
+  ##   budget) than it did. No key bytes change.
 
-const symexWalkerVersion* = "371"
+const symexWalkerVersion* = "377"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

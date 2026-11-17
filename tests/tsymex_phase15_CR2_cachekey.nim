@@ -1252,7 +1252,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## run's flip carries the collect errors): 369->370.
     ## RFC-0016 W4 H1b (HRV-32, a variant constructor under a `case`
     ## expression narrows to the branch's tags): 370->371.
-    check symexWalkerVersion == "371"
+    ## RFC-0016 W4 perf (a tail walk's branch asks carry only the pools they
+    ## reach; 372-376 reserved): 371->377.
+    check symexWalkerVersion == "377"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

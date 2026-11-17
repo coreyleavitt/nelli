@@ -767,8 +767,17 @@ const renderAsChoicesVersion* = "12"
   ##   order, arguments last to first). Verdicts are unchanged; Z3 units on
   ##   a query move (`lastNl`: 1,026,624 to 498,821 on Z3 5.1), so a walk
   ##   cut by its budget can cut elsewhere. No key bytes change.
+  ## - RFC-0016 S8ci follow-up (379->384; 380-383 are Wave 4 lanes in
+  ##   flight): an own-context search (`ownContextSolver`) runs Z3's
+  ##   defaults under the first half of its bound; only one that half ran
+  ##   out on goes on, on the same solver, with `smt.arith.propagate_eqs`
+  ##   off, under what is left (`ownContextCheck`): the cheap equality
+  ##   search spends wall time `rlimit` does not count. A query decided
+  ##   within half its bound is searched as before; past that, verdicts are
+  ##   the query's own either way, but a search cut by its bound can cut
+  ##   elsewhere. No key bytes change.
 
-const symexWalkerVersion* = "379"
+const symexWalkerVersion* = "384"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

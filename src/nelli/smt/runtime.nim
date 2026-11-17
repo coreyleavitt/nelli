@@ -10383,6 +10383,18 @@ proc queryTermCount(ctx: Z3Context; roots: openArray[Z3Bool]): int =
     if getAstKind(t) == akApp:
       for a in unpackApp(t).args: stack.add a
 
+var eqsSplitCaps {.threadvar.}: Table[pointer, uint]
+  ## RFC-0016 S8ci. The whole bound of each `ownContextSolver` solver not
+  ## yet checked, keyed by the solver: the solver itself carries only the
+  ## first half (see `ownContextSolver`), and `ownContextCheck` gives a
+  ## search that half did not decide the rest. Removed when it is checked.
+
+when defined(symexQueryStats):
+  var symexEqsSplits* {.threadvar.}: int
+    ## RFC-0016 S8ci. The own-context checks whose first half ran out undecided
+    ## and were searched on without Z3's cheap equality search
+    ## (`ownContextCheck`). Never reset by the engine.
+
 proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
                       rlimit: uint; seqTheory = true): Z3Solver =
   ## RFC-0005 S8bm. `querySolver`'s solver for `roots`, in a fresh Z3
@@ -10418,7 +10430,14 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   let made = translate(terms, own)
   var inOwn = newSeq[Z3Bool](roots.len)
   for i in 0 ..< roots.len: inOwn[i] = wrap[Z3Bool](own, made[i])
-  querySolver(own, inOwn, rlimit, seqTheory)
+  result = querySolver(own, inOwn, rlimit, seqTheory)
+  # RFC-0016 S8ci: Z3's defaults get the first half of the bound; the rest
+  # is `ownContextCheck`'s, without the cheap equality search.
+  if rlimit > 1'u:
+    let half = newParams(own)
+    half.set("rlimit", (rlimit + 1'u) div 2)
+    result.setParams(half)
+    eqsSplitCaps[cast[pointer](result)] = rlimit
 
 when defined(symexTestInjectWalkerFault):
   proc injectedSolveFaultTerms(s: Z3Solver): seq[Z3Bool] =
@@ -10435,6 +10454,24 @@ proc ownContextCheck(s: Z3Solver;
   ## context's whole step count (nothing else ran there) added to
   ## `ownContextUnits`. RFC-0005 batch 7: the check is S8bu's
   ## `solveBounded`, so a solve the clock cut off is noted here too.
+  ##
+  ## RFC-0016 S8ci. With `smt.arith.propagate_eqs` on (Z3's default), every
+  ## LP bound propagation runs `lp_bound_propagator::cheap_eq_on_nbase` over
+  ## the touched rows and explains each equality it finds by walking its
+  ## row (`lar_solver::explain_fixed_in_row`); none of that advances
+  ## `rlimit`, so a unit's wall time grows with the tableau's rows, which
+  ## follow the order the query's terms were made in (`r4_strip`'s
+  ## budget-out step 3: 228 of 300 stack samples there, Z3 5.1.0; 45 s in
+  ## S8bm's term order, 71 s in S8bp's, the same units). Turning it off
+  ## everywhere bounds that, but loses what it decides cheaply
+  ## (`s8bb_replace_d` 3.8M units to 26.5M and red). So the search is
+  ## split: Z3's defaults under the first half of the bound
+  ## (`ownContextSolver`), and only a search that half ran out on goes on,
+  ## on the same solver, without the equality search, under what the bound
+  ## has left. A query decided within half its bound is searched exactly as
+  ## before; one that spends its whole bound spends half of it where a unit
+  ## costs about the same wall time in any term order. The units counted
+  ## are the context's whole step count, both halves.
   when defined(symexTestInjectWalkerFault):
     # RFC-0005 batch 8 fault injection (compiled out of every normal build):
     # a query over a parameter named for the shape raises, as `extractLeaf`'s
@@ -10449,10 +10486,23 @@ proc ownContextCheck(s: Z3Solver;
       held = injectedSolveFaultTerms(s)
       discard held
   result = solveBounded(s, assumptions)
-  let st = s.getStatistics()
-  if st.contains("rlimit count"):
-    ownContextUnits += (if st.isInt("rlimit count"): st.getInt("rlimit count")
-                        else: int(st.getFloat("rlimit count")))
+  var st = s.getStatistics()
+  proc spentIn(st: Z3Stats): uint =
+    if not st.contains("rlimit count"): 0'u
+    elif st.isInt("rlimit count"): uint(st.getInt("rlimit count"))
+    else: uint(st.getFloat("rlimit count"))
+  var cap: uint
+  if eqsSplitCaps.pop(cast[pointer](s), cap) and result == zsUnknown:
+    let spent = spentIn(st)
+    if spent >= (cap + 1'u) div 2 and spent < cap:
+      let rest = newParams(s.ctx)
+      rest.set("rlimit", cap - spent)
+      rest.set("smt.arith.propagate_eqs", false)
+      s.setParams(rest)
+      when defined(symexQueryStats): inc symexEqsSplits
+      result = solveBounded(s, assumptions)
+      st = s.getStatistics()
+  ownContextUnits += int(spentIn(st))
   chargeWalkWork()   ## RFC-0016 K7
 
 var intDivDeclKinds {.threadvar.}:

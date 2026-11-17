@@ -1259,7 +1259,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## `seqElemAt` and `seqStoreArrs`): 373->374.
     ## RFC-0016 S8ci (a query's own context makes its terms in Z3's
     ## translation order): 374->379.
-    check symexWalkerVersion == "379"
+    ## RFC-0016 S8ci follow-up (an own-context search's second half runs
+    ## without Z3's cheap equality search): 379->384.
+    check symexWalkerVersion == "384"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

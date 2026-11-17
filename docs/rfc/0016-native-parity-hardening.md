@@ -202,7 +202,7 @@ state = "done"
 [[slice]]
 id    = "W4"
 title = "Wave 4 (§11): K8b fuzzer and metamorphic families with pairwise floor, K8c sanitizer job, K7c, K9c, K9d, K9e pin strength, K2a-fail, H1 hygiene, precision rows, W4-z allowlists emptied and §12 checked"
-state = "pending"
+state = "in-progress"
 
 [[slice]]
 id    = "S8cg"

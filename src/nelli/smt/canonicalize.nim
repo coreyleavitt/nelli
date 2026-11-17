@@ -753,8 +753,16 @@ const renderAsChoicesVersion* = "12"
   ##   `addr x` of a `T` are one sort (`c.owner == addr(a)` in
   ##   `rawDealloc`, a Z3 sort mismatch on the cpp walk of `create`). Key
   ##   bytes change for such a type (`Ty<U:...:rk=...>`).
+  ## - RFC-0016 K9c-g (373->374): the rest of the unbacked-element class,
+  ##   decided where the access is built rather than per caller. `seqElemAt`
+  ##   of an element type the model does not back is exact when the seq's
+  ##   length is the numeral 0 (no element to read) and otherwise declines
+  ##   `seNestedSeqUnsupported`; a store into such a seq (`insert`, and any
+  ##   `seqStoreArrs` caller) declines `seNestedSeqUnsupported` through
+  ##   `seqStoreDecline`, `storeSeqElem` taints rather than raising. These
+  ##   were `weInternalWalkerFault` (`insert` on an empty `seq[seq[T]]`).
 
-const symexWalkerVersion* = "373"
+const symexWalkerVersion* = "374"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

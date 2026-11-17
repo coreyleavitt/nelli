@@ -4061,6 +4061,22 @@ proc seqElemAt*(seqSV: SymVal, idx: Z3Int): SymVal =
     let t = wrap[Z3Array[Z3Int, Z3String]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
     SymVal(kind: svString, str: select(t, idx))
   else:
+    # RFC-0016 K9c-g. An element type the model does not back has no array
+    # to read: a known modelling gap, decided here for every caller (the
+    # for-loops, the HOFs, `contains`/`find`, slicing, `&`, a read through a
+    # pointer). The caller guarantees `idx` is in bounds, so a seq whose length
+    # is the numeral 0 has no element to read: the branch is dead, and an
+    # inert placeholder is exact. Otherwise the read declines
+    # `seNestedSeqUnsupported`. Neither is a walker fault.
+    if not isBackedSeqElemTy(seqSV.seqElemTy):
+      if $simplify(seqSV.seqLen) == "0": # [placeholder-audited]
+        var scratch: seq[Z3Bool]
+        return allocateSym(seqSV.seqElemTy,
+                           freshDegradeName("__seqElemAtEmpty"), scratch)
+      return degradeAlloc(seqSV.seqElemTy, seNestedSeqUnsupported,
+        "seqElemAt: an element of a seq of " & $seqSV.seqElemTy &
+        ", an element type the model does not back (seNestedSeqUnsupported)",
+        "__seqElemAtUnbacked")
     # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
     # `raise newException`. This is a genuine asymmetry bug, not a
     # by-design gap: `isBackedSeqElemTy` (the guard gating every

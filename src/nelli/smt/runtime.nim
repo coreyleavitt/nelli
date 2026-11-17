@@ -2041,6 +2041,16 @@ proc conformSV(sv: SymVal; ty: IRType): Option[SymVal] =
     some(r)
   else: some(sv)
 
+proc seqStoreDeclineKind(elemTy: IRType): SymexErrorKind =
+  ## The classified kind of a store a seq of `elemTy` cannot take
+  ## (`seqStoreArrs` none): `seNestedSeqUnsupported` for an element type the
+  ## model does not back (a known modelling gap, RFC-0016 K9c-g),
+  ## `seRecursiveValueDepth` when the element type holds a depth bound (a
+  ## value of another depth's layout), else `feUnsupportedOp`.
+  if not isBackedSeqElemTy(elemTy): seNestedSeqUnsupported
+  elif hasDepthBound(elemTy): seRecursiveValueDepth
+  else: feUnsupportedOp
+
 proc seqStoreArrs(seqSV: SymVal; idx: Z3Int; val: SymVal): Option[seq[Z3AnyAst]] =
   ## RFC-0005 S8bc. The data arrays of `seqSV` with `val` stored at `idx`:
   ## `storeSeqElem` for a scalar element (its callers check
@@ -2051,6 +2061,9 @@ proc seqStoreArrs(seqSV: SymVal; idx: Z3Int; val: SymVal): Option[seq[Z3AnyAst]]
   ## (`seqStoreDecline`). Every leaf's sort is checked against its array's
   ## range first, so no ill-sorted store is ever built.
   let elemTy = seqSV.seqElemTy
+  # RFC-0016 K9c-g. An element type the model does not back has no arrays to
+  # store into: the store declines (`seqStoreDecline`, `seNestedSeqUnsupported`).
+  if not isBackedSeqElemTy(elemTy): return none(seq[Z3AnyAst])
   if not isTreeSeqElemTy(elemTy):
     return some(@[storeSeqElem(seqSV.seqDataRaw, elemTy, idx, val)]) # [placeholder-audited]
   # RFC-0005 batch 4: a `distinct` value is stored as its base (the seq's
@@ -2078,13 +2091,18 @@ proc seqStoreDecline(op: string; elemTy: IRType; val: SymVal): SymVal =
   ## holds a depth bound (a value of another depth's layout), else
   ## `feUnsupportedOp`. Returns a fresh placeholder seq of the declined
   ## kind, so every later read of it declines too.
-  let kind = if hasDepthBound(elemTy): seRecursiveValueDepth else: feUnsupportedOp
-  let msg = op & ": a " & plainEnglishSymValKind(val.kind) &
-    " that does not fit an element of the seq (" & $elemTy & ")" &
-    (if kind == seRecursiveValueDepth:
-       " -- a recursive value object is unrolled to a bounded depth, and " &
-       "this value reaches past it (seRecursiveValueDepth)"
-     else: " (feUnsupportedOp)")
+  let kind = seqStoreDeclineKind(elemTy)
+  let msg =
+    if kind == seNestedSeqUnsupported:
+      op & ": a store into a seq of " & $elemTy & ", an element type the " &
+        "model does not back (seNestedSeqUnsupported)"
+    else:
+      op & ": a " & plainEnglishSymValKind(val.kind) &
+        " that does not fit an element of the seq (" & $elemTy & ")" &
+        (if kind == seRecursiveValueDepth:
+           " -- a recursive value object is unrolled to a bounded depth, " &
+           "and this value reaches past it (seRecursiveValueDepth)"
+         else: " (feUnsupportedOp)")
   lowerDegrade(kind, msg)
   var fresh: seq[Z3Bool]
   allocateSym(tUnsupportedFieldSeq(elemTy, msg, kind = kind),
@@ -18711,8 +18729,7 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
         # value that does not fit declines on this path.
         let storedOpt = seqStoreArrs(recvSV, idxZi, valSV)
         if storedOpt.isNone:
-          let kind = if hasDepthBound(recvSV.seqElemTy): seRecursiveValueDepth
-                     else: feUnsupportedOp
+          let kind = seqStoreDeclineKind(recvSV.seqElemTy)
           let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
           let d = w.degrade(kind, locPrefix &
             "isIndexAssign: a " & plainEnglishSymValKind(valSV.kind) &
@@ -24578,7 +24595,15 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
     let storedRaw = checkedStore(ctx, dataRaw.raw, idx.raw, valAst.raw)
     wrap[Z3AnyAst](ctx, storedRaw)
   else:
-    raise newException(ValueError, "storeSeqElem: unsupported elem kind " & $elemTy.kind)  # [raise-audited: category-c: kind-exhaustive (storeSeqElem's case set matches isBackedSeqElemTy exactly, including itRef/itPtr -- unlike seqElemAt, this proc's read-side counterpart, which lacks the itRef/itPtr arm; see seqElemAt's own N46 comment)]
+    # RFC-0016 K9c-g. An element type the model does not back has no array
+    # to store into: a known modelling gap, not a walker fault. `seqStoreArrs`
+    # routes it to a clean decline before it gets here; this is the backstop
+    # for a direct caller, in-band as the arms above (the data is returned
+    # unchanged, the path tainted `seNestedSeqUnsupported`).
+    allocDegrade(seNestedSeqUnsupported, "storeSeqElem: a store into a seq " &
+      "of " & $elemTy & ", an element type the model does not back " &
+      "(seNestedSeqUnsupported)")
+    dataRaw
 
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C4. `@[a, b, c]` → a CONCRETE-length svSeq: a fresh data array

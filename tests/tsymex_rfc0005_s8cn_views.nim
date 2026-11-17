@@ -15,6 +15,7 @@
 ## that each file compiles and runs in under 60 s on the Windows legs where it
 ## can: part 0 took 123 s there, part 1 84 s. Part 2's first test alone runs
 ## 80 to 103 s on Windows.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 when not declared(s8cnViewsPart):
   const s8cnViewsPart = 0
@@ -55,6 +56,7 @@ template declined(fn: typed; lbl: static string; why: static string) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feTableIterOrder)
     check why in show(r.errors)
 
 template guardT(): untyped {.dirty.} =
@@ -495,9 +497,15 @@ when s8cnViewsPart == 3:
     test "writes both ways":
       check symexFind(sOther2, tLabel("nl2_same_live")).status == sxSat
       # A new key, and the view written past it: a rehash may lose the write.
-      check symexFind(sOther2, tLabel("nl2_other_live")).status == sxUnknown
+      block:
+        let r = symexFind(sOther2, tLabel("nl2_other_live"))
+        check r.status == sxUnknown
+        check r.errors.named(feTableIterOrder)
       # The other arm's decline covers the query too.
-      check symexFind(sOther2, tLabel("nl2_same_dead")).status == sxUnknown
+      block:
+        let r = symexFind(sOther2, tLabel("nl2_same_dead"))
+        check r.status == sxUnknown
+        check r.errors.named(feTableIterOrder)
       check "nl2_same_live" in hits(sOther2({"a": 5}.toTable, "a"))
       check "nl2_other_live" in hits(sOther2({"a": 5}.toTable, "q"))
       check "nl2_same_dead" notin hits(sOther2({"a": 5}.toTable, "a"))

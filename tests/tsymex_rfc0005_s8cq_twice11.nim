@@ -6,6 +6,7 @@
 ## evaluates its target apart now declines unless the target is proved free of a
 ## call (`lvalueHasCall`, an allowlist of node kinds). A shape that stays decided
 ## has its native answer pinned beside it.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
@@ -174,6 +175,10 @@ suite "tsymex_rfc0005_s8cq_twice11: the replay candidates' tail walks":
     let r = try: symexFind(q10, tLabel("q10_once"))
             finally: delEnv(walkUnitsLogEnv)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedExprKind)
+    check r.errors.named(feUnsupportedOp)
+    check r.errors.named(feUnsupportedParamType)
+    check r.errors.named(feUnsupportedStmtKind)
     let tails = if fileExists(log): tailUnitLines(log) else: @[]
     removeFile(log)
     checkpoint "tail walk units: " & $tails

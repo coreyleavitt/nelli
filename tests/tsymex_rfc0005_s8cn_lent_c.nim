@@ -17,6 +17,7 @@
 ## `tsymex_rfc0005_s8cn_lent_e`, `tsymex_rfc0005_s8cn_lent_f`. Split so that
 ## each part compiles and runs in under 60 s on the Windows legs (the whole
 ## file took 95 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -41,6 +42,7 @@ template declined(fn: typed; lbl: static string) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
     check "memory" in show(r.errors)
 
 template decided(fn: typed; lbl: static string; want: typed) =
@@ -209,8 +211,14 @@ suite "S8cn: mitems and mpairs":
     nativeSees(mGlobalCallee, "mg_live", "mg_dead")
     nativeSees(mPtr, "mq_live", "mq_dead")
     decided(mGlobalCallee, "mg_live", sxSat); decided(mGlobalCallee, "mg_dead", sxUnsat)
-    check symexFind(mPtr, tLabel("mq_live")).status == sxUnknown
-    check symexFind(mPtr, tLabel("mq_dead")).status == sxUnknown
+    block:
+      let k9r = symexFind(mPtr, tLabel("mq_live"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedExprKind)
+    block:
+      let k9r = symexFind(mPtr, tLabel("mq_dead"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedExprKind)
 
 suite "S8cn: a Table's values and keys":
   test "native":

@@ -1,5 +1,6 @@
 ## RFC-0005 (soundness channels) slice S8cb, item 5, continued from
 ## `tsymex_rfc0005_s8cb_tostr` (split for the per-file time convention).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -127,3 +128,4 @@ suite "RFC-0005 S8cb tostr: what stays declined":
     let r = symexFind(reprSut, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)

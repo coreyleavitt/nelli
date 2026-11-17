@@ -29,6 +29,7 @@
 ##   (d) candidacy is unspellable as sat: `SatCandidate` exposes no witness
 ##       (compile-time pin) and `runSymex` is emitted from exactly one place
 ##       in `symex.nim`, the settle emitter (structural pin).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, os, options, unicode]
 import nelli
 import nelli/symex
@@ -434,6 +435,9 @@ suite "RFC-0005 S10 (e) -- the opt-out: SymexSettings.replay = false":
     ## `symexFind` in it (see `s10NoSuchSymbol`).
     let r = symexFind(s10Unlinkable, tLabel("s10_unlinkable"), s10NoReplay)
     check r.status == sxUnknown          ## a candidate, not replayed
+    check r.errors.named(feGlobalHavoc)
+    check r.errors.named(feGlobalRouteUnproved)
+    check r.errors.named(feOpaqueCallUnmodelled)
     check rfc0005RawStatus == sxUnknown
     let fs = symexFindAllWitnesses(s10Unlinkable, inMemoryDatabase(), s10NoReplay)
     check fs.findingFor("label(\"s10_unlinkable\")").isSome

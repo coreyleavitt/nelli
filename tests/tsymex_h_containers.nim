@@ -44,6 +44,7 @@
 ## unchanged; `array`/`tuple` of a ref were already witness-renderable
 ## structurally, this slice only changes what verdicts are REACHABLE, not
 ## what shape a witness takes).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 
@@ -189,10 +190,12 @@ suite "Cluster H H_containers — seq/array/tuple of named ref-objects":
   test "Table[string, Node] STAYS degraded: sxUnknown, no crash, no false verdict":
     let r = symexFind(tableNodeGuard, tLabel("table_node_guard_hit"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedWitnessType)
 
   test "HashSet[Node] STAYS degraded: sxUnknown, no crash, no false verdict":
     let r = symexFind(setNodeGuard, tLabel("set_node_guard_hit"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedWitnessType)
 
   test "walker version floor >= 57 (H_containers introduced at 57)":
     check parseInt(symexWalkerVersion) >= 57

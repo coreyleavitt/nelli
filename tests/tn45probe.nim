@@ -13,6 +13,7 @@
 ## Read:  the single N45STATS line (deterministic; rlimit is Z3's own logical
 ##        step count, not wall time).
 
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -56,3 +57,4 @@ suite "N45 controlled probe — B5-4 trip-wire at a FIXED k=2 budget":
                       tLabel("impossible"), b5TripWireBudget)
     echo "STATUS=", r.status
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)

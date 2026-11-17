@@ -10,6 +10,7 @@
 ##
 ## The detected library is overridden for the test
 ## (`pcre_engine.overridePcreLib`); the real one must itself be verified.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re, times]
 import pcre
 import nelli/symex
@@ -103,13 +104,23 @@ suite "S8bt: an unverified libpcre declines every regex call":
     defer: clearPcreLibOverride()
     let rf = verdict(findTarget, "bt_lib_find")
     check rf.status == sxUnknown
+    check rf.errors.named(seUnsupportedRegex)
     var named = false
     for e in rf.errors:
       if "psUnverifiedLib" in e.msg: named = true
     check named
-    check verdict(matchTarget, "bt_lib_match").status == sxUnknown
-    check verdict(replaceTarget, "bt_lib_replace").status == sxUnknown
-    check verdict(rejectedTarget, "bt_lib_rejected").status == sxUnknown
+    block:
+      let k9r = verdict(matchTarget, "bt_lib_match")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(seUnsupportedRegex)
+    block:
+      let k9r = verdict(replaceTarget, "bt_lib_replace")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(seUnsupportedRegex)
+    block:
+      let k9r = verdict(rejectedTarget, "bt_lib_rejected")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(seUnsupportedRegex)
 
 suite "S8bt: walker version":
 

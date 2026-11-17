@@ -8,6 +8,7 @@
 ## Split so that each part compiles and runs in under 60 s on the Windows legs
 ## (the whole file took 62 s).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -125,6 +126,7 @@ suite "S8cd item 6: a string pinned to a literal under a cap":
     let r = symexFind(longPinnedLen, tLabel("c_other_past"), cap2)
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beSolverUndef)
     check "maxSeqLen" in show(r.errors)
 
   test "SAT within the cap, and SAT only past it":
@@ -132,6 +134,7 @@ suite "S8cd item 6: a string pinned to a literal under a cap":
     let r = symexFind(pastCap, tLabel("c_past"), cap8)
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beSolverUndef)
     check "maxSeqLen" in show(r.errors)
 
 suite "S8cd":

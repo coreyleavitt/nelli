@@ -1,3 +1,4 @@
+from ./s8cu_helpers import named
 import std/unittest
 import std/sequtils
 import nelli/symex
@@ -67,4 +68,5 @@ suite "symex Phase 15 — F5 hang regression: p[]=int(f) ordering goal":
     ## conversion is undefined behaviour and halts, so the run is sxUnknown.
     let r = symexFind(f5HangSut, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
     check not r.trusted

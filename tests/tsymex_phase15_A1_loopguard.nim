@@ -52,6 +52,7 @@
 ## authoring-session build state. The collision surface is permanently
 ## pinned in `tsymex_q1_sibling_collision.nim`; the `';'` delimiters below
 ## are kept as cheap cell-independence hygiene.
+from ./s8cu_helpers import named
 import std/[unittest]
 import nelli/symex
 
@@ -176,6 +177,7 @@ suite "symex A1 — loop-guard operand-shape characterization corpus":
     let rWithContinue = symexFind(loopGuardCompoundWithContinue, tLabel("hit"))
     check rNoContinue.status == sxSat
     check rWithContinue.status == sxUnknown
+    check rWithContinue.errors.named(beBudgetExhaustedAssumedBound)
     if rWithContinue.status == sxUnknown:
       check rWithContinue.errors.len > 0
 

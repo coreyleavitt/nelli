@@ -214,6 +214,7 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
   test "T2: countUpIter(100) — beyond maxLoopUnwind bound → sxUnknown":
     let r = symexFind(sutA3BeyondBound, tLabel("impossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
   # ---- T3: break in for-body (CRIT-2 / D2-0c; modelled since W3-z P13) ----
   test "T3: break in for-body over finite iterator → exact sxSat (P13)":
@@ -244,6 +245,7 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     ## Pre-scan 0(b) degrades the whole for → sxUnknown.
     let r = symexFind(sutA3ReturnIter, tLabel("got42"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedStmtKind)
 
   # ---- T5: soundness — label AFTER return-bearing iterator is reachable ----
   # SND-1 (RFC-chapulin-hardening Cluster 1, walker v38) update: `isUnsupported`
@@ -264,6 +266,7 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
   test "T5: label after for-over-return-iter → sxUnknown (SND-1: post-drop path is tainted uncertain)":
     let r = symexFind(sutA3LabelAfterReturnIter, tLabel("afterLoop"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedStmtKind)
 
   # ---- T6: recursion guard (CRIT-3) — no compile-time hang; degraded inner for is tainted ----
   # The recursion guard (D2-0d) stops the infinite parse-time re-inlining: the fact
@@ -284,11 +287,13 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
   test "T6: recursive iterator — degraded inner for taints the path → sxUnknown (SND-1)":
     let r = symexFind(sutA3RecursiveIter, tLabel("deepRecurse"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedStmtKind)
 
   # ---- T7: deferred — first-class iterator value → sxUnknown (D6) ----
   test "T7: first-class iterator value (stored in let) → sxUnknown (D6 deferred)":
     let r = symexFind(sutA3FirstClassIter, tLabel("firstClass"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedStmtKind)
 
   # ---- T8 (A3-S2a positive): explicit tuple-yield inlined; witness pinned ----
   test "T8: pairsIter tuple-yield — sxSat, witness n==3 (sum of vals 0+2+4==6)":
@@ -309,6 +314,7 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     ## is defense-in-depth for future or implementation-internal mismatches.)
     let r = symexFind(sutA3TupleVarYield, tLabel("tupleVarReach"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedStmtKind)
 
   # ---- T10 (A3-S2a 3-var): 3-element tuple destructuring — positive ----
   test "T10: tripleIter 3-var tuple-yield — sxSat, witness n==3 (sum z 0+3+6==9)":

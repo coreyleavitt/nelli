@@ -36,6 +36,7 @@
 ## Every expected value was probed against the real compiler (Nim 2.2.10,
 ## debug build) by the oracle test of each suite, which runs the SUT
 ## itself.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables, sets]
 import nelli
 import nelli/symex
@@ -75,6 +76,7 @@ template expectExactSat(r: untyped) =
 template expectUnknown(r: untyped; k: SymexErrorKind) =
   checkpoint($r.status & " " & show(r.errors))
   check r.status == sxUnknown
+  check r.errors.named(feUnsupportedWitnessType)
   check hasKind(r.errors, k)
 
 # ---- (1) compound assignment on a seq element -------------------------------

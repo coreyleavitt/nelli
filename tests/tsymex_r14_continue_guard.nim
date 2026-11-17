@@ -49,6 +49,7 @@
 ## Every test in this file is checked on BOTH the `c` and `cpp` backends
 ## (`scripts/dt-bounded.sh c|cpp`) per project convention.
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -206,6 +207,7 @@ suite "symex R14 — continue-safety of the and-split short-circuit while guard"
   test "R14-4b: for-nested guarded while with continue -> \"forNestImpossible\" degrades to sxUnknown, never a false sxRaised":
     let r = symexFind(sutForNestedContinueOob, tLabel("forNestImpossible"), nestedLoopBudget)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
   test "R14-4c (reachable companion): for-nested guarded while with continue still finds a real target":
     let r = symexFind(sutForNestedContinueFindX, tLabel("forNestFoundX"), nestedLoopBudget)

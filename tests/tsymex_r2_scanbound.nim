@@ -50,6 +50,7 @@
 ## previously (incorrectly) ACCEPTED mis-lift, changing the verdict for any
 ## SUT matching this exact near-miss shape. See canonicalize.nim for the
 ## full changelog entry.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -124,6 +125,7 @@ suite "symex RFC-chapulin-hardening R2 -- loop-counter-dependent bound rejected"
     # observed post-fix verdict (contrast the PRE-fix `sxSat`).
     check r.status != sxSat
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
 # ---------------------------------------------------------------------------
 # Positive control -- the genuinely-same-symbol, loop-invariant-bound case

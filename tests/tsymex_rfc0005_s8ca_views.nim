@@ -28,6 +28,7 @@
 ##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types
@@ -51,6 +52,7 @@ template declines(fn: typed, lbl, why: string): untyped =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
     var named = false
     for e in r.errors:
       if e.severity == sevError and why in e.msg: named = true

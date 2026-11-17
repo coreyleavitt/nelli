@@ -5,6 +5,7 @@
 ## the *path* as uncertain (a fresh unconstrained symbol replaces the
 ## return value); any target reached only on uncertain paths
 ## degrades the verdict from `sxSat` to `sxUnknown`.
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -33,6 +34,7 @@ suite "symex Phase 3 — bounded recursion":
         symexTarget("deep")
     let r = symexFind(fibDeep, tLabel("deep"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
 
   test "custom maxCallDepth=1 — even shallow recursion bails":
     # With maxCallDepth=1, fib's first internal recursion is already
@@ -43,3 +45,4 @@ suite "symex Phase 3 — bounded recursion":
       result.budget.maxCallDepth = 1
     let r = symexFind(fibTarget, tLabel("hit"), settings1())
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)

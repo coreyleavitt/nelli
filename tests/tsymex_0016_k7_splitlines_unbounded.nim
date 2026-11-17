@@ -38,5 +38,8 @@ suite "RFC-0016 K7: splitLines over an unbounded string terminates":
   test "plain string parameter ends in a typed cap":
     let r = symexFind(psplitU, tLabel("hit"), bounded)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(beBudgetExhaustedPrune)
+    check r.errors.named(seUnsupportedStringOp)
     check not r.trusted()
     pinCap(psplitU, "ckWalkWork", tLabel("hit"), bounded)

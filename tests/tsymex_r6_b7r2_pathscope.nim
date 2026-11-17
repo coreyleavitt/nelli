@@ -90,6 +90,7 @@
 ## 4. A genuinely-unmodeled whole-proc shape still declines (never a
 ##    crash) -- the standing "walker never crashes" invariant, unaffected
 ##    by this slice's two fixes.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -383,4 +384,7 @@ suite "symex round-6 B7r2 -- regression: a genuinely-unmodeled whole-proc shape 
       result = t.len > 0
     let r = symexFind(sut, tIndexError())
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOpHavoc)
+    check r.errors.named(feUnsupportedStmtKind)
+    check r.errors.named(seUnsupportedTableValType)
     check r.errors.len > 0

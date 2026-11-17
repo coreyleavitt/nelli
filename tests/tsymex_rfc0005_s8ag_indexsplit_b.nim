@@ -43,6 +43,7 @@
 ## `tsymex_rfc0005_s8ag_indexsplit`, `tsymex_rfc0005_s8ag_indexsplit_c`. Split
 ## so that each part compiles and runs in under 60 s on the Windows legs (the
 ## whole file took 65 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, random, options]
 import nelli/symex
 import nelli/smt/types
@@ -118,3 +119,6 @@ suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
     # is too, and in practice far below (solved hits) x 400k.
     check st.units < 8 * 400_000
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(beSolverUndef)
+    check r.errors.named(seUnsupportedStringOp)

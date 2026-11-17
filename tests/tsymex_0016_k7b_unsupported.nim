@@ -15,6 +15,7 @@
 ##       scalar or string, so the pin is a unit one);
 ##   (d) the walker version is at least 290 (the class of `feUnadmitted`
 ##       moved, which changes taint).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
@@ -78,6 +79,7 @@ suite "RFC-0016 K7b (a) -- feUnadmitted is dcOmitted and drops the path":
     let raw = runSymex(unadmittedProg(),
                        SymexTarget(kind: stkLabel, label: "nowhere"))
     check raw.status == sxUnknown
+    check raw.errors.named(feUnadmitted)
 
   test "the isUnsupported arm drops a dcOmitted marker and taints the rest":
     let t = tInt(64, true)

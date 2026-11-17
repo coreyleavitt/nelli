@@ -16,6 +16,7 @@
 ## The run-dependence now rides the result (`Soundness.runDependence`), set
 ## where the run ends and where its replays settle, and the save reads the
 ## soundness it is handed.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, options]
 import nelli
 import nelli/symex
@@ -57,6 +58,7 @@ suite "R1-07: a save reads the run-dependence of the verdict it is handed":
     let cut = symexFind(r1ForeverSut, tLabel("r1_forever_never"), deep)
     checkpoint show(cut.errors)
     check cut.status == sxUnknown
+    check cut.errors.named(beBudgetExhaustedUnmodelled)
     # Nothing about this verdict depends on the run before it.
     let db = inMemoryDatabase()
     saveSymexVerdict(db, r1Unrelated, tLabel("r1_unrelated"),
@@ -70,6 +72,7 @@ suite "R1-07: a save reads the run-dependence of the verdict it is handed":
     let cut = symexFind(r1ForeverSut, tLabel("r1_forever_never"), deep)
     checkpoint show(cut.errors)
     check cut.status == sxUnknown
+    check cut.errors.named(beBudgetExhaustedUnmodelled)
     let clean = symexFind(r1Shallow, tLabel("r1_shallow"))
     check clean.status == sxSat
     let db = inMemoryDatabase()

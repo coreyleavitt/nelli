@@ -20,6 +20,7 @@
 ##       be replayed.
 ## Every expected value was probed against the real compiler (Nim 2.2.10,
 ## debug build, c and cpp identical); the probe is quoted beside the test.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -120,12 +121,14 @@ suite "S8k (1): every query over strings is bounded":
     let r = symexFind(needs130, tLabel("s8k_needs130"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beSolverUndef)
     check r.errors.capMsg
 
   test "a 130-byte length alone is past the default cap too":
     let r = symexFind(len130, tLabel("s8k_len130"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beSolverUndef)
     check r.errors.capMsg
 
   test "maxSeqLen raises the cap: the 130-byte witness is found":

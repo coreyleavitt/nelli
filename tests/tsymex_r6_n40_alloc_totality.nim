@@ -60,6 +60,7 @@
 ## float value, so this file's poison tables (`Table[int, string]`,
 ## `Table[string, string]`) became modelled. Each was swapped for a shape
 ## still unbacked: a `float` key and a `seq[int]` value.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -266,6 +267,7 @@ suite "symex N40 -- family 4/5: lambda with an unallocatable param/return type":
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(seUnsupportedTableKeyType)
 
   test "N40-6: lambda construction with an unsupported-KEY Table RETURN type -- never called, so the label is reached (RFC-0005 S8cd: a Table result is structured, allocated per call; `tsymex_rfc0005_s8cd_ops` pins the called form)":
     symexCaptureBegin()

@@ -6,6 +6,7 @@
 ## flipped and are justified here. The SND-3 family did NOT flip: its pins still
 ## read `sxUnknown`, so there is no `sxUnsat` for the helper to justify, and the
 ## suite at the end asserts why.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
@@ -179,19 +180,20 @@ proc flOutsideLoop(s: string) =
 suite "§4.3's SND-3 family stays sxUnknown, so the helper has nothing to justify":
   ## The labels are reachable in Nim, so `sxUnsat` would be false and the helper
   ## must keep refusing these runs. The checks read that refusal directly.
-  template stays(sut: untyped; label: string) =
+  template stays(sut: untyped; label: string, kinds: set[SymexErrorKind]) =
     let r = symexFind(sut, tLabel(label))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     expect AssertionDefect:
       checkUnsatOverTaintOnly(r)
 
   test "SND-3-1: the digit scan loop":
-    stays(flDigitScanLoop, "after_loop")
+    stays(flDigitScanLoop, "after_loop", {beBudgetExhausted, seUnsupportedStringOp})
   test "SND-3-2: a target reachable only through the compare":
-    stays(flOnlyViaDegraded, "only_via_degrade")
+    stays(flOnlyViaDegraded, "only_via_degrade", {beBudgetExhausted, seUnsupportedStringOp})
   test "SND-3-4: the compare outside a loop":
-    stays(flOutsideLoop, "outside_loop_degrade")
+    stays(flOutsideLoop, "outside_loop_degrade", {seUnsupportedStringOp})
   test "oracle: Nim reaches each label":
     symexCaptureBegin()
     flDigitScanLoop("12")

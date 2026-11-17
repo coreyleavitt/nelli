@@ -15,6 +15,7 @@
 ## empirical Z3 NON-TERMINATOR (bisected: the UNSAT side hung > 3 h) — that
 ## shape now DECLINES CLASSIFIED (CR-17 class; pinned below); the
 ## Int-representation pre-pass lifting it is the recorded round-5 slice.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -88,6 +89,7 @@ suite "symex round-4 Slice A — bound string slices lower as substrings":
   test "free-int-param bound declines classified (the bv2int non-termination shape)":
     let r = symexFind(bvBoundDeclined, tLabel("bv-bound"))
     check r.status == sxUnknown
+    check r.errors.named(seUnsupportedStringOp)
     check r.errors.len > 0
 
 suite "symex round-4 Slice A — walker version pin":

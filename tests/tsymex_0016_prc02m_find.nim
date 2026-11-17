@@ -73,6 +73,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 
 template declines(r: SymexResult) =
   check r.status == sxUnknown
+  check r.errors.named(feGlobalRouteUnproved)
   check not r.trusted
   check "whose overrides cannot be listed" in show(r.errors)
 
@@ -132,6 +133,7 @@ suite "PRC-02m: symexFind over a dynamic call":
       # dispatch whatever it reads (it would otherwise be a trusted verdict over
       # the visible overrides only).
       check r.status == sxUnknown
+      check r.errors.named(feGlobalRouteUnproved)
       check not r.trusted
 
   test "a global read beside a ref hierarchy decides with the subtype table":
@@ -166,6 +168,8 @@ suite "PRC-02m: symexFind over a dynamic call":
       let r = symexFind(sutHeld, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
       check r.status == sxUnknown
+      check r.errors.named(feGlobalHavoc)
+      check r.errors.named(feGlobalRouteUnproved)
       check not r.trusted
       when hasSubtypeTable:
         check "a lifetime hook the entry could not see" in show(r.errors)

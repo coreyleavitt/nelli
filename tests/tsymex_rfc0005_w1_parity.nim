@@ -12,6 +12,7 @@
 ##   WA-11  (`SymexResult.fromCache`, removed in K10d; `tsymex_0016_k10d_removals`)
 ##   WA-12  the no-targets finding carries `soundness`, `gaps` and
 ##          `annotationViolations`, as every finding does (§8.1, S11).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, json, tables]
 import nelli
 import nelli/symex
@@ -147,6 +148,7 @@ suite "WA-6 -- symexFindAllWitnesses carries hints and diagnostics":
   test "symexFind: the replay hint is on the result":
     let r = symexFind(w1QuitFirst, tLabel("w1_quit"))
     check r.status == sxUnknown
+    check r.errors.named(feGlobalHavoc)
     var found = false
     for e in r.errors:
       if $e.kind in replayHintKinds: found = true

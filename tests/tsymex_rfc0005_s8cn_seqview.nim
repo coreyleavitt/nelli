@@ -16,6 +16,7 @@
 ## `tsymex_rfc0005_s8cn_seqview_d`, `tsymex_rfc0005_s8cn_seqview_e`,
 ## `tsymex_rfc0005_s8cn_seqview_f`. Split so that each part compiles and runs
 ## in under 60 s on the Windows legs (the whole file took 94 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -54,6 +55,9 @@ template declined(fn: typed; lbl: static string; why: static string) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(ceClosureBodyUncertain)
+    check r.errors.named(feTableIterOrder)
+    check r.errors.named(feUnsupportedOp)
     check why in show(r.errors)
 
 template guardT(): untyped {.dirty.} =

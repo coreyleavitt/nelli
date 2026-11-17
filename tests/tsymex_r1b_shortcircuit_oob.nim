@@ -44,6 +44,7 @@
 ## cycle (see `tests/tsymex_r1_draingap.nim`'s pin). `renderAsChoicesVersion`
 ## STAYS "7" (no new witness shape).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -249,6 +250,7 @@ suite "symex R1B — while-arm (re-evaluated each iteration): A and s[i] must NO
     ## RED (pre-fix): sxRaised (false). GREEN (post-fix): sxUnknown.
     let r = symexFind(sutWhileGuardedOob, tLabel("whileImpossible"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
   test "R1B-while-3 (reachable companion): \"foundX\" is a real sxSat with a valid witness":
     let r = symexFind(sutWhileFindX, tLabel("foundX"))
@@ -279,6 +281,7 @@ suite "symex R1B — for-NESTED while (parseIterBodyStmt arm): A and s[i] must N
   test "R1B-fornest-2: \"forWhileImpossible\" degrades to sxUnknown, never a false sxRaised":
     let r = symexFind(sutForNestedWhileOob, tLabel("forWhileImpossible"), nestedLoopBudget)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
   test "R1B-fornest-3 (reachable companion): \"forFoundX\" is a real sxSat with a valid witness":
     let r = symexFind(sutForNestedWhileFindX, tLabel("forFoundX"), nestedLoopBudget)

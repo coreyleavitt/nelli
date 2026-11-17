@@ -31,6 +31,7 @@
 ## so that each part compiles and runs in under 60 s on the Windows legs (the
 ## whole file took 76 s).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re, sequtils, os, tables]
 import nelli/symex
 import nelli/smt/types
@@ -262,6 +263,7 @@ suite "S8bi (1): raise sites behind a while guard's short circuit":
     # sxUnknown; bounded, the S8bi pin stands.
     let r = verdict(nsShortCircuit, "bi_ns_short_circuit")
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
     check onlyLengthDecline(r.errors)
     check verdict(nsShortCircuitB, "bi_ns_short_circuit_b").status == sxUnsat
 

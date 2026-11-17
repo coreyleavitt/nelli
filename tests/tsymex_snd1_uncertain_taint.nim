@@ -39,6 +39,7 @@
 ## demonstrating the `isUnsupported` chokepoint rather than an op M4 now
 ## models correctly. `/=` itself (SUT 2) remains untouched by M4 and continues
 ## to prove the taint mechanism is intact for ops M4 did not touch.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -118,6 +119,8 @@ suite "symex SND-1 — isUnsupported taints Path.uncertain (walker v38)":
   test "SND-1: a nested-seq element `*=` drop then a compare degrades to sxUnknown (no false sxSat)":
     let r = symexFind(divMutate, tLabel("div"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedStmtKind)
+    check r.errors.named(seNestedSeqUnsupported)
 
   test "PRC-07: `acc /= 2.0; if acc == 5.0` is modelled: exact sxSat, witness 10.0":
     let r = symexFind(divModelled, tLabel("div_modelled"))

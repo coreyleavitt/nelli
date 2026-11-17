@@ -53,6 +53,7 @@
 ## else moved: a live target through a fresh symbol is a candidate
 ## (`sxUnknown`, never `sxSat`), substituted/halt/abort runs stay
 ## `sxUnknown`, and the unknown-exception repros no longer lie.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, os, math, sets, tables]
 import nelli/symex
 import nelli/smt/types
@@ -583,6 +584,7 @@ suite "RFC-0005 S6b (c) -- guards":
     let r = symexFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))
     show r
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOpHavoc)
 
   test "an untouched new-ref distinct field (a seq one until RFC-0005 S8ap) is a candidate: sxUnknown, never sxSat":
     let r = symexFind(s6bNewSeqFieldLive, tLabel("s6b_new_seq_field_live"))

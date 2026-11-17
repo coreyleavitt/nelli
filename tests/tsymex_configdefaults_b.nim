@@ -22,6 +22,7 @@
 ## Split so that each part compiles and runs in under 60 s on the Windows legs
 ## (the whole file took 64 s).
 
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -142,6 +143,7 @@ suite "RFC-0010 B4 round 2 — maxCallDepth is a documented exception, not unlim
     let r = symexFind(b4CallDepth, tLabel("call_depth_hit"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 0)))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
 
   test "an explicit large bound genuinely reaches deeper recursion":
     # The default cap (3) is too shallow for this SUT's needed depth (up to
@@ -211,6 +213,7 @@ suite "RFC-0010 B4 — maxLoopUnwind, a documented exception (see also maxCallDe
     let r = symexFind(boundedLoopZero, tLabel("loop_zero_hit"),
         SymexSettings(budget: ResourceBudget(maxLoopUnwind: 0)))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedAssumedBound)
 
 # ---------------------------------------------------------------------------
 # RFC-0010 B4 — review finding #7: the FINITE default must actually bound a
@@ -243,10 +246,12 @@ suite "RFC-0010 B4 — the default budget actually bounds a runaway search":
   test "an unbounded while loop declines under the default maxLoopUnwind":
     let r = symexFind(runawayLoop, tLabel("runaway_loop_never"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
 
   test "unbounded recursion declines under the default maxCallDepth":
     let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
 
   # The explicit finite `maxCallDepth` pin, the one test of this file that
   # takes a minute, is `tsymex_configdefaults_depth`.

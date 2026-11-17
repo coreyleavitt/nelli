@@ -1,3 +1,4 @@
+from ./s8cu_helpers import named
 import std/unittest
 import std/math
 import std/sequtils
@@ -72,7 +73,10 @@ proc mixedCmpOrd(a: float32, b: float64) =
 suite "symex Phase 15 — CR-3 float→int domain bounding":
 
   test "CR-3: unbounded int(x) never raises; int(x)==3 is a clean sxSat (S8g)":
-    check symexFind(f2i_unbound, tRaisedExn("RangeDefect")).status == sxUnknown  # K10a-float: halted undefined side
+    block:
+      let k9r = symexFind(f2i_unbound, tRaisedExn("RangeDefect"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ubFloatToIntRange)
     let r = symexFind(f2i_unbound, tLabel("f2i_unbound"))
     check r.status == sxSat
     if r.status == sxSat: check int(r.witness[0]) == 3
@@ -80,19 +84,30 @@ suite "symex Phase 15 — CR-3 float→int domain bounding":
   test "CR-3: NaN input → never a claim (S8g: fresh value, replay refutes)":
     ## Real Nim: int(NaN) == low(int), so the label is unreachable. The model's
     ## out-of-range value is fresh; its candidate is replayed and refuted.
-    check symexFind(f2i_nan, tRaisedExn("RangeDefect")).status == sxUnknown  # K10a-float: halted undefined side
+    block:
+      let k9r = symexFind(f2i_nan, tRaisedExn("RangeDefect"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ubFloatToIntRange)
     let r = symexFind(f2i_nan, tLabel("f2i_nan"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
 
   test "CR-3: Inf input → never a claim (S8g: fresh value, replay refutes)":
-    check symexFind(f2i_inf, tRaisedExn("RangeDefect")).status == sxUnknown  # K10a-float: halted undefined side
+    block:
+      let k9r = symexFind(f2i_inf, tRaisedExn("RangeDefect"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ubFloatToIntRange)
     let r = symexFind(f2i_inf, tLabel("f2i_inf"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
 
 suite "symex Phase 15 — CR-4 int32(float) 32-bit conversion":
 
   test "CR-4: int32(x) never raises; int32(x)==5 is a clean sxSat (S8g)":
-    check symexFind(i32conv, tRaisedExn("RangeDefect")).status == sxUnknown  # K10a-float: halted undefined side
+    block:
+      let k9r = symexFind(i32conv, tRaisedExn("RangeDefect"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ubFloatToIntRange)
     let r = symexFind(i32conv, tLabel("i32conv"))
     check r.status == sxSat
     if r.status == sxSat: check int32(r.witness[0]) == 5

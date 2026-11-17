@@ -212,6 +212,7 @@ suite "symex N3 — nestedRoutineScanBoundary characterization (RFC-parser-norma
   test "hasReturnShallow contrast: a real top-level iterator return still degrades — sxUnknown":
     let r = symexFind(sutTopLevelReturnDegrades, tLabel("topLevelReturnGot42"))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedStmtKind)
 
   test "hasKindShallow/hasBreakContinueShallow: nested lambda's own break does not leak — sxSat":
     let r = symexFind(sutLambdaBreakBoundary, tLabel("lambdaBreakSum3"))

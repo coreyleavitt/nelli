@@ -16,6 +16,7 @@
 ## `tsymex_rfc0005_s8cn_seqview_c`, `tsymex_rfc0005_s8cn_seqview_d`,
 ## `tsymex_rfc0005_s8cn_seqview_f`. Split so that each part compiles and runs
 ## in under 60 s on the Windows legs (the whole file took 94 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -49,11 +50,12 @@ template decidedT(fn: typed; lbl: static string; want: typed) =
     if r.status == sxSat:
       check lbl in hits(fn(r.witness[0]))
 
-template declined(fn: typed; lbl: static string; why: static string) =
+template declined(fn: typed; lbl: static string; why: static string, kinds: set[SymexErrorKind]) =
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     check why in show(r.errors)
 
 template guardT(): untyped {.dirty.} =
@@ -167,8 +169,8 @@ suite "S8cn: the callee holding the memory":
     check "le_new" in hits(sLent(1))
     check "tv_new" in hits(sTv({"a": 1}.toTable))
   test "declines":
-    declined(sTc1, "tc1_shared", "holding the whole of one")
-    declined(sTc2, "tc2_copy", "holding the whole of one")
-    declined(sCur, "cu_shared", "holding the whole of one")
-    declined(sLent, "le_new", "holding the whole of one")
-    declined(sTv, "tv_new", "holding the whole of one")
+    declined(sTc1, "tc1_shared", "holding the whole of one", {feTableIterOrder, feUnsupportedOp})
+    declined(sTc2, "tc2_copy", "holding the whole of one", {feTableIterOrder, feUnsupportedOp})
+    declined(sCur, "cu_shared", "holding the whole of one", {feUnsupportedOp})
+    declined(sLent, "le_new", "holding the whole of one", {feUnsupportedOp})
+    declined(sTv, "tv_new", "holding the whole of one", {feTableIterOrder, feUnsupportedOp})

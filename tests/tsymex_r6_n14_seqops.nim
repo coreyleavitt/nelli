@@ -87,6 +87,7 @@
 ##    `feUnsupportedOp` (unchanged by this slice, confirmed via direct
 ##    probe before writing this suite). Pinned below to prove it stays
 ##    classified.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -456,17 +457,21 @@ suite "N14 — mutation on a placeholder-ized seq (item 1 audit pin, round-6 fix
   test "index-assign on a placeholder receiver classifies sxUnknown, never a crash":
     let r = symexFind(mutIndexAssignOnPlaceholder, tLabel("mut_indexassign_placeholder"))
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check r.errors.len > 0
     check r.errors.anyIt(it.severity == sevError)
 
   test "pop on a placeholder receiver classifies sxUnknown, never a crash":
     let r = symexFind(mutPopOnPlaceholder, tLabel("mut_pop_placeholder"))
     check r.status == sxUnknown
+    check r.errors.named(seNestedSeqUnsupported)
+    check r.errors.named(weInternalWalkerFault)
     check r.errors.len > 0
     check r.errors.anyIt(it.severity == sevError)
 
   test "del on a placeholder receiver classifies sxUnknown, never a crash":
     let r = symexFind(mutDelOnPlaceholder, tLabel("mut_del_placeholder"))
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check r.errors.len > 0
     check r.errors.anyIt(it.severity == sevError)

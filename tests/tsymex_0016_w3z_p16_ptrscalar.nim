@@ -156,3 +156,4 @@ suite "P16 nonzero cast":
   test "a nonzero address stays declined (no address model)":
     let r = symexFind(nz, tLabel("hit"))
     check r.status == sxUnknown
+    check r.errors.named(heUnsafeCast)

@@ -26,6 +26,7 @@
 ## fix itself (`lowerSeqLit` now allocates a REAL backed-sort empty array
 ## for a BACKED `elemTy`, falling back to the inert placeholder only for a
 ## genuinely unbacked one).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -123,6 +124,7 @@ suite "symex N29 -- unbacked seq[(string,string)] literal-then-add: unaffected, 
   test "N29-5: `.add` on an unbacked-element empty literal stays an honest classified decline, never a crash":
     let r = symexFind(sutUnbackedLitAdd, tLabel("unbacked_add"))
     check r.status == sxUnknown
+    check r.errors.named(seNestedSeqUnsupported)
     var sawClassified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)

@@ -24,6 +24,7 @@
 ## `tsymex_rfc0005_s8bq_remainder`, `tsymex_rfc0005_s8bq_remainder_b`. Split so
 ## that each part compiles and runs in under 60 s on the Windows legs (the
 ## whole file took 71 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
@@ -244,13 +245,22 @@ suite "S8bq (4): newSeqUninit taints only a read of an unwritten element":
   test "a symbolic index confined to written elements":
     check verdict(unSymIndexDead, "bq_un_sym_index_dead").status == sxUnsat
   test "a symbolic index that may reach an unwritten element":
-    check verdict(unSymIndexLive, "bq_un_sym_index_live").status == sxUnknown
+    block:
+      let k9r = verdict(unSymIndexLive, "bq_un_sym_index_live")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOpHavoc)
   test "written on both arms of a merge":
     check verdict(unMerge, "bq_un_merge").status == sxUnsat
   test "written on one arm of a merge, read on the other":
-    check verdict(unMergeOneArm, "bq_un_merge_one_arm").status == sxUnknown
+    block:
+      let k9r = verdict(unMergeOneArm, "bq_un_merge_one_arm")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOpHavoc)
   test "del moves an unwritten element into a written slot":
-    check verdict(unDelMoves, "bq_un_del_moves").status == sxUnknown
+    block:
+      let k9r = verdict(unDelMoves, "bq_un_del_moves")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOpHavoc)
   test "del of fully written elements":
     check verdict(unDelWritten, "bq_un_del_written").status == sxUnsat
   test "an added element is written":
@@ -260,12 +270,18 @@ suite "S8bq (4): newSeqUninit taints only a read of an unwritten element":
   test "pop of a written element":
     check verdict(unPop, "bq_un_pop").status == sxUnsat
   test "pop of an unwritten element":
-    check verdict(unPopUnwritten, "bq_un_pop_unwritten").status == sxUnknown
+    block:
+      let k9r = verdict(unPopUnwritten, "bq_un_pop_unwritten")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOpHavoc)
   test "a seq returned by a call keeps its unwritten elements":
     let r = verdict(unReturnWritten, "bq_un_return_written")
     check r.status == sxSat
     check r.errors.len == 0
-    check verdict(unReturnUnwritten, "bq_un_return_unwritten").status == sxUnknown
+    block:
+      let k9r = verdict(unReturnUnwritten, "bq_un_return_unwritten")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOpHavoc)
   test "a loop writes every element":
     check verdict(unLoopFill, "bq_un_loop_fill").status == sxUnsat
   test "an element assignment's index check is not a read":
@@ -273,7 +289,10 @@ suite "S8bq (4): newSeqUninit taints only a read of an unwritten element":
     check r.status == sxSat
     check r.errors.len == 0
   test "an augmented assignment reads the element":
-    check verdict(unAugUnwritten, "bq_un_aug_unwritten").status == sxUnknown
+    block:
+      let k9r = verdict(unAugUnwritten, "bq_un_aug_unwritten")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOpHavoc)
     let r = verdict(unAugWritten, "bq_un_aug_written")
     check r.status == sxSat
     check r.errors.len == 0

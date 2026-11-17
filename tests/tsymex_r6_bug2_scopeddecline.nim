@@ -38,6 +38,7 @@
 ## Bumps `symexWalkerVersion` 84->85: verdict-surface change (previously
 ## `sxUnknown` verdicts for procs allocating — but not reading — a poisoned
 ## field now honestly TIGHTEN to their real `sxSat`/`sxUnsat`).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -217,6 +218,7 @@ suite "symex round-6 Bug #2 — variant construction (A3 fork-per-tag) with a pl
   test "Bug2-5b: the touched (symRrq) fork's own options READ still degrades classified, not a crash":
     let r = symexFind(sutSymConstructTouchedArmDegrades, tLabel("sym_construct_rrq_touch_degrades"))
     check r.status == sxUnknown
+    check r.errors.named(seNestedSeqUnsupported)
 
 suite "symex round-6 Bug #2 — local seq[(string,string)] composition (regression, not new capability)":
 
@@ -228,6 +230,7 @@ suite "symex round-6 Bug #2 — local seq[(string,string)] composition (regressi
   test "Bug2-6b: a MUTATED local seq[(string,string)] still degrades classified, never a crash":
     let r = symexFind(sutLocalSeqTouchDegrades, tLabel("local_seq_touch_degrades"))
     check r.status == sxUnknown
+    check r.errors.named(seNestedSeqUnsupported)
 
 suite "symex round-6 Bug #2 — walker version pin":
 

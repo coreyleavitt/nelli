@@ -90,6 +90,7 @@
 ## `tsymex_163rev_degrade_classification_d`. Split so that each part compiles
 ## and runs in under 60 s on the Windows legs (the whole file took 89 s).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
@@ -127,6 +128,7 @@ suite "#161/#163 handoff -- maxCallDepth bail names its own budget":
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
 
   test "the depth-cap bail degrades classified, naming the budget and the remedy":
     let r = symexFind(probeBottom, tLabel("bottom12"), cappedShallow)

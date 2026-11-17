@@ -4,6 +4,7 @@
 ## iteration forks on the guard: the cond=true branch walks the
 ## body and continues; the cond=false branch exits. After k
 ## iterations, surviving paths get marked uncertain (sawUnknown).
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -31,3 +32,4 @@ suite "symex Phase 6 — while":
         symexTarget("deep")
     let r = symexFind(loopToHundred, tLabel("deep"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)

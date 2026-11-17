@@ -6,6 +6,7 @@
 ## `rlimit` parameter so that solving a non-trivial BV[64] formula
 ## with a tiny rlimit budget produces `sxUnknown` (the solver
 ## exhausted its step quota before deciding).
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 import nelli/smt/types
@@ -33,3 +34,4 @@ suite "symex Phase 13 cycle 1 — queryRLimit wires Z3 rlimit":
     # Z3_L_UNDEF → sxUnknown.
     let r = symexFind(multConstraint, tLabel("rare"), tightSettings)
     check r.status == sxUnknown
+    check r.errors.named(beSolverUndef)

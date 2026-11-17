@@ -10,6 +10,7 @@
 ##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types
@@ -28,11 +29,12 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, kinds: set[SymexErrorKind]): untyped =
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
@@ -134,7 +136,7 @@ suite "S8cl (4): newString is fresh memory":
     clean(sutLength, "nl_dead", sxUnsat)
     clean(sutLength, "nr", sxSat)
     clean(sutLength, "nr_dead", sxUnsat)
-    declines(sutHuge, "nh", "is not modelled")
+    declines(sutHuge, "nh", "is not modelled", {beSolverUndef, feUnsupportedOp})
 
   test "newStringOfCap":
     clean(sutCap, "nc", sxSat)
@@ -145,10 +147,11 @@ suite "S8cl (4): newString is fresh memory":
     clean(sutFreshView, "bf_dead", sxUnsat)
 
   test "what cannot be placed still declines":
-    declines(sutOpaqueView, "bu", "opaqueStr")
+    declines(sutOpaqueView, "bu", "opaqueStr", {feOpaqueCallUnmodelled, feUnsupportedOp})
     let u = symexFind(sutUninit, tLabel("ui"))
     checkpoint $u.status & " " & show(u.errors)
     check u.status == sxUnknown
+    check u.errors.named(feUnsupportedStmtKind)
 
 suite "S8cl: walker version":
   test "symexWalkerVersion >= 248":

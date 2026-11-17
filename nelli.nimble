@@ -1897,6 +1897,8 @@ task test, "Run the test suite":
             "tsymex_0016_universe",
             # RFC-0016 K2a: the dispatch census (every NimNode case and its else, Survivors(/Degrade( literals, bare skip(, platform arms) against its ratcheted allowlist.
             "tsymex_0016_k2a_census",
+            # RFC-0016 K9c: no decline assertion without a kind (the census of `check r.status == sxUnknown` blocks that name no SymexErrorKind), ratcheted at its ceiling.
+            "tsymex_0016_k9c_census",
             "tsymex_0016_d3b_walklog",
             # RFC-0016 0.10.0 review D3c: the include surface census (include list, no import in runtime_*.nim, symbol-coupling ceilings, the heap-only forward-declaration block, the symval leaf).
             "tsymex_0016_d3_include_census",

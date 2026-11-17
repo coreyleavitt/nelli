@@ -17,6 +17,7 @@
 ## `tsymex_rfc0005_s8cn_lent_e`, `tsymex_rfc0005_s8cn_lent_f`. Split so that
 ## each part compiles and runs in under 60 s on the Windows legs (the whole
 ## file took 95 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -36,11 +37,12 @@ template hits(call: untyped): untyped =
       discard
     symexCaptureEnd()
 
-template declined(fn: typed; lbl: static string) =
+template declined(fn: typed; lbl: static string, kinds: set[SymexErrorKind]) =
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     check "memory" in show(r.errors)
 
 template nativeSees(fn: typed; live, dead: static string) =
@@ -159,16 +161,22 @@ suite "S8cn: seq `items` with a write in the body":
     nativeSees(iFormalCall, "if_new", "if_old")
     nativeSees(iOpenArray, "oa_new", "oa_old")
   test "declines":
-    declined(iDirect, "id_new"); declined(iDirect, "id_old")
-    declined(iVarCallee, "iv_new"); declined(iVarCallee, "iv_old")
-    declined(iGlobalName, "in_new"); declined(iGlobalName, "in_old")
-    declined(iGlobalCallee, "ig_new"); declined(iGlobalCallee, "ig_old")
-    declined(iPtrLocal, "ip_new"); declined(iPtrLocal, "ip_old")
-    declined(iPtrGlobal, "ipg_new"); declined(iPtrGlobal, "ipg_old")
-    declined(iElemPtr, "ie_new"); declined(iElemPtr, "ie_old")
-    declined(iFormalCall, "if_new"); declined(iFormalCall, "if_old")
-    declined(iOpenArray, "oa_new"); declined(iOpenArray, "oa_old")
+    declined(iDirect, "id_new", {feUnsupportedOp}); declined(iDirect, "id_old", {feUnsupportedOp})
+    declined(iVarCallee, "iv_new", {feUnsupportedOp}); declined(iVarCallee, "iv_old", {feUnsupportedOp})
+    declined(iGlobalName, "in_new", {feUnsupportedOp}); declined(iGlobalName, "in_old", {feUnsupportedOp})
+    declined(iGlobalCallee, "ig_new", {feUnsupportedOp}); declined(iGlobalCallee, "ig_old", {feUnsupportedOp})
+    declined(iPtrLocal, "ip_new", {feUnsupportedOp}); declined(iPtrLocal, "ip_old", {feUnsupportedOp})
+    declined(iPtrGlobal, "ipg_new", {feUnsupportedExprKind, feUnsupportedOp}); declined(iPtrGlobal, "ipg_old", {feUnsupportedExprKind, feUnsupportedOp})
+    declined(iElemPtr, "ie_new", {feUnsupportedOp}); declined(iElemPtr, "ie_old", {feUnsupportedOp})
+    declined(iFormalCall, "if_new", {feUnsupportedOp}); declined(iFormalCall, "if_old", {feUnsupportedOp})
+    declined(iOpenArray, "oa_new", {feUnsupportedOp}); declined(iOpenArray, "oa_old", {feUnsupportedOp})
   test "a target in the body of a declined call declines":
     nativeSees(iTwoInBody, "tb_new", "tb_old")
-    check symexFind(iTwoInBody, tLabel("tb_new")).status == sxUnknown
-    check symexFind(iTwoInBody, tLabel("tb_old")).status == sxUnknown
+    block:
+      let k9r = symexFind(iTwoInBody, tLabel("tb_new"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOp)
+    block:
+      let k9r = symexFind(iTwoInBody, tLabel("tb_old"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOp)

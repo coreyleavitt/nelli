@@ -1,3 +1,4 @@
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 import nelli/smt/types
@@ -35,6 +36,7 @@ suite "symex Phase 16 R16-2 — float→int RangeDefect (S8g: range targets only
     ## K10a-float: sxUnknown, the out-of-range side is a halted undefined op.
     let r = symexFind(rd_raiseOnly, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
     check not r.trusted
 
   test "R16-2-1b: unconstrained Natural(f) → sxRaised(RangeDefect)":
@@ -69,6 +71,7 @@ suite "symex Phase 16 R16-2 — RangeDefect catchability":
     ## run is an untrusted sxUnknown.
     let r = symexFind(rd_caught, tLabel("rdCaughtHit"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
     check not r.trusted
 
   test "R16-2-2b: Natural(f) in try/except RangeDefect is caught → sxSat":
@@ -153,6 +156,7 @@ suite "symex Phase 16 R16-2 — int32(float)":
   test "R16-2-5: int32(f) unconstrained → no RangeDefect (sxUnsat)":
     let r = symexFind(rd_int32width, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
+    check r.errors.named(ubFloatToIntRange)
     check not r.trusted
 
   test "R16-2-5b: int32(f) in range is exact":

@@ -24,6 +24,7 @@
 ##   actual; `inc data[0]` and `data[0] += 1` are mutations it now reads.
 ##
 ## Walker version: 312 (from 311).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -62,6 +63,7 @@ template declined(fn: typed; lbl: static string; why: static string) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
     check why in show(r.errors)
 
 # ---- mayWriteRoot: a writing magic in a `lent` loop body ---------------------
@@ -168,7 +170,12 @@ suite "K2F-1: a call through a proc field may resize or rearm":
     declined(sField, "sf_old", "may resize")
   test "native and walk: the rearm through a field":
     for n in ns: check "rf_new" in hits(rField(n))
-    check symexFind(rField, tLabel("rf_new")).status == sxUnknown
+    block:
+      let k9r = symexFind(rField, tLabel("rf_new"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ceClosureBodyUncertain)
+      check k9r.errors.named(feUnsupportedOp)
+      check k9r.errors.named(seUnsupportedCompoundSortLeaf)
 
 suite "K2F-1: scanShapeReceiverMutated reads a magic mutation":
   test "native":

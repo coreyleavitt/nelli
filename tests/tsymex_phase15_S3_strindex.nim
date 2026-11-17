@@ -16,6 +16,7 @@
 ## bridge. `for c in s` (symbolic iteration over an unknown-length string) stays
 ## unsupported — NOT for a byte/codepoint reason but because the iteration count
 ## is unbounded; it classifies honestly as a string-unsupported op (sxUnknown).
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -114,3 +115,4 @@ suite "symex Phase 15 S3 — string len/index/slice (byte-faithful)":
     # NOT a byte/codepoint objection — symbolic unbounded iteration. sxUnknown
     # with a classified error, never a silent UNSAT (Invariant 3).
     check r.status == sxUnknown
+    check r.errors.named(seByteIterUnsupported)

@@ -34,6 +34,7 @@
 ##
 ## Every label is checked natively as well (`exitVerdict`).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, macros]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -196,9 +197,11 @@ template exhausted(fn: typed) =
     let ok = symexFind(fn, tLabel("ok"))
     checkpoint "ok " & $ok.status & "\n" & show(ok.errors)
     check ok.status == sxUnknown
+    check ok.errors.named(beBudgetExhausted)
     let bad = symexFind(fn, tLabel("bad"))
     checkpoint "bad " & $bad.status & "\n" & show(bad.errors)
     check bad.status == sxUnknown
+    check bad.errors.named(beBudgetExhausted)
 
 suite "R6-2: the final test after the unroll bound":
   test "default bound is 5":

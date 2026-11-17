@@ -17,6 +17,7 @@
 ## `tsymex_rfc0005_s8cn_lent_d`, `tsymex_rfc0005_s8cn_lent_f`. Split so that
 ## each part compiles and runs in under 60 s on the Windows legs (the whole
 ## file took 95 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -25,11 +26,12 @@ proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs:
     if e.severity == sevError: result.add $e.kind & ": " & e.msg & "\n"
 
-template declined(fn: typed; lbl: static string) =
+template declined(fn: typed; lbl: static string, kinds: set[SymexErrorKind]) =
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     check "memory" in show(r.errors)
 
 template guardN(): untyped {.dirty.} =
@@ -115,12 +117,12 @@ proc lObject(n: int) =
 
 suite "S8cn: `let` over a container with a write in its life":
   test "declines":
-    declined(lGlobalCallee, "lg_a"); declined(lGlobalCallee, "lg_b")
-    declined(lGlobalName, "ln_a"); declined(lGlobalName, "ln_b")
-    declined(lLocal, "ll_a"); declined(lLocal, "ll_b")
-    declined(lVarCallee, "lv_a"); declined(lVarCallee, "lv_b")
-    declined(lPtr, "lp_a"); declined(lPtr, "lp_b")
-    declined(lTable, "lt_a"); declined(lTable, "lt_b")
-    declined(lField, "lf_a"); declined(lField, "lf_b")
-    declined(lString, "ls_a"); declined(lString, "ls_b")
-    declined(lObject, "lo_a"); declined(lObject, "lo_b")
+    declined(lGlobalCallee, "lg_a", {feUnsupportedOp}); declined(lGlobalCallee, "lg_b", {feUnsupportedOp})
+    declined(lGlobalName, "ln_a", {feUnsupportedOp}); declined(lGlobalName, "ln_b", {feUnsupportedOp})
+    declined(lLocal, "ll_a", {feUnsupportedOp}); declined(lLocal, "ll_b", {feUnsupportedOp})
+    declined(lVarCallee, "lv_a", {feUnsupportedOp}); declined(lVarCallee, "lv_b", {feUnsupportedOp})
+    declined(lPtr, "lp_a", {feUnsupportedOp}); declined(lPtr, "lp_b", {feUnsupportedOp})
+    declined(lTable, "lt_a", {feUnsupportedOp, feUnsupportedStmtKind}); declined(lTable, "lt_b", {feUnsupportedOp, feUnsupportedStmtKind})
+    declined(lField, "lf_a", {feUnsupportedOp}); declined(lField, "lf_b", {feUnsupportedOp})
+    declined(lString, "ls_a", {feUnsupportedOp}); declined(lString, "ls_b", {feUnsupportedOp})
+    declined(lObject, "lo_a", {feUnsupportedOp}); declined(lObject, "lo_b", {feUnsupportedOp})

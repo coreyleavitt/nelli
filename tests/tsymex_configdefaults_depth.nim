@@ -1,6 +1,7 @@
 ## RFC-0010 B4 round 2 -- an explicit finite `maxCallDepth` completes cleanly.
 ## Split from `tsymex_configdefaults` (RFC-0005 batch 8): this one test took 60
 ## to 150 s on the Windows runners, and the rest of that file about 14 s.
+from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 
@@ -37,3 +38,4 @@ suite "RFC-0010 B4 -- the default budget actually bounds a runaway search":
     let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)

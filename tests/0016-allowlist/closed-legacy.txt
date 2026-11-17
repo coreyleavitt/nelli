@@ -24,3 +24,4 @@ AUD-04	process, infrastructure or documentation disposition: no engine behaviour
 AUD-10	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
 W-63	a CI-leg observation (the Windows legs are the JIT rows); K2a rechecks the skip census
 MOV-01	process, infrastructure or documentation disposition: no engine behaviour, so no cell and no pin record
+CRH-07	a latent crash with no cell axis: its pin (tsymex_0016_crh07_substowned) asserts verdicts and no crash, and the ASan core set runs it; no K9 cell names a refcount defect

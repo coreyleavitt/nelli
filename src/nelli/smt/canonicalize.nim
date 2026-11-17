@@ -727,8 +727,17 @@ const renderAsChoicesVersion* = "12"
   ##   Nim's. It is now bound once ahead of the chain (a loop with such a
   ##   guard takes the rotation). The follow `while` also checks `shouldStop`
   ##   per continuation, as the follow `if` does (R8-3). No key bytes change.
+  ## - RFC-0016 CRH-07 (369->372; 370 and 371 are the integration head's):
+  ##   `strutils.count`'s value is a fresh `v` with its definition in
+  ##   `regexRecDefConds`, as `replace`'s is, so step 0 decides on the facts
+  ##   alone; S8cf had inlined the term to avoid a crash. The crash was
+  ##   `checkExact` holding an unowned `Z3_substitute` result while resolving
+  ##   one definition against another (`count` over a `replace` value): the
+  ##   roots built over the freed term read stale nodes (a false `sxUnsat` on
+  ##   a satisfiable `count`) and were later released into them (SIGSEGV).
+  ##   The query a count reaches changes shape; no key bytes change.
 
-const symexWalkerVersion* = "369"
+const symexWalkerVersion* = "372"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

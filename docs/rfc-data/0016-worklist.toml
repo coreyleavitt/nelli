@@ -889,12 +889,13 @@ pins = ["tsymex_0016_k20_probes"]
 id = "CRH-07"
 table = "5.3"
 title = "**Latent crash:** a `v == f` Int definition in `regexRecDefConds` segfaults at `byteLeafIds` `dec_ref`"
-state = "open"
+state = "closed"
 note = "the walker-under-sanitizers job, §11"
 slice = "K8c"
 source = "sort U4; S8co item 1; S8cf remainder"
-evidence = "avoided, not fixed; no SUT at e497dcf reaches it; a wrong refcount can hide a use-after-free"
+evidence = "**Fixed (2026-11-17, walker 372).** The cause was not in `byteLeafIds`: `checkExact` resolves each `regexRecDefConds` term against the earlier definitions with `Z3_substitute` and held the result raw, with no reference, so Z3 freed it at the next AST-returning call; the roots substituted over it read freed nodes and releasing them crashed at the next `dec_ref` (`byteLeafIds` was the first walk over them). It needs two definitions, the second naming the first: S8cf's `v == f` was `count` over a `replace` value, and the inline term it chose instead hid it. The resolved terms are now owned (`held`), as are `pointCheck`'s lifted values and substitutions (the same raw-hold class), and `count`'s value is a `regexRecDefConds` definition again, so the path is live. RED with the avoidance removed: a false `sxUnsat` on a satisfiable `s.count('a') == 2`, then SIGSEGV in `byteLeafIds`' `=destroy`. Pinned in `tests/tsymex_0016_crh07_substowned.nim`, which is in `scripts/asan-slice.sh`'s core set."
 cells = []
+pins = ["tsymex_0016_crh07_substowned"]
 
 [[row]]
 id = "CRH-08"

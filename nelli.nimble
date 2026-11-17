@@ -1855,6 +1855,8 @@ task test, "Run the test suite":
             "tsymex_0016_w1d1b_udivzero",
             # RFC-0016 W1-d1c: a call summary relying on a pruned undefined side is reused only where the prune holds.
             "tsymex_0016_w1d1c_cachedprune",
+            # RFC-0016 CRH-07: checkExact owns the terms it substitutes; count is a regexRecDefConds definition again.
+            "tsymex_0016_crh07_substowned",
             # RFC-0016 W1-d3: Path.undefined, Soundness.witnessUndefined, codec v4.
             "tsymex_0016_w1d3_undefined",
             # RFC-0016 W1-d2: checks-off signed arithmetic is undefined, not a wrap; arithChecks derives from the build (W-07).

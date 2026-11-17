@@ -11136,14 +11136,24 @@ proc checkExact(ctx: Z3Context; query: openArray[Z3Bool];
       # A nested replace's term mentions the inner value: definitions are
       # added inner first, so each term is resolved against the earlier
       # ones before it stands in.
+      # RFC-0016 CRH-07: a `Z3_substitute` result has no reference until it
+      # is wrapped, and Z3 frees it at the next call that returns an AST.
+      # `held` owns each resolved term for as long as `tos` names it; the
+      # raw one was freed before it was substituted into the roots, and the
+      # roots built over it were later released into freed nodes (a SIGSEGV
+      # at `byteLeafIds`' dec_ref when a second definition, `count` over a
+      # `replace` value, named the first).
       var froms, tos: seq[RawZ3Ast]
+      var held: seq[Z3AnyAst]
       for d in regexRecDefConds:
         let app = Z3_to_app(ctx.raw, d.raw)
         var t = Z3_get_app_arg(ctx.raw, app, 1)
         if froms.len > 0:
-          t = ctx.checkErr Z3_substitute(ctx.raw, t, cuint(froms.len),
+          held.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute(ctx.raw, t,
+            cuint(froms.len),
             cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
-            cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr))
+            cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+          t = held[^1].raw
         froms.add Z3_get_app_arg(ctx.raw, app, 0)
         tos.add t
       rootsIn = @[]
@@ -11623,6 +11633,10 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
     for r in query: queryIds.incl astId(ctx, r.raw)
     type Lifted = tuple[exact, value: RawZ3Ast, defs: seq[int]]
     var lifted: seq[Lifted]
+    # RFC-0016 CRH-07: owns each lifted value for as long as `lifted` names
+    # it raw (the `pointLit` temporary was released at the end of its
+    # statement, leaving a stale handle for the substitutions below).
+    var liftedHeld: seq[Z3AnyAst]
     for i, st in regexPointSites:
       if i in sites: continue
       var onPath = false
@@ -11636,7 +11650,8 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
       let p = pointValue(st, lit.s, "",
                          int(parseBiggestInt(getNumeralString(startS))))
       if not p.ok: continue
-      lifted.add (st.exact.raw, pointLit(st, p).raw, st.defs)
+      liftedHeld.add pointLit(st, p)
+      lifted.add (st.exact.raw, liftedHeld[^1].raw, st.defs)
       ff.add st.subject.raw
       tt.add lits[id]
     let kinds = seqCapKinds()
@@ -11654,11 +11669,13 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
             result.incl $Z3_get_symbol_string(ctx.raw,
                                               Z3_get_decl_name(ctx.raw, decl))
         for a in args: work.add a
-    proc subst(r: RawZ3Ast; a, b: var seq[RawZ3Ast]): RawZ3Ast =
-      if a.len == 0: return r
-      ctx.checkErr Z3_substitute(ctx.raw, r, cuint(a.len),
+    proc subst(r: RawZ3Ast; a, b: var seq[RawZ3Ast]): Z3Bool =
+      ## Owned at once (CRH-07): a `Z3_substitute` result has no reference
+      ## until it is wrapped.
+      if a.len == 0: return wrap[Z3Bool](ctx, r)
+      wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r, cuint(a.len),
         cast[ptr UncheckedArray[RawZ3Ast]](a[0].addr),
-        cast[ptr UncheckedArray[RawZ3Ast]](b[0].addr))
+        cast[ptr UncheckedArray[RawZ3Ast]](b[0].addr)))
     while true:
       var gone = dropped
       var fs = froms
@@ -11670,7 +11687,7 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
       pins = @[]
       for r in query:
         if astId(ctx, r.raw) in gone: continue
-        pins.add simplify(wrap[Z3Bool](ctx, subst(subst(r.raw, fs, ts), ff, tt)))
+        pins.add simplify(subst(subst(r.raw, fs, ts).raw, ff, tt))
       var live: HashSet[string]
       for r in pins: live = live + constsOf(toAnyAst(r))
       var keep: seq[Lifted]
@@ -11678,7 +11695,7 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
         var shared = false
         for r in query:
           if astId(ctx, r.raw) in l.defs:
-            let c = constsOf(toAnyAst(wrap[Z3Bool](ctx, subst(r.raw, ff, tt))))
+            let c = constsOf(toAnyAst(subst(r.raw, ff, tt)))
             for n in c:
               if n in live: shared = true
         if not shared: keep.add l

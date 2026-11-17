@@ -51,3 +51,4 @@ the CHANGELOG is enough. Do not write one of these out of habit.
 | 0.9.0 | [0.9.0.md](0.9.0.md) | the RFC-0005 soundness surface |
 | 0.9.1 | [0.9.1.md](0.9.1.md) | wiring-audit and code-review fixes; three 0.9.0 regressions |
 | 0.9.2 | [0.9.2.md](0.9.2.md) | RFC-0016 Wave 1: the clean false verdicts, undefined behaviour as an outcome, build-derived checks |
+| 0.10.0 | [0.10.0.md](0.10.0.md) | RFC-0016 Waves 2-3: the undefined-behaviour axis, the build profile in the cache key, `arithChecks` and `fromCache` removed |

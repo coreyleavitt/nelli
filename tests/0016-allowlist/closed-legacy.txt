@@ -35,3 +35,5 @@ AUD-03	structural: no clean no-zero type remains after S8z, so the pins stay on 
 AUD-06	a CI design note (the sampled vm-alias job); no engine behaviour, so no cell and no pin record
 INT-19	a local one-off run against a PCRE 8.37 no-JIT build, recorded in the row; no cell and no pin record
 PRC-30	pinned by tests/tsymex_0016_s8ch_addrglobal.nim, which checks every verdict against the native run of its SUT (`nativeHits`) by hand rather than through a K9 record verb: the SUTs write module-level globals and arrays through pointers, which the K9 replay domains do not drive
+INT-53	a CI-intake tooling defect (scripts/rfc0016-intake.sh, pinned by its --self-test); no engine behaviour, so no cell and no pin record
+INT-54	a compile-time VM budget observation on the msvc nightly leg (the suites it names write no record; tsymex_0016_w3z_r10_nestedreplay pins the budget); no engine cell

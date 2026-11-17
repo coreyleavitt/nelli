@@ -3,24 +3,25 @@
 ## `ubSignedOverflow` for an overflow-capable magic in an opaque callee whose
 ## owner has overflow checks off, unless the build wraps: under `-fwrapv` the
 ## signed `+` is a defined wrap and the sat carries no such kind. The opposite
-## case (no `-fwrapv`, checks off) is `tsymex_0016_w3z_p1_off`. Under vcc the
-## build is refused by design and cannot import `nelli/symex`, so this arm
-## asserts the refusal through `admitBuild`, as `tsymex_0016_k5a_fwrapv` and
-## `tsymex_0016_k5b_cfg_fwrapv` do; the msvc row's `build:fwrapv` cell is
-## allowlisted (`tests/0016-allowlist/build.txt`, `rows=msvc`).
+## case (no `-fwrapv`, checks off) is `tsymex_0016_w3z_p1_off`. The suite keys
+## on the product's own admission of the build, never on the C compiler: a
+## build `nelli/symex` refuses (under vcc, which has no `-fwrapv`) cannot import
+## it, so that arm asserts the refusal through `admitBuild`, as
+## `tsymex_0016_k5a_fwrapv` and `tsymex_0016_k5b_cfg_fwrapv` do; the msvc row's
+## `build:fwrapv` cell is allowlisted (`tests/0016-allowlist/build.txt`,
+## `rows=msvc`).
+import std/options
 import nelli/smt/buildprofile
-when defined(vcc):
+const admission = admitBuild(buildSemantics, buildProvenance)
+when admission.isSome:
   # Neither `nelli/symex` nor `s8cu_helpers` (which imports it) compiles here:
   # the build is refused at compile time.
-  import std/[unittest, strutils, options]
-  suite "W3-z P2: opaque scan, -fwrapv build (vcc)":
+  import std/[unittest, strutils]
+  suite "W3-z P2: opaque scan, -fwrapv build (refused build)":
     test "symex refuses the build by name":
       check buildSemantics.fwrapv
-      let refusal = admitBuild(buildSemantics, buildProvenance)
-      check refusal.isSome
-      if refusal.isSome:
-        check refusal.get.field == bfFwrapv
-        check "-fwrapv" in refusal.get.reason
+      check admission.get.field == bfFwrapv
+      check "-fwrapv" in admission.get.reason
 else:
   import std/[unittest, strutils, tables, macros]
   import nelli

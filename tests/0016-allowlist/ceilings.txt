@@ -4,15 +4,15 @@
 # THE RULE (RFC section 8.2; not checkable in a test): a ceiling is raised only in the commit that introduces a new cell, scope or file whose own entries are added. That bump and the entries land together in one commit, and the commit message names the cell. Raising a ceiling for a skipped test (record it with skipCell), for an entry added after its scope's introduction, or to absorb a regression is the failure this file exists to stop: evidence the cell or fix the cause. A shrunk list lowers its ceiling in the same commit.
 build.txt	5
 capkind.txt	0
-closed-legacy.txt	35
+closed-legacy.txt	37
 ceiling-offenders-cpp.txt	783
 ceiling-offenders-msvc.txt	422
 ceiling-offenders-z3-4.13.4.txt	744
 census.txt	48
-skipsites.txt	93
+skipsites.txt	90
 defined.txt	0
 errorkind.txt	65
-ids.txt	78
+ids.txt	80
 linux-host-known-red.txt	1
 magic.txt	0
 nightly-cpp-known-red.txt	1

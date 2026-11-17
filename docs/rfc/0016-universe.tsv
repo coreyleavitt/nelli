@@ -5,7 +5,7 @@
 # axis typeop: 34 cells
 # axis pragma: 198 cells
 # axis magic: 244 cells
-# axis stdlib: 90 cells
+# axis stdlib: 91 cells
 # axis build: 31 cells (pcre libs and build cells; rows below)
 # axis readonly: 33 cells
 # axis defined: 25 cells
@@ -833,6 +833,7 @@ stdlib:system.-%	modelled	-
 stdlib:system./%	modelled	-
 stdlib:system.<%	modelled	-
 stdlib:system.<=%	modelled	-
+stdlib:system.==	modelled	-
 stdlib:system.countdown/iterator	declined	-
 stdlib:system.countup/iterator	declined	-
 stdlib:tables.CountTable	declined	-

@@ -3775,21 +3775,21 @@ proc atomRecordFieldTypes(recTy: NimNode): seq[NimNode] =
   if recTy == nil or recTy.kind == nnkNilLit: return @[]
   let impl = recTy.getTypeImpl
   var tys: seq[NimNode]
-  case impl.kind
-  of nnkTupleConstr:
+  if impl.kind == nnkTupleConstr:
     for c in impl: tys.add c
-  of nnkTupleTy:
+  elif impl.kind == nnkTupleTy:
     for d in impl:
       if d.kind != nnkIdentDefs: return @[]
       for _ in 0 ..< d.len - 2: tys.add d[^2]
-  of nnkObjectTy:
+  elif impl.kind == nnkObjectTy:
     if impl.len != 3 or impl[0].kind != nnkEmpty or impl[1].kind != nnkEmpty or
        impl[2].kind != nnkRecList:
       return @[]
     for d in impl[2]:
       if d.kind != nnkIdentDefs: return @[]
       for _ in 0 ..< d.len - 2: tys.add d[^2]
-  else: return @[]
+  else:
+    return @[]   # not a record: no fields to decide, the decline stands
   for t in tys:
     let ti = t.getTypeImpl
     if ti.kind != nnkSym or ti.strVal notin atomEqTypeNames: return @[]

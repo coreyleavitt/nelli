@@ -142,6 +142,7 @@ suite "RFC-0016 PRC-34: record ==":
     let r = symexFind(nestedRecord, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
 
 suite "RFC-0016 PRC-34: a type section in a routine body":
   test "native":

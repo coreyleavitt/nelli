@@ -10,7 +10,7 @@ ceiling-offenders-msvc.txt	422
 ceiling-offenders-z3-4.13.4.txt	744
 census.txt	144
 defined.txt	0
-errorkind.txt	66
+errorkind.txt	65
 ids.txt	80
 linux-host-known-red.txt	1
 magic.txt	0

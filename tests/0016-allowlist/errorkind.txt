@@ -38,7 +38,6 @@ errorkind:geDistinctBijectivitySkipped	K9c	no pinDecline asserts this kind; K9c 
 errorkind:geInstantiationCapped	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:geUnresolvedGeneric	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:geVtableDispatch	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
-errorkind:heDepthExhausted	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heFreshnessCapExceeded	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heNewFieldZeroUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:hePtrArith	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]

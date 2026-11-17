@@ -20529,9 +20529,9 @@ proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
                     scope = siteAnchored(stmt.unMarker))
   surviving(live, d)
 
-proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   if w.shouldStop or stmt == nil or paths.len == 0:
-    return paths
+    return exact(paths)
   case stmt.kind
   of isBlock:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -20550,7 +20550,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if pushed: arithFrames.leave()
       return
     if stmt.blkLabel.len == 0:
-      return walkBlock(stmt.stmts, paths, w)
+      return exact(walkBlock(stmt.stmts, paths, w))
     # RFC-0005 S8m: a labelled block is a break target (a source `block` a
     # `break` names, or a desugared loop body a `continue` leaves). Paths
     # that `break` it resume after it, beside its fall-through.
@@ -20563,7 +20563,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # through (`reconcileCells`), and rejoin as they are.
     survivors.add w.loopStack[frameIx].exits.breakPaths.contents
     discard w.loopStack.pop()
-    survivors
+    exact(survivors)
   of isIf:
     case w.mode
     of wmExplore: discard
@@ -20573,7 +20573,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## `walkIfFollowConcrete`'s doc comment above. `wmExplore`'s
       ## fork-every-arm loop below is UNCHANGED (only reached for
       ## `wmExplore`), so this branch does not perturb it.
-      return walkIfFollowConcrete(stmt, paths, w)
+      return exact(walkIfFollowConcrete(stmt, paths, w))
     var survivors: seq[Path]
     if stmt.ifJoin and stmt.branches.len == 1 and stmt.elseBody == nil:
       # RFC-0005 S8w: a short-circuit chain's guard (`IRStmt.ifJoin`). The
@@ -20602,7 +20602,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             continue
           let skipPath = forkPath(cp, cp.pc & @[not condBool], cp.env)
           survivors.add mergeJoinPaths(cp, condBool, armOut, skipPath)
-      return survivors
+      return exact(survivors)
     for p in paths:
       if w.shouldStop: return
       # Phase 15 S10b: evaluating a branch condition may itself raise (a
@@ -20658,7 +20658,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           survivors.add walk(stmt.elseBody, @[elsePath], w)
         else:
           survivors.add elsePath
-    survivors
+    exact(survivors)
   of isLet:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20694,7 +20694,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         newEnv[stmt.lname] = lv
         out2.add forkPath(cp, cp.pc, newEnv)
-    out2
+    exact(out2)
   of isAssign:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20720,7 +20720,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         newEnv[stmt.aname] = av
         out2.add forkPath(cp, cp.pc, newEnv)
-    out2
+    exact(out2)
   of isWhile:
     case w.mode
     of wmExplore: discard
@@ -20729,7 +20729,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## left open for `while` — see `walkWhileFollowConcrete`'s doc comment
       ## above. `wmExplore`'s fork-both-ways k-unroll below is UNCHANGED
       ## (only reached for `wmExplore`), so this branch does not perturb it.
-      return walkWhileFollowConcrete(stmt, paths, w)
+      return exact(walkWhileFollowConcrete(stmt, paths, w))
     # Phase 6: k-unroll. Each iteration forks on the guard.
     var survivors: seq[Path] = @[]
     var active = paths
@@ -20874,7 +20874,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for p in active:
         survivors.add forkPathTainted(p, p.pc, p.env, d)
     discard w.loopStack.pop()
-    survivors
+    exact(survivors)
   of isBreak:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20889,11 +20889,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # act (was a kindless run mark with no error); token discarded.
       return w.halted(weBreakOutsideLoop,
         "`break` reached with no enclosing loop or block to leave — the " &
-             "breaking path is dropped (weBreakOutsideLoop)").live
+             "breaking path is dropped (weBreakOutsideLoop)")
     # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
       exitJump(p, target, isCont = false, w)
-    @[]
+    exact(@[])
   of isContinue:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20904,29 +20904,29 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # from hand-built IR. RFC-0005 S1b: HALT site, same kind as `break`.
       return w.halted(weBreakOutsideLoop,
         "`continue` reached with no enclosing loop — the path is dropped " &
-             "(weBreakOutsideLoop)").live
+             "(weBreakOutsideLoop)")
     # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
       exitJump(p, target, isCont = true, w)
-    @[]
+    exact(@[])
   of isIndex:
-    walkIndexArm(stmt, paths, w)
+    exact(walkIndexArm(stmt, paths, w))
   of isIndexAssign:
-    walkIndexAssignArm(stmt, paths, w)
+    exact(walkIndexAssignArm(stmt, paths, w))
   of isSeqPop:
-    walkSeqPopArm(stmt, paths, w)
+    exact(walkSeqPopArm(stmt, paths, w))
   of isTabKeys:
-    walkTabKeysArm(stmt, paths, w)
+    exact(walkTabKeysArm(stmt, paths, w))
   of isSetLen:
-    walkSetLenArm(stmt, paths, w)
+    exact(walkSetLenArm(stmt, paths, w))
   of isVariantReassign:
-    walkVariantReassignArm(stmt, paths, w)
+    exact(walkVariantReassignArm(stmt, paths, w))
   of isVariantReassignSymbolic:
-    walkVariantReassignSymbolicArm(stmt, paths, w)
+    exact(walkVariantReassignSymbolicArm(stmt, paths, w))
   of isVariantConstructSym:
-    walkVariantConstructSymArm(stmt, paths, w)
+    exact(walkVariantConstructSymArm(stmt, paths, w))
   of isVariantField:
-    walkVariantFieldArm(stmt, paths, w)
+    exact(walkVariantFieldArm(stmt, paths, w))
   of isReturn:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20935,7 +20935,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # (`raisedFinallyLoops`, this frame) is backend-divergent -- c re-raises the
     # in-flight exception, cpp returns (probed). HALT the path.
     if w.frame.raisedFinallyLoops.len > 0:
-      return w.halted(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)").live
+      return w.halted(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)")
     # RFC-0005 S8j (top level) / R1 (callee): lower `stmt.retExpr` and
     # drain its scalar raises, so a raise in the returned expression routes
     # to its handler (`return 100 div x`, a `Natural` result's range check).
@@ -20960,9 +20960,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## address-taken variable a `finally` or a `var` write-back then reads.
       let bound = evalReturnSynced(p, stmt.retExpr, proto, w)
       for bp in bound: exitReturn(bp, w)
-    @[]
+    exact(@[])
   of isCall:
-    walkCallArm(stmt, paths, w)
+    exact(walkCallArm(stmt, paths, w))
   of isAssert:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20977,7 +20977,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for p in drainScalarRaiseForks(pb0, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
         discard forkDefect(p, not cond, "AssertionDefect", none(string), w)   ## Phase 16 D1a
         out2.add forkPath(p, p.pc & @[cond], p.env)
-    out2
+    exact(out2)
   of isAssume:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20996,7 +20996,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     ## path here. Carried on with a false pc, the path would lower what follows
     ## the `quit`, which an arm's stand-in value does not type.
     if stmt.acond.kind == iekBoolLit and not stmt.acond.bval:
-      return @[]
+      return exact(@[])
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return
@@ -21020,7 +21020,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # which satisfies the same equality (`initialEnv` is untouched).
           env2[pin.name] = SymVal(kind: svString, str: mkString(pin.lit))
         out2.add forkPath(p, p.pc & @[cond], env2)
-    out2
+    exact(out2)
   of isTargetLabel:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21093,7 +21093,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                  " (beSolverUndef)")
         of sxUnsat:  discard
         of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
-    paths
+    exact(paths)
   of isRaise:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21143,7 +21143,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # is never empty here — `walk` returns early on an empty frontier).
         return w.halted(eeRaiseOutsideHandler,
           "bare `raise` (re-raise) with no in-flight exception " &
-               "(eeRaiseOutsideHandler)").live
+               "(eeRaiseOutsideHandler)")
       else:
         # Inside a handler with no recorded in-flight exn yet — handler-stack
         # re-raise is E3+. Surface as unknown rather than guess.
@@ -21154,12 +21154,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         return w.halted(eeHandlerReraiseUnmodelled,
           "bare `raise` (re-raise) inside a `try` with no in-flight " &
                "exception — not modelled (real Nim raises ReraiseDefect); " &
-               "the path is dropped (eeHandlerReraiseUnmodelled)").live
+               "the path is dropped (eeHandlerReraiseUnmodelled)")
     var survivors: seq[Path]
     for p in paths:
-      if w.shouldStop: return survivors
+      if w.shouldStop: return exact(survivors)
       survivors.add routeRaise(p, raiseTypeId, raiseMsg, w)
-    survivors
+    exact(survivors)
   of isTry:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21215,9 +21215,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # re-propagate immediately (re-route through the now-popped outer stack).
       var survivors = continuations
       for rc in raisedConts:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         survivors.add routeRaise(rc.path, rc.typeId, rc.msg, w)
-      survivors
+      exact(survivors)
     else:
       # Phase 15 E5 finally composition. The finally runs ONCE per exit
       # continuation (never combinatorially): once on the merged normal-exit
@@ -21232,7 +21232,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       #     NOT an `eeRaiseOutsideHandler`). `inFlightExn` stays untouched (none).
       if continuations.len > 0:
         survivors.add walk(stmt.tryFinally, continuations, w)
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
       # (a') RETURN exits (RFC-0005 S8l): walk the finally on each with
       #     `result` already bound, as Nim runs it. The finally's fall-through
       #     continues the SAME return outward (`exitReturn`: the next-outer
@@ -21244,7 +21244,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if returnConts.len > 0:
         for fp in walk(stmt.tryFinally, returnConts, w):
           exitReturn(fp, w)
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
       # (a'') JUMP exits (RFC-0005 S8m): walk the finally on each `break` /
       #     `continue` that leaves this try, as Nim runs it. Its fall-through
       #     continues the SAME jump outward (`exitJump`: the next-outer
@@ -21255,7 +21255,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for jc in jumpConts:
         for fp in walk(stmt.tryFinally, @[jc.path], w):
           exitJump(fp, jc.target, jc.isCont, w)
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
       # (b) RAISED exits: for each, set `inFlightExn` to the original exn for the
       #     finally's duration (so a bare re-raise inside finally sees it), walk
       #     the finally on the raised path; the survivors are the paths where the
@@ -21264,7 +21264,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       #     new exn was already routed by `routeRaise` and REPLACES the original
       #     (so we do NOT re-raise the original on those sub-paths).
       for rc in raisedConts:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         let savedInFlight = w.frame.inFlightExn
         w.frame.inFlightExn = some(ExnRecord(typeId: rc.typeId, msg: rc.msg))
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
@@ -21276,10 +21276,10 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.frame.inFlightExn = savedInFlight
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
         for fp in finallyNormal:
-          if w.shouldStop: return survivors
+          if w.shouldStop: return exact(survivors)
           # Finally fell through on this sub-path → re-propagate the ORIGINAL.
           survivors.add routeRaise(fp, rc.typeId, rc.msg, w)
-      survivors
+      exact(survivors)
   of isDeref, isNew, isDerefWrite:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21295,7 +21295,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         liveViewMarks(p, w)
         if p.viewMarks.len > 0: viewed = true
     if not viewed:
-      walkHeapArm(stmt, paths, w)
+      exact(walkHeapArm(stmt, paths, w))
     else:
       var outs: seq[Path]
       for p in paths:
@@ -21304,7 +21304,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for q in walkHeapArm(stmt, @[p], w):
           if q != p: logInPlace(p, heapsBefore, q)
           outs.add q
-      outs
+      exact(outs)
   of isUnsupported:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21342,7 +21342,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # signed `+`, `-` and `*` are undefined on overflow in C, not a wrap, and
     # nothing here tells the arithmetic which routine it is in: the marker
     # declines (the degrade below) on every setting.
-    walkUnsupported(stmt, paths, w).live
+    walkUnsupported(stmt, paths, w)
   of isUndefined:
     # RFC-0016 PRC-07. The path performs an operation C leaves undefined: it
     # ends here through `haltUndefined`, decided at the op as the arithmetic
@@ -21351,7 +21351,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       if w.shouldStop: break
       decideUndefined(p, stmt.udKind, w.z3.mkBool(true), stmt.udSite, w)
-    @[]
+    exact(@[])
   of isUnsafeCast:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -21377,7 +21377,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # and joins on it. The token is discarded: a halted path needs no carrier.
     w.halted(heUnsafeCast,
       "unsafe pointer materialisation (" & stmt.ucReason & ") reached at " &
-      "walk time -- path halted", scope = siteAnchored(stmt.ucMarker)).live
+      "walk time -- path halted", scope = siteAnchored(stmt.ucMarker))
 
 const capSnapPrefix = "__capsnap#"
   ## RFC-0005 S8ax. A frame-local name (no `__gl:` prefix, so no call
@@ -22422,16 +22422,16 @@ proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## where every snapshot is shallower, and the next one drops them
   ## (`dropSnapshots`) rather than reading them as its own.
   if stmt == nil or paths.len == 0 or not frameHasCells(paths, w):
-    return walkStmt(stmt, paths, w)
+    return walkStmt(stmt, paths, w).live
   if stmt.kind in compoundStmtKinds:
     inc w.capSyncDepth
-    result = walkStmt(stmt, paths, w)
+    result = walkStmt(stmt, paths, w).live
     dec w.capSyncDepth
     return
   inc w.capSyncDepth
   let depth = w.capSyncDepth
   let ins = snapCells(paths, depth, w)
-  let outs0 = walkStmt(stmt, ins, w)
+  let outs0 = walkStmt(stmt, ins, w).live
   dec w.capSyncDepth
   reconcileCells(producerOf(stmt), outs0, depth, w)
 

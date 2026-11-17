@@ -119,7 +119,11 @@ const
 
   ## Marked lines per family file (RFC-0016 R2-6). Their sum is the family
   ## total this audit pins.
-  markerPins = [("runtime.nim", 102), ("runtime_strings.nim", 4),
+  ## RFC-0016 S8cg: runtime.nim 102 -> 104. `isTabKeys`'s literal-key
+  ## spelling reads and rewrites `ks.seqDataRaw`, where `ks` is the seq the
+  ## arm has just built with `allocateSeqDataRaw` (structurally backed: it is
+  ## never a placeholder).
+  markerPins = [("runtime.nim", 104), ("runtime_strings.nim", 4),
                 ("heap_model.nim", 21), ("runtime_heap.nim", 11)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
@@ -366,8 +370,9 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     for (_, pn) in markerPins: pinnedTotal += pn
     ## RFC-0016 K9c-g: `seqElemAt`'s unbacked-element decision reads the
     ## seq's length once, in the arm that has no array (heap_model.nim 20 ->
-    ## 21): 137 + 1 = 138.
-    check pinnedTotal == 138
+    ## 21): 137 + 1 = 138. RFC-0016 S8cg: `isTabKeys`'s literal-key spelling
+    ## (runtime.nim 102 -> 104, `markerPins`): 138 + 2 = 140.
+    check pinnedTotal == 140
     check total == pinnedTotal
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

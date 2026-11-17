@@ -19074,7 +19074,7 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
           if Z3_get_ast_id(ctx.raw, l) == Z3_get_ast_id(ctx.raw, d): dup = true
         if not dup: lits.add d
       var hold: seq[Z3AnyAst]
-      var data = ks.seqDataRaw.raw
+      var data = ks.seqDataRaw.raw # [placeholder-audited]
       for j in 0 ..< w.settings.budget.maxLoopUnwind:
         var t = lits[^1]
         for i in countdown(lits.len - 2, 0):
@@ -19084,7 +19084,7 @@ proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
           hold.add wrap[Z3AnyAst](ctx, t)
         data = checkedStore(ctx, data, mkZ3IntLit(int64(j)).raw, t)
         hold.add wrap[Z3AnyAst](ctx, data)
-      ks.seqDataRaw = wrap[Z3AnyAst](ctx, data)
+      ks.seqDataRaw = wrap[Z3AnyAst](ctx, data) # [placeholder-audited]
     var facts: seq[Z3Bool]
     # The position array, built raw (its key sort is runtime, as
     # `tabTreeDataVars`'s arrays are) and wrapped at once so its reference

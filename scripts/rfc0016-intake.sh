@@ -30,16 +30,22 @@ extract() { # leg gate.txt
   awk -v leg="$1" '
     /^FAIL: / { title = substr($0, 7); next }
     /^  [^ ]/ && title != "" { sub(/^  /, ""); printf "%s\t%s\t%s\n", leg, $0, title; next }
-    { title = (/^linux gate:/ ? "" : title) }' "$2"
+    # Any other unindented line ends the FAIL block: the gate also lists its
+    # allowlisted reds under "known-red (...; not failing):", which are no finding.
+    /^[^ ]/ { title = "" }' "$2"
 }
 
 # plan <findings.tsv> <open-issues.json> -> lines `NEW|COMMENT<TAB>key<TAB>number<TAB>title<TAB>reason`
 plan() {
   local findings="$1" open="$2"
   awk -F'\t' -v max="$MAX_PER_LEG" '
-    { leg[NR] = $1; test[NR] = $2; why[NR] = $3; cnt[$1]++ }
+    # One (leg, test) is one finding: a second reason for it in the same run (the
+    # gate FAIL and the baseline diff REGRESSED) joins the first, never a 2nd issue.
+    { k = $1 SUBSEP $2
+      if (k in at) { why[at[k]] = why[at[k]] "; " $3; next }
+      n++; at[k] = n; leg[n] = $1; test[n] = $2; why[n] = $3; cnt[$1]++ }
     END {
-      for (i = 1; i <= NR; i++) {
+      for (i = 1; i <= n; i++) {
         if (cnt[leg[i]] > max) {
           k = leg[i] ":*"
           if (!(k in seen)) { seen[k] = 1; printf "%s\t%s\t%d findings on this leg (more than %d): see the run\n", k, k, cnt[leg[i]], max }
@@ -79,6 +85,18 @@ self_test() {
   printf 'FAIL: red tests NOT in the allowlist (new failures)\n  tsymex_a\n  tsymex_b\nFAIL: allowlisted tests that PASSED (stale entries; delete them)\n  tsymex_c\nlinux gate: expected=3 ran=3 -> FAIL\n' > "$d/gate.txt"
   extract c-z3-4.13.4 "$d/gate.txt" > "$d/f.tsv"
   [ "$(wc -l < "$d/f.tsv")" = 3 ] || { echo "self-test FAILED: extract gave $(wc -l < "$d/f.tsv") lines"; bad=1; }
+  # A known-red block after a FAIL block lists allowlisted tests (the gate does not fail on
+  # them): they are no finding (intake #178 filed one as a new failure).
+  printf 'FAIL: red tests NOT in the allowlist (new failures)\n  tsymex_a\nknown-red (allowlisted, still red; not failing):\n  tsymex_k\nlinux gate: expected=2 ran=2 red=2 allowlisted=1 -> FAIL\n' > "$d/gate2.txt"
+  extract cpp "$d/gate2.txt" > "$d/f2.tsv"
+  if grep -q 'tsymex_k' "$d/f2.tsv" || [ "$(wc -l < "$d/f2.tsv")" != 1 ]; then
+    echo "self-test FAILED: a known-red test was extracted as a finding"; cat "$d/f2.tsv"; bad=1; fi
+  # One key twice in one run (the gate's FAIL and the baseline diff's REGRESSED) is one
+  # action, carrying both reasons (intake #179/#181 and #180/#182 were opened as pairs).
+  printf 'msvc\ttsymex_d\tred tests NOT in the allowlist (new failures)\nmsvc\ttsymex_d\tREGRESSED vs the last nightly baseline\n' > "$d/dup.tsv"
+  echo '[]' > "$d/none.json"; plan "$d/dup.tsv" "$d/none.json" > "$d/plan3.txt"
+  if [ "$(wc -l < "$d/plan3.txt" | tr -d ' ')" != 1 ] || ! grep -q 'new failures.*REGRESSED' "$d/plan3.txt"; then
+    echo "self-test FAILED: one key twice in a run planned other than one action with both reasons"; cat "$d/plan3.txt"; bad=1; fi
   printf '[{"number":7,"body":"x\\n<!-- rfc0016-intake-key: c-z3-4.13.4:tsymex_a -->"}]\n' > "$d/open.json"
   plan "$d/f.tsv" "$d/open.json" > "$d/plan.txt"
   grep -q '^COMMENT.*c-z3-4.13.4:tsymex_a	7' "$d/plan.txt" || { echo "self-test FAILED: dedup"; cat "$d/plan.txt"; bad=1; }

@@ -132,3 +132,14 @@ proc symexAssume*(cond: bool) {.inline.} =
   ## yet affect the SUT's normal-run behavior). Inside symex, the
   ## walker conjoins `cond` into the path condition.
   discard cond
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(symexCapture)
+
+registerThreadStateRelease(releaseThreadState)

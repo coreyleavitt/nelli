@@ -205,3 +205,14 @@ proc pcreSearchEngine*(): PcreEngine =
   ## unverified library declines every call before this is asked.)
   let a = admitPcreLib(pcreVersion(), pcreRunsJit())
   if a.admitted: a.payload else: peInterp
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(engineKnown, engineJit, versionKnown, versionStr)
+
+registerThreadStateRelease(releaseThreadState)

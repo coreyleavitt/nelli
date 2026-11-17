@@ -60,6 +60,11 @@ when defined(linux) and compileOption("threads"):
     {.cast(gcsafe).}:
       foreignOut.status = symexFind(sutBig, tLabel("big")).status
       foreignOut.big = s8cbBig
+      # RFC-0016 S8ck-r: Nim runs no destruction handler on a thread it did
+      # not create, so a foreign thread gives nelli's per-thread state back
+      # itself; without this the run's walker state leaked when the thread
+      # exited (LeakSanitizer, scripts/asan-slice.sh).
+      releaseSymexThreadState()
 
   proc foreignMain(x: pointer): pointer {.noconv.} =
     # Before anything allocates: its own frame must not.

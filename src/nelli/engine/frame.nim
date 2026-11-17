@@ -247,3 +247,14 @@ proc snapshotEvents*(): EventStats =
     result.numeric[k] = NumericSummary(
       count: s.len, mn: s[0], mx: s[^1], mean: sum / float(s.len),
       p50: quantile(s, 0.5), p90: quantile(s, 0.9), p99: quantile(s, 0.99))
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(engineStack, droppedFindings)
+
+registerThreadStateRelease(releaseThreadState)

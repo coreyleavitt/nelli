@@ -32,14 +32,18 @@
 # third plant (tests/asan/plant_z3_throw.nim) fails the job if this link goes
 # missing.
 #
-# Leaks: LeakSanitizer is OFF (detect_leaks=0). nim-z3 still has live leaks
-# that its own slice (S8ck-r items 2 and 12: hooks that never release `ctx`,
-# separating real leaks from live Z3 globals) owns, plus per-process Z3 and
-# softlink globals that are reachable-until-exit by design; a suppression file
-# would be either empty of justification or full of S8ck-r's open work. What
-# this job gates is INVALID ACCESS: use-after-free, double free, overflow.
-# Turn leaks on after S8ck-r with `ASAN_OPTIONS=detect_leaks=1` and a
-# suppression file naming the Z3 globals.
+# Leaks: LeakSanitizer is ON (detect_leaks=1, S8ck-r). A leak report fails the
+# test like any other sanitizer report. tests/asan/lsan.supp suppresses only
+# frames outside nelli (nim-z3's open INF-04 items), one sourced reason and
+# retirement condition per entry; a leak under src/nelli is fixed, never
+# suppressed. The self-test's fourth plant (tests/asan/plant_nim_leak.nim)
+# fails the job if leak detection is off or swallowed. Nim 2.2.10 itself
+# leaks in three shapes nelli met, each worked around rather than
+# suppressed: a first write that is a bitwise copy
+# (tests/asan/nim_firstwrite_leak.nim; tsymex_0016_s8ckr_firstwrite_audit
+# keeps the shape out of src/), a never-read string cursor
+# (nim_cursor_strlit_leak.nim), and threadvars never destroyed at thread
+# exit (nim_threadvar_exit_leak.nim; releaseSymexThreadState).
 #
 # The slice: the CORE set (the suites that exercise Z3 AST lifetime hardest:
 # heap, strings, regex, closures, raise paths, cache replay) always runs, then
@@ -65,7 +69,11 @@ cd "$(dirname "$0")/.."
 
 # One definition of the sanitizer build.
 asan_flags="--mm:orc -d:useMalloc --debugger:native --passC:-fsanitize=address --passC:-fno-omit-frame-pointer --passL:-fsanitize=address --passL:-Wl,--push-state,--no-as-needed,-l:libstdc++.so.6,--pop-state"
-export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:abort_on_error=0:detect_odr_violation=0:symbolize=1:print_summary=1"
+export ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=0:detect_odr_violation=0:symbolize=1:print_summary=1"
+# The suppression file as the test process sees it: the repo is /work in the
+# podman container, the checkout itself on a host run.
+if [ -n "${NELLI_HOST:-}" ]; then supp="$PWD/tests/asan/lsan.supp"; else supp=/work/tests/asan/lsan.supp; fi
+export LSAN_OPTIONS="suppressions=$supp:print_suppressions=1"
 export NELLI_NIM_FLAGS="${NELLI_NIM_FLAGS:-} $asan_flags"
 
 # Suites that exercise Z3 AST lifetime hardest. Every name must be registered.
@@ -104,6 +112,13 @@ if [ "${1:-}" = "--self-test" ]; then
   if [ "$rc" = 0 ] && command grep -q 'z3 threw and recovered' "$d/throw.out" && ! command grep -q 'Sanitizer' "$d/throw.out"; then
     echo "asan self-test: plant_z3_throw exited cleanly (an internal Z3 C++ exception passes the interceptor)"
   else echo "asan self-test FAILED: plant_z3_throw rc=$rc (an internal Z3 exception must not abort: is libstdc++ linked at startup?)"; tail -n 20 "$d/throw.out"; fail=1; fi
+  # 4. a dropped heap block: LeakSanitizer is on, and the suppressions do not
+  # swallow a leak in plain program code
+  rc="$(run_one tests/asan/plant_nim_leak.nim 600 "$d/leak.out")"
+  k="$(san_kind "$d/leak.out")"
+  if [ "$rc" != 0 ] && [ "$k" = "LeakSanitizer:detected" ] && command grep -q 'leakOne' "$d/leak.out"; then
+    echo "asan self-test: plant_nim_leak failed as it must (rc=$rc, $k, leakOne named)"
+  else echo "asan self-test FAILED: plant_nim_leak rc=$rc kind='$k' (a dropped heap block must be reported: is detect_leaks on, useMalloc set, the suppression file narrow?)"; tail -n 20 "$d/leak.out"; fail=1; fi
   exit "$fail"
 fi
 

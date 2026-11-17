@@ -67,6 +67,7 @@ export heap_model.distinctBijectivityHints, heap_model.distinctSortNames,
 import ./string_lower_support   ## RFC-0016 review D3c-7: index splits, `splitNeedle`, `literalStringBytes`
 import ./runtime_strings   ## RFC-0016 review D3c-7: Cluster S, `lowerStrArm`
 import ./runtime_closures   ## RFC-0016 review D3c-5: Cluster C, `lowerClosureArm`
+import ../thread_state   ## RFC-0016 S8ck-r: the per-thread state release registry
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
@@ -25744,6 +25745,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   # nested try blocks are present, so an inner try/finally cannot be used).
   # Resetting it HERE — before any sync*/allocRef* call that checks
   # `currentWalkCtxPtr != nil` — ensures the stale pointer is never dereffed.
+  armThreadStateRelease()  ## RFC-0016 S8ck-r: a Nim thread's state is released when it exits
   resetWalkState(settings.budget.maxSplitParts)  ## RFC-0016 D3c-2: walk_state's threadvars, the sinks pointer included
   let ctx = newContext()
   setCurrentContext(ctx)
@@ -28650,3 +28652,45 @@ lowerHooks = LowerHooks(
   currentFrameId: currentFrameId,
   registerCapCell: registerCapCell,
   depositStrIndexOob: depositStrIndexOob)
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(freshnessCapHints, heapDepthErrors, newFieldZeroErrors,
+    ptrFamilyHints, closureEnvWrites, loweringReadNames, z3ApiErrorCount,
+    z3ApiFirstError, arithFrames, checkScopes, obligationLog, seqOobConds,
+    uninitReadConds, arithTrapConds, currentVariantHeaps,
+    currentWinningGlobals, heapWitnessNominalRegistry, currentCallerHeaps,
+    currentCallerHeapDepth, currentCallerAllocCounters,
+    currentCallerLiveRefs, currentClosureExitHeaps,
+    currentClosureExitAllocCounters, currentClosureExitLiveRefs,
+    currentClosureDidMutateHeap, currentClosureExitPc,
+    lastDrainedClosureExitPc, currentCallerUb, currentCallerTaint,
+    currentCallerPc, closureBodyCallerPc, currentClosureCallAxioms,
+    currentClosureCallAxiomStrs, currentClosureCallErrors, sliceViewCounter,
+    variantLitFreshCounter, variantConstructSymFreshCounter,
+    seqConformCounter, bitSetCardTerms, bitSetCardIds, bitSetCardSets,
+    walkerWorkUnits, uninitSeqBases, uninitSeqBaseIds, uninitSeqAliases,
+    uninitAliasHeld, uninitArrKinds, pendingPtrCompares, bvIvlDeclKinds,
+    glUnwrittenCtx, glUnwritten, glPartHavoc, glWatched, glVarGlobal,
+    glUnwrittenAsts, lowerAsReceiver, globalEntryVals, noinitSerial,
+    callGuardedNames, extractionErrors, unknownExnWarnings, ptrLeafAims,
+    symexTargetSolveStats, ownContextUnits, symexZ3CallCount,
+    seqCapDeclKinds, byteDomainKinds, deepTermsLeftAlone,
+    theoryFreeNeedsSimple, queryTimeoutMsCur, nativeStackCutFlag,
+    queryTimedOutFlag, walkerWorkBase, walkUnitsBase, walkRLimitCur,
+    walkWorkExhausted, tailUnitsCeil, tailWorkExhausted, tailUnitsRun,
+    intDivDeclKinds, int2bvDeclKind, eqDeclKind, ctxPruneLog,
+    symexIfArmsPruned, symexIfArmsChecked, symexLoopIterations,
+    rfc0005RawStatus, scratchCapped, uninterpDeclKind, paramBoundaryAbort,
+    ptrAims)
+  when defined(symexTestInjectWalkerFault):
+    releaseToDefault(injectedShape)
+  when defined(symexQueryStats):
+    releaseToDefault(symexQueryStats, symexQueryStatsPaused,
+      symexFactsFirstOff, symexStepStats, symexPerturbConsts, perturbSerial)
+
+registerThreadStateRelease(releaseThreadState)

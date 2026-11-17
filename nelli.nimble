@@ -1888,6 +1888,12 @@ task test, "Run the test suite":
             # a verdict after Z3 5.1's mk_unique message is never a trusted sat/unsat (UPS-02, PND-10).
             "tsymex_0016_s8cj_runctx",
             "tsymex_0016_s8cj_mkunique",
+            # RFC-0016 S8ck-r (INF-04): per-thread state is released (a Nim thread at exit,
+            # a foreign thread by its owner); no threadvar escapes it; the Nim 2.2.10
+            # first-write leak shape stays out of src/.
+            "tsymex_0016_s8ckr_threadstate",
+            "tsymex_0016_s8ckr_threadstate_audit",
+            "tsymex_0016_s8ckr_firstwrite_audit",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

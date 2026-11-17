@@ -70,7 +70,13 @@ proc sutCharWrite(k: int) =
     symexTarget("cw_dead")
 
 proc sutCharOrder(k: int) =
-  ## Nim checks the index before it evaluates the value.
+  ## Nim checks the index before it evaluates the value, and a value that
+  ## raises leaves the string unwritten.
+  ##
+  ## RFC-0016 S8ck-r: `co_dead` reads `s` after the write. Without a later
+  ## read Nim 2.2.10's cursor inference makes `s` a cursor, so it is never
+  ## destroyed and the copy `s[k] =` makes of the literal leaked under
+  ## LeakSanitizer (tests/asan/nim_cursor_strlit_leak.nim).
   var s = "ab"
   var which = 0
   try:
@@ -81,7 +87,7 @@ proc sutCharOrder(k: int) =
     which = 2
   if which == 1 and k == 5: symexTarget("co")
   if which == 2 and k == 1: symexTarget("co_value")
-  if which == 2 and k == 5: symexTarget("co_dead")
+  if which == 2 and (k == 5 or s != "ab"): symexTarget("co_dead")
 
 type SBox = object
   s: string

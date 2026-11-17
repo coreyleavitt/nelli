@@ -4118,3 +4118,14 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
         if y in sure or y in alive[ord(x)]: continue
         result.pairs.add (x, y)
     if result.pairs.len > maxPairs: result.pairs = @[]
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(concreteCall, rnIds, selCache, verCache)
+
+registerThreadStateRelease(releaseThreadState)

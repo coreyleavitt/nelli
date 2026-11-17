@@ -1264,3 +1264,15 @@ when defined(posix) or defined(windows):
       let base = if shmName.len > 0 and shmName[0] == '/': shmName[1 .. ^1] else: shmName
       try: removeFile("/dev/shm/" & base)
       except OSError: discard
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ./thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(coverageBitmap, coverageHitsCached, coverageMode,
+    cmpLogMode, cmpLogBuf)
+
+registerThreadStateRelease(releaseThreadState)

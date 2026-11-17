@@ -620,3 +620,15 @@ proc mkSeqSV*(len: Z3Int; arrs: seq[Z3AnyAst]; elemTy: IRType): SymVal =
   ## read at the distinct static type re-boxes.
   SymVal(kind: svSeq, seqLen: len, seqDataRaw: arrs[0],
          seqDataMore: arrs[1 .. ^1], seqElemTy: seqCellTy(elemTy))
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(loweringDegradeErrors, loweringPendingUb,
+    loweringPendingTaint)
+
+registerThreadStateRelease(releaseThreadState)

@@ -1628,3 +1628,14 @@ proc resetStringLowering*() =
   ## pure function of the pattern text (a `LimitReach` holds no Z3 term), so
   ## it is process-stable and stays.
   strCharsCounter = 0                    ## RFC-0005 S8ca: bound-var names
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(strCharsCounter, regexReachCache)
+
+registerThreadStateRelease(releaseThreadState)

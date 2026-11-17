@@ -4080,3 +4080,18 @@ proc seqElemAt*(seqSV: SymVal, idx: Z3Int): SymVal =
     degradeAlloc(seqSV.seqElemTy, weInternalWalkerFault,
       "seqElemAt: unsupported elem kind " & $seqSV.seqElemTy.kind &
       " (weInternalWalkerFault)", "__seqElemAtUnsupported")
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(allocEnumZeroLegal, distinctBijectivityHints,
+    distinctSortNames, containerCard, intHeapIsInt, heapKeyShapes,
+    currentBorrowReboxCounter, intOfBV, globalEntryFacts, storeDeclKind,
+    selectDeclKind, constArrayDeclKind, iteDeclKind, intCellFactSeen,
+    heapChainKinds)
+
+registerThreadStateRelease(releaseThreadState)

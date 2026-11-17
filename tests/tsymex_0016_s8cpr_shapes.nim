@@ -181,6 +181,34 @@ proc seqEqSymDead(s, t: seq[int]) =
 proc seqEqSymLenDead(s, t: seq[int]) =
   if s == t and s.len != t.len: symexTarget("hit")
 
+proc seqNeSymDead(s, t: seq[int]) =
+  # Equal lengths and elements, so equal: what the data arrays hold past the
+  # length (or below 0) must not make them differ.
+  if s.len == 1 and t.len == 1 and s[0] == t[0] and s != t:
+    symexTarget("hit")
+
+proc seqEqLoop(s, t: seq[int]) =
+  var hits = 0
+  for k in 0 ..< 3:
+    if s == t and s.len == k: inc hits
+  if hits == 1 and t.len == 2: symexTarget("hit")
+
+proc seqEqLoopDead(s, t: seq[int]) =
+  var hits = 0
+  for k in 0 ..< 3:
+    if s == t and s.len == k: inc hits
+  if hits == 1 and t.len == 2 and s.len != 2: symexTarget("hit")
+
+proc seqStrSym(s, t: seq[string]) =
+  if s == t and s.len == 1 and s[0] == "ab": symexTarget("hit")
+
+proc seqStrSymDead(s, t: seq[string]) =
+  if s == t and t.len == 1 and t[0] == "ab" and s[0] != "ab":
+    symexTarget("hit")
+
+proc seqFloatSym(s, t: seq[float]) =
+  if s == t: symexTarget("hit")
+
 proc seqEqBranch(c: bool; t: seq[int]) =
   let s = if c: @[1, 2] else: @[1]
   if s == t and t.len == 2 and t[1] == 2: symexTarget("hit")
@@ -292,6 +320,17 @@ suite "RFC-0016 PRC-34: whole-seq ==":
     check native(seqEqSym(@[1, 5], @[1, 5, 0])) == "ran"
     check native(seqEqSymDead(@[1, 5], @[1, 5])) == "ran"
     check native(seqEqSymLenDead(@[], @[])) == "ran"
+    check native(seqNeSymDead(@[4], @[4])) == "ran"
+    check native(seqNeSymDead(@[4], @[5])) == "ran"
+    check native(seqEqLoop(@[1, 2], @[1, 2])) == "hit"
+    check native(seqEqLoop(@[1, 2], @[1, 3])) == "ran"
+    check native(seqEqLoopDead(@[1, 2], @[1, 2])) == "ran"
+    check native(seqStrSym(@["ab"], @["ab"])) == "hit"
+    check native(seqStrSym(@["ab"], @["a"])) == "ran"
+    check native(seqStrSymDead(@["ab"], @["ab"])) == "ran"
+    check native(seqFloatSym(@[1.0], @[1.0])) == "hit"
+    check native(seqFloatSym(@[NaN], @[NaN])) == "ran"
+    check native(seqFloatSym(@[0.0], @[-0.0])) == "hit"
     check native(seqEqBranch(true, @[1, 2])) == "hit"
     check native(seqEqBranch(false, @[1])) == "ran"
     check native(seqEqIdx(0, @[1, 2])) == "hit"
@@ -318,22 +357,30 @@ suite "RFC-0016 PRC-34: whole-seq ==":
     decides(seqEqParamDead, sxUnsat)
   test "a parameter against a literal fixes its elements":
     decides(seqEqParamElemDead, sxUnsat)
-  test "two parameters with no length bound decline":
-    # No `forall` over an array (the G4 hang lesson): with neither length
-    # bounded in the term, the comparison declines. `s.len == 2` in the same
-    # guard is a path fact a lowering cannot read.
-    let r1 = symexFind(seqEqSym, tLabel("hit"))
-    checkpoint show(r1.errors)
-    check r1.status == sxUnknown
-    check r1.errors.named(feUnsupportedOp)
-    let r2 = symexFind(seqEqSymDead, tLabel("hit"))
-    checkpoint show(r2.errors)
-    check r2.status == sxUnknown
-    check r2.errors.named(feUnsupportedOp)
-    let r3 = symexFind(seqEqSymLenDead, tLabel("hit"))
-    checkpoint show(r3.errors)
-    check r3.status == sxUnknown
-    check r3.errors.named(feUnsupportedOp)
+  # Two seqs with no length bound in the term compare as equal lengths and
+  # equal masked data arrays (a lambda term, no `forall`: the G4 hang
+  # lesson).
+  test "two parameters with no length bound: reached":
+    decides(seqEqSym, sxSat)
+  test "two parameters with no length bound: elements unreachable":
+    decides(seqEqSymDead, sxUnsat)
+  test "two parameters with no length bound: lengths unreachable":
+    decides(seqEqSymLenDead, sxUnsat)
+  test "equal seqs are not unequal past their length":
+    decides(seqNeSymDead, sxUnsat)
+  test "inside a loop: reached":
+    decides(seqEqLoop, sxSat)
+  test "inside a loop: unreachable":
+    decides(seqEqLoopDead, sxUnsat)
+  test "string elements with no length bound: reached":
+    decides(seqStrSym, sxSat)
+  test "string elements with no length bound: unreachable":
+    decides(seqStrSymDead, sxUnsat)
+  test "float elements with no length bound decline (IEEE `==`)":
+    let r = symexFind(seqFloatSym, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
   test "a branch-merged length bounds the unroll: reached":
     decides(seqEqBranch, sxSat)
   test "an indexed element's `ite` length bounds the unroll: reached":
@@ -384,5 +431,5 @@ suite "RFC-0016 PRC-34: shapes later slices modelled":
     decides(seqFieldWrite, sxSat)
 
 suite "RFC-0016 S8cp-r: walker version":
-  test "symexWalkerVersion is at least 394":
-    check parseInt(symexWalkerVersion) >= 394
+  test "symexWalkerVersion is at least 399":
+    check parseInt(symexWalkerVersion) >= 399

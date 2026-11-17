@@ -5195,6 +5195,49 @@ proc seqLenUpperBound(l: Z3Int): Option[int] =
     else: none(int)
   bound(toAnyAst(simplify(l)), 0)
 
+proc maskedSeqData(ctx: Z3Context; data: Z3AnyAst; len: Z3Int;
+                   dflt: Z3AnyAst): Z3AnyAst =
+  ## RFC-0016 PRC-34. The data array of a seq with every index outside
+  ## `0 ..< len` mapped to `dflt`: the term
+  ## `lambda i. ite(0 <= i and i < len, data[i], dflt)`. A lambda is an
+  ## array term, not an axiom: Z3 beta-reduces a `select` of it, and a
+  ## disequality of two of them is one skolem witness (array
+  ## extensionality), so no universal over the array is asserted (the G4
+  ## hang lesson).
+  let i = mkIntVar(ctx, "__seqEqMaskI")
+  let inRange = (mkInt(0) <= i) and (i < len)
+  # Each raw term is wrapped (owned) before the next API call.
+  let sel = wrap[Z3AnyAst](ctx, checkedSelect(ctx, data.raw, i.raw))
+  let body = wrap[Z3AnyAst](ctx, checkedIte(ctx, inRange.raw, sel.raw, dflt.raw))
+  var bound = [Z3_to_app(ctx.raw, i.raw)]
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw, cuint(1),
+    cast[ptr UncheckedArray[RawZ3App]](addr bound[0]), body.raw))
+
+proc seqEqMasked(a, b: SymVal): Option[Z3Bool] =
+  ## RFC-0016 PRC-34. Whole-seq `==` with no length bound: equal lengths and
+  ## equal masked data arrays (`maskedSeqData`). Exact where the element's
+  ## `==` is Z3's equality of its term: an integer, a `bool`, a `char`, a
+  ## `string`. A float's IEEE `==` is not (a NaN is unequal to itself, and
+  ## `0.0 == -0.0`), so a float element declines here. The default outside
+  ## the length is one value for both sides, so which value it is cannot
+  ## matter once the lengths are equal.
+  if a.seqElemTy.kind in {itFloat32, itFloat64}: return none(Z3Bool)
+  let ctx = a.seqLen.ctx # [placeholder-audited]
+  let sa = sortOfRaw(ctx, a.seqDataRaw.raw) # [placeholder-audited]
+  if sa != sortOfRaw(ctx, b.seqDataRaw.raw): return none(Z3Bool) # [placeholder-audited]
+  let rng = ctx.checkErr Z3_get_array_sort_range(ctx.raw, sa)
+  let dflt = wrap[Z3AnyAst](ctx,
+    case Z3_get_sort_kind(ctx.raw, rng)
+    of Z3_BOOL_SORT: ctx.checkErr Z3_mk_false(ctx.raw)
+    of Z3_BV_SORT, Z3_INT_SORT: ctx.checkErr Z3_mk_int(ctx.raw, 0, rng)
+    else:
+      if a.seqElemTy.kind != itString: return none(Z3Bool)
+      ctx.checkErr Z3_mk_string(ctx.raw, ""))
+  let ma = maskedSeqData(ctx, a.seqDataRaw, a.seqLen, dflt) # [placeholder-audited]
+  let mb = maskedSeqData(ctx, b.seqDataRaw, b.seqLen, dflt) # [placeholder-audited]
+  some((a.seqLen == b.seqLen) and # [placeholder-audited]
+       wrap[Z3Bool](ctx, checkedEq(ctx, ma.raw, mb.raw)))
+
 proc seqEqZ3(a, b: SymVal): Option[Z3Bool] =
   ## RFC-0016 PRC-34. System's `==` on two seqs of a scalar element (the
   ## parser admits only an element type whose `==` is system's own): equal
@@ -5223,7 +5266,7 @@ proc seqEqZ3(a, b: SymVal): Option[Z3Bool] =
     if la.isSome and lb.isSome: some(min(la.get, lb.get))
     elif la.isSome: la
     else: lb
-  if n.isNone or n.get > seqEqUnrollMax: return none(Z3Bool)
+  if n.isNone or n.get > seqEqUnrollMax: return seqEqMasked(a, b)
   var acc = a.seqLen == b.seqLen # [placeholder-audited]
   for i in 0 ..< n.get:
     acc = acc and implies(mkInt(i) < a.seqLen, # [placeholder-audited]

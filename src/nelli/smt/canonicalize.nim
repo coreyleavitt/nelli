@@ -827,8 +827,13 @@ const renderAsChoicesVersion* = "12"
   ##   `forall` over the index). `==` on a record with a non-atom field walks
   ##   the compiler's instance of system's `==`, so each field compares with
   ##   the `==` Nim resolved for it, a user's included (was `eqBV`, declined).
+  ## - RFC-0016 W4 S8cp-r (394->399; 395-398 are reserved), PRC-34: whole-seq
+  ##   `==` with no length bound in the term over a non-float element is
+  ##   equal lengths and equal masked data arrays (`lambda i. ite(0 <= i <
+  ##   len, data[i], default)`, an array term, no quantifier); it declined.
+  ##   A float element still declines there (IEEE `==` is not term equality).
 
-const symexWalkerVersion* = "394"
+const symexWalkerVersion* = "399"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

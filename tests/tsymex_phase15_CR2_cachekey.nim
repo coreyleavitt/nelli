@@ -1275,7 +1275,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W4 S8cp-r (PRC-34: quantifier-free whole-seq `==`; a record
     ## with a non-atom field walks system's `==` instance; 393 reserved):
     ## 392->394.
-    check symexWalkerVersion == "394"
+    ## RFC-0016 W4 S8cp-r (PRC-34: whole-seq `==` with no length bound over
+    ## masked data arrays; 395-398 reserved): 394->399.
+    check symexWalkerVersion == "399"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

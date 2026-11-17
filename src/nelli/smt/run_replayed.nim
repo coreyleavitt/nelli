@@ -44,7 +44,11 @@ proc emitRunSymexReplayed*(fn: NimNode; params: seq[IRParam];
   ## (`emitReplayWitness`) against the search target (an `sxSat` claim) or
   ## `tRaisedExn(<its raised type>)` (an `sxRaised` claim -- the claim that
   ## exact type escapes `fn`), and hands the `ReplayResult` it returns to
-  ## `settleCandidate`; stops at the first confirmation. Nothing about a
+  ## `settleCandidate`; stops at the first confirmation. RFC-0016 W4 perf:
+  ## the candidates' replays run inside the run, through the
+  ## `CandidateReplay` this body hands `runSymex`, so the run walks the tail
+  ## of the confirmed one only (W3-z R2); the settle folds their recorded
+  ## outcomes, in the order they ran, once the run returns. Nothing about a
   ## replay is read off the thread (review R1-06): what the settle and a
   ## later save need of it, the run-dependence included, is on the value.
   let rawId     = genSym(nskLet, "rawPreReplay")
@@ -53,19 +57,28 @@ proc emitRunSymexReplayed*(fn: NimNode; params: seq[IRParam];
   # RFC-0016 K10b: a lossy witness cannot be followed past the label, so under
   # the whole-run gate it fails closed (`ubTailUnverified`) before any replay.
   let gateLossySym = bindSym"gateLossyWinner"
-  let runCall = quote do:
-    `gateLossySym`(runSymex(`prog`, `target`, `settings`), `staticLossy`,
-                   `settings`)
+  # RFC-0016 W4 perf: with replay on, the run is handed the candidates'
+  # replay (`CandidateReplay`, below) as its fourth argument.
+  let cbId = genSym(nskLet, "candidateReplay")
+  var runCall = quote do:
+    runSymex(`prog`, `target`, `settings`)
+  if runCall.kind == nnkStmtList: runCall = runCall[0]
   if not replayOn:
     let markSym = bindSym"markLossyWinnerUnreplayed"
     return quote do:
-      `markSym`(`runCall`, `staticLossy`)
+      `markSym`(`gateLossySym`(`runCall`, `staticLossy`, `settings`),
+                `staticLossy`)
+  runCall.add cbId
   let witId  = genSym(nskLet, "candRawWit")
   let (tupleTy, witnessTup) = emitWitnessTuple(params, witId)
   let settledId = genSym(nskVar, "settled")
   let tgtId     = genSym(nskLet, "searchTarget")
-  let candId    = genSym(nskForVar, "cand")
-  let claimId   = genSym(nskForVar, "claim")
+  let candId    = genSym(nskParam, "cand")
+  let idxId     = genSym(nskParam, "candIdx")
+  let replayOneId = genSym(nskProc, "replayOne")
+  let recordsId = genSym(nskVar, "replays")
+  let recId     = genSym(nskForVar, "rec")
+  let cbTy      = bindSym"CandidateReplay"
   let typedId   = genSym(nskLet, "candWitness")
   let replayedId = genSym(nskLet, "replayed")
   let replayTgt = genSym(nskLet, "replayTarget")
@@ -74,8 +87,6 @@ proc emitRunSymexReplayed*(fn: NimNode; params: seq[IRParam];
   let winnerSettleSym = bindSym"settleWinner"
   let lossyWinSym = bindSym"winnerLossy"
   let winnerCandSym = bindSym"winnerCandidate"
-  let lossyWinId = genSym(nskLet, "lossyWinner")
-  let jobsId = genSym(nskLet, "replayJobs")
   let liftId = genSym(nskLet, "procValueLift")   # RFC-0016 W3-z R7
   let liftExpr = emitProcValueLift(fn, procValueKeys,
                                    newDotExpr(rawId, ident"procValueSites"))
@@ -110,34 +121,38 @@ proc emitRunSymexReplayed*(fn: NimNode; params: seq[IRParam];
     newDotExpr(candId, ident"nilDerefOnPath"),
     newDotExpr(settings, ident"replayTimeoutMs"),   # RFC-0005 S8be
     child)
+  # RFC-0016 W4 perf: the candidates are replayed inside the run
+  # (`CandidateReplay`), which walks the tail of the one a replay confirms
+  # while its context is live, and settled here, in the order they ran, once
+  # it returns. A lossy clean winner is replayed after the run, as before.
   result = quote do:
     block:
-      let `rawId` = `runCall`
+      let `tgtId`: SymexTarget = `target`
+      proc `replayOneId`(`candId`: SatCandidate):
+          tuple[replayed: ReplayResult; shown: string] =
+        let `replayTgt`: SymexTarget =
+          if `candId`.status == sxSat: `tgtId`
+          else: tRaisedExn(`candId`.raisedTypeId)
+        let `witId` {.used.} = `inputSym`(`candId`)
+        `typedDecl`
+        let `replayedId` = `replay`
+        (replayed: `replayedId`,
+         shown: (when compiles($`typedId`): $`typedId` else: ""))
+      var `recordsId`: seq[tuple[i: int; replayed: ReplayResult; shown: string]]
+      let `cbId`: `cbTy` = proc (`idxId`: int; c: SatCandidate): bool =
+        let one = `replayOneId`(c)
+        `recordsId`.add (i: `idxId`, replayed: one.replayed, shown: one.shown)
+        one.replayed.outcome == roConfirmed
+      let `rawId` = `gateLossySym`(`runCall`, `staticLossy`, `settings`)
       var `settledId` = `rawId`
       # RFC-0005 0.9.1 (WA-9): a lossy clean winner is the pass's one job.
-      let `lossyWinId` = `lossyWinSym`(`rawId`, `staticLossy`)
-      if (`rawId`.status == sxUnknown and `rawId`.candidates.len > 0) or
-         `lossyWinId`:
-        let `tgtId`: SymexTarget = `target`
-        let `jobsId` =
-          if `lossyWinId`: @[`winnerCandSym`(`rawId`)]
-          else: `rawId`.candidates
+      if `lossyWinSym`(`rawId`, `staticLossy`):
+        let one = `replayOneId`(`winnerCandSym`(`rawId`))
+        `settledId` = `winnerSettleSym`(`settledId`, one.replayed, one.shown)
+      elif `rawId`.status == sxUnknown and `rawId`.candidates.len > 0 and
+           `recordsId`.len > 0:
         let `liftId` = `liftExpr`
-        block replayPass:
-          for `claimId` in [sxSat, sxRaised]:
-            for `candId` in `jobsId`:
-              if `candId`.status != `claimId`: continue
-              let `replayTgt`: SymexTarget =
-                if `claimId` == sxSat: `tgtId`
-                else: tRaisedExn(`candId`.raisedTypeId)
-              let `witId` {.used.} = `inputSym`(`candId`)
-              `typedDecl`
-              let `replayedId` = `replay`
-              let shown = (when compiles($`typedId`): $`typedId` else: "")
-              `settledId` =
-                if `lossyWinId`:
-                  `winnerSettleSym`(`settledId`, `replayedId`, shown)
-                else: `settleSym`(`settledId`, `candId`, `replayedId`, shown,
-                                  `liftId`)
-              if `replayedId`.outcome == roConfirmed: break replayPass
+        for `recId` in `recordsId`:
+          `settledId` = `settleSym`(`settledId`, `rawId`.candidates[`recId`.i],
+                                    `recId`.replayed, `recId`.shown, `liftId`)
       `settledId`

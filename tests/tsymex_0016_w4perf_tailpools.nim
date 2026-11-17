@@ -25,7 +25,9 @@
 ## `_d`, `tsymex_rfc0005_s1c_verdict`, `tsymex_rfc0005_s8ag_indexsplit_c`).
 ## Their replay candidates' tails (W3-z R2) spend the run's whole 100M-unit
 ## tail budget on asks that genuinely need the chained index splits of the
-## pinned subject (13-16M units each); slicing does not shrink them.
+## pinned subject (13-16M units each); slicing does not shrink them. No
+## replay confirms any of those candidates, so walker 378 walks none of
+## their tails (`tsymex_0016_w4perf_demandtail`).
 import std/[unittest, re, strutils, os]
 import nelli/symex
 import nelli/smt/canonicalize

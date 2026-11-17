@@ -420,6 +420,15 @@ type
       ## PRIVATE: the solver's model of the input (the `witness` of an
       ## `sxSat` claim, the `raisedWitness` of an `sxRaised` one).
 
+  CandidateReplay* = proc (i: int; c: SatCandidate): bool {.closure.}
+    ## RFC-0016 W4 perf. The settle's replay of one candidate, handed to
+    ## `runSymex` by the entry macros' replayed body (`emitRunSymexReplayed`):
+    ## replays `c` (the run's `RawResult.candidates[i]`), records the outcome
+    ## for the settle that follows the run, and answers whether the replay
+    ## confirmed it. The run calls it in the settle's order and stops at the
+    ## first confirmation, while its context is live, so it walks the tail of
+    ## the candidate a replay confirmed (W3-z R2) and of no other.
+
   RawResult* = object
     abstractions*: AbstractionLog
     obligations*:  ObligationLog
@@ -13794,10 +13803,11 @@ func decideVerdict*(found, candidates: openArray[RawResult]; runTaint: Taint;
   ##   2. a clean `sxRaised` in `found` -> `sxRaised` (a reachable raise is an
   ##      existence claim: it obeys the SAT rule verbatim)
   ##   3. a candidate whose replay returns `roConfirmed` -> `sxSat`/`sxRaised`
-  ##      -- RFC-0005 S10's rule: replay runs in macro code after `runSymex`
-  ##      returns (§4.2 plumbing), so it cannot sit in this runtime function;
-  ##      S10 applies it to `RawResult.candidates` on the `sxUnknown` this
-  ##      procedure returns under rule 4.
+  ##      -- RFC-0005 S10's rule: replay is macro code (§4.2 plumbing), so
+  ##      it cannot sit in this runtime function; S10 applies it to
+  ##      `RawResult.candidates` on the `sxUnknown` this procedure returns
+  ##      under rule 4 (RFC-0016 W4 perf: the replays run inside the run,
+  ##      through the macro's `CandidateReplay`; the settle follows it).
   ##   4. any solved SAT anywhere -- a candidate, or a `found` entry the rules
   ##      above did not accept -- terminally blocks `sxUnsat`: the enlarged
   ##      program DOES reach the target. -> `sxUnknown`
@@ -25266,7 +25276,8 @@ proc drainRunTaint[T](dst: var T; drained: openArray[seq[SymexErrorInfo]];
 
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
-                  settings: SymexSettings): RawResult
+                  settings: SymexSettings;
+                  replay: CandidateReplay): RawResult
 
 when defined(windows) and not defined(symexNoBigStack):
   # Chapulin 0.1.0 re-test triage (catalog #11, CRASH class), walker v64.
@@ -25299,6 +25310,7 @@ when defined(windows) and not defined(symexNoBigStack):
     prog: SymexProgram
     target: SymexTarget
     settings: SymexSettings
+    replay: CandidateReplay
     res: RawResult
     exn: ref Exception
     mainFiber: pointer
@@ -25322,7 +25334,7 @@ when defined(windows) and not defined(symexNoBigStack):
     when defined(symexFiberTrace): stderr.writeLine "[fiber] trampoline enter"
     let ctx = cast[ptr FiberSolveCtx](param)
     try:
-      ctx.res = runSymexImpl(ctx.prog, ctx.target, ctx.settings)
+      ctx.res = runSymexImpl(ctx.prog, ctx.target, ctx.settings, ctx.replay)
       when defined(symexFiberTrace): stderr.writeLine "[fiber] impl returned"
     except Exception as e:
       ctx.exn = e
@@ -25331,7 +25343,8 @@ when defined(windows) and not defined(symexNoBigStack):
     # Never reached: the fiber is deleted by the main fiber after the switch.
 
   proc runSymexWithBigStack(prog: SymexProgram, target: SymexTarget,
-                            settings: SymexSettings): RawResult =
+                            settings: SymexSettings;
+                            replay: CandidateReplay): RawResult =
     # ConvertThreadToFiber returns nil if the thread is ALREADY a fiber (or
     # on failure) — degrade gracefully to a direct call on the current stack
     # (the pre-v64 behaviour) rather than failing the run outright.
@@ -25339,8 +25352,9 @@ when defined(windows) and not defined(symexNoBigStack):
     when defined(symexFiberTrace):
       stderr.writeLine "[fiber] converted mainFiber nil=" & $(mainFiber == nil)
     if mainFiber == nil:
-      return runSymexImpl(prog, target, settings)
+      return runSymexImpl(prog, target, settings, replay)
     var ctx = FiberSolveCtx(prog: prog, target: target, settings: settings,
+                            replay: replay,
                             mainFiber: mainFiber)
     # FIBER_FLAG_FLOAT_SWITCH (1): float-state switching — a no-op on x64,
     # required for correctness on x86.
@@ -25351,7 +25365,7 @@ when defined(windows) and not defined(symexNoBigStack):
       stderr.writeLine "[fiber] created nil=" & $(fib == nil)
     if fib == nil:
       discard convertFiberToThread()
-      return runSymexImpl(prog, target, settings)
+      return runSymexImpl(prog, target, settings, replay)
     # Debug-build frame-chain hygiene: Nim's `--stackTrace` machinery links
     # stack-ALLOCATED `TFrame` records through a threadvar chain
     # (`framePtr`), and the trampoline never RETURNS through its Nim
@@ -25389,7 +25403,8 @@ proc abortScope(): DeclineScope =
 
 proc runSymexCaught(prog: SymexProgram,
                target: SymexTarget,
-               settings: SymexSettings = defaultSymexSettings()): RawResult =
+               settings: SymexSettings;
+               replay: CandidateReplay): RawResult =
   ## Phase 14 cycle C4. Wrap the implementation in a `try/except` that
   ## catches `Z3Error` (the abstract base class — all 12 typed
   ## subclasses derive from it). On catch, return `sxUnknown` with
@@ -25402,9 +25417,9 @@ proc runSymexCaught(prog: SymexProgram,
     # the fiber trampoline re-raises any escaped exception HERE on the main
     # fiber with its dynamic type intact, so the arms below are unaffected.
     when declared(runSymexWithBigStack):
-      runSymexWithBigStack(prog, target, settings)
+      runSymexWithBigStack(prog, target, settings, replay)
     else:
-      runSymexImpl(prog, target, settings)
+      runSymexImpl(prog, target, settings, replay)
   except SymexUnsupportedOpError as e:
     # Phase 15 F6: an unmodeled float op (classify/copySign/nextafter/any
     # unmodeled math.<name>) -> sxUnknown + a classified error (Invariant 3:
@@ -25627,11 +25642,18 @@ proc dropWitnessPins(r: var RawResult) =
 
 proc runSymex*(prog: SymexProgram,
                target: SymexTarget,
-               settings: SymexSettings = defaultSymexSettings()): RawResult =
+               settings: SymexSettings = defaultSymexSettings();
+               replay: CandidateReplay = nil): RawResult =
   ## Phase 14 cycle C4 boundary (`runSymexCaught`), plus RFC-0005 S8
   ## (§13.3, i3): the program's annotation violations ride out on EVERY
   ## verdict branch, including a boundary abort. Verdict-neutral: nothing
   ## reads them to decide `status`.
+  ##
+  ## RFC-0016 W4 perf: `replay` is the settle's replay of one candidate
+  ## (`CandidateReplay`), which only `emitRunSymexReplayed` passes. Nil, no
+  ## candidate is replayed in the run, so none is confirmed and no
+  ## candidate's tail is walked: each label claim the whole-run gate holds
+  ## carries `ubTailUnverified`.
   # RFC-0016 K5a: the host half of the build profile, read once. A host no
   # row covers decides nothing: `sxUnknown` with `feHostUnadmitted`, no raise.
   let hostRefusal = hostAdmission()
@@ -25652,7 +25674,7 @@ proc runSymex*(prog: SymexProgram,
   # has returned on every path it catches; `runSymexImpl` cannot do it in a
   # `finally` (CR-13's goto-exception caveat).
   let prevCtx = currentContext()
-  result = runSymexCaught(prog, target, settings)
+  result = runSymexCaught(prog, target, settings, replay)
   dropWitnessPins(result)
   # The caller path-condition stacks hold Z3 terms and are read only by the
   # walk that pushed them. The tail check's walk leaves its last entries in
@@ -25999,12 +26021,13 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
   ## capped checks, bounded before only by `walkRLimit`.
   ##
   ## RFC-0016 W3-z int4r: that budget is the run's, shared by every tail walk
-  ## the run makes (`tailUnitsRun`): the winner's, or one per replay
-  ## candidate (R2). Each walk may spend what the walks before it left, and a
-  ## walk that starts with nothing left fails closed at once. A per-walk
-  ## budget let a run with many candidates spend one budget per candidate:
-  ## `tsymex_r6_n36_raise_degrade` walked eleven candidate tails of a pair loop
-  ## past 900 s, where the explore walk took seconds.
+  ## the run makes (`tailUnitsRun`). Each walk may spend what the walks
+  ## before it left, and a walk that starts with nothing left fails closed at
+  ## once. A per-walk budget let a run with many candidates spend one budget
+  ## per candidate: `tsymex_r6_n36_raise_degrade` walked eleven candidate
+  ## tails of a pair loop past 900 s, where the explore walk took seconds.
+  ## RFC-0016 W4 perf: a run now walks at most one tail, the winner's or the
+  ## replay-confirmed candidate's (R2), so that walk has the whole budget.
   let lowerBase = loweringDegradeErrors.len
   if walkWorkExhausted:
     return {UbKind(ubTailUnverified)}   # no budget left to look with
@@ -26100,52 +26123,10 @@ proc verifyTailDefined(prog: SymexProgram; settings: SymexSettings;
                                      pins, via, sites)
   (all: fixed + via, viaOnly: via - fixed, sites: sites)
 
-type TailWalked = seq[tuple[pins: seq[Z3Bool];
-                            tail: tuple[all, viaOnly: set[UbKind];
-                                        sites: seq[string]]]]
-  ## RFC-0016 W3-z int7. The tail walks one run has made, by their pins.
-
-proc samePins(ctx: Z3Context; a, b: seq[Z3Bool]): bool =
-  ## The same pin terms in the same order. Z3 hash-conses its terms, so two
-  ## structurally equal terms of one context are one node with one id, and
-  ## `TailWalked` holds every term it compares, so no id is freed and reused.
-  if a.len != b.len: return false
-  for i in 0 ..< a.len:
-    if astId(ctx, a[i].raw) != astId(ctx, b[i].raw): return false
-  true
-
-proc verifyTailDefinedOnce(prog: SymexProgram; settings: SymexSettings;
-                           ctx: Z3Context; env: Env; initialPC: seq[Z3Bool];
-                           pins: seq[Z3Bool]; walked: var TailWalked):
-                           tuple[all, viaOnly: set[UbKind]; sites: seq[string]] =
-  ## RFC-0016 W3-z int7. `verifyTailDefined`, walked once per distinct pins
-  ## within one run. Every input of the tail walk other than the pins --
-  ## `prog`, `settings`, `ctx`, `env`, `initialPC` -- is the run's and the
-  ## same for each of its candidates, so the walk is the same check under
-  ## the same pins, and its answer is that check's answer. Replay
-  ## candidates of one run often share their pins: `q10_once` in
-  ## `tsymex_rfc0005_s8cq_twice11` hands out 24 with the one model `x = 0`.
-  ## Walked per candidate, 13 identical walks of 8,014,309 units spent the
-  ## run's whole tail budget (`tailUnitsRun`, R9/int4r), and the other 11
-  ## failed closed on the spent budget: 138 s on Linux for one check that
-  ## took 6 s before R2 (7dbb8566), killed at the 240 s bound on mingw.
-  ##
-  ## Sound: the answer returned for a repeat is one a whole walk under those
-  ## very pins gave, kinds, `viaOnly` split and proc-value sites alike, so a
-  ## candidate is trusted only if a walk under its pins showed the tail
-  ## defined, and every kind that walk named stays named. Only a fail-closed
-  ## artifact goes: a repeat is not walked again on the budget its
-  ## predecessors left, so it cannot read `ubTailUnverified` for want of
-  ## budget the first walk under its pins did not lack. Distinct pins are
-  ## walked as before, on what the run's budget has left.
-  for e in walked:
-    if samePins(ctx, e.pins, pins): return e.tail
-  result = verifyTailDefined(prog, settings, ctx, env, initialPC, pins)
-  walked.add (pins: pins, tail: result)
-
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
-                  settings: SymexSettings): RawResult =
+                  settings: SymexSettings;
+                  replay: CandidateReplay): RawResult =
   let ctx = resetSymexRunState(settings)
   # RFC-0005 S8as/S8ax: the signed `int` heaps are Int-sorted whenever the
   # run's ints are not exact (`intHeapIsInt`). S8as also required every
@@ -26758,32 +26739,56 @@ proc runSymexImpl(prog: SymexProgram,
         # fires only when no site recorded anything, so there is no site to
         # name. Bucket 4 by construction; the S8 pin enumerates it by name.
         scope: DeclineScope(kind: dskUnplaced))
+    # RFC-0016 W4 perf: the settle's replays run here, in its order (`sxSat`
+    # claims, then `sxRaised` claims, each in discovery order) up to the
+    # first confirmation, while the run's context and the candidates' model
+    # pins are live (`dropWitnessPins` clears them at the boundary). The
+    # entry macro settles on what they recorded once the run returns. A run
+    # whose Z3 API errors `runSymex` will turn into a bare `sxUnknown`
+    # (RFC-0005 S8m) hands out no candidate to settle, so replays none.
+    var confirmed = -1
+    if replay != nil and z3ApiErrorCount == 0:
+      block replayPass:
+        for claim in [sxSat, sxRaised]:
+          for i, c in w.candidates:
+            if c.status == claim and replay(i, toCandidate(c)):
+              confirmed = i
+              break replayPass
     # RFC-0016 W3-z R2 (section 9: replay is no evidence for undefined
-    # behaviour). A label candidate the replay may confirm is held to the
-    # whole-run gate the winner is: its tail is walked here, while its model
-    # pins are live (`dropWitnessPins` clears them at the boundary), and the
-    # kinds it is not shown defined in join its `witnessUndefined`, which
-    # `settleCandidate` carries onto the confirmed verdict. Its path carries
-    # a fresh symbol the pins do not fix, which the walk over-approximates,
-    # as it does the winner's. Replay off: no candidate is ever confirmed.
+    # behaviour). A label candidate a replay confirms is held to the
+    # whole-run gate the winner is: its tail is walked under its model pins,
+    # and the kinds it is not shown defined in join its `witnessUndefined`,
+    # which `settleCandidate` carries onto the confirmed verdict. Its path
+    # carries a fresh symbol the pins do not fix, which the walk
+    # over-approximates, as it does the winner's.
+    #
+    # RFC-0016 W4 perf: only the confirmed candidate's tail is walked. A
+    # candidate no replay confirms reaches no verdict, so what its tail
+    # holds is read by nothing; walking every candidate's tail before any
+    # replay spent the run's whole tail budget on the `n36` pair loop, whose
+    # verdict stays `sxUnknown`. A candidate whose tail is not walked fails
+    # closed (`ubTailUnverified`), so no settle can make it a defined claim.
+    # The confirmed tail is the run's only candidate tail walk, so it has
+    # the run's whole tail budget and its sites are the only ones joined.
     if settings.wholeRunDefinedness and settings.replay and
        target.kind == stkLabel:
-      # RFC-0016 W3-z int7: one walk per distinct pins (`verifyTailDefinedOnce`).
-      var walked: TailWalked
-      for c in w.candidates.mitems:
+      for i, c in w.candidates.mpairs:
         # RFC-0016 W3-z R7: a candidate whose kinds all came through
         # proc-valued variables (`undefinedViaOnly`) is walked too: a replay
         # may replace those, and then the tail must have been looked at.
         let fixed = c.soundness.witnessUndefined - c.undefinedViaOnly
-        if c.status == sxSat and fixed == {}:
-          let tail = verifyTailDefinedOnce(prog, settings, ctx, env,
-                                           initialPC, c.witness.pins, walked)
-          let all = c.soundness.witnessUndefined + ubOrdinals(tail.all)
-          let allFixed = fixed + ubOrdinals(tail.all - tail.viaOnly)
-          c.soundness.witnessUndefined = all
-          c.undefinedViaOnly = all - allFixed
-          for k in tail.sites:
-            if k notin w.procValueSites: w.procValueSites.add k
+        if c.status != sxSat or fixed != {}: continue
+        if i != confirmed:
+          c.soundness.witnessUndefined.incl ubOrdinals({UbKind(ubTailUnverified)})
+          continue
+        let tail = verifyTailDefined(prog, settings, ctx, env, initialPC,
+                                     c.witness.pins)
+        let all = c.soundness.witnessUndefined + ubOrdinals(tail.all)
+        let allFixed = fixed + ubOrdinals(tail.all - tail.viaOnly)
+        c.soundness.witnessUndefined = all
+        c.undefinedViaOnly = all - allFixed
+        for k in tail.sites:
+          if k notin w.procValueSites: w.procValueSites.add k
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
               callStats: statsSeq, errors: unknownErrs,
               undefined: w.undefinedFound,   # RFC-0016 K10a-target

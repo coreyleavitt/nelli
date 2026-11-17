@@ -165,10 +165,12 @@ suite "tsymex_rfc0005_s8cq_twice11: the replay candidates' tail walks":
   # `tailWalkCappedChecks` times `concreteBranchRLimit`), the other 11 failed
   # closed on the spent budget, and the check took 138 s on Linux against
   # 6 s at main db6c3da6 (killed at the 240 s bound on mingw). The
-  # requirement: a run walks the tail once per distinct pins, so here one
-  # walk, and the run's tail budget is not spent on repeats of it.
-  test "walker 354: candidates with the same pins share one tail walk":
-    check parseInt(symexWalkerVersion) >= 354
+  # requirement: the run's tail budget is not spent on repeats of one check.
+  # RFC-0016 W4 perf (walker 378) sharpens it: a candidate's tail is walked
+  # only when a replay confirms it. No replay confirms one here (the verdict
+  # stays `sxUnknown`), so no candidate tail is walked at all.
+  test "walker 378: no replay confirms a candidate, so no tail is walked":
+    check parseInt(symexWalkerVersion) >= 378
     let log = getTempDir() / ("s8cq_q10_units_" & $getCurrentProcessId() & ".log")
     removeFile(log)
     putEnv(walkUnitsLogEnv, log)
@@ -183,8 +185,8 @@ suite "tsymex_rfc0005_s8cq_twice11: the replay candidates' tail walks":
     removeFile(log)
     checkpoint "tail walk units: " & $tails
     # Red at 7808bc79: 13 walks (8,014,309 units each but the last), summing
-    # to the whole budget.
-    check tails.len == 1
+    # to the whole budget; one walk at walker 354-377.
+    check tails.len == 0
     let budget = defaultSymexSettings().budget.tailWalkCappedChecks *
                  int(concreteBranchRLimit(defaultSymexSettings()))
     var spent = 0

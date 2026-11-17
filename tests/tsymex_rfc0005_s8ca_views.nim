@@ -47,16 +47,15 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
     var named = false
     for e in r.errors:
       if e.severity == sevError and why in e.msg: named = true
     check named
+    body
 
 from ./s8cu_helpers import nativeHits
 
@@ -165,11 +164,17 @@ suite "S8ca (2): a view follows logged in-place writes, not term shapes":
       check (l & "_dead") notin h
 
   test "a swap that leaves equal terms is not an in-place write":
-    declines(sutSwap, "vw", "assigned whole or resized")
-    declines(sutSwap, "vw_dead", "assigned whole or resized")
+    declines(sutSwap, "vw", "assigned whole or resized"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    declines(sutSwap, "vw_dead", "assigned whole or resized"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
 
   test "an assignment of the whole whose terms match declines":
-    declines(sutFresh, "vf", "assigned whole or resized")
+    declines(sutFresh, "vf", "assigned whole or resized"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
 
   test "in-place writes through the pointer and by a var formal are seen":
     clean(sutTwice, "vt", sxSat)

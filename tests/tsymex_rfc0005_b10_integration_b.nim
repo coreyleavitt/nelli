@@ -40,16 +40,15 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string, kinds: set[SymexErrorKind]): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    for k in kinds: check r.errors.named(k)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
     check named
+    body
 
 # (2) ---------------------------------------------------------------------
 
@@ -123,11 +122,25 @@ suite "RFC-0005 batch 10: integration":
     check "pc_method_dead" notin hits
 
   test "procCall: every form declines, naming the magic":
-    declines(pcStmt, "pc_stmt", "procCall", {feUnsupportedOp})
-    declines(pcStmt, "pc_stmt_dead", "procCall", {feUnsupportedOp})
-    declines(pcValue, "pc_value", "procCall", {feUnsupportedOp})
-    declines(pcMethod, "pc_method", "procCall", {feGlobalRouteUnproved, feUnsupportedOp})
-    declines(pcMethod, "pc_method_dead", "procCall", {feGlobalRouteUnproved, feUnsupportedOp})
+    declines(pcStmt, "pc_stmt", "procCall"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    declines(pcStmt, "pc_stmt_dead", "procCall"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    declines(pcValue, "pc_value", "procCall"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    # `feGlobalRouteUnproved` (a method call whose overrides cannot be listed)
+    # is recorded only by a toolchain without the dispatch table (patch 0008,
+    # `hasMethodTable`), such as the local dev image; `feUnsupportedOp` is
+    # recorded either way.
+    declines(pcMethod, "pc_method", "procCall"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    declines(pcMethod, "pc_method_dead", "procCall"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
 
   test "proc-value results: nim":
     symexCaptureBegin()

@@ -72,8 +72,8 @@ proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs: result.add $e.kind & ": " & e.msg & "; "
 
 template declines(r: SymexResult) =
-  check r.status == sxUnknown
-  check r.errors.named(feGlobalRouteUnproved)
+  ## The decline's trust and message; the call site asserts the status and the
+  ## kind (`feGlobalRouteUnproved`).
   check not r.trusted
   check "whose overrides cannot be listed" in show(r.errors)
 
@@ -85,6 +85,8 @@ template decides(r: SymexResult) =
     check r.status == sxSat
     check r.trusted
   else:
+    check r.status == sxUnknown
+    check r.errors.named(feGlobalRouteUnproved)
     declines(r)
 
 suite "PRC-02m: symexFind over a dynamic call":
@@ -119,6 +121,8 @@ suite "PRC-02m: symexFind over a dynamic call":
       when hasMethodTable:
         check r.status == sxUnsat
       else:
+        check r.status == sxUnknown
+        check r.errors.named(feGlobalRouteUnproved)
         declines(r)
 
   test "an override the scan cannot see still declines":

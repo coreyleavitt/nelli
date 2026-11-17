@@ -40,16 +40,15 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(beSolverUndef)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
     check named
+    body
 
 # (1) ---------------------------------------------------------------------
 
@@ -91,7 +90,9 @@ suite "RFC-0005 batch 10: integration":
       for e in r.errors:
         if e.kind == beSolverUndef: undef = true
       check undef
-    declines(altMissLen, "alt_miss_len", "PCRE's own limits")
+    declines(altMissLen, "alt_miss_len", "PCRE's own limits"):
+      check r.status == sxUnknown
+      check r.errors.named(beSolverUndef)
 
   test "alt_short: inside the safe length the refutation stands":
     clean(altShort, "alt_short", sxUnsat)

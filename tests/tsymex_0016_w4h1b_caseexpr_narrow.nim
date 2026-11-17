@@ -10,6 +10,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+from ./s8cu_helpers import named
 
 type
   WideTag = enum wt0, wt1, wt2, wt3, wt4, wt5, wt6, wt7, wt8, wt9
@@ -83,3 +84,4 @@ suite "RFC-0016 H1b HRV-32 - case-expression tag narrowing":
   test "no narrowing set from the labels: the budget decline is unchanged":
     let res = symexFind(sutExprElseUnnarrowed, tLabel("expr_else_7"))
     check res.status == sxUnknown
+    check res.errors.named(beBudgetExhaustedUnmodelled)

@@ -29,16 +29,15 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string, kinds: set[SymexErrorKind]): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    for k in kinds: check r.errors.named(k)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
     check named
+    body
 
 from ./s8cu_helpers import nativeHits
 
@@ -136,7 +135,10 @@ suite "S8cl (4): newString is fresh memory":
     clean(sutLength, "nl_dead", sxUnsat)
     clean(sutLength, "nr", sxSat)
     clean(sutLength, "nr_dead", sxUnsat)
-    declines(sutHuge, "nh", "is not modelled", {beSolverUndef, feUnsupportedOp})
+    declines(sutHuge, "nh", "is not modelled"):
+      check r.status == sxUnknown
+      check r.errors.named(beSolverUndef)
+      check r.errors.named(feUnsupportedOp)
 
   test "newStringOfCap":
     clean(sutCap, "nc", sxSat)
@@ -147,7 +149,10 @@ suite "S8cl (4): newString is fresh memory":
     clean(sutFreshView, "bf_dead", sxUnsat)
 
   test "what cannot be placed still declines":
-    declines(sutOpaqueView, "bu", "opaqueStr", {feOpaqueCallUnmodelled, feUnsupportedOp})
+    declines(sutOpaqueView, "bu", "opaqueStr"):
+      check r.status == sxUnknown
+      check r.errors.named(feOpaqueCallUnmodelled)
+      check r.errors.named(feUnsupportedOp)
     let u = symexFind(sutUninit, tLabel("ui"))
     checkpoint $u.status & " " & show(u.errors)
     check u.status == sxUnknown

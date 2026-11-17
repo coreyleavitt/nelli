@@ -38,17 +38,16 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string, kinds: set[SymexErrorKind]): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   ## A shape the walk does not model: `sxUnknown`, with the decline named.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    for k in kinds: check r.errors.named(k)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
     check named
+    body
 
 import ./s8cu_helpers except show
 
@@ -186,7 +185,9 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     check "du_dead" notin h
     clean(sutDup, "du", sxSat)
     clean(sutDup, "du_dead", sxUnsat)
-    declines(sutDestroy, "ds", "=destroy", {feUnsupportedOp})
+    declines(sutDestroy, "ds", "=destroy"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
 
   test "what stopped the compile declines: create, GC_ref, a when member":
     let h = nativeHits(sutCreate, ks) + nativeHits(sutGcRef, ks) +
@@ -194,9 +195,21 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     for l in ["cr", "gr", "wn"]:
       checkpoint l
       check l in h
-    declines(sutCreate, "cr", "create", {beBudgetExhaustedUnmodelled, feUnsupportedParamType})
-    declines(sutGcRef, "gr", "nnkCast", {feLocalPragma})
-    declines(sutWhenMember, "wn", "WhenMember", {feUnsupportedExprKind, feUnsupportedParamType, feUnsupportedStmtKind})
+    # `create` walks into the allocator, and the stdlib body it reaches differs
+    # by toolchain and OS: the local Linux image stops on the call budget and a
+    # param type, Windows on `{.align.}` of `BigChunk` and compiled-out checks.
+    # `feUnsupportedOp` (the hook whose formals cannot be read) is on every one.
+    declines(sutCreate, "cr", "create"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    declines(sutGcRef, "gr", "nnkCast"):
+      check r.status == sxUnknown
+      check r.errors.named(feLocalPragma)
+    declines(sutWhenMember, "wn", "WhenMember"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedExprKind)
+      check r.errors.named(feUnsupportedParamType)
+      check r.errors.named(feUnsupportedStmtKind)
     # RFC-0016 CRH-02: the two compile stops as K9 pins.
     pinDecline(sutCreate, cellKey(faCallShape, "lifetime/create"), feUnsupportedOp, tLabel("cr"))
     pinDecline(sutGcRef, cellKey(axMagic, "GCref"), feUnsupportedExprKind, tLabel("gr"), needle = "nnkCast")
@@ -215,7 +228,9 @@ suite "S8cl (3): setLen":
     clean(sutSetLen, "sl_dead", sxUnsat)
     clean(sutSetLenWrites, "sw", sxSat)
     clean(sutSetLenWrites, "sw_dead", sxUnsat)
-    declines(sutSetLenLater, "sa", "feEvalOrderUnmodelled", {feEvalOrderUnmodelled})
+    declines(sutSetLenLater, "sa", "feEvalOrderUnmodelled"):
+      check r.status == sxUnknown
+      check r.errors.named(feEvalOrderUnmodelled)
 
   test "a mitems body that resizes with setLen decides":
     clean(sutMitemsSetLen, "ms", sxSat)

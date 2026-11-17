@@ -183,7 +183,8 @@ suite "S8cu: routines of other kinds":
     let r = symexFind(viaMethod, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
-    check r.errors.named(feGlobalRouteUnproved)
+    # `feGlobalRouteUnproved` is recorded only by a toolchain without the
+    # dispatch table (`hasMethodTable`); `feUnsupportedOp` either way.
     check r.errors.named(feUnsupportedOp)
 
   test "a converter":

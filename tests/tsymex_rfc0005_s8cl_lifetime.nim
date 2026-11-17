@@ -39,17 +39,16 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   ## A shape the walk does not model: `sxUnknown`, with the decline named.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
     check named
+    body
 
 from ./s8cu_helpers import nativeHits
 
@@ -164,7 +163,9 @@ suite "S8cl (1c): the audit of the lifetime magics":
     clean(sutNew, "nw_dead", sxUnsat)
     clean(sutNewExpr, "ne", sxSat)
     clean(sutNewExpr, "ne_dead", sxUnsat)
-    declines(sutNewFinalizer, "nf", "magic \"NewFinalize\"")
+    declines(sutNewFinalizer, "nf", "magic \"NewFinalize\""):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
 
   test "a field, an element, an object, the hooks called by name":
     clean(sutNewObject, "no", sxSat)

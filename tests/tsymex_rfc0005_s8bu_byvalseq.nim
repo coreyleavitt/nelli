@@ -35,17 +35,16 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   ## A shape the walk does not model: `sxUnknown`, with the decline named.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
     var named = false
     for e in r.errors:
       if e.severity == sevError and why in e.msg: named = true
     check named
+    body
 
 from ./s8cu_helpers import nativeHits
 
@@ -167,8 +166,12 @@ suite "S8bu (6): a by-value seq whose whole address is taken":
     clean(sutSeqField, "sf_dead", sxUnsat)
 
   test "an assignment of the whole, or a resize, declines":
-    declines(sutSeqWhole, "sa", "assigned whole or resized")
-    declines(sutSeqGrow, "sg", "assigned whole or resized")
+    declines(sutSeqWhole, "sa", "assigned whole or resized"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
+    declines(sutSeqGrow, "sg", "assigned whole or resized"):
+      check r.status == sxUnknown
+      check r.errors.named(feUnsupportedOp)
 
   test "a string (RFC-0005 S8ca)":
     # S8bu declined it. RFC-0005 S8ca: the string owns its memory

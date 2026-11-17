@@ -40,16 +40,15 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, body: untyped): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r {.inject.} = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feGlobalHavoc)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
     check named
+    body
 
 # (3) ---------------------------------------------------------------------
 
@@ -123,7 +122,9 @@ suite "RFC-0005 batch 10: integration":
   test "a store through a ptr that may address a global's field":
     # The dead label is a proof over both worlds, aliased or not; the live one
     # stays a decline until a replay can aim the pointer at the global.
-    declines(fieldPtr, "fp", "gPr.y")
+    declines(fieldPtr, "fp", "gPr.y"):
+      check r.status == sxUnknown
+      check r.errors.named(feGlobalHavoc)
     block:
       let r = symexFind(fieldPtr, tLabel("fp_dead"))
       checkpoint $r.status & " " & show(r.errors)

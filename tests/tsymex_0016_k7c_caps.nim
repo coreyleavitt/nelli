@@ -99,18 +99,21 @@ suite "RFC-0016 K7c -- a converted cap halt is a cut, not a clean unsat":
   test "variant constructor fork budget (ckVariantForks)":
     let r = symexFind(k7cForks, tLabel("k7c_forks"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
     check not r.trusted()
     pinCap(k7cForks, "ckVariantForks", tLabel("k7c_forks"))
 
   test "variant constructor field-allocation budget (ckVariantFieldAllocs)":
     let r = symexFind(k7cFieldAllocs, tLabel("k7c_fields"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
     check not r.trusted()
     pinCap(k7cFieldAllocs, "ckVariantFieldAllocs", tLabel("k7c_fields"))
 
   test "heap dereference depth budget (ckHeapDepth)":
     let r = symexFind(k7cHeap, tLabel("k7c_heap"), depthTwo)
     check r.status == sxUnknown
+    check r.errors.named(heDepthExhausted)
     check not r.trusted()
     pinCap(k7cHeap, "ckHeapDepth", tLabel("k7c_heap"), depthTwo)
 

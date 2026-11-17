@@ -34,3 +34,4 @@ INT-26	pinned by tests/tsymex_0016_h1_findall_regexerror.nim, which checks the v
 AUD-03	structural: no clean no-zero type remains after S8z, so the pins stay on the sound sxUnknown arm-field cases, which are pre-K9 suites
 AUD-06	a CI design note (the sampled vm-alias job); no engine behaviour, so no cell and no pin record
 INT-19	a local one-off run against a PCRE 8.37 no-JIT build, recorded in the row; no cell and no pin record
+PRC-30	pinned by tests/tsymex_0016_s8ch_addrglobal.nim, which checks every verdict against the native run of its SUT (`nativeHits`) by hand rather than through a K9 record verb: the SUTs write module-level globals and arrays through pointers, which the K9 replay domains do not drive

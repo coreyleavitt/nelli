@@ -5034,11 +5034,23 @@ func capBoundName*(cell: string): string =
   ## (`syncAddrCells`).
   cell & "#bound"
 
+func isModuleGlobalEnvName*(name: string): bool =
+  ## RFC-0016 S8ch. A module-level variable's IR name (`isGlobalEnvName`),
+  ## not a capture's env cell (`capCellName`, `__gl:@cap`) nor a name derived
+  ## from one (`#` is in no Nim identifier: `capAddrName`, `addrCellName`).
+  isGlobalEnvName(name) and not name.startsWith(globalEnvPrefix & "@") and
+    '#' notin name
+
 func addrCellName*(local: string): string =
   ## RFC-0005 S8ax. The env name of the address cell of the variable
   ## `local` (`addr local`): frame local (no `__gl:` prefix), never a Nim
   ## identifier.
-  "__addr." & local
+  ## RFC-0016 S8ch: a module-level variable's cell is a global's name
+  ## (`<global>#addr`, as `capAddrName` is beside a capture's cell), so every
+  ## call threads it as it threads the variable: there is one cell per
+  ## global for the whole walk, whichever frame took the address first.
+  if isModuleGlobalEnvName(local): local & "#addr"
+  else: "__addr." & local
 
 func displayName*(name: string): string =
   ## RFC-0005 S8an. The source spelling of an IR name, for messages: a

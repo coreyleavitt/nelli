@@ -774,8 +774,22 @@ const renderAsChoicesVersion* = "12"
   ##   overflow check splits on an operand that is such a choice
   ##   (`mulOverflowSplit`): `ti_tuple`'s query, 121M units in a context of
   ##   its own, is decided under the defaults. No key bytes change.
+  ## - RFC-0016 W4 S8ch (PRC-30; 371->376, 372..375 reserved by in-flight
+  ##   branches): `addr g` of a module-level `var` is the global's own address
+  ##   cell, one for the whole walk (`addrCellName`), which every frame keeps
+  ##   equal to the global; it halted the path (`heUnsafeCast`). An address
+  ##   cell's pointer is its own cell (`sel = 0`, `ptrSelOwnAtAlloc`), as
+  ##   every other allocation's is. A pointer that addresses such a global
+  ##   reads and writes its cell (`ptrTargets`' `inCell`), so `p[] = k` through
+  ##   a callee's returned `addr g` decides. A by-value array formal whose
+  ##   address the callee takes is the actual's location (`addrTakenArrayFormal`,
+  ##   passed as a `var` formal): exact for a `var` actual, a part of one
+  ##   with no dereference on the way (`h.a`, `m[j]`: `arrayFormalPath`,
+  ##   copied in and written back to the path as a `var` actual is), and a
+  ##   temporary; declined for constant data (SIGSEGV natively), a variable
+  ##   another actual names, and any other actual. No key bytes change.
 
-const symexWalkerVersion* = "375"
+const symexWalkerVersion* = "376"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -79,7 +79,6 @@ W-48	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision
 W-49	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 W-62	K5b	no cell or pin names it yet; the row's home names this slice
 W-64	K10d	no cell or pin names it yet; the row's home names this slice
-W-65	H1	no cell or pin names it yet; the row's home names this slice
 STY-09	K4c	no cell or pin names it yet; the row's home names this slice
 PRC-02b	W4-z	follow-up toolchain slice; the decline it would lift is pinned in tsymex_0016_prc02_reexec, no cell names it yet
 INT-48	W4-z	upstream Nim issue candidate; nelli has no cell for it

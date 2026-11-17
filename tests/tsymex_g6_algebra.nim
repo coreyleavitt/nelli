@@ -7,20 +7,19 @@ import nelli/smt/transparency
 
 suite "RFC-fuzzer-nextgen G6 — transparency descriptor composition algebra":
 
-  test "closed: every ordered pair of the 6 categories composes to a valid descriptor":
+  test "closed: every ordered pair of the 5 categories composes to a valid descriptor":
     # One representative, non-degenerate instance per kind.
     let reps = [
       dIdentity(),
       dAffine(2, 1),
       dPredicated(dIdentity(), @[PredicateSpec(a: 1, b: 0, op: poGt, lit: 5)]),
-      dSpanComposite(@[dIdentity(), dAffine(3, 0)]),
       dOpaque(),
       dBranching(@[
         BranchingCase(guard: PredicateSpec(a: 1, b: 0, op: poEq, lit: 0), then: dIdentity()),
         BranchingCase(guard: PredicateSpec(a: 1, b: 0, op: poNe, lit: 0), then: dAffine(1, 10)),
       ]),
     ]
-    # Totality: compose never raises, and always yields one of the 6 kinds
+    # Totality: compose never raises, and always yields one of the 5 kinds
     # (trivially true by Nim's own type system once every branch returns —
     # this loop is the executable proof that no (kind1, kind2) pair was
     # left unhandled at runtime, since a missing `of` would raise a
@@ -31,10 +30,34 @@ suite "RFC-fuzzer-nextgen G6 — transparency descriptor composition algebra":
         let c = compose(a, b)
         seenKinds.incl c.kind
     # Every pair produced SOME valid descriptor — the loop completing at
-    # all (36 iterations, no exception) is the closure proof; this final
+    # all (25 iterations, no exception) is the closure proof; this final
     # check just confirms composition wasn't vacuously degenerate (i.e.
     # every kind is reachable as a RESULT of composing these two reps).
     check seenKinds.card >= 1
+
+  test "HRV-26: the kind set is exactly the producible kinds, and the table is total over it":
+    # The classifier (`concolic.nim`) only ever builds identity/affine/
+    # predicated/branching/opaque; a span-composite kind was dead substrate
+    # (no producer) and was removed rather than kept as stub cells. Pin the
+    # kind set and prove totality by composing every ordered pair of kinds.
+    check DescriptorKind.high.ord + 1 == 5
+    var reps: seq[TransparencyDescriptor]
+    for k in DescriptorKind:
+      reps.add(case k
+        of dkIdentity: dIdentity()
+        of dkAffine: dAffine(2, 1)
+        of dkPredicated: dPredicated(dIdentity(), @[PredicateSpec(a: 1, b: 0, op: poGt, lit: 5)])
+        of dkOpaque: dOpaque()
+        of dkBranching: dBranching(@[BranchingCase(
+          guard: PredicateSpec(a: 1, b: 0, op: poEq, lit: 0), then: dAffine(1, 3))]))
+    check reps.len == 5
+    for a in reps:
+      for b in reps:
+        let c = compose(a, b)
+        check c != nil
+        # soundness: opaque on either side is never made transparent
+        if a.kind == dkOpaque or b.kind == dkOpaque:
+          check c.kind == dkOpaque
 
   test "identity is the neutral element both directions":
     let a = dAffine(3, 7)
@@ -47,7 +70,6 @@ suite "RFC-fuzzer-nextgen G6 — transparency descriptor composition algebra":
       dIdentity(),
       dAffine(2, 1),
       dPredicated(dIdentity(), @[PredicateSpec(a: 1, b: 0, op: poGt, lit: 5)]),
-      dSpanComposite(@[dIdentity()]),
       dBranching(@[BranchingCase(guard: PredicateSpec(a: 1, b: 0, op: poEq, lit: 0), then: dIdentity())]),
     ]
     for r in reps:
@@ -114,28 +136,6 @@ suite "RFC-fuzzer-nextgen G6 — transparency descriptor composition algebra":
     check composed.conjuncts.len == 2
     check composed.conjuncts[0] == PredicateSpec(a: 1, b: 0, op: poGt, lit: 5)
     check composed.conjuncts[1] == PredicateSpec(a: 1, b: 0, op: poLt, lit: 100)
-
-  test "span-composite ∘ affine distributes the affine into every span":
-    let sc = dSpanComposite(@[dIdentity(), dAffine(2, 0)])
-    let composed = compose(sc, dAffine(1, 10))
-    check composed.kind == dkSpanComposite
-    check composed.spans.len == 2
-    check composed.spans[0].kind == dkAffine
-    check composed.spans[0].a == 1
-    check composed.spans[0].b == 10
-    check composed.spans[1].kind == dkAffine
-    check composed.spans[1].a == 2
-    check composed.spans[1].b == 10
-
-  test "span-composite ∘ predicated distributes the filter into every span":
-    let sc = dSpanComposite(@[dIdentity(), dAffine(2, 0)])
-    let pred = dPredicated(dIdentity(), @[PredicateSpec(a: 1, b: 0, op: poNe, lit: 0)])
-    let composed = compose(sc, pred)
-    check composed.kind == dkSpanComposite
-    check composed.spans.len == 2
-    for s in composed.spans:
-      check s.kind == dkPredicated
-      check s.conjuncts.len == 1
 
   test "branching ∘ affine distributes into every case's continuation":
     let br = dBranching(@[

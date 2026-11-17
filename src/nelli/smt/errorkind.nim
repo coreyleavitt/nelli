@@ -1317,8 +1317,7 @@ const kindInfo*: array[SymexErrorKind, KindInfo] = [
     # S4 audited (split -> heUnsupportedPointeeRead): the remaining sites
     # substitute, they do not havoc -- `walkHeapArm`'s non-ref/ptr-SymVal
     # deref reads bind a placeholder WITHOUT the NilAccessDefect fork (a
-    # dropped raise branch), its deref writes DROP the write (stale heap),
-    # and `runSymex`'s `SymexRefUnresolvedError` boundary arm aborts the run.
+    # dropped raise branch), its deref writes DROP the write (stale heap).
     geVtableDispatch: (class: dcNoAnswer, severity: sevError),
     ceClosureBodyUncertain: (class: dcFreshSymbol, severity: sevError),
     # S7: the tainted body arm is dropped from the ground axioms, so the

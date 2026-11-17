@@ -971,6 +971,10 @@ proc danglingFork(p: Path; refAst: Z3AnyAst; w: var WalkCtx): seq[Path] =
     result.add forkPathTainted(p, p.pc & @[anyHit], p.env, d)
   result.add forkPath(p, p.pc & @[not anyHit], p.env)
 
+proc ptrSelOwnAtAlloc(ctx: Z3Context; p: Path; pointee: IRType;
+                      refSort: RawZ3Sort; typeId: string;
+                      newRef: Z3AnyAst)  ## RFC-0016 S8ch fwd decl
+
 proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. `addr x` (`isNew` with `nAddrOf = x`): bind
   ## `stmt.nRetName` to `x`'s address cell, allocating it on the first
@@ -991,6 +995,15 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
   for p in paths:
     if w.shouldStop: return
     if p.env.hasKey(stmt.nRetName) and p.env[stmt.nRetName].kind == svPtr:
+      # RFC-0016 S8ch: a global's cell another frame took is this frame's too.
+      if isModuleGlobalEnvName(local):
+        var known = false
+        for c in w.frame.addrCells:
+          if c.local == local and not c.bound: known = true
+        if not known:
+          w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
+                                 path: @[], ixs: @[], bound: false,
+                                 view: false, slot: "")
       result.add p
       continue
     var why = ""
@@ -999,7 +1012,10 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     if ty.kind notin {itInt, itBool, itFloat32, itFloat64, itString, itTuple,
                       itSeq, itVariant, itMultiVariant}:
       why = "of a variable of type " & $ty
-    elif local in w.frame.outerNames or isGlobalEnvName(local):
+    elif local in w.frame.outerNames or
+         (isGlobalEnvName(local) and not isModuleGlobalEnvName(local)):
+      # RFC-0016 S8ch: a module-level variable's cell is threaded as the
+      # variable is (`addrCellName`), and every frame keeps the two equal.
       why = "of a variable an enclosing routine owns"
     elif not p.env.hasKey(local):
       why = "of a variable this frame does not hold"
@@ -1010,6 +1026,12 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     var child = forkPath(p, p.pc, p.env)
     let newRef = freshRef(ctx, refSort, typeId, child)
     assertFreshness(ctx, child, typeId, newRef, w.settings)
+    # RFC-0016 S8ch: an address cell is its own cell, as every allocation is
+    # (S8bh's model above `tyMayHold`): `sel = 0` at its address. Left free,
+    # a write through a pointer equal to it (a callee's `ptr` result) also
+    # stored into each global under a guard the model left open, and a
+    # global's cell then saw its variable written twice in one statement.
+    ptrSelOwnAtAlloc(ctx, child, ty, refSort, typeId, newRef)
     var env2 = child.env
     env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef, ptrFamily: true,
                                  ptrPointee: ty)
@@ -1028,7 +1050,10 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
       if not known:
         w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
                                path: @[], ixs: @[], bound: false, view: false, slot: "")
-    child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
+    # RFC-0016 S8ch: a global's storage outlives every frame: its cell never
+    # dangles, so no frame owns it.
+    if not isModuleGlobalEnvName(local):
+      child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
     env2[local] = keepStrBuf(addrCellStore(ctx, child, ty, newRef,
                                            env2[local]), env2[local])
     child.env = env2

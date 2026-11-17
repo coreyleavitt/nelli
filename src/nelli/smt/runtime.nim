@@ -14083,6 +14083,12 @@ proc inheritAddrCells(calleeEnv: var Env; callerEnv: Env;
     if c.local in captures and c.local notin guarded:
       calleeEnv[c.cell] = callerEnv[c.cell]
       result.add c
+    # RFC-0016 S8ch: a module-level variable's cell, threaded as the variable
+    # is (`threadOuterBindings`): the callee reaches both by name.
+    if not c.bound and isModuleGlobalEnvName(c.local) and
+       c.local notin guarded and calleeEnv.hasKey(c.local):
+      calleeEnv[c.cell] = callerEnv[c.cell]
+      result.add c
     for (formal, callerName) in varArgs:
       if callerName == c.local:
         # RFC-0005 S8bs: a formal bound into a cell passes the binding on.
@@ -14155,7 +14161,10 @@ proc carryElemCells(p: Path; callerFrame, calleeFrame: int;
         c.dead = true
   p.elemCells = kept
 
-type AddrCarry = tuple[moved: seq[Z3AnyAst]; lost: seq[string]]
+type AddrCarry = tuple[moved: seq[Z3AnyAst]; lost: seq[string];
+                       unowned: seq[Z3AnyAst]]
+  ## RFC-0016 S8ch: `unowned` are cells that became a module-level variable's
+  ## (a `var` formal bound to it): its storage never dangles.
 
 proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
                     varArgs: seq[(string, string)]; sig: ProcSig;
@@ -14166,7 +14175,8 @@ proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
   ## `getP(x: var int): ptr int = addr x` returns the address of the
   ## caller's `x`. `moved` are those cells (`settleAddrCells` gives them to
   ## the caller's frame); `lost` are cells of a `var` formal bound to
-  ## something with no cell (a field, an element, a module-level variable).
+  ## something with no cell (a field, an element; RFC-0016 S8ch: a
+  ## module-level variable has one, `addrCellName`).
   ## A cell of the callee's own variable stays the callee's: it dangles now
   ## (`danglingFork`).
   for c in calleeCells:
@@ -14180,12 +14190,18 @@ proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
       if formal == c.local: to = callerName
     if to.len == 0 and c.local in sig.captures and c.local notin guarded:
       to = c.local
+    # RFC-0016 S8ch: a module-level variable's cell is the caller's too
+    # (`carryOuterBindings` carried the pointer under the global's name).
+    if to.len == 0 and isModuleGlobalEnvName(c.local) and
+       c.local notin guarded:
+      to = c.local
     var isVarFormal = false
     for f in sig.params:
       if f.name == c.local and f.isVar: isVarFormal = true
     # A parser temporary (`__sym_varArg_<n>`, the copy a field or element
     # actual is passed through) is not the location: the cell is lost.
-    if to.len > 0 and not isGlobalEnvName(to) and not to.startsWith("__"):
+    if to.len > 0 and (isModuleGlobalEnvName(to) or
+                       not isGlobalEnvName(to) and not to.startsWith("__")):
       dst[addrCellName(to)] = exitEnv[c.cell]
       var known = false
       for k in w.frame.addrCells:
@@ -14193,7 +14209,8 @@ proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
       if not known:
         w.frame.addrCells.add (local: to, cell: addrCellName(to), ty: c.ty,
                                path: @[], ixs: @[], bound: false, view: false, slot: "")
-      result.moved.add exitEnv[c.cell].ptrAst
+      if isModuleGlobalEnvName(to): result.unowned.add exitEnv[c.cell].ptrAst
+      else: result.moved.add exitEnv[c.cell].ptrAst
     elif isVarFormal or to.len > 0:
       result.lost.add displayName(c.local)
 
@@ -14206,11 +14223,16 @@ proc settleAddrCells(p: Path; carried: AddrCarry; w: var WalkCtx): Path =
     for o in p.addrOwners.mitems:
       if cast[pointer](o.refAst.raw) == cast[pointer](r.raw):
         o.frame = w.frame.frameId
+  for r in carried.unowned:   ## RFC-0016 S8ch
+    var kept: seq[tuple[refAst: Z3AnyAst; frame: int]]
+    for o in p.addrOwners:
+      if cast[pointer](o.refAst.raw) != cast[pointer](r.raw): kept.add o
+    p.addrOwners = kept
   if carried.lost.len > 0:
     taintInPlace(p, w.degrade(feUnsupportedOp,
       "RFC-0005 S8ax: the address of the `var` formal(s) " &
            carried.lost.join(", ") & " was taken, and the formal is bound " &
-           "to a field, an element or a module-level variable, which has no " &
+           "to a field or an element, which has no " &
            "address cell the walk keeps equal to it (feUnsupportedOp)"))
   p
 
@@ -23898,6 +23920,11 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
           entryCells.add (local: formal, cell: cell, ty: c.ty, path: c.path,
                           ixs: c.ixs, bound: c.bound, view: c.view, slot: "")
           if callerName notin boundOuts: boundOuts.add callerName
+      # RFC-0016 S8ch: a module-level variable's cell, threaded with the
+      # globals (`descentEnv`): the body reaches both by name.
+      if not c.bound and isModuleGlobalEnvName(c.local) and
+         descentBase.env.hasKey(c.local) and descentBase.env.hasKey(c.cell):
+        entryCells.add c
     if locs.len > 0:
       descentBase.elemCells = w.callerElemCells
       var paramNames: seq[string]

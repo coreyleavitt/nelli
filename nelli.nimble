@@ -1888,6 +1888,8 @@ task test, "Run the test suite":
             # a verdict after Z3 5.1's mk_unique message is never a trusted sat/unsat (UPS-02, PND-10).
             "tsymex_0016_s8cj_runctx",
             "tsymex_0016_s8cj_mkunique",
+            # RFC-0016 S8ch (PRC-30): the address of a module-level variable in a walked callee is the global's own cell.
+            "tsymex_0016_s8ch_addrglobal",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

@@ -7222,14 +7222,18 @@ proc addrCellLocal(e: NimNode): NimNode =
   ## `x` has an address cell in the walk (`mkNewT`'s `addrOf`): the
   ## pointer is a value like any other -- stored, returned, compared,
   ## re-pointed -- and the walker keeps `x` and its cell equal.
+  ## RFC-0016 S8ch: or a module-level `var` (`isModuleGlobal`), whose cell is
+  ## one for the whole walk (`addrCellName`): every frame keeps the global and
+  ## the cell equal (`inheritAddrCells`, `carryAddrCells`). It halted the path
+  ## (`heUnsafeCast`). A module-level `let` keeps its decline.
   let lv = addrActualLvalue(e)
   if lv == nil: return nil
   var t = lv
   if isVarIndirection(t): t = t[0]
   if t.kind != nnkSym or
-     symKind(t) notin {nskVar, nskLet, nskParam, nskResult, nskForVar} or
-     isModuleGlobal(t):
+     symKind(t) notin {nskVar, nskLet, nskParam, nskResult, nskForVar}:
     return nil
+  if isModuleGlobal(t) and symKind(t) != nskVar: return nil
   t
 
 proc elemCellOf(e: NimNode): tuple[root, idx: NimNode] =

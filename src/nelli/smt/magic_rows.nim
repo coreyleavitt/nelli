@@ -345,7 +345,7 @@ const magicAxis* = axisTable[MagicSite, MagicModel](axMagic, [
   mModelled("IsNil",
     "isNil (system.nim:1455): P:11629 (S8bo)"),
   mModelled("Addr",
-    "addr,unsafeAddr (system.nim:99): addr/unsafeAddr arms P:7706,8008,8404 (cluster R, S8ch); global in a walked callee declines (heUnsafeCast)"),
+    "addr,unsafeAddr (system.nim:99): addr/unsafeAddr arms P:7706,8008,8404 (cluster R); a module-level var is its own cell in every frame (S8ch, PRC-30); unsafeAddr of a by-value array formal declines (feUnsupportedOp, PRC-30 item 2)"),
   mNeverBecause("DeepCopy",
     "deepCopy (system.nim:2768): under the default --mm:orc it needs --deepcopy:on, a flag a test file cannot set (the compile stops: 'deepcopy support has to be enabled'), so no SUT reaches it (W3-z M1: pinned never; a build with --deepcopy:on would reach the stubBody decline P:21225)", nrPlatform),
   mDeclinedAs("GCref", feUnsupportedExprKind,

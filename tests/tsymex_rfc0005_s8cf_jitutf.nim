@@ -15,6 +15,7 @@ import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
 import ./s8bt_harness/member
+import ./s8cu_helpers
 
 const
   heads = ["(?:\\sb|\\x{a9})c", "(?:\\d|\\x{80})ab", "\\x{a9}b", "\\x{85}b",
@@ -62,7 +63,9 @@ when s8cfJuPart != 0:
   suite "S8cf: UTF mode under the JIT's scan, by head":
     test "concrete calls against native":
       if pcreSearchEngine() != peJit837:
-        skip()
+        skipCell(cellKey(axBuild, "8.37 2015-04-28|jit"),
+          "this host's search engine is " & $pcreSearchEngine() &
+          ", not the 8.37 JIT whose scan the comparison needs")
       else:
         var calls, scanned, midSeen = 0
         var bad: seq[string]

@@ -12,11 +12,14 @@ import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
 import ./s8bt_harness/limit_corpus
+import ./s8cu_helpers
 
 suite "S8cf: the JIT's LIMIT_MATCH":
   test "native JIT against the automaton":
     if not pcreRunsJit() or pcreVersion() != "8.37 2015-04-28":
-      skip()
+      skipCell(cellKey(axBuild, "8.37 2015-04-28|jit"),
+        "the native JIT 8.37 is not the PCRE this host runs (" & pcreVersion() &
+        ", jit=" & $pcreRunsJit() & "); LIMIT_MATCH is compared against it only there")
     else:
       var bad: seq[string]
       var calls, skipped = 0

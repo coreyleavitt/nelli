@@ -547,7 +547,7 @@ jobs:
             bash scripts/build-z3-asan.sh "$Z3_ASAN_VERSION" "$HOME/z3-asan-prefix" "$RUNNER_TEMP/z3-asan-build"
           rm -rf "$RUNNER_TEMP/z3-asan-build"
 
-      - name: Self-test, the job fails on planted defects (a plain UAF and an over-released Z3 AST)
+      - name: Self-test, the job fails on planted defects (a plain UAF, an over-released Z3 AST) and passes the throw control
         env:
           NELLI_HOST: "1"
         run: |

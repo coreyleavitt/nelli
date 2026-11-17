@@ -621,12 +621,25 @@ proc lowerDegrade*(kind: SymexErrorKind; msg: string;
   loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
   loweringPendingUb = loweringPendingUb + ub     # RFC-0016 W1-d3
 
+var rawKeep {.threadvar.}: seq[Z3AnyAst]
+  ## RFC-0016 CRH-07. The terms `keepRaw` owns for the run.
+
+proc keepRaw*[T](a: T): RawZ3Ast =
+  ## RFC-0016 CRH-07. The raw handle of `a`, valid for the rest of the run.
+  ## A proc that returns a raw handle of a term it built returns this: the
+  ## `.raw` of its temporary has no owner once the proc returns, and Z3 frees
+  ## the node at the next release or call that makes an AST.
+  if a.raw.isNil: return a.raw
+  rawKeep.add wrap[Z3AnyAst](a.ctx, a.raw)
+  rawKeep[^1].raw
+
 proc resetLoweringSink*() =
   ## RFC-0016 review D3c-1. The per-run reset of this module's threadvars,
   ## called from `resetSymexRunState` beside the rest of the run state.
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
   loweringPendingUb = {}
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
+  rawKeep = @[]                          ## RFC-0016 CRH-07
 
 proc truncBV*(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## RFC-0005 S8i. The low `tgtWidth` bits of a wider BV (C's truncating

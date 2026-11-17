@@ -8883,7 +8883,6 @@ proc seqCapKinds(): SeqCapKinds =
     let str = mkStringVar(ctx, "__s8o_kind_probe_str")
     let ch = at(str, c)
     # RFC-0005 S8ai: the regex constructors, over the string regex sort.
-    let reSort = Z3_mk_re_sort(ctx.raw, Z3_get_sort(ctx.raw, str.raw))
     let lit = mkString(ctx, "a")
     let reA = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_seq_to_re(ctx.raw, lit.raw))
     let reR = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_re_range(ctx.raw, lit.raw,
@@ -8911,7 +8910,8 @@ proc seqCapKinds(): SeqCapKinds =
       reOpt:     kindOf(ctx, ctx.checkErr Z3_mk_re_option(ctx.raw, reA.raw)),
       reLoop:    kindOf(ctx, ctx.checkErr Z3_mk_re_loop(ctx.raw, reA.raw, 1, 2)),
       rePower:   kindOf(ctx, ctx.checkErr Z3_mk_re_power(ctx.raw, reA.raw, 2)),
-      reAllChar: kindOf(ctx, ctx.checkErr Z3_mk_re_allchar(ctx.raw, reSort)),
+      reAllChar: kindOf(ctx, ctx.checkErr Z3_mk_re_allchar(ctx.raw,
+                   Z3_get_sort(ctx.raw, reA.raw))),   # CRH-07: the sort of the live `reA`
       uninterp: kindOf(ctx, c.raw),
       select:   kindOf(ctx, select(arr, mkInt(ctx, 0)).raw),
       int2bv:   kindOf(ctx, intToBv[8](c, Z3BitVec[8]).raw),
@@ -9424,12 +9424,14 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     ## over the literals `a` and `b` fold to: 1 true, 0 false, -1 when
     ## either is not a literal.
     if litLen(a) < 0 or litLen(b) < 0: return -1
-    let x = simp(a).raw
-    let y = simp(b).raw
+    # CRH-07: owned for the call; a `.raw` of each temporary relied on
+    # `simp`'s memo table to keep the term alive.
+    let x = simp(a)
+    let y = simp(b)
     let term = case rel
-      of lrContains: ctx.checkErr Z3_mk_seq_contains(ctx.raw, x, y)
-      of lrPrefix: ctx.checkErr Z3_mk_seq_prefix(ctx.raw, x, y)
-      of lrSuffix: ctx.checkErr Z3_mk_seq_suffix(ctx.raw, x, y)
+      of lrContains: ctx.checkErr Z3_mk_seq_contains(ctx.raw, x.raw, y.raw)
+      of lrPrefix: ctx.checkErr Z3_mk_seq_prefix(ctx.raw, x.raw, y.raw)
+      of lrSuffix: ctx.checkErr Z3_mk_seq_suffix(ctx.raw, x.raw, y.raw)
     let v = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_simplify(ctx.raw, term))
     case $Z3_ast_to_string(ctx.raw, v.raw)
     of "true": 1
@@ -9979,8 +9981,10 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
   proc kindOf(a: Z3AnyAst): int =
     if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
     else: -1
-  let byteReId = astId(ctx, star(range(mkString(ctx, "\x00"),
-                                       mkString(ctx, "\xff"))).raw)
+  # RFC-0016 CRH-07: held, so its id is not recycled by a later term (the
+  # id of a released temporary could name a new `merged` literal).
+  let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
+  let byteReId = astId(ctx, byteRe.raw)
   type
     Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
     Held = seq[tuple[re: Z3AnyAst, neg: bool]]
@@ -21654,7 +21658,8 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
     var viewWhy = ""         ## RFC-0005 S8bx
     ## RFC-0005 S8cn: a `slot` entry whose key may have left, for the fork below.
     var removal: seq[tuple[local: string; ty: IRType; tab, snap: SymVal;
-                           key: RawZ3Ast; rm: Z3Bool; gone: bool]]
+                           key: Z3AnyAst; rm: Z3Bool; gone: bool]]
+      ## CRH-07: `key` is owned; a raw one outlived its `keyO`.
     for c in w.frame.addrCells:
       if c.view and env2.hasKey(viewFreedPrefix & c.local):
         env2.del(viewFreedPrefix & c.local)
@@ -21808,7 +21813,7 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
               env2[c.local] = tabValAt(ctx, tabV, keyO.get.raw)
             else:
               removal.add (local: c.local, ty: c.ty, tab: tabV, snap: snapO.get,
-                           key: keyO.get.raw, rm: rm, gone: gone)
+                           key: keyO.get, rm: rm, gone: gone)
           continue
         if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
            env2[c.cell].kind != svPtr:
@@ -21909,7 +21914,7 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
       # that slot; else the slot depends on the hashes.
       let r = removal[0]
       let lenNow = r.tab.tabSize
-      let held = wrap[Z3Bool](ctx, checkedSelect(ctx, r.tab.tabPresentRaw.raw, r.key))
+      let held = wrap[Z3Bool](ctx, checkedSelect(ctx, r.tab.tabPresentRaw.raw, r.key.raw))
       let empty = lenNow == mkInt(ctx, 0)
       let back = lenNow == mkInt(ctx, 1) and held
       let one = r.snap.tabSize == mkInt(ctx, 1)
@@ -21917,7 +21922,7 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
       let onSlot = if r.gone: empty else: r.rm and one and empty
       let putBack = if r.gone: back else: r.rm and one and back
       var keep = env2
-      keep[r.local] = tabValAt(ctx, r.tab, r.key)
+      keep[r.local] = tabValAt(ctx, r.tab, r.key.raw)
       keep.del(goneName)
       var slotEnv = env2
       if not r.gone: slotEnv[r.local] = defaultZero(r.ty, "__viewGoneZero")
@@ -25193,8 +25198,13 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       closureDegrade(ceUnsupportedHof,
         "map over a symbolic-length seq maps an unconstrained function symbol " &
              "(the closure body is not applied per element)")
-      let fd = Z3FuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
-        raw: cloSV.closureRawFD, ctx: ctx)
+      # RFC-0016 CRH-07: `wrapFuncDecl` takes its own reference. Built as an
+      # object, `fd` took none, and its `=destroy` released the reference
+      # `currentClosureSyms` holds for the run: once the mapped term died the
+      # decl was freed while still cached, and the next path to reach this
+      # lambda site mapped the freed decl.
+      let fd = wrapFuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
+        ctx, cloSV.closureRawFD)
       let srcArr = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
         seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       let mappedArr = mapArray[Z3Int, Z3BitVec[64], Z3BitVec[64]](fd, srcArr)

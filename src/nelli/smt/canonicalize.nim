@@ -803,8 +803,15 @@ const renderAsChoicesVersion* = "12"
   ##   name fewer kinds: no `ubTailUnverified` from a budget earlier
   ##   candidates spent, and no proc-value sites from their tails in its
   ##   settle's lift. No key bytes change.
+  ## - RFC-0016 W4 perf (378->381; 379-380 are reserved for other W4 work):
+  ##   a branch ask's `std/re` calls whose operands the pins fix to literals
+  ##   take their value from the automaton (`foldPinnedRegexCalls`), and
+  ##   their encodings leave the ask. Z3 4.13.4 spent a capped check on those
+  ##   memberships over a ground subject; a branch it left open is decided,
+  ##   so a tail or a replay can fork less and name fewer kinds. No key
+  ##   bytes change.
 
-const symexWalkerVersion* = "378"
+const symexWalkerVersion* = "381"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

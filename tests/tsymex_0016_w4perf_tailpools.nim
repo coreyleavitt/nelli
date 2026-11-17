@@ -21,6 +21,13 @@
 ## over a subject the pins fix decides its branches without a capped scratch
 ## check, so its units stay under one check's bound.
 ##
+## Walker 381: sliced, the asks still carried the `findBounds` encoding
+## the branch reads, and Z3 4.13.4 (the Windows legs) spent 10.4M + 19.7M
+## and 8.0M + a capped 20M units deciding it over the ground subject
+## (30.1M and 28.9M units of tail; Z3 5.1 stays under one check). A
+## regex call whose operands the pins fix now takes its value from the
+## automaton in the ask (`foldPinnedRegexCalls`), on every Z3.
+##
 ## Not covered here: the `n36` pair-loop family (`tsymex_r6_n36_raise_degrade`,
 ## `_d`, `tsymex_rfc0005_s1c_verdict`, `tsymex_rfc0005_s8ag_indexsplit_c`).
 ## Their replay candidates' tails (W3-z R2) spend the run's whole 100M-unit
@@ -68,6 +75,9 @@ suite "RFC-0016 W4 perf: a tail walk's asks carry only the pools they reach":
 
   test "walker 377: the version floor":
     check parseInt(symexWalkerVersion) >= 377
+
+  test "walker 381: a pinned regex call's value is folded into the asks":
+    check parseInt(symexWalkerVersion) >= 381
 
   test "a pinned subject's tail decides its branches without a capped check":
     # Red at main 822f0fe6 (cpp, Z3 5.1): one tail walk of 41,095,494 units,

@@ -16212,6 +16212,90 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
 proc definingSlice(ctx: Z3Context; pins: seq[Z3Bool]; seeds: seq[Z3Bool];
                    conjuncts: seq[Z3Bool]): seq[Z3Bool]
 
+proc foldPinnedRegexCalls(ctx: Z3Context; pins: seq[Z3Bool];
+                          body: var seq[Z3Bool]; cond: var Z3Bool) =
+  ## RFC-0016 W4 perf (int4). Each `std/re` call (`regexPointSites`) the
+  ## ask reads whose operands the pins fix to literals takes its value from
+  ## the automaton (`pointValue`, as `pointCheck`'s pinned round does), and
+  ## the assertions that only define it (`defs`) leave the ask. Z3 4.13.4
+  ## did not decide those definitions over a ground subject within one
+  ## check's bound: `findBounds(s, re"(*UTF)(*ANY).+")` with `s` pinned to
+  ## `"abcde"` spent 10.4M units SAT and 19.7M UNSAT, and 8.0M SAT then the
+  ## whole 20M undecided (`tsymex_0016_w4perf_tailpools`; the same asks
+  ## stay under one check's bound on Z3 5.1). Fail-closed: under the pins `exact`
+  ## IS that value (the automaton is PCRE's semantics within the safe
+  ## length, past which `pointValue` declines), and the dropped definitions
+  ## constrain only the call's own fresh terms, so the folded ask is the
+  ## same question or one with fewer constraints. An UNSAT of it is an UNSAT
+  ## of the original, and the branch answers rest on an UNSAT.
+  if regexPointSites.len == 0: return
+  ensureByteDomainKinds()
+  let kinds = seqCapKinds()
+  var pf, pt: seq[RawZ3Ast]
+  for p in pins:
+    let t = toAnyAst(p)
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    if args.len != 2 or
+       ord(Z3_get_decl_kind(ctx.raw, decl)) != byteDomainKinds.eq: continue
+    for (a, b) in [(args[0], args[1]), (args[1], args[0])]:
+      if getAstKind(a) != akApp: continue
+      let (ad, aargs) = unpackApp(a)
+      if aargs.len == 0 and ord(Z3_get_decl_kind(ctx.raw, ad)) == kinds.uninterp and
+         (Z3_is_string(ctx.raw, b.raw) or isNumeralAst(ctx, b.raw) or
+          Z3_get_bool_value(ctx.raw, b.raw) != Z3_L_UNDEF):
+        pf.add a.raw
+        pt.add b.raw
+        break
+  if pf.len == 0: return
+  proc subst(r: RawZ3Ast; a, b: seq[RawZ3Ast]): RawZ3Ast =
+    var a = a
+    var b = b
+    ctx.checkErr Z3_substitute(ctx.raw, r, cuint(a.len),
+      cast[ptr UncheckedArray[RawZ3Ast]](a[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](b[0].addr))
+  var ids: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in body: stack.add toAnyAst(r)
+  stack.add toAnyAst(cond)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in ids: continue
+    ids.incl id
+    chargeWalkerTerms(1)
+    if getAstKind(t) != akApp: continue
+    let (_, args) = unpackApp(t)
+    for a in args: stack.add a
+  var ef, et: seq[RawZ3Ast]
+  var dropped: HashSet[int]
+  for st in regexPointSites:
+    if astId(ctx, st.exact.raw) notin ids: continue
+    let subj = literalStringBytes(simplify(wrap[Z3String](ctx,
+                 subst(st.subject.raw, pf, pt))))
+    if not subj.ok: continue
+    let start = simplify(wrap[Z3Int](ctx, subst(st.start.raw, pf, pt)))
+    if not isNumeralAst(ctx, start.raw): continue
+    var by = ""
+    if st.sp.entry == "replace":
+      let b = literalStringBytes(simplify(wrap[Z3String](ctx,
+                subst(st.by.raw, pf, pt))))
+      if not b.ok: continue
+      by = b.s
+    let p = pointValue(st, subj.s, by,
+                       int(parseBiggestInt(getNumeralString(start))))
+    if not p.ok: continue
+    ef.add st.exact.raw
+    et.add pointLit(st, p).raw
+    for d in st.defs: dropped.incl d
+  if ef.len == 0: return
+  var kept: seq[Z3Bool]
+  for r in body:
+    if astId(ctx, r.raw) in dropped: continue
+    kept.add wrap[Z3Bool](ctx, subst(r.raw, ef, et))
+  body = kept
+  cond = wrap[Z3Bool](ctx, subst(cond.raw, ef, et))
+
 proc concreteBranchAsk(ctx: Z3Context, concreteEq: seq[Z3Bool],
                        cond: Z3Bool, settings: SymexSettings,
                        facts: seq[Z3Bool];
@@ -16240,14 +16324,17 @@ proc concreteBranchAsk(ctx: Z3Context, concreteEq: seq[Z3Bool],
     if slicePools: definingSlice(ctx, concreteEq, facts & @[cond],
                                  globalRoots(reach))
     else: globalRoots(reach)
+  # RFC-0016 W4 perf (int4): a regex call on a pinned subject is its value.
+  var body = pools & facts
+  var c = cond
+  foldPinnedRegexCalls(ctx, concreteEq, body, c)
   # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
-  let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
-                                   settings)
+  let rTrue = concreteScratchCheck(ctx, concreteEq & body & @[c], settings)
   # RFC-0016 W3-z R9: an undecided first solve decides the answer (`none`)
   # whatever the second says, so the second is not asked.
   if rTrue == zsUnknown: return (zsUnknown, zsUnknown)
-  let rFalse = concreteScratchCheck(ctx,
-    concreteEq & pools & facts & @[not cond], settings)
+  let rFalse = concreteScratchCheck(ctx, concreteEq & body & @[not c],
+                                    settings)
   (rTrue, rFalse)
 
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],

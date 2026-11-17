@@ -12,19 +12,131 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
-## [Unreleased] — 0.10.0
+## [0.10.0] — 2026-11-16
 
 Breaking. Upgrading: `docs/migration/0.10.0.md`.
 
+This release is Waves 2 and 3 of RFC-0016 (native-parity hardening): the
+undefined-behaviour axis, the build profile in the cache key, the whole-run
+definedness check, and the removal of the two fields 0.9.2 deprecated; plus
+the code review of that surface (`docs/rfc/0016-review.md`, "0.10.0 review",
+nine rounds, floor at round 9).
+
+The walker version moves from `"287"` to `"369"`. Every 0.9.2 cache entry is
+orphaned and the first run after the upgrade is cold. The soundness codec
+stays at version 4.
+
+### Changed - breaking
+
 - Removed `SymexSettings.arithChecks` and `SymexResult.fromCache` (deprecated
   in 0.9.2, INT-39). The build alone decides which arithmetic checks run; the
-  cache-hit flag is `SymexFinding.fromCache`. RFC-0016 K10d.
+  cache-hit flag is `SymexFinding.fromCache`. RFC-0016 K10d. With them go
+  `effectiveArithChecks`, `arithChecksDisagree` and `arithChecksFor`; read the
+  build's regime from `buildprofile.buildSemantics.checks` or
+  `arith_regime.buildRegime()`.
 - `SymexErrorKind` gains `ubTailUnverified`, `feHostUnadmitted`,
-  `feUnadmitted` and `feDefectExcluded`; `SymexTargetKind` gains
-  `stkUndefined` (`tUndefined`); `Soundness` gains `buildSegment` and
-  `buildRow`; `UbKind` widens and `ubFloatToIntRange` moves.
+  `feUnadmitted` and `feDefectExcluded`, and the `ub*` kinds
+  `ubArrayOutOfBounds`, `ubInvalidObjConversion` and
+  `ubInactiveVariantField`; `SymexTargetKind` gains `stkUndefined`
+  (`tUndefined`); `Soundness` gains `buildSegment` and `buildRow`; `UbKind`
+  widens to `ubUnsignedDivZero .. ubInactiveVariantField` and
+  `ubFloatToIntRange` moves.
+- The build and host half of the cache key is one `buildSegment(b, h)`;
+  `buildFlagsSegment`, `renderBuildFlags`, `verifiedLibs`/`VerifiedLib` and
+  `varParamMagics`/`VarMagicModel` are gone in favour of the admission
+  answers (`admitPcreLib`, `admitMagic`). `buildWraps` is replaced by
+  `arith_regime.buildRegime` / `programMayWrap`.
+- IR constructors take an admission proof: `mkZeroValue`, `mkMathCall`,
+  `mkOpaqueCall`. `mkArithBlock` takes an `ArithStamp` (made by
+  `arith_regime.stampFor`); `ArithScopeProof`, `arithFrom*` and `replayArith`
+  are deleted (review D2, a stamp can no longer be minted by a caller).
 - New settings `wholeRunDefinedness` (default on) and `budget.walkRLimit`.
-- Walker `"287"` to `"302"`: every cached verdict is recomputed once.
+
+### Module layout
+
+The public import surface is unchanged: `nelli/symex` and `nelli/smt/types`
+re-export what they exported before. What moved is where the code lives, for
+a consumer that imported an internal module by path.
+
+- `smt/types.nim` no longer holds the error-kind catalogue and its
+  class/severity tables (`smt/errorkind.nim`: one `kindInfo` table holds each
+  kind's class and severity, review D4) or the arithmetic regime
+  (`smt/arith_regime.nim`, review D1: one owner of the regime decision);
+  `types` re-exports `errorkind`, `ArithScope`, `ArithCheck`, `ArithStamp`
+  and `stampFor`.
+- `nelli/symex.nim` (6.2k lines) is a 951-line facade over new modules under
+  `src/nelli/smt/` (review D6: `entry_parse`, `find_emit`, `findall_emit`,
+  `cover_emit`, `replay_emit`, `replay_footprint`, `replay_settle`,
+  `witness_emit`, `witness_render`, `symex_cache`, `heldset`,
+  `routine_table` and others). The exported names, including the `*Impl`
+  cache codecs, `renderAsChoices` and `emitTyAndReader`, still come from
+  `nelli/symex`.
+- `smt/runtime.nim` and `smt/dsl_parser.nim` shed leaf modules (review D3:
+  `ub_deposit`, `walk_log`, `symval`, `walk_state`, `z3check`, `heap_model`,
+  `runtime_exceptions`, `runtime_floats`, `runtime_closures`,
+  `runtime_strings`). Axis modules no longer import one another laterally
+  (review D5).
+
+### Fixed - wrong clean verdicts (0.10.0 review)
+
+- **Closures sharing an environment on the re-exec wire** (H1). Re-exec, the
+  Windows default replay, split a shared closure environment into copies, so
+  it could confirm a trusted `sxSat` that fork refutes. The wire now interns
+  environments and fails closed when an address is both an environment and a
+  `ref`.
+- **`ubIndeterminateRead` after the label** (H2). A `{.noinit.}` read after
+  the label gave a trusted `sxSat`; the tail walk now records the kind and the
+  verdict is untrusted.
+- **Opaque-call havoc epochs were pinned by the candidate tail walk** (H3),
+  hiding UB the real run executes. Only the base heap cell is pinned now.
+- **Loop bounds that Nim re-reads** (H4). A `for` bound that is a field path
+  or a `var` parameter was snapshotted once, so the trip count was wrong and
+  trusted. A bound is read as the compiler binds it, and an unstable address
+  declines.
+- **Routine `{.noinit.}`** (H5). `result` was treated as unwritten but is
+  zero-initialised; a routine `{.noinit.}` now leaves it unwritten, and the
+  routine pragmas with no reader decline.
+- **Enums with a negative ordinal** (H6) are sized by Nim's rule (4 bytes),
+  not by bit width; a size mismatch with the compiler declines. A cross-arm
+  read of such a field was a trusted false proof.
+- **`setLenUninit` in a `for x in s` body** (H7) is a may-write magic, so the
+  iteration declines instead of deciding on a stale length.
+- **Opaque signed `div` and `mod` under `-fwrapv`** (F1) record
+  `ubSignedDivZero` in `witnessUndefined`; the `sxSat` was already untrusted.
+- **Aliased lambda bodies** (R2-1). A lambda called with one location passed
+  to two same-typed `var` formals was parsed outside the routine-body
+  wrapper, so it ran under the caller's arithmetic regime and the
+  `overflowChecks` pragma decline did not apply: a false `sxSat` where the
+  plain call raises.
+- **A call used as a `case` scrutinee** (R8-1) was applied once per `of`
+  label for a by-value closure call (a lambda, a proc-valued `let` or field):
+  `case next(): of 1: .. of 2: ..` took `else` where Nim takes `of 2`. It is
+  bound once. The same duplication in `while next() in {..}` and
+  `while next() in a .. b` is fixed. Pre-existing on 0.9.2.
+- **A bare closure call in a `return`** (R7-1) left an address-taken local
+  stale for a `finally` or a `var` write-back that reads it by name (a false
+  `sxSat`). The value is evaluated and reconciled where it is produced.
+- **The concolic follow `while`** (R7-4) with a closure that writes an
+  address-taken variable through its pointer recorded the wrong arm in
+  `branchTrace`; the follow loop now passes the guard's facts as the follow
+  `if` does. Pre-existing on 0.9.2.
+
+### Fixed - refusals and regressions found by the review
+
+- **`--exceptions:setjmp` on Windows is refused** by `admitBuild` (cell
+  `exceptions/setjmp/windows`, R-M1): it crashes, INT-12 stays open.
+- **A labelled block or `if`/`while` over a view-and-Table callee** declined
+  `feUnsupportedOp` ("the view and the table were both written in one
+  statement"), turning a decided `sxSat` or `sxUnsat` into `sxUnknown`
+  (D1-F2r, R4-1, R5-1, R5-2: regressions of this release's own D1 work, never
+  shipped).
+- **Stack frame size on MSVC** (D1-F2v). Generated entry code overflowed the
+  1 MB stack; each program is now built in a `noinline` builder and the
+  routine's arithmetic facts are stated once.
+- **`std/os` pruned from `symex.nim`** broke the `nelliVmAliasAudit` build
+  only (R5-H1); the audit block imports what it uses.
+- Walker `"287"` to `"369"` (`symexWalkerVersion`): every cached verdict is
+  recomputed once.
 
 ## [0.9.2] — 2026-11-07
 

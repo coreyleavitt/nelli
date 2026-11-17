@@ -18972,7 +18972,7 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
   exact(survivors)
 
 proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantReassign` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19045,7 +19045,7 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
     if stmt.vrMode == dwmChecked:
       maybeForkDefect(p, not sameBranchCond(oldDisc, stmt.vrNewTag, stmt.vrBranches),
                       "FieldDefect", none(string), w)
-      if w.shouldStop: return out2
+      if w.shouldStop: return exact(out2)
     let newDiscBoxed = new(SymVal)
     newDiscBoxed[] = newDiscInner
     let outcomes = discWriteOutcomes(stmt.vrMode, oldSV.vArmFields, oldDisc,
@@ -19073,10 +19073,10 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
                          vActive: oldSV.vActive)   # RFC-0016 PRC-07 B
       child.env[stmt.vrObjName] = newSV
       out2.add child
-  return out2
+  return exact(out2)
 
 proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantReassignSymbolic` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19167,7 +19167,7 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
           if stmt.vrsMode == dwmChecked:
             maybeForkDefect(chosen, not sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches),
                             "FieldDefect", none(string), w)
-            if w.shouldStop: return out2
+            if w.shouldStop: return exact(out2)
           let newDiscConst: SymVal =
             case oldSV.vDisc[].kind
             of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
@@ -19232,7 +19232,7 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
           if stmt.vrsMode == dwmChecked:
             maybeForkDefect(chosen, not sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches),
                             "FieldDefect", none(string), w)
-            if w.shouldStop: return out2
+            if w.shouldStop: return exact(out2)
           let newDiscConst: SymVal =
             case oldAxis.disc[].kind
             of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
@@ -19276,10 +19276,10 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
         # RFC-0005 S8i: a declined construction's placeholder (this was a
         # `doAssert false`, surfacing the decline as an internal fault).
         out2.add degradeUnmodelledReassign(cp, stmt.vrsObjName, oldSV.kind, w)
-  return out2
+  return exact(out2)
 
 proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantConstructSym` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19328,7 +19328,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
       # never rides a bare `w.sawUnknown` alone. RFC-0005 S1: one token
       # `d`, forked onto every path.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return out2
+    return exact(out2)
   # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
   # remediation). `maxVariantConstructorForks` above only bounds the OUTER
   # fork count (`vcsTagSet.len`); the per-fork field-allocation loop below
@@ -19362,7 +19362,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       # Same safe-degrade idiom as the fork-count budget above.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return out2
+    return exact(out2)
   # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
   # `paths`/`tag` fork loops (mirrors the two budget checks immediately
   # above — a STRUCTURAL check against `vcsTy` itself, uniform across
@@ -19401,7 +19401,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
     for p in paths:
       # Same safe-degrade idiom as the two budget checks above.
       out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-    return out2
+    return exact(out2)
   # RFC-0005 S8f: Nim accepts a runtime discriminator in constructor
   # syntax only when no arm field is set, so every arm field is its
   # type's `default(T)` -- walker <= 153 allocated each one FRESH, and a
@@ -19418,7 +19418,7 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
                  "` has no modelled default value (" & $ft & ")")
           for p in paths:
             out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
-          return out2
+          return exact(out2)
   for p in paths:
     let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
     proc vcsDiscEq(tagOrd: int64): Z3Bool =
@@ -19486,10 +19486,10 @@ proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
         var newEnv = cp.env
         newEnv[stmt.vcsResultVar] = newSV
         out2.add forkPath(cp, cp.pc & @[vcsDiscEq(int64(tag))], newEnv)
-  return out2
+  return exact(out2)
 
 proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
-    w: var WalkCtx): seq[Path] {.noinline.} =
+    w: var WalkCtx): Survivors {.noinline.} =
   ## RFC-0005 batch 6. `walkStmt`'s `isVariantField` arm, in a proc of its
   ## own: `walkStmt` recurses once per statement nesting level and per
   ## call level, and a debug build gives every arm's locals their own
@@ -19509,7 +19509,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
   # and (under `tFieldDefect`) is solved for a witness.
   var survivors: seq[Path]
   for p0 in paths:
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     ## Drain-coverage audit: `stmt.vfRecv` is always an env-resident var —
     ## the parser A-normalises so variant object accesses are through named
     ## bindings (no complex expression as receiver). A violation here means
@@ -19664,7 +19664,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
                                            stmt.vfWrite)
     else:
       maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
-    if w.shouldStop: return
+    if w.shouldStop: return exact(@[])
     survivors.add declinedSide
     # In-arm path — bind retName to the ite-chain over arms.
     var bound = armBindings[armBindings.len - 1][1]
@@ -19694,7 +19694,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
       envX[stmt.vfRetName] = exactVal
       var exact = forkPath(pM, pM.pc & @[exactCond.get], envX)
       survivors.add (if stmt.vfWrite: exact else: observed(exact, exactVal, w))
-  survivors
+  exact(survivors)
 
 proc walkCallArm(stmt: IRStmt, paths: seq[Path],
     w: var WalkCtx): seq[Path] {.noinline.} =
@@ -20920,13 +20920,13 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   of isSetLen:
     walkSetLenArm(stmt, paths, w)
   of isVariantReassign:
-    exact(walkVariantReassignArm(stmt, paths, w))
+    walkVariantReassignArm(stmt, paths, w)
   of isVariantReassignSymbolic:
-    exact(walkVariantReassignSymbolicArm(stmt, paths, w))
+    walkVariantReassignSymbolicArm(stmt, paths, w)
   of isVariantConstructSym:
-    exact(walkVariantConstructSymArm(stmt, paths, w))
+    walkVariantConstructSymArm(stmt, paths, w)
   of isVariantField:
-    exact(walkVariantFieldArm(stmt, paths, w))
+    walkVariantFieldArm(stmt, paths, w)
   of isReturn:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard

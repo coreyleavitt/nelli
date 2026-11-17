@@ -643,6 +643,7 @@ func capExpectation*(cap: string): tuple[kind: SymexErrorKind, needle: string] =
   of "ckCallDepth": (beBudgetExhaustedUnmodelled, "call-inlining depth budget")
   of "ckLoopUnwind": (beBudgetExhausted, "while-loop k-unroll budget exhausted")
   of "ckLoopUnwindFollow": (beBudgetExhausted, "following a concrete replay")
+  of "ckHeapDepth": (heDepthExhausted, "heap depth budget")
   of "ckVariantForks": (beBudgetExhaustedUnmodelled, "variant constructor fork budget")
   of "ckVariantFieldAllocs": (beBudgetExhaustedUnmodelled, "field-allocation budget")
   of "ckWalkWork": (beBudgetExhaustedPrune, "walk work cap")

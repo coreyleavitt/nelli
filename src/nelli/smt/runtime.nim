@@ -17360,7 +17360,7 @@ proc followGuard(w: var WalkCtx; dp: Path; cond: Z3Bool; factBase: int;
     return foOffRun
   followBranchOutcome(w, dp, cond, newFacts, construct)
 
-proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
   ## lowering and path-forking machinery `wmExplore` uses — but walks ONLY
@@ -17384,7 +17384,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
   ## the concrete draws contradict is not this trace and is not followed.
   var survivors: seq[Path]
   for p in paths:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     # RFC-fuzzer-nextgen G2: snapshot the pc BEFORE this if-statement's own
     # branch predicates are lowered/appended — the "prefix constraints up to
     # that branch" a later flip-solve needs. Side-conditions `lowerBoolInExpr`
@@ -17398,7 +17398,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
     var states: seq[(int, Path, seq[Z3Bool])] = @[(0, p, newSeq[Z3Bool]())]
     var si = 0
     while si < states.len:
-      if w.shouldStop: return survivors
+      if w.shouldStop: return exact(survivors)
       let (i, sp, accumNegated) = states[si]
       inc si
       if i >= stmt.branches.len:
@@ -17423,7 +17423,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
       let factBase = sp.defectSurvivorPc.len
       let (condBool, conds) = evalCondSynced(sp, stmt.branches[i].cond, w)
       for dp in conds:
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         case followGuard(w, dp, condBool, factBase, wckIf)
         of foOffRun:
           # The pins contradict this path or its new facts (RFC-0016 W3-z
@@ -17443,7 +17443,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
           # following this path past the ambiguous branch rather than guess
           # (guessing could collect an UNSOUND constraint); counted, not
           # silently dropped — attributed to `wckIf` (R28).
-          return survivors & dp
+          return exact(survivors & dp)
         of foTrue:
           # RFC-fuzzer-nextgen G2: the taken arm's own condition.
           w.branchTrace.add ConcolicBranchRecord(
@@ -17452,9 +17452,9 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
           survivors.add walk(stmt.branches[i].body, @[armPath], w)
         of foFalse:
           states.add (i + 1, dp, accumNegated & @[not condBool])
-  survivors
+  exact(survivors)
 
-proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   ## `wmFollowConcrete` counterpart to `isWhile`'s `wmExplore` k-unroll loop
   ## (below). RFC-fuzzer-nextgen R14: the explore loop forks BOTH cond=true
   ## (continue) and cond=false (exit) at EVERY unrolled iteration regardless
@@ -17507,7 +17507,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
   # other implausibly-tight budget — not silently reinterpreted as infinite.
   let unwind = w.settings.budget.maxLoopUnwind
   for iter in 0 ..< unwind:
-    if w.shouldStop: return survivors
+    if w.shouldStop: return exact(survivors)
     if active.len == 0: break
     var nextActive: seq[Path]
     for p in active:
@@ -17521,7 +17521,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
         # As `walkIfFollowConcrete` checks per continuation: each one walks
         # a body, so a stop request (budget, deadline) must not wait for the
         # rest of a drain's continuations (R8-3).
-        if w.shouldStop: return survivors
+        if w.shouldStop: return exact(survivors)
         case followGuard(w, dp, cond, factBase, wckWhile)
         of foOffRun:
           # The pins contradict this path or its new facts (RFC-0016 W3-z
@@ -17546,7 +17546,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
           # `walkIfFollowConcrete`), not just a `continue` to the next
           # active path — `defer` still pops the loop frame. Attributed to
           # `wckWhile` (R28).
-          return survivors & dp
+          return exact(survivors & dp)
         of foTrue:
           # Concretely continued this iteration: fold cond=true, walk the
           # body, feed its continuations into the NEXT iteration's active
@@ -17581,7 +17581,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
            "allows (beBudgetExhausted)", cap = ckLoopUnwindFollow)
     for p in active:
       survivors.add forkPathTainted(p, p.pc, p.env, d)
-  survivors
+  exact(survivors)
 
 proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   ## RFC-0005 batch 6. The value of the receiver `name` a statement arm
@@ -20573,7 +20573,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
       ## `walkIfFollowConcrete`'s doc comment above. `wmExplore`'s
       ## fork-every-arm loop below is UNCHANGED (only reached for
       ## `wmExplore`), so this branch does not perturb it.
-      return exact(walkIfFollowConcrete(stmt, paths, w))
+      return walkIfFollowConcrete(stmt, paths, w)
     var survivors: seq[Path]
     if stmt.ifJoin and stmt.branches.len == 1 and stmt.elseBody == nil:
       # RFC-0005 S8w: a short-circuit chain's guard (`IRStmt.ifJoin`). The
@@ -20729,7 +20729,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
       ## left open for `while` — see `walkWhileFollowConcrete`'s doc comment
       ## above. `wmExplore`'s fork-both-ways k-unroll below is UNCHANGED
       ## (only reached for `wmExplore`), so this branch does not perturb it.
-      return exact(walkWhileFollowConcrete(stmt, paths, w))
+      return walkWhileFollowConcrete(stmt, paths, w)
     # Phase 6: k-unroll. Each iteration forks on the guard.
     var survivors: seq[Path] = @[]
     var active = paths

@@ -274,8 +274,39 @@ proc countPlatform(s: string): int =
   for t in platformToks:
     result += countTok(s, t)
 
+const sanctionedCtors = ["degrade", "halted", "exact", "surviving", "continued",
+                         "carriedDegrade", "takeLoweringPendingDegrade",
+                         "heapArmDegrade"]
+  ## RFC-0016 K7c. The procs that DEFINE the sanctioned `Degrade`/`Survivors`
+  ## constructors (runtime.nim's privacy note). Their own literals are the
+  ## definitions, not use sites, so the census skips a sanctioned proc's body
+  ## structurally, by name; every literal outside them is still a site.
+
+proc routineName(raw: string): string =
+  ## The name of a column-0 `proc`/`func` header, else "".
+  for kw in ["proc ", "func "]:
+    if raw.startsWith(kw):
+      var e = kw.len
+      while e < raw.len and raw[e] notin {'(', '*', ' ', '[', '{', ':'}: inc e
+      return raw[kw.len ..< e]
+
 proc context(line: string): string =
   stripComment(line).strip().replace('\t', ' ')
+
+proc ctorLiterals*(files: seq[SrcFile]): CountTable[string] =
+  ## The `Survivors(`/`Degrade(` literals inside the sanctioned constructor
+  ## definitions: the ones `sites` does not list, counted so the K2-s script's
+  ## totals (which see every literal) still reconcile.
+  for f in files:
+    if not f.path.startsWith("src/nelli/"): continue
+    var inCtor = false
+    for raw in f.text.splitLines():
+      if raw.len > 0 and raw[0] notin {' ', '\t', '#', '\r'}:
+        inCtor = routineName(raw) in sanctionedCtors
+      if not inCtor: continue
+      let s = stripComment(raw)
+      result.inc "survivors", countTok(s, "Survivors(")
+      result.inc "degrade", countTok(s, "Degrade(")
 
 proc sites*(files: seq[SrcFile]): seq[string] =
   ## Every census site of the given files, as `kind:file:context[#n]`.
@@ -284,11 +315,15 @@ proc sites*(files: seq[SrcFile]): seq[string] =
     let inSrc = f.path.startsWith("src/nelli/")
     let inTests = f.path.startsWith("tests/")
     let recorded = "skipCell" in f.text
+    var inCtor = false
     for raw in f.text.splitLines():
       let line = raw.strip(trailing = true, chars = {'\r', ' ', '\t'})
       let s = stripComment(line)
       var hits: seq[string]
+      if inSrc and raw.len > 0 and raw[0] notin {' ', '\t', '#', '\r'}:
+        inCtor = routineName(raw) in sanctionedCtors
       if inSrc:
+        if inCtor: continue
         for _ in 1 .. countTok(s, "Survivors("): hits.add "survivors"
         for _ in 1 .. countTok(s, "Degrade("): hits.add "degrade"
       elif inTests:
@@ -368,6 +403,21 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
     check t.getOrDefault("degrade") == 1       # allocDegrade/lowerDegrade not
     check t.getOrDefault("bare_skip") == 1     # skipCell and the comment not
     check t.getOrDefault("platform") == 2      # q.nim has skipCell: not counted
+
+  test "K7c: a sanctioned constructor's own literals are definitions, others are sites":
+    let src = "proc exact(ps: seq[Path]): Survivors =\n" &
+              "  Survivors(live: ps)\n" &
+              "proc degrade(w: var WalkCtx): Degrade =\n" &
+              "  Degrade(path: t)\n" &
+              "proc rogue(ps: seq[Path]): Survivors =\n" &
+              "  Survivors(live: ps)\n" &
+              "const afterAll = Degrade(path: t)\n"
+    let t = tally(sites(@[("src/nelli/c.nim", src)]))
+    check t.getOrDefault("survivors") == 1      # `rogue`'s only
+    check t.getOrDefault("degrade") == 1        # after the proc ends
+    let c = ctorLiterals(@[("src/nelli/c.nim", src)])
+    check c.getOrDefault("survivors") == 1
+    check c.getOrDefault("degrade") == 1
 
   test "a repeated case in one routine gets #n and stays distinct":
     let two = "proc g(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n" &
@@ -486,8 +536,14 @@ suite "RFC-0016 K2a: dispatch census (the tree)":
 
   test "every kind is counted (a rule that finds nothing is broken)":
     let t = tally(found)
-    for k in ["survivors", "degrade", "bare_skip"]:
-      check t.getOrDefault(k) > 0
+    check t.getOrDefault("bare_skip") > 0
+    ## K7c: every `Survivors(`/`Degrade(` literal is now a sanctioned
+    ## constructor's own; the rule still finds them there, and finds none
+    ## outside (an outside one is an unlisted site, above).
+    let ctors = ctorLiterals(files)
+    for k in ["survivors", "degrade"]:
+      check ctors.getOrDefault(k) > 0
+      check t.getOrDefault(k) == 0
 
   test "K2F-4: every sentinel else carries its audited polarity":
     var problems: seq[string]
@@ -547,8 +603,9 @@ suite "RFC-0016 K2a: dispatch census (the tree)":
         if f.len >= 3 and f[0] == "summary" and ':' notin f[1]:
           want[f[1]] = parseInt(f[2])
       let t = tally(found)
+      let ctors = ctorLiterals(files)
       for k in ["survivors", "degrade", "bare_skip"]:
-        check t.getOrDefault(k) == want.getOrDefault(k)
+        check t.getOrDefault(k) + ctors.getOrDefault(k) == want.getOrDefault(k)
       var literal = 0
       for f in files:
         if f.path.startsWith("src/nelli/"):

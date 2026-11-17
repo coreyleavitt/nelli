@@ -8,7 +8,7 @@ closed-legacy.txt	24
 ceiling-offenders-cpp.txt	783
 ceiling-offenders-msvc.txt	422
 ceiling-offenders-z3-4.13.4.txt	744
-census.txt	152
+census.txt	144
 defined.txt	0
 errorkind.txt	66
 ids.txt	90

@@ -183,24 +183,29 @@ suite "S8cu: routines of other kinds":
     let r = symexFind(viaMethod, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feGlobalRouteUnproved)
+    check r.errors.named(feUnsupportedOp)
 
   test "a converter":
     check native(viaConverter(1'u8)) == "hit"
     let r = symexFind(viaConverter, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feOverflowCheckOption)
 
   test "a closure iterator is compiled at its definition":
     check native(viaClosureIter(high(int))) == "hit"
     let r = symexFind(viaClosureIter, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feOverflowCheckOption)
 
   test "a lambda":
     check native(viaLambda(high(int))) == "hit"
     let r = symexFind(viaLambda, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(ceClosureUnknownCallee)
 
   test "an inline iterator takes the routine it lands in":
     check native(viaInlineIter(high(int))) == "OverflowDefect"

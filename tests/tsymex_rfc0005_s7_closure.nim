@@ -14,6 +14,7 @@
 ##       never a clean `sxSat` for an S7 SUT;
 ##   (e) structural -- the solver-sink drain list, the closure-sink funnel,
 ##       the error-sink -> run-channel map, and the walker version floor.
+from ./s8cu_helpers import named
 import std/[unittest, sequtils, macros, strutils, os, sets]
 import nelli/symex
 import nelli/smt/types
@@ -346,6 +347,7 @@ suite "RFC-0005 S7 (d) -- S9 precondition: without the vetoes, no S7 SUT is a cl
     let r = runSymex(progOf(s7Filter), tLabel("s7_filter"))
     checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
     check r.status == sxUnknown
+    check r.errors.named(ceUnsupportedHof)
     check rfc0005RawStatus != sxSat
 
   test "capturing map decline (__hofMapUnsupported)":

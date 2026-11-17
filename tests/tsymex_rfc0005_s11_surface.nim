@@ -15,6 +15,7 @@
 ##       annotation violations; the cache stores and serves the soundness.
 ##   (f) the render layer: text / JSON / JUnit / GitHub output show the
 ##       findings, their trust, their gaps and the annotation violations.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, options, json]
 import nelli
 import nelli/symex
@@ -123,6 +124,7 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
   test "forcedBy shape: an sxUnknown through symexFind carries a non-empty runTaint":
     let r = symexFind(s11Opaque, tLabel("s11_opaque"))
     check r.status == sxUnknown
+    check r.errors.named(feOpaqueCallUnmodelled)
     check r.soundness.runTaint != {}
     check scIncomplete in r.soundness.runTaint   # dcSubstituted is ⊤ on the run
     check r.soundness.pathTaint == {}            # no winning path
@@ -131,6 +133,7 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
   test "forcedBy shape: a budget-bound sxUnknown names scIncomplete in runTaint":
     let r = symexFind(s11Deep, tLabel("s11_deep"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
     check scIncomplete in r.soundness.runTaint
 
   test "a clean sxSat: pathTaint {}, replay rsNotNeeded":
@@ -152,6 +155,7 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
     const noReplay = SymexSettings(replay: false)
     let r = symexFind(s11Confirm, tLabel("s11_confirm"), noReplay)
     check r.status == sxUnknown
+    check r.errors.named(feGlobalHavoc)
     check r.soundness.replay == rsNotNeeded
     check r.soundness.runTaint != {}
 
@@ -245,6 +249,8 @@ suite "RFC-0005 S11 (c) -- gaps(): read the cause, pull its lever":
   test "walkthrough 3 -- two causes, two levers: ⊤ on the run, two classes in gaps()":
     let r = symexFind(s11Both, tLabel("s11_both"))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(feOpaqueCallUnmodelled)
     check r.soundness.runTaint == {scSpurious, scIncomplete}
     let cs = classesOf(r.gaps())
     check dcFabricated in cs

@@ -17,6 +17,7 @@
 ##
 ## The re-execution path (Windows) runs this suite through
 ## `tsymex_rfc0005_w2_settle_reexec` (`-d:nelliReplayReexec`).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, os, osproc, streams, strtabs, tables]
 import nelli
 import nelli/symex
@@ -385,6 +386,7 @@ suite "W2 / WA-9: a lossy winner is trusted only once replay confirms it":
     let n0 = replayExecutions()
     let r = symexFind(confirmable, tLabel("c"), noReplay)
     check r.status == sxUnknown           # a candidate, with replay off
+    check r.errors.named(feGlobalHavoc)
     let r2 = symexFind(labelThenQuitToo, tLabel("t"))
     check r2.status == sxSat
     check r2.soundness.replay == rsNotNeeded
@@ -428,6 +430,7 @@ suite "R3 E11: the replay pass settles a spurious claim":
   test "with replay off it is an sxUnknown, settled":
     let r = symexFind(confirmable, tLabel("c"), noReplay)
     check r.status == sxUnknown
+    check r.errors.named(feGlobalHavoc)
     check r.soundness.replay == rsNotNeeded
 
 suite "R3 SC1: a witness unsafe for a reason of the run is not cached":

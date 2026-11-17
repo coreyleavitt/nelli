@@ -17,6 +17,7 @@
 ## `tsymex_rfc0005_s8cn_lent_e`, `tsymex_rfc0005_s8cn_lent_f`. Split so that
 ## each part compiles and runs in under 60 s on the Windows legs (the whole
 ## file took 95 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -172,9 +173,22 @@ suite "S8cn: seq `items` with a write in the body":
     nativeSees(cGlobal, "cg_new", "cg_old")
     nativeSees(cLambda, "cl_new", "cl_old")
     nativeSeesT(cVarCall, "cv_new", "cv_old")
-    check symexFind(cGlobal, tLabel("cg_old")).status == sxUnknown
-    check symexFind(cLambda, tLabel("cl_old")).status == sxUnknown
-    check symexFind(cVarCall, tLabel("cv_old")).status == sxUnknown
+    block:
+      let k9r = symexFind(cGlobal, tLabel("cg_old"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ceCaptureByRefUnmodelled)
+      check k9r.errors.named(ceClosureBodyUncertain)
+    block:
+      let k9r = symexFind(cLambda, tLabel("cl_old"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ceCaptureByRefUnmodelled)
+      check k9r.errors.named(ceClosureBodyUncertain)
+    block:
+      let k9r = symexFind(cVarCall, tLabel("cv_old"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(ceCaptureByRefUnmodelled)
+      check k9r.errors.named(ceClosureBodyUncertain)
+      check k9r.errors.named(feUnsupportedOp)
   test "a target in a closure body: the calling path's branches hold":
     for n in [-1, 0, 76, 77, 78, 177]:
       check "cp_never" notin hits(cPcVar(n))

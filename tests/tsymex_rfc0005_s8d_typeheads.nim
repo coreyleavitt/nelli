@@ -16,6 +16,7 @@
 ## recorded decline for its shape (a user generic instance or plain alias is
 ## `feUnsupportedParamType`, as every other user generic/alias already is).
 ## Walker 150 -> 151.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets, tables, options, unicode]
 import nelli/symex
 import nelli/smt/types
@@ -176,6 +177,7 @@ suite "RFC-0005 S8d -- controls: the stdlib type heads keep their models":
     let r = symexFind(s8dRealOption, tLabel("s8d_real_option"))
     dump(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedParamType)
 
 suite "RFC-0005 S8d -- walker version pin":
 

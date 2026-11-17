@@ -20,6 +20,7 @@
 ## `tsymex_rfc0005_s8cn_step1d_d`, `tsymex_rfc0005_s8cn_step1d_e`,
 ## `tsymex_rfc0005_s8cn_step1d_f`. Split so that each part compiles and runs in
 ## under 60 s on the Windows legs (the whole file took 118 s).
+from ./s8cu_helpers import named
 import std/[re, tables]
 include s8ai_helpers
 
@@ -110,4 +111,5 @@ suite "S8cn (1): grow_pad_dead natively":
     check g.status == sxUnsat
     let tooSmall = walk(growPad, "grow_pad_dead")
     check tooSmall.status == sxUnknown
+    check tooSmall.errors.named(beSolverUndef)
     check stepStatus("1d") == "zsSat"

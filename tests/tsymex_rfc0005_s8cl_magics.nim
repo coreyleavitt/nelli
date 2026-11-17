@@ -32,12 +32,13 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, kinds: set[SymexErrorKind]): untyped =
   ## A shape the walk does not model: `sxUnknown`, with the decline named.
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
@@ -197,10 +198,10 @@ suite "S8cl (1a): unsafeNew is an allocation":
   test "the size":
     clean(sutUnsafeNegative, "ug", sxSat)
     clean(sutUnsafeNegative, "ug_dead", sxUnsat)
-    declines(sutUnsafeSymbolic, "uy_dead", "under its pointee")
-    declines(sutUnsafeTooSmall, "us", "under its pointee")
-    declines(sutUnsafeHuge, "uh", "is not modelled")
-    declines(sutUnsafeLater, "ul", "feEvalOrderUnmodelled")
+    declines(sutUnsafeSymbolic, "uy_dead", "under its pointee", {feUnsupportedOp})
+    declines(sutUnsafeTooSmall, "us", "under its pointee", {feUnsupportedOp})
+    declines(sutUnsafeHuge, "uh", "is not modelled", {feUnsupportedOp})
+    declines(sutUnsafeLater, "ul", "feEvalOrderUnmodelled", {feEvalOrderUnmodelled})
 
 suite "S8cl (1b): a magic with no body declines":
   test "nim":
@@ -218,8 +219,8 @@ suite "S8cl (1b): a magic with no body declines":
     discard pinExact(sutEnsureMove, cellKey(axMagic, "EnsureMove"), tLabel("em_dead"))
 
   test "procCall declines, each label":
-    declines(sutProcCall, "pc", "ProcCall")
-    declines(sutProcCall, "pc_dead", "ProcCall")
+    declines(sutProcCall, "pc", "ProcCall", {feUnsupportedOp})
+    declines(sutProcCall, "pc_dead", "ProcCall", {feUnsupportedOp})
     # RFC-0016 SND-06: the decline as K9 pins (exact model: PRC-21).
     pinDecline(sutProcCall, cellKey(axMagic, "ProcCall"), feUnsupportedOp, tLabel("pc"))
     pinDecline(sutProcCall, cellKey(axMagic, "ProcCall"), feUnsupportedOp, tLabel("pc_dead"))

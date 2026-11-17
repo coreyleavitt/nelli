@@ -25,6 +25,7 @@
 ## `tsymex_rfc0005_s8bx_extractraise`. Split so that each part compiles and
 ## runs in under 60 s on the Windows legs (the whole file took 62 s).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -104,36 +105,42 @@ suite "batch 8: a raise from an own-context solve":
     let r = symexFind(solveAfterLoop, tLabel("solve_after_loop"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check namedFault(r, injectedSolve)
 
   test "no loop: a named decline":
     let r = symexFind(solveFlat, tLabel("solve_flat"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check namedFault(r, injectedSolve)
 
   test "lost inside the solve: a named decline":
     let r = symexFind(solveSwallowed, tLabel("solve_swallowed"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check namedFault(r, "batch 8 synthetic swallowed solve fault")
 
   test "the target's solve, past a loop: a named decline":
     let r = symexFind(solveAtTarget, tLabel("solve_at_target"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check namedFault(r, injectedSolve)
 
   test "the target's solve, past two iterations of a table: a named decline":
     let r = symexFind(solveAtTargetTable, tLabel("solve_at_table"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check namedFault(r, injectedSolve)
 
   test "lost inside the target's solve: a named decline":
     let r = symexFind(solveSwallowedAtTarget, tLabel("solve_swallowed_target"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(weInternalWalkerFault)
     check namedFault(r, "batch 8 synthetic swallowed solve fault")
 
   test "a later run is not declined by an earlier run's fault":

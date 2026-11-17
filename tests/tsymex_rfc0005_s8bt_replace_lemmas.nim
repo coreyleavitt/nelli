@@ -19,6 +19,7 @@
 ## `tsymex_rfc0005_s8bt_replace_lemmas_b`. Split so that each part compiles and
 ## runs in under 60 s on the Windows legs (the whole file took 64 s).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re, times]
 import nelli/symex
 import nelli/smt/types
@@ -124,7 +125,10 @@ suite "S8bt (7): patterns past S8aw's shapes":
   test "(?:ab|a)+ leaves no a up to its safe length: sxUnsat":
     # RFC-0005 S8cf: past it `replace` can stop at a limit and keep the rest
     # (`a` * 100000 on the JIT's stack, -27): an unbounded `s` is not refuted.
-    check verdict(altPlus, "bt_alt_plus").status == sxUnknown
+    block:
+      let k9r = verdict(altPlus, "bt_alt_plus")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(beSolverUndef)
     check verdict(altPlusBounded, "bt_alt_plus_bounded").status == sxUnsat
 
   test "ab|cd never grows: sxUnsat":

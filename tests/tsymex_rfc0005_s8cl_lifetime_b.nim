@@ -38,12 +38,13 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, kinds: set[SymexErrorKind]): untyped =
   ## A shape the walk does not model: `sxUnknown`, with the decline named.
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
@@ -185,7 +186,7 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     check "du_dead" notin h
     clean(sutDup, "du", sxSat)
     clean(sutDup, "du_dead", sxUnsat)
-    declines(sutDestroy, "ds", "=destroy")
+    declines(sutDestroy, "ds", "=destroy", {feUnsupportedOp})
 
   test "what stopped the compile declines: create, GC_ref, a when member":
     let h = nativeHits(sutCreate, ks) + nativeHits(sutGcRef, ks) +
@@ -193,9 +194,9 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     for l in ["cr", "gr", "wn"]:
       checkpoint l
       check l in h
-    declines(sutCreate, "cr", "create")
-    declines(sutGcRef, "gr", "nnkCast")
-    declines(sutWhenMember, "wn", "WhenMember")
+    declines(sutCreate, "cr", "create", {beBudgetExhaustedUnmodelled, feGlobalHavoc, feUnsupportedParamType})
+    declines(sutGcRef, "gr", "nnkCast", {feLocalPragma})
+    declines(sutWhenMember, "wn", "WhenMember", {feUnsupportedExprKind, feUnsupportedParamType, feUnsupportedStmtKind})
     # RFC-0016 CRH-02: the two compile stops as K9 pins.
     pinDecline(sutCreate, cellKey(faCallShape, "lifetime/create"), feUnsupportedOp, tLabel("cr"))
     pinDecline(sutGcRef, cellKey(axMagic, "GCref"), feUnsupportedExprKind, tLabel("gr"), needle = "nnkCast")
@@ -214,7 +215,7 @@ suite "S8cl (3): setLen":
     clean(sutSetLen, "sl_dead", sxUnsat)
     clean(sutSetLenWrites, "sw", sxSat)
     clean(sutSetLenWrites, "sw_dead", sxUnsat)
-    declines(sutSetLenLater, "sa", "feEvalOrderUnmodelled")
+    declines(sutSetLenLater, "sa", "feEvalOrderUnmodelled", {feEvalOrderUnmodelled})
 
   test "a mitems body that resizes with setLen decides":
     clean(sutMitemsSetLen, "ms", sxSat)

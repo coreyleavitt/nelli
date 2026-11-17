@@ -1,6 +1,7 @@
 ## RFC-0005 S8cp, item 2, continued (split from `tsymex_rfc0005_s8cp_unchecked_zero`
 ## for the Windows per-file budget): a hook on the object, which no macro can see,
 ## and the shapes under `{.cast(uncheckedAssign).}` that decline.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/types
@@ -146,6 +147,7 @@ suite "RFC-0005 S8cp (2): a hook, and the shapes that decline":
     let r = symexFind(hookedZeroes, tLabel("kept"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUncheckedDiscBytes)
   test "a var argument":
     verdict(viaVarArg, tLabel("live"), sxUnknown)
     verdict(viaVarArg, tLabel("dead"), sxUnknown)

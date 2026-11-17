@@ -7,6 +7,7 @@
 ## Each section below names the wrong verdict, the crash or the decline it
 ## closes. Every expected value was probed against the real compiler (Nim
 ## 2.2.10, the debug build the test binary itself is).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
@@ -205,4 +206,5 @@ suite "RFC-0005 S8be (13): the call-depth decline":
     let r = symexFind(sutDownFree, tLabel("dd"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
     check "maxCallDepth" in show(r.errors)

@@ -31,6 +31,7 @@
 ## that each part compiles and runs in under 60 s on the Windows legs (the
 ## whole file took 76 s).
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re, sequtils, os, tables]
 import nelli/symex
 import nelli/smt/types
@@ -181,6 +182,7 @@ suite "S8bi (3): newSeq, newSeqOfCap, newSeqUninit":
   test "a newSeq element is never nonzero":
     let r = verdict(nsNonZero, "bi_ns_nonzero")
     check r.status == sxUnknown   # batch 5: the n > 2^20 path declines
+    check r.errors.named(feUnsupportedOp)
     check onlyLengthDecline(r.errors)
     check verdict(nsNonZeroB, "bi_ns_nonzero_b").status == sxUnsat
   test "a negative length raises RangeDefect":
@@ -188,6 +190,7 @@ suite "S8bi (3): newSeq, newSeqOfCap, newSeqUninit":
   test "a non-negative length does not raise":
     let r = verdict(nsNonNegRaise, "bi_ns_nonneg_raise")
     check r.status == sxUnknown   # batch 5: the n > 2^20 path declines
+    check r.errors.named(feUnsupportedOp)
     check onlyLengthDecline(r.errors)
     check verdict(nsNonNegRaiseB, "bi_ns_nonneg_raise_b").status == sxUnsat
   test "index n of a newSeq of length n raises IndexDefect":
@@ -202,6 +205,7 @@ suite "S8bi (3): newSeq, newSeqOfCap, newSeqUninit":
     check verdict(nsOfCap, "bi_ns_ofcap").status == sxSat
     let r = verdict(nsOfCapLen, "bi_ns_ofcap_len")
     check r.status == sxUnknown   # batch 5: the n > 2^20 path declines
+    check r.errors.named(feUnsupportedOp)
     check onlyLengthDecline(r.errors)
     check verdict(nsOfCapLenB, "bi_ns_ofcap_len_b").status == sxUnsat
   test "newSeqOfCap range-checks its capacity":

@@ -21,6 +21,7 @@
 ##       in the CALLER's scope, where they may be undeclared or name a
 ##       different symbol (S8d's dropped non-generic user `OrderedTable`).
 ##   (d) the walker version floor.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -338,12 +339,15 @@ suite "S8e (b) generic callees keep their types":
     let r = symexFind(s8eAliasLocalIn, tLabel("s8e_alias_local_in"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
     check r.errors.len > 0
 
   test "`s.add x` over a local alias: a recorded decline":
     let r = symexFind(s8eAliasLocalAdd, tLabel("s8e_alias_local_add"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedExprKind)
+    check r.errors.named(feUnsupportedOp)
     check r.errors.len > 0
 
   test "a user generic over seq[T]: modelled, sxSat":

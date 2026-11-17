@@ -18,6 +18,7 @@
 ## RFC-0005 S8cm: part 1 of 2 of this suite, with `tsymex_rfc0005_s8l_exits_b`.
 ## Split so that each part compiles and runs in under 60 s on the Windows legs
 ## (the whole file took 60 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sequtils, sets]
 import nelli
 import nelli/symex
@@ -419,6 +420,7 @@ suite "S8l (1) finally runs on a return exit":
     let r = symexFind(callsRetInRaisedFin, tLabel("s8l_raisedfin_raise"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
+    check r.errors.named(eeFinallyReturnOnRaise)
     # The non-raising path returns 7 on both backends.
     let s = symexFind(callsRetInRaisedFin, tLabel("s8l_raisedfin_ret"))
     checkpoint($s.status & " " & show(s.errors))

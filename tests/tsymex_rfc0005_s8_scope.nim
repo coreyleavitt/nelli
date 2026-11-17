@@ -17,6 +17,7 @@
 ##       parse record is a funnel, every marker is minted by one, and every
 ##       `sevError` `SymexErrorInfo` construction names its scope;
 ##   (f) the walker version floor.
+from ./s8cu_helpers import named
 import std/[unittest, macros, strutils, os, tables]
 import nelli/symex
 import nelli/smt/types
@@ -310,6 +311,7 @@ suite "RFC-0005 S8 (b) -- every decline names its scope; bucket 4 is the enumera
     let r = runSymex(progOf(signatureS8), tLabel("s8_sig"))
     checkpoint(show(r.errors))
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedWitnessType)
     var sig = 0
     for e in r.errors:
       if taintsRun(e) and e.scope.kind == dskSignature: inc sig
@@ -423,6 +425,7 @@ suite "RFC-0005 S8 (d) -- the i3 flips, each justified":
     let r = symexFind(flipUnsatS8, tLabel("s8_flip_unsat"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
+    check r.errors.named(feOpaqueCallUnmodelled)
     check r.annotationViolations.len == 1
 
 # =============================================================================

@@ -21,6 +21,7 @@
 ## whole file took 99 s). The three tests from `cross-slice shapes: nim` on
 ## stay together: the last reads `gPr` as the first leaves it.
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets, re, tables]
 import nelli/symex
 import nelli/smt/types
@@ -39,11 +40,12 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     check r.status == want
     for e in r.errors: check e.severity == sevHint
 
-template declines(fn: typed, lbl, why: string): untyped =
+template declines(fn: typed, lbl, why: string, kinds: set[SymexErrorKind]): untyped =
   block:
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    for k in kinds: check r.errors.named(k)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true
@@ -121,11 +123,11 @@ suite "RFC-0005 batch 10: integration":
     check "pc_method_dead" notin hits
 
   test "procCall: every form declines, naming the magic":
-    declines(pcStmt, "pc_stmt", "procCall")
-    declines(pcStmt, "pc_stmt_dead", "procCall")
-    declines(pcValue, "pc_value", "procCall")
-    declines(pcMethod, "pc_method", "procCall")
-    declines(pcMethod, "pc_method_dead", "procCall")
+    declines(pcStmt, "pc_stmt", "procCall", {feUnsupportedOp})
+    declines(pcStmt, "pc_stmt_dead", "procCall", {feUnsupportedOp})
+    declines(pcValue, "pc_value", "procCall", {feUnsupportedOp})
+    declines(pcMethod, "pc_method", "procCall", {feGlobalRouteUnproved, feUnsupportedOp})
+    declines(pcMethod, "pc_method_dead", "procCall", {feGlobalRouteUnproved, feUnsupportedOp})
 
   test "proc-value results: nim":
     symexCaptureBegin()

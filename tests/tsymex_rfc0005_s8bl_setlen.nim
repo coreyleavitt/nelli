@@ -2,6 +2,7 @@
 ## seq element, `new` on a field, and the magics that decline by name.
 ## Before S8bl a string's `setLen` and `s[0].add c` were dropped (the magic
 ## registered with an empty body): a false sxSat.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -166,6 +167,7 @@ suite "S8bl (1): setLen":
     let g = symexFind(slUninit, tLabel("slu_grow"))
     checkpoint $g.status & " " & show(g.errors)
     check g.status == sxUnknown
+    check g.errors.named(feUnsupportedOp)
     check g.errors.hasMsg("setLenUninit")
 
 suite "S8bl (1): add to a seq element, new on a field, `+=` as a call":

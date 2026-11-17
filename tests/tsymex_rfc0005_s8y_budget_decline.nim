@@ -39,6 +39,7 @@
 ## never `sxUnsat`). (S8aq pinned `budgetOut <= 1`, the n36 / s1c floor at
 ## their default budget; at S8ag's 20k `tightTainted` a shallower hit can
 ## run out after a deeper one, so this suite keeps S8ag's `budgetOut >= 1`.)
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
@@ -177,6 +178,9 @@ suite "S8y (b): a tainted hit at least as deep as an exhausted one is declined":
     # <= 1` here; at S8ag's 20k budget a shallower hit can run out after a
     # deeper one, so the batch keeps S8ag's `>= 1` instead.)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhausted)
+    check r.errors.named(beSolverUndef)
+    check r.errors.named(seUnsupportedStringOp)
 
   test "the decline is recorded as a classified beSolverUndef, so never sxUnsat":
     let r = symexFind(pairLoopS8y, tLabel("s8y_pair_after"), tightTainted)
@@ -202,6 +206,7 @@ suite "S8y (b): a tainted hit at least as deep as an exhausted one is declined":
     check st.budgetOut >= 2
     check st.declined == 0
     check r.status == sxUnknown
+    check r.errors.named(beSolverUndef)
 
 suite "S8y: walker version floor":
   test "symexWalkerVersion >= 176":

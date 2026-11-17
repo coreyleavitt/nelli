@@ -5,6 +5,7 @@
 ## modelled or declined by name (`magicAxis`, `varMagicDecline`). This
 ## file scans the stdlib's system sources for `var`-parameter magics, so a
 ## toolchain that adds one fails here until it is classified.
+from ./s8cu_helpers import named
 import std/[unittest, os, strutils, compilesettings, sets]
 import nelli
 import nelli/symex
@@ -95,11 +96,13 @@ suite "S8bl (1): every system magic with a var parameter is classified":
     let r = symexFind(pnew, tLabel("new_finalizer"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
     check r.errors.hasMsg("`new`")
     check r.errors.hasMsg("magic \"NewFinalize\"")
     let d = symexFind(pswapImpure, tLabel("swap_impure"))
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnknown
+    check d.errors.named(feUnsupportedOp)
     check d.errors.hasMsg("magic \"Swap\"")
 
   test "walker version floor":

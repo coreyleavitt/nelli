@@ -17,6 +17,7 @@
 ## `tsymex_rfc0005_s8cn_lent_e`, `tsymex_rfc0005_s8cn_lent_f`. Split so that
 ## each part compiles and runs in under 60 s on the Windows legs (the whole
 ## file took 95 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -41,6 +42,7 @@ template declined(fn: typed; lbl: static string) =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & "\n" & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
     check "memory" in show(r.errors)
 
 template guardN(): untyped {.dirty.} =
@@ -146,4 +148,7 @@ suite "S8cn: a Table's values and keys":
 
 suite "S8cn: a string":
   test "declines":
-    check symexFind(strItems, tLabel("st_new")).status == sxUnknown
+    block:
+      let k9r = symexFind(strItems, tLabel("st_new"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(seByteIterUnsupported)

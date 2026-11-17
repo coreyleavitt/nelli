@@ -21,6 +21,7 @@
 ## (the whole file took 99 s). The three tests from `cross-slice shapes: nim`
 ## on stay together: the last reads `gPr` as the first leaves it.
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils, sets, re, tables]
 import nelli/symex
 import nelli/smt/types
@@ -44,6 +45,7 @@ template declines(fn: typed, lbl, why: string): untyped =
     let r = symexFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beSolverUndef)
     var named = false
     for e in r.errors:
       if why in e.msg: named = true

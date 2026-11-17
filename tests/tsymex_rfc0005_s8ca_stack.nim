@@ -24,6 +24,7 @@
 ##       inlined and decides;
 ##   (3) a decline the stack forced is the machine's, not the program's,
 ##       and is not cached (`rdNativeStack`, on the result).
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
@@ -84,6 +85,7 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     let r = symexFind(s8caForeverSut, tLabel("s8ca_forever_never"), deep)
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
     check stackNamed(r.errors)
     check rdNativeStack in r.soundness.runDependence
 
@@ -105,6 +107,7 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 5)))
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
     check rdNativeStack notin r.soundness.runDependence
 
 # (2) A 2 MB stack: a Nim thread's on every platform (on Windows the solve
@@ -112,6 +115,7 @@ suite "S8ca (1): the walk declines before the native stack runs out":
 type ThreadOut = object
   status: SymexStatusKind
   named: bool
+  kinds: set[SymexErrorKind]
   cut: bool
   left: int
 
@@ -120,7 +124,11 @@ var outs: array[4, ThreadOut]
 proc analyse(which: int) =
   template take(call: untyped) =
     let r = call
+    var ks: set[SymexErrorKind]
+    for e in r.errors:
+      if taintsRun(e): ks.incl e.kind
     outs[which] = ThreadOut(status: r.status, named: stackNamed(r.errors),
+                            kinds: ks,
                             cut: rdNativeStack in r.soundness.runDependence,
                             left: nativeStackLeft())
   case which
@@ -154,12 +162,14 @@ suite "S8ca (2): a 2 MB thread":
       check outs[0].left > 0
       check outs[0].left < 2 * 1024 * 1024
       check outs[0].status == sxUnknown
+      check beBudgetExhaustedUnmodelled in outs[0].kinds
 
   test "an explicit deep budget declines in-band, named":
     var t: Thread[int]
     createThread(t, onThread, 1)
     joinThread(t)
     check outs[1].status == sxUnknown
+    check beBudgetExhaustedUnmodelled in outs[1].kinds
     check outs[1].named
     check outs[1].cut
 
@@ -170,6 +180,7 @@ suite "S8ca (2): a 2 MB thread":
       joinThread(t)
       check outs[2].left < 1024 * 1024
       check outs[2].status == sxUnknown
+      check beBudgetExhaustedUnmodelled in outs[2].kinds
 
   test "with about 1 MB left, a shallow call is still inlined and decides":
     var t: Thread[int]

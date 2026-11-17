@@ -5,6 +5,7 @@
 ## of deepterm's 186 s on the Windows leg, against a 240 s kill. The deep-term
 ## pins stay there; `arrayAccessTooWide`'s decline is pinned there too.
 
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
@@ -34,6 +35,10 @@ suite "S8ct: row B19's exact SUT":
       check r.soundness.replay == rsConfirmed
     else:
       check r.status == sxUnknown
+      check r.errors.named(beBudgetExhaustedUnmodelled)
+      check r.errors.named(feGlobalHavoc)
+      check r.errors.named(feUnsupportedOpHavoc)
+      check r.errors.named(feUnsupportedStmtKind)
       var named = false
       for e in r.errors:
         if "termWalkMaxDepth" in e.msg: named = true

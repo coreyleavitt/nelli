@@ -42,6 +42,7 @@
 ##       `s.endsWith(re"b+") and not s.contains(re"b")` with the negated
 ##       membership inside a disjunction was `sxUnknown` on Z3 4.13.4.
 ##       Pinned against native Nim.
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re, options]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -81,7 +82,8 @@ proc names(steps: seq[string]): seq[string] =
   for x in steps: result.add x.split('/')[0]
 
 template walk(sut: untyped; lbl: string; settings: SymexSettings):
-    tuple[status: SymexStatusKind, steps: seq[string], units: int] =
+    tuple[status: SymexStatusKind, steps: seq[string], units: int,
+          errs: seq[SymexErrorInfo]] =
   symexStepStats = @[]
   symexQueryStats = @[]
   let r = symexFind(sut, tLabel(lbl), settings)
@@ -91,7 +93,7 @@ template walk(sut: untyped; lbl: string; settings: SymexSettings):
   checkpoint $r.status & " units=" & $u & ": " & st.join(" ")
   symexStepStats = @[]
   symexQueryStats = @[]
-  (r.status, st, u)
+  (r.status, st, u, r.errors)
 
 let z351 = z3FullVersion().startsWith("5.")
 
@@ -246,6 +248,7 @@ suite "S8by (2): no (1b) or (1c) after a facts-first SAT":
   test "pastCap: the model breaks the cap, so (1c)'s capped half declines":
     let w = walk(pastCap, "s8by_pastcap", smallCap)
     check w.status == sxUnknown
+    check w.errs.named(beSolverUndef)
     let n = names(w.steps)
     check "1c-capped" in n
     check "1b" notin n

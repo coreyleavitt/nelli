@@ -9,6 +9,7 @@
 ##
 ## This file's `.nim.cfg` lowers the limit to 800, so the frames run out long
 ## before any stack does and the same pin holds on every platform.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/runtime
@@ -53,6 +54,7 @@ suite "batch 9: Nim's call depth limit":
     let r = symexFind(foreverSut, tLabel("cd_forever_never"), deep)
     checkpoint show(r.errors)
     check r.status == sxUnknown
+    check r.errors.named(beBudgetExhaustedUnmodelled)
     check framesNamed(r.errors)
     # The machine's limit, not the program's: not cached.
     check rdNativeStack in r.soundness.runDependence

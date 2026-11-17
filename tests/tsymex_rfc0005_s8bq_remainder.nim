@@ -24,6 +24,7 @@
 ## `tsymex_rfc0005_s8bq_remainder_b`, `tsymex_rfc0005_s8bq_remainder_c`. Split
 ## so that each part compiles and runs in under 60 s on the Windows legs (the
 ## whole file took 71 s).
+from ./s8cu_helpers import named
 import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
@@ -248,7 +249,10 @@ suite "S8bq (1): a length above 2^20 is declined, not modelled as allocated":
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedOp)
   test "the statement newSeq(s, n) above 2^20 declines":
-    check verdict(hugeNewSeqStmt, "bq_huge_newseq_stmt").status == sxUnknown
+    block:
+      let k9r = verdict(hugeNewSeqStmt, "bq_huge_newseq_stmt")
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOp)
   test "newSeqOfCap above 2^20 declines":
     let r = verdict(hugeOfCap, "bq_huge_ofcap")
     check r.status == sxUnknown

@@ -6,6 +6,7 @@
 ## and not on main. A pragma on a formal (`a {.byref.}: int`): the formal is a
 ## `nnkPragmaExpr`, whose `strVal` the walker read, on main too. A `{.byref.}`
 ## formal is the same memory whatever its type, so it declines.
+from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -39,7 +40,11 @@ suite "S8cq compile stops":
     check parseInt(symexWalkerVersion) >= 252
 
   test "an alias of an object declines":
-    check symexFind(pAl, tLabel("al")).status == sxUnknown
+    block:
+      let k9r = symexFind(pAl, tLabel("al"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedExprKind)
+      check k9r.errors.named(feUnsupportedStmtKind)
 
   test "a by-reference formal declines":
     symexCaptureBegin()
@@ -47,5 +52,11 @@ suite "S8cq compile stops":
     let hits = symexCaptureEnd()
     check "br_r50" in hits
     check "br_rx" notin hits
-    check symexFind(pBr, tLabel("br_r50")).status == sxUnknown
-    check symexFind(pBr, tLabel("br_rx")).status == sxUnknown
+    block:
+      let k9r = symexFind(pBr, tLabel("br_r50"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOp)
+    block:
+      let k9r = symexFind(pBr, tLabel("br_rx"))
+      check k9r.status == sxUnknown
+      check k9r.errors.named(feUnsupportedOp)

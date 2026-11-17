@@ -19,23 +19,12 @@ proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
 
-proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
-  for e in errs:
-    if e.kind == k: return true
-  false
-
 template reproduces(call: untyped; label: string): bool =
   block:
     symexCaptureBegin()
     call
     let hits = symexCaptureEnd()
     label in hits
-
-const tupleBudget = SymexSettings(budget: ResourceBudget(
-  queryRLimit: 600_000_000'u))
-  ## RFC-0005 batch 7: past `tiTuple`'s label search on both pinned Z3s
-  ## (see its test), and not the 250M default, which a tainted path does
-  ## not take as the caller's. Batch 9: 300M before S8by's term order.
 
 proc tiTuple(a: int) =
   # Bounded: `s += k * v` overflows for a huge `a`, a real `OverflowDefect`
@@ -57,23 +46,16 @@ suite "S8bc (6): Table iteration":
 
   test "for (k, v) in t.pairs, and for kv in t.pairs":
     ## RFC-0005 batch 7 (S8bp on this pin): the label query multiplies a
-    ## key by its value, two symbolic 64-bit terms, and Nim's overflow
-    ## checks on that product (`bvsmul_noovfl` / `noudfl`) are a hard
-    ## bit-vector search from the query's own text: 120,971,633 units on
-    ## Z3 5.1 and 79,811,624 on 4.13.4 in a context of its own, against
-    ## 40,490 in the walk's context before S8bp (the same 57 assertions;
-    ## without the four overflow checks the text alone takes 632,702).
-    ## RFC-0005 batch 9: S8by's `queryTermOrder` takes the 4.13.4 search to
-    ## 411,783,288 units; the query, the witness and the verdict are the same.
-    ## The path is tainted (`feTableIterOrder`), so its solve runs under
-    ## `taintedSolveRLimit`'s 20M: under the defaults it declines
-    ## (`beSolverUndef`), never `sxUnsat`; with a budget past the search it
-    ## finds Nim's own witness (`a == 6`, replayed natively).
-    let d = symexFind(tiTuple, tLabel("ti_tuple"))
-    checkpoint "default " & $d.status & " " & show(d.errors)
-    check d.status in {sxSat, sxUnknown}
-    if d.status == sxUnknown: check d.errors.hasKind(beSolverUndef)
-    let r = symexFind(tiTuple, tLabel("ti_tuple"), tupleBudget)
+    ## key by its value, and Nim's overflow checks on that product
+    ## (`bvsmul_noovfl` / `noudfl` over two free 64-bit terms) cost 120,971,633
+    ## units on Z3 5.1 and 79,811,624 on 4.13.4 in a context of its own, past
+    ## a tainted path's 20M: the defaults declined (`beSolverUndef`) and only
+    ## a 300M (later 600M) budget found the witness. RFC-0016 S8cg: the keys
+    ## are spelled as a choice among the literals stored (`isTabKeys`), and
+    ## the product's overflow check splits on them (`mulOverflowSplit`), so
+    ## the defaults find Nim's own witness (`a == 6`, replayed natively) on
+    ## both pinned Z3s.
+    let r = symexFind(tiTuple, tLabel("ti_tuple"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:

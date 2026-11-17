@@ -722,12 +722,13 @@ cells = []
 [[row]]
 id = "PRC-29"
 table = "5.2m"
-state = "open"
-note = ""
+state = "closed"
+note = "S8cg (`rfc-0016-w4s8cg`, walker 375, 2026-11-17). Item 2: a `var openArray` actual is read at the call (Nim passes the storage's address and length in the call expression), so `fill(gArr, bumpA())` and its slice, proc-value, seq and string forms decide and replay; a slice's bounds are checked where the argument stands and the variables they read join the frame condition (`laterLeavesView`), which closed a trusted false `sxSat` (a later call moving `gLo`; natively `gArr[1]` is written); a path on which a later call moved a bound or the storage's length declines, and so does a bound read through a dereference. Item 3: closed by RFC-0005 S8cc (`scanRead`); the view form is pinned (`ro`). Item 4: `ti_tuple` is exact `sxSat` under default budgets on Z3 5.1 and 4.13.4: a table's literal keys are enumerated as the key domain, and a multiply by a small literal set decides its overflow per literal (`mulOverflowSplit`); RED was `sxUnknown` on both. Item 5: `bb_rep_sym_empty_hit` was already `sxSat` under default budgets on both Z3 versions at `da0a4a85`; the pin is now exact. Item 7: closed by RFC-0005 S8cc/S8br (an index call through a proc value bound once, `fs_dead`). Item 8: `s8bb_constructs` stays under 60 s; `tsymex_r6_b6_optionregion` measured at 43.3 s on symex-mingw and added to `scripts/ci-suite-seconds.tsv`. The premise was wrong: on Windows it runs in the scan-tail matrix, not the corpus, so it was never sharded at the median there; the Linux deriver weights it"
 home = "S8cg"
 source = "`jobs/s8cg.md`; batch 7 note"
 moves = "items 2 (copy a `var openArray` view at the call, so `fill(gArr, bumpA())` decides), 3 (a later argument that only reads a global counts as a read), 4 (`ti_tuple` exact `sxSat` under default budgets), 5 (`bb_rep_sym_empty_hit` exact on both Z3 versions), 7 (an index call through a proc value), 8 (`s8bb_constructs` 40.7 s (under 60); `tsymex_r6_b6_optionregion` is absent from `scripts/ci-suite-seconds.tsv`, so it is sharded at the median estimate (`derive-ci-suites.ps1:278`) because it is unmeasured: measure it). Items 1 and 6 were closed by S8ca and S8by"
 cells = []
+pins = ["tsymex_0016_s8cg_views", "tsymex_rfc0005_b7_integration", "tsymex_rfc0005_s8bc_remainder_c2", "tsymex_rfc0005_s8bb_replace_d"]
 
 [[row]]
 id = "PRC-30"

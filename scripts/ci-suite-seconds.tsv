@@ -3,6 +3,11 @@
 # read by scripts/derive-ci-suites.ps1 to place the corpus shards.
 # tsymex_rfc0005_b11_hoststate (45) and its _reexec twin (55) are estimates
 # from the s8ct isolation and re-exec parts, until a run measures them.
+# tsymex_r6_b6_optionregion (43.3) is RFC-0016 S8cg's measurement from
+# symex-mingw run 44050888448 (job 133928105873, compile and run). On Windows
+# it runs in the scan-tail matrix, not the corpus (derive-ci-suites.ps1
+# $matrixSuites), so that script ignores it; derive-linux-shards.py weights
+# it with this value in place of the median.
 tsymex_161_overflow_obligation	53.6
 tsymex_162_range_base_width	56.6
 tsymex_163_opaque_transparent	47.3
@@ -300,6 +305,7 @@ tsymex_r6_b1_stringbacked	39.5
 tsymex_r6_b2_intwidth	29.5
 tsymex_r6_b3_scanpair	20.8
 tsymex_r6_b4_readcstring	26.2
+tsymex_r6_b6_optionregion	43.3
 tsymex_r6_d2_recursive_budget	37.6
 tsymex_r6_degrade_pairing_audit	3.1
 tsymex_r6_heap_raise_totality	24.6

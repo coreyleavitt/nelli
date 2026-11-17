@@ -8327,8 +8327,15 @@ proc arrayAsSeq(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   for k in 0 ..< aty.size: elems.add mkIndex(mkVar(a), mkIntLit(int64(k)))
   mkSeqLit(elems, aty.elemTy)
 
+type ViewSlice = object
+  ## RFC-0016 S8cg. Where `toOpenArraySlice` bound a slice's parts: its
+  ## storage as a seq (`base`, a `let`; empty when it declined) and its
+  ## bounds (`lo`, `hi`, fixed `let`s, taken across the array's low index).
+  base: string
+  lo, hi: IRExpr
+
 proc toOpenArraySlice(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx;
-                      lo: var IRExpr): IRExpr =
+                      parts: var ViewSlice): IRExpr =
   ## RFC-0005 S8bu. `toOpenArray(src, first, last)`: the view of `src` (a seq
   ## or an array, evaluated once, then the bounds, in Nim's order) from
   ## position `first` to `last`, a slice (`iekSeqSlice`) whose bounds are
@@ -8363,7 +8370,7 @@ proc toOpenArraySlice(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx;
               " (`" & src.repr & "`) is not modelled: the walk views a seq " &
               "or an array only (feUnsupportedOp)"),
       "toOpenArray of an unmodelled storage (feUnsupportedOp)")
-    lo = mkIntLit(0)
+    parts = ViewSlice(lo: mkIntLit(0), hi: mkIntLit(-1))
     return mkSeqLit(@[], classifyType(x).ty.seqElemTy)
   let elemTy = classifyType(x).ty.seqElemTy
   let b = freshSynth(ctx, "oaBase")
@@ -8375,8 +8382,15 @@ proc toOpenArraySlice(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx;
     let t = freshSynth(ctx, "oaBound")
     preamble.add mkLet(t, intTy, e)
     bounds.add mkVar(t)
-  lo = bounds[0]
+  parts = ViewSlice(base: b, lo: bounds[0], hi: bounds[1])
   mkSeqSlice(mkVar(b), bounds[0], bounds[1], view = true)
+
+proc toOpenArraySlice(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx;
+                      lo: var IRExpr): IRExpr =
+  ## `toOpenArraySlice` naming only the slice's first position.
+  var parts: ViewSlice
+  result = toOpenArraySlice(x, preamble, ctx, parts)
+  lo = parts.lo
 
 proc openArrayView(n: NimNode; preamble: var seq[IRStmt];
                    ctx: ParseCtx): IRExpr =
@@ -8848,18 +8862,25 @@ proc varViewSource(a: NimNode): NimNode =
   nil
 
 proc viewTemp(view, actual: NimNode; preamble: var seq[IRStmt];
-              ctx: ParseCtx; lo: var IRExpr): string =
+              ctx: ParseCtx; parts: var ViewSlice): string =
   ## RFC-0005 S8bu. A temporary seq holding the `var openArray` view
-  ## `view` (`varViewSource`) of the actual `actual`; `lo` names the
-  ## slice's first position (nil for a whole array).
-  lo = nil
+  ## `view` (`varViewSource`) of the actual `actual`; `parts` names the
+  ## slice's storage and bounds (`lo` nil for a whole array or string).
+  parts = ViewSlice()
   let viewIR =
-    if isToOpenArray(view): toOpenArraySlice(view, preamble, ctx, lo)
+    if isToOpenArray(view): toOpenArraySlice(view, preamble, ctx, parts)
     elif classifyType(view).ty.kind == itString:   # RFC-0005 S8ca
       mkStrOp(iekStrChars, "openArray", @[parseExpr(view, preamble, ctx)])
     else: arrayAsSeq(view, preamble, ctx)
   result = freshSynth(ctx, "oaView")
   preamble.add mkLet(result, classifyType(actual).ty, viewIR)
+
+proc viewTemp(view, actual: NimNode; preamble: var seq[IRStmt];
+              ctx: ParseCtx; lo: var IRExpr): string =
+  ## `viewTemp` naming only the slice's first position.
+  var parts: ViewSlice
+  result = viewTemp(view, actual, preamble, ctx, parts)
+  lo = parts.lo
 
 proc viewStorage(view: NimNode): NimNode =
   ## RFC-0005 S8bu. The storage a `var openArray` view writes to.
@@ -8914,6 +8935,108 @@ proc plainActual(a: NimNode): bool =
       if not plainActual(c): return false
     true
   else: false  # k2: fail-closed: false: the var actual declines; seqViewPeer skips none
+
+proc viewReadsPlain(view: NimNode): bool =
+  ## RFC-0016 S8cg. The `var openArray` view `view` names its storage, and a
+  ## slice its bounds, with no effect (`plainActual`), so reading them a
+  ## second time, at the call, reads what Nim reads there.
+  if not plainActual(viewStorage(view)): return false
+  if isToOpenArray(view):
+    for k in 2 .. 3:
+      if not plainActual(view[k]): return false
+  true
+
+proc viewAtCall(view, actual: NimNode; early: ViewSlice;
+                lateStmts: var seq[IRStmt]; ctx: ParseCtx;
+                lo: var IRExpr): string =
+  ## RFC-0016 S8cg. The `var openArray` view `view` (`viewReadsPlain`) read
+  ## at the call, into a temporary built by `lateStmts`, which the caller
+  ## places after every later argument. Nim passes the storage's address and
+  ## the view's length in the call expression (`ccgcalls`: an `openArray`
+  ## formal never takes a temporary, `nimArgTemps`), so the callee sees what
+  ## a later argument's call wrote there. A slice's bounds are checked where
+  ## the argument stands (`early`, `viewTemp`'s read there) and read again
+  ## at the call; a path on which a later call moved a bound, or changed the
+  ## length of a seq or string the check read, declines before the access
+  ## (`feEvalOrderUnmodelled`: Nim accesses through a value it never
+  ## checked), as `placeLateAddr` does for an lvalue. Batch 7 declined every
+  ## such view.
+  var parts: ViewSlice
+  result = viewTemp(view, actual, lateStmts, ctx, parts)
+  lo = parts.lo
+  if not isToOpenArray(view) or early.base.len == 0 or parts.base.len == 0:
+    return
+  # The slice's own `let` is the last statement: the guard goes before it,
+  # after the bounds and the storage are read.
+  let bound = lateStmts.pop()
+  var differs = mkBinop(bOr, mkBinop(bNe, parts.lo, early.lo),
+                        mkBinop(bNe, parts.hi, early.hi))
+  if classifyType(viewStorage(view)).ty.kind != itArray:
+    differs = mkBinop(bOr, differs,
+                      mkBinop(bNe, mkSeqLen(mkVar(parts.base)),
+                              mkSeqLen(mkVar(early.base))))
+  lateStmts.add mkIf(@[mkBranch(differs, mkBlock(@[ctx.declineMarker(
+    feEvalOrderUnmodelled,
+    "a `var openArray` slice whose bounds Nim checks where the argument " &
+    "stands and whose storage it passes at the call, after a later " &
+    "argument's call changed a bound or the storage's length: Nim accesses " &
+    "through a value it never checked (feEvalOrderUnmodelled)")]))])
+  lateStmts.add bound
+
+proc boundReadSyms(e: NimNode; into: var seq[NimNode]): bool =
+  ## RFC-0016 S8cg. The variables a `toOpenArray` bound `e` reads in the call
+  ## expression, into `into`; false for a shape not listed here. A call's
+  ## result is a temporary made where the argument stands (`fixupCall`), so
+  ## a user routine's arguments are not among them. A dereference is not
+  ## listed: a later argument may write its target through another name.
+  case e.kind
+  of nnkCharLit .. nnkUInt64Lit, nnkFloatLit .. nnkFloat64Lit, nnkNilLit,
+     nnkStrLit .. nnkTripleStrLit, nnkEmpty, nnkType:
+    true
+  of nnkSym:
+    if symKind(e) in {nskVar, nskLet, nskParam, nskResult, nskForVar, nskTemp}:
+      into.add e
+    true
+  of nnkCall, nnkCommand, nnkCallStrLit, nnkInfix, nnkPrefix:
+    if e.len > 0 and e[0].kind == nnkSym and
+       symKind(e[0]) notin procValueHeadKinds and isUserRoutine(e[0]):
+      return true
+    for c in e:
+      if not boundReadSyms(c, into): return false
+    true
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkDotExpr, nnkBracketExpr,
+     nnkCheckedFieldExpr, nnkPar:
+    for c in e:
+      if not boundReadSyms(c, into): return false
+    true
+  else: false  # k2: fail-closed: laterLeavesView reads false as written (a dereference too: an alias may write it), so the view declines
+
+proc laterLeavesView(view, lv: NimNode; later: seq[NimNode]): bool =
+  ## RFC-0016 S8cg. The frame condition of a `var openArray` view: no later
+  ## argument may write its storage `lv` (`laterLeavesLvalue`), nor, for a
+  ## slice, a variable a bound reads. Nim reads both in the call expression:
+  ## `fill(toOpenArray(gArr, gLo, 1), moveLo())` with `moveLo` setting `gLo`
+  ## to 1 writes `gArr[1]` natively. S8bu read the bounds where the argument
+  ## stands, and batch 7's condition named the storage alone.
+  if not laterLeavesLvalue(lv, later): return false
+  if isToOpenArray(view):
+    var syms: seq[NimNode]
+    for k in 2 .. 3:
+      if not boundReadSyms(view[k], syms): return false
+    for s in syms:
+      if not laterLeavesLvalue(s, later): return false
+  true
+
+proc lateViewTemp(view, actual: NimNode; atCall: bool;
+                  preamble, lateStmts: var seq[IRStmt]; ctx: ParseCtx;
+                  lo: var IRExpr): string =
+  ## RFC-0016 S8cg. The temporary a `var openArray` actual is passed as:
+  ## read where it stands (`viewTemp`), or, `atCall`, at the call
+  ## (`viewAtCall`), a slice's bounds checked where it stands first.
+  if not atCall: return viewTemp(view, actual, preamble, ctx, lo)
+  var early: ViewSlice
+  if isToOpenArray(view): discard viewTemp(view, actual, preamble, ctx, early)
+  viewAtCall(view, actual, early, lateStmts, ctx, lo)
 
 proc typeCopiedByValue(ty: NimNode; depth = 0): bool =
   ## RFC-0005 S8cq. The allowlist: a by-value formal of type `ty` is its own
@@ -9383,6 +9506,8 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
   # RFC-0005 S8bk: where each by-address argument's lvalue was lowered, so
   # that its address is taken at the call (`placeLateAddr`).
   var argLate: seq[LateAddr]
+  # RFC-0016 S8cg: the `var openArray` views read at the call (`viewAtCall`).
+  var lateViews: seq[IRStmt]
   # RFC-0005 S8ax: index pairs under which two by-address arguments are
   # one location (`aliasPath`); the call declines on the paths where they
   # all may be equal.
@@ -9582,9 +9707,13 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         let d = lvalueCallDecline(viewStorage(view), n, ctx)
         if d != nil: preamble.add d
       var lo: IRExpr = nil
-      let t = viewTemp(view, n[i], preamble, ctx, lo)
       var lv = viewStorage(view)
       if isVarIndirection(lv): lv = lv[0]
+      # RFC-0016 S8cg: Nim passes the storage's address at the call, so a
+      # view a later argument's call may write is read there (`viewAtCall`).
+      let written = not laterLeavesView(view, lv, laterActuals(n, i))
+      let atCall = written and viewReadsPlain(view)
+      let t = lateViewTemp(view, n[i], atCall, preamble, lateViews, ctx, lo)
       block:
         var syms: seq[NimNode]
         lvalueVarSyms(lv, syms)
@@ -9592,17 +9721,19 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
           if s.strVal notin guards: guards.add s.strVal
       var heapSteps: seq[NimNode]
       let root = if lv.kind == nnkSym: lv else: lvalueRoot(lv, heapSteps)
-      if not laterLeavesLvalue(lv, laterActuals(n, i)):
+      if written and not atCall:
         # RFC-0005 batch 7: the temporary is the view's elements where the
         # argument stands; Nim passes the storage's address, so the callee
         # sees what a later argument's call wrote there, and the write-back
         # would overwrite that write with the stale copy (a false `sxUnsat`
-        # before batch 7). S8br's frame condition decides it.
+        # before batch 7). RFC-0016 S8cg: read at the call instead, unless
+        # reading the storage or a bound again would run an effect twice.
         preamble.add ctx.declineAtSite(feEvalOrderUnmodelled,
           siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
-                  calleeSym.strVal & "` is copied where it stands, and a " &
-                  "later argument's call may write its storage before the " &
-                  "call (feEvalOrderUnmodelled)"),
+                  calleeSym.strVal & "` is copied where it stands (its " &
+                  "storage or a bound has an effect, so it is not read " &
+                  "again at the call), and a later argument's call may " &
+                  "write its storage before the call (feEvalOrderUnmodelled)"),
           "var openArray view written by a later argument (feEvalOrderUnmodelled)")
       elif root.isNil or
          varActualMayAlias(n, i, lv, root, heapSteps, aliasConds,
@@ -9806,6 +9937,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     for t in argTemps.mitems: t = atUnknown
   orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
                 argFixed, argLate, argTemps)   ## RFC-0005 S8ax, S8bk; S8be: in a `while` guard too
+  preamble.add lateViews   ## RFC-0016 S8cg: read at the call (`viewAtCall`)
   # RFC-0005 S8ax: the indices are free of side effects (`stableIndex`), so
   # reading them again after the arguments is reading the same values.
   for pairs in aliasConds:
@@ -10228,6 +10360,7 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
   var argTys: seq[IRType]
   var argFixed: seq[bool]
   var argLate = newSeq[LateAddr](nArgs)
+  var lateViews: seq[IRStmt]   ## RFC-0016 S8cg (`viewAtCall`)
   for i in 1 ..< n.len:
     let k = i - 1
     var lv = lvOf[i]
@@ -10241,20 +10374,24 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
         if d != nil: declines.add d
       # RFC-0005 S8bu: a `var openArray` view of an array or a slice.
       var lo: IRExpr = nil
-      let t = viewTemp(view, n[i], preamble, ctx, lo)
       var vlv = viewStorage(view)
       if isVarIndirection(vlv): vlv = vlv[0]
+      # RFC-0016 S8cg: read at the call when a later argument may write it.
+      let written = not laterLeavesView(view, vlv, laterActuals(n, i))
+      let atCall = written and viewReadsPlain(view)
+      let t = lateViewTemp(view, n[i], atCall, preamble, lateViews, ctx, lo)
       var heapSteps: seq[NimNode]
       let root = if vlv.kind == nnkSym: vlv else: lvalueRoot(vlv, heapSteps)
       addTouch(vlv, heapSteps)
-      if not laterLeavesLvalue(vlv, laterActuals(n, i)):
+      if written and not atCall:
         # RFC-0005 batch 7: as `userCallStmt`'s view, copied where it
         # stands, while Nim passes the storage a later argument may write.
         declines.add ctx.declineAtSite(feEvalOrderUnmodelled,
           siteMsg(n, "call through `" & calleeName & "`: `var openArray` " &
-                  "argument `" & view.repr & "` is copied where it stands, " &
-                  "and a later argument's call may write its storage before " &
-                  "the call (feEvalOrderUnmodelled)"),
+                  "argument `" & view.repr & "` is copied where it stands " &
+                  "(its storage or a bound has an effect, so it is not read " &
+                  "again at the call), and a later argument's call may " &
+                  "write its storage before the call (feEvalOrderUnmodelled)"),
           "var openArray view written by a later argument (feEvalOrderUnmodelled)")
       if root.isNil or
          varActualMayAlias(n, i, vlv, root, heapSteps, aliasConds, peers[i]):
@@ -10424,6 +10561,7 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
     for t in argTemps.mitems: t = atUnknown
   orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
                 argFixed, argLate, argTemps)
+  preamble.add lateViews   ## RFC-0016 S8cg: read at the call (`viewAtCall`)
   # The peer pairs: each argument at most one, mutual, both `var` or both
   # `addr`, through refs read without effect, along one field path.
   var pair: tuple[a, b: int] = (0, 0)

@@ -740,8 +740,21 @@ const renderAsChoicesVersion* = "12"
   ##   a wide enum no longer forks over every declared arm (or declines past
   ##   `maxVariantConstructorForks`). Verdicts that were `sxUnknown` there
   ##   resolve. No key bytes change.
+  ## - RFC-0016 S8cg (PRC-29; 371->375, 372-374 held by other branches): a
+  ##   `var openArray` view a later argument's call may write is read at the
+  ##   call (`viewAtCall`), as Nim passes it, instead of declining
+  ##   (`feEvalOrderUnmodelled`); a slice's bounds are checked where the
+  ##   argument stands, and a path on which a later call moved a bound or the
+  ##   storage's length declines. The view's frame condition also names the
+  ##   variables a slice's bounds read (`laterLeavesView`): a later call
+  ##   moving `gLo` in `fill(toOpenArray(gArr, gLo, 1), moveLo())` was a
+  ##   trusted false `sxSat`. A `Table`'s keys stored as integer literals
+  ##   are spelled as a choice among them (`isTabKeys`), and a product's
+  ##   overflow check splits on an operand that is such a choice
+  ##   (`mulOverflowSplit`): `ti_tuple`'s query, 121M units in a context of
+  ##   its own, is decided under the defaults. No key bytes change.
 
-const symexWalkerVersion* = "371"
+const symexWalkerVersion* = "375"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

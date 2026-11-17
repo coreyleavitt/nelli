@@ -13,7 +13,7 @@
 ## `tsymex_rfc0005_s8bb_replace`, `tsymex_rfc0005_s8bb_replace_b`,
 ## `tsymex_rfc0005_s8bb_replace_c`. Split so that each part compiles and runs
 ## in under 60 s on the Windows legs (the whole file took 90 s).
-import std/[unittest, strutils, re, times, sequtils]
+import std/[unittest, strutils, re, times]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -26,9 +26,6 @@ proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
-
-const seqBudget = SymexSettings(budget: ResourceBudget(
-  seqQueryRLimit: 100_000_000'u))
 
 template verdict(sut: untyped; label: string): SymexResult =
   let t0 = epochTime()
@@ -67,22 +64,13 @@ suite "S8bb (6): replace takes PCRE's chosen match, Nim's empty-match retry":
       check alt.witness[0] == "ab"
     check verdict(symbolicEmpty, "bb_rep_sym_empty").status == sxUnsat
     # RFC-0005 batch 7: since S8bp solves this label query in a context
-    # of its own, its cost is the query text's alone. Z3 5.1 decides it
-    # in 198,718 units; Z3 4.13.4 needs 18,801,883 (12,755,004 in the
-    # walk's context at batch 6), and step 1 has half of
-    # `seqQueryRLimit`'s 20M, so on 4.13.4 the default walk declines.
-    # Under the defaults the pin is sxSat or that decline, never sxUnsat;
-    # under an explicit 100M sequence budget it is Nim's witness on both
-    # Z3s.
+    # of its own, its cost is the query text's alone: 18,801,883 units on
+    # Z3 4.13.4 then, past step 1's half of `seqQueryRLimit`, so the pin
+    # admitted a decline under the defaults. RFC-0016 S8cg: the defaults
+    # decide it on both pinned Z3s (5.1 and the 4.13.4 row) at da0a4a85, so
+    # the pin is exact again.
     let hit = verdict(symbolicEmptyHit, "bb_rep_sym_empty_hit")
-    check hit.status in {sxSat, sxUnknown}
+    check hit.status == sxSat
     if hit.status == sxSat:
       check hit.witness[0] == "q"
-    else:
-      check hit.errors.anyIt(it.kind == beSolverUndef)
-    let wide = symexFind(symbolicEmptyHit, tLabel("bb_rep_sym_empty_hit"),
-                         seqBudget)
-    check wide.status == sxSat
-    if wide.status == sxSat:
-      check wide.witness[0] == "q"
       check "q".replace(re"$", "-") == "q-"

@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.9.2"
+version       = "0.10.0"
 author        = "Corey Leavitt"
 description   = "Property-based testing for Nim with internal choice-sequence shrinking (a Hypothesis-style engine)"
 license       = "Apache-2.0"

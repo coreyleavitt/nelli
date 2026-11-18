@@ -247,7 +247,11 @@ suite "K4b: the reachable magic cells, through symexFind":
   exactCell(sEqProc, "EqProc")
   declineCell(sCStrToStr, "CStrToStr", feUnsupportedOp)
   exactCell(sEqCString, "EqCString")
-  declineCell(sGCref, "GCref", feUnsupportedExprKind)
+  # RFC-0016 INT-65: the `cast[pointer]` in arc.nim's GC_ref keeps the
+  # address now, so the walk stops one statement later, at `nimIncRef`'s
+  # write through an integer-computed address (`cast[Cell](cast[int](p) -%
+  # ...).rc = ...`), and names that statement (was the nnkCast).
+  declineCell(sGCref, "GCref", feUnsupportedStmtKind)
   declineCell(sGCunref, "GCunref", feUnsupportedOp)
   declineCell(sGetTypeInfo, "GetTypeInfo", feUnsupportedOp)
   declineCell(sTrace, "Trace", feUnsupportedOp)

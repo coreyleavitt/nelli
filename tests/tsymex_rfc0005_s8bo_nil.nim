@@ -67,7 +67,8 @@ proc sutNilField(n: S8boNode) =
   if n.next.isNil: symexTarget("nil")
   if not n.next.isNil: symexTarget("some")
 
-# A proc value against nil is not modelled (S8z): `isNil` declines exactly
+# A proc PARAMETER against nil is not modelled (S8z; still so after RFC-0016
+# INT-65, which models nil and built proc values): `isNil` declines exactly
 # as `== nil` does, never a constant.
 proc sutNilProc(f: proc(x: int): int {.closure.}) =
   if f.isNil: symexTarget("nil")
@@ -134,7 +135,12 @@ suite "RFC-0005 S8bo (1): `isNil` is the nil comparison":
     verdict(sutNilField, tLabel("nil"), sxSat)
     verdict(sutNilField, tLabel("some"), sxSat)
   test "a proc value declines as `== nil` does":
-    pinDecline(sutNilProc, declKey, ceUnsupportedHof, tLabel("nil"), "compared with nil")
+    # RFC-0016 INT-65: `nil` is a proc value now (Nim's nil closure), so the
+    # decline is the comparison of it with the parameter, which the walk
+    # holds only as a placeholder (`closureMixedCmpDecline`): same kind,
+    # named at the comparison instead of at the `nil`.
+    pinDecline(sutNilProc, declKey, ceUnsupportedHof, tLabel("nil"),
+               "does not hold as a proc value")
 
 suite "RFC-0005 S8bo (1): a conversion or cast to `pointer`":
   test "`pointer(p) == nil`":

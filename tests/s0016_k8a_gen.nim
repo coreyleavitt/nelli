@@ -640,6 +640,15 @@ proc genAxis*(axis: AxisScope; seed, count, per: int; first = 0): seq[Prog] =
     p.k = Lit(kind: lkNum, n: r.pick(famK))
     if i >= first: result.add p
 
+proc genAxisKeys*(axis: AxisScope; seed: int; keys: openArray[string]):
+    seq[Prog] =
+  ## The one-row programs of the axis's stream (`per` = 1) whose row is one of
+  ## `keys`, in stream order, ids absolute: a suite that must run particular
+  ## rows (the build axis, whose rows are compile switches) takes its
+  ## programs from the same stream as one that runs a slice of it.
+  for p in genAxis(axis, seed, streamRows(axis), 1):
+    if p.rows[0] in keys: result.add p
+
 func anchorPrograms*(): seq[Prog] =
   ## One hand-seeded instance per shape whose seeded stream may reach no sat
   ## witness in a small batch (`mod`/`div` by a literal, guarded unsigned

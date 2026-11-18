@@ -1756,6 +1756,20 @@ task test, "Run the test suite":
             "tsymex_0016_k8b_axes_magic_c",
             "tsymex_0016_k8b_axes_magic_d",
             "tsymex_0016_k8b_axes_defined",
+            "tsymex_0016_k8b_axes_readonly",
+            # the build axis: the default build's libpcre rows, then one binary
+            # per switch row (each file's .nim.cfg or .nims)
+            "tsymex_0016_k8b_axes_build",
+            "tsymex_0016_k8b_axes_build_mm_arc",
+            "tsymex_0016_k8b_axes_build_mm_atomicarc",
+            "tsymex_0016_k8b_axes_build_usemalloc",
+            "tsymex_0016_k8b_axes_build_setjmp",
+            "tsymex_0016_k8b_axes_build_release",
+            "tsymex_0016_k8b_axes_build_fwrapv",
+            "tsymex_0016_k8b_axes_build_rangeoff",
+            "tsymex_0016_k8b_axes_build_boundoff",
+            "tsymex_0016_k8b_axes_build_objoff",
+            "tsymex_0016_k8b_axes_build_fieldoff",
             # RFC-0016 INT-55: a by-reference base in a parsed routine.
             "tsymex_0016_int55_parsedbyref",
             "tsymex_0016_k5a_fwrapv",

@@ -50,11 +50,49 @@ const axisFiles*: array[AxisScope, seq[string]] = [
              "tsymex_0016_k8b_axes_magic_c.nim",
              "tsymex_0016_k8b_axes_magic_d.nim"],
   axStdlibBody: @["tsymex_0016_k8b_axes_stdlib.nim"],
-  axBuild: @[],
-  axReadOnly: @[],
+  axBuild: @["tsymex_0016_k8b_axes_build.nim",
+             "tsymex_0016_k8b_axes_build_mm_arc.nim",
+             "tsymex_0016_k8b_axes_build_mm_atomicarc.nim",
+             "tsymex_0016_k8b_axes_build_usemalloc.nim",
+             "tsymex_0016_k8b_axes_build_setjmp.nim",
+             "tsymex_0016_k8b_axes_build_release.nim",
+             "tsymex_0016_k8b_axes_build_fwrapv.nim",
+             "tsymex_0016_k8b_axes_build_rangeoff.nim",
+             "tsymex_0016_k8b_axes_build_boundoff.nim",
+             "tsymex_0016_k8b_axes_build_objoff.nim",
+             "tsymex_0016_k8b_axes_build_fieldoff.nim"],
+  axReadOnly: @["tsymex_0016_k8b_axes_readonly.nim"],
   axDefinedness: @["tsymex_0016_k8b_axes_defined.nim"]]
   ## The suites that run each axis. An axis with no suite is not generated:
   ## its figure is 0 over its exact rows, judged against a floor of 0.
+
+proc buildSuiteOf*(s: Snippet): string =
+  ## The build axis's suite that runs the fragment: a row is a compile switch,
+  ## so each switch has its own binary (the file's `.nim.cfg`, or `.nims`,
+  ## holds `s.cfg`); the default build's suite runs the libpcre rows.
+  if s.cfg.len == 0: return axisFiles[axBuild][0]
+  for f in axisFiles[axBuild]:
+    let stem = f.changeFileExt("")
+    for cfgFile in [stem & ".nim.cfg", stem & ".nims"]:
+      let path = currentSourcePath().parentDir / cfgFile
+      if fileExists(path):
+        for l in readFile(path).splitLines:
+          if l.strip == s.cfg: return f
+  ""
+
+proc buildSuiteProblems*(): seq[string] =
+  ## Every switch fragment is compiled under its switch by exactly one suite,
+  ## and every switch suite runs one.
+  var used: HashSet[string]
+  for s in axisSnippets[axBuild]:
+    let f = buildSuiteOf(s)
+    if f.len == 0:
+      result.add "build:" & s.key & ": no axis suite's cfg holds `" & s.cfg & "`"
+    elif s.cfg.len > 0:
+      if f in used: result.add f & " compiles two switch rows"
+      used.incl f
+  for f in axisFiles[axBuild][1 .. ^1]:
+    if f notin used: result.add f & " runs no switch row"
 
 proc modelledRows*(axis: AxisScope): seq[string] =
   ## Every row of the axis's table that is admitted at some site.
@@ -136,7 +174,7 @@ proc axisRecordProblems*(recs: seq[ExercisedRecord]): seq[string] =
       if c.scope != r.family or c.key notin rows[ax]:
         result.add "exercised record " & r.testFile & " prog=" & $r.progId &
           ": cell " & render(c) & " is no exact row of " & scopePrefix[ax]
-    if r.outcome notin ["exact", "declined", "disagree"]:
+    if r.outcome notin ["exact", "declined", "disagree", "skipped"]:
       result.add "exercised record " & r.testFile & " prog=" & $r.progId &
         ": unknown outcome " & r.outcome
 

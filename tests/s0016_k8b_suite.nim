@@ -185,3 +185,64 @@ template axisBatch*(axis: static AxisScope; tag: static string;
       for f in fs: echo "FINDING ", f
       check fs.len == 0
       check exact > 0
+
+proc skippedRecord*(file, why: string): ExercisedRecord =
+  ## A build-axis suite whose switch cannot be built on this leg (a backend or
+  ## platform with no such mode) ran and exercised nothing: a record with no
+  ## cell, so K1 sees the suite ran on the leg (`axisJoinProblems` judges an
+  ## axis only when all its suites did) and counts no row.
+  ExercisedRecord(testFile: file, variant: "orig", outcome: "skipped",
+                  family: axBuild, cells: @[])
+
+template buildAxisBatch*(keys: static openArray[string]; applies: static bool;
+                         why: static string; tag: static string;
+                         runBatch: untyped; file: static string;
+                         seed: static int; hostKeys: seq[string]) =
+  ## The build axis: the one-row programs of the axis's stream whose row is
+  ## one of `keys` (`genAxisKeys`), each with one rotating relation, through
+  ## `symexFind` and the native differential, in a binary compiled under the
+  ## rows' switch (the file's `.nim.cfg`). Only the records of rows in
+  ## `hostKeys` are written: a libpcre row is exercised only on the library
+  ## the binary loaded. A build that is not the switch here (`applies` false)
+  ## writes one `skipped` record, naming `why`.
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  when applies:
+    const progs = genAxisKeys(axBuild, seed, keys)
+    genFamilyBatch(progs, tag)
+
+  suite "K8b axis build: " & tag:
+    when applies:
+      test "the programs are the stream's, one per row":
+        check progs.len == keys.len
+        for p in progs:
+          check p.rows.len == 1 and p.rows[0] in keys
+          check p == genAxis(axBuild, seed, p.id + 1, 1)[p.id]
+        for k in hostKeys: check k in keys
+
+      test "generated programs and their relations agree with native":
+        let outs = runBatch()
+        let fs = findings(progs, outs, seed)
+        var recs: seq[ExercisedRecord]
+        for r in axisExercisedOf(progs, outs, seed, file):
+          if r.cells.len == 1 and r.cells[0].key in hostKeys: recs.add r
+        writeExercisedTo(realPins, recs)
+        var exact, declined, disagree: int
+        for r in recs:
+          case r.outcome
+          of "exact": inc exact
+          of "declined": inc declined
+          else: inc disagree
+        echo "k8b axis build ", tag, " seed=", seed, " runs=", outs.len,
+          " recorded=", recs.len, " exact=", exact, " declined=", declined,
+          " disagree=", disagree, "\nk8b declines:\n", declineSummary(outs)
+        for f in fs: echo "FINDING ", f
+        check fs.len == 0
+        check exact > 0
+    else:
+      test "the switch cannot be built here":
+        echo "k8b axis build ", tag, " skipped: ", why
+        writeExercisedTo(realPins, @[skippedRecord(file, why)])

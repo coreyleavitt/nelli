@@ -4,6 +4,7 @@
 ## the real records; K1 (`tsymex_0016_universe`) reads them.
 import std/[unittest, os, strutils, sets, sequtils]
 import nelli/smt/admission
+import nelli/smt/readonlyaxes
 import ./s8cu_helpers
 import ./s0016_k8b_axes
 import ./s0016_k8a_gen
@@ -40,6 +41,25 @@ suite "K8b axes: the fragments and the denominator":
       for f in axisFiles[a]:
         check fileExists(currentSourcePath().parentDir / f)
         check ("\"" & f.changeFileExt("") & "\"") in nimble
+
+  test "every build fragment runs in the one suite compiled under its switch":
+    let p = buildSuiteProblems()
+    checkpoint p.join("\n")
+    check p.len == 0
+    check buildSuiteOf(snippetOf(axBuild, "mm=arc")) ==
+      "tsymex_0016_k8b_axes_build_mm_arc.nim"
+    check buildSuiteOf(snippetOf(axBuild, "8.45 2021-06-15|interp")) ==
+      axisFiles[axBuild][0]
+    for s in axisSnippets[axBuild]:
+      check genAxisKeys(axBuild, 20261117, [s.key]).len == 1
+
+  test "every read-only fragment names a shape a route proves read-only":
+    for s in axisSnippets[axReadOnly]:
+      var proved = false
+      for c in readOnlyAxis.cells:
+        if c.cell.key == s.key and c.admitted: proved = true
+      check proved
+    check axisSnippets[axReadOnly].len == modelledRows(axReadOnly).len
 
   test "the axis stream covers every unblocked fragment, rows once per lap":
     for a in AxisScope:
@@ -186,6 +206,18 @@ suite "K8b axes: the floor and K1's join":
     var floor = floorNow
     floor[axStdlibBody].total += 1
     check axisJoinProblems(@[], "", floor).len == 1
+
+  test "a skipped build record marks its suite as run and exercises nothing":
+    var floor = floorNow
+    for a in AxisScope: floor[a].exercised = 0
+    var recs: seq[ExercisedRecord]
+    for f in axisFiles[axBuild]:
+      recs.add rec(axBuild, @[], "skipped", file = f)
+    check axisRecordProblems(recs).len == 0
+    check axisFigure(recs)[axBuild].exercised == 0
+    floor[axBuild].exercised = 1
+    let p = axisJoinProblems(recs, "linux-c", floor)
+    check p.len == 1 and "below the floor" in p[0]
 
   test "RED: a record naming no exact row of its axis fails":
     var floor = floorNow

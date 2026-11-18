@@ -9,7 +9,7 @@
 ## (`tsymex_0016_universe`) judges each axis's figure against
 ## `tests/0016-axis-rows.floor` (`s0016_k8b_axes.axisJoinProblems`).
 ##   -d:k8bSeed=N   (the stream's seed)
-import std/[unittest, os, strutils, sets, math]
+import std/[unittest, os, strutils, sets, math, compilesettings]
 import nelli
 import nelli/symex
 import nelli/smt/admission

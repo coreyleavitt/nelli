@@ -87,3 +87,4 @@ INT-59	K8b	found by the K8b stdlib axis suite: a solve cost with no step bound, 
 INT-60	K8b	found by the K8b magic axis suite; its reproducer tests/tsymex_0016_int60_lenarrarith.nim is red and unregistered; closes when an array's len is exact as an arithmetic operand and the file is registered as its pin
 INT-61	K8b	found by the K8b magic axis suite: a solve cost with no step bound, no cell can name it; closes when a char's string length solves in line with the other magic rows
 INT-62	K8b	found by the K8b axis suites: a packed program's solve cost, no cell can name it; closes when the axis stream can pack rows again
+INT-63	K8b	found by the K8b typeop axis suite: the walk declines a `pointer` local before the `let` copy is judged, no pin yet; closes when a `let` copy of a placeholder-sort value is exact and the axis stream readmits typeop:letCursor/uninterp

@@ -24,9 +24,15 @@ type
     key*: string
     top*, pre*, expr*: string
     raises*: bool
+    cfg*: string
+      ## The build axis only: the compile switch the row is (a line of its
+      ## suite's `.nim.cfg` or `.nims`, `s0016_k8b_axes.buildSuites`). A build
+      ## row is a property of the whole binary, so its fragment runs only in a
+      ## suite compiled under that switch; "" is the default build.
 
-func sn(key, expr: string; pre = ""; top = ""; raises = false): Snippet =
-  Snippet(key: key, expr: expr, pre: pre, top: top, raises: raises)
+func sn(key, expr: string; pre = ""; top = ""; raises = false;
+        cfg = ""): Snippet =
+  Snippet(key: key, expr: expr, pre: pre, top: top, raises: raises, cfg: cfg)
 
 const magicSnippets = @[
   sn("AbsI", "abs(t)"),
@@ -173,6 +179,29 @@ const magicSnippets = @[
   sn("EqCString", "ord(V_c == cstring(\"ab\"))", "let V_c = cstring(if t > 0: \"ab\" else: \"cd\")"),
   sn("EqProc", "ord(V_p == N_f)", "let V_p = (if t > 0: N_f else: N_g)",
      top = "proc N_f(x: int): int = x\nproc N_g(x: int): int = -x"),
+  # a shrink: a grow leaves elements unwritten and declines by design
+  sn("SetLengthSeqUninit", "V_s.len + V_s[0]",
+     "var V_s = @[t, u, 1]\n  V_s.setLenUninit(1)"),
+  # a plain value type (a seq's `=dup` declines: the row is the plain copy)
+  sn("Dup", "V_y", "var V_x = t\n  let V_y = `=dup`(V_x)\n  V_x = u"),
+  # a side effect on a path no input reaches (t, u <= 127), so the native
+  # runs neither print nor stop
+  sn("Echo", "t", "if t > 126 and u > 126 and t < 0: echo \"k8b\""),
+  sn("Exit", "t", "if t > 126 and t < 0: quit(3)"),
+  sn("DeclaredInScope", "(when declaredInScope(V_none): 1 else: 0) + t"),
+  sn("CompileOptionArg", "ord(compileOption(\"gc\", \"orc\")) + t"),
+  # the suite's own main file (`std/compilesettings`, imported by the magic
+  # suites): generated code has no source path to resolve a relative one by
+  sn("Slurp", "ord(N_s.len > 0) + t",
+     top = "const N_s = staticRead(querySetting(projectFull))"),
+  sn("StaticExec", "ord(N_s.len > 0) + t",
+     top = "const N_s = staticExec(\"echo k8b\")"),
+  sn("RunnableExamples", "N_f(t)",
+     top = "proc N_f(x: int): int =\n  runnableExamples: discard\n  x + 1"),
+  sn("InstantiationInfo", "ord(N_w() > 0) + t",
+     top = "template N_w(): int = instantiationInfo().line"),
+  sn("CompileDate", "len(CompileDate) + t"),
+  sn("CompileTime", "len(CompileTime) + t"),
 ]
 
 const stdlibSnippets = @[
@@ -248,6 +277,10 @@ const definedSnippets = @[
 const typeClassSnippets = @[
   sn("alias", "N_f(t)", top = "type N_A = int\nproc N_f(x: N_A): int = x + 1"),
   sn("array", "N_f([t, u])", top = "proc N_f(x: array[2, int]): int = x[0] - x[1]"),
+  # the by-value formal site, in the pin's shape (tsymex_0016_k2c_typeclass
+  # `bvPtr`: a global `ptr` handed to a `pointer` formal the callee never reads)
+  sn("pointer", "N_f(N_g) + ord(N_g == nil) + t", "N_g = nil",
+     top = "var N_g: ptr int\nproc N_f(p: pointer): int =\n  N_g = nil\n  3"),
   sn("array/enumIndex", "N_f([t, u])",
      top = "type N_E = enum N_e0, N_e1\nproc N_f(x: array[N_E, int]): int = x[N_e1] - x[N_e0]"),
   sn("bool", "N_f(t > u)", top = "proc N_f(x: bool): int = (if x: 3 else: 5)"),
@@ -349,6 +382,18 @@ const typeOpSnippets = @[
   letCursor("tuple", "(int, int)", "(t, u)", "V_c[0] + V_c[1]"),
   letCursor("variant", "N_V", "N_V(k: false, m: t)", "V_c.m",
      "type N_V = object\n  case k: bool\n  of false: m: int\n  of true: z: int"),
+  fieldDefault("table", "Table[int, int]", "V_o.w.len"),
+  fieldDefault("multiVariant", "N_M", "V_o.w.m + V_o.w.p",
+     "type N_M = object\n  case k: bool\n  of false: m: int\n  of true: z: int\n" &
+     "  case j: bool\n  of false: p: int\n  of true: q: int\n"),
+  sn("letCursor/table", "V_c.len + V_c[t]",
+     "var V_x = initTable[int, int]()\n  V_x[t] = u\n  let V_c = V_x"),
+  letCursor("multiVariant", "N_M", "N_M(k: false, m: t, j: true, q: u)",
+     "V_c.m + V_c.q", "type N_M = object\n  case k: bool\n  of false: m: int\n  of true: z: int\n" &
+     "  case j: bool\n  of false: p: int\n  of true: q: int\n"),
+  # a placeholder sort's handle is copied (blocked: the `pointer` local
+  # declines before the `let` is judged, INT-63)
+  letCursor("uninterp", "pointer", "nil", "t + 1"),
 ]
 
 func routinePragma(p: string; prag = ""): Snippet =
@@ -428,14 +473,108 @@ const pragmaSnippets = @[
   sn("local/noinit", "V_x", "var V_x {.noinit.}: int\n  V_x = t"),
 ]
 
+# The build axis (K5b's cells, `buildprofile.buildCells`, and the verified
+# libpcre builds, `pcre_engine.pcreLibs`). Each fragment is ordinary code whose
+# verdict the switch could move: the heap under a memory model or allocator,
+# a caught raise under setjmp exceptions, arithmetic under `release` and
+# `fwrapv`, and the in-range side of each disabled check (narrowing, an
+# index, a subtype conversion, a field of the active branch).
+const
+  pcreFrag = sn("", "ord(V_s.match(re\"[a-c]\"))",
+                "var V_s = \"x\"\n  V_s[0] = chr(t + 128)")
+  refTop = "type N_R = ref object\n  x: int"
+
+func pcreSnippet(key: string): Snippet =
+  ## A regex call: the row is the libpcre the binary loaded, so the build
+  ## suite runs it on every leg and keeps the record of the host's row only.
+  result = pcreFrag
+  result.key = key
+
+const buildSnippets = @[
+  sn("mm=arc", "V_r.x + t", "let V_r = N_R(x: t)\n  let V_q = V_r\n  V_q.x = u",
+     top = refTop, cfg = "--mm:arc"),
+  sn("mm=atomicArc", "V_a.x - V_b.x",
+     "var V_a, V_b: N_R\n  new(V_a)\n  new(V_b)\n  V_a.x = t\n  V_b.x = u",
+     top = refTop, cfg = "--mm:atomicArc"),
+  sn("useMalloc", "V_s[1] + V_s.len", "var V_s = @[t, u]\n  V_s.add 3",
+     cfg = "-d:useMalloc"),
+  sn("exceptions/setjmp", "V_x + t",
+     "var V_x = 0\n  try:\n    if t > 3: raise newException(ValueError, \"e\")\n" &
+     "    V_x = 1\n  except ValueError:\n    V_x = 2",
+     cfg = "switch(\"exceptions\", \"setjmp\")"),
+  sn("release", "t * u - 3", cfg = "-d:release"),
+  sn("fwrapv", "t * 7 + u", cfg = "-d:nelliFwrapv"),
+  sn("rangeChecks=off", "int(int8(t + u))", cfg = "--rangeChecks:off"),
+  sn("boundChecks=off", "V_s[t and 1]", "let V_s = @[t, u]",
+     cfg = "--boundChecks:off"),
+  sn("objChecks=off", "N_D(V_b).y + V_b.x", "let V_b: N_B = N_D(x: t, y: u)",
+     top = "type\n  N_B = ref object of RootObj\n    x: int\n" &
+           "  N_D = ref object of N_B\n    y: int",
+     cfg = "--objChecks:off"),
+  sn("fieldChecks=off", "(if V_v.k: V_v.x else: V_v.y)",
+     "let V_v = (if t > 0: N_V(k: true, x: t) else: N_V(k: false, y: u))",
+     top = "type N_V = object\n  case k: bool\n  of true: x: int\n  of false: y: int",
+     cfg = "--fieldChecks:off"),
+  pcreSnippet("8.45 2021-06-15|interp"),
+  pcreSnippet("8.37 2015-04-28|jit"),
+  pcreSnippet("8.37 2015-04-28|interp"),
+]
+
+# The read-only axis (`readonlyaxes.readOnlyAxis`): each modelled shape a K6
+# route proves read-only, in the K6 corpus's own form. `lent/`: the body of a
+# `for` over a global seq (`mayWriteRoot`); `hookcopy/`, `hookstore/`: a user
+# `=copy` that is the plain copy (`routeHookCopies`, `routeStoresThroughDeref`);
+# `ptrformal/`: a callee's `ptr` formal (`ptrUsesStayLocal`); `viewwhole/`: a
+# callee given a `var` element and the `Table` it lives in (`bindsViewWhole`).
+func lentShape(key, body: string; top = ""): Snippet =
+  sn(key, "V_s", "N_gs = @[t, u]\n  var V_s = 0\n  for V_x in N_gs:\n" & body,
+     top = "var N_gs: seq[int]" & (if top.len > 0: "\n" & top else: ""))
+
+func hookShape(key, hook: string): Snippet =
+  sn(key, "V_y.v", "var V_x = N_C(v: t)\n  var V_y = V_x\n  V_x.v = u",
+     top = "type N_C = object\n  v: int\nproc N_pure(x, y: int): int = x + y\n" &
+           "proc `=copy`(a: var N_C; b: N_C) =\n" & hook)
+
+func viewShape(key, hold: string): Snippet =
+  sn(key, "V_r",
+     "var V_t = initTable[string, int]()\n  V_t[\"a\"] = t\n  var V_r = 0\n" &
+     "  for V_k, V_v in V_t.mpairs:\n    V_r = N_hold(V_v, V_t, V_k)",
+     top = "proc N_hold(v: var int; t: Table[string, int]; k: string): int =\n" &
+           hold)
+
+const readOnlySnippets = @[
+  lentShape("lent/walked-pure", "    V_s = V_s + N_pure(V_x, 1)",
+            "proc N_pure(x, y: int): int = x + y"),
+  lentShape("lent/local-work",
+            "    var V_w = V_x\n    if V_w < 0: V_w = -V_w\n    V_s = V_s + V_w"),
+  lentShape("lent/global-read", "    V_s = V_s + V_x + N_gs.len"),
+  lentShape("lent/pragma-block", "    doAssert V_x < 1000\n    V_s = V_s + V_x"),
+  hookShape("hookcopy/plain", "  a.v = b.v"),
+  hookShape("hookcopy/local-work",
+            "  var w = b.v + 1\n  if w > 3: w = w - 1\n  a.v = b.v\n  discard w"),
+  hookShape("hookcopy/walked-pure", "  discard N_pure(b.v, 1)\n  a.v = b.v"),
+  hookShape("hookstore/plain", "  a.v = b.v"),
+  hookShape("hookstore/local-work",
+            "  var w = N_pure(b.v, 1)\n  if w > 3: w = w - 1\n  a.v = b.v\n  discard w"),
+  sn("ptrformal/local", "V_x", "var V_x = 1\n  N_set(addr V_x, addr V_x, t)",
+     top = "proc N_set(p, q: ptr int; v: int) =\n  p[] = v\n  q[] = 3"),
+  sn("ptrformal/global-store", "V_x",
+     "var V_x = 1\n  N_keep(addr V_x)\n  N_gq[] = t",
+     top = "var N_gq: ptr int\nproc N_keep(p: ptr int) = N_gq = p"),
+  viewShape("viewwhole/tuple-copy",
+            "  let c = (a: t, b: 1)\n  v = 77\n  c.a[k]"),
+  viewShape("viewwhole/scalar-read",
+            "  let c = t.getOrDefault(\"zz\")\n  v = 77\n  t[k] + c"),
+]
+
 const axisSnippets*: array[AxisScope, seq[Snippet]] = [
   axTypeClass: typeClassSnippets,
   axTypeOp: typeOpSnippets,
   axPragma: pragmaSnippets,
   axMagic: magicSnippets,
   axStdlibBody: stdlibSnippets,
-  axBuild: @[],         # build rows are exercised by build-profile legs
-  axReadOnly: @[],
+  axBuild: buildSnippets,
+  axReadOnly: readOnlySnippets,
   axDefinedness: definedSnippets]
 
 # --- the blocked rows ------------------------------------------------------------
@@ -483,6 +622,8 @@ const
        "an unsat target over `int(round(x))` declines `ubFloatToIntRange`"),
     bk(axStdlibBody, "math.floor", "INT-58",
        "an unsat target over `int(floor(x))` declines `ubFloatToIntRange`"),
+    bk(axTypeOp, "letCursor/uninterp", "INT-63",
+       "a `let` copy of a `pointer` local declines `feUnsupportedExprKind`"),
     bk(axStdlibBody, "math.trunc", "INT-59",
        "about 60 s alone on c, with no step bound to cap it"),
   ]

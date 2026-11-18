@@ -78,7 +78,7 @@ suite "S8ai (3): a query holding seq.last_indexof takes step 1c":
     proc tight(): SymexSettings =
       result = defaultSymexSettings()
       result.budget.seqQueryRLimit = 2_000
-    let r = symexFind(rfindPastCap, tLabel("s8ai_rfind_notin"), tight())
+    let r = pinFind(rfindPastCap, tLabel("s8ai_rfind_notin"), tight())
     checkpoint show(r.errors)
     check r.status == sxUnsat
     for e in r.errors: check "was not decided" notin e.msg
@@ -96,7 +96,7 @@ suite "S8ai (3): a query holding seq.last_indexof takes step 1c":
     proc tight(): SymexSettings =
       result = defaultSymexSettings()
       result.budget.seqQueryRLimit = 2_000
-    let r = symexFind(fn, tLabel(label), tight())
+    let r = pinFind(fn, tLabel(label), tight())
     checkpoint show(r.errors)
     check r.status == sxUnsat
     for e in r.errors: check "was not decided" notin e.msg
@@ -105,7 +105,7 @@ suite "S8ai (3): a query holding seq.last_indexof takes step 1c":
     decidedBy1c(rfindSuffix, "s8ai_rfind_suffix")
 
   test "companion: rfind > 3 and in is sxSat":
-    let r = symexFind(rfindFound, tLabel("s8ai_rfind_found"))
+    let r = pinFind(rfindFound, tLabel("s8ai_rfind_found"))
     checkpoint show(r.errors)
     check r.status == sxSat
 

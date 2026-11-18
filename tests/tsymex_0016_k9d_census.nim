@@ -23,7 +23,7 @@
 import std/[unittest, os, strutils, algorithm]
 
 const
-  ceiling = 347
+  ceiling = 281
   testsDir = currentSourcePath().parentDir()
   verdictWords = ["sxSat", "sxUnsat", "sxRaised"]
   idioms = ["pinFind", "pinExact", "pinCrash", "pinNever", "pinCap",

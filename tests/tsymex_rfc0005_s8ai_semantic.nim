@@ -79,12 +79,12 @@ suite "S8ai (1): step 1c's links follow the query's equality classes":
     check stepOneC(ctx, roots) == zsSat
 
   test "end to end: t == \":\" and s.find(t) > 200 and \":\" notin s is sxUnsat":
-    let r = symexFind(needleByEquality, tLabel("s8ai_needle_eq"))
+    let r = pinFind(needleByEquality, tLabel("s8ai_needle_eq"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "companion: t == \":\" and s.find(t) > 5 and \":\" in s is sxSat":
-    let r = symexFind(needleByEqualityFound, tLabel("s8ai_needle_eq_found"))
+    let r = pinFind(needleByEqualityFound, tLabel("s8ai_needle_eq_found"))
     checkpoint show(r.errors)
     check r.status == sxSat
 

@@ -279,6 +279,69 @@ domain is another family's, so they stay (the compile error names the type):
   `p2b_refobjconstr_expr`, `phase15_r9_recursive`, `rectify_refs`,
   `rfc0005_s0_exhibit`, `rfc0005_s8ac_remainder`, `rfc0005_s8ao_remainder`
 
+## K9d-6 result (`k9d6`)
+
+`boundaryOf(string)` is a deterministic finite set, never the type: at most
+`stringDomainCap` (2048) values, in priority order, deduplicated. It holds
+
+- the empty string and every byte of a 25-byte alphabet (`'\0'`, `a`, `z`,
+  `0`, `9`, space, `-`, `\x7F`, `\x80`, `\xFF`, `A`, `Z`, `_`, `.`, `/`, `\n`
+  and the UTF-8 leads and continuations `C3 A9 E2 82 AC F0 9F 98 BF`);
+- the whole multi-byte sequences (`é`, `€`, an emoji, an overlong `C0 80`, a
+  truncated 3- and 4-byte lead, a surrogate, a code point past U+10FFFF);
+- **what the SUT's own source says**: `pinFind` harvests, at macro time, every
+  string literal and char literal in the target proc's typed AST, followed
+  into the routines and consts it names that live in the same directory
+  (stdlib is not followed; a `symexTarget`, `newException` or `echo` call's
+  arguments are not data), and its small integer literals (1..256). Each
+  literal (the first 32) is in the set along with its characters; its proper
+  prefixes and suffixes; it with one byte appended or prepended
+  (`\0 a 0 space \xFF`); each single byte removed; each byte changed (to +1,
+  -1, `a`, `\0`); upper and lower case; one space of padding. For each integer
+  literal `k`, strings of `k-1`, `k` and `k+1` bytes (up to 16 thresholds), and
+  fixed lengths 5, 8, 16, 33, 64, 100;
+- all pairs over a 10-byte alphabet and all triples over a 5-byte one.
+
+The set is bounded however many literals the SUT holds (the neighbour stages
+are filled in order and the cap truncates the last). A string field of an
+aggregate, or a string parameter beside another string whose two domains would
+multiply past `pinFindCap`, is cut to its first 64 values (`stringCore`: empty,
+the single bytes, then the literals), so two string parameters cross 64 x 64
+and an object with a string field crosses as pairwise rows. A string domain is
+always `sampled`; the record's `[n]` is its size, and `showArg` shows a
+string quoted and escaped (a record is text: the raw NUL and high bytes had
+made the jsonl invalid UTF-8).
+
+Coverage guarantee: a sat or raised witness is replayed exactly, whatever the
+domain. For an unsat verdict, the pin covers every string of up to 3 bytes over
+the small alphabets, the single bytes over the full one, and each SUT literal
+with its one-edit neighbours and length thresholds (up to the 2048 cap); a bug
+that needs a string outside that set (a 4-byte string off any literal, a
+neighbour of a 33rd literal) is not found. `cstring` takes the same set minus
+the values with a NUL (Nim's `cstring` ends at it), their storage held for the
+process. The walker declines a `cstring` parameter (`feUnsupportedParamType`),
+so a `cstring` call returns unpinned as it came; the domain is there for the
+day it does not. The witness of an unmodelled type is not converted back
+(`witnessAs`).
+
+`tsymex_0016_k9d_pinfind` pins the literal harvest (strings, chars, a helper,
+the label exclusion, int thresholds), the fixed core, the hinted neighbours,
+the bound, a sat witness outside the set, a tuple, an object and two string
+parameters, a planted unsat claim refused over a literal's neighbour, the
+cstring domain, and that hints do not outlive a `pinFind` call.
+
+66 suites convert (two commits, 33 each), every verdict reproduced natively;
+no native/walker disagreement, so no soundness row. `tsymex_rfc0005_s8ai_semantic`
+and `_c` pin through a helper-file `include`. Census ceiling 347 -> 281.
+
+Deferred, with the slice that owns them: `phase15_g10_smoke`,
+`phase15_N0_kindgate_widen`, `phase15_S10b_strconv`, `snd1_uncertain_taint`
+(a float parameter, K9d-8); `r1_draingap`, `rfc0005_s8bx_extractraise` (a
+`seq[int]` and a table's pair sequence, K9d-7); `tot1_totality_corpus` (a
+`seq[Widget]` besides its `cstring`, K9d-7); `rfc0005_s8cb_order` (its SUTs
+call `quit`, which ends the test process natively, so it needs the child-process
+idiom, K9d-11).
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

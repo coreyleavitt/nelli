@@ -6,8 +6,8 @@
 ## Found at 7746d32a by K8b's typeop axis suite (INT-56): the row's fragment
 ## was `var x: pointer = nil; let c = x`, which declined
 ## `feUnsupportedExprKind` before the `let` was judged: no `pointer` value is
-## modelled, so a `nil` of `pointer` has no representation (INT-65, red pin
-## `tests/tsymex_0016_int65_placeholdernil.nim`). The row itself was never
+## modelled, so a `nil` of `pointer` had no representation (INT-65, closed
+## at walker 434, `tests/tsymex_0016_int65_ptrnil.nim`). The row itself was never
 ## the cause: a closure local reaches it and is exact, and the axis fragment
 ## is now that shape.
 import std/[unittest, strutils, sequtils]

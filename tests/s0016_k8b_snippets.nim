@@ -419,7 +419,7 @@ const typeOpSnippets = @[
      "V_c.m + V_c.q", "type N_M = object\n  case k: bool\n  of false: m: int\n  of true: z: int\n" &
      "  case j: bool\n  of false: p: int\n  of true: q: int\n"),
   # a placeholder sort's handle is copied: a closure local is the `__closure`
-  # sort (a `pointer` has no modelled nil to start from, INT-65)
+  # sort (a `pointer` holds a `ptr`'s address, not a placeholder, INT-65)
   sn("letCursor/uninterp", "V_c(u)",
      "let V_f = proc (x: int): int = x + t\n  let V_c = V_f"),
 ]

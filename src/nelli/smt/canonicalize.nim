@@ -832,8 +832,19 @@ const renderAsChoicesVersion* = "12"
   ##   (no type until expanded) is skipped by the route scan, which stopped
   ##   the compile ("node has no type"). Verdicts change from `sxUnknown` to
   ##   exact; a program that did not compile does. No key bytes change.
+  ## - RFC-0016 INT-65 (423->434; 424-433 are reserved for other W4 work): a
+  ##   `pointer` holds the address it was converted from (`addr`, a `cast` or
+  ##   conversion of a `ptr`/`ref`) or its nil (`pointerNilTy`, also an
+  ##   uninitialised one), and `refEq` compares addresses of different
+  ##   pointee sorts (nil against either side decides; two non-nil ones
+  ##   decline `heUnresolvedRef`); a `ptr` cast from a `pointer` declines
+  ##   `heUnsafeCast`. A proc value is its routine or closure or nil
+  ##   (`nilClosure`, also an uninitialised proc variable): compared with nil
+  ##   it is decided (`closureEq`), a call through nil declines
+  ##   `ceUnsupportedHof`. Verdicts change from `sxUnknown` to exact. No key
+  ##   bytes change.
 
-const symexWalkerVersion* = "423"
+const symexWalkerVersion* = "434"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

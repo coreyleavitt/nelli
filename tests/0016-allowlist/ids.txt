@@ -85,4 +85,3 @@ INT-57	K8b	found by the K8b axis suites; its reproducer tests/tsymex_0016_int57_
 INT-59	K8b	found by the K8b stdlib axis suite: a solve cost with no step bound, no cell can name it; closes with a per-row budget or an axis stream that keeps FP rows one per program
 INT-61	K8b	found by the K8b magic axis suite: a solve cost with no step bound, no cell can name it; closes when a char's string length solves in line with the other magic rows
 INT-62	K8b	found by the K8b axis suites: a packed program's solve cost, no cell can name it; closes when the axis stream can pack rows again
-INT-65	K8b	found probing INT-63 (K8b typeop axis suite); its reproducer tests/tsymex_0016_int65_placeholdernil.nim is red and unregistered (a pin must be registered); closes when `nil` of a `pointer` and a closure compared with `nil` are exact and the file is registered as its pin

@@ -11681,6 +11681,13 @@ var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
   ## the element is preceded by a check that the length is still `L`
   ## (`miElemGuard`).
 
+proc pointerNilTy*(): IRType =
+  ## RFC-0016 INT-65. The type a `pointer`'s `nil` is lowered at: Nim's
+  ## `pointer` is an untyped address, and the walk holds a non-nil one as the
+  ## `ptr`/`ref` it was converted from (whose pointee sort it keeps). Its nil
+  ## is the nil of `ptr uint8`; `refEq` compares across pointee sorts.
+  tPtr(tUInt(8))
+
 proc nilSideCore(refNode: NimNode): NimNode =
   ## RFC-0005 S8bo. The operand a nil comparison or `isNil` decides, seen
   ## through a conversion or a cast to `pointer` (`pointer(p)`,
@@ -11722,13 +11729,23 @@ proc parseNilCompare(op: IRBinop; refNode0: NimNode; nilIsLhs: bool;
   # this arm `nil` fell to the generic unsupported-literal dummy (an int
   # 0), and the walker compared an `svClosure` against it: a
   # `weInternalWalkerFault` whenever the closure path was walked first.
+  # RFC-0016 INT-65: a proc value is the routine or closure it was built
+  # from, or nil (`nilClosureSite`); the walk compares it with nil as it
+  # compares two proc values (`closureEq`), and a value it holds only as a
+  # placeholder declines there (`ceUnsupportedHof`).
   if refCls.ty.kind == itUninterp and refCls.ty.uninterpName == "__closure":
-    preamble.add ctx.declineAtSite(
-      ceUnsupportedHof,
-      "a proc value compared with nil in `" & site.repr &
-        "` is not modelled -- degraded to sxUnknown (ceUnsupportedHof)",
-      "proc value compared with nil (ceUnsupportedHof)")
-    return mkBoolLit(false)
+    let cloIR = parseAtomicOperand(refNode, preamble, ctx)
+    let nilIR = mkNil(refCls.ty)
+    return (if nilIsLhs: mkBinop(op, nilIR, cloIR)
+            else:        mkBinop(op, cloIR, nilIR))
+  # RFC-0016 INT-65: a `pointer` holds the address it was converted from (a
+  # `ptr` or a `ref`), or its own nil (`pointerNilTy`); `refEq` compares
+  # addresses of different pointee types.
+  if refNode.typeKind == ntyPointer:
+    let pIR = parseAtomicOperand(refNode, preamble, ctx)
+    let nilIR = mkNil(pointerNilTy())
+    return (if nilIsLhs: mkBinop(op, nilIR, pIR)
+            else:        mkBinop(op, pIR, nilIR))
   nil
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -11789,6 +11806,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let t = classifyType(n).ty
     if t != nil and t.kind in {itRef, itPtr}:
       mkNil(t)
+    elif n.typeKind == ntyPointer:
+      mkNil(pointerNilTy())   # RFC-0016 INT-65
+    elif t != nil and t.kind == itUninterp and t.uninterpName == "__closure":
+      mkNil(t)                # RFC-0016 INT-65: a nil proc value
     else:
       preamble.add ctx.declineAtSite(feUnsupportedExprKind,
         siteMsg(n, "`nil` of a type the walk holds no nil for (" & $t &
@@ -12089,6 +12110,25 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # RFC-0016 W3-z P16. `cast[ptr T](0)` is the target's nil (no address).
     if isNilPtrCast(n):
       return mkNil(classifyType(n).ty)
+    # RFC-0016 INT-65. `cast[pointer](r)` of a `ref`/`ptr`/`pointer` keeps
+    # the address (`nilSideCore`); a `pointer` holds the address it was
+    # converted from.
+    if nilSideCore(n) != n:
+      return parseExpr(nilSideCore(n), preamble, ctx)
+    # RFC-0016 INT-65. `cast[ptr T](q)` of a `pointer`: what `q` addresses is
+    # not known to be a `T`, so the reinterpretation declines. The stand-in
+    # is let-bound so a dereference of it reads a variable.
+    if n.len == 2 and n[1].typeKind == ntyPointer and
+       n.typeKind in {ntyPtr, ntyRef}:
+      preamble.add ctx.declineUnsafeCast(
+        siteMsg(n, "`" & n.repr & "` reinterprets a `pointer` as a typed " &
+                "address; what it addresses is not known to be that type " &
+                "(RFC-0016 INT-65; heUnsafeCast)"),
+        "cast of a pointer to a typed address (heUnsafeCast)")
+      let tmp = freshSynth(ctx, "ptrcast")
+      let ty = classifyType(n).ty
+      preamble.add mkLet(tmp, ty, mkNil(ty))
+      return mkVar(tmp)
     # RFC-0005 S8m. `cast[ref Obj](p)` with `p: ref Obj` reinterprets a ref as
     # the very type it already has: the same address, the same `Ref_<id>`
     # sort, so it is the identity and keeps `p`'s heap identity. Before, the
@@ -22642,6 +22682,14 @@ proc parseStmtInner(n: NimNode,
           let zero = zeroValueForType(classified.ty)
           if zero != nil:
             stmts.add mkLet(id[j].strVal, classified.ty, zero)
+          elif id[j].typeKind == ntyPointer:
+            # RFC-0016 INT-65: a `pointer` is nil.
+            stmts.add mkLet(id[j].strVal, classified.ty, mkNil(pointerNilTy()))
+          elif classified.ty.kind == itUninterp and
+               classified.ty.uninterpName == "__closure" and
+               id[j].typeKind == ntyProc:
+            # RFC-0016 INT-65: a proc variable is nil.
+            stmts.add mkLet(id[j].strVal, classified.ty, mkNil(classified.ty))
           elif classified.ty.kind == itUninterp:
             # RFC-0005 S8ap (S8ao's remainder): an `itUninterp` local has
             # no zero (`zeroValueForType`'s own argument), and the decline

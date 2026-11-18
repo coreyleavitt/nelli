@@ -1276,7 +1276,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 INT-66 / INT-67 / INT-70 (a user-declared binary magic is
     ## the system operator; a borrowed `.` is the base field read; a template
     ## body's type section no longer stops the route scan): 422->423.
-    check symexWalkerVersion == "423"
+    ## RFC-0016 INT-65 (a `pointer` is an address with a nil; a proc value
+    ## is a routine or nil; 424-433 reserved): 423->434.
+    check symexWalkerVersion == "434"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

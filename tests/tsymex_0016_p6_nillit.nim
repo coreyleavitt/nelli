@@ -59,12 +59,10 @@ proc pprocG(c: bool) =
   if gf != nil: symexTarget("hit")
 
 suite "RFC-0016 W3-z P6: nil in a composite slot":
-  test "cstring and pointer nil arms decline by name (were a walker fault)":
+  test "cstring nil arms decline by name (were a walker fault)":
     check parseInt(symexWalkerVersion) >= 317
     pinDecline(pcsGlobal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
     pinDecline(pcsLocal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
-    pinDecline(pptr, cellKey(axTypeClass, "pointer"), feUnsupportedExprKind)
-    pinDecline(pptrG, cellKey(axTypeClass, "pointer"), feUnsupportedExprKind)
 
   test "the case-expression form declines by name (was an unbound temp fault)":
     pinDecline(pcsCase, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
@@ -77,6 +75,11 @@ suite "RFC-0016 W3-z P6: nil in a composite slot":
     discard pinExact(pref, cellKey(axTypeClass, "ref"), domain = sampled([true, false]))
     discard pinExact(prefG, cellKey(axTypeClass, "ref"), domain = sampled([true, false]))
 
-  test "a proc nil arm declines by name":
-    pinDecline(pproc, cellKey(axTypeClass, "proc"), ceUnsupportedHof)
-    pinDecline(pprocG, cellKey(axTypeClass, "proc"), ceUnsupportedHof)
+  test "a pointer nil arm is modelled and agrees with native (INT-65)":
+    check parseInt(symexWalkerVersion) >= 434
+    discard pinExact(pptr, cellKey(axTypeClass, "pointer"), domain = sampled([true, false]))
+    discard pinExact(pptrG, cellKey(axTypeClass, "pointer"), domain = sampled([true, false]))
+
+  test "a proc nil arm is modelled and agrees with native (INT-65)":
+    discard pinExact(pproc, cellKey(axTypeClass, "proc"), domain = sampled([true, false]))
+    discard pinExact(pprocG, cellKey(axTypeClass, "proc"), domain = sampled([true, false]))

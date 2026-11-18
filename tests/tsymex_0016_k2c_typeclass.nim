@@ -216,8 +216,8 @@ suite "RFC-0016 K2c: walker version":
 # overwrites the global it was handed a copy of does not change what it holds.
 # The parameter site declines (pinned above); these pin the modelled site, where
 # the walk's copy is Nim's and the verdict is exact against native. A `pointer`
-# value is built only from a `ptr` (the walk has no `nil` or `cast` for it), and
-# a `proc` value is a local (a global one is held by name and declines).
+# value holds the `ptr` it is built from (its nil and `cast` are INT-65's,
+# `tsymex_0016_int65_ptrnil`), and a `proc` value is a local.
 var
   gByCs: cstring
   gByPtr: ptr int

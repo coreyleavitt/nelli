@@ -1788,6 +1788,8 @@ task test, "Run the test suite":
             # `toTable` table (a tuple-unpacking `items` loop).
             "tsymex_0016_int63_closurelet",
             "tsymex_0016_int64_totable",
+            # RFC-0016 INT-65: a `pointer` value and a proc value's nil.
+            "tsymex_0016_int65_ptrnil",
             # RFC-0016 INT-66, INT-67, INT-69, INT-70: a user-declared magic;
             # a borrowed `.`; an undefined answer native reproduces; a type
             # section in a routine's template.

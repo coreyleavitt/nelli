@@ -430,6 +430,21 @@ type
   Env* = OrderedTable[string, SymVal]
 
 
+const nilClosureSite* = (siteHash: 0'i64, declOrder: -1)
+  ## RFC-0016 INT-65. The site of the nil proc value: no lambda or routine has
+  ## it (a lambda's `declOrder` counts from 0), so `closureEq` finds nil equal
+  ## to nil only, and no body is registered under it.
+
+proc nilClosure*(): SymVal =
+  ## RFC-0016 INT-65. Nim's nil proc value (an uninitialised proc variable, a
+  ## `nil` stored in one): a closure with no site, no environment and no
+  ## function symbol. A call through it declines (`lowerClosureCall`).
+  SymVal(kind: svClosure, closureSite: nilClosureSite, closureEnv: nil,
+         closureFrame: -1)
+
+func isNilClosure*(v: SymVal): bool =
+  v.kind == svClosure and v.closureSite == nilClosureSite
+
 proc plainEnglishSymValKind*(k: SVKind): string =
   ## Round-6 N12 follow-up. The runtime-layer sibling of
   ## `plainEnglishTypeKind` (`types.nim`) — that helper is the single

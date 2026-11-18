@@ -27953,46 +27953,45 @@ const defaultZ3TimeoutMs* = 2000'u
   ## host is, so it cannot be used to deterministically PROVE `cfoTimedOut`
   ## in a test. Callers who need a bound that exhausts identically on every
   ## machine set `settings.budget.queryRLimit` instead (or in addition):
-  ## `z3CheckBounded` applies it the same way `trySolve` and
-  ## `concreteBranchOutcome` do (see `concreteBranchRLimit`'s doc).
+  ## `flipCheck` applies it the same way `trySolve` and
+  ## `concreteBranchOutcome` do (see `concreteBranchRLimit`'s doc). RFC-0016
+  ## INT-33: this timeout caps the solve's `queryTimeoutMs`.
 
-proc z3CheckBounded(ctx: Z3Context, conjuncts: seq[Z3Bool], target: Z3Bool,
-                    timeoutMs: uint, rlimit: uint): tuple[status: Z3Status, solver: Z3Solver] =
-  ## One bounded Z3 check: `conjuncts` (the prefix, possibly relaxed) AND
-  ## `target` (the already-negated branch predicate). Deterministic
-  ## (`random_seed = 0`, matching `trySolve`'s determinism guarantee) and
-  ## bounded by `timeoutMs` so a single attempt can never hang regardless of
-  ## formula shape.
-  ##
-  ## R26: also applies `rlimit` — Z3's deterministic logical-step-count bound,
-  ## same param `trySolve` wires from `settings.budget.queryRLimit` (see its
-  ## comment) and `concreteBranchOutcome` wires via `concreteBranchRLimit`.
-  ## `rlimit = 0` is Z3's documented "unbounded", so a caller who never sets
-  ## `settings.budget.queryRLimit` (the codebase-wide 0-means-unbounded
-  ## convention) gets exactly today's timeout-only behavior; a caller who
-  ## sets a nonzero value forces `Z3_L_UNDEF` once that many logical steps
-  ## are spent, identically on every machine and Z3 build, unlike `timeoutMs`,
-  ## which is wall-clock and therefore machine/load-dependent. NOTE:
-  ## `runConcolicFlipImpl` passes the SAME `settings` to `runConcolicCollectImpl`
-  ## (G1b) that it uses here — `queryRLimit` is one shared budget, not a
-  ## G2-only knob. A caller (or test) wanting a deterministic `cfoTimedOut`
-  ## needs a value that starves THIS query while still leaving G1b's own
-  ## (cheaper, concrete-pinned) branch checks enough room to finish; see
-  ## `tests/tsymex_g2_flip.nim`'s R26 suite for a worked, empirically-checked
-  ## example.
-  let s = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("timeout", timeoutMs)
-  sp.set("rlimit", rlimit)
-  sp.set("random_seed", 0'u)
-  s.setParams(sp)
-  for c in conjuncts: s.add(c)
-  s.add(target)
-  # RFC-0005 S8ag: the axioms of the one-character `str.indexof` splits
-  # the formula reaches (definitional, so a relaxed prefix keeps them).
-  for c in indexSplitRoots(ctx, conjuncts & @[target]): s.add(c)
+proc flipCheck(ctx: Z3Context; conjuncts: seq[Z3Bool]; target: Z3Bool;
+               settings: SymexSettings; z3TimeoutMs: uint):
+               tuple[status: Z3Status, m: Z3Model] =
+  ## RFC-0016 INT-33 (R1-27, PRC-25). One flip solve, as a walker query:
+  ## `conjuncts` and `target` with the run-wide facts every walker query
+  ## asserts (`globalRoots`: the closure-call axioms, the entry values' type
+  ## facts, the containers' cardinality, the string decompositions and the
+  ## `str.indexof` splits), decided by `checkCapped` (the `maxSeqLen` caps,
+  ## `seqQueryRLimit`, the regex limit sites) under `queryRLimit` and a
+  ## `queryTimeoutMs` capped at the flip's own `z3TimeoutMs`. The bespoke
+  ## solve this replaced asserted neither: a closure call's result was free
+  ## there, so a flip set it to the flipped value and left the draws where
+  ## they were. `queryRLimit` is one budget with the collect pass (G1b), so
+  ## a caller wanting a deterministic `cfoTimedOut` needs one that starves
+  ## this query and still lets the collect's concrete-pinned checks finish
+  ## (`tests/tsymex_g2_flip.nim`'s R26 suite).
+  ## The collect that built the formula restored the thread's context on its
+  ## way out; the pools `globalRoots` drains are still its run's.
+  var s = settings
+  if z3TimeoutMs != 0'u and (s.budget.queryTimeoutMs == 0'u or
+                             s.budget.queryTimeoutMs > z3TimeoutMs):
+    s.budget.queryTimeoutMs = z3TimeoutMs
+  let prevCtx = currentContext()
+  let savedTimeout = queryTimeoutMsCur
+  defer:
+    setCurrentContext(prevCtx)
+    queryTimeoutMsCur = savedTimeout
+  setCurrentContext(ctx)
+  queryTimeoutMsCur = s.budget.queryTimeoutMs
+  var q = conjuncts
+  q.add target
+  let roots = q & globalRoots(q)
   inc symexZ3CallCount
-  (s.check(), s)
+  let r = checkCapped(ctx, roots, s, s.budget.queryRLimit)
+  (r.status, r.m)
 
 proc evalConcolicDrawInt64(m: Z3Model, sv: SymVal): int64 =
   ## Issue #163 review R24/R25. Evaluate a concolic draw's ACTUAL Z3
@@ -28122,11 +28121,11 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   var model: Z3Model
   var solved = false
   var sawTimeout = false
-  let (exactStatus, exactSolver) = z3CheckBounded(ctx, target.prefixPc, negatedTarget, z3TimeoutMs,
-                                                   settings.budget.queryRLimit)
+  let (exactStatus, exactModel) = flipCheck(ctx, target.prefixPc, negatedTarget,
+                                             settings, z3TimeoutMs)
   case exactStatus
   of zsSat:
-    model = exactSolver.model()
+    model = exactModel
     solved = true
   of zsUnknown:
     sawTimeout = true
@@ -28146,11 +28145,10 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     while k <= maxRelaxationAttempts and k <= n:
       let relaxed = target.prefixPc[0 ..< (n - k)]
       inc attemptsUsed
-      let (r, s) = z3CheckBounded(ctx, relaxed, negatedTarget, z3TimeoutMs,
-                                   settings.budget.queryRLimit)
+      let (r, m) = flipCheck(ctx, relaxed, negatedTarget, settings, z3TimeoutMs)
       case r
       of zsSat:
-        model = s.model()
+        model = m
         solved = true
       of zsUnknown:
         sawTimeout = true
@@ -28177,13 +28175,12 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
       for g in targetOps[i .. ^1]:
         if astEqual(c, not g.cond) or astEqual(not c, g.cond): own = true
       if not own: reach.add c
-    let (st, sv) = z3CheckBounded(ctx, reach, f.cond, z3TimeoutMs,
-                                  settings.budget.queryRLimit)
+    let (st, sm) = flipCheck(ctx, reach, f.cond, settings, z3TimeoutMs)
     if st == zsSat:
       seenUb.add (f.kind, f.site)
       result.undefinedReached.add ConcolicUndefined(
         kind: f.kind, site: f.site,
-        input: materializeConcolicModel(sv.model(), trace, collected.drawVars,
+        input: materializeConcolicModel(sm, trace, collected.drawVars,
           collected.drawOverrides, min(trace.len, maxDraws)))
       inc result.flipCounters.undefinedReached
 

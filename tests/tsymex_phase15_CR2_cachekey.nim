@@ -1274,7 +1274,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W4 rv0005-lows part 2 (a replay-settled claim of a program
     ## whose foreign body or proc-variable target the key cannot see is not
     ## stored; 405 reserved): 404->406.
-    check symexWalkerVersion == "406"
+    ## RFC-0016 W4 rv0005-lows part 3 (the key carries the toolchain's
+    ## `lib/` and binary digest, `|tc=`; a concolic flip solves with the
+    ## walker's run-wide facts): 406->407.
+    check symexWalkerVersion == "407"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

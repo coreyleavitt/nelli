@@ -24,7 +24,7 @@ import nelli/symex
 
 # R26: `settings.budget.queryRLimit` forces Z3's bounded-solve path (both
 # `concreteBranchOutcome`'s G1b collection-time scratch solves, per R7, AND
-# `z3CheckBounded`'s G2 flip-solve queries) to exhaust by LOGICAL STEP COUNT
+# `flipCheck`'s G2 flip-solve queries) to exhaust by LOGICAL STEP COUNT
 # rather than wall-clock time — deterministic across machines and load for a
 # fixed Z3 build, unlike `z3TimeoutMs`, whose firing time is exactly what let
 # the earlier version of this test pass on Linux and fail on the

@@ -21,6 +21,7 @@ import ./types
 import ./replayproc   ## RFC-0005 0.9.1 (WA-8): how this build replays
 import ./buildprofile ## RFC-0016 W1-c1a: the build reads live there
 import ./sha256       ## review R3 (E10): the one hash the cache keys with
+import ./toolchain_id ## RFC-0016 INT-31: the `|tc=` segment
 
 const
   symexCacheKeyPrefix* = "sx2:"
@@ -825,8 +826,14 @@ const renderAsChoicesVersion* = "12"
   ##   longer stored (INT-31, W-18): such a stored claim was served after
   ##   that body changed. Entries an earlier run stored for such a program
   ##   are stale. No key bytes change.
+  ## - RFC-0016 W4 rv0005-lows part 3 (406->407): the key carries the
+  ##   toolchain (`|tc=`, a digest of the compiler's `lib/` tree and binary;
+  ##   INT-31): a toolchain republished under the same `NimVersion` was served
+  ##   the verdicts its old `lib/` made. A concolic flip's solve asserts the
+  ##   walker's run-wide facts under its caps (INT-33), which moves the flips
+  ##   a closure condition's result decides. Every key moves.
 
-const symexWalkerVersion* = "406"
+const symexWalkerVersion* = "407"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7358,7 +7365,8 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     z3Version, nimVersion, walkerVersion,
                     renderingVersion: string;
                     replayMode = replayModeSegment();
-                    buildSeg = ""): string =
+                    buildSeg = "";
+                    toolchain = toolchainIdentity): string =
   ## Content-addressed key over every input that determines a
   ## witness's validity. Stable across builds (no source locations,
   ## no map-iteration order, no compiler-specific hashes). Returns
@@ -7374,6 +7382,10 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
   ## RFC-0016 K5a: `buildSeg` is `buildSegment` of this build and host (the
   ## default, read for the Z3 `z3Version` names); it replaces the `|z3=`,
   ## `|pcre=` and `|bf=` segments.
+  ## RFC-0016 INT-31: `toolchain` is `toolchainIdentity` (the default), a
+  ## content digest of the compiler's `lib/` tree and binary. `nimVersion`
+  ## alone let a toolchain republished under the same version serve the
+  ## verdicts its old `lib/` made.
   let seg = if buildSeg.len > 0: buildSeg
             else: buildSegment(buildSemantics, readHost(z3Version))
   let canon =
@@ -7381,6 +7393,7 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
     "|" & canonicalize(target) &
     "|" & canonicalize(settings) &
     "|nim=" & nimVersion &
+    "|tc=" & toolchain &
     "|w=" & walkerVersion &
     "|r=" & renderingVersion &
     # RFC-0005 0.9.1 (WA-8): how this build replays (`replayModeSegment`).

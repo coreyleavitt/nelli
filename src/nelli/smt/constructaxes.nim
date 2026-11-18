@@ -146,6 +146,17 @@ func constructRows(): seq[ConstructKey] =
     "the cache, and the walk declines what else it cannot read (INT-31)",
     iNever, nrByDesign)
   result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/key/toolchain"], none(SymexErrorKind),
+    "a claim made under one toolchain is never served to a build under " &
+    "another: the key's `|tc=` segment is a digest of the compiler's `lib/` " &
+    "tree and binary, so a republish under the same `NimVersion` moves it " &
+    "(INT-31)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["concolic/flip/roots"], none(SymexErrorKind),
+    "a concolic flip's solve asserts the run-wide facts every walker query " &
+    "does (`globalRoots`) under the walker's caps (`checkCapped`), so a " &
+    "closure call's result is not free there (INT-33)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
     ["db/secondary/guard"], none(SymexErrorKind),
     "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
     "`strictDb` run with a report), never raised out of `forAll` (INT-33)",

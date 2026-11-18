@@ -18,7 +18,8 @@
 ##
 ## Not followed, by design:
 ## - a routine declared in the compiler's `lib/` tree. The walker models what it
-##   inlines from there, and the key's `nim=` segment moves with the toolchain;
+##   inlines from there, and the key's `|tc=` segment (`toolchain_id`, a
+##   digest of the whole `lib/` tree and the compiler binary) moves with it;
 ## - nelli's own runtime (the markers), which `symexWalkerVersion` keys.
 ##
 ## Not visible, and so not keyed (`docs/migration/0.9.0.md` names the same
@@ -38,7 +39,7 @@
 ## a method whose overrides cannot be listed, so what is left is the replay of
 ## a lossy witness and of a raise. A `let` proc value's routine is named by its
 ## initialiser, which the program's globals key. The compiler's `lib/` tree is
-## keyed by the toolchain (`nim=`), not here.
+## keyed by the toolchain (`|tc=`, `toolchain_id`), not here.
 import std/[macros, os, strutils]
 import ./dsl_typebridge   ## `isUserRoutine`
 import ./check_options    ## `routineChecks`

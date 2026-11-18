@@ -1967,6 +1967,8 @@ task test, "Run the test suite":
             "tsymex_0016_int30_wire",
             "tsymex_0016_int31_keyholes",
             "tsymex_0016_int33_savesecondary",
+            "tsymex_0016_int31_libkey",
+            "tsymex_0016_int33_flipsolve",
             "tsymex_0016_int30_refcfiber",
             "tsymex_rfc0005_r1_keyflags",
             "tsymex_rfc0005_r1_keyimpl",

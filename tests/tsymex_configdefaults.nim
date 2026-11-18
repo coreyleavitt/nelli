@@ -184,6 +184,8 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
       inlinePolicy: ipAlwaysAxiomatize,
       replay: false,                     # RFC-0005 S10
       replayTimeoutMs: 1234,             # RFC-0005 S8be
+      replayConcurrency: defaultSymexSettings().replayConcurrency + 3,
+                                         # RFC-0016 INT-32
       wholeRunDefinedness: not defaultSymexSettings().wholeRunDefinedness,
                                          # RFC-0016 K10b
       budget: ResourceBudget(
@@ -217,11 +219,13 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
                                                # override above sets it);
                                                # W3-z R9
                                                # `tailWalkCappedChecks`
-    check fieldCount[SymexSettings]() == 8   # 7 scalars plus `budget`
+    check fieldCount[SymexSettings]() == 9   # 8 scalars plus `budget`
                                              # (RFC-0005 S10 added `replay`,
                                              # S8be `replayTimeoutMs`, RFC-0016 K10b
                                              # `wholeRunDefinedness`; K10d
-                                             # deleted `arithChecks`)
+                                             # deleted `arithChecks`; INT-32
+                                             # `replayConcurrency`, merged in
+                                             # `+` and set by the override above)
 
   test "composing two different nested budget overrides keeps both":
     # `a` and `b` each change ONE, different, budget subfield. A whole-object

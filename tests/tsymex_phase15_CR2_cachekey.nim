@@ -1291,7 +1291,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## 429->430.
     ## RFC-0016 PRC-50 (an owning loop variable, an alias of a loop
     ## variable, a magic call in the cursor inference): 430->432.
-    check symexWalkerVersion == "432"
+    ## RFC-0016 INT-75 / PRC-51 (a `for` destructuring its variable; the
+    ## `=dup` shapes PRC-50 left declining): 432->433.
+    check symexWalkerVersion == "433"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

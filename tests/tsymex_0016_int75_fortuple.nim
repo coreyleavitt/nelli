@@ -9,7 +9,8 @@
 ## In the typed tree the iterator is already resolved (`items(st)`,
 ## `pairs(s)`, the user's call), so `for (a, b) in X` binds exactly what
 ## `for a, b in X` binds: each name to its component of each yielded tuple.
-## `fieldPairs` admits no parenthesised form (native: "wrong number of
+## `mitems`/`mpairs` destructured and `pairs` over a string decline by name,
+## as their flat forms do. `fieldPairs` admits no parenthesised form (native: "wrong number of
 ## variables"), so it has none to model.
 import std/[unittest, strutils]
 import nelli
@@ -48,6 +49,31 @@ proc n1(k: int): int =
   for i, (a, b) in pairs(st): result += i * 100 + a + b
 proc c1(k: int): int =
   for (a, b) in itc(k): result += a + b * 10
+# The C++ backend rejects a destructured `mitems`/`mpairs` (Nim 2.2.10:
+# `(NI&)0` for each `var` view), so these three are read on C only.
+when not defined(cpp):
+  proc m1(k: int): int =
+    var st = @[(k, 2), (3, 4)]
+    for (a, b) in mitems(st): result += a + b * 10
+  proc m2(k: int): int =
+    var st = @[(k, 2), (3, 4)]
+    for (a, b) in mitems(st):
+      a += 5
+      b = a
+    result = st[0][1] + st[1][1] * 10
+  proc m3(k: int): int =
+    var st = @[(k, 2), (3, 4)]
+    for i, (a, b) in mpairs(st):
+      b = a + i
+    result = st[0][1] + st[1][1] * 10
+proc w1(k: int): int =
+  var st = @[(k, 2), (3, 4)]
+  for (a, b) in st:
+    st[1] = (100, k)
+    result += a + b
+proc s1(k: int): int =
+  let str = "ab"
+  for (i, c) in pairs(str): result += i * k + ord(c)
 
 template pair(name, neverName: untyped; call, hitV, neverV: untyped) =
   proc name(k {.inject.}: int) =
@@ -65,6 +91,12 @@ pair(eI1, eI1Never, i1(k), 5 * k, 5 * k + 1)
 pair(eI2, eI2Never, i2(k), k + 63, k + 36)
 pair(eN1, eN1Never, n1(k), k + 109, k + 9)
 pair(eC1, eC1Never, c1(k), 3 * k + 70, 3 * k)
+when not defined(cpp):
+  pair(eM1, eM1Never, m1(k), k + 63, k + 36)
+  pair(eM2, eM2Never, m2(k), k + 85, k + 42)
+  pair(eM3, eM3Never, m3(k), k + 40, k + 42)
+pair(eW1, eW1Never, w1(k), 2 * k + 102, 2 * k + 9)
+pair(eS1, eS1Never, s1(k), k + 195, k + 196)
 
 const idom = sampled([0, 1, 2, 3, 4, 5, -42, 42])
 let tCell = cellKey(axTypeClass, "tuple")
@@ -76,9 +108,13 @@ suite "INT-75":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 433
   test "native truth":
-    for e in [eU1, eU2, eU3, eP1, eP2, eI1, eI2, eN1, eC1]:
+    for e in [eU1, eU2, eU3, eP1, eP2, eI1, eI2, eN1, eC1, eW1, eS1]:
       for k in [-42, 0, 1, 2, 3]:
         check native(e(k)) == "hit"
+    when not defined(cpp):
+      for e in [eM1, eM2, eM3]:
+        for k in [-42, 0, 1, 2, 3]:
+          check native(e(k)) == "hit"
   test "a user iterator's tuple, destructured":
     exact(eU1, eU1Never)
     exact(eU2, eU2Never)
@@ -93,3 +129,15 @@ suite "INT-75":
     exact(eN1, eN1Never)
   test "a closure iterator's tuple, destructured":
     exact(eC1, eC1Never)
+  test "`mitems` / `mpairs` destructured: declined by name":
+    # Each name is a `var` view of its component (native: a write through
+    # it is the element's); the walk spells the loop variable as the
+    # element's typed lvalue, and a component has none.
+    when not defined(cpp):
+      pinDecline(eM1, tCell, feUnsupportedStmtKind, needle = "mitems")
+      pinDecline(eM2, tCell, feUnsupportedStmtKind, needle = "mitems")
+      pinDecline(eM3, tCell, feUnsupportedStmtKind, needle = "destructuring")
+  test "the element is read at each step":
+    exact(eW1, eW1Never)
+  test "`pairs` over a string, destructured: declined as the flat form":
+    pinDecline(eS1, tCell, seByteIterUnsupported)

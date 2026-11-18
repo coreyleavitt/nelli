@@ -21749,6 +21749,13 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
       &"for-loop over `{iterExpr[0].strVal}` with {n.len - 2} loop " &
       "variable(s): only `for x in mitems(c)` and `for i, x in mpairs(c)` " &
       "are modelled")
+  # RFC-0016 INT-75. A destructured element (`for i, (a, b) in mpairs(st)`)
+  # makes each name a `var` view of its component; the walk spells the
+  # loop variable as the element's typed lvalue, and a component has none.
+  if n[n.len - 3].kind != nnkSym:
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      &"for-loop over `{iterExpr[0].strVal}` destructuring its element " &
+      "is not modelled")
   var c = iterExpr[1]
   if c.kind == nnkHiddenAddr and c.len == 1: c = c[0]
   c = openArraySource(c)
@@ -22019,6 +22026,20 @@ proc parseStmtInner(n: NimNode,
     block tableFor:
       let tf = parseTableForLoop(n, ctx)
       if tf != nil: return tf
+    # RFC-0016 INT-75. `for (a, b) in X` holds one `nnkVarTuple` where
+    # `for a, b in X` holds a symbol per name. The iterator is already
+    # resolved in the typed tree (`items(st)`, `pairs(s)`, a user's call), so
+    # both forms bind each name to its component of each yielded tuple
+    # (`transf.transformYield` unpacks either one at its `yield`): the
+    # parenthesised form is read as the flat one. A destructuring nested in
+    # a flat form (`for i, (a, b) in pairs(st)`) is read by the arms below.
+    if n.len == 3 and n[0].kind == nnkVarTuple:
+      var flat = newNimNode(nnkForStmt, n)
+      for c in n[0]:
+        if c.kind != nnkEmpty: flat.add c
+      flat.add n[1]
+      flat.add n[2]
+      return parseStmt(flat, ctx)
     let iterVar = n[0]
     let iterExpr = n[^2]
     let bodyNode = n[^1]
@@ -22153,12 +22174,49 @@ proc parseStmtInner(n: NimNode,
       # single-variable `pairs` binds a `(key, val)` tuple, which this
       # desugaring does not build: a scoped decline.
       let isPairs = iterExpr[0].strVal == "pairs"
-      if (isPairs and n.len != 4) or (not isPairs and n.len != 3):
+      if isPairs and n.len != 4:
         return ctx.declineMarker(feUnsupportedStmtKind,
           &"for-loop over `{iterExpr[0].strVal}` with {n.len - 2} loop " &
           "variable(s): only `for x in c` and `for i, x in pairs(c)` are modelled")
-      if isPairs: n[1].expectKind nnkSym
-      let valName = if isPairs: n[1].strVal else: iterName
+      # RFC-0016 INT-75. The element destructured: `for a, b in items(st)`
+      # (the flat reading of `for (a, b) in st`) and `for i, (a, b) in
+      # pairs(st)`. Each name is its component of the element read at the
+      # step (`transformYield` assigns them there): `parts`, empty for one
+      # variable.
+      var parts: seq[NimNode]
+      if not isPairs and n.len > 3:
+        for vi in 0 ..< n.len - 2: parts.add n[vi]
+      elif isPairs and n[1].kind == nnkVarTuple:
+        for c in n[1]:
+          if c.kind != nnkEmpty: parts.add c
+      if parts.len > 0:
+        let elemTy0 =
+          if recvCls.ty.kind == itArray: recvCls.ty.elemTy
+          elif recvCls.ty.kind == itSeq: recvCls.ty.seqElemTy
+          else: nil
+        var why = ""
+        if elemTy0 == nil:
+          why = "over a " & $recvCls.ty.kind
+        elif elemTy0.kind != itTuple or elemTy0.fields.len != parts.len:
+          why = "of an element that is not a tuple of " & $parts.len
+        for p in parts:
+          if p.kind != nnkSym: why = "nesting a destructuring"
+        if why.len > 0:
+          return ctx.declineMarker(feUnsupportedStmtKind,
+            &"for-loop over `{iterExpr[0].strVal}` destructuring its " &
+            &"variable {why} is not modelled")
+      elif isPairs: n[1].expectKind nnkSym
+      let valName =
+        if parts.len > 0: freshSynth(ctx, "ftup")
+        elif isPairs: n[1].strVal
+        else: iterName
+      proc bindVal(elemTy: IRType; v: IRExpr): seq[IRStmt] =
+        ## `valName = v`, then each destructured name its component.
+        result.add mkLet(valName, elemTy, v)
+        for k, p in parts:
+          let fname = if k < elemTy.fieldNames.len: elemTy.fieldNames[k] else: ""
+          result.add mkLet(p.strVal, elemTy.fields[k],
+                           mkField(mkVar(valName), k, fname))
       if recvCls.ty.kind == itString:
         # Phase 15 S3 (ADR-0006): `for c in s` over a *symbolic* string is
         # unsupported — NOT for a byte/codepoint reason (byte-faithful makes
@@ -22191,7 +22249,15 @@ proc parseStmtInner(n: NimNode,
       if recvCls.ty.kind in {itSeq, itArray}:
         let elemTy = if recvCls.ty.kind == itArray: recvCls.ty.elemTy
                      else: recvCls.ty.seqElemTy
-        if recvCls.ty.kind == itSeq and not isPairs or not alwaysCopied(elemTy):
+        if parts.len > 0:
+          # A destructured name is assigned its component at the step: a
+          # scalar one is a copy; any other may share the element's memory.
+          for k, p in parts:
+            if not alwaysCopied(elemTy.fields[k]):
+              let d = lentLoopDecline(n, container, p, bodyNode, ctx,
+                                      iterExpr[0].strVal)
+              if d != nil: return d
+        elif recvCls.ty.kind == itSeq and not isPairs or not alwaysCopied(elemTy):
           let d = lentLoopDecline(n, container, (if isPairs: n[1] else: iterVar),
                                   bodyNode, ctx, iterExpr[0].strVal)
           if d != nil: return d
@@ -22239,7 +22305,7 @@ proc parseStmtInner(n: NimNode,
                                 recvCls.ty.elemTy)
           if isPairs:
             iters.add mkLet(iterName, idxTy, mkIntLit(lo + int64(k)))
-          iters.add mkLet(valName, recvCls.ty.elemTy, mkVar(synth))
+          iters.add bindVal(recvCls.ty.elemTy, mkVar(synth))
           iters.add body
         if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
         else: stmts.add iters
@@ -22273,13 +22339,14 @@ proc parseStmtInner(n: NimNode,
         # A-normalised index: isIndex stmt + bind via let
         let idxStmt = mkIndexStmt(synth, seqIR, mkVar(ivName),
                                   recvCls.ty.seqElemTy)
-        let bindIter = mkLet(valName, recvCls.ty.seqElemTy, mkVar(synth))
+        let bindIter = bindVal(recvCls.ty.seqElemTy, mkVar(synth))
         let incIv = mkAssign(ivName,
           mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
         var loopStmts = @[idxStmt]
         if isPairs:   # RFC-0005 S8z: `i` is the position
           loopStmts.add mkLet(iterName, intTy, mkVar(ivName))
-        loopStmts.add @[bindIter, body, incIv]
+        loopStmts.add bindIter
+        loopStmts.add @[body, incIv]
         loopStmts.add mkIf(@[mkBranch(
           mkBinop(bNe, mkSeqLen(seqIR), mkVar(lenName)),
           seqIterLenChanged(ctx, n, container, iterExpr[0].strVal))])

@@ -865,8 +865,12 @@ const renderAsChoicesVersion* = "12"
   ##   `yield` gives a value made there owns it, `let b = o` of an inlined
   ##   loop variable owns, and a magic call mutates no argument through a
   ##   pointer in the cursor inference. No key bytes change.
+  ## - RFC-0016 INT-75 / PRC-51 (432->433): a parenthesised `for`
+  ##   destructuring is read as the flat one and `items`/`pairs` destructure
+  ##   their element (INT-75); the `=dup` shapes PRC-50 left declining are
+  ##   modelled (PRC-51). No key bytes change.
 
-const symexWalkerVersion* = "432"
+const symexWalkerVersion* = "433"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

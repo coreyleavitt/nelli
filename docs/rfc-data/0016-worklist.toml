@@ -892,6 +892,17 @@ cells = []
 pins = ["tsymex_0016_prc50_dupresid", "tsymex_0016_prc49_dupfinal2", "tsymex_0016_k4b_cells"]
 
 [[row]]
+id = "PRC-51"
+table = "5.2m"
+state = "open"
+note = "filed `rfc-0016-w4prc51` (2026-11-18), red: `tests/tsymex_0016_prc51_dupfield.nim` pins PRC-50's seven sound declines and their siblings exact against native (Nim 2.2.10, c and cpp agree, `=dup` calls per call): `yield x.d` 0, with `w.d` read after 2, with `w.n` read after 2, a nested path 0; `let b = w.d` 0, `w.d` read after 1, `w.n` read after 1 (rule B on the root's live range), `w.w.d` read after 1, `var w` with `w.n` written then read 0 (rule A on any path; `w.d` moved at its last read); `yield (x, 1)` with `dTake(t[0])` 1, `t[0]` read after 3, `let t = (a, 1)` 0, `t[0]` read after 1, `t[1]` read after 0 (last read per path); `items`/`pairs` over a seq 2/2 (`lent T`: a cursor), `let b = o` 0, `o` read after 2, two loops 2, the seq read after 2, `items`/`pairs` over an array 0/0 and `let b = o` 0 (`a[i]` owned, `=copy`); a looping `yield` of a value made there 0, a straight `while` local sunk 0 and read after 2, `let b = o` 0; a mixed iterator 0 either order, `let b = o` 0, `o` read after 2"
+home = "W4"
+source = "PRC-50 remainder; `tests/tsymex_0016_prc50_dupresid.nim` (`f1`, `f2`, `t1`, `s1`-`s4`, `y3f`, `y3h`)"
+moves = "the PRC-50 declines become exact: a field path at rule B, a field of a local at a sink, a listed `system` iterator's loop variable, a local declared in a loop, a mixed iterator"
+cells = []
+pins = ["tsymex_0016_prc51_dupfield"]
+
+[[row]]
 id = "PRC-39"
 table = "5.2m"
 state = "open"

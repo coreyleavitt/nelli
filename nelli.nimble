@@ -1915,6 +1915,8 @@ task test, "Run the test suite":
             "tsymex_0016_prc49_dupfinal2",
             # RFC-0016 PRC-50: the =dup shapes PRC-49 left declining (an owning loop variable, an alias of one, a listed inner loop).
             "tsymex_0016_prc50_dupresid",
+            # RFC-0016 PRC-51: the =dup shapes PRC-50 left declining (a field path, a field of a local, listed system iterators, a loop-local, a mixed iterator).
+            "tsymex_0016_prc51_dupfield",
             # RFC-0016 INT-73: a conversion to an anonymous tuple's alias aborted the compile.
             "tsymex_0016_int73_tuplealias",
             # RFC-0016 INT-75: a `for` destructuring its variable in parentheses failed the parse.

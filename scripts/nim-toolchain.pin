@@ -21,3 +21,14 @@ Z3_SHA256=f47be8d27d3230e823bf1eeede2fe0abaca55bb78d0b59974370e6689a92284a
 Z3_4134_VERSION=4.13.4
 Z3_4134_ASSET=z3-4.13.4-x64-glibc-2.35
 Z3_4134_SHA256=93f91f9c6f4a00a041c19fc7a74adc1f441c8244ce70d486e19abcd89c6a014b
+
+# PCRE1 for std/re. The 8.45 row (the final PCRE1 release, interpreter) is the regex model's
+# reference: the dev image (scripts/Containerfile) and CI's setup-pcre1-linux build it from
+# this tarball. The 8.37 row, built WITH the JIT, is the Windows legs' engine (Nim's
+# pcre64.dll): scripts/Containerfile.pcre-8.37-jit builds localhost/nelli-dev:pcre-8.37-jit,
+# the local native oracle for the 8.37 JIT model (`scripts/dt-bounded.sh -i pcre-8.37-jit`).
+# check-toolchain-parity.sh fails when any copy, or a built image, disagrees with these.
+PCRE_VERSION=8.45
+PCRE_SHA256=4e6ce03e0336e8b4a3d6c2b70b1c5e18590a5673a98186da90d4f33c23defc09
+PCRE_837_VERSION=8.37
+PCRE_837_SHA256=19d490a714274a8c4c9d131f651489b8647cdb40a159e9fb7ce17ba99ef992ab

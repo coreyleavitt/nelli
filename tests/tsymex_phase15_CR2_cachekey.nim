@@ -1426,7 +1426,10 @@ suite "Phase 15 CR-2 — version bumps":
 # function, so a change of the segment's text or of a build read fails here
 # instead of silently renaming every key.
 #
-# Linux c, Linux cpp and Linux c under Z3 4.13.4 were read off a run of each.
+# Linux c, Linux cpp and Linux c under Z3 4.13.4 were read off a run of each,
+# as was Linux c on the PCRE 8.37 JIT image (`pcre-8.37-jit`, the native oracle
+# the regex work gates on): it differs from Linux c only in the host's pcre
+# identity, which selects it.
 # The mingw and MSVC goldens are DERIVED from the fields, not run: os is
 # windows, the backend is c, the host libpcre is Nim's pcre64.dll, 8.37 on the
 # JIT (`verifiedLibs`), and Z3 is 4.13.4 (`rowOf`). The Windows CI legs
@@ -1450,6 +1453,10 @@ const
     ";panics=0;mm=orc;exceptions=cpp;backend=cpp" & linuxTail &
     "|host:pcre=peInterp;pcreVersion=\"8.45\";pcreJit=0;z3=5.1;" &
     "z3Full=\"5.1.0.0\">"
+  goldenLinuxCJit = "bs1<build:checks=" & checksAll &
+    ";panics=0;mm=orc;exceptions=goto;backend=c" & linuxTail &
+    "|host:pcre=peJit837;pcreVersion=\"8.37\";pcreJit=1;z3=5.1;" &
+    "z3Full=\"5.1.0.0\">"
   goldenZ3v4 = "bs1<build:checks=" & checksAll &
     ";panics=0;mm=orc;exceptions=goto;backend=c" & linuxTail &
     "|host:pcre=peInterp;pcreVersion=\"8.45\";pcreJit=0;z3=4.13.4;" &
@@ -1462,7 +1469,7 @@ const
 
 suite "RFC-0016 K5a-2 — one golden build segment per leg":
 
-  test "the five legs' goldens are distinct but for the compiler":
+  test "the six legs' goldens are distinct but for the compiler":
     # mingw and MSVC differ in the C compiler family, which is provenance and
     # not keyed: their segments agree, their rows (below) do not.
     check goldenLinuxC != goldenLinuxCpp
@@ -1470,10 +1477,13 @@ suite "RFC-0016 K5a-2 — one golden build segment per leg":
     check goldenLinuxC != goldenMingw
     check goldenLinuxCpp != goldenMingw
     check goldenZ3v4 != goldenMingw
+    check goldenLinuxCJit != goldenLinuxC
+    check goldenLinuxCJit != goldenMingw
     check goldenMsvc == goldenMingw
 
   test "this leg's segment is its golden":
-    let seg = buildSegment(buildSemantics, readHost(z3FullVersion()))
+    let host = readHost(z3FullVersion())
+    let seg = buildSegment(buildSemantics, host)
     let z3v4 = z3FullVersion().startsWith("4.13.4")
     checkpoint seg
     when defined(windows):
@@ -1481,7 +1491,9 @@ suite "RFC-0016 K5a-2 — one golden build segment per leg":
     elif defined(cpp):
       if not z3v4: check seg == goldenLinuxCpp
     else:
-      check seg == (if z3v4: goldenZ3v4 else: goldenLinuxC)
+      check seg == (if z3v4: goldenZ3v4
+                    elif host.pcre == peJit837: goldenLinuxCJit
+                    else: goldenLinuxC)
 
   test "this leg's row is the one the cells claim":
     let row = rowOf(buildSemantics, readHost(z3FullVersion()), buildProvenance)

@@ -9,7 +9,11 @@
 #                  label and /etc/nelli-toolchain record the pinned digest, its
 #                  libz3 and headers are the pinned Z3 version, and no distro Z3
 #                  package is installed. An image whose TAG starts with z3-4.13.4
-#                  is held to the 4.13.4 row's pin (Z3_4134_*) instead.
+#                  is held to the 4.13.4 row's pin (Z3_4134_*) instead. The
+#                  libpcre.so.1 the image loads must be the pinned 8.45 without
+#                  the JIT, or, for a TAG starting with pcre-8.37-jit, the pinned
+#                  8.37 with the JIT (PCRE_837_*); the Containerfiles and CI's
+#                  setup-pcre1-linux defaults must follow the pin's PCRE rows.
 #   --image TAG    check localhost/nelli-dev:TAG instead of :latest.
 #   --live         also ask the registry what the tag resolves to now; a
 #                  republished tag (new digest) fails with the new digest named.
@@ -71,7 +75,24 @@ for k in Z3_VERSION Z3_ASSET Z3_SHA256; do
   [ "$got" = "$want" ] || fail "scripts/Containerfile.z3-4.13.4 ARG $k='$got', pin says '$want'"
 done
 
+# PCRE1: the default image and CI's setup-pcre1-linux build the pinned 8.45 tarball;
+# the pcre-8.37-jit row builds the pinned 8.37 tarball.
+for k in PCRE_VERSION PCRE_SHA256; do
+  want="${!k}"
+  got="$(sed -n "s/^ARG $k=//p" scripts/Containerfile)"
+  [ "$got" = "$want" ] || fail "scripts/Containerfile ARG $k='$got', pin says '$want'"
+  kk="${k/PCRE_/PCRE_837_}"; want837="${!kk}"
+  got="$(sed -n "s/^ARG $k=//p" scripts/Containerfile.pcre-8.37-jit)"
+  [ "$got" = "$want837" ] || fail "scripts/Containerfile.pcre-8.37-jit ARG $k='$got', pin says '$want837'"
+done
+for v in "$PCRE_VERSION" "$PCRE_SHA256"; do
+  command grep -q "default: \"$v\"" .github/actions/setup-pcre1-linux/action.yml || \
+    fail ".github/actions/setup-pcre1-linux/action.yml has no default \"$v\" (the pin's PCRE)"
+done
+
 img="localhost/nelli-dev:$tag"
+pv="$PCRE_VERSION"; pj=0
+case "$tag" in pcre-8.37-jit*) pv="$PCRE_837_VERSION"; pj=1 ;; esac
 zv="$Z3_VERSION"; zh="$Z3_SHA256"
 case "$tag" in z3-4.13.4*) zv="$Z3_4134_VERSION"; zh="$Z3_4134_SHA256" ;; esac
 if command -v podman >/dev/null 2>&1 && podman image exists "$img"; then
@@ -92,6 +113,9 @@ if command -v podman >/dev/null 2>&1 && podman image exists "$img"; then
   case "$(printf '%s\n' "$have" | sed -n 's/^so://p')" in *"libz3.so.${zv%.*}"*) ;; *) fail "$img /usr/lib64/libz3.so does not resolve to libz3.so.${zv%.*}* ($(printf '%s' "$have" | sed -n 's/^so://p'))" ;; esac
   rp="$(printf '%s\n' "$have" | sed -n 's/^rpm://p' | tr -d ' ')"
   [ -z "$rp" ] || fail "$img has a distro Z3 package installed: $rp"
+  # The libpcre std/re would load (the name Nim's wrapper dlopens), asked directly.
+  plib="$(podman run --rm "$img" python3 -I -c 'import ctypes; l = ctypes.CDLL("libpcre.so.1"); l.pcre_version.restype = ctypes.c_char_p; v = ctypes.c_int(0); l.pcre_config(9, ctypes.byref(v)); print(l.pcre_version().decode().split(" ")[0], v.value)' 2>/dev/null)"
+  [ "$plib" = "$pv $pj" ] || fail "$img libpcre.so.1 reports '${plib:-<none>}' (version, JIT), pin says '$pv $pj'"
 else
   echo "note: $img not present; image check skipped" >&2
 fi
@@ -103,5 +127,5 @@ if [ "$live" = 1 ]; then
   [ -n "$now" ] || { echo "registry did not answer for $NIM_ARTIFACT_TAG" >&2; exit 2; }
   [ "$now" = "$NIM_ARTIFACT_DIGEST" ] || fail "registry tag $NIM_ARTIFACT_TAG now resolves to $now, pin says $NIM_ARTIFACT_DIGEST (republished; review, then update the pin and rebuild)"
 fi
-[ "$rc" = 0 ] && echo "toolchain parity ok: $NIM_ARTIFACT_TAG $NIM_ARTIFACT_DIGEST; Z3 $zv $zh"
+[ "$rc" = 0 ] && echo "toolchain parity ok: $NIM_ARTIFACT_TAG $NIM_ARTIFACT_DIGEST; Z3 $zv $zh; PCRE $pv (jit=$pj)"
 exit "$rc"

@@ -856,8 +856,13 @@ const renderAsChoicesVersion* = "12"
   ##   body of a `for` over an inline iterator is classified per inlined copy
   ##   (the compiler's cursor inference reads the inlined tree), and a `for`
   ##   over a closure iterator is a loop. No key bytes change.
+  ## - RFC-0016 PRC-49 (429->430): a loop variable the compiler makes a
+  ##   cursor (`transf.isSimpleIteratorVar`) is copied at every sink position,
+  ##   a sink of a formal in the yielded expression is keyed by its `yield`,
+  ##   and an iterator with a `try` or a scalar `openArray` formal is read
+  ##   inlined. No key bytes change.
 
-const symexWalkerVersion* = "429"
+const symexWalkerVersion* = "430"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

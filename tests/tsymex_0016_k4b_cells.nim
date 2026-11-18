@@ -111,10 +111,11 @@ proc sZeroDefault(a: int) =
   if zeroDefault(int) == 0 and a == 3: symexTarget("hit")
 # Repr and Dup are partial rows (PRC-35): each is pinned on the shape that
 # declines. `repr` of a seq declines at the call; a user `=dup` at a sink
-# position on the loop variable of a `for` over an iterator yielding the
-# hooked type (natively copied at each sink: `a` + 1, twice) declines in the
-# route proof (PRC-48: an iterator yielding a scalar is inlined, each copy of
-# the loop body classified on its own, and a once-yielding one is exact).
+# position on the loop variable of a `for` over an iterator yielding a value
+# of the hooked type made there (natively no cursor, moved: no hook runs)
+# declines in the route proof (PRC-48: an iterator yielding a scalar is
+# inlined, each copy of the loop body classified on its own; PRC-49: a loop
+# variable yielded a variable, a cursor, is copied at each sink, exact).
 proc sRepr(a: int) =
   if repr(@[a]) == "@[5]": symexTarget("hit")
 type K4Dup = object
@@ -122,8 +123,8 @@ type K4Dup = object
 proc `=dup`(x: K4Dup): K4Dup = K4Dup(v: x.v + 1)
 proc k4DupTake(x: sink K4Dup): int = x.v
 iterator k4Objs(x: K4Dup): K4Dup =
-  yield x
-  yield x
+  yield K4Dup(v: x.v)
+  yield K4Dup(v: x.v)
 proc sDup(a: int) =
   let d = K4Dup(v: a)
   var r = 0

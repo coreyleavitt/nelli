@@ -1286,7 +1286,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## iterators and templates; 425-426 are taken): 424->427.
     ## RFC-0016 PRC-48 (`=dup` in an inline iterator's loop body, each
     ## inlined copy classified on its own; 428 is taken): 427->429.
-    check symexWalkerVersion == "429"
+    ## RFC-0016 PRC-49 (the `=dup` shapes PRC-48 left declining: a cursor
+    ## loop variable, a sink in a yielded expression, `try`, `openArray`):
+    ## 429->430.
+    check symexWalkerVersion == "430"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

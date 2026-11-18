@@ -28,12 +28,12 @@
 ##   ct a `continue` before the first copy's site            0
 ##   tw two fors over one iterator                           3
 ##   y1 an iterator yielding the hooked type, the loop
-##      variable sunk                                        2 (declined)
+##      variable sunk                                        2 (PRC-49)
 ##   ti a sink inside the iterator's body on a substituted
-##      formal, `a` read after the loop                      1 (declined)
+##      formal, `a` read after the loop                      1 (PRC-49)
 ##   g1 a generic iterator's instance, `b` in the body       1
-##   tr an iterator whose `yield`s are in a `try`            1 (declined)
-##   oa an iterator with an `openArray` formal               1 (declined)
+##   tr an iterator whose `yield`s are in a `try`            1 (PRC-49)
+##   oa an iterator with an `openArray` formal               1 (PRC-49)
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -299,6 +299,8 @@ template declined(p: untyped) =
 suite "PRC-48":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 429
+    # PRC-49 (430): the shapes below that declined here are exact.
+    check parseInt(symexWalkerVersion) >= 430
 
   test "native truth":
     for e in [eI1, eI2, eI3, eH1, eH3, eD1, eD2, eS1, eS2, eA1, eBr, eOl,
@@ -339,13 +341,11 @@ suite "PRC-48":
   test "a generic iterator's instance is inlined":
     exact(eG1, eG1Never)
 
-  test "a sunk loop variable of the hooked type declines":
-    declined(eY1)
-
-  test "an iterator not read inlined declines":
-    # A sink inside the iterator's own body reads its formal in the walk and
-    # the argument in the inlined scan: unmodelled. A `try` around the
-    # `yield`s and an `openArray` formal are not inlined.
-    declined(eTi)
-    declined(eTr)
-    declined(eOa)
+  test "PRC-49: a cursor loop variable, a sink in the iterator, try, openArray":
+    # A loop variable the compiler makes a cursor is copied at every sink
+    # position; a sink in a yielded expression is keyed by its `yield`; a
+    # `try` and a scalar `openArray` formal are inlined.
+    exact(eY1, eY1Never)
+    exact(eTi, eTiNever)
+    exact(eTr, eTrNever)
+    exact(eOa, eOaNever)

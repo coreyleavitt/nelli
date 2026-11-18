@@ -870,6 +870,17 @@ cells = []
 pins = ["tsymex_0016_prc48_dupiter", "tsymex_0016_prc47_dupclose", "tsymex_0016_prc35_models", "tsymex_0016_k4b_cells"]
 
 [[row]]
+id = "PRC-49"
+table = "5.2m"
+state = "closed"
+note = "closed `rfc-0016-w4prc49` (walker 429->430, 2026-11-18). The `=dup` shapes PRC-48 left declining, each against native evidence (Nim 2.2.10, c and cpp, `dups` per call). A loop variable of the hooked type: `transf.transformFor` makes it a cursor (`sfCursor`) when `isSimpleIteratorVar` holds (every `yield` yields a symbol the iterator owns, and every symbol of the call's arguments is owned by the routine), and a cursor is copied at every sink position, last read or not: two `yield x` sunk 2, one 1 (`a` not read after), a looping one 2, the loop variable read after its sink 2, over a `var` 1 (`dupSimpleIterVar`; the expansion declares it `{.cursor.}`, the scan and the walk read a loop variable at a sink position). A sink of a formal in the iterator's own body: the inlined copy substitutes the argument there (`putArgInto`), so the scan of the caller classifies it (`yield dTake(x)` over `a` read after the loop 1, not read after 0, two such `yield`s 1 / 2 read after, a looping one 2); the walk now keys the yielded expression by its `yield`, as the scan's copy holds the loop variable's assignment (`enterDupCopy`), and the route proof skips an inline iterator every `for` over which is read inlined (`dupInlinedEverywhere`: it never runs as a routine; its own scan read its formals as parameters). `yield`s in a `try`: `transformYield` has no `try` case (a `finally` 1, an `except` 1, a `finally` reading the formal 2), so a `try` is inlined as written. An `openArray` formal of a scalar element type: an array constructor is assigned to it (`paFastAsgnTakeTypeFromArg`), a local substituted (direct mapping), each 1. Still declined (sound, pinned, not modelled; not among PRC-48's four): a loop variable that owns its value (`yield` of a value made there: no cursor, moved, native 0; `let b = o` of a cursor one: `b` owns, the plain `=copy`, native 0), and `let b = a` in the body of a `for` over a listed iterator inside the inlined body (native 0), whose cursor inference `dupAliasCursor` does not follow there. The K4b `Dup` cell's decline is re-pinned on the owning loop variable (an iterator yielding a value made there). Census: PRC-48's `dupDeclares` `else: discard` returned the empty result as a tagged sentinel (its own commit, pushed to `rfc-0016-w4prc48` after rebasing PRC-48 onto PRC-47's amended e1fb8165)"
+home = "W4"
+source = "PRC-48 remainder; `tests/tsymex_0016_prc48_dupiter.nim` (`y1`, `ti`, `tr`, `oa`)"
+moves = "the PRC-48 declines become exact: a sunk loop variable of the hooked type, a sink of a formal inside the iterator's body, `yield`s in a `try`, an `openArray` formal"
+cells = []
+pins = ["tsymex_0016_prc49_dupfinal2", "tsymex_0016_prc48_dupiter", "tsymex_0016_k4b_cells"]
+
+[[row]]
 id = "PRC-39"
 table = "5.2m"
 state = "open"

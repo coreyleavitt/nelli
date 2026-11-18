@@ -470,15 +470,9 @@ const
     bk(axMagic, "LengthStr", "INT-57", int57Why),
     bk(axMagic, "ConStrStr", "INT-57", int57Why),
     bk(axMagic, "AppendStrStr", "INT-57", int57Why),
-    bk(axMagic, "CharToStr", "INT-61",
-       "the length of a string built from a char costs 84-95 s alone on c"),
-    bk(axMagic, "AppendStrCh", "INT-61",
-       "the length of a string built from a char costs 106-114 s alone on c"),
     bk(axTypeClass, "string", "INT-57", int57Why),
     bk(axTypeOp, "letCursor/string", "INT-57", int57Why),
     bk(axTypeOp, "fieldDefault/string", "INT-57", int57Why),
-    bk(axStdlibBody, "math.trunc", "INT-59",
-       "about 60 s alone on c, with no step bound to cap it"),
   ]
 
 func isBlocked*(axis: AxisScope; key: string): bool =

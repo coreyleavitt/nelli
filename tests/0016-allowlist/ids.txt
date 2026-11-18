@@ -82,6 +82,4 @@ INT-48	W4-z	upstream Nim issue candidate; nelli has no cell for it
 INT-50	W4-z	intake #173-#175 ceiling regressions (F-0009): a CI-D time ratchet, no cell can name it; closes when rfc-0016-w4perf and rfc-0016-w4perfb land and a nightly ceiling step is clean
 INT-51	W4-z	intake #173-#175 new ceiling offenders (F-0010): a CI-D time ratchet, no cell can name it; closes when a Wave 4 split slice splits or speeds up the six tests
 INT-57	K8b	found by the K8b axis suites; its reproducer tests/tsymex_0016_int57_strlenstall.nim is red and unregistered (a pin must be registered); closes when the string-length and string-order queries are decided and the file is registered as its pin
-INT-59	K8b	found by the K8b stdlib axis suite: a solve cost with no step bound, no cell can name it; closes with a per-row budget or an axis stream that keeps FP rows one per program
-INT-61	K8b	found by the K8b magic axis suite: a solve cost with no step bound, no cell can name it; closes when a char's string length solves in line with the other magic rows
-INT-62	K8b	found by the K8b axis suites: a packed program's solve cost, no cell can name it; closes when the axis stream can pack rows again
+INT-71	K8b	found by INT-62; its reproducer tests/tsymex_0016_int71_gensymseqroute.nim is red and unregistered (a pin must be registered); closes when a template's seq local beside an imported z3 is exact and the file is registered as its pin

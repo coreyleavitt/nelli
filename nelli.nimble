@@ -1762,6 +1762,11 @@ task test, "Run the test suite":
             # `len` of an array as an arithmetic operand.
             "tsymex_0016_int58_roundunsat",
             "tsymex_0016_int60_lenarrarith",
+            # RFC-0016 INT-59 / INT-61 / INT-62: a float interval refutation;
+            # a string length's structural bound; a packed program's cost.
+            "tsymex_0016_int59_fpinterval",
+            "tsymex_0016_int61_strlenbound",
+            "tsymex_0016_int62_packcost",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

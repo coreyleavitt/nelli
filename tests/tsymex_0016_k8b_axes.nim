@@ -82,18 +82,18 @@ suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)
     for b in blockedRows:
       check b.why.len > 0
 
-  test "the INT-57 and INT-59 rows are blocked against their rows":
+  test "the INT-57 rows are blocked against their row":
     for (a, k, r) in [(axMagic, "IntToStr", "INT-57"),
                       (axTypeClass, "string", "INT-57"),
-                      (axTypeOp, "letCursor/string", "INT-57"),
-                      (axStdlibBody, "math.trunc", "INT-59")]:
+                      (axTypeOp, "letCursor/string", "INT-57")]:
       check isBlocked(a, k)
       check blockedRows.anyIt(it.axis == a and it.key == k and it.row == r)
     check not isBlocked(axMagic, "AddI")
 
-  test "the INT-58 and INT-60 rows are readmitted (both closed)":
+  test "the INT-58, INT-59, INT-60 and INT-61 rows are readmitted (all closed)":
     for (a, k) in [(axStdlibBody, "math.round"), (axStdlibBody, "math.floor"),
-                   (axMagic, "LengthArray")]:
+                   (axMagic, "LengthArray"), (axStdlibBody, "math.trunc"),
+                   (axMagic, "CharToStr"), (axMagic, "AppendStrCh")]:
       check not isBlocked(a, k)
       check streamSnippets(a).anyIt(it.key == k)
 

@@ -1271,7 +1271,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 INT-58 / INT-60 (an undecided undefined side is asked again
     ## under `queryRLimit`; `len` of an array folds; 382-416 reserved):
     ## 381->417.
-    check symexWalkerVersion == "417"
+    ## RFC-0016 INT-59 / INT-61 / INT-62 (a float interval refutes a query;
+    ## a string length's structural bound; 418-420 reserved): 417->421.
+    check symexWalkerVersion == "421"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

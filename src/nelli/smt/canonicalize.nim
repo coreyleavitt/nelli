@@ -818,8 +818,25 @@ const renderAsChoicesVersion* = "12"
   ##   value folds to its element count wherever it is used (it declined
   ##   `feUnsupportedOp` as an arithmetic operand). Verdicts change from
   ##   `sxUnknown` to exact. No key bytes change.
+  ## - RFC-0016 INT-59 / INT-61 / INT-62 (417->421; 418-420 are reserved for
+  ##   other W4 work): a query a float interval argument refutes is asked as
+  ##   `false` (`fpIntervalRefutes`), and a string length bounded by its
+  ##   term's structure gets that bound beside the query
+  ##   (`seqLenBoundFacts`), so a rounded division's range side and a
+  ##   char-built string's overflow side are decided in a few units
+  ##   instead of millions; `pointCheck` and `limitWorldRefuted` cut a solve
+  ##   by their clocks only under a run clock, so under the pin settings
+  ##   their answers are the step bound's; and a query that counts a
+  ##   builtin set's members is asked first with each count a free variable
+  ##   beside the ranges of its `int` views (`cardFreeAbstraction`,
+  ##   `bvViewRangeFacts`), so a packed program's queries after a set row
+  ##   no longer bit-blast the set again (six rows: past 16.5M units, now
+  ##   about 6 times the rows' sum). Verdicts can change from
+  ##   `sxUnknown` to exact. Key bytes change: the default
+  ##   `queryTimeoutMs` is `1_200_000` (was `600_000`), which the default
+  ##   settings' canonical form names.
 
-const symexWalkerVersion* = "417"
+const symexWalkerVersion* = "421"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

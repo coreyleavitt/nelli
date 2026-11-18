@@ -640,7 +640,11 @@ proc fnParamTypes(fn: NimNode): seq[NimNode] =
   for i in 1 ..< fp.len:
     for _ in 0 ..< fp[i].len - 2:
       let t = fp[i][^2]
-      result.add(if t.kind == nnkVarTy: t[0] else: t)
+      var u = if t.kind == nnkVarTy: t[0] else: t
+      # `sink T` / `lent T` are ownership annotations, not part of the type
+      if u.kind == nnkBracketExpr and u.len == 2 and
+         (u[0].eqIdent("sink") or u[0].eqIdent("lent")): u = u[1]
+      result.add u
 
 macro pinFind*(fn: typed; target: untyped;
                rest: varargs[untyped]): untyped =
@@ -661,9 +665,19 @@ macro pinFind*(fn: typed; target: untyped;
   # Witness replay: each field copied into a variable, so `var` params bind.
   let wbody = newStmtList()
   let wcall = newCall(fn)
+  # The declared parameter types, as local aliases: the witness tuple holds a
+  # `range` as its base type, so the domain and the replay go through these.
+  let tdefs = newStmtList()
+  var tsyms: seq[NimNode]
+  for i in 0 ..< types.len:
+    let ts = genSym(nskType, "P" & $i)
+    tsyms.add ts
+    tdefs.add nnkTypeSection.newTree(
+      nnkTypeDef.newTree(ts, newEmptyNode(), types[i]))
   for i in 0 ..< types.len:
     let a = genSym(nskVar, "a" & $i)
-    wbody.add newVarStmt(a, nnkBracketExpr.newTree(w, newLit(i)))
+    wbody.add nnkVarSection.newTree(nnkIdentDefs.newTree(a, tsyms[i],
+      newCall(tsyms[i], nnkBracketExpr.newTree(w, newLit(i)))))
     wcall.add a
   # A SUT with a result: the native run discards it.
   let rty = fn.getTypeInst[0][0]
@@ -682,8 +696,7 @@ macro pinFind*(fn: typed; target: untyped;
     domSyms.add d
     # The parameter's type as the witness tuple holds it (a type symbol
     # spliced from `getTypeInst` does not bind as a `typedesc` argument).
-    doms.add newLetStmt(d, newCall(ident"boundaryOf", newCall(ident"typeof",
-      nnkBracketExpr.newTree(newDotExpr(res, ident"witness"), newLit(i)))))
+    doms.add newLetStmt(d, newCall(ident"boundaryOf", tsyms[i]))
     combos = infix(combos, "*", newDotExpr(newDotExpr(d, ident"values"), ident"len"))
     exh = infix(exh, "and", newDotExpr(d, ident"exhaustive"))
     let part = newCall(ident"describe", d)
@@ -716,6 +729,7 @@ macro pinFind*(fn: typed; target: untyped;
   quote do:
     block:
       let `res` = `find`
+      `tdefs`
       `doms`
       pinFindJudge(`res`, cellKey(faGeneric, `key`), `target`, `file` & ".nim",
         proc (`w`: typeof(`res`.witness)): NativeRun = `wbody`,

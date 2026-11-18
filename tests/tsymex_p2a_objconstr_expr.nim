@@ -36,6 +36,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -140,45 +141,45 @@ proc sutPlainArithRegression(x: int) =
 suite "symex RFC-chapulin-hardening P2a — value-object construction as expression":
 
   test "P2a-1: let p=Point(x:x,y:x+1); p.x==3 and p.y==4 -> sxSat, exact witness x==3":
-    let r = symexFind(sutObjBasicHit, tLabel("basic_hit"))
+    let r = pinFind(sutObjBasicHit, tLabel("basic_hit"))
     check r.status == sxSat
     check r.witness[0] == 3
 
   test "P2a-2: UNSAT soundness — p.y == p.x+2 is impossible (real modeling)":
-    let r = symexFind(sutObjUnsat, tLabel("basic_unsat"))
+    let r = pinFind(sutObjUnsat, tLabel("basic_unsat"))
     check r.status == sxUnsat
 
   test "P2a-3: fields out of order (y before x) — exact witness x==3":
-    let r = symexFind(sutObjOutOfOrderHit, tLabel("outoforder_hit"))
+    let r = pinFind(sutObjOutOfOrderHit, tLabel("outoforder_hit"))
     check r.status == sxSat
     check r.witness[0] == 3
 
   test "P2a-4: fields out of order UNSAT soundness":
-    let r = symexFind(sutObjOutOfOrderUnsat, tLabel("outoforder_unsat"))
+    let r = pinFind(sutObjOutOfOrderUnsat, tLabel("outoforder_unsat"))
     check r.status == sxUnsat
 
   test "P2a-5: omitted field y defaults to 0 — exact witness x==5":
-    let r = symexFind(sutObjOmittedFieldHit, tLabel("omitted_hit"))
+    let r = pinFind(sutObjOmittedFieldHit, tLabel("omitted_hit"))
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "P2a-6: omitted-field UNSAT soundness — p.y == 1 is impossible (never set)":
-    let r = symexFind(sutObjOmittedFieldUnsat, tLabel("omitted_unsat"))
+    let r = pinFind(sutObjOmittedFieldUnsat, tLabel("omitted_unsat"))
     check r.status == sxUnsat
 
   test "P2a-7: heterogeneous fields (int, uint8) lower at declared width — exact witness a==9":
-    let r = symexFind(sutObjHeteroWidthHit, tLabel("hetero_hit"))
+    let r = pinFind(sutObjHeteroWidthHit, tLabel("hetero_hit"))
     check r.status == sxSat
     check r.witness[0] == 9
 
   test "P2a-8: heterogeneous-field UNSAT soundness — bp.b == 6 is impossible (always 5'u8)":
-    let r = symexFind(sutObjHeteroWidthUnsat, tLabel("hetero_unsat"))
+    let r = pinFind(sutObjHeteroWidthUnsat, tLabel("hetero_unsat"))
     check r.status == sxUnsat
 
 suite "symex RFC-chapulin-hardening P2a — newException regression":
 
   test "P2a-9: raise newException(ValueError, msg) still resolves to sxRaised":
-    let r = symexFind(sutNewExceptionRegression, tRaisedExn("ValueError"))
+    let r = pinFind(sutNewExceptionRegression, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
 
@@ -186,7 +187,7 @@ suite "symex RFC-chapulin-hardening P2a — SND-1 soundness (unsupported field)"
 
   test "P2a-10: object with cast[int32](x) field compiles and degrades to sxUnknown + feUnsupportedExprKind":
     ## Strong form: assert the classified KIND, not just the verdict.
-    let r = symexFind(sutObjUnsupportedField, tLabel("dummy_would_sat"))
+    let r = pinFind(sutObjUnsupportedField, tLabel("dummy_would_sat"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -197,13 +198,13 @@ suite "symex RFC-chapulin-hardening P2a — SND-1 soundness (unsupported field)"
   test "P2a-11: the dummy field value never produces a false sxSat (SND-1 taint)":
     ## Even though a leaked dummy (0) would make `p.y == 0` look trivially
     ## reachable for every x, SND-1's taint forces sxUnknown — never sxSat.
-    let r = symexFind(sutObjUnsupportedField, tLabel("dummy_would_sat"))
+    let r = pinFind(sutObjUnsupportedField, tLabel("dummy_would_sat"))
     check r.status != sxSat
 
 suite "symex RFC-chapulin-hardening P2a — regression guard":
 
   test "P2a-12: plain (non-object) arithmetic unaffected — exact witness x==4":
-    let r = symexFind(sutPlainArithRegression, tLabel("plain_arith"))
+    let r = pinFind(sutPlainArithRegression, tLabel("plain_arith"))
     check r.status == sxSat
     check r.witness[0] == 4
 

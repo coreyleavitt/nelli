@@ -25,6 +25,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 # ---- Direction 1: sibling-branch shadow silently deletes the tracked type --
 #
@@ -78,13 +79,13 @@ suite "#163 review R27 -- direction 1: a sibling shadow must not hide the check"
     ## `v = y` statement walks, "v"'s entry is GONE -- the fork silently
     ## does not happen -- sxUnsat (nothing in the path space raises,
     ## because the raise was never modeled) instead of sxRaised.
-    let r = symexFind(siblingShadowSkip, tRaisedExn("RangeDefect"))
+    let r = pinFind(siblingShadowSkip, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(siblingShadowSkip, tLabel("t"))
+    let r = pinFind(siblingShadowSkip, tLabel("t"))
     check r.status == sxSat
 
 # ---- Direction 2: stale cross-call-frame entry produces a phantom raise ----
@@ -139,11 +140,11 @@ suite "#163 review R27 -- direction 2: a stale callee entry must not phantom-rai
     ## though `y` is a free, unconstrained int -- Z3 satisfies `y` outside
     ## [1,10] and the walker reports a phantom sxRaised(RangeDefect) for a
     ## program that cannot raise.
-    let r = symexFind(staleCrossFramePhantom, tRaisedExn("RangeDefect"))
+    let r = pinFind(staleCrossFramePhantom, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached (the program runs to completion)":
-    let r = symexFind(staleCrossFramePhantom, tLabel("t"))
+    let r = pinFind(staleCrossFramePhantom, tLabel("t"))
     check r.status == sxSat
 
 # ---- Non-regression: R22's original local-assignment fork still works -----
@@ -166,13 +167,13 @@ suite "#163 review R27 non-regression -- R22's own local-assignment fork survive
     check rt(1, 0) == 1
 
   test "the plain #163 R22 case is still found as sxRaised(RangeDefect)":
-    let r = symexFind(plainAssignStillChecked, tRaisedExn("RangeDefect"))
+    let r = pinFind(plainAssignStillChecked, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the survivor path still reaches the label":
-    let r = symexFind(plainAssignStillChecked, tLabel("t"))
+    let r = pinFind(plainAssignStillChecked, tLabel("t"))
     check r.status == sxSat
 
 

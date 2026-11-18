@@ -10,6 +10,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import named
 
 type
@@ -68,20 +69,20 @@ suite "RFC-0016 H1b HRV-32 - case-expression tag narrowing":
     check symexWalkerVersion.parseInt >= 371
 
   test "narrowed constructor under a case expression resolves: wt1 reachable":
-    let res = symexFind(sutExprTag, tLabel("expr_tag_wt1"))
+    let res = pinFind(sutExprTag, tLabel("expr_tag_wt1"))
     check res.status == sxSat
     check res.witness[0] != 1'u8
 
   test "a tag outside the narrowed set is UNSAT (not an unknown decline)":
-    let res = symexFind(sutExprImpossibleTag, tLabel("expr_tag_wt5"))
+    let res = pinFind(sutExprImpossibleTag, tLabel("expr_tag_wt5"))
     check res.status == sxUnsat
 
   test "a plain field read through the narrowed constructor is SAT with witness":
-    let res = symexFind(sutExprPlainField, tLabel("expr_plain_7"))
+    let res = pinFind(sutExprPlainField, tLabel("expr_plain_7"))
     check res.status == sxSat
     check res.witness[1] == 7
 
   test "no narrowing set from the labels: the budget decline is unchanged":
-    let res = symexFind(sutExprElseUnnarrowed, tLabel("expr_else_7"))
+    let res = pinFind(sutExprElseUnnarrowed, tLabel("expr_else_7"))
     check res.status == sxUnknown
     check res.errors.named(beBudgetExhaustedUnmodelled)

@@ -26,6 +26,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -77,26 +78,26 @@ proc callMVEBare(x: int) =
 
 suite "S8s (2) a multi-variant whose ordinal 0 is in an else arm":
   test "an untouched result is its zero value (was feUnsupportedOpHavoc)":
-    let r = symexFind(callMVE, tLabel("s8s_mve"))
+    let r = pinFind(callMVE, tLabel("s8s_mve"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.errors.len == 0
-    let d = symexFind(callMVE, tLabel("s8s_mve_dead"))
+    let d = pinFind(callMVE, tLabel("s8s_mve_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
-    let e = symexFind(callMVE, tLabel("s8s_mve_edead"))
+    let e = pinFind(callMVE, tLabel("s8s_mve_edead"))
     checkpoint($e.status & " " & show(e.errors))
     check e.status == sxUnsat
-    let b = symexFind(callMVE, tLabel("s8s_mve_b"))
+    let b = pinFind(callMVE, tLabel("s8s_mve_b"))
     checkpoint($b.status & " " & show(b.errors))
     check b.status == sxSat
     if b.status == sxSat:
       check b.witness[0] == 5
 
   test "a bare return is its zero value":
-    let r = symexFind(callMVEBare, tLabel("s8s_mvebare"))
+    let r = pinFind(callMVEBare, tLabel("s8s_mvebare"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
-    let d = symexFind(callMVEBare, tLabel("s8s_mvebare_dead"))
+    let d = pinFind(callMVEBare, tLabel("s8s_mvebare_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat

@@ -39,6 +39,7 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl, runtime, canonicalize]
 import nelli/engine/types
+import ./s8cu_helpers
 
 # =============================================================================
 # (1) public cache macros route dbErrors to the caller, not discard them
@@ -260,12 +261,12 @@ proc s8avSeqAsgn(i: int) =
 
 suite "RFC-0005 S8av (4) -- raise-irrelevant-parameter witness is IndexDefect's own, concrete and replayable":
   test "searching for ValueError on an OOB-guarded seq write actually finds IndexDefect":
-    let r = s8avSeqAsgn.symexFind(tRaisedExn("ValueError"))
+    let r = s8avSeqAsgn.pinFind(tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
 
   test "the reported witness concretely replays the exact IndexDefect it claims":
-    let r = s8avSeqAsgn.symexFind(tRaisedExn("ValueError"))
+    let r = s8avSeqAsgn.pinFind(tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
     let i = r.raisedWitness[0]

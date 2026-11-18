@@ -19,6 +19,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---- SUT 1: toHex(x: uint8) full-width, 2 hex chars -------------------------
 # toHex(255'u8) == "FF" under Nim std/strutils (raw bits, uppercase, no sign)
@@ -59,7 +60,7 @@ suite "symex Phase 16 A8 — toHex/toBin BV-nibble radix formatting":
   test "toHex(x: uint8) == \"FF\" → sxSat, witness x == 255":
     ## toHex(-1'u8) / toHex(255'u8) produces "FF" — raw two's-complement bits,
     ## uppercase, no sign. The BV-nibble-extract + ITE digit table picks x=255.
-    let r = symexFind(hexU8, tLabel("hex8"))
+    let r = pinFind(hexU8, tLabel("hex8"))
     check r.status == sxSat
     # Witness: x == 255 (the unique uint8 with toHex == "FF")
     check r.witness[0] == 255
@@ -67,7 +68,7 @@ suite "symex Phase 16 A8 — toHex/toBin BV-nibble radix formatting":
   test "toHex(x: uint16) == \"0000\" → sxSat, witness x == 0":
     ## Full-width 4-char hex for uint16: toHex(0'u16) == "0000".
     ## Validates 4-digit zero-padding; all nibbles are 0, simplest 4-char case.
-    let r = symexFind(hexU16, tLabel("hex16"))
+    let r = pinFind(hexU16, tLabel("hex16"))
     check r.status == sxSat
     check r.witness[0] == 0
 
@@ -75,14 +76,14 @@ suite "symex Phase 16 A8 — toHex/toBin BV-nibble radix formatting":
     ## toBin takes BiggestInt (= int64); BV64 under ADR-0001.
     ## toBin(10, 8) == "00001010" (binary with literal len=8, MS bit first).
     ## The 1-bit ITE chain covers 8 positions; bits 3 and 1 are set for 10 = 0b1010.
-    let r = symexFind(binLow, tLabel("bin8"))
+    let r = pinFind(binLow, tLabel("bin8"))
     check r.status == sxSat
     check r.witness[0] == 10
 
   test "toOct → sxUnknown (no Z3 oct primitive, Invariant 3 sound degrade)":
     ## toOct is not modeled (iekStrUnsupported → seUnsupportedStringOp).
     ## Must never crash or produce a silent UNSAT.
-    let r = symexFind(octDegrade, tLabel("oct"))
+    let r = pinFind(octDegrade, tLabel("oct"))
     check r.status == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp
@@ -91,7 +92,7 @@ suite "symex Phase 16 A8 — toHex/toBin BV-nibble radix formatting":
     ## toHex(x, n) where n is a runtime parameter is not encodable (the digit
     ## chain length would be symbolic → unbounded). Parser routes to
     ## iekStrUnsupported; boundary maps to seUnsupportedStringOp → sxUnknown.
-    let r = symexFind(hexDynLen, tLabel("hexDyn"))
+    let r = pinFind(hexDynLen, tLabel("hexDyn"))
     check r.status == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp

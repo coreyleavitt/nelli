@@ -32,6 +32,7 @@ import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/coverage
+import ./s8cu_helpers
 
 const Magic = 0x5A4D
 
@@ -98,13 +99,13 @@ suite "#163 review R7 -- a transparent call is only deleted when it is provably 
     ## as `x != x` -- `sxUnsat` -- for a target reachable for essentially
     ## every input in real Nim. `sxUnsat` here IS the wrong-verdict bug; the
     ## fix's fail-safe floor is `sxUnknown`, never `sxUnsat`.
-    let r = symexFind(withMutateT, tLabel("t_bug"))
+    let r = pinFind(withMutateT, tLabel("t_bug"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status != sxUnsat
 
   test "the var-argument overclaim is reported as an annotation violation, naming the callee":
-    let r = symexFind(withMutateT, tLabel("t_bug"))
+    let r = pinFind(withMutateT, tLabel("t_bug"))
     var specific = false
     var generic = false
     var internalFault = false
@@ -150,13 +151,13 @@ suite "#163 review R7 -- a transparent call is only deleted when it is provably 
     ## `x + 1` after the call and the target is reachable for essentially
     ## every input -- a concrete false `sxUnsat`, not merely a missed
     ## precision opportunity.
-    let r = symexFind(withTouchT, tLabel("t_touched"))
+    let r = pinFind(withTouchT, tLabel("t_touched"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status != sxUnsat
 
   test "the ref-argument overclaim is reported as an annotation violation, naming the callee":
-    let r = symexFind(withTouchT, tLabel("t_touched"))
+    let r = pinFind(withTouchT, tLabel("t_touched"))
     var specific = false
     var generic = false
     var internalFault = false
@@ -197,7 +198,7 @@ suite "#163 review R7 -- a transparent call is only deleted when it is provably 
     ## `isInertOpaqueCall` classifies it inert, so the gate this fix adds
     ## must still let the deletion through unchanged. This is issue #163's
     ## entire win and must survive R7's fix intact.
-    let r = symexFind(coveredT, tRaisedExn("ValueError"))
+    let r = pinFind(coveredT, tRaisedExn("ValueError"))
     var opaqueUnmodelled = false
     var specificDegrade = false
     var internalFault = false

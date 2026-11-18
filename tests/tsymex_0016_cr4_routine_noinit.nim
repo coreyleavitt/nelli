@@ -82,17 +82,17 @@ suite "CR-4 H5: a routine {.noinit.} leaves result unwritten":
     check parseInt(symexWalkerVersion) >= 357
 
   test "v != 0 after no write is no trusted UNSAT":
-    let r = symexFind(sutNoinitNonzero, tLabel("nz"))
+    let r = pinFind(sutNoinitNonzero, tLabel("nz"))
     checkpoint show(r.errors) & " " & $r.soundness
     check not (r.status == sxUnsat and r.trusted)
 
   test "v == 0 after no write is no trusted SAT":
-    let r = symexFind(sutNoinitZero, tLabel("z"))
+    let r = pinFind(sutNoinitZero, tLabel("z"))
     checkpoint show(r.errors) & " " & $r.soundness
     check not (r.status == sxSat and r.trusted)
 
   test "tUndefined finds the indeterminate read of result":
-    let r = symexFind(sutNoinitNonzero, tUndefined())
+    let r = pinFind(sutNoinitNonzero, tUndefined())
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
@@ -100,42 +100,42 @@ suite "CR-4 H5: a routine {.noinit.} leaves result unwritten":
     check not r.trusted
 
   test "a written result is exact: trusted UNSAT":
-    let r = symexFind(sutNoinitWritten, tLabel("bad"))
+    let r = pinFind(sutNoinitWritten, tLabel("bad"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check r.trusted
 
   test "the routine's own read of result is indeterminate":
-    let r = symexFind(sutNoinitSelfRead, tUndefined())
+    let r = pinFind(sutNoinitSelfRead, tUndefined())
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
-    let r2 = symexFind(sutNoinitSelfRead, tLabel("one"))
+    let r2 = pinFind(sutNoinitSelfRead, tLabel("one"))
     check not (r2.status == sxSat and r2.trusted)
 
   test "result = result + x reads an indeterminate result":
-    let r = symexFind(sutNoinitAsgn, tLabel("same"))
+    let r = pinFind(sutNoinitAsgn, tLabel("same"))
     checkpoint show(r.errors) & " " & $r.soundness
     check not (r.status == sxSat and r.trusted)
-    let r2 = symexFind(sutNoinitAsgn, tUndefined())
+    let r2 = pinFind(sutNoinitAsgn, tUndefined())
     check r2.status == sxSat
     check UbKind(ubIndeterminateRead) in r2.soundness.undefinedKinds
 
   test "the target routine's own {.noinit.} result":
-    let r = symexFind(sutTargetNoinit, tUndefined())
+    let r = pinFind(sutTargetNoinit, tUndefined())
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
-    let r2 = symexFind(sutTargetNoinit, tLabel("z"))
+    let r2 = pinFind(sutTargetNoinit, tLabel("z"))
     check not (r2.status == sxSat and r2.trusted)
 
   test "a managed result under {.noinit.} declines":
-    let r = symexFind(sutNoinitStr, tLabel("empty"))
+    let r = pinFind(sutNoinitStr, tLabel("empty"))
     checkpoint show(r.errors)
     check not r.trusted
 
   test "without the pragma result is zeroed: trusted UNSAT":
-    let r = symexFind(sutPlainZero, tLabel("nz"))
+    let r = pinFind(sutPlainZero, tLabel("nz"))
     check r.status == sxUnsat
     check r.trusted
 

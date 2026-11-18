@@ -26,7 +26,7 @@ suite "W3-z R3: the main walk and opaque undefined behaviour":
     check parseInt(symexWalkerVersion) >= 315
 
   test "tUndefined(overflow) over an overflow only in the callee is not a trusted unsat":
-    let r = symexFind(sutOnlyInCallee, tUndefined({ubSignedOverflow}),
+    let r = pinFind(sutOnlyInCallee, tUndefined({ubSignedOverflow}),
                       pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
@@ -34,13 +34,13 @@ suite "W3-z R3: the main walk and opaque undefined behaviour":
     check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds
 
   test "tUndefined of a kind the callee cannot reach is unaffected":
-    let r = symexFind(sutOnlyInCallee, tUndefined({ubArrayOutOfBounds}),
+    let r = pinFind(sutOnlyInCallee, tUndefined({ubArrayOutOfBounds}),
                       pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status != sxSat
 
   test "a plain run lists the kind":
-    let r = symexFind(sutLabelAfter, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutLabelAfter, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check not r.trusted

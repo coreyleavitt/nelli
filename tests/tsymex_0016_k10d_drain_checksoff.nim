@@ -31,19 +31,19 @@ suite "K10d: a drain for a check the build lacks returns the path (checks off)":
     check not ArithFrames.init().emits(acOverflow)
 
   test "no OverflowDefect is reachable: a clean unsat, no Defect fork":
-    let r = symexFind(sutAddInt8, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sutAddInt8, tRaisedExn("OverflowDefect"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check r.errors.len == 0
 
   test "a handler for the unforked raise is unreachable":
-    let r = symexFind(sutAddHandler, tLabel("overflow-handler"))
+    let r = pinFind(sutAddHandler, tLabel("overflow-handler"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check not r.errors.named(ubSignedOverflow)
 
   test "the path continues unchanged: the wrap is the exact witness":
-    let r = symexFind(sutAddInt8, tLabel("wrapped"))
+    let r = pinFind(sutAddInt8, tLabel("wrapped"))
     check r.status == sxSat
     check r.trusted
     check r.witness[0] == 127'i8
@@ -54,14 +54,14 @@ proc sutAddWide(a: int) =
 
 suite "K10d: the wide overflow is the axis's halt, never a Defect fork (checks off)":
   test "a search for OverflowDefect does not find one":
-    let r = symexFind(sutAddWide, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sutAddWide, tRaisedExn("OverflowDefect"))
     checkpoint show(r.errors)
     check r.status != sxRaised
     check r.status == sxUnknown
     check r.errors.named(ubSignedOverflow)
 
   test "the continuation is the ordinary one, tainted by the halt only":
-    let r = symexFind(sutAddWide, tLabel("zero"))
+    let r = pinFind(sutAddWide, tLabel("zero"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check r.witness[0] == -1

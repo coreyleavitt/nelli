@@ -48,6 +48,7 @@ import std/unittest
 import nelli/symex
 import nelli/smt/canonicalize
 import std/strutils
+import ./s8cu_helpers
 
 type
   Bag = object
@@ -86,15 +87,15 @@ proc sutBagOmittedSeqFieldDead(x: int) =
 suite "symex RFC-chapulin-hardening R8 — omitted non-scalar field construction-time degrade":
 
   test "R8-1: omitted seq field is Nim's empty seq -> a real sxSat, its twin sxUnsat (never a false verdict -- Invariant 3)":
-    let r = symexFind(sutBagOmittedSeqField, tLabel("bag_omitted_seq_hit"))
+    let r = pinFind(sutBagOmittedSeqField, tLabel("bag_omitted_seq_hit"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 5
-    let d = symexFind(sutBagOmittedSeqFieldDead, tLabel("bag_omitted_seq_dead"))
+    let d = pinFind(sutBagOmittedSeqFieldDead, tLabel("bag_omitted_seq_dead"))
     check d.status == sxUnsat
 
   test "R8-2: no decline and never weInternalWalkerFault":
-    let r = symexFind(sutBagOmittedSeqField, tLabel("bag_omitted_seq_hit"))
+    let r = pinFind(sutBagOmittedSeqField, tLabel("bag_omitted_seq_hit"))
     var sawDecline = false
     var sawFault = false
     for e in r.errors:

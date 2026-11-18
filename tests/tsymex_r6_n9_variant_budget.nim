@@ -48,6 +48,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUT — wide-FIELDED variant: fork count (8) sits AT the
@@ -155,7 +156,7 @@ proc sutBoundaryOverBudget(b: byte, n: int) =
 suite "symex round-6 N9 — variant constructor field-allocation budget":
 
   test "N9-1: wide-fielded variant (forks=8 <= fork budget, fields=512 > field budget) declines honestly":
-    let res = symexFind(sutWideFieldsBudget, tLabel("wide_fields_budget_reached"))
+    let res = pinFind(sutWideFieldsBudget, tLabel("wide_fields_budget_reached"))
     check res.status == sxUnknown
     check res.status != sxSat
     var hasClassified = false
@@ -173,23 +174,23 @@ suite "symex round-6 N9 — variant constructor field-allocation budget":
 suite "symex round-6 N9 — within-budget variants keep exact prior verdicts":
 
   test "N9-2a: SAT witness unchanged — b==1 is still the only driving value":
-    let res = symexFind(sutWithinBudgetTracer, tLabel("n9_within_budget_sat"))
+    let res = pinFind(sutWithinBudgetTracer, tLabel("n9_within_budget_sat"))
     check res.status == sxSat
     check res.witness[0] == 1'u8
 
   test "N9-2b: UNSAT companion unchanged — op==op2Rrq still forces b==1'u8":
-    let res = symexFind(sutWithinBudgetUnsatCompanion, tLabel("n9_within_budget_unsat"))
+    let res = pinFind(sutWithinBudgetUnsatCompanion, tLabel("n9_within_budget_unsat"))
     check res.status == sxUnsat
 
 suite "symex round-6 N9 — budget-boundary":
 
   test "N9-3a: exactly AT the field-allocation budget (4 forks x 16 fields = 64) constructs":
-    let res = symexFind(sutBoundaryAtBudget, tLabel("n9_boundary_at_budget"))
+    let res = pinFind(sutBoundaryAtBudget, tLabel("n9_boundary_at_budget"))
     check res.status == sxSat
     check res.witness[1] == 9
 
   test "N9-3b: one field over the budget (4 forks x 20 fields = 80) declines":
-    let res = symexFind(sutBoundaryOverBudget, tLabel("n9_boundary_over_budget"))
+    let res = pinFind(sutBoundaryOverBudget, tLabel("n9_boundary_over_budget"))
     check res.status == sxUnknown
     check res.status != sxSat
     var hasClassified = false

@@ -90,6 +90,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/int128
+import ./s8cu_helpers
 
 # =============================================================================
 # R24 -- concolicFlip over a BV-bound (uint8) direct draw-linked param
@@ -135,7 +136,7 @@ suite "#163 review R24 -- concolicFlip on a BV-bound uint8 param":
     check r.branchTrace[0].armTaken == -1   ## "lo" -- 5 is not > 200
 
   test "wmExplore cross-check: x == 201 reaching \"hi\" is independently confirmed reachable":
-    let r = symexFind(u8ThresholdGateAt201, tLabel("hi_at_201"))
+    let r = pinFind(u8ThresholdGateAt201, tLabel("hi_at_201"))
     check r.status == sxSat
 
   test "R24: the flip solves the SAME variable it bound -- a usable, exact flipped draw":
@@ -189,7 +190,7 @@ suite "#163 review R25 -- concolicFlip over a transform-linked BV-bound (uint8) 
     check uint8(2 * 100 + 1) == 201'u8
 
   test "wmExplore cross-check: draw = 100 reaching mapped == 201 is independently reachable":
-    let r = symexFind(u8MappedGateExplore, tLabel("hit"))
+    let r = pinFind(u8MappedGateExplore, tLabel("hit"))
     check r.status == sxSat
 
   test "wmFollowConcrete collect: draw = 7 (mapped = 15) takes the miss arm, non-degrading":
@@ -244,7 +245,7 @@ suite "#163 review R26 -- concolic Z3Int params now carry the overflow obligatio
       discard rt(9_000_000_000_000_000_000'i64, 9_000_000_000_000_000_000'i64)
 
   test "wmExplore cross-check: the obligation is live for the SAME SUT (non-regression anchor)":
-    let r = symexFind(concolicOverflowGate, tRaisedExn("OverflowDefect"))
+    let r = pinFind(concolicOverflowGate, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     check r.obligations.len >= 1
     var anyLive = false

@@ -50,26 +50,26 @@ suite "W3-z P1: opaque scan, default build":
     check parseInt(symexWalkerVersion) >= 312
 
   test "a checked opaque overflow is not undefined: no ubSignedOverflow":
-    let r = symexFind(sutOpaqueTail, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutOpaqueTail, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check UbKind(ubSignedOverflow) notin r.soundness.undefinedKinds
 
   test "a routine pushed overflowChecks:off is unchecked: ubSignedOverflow":
-    let r = symexFind(sutOpaquePushedOff, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutOpaquePushedOff, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check not r.trusted
     check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds
 
   test "a checked opaque index is an IndexDefect, not undefined":
-    let r = symexFind(sutIdxChecked, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutIdxChecked, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check uncheckedIndexUb() notin r.soundness.undefinedKinds
 
   test "a routine pushed boundChecks:off has an unchecked index (ownerChecked)":
-    let r = symexFind(sutIdxPushedOff, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutIdxPushedOff, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check not r.trusted

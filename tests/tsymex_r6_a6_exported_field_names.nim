@@ -22,6 +22,7 @@
 ## "crash -> correct verdict, no bump" precedent).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 type
   EKind* = enum ekCircle, ekSquare
@@ -44,15 +45,15 @@ proc sutExportedSquareHit(sd: int) =
 suite "symex round-6 A6 -- exported case-object field names classify and construct":
 
   test "A6-fix-1: exported discriminator + exported arm field + exported plain field all classify -- sxSat, witness r==7":
-    let res = symexFind(sutExportedCircleHit, tLabel("exported_circle_radius_7"))
+    let res = pinFind(sutExportedCircleHit, tLabel("exported_circle_radius_7"))
     check res.status == sxSat
     check res.witness[0] == 7
 
   test "A6-fix-2: the OTHER exported arm also constructs and proves":
-    let res = symexFind(sutExportedSquareHit, tLabel("exported_square_side_11"))
+    let res = pinFind(sutExportedSquareHit, tLabel("exported_square_side_11"))
     check res.status == sxSat
     check res.witness[0] == 11
 
   test "A6-fix-3: no IndexError/FieldDefect path (sxUnsat)":
-    check symexFind(sutExportedCircleHit, tIndexError()).status == sxUnsat
-    check symexFind(sutExportedCircleHit, tFieldDefect()).status == sxUnsat
+    check pinFind(sutExportedCircleHit, tIndexError()).status == sxUnsat
+    check pinFind(sutExportedCircleHit, tFieldDefect()).status == sxUnsat

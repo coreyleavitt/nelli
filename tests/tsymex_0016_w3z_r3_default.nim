@@ -18,14 +18,14 @@ proc sutLabelAfter(x: int64) =
 
 suite "W3-z R3: checked opaque callee, default build":
   test "tUndefined(overflow) finds nothing (the callee raises OverflowDefect)":
-    let r = symexFind(sutOnlyInCallee, tUndefined({ubSignedOverflow}),
+    let r = pinFind(sutOnlyInCallee, tUndefined({ubSignedOverflow}),
                       pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status != sxSat
     check UbKind(ubSignedOverflow) notin r.soundness.undefinedKinds
 
   test "a plain run lists nothing":
-    let r = symexFind(sutLabelAfter, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutLabelAfter, tLabel("hit"), pinSettingsConst)
     check r.status == sxSat
     check r.undefined.len == 0
     check UbKind(ubSignedOverflow) notin r.soundness.undefinedKinds

@@ -41,6 +41,9 @@ proc sutI8(x: int8) =
 proc sutRange(x: range[3 .. 9]; y: int) =
   if x == 2: symexTarget("hit")
 
+proc sutWide(x: range[0'u64 .. 5_000_000_000'u64]; y: range[1 .. 1_000_000]) =
+  if x > 5_000_000_000'u64 or y > 1_000_000: symexTarget("hit")
+
 proc sutVar(x: var int) =
   if x == 4 and x == 5: symexTarget("hit")
   x = 1
@@ -110,3 +113,9 @@ suite "K9d: pinFind":
       s
     check pinFind(sutHit, tLabel("hit"), s).status == sxSat
     check recordsWith("/sutHit/").len == 2
+
+  test "a wide range parameter is generated and replayed at its declared type":
+    ## the witness tuple holds a range as its base type, so the domain must
+    ## come from the declared type or a native call would raise on conversion
+    check pinFind(sutWide, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutWide/").len == 1

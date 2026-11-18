@@ -41,7 +41,7 @@ suite "W3-z R1: tUndefined and the noinit read":
     check parseInt(symexWalkerVersion) >= 312
 
   test "the default target finds a reachable indeterminate read":
-    let r = symexFind(sutNoinitRead, tUndefined())
+    let r = pinFind(sutNoinitRead, tUndefined())
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check r.witness[0] > 3
@@ -49,26 +49,26 @@ suite "W3-z R1: tUndefined and the noinit read":
     check not r.trusted
 
   test "the listed kind is a hit":
-    let r = symexFind(sutNoinitReadAlways, tUndefined({UbKind(ubIndeterminateRead)}))
+    let r = pinFind(sutNoinitReadAlways, tUndefined({UbKind(ubIndeterminateRead)}))
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check r.soundness.undefinedKinds == {UbKind(ubIndeterminateRead)}
 
   test "an unlisted kind is not a hit":
-    let r = symexFind(sutNoinitReadAlways, tUndefined({UbKind(ubSignedOverflow)}))
+    let r = pinFind(sutNoinitReadAlways, tUndefined({UbKind(ubSignedOverflow)}))
     check r.status != sxSat
 
   test "a write before the read is no hit: trusted sxUnsat":
-    let r = symexFind(sutNoinitWritten, tUndefined())
+    let r = pinFind(sutNoinitWritten, tUndefined())
     check r.status == sxUnsat
     check r.trusted
 
   test "an unreachable read is no hit":
-    let r = symexFind(sutNoinitGuarded, tUndefined())
+    let r = pinFind(sutNoinitGuarded, tUndefined())
     check r.status != sxSat
 
   test "a program with no read is still a trusted sxUnsat":
-    let r = symexFind(sutPlain, tUndefined())
+    let r = pinFind(sutPlain, tUndefined())
     check r.status == sxUnsat
     check r.trusted
 

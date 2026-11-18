@@ -8,6 +8,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc negConvAssert(bFlag: bool) =
   ## The mask lemma itself: -int32(b) is always 0 or -1.
@@ -32,18 +33,18 @@ proc ifElseControl(bFlag: bool) =
 suite "symex round-5 sello#3 — unary minus over bool->int32 conversion":
 
   test "mask lemma -int32(b) in {0,-1} proves (sxUnsat)":
-    let r = symexFind(negConvAssert, tAssertionViolation())
+    let r = pinFind(negConvAssert, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "all-ones arm reachable (non-vacuous SAT)":
-    let r = symexFind(negConvSat, tLabel("all-ones-mask"))
+    let r = pinFind(negConvSat, tLabel("all-ones-mask"))
     check r.status == sxSat
 
   test "-int32(b) == 1 is UNSAT (soundness)":
-    let r = symexFind(negConvUnsat, tLabel("impossible-value"))
+    let r = pinFind(negConvUnsat, tLabel("impossible-value"))
     check r.status == sxUnsat
 
   test "if/else mask control still proves (regression guard)":
-    let r = symexFind(ifElseControl, tAssertionViolation())
+    let r = pinFind(ifElseControl, tAssertionViolation())
     check r.status == sxUnsat

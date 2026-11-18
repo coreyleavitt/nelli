@@ -75,6 +75,7 @@ import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/coverage
+import ./s8cu_helpers
 
 # =============================================================================
 # Section A -- `{.symexTransparent.}` (`{.cover.}`) branch decisions
@@ -320,7 +321,7 @@ suite "#163 review R16 -- concolic-bound scalar params bind at their declared wi
     check (200'u8 + 100'u8) < 200'u8
 
   test "D1 wmExplore agrees the wrap is reachable at exactly a=200, b=100":
-    let r = symexFind(addU8GateAt200_100, tLabel("wrapped_200_100"))
+    let r = pinFind(addU8GateAt200_100, tLabel("wrapped_200_100"))
     check r.status == sxSat
 
   test "D1 wmFollowConcrete now agrees too (was armTaken == -1, the wrong arm, before this fix)":
@@ -336,12 +337,12 @@ suite "#163 review R16 -- concolic-bound scalar params bind at their declared wi
     check -100'i8 + 100'i8 == 0'i8
 
   test "D2 wmExplore (rule b): a signed narrow sum in the window is reachable at a=-100, b=100":
-    let r = symexFind(addI8DefinedGateOverflowFree, tLabel("i8_cancel"))
+    let r = pinFind(addI8DefinedGateOverflowFree, tLabel("i8_cancel"))
     check r.status == sxSat
     check r.trusted
 
   test "D2 wmExplore (rule b): a < 0 sum below a is reachable for a signed narrow b":
-    let r = symexFind(addI8DefinedGate, tLabel("i8_negative_b"))
+    let r = pinFind(addI8DefinedGate, tLabel("i8_negative_b"))
     check r.status == sxSat
     check r.trusted
 
@@ -358,7 +359,7 @@ suite "#163 review R16 -- concolic-bound scalar params bind at their declared wi
     check not (100 + 100 < 100)
 
   test "D3 wmExplore agrees at exactly a=100, b=100 (non-regression)":
-    let r = symexFind(addIntGateAt100_100, tLabel("int_wrapped_100_100"))
+    let r = pinFind(addIntGateAt100_100, tLabel("int_wrapped_100_100"))
     check r.status == sxUnsat
 
   test "D3 wmFollowConcrete agrees too -- an ordinary int stays Z3Int and this fix leaves it alone":

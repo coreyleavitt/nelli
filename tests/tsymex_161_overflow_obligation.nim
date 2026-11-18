@@ -115,7 +115,7 @@ suite "#161 — promotion keeps the overflow obligation live":
 
   test "isOptimised finds the reachable OverflowDefect in a*b":
     ## The load-bearing property. Was sxUnsat (false negative) at a1ebeb1.
-    let r = symexFind(mul64, tRaisedExn("OverflowDefect"))
+    let r = pinFind(mul64, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -125,7 +125,7 @@ suite "#161 — promotion keeps the overflow obligation live":
     ## arithmetic proves that in-window, so the obligation is discharged
     ## at lowering time and NO fork is handed to Z3. Same verdict as
     ## before, reached without the solver — which is the whole point.
-    let r = symexFind(addSafe, tLabel("t"))
+    let r = pinFind(addSafe, tLabel("t"))
     check r.status == sxSat
     check r.obligations.len >= 1
     for o in r.obligations:
@@ -136,7 +136,7 @@ suite "#161 — promotion keeps the overflow obligation live":
     ## int64 — so nothing is proven and the fork must survive to Z3.
     ## Note the analysis's OWN arithmetic overflows int64 here: the
     ## abstract domain has to answer "unknown" rather than raise.
-    let r = symexFind(mul64, tLabel("t"))
+    let r = pinFind(mul64, tLabel("t"))
     check r.status == sxSat
     check r.obligations.len >= 1
     var anyLive = false
@@ -165,8 +165,8 @@ suite "#161 — promotion keeps the overflow obligation live":
     ## strength on an unsigned probe (defined wrap, trusted sat). `isExact`
     ## is the oracle: BV arithmetic wraps because that is what bit-vectors
     ## DO; `isOptimised` once modelled the product as an unbounded Int.
-    let oracle = symexFind(wrapProbeU, tLabel("wrapped"), UncheckedUExact)
-    let opt = symexFind(wrapProbeU, tLabel("wrapped"), UncheckedU)
+    let oracle = pinFind(wrapProbeU, tLabel("wrapped"), UncheckedUExact)
+    let opt = pinFind(wrapProbeU, tLabel("wrapped"), UncheckedU)
     check oracle.status == sxSat
     check oracle.trusted
     check opt.status == oracle.status
@@ -176,9 +176,9 @@ suite "#161 — promotion keeps the overflow obligation live":
     ## Non-regression for slices 1-2: the wrap scan is gated on the
     ## setting, so a default (checked) run still promotes and still finds
     ## the defect.
-    let r = symexFind(mul64, tRaisedExn("OverflowDefect"))
+    let r = pinFind(mul64, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
-    let safe = symexFind(addSafe, tLabel("t"))
+    let safe = pinFind(addSafe, tLabel("t"))
     check safe.abstractions.len == 2
 
   test "the oracle -- Nim itself raises OverflowDefect on int64 addition":
@@ -189,7 +189,7 @@ suite "#161 — promotion keeps the overflow obligation live":
       discard rt(9_000_000_000_000_000_000'i64, 9_000_000_000_000_000_000'i64)
 
   test "addition overflow is found on a promoted param":
-    let r = symexFind(addOvf, tRaisedExn("OverflowDefect"))
+    let r = pinFind(addOvf, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
 
   test "the oracle -- Nim itself raises OverflowDefect on int64 subtraction":
@@ -201,7 +201,7 @@ suite "#161 — promotion keeps the overflow obligation live":
       discard rt(-9_000_000_000_000_000_000'i64, 9_000_000_000_000_000_000'i64)
 
   test "subtraction underflow is found on a promoted param":
-    let r = symexFind(subUnd, tRaisedExn("OverflowDefect"))
+    let r = pinFind(subUnd, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
 
   test "the oracle -- the safe intermediate is safe, and the final multiply is not":
@@ -218,11 +218,11 @@ suite "#161 — promotion keeps the overflow obligation live":
   test "the obligation survives a safe intermediate local":
     ## Pins `arithInt`'s width propagation. `s = a + b` is provably safe;
     ## `s * s` is not. If the width stopped at `s`, this would be sxUnsat.
-    let r = symexFind(chainedOvf, tRaisedExn("OverflowDefect"))
+    let r = pinFind(chainedOvf, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
 
   test "a comparison-only param is not banned from promotion":
-    let r = symexFind(cmpOnly, tLabel("t"))
+    let r = pinFind(cmpOnly, tLabel("t"))
     check r.status == sxSat
     check r.abstractions.len == 2
     check r.obligations.len == 0    ## no arithmetic, so no obligation
@@ -234,13 +234,13 @@ suite "#161 — promotion keeps the overflow obligation live":
     check rt(200'u8, 100'u8) == 44'u8
 
   test "unsigned arithmetic raises nothing — Nim wraps it silently":
-    let r = symexFind(uAdd, tRaisedExn("OverflowDefect"))
+    let r = pinFind(uAdd, tRaisedExn("OverflowDefect"))
     check r.status != sxRaised
 
   test "isExact is untouched by any of this":
-    let r = symexFind(mul64, tRaisedExn("OverflowDefect"), Exact)
+    let r = pinFind(mul64, tRaisedExn("OverflowDefect"), Exact)
     check r.status == sxRaised
-    let l = symexFind(mul64, tLabel("t"), Exact)
+    let l = pinFind(mul64, tLabel("t"), Exact)
     check l.abstractions.len == 0   ## isExact never promotes
 
   test "version floor — this file needs walker 128":

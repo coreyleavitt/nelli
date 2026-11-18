@@ -27,6 +27,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -42,12 +43,12 @@ proc tupPosNested(x: int) =
 
 suite "S8s (4) variant arm field writes and positional tuple writes":
   test "nested positional and named tuple writes":
-    let r = symexFind(tupPosNested, tLabel("s8s_tpn"))
+    let r = pinFind(tupPosNested, tLabel("s8s_tpn"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 9
-    let d = symexFind(tupPosNested, tLabel("s8s_tpn_dead"))
+    let d = pinFind(tupPosNested, tLabel("s8s_tpn_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
 

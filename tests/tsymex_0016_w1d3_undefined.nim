@@ -38,7 +38,7 @@ suite "W1-d3 the noinit read":
 
   test "read of an unwritten slot: confirmed, not trusted, not host-run":
     scrub()
-    let r = symexFind(sutNoinitRead, tLabel("z"))
+    let r = pinFind(sutNoinitRead, tLabel("z"))
     checkpoint show(r.errors) & " " & $r.soundness
     check not r.trusted
     when defined(cpp) or replayReexecs:
@@ -59,7 +59,7 @@ suite "W1-d3 the noinit read":
       check not hostRunnable(r.soundness)
 
   test "written before the read stays trusted":
-    let r = symexFind(sutNoinitWritten, tLabel("w"))
+    let r = pinFind(sutNoinitWritten, tLabel("w"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check r.soundness.witnessUndefined == {}
@@ -69,7 +69,7 @@ suite "W1-d3 the noinit read":
   test "a halted undefined side does not reach the winner":
     ## Halted paths are terminal and parked nowhere, so a winner through an
     ## undefined op carries nothing: the defined path is clean.
-    let r = symexFind(sutUDivWitness, tLabel("hit"))
+    let r = pinFind(sutUDivWitness, tLabel("hit"))
     check r.status == sxSat
     check r.soundness.witnessUndefined == {}
     check r.trusted

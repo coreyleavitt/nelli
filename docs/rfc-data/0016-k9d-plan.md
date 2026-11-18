@@ -110,6 +110,23 @@ opt-in unsound by design (ADR-0001, AUD-01), and the native run refutes its
 `sxUnsat` at 255, which is the false negative that test documents. `pinFind`
 reports it as a pin failure, as it should; the call carries a comment instead.
 
+## K9d-2a/2b result
+
+The 49 remaining suites of the int family without `symexAssume` (the 0016,
+161, 163rev, CR2a, a8, configdefaults, cr22, p1, p2a, r5, r6, r8, rectify and
+rfc0005 prefixes) were taken in 2a/2b; 47 route every `symexFind` call through
+`pinFind`. Census ceiling 441 → 394. The int suites that call `symexAssume`
+stay for K9d-4. `tsymex_rfc0005_s8ce_raiseshapes` and
+`tsymex_rfc0005_s8cr_intro` have a `string` parameter, so they have no
+generated domain and move to K9d-6 (string family). No verdict disagreed with
+native; no soundness row was filed.
+
+Harness fix: the witness tuple holds a `range[a..b]` parameter as its base
+type, so `pinFind` generated an out-of-range domain and its native call raised
+on the conversion (`assign_rangedefect`) or failed to bind (`161_overflow`).
+`pinFind` now aliases each declared parameter type and generates and replays
+through it; `tsymex_0016_k9d_pinfind` pins a wide-range SUT.
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

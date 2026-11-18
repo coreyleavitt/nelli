@@ -6,6 +6,7 @@
 ## - #133: loop-invariant inference (deferred; needs Phase 6 loops).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex abstraction refinements":
   test "#134 assertion-based range refinement promotes plain int":
@@ -14,7 +15,7 @@ suite "symex abstraction refinements":
       symexAssert(x <= 20)
       if x == 15:
         symexTarget("hit")
-    let r = symexFind(refined, tLabel("hit"), optimisedSymexSettings())
+    let r = pinFind(refined, tLabel("hit"), optimisedSymexSettings())
     check r.status == sxSat
     check r.witness[0] == 15
     var hasX = false
@@ -29,7 +30,7 @@ suite "symex abstraction refinements":
     proc outer(x: range[0..100]) =
       if helper(x) == 50:
         symexTarget("hit")
-    let r = symexFind(outer, tLabel("hit"), optimisedSymexSettings())
+    let r = pinFind(outer, tLabel("hit"), optimisedSymexSettings())
     check r.status == sxSat
     check r.witness[0] == 25
     # outer's `x` is promoted via its range type — propagation to the

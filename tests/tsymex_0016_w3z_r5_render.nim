@@ -7,6 +7,7 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, soundness]
 import nelli/engine/types as etypes
+import ./s8cu_helpers
 
 proc sutUDivSat(k: uint64) =
   let r = 10'u64 div k
@@ -47,7 +48,7 @@ suite "W3-z R5 U6: the undefined behaviour a run reached is rendered":
 
 suite "W3-z R5 U7: a raise carries its own soundness":
   test "allRaiseFindings: the raise past undefined behaviour reports it":
-    let r = symexFind(undefRaise, tLabel("hit"))
+    let r = pinFind(undefRaise, tLabel("hit"))
     check r.status == sxRaised
     let all = allRaiseFindings(r)
     check all.len == 1
@@ -55,7 +56,7 @@ suite "W3-z R5 U7: a raise carries its own soundness":
     check not hostRunnable(all[0])
 
   test "a clean raise is host-runnable":
-    let r = symexFind(cleanRaise, tRaisedExn("AssertionDefect"))
+    let r = pinFind(cleanRaise, tRaisedExn("AssertionDefect"))
     let all = allRaiseFindings(r)
     check all.len == 1
     check all[0].witnessUndefined == {}

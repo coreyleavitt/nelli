@@ -94,6 +94,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 # =============================================================================
 # Item 2 -- maxCallDepth bail classification
@@ -124,14 +125,14 @@ suite "#161/#163 handoff -- maxCallDepth bail names its own budget":
     ## soundly confirm or deny the target -- it must fail SAFE (sxUnknown),
     ## never claim the target is unreachable (sxUnsat would be a wrong
     ## verdict: `countdown(12) == 12` truly holds in real Nim).
-    let r = symexFind(probeBottom, tLabel("bottom12"), cappedShallow)
+    let r = pinFind(probeBottom, tLabel("bottom12"), cappedShallow)
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)
 
   test "the depth-cap bail degrades classified, naming the budget and the remedy":
-    let r = symexFind(probeBottom, tLabel("bottom12"), cappedShallow)
+    let r = pinFind(probeBottom, tLabel("bottom12"), cappedShallow)
     var classified = false
     var internalFault = false
     for e in r.errors:

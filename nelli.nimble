@@ -1788,6 +1788,13 @@ task test, "Run the test suite":
             # `toTable` table (a tuple-unpacking `items` loop).
             "tsymex_0016_int63_closurelet",
             "tsymex_0016_int64_totable",
+            # RFC-0016 INT-66, INT-67, INT-69, INT-70: a user-declared magic;
+            # a borrowed `.`; an undefined answer native reproduces; a type
+            # section in a routine's template.
+            "tsymex_0016_int66_usermagic",
+            "tsymex_0016_int67_borrowdot",
+            "tsymex_0016_int69_undefinedaxis",
+            "tsymex_0016_int70_templatetype",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

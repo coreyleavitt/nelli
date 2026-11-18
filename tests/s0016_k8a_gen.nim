@@ -420,9 +420,11 @@ func axisFrag(s, name: string; i: int): string =
 func renderAxis(p: Prog; name: string; tw: Twin): string =
   var top = ""
   var frags: seq[string]
+  var post = ""
   for i, key in p.rows:
     let sn = snippetOf(AxisScope(p.axis), key)
     if sn.top.len > 0: top.add axisFrag(sn.top, name, i) & "\n"
+    if sn.post.len > 0: post.add "  " & axisFrag(sn.post, name, i) & "\n"
     var f = ""
     if sn.pre.len > 0: f.add "  " & axisFrag(sn.pre, name, i) & "\n"
     f.add "  acc = acc + (" & axisFrag(sn.expr, name, i) & ")\n"
@@ -435,6 +437,7 @@ func renderAxis(p: Prog; name: string; tw: Twin): string =
   for f in frags: inner.add f
   inner.add deadLine(tw)
   inner.add famPred(p, "acc")
+  inner.add post
   var body = "  let t = int(a)\n  let u = int(b)\n"
   if tw == twTemplate:
     body.add "  template w() =\n" & indent(inner, "  ") & "  w()\n"
@@ -445,6 +448,17 @@ func renderAxis(p: Prog; name: string; tw: Twin): string =
 func axisRaises*(p: Prog): bool =
   for key in p.rows:
     if snippetOf(AxisScope(p.axis), key).raises: return true
+
+func undefinedSrc*(p: Prog): string =
+  ## RFC-0016 INT-69: the undefined behaviours an axis program's modelled
+  ## answer carries (its rows' `Snippet.undefined`), as a `set[UbKind]`
+  ## literal for `pinExactImpl`; `{}` for every other program.
+  var ks: seq[string]
+  if p.shape == shAxis:
+    for key in p.rows:
+      let u = snippetOf(AxisScope(p.axis), key).undefined
+      if u.len > 0 and "UbKind(" & u & ")" notin ks: ks.add "UbKind(" & u & ")"
+  "{" & ks.join(", ") & "}"
 
 func applicable*(p: Prog): seq[Twin] =
   case p.shape
@@ -725,7 +739,8 @@ proc emitCases*(cases: seq[Case]; plant: bool; tag: string): NimNode =
       ", claimed(captureRes(symexFind(" & name & ", tLabel(\"hit\"), " &
       "pinSettingsConst), o, " & $plant & "), \"symexFind\"), " &
       cellSrc(pinCellOf(p)) & ", " &
-      "tLabel(\"hit\"), " & dom & ", \"tsymex_0016_k8a_gen.nim\")\n" &
+      "tLabel(\"hit\"), " & dom & ", \"tsymex_0016_k8a_gen.nim\", " &
+      undefinedSrc(p) & ")\n" &
       "    o.kind = okExact\n" &
       "  except PinFailure as e:\n" &
       "    o.msg = e.msg\n" &

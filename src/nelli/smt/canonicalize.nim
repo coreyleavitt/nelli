@@ -824,8 +824,16 @@ const renderAsChoicesVersion* = "12"
   ##   `tables.toTable` (`for key, val in items(pairs)`) is walked; it
   ##   declined `feUnsupportedStmtKind`. Verdicts change from `sxUnknown` to
   ##   exact. No key bytes change.
+  ## - RFC-0016 INT-66 / INT-67 / INT-70 (422->423): a call of a routine the
+  ##   program declares with a binary `{.magic.}` and no body is the infix of
+  ##   the system routine of that magic and signature (`userMagicRewrite`);
+  ##   a field read through a distinct object that borrows `.` is the base
+  ##   object's field read; a type a template body in the routine declares
+  ##   (no type until expanded) is skipped by the route scan, which stopped
+  ##   the compile ("node has no type"). Verdicts change from `sxUnknown` to
+  ##   exact; a program that did not compile does. No key bytes change.
 
-const symexWalkerVersion* = "422"
+const symexWalkerVersion* = "423"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

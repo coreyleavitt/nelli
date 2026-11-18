@@ -29,10 +29,22 @@ type
       ## suite's `.nim.cfg` or `.nims`, `s0016_k8b_axes.buildSuites`). A build
       ## row is a property of the whole binary, so its fragment runs only in a
       ## suite compiled under that switch; "" is the default build.
+    post*: string
+      ## Statements run after the predicate (past the label): an opaque
+      ## foreign call there leaves the verdict's tail undefined
+      ## (`ubTailUnverified`), where one before it declines the run
+      ## (`feOpaqueCallUnmodelled`).
+    undefined*: string
+      ## RFC-0016 INT-69: the `UbKind` the row's modelled answer carries (a
+      ## `{.noinit.}` read, an opaque foreign body), "" for a defined row. A
+      ## program holding one is judged as `pinUndefined` judges a cell: its
+      ## `sxSat` is untrusted only by that kind, and its witness hits
+      ## natively (`s8cu_helpers.pinJudge`'s `undefined`).
 
 func sn(key, expr: string; pre = ""; top = ""; raises = false;
-        cfg = ""): Snippet =
-  Snippet(key: key, expr: expr, pre: pre, top: top, raises: raises, cfg: cfg)
+        cfg = ""; undefined = ""; post = ""): Snippet =
+  Snippet(key: key, expr: expr, pre: pre, top: top, raises: raises, cfg: cfg,
+          undefined: undefined, post: post)
 
 const magicSnippets = @[
   sn("AbsI", "abs(t)"),
@@ -269,10 +281,14 @@ const definedSnippets = @[
   sn("convert/floatToIntVia", "int(int8(float(t) * 0.5))"),
   # a `{.noinit.}` local read before a write: the read rides the witness
   # (`ubIndeterminateRead`), so a path holding it is never a trusted verdict
-  sn("read/uninitialised", "V_x * 0 + t", "var V_x {.noinit.}: int"),
-  # an opaque (foreign) body: undefined under the whole-run gate
-  sn("call/opaqueBody", "int(N_abs(cint(t)))",
-     top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}"),
+  sn("read/uninitialised", "V_x * 0 + t", "var V_x {.noinit.}: int",
+     undefined = "ubIndeterminateRead"),
+  # an opaque (foreign) body: undefined under the whole-run gate. The
+  # foreign value is any value to the walk, so the predicate does not rest
+  # on it: a witness the model gives hits natively (INT-69)
+  sn("call/opaqueBody", "t", post = "discard N_abs(cint(t))",
+     top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}",
+     undefined = "ubTailUnverified"),
   sn("index/unchecked", "V_s[u and 3]", "let V_s = @[t, 1, 2]", raises = true),
   sn("field/inactiveBranch", "V_v.n",
      "var V_v = N_V(k: true, n: t)\n  if u > 100: V_v = N_V(k: false, m: u)",
@@ -538,18 +554,24 @@ const pragmaSnippets = @[
   pushedPragma("debugger", "debugger: off"),
   sn("routine/magic", "N_plus(t, u)",
      top = "proc N_plus(x, y: int): int {.magic: \"AddI\", noSideEffect.}"),
-  sn("routine/importc", "int(N_abs(cint(t)))",
-     top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}"),
-  sn("routine/header", "int(N_ll(clonglong(t)))",
+  # a foreign routine is the opaque-call arm (INT-68): its value is any
+  # value to the walk and the run carries `ubTailUnverified`, so the
+  # predicate does not rest on it (the `call/opaqueBody` row's shape)
+  sn("routine/importc", "t", post = "discard N_abs(cint(t))",
+     top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}",
+     undefined = "ubTailUnverified"),
+  sn("routine/header", "t", post = "discard N_ll(clonglong(t))",
      top = "proc N_ll(x: clonglong): clonglong {.importc: \"llabs\", " &
-           "header: \"<stdlib.h>\".}"),
+           "header: \"<stdlib.h>\".}", undefined = "ubTailUnverified"),
   # `labs` is declared by the `<stdlib.h>` the `abs` beside it includes
-  sn("routine/nodecl", "int(N_l(clong(t))) + int(N_abs(cint(u)))",
+  sn("routine/nodecl", "t",
+     post = "discard N_l(clong(t))\n  discard N_abs(cint(u))",
+     undefined = "ubTailUnverified",
      top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}\n" &
            "proc N_l(x: clong): clong {.importc: \"labs\", nodecl.}"),
-  sn("routine/dynlib", "int(N_abs(cint(t)))",
+  sn("routine/dynlib", "t", post = "discard N_abs(cint(t))",
      top = "proc N_abs(x: cint): cint {.importc: \"abs\", " &
-           "dynlib: \"(msvcrt.dll|libc.so.6)\".}"),
+           "dynlib: \"(msvcrt.dll|libc.so.6)\".}", undefined = "ubTailUnverified"),
   # a call on a path no input reaches (t <= 127)
   sn("routine/noreturn", "t", "if t > 126 and t < 0: N_die()",
      top = "proc N_die() {.noreturn.} = quit(3)"),
@@ -764,12 +786,6 @@ func bk(axis: AxisScope; key, row, why: string): Blocked =
   Blocked(axis: axis, key: key, row: row, why: why)
 
 const
-  int68Why = "a foreign routine (`importc`, and `header`, `nodecl`, " &
-    "`dynlib` beside it) is the opaque-call arm: its result is fresh and " &
-    "the path is tainted `feOpaqueCallUnmodelled`, so no run is exact"
-  int69Why = "the row's modelled answer is undefined (a witness carrying " &
-    "the UB kind, `pinUndefined`); the axis differential has no outcome " &
-    "for it and counts it declined"
   int57Why = "a `$n` query (`str.from_int`) beside integer arithmetic stalls Z3's step counter; the walk never returns"
   blockedRows*: seq[Blocked] = @[
     bk(axMagic, "IntToStr", "INT-57", int57Why),
@@ -790,17 +806,6 @@ const
     bk(axTypeOp, "fieldDefault/string", "INT-57", int57Why),
     bk(axStdlibBody, "math.trunc", "INT-59",
        "about 60 s alone on c, with no step bound to cap it"),
-    bk(axPragma, "routine/magic", "INT-66",
-       "a routine the program declares with `{.magic.}` declines " &
-       "`feUnsupportedOp`: a magic is modelled under the system name only"),
-    bk(axPragma, "type/borrow", "INT-67",
-       "a borrowed `.` on a distinct object declines `feUnsupportedExprKind`"),
-    bk(axPragma, "routine/importc", "INT-68", int68Why),
-    bk(axPragma, "routine/header", "INT-68", int68Why),
-    bk(axPragma, "routine/nodecl", "INT-68", int68Why),
-    bk(axPragma, "routine/dynlib", "INT-68", int68Why),
-    bk(axDefinedness, "read/uninitialised", "INT-69", int69Why),
-    bk(axDefinedness, "call/opaqueBody", "INT-69", int69Why),
   ]
 
 func isBlocked*(axis: AxisScope; key: string): bool =

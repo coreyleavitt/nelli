@@ -1,4 +1,4 @@
-## RFC-0016 INT-79 (soundness, red until fixed): a ref parameter compared
+## RFC-0016 INT-82 (soundness, red until fixed): a ref parameter compared
 ## with a node the SUT allocates is a false sxSat. `Node(...)` and `new`
 ## mint a fresh address that `assertFreshness` (runtime_heap.nim) keeps
 ## distinct from nil and from the path's live refs only; a caller's ref
@@ -41,7 +41,7 @@ proc writeThroughFresh(p: Node; x: int) =
     n.val = 99
     if p.val == 99: symexTarget("hit")
 
-suite "INT-79: a fresh allocation is never a caller's ref":
+suite "INT-82: a fresh allocation is never a caller's ref":
   test "a parameter is not a node the SUT constructs":
     check pinFind(paramEqFresh, tLabel("hit")).status == sxUnsat
 

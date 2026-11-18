@@ -1,4 +1,4 @@
-## RFC-0016 INT-80 (precision, red until fixed): the walker declines a
+## RFC-0016 INT-83 (precision, red until fixed): the walker declines a
 ## `pointer` parameter and a `pointer` field of a by-value parameter
 ## (`feUnsupportedParamType`), where a `ref` or `ptr` one is modelled. Found
 ## converting the ref family (K9d-10): `pinFind` now generates a `pointer`
@@ -28,7 +28,7 @@ proc pNeverBoth(x: pointer) =
 proc pField(h: PHolder) =
   if h.tag and h.p == nil: symexTarget("hit")
 
-suite "INT-80: a pointer parameter is modelled, not declined":
+suite "INT-83: a pointer parameter is modelled, not declined":
   test "a pointer parameter compared with nil is sat, pinned on its witness":
     let r = pinFind(pNonNil, tLabel("hit"))
     checkpoint $r.errors

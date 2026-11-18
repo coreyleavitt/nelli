@@ -253,7 +253,7 @@ suite "Cluster H verification — identity transitivity / composition":
 suite "Cluster H verification — mixed param<->constructed-node aliasing":
 
   test "p == n (param vs freshly-constructed node) is reachable (sxSat)":
-    # symexFind: a false sxSat, INT-79 (a fresh node is never a caller ref)
+    # symexFind: a false sxSat, INT-82 (a fresh node is never a caller ref)
     let r = symexFind(paramConstructedEqHit, tLabel("param_ctor_eq_hit"))
     check r.status == sxSat
 
@@ -262,7 +262,7 @@ suite "Cluster H verification — mixed param<->constructed-node aliasing":
     check r.status == sxSat
 
   test "forced p == n: a write through n is observed through p (sxSat)":
-    # symexFind: a false sxSat, INT-79 (a fresh node is never a caller ref)
+    # symexFind: a false sxSat, INT-82 (a fresh node is never a caller ref)
     let r = symexFind(paramConstructedForcedWriteHit, tLabel("param_ctor_write_hit"))
     check r.status == sxSat
 

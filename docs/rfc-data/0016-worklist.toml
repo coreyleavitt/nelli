@@ -2419,7 +2419,7 @@ cells = []
 pins = ["tsymex_0016_int77_floatrange"]
 
 [[row]]
-id = "INT-79"
+id = "INT-82"
 table = "5.8c"
 title = "K9d-10: a ref parameter compared with a node the SUT allocates (`Node(...)`, `new`) is a false `sxSat`. `assertFreshness` (`runtime_heap.nim`) keeps a fresh address distinct from nil and from the path's live refs only, and a caller's ref parameter (or a ref reached through one) is never among them, so `p == n` holds in the model. Natively no caller's object is the one the SUT has just allocated: `p == n` is false on every input, and every target behind it (a write through `n` read back through `p`) is unreachable. `tsymex_h_verification` asserted the false verdict as intended (its section 2 comment); its two witnesses do not hit natively"
 class = "soundness"
@@ -2428,13 +2428,13 @@ note = ": open. The bar: a fresh allocation is distinct from every ref that exis
 slice = "K9d"
 home = "K9d-10 (`wip/k9d10`)"
 source = "K9d-10 pinFind conversion"
-evidence = "red reproducer `tests/tsymex_0016_int79_paramfresh.nim` (four targets, each `sxSat` with a witness that does not hit natively); under `pinFind`, `tsymex_h_verification` fails with `walker says sxSat for label(\"param_ctor_eq_hit\") but the witness does not hit natively: hits=[] raised=-` (likewise `param_ctor_write_hit`)"
+evidence = "red reproducer `tests/tsymex_0016_int82_paramfresh.nim` (four targets, each `sxSat` with a witness that does not hit natively); under `pinFind`, `tsymex_h_verification` fails with `walker says sxSat for label(\"param_ctor_eq_hit\") but the witness does not hit natively: hits=[] raised=-` (likewise `param_ctor_write_hit`)"
 aliases = []
 cells = []
-pins = ["tsymex_0016_int79_paramfresh"]
+pins = ["tsymex_0016_int82_paramfresh"]
 
 [[row]]
-id = "INT-80"
+id = "INT-83"
 table = "5.8c"
 title = "K9d-10: the walker declines a `pointer` parameter and a `pointer` field of a by-value parameter (`feUnsupportedParamType`), where a `ref` or `ptr` one is modelled. `pinFind` now generates a `pointer` domain (nil and the addresses of `ref int` cells), so a verdict would be pinned natively the moment the walker decides one"
 class = "precision"
@@ -2443,10 +2443,10 @@ note = ": open. The bar: a `pointer` parameter or field is nil or an address, co
 slice = "K9d"
 home = "K9d-10 (`wip/k9d10`)"
 source = "K9d-10 pinFind conversion"
-evidence = "red reproducer `tests/tsymex_0016_int80_pointerparam.nim`: each target is `sxUnknown` with `feUnsupportedParamType`; `tsymex_0016_k2c_typeclass` pins the same decline for `ppointer`"
+evidence = "red reproducer `tests/tsymex_0016_int83_pointerparam.nim`: each target is `sxUnknown` with `feUnsupportedParamType`; `tsymex_0016_k2c_typeclass` pins the same decline for `ppointer`"
 aliases = []
 cells = []
-pins = ["tsymex_0016_int80_pointerparam"]
+pins = ["tsymex_0016_int83_pointerparam"]
 
 [[row]]
 id = "INT-81"

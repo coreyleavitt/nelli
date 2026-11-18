@@ -751,7 +751,7 @@ calls K9d-9 deferred here are pinned too: `phase15_rereview_drains`' twelve
 `finallyHeapWrites`. The census ceiling 84 -> 37.
 
 Calls left as `symexFind`: `h_verification`'s `param_ctor_eq_hit` and
-`param_ctor_write_hit` (INT-79, a false sxSat); `h_containers`'
+`param_ctor_write_hit` (INT-82, a false sxSat); `h_containers`'
 `setNodeGuard` (a `HashSet` of a ref with no `hash` has no native value).
 Suites not converted: `rfc0005_s8bn_remainder_d` and `_e` (INT-81; `_e`'s
 `CMid8`, a descendant of a case object, also fails to compile when copied by
@@ -759,18 +759,18 @@ value in the C backend, which the ref domain does), `0016_wa_runtime` (its
 calls write no pin record).
 
 Rows filed:
-- INT-79, soundness: a ref parameter compared with a node the SUT allocates
+- INT-82, soundness: a ref parameter compared with a node the SUT allocates
   is a false sxSat (`assertFreshness` keeps a fresh address apart from the
   path's live refs only). `h_verification` asserted it as intended. Red
-  reproducer `tsymex_0016_int79_paramfresh`.
+  reproducer `tsymex_0016_int82_paramfresh`.
 - INT-81, witness fidelity (the verdict is sound): the witness builds a ref
   cell as its position's static type, not its run-type tag, so a sat verdict
   on a method override, `of` or a down-conversion misses natively. Red
   reproducer `tsymex_0016_int81_witnesstag`.
-- INT-80, precision: a `pointer` parameter or field is declined
+- INT-83, precision: a `pointer` parameter or field is declined
   (`feUnsupportedParamType`); the non-nil cross-sort compare (INT-65, on
   `rfc-0016-w4int65`) is the same gap one step on. Red reproducer
-  `tsymex_0016_int80_pointerparam`.
+  `tsymex_0016_int83_pointerparam`.
 
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 

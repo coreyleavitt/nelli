@@ -8,6 +8,7 @@
 
 import std/[unittest, re, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
@@ -34,5 +35,5 @@ suite "S8cf: the JIT's LIMIT_MATCH":
   test "the walker decides it":
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
-    check symexFind(jitFind, tLabel("cf_jit_count")).status == sxSat
-    check symexFind(jitFindNo, tLabel("cf_jit_count_no")).status == sxUnsat
+    check pinFind(jitFind, tLabel("cf_jit_count")).status == sxSat
+    check pinFind(jitFindNo, tLabel("cf_jit_count_no")).status == sxUnsat

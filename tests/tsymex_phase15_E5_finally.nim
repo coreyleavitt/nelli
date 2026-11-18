@@ -16,6 +16,7 @@
 ## finally itself raises, that replaces the in-flight one.
 import std/[unittest, options]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/[dsl, runtime]
 
 # --- 1. finally runs on the NORMAL exit path --------------------------------
@@ -43,29 +44,29 @@ proc finallyReplaces(x: int): int =
 suite "symex Phase 15 E5 — finally semantics (finally-raises-replaces)":
   # ---- test 1: finally on normal exit ----
   test "E5: finally runs on normal exit (isExact)":
-    let r = symexFind(finallyNormal, tLabel("finally_normal"))
+    let r = pinFind(finallyNormal, tLabel("finally_normal"))
     check r.status == sxSat
 
   test "E5: finally runs on normal exit (isOptimised)":
-    let r = symexFind(finallyNormal, tLabel("finally_normal"),
+    let r = pinFind(finallyNormal, tLabel("finally_normal"),
                       optimisedSymexSettings())
     check r.status == sxSat
 
   # ---- test 2: finally-raises replaces in-flight exception ----
   test "E5: finally raise replaces in-flight exn (IOError wins, x>100)":
-    let r = symexFind(finallyReplaces, tRaisedExn("IOError"))
+    let r = pinFind(finallyReplaces, tRaisedExn("IOError"))
     check r.status == sxRaised
     check r.raisedTypeId == "IOError"
     check r.raisedWitness[0] > 100
 
   test "E5: finally fall-through re-raises original (ValueError, x<=100)":
-    let r = symexFind(finallyReplaces, tRaisedExn("ValueError"))
+    let r = pinFind(finallyReplaces, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] <= 100
 
   test "E5: finally-replaces — IOError witness (isOptimised)":
-    let r = symexFind(finallyReplaces, tRaisedExn("IOError"),
+    let r = pinFind(finallyReplaces, tRaisedExn("IOError"),
                       optimisedSymexSettings())
     check r.status == sxRaised
     check r.raisedTypeId == "IOError"

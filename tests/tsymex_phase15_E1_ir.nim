@@ -10,6 +10,7 @@ import nelli/smt/types
 import nelli/smt/dsl_parser
 import nelli/symex
 
+from ./s8cu_helpers import pinFind
 # --- a typed SUT containing `raise newException(ValueError, "x")` ------------
 proc raiseSut() =
   raise newException(ValueError, "x")
@@ -45,8 +46,8 @@ suite "symex Phase 15 E1 — exception IR (raise/try) + handler scaffolding":
     # target-gated: a `tLabel("after")` search no longer surfaces the raise (the
     # raise terminates the path, so the post-raise label is unreachable →
     # sxUnsat). The raise is now found via an exception-seeking target.
-    let unreached = symexFind(raiseSut, tLabel("after"))
+    let unreached = pinFind(raiseSut, tLabel("after"))
     check unreached.status == sxUnsat
-    let res = symexFind(raiseSut, tRaisedExn("ValueError"))
+    let res = pinFind(raiseSut, tRaisedExn("ValueError"))
     check res.status == sxRaised
     check res.raisedTypeId == "ValueError"

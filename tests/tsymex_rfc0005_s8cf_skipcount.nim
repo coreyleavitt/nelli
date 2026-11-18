@@ -3,6 +3,7 @@
 ## states the value.
 import std/[unittest, re, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
@@ -45,6 +46,6 @@ suite "S8cf: SKIP:NAME past argCap":
 
   test "the walker decides it":
     check find(w, re(unbounded)) == 22
-    check symexFind(atPoint, tLabel("cf_skip_at")).status == sxSat
-    check symexFind(notAtPoint, tLabel("cf_skip_not")).status == sxUnsat
-    check symexFind(lit, tLabel("cf_skip_lit")).status == sxSat
+    check pinFind(atPoint, tLabel("cf_skip_at")).status == sxSat
+    check pinFind(notAtPoint, tLabel("cf_skip_not")).status == sxUnsat
+    check pinFind(lit, tLabel("cf_skip_lit")).status == sxSat

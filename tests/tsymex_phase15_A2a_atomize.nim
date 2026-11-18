@@ -13,6 +13,7 @@
 import std/[unittest, unicode, strutils]
 import nelli/symex
 
+from ./s8cu_helpers import pinFind
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
   if rInline.status == sxSat and rHoisted.status == sxSat:
@@ -85,23 +86,23 @@ suite "symex A2a — parseAtomicOperand chokepoint demonstration (post-atomizati
     check parseInt(symexWalkerVersion) >= 72
 
   test "cell 1 (borrow bypass site, nested borrowed +): twin-identical post-atomization":
-    let rInline  = symexFind(a2aBorrowNestedArith, tLabel("hit"))
-    let rHoisted = symexFind(a2aBorrowNestedArithHoisted, tLabel("hit"))
+    let rInline  = pinFind(a2aBorrowNestedArith, tLabel("hit"))
+    let rHoisted = pinFind(a2aBorrowNestedArithHoisted, tLabel("hit"))
     checkTwins(rInline, rHoisted)
     check rInline.status in {sxSat, sxUnsat, sxRaised, sxUnknown}
     if rInline.status == sxUnknown:
       check rInline.errors.len > 0
 
   test "cell 2 (rune-compare bypass site, call-result operand): twin-identical post-atomization":
-    let rInline  = symexFind(a2aRuneCompareCallResult, tLabel("hit"))
-    let rHoisted = symexFind(a2aRuneCompareCallResultHoisted, tLabel("hit"))
+    let rInline  = pinFind(a2aRuneCompareCallResult, tLabel("hit"))
+    let rHoisted = pinFind(a2aRuneCompareCallResultHoisted, tLabel("hit"))
     checkTwins(rInline, rHoisted)
     check rInline.status in {sxSat, sxUnsat, sxRaised, sxUnknown}
     if rInline.status == sxUnknown:
       check rInline.errors.len > 0
 
   test "cell 3 (not over bitwise compound, #149-named): twin-identical, sxSat, post-atomization":
-    let rInline  = symexFind(a2aUnaryNotBitwise, tLabel("notPow2"))
-    let rHoisted = symexFind(a2aUnaryNotBitwiseHoisted, tLabel("notPow2"))
+    let rInline  = pinFind(a2aUnaryNotBitwise, tLabel("notPow2"))
+    let rHoisted = pinFind(a2aUnaryNotBitwiseHoisted, tLabel("notPow2"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)

@@ -44,7 +44,7 @@
 ## cycle (see `tests/tsymex_r1_draingap.nim`'s pin). `renderAsChoicesVersion`
 ## STAYS "7" (no new witness shape).
 
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -207,31 +207,31 @@ suite "symex R1B — once-evaluated arms (if/let/return): A and s[i] must NOT fa
   test "R1B-if-1: i<s.len and s[i]=='x' -> IndexDefect is NOT reachable (sxUnsat, not sxRaised)":
     ## RED (pre-fix): sxRaised(IndexDefect) — the OOB fork fires unguarded.
     ## GREEN (post-fix): NOT sxRaised — the guard makes the OOB predicate UNSAT.
-    let r = symexFind(sutIfGuardedOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(sutIfGuardedOob, tRaisedExn("IndexDefect"))
     check r.status != sxRaised
 
   test "R1B-if-2 (reachable companion): \"hitIf\" is still a real sxSat":
-    let r = symexFind(sutIfGuardedOob, tLabel("hitIf"))
+    let r = pinFind(sutIfGuardedOob, tLabel("hitIf"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check r.witness[0][0] == 'x'
 
   test "R1B-let-1: let ok = i<s.len and s[i]=='x' -> IndexDefect NOT reachable":
-    let r = symexFind(sutLetGuardedOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(sutLetGuardedOob, tRaisedExn("IndexDefect"))
     check r.status != sxRaised
 
   test "R1B-let-2 (reachable companion): \"hitLet\" is still a real sxSat":
-    let r = symexFind(sutLetGuardedOob, tLabel("hitLet"))
+    let r = pinFind(sutLetGuardedOob, tLabel("hitLet"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check r.witness[0][0] == 'x'
 
   test "R1B-return-1: return i<s.len and s[i]=='x' -> IndexDefect NOT reachable":
-    let r = symexFind(sutReturnGuardedOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(sutReturnGuardedOob, tRaisedExn("IndexDefect"))
     check r.status != sxRaised
 
   test "R1B-return-2 (reachable companion): \"hitReturn\" is still a real sxSat":
-    let r = symexFind(sutReturnGuardedOob, tLabel("hitReturn"))
+    let r = pinFind(sutReturnGuardedOob, tLabel("hitReturn"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check r.witness[0][0] == 'x'
@@ -242,18 +242,18 @@ suite "symex R1B — while-arm (re-evaluated each iteration): A and s[i] must NO
     ## RED (pre-fix): sxRaised(IndexDefect) — the guard preamble is hoisted
     ## once before the loop and never re-evaluated, so it drifts stale.
     ## GREEN (post-fix): NOT sxRaised.
-    let r = symexFind(sutWhileGuardedOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(sutWhileGuardedOob, tRaisedExn("IndexDefect"))
     check r.status != sxRaised
 
   test "R1B-while-2: \"whileImpossible\" degrades to sxUnknown (k-unroll), never a false sxRaised":
     ## This is the tests/tsymex_q1_scanlift.nim Q1-4a shape exactly.
     ## RED (pre-fix): sxRaised (false). GREEN (post-fix): sxUnknown.
-    let r = symexFind(sutWhileGuardedOob, tLabel("whileImpossible"))
+    let r = pinFind(sutWhileGuardedOob, tLabel("whileImpossible"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
   test "R1B-while-3 (reachable companion): \"foundX\" is a real sxSat with a valid witness":
-    let r = symexFind(sutWhileFindX, tLabel("foundX"))
+    let r = pinFind(sutWhileFindX, tLabel("foundX"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check 'x' in r.witness[0]
@@ -262,7 +262,7 @@ suite "symex R1B — while-arm (re-evaluated each iteration): A and s[i] must NO
     ## Proves the `while true` + break restructuring does not hang and
     ## produces the same verdict as the pre-restructure `while cond: body`
     ## would have for a genuinely bounded scan.
-    let r = symexFind(sutWhileConcreteBound, tLabel("allThreeA"))
+    let r = pinFind(sutWhileConcreteBound, tLabel("allThreeA"))
     check r.status == sxSat
     check r.witness[0].len >= 3
     check r.witness[0][0] == 'a'
@@ -275,16 +275,16 @@ suite "symex R1B — for-NESTED while (parseIterBodyStmt arm): A and s[i] must N
     ## RED (pre-fix, the ~2665 arm still hoisted the guard preamble once):
     ## sxRaised(IndexDefect) — proves the SECOND while-arm had the same bug.
     ## GREEN (post-fix, routed through mkGuardedWhile): NOT sxRaised.
-    let r = symexFind(sutForNestedWhileOob, tRaisedExn("IndexDefect"), nestedLoopBudget)
+    let r = pinFind(sutForNestedWhileOob, tRaisedExn("IndexDefect"), nestedLoopBudget)
     check r.status != sxRaised
 
   test "R1B-fornest-2: \"forWhileImpossible\" degrades to sxUnknown, never a false sxRaised":
-    let r = symexFind(sutForNestedWhileOob, tLabel("forWhileImpossible"), nestedLoopBudget)
+    let r = pinFind(sutForNestedWhileOob, tLabel("forWhileImpossible"), nestedLoopBudget)
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
   test "R1B-fornest-3 (reachable companion): \"forFoundX\" is a real sxSat with a valid witness":
-    let r = symexFind(sutForNestedWhileFindX, tLabel("forFoundX"), nestedLoopBudget)
+    let r = pinFind(sutForNestedWhileFindX, tLabel("forFoundX"), nestedLoopBudget)
     check r.status == sxSat
     check r.witness[0].len > 0
     check 'x' in r.witness[0]
@@ -292,17 +292,17 @@ suite "symex R1B — for-NESTED while (parseIterBodyStmt arm): A and s[i] must N
 suite "symex R1B — or-guard analogue: i>=s.len or s[i]=='x' must NOT false-raise":
 
   test "R1B-or-1: i>=s.len or s[i]=='x' -> IndexDefect NOT reachable":
-    let r = symexFind(sutOrGuardedOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(sutOrGuardedOob, tRaisedExn("IndexDefect"))
     check r.status != sxRaised
 
   test "R1B-or-2 (reachable companion): \"hitOr\" is still a real sxSat":
-    let r = symexFind(sutOrGuardedOob, tLabel("hitOr"))
+    let r = pinFind(sutOrGuardedOob, tLabel("hitOr"))
     check r.status == sxSat
 
 suite "symex R1B — regression guards: genuinely unguarded s[i] must STILL raise":
 
   test "R1B-noguard-1: if s[0]=='x' (own condition, no and/or) -> STILL sxRaised(IndexDefect)":
-    let r = symexFind(sutIfNoGuardOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(sutIfNoGuardOob, tRaisedExn("IndexDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "IndexDefect"
@@ -310,7 +310,7 @@ suite "symex R1B — regression guards: genuinely unguarded s[i] must STILL rais
   test "R1B-noguard-2: unbounded while s[i]==' ' (no bound at all) -> STILL sxRaised(IndexDefect)":
     ## This is R1's own fix (runtime.nim isWhile drain); pins that R1B's
     ## while-restructuring does not regress it.
-    let r = symexFind(sutWhileUnboundedOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(sutWhileUnboundedOob, tRaisedExn("IndexDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "IndexDefect"

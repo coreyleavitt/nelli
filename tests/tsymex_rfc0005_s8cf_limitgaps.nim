@@ -5,6 +5,7 @@
 ## model and native differ on `abab` at LIMIT_MATCH=5.
 import std/[unittest, re, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/regex_parser
@@ -65,6 +66,6 @@ suite "S8cf: limit accounting gaps":
 
   test "the walker reads them":
     check "a\r\nb".replace(re"(*LIMIT_MATCH=5)(*CRLF).*", "y") == "yy\r\ny"
-    check symexFind(crlfSym, tLabel("cf_gap_crlf")).status == sxSat
-    check symexFind(crlfSymNo, tLabel("cf_gap_crlf_no")).status == sxUnsat
-    check symexFind(utfSym, tLabel("cf_gap_utf")).status == sxSat
+    check pinFind(crlfSym, tLabel("cf_gap_crlf")).status == sxSat
+    check pinFind(crlfSymNo, tLabel("cf_gap_crlf_no")).status == sxUnsat
+    check pinFind(utfSym, tLabel("cf_gap_utf")).status == sxSat

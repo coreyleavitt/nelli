@@ -22,6 +22,7 @@ import std/strutils  ## contains/find/startsWith/endsWith/split/join on strings
 import std/re        ## match with a compiled Regex
 import nelli/symex
 
+from ./s8cu_helpers import pinFind
 # ----------------------------------------------------------------------------
 # 1. Multi-op SUT: len + index + contains + startsWith all on the SAME free
 #    string, threaded through one path condition. A consistent witness ("hello")
@@ -107,7 +108,7 @@ proc freeLen1Sut(s: string) =
 suite "symex Phase 15 S7b — Z3-string regression smoke (cross-op composition)":
 
   test "multi-op SUT (len+index+contains+startsWith) -> sxSat, consistent witness":
-    let r = symexFind(multiOpSut, tLabel("hit"))
+    let r = pinFind(multiOpSut, tLabel("hit"))
     check r.status == sxSat
     # The witness must satisfy EVERY clause when plugged back into the predicate
     # at runtime — a genuine round-trip of the composed body.
@@ -115,12 +116,12 @@ suite "symex Phase 15 S7b — Z3-string regression smoke (cross-op composition)"
     check r.witness[0].len == 5
 
   test "multi-op SUT (len+slice+endsWith+find) -> sxSat, witness 'world'":
-    let r = symexFind(multiOp2Sut, tLabel("hit"))
+    let r = pinFind(multiOp2Sut, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "world"
 
   test "split+join round-trip (concrete) + a part's byte in one SUT -> sxSat":
-    let r = symexFind(splitJoinBytesSut, tLabel("hit"))
+    let r = pinFind(splitJoinBytesSut, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"
 
@@ -129,24 +130,24 @@ suite "symex Phase 15 S7b — Z3-string regression smoke (cross-op composition)"
     # be lowercase; this pinned all three, which held only while `match`
     # was (wrongly) full-string membership, and on Z3 4.13.4 the model's
     # later bytes are free.
-    let r = symexFind(regexLowerSut, tLabel("hit"))
+    let r = pinFind(regexLowerSut, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len == 3
     check r.witness[0][0] in {'a'..'z'}
     check r.witness[0].match(re"[a-z]+")
 
   test "string equality s == \"hello\" -> sxSat, witness 'hello'":
-    let r = symexFind(equalitySut, tLabel("hit"))
+    let r = pinFind(equalitySut, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "withSymexSettings threads through a STRING SUT -> sxSat":
-    let r = symexFind(cfgStringSut, tLabel("cfg"), axiomSettings)
+    let r = pinFind(cfgStringSut, tLabel("cfg"), axiomSettings)
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "byte-faithful: free s with s.len == 1 round-trips to a single Nim byte":
-    let r = symexFind(freeLen1Sut, tLabel("hit"))
+    let r = pinFind(freeLen1Sut, tLabel("hit"))
     check r.status == sxSat
     # ≤0xFF soundness: exactly one Nim byte, no multi-byte blowup.
     check r.witness[0].len == 1

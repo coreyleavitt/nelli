@@ -12,6 +12,7 @@
 ## an unconstrained result would report them sxSat.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 
 proc findColonAt2(s: string) =
@@ -40,26 +41,26 @@ proc containsInEmpty(s: string) =
 suite "symex re-test v65 — char-needle string search (was a native crash)":
 
   test "s.find(':') == 2 is SAT with a consistent witness":
-    let r = symexFind(findColonAt2, tLabel("colon-at-2"))
+    let r = pinFind(findColonAt2, tLabel("colon-at-2"))
     check r.status == sxSat
     check r.witness[0].find(':') == 2
 
   test "s.find(':') == -2 is UNSAT (soundness)":
-    let r = symexFind(findNeverMinus2, tLabel("impossible-find"))
+    let r = pinFind(findNeverMinus2, tLabel("impossible-find"))
     check r.status == sxUnsat
 
   test "s.rfind(':') == 0 is SAT with a consistent witness":
-    let r = symexFind(rfindColonAt0, tLabel("last-colon-front"))
+    let r = pinFind(rfindColonAt0, tLabel("last-colon-front"))
     check r.status == sxSat
     check r.witness[0].rfind(':') == 0
 
   test "s.contains('@') is SAT with a consistent witness":
-    let r = symexFind(containsAt, tLabel("has-at"))
+    let r = pinFind(containsAt, tLabel("has-at"))
     check r.status == sxSat
     check r.witness[0].contains('@')
 
   test "empty-string contains('@') is UNSAT (soundness)":
-    let r = symexFind(containsInEmpty, tLabel("impossible-contains"))
+    let r = pinFind(containsInEmpty, tLabel("impossible-contains"))
     check r.status == sxUnsat
 
 suite "symex re-test v65 — walker version pin":

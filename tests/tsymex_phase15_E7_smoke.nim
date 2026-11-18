@@ -21,6 +21,7 @@
 ##   - the walker version pin: `symexWalkerVersion == "7"` (this cycle's bump).
 import std/[unittest, sequtils, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/db
 import nelli/smt/[types, dsl, runtime]
 import nelli/engine/types
@@ -92,24 +93,24 @@ suite "symex Phase 15 E7 — Cluster-E regression smoke + walker version 7":
 
   # ---- inter-proc raise propagation (E3) ----
   test "E7: inter-proc raise caught by caller handler":
-    let r = symexFind(interProcCatch, tLabel("ip_caught"))
+    let r = pinFind(interProcCatch, tLabel("ip_caught"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E7: inter-proc raise — nothing escapes the boundary":
     # The caller's except ValueError consumes the helper's raise; no sxRaised.
-    let r = symexFind(interProcCatch, tRaisedExn("ValueError"))
+    let r = pinFind(interProcCatch, tRaisedExn("ValueError"))
     check r.status == sxUnsat
 
   # ---- finally + raise interaction (E5) ----
   test "E7: finally fall-through re-raises original (ValueError, x<=100)":
-    let r = symexFind(finallyReplaces, tRaisedExn("ValueError"))
+    let r = pinFind(finallyReplaces, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] <= 100
 
   test "E7: finally-raises replaces in-flight exn (IOError wins, x>100)":
-    let r = symexFind(finallyReplaces, tRaisedExn("IOError"))
+    let r = pinFind(finallyReplaces, tRaisedExn("IOError"))
     check r.status == sxRaised
     check r.raisedTypeId == "IOError"
     check r.raisedWitness[0] > 100
@@ -118,28 +119,28 @@ suite "symex Phase 15 E7 — Cluster-E regression smoke + walker version 7":
   test "E7: nested try with bare re-raise pops to outer handler":
     # inner except IOError does NOT match the ValueError; the bare `raise`
     # re-raises through the inner frame to the OUTER except ValueError.
-    let r = symexFind(nestedReraise, tLabel("outer_caught"))
+    let r = pinFind(nestedReraise, tLabel("outer_caught"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   # ---- subtype catch (E4 / E4a) ----
   test "E7: except CatchableError catches ValueError (subtype, E4)":
-    let r = symexFind(catchableCatches, tLabel("base_caught"))
+    let r = pinFind(catchableCatches, tLabel("base_caught"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E7: user exn caught by stdlib base (E4a)":
-    let r = symexFind(userExnCaughtByBase, tLabel("user_caught"))
+    let r = pinFind(userExnCaughtByBase, tLabel("user_caught"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E7: user exn — caught by base, nothing escapes":
-    let r = symexFind(userExnCaughtByBase, tRaisedExn("E7MyError"))
+    let r = pinFind(userExnCaughtByBase, tRaisedExn("E7MyError"))
     check r.status == sxUnsat
 
   # ---- Defect (E6) ----
   test "E7: assert-false lowers to sxRaised AssertionDefect (Defect)":
-    let r = symexFind(assertDefect, tRaisedExn("AssertionDefect"))
+    let r = pinFind(assertDefect, tRaisedExn("AssertionDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     check r.raisedWitness[0] <= 0
@@ -150,10 +151,10 @@ suite "symex Phase 15 E7 — Cluster-E regression smoke + walker version 7":
     # real walker, persist both sxRaised findings, then reload them from a fresh
     # DB-only state (empty in-memory cache) and assert BOTH reconstruct without
     # invoking Z3. Complements E2a test 3 (which constructs the seq by hand).
-    let vr = symexFind(twoRaise, tRaisedExn("ValueError"))
+    let vr = pinFind(twoRaise, tRaisedExn("ValueError"))
     check vr.status == sxRaised
     check vr.raisedTypeId == "ValueError"
-    let ir = symexFind(twoRaise, tRaisedExn("IOError"))
+    let ir = pinFind(twoRaise, tRaisedExn("IOError"))
     check ir.status == sxRaised
     check ir.raisedTypeId == "IOError"
 

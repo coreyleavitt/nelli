@@ -4,6 +4,7 @@
 ## on every receiver.
 import std/[unittest, re, strutils, unicode]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
@@ -103,22 +104,22 @@ suite "S8cf: replace's lemma residuals":
     check pairPats >= 2
 
   test "two-byte containment":
-    check symexFind(twoBounded, tLabel("cf_rp_two")).status == sxUnsat
-    check symexFind(twoStays, tLabel("cf_rp_two_sat")).status == sxSat
+    check pinFind(twoBounded, tLabel("cf_rp_two")).status == sxUnsat
+    check pinFind(twoStays, tLabel("cf_rp_two_sat")).status == sxSat
 
   test "verbs and LIMIT":
-    check symexFind(skipSure, tLabel("cf_rp_skip")).status == sxUnsat
-    check symexFind(commitSure, tLabel("cf_rp_commit")).status == sxUnsat
-    check symexFind(commitStays, tLabel("cf_rp_commit_sat")).status == sxSat
-    check symexFind(pruneSure, tLabel("cf_rp_prune")).status == sxUnsat
-    check symexFind(limitSure, tLabel("cf_rp_limit")).status == sxUnsat
+    check pinFind(skipSure, tLabel("cf_rp_skip")).status == sxUnsat
+    check pinFind(commitSure, tLabel("cf_rp_commit")).status == sxUnsat
+    check pinFind(commitStays, tLabel("cf_rp_commit_sat")).status == sxSat
+    check pinFind(pruneSure, tLabel("cf_rp_prune")).status == sxUnsat
+    check pinFind(limitSure, tLabel("cf_rp_limit")).status == sxUnsat
 
   test "UTF: an invalid subject keeps its bytes":
     check "a\xff".replace(re"(*UTF)a", "-") == "a\xff"
-    check symexFind(utfValid, tLabel("cf_rp_utf")).status == sxUnsat
-    check symexFind(utfInvalid, tLabel("cf_rp_utf_inv")).status == sxSat
+    check pinFind(utfValid, tLabel("cf_rp_utf")).status == sxUnsat
+    check pinFind(utfInvalid, tLabel("cf_rp_utf_inv")).status == sxSat
 
   test "count over a replace value":
     check "xaxax".replace(re"a", "-").count('-') == 2
-    check symexFind(countNo, tLabel("cf_rp_count")).status == sxUnsat
-    check symexFind(countBy, tLabel("cf_rp_count_sat")).status == sxSat
+    check pinFind(countNo, tLabel("cf_rp_count")).status == sxUnsat
+    check pinFind(countBy, tLabel("cf_rp_count_sat")).status == sxSat

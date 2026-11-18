@@ -17,6 +17,7 @@
 import std/[unittest, sequtils]
 import nelli/symex
 
+from ./s8cu_helpers import pinFind
 # ============================================================================
 # S-1: liveRefs union-merge drops equal-length arms → false SAT aliasing
 # ============================================================================
@@ -318,11 +319,11 @@ suite "symex Phase 15 re-review S-1: liveRefs union-merge":
   ## and by the absence of regression in CR-5 tests.
 
   test "S-1-arm1: callerRef seeded before closure; arm-T new int is distinct (sxUnsat)":
-    let r = symexFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm1"))
+    let r = pinFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm1"))
     check r.status == sxUnsat
 
   test "S-1-arm2: callerRef seeded before closure; arm-F new int is distinct (sxUnsat)":
-    let r = symexFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm2"))
+    let r = pinFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm2"))
     check r.status == sxUnsat
 
 suite "symex Phase 15 re-review S-2a: isAssert missing seed+drain":

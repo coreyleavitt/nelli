@@ -104,7 +104,7 @@
 ## float value, so this file's poison tables (`Table[int, string]`,
 ## `Table[string, string]`) became modelled. Each was swapped for a shape
 ## still unbacked: a `float` key and a `seq[int]` value.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils, tables, sets, options, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -365,12 +365,12 @@ proc n43ClosureNestedArrayBlock(n: int) =
 suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nesting recursion parity)":
 
   test "N43-C0: an ordinary, fully-backed lambda param is unaffected (no over-degrade)":
-    let r = symexFind(n43ClosureGoodBlock, tLabel("n43_closure_good"))
+    let r = pinFind(n43ClosureGoodBlock, tLabel("n43_closure_good"))
     check r.status == sxSat
 
   test "N43-C1: tuple nesting a bad-key Table field, as a lambda param -- predicted unallocatable (Part 1's itTuple recursion), allocator confirms honest sxUnknown, no crash":
     check unallocatableFieldIssue(tTuple(@[tInt(), tTable(tTuple(@[tInt(), tInt()]), tString())])).isSome
-    let r = symexFind(n43ClosureNestedTupleBlock, tLabel("n43_closure_nested_tuple"))
+    let r = pinFind(n43ClosureNestedTupleBlock, tLabel("n43_closure_nested_tuple"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -378,7 +378,7 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
 
   test "N43-C2: array nesting a bad-key Table field, as a lambda param -- predicted unallocatable (Part 1's itArray recursion), allocator confirms honest sxUnknown, no crash":
     check unallocatableFieldIssue(tArray(tTable(tTuple(@[tInt(), tInt()]), tString()), 2)).isSome
-    let r = symexFind(n43ClosureNestedArrayBlock, tLabel("n43_closure_nested_array"))
+    let r = pinFind(n43ClosureNestedArrayBlock, tLabel("n43_closure_nested_array"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -411,7 +411,7 @@ suite "symex N43 -- companion: param-boundary confirmation for the two structura
 
   test "N43-P1: an unresolved parameter type (__unsupported:) -- predicted unallocatable (Part 1), raiseParamAllocIssue confirms: whole-run sxUnknown, feUnsupportedParamType":
     check unallocatableFieldIssue(tUninterp("__unsupported:cstring")).isSome
-    let r = symexFind(n43ParamUnsupported, tLabel("n43_param_unsupported"))
+    let r = pinFind(n43ParamUnsupported, tLabel("n43_param_unsupported"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown

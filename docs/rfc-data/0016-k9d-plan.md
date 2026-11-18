@@ -86,7 +86,7 @@ confirms per SUT before choosing a per-suite idiom.
 | K9d-6 | string family (`boundaryOf(string)`) | 66 → 6a/6b | |
 | K9d-7 | seq family | 37 | |
 | K9d-8 | float family | 17 | |
-| K9d-9 | regex family (string domain, per-row records) | 63 → 9a/9b | |
+| K9d-9 | regex family (string domain, per-row records): done, 23 converted, 38 already pinned, 2 to K9d-10 (see the result section) | 63 → 25 left | regex members and near-misses (`k9d_regex.nim`) |
 | K9d-10 | ref family (sat replay; unsat explicit domain) | 22 | |
 | K9d-11 | impure family, per suite (state reset, `pinExact`) | 58 → 11a/11b | |
 | K9d-12 | triage: unresolved, meta, non-`symexFind` path, nullary | 37 | |
@@ -579,6 +579,103 @@ Failures triaged:
 Float candidates left: none. `rfc0005_s8k_bounds`,
 `phase15_rereview_drains` and `tot1_totality_corpus` (ref/ptr parameters)
 stay for K9d-10.
+
+## K9d-9 result (`k9d9`)
+
+The regex family's list holds 63 suites; 38 were already pinned by earlier
+slices (they take string or int parameters and converted with them), so 25
+were left. 23 convert; 2 stay for K9d-10.
+
+### The regex domain (`tests/k9d_regex.nim`)
+
+A SUT that matches against a regex literal now has its string domain extended
+with strings near the pattern's language. `pinFind`'s harvest recognises a
+call to `re` or `rex` (std/re and std/nre alike) whose argument is a string
+literal and records the literal in `StringHints.pats`; the pattern is no
+longer a data literal (its neighbours, such as `[a-z]+` minus a byte, were
+noise). Each pattern is read by a parser of its own, deliberately not the
+walker's (a domain made from the walker's reading of a pattern would share
+its mistakes), over the subset the walker models: literals, escapes
+(`\d \w \s` and their negations, `\xHH`, `\x{...}`, the control escapes),
+`.`, classes with ranges, negation and POSIX names, capturing and `(?:`
+groups, alternation, `* + ? {m} {m,} {m,n}` with their lazy and possessive
+forms, `^ $ \A \z \Z \b \B`, and `(*VERB)` items (zero-width here; `(*UTF)`
+switches code points to UTF-8). A backreference, a lookaround, a named group,
+an inline option or an unread escape puts the pattern outside: it adds no
+values, and the SUT keeps the plain string domain.
+
+From the parse, deterministically, in five stages:
+
+1. members: each node's representatives combined one factor at a time (a
+   class's first printable, lowest and highest byte; each alternation arm; a
+   quantifier at its min, min+1 and max, or min+2 when unbounded);
+2. boundaries: each of the first four members followed by `\n`, `\r\n`, NUL or
+   0xFF and preceded by `\n` or 0x80 (PCRE's `$` matches before a final
+   newline, `.` stops at one), plus `""` and `"\n"`;
+3. structural near-misses in the canonical member's context: a quantifier at
+   min-1 and max+1, the bytes just outside each run of a class, a literal's
+   case swap and next byte, `.` as a newline, a multi-byte code point under a
+   byte-mode `.` and a lone high byte under a UTF-mode one;
+4. case variants (upper, lower, first letter swapped) when the pattern has
+   letters outside escapes;
+5. one-edit neighbours of the four shortest members (up to 12 bytes): each
+   byte deleted, a byte inserted at each position (its neighbour doubled,
+   `\n`, NUL, 0xFF), each byte substituted (+1, -1, `\n`, 0xFF).
+
+Each node keeps at most 24 values, a value is at most 64 bytes, and the regex
+part at most `regexDomainCap` (768) values. Stages 1-4 come right after the
+SUT's own literals in `boundaryOf(string)`, stage 5 after the length
+thresholds, all inside the 2048 cap (the pairs and triples at the tail are what
+a regex-heavy SUT can lose to it).
+
+Per-row records: a `pinFind` record's domain text ends with
+` regex[<n> patterns, <m> outside]{<constructs>}` (for instance
+`regex[1 patterns, 0 outside]{lit,group,alt,star,plus,verb}`), computed at
+macro time from the same parse, so each record says which constructs its pin
+exercised and whether a pattern fell back.
+
+Self-tests (`tsymex_0016_k9d_pinfind`, 71 OK c and cpp): the harvest (patterns
+apart from data literals, a backreference pattern harvested but outside);
+every stage-1 member of 15 patterns covering each construct matches its
+pattern in full natively (std/re, `(?:p)\z`, verbs kept leading); a bound's
+min-1/max+1, a class's outside neighbours, `.` as a newline, `.` over a code
+point in UTF mode only; the boundary stage beside `^`/`$`; case variants
+only with letters; the one-edit stage; five outside patterns fall back to
+exactly the plain domain; 60 patterns stay within the caps, deterministic and
+deduplicated; a planted unsat claim whose only hit is a quantifier's max+1
+(`k{2,5}` six times) is refused over the regex domain and the plain domain
+lacks the value; a regex unsat and a regex sat verdict pinned with the
+constructs in the record.
+
+### Conversions
+
+23 suites convert (local c runs, rc 0, every definite verdict reproduced
+natively): `0016_f1_searchdfa_vok`, `phase15_A2a_atomize`, `phase15_E1_ir`,
+`phase15_E5_finally`, `phase15_E7_smoke`, `phase15_S6b_regex`,
+`phase15_S7b_smoke`, `phase15_rereview_drains`, `r14_continue_guard`,
+`r1b_shortcircuit_oob`, `r6_b5_chained`, `r6_n43_parity`, `retest_c11_stack`,
+`retest_char_needle`, `retest_pred_succ`, `rfc0005_s8cf_classes`,
+`_classes_b`, `_jitlimit`, `_jitutf`, `_limitgaps`, `_limits`, `_replace`,
+`_skipcount`. 12 of them do not match against a regex at all (the family was
+assigned by a keyword); they convert over the existing domains. The census
+ceiling 107 -> 84.
+
+The 30 suites already pinned whose SUTs hold regex literals (the 26 earlier
+conversions on the regex list, `s8ay_remainder`, `_b`, `s8cf_point`, `_b`)
+now pin over the regex domain; all rerun green locally (c).
+
+Not converted, calls left as `symexFind` (ref and ptr parameters, K9d-10):
+`phase15_rereview_drains`' twelve `ref int` SUTs (its `bool` one is pinned),
+`r6_n43_parity`'s five `ref N43Outer` SUTs and its `seq` of an object holding
+a `Table[string, ref int]`, `phase15_E5_finally`'s `finallyHeapWrites`
+(`ptr int`). Whole suites deferred to K9d-10: `h_verification` (every SUT
+takes a `Node` ref) and `phase15_r13_ptr_finally` (`ptr int`).
+
+Failures triaged: none beyond the ref/ptr domains above (compile-time
+refusals, `no generated domain`). The regex domain found no walker/native
+disagreement in these suites, so no soundness row: the PCRE/Z3 differences it
+probes (`$` before a final newline, `.` and newline, case, byte versus UTF-8
+under `(*UTF)`) all reproduced natively.
 
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 

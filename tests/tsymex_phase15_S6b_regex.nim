@@ -33,6 +33,7 @@ import std/[unittest, strutils]
 import std/re        ## match/find/contains/replace with compiled Regex
 import nelli/symex
 
+from ./s8cu_helpers import pinFind
 # --- match: [a-z]+ → SAT, all-lowercase witness ---
 proc matchLower(s: string) =
   if s.len == 3 and s.match(re"[a-z]+"):
@@ -64,14 +65,14 @@ suite "symex Phase 15 S6b — regex match walker integration":
   test "match [a-z]+: SAT with a lowercase-led witness":
     # RFC-0005 S8ay: `match` is a prefix match, so only the first byte must
     # be lowercase (this pinned all three).
-    let r = symexFind(matchLower, tLabel("hit"))
+    let r = pinFind(matchLower, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len == 3
     check r.witness[0][0] in {'a'..'z'}
     check r.witness[0].match(re"[a-z]+")
 
   test "match \\d+: SAT with a digit-led witness":
-    let r = symexFind(matchDigits, tLabel("hit"))
+    let r = pinFind(matchDigits, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len == 2
     check r.witness[0][0] in {'0'..'9'}
@@ -79,14 +80,14 @@ suite "symex Phase 15 S6b — regex match walker integration":
 
   test "re\"\" matches a prefix of a non-empty string: SAT":
     # RFC-0005 S8ay: was pinned sxUnsat -- a false verdict.
-    let r = symexFind(matchEmptyContradiction, tLabel("hit"))
+    let r = pinFind(matchEmptyContradiction, tLabel("hit"))
     check r.status == sxSat
 
   test "backreference re\"(.)\\1\": a fresh value, never a claim":
     # RFC-0005 S8ay: a valid pattern (PCRE accepts it) whose language the
     # walker does not model: `seZ3StringIncomplete` (a fresh bool, a SAT is
     # replay-gated), no longer `seUnsupportedRegex`.
-    let r = symexFind(matchBackref, tLabel("hit"))
+    let r = pinFind(matchBackref, tLabel("hit"))
     check r.status in {sxSat, sxUnknown}
     var named = false
     for e in r.errors:
@@ -98,6 +99,6 @@ suite "symex Phase 15 S6b — regex match walker integration":
   test "regex replace: \"foofoo\".replace(re\"f+\", \"x\") is \"xoox\", so \"xoxo\" is sxUnsat":
     # RFC-0005 S8aw (was sxUnknown + seZ3VersionMissing: the gated
     # `str.replace_re` was never built in).
-    let r = symexFind(replaceRe, tLabel("hit"))
+    let r = pinFind(replaceRe, tLabel("hit"))
     check r.status == sxUnsat
     for e in r.errors: check e.kind != seZ3VersionMissing

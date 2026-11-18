@@ -57,7 +57,7 @@
 ## `seZ3VersionMissing`); the `bytes(s)` model and its two kinds
 ## (`seBytesLengthTooLarge`, `seBytesSymbolicLength`) are deleted/retired, so
 ## their rows below are removed; the regex rows use the real `std/re`.
-import std/[unittest, strutils, os, unicode, re]
+import std/[unittest, strutils, os, unicode, re, sets]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -521,11 +521,19 @@ suite "RFC-0005 S5 (e) -- the funnels' substituting kinds stay ⊤":
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedRegex)
 
-  test "seNestedSeqUnsupported (R1 placeholder .len) keeps an unreachable target sxUnknown":
+  test "a seq of seqs field is backed: its unreachable target decides":
+    ## RFC-0016 S8cp-r (walker 400, PRC-23): a `seq[seq[string]]` field is
+    ## backed and its witness read, so this run no longer reaches the R1
+    ## placeholder funnel (was `sxUnknown` with `seNestedSeqUnsupported`).
+    var h = S5Holder(opts: @[@["a"]])
+    for n in [5, 6, 0]:
+      symexCaptureBegin()
+      s5PlaceholderLenDead(h, n)
+      check "s5_placeholder_len_dead" notin symexCaptureEnd()
     let r = symexFind(s5PlaceholderLenDead, tLabel("s5_placeholder_len_dead"))
     checkpoint($kindNames(r.errors))
-    check r.status == sxUnknown
-    check r.errors.hasKind(seNestedSeqUnsupported)
+    check r.status == sxUnsat
+    check not r.errors.hasKind(seNestedSeqUnsupported)
 
   test "seRuneDecodeSymbolic (runeLen, forced 0) keeps an unreachable target sxUnknown":
     let r = symexFind(s5RuneLenDead, tLabel("s5_runelen_dead"))

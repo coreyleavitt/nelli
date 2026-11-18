@@ -514,11 +514,13 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     check l.status == sxUnsat
     check l.errors.len == 0
 
-  test "heNewFieldZeroUnsupported: dead target is sxUnsat":
+  test "a new ref with a seq of seqs part: dead target is sxUnsat":
+    ## RFC-0016 S8cp-r (walker 400, PRC-23): a seq of seqs is backed, so the
+    ## constructor zero-writes the part (was `heNewFieldZeroUnsupported`).
     let r = symexFind(s6bNewSeqFieldDead, tLabel("s6b_new_seq_field_dead"))
     show r
-    check r.errors.hasKind(heNewFieldZeroUnsupported)
-    checkUnsatOverTaintOnly(r)
+    check r.status == sxUnsat
+    check not r.errors.hasKind(heNewFieldZeroUnsupported)
 
 # =============================================================================
 # (c) guards: what must NOT flip
@@ -586,18 +588,23 @@ suite "RFC-0005 S6b (c) -- guards":
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOpHavoc)
 
-  test "an untouched new-ref distinct field (a seq one until RFC-0005 S8ap) is a candidate: sxUnknown, never sxSat":
+  test "an untouched new-ref field with a seq of seqs part is zero: sxUnsat":
+    ## RFC-0016 S8cp-r (walker 400, PRC-23): the part is zero-written, so
+    ## `items.x` is 0, as the native run shows (was `sxUnknown`).
+    for n in [-1, 0, 1]: check S6bBox(v: n).items.x == 0
     let r = symexFind(s6bNewSeqFieldLive, tLabel("s6b_new_seq_field_live"))
     show r
-    check r.errors.hasKind(heNewFieldZeroUnsupported)
-    check r.status == sxUnknown
+    check not r.errors.hasKind(heNewFieldZeroUnsupported)
+    check r.status == sxUnsat
 
-  test "substituted: tuple equality by name keeps feUnsupportedOp; a dead target stays sxUnknown":
+  test "tuple equality is modelled: a dead target is sxUnsat":
+    ## RFC-0016 S8cp-r (walker 391, PRC-34): `==` on two atom tuples is the
+    ## conjunction of the fields' `==` (was `feUnsupportedOp`, `sxUnknown`).
+    ## `n == 5 and n == 6` holds for no `n`.
     let r = symexFind(s6bTupleEqDead, tLabel("s6b_tuple_eq_dead"))
     show r
-    check r.errors.hasKind(feUnsupportedOp)
-    check not r.errors.hasKind(feUnsupportedOpHavoc)
-    check r.status == sxUnknown
+    check not r.errors.hasKind(feUnsupportedOp)
+    check r.status == sxUnsat
 
   test "no answer: the boundary abort records feUnsupportedOpAborted and is sxUnknown":
     let r = symexFind(s6bLn, tLabel("s6b_ln"))

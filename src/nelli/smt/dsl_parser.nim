@@ -1210,6 +1210,8 @@ type
                                    ## compiler's typed instance of its body,
                                    ## which `dupHookSites` reads instead of
                                    ## the monomorphised one walked.
+    dupInstFormals*: NimNode       ## RFC-0016 PRC-46. Its formals as written
+                                   ## (`dupSinkFromGeneric`).
     stringBackedParams*: seq[NimNode]
                                    ## Round-6 B1 (ADR-0028 Leg 1); RE-KEYED
                                    ## round-6 R4 (findings W1/N8/N2). The
@@ -24304,6 +24306,7 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     let inst = try: calleeSym.getImpl except CatchableError: newEmptyNode()
     if inst.kind in RoutineNodes and inst.len > 6 and inst[2].kind == nnkEmpty:
       ctx.procScoped.dupInstBody = inst[6]
+      ctx.procScoped.dupInstFormals = inst[3]
   # RFC-0005 S8e: a callee runs in its own env frame, so it is its own
   # naming scope -- claimed before `parseCalleeImpl`'s pre-passes read a
   # name, discarded (with its renames) once its IR is built.
@@ -25809,6 +25812,8 @@ type
                           ## `finally` body, or nil
     cursors: seq[NimNode] ## PRC-45: locals declared `{.cursor.}`
     generic: bool         ## PRC-45: the routine is a generic one's instance
+    formals: NimNode      ## PRC-46: its formals as written (a generic
+                          ## instance's still spell its `T`), or nil
     body: NimNode         ## PRC-45: the routine body scanned
     inits: seq[tuple[v, init: NimNode]]  ## PRC-45: each local's initialiser
     aliases: seq[tuple[b, a: NimNode]]   ## PRC-45: `let b = a`, `a` a local
@@ -25929,7 +25934,16 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
     s.alive = saved
     return
   of nnkStmtList, nnkStmtListExpr:
-    for c in n:
+    for i, c in n:
+      if c.kind == nnkDefer and c.len > 0:
+        # PRC-46: the compiler lowers a `defer` to a `try` holding the rest
+        # of its statement list, the `defer`'s body its `finally`.
+        var rest = newNimNode(nnkStmtList)
+        for k in i + 1 ..< n.len: rest.add n[k]
+        let t = newTree(nnkTryStmt, rest, newTree(nnkFinally, c[^1]))
+        inc nextStmt
+        dupScan(t, s, nextStmt, loop, unsafe, nextStmt)
+        return
       inc nextStmt
       dupScan(c, s, nextStmt, loop, unsafe, nextStmt)
     return
@@ -26098,14 +26112,16 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
       s.inits.add (n[0], n[2])
       # PRC-45: a copy of another local, whose cursor inference
       # `dupClassify` follows (`dupAliasCursor`).
+      # PRC-46: in a loop too (`dupAliasCursor` walks loops).
       if n[2].kind == nnkSym and symKind(n[2]) in {nskLet, nskVar} and
-         not isModuleGlobal(n[2]) and not loop:
+         not isModuleGlobal(n[2]):
         s.aliases.add (n[0], n[2])
     if n.len == 3 and n[0].kind == nnkSym and not loop:
       let init = n[2]
       if init.kind in {nnkObjConstr, nnkTupleConstr} or
          (init.kind == nnkBracket and init.typeKind == ntyArray) or
-         (init.kind == nnkCall and init.len > 0 and init[0].kind == nnkSym and
+         (init.kind in {nnkCall, nnkPrefix} and init.len > 0 and
+          init[0].kind == nnkSym and
           symKind(init[0]) in {nskProc, nskFunc} and
           init.typeKind notin {ntyVar, ntyNone}):
         s.fresh.add n[0]
@@ -26113,11 +26129,23 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
       s.initCtor = true
       dupScan(n[2], s, stmt, loop, unsafe, nextStmt)
       s.initCtor = false
+    # PRC-46: a declaration defines its local afresh (a loop's next pass):
+    # a path from a site of the old value reads no more of it.
+    for i in 0 ..< n.len - 2:
+      let v = if n[i].kind == nnkPragmaExpr and n[i].len > 0: n[i][0] else: n[i]
+      if v.kind != nnkSym: continue
+      var keep: seq[int]
+      for k in s.alive:
+        let e = s.sites[k].event
+        if e < 0 or s.events[e].sym != v: keep.add k
+      s.alive = keep
     return
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit:
     if n.len > 0:
       let ty = n[0].getTypeInst
-      if ty.kind == nnkProcTy and ty.len > 0 and ty[0].kind == nnkFormalParams:
+      # PRC-46: an iterator's formals too (`for e in x`: `items(x)`).
+      if ty.kind in {nnkProcTy, nnkIteratorTy} and ty.len > 0 and
+         ty[0].kind == nnkFormalParams:
         var formals: seq[NimNode]
         for i in 1 ..< ty[0].len:
           for _ in 0 ..< ty[0][i].len - 2: formals.add ty[0][i][^2]
@@ -26249,6 +26277,76 @@ proc dupDestroyKind(t: NimNode; depth = 0): DupDestroy =
     of ddUnknown: result = ddUnknown
     of ddTrivial: discard
 
+type DupAsgn = object
+  ## PRC-46. Whether a type has `tfHasAsgn` (`known`, `has`), and the node
+  ## whose position it has had it from (`at`).
+  known, has: bool
+  at: NimNode
+
+proc dupBefore(a, b: NimNode): int =
+  ## PRC-46. 1 when `a` is written before `b` in the same file, 0 when after
+  ## it, -1 when the two are not comparable (different files, no position).
+  let x = a.lineInfoObj
+  let y = b.lineInfoObj
+  if x.filename.len == 0 or x.filename != y.filename: return -1
+  if x.line < y.line or (x.line == y.line and x.column < y.column): 1 else: 0
+
+proc dupInstAsgn(t: NimNode; depth = 0): DupAsgn =
+  ## PRC-46. Whether the type `t` has `tfHasAsgn` when a generic routine is
+  ## instantiated with it, which its instance's `sink T` takes
+  ## (`semtypinst` propagates it; a non-generic `sink T` is made without).
+  ## A user hook sets it on its type where the hook is bound
+  ## (`semstmts.bindTypeHook`); an object takes it from a field whose type
+  ## has it when the object is declared (`semtypes.semRecordNodeAux`'s
+  ## `propagateToOwner`), so an object declared before its field's hook has
+  ## none. Native (Nim 2.2.10, c and cpp): `DBox(o: DObj)` declared after
+  ## DObj's `=dup` runs it inside a generic routine; `DEarly(o: DLate)`
+  ## declared in DLate's type section, before its hook, does not. A tuple or
+  ## an array takes its flag where it is written, which is not read here.
+  if t.isNil or depth > 8: return DupAsgn()
+  case t.typeKind
+  of ntyBool, ntyChar, ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
+     ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64, ntyFloat,
+     ntyFloat32, ntyFloat64, ntyEnum, ntyRange, ntySet, ntyPtr, ntyPointer,
+     ntyCString:
+    return DupAsgn(known: true)
+  of ntyObject: discard
+  else: return DupAsgn()  # k2: fail-closed: unknown: a tuple or an array (flagged where written), a kind with a destructor
+  if t.kind != nnkSym or symKind(t) != nskType: return DupAsgn()
+  let tk = routeTypeKey(t)
+  if tk.len == 0 or tk notin typeHooks or tk in unprovedTypes:
+    return DupAsgn()
+  var hooks = typeHooks[tk]   # a copy (S8ab)
+  # Positions are the declarations' (a symbol's own is where it is named).
+  let decl = t.getImpl
+  if decl.kind != nnkTypeDef: return DupAsgn()
+  if hooks.len > 0:
+    var first: NimNode = nil
+    for h in hooks:
+      let hd = h.getImpl
+      if hd.kind notin RoutineNodes: return DupAsgn()
+      if first.isNil: first = hd
+      else:
+        case dupBefore(hd, first)
+        of 1: first = hd
+        of 0: discard
+        else: return DupAsgn()
+    return DupAsgn(known: true, has: true, at: first)
+  let impl = t.getTypeImpl
+  if impl.kind != nnkObjectTy or impl.len < 3 or impl[1].kind != nnkEmpty or
+     impl[2].kind != nnkRecList:
+    return DupAsgn()
+  result = DupAsgn(known: true)
+  for d in impl[2]:
+    if d.kind != nnkIdentDefs: return DupAsgn()
+    let f = dupInstAsgn(d[^2], depth + 1)
+    if not f.known: return DupAsgn()
+    if f.has:
+      case dupBefore(f.at, decl)
+      of 1: result = DupAsgn(known: true, has: true, at: decl)
+      of 0: discard
+      else: return DupAsgn()
+
 proc dupProbeHeld(t: NimNode; ctx: ParseCtx; depth = 0) =
   ## PRC-45. Notes for the probe (`dupUnprobed`) each nominal object type
   ## `t` holds by value, itself included.
@@ -26274,22 +26372,37 @@ proc dupProbeHeld(t: NimNode; ctx: ParseCtx; depth = 0) =
     if impl.len == 3: dupProbeHeld(impl[2], ctx, depth + 1)
   else: return  # k2: n/a: nothing held to probe; `dupDestroyKind` reads the shape as ddUnknown
 
+type DupRead = tuple[t, rob, seq: int; call: NimNode]
+  ## PRC-46: a read on `computeLiveRanges`'s clock (`t`), the nodes entered
+  ## the compiler's own tree has too (`rob`), its place in the walk (`seq`),
+  ## and the call it is a bare argument of (nil when it is not one).
+
 type DupLive = object
   ## PRC-45. `varpartitions.computeLiveRanges`'s clock over a routine body,
   ## for a local `b` declared `let b = a`.
   ok: bool
-  t, rob: int            ## the clock; and the nodes entered that the
-                         ## compiler's own tree has too (`dupRobust`)
-  aEnd, bEnd: tuple[t, rob: int]
+  t, rob, seq: int       ## the clock; the nodes entered that the compiler's
+                         ## own tree has too (`dupRobust`); every node walked
+  aEnd, bEnd: DupRead
   bDecl: int
   muts: seq[tuple[lo, hi: int]]  ## where a write may mutate a graph
+  inLoop, inCond: int    ## PRC-46: the second walk of a loop; a branch
+  aLoopDecl: bool        ## PRC-46: `a` declared in a loop (`isReassigned`)
+  bCondLoopDecl: bool    ## PRC-46: `b` declared under a branch in a loop
+                         ## (`isConditionallyReassigned`)
+  bFlows: bool           ## PRC-46: `b` read into a value that may hold a
+                         ## pointer (`connect`: b's graph may grow)
 
 const dupRobust = {nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
                    nnkCallStrLit, nnkDotExpr, nnkObjConstr, nnkIfStmt,
                    nnkIfExpr, nnkElifBranch, nnkElifExpr, nnkElse, nnkElseExpr,
                    nnkAsgn, nnkFastAsgn, nnkLetSection, nnkVarSection,
                    nnkReturnStmt, nnkBracket, nnkTupleConstr, nnkBracketExpr,
-                   nnkCaseStmt, nnkOfBranch, nnkDiscardStmt, nnkRaiseStmt}
+                   nnkCaseStmt, nnkOfBranch, nnkDiscardStmt, nnkRaiseStmt,
+                   nnkTryStmt, nnkExceptBranch, nnkFinally, nnkWhileStmt,
+                   nnkForStmt}
+  ## PRC-46: a `for` over a listed iterator stands for the `while` it is
+  ## inlined into, a `defer` for the `try`/`finally` it is lowered to.
 
 proc dupHasPointer(t: NimNode; depth = 0): bool =
   ## PRC-45. A value of the type `t` may hold a pointer, so the compiler takes
@@ -26332,16 +26445,27 @@ const dupLiveKinds = {nnkLetSection, nnkVarSection, nnkAsgn, nnkFastAsgn,
   nnkBracket, nnkCurly, nnkReturnStmt, nnkDiscardStmt, nnkRaiseStmt,
   nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkCast, nnkHiddenDeref,
   nnkDerefExpr, nnkCheckedFieldExpr, nnkObjDownConv, nnkObjUpConv,
-  nnkChckRange, nnkChckRange64, nnkChckRangeF, nnkRange}
-  ## PRC-45. The kinds `dupLiveWalk` follows; any other (a loop: walked twice;
-  ## a nested routine or a `defer`: its own clock; a `try`) is not followed.
+  nnkChckRange, nnkChckRange64, nnkChckRangeF, nnkRange, nnkTryStmt,
+  nnkExceptBranch, nnkFinally, nnkWhileStmt, nnkForStmt, nnkProcDef,
+  nnkFuncDef, nnkLambda, nnkDo}
+  ## PRC-45. The kinds `dupLiveWalk` follows; any other is not followed.
+  ## PRC-46: a loop (walked twice), a `try`, a nested routine that captures
+  ## neither local (no time: `nodesToIgnoreSet`); a `defer` in a statement
+  ## list (as the `try`/`finally` the compiler lowers it to).
 
-proc dupLiveWalk(n, a, b: NimNode; st: var DupLive) =
+proc dupLiveRead(st: var DupLive; call: NimNode): DupRead =
+  (st.t, st.rob, st.seq, call)
+
+proc dupLiveWalk(n, a, b: NimNode; st: var DupLive; call: NimNode = nil) =
+  ## PRC-45. `computeLiveRanges` over `n`, for `let b = a`. `call` is the call
+  ## `n` is a bare argument of. PRC-46: the loops, `try`, `defer` and nested
+  ## routines too.
   if not st.ok: return
   if n.kind notin dupLiveKinds:
     st.ok = false
     return
   inc st.t
+  inc st.seq
   if n.kind in dupRobust: inc st.rob
   let entry = st.t
   case n.kind
@@ -26349,24 +26473,38 @@ proc dupLiveWalk(n, a, b: NimNode; st: var DupLive) =
     for d in n:
       if d.len < 3: continue
       dupLiveWalk(d[^1], a, b, st)
+      if d[^1].kind != nnkEmpty and mentionsSym(d[^1], b):
+        for i in 0 ..< d.len - 2:
+          if dupHasPointer(d[i].getTypeInst): st.bFlows = true
       for i in 0 ..< d.len - 2:
         let v = if d[i].kind == nnkPragmaExpr: d[i][0] else: d[i]
-        if v == b: st.bDecl = entry
+        if v == b and st.bDecl < 0: st.bDecl = entry
+        # PRC-46: a declaration in a loop's second walk is a reassignment
+        # (`markAsReassigned`, bug #22787), under a branch a conditional one.
+        if st.inLoop > 0 and d[^1].kind != nnkEmpty:
+          if v == a: st.aLoopDecl = true
+          if v == b and st.inCond > 0: st.bCondLoopDecl = true
   of nnkAsgn, nnkFastAsgn:
     dupLiveWalk(n[0], a, b, st)
     dupLiveWalk(n[1], a, b, st)
     if n[0].kind != nnkSym: st.muts.add (entry, st.t)
+    if mentionsSym(n[1], b) and dupHasPointer(n[0].getTypeInst):
+      st.bFlows = true
   of nnkSym:
     dec st.t
-    if n == a: st.aEnd = (st.t, st.rob)
-    if n == b: st.bEnd = (st.t, st.rob)
+    if n == a: st.aEnd = dupLiveRead(st, call)
+    if n == b: st.bEnd = dupLiveRead(st, call)
   of nnkNone, nnkEmpty, nnkIdent, nnkType, nnkCharLit .. nnkNilLit,
      nnkTypeSection, nnkConstSection, nnkPragma, nnkCommentStmt,
      nnkTypeOfExpr, nnkMixinStmt, nnkBindStmt, nnkIncludeStmt,
      nnkImportStmt, nnkExportStmt:
     dec st.t
+  of nnkProcDef, nnkFuncDef, nnkLambda, nnkDo:
+    # PRC-46: a nested routine is not followed (`nodesToIgnoreSet`); one
+    # naming either local is read by `dupAliasCursor` before the walk.
+    dec st.t
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit:
-    for c in n: dupLiveWalk(c, a, b, st)
+    for i, c in n: dupLiveWalk(c, a, b, st, if i > 0: n else: nil)
     for i in 1 ..< n.len:
       if n[i].kind in {nnkCharLit .. nnkNilLit}: continue
       if dupHasPointer(n[i].getTypeInst): st.muts.add (entry, st.t)
@@ -26375,15 +26513,76 @@ proc dupLiveWalk(n, a, b: NimNode; st: var DupLive) =
     st.muts.add (entry, st.t)
   of nnkPragmaBlock:
     dupLiveWalk(n[^1], a, b, st)
-  of nnkStmtList, nnkStmtListExpr, nnkIfStmt, nnkIfExpr, nnkElifBranch,
-     nnkElifExpr, nnkElse, nnkElseExpr, nnkCaseStmt, nnkOfBranch,
-     nnkBlockStmt, nnkBlockExpr, nnkDotExpr, nnkBracketExpr, nnkObjConstr,
+  of nnkStmtList, nnkStmtListExpr:
+    for i, c in n:
+      if c.kind == nnkDefer:
+        # PRC-46: the compiler lowers a `defer` to a `try` holding the rest
+        # of its statement list, the `defer`'s body its `finally` (read with
+        # `--expandArc`): the rest first, then the body.
+        inc st.t
+        inc st.seq
+        inc st.rob
+        for k in i + 1 ..< n.len: dupLiveWalk(n[k], a, b, st)
+        inc st.t
+        inc st.seq
+        inc st.rob
+        for c2 in c: dupLiveWalk(c2, a, b, st)
+        return
+      dupLiveWalk(c, a, b, st)
+  of nnkIfStmt, nnkIfExpr, nnkElse, nnkElseExpr, nnkCaseStmt, nnkBlockStmt,
+     nnkBlockExpr, nnkDotExpr, nnkBracketExpr, nnkObjConstr,
      nnkExprColonExpr, nnkTupleConstr, nnkPar, nnkBracket, nnkCurly,
      nnkReturnStmt, nnkDiscardStmt, nnkRaiseStmt, nnkHiddenStdConv,
      nnkHiddenSubConv, nnkConv, nnkCast, nnkHiddenDeref, nnkDerefExpr,
      nnkCheckedFieldExpr, nnkObjDownConv, nnkObjUpConv, nnkChckRange,
-     nnkChckRange64, nnkChckRangeF, nnkRange:
+     nnkChckRange64, nnkChckRangeF, nnkRange, nnkTryStmt, nnkFinally:
+    # `nkElse` counts as a branch (below); `nkElseExpr` does not.
+    let branch = n.kind == nnkElse
+    if branch: inc st.inCond
     for c in n: dupLiveWalk(c, a, b, st)
+    if branch: dec st.inCond
+  of nnkElifBranch, nnkElifExpr, nnkOfBranch:
+    inc st.inCond
+    for c in n: dupLiveWalk(c, a, b, st)
+    dec st.inCond
+  of nnkExceptBranch:
+    # Its exception types, then its body; `except E as e` is lowered to a
+    # local the typed tree does not have: not followed.
+    for i in 0 ..< n.len - 1:
+      if n[i].kind notin {nnkSym, nnkType}:
+        st.ok = false
+        return
+    for c in n: dupLiveWalk(c, a, b, st)
+  of nnkWhileStmt:
+    # `computeLiveRanges`: the children, again in the loop, then the
+    # condition once more.
+    for c in n: dupLiveWalk(c, a, b, st)
+    inc st.inLoop
+    for c in n: dupLiveWalk(c, a, b, st)
+    dec st.inLoop
+    dupLiveWalk(n[0], a, b, st)
+  of nnkForStmt:
+    # Inlined (`transf`) into a `while` holding the body once when the
+    # iterator is a listed one of `system`'s; its header must name neither
+    # local and write nothing (it is evaluated before the `while`, or read
+    # in its condition).
+    let iter = n[^2]
+    let known = iter.kind in {nnkCall, nnkCommand, nnkInfix} and
+      iter.len > 0 and iter[0].kind == nnkSym and
+      symKind(iter[0]) == nskIterator and
+      macros.strVal(iter[0]) in dupLoopIters and isStdlibDecl(iter[0])
+    if not known or mentionsSym(iter, a) or mentionsSym(iter, b):
+      st.ok = false
+      return
+    let m0 = st.muts.len
+    dupLiveWalk(iter, a, b, st)
+    if st.muts.len != m0:
+      st.ok = false
+      return
+    dupLiveWalk(n[^1], a, b, st)
+    inc st.inLoop
+    dupLiveWalk(n[^1], a, b, st)
+    dec st.inLoop
   else: return  # k2: fail-closed: return: unreachable, `st.ok` cleared above for a kind not in `dupLiveKinds`
 
 proc dupWriteRoot(n: NimNode): NimNode =
@@ -26428,10 +26627,12 @@ proc dupAliasCursor(body, b, a, aInit: NimNode): tuple[known, cursor: bool] =
   ## reassigned, passed by address or `var` (C, D, `noCursor`), and no
   ## write that may mutate what `b` borrows falls within `b`'s life
   ## (`dangerousMutation`). `known` is false for what is not followed here:
-  ## a loop, a nested routine, a `defer`, `b` in a constructor (`pretendOwns
-  ## Data`), an initialiser of `a` whose arm is not read, or last reads the
-  ## compiler's own tree may order otherwise (no node of both trees between
-  ## them).
+  ## `b` in a constructor (`pretendOwnsData`), an initialiser of `a` whose
+  ## arm is not read, a `for` over an iterator not listed or whose header
+  ## names either local, `except E as e`, a nested iterator or template
+  ## naming either, or `a`'s last read before `b`'s with only nodes between
+  ## them the compiler's own tree may not have. PRC-46: loops, `try`,
+  ## `defer`, nested routines and tied last reads are followed.
   if a.kind != nnkSym or b.kind != nnkSym or aInit.isNil or
      not dupInitOwnsSafe(aInit):
     return (false, false)
@@ -26460,15 +26661,94 @@ proc dupAliasCursor(body, b, a, aInit: NimNode): tuple[known, cursor: bool] =
     for c in n: check(c)
   check(body)
   if bad: return (false, false)
-  var st = DupLive(ok: true, aEnd: (-1, -1), bEnd: (-1, -1), bDecl: -1)
+  # PRC-46: a nested routine naming either local. Natively (c and cpp, read
+  # with `--expandArc`) lambda lifting moves a captured local into the
+  # closure's environment, a local the routine assigns: a copy of a
+  # captured `a` borrows from a reassigned location and owns (rule C), and a
+  # captured `b` is a field of the environment, copied at every sink
+  # position. A routine of another kind naming either is not followed.
+  var capA, capB, other = false
+  proc captures(n: NimNode; inner: bool) =
+    if n.kind in RoutineNodes:
+      if n.kind notin {nnkProcDef, nnkFuncDef, nnkLambda, nnkDo}:
+        if mentionsSym(n, a) or mentionsSym(n, b): other = true
+        return
+      for c in n: captures(c, true)
+      return
+    if inner and n.kind == nnkSym:
+      if n == a: capA = true
+      if n == b: capB = true
+    for c in n: captures(c, inner)
+  captures(body, false)
+  if other: return (false, false)
+  if capB: return (true, true)
+  if capA: return (true, false)
+  var st = DupLive(ok: true, aEnd: (-1, -1, -1, nil), bEnd: (-1, -1, -1, nil),
+                   bDecl: -1)
   dupLiveWalk(body, a, b, st)
   if not st.ok or st.bDecl < 0 or st.aEnd.t < 0 or st.bEnd.t < 0:
     return (false, false)
-  if st.aEnd.rob == st.bEnd.rob: return (false, false)
-  if st.aEnd.t < st.bEnd.t: return (true, false)   # B: `a` dies first
-  for m in st.muts:
-    if m.hi >= st.bDecl and m.lo <= st.bEnd.t: return (false, false)
+  # PRC-46: `a` declared in a loop is reassigned (C); `b` declared under a
+  # branch in one is conditionally reassigned (`computeCursors`).
+  if st.aLoopDecl or st.bCondLoopDecl: return (true, false)
+  # B: `a`'s last read strictly before `b`'s on the compiler's clock. When
+  # `a`'s comes after `b`'s in the walk it does in the compiler's tree too
+  # (both keep a call's arguments, and every other node, in order): never.
+  # Before it, a node of both trees entered between them puts it strictly
+  # before. PRC-46: with no node at all between them, both bare arguments
+  # of one call, they share the time (`dTake2(b, a)`, `dTakeR(a, b)`).
+  if st.aEnd.seq < st.bEnd.seq:
+    if st.aEnd.rob < st.bEnd.rob: return (true, false)
+    if not (st.aEnd.t == st.bEnd.t and not st.aEnd.call.isNil and
+            st.aEnd.call == st.bEnd.call):
+      return (false, false)
+  # `dangerousMutation`: a write that may mutate b's graph within its life.
+  # PRC-46: a `b` whose type holds no pointer, read into nothing that does,
+  # is a graph of its own, which only a write of `b` mutates (refused above).
+  if dupHasPointer(b.getTypeInst) or st.bFlows:
+    for m in st.muts:
+      if m.hi >= st.bDecl and m.lo <= st.bEnd.t: return (false, false)
   (true, true)
+
+proc dupHasGenericParam(t: NimNode; depth = 0): bool =
+  ## PRC-46. The type expression `t` names a generic parameter. A generic
+  ## routine's instance keeps its formals as the generic writes them, where
+  ## a generic parameter is an identifier (every other name is a symbol).
+  if t.isNil or depth > 16: return false
+  if t.kind == nnkIdent: return true
+  if t.kind == nnkSym:
+    return symKind(t) == nskType and t.typeKind == ntyGenericParam
+  for c in t:
+    if dupHasGenericParam(c, depth + 1): return true
+  false
+
+proc dupFormalsGeneric(formals: NimNode): bool =
+  ## PRC-46. The formals `formals` (a routine's `getImpl[3]`) spell a generic
+  ## parameter: the routine is a generic one or its instance (whose
+  ## `getImpl` has no generic parameters but keeps the formals as written).
+  if formals.isNil or formals.kind != nnkFormalParams: return false
+  for i in 1 ..< formals.len:
+    if formals[i].kind == nnkIdentDefs and formals[i].len >= 2 and
+       dupHasGenericParam(formals[i][^2]):
+      return true
+  false
+
+proc dupSinkFromGeneric(s: DupScan; p: NimNode): bool =
+  ## PRC-46. The `sink` parameter `p` of the scanned routine has its type
+  ## from an instantiation: the routine is a generic one's instance and the
+  ## formal is written with a generic parameter (`semtypinst` makes its
+  ## `sink T` anew, taking T's flags; a formal written with none is kept as
+  ## it is, as a non-generic routine's).
+  if not s.generic or s.formals.isNil or s.formals.kind != nnkFormalParams:
+    return false
+  let name = macros.strVal(p)
+  for i in 1 ..< s.formals.len:
+    let d = s.formals[i]
+    if d.kind != nnkIdentDefs or d.len < 3: continue
+    for j in 0 ..< d.len - 2:
+      if d[j].kind in {nnkSym, nnkIdent} and macros.strVal(d[j]) == name:
+        return dupHasGenericParam(d[^2])
+  false
 
 type DupClass = enum
   dcMove     ## its source's provable last read: the move
@@ -26514,13 +26794,24 @@ proc dupClassify(s: DupScan; i: int; owner: string): tuple[c: DupClass; why: str
     # destructor is not trivial (`liftdestructors.createTypeBoundOps`);
     # natively (c and cpp) an instance's `sink T` has it whenever T has a
     # user hook, which the scan of an instance does not see.
-    if s.generic:
-      return (dcUnknown, where & " (the `sink` parameter " & what &
-              " of a generic routine is read after it)")
     var pt = ev.sym.getTypeInst
     if pt.kind == nnkBracketExpr and pt.len == 2: pt = pt[1]
     case dupDestroyKind(pt)
-    of ddTrivial: return (dcMove, "")
+    of ddTrivial:
+      if not dupSinkFromGeneric(s, ev.sym): return (dcMove, "")
+      # PRC-46: an instance's `sink T` has a destructor when T has
+      # `tfHasAsgn` where the routine is instantiated (`dupInstAsgn`): every
+      # instantiation is after the routine's declaration, so one after the
+      # flag's source has it.
+      let f = dupInstAsgn(pt)
+      if f.known and not f.has: return (dcMove, "")
+      if f.known and f.has and st.copies and not s.body.isNil and
+         dupBefore(f.at, s.body) == 1:
+        return (dcDup, "")
+      return (dcUnknown, where & " (the `sink` parameter " & what &
+              " of a generic routine is read after it, and whether its " &
+              "type has a destructor where the routine is instantiated is " &
+              "not known)")
     of ddNontrivial:
       if st.copies: return (dcDup, "")
     of ddUnknown:
@@ -26587,12 +26878,14 @@ proc dupSiteKey(arg: NimNode): string =
   ## the route proof read the same routine, so they meet on it.
   macros.strVal(arg) & "@" & arg.lineInfo
 
-proc dupHookSites(body: NimNode; generic: bool): Table[string, NimNode] =
+proc dupHookSites(body: NimNode; generic: bool;
+                  formals: NimNode = nil): Table[string, NimNode] =
   ## PRC-44: the sink positions of the routine body `body` that run their
   ## type's `=dup` (`dcDup`), by `dupSiteKey`. A key two sink positions share,
   ## or a read of a local shares (a template expanded twice), is none of them.
   ## PRC-45: each with its argument's type (a `var` parameter's stripped).
-  var s = DupScan(key: "", generic: generic, provisional: true, body: body)
+  var s = DupScan(key: "", generic: generic, provisional: true, body: body,
+                  formals: formals)
   var nextStmt = 0
   dupScan(body, s, 0, false, false, nextStmt)
   var seen: CountTable[string]
@@ -26629,7 +26922,11 @@ proc dupSinkSites(r: NimNode; key: string; modelled: HashSet[string]): string =
   ## neither.
   let impl = r.getImpl
   if impl.kind notin RoutineNodes or impl.len <= 6: return ""
-  var s = DupScan(key: key, generic: impl[2].kind != nnkEmpty, body: impl[6])
+  # PRC-46: a generic routine's instance has no generic parameters of its
+  # own, but its formals still spell its `T` (`dupFormalsGeneric`).
+  var s = DupScan(key: key, generic: impl[2].kind != nnkEmpty or
+                    dupFormalsGeneric(impl[3]),
+                  body: impl[6], formals: impl[3])
   var nextStmt = 0
   dupScan(impl[6], s, 0, false, false, nextStmt)
   for i in 0 ..< s.sites.len:
@@ -26666,6 +26963,57 @@ proc dupHookFor(t: NimNode; ctx: ParseCtx; probed: var bool): NimNode =
   for x in hooks:
     if dupHookKey(x) == tk and routeHookCopies(x).len > 0: return x
 
+proc dupHookPure(h: NimNode): bool =
+  ## PRC-46. The user hook `h` has no effect beyond its result: its body
+  ## names no module-level variable, calls no user routine (which may reach
+  ## one), and holds no foreign code. Fail-closed.
+  let impl = h.getImpl
+  if impl.kind notin RoutineNodes or impl.len <= 6: return false
+  var pure = true
+  proc walk(n: NimNode) =
+    if not pure: return
+    if n.kind == nnkSym:
+      if isModuleGlobal(n): pure = false
+      elif symKind(n) in {nskProc, nskFunc, nskMethod, nskIterator,
+                          nskConverter} and isUserCallee(n):
+        pure = false
+      return
+    # Foreign code, and a routine declared in it (its own effects); every
+    # other node is scanned through its children, where any name is a symbol.
+    if n.kind in {nnkAsmStmt} + RoutineNodes or
+       (n.kind == nnkPragma and foreignWriteNode(n)):
+      pure = false
+      return
+    for c in n: walk(c)
+  walk(impl[6])
+  pure
+
+proc dupSeqValue(src: IRExpr; t: NimNode; ctx: ParseCtx): IRExpr =
+  ## PRC-46. The compiler's `=dup` of a `seq` of the type `t`'s elements:
+  ## natively (Nim 2.2.10, c and cpp) a loop running the element type's
+  ## `=dup` on each element in index order, never for an empty seq. Modelled
+  ## as the `map` of the element type's user hook over the seq (the walker's
+  ## higher-order `map`: unrolled at a known length, an array map at a
+  ## symbolic one). nil for what is not: an element type without a user
+  ## `=dup` of its own, a hook with an effect beyond its result (its runs
+  ## would have to be ordered against the walk's other effects), a type whose
+  ## hooks are not read yet.
+  let ity = classifyType(t).ty
+  if ity.isNil or ity.kind != itSeq: return nil
+  let impl = t.getTypeImpl
+  if impl.kind != nnkBracketExpr or impl.len != 2: return nil
+  let et = impl[1]
+  if et.kind != nnkSym or symKind(et) != nskType or et.typeKind != ntyObject:
+    return nil
+  var probed = false
+  let h = dupHookFor(et, ctx, probed)
+  if not probed or h.isNil or not dupHookPure(h): return nil
+  let impl2 = h.getImpl
+  if impl2.kind notin RoutineNodes: return nil
+  let fn = parseProcAsValue(h, impl2, ctx)
+  if fn.isNil or fn.kind != iekLambda: return nil
+  mkHofCall("map", src, fn, ity.seqElemTy)
+
 proc dupValue(src: IRExpr; t: NimNode; preamble: var seq[IRStmt];
               ctx: ParseCtx; depth = 0): IRExpr =
   ## PRC-45. What the compiler's `=dup` of the type `t` makes of the value
@@ -26689,7 +27037,9 @@ proc dupValue(src: IRExpr; t: NimNode; preamble: var seq[IRStmt];
     return src   # a copy of it runs no user hook
   of ntyObject, ntyTuple, ntyArray:
     discard
-  else: return nil  # k2: fail-closed: nil: a `seq`, a `distinct`, a generic
+  of ntySequence:
+    return dupSeqValue(src, t, ctx)
+  else: return nil  # k2: fail-closed: nil: a `distinct`, a generic
   let ity = classifyType(t).ty
   if ity.isNil: return nil
   if t.kind == nnkSym and symKind(t) == nskType and t.typeKind == ntyObject:
@@ -26778,7 +27128,8 @@ proc parseDupSite(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr 
     ctx.procScoped.dupScanned = true
     let inst = ctx.procScoped.dupInstBody
     ctx.procScoped.dupSites = dupHookSites(if inst.isNil: body else: inst,
-                                           not inst.isNil)
+                                           not inst.isNil,
+                                           ctx.procScoped.dupInstFormals)
   let key = dupSiteKey(n)
   if key notin ctx.procScoped.dupSites: return nil
   # The argument's type, read where the site was classified (typed there).

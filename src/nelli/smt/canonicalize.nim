@@ -840,8 +840,13 @@ const renderAsChoicesVersion* = "12"
   ##   destructor is not trivial; a value holding the hooked type runs the
   ##   hook per hooked field and element; a copy of a local is a cursor as
   ##   the compiler's inference has it. No key bytes change.
+  ## - RFC-0016 PRC-46 (420->424; 421-423 are taken): a `seq` of the hooked
+  ##   type runs the hook per element (a `map`), a generic routine's `sink`
+  ##   parameter read after the site is copied when its instance's type has
+  ##   `tfHasAsgn`, and the cursor inference follows tied last reads, loops,
+  ##   `try`, `defer` and nested routines. No key bytes change.
 
-const symexWalkerVersion* = "420"
+const symexWalkerVersion* = "424"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

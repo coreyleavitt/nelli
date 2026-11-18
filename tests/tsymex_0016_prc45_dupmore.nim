@@ -195,7 +195,7 @@ proc aReturn(k: int) =
     return
   if a.v == 7: symexTarget("other")
 proc aTied(k: int) =
-  # Nothing between the two last reads: not followed (declines).
+  # Nothing between the two last reads: a cursor (PRC-46).
   if k > 100 or k < -100: return
   let a = DObj(v: k)
   let b = a
@@ -341,8 +341,7 @@ suite "PRC-45":
     check pinExact(aOwnedNever, dCell, domain = idom).status == sxUnsat
     check pinExact(aOwnedRead, dCell, domain = idom).status == sxSat
     check pinExact(aReturn, dCell, domain = idom).status == sxSat
-    pinDecline(aTied, dCell, feGlobalRouteUnproved,
-               needle = "whether the compiler makes it a cursor is not followed")
+    check pinExact(aTied, dCell, domain = idom).status == sxSat
 
   test "a generic routine's sink position is its instance's":
     check native(gLocalSite(1)) == "hit"
@@ -368,6 +367,5 @@ suite "PRC-45":
     check pinExact(cArr, dCell, domain = idom).status == sxSat
     check pinExact(cArrNever, dCell, domain = idom).status == sxUnsat
 
-  test "a seq of the hooked type declines (its `=dup` loops over the elements)":
-    pinDecline(cSeq, dCell, feGlobalRouteUnproved,
-               needle = "may run at a sink position the walk does not model")
+  test "a seq of the hooked type runs the hook per element (PRC-46)":
+    check pinExact(cSeq, dCell, domain = idom).status == sxSat

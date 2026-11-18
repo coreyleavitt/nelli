@@ -1278,7 +1278,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## after; 417 reserved): 416->418.
     ## RFC-0016 PRC-45 (`=dup` at the sink positions PRC-44 left declining;
     ## 419 is S8co's): 418->420.
-    check symexWalkerVersion == "420"
+    ## RFC-0016 PRC-46 (`=dup` over a seq, a generic `sink` parameter, the
+    ## cursor inference through loops, `try`, `defer`, nested routines;
+    ## 421-423 are taken): 420->424.
+    check symexWalkerVersion == "424"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

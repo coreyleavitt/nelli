@@ -1923,6 +1923,7 @@ task test, "Run the test suite":
             "tsymex_0016_int77_floatrange",
             # RFC-0016 INT-82: an allocation is distinct from every object of the walk's entry state (parameters, what they reach, globals).
             "tsymex_0016_int82_paramfresh",
+            "tsymex_0016_int83_pointerparam",
             "tsymex_0016_k9cg_unbacked",
             "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",

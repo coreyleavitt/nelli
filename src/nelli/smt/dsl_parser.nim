@@ -622,6 +622,8 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekSeqNew:           ## RFC-0005 S8bi
     newCall(bindSym"mkSeqNew", emitExpr(e.snArg), emitIRType(e.snElemTy),
             newLit(e.snZeroed), newLit(e.snOfCap))
+  of iekPtrCast:          ## RFC-0016 INT-83
+    newCall(bindSym"mkPtrCast", emitExpr(e.pcArg), emitIRType(e.pcTy))
   of iekBitSet:           ## RFC-0005 S8bq
     var args = newNimNode(nnkBracket)
     for a in e.bsArgs: args.add emitExpr(a)
@@ -2398,6 +2400,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekHofCall:
     # RFC-0005 S8as: it applies a closure (see `iekClosureCall`).
     result = true
+  of iekPtrCast:
+    result = rhsHasInlineDefectFork(e.pcArg)   # RFC-0016 INT-83
   of iekSeqNew:
     # RFC-0005 S8bc, S8bi: its length guard forks in the preamble
     # (`parseNewSeqLen`), not here.
@@ -2482,6 +2486,7 @@ proc irKids*(e: IRExpr): seq[IRExpr] =
   of iekHofCall: @[e.hofSeq, e.hofClosure, e.hofInit]
   of iekSeqNew: @[e.snArg]   # RFC-0005 S8bc, S8bi (batch 5: one kind)
   of iekBitSet: e.bsArgs     # RFC-0005 S8bq (batch 6)
+  of iekPtrCast: @[e.pcArg]  # RFC-0016 INT-83
   of iekLambda, iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
      iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
     @[]
@@ -11646,6 +11651,32 @@ var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
   ## the element is preceded by a check that the length is still `L`
   ## (`miElemGuard`).
 
+proc pointerCastIR(n: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
+  ## RFC-0016 INT-83. `n` (a `cast`, a conversion, a hidden conversion)
+  ## reinterprets an address between Nim's `pointer` and a typed `ptr`/`ref`:
+  ## the address kept, its sort changed (`iekPtrCast`; `pointerAddrOf` and
+  ## `pointerAsTyped` in the walker). nil for any other node.
+  if n.len != 2: return nil
+  let src = n[1]
+  let tk = n.typeKind
+  let sk = src.typeKind
+  if tk == ntyPointer and sk == ntyPointer:
+    return parseExpr(src, preamble, ctx)
+  if tk == ntyPointer and sk in {ntyRef, ntyPtr}:
+    let st = classifyType(src).ty
+    if st == nil or st.kind notin {itRef, itPtr}: return nil
+    return mkPtrCast(parseExpr(src, preamble, ctx), tPtr(pointerPointeeTy()))
+  if tk in {ntyRef, ntyPtr} and sk == ntyPointer and n.kind == nnkCast:
+    let tt = classifyType(n).ty
+    if tt == nil or tt.kind notin {itRef, itPtr}: return nil
+    # let-bound, so a dereference of it reads a variable (a cast is pure:
+    # hoisting it out of a short-circuit changes nothing)
+    let tmp = freshSynth(ctx, "ptrcast")
+    preamble.add mkLet(tmp, tt, mkPtrCast(parseExpr(src, preamble, ctx), tt))
+    return mkVar(tmp)
+  nil
+
 proc nilSideCore(refNode: NimNode): NimNode =
   ## RFC-0005 S8bo. The operand a nil comparison or `isNil` decides, seen
   ## through a conversion or a cast to `pointer` (`pointer(p)`,
@@ -12049,6 +12080,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # RFC-0016 W3-z P16. `cast[ptr T](0)` is the target's nil (no address).
     if isNilPtrCast(n):
       return mkNil(classifyType(n).ty)
+    # RFC-0016 INT-83. A cast between `pointer` and a typed address.
+    block:
+      let pc = pointerCastIR(n, preamble, ctx)
+      if pc != nil: return pc
     # RFC-0005 S8m. `cast[ref Obj](p)` with `p: ref Obj` reinterprets a ref as
     # the very type it already has: the same address, the same `Ref_<id>`
     # sort, so it is the identity and keeps `p`'s heap identity. Before, the
@@ -12079,6 +12114,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
     let operand = n[n.len - 1]
+    # RFC-0016 INT-83. `pointer(q)` of a typed address.
+    block:
+      let pc = pointerCastIR(n, preamble, ctx)
+      if pc != nil: return pc
     # RFC-0016 W3-z P14. `RefO(nil)` / `PtrT(nil)`: the nil literal's own type
     # is `nil`, so `classifyType(operand)` names no ref; the conversion's
     # TARGET type picks the nil. A target the walk holds no nil for (cstring,
@@ -12309,6 +12348,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     else:
       parseExpr(operand, preamble, ctx)
   of nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenAddr:
+    # RFC-0016 INT-83. A typed address passed or bound where a `pointer` is
+    # expected.
+    if n.kind != nnkHiddenAddr:
+      let pc = pointerCastIR(n, preamble, ctx)
+      if pc != nil: return pc
     # RFC-0005 S8bc (item 7). An EMPTY `@[]` passed where a `seq[T]` is
     # expected (`t[k] = @[]`, `mgetOrPut(t, k, @[])`, `getOrDefault(t, k,
     # @[])`) types `seq[empty]` and reaches the parameter through
@@ -15201,6 +15245,7 @@ proc unsafeCastReason(n: NimNode): string =
   case n.kind
   of nnkCast:
     if isNilPtrCast(n): ""
+    elif n.len == 2 and n[1].typeKind == ntyPointer: ""   # RFC-0016 INT-83
     elif n.len >= 1 and n[0].kind == nnkPtrTy:
       "cast[ptr T]"
     else:

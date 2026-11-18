@@ -1968,6 +1968,10 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # behaviour, reconciliation §A:128). The walker STUBS these via
   # `allocateSym(itRef/itPtr)` → `heUnresolvedRef` (sxUnknown) until R1+ land the
   # logical-heap semantics.
+  # RFC-0016 INT-83: Nim's untyped `pointer` is an address of its own sort
+  # (`pointerPointeeTy`), related to every typed one by the casts.
+  if isBuiltinTypeHead(resolved, ["pointer"]):
+    return unranged(tPtr(pointerPointeeTy()))
   if resolved.kind == nnkRefTy and resolved.len == 1:
     return unranged(tRef(classifyType(resolved[0]).ty))
   if resolved.kind == nnkPtrTy and resolved.len == 1:

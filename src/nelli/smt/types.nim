@@ -846,6 +846,9 @@ type
                         ## `set[T]` values (`bsOp`): a literal, `contains`,
                         ## `incl` / `excl` (the new value), `+`, `-`, `*`,
                         ## `<=`, `<`, `==` and `card`.
+    iekPtrCast          ## RFC-0016 INT-83: an address reinterpreted between
+                        ## `pointer` and a typed `ptr`/`ref` (`cast`, or a
+                        ## conversion to `pointer`): `pcArg` held at `pcTy`.
 
   BitSetOp* = enum
     ## RFC-0005 S8bq (item 2). An `iekBitSet` operation, and its `bsArgs`:
@@ -1195,6 +1198,9 @@ type
       bsOp*:    BitSetOp
       bsArgs*:  seq[IRExpr]          ## see `BitSetOp`
       bsSetTy*: IRType               ## the `itBitSet` of the set operand(s)
+    of iekPtrCast:                   ## RFC-0016 INT-83
+      pcArg*: IRExpr                 ## the address (a `ref`, `ptr`, `pointer`)
+      pcTy*:  IRType                 ## the `itPtr`/`itRef` it is read as
 
   DiscWriteMode* = enum
     ## RFC-0005 S8cp (item 2). What an assignment to a discriminator does.
@@ -3295,6 +3301,11 @@ proc mkBitSet*(op: BitSetOp; args: seq[IRExpr]; setTy: IRType): IRExpr =
   ## RFC-0005 S8bq. An operation on builtin `set[T]` values (`BitSetOp`).
   IRExpr(kind: iekBitSet, bsOp: op, bsArgs: args, bsSetTy: setTy)
 
+proc mkPtrCast*(arg: IRExpr; ty: IRType): IRExpr =
+  ## RFC-0016 INT-83. `arg` (an address) reinterpreted as `ty`, where one of
+  ## the two is Nim's `pointer` (`isPointerTy`).
+  IRExpr(kind: iekPtrCast, pcArg: arg, pcTy: ty)
+
 proc satAdd64*(a, b: int64): int64 =
   ## D2 (round-6 review remediation, N9 companion). Saturating add: caps at
   ## `high(int64)` instead of wrapping. Shared by `allocCostOf` (below) and
@@ -5216,6 +5227,8 @@ proc render*(e: IRExpr): string =
   of iekSeqNew:           ## RFC-0005 S8bi
     (if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
      else: "newSeqUninit") & "[" & $e.snElemTy & "](" & render(e.snArg) & ")"
+  of iekPtrCast:          ## RFC-0016 INT-83
+    "cast[" & $e.pcTy & "](" & render(e.pcArg) & ")"
   of iekBitSet:           ## RFC-0005 S8bq
     var es: seq[string]
     for a in e.bsArgs: es.add render(a)
@@ -5337,3 +5350,85 @@ proc render*(s: IRStmt): string =
   of isUndefined:    "undefined(" & $s.udKind & ": " & s.udSite & ")"
   of isUnsupported:  "unsupported(" & $s.unKind & ": " & s.reason & ")"
   of isUnsafeCast:   "unsafeCast(" & s.ucReason & ")"
+
+# ---- RFC-0016 INT-83: the ref sort id of a pointee (moved from heap_model) ----
+
+proc sanitizeTypeId*(base: string): string =
+  ## The heap/sort-name spelling of a type id: every character outside
+  ## `[A-Za-z0-9_]` becomes `_` (split out of `refPointeeTypeId` at RFC-0005
+  ## S8bh, whose `fieldHeapKey` spells a declaring type's id the same way).
+  result = base
+  for i in 0 ..< result.len:
+    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      result[i] = '_'
+
+proc refPointeeTypeId*(pointeeTy: IRType): string =
+  ## Phase 15 R1; flipped at Cluster H Step B (ADR-0022). A stable
+  ## per-pointee-type identifier used to key the `Ref_T` sort + heap array +
+  ## nil const (and, via `fieldHeapKey`, the per-field heap arrays — an
+  ## object's ref sort and its field-array keys must agree, so the same
+  ## preference applies uniformly to `refPointeeTypeId(objTy)` calls too).
+  ##
+  ## Prefer the pointee's `nominalId` (a canonical, symbol-unique nominal
+  ## identity — Cluster H Step A) over the structural `$pointeeTy` rendering
+  ## when the pointee is a named object (`itTuple` with a non-empty
+  ## `nominalId`). Two `IRType`s for the SAME nominal object can carry
+  ## DIFFERENT structural renderings — e.g. a bare ref's full-field pointee
+  ## vs. a recursive field's empty-fielded placeholder (`namedRefPlaceholder`,
+  ## built to break compile-time self-reference) — yet they denote the same
+  ## Nim type and must key the SAME `Ref_T` sort. Keying on `nominalId`
+  ## unifies them; keying on `$pointeeTy` (the pre-Step-B behaviour) would
+  ## mint two distinct sorts and a Z3 sort mismatch on the first cross-use
+  ## (degrading to `sxUnknown`). That unification becomes reachable once a
+  ## bare named-ref parameter itself routes through `itRef` (Step C); Step B
+  ## proves the mechanism keeps inline-ref sort naming consistent first.
+  ## Anonymous tuples and non-object pointees have no `nominalId` and keep
+  ## the structural rendering (unchanged behaviour).
+  ##
+  ## RFC-0005 S8j: a variant pointee keys on its `vNominalId` the same way.
+  ## An inline `ref Obj` field's pointee is the empty-fielded placeholder
+  ## tuple, keyed on `nominalId(Obj)`; when `Obj` is a case object, every
+  ## other position (the nil in `h.v != nil`, the pointee of `h.v.kind`)
+  ## carries the full variant. Keyed structurally, the two were distinct
+  ## sorts for one Nim type: a Z3 sort error, or a false `sxUnsat`.
+  ## RFC-0005 S8l: a multi-variant keys on its `mvNominalId` for the same
+  ## reason (an inline `ref MV` field was that sort error).
+  ## RFC-0005 S8bh (item 3): a type of an inheritance hierarchy keys on the
+  ## hierarchy's ROOT (`inheritChain[0]`): every ref of the hierarchy is an
+  ## address of one sort, as in Nim, where `Base(d)` is `d`'s own address.
+  ## RFC-0016 K9c follow-up: a named object the classifier could not
+  ## represent (`__unsupported:<name>`) keys on `uninterpRefKey`, the key
+  ## its placeholder pointee carries, for the same reason.
+  let base = if pointeeTy.kind == itTuple and pointeeTy.inheritChain.len > 0:
+               pointeeTy.inheritChain[0]
+             elif pointeeTy.kind == itVariant and
+                  pointeeTy.vInheritChain.len > 0:
+               pointeeTy.vInheritChain[0]   # RFC-0005 S8bn (item 8)
+             elif pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
+               pointeeTy.nominalId
+             elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
+               pointeeTy.vNominalId
+             elif pointeeTy.kind == itMultiVariant and pointeeTy.mvNominalId.len > 0:
+               pointeeTy.mvNominalId   # RFC-0005 S8l
+             elif pointeeTy.kind == itUninterp and
+                  pointeeTy.uninterpRefKey.len > 0:
+               pointeeTy.uninterpRefKey   # RFC-0016 K9c follow-up
+             else:
+               $pointeeTy
+  result = sanitizeTypeId(base)
+
+const pointerTypeId* = "pointer"
+  ## RFC-0016 INT-83. The ref sort id of Nim's untyped `pointer`
+  ## (`Ref_pointer`, the address space every `ptr`/`ref` sort maps into).
+
+proc pointerPointeeTy*(): IRType =
+  ## RFC-0016 INT-83. The pointee a `pointer` is held as (`tPtr` of it): a
+  ## placeholder no cell is ever read at (`p[]` does not compile for a
+  ## `pointer`), keyed on `pointerTypeId` so every `pointer` is one sort.
+  tUninterp("__pointer", pointerTypeId)
+
+proc isPointerTy*(t: IRType): bool =
+  ## RFC-0016 INT-83. `t` is Nim's `pointer` (`tPtr(pointerPointeeTy())`).
+  t != nil and t.kind == itPtr and t.ptrPointeeTy != nil and
+    t.ptrPointeeTy.kind == itUninterp and
+    t.ptrPointeeTy.uninterpRefKey == pointerTypeId

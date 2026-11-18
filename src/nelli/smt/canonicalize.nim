@@ -822,6 +822,15 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 INT-83 (440->443, provisional; 441-442 are reserved for
+  ##   in-flight work): Nim's `pointer` is modelled (a parameter, a field,
+  ##   a local: it was `feUnsupportedParamType`): an address of its own sort
+  ##   (`Ref_pointer`), related to each typed sort by the casts
+  ##   (`iekPtrCast`: `cast[pointer](r)`, `pointer(q)`, `cast[ptr T](p)`),
+  ##   which keep the address both ways; objects of two types are two
+  ##   addresses; a location read at two types declines
+  ##   (`heUnresolvedRef`). A `pointer` enters a type's key as `ptr` of its
+  ##   placeholder pointee, and a cast as `Ex<PtrCast:..>`.
   ## - RFC-0016 INT-82 (436->440, provisional; 437-439 are reserved for
   ##   in-flight work): an allocation (`new`, `T(...)`) is distinct from
   ##   every object of the walk's entry state -- a ref parameter, a ref
@@ -846,7 +855,7 @@ const renderAsChoicesVersion* = "12"
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "440"
+const symexWalkerVersion* = "443"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -6946,6 +6955,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<SeqNew:" & canonicalize(e.snElemTy) & ":" &
       (if e.snZeroed: "zero" else: "uninit") &
       (if e.snOfCap: ":cap:" else: ":len:") & canonicalize(e.snArg, env) & ">"
+  of iekPtrCast:                         ## RFC-0016 INT-83
+    "Ex<PtrCast:" & canonicalize(e.pcTy) & ":" & canonicalize(e.pcArg, env) & ">"
   of iekBitSet:                          ## RFC-0005 S8bq
     var parts: seq[string]
     for a in e.bsArgs: parts.add canonicalize(a, env)

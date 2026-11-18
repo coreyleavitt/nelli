@@ -1278,7 +1278,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## reserved): 426->436.
     ## RFC-0016 INT-82 (an allocation is apart from the entry state; 437-439
     ## reserved; provisional): 436->440.
-    check symexWalkerVersion == "440"
+    ## RFC-0016 INT-83 (a `pointer` is an address of its own sort; 441-442
+    ## reserved; provisional): 440->443.
+    check symexWalkerVersion == "443"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

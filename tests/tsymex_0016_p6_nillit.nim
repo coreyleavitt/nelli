@@ -59,12 +59,15 @@ proc pprocG(c: bool) =
   if gf != nil: symexTarget("hit")
 
 suite "RFC-0016 W3-z P6: nil in a composite slot":
-  test "cstring and pointer nil arms decline by name (were a walker fault)":
+  test "cstring nil arms decline by name (were a walker fault)":
     check parseInt(symexWalkerVersion) >= 317
     pinDecline(pcsGlobal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
     pinDecline(pcsLocal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
-    pinDecline(pptr, cellKey(axTypeClass, "pointer"), feUnsupportedExprKind)
-    pinDecline(pptrG, cellKey(axTypeClass, "pointer"), feUnsupportedExprKind)
+
+  test "a pointer nil arm is modelled and agrees with native (INT-83)":
+    check parseInt(symexWalkerVersion) >= 443
+    discard pinExact(pptr, cellKey(axTypeClass, "pointer"), domain = sampled([true, false]))
+    discard pinExact(pptrG, cellKey(axTypeClass, "pointer"), domain = sampled([true, false]))
 
   test "the case-expression form declines by name (was an unbound temp fault)":
     pinDecline(pcsCase, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)

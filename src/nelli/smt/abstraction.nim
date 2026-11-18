@@ -205,6 +205,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekNil,                                  ## Phase 15 R5: a ref/ptr nil literal
      iekZeroValue,                            ## RFC-0005 S8u: a container zero
      iekSeqNew,                               ## RFC-0005 S8bc/S8bi: a seq, not an int
+     iekPtrCast,                              ## RFC-0016 INT-83: an address
      iekBitSet:                               ## RFC-0005 S8bq: a builtin set,
                                               ## or a bool / card of sets
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
@@ -360,6 +361,8 @@ proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
     collectVarRefs(e.snArg, into)
   of iekBitSet:        ## RFC-0005 S8bq: so do the operands.
     for a in e.bsArgs: collectVarRefs(a, into)
+  of iekPtrCast:       ## RFC-0016 INT-83: the address cast.
+    collectVarRefs(e.pcArg, into)
 
 type
   BanPolicy* = object

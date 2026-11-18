@@ -28,6 +28,7 @@ import std/tables
 import std/options
 import std/sets
 import std/strutils
+import std/hashes   # RFC-0016 INT-83: `@addrKind` codes
 import z3
 import ./types
 import ./abstraction
@@ -35,6 +36,7 @@ import ./symval
 import ./walk_state
 import ./z3check
 import ./variant_layout as vl
+export sanitizeTypeId, refPointeeTypeId   # RFC-0016 INT-83: now in types.nim
 
 # Forward declarations: the container registry (below, with the runtime half
 # of this file) reads the leaf split, whose bodies follow the cell model.
@@ -833,69 +835,9 @@ var globalEntryFacts* {.threadvar.}: seq[Z3Bool]
   ## at least 0, a range's bounds): true of every value of the type, so
   ## asserted into every check (`globalRoots`), as the values are run-wide.
 
-proc sanitizeTypeId*(base: string): string =
-  ## The heap/sort-name spelling of a type id: every character outside
-  ## `[A-Za-z0-9_]` becomes `_` (split out of `refPointeeTypeId` at RFC-0005
-  ## S8bh, whose `fieldHeapKey` spells a declaring type's id the same way).
-  result = base
-  for i in 0 ..< result.len:
-    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-      result[i] = '_'
+## `sanitizeTypeId` and `refPointeeTypeId` live in `types.nim` (RFC-0016
+## INT-83: the witness emitter names a pointer cell's sort at compile time).
 
-proc refPointeeTypeId*(pointeeTy: IRType): string =
-  ## Phase 15 R1; flipped at Cluster H Step B (ADR-0022). A stable
-  ## per-pointee-type identifier used to key the `Ref_T` sort + heap array +
-  ## nil const (and, via `fieldHeapKey`, the per-field heap arrays — an
-  ## object's ref sort and its field-array keys must agree, so the same
-  ## preference applies uniformly to `refPointeeTypeId(objTy)` calls too).
-  ##
-  ## Prefer the pointee's `nominalId` (a canonical, symbol-unique nominal
-  ## identity — Cluster H Step A) over the structural `$pointeeTy` rendering
-  ## when the pointee is a named object (`itTuple` with a non-empty
-  ## `nominalId`). Two `IRType`s for the SAME nominal object can carry
-  ## DIFFERENT structural renderings — e.g. a bare ref's full-field pointee
-  ## vs. a recursive field's empty-fielded placeholder (`namedRefPlaceholder`,
-  ## built to break compile-time self-reference) — yet they denote the same
-  ## Nim type and must key the SAME `Ref_T` sort. Keying on `nominalId`
-  ## unifies them; keying on `$pointeeTy` (the pre-Step-B behaviour) would
-  ## mint two distinct sorts and a Z3 sort mismatch on the first cross-use
-  ## (degrading to `sxUnknown`). That unification becomes reachable once a
-  ## bare named-ref parameter itself routes through `itRef` (Step C); Step B
-  ## proves the mechanism keeps inline-ref sort naming consistent first.
-  ## Anonymous tuples and non-object pointees have no `nominalId` and keep
-  ## the structural rendering (unchanged behaviour).
-  ##
-  ## RFC-0005 S8j: a variant pointee keys on its `vNominalId` the same way.
-  ## An inline `ref Obj` field's pointee is the empty-fielded placeholder
-  ## tuple, keyed on `nominalId(Obj)`; when `Obj` is a case object, every
-  ## other position (the nil in `h.v != nil`, the pointee of `h.v.kind`)
-  ## carries the full variant. Keyed structurally, the two were distinct
-  ## sorts for one Nim type: a Z3 sort error, or a false `sxUnsat`.
-  ## RFC-0005 S8l: a multi-variant keys on its `mvNominalId` for the same
-  ## reason (an inline `ref MV` field was that sort error).
-  ## RFC-0005 S8bh (item 3): a type of an inheritance hierarchy keys on the
-  ## hierarchy's ROOT (`inheritChain[0]`): every ref of the hierarchy is an
-  ## address of one sort, as in Nim, where `Base(d)` is `d`'s own address.
-  ## RFC-0016 K9c follow-up: a named object the classifier could not
-  ## represent (`__unsupported:<name>`) keys on `uninterpRefKey`, the key
-  ## its placeholder pointee carries, for the same reason.
-  let base = if pointeeTy.kind == itTuple and pointeeTy.inheritChain.len > 0:
-               pointeeTy.inheritChain[0]
-             elif pointeeTy.kind == itVariant and
-                  pointeeTy.vInheritChain.len > 0:
-               pointeeTy.vInheritChain[0]   # RFC-0005 S8bn (item 8)
-             elif pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
-               pointeeTy.nominalId
-             elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
-               pointeeTy.vNominalId
-             elif pointeeTy.kind == itMultiVariant and pointeeTy.mvNominalId.len > 0:
-               pointeeTy.mvNominalId   # RFC-0005 S8l
-             elif pointeeTy.kind == itUninterp and
-                  pointeeTy.uninterpRefKey.len > 0:
-               pointeeTy.uninterpRefKey   # RFC-0016 K9c follow-up
-             else:
-               $pointeeTy
-  result = sanitizeTypeId(base)
 
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
   ## Phase 15 R1 (ADR-0010). Return the per-walker `Ref_<typeId>` uninterpreted
@@ -2163,6 +2105,18 @@ proc refProvenanceRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
           emit(not pre(tid, t))
         elif entryConst(name):
           emit(pre(tid, t))
+      elif n == 1 and k == kinds.uninterp:
+        # RFC-0016 INT-83: a cast between `pointer` and a typed sort names
+        # the object its operand does.
+        let name = declName(ctx, d)
+        if name.startsWith("@toAddr_") or name.startsWith("@fromAddr_"):
+          let a = Z3_get_app_arg(ctx.raw, app, 0)
+          let aTid = refTypeOf(a)
+          if aTid.len > 0:
+            let held = wrap[Z3AnyAst](ctx, t)
+            let ph = pre(tid, held.raw)
+            let pa = pre(aTid, a)
+            emit(implies(ph, pa) and implies(pa, ph))
       elif n == 2 and k == kinds.select:
         let idx = Z3_get_app_arg(ctx.raw, app, 1)
         let idxRef = refTypeOf(idx)
@@ -2178,6 +2132,144 @@ proc refProvenanceRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
   facts
 
 
+# ---- RFC-0016 INT-83: Nim's untyped `pointer` -------------------------------
+#
+# A `pointer` is an address of its own sort, `Ref_pointer` (`pointerTypeId`;
+# a `pointer` is `tPtr(pointerPointeeTy())`, so a parameter, a field and an
+# element of one allocate as any `ptr` does, and nil is `nil_pointer`). The
+# per-sort heap model keys every cell on a typed `Ref_T`, so the address
+# space is related to each typed sort by a pair of unary functions per sort,
+# minted on first use:
+#   * `@toAddr_T: Ref_T -> Ref_pointer`, a typed address seen as a `pointer`
+#     (`cast[pointer](r)`, `pointer(q)`, a typed address passed where a
+#     `pointer` is expected), and
+#   * `@fromAddr_T: Ref_pointer -> Ref_T`, a `pointer` read as a `ptr T` /
+#     `ref T` (`cast[ptr T](p)`).
+# The reinterpretation keeps the bits both ways, so each application gets its
+# round trip as a ground fact (`@fromAddr_T(@toAddr_T(x)) = x` and
+# `@toAddr_T(@fromAddr_T(p)) = p`; both are native for every value), and nil
+# maps to nil. No quantifier: one fact per term the walk built. A cell read
+# through `cast[ptr T](p)` is a cell of `T`'s heap at `@fromAddr_T(p)`, which
+# is free where nothing relates it to another address, as a `ptr T`
+# parameter's cell is.
+#
+# Two non-nil addresses of different sorts: an object of `ref A` and one of
+# `ref B` (two hierarchies; one hierarchy is one sort) are two allocations,
+# so `cast[pointer](a) == cast[pointer](b)` is false unless both are nil.
+# That is a kind tag, `@addrKind: Ref_pointer -> Int`, fixed for the image of
+# a non-nil `ref` that is a whole object (not itself read out of a `pointer`,
+# `pointerWholeObject`): the walk's `ref` values are always whole objects. A
+# `ptr` is not tagged: `addr o.f` of a first field is `o`'s own address.
+#
+# What the model does not follow is a location read at two types (a `float`
+# cell read back as an `int`): the walk declines (`heUnsafeCast`) once
+# pointers of one run are cast to one sort and converted from or to another
+# (`pointerSortsUsed`, `pointerReadSorts`, checked by `lowerPtrCast`), so a
+# read through a `pointer` is always in the one heap every view of it uses.
+
+var pointerFacts* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0016 INT-83. The round-trip, nil and kind facts of every
+  ## `@toAddr_T`/`@fromAddr_T` application the run built: true of every
+  ## value, so asserted into every check (`globalRoots`).
+var pointerViews* {.threadvar.}:
+    seq[tuple[addrAst, typedAst: Z3AnyAst; pointee: IRType]]
+  ## RFC-0016 INT-83. Each application: the `Ref_pointer` address and the
+  ## typed address it is (the witness renders a `pointer` position as the
+  ## typed cell of a view whose address the model gives it).
+var pointerSortsUsed* {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-83. The sorts the run converted a pointer from or to.
+var pointerReadSorts* {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-83. The sorts the run read a `pointer` as.
+var pointerDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3FuncDecl]]
+  ## RFC-0016 INT-83. `@toAddr_<T>` / `@fromAddr_<T>` / `@addrKind` of the
+  ## run's context.
+
+proc pointerDecl(ctx: Z3Context; name: string; dom, rng: RawZ3Sort): RawZ3FuncDecl =
+  if pointerDecls.ctx != cast[pointer](ctx.raw):
+    pointerDecls = (ctx: cast[pointer](ctx.raw),
+                    decls: initTable[string, RawZ3FuncDecl]())
+  if not pointerDecls.decls.hasKey(name):
+    pointerDecls.decls[name] = mkPinnedUnaryDecl(ctx, name, dom, rng)
+  pointerDecls.decls[name]
+
+proc pointerApp(ctx: Z3Context; fd: RawZ3FuncDecl; arg: RawZ3Ast): Z3AnyAst =
+  var args = @[arg]   # a HEAP seq (`rawApp1`'s Z3 4.15 hazard)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_app(ctx.raw, fd, 1,
+    cast[ptr UncheckedArray[RawZ3Ast]](addr args[0])))
+
+proc pointerSortPair(ctx: Z3Context; pointee: IRType):
+    tuple[toF, fromF: RawZ3FuncDecl; tNil, pNil: Z3AnyAst] =
+  ## The two functions of `pointee`'s sort, and the two nils, with the nil
+  ## facts on first use.
+  let pSort = allocRefSort(ctx, pointerPointeeTy())
+  let tSort = allocRefSort(ctx, pointee)
+  let tid = refPointeeTypeId(pointee)
+  let fresh = pointerDecls.ctx != cast[pointer](ctx.raw) or
+              not pointerDecls.decls.hasKey("@toAddr_" & tid)
+  result.toF = pointerDecl(ctx, "@toAddr_" & tid, tSort, pSort)
+  result.fromF = pointerDecl(ctx, "@fromAddr_" & tid, pSort, tSort)
+  result.tNil = currentNilConsts[tid]
+  result.pNil = currentNilConsts[pointerTypeId]
+  if fresh:
+    let a = pointerApp(ctx, result.toF, result.tNil.raw)
+    pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, result.pNil.raw))
+    let b = pointerApp(ctx, result.fromF, result.pNil.raw)
+    pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, b.raw, result.tNil.raw))
+
+proc pointerWholeObject*(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0016 INT-83. No `@fromAddr_` application in `t` (bounded: past the
+  ## bound, false, which only drops a kind fact).
+  var stack = @[(t, 0)]
+  var seen: HashSet[int]
+  while stack.len > 0:
+    let (x, lvl) = stack.pop()
+    if lvl > termWalkMaxDepth: return false
+    if Z3_get_ast_kind(ctx.raw, x) != Z3_APP_AST: continue
+    let id = astId(ctx, x)
+    if id in seen: continue
+    seen.incl id
+    let app = Z3_to_app(ctx.raw, x)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    if n == 1 and declName(ctx, Z3_get_app_decl(ctx.raw, app)).startsWith(
+        "@fromAddr_"):
+      return false
+    for i in 0 ..< n: stack.add (Z3_get_app_arg(ctx.raw, app, cuint(i)), lvl + 1)
+  true
+
+proc pointerAddrOf*(ctx: Z3Context; x: Z3AnyAst; pointee: IRType;
+                    wholeObject: bool): Z3AnyAst =
+  ## RFC-0016 INT-83. The typed address `x` (of `pointee`'s sort) as a
+  ## `pointer`. `wholeObject`: `x` is a `ref`'s whole object
+  ## (`pointerWholeObject`), whose address no other sort's object has.
+  let tid = refPointeeTypeId(pointee)
+  if tid == pointerTypeId: return x
+  let sp = pointerSortPair(ctx, pointee)
+  result = pointerApp(ctx, sp.toF, x.raw)
+  let back = pointerApp(ctx, sp.fromF, result.raw)
+  pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, back.raw, x.raw))
+  if wholeObject:
+    let kindF = pointerDecl(ctx, "@addrKind",
+      allocRefSort(ctx, pointerPointeeTy()),
+      ctx.checkErr Z3_mk_int_sort(ctx.raw))
+    let k = pointerApp(ctx, kindF, result.raw)
+    let code = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw,
+      int64(hash(tid)), sortOfRaw(ctx, k.raw)))
+    let isNil = wrap[Z3Bool](ctx, checkedEq(ctx, x.raw, sp.tNil.raw))
+    pointerFacts.add(isNil or wrap[Z3Bool](ctx, checkedEq(ctx, k.raw, code.raw)))
+  pointerViews.add (addrAst: result, typedAst: x, pointee: pointee)
+
+proc pointerAsTyped*(ctx: Z3Context; p: Z3AnyAst; pointee: IRType): Z3AnyAst =
+  ## RFC-0016 INT-83. The `pointer` `p` read as an address of `pointee`'s
+  ## sort.
+  let tid = refPointeeTypeId(pointee)
+  if tid == pointerTypeId: return p
+  let sp = pointerSortPair(ctx, pointee)
+  result = pointerApp(ctx, sp.fromF, p.raw)
+  let back = pointerApp(ctx, sp.toF, result.raw)
+  pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, back.raw, p.raw))
+  pointerViews.add (addrAst: p, typedAst: result, pointee: pointee)
+
+
 # ---- the per-run reset ------------------------------------------------------
 
 proc resetHeapModel*() =
@@ -2191,6 +2283,10 @@ proc resetHeapModel*() =
   distinctSortNames = @[]
   containerCard = ContainerCardRegistry()
   globalEntryFacts = @[]
+  pointerFacts = @[]                     # RFC-0016 INT-83
+  pointerViews = @[]
+  pointerSortsUsed.clear()
+  pointerReadSorts.clear()
   currentBorrowReboxCounter = 0
   heapKeyShapes = initTable[string, HeapKeyShape]()
   heapFieldOwners = initTable[string, tuple[code: int64; depth: int]]()   ## RFC-0016 INT-81

@@ -1883,6 +1883,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   of iekBitSet:
     # RFC-0005 S8bq. A set, or a bool / card computed from sets.
     none(SymVal)
+  of iekPtrCast:
+    # RFC-0016 INT-83. An address: compared through `refEq`, not a proto.
+    none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
@@ -2604,6 +2607,55 @@ proc bitSetCardFacts(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       let both = bsPopcount(bsBin(Z3_mk_bvand, a, b), n)
       result.add ka == both + bsPopcount(bsBin(Z3_mk_bvand, a, bsNot(b)), n)
       result.add kb == both + bsPopcount(bsBin(Z3_mk_bvand, b, bsNot(a)), n)
+
+proc lowerPtrCast(env: Env, e: IRExpr): SymVal =
+  ## RFC-0016 INT-83. An address reinterpreted between `pointer` and a typed
+  ## sort (`pointerAddrOf` / `pointerAsTyped`, heap_model.nim's section on
+  ## `pointer`). A run whose pointers are read as one sort and converted from
+  ## or to another declines here (`heUnresolvedRef`, no answer: a
+  ## stand-in there may disagree with a later read of the location): such a location would be
+  ## read at two types, which the per-sort heap does not follow.
+  let v = lower(env, e.pcArg)
+  let toPointer = isPointerTy(e.pcTy)
+  if v.kind notin {svRef, svPtr} or
+     (v.kind == svRef and v.refPointee == nil) or
+     (v.kind == svPtr and v.ptrPointee == nil):
+    return degradeAlloc(e.pcTy, heUnresolvedRef,
+      "`" & render(e) & "`: an address the walk does not hold as a ref or " &
+        "ptr (RFC-0016 INT-83; heUnresolvedRef)", "__ptrCastDegrade")
+  let ctx = requireCurrentContext()
+  let ast = if v.kind == svRef: v.refAst else: v.ptrAst
+  let srcPointee = if v.kind == svRef: v.refPointee else: v.ptrPointee
+  let srcTid = refPointeeTypeId(srcPointee)
+  let dstPointee = if e.pcTy.kind == itRef: e.pcTy.refPointeeTy
+                   else: e.pcTy.ptrPointeeTy
+  let dstTid = refPointeeTypeId(dstPointee)
+  if srcTid == dstTid: return v
+  proc punned(tid: string): SymVal =
+    degradeAlloc(e.pcTy, heUnresolvedRef,
+      "`" & render(e) & "`: pointers of this run are read as one type and " &
+        "converted from or to another (`" & tid & "`); a location read at " &
+        "two types is not modelled (RFC-0016 INT-83; heUnresolvedRef)",
+      "__ptrCastDegrade")
+  if toPointer:
+    for t in pointerReadSorts:
+      if t != srcTid: return punned(srcTid)
+    pointerSortsUsed.incl srcTid
+    let whole = v.kind == svRef and pointerWholeObject(ctx, ast.raw)
+    SymVal(kind: svPtr, ptrFamily: true, ptrPointee: pointerPointeeTy(),
+           ptrAst: pointerAddrOf(ctx, ast, srcPointee, whole))
+  elif srcTid == pointerTypeId:
+    for t in pointerSortsUsed:
+      if t != dstTid: return punned(dstTid)
+    pointerSortsUsed.incl dstTid
+    pointerReadSorts.incl dstTid
+    let typed = pointerAsTyped(ctx, ast, dstPointee)
+    if e.pcTy.kind == itRef:
+      SymVal(kind: svRef, refAst: typed, refPointee: dstPointee)
+    else:
+      SymVal(kind: svPtr, ptrAst: typed, ptrFamily: true, ptrPointee: dstPointee)
+  else:
+    punned(dstTid)
 
 proc lowerBitSet(env: Env, e: IRExpr): SymVal =
   ## RFC-0005 S8bq (item 2). An `iekBitSet` operation. The arguments are
@@ -7110,6 +7162,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
   of iekBitSet:
     # RFC-0005 S8bq (item 2). A builtin `set[T]` operation.
     lowerBitSet(env, e)
+  of iekPtrCast:
+    lowerPtrCast(env, e)   # RFC-0016 INT-83
   of iekSeqNew:
     lowerSeqNew(env, e)
 
@@ -7996,6 +8050,18 @@ proc collectTreeRefPositions(m: Z3Model, path: string, sv: SymVal,
                                 sv.seqElemTy, acc)
   else: discard
 
+proc pointerViewPos(m: Z3Model; path: string; p: Z3AnyAst): RefPos =
+  ## RFC-0016 INT-83. The `pointer` position `path` seen as the typed
+  ## address of the first cast of the run (`pointerViews`) the model gives
+  ## its address: as that typed position it aliases every other position of
+  ## the address, and its cell holds the value a `cast[ptr T]` read saw. One
+  ## no cast relates to a typed address is a cell of its own (or nil).
+  let v = $m.eval(p)
+  for view in pointerViews:
+    if $m.eval(view.addrAst) == v:
+      return RefPos(name: path, addrAst: view.typedAst, pointee: view.pointee)
+  RefPos(name: path, addrAst: p, pointee: pointerPointeeTy())
+
 proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
                          acc: var seq[RefPos]) =
   ## RFC-0005 S8h. The `ref`/`ptr` positions inside the input value `sv` at
@@ -8008,7 +8074,10 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
     if sv.refPointee != nil:
       acc.add RefPos(name: path, addrAst: sv.refAst, pointee: sv.refPointee)
   of svPtr:
-    if sv.ptrPointee != nil:
+    if sv.ptrPointee != nil and
+       refPointeeTypeId(sv.ptrPointee) == pointerTypeId:
+      acc.add pointerViewPos(m, path, sv.ptrAst)   # RFC-0016 INT-83
+    elif sv.ptrPointee != nil:
       acc.add RefPos(name: path, addrAst: sv.ptrAst, pointee: sv.ptrPointee)
   of svTuple:
     for i, f in sv.fields:
@@ -12171,6 +12240,8 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   for c in currentClosureCallAxioms:
     roots.add c
   # RFC-0005 S8as: the entry values' type facts (`globalEntryFacts`).
+  for c in pointerFacts:          # RFC-0016 INT-83: the casts' facts
+    roots.add c
   for c in globalEntryFacts:
     roots.add c
   # Round-4 Slice B (ADR-0026): drain the strip decomposition constraints
@@ -28835,6 +28906,43 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
       inc i
   else:
     discard
+
+proc resolvePointer*(c: RefWitness; pos: string): pointer =
+  ## RFC-0016 INT-83. The witness value of the `pointer` position `pos`:
+  ## nil, the cell of the typed position the snapshot aliases it to, or a
+  ## cell of its own, of the scalar sort the snapshot gave it (the sort a
+  ## `cast[ptr T]` of it reads; `pointerViewPos`), filled from its leaf, or
+  ## sixteen zero bytes for an address no read looks through.
+  ## Defined after `readCellField`'s body: an instantiation of that generic
+  ## made before its body is compiled is empty, and every later use of the
+  ## same instantiation (a `bool` or `int` field of any witness cell) would
+  ## read nothing.
+  let cell = cellNameOf(c, pos)
+  if cell.len == 0: return nil
+  let built = cellBuilt(c, cell)
+  if built != nil: return built
+  var srt = ""
+  for e in c.w.heapSnapshot:
+    if e.name == cell: srt = e.sort
+  template scalar(T: typedesc; ty: IRType) =
+    if srt == "Ref_" & refPointeeTypeId(ty):
+      let q = cast[ptr T](alloc0(max(sizeof(T), 16)))
+      readCellField(c, cell, q[])
+      cellRecord(c, cell, cast[pointer](q))
+      return cast[pointer](q)
+  scalar(int, tInt(64, signed = true))
+  scalar(int32, tInt(32, signed = true))
+  scalar(int16, tInt(16, signed = true))
+  scalar(int8, tInt(8, signed = true))
+  scalar(uint64, tInt(64, signed = false))
+  scalar(uint32, tInt(32, signed = false))
+  scalar(uint16, tInt(16, signed = false))
+  scalar(uint8, tInt(8, signed = false))
+  scalar(bool, tBool())
+  # A cell no read looks through as a scalar: its own address only. Never
+  # freed (the witness's cells live for the process, as a `ptr` cell does).
+  result = alloc0(16)
+  cellRecord(c, cell, result)
 
 proc readSeqLen*(w: RawWitness, name: string): int =
   ## Phase 15 R3 (ADR-0010). The model length of a seq witness leaf — used by

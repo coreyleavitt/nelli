@@ -119,6 +119,8 @@ proc stdName(name: string): NimNode =
   of "registerCellType": bindSym"registerCellType"  # RFC-0016 INT-81
   of "buildCellAs": bindSym"buildCellAs"            # RFC-0016 INT-81
   of "WitnessCellBuild": bindSym"WitnessCellBuild"  # RFC-0016 INT-81
+  of "pointer": bindSym"pointer"                  # RFC-0016 INT-83
+  of "resolvePointer": bindSym"resolvePointer"    # RFC-0016 INT-83
   else:
     error("symex RFC-0005 S8e: stdName has no binding for `" & name & "`")
     nil
@@ -168,7 +170,10 @@ proc refWitnessCtx(witId: NimNode): NimNode =
   else: newCall(stdName("newRefWitness"), witId)
 
 proc resolveRefCall(refTy: NimNode; pos, witId: NimNode): NimNode =
-  ## RFC-0005 S8h. `resolveRef[refTy](ctx, pos)`.
+  ## RFC-0005 S8h. `resolveRef[refTy](ctx, pos)`. RFC-0016 INT-83: a
+  ## `pointer` position is `resolvePointer(ctx, pos)`.
+  if refTy.kind in {nnkIdent, nnkSym} and refTy.strVal == "pointer":
+    return newCall(stdName("resolvePointer"), refWitnessCtx(witId), pos)
   newCall(nnkBracketExpr.newTree(stdName("resolveRef"), refTy),
           refWitnessCtx(witId), pos)
 
@@ -197,6 +202,7 @@ proc resolvesByRef*(ty: IRType): bool =
   ## `resolveRef`: always, for a `ref`, unless it is a recursive field whose
   ## type reached the IR without a symbol; for a `ptr`, when its pointee is
   ## an object or a scalar `alloc0` can hold.
+  if isPointerTy(ty): return true   # RFC-0016 INT-83: `resolvePointer`
   let pointee = refPointeeOf(ty)
   if isRecursionPlaceholder(pointee) and witnessTypeSym(pointee) == nil:
     return false
@@ -212,6 +218,7 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   ## pointee is an empty placeholder carrying only the symbol it was
   ## classified from -- the alias itself, or the object an inline `ref Obj`
   ## points to.
+  if isPointerTy(ty): return stdName("pointer")   # RFC-0016 INT-83
   let pointee = refPointeeOf(ty)
   proc wrapped(inner: NimNode): NimNode =
     if ty.kind == itRef: nnkRefTy.newTree(inner) else: nnkPtrTy.newTree(inner)
@@ -1128,9 +1135,12 @@ proc emitWitnessTuple*(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode)
   var stmts = newStmtList(newLetStmt(ctxId, ctxInit))
   stmts.add emitCellTypes(params, ctxId, witId)   # RFC-0016 INT-81
   var ids = newSeq[NimNode](params.len)
-  for rank in 0 .. 2:
+  for rank in 0 .. 3:
     for i, p in params:
-      let r = if p.ty != nil and p.ty.kind == itPtr: 2
+      # RFC-0016 INT-83: a `pointer` after every typed position, whose cell
+      # it may be.
+      let r = if isPointerTy(p.ty): 3
+              elif p.ty != nil and p.ty.kind == itPtr: 2
               elif irTypeHoldsPtr(p.ty): 1
               else: 0
       if r != rank: continue

@@ -77,10 +77,12 @@ func classKey*(k: NimTypeKind): string =
 
 const
   ## The kinds `classifyType` turns into an IR type (pinned per kind in
-  ## tsymex_0016_k2c_typeclass). A leaf kind outside it (`cstring`, `pointer`,
-  ## `proc`) is on the by-value allowlist but classifies to the
-  ## `__unsupported:`/`__closure` placeholder.
-  classified = {ntyBool, ntyChar, ntyEnum, ntyRange, ntyRef, ntyPtr} +
+  ## tsymex_0016_k2c_typeclass). A leaf kind outside it (`cstring`, `proc`)
+  ## is on the by-value allowlist but classifies to the
+  ## `__unsupported:`/`__closure` placeholder. `pointer` is an address of its
+  ## own sort (RFC-0016 INT-83).
+  classified = {ntyBool, ntyChar, ntyEnum, ntyRange, ntyRef, ntyPtr,
+                ntyPointer} +
                {ntyInt .. ntyInt64} + {ntyUInt .. ntyUInt64} +
                {ntyFloat, ntyFloat32, ntyFloat64} +
                {ntyString, ntySequence, ntyOpenArray, ntyArray, ntySet,

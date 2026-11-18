@@ -2423,12 +2423,13 @@ id = "INT-82"
 table = "5.8c"
 title = "K9d-10: a ref parameter compared with a node the SUT allocates (`Node(...)`, `new`) is a false `sxSat`. `assertFreshness` (`runtime_heap.nim`) keeps a fresh address distinct from nil and from the path's live refs only, and a caller's ref parameter (or a ref reached through one) is never among them, so `p == n` holds in the model. Natively no caller's object is the one the SUT has just allocated: `p == n` is false on every input, and every target behind it (a write through `n` read back through `p`) is unreachable. `tsymex_h_verification` asserted the false verdict as intended (its section 2 comment); its two witnesses do not hit natively"
 class = "soundness"
-state = "open"
-note = ": open. The bar: a fresh allocation is distinct from every ref that existed before it (parameters, their fields and elements, globals), so the four targets of the reproducer are `sxUnsat`, pinned natively over the ref domain. `tsymex_h_verification`'s `param_ctor_eq_hit` and `param_ctor_write_hit` stay `symexFind` (asserting the false `sxSat`) until the fix flips them. Found converting the ref family (K9d-10)"
+state = "closed"
+note = "fixed in the walker (440, provisional): an allocation is distinct from every object of the walk's entry state. A disjointness predicate per ref sort (`@pre_<T>`, EUF, no quantifier): the `new` arm's address is `not @pre`, and every entry-state address a query mentions is `@pre` -- a parameter's leaves and a global's entry value by name, and a `select` on an input heap (`heap_<key>`) or a parameter's seq / table backing, through stores and merges, guarded by its index being `@pre` for a Ref-keyed array (`refProvenanceRoots`, heap_model.nim, asserted from `globalRoots`). Read off the query's terms, so it is complete for every address a query can name, not only the path's live set. `tsymex_h_verification`'s `param_ctor_eq_hit` and `param_ctor_write_hit` are pinned `sxUnsat` (pinFind). A module-level ref read before any write still declines (`feGlobalReadUnmodelled`), pinned in the reproducer"
+sha = "39736fd6"
 slice = "K9d"
 home = "K9d-10 (`wip/k9d10`)"
 source = "K9d-10 pinFind conversion"
-evidence = "red reproducer `tests/tsymex_0016_int82_paramfresh.nim` (four targets, each `sxSat` with a witness that does not hit natively); under `pinFind`, `tsymex_h_verification` fails with `walker says sxSat for label(\"param_ctor_eq_hit\") but the witness does not hit natively: hits=[] raised=-` (likewise `param_ctor_write_hit`)"
+evidence = "red at 6179aae4: six of the reproducer's targets `sxSat` (param vs `Node(...)`, vs `new`, a field, a write through the fresh node, a field two down, a seq parameter's element); green after the fix, c and cpp, 13 OK, every verdict pinned natively by pinFind over the ref domain, the three stored-then-compared targets `sxSat` with witnesses that hit"
 aliases = []
 cells = []
 pins = ["tsymex_0016_int82_paramfresh"]

@@ -16,7 +16,7 @@
 ## recorded decline for its shape (a user generic instance or plain alias is
 ## `feUnsupportedParamType`, as every other user generic/alias already is).
 ## Walker 150 -> 151.
-from ./s8cu_helpers import named
+import ./s8cu_helpers
 import std/[unittest, strutils, sets, tables, options, unicode]
 import nelli/symex
 import nelli/smt/types
@@ -163,10 +163,16 @@ suite "RFC-0005 S8d -- controls: the stdlib type heads keep their models":
     dump(r.errors)
     check r.status == sxUnsat
 
-  test "unicode.Rune is pinned to [0, 0x10FFFF] (clean sxUnsat)":
-    let r = symexFind(s8dRealRune, tLabel("s8d_real_rune"))
+  test "unicode.Rune is any int32: a negative one is reachable (clean sxSat)":
+    # RFC-0016 INT-72: the stdlib Rune was pinned to [0, 0x10FFFF] here, a
+    # false sxUnsat (native `s8dRealRune(Rune(-1))` reaches the target); it
+    # now ranges over int32, as the user `Rune` above does. The intercept by
+    # symbol still decides `$r` (UTF-8, tsymex_a7_rune). `pinFind` is the same
+    # `symexFind` call, its sxSat witness replayed natively and recorded.
+    let r = pinFind(s8dRealRune, tLabel("s8d_real_rune"))
     dump(r.errors)
-    check r.status == sxUnsat
+    check r.status == sxSat
+    check r.witness[0] < 0
 
   test "system.bool is two-valued (clean sxUnsat)":
     let r = symexFind(s8dRealBool, tLabel("s8d_real_bool"))

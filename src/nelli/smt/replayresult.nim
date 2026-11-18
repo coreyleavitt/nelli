@@ -131,16 +131,29 @@ func detail*(r: ReplayResult): string =
 func runDependence*(r: ReplayResult): set[RunDependence] =
   ## RFC-0005 0.9.1 (WA-7). What this replay adds to its verdict's
   ## `Soundness.runDependence`. Review R5 (D4b): a pure function of the child:
-  ## a `reTimedOut` or `reLost` ending is run-dependent by construction, so no
-  ## producer can forget it; `ReplayChild.runDependent` adds the causes an
-  ## ending cannot express (see its doc, the one place both are described).
-  if r.child.ending in {reTimedOut, reLost} or r.child.runDependent: {rdReplay}
+  ## a `reLost` ending, a `reTimedOut` one not killed at the bound, and
+  ## (RFC-0016 INT-32) a `reSignalled` one ended from outside the SUT are
+  ## run-dependent by construction, so no producer can forget them;
+  ## `ReplayChild.runDependent` adds the causes an ending cannot express (see
+  ## its doc, the one place both are described). RFC-0016 INT-32 (R4-07): a
+  ## child killed at `replayTimeoutMs` is not, since the bound is in the key,
+  ## so an always-hanging witness does not pay the bound on every run.
+  let c = r.child
+  if c.ending == reLost or c.runDependent or
+     (c.ending == reTimedOut and not killedAtBound(c)) or
+     signalledFromOutside(c):
+    {rdReplay}
   else: {}
 
 func replayStatus*(r: ReplayResult): ReplayStatus =
   ## The `ReplayStatus` a claim this replay settled carries: only a
-  ## confirmation is `rsConfirmed`.
-  if r.outcome == roConfirmed: rsConfirmed else: rsUnconfirmed
+  ## confirmation is `rsConfirmed`. RFC-0016 INT-32 (R4-10): a replay no
+  ## child could run (`roDeclined`) is `rsRefused`, which no consumer runs in
+  ## its own process.
+  case r.outcome
+  of roConfirmed: rsConfirmed
+  of roDeclined: rsRefused
+  else: rsUnconfirmed
 
 func hintKind*(o: ReplayOutcome): SymexErrorKind =
   ## The `feReplay*` kind a hint about an unconfirmed replay carries. A
@@ -252,7 +265,10 @@ func winnerHint*(r: ReplayResult; claim: string;
   result.add tagged(hintKind(r.outcome),
     "the clean winner, " & claim & ", reaches the target, but " & lossyWhy &
     ", and its replay did not confirm it: " & why &
-    ". Not trusted (rsUnconfirmed)")
+    ". Not trusted (" & $r.replayStatus & ")" &
+    (if r.outcome == roDeclined:
+       "; nothing has run it, so it is not run in the host"
+     else: ""))
 
 func winnerUnreplayedHint*(claim: string): SymexErrorInfo =
   ## RFC-0005 0.9.1 (WA-9). `SymexSettings.replay = false`: a lossy clean

@@ -103,9 +103,12 @@ type
       ## RFC-0005 0.9.1 (WA-7), review R5 (D4b). The run-dependence the ending
       ## cannot express. This flag and `ending` are the two sources of a
       ## replay's `rdReplay`, and `ReplayResult.runDependence` (`replayresult.nim`)
-      ## joins them: a `reTimedOut` or `reLost` ending is run-dependent BY
-      ## CONSTRUCTION (a run past its bound, a status the system lost), whatever
-      ## this flag says. This flag carries the rest: an allocation that failed at
+      ## joins them: a `reLost` ending, a `reTimedOut` one stopped for a reason
+      ## other than the bound (a limit, a flood: `why`), and a `reSignalled`
+      ## one ended from outside the SUT (`signalledFromOutside`) are
+      ## run-dependent BY CONSTRUCTION, whatever this flag says. RFC-0016
+      ## INT-32: a child killed at the bound (`killedAtBound`) is not: the
+      ## bound is keyed. This flag carries the rest: an allocation that failed at
       ## the memory limit (`outOfMemory`), a child that could not be started or
       ## handed its state for a reason of the moment (a failed `fork`, pipe or
       ## job object, a runtime hook the host had set), and a report the host
@@ -777,6 +780,31 @@ proc replayLimitSignals*(): seq[tuple[signal: int, limit: string]] =
     @[(int(SIGXCPU), "CPU"), (int(SIGXFSZ), "file-size")]
   else:
     @[]
+
+func signalledFromOutside*(c: ReplayChild): bool =
+  ## RFC-0016 INT-32 (R1-33). The child was ended by a signal the SUT's own
+  ## run does not raise: one sent from outside it (`SIGKILL` from the OOM
+  ## killer or an operator, `SIGTERM`, `SIGINT`, `SIGHUP`, ...). Another run
+  ## may not be, so the replay is run-dependent (`ReplayResult.runDependence`).
+  ## A synchronous fault (`SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`, `SIGTRAP`,
+  ## `SIGSYS`) or an abort (`SIGABRT`: `abort`, a failed C assertion) is the
+  ## program's, and the same on every run. A signal the SUT sends itself
+  ## with `kill` cannot be told from one sent from outside, so it is
+  ## run-dependent too: conservative, a verdict not stored is only re-derived.
+  ## Windows reports a system exception code, always the program's.
+  when defined(posix):
+    c.ending == reSignalled and
+      c.code notin [int(SIGSEGV), int(SIGBUS), int(SIGFPE), int(SIGILL),
+                    int(SIGABRT), int(SIGTRAP), int(SIGSYS)]
+  else:
+    false
+
+func killedAtBound*(c: ReplayChild): bool =
+  ## RFC-0016 INT-32 (R4-07). The child ran past `replayTimeoutMs` and was
+  ## killed for it, and for nothing else (no `why`: not a resource limit, not
+  ## a report flood). The bound and the host are in the cache key, so this is
+  ## the key's fact, and the verdict it leaves is stored.
+  c.ending == reTimedOut and c.why.len == 0
 
 # ---- fork ---------------------------------------------------------------------
 

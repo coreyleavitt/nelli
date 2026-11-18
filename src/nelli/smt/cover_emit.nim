@@ -60,6 +60,8 @@ proc hostRefusalReason*(s: Soundness): string =
   ## not running a witness: the actual cause, not one guessed for all of them.
   if s.replay == rsUnsettled:
     "its record was never settled"
+  elif s.replay == rsRefused:
+    "its witness is lossy and no replay child could run it (rsRefused)"
   elif s.witnessUndefined != {}:
     var names: seq[string] = @[]
     for k in undefinedKinds(s): names.add $k

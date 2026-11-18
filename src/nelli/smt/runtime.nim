@@ -464,6 +464,12 @@ type
       ## nil dereference edge (`Path.nilDeref`), recorded at target-hit time
       ## beside `pathTaint`. Read only when the finding becomes a replay
       ## candidate (`SatCandidate.nilDerefOnPath`).
+    witnessExtraction*: seq[SymexErrorInfo]
+      ## RFC-0016 INT-32 (R1-33). On a clean `sxSat` / `sxRaised` winner: the
+      ## `feExtractionFailed` records of ITS OWN witness extraction (a value
+      ## the render substituted), which `winnerLossy` reads. `errors` holds
+      ## the run's, a sibling hit's among them, which said nothing about this
+      ## witness. Empty on every other result.
     soundness*:    Soundness
       ## RFC-0005 S11 (§8.1) -- the one carrier (was S1's bare `pathTaint`
       ## field). `soundness.pathTaint` is the taint of the path that produced
@@ -12740,6 +12746,11 @@ type
     budgetOutDepths: seq[seq[tuple[loop: int, iters: int]]]
       ## RFC-0005 S8y. The loop depths (`Path.loopIters`) of each tainted
       ## target hit whose solve ran out of budget (`solveTargetHit`).
+    hitExtraction: seq[SymexErrorInfo]
+      ## RFC-0016 INT-32 (R1-33). The `feExtractionFailed` records the last
+      ## CLEAN target hit's own witness extraction made (`solveTargetHit`),
+      ## read by `admitSolvedHit` into that hit's
+      ## `RawResult.witnessExtraction`. The shared sink holds every hit's.
     callCache: Table[string, seq[CallCacheEntry]]
                        ## RFC-0005 S8ax: a bucket per `argShapeKey`; each
                        ## entry carries its exact arguments and the facts its
@@ -13868,11 +13879,19 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
         w.budgetOutDepths.add p.loopIters
   of tscCheap: discard
   var errs: seq[SymexErrorInfo]
+  w.hitExtraction.setLen(0)
   if isCandidate:
     for i in exLiveStart ..< w.sinks.extractionErrors.len:
       errs.add w.sinks.extractionErrors[i]
     extractionErrors.setLen(exStart)
     w.sinks.extractionErrors.setLen(exLiveStart)
+  else:
+    # RFC-0016 INT-32 (R1-33): a clean hit's own extraction failures stay on
+    # the sink (the run reports them) and are ALSO this hit's, so a winner is
+    # lossy by its own witness only, never by a sibling hit's.
+    for i in exLiveStart ..< w.sinks.extractionErrors.len:
+      if w.sinks.extractionErrors[i].kind == feExtractionFailed:
+        w.hitExtraction.add w.sinks.extractionErrors[i]
   (status: st, witness: wit, candidateErrs: errs, undefWhy: why)
 
 proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
@@ -13886,6 +13905,8 @@ proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
   if scSpurious in r.soundness.pathTaint:
     w.candidates.add r
   else:
+    var r = r
+    r.witnessExtraction = w.hitExtraction   # RFC-0016 INT-32
     w.found.add r
 
 func toCandidate(r: RawResult): SatCandidate =

@@ -296,17 +296,20 @@ suite "W2 / WA-8: the cache key covers how the build replays":
 # ---- WA-7 --------------------------------------------------------------------
 
 suite "W2 / WA-7: a run-dependent replay outcome is not cached":
-  test "a replay killed at its bound is tried again on the next run":
+  test "RFC-0016 INT-32: a replay killed at its bound is stored":
+    # The bound (`replayTimeoutMs`) and the host are in the key, so a witness
+    # that runs past it is a fact of the key: a hit does not pay it again.
     let db = inMemoryDatabase()
     let n0 = replayExecutions()
     let f1 = labelFinding(symexFindAllWitnesses(sutSpin, db, tinyReplay), "big")
     check f1.status == sfUnknown
+    check f1.soundness.runDependence == {}
     let n1 = replayExecutions()
     check n1 > n0
     let f2 = labelFinding(symexFindAllWitnesses(sutSpin, db, tinyReplay), "big")
     check f2.status == sfUnknown
-    check not f2.fromCache
-    check replayExecutions() > n1
+    check f2.fromCache
+    check replayExecutions() == n1
 
   test "a replay ended at the memory limit is tried again on the next run":
     let db = inMemoryDatabase()
@@ -433,8 +436,11 @@ suite "R3 E11: the replay pass settles a spurious claim":
     check r.errors.named(feGlobalHavoc)
     check r.soundness.replay == rsNotNeeded
 
-suite "R3 SC1: a witness unsafe for a reason of the run is not cached":
-  test "a confirmed claim killed past the target is replayed again":
+suite "R3 SC1, RFC-0016 INT-32: a claim killed at its bound is stored unsafe":
+  test "a confirmed claim killed past the target is served unsafe":
+    # INT-32: the bound is in the key, so the kill is the key's fact. The
+    # claim is stored with `witnessUnsafe`, which fails closed: a hit never
+    # runs the witness in the host, and does not replay it.
     let db = inMemoryDatabase()
     let f1 = labelFinding(symexFindAllWitnesses(labelThenSpin, db, tinyReplay),
                           "ts")
@@ -442,12 +448,14 @@ suite "R3 SC1: a witness unsafe for a reason of the run is not cached":
     check f1.status == sfSat
     check f1.soundness.replay == rsConfirmed
     check f1.soundness.witnessUnsafe
-    check rdReplay in f1.soundness.runDependence
+    check rdReplay notin f1.soundness.runDependence
     let n1 = replayExecutions()
     let f2 = labelFinding(symexFindAllWitnesses(labelThenSpin, db, tinyReplay),
                           "ts")
-    check not f2.fromCache
-    check replayExecutions() > n1
+    check f2.fromCache
+    check f2.soundness.witnessUnsafe
+    check not hostRunnable(f2.soundness)
+    check replayExecutions() == n1
 
 suite "R4 W2: the notes are saved only with their verdict":
   proc watched(db: ExampleDatabase; keys: ref seq[string]): ExampleDatabase =
@@ -465,7 +473,7 @@ suite "R4 W2: the notes are saved only with their verdict":
   test "a verdict skipped as run-dependent leaves no notes record":
     var keys = new(seq[string])
     let db = watched(inMemoryDatabase(), keys)
-    let f = labelFinding(symexFindAllWitnesses(sutSpin, db, tinyReplay), "big")
+    let f = labelFinding(symexFindAllWitnesses(sutHog, db), "h")
     check f.status == sfUnknown
     check f.soundness.runDependence != {}
     var notes = 0

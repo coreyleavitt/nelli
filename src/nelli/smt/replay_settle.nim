@@ -207,28 +207,26 @@ proc settleCandidate*(raw: RawResult; c: SatCandidate;
 func winnerLossy*(raw: RawResult; staticLossy: bool): bool =
   ## RFC-0005 0.9.1 (WA-9). A clean winner (rules 1-2 decided `sxSat` or
   ## `sxRaised` without replay) whose witness renders lossily: the shape is
-  ## `wfLossy` (`staticLossy`, decided at macro time), or the run's extraction
-  ## substituted a value (`feExtractionFailed`). The winner's path reaches the
-  ## target, but the witness reported for it is not the model's, so nothing
-  ## yet says that witness reaches it.
+  ## `wfLossy` (`staticLossy`, decided at macro time), or the winner's own
+  ## extraction substituted a value (`RawResult.witnessExtraction`; RFC-0016
+  ## INT-32: not the run's `errors`, where a sibling hit's failure made a
+  ## faithful winner lossy). The winner's path reaches the target, but the
+  ## witness reported for it is not the model's, so nothing yet says that
+  ## witness reaches it.
   if raw.status notin {sxSat, sxRaised} or raw.soundness.replay != rsNotNeeded or
      scSpurious in raw.soundness.pathTaint:
     return false
-  if staticLossy: return true
-  for e in raw.errors:
-    if e.kind == feExtractionFailed: return true
-  false
+  staticLossy or raw.witnessExtraction.len > 0
 
 proc winnerCandidate*(raw: RawResult): SatCandidate =
   ## RFC-0005 0.9.1 (WA-9). A lossy clean winner as the one job of the replay
   ## pass, so it is replayed by the same codegen a candidate is. Its path is
-  ## clean (replay-eligible); its extraction errors make `candidateLossy` true
-  ## where the run substituted a value. Settled by `settleWinner`, never by
+  ## clean (replay-eligible); its own extraction errors make `candidateLossy`
+  ## true where its extraction substituted a value. Settled by `settleWinner`, never by
   ## `settleCandidate`.
   result = SatCandidate(status: raw.status, pathTaint: {},
                         nilDerefOnPath: raw.nilDerefOnPath)
-  for e in raw.errors:
-    if e.kind == feExtractionFailed: result.errors.add e
+  result.errors = raw.witnessExtraction   # RFC-0016 INT-32: its own only
   case raw.status
   of sxSat: result.input = raw.witness
   of sxRaised:

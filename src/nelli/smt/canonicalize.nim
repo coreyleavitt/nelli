@@ -825,8 +825,17 @@ const renderAsChoicesVersion* = "12"
   ##   longer stored (INT-31, W-18): such a stored claim was served after
   ##   that body changed. Entries an earlier run stored for such a program
   ##   are stale. No key bytes change.
+  ## - RFC-0016 W4 rv0005-lows part 3 (406->408; 407 is reserved; INT-32): a
+  ##   replay killed at `replayTimeoutMs` is no longer run-dependent (the bound
+  ##   is keyed), so its verdict is stored; one ended by a signal from outside
+  ##   the SUT is run-dependent and not stored; a lossy winner whose replay no
+  ##   child could run is `rsRefused` (a new `ReplayStatus`, never run in the
+  ##   host); a record with malformed gaps metadata is a miss; the strongest
+  ##   raise per type is stored, not the first; a winner is lossy by its own
+  ##   extraction only. Entries an earlier walker stored are stale. No key
+  ##   bytes change.
 
-const symexWalkerVersion* = "406"
+const symexWalkerVersion* = "408"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

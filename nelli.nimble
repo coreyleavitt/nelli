@@ -1925,6 +1925,8 @@ task test, "Run the test suite":
             "tsymex_0016_int78_seqlitsort",
             # RFC-0016 INT-79: a seq literal as a `for` operand was a walker fault (`lowerLeafInExpr` met `iekSeqLit`).
             "tsymex_0016_int79_seqlitloop",
+            # RFC-0016 INT-80: seq `&` (and `add` of a seq) declined; no seq concatenation model.
+            "tsymex_0016_int80_seqconcat",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

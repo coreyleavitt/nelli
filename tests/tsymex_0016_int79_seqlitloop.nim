@@ -93,9 +93,8 @@ proc u3(k: int): int =
   for x in evens(@[g[0], g[1], 4]):
     g[1] = 100
     result += x
-# The same copy computed by seq `&`: the walker has no model of seq `&`
-# anywhere (`let h = g & @[4]` declines alike), a construct of its own and
-# not the loop's; it declines by name, never faults.
+# The same copy computed by seq `&` (modelled since INT-80, walker 439;
+# it declined `feUnsupportedOp` before, as `let h = g & @[4]` did).
 proc u4(k: int): int =
   var g = @[k, 2]
   for x in evens(g & @[4]):
@@ -147,6 +146,9 @@ proc eU3Never(k: int) =
 proc eU4(k: int) =
   if k > 50 or k < -50: return
   if u4(k) == 6 + (if k mod 2 == 0: k else: 0): symexTarget("hit")
+proc eU4Never(k: int) =
+  if k > 50 or k < -50: return
+  if u4(k) == 104 + (if k mod 2 == 0: k else: 0): symexTarget("hit")
 
 # `mgetOrPut` with a computed key (`s8cq_twice11` q10): the key is
 # evaluated once, after the receiver and before the default.
@@ -210,7 +212,7 @@ template exact(hitP, neverP: untyped) =
 
 suite "INT-79":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 438
+    check parseInt(symexWalkerVersion) >= 439
   test "native truth":
     for e in [eR1, eA1, eA2, eA3, eA4, eT1, eO1, eS1, eN1, eN2, eD1, eD2,
               eP1, eP2, eU1, eU2, eU3, eU4]:
@@ -218,7 +220,7 @@ suite "INT-79":
         check native(e(k)) == "hit"
     for e in [eR1Never, eA1Never, eA2Never, eA3Never, eA4Never, eT1Never,
               eO1Never, eS1Never, eN1Never, eN2Never, eD1Never, eD2Never,
-              eP1Never, eP2Never, eU1Never, eU2Never, eU3Never]:
+              eP1Never, eP2Never, eU1Never, eU2Never, eU3Never, eU4Never]:
       for k in [-42, -7, 0, 1, 2, 3]:
         check native(e(k)) == "ran"
   test "the reported shape: a seq literal of tuples under `items`":
@@ -247,8 +249,7 @@ suite "INT-79":
     exact(eU1, eU1Never)
     exact(eU2, eU2Never)
     exact(eU3, eU3Never)
-    pinDecline(eU4, cell, feUnsupportedOp, needle = "`&`",
-               excluding = {weInternalWalkerFault})
+    exact(eU4, eU4Never)
   test "`mgetOrPut` with a computed key, exact against native":
     for e in [mk1, mk2, mk3, mk4]:
       for k in [-42, -7, 0, 1, 2, 3]:

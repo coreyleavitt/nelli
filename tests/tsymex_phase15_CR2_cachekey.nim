@@ -1297,7 +1297,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## held as a bit-vector; 434-436 are taken): 433->437.
     ## RFC-0016 INT-79 (a seq literal as a `for` operand is bound to a
     ## temporary, not a walker fault): 437->438.
-    check symexWalkerVersion == "438"
+    ## RFC-0016 INT-80 (seq `&` and `add` of an `openArray` modelled as a
+    ## concatenation): 438->439.
+    check symexWalkerVersion == "439"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

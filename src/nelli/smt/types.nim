@@ -727,6 +727,12 @@ type
                      ## (the same length): a `var openArray` view of a
                      ## `toOpenArray` slice written back to its storage.
                      ## Lowered as an array-lambda like `iekSeqSlice`.
+    iekSeqConcat     ## RFC-0016 INT-80: `scLeft & scRight` over two seqs
+                     ## (system's `&`; `seq & T` and `T & seq` take the
+                     ## element as a one-element literal): length the sum,
+                     ## element `i` the left's below its length and the
+                     ## right's `i - len(left)` from there, an array-lambda
+                     ## per data array like `iekSeqSplice`.
     iekStrStrip      ## Round-4 Slice B (ADR-0026): `strutils.strip(s,
                      ## leading, trailing, chars)` with COMPILE-TIME-literal
                      ## flags and char set → quantifier-free DECOMPOSITION
@@ -989,6 +995,9 @@ type
       spBase*: IRExpr
       spAt*:   IRExpr
       spPart*: IRExpr
+    of iekSeqConcat:   ## RFC-0016 INT-80
+      scLeft*:  IRExpr
+      scRight*: IRExpr
     of iekStrLit:
       sval*: string
     of iekContains:
@@ -2930,6 +2939,10 @@ proc mkSeqSplice*(base, at, part: IRExpr): IRExpr =
   ## RFC-0005 S8bu. `base` with `part` written over it from position `at`
   ## (see `iekSeqSplice`).
   IRExpr(kind: iekSeqSplice, spBase: base, spAt: at, spPart: part)
+
+proc mkSeqConcat*(left, right: IRExpr): IRExpr =
+  ## RFC-0016 INT-80. The seq `left & right` (see `iekSeqConcat`).
+  IRExpr(kind: iekSeqConcat, scLeft: left, scRight: right)
 
 proc mkStrLit*(s: string): IRExpr =
   IRExpr(kind: iekStrLit, sval: s)
@@ -5100,6 +5113,8 @@ proc render*(e: IRExpr): string =
   of iekSeqSplice:
     "splice(" & render(e.spBase) & ", " & render(e.spAt) & ", " &
       render(e.spPart) & ")"
+  of iekSeqConcat:
+    "(" & render(e.scLeft) & " & " & render(e.scRight) & ")"
   of iekArrayLit:
     var inner = ""
     for i, c in e.lelems:

@@ -511,6 +511,8 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekSeqSplice:   ## RFC-0005 S8bu
     newCall(bindSym"mkSeqSplice", emitExpr(e.spBase),
             emitExpr(e.spAt), emitExpr(e.spPart))
+  of iekSeqConcat:   ## RFC-0016 INT-80
+    newCall(bindSym"mkSeqConcat", emitExpr(e.scLeft), emitExpr(e.scRight))
   of iekStrLit:
     newCall(bindSym"mkStrLit", newLit(e.sval))
   of iekContains:
@@ -2352,6 +2354,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekSeqSplice:   ## RFC-0005 S8bu: forks nothing of its own
     result = rhsHasInlineDefectFork(e.spBase) or
              rhsHasInlineDefectFork(e.spAt) or rhsHasInlineDefectFork(e.spPart)
+  of iekSeqConcat:   ## RFC-0016 INT-80: forks nothing of its own
+    result = rhsHasInlineDefectFork(e.scLeft) or
+             rhsHasInlineDefectFork(e.scRight)
   of iekContains:
     result = rhsHasInlineDefectFork(e.container) or rhsHasInlineDefectFork(e.key)
   of iekTabRemovedSince:   # RFC-0005 S8bx (item 4): two variables
@@ -2489,6 +2494,7 @@ proc irKids*(e: IRExpr): seq[IRExpr] =
   of iekSeqLen: @[e.lenObj]
   of iekSeqSlice: @[e.ssBase, e.ssLo, e.ssHi]
   of iekSeqSplice: @[e.spBase, e.spAt, e.spPart]   ## RFC-0005 S8bu
+  of iekSeqConcat: @[e.scLeft, e.scRight]   ## RFC-0016 INT-80
   of iekContains: @[e.container, e.key]
   of iekTabRemovedSince: @[e.trCur, e.trBase]   ## RFC-0005 S8bx
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel: @[e.mutRecv, e.mutArg]
@@ -2578,6 +2584,7 @@ func isEagerIR(e: IRExpr): bool =
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip, iekStrInOptionRegion, iekSeqSlice,
      iekSeqSplice,   # RFC-0005 S8bu
+     iekSeqConcat,   # RFC-0016 INT-80
      iekStrSetAt, iekStrChars, iekStrFromChars,   # RFC-0005 S8ca
      iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel, iekSeqDel,
      iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp,
@@ -12865,6 +12872,29 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
        classifyType(n[2]).ty.kind == itString:
       let (lhs, rhs) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (string-concat); RFC-0005 S8ax order
       return mkStrOp(iekStrConcat, "&", @[lhs, rhs])
+    # RFC-0016 INT-80: system's seq `&` (`seq & seq`, `seq & T`, `T & seq`).
+    # An element operand is a one-element literal (Nim's `seq & T` is `x &
+    # @[y]` in effect: a fresh seq one longer), so the walker sees only
+    # `iekSeqConcat` of two seqs. Each operand is read where Nim reads it
+    # (`parseOperandPair`). A seq of seqs declines by name, as its literal.
+    if n[0].strVal == "&" and n[0].kind == nnkSym and isStdlibDecl(n[0]) and
+       classifyType(n).ty.kind == itSeq:
+      let rty = classifyType(n).ty
+      let et = rty.seqElemTy
+      if not isBackedSeqElemTy(et):
+        preamble.add ctx.declineAtSite(
+          seNestedSeqUnsupported,
+          "seq `&` over a seq of " & $et & " in `" & n.repr &
+            "`, an element type the model does not back — degraded to " &
+            "sxUnknown (seNestedSeqUnsupported)",
+          "seq `&` of an unbacked element (seNestedSeqUnsupported)")
+        let dummy = zeroValueForType(rty)
+        return (if dummy != nil: dummy else: mkSeqLit(@[], et))
+      let lSeq = classifyType(n[1]).ty.kind == itSeq
+      let rSeq = classifyType(n[2]).ty.kind == itSeq
+      let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
+      return mkSeqConcat((if lSeq: l else: mkSeqLit(@[l], et)),
+                         (if rSeq: r else: mkSeqLit(@[r], et)))
     # Phase 15 G5: a `{.borrow.}` operator on a `distinct T`. In the typed AST
     # `m1 + m2` (with `proc \`+\`(a,b: Meters): Meters {.borrow.}`) is an
     # `nnkInfix` whose `n[0]` is the borrow proc SYMBOL. Detect it and route
@@ -20042,14 +20072,24 @@ type DottedOp = enum
   ## field's old value the same one the bare arm applies to a variable's.
   doSeqAdd, doSeqDel, doSeqInsert, doTabDel, doTabSet, doSetIncl, doSetExcl,
   doStrConcat, doStrUnsupported, doStrIndexAssign,
-  doSeqInsertGrow   ## RFC-0005 S8ar: `insert`'s grow phase
+  doSeqInsertGrow,  ## RFC-0005 S8ar: `insert`'s grow phase
+  doSeqAddAll       ## RFC-0016 INT-80: `add` of an `openArray` (`&=`)
+
+proc isOpenArrayActual(a: NimNode): bool =
+  ## RFC-0016 INT-80. `a` is an actual Nim converted to an `openArray`
+  ## formal: `add(x: var seq[T], y: openArray[T])` (and `&=`, a template
+  ## over it) rather than `add(x: var seq[T], y: sink T)`. `parseExpr`
+  ## reads such an actual as the seq it views (`openArrayView`).
+  a.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and a.len == 2 and
+    a.typeKind in {ntyOpenArray, ntyVarargs}
 
 proc mutationOp(calleeName: string; fk: IRTypeKind; n: NimNode): DottedOp =
   ## RFC-0005 S8ap (factored by S8at). The bare arm's IR for a mutation
   ## `isKnownMutatingReceiverCall` accepted, by name and receiver kind.
   case calleeName
   of "add":
-    if fk == itSeq: doSeqAdd
+    if fk == itSeq and n.len == 3 and isOpenArrayActual(n[2]): doSeqAddAll
+    elif fk == itSeq: doSeqAdd
     elif classifyType(n[2]).ty.kind == itString or
          unwrapHidden(n[2]).typeKind == ntyChar: doStrConcat
     else: doStrUnsupported
@@ -21011,6 +21051,7 @@ proc dottedOpExpr(op: DottedOp; old: IRExpr; args: seq[IRExpr]): IRExpr =
   ## over `mkVar(recvName)`.
   case op
   of doSeqAdd:    mkSeqAdd(old, args[0])
+  of doSeqAddAll: mkSeqConcat(old, args[0])   ## RFC-0016 INT-80
   of doSeqDel:    mkSeqDel(old, args[0])
   of doSeqInsert: mkSeqInsert(old, args[0], args[1])
   of doSeqInsertGrow: mkSeqInsert(old, args[0], args[1], grow = true)
@@ -23148,7 +23189,12 @@ proc parseStmtInner(n: NimNode,
           # `s.add(v)` on a seq
           if calleeName == "add" and recvCls.ty.kind == itSeq and n.len == 3:
             let val = parseExpr(n[2], preamble, ctx)
-            mkAssign(recvName, mkSeqAdd(mkVar(recvName), val))
+            # RFC-0016 INT-80: `add` of an `openArray` (`s.add(@[..])`,
+            # `s &= t`) appends every element: `s := s & t`.
+            if isOpenArrayActual(n[2]):
+              mkAssign(recvName, mkSeqConcat(mkVar(recvName), val))
+            else:
+              mkAssign(recvName, mkSeqAdd(mkVar(recvName), val))
           # `s.del(i)` on a seq (Nim's swap-with-last)
           elif calleeName == "del" and recvCls.ty.kind == itSeq and n.len == 3:
             let idx = parseExpr(n[2], preamble, ctx)

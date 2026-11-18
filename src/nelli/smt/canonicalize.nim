@@ -878,8 +878,13 @@ const renderAsChoicesVersion* = "12"
   ##   bound as a copy is a local of the expansion to the S8cn `lent` check;
   ##   `mgetOrPut` with a computed key evaluates it once in the model. No key
   ##   bytes change.
+  ## - RFC-0016 INT-80 (438->439): seq `&` (`seq & seq`, `seq & T`, `T & seq`)
+  ##   and `add` of an `openArray` (`&=`) are modelled as a concatenation
+  ##   (`iekSeqConcat`, an array lambda per data array) where they declined
+  ##   (`feUnsupportedOp`) or faulted (`add` of a seq). It keys as
+  ##   `Ex<SCC:left:right>`; no existing key bytes change.
 
-const symexWalkerVersion* = "438"
+const symexWalkerVersion* = "439"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -6889,6 +6894,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekSeqSplice: "Ex<SSP:" & canonicalize(e.spBase, env) & ":" &
                    canonicalize(e.spAt, env) & ":" &
                    canonicalize(e.spPart, env) & ">"   ## RFC-0005 S8bu
+  of iekSeqConcat: "Ex<SCC:" & canonicalize(e.scLeft, env) & ":" &
+                   canonicalize(e.scRight, env) & ">"   ## RFC-0016 INT-80
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &

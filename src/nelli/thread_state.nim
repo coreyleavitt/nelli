@@ -37,6 +37,15 @@
 ## that marker, and that every module with a `releaseToDefault` registers it.
 ##
 ## Z3-free and a leaf: `import nelli` and the engine use it as well.
+##
+## It reads no build option (RFC-0016 K5a: those reads live in
+## `buildprofile.nim` only), and it cannot import `buildprofile`: that module
+## imports `pcre_engine`, which imports this one, so the import would be a
+## cycle. It needs none: whether the build has threads is whether system.nim
+## declares the thread-exit API (`onThreadDestruction`,
+## `nimThreadDestructionHandlers`; system includes `threadimpl` only when
+## `hasThreadSupport`), and that symbol is what the code below calls. A
+## `when declared(...)` on it is the exact compile guard the call needs.
 
 import std/macros
 
@@ -85,7 +94,7 @@ proc disarmThreadStateRelease() {.gcsafe, raises: [].} =
   ## needs no hook until a later run arms it again. Called from the hook
   ## itself, the removal is safe: `afterThreadRuns` walks the list down to
   ## index 0, and deleting entry `i` moves only entries it has already run.
-  when compileOption("threads") and declared(nimThreadDestructionHandlers):
+  when declared(nimThreadDestructionHandlers):
     if threadStateArmed:
       threadStateArmed = false
       {.cast(gcsafe).}:
@@ -118,7 +127,7 @@ proc armThreadStateRelease*() =
   ## on the main thread and a foreign thread no handler ever runs (the main
   ## thread's state is reachable until exit; a foreign thread's owner
   ## releases it, which also takes the hook back out).
-  when compileOption("threads"):
+  when declared(onThreadDestruction):
     if not threadStateArmed:
       threadStateArmed = true
       onThreadDestruction(releaseAtThreadExit)

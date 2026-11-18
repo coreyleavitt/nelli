@@ -38,12 +38,14 @@
 # condition per entry; it is empty since the nim-z3 d86efda lock bump retired
 # its one entry. A leak under src/nelli is fixed, never suppressed. The self-test's fourth plant (tests/asan/plant_nim_leak.nim)
 # fails the job if leak detection is off or swallowed. Nim 2.2.10 itself
-# leaks in three shapes nelli met, each worked around rather than
+# leaks in four shapes nelli met, each worked around rather than
 # suppressed: a first write that is a bitwise copy
 # (tests/asan/nim_firstwrite_leak.nim; tsymex_0016_s8ckr_firstwrite_audit
 # keeps the shape out of src/), a never-read string cursor
-# (nim_cursor_strlit_leak.nim), and threadvars never destroyed at thread
-# exit (nim_threadvar_exit_leak.nim; releaseSymexThreadState).
+# (nim_cursor_strlit_leak.nim), threadvars never destroyed at thread
+# exit (nim_threadvar_exit_leak.nim; releaseSymexThreadState), and an owned
+# temporary not destroyed when a later argument raises a Defect
+# (nim_defect_temp_leak.nim).
 #
 # The slice: the CORE set (the suites that exercise Z3 AST lifetime hardest:
 # heap, strings, regex, closures, raise paths, cache replay) always runs, then
@@ -79,6 +81,7 @@ export NELLI_NIM_FLAGS="${NELLI_NIM_FLAGS:-} $asan_flags"
 # Suites that exercise Z3 AST lifetime hardest. Every name must be registered.
 core=(
   tsymex_h_stepC_heapidentity tsymex_r6_heap_raise_totality tsymex_phase15_r1b_callheap   # heap
+  tsymex_phase15_g4_distinct_sort  # distinct sorts: inject/eject decls pinned before the next Z3 call (S8ck-r)
   tsymex_rfc0005_s8ca_strings tsymex_r6_b1_stringbacked                                    # strings
   tsymex_phase15_S6a_regex_parser tsymex_phase15_S6b_regex tsymex_rfc0005_s8cf_classes     # regex
   tsymex_rfc0005_s8ca_closures_heap tsymex_phase15_CR1_CR5_closure_heap                    # closures

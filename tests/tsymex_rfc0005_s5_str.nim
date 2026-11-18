@@ -292,7 +292,13 @@ suite "RFC-0005 S5 -- oracles":
     probe(proc () = discard ($(1 div z)).split(","))
     probe(proc () = discard "s".split($(1 div z)))
     probe(proc () = discard ($(1 div z)).split(""))
-    probe(proc () = discard "s".split(",").join($(1 div z)))
+    # The separator is evaluated before the split: Nim 2.2.10 never destroys
+    # an owned temporary (the seq `split` returns) when a later argument
+    # raises a Defect from an inline check (tests/asan/nim_defect_temp_leak.nim;
+    # 34 bytes under LeakSanitizer). The probe still raises at the same `div`.
+    probe(proc () =
+      let sep = $(1 div z)
+      discard "s".split(",").join(sep))
     check hits == 6
 
   test "oracle: the live targets are reachable":

@@ -71,6 +71,7 @@ export NELLI_NIM_FLAGS="${NELLI_NIM_FLAGS:-} $asan_flags"
 # Suites that exercise Z3 AST lifetime hardest. Every name must be registered.
 core=(
   tsymex_h_stepC_heapidentity tsymex_r6_heap_raise_totality tsymex_phase15_r1b_callheap   # heap
+  tsymex_phase15_g4_distinct_sort  # distinct sorts: inject/eject decls pinned before the next Z3 call (S8ck-r)
   tsymex_rfc0005_s8ca_strings tsymex_r6_b1_stringbacked                                    # strings
   tsymex_phase15_S6a_regex_parser tsymex_phase15_S6b_regex tsymex_rfc0005_s8cf_classes     # regex
   tsymex_rfc0005_s8ca_closures_heap tsymex_phase15_CR1_CR5_closure_heap                    # closures

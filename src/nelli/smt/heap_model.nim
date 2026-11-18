@@ -423,6 +423,22 @@ proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
   else:
     result.add ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(sv))
 
+proc mkPinnedUnaryDecl(ctx: Z3Context; name: string;
+                       dom, rng: RawZ3Sort): RawZ3FuncDecl =
+  ## A unary func-decl `name: dom -> rng`, inc-ref'd for the run's lifetime
+  ## (never dec'd: the context is torn down at run end) BEFORE any other Z3
+  ## call. In a ref-counted context Z3 keeps a fresh result alive only until
+  ## the next call that returns an ast (`api::context::save_ast_trail`): the
+  ## inject decl, ref'd only after the eject decl was made, was already freed
+  ## (RFC-0016 S8ck-r: a heap-use-after-free in `Z3_inc_ref` under the ASan
+  ## libz3, tsymex_rfc0005_s8u_precision_b and
+  ## tsymex_phase15_g4_distinct_sort).
+  var domain = @[dom]   # a HEAP seq (the G4 raw-FFI discipline)
+  let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
+  result = ctx.checkErr Z3_mk_func_decl(ctx.raw, sym, 1,
+    cast[ptr UncheckedArray[RawZ3Sort]](addr domain[0]), rng)
+  incRefFD(ctx, result)
+
 proc ensureDistinctSort*(ty: IRType): DistinctSortEntry =
   ## Phase 15 G4 (ADR-0008 D4), factored out of `allocDistinctSym` by
   ## RFC-0005 S8ad. The "DistinctName" uninterpreted sort, its inject/eject
@@ -451,18 +467,8 @@ proc ensureDistinctSort*(ty: IRType): DistinctSortEntry =
                                           false, @[])
     if baseIsDecidable(ty.distinctBase) and isBijectivityBaseSym(baseRep):
       let baseSort = rawSortOf(baseRep)
-      var injDom = @[baseSort]
-      let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("inject_" & name).cstring)
-      let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
-      var ejDom = @[sort.raw]
-      let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("eject_" & name).cstring)
-      let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
-      incRefFD(ctx, inject)   # keep the decls alive for the run's lifetime
-      incRefFD(ctx, eject)
+      let inject = mkPinnedUnaryDecl(ctx, "inject_" & name, baseSort, sort.raw)
+      let eject = mkPinnedUnaryDecl(ctx, "eject_" & name, sort.raw, baseSort)
       let dentry = DistinctSortEntry(sort: sort, inject: inject, eject: eject)
       currentDistinctSorts[name] = dentry
       # CR-9 Stage 4: also populate WalkerStatics when a walk is active so
@@ -489,20 +495,10 @@ proc ensureDistinctSort*(ty: IRType): DistinctSortEntry =
       if baseRep.kind notin {svTable, svSet, svSeq, svArray, svTuple,
                              svVariant, svMultiVariant}:
         let baseSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(baseRep))
-        var injDom = @[baseSort]
-        let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-          ("inject_" & name).cstring)
-        let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
-          cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
-        var ejDom = @[sort.raw]
-        let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-          ("eject_" & name).cstring)
-        let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
-          cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
-        incRefFD(ctx, inject)
-        incRefFD(ctx, eject)
-        dentry.inject = inject
-        dentry.eject = eject
+        dentry.inject = mkPinnedUnaryDecl(ctx, "inject_" & name, baseSort,
+                                          sort.raw)
+        dentry.eject = mkPinnedUnaryDecl(ctx, "eject_" & name, sort.raw,
+                                         baseSort)
       currentDistinctSorts[name] = dentry
       # CR-9 Stage 4: also populate WalkerStatics when a walk is active.
       syncDistinctSortEntry(name, dentry)

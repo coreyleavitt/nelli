@@ -21892,12 +21892,35 @@ proc parseStmtInner(n: NimNode,
       # single-variable `pairs` binds a `(key, val)` tuple, which this
       # desugaring does not build: a scoped decline.
       let isPairs = iterExpr[0].strVal == "pairs"
-      if (isPairs and n.len != 4) or (not isPairs and n.len != 3):
+      # RFC-0016 INT-64: `for a, b in items(c)` over a seq or an array of
+      # tuples unpacks each element into the variables (`tables.toTable`'s
+      # `for key, val in items(pairs)`): the element is bound to a fresh
+      # name, then each variable to its field.
+      var unpack: seq[NimNode]
+      if not isPairs and n.len > 3 and recvCls.ty.kind in {itSeq, itArray}:
+        let et = if recvCls.ty.kind == itArray: recvCls.ty.elemTy
+                 else: recvCls.ty.seqElemTy
+        if et != nil and et.kind == itTuple and et.fields.len == n.len - 2:
+          for i in 0 ..< n.len - 2:
+            if n[i].kind != nnkSym:
+              unpack.setLen(0)
+              break
+            unpack.add n[i]
+      if unpack.len == 0 and
+         ((isPairs and n.len != 4) or (not isPairs and n.len != 3)):
         return ctx.declineMarker(feUnsupportedStmtKind,
           &"for-loop over `{iterExpr[0].strVal}` with {n.len - 2} loop " &
-          "variable(s): only `for x in c` and `for i, x in pairs(c)` are modelled")
+          "variable(s): only `for x in c`, `for a, b in c` over tuples and " &
+          "`for i, x in pairs(c)` are modelled")
       if isPairs: n[1].expectKind nnkSym
-      let valName = if isPairs: n[1].strVal else: iterName
+      let valName = if isPairs: n[1].strVal
+                    elif unpack.len > 0: freshSynth(ctx, "fup")
+                    else: iterName
+      proc unpackLets(ety: IRType): seq[IRStmt] =
+        for i, v in unpack:
+          let fname = if ety.fieldNames.len > i: ety.fieldNames[i] else: ""
+          result.add mkLet(v.strVal, ety.fields[i],
+                           mkField(mkVar(valName), i, fname))
       if recvCls.ty.kind == itString:
         # Phase 15 S3 (ADR-0006): `for c in s` over a *symbolic* string is
         # unsupported — NOT for a byte/codepoint reason (byte-faithful makes
@@ -21931,9 +21954,15 @@ proc parseStmtInner(n: NimNode,
         let elemTy = if recvCls.ty.kind == itArray: recvCls.ty.elemTy
                      else: recvCls.ty.seqElemTy
         if recvCls.ty.kind == itSeq and not isPairs or not alwaysCopied(elemTy):
-          let d = lentLoopDecline(n, container, (if isPairs: n[1] else: iterVar),
-                                  bodyNode, ctx, iterExpr[0].strVal)
-          if d != nil: return d
+          if unpack.len > 0:
+            for v in unpack:
+              let d = lentLoopDecline(n, container, v, bodyNode, ctx,
+                                      iterExpr[0].strVal)
+              if d != nil: return d
+          else:
+            let d = lentLoopDecline(n, container, (if isPairs: n[1] else: iterVar),
+                                    bodyNode, ctx, iterExpr[0].strVal)
+            if d != nil: return d
       # RFC-0005 S8m: an array is unrolled (a `break` leaves the block
       # around the whole unroll); a seq is a `while` whose increment follows
       # the body (a `continue` leaves the body's block).
@@ -21979,6 +22008,7 @@ proc parseStmtInner(n: NimNode,
           if isPairs:
             iters.add mkLet(iterName, idxTy, mkIntLit(lo + int64(k)))
           iters.add mkLet(valName, recvCls.ty.elemTy, mkVar(synth))
+          iters.add unpackLets(recvCls.ty.elemTy)
           iters.add body
         if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
         else: stmts.add iters
@@ -22018,7 +22048,9 @@ proc parseStmtInner(n: NimNode,
         var loopStmts = @[idxStmt]
         if isPairs:   # RFC-0005 S8z: `i` is the position
           loopStmts.add mkLet(iterName, intTy, mkVar(ivName))
-        loopStmts.add @[bindIter, body, incIv]
+        loopStmts.add bindIter
+        loopStmts.add unpackLets(recvCls.ty.seqElemTy)
+        loopStmts.add @[body, incIv]
         loopStmts.add mkIf(@[mkBranch(
           mkBinop(bNe, mkSeqLen(seqIR), mkVar(lenName)),
           seqIterLenChanged(ctx, n, container, iterExpr[0].strVal))])

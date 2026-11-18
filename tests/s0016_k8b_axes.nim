@@ -44,7 +44,12 @@ const axisFiles*: array[AxisScope, seq[string]] = [
                  "tsymex_0016_k8b_axes_typeclass_b.nim"],
   axTypeOp: @["tsymex_0016_k8b_axes_typeop.nim"],
   axPragma: @["tsymex_0016_k8b_axes_pragma_a.nim",
-              "tsymex_0016_k8b_axes_pragma_b.nim"],
+              "tsymex_0016_k8b_axes_pragma_b.nim",
+              "tsymex_0016_k8b_axes_pragma_c.nim",
+              "tsymex_0016_k8b_axes_pragma_d.nim",
+              "tsymex_0016_k8b_axes_pragma_e.nim",
+              "tsymex_0016_k8b_axes_pragma_f.nim",
+              pragmaCppSuite, pragmaDispatchSuite, pragmaForeignSuite],
   axMagic: @["tsymex_0016_k8b_axes_magic_a.nim",
              "tsymex_0016_k8b_axes_magic_b.nim",
              "tsymex_0016_k8b_axes_magic_c.nim",
@@ -93,6 +98,23 @@ proc buildSuiteProblems*(): seq[string] =
       used.incl f
   for f in axisFiles[axBuild][1 .. ^1]:
     if f notin used: result.add f & " runs no switch row"
+
+proc ownRowProblems*(rows: seq[OwnRow] = ownRows): seq[string] =
+  ## Every row with a suite of its own names a fragment of its axis and one
+  ## of the axis's suites (not one of its stream's), once, and is not blocked.
+  var seen: HashSet[string]
+  for o in rows:
+    let id = scopePrefix[o.axis] & ":" & o.key
+    var found = false
+    for s in axisSnippets[o.axis]:
+      if s.key == o.key: found = true
+    if not found: result.add id & " has a suite of its own but no fragment"
+    if o.suite notin axisFiles[o.axis]:
+      result.add id & ": " & o.suite & " is no suite of the axis (`axisFiles`)"
+    if isBlocked(o.axis, o.key):
+      result.add id & " is blocked and has a suite of its own"
+    if id in seen: result.add id & " has two suites of its own"
+    seen.incl id
 
 proc modelledRows*(axis: AxisScope): seq[string] =
   ## Every row of the axis's table that is admitted at some site.

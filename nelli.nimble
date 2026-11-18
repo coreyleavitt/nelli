@@ -1750,6 +1750,14 @@ task test, "Run the test suite":
             "tsymex_0016_k8b_axes_typeop",
             "tsymex_0016_k8b_axes_pragma_a",
             "tsymex_0016_k8b_axes_pragma_b",
+            "tsymex_0016_k8b_axes_pragma_c",
+            "tsymex_0016_k8b_axes_pragma_d",
+            "tsymex_0016_k8b_axes_pragma_e",
+            "tsymex_0016_k8b_axes_pragma_f",
+            # the pragma rows with a suite of their own (s0016_k8b_snippets `ownRows`)
+            "tsymex_0016_k8b_axes_pragma_cpp",
+            "tsymex_0016_k8b_axes_pragma_dispatch",
+            "tsymex_0016_k8b_axes_pragma_foreign",
             "tsymex_0016_k8b_axes_stdlib",
             "tsymex_0016_k8b_axes_magic_a",
             "tsymex_0016_k8b_axes_magic_b",
@@ -1776,6 +1784,10 @@ task test, "Run the test suite":
             # `len` of an array as an arithmetic operand.
             "tsymex_0016_int58_roundunsat",
             "tsymex_0016_int60_lenarrarith",
+            # RFC-0016 INT-63 / INT-64: a `let` copy of a closure local; a
+            # `toTable` table (a tuple-unpacking `items` loop).
+            "tsymex_0016_int63_closurelet",
+            "tsymex_0016_int64_totable",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

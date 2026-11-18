@@ -613,14 +613,15 @@ proc genFamily*(fam: FamilyScope; seed, count: int; first = 0): seq[Prog] =
 
 proc axisOrder*(axis: AxisScope; seed: int): seq[string] =
   ## The axis's fragment keys in a seeded order: which rows share a program.
-  ## A blocked row (`blockedRows`) is shuffled with the rest and then left
-  ## out, so blocking or readmitting one keeps the others' relative order.
+  ## A blocked row (`blockedRows`) or one with a suite of its own (`ownRows`)
+  ## is shuffled with the rest and then left out, so blocking or readmitting
+  ## one keeps the others' relative order.
   var all: seq[string]
   for s in axisSnippets[axis]: all.add s.key
   var r = initRand(seed)
   r.shuffle(all)
   for k in all:
-    if not isBlocked(axis, k): result.add k
+    if inStream(axis, k): result.add k
 
 proc genAxis*(axis: AxisScope; seed, count, per: int; first = 0): seq[Prog] =
   ## Programs `[first, first + count)` of the axis's seeded stream: program
@@ -648,6 +649,26 @@ proc genAxisKeys*(axis: AxisScope; seed: int; keys: openArray[string]):
   ## programs from the same stream as one that runs a slice of it.
   for p in genAxis(axis, seed, streamRows(axis), 1):
     if p.rows[0] in keys: result.add p
+
+const ownBase* = 10_000
+  ## Where the ids of the programs of rows with a suite of their own start.
+
+proc genAxisOwn*(axis: AxisScope; seed: int; keys: openArray[string]):
+    seq[Prog] =
+  ## One one-row program per key, for a row with a suite of its own (out of
+  ## the stream, `ownRows`): its id is `ownBase` plus the row's place in the
+  ## axis table, its predicate drawn from the seed and that place.
+  for k in keys:
+    var ix = -1
+    for i, s in axisSnippets[axis]:
+      if s.key == k: ix = i
+    doAssert ix >= 0, "no fragment for " & scopePrefix[axis] & ":" & k
+    var r = initRand(seed xor 0xA815 xor (ix + 1))
+    var p = Prog(id: ownBase + ix, shape: shAxis, ty: "int8", axis: axis)
+    p.rows.add k
+    p.cmp = r.pick(cmps)
+    p.k = Lit(kind: lkNum, n: r.pick(famK))
+    result.add p
 
 func anchorPrograms*(): seq[Prog] =
   ## One hand-seeded instance per shape whose seeded stream may reach no sat

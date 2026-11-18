@@ -186,13 +186,15 @@ template axisBatch*(axis: static AxisScope; tag: static string;
       check fs.len == 0
       check exact > 0
 
-proc skippedRecord*(file, why: string): ExercisedRecord =
-  ## A build-axis suite whose switch cannot be built on this leg (a backend or
-  ## platform with no such mode) ran and exercised nothing: a record with no
-  ## cell, so K1 sees the suite ran on the leg (`axisJoinProblems` judges an
-  ## axis only when all its suites did) and counts no row.
+proc skippedRecord*(file, why: string; axis: AxisScope = axBuild):
+    ExercisedRecord =
+  ## A suite whose rows cannot be built or decided on this leg (a build
+  ## switch, a backend or a toolchain table the leg lacks) ran and exercised
+  ## nothing: a record with no cell, so K1 sees the suite ran on the leg
+  ## (`axisJoinProblems` judges an axis only when all its suites did) and
+  ## counts no row.
   ExercisedRecord(testFile: file, variant: "orig", outcome: "skipped",
-                  family: axBuild, cells: @[])
+                  family: axis, cells: @[])
 
 template buildAxisBatch*(keys: static openArray[string]; applies: static bool;
                          why: static string; tag: static string;
@@ -246,3 +248,50 @@ template buildAxisBatch*(keys: static openArray[string]; applies: static bool;
       test "the switch cannot be built here":
         echo "k8b axis build ", tag, " skipped: ", why
         writeExercisedTo(realPins, @[skippedRecord(file, why)])
+
+template ownAxisBatch*(axis: static AxisScope; applies: static bool;
+                       why: static string; tag: static string;
+                       runBatch: untyped; file: static string;
+                       seed: static int) =
+  ## The rows of `axis` with a suite of their own (`ownRows`) whose suite is
+  ## `file`: one one-row program each (`genAxisOwn`), with one rotating
+  ## relation, through `symexFind` and the native differential. On a leg
+  ## that cannot build or decide them (`applies` false) the suite writes one
+  ## `skipped` record, naming `why` (which leg exercises them).
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  const ownRowKeys = ownKeys(axis, file)
+  when applies:
+    const progs = genAxisOwn(axis, seed, ownRowKeys)
+    genFamilyBatch(progs, tag)
+
+  suite "K8b axis " & scopePrefix[axis] & ": " & tag:
+    test "the suite runs the rows `ownRows` gives it, out of the stream":
+      check ownRowKeys.len > 0
+      for k in ownRowKeys: check not inStream(axis, k)
+    when applies:
+      test "generated programs and their relations agree with native":
+        let outs = runBatch()
+        let fs = findings(progs, outs, seed)
+        let recs = axisExercisedOf(progs, outs, seed, file)
+        writeExercisedTo(realPins, recs)
+        var exact, declined, disagree: int
+        for r in recs:
+          case r.outcome
+          of "exact": inc exact
+          of "declined": inc declined
+          else: inc disagree
+        echo "k8b axis ", scopePrefix[axis], " ", tag, " seed=", seed,
+          " runs=", outs.len, " exact=", exact, " declined=", declined,
+          " disagree=", disagree, "\nk8b declines:\n", declineSummary(outs)
+        for f in fs: echo "FINDING ", f
+        check fs.len == 0
+        check exact > 0
+    else:
+      test "the rows cannot be built or decided here":
+        echo "k8b axis ", scopePrefix[axis], " ", tag, " skipped (",
+          ownRowKeys.len, " rows): ", why
+        writeExercisedTo(realPins, @[skippedRecord(file, why, axis)])

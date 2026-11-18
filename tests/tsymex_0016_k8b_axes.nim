@@ -72,9 +72,35 @@ suite "K8b axes: the fragments and the denominator":
         for k in p.rows: seen.incl k
       check seen.len == streamRows(a)
       for s in axisSnippets[a]:
-        check (s.key in seen) == not isBlocked(a, s.key)
+        check (s.key in seen) == inStream(a, s.key)
       check genAxis(a, 3, 2, per) == genAxis(a, 3, 4, per)[0 ..< 2]
       check genAxis(a, 3, 2, per, 2) == genAxis(a, 3, 4, per)[2 ..< 4]
+
+  test "a row with a suite of its own runs there, out of the stream":
+    let p = ownRowProblems()
+    checkpoint p.join("\n")
+    check p.len == 0
+    check ownSuite(axPragma, "routine/base") == pragmaDispatchSuite
+    check ownKeys(axPragma, pragmaCppSuite) ==
+      @["routine/importcpp", "routine/exportcpp", "type/importcpp"]
+    for o in ownRows:
+      check not inStream(o.axis, o.key)
+      let ps = genAxisOwn(o.axis, 20261117, [o.key])
+      check ps.len == 1 and ps[0].rows == @[o.key] and ps[0].id >= ownBase
+    check genAxisOwn(axPragma, 1, ["routine/base"]) ==
+      genAxisOwn(axPragma, 1, ["routine/base"])
+    check inStream(axPragma, "routine/inline")
+
+  test "RED: an own row naming no axis suite, no fragment, or twice fails":
+    let ok = @[OwnRow(axis: axPragma, key: "routine/base", suite: pragmaDispatchSuite)]
+    check ownRowProblems(ok).len == 0
+    check ownRowProblems(@[OwnRow(axis: axPragma, key: "routine/base",
+                                  suite: "tsymex_0016_k8b_axes_nosuch.nim")]).len == 1
+    check ownRowProblems(@[OwnRow(axis: axPragma, key: "routine/nosuch",
+                                  suite: pragmaDispatchSuite)]).len == 1
+    check ownRowProblems(ok & ok).len == 1
+    check ownRowProblems(@[OwnRow(axis: axMagic, key: "IntToStr",
+                                  suite: axisFiles[axMagic][0])]).len == 1
 
   test "a raising fragment's program takes no reordering relation":
     let ps = genAxis(axDefinedness, 1, 3, 2)
@@ -111,9 +137,9 @@ suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)
       check blockedRows.anyIt(it.axis == a and it.key == k and it.row == r)
     check not isBlocked(axMagic, "AddI")
 
-  test "the INT-58 and INT-60 rows are readmitted (both closed)":
+  test "the INT-58, INT-60 and INT-63 rows are readmitted (all closed)":
     for (a, k) in [(axStdlibBody, "math.round"), (axStdlibBody, "math.floor"),
-                   (axMagic, "LengthArray")]:
+                   (axMagic, "LengthArray"), (axTypeOp, "letCursor/uninterp")]:
       check not isBlocked(a, k)
       check streamSnippets(a).anyIt(it.key == k)
 
@@ -144,6 +170,8 @@ suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)
     for a in AxisScope:
       if axisSnippets[a].len == 0: continue
       check f[a].exercised == streamRows(a)
+      for o in ownRows:
+        if o.axis == a: check o.key in unexercised(all, a)
       for b in blockedRows:
         if b.axis == a: check b.key in unexercised(all, a)
 

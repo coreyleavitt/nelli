@@ -818,8 +818,14 @@ const renderAsChoicesVersion* = "12"
   ##   value folds to its element count wherever it is used (it declined
   ##   `feUnsupportedOp` as an arithmetic operand). Verdicts change from
   ##   `sxUnknown` to exact. No key bytes change.
+  ## - RFC-0016 INT-64 (417->422; 418-421 are reserved for other W4 work):
+  ##   `for a, b in items(c)` over a seq or an array of tuples binds each
+  ##   element to a fresh name and each variable to its field, so
+  ##   `tables.toTable` (`for key, val in items(pairs)`) is walked; it
+  ##   declined `feUnsupportedStmtKind`. Verdicts change from `sxUnknown` to
+  ##   exact. No key bytes change.
 
-const symexWalkerVersion* = "417"
+const symexWalkerVersion* = "422"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -1,5 +1,5 @@
 ## RFC-0016 K8b (INT-56, section 12 item 4) -- the admission-axis fuzzer
-## suite for the pragma axis (first half of its stream): generated programs, one exact row's
+## suite for the pragma axis (the first sixth of its stream): generated programs, one exact row's
 ## fragment each (tests/s0016_k8b_snippets.nim, `per` = 1: packing several
 ## rows into one query multiplies the solve cost), run through `symexFind`
 ## and the native differential with one rotating metamorphic relation (dead
@@ -16,9 +16,10 @@ import nelli/smt/admission
 import ./s8cu_helpers
 import ./s0016_k8a_gen
 import ./s0016_k8b_suite
+import ./s0016_k8b_pragmas
 
 const k8bSeed {.intdefine.} = 20261117
 
 axisBatch(axPragma, "pga", runBatch_pga, "tsymex_0016_k8b_axes_pragma_a.nim",
-          k8bSeed, streamRows(axPragma) * 0 div 2,
-          streamRows(axPragma) * 1 div 2 - streamRows(axPragma) * 0 div 2, 1)
+          k8bSeed, streamRows(axPragma) * 0 div 6,
+          streamRows(axPragma) * 1 div 6 - streamRows(axPragma) * 0 div 6, 1)

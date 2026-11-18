@@ -202,6 +202,9 @@ const magicSnippets = @[
      top = "template N_w(): int = instantiationInfo().line"),
   sn("CompileDate", "len(CompileDate) + t"),
   sn("CompileTime", "len(CompileTime) + t"),
+  # `std/typetraits` (imported by the magic suites): folded by semcheck
+  sn("TypeTrait", "ord(supportsCopyMem(N_O)) + tupleLen((int, int8)) + t",
+     top = "type N_O = object\n  x: int"),
 ]
 
 const stdlibSnippets = @[
@@ -262,6 +265,14 @@ const definedSnippets = @[
      "(if u == 0: 0 else: (if t == -128: low(int) else: t) mod u)",
      raises = true),
   sn("convert/floatToInt", "int(float(t) * 1.5)"),
+  # `(NI8)((NI64)f)`: the in-range side, inside both int64 and int8
+  sn("convert/floatToIntVia", "int(int8(float(t) * 0.5))"),
+  # a `{.noinit.}` local read before a write: the read rides the witness
+  # (`ubIndeterminateRead`), so a path holding it is never a trusted verdict
+  sn("read/uninitialised", "V_x * 0 + t", "var V_x {.noinit.}: int"),
+  # an opaque (foreign) body: undefined under the whole-run gate
+  sn("call/opaqueBody", "int(N_abs(cint(t)))",
+     top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}"),
   sn("index/unchecked", "V_s[u and 3]", "let V_s = @[t, 1, 2]", raises = true),
   sn("field/inactiveBranch", "V_v.n",
      "var V_v = N_V(k: true, n: t)\n  if u > 100: V_v = N_V(k: false, m: u)",
@@ -391,9 +402,10 @@ const typeOpSnippets = @[
   letCursor("multiVariant", "N_M", "N_M(k: false, m: t, j: true, q: u)",
      "V_c.m + V_c.q", "type N_M = object\n  case k: bool\n  of false: m: int\n  of true: z: int\n" &
      "  case j: bool\n  of false: p: int\n  of true: q: int\n"),
-  # a placeholder sort's handle is copied (blocked: the `pointer` local
-  # declines before the `let` is judged, INT-63)
-  letCursor("uninterp", "pointer", "nil", "t + 1"),
+  # a placeholder sort's handle is copied: a closure local is the `__closure`
+  # sort (a `pointer` has no modelled nil to start from, INT-65)
+  sn("letCursor/uninterp", "V_c(u)",
+     "let V_f = proc (x: int): int = x + t\n  let V_c = V_f"),
 ]
 
 func routinePragma(p: string; prag = ""): Snippet =
@@ -409,6 +421,22 @@ func pushedPragma(p, prag: string): Snippet =
 
 func typePragma(p, decl, read: string): Snippet =
   sn("type/" & p, read, top = decl)
+
+func procTypePragma(p: string; impl = "-"; prag = ""): Snippet =
+  ## A proc type carrying the pragma, a routine bound to a local of it and
+  ## called; `impl` is the routine's own pragma ("-": the same one).
+  let pr = if prag.len > 0: prag else: p
+  let im = if impl == "-": pr else: impl
+  sn("type/" & p, "(let p: N_P = N_h; p(t))",
+     top = "type N_P = proc (x: int): int {." & pr & ".}\n" &
+           "proc N_h(x: int): int" & (if im.len > 0: " {." & im & ".}" else: "") &
+           " = x + 1")
+
+func localPragma(key, name, decl, read: string): Snippet =
+  ## A pragma word Nim rejects in the row's place reaches it only as a custom
+  ## pragma of that name: declared in the SUT, so it shadows the word for
+  ## this fragment alone.
+  sn(key, read, "template " & name & "() {.pragma.}\n  " & decl)
 
 const pragmaSnippets = @[
   routinePragma("inline"), routinePragma("noinline"), routinePragma("nimcall"),
@@ -471,6 +499,144 @@ const pragmaSnippets = @[
   sn("field/used", "N_O(x: t).x", top = "type N_O = object\n  x {.used.}: int"),
   sn("local/used", "V_x", "let V_x {.used.} = t"),
   sn("local/noinit", "V_x", "var V_x {.noinit.}: int\n  V_x = t"),
+  # --- the rows outside the first table ---------------------------------------
+  sn("local/global", "V_g", "var V_g {.global.} = 0\n  V_g = t"),
+  # template hygiene: the `let` is the SUT's local once the template expands
+  sn("local/inject", "N_t(t)",
+     top = "template N_t(v: int): int =\n  let N_y {.inject.} = v\n  N_y + 1"),
+  sn("local/gensym", "N_t(t)",
+     top = "template N_t(v: int): int =\n  let N_y {.gensym.} = v\n  N_y + 1"),
+  sn("param/inject", "N_f(t)", top = "proc N_f(x {.inject.}: int): int = x * 2 + 1"),
+  # Nim rejects `used` on a formal; the name reaches one only as a custom
+  # pragma, declared in the SUT so no other row sees it
+  localPragma("param/used", "used",
+              "proc V_f(x {.used.}: int): int = x * 2 + 1", "V_f(t)"),
+  routinePragma("sideEffect"), routinePragma("procvar"),
+  routinePragma("compilerproc"), routinePragma("core"),
+  routinePragma("nonReloadable"), routinePragma("enforceNoRaises"),
+  routinePragma("systemRaisesDefect"), routinePragma("quirky"),
+  routinePragma("nosinks"), routinePragma("thread"),
+  routinePragma("requires", "requires: x > -1000"),
+  routinePragma("ensures", "ensures: result > -10000"),
+  routinePragma("extern", "extern: \"N_fx\""),
+  sn("routine/effectsOf", "N_f(t, N_h)",
+     top = "proc N_h(y: int): int = y + 1\n" &
+           "proc N_f(x: int; p: proc (y: int): int {.nimcall.}): int " &
+           "{.effectsOf: p.} = p(x) * 2"),
+  sn("routine/dirty", "N_f(t)",
+     top = "template N_f(x: int): int {.dirty.} = x * 2 + 1"),
+  sn("routine/callsite", "N_f(t)",
+     top = "template N_f(x: int): int {.callsite.} = x * 2 + 1"),
+  pushedPragma("assertions", "assertions: on"),
+  pushedPragma("floatChecks", "floatChecks: on"),
+  pushedPragma("nanChecks", "nanChecks: on"),
+  pushedPragma("infChecks", "infChecks: on"),
+  pushedPragma("fieldChecks", "fieldChecks: on"),
+  pushedPragma("objChecks", "objChecks: on"),
+  pushedPragma("nilChecks", "nilChecks: on"),
+  pushedPragma("profiler", "profiler: off"),
+  pushedPragma("debugger", "debugger: off"),
+  sn("routine/magic", "N_plus(t, u)",
+     top = "proc N_plus(x, y: int): int {.magic: \"AddI\", noSideEffect.}"),
+  sn("routine/importc", "int(N_abs(cint(t)))",
+     top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}"),
+  sn("routine/header", "int(N_ll(clonglong(t)))",
+     top = "proc N_ll(x: clonglong): clonglong {.importc: \"llabs\", " &
+           "header: \"<stdlib.h>\".}"),
+  # `labs` is declared by the `<stdlib.h>` the `abs` beside it includes
+  sn("routine/nodecl", "int(N_l(clong(t))) + int(N_abs(cint(u)))",
+     top = "proc N_abs(x: cint): cint {.importc: \"abs\", header: \"<stdlib.h>\".}\n" &
+           "proc N_l(x: clong): clong {.importc: \"labs\", nodecl.}"),
+  sn("routine/dynlib", "int(N_abs(cint(t)))",
+     top = "proc N_abs(x: cint): cint {.importc: \"abs\", " &
+           "dynlib: \"(msvcrt.dll|libc.so.6)\".}"),
+  # a call on a path no input reaches (t <= 127)
+  sn("routine/noreturn", "t", "if t > 126 and t < 0: N_die()",
+     top = "proc N_die() {.noreturn.} = quit(3)"),
+  # a call to it does not compile: the program declares it and reaches none
+  sn("routine/error", "t", top = "proc N_f(x: int): int {.error.}"),
+  # names the walk meets as stdlib's pragma aliases and macro pragmas: a
+  # custom pragma of the same name (`s0016_k8b_pragmas`)
+  routinePragma("benign"), routinePragma("rtl"), routinePragma("rtlFunc"),
+  routinePragma("inl"), routinePragma("compilerRtl"),
+  routinePragma("noWeirdTarget"), routinePragma("noNimJs"),
+  routinePragma("nimhcr"), routinePragma("hcrInline"),
+  routinePragma("multisync"), routinePragma("since"), routinePragma("async"),
+  routinePragma("parseRaises"), routinePragma("parseFormatRaises"),
+  routinePragma("auditDelete"), routinePragma("evalonce"),
+  routinePragma("myShallow"), routinePragma("epollPacked"),
+  routinePragma("outParamsAt"), routinePragma("importIconv"),
+  routinePragma("lcrypto"), routinePragma("boehmGC"), routinePragma("gcMark"),
+  routinePragma("errorNoReturn"), routinePragma("nimbaseH"),
+  routinePragma("operator"), routinePragma("tlsEmulation"),
+  routinePragma("exportJs"),
+  # pragma words Nim rejects on a routine: a custom pragma declared in the SUT
+  localPragma("routine/fatal", "fatal",
+              "proc V_f(x: int): int {.fatal.} = x * 2 + 1", "V_f(t)"),
+  localPragma("routine/executeOnReload", "executeOnReload",
+              "proc V_f(x: int): int {.executeOnReload.} = x * 2 + 1", "V_f(t)"),
+  localPragma("routine/sendable", "sendable",
+              "proc V_f(x: int): int {.sendable.} = x * 2 + 1", "V_f(t)"),
+  # the type list: a proc type's effect and calling-convention pragmas
+  procTypePragma("gcsafe"), procTypePragma("noSideEffect"),
+  procTypePragma("cdecl"), procTypePragma("stdcall"),
+  procTypePragma("fastcall"), procTypePragma("safecall"),
+  procTypePragma("syscall"), procTypePragma("noconv"),
+  procTypePragma("inline"), procTypePragma("closure", ""),
+  procTypePragma("benign", ""), procTypePragma("raises", "", "raises: []"),
+  procTypePragma("tags", "", "tags: []"),
+  procTypePragma("forbids", "", "forbids: []"),
+  procTypePragma("locks", "", "locks: 0"),
+  # Nim rejects `effectsOf` on a proc type it declares; a routine's own type
+  # carries it to the local it is bound to
+  sn("type/effectsOf", "V_p(t, N_g)", "let V_p = N_h",
+     top = "proc N_g(y: int): int = y + 1\n" &
+           "proc N_h(x: int; p: proc (y: int): int {.nimcall.}): int " &
+           "{.effectsOf: p.} = p(x)"),
+  # `nosinks` and `dynlib` are rejected on a type; a custom pragma of the same
+  # name is local to `s0016_k8b_pragmas` (an exported one would shadow the
+  # routine pragma `dynlib`), which declares the types (a type section in a
+  # routine declines, `feUnsupportedStmtKind`)
+  sn("type/nosinks", "V_p(t)", "let V_p: K8bNoSinksP = N_h",
+     top = "proc N_h(x: int): int = x + 1"),
+  typePragma("sendable", "type N_O {.sendable.} = object\n  x: int", "N_O(x: t).x"),
+  typePragma("myShallow", "type N_O {.myShallow.} = object\n  x: int",
+             "N_O(x: t).x"),
+  typePragma("extern", "type N_O {.extern: \"N_Ox\".} = object\n  x: int",
+             "N_O(x: t).x"),
+  typePragma("borrow", "type\n  N_O = object\n    x: int\n  N_D {.borrow: `.`.} = distinct N_O",
+             "N_D(N_O(x: t)).x"),
+  sn("type/dynlib", "K8bDynO(x: t).x"),
+  # a foreign scalar: `system.cint`'s form
+  typePragma("importc", "type N_I {.importc: \"int\", nodecl.} = int32",
+             "int(N_I(t) + 1)"),
+  typePragma("nodecl", "type N_I {.importc: \"long long\", nodecl.} = int64",
+             "int(N_I(t) - 1)"),
+  typePragma("header", "type N_I {.importc: \"int32_t\", header: \"<stdint.h>\".} = int32",
+             "int(N_I(t) * 2)"),
+  typePragma("nimbaseH", "type N_I {.importc: \"NI\", nimbaseH.} = int",
+             "int(N_I(t) + 1)"),
+  typePragma("incompleteStruct",
+             "type N_S {.importc: \"div_t\", header: \"<stdlib.h>\", " &
+             "incompleteStruct.} = object\n  quot, rem: cint",
+             "int(N_S(quot: cint(t)).quot)"),
+  typePragma("completeStruct",
+             "type N_S {.importc: \"div_t\", header: \"<stdlib.h>\", " &
+             "completeStruct.} = object\n  quot, rem: cint",
+             "int(N_S(quot: cint(t)).quot)"),
+  # rows only a backend some legs lack can carry: each runs in its own suite
+  # (`ownRows`)
+  sn("routine/importcpp", "int(N_abs(cint(t)))",
+     top = "proc N_abs(x: cint): cint {.importcpp: \"abs(@)\", header: \"<cstdlib>\".}"),
+  routinePragma("exportcpp", "exportcpp: \"N_fx\""),
+  typePragma("importcpp", "type N_I {.importcpp: \"int\", nodecl.} = int32",
+             "int(N_I(t) + 1)"),
+  sn("routine/importjs", "int(N_abs(cint(t)))",
+     top = "proc N_abs(x: cint): cint {.importjs: \"Math.abs(#)\".}"),
+  typePragma("importjs", "type N_I {.importjs: \"Number\".} = int32",
+             "int(N_I(t) + 1)"),
+  sn("routine/importObjC", "int(N_abs(cint(t)))",
+     top = "proc N_abs(x: cint): cint {.importObjC: \"abs\", nodecl.}"),
 ]
 
 # The build axis (K5b's cells, `buildprofile.buildCells`, and the verified
@@ -598,6 +764,12 @@ func bk(axis: AxisScope; key, row, why: string): Blocked =
   Blocked(axis: axis, key: key, row: row, why: why)
 
 const
+  int68Why = "a foreign routine (`importc`, and `header`, `nodecl`, " &
+    "`dynlib` beside it) is the opaque-call arm: its result is fresh and " &
+    "the path is tainted `feOpaqueCallUnmodelled`, so no run is exact"
+  int69Why = "the row's modelled answer is undefined (a witness carrying " &
+    "the UB kind, `pinUndefined`); the axis differential has no outcome " &
+    "for it and counts it declined"
   int57Why = "a `$n` query (`str.from_int`) beside integer arithmetic stalls Z3's step counter; the walk never returns"
   blockedRows*: seq[Blocked] = @[
     bk(axMagic, "IntToStr", "INT-57", int57Why),
@@ -616,20 +788,76 @@ const
     bk(axTypeClass, "string", "INT-57", int57Why),
     bk(axTypeOp, "letCursor/string", "INT-57", int57Why),
     bk(axTypeOp, "fieldDefault/string", "INT-57", int57Why),
-    bk(axTypeOp, "letCursor/uninterp", "INT-63",
-       "a `let` copy of a `pointer` local declines `feUnsupportedExprKind`"),
     bk(axStdlibBody, "math.trunc", "INT-59",
        "about 60 s alone on c, with no step bound to cap it"),
+    bk(axPragma, "routine/magic", "INT-66",
+       "a routine the program declares with `{.magic.}` declines " &
+       "`feUnsupportedOp`: a magic is modelled under the system name only"),
+    bk(axPragma, "type/borrow", "INT-67",
+       "a borrowed `.` on a distinct object declines `feUnsupportedExprKind`"),
+    bk(axPragma, "routine/importc", "INT-68", int68Why),
+    bk(axPragma, "routine/header", "INT-68", int68Why),
+    bk(axPragma, "routine/nodecl", "INT-68", int68Why),
+    bk(axPragma, "routine/dynlib", "INT-68", int68Why),
+    bk(axDefinedness, "read/uninitialised", "INT-69", int69Why),
+    bk(axDefinedness, "call/opaqueBody", "INT-69", int69Why),
   ]
 
 func isBlocked*(axis: AxisScope; key: string): bool =
   for b in blockedRows:
     if b.axis == axis and b.key == key: return true
 
-func streamSnippets*(axis: AxisScope): seq[Snippet] =
-  ## The axis's fragments the stream packs: every one not blocked.
+# --- the rows with a suite of their own -------------------------------------------
+#
+# A row only some legs can decide (a backend's foreign-code pragma, a table the
+# toolchain writes) is left out of the axis stream and runs in a suite of its
+# own (one of the axis's `axisFiles`), which applies on the legs that can build
+# and decide it and writes one `skipped` record on the others, naming the leg
+# that exercises it (`s0016_k8b_suite.ownAxisBatch`). Unlike a blocked row it
+# is exercised wherever its suite applies.
+
+type OwnRow* = object
+  axis*: AxisScope
+  key*: string
+  suite*: string  ## the axis suite that runs it
+
+func own(axis: AxisScope; key, suite: string): OwnRow =
+  OwnRow(axis: axis, key: key, suite: suite)
+
+const
+  pragmaCppSuite* = "tsymex_0016_k8b_axes_pragma_cpp.nim"
+  pragmaDispatchSuite* = "tsymex_0016_k8b_axes_pragma_dispatch.nim"
+  pragmaForeignSuite* = "tsymex_0016_k8b_axes_pragma_foreign.nim"
+  ownRows*: seq[OwnRow] = @[
+    own(axPragma, "routine/importcpp", pragmaCppSuite),
+    own(axPragma, "routine/exportcpp", pragmaCppSuite),
+    own(axPragma, "type/importcpp", pragmaCppSuite),
+    own(axPragma, "routine/base", pragmaDispatchSuite),
+    own(axPragma, "routine/importjs", pragmaForeignSuite),
+    own(axPragma, "type/importjs", pragmaForeignSuite),
+    own(axPragma, "routine/importObjC", pragmaForeignSuite),
+  ]
+
+func ownSuite*(axis: AxisScope; key: string): string =
+  ## The suite of its own the row runs in, or "" (the axis stream).
+  for o in ownRows:
+    if o.axis == axis and o.key == key: return o.suite
+  ""
+
+func inStream*(axis: AxisScope; key: string): bool =
+  ## The row is packed by the axis stream: not blocked, no suite of its own.
+  not isBlocked(axis, key) and ownSuite(axis, key).len == 0
+
+func ownKeys*(axis: AxisScope; suite: string): seq[string] =
+  ## The rows `suite` runs on its own, in table order.
   for s in axisSnippets[axis]:
-    if not isBlocked(axis, s.key): result.add s
+    if ownSuite(axis, s.key) == suite: result.add s.key
+
+func streamSnippets*(axis: AxisScope): seq[Snippet] =
+  ## The axis's fragments the stream packs: every one not blocked and with no
+  ## suite of its own.
+  for s in axisSnippets[axis]:
+    if inStream(axis, s.key): result.add s
 
 func streamRows*(axis: AxisScope): int = streamSnippets(axis).len
 

@@ -8,6 +8,7 @@ import nelli/choice
 import nelli/int128
 import nelli/engine/types
 import nelli/smt/admission
+import nelli/smt/soundness
 from nelli/smt/errorkind import UbKind
 from nelli/smt/types import undefinedKinds, `$`
 import nelli/smt/buildprofile
@@ -524,8 +525,15 @@ proc pinJudge*[T, D](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
                      runW: proc (w: T): NativeRun;
                      runD: proc (vals: seq[D];
                                  hit: proc (n: NativeRun): bool): string;
-                     entry = "symexFind"): SymexResult[T] =
-  ## The differential judgement `pinExact` expands to.
+                     entry = "symexFind";
+                     undefined: set[UbKind] = {}): SymexResult[T] =
+  ## The differential judgement `pinExact` expands to. `undefined` (RFC-0016
+  ## INT-69): the undefined behaviours the program's modelled answer carries.
+  ## A `sxSat` that is untrusted ONLY because its witness reads one of them
+  ## (`witnessUndefined` non-empty, within `undefined`, and the soundness
+  ## otherwise trusted) is the model's answer, as `pinUndefined` judges it;
+  ## it is reproduced when its witness hits natively, and recorded as
+  ## `pinUndefined` records (`pvDeclined` by the kind), with the native hit.
   let cell = render(key)
   let isHit = proc (n: NativeRun): bool = hitsTarget(n, tgt)
   var rec = PinRecord(testFile: file, entry: entry, cell: key,
@@ -533,9 +541,14 @@ proc pinJudge*[T, D](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
                       exhaustive: dom.exhaustive, walker: $res.status)
   case res.status
   of sxSat:
-    if not res.trusted:
+    let ub = res.soundness.undefinedKinds
+    var defined = res.soundness
+    defined.witnessUndefined = {}
+    let asModelled = not res.trusted and undefined != {} and ub != {} and
+                     ub <= undefined and trustedSat(defined)
+    if not res.trusted and not asModelled:
       pinFail("pinExact " & cell & ": sxSat is not trusted; errors: " &
-              kindsOf(res.errors))
+              kindsOf(res.errors) & (if ub != {}: "; undefined: " & $ub else: ""))
     if res.soundness.witnessUnsafe:
       pinFail("pinExact " & cell & ": the witness ends or hangs the process " &
               "that runs it; it cannot be reproduced in-process")
@@ -543,6 +556,14 @@ proc pinJudge*[T, D](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
     if not isHit(nr):
       pinFail("pinExact " & cell & ": walker says sxSat for " & rec.target &
               " but the witness does not hit natively: " & describeNative(nr))
+    if asModelled:
+      for k in ub:
+        rec.verdict = pvDeclined
+        rec.declineKind = $k
+        rec.native = "witness hit: " & describeNative(nr) &
+          "; the verdict carries the undefined behaviour it models"
+        writePinRecord(rec)
+      return res
     rec.verdict = pvExact
     rec.native = "witness hit: " & describeNative(nr)
   of sxRaised:
@@ -579,8 +600,8 @@ proc paramCount(fn: NimNode): int =
   let fp = ty[0]
   for i in 1 ..< fp.len: result += fp[i].len - 2
 
-macro pinExactImpl*(fn: typed; claim, key, target, domain,
-                    file: untyped): untyped =
+macro pinExactImpl*(fn: typed; claim, key, target, domain, file,
+                    undefined: untyped): untyped =
   let n = paramCount(fn)
   let res = genSym(nskLet, "res")
   let tgt = genSym(nskLet, "tgt")
@@ -619,7 +640,7 @@ macro pinExactImpl*(fn: typed; claim, key, target, domain,
           var `found` = ""
           `loops`
           `found`,
-        `res`.entry)
+        `res`.entry, `undefined`)
 
 template pinExact*(fn: untyped; key: CellKey;
                    target: untyped = tLabel("hit");
@@ -634,7 +655,7 @@ template pinExact*(fn: untyped; key: CellKey;
   ## `sxUnknown` or untrusted: fails with `PinFailure`. A raise is a target:
   ## `target = tRaisedExn("ValueError")`.
   pinExactImpl(fn, viaClaim(via, fn, target), key, target, domain,
-               instantiationInfo(-1).filename)
+               instantiationInfo(-1).filename, {})
 
 template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
                      target: untyped = tLabel("hit");
@@ -643,7 +664,7 @@ template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
   ## walker's: the way a test plants a wrong claim and sees the pin refuse it.
   ## Its record's entry is "caller", not a public entry point: K1 refuses it.
   pinExactImpl(fn, claimed(claim, "caller"), key, target, domain,
-               instantiationInfo(-1).filename)
+               instantiationInfo(-1).filename, {})
 
 # --- pinDecline ------------------------------------------------------------
 

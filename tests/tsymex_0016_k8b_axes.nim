@@ -143,6 +143,25 @@ suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)
       check not isBlocked(a, k)
       check streamSnippets(a).anyIt(it.key == k)
 
+  test "the INT-66..69 rows are readmitted (all closed)":
+    for (a, k) in [(axPragma, "routine/magic"), (axPragma, "type/borrow"),
+                   (axPragma, "routine/importc"), (axPragma, "routine/header"),
+                   (axPragma, "routine/nodecl"), (axPragma, "routine/dynlib"),
+                   (axDefinedness, "read/uninitialised"),
+                   (axDefinedness, "call/opaqueBody")]:
+      check not isBlocked(a, k)
+      check streamSnippets(a).anyIt(it.key == k)
+
+  test "an undefined-answer row names its kind, and only those rows do":
+    for a in AxisScope:
+      for s in axisSnippets[a]:
+        let want = (a == axDefinedness and s.key == "read/uninitialised") or
+                   (a == axDefinedness and s.key == "call/opaqueBody") or
+                   (a == axPragma and s.key in ["routine/importc",
+                     "routine/header", "routine/nodecl", "routine/dynlib"])
+        checkpoint scopePrefix[a] & ":" & s.key
+        check (s.undefined.len > 0) == want
+
   test "RED: an entry whose row closed must be readmitted":
     let b = @[Blocked(axis: axMagic, key: "IntToStr", row: "INT-57", why: "x")]
     check blockedProblems(fixture("INT-57", "open"), b).len == 0

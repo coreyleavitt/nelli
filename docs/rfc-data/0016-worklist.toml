@@ -2502,45 +2502,58 @@ id = "INT-66"
 table = "5.8c"
 title = "Found by K8b's pragma axis suite (INT-56): a routine the program declares with `{.magic.}` declines. `proc plus(x, y: int): int {.magic: \"AddI\".}` is `system.+` under another name, and `plus(t, u) == 5` (sat) returns an untrusted `sxUnknown` with `feUnsupportedOp` (\"the compiler magic `plus` ({.magic: \"AddI\".}) has no symbolic model\")"
 class = "precision"
-state = "open"
-note = "The walk models a magic where it meets the system routine's name (`binopForInfix` and the call arms dispatch on `+`, not on `implMagic`), so the magic axis's exact row `AddI` is never consulted for another name; the pragma row `routine/magic` (a `read` row: decided where the callee is resolved, `implMagic`) is reachable only through such a declaration. Red pin `tests/tsymex_0016_int66_usermagic.nim` (unregistered until green). Blocks pragma `routine/magic` in the axis stream (`s0016_k8b_snippets.blockedRows`)."
+state = "closed"
+note = "The walk models a magic where it meets the system routine's name (`binopForInfix` and the call arms dispatch on `+`, not on `implMagic`), so the magic axis's exact row `AddI` is never consulted for another name; the pragma row `routine/magic` (a `read` row: decided where the callee is resolved, `implMagic`) is reachable only through such a declaration. Red pin `tests/tsymex_0016_int66_usermagic.nim` (unregistered until green). Blocks pragma `routine/magic` in the axis stream (`s0016_k8b_snippets.blockedRows`). CLOSED (2026-11-18, walker 423): a call of a routine the program declares with a binary `{.magic.}` and no body is the infix of the system routine of the same magic and signature (`dsl_parser.userMagicRewrite`: the magic's operator from `userMagicInfix`, the system symbol found by `bindSym` and matched on `implMagic` and every formal's and the result's type, the infix typed as the call through a `borrowBaseViews` view), so the infix arm models it as it models `t + u`, overflow and narrowing included. A magic the infix arm does not model (a unary one, `AbsI`) or one no system routine of the same signature carries still declines `feUnsupportedOp`. Pinned by `tests/tsymex_0016_int66_usermagic.nim` (`AddI` sat and unsat, `LtI`, `int8` `MulI` sat and its `OverflowDefect`, the `AbsI` decline, the walker-423 floor); red at 2206eb51. The pragma row `routine/magic` is readmitted to the axis stream."
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
-cells = []
-pins = []
+cells = ["pragma:routine/magic"]
+pins = ["tsymex_0016_int66_usermagic"]
 
 [[row]]
 id = "INT-67"
 table = "5.8c"
 title = "Found by K8b's pragma axis suite (INT-56): a field read through a distinct object that borrows `.` declines. With `type D {.borrow: `.`.} = distinct O`, `D(O(x: t)).x == 5` (sat at `a = 5`) returns an untrusted `sxUnknown` with `feUnsupportedExprKind` (\"`.` on unsupported type distinct D(O{x:i64})\")"
 class = "precision"
-state = "open"
-note = "The type row `type/borrow` is a `read` row (the type's classification reads it), but a field access through the distinct barrier is not lifted for a borrowed `.`. Red pin `tests/tsymex_0016_int67_borrowdot.nim` (unregistered until green). Blocks pragma `type/borrow` in the axis stream."
+state = "closed"
+note = "The type row `type/borrow` is a `read` row (the type's classification reads it), but a field access through the distinct barrier is not lifted for a borrowed `.`. Red pin `tests/tsymex_0016_int67_borrowdot.nim` (unregistered until green). Blocks pragma `type/borrow` in the axis stream. CLOSED (2026-11-18, walker 423): Nim admits a field read through a distinct object only through a borrowed `.`, so the dot arm reads one (an `itDistinct` operand and an `nskField` field) as the base object's field read, with the operand viewed at its base type (`distinctBaseTypeNode`, `parseBorrowViewedExpr`, as a borrowed routine's argument is). Pinned by `tests/tsymex_0016_int67_borrowdot.nim` (a field of a conversion, two fields of a `let`, an unsat relation, a distinct parameter); red at 2206eb51. Not yet probed: a write through a borrowed `.` and a distinct of a `ref object`. The pragma row `type/borrow` is readmitted to the axis stream."
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
-cells = []
-pins = []
+cells = ["pragma:type/borrow"]
+pins = ["tsymex_0016_int67_borrowdot"]
 
 [[row]]
 id = "INT-68"
 table = "5.8c"
 title = "Found by K8b's pragma axis suite (INT-56): the foreign-routine pragma rows cannot be exact. `importc` (C `abs`), `header` (C `llabs` with its header), `nodecl` (C `labs`) and `dynlib` (`abs` from the C library) each make the call the opaque-call arm (`isBodilessForeign`): a fresh result and a `feOpaqueCallUnmodelled` path taint, so every run declines"
 class = "precision"
-state = "open"
-note = "Sound by design (before S8b such a call walked an empty body and could answer a false `sxUnsat`), but the rows' table entries (`importc`, `dynlib`: `read`, decided by the opaque-call arm; `header`, `nodecl`: inert beside a foreign body) are reachable only through a foreign routine, so the axis cannot exercise them exactly. `header` and `nodecl` on a Nim-bodied routine do not compile (no prototype is emitted before the call). Exact needs a modelled foreign body, e.g. a summary table for the C library routines a program imports (`abs`, `labs`, `llabs`), consulted before the opaque-call arm. The own-suite cpp rows `routine/importcpp` and `type/importcpp` meet the same arm on the cpp leg. Blocks pragma `routine/importc`, `routine/header`, `routine/nodecl`, `routine/dynlib` in the axis stream."
+state = "closed"
+note = "Sound by design (before S8b such a call walked an empty body and could answer a false `sxUnsat`), but the rows' table entries (`importc`, `dynlib`: `read`, decided by the opaque-call arm; `header`, `nodecl`: inert beside a foreign body) are reachable only through a foreign routine, so the axis cannot exercise them exactly. `header` and `nodecl` on a Nim-bodied routine do not compile (no prototype is emitted before the call). Exact needs a modelled foreign body, e.g. a summary table for the C library routines a program imports (`abs`, `labs`, `llabs`), consulted before the opaque-call arm. The own-suite cpp rows `routine/importcpp` and `type/importcpp` meet the same arm on the cpp leg. Blocks pragma `routine/importc`, `routine/header`, `routine/nodecl`, `routine/dynlib` in the axis stream. CLOSED (2026-11-18), by design: a foreign body is not visible to the walk, so the opaque-call arm (any result, the run carrying `ubTailUnverified`) is the correct model, and no exact value model exists in general (an `importc` binds a C name, not a body the walk can read). There is no narrower exact case: nelli models no C library routine (no `memcmp`/`strlen`/`abs` summary exists), and keying one on the C name would trust a binding the walk cannot see (a program may `importc` its own `abs`). A `never` record needs a `never` cell and the four pragma rows are admitted (`read`, decided by the opaque-call arm), so the row is closed on them instead: the axis differential judges a run whose answer is the opaque arm's undefined one as exact when its witness hits natively (INT-69), and the four fragments call the foreign routine after the label (`Snippet.post`: a call before it declines the run `feOpaqueCallUnmodelled`, one after it leaves the tail `ubTailUnverified`), so `routine/importc`, `routine/header`, `routine/nodecl` and `routine/dynlib` are readmitted and exercised through the opaque arm. The own-suite cpp rows `routine/importcpp` and `type/importcpp` are unchanged."
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
-cells = []
-pins = []
+cells = ["pragma:routine/importc", "pragma:routine/header", "pragma:routine/nodecl", "pragma:routine/dynlib"]
+pins = ["tsymex_0016_int69_undefinedaxis"]
 
 [[row]]
 id = "INT-69"
 table = "5.8c"
 title = "Found by K8b's defined axis suite (INT-56): the axis differential has no outcome for a row whose modelled answer is undefined. `read/uninitialised` (a `{.noinit.}` local read before a write: `sxSat`, untrusted, `witnessUndefined` carrying the indeterminate read, `feGlobalHavoc`) and `call/opaqueBody` (an `importc` call: `feOpaqueCallUnmodelled`, `ubTailUnverified`) are decided as the model says, and `pinExactImpl` counts both declined"
 class = "precision"
-state = "open"
-note = "Not a walker gap: both answers are pinned exact-as-undefined elsewhere (`pinUndefined` in `tsymex_0016_k10aa_axis`; `call/opaqueBody` in `tsymex_0016_k10b_round`). The axis figure counts only `exact` records, so the two rows stay unexercised until the differential judges a row whose model is undefined as `pinUndefined` does (the verdict untrusted, sat, carrying the row's kind; the native side not run) and records that as the row's exercise. Blocks defined `read/uninitialised` and `call/opaqueBody` in the axis stream."
+state = "closed"
+note = "Not a walker gap: both answers are pinned exact-as-undefined elsewhere (`pinUndefined` in `tsymex_0016_k10aa_axis`; `call/opaqueBody` in `tsymex_0016_k10b_round`). The axis figure counts only `exact` records, so the two rows stay unexercised until the differential judges a row whose model is undefined as `pinUndefined` does (the verdict untrusted, sat, carrying the row's kind; the native side not run) and records that as the row's exercise. Blocks defined `read/uninitialised` and `call/opaqueBody` in the axis stream. CLOSED (2026-11-18): `pinJudge` takes the undefined behaviours a program's modelled answer carries (`undefined`, from each row's `Snippet.undefined` via `s0016_k8a_gen.undefinedSrc`); a `sxSat` untrusted ONLY by them (the kinds within the set, and `trustedSat` once they are cleared) is the model's answer, reproduced when its witness hits natively, and recorded as `pinUndefined` records it (`pvDeclined` by the kind, with the native hit); the axis harness counts the run exact. Any other untrusted verdict, a kind outside the set, or a witness that misses natively still fails. Pinned by `tests/tsymex_0016_int69_undefinedaxis.nim` (the `{.noinit.}` read on c, the opaque body, and three refusals); red at 2206eb51. `read/uninitialised` and `call/opaqueBody` are readmitted to the defined stream (the opaque fragment calls the foreign routine after the label, `Snippet.post`)."
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
-cells = []
-pins = []
+cells = ["defined:read/uninitialised", "defined:call/opaqueBody"]
+pins = ["tsymex_0016_int69_undefinedaxis"]
+
+
+[[row]]
+id = "INT-70"
+table = "5.8c"
+title = "Found by K8b's pragma axis suite (INT-56): a type section in a template a routine declares stops the compile. `template w() = (type O = object ...)` inside the SUT, with any type pragma or none (and a proc type, and a generic object), fails the build with \"node has no type\" (`dsl_typebridge.viewTypeImpl`, from `routeType`); `pragma_e`'s `twTemplate` relation wrapped the then-local `type/dynlib` and `type/nosinks` fragments in one"
+class = "robustness (a compile crash of user code)"
+state = "closed"
+note = "The template's body is not semchecked where it is defined, so the type symbol its section declares has no type; the route scan (`routeScan`'s `nskType` and `nnkBracketExpr` arms) handed it to `routeType`, whose `getTypeImpl` is a hard compile error. Each fragment alone only declined (a type section in a routine is `feUnsupportedStmtKind`, unchanged); the pragma was never the trigger. Walker 423: both arms skip a type node with no type, as the `nskVar` arm's K8A-1 binding does (the expanded copy of the body, where the template is called, declares the typed symbol and is scanned), and `routeType` treats an untyped symbol or instance as unlisted instead of reading it. `routeType` was the only unguarded `getTypeImpl` the scan reaches from a template body; `routeRecFields` reads typed impls only. Pinned by `tests/tsymex_0016_int70_templatetype.nim`: an object type with no pragma and with a custom one, a proc type and a generic object in a template each compile and decline cleanly, and the K8b fragments' top-level types read in a template are exact (`type/dynlib`, `type/nosinks`); red (the file does not compile) at 2206eb51."
+slice = "K8b"
+source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
+cells = ["pragma:type/dynlib", "pragma:type/nosinks"]
+pins = ["tsymex_0016_int70_templatetype"]

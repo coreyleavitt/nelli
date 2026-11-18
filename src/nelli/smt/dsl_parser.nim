@@ -29,6 +29,7 @@
 # RFC-0005 S8bl: `dsl_typebridge`'s `typeKind` / `getTypeInst` /
 # `getTypeImpl` read a borrowed routine's argument at its base type.
 import std/macros except strVal, typeKind, getTypeInst, getTypeImpl
+{.experimental: "dynamicBindSym".}  ## RFC-0016 INT-66: `userMagicRewrite`
 from std/typetraits import supportsCopyMem   ## RFC-0005 S8cs: a type with no copy hook to hide
 import std/compilesettings   ## RFC-0016 W3-z P8: `projectFull`, the main module of the build
 import std/effecttraits   ## RFC-0005 S8ax: an opaque routine's inferred `raises`
@@ -5156,6 +5157,83 @@ proc borrowRoutineRewrite(n: NimNode):
     if retBase == nil: return
     views.add (rw, retBase)
   (rw, views)
+
+proc stubBody(body: NimNode): bool  ## defined below (RFC-0005 S8bo)
+
+const userMagicInfix = {
+  "AddI": "+", "SubI": "-", "MulI": "*", "DivI": "div", "ModI": "mod",
+  "AddF64": "+", "SubF64": "-", "MulF64": "*", "DivF64": "/",
+  "EqI": "==", "LeI": "<=", "LtI": "<", "EqF64": "==", "LeF64": "<=",
+  "LtF64": "<", "EqB": "==", "LeB": "<=", "LtB": "<", "EqCh": "==",
+  "LeCh": "<=", "LtCh": "<", "EqEnum": "==", "LeEnum": "<=", "LtEnum": "<",
+  "And": "and", "Or": "or", "Xor": "xor", "BitandI": "and", "BitorI": "or",
+  "BitxorI": "xor", "ShlI": "shl", "ShrI": "shr"}.toTable
+  ## RFC-0016 INT-66. The binary magics the infix arm models, by the system
+  ## operator that carries each (`binopForInfix`).
+
+proc sameRoutineSig(a, b: NimNode): bool =
+  ## The two routine symbols take formals of the same types, in order, and
+  ## return the same type.
+  let ta = a.getTypeInst
+  let tb = b.getTypeInst
+  if ta.kind != nnkProcTy or tb.kind != nnkProcTy or ta.len < 1 or
+     tb.len < 1 or ta[0].kind != nnkFormalParams or
+     tb[0].kind != nnkFormalParams:
+    return false
+  var fa, fb: seq[NimNode]
+  for fp in [ta[0], tb[0]]:
+    var acc: seq[NimNode]
+    acc.add fp[0]
+    for i in 1 ..< fp.len:
+      if fp[i].kind != nnkIdentDefs: return false
+      for _ in 0 ..< fp[i].len - 2: acc.add fp[i][^2]
+    if fa.len == 0: fa = acc else: fb = acc
+  if fa.len != fb.len: return false
+  for i in 0 ..< fa.len:
+    if fa[i].kind == nnkEmpty or fb[i].kind == nnkEmpty:
+      if fa[i].kind != fb[i].kind: return false
+    elif not sameType(fa[i], fb[i]): return false
+  true
+
+proc userMagicRewrite(n: NimNode):
+    tuple[rw: NimNode, views: seq[tuple[node, baseTy: NimNode]]] =
+  ## RFC-0016 INT-66. A call of a routine the program declares with a binary
+  ## `{.magic.}` and no body (`proc plus(x, y: int): int {.magic: "AddI".}`)
+  ## is the compiler's operation, the one the system routine of that magic
+  ## and signature performs (`+`): the code generator emits the magic, not a
+  ## call. `rw` is the call as an infix of the system routine over the same
+  ## typed arguments, typed as the call is (a view, `borrowBaseViews`), so
+  ## the infix arm models it as it models `t + u`. Nil (the call is left to
+  ## the routine path, which declines `feUnsupportedOp`) for a magic the
+  ## infix arm does not model, or one no system routine of the same
+  ## signature carries. It declined at every site before INT-66: the walk
+  ## dispatched a magic on the system routine's name.
+  if n.kind notin {nnkCall, nnkCommand, nnkInfix} or n.len != 3: return
+  let head = n[0]
+  if head.kind != nnkSym or not isUserRoutine(head): return
+  let impl = resolveRoutineImpl(head)
+  if impl == nil or hasBorrowPragma(impl) or impl.len < 7 or
+     not stubBody(impl[6]):
+    return
+  let magic = implMagic(impl)
+  if magic notin userMagicInfix: return
+  let op = userMagicInfix[magic]
+  let cands = bindSym(op, brForceOpen)
+  var sys: NimNode = nil
+  var syms: seq[NimNode]
+  if cands.kind == nnkSym: syms.add cands
+  else:
+    for c in cands: syms.add c
+  for s in syms:
+    if s.kind != nnkSym or isUserRoutine(s): continue
+    let si = resolveRoutineImpl(s)
+    if si == nil or implMagic(si) != magic: continue
+    if sameRoutineSig(head, s):
+      sys = s
+      break
+  if sys == nil: return
+  let rw = nnkInfix.newTree(sys, n[1], n[2])
+  (rw, @[(rw, n.getTypeInst)])
 
 proc isUserCallee(sym: NimNode): bool =
   ## RFC-0005 S8c. The gate every builtin-by-name dispatch site consults: a
@@ -11690,6 +11768,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   block borrowRoutine:
     let (rw, views) = borrowRoutineRewrite(n)
     if rw != nil: return parseBorrowViewedExpr(rw, views, preamble, ctx)
+  # RFC-0016 INT-66: a user-declared binary magic is the system operator's
+  # infix (`userMagicRewrite`).
+  block userMagic:
+    let (rw, views) = userMagicRewrite(n)
+    if rw != nil: return parseBorrowViewedExpr(rw, views, preamble, ctx)
   # RFC-0005 S8bc (item 7): `mgetOrPut(t, k[, d])` read as a value is the
   # get-or-insert (`parseMGetOrPut`). Hooked ahead of the `nnkHiddenDeref`
   # arm its `var B` result is wrapped in.
@@ -13056,6 +13139,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           return mkVar(synth)
     let lhsCls = classifyType(n[0])
     let fieldName = n[1].strVal
+    # RFC-0016 INT-67. A field read through a distinct object: Nim admits it
+    # only through a borrowed `.` (`type D {.borrow: `.`.} = distinct O`),
+    # which is `O(d).x`. The operand is viewed at its base type
+    # (`borrowBaseViews`, as a borrowed routine's argument is), so the read
+    # is the base object's field read; the conversion is a value pass-through.
+    # It declined `feUnsupportedExprKind` ("`.` on unsupported type distinct").
+    if lhsCls.ty.kind == itDistinct and n[1].kind == nnkSym and
+       symKind(n[1]) == nskField:
+      let baseTy = distinctBaseTypeNode(n[0].getTypeInst)
+      if baseTy != nil and classifyType(baseTy).ty.kind != itDistinct:
+        return parseBorrowViewedExpr(n, @[(n[0], baseTy)], preamble, ctx)
     case lhsCls.ty.kind
     of itTuple:
       var ix = -1
@@ -25093,6 +25187,11 @@ proc routeType(run: var RouteRun; t: NimNode; storage: bool) =
   if t.kind == nnkSym and symKind(t) != nskType:
     unlisted(t.repr)
     return
+  # RFC-0016 INT-70: a type symbol or instance with no type (an unexpanded
+  # template body's) cannot be read; never a compile error of the SUT.
+  if t.kind in {nnkSym, nnkBracketExpr} and t.typeKind == ntyNone:
+    unlisted(t.repr)
+    return
   let key = routeTypeKey(t) & (if storage: "!" else: "")
   if key in run.seenTypes: return
   run.seenTypes.add key
@@ -25169,8 +25268,10 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
   case n.kind
   of nnkBracketExpr:
     # `Gen[int]` as a type: the instance, whose head alone says nothing.
+    # RFC-0016 INT-70: an untyped one (a template body's) names no value; see
+    # the `nskType` arm.
     if n.len > 0 and n[0].kind == nnkSym and symKind(n[0]) == nskType:
-      acc.types.add (n, false)
+      if n.typeKind != ntyNone: acc.types.add (n, false)
     else:
       for c in n: routeScan(c, acc)
   of nnkSym:
@@ -25202,7 +25303,14 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
       if n.typeKind != ntyNone:
         acc.types.add (n.getTypeInst, false)
     of nskType:
-      acc.types.add (n, false)
+      # RFC-0016 INT-70. A type a template body declares (`template w() =
+      # type O = object ...`, inside the routine) is a symbol the semchecker
+      # never typed: the template is not instantiated where it is defined.
+      # `routeType`'s `getTypeImpl` on it stopped the compile ("node has no
+      # type"), as the `nskVar` arm's K8A-1 binding did. It names no value of
+      # a type this scan misses: the expanded copy of the body, where the
+      # template is called, declares the typed symbol and is scanned.
+      if n.typeKind != ntyNone: acc.types.add (n, false)
     of userRoutineSymKinds:
       if symKind(n) == nskMethod:
         # RFC-0016 PRC-02m. With the toolchain's dispatch table the override set

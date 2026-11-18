@@ -4,9 +4,9 @@
 # a changed exact-row count must be re-measured.
 typeclass	36	37
 typeop	31	33
-pragma	140	153
+pragma	146	153
 magic	130	141
 stdlib	28	29
 build	11	13
 readonly	13	13
-defined	19	21
+defined	21	21

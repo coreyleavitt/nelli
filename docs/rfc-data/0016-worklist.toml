@@ -2475,3 +2475,14 @@ source = "PRC-47 (`rfc-0016-w4prc47`), 2026-11-18"
 evidence = "`tests/tsymex_0016_int73_tuplealias.nim` aborted the compile before the fix (c), green after: a conversion to the alias and an alias holding another tuple, exact against native"
 cells = []
 pins = ["tsymex_0016_int73_tuplealias"]
+
+[[row]]
+id = "INT-75"
+table = "5.8c"
+title = "A `for` destructuring its loop variable in parentheses (`for (a, b) in it(k)`, `for (i, x) in pairs(s)`, `for (a, b) in st` over a container of tuples) failed the compile: the typed tree holds one `nnkVarTuple` where the flat form holds a symbol per name, and the walker's `for` arm asserted a symbol (`iterVar.expectKind nnkSym`); `for i, (a, b) in pairs(st)` failed the same way on its second variable (`n[1].expectKind nnkSym`). Found by PRC-50 (`for (o, i) in` an iterator yielding a tuple)"
+class = "robustness (a compile abort); a user's program is never a compile error"
+state = "open"
+source = "PRC-50 (`rfc-0016-w4prc50`), 2026-11-18"
+evidence = "`tests/tsymex_0016_int75_fortuple.nim` aborts the compile on c at d977c2f2 (`Expected a node of kind nnkSym, got nnkVarTuple`)"
+cells = []
+pins = []

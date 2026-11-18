@@ -1917,6 +1917,8 @@ task test, "Run the test suite":
             "tsymex_0016_prc50_dupresid",
             # RFC-0016 INT-73: a conversion to an anonymous tuple's alias aborted the compile.
             "tsymex_0016_int73_tuplealias",
+            # RFC-0016 INT-75: a `for` destructuring its variable in parentheses failed the parse.
+            "tsymex_0016_int75_fortuple",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

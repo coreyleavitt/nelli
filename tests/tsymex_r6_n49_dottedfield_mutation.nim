@@ -61,6 +61,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type
   Kind = enum kA, kB
@@ -143,34 +144,34 @@ suite "N49 -- dotted-field lvalue mutation":
   test "plain object dotted-field seq .add() is modeled (RFC-0005 S8ao)":
     ## Pre-S8ao this declined cleanly (`sxUnknown`); S8ao routed `.add`
     ## through the field path instead (see the module header).
-    let r = symexFind(mutatePlainField, tLabel("plain_added"))
+    let r = pinFind(mutatePlainField, tLabel("plain_added"))
     check r.status == sxSat
 
   test "variant-arm object dotted-field seq .add() is modeled (RFC-0005 S8ao)":
-    let r = symexFind(mutateVariantArmField, tLabel("variant_added"))
+    let r = pinFind(mutateVariantArmField, tLabel("variant_added"))
     check r.status == sxSat
 
   test "rider: plain object dotted-field seq .del() is modeled (RFC-0005 S8ap)":
     ## Pre-S8ap this declined cleanly (`sxUnknown`); S8ap routed `.del`
     ## through the field path (see the module header).
-    let r = symexFind(mutatePlainFieldDel, tLabel("plain_deleted"))
+    let r = pinFind(mutatePlainFieldDel, tLabel("plain_deleted"))
     check r.status == sxSat
     for e in r.errors: check "N49" notin e.msg
 
   test "rider: plain object dotted-field seq .insert() is modelled (no crash)":
     ## `sxUnknown` through RFC-0005 S8ap (the bare `insert`'s lowering
     ## decline); RFC-0005 S8ar models `insert`.
-    let r = symexFind(mutatePlainFieldInsert, tLabel("plain_inserted"))
+    let r = pinFind(mutatePlainFieldInsert, tLabel("plain_inserted"))
     check r.status == sxSat
     for e in r.errors: check "N49" notin e.msg
 
 suite "N49 -- regression: unaffected shapes":
   test "an ordinary non-mutating call with a dotted-field argument is unaffected":
-    let r = symexFind(nonMutatingDottedCall, tLabel("helper_true"))
+    let r = pinFind(nonMutatingDottedCall, tLabel("helper_true"))
     check r.status == sxSat
 
   test "the pre-existing bare-symbol receiver mutation is still modeled, not declined":
-    let r = symexFind(mutateBareLocal, tLabel("bare_added"))
+    let r = pinFind(mutateBareLocal, tLabel("bare_added"))
     check r.status == sxSat
 
 suite "N49 -- walker version pin":

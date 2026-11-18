@@ -11,6 +11,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -120,12 +121,12 @@ suite "S8aa (1): a division that traps in C is not a Defect":
   test "unchecked x div 0 is a trap, not a DivByZeroDefect (isOptimised)":
     ## RED: `sxRaised` DivByZeroDefect, witness (0, 0) -- whose replay
     ## aborts with SIGFPE.
-    let r = symexFind(sutZeroDiv, tRaisedExn("DivByZeroDefect"), optUnchecked)
+    let r = pinFind(sutZeroDiv, tRaisedExn("DivByZeroDefect"), optUnchecked)
     checkpoint show(r.errors)
     check r.halted(ubSignedOverflow)
 
   test "unchecked x div 0 is a trap, not a DivByZeroDefect (isExact)":
-    let r = symexFind(sutZeroDiv, tRaisedExn("DivByZeroDefect"),
+    let r = pinFind(sutZeroDiv, tRaisedExn("DivByZeroDefect"),
                       exactUnchecked)
     checkpoint show(r.errors)
     check r.halted(ubSignedOverflow)
@@ -135,7 +136,7 @@ suite "S8aa (1): a division that traps in C is not a Defect":
     ## `except` arm runs. RFC-0016 W1-d1b: the C division is undefined there,
     ## so the zero side halts (`ubUnsignedDivZero`) instead of being a
     ## confined, trusted `sxUnsat`.
-    let r = symexFind(sutZeroDivU, tRaisedExn("DivByZeroDefect"), optUnchecked)
+    let r = pinFind(sutZeroDivU, tRaisedExn("DivByZeroDefect"), optUnchecked)
     checkpoint show(r.errors)
     check r.status != sxRaised
     check not r.trusted
@@ -144,13 +145,13 @@ suite "S8aa (1): a division that traps in C is not a Defect":
   test "no execution continues past x div 0 (no checks at all)":
     ## RED: `sxSat` with witness (0, 0): the continuation carried Z3's
     ## `x div 0 == -1`, and the witness aborts on replay.
-    let r = symexFind(sutZeroDiv, tLabel("s8aa_zero_div"), noChecks)
+    let r = pinFind(sutZeroDiv, tLabel("s8aa_zero_div"), noChecks)
     checkpoint show(r.errors)
     check r.halted(ubSignedOverflow)
 
   test "no execution continues past x mod 0 (no checks at all)":
     ## RED: `sxSat` with witness (0, 0) (Z3's `x mod 0 == x`).
-    let r = symexFind(sutZeroMod, tLabel("s8aa_zero_mod"), noChecks)
+    let r = pinFind(sutZeroMod, tLabel("s8aa_zero_mod"), noChecks)
     checkpoint show(r.errors)
     check r.halted(ubIntMinModMinusOne)
 
@@ -158,7 +159,7 @@ suite "S8aa (1): a division that traps in C is not a Defect":
     template dead(fn: typed, lbl: string, st: static SymexSettings,
                   k: UbKind) =
       block:
-        let r = symexFind(fn, tLabel(lbl), st)
+        let r = pinFind(fn, tLabel(lbl), st)
         checkpoint lbl & " " & show(r.errors)
         check r.halted(k)
     dead(sutLowDiv, "s8aa_low_div", optUnchecked, ubSignedOverflow)
@@ -167,7 +168,7 @@ suite "S8aa (1): a division that traps in C is not a Defect":
     dead(sutLowMod, "s8aa_low_mod", optUnchecked, ubIntMinModMinusOne)
 
   test "low(int8) div -1 wraps, and the witness replays":
-    let r = symexFind(sutLowDiv8, tLabel("s8aa_low_div8"), optUnchecked)
+    let r = pinFind(sutLowDiv8, tLabel("s8aa_low_div8"), optUnchecked)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -180,7 +181,7 @@ suite "S8aa (1): a division that traps in C is not a Defect":
       check q == low(int8)
 
   test "a division away from the traps keeps its quotient":
-    let r = symexFind(sutSafeDiv, tLabel("s8aa_safe_div"), optUnchecked)
+    let r = pinFind(sutSafeDiv, tLabel("s8aa_safe_div"), optUnchecked)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -188,10 +189,10 @@ suite "S8aa (1): a division that traps in C is not a Defect":
       check y < 0 and x div y == 7 and x mod y == -3
 
   test "a stamped B4 offset divided by -1 traps at low(int)":
-    let r = symexFind(sutOffsetDiv, tLabel("s8aa_offset_div"), optUnchecked)
+    let r = pinFind(sutOffsetDiv, tLabel("s8aa_offset_div"), optUnchecked)
     checkpoint show(r.errors)
     check r.halted(ubSignedOverflow)
-    let r2 = symexFind(sutOffsetDiv, tLabel("s8aa_offset_hit"), optUnchecked)
+    let r2 = pinFind(sutOffsetDiv, tLabel("s8aa_offset_hit"), optUnchecked)
     checkpoint show(r2.errors)
     check r2.status == sxSat
     if r2.status == sxSat:

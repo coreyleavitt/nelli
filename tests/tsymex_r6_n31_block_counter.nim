@@ -71,6 +71,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # 1. THE BUG -- two-hop literal-seeded counter, scan loop wrapped in a
@@ -95,7 +96,7 @@ proc sutN31BlockAfter(data: seq[byte]) =
 suite "symex N31 -- two-hop literal-seeded counter inside a block:":
 
   test "N31-1: post-block target is reachable (sxSat) -- pre-fix this was the false sxUnsat":
-    let r = symexFind(sutN31BlockAfter, tLabel("n31_block_after"))
+    let r = pinFind(sutN31BlockAfter, tLabel("n31_block_after"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -124,7 +125,7 @@ proc sutN31BlockBefore(data: seq[byte]) =
 suite "symex N31 -- regression: target before the block stays correct":
 
   test "N31-2: pre-block target is unconditionally reachable (sxSat)":
-    let r = symexFind(sutN31BlockBefore, tLabel("n31_block_before"))
+    let r = pinFind(sutN31BlockBefore, tLabel("n31_block_before"))
     check r.status == sxSat
 
 # =============================================================================
@@ -148,7 +149,7 @@ proc sutN31DirectLiteralBlockAfter(data: seq[byte]) =
 suite "symex N31 -- regression: direct literal-seeded counter in a block stays correct":
 
   test "N31-3: post-block target reachable (sxSat), unaffected by the fix (no CR-17 mismatch here)":
-    let r = symexFind(sutN31DirectLiteralBlockAfter, tLabel("n31_directlit_after"))
+    let r = pinFind(sutN31DirectLiteralBlockAfter, tLabel("n31_directlit_after"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -180,7 +181,7 @@ proc sutN31NoBlockAfter(data: seq[byte]) =
 suite "symex N31 -- no-block two-hop shape: honest decline upgraded to sxSat by the same fix":
 
   test "N31-4: post-loop target reachable (sxSat) -- UPGRADED from the pre-fix sxUnknown decline":
-    let r = symexFind(sutN31NoBlockAfter, tLabel("n31_noblock_after"))
+    let r = pinFind(sutN31NoBlockAfter, tLabel("n31_noblock_after"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -217,7 +218,7 @@ proc sutN31DirectLiteralBlockAfterUnsat(data: seq[byte]) =
 suite "symex N31 -- UNSAT companion: no over-correction":
 
   test "N31-5: a data-independent false condition after the block still proves sxUnsat":
-    let r = symexFind(sutN31DirectLiteralBlockAfterUnsat,
+    let r = pinFind(sutN31DirectLiteralBlockAfterUnsat,
                        tLabel("n31_directlit_unreachable_after"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -250,7 +251,7 @@ proc sutN31BlockAfterRaisePath(data: seq[byte]) =
 suite "symex N31 -- raise-path companion: real IndexDefect is reported honestly":
 
   test "N31-6: the only entry into the loop is a real out-of-range read (sxRaised IndexDefect)":
-    let r = symexFind(sutN31BlockAfterRaisePath, tLabel("n31_raisepath_after"))
+    let r = pinFind(sutN31BlockAfterRaisePath, tLabel("n31_raisepath_after"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised

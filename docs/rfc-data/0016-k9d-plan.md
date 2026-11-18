@@ -342,6 +342,70 @@ Deferred, with the slice that owns them: `phase15_g10_smoke`,
 call `quit`, which ends the test process natively, so it needs the child-process
 idiom, K9d-11).
 
+## K9d-7 result (`k9d7`, WIP: the first pass of the collection family)
+
+`boundaryOf` gained `seq[T]`, `array[I, T]`, `set[E]`, `Table[K, V]` and
+`HashSet[T]` (an `openArray[T]` or `varargs[T]` parameter is passed a `seq[T]`,
+`fnParamTypes`). Each is a deterministic finite set in priority order, at most
+`seqDomainCap` (2048) values, built from the element domain's CORE (`coreOf`,
+at most 8 values: all of a small domain, else the low end, the middle and the
+high end; a string's first three values and the SUT's literals; an ordinal other
+than bool/enum also gets the SUT's first two integer literals, or char literals
+for a `char`, each with its neighbours, up to 6 more):
+
+- `seq`: empty; each single; the leading pairs and triples; at each integer
+  literal `k` of the SUT (and 4, 5, 8) the lengths k-1, k, k+1 filled with
+  all-equal (low, high, middle), ascending, descending, an outlier at either end
+  (of either kind) and adjacent duplicates; every pair; every triple (the full
+  product up to 512, else all-pairs). Always sampled;
+- `array`: fixed length; the full product over positions up to 4096, else the
+  all-pairs array (positions up to 32), every all-equal array, and the length
+  patterns. Exhaustive only when the element domain is exhaustive, the core is
+  all of it and the product is full;
+- `set[E]`: empty, full, each singleton, each pair, each complement of a
+  singleton, all members; exhaustive when E has at most 4 values;
+- `Table`/`HashSet`: empty, singles, every ordered pair of the first eight keys,
+  ascending and descending triples of the first five, all keys either way; a
+  table's values from a 3-value core as all-equal, ascending, descending and an
+  outlier at either end. The insertion orders are both kept (iteration order of
+  a colliding table is observable); a repeated key adds no value (the last write
+  wins), so it is not a separate member. Never exhaustive.
+
+A collection in an aggregate or beside another is cut to its first 64 values
+(`prefixDomain`, as `stringCore`). Coverage guarantee: a sat or raised witness
+is replayed exactly; for unsat, every length 0..2 sequence over the core, every
+all-pairs of positions in an array and every set/table/hash set above, plus the
+length thresholds the SUT's integer literals name (up to 256). A bug that needs a
+longer sequence off any literal, an element outside the core, or a literal above
+256 is not found. `tsymex_0016_k9d_pinfind` pins one family per test, a sat
+witness outside the domain, a planted unsat claim refused over a harvested
+length, and the size bound.
+
+49 suites convert (local c runs, rc 0, every verdict reproduced natively); the
+census ceiling 281 -> 232: `0016_w3z_p5_shortcircuit_guard`, `163audit_w9`, `163rev_enum_positions`, `a6_symlen_hof`, `g1a_mode`, `phase15_A1_boolean`, `phase15_A2a_atomicir_audit`, `phase15_C2_staticparams`, `phase15_C4_hof`, `phase15_g7_static_param`, `phase16_CR1b_tail_local`, `phase16_D1a_defect_routeraise`, `phase16_m4_str_add_ampeq`, `phase4_array`, `phase4_oob`, `phase5_hashset`, `phase5_seq`, `phase5_table`, `phase6_break`, `phase6_for`, `r1_draingap`, `r4_seq_slice`, `r5_discard`, `r6_b1_stringbacked`, `r6_b7r2_pathscope`, `r6_b7r_bytescan`, `r6_lows_collectors`, `r6_n13_reassign_seqarm`, `r6_n27_hof_placeholder`, `r6_n28_shadow_collision`, `r6_n31_block_counter`, `r6_n37_raise_residue`, `r6_n49_dottedfield_mutation`, `r6_r4_collector_scoping`, `rectify_cardinality`, `rectify_mutation`, `rectify_nested_arrays`, `retest_c3_bitwise_guard`, `retest_c6_tuple_chain`, `rfc0005_s8aa_remainder_checksoff`, `rfc0005_s8ba_remainder_c`, `rfc0005_s8bm_stability`, `rfc0005_s8bq_remainder`, `rfc0005_s8bx_extractraise`, `rfc0005_s8bx_extractraise_b`, `rfc0005_s8t_termination`, `rfc0005_s8w_remainder`, `rfc0005_s8w_remainder_b`, `rfc0005_s8w_remainder_b_checksoff`.
+
+Not converted (reverted, still unpinned), with the owner:
+
+- ref or ptr in a parameter (K9d-10): `163audit_range_elem`,
+  `CR2c_witnessreader_catchall`, `h_containers`, `rfc0005_s0_exhibit`,
+  `rfc0005_s8aa_remainder`, `rfc0005_s8ac_remainder`,
+  `rfc0005_s8ac_remainder_b`, `tot1_totality_corpus` (also float/cstring);
+- float (K9d-8): `phase15_g10_smoke`, `rfc0005_s8ba_remainder`;
+- needs a decision (the pin failed natively, not triaged; NOT yet filed as a
+  worklist row): `163rev_table_elem` (a sat witness over a `Table` raises
+  KeyError natively: either the walker's witness for a Table is not
+  materialised into the replayed value, or a walker/native disagreement);
+  `163rev_seqelem_promoted_int` (the sat witness is rejected by `symexAssume`
+  natively); `rfc0005_s8c_resolution` (an empty domain for a distinct int
+  parameter); `rfc0005_s8q_termination` (every generated run rejected by
+  `symexAssume`, vacuous); `phase15_M1_seq_fixedwidth` (a C compile error in
+  `seq[Widget]`/`seq[string]` instantiation inside `system.add`).
+
+Not yet attempted: the `symexFind` suites whose SUT is reached through `fn`/a
+lambda, the `symexForAll`/`symexFindAllWitnesses` suites (not `pinFind` shapes),
+and the remaining collection suites in the seq family list below
+(`a6`..`rfc0005_s9_vetoes`) that did not appear in this candidate pass.
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

@@ -29,6 +29,7 @@ import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -46,7 +47,7 @@ proc hasMsg(errs: seq[SymexErrorInfo]; k: SymexErrorKind; sub: string): bool =
   false
 
 template verdict(sut: untyped; label: string): SymexResult =
-  let r = symexFind(sut, tLabel(label))
+  let r = pinFind(sut, tLabel(label))
   checkpoint label & ": " & $r.status & " " & show(r.errors) & " witness=" &
              (if r.status == sxSat: $r.witness else: "-")
   r
@@ -320,7 +321,7 @@ suite "S8bq (2): builtin set values":
     check verdict(bsProper, "bq_bs_proper").status == sxUnsat
     check verdict(bsProperSat, "bq_bs_proper_sat").status == sxSat
   test "a query counting a set's members runs under seqQueryRLimit":
-    let r = symexFind(bsCardBounded, tLabel("bq_bs_card_bounded"),
+    let r = pinFind(bsCardBounded, tLabel("bq_bs_card_bounded"),
                       tinySeqBudget)
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown

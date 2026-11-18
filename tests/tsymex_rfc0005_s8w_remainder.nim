@@ -24,6 +24,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -85,7 +86,7 @@ suite "S8w (1): an alternating and/or chain is linear in paths":
     ## RED: 2^6-fold path growth. GREEN: the target solve plus one UNSAT
     ## IndexDefect solve per read.
     symexZ3CallCount = 0
-    let r = symexFind(sutAndOfOrs, tLabel("s8w_and_of_ors"))
+    let r = pinFind(sutAndOfOrs, tLabel("s8w_and_of_ors"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -97,7 +98,7 @@ suite "S8w (1): an alternating and/or chain is linear in paths":
 
   test "(a and b) or (c and d) or ... (6 pairs) in linearly many Z3 calls":
     symexZ3CallCount = 0
-    let r = symexFind(sutOrOfAnds, tLabel("s8w_or_of_ands"))
+    let r = pinFind(sutOrOfAnds, tLabel("s8w_or_of_ands"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -109,7 +110,7 @@ suite "S8w (1): an alternating and/or chain is linear in paths":
 
   test "let x = (a or b) and ... (6 pairs)":
     symexZ3CallCount = 0
-    let r = symexFind(sutLetAlt, tLabel("s8w_let_alt"))
+    let r = pinFind(sutLetAlt, tLabel("s8w_let_alt"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -122,10 +123,10 @@ suite "S8w (1): an alternating and/or chain is linear in paths":
     ## Probe: `sutAltGuarded` never raises; `("a", 0, 5)` hits.
     sutAltGuarded("a", 0, 5)
     sutAltGuarded("", -1, 7)
-    let r = symexFind(sutAltGuarded, tIndexError())
+    let r = pinFind(sutAltGuarded, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxUnsat
-    let r2 = symexFind(sutAltGuarded, tLabel("s8w_alt_guarded"))
+    let r2 = pinFind(sutAltGuarded, tLabel("s8w_alt_guarded"))
     checkpoint show(r2.errors)
     check r2.status == sxSat
     if r2.status == sxSat:
@@ -139,7 +140,7 @@ suite "S8w (1): an alternating and/or chain is linear in paths":
     try: sutAltUnguarded("", -1, 0)
     except IndexDefect: raised = true
     check raised
-    let r = symexFind(sutAltUnguarded, tIndexError())
+    let r = pinFind(sutAltUnguarded, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -208,7 +209,7 @@ suite "S8w (2): a while guard whose first operand hoists, with continue":
     ## Probe: `sutContGuard("aax") == (2, 1)`, `("a") == (4, 3)`.
     check sutContGuard("aax") == (2, 1)
     check sutContGuard("a") == (4, 3)
-    let r = symexFind(sutContHit, tLabel("s8w_cont_hit"))
+    let r = pinFind(sutContHit, tLabel("s8w_cont_hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -218,18 +219,18 @@ suite "S8w (2): a while guard whose first operand hoists, with continue":
 
   test "a stale guard's extra iteration is dead":
     ## RED: `sxUnknown` (the R14 Case 2 decline).
-    let r = symexFind(sutContDead, tLabel("s8w_cont_dead"))
+    let r = pinFind(sutContDead, tLabel("s8w_cont_dead"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "the guarded read never raises":
-    let r = symexFind(sutContGuard, tIndexError())
+    let r = pinFind(sutContGuard, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "tsymex_r14_case2_degrade's shape gets its verdict":
     ## Probe: `caseTwoContinue(3, 1, "abc")` reaches i == 3.
-    let r = symexFind(caseTwoContinue, tLabel("s8w_case2_hit"))
+    let r = pinFind(caseTwoContinue, tLabel("s8w_case2_hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -238,10 +239,10 @@ suite "S8w (2): a while guard whose first operand hoists, with continue":
 
   test "an or guard with a fault and continue (R14 Case 3)":
     ## Probe: "" gives n == 2, i == 4 (i == 1 continues; i == 2, 3 count).
-    let r = symexFind(sutOrGuardCont, tLabel("s8w_case3_hit"))
+    let r = pinFind(sutOrGuardCont, tLabel("s8w_case3_hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
-    let r2 = symexFind(sutOrGuardCont, tIndexError())
+    let r2 = pinFind(sutOrGuardCont, tIndexError())
     checkpoint show(r2.errors)
     check r2.status == sxUnsat
 

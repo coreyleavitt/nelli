@@ -3,6 +3,7 @@ import std/unittest
 import std/tables
 import std/sets
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex mutations #145":
   test "seq.add appends and increments len":
@@ -10,7 +11,7 @@ suite "symex mutations #145":
       s.add(42)
       if s.len == 1 and s[0] == 42:
         symexTarget("post")
-    let r = symexFind(growAndCheck, tLabel("post"))
+    let r = pinFind(growAndCheck, tLabel("post"))
     check r.status == sxSat
     check r.witness[0].len == 0
 
@@ -19,7 +20,7 @@ suite "symex mutations #145":
       t["a"] = 7
       if t["a"] == 7:
         symexTarget("set-ok")
-    let r = symexFind(setKey, tLabel("set-ok"))
+    let r = pinFind(setKey, tLabel("set-ok"))
     check r.status == sxSat
 
   test "Table.del removes the key":
@@ -28,7 +29,7 @@ suite "symex mutations #145":
       t.del("a")
       if "a" notin t:
         symexTarget("removed")
-    let r = symexFind(removeKey, tLabel("removed"))
+    let r = pinFind(removeKey, tLabel("removed"))
     check r.status == sxSat
 
   test "HashSet.incl adds a member":
@@ -36,7 +37,7 @@ suite "symex mutations #145":
       s.incl(42)
       if 42 in s:
         symexTarget("included")
-    let r = symexFind(inclMember, tLabel("included"))
+    let r = pinFind(inclMember, tLabel("included"))
     check r.status == sxSat
 
   test "HashSet.excl removes a member":
@@ -45,7 +46,7 @@ suite "symex mutations #145":
       s.excl(7)
       if 7 notin s:
         symexTarget("excluded")
-    let r = symexFind(exclMember, tLabel("excluded"))
+    let r = pinFind(exclMember, tLabel("excluded"))
     check r.status == sxSat
 
   test "var T param mutated in helper propagates to caller (#140)":
@@ -55,6 +56,6 @@ suite "symex mutations #145":
       helper(s)
       if s.len == 1 and s[0] == 9:
         symexTarget("helper-mutated")
-    let r = symexFind(outer, tLabel("helper-mutated"))
+    let r = pinFind(outer, tLabel("helper-mutated"))
     check r.status == sxSat
     check r.witness[0].len == 0

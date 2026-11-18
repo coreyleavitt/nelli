@@ -123,6 +123,7 @@
 import std/[unittest, sequtils, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # Bare call-return placeholder receiver (finding 1 above). Mirrors
@@ -197,7 +198,7 @@ suite "symex N27 — lowerHofCall now declines a placeholder receiver through th
     ## Post-fix it is `seNestedSeqUnsupported`, attributed to the receiver's
     ## placeholder status specifically, and it is the FIRST error recorded
     ## (the closure is never even lowered) -- the meaningful, pinned change.
-    let r = symexFind(sutMapPlaceholder, tLabel("map_placeholder"))
+    let r = pinFind(sutMapPlaceholder, tLabel("map_placeholder"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -213,7 +214,7 @@ suite "symex N27 — lowerHofCall now declines a placeholder receiver through th
     ## substituted placeholder (`__hofFilterUnsupported`) -- not from the
     ## receiver's own placeholder status. Post-fix, the FIRST error is now
     ## the receiver's own decline, attributed correctly and immediately.
-    let r = symexFind(sutFilterPlaceholder, tLabel("filter_placeholder"))
+    let r = pinFind(sutFilterPlaceholder, tLabel("filter_placeholder"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -225,7 +226,7 @@ suite "symex N27 — lowerHofCall now declines a placeholder receiver through th
 suite "symex N27 — declared-field placeholder receiver (companion, unaffected by this slice)":
 
   test "N27-field-map: `.map` over a declared-field placeholder receiver still declines sxUnknown at the parse-time field-read interception -- unaffected by this slice's runtime guard":
-    let r = symexFind(sutFieldMapPlaceholder, tLabel("field_map_placeholder"))
+    let r = pinFind(sutFieldMapPlaceholder, tLabel("field_map_placeholder"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -239,7 +240,7 @@ suite "symex N27 — declared-field placeholder receiver (companion, unaffected 
 suite "symex N27 — backed-elem HOF companions (regression: unaffected by the guard)":
 
   test "N27-companion-filter: symbolic-length seq[int] filter still emits ceUnsupportedHof (sevError), sxUnknown -- identical to C4-2, guard never triggers":
-    let r = symexFind(sutFilterBackedSymbolic, tLabel("filter_backed_symbolic"))
+    let r = pinFind(sutFilterBackedSymbolic, tLabel("filter_backed_symbolic"))
     check r.status == sxUnknown
     var sawHof = false
     for e in r.errors:
@@ -248,7 +249,7 @@ suite "symex N27 — backed-elem HOF companions (regression: unaffected by the g
     check sawHof
 
   test "N27-companion-map: symbolic-length seq[int] map still terminates (sxSat or sxUnknown, never a hang/crash) -- identical to C4-3, guard never triggers":
-    let r = symexFind(sutMapBackedSymbolic, tLabel("map_backed_symbolic"))
+    let r = pinFind(sutMapBackedSymbolic, tLabel("map_backed_symbolic"))
     check r.status in {sxSat, sxUnknown}
 
 suite "symex N27 — walker version pin":

@@ -27,6 +27,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -55,11 +56,11 @@ proc byteScanQ1BoundProof(data: seq[byte]) =
 suite "symex round-6 B7-rider -- B0/Q1 widened to a seq[byte] receiver":
 
   test "B7R-1: byte-backed Q1 scan reaches i==3 -> sxSat":
-    let r = symexFind(byteScanQ1, tLabel("byte_q1_sat"))
+    let r = pinFind(byteScanQ1, tLabel("byte_q1_sat"))
     check r.status == sxSat
 
   test "B7R-1b UNSAT companion: the byte-backed scan-lift clamp never exceeds data.len":
-    let r = symexFind(byteScanQ1BoundProof, tAssertionViolation())
+    let r = pinFind(byteScanQ1BoundProof, tAssertionViolation())
     check r.status == sxUnsat
 
 # -----------------------------------------------------------------------------
@@ -92,15 +93,15 @@ proc byteScanDelimHexLit(data: seq[byte]) =
 suite "symex round-6 B7-rider -- byte-literal delimiter spellings map to the real 0x00":
 
   test "B7R-2a: 0'u8 delimiter spelling is recognized -> sxSat":
-    let r = symexFind(byteScanDelimU8Suffix, tLabel("delim_u8_suffix"))
+    let r = pinFind(byteScanDelimU8Suffix, tLabel("delim_u8_suffix"))
     check r.status == sxSat
 
   test "B7R-2b: byte(0) delimiter spelling is recognized -> sxSat":
-    let r = symexFind(byteScanDelimByteCall, tLabel("delim_byte_call"))
+    let r = pinFind(byteScanDelimByteCall, tLabel("delim_byte_call"))
     check r.status == sxSat
 
   test "B7R-2c: 0x00 plain-int-literal delimiter spelling is recognized -> sxSat":
-    let r = symexFind(byteScanDelimHexLit, tLabel("delim_hex_lit"))
+    let r = pinFind(byteScanDelimHexLit, tLabel("delim_hex_lit"))
     check r.status == sxSat
 
 # -----------------------------------------------------------------------------
@@ -134,11 +135,11 @@ proc sutByteScanPairNotFoundImpossible(data: seq[byte], start: int) =
 suite "symex round-6 B7-rider -- B3 widened to a seq[byte] receiver":
 
   test "B7R-3: byte-backed B3 scan finds start+4 -> sxSat":
-    let r = symexFind(sutByteScanPairFound, tLabel("byte_pair_hit"))
+    let r = pinFind(sutByteScanPairFound, tLabel("byte_pair_hit"))
     check r.status == sxSat
 
   test "B7R-3b UNSAT companion: the byte-backed B3 not-found clamp never exceeds data.len":
-    let r = symexFind(sutByteScanPairNotFoundImpossible, tLabel("byte_pair_impossible"))
+    let r = pinFind(sutByteScanPairNotFoundImpossible, tLabel("byte_pair_impossible"))
     check r.status == sxUnsat
 
 # -----------------------------------------------------------------------------
@@ -168,11 +169,11 @@ proc sutByteAccPayloadAB(data: seq[byte], start: int) =
 suite "symex round-6 B7-rider -- B4 widened to a seq[byte] receiver (chapulin's real readCString shape)":
 
   test "B7R-4: byte-backed readCString finds payload==\"AB\" -> sxSat":
-    let r = symexFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))
+    let r = pinFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))
     check r.status == sxSat
 
   test "B7R-4-content: the witness's real seq[byte] receiver and real NUL terminator are exact":
-    let r = symexFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))
+    let r = pinFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))
     check r.status == sxSat
     # Model-independent (RFC-0005 S8w2): the path fixes `data[start ..
     # start+2]` only; Z3 may put any bytes after the terminator, so the
@@ -194,7 +195,7 @@ suite "symex round-6 B7-rider -- B4 widened to a seq[byte] receiver (chapulin's 
         check data[q - 1] == 0'u8
 
   test "B7R-4-cross: the witness, replayed through the real function, reproduces the exact found outcome":
-    let r = symexFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))
+    let r = pinFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))
     check r.status == sxSat
     let (data, start) = r.witness
     let (payload, q) = readCStringByteSeq(data, start)
@@ -204,13 +205,13 @@ suite "symex round-6 B7-rider -- B4 widened to a seq[byte] receiver (chapulin's 
   test "B7R-4-notfound: no NUL terminator present -> the modeled ScanError raise is reachable (sxRaised)":
     proc discardSut(data: seq[byte], start: int) =
       discard readCStringByteSeq(data, start)
-    let r = symexFind(discardSut, tRaisedExn("ScanError"))
+    let r = pinFind(discardSut, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
   test "B7R-4-oob: negative symbolic start -> the entry-read probe deposits a real IndexDefect (sxRaised)":
     proc discardSut(data: seq[byte], start: int) =
       discard readCStringByteSeq(data, start)
-    let r = symexFind(discardSut, tIndexError())
+    let r = pinFind(discardSut, tIndexError())
     check r.status == sxRaised
 
 # -----------------------------------------------------------------------------
@@ -232,11 +233,11 @@ proc sutByteChainedTwoPayloads(data: seq[byte]) =
 suite "symex round-6 B7-rider -- B5 call-boundary composition on a seq[byte] receiver":
 
   test "B7R-5: two chained readCString calls (byte-backed) -- both payloads reachable -> sxSat":
-    let r = symexFind(sutByteChainedTwoPayloads, tLabel("byte_chained_hit"))
+    let r = pinFind(sutByteChainedTwoPayloads, tLabel("byte_chained_hit"))
     check r.status == sxSat
 
   test "B7R-5-cross: the witness, replayed through the real function twice, reproduces both payloads":
-    let r = symexFind(sutByteChainedTwoPayloads, tLabel("byte_chained_hit"))
+    let r = pinFind(sutByteChainedTwoPayloads, tLabel("byte_chained_hit"))
     check r.status == sxSat
     let data = r.witness[0]
     let (payload1, p1) = readCStringByteSeq(data, 0)
@@ -301,7 +302,7 @@ suite "symex round-6 B7-rider -- B6 widened to a seq[byte] receiver":
         data[12] == byte('e') and data[13] == byte('e') and data[14] == 0'u8 and
         data[15] == 0'u8)
       readOptionsByteSeqSut(data, 0)
-    let r = symexFind(sut, tLabel("byte_options_done"))
+    let r = pinFind(sut, tLabel("byte_options_done"))
     check r.status == sxSat
 
 # -----------------------------------------------------------------------------
@@ -342,7 +343,7 @@ suite "symex round-6 B7-rider -- mutation-fallback veto (B1's scanShapeReceiverM
     ## The receiver staying array-modelled is still what is checked: a
     ## wrongly string-backed one reaches `iekSeqAdd`'s kind-mismatch decline
     ## ("expected svSeq") instead of the store.
-    let r = symexFind(mutatedByteReceiverStaysArray, tLabel("b7r_mutated_stays_array"))
+    let r = pinFind(mutatedByteReceiverStaysArray, tLabel("b7r_mutated_stays_array"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
     # receiver staying ARRAY-modelled is now shown by the add succeeding: a
@@ -356,7 +357,7 @@ suite "symex round-6 B7-rider -- mutation-fallback veto (B1's scanShapeReceiverM
       check "expected svSeq" notin e.msg
 
   test "B7R-7 diagnostic: the no-loop ground truth is sxSat (the add-width gap closed in RFC-0005 S8ar)":
-    let r = symexFind(addMutationNoLoopDiagnostic, tLabel("b7r_add_no_loop_sat"))
+    let r = pinFind(addMutationNoLoopDiagnostic, tLabel("b7r_add_no_loop_sat"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
     # receiver staying ARRAY-modelled is now shown by the add succeeding: a
@@ -386,7 +387,7 @@ proc sutByteNonLenBoundImpossible(data: seq[byte]) =
 suite "symex round-6 B7-rider -- trip wire (byte receiver, non-.len bound stays unrecognized)":
 
   test "B7R-8: non-.len bound over a seq[byte] receiver is NOT recognized -> sxUnknown":
-    let r = symexFind(sutByteNonLenBoundImpossible, tLabel("b7r_impossible"))
+    let r = pinFind(sutByteNonLenBoundImpossible, tLabel("b7r_impossible"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
@@ -406,7 +407,7 @@ proc sutByteAccPositionHonoredImpossible(data: seq[byte], start: int) =
 suite "symex round-6 B7-rider -- exclusivity (siblings do not cross-fire on a byte receiver)":
 
   test "B7R-9: the 3-statement accumulating body over a byte receiver is B4's shape alone, never B3's -> sxRaised (only the not-found raise survives, mirroring B3-5's migrated verdict)":
-    let r = symexFind(sutByteAccPositionHonoredImpossible, tLabel("b7r_exclusive_impossible"))
+    let r = pinFind(sutByteAccPositionHonoredImpossible, tLabel("b7r_exclusive_impossible"))
     check r.status == sxRaised
 
 # =============================================================================
@@ -462,11 +463,11 @@ proc twoCharWidenCombineTwin(s: string): uint16 =
 suite "symex round-6 B7-rider -- LEG 2 (char-widening witness-corruption fix)":
 
   test "B7R-LEG2-1: two char-sourced widened values combined and compared -> sxSat":
-    let r = symexFind(twoCharWidenCombine, tLabel("leg2_hit"))
+    let r = pinFind(twoCharWidenCombine, tLabel("leg2_hit"))
     check r.status == sxSat
 
   test "B7R-LEG2-1-content: the witness is the exact 2 bytes the property depends on, not Z3's free don't-care choice for the (pre-fix, spuriously unconstrained) high byte":
-    let r = symexFind(twoCharWidenCombine, tLabel("leg2_hit"))
+    let r = pinFind(twoCharWidenCombine, tLabel("leg2_hit"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.len == 2
@@ -475,7 +476,7 @@ suite "symex round-6 B7-rider -- LEG 2 (char-widening witness-corruption fix)":
     check ord(s[1]) == 0x42
 
   test "B7R-LEG2-1-cross: the witness, replayed through a real-code twin of the widen+shl+or expression, reproduces the exact target value":
-    let r = symexFind(twoCharWidenCombine, tLabel("leg2_hit"))
+    let r = pinFind(twoCharWidenCombine, tLabel("leg2_hit"))
     check r.status == sxSat
     let s = r.witness[0]
     check twoCharWidenCombineTwin(s) == 0x4142'u16
@@ -497,7 +498,7 @@ suite "symex round-6 B7-rider -- LEG 2 (char-widening witness-corruption fix)":
         let combined = (hi shl 8) or lo
         if combined == 0xFF00'u16:
           symexTarget("leg2_highbyte_hit")
-    let r = symexFind(sut, tLabel("leg2_highbyte_hit"))
+    let r = pinFind(sut, tLabel("leg2_highbyte_hit"))
     check r.status == sxSat
 
   test "B7R-LEG2-3: char(<a wider int>) narrowing is modelled (range-checked, faithful witness)":
@@ -510,7 +511,7 @@ suite "symex round-6 B7-rider -- LEG 2 (char-widening witness-corruption fix)":
       let c = char(x)
       if c == 'A':
         symexTarget("char_narrow_decline_target")
-    let r = symexFind(charNarrowingDecline, tLabel("char_narrow_decline_target"))
+    let r = pinFind(charNarrowingDecline, tLabel("char_narrow_decline_target"))
     check r.status == sxSat
     check r.witness[0] == 65'i32
     check not r.errors.anyIt("narrowing" in it.msg)

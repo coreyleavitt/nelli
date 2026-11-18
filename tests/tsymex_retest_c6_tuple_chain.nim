@@ -37,6 +37,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -101,7 +102,7 @@ suite "symex re-test C6 — tuple-return destructure through the raise drain":
     ## discarded expressions, so this shape now degrades EXACTLY like
     ## `singleDestructure` below (same call, bound): classified sxUnknown,
     ## never the walker-fault route.
-    let r = symexFind(singleDiscard, tIndexError())
+    let r = pinFind(singleDiscard, tIndexError())
     check r.status == sxUnknown
     check r.errors.len > 0
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
@@ -115,17 +116,17 @@ suite "symex re-test C6 — tuple-return destructure through the raise drain":
     ## scan is DECIDED rather than budget-exhausted. No `IndexDefect` is
     ## reachable anywhere in `destructurePair` — a REAL sxUnsat proof, the
     ## strongest possible verdict, not merely "some real verdict".
-    let r = symexFind(destructurePair, tIndexError())
+    let r = pinFind(destructurePair, tIndexError())
     check r.status == sxUnsat
 
   test "destructured string-tuple return: deterministic classified degrade, never the walker-fault route":
-    let r = symexFind(singleDestructure, tIndexError())
+    let r = pinFind(singleDestructure, tIndexError())
     check r.status == sxUnknown
     check r.errors.len > 0
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "chained dependent scans (the catalog-#6 repro): classified sxUnknown, never a crash":
-    let r = symexFind(chained, tIndexError())
+    let r = pinFind(chained, tIndexError())
     check r.status == sxUnknown
     check r.errors.len > 0
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)

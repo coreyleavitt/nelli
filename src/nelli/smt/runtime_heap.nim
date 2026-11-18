@@ -3897,6 +3897,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
       var child = forkPath(p, p.pc, p.env)
       let newRef = freshRef(ctx, refSort, typeId, child)
       assertFreshness(ctx, child, typeId, newRef, w.settings)
+      noteAllocation(ctx, newRef)   # RFC-0016 INT-82: apart from the entry state
       var newEnv = child.env
       if isPtr:
         newEnv[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,

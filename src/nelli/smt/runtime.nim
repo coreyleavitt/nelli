@@ -5462,6 +5462,10 @@ proc globalInitValue(name: string; ty: IRType): SymVal =
   var facts: seq[Z3Bool]
   result = allocateSym(ty, "__glInit_" & displayName(name), facts)
   globalEntryVals[name] = result
+  block:   # RFC-0016 INT-82: a global's entry value is entry state
+    var acc: seq[RawZ3Ast]
+    svAsts(result, acc)
+    notePreExistingTerms(ctx, acc)
   registerUnwritten(ctx, result, displayName(name), havoc = false)
 
 var noinitSerial {.threadvar.}: int
@@ -12117,6 +12121,12 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   var reach = @base
   reach.add roots
   for c in indexSplitRoots(currentContext(), reach):
+    roots.add c
+  # RFC-0016 INT-82: an allocation is no object of the entry state. True of
+  # every real execution (the entry state predates the walk), so it prunes no
+  # real input (`refProvenanceRoots`).
+  reach.add roots
+  for c in refProvenanceRoots(currentContext(), reach):
     roots.add c
   roots
 
@@ -23756,6 +23766,10 @@ proc entryValueOf(name: string): SymVal =
     globalEntryVals[name] =
       allocateSym(g.ty, "__glEntry_" & displayName(name), facts)
     for f in facts: globalEntryFacts.add f
+    block:   # RFC-0016 INT-82: a global's entry value is entry state
+      var acc: seq[RawZ3Ast]
+      svAsts(globalEntryVals[name], acc)
+      notePreExistingTerms(ctx, acc)
     registerUnwritten(ctx, globalEntryVals[name], displayName(name),
                       havoc = true)
   globalEntryVals[name]
@@ -26817,6 +26831,13 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
+  # RFC-0016 INT-82: every parameter's leaves (a ref's address, a seq's or
+  # table's backing) are the walk's entry state (`refProvenanceRoots`).
+  block:
+    var acc: seq[RawZ3Ast]
+    for p in prog.params:
+      if env.hasKey(p.name): svAsts(env[p.name], acc)
+    notePreExistingTerms(ctx, acc)
   let initial = initialWalkPath(initialPC, env)
   let exitClock = newExitClock()
   var w = WalkCtx(

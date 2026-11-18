@@ -1285,6 +1285,15 @@ proc heapStoreValue*(valSV: SymVal; proto: SymVal; ty: IRType): SymVal =
     of svBV64: result = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
     else: discard
 
+var preExistingNames {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-82. The names of the constants that hold the walk's entry
+  ## state (`notePreExistingTerms`, `mkHeapArrayVar`'s `heap_<key>`). Reset
+  ## per run.
+
+proc notePreExistingName*(name: string) =
+  ## RFC-0016 INT-82. Record the constant `name` as part of the entry state.
+  preExistingNames.incl name
+
 proc mkHeapArrayVar*(ctx: Z3Context, refSort: RawZ3Sort,
                     pointeeTy: IRType, name: string,
                     variantTy: IRType = nil, leaf = 0): Z3AnyAst =
@@ -1317,6 +1326,10 @@ proc mkHeapArrayVar*(ctx: Z3Context, refSort: RawZ3Sort,
   if leaf == 0 and "@ep" notin key and (not heapKeyShapes.hasKey(key) or
      (variantTy != nil and heapKeyShapes[key].variantTy == nil)):
     heapKeyShapes[key] = HeapKeyShape(valTy: pointeeTy, variantTy: variantTy)
+  # RFC-0016 INT-82: an input heap (`heap_<key>`, not a havoc's `@ep<n>`)
+  # is the walk's entry state (`refProvenanceRoots`).
+  if name.startsWith("heap_") and '@' notin name:
+    notePreExistingName(name)
   var scratchPC: seq[Z3Bool]
   let proto = allocateSym(pointeeTy, "__heapValSort", scratchPC,
                                       false, @[])
@@ -1955,12 +1968,204 @@ func heapDerefDecline*(chainDepth, derefCount, limit: int): string =
   else: ""
 
 
+# ---- address provenance: an allocation is no pre-existing object ------------
+# RFC-0016 INT-82 (SOUNDNESS). Natively a `new T` / `T(...)` returns an object
+# distinct from every object that existed when it was made: every ref the SUT
+# was handed (a parameter, a field or element reached through one, a global's
+# entry value), and every earlier allocation. `assertFreshness` states the
+# second half pairwise against the path's own allocations (`liveRefs`), but a
+# caller's ref is never one of them, so `p == Node(...)` was satisfiable (a
+# false sxSat; `h_verification` asserted it).
+#
+# The encoding is a disjointness predicate per ref sort, `@pre_<T>: Ref_T ->
+# Bool`, "names an object of the walk's ENTRY state": every allocation is
+# `not @pre(f)` and every entry-state address is `@pre(a)`. It is the
+# watermark idea with the order dropped (only "before the walk / during it"
+# matters; allocations among themselves keep `assertFreshness`), so it stays
+# in EUF: one ground unary application per term, no arithmetic, no quantifier
+# (the G4 lesson). Entry-state addresses are not enumerated from a path's live
+# set, which is what missed the parameters; they are read off the query's own
+# terms at solve time (`refProvenanceRoots`, from `globalRoots`), which is
+# complete for every address a query can mention:
+#   * a constant of the entry state (`notePreExistingTerms`: each parameter's
+#     leaves, each global's entry value) is `@pre`;
+#   * a `select(A, i)` whose array `A` reaches, through `store`s and `ite`s,
+#     an entry-state array `B` (an input heap `heap_<key>`, noted by
+#     `mkHeapArrayVar`, or a parameter's seq / table backing) gives
+#     `@pre(i) -> @pre(select(B, i))` for a `Ref`-keyed `B` (a field of an
+#     entry object is an entry object or nil) and `@pre(select(B, i))` for an
+#     Int-keyed one, nested selects composing their guards. `B`'s entry value
+#     is what the read sees wherever no store on the path intervenes, and the
+#     array theory relates the two terms (`select(store(B, f, v), i)` is
+#     `select(B, i)` for `i != f`), so a field a SUT stored a fresh node into
+#     reads that node, and stays equal to it.
+# A term none of these covers (a havocked heap `heap_<k>@ep<n>`, an opaque
+# call's result, a pointer of unknown origin) gets no fact: it may well hold
+# an allocation, so leaving it free is the sound side. Every fact is true of
+# every real execution (the entry state predates the walk), so asserting it in
+# every query prunes no real input. `@pre(nil)` may hold (an entry ref may be
+# nil); an allocation is never nil (`assertFreshness`).
+#
+# Only the `new` arm's address is an allocation here: `walkAddrCell` /
+# `walkElemCell` mint a `ptr` to a frame local or an element with the same
+# `freshRef`, and such an address may lie inside the entry state (`addr s[i]`
+# of a parameter's seq), so it is not claimed apart from it.
+
+var allocatedNames {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-82. The names of the addresses `new` minted (`noteAllocation`).
+  ## A name in both sets is in neither. Reset per run.
+var preDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3FuncDecl]]
+  ## RFC-0016 INT-82. `@pre_<typeId>`, per ref sort, of the run's context.
+var provKinds {.threadvar.}:
+    tuple[ready: bool, select, store, ite, uninterp: int]
+  ## RFC-0016 INT-82. The linked Z3's decl kinds `refProvenanceRoots` reads,
+  ## off probe terms (`heapChainKinds`' discipline). Process-stable.
+
+proc ensureProvKinds() =
+  if provKinds.ready: return
+  let pc = probeContext()
+  let b = mkBoolVar(pc, "__int82_kind_probe_b")
+  let x = mkIntVar(pc, "__int82_kind_probe_x")
+  let arr = mkArrayVar[Z3Int, Z3Int](pc, "__int82_kind_probe_arr")
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(pc.raw, Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, a))))
+  provKinds = (ready: true, select: kindOf(select(arr, x).raw),
+               store: kindOf(checkedStore(pc, arr.raw, x.raw, x.raw)),
+               ite: kindOf(ite(b, x, x + mkInt(pc, 1)).raw),
+               uninterp: kindOf(x.raw))
+
+proc notePreExistingTerms*(ctx: Z3Context; asts: openArray[RawZ3Ast]) =
+  ## RFC-0016 INT-82. Record every uninterpreted constant in `asts` (an
+  ## entry value's terms: a parameter's, a global's entry value) as part of
+  ## the walk's entry state.
+  ensureProvKinds()
+  var seen: HashSet[int]
+  var stack = @asts
+  while stack.len > 0:
+    let t = stack.pop()
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    let app = Z3_to_app(ctx.raw, t)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    let d = Z3_get_app_decl(ctx.raw, app)
+    if n == 0:
+      if ord(Z3_get_decl_kind(ctx.raw, d)) == provKinds.uninterp:
+        preExistingNames.incl declName(ctx, d)
+      continue
+    for i in 0 ..< n: stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+
+proc noteAllocation*(ctx: Z3Context; newRef: Z3AnyAst) =
+  ## RFC-0016 INT-82. Record the address a `new` minted.
+  allocatedNames.incl declName(ctx, getAppDecl(newRef))
+
+proc refProvenanceRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0016 INT-82. The provenance facts of every `Ref` term `base`
+  ## reaches (the section comment above). Empty when the run allocated
+  ## nothing: no term then needs telling apart from the entry state.
+  if allocatedNames.len == 0: return
+  ensureProvKinds()
+  let kinds = provKinds
+  if preDecls.ctx != cast[pointer](ctx.raw):
+    preDecls = (ctx: cast[pointer](ctx.raw),
+                decls: initTable[string, RawZ3FuncDecl]())
+  var refSortOf: Table[int, string]          # sort id -> typeId
+  for typeId, s in currentRefSorts: refSortOf[sortId(ctx, s)] = typeId
+  proc refTypeOf(t: RawZ3Ast): string =
+    refSortOf.getOrDefault(sortId(ctx, sortOfRaw(ctx, t)), "")
+  proc pre(typeId: string; t: RawZ3Ast): Z3Bool =
+    if not preDecls.decls.hasKey(typeId):
+      preDecls.decls[typeId] = mkPinnedUnaryDecl(ctx, "@pre_" & typeId,
+        currentRefSorts[typeId], ctx.checkErr Z3_mk_bool_sort(ctx.raw))
+    var args = @[t]     # a HEAP seq (`rawApp1`'s Z3 4.15 hazard)
+    wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_app(ctx.raw, preDecls.decls[typeId], 1,
+      cast[ptr UncheckedArray[RawZ3Ast]](addr args[0])))
+  proc entryConst(name: string): bool =
+    name in preExistingNames and name notin allocatedNames
+  # An entry-state array reached by a term: the array term over entry
+  # constants only, and the indices (`Ref`-sorted) that must be entry
+  # addresses for its cells to be entry values.
+  type Root = tuple[arr: Z3AnyAst, guards: seq[Z3AnyAst]]
+  const maxRoots = 64   # a term past it keeps the first 64 (fewer facts: sound)
+  var memo: Table[int, seq[Root]]
+  proc roots(t: RawZ3Ast; level: int): seq[Root] =
+    if level > termWalkMaxDepth: return
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return
+    let id = astId(ctx, t)
+    if id in memo: return memo[id]
+    let app = Z3_to_app(ctx.raw, t)
+    let d = Z3_get_app_decl(ctx.raw, app)
+    let k = ord(Z3_get_decl_kind(ctx.raw, d))
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    template arg(i: int): RawZ3Ast = Z3_get_app_arg(ctx.raw, app, cuint(i))
+    if n == 0 and k == kinds.uninterp:
+      if entryConst(declName(ctx, d)):
+        result = @[(arr: wrap[Z3AnyAst](ctx, t), guards: newSeq[Z3AnyAst]())]
+    elif n == 3 and k == kinds.store:
+      result = roots(arg(0), level + 1)
+    elif n == 3 and k == kinds.ite:
+      result = roots(arg(1), level + 1)
+      for r in roots(arg(2), level + 1):
+        if result.len < maxRoots: result.add r
+    elif n == 2 and k == kinds.select and
+         getSortKind(ctx, sortOfRaw(ctx, t)) == skArray:
+      let idx = arg(1)
+      let idxRef = refTypeOf(idx).len > 0
+      for r in roots(arg(0), level + 1):
+        var g = r.guards
+        if idxRef: g.add wrap[Z3AnyAst](ctx, idx)
+        result.add (arr: wrap[Z3AnyAst](ctx, checkedSelect(ctx, r.arr.raw, idx)),
+                    guards: g)
+    memo[id] = result
+  var seen, emitted: HashSet[int]
+  var facts: seq[Z3Bool]
+  proc emit(f: Z3Bool) =
+    let id = astId(ctx, f.raw)
+    if id notin emitted:
+      emitted.incl id
+      facts.add f
+  var stack: seq[RawZ3Ast]
+  for r in base: stack.add r.raw
+  while stack.len > 0:
+    let t = stack.pop()
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    let app = Z3_to_app(ctx.raw, t)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    let tid = refTypeOf(t)
+    if tid.len > 0:
+      let d = Z3_get_app_decl(ctx.raw, app)
+      let k = ord(Z3_get_decl_kind(ctx.raw, d))
+      if n == 0 and k == kinds.uninterp:
+        let name = declName(ctx, d)
+        if name in allocatedNames and name notin preExistingNames:
+          emit(not pre(tid, t))
+        elif entryConst(name):
+          emit(pre(tid, t))
+      elif n == 2 and k == kinds.select:
+        let idx = Z3_get_app_arg(ctx.raw, app, 1)
+        let idxRef = refTypeOf(idx)
+        for r in roots(Z3_get_app_arg(ctx.raw, app, 0), 0):
+          var g = mkBool(ctx, true)
+          for gi in r.guards: g = g and pre(refTypeOf(gi.raw), gi.raw)
+          if idxRef.len > 0: g = g and pre(idxRef, idx)
+          # wrapped (inc-ref'd) before `pre` may make the decl: an unheld
+          # result lives only until Z3's next call (`mkPinnedUnaryDecl`)
+          let cell = wrap[Z3AnyAst](ctx, checkedSelect(ctx, r.arr.raw, idx))
+          emit(implies(g, pre(tid, cell.raw)))
+    for i in 0 ..< n: stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+  facts
+
+
 # ---- the per-run reset ------------------------------------------------------
 
 proc resetHeapModel*() =
   ## RFC-0016 review D3c-6. The per-run reset of the run-state threadvars of
   ## this module, called by `resetSymexRunState`. `storeDeclKind`,
-  ## `selectDeclKind`, `constArrayDeclKind`, `iteDeclKind` and `heapChainKinds`
+  ## `selectDeclKind`, `constArrayDeclKind`, `iteDeclKind`, `heapChainKinds` and `provKinds`
   ## are the linked Z3's decl kinds, the same in every run and read in a probe
   ## context, so they are process-stable and not reset (`probeContext`).
   allocEnumZeroLegal = false
@@ -1973,6 +2178,9 @@ proc resetHeapModel*() =
   intHeapIsInt = false
   intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()
   intCellFactSeen = initHashSet[uint]()
+  preExistingNames = initHashSet[string]()     ## RFC-0016 INT-82
+  allocatedNames = initHashSet[string]()
+  preDecls = (ctx: nil, decls: initTable[string, RawZ3FuncDecl]())
 
 # ---- the value merge (RFC-0016 review R2-4) ---------------------------------
 # `iteSV` and what it rests on moved down from `runtime.nim`: it needs the

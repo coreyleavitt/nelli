@@ -751,7 +751,7 @@ calls K9d-9 deferred here are pinned too: `phase15_rereview_drains`' twelve
 `finallyHeapWrites`. The census ceiling 84 -> 37.
 
 Calls left as `symexFind`: `h_verification`'s `param_ctor_eq_hit` and
-`param_ctor_write_hit` (INT-82, a false sxSat); `h_containers`'
+`param_ctor_write_hit` (INT-82, a false sxSat; pinned sxUnsat once INT-82 closed); `h_containers`'
 `setNodeGuard` (a `HashSet` of a ref with no `hash` has no native value).
 Suites not converted: `rfc0005_s8bn_remainder_d` and `_e` (INT-81; `_e`'s
 `CMid8`, a descendant of a case object, also fails to compile when copied by

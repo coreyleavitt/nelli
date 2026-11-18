@@ -822,6 +822,12 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 INT-82 (436->440, provisional; 437-439 are reserved for
+  ##   in-flight work): an allocation (`new`, `T(...)`) is distinct from
+  ##   every object of the walk's entry state -- a ref parameter, a ref
+  ##   reached through one's fields or seq / table elements, a global's
+  ##   entry value -- (`refProvenanceRoots`, heap_model.nim). `p == n` for a
+  ##   caller's `p` and a fresh `n` was a false `sxSat`. No key bytes change.
   ## - RFC-0016 INT-77 (426->436; 427-435 are reserved for in-flight
   ##   work): a float `range` (`range[0.0 .. 1.0]`, `range[-1.5'f32 ..
   ##   2.5'f32]`, anonymous or named) is classified (it did not compile:
@@ -840,7 +846,7 @@ const renderAsChoicesVersion* = "12"
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "436"
+const symexWalkerVersion* = "440"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

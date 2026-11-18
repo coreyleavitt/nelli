@@ -55,7 +55,8 @@ const
   ## The decl-kind caches of the linked Z3: the same in every run, read in a
   ## probe context (`probeContext`), so `resetHeapModel` leaves them alone.
   hmProcessStable = ["storeDeclKind", "selectDeclKind", "constArrayDeclKind",
-                     "iteDeclKind", "heapChainKinds"]
+                     "iteDeclKind", "heapChainKinds",
+                     "provKinds"]   # RFC-0016 INT-82
 
   heapPinned = [
     "AddrCellEntry", "Degrade", "ElemCell", "Path", "PtrLeafAim",
@@ -795,7 +796,7 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
     for l in hm.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 15
+    check tvs.len == 19   # RFC-0016 INT-82: +4 (provenance)
     for n in tvs:
       checkpoint n
       if n in hmProcessStable:

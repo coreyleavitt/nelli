@@ -44,20 +44,17 @@ proc transitiveWriteUnsat(p, q, r: Node) =
       symexTarget("transitive_unsat")
 
 # =============================================================================
-# 2. Mixed param <-> constructed-node aliasing. `p` is a caller PARAM (a free
-# `Ref_Node`-sorted symbol with no address history); `n` is a LOCALLY
-# constructed node (`Node(val: x, next: nil)`, Step C's real heap
-# construction, which allocates via the same `freshRef`/`assertFreshness`
-# machinery as `new`). `assertFreshness` (runtime_heap.nim) only asserts `n`
-# distinct from `nil` and from every PRIOR *live* ref of this type ON THIS
-# PATH (`path.liveRefs`) — bare caller params are never registered there (no
-# universal quantifier over the ref sort is ever asserted — the G4 MBQI-hang
-# lesson). So `p` (an unconstrained free symbol of the SAME uninterpreted
-# `Ref_Node` sort) is NOT excluded from coinciding with `n`'s freshly-minted
-# address: `p == n` is genuinely reachable, and so is `p != n` — a real,
-# two-sided verdict, not a one-sided degrade. When `p == n` is forced, a
-# write through either is observable through the other, with a matching
-# UNSAT soundness companion — real identity, not a free/unconstrained value.
+# 2. Mixed param <-> constructed-node aliasing. `p` is a caller PARAM;
+# `n` is a LOCALLY constructed node (`Node(val: x, next: nil)`, Step C's real
+# heap construction, through the `new` arm's `freshRef`/`assertFreshness`).
+# Natively a fresh allocation is distinct from every object that existed
+# before it, so `p == n` is false on every input and `p != n` true on every
+# one. This section once asserted `p == n` reachable (`assertFreshness` kept
+# `n` apart from the path's own allocations only, never from a parameter):
+# a false sxSat, RFC-0016 INT-82, whose witnesses did not hit natively. The
+# walker now keeps every allocation apart from the entry state
+# (`refProvenanceRoots`, heap_model.nim), so the two `p == n` targets are
+# sxUnsat and the forced-write companion is unsat for the same reason.
 # =============================================================================
 
 proc paramConstructedEqHit(p: Node, x: int) =
@@ -252,19 +249,17 @@ suite "Cluster H verification — identity transitivity / composition":
 
 suite "Cluster H verification — mixed param<->constructed-node aliasing":
 
-  test "p == n (param vs freshly-constructed node) is reachable (sxSat)":
-    # symexFind: a false sxSat, INT-82 (a fresh node is never a caller ref)
-    let r = symexFind(paramConstructedEqHit, tLabel("param_ctor_eq_hit"))
-    check r.status == sxSat
+  test "p == n (param vs freshly-constructed node) is unreachable (sxUnsat, INT-82)":
+    let r = pinFind(paramConstructedEqHit, tLabel("param_ctor_eq_hit"))
+    check r.status == sxUnsat
 
-  test "p != n is ALSO reachable (freshness only excludes nil/prior live refs, not free params)":
+  test "p != n is reachable":
     let r = pinFind(paramConstructedNeqHit, tLabel("param_ctor_neq_hit"))
     check r.status == sxSat
 
-  test "forced p == n: a write through n is observed through p (sxSat)":
-    # symexFind: a false sxSat, INT-82 (a fresh node is never a caller ref)
-    let r = symexFind(paramConstructedForcedWriteHit, tLabel("param_ctor_write_hit"))
-    check r.status == sxSat
+  test "p == n never holds, so no write through n is seen through p (sxUnsat, INT-82)":
+    let r = pinFind(paramConstructedForcedWriteHit, tLabel("param_ctor_write_hit"))
+    check r.status == sxUnsat
 
   test "forced p == n UNSAT soundness: p.val != 99 after the write is impossible":
     let r = pinFind(paramConstructedForcedWriteUnsat, tLabel("param_ctor_write_unsat"))

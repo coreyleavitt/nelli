@@ -816,8 +816,14 @@ const renderAsChoicesVersion* = "12"
   ##   a built search language that is wrong (PRC-33 item 6b; an `skNoOcc`
   ##   one could be empty); the search now declines instead. No key bytes
   ##   change.
+  ## - RFC-0016 F2 hotfix (401->412; 402-411 are reserved for in-flight W4
+  ##   work): a SKIP:NAME that can run without its MARK under
+  ##   `(*LIMIT_RECURSION=n)` declines (`pcre_select.buildNfa`, the concrete
+  ##   call too). Its re-run's depths were not modelled, and a call on a
+  ##   literal or pinned subject read -21 for -1 or a match and the other
+  ##   way round (SND-16); such a call is now unknown. No key bytes change.
 
-const symexWalkerVersion* = "401"
+const symexWalkerVersion* = "412"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

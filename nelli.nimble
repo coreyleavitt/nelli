@@ -1732,6 +1732,9 @@ task test, "Run the test suite":
             # RFC-0016 F1: searchDfa sees a verifier declining on its last
             # state.
             "tsymex_0016_f1_searchdfa_vok",
+            # RFC-0016 F2: a SKIP:NAME without its MARK under
+            # LIMIT_RECURSION declines (SND-16).
+            "tsymex_0016_f2hot_skiplimit",
             # RFC-0016 K10a-concolic: the flip solve keeps the prefix defined.
             "tsymex_0016_k10ac_concolic",
             "tsymex_0016_k10ac_concolic_checksoff",

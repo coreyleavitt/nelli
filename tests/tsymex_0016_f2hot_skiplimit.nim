@@ -1,12 +1,22 @@
-## RFC-0016 S8co hotfix probe (PRC-33): a regex call on a literal or pinned
-## subject, with a SKIP:NAME pattern under an in-pattern limit, against native
-## PCRE 8.37. Each call's value is stated natively first; the walker must
-## find the native value reachable and the value it used to compute refuted.
+## RFC-0016 PRC-33 hotfix (SND-16): a regex call on a literal or pinned
+## subject, with a SKIP:NAME pattern under an in-pattern limit, against
+## native PCRE 8.37. Each call's value is stated natively first.
 ## Red on main at 3ed885e2 (walker 401) for every case but p10m8: the walker
-## reads `find` as -21 where native returns -1 or 0, and as -1 or 0 where
-## native stops at LIMIT_RECURSION (-21).
-import std/[unittest, re]
+## read `find` as -21 where native returns -1 or 0, and as -1 or 0 where
+## native stops at LIMIT_RECURSION (-21) -- both literal and pinned queries
+## answered the wrong `sxSat` / `sxUnsat`.
+##
+## The fix is a decline, not a model: a SKIP:NAME that can run without its
+## MARK under `(*LIMIT_RECURSION=n)` is unmodelled (`buildNfa` is not `ok`,
+## the concrete call too), so for those cases the expectation is "not a
+## wrong verdict": the native value is never refuted (`!= sxUnsat`) and the
+## value main computed is never reached (`!= sxSat`); the walker answers
+## unknown. Under `(*LIMIT_MATCH=n)` (p10m8) the call stays modelled and
+## must still agree exactly.
+import std/[unittest, re, strutils]
 import nelli/symex
+import nelli/smt/pcre_syntax
+import nelli/smt/pcre_select
 
 proc lit_p6r6_nat() =
   let s = "acab"
@@ -112,7 +122,27 @@ template verdict(f: untyped; l: string): untyped =
   echo "  ", l, ": ", res.status
   res.status
 
-suite "hotfix probe: SKIP:NAME under a limit on a concrete subject":
+suite "hotfix: SKIP:NAME under a limit on a concrete subject":
+  test "the walker's version floor (SND-16)":
+    check parseInt(symexWalkerVersion) >= 412
+
+  test "a SKIP:NAME without its MARK under LIMIT_RECURSION declines":
+    for q in ["(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+",
+              "(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d",
+              "(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?",
+              "(*LIMIT_RECURSION=2)a(*SKIP:N)(*SKIP:M)c|ab(*SKIP)d|.",
+              "(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+"]:
+      let pr = parsePcre(q)
+      check pr.status == psOk
+      check not buildNfa(pr, limitRoom = 0).ok
+      check not buildNfa(pr, limitRoom = 0, concrete = true).ok
+    # LIMIT_MATCH stays modelled, and the concrete call agrees with native.
+    let pr = parsePcre("(*LIMIT_MATCH=8)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?")
+    let nc = buildNfa(pr, limitRoom = 0, concrete = true)
+    check nc.ok
+    check pcreExec(nc, "aca", 0, false)[0] == 1
+    check pcreExec(nc, "aca", 0, false)[1] == 0
+
   test "native":
     check "acab".find(re"(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+") == -1
     check "aca".find(re"(*LIMIT_MATCH=8)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?") == 0
@@ -122,31 +152,31 @@ suite "hotfix probe: SKIP:NAME under a limit on a concrete subject":
     check "a".find(re"(*LIMIT_RECURSION=2)a(*SKIP:N)(*SKIP:M)c|ab(*SKIP)d|.") == -21
     check "aca".find(re"(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+") == -21
   test "the walker agrees with native":
-    check verdict(lit_p6r6_nat, "lit_p6r6_nat") == sxSat
-    check verdict(lit_p6r6_bad, "lit_p6r6_bad") == sxUnsat
-    check verdict(pin_p6r6_nat, "pin_p6r6_nat") == sxSat
-    check verdict(pin_p6r6_bad, "pin_p6r6_bad") == sxUnsat
+    check verdict(lit_p6r6_nat, "lit_p6r6_nat") != sxUnsat
+    check verdict(lit_p6r6_bad, "lit_p6r6_bad") != sxSat
+    check verdict(pin_p6r6_nat, "pin_p6r6_nat") != sxUnsat
+    check verdict(pin_p6r6_bad, "pin_p6r6_bad") != sxSat
     check verdict(lit_p10m8_nat, "lit_p10m8_nat") == sxSat
     check verdict(lit_p10m8_bad, "lit_p10m8_bad") == sxUnsat
     check verdict(pin_p10m8_nat, "pin_p10m8_nat") == sxSat
     check verdict(pin_p10m8_bad, "pin_p10m8_bad") == sxUnsat
-    check verdict(lit_p11r7a_nat, "lit_p11r7a_nat") == sxSat
-    check verdict(lit_p11r7a_bad, "lit_p11r7a_bad") == sxUnsat
-    check verdict(pin_p11r7a_nat, "pin_p11r7a_nat") == sxSat
-    check verdict(pin_p11r7a_bad, "pin_p11r7a_bad") == sxUnsat
-    check verdict(lit_p11r7b_nat, "lit_p11r7b_nat") == sxSat
-    check verdict(lit_p11r7b_bad, "lit_p11r7b_bad") == sxUnsat
-    check verdict(pin_p11r7b_nat, "pin_p11r7b_nat") == sxSat
-    check verdict(pin_p11r7b_bad, "pin_p11r7b_bad") == sxUnsat
-    check verdict(lit_p10r2_nat, "lit_p10r2_nat") == sxSat
-    check verdict(lit_p10r2_bad, "lit_p10r2_bad") == sxUnsat
-    check verdict(pin_p10r2_nat, "pin_p10r2_nat") == sxSat
-    check verdict(pin_p10r2_bad, "pin_p10r2_bad") == sxUnsat
-    check verdict(lit_p5r2_nat, "lit_p5r2_nat") == sxSat
-    check verdict(lit_p5r2_bad, "lit_p5r2_bad") == sxUnsat
-    check verdict(pin_p5r2_nat, "pin_p5r2_nat") == sxSat
-    check verdict(pin_p5r2_bad, "pin_p5r2_bad") == sxUnsat
-    check verdict(lit_p6r5_nat, "lit_p6r5_nat") == sxSat
-    check verdict(lit_p6r5_bad, "lit_p6r5_bad") == sxUnsat
-    check verdict(pin_p6r5_nat, "pin_p6r5_nat") == sxSat
-    check verdict(pin_p6r5_bad, "pin_p6r5_bad") == sxUnsat
+    check verdict(lit_p11r7a_nat, "lit_p11r7a_nat") != sxUnsat
+    check verdict(lit_p11r7a_bad, "lit_p11r7a_bad") != sxSat
+    check verdict(pin_p11r7a_nat, "pin_p11r7a_nat") != sxUnsat
+    check verdict(pin_p11r7a_bad, "pin_p11r7a_bad") != sxSat
+    check verdict(lit_p11r7b_nat, "lit_p11r7b_nat") != sxUnsat
+    check verdict(lit_p11r7b_bad, "lit_p11r7b_bad") != sxSat
+    check verdict(pin_p11r7b_nat, "pin_p11r7b_nat") != sxUnsat
+    check verdict(pin_p11r7b_bad, "pin_p11r7b_bad") != sxSat
+    check verdict(lit_p10r2_nat, "lit_p10r2_nat") != sxUnsat
+    check verdict(lit_p10r2_bad, "lit_p10r2_bad") != sxSat
+    check verdict(pin_p10r2_nat, "pin_p10r2_nat") != sxUnsat
+    check verdict(pin_p10r2_bad, "pin_p10r2_bad") != sxSat
+    check verdict(lit_p5r2_nat, "lit_p5r2_nat") != sxUnsat
+    check verdict(lit_p5r2_bad, "lit_p5r2_bad") != sxSat
+    check verdict(pin_p5r2_nat, "pin_p5r2_nat") != sxUnsat
+    check verdict(pin_p5r2_bad, "pin_p5r2_bad") != sxSat
+    check verdict(lit_p6r5_nat, "lit_p6r5_nat") != sxUnsat
+    check verdict(lit_p6r5_bad, "lit_p6r5_bad") != sxSat
+    check verdict(pin_p6r5_nat, "pin_p6r5_nat") != sxUnsat
+    check verdict(pin_p6r5_bad, "pin_p6r5_bad") != sxSat

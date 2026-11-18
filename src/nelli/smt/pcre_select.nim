@@ -1033,6 +1033,20 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
                    b.costWhy
       return
   result.classifySkipNames()
+  if result.costs and not boundOnly and result.hasNeverSkip and
+     result.recLimit < high(int):
+    # RFC-0016 PRC-33 hotfix (SND-16): a SKIP:NAME that can run without its
+    # MARK re-runs the attempt, and under `(*LIMIT_RECURSION=n)` the re-run's
+    # depths are not modelled: a SKIP:NAME terminal a decided item cut left
+    # its continuation one frame too deep (`rerunCosts`), and a run that
+    # reached the limit before the re-run went on. pcre_exec.c stops with
+    # -21 where the call read -1 or a match, and the other way round:
+    # `(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?` on `a`, and
+    # `(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+` on `acab`.
+    result.ok = false
+    result.why = "match()'s call accounting is not modelled for a " &
+                 "SKIP:NAME without its MARK under LIMIT_RECURSION"
+    return
   # RFC-0005 S8bt: an attempt can leave `ignore_skip_arg` set for the next
   # one when a SKIP:NAME without its MARK can re-run it and the attempt can
   # then end by a SKIP's jump or past a CRLF's LF.

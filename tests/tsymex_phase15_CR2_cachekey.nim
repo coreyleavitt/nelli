@@ -1274,7 +1274,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## 401->414.
     ## RFC-0016 PRC-35 (`repr` of a string, `=dup` through a user hook;
     ## 415 reserved): 414->416.
-    check symexWalkerVersion == "416"
+    ## RFC-0016 PRC-44 (`=dup` at a sink position its source is surely read
+    ## after; 417 reserved): 416->418.
+    check symexWalkerVersion == "418"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

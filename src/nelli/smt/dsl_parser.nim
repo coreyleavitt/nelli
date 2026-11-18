@@ -1199,6 +1199,11 @@ type
                                    ## narrowed branch (ADR-0029's recorded
                                    ## "does not cross proc boundaries"
                                    ## boundary).
+    dupBody*: NimNode              ## RFC-0016 PRC-44. The routine body
+                                   ## being walked, which `parseDupSite`
+                                   ## scans on its first sink position.
+    dupScanned*: bool              ## RFC-0016 PRC-44: `dupSites` is read.
+    dupSites*: HashSet[string]     ## RFC-0016 PRC-44 (`dupHookSites`).
     stringBackedParams*: seq[NimNode]
                                    ## Round-6 B1 (ADR-0028 Leg 1); RE-KEYED
                                    ## round-6 R4 (findings W1/N8/N2). The
@@ -1511,6 +1516,12 @@ type
                                    ## (`regexLiteralOfCtx`), exactly as if it
                                    ## had been written there: the constructor
                                    ## already ran, and a `let` cannot change.
+    dupInHook*: bool               ## RFC-0016 PRC-44: the argument of a
+                                   ## `=dup` call `parseDupSite` builds.
+    dupModelled*: HashSet[string]  ## RFC-0016 PRC-44: the sink positions
+                                   ## that run the hook (`dupSiteKey`).
+    dupUnprobed*: seq[NimNode]     ## RFC-0016 PRC-44: types whose hooks no
+                                   ## probe has read (`dupHookProbes`).
     procScoped*: ProcScopedCollectors
                                    ## D4 (design finding, accepted). The four
                                    ## former individually-scoped collector
@@ -3042,6 +3053,8 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
 # ---- Forward decls -----------------------------------------------------------
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
+proc parseDupSite(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr
+  ## RFC-0016 PRC-44 (fwd; defined with the route proof's `dupScan`)
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
 proc parseStmtBare(n: NimNode, ctx: ParseCtx): IRStmt
 proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
@@ -11863,6 +11876,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let mg = parseMGetOrPut(n, preamble, ctx)
     if mg != nil: return mg
   if isOfTest(n): return parseOfTest(n, preamble, ctx)   ## RFC-0005 S8bn
+  # RFC-0016 PRC-44: a local at a sink position that runs its type's `=dup`.
+  if n.kind == nnkSym:
+    let d = parseDupSite(n, preamble, ctx)
+    if d != nil: return d
   case n.kind
   of nnkNilLit:
     # RFC-0005 S8bn (item 7). A `nil` literal in any typed position (`let
@@ -24431,6 +24448,8 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # own body too, not just the top-level entry.
   ctx.procScoped.pairLoopCounterConsumedAfter = collectPairLoopCounterConsumedAfter(monoImpl)
   collectElemAddrs(monoImpl, ctx.procScoped.elemAddrs)   ## RFC-0005 S8ca
+  if monoImpl.kind in RoutineNodes and monoImpl.len > 6:   ## RFC-0016 PRC-44
+    ctx.procScoped.dupBody = monoImpl[6]
   # Params
   var params: seq[IRParam]
   let inst = instantiatedFormalTypes(instTy)   ## RFC-0005 S8e
@@ -24589,6 +24608,10 @@ type
                               ## the parse named (`seenModuleGlobals`).
     globalsNimNode*: NimNode  ## RFC-0005 S8as. Emit-time AST of `globals`,
                               ## threaded into `SymexProgram.globals`.
+    dupModelled*: HashSet[string]
+                              ## RFC-0016 PRC-44 (`ParseCtx.dupModelled`).
+    dupUnprobed*: seq[NimNode]
+                              ## RFC-0016 PRC-44 (`dupHookProbes`).
 
 func isLiteralInit(v: NimNode): bool =
   ## RFC-0005 S8as. `v` is a literal, possibly behind the conversion Nim
@@ -24912,6 +24935,8 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # mid-body-walk) decides whether to apply the closed form at all.
   ctx.procScoped.pairLoopCounterConsumedAfter = collectPairLoopCounterConsumedAfter(procDef)
   collectElemAddrs(procDef, ctx.procScoped.elemAddrs)   ## RFC-0005 S8ca
+  if procDef.kind in RoutineNodes and procDef.len > 6:   ## RFC-0016 PRC-44
+    ctx.procScoped.dupBody = procDef[6]
   var params: seq[IRParam]
   var paramsNimSeq = newTree(nnkBracket)
   for i in 1 ..< formalParams.len:
@@ -25017,6 +25042,8 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   result.procsNimNode = emitProcs(ctx.procs)
   result.body = bodyIR
   result.procs = ctx.procs
+  result.dupModelled = ctx.dupModelled   ## RFC-0016 PRC-44
+  result.dupUnprobed = ctx.dupUnprobed
   result.userExnHierarchyNimNode = emitStrStrTable(ctx.userExnHierarchy)
   # RFC-0005 S8as: after every routine is parsed, so every global the walk
   # can reach has been named.
@@ -25089,6 +25116,7 @@ type
     nested: seq[NimNode]   ## W3-z R11: the nested routines of the routines read
     routines: seq[NimNode]  ## PRC-35: every routine read (`dupSinkSites`)
     dupHooks: seq[tuple[key, why: string]]  ## PRC-35: a `=dup` not the plain copy
+    dupModelled: HashSet[string]  ## PRC-44: the sink positions the parse ran the hook at
 
 var routeBodies {.compileTime.}: Table[string, RouteBody]
   ## Per routine, so a file's entry macros read each routine once.
@@ -25730,39 +25758,186 @@ type
     arg: NimNode
     event: int       ## its own event, or -1 (not a local symbol)
     inLoop: bool
+    inRoutine: bool  ## in a nested routine
+    copies: bool     ## PRC-44: the compiler copies a value here when it is not
+                     ## the last read (a `sink` formal, an element of a
+                     ## constructor that initialises a local)
+    live: bool       ## PRC-44: a read of its source is reachable from it
   DupScan = object
-    key: string
+    key: string           ## "" (PRC-44): every sink position
     events: seq[DupEvent]
     sites: seq[DupSite]
     fresh: seq[NimNode]   ## locals declared here with a fresh value
+    alive: seq[int]       ## PRC-44: the sites a path from which reaches here
+    replay: bool          ## PRC-44: a loop's back edge, rescanned for reads only
+    routines: int         ## nested routines the scan is in
+    initCtor: bool        ## PRC-44: the node scanned next initialises a local
+
+# RFC-0016 PRC-44: where a sink position runs the hook. Natively (Nim 2.2.10,
+# c and cpp) the compiler runs `=dup` at a sink position when a read of its
+# source is reachable from it on its control-flow graph: a read in a branch
+# not taken, after an `if` holding a `return`, after a `raise` under an `if`,
+# in a later argument of the same call, and the site itself again through a
+# loop's back edge (a `while`, a `for` over `..<`) all run it. A read no path
+# reaches does not (an early `return`, a loop body ending in `break`, a `for`
+# over an iterator that yields once, which is no loop once inlined). So a site
+# is the hook's when the scan proves a path to a read: the scan follows the
+# paths forward (`alive`), and a construct that may end every path it is not
+# sure of ends them all (a jump, a `{.noreturn.}` call, a constant condition,
+# a loop over an iterator not listed, an `except` branch), which only loses a
+# site to the decline. A constructor's element is a sink position only when
+# the constructor initialises a local: passed to a formal that is not `sink`,
+# it is borrowed and no hook runs.
+
+const dupLoopIters = ["..<", "..", "countup", "countdown", "items", "pairs",
+                      "mitems", "mpairs"]
+  ## PRC-44: `system`'s iterators whose body yields in a loop, so a `for` over
+  ## one has a back edge and an exit.
+
+proc dupConst(c: NimNode): bool =
+  ## A condition the compiler may fold: a literal or a constant.
+  c.kind in nnkLiterals or
+    (c.kind == nnkSym and symKind(c) in {nskConst, nskEnumField})
+
+proc dupMerge(a: var seq[int]; b: seq[int]) =
+  for x in b:
+    if x notin a: a.add x
 
 proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
              nextStmt: var int) =
   ## Pre-order: every read of a local, and every sink position a value of
-  ## the hook's type reaches.
-  proc site(s: var DupScan; call, arg: NimNode; loop: bool) =
-    if not dupMayHold(arg.getTypeInst, s.key): return
-    s.sites.add DupSite(call: call, arg: arg, event: -1, inLoop: loop)
+  ## the hook's type reaches. PRC-44: and which reads each site reaches.
+  proc site(s: var DupScan; call, arg: NimNode; loop, copies: bool) =
+    if s.replay: return
+    if s.key.len > 0 and not dupMayHold(arg.getTypeInst, s.key): return
+    s.sites.add DupSite(call: call, arg: arg, event: -1, inLoop: loop,
+                        inRoutine: s.routines > 0, copies: copies)
+  # Each copy of `s.alive` below is a `var`: the VM aliases a `let` of a
+  # field (S8ab), and the copy would follow the seq it was taken from.
+  let isInit = s.initCtor
+  s.initCtor = false
   case n.kind
   of nnkSym:
     if symKind(n) in {nskVar, nskLet}:
-      s.events.add DupEvent(sym: n, stmt: stmt, site: -1, unsafe: unsafe)
+      for k in s.alive:
+        if s.events[s.sites[k].event].sym == n: s.sites[k].live = true
+      if not s.replay:
+        s.events.add DupEvent(sym: n, stmt: stmt, site: -1, unsafe: unsafe)
     return
   of RoutineNodes:
     # A nested routine may run any number of times, whenever it is called: a
     # sink position in it is as one in a loop, and a read of a local in it
-    # is not a plain read.
+    # is not a plain read. No path of the routine's runs into it.
+    var saved = s.alive
+    s.alive = @[]
+    inc s.routines
     for c in n: dupScan(c, s, stmt, true, true, nextStmt)
+    dec s.routines
+    s.alive = saved
     return
   of nnkStmtList, nnkStmtListExpr:
     for c in n:
       inc nextStmt
       dupScan(c, s, nextStmt, loop, unsafe, nextStmt)
     return
-  of nnkWhileStmt, nnkForStmt:
-    for c in n: dupScan(c, s, stmt, true, unsafe, nextStmt)
+  of nnkWhileStmt:
+    dupScan(n[0], s, stmt, true, unsafe, nextStmt)
+    var exit = s.alive
+    for i in 1 ..< n.len: dupScan(n[i], s, stmt, true, unsafe, nextStmt)
+    var back = s.alive
+    if back.len > 0:
+      # The back edge: the condition and the body again, from the body's end.
+      let wasReplay = s.replay
+      s.replay = true
+      s.alive = back
+      for c in n: dupScan(c, s, stmt, true, unsafe, nextStmt)
+      s.replay = wasReplay
+    s.alive = if dupConst(n[0]): @[] else: exit
+    if not dupConst(n[0]): dupMerge(s.alive, back)
     return
-  of nnkDefer, nnkFinally, nnkAddr, nnkHiddenAddr:
+  of nnkForStmt:
+    let iter = n[^2]
+    for i in 0 ..< n.len - 1: dupScan(n[i], s, stmt, true, unsafe, nextStmt)
+    var entry = s.alive
+    dupScan(n[^1], s, stmt, true, unsafe, nextStmt)
+    let known = iter.kind in {nnkCall, nnkCommand, nnkInfix} and iter.len > 0 and
+      iter[0].kind == nnkSym and symKind(iter[0]) == nskIterator and
+      macros.strVal(iter[0]) in dupLoopIters and isStdlibDecl(iter[0])
+    var back = s.alive
+    if known and back.len > 0:
+      let wasReplay = s.replay
+      s.replay = true
+      s.alive = back
+      dupScan(n[^1], s, stmt, true, unsafe, nextStmt)
+      s.replay = wasReplay
+    if known:
+      s.alive = entry
+      dupMerge(s.alive, back)
+    else:
+      s.alive = @[]
+    return
+  of nnkIfStmt, nnkIfExpr, nnkWhenStmt:
+    var folds = false
+    for br in n:
+      if br.kind in {nnkElifBranch, nnkElifExpr} and br.len > 0 and
+         dupConst(br[0]):
+        folds = true
+    var outs: seq[int]
+    var hasElse = false
+    for br in n:
+      if br.kind in {nnkElifBranch, nnkElifExpr} and br.len == 2:
+        dupScan(br[0], s, stmt, loop, unsafe, nextStmt)
+        var afterCond = s.alive
+        if folds: s.alive = @[]
+        dupScan(br[1], s, stmt, loop, unsafe, nextStmt)
+        dupMerge(outs, s.alive)
+        s.alive = afterCond
+      else:
+        hasElse = true
+        if folds: s.alive = @[]
+        for c in br: dupScan(c, s, stmt, loop, unsafe, nextStmt)
+        dupMerge(outs, s.alive)
+    if not hasElse: dupMerge(outs, s.alive)
+    s.alive = if folds: @[] else: outs
+    return
+  of nnkCaseStmt:
+    dupScan(n[0], s, stmt, loop, unsafe, nextStmt)
+    let folds = dupConst(n[0])
+    var entry = if folds: @[] else: s.alive
+    var outs: seq[int]
+    for i in 1 ..< n.len:
+      s.alive = entry
+      for c in n[i]: dupScan(c, s, stmt, loop, unsafe, nextStmt)
+      dupMerge(outs, s.alive)
+    # No `else`: the branches cover every value, so no path skips them all.
+    s.alive = if folds: @[] else: outs
+    return
+  of nnkTryStmt:
+    dupScan(n[0], s, stmt, loop, unsafe, nextStmt)
+    var outs = s.alive
+    for i in 1 ..< n.len:
+      if n[i].kind == nnkFinally:
+        var saved = s.alive
+        dupScan(n[i], s, stmt, loop, unsafe, nextStmt)
+        s.alive = saved
+      else:
+        # Which call raises is not followed: no path is taken into it.
+        s.alive = @[]
+        for c in n[i]: dupScan(c, s, stmt, loop, unsafe, nextStmt)
+        dupMerge(outs, s.alive)
+    s.alive = outs
+    return
+  of nnkReturnStmt, nnkRaiseStmt, nnkBreakStmt, nnkContinueStmt:
+    for c in n: dupScan(c, s, stmt, loop, unsafe, nextStmt)
+    s.alive = @[]
+    return
+  of nnkDefer, nnkFinally:
+    var saved = s.alive
+    s.alive = @[]
+    for c in n: dupScan(c, s, stmt, loop, true, nextStmt)
+    s.alive = saved
+    return
+  of nnkAddr, nnkHiddenAddr:
     for c in n: dupScan(c, s, stmt, loop, true, nextStmt)
     return
   of nnkAsgn, nnkFastAsgn, nnkSinkAsgn:
@@ -25777,7 +25952,10 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
           symKind(init[0]) in {nskProc, nskFunc} and
           init.typeKind notin {ntyVar, ntyNone}):
         s.fresh.add n[0]
-    if n.len == 3: dupScan(n[2], s, stmt, loop, unsafe, nextStmt)
+    if n.len == 3:
+      s.initCtor = true
+      dupScan(n[2], s, stmt, loop, unsafe, nextStmt)
+      s.initCtor = false
     return
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit:
     if n.len > 0:
@@ -25788,27 +25966,37 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
           for _ in 0 ..< ty[0][i].len - 2: formals.add ty[0][i][^2]
         for i in 1 ..< n.len:
           let f = if i - 1 < formals.len: formals[i - 1] else: nil
-          if f.isNil or cgIsSink(f): s.site(n, n[i], loop)
+          if f.isNil or cgIsSink(f): s.site(n, n[i], loop, not f.isNil)
       else:
         # k2: fail-closed: a callee whose formals cannot be read may sink
         # any argument.
-        for i in 1 ..< n.len: s.site(n, n[i], loop)
+        for i in 1 ..< n.len: s.site(n, n[i], loop, false)
+      if n.len == 3 and n[0].kind == nnkSym and dupConst(n[1]) and
+         macros.strVal(n[0]) in ["and", "or"]:
+        # The right operand may be folded away: no path is taken into it.
+        for i in 0 ..< 2: dupScan(n[i], s, stmt, loop, unsafe, nextStmt)
+        var saved = s.alive
+        s.alive = @[]
+        dupScan(n[2], s, stmt, loop, unsafe, nextStmt)
+        s.alive = saved
+        return
   of nnkObjConstr:
     for i in 1 ..< n.len:
-      if n[i].kind == nnkExprColonExpr: s.site(n, n[i][1], loop)
+      if n[i].kind == nnkExprColonExpr: s.site(n, n[i][1], loop, isInit)
   of nnkYieldStmt:
     # Not probed: a `yield` is taken as a sink position.
-    if n.len > 0 and n[0].kind != nnkEmpty: s.site(n, n[0], loop)
+    if n.len > 0 and n[0].kind != nnkEmpty: s.site(n, n[0], loop, false)
   of nnkTupleConstr, nnkBracket, nnkTableConstr:
     for c in n:
-      if c.kind == nnkExprColonExpr: s.site(n, c[1], loop)
-      else: s.site(n, c, loop)
+      if c.kind == nnkExprColonExpr: s.site(n, c[1], loop, isInit)
+      else: s.site(n, c, loop, isInit)
   else: discard
   # The children, each sink argument's own read marked as its site's. A field
   # of an object constructor or a named tuple is the value of its `f: a`.
   for c in n:
     let before = s.events.len
     dupScan(c, s, stmt, loop, unsafe, nextStmt)
+    if s.replay: continue
     let a = if c.kind == nnkExprColonExpr and c.len == 2: c[1] else: c
     if a.kind == nnkSym and s.events.len == before + 1 and
        s.events[before].sym == a:
@@ -25817,7 +26005,62 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
            s.sites[k].call == n:
           s.sites[k].event = before
           s.events[before].site = k
+          # From here on, a path from the site runs.
+          if k notin s.alive: s.alive.add k
           break
+  if n.kind in {nnkCall, nnkCommand} and n.len > 0 and isNoReturnRoutine(n[0]):
+    s.alive = @[]
+
+type DupClass = enum
+  dcMove     ## its source's provable last read: the move
+  dcDup      ## PRC-44: a read of its source is surely reachable: the hook runs
+  dcUnknown
+
+proc dupClassify(s: DupScan; i: int; owner: string): tuple[c: DupClass; why: string] =
+  ## The site `i` of the scan `s`, and why it is neither when it is not.
+  var st = s.sites[i]   # a copy: the VM aliases a let (S8ab)
+  let where = "`" & st.call.repr & "` in `" & owner & "`"
+  if st.event < 0:
+    return (dcUnknown, where & " (its argument is not a local the walk can follow)")
+  var ev = s.events[st.event]   # a copy: the VM aliases a let (S8ab)
+  var fresh = false
+  for f in s.fresh:
+    if f == ev.sym: fresh = true
+  if not fresh or isModuleGlobal(ev.sym):
+    return (dcUnknown, where & " (`" & macros.strVal(ev.sym) & "` is not a local " &
+            "declared there with a fresh value)")
+  if st.inRoutine:
+    return (dcUnknown, where & " (in a loop or a nested routine)")
+  var after = false
+  for j, e in s.events:
+    if j == st.event or e.sym != ev.sym: continue
+    if e.unsafe:
+      return (dcUnknown, where & " (`" & macros.strVal(ev.sym) & "` is read after it)")
+    if j > st.event or e.stmt == ev.stmt: after = true
+  if not st.inLoop and not after: return (dcMove, "")
+  if st.copies and st.live: return (dcDup, "")
+  if st.inLoop:
+    return (dcUnknown, where & " (in a loop or a nested routine)")
+  (dcUnknown, where & " (`" & macros.strVal(ev.sym) & "` is read after it)")
+
+proc dupSiteKey(arg: NimNode): string =
+  ## PRC-44: a sink position's argument, by where it is written. The parse and
+  ## the route proof read the same routine, so they meet on it.
+  macros.strVal(arg) & "@" & arg.lineInfo
+
+proc dupHookSites(body: NimNode): HashSet[string] =
+  ## PRC-44: the sink positions of the routine body `body` that run their
+  ## type's `=dup` (`dcDup`), by `dupSiteKey`. A key two sink positions share,
+  ## or a read of a local shares (a template expanded twice), is none of them.
+  var s = DupScan(key: "")
+  var nextStmt = 0
+  dupScan(body, s, 0, false, false, nextStmt)
+  var seen: CountTable[string]
+  for e in s.events: seen.inc dupSiteKey(e.sym)
+  for i in 0 ..< s.sites.len:
+    if dupClassify(s, i, "").c != dcDup: continue
+    let k = dupSiteKey(s.sites[i].arg)
+    if seen.getOrDefault(k) == 1: result.incl k
 
 proc dupHookKey(h: NimNode): string =
   ## The `routeTypeKey` of the type a user `=dup` hook `h` copies, or "".
@@ -25828,35 +26071,74 @@ proc dupHookKey(h: NimNode): string =
   if t.kind != nnkSym or symKind(t) != nskType: return ""
   routeTypeKey(t)
 
-proc dupSinkSites(r: NimNode; key: string): string =
+proc dupSinkSites(r: NimNode; key: string; modelled: HashSet[string]): string =
   ## "" when every sink position of the routine `r` that a value of the type
   ## `key` reaches is provably its source's last use (a local, declared here
   ## with a fresh value, never read again in the routine, in no loop, its
   ## site's only read in its statement, never under `addr`, reassigned, in
-  ## a closure, a `defer` or a `finally`), else the first that is not.
+  ## a closure, a `defer` or a `finally`), or (PRC-44) one a read of its
+  ## source is surely reachable from, of the type `key` itself, where the
+  ## parse ran the hook (`modelled`, by `dupSiteKey`); else the first that is
+  ## neither.
   let impl = r.getImpl
   if impl.kind notin RoutineNodes or impl.len <= 6: return ""
   var s = DupScan(key: key)
   var nextStmt = 0
   dupScan(impl[6], s, 0, false, false, nextStmt)
-  for st in s.sites:
-    let where = "`" & st.call.repr & "` in `" & macros.strVal(r) & "`"
-    if st.event < 0:
-      return where & " (its argument is not a local the walk can follow)"
-    var ev = s.events[st.event]   # a copy: the VM aliases a let (S8ab)
-    var fresh = false
-    for f in s.fresh:
-      if f == ev.sym: fresh = true
-    if not fresh or isModuleGlobal(ev.sym):
-      return where & " (`" & macros.strVal(ev.sym) & "` is not a local " &
-             "declared there with a fresh value)"
-    if st.inLoop:
-      return where & " (in a loop or a nested routine)"
-    for j, e in s.events:
-      if j == st.event or e.sym != ev.sym: continue
-      if e.unsafe or j > st.event or e.stmt == ev.stmt:
-        return where & " (`" & macros.strVal(ev.sym) & "` is read after it)"
+  for i in 0 ..< s.sites.len:
+    let (c, why) = dupClassify(s, i, macros.strVal(r))
+    case c
+    of dcMove: discard
+    of dcDup:
+      let arg = s.sites[i].arg
+      if routeTypeKey(arg.getTypeInst) != key or dupSiteKey(arg) notin modelled:
+        return "`" & s.sites[i].call.repr & "` in `" & macros.strVal(r) &
+               "` (`" & macros.strVal(arg) & "` is read after it, and the " &
+               "walk did not run the hook there)"
+    of dcUnknown: return why
   ""
+
+proc parseDupSite(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0016 PRC-44. A local `n` read at a sink position of its routine that
+  ## runs its type's user `=dup` (`dupHookSites`): the hook's call on it, and
+  ## the route proof is told so (`ParseCtx.dupModelled`). nil otherwise. A
+  ## type whose hooks no probe has read yet is noted (`dupUnprobed`); the
+  ## entry macro probes it and parses again (`dupHookProbes`).
+  if ctx.dupInHook or n.kind != nnkSym or symKind(n) notin {nskLet, nskVar}:
+    return nil
+  let body = ctx.procScoped.dupBody
+  if body.isNil: return nil
+  let t = n.getTypeInst
+  if t.kind != nnkSym or symKind(t) != nskType: return nil
+  let tk = routeTypeKey(t)
+  if tk.len == 0: return nil
+  if not ctx.procScoped.dupScanned:
+    ctx.procScoped.dupScanned = true
+    ctx.procScoped.dupSites = dupHookSites(body)
+  let key = dupSiteKey(n)
+  if key notin ctx.procScoped.dupSites: return nil
+  if tk notin typeHooks:
+    var known = false
+    for u in ctx.dupUnprobed:
+      if routeTypeKey(u) == tk: known = true
+    if not known: ctx.dupUnprobed.add t
+    return nil
+  if tk in unprovedTypes: return nil
+  var h: NimNode = nil
+  var hooks = typeHooks[tk]   # a copy: the VM aliases a let (S8ab)
+  for x in hooks:
+    if dupHookKey(x) == tk and routeHookCopies(x).len > 0: h = x
+  if h.isNil: return nil
+  let call = newCall(h, n)
+  let callKey = ensureProcRegistered(ctx, h, call, varMagic = calleeVarMagic(h))
+  let synth = freshSynth(ctx, "=dup")
+  ctx.dupInHook = true
+  let callStmt = userCallStmt(call, h, callKey, synth, classifyType(n).ty, @[],
+                              preamble, ctx)
+  ctx.dupInHook = false
+  preamble.add callStmt
+  ctx.dupModelled.incl key
+  mkVar(synth)
 
 proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
   ## What `hooks` may write has no proof; and whatever they run is reachable too.
@@ -25980,6 +26262,19 @@ proc hookProbes(t: NimNode): NimNode =
     nnkElifBranch.newTree(newCall(bindSym"supportsCopyMem", newCall(bindSym"typeof", lv())),
                           nnkDiscardStmt.newTree(newEmptyNode())),
     nnkElse.newTree(newCall(bindSym"symexHookMayHide")))
+
+proc dupHookProbes*(p: ParseResult): NimNode =
+  ## RFC-0016 PRC-44. nil when the parse read the hooks of every type it met at
+  ## a sink position that runs `=dup`; otherwise the probes of the others,
+  ## semchecked in the caller's scope before the entry macro expands again.
+  var probes = newStmtList()
+  var keys: seq[string]
+  for t in p.dupUnprobed:
+    let k = routeTypeKey(t)
+    if k in typeHooks or k in keys: continue
+    keys.add k
+    probes.add newCall(bindSym"symexHookProbe", newLit(k), hookProbes(t))
+  if probes.len == 0: nil else: probes
 
 const closureCaptureKinds = {nskVar, nskLet, nskParam, nskResult, nskForVar,
                              nskTemp}
@@ -26205,7 +26500,7 @@ proc routeContinue(id: int; resume: NimNode): NimNode =
     var routines = routeRuns[id].routines    # a copy (S8ab)
     for (key, why) in dups:
       for r in routines:
-        let site = dupSinkSites(r, key)
+        let site = dupSinkSites(r, key, routeRuns[id].dupModelled)
         if site.len > 0:
           addRoute(routeRuns[id], routeOpenValue, "the lifetime hook `=dup` " &
                    "is not the plain copy (" & why & ") and may run at a sink " &
@@ -26291,17 +26586,25 @@ macro symexRouteResume*(id: static int): untyped =
     routeProbeRead(routeRuns[id], k, t)
   routeContinue(id, bindSym"symexRouteResume")
 
-macro symexGlobalRoutes*(fn: typed; site: typed): untyped =
+macro symexGlobalRoutes*(fn: typed; site: typed;
+                         dupModelled: static seq[string]): untyped =
   ## RFC-0005 S8cs. The list `withGlobalRoutes` takes: every global a store the
   ## walk does not see may reach, with the reason, for the routine `fn`. `site` is
-  ## `routeSiteMarker()`, semchecked where this expands.
-  routeRuns.add RouteRun(siteModule: routeSiteModule(site))
+  ## `routeSiteMarker()`, semchecked where this expands. RFC-0016 PRC-44:
+  ## `dupModelled` is the parse's `ParseResult.dupModelled`.
+  routeRuns.add RouteRun(siteModule: routeSiteModule(site),
+                         dupModelled: toHashSet(dupModelled))
   let id = routeRuns.high
   if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds:
     addRoute(routeRuns[id], routeOpenAll, "the entry routine cannot be read")
   else:
     routeWalk(routeRuns[id], fn)
   routeContinue(id, bindSym"symexRouteResume")
+
+proc dupModelledKeys(p: ParseResult): seq[string] =
+  ## RFC-0016 PRC-44: `p.dupModelled`, in a fixed order.
+  for k in p.dupModelled: result.add k
+  result.sort()
 
 proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
   ## RFC-parser-normalization N1. Collapses the three-step `getImpl` -> kind
@@ -26323,4 +26626,5 @@ proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
   # for each global the parse named.
   result.globalsNimNode = newCall(bindSym"withGlobalRoutes", result.globalsNimNode,
                                   newCall(bindSym"symexGlobalRoutes", fn,
-                                          routeSiteMarker()))
+                                          routeSiteMarker(),
+                                          newLit(dupModelledKeys(result))))

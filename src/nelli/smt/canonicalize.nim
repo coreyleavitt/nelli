@@ -828,8 +828,12 @@ const renderAsChoicesVersion* = "12"
   ##   is the plain copy, and a sink position on its source's provable last
   ##   read is the move. Any other sink position declines (PRC-44). No key
   ##   bytes change.
+  ## - RFC-0016 PRC-44 (416->418; 417 is reserved for in-flight W4 work): a
+  ##   sink position a read of its source is surely reachable from runs the
+  ##   type's user `=dup` (the parse walks the hook there, staged behind the
+  ##   hook probes), where it declined. No key bytes change.
 
-const symexWalkerVersion* = "416"
+const symexWalkerVersion* = "418"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

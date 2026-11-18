@@ -8,8 +8,9 @@
 ## measured out of the 10 s a check budget (`parseFloatToStr`) and declines.
 ## `repr` of a string is exact when no byte of it is escaped, and declines
 ## otherwise. `=dup` through a user hook: an explicit call and a copy are
-## exact, a sink position on its source's provable last read moves, and any
-## other sink position declines.
+## exact, a sink position on its source's provable last read moves, one its
+## source is surely read again after runs the hook (PRC-44), and any other
+## sink position declines.
 import std/[unittest, strutils, math]
 import nelli
 import nelli/symex
@@ -90,15 +91,18 @@ proc sBoolCall(b: bool) =
 
 # `=dup` through a user hook. Natively (Nim 2.2.10, c and cpp) a `let`/`var`
 # copy runs the generated `=copy`, an explicit call runs the hook, and a sink
-# position runs it when its source is read afterwards, and moves on the last
-# read. The walk models the first two and a provable last read; any other
-# sink position declines (the model of the hook there is PRC-44).
+# position runs it when a later read of its source is reachable from it (on
+# some path: a read in a branch not taken still makes it run), and moves on
+# the last read. The walk models the first two, a provable last read, and
+# (PRC-44) a sink position a read of its source is surely reachable from;
+# any other sink position declines.
 type DupObj = object
   v: int
 type DupBox = object
   o: DupObj
 proc `=dup`(x: DupObj): DupObj = DupObj(v: x.v + 1)
 proc dupTake(x: sink DupObj): int = x.v
+proc dupPeek(t: (DupObj, int)): int = t[0].v
 
 proc dExplicit(k: int) =
   let a = DupObj(v: k)
@@ -140,6 +144,60 @@ proc dLoop(k: int) =
   for i in 0 ..< 1:
     r = dupTake(a)
   if r == 2: symexTarget("hit")
+proc dSinkReadAfterNever(k: int) =
+  if k > 1000: return   # the hook's `+ 1` raises at high(int)
+  let a = DupObj(v: k)
+  if dupTake(a) == a.v: symexTarget("hit")
+proc dCondReadAfter(k: int) =
+  # The later read is in a branch not taken at k = 1: the hook runs anyway.
+  let a = DupObj(v: k)
+  let r = dupTake(a)
+  var s = 0
+  if k > 100: s = a.v
+  if r == 2 and s == 0: symexTarget("hit")
+proc dCondReadAfterNever(k: int) =
+  if k > 1000: return   # the hook's `+ 1` raises at high(int)
+  let a = DupObj(v: k)
+  let r = dupTake(a)
+  var s = 0
+  if k > 100: s = a.v
+  if r == k: symexTarget("hit")
+proc dSiteInBranch(k: int) =
+  let a = DupObj(v: k)
+  var r = 0
+  if k > 0: r = dupTake(a)
+  if r * 1000 + a.v == 2001: symexTarget("hit")
+proc dWhileOnce(k: int) =
+  let a = DupObj(v: k)
+  var r = 0
+  var i = 0
+  while i < 1:
+    r = dupTake(a)
+    inc i
+  if r == 2: symexTarget("hit")
+proc dArrayReadAfter(k: int) =
+  let a = DupObj(v: k)
+  let arr = [a]
+  if arr[0].v * 1000 + a.v == 2001: symexTarget("hit")
+proc dEarlyReturn(k: int) =
+  # No path from the sink to the later read: natively the move.
+  let a = DupObj(v: k)
+  if k > 0:
+    if dupTake(a) == 1: symexTarget("hit")
+    return
+  if a.v == 7: symexTarget("other")
+iterator dupOnce(): int = yield 0
+proc dOnceLoop(k: int) =
+  # An iterator that yields once is no loop once inlined: natively the move.
+  let a = DupObj(v: k)
+  var r = 0
+  for i in dupOnce():
+    r = dupTake(a)
+  if r == 1: symexTarget("hit")
+proc dTupleTemp(k: int) =
+  # A constructor passed to a non-`sink` formal is no sink position.
+  let a = DupObj(v: k)
+  if dupPeek((a, 0)) * 1000 + a.v == 1001: symexTarget("hit")
 
 const fdom = sampled([0.0, -0.0, 0.1, 0.5, 2.5, 2.9, -2.9, -3.4, -7.0, 3.0,
                       0.49999999999999994, -42.0, 1e15, 0.0001220703125,
@@ -154,6 +212,9 @@ let rCell = cellKey(axMagic, "Repr")
 suite "PRC-35":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 416
+
+  test "version floor (PRC-44)":
+    check parseInt(symexWalkerVersion) >= 418
 
   test "toInt rounds half away from zero, through the RNE add":
     check pinExact(sToInt, cellKey(axStdlibBody, "math.toInt"),
@@ -222,19 +283,32 @@ suite "PRC-35":
     check pinExact(dSinkMoveNever, dCell, domain = idom).status == sxUnsat
     check pinExact(dCtorMove, dCell, domain = idom).status == sxSat
 
-  test "=dup: a sink position read afterwards, or in a loop, declines":
+  test "=dup: a sink position its source is surely read after runs the hook":
     let dCell = cellKey(axMagic, "Dup")
-    check native(dSinkReadAfter(1)) == "hit"
-    check native(dAddReadAfter(1)) == "hit"
-    check native(dTupleReadAfter(1)) == "hit"
-    check native(dLoop(1)) == "hit"
-    pinDecline(dSinkReadAfter, dCell, feGlobalRouteUnproved,
+    check pinExact(dSinkReadAfter, dCell, domain = idom).status == sxSat
+    check pinExact(dSinkReadAfterNever, dCell, domain = idom).status == sxUnsat
+    check pinExact(dAddReadAfter, dCell, domain = idom).status == sxSat
+    check pinExact(dTupleReadAfter, dCell, domain = idom).status == sxSat
+    check pinExact(dArrayReadAfter, dCell, domain = idom).status == sxSat
+    check pinExact(dLoop, dCell, domain = idom).status == sxSat
+    check pinExact(dWhileOnce, dCell, domain = idom).status == sxSat
+    check pinExact(dSiteInBranch, dCell, domain = idom).status == sxSat
+
+  test "=dup: a later read in a branch not taken still runs the hook":
+    let dCell = cellKey(axMagic, "Dup")
+    check pinExact(dCondReadAfter, dCell, domain = idom).status == sxSat
+    check pinExact(dCondReadAfterNever, dCell, domain = idom).status == sxUnsat
+
+  test "=dup: a sink position with no sure path to a later read declines":
+    let dCell = cellKey(axMagic, "Dup")
+    check native(dEarlyReturn(1)) == "hit"
+    check native(dOnceLoop(1)) == "hit"
+    check native(dTupleTemp(1)) == "hit"
+    pinDecline(dEarlyReturn, dCell, feGlobalRouteUnproved,
                needle = "`a` is read after it")
-    pinDecline(dAddReadAfter, dCell, feGlobalRouteUnproved,
+    pinDecline(dOnceLoop, dCell, feGlobalRouteUnproved, needle = "(in a loop")
+    pinDecline(dTupleTemp, dCell, feGlobalRouteUnproved,
                needle = "`a` is read after it")
-    pinDecline(dTupleReadAfter, dCell, feGlobalRouteUnproved,
-               needle = "`a` is read after it")
-    pinDecline(dLoop, dCell, feGlobalRouteUnproved, needle = "(in a loop")
 
   test "$bool is exact in both spellings":
     check pinExact(sBool, cellKey(axMagic, "BoolToStr"),

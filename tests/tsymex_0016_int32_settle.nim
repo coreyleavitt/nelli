@@ -20,7 +20,7 @@
 ## * A lossy winner whose replay no child could run is `rsRefused`: not
 ##   trusted, and never run in the host, cold or from the cache. It was
 ##   `rsUnconfirmed`, which a consumer runs.
-import std/[unittest, options, strutils, tables, os]
+import std/[unittest, options, strutils, tables, os, times]
 import nelli
 import nelli/symex
 import nelli/db
@@ -327,6 +327,93 @@ suite "INT-32 (9): a lossy winner whose replay was refused is rsRefused":
     pinNever(cellKey(axConstruct, "replay/settle/policy"),
       loaded.len == 1 and not hostRunnable(loaded[0].soundness),
       "a lossy winner no replay child ran is rsRefused, not run in the host")
+
+# =============================================================================
+# 8. candidate replays run at once; the winner is still the first in order
+# =============================================================================
+
+const int32RaceBound = 2_000
+  ## The bound a hanging candidate is killed at. Two of them run one after
+  ## another cost two bounds before the third candidate runs.
+const int32RaceSettings = SymexSettings(replayTimeoutMs: int32RaceBound)
+
+let int32LateMark = getTempDir() / "nelli_int32_late_candidate"
+  ## Written by a candidate's replay that was not killed in time.
+
+proc int32HangThenHit(x: int) =
+  ## Three candidates, in this order: two whose replays hang, then one that
+  ## reaches the target after a short run.
+  let o = int32Fresh and (x == x)
+  if not o:
+    if x == 1:
+      os.sleep(60_000)
+      symexTarget("int32_race")
+    elif x == 2:
+      os.sleep(60_000)
+      symexTarget("int32_race")
+    elif x == 3:
+      os.sleep(300)
+      symexTarget("int32_race")
+
+proc int32SlowFirst(x: int) =
+  ## The first candidate confirms after the second has: the first wins.
+  let o = int32Fresh and (x == x)
+  if not o:
+    if x == 1:
+      os.sleep(800)
+      symexTarget("int32_first")
+    elif x == 2:
+      symexTarget("int32_first")
+
+proc int32HitThenHang(x: int) =
+  ## The first candidate confirms; the second would hang, then leave a mark.
+  let o = int32Fresh and (x == x)
+  if not o:
+    if x == 1:
+      os.sleep(300)
+      symexTarget("int32_late")
+    elif x == 2:
+      os.sleep(1_500)
+      writeFile(int32LateMark, "ran")
+      os.sleep(60_000)
+      symexTarget("int32_late")
+
+suite "INT-32 (8): a loser's timeout does not delay the winner":
+  test "two hanging candidates before the confirming one cost one bound":
+    let t0 = epochTime()
+    let r = symexFind(int32HangThenHit, tLabel("int32_race"), int32RaceSettings)
+    let ms = int((epochTime() - t0) * 1000)
+    checkpoint "wall " & $ms & " ms, bound " & $int32RaceBound & " ms"
+    check r.status == sxSat
+    check r.witness[0] == 3
+    check r.soundness.replay == rsConfirmed
+    # The earlier candidates' actual run is the bound each; they run beside
+    # each other and the winner, so it is not delayed past one bound and its
+    # own run. One after another it took two bounds and its run.
+    check ms >= int32RaceBound
+    check ms < 2 * int32RaceBound
+    pinNever(cellKey(axConstruct, "replay/settle/policy"),
+      r.status == sxSat and ms < 2 * int32RaceBound,
+      "a hanging earlier candidate does not delay a confirming later one")
+
+  test "the winner is the first in order, not the first to finish":
+    let r = symexFind(int32SlowFirst, tLabel("int32_first"))
+    check r.status == sxSat
+    check r.witness[0] == 1
+    check r.soundness.replay == rsConfirmed
+
+  test "a hanging later candidate is killed once the winner is decided":
+    if fileExists(int32LateMark): removeFile(int32LateMark)
+    let t0 = epochTime()
+    let r = symexFind(int32HitThenHang, tLabel("int32_late"),
+                      SymexSettings(replayTimeoutMs: 10_000))
+    let ms = int((epochTime() - t0) * 1000)
+    checkpoint "wall " & $ms & " ms"
+    check r.status == sxSat
+    check r.witness[0] == 1
+    check ms < 5_000
+    os.sleep(2_500)
+    check not fileExists(int32LateMark)
 
 suite "INT-32: walker version floor":
   test "408":

@@ -581,6 +581,32 @@ proc statusLost(c: ReplayChild): ReplayChild =
     "before the host could read it (SIGCHLD is ignored, or another wait " &
     "reaped it), so how it ended is not known"
 
+# ---- a child the host has started and not yet finished with -------------------
+#
+# RFC-0016 INT-32 (item 8). Starting a child and waiting for it are two steps,
+# so the host can watch several at once (`replayInOrder`, `replayresult.nim`):
+# `stepChild` waits on one for at most a slice, `stopChild` kills one whose
+# ending nobody will read, `awaitChild` waits it out. A child that was never
+# started (refused) is `readyChild`, done from the start.
+
+type
+  PendingChild* = ref object of RootObj
+    done: bool
+    res: ReplayChild
+
+proc readyChild*(c: ReplayChild): PendingChild =
+  ## A child decided without a run (a refusal), or one already waited out.
+  PendingChild(done: true, res: c)
+
+proc childDone*(p: PendingChild): bool =
+  ## Its ending is known (`childEnding`), or it was stopped.
+  p.done
+
+proc childEnding*(p: PendingChild): ReplayChild =
+  ## How it ended. Only once `childDone`.
+  doAssert p.done, "childEnding of a child still running"
+  p.res
+
 # ---- POSIX: what both ways of starting a child share ---------------------------
 
 when defined(posix):
@@ -929,13 +955,128 @@ when replayForks:
         fds[i] = d
     true
 
-  proc runReplayForked*(body: proc (): ReplayReport {.closure, gcsafe.};
-                        timeoutMs: int): ReplayChild =
+  type ForkRun = ref object of PendingChild
+    ## RFC-0016 INT-32 (item 8). A forked child being watched.
+    pid: Pid
+    fd: cint                 # the report's read end
+    timeoutMs, cpuSeconds: int
+    start: MonoTime
+    rd: ReportReader
+    eof: bool
+    reaped: bool             # waited for: its pid is no longer the host's
+    ended: bool              # ended, and not yet waited for
+    haveStatus: bool         # and `status` is what it ended with
+    status: cint
+    killed: bool
+
+  proc reap(p: ForkRun; flags: cint) =
+    let w = waitpid(p.pid, p.status, flags)
+    if w == p.pid:
+      p.reaped = true
+      p.haveStatus = true
+    elif w < 0 and errno != EINTR:
+      # ECHILD: the host ignores SIGCHLD, or another wait took it. Gone,
+      # and its status with it; its pid may already name another process.
+      p.reaped = true
+
+  proc readSome(p: ForkRun; wait: cint): bool =
+    ## Reads what is there within `wait` ms; false when nothing was.
+    var pf = TPollfd(fd: p.fd, events: POLLIN)
+    if poll(addr pf, Tnfds(1), wait) > 0:
+      var chunk: array[512, char]
+      let n = read(p.fd, addr chunk[0], chunk.len)
+      if n > 0:
+        p.rd.feed(chunk.toOpenArray(0, n - 1))
+        result = true
+      elif n == 0 or errno != EINTR:
+        p.eof = true
+
+  proc watching(p: ForkRun): bool =
+    not (p.rd.done or p.rd.corrupt or p.reaped or p.ended or p.killed)
+
+  proc forkFinish(p: ForkRun) =
+    if not p.reaped:
+      # Timed out, flooding, finished, or ended by itself: either way nothing
+      # more is read from it, and what the SUT started dies with it. Not yet
+      # waited for, so its pid and its group are ours.
+      killGroup(p.pid)
+      while not p.reaped: p.reap(0)
+    # What a child wrote before it ended, up to the cap: a SUT's children
+    # outside its group may still be writing.
+    while not (p.rd.done or p.rd.corrupt or p.eof):
+      if not p.readSome(0): break
+    discard close(p.fd)
+    p.done = true
+    if p.rd.corrupt:
+      p.res = stopped("")
+      return
+    var c = ReplayChild(reached: p.rd.reached, outOfMemory: p.rd.outOfMemory)
+    let limit = if p.haveStatus: limitEnding(p.status, p.cpuSeconds) else: ""
+    if p.rd.finished:
+      readFlags(p.rd.flags, c)
+      c.ending = reFinished
+    elif p.rd.exited:
+      c.ending = reExited
+      c.code = p.rd.code
+    elif p.killed:
+      c.ending = reTimedOut
+    elif limit.len > 0:
+      c.ending = reTimedOut
+      c.why = limit
+    elif p.haveStatus and WIFSIGNALED(p.status):
+      c.ending = reSignalled
+      c.code = int(WTERMSIG(p.status))
+    elif p.haveStatus and WIFEXITED(p.status):
+      c.ending = reExited
+      c.code = int(WEXITSTATUS(p.status))
+    else:
+      c = statusLost(c)
+    p.res = settled(c)
+
+  proc forkStep(p: ForkRun; slice: int) =
+    ## One wait of at most `slice` ms on the child; finished with it once it
+    ## has reported, ended or run past its bound.
+    if p.watching:
+      var wait = cint(max(slice, 0))
+      if p.timeoutMs > 0:
+        let left = p.timeoutMs - (getMonoTime() - p.start).inMilliseconds
+        if left <= 0:
+          p.killed = true
+        else:
+          wait = cint(min(left, int64(wait)))
+      if not p.killed:
+        if not p.eof:
+          discard p.readSome(wait)
+        else:
+          discard usleep(cuint(wait) * 1000)
+        if not (p.rd.done or p.rd.corrupt):
+          # A child's own children may hold the pipe open past its end, and
+          # the pipe may be closed while it still runs. RFC-0016 INT-28
+          # (R1-24): an ended child is left unwaited for, so its group is
+          # still the host's to kill below.
+          case hasEnded(p.pid)
+          of 1: p.ended = true
+          of -1: p.reaped = true
+          else: discard
+    if not p.watching: p.forkFinish()
+
+  proc forkStop(p: ForkRun) =
+    ## Killed, its group with it, and nothing it wrote read.
+    if not p.reaped:
+      killGroup(p.pid)
+      while not p.reaped: p.reap(0)
+    discard close(p.fd)
+    p.done = true
+
+  proc startReplayForked*(body: proc (): ReplayReport {.closure, gcsafe.};
+                          timeoutMs: int): PendingChild =
     ## RFC-0005 S8ct. `body` in a forked child, killed at `timeoutMs` (`<= 0`: no
-    ## bound).
+    ## bound). RFC-0016 INT-32 (item 8): started, not waited for
+    ## (`stepChild`, `awaitChild`).
     var fds: array[2, cint]
     if not reportPipe(fds):
-      return refused("a pipe could not be created for the replay's child")
+      return readyChild(
+        refused("a pipe could not be created for the replay's child"))
     let cpuSeconds = cpuBound(timeoutMs)
     let processes = processBound()
     let hostPid = getpid()
@@ -946,7 +1087,7 @@ when replayForks:
       let err = errno
       discard close(fds[0])
       discard close(fds[1])
-      return refused("fork failed (errno " & $err & ")")
+      return readyChild(refused("fork failed (errno " & $err & ")"))
     if pid == 0:
       childFd = fds[1]
       discard close(fds[0])
@@ -955,92 +1096,9 @@ when replayForks:
     countExecution()
     discard close(fds[1])
     discard setpgid(pid, pid)   # either side may run first
-    let start = getMonoTime()
-    var rd: ReportReader
-    var eof = false
-    var reaped = false       # waited for: its pid is no longer the host's
-    var ended = false        # ended, and not yet waited for
-    var haveStatus = false   # and `status` is what it ended with
-    var status: cint = 0
-    var killed = false
-    template reap(flags: cint) =
-      let w = waitpid(pid, status, flags)
-      if w == pid:
-        reaped = true
-        haveStatus = true
-      elif w < 0 and errno != EINTR:
-        # ECHILD: the host ignores SIGCHLD, or another wait took it. Gone,
-        # and its status with it; its pid may already name another process.
-        reaped = true
-    template readSome(wait: cint): bool =
-      ## Reads what is there within `wait` ms; false when nothing was.
-      var got = false
-      var p = TPollfd(fd: fds[0], events: POLLIN)
-      if poll(addr p, Tnfds(1), wait) > 0:
-        var chunk: array[512, char]
-        let n = read(fds[0], addr chunk[0], chunk.len)
-        if n > 0:
-          rd.feed(chunk.toOpenArray(0, n - 1))
-          got = true
-        elif n == 0 or errno != EINTR:
-          eof = true
-      got
-    while not (rd.done or rd.corrupt or reaped or ended):
-      var wait = cint(50)
-      if timeoutMs > 0:
-        let left = timeoutMs - (getMonoTime() - start).inMilliseconds
-        if left <= 0:
-          killed = true
-          break
-        wait = cint(min(left, 50))
-      if not eof:
-        discard readSome(wait)
-      else:
-        discard usleep(cuint(wait) * 1000)
-      if not (rd.done or rd.corrupt):
-        # A child's own children may hold the pipe open past its end, and the
-        # pipe may be closed while it still runs. RFC-0016 INT-28 (R1-24):
-        # an ended child is left unwaited for, so its group is still the
-        # host's to kill below.
-        case hasEnded(pid)
-        of 1: ended = true
-        of -1: reaped = true
-        else: discard
-    if not reaped:
-      # Timed out, flooding, finished, or ended by itself: either way nothing
-      # more is read from it, and what the SUT started dies with it. Not yet
-      # waited for, so its pid and its group are ours.
-      killGroup(pid)
-      while not reaped: reap(0)
-    # What a child wrote before it ended, up to the cap: a SUT's children
-    # outside its group may still be writing.
-    while not (rd.done or rd.corrupt or eof):
-      if not readSome(0): break
-    discard close(fds[0])
-    if rd.corrupt:
-      return stopped("")
-    var c = ReplayChild(reached: rd.reached, outOfMemory: rd.outOfMemory)
-    let limit = if haveStatus: limitEnding(status, cpuSeconds) else: ""
-    if rd.finished:
-      readFlags(rd.flags, c)
-      c.ending = reFinished
-    elif rd.exited:
-      c.ending = reExited
-      c.code = rd.code
-    elif killed:
-      c.ending = reTimedOut
-    elif limit.len > 0:
-      c.ending = reTimedOut
-      c.why = limit
-    elif haveStatus and WIFSIGNALED(status):
-      c.ending = reSignalled
-      c.code = int(WTERMSIG(status))
-    elif haveStatus and WIFEXITED(status):
-      c.ending = reExited
-      c.code = int(WEXITSTATUS(status))
-    else:
-      c = statusLost(c)
-    settled(c)
+    ForkRun(pid: pid, fd: fds[0], timeoutMs: timeoutMs,
+            cpuSeconds: cpuSeconds, start: getMonoTime())
+
 
 # ---- re-execution -------------------------------------------------------------
 #
@@ -1406,11 +1464,22 @@ when replayReexecs:
       result.add 0'u16
       result.add 0'u16
 
-    proc spawnAndWait(spec: string; timeoutMs: int; output: OutHandle;
-                      c: var ReplayChild; lost, flooded: var bool): bool =
-      ## False: no child ran (`c.why`). `lost`: it ended, and how is not
-      ## known. `flooded`: its report grew past `replayReportCap`, and it was
-      ## killed.
+    type ReexecRun = ref object of PendingChild
+      ## RFC-0016 INT-32 (item 8). A re-executed child being watched.
+      timeoutMs: int
+      start: MonoTime
+      dir, input, outName: string
+      output: OutHandle
+      c: ReplayChild
+      lost: bool      # it ended, and how is not known
+      flooded: bool   # its report grew past `replayReportCap`; killed
+      killed: bool    # it ran past `timeoutMs`; killed
+      ended: bool
+      process, job: Handle
+
+    proc spawnChild(p: ReexecRun; spec: string): bool =
+      ## False: no child ran (`p.c.why`).
+      template c: untyped = p.c
       let job = createJobObjectW(nil, nil)
       if job == Handle(0):
         c.why = "a job object could not be created for the replay's child"
@@ -1503,47 +1572,54 @@ when replayReexecs:
         return false
       discard closeHandle(pi.hThread)
       countExecution()
-      # In slices, so the report's size is watched and no bound wraps an
-      # `int32`.
-      let start = getMonoTime()
-      var ended = false
-      var killed = false
-      while true:
-        var slice = 50'i32
-        if timeoutMs > 0:
-          let left = timeoutMs - (getMonoTime() - start).inMilliseconds
-          if left <= 0:
-            killed = true
-            break
-          slice = int32(min(left, 50))
-        let w = waitForSingleObject(pi.hProcess, slice)
-        if w == waitObject0:
-          ended = true
-          break
-        if w != waitTimeoutResult:
-          lost = true   # WAIT_FAILED: what it does is not known
-          break
-        if outputSize(output) > replayReportCap:
-          flooded = true
-          break
-      if ended:
+      p.process = pi.hProcess
+      p.job = job
+      p.start = getMonoTime()
+      true
+
+    proc watching(p: ReexecRun): bool =
+      not (p.ended or p.killed or p.lost or p.flooded)
+
+    proc childStep(p: ReexecRun; slice: int) =
+      ## One wait of at most `slice` ms, so the report's size is watched and
+      ## no bound wraps an `int32`.
+      var wait = int32(clamp(slice, 0, 50))
+      if p.timeoutMs > 0:
+        let left = p.timeoutMs - (getMonoTime() - p.start).inMilliseconds
+        if left <= 0:
+          p.killed = true
+          return
+        wait = int32(min(left, int64(wait)))
+      let w = waitForSingleObject(p.process, wait)
+      if w == waitObject0:
+        p.ended = true
+      elif w != waitTimeoutResult:
+        p.lost = true   # WAIT_FAILED: what it does is not known
+      elif outputSize(p.output) > replayReportCap:
+        p.flooded = true
+
+    proc childKill(p: ReexecRun) =
+      discard terminateJobObject(p.job, 1)
+      discard closeHandle(p.process)
+      discard closeHandle(p.job)   # kills whatever the SUT started
+
+    proc childEnd(p: ReexecRun) =
+      if p.ended:
         var code: int32
-        if getExitCodeProcess(pi.hProcess, code) == 0:
-          lost = true
+        if getExitCodeProcess(p.process, code) == 0:
+          p.lost = true
         else:
           let ucode = cast[uint32](code)
           if ucode >= 0xC0000000'u32:
-            c.ending = reSignalled
-            c.code = int(ucode)
+            p.c.ending = reSignalled
+            p.c.code = int(ucode)
           else:
-            c.ending = reExited
-            c.code = int(ucode)
-      elif killed:
-        c.ending = reTimedOut
-      discard terminateJobObject(job, 1)
-      discard closeHandle(pi.hProcess)
-      discard closeHandle(job)   # kills whatever the SUT started
-      true
+            p.c.ending = reExited
+            p.c.code = int(ucode)
+      elif p.killed:
+        p.c.ending = reTimedOut
+      p.childKill()
+
 
     proc callerStackSize*(): int =
       var lo, hi: uint
@@ -1662,8 +1738,23 @@ when replayReexecs:
         if k != replayChildEnv: result.add k & "=" & v
       result.add replayChildEnv & "=" & spec
 
-    proc spawnAndWait(spec: string; timeoutMs: int; output: OutHandle;
-                      c: var ReplayChild; lost, flooded: var bool): bool =
+    type ReexecRun = ref object of PendingChild
+      ## RFC-0016 INT-32 (item 8). A re-executed child being watched.
+      timeoutMs: int
+      start: MonoTime
+      dir, input, outName: string
+      output: OutHandle
+      c: ReplayChild
+      lost: bool      # it ended, and how is not known
+      flooded: bool   # its report grew past `replayReportCap`; killed
+      killed: bool    # it ran past `timeoutMs`; killed
+      ended: bool     # ended, not yet waited for: its group is ours
+      gone: bool      # no longer the host's child: its status is lost
+      pid: Pid
+      cpuSeconds: int
+      nap: int
+
+    proc spawnChild(p: ReexecRun; spec: string): bool =
       ## As the Windows one. The child leads a process group of its own, and
       ## is signalled, it and its group, only while it is not yet waited for:
       ## until then its pid cannot name another process (R1-19). RFC-0016
@@ -1675,7 +1766,7 @@ when replayReexecs:
       let exe = when defined(linux): "/proc/self/exe" else: getAppFilename()
       let args = allocCStringArray([getAppFilename()])
       let envp = allocCStringArray(childEnvironment(spec))
-      let cpuSeconds = cpuBound(timeoutMs)
+      let cpuSeconds = cpuBound(p.timeoutMs)
       let processes = processBound()
       let hostPid = getpid()
       let pid = fork()
@@ -1683,7 +1774,7 @@ when replayReexecs:
         let err = errno
         deallocCStringArray(args)
         deallocCStringArray(envp)
-        c.why = "fork failed (errno " & $err & ")"
+        p.c.why = "fork failed (errno " & $err & ")"
         return false
       if pid == 0:
         enterGroup(hostPid)
@@ -1702,55 +1793,77 @@ when replayReexecs:
       deallocCStringArray(envp)
       discard setpgid(pid, pid)   # either side may run first
       countExecution()
-      let start = getMonoTime()
+      p.pid = pid
+      p.cpuSeconds = cpuSeconds
+      p.nap = 1
+      p.start = getMonoTime()
+      true
+
+    proc watching(p: ReexecRun): bool =
+      not (p.ended or p.gone or p.killed or p.flooded)
+
+    proc probe(p: ReexecRun) =
+      let e = hasEnded(p.pid)
+      if e == 1: p.ended = true
+      elif e < 0: p.gone = true
+      elif outputSize(p.output) > replayReportCap: p.flooded = true
+      elif p.timeoutMs > 0 and
+           (getMonoTime() - p.start).inMilliseconds >= p.timeoutMs:
+        p.killed = true
+
+    proc childStep(p: ReexecRun; slice: int) =
+      ## One wait of at most `slice` ms (and of at most the next nap: the
+      ## naps grow from 1 ms to 20 ms, so a short run is seen soon).
+      p.probe()
+      if not p.watching: return
+      var wait = int64(min(p.nap, max(slice, 0)))
+      if p.timeoutMs > 0:
+        wait = min(wait, p.timeoutMs - (getMonoTime() - p.start).inMilliseconds)
+      if wait > 0: discard usleep(cuint(wait) * 1000)
+      p.nap = min(p.nap * 2, 20)
+      p.probe()
+
+    proc childKill(p: ReexecRun) =
+      ## Its group killed and the child waited for, unless it is no longer
+      ## the host's.
       var status: cint
-      var gone = false         # no longer the host's child: its status is lost
-      var haveStatus = false
-      var killed = false
-      var nap = 1
-      while true:
-        let e = hasEnded(pid)
-        if e == 1: break       # ended, not yet waited for: its group is ours
-        if e < 0:
-          gone = true
-          break
-        if outputSize(output) > replayReportCap:
-          flooded = true
-          break
-        var left = 20'i64
-        if timeoutMs > 0:
-          left = timeoutMs - (getMonoTime() - start).inMilliseconds
-          if left <= 0:
-            killed = true
-            break
-        discard usleep(cuint(min(int64(nap), left)) * 1000)
-        nap = min(nap * 2, 20)
-      if not gone:
-        killGroup(pid)
+      if not p.gone:
+        killGroup(p.pid)
         while true:
-          let w = waitpid(pid, status, 0)
-          if w == pid:
+          let w = waitpid(p.pid, status, 0)
+          if w == p.pid: break
+          if w < 0 and errno == EINTR: continue
+          break
+
+    proc childEnd(p: ReexecRun) =
+      var status: cint
+      var haveStatus = false
+      if not p.gone:
+        killGroup(p.pid)
+        while true:
+          let w = waitpid(p.pid, status, 0)
+          if w == p.pid:
             haveStatus = true
             break
           if w < 0 and errno == EINTR: continue
           break
-      let limit = if haveStatus: limitEnding(status, cpuSeconds) else: ""
-      if flooded:
+      let limit = if haveStatus: limitEnding(status, p.cpuSeconds) else: ""
+      if p.flooded:
         discard
-      elif killed:
-        c.ending = reTimedOut
+      elif p.killed:
+        p.c.ending = reTimedOut
       elif limit.len > 0:
-        c.ending = reTimedOut
-        c.why = limit
+        p.c.ending = reTimedOut
+        p.c.why = limit
       elif haveStatus and WIFSIGNALED(status):
-        c.ending = reSignalled
-        c.code = int(WTERMSIG(status))
+        p.c.ending = reSignalled
+        p.c.code = int(WTERMSIG(status))
       elif haveStatus and WIFEXITED(status):
-        c.ending = reExited
-        c.code = int(WEXITSTATUS(status))
+        p.c.ending = reExited
+        p.c.code = int(WEXITSTATUS(status))
       else:
-        lost = true
-      true
+        p.lost = true
+
 
     proc callerStackSize*(): int = 0
 
@@ -1817,64 +1930,89 @@ when replayReexecs:
     try: removeFile(path)
     except CatchableError: discard
 
-  proc runReplayReexec*(site, payload: string; timeoutMs: int): ReplayChild =
-    ## RFC-0005 S8ct. The host's half: `payload` to a re-executed copy of this
-    ## program, which the initialiser at call site `site` picks up
-    ## (`replayChildEntry`), and what it reported.
-    if inReplayChild():
-      return refused("a replay's child does not start another")
-    var r: array[16, byte]
-    if not urandom(r):
-      return refused("no random bytes for the replay's private directory")
-    let nonce = toHexString(r)
-    let dir = replayPrivateDir()
-    if dir.len == 0:
-      return refused("a private directory could not be created for the " &
-                     "replay's child")
-    let input = dir / "in"
-    let outName = dir / "out"
-    var output = noOut
-    defer:
-      if output != noOut: closeOutput(output)
-      removeQuietly(input)
-      removeQuietly(outName)
-      try: removeDir(dir)
-      except CatchableError: discard
-    if not writeNew(input, witnessFile(nonce, site, payload)):
-      return refused("the replay's witness could not be written")
-    output = openNewOutput(outName)
-    if output == noOut:
-      return refused("the replay's report file could not be created")
-    var c = ReplayChild(ending: reSignalled)
-    var lost, flooded = false
-    flushFile(stdout)
-    flushFile(stderr)
-    if not spawnAndWait(nonce & "|" & dir, timeoutMs, output, c, lost,
-                        flooded):
-      return refused(c.why)
+  proc cleanUp(p: ReexecRun) =
+    if p.output != noOut:
+      closeOutput(p.output)
+      p.output = noOut
+    removeQuietly(p.input)
+    removeQuietly(p.outName)
+    try: removeDir(p.dir)
+    except CatchableError: discard
+
+  proc reexecFinish(p: ReexecRun) =
+    ## What the child reported, once it is no longer watched.
+    p.childEnd()
+    p.done = true
     var rd: ReportReader
-    rd.feed(readOutput(output, replayReportCap + 1))
-    if flooded or rd.corrupt:
-      return stopped("")
-    if rd.total == 0 and c.ending != reTimedOut and fileExists(input):
+    rd.feed(readOutput(p.output, replayReportCap + 1))
+    var c = p.c
+    if p.flooded or rd.corrupt:
+      p.res = stopped("")
+    elif rd.total == 0 and c.ending != reTimedOut and fileExists(p.input):
       # RFC-0016 INT-29 (R2-21, R2-22). The child ended without taking its
       # witness: the program could not be started (a failed `execve` ends
       # its fork with 127), or it could not open its report, or no site of
       # it took the marker. The SUT did not run, so this is no crash of it.
-      return refused("the re-executed child ended before it took its " &
-                     "witness (" & describe(c) & "), so the SUT did not run")
-    c.reached = rd.reached
-    c.outOfMemory = rd.outOfMemory and c.ending != reTimedOut
-    if rd.finished and c.ending != reTimedOut:
-      readFlags(rd.flags, c)
-      c.ending = reFinished
-    elif rd.unreadable:
-      c.ending = reRefused
-      c.why = "the child could not read the witness"
-      c.runDependent = true
-    elif lost:
-      c = statusLost(c)
-    settled(c)
+      p.res = refused("the re-executed child ended before it took its " &
+                      "witness (" & describe(c) & "), so the SUT did not run")
+    else:
+      c.reached = rd.reached
+      c.outOfMemory = rd.outOfMemory and c.ending != reTimedOut
+      if rd.finished and c.ending != reTimedOut:
+        readFlags(rd.flags, c)
+        c.ending = reFinished
+      elif rd.unreadable:
+        c.ending = reRefused
+        c.why = "the child could not read the witness"
+        c.runDependent = true
+      elif p.lost:
+        c = statusLost(c)
+      p.res = settled(c)
+    p.cleanUp()
+
+  proc reexecStep(p: ReexecRun; slice: int) =
+    if p.watching: p.childStep(slice)
+    if not p.watching: p.reexecFinish()
+
+  proc reexecStop(p: ReexecRun) =
+    p.childKill()
+    p.cleanUp()
+    p.done = true
+
+  proc startReplayReexec*(site, payload: string; timeoutMs: int): PendingChild =
+    ## RFC-0005 S8ct. The host's half: `payload` to a re-executed copy of this
+    ## program, which the initialiser at call site `site` picks up
+    ## (`replayChildEntry`), and what it reported. RFC-0016 INT-32 (item 8):
+    ## started, not waited for (`stepChild`, `awaitChild`).
+    if inReplayChild():
+      return readyChild(refused("a replay's child does not start another"))
+    var r: array[16, byte]
+    if not urandom(r):
+      return readyChild(
+        refused("no random bytes for the replay's private directory"))
+    let nonce = toHexString(r)
+    let dir = replayPrivateDir()
+    if dir.len == 0:
+      return readyChild(refused("a private directory could not be created " &
+                                "for the replay's child"))
+    let p = ReexecRun(timeoutMs: timeoutMs, dir: dir, input: dir / "in",
+                      outName: dir / "out", output: noOut,
+                      c: ReplayChild(ending: reSignalled))
+    if not writeNew(p.input, witnessFile(nonce, site, payload)):
+      p.cleanUp()
+      return readyChild(refused("the replay's witness could not be written"))
+    p.output = openNewOutput(p.outName)
+    if p.output == noOut:
+      p.cleanUp()
+      return readyChild(
+        refused("the replay's report file could not be created"))
+    flushFile(stdout)
+    flushFile(stderr)
+    if not p.spawnChild(nonce & "|" & dir):
+      p.cleanUp()
+      return readyChild(refused(p.c.why))
+    p
+
 
   proc replayChildEntry*(site: string;
                          run: proc (payload: string): ReplayReport {.nimcall.}):
@@ -1920,3 +2058,41 @@ when replayReexecs:
       endChild(123)
     endChild(0)
     true
+
+# ---- watching a started child ---------------------------------------------------
+
+proc stepChild*(p: PendingChild; slice: int) =
+  ## RFC-0016 INT-32 (item 8). Waits on `p` for at most `slice` ms; once its
+  ## ending is known (it reported, ended, or ran past its bound and was
+  ## killed), `childDone`.
+  if p.done: return
+  when replayForks:
+    forkStep(ForkRun(p), slice)
+  elif replayReexecs:
+    reexecStep(ReexecRun(p), slice)
+
+proc stopChild*(p: PendingChild) =
+  ## RFC-0016 INT-32 (item 8). Kills `p`, and what its SUT started, when its
+  ## ending will not be read; it is then `childDone` with no ending.
+  if p.done: return
+  when replayForks:
+    forkStop(ForkRun(p))
+  elif replayReexecs:
+    reexecStop(ReexecRun(p))
+  p.res = refused("stopped by the host: its ending is not read")
+
+proc awaitChild*(p: PendingChild): ReplayChild =
+  ## RFC-0016 INT-32 (item 8). `p` waited out.
+  while not p.done: stepChild(p, 50)
+  p.res
+
+when replayForks:
+  proc runReplayForked*(body: proc (): ReplayReport {.closure, gcsafe.};
+                        timeoutMs: int): ReplayChild =
+    ## RFC-0005 S8ct. `startReplayForked`, waited out.
+    awaitChild(startReplayForked(body, timeoutMs))
+
+when replayReexecs:
+  proc runReplayReexec*(site, payload: string; timeoutMs: int): ReplayChild =
+    ## RFC-0005 S8ct. `startReplayReexec`, waited out.
+    awaitChild(startReplayReexec(site, payload, timeoutMs))

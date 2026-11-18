@@ -2488,6 +2488,14 @@ type
       ## child process, killed past this bound (`roTimedOut`: the candidate
       ## stays `sxUnknown`, with a `feReplayTimedOut` hint). `<= 0` leaves the
       ## child unbounded. In the cache key when not the default.
+    replayConcurrency*: int = 4
+      ## RFC-0016 INT-32 (item 8). How many candidates' replay children run at
+      ## once (`replayInOrder`), so a candidate whose replay hangs until
+      ## `replayTimeoutMs` does not hold back the ones after it. The verdict
+      ## is the same at any value: the winner is the first candidate in order
+      ## that confirms, and no earlier one still running is given up on.
+      ## `<= 1` runs them one after another. Not in the cache key
+      ## (`symexSettingsNeutral`).
 
 # ---- RFC-0005 S1: the channel algebra (§2.2) -------------------------------
 
@@ -4856,6 +4864,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings {.deprecated:
   if b.replay != d.replay: result.replay = b.replay   ## RFC-0005 S10
   if b.replayTimeoutMs != d.replayTimeoutMs:   ## RFC-0005 S8be
     result.replayTimeoutMs = b.replayTimeoutMs
+  if b.replayConcurrency != d.replayConcurrency:   ## RFC-0016 INT-32
+    result.replayConcurrency = b.replayConcurrency
   if b.wholeRunDefinedness != d.wholeRunDefinedness:   ## RFC-0016 K10b
     result.wholeRunDefinedness = b.wholeRunDefinedness
 

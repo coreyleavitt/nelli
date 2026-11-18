@@ -7296,15 +7296,19 @@ const symexSettingsNeutral* = [
   "acceptUnknownAsCovered",
     # Governs `assertCoveredBy`'s raise/pass decision AFTER the walker
     # returns; it has no influence on what symex returns or what is persisted.
-  "budget.maxInstantiationsPerProc"
+  "budget.maxInstantiationsPerProc",
     # Self-protected: the cap changes which procs are registered in
     # `prog.procs`, which is already part of the program's canonical key
     # (`canonicalize(prog)`).
+  "replayConcurrency"
+    # RFC-0016 INT-32 (item 8). How many replay children run at once: the
+    # winner is the first in order that confirms whatever it is
+    # (`replayInOrder`), so the verdict is the same at every value.
   ]
   ## RFC-0016 K5a (section 8.3). The `SymexSettings` fields (dotted for the
   ## ones inside `budget`) that are verdict-neutral and so NOT in the cache
-  ## key. Exactly the two the hand-written list left out. Every other field,
-  ## and any field added later, is keyed by `canonicalize(SymexSettings)`
+  ## key: the two the hand-written list left out, and `replayConcurrency`
+  ## (RFC-0016 INT-32). Every other field, and any field added later, is keyed by `canonicalize(SymexSettings)`
   ## iterating `fieldPairs`: a new setting cannot be silently unkeyed, and
   ## keeping one out of the key means naming it here with a reason.
 

@@ -420,14 +420,18 @@ type
       ## PRIVATE: the solver's model of the input (the `witness` of an
       ## `sxSat` claim, the `raisedWitness` of an `sxRaised` one).
 
-  CandidateReplay* = proc (i: int; c: SatCandidate): bool {.closure.}
-    ## RFC-0016 W4 perf. The settle's replay of one candidate, handed to
-    ## `runSymex` by the entry macros' replayed body (`emitRunSymexReplayed`):
-    ## replays `c` (the run's `RawResult.candidates[i]`), records the outcome
-    ## for the settle that follows the run, and answers whether the replay
-    ## confirmed it. The run calls it in the settle's order and stops at the
-    ## first confirmation, while its context is live, so it walks the tail of
-    ## the candidate a replay confirmed (W3-z R2) and of no other.
+  CandidateReplay* = proc (order: seq[int]; cands: seq[SatCandidate]): int
+                         {.closure.}
+    ## RFC-0016 W4 perf. The settle's replays, handed to `runSymex` by the
+    ## entry macros' replayed body (`emitRunSymexReplayed`): replays the
+    ## candidates in the settle's order, `cands[k]` being the run's
+    ## `RawResult.candidates[order[k]]`, up to the first confirmation, records
+    ## their outcomes for the settle that follows the run, and answers the
+    ## confirmed one's position in `order` (`-1`: none). The run calls it while its
+    ## context is live, so it walks the tail of the candidate a replay
+    ## confirmed (W3-z R2) and of no other. RFC-0016 INT-32 (item 8): the
+    ## replays run at once (`replayInOrder`), and the answer is still the
+    ## first in order.
 
   RawResult* = object
     abstractions*: AbstractionLog
@@ -27100,19 +27104,23 @@ proc runSymexImpl(prog: SymexProgram,
         scope: DeclineScope(kind: dskUnplaced))
     # RFC-0016 W4 perf: the settle's replays run here, in its order (`sxSat`
     # claims, then `sxRaised` claims, each in discovery order) up to the
-    # first confirmation, while the run's context and the candidates' model
+    # first confirmation (RFC-0016 INT-32 item 8: at once, `replayInOrder`), while the run's context and the candidates' model
     # pins are live (`dropWitnessPins` clears them at the boundary). The
     # entry macro settles on what they recorded once the run returns. A run
     # whose Z3 API errors `runSymex` will turn into a bare `sxUnknown`
     # (RFC-0005 S8m) hands out no candidate to settle, so replays none.
     var confirmed = -1
     if replay != nil and z3ApiErrorCount == 0:
-      block replayPass:
-        for claim in [sxSat, sxRaised]:
-          for i, c in w.candidates:
-            if c.status == claim and replay(i, toCandidate(c)):
-              confirmed = i
-              break replayPass
+      var order: seq[int]
+      var cands: seq[SatCandidate]
+      for claim in [sxSat, sxRaised]:
+        for i, c in w.candidates:
+          if c.status == claim:
+            order.add i
+            cands.add toCandidate(c)
+      if order.len > 0:
+        let k = replay(order, cands)
+        if k >= 0: confirmed = order[k]
     # RFC-0016 W3-z R2 (section 9: replay is no evidence for undefined
     # behaviour). A label candidate a replay confirms is held to the
     # whole-run gate the winner is: its tail is walked under its model pins,

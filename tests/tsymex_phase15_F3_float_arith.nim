@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F3: float arithmetic (+ - * / and unary -).
 # IEEE arithmetic via Z3 FP theory (round-to-nearest-even).
@@ -20,14 +21,14 @@ proc fMulZero(x: float) =
 suite "symex Phase 15 — F3 float arithmetic":
 
   test "x + 1.0 == 5.0 -> sat":
-    check symexFind(fAdd, tLabel("add")).status == sxSat
+    check pinFind(fAdd, tLabel("add")).status == sxSat
   test "x - 2.0 == 3.0 -> sat":
-    check symexFind(fSub, tLabel("sub")).status == sxSat
+    check pinFind(fSub, tLabel("sub")).status == sxSat
   test "x * 2.0 == 10.0 -> sat":
-    check symexFind(fMul, tLabel("mul")).status == sxSat
+    check pinFind(fMul, tLabel("mul")).status == sxSat
   test "x / 2.0 == 4.0 -> sat":
-    check symexFind(fDiv, tLabel("div")).status == sxSat
+    check pinFind(fDiv, tLabel("div")).status == sxSat
   test "unary -x == 5.0 -> sat":
-    check symexFind(fNeg, tLabel("neg")).status == sxSat
+    check pinFind(fNeg, tLabel("neg")).status == sxSat
   test "x * 0.0 == 5.0 -> unsat (arithmetic is real, not skipped)":
-    check symexFind(fMulZero, tLabel("never")).status == sxUnsat
+    check pinFind(fMulZero, tLabel("never")).status == sxUnsat

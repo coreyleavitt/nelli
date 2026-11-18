@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F (float) cycle F1: type-bridge.
 # Reconciled RED: the RFC's `x > 0.0` SUT needs float literals (F2) and float
@@ -17,9 +18,9 @@ proc f32sut(x: float32) =
 suite "symex Phase 15 — F1 float type-bridge":
 
   test "float64 SUT: symexFind returns sxSat (float param allocated + extracted)":
-    let r = symexFind(f64sut, tLabel("hit"))
+    let r = pinFind(f64sut, tLabel("hit"))
     check r.status == sxSat
 
   test "float32 SUT: symexFind returns sxSat":
-    let r = symexFind(f32sut, tLabel("hit32"))
+    let r = pinFind(f32sut, tLabel("hit32"))
     check r.status == sxSat

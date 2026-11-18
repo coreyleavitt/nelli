@@ -1,6 +1,7 @@
 import std/unittest
 import std/math
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F6: std/math float ops + FP predicates.
 # All modeled ops are Z3-FP-native (no transcendentals). Math/predicate calls
@@ -77,46 +78,46 @@ proc fLogNested(x: float) =
 suite "symex Phase 15 — F6 std/math float ops + FP predicates":
 
   test "sqrt(x) > 2.0 -> sat (witness x > 4.0)":
-    check symexFind(fSqrt, tLabel("sqrt")).status == sxSat
+    check pinFind(fSqrt, tLabel("sqrt")).status == sxSat
   test "floor(x) == 3.0 -> sat (witness in [3.0, 4.0))":
-    check symexFind(fFloor, tLabel("floor")).status == sxSat
+    check pinFind(fFloor, tLabel("floor")).status == sxSat
   test "abs(x) == 5.0 -> sat":
-    check symexFind(fAbs, tLabel("abs")).status == sxSat
+    check pinFind(fAbs, tLabel("abs")).status == sxSat
   test "min(x, y) == 1.0 -> sat":
-    check symexFind(fMin, tLabel("min")).status == sxSat
+    check pinFind(fMin, tLabel("min")).status == sxSat
   test "max(x, y) == 9.0 -> sat":
-    check symexFind(fMax, tLabel("max")).status == sxSat
+    check pinFind(fMax, tLabel("max")).status == sxSat
   test "ceil(x) == 4.0 -> sat":
-    check symexFind(fCeil, tLabel("ceil")).status == sxSat
+    check pinFind(fCeil, tLabel("ceil")).status == sxSat
   test "round(x) == 2.0 -> sat":
-    check symexFind(fRound, tLabel("round")).status == sxSat
+    check pinFind(fRound, tLabel("round")).status == sxSat
   test "trunc(x) == 2.0 -> sat":
-    check symexFind(fTrunc, tLabel("trunc")).status == sxSat
+    check pinFind(fTrunc, tLabel("trunc")).status == sxSat
 
   test "signbit(x) -> sat (negative witness)":
-    check symexFind(fSignNeg, tLabel("signneg")).status == sxSat
+    check pinFind(fSignNeg, tLabel("signneg")).status == sxSat
   test "not signbit(x) -> sat (non-negative witness)":
-    check symexFind(fSignPos, tLabel("signpos")).status == sxSat
+    check pinFind(fSignPos, tLabel("signpos")).status == sxSat
 
   test "not isNaN(x) and x == x -> sat (finite witness), no errors":
-    let r = symexFind(fIsNaN, tLabel("notnan"))
+    let r = pinFind(fIsNaN, tLabel("notnan"))
     check r.status == sxSat
     check r.errors.len == 0
 
   test "float32: sqrt(x) > 2.0 -> sat":
-    check symexFind(fSqrt32, tLabel("sqrt32")).status == sxSat
+    check pinFind(fSqrt32, tLabel("sqrt32")).status == sxSat
 
   test "classify(x)==fcNan is sat (Phase 16 A5: classify now modeled)":
     ## Phase 16 A5: classify promoted from deferred to fully modeled (svBV64 ite-chain).
-    let r = symexFind(fClassify, tLabel("classify"))
+    let r = pinFind(fClassify, tLabel("classify"))
     check r.status == sxSat
   test "copySign(x, y)==1.0 is sat (Phase 16 A5: copySign now modeled)":
     ## Phase 16 A5: copySign promoted from deferred to modeled (ite over isNegative).
-    let r = symexFind(fCopySign, tLabel("copysign"))
+    let r = pinFind(fCopySign, tLabel("copysign"))
     check r.status == sxSat
   test "unmodeled math.ln emits feUnsupportedOpAborted (sxUnknown)":
     ## RFC-0005 S6b: the boundary abort is `feUnsupportedOpAborted`.
-    let r = symexFind(fLog, tLabel("log"))
+    let r = pinFind(fLog, tLabel("log"))
     check r.status == sxUnknown
     check r.errors[0].kind == feUnsupportedOpAborted
     check r.errors[0].severity == sevError
@@ -124,6 +125,6 @@ suite "symex Phase 15 — F6 std/math float ops + FP predicates":
   test "unmodeled math.ln from nested frames is sxUnknown, never UNSAT":
     ## D3-fix-c: pins N36's `boundary-abort` classification of
     ## `lowerMathCall`'s unmodeled-op raise.
-    let r = symexFind(fLogNested, tLabel("log"))
+    let r = pinFind(fLogNested, tLabel("log"))
     check r.status == sxUnknown
     check r.errors[0].kind == feUnsupportedOpAborted

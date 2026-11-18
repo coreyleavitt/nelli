@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F4: float ordering comparison (< <= > >=).
 # IEEE ordering via Z3 FP theory: all ordering comparisons are false when an
@@ -17,10 +18,10 @@ proc fIrreflexive(x: float) =
 suite "symex Phase 15 — F4 float ordering comparison":
 
   test "x < 5.0 -> sat":
-    check symexFind(fLt, tLabel("lt")).status == sxSat
+    check pinFind(fLt, tLabel("lt")).status == sxSat
   test "x >= 5.0 -> sat":
-    check symexFind(fGe, tLabel("ge")).status == sxSat
+    check pinFind(fGe, tLabel("ge")).status == sxSat
   test "2.0 < x < 4.0 -> sat":
-    check symexFind(fRange, tLabel("range")).status == sxSat
+    check pinFind(fRange, tLabel("range")).status == sxSat
   test "x < x -> unsat (IEEE ordering irreflexive, NaN<NaN false)":
-    check symexFind(fIrreflexive, tLabel("never")).status == sxUnsat
+    check pinFind(fIrreflexive, tLabel("never")).status == sxUnsat

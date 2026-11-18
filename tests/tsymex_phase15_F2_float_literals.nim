@@ -1,6 +1,7 @@
 import std/unittest
 import std/math
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F2: float literal lifts (incl. Inf/NaN/-0.0) +
 # IEEE ==/!= (reconciled: testing a literal needs equality; F4 adds ordering).
@@ -19,16 +20,16 @@ proc fZero(f: float) =
 suite "symex Phase 15 — F2 float literals":
 
   test "f == Inf is satisfiable":
-    check symexFind(fInf, tLabel("inf")).status == sxSat
+    check pinFind(fInf, tLabel("inf")).status == sxSat
 
   test "f == NaN is UNSAT (IEEE: NaN != NaN) — ADR-0005":
-    check symexFind(fNaN, tLabel("nan")).status == sxUnsat
+    check pinFind(fNaN, tLabel("nan")).status == sxUnsat
 
   test "f == -0.0 is satisfiable":
-    check symexFind(fNegZero, tLabel("negzero")).status == sxSat
+    check pinFind(fNegZero, tLabel("negzero")).status == sxSat
 
   test "f == 3.14 is satisfiable":
-    check symexFind(fPi, tLabel("pi")).status == sxSat
+    check pinFind(fPi, tLabel("pi")).status == sxSat
 
   test "f == 0.0 is satisfiable":
-    check symexFind(fZero, tLabel("zero")).status == sxSat
+    check pinFind(fZero, tLabel("zero")).status == sxSat

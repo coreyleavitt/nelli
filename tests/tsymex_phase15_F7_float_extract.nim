@@ -1,6 +1,7 @@
 import std/unittest
 import std/math
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F7: eval-side bit-exact float witness extraction.
 # Replaces the F1 extractLeaf stub: when Z3 returns a SAT model, svFloat32 /
@@ -28,36 +29,36 @@ proc fPosInf32(x: float32) =
 suite "symex Phase 15 — F7 float witness extraction":
 
   test "float extraction: witness bit-pattern round-trip for float64":
-    let r = symexFind(fPi, tLabel("pi"))
+    let r = pinFind(fPi, tLabel("pi"))
     check r.status == sxSat
     check r.witness[0] == 3.14          # exact float64 equality, not approximate
 
   test "float extraction: NaN witness extracted and round-tripped":
-    let r = symexFind(fNan, tLabel("nan"))
+    let r = pinFind(fNan, tLabel("nan"))
     check r.status == sxSat
     check classify(r.witness[0]) == fcNan
 
   test "float extraction: +Inf witness extracted correctly":
-    let r = symexFind(fPosInf, tLabel("posinf"))
+    let r = pinFind(fPosInf, tLabel("posinf"))
     check r.status == sxSat
     check classify(r.witness[0]) == fcInf
 
   test "float extraction: -Inf witness extracted correctly":
-    let r = symexFind(fNegInf, tLabel("neginf"))
+    let r = pinFind(fNegInf, tLabel("neginf"))
     check r.status == sxSat
     check classify(r.witness[0]) == fcNegInf
 
   test "float32 extraction: witness round-trip at reduced precision":
-    let r = symexFind(fPi32, tLabel("pi32"))
+    let r = pinFind(fPi32, tLabel("pi32"))
     check r.status == sxSat
     check r.witness[0] == 3.14'f32
 
   test "float32 extraction: NaN witness extracted and round-tripped":
-    let r = symexFind(fNan32, tLabel("nan32"))
+    let r = pinFind(fNan32, tLabel("nan32"))
     check r.status == sxSat
     check classify(float(r.witness[0])) == fcNan
 
   test "float32 extraction: +Inf witness extracted correctly":
-    let r = symexFind(fPosInf32, tLabel("posinf32"))
+    let r = pinFind(fPosInf32, tLabel("posinf32"))
     check r.status == sxSat
     check classify(float(r.witness[0])) == fcInf

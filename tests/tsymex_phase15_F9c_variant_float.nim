@@ -1,6 +1,7 @@
 import std/unittest
 import std/math
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F9c: object-variant arm fields of type
 # float32/float64 (closes Cluster F).
@@ -39,19 +40,19 @@ proc fTrue32(v: V32) =
 suite "symex Phase 15 — F9c object-variant float arm fields":
 
   test "variant true-arm (float64 field): sxSat with x > 0.0":
-    let r = symexFind(fTrue, tLabel("vtrue"))
+    let r = pinFind(fTrue, tLabel("vtrue"))
     check r.status == sxSat
     check r.witness[0].k == true
     check r.witness[0].x > 0.0
 
   test "variant false-arm (int field): sxSat with y < 0":
-    let r = symexFind(fFalse, tLabel("vfalse"))
+    let r = pinFind(fFalse, tLabel("vfalse"))
     check r.status == sxSat
     check r.witness[0].k == false
     check r.witness[0].y < 0
 
   test "variant true-arm (float32 field): sxSat with a > 0.0":
-    let r = symexFind(fTrue32, tLabel("vtrue32"))
+    let r = pinFind(fTrue32, tLabel("vtrue32"))
     check r.status == sxSat
     check r.witness[0].k == true
     check r.witness[0].a > 0.0'f32

@@ -1,6 +1,7 @@
 import std/unittest
 import std/math
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F9a: array[N, float32/float64] element type-bridge
 # audit + array-derived NaN extraction.
@@ -28,16 +29,16 @@ proc fArrNan(xs: array[4, float64]) =
 suite "symex Phase 15 — F9a array[N, float] element completeness":
 
   test "array[4, float64] SUT: element access returns svFloat64 witness":
-    let r = symexFind(fArr64, tLabel("a64"))
+    let r = pinFind(fArr64, tLabel("a64"))
     check r.status == sxSat
     check r.witness[0][2] > 0.0
 
   test "array[4, float32] SUT: element access returns svFloat32 witness":
-    let r = symexFind(fArr32, tLabel("a32"))
+    let r = pinFind(fArr32, tLabel("a32"))
     check r.status == sxSat
     check r.witness[0][2] > 0.0'f32
 
   test "array[4, float64] SUT: NaN element extraction via model_completion":
-    let r = symexFind(fArrNan, tLabel("anan"))
+    let r = pinFind(fArrNan, tLabel("anan"))
     check r.status == sxSat
     check classify(r.witness[0][0]) == fcNan

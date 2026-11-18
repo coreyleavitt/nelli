@@ -461,6 +461,78 @@ Still deferred: ref/ptr (K9d-10) `0016_fieldref`, `rfc0005_s8ao_remainder`,
 method-call test returns sxUnknown, feGlobalRouteUnproved) and was left as it
 is.
 
+## K9d-8 result (`k9d8`, WIP: the float domain and the first ten suites)
+
+`boundaryOf` gained the float family: `float`/`float64`, `float32`,
+`cfloat`/`cdouble`, a float `range` (the values inside it; NaN never is) and a
+distinct float through its base. The domain is in the parameter's own width
+(`floatDomainValues[F]`), deterministic, at most `seqDomainCap` values, each
+value once by its bits (so -0.0 and 0.0 are two values and NaN is one), in
+priority order:
+
+- the specials: +-0, +-1, NaN, +-Inf, 0.5, +-the smallest subnormal, +-the
+  smallest normal, +-the largest finite, both neighbours of 1;
+- the SUT's float AND integer literals (`StringHints.nums`, harvested at macro
+  time, at most 32, carried as bits so -0.0 and edge values survive), each in
+  the parameter's width with its neighbour either way (`fNextUp`/`fNextDown`:
+  a float32 neighbour is one float32 step, not a float64 step rounded back),
+  then each negated with its neighbours;
+- the tail: +-the largest subnormal, the step above the smallest normal, -0.5,
+  the neighbours of -1, +-2, the ties 1.5 and 2.5, 0.1, 3, 10, 100, 1e10,
+  1e-10, the step below the largest finite, and 2^e - 1, 2^e with both
+  neighbours, 2^e + 1, negated too, for e in 7, 8, 15, 16, 24, 31, 32, 53, 63,
+  64 (integer exactness and integer-width conversion edges); a float64 domain
+  also holds float32's largest finite and the step above it, float32's
+  smallest subnormal and half of it (narrowing overflow and underflow).
+
+Floats are a prefix domain: thinned in an aggregate to the first 64 values
+(the specials and the leading literals with their neighbours); a collection's
+element core is the first 8 (+-0, +-1, NaN, +-Inf, 0.5) plus the first two
+literals with their neighbours. `domHas` compares a float by its bits.
+
+Witness replay is bit-faithful already: `extractLeaf` reads a float through
+`Z3_mk_fpa_to_ieee_bv` (`fpBitsToUint64`) and a NaN through the `isNaN`
+predicate (the canonical quiet NaN); the self-tests pin a NaN, a -0.0 and a
+literal-neighbour witness in both widths, and a planted unsat over a
+harvested neighbour, a NaN-only and a -0.0-only hit is refused.
+
+Traps found:
+
+- `cfloat`/`float32` (and `cdouble`/`float`) are one Nim type but two C types,
+  as `cuint`/`uint32` in K9d-7b: `sampled(vs)` and a local `seq[T]` built for
+  `cfloat` do not compile in C. The float branch appends straight into
+  `result.values` with `domPut`.
+- A float `range` parameter does not compile in the walker:
+  `parseRangeBracket` (`src/nelli/smt/dsl_typebridge.nim`) reads the bounds
+  with `intVal` (`Error: node lacks field: intVal`). Its domain is generated
+  and self-tested; its pin waits on the walker (not filed: a loud compile
+  error, not a disagreement).
+- Two suites import the helpers selectively (`from ./s8cu_helpers import
+  named`), so a mechanical `symexFind` -> `pinFind` swap does not see
+  `pinFind`: `phase15_F5_float_conv`, `phase15_CR3_CR4_CR6_float` (reverted;
+  add `pinFind` to the `from` import).
+
+10 suites convert (local c runs, rc 0, every verdict reproduced natively, no
+disagreement): `cr9c_intrep`, `phase15_F1_typebridge`,
+`phase15_F2_float_literals`, `phase15_F3_float_arith`,
+`phase15_F4_float_compare`, `phase15_F6_float_math`,
+`phase15_F7_float_extract`, `phase15_F9a_array_float`,
+`phase15_F9b_seq_float`, `phase15_F9c_variant_float`. The census ceiling
+139 -> 129.
+
+Remaining float candidates (unconverted, unrun): `phase15_F5_float_conv`,
+`phase15_CR3_CR4_CR6_float` (the import above), `phase15_C1_canonical_kind`,
+`phase15_F5hang_derefwrite`, `phase15_F8_smoke`, `phase15_N0_kindgate_widen`,
+`phase15_S10b_strconv`, `phase15_cr9_lowerInExpr`, `phase15_g10_smoke`,
+`phase15_g3_type_subst`, `phase15_g4_distinct_sort`,
+`phase15_g5_distinct_borrow`, `phase16_A5_float_classify`,
+`phase16_R16_2_rangedefect`, `phase16_R16_2b_shortcircuit_conv`,
+`r6_n36_raise_degrade_b`, `r6_n36_raise_degrade_c`, `rfc0005_s6b_ops`,
+`rfc0005_s8au_remainder`, `rfc0005_s8ba_remainder`,
+`snd1_uncertain_taint`, `snd1b_closure_uncertain_axiom`. Ref/ptr parameters
+keep `rfc0005_s8k_bounds`, `phase15_rereview_drains` and
+`tot1_totality_corpus` in K9d-10.
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

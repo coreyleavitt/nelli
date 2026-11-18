@@ -114,7 +114,8 @@ type
     ## result at save time, never off the thread: a verdict the save is
     ## handed carries its own.
     rdQueryTimeout  ## RFC-0005 S8bu. A solve the wall clock cut off
-                    ## (`queryTimeoutMs`)
+                    ## (`queryTimeoutMs`, or with it `0` the stall backstop
+                    ## `stallBackstopMs`, RFC-0016 INT-57)
     rdNativeStack   ## RFC-0005 S8ca. A call declined for want of native stack
                     ## (or of Nim's call depth): a thread with more goes deeper
     rdReplay        ## RFC-0005 0.9.1 (WA-7). A replay's child ended in a way

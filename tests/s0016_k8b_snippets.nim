@@ -459,20 +459,14 @@ func bk(axis: AxisScope; key, row, why: string): Blocked =
   Blocked(axis: axis, key: key, row: row, why: why)
 
 const
-  int57Why = "a `$n` query (`str.from_int`) beside integer arithmetic stalls Z3's step counter; the walk never returns"
+  int74Why = "a slice of a concatenation over `$t`, indexed (`($t & \"ab\")[0 .. 1][0]`), beside the accumulator: the sequence solver does not decide the target's unsat query (15.5M units in 60 s); under the pin settings the stall backstop ends it at 600 s, `sxUnknown`"
   blockedRows*: seq[Blocked] = @[
-    bk(axMagic, "IntToStr", "INT-57", int57Why),
-    bk(axMagic, "Int64ToStr", "INT-57", int57Why),
-    bk(axMagic, "BoolToStr", "INT-57", int57Why),
-    bk(axMagic, "EqStr", "INT-57", int57Why),
-    bk(axMagic, "LeStr", "INT-57", int57Why),
-    bk(axMagic, "LtStr", "INT-57", int57Why),
-    bk(axMagic, "LengthStr", "INT-57", int57Why),
-    bk(axMagic, "ConStrStr", "INT-57", int57Why),
-    bk(axMagic, "AppendStrStr", "INT-57", int57Why),
-    bk(axTypeClass, "string", "INT-57", int57Why),
-    bk(axTypeOp, "letCursor/string", "INT-57", int57Why),
-    bk(axTypeOp, "fieldDefault/string", "INT-57", int57Why),
+    ## INT-57 (walker 428) readmitted its twelve (magic `IntToStr`,
+    ## `Int64ToStr`, `BoolToStr`, `EqStr`, `LeStr`, `LtStr`, `LengthStr`,
+    ## `ConStrStr`, `AppendStrStr`; typeclass `string`; typeop
+    ## `letCursor/string`, `fieldDefault/string`). Readmitting them moved
+    ## `Slice` onto a target its fragment cannot reach, which INT-74 is.
+    bk(axMagic, "Slice", "INT-74", int74Why),
   ]
 
 func isBlocked*(axis: AxisScope; key: string): bool =

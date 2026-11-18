@@ -873,7 +873,10 @@ suite "RFC-0016 D3c-7: the strings module and string_lower_support leaf":
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
     # the test hook and the linked-Z3 probe are the same in every run
-    check tvs.len == 5
+    # 5 -> 6, RFC-0016 INT-57: `intRenders`, the run's registered integer
+    # renderings. It holds Z3 terms of the run's context, so it is one the
+    # per-run reset must clear, and the loop below checks that it does.
+    check tvs.len == 6
     for n in tvs:
       checkpoint n
       if n in ["notInFormOverride", "linkedNotInForm"]:

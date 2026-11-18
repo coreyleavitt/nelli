@@ -155,7 +155,10 @@ type
     queryTimeoutMs*: uint = 1_200_000
       ## RFC-0005 S8bu. A wall-clock bound, in milliseconds, on every solve
       ## the walker issues (Z3's `timeout` solver parameter), beside the
-      ## step bounds above. `0` means none. A solve it cuts off is
+      ## step bounds above. `0` means no run clock, not no bound: the run's
+      ## step-bounded solves then share the solver stall backstop, a 600 s
+      ## deadline for the whole run (`stallBackstopMs`; RFC-0016 INT-57),
+      ## and a solve with no step bound either is the only unbounded one. A solve it cuts off is
       ## `zsUnknown`: `sxUnknown` with `beSolverUndef` naming this field,
       ## and the run's verdict is not written to the verdict cache (it is
       ## the machine's, not the program's).

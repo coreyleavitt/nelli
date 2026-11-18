@@ -650,7 +650,7 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     # equals the Nim byte length, so this is exact.
     let recv = lowerStrOperand(env, e.strArgs[0])
     requireStr(recv, "iekStrLen")
-    SymVal(kind: svInt, zi: len(recv.str))
+    SymVal(kind: svInt, zi: strLenOf(recv.str))   # RFC-0016 INT-57
   of iekStrAt:
     # Phase 15 S3 / RFC-chapulin-hardening SND-4 (ADR-0024). `s[i]` (read) → a
     # Nim `char` (svBV8 unsigned). The Z3 bridge: `at(s, i)` is a 1-char
@@ -1164,11 +1164,23 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
       of svInt: true
       of svBV8, svBV16, svBV32, svBV64: operand.signed
       else: true
-    if mayBeNegative:
-      SymVal(kind: svString, str: ite(v < mkInt(0),
-        concat(mkString("-"), toStr(mkInt(0) - v)), toStr(v)))
-    else:
-      SymVal(kind: svString, str: toStr(v))
+    let rendered =
+      if mayBeNegative:
+        ite(v < mkInt(0), concat(mkString("-"), toStr(mkInt(0) - v)), toStr(v))
+      else:
+        toStr(v)
+    # RFC-0016 INT-57: the rendering of a bit-vector is registered, so its
+    # length and its order against another (`strLenOf`, `renderCmp`) are
+    # decided as bit-vector formulas, not by the sequence solver.
+    var bv = operand
+    if bv.kind == svDistinct: bv = ejectBase(bv)
+    if bv.kind == svInt:
+      let back = bvOfInt(bv)
+      if back.isSome: bv = back.get
+    if bv.kind in {svBV8, svBV16, svBV32, svBV64}:
+      registerIntRender(rendered, wrap[Z3AnyAst](rendered.ctx, rawAnyAstOf(bv)),
+                        bvKindWidth(bv.kind), bv.signed)
+    SymVal(kind: svString, str: rendered)
   of iekStrToInt:
     # Phase 15 S10a + S10b. `parseInt(s)` — both the DIGITS-PATH (S10a) and the
     # RAISES-PATH (S10b, now that E1–E6 shipped the exception walker).

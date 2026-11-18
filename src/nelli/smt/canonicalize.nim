@@ -843,8 +843,19 @@ const renderAsChoicesVersion* = "12"
   ##   an imported library's hooks and declined every read
   ##   (`feGlobalRouteUnproved`). Verdicts change from `sxUnknown` to exact.
   ##   No key bytes change.
+  ## - RFC-0016 INT-57 (425->428; 426-427 are reserved for other W4 work):
+  ##   the rendering `$v` of a bit-vector is registered, and its length and
+  ##   its order or equality against another rendering lower to bit-vector
+  ##   formulas over `v` (`strLenOf`, `renderCmp`; a merged `$b` compares by
+  ##   cases, `litCmp`), so the sequence solver no longer decides them and
+  ##   Z3's step counter no longer stalls on them. With no run clock
+  ##   (`queryTimeoutMs = 0`) every step-bounded solve runs under the solver
+  ##   stall backstop (`stallBackstopMs`), a wall deadline for the whole run:
+  ##   a solve it ends is `beSolverUndef` naming it, the walk stops, and the
+  ##   run is `rdQueryTimeout`, not cached. Verdicts change from a hang to
+  ##   exact. No key bytes change.
 
-const symexWalkerVersion* = "425"
+const symexWalkerVersion* = "428"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -131,7 +131,10 @@ func describe*[T](d: Domain[T]): string =
 proc mkPinSettings(): SymexSettings =
   ## Resource limits only (RFC-0016 §10): the step-counted rlimit budgets stay
   ## at their defaults and the wall-clock `queryTimeoutMs` is off, so a loaded
-  ## machine cannot turn an exact pin into a decline.
+  ## machine cannot turn an exact pin into a decline. Off is not unbounded: a
+  ## run's step-bounded solves still share the 600 s stall
+  ## backstop deadline (`stallBackstopMs`, RFC-0016 INT-57), so a stalled
+  ## query declines named and the walk ends.
   result = defaultSymexSettings()
   result.budget.queryTimeoutMs = 0
 

@@ -27,6 +27,7 @@ import std/algorithm   ## N46 audit (RFC-chapulin-hardening bucket-2): sort() fo
                         ## deterministic Table-key iteration order at Z3 term-
                         ## building sites (mergeClosureExitHeap's ITE loop)
 import std/math   ## Phase 15 F2: classify() for float-literal NaN/Inf/-0.0 lowering
+import std/monotimes   ## RFC-0016 INT-57: the stall backstop deadline
 import std/strutils   ## Phase 15 S5: parseInt on a concrete seqLen numeral; split
 import z3
 
@@ -4324,6 +4325,13 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
   ## `raise` here would hit the identical C-backend silent-loss hazard. See
   ## `loweringDidDegrade`'s doc comment for the full mechanism.
   doAssert a.kind == svString and b.kind == svString
+  # RFC-0016 INT-57: two renderings of bit-vectors (`$t <= $u`), or two
+  # values each one of a few literals (a merged `$b`), compare as formulas
+  # over the values, not as strings (`renderCmp`, `litCmp`).
+  let byValue = renderCmp(a.str, b.str, op)
+  if byValue.isSome: return ofBool(byValue.get)
+  let byCases = litCmp(a.str, b.str, op)
+  if byCases.isSome: return ofBool(byCases.get)
   case op
   of bEq: ofBool(a.str == b.str)
   of bNe: ofBool(a.str != b.str)
@@ -5938,7 +5946,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # (`runtime_strings.nim`), same byte-faithful `str.len` read. Makes
       # `data.len` WORK (not merely decline) even through a call-chain hop
       # whose OWN parse never routed the dispatch through `iekStrLen`.
-      SymVal(kind: svInt, zi: len(recv.str))
+      SymVal(kind: svInt, zi: strLenOf(recv.str))   # RFC-0016 INT-57
     else:
       # Round-6 B1 backstop: was a bare `ValueError` (a live crash gap) —
       # a mis-classified receiver now declines classified instead of
@@ -10720,6 +10728,73 @@ proc theoryFreeSimple(): bool =
     theoryFreeNeedsSimple = (ready: true, simple: s.check() != zsSat)
   theoryFreeNeedsSimple.simple
 
+const stallBackstopMs* {.intdefine: "nelliStallBackstopMs".} = 600_000
+  ## RFC-0016 INT-57. The solver stall backstop: the wall-clock bound, in
+  ## milliseconds, on the step-bounded solves (`rlimit` non-zero) of ONE run
+  ## that has no run clock (`queryTimeoutMs = 0`, the pin settings). A step
+  ## bound ends a search only while Z3 advances its step counter, and Z3 can
+  ## stop advancing it (`len($t) + t + 129 <= 3` over the sequence solver,
+  ## S8bu's mixed Int / bit-vector query); `walkRLimit` cannot end it either,
+  ## since a check is charged only once it returns (`chargeWalkWork`). So the
+  ## pin settings, which turn the run clock off, left such a solve unbounded:
+  ## the walk was killed at 900 s. Z3 offers no thread-safe read of the
+  ## counter during a check (`rlimit count` is a statistic, collected from
+  ## the solver's own state), so a monitor cannot tell a stalled counter from
+  ## a slow one; the backstop is Z3's own `timeout` (a timer thread that
+  ## cancels the search, as `Z3_interrupt` does). It is a DEADLINE for the
+  ## run, not a per-solve figure (`beginStallDeadline`): each solve gets what
+  ## is left of it (`stallTimeoutMs`), so a walk of many stalling solves ends
+  ## within it too, and once a solve is cut the walk stops (`walkStalled`,
+  ## `shouldStop`). `600_000` is past where the step bounds end a search
+  ## whose counter advances (the slowest measured, the sequence solver at
+  ## 40-55k units/s, spends `seqQueryRLimit`'s 20M in about 6-8 minutes) and
+  ## inside the 900 s a sweep allows a suite. A solve it ends is never a
+  ## verdict: `zsUnknown`, `beSolverUndef` naming the backstop
+  ## (`undefReason`), and the run is marked `rdQueryTimeout`
+  ## (`solveBounded`), so its verdict is not cached, as a wall-clock cut
+  ## never is; a sat or unsat answer never depends on it. A step-unbounded
+  ## solve (`rlimit = 0`: the caller opted out of every step bound and
+  ## `walkRLimit`) is left alone. `-d:nelliStallBackstopMs=N` lowers it for
+  ## a suite that exercises it.
+
+type StallDeadline = object
+  ## RFC-0016 INT-57. The run's stall backstop deadline (`stallBackstopMs`),
+  ## in `getMonoTime` ticks; `on` only inside a run with no run clock.
+  on: bool
+  ticks: int64
+
+var stallDeadline {.threadvar.}: StallDeadline
+var walkStalled {.threadvar.}: bool
+  ## RFC-0016 INT-57. A solve of the current run was cut by the stall
+  ## backstop; reset by `resetSymexRunState`. `shouldStop` ends the walk and
+  ## `runSymexImpl` records the halt.
+
+proc beginStallDeadline(timeoutMs: uint): StallDeadline =
+  ## RFC-0016 INT-57. Starts the run's stall deadline (no run clock only) and
+  ## returns the one it replaces, for the run's exit to restore
+  ## (`endStallDeadline`). A run begun inside another keeps the earlier of
+  ## the two deadlines.
+  result = stallDeadline
+  if timeoutMs == 0'u and stallBackstopMs > 0:
+    let t = getMonoTime().ticks + int64(stallBackstopMs) * 1_000_000'i64
+    stallDeadline = StallDeadline(on: true,
+      ticks: (if result.on: min(result.ticks, t) else: t))
+  else:
+    stallDeadline = StallDeadline(on: false)
+
+proc endStallDeadline(prev: StallDeadline) =
+  ## RFC-0016 INT-57. The run is over: the deadline it replaced is back.
+  stallDeadline = prev
+
+proc stallTimeoutMs(): uint =
+  ## RFC-0016 INT-57. The `timeout` a step-bounded solve runs under with no
+  ## run clock: what is left of the run's deadline (at least 1 ms: the
+  ## deadline passed, the solve is cut at once), or outside a run the whole
+  ## backstop.
+  if not stallDeadline.on: return uint(stallBackstopMs)
+  let left = (stallDeadline.ticks - getMonoTime().ticks) div 1_000_000'i64
+  uint(max(1'i64, min(left, int64(stallBackstopMs))))
+
 var queryTimeoutMsCur {.threadvar.}: uint
   ## RFC-0005 S8bu. The run's `queryTimeoutMs`, set by `resetSymexRunState`:
   ## every solver `querySolver` builds runs under it. `0` (none) outside a
@@ -10806,6 +10881,9 @@ proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
   result = if assumptions.len == 0: s.check() else: s.checkWith(assumptions)
   if result == zsUnknown and s.reasonUnknown() == "timeout":
     queryTimedOutFlag = true
+    # RFC-0016 INT-57: with no run clock it was the stall backstop; the run's
+    # deadline is spent, so the walk stops (`shouldStop`).
+    if queryTimeoutMsCur == 0'u: walkStalled = true
 
 proc undefReason(s: Z3Solver; timeoutMs: uint): string =
   ## RFC-0005 S8bu. Z3's `reason_unknown`, naming `queryTimeoutMs` when
@@ -10821,10 +10899,16 @@ proc undefReason(s: Z3Solver; timeoutMs: uint): string =
     if st.contains("rlimit count"):
       units = if st.isInt("rlimit count"): int64(st.getInt("rlimit count"))
               else: int64(st.getFloat("rlimit count"))
-    result.add " (queryTimeoutMs = " & $timeoutMs & ": the run clock " &
-      "ended the solve" &
-      (if units >= 0: " after " & $units & " rlimit units" else: "") &
-      ", before its step bound did)"
+    let spent = (if units >= 0: " after " & $units & " rlimit units" else: "")
+    if queryTimeoutMsCur == 0'u:
+      # RFC-0016 INT-57: no run clock, so the stall backstop ended it.
+      result.add " (solver stall backstop: the run had no answer within " &
+        $stallBackstopMs & " ms with queryTimeoutMs = 0" & spent &
+        ", and the step bound had not ended the solve; the run's, not " &
+        "the program's)"
+    else:
+      result.add " (queryTimeoutMs = " & $timeoutMs & ": the run clock " &
+        "ended the solve" & spent & ", before its step bound did)"
 
 proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
                  rlimit: uint; seqTheory = true): Z3Solver =
@@ -10848,6 +10932,9 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   solverParams.set("rlimit", rlimit)
   # RFC-0005 S8bu: and the run's wall-clock backstop (`queryTimeoutMs`).
   if queryTimeoutMsCur > 0'u: solverParams.set("timeout", queryTimeoutMsCur)
+  elif rlimit > 0'u and stallBackstopMs > 0:
+    # RFC-0016 INT-57: no run clock; the run's stall deadline bounds it.
+    solverParams.set("timeout", stallTimeoutMs())
   solverParams.set("random_seed", 0'u)
   if not seqTheory:
     solverParams.set("smt.string_solver", "none")
@@ -14211,6 +14298,7 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
   ## label's sxSat is never computed. All raise-flavoured targets: an sxRaised IS
   ## the terminal answer (unchanged).
   if walkWorkExhausted: return true   ## RFC-0016 K7: out of solver work
+  if walkStalled: return true         ## RFC-0016 INT-57: the stall backstop
   if tailWorkExhausted: return true   ## RFC-0016 W3-z R9: the tail's budget
   for r in w.found:
     if r.status == sxSat: return true
@@ -26622,7 +26710,11 @@ proc runSymex*(prog: SymexProgram,
   # has returned on every path it catches; `runSymexImpl` cannot do it in a
   # `finally` (CR-13's goto-exception caveat).
   let prevCtx = currentContext()
+  # RFC-0016 INT-57: with no run clock the run's solves share one stall
+  # deadline (`stallBackstopMs`), and the one it replaces is back after.
+  let prevStall = beginStallDeadline(settings.budget.queryTimeoutMs)
   result = runSymexCaught(prog, target, settings, replay)
+  endStallDeadline(prevStall)
   dropWitnessPins(result)
   # The caller path-condition stacks hold Z3 terms and are read only by the
   # walk that pushed them. The tail check's walk leaves its last entries in
@@ -26746,6 +26838,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   walkerWorkBase = walkerWorkUnits
   walkRLimitCur = settings.budget.walkRLimit
   walkWorkExhausted = false
+  walkStalled = false                                  ## RFC-0016 INT-57
   tailUnitsCeil = 0                                    ## RFC-0016 W3-z R9
   tailWorkExhausted = false
   tailUnitsRun = 0                                     ## RFC-0016 W3-z int4r
@@ -27477,6 +27570,16 @@ proc runSymexImpl(prog: SymexProgram,
            $walkUnitsSpent() & " spent) ended the walk -- the paths not yet " &
            "decided are unexplored (beBudgetExhaustedPrune)",
       cap = ckWalkWork)
+  if walkStalled:
+    # RFC-0016 INT-57. A solve ran past the run's stall deadline with no run
+    # clock (`stallBackstopMs`) and `shouldStop` ended the walk: the paths
+    # not yet decided are dropped, and the run is `rdQueryTimeout` (not
+    # cached). Never a verdict: `sxUnknown` unless a sound witness was found.
+    w.halted(beSolverUndef,
+      "solver stall backstop (" & $stallBackstopMs & " ms for the run, " &
+           "queryTimeoutMs = 0) ended the walk: Z3 had stopped answering a " &
+           "solve its step bound had not ended -- the paths not yet decided " &
+           "are unexplored (the run's, not the program's)")
   currentLowerSinks = nil
   currentWalkCtxPtr = nil   ## (a) normal-path clear: walk() completed without raising
   stampLoweringPendingLeak(w)  ## RFC-0005 S1: pending-taint leak pin (§2.2)
@@ -28124,6 +28227,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # a `finally` on the raise path does not apply).
   let prevCtx = currentContext()
   defer: setCurrentContext(prevCtx)
+  let prevStall = beginStallDeadline(settings.budget.queryTimeoutMs)  ## RFC-0016 INT-57
+  defer: endStallDeadline(prevStall)
   let ctx = resetSymexRunState(settings)
   var counters: ConcolicYieldCounters
   let cappedLen = min(trace.len, maxDraws)

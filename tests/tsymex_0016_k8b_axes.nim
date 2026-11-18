@@ -82,20 +82,25 @@ suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)
     for b in blockedRows:
       check b.why.len > 0
 
-  test "the INT-57 rows are blocked against their row":
-    for (a, k, r) in [(axMagic, "IntToStr", "INT-57"),
-                      (axTypeClass, "string", "INT-57"),
-                      (axTypeOp, "letCursor/string", "INT-57")]:
-      check isBlocked(a, k)
-      check blockedRows.anyIt(it.axis == a and it.key == k and it.row == r)
-    check not isBlocked(axMagic, "AddI")
-
-  test "the INT-58, INT-59, INT-60 and INT-61 rows are readmitted (all closed)":
+  test "the INT-57..61 rows are readmitted (all closed)":
     for (a, k) in [(axStdlibBody, "math.round"), (axStdlibBody, "math.floor"),
                    (axMagic, "LengthArray"), (axStdlibBody, "math.trunc"),
-                   (axMagic, "CharToStr"), (axMagic, "AppendStrCh")]:
+                   (axMagic, "CharToStr"), (axMagic, "AppendStrCh"),
+                   (axMagic, "IntToStr"), (axMagic, "Int64ToStr"),
+                   (axMagic, "BoolToStr"), (axMagic, "EqStr"),
+                   (axMagic, "LeStr"), (axMagic, "LtStr"),
+                   (axMagic, "LengthStr"), (axMagic, "ConStrStr"),
+                   (axMagic, "AppendStrStr"), (axTypeClass, "string"),
+                   (axTypeOp, "letCursor/string"),
+                   (axTypeOp, "fieldDefault/string")]:
       check not isBlocked(a, k)
       check streamSnippets(a).anyIt(it.key == k)
+
+  test "the INT-74 row is blocked against its row":
+    check isBlocked(axMagic, "Slice")
+    check blockedRows.anyIt(it.axis == axMagic and it.key == "Slice" and
+                            it.row == "INT-74")
+    check not isBlocked(axMagic, "AddI")
 
   test "RED: an entry whose row closed must be readmitted":
     let b = @[Blocked(axis: axMagic, key: "IntToStr", row: "INT-57", why: "x")]

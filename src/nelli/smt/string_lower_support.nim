@@ -14,6 +14,7 @@ import std/tables
 import std/options
 import std/sets
 import std/algorithm
+import std/strutils
 import z3
 import ./types
 
@@ -420,6 +421,290 @@ proc indexSplitRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
          astId(ctx, indexSplits[b].c.raw) == n:
         result.add indexSplitLastLink(indexSplits[a], indexSplits[b])
 
+# ---- RFC-0016 INT-57: an integer's rendering, decided without strings --------
+#
+# `$v` of a bit-vector `v` (`iekIntToStr`) is the Z3 term
+# `ite(v < 0, "-" ++ str.from_int(-v), str.from_int(v))`. Its length, or a
+# string order or equality between two such renderings, put to Z3 as string
+# terms is decided by the sequence solver, whose step counter stopped
+# advancing on `len($t) + t + 129 <= 3` (a 900 s kill under the pin settings,
+# which run with no wall clock). Each is a function of `v` alone, and `v`
+# ranges over at most 2^64 values whose decimal digits Nim renders with a
+# leading `-` for a negative value (`$low(int)` is `-9223372036854775808`), so
+# each is restated here as a bit-vector formula, exact for every value: the
+# digit count is an `ite` chain over `v`'s powers-of-ten thresholds, and the
+# byte order of two renderings is that of their magnitudes' digit strings,
+# which is the order of `(m * 10^(L - digits(m)), m)` (the digit string padded
+# on the right with zeros to `L` digits, its length breaking a tie: a shorter
+# string equal so far is a prefix, and a prefix sorts first). `'-'` (0x2D)
+# sorts before every digit. A term that is not a registered rendering keeps
+# the string lowering.
+
+type IntRender = object
+  term: Z3String     ## the rendering (held: its address keys `intRenders`)
+  v: Z3AnyAst        ## the bit-vector it renders
+  width: int
+  signed: bool
+
+var intRenders {.threadvar.}: Table[uint, IntRender]
+  ## RFC-0016 INT-57. Every `$v` of a bit-vector lowered this run, keyed by
+  ## the rendering term's address (the entry holds the term, so the address
+  ## is not reused while it is listed, as `intOfBV`'s are).
+
+proc registerIntRender*(term: Z3String; v: Z3AnyAst; width: int;
+                        signed: bool) =
+  ## RFC-0016 INT-57. `term` is `$v`, `v` a `width`-bit bit-vector.
+  if width notin [8, 16, 32, 64]: return
+  intRenders[cast[uint](cast[pointer](term.raw))] =
+    IntRender(term: term, v: v, width: width, signed: signed)
+
+proc renderOf(t: Z3String): Option[IntRender] =
+  let k = cast[uint](cast[pointer](t.raw))
+  if k in intRenders and
+     cast[pointer](intRenders[k].term.raw) == cast[pointer](t.raw):
+    return some(intRenders[k])
+
+proc digitCount(x: uint64): int =
+  var y = x
+  result = 1
+  while y >= 10'u64:
+    y = y div 10'u64
+    inc result
+
+proc pow10Text(k: int): string = "1" & repeat('0', k)
+
+proc maxMagnitude(r: IntRender): uint64 =
+  ## The largest magnitude `r` renders: `2^(w-1)` (`low`) signed, `2^w - 1`.
+  if r.signed: 1'u64 shl (r.width - 1)
+  elif r.width == 64: high(uint64)
+  else: (1'u64 shl r.width) - 1
+
+proc bvNum(ctx: Z3Context; text: string; width: int): Z3AnyAst =
+  let s = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(width))
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring, s))
+
+proc rbool(ctx: Z3Context; raw: RawZ3Ast): Z3Bool = wrap[Z3Bool](ctx, raw)
+
+proc isNeg(ctx: Z3Context; r: IntRender): Z3Bool =
+  if not r.signed: return mkBool(ctx, false)
+  rbool(ctx, ctx.checkErr Z3_mk_bvslt(ctx.raw, r.v.raw,
+                                      bvNum(ctx, "0", r.width).raw))
+
+proc renderLen(ctx: Z3Context; r: IntRender): Z3Int =
+  ## `len($v)`: the digit count of `v`'s magnitude, one more when negative.
+  proc chain(ctx: Z3Context; top: int; below: proc (k: int): Z3Bool): Z3Int =
+    result = mkInt(ctx, top)
+    for k in countdown(top - 1, 1):
+      result = ite(below(k), mkInt(ctx, k), result)
+  let w = r.width
+  let v = r.v
+  if not r.signed:
+    return chain(ctx, digitCount(maxMagnitude(r)), proc (k: int): Z3Bool =
+      rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, v.raw,
+                                          bvNum(ctx, pow10Text(k), w).raw)))
+  let posLen = chain(ctx, digitCount(maxMagnitude(r) - 1),
+    proc (k: int): Z3Bool =
+      rbool(ctx, ctx.checkErr Z3_mk_bvslt(ctx.raw, v.raw,
+                                          bvNum(ctx, pow10Text(k), w).raw)))
+  let negLen = chain(ctx, digitCount(maxMagnitude(r)),
+    proc (k: int): Z3Bool =
+      rbool(ctx, ctx.checkErr Z3_mk_bvsgt(ctx.raw, v.raw,
+                                          bvNum(ctx, "-" & pow10Text(k), w).raw)))
+  ite(isNeg(ctx, r), mkInt(ctx, 1) + negLen, posLen)
+
+proc magnitude(ctx: Z3Context; r: IntRender; width: int): Z3AnyAst =
+  ## `|v|` as an unsigned `width`-bit vector (`-low` is `2^(w-1)` unsigned).
+  var m = r.v
+  if r.signed:
+    let neg = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvneg(ctx.raw, r.v.raw))
+    m = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+      isNeg(ctx, r).raw, neg.raw, r.v.raw))
+  if width > r.width:
+    m = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_zero_ext(ctx.raw,
+      cuint(width - r.width), m.raw))
+  m
+
+proc lexKey(ctx: Z3Context; m: Z3AnyAst; L, width: int): Z3AnyAst =
+  ## `m * 10^(L - digits(m))`: `m`'s digit string padded right to `L` digits.
+  ## The pad `e = L - digits(m)` is a small bit-vector (an `ite` chain over
+  ## `m`'s thresholds), and `m` is scaled by `10^(2^i)` for each set bit `i`
+  ## of `e`: about `log2(L)` constant multiplications a side, not one per
+  ## digit count. One full-width product per digit count (19 a side over two
+  ## 64-bit renderings) stalled Z3's step counter on `$a < $b` alone, and
+  ## narrowing each product to the bits its branch leaves `m` still took Z3
+  ## 2.3 s on a bare solver against 0.5 s for this form. Every partial
+  ## product divides the key, so none overflows `width`.
+  const ew = 8
+  var e = bvNum(ctx, "0", ew)
+  for k in countdown(L - 1, 1):
+    let below = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, m.raw,
+                                         bvNum(ctx, pow10Text(k), width).raw))
+    e = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, below.raw,
+      bvNum(ctx, $(L - k), ew).raw, e.raw))
+  let one = bvNum(ctx, "1", 1)
+  result = m
+  var i = 0
+  while (1 shl i) <= L - 1:
+    let bit = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw, cuint(i),
+                                                              cuint(i), e.raw))
+    let isSet = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, bit.raw, one.raw))
+    let scaled = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvmul(ctx.raw,
+      result.raw, bvNum(ctx, pow10Text(1 shl i), width).raw))
+    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, isSet.raw,
+                                                         scaled.raw, result.raw))
+    inc i
+
+proc renderCmp*(a, b: Z3String; op: IRBinop): Option[Z3Bool] =
+  ## RFC-0016 INT-57. `a op b` (`==`, `!=`, `<`, `<=`, `>`, `>=`, the byte
+  ## order Nim's `cmp` gives) when `a` and `b` are both renderings of
+  ## bit-vectors, as a bit-vector formula; `none` otherwise.
+  if op notin {bEq, bNe, bLt, bLe, bGt, bGe}: return
+  let ra = renderOf(a)
+  let rb = renderOf(b)
+  if ra.isNone or rb.isNone: return
+  if op in {bGt, bGe}:
+    return renderCmp(b, a, if op == bGt: bLt else: bLe)
+  let ctx = a.ctx
+  let x = ra.get
+  let y = rb.get
+  let L = max(digitCount(maxMagnitude(x)), digitCount(maxMagnitude(y)))
+  # bits for `10^L - 1` (a padded key) and one to spare
+  let width = (L * 33220 + 9999) div 10000 + 1
+  let mx = magnitude(ctx, x, width)
+  let my = magnitude(ctx, y, width)
+  let nx = isNeg(ctx, x)
+  let ny = isNeg(ctx, y)
+  let sameMag = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, mx.raw, my.raw))
+  if op in {bEq, bNe}:
+    let eq = (nx == ny) and sameMag
+    return some(if op == bEq: eq else: not eq)
+  let kx = lexKey(ctx, mx, L, width)
+  let ky = lexKey(ctx, my, L, width)
+  let keyLt = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, kx.raw, ky.raw))
+  let keyEq = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, kx.raw, ky.raw))
+  let tie = if op == bLt:
+              rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, mx.raw, my.raw))
+            else:
+              rbool(ctx, ctx.checkErr Z3_mk_bvule(ctx.raw, mx.raw, my.raw))
+  let lex = keyLt or (keyEq and tie)
+  some(ite(nx and not ny, mkBool(ctx, true),
+           ite(ny and not nx, mkBool(ctx, false), lex)))
+
+const z3OpIte = 0x104
+  ## `Z3_OP_ITE` in `z3_api.h`'s `Z3_decl_kind` (`Z3_OP_TRUE` 0x100, `FALSE`,
+  ## `EQ`, `DISTINCT`, `ITE`), the same in every Z3 nelli links. nim-z3's
+  ## `Z3DeclKindFFI` declares only the proof rules, so the kind is read as its
+  ## ordinal (`heap_model.nim` does the same).
+
+proc isIteApp*(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0016 INT-57. `t` is an application of Z3's `ite`, by its declaration
+  ## kind, not its display name.
+  if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
+  let app = Z3_to_app(ctx.raw, t)
+  Z3_get_app_num_args(ctx.raw, app) == 3 and
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) == z3OpIte
+
+proc litCases(t: Z3String; budget: var int):
+    Option[seq[tuple[c: Z3Bool, s: string]]] =
+  ## The literal values `t` takes, each with its condition, when `t` is a
+  ## tree of `ite`s over string literals (a merged `$b`, `$e`); `none` past
+  ## `budget` leaves or at any other term.
+  let ctx = t.ctx
+  let lit = literalLen(t)
+  if lit >= 0:
+    let bytes = literalStringBytes(t)
+    if not bytes.ok: return
+    dec budget
+    if budget < 0: return
+    return some(@[(c: mkBool(ctx, true), s: bytes.s)])
+  if not isIteApp(ctx, t.raw): return
+  let (_, args) = unpackApp(t)
+  let c = asZ3Bool(args[0])
+  let th = litCases(wrap[Z3String](ctx, args[1].raw), budget)
+  if th.isNone: return
+  let el = litCases(wrap[Z3String](ctx, args[2].raw), budget)
+  if el.isNone: return
+  var res: seq[tuple[c: Z3Bool, s: string]]
+  for x in th.get: res.add (c: c and x.c, s: x.s)
+  for x in el.get: res.add (c: (not c) and x.c, s: x.s)
+  some(res)
+
+proc isConcatApp(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0016 INT-57. `t` is a string concatenation (`str.++`), by its
+  ## declaration kind. `Z3_OP_SEQ_CONCAT` has no fixed ordinal across the Z3
+  ## builds nelli links (it follows an unnumbered run of the enum), so the
+  ## kind is read off a concatenation built here.
+  if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
+  let app = Z3_to_app(ctx.raw, t)
+  if Z3_get_app_num_args(ctx.raw, app) < 2: return false
+  let probe = mkStringVar(ctx, "__int57_cat_a") & mkStringVar(ctx, "__int57_cat_b")
+  let pk = Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw,
+                                                     Z3_to_app(ctx.raw, probe.raw)))
+  Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)) == pk
+
+proc strLenOpt(t: Z3String): Option[Z3Int] =
+  ## `len(t)` without the string when `t` is a rendering (`renderLen`), a
+  ## literal, or an `ite` tree over those; a concatenation with such a part
+  ## (`"ab" & $t`, `s.add $t`) is the sum of its parts' lengths, the others
+  ## kept as `str.len` (the theory's own identity); `none` otherwise.
+  let ctx = t.ctx
+  let r = renderOf(t)
+  if r.isSome: return some(renderLen(ctx, r.get))
+  let lit = literalLen(t)
+  if lit >= 0: return some(mkInt(ctx, lit))
+  if isConcatApp(ctx, t.raw):
+    let (_, parts) = unpackApp(t)
+    var any = false
+    var sum = mkInt(ctx, 0)
+    for i, part in parts:
+      let ps = wrap[Z3String](ctx, part.raw)
+      let o = strLenOpt(ps)
+      if o.isSome and literalLen(ps) < 0: any = true
+      let l = if o.isSome: o.get else: len(ps)
+      sum = if i == 0: l else: sum + l
+    if any: return some(sum)
+    return
+  if not isIteApp(ctx, t.raw): return
+  let (_, args) = unpackApp(t)
+  let th = strLenOpt(wrap[Z3String](ctx, args[1].raw))
+  if th.isNone: return
+  let el = strLenOpt(wrap[Z3String](ctx, args[2].raw))
+  if el.isNone: return
+  some(ite(asZ3Bool(args[0]), th.get, el.get))
+
+proc strLenOf*(t: Z3String): Z3Int =
+  ## RFC-0016 INT-57. `len(t)`, restated without the string when `t` is a
+  ## rendering of a bit-vector or an `ite` tree over renderings and
+  ## literals (`strLenOpt`), else `str.len(t)`. Exact either way.
+  let o = strLenOpt(t)
+  if o.isSome: o.get else: len(t)
+
+proc litCmp*(a, b: Z3String; op: IRBinop): Option[Z3Bool] =
+  ## RFC-0016 INT-57. `a op b` by cases when each of `a` and `b` takes one
+  ## of a few literal values (`litCases`; a merged `$b` or `$e`, at most 16
+  ## pairs), the order Nim's `cmp` gives decided here; `none` otherwise.
+  if op notin {bEq, bNe, bLt, bLe, bGt, bGe}: return
+  if literalLen(a) >= 0 and literalLen(b) >= 0: return
+  var budget = 4
+  let ca = litCases(a, budget)
+  if ca.isNone: return
+  budget = 4
+  let cb = litCases(b, budget)
+  if cb.isNone: return
+  var res = mkBool(a.ctx, false)
+  for x in ca.get:
+    for y in cb.get:
+      let c = cmp(x.s, y.s)
+      let holds = case op
+        of bEq: c == 0
+        of bNe: c != 0
+        of bLt: c < 0
+        of bLe: c <= 0
+        of bGt: c > 0
+        else: c >= 0
+      if holds: res = res or (x.c and y.c)
+  some(res)
+
 proc resetStringSupport*() =
   ## The per-run reset of the split registry. `notInFormOverride` is a test
   ## hook and `linkedNotInForm` a probe of the linked Z3 (the same in every
@@ -427,3 +712,4 @@ proc resetStringSupport*() =
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   indexSplitOf = (ctx: Z3Context(nil), ids: initTable[int, int]())  ## RFC-0005 S8ag
   indexSplitCounter = 0                  ## RFC-0005 S8ag: reset split fresh-name counter
+  intRenders = initTable[uint, IntRender]()  ## RFC-0016 INT-57: the run's renderings

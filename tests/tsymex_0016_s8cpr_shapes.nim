@@ -250,6 +250,124 @@ proc seqEnum(a: int) =
 proc seqNested(a: int) =
   if @[@[a]] == @[@[4]]: symexTarget("hit")
 
+proc nestStore(x: int) =
+  var s = @[@[1, 2], @[3, 4]]
+  s[1][0] = x
+  if s[1][0] == 7 and s[1][1] == 4 and s[0][0] == 1 and s.len == 2 and
+     s[1].len == 2:
+    symexTarget("hit")
+
+proc nestStoreDead(x: int) =
+  var s = @[@[1, 2], @[3, 4]]
+  s[1][0] = x
+  if s[1][0] != x or s[0][0] != 1 or s[1][1] != 4: symexTarget("hit")
+
+proc nestOuterOob(i: int) =
+  var s = @[@[1, 2], @[3, 4]]
+  s[i][0] = 5
+  if s[i][0] == 5: symexTarget("hit")
+
+proc nestInnerOob(j: int) =
+  var s = @[@[1, 2], @[3]]
+  s[1][j] = 5
+  if s[1][j] == 5: symexTarget("hit")
+
+proc nestInBounds(i, j: int) =
+  # Both indexes in bounds: no IndexDefect.
+  var s = @[@[1, 2], @[3]]
+  if i >= 0 and i < 2 and j >= 0 and j < s[i].len:
+    s[i][j] = 5
+    if s[i][j] == 5: symexTarget("hit")
+
+proc nestAlias(x: int) =
+  # A `var` copy: a `let` of memory written later keeps its decline
+  # (`feUnsupportedOp`, whether ARC shares it is cursor inference's call).
+  var s = @[@[1, 2], @[3, 4]]
+  var t = s
+  var u = s[1]
+  s[1][0] = x
+  if t[1][0] == 3 and u[0] == 3 and s[1][0] == x and x == 9:
+    symexTarget("hit")
+
+proc nestAliasDead(x: int) =
+  var s = @[@[1, 2], @[3, 4]]
+  var t = s
+  var u = s[1]
+  s[1][0] = x
+  if t[1][0] != 3 or u[0] != 3: symexTarget("hit")
+
+proc nestRead(i: int) =
+  let s = @[@[1, 2], @[3]]
+  if i >= 0 and i < 2 and s[i].len == 1 and s[i][0] == 3: symexTarget("hit")
+
+proc nestReadDead(i: int) =
+  let s = @[@[1, 2], @[3]]
+  if i >= 0 and i < 2 and s[i].len == 1 and s[i][0] != 3: symexTarget("hit")
+
+proc nestNewSeq(x: int) =
+  var s = newSeq[seq[int]](2)
+  s[1].add x
+  if s[1].len == 1 and s[0].len == 0 and s[1][0] == 4: symexTarget("hit")
+
+proc nestNewSeqDead(x: int) =
+  var s = newSeq[seq[int]](2)
+  if s[0].len != 0 or s[1].len < 0: symexTarget("hit")
+
+suite "RFC-0016 PRC-34 / PRC-23: a seq of seqs":
+  test "native":
+    check native(nestStore(7)) == "hit"
+    check native(nestStore(8)) == "ran"
+    for v in [low(int), 0, 7, high(int)]:
+      check native(nestStoreDead(v)) == "ran"
+    check native(nestOuterOob(1)) == "hit"
+    check native(nestOuterOob(2)) == "IndexDefect"
+    check native(nestOuterOob(-1)) == "IndexDefect"
+    check native(nestInnerOob(0)) == "hit"
+    check native(nestInnerOob(1)) == "IndexDefect"
+    for i in -1 .. 2:
+      for j in -1 .. 2:
+        check native(nestInBounds(i, j)) in ["hit", "ran"]
+    check native(nestAlias(9)) == "hit"
+    for v in [low(int), 0, 9, high(int)]:
+      check native(nestAliasDead(v)) == "ran"
+    check native(nestRead(1)) == "hit"
+    check native(nestNewSeq(4)) == "hit"
+    check native(nestNewSeq(5)) == "ran"
+    check native(nestNewSeqDead(0)) == "ran"
+    for i in -1 .. 2:
+      check native(nestReadDead(i)) == "ran"
+  test "an in-bounds store: reached":
+    decides(nestStore, sxSat)
+  test "an in-bounds store: unreachable":
+    decides(nestStoreDead, sxUnsat)
+  test "an out-of-bounds outer index raises IndexDefect":
+    let r = symexFind(nestOuterOob, tRaisedExn("IndexDefect"))
+    checkpoint show(r.errors)
+    check r.status == sxRaised
+  test "an out-of-bounds inner index raises IndexDefect":
+    let r = symexFind(nestInnerOob, tRaisedExn("IndexDefect"))
+    checkpoint show(r.errors)
+    check r.status == sxRaised
+  test "the in-bounds outer index reaches the store":
+    decides(nestOuterOob, sxSat)
+  test "indexes checked in bounds raise nothing":
+    let r = symexFind(nestInBounds, tRaisedExn("IndexDefect"))
+    checkpoint show(r.errors)
+    check r.status == sxUnsat
+    decides(nestInBounds, sxSat)
+  test "a copy before the store keeps its value: reached":
+    decides(nestAlias, sxSat)
+  test "a copy before the store keeps its value: unreachable":
+    decides(nestAliasDead, sxUnsat)
+  test "a symbolic outer index reads an inner seq: reached":
+    decides(nestRead, sxSat)
+  test "a symbolic outer index reads an inner seq: unreachable":
+    decides(nestReadDead, sxUnsat)
+  test "newSeq of seqs, then add to an inner seq: reached":
+    decides(nestNewSeq, sxSat)
+  test "newSeq of seqs holds empty inner seqs":
+    decides(nestNewSeqDead, sxUnsat)
+
 suite "RFC-0016 PRC-34: record ==":
   test "native":
     check native(tupEq(3, 3)) == "hit"

@@ -19408,6 +19408,15 @@ proc isTableElemCall(n: NimNode): bool =
     n[0].strVal == "[]" and n[1].kind != nnkEmpty and
     classifyType(unwrapHidden(n[1])).ty.kind == itTable
 
+proc nestedSeqElemRecv(recv: NimNode): bool =
+  ## RFC-0016 PRC-34 / PRC-23. `recv` is an element of a seq whose elements
+  ## are seqs (`s[i]` of a `seq[seq[T]]`), so `recv[j] = v` is a write
+  ## through a value chain, not a bare `isIndexAssign` receiver.
+  if recv.kind != nnkBracketExpr or recv.len < 2: return false
+  let outer = classifyType(recv[0]).ty
+  outer != nil and outer.kind == itSeq and seqBackedTy(outer) and
+    outer.seqElemTy != nil and seqCellTy(outer.seqElemTy).kind == itSeq
+
 proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## RFC-0005 S8s. Classifies `lhs` as one step of a value field chain. A
   ## variant arm field's `nnkCheckedFieldExpr` (Nim's discriminant check) is
@@ -19488,7 +19497,11 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
     # also what `addr xs[i].x`'s store is rewritten to (`elemAddrNode`). It was
     # the "unsupported nnkAsgn shape" decline. Stored as an array's symbolic
     # index is (`valueFieldWrite`).
-    if not seqBackedTy(recvTy) or not isTreeSeqElemTy(recvTy.seqElemTy):
+    # RFC-0016 PRC-34 / PRC-23: or an element of an inner seq of a seq of
+    # seqs (`s[i][j] = v`): the inner seq is read, stored into and written
+    # back to the outer seq, the outer index checked first, as Nim does.
+    if not seqBackedTy(recvTy) or
+       not (isTreeSeqElemTy(recvTy.seqElemTy) or nestedSeqElemRecv(recv)):
       return false
     var ixNode = t[1]
     while ixNode.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ixNode.len >= 1:

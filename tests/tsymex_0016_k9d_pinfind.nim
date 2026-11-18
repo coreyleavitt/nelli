@@ -14,6 +14,7 @@
 import std/[unittest, os, strutils, sequtils, tables, sets, algorithm]
 import nelli/symex
 import ./s8cu_helpers
+import ./k9d_hostile
 
 let pinTmp = getTempDir() / ("k9d_pinfind_" & $getCurrentProcessId())
 createDir(pinTmp)
@@ -215,6 +216,16 @@ proc sutHashSet(t: HashSet[int]) =
 
 proc sutSeqTuple(t: (seq[int], bool)) =
   if t[0].len > 5 and t[0].len < 3: symexTarget("hit")
+
+proc sutRangedTable(t: Table[string, range[0..100]]) =
+  if t["a"] == 100: symexTarget("hit")
+
+proc sutRangedSeq(xs: seq[range[1..100]]; i: int) =
+  symexAssume(i >= 0 and i < xs.len)
+  if xs[i] == 77: symexTarget("hit")
+
+proc sutRangedArr(a: array[3, range[10..20]]) =
+  if a[1] == 13: symexTarget("hit")
 
 
 suite "K9d: pinFind":
@@ -675,3 +686,49 @@ suite "K9d: pinFind":
     let at = r[0].domain.find('[')
     let n = parseInt(r[0].domain[at + 1 ..< r[0].domain.find(']')])
     check n <= pinFindCap and n > 1
+
+  test "a ranged element inside a collection is converted, not defaulted":
+    ## the witness tuple holds `seq[range[1..100]]` as `seq[int]`; a type
+    ## conversion does not turn it back, so the replay once ran the SUT on an
+    ## empty collection (163rev_table_elem, 163rev_seqelem_promoted_int)
+    let cs = convWitness(seq[range[1..100]], @[5, 7])
+    check cs.len == 2 and cs[0] == 5 and cs[1] == 7
+    expect RangeDefect:
+      discard convWitness(seq[range[1..100]], @[0])
+    let tb = convWitness(Table[string, range[0..100]], {"a": 100}.toTable)
+    check tb.len == 1 and tb["a"] == 100
+    let ca = convWitness(array[2, range[1..9]], [3, 4])
+    check ca[0] == 3 and ca[1] == 4
+    check convWitness(HashSet[range[1..9]], [3].toHashSet).len == 1
+    expect PinFailure:
+      discard convWitness(seq[string], 3)
+    expect PinFailure:   # a tuple holding a ranged container: loud, not a default
+      discard convWitness(tuple[s: seq[range[1..9]], n: int], (@[2], 5))
+    let rt = pinFind(sutRangedTable, tLabel("hit"))
+    check rt.status == sxSat
+    check recordsWith("/sutRangedTable/").len == 1
+    let rs = pinFind(sutRangedSeq, tLabel("hit"))
+    check rs.status == sxSat
+    check recordsWith("/sutRangedSeq/").len == 1
+    let ra = pinFind(sutRangedArr, tLabel("hit"))
+    check ra.status == sxSat
+    check recordsWith("/sutRangedArr/").len == 1
+
+  test "a suite's own overloads of add, len, items do not reach the domain":
+    ## k9d_hostile declares `add(var seq[int], int)`, `len(seq[int16])` and
+    ## `items(seq[int8])` and instantiates the domains under them first
+    let i = hostileInt()
+    check i.n == boundaryInts.values.len
+    check i.st == sxUnsat
+    let s = hostileSeqI16()
+    check s.st == sxUnsat and s.n > 1
+    check hostileSeqI8() == sxUnsat
+    check recordsWith("/sutIntNever/").len == 1
+    check recordsWith("/sutI16Never/").len == 1
+    check recordsWith("/sutI8Never/").len == 1
+
+  test "a seq[uint32] domain compiles beside a seq[seq[cuint]]":
+    ## `system.add`'s instance for the two is shared and its C does not
+    ## compile; the domain code appends with `domPut`
+    check hostileSeqU32() == sxUnsat
+    check recordsWith("/sutU32Never/").len == 1

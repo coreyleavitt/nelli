@@ -25,6 +25,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type
   Widget = object
@@ -125,52 +126,52 @@ proc sutSeqWidgetStillUnknown(xs: seq[Widget], y: int) =
 suite "symex RFC-chapulin-hardening M1 — seq[byte]/fixed-width-int witness readers":
 
   test "M1-1: seq[byte] resolves sxSat with exact witness (was sxUnknown pre-M1)":
-    let r = symexFind(sutByteSat, tLabel("byte_sat"))
+    let r = pinFind(sutByteSat, tLabel("byte_sat"))
     check r.status == sxSat
     check r.witness[0] == @[200'u8]
 
   test "M1-2: seq[byte] renders the boundary value 255 exactly (no truncation)":
-    let r = symexFind(sutByteMaxSat, tLabel("byte_max_sat"))
+    let r = pinFind(sutByteMaxSat, tLabel("byte_max_sat"))
     check r.status == sxSat
     check r.witness[0] == @[255'u8]
 
   test "M1-3: seq[uint32] resolves sxSat with exact witness":
-    let r = symexFind(sutUInt32Sat, tLabel("uint32_sat"))
+    let r = pinFind(sutUInt32Sat, tLabel("uint32_sat"))
     check r.status == sxSat
     check r.witness[0] == @[70000'u32]
 
   test "M1-4: seq[uint64] resolves sxSat with exact witness":
-    let r = symexFind(sutUInt64Sat, tLabel("uint64_sat"))
+    let r = pinFind(sutUInt64Sat, tLabel("uint64_sat"))
     check r.status == sxSat
     check r.witness[0] == @[5_000_000_000'u64]
 
   test "M1-5: seq[int16] resolves sxSat with a correctly sign-extended negative witness":
-    let r = symexFind(sutInt16Sat, tLabel("int16_sat"))
+    let r = pinFind(sutInt16Sat, tLabel("int16_sat"))
     check r.status == sxSat
     check r.witness[0] == @[-1'i16]
 
   test "M1-6: seq[int8] resolves sxSat with exact witness":
-    let r = symexFind(sutInt8Sat, tLabel("int8_sat"))
+    let r = pinFind(sutInt8Sat, tLabel("int8_sat"))
     check r.status == sxSat
     check r.witness[0] == @[-100'i8]
 
   test "M1-7: seq[int32] resolves sxSat with exact witness":
-    let r = symexFind(sutInt32Sat, tLabel("int32_sat"))
+    let r = pinFind(sutInt32Sat, tLabel("int32_sat"))
     check r.status == sxSat
     check r.witness[0] == @[-70000'i32]
 
   test "M1-8 (load-bearing UNSAT): seq[byte] element can never exceed 255":
-    let r = symexFind(sutByteImpossible, tLabel("byte_impossible"))
+    let r = pinFind(sutByteImpossible, tLabel("byte_impossible"))
     check r.status == sxUnsat
 
   test "M1-9 (nested-renderable guard): tuple[a: seq[byte], n: int] resolves sxSat (was sxUnknown pre-M1)":
-    let r = symexFind(sutNestedByteTuple, tLabel("nested_byte_tuple"))
+    let r = pinFind(sutNestedByteTuple, tLabel("nested_byte_tuple"))
     check r.status == sxSat
     check r.witness[0].a == @[42'u8]
     check r.witness[0].n == 7
 
   test "M1-10: a seq[string] param renders (RFC-0005 S8ar; it degraded before)":
-    let r = symexFind(sutSeqStringStillUnknown, tLabel("seq_string_still_unknown"))
+    let r = pinFind(sutSeqStringStillUnknown, tLabel("seq_string_still_unknown"))
     check r.status == sxSat
     for e in r.errors: check e.kind != feUnsupportedWitnessType
 
@@ -178,7 +179,7 @@ suite "symex RFC-chapulin-hardening M1 — seq[byte]/fixed-width-int witness rea
     # RFC-0005 S8bc: a seq of an object element is held leaf-split and its
     # witness is read element-wise (`readSeqAs[Widget]`), so the param no
     # longer degrades the run (`feUnsupportedWitnessType`).
-    let r = symexFind(sutSeqWidgetStillUnknown, tLabel("seq_widget_still_unknown"))
+    let r = pinFind(sutSeqWidgetStillUnknown, tLabel("seq_widget_still_unknown"))
     check r.status == sxSat
     for e in r.errors: check e.kind != feUnsupportedWitnessType
     if r.status == sxSat:

@@ -115,6 +115,30 @@ type
     flags*: seq[string]    ## pinCrash: the exact flags the probe was built with
     why*: string           ## skipCell: the reason
 
+# ---- closed primitives for the generic domain code (K9d-7) ------------------
+# An overloaded call in a generic routine (`add`, `len`, `items`, `contains`)
+# is an open symbol: Nim looks it up again where the routine is instantiated,
+# so a suite that declares its own `add(var seq[int], int)` or
+# `len(seq[int16])` (RFC-0005 S8c does, on purpose) silently replaces the
+# stdlib's inside the generated domain (S8c's int domains came out empty).
+# The domain code calls these instead: each is the only routine of its name
+# here (a closed symbol, bound where it is defined) and reaches the stdlib by
+# a qualified name. `domPut` also avoids `system.add`, whose instance for
+# `seq[seq[uint32]]` is shared with `seq[seq[cuint]]` (nim-z3 declares one)
+# and then does not compile in C: a Nim defect, the two element types being
+# one Nim type but two C types (reproducer in the K9d plan, K9d-7b).
+
+proc domPut*[T](s: var seq[T]; v: sink T) {.inline.} =
+  let n = system.len(s)
+  system.setLen(s, n + 1)
+  s[n] = v
+
+proc domLen*[T](s: seq[T]): int {.inline.} = system.len(s)
+
+proc domHas*[T](s: seq[T]; v: T): bool =
+  for i in 0 ..< system.len(s):
+    if s[i] == v: return true
+
 func exhaustive*[T](v: openArray[T]): Domain[T] =
   Domain[T](values: @v, exhaustive: true)
 
@@ -133,24 +157,24 @@ func showArg*[T](v: T): string =
   elif T is cstring: escape($v)
   elif T is seq or T is array:
     var parts: seq[string]
-    for e in v: parts.add showArg(e)
+    for i in low(v) .. high(v): domPut(parts, showArg(v[i]))
     (when T is seq: "@" else: "") & "[" & parts.join(", ") & "]"
   elif T is Table:
     var parts: seq[string]
-    for k, x in v: parts.add showArg(k) & ": " & showArg(x)
+    for k, x in tables.pairs(v): domPut(parts, showArg(k) & ": " & showArg(x))
     "{" & parts.join(", ") & "}"
   elif T is HashSet:
     var parts: seq[string]
-    for e in v: parts.add showArg(e)
+    for e in sets.items(v): domPut(parts, showArg(e))
     "{" & parts.join(", ") & "}"
   else: $v
 
 func describe*[T](d: Domain[T]): string =
   var vs: seq[string]
-  for i, v in d.values:
-    if i == 12: vs.add "..."; break
-    vs.add showArg(v)
-  (if d.exhaustive: "exhaustive" else: "sampled") & "[" & $d.values.len & "]{" &
+  for i in 0 ..< domLen(d.values):
+    if i == 12: domPut(vs, "..."); break
+    domPut(vs, showArg(d.values[i]))
+  (if d.exhaustive: "exhaustive" else: "sampled") & "[" & $domLen(d.values) & "]{" &
     vs.join(",") & "}"
 
 proc mkPinSettings(): SymexSettings =
@@ -508,14 +532,14 @@ proc pinJudge*[T, D](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
     if not res.trusted:
       pinFail("pinExact " & cell & ": sxUnsat is not trusted; errors: " &
               kindsOf(res.errors))
-    if dom.values.len == 0:
+    if domLen(dom.values) == 0:
       pinFail("pinExact " & cell & ": an empty domain refutes nothing")
     let hitAt = runD(dom.values, isHit)
     if hitAt.len > 0:
       pinFail("pinExact " & cell & ": walker says sxUnsat for " & rec.target &
               " but " & hitAt & " hits it natively")
     rec.verdict = pvExact
-    rec.native = "no domain value hit (" & $dom.values.len & ")"
+    rec.native = "no domain value hit (" & $domLen(dom.values) & ")"
   of sxUnknown:
     pinFail("pinExact " & cell & ": sxUnknown; errors: " & kindsOf(res.errors))
   writePinRecord(rec)
@@ -866,18 +890,18 @@ template prefixDomain*(T: typedesc): bool =
 proc thinDomain*[T](d: var Domain[T]) =
   ## A field of an aggregate too large to cross in full keeps its extremes and
   ## its middle (an ordinal's low end, zero and high end): at most nine values.
-  let n = d.values.len
+  let n = domLen(d.values)
   if n <= 16: return
   when prefixDomain(T):
     # the domain is in priority order: its prefix is the core
-    d.values.setLen(min(n, stringCore))
+    system.setLen(d.values, min(n, stringCore))
     d.exhaustive = false
     return
   var keep: seq[int]
   for i in [0, 1, 2, n div 2 - 1, n div 2, n div 2 + 1, n - 3, n - 2, n - 1]:
-    if i notin keep: keep.add i
+    if not domHas(keep, i): domPut(keep, i)
   var vs: seq[T]
-  for i in keep: vs.add d.values[i]
+  for j in 0 ..< domLen(keep): domPut(vs, d.values[keep[j]])
   d.values = vs
   d.exhaustive = false
 
@@ -908,7 +932,7 @@ proc domLeaf(cx: DomCtx; fields: seq[NimNode];
       newCall(ident"typeof", selector(f, cx.proto))))
   let thin = newStmtList()
   for d in ds:
-    sizes.add newDotExpr(newDotExpr(d, ident"values"), ident"len")
+    sizes.add newCall(bindSym"domLen", newDotExpr(d, ident"values"))
     thin.add newCall(ident"thinDomain", d)
   body.add quote do:
     if exceeds(@`sizes`, fieldProductFull): `thin`
@@ -933,8 +957,9 @@ proc domLeaf(cx: DomCtx; fields: seq[NimNode];
     setup.add newAssignment(selector(f, o),
       nnkBracketExpr.newTree(newDotExpr(ds[i], ident"values"),
                              nnkBracketExpr.newTree(row, newLit(i))))
+  let put = bindSym"domPut"
   setup.add quote do:
-    `vals`.add `o`
+    `put`(`vals`, `o`)
   body.add nnkForStmt.newTree(row, newDotExpr(fr, ident"rows"), setup)
   result = newStmtList(nnkBlockStmt.newTree(newEmptyNode(), body))
 
@@ -1077,37 +1102,40 @@ proc coreOf*[E](d: Domain[E]; limit: int; spread: var int): seq[E] =
   ## the SUT's literals); `d` cut to at most `limit` values, plus (for an ordinal other than a
   ## boolean or enum) the integer or char literals of the SUT and each one's
   ## neighbours, at most `collExtraMax` more
-  let n = d.values.len
+  let n = domLen(d.values)
   when E is string:
-    for i in 0 ..< min(n, 3): result.add d.values[i]
+    for i in 0 ..< min(n, 3): domPut(result, d.values[i])
     for s in stringHintsCur.strs:
-      if result.len >= limit: break
-      if s.len > 0 and s notin result and s in d.values: result.add s
-    spread = result.len
+      if domLen(result) >= limit: break
+      if s.len > 0 and not domHas(result, s) and domHas(d.values, s):
+        domPut(result, s)
+    spread = domLen(result)
   elif prefixDomain(E):
-    for i in 0 ..< min(n, limit): result.add d.values[i]
-    spread = result.len
+    for i in 0 ..< min(n, limit): domPut(result, d.values[i])
+    spread = domLen(result)
   else:
-    for i in coreIdx(n, limit): result.add d.values[i]
-    spread = result.len
+    let ci = coreIdx(n, limit)
+    for j in 0 ..< domLen(ci): domPut(result, d.values[ci[j]])
+    spread = domLen(result)
     when not (E is distinct) and (E is char or
          (E is Ordinal and not (E is enum) and not (E is bool))):
       var seeds: seq[int]
       when E is char:
         for s in stringHintsCur.strs:
-          if s.len == 1 and ord(s[0]) notin seeds and seeds.len < 2:
-            seeds.add ord(s[0])
+          if s.len == 1 and not domHas(seeds, ord(s[0])) and domLen(seeds) < 2:
+            domPut(seeds, ord(s[0]))
       else:
         for k in stringHintsCur.ints:
-          if k notin seeds and seeds.len < 2: seeds.add k
+          if not domHas(seeds, k) and domLen(seeds) < 2: domPut(seeds, k)
       var added = 0
-      for k in seeds:
+      for si in 0 ..< domLen(seeds):
+        let k = seeds[si]
         for x in [k, k - 1, k + 1]:
           let inRange =
             when E is SomeUnsignedInt: x >= 0 and uint64(x) <= uint64(high(E))
             else: x >= ord(low(E)) and x <= ord(high(E))
-          if inRange and added < collExtraMax and E(x) notin result:
-            result.add E(x)
+          if inRange and added < collExtraMax and not domHas(result, E(x)):
+            domPut(result, E(x))
             inc added
 
 proc coreOf*[E](d: Domain[E]; limit: int): seq[E] =
@@ -1239,25 +1267,25 @@ proc valueShapes*(l, vc: int): seq[seq[int]] =
 proc seqDomain[E](t: typedesc[seq[E]]): Domain[seq[E]] =
   var spread = 0
   let cv = coreOf(boundaryOf(E), collCoreMax, spread)
-  for row in seqShapes(cv.len, stringHintsCur.ints, spread):
+  for row in seqShapes(domLen(cv), stringHintsCur.ints, spread):
     var s = newSeq[E](row.len)
     for i, ix in row: s[i] = cv[ix]
-    result.values.add s
+    domPut(result.values, s)
 
 proc arrayDomain[I, E](t: typedesc[array[I, E]]): Domain[array[I, E]] =
   let ed = boundaryOf(E)
   var spread = 0
   let cv = coreOf(ed, collCoreMax, spread)
   var probe: array[I, E]
-  let (rows, full) = arrayShapes(probe.len, cv.len, spread)
+  let (rows, full) = arrayShapes(probe.len, domLen(cv), spread)
   for row in rows:
     var a: array[I, E]
     var j = 0
     for ix in low(I) .. high(I):
       a[ix] = cv[row[j]]
       inc j
-    result.values.add a
-  result.exhaustive = full and ed.exhaustive and cv.len == ed.values.len
+    domPut(result.values, a)
+  result.exhaustive = full and ed.exhaustive and domLen(cv) == domLen(ed.values)
 
 proc setDomain[E](t: typedesc[set[E]]): Domain[set[E]] =
   let ed = boundaryOf(E)
@@ -1267,35 +1295,36 @@ proc setDomain[E](t: typedesc[set[E]]): Domain[set[E]] =
   template put(v: set[E]) =
     block:
       let vv = v
-      if not seen.containsOrIncl(vv): result.values.add vv
+      if not seen.containsOrIncl(vv): domPut(result.values, vv)
+  let m = domLen(cv)
   put default(set[E])
   put full
-  for x in cv: put {x}
-  for i in 0 ..< cv.len:
-    for j in i + 1 ..< cv.len: put {cv[i], cv[j]}
-  for x in cv: put full - {x}
+  for i in 0 ..< m: put {cv[i]}
+  for i in 0 ..< m:
+    for j in i + 1 ..< m: put {cv[i], cv[j]}
+  for i in 0 ..< m: put full - {cv[i]}
   var all: set[E]
-  for x in cv: all.incl x
+  for i in 0 ..< m: all.incl cv[i]
   put all
-  result.exhaustive = ed.exhaustive and ed.values.len <= 4 and
-                      cv.len == ed.values.len
+  result.exhaustive = ed.exhaustive and domLen(ed.values) <= 4 and
+                      m == domLen(ed.values)
 
 proc tableDomain[K, V](t: typedesc[Table[K, V]]): Domain[Table[K, V]] =
   let kc = coreOf(boundaryOf(K), collCoreMax)
   let vc = coreOf(boundaryOf(V), 3)
-  for ko in orderShapes(kc.len):
-    for vs in valueShapes(ko.len, vc.len):
-      if result.values.len >= seqDomainCap: return
+  for ko in orderShapes(domLen(kc)):
+    for vs in valueShapes(ko.len, domLen(vc)):
+      if domLen(result.values) >= seqDomainCap: return
       var tb = initTable[K, V]()
       for i, ki in ko: tb[kc[ki]] = vc[vs[i]]
-      result.values.add tb
+      domPut(result.values, tb)
 
 proc hashSetDomain[E](t: typedesc[HashSet[E]]): Domain[HashSet[E]] =
   let cv = coreOf(boundaryOf(E), collCoreMax)
-  for ko in orderShapes(cv.len):
+  for ko in orderShapes(domLen(cv)):
     var hs = initHashSet[E]()
-    for ki in ko: hs.incl cv[ki]
-    result.values.add hs
+    for ki in ko: sets.incl(hs, cv[ki])
+    domPut(result.values, hs)
 
 macro underlyingName(T: typedesc): string =
   ## the type behind an alias, for the "no generated domain" message
@@ -1312,32 +1341,32 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
   elif T is enum:
     # every declared value; a holey enum's holes are not values of the type
     var vs: seq[T]
-    for v in declaredValues(T): vs.add v
+    for v in declaredValues(T): domPut(vs, v)
     exhaustive(vs)
   elif T is distinct:
     # the base type's domain, each value converted
     let base = boundaryOf(distinctBase(T))
     var vs: seq[T]
-    for v in base.values: vs.add T(v)
+    for i in 0 ..< domLen(base.values): domPut(vs, T(base.values[i]))
     Domain[T](values: vs, exhaustive: base.exhaustive)
   elif sizeof(T) == 1 and T is Ordinal:
     var vs: seq[T]
-    for v in low(T) .. high(T): vs.add v
+    for v in low(T) .. high(T): domPut(vs, v)
     exhaustive(vs)
   elif T is SomeUnsignedInt:
     var vs: seq[T]
     for x in [low(T), low(T) + 1, T(1), T(7), high(T) - 1, high(T)]:
-      if x notin vs: vs.add x
+      if not domHas(vs, x): domPut(vs, x)
     sampled(vs)
   elif T is Ordinal:
     let lo = ord(low(T))
     let hi = ord(high(T))
     var vs: seq[T]
     if hi div 2 - lo div 2 <= 128:
-      for v in low(T) .. high(T): vs.add v
+      for v in low(T) .. high(T): domPut(vs, v)
       return exhaustive(vs)
     for x in [lo, lo + 1, -1, 0, 1, 7, hi - 1, hi]:
-      if x >= lo and x <= hi and T(x) notin vs: vs.add T(x)
+      if x >= lo and x <= hi and not domHas(vs, T(x)): domPut(vs, T(x))
     sampled(vs)
   elif T is string:
     sampled(stringDomainValues(stringHintsCur))
@@ -1382,10 +1411,52 @@ proc pinFindJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
              runD(hit, vals.len),
            "symexFind", d)
 
+proc convWitness*[T, W](t: typedesc[T]; x: W): T =
+  ## The walker's witness value `x` as the declared parameter type `T`. The
+  ## witness tuple holds a `range` as its base type, also inside a container
+  ## (`seq[range[1..100]]` is witnessed as a `seq[int]`), which no type
+  ## conversion turns back: a container and a set are converted
+  ## element by element, each element checked against its range (a witness
+  ## outside it raises natively, as the SUT's own conversion would). A value
+  ## with no conversion fails the pin when it is replayed: it was never
+  ## replaced by a default, which could hit or miss by accident.
+  when compiles(T(x)):
+    T(x)
+  elif T is seq and W is seq:
+    type E = typeof(default(T)[0])
+    for i in 0 ..< system.len(x): domPut(result, convWitness(E, x[i]))
+  elif T is array and W is array:
+    type E = typeof(default(T)[low(T)])
+    var k = 0
+    for ix in low(T) .. high(T):
+      result[ix] = convWitness(E, x[low(x) + k])
+      inc k
+  elif T is Table and W is Table:
+    # the element types through the iterators (`genericParams` does not
+    # read a `range` argument)
+    type K = typeof(tables.keys(default(T)))
+    type V = typeof(tables.values(default(T)))
+    result = initTable[K, V]()
+    for k, v in tables.pairs(x): result[convWitness(K, k)] = convWitness(V, v)
+  elif T is HashSet and W is HashSet:
+    type E = typeof(sets.items(default(T)))
+    result = initHashSet[E]()
+    for e in sets.items(x): sets.incl(result, convWitness(E, e))
+  elif T is set and W is set:
+    type E = typeof(system.items(default(T)))
+    for e in system.items(x): result.incl convWitness(E, e)
+  else:
+    # (a tuple holding a ranged container lands here: a field-wise copy
+    # into it does not compile in C, the `seq[range]` field and the
+    # `seq[int]` one sharing a `=sink` instance)
+    raise newException(PinFailure, "pinFind: the witness's " & $W &
+      " has no conversion to the parameter type " & $T)
+
 template witnessAs*(T: typedesc; x: untyped): untyped =
-  ## the witness element as the declared parameter type; a type the walker
-  ## does not model (`cstring`: the SUT declines) has no witness to convert
-  when compiles(T(x)): T(x) else: default(T)
+  ## the witness element as the declared parameter type (`convWitness`); a
+  ## type the walker does not model (`cstring`: the SUT declines) is never
+  ## replayed, and a replay of one fails the pin
+  convWitness(T, x)
 
 proc fnParamTypes(fn: NimNode): seq[NimNode] =
   let ty = fn.getTypeInst
@@ -1458,7 +1529,7 @@ macro pinFind*(fn: typed; target: untyped;
     # The parameter's type as the witness tuple holds it (a type symbol
     # spliced from `getTypeInst` does not bind as a `typedesc` argument).
     doms.add newVarStmt(d, newCall(ident"boundaryOf", tsyms[i]))
-    sizesLit.add newDotExpr(newDotExpr(d, ident"values"), ident"len")
+    sizesLit.add newCall(bindSym"domLen", newDotExpr(d, ident"values"))
     exh = infix(exh, "and", newDotExpr(d, ident"exhaustive"))
     let part = newCall(ident"describe", d)
     desc = if i == 0: part else: infix(infix(desc, "&", newLit(" x ")), "&", part)
@@ -1475,7 +1546,7 @@ macro pinFind*(fn: typed; target: untyped;
   doms.add quote do:
     if pairsExceed(@`sizesLit`, pinFindCap): `thin`
   let sizesNow = nnkBracket.newTree()
-  for d in domSyms: sizesNow.add newDotExpr(newDotExpr(d, ident"values"), ident"len")
+  for d in domSyms: sizesNow.add newCall(bindSym"domLen", newDotExpr(d, ident"values"))
   doms.add quote do:
     let `rows` = fieldRows(@`sizesNow`, pinFindCap)
     clearStringHints()

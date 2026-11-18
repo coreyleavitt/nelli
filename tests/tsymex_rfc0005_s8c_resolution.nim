@@ -21,6 +21,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import ./s8c_foreign_marker   ## a user `symexAssume` that is not the marker
+import ./s8cu_helpers
 
 proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   for e in errs:
@@ -229,97 +230,97 @@ proc s8cReplaceChar(s: string) =
 suite "RFC-0005 S8c -- a user overload is walked, not modelled as the builtin":
 
   test "user `+` on a distinct int: reachable through the fee (was a false sxUnsat)":
-    let r = symexFind(s8cPlus, tLabel("s8c_plus"))
+    let r = pinFind(s8cPlus, tLabel("s8c_plus"))
     dump(r.errors)
     check r.status == sxSat
 
   test "user `<` on a distinct int: unreachable (was a false sxSat)":
-    let r = symexFind(s8cLess, tLabel("s8c_less"))
+    let r = pinFind(s8cLess, tLabel("s8c_less"))
     dump(r.errors)
     check r.status == sxUnsat
 
   test "user prefix `-` on a distinct int: reachable (was a false sxUnsat)":
-    let r = symexFind(s8cNeg, tLabel("s8c_neg"))
+    let r = pinFind(s8cNeg, tLabel("s8c_neg"))
     dump(r.errors)
     check r.status == sxSat
 
   test "user `+=` on a distinct int: unreachable (was a false sxSat)":
-    let r = symexFind(s8cAugAssign, tLabel("s8c_augassign"))
+    let r = pinFind(s8cAugAssign, tLabel("s8c_augassign"))
     dump(r.errors)
     check r.status == sxUnsat
 
   test "user `inc` on a distinct int: unreachable (pin: already walked pre-S8c)":
-    let r = symexFind(s8cInc, tLabel("s8c_inc"))
+    let r = pinFind(s8cInc, tLabel("s8c_inc"))
     dump(r.errors)
     check r.status == sxUnsat
 
   test "user `==` on an object: reachable (was a false sxUnsat)":
-    let r = symexFind(s8cEq, tLabel("s8c_eq"))
+    let r = pinFind(s8cEq, tLabel("s8c_eq"))
     dump(r.errors)
     check r.status == sxSat
 
   test "`!=` resolves through the user `==` too":
-    let r = symexFind(s8cNe, tLabel("s8c_ne"))
+    let r = pinFind(s8cNe, tLabel("s8c_ne"))
     dump(r.errors)
     check r.status == sxSat
 
   test "user non-generic `contains` beats sets.contains: unreachable (was a false sxSat)":
-    let r = symexFind(s8cContains, tLabel("s8c_contains"))
+    let r = pinFind(s8cContains, tLabel("s8c_contains"))
     dump(r.errors)
     check r.status == sxUnsat
 
   test "user non-generic `len` beats system.len: unreachable (was a false sxSat)":
-    let r = symexFind(s8cLen, tLabel("s8c_len"))
+    let r = pinFind(s8cLen, tLabel("s8c_len"))
     dump(r.errors)
     check r.status == sxUnsat
 
   test "user non-generic `items` beats system.items: reachable (was a false sxUnsat)":
-    let r = symexFind(s8cItems, tLabel("s8c_items"))
+    let r = pinFind(s8cItems, tLabel("s8c_items"))
     dump(r.errors)
     check r.status != sxUnsat
     check r.status == sxSat
 
   test "a user `converter` is walked (was declined as an unsupported expression)":
-    let r = symexFind(s8cConverter, tLabel("s8c_converter"))
+    let r = pinFind(s8cConverter, tLabel("s8c_converter"))
     dump(r.errors)
     check r.status == sxSat
 
   test "user non-generic `add` beats system.add: reachable (was a false sxUnsat)":
-    let r = symexFind(s8cAdd, tLabel("s8c_add"))
+    let r = pinFind(s8cAdd, tLabel("s8c_add"))
     dump(r.errors)
     check r.status == sxSat
 
   test "user string-receiver `find`: unreachable (was a false sxSat)":
-    let r = symexFind(s8cFind, tLabel("s8c_find"))
+    let r = pinFind(s8cFind, tLabel("s8c_find"))
     dump(r.errors)
     check r.status == sxUnsat
 
   test "a user proc named `symexAssume` is not the marker: reachable (was a false sxUnsat)":
-    let r = symexFind(s8cForeignAssume, tLabel("s8c_foreign_assume"))
+    let r = pinFind(s8cForeignAssume, tLabel("s8c_foreign_assume"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[0] == 2
 
 suite "RFC-0005 S8c -- strutils.replace is the all-occurrences model":
   test "replace is not first-occurrence (was a false sxSat)":
-    let r = symexFind(s8cReplaceFirst, tLabel("s8c_replace_first"))
+    let r = pinFind(s8cReplaceFirst, tLabel("s8c_replace_first"))
     dump(r.errors)
     check r.status != sxSat
 
   test "replace reaches the all-occurrences value":
-    let r = symexFind(s8cReplaceAll, tLabel("s8c_replace_all"))
+    let r = pinFind(s8cReplaceAll, tLabel("s8c_replace_all"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[0] == "foofoo"
 
   test "an empty sub returns s unchanged: clean sxUnsat (was a false sxSat)":
-    let r = symexFind(s8cReplaceEmptySub, tLabel("s8c_replace_empty_sub"))
+    let r = pinFind(s8cReplaceEmptySub, tLabel("s8c_replace_empty_sub"))
     dump(r.errors)
     check r.status == sxUnsat
     check r.errors.len == 0
 
   test "the char overload replaces every occurrence (never a false sxSat)":
-    let r = symexFind(s8cReplaceChar, tLabel("s8c_replace_char"))
+    let r = pinFind(s8cReplaceChar, tLabel("s8c_replace_char"))
     dump(r.errors)
     check r.status != sxSat
 
@@ -336,13 +337,13 @@ suite "RFC-0005 S8c -- a stdlib generic over a user routine: closed by the eleme
   ## element ops turns one of them into a false verdict.
 
   test "system.== over an object with a user-`==` field: sxUnknown, recorded":
-    let r = symexFind(s8cFieldEq, tLabel("s8c_field_eq"))
+    let r = pinFind(s8cFieldEq, tLabel("s8c_field_eq"))
     dump(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedOp)
 
   test "system.== over a tuple with a user-`==` element: sxUnknown, recorded":
-    let r = symexFind(s8cTupEq, tLabel("s8c_tupeq"))
+    let r = pinFind(s8cTupEq, tLabel("s8c_tupeq"))
     dump(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedOp)
@@ -351,7 +352,7 @@ suite "RFC-0005 S8c -- a stdlib generic over a user routine: closed by the eleme
     ## RFC-0005 S8ba: a `seq` of a distinct type is modelled now, so the
     ## decline is no longer the fragment's `seNestedSeqUnsupported`; the
     ## element comparison declines (`feUnsupportedOp`), still recorded.
-    let r = symexFind(s8cSeqEq, tLabel("s8c_seqeq"))
+    let r = pinFind(s8cSeqEq, tLabel("s8c_seqeq"))
     dump(r.errors)
     check r.status == sxUnknown
     # RFC-0005 S8ba / S8bc: a seq of a distinct is modelled (it was the
@@ -360,7 +361,7 @@ suite "RFC-0005 S8c -- a stdlib generic over a user routine: closed by the eleme
     check r.errors.hasKind(feUnsupportedOp)
 
   test "sets.contains over a key with a user `==`/`hash`: sxUnknown, recorded":
-    let r = symexFind(s8cSetKey, tLabel("s8c_setkey"))
+    let r = pinFind(s8cSetKey, tLabel("s8c_setkey"))
     dump(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedWitnessType)
@@ -368,12 +369,12 @@ suite "RFC-0005 S8c -- a stdlib generic over a user routine: closed by the eleme
 suite "RFC-0005 S8c -- controls: the builtin models still apply to builtins":
 
   test "builtin `+` on int keeps its model (clean sxUnsat)":
-    let r = symexFind(s8cBuiltinPlus, tLabel("s8c_builtin_plus"))
+    let r = pinFind(s8cBuiltinPlus, tLabel("s8c_builtin_plus"))
     dump(r.errors)
     check r.status == sxUnsat
 
   test "strutils.contains keeps its model (clean sxUnsat)":
-    let r = symexFind(s8cBuiltinStrContains, tLabel("s8c_builtin_strcontains"))
+    let r = pinFind(s8cBuiltinStrContains, tLabel("s8c_builtin_strcontains"))
     dump(r.errors)
     check r.status == sxUnsat
 

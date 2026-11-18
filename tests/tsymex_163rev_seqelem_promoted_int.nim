@@ -32,6 +32,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 proc writePromotedParamIntoUnrangedSeq(xs: seq[int], i: int, x: range[0..100]) =
   ## `xs`'s element type carries NO declared range -- this crash is not
@@ -58,12 +59,12 @@ suite "#163 review R22 site 3 prerequisite -- storeSeqElem reconciles a promoted
   test "a promoted param written into an UNRANGED seq element does not crash the walker":
     ## Before the fix: sxUnknown, r.errors[0].kind == weInternalWalkerFault
     ## (an internal FieldDefect reconstructing `.bv64` on an svInt SymVal).
-    let r = symexFind(writePromotedParamIntoUnrangedSeq, tLabel("t"))
+    let r = pinFind(writePromotedParamIntoUnrangedSeq, tLabel("t"))
     check r.status == sxSat
     check r.errors.len == 0
 
   test "a promoted param written into a RANGED seq element does not crash the walker":
-    let r = symexFind(writePromotedParamIntoRangedSeq, tLabel("t"))
+    let r = pinFind(writePromotedParamIntoRangedSeq, tLabel("t"))
     check r.status == sxSat
     check r.errors.len == 0
 

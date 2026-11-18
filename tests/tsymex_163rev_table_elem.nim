@@ -33,6 +33,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 proc mkRange50to60(x: int): range[50..60] = range[50..60](x)
 
@@ -52,14 +53,14 @@ suite "#163 review R4 -- Table[string, range[lo..hi]] values reach the declared 
     proc probeBig(t: Table[string, range[0..100]]) =
       if t["a"] > 100:
         symexTarget("big")
-    let r = symexFind(probeBig, tLabel("big"))
+    let r = pinFind(probeBig, tLabel("big"))
     check r.status == sxUnsat
 
   test "the bounds are a refinement, not a ban -- an in-range target survives":
     proc probeEdge(t: Table[string, range[0..100]]) =
       if t["a"] == 100:
         symexTarget("edge")
-    let r = symexFind(probeEdge, tLabel("edge"))
+    let r = pinFind(probeEdge, tLabel("edge"))
     check r.status == sxSat
     if r.status == sxSat:
       check "a" in r.witness[0]
@@ -83,7 +84,7 @@ suite "#163 review R4 -- Table[string, range[lo..hi]] values reach the declared 
         else:
           if t.len == 1:
             symexTarget("hit")
-    let r = symexFind(probeUnread, tLabel("hit"))
+    let r = pinFind(probeUnread, tLabel("hit"))
     check r.status == sxSat
     if r.status == sxSat:
       check "a" in r.witness[0]
@@ -96,7 +97,7 @@ suite "#163 review R4 -- Table[string, range[lo..hi]] values reach the declared 
       if flag:
         if t["a"] == 55:
           symexTarget("hit2")
-    let r = symexFind(probeReadWinning, tLabel("hit2"))
+    let r = pinFind(probeReadWinning, tLabel("hit2"))
     check r.status == sxSat
     if r.status == sxSat:
       check "a" in r.witness[0]

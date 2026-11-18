@@ -12,6 +12,7 @@
 ## `family:generic:k9d/<file>/<fn>/<target>`, so the record says which suite
 ## and which call it evidences.
 import std/[unittest, os, strutils, sequtils, tables, sets, algorithm, math]
+import std/re
 import nelli/symex
 import ./s8cu_helpers
 import ./k9d_hostile
@@ -187,6 +188,23 @@ proc sutCstr(s: cstring) =
 # byte removed, which only a neighbour-aware domain reaches.
 proc sutNeighbour(s: string) =
   if s == "confi": symexTarget("hit")
+
+# --- K9d-9: regex patterns ---------------------------------------------------
+
+proc sutRxBound(s: string) =
+  ## hits only on six k's: `k{2,5}` matches a prefix, the whole is outside
+  if s.len == 6 and s.match(re"k{2,5}") and not s.match(re"^k{2,5}$"):
+    symexTarget("hit")
+
+proc sutRxUnsat(s: string) =
+  if s.len == 2 and s.match(re"[b-d]{2}") and s[0] notin {'b' .. 'd'}:
+    symexTarget("hit")
+
+proc sutRxSat(s: string) =
+  if s.len == 3 and s.match(re"x[0-9]y"): symexTarget("hit")
+
+proc sutRxOutside(s: string) =
+  if s.match(re"(.)\1") and s.len == 1: symexTarget("hit")
 
 # K9d-7: collection parameters (seq, array, set, openArray, Table, HashSet).
 type Quad = enum qA, qB, qC, qD
@@ -987,3 +1005,109 @@ suite "K9d: pinFind":
     check selectiveUnsat() == sxUnsat
     check recordsWith("/selSat/").len == 1
     check recordsWith("/selUnsat/").len == 1
+
+  test "regex literals are harvested as patterns, not as data":
+    let h = harvestLiterals(sutRxBound)
+    check h.pats == @["k{2,5}", "^k{2,5}$"]
+    check "k{2,5}" notin h.strs
+    check harvestLiterals(sutRxOutside).pats == @["(.)\\1"]
+
+  test "regex members: each construct's members match the pattern natively":
+    const pats = ["[a-z]+", "\\d{2,4}", "a|bc", "x.y", "(ab)*c", "[^0-9]?z",
+                  "a+?b", "[[:punct:]]", "\\x41\\s", "colou?r", "(?:p|q)r{0,2}",
+                  "[\\w-]", "\\.\\*", "(*UTF)\\x{e9}.", "(*LIMIT_MATCH=9)a{3}"]
+    for p in pats:
+      let r = parseRegex(p)
+      check r.ok
+      let mem = regexStages([p])[0]
+      check mem.len > 0
+      # a leading verb must stay first
+      var verbs = ""
+      var body = p
+      while body.startsWith("(*"):
+        let j = body.find(')')
+        verbs.add body[0 .. j]
+        body = body[j + 1 .. ^1]
+      let full = re(verbs & "(?:" & body & ")\\z")
+      for m in mem:
+        if not m.match(full):
+          checkpoint "pattern " & p & " member " & escape(m)
+          check false
+    let s = regexStages(["a{2,4}"])
+    check "aa" in s[0] and "aaa" in s[0] and "aaaa" in s[0]
+    check "a" in s[2] and "aaaaa" in s[2]           # min-1, max+1
+    let alt = regexStages(["cat|dog|e"])[0]
+    check "cat" in alt and "dog" in alt and "e" in alt
+    let cls = regexStages(["[d-f]"])
+    check "d" in cls[0] and "f" in cls[0]
+    check "c" in cls[2] and "g" in cls[2]            # just outside the class
+    check "" in regexStages(["a*"])[0]
+    check "x\ny" in regexStages(["x.y"])[2]          # dot as a newline
+    check "x\xC3\xA9y" in regexStages(["(*UTF)x.y"])[0]
+    check "x\xC3\xA9y" notin regexStages(["x.y"])[0]
+
+  test "regex boundaries: newline, CRLF, NUL and high bytes beside ^ and $":
+    let b = regexStages(["^ab$"])[1]
+    for v in ["ab\n", "\nab", "ab\r\n", "ab\0", "ab\xFF", "\x80ab", "", "\n"]:
+      check v in b
+    # PCRE's `$` matches before a final newline, `\z` does not
+    check "ab\n".match(re"^ab$") and not "ab\n".match(re"^ab\z")
+    let c = regexStages(["Ab"])[3]
+    check "AB" in c and "ab" in c
+    check regexStages(["\\d+"])[3].len == 0          # no letter, no case variant
+    let e = regexStages(["abc"])[4]
+    check "ac" in e and "abbc" in e and "ab\nc" in e and "abd" in e
+
+  test "patterns outside the subset fall back to the plain string domain":
+    for p in ["(.)\\1", "(?=a)b", "(?i)a", "a\\p{L}", "(?<n>a)"]:
+      let r = parseRegex(p)
+      check not r.ok and r.why.len > 0
+      check regexValues([p]).len == 0
+    let h = harvestLiterals(sutRxOutside)
+    setStringHints(h)
+    let d = boundaryOf(string)
+    setStringHints(StringHints(strs: h.strs, ints: h.ints))
+    let plain = boundaryOf(string)
+    clearStringHints()
+    check d.values == plain.values
+
+  test "the regex domain is bounded and deterministic":
+    var pats: seq[string]
+    for i in 0 ..< 60:
+      pats.add "(?:[a-" & $char(ord('b') + i mod 24) & "]{1," & $(i mod 7 + 1) &
+               "}|x" & $i & "y+)\\d?$"
+    let v = regexValues(pats)
+    check v.len <= regexDomainCap and v.len > 200
+    check v == regexValues(pats)
+    check v.deduplicate.len == v.len
+    check v.allIt(it.len <= 64)
+    setStringHints(StringHints(pats: pats))
+    let d = boundaryOf(string)
+    clearStringHints()
+    check d.values.len <= stringDomainCap
+    check d.values.deduplicate.len == d.values.len
+
+  test "a planted unsat claim over a quantifier's max+1 is refused":
+    type W = tuple[s: string]
+    let key = cellKey(faGeneric, "k9d9/rxbound")
+    let settled = Soundness(replay: rsNotNeeded)
+    let lie = SymexResult[W](status: sxUnsat, soundness: settled)
+    check "kkkkkk" notin boundaryOf(string).values
+    setStringHints(harvestLiterals(sutRxBound))
+    let dom = boundaryOf(string)
+    clearStringHints()
+    check "kkkkkk" in dom.values
+    expect PinFailure:
+      discard pinExactOn(sutRxBound, lie, key, domain = dom)
+
+  test "regex unsat and sat verdicts are pinned and record their constructs":
+    check pinFind(sutRxUnsat, tLabel("hit")).status == sxUnsat
+    let r = recordsWith("/sutRxUnsat/")
+    check r.len == 1
+    check "regex[1 patterns, 0 outside]{" in r[0].domain
+    check "class" in r[0].domain and "bound" in r[0].domain
+    check r[0].domain.allIt(it in {' ' .. '~'})
+    let s = pinFind(sutRxSat, tLabel("hit"))
+    check s.status == sxSat
+    check s.witness[0].match(re"x[0-9]y")
+    check recordsWith("/sutRxSat/").len == 1

@@ -12,7 +12,8 @@ import nelli/smt/admission
 from nelli/smt/errorkind import UbKind
 from nelli/smt/types import undefinedKinds, `$`
 import nelli/smt/buildprofile
-export admission
+import ./k9d_regex
+export admission, k9d_regex
 
 proc show*(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -748,6 +749,8 @@ type
     strs*: seq[string]   ## string and char literals of the SUT, in source order
     ints*: seq[int]      ## its small integer literals (length thresholds)
     nums*: seq[float64]  ## its float literals and integer literals, as floats
+    pats*: seq[string]   ## its regex literals (`re"..."`, `rex"..."`), which
+                         ## are patterns, not data (K9d-9, k9d_regex.nim)
 
 const
   stringDomainCap* = 2048
@@ -791,6 +794,16 @@ proc stringDomainValues*(h: StringHints): seq[string] =
   for l in lits:
     for i in 0 ..< min(l.len, strNeighbourMaxLen): put $l[i]
   for l in lits: put l
+  # the regex part (K9d-9): members, boundaries, structural near-misses and
+  # case variants first, the one-edit neighbours after the thresholds
+  let rx = regexStages(h.pats)
+  var rxLeft = regexDomainCap
+  template putRx(v: string) =
+    if rxLeft > 0 and result.len < stringDomainCap and not seen.containsOrIncl(v):
+      result.add v
+      dec rxLeft
+  for st in 0 .. 3:
+    for v in rx[st]: putRx v
   for u in strUtf8: put u
   var ks: seq[int]
   for k in h.ints:
@@ -798,6 +811,7 @@ proc stringDomainValues*(h: StringHints): seq[string] =
   for k in ks:
     for n in [k - 1, k, k + 1]: put 'a'.repeat(n)
   for n in strFixedLens: put 'a'.repeat(n)
+  for v in rx[4]: putRx v
   let near = lits.filterIt(it.len in 1 .. strNeighbourMaxLen)
   for l in near:                       # prefixes, suffixes
     for i in 1 ..< l.len:
@@ -1004,8 +1018,16 @@ proc harvestInto(n: NimNode; dir: string; h: var StringHints;
       let key = n.strVal & "@" & li.filename & ":" & $li.line
       if li.filename.parentDir == dir and not seen.containsOrIncl(key):
         harvestInto(n.getImpl, dir, h, seen)
-  of nnkCall, nnkCommand:
+  of nnkCall, nnkCommand, nnkCallStrLit:
     if n[0].kind == nnkSym and n[0].strVal in skipCalls: return
+    if n[0].kind == nnkSym and n[0].strVal in ["re", "rex"] and n.len >= 2:
+      var a = n[1]
+      while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and a.len > 0:
+        a = a[^1]
+      if a.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        if a.strVal notin h.pats: h.pats.add a.strVal
+        for c in n[2 .. ^1]: harvestInto(c, dir, h, seen)
+        return
     for c in n: harvestInto(c, dir, h, seen)
   else:
     for c in n: harvestInto(c, dir, h, seen)
@@ -1027,10 +1049,13 @@ proc hintsExpr(h: StringHints): NimNode =
   var nn = newNimNode(nnkBracket)
   for f in h.nums: nn.add newLit(cast[uint64](f))
   let nums = newCall(bindSym"floatsOfBits", nn)
+  var pp = newNimNode(nnkBracket)
+  for p in h.pats: pp.add newLit(p)
   nnkObjConstr.newTree(bindSym"StringHints",
     nnkExprColonExpr.newTree(ident"strs", nnkPrefix.newTree(ident"@", ss)),
     nnkExprColonExpr.newTree(ident"ints", nnkPrefix.newTree(ident"@", ii)),
-    nnkExprColonExpr.newTree(ident"nums", nums))
+    nnkExprColonExpr.newTree(ident"nums", nums),
+    nnkExprColonExpr.newTree(ident"pats", nnkPrefix.newTree(ident"@", pp)))
 
 macro harvestLiterals*(fn: typed): untyped =
   ## the SUT's string, char and small integer literals as `StringHints`
@@ -1715,7 +1740,8 @@ macro pinFind*(fn: typed; target: untyped;
   wbody.add newCall(bindSym("nativeRun", brOpen), used(wcall))
   # The domain: one generated domain per parameter, nested loops, capped.
   let doms = newStmtList()
-  doms.add newCall(bindSym("setStringHints", brOpen), hintsExpr(harvest(fn)))
+  let hints = harvest(fn)
+  doms.add newCall(bindSym("setStringHints", brOpen), hintsExpr(hints))
   var domSyms: seq[NimNode]
   var sizesLit = nnkBracket.newTree()
   var exh: NimNode = newLit(true)
@@ -1731,6 +1757,9 @@ macro pinFind*(fn: typed; target: untyped;
     let part = newCall(bindSym("describe", brOpen), d)
     desc = if i == 0: part else: infix(infix(desc, "&", newLit(" x ")), "&", part)
   if types.len == 0: desc = newLit("no parameters")
+  # which regex constructs the SUT's patterns put in the domain (K9d-9)
+  let rxs = regexSummary(hints.pats)
+  if rxs.len > 0: desc = infix(desc, "&", newLit(rxs))
   # The parameter product is run in full up to the cap; beyond it, an
   # all-pairs covering array over the parameters' domains (the product's
   # leading rows would otherwise leave the last parameters unvaried).

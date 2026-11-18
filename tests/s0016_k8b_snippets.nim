@@ -459,15 +459,13 @@ func bk(axis: AxisScope; key, row, why: string): Blocked =
   Blocked(axis: axis, key: key, row: row, why: why)
 
 const
-  int74Why = "a slice of a concatenation over `$t`, indexed (`($t & \"ab\")[0 .. 1][0]`), beside the accumulator: the sequence solver does not decide the target's unsat query (15.5M units in 60 s); under the pin settings the stall backstop ends it at 600 s, `sxUnknown`"
-  blockedRows*: seq[Blocked] = @[
-    ## INT-57 (walker 428) readmitted its twelve (magic `IntToStr`,
+  blockedRows*: seq[Blocked] = @[]
+    ## Empty. INT-57 (walker 428) readmitted its twelve (magic `IntToStr`,
     ## `Int64ToStr`, `BoolToStr`, `EqStr`, `LeStr`, `LtStr`, `LengthStr`,
     ## `ConStrStr`, `AppendStrStr`; typeclass `string`; typeop
-    ## `letCursor/string`, `fieldDefault/string`). Readmitting them moved
-    ## `Slice` onto a target its fragment cannot reach, which INT-74 is.
-    bk(axMagic, "Slice", "INT-74", int74Why),
-  ]
+    ## `letCursor/string`, `fieldDefault/string`); readmitting them moved
+    ## `Slice` onto a target its fragment cannot reach, INT-74, which
+    ## walker 431 readmitted. A new entry is `bk(axis, key, row, why)`.
 
 func isBlocked*(axis: AxisScope; key: string): bool =
   for b in blockedRows:

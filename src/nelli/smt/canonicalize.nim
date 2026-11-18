@@ -854,8 +854,15 @@ const renderAsChoicesVersion* = "12"
   ##   a solve it ends is `beSolverUndef` naming it, the walk stops, and the
   ##   run is `rdQueryTimeout`, not cached. Verdicts change from a hang to
   ##   exact. No key bytes change.
+  ## - RFC-0016 INT-57 / INT-74 (428->431; 429-430 are reserved for other W4
+  ##   work): a fixed-index byte of a rendering, and of a slice or a
+  ##   concatenation over one, lowers to a bit-vector formula (`strByteAt`),
+  ##   and a slice's length to SMT-LIB's definition over its base's length
+  ##   (`strLenOf`), so `($t & "ab")[0 .. 1][0]` holds no string. Verdicts
+  ##   change from `sxUnknown` (the stall backstop) to exact. No key bytes
+  ##   change.
 
-const symexWalkerVersion* = "428"
+const symexWalkerVersion* = "431"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

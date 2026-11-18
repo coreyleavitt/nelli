@@ -34,12 +34,12 @@ proc sutManyCubes(x, y, z, w: int) =
     if x * x * x + z * z * z == y * y * y: symexTarget("tc")
     if y * y * y + z * z * z == x * x * x: symexTarget("tc")
 
-proc sutSlice(a, b: int8) =
-  ## INT-74 (open): magic `Slice`'s axis program 35. `$t & "ab"` sliced and
-  ## indexed beside the accumulator; no input hits (the first byte is `-` or
-  ## a digit, so `acc` is 47 or 50..59), and the sequence solver does not
-  ## decide it (15.5M units in 60 s on c, at this walker and before it).
-  ## Under the pin settings it ran to the 900 s kill; the backstop ends it.
+proc sutSliceWide(a: int32) =
+  ## INT-74's shape over a 32-bit rendering, which the byte rewrite does not
+  ## restate (the 8-bit row is exact since walker 431 and pinned in
+  ## `tsymex_0016_int74_renderslice`): no input hits (the first byte is `-`
+  ## or a digit, so `acc` is 47 or 50..59), and the sequence solver is left
+  ## the `str.at` over `str.from_int` it did not decide for the 8-bit row.
   let t = int(a)
   var acc = 0
   let s = ($t & "ab")[0 .. 1]
@@ -99,20 +99,19 @@ suite "RFC-0016 INT-57 (A): the stall backstop with the wall clock off":
     # the slack is the walk's own work on a loaded host
     check secs < 7.0
 
-  test "INT-74's undecided slice declines named within the backstop":
+  test "a wide rendering's slice is never a wrong verdict, and ends within the backstop":
     let t0 = epochTime()
-    let r = symexFind(sutSlice, tLabel("hit"), noClock)
+    let r = symexFind(sutSliceWide, tLabel("hit"), noClock)
     let secs = epochTime() - t0
     checkpoint $r.status & " in " & $secs & " s; errors " & $r.errors
-    # never a wrong verdict; when INT-74 is fixed this is `sxUnsat`, trusted,
-    # and this check moves to the row's own pin
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == beSolverUndef and "solver stall backstop" in e.msg:
-        named = true
-    check named
-    check rdQueryTimeout in r.soundness.runDependence
+    check r.status in {sxUnknown, sxUnsat}
+    if r.status == sxUnknown:
+      var named = false
+      for e in r.errors:
+        if e.kind == beSolverUndef and "solver stall backstop" in e.msg:
+          named = true
+      check named
+      check rdQueryTimeout in r.soundness.runDependence
     check secs < 7.0
 
   test "a query the step bound decides keeps its exact verdict":

@@ -626,6 +626,48 @@ proc replaceAtPointsPlain(sp: RegexSpec; pr: PcreParse;
   regexPointSite(sp, pr, recv, by, mkInt(0), r, @[], declined = true)
   SymVal(kind: svString, str: r)
 
+proc lowerIntToStr*(operand: SymVal): SymVal =
+  ## `$n` of an int-typed `operand`: the walker's `iekIntToStr` term, and the
+  ## rendering registered for `strLenOf`, `renderCmp` and `strByteAt`.
+  ## Exported so the proofs (`tsymex_0016_int74_renderslice`,
+  ## `tsymex_0016_int57_orderproof`) state their claims over this term.
+  # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
+  # (`Z3_mk_int_to_str`), exposed by nim-z3 as `toStr` on `Z3Int`. Result is a
+  # decimal-string svString. (Z3's `int.to.str` is the empty string for a
+  # negative `n`.) strArgs = [n].
+  # An int param is a BV under the abstraction layer (ADR-0001), so coerce to
+  # Z3Int via `toZ3Int` (svInt passes through; a BV lifts via bv2int). The
+  # surrounding `$n == "lit"` is an equality goal (low F5 mixed-theory hang
+  # risk — F5's pathology was ORDERING goals over int2bv(bv2int(x))).
+  #
+  # RFC-0005 S8cb (item 5). SOUNDNESS: a value that may be negative is
+  # `"-"` and the digits of its magnitude, computed in Int (exact at
+  # `low(int)`). Z3's empty string made `$x == "-5"` a false `sxUnsat` and
+  # `$x == ""` a false `sxSat`.
+  let v = toZ3Int(operand)
+  let mayBeNegative =
+    case operand.kind
+    of svInt: true
+    of svBV8, svBV16, svBV32, svBV64: operand.signed
+    else: true
+  let rendered =
+    if mayBeNegative:
+      ite(v < mkInt(0), concat(mkString("-"), toStr(mkInt(0) - v)), toStr(v))
+    else:
+      toStr(v)
+  # RFC-0016 INT-57: the rendering of a bit-vector is registered, so its
+  # length and its order against another (`strLenOf`, `renderCmp`) are
+  # decided as bit-vector formulas, not by the sequence solver.
+  var bv = operand
+  if bv.kind == svDistinct: bv = ejectBase(bv)
+  if bv.kind == svInt:
+    let back = bvOfInt(bv)
+    if back.isSome: bv = back.get
+  if bv.kind in {svBV8, svBV16, svBV32, svBV64}:
+    registerIntRender(rendered, wrap[Z3AnyAst](rendered.ctx, rawAnyAstOf(bv)),
+                      bvKindWidth(bv.kind), bv.signed)
+  SymVal(kind: svString, str: rendered)
+
 proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for
   ## `iekStrLit` and `StrOpKinds`. Params: `env` and `e` are the same as
@@ -673,13 +715,14 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     requireStr(recv, "iekStrAt")
     let idx = lowerStrOperand(env, e.strArgs[1])
     let idxZi = toZ3Int(idx)
-    let strLenZi = len(recv.str)
+    let strLenZi = strLenOf(recv.str)      # RFC-0016 INT-74
     let inLoCond = idxZi >= mkInt(0)
     let inHiCond = idxZi < strLenZi
     let oob = not (inLoCond and inHiCond)
     lowerHooks.depositStrIndexOob(oob)
-    let code = toCode(at(recv.str, idxZi))
-    liftBV(intToBv[8](code, Z3BitVec[8]), false)
+    # RFC-0016 INT-74: a byte of a rendering (or of a slice or concatenation
+    # over one) at a fixed index is a bit-vector formula (`strByteAt`).
+    liftBV(strByteAt(recv.str, idxZi), false)
   of iekStrSubstr:
     # Phase 15 S3. `s[a..b]` → Z3 `(seq.extract s a (b-a+1))` (substr's
     # (offset, length) convention). Byte-offset slice. The parser already
@@ -760,7 +803,7 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
       return allocateSym(tString(), "__strSubstrBoundDegrade", fresh, false, @[])
     let lo = loSV.zi
     let hi = hiSV.zi
-    let lenS = len(recv.str)
+    let lenS = strLenOf(recv.str)          # RFC-0016 INT-74
     if e.strOp == "substr":
       # RFC-0005 S8g: `substr` CLAMPS (system.nim: `first = max(first, 0)`,
       # `L = max(min(last, high(s)) - first + 1, 0)`) and never raises:
@@ -1144,43 +1187,7 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     SymVal(kind: svString, str: concat(l.str, needleAsStr(r, "iekStrConcat")),
            strBuf: sbOwned)
   of iekIntToStr:
-    # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
-    # (`Z3_mk_int_to_str`), exposed by nim-z3 as `toStr` on `Z3Int`. Result is a
-    # decimal-string svString. (Z3's `int.to.str` is the empty string for a
-    # negative `n`.) strArgs = [n].
-    let operand = lowerStrOperand(env, e.strArgs[0])
-    # An int param is a BV under the abstraction layer (ADR-0001), so coerce to
-    # Z3Int via `toZ3Int` (svInt passes through; a BV lifts via bv2int). The
-    # surrounding `$n == "lit"` is an equality goal (low F5 mixed-theory hang
-    # risk — F5's pathology was ORDERING goals over int2bv(bv2int(x))).
-    #
-    # RFC-0005 S8cb (item 5). SOUNDNESS: a value that may be negative is
-    # `"-"` and the digits of its magnitude, computed in Int (exact at
-    # `low(int)`). Z3's empty string made `$x == "-5"` a false `sxUnsat` and
-    # `$x == ""` a false `sxSat`.
-    let v = toZ3Int(operand)
-    let mayBeNegative =
-      case operand.kind
-      of svInt: true
-      of svBV8, svBV16, svBV32, svBV64: operand.signed
-      else: true
-    let rendered =
-      if mayBeNegative:
-        ite(v < mkInt(0), concat(mkString("-"), toStr(mkInt(0) - v)), toStr(v))
-      else:
-        toStr(v)
-    # RFC-0016 INT-57: the rendering of a bit-vector is registered, so its
-    # length and its order against another (`strLenOf`, `renderCmp`) are
-    # decided as bit-vector formulas, not by the sequence solver.
-    var bv = operand
-    if bv.kind == svDistinct: bv = ejectBase(bv)
-    if bv.kind == svInt:
-      let back = bvOfInt(bv)
-      if back.isSome: bv = back.get
-    if bv.kind in {svBV8, svBV16, svBV32, svBV64}:
-      registerIntRender(rendered, wrap[Z3AnyAst](rendered.ctx, rawAnyAstOf(bv)),
-                        bvKindWidth(bv.kind), bv.signed)
-    SymVal(kind: svString, str: rendered)
+    lowerIntToStr(lowerStrOperand(env, e.strArgs[0]))
   of iekStrToInt:
     # Phase 15 S10a + S10b. `parseInt(s)` — both the DIGITS-PATH (S10a) and the
     # RAISES-PATH (S10b, now that E1–E6 shipped the exception walker).

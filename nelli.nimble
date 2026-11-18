@@ -1888,6 +1888,10 @@ task test, "Run the test suite":
             "tsymex_0016_w1p_probes",
             "tsymex_0016_int57_strlenstall",
             "tsymex_0016_int57_backstop",
+            # RFC-0016 INT-57 / INT-74: the rendering order proved per band; a
+            # byte and a slice of a rendering decided without strings.
+            "tsymex_0016_int57_orderproof",
+            "tsymex_0016_int74_renderslice",
             # RFC-0016 K2-0: the probe batch (SND-13, CRH-06, CRH-08, CRH-09, INT-11, INT-12, INT-15, INT-22, PND-13, W-19b, W-19c, W-22, W-24).
             "tsymex_0016_k20_probes",
             "tsymex_0016_k20_probes_child",

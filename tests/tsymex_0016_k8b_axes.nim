@@ -78,11 +78,10 @@ suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)
     let p = blockedProblems(wl)
     checkpoint p.join("\n")
     check p.len == 0
-    check blockedRows.len > 0
     for b in blockedRows:
       check b.why.len > 0
 
-  test "the INT-57..61 rows are readmitted (all closed)":
+  test "the INT-57..61 and INT-74 rows are readmitted (all closed)":
     for (a, k) in [(axStdlibBody, "math.round"), (axStdlibBody, "math.floor"),
                    (axMagic, "LengthArray"), (axStdlibBody, "math.trunc"),
                    (axMagic, "CharToStr"), (axMagic, "AppendStrCh"),
@@ -92,14 +91,13 @@ suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)
                    (axMagic, "LengthStr"), (axMagic, "ConStrStr"),
                    (axMagic, "AppendStrStr"), (axTypeClass, "string"),
                    (axTypeOp, "letCursor/string"),
-                   (axTypeOp, "fieldDefault/string")]:
+                   (axTypeOp, "fieldDefault/string"), (axMagic, "Slice")]:
       check not isBlocked(a, k)
       check streamSnippets(a).anyIt(it.key == k)
 
-  test "the INT-74 row is blocked against its row":
-    check isBlocked(axMagic, "Slice")
-    check blockedRows.anyIt(it.axis == axMagic and it.key == "Slice" and
-                            it.row == "INT-74")
+  test "no row is blocked (INT-74 readmitted magic `Slice`, walker 431)":
+    check blockedRows.len == 0
+    check not isBlocked(axMagic, "Slice")
     check not isBlocked(axMagic, "AddI")
 
   test "RED: an entry whose row closed must be readmitted":

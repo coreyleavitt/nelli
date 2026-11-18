@@ -25931,8 +25931,11 @@ type DupRaise = enum
 proc dupMayRaise(callee: NimNode): DupRaise =
   ## PRC-45: whether the compiler's graph has a raise edge after a call of
   ## `callee` (`canRaiseConservative`).
+  # A `proc`/`func` resolves through the nil-core; a method or a converter
+  # is a called routine too (its `getImpl` is not a walkable kind).
   if callee.kind != nnkSym or
-     symKind(callee) notin {nskProc, nskFunc, nskMethod, nskConverter}:
+     (resolveRoutineImpl(callee).isNil and
+      symKind(callee) notin {nskMethod, nskConverter}):
     return drUnknown
   let m = routineMagic(callee)
   if m.len == 0 or m in dupRaisingMagics: drMay else: drNever
@@ -26498,7 +26501,7 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
          (init.kind == nnkBracket and init.typeKind == ntyArray) or
          (init.kind in {nnkCall, nnkPrefix} and init.len > 0 and
           init[0].kind == nnkSym and
-          symKind(init[0]) in {nskProc, nskFunc} and
+          resolveRoutineImpl(init[0]) != nil and
           init.typeKind notin {ntyVar, ntyNone}):
         s.fresh.add (n[0], s.ids.idOf(n[0]))
     if n.len == 3:
@@ -26601,7 +26604,7 @@ proc dupFreshArg(a: NimNode): bool =
       if v.kind == nnkBracket and v.typeKind == ntySequence: return false
     true
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkCallStrLit:
-    a.len > 0 and a[0].kind == nnkSym and symKind(a[0]) in {nskProc, nskFunc}
+    a.len > 0 and a[0].kind == nnkSym and resolveRoutineImpl(a[0]) != nil
   of nnkConv, nnkHiddenStdConv:
     # PRC-47: a conversion of a value made there (`TE((D(v: k), 5))`) is
     # that value.
@@ -26908,10 +26911,13 @@ const dupLiveKinds = {nnkLetSection, nnkVarSection, nnkAsgn, nnkFastAsgn,
   nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkCast, nnkHiddenDeref,
   nnkDerefExpr, nnkCheckedFieldExpr, nnkObjDownConv, nnkObjUpConv,
   nnkChckRange, nnkChckRange64, nnkChckRangeF, nnkRange, nnkTryStmt,
-  nnkExceptBranch, nnkFinally, nnkWhileStmt, nnkForStmt, nnkProcDef,
-  nnkFuncDef, nnkLambda, nnkDo, nnkIteratorDef, nnkTemplateDef, nnkMacroDef,
-  nnkRefTy, nnkPtrTy, nnkBreakStmt, nnkContinueStmt}
+  nnkExceptBranch, nnkFinally, nnkWhileStmt, nnkForStmt,
+  nnkRefTy, nnkPtrTy, nnkBreakStmt, nnkContinueStmt} + nestedRoutineScanBoundary
   ## PRC-45. The kinds `dupLiveWalk` follows; any other is not followed.
+  ## A nested routine is `nestedRoutineScanBoundary` (N3): a `method` or a
+  ## `converter` is only allowed at top level, and a typed tree has no
+  ## `nnkDo`, so in a body it is the routine kinds the compiler's
+  ## `nodesToIgnoreSet` names.
   ## PRC-48: a `break` or `continue` is a node like any other on the clock
   ## (`computeLiveRanges` reads no control flow: its `else` arm).
   ## PRC-46: a loop (walked twice), a `try`, a nested routine that captures
@@ -26970,8 +26976,7 @@ proc dupLiveWalk(n, a, b: NimNode; st: var DupLive; call: NimNode = nil) =
     # PRC-47: a type expression (`newException`'s `(ref E)(msg: ...)`) is
     # the compiler's `nkType`: no time, no read.
     dec st.t
-  of nnkProcDef, nnkFuncDef, nnkLambda, nnkDo, nnkIteratorDef,
-     nnkTemplateDef, nnkMacroDef:
+  of nestedRoutineScanBoundary:
     # PRC-46: a nested routine is not followed (`nodesToIgnoreSet`); one
     # naming either local is read by `dupAliasCursor` before the walk.
     # PRC-47: an iterator, a template and a macro too (`nodesToIgnoreSet`).
@@ -27182,8 +27187,9 @@ proc dupAliasCursor(body, b, a, aInit: NimNode; bId, aId = ""):
     for v in dupDeclares(n): ids.declare(v)
     if n.kind in RoutineNodes:
       if n.kind in {nnkTemplateDef, nnkMacroDef}: return
-      if n.kind notin {nnkProcDef, nnkFuncDef, nnkLambda, nnkDo,
-                       nnkIteratorDef}:
+      # A `method` or a `converter` is only allowed at top level: never
+      # reached in a body, not followed (fail-closed).
+      if n.kind in {nnkMethodDef, nnkConverterDef}:
         if mentionsSym(n, a) or mentionsSym(n, b): other = true
         return
       for c in n: captures(c, true)

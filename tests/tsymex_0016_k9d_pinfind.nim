@@ -314,6 +314,71 @@ proc bitsOf(x: float32): uint32 = cast[uint32](x)
 proc hasBits[F](vs: seq[F]; x: F): bool =
   vs.anyIt(bitsOf(it) == bitsOf(x))
 
+# ---- the ref family (K9d-10) ----
+
+type
+  RNode = ref object
+    val: int
+    next: RNode
+  RHolder = object
+    tag: bool
+    cell: ref int
+
+proc sutRefNil(p: ref int) =
+  if p == nil: symexTarget("hit")
+
+proc sutRefVal(p: ref int) =
+  if p != nil and p[] == 7: symexTarget("hit")
+
+proc sutAliasWrite(p, q: ref int) =
+  ## hits only when `p` and `q` are one cell
+  if p != nil and q != nil:
+    p[] = 1
+    q[] = 2
+    if p[] == 2: symexTarget("hit")
+
+proc sutAliasNever(p, q: ref int) =
+  if p != nil and q != nil:
+    p[] = 1
+    q[] = 2
+    if p == q and p[] == 1: symexTarget("hit")
+
+proc sutTwin(p, q: ref int) =
+  ## two distinct cells holding one value
+  if p != nil and q != nil and p != q and p[] == q[]: symexTarget("hit")
+
+proc sutWriteBack(p: ref int) =
+  ## a write that would leak into the next run without the pool's restore
+  ## (a second run on the cell would hit)
+  if p != nil:
+    if p[] == 424242: symexTarget("hit")
+    p[] = 424242
+
+proc sutCycle(n: RNode) =
+  if n != nil and n.next == n: symexTarget("hit")
+
+proc sutSibling(a, b: RNode) =
+  if a != nil and b != nil and a != b and a.next == b: symexTarget("hit")
+
+proc sutNodeLink(a, b: RNode) =
+  if a != nil and b != nil and a.next == b and b.val == 3: symexTarget("hit")
+
+proc sutHolderAlias(h: RHolder; p: ref int) =
+  ## a field of a by-value parameter and a parameter are one cell
+  if h.cell != nil and h.cell == p: symexTarget("hit")
+
+proc sutPtrVal(p: ptr int) =
+  if p != nil and p[] == 7: symexTarget("hit")
+
+proc sutPtrShared(p, q: ptr int) =
+  if p != nil and p == q: symexTarget("hit")
+
+proc sutNodeNever(a, b: RNode) =
+  if a != nil and b != nil:
+    a.val = 1
+    b.val = 2
+    if a == b and a.val == 1: symexTarget("hit")
+
 
 suite "K9d: pinFind":
   test "boundaryOf: exhaustive for bool and a small ordinal, sampled for int":
@@ -595,7 +660,9 @@ suite "K9d: pinFind":
     check r[0].domain.allIt(it in {' ' .. '~'})
     check pinFind(sutStrLit, tLabel("hit")).status == sxUnsat
     # the walker declines a cstring parameter: returned as it came, no record
-    check pinFind(sutCstr, tLabel("hit")).status == sxUnknown
+    let cs = pinFind(sutCstr, tLabel("hit"))
+    check cs.status == sxUnknown
+    check cs.errors.named(feUnsupportedParamType)
     check recordsWith("/sutCstr/").len == 0
 
   test "a planted unsat claim over a literal's neighbour is refused":
@@ -1111,3 +1178,127 @@ suite "K9d: pinFind":
     check s.status == sxSat
     check s.witness[0].match(re"x[0-9]y")
     check recordsWith("/sutRxSat/").len == 1
+
+  # ---- the ref family (K9d-10) ----
+
+  test "boundaryOf ref: nil first, fresh cells over the pointee's core, one pool":
+    let d = boundaryOf(ref int)
+    check not d.exhaustive
+    check d.values[0] == nil
+    check d.values.countIt(it != nil) >= 2
+    # one pool per pointee type: a second call returns the same cells
+    let e = boundaryOf(ref int)
+    check e.values.len == d.values.len
+    for i in 0 ..< d.values.len: check e.values[i] == d.values[i]
+    # distinct cells holding one value (the twin)
+    var twin = false
+    for i in 1 ..< d.values.len:
+      for j in i + 1 ..< d.values.len:
+        if d.values[i][] == d.values[j][]: twin = true
+    check twin
+    check "nil" in describe(d) and "#" in describe(d)
+
+  test "a nil and a fresh-cell witness replay; a ref unsat is pinned":
+    let n = pinFind(sutRefNil, tLabel("hit"))
+    check n.status == sxSat and n.witness[0] == nil
+    let v = pinFind(sutRefVal, tLabel("hit"))
+    check v.status == sxSat and v.witness[0] != nil and v.witness[0][] == 7
+    check recordsWith("/sutRefNil/").len == 1
+    check recordsWith("/sutRefVal/").len == 1
+    check pinFind(sutAliasNever, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutAliasNever/").len == 1
+
+  test "a planted unsat claim only an aliased input refutes is refused":
+    type W = tuple[p: ref int, q: ref int]
+    let lie = SymexResult[W](status: sxUnsat, soundness: Soundness(replay: rsNotNeeded))
+    expect PinFailure:
+      discard pinExactOn(sutAliasWrite, lie, cellKey(faGeneric, "k9d10/alias"),
+                         domain = boundaryOf(ref int))
+    # and one only two distinct cells of one value refute
+    expect PinFailure:
+      discard pinExactOn(sutTwin, lie, cellKey(faGeneric, "k9d10/twin"),
+                         domain = boundaryOf(ref int))
+
+  test "the alias witness is one cell at both positions, replayed":
+    let r = pinFind(sutAliasWrite, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[0] != nil and r.witness[0] == r.witness[1]
+    check recordsWith("/sutAliasWrite/").len == 1
+
+  test "a write through a parameter does not leak into the next run":
+    check pinFind(sutWriteBack, tLabel("hit")).status == sxSat
+    check recordsWith("/sutWriteBack/").len == 1
+    let d = boundaryOf(ref int)
+    # the pin's domain runs wrote every cell; each is back to its value
+    check d.values.allIt(it == nil or it[] != 424242)
+    discard nativeRun(sutWriteBack(d.values[1]))
+    let again = nativeRun(sutWriteBack(d.values[1]))
+    check "hit" notin again.hits
+
+  test "boundaryOf a recursive ref object: a cycle and chains, bounded":
+    let d = boundaryOf(RNode)
+    check d.values[0] == nil
+    check d.values.len <= 16
+    check d.values.anyIt(it != nil and it.next == it)
+    check d.values.anyIt(it != nil and it.next != nil and it.next != it and
+                         it.next.next != nil)
+    type W = tuple[n: RNode]
+    let lie = SymexResult[W](status: sxUnsat, soundness: Soundness(replay: rsNotNeeded))
+    expect PinFailure:
+      discard pinExactOn(sutCycle, lie, cellKey(faGeneric, "k9d10/cycle"),
+                         domain = d)
+    type W2 = tuple[a: RNode, b: RNode]
+    let lie2 = SymexResult[W2](status: sxUnsat, soundness: Soundness(replay: rsNotNeeded))
+    expect PinFailure:
+      discard pinExactOn(sutSibling, lie2, cellKey(faGeneric, "k9d10/sibling"),
+                         domain = d)
+
+  test "a ref-object witness keeps its identity: a.next is b":
+    let r = pinFind(sutNodeLink, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[1] != nil and r.witness[0].next == r.witness[1]
+    check recordsWith("/sutNodeLink/").len == 1
+    check pinFind(sutNodeNever, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutNodeNever/").len == 1
+
+  test "a ref field of a by-value parameter shares the parameter's pool":
+    let h = boundaryOf(RHolder)
+    let p = boundaryOf(ref int)
+    check h.values.anyIt(it.cell != nil and it.cell == p.values[1])
+    proc viaHolder(h: RHolder) = sutHolderAlias(h, h.cell)
+    type WH = tuple[h: RHolder]
+    let lieH = SymexResult[WH](status: sxUnsat, soundness: Soundness(replay: rsNotNeeded))
+    expect PinFailure:
+      discard pinExactOn(viaHolder, lieH, cellKey(faGeneric, "k9d10/holder"),
+                         domain = h)
+    let r = pinFind(sutHolderAlias, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[0].cell != nil and r.witness[0].cell == r.witness[1]
+    check recordsWith("/sutHolderAlias/").len == 1
+
+  test "boundaryOf ptr: nil and the ref pool's cell addresses, shared":
+    let d = boundaryOf(ptr int)
+    let refs = boundaryOf(ref int)
+    check d.values[0] == nil
+    check d.values.len == refs.values.len
+    check cast[pointer](d.values[1]) == cast[pointer](refs.values[1])
+    check d.values[1][] == refs.values[1][]
+    type W = tuple[p: ptr int, q: ptr int]
+    let lie = SymexResult[W](status: sxUnsat, soundness: Soundness(replay: rsNotNeeded))
+    expect PinFailure:
+      discard pinExactOn(sutPtrShared, lie, cellKey(faGeneric, "k9d10/ptr"),
+                         domain = d)
+    let r = pinFind(sutPtrVal, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[0] != nil and r.witness[0][] == 7
+    check recordsWith("/sutPtrVal/").len == 1
+    check boundaryOf(pointer).values[0] == nil
+    check boundaryOf(pointer).values.len == boundaryOf(ptr int).values.len
+
+  test "two ref parameters cross within the bound and record sampled":
+    let r = recordsWith("/sutNodeNever/")
+    check r.len >= 1
+    let at = r[^1].domain.find('[')
+    let n = parseInt(r[^1].domain[at + 1 ..< r[^1].domain.find(']')])
+    check n > 1 and n <= 2048
+    check "sampled[" in r[^1].domain

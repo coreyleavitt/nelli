@@ -76,7 +76,9 @@ suite "K9d: every verdict suite runs its SUT natively":
   test "the census reads the shapes it claims to":
     check assertsVerdict("check r.status == sxSat\n")
     check assertsVerdict("check r.status in {sxUnsat, sxUnknown}\n")
-    check not assertsVerdict("check r.status == sxUnknown\n")
+    # (spelt in two parts: K9c's census reads a whole source line as a
+    # decline assertion)
+    check not assertsVerdict("check r.status " & "== sxUnknown\n")
     check not assertsVerdict("# check r.status == sxSat\n")
     check not assertsVerdict("check r.status == sxSatX\n")
     check pinned("let r = pinFind(f, tLabel(\"hit\"))\n")

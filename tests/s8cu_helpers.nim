@@ -157,6 +157,61 @@ func sampled*[T](v: openArray[T]): Domain[T] =
 const boundaryInts* = sampled([low(int), low(int) + 1, -1, 0, 1, 7,
                                high(int) - 1, high(int)])
 
+proc heapIdOf*(p: pointer): int
+  ## forward (K9d-10): a pool cell's number, -1 otherwise
+
+proc heapTypeIn(t: NimNode; seen: var seq[string]): bool
+
+proc heapFieldsIn(n: NimNode; seen: var seq[string]): bool =
+  case n.kind
+  of nnkIdentDefs:
+    heapTypeIn(n[^2], seen)
+  of nnkRecCase:
+    var found = heapTypeIn(n[0][^2], seen)
+    for i in 1 ..< n.len:
+      if heapFieldsIn(n[i][^1], seen): found = true
+    found
+  else:
+    var found = false
+    for c in n:
+      if heapFieldsIn(c, seen): found = true
+    found
+
+proc heapTypeIn(t: NimNode; seen: var seq[string]): bool =
+  ## the type (as a typed node) holds a ref, a ptr or a pointer
+  if t.kind == nnkEmpty: return false
+  let k = t.repr
+  if k in seen: return false
+  seen.add k
+  if t.kind == nnkSym and t.strVal == "pointer": return true
+  let impl = t.getTypeImpl
+  case impl.kind
+  of nnkRefTy, nnkPtrTy: true
+  of nnkSym: impl.strVal == "pointer"
+  of nnkObjectTy:
+    var found = heapFieldsIn(impl[2], seen)
+    if impl[1].kind == nnkOfInherit and heapTypeIn(impl[1][0], seen):
+      found = true
+    found
+  of nnkTupleTy, nnkTupleConstr:
+    var found = false
+    for c in impl:
+      let ft = if c.kind == nnkIdentDefs: c[^2] else: c
+      if heapTypeIn(ft, seen): found = true
+    found
+  of nnkBracketExpr:
+    var found = false
+    for i in 1 ..< impl.len:
+      if impl[i].kind in {nnkSym, nnkBracketExpr} and heapTypeIn(impl[i], seen):
+        found = true
+    found
+  else: false
+
+macro holdsHeap*(T: typedesc): bool =
+  ## the type holds a ref, a ptr or a pointer somewhere in its fields
+  var seen: seq[string]
+  newLit(heapTypeIn(T.getType[1], seen))
+
 func showArg*[T](v: T): string =
   ## `$` of a generated input; a distinct type shows as its base type
   ## (a string shows quoted and escaped: a record is text, and a generated
@@ -176,6 +231,23 @@ func showArg*[T](v: T): string =
     var parts: seq[string]
     for e in sets.items(v): domPut(parts, showArg(e))
     "{" & parts.join(", ") & "}"
+  elif T is ref or T is ptr or T is pointer:
+    # a pool cell by its number (K9d-10), a witness's own cell as "#w"; a
+    # non-object pointee's value is shown, an object's is not (a cycle)
+    if v == nil: "nil"
+    else:
+      var id = -1
+      {.cast(noSideEffect).}:
+        id = heapIdOf(cast[pointer](v))
+      let tag = if id >= 0: "#" & $id else: "#w"
+      when T is pointer: tag
+      elif typeof(v[]) is object: tag
+      else: tag & ":" & showArg(v[])
+  elif (T is object or T is tuple) and holdsHeap(T):
+    # `$` of an object reaches its ref fields, which have no `$`
+    var parts: seq[string]
+    for n, f in fieldPairs(v): domPut(parts, n & ": " & showArg(f))
+    "(" & parts.join(", ") & ")"
   else: $v
 
 func describe*[T](d: Domain[T]): string =
@@ -308,12 +380,17 @@ iterator pinRecords*(dir: string): PinRecord =
 
 # --- native evaluation -----------------------------------------------------
 
+proc restoreHeapDomain*()
+  ## forward (K9d-10, with the ref domains): every ref/ptr pool cell back to
+  ## its snapshot
+
 template nativeRun*(call: untyped): NativeRun =
   ## Runs `call` on this build with marker capture; records what it reached and
   ## the type name of an exception it raised.
   block:
     var nr: NativeRun
     let gate = symexAssumeGateOpen()
+    restoreHeapDomain()
     symexCaptureBegin()
     try:
       call
@@ -322,6 +399,7 @@ template nativeRun*(call: untyped): NativeRun =
     except CatchableError as e:
       nr.raised = $e.name
     nr.hits = symexCaptureEnd()
+    restoreHeapDomain()
     nr.rejected = symexAssumeGateClose(gate)
     if nr.rejected:
       # outside the walker's domain: nothing the run reached counts
@@ -773,8 +851,12 @@ const
 
 var stringHintsCur {.threadvar.}: StringHints
 
+proc newHeapEpoch()
+  ## forward (K9d-10): the ref pools are rebuilt over the new hints
+
 proc setStringHints*(h: StringHints) =
   stringHintsCur = h
+  newHeapEpoch()
 
 proc clearStringHints*() =
   stringHintsCur = StringHints()
@@ -1064,7 +1146,8 @@ macro harvestLiterals*(fn: typed): untyped =
 template prefixDomain*(T: typedesc): bool =
   ## a type whose generated domain is in priority order (its prefix is its core)
   T is string or T is cstring or T is seq or T is array or T is set or
-    T is Table or T is HashSet or T is SomeFloat
+    T is Table or T is HashSet or T is SomeFloat or T is ref or T is ptr or
+    T is pointer
 
 proc thinDomain*[T](d: var Domain[T]) =
   ## A field of an aggregate too large to cross in full keeps its extremes and
@@ -1516,6 +1599,134 @@ proc hashSetDomain[E](t: typedesc[HashSet[E]]): Domain[HashSet[E]] =
     for ki in ko: sets.incl(hs, cv[ki])
     domPut(result.values, hs)
 
+# --- the ref and ptr domains (K9d-10) ----------------------------------------
+#
+# A `ref T` domain is a POOL of heap cells, one pool per pointee type and per
+# `setStringHints` (built on first use, then reused), so two parameters, a field
+# and a parameter, or two elements of one collection that draw from it meet
+# the SAME cells: the parameter product holds both the aliased case (one cell
+# at both positions) and the distinct one. The pool, in priority order:
+#   nil;
+#   fresh cells, one per value of the pointee's own domain core;
+#   for a pointee holding a field of the pool's own type (`Node.next`): a cell
+#   whose such fields point back at itself (a cycle), a cell pointing at the
+#   first fresh cell (a chain of two, so a parameter can be the next of
+#   another) and a cell pointing at that one (a chain of three);
+#   a second cell holding the first core value (distinct cells, equal values).
+# While a pool is built its own type's fields are nil (a recursive pointee's
+# core is generated with its ref fields at nil, then linked as above).
+# Every cell is snapshotted once its pool is linked, and `nativeRun` restores
+# every snapshot before each run: a SUT that writes through a parameter does
+# not leak the write into the next run.
+# A `ptr T` domain is nil and the addresses of the `ref T` pool's cells (so a
+# `ptr T` and a `ref T` parameter can alias); `pointer` is nil and the
+# addresses of the `ref int` pool's cells.
+
+const refCoreMax* = 4   ## fresh cells per pool, one per pointee core value
+
+var heapRestores {.threadvar.}: seq[proc () {.closure.}]
+var heapIds {.threadvar.}: Table[pointer, int]
+var heapEpoch {.threadvar.}: int
+
+proc newHeapEpoch() =
+  ## A pool's pointee core holds the SUT's literals (`setStringHints`), so a
+  ## new set of hints starts new pools: the old cells are dropped from the
+  ## restore list (a value a suite still holds keeps its cell alive).
+  inc heapEpoch
+  heapRestores.setLen 0
+  heapIds.clear()
+
+proc restoreHeapDomain*() =
+  for i in 0 ..< system.len(heapRestores): heapRestores[i]()
+
+proc heapIdOf*(p: pointer): int =
+  heapIds.getOrDefault(p, -1)
+
+proc registerCell(p: pointer; restore: proc () {.closure.}) =
+  ## (not generic: bound here, whatever `add` or `len` a suite declares)
+  heapIds[p] = heapIds.len
+  heapRestores.add restore
+
+proc snapshotOf[R](r: R): proc () {.closure.} =
+  ## restores `r[]` to what it holds now (a proc of its own per cell: a
+  ## closure made in a loop would share the loop's one environment)
+  let saved = r[]
+  result = proc () = r[] = saved
+
+proc linkSelfFields[R](x: R; to: R) =
+  ## every field of `x[]` of the pool's own type `R` set to `to`
+  for _, f in fieldPairs(x[]):
+    when f is R: f = to
+
+template selfLinked(R: typedesc): bool =
+  ## the pointee holds a field of type `R` (a recursive type)
+  block:
+    var found = false
+    var probe: typeof(default(R)[])
+    for _, f in fieldPairs(probe):
+      when f is R: found = true
+    found
+
+proc refDomain[R: ref](t: typedesc[R]): Domain[R] =
+  var pool {.global.}: seq[R]
+  var state {.global.}: int   # 0 unbuilt, 1 being built, 2 built
+  var epoch {.global.}: int
+  if state == 2 and epoch != heapEpoch: state = 0
+  if state == 1:
+    # the pointee's own core asks for this pool while it is built: nil
+    return Domain[R](values: @[R(nil)], exhaustive: false)
+  if state == 0:
+    state = 1
+    epoch = heapEpoch
+    type P = typeof(default(R)[])
+    # an integer pointee keeps its eight boundary points (zero, -1 and 7
+    # among them) plus the SUT's literals; any other its core
+    let core = coreOf(boundaryOf(P), when P is Ordinal: 8 else: refCoreMax)
+    var cells: seq[R]
+    proc cell(v: P): R =
+      new(result)
+      result[] = v
+    for i in 0 ..< domLen(core): domPut(cells, cell(core[i]))
+    var linked: seq[R]
+    when P is object:
+      when selfLinked(R):
+        if domLen(core) > 0:
+          let cyc = cell(core[0])
+          linkSelfFields(cyc, cyc)
+          let chain = cell(core[min(1, domLen(core) - 1)])
+          linkSelfFields(chain, cells[0])
+          let chain3 = cell(core[0])
+          linkSelfFields(chain3, chain)
+          linked = @[cyc, chain, chain3]
+    var dup: seq[R]
+    if domLen(core) > 0: dup = @[cell(core[0])]
+    pool = @[R(nil)]
+    # priority order: nil, two fresh, the linked shapes, the rest, the twin
+    for i in 0 ..< min(2, domLen(cells)): domPut(pool, cells[i])
+    for i in 0 ..< domLen(linked): domPut(pool, linked[i])
+    for i in 2 ..< domLen(cells): domPut(pool, cells[i])
+    for i in 0 ..< domLen(dup): domPut(pool, dup[i])
+    for i in 1 ..< domLen(pool):
+      registerCell(cast[pointer](pool[i]), snapshotOf(pool[i]))
+    state = 2
+  Domain[R](values: pool, exhaustive: false)
+
+proc ptrDomain[Q: ptr](t: typedesc[Q]): Domain[Q] =
+  type P = typeof(default(Q)[])
+  let refs = refDomain(ref P)
+  for i in 0 ..< domLen(refs.values):
+    let r = refs.values[i]
+    # a cell's address is the ref's own (its "#k" is the cell's); the pool
+    # keeps the cell alive for the process
+    if r == nil: domPut(result.values, Q(nil))
+    else: domPut(result.values, cast[Q](addr r[]))
+  result.exhaustive = false
+
+proc pointerDomain[T: pointer](t: typedesc[T]): Domain[pointer] =
+  let ps = ptrDomain(ptr int)
+  for i in 0 ..< domLen(ps.values): domPut(result.values, cast[pointer](ps.values[i]))
+  result.exhaustive = false
+
 macro underlyingName(T: typedesc): string =
   ## the type behind an alias, for the "no generated domain" message
   newLit(T.getType[1].repr)
@@ -1539,6 +1750,12 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
     var vs: seq[T]
     for i in 0 ..< domLen(base.values): domPut(vs, T(base.values[i]))
     Domain[T](values: vs, exhaustive: base.exhaustive)
+  elif T is ref:
+    refDomain(T)
+  elif T is ptr:
+    ptrDomain(T)
+  elif T is pointer:
+    pointerDomain(T)
   elif sizeof(T) == 1 and T is Ordinal:
     var vs: seq[T]
     for v in low(T) .. high(T): domPut(vs, v)

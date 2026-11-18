@@ -1292,6 +1292,17 @@ suite "RFC-0016 K1a-ids: the work list is data":
   proc join(w: Worklist; a: seq[Allow]): seq[string] =
     joinIds(w, a, slices, ukeys, registered, testsDir, cellStates(), legacy)
 
+  test "every name on a nimble line holding several is registered":
+    # INT-32 registered `tparallel_int32_jitter` on a line it shares with
+    # three others; only one name per line was read, so none of them was.
+    let r = registeredTests("""
+      for f in ["tsmoke",
+                "tlaws", "tmetamorphic", "tparallel_int32_jitter",
+                "tpipeline"]:""")
+    check r == ["tsmoke", "tlaws", "tmetamorphic", "tparallel_int32_jitter",
+                "tpipeline"].toHashSet
+    check "tparallel_int32_jitter" in registered
+
   test "the committed work list, ids.txt and slice ids agree":
     let fails = join(wl, idsAllow)
     checkpoint fails.join("\n")

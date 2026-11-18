@@ -24,6 +24,7 @@ import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/errorkind
 from nelli/smt/admission import cellKey, axConstruct
+from nelli/smt/replayproc import replayForks
 from ./s8cu_helpers import pinNever, show, named
 import ./int31_ffi_a as fa
 import ./int31_ffi_b as fb
@@ -39,25 +40,43 @@ proc firstInt(f: SymexFinding): int =
     if n.kind == ckInteger: return int(n.intVal.toInt64)
   doAssert false, "no integer choice in " & $f.witnessChoices
 
+func claim(f: SymexFinding): string =
+  ## What a finding says about the program, without where it came from.
+  f.targetDesc & "|" & $f.status & "|" & $f.soundness.replay & "|" &
+    $f.soundness.witnessUnsafe
+
 template neverStale(sutA, sutB: untyped; settled = true) =
-  ## `sutA`'s run fills the database with a replay-confirmed claim whose
-  ## witness is safe to run; in `sutB` the same witness ends the process. Its
-  ## run against that database may not be served the claim as safe.
+  ## `sutA`'s run fills the database; in `sutB` the same witness ends the
+  ## process. Its run against that database may be served only the claim a
+  ## cold run of `sutB` makes: a cached claim about another body is stale.
+  ##
+  ## Where a replay forks (Linux, macOS), `sutA`'s claim is replay-confirmed
+  ## and safe, which is the claim INT-31 kept from being served to `sutB`.
+  ## Where it re-executes (Windows, `-d:nelliReplayReexec`), the child cannot
+  ## be handed a foreign routine or a proc value's target, so the replay is
+  ## refused (`rsRefused`): a claim that never ran the body, and that a cold
+  ## run of `sutB` makes as well.
   let db = inMemoryDatabase()
   let first = symexFindAllWitnesses(sutA, db)
   checkpoint "first: " & $first
-  var cold = false
+  var cold, refused = false
   for f in first:
     if f.status == sfSat and f.soundness.replay == rsConfirmed and
        not f.soundness.witnessUnsafe: cold = true
+    if f.status == sfSat and f.soundness.replay == rsRefused: refused = true
   # `settled = false`: the walk itself declines the SUT (its routes run code
   # it cannot read), so no claim about the body is ever made, nor cached.
-  check cold == settled
+  check cold == (settled and replayForks)
+  check refused == (settled and not replayForks)
   let second = symexFindAllWitnesses(sutB, db)
   checkpoint "second: " & $second
+  let fresh = symexFindAllWitnesses(sutB, inMemoryDatabase())
+  checkpoint "cold second: " & $fresh
+  var coldClaims: seq[string]
+  for f in fresh: coldClaims.add f.claim
   var stale = false
   for f in second:
-    if f.status == sfSat and f.fromCache and not f.soundness.witnessUnsafe:
+    if f.status == sfSat and f.fromCache and f.claim notin coldClaims:
       stale = true
   check not stale
   pinNever(cell, not stale, "a stale cached claim after a body change")

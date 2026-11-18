@@ -116,10 +116,22 @@ proc cellProblems*(r: WRow; universeKeys: HashSet[string]): seq[string] =
       result.add r.id & ": cell \"" & c & "\" is not a cell of the universe"
 
 proc registeredTests*(nimbleText: string): HashSet[string] =
+  ## Every quoted name on a line of a test list (a line that starts with a
+  ## quoted name, or opens the list with `for f in ["...`). A line may hold
+  ## several names, and the last one of a list ends in `]:` rather than `,`:
+  ## each is registered.
   for l in nimbleText.splitLines():
     let t = l.strip()
-    if t.startsWith("\"") and t.endsWith("\","):
-      result.incl t[1 ..< t.len - 2]
+    let open = t.find("in [\"")
+    if not t.startsWith("\"") and open < 0: continue
+    var i = if open >= 0: open else: 0
+    while i < t.len:
+      let a = t.find('"', i)
+      if a < 0: break
+      let b = t.find('"', a + 1)
+      if b < 0: break
+      result.incl t[a + 1 ..< b]
+      i = b + 1
 
 proc pinProblems*(r: WRow; registered: HashSet[string]; testsDir: string):
     seq[string] =

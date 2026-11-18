@@ -666,8 +666,17 @@ proc emitIRType*(t: IRType): NimNode =
   of itUninterp:
     newCall(bindSym"tUninterp", newLit(t.uninterpName),
             newLit(t.uninterpRefKey))   # RFC-0016 K9c follow-up
-  of itFloat32: newCall(bindSym"tFloat32")
-  of itFloat64: newCall(bindSym"tFloat64")
+  of itFloat32, itFloat64:
+    let base = newCall(if t.kind == itFloat32: bindSym"tFloat32"
+                       else: bindSym"tFloat64")
+    # RFC-0016 INT-77: a float range's bounds round-trip as `hasRange` does
+    # (the `itInt` arm below); as bits, so -0.0 and every edge survive.
+    if t.floatRange:
+      newCall(bindSym"withFloatRange", base,
+              newCall(bindSym"floatOfBits", newLit(cast[uint64](t.floatLo))),
+              newCall(bindSym"floatOfBits", newLit(cast[uint64](t.floatHi))))
+    else:
+      base
   of itDistinct:   ## Phase 15 G4: name + recursive base.
     newCall(bindSym"tDistinct", newLit(t.distinctName), emitIRType(t.distinctBase))
   of itRef:        ## Phase 15 R1a: ref + recursive pointee.

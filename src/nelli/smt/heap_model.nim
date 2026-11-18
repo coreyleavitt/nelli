@@ -128,6 +128,17 @@ proc rangeCondsIfNeeded*(v: SymVal, ty: IRType): seq[Z3Bool] =
       if zero.len == 2:
         return @[(conds[0] and conds[1]) or (zero[0] and zero[1])]
     conds
+  elif ty.kind in {itFloat32, itFloat64} and ty.floatRange:
+    # RFC-0016 INT-77: Nim's float range check is `lo <= x and x <= hi` in
+    # the base width, so the value set is the closed IEEE interval: NaN
+    # fails both comparisons, -0.0 passes wherever 0.0 does.
+    if v.kind == svFloat64:
+      @[v.fp64 >= mkFloat64(ty.floatLo), v.fp64 <= mkFloat64(ty.floatHi)]
+    elif v.kind == svFloat32:
+      @[v.fp32 >= mkFloat32(float32(ty.floatLo)),
+        v.fp32 <= mkFloat32(float32(ty.floatHi))]
+    else:
+      @[]
   else:
     @[]
 
@@ -3007,8 +3018,17 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svRef, refAst: refAny, refPointee: pointee)
     else:
       SymVal(kind: svPtr, ptrAst: refAny, ptrFamily: true, ptrPointee: pointee)
-  of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
-  of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
+  of itFloat32, itFloat64:
+    let v =
+      if ty.kind == itFloat32:
+        SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
+      else:
+        SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
+    # RFC-0016 INT-77: a float range's interval, wherever the type lands (a
+    # parameter, a field, an element), as the `itInt` arm above.
+    for c in rangeCondsIfNeeded(v, ty):
+      pcOut.add c
+    v
   of itDistinct:   ## Phase 15 G4 (ADR-0008 D4): fresh uninterpreted sort.
     allocDistinctSym(ty, baseName, pcOut)
   of itVariant:

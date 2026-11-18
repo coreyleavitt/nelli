@@ -7347,6 +7347,16 @@ proc clampWitnessField(w: var RawWitness, path: string, fty: IRType) =
       w.intVals[path] = clampToDeclaredRange(w.intVals[path], fty)
     elif not fty.signed and w.uintVals.hasKey(path):
       w.uintVals[path] = uint64(clampToDeclaredRange(int64(w.uintVals[path]), fty))
+  elif fty.kind in {itFloat32, itFloat64} and fty.floatRange:
+    # RFC-0016 INT-77: an unread float-range cell, as an unread int one; a
+    # value outside the interval (NaN included) is replaced by its low bound
+    template clampF(x, lo, hi: untyped): untyped =
+      (if x >= lo and x <= hi: x else: lo)
+    if fty.kind == itFloat64 and w.float64Vals.hasKey(path):
+      w.float64Vals[path] = clampF(w.float64Vals[path], fty.floatLo, fty.floatHi)
+    elif fty.kind == itFloat32 and w.float32Vals.hasKey(path):
+      w.float32Vals[path] = clampF(w.float32Vals[path], float32(fty.floatLo),
+                                   float32(fty.floatHi))
 
 proc renderedSize(m: Z3Model; size: Z3Int): int =
   ## RFC-0005 S8f. A table/set size under the model. Allocation bounds it to
@@ -18624,10 +18634,12 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
           let typed = wrap[Z3Array[Z3Int, Z3Float32]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
           indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
+          rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)   # INT-77
         of itFloat64:   ## Phase 15 F9b
           let typed = wrap[Z3Array[Z3Int, Z3Float64]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
           indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
+          rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)   # INT-77
         of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
           let typed = wrap[Z3Array[Z3Int, Z3String]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]

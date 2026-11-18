@@ -397,6 +397,37 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
   result.lo = body[1].intVal
   result.hi = body[2].intVal
 
+proc floatBound(n: NimNode): Option[tuple[v: float64, f32: bool]] =
+  ## RFC-0016 INT-77. A float range bound as semcheck leaves it: a float
+  ## literal (its node kind names the width), a negated one, or one under a
+  ## conversion node. none for anything else (an int or char bound).
+  case n.kind
+  of nnkFloatLit, nnkFloat64Lit: some((n.floatVal.float64, false))
+  of nnkFloat32Lit: some((n.floatVal.float64, true))
+  of nnkPrefix:
+    if n.len == 2 and n[0].kind in {nnkIdent, nnkSym} and n[0].strVal == "-":
+      let b = floatBound(n[1])
+      if b.isSome: return some((-b.get.v, b.get.f32))
+    none(tuple[v: float64, f32: bool])
+  of nnkHiddenStdConv, nnkConv, nnkPar, nnkStmtListExpr:
+    if n.len > 0: floatBound(n[^1]) else: none(tuple[v: float64, f32: bool])
+  else: none(tuple[v: float64, f32: bool])
+
+proc classifyFloatRange(rangeNode: NimNode): Option[ClassifiedType] =
+  ## RFC-0016 INT-77. `range[lo .. hi]` over a float: the base float type
+  ## refined with the closed interval (`withFloatRange`). `parseRangeBracket`
+  ## read every bound as an integer, so a float range did not compile. The
+  ## width is the bounds' (`range[-1.5'f32 .. 2.5'f32]` is a float32 range);
+  ## the int `range` tuple stays unset, which feeds integer machinery only.
+  if rangeNode.len != 2 or rangeNode[1].kind != nnkInfix or
+     rangeNode[1].len != 3:
+    return none(ClassifiedType)
+  let lo = floatBound(rangeNode[1][1])
+  let hi = floatBound(rangeNode[1][2])
+  if lo.isNone or hi.isNone: return none(ClassifiedType)
+  let base = if lo.get.f32 and hi.get.f32: tFloat32() else: tFloat64()
+  some(unranged(base.withFloatRange(lo.get.v, hi.get.v)))
+
 proc rangeBaseType(bound: NimNode): IRType =
   ## Issue #162. A `range[lo .. hi]` is a SUBTYPE — of `int32` in
   ## `range[0'i32 .. 100_000'i32]`, of `int` in `range[0 .. 1000]`. Nim
@@ -1479,6 +1510,8 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   if resolved.kind == nnkBracketExpr and
      resolved.len == 2 and
      isBuiltinTypeHead(resolved[0], ["range"]):   ## RFC-0005 S8d
+    let fr = classifyFloatRange(resolved)   ## RFC-0016 INT-77
+    if fr.isSome: return fr.get
     let sub = classifyEnumSubrange(resolved)   ## RFC-0005 S8bv
     if sub.isSome: return sub.get
     let (lo, hi) = parseRangeBracket(resolved)
@@ -1613,6 +1646,8 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let ti = resolved.getTypeImpl
       if ti.kind == nnkBracketExpr and ti.len == 2 and
          isBuiltinTypeHead(ti[0], ["range"]):
+        let fr = classifyFloatRange(ti)   ## RFC-0016 INT-77
+        if fr.isSome: return fr.get
         let sub = classifyEnumSubrange(ti)
         if sub.isSome: return sub.get
     if impl.kind == nnkTypeDef and impl.len >= 3 and

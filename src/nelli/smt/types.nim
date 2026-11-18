@@ -504,8 +504,19 @@ type
         ## a Z3 sort mismatch (`weInternalWalkerFault`). "" for every other
         ## uninterpreted type.
     of itFloat32, itFloat64:
-      # Phase 15 F1: sort fully determined by the kind; no payload fields.
-      discard
+      # Phase 15 F1: sort fully determined by the kind.
+      floatRange*: bool        ## RFC-0016 INT-77. A float `range[lo..hi]`:
+      floatLo*: float64        ## Nim admits `x` when `lo <= x and x <= hi`
+      floatHi*: float64        ## (an IEEE comparison in the base width), so
+                               ## the value set is that closed interval: NaN
+                               ## is outside it and -0.0 is inside whenever
+                               ## 0.0 is. The bounds are held as float64,
+                               ## which holds a float32 bound exactly. As
+                               ## `hasRange` on `itInt`: not part of `==`
+                               ## (a refinement, not a shape), part of the
+                               ## canonical form, asserted wherever a value
+                               ## of the type is allocated or read from a
+                               ## backing store (`rangeCondsIfNeeded`).
     of itDistinct:
       distinctName*: string   ## Phase 15 G4: the Nim distinct type name; the
                               ## Z3 uninterpreted-sort name (e.g. "Meters").
@@ -3096,6 +3107,21 @@ proc withRange*(ty: IRType, lo, hi: int64): IRType =
          hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName,
          typeKey: ty.typeKey)
 
+func floatOfBits*(b: uint64): float64 = cast[float64](b)
+  ## RFC-0016 INT-77: a float literal carried through emitted code by its bits
+
+proc withFloatRange*(ty: IRType, lo, hi: float64): IRType =
+  ## RFC-0016 INT-77. Refine an `itFloat32`/`itFloat64` with the bounds of
+  ## the float `range` it came from; a fresh `IRType`, as `withRange`.
+  doAssert ty.kind in {itFloat32, itFloat64},
+    "withFloatRange: not a float: " & $ty.kind
+  if ty.kind == itFloat32:
+    IRType(kind: itFloat32, floatRange: true, floatLo: lo, floatHi: hi,
+           typeKey: ty.typeKey)
+  else:
+    IRType(kind: itFloat64, floatRange: true, floatLo: lo, floatHi: hi,
+           typeKey: ty.typeKey)
+
 proc withEnumName*(ty: IRType, name: string): IRType =
   ## Issue #163 (rev item 1). Stamp the lifted `itInt`'s ORIGIN enum name —
   ## see `IRType.enumName`'s own field doc for why witness reconstruction
@@ -4147,8 +4173,9 @@ proc `$`*(t: IRType): string =
   case t.kind
   of itBool: "bool"
   of itUninterp: "uninterp[" & t.uninterpName & "]"
-  of itFloat32: "float32"
-  of itFloat64: "float64"
+  of itFloat32, itFloat64:   ## RFC-0016 INT-77: a float range's bounds
+    (if t.kind == itFloat32: "float32" else: "float64") &
+      (if t.floatRange: "[" & $t.floatLo & ".." & $t.floatHi & "]" else: "")
   of itDistinct: "distinct " & t.distinctName & "(" & $t.distinctBase & ")"  ## G4
   of itRef: "ref " & $t.refPointeeTy    ## Phase 15 R1a
   of itPtr: "ptr " & $t.ptrPointeeTy    ## Phase 15 R1a

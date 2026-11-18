@@ -822,6 +822,14 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 INT-77 (426->436; 427-435 are reserved for in-flight
+  ##   work): a float `range` (`range[0.0 .. 1.0]`, `range[-1.5'f32 ..
+  ##   2.5'f32]`, anonymous or named) is classified (it did not compile:
+  ##   `parseRangeBracket` read its bounds as integers) and modelled as the
+  ##   closed IEEE interval in its width wherever the type lands, NaN
+  ##   excluded, -0.0 admitted with 0.0, as Nim's range check is. Its bounds
+  ##   enter a type's key (`Ty<F64:r[..]>`, by bits); a key without a float
+  ##   range is unchanged.
   ## - RFC-0016 INT-72 (412->426; 413-425 are reserved for in-flight W4
   ##   work): a free `Rune` ranges over int32, its native domain, not
   ##   [0, 0x10FFFF]: `r.ord > 0x10FFFF` and `r.ord < 0` on a Rune parameter
@@ -832,7 +840,7 @@ const renderAsChoicesVersion* = "12"
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "426"
+const symexWalkerVersion* = "436"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -6564,8 +6572,15 @@ proc canonicalize*(t: IRType): string =
   of itUninterp:
     "Ty<U:" & t.uninterpName &
       (if t.uninterpRefKey.len > 0: ":rk=" & t.uninterpRefKey else: "") & ">"
-  of itFloat32: "Ty<F32>"
-  of itFloat64: "Ty<F64>"
+  # RFC-0016 INT-77: a float range's bounds by their bits (a decimal
+  # rendering need not read back as the same float). Absent, nothing: every
+  # earlier float key is unchanged.
+  of itFloat32, itFloat64:
+    "Ty<F" & (if t.kind == itFloat32: "32" else: "64") &
+      (if t.floatRange:
+         ":r[" & toHex(cast[uint64](t.floatLo)) & "," &
+           toHex(cast[uint64](t.floatHi)) & "]"
+       else: "") & ">"
   of itDistinct:
     # Phase 15 G4: nominal distinct-name + recursive base encoding. The
     # name is the type wall identity; the base recurses (nested chains).

@@ -883,8 +883,14 @@ const renderAsChoicesVersion* = "12"
   ##   (`iekSeqConcat`, an array lambda per data array) where they declined
   ##   (`feUnsupportedOp`) or faulted (`add` of a seq). It keys as
   ##   `Ex<SCC:left:right>`; no existing key bytes change.
+  ## - RFC-0016 INT-80 (439->441; 440 is taken): `sequtils.concat(a, b, ...)`
+  ##   over a varargs bracket is a left fold of `iekSeqConcat`, its elements
+  ##   read in order, where its body was walked; `concat[T]()`, the empty
+  ##   seq, was a compile-time parse error.
+  ##   Self-append (`s.add(s)`, `s &= s`) is pinned as doubling. No existing
+  ##   key bytes change.
 
-const symexWalkerVersion* = "439"
+const symexWalkerVersion* = "441"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

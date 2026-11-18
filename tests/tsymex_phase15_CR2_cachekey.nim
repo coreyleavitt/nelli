@@ -1299,7 +1299,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## temporary, not a walker fault): 437->438.
     ## RFC-0016 INT-80 (seq `&` and `add` of an `openArray` modelled as a
     ## concatenation): 438->439.
-    check symexWalkerVersion == "439"
+    ## RFC-0016 INT-80 (`sequtils.concat` a left fold of the concatenation;
+    ## 440 is taken): 439->441.
+    check symexWalkerVersion == "441"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

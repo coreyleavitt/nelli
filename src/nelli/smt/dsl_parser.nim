@@ -13718,6 +13718,37 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                          else: nil
             return mkHofCall(calleeSym.strVal, seqIR, closureIR,
                              retElemTy, initIR)
+    # RFC-0016 INT-80: `sequtils.concat(seqs: varargs[seq[T]])` is a left
+    # fold of `iekSeqConcat` over the varargs array's elements, each read
+    # where Nim builds the array (`omElements`); no operands is the empty seq
+    # of `T`. Its body (`newSeq(result, L)` over the array's lengths, then a
+    # store loop) is not walked. An argument that is already an array or a
+    # seq of seqs (no bracket) keeps the body; guarded on sequtils' own
+    # `concat`, as the HOF dispatch above is.
+    if calleeSym.kind == nnkSym and calleeSym.strVal == "concat" and
+       n.len == 2 and calleeSym.owner.kind == nnkSym and
+       calleeSym.owner.strVal == "sequtils" and
+       classifyType(n).ty.kind == itSeq:
+      var arr = n[1]
+      while arr.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and arr.len == 2:
+        arr = arr[1]
+      if arr.kind == nnkBracket:
+        let rty = classifyType(n).ty
+        let et = rty.seqElemTy
+        if not isBackedSeqElemTy(et):
+          preamble.add ctx.declineAtSite(
+            seNestedSeqUnsupported,
+            "`concat` over a seq of " & $et & " in `" & n.repr &
+              "`, an element type the model does not back — degraded to " &
+              "sxUnknown (seNestedSeqUnsupported)",
+            "`concat` of an unbacked element (seNestedSeqUnsupported)")
+          let dummy = zeroValueForType(rty)
+          return (if dummy != nil: dummy else: mkSeqLit(@[], et))
+        let ops = parseOrderedArgs(arr, 0, preamble, ctx, omElements)
+        if ops.len == 0: return mkSeqLit(@[], et)
+        var acc = ops[0]
+        for i in 1 ..< ops.len: acc = mkSeqConcat(acc, ops[i])
+        return acc
     # Phase 15 Cluster S (S1): `itString`-receiver call routing. This guard
     # runs BEFORE the seq/Table/HashSet builtins so `s.len` on a `string` is
     # NOT mis-routed to `iekSeqLen` (which would lower a Z3String operand into

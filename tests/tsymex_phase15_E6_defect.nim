@@ -13,6 +13,7 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl, runtime]
 import nelli/engine/types
+import ./s8cu_helpers
 
 # --- a SUT with a raw `assert` (raises AssertionDefect on x <= 0) ------------
 proc f(x: int) =
@@ -20,14 +21,14 @@ proc f(x: int) =
 
 suite "symex Phase 15 E6 — Defect modeling (sxRaised isDefect + defectExclusions)":
   test "E6: assert false produces sxRaised with isDefect (typeFilter)":
-    let r = symexFind(f, tRaisedExn("AssertionDefect"))
+    let r = pinFind(f, tRaisedExn("AssertionDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     # The witness must satisfy the assert-fails condition x <= 0.
     check r.raisedWitness[0] <= 0
 
   test "E6: assert false produces sxRaised with isDefect (isOptimised)":
-    let r = symexFind(f, tRaisedExn("AssertionDefect"), optimisedSymexSettings())
+    let r = pinFind(f, tRaisedExn("AssertionDefect"), optimisedSymexSettings())
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
 
@@ -35,7 +36,7 @@ suite "symex Phase 15 E6 — Defect modeling (sxRaised isDefect + defectExclusio
     # Searching for a non-existent label must NOT silently suppress the
     # reachable AssertionDefect: a non-excluded defect surfaces regardless of
     # the search target, so the SymexResult is sxRaised, not sxUnsat.
-    let r = symexFind(f, tLabel("never_reached"))
+    let r = pinFind(f, tLabel("never_reached"))
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
 

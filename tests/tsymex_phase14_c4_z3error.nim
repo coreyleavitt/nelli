@@ -21,6 +21,7 @@ import std/unittest
 import nelli/symex
 import nelli/smt/runtime
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc trivial(x: int) =
   if x == 42: symexTarget("hit")
@@ -30,7 +31,7 @@ suite "symex Phase 14 cycle C4 — Z3Error policy shape":
     # Build a minimal SymexProgram by hand isn't easy without the
     # macro path; instead exercise the user-facing symexFind to
     # verify the policy doesn't regress the happy path.
-    let r = symexFind(trivial, tLabel("hit"))
+    let r = pinFind(trivial, tLabel("hit"))
     check r.status == sxSat
 
   test "RawResult.errors field is exposed and zero-valued by default":

@@ -438,12 +438,15 @@ proc pinJudge*[T, D](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
                      runW: proc (w: T): NativeRun;
                      runD: proc (vals: seq[D];
                                  hit: proc (n: NativeRun): bool): string;
-                     entry = "symexFind"): SymexResult[T] =
-  ## The differential judgement `pinExact` expands to.
+                     entry = "symexFind"; domDesc = ""): SymexResult[T] =
+  ## The differential judgement `pinExact` expands to. `domDesc`, when given,
+  ## is the record's domain text in place of `describe(dom)` (`pinFind`'s
+  ## per-parameter domains are judged as a domain of combination indices).
   let cell = render(key)
   let isHit = proc (n: NativeRun): bool = hitsTarget(n, tgt)
   var rec = PinRecord(testFile: file, entry: entry, cell: key,
-                      target: describeTarget(tgt), domain: describe(dom),
+                      target: describeTarget(tgt),
+                      domain: (if domDesc.len > 0: domDesc else: describe(dom)),
                       exhaustive: dom.exhaustive, walker: $res.status)
   case res.status
   of sxSat:
@@ -558,6 +561,170 @@ template pinExactOn*(fn: untyped; claim: untyped; key: CellKey;
   ## Its record's entry is "caller", not a public entry point: K1 refuses it.
   pinExactImpl(fn, claimed(claim, "caller"), key, target, domain,
                instantiationInfo(-1).filename)
+
+# --- pinFind (K9d) ---------------------------------------------------------
+#
+# The generator for suites with no native idiom (W-54): `pinFind` is the
+# suite's own `symexFind` call, same arguments, same result, judged natively
+# by `pinJudge`. The `sxUnsat` domain is generated from each parameter's type.
+
+const pinFindCap* = 65_536
+  ## The most input combinations an `sxUnsat` pin runs natively; a larger
+  ## product is run up to the cap and recorded as sampled.
+
+proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
+  ## The generated domain of one parameter type: every value of `bool`, of a
+  ## one-byte ordinal and of an ordinal spanning at most 256 values (so a
+  ## `range` is exhaustive when small); otherwise the boundary sample
+  ## (`boundaryInts`' points that lie in the type).
+  when T is bool:
+    exhaustive([false, true])
+  elif T is enum:
+    when T is Ordinal:
+      var vs: seq[T]
+      for v in low(T) .. high(T): vs.add v
+      exhaustive(vs)
+    else:
+      {.error: "pinFind: a holey enum has no generated domain; use pinExact".}
+  elif sizeof(T) == 1 and T is Ordinal:
+    var vs: seq[T]
+    for v in low(T) .. high(T): vs.add v
+    exhaustive(vs)
+  elif T is SomeUnsignedInt:
+    var vs: seq[T]
+    for x in [low(T), low(T) + 1, T(1), T(7), high(T) - 1, high(T)]:
+      if x notin vs: vs.add x
+    sampled(vs)
+  elif T is Ordinal:
+    let lo = ord(low(T))
+    let hi = ord(high(T))
+    var vs: seq[T]
+    if hi div 2 - lo div 2 <= 128:
+      for v in low(T) .. high(T): vs.add v
+      return exhaustive(vs)
+    for x in [lo, lo + 1, -1, 0, 1, 7, hi - 1, hi]:
+      if x >= lo and x <= hi and T(x) notin vs: vs.add T(x)
+    sampled(vs)
+  else:
+    {.error: "pinFind: no generated domain for " & $T &
+             "; pin this call with pinExact and an explicit domain".}
+
+proc pinFindJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
+                      file: string; runW: proc (w: T): NativeRun;
+                      runD: proc (hit: proc (n: NativeRun): bool;
+                                  cap: int): string;
+                      combos: int; exh: bool; desc: string): SymexResult[T] =
+  ## A definite, trusted, replayable verdict is judged by `pinJudge` and
+  ## recorded; anything else is returned as it came, with no record (a decline
+  ## is K9c's, an undefined-behaviour target is K10's).
+  if res.status == sxUnknown or not res.trusted or
+     tgt.kind == stkUndefined or
+     (res.status == sxSat and res.soundness.witnessUnsafe):
+    return res
+  let n = min(combos, pinFindCap)
+  var idx = newSeq[int](n)
+  for i in 0 ..< n: idx[i] = i
+  let dom = Domain[int](values: idx, exhaustive: exh and combos <= pinFindCap)
+  let d = (if dom.exhaustive: "exhaustive" else: "sampled") & "[" & $n &
+          "]: " & desc
+  pinJudge(res, key, tgt, dom, file, runW,
+           proc (vals: seq[int]; hit: proc (n: NativeRun): bool): string =
+             runD(hit, vals.len),
+           "symexFind", d)
+
+proc fnParamTypes(fn: NimNode): seq[NimNode] =
+  let ty = fn.getTypeInst
+  doAssert ty.kind in {nnkProcTy, nnkLambda} or ty.len > 0,
+    "pinFind: cannot read the parameter list of " & fn.repr
+  let fp = ty[0]
+  for i in 1 ..< fp.len:
+    for _ in 0 ..< fp[i].len - 2:
+      let t = fp[i][^2]
+      result.add(if t.kind == nnkVarTy: t[0] else: t)
+
+macro pinFind*(fn: typed; target: untyped;
+               rest: varargs[untyped]): untyped =
+  ## `symexFind(fn, target, rest...)`, its result returned as is, with a
+  ## definite verdict pinned natively (`pinFindJudge`). The cell is
+  ## `family:generic:k9d/<file>/<fn>/<target>`.
+  let types = fnParamTypes(fn)
+  let file = lineInfoObj(fn).filename.splitFile.name
+  let key = "k9d/" & file & "/" & fn.repr & "/" & target.repr
+  let find = newCall(ident"symexFind", fn, target)
+  for a in rest: find.add a
+  let res = genSym(nskLet, "res")
+  let w = genSym(nskParam, "w")
+  let hit = genSym(nskParam, "hit")
+  let cap = genSym(nskParam, "cap")
+  let found = genSym(nskVar, "found")
+  let count = genSym(nskVar, "count")
+  # Witness replay: each field copied into a variable, so `var` params bind.
+  let wbody = newStmtList()
+  let wcall = newCall(fn)
+  for i in 0 ..< types.len:
+    let a = genSym(nskVar, "a" & $i)
+    wbody.add newVarStmt(a, nnkBracketExpr.newTree(w, newLit(i)))
+    wcall.add a
+  # A SUT with a result: the native run discards it.
+  let rty = fn.getTypeInst[0][0]
+  let returns = rty.kind != nnkEmpty and not rty.eqIdent("void")
+  template used(c: NimNode): NimNode =
+    (if returns: nnkDiscardStmt.newTree(c) else: c)
+  wbody.add newCall(ident"nativeRun", used(wcall))
+  # The domain: one generated domain per parameter, nested loops, capped.
+  let doms = newStmtList()
+  var domSyms: seq[NimNode]
+  var combos: NimNode = newLit(1)
+  var exh: NimNode = newLit(true)
+  var desc: NimNode = newLit("")
+  for i in 0 ..< types.len:
+    let d = genSym(nskLet, "d" & $i)
+    domSyms.add d
+    # The parameter's type as the witness tuple holds it (a type symbol
+    # spliced from `getTypeInst` does not bind as a `typedesc` argument).
+    doms.add newLetStmt(d, newCall(ident"boundaryOf", newCall(ident"typeof",
+      nnkBracketExpr.newTree(newDotExpr(res, ident"witness"), newLit(i)))))
+    combos = infix(combos, "*", newDotExpr(newDotExpr(d, ident"values"), ident"len"))
+    exh = infix(exh, "and", newDotExpr(d, ident"exhaustive"))
+    let part = newCall(ident"describe", d)
+    desc = if i == 0: part else: infix(infix(desc, "&", newLit(" x ")), "&", part)
+  if types.len == 0: desc = newLit("no parameters")
+  let inner = newStmtList()
+  var callVars: seq[NimNode]
+  var loopVars: seq[NimNode]
+  for i in 0 ..< types.len:
+    loopVars.add genSym(nskForVar, "v" & $i)
+    let a = genSym(nskVar, "x" & $i)
+    inner.add newVarStmt(a, loopVars[i])
+    callVars.add a
+  let dcall = newCall(fn)
+  for a in callVars: dcall.add a
+  var shown = newLit("input (")
+  for i, v in loopVars:
+    shown = infix(shown, "&", newCall(ident"$", v))
+    if i < loopVars.high: shown = infix(shown, "&", newLit(","))
+  shown = infix(shown, "&", newLit(")"))
+  let dused = used(dcall)
+  inner.add quote do:
+    if `found`.len == 0 and `count` < `cap`:
+      inc `count`
+      if `hit`(nativeRun(`dused`)): `found` = `shown`
+  var loops: NimNode = inner
+  for i in countdown(types.len - 1, 0):
+    loops = nnkForStmt.newTree(loopVars[i],
+      newDotExpr(domSyms[i], ident"values"), newStmtList(loops))
+  quote do:
+    block:
+      let `res` = `find`
+      `doms`
+      pinFindJudge(`res`, cellKey(faGeneric, `key`), `target`, `file` & ".nim",
+        proc (`w`: typeof(`res`.witness)): NativeRun = `wbody`,
+        proc (`hit`: proc (n: NativeRun): bool; `cap`: int): string =
+          var `found` = ""
+          var `count` = 0
+          `loops`
+          `found`,
+        `combos`, `exh`, `desc`)
 
 # --- pinDecline ------------------------------------------------------------
 

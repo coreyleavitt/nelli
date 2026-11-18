@@ -6,6 +6,7 @@
 ## declaration's `IRType.signed`.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 2 — width-specific BV arithmetic":
   test "uint16: high byte extracted via shr finds the right witness":
@@ -14,7 +15,7 @@ suite "symex Phase 2 — width-specific BV arithmetic":
     proc highByteIsFF(b: uint16) =
       if (b shr 8) == 0xFF'u16:
         symexTarget("hi-ff")
-    let r = symexFind(highByteIsFF, tLabel("hi-ff"))
+    let r = pinFind(highByteIsFF, tLabel("hi-ff"))
     check r.status == sxSat
     check (r.witness[0] shr 8) == 0xFF'u16
 
@@ -22,7 +23,7 @@ suite "symex Phase 2 — width-specific BV arithmetic":
     proc isNeg(x: int8) =
       if x < 0:
         symexTarget("neg")
-    let r = symexFind(isNeg, tLabel("neg"))
+    let r = pinFind(isNeg, tLabel("neg"))
     check r.status == sxSat
     check r.witness[0] < 0
 
@@ -30,7 +31,7 @@ suite "symex Phase 2 — width-specific BV arithmetic":
     proc cantBeNeg(x: uint8) =
       if x < 0'u8:
         symexTarget("impossible")
-    let r = symexFind(cantBeNeg, tLabel("impossible"))
+    let r = pinFind(cantBeNeg, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "int8 addition wraps at the BV[8] boundary":
@@ -43,7 +44,7 @@ suite "symex Phase 2 — width-specific BV arithmetic":
     proc wrapNeeded(x: int8) =
       if x + 1 < x:
         symexTarget("wrapped")
-    let r = symexFind(wrapNeeded, tLabel("wrapped"))
+    let r = pinFind(wrapNeeded, tLabel("wrapped"))
     check r.status == sxRaised  ## R16-4: x=127 overflows signed int8 → OverflowDefect
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"

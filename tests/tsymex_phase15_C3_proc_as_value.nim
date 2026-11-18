@@ -12,6 +12,7 @@
 ## C3 is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # --- SUT 1: top-level proc stored as a value, then called. -------------------
 #
@@ -53,8 +54,8 @@ proc sutProcAsArg(n: int) =
 suite "symex Phase 15 C3 — top-level procs as values (unit-env)":
 
   test "C3: top-level proc stored as value and called produces same witness as direct call":
-    let viaValue  = symexFind(sutProcAsValue, tLabel("proc-as-value"))
-    let viaDirect = symexFind(sutDirectCall, tLabel("direct"))
+    let viaValue  = pinFind(sutProcAsValue, tLabel("proc-as-value"))
+    let viaDirect = pinFind(sutDirectCall, tLabel("direct"))
     check viaValue.status == sxSat
     check viaDirect.status == sxSat
     check viaValue.witness[0] == 5     ## n : n*2 == 10 ⇒ n == 5
@@ -64,6 +65,6 @@ suite "symex Phase 15 C3 — top-level procs as values (unit-env)":
     check viaValue.witness[0] == viaDirect.witness[0]
 
   test "C3: top-level proc passed as a proc-valued argument resolves and is called":
-    let r = symexFind(sutProcAsArg, tLabel("as-arg"))
+    let r = pinFind(sutProcAsArg, tLabel("as-arg"))
     check r.status == sxSat
     check r.witness[0] == 5             ## n : double(n) == 10 ⇒ n == 5

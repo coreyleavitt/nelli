@@ -1914,6 +1914,9 @@ task test, "Run the test suite":
             "tsymex_0016_k2a_census",
             # RFC-0016 K9c: no decline assertion without a kind (the census of `check r.status == sxUnknown` blocks that name no SymexErrorKind), ratcheted at its ceiling.
             "tsymex_0016_k9c_census",
+            # RFC-0016 K9d: no verdict suite without a native pin (the census of tsymex_* files asserting sxSat/sxUnsat/sxRaised with no native idiom), ratcheted at its ceiling; pinFind, the generator that pins a suite's own symexFind call.
+            "tsymex_0016_k9d_census",
+            "tsymex_0016_k9d_pinfind",
             "tsymex_0016_k9cg_unbacked",
             "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",

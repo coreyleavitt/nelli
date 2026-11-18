@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Z3c: classifyType `char` branch + `sink`/`lent` strip
 # (see docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z).
@@ -17,9 +18,9 @@ proc sinkIntSut(x: sink int) =
 suite "symex Phase 15 — Z3c classifyType (char, sink)":
 
   test "char parameter is modelled and symex finds a witness":
-    let r = symexFind(charSut, tLabel("hitA"))
+    let r = pinFind(charSut, tLabel("hitA"))
     check r.status == sxSat
 
   test "sink int parameter is stripped to int and symex finds a witness":
-    let r = symexFind(sinkIntSut, tLabel("hitSink"))
+    let r = pinFind(sinkIntSut, tLabel("hitSink"))
     check r.status == sxSat

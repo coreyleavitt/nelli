@@ -20,6 +20,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/runtime  ## C2b: introspect the ground closure-call axioms
+import ./s8cu_helpers
 
 # --- Sub-test 1: a closure call observes a captured value. -------------------
 #
@@ -66,17 +67,17 @@ proc sutTwoBranch(cond: bool, a: int, b: int) =
 suite "symex Phase 15 C2b — closure call dispatch (ground multi-return-path axiom)":
 
   test "C2b-1: closure call observes captured value (f(3) == 3 + x*2)":
-    let r = symexFind(sutCapture, tLabel("captured"))
+    let r = pinFind(sutCapture, tLabel("captured"))
     check r.status == sxSat
     check r.witness[0] == 5    ## x : 3 + x*2 == 13 ⇒ x == 5
 
   test "C2b-2: proc-valued param resolves via svClosure (applyTwice ⇒ n+2)":
-    let r = symexFind(sutProcParam, tLabel("twice"))
+    let r = pinFind(sutProcParam, tLabel("twice"))
     check r.status == sxSat
     check r.witness[0] == 40   ## n : (n+1)+1 == 42 ⇒ n == 40
 
   test "C2b-3: 2-branch lambda body — both ground axiom arms present":
-    let r = symexFind(sutTwoBranch, tLabel("branch"))
+    let r = pinFind(sutTwoBranch, tLabel("branch"))
     check r.status == sxSat
     # The result `f(cond, a, b) == 7` is reachable via EITHER arm (a==7 with
     # cond, or b==7 with not-cond), so the witness alone does not pin a branch.

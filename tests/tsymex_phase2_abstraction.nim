@@ -3,20 +3,21 @@
 ## proof obligation.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 2 — type-derived ranges":
   test "range[0..100] tightens pc — x > 100 is UNSAT":
     proc cannotExceed(x: range[0..100]) =
       if x > 100:
         symexTarget("over")
-    let r = symexFind(cannotExceed, tLabel("over"))
+    let r = pinFind(cannotExceed, tLabel("over"))
     check r.status == sxUnsat
 
   test "isOptimised promotes range param to Z3Int; audit log records it":
     proc findValue(x: range[0..100]) =
       if x == 42:
         symexTarget("found")
-    let r = symexFind(findValue, tLabel("found"), optimisedSymexSettings())
+    let r = pinFind(findValue, tLabel("found"), optimisedSymexSettings())
     check r.status == sxSat
     check r.witness[0] == 42
     check r.abstractions.len == 1
@@ -28,14 +29,14 @@ suite "symex Phase 2 — type-derived ranges":
     proc neverNeg(x: Natural) =
       if x < 0:
         symexTarget("impossible")
-    let r = symexFind(neverNeg, tLabel("impossible"))
+    let r = pinFind(neverNeg, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "Positive recognised as `[1..int.high]`":
     proc neverZeroOrNeg(x: Positive) =
       if x < 1:
         symexTarget("impossible")
-    let r = symexFind(neverZeroOrNeg, tLabel("impossible"))
+    let r = pinFind(neverZeroOrNeg, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "interval arithmetic composes through let-binding":
@@ -47,7 +48,7 @@ suite "symex Phase 2 — type-derived ranges":
       let s = a + b
       if s == 150:
         symexTarget("hit")
-    let r = symexFind(compose, tLabel("hit"), optimisedSymexSettings())
+    let r = pinFind(compose, tLabel("hit"), optimisedSymexSettings())
     check r.status == sxSat
     check r.witness[0] + r.witness[1] == 150
     check r.witness[0] in 0..100

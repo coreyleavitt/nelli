@@ -21,6 +21,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/dsl
+import ./s8cu_helpers
 
 # Exception types are defined at module scope so the parser's `getImpl` on the
 # raised/handler type symbols sees a concrete `nnkTypeDef` at macro expansion.
@@ -50,13 +51,13 @@ suite "symex Phase 15 E4a — dynamic user-exception hierarchy":
   test "E4a: user-defined exception subtype matched by base handler":
     # MyError is-a ValueError; `except ValueError:` must catch the raised
     # MyError. Without E4a this silently lands as sxRaised{MyError}.
-    let r = symexFind(caughtByBase, tLabel("caught_by_base"))
+    let r = pinFind(caughtByBase, tLabel("caught_by_base"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E4a: unrelated user type not matched by unrelated handler":
     # SomeError is-a IOError; `except ValueError:` does NOT catch it; it
     # propagates to the SUT boundary as sxRaised{SomeError}.
-    let r = symexFind(unrelatedNoMatch, tRaisedExn("SomeError"))
+    let r = pinFind(unrelatedNoMatch, tRaisedExn("SomeError"))
     check r.status == sxRaised
     check r.raisedTypeId == "SomeError"

@@ -25,6 +25,7 @@
 ##   - the walker version pin: `symexWalkerVersion == "9"` (this cycle's bump).
 import std/[unittest, sequtils, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # === SUTs ====================================================================
 
@@ -124,20 +125,20 @@ suite "symex Phase 15 C6 — Cluster-C regression smoke + walker version 9":
 
   # ---- C2a/C2b: construction + call observing a captured value ----
   test "C6: closure call observes captured value (f(3) == 3 + x*2)":
-    let r = symexFind(c6Capture, tLabel("captured"))
+    let r = pinFind(c6Capture, tLabel("captured"))
     check r.status == sxSat
     check r.witness[0] == 5             ## x : 3 + x*2 == 13 ⇒ x == 5
 
   # ---- C2b: proc-valued param (+ Cluster G generic instantiation) ----
   test "C6: proc-valued param resolves via svClosure (applyTwice ⇒ n+2)":
-    let r = symexFind(c6ProcParam, tLabel("twice"))
+    let r = pinFind(c6ProcParam, tLabel("twice"))
     check r.status == sxSat
     check r.witness[0] == 40            ## n : (n+1)+1 == 42 ⇒ n == 40
 
   # ---- C3: top-level proc as a value matches the direct call ----
   test "C6: top-level proc as value gives same witness as direct call":
-    let viaValue  = symexFind(c6ProcAsValue, tLabel("proc-as-value"))
-    let viaDirect = symexFind(c6DirectCall, tLabel("direct"))
+    let viaValue  = pinFind(c6ProcAsValue, tLabel("proc-as-value"))
+    let viaDirect = pinFind(c6DirectCall, tLabel("direct"))
     check viaValue.status == sxSat
     check viaDirect.status == sxSat
     check viaValue.witness[0] == 5
@@ -147,27 +148,27 @@ suite "symex Phase 15 C6 — Cluster-C regression smoke + walker version 9":
 
   # ---- C4: bounded filter/map HOF with a closure (inline path) ----
   test "C6: bounded filter HOF with predicate closure → sat (inline path)":
-    let r = symexFind(c6FilterInline, tLabel("nonempty"))
+    let r = pinFind(c6FilterInline, tLabel("nonempty"))
     check r.status == sxSat
     check (r.witness[0] > 0) or (r.witness[1] > 0) or (r.witness[2] > 0)
 
   test "C6: bounded map HOF with mapper closure (ys[0] == a+1)":
-    let r = symexFind(c6MapInline, tLabel("mapped"))
+    let r = pinFind(c6MapInline, tLabel("mapped"))
     check r.status == sxSat
     check r.witness[0] == 9             ## a+1 == 10 ⇒ a == 9
 
   # ---- C5: closure equality — distinct sites unequal; same-site equal ----
   test "C6: distinct lambda sites are ALWAYS unequal (==) ⇒ sxUnsat":
-    let r = symexFind(c6DistinctSites, tLabel("distinct-sites-equal"))
+    let r = pinFind(c6DistinctSites, tLabel("distinct-sites-equal"))
     check r.status == sxUnsat
 
   test "C6: same-site alias + same env → equal (svTupleEq branch) ⇒ sxSat":
-    let r = symexFind(c6SameSiteEqual, tLabel("same-site-equal"))
+    let r = pinFind(c6SameSiteEqual, tLabel("same-site-equal"))
     check r.status == sxSat
 
   # ---- DoD: maxClosureInlineCount override threads through a closure SUT ----
   test "C6: maxClosureInlineCount override still witnesses the captured closure call":
-    let r = symexFind(c6Capture, tLabel("captured"), c6Budget)
+    let r = pinFind(c6Capture, tLabel("captured"), c6Budget)
     check r.status == sxSat
     check r.witness[0] == 5
 

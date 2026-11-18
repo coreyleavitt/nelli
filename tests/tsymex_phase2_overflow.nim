@@ -49,14 +49,14 @@ proc looseAgreeSettings(): SymexSettings =
 suite "symex Phase 2 — ADR-0001 soundness validation":
   test "isExact finds the BV-only witness":
     ## Rule (b), unsigned twin: x + 1 < x holds exactly at uint8.high (255).
-    let r = symexFind(wrapNeededU, tLabel("wrap-needed"), exactSettings())
+    let r = pinFind(wrapNeededU, tLabel("wrap-needed"), exactSettings())
     check r.status == sxSat
     check r.trusted
     check r.witness[0] == 255
 
   test "isOptimised agrees with isExact (no range info → no promotion)":
     ## Rule (b): no range info on uint8 → no abstraction → stays BV → same result.
-    let r = symexFind(wrapNeededU, tLabel("wrap-needed"), optimisedAgreeSettings())
+    let r = pinFind(wrapNeededU, tLabel("wrap-needed"), optimisedAgreeSettings())
     check r.status == sxSat
     check r.trusted
     check r.witness[0] == 255
@@ -65,7 +65,7 @@ suite "symex Phase 2 — ADR-0001 soundness validation":
   test "isLoose misses the overflow-only path (false negative)":
     ## Rule (b): Z3Int still says x+1 > x always -- the documented false
     ## negative is preserved.
-    let r = symexFind(wrapNeededU, tLabel("wrap-needed"), looseAgreeSettings())
+    let r = pinFind(wrapNeededU, tLabel("wrap-needed"), looseAgreeSettings())
     check r.status == sxUnsat   ## ← UNSOUND: Int says x+1 > x always
 
   test "overflow-on default: the wrap now RAISES (R16-4)":
@@ -73,7 +73,7 @@ suite "symex Phase 2 — ADR-0001 soundness validation":
     ## instead of wrapping silently. ADR-0012 target-aware shouldStop + unified
     ## verdict reduction means the sxRaised(OverflowDefect) is the headline;
     ## the label is not reachable without the wrap, so no sxSat is found.
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"))
+    let r = pinFind(wrapNeeded, tLabel("wrap-needed"))
     check r.status == sxRaised
     check r.raisedTypeId == "OverflowDefect"
     check r.raisedWitness[0] == 127

@@ -15,6 +15,7 @@
 ## cap (2) and a SUT that instantiates ONE generic at 3 distinct types.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Monomorphized body differs by T (sizeof) — same load-bearing generic as G1a.
 proc szof[T](x: T): int = sizeof(T)
@@ -39,7 +40,7 @@ const lowCap = withSymexSettings() do (s: var SymexSettings):
 suite "symex Phase 15 G1c — generic instantiation cap (maxInstantiationsPerProc)":
 
   test "exceeding the per-proc cap → sxUnknown + geInstantiationCapped (sevError)":
-    let r = symexFind(threeInsts, tLabel("found"), lowCap)
+    let r = pinFind(threeInsts, tLabel("found"), lowCap)
     check r.status == sxUnknown
     check r.errors.len > 0                     # no silent empty-errors sxUnknown
     var sawCap = false
@@ -50,7 +51,7 @@ suite "symex Phase 15 G1c — generic instantiation cap (maxInstantiationsPerPro
     check sawCap
 
   test "default high cap: a few instantiations work, no false-positive cap":
-    let r = symexFind(fewInsts, tLabel("found"))
+    let r = pinFind(fewInsts, tLabel("found"))
     check r.status == sxSat
     for e in r.errors:
       check e.kind != geInstantiationCapped

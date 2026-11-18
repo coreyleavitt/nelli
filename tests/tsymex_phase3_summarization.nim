@@ -6,6 +6,7 @@
 import std/unittest
 import std/sequtils
 import nelli/symex
+import ./s8cu_helpers
 
 ## RFC-0016 W1-d2 (rule b: the property is the call cache, not the overflow
 ## opt-out). The helper is UNSIGNED so `x + 1` has no OverflowDefect fork and
@@ -39,7 +40,7 @@ proc twinHelpers(x: uint) =
 ## PRE-overflow region (x==5, x+1==6) regardless of arithChecks.
 suite "symex Phase 3 — summarization cache":
   test "same callee with same args: body walked once, cache hits once":
-    let r = symexFind(twinHelpers, tLabel("twin"))
+    let r = pinFind(twinHelpers, tLabel("twin"))
     check r.status == sxSat
     check r.witness[0] == 5
     let stats = r.callStats.filterIt(it.name == "helper")

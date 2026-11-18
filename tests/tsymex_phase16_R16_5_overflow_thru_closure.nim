@@ -28,6 +28,7 @@
 
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc dbl(x: int): int = x * 2
 proc applyOnce(f: proc(x: int): int, v: int): int = f(v)
@@ -54,19 +55,19 @@ proc directOverflow(a, b: int) =
 suite "symex Phase 16 R16-5 — sound witness through proc-as-value (ADR-0012)":
 
   test "R16-5-1: proc-as-value label search → SOUND witness (n=5, 5*2==10)":
-    let r = symexFind(soundLabelValue, tLabel("hit"))
+    let r = pinFind(soundLabelValue, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 5
     check r.witness[0] * 2 == 10     ## the witness ACTUALLY satisfies the gate
 
   test "R16-5-2: proc-as-arg label search → SOUND witness (n=5, 5*2==10)":
-    let r = symexFind(soundLabelArg, tLabel("hit"))
+    let r = pinFind(soundLabelArg, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 5
     check r.witness[0] * 2 == 10
 
   test "R16-5-3: anti-masking — direct SUT-body overflow still sxRaised":
-    let r = symexFind(directOverflow, tRaisedExn("OverflowDefect"))
+    let r = pinFind(directOverflow, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"

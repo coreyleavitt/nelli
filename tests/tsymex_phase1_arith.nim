@@ -4,6 +4,7 @@
 ## throughout — Phase 2 will add the abstraction layer.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc reachIfBig(x: int) =
   if x > 5:
@@ -15,19 +16,19 @@ proc unreachableTarget(x: int) =
 
 suite "symex Phase 1 — arithmetic":
   test "tracer: reaches a labeled branch under int comparison":
-    let r = symexFind(reachIfBig, tLabel("big"))
+    let r = pinFind(reachIfBig, tLabel("big"))
     check r.status == sxSat
     check r.witness[0] > 5
 
   test "sxUnsat for provably unreachable target":
-    let r = symexFind(unreachableTarget, tLabel("impossible"))
+    let r = pinFind(unreachableTarget, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "else-branch path condition is the negation":
     proc twoWay(x: int) =
       if x > 5: symexTarget("hi")
       else:     symexTarget("lo")
-    let r = symexFind(twoWay, tLabel("lo"))
+    let r = pinFind(twoWay, tLabel("lo"))
     check r.status == sxSat
     check r.witness[0] <= 5
 
@@ -36,7 +37,7 @@ suite "symex Phase 1 — arithmetic":
       if x > 0:
         if y > x:
           symexTarget("both-pos-and-ordered")
-    let r = symexFind(nested, tLabel("both-pos-and-ordered"))
+    let r = pinFind(nested, tLabel("both-pos-and-ordered"))
     check r.status == sxSat
     check r.witness[0] > 0
     check r.witness[1] > r.witness[0]
@@ -52,7 +53,7 @@ suite "symex Phase 1 — arithmetic":
         return
       if x > 5:
         symexTarget("impossible-if-return-works")
-    let r = symexFind(earlyExit, tLabel("impossible-if-return-works"))
+    let r = pinFind(earlyExit, tLabel("impossible-if-return-works"))
     check r.status == sxUnsat
 
   test "statements after an if see the merged post-if path conditions":
@@ -67,7 +68,7 @@ suite "symex Phase 1 — arithmetic":
       else:
         return
       symexTarget("only-positive")
-    let r = symexFind(afterIf, tLabel("only-positive"))
+    let r = pinFind(afterIf, tLabel("only-positive"))
     check r.status == sxSat
     check r.witness[0] > 0
 
@@ -76,12 +77,12 @@ suite "symex Phase 1 — arithmetic":
       if x < 0:    symexTarget("neg")
       elif x == 0: symexTarget("zero")
       else:        symexTarget("pos")
-    let zero = symexFind(threeWay, tLabel("zero"))
+    let zero = pinFind(threeWay, tLabel("zero"))
     check zero.status == sxSat
     check zero.witness[0] == 0
-    let pos = symexFind(threeWay, tLabel("pos"))
+    let pos = pinFind(threeWay, tLabel("pos"))
     check pos.status == sxSat
     check pos.witness[0] > 0
-    let neg = symexFind(threeWay, tLabel("neg"))
+    let neg = pinFind(threeWay, tLabel("neg"))
     check neg.status == sxSat
     check neg.witness[0] < 0

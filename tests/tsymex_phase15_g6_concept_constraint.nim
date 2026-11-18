@@ -33,6 +33,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/dsl   ## re-exports dsl_parser (conformsToStdlibConcept)
+import ./s8cu_helpers
 
 # --- POSITIVE: concept-constrained generic at a CONFORMING type ------------
 # `T: SomeNumber` instantiated at `T = int` (int conforms). Monomorphizes and
@@ -59,7 +60,7 @@ proc useCompoundInt(a: int): bool =
 
 suite "symex Phase 15 G6 — concept-constraint trust boundary":
   test "G6: concept-constrained generic at conforming type reaches target":
-    let r = symexFind(useConformingNum, tLabel("over_ten"))
+    let r = pinFind(useConformingNum, tLabel("over_ten"))
     check r.status == sxSat
     check r.witness[0] > 10
 
@@ -82,6 +83,6 @@ suite "symex Phase 15 G6 — concept-constraint trust boundary":
     check conformsToStdlibConcept("MyUserConcept", "string") == true
 
   test "G6: compound-constrained generic works without special-casing":
-    let r = symexFind(useCompoundInt, tLabel("is_42"))
+    let r = pinFind(useCompoundInt, tLabel("is_42"))
     check r.status == sxSat
     check r.witness[0] == 42

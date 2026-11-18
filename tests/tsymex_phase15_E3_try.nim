@@ -13,6 +13,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/[dsl, runtime]
+import ./s8cu_helpers
 
 # --- 1. raise caught by a matching `except ValueError` ----------------------
 proc caughtMatch(x: int): int =
@@ -69,54 +70,54 @@ proc catchableCatches(x: int): int =
 suite "symex Phase 15 E3 — try/except matching + inter-proc propagation":
   test "E3: raise inside try caught by matching except (normal path)":
     # The `done` label is on the normal (non-raising) path; reachable with x >= 0.
-    let r = symexFind(caughtMatch, tLabel("done"))
+    let r = pinFind(caughtMatch, tLabel("done"))
     check r.status == sxSat
     check r.witness[0] >= 0
 
   test "E3: raise inside try caught by matching except (handler body reached)":
     # The handler-body `caught` marker is reachable; witness x < 0.
-    let r = symexFind(caughtMatch, tLabel("caught"))
+    let r = pinFind(caughtMatch, tLabel("caught"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E3: unmatched exception type propagates past try (isExact)":
-    let r = symexFind(unmatchedType, tRaisedExn("ValueError"))
+    let r = pinFind(unmatchedType, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] < 0
 
   test "E3: unmatched exception type propagates past try (isOptimised)":
-    let r = symexFind(unmatchedType, tRaisedExn("ValueError"), optimisedSymexSettings())
+    let r = pinFind(unmatchedType, tRaisedExn("ValueError"), optimisedSymexSettings())
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
 
   test "E3: bare except catches all (handler body reached)":
-    let r = symexFind(bareCatchAll, tLabel("caught"))
+    let r = pinFind(bareCatchAll, tLabel("caught"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E3: bare except catches all (no escaping raise)":
     # With the bare except consuming the raise, nothing escapes the boundary.
-    let r = symexFind(bareCatchAll, tRaisedExn("ValueError"))
+    let r = pinFind(bareCatchAll, tRaisedExn("ValueError"))
     check r.status == sxUnsat
 
   test "E3: inter-proc raise propagates into caller handler (isExact)":
-    let r = symexFind(interProc, tLabel("caught"))
+    let r = pinFind(interProc, tLabel("caught"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E3: inter-proc raise propagates into caller handler (isOptimised)":
-    let r = symexFind(interProc, tLabel("caught"), optimisedSymexSettings())
+    let r = pinFind(interProc, tLabel("caught"), optimisedSymexSettings())
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E4: CatchableError handler catches ValueError — nothing escapes":
     # Post-E4 subtype matching: CatchableError catches the derived ValueError,
     # so no raise reaches the boundary (the raise is consumed by the handler).
-    let r = symexFind(catchableCatches, tRaisedExn("ValueError"))
+    let r = pinFind(catchableCatches, tRaisedExn("ValueError"))
     check r.status == sxUnsat
 
   test "E4: CatchableError handler catches ValueError — handler body reached":
-    let r = symexFind(catchableCatches, tLabel("caught"))
+    let r = pinFind(catchableCatches, tLabel("caught"))
     check r.status == sxSat
     check r.witness[0] < 0

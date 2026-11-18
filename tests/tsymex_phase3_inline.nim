@@ -6,6 +6,7 @@
 ## environment.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc bumpBy1(x: int): int = x + 1
 
@@ -24,12 +25,12 @@ proc f2(x: int) =
 
 suite "symex Phase 3 — inline call resolution":
   test "value-returning helper composes through the caller":
-    let r = symexFind(f1, tLabel("hit"))
+    let r = pinFind(f1, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "helper with internal branches: caller's target reached via callee's branch":
-    let r = symexFind(f2, tLabel("abs-is-7"))
+    let r = pinFind(f2, tLabel("abs-is-7"))
     check r.status == sxSat
     # Either x = 7 or x = -7 satisfies absVal(x) == 7.
     check (r.witness[0] == 7 or r.witness[0] == -7)
@@ -40,7 +41,7 @@ suite "symex Phase 3 — inline call resolution":
       let b = bumpBy1(x)
       if a + b == 12:
         symexTarget("twin")
-    let r = symexFind(f4, tLabel("twin"))
+    let r = pinFind(f4, tLabel("twin"))
     check r.status == sxSat
     # a = x+1, b = x+1, a+b = 2x+2 == 12 → x = 5.
     check r.witness[0] == 5
@@ -51,6 +52,6 @@ suite "symex Phase 3 — inline call resolution":
         symexTarget("inside-helper")
     proc f3(x: int) =
       setMark(x)
-    let r = symexFind(f3, tLabel("inside-helper"))
+    let r = pinFind(f3, tLabel("inside-helper"))
     check r.status == sxSat
     check r.witness[0] > 5

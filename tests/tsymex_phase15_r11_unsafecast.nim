@@ -20,6 +20,7 @@
 ## R11 is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Canonical R11 SUT: `cast[ptr int](addr x)` then a deref `p[]`. The cast is an
 # unmodelable pointer materialisation → heUnsafeCast → sxUnknown.
@@ -50,7 +51,7 @@ proc noCast(x: int) =
 suite "symex Phase 15 R11 — unsafe cast / addr classification (heUnsafeCast)":
 
   test "R11.1: cast[ptr int](addr x) → sxUnknown + heUnsafeCast (sevError)":
-    let r = symexFind(castPtr, tLabel("hit"))
+    let r = pinFind(castPtr, tLabel("hit"))
     check r.status == sxUnknown
     check r.errors.len > 0                 # no silent empty-errors sxUnknown
     var sawUnsafeCast = false
@@ -64,7 +65,7 @@ suite "symex Phase 15 R11 — unsafe cast / addr classification (heUnsafeCast)":
     # RFC-0005 S8ax item 8: `addr` of a routine's variable is a heap cell
     # the walk keeps equal to the variable, so `p[]` is `x` and the target
     # is decided. A cast to `ptr` (R11.1) still halts.
-    let r = symexFind(bareAddr, tLabel("hit"))
+    let r = pinFind(bareAddr, tLabel("hit"))
     check r.status == sxSat
     if r.status == sxSat: check r.witness[0] == 2
     var sawUnsafeCast = false
@@ -76,7 +77,7 @@ suite "symex Phase 15 R11 — unsafe cast / addr classification (heUnsafeCast)":
     # RFC-0005 S8ax item 8: `addr` of a routine's variable is a heap cell
     # the walk keeps equal to the variable, so `p[]` is `x` and the target
     # is decided. A cast to `ptr` (R11.1) still halts.
-    let r = symexFind(unsafeAddrSut, tLabel("hit"))
+    let r = pinFind(unsafeAddrSut, tLabel("hit"))
     check r.status == sxSat
     if r.status == sxSat: check r.witness[0] == 3
     var sawUnsafeCast = false
@@ -85,7 +86,7 @@ suite "symex Phase 15 R11 — unsafe cast / addr classification (heUnsafeCast)":
     check not sawUnsafeCast
 
   test "R11.4: a normal no-cast SUT still works (sxSat, NO heUnsafeCast)":
-    let r = symexFind(noCast, tLabel("hit"))
+    let r = pinFind(noCast, tLabel("hit"))
     check r.status == sxSat
     for e in r.errors:
       check e.kind != heUnsafeCast

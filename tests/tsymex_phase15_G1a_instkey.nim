@@ -23,6 +23,7 @@
 ## instantiations register as DISTINCT `ProcSig`s and dispatch resolves each.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Monomorphized body DIFFERS by instantiation type: `sizeof(T)` is a per-T
 # constant the semchecker bakes in (1 at int8, 8 at int64). This is the
@@ -58,21 +59,21 @@ proc idTwoTypes(a: int8, b: int64) =
 
 suite "symex Phase 15 G1a — generic instantiation key (bare-name collision)":
   test "same generic at two types both dispatch (szof@int8 and szof@int64)":
-    let r = symexFind(bothTypes, tLabel("found"))
+    let r = pinFind(bothTypes, tLabel("found"))
     check r.status == sxSat
 
   test "collision fix is registration-order-independent":
-    let r = symexFind(bothTypesRev, tLabel("found"))
+    let r = pinFind(bothTypesRev, tLabel("found"))
     check r.status == sxSat
 
   test "same generic at the same type twice shares one ProcSig (no regression)":
-    let r = symexFind(sameTypeTwice, tLabel("found"))
+    let r = pinFind(sameTypeTwice, tLabel("found"))
     check r.status == sxSat
     check r.witness[0] == 4'i8
     check r.witness[1] == 7'i8
 
   test "identity generic at two types both dispatch with correct witnesses":
-    let r = symexFind(idTwoTypes, tLabel("found"))
+    let r = pinFind(idTwoTypes, tLabel("found"))
     check r.status == sxSat
     check r.witness[0] == 5'i8
     check r.witness[1] == 9_000_000_000'i64

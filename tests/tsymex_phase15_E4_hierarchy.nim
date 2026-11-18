@@ -19,6 +19,7 @@ import std/[unittest, tables]
 import nelli/symex
 import nelli/smt/[dsl, runtime]
 import nelli/smt/exn_hierarchy
+import ./s8cu_helpers
 
 # --- 1. base-type except catches derived raise ------------------------------
 proc baseCatchesDerived(x: int): int =
@@ -46,13 +47,13 @@ proc raisesMyDefect(x: int) =
 suite "symex Phase 15 E4 — exception subtype hierarchy":
   test "E4: base-type except catches derived raise":
     # `except CatchableError:` now catches a raised `ValueError` (subtype).
-    let r = symexFind(baseCatchesDerived, tLabel("caught_by_base"))
+    let r = pinFind(baseCatchesDerived, tLabel("caught_by_base"))
     check r.status == sxSat
     check r.witness[0] < 0
 
   test "E4: sibling type does not match (propagates)":
     # IOError is a sibling of ValueError under CatchableError; no catch.
-    let r = symexFind(siblingNoMatch, tRaisedExn("ValueError"))
+    let r = pinFind(siblingNoMatch, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
 
@@ -82,6 +83,6 @@ suite "symex Phase 15 E4 — exception subtype hierarchy":
     check isDefect(exnTypeTable, "MyDefect", userHier)
     check isSubtypeOf("MyDefect", "Defect", exnTypeTable, userHier)
     # Observable walker behavior: the MyDefect raise surfaces (no handler).
-    let r = symexFind(raisesMyDefect, tRaisedExn("MyDefect"))
+    let r = pinFind(raisesMyDefect, tRaisedExn("MyDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "MyDefect"

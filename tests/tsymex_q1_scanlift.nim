@@ -39,6 +39,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # Part 1 -- 3-arg `find(sub, start)` sanity pin
@@ -61,12 +62,12 @@ proc sutFindWithStartUnsat(s: string) =
 suite "symex RFC-chapulin-hardening Q1 Part 1 -- 3-arg find(sub, start)":
 
   test "Q1-P1a: find(sub, start) resolves a real sxSat honoring the start offset":
-    let r = symexFind(sutFindWithStart, tLabel("hit"))
+    let r = pinFind(sutFindWithStart, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len >= 6
 
   test "Q1-P1b UNSAT companion: result can never be < start (start is not silently dropped)":
-    let r = symexFind(sutFindWithStartUnsat, tLabel("impossible"))
+    let r = pinFind(sutFindWithStartUnsat, tLabel("impossible"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -94,12 +95,12 @@ proc sutScanTracerUnsat(s: string) =
 suite "symex RFC-chapulin-hardening Q1 Part 2 -- scan-idiom recognizer":
 
   test "Q1-1 tracer: while i<s.len and s[i]!=':' : inc i ; i==3 -> sxSat (was sxUnknown)":
-    let r = symexFind(sutScanTracer, tLabel("hit"))
+    let r = pinFind(sutScanTracer, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len >= 3
 
   test "Q1-1b UNSAT companion: i > s.len is impossible (closed form clamps at bound)":
-    let r = symexFind(sutScanTracerUnsat, tLabel("impossible"))
+    let r = pinFind(sutScanTracerUnsat, tLabel("impossible"))
     check r.status == sxUnsat
 
 # 2. Chained/dependent scan -- the RFC's headline finding (#6): a 2nd scan's
@@ -131,11 +132,11 @@ proc sutChainedScanUnsat(s: string) =
 suite "symex RFC-chapulin-hardening Q1 Part 2b -- chained/dependent scans (headline)":
 
   test "Q1-2 chained scan: dependent i,j both pinned (i==2 and j==7) -> sxSat":
-    let r = symexFind(sutChainedScan, tLabel("hit"))
+    let r = pinFind(sutChainedScan, tLabel("hit"))
     check r.status == sxSat
 
   test "Q1-2b UNSAT companion: j < i is impossible (j's scan starts at i+1)":
-    let r = symexFind(sutChainedScanUnsat, tLabel("impossible"))
+    let r = pinFind(sutChainedScanUnsat, tLabel("impossible"))
     check r.status == sxUnsat
 
 # 3. Scan then out-of-bounds -- the loop-FORM analogue of SND-4's
@@ -154,7 +155,7 @@ proc sutScanThenOobViaLoop(s: string) =
 suite "symex RFC-chapulin-hardening Q1 Part 2c -- scan then out-of-bounds":
 
   test "Q1-3: loop-form scan then s[i+1] -> sxRaised IndexDefect (scan-then-OOB reachable via the loop, not just find())":
-    let r = symexFind(sutScanThenOobViaLoop, tIndexError())
+    let r = pinFind(sutScanThenOobViaLoop, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
 
@@ -208,18 +209,18 @@ proc sutNonIncBodyImpossible(s: string) =
 suite "symex RFC-chapulin-hardening Q1 Part 2d -- scope guards (must stay sxUnknown, unchanged)":
 
   test "Q1-4a: ==-guard (skip-while) is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
-    let r = symexFind(sutSkipWhileGuardImpossible, tLabel("impossible"))
+    let r = pinFind(sutSkipWhileGuardImpossible, tLabel("impossible"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
   test "Q1-4b: char-class/predicate scan is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
-    let r = symexFind(sutCharClassScanImpossible, tLabel("impossible"))
+    let r = pinFind(sutCharClassScanImpossible, tLabel("impossible"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
     check r.errors.named(seUnsupportedStringOp)
 
   test "Q1-4c: non-inc body (extra statement) is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
-    let r = symexFind(sutNonIncBodyImpossible, tLabel("impossible"))
+    let r = pinFind(sutNonIncBodyImpossible, tLabel("impossible"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
@@ -242,7 +243,7 @@ proc sutPlainWhile(n: int) =
 suite "symex RFC-chapulin-hardening Q1 Part 2e -- regression (plain non-scan while, unaffected)":
 
   test "Q1-5: plain `while i < n: acc += i; inc i` still k-unrolls -> sxSat (acc==3 via n==3)":
-    let r = symexFind(sutPlainWhile, tLabel("hit"))
+    let r = pinFind(sutPlainWhile, tLabel("hit"))
     check r.status == sxSat
 
 suite "symex RFC-chapulin-hardening Q1 -- version pins":

@@ -20,6 +20,7 @@ import std/unittest
 import nelli/symex
 import nelli/smt/[dsl, runtime]
 import nelli/smt/[walk_state]   ## R2-3: the leaves are no longer re-exported by the facade
+import ./s8cu_helpers
 
 # --- 1. getCurrentExceptionMsg() returns the in-flight message --------------
 # The handler reads the in-flight msg ("hello") and compares it to the param
@@ -94,19 +95,19 @@ proc msgNoMessage(s: string) =
 
 suite "symex Phase 15 E8 — getCurrentException / getCurrentExceptionMsg":
   test "E8: getCurrentExceptionMsg returns the in-flight msg":
-    let r = symexFind(msgInHandler, tLabel("hit"))
+    let r = pinFind(msgInHandler, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "E8: getCurrentException returns svUninterpRef tagged with typeId":
     lastGetCurrentExnRef = (sortName: "", typeTag: "")
-    let r = symexFind(exnInHandler, tLabel("got"))
+    let r = pinFind(exnInHandler, tLabel("got"))
     check r.status == sxSat
     check lastGetCurrentExnRef.sortName == "Exn_ValueError"
     check lastGetCurrentExnRef.typeTag == "ValueError"
 
   test "E8: getCurrentExceptionMsg outside handler -> eeNotInHandler (sxUnknown)":
-    let r = symexFind(msgOutsideHandler, tLabel("never"))
+    let r = pinFind(msgOutsideHandler, tLabel("never"))
     check r.status == sxUnknown
     check r.errors.len >= 1
     var sawNotInHandler = false
@@ -117,7 +118,7 @@ suite "symex Phase 15 E8 — getCurrentException / getCurrentExceptionMsg":
     check sawNotInHandler
 
   test "E8: getCurrentExceptionMsg outside handler, nested frames -> eeNotInHandler, never UNSAT":
-    let r = symexFind(msgNestedOutside, tLabel("never"))
+    let r = pinFind(msgNestedOutside, tLabel("never"))
     check r.status == sxUnknown
     var saw = false
     for e in r.errors:
@@ -125,7 +126,7 @@ suite "symex Phase 15 E8 — getCurrentException / getCurrentExceptionMsg":
     check saw
 
   test "E8: getCurrentException outside handler, nested frames -> eeNotInHandler, never UNSAT":
-    let r = symexFind(exnNestedOutside, tLabel("never"))
+    let r = pinFind(exnNestedOutside, tLabel("never"))
     check r.status == sxUnknown
     var saw = false
     for e in r.errors:
@@ -133,6 +134,6 @@ suite "symex Phase 15 E8 — getCurrentException / getCurrentExceptionMsg":
     check saw
 
   test "E8: zero-arg raise -> getCurrentExceptionMsg yields empty string":
-    let r = symexFind(msgNoMessage, tLabel("hit"))
+    let r = pinFind(msgNoMessage, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == ""

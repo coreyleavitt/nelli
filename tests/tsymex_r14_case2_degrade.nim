@@ -35,6 +35,7 @@
 
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # Case 2, continue present: sound-degrade to sxUnknown.
@@ -67,7 +68,7 @@ proc caseTwoNoContinue(a, b: int, s: string) =
 suite "symex R14 Case-2 — sound limitation of the nested-hoisting and-guard shape":
 
   test "Case-2 + continue: (a div b) > i and s[i] != 'z' guard gets its real sxSat verdict (RFC-0005 S8w)":
-    let r = symexFind(caseTwoContinue, tLabel("hit"))
+    let r = pinFind(caseTwoContinue, tLabel("hit"))
     check r.status == sxSat
     if r.status == sxSat:
       let (a, b, s) = r.witness
@@ -77,7 +78,7 @@ suite "symex R14 Case-2 — sound limitation of the nested-hoisting and-guard sh
       check (a div b) == 3 or (s.len > 3 and s[3] == 'z')
 
   test "Case-2, continue-free companion: same guard shape without continue still gets the real sxSat verdict via the rotation fallback":
-    let r = symexFind(caseTwoNoContinue, tLabel("hit"))
+    let r = pinFind(caseTwoNoContinue, tLabel("hit"))
     check r.status == sxSat
     check r.witness[2].len >= 3
     check 'z' notin r.witness[2][0 .. 2]

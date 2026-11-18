@@ -42,6 +42,7 @@ import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 # --- SUT: concrete both-literal split with 4 parts (cap=3 → sxUnknown) ---
 proc splitFourParts(s: string) =
@@ -80,7 +81,7 @@ suite "Phase 15 CR-11 + CR-18 — maxSplitParts cap wired into concrete-inline s
     ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
     ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
     ## the classified kind is still recorded.
-    let r = symexFind(splitFourParts, tLabel("hit"), cap3)
+    let r = pinFind(splitFourParts, tLabel("hit"), cap3)
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown
     check r.errors.len >= 1
@@ -88,14 +89,14 @@ suite "Phase 15 CR-11 + CR-18 — maxSplitParts cap wired into concrete-inline s
 
   test "CR-18: small split (<=cap parts) still yields sxSat (cap does not over-classify)":
     ## 2-part split with cap=3: must still succeed. The cap only fires when exceeded.
-    let r = symexFind(splitTwoParts, tLabel("hit"), cap3)
+    let r = pinFind(splitTwoParts, tLabel("hit"), cap3)
     check r.status == sxSat
     check r.witness[0] == "x"
 
   test "CR-11: empty-sep split is one part, under any cap → sxUnsat (S8g)":
     ## An empty separator yields @[s], so the cap never fires on path (a) and
     ## a 5-part result is unreachable.
-    let r = symexFind(splitEmptySepFiveParts, tLabel("hit"), cap3)
+    let r = pinFind(splitEmptySepFiveParts, tLabel("hit"), cap3)
     check r.status == sxUnsat
 
   test "CR-18: maxSplitParts NOW changes canonical form (wired into cache key)":

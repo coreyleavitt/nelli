@@ -18,6 +18,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc bytes(s: string): seq[byte] =
   ## A user helper. NOT a model entry point: walked like any user routine.
@@ -51,22 +52,22 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 suite "symex Phase 15 S7a — byte view (RFC-0005 S8c: no name-matched bytes model)":
   test "a user `bytes` helper over a literal is walked: sxUnknown, seByteIterUnsupported":
-    let r = symexFind(bytesAIs65, tLabel("hit"))
+    let r = pinFind(bytesAIs65, tLabel("hit"))
     check r.status == sxUnknown
     check r.errors.hasKind(seByteIterUnsupported)
     check not r.errors.hasKind(seBytesLengthTooLarge)
 
   test "a user `bytes` helper over a parameter is walked: sxUnknown, seByteIterUnsupported":
-    let r = symexFind(bytesSymbolicLen, tLabel("hit"))
+    let r = pinFind(bytesSymbolicLen, tLabel("hit"))
     check r.status == sxUnknown
     check r.errors.hasKind(seByteIterUnsupported)
     check not r.errors.hasKind(seBytesSymbolicLength)
 
   test "\"é\" is the raw 2 bytes [0xC3, 0xA9] through s[i] (byte-faithful, sat)":
-    let r = symexFind(eacuteIsTwoRawBytes, tLabel("hit"))
+    let r = pinFind(eacuteIsTwoRawBytes, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "é"
 
   test "\"é\" is not one character (byte-faithful, unsat)":
-    let r = symexFind(eacuteIsNotOneChar, tLabel("hit"))
+    let r = pinFind(eacuteIsNotOneChar, tLabel("hit"))
     check r.status == sxUnsat

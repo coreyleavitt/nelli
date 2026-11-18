@@ -13,6 +13,7 @@
 ## `(a & b).len == a.len + b.len` (uses S3's `iekStrLen`).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # --- literal & literal: "foo" & "bar" == "foobar" ---
 proc litConcat(s: string) =
@@ -41,25 +42,25 @@ proc concatContradiction(a, b: string) =
 
 suite "symex Phase 15 S8 — `&` string concatenation":
   test "literal concat: s == \"foo\" & \"bar\" is SAT with witness \"foobar\"":
-    let r = symexFind(litConcat, tLabel("hit"))
+    let r = pinFind(litConcat, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "foobar"
 
   test "variable concat: (a & b) == \"hello\" and a == \"he\" → b == \"llo\"":
-    let r = symexFind(varConcat, tLabel("hit"))
+    let r = pinFind(varConcat, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "he"
     check r.witness[1] == "llo"
 
   test "chained concat: \"a\" & \"b\" & \"c\" == \"abc\" is SAT":
-    let r = symexFind(chainedConcat, tLabel("hit"))
+    let r = pinFind(chainedConcat, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "abc"
 
   test "concat length is additive: (a & b).len == a.len + b.len is SAT":
-    let r = symexFind(concatLen, tLabel("hit"))
+    let r = pinFind(concatLen, tLabel("hit"))
     check r.status == sxSat
 
   test "concat contradiction: (a & b) == \"xy\" and a == \"zzz\" is UNSAT":
-    let r = symexFind(concatContradiction, tLabel("hit"))
+    let r = pinFind(concatContradiction, tLabel("hit"))
     check r.status == sxUnsat

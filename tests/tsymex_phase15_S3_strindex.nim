@@ -19,6 +19,7 @@
 from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # --- s.len ---
 proc lenIs5(s: string) =
@@ -60,21 +61,21 @@ proc forCInS(s: string) =
 
 suite "symex Phase 15 S3 — string len/index/slice (byte-faithful)":
   test "s.len == 5 is SAT":
-    let r = symexFind(lenIs5, tLabel("hit"))
+    let r = pinFind(lenIs5, tLabel("hit"))
     check r.status == sxSat
 
   test "s == \"abcde\" and s[1..3] == \"bcd\" is SAT (substr)":
-    let r = symexFind(substrBcd, tLabel("hit"))
+    let r = pinFind(substrBcd, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "abcde"
 
   test "s[1] == 'b' single-index char read is SAT (at->toCode->BV8 bridge)":
-    let r = symexFind(charAt1IsB, tLabel("hit"))
+    let r = pinFind(charAt1IsB, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "abcde"
 
   test "s.high == 4 byte-faithful is SAT (len-1)":
-    let r = symexFind(highIs4, tLabel("hit"))
+    let r = pinFind(highIs4, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
@@ -100,18 +101,18 @@ suite "symex Phase 15 S3 — string len/index/slice (byte-faithful)":
     ## soundness correction, not a regression: real Nim `s[5]` on a short
     ## string DOES raise `IndexDefect`, so reporting that the SUT can raise is
     ## strictly more informative than the old underspecified "maybe sat".
-    let r = symexFind(oobIndex, tLabel("hit"))
+    let r = pinFind(oobIndex, tLabel("hit"))
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
 
   test "free s with s.len == 1 round-trips to a single Nim byte (<=0xFF)":
-    let r = symexFind(freeLen1, tLabel("hit"))
+    let r = pinFind(freeLen1, tLabel("hit"))
     check r.status == sxSat
     # byte-faithful soundness: exactly one Nim byte, no multi-byte blowup.
     check r.witness[0].len == 1
 
   test "for c in s is honestly classified unsupported (unbounded iteration)":
-    let r = symexFind(forCInS, tLabel("hit"))
+    let r = pinFind(forCInS, tLabel("hit"))
     # NOT a byte/codepoint objection — symbolic unbounded iteration. sxUnknown
     # with a classified error, never a silent UNSAT (Invariant 3).
     check r.status == sxUnknown

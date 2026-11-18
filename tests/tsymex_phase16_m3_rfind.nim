@@ -15,6 +15,7 @@ import std/unittest
 import std/strutils  ## find/rfind on strings
 import nelli/symex
 import nelli/smt/canonicalize  ## symexCacheKeyForFn — cache-key distinctness
+import ./s8cu_helpers
 
 # --- rfind: present, single occurrence → same offset as find ---
 proc rfindBc(s: string) =
@@ -39,19 +40,19 @@ proc rfindImpossible(s: string) =
 
 suite "symex Phase 16 M3 — string rfind (nim-z3 lastIndexOf)":
   test "rfind: \"abc\".rfind(\"bc\") == 1 is SAT (byte offset, single occurrence)":
-    let r = symexFind(rfindBc, tLabel("hit"))
+    let r = pinFind(rfindBc, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "abc"
     check r.witness[0].rfind("bc") == 1  ## witness round-trips against real Nim rfind
 
   test "rfind absent: \"abc\".rfind(\"zz\") == -1 is SAT (no crash, -1 sentinel)":
-    let r = symexFind(rfindAbsent, tLabel("hit"))
+    let r = pinFind(rfindAbsent, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "abc"
     check r.witness[0].rfind("zz") == -1
 
   test "rfind != find: last-occurrence semantics distinguishes rfind from find":
-    let r = symexFind(rfindVsFindTwice, tLabel("hit"))
+    let r = pinFind(rfindVsFindTwice, tLabel("hit"))
     check r.status == sxSat
     let w = r.witness[0]
     check w.rfind("a") == 5   ## real Nim rfind: LAST occurrence
@@ -59,7 +60,7 @@ suite "symex Phase 16 M3 — string rfind (nim-z3 lastIndexOf)":
     check w.rfind("a") != w.find("a")
 
   test "rfind UNSAT: an impossible rfind target is unsatisfiable":
-    let r = symexFind(rfindImpossible, tLabel("hit"))
+    let r = pinFind(rfindImpossible, tLabel("hit"))
     check r.status == sxUnsat
 
   test "cache-key distinctness: find and rfind on the same receiver/arg differ":

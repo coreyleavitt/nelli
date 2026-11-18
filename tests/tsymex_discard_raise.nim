@@ -12,6 +12,7 @@
 ## the affected programs were unsound false-positives before).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 proc nimV(s: string): string =
   ## Ground truth: what Nim's parseInt actually does with `s`.
@@ -39,22 +40,22 @@ proc sutDiscardValid(n: int) =
 
 suite "symex: discard parseInt models the ValueError raise":
   test "D1: discarded parseInt RAISES for non-numeric input (sxRaised)":
-    let r = symexFind(sutDiscardThenAfter, tRaisedExn("ValueError"))
+    let r = pinFind(sutDiscardThenAfter, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check nimV(r.raisedWitness[0]) == "RAISES"     # SOUND: the witness truly raises
 
   test "D2: SOUND — `after` reachable only via a genuinely-parseable string":
-    let r = symexFind(sutDiscardThenAfter, tLabel("after"))
+    let r = pinFind(sutDiscardThenAfter, tLabel("after"))
     check r.status == sxSat
     check nimV(r.witness[0]) != "RAISES"           # no false positive via garbage
 
   test "D3: validate-idiom — caught path reachable, witness non-numeric":
-    let r = symexFind(sutValidateIdiom, tLabel("caught"))
+    let r = pinFind(sutValidateIdiom, tLabel("caught"))
     check r.status == sxSat
     check nimV(r.witness[0]) == "RAISES"
 
   test "D4: regression — concrete valid discard does not raise; `ok` reachable":
-    let r = symexFind(sutDiscardValid, tLabel("ok"))
+    let r = pinFind(sutDiscardValid, tLabel("ok"))
     check r.status == sxSat
     check r.witness[0] == 5

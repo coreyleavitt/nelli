@@ -23,6 +23,7 @@ import std/unittest
 import std/strutils   ## find on strings
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # --- `len and 1` (operand is svInt from `.len`) ---
 proc lenAndOneSat(s: string) =
@@ -57,30 +58,30 @@ proc lenXorSelfIsZero(s: string) =
 suite "symex Phase 16 CR-1a — bitwise and/or/xor on svInt (.len/.find)":
 
   test "len and 1 == 1 is SAT with an odd-length witness (was a native crash)":
-    let r = symexFind(lenAndOneSat, tLabel("odd-len"))
+    let r = pinFind(lenAndOneSat, tLabel("odd-len"))
     check r.status == sxSat
     check r.witness[0].len mod 2 == 1
 
   test "len and 1 == 2 is UNSAT (a single AND-1 bit is never 2 — soundness)":
-    let r = symexFind(lenAndOneUnsat, tLabel("impossible-len"))
+    let r = pinFind(lenAndOneUnsat, tLabel("impossible-len"))
     check r.status == sxUnsat
 
   test "s.find(\"bc\") and 1 == 1 is SAT with an odd find-index witness":
-    let r = symexFind(findAndOneSat, tLabel("odd-find"))
+    let r = pinFind(findAndOneSat, tLabel("odd-find"))
     check r.status == sxSat
     check r.witness[0].find("bc") mod 2 == 1
 
   test "s.find(\"bc\") and 1 == 2 is UNSAT (soundness)":
-    let r = symexFind(findAndOneUnsat, tLabel("impossible-find"))
+    let r = pinFind(findAndOneUnsat, tLabel("impossible-find"))
     check r.status == sxUnsat
 
   test "len or 2 == 3 is SAT (bOr shares the same svInt-coercion arm)":
-    let r = symexFind(lenOrTwoSat, tLabel("or-hit"))
+    let r = pinFind(lenOrTwoSat, tLabel("or-hit"))
     check r.status == sxSat
     check (r.witness[0].len or 2) == 3
 
   test "len xor len == 1 is UNSAT (bXor shares the same svInt-coercion arm)":
-    let r = symexFind(lenXorSelfIsZero, tLabel("impossible-xor"))
+    let r = pinFind(lenXorSelfIsZero, tLabel("impossible-xor"))
     check r.status == sxUnsat
 
 suite "symex Phase 16 CR-1a — walker version pin":

@@ -33,6 +33,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 # --- `s[i] = c` index-assign: classified seUnsupportedStringOp -------------
 # A SUT with a local `var s: string`; assigning to a string index is the
@@ -67,7 +68,7 @@ suite "symex Phase 15 S11 — string mutation classified + walker version 6":
   test "s[i] = c index-assign → now MODELED (RFC-0005 S8ca): real sxSat":
     ## Real Nim: indexAssign('x') makes s == "xbc". The write is the string
     ## with that byte replaced (`iekStrSetAt`, walker 233).
-    let r = symexFind(indexAssign, tLabel("idxAsg"))
+    let r = pinFind(indexAssign, tLabel("idxAsg"))
     check r.status == sxSat
     for e in r.errors: check e.severity == sevHint
     if r.status == sxSat:
@@ -76,7 +77,7 @@ suite "symex Phase 15 S11 — string mutation classified + walker version 6":
   test "s.add(c) char append → now MODELED (RFC-0005 S8p): real sxSat":
     ## Real Nim: addChar('c') makes s == "abc" and reaches the label. The
     ## char is appended as its 1-byte string (walker 164).
-    let r = symexFind(addChar, tLabel("addC"))
+    let r = pinFind(addChar, tLabel("addC"))
     check r.status == sxSat
     if r.status == sxSat:
       ## RFC-0005 S8am: a char witness renders Nim's own `char` (was
@@ -85,11 +86,11 @@ suite "symex Phase 15 S11 — string mutation classified + walker version 6":
       check r.witness[0] == 'c'
 
   test "s.add(\"x\") string append → now MODELED (M4): real sxSat via iekStrConcat":
-    let r = symexFind(addStr, tLabel("addS"))
+    let r = pinFind(addStr, tLabel("addS"))
     check r.status == sxSat
 
   test "surrounding string read unaffected: plain s == \"abc\" is SAT":
-    let r = symexFind(plainRead, tLabel("plain"))
+    let r = pinFind(plainRead, tLabel("plain"))
     check r.status == sxSat
     check r.witness[0] == "abc"
 

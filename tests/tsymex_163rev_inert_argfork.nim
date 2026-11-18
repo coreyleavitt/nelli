@@ -41,6 +41,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 const Magic = 0x5A4D
 
@@ -94,7 +95,7 @@ suite "#163 review R1 -- inert opaque calls assert their arguments' defect forks
     ## Before the fix: `stmt.cargs` is never lowered on the inert fast path,
     ## so `divByZeroConds` is never populated and no raise fork exists at
     ## all -- this target is not found as a raise.
-    let r = symexFind(withDivArg, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(withDivArg, tRaisedExn("DivByZeroDefect"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
@@ -107,7 +108,7 @@ suite "#163 review R1 -- inert opaque calls assert their arguments' defect forks
     ## inert-classified call -- including b == 0, which in REAL Nim raises
     ## `DivByZeroDefect` out of the `sink` argument before `symexTarget` is
     ## ever reached. That is the unsound witness this test pins against.
-    let r = symexFind(withDivArg, tLabel("reached"))
+    let r = pinFind(withDivArg, tLabel("reached"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[1] != 0
@@ -118,7 +119,7 @@ suite "#163 review R1 -- inert opaque calls assert their arguments' defect forks
     check withParseIntArgRT("42") == 42
 
   test "parseInt inside an inert opaque call's argument is found, not lost":
-    let r = symexFind(withParseIntArg, tRaisedExn("ValueError"))
+    let r = pinFind(withParseIntArg, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
@@ -131,7 +132,7 @@ suite "#163 review R1 -- inert opaque calls assert their arguments' defect forks
     withPlainSink(0)
 
   test "non-regression -- a raise BEHIND a plain-value inert call is found, not degraded":
-    let r = symexFind(withPlainSink, tRaisedExn("ValueError"))
+    let r = pinFind(withPlainSink, tRaisedExn("ValueError"))
     var opaqueUnmodelled = false
     var internalFault = false
     for e in r.errors:
@@ -143,7 +144,7 @@ suite "#163 review R1 -- inert opaque calls assert their arguments' defect forks
     check not internalFault
 
   test "non-regression -- a label BEHIND the same plain-value inert call is reachable":
-    let r = symexFind(withPlainSink, tLabel("t_reached"))
+    let r = pinFind(withPlainSink, tLabel("t_reached"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat

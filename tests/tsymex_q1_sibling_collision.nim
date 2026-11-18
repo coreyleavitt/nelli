@@ -31,6 +31,7 @@
 ## interference that suppresses or corrupts recognition flips this verdict.
 import std/[unittest]
 import nelli/symex
+import ./s8cu_helpers
 
 # Byte-identical to the target's loop (same `':'` delimiter, same bare
 # `inc i` body) — never referenced anywhere. Declaration alone must not
@@ -60,9 +61,9 @@ proc scanTarget(s: string) =
 
 suite "symex Q1 — byte-identical sibling loops must not perturb a query (#154)":
   test "queried sibling baseline: its own target is reachable, sxSat":
-    let r = symexFind(scanSiblingQueried, tLabel("hit"))
+    let r = pinFind(scanSiblingQueried, tLabel("hit"))
     check r.status == sxSat
 
   test "target after both siblings: UNSAT companion still proves, sxUnsat":
-    let r = symexFind(scanTarget, tLabel("impossible"))
+    let r = pinFind(scanTarget, tLabel("impossible"))
     check r.status == sxUnsat

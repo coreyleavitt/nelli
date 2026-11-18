@@ -11,6 +11,7 @@
 ## intermediate `if`.
 import std/[unittest]
 import nelli/symex
+import ./s8cu_helpers
 
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
@@ -78,18 +79,18 @@ proc assumeArgArithDirectHoisted(x, y: int) =
 suite "symex A1 — assert/assume direct-argument-position operand-shape characterization corpus":
 
   test "cell 1 (atomic direct assert, coverage): sxUnsat, no violation":
-    let r = symexFind(assertArgAtomic, tAssertionViolation())
+    let r = pinFind(assertArgAtomic, tAssertionViolation())
     check r.status == sxUnsat
 
   test "cell 2 (#149-named: direct assert of pow2-mask condition): sxUnsat, twin-identical":
-    let rInline  = symexFind(assertArgBitwiseDirect, tAssertionViolation())
-    let rHoisted = symexFind(assertArgBitwiseDirectHoisted, tAssertionViolation())
+    let rInline  = pinFind(assertArgBitwiseDirect, tAssertionViolation())
+    let rHoisted = pinFind(assertArgBitwiseDirectHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 3 (direct assert, boolean short-circuit with fault): sxUnsat, twin-identical":
-    let rInline  = symexFind(assertArgBoolFaultDirect, tAssertionViolation())
-    let rHoisted = symexFind(assertArgBoolFaultDirectHoisted, tAssertionViolation())
+    let rInline  = pinFind(assertArgBoolFaultDirect, tAssertionViolation())
+    let rHoisted = pinFind(assertArgBoolFaultDirectHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
@@ -100,8 +101,8 @@ suite "symex A1 — assert/assume direct-argument-position operand-shape charact
     ## the path conditions differ in order, so Z3 picks different models
     ## (inline (-6291457, 274871877636), hoisted (0, 4611686018427387904)).
     ## Each witness is checked against the real conditions instead.
-    let rInline  = symexFind(assumeArgArithDirect, tLabel("hit"))
-    let rHoisted = symexFind(assumeArgArithDirectHoisted, tLabel("hit"))
+    let rInline  = pinFind(assumeArgArithDirect, tLabel("hit"))
+    let rHoisted = pinFind(assumeArgArithDirectHoisted, tLabel("hit"))
     check rInline.status == sxSat
     check rHoisted.status == sxSat
     if rInline.status == sxSat and rHoisted.status == sxSat:

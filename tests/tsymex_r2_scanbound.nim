@@ -54,6 +54,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # R2 -- loop-counter-dependent bound must NOT be lifted to a closed form.
@@ -103,7 +104,7 @@ proc sutScanBoundDependsOnI(s: string, n: int) =
 suite "symex RFC-chapulin-hardening R2 -- loop-counter-dependent bound rejected":
 
   test "R2-1: while i < (n - i) and s[i] != 'z': inc i -- bound depends on i, must NOT closed-form lift":
-    let r = symexFind(sutScanBoundDependsOnI, tLabel("impossible"))
+    let r = pinFind(sutScanBoundDependsOnI, tLabel("impossible"))
     # Pre-fix (bug present): the recognizer wrongly accepts this shape and
     # lifts it to a closed form pinned at the loop-ENTRY bound (`n == 6`),
     # letting the solver pick an `s` with its first 'z' at index 4 to satisfy
@@ -144,7 +145,7 @@ proc sutScanBoundLoopInvariant(s: string) =
 suite "symex RFC-chapulin-hardening R2/R6 -- positive control (ordinary idiom still lifts)":
 
   test "R2/R6-pos: while i < s.len and s[i] != ':' : inc i ; i==3 -> sxSat (sameSym/refersToSym did not regress the common case)":
-    let r = symexFind(sutScanBoundLoopInvariant, tLabel("hit"))
+    let r = pinFind(sutScanBoundLoopInvariant, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len >= 3
 

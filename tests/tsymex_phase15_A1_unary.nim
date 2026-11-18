@@ -14,6 +14,7 @@
 ## pin (no eager evaluation of the RHS fork).
 import std/[unittest]
 import nelli/symex
+import ./s8cu_helpers
 
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
@@ -96,28 +97,28 @@ proc unaryNotShortCircuitFault(s: string, i: int) =
 suite "symex A1 — unary (not / unary minus) operand-shape characterization corpus":
 
   test "cell 1 (atomic NOT, coverage): reachable, sxSat":
-    let r = symexFind(unaryAtomicNot, tLabel("hit"))
+    let r = pinFind(unaryAtomicNot, tLabel("hit"))
     check r.status == sxSat
 
   test "cell 2 (#149-named: not pow2-mask, inline-arith): twin-identical, sxSat":
-    let rInline  = symexFind(unaryNotBitwise, tLabel("notPow2"))
-    let rHoisted = symexFind(unaryNotBitwiseHoisted, tLabel("notPow2"))
+    let rInline  = pinFind(unaryNotBitwise, tLabel("notPow2"))
+    let rHoisted = pinFind(unaryNotBitwiseHoisted, tLabel("notPow2"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 3 (unary minus, inline-arith): twin-identical, sxSat":
-    let rInline  = symexFind(unaryNegInline, tLabel("hit"))
-    let rHoisted = symexFind(unaryNegInlineHoisted, tLabel("hit"))
+    let rInline  = pinFind(unaryNegInline, tLabel("hit"))
+    let rHoisted = pinFind(unaryNegInlineHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 4 (unary minus, call-result operand): twin-identical, sxSat":
-    let rInline  = symexFind(unaryNegCallResult, tLabel("hit"))
-    let rHoisted = symexFind(unaryNegCallResultHoisted, tLabel("hit"))
+    let rInline  = pinFind(unaryNegCallResult, tLabel("hit"))
+    let rHoisted = pinFind(unaryNegCallResultHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 5 (not over short-circuit fault, no twin): sxSat, no eager evaluation":
-    let r = symexFind(unaryNotShortCircuitFault, tLabel("miss"))
+    let r = pinFind(unaryNotShortCircuitFault, tLabel("miss"))
     check r.status == sxSat
     check r.witness[1] < 0                    ## i < 0: real Nim never evaluates s[i]

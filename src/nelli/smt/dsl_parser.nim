@@ -26113,6 +26113,23 @@ proc dupSimpleIterVar(impl, iter, v: NimNode): bool =
     if not ownedBy(iter[i], v.owner): return false
   true
 
+proc dupFreshArg(a: NimNode): bool
+
+proc dupOwningIterVar(impl: NimNode): bool =
+  ## PRC-50: every `yield` of the iterator `impl` yields a value made there
+  ## (`dupFreshArg`: a constructor, a literal, a call's result), so the loop
+  ## variable owns data (`varpartitions.destMightOwn`: `ownsData`) and is no
+  ## cursor: each `yield` sinks a new value into it, which a sink position
+  ## moves on its last read and copies before it (native, c and cpp:
+  ## `yield DObj(v: n)` twice, `dTake(o)` 0, read after it 2; `yield mk(n)` 0).
+  proc yieldsFresh(n: NimNode): bool =
+    if n.kind == nnkYieldStmt:
+      return n.len == 1 and dupFreshArg(n[0])
+    for c in n:
+      if not yieldsFresh(c): return false
+    true
+  yieldsFresh(impl[6])
+
 proc dupOpenArrayArg(a: NimNode): NimNode =
   ## PRC-49: an argument to an `openArray` formal, its conversion stripped
   ## (`transf.transformConv` drops it).
@@ -26144,7 +26161,7 @@ proc dupInlinable(n: NimNode): bool =
      (macros.strVal(iter[0]) in dupLoopIters and isStdlibDecl(iter[0])):
     return false
   if not dupPlainType(n[0].getTypeInst) and
-     not dupSimpleIterVar(impl, iter, n[0]):
+     not dupSimpleIterVar(impl, iter, n[0]) and not dupOwningIterVar(impl):
     return false
   var k = 1
   for d in impl[3][1 .. ^1]:
@@ -26179,7 +26196,11 @@ proc dupExpand(n: NimNode): NimNode =
   result = newStmtList(newCommentStmtNode(dupMarkPrefix & "E:" & li))
   # PRC-49: a loop variable the compiler makes a cursor, declared so, as
   # `transformFor` declares it (a scalar one needs no hook either way).
-  if not dupPlainType(n[0].getTypeInst):
+  # PRC-50: an owning one (`dupOwningIterVar`) is declared at each `yield`
+  # with the value it sinks there, a local afresh in each copy.
+  let owning = not dupPlainType(n[0].getTypeInst) and
+               not dupSimpleIterVar(impl, iter, n[0])
+  if not dupPlainType(n[0].getTypeInst) and not owning:
     result.add newTree(nnkVarSection, newTree(nnkIdentDefs,
       newTree(nnkPragmaExpr, n[0], newTree(nnkPragma, ident"cursor")),
       newEmptyNode(), newEmptyNode()))
@@ -26199,7 +26220,10 @@ proc dupExpand(n: NimNode): NimNode =
     if x.kind == nnkYieldStmt and x.len == 1:
       result = newStmtList(
         newCommentStmtNode(dupMarkPrefix & "Y:" & li & ">" & x.lineInfo),
-        newTree(nnkFastAsgn, copyNimTree(n[0]), subst(x[0])),
+        if owning:
+          newTree(nnkVarSection, newTree(nnkIdentDefs, copyNimTree(n[0]),
+                                         newEmptyNode(), subst(x[0])))
+        else: newTree(nnkFastAsgn, copyNimTree(n[0]), subst(x[0])),
         copyNimTree(n[^1]))
       result.copyLineInfo(x)
       return
@@ -26492,7 +26516,8 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
       # PRC-45: a copy of another local, whose cursor inference
       # `dupClassify` follows (`dupAliasCursor`).
       # PRC-46: in a loop too (`dupAliasCursor` walks loops).
-      if n[2].kind == nnkSym and symKind(n[2]) in {nskLet, nskVar} and
+      # PRC-50: of a loop variable of an inlined `for` too (`dupExpand`).
+      if n[2].kind == nnkSym and symKind(n[2]) in {nskLet, nskVar, nskForVar} and
          not isModuleGlobal(n[2]):
         s.aliases.add (n[0], s.ids.idOf(n[0]), n[2], s.ids.idOf(n[2]))
     if n.len == 3 and n[0].kind == nnkSym and not loop:
@@ -26983,8 +27008,31 @@ proc dupLiveWalk(n, a, b: NimNode; st: var DupLive; call: NimNode = nil) =
     dec st.t
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit:
     for i, c in n: dupLiveWalk(c, a, b, st, if i > 0: n else: nil)
+    # PRC-50: an argument holding a pointer may be mutated through it only
+    # in a call of no magic (`varpartitions.traverse`: `m == mNone`, then
+    # `potentialMutationViaArg`): `len(x)` of an `openArray` mutates none.
+    # A `var` formal's argument is one in any call (`potentialMutation`).
+    let magic = routineMagic(n[0]).len > 0
+    var formals: NimNode = nil
+    if magic:
+      let ft = try: n[0].getTypeImpl except CatchableError: nil
+      if not ft.isNil and ft.kind == nnkProcTy and ft.len > 0 and
+         ft[0].kind == nnkFormalParams:
+        formals = ft[0]
     for i in 1 ..< n.len:
       if n[i].kind in {nnkCharLit .. nnkNilLit}: continue
+      if magic:
+        # The `i`th formal's type; a magic whose formals are not read is
+        # taken as one that may mutate (fail-closed).
+        var k = 0
+        var t: NimNode = nil
+        if not formals.isNil:
+          for d in formals[1 .. ^1]:
+            if d.kind != nnkIdentDefs: continue
+            for j in 0 ..< d.len - 2:
+              inc k
+              if k == i: t = d[^2]
+        if not t.isNil and t.kind != nnkVarTy: continue
       if dupHasPointer(n[i].getTypeInst): st.muts.add (entry, st.t)
   of nnkHiddenAddr, nnkAddr:
     if n.len > 0: dupLiveWalk(n[0], a, b, st)
@@ -27394,8 +27442,24 @@ proc dupClassify(s: DupScan; i: int; owner: string): tuple[c: DupClass; why: str
       hooked = hooks.len > 0
       for h in hooks:
         if macros.strVal(h) == "=copy": hooked = false
+    # PRC-50: `a` the loop variable of an inlined `for` (`dupExpand`). A
+    # cursor one (`dupSimpleIterVar`): each `yield` assigns it a symbol, so
+    # it is `reassignedTo` one other than `b`, and `b` may not borrow from it
+    # (`varpartitions.deps`, rule D). An owning one (`dupOwningIterVar`,
+    # declared with its value at each `yield`, the only loop variable with an
+    # initialiser here): the compiler assigns it a value made there, which
+    # marks it reassigned (`markAsReassigned`; rule C). Either way `b` owns.
+    # Native, c and cpp: `let b = o` then `dTake(b)` 0, with `o` read after
+    # 0, over one `yield`, two, a looping one, a `var b` 0, `b` read after 2;
+    # over an owning one with `o` read after 0.
+    var loopCursor = false
+    if symKind(aliasOf) == nskForVar:
+      loopCursor = not aInit.isNil
+      for c in s.cursors:
+        if c.sym == aliasOf and c.id == aliasId: loopCursor = true
     let (known, cursor) =
-      if hooked: dupAliasCursor(s.body, ev.sym, aliasOf, aInit, ev.id, aliasId)
+      if loopCursor: (true, false)
+      elif hooked: dupAliasCursor(s.body, ev.sym, aliasOf, aInit, ev.id, aliasId)
       else: (false, false)
     if not known:
       if s.provisional and st.copies: return (dcDup, "")

@@ -8,8 +8,8 @@
 ##   y4 a looping `yield x`, sunk                                  2
 ##   y6 the loop variable read after its sink                      2
 ##   y7 one `yield x` of a `var`, `a` read after the loop          1
-##   y3 `yield` of a value made there, sunk                        0 (declined)
-##   y5 `let b = o` of the loop variable, `b` sunk                 0 (declined)
+##   y3 `yield` of a value made there, sunk                        0 (PRC-50)
+##   y5 `let b = o` of the loop variable, `b` sunk                 0 (PRC-50)
 ##   ti a sink of a formal in the iterator's body, `a` read after   1
 ##   ti2 the same, `a` not read after                              0
 ##   ti3 two `yield`s each sinking the formal                      1
@@ -20,12 +20,12 @@
 ##   tr3 a `finally` reading the formal                            2
 ##   oa an `openArray` formal over an array constructor            1
 ##   oa2 the same over a `seq` local                               1
-##   oa3 a `for` over the `openArray` in the iterator              0 (declined)
+##   oa3 a `for` over the `openArray` in the iterator              0 (PRC-50)
 ##
 ## The loop variable of an iterator whose every `yield` is of a variable it
 ## owns, called with arguments of the caller's locals and literals only, is a
 ## cursor (`transf.isSimpleIteratorVar`): copied at every sink position.
-## Still declined (sound, unmodelled): a loop variable that owns its value
+## Declined here, exact since PRC-50 (`tsymex_0016_prc50_dupresid`): a loop variable that owns its value
 ## (y3: a `yield` of a value made there is no cursor; y5: `let b = o` of a
 ## cursor one makes `b` own, the plain `=copy`), whose ownership the scan
 ## does not follow, and `let b = a` in the body of a `for` over a listed
@@ -208,9 +208,6 @@ template exact(hitP, neverP: untyped) =
   check pinExact(hitP, dCell, domain = idom).status == sxSat
   check pinExact(neverP, dCell, domain = idom).status == sxUnsat
 
-template declined(p: untyped) =
-  pinDecline(p, dCell, feGlobalRouteUnproved, needle = "=dup")
-
 suite "PRC-49":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 430
@@ -228,9 +225,9 @@ suite "PRC-49":
     exact(eY6, eY6Never)
     exact(eY7, eY7Never)
 
-  test "an owning loop variable declines":
-    declined(eY3)
-    declined(eY5)
+  test "an owning loop variable (PRC-50: exact)":
+    exact(eY3, eY3Never)
+    exact(eY5, eY5Never)
 
   test "a sink of a formal in the iterator's own body":
     exact(eTi, eTiNever)
@@ -248,5 +245,5 @@ suite "PRC-49":
     exact(eOa, eOaNever)
     exact(eOa2, eOa2Never)
 
-  test "a listed loop inside the inlined body declines":
-    declined(eOa3)
+  test "a listed loop inside the inlined body (PRC-50: exact)":
+    exact(eOa3, eOa3Never)

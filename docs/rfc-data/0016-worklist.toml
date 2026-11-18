@@ -881,6 +881,17 @@ cells = []
 pins = ["tsymex_0016_prc49_dupfinal2", "tsymex_0016_prc48_dupiter", "tsymex_0016_k4b_cells"]
 
 [[row]]
+id = "PRC-50"
+table = "5.2m"
+state = "closed"
+note = "closed `rfc-0016-w4prc50` (walker 430->432, 431 taken, 2026-11-18). The `=dup` shapes PRC-49 left declining and their siblings, each against native evidence (Nim 2.2.10, c and cpp, `dups` per call; `varpartitions.nim` read at v2.2.10). An owning loop variable: every `yield` yields a value made there (`dupFreshArg`), so the loop variable owns data (`destMightOwn`), no cursor; the expansion declares it with its value at each `yield` (`dupOwningIterVar`): two `yield DObj(..)` sunk 0, of a call's result 0, read after its sink 2, `let b = o` 0, `let b = o` with `o` read after 0. `let b = o` of an inlined loop variable: a cursor one is `reassignedTo` the yielded symbol (rule D), an owning one reassigned (rule C), so `b` owns: two `yield`s 0, one 0, looping 0, `var b` 0, `o` read after 0, `a` read after 0, `b` read after its sink 2. A listed `for` inside the inlined body (`for i in 0 ..< x.len` over an `openArray` formal): `dupLiveWalk` stopped on the header, taking `len(x)` as a mutation through a pointer; the compiler calls `potentialMutationViaArg` only for a call of no magic (`m == mNone`), a `var` formal's argument in any call: 0, a `while` 0, sinking `a` itself 2. Still declined (sound, pinned in `tsymex_0016_prc50_dupresid`, not modelled): `yield x.d` of a formal's field (native 0, 2 with `w.d` read after: rule B on a field path, which the scan reads for a symbol only, as `let b = w.d` in straight-line code), `yield (x, 1)` with `dTake(t[0])` 1 (a field of a local at a sink), `system.items`/`pairs` over a `seq` of the hooked type 2/2 (`let b = o` 0) and `items` over an array 0 (the loop variable of a listed iterator is no event the scan keys), a looping `yield` of a value made there 0 (a local declared in a loop), `yield x` then a made value 0 (a mixed iterator). The K4b `Dup` cell's decline is re-pinned on `items` over a `seq` of the hooked type. `for (o, i) in` an iterator yielding a tuple fails the walker's parse (`iterVar.expectKind nnkSym`, a compile error outside the `=dup` route; not pinned). N2 audit: PRC-48's three bare routine-kind gates resolve through `resolveRoutineImpl` (`dupMayRaise` keeps a method or converter as a called routine) and its three wide routine-node lists use `nestedRoutineScanBoundary` or name the two top-level-only kinds, membership unchanged on every reachable tree (a `method` or `converter` is only allowed at top level, probed; a typed tree has no `nnkDo`); its own commit"
+home = "W4"
+source = "PRC-49 remainder; `tests/tsymex_0016_prc49_dupfinal2.nim` (`y3`, `y5`, `oa3`)"
+moves = "the PRC-49 declines become exact: an owning loop variable, `let b = o` of a loop variable, a listed `for` inside the inlined body"
+cells = []
+pins = ["tsymex_0016_prc50_dupresid", "tsymex_0016_prc49_dupfinal2", "tsymex_0016_k4b_cells"]
+
+[[row]]
 id = "PRC-39"
 table = "5.2m"
 state = "open"

@@ -861,8 +861,12 @@ const renderAsChoicesVersion* = "12"
   ##   a sink of a formal in the yielded expression is keyed by its `yield`,
   ##   and an iterator with a `try` or a scalar `openArray` formal is read
   ##   inlined. No key bytes change.
+  ## - RFC-0016 PRC-50 (430->432; 431 is taken): a loop variable every
+  ##   `yield` gives a value made there owns it, `let b = o` of an inlined
+  ##   loop variable owns, and a magic call mutates no argument through a
+  ##   pointer in the cursor inference. No key bytes change.
 
-const symexWalkerVersion* = "430"
+const symexWalkerVersion* = "432"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

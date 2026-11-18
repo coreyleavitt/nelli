@@ -834,8 +834,13 @@ const renderAsChoicesVersion* = "12"
   ##   raise per type is stored, not the first; a winner is lossy by its own
   ##   extraction only. Entries an earlier walker stored are stale. No key
   ##   bytes change.
+  ## - RFC-0016 W4 rv0005-lows part 5 (408->413; 409-412 are reserved;
+  ##   INT-36): a statement's stray lowering taint reaches the findings it
+  ##   filed, so a hit solved mid-statement before the stray was found is a
+  ##   candidate, not a clean winner. Entries an earlier walker stored are
+  ##   stale. No key bytes change.
 
-const symexWalkerVersion* = "408"
+const symexWalkerVersion* = "413"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -1278,7 +1278,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## is stored, one ended from outside is not, a refused lossy winner is
     ## `rsRefused`, malformed gaps miss, the strongest raise per type is
     ## kept; 407 reserved): 406->408.
-    check symexWalkerVersion == "408"
+    ## RFC-0016 W4 rv0005-lows part 5 (INT-36: a statement's stray taint
+    ## reaches the findings it filed; 409-412 reserved): 408->413.
+    check symexWalkerVersion == "413"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -1516,9 +1516,10 @@ table = "5.8c"
 title = "Exit-group guards: a compile-time `fields()` check that every group-typed field of `WalkCtx`/`LoopFrame`/`CallFrame`/`CallFrameCtx` is visited by `forEachExitGroup`; per-frame constructors so a group cannot be default-constructed unbound; `mitemsSince` yields `var T` so an entry's depth is mutable; `replayNotRun`'s hint check"
 class = "design debt; guards against a future soundness slip"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Part 5 (branch `rfc-0016-w4rvlows-d`): every field of `WalkCtx`, `CallFrame`, `LoopFrame` and `CallFrameCtx` holding an exit group (directly, as a frame, or a seq of frames) must be named walked or unwalked beside `forEachExitGroup`, or `runtime.nim` does not compile (`collectExitGroupFields`, R6-03); `mitemsSince` is private to `exits`, so a parked entry's handler depth cannot be changed from outside (R5-08; RED: it compiled from a test). Left: per-frame constructors (R6-04: an unbound group still fails only at its first `park`), `replayNotRun`'s hint check"
 source = "0005 review R5-08, R6-03, R6-04"
-cells = []
+cells = ["construct:walk/exits/groups"]
+pins = ["tsymex_0016_int35_exitgroups"]
 
 [[row]]
 id = "INT-36"
@@ -1526,9 +1527,10 @@ table = "5.8c"
 title = "The finding collector's edges: `droppedSymexFindings` has no production consumer and is per-thread, so a worker thread's drops are invisible; `popEngineFrame` merges speculative nested runs and double-reports; a finding filed mid-statement is not stamped with later stray taint (pre-existing)"
 class = "precision (R4-09, R5-07) and soundness (R3-17, not compared against `main`)"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Part 5 (branch `rfc-0016-w4rvlows-d`, walker 408->413): a statement's stray taint reaches the findings it filed since it began (`stampStatementSince`), so a hit solved before the stray was found is a candidate, not a clean winner (R3-17; RED: the exit stamp alone left it in `w.found`). No source shape is known to leave stray taint, so the pin drives the stamp through `strayFindingProbe`, as R2's walktaint probe does. Left: `droppedSymexFindings`'s consumer and per-thread scope (R5-07), `popEngineFrame`'s merge of nested runs (R4-09)"
 source = "0005 review R5-07, R6-08, R4-09, R3-17"
-cells = []
+cells = ["construct:walk/stmt/stray-findings"]
+pins = ["tsymex_0016_int36_collector"]
 
 [[row]]
 id = "INT-37"
@@ -1536,9 +1538,10 @@ table = "5.8c"
 title = "Precision and unverified probes: `claimStrayPendingTaint` over-taints coalesced pending taint; a possessive quantifier on a non-group item may add 0 to the PCRE size bound (probe near 65536); `symBodyHash` on a bodiless routine (importc or forward declaration) may fail at compile time"
 class = "precision; two items unverified"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Part 5 (branch `rfc-0016-w4rvlows-d`): both probes run, neither a defect. R2-09: PCRE 8.45 has a possessive opcode for every repeat of a character, type, class and back-reference, so a possessive on a non-group item adds nothing; seven families taken to the largest count the reader decides all compile under `re()`, and one more is undecided. R6-09: a SUT calling an `importc` routine and a forward-declared one compiles and is keyed. Left: `claimStrayPendingTaint`'s over-taint (R2-08)"
 source = "0005 review R2-08, R2-09, R6-09"
-cells = []
+cells = ["construct:regex/possessive/size", "construct:cache/key/bodiless"]
+pins = ["tsymex_0016_int37_probes"]
 
 [[row]]
 id = "INT-38"
@@ -1546,9 +1549,10 @@ table = "5.8c"
 title = "Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up"
 class = "performance; no wrong verdict"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Part 5 (branch `rfc-0016-w4rvlows-d`): a notes re-save first writes a head the loader refuses, so a failure part-way reads back as the old record, the new one or nothing (R6-07; RED: the new run's first diagnostics under the old head). Left (a fork): R8-04's `:raised` slots were written under walker versions no current key reaches, and the base key is a hash, so they can be cleaned only by a general sweep of records of other walker versions"
 source = "0005 review R6-07, R8-04"
-cells = []
+cells = ["construct:cache/record/notes"]
+pins = ["tsymex_0016_int38_notes"]
 
 [[row]]
 id = "INT-39"

@@ -22926,6 +22926,55 @@ template forEachExitGroup(w, g, body: untyped) =
     template g(): untyped = w.frame.exits
     body
 
+const
+  exitGroupsWalked = ["WalkCtx.topExits", "WalkCtx.callStack",
+                      "WalkCtx.loopStack", "WalkCtx.frame", "CallFrame.exits",
+                      "LoopFrame.exits", "CallFrameCtx.exits"]
+    ## RFC-0016 INT-35 (R6-03). What `forEachExitGroup` reaches: each field
+    ## of a walk or frame type that holds an exit group, or a frame or a seq
+    ## of frames holding one.
+  exitGroupsUnwalked = ["WalkCtx.frameStack"]
+    ## Saved caller frames: a statement parks only on the frame it runs in.
+
+template isExitGroupType(T: typedesc): bool =
+  T is CallExits or T is LoopExits or T is FrameExits
+
+template isExitFrameType(T: typedesc): bool =
+  T is CallFrame or T is LoopFrame or T is CallFrameCtx
+
+proc collectExitGroupFields[T: object](x: T; owner: static string;
+                                       acc: var seq[string]) =
+  ## RFC-0016 INT-35 (R6-03). Every field of `x` that holds an exit group
+  ## (directly, as a frame, or as a seq of frames), as `owner.field`. One
+  ## that `exitGroupsWalked` and `exitGroupsUnwalked` do not name is a
+  ## compile error: a group `forEachExitGroup` does not visit is stamped by
+  ## no statement and claimed by no `try`.
+  for name, f in fieldPairs(x):
+    when isExitGroupType(typeof(f)) or isExitFrameType(typeof(f)):
+      const path = owner & "." & name
+      when path notin exitGroupsWalked and path notin exitGroupsUnwalked:
+        {.error: "RFC-0016 INT-35: `" & path & "` holds an exit group " &
+                 "that forEachExitGroup does not visit".}
+      acc.add path
+      when isExitFrameType(typeof(f)):
+        collectExitGroupFields(f, $typeof(f), acc)
+    elif typeof(f) is seq:
+      when isExitGroupType(typeof(f[0])) or isExitFrameType(typeof(f[0])):
+        const path = owner & "." & name
+        when path notin exitGroupsWalked and path notin exitGroupsUnwalked:
+          {.error: "RFC-0016 INT-35: `" & path & "` holds exit groups " &
+                   "that forEachExitGroup does not visit".}
+        acc.add path
+        when isExitFrameType(typeof(f[0])):
+          var e: typeof(f[0])
+          collectExitGroupFields(e, $typeof(f[0]), acc)
+
+proc exitGroupFieldPaths*(): seq[string] =
+  ## RFC-0016 INT-35 (R6-03). The exit-group fields of `WalkCtx` and the
+  ## frames it holds (`collectExitGroupFields`); compiling it is the check.
+  var w: WalkCtx
+  collectExitGroupFields(w, "WalkCtx", result)
+
 proc visitExitsSince(w: var WalkCtx; since: ExitMark;
                      visit: proc (p: var Path) {.closure.}) =
   ## RFC-0005 review R5. `visit` the path of every exit-channel entry parked
@@ -22948,6 +22997,50 @@ proc stampExitsSince(w: var WalkCtx; since: ExitMark; taint: Taint;
   if not w.exitClock.parkedSince(since): return   # nothing parked
   w.visitExitsSince(since, proc (p: var Path) =
     p = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint, ub)))
+
+type StmtMark = object
+  ## RFC-0016 INT-36 (R3-17). Where a statement began: the exit clock's
+  ## reading, and how many findings (`w.found`) and candidates
+  ## (`w.candidates`) were filed. Both only grow during a walk.
+  exits: ExitMark
+  found, candidates: int
+
+proc stmtMark(w: WalkCtx): StmtMark =
+  StmtMark(exits: w.exitClock.mark, found: w.found.len,
+           candidates: w.candidates.len)
+
+proc stampFindingsSince(w: var WalkCtx; m: StmtMark; taint: Taint;
+                        ub: set[UbKind] = {}) =
+  ## RFC-0016 INT-36 (R3-17). Join `taint` (and `ub`) into every finding
+  ## filed since `m`, as the paths the statement produced are. A winner the
+  ## join makes `scSpurious` moves to the candidates, in filing order, as
+  ## `admitSolvedHit` files a tainted hit: it no longer halts the walk and
+  ## only a replay can promote it.
+  for i in m.candidates ..< w.candidates.len:
+    w.candidates[i].soundness.pathTaint =
+      w.candidates[i].soundness.pathTaint + taint
+    w.candidates[i].soundness.witnessUndefined =
+      w.candidates[i].soundness.witnessUndefined + ubOrdinals(ub)
+  if m.found >= w.found.len: return
+  var kept = w.found[0 ..< m.found]
+  for i in m.found ..< w.found.len:
+    var r = w.found[i]
+    r.soundness.pathTaint = r.soundness.pathTaint + taint
+    r.soundness.witnessUndefined = r.soundness.witnessUndefined + ubOrdinals(ub)
+    if scSpurious in r.soundness.pathTaint:
+      r.witnessExtraction = @[]
+      w.candidates.add r
+    else:
+      kept.add r
+  w.found = move kept
+
+proc stampStatementSince(w: var WalkCtx; m: StmtMark; taint: Taint;
+                         ub: set[UbKind] = {}) =
+  ## The end of a statement that left stray taint: on its exit-channel
+  ## entries (`stampExitsSince`) and on its findings (`stampFindingsSince`).
+  ## The paths it returns are the caller's to taint (`walk`).
+  stampExitsSince(w, m.exits, taint, ub)
+  stampFindingsSince(w, m, taint, ub)
 
 proc taintAll(paths: seq[Path]; taint: Taint;
               ub: set[UbKind] = {}): seq[Path] =
@@ -22991,6 +23084,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## handler body that claimed an older `caught` entry shrank the channel
   ## under its mark, so the new entry landed below it unstamped). A
   ## statement with nothing queued on either side allocates nothing.
+  ##
+  ## RFC-0016 INT-36 (R3-17): and the findings it filed (`stampStatementSince`):
+  ## a hit solved mid-statement, before the stray was found, was filed from a
+  ## path that did not carry it yet.
   let outerPending = loweringPendingTaint
   let outerPendingUb = loweringPendingUb
   loweringPendingTaint = {}
@@ -22999,7 +23096,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   let outerStrayUb = w.stmtStrayUb
   w.stmtStrayTaint = {}
   w.stmtStrayUb = {}
-  let since = w.exitClock.mark
+  let since = w.stmtMark
   result =
     if outerPending == {}: walkCapSynced(stmt, paths, w)
     else: walkCapSynced(stmt, taintAll(paths, outerPending, outerPendingUb), w)
@@ -23011,7 +23108,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   w.stmtStrayUb = outerStrayUb
   if stray != {}:
     result = taintAll(result, stray, strayUb)
-    stampExitsSince(w, since, stray, strayUb)
+    stampStatementSince(w, since, stray, strayUb)
 
 # ---- Statement exit-taint test hook (H1 pattern) -----------------------------
 # `Path`/`WalkCtx` are private to the runtime unit, so -- as
@@ -23095,6 +23192,49 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
   discard routeRaise(np(), "E", none(string), w3)
   stampExitsSince(w3, since3, spur)
   for c in w3.frame.exits.held.caught: result.caughtTaints.add c.path.taint
+
+type
+  StrayFindingProbe* = object
+    ## Observations `strayFindingProbe` reports (see its doc).
+    foundBefore*, foundAfter*, candidatesAfter*: int
+    foundAfterExitsOnly*: int
+      ## What the statement's end left in `w.found` before INT-36: the exit
+      ## stamp alone (`stampExitsSince`).
+    earlierFoundKept*: bool
+    movedTaint*, stmtCandidateTaint*: Taint
+
+proc strayFindingProbe*(): StrayFindingProbe =
+  ## RFC-0016 INT-36 (R3-17). A walk context holding a clean winner filed
+  ## before a statement began; the statement files a candidate and a clean
+  ## winner, and ends with `{scSpurious, scIncomplete}` stray. Run twice:
+  ## with the exit stamp alone (the statement end before INT-36) and with
+  ## the statement stamp `walk` runs (`stampStatementSince`). For
+  ## `tests/tsymex_0016_int36_collector.nim` only.
+  let stray: Taint = {scSpurious, scIncomplete}
+  proc staged(m: var StmtMark): WalkCtx =
+    result.exitClock = newExitClock()
+    result.topExits = result.exitClock.newExits(CallExits)
+    result.frame = CallFrameCtx(exits: result.exitClock.newExits(FrameExits))
+    result.found.add RawResult(status: sxRaised, raisedTypeId: "before")
+    m = result.stmtMark
+    result.admitSolvedHit(RawResult(status: sxSat,
+      soundness: Soundness(pathTaint: {scSpurious})))
+    result.admitSolvedHit(RawResult(status: sxSat))
+  var m0: StmtMark
+  var w0 = staged(m0)
+  stampExitsSince(w0, m0.exits, stray)
+  result.foundAfterExitsOnly = w0.found.len
+  var m: StmtMark
+  var w = staged(m)
+  result.foundBefore = w.found.len
+  stampStatementSince(w, m, stray)
+  result.foundAfter = w.found.len
+  result.candidatesAfter = w.candidates.len
+  result.earlierFoundKept = w.found.len > 0 and
+    w.found[0].status == sxRaised and w.found[0].raisedTypeId == "before" and w.found[0].soundness.pathTaint == {}
+  if w.candidates.len == 2:
+    result.stmtCandidateTaint = w.candidates[0].soundness.pathTaint
+    result.movedTaint = w.candidates[1].soundness.pathTaint
 
 proc haltExcludedDefect(p: Path, typeId: string, w: var WalkCtx) =
   ## RFC-0016 K7b (W-16). A `Defect` raise that reaches the SUT boundary

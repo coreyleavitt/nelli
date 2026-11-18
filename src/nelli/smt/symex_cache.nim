@@ -332,6 +332,12 @@ proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
   meta["diagn"] = $diagnostics.len
   meta["undefn"] = $undefined.len   # RFC-0016 K10a-target
   try:
+    # RFC-0016 INT-38 (R6-07): a head the loader refuses first, so a re-save
+    # that fails part-way never serves the earlier record's head over a mix
+    # of its slots and this save's. A failure of this first write leaves the
+    # earlier record whole.
+    db.save(baseKey & cacheKeyNotes, @[],
+            {notesVersionMetaKey: "-"}.toTable, verdictCacheMaxEntries)
     for i, u in undefined:
       var um = initTable[string, string]()
       um["kind"] = u.kind

@@ -43,6 +43,7 @@
 ## the `applyClosureGround` uncertain-skip mechanism this file is about.
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/canonicalize
 
 # ---- SUT 1: a still-unsupported `/=` drop, wrapped INSIDE a closure body ---
@@ -112,12 +113,12 @@ proc closureCleanCapture(x: int) =
 suite "symex SND-1b — closure ground-axiom path drops uncertain sub-paths (walker v39)":
 
   test "PRC-07: float `/=` INSIDE a closure body is modelled: exact sxSat, witness 10.0":
-    let r = symexFind(closureDivModelled, tLabel("closure_div_modelled"))
+    let r = pinFind(closureDivModelled, tLabel("closure_div_modelled"))
     check r.status == sxSat
     check r.witness[0] / 2.0 == 5.0
 
   test "SND-1b: a nested-seq element `*=` dropped INSIDE a closure body degrades to sxUnknown (no false sxSat)":
-    let r = symexFind(closureDivMutate, tLabel("closure_concat"))
+    let r = pinFind(closureDivMutate, tLabel("closure_concat"))
     check r.status == sxUnknown
     var sawBodyUncertain = false
     for e in r.errors:
@@ -125,7 +126,7 @@ suite "symex SND-1b — closure ground-axiom path drops uncertain sub-paths (wal
     check sawBodyUncertain
 
   test "SND-1b: closure body's internal call bails on maxCallDepth degrades to sxUnknown":
-    let r = symexFind(closureDepthBail, tLabel("closure_depth"))
+    let r = pinFind(closureDepthBail, tLabel("closure_depth"))
     check r.status == sxUnknown
     var sawBodyUncertain = false
     for e in r.errors:
@@ -133,7 +134,7 @@ suite "symex SND-1b — closure ground-axiom path drops uncertain sub-paths (wal
     check sawBodyUncertain
 
   test "SND-1b regression: a clean (fully-modeled) closure application still yields valid sxSat":
-    let r = symexFind(closureCleanCapture, tLabel("closure_clean"))
+    let r = pinFind(closureCleanCapture, tLabel("closure_clean"))
     check r.status == sxSat
     check r.witness[0] == 5    ## x : 3 + x*2 == 13 ⇒ x == 5
 

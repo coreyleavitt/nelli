@@ -1,4 +1,4 @@
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/unittest
 import nelli/symex
 
@@ -34,12 +34,12 @@ suite "symex Phase 16 R16-2b — short-circuit float→int guard (and)":
     ## the inline iekConvFloatToInt bypasses the D1c guard (fast path).
     ## After fix: the guarded path carries the LHS constraint (x∈(3,4)) into
     ## the drain, making not(domainCond) UNSAT → no raise → sxUnsat.
-    let r = symexFind(r2b_andConv, tRaisedExn("RangeDefect"))
+    let r = pinFind(r2b_andConv, tRaisedExn("RangeDefect"))
     check r.status != sxRaised  ## must not raise RangeDefect
 
   test "R16-2b-1b: and-guarded Natural(x) target is reachable → sxSat":
     ## x=3.5 satisfies x>3.0 and x<4.0 and Natural(x)==3. Target must be found.
-    let r = symexFind(r2b_andConv, tLabel("r2bAndConvHit"))
+    let r = pinFind(r2b_andConv, tLabel("r2bAndConvHit"))
     check r.status == sxSat
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ suite "symex Phase 16 R16-2b — short-circuit float→int guard (or)":
     ## Natural(x)==3 is the RHS of the outer `or`. The LHS `not (x>3.0 and x<4.0)`
     ## is true for all x∉(3,4) including NaN (NaN comparisons are all false).
     ## So Natural(x) is only evaluated when x∈(3,4), where it cannot raise.
-    let r = symexFind(r2b_orConv, tRaisedExn("RangeDefect"))
+    let r = pinFind(r2b_orConv, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ suite "symex Phase 16 R16-2b — LHS conv unguarded (regression)":
   test "R16-2b-3: LHS Natural(x) still raises RangeDefect (unconditional path)":
     ## The fix must NOT over-guard. LHS conv is always evaluated; for out-of-range
     ## x it genuinely raises. This test fails if the fix incorrectly guards lhsIR.
-    let r = symexFind(r2b_lhsConv, tRaisedExn("RangeDefect"))
+    let r = pinFind(r2b_lhsConv, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
@@ -98,7 +98,7 @@ suite "symex Phase 16 R16-2b — unguarded float→Natural":
   test "R16-2b-4: unconstrained Natural(f) raises RangeDefect":
     ## The guard only changes a guarded RHS; an unguarded Natural(f) must
     ## continue to fork a RangeDefect raise.
-    let r = symexFind(r2b_unguarded, tRaisedExn("RangeDefect"))
+    let r = pinFind(r2b_unguarded, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
@@ -107,7 +107,7 @@ suite "symex Phase 16 R16-2b — int(f) itself never raises (S8g)":
 
   test "R16-2b-5: unconstrained int(f) has no RangeDefect path":
     ## K10a-float: sxUnknown, the out-of-range side is a halted undefined op.
-    let r = symexFind(r2b_intNever, tRaisedExn("RangeDefect"))
+    let r = pinFind(r2b_intNever, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
     check not r.trusted

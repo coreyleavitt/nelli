@@ -533,6 +533,53 @@ Remaining float candidates (unconverted, unrun): `phase15_F5_float_conv`,
 keep `rfc0005_s8k_bounds`, `phase15_rereview_drains` and
 `tot1_totality_corpus` in K9d-10.
 
+### K9d-8b (`k9d8b`): the remaining float candidates, the harness's scope, INT-77
+
+All 22 remaining float candidates convert (local c runs, rc 0, every
+definite verdict reproduced natively, no walker/native disagreement):
+`phase15_F5_float_conv`, `phase15_CR3_CR4_CR6_float`,
+`phase15_C1_canonical_kind`, `phase15_F5hang_derefwrite`, `phase15_F8_smoke`,
+`phase15_N0_kindgate_widen`, `phase15_S10b_strconv`,
+`phase15_cr9_lowerInExpr`, `phase15_g10_smoke`, `phase15_g3_type_subst`,
+`phase15_g4_distinct_sort`, `phase15_g5_distinct_borrow`,
+`phase16_A5_float_classify`, `phase16_R16_2_rangedefect`,
+`phase16_R16_2b_shortcircuit_conv`, `r6_n36_raise_degrade_b`,
+`r6_n36_raise_degrade_c`, `rfc0005_s6b_ops`, `rfc0005_s8au_remainder`,
+`rfc0005_s8ba_remainder`, `snd1_uncertain_taint`,
+`snd1b_closure_uncertain_axiom`. The census ceiling 129 -> 107.
+
+Failures triaged:
+
+- Harness defect (fixed, self-tested): `pinFind`'s expansion named its
+  helpers (`setStringHints`, `StringHints`, `boundaryOf`, `witnessAs`,
+  `nativeRun`, `showArg`, `describe`, `thinForPairs`, `thinDomain`) as bare
+  identifiers, and the float domain read `seqDomainCap` before its
+  declaration, so they resolved in the CALLER's scope: eight suites that
+  import the helpers selectively (`from ./s8cu_helpers import named,
+  pinFind`) did not compile. They are bound where `pinFind` is declared now
+  (`bindSym(.., brOpen)`, so a suite's own overload still applies; the
+  `boundaryOf` forward declaration and the domain size constants moved above
+  their first use). Self-test: `tests/k9d_selective.nim` imports `pinFind`
+  alone and pins a sat and an unsat float call
+  (`tsymex_0016_k9d_pinfind`, 64 OK c and cpp).
+- Not converted, one call: `phase15_g5_distinct_borrow`'s
+  `useDistinctBarrier` calls an unlinkable `importc` stub on purpose, so its
+  native run does not link; that call stays `symexFind` (its verdict is
+  `sxUnknown` regardless). The suite's other two calls are pinned.
+- Walker defect, INT-77 (closed, walker 436): a float `range` did not
+  compile (`parseRangeBracket` read the bounds with `intVal`). A float range
+  is now classified (anonymous and named) as its base float refined with the
+  closed interval (`IRType.floatRange`/`floatLo`/`floatHi`,
+  `withFloatRange`), asserted at allocation and at a seq element's read
+  (`rangeCondsIfNeeded`), clamped in an unread witness cell, and keyed by its
+  bounds' bits. Pins: `tsymex_0016_int77_floatrange` (`range[0.0 .. 1.0]`,
+  `range[-1.5'f32 .. 2.5'f32]`, named aliases, an object field, seq and
+  array elements; `pinExact` over the float-range domain and `pinFind`).
+
+Float candidates left: none. `rfc0005_s8k_bounds`,
+`phase15_rereview_drains` and `tot1_totality_corpus` (ref/ptr parameters)
+stay for K9d-10.
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

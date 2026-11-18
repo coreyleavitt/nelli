@@ -53,7 +53,7 @@
 ## else moved: a live target through a fresh symbol is a candidate
 ## (`sxUnknown`, never `sxSat`), substituted/halt/abort runs stay
 ## `sxUnknown`, and the unknown-exception repros no longer lie.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils, os, math, sets, tables]
 import nelli/symex
 import nelli/smt/types
@@ -467,19 +467,19 @@ suite "RFC-0005 S6b (a) -- classOf rows":
 suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
 
   test "bool ordering: dead target is sxUnsat, exactly (RFC-0005 S8cb)":
-    let r = symexFind(s6bBoolOrderDead, tLabel("s6b_bool_order_dead"))
+    let r = pinFind(s6bBoolOrderDead, tLabel("s6b_bool_order_dead"))
     show r
     check r.status == sxUnsat
     check r.errors.len == 0
 
   test "composite result (implicit-result fallthrough): a Table result is bound, the dead target exactly sxUnsat (RFC-0005 S8u)":
-    let r = symexFind(s6bTabResultDead, tLabel("s6b_seq_result_dead"))
+    let r = pinFind(s6bTabResultDead, tLabel("s6b_seq_result_dead"))
     show r
     check r.status == sxUnsat
     check r.errors.len == 0
 
   test "composite result (explicit return): a Table result is bound, the dead target exactly sxUnsat (RFC-0005 S8u)":
-    let r = symexFind(s6bTabReturnDead, tLabel("s6b_seq_return_dead"))
+    let r = pinFind(s6bTabReturnDead, tLabel("s6b_seq_return_dead"))
     show r
     check r.status == sxUnsat
     check r.errors.len == 0
@@ -492,30 +492,30 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     ## no-zero field, an unbacked `HashSet[string]`, allocates with its
     ## `seUnsupportedSetCharInterop` (dcNoAnswer), so the run is honestly
     ## sxUnknown: never the unsound sxUnsat, and no longer taint-only.
-    let r = symexFind(s6bFloatZeroDead, tLabel("s6b_float_zero_dead"))
+    let r = pinFind(s6bFloatZeroDead, tLabel("s6b_float_zero_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
     check r.errors.hasKind(seUnsupportedSetCharInterop)
     check r.status == sxUnknown
 
   test "iteSV set merge (array index fold): dead target is sxUnsat":
-    let r = symexFind(s6bStrIndexDead, tLabel("s6b_str_index_dead"))
+    let r = pinFind(s6bStrIndexDead, tLabel("s6b_str_index_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
     checkUnsatOverTaintOnly(r)
 
   test "iteSV string merge is exact (RFC-0005 S8bb): no taint, exact verdicts":
-    let d = symexFind(s6bStrMergeDead, tLabel("s6b_str_merge_dead"))
+    let d = pinFind(s6bStrMergeDead, tLabel("s6b_str_merge_dead"))
     show d
     check d.status == sxUnsat
     check not d.errors.hasKind(feUnsupportedOpHavoc)
-    let l = symexFind(s6bStrMergeLive, tLabel("s6b_str_merge_live"))
+    let l = pinFind(s6bStrMergeLive, tLabel("s6b_str_merge_live"))
     show l
     check l.status == sxUnsat
     check l.errors.len == 0
 
   test "heNewFieldZeroUnsupported: dead target is sxUnsat":
-    let r = symexFind(s6bNewSeqFieldDead, tLabel("s6b_new_seq_field_dead"))
+    let r = pinFind(s6bNewSeqFieldDead, tLabel("s6b_new_seq_field_dead"))
     show r
     check r.errors.hasKind(heNewFieldZeroUnsupported)
     checkUnsatOverTaintOnly(r)
@@ -527,13 +527,13 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
 suite "RFC-0005 S6b (c) -- guards":
 
   test "a live target through a bool ordering is sxSat, exactly (RFC-0005 S8cb)":
-    let r = symexFind(s6bBoolOrderLive, tLabel("s6b_bool_order_live"))
+    let r = pinFind(s6bBoolOrderLive, tLabel("s6b_bool_order_live"))
     show r
     check r.status == sxSat
     check r.errors.len == 0
 
   test "two orderings over one operand: sxSat, exactly (RFC-0005 S8cb)":
-    let r = symexFind(s6bBoolOrderFresh, tLabel("s6b_bool_order_fresh"))
+    let r = pinFind(s6bBoolOrderFresh, tLabel("s6b_bool_order_fresh"))
     show r
     check r.status == sxSat
     check rfc0005RawStatus == sxSat
@@ -542,13 +542,13 @@ suite "RFC-0005 S6b (c) -- guards":
   test "a target decided only by the havoc retSym is a candidate: sxUnknown, never sxSat":
     ## RFC-0005 S8u: over the untouched result with no modelled zero (a
     ## bound `Table` result is exact: `s.len != t.len` is sxUnsat, below).
-    let r = symexFind(s6bMaybeVariantLive, tLabel("s6b_seq_result_live"))
+    let r = pinFind(s6bMaybeVariantLive, tLabel("s6b_seq_result_live"))
     show r
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a bound Table result decides its own target: sxUnsat (RFC-0005 S8u)":
-    let r = symexFind(s6bTabResultLive, tLabel("s6b_seq_result_live"))
+    let r = pinFind(s6bTabResultLive, tLabel("s6b_seq_result_live"))
     show r
     check r.status == sxUnsat
     check r.errors.len == 0
@@ -567,72 +567,72 @@ suite "RFC-0005 S6b (c) -- guards":
     ## no-zero field, an unbacked `HashSet[string]`, allocates with its
     ## `seUnsupportedSetCharInterop` (dcNoAnswer), so the replay is not
     ## reached: an honest sxUnknown, never sxUnsat.
-    let r = symexFind(s6bMaybeVariantFresh, tLabel("s6b_seq_fresh"))
+    let r = pinFind(s6bMaybeVariantFresh, tLabel("s6b_seq_fresh"))
     show r
     check r.status == sxUnknown
     check rfc0005RawStatus == sxUnknown
     check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "two bound Table results agree: exact sxSat (RFC-0005 S8u)":
-    let r = symexFind(s6bTabFresh, tLabel("s6b_seq_fresh"))
+    let r = pinFind(s6bTabFresh, tLabel("s6b_seq_fresh"))
     show r
     check r.status == sxSat
     check rfc0005RawStatus == sxSat
     check r.errors.len == 0
 
   test "a target decided only by the merged set is a candidate: sxUnknown":
-    let r = symexFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))
+    let r = pinFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))
     show r
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOpHavoc)
 
   test "an untouched new-ref distinct field (a seq one until RFC-0005 S8ap) is a candidate: sxUnknown, never sxSat":
-    let r = symexFind(s6bNewSeqFieldLive, tLabel("s6b_new_seq_field_live"))
+    let r = pinFind(s6bNewSeqFieldLive, tLabel("s6b_new_seq_field_live"))
     show r
     check r.errors.hasKind(heNewFieldZeroUnsupported)
     check r.status == sxUnknown
 
   test "substituted: tuple equality by name keeps feUnsupportedOp; a dead target stays sxUnknown":
-    let r = symexFind(s6bTupleEqDead, tLabel("s6b_tuple_eq_dead"))
+    let r = pinFind(s6bTupleEqDead, tLabel("s6b_tuple_eq_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOp)
     check not r.errors.hasKind(feUnsupportedOpHavoc)
     check r.status == sxUnknown
 
   test "no answer: the boundary abort records feUnsupportedOpAborted and is sxUnknown":
-    let r = symexFind(s6bLn, tLabel("s6b_ln"))
+    let r = pinFind(s6bLn, tLabel("s6b_ln"))
     show r
     check r.errors.hasKind(feUnsupportedOpAborted)
     check not r.errors.hasKind(feUnsupportedOp)
     check r.status == sxUnknown
 
   test "halt: heap depth exhaustion keeps a dead target sxUnknown":
-    let r = symexFind(s6bDeepDead, tLabel("s6b_deep_dead"), depthOne)
+    let r = pinFind(s6bDeepDead, tLabel("s6b_deep_dead"), depthOne)
     show r
     check r.errors.hasKind(heDepthExhausted)
     check r.status == sxUnknown
 
   test "halt: an unsafe cast keeps a dead target sxUnknown":
-    let r = symexFind(s6bUnsafeCastDead, tLabel("s6b_unsafe_cast_dead"))
+    let r = pinFind(s6bUnsafeCastDead, tLabel("s6b_unsafe_cast_dead"))
     show r
     check r.errors.hasKind(heUnsafeCast)
     check r.status == sxUnknown
 
   test "unknown exception type: the skipped named handler's target is never sxUnsat (was a false sxUnsat)":
-    let r = symexFind(s6bUnknownExnCaught, tLabel("s6b_unknown_exn_caught"))
+    let r = pinFind(s6bUnknownExnCaught, tLabel("s6b_unknown_exn_caught"))
     show r
     check r.errors.hasKind(eeUnknownExnType)
     check r.errors.severityOf(eeUnknownExnType) == sevWarning
     check r.status == sxUnknown
 
   test "unknown exception type: a bare except past a skipped named handler is never sxSat (was a false sxSat)":
-    let r = symexFind(s6bUnknownExnFabricated, tLabel("s6b_unknown_exn_fabricated"))
+    let r = pinFind(s6bUnknownExnFabricated, tLabel("s6b_unknown_exn_fabricated"))
     show r
     check r.errors.hasKind(eeUnknownExnType)
     check r.status == sxUnknown
 
   test "unknown exception type: a bare except reached WITHOUT a skipped handler is exact: clean sxSat":
-    let r = symexFind(s6bUnknownExnBare, tLabel("s6b_unknown_exn_bare"))
+    let r = pinFind(s6bUnknownExnBare, tLabel("s6b_unknown_exn_bare"))
     show r
     check r.errors.hasKind(eeUnknownExnType)
     check r.status == sxSat

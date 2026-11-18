@@ -15,6 +15,7 @@ import std/[unittest, os, strutils, sequtils, tables, sets, algorithm, math]
 import nelli/symex
 import ./s8cu_helpers
 import ./k9d_hostile
+import ./k9d_selective
 
 let pinTmp = getTempDir() / ("k9d_pinfind_" & $getCurrentProcessId())
 createDir(pinTmp)
@@ -978,3 +979,11 @@ suite "K9d: pinFind":
     let at = r[0].domain.find('[')
     let n = parseInt(r[0].domain[at + 1 ..< r[0].domain.find(']')])
     check n <= pinFindCap and n > 1000
+
+  test "a suite that imports pinFind alone compiles and pins":
+    ## k9d_selective imports `from ./s8cu_helpers import pinFind`; the
+    ## expansion's helpers are bound where pinFind is declared
+    check selectiveSat() == sxSat
+    check selectiveUnsat() == sxUnsat
+    check recordsWith("/selSat/").len == 1
+    check recordsWith("/selUnsat/").len == 1

@@ -581,7 +581,7 @@ macro pinExactImpl*(fn: typed; claim, key, target, domain,
   for v in loopVars: dcall.add v
   var shown = newLit("input (")
   for i, v in loopVars:
-    shown = infix(shown, "&", newCall(ident"showArg", v))
+    shown = infix(shown, "&", newCall(bindSym("showArg", brOpen), v))
     if i < loopVars.high: shown = infix(shown, "&", newLit(","))
   shown = infix(shown, "&", newLit(")"))
   var loops = quote do:
@@ -838,6 +838,18 @@ proc cstringDomain(h: StringHints): Domain[cstring] =
       vs.add cstring(cstringArena[^1])
   Domain[cstring](values: vs, exhaustive: false)
 
+const
+  seqDomainCap* = 2048
+    ## the most values a collection domain holds, whatever the hints
+  collCoreMax* = 8
+    ## the element core: up to this many spread values of the element domain
+  collExtraMax = 6
+    ## and up to this many more an ordinal gets from the SUT's own literals
+  seqFixedLens = [4, 5, 8]
+  seqTripleFull = 512
+    ## length-3 sequences are the full product of the core up to this many,
+    ## else an all-pairs array
+
 proc pairsExceed*(sizes: seq[int]; limit: int): bool =
   ## whether the two largest of `sizes` multiply to more than `limit`
   var a, b = 0
@@ -1015,7 +1027,7 @@ proc hintsExpr(h: StringHints): NimNode =
   var nn = newNimNode(nnkBracket)
   for f in h.nums: nn.add newLit(cast[uint64](f))
   let nums = newCall(bindSym"floatsOfBits", nn)
-  nnkObjConstr.newTree(ident"StringHints",
+  nnkObjConstr.newTree(bindSym"StringHints",
     nnkExprColonExpr.newTree(ident"strs", nnkPrefix.newTree(ident"@", ss)),
     nnkExprColonExpr.newTree(ident"ints", nnkPrefix.newTree(ident"@", ii)),
     nnkExprColonExpr.newTree(ident"nums", nums))
@@ -1055,6 +1067,10 @@ proc thinForPairs*[T](d: var Domain[T]) =
 proc selector(f: NimNode; o: NimNode): NimNode =
   if f.kind == nnkIntLit: nnkBracketExpr.newTree(o, f) else: newDotExpr(o, f)
 
+proc boundaryOf*[T](t: typedesc[T]): Domain[T]
+  ## forward: the generated domain code binds it here (open, so a suite's
+  ## own overload still applies) and does not name it in the suite's scope
+
 type DomCtx = object
   ty, vals, exh, proto: NimNode
   depth: int
@@ -1070,12 +1086,12 @@ proc domLeaf(cx: DomCtx; fields: seq[NimNode];
   for i, f in fields:
     let d = genSym(nskVar, "fd" & $i)
     ds.add d
-    body.add newVarStmt(d, newCall(ident"boundaryOf",
+    body.add newVarStmt(d, newCall(bindSym("boundaryOf", brOpen),
       newCall(ident"typeof", selector(f, cx.proto))))
   let thin = newStmtList()
   for d in ds:
     sizes.add newCall(bindSym"domLen", newDotExpr(d, ident"values"))
-    thin.add newCall(ident"thinDomain", d)
+    thin.add newCall(bindSym("thinDomain", brOpen), d)
   body.add quote do:
     if exceeds(@`sizes`, fieldProductFull): `thin`
   for d in ds:
@@ -1157,7 +1173,7 @@ proc domEmit(cx: var DomCtx; items: seq[NimNode]; fields: seq[NimNode];
         # the generated case is over the discriminator's ordinal
         cs.add nnkElse.newTree(newStmtList(nnkDiscardStmt.newTree(newEmptyNode())))
       result = newStmtList()
-      result.add newLetStmt(dd, newCall(ident"boundaryOf",
+      result.add newLetStmt(dd, newCall(bindSym("boundaryOf", brOpen),
         newCall(ident"typeof", selector(dname, cx.proto))))
       result.add quote do:
         if not `dd`.exhaustive: `exh` = false
@@ -1213,19 +1229,8 @@ macro objectDomain(T: typedesc): untyped =
 # in priority order, at most `seqDomainCap` values (the prefix a nested
 # collection is cut to is the first `stringCore`).
 
-const
-  seqDomainCap* = 2048
-    ## the most values a collection domain holds, whatever the hints
-  collCoreMax* = 8
-    ## the element core: up to this many spread values of the element domain
-  collExtraMax = 6
-    ## and up to this many more an ordinal gets from the SUT's own literals
-  seqFixedLens = [4, 5, 8]
-  seqTripleFull = 512
-    ## length-3 sequences are the full product of the core up to this many,
-    ## else an all-pairs array
+# (the domain size constants are declared above the float domain)
 
-proc boundaryOf*[T](t: typedesc[T]): Domain[T]
 
 proc coreIdx*(n, limit: int): seq[int] =
   ## the indices of an `n`-value domain kept in its core: all of them when
@@ -1700,17 +1705,17 @@ macro pinFind*(fn: typed; target: untyped;
   for i in 0 ..< types.len:
     let a = genSym(nskVar, "a" & $i)
     wbody.add nnkVarSection.newTree(nnkIdentDefs.newTree(a, tsyms[i],
-      newCall(ident"witnessAs", tsyms[i], nnkBracketExpr.newTree(w, newLit(i)))))
+      newCall(bindSym("witnessAs", brOpen), tsyms[i], nnkBracketExpr.newTree(w, newLit(i)))))
     wcall.add a
   # A SUT with a result: the native run discards it.
   let rty = fn.getTypeInst[0][0]
   let returns = rty.kind != nnkEmpty and not rty.eqIdent("void")
   template used(c: NimNode): NimNode =
     (if returns: nnkDiscardStmt.newTree(c) else: c)
-  wbody.add newCall(ident"nativeRun", used(wcall))
+  wbody.add newCall(bindSym("nativeRun", brOpen), used(wcall))
   # The domain: one generated domain per parameter, nested loops, capped.
   let doms = newStmtList()
-  doms.add newCall(ident"setStringHints", hintsExpr(harvest(fn)))
+  doms.add newCall(bindSym("setStringHints", brOpen), hintsExpr(harvest(fn)))
   var domSyms: seq[NimNode]
   var sizesLit = nnkBracket.newTree()
   var exh: NimNode = newLit(true)
@@ -1720,10 +1725,10 @@ macro pinFind*(fn: typed; target: untyped;
     domSyms.add d
     # The parameter's type as the witness tuple holds it (a type symbol
     # spliced from `getTypeInst` does not bind as a `typedesc` argument).
-    doms.add newVarStmt(d, newCall(ident"boundaryOf", tsyms[i]))
+    doms.add newVarStmt(d, newCall(bindSym("boundaryOf", brOpen), tsyms[i]))
     sizesLit.add newCall(bindSym"domLen", newDotExpr(d, ident"values"))
     exh = infix(exh, "and", newDotExpr(d, ident"exhaustive"))
-    let part = newCall(ident"describe", d)
+    let part = newCall(bindSym("describe", brOpen), d)
     desc = if i == 0: part else: infix(infix(desc, "&", newLit(" x ")), "&", part)
   if types.len == 0: desc = newLit("no parameters")
   # The parameter product is run in full up to the cap; beyond it, an
@@ -1734,7 +1739,7 @@ macro pinFind*(fn: typed; target: untyped;
   # Two string parameters would cross to more runs than the cap: each is cut
   # to its core first (a string domain is in priority order).
   let thin = newStmtList()
-  for d in domSyms: thin.add newCall(ident"thinForPairs", d)
+  for d in domSyms: thin.add newCall(bindSym("thinForPairs", brOpen), d)
   doms.add quote do:
     if pairsExceed(@`sizesLit`, pinFindCap): `thin`
   let sizesNow = nnkBracket.newTree()
@@ -1759,7 +1764,7 @@ macro pinFind*(fn: typed; target: untyped;
   for a in callVars: dcall.add a
   var shown = newLit("input (")
   for i, v in loopVars:
-    shown = infix(shown, "&", newCall(ident"showArg", v))
+    shown = infix(shown, "&", newCall(bindSym("showArg", brOpen), v))
     if i < loopVars.high: shown = infix(shown, "&", newLit(","))
   shown = infix(shown, "&", newLit(")"))
   let dused = used(dcall)

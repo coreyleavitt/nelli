@@ -38,7 +38,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
-from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric, pinFind
 
 const declKey = cellKey(faGeneric, "s8au_remainder")
 
@@ -54,7 +54,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -125,7 +125,7 @@ suite "S8au (1): a local distinct value":
   test "ret": (verdict(dRet, "ret", sxSat); verdict(dRet, "ret_dead", sxUnsat))
   test "fld": (verdict(dField, "fld", sxSat); verdict(dField, "fld_dead", sxUnsat))
   test "a seq of a distinct type is modelled (RFC-0005 S8ba)":
-    let r = symexFind(dSeq, tLabel("sq"))
+    let r = pinFind(dSeq, tLabel("sq"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     check r.errors.len == 0

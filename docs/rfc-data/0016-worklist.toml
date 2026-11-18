@@ -2407,12 +2407,13 @@ id = "INT-77"
 table = "5.8c"
 title = "K9d-8: a float `range` parameter (`range[0.0 .. 1.0]`, `range[-1.5'f32 .. 2.5'f32]`, anonymous or named) does not compile in the walker: `parseRangeBracket` (`src/nelli/smt/dsl_typebridge.nim`) reads both bounds with `intVal` (`Error: node lacks field: intVal`), so any suite whose SUT takes one fails at macro time instead of declining. The value set Nim admits is `lo <= x and x <= hi` in the base width: the closed IEEE interval, NaN excluded, -0.0 admitted with 0.0. The bar is to model that exactly wherever the type lands (a parameter, an object field, a seq element)"
 class = "precision"
-state = "open"
-note = "found converting the float family (K9d-8); the domain generator (`boundaryOf` over a float range) is already in `tests/s8cu_helpers.nim`"
+state = "closed"
+note = "fixed in the walker (436): a float range (anonymous or named) is classified as its base float refined with the closed interval (`IRType.floatRange`, `withFloatRange`), asserted at allocation and at a seq element read (`rangeCondsIfNeeded`), clamped in an unread witness cell, emitted and keyed by its bounds' bits. Modelled exactly, no decline. Found converting the float family (K9d-8)"
+sha = "f2bcc983"
 slice = "K9d"
 home = "INT-77 (`wip/k9d8`)"
 source = "K9d-8 pinFind conversion"
-evidence = "reproducer: `scripts/dt-bounded.sh c tests/tsymex_0016_int77_floatrange.nim` fails to compile (`node lacks field: intVal` in `parseRangeBracket`)"
+evidence = "red at 87695fc2: `tsymex_0016_int77_floatrange` does not compile (`node lacks field: intVal` in `parseRangeBracket`); green at f2bcc983, c and cpp, 6 OK: every verdict pinned natively (`pinExact` over the float-range domain, `pinFind`), incl. -0.0 admitted, NaN and the float32 successor of 2.5 excluded"
 aliases = []
 cells = []
 pins = ["tsymex_0016_int77_floatrange"]

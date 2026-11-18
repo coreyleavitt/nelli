@@ -2,6 +2,7 @@ import std/unittest
 import std/math
 import std/sequtils
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 16 A5 — model classify() + copySign(); nextafter stays unsupported.
 #
@@ -75,49 +76,49 @@ proc copySignPos(x: float) =
 suite "symex Phase 16 A5 — classify() tracer bullet: fcNan":
 
   test "A5-1a: classify(x)==fcNan is sat (x can be NaN)":
-    let r = symexFind(classifyIsNan, tLabel("classifyIsNan"))
+    let r = pinFind(classifyIsNan, tLabel("classifyIsNan"))
     check r.status == sxSat
 
   test "A5-1b: isNaN(x) and classify(x)==fcNormal is unsat (contradiction)":
-    let r = symexFind(classifyNanContradiction, tLabel("classifyNanContradiction"))
+    let r = pinFind(classifyNanContradiction, tLabel("classifyNanContradiction"))
     check r.status == sxUnsat
 
 suite "symex Phase 16 A5 — classify() infinities and zeros":
 
   test "A5-2a: classify(x)==fcInf is sat (+Inf is reachable)":
-    let r = symexFind(classifyIsInf, tLabel("classifyIsInf"))
+    let r = pinFind(classifyIsInf, tLabel("classifyIsInf"))
     check r.status == sxSat
 
   test "A5-2b: classify(x)==fcNegInf is sat (-Inf is reachable)":
-    let r = symexFind(classifyIsNegInf, tLabel("classifyIsNegInf"))
+    let r = pinFind(classifyIsNegInf, tLabel("classifyIsNegInf"))
     check r.status == sxSat
 
   test "A5-3a: classify(x)==fcZero is sat (+0.0 is reachable)":
-    let r = symexFind(classifyIsZero, tLabel("classifyIsZero"))
+    let r = pinFind(classifyIsZero, tLabel("classifyIsZero"))
     check r.status == sxSat
 
   test "A5-3b: classify(x)==fcNegZero is sat (-0.0 is reachable)":
     ## Z3 fp.isZero(−0.0)=true and fp.isNegative(−0.0)=true, so the ite-chain
     ## should witness −0.0 (ordinal 3) distinct from +0.0 (ordinal 2).
-    let r = symexFind(classifyIsNegZero, tLabel("classifyIsNegZero"))
+    let r = pinFind(classifyIsNegZero, tLabel("classifyIsNegZero"))
     check r.status == sxSat
 
 suite "symex Phase 16 A5 — classify() normal and subnormal":
 
   test "A5-4a: classify(x)==fcNormal is sat (ordinary finite value reachable)":
-    let r = symexFind(classifyIsNormal, tLabel("classifyIsNormal"))
+    let r = pinFind(classifyIsNormal, tLabel("classifyIsNormal"))
     check r.status == sxSat
 
   test "A5-4b: classify(x)==fcSubnormal is sat (subnormal reachable)":
-    let r = symexFind(classifyIsSubnormal, tLabel("classifyIsSubnormal"))
+    let r = pinFind(classifyIsSubnormal, tLabel("classifyIsSubnormal"))
     check r.status == sxSat
 
 suite "symex Phase 16 A5 — copySign()":
 
   test "A5-5a: copySign(3.0, x) < 0.0 is sat (sign from x, which can be negative)":
-    let r = symexFind(copySignNeg, tLabel("copySignNeg"))
+    let r = pinFind(copySignNeg, tLabel("copySignNeg"))
     check r.status == sxSat
 
   test "A5-5b: copySign(3.0, x) > 0.0 is sat (sign from x, which can be positive)":
-    let r = symexFind(copySignPos, tLabel("copySignPos"))
+    let r = pinFind(copySignPos, tLabel("copySignPos"))
     check r.status == sxSat

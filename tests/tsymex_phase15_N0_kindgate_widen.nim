@@ -77,6 +77,7 @@
 ## floor pin (house convention for incidental, non-canonical pins).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/canonicalize
 import nelli/smt/[dsl, runtime]
 
@@ -111,8 +112,8 @@ proc sutFuncDirectCall(n: int) =
 
 suite "symex N0 cycle 1 — C3 widened for func-valued capture":
   test "N0-C3: a func-valued capture produces the SAME witness as calling the func directly":
-    let viaValue  = symexFind(sutFuncAsValue, tLabel("func-as-value"))
-    let viaDirect = symexFind(sutFuncDirectCall, tLabel("func-direct"))
+    let viaValue  = pinFind(sutFuncAsValue, tLabel("func-as-value"))
+    let viaDirect = pinFind(sutFuncDirectCall, tLabel("func-direct"))
     check viaValue.status == sxSat     ## pre-fix: sxUnknown (weInternalWalkerFault)
     check viaDirect.status == sxSat
     check viaValue.witness[0] == 5     ## n : n*2 == 10 => n == 5
@@ -144,7 +145,7 @@ proc sutFuncStringParam(s: string) =
 
 suite "symex N0 cycle 2 — G8 widened for a func with a string first param":
   test "N0-G8: a user func taking a string first param resolves to a real verdict, not seUnsupportedStringOp":
-    let r = symexFind(sutFuncStringParam, tLabel("func-string-param"))
+    let r = pinFind(sutFuncStringParam, tLabel("func-string-param"))
     check r.status == sxSat            ## pre-fix: sxUnknown (seUnsupportedStringOp)
     check r.witness[0].len > 0
     check r.witness[0].len mod 2 == 0
@@ -190,8 +191,8 @@ suite "symex N0 cycle 3 — borrowInfoFor proc-vs-func twin equality (characteri
     ## ejects both operands to base float and computes the same sum — the
     ## missed widen only skips re-boxing the (unread, unconstrained) result
     ## as a distinct const.
-    let rProc = symexFind(sutBorrowAddProc, tLabel("borrow_add_proc"))
-    let rFunc = symexFind(sutBorrowAddFunc, tLabel("borrow_add_func"))
+    let rProc = pinFind(sutBorrowAddProc, tLabel("borrow_add_proc"))
+    let rFunc = pinFind(sutBorrowAddFunc, tLabel("borrow_add_func"))
     check rProc.status == sxSat
     check rFunc.status == sxSat
     check rProc.status == rFunc.status
@@ -199,8 +200,8 @@ suite "symex N0 cycle 3 — borrowInfoFor proc-vs-func twin equality (characteri
     check float64(rFunc.witness[0]) + float64(rFunc.witness[1]) > 10.0
 
   test "N0-borrow pin: comparison borrow (<) — proc and func spellings agree on verdict AND witness":
-    let rProc = symexFind(sutBorrowLtProc, tLabel("borrow_lt_proc"))
-    let rFunc = symexFind(sutBorrowLtFunc, tLabel("borrow_lt_func"))
+    let rProc = pinFind(sutBorrowLtProc, tLabel("borrow_lt_proc"))
+    let rFunc = pinFind(sutBorrowLtFunc, tLabel("borrow_lt_func"))
     check rProc.status == sxSat
     check rFunc.status == sxSat
     check rProc.status == rFunc.status

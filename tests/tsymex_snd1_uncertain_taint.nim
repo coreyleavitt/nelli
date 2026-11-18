@@ -39,7 +39,7 @@
 ## demonstrating the `isUnsupported` chokepoint rather than an op M4 now
 ## models correctly. `/=` itself (SUT 2) remains untouched by M4 and continues
 ## to prove the taint mechanism is intact for ops M4 did not touch.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -111,29 +111,29 @@ proc branchIsolation(x: int, acc: var float) =
 suite "symex SND-1 — isUnsupported taints Path.uncertain (walker v38)":
 
   test "M4 CLOSES this case: `t &= \"x\"; if t == \"ax\"` now a real sxSat (was sxUnknown pre-M4, false sxSat pre-SND-1)":
-    let r = symexFind(concatMutate, tLabel("concat"))
+    let r = pinFind(concatMutate, tLabel("concat"))
     check r.status == sxSat
     check r.witness[0] == "a"
     check r.witness[0] & "x" == "ax"  ## round-trips against real Nim `&`
 
   test "SND-1: a nested-seq element `*=` drop then a compare degrades to sxUnknown (no false sxSat)":
-    let r = symexFind(divMutate, tLabel("div"))
+    let r = pinFind(divMutate, tLabel("div"))
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedStmtKind)
     check r.errors.named(seNestedSeqUnsupported)
 
   test "PRC-07: `acc /= 2.0; if acc == 5.0` is modelled: exact sxSat, witness 10.0":
-    let r = symexFind(divModelled, tLabel("div_modelled"))
+    let r = pinFind(divModelled, tLabel("div_modelled"))
     check r.status == sxSat
     check r.witness[0] / 2.0 == 5.0
 
   test "SND-1 regression: target reached BEFORE the drop still yields a valid sxSat":
-    let r = symexFind(targetBeforeDrop, tLabel("before"))
+    let r = pinFind(targetBeforeDrop, tLabel("before"))
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "SND-1 regression: a clean sibling branch (isIf merge) stays non-uncertain, still sxSat":
-    let r = symexFind(branchIsolation, tLabel("branch_clean"))
+    let r = pinFind(branchIsolation, tLabel("branch_clean"))
     check r.status == sxSat
     check r.witness[0] == 5
 

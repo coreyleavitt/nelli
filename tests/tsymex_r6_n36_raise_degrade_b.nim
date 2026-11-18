@@ -97,6 +97,7 @@
 
 import std/[unittest, strutils, tables]
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 
@@ -126,7 +127,7 @@ suite "symex N36 -- iekStrSplit cap-exceeded decline inside a block: (loop-in-bl
     ## honest sxUnknown carrying seZ3StringIncomplete (plus the loop's own
     ## beBudgetExhausted, since a single-iteration k-unrollable while loop
     ## still walks through the generic loop machinery).
-    let r = symexFind(sutSplitOversizeBlockAfter, tLabel("n36_split_oversize_block_after"))
+    let r = pinFind(sutSplitOversizeBlockAfter, tLabel("n36_split_oversize_block_after"))
     var sawSplitCapKind = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -148,7 +149,7 @@ proc sutSplitOversizeNoBlockAfter(unused: int) =
 suite "symex N36 -- regression: iekStrSplit no-block companion stays correct":
 
   test "N36-2-noblock: same shape without the block -- honest sxUnknown, same kind pre- and post-fix":
-    let r = symexFind(sutSplitOversizeNoBlockAfter, tLabel("n36_split_oversize_noblock_after"))
+    let r = pinFind(sutSplitOversizeNoBlockAfter, tLabel("n36_split_oversize_noblock_after"))
     ## RFC-0005 S10: the label is reached unconditionally in reality and the
     ## path's only taint is `seZ3StringIncomplete` (`dcFreshSymbol`), so the
     ## candidate is replayed and CONFIRMED -> sxSat (rules 1-2 alone decide
@@ -197,7 +198,7 @@ suite "symex N36 -- isVariantReassign defaultZero(float) decline via a call fram
     ## (Nim raises `FieldDefect` on a branch change and keeps the fields on
     ## `n36fkB -> n36fkB`), so no `defaultZero` is reached: the target is a
     ## clean sxSat whose witness starts on `n36fkB`.
-    let r = symexFind(sutFloatReassignCallAfter, tLabel("n36_floatreassign_call_after"))
+    let r = pinFind(sutFloatReassignCallAfter, tLabel("n36_floatreassign_call_after"))
     check r.status == sxSat
     var sawGenericFault = false
     for e in r.errors:

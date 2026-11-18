@@ -97,6 +97,7 @@
 
 import std/[unittest, strutils, tables]
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 
@@ -128,7 +129,7 @@ suite "symex N36 -- regression: isVariantReassign no-frame companion stays corre
 
   test "N36-3-noframe: direct (non-call) reassignment -- same verdict as the call frame":
     ## RFC-0005 S8f: see N36-3.
-    let r = symexFind(sutFloatReassignNoBlockAfter, tLabel("n36_floatreassign_noblock_after"))
+    let r = pinFind(sutFloatReassignNoBlockAfter, tLabel("n36_floatreassign_noblock_after"))
     check r.status == sxSat
     check r.errors.len == 0
 
@@ -169,7 +170,7 @@ proc sutSplitNormalBlockAfterUnsat(unused: int) =
 suite "symex N36 -- UNSAT companion: no over-degrade":
 
   test "N36-4: a data-independent false condition after a NON-degrading block still proves sxUnsat":
-    let r = symexFind(sutSplitNormalBlockAfterUnsat,
+    let r = pinFind(sutSplitNormalBlockAfterUnsat,
                        tLabel("n36_split_normal_unreachable_after"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)

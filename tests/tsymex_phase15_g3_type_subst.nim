@@ -26,6 +26,7 @@
 ## return-value bridge through generics; sink proves the wrapper strip.)
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # --- 1. float64 instantiation (Cluster F bridge through generics) -----------
 proc idF[T](x: T): T = x
@@ -48,9 +49,9 @@ proc useSink(x: int) =
 
 suite "symex Phase 15 G3 — generic type-substitution through classifyType":
   test "identity proc instantiated at float64 classifies correctly":
-    let r = symexFind(useFloat, tLabel("float_reached"))
+    let r = pinFind(useFloat, tLabel("float_reached"))
     check r.status == sxSat
 
   test "sink T param through generics classifies as itInt (Z3c sink strip)":
-    let r = symexFind(useSink, tLabel("sink_reached"))
+    let r = pinFind(useSink, tLabel("sink_reached"))
     check r.status == sxSat

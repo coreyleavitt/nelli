@@ -1,4 +1,4 @@
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/unittest
 import std/sequtils
 import nelli/symex
@@ -49,7 +49,7 @@ suite "symex Phase 15 — F5 hang regression: p[]=int(f) ordering goal":
     ## goal over int2bv(bv2int(fp.to.sbv f))). After the fix the stored term is
     ## pure BV and Z3 terminates with sxSat. A concrete (f, k) witness is
     ## returned; plugging it in confirms q[] > k at runtime.
-    let r = symexFind(f5HangSut, tLabel("f5HangHit"))
+    let r = pinFind(f5HangSut, tLabel("f5HangHit"))
     check r.status == sxSat
     # Witness round-trip: the returned (f, k) must satisfy the predicate.
     let f = r.witness[0]   # float
@@ -66,7 +66,7 @@ suite "symex Phase 15 — F5 hang regression: p[]=int(f) ordering goal":
     ## isDerefWrite is deferred to a future slice.
     ## K10a-float: no RangeDefect either way; the out-of-range side of the
     ## conversion is undefined behaviour and halts, so the run is sxUnknown.
-    let r = symexFind(f5HangSut, tRaisedExn("RangeDefect"))
+    let r = pinFind(f5HangSut, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
     check not r.trusted

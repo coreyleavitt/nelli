@@ -1,4 +1,4 @@
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/unittest
 import std/math
 import std/sequtils
@@ -74,10 +74,10 @@ suite "symex Phase 15 — CR-3 float→int domain bounding":
 
   test "CR-3: unbounded int(x) never raises; int(x)==3 is a clean sxSat (S8g)":
     block:
-      let k9r = symexFind(f2i_unbound, tRaisedExn("RangeDefect"))
+      let k9r = pinFind(f2i_unbound, tRaisedExn("RangeDefect"))
       check k9r.status == sxUnknown
       check k9r.errors.named(ubFloatToIntRange)
-    let r = symexFind(f2i_unbound, tLabel("f2i_unbound"))
+    let r = pinFind(f2i_unbound, tLabel("f2i_unbound"))
     check r.status == sxSat
     if r.status == sxSat: check int(r.witness[0]) == 3
 
@@ -85,19 +85,19 @@ suite "symex Phase 15 — CR-3 float→int domain bounding":
     ## Real Nim: int(NaN) == low(int), so the label is unreachable. The model's
     ## out-of-range value is fresh; its candidate is replayed and refuted.
     block:
-      let k9r = symexFind(f2i_nan, tRaisedExn("RangeDefect"))
+      let k9r = pinFind(f2i_nan, tRaisedExn("RangeDefect"))
       check k9r.status == sxUnknown
       check k9r.errors.named(ubFloatToIntRange)
-    let r = symexFind(f2i_nan, tLabel("f2i_nan"))
+    let r = pinFind(f2i_nan, tLabel("f2i_nan"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
 
   test "CR-3: Inf input → never a claim (S8g: fresh value, replay refutes)":
     block:
-      let k9r = symexFind(f2i_inf, tRaisedExn("RangeDefect"))
+      let k9r = pinFind(f2i_inf, tRaisedExn("RangeDefect"))
       check k9r.status == sxUnknown
       check k9r.errors.named(ubFloatToIntRange)
-    let r = symexFind(f2i_inf, tLabel("f2i_inf"))
+    let r = pinFind(f2i_inf, tLabel("f2i_inf"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
 
@@ -105,10 +105,10 @@ suite "symex Phase 15 — CR-4 int32(float) 32-bit conversion":
 
   test "CR-4: int32(x) never raises; int32(x)==5 is a clean sxSat (S8g)":
     block:
-      let k9r = symexFind(i32conv, tRaisedExn("RangeDefect"))
+      let k9r = pinFind(i32conv, tRaisedExn("RangeDefect"))
       check k9r.status == sxUnknown
       check k9r.errors.named(ubFloatToIntRange)
-    let r = symexFind(i32conv, tLabel("i32conv"))
+    let r = pinFind(i32conv, tLabel("i32conv"))
     check r.status == sxSat
     if r.status == sxSat: check int32(r.witness[0]) == 5
 
@@ -117,17 +117,17 @@ suite "symex Phase 15 — CR-6 float32 vs float64 comparison":
   test "CR-6: float32==float64 comparison does not crash (RED: AssertionDefect before fix)":
     ## Before fix: cmpFloat doAssert fires when a.kind != b.kind.
     ## After fix: float32 widened to float64 → returns correct verdict.
-    let r = symexFind(mixedCmp, tLabel("mixedCmp"))
+    let r = pinFind(mixedCmp, tLabel("mixedCmp"))
     # Must not crash; result must be sat (there exist equal float32/float64 pairs).
     check r.status == sxSat
 
   test "CR-6: float32 < float64 ordering comparison does not crash":
-    let r = symexFind(mixedCmpOrd, tLabel("mixedCmpOrd"))
+    let r = pinFind(mixedCmpOrd, tLabel("mixedCmpOrd"))
     check r.status == sxSat
 
   test "CR-6: mixed float32==float64 witness round-trips":
     ## The witness (a: float32, b: float64) must actually satisfy a == b at runtime.
-    let r = symexFind(mixedCmp, tLabel("mixedCmp"))
+    let r = pinFind(mixedCmp, tLabel("mixedCmp"))
     check r.status == sxSat
     let a = r.witness[0]   # float32
     let b = r.witness[1]   # float64

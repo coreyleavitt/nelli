@@ -822,6 +822,15 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
+  ##   parameter, its fields, elements, table values, set members, a ref
+  ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:
+  ##   a target only a hole reaches was a trusted `sxSat` whose witness no
+  ##   caller can pass. A read site asserts the declared ordinals and 0 (a
+  ##   zero-initialised slot) until the walk lowers a hole it does not see
+  ##   made (a conversion to a holey enum, an opaque call;
+  ##   `enumHolesMade`). A holey enum's ordinals enter a type's key
+  ##   (`Ty<I:..:eo@[..]>`), a conversion to one `Ex<CIW:..h:..>`.
   ## - RFC-0016 INT-83 (440->443, provisional; 441-442 are reserved for
   ##   in-flight work): Nim's `pointer` is modelled (a parameter, a field,
   ##   a local: it was `feUnsupportedParamType`): an address of its own sort
@@ -855,7 +864,7 @@ const renderAsChoicesVersion* = "12"
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "443"
+const symexWalkerVersion* = "444"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -6579,7 +6588,8 @@ proc canonicalize*(t: IRType): string =
       (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") &
       (if t.enumName.len > 0: ":e[" & t.enumName & "]" else: "") &
       (if t.isChar: ":c" else: "") &
-      (if t.enumRange: ":er" else: "") & ">"   # RFC-0005 S8bv: as `isChar`
+      (if t.enumRange: ":er" else: "") &   # RFC-0005 S8bv: as `isChar`
+      (if t.enumOrds.len > 0: ":eo" & $t.enumOrds else: "") & ">"   # INT-84
   of itBool:
     "Ty<B>"
   of itString:
@@ -6785,6 +6795,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<CIW:" & $e.ciwSrcWidth & ":" & $e.ciwSrcSigned & ":" &
       $e.ciwTgtWidth & ":" & $e.ciwTgtSigned & ":" &
       (if e.ciwHasRange: $e.ciwLo & ".." & $e.ciwHi & ":" else: "") &
+      (if e.ciwHoley: "h:" else: "") &   # RFC-0016 INT-84
       canonicalize(e.ciwOperand, env) & ">"
   of iekConvIntReinterpret:
     # A1 adjudication: width + target signedness are both part of the key

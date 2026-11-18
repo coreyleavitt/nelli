@@ -277,6 +277,21 @@ type
                                ## provenance-only contract as `isChar`: NOT
                                ## part of `IRType.==`, IS rendered by
                                ## `canonicalize`.
+      enumOrds*: seq[int64]   ## RFC-0016 INT-84. A HOLEY enum's declared
+                               ## ordinals, ascending (empty for an enum
+                               ## whose values are consecutive, and for
+                               ## every non-enum `itInt`). `[rangeLo,
+                               ## rangeHi]` spans the holes too; a caller
+                               ## can pass no hole, so an input of the type
+                               ## ranges over these values only
+                               ## (`enumHoleConds`, heap_model.nim). A value
+                               ## the program makes is not bounded by it: a
+                               ## conversion to a holey enum checks
+                               ## `low .. high` only, a cast nothing, and a
+                               ## zero-initialised slot holds ordinal 0.
+                               ## Not part of `IRType.==` (a refinement of
+                               ## the value set, as `hasRange`); IS rendered
+                               ## by `canonicalize`.
     of itBool:
       discard
     of itTuple:
@@ -899,6 +914,9 @@ type
                              ## width relation is modelled here, the value
                              ## being representable in the target whenever
                              ## the check passes.
+      ciwHoley*: bool        ## RFC-0016 INT-84: the target is a holey enum,
+                             ## so the converted value may be a hole (Nim
+                             ## checks `low .. high` only).
     of iekConvIntReinterpret:
       cirOperand*:   IRExpr  ## A1 adjudication: the value being reinterpreted
       cirWidth*:     int     ## shared src==tgt width: 8, 16, 32, or 64
@@ -2688,7 +2706,8 @@ proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64, signed = true,
 
 proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
                       tgtWidth: int, tgtSigned: bool,
-                      hasRange = false, lo = 0'i64, hi = 0'i64): IRExpr =
+                      hasRange = false, lo = 0'i64, hi = 0'i64,
+                      holey = false): IRExpr =
   ## Round-6 B2: WIDENING-only int-family width conversion. Zero-/sign-
   ## extend is keyed on `srcSigned` (the SOURCE value's own signedness);
   ## `tgtSigned` becomes the resulting SymVal's `signed` flag.
@@ -2701,7 +2720,7 @@ proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
     $srcWidth & " tgt=" & $tgtWidth
   IRExpr(kind: iekConvIntWidth, ciwOperand: e, ciwSrcWidth: srcWidth,
          ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned,
-         ciwHasRange: hasRange, ciwLo: lo, ciwHi: hi)
+         ciwHasRange: hasRange, ciwLo: lo, ciwHi: hi, ciwHoley: holey)
 
 proc carriesRangeCheck*(e: IRExpr, ty: IRType): bool =
   ## RFC-0005 S8j. True iff `e` is an integer conversion that range-checks
@@ -3111,7 +3130,7 @@ proc withRange*(ty: IRType, lo, hi: int64): IRType =
   doAssert ty.kind == itInt, "withRange: not an itInt: " & $ty.kind
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
          hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName,
-         typeKey: ty.typeKey)
+         enumOrds: ty.enumOrds, typeKey: ty.typeKey)
 
 func floatOfBits*(b: uint64): float64 = cast[float64](b)
   ## RFC-0016 INT-77: a float literal carried through emitted code by its bits
@@ -3141,7 +3160,17 @@ proc withEnumName*(ty: IRType, name: string): IRType =
   doAssert ty.kind == itInt, "withEnumName: not an itInt: " & $ty.kind
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
          hasRange: ty.hasRange, rangeLo: ty.rangeLo, rangeHi: ty.rangeHi,
-         enumName: name, typeKey: ty.typeKey)
+         enumName: name, enumOrds: ty.enumOrds, typeKey: ty.typeKey)
+
+proc withEnumOrds*(ty: IRType, ords: seq[int64]): IRType =
+  ## RFC-0016 INT-84. Stamp a holey enum's declared ordinals (ascending)
+  ## onto its lifted `itInt`; see `IRType.enumOrds`. A fresh `IRType`, as
+  ## `withEnumName`, carrying every other `itInt` field forward.
+  doAssert ty.kind == itInt, "withEnumOrds: not an itInt: " & $ty.kind
+  IRType(kind: itInt, width: ty.width, signed: ty.signed,
+         hasRange: ty.hasRange, rangeLo: ty.rangeLo, rangeHi: ty.rangeHi,
+         enumName: ty.enumName, enumRange: ty.enumRange, enumOrds: ords,
+         typeKey: ty.typeKey)
 
 proc withEnumRange*(ty: IRType, lo, hi: int64): IRType =
   ## RFC-0005 S8bv. The enum subrange `range[lo..hi]` of the lifted enum
@@ -3151,7 +3180,7 @@ proc withEnumRange*(ty: IRType, lo, hi: int64): IRType =
     "withEnumRange: not a lifted enum"
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
          hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName,
-         enumRange: true, typeKey: ty.typeKey)
+         enumRange: true, enumOrds: ty.enumOrds, typeKey: ty.typeKey)
 
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              objectName: string = "", nominalId: string = "",

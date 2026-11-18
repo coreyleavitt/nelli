@@ -26,6 +26,7 @@ import std/strutils
 import std/strformat
 import std/options   ## RFC-0005 S8bv: `classifyEnumSubrange`
 import std/sequtils
+import std/algorithm   ## RFC-0016 INT-84: `sort` of a holey enum's ordinals
 import std/tables     ## RFC-0005 S8e: the witness type-symbol registry
 import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
 import std/macrocache   ## RFC-0016 W3-z R10 follow-up: `stdlibFileMemo`
@@ -1774,6 +1775,13 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # could not even reach `symexFind`: the generated witness constructor
       # failed to COMPILE).
       cls.ty = cls.ty.withEnumName(s).keyedBySym(resolved)
+      # RFC-0016 INT-84: a holey enum's declared ordinals. The range above
+      # spans its holes, which no caller can pass (`IRType.enumOrds`).
+      if int64(fields.len) <= maxOrd - minOrd:
+        var ords: seq[int64]
+        for (_, o) in fields: ords.add o
+        ords.sort()
+        cls.ty = cls.ty.withEnumOrds(ords)
       return cls
     # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
     # whose pointee is a plain (non-variant) object now classifies as

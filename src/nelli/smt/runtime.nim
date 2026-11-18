@@ -3177,6 +3177,7 @@ proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
     # conversion's defect CONDITION, not a path constraint on a stored
     # value, so `rangeCondsIfNeeded` is not the applicable helper]
     conds = bvRangeConds(sv, lo, hi, sgn)  # [range-invariant: range-defect-check]
+  if e.ciwHoley: enumHolesMade = true   # RFC-0016 INT-84: a hole may result
   if conds.len > 0:
     when defined(symexTestInjectWalkerFault):
       injectShapeFault("conds")  # RFC-0005 S8ce: a local seq[Z3Bool] held
@@ -3645,6 +3646,8 @@ proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
   ## (`allocEnumZeroLegal`).
   let saved = allocEnumZeroLegal
   allocEnumZeroLegal = true
+  # RFC-0016 INT-84: a callee the walk does not see may return a hole.
+  if hasHoleyEnum(ty): enumHolesMade = true
   result = allocateSym(ty, name, pcOut, intOffsetPositions = intOffsetPositions)
   allocEnumZeroLegal = saved
   # RFC-0016 PRC-07 slice B: which bytes of a returned variant no write
@@ -14245,6 +14248,7 @@ proc havocOpaqueHeaps(w: var WalkCtx; p: Path; stmt: IRStmt): bool =
   ## replaced by a fresh constant of its sort; one it has not touched yet is
   ## read from a constant of its own from here on (`heapInputName`). True
   ## when anything was havocked.
+  enumHolesMade = true   # RFC-0016 INT-84: the callee may store a hole
   var ids: seq[string]
   for t in stmt.opaqueHeapTys:
     let pointee = if t.kind == itRef: t.refPointeeTy else: t.ptrPointeeTy
@@ -14299,6 +14303,7 @@ proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
   ## fresh `ref` is any address, nil included), and the cells it reaches
   ## take fresh contents (`havocOpaqueHeaps`, `feOpaqueEffectHavoc`). S8as
   ## kept such a call non-inert, and declined one under `havocAllGlobals`.
+  enumHolesMade = true   # RFC-0016 INT-84: the callee may write a hole
   var names: seq[string]
   for nm in stmt.opaqueHavoc:
     if nm == "*":
@@ -15596,7 +15601,7 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
   if av.kind == svInt and av.ziIvl.isSome and
      av.ziIvl.get.lo >= targetTy.rangeLo and av.ziIvl.get.hi <= targetTy.rangeHi:
     return cp   ## provably in range: no fork, no solver call.
-  let conds = rangeCondsIfNeeded(av, targetTy)
+  let conds = rangeCondsIfNeeded(av, targetTy, holes = false)  # INT-84: a check
   if conds.len == 0:
     return cp   ## `av`'s kind carries no bound assertion (e.g. a degrade
                 ## placeholder reaching an itInt target) — honest-incomplete,
@@ -26716,6 +26721,9 @@ proc runSymexImpl(prog: SymexProgram,
     let paramAllocIssue = unallocatableFieldIssue(p.ty)
     if paramAllocIssue.isSome:
       raiseParamAllocIssue(paramAllocIssue.get)
+  # RFC-0016 INT-84: what `allocateSym` builds here is the walk's input, so
+  # a holey enum in it ranges over its declared values (`allocInputDomain`).
+  allocInputDomain = true
   for p in prog.params:
     case p.ty.kind
     of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct, itRef, itPtr, itBitSet:
@@ -26980,6 +26988,12 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
+    # RFC-0016 INT-84: a holey enum parameter is one of its declared values
+    # (the arms above bound it by `[rangeLo, rangeHi]`, holes included).
+    if p.ty.kind == itInt and p.ty.enumOrds.len > 0:
+      for c in enumHoleConds(env[p.name], p.ty, zeroLegal = false):
+        initialPC.add c
+  allocInputDomain = false
   # RFC-0016 INT-82: every parameter's leaves (a ref's address, a seq's or
   # table's backing) are the walk's entry state (`refProvenanceRoots`).
   block:

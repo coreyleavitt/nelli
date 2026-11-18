@@ -1637,7 +1637,13 @@ proc arrayDomain[I, E](t: typedesc[array[I, E]]): Domain[array[I, E]] =
 proc setDomain[E](t: typedesc[set[E]]): Domain[set[E]] =
   let ed = boundaryOf(E)
   let cv = coreOf(ed, collCoreMax)
-  let full = {low(E) .. high(E)}
+  # Every value of `E`: for an enum its declared values (`low .. high` of a
+  # holey enum spans its holes, which are no members; RFC-0016 INT-84).
+  var full: set[E]
+  when E is enum:
+    for v in declaredValues(E): full.incl v
+  else:
+    full = {low(E) .. high(E)}
   var seen = initHashSet[set[E]]()
   template put(v: set[E]) =
     block:

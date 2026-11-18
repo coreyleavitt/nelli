@@ -139,9 +139,10 @@ proc excludesOutOfDomainOrdering(b: OrderBox) =
     symexTarget("oob")
 
 proc reachHoleAbove44Field(b: BigBox) =
-  ## 100 is not a declared `BigOrd` member (a documented sparse-domain
-  ## imprecision, `tsymex_163rev_enum_domain.nim`) but must stay reachable:
-  ## it is inside [0, 300].
+  ## 100 is not a declared `BigOrd` member: a hole, inside [0, 300]. It
+  ## was pinned reachable (with a hole witness) as a documented sparse-
+  ## domain imprecision; RFC-0016 INT-84 bounds a field by its declared
+  ## ordinals, so no input reaches it.
   if ord(b.kind) == 100 and b.payload == 1:
     symexTarget("hole100")
 
@@ -176,11 +177,9 @@ suite "#163 item 1 -- object-field enum DOMAIN: sparse, large explicit ordinal":
     let bb = BigBox(kind: boC, payload: 9)
     check bb.kind == boC and bb.payload == 9
 
-  test "a legal value beyond a truncated 8-bit bound is still reachable, with witness replay":
+  test "a hole beyond a truncated 8-bit bound is no input (RFC-0016 INT-84)":
     let r = pinFind(reachHoleAbove44Field, tLabel("hole100"))
-    check r.status == sxSat
-    check ord(r.witness[0].kind) == 100
-    check r.witness[0].payload == 1
+    check r.status == sxUnsat
 
   test "the declared large ordinal itself is reachable, with witness replay":
     let r = pinFind(reachDeclaredBigField, tLabel("is-boc"))

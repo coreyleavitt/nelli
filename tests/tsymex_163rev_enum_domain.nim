@@ -124,12 +124,12 @@ type
 const bigOrdInfo = classifyEnumTypedesc(BigOrd)
 
 proc reachesHoleAbove44(e: BigOrd) =
-  ## 100 is not a declared BigOrd member (a "hole" in the sparse domain,
-  ## same documented imprecision `tsymex_163audit_range_domain.nim` pins for
-  ## `Sparse`) but it MUST stay reachable: it is inside [0, 300]. Pre-fix,
-  ## `bits = 8` (3 members) put the asserted upper bound at 300 mod 256 = 44,
-  ## which wrongly excludes every legal value from 45 to 255 -- 100 among
-  ## them.
+  ## 100 is not a declared BigOrd member (a hole in the sparse domain).
+  ## Pre-fix, `bits = 8` (3 members) put the asserted upper bound at
+  ## 300 mod 256 = 44, which excluded every value from 45 to 255 -- 100
+  ## among them -- and this pinned 100 reachable as the evidence. RFC-0016
+  ## INT-84: a hole is no input (no caller can pass one), so 100 is
+  ## unreachable; the width is pinned by `reachesDeclaredBig` (300).
   if ord(e) == 100:
     symexTarget("hole100")
 
@@ -158,11 +158,13 @@ suite "#163 review R2, half (b) -- an enum's bit width must fit its ordinals":
     check bigOrdInfo[2] == 300'i64   # rangeHi, unaffected by the width bug
     check not bigOrdInfo[3]          # unsigned (minOrd is 0)
 
-  test "a legal value beyond a truncated 8-bit bound is still reachable":
-    ## RED (pre-fix): sxUnsat -- the truncated bound (300 mod 256 = 44)
-    ## wrongly excluded ordinal 100.
+  test "a hole beyond a truncated 8-bit bound is no input":
+    ## RED (#163 R2 pre-fix): sxUnsat for the wrong reason -- the truncated
+    ## bound (300 mod 256 = 44) excluded ordinal 100. Then sxSat with a hole
+    ## witness, until RFC-0016 INT-84 bounded the input by its declared
+    ## ordinals {0, 1, 300}.
     let r = pinFind(reachesHoleAbove44, tLabel("hole100"))
-    check r.status == sxSat
+    check r.status == sxUnsat
 
   test "the declared large ordinal itself is reachable":
     let r = pinFind(reachesDeclaredBig, tLabel("is_boc"))
@@ -260,8 +262,8 @@ suite "#163 review R2 -- non-regression pins (dense + small-sparse enums)":
   test "small sparse enum: classifier range is unchanged -- [0, 3], unsigned":
     check smallSparseInfo == (true, 0'i64, 3'i64, false)
 
-  test "small sparse enum: the documented hole stays sxSat (not a regression)":
-    check pinFind(sparseHole, tLabel("hole")).status == sxSat
+  test "small sparse enum: the hole is no input (RFC-0016 INT-84)":
+    check pinFind(sparseHole, tLabel("hole")).status == sxUnsat
 
   test "small sparse enum: a genuinely out-of-range ordinal stays excluded":
     check pinFind(sparseBeyond, tLabel("beyond")).status == sxUnsat

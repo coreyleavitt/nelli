@@ -420,7 +420,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
             newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
             newLit(e.ciwTgtWidth), newLit(e.ciwTgtSigned),
-            newLit(e.ciwHasRange), newLit(e.ciwLo), newLit(e.ciwHi))
+            newLit(e.ciwHasRange), newLit(e.ciwLo), newLit(e.ciwHi),
+            newLit(e.ciwHoley))
   of iekConvIntReinterpret:
     newCall(bindSym"mkConvIntReinterpret", emitExpr(e.cirOperand),
             newLit(e.cirWidth), newLit(e.cirTgtSigned))
@@ -703,14 +704,20 @@ proc emitIRType*(t: IRType): NimNode =
     # `classifyType` computed, no matter what `symex.emitTyAndReader`
     # (which reads the macro-time `IRType` directly and needs no round trip
     # of its own) does with the name at witness-codegen time.
-    if t.enumName.len > 0 and t.enumRange:   # RFC-0005 S8bv
-      newCall(bindSym"withEnumRange",
-              newCall(bindSym"withEnumName", ranged, newLit(t.enumName)),
-              newLit(t.rangeLo), newLit(t.rangeHi))
-    elif t.enumName.len > 0:
-      newCall(bindSym"withEnumName", ranged, newLit(t.enumName))
+    let named =
+      if t.enumName.len > 0 and t.enumRange:   # RFC-0005 S8bv
+        newCall(bindSym"withEnumRange",
+                newCall(bindSym"withEnumName", ranged, newLit(t.enumName)),
+                newLit(t.rangeLo), newLit(t.rangeHi))
+      elif t.enumName.len > 0:
+        newCall(bindSym"withEnumName", ranged, newLit(t.enumName))
+      else:
+        ranged
+    # RFC-0016 INT-84: a holey enum's declared ordinals round-trip too.
+    if t.enumOrds.len > 0:
+      newCall(bindSym"withEnumOrds", named, newLit(t.enumOrds))
     else:
-      ranged
+      named
   of itTuple:
     var fieldsLit = newTree(nnkBracket)
     for f in t.fields:
@@ -12216,7 +12223,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       mkConvIntWidth(parseExpr(operand, preamble, ctx),
                      scls.ty.width, scls.ty.signed,
                      tcls.ty.width, tcls.ty.signed,
-                     true, tcls.range.lo, tcls.range.hi)
+                     true, tcls.range.lo, tcls.range.hi,
+                     holey = tcls.ty.enumOrds.len > 0)   # RFC-0016 INT-84
     elif tgt in intTyNames and src == "bool":
       # v69 (sello #3): `int32(b)` — previously the pass-through below, which
       # left an svBool flowing where an int-kinded SymVal is required

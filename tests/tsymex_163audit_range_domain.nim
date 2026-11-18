@@ -106,8 +106,7 @@ type
     mode: TwoVal
 
   # A sparse/holed enum: ordinals 0 and 3, with 1 and 2 unoccupied. The fix's
-  # `[0..maxOrd]` is a sound REFINEMENT here, not exact -- it excludes 4+ but
-  # still admits the 1/2 holes.
+  # `[0..maxOrd]` excludes 4+; RFC-0016 INT-84 excludes the 1/2 holes too.
   Sparse = enum
     sA = 0
     sB = 3
@@ -215,16 +214,14 @@ suite "#163 W7 -- plain enum params carry a domain constraint":
     check twoValFieldInfo == twoValParamInfo
     check twoValFieldInfo == (true, 0'i64, 1'i64, false)
 
-  test "sparse enum -- the hole is a known, recorded imprecision":
+  test "sparse enum -- the hole is no input":
     ## `Sparse` occupies ordinals {0, 3}; the fix's range is [0, 3]. Ordinals
-    ## 1 and 2 are holes: illegal enum values that the sound-refinement
-    ## range does not exclude. This must stay sxSat both before and after
-    ## the fix -- it is not a regression, it is the documented limitation.
-    ## Left on `symexFind` (K9d-11a): the verdict is a trusted sxSat whose
-    ## witness is a hole, which no native input is; INT-84
-    ## (`tsymex_0016_int84_holeyenum`) pins it sxUnsat once fixed.
-    let r = symexFind(sparseHole, tLabel("hole"))
-    check r.status == sxSat
+    ## 1 and 2 are holes, no value of the type, so no caller can pass one.
+    ## This asserted a trusted sxSat (a hole witness) as a documented
+    ## imprecision until RFC-0016 INT-84 bounded a holey enum input by its
+    ## declared ordinals (`tsymex_0016_int84_holeyenum`).
+    let r = pinFind(sparseHole, tLabel("hole"))
+    check r.status == sxUnsat
 
   test "sparse enum -- a genuinely out-of-range ordinal IS excluded":
     ## The complement that proves the refinement still does real work: an

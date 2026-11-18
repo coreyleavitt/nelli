@@ -29,6 +29,7 @@ import std/options
 import std/sets
 import std/strutils
 import std/hashes   # RFC-0016 INT-83: `@addrKind` codes
+import std/algorithm   # RFC-0016 INT-84: `sort`
 import z3
 import ./types
 import ./abstraction
@@ -78,7 +79,68 @@ var allocEnumZeroLegal* {.threadvar.}: bool
   ## conditions of an enum without ordinal 0 admit 0 there. Inputs (params)
   ## keep the exact member range: their witness must render as a member.
 
-proc rangeCondsIfNeeded*(v: SymVal, ty: IRType): seq[Z3Bool] =
+var allocInputDomain* {.threadvar.}: bool
+  ## RFC-0016 INT-84. Set while `runSymexImpl` allocates the walk's inputs
+  ## (its parameters and what `allocateSym` builds of them): a holey enum
+  ## there ranges over its declared values exactly (`enumHoleConds`), since
+  ## no caller can pass a hole.
+
+var enumHolesMade* {.threadvar.}: bool
+  ## RFC-0016 INT-84. Set once the walk lowers a value a holey enum's hole
+  ## may come from that the walk does not see made: a conversion to a holey
+  ## enum (`E(k)` checks `low .. high` only; `lowerConvIntRange`) or an
+  ## opaque call's result or writes (`freshRetSym`, the opaque havocs).
+  ## Until then every holey enum value a read site sees is an input or a
+  ## value the program made from declared values and zero-initialisation,
+  ## so a read site may assert the declared ordinals and 0
+  ## (`rangeCondsIfNeeded`). Monotone over a run: a read on another path,
+  ## or earlier on this one, read no hole.
+
+proc hasHoleyEnum*(ty: IRType): bool =
+  ## RFC-0016 INT-84. `ty` holds a holey enum value somewhere by value: the
+  ## type itself, a field, an element, a key or a set member; a case object
+  ## and a ref (whose cells are the heap's) conservatively.
+  if ty == nil: return false
+  case ty.kind
+  of itInt: ty.enumOrds.len > 0
+  of itTuple:
+    for f in ty.fields:
+      if hasHoleyEnum(f): return true
+    false
+  of itArray: hasHoleyEnum(ty.elemTy)
+  of itSeq: hasHoleyEnum(ty.seqElemTy)
+  of itTable: hasHoleyEnum(ty.tabKeyTy) or hasHoleyEnum(ty.tabValTy)
+  of itSet: hasHoleyEnum(ty.setElemTy)
+  of itDistinct: hasHoleyEnum(ty.distinctBase)
+  of itVariant, itMultiVariant, itRef, itPtr: true   # conservatively
+  else: false
+
+proc enumHoleConds*(v: SymVal, ty: IRType, zeroLegal: bool): seq[Z3Bool] =
+  ## RFC-0016 INT-84. A holey enum value is one of its declared ordinals
+  ## (`IRType.enumOrds`), and `0` too when `zeroLegal` (a zero-initialised
+  ## slot): one disjunction, a run of consecutive ordinals compared as a
+  ## range. Empty for any type that is not a holey enum, and for a value
+  ## whose kind carries no bound (as `bvRangeConds`).
+  if ty == nil or ty.kind != itInt or ty.enumOrds.len == 0: return @[]
+  var ords = ty.enumOrds
+  if zeroLegal and 0'i64 notin ords:
+    ords.add 0'i64
+    ords.sort()
+  var runs: seq[(int64, int64)]
+  for o in ords:
+    if runs.len > 0 and runs[^1][1] + 1 == o: runs[^1][1] = o
+    else: runs.add (o, o)
+  var clause: Z3Bool
+  for i, (a, b) in runs:
+    let cs =
+      if v.kind == svInt: @[v.zi >= mkZ3IntLit(a), v.zi <= mkZ3IntLit(b)]
+      else: bvRangeConds(v, a, b, ty.signed)
+    if cs.len != 2: return @[]
+    let inRun = cs[0] and cs[1]
+    clause = if i == 0: inRun else: clause or inRun
+  @[clause]
+
+proc rangeCondsIfNeeded*(v: SymVal, ty: IRType; holes = true): seq[Z3Bool] =
   ## Issue #163 review R11. The CONSTRAINT half of the two-obligation
   ## contract every `range[lo..hi]`-typed value carries wherever it is
   ## materialized from a backing store: (a) here — assert the symbol lies
@@ -128,7 +190,20 @@ proc rangeCondsIfNeeded*(v: SymVal, ty: IRType): seq[Z3Bool] =
         if v.kind == svInt: @[v.zi >= mkZ3IntLit(0), v.zi <= mkZ3IntLit(0)]
         else: bvRangeConds(v, 0, 0, ty.signed)
       if zero.len == 2:
-        return @[(conds[0] and conds[1]) or (zero[0] and zero[1])]
+        return @[(conds[0] and conds[1]) or (zero[0] and zero[1])] &
+               (if holes and allocInputDomain:
+                  enumHoleConds(v, ty, zeroLegal = true) else: @[])
+    # RFC-0016 INT-84: a holey enum's holes. An input ranges over its
+    # declared values; a value a read site sees, over them and 0, unless a
+    # hole may have been made (`enumHolesMade`). `holes = false` is a range
+    # CHECK, which Nim makes against `low .. high` only.
+    if holes and ty.enumOrds.len > 0:
+      if allocInputDomain:
+        result = conds & enumHoleConds(v, ty, zeroLegal = allocEnumZeroLegal)
+        return
+      elif not enumHolesMade:
+        result = conds & enumHoleConds(v, ty, zeroLegal = true)
+        return
     conds
   elif ty.kind in {itFloat32, itFloat64} and ty.floatRange:
     # RFC-0016 INT-77: Nim's float range check is `lo <= x and x <= hi` in
@@ -2279,6 +2354,8 @@ proc resetHeapModel*() =
   ## are the linked Z3's decl kinds, the same in every run and read in a probe
   ## context, so they are process-stable and not reset (`probeContext`).
   allocEnumZeroLegal = false
+  allocInputDomain = false               # RFC-0016 INT-84
+  enumHolesMade = false
   distinctBijectivityHints = @[]
   distinctSortNames = @[]
   containerCard = ContainerCardRegistry()
@@ -3713,11 +3790,26 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # per value of `T`; every value of it is a legal set. Allocation cost
     # mirrored in allocCostOf (types.nim).
     let ctx = requireCurrentContext()
-    let srt = ctx.checkErr Z3_mk_bv_sort(ctx.raw,
-                                         cuint(bitSetDomain(ty.bsElemTy).size))
-    SymVal(kind: svBitSet,
-           bsRaw: wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt, baseName)),
-           bsElemTy: ty.bsElemTy)
+    let dom = bitSetDomain(ty.bsElemTy)
+    let srt = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(dom.size))
+    let bs = wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt, baseName))
+    # RFC-0016 INT-84: an input set of a holey enum holds declared values
+    # only: each run of hole bits is zero.
+    if allocInputDomain and ty.bsElemTy.kind == itInt and
+       ty.bsElemTy.enumOrds.len > 0:
+      var holeRuns: seq[(int64, int64)]   # bit indices, inclusive
+      var next = dom.lo   # the first value not yet seen declared
+      for o in ty.bsElemTy.enumOrds:
+        if o > next: holeRuns.add (next - dom.lo, o - 1 - dom.lo)
+        next = o + 1
+      for (ia, ib) in holeRuns:
+        if ia < 0 or ib >= int64(dom.size) or ia > ib: continue
+        let bits = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw,
+                                    cuint(ib), cuint(ia), bs.raw))
+        let zsrt = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(ib - ia + 1))
+        let zero = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw, 0, zsrt))
+        pcOut.add wrap[Z3Bool](ctx, checkedEq(ctx, bits.raw, zero.raw))
+    SymVal(kind: svBitSet, bsRaw: bs, bsElemTy: ty.bsElemTy)
   of itSet:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # RFC-0005 S8z: any fixed-width int element type (`isBackedSetElemTy`),

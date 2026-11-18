@@ -69,6 +69,11 @@ func complexity(p: Prog): int =
     if p.shape == shExnMem:
       if p.lit2 != zeroLit(): inc result
       if p.cmp2 notin ["", "=="]: inc result
+  of shAxis:
+    # an axis program is simpler the fewer rows it packs
+    result += max(0, p.rows.len - 1)
+    if p.k != zeroLit(): inc result
+    if p.cmp notin ["", "=="]: inc result
 
 func measure*(c: Case): (int, int, int) =
   ((if c.tw == twNone: 0 else: 1), complexity(c.prog),

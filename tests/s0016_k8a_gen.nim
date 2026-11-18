@@ -24,6 +24,10 @@ import ./s8cu_helpers
 import ./s0016_k8b_pairs
 import ./s0016_k8b_snippets
 export sequtils, s0016_k8b_pairs, s0016_k8b_snippets
+when defined(k8aTrace):
+  # the emitted batch's per-run timing (`emitCases`) reads `epochTime`
+  import std/times
+  export times
 
 type
   Shape* = enum
@@ -609,9 +613,14 @@ proc genFamily*(fam: FamilyScope; seed, count: int; first = 0): seq[Prog] =
 
 proc axisOrder*(axis: AxisScope; seed: int): seq[string] =
   ## The axis's fragment keys in a seeded order: which rows share a program.
-  for s in axisSnippets[axis]: result.add s.key
+  ## A blocked row (`blockedRows`) is shuffled with the rest and then left
+  ## out, so blocking or readmitting one keeps the others' relative order.
+  var all: seq[string]
+  for s in axisSnippets[axis]: all.add s.key
   var r = initRand(seed)
-  r.shuffle(result)
+  r.shuffle(all)
+  for k in all:
+    if not isBlocked(axis, k): result.add k
 
 proc genAxis*(axis: AxisScope; seed, count, per: int; first = 0): seq[Prog] =
   ## Programs `[first, first + count)` of the axis's seeded stream: program

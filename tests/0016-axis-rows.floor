@@ -2,11 +2,11 @@
 # exercised by the axis suites (s0016_k8b_axes `axisFiles`), per axis.
 # axis<TAB>exercised<TAB>exact rows. K1 judges it per leg. It only rises;
 # a changed exact-row count must be re-measured.
-typeclass	0	37
-typeop	0	33
-pragma	0	153
-magic	0	141
-stdlib	0	29
+typeclass	35	37
+typeop	26	33
+pragma	50	153
+magic	116	141
+stdlib	26	29
 build	0	13
 readonly	0	13
-defined	0	21
+defined	18	21

@@ -33,18 +33,23 @@ import nelli/smt/buildprofile
 import nelli/smt/pcre_engine
 import ./s8cu_helpers
 import ./s0016_k8b_snippets
+import ./worklist_toml
 
-export s0016_k8b_snippets
+export s0016_k8b_snippets, worklist_toml
 
 const axisFloorFile* = "tests" / "0016-axis-rows.floor"
 
 const axisFiles*: array[AxisScope, seq[string]] = [
-  axTypeClass: @["tsymex_0016_k8b_axes_types.nim"],
-  axTypeOp: @["tsymex_0016_k8b_axes_types.nim"],
-  axPragma: @["tsymex_0016_k8b_axes_pragma.nim"],
+  axTypeClass: @["tsymex_0016_k8b_axes_typeclass_a.nim",
+                 "tsymex_0016_k8b_axes_typeclass_b.nim"],
+  axTypeOp: @["tsymex_0016_k8b_axes_typeop.nim"],
+  axPragma: @["tsymex_0016_k8b_axes_pragma_a.nim",
+              "tsymex_0016_k8b_axes_pragma_b.nim"],
   axMagic: @["tsymex_0016_k8b_axes_magic_a.nim",
-             "tsymex_0016_k8b_axes_magic_b.nim"],
-  axStdlibBody: @["tsymex_0016_k8b_axes_pragma.nim"],
+             "tsymex_0016_k8b_axes_magic_b.nim",
+             "tsymex_0016_k8b_axes_magic_c.nim",
+             "tsymex_0016_k8b_axes_magic_d.nim"],
+  axStdlibBody: @["tsymex_0016_k8b_axes_stdlib.nim"],
   axBuild: @[],
   axReadOnly: @[],
   axDefinedness: @["tsymex_0016_k8b_axes_defined.nim"]]
@@ -81,6 +86,36 @@ proc snippetProblems*(): seq[string] =
       if s.key in seen:
         result.add scopePrefix[axis] & ":" & s.key & " has two fragments"
       seen.incl s.key
+
+proc blockedProblems*(wl: Worklist; blocked = blockedRows): seq[string] =
+  ## The blocked list retires itself: an entry whose worklist row is no
+  ## longer `open` (the defect closed, merged, moved or was ruled never) must
+  ## be deleted, readmitting its row to the stream. An entry naming no
+  ## worklist row or no fragment of its axis, or a row blocked twice, is a
+  ## typo.
+  var seen: HashSet[string]
+  for b in blocked:
+    let name = scopePrefix[b.axis] & ":" & b.key
+    if name in seen:
+      result.add name & " is blocked twice"
+      continue
+    seen.incl name
+    var frag = false
+    for s in axisSnippets[b.axis]:
+      if s.key == b.key: frag = true
+    if not frag:
+      result.add name & " is blocked but has no fragment"
+      continue
+    var state = ""
+    for r in wl.rows:
+      if r.id == b.row: state = r.stateWord
+    if state.len == 0:
+      result.add name & " is blocked against " & b.row &
+        ", which is no worklist row"
+    elif state != "open":
+      result.add name & " is blocked against " & b.row & ", which is " &
+        state & ": readmit it (delete its `blockedRows` entry in " &
+        "tests/s0016_k8b_snippets.nim) and re-measure " & axisFloorFile
 
 # --- the figure ------------------------------------------------------------------
 

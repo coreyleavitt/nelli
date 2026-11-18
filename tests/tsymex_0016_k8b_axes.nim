@@ -7,6 +7,7 @@ import nelli/smt/admission
 import ./s8cu_helpers
 import ./s0016_k8b_axes
 import ./s0016_k8a_gen
+import ./worklist_toml
 
 proc rec(axis: AxisScope; keys: seq[string]; outcome = "exact";
          row = "linux-c"; file = ""): ExercisedRecord =
@@ -40,16 +41,18 @@ suite "K8b axes: the fragments and the denominator":
         check fileExists(currentSourcePath().parentDir / f)
         check ("\"" & f.changeFileExt("") & "\"") in nimble
 
-  test "the axis stream covers every fragment, rows once per lap":
+  test "the axis stream covers every unblocked fragment, rows once per lap":
     for a in AxisScope:
       if axisSnippets[a].len == 0: continue
       let per = 6
-      let n = (axisSnippets[a].len + per - 1) div per
+      let n = (streamRows(a) + per - 1) div per
       var seen: HashSet[string]
       for p in genAxis(a, 20261117, n, per):
         check p.axis == a
         for k in p.rows: seen.incl k
-      check seen.len == axisSnippets[a].len
+      check seen.len == streamRows(a)
+      for s in axisSnippets[a]:
+        check (s.key in seen) == not isBlocked(a, s.key)
       check genAxis(a, 3, 2, per) == genAxis(a, 3, 4, per)[0 ..< 2]
       check genAxis(a, 3, 2, per, 2) == genAxis(a, 3, 4, per)[2 ..< 4]
 
@@ -63,6 +66,61 @@ suite "K8b axes: the fragments and the denominator":
       check twComm notin applicable(p)
       for tw in applicable(p):
         check render(p, "g", tw) != render(p, "g", twNone)
+
+suite "K8b axes: the blocked rows (an open defect keeps a row out of the stream)":
+  let wl = parseWorklist(readFile(currentSourcePath().parentDir / ".." /
+    "docs" / "rfc-data" / "0016-worklist.toml"))
+
+  proc fixture(id, state: string): Worklist =
+    parseWorklist("[[row]]\nid = \"" & id & "\"\nstate = \"" & state & "\"\n")
+
+  test "every blocked row has a fragment and names an open worklist row":
+    let p = blockedProblems(wl)
+    checkpoint p.join("\n")
+    check p.len == 0
+    check blockedRows.len > 0
+    for b in blockedRows:
+      check b.why.len > 0
+
+  test "the INT-57, INT-58 and INT-59 rows are blocked against their rows":
+    for (a, k, r) in [(axMagic, "IntToStr", "INT-57"),
+                      (axTypeClass, "string", "INT-57"),
+                      (axTypeOp, "letCursor/string", "INT-57"),
+                      (axStdlibBody, "math.round", "INT-58"),
+                      (axStdlibBody, "math.trunc", "INT-59")]:
+      check isBlocked(a, k)
+      check blockedRows.anyIt(it.axis == a and it.key == k and it.row == r)
+    check not isBlocked(axMagic, "AddI")
+
+  test "RED: an entry whose row closed must be readmitted":
+    let b = @[Blocked(axis: axMagic, key: "IntToStr", row: "INT-57", why: "x")]
+    check blockedProblems(fixture("INT-57", "open"), b).len == 0
+    for st in ["closed", "merged", "moved", "never"]:
+      let p = blockedProblems(fixture("INT-57", st), b)
+      check p.len == 1
+      check "INT-57" in p[0] and "readmit" in p[0] and "IntToStr" in p[0]
+
+  test "RED: an entry naming no worklist row, or no fragment, fails":
+    let none = @[Blocked(axis: axMagic, key: "IntToStr", row: "INT-999", why: "x")]
+    check blockedProblems(fixture("INT-57", "open"), none).len == 1
+    let nofrag = @[Blocked(axis: axMagic, key: "NoSuch", row: "INT-57", why: "x")]
+    check blockedProblems(fixture("INT-57", "open"), nofrag).len == 1
+    let twice = @[Blocked(axis: axMagic, key: "IntToStr", row: "INT-57", why: "x"),
+                  Blocked(axis: axMagic, key: "IntToStr", row: "INT-57", why: "y")]
+    check blockedProblems(fixture("INT-57", "open"), twice).len == 1
+
+  test "a blocked row is never exercised, so it counts against the figure":
+    var all: seq[ExercisedRecord]
+    for a in AxisScope:
+      if axisSnippets[a].len == 0: continue
+      for p in genAxis(a, 20261117, streamRows(a), 1):
+        all.add rec(a, p.rows)
+    let f = axisFigure(all)
+    for a in AxisScope:
+      if axisSnippets[a].len == 0: continue
+      check f[a].exercised == streamRows(a)
+      for b in blockedRows:
+        if b.axis == a: check b.key in unexercised(all, a)
 
 suite "K8b axes: the figure":
   test "a row is exercised only by an exact record":

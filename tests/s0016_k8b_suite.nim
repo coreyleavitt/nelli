@@ -157,7 +157,8 @@ template axisBatch*(axis: static AxisScope; tag: static string;
     test "the axis stream is deterministic and every relation is a new source":
       check genAxis(axis, 7, 3, per) == genAxis(axis, 7, 5, per)[0 ..< 3]
       for p in progs:
-        check p.rows.len == min(per, axisSnippets[axis].len)
+        check p.rows.len == min(per, streamRows(axis))
+        for k in p.rows: check not isBlocked(axis, k)
         let o = render(p, "g", twNone)
         for tw in applicable(p):
           check render(p, "g", tw) != o
@@ -180,6 +181,7 @@ template axisBatch*(axis: static AxisScope; tag: static string;
         " runs=", outs.len, " exact=", exact, " declined=", declined,
         " disagree=", disagree, " rows exercised here=", rowsOk.len, "\n",
         "k8b declines:\n", declineSummary(outs)
+      for line in blockedReport(axis): echo line
       for f in fs: echo "FINDING ", f
       check fs.len == 0
       check exact > 0

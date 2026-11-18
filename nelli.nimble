@@ -1745,10 +1745,16 @@ task test, "Run the test suite":
             "tsymex_0016_k8b_generic_b",
             # RFC-0016 K8b INT-56: the admission-axis suites (s0016_k8b_axes `axisFiles`)
             "tsymex_0016_k8b_axes",
+            "tsymex_0016_k8b_axes_typeclass_a",
+            "tsymex_0016_k8b_axes_typeclass_b",
+            "tsymex_0016_k8b_axes_typeop",
+            "tsymex_0016_k8b_axes_pragma_a",
+            "tsymex_0016_k8b_axes_pragma_b",
+            "tsymex_0016_k8b_axes_stdlib",
             "tsymex_0016_k8b_axes_magic_a",
             "tsymex_0016_k8b_axes_magic_b",
-            "tsymex_0016_k8b_axes_pragma",
-            "tsymex_0016_k8b_axes_types",
+            "tsymex_0016_k8b_axes_magic_c",
+            "tsymex_0016_k8b_axes_magic_d",
             "tsymex_0016_k8b_axes_defined",
             # RFC-0016 INT-55: a by-reference base in a parsed routine.
             "tsymex_0016_int55_parsedbyref",

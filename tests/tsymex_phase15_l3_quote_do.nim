@@ -1,6 +1,7 @@
 import std/unittest
 import std/macros
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster L cycle L3: getAst / quote do macros (verification).
 
@@ -27,8 +28,8 @@ withDouble(genericSut)
 suite "symex Phase 15 — L3 getAst/quote do macros":
 
   test "quote-do `len` SUT is walker-identical to hand-written (both sxSat)":
-    let rq = symexFind(quoteSut, tLabel("long"))
-    let rh = symexFind(handWritten, tLabel("long"))
+    let rq = pinFind(quoteSut, tLabel("long"))
+    let rh = pinFind(handWritten, tLabel("long"))
     check rq.status == sxSat
     check rh.status == sxSat
     check rq.status == rh.status
@@ -36,5 +37,5 @@ suite "symex Phase 15 — L3 getAst/quote do macros":
   test "quote-do macro emitting a generic call monomorphizes and symexes -> sxSat":
     # doubleOrd(n) == 10 is reachable at n == 5; monomorphization + inlining
     # of the quote-do-emitted generic call must find it.
-    let r = symexFind(genericSut, tLabel("doubled"))
+    let r = pinFind(genericSut, tLabel("doubled"))
     check r.status == sxSat

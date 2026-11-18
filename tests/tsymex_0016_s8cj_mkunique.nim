@@ -20,6 +20,7 @@
 import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 when defined(posix): import std/posix
 
 proc wideFactoring(p, q: int) =
@@ -64,7 +65,7 @@ suite "S8cj: a verdict after Z3's mk_unique message is never a trusted sat/unsat
     var errs: string
     var witnessOk = false
     let captured = captureStderr:
-      let r = symexFind(wideFactoring, tLabel("s8cj_wide_factoring"), bounded)
+      let r = pinFind(wideFactoring, tLabel("s8cj_wide_factoring"), bounded)
       status = r.status
       errs = show(r.errors)
       if r.status == sxSat:

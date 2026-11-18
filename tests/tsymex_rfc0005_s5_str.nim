@@ -62,6 +62,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import audit_scan_utils
+import ./s8cu_helpers
 
 proc kindNames(errs: seq[SymexErrorInfo]): seq[string] =
   for e in errs: result.add $e.kind
@@ -335,7 +336,7 @@ suite "RFC-0005 S5 (a) -- the degradeStrArm / R1 funnels' classOf rows":
 suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
 
   test "seZ3VersionMissing (strutils.replace, all occurrences): -> sxUnsat":
-    let r = symexFind(s5DeadReplaceAll, tLabel("s5_dead_replace_all"))
+    let r = pinFind(s5DeadReplaceAll, tLabel("s5_dead_replace_all"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[seZ3VersionMissing]
@@ -347,33 +348,33 @@ suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
     # empty-matching pattern's decline.
     # RFC-0005 S8bb: the CRLF-skip decline (`pcre_select.runTable`).
     # RFC-0005 S8bj: the limit start option's decline.
-    let r = symexFind(s5DeadReplaceRe, tLabel("s5_dead_replace_re"))
+    let r = pinFind(s5DeadReplaceRe, tLabel("s5_dead_replace_re"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[seZ3StringIncomplete]
 
   test "seZ3StringIncomplete (general split): -> sxUnsat":
-    let r = symexFind(s5DeadSplit, tLabel("s5_dead_split"))
+    let r = pinFind(s5DeadSplit, tLabel("s5_dead_split"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[seZ3StringIncomplete]
 
   test "seZ3StringIncomplete (join over a symbolic-length split): -> sxUnsat":
-    let r = symexFind(s5DeadJoin, tLabel("s5_dead_join"))
+    let r = pinFind(s5DeadJoin, tLabel("s5_dead_join"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[seZ3StringIncomplete]
 
   test "a contradiction THROUGH the fresh value is still sxUnsat (the symbol is free, not pinned)":
-    let r = symexFind(s5DeadThroughValue, tLabel("s5_dead_through_value"))
+    let r = pinFind(s5DeadThroughValue, tLabel("s5_dead_through_value"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[seZ3VersionMissing]
 
   test "guard: a target reachable ONLY through the fresh value is a candidate -- sxUnknown, never sxUnsat":
     for (name, r) in [
-        ("replace", symexFind(s5LiveReplaceAll, tLabel("s5_live_replace_all")).status),
-        ("split", symexFind(s5LiveSplit, tLabel("s5_live_split")).status)]:
+        ("replace", pinFind(s5LiveReplaceAll, tLabel("s5_live_replace_all")).status),
+        ("split", pinFind(s5LiveSplit, tLabel("s5_live_split")).status)]:
       checkpoint(name & " -> " & $r)
       check r == sxUnknown
 
@@ -384,31 +385,31 @@ suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
 suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint":
 
   test "seZ3VersionMissing: two cells' replace results are independent -- never sxUnsat":
-    let r = symexFind(s5TwoCellsReplaceAll, tLabel("s5_two_cells_replace_all"))
+    let r = pinFind(s5TwoCellsReplaceAll, tLabel("s5_two_cells_replace_all"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
     check r.errors.hasKind(seZ3VersionMissing)
 
   test "seZ3StringIncomplete: two cells' declined regex-replace results are independent -- never sxUnsat":
-    let r = symexFind(s5TwoCellsReplaceRe, tLabel("s5_two_cells_replace_re"))
+    let r = pinFind(s5TwoCellsReplaceRe, tLabel("s5_two_cells_replace_re"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
     check r.errors.hasKind(seZ3StringIncomplete)
 
   test "seZ3StringIncomplete: two cells' splits are independent -- never sxUnsat":
-    let r = symexFind(s5TwoCellsSplit, tLabel("s5_two_cells_split"))
+    let r = pinFind(s5TwoCellsSplit, tLabel("s5_two_cells_split"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
     check r.errors.hasKind(seZ3StringIncomplete)
 
   test "seZ3StringIncomplete: two cells' joins are independent -- never sxUnsat":
-    let r = symexFind(s5TwoCellsJoin, tLabel("s5_two_cells_join"))
+    let r = pinFind(s5TwoCellsJoin, tLabel("s5_two_cells_join"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
     check r.errors.hasKind(seZ3StringIncomplete)
 
   test "repeat hits of one site across loop iterations are independent -- never sxUnsat":
-    let r = symexFind(s5TwoCellsLoop, tLabel("s5_two_cells_loop"))
+    let r = pinFind(s5TwoCellsLoop, tLabel("s5_two_cells_loop"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
 
@@ -474,32 +475,32 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
 suite "RFC-0005 S5 (d) -- a caught operand raise is never dropped with the op":
 
   test "replace($(a div b), ...): the DivByZeroDefect handler is reachable -- never sxUnsat":
-    let r = symexFind(s5EffReplaceAll, tLabel("s5_eff_replace_all"))
+    let r = pinFind(s5EffReplaceAll, tLabel("s5_eff_replace_all"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 
   test "($(a div b)).replace(re, ...): never sxUnsat":
-    let r = symexFind(s5EffReplaceRe, tLabel("s5_eff_replace_re"))
+    let r = pinFind(s5EffReplaceRe, tLabel("s5_eff_replace_re"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 
   test "($(a div b)).split(\",\") (general path, receiver effect): never sxUnsat":
-    let r = symexFind(s5EffSplitGeneral, tLabel("s5_eff_split_general"))
+    let r = pinFind(s5EffSplitGeneral, tLabel("s5_eff_split_general"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 
   test "s.split($(a div b)) (general path, separator effect): never sxUnsat":
-    let r = symexFind(s5EffSplitSep, tLabel("s5_eff_split_sep"))
+    let r = pinFind(s5EffSplitSep, tLabel("s5_eff_split_sep"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 
   test "($(a div b)).split(\"\") (empty-sep path, receiver effect): never sxUnsat":
-    let r = symexFind(s5EffSplitEmptySep, tLabel("s5_eff_split_empty_sep"))
+    let r = pinFind(s5EffSplitEmptySep, tLabel("s5_eff_split_empty_sep"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 
   test "s.split(\",\").join($(a div b)) (join separator effect): never sxUnsat":
-    let r = symexFind(s5EffJoin, tLabel("s5_eff_join"))
+    let r = pinFind(s5EffJoin, tLabel("s5_eff_join"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 
@@ -510,38 +511,38 @@ suite "RFC-0005 S5 (d) -- a caught operand raise is never dropped with the op":
 suite "RFC-0005 S5 (e) -- the funnels' substituting kinds stay ⊤":
 
   test "seUnsupportedStringOp (toOct, the S3 F2 shape) keeps an unreachable target sxUnknown":
-    let r = symexFind(s5ToOctDead, tLabel("s5_tooct_dead"))
+    let r = pinFind(s5ToOctDead, tLabel("s5_tooct_dead"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedStringOp)
 
   test "seUnsupportedRegex (backreference) keeps an unreachable target sxUnknown":
-    let r = symexFind(s5BackrefDead, tLabel("s5_backref_dead"))
+    let r = pinFind(s5BackrefDead, tLabel("s5_backref_dead"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedRegex)
 
   test "seNestedSeqUnsupported (R1 placeholder .len) keeps an unreachable target sxUnknown":
-    let r = symexFind(s5PlaceholderLenDead, tLabel("s5_placeholder_len_dead"))
+    let r = pinFind(s5PlaceholderLenDead, tLabel("s5_placeholder_len_dead"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seNestedSeqUnsupported)
 
   test "seRuneDecodeSymbolic (runeLen, forced 0) keeps an unreachable target sxUnknown":
-    let r = symexFind(s5RuneLenDead, tLabel("s5_runelen_dead"))
+    let r = pinFind(s5RuneLenDead, tLabel("s5_runelen_dead"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seRuneDecodeSymbolic)
     check not r.errors.hasKind(seZ3StringIncomplete)
 
   test "seRuneDecodeSymbolic (runes loop, body dropped) keeps an unreachable target sxUnknown":
-    let r = symexFind(s5RunesLoopDead, tLabel("s5_runes_loop_dead"))
+    let r = pinFind(s5RunesLoopDead, tLabel("s5_runes_loop_dead"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seRuneDecodeSymbolic)
 
   test "seRuneDecodeSymbolic: a target live only past the forced 0 is never sxUnsat":
-    let r = symexFind(s5RuneLenLive, tLabel("s5_runelen_live"))
+    let r = pinFind(s5RuneLenLive, tLabel("s5_runelen_live"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
 

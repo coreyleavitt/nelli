@@ -50,6 +50,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -127,18 +128,18 @@ suite "S8aw (1): step 1c joins seqRangeFacts to str.indexof":
 
   test "end to end: a first index past the last is sxUnsat":
     # RED at 5ffc922: sxUnknown + beSolverUndef (S8aq (2)).
-    let r = symexFind(foundExceedsLast, tLabel("aw_found_exceeds_last"), tightSeq())
+    let r = pinFind(foundExceedsLast, tLabel("aw_found_exceeds_last"), tightSeq())
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "end to end: from a symbolic start, sxUnsat":
-    let r = symexFind(foundFromIExceedsLast, tLabel("aw_found_from_i_exceeds_last"),
+    let r = pinFind(foundFromIExceedsLast, tLabel("aw_found_from_i_exceeds_last"),
                       tightSeq())
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "companion: a found index at or before L is reachable":
-    let r = symexFind(foundAtOrBeforeLast, tLabel("aw_found_at_or_before_last"))
+    let r = pinFind(foundAtOrBeforeLast, tLabel("aw_found_at_or_before_last"))
     checkpoint show(r.errors)
     check r.status == sxSat
 
@@ -388,55 +389,55 @@ suite "S8aw (2): a regex replace over a concrete receiver is decided":
 
   test "a literal: the first-occurrence-only result is sxUnsat":
     # RED at 5ffc922: sxUnknown (seZ3VersionMissing stand-in, replay-refuted).
-    let r = symexFind(litFirstOnly, tLabel("aw_lit_first_only"))
+    let r = pinFind(litFirstOnly, tLabel("aw_lit_first_only"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check not hasKind(r.errors, seZ3VersionMissing)
 
   test "a literal: every occurrence replaced is sxSat":
-    let r = symexFind(litAll, tLabel("aw_lit_all"))
+    let r = pinFind(litAll, tLabel("aw_lit_all"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check not hasKind(r.errors, seZ3VersionMissing)
 
   test "a literal: occurrences are leftmost and non-overlapping":
-    let r = symexFind(litOverlap, tLabel("aw_lit_overlap"))
+    let r = pinFind(litOverlap, tLabel("aw_lit_overlap"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "a one-byte class deleted: any other result is sxUnsat":
-    let r = symexFind(classDelete, tLabel("aw_class_delete"))
+    let r = pinFind(classDelete, tLabel("aw_class_delete"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "companion: the class deleted is sxSat":
-    let r = symexFind(classDeleteHit, tLabel("aw_class_delete_hit"))
+    let r = pinFind(classDeleteHit, tLabel("aw_class_delete_hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
 
   test "a class run collapsed: any other result is sxUnsat":
-    let r = symexFind(runCollapse, tLabel("aw_run_collapse"))
+    let r = pinFind(runCollapse, tLabel("aw_run_collapse"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "a greedy run is one match (SMT-LIB's shortest match is not PCRE's)":
-    let r = symexFind(greedyRun, tLabel("aw_greedy_shortest"))
+    let r = pinFind(greedyRun, tLabel("aw_greedy_shortest"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
-    let h = symexFind(greedyRunHit, tLabel("aw_greedy_hit"))
+    let h = pinFind(greedyRunHit, tLabel("aw_greedy_hit"))
     checkpoint show(h.errors)
     check h.status == sxSat
 
   test "'.' does not match a newline":
-    let r = symexFind(dotNoNewline, tLabel("aw_dot_newline"))
+    let r = pinFind(dotNoNewline, tLabel("aw_dot_newline"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
-    let h = symexFind(dotNoNewlineHit, tLabel("aw_dot_newline_hit"))
+    let h = pinFind(dotNoNewlineHit, tLabel("aw_dot_newline_hit"))
     checkpoint show(h.errors)
     check h.status == sxSat
 
   test "\\D is the complement of \\d":
-    let r = symexFind(complementClass, tLabel("aw_complement"))
+    let r = pinFind(complementClass, tLabel("aw_complement"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
@@ -459,12 +460,12 @@ proc pastUnroll(s: string) =
 suite "S8aw (2): a regex replace over a symbolic receiver":
 
   test "deletion never grows the string: sxUnsat":
-    let r = symexFind(deleteNeverGrows, tLabel("aw_delete_grows"))
+    let r = pinFind(deleteNeverGrows, tLabel("aw_delete_grows"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "an expansion is solved for its receiver: sxSat with the witness":
-    let r = symexFind(expandWitness, tLabel("aw_expand_witness"))
+    let r = pinFind(expandWitness, tLabel("aw_expand_witness"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat: check r.witness[0] == "aab"
@@ -481,7 +482,7 @@ suite "S8aw (2): a regex replace over a symbolic receiver":
     # recursive function of the receiver, `regexReplaceRec`), so nothing is
     # tainted; under this tight budget Z3 may still leave it undecided
     # (`beSolverUndef`). It was `seZ3StringIncomplete` (a fresh value).
-    let r = symexFind(pastUnroll, tLabel("aw_past_unroll"), tight())
+    let r = pinFind(pastUnroll, tLabel("aw_past_unroll"), tight())
     checkpoint $r.status & " " & show(r.errors)
     check r.status in {sxSat, sxUnknown}
     check not hasKind(r.errors, seZ3StringIncomplete)
@@ -507,14 +508,14 @@ suite "S8aw (2): other pattern shapes decline, scoped and named":
     # RFC-0005 S8bb (item 6): an alternation is lowered by PCRE's priority
     # run (`regex_parser.replaceRunZ3`), so the claim is sxUnsat, untainted.
     # It declined here (`seZ3StringIncomplete` naming `a|ab`) before.
-    let r = symexFind(alternationOrder, tLabel("aw_alternation"))
+    let r = pinFind(alternationOrder, tLabel("aw_alternation"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check not hasKind(r.errors, seZ3StringIncomplete)
     check not hasKind(r.errors, seZ3VersionMissing)
 
   test "companion: the result PCRE gives is reachable (replay-confirmed)":
-    let r = symexFind(alternationOrderHit, tLabel("aw_alternation_hit"))
+    let r = pinFind(alternationOrderHit, tLabel("aw_alternation_hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
 
@@ -545,7 +546,7 @@ proc declineMsg(r: SymexResult; k: SymexErrorKind; frag: string): bool =
 suite "S8aw (2): exact on a known length; each decline names its construct":
 
   test "a receiver of known length is exact and untainted":
-    let r = symexFind(knownLength, tLabel("aw_known_length"))
+    let r = pinFind(knownLength, tLabel("aw_known_length"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check r.errors.len == 0
@@ -554,7 +555,7 @@ suite "S8aw (2): exact on a known length; each decline names its construct":
     # Nim: "b".replace(re"a*", "x") == "xbx". RFC-0005 S8bb (item 6): Nim's
     # NOTEMPTY_ATSTART retry is modelled, so the claim is sxUnsat; it
     # declined ("can match empty") before.
-    let r = symexFind(starDecline, tLabel("aw_star"))
+    let r = pinFind(starDecline, tLabel("aw_star"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check not declineMsg(r, seZ3StringIncomplete, "can match empty")
@@ -563,7 +564,7 @@ suite "S8aw (2): exact on a known length; each decline names its construct":
     # RFC-0005 S8ay: `re"a b"` reads the space as a literal byte (`rex`
     # would skip it), so "a b" becomes "x": the claim is sxUnsat. It
     # declined (`seZ3StringIncomplete`) while the IR lost `re` vs `rex`.
-    let r = symexFind(spaceDecline, tLabel("aw_space"))
+    let r = pinFind(spaceDecline, tLabel("aw_space"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check r.errors.len == 0
@@ -572,7 +573,7 @@ suite "S8aw (2): exact on a known length; each decline names its construct":
     # RFC-0005 S8ay: `re"[z-a]"` raises RegexError when the call runs, so
     # no path reaches the label (it was `seUnsupportedRegex`, ⊤). The raise
     # itself is pinned in tsymex_rfc0005_s8ay_remainder (suite 4).
-    let r = symexFind(reversedRange, tLabel("aw_reversed"))
+    let r = pinFind(reversedRange, tLabel("aw_reversed"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 

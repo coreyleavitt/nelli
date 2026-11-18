@@ -19,6 +19,7 @@
 import std/[unittest, strutils, re, times]
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -27,7 +28,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 
 template verdict(sut: untyped; label: string): SymexResult =
   let t0 = epochTime()
-  let r = symexFind(sut, tLabel(label))
+  let r = pinFind(sut, tLabel(label))
   echo "  ", label, ": ", r.status, " ", formatFloat(epochTime() - t0,
                                                      ffDecimal, 1), " s"
   checkpoint $r.status & " " & show(r.errors) & " witness=" &

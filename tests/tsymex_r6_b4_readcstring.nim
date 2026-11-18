@@ -75,6 +75,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -108,11 +109,11 @@ proc sutAccPayloadAB(s: string, start: int) =
 suite "symex round-6 B4 -- symbolic-start lift":
 
   test "B4-1: payload == \"AB\" reachable from a symbolic start -> sxSat":
-    let r = symexFind(sutAccPayloadAB, tLabel("payload_ab"))
+    let r = pinFind(sutAccPayloadAB, tLabel("payload_ab"))
     check r.status == sxSat
 
   test "B4-1-cross: the witness, replayed through the real function, reproduces the exact found outcome":
-    let r = symexFind(sutAccPayloadAB, tLabel("payload_ab"))
+    let r = pinFind(sutAccPayloadAB, tLabel("payload_ab"))
     check r.status == sxSat
     let (s, start) = r.witness
     check start >= 0 and start <= s.len
@@ -168,11 +169,11 @@ suite "symex round-6 B4 -- inclusive-hi pin":
     ## `payload == "AB"` / `q == start + 3` pin, this concretely validates
     ## the off-by-one arithmetic (`payload.len == q - start - 1`) at both
     ## the empty and non-empty boundary.
-    let r = symexFind(sutAccImmediateTerminatorEmptyPayload, tLabel("empty_payload"))
+    let r = pinFind(sutAccImmediateTerminatorEmptyPayload, tLabel("empty_payload"))
     check r.status == sxSat
 
   test "B4-2-cross: the empty-payload witness, replayed through the real function, reproduces it":
-    let r = symexFind(sutAccImmediateTerminatorEmptyPayload, tLabel("empty_payload"))
+    let r = pinFind(sutAccImmediateTerminatorEmptyPayload, tLabel("empty_payload"))
     check r.status == sxSat
     let (s, start) = r.witness
     let (payload, q) = readCStringTracer(s, start)
@@ -180,7 +181,7 @@ suite "symex round-6 B4 -- inclusive-hi pin":
     check q == start + 1
 
   test "B4-3 UNSAT companion: not-found clamp never exceeds bound, for the accumulating shape":
-    let r = symexFind(sutAccNotFoundClampImpossible, tLabel("impossible"))
+    let r = pinFind(sutAccNotFoundClampImpossible, tLabel("impossible"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -193,7 +194,7 @@ proc sutAccDiscard(s: string, start: int) =
 suite "symex round-6 B4 -- not-found fork":
 
   test "B4-4: no terminator present -> the modeled ScanError raise is reachable (sxRaised)":
-    let r = symexFind(sutAccDiscard, tRaisedExn("ScanError"))
+    let r = pinFind(sutAccDiscard, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
 # ---------------------------------------------------------------------------
@@ -203,7 +204,7 @@ suite "symex round-6 B4 -- not-found fork":
 suite "symex round-6 B4 -- OOB entry guard":
 
   test "B4-5: negative symbolic start -> the entry-read probe deposits a real IndexDefect (sxRaised)":
-    let r = symexFind(sutAccDiscard, tIndexError())
+    let r = pinFind(sutAccDiscard, tIndexError())
     check r.status == sxRaised
 
 # ---------------------------------------------------------------------------
@@ -227,7 +228,7 @@ proc sutAccNonLenBoundImpossible(s: string) =
 suite "symex round-6 B4 -- trip wire (recognizer stays narrow)":
 
   test "B4-6: non-.len bound is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
-    let r = symexFind(sutAccNonLenBoundImpossible, tLabel("impossible"))
+    let r = pinFind(sutAccNonLenBoundImpossible, tLabel("impossible"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
@@ -262,11 +263,11 @@ proc sutAccNulPayloadAB(s: string, start: int) =
 suite "symex round-6 B4 -- real chapulin delimiter ('\\0')":
 
   test "B4-8: the SAME closed form recognizes and proves the real '\\0' delimiter -> sxSat":
-    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    let r = pinFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
 
   test "B4-8-content: the witness's real NUL terminator extracts as 1 raw byte, not 5-char escape text (Round-6 B4-rider)":
-    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    let r = pinFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
     # Model-independent (RFC-0005 S8w2): the path fixes `s[start ..
     # start+2]` only; Z3 may put any bytes after the terminator (4.13.4
@@ -292,7 +293,7 @@ suite "symex round-6 B4 -- real chapulin delimiter ('\\0')":
           check esc notin extracted
 
   test "B4-8-cross: the witness, replayed through the real function, reproduces the exact found outcome (Round-6 B4-rider)":
-    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    let r = pinFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
     let (s, start) = r.witness
     let (payload, q) = readCStringNulTracer(s, start)
@@ -329,7 +330,7 @@ proc sutByteWitness(data: seq[byte]) =
 suite "symex round-6 B4 -- string-backed witness reader fix":
 
   test "B4-9: string-backed seq[byte] param's witness renders real byte content, not an empty seq":
-    let r = symexFind(sutByteWitness, tLabel("found_at_2"))
+    let r = pinFind(sutByteWitness, tLabel("found_at_2"))
     check r.status == sxSat
     let data = r.witness[0]
     check data.len == 2

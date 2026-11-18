@@ -27,6 +27,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/engine/markers
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -35,7 +36,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 
 template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     for e in r.errors: check e.severity == sevHint

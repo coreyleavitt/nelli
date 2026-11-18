@@ -220,6 +220,10 @@ proc sutSeqTuple(t: (seq[int], bool)) =
 proc sutRangedTable(t: Table[string, range[0..100]]) =
   if t["a"] == 100: symexTarget("hit")
 
+proc sutQuits(x: int) =
+  if x > 5 and x < 3: symexTarget("hit")
+  if x > 100: quit(3)
+
 proc sutRangedSeq(xs: seq[range[1..100]]; i: int) =
   symexAssume(i >= 0 and i < xs.len)
   if xs[i] == 77: symexTarget("hit")
@@ -732,3 +736,8 @@ suite "K9d: pinFind":
     ## compile; the domain code appends with `domPut`
     check hostileSeqU32() == sxUnsat
     check recordsWith("/sutU32Never/").len == 1
+
+  test "a SUT that calls quit is refused at compile time, not replayed":
+    ## its unsat domain run would end this process at the first x > 100
+    check not compiles(pinFind(sutQuits, tLabel("hit")))
+    check symexFind(sutQuits, tLabel("hit")).status in {sxUnsat, sxUnknown}

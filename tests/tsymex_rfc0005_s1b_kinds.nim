@@ -32,6 +32,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import audit_scan_utils
+import ./s8cu_helpers
 
 proc kindNames(errs: seq[SymexErrorInfo]): seq[string] =
   for e in errs: result.add $e.kind
@@ -146,28 +147,28 @@ proc s1bClosureDiverge(x: int) =
 suite "RFC-0005 S1b (a) -- every degrade records its kind (behavioural correspondence)":
 
   test "solver resource-out at the target (isTargetLabel consumer) is beSolverUndef, NOT weInternalWalkerFault":
-    let r = symexFind(s1bSolverUndefLabel, tLabel("s1b_rare"), tightRLimit)
+    let r = pinFind(s1bSolverUndefLabel, tLabel("s1b_rare"), tightRLimit)
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(beSolverUndef)
     check not r.errors.hasKind(weInternalWalkerFault)
 
   test "solver resource-out at a raised finding (routeRaise consumer) is beSolverUndef, NOT weInternalWalkerFault":
-    let r = symexFind(s1bSolverUndefRaise, tRaisedExn(), tightRLimit)
+    let r = pinFind(s1bSolverUndefRaise, tRaisedExn(), tightRLimit)
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(beSolverUndef)
     check not r.errors.hasKind(weInternalWalkerFault)
 
   test "a Class-B isUnsupported (no parse error) records its own kind at the walk site":
-    let r = symexFind(s1bFieldAug, tLabel("s1b_fieldaug"))
+    let r = pinFind(s1bFieldAug, tLabel("s1b_fieldaug"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedStmtKind)
     check not r.errors.hasKind(weInternalWalkerFault)
 
   test "a Class-A isUnsupported carries the SAME kind as its parse-time error, recorded again at the walk site":
-    let r = symexFind(s1bLowBool, tLabel("s1b_lowbool"))
+    let r = pinFind(s1bLowBool, tLabel("s1b_lowbool"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     var walkSite = false
@@ -178,14 +179,14 @@ suite "RFC-0005 S1b (a) -- every degrade records its kind (behavioural correspon
     check walkSite
 
   test "a recursion cycle cut records weRecursionCycleCut":
-    let r = symexFind(s1bCycleUser, tLabel("s1b_cycle"))
+    let r = pinFind(s1bCycleUser, tLabel("s1b_cycle"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(weRecursionCycleCut)
     check not r.errors.hasKind(weInternalWalkerFault)
 
   test "an over-cap missing callee records its geInstantiationCapped AT the walk site":
-    let r = symexFind(s1bThreeInsts, tLabel("s1b_found"), s1bLowCap)
+    let r = pinFind(s1bThreeInsts, tLabel("s1b_found"), s1bLowCap)
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     var walkSite = false
@@ -202,7 +203,7 @@ suite "RFC-0005 S1b (a) -- every degrade records its kind (behavioural correspon
     ## `break` to it), so the break now leaves the block and the target
     ## after it is genuinely reachable (x > 0). The loop-less kind itself
     ## is still pinned at the IR level just below.
-    let r = symexFind(s1bBlockBreak, tLabel("s1b_after_block"))
+    let r = pinFind(s1bBlockBreak, tLabel("s1b_after_block"))
     checkpoint($kindNames(r.errors))
     check r.status == sxSat
     check not r.errors.hasKind(weBreakOutsideLoop)
@@ -227,13 +228,13 @@ suite "RFC-0005 S1b (a) -- every degrade records its kind (behavioural correspon
     check not raw.errors.hasKind(weInternalWalkerFault)
 
   test "a bare `raise` in a try body (handler stack, no in-flight exn) records eeHandlerReraiseUnmodelled":
-    let r = symexFind(s1bTryBodyReraise, tLabel("s1b_after_try"))
+    let r = pinFind(s1bTryBodyReraise, tLabel("s1b_after_try"))
     checkpoint($kindNames(r.errors))
     check r.errors.hasKind(eeHandlerReraiseUnmodelled)
     check not r.errors.hasKind(weInternalWalkerFault)
 
   test "a closure body with no value-bearing exit records ceClosureBodyDiverged":
-    let r = symexFind(s1bClosureDiverge, tLabel("s1b_closure_hit"))
+    let r = pinFind(s1bClosureDiverge, tLabel("s1b_closure_hit"))
     checkpoint($kindNames(r.errors))
     check r.errors.hasKind(ceClosureBodyDiverged)
     check not r.errors.hasKind(weInternalWalkerFault)

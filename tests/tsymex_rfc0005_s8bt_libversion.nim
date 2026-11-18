@@ -17,6 +17,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_engine
+import ./s8cu_helpers
 
 proc jitEngine(): bool =
   var v: cint
@@ -25,7 +26,7 @@ proc jitEngine(): bool =
 
 template verdict(sut: untyped; label: string): SymexResult =
   let t0 = epochTime()
-  let r = symexFind(sut, tLabel(label))
+  let r = pinFind(sut, tLabel(label))
   echo "  ", label, ": ", r.status, " ", formatFloat(epochTime() - t0,
                                                      ffDecimal, 1), " s"
   r

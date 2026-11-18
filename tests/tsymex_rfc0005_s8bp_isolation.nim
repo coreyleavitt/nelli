@@ -24,6 +24,7 @@ import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8bp_isolation needs -d:symexQueryStats (its .nim.cfg)".}
@@ -80,7 +81,7 @@ proc twoWalks() {.thread.} =
   {.cast(gcsafe).}:
     for w in 0 .. 1:
       symexStepStats = @[]
-      let r = symexFind(lastNl, tLabel("s8bp_lastnl"), smallCap)
+      let r = pinFind(lastNl, tLabel("s8bp_lastnl"), smallCap)
       walks[w] = (r.status, steps())
     symexStepStats = @[]
 
@@ -91,7 +92,7 @@ template perturbed(sut: untyped; lbl: string; settings: SymexSettings;
   ## walk's context before each query (`symexPerturbConsts`).
   symexStepStats = @[]
   symexPerturbConsts = n
-  let r = symexFind(sut, tLabel(lbl), settings)
+  let r = pinFind(sut, tLabel(lbl), settings)
   symexPerturbConsts = 0
   let recorded = steps()
   symexStepStats = @[]
@@ -146,7 +147,7 @@ suite "S8bp (1): no step's search moves with unrelated walk state":
     symexQueryStats = @[]
     symexStepStats = @[]
     symexTargetSolveStats = (budgetOut: 0, declined: 0, slowSat: 0, units: 0)
-    let r = symexFind(lastNl, tLabel("s8bp_lastnl"), smallCap)
+    let r = pinFind(lastNl, tLabel("s8bp_lastnl"), smallCap)
     check r.status == sxSat
     var stepUnits, queryUnits = 0
     for x in symexStepStats: stepUnits += x.units
@@ -185,7 +186,7 @@ suite "S8bp (3): the unbounded endsWith run is decided on both Z3 versions":
 
   test "s.endsWith(re\"b+\") and not s.contains(re\"b\"), unbounded":
     symexQueryStats = @[]
-    let r = symexFind(endsWithRun, tLabel("s8bp_ends_run"))
+    let r = pinFind(endsWithRun, tLabel("s8bp_ends_run"))
     var units = 0
     for q in symexQueryStats: units += q.rlimitDelta
     checkpoint $r.status & " units=" & $units & "\n" & symexQueryStatsSummary()

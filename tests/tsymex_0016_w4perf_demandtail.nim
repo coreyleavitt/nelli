@@ -68,7 +68,7 @@ template tailWalks(fn: typed; tag: static string; res: untyped): seq[int] =
   let log = getTempDir() / ("w4demand_" & tag & "_" & $getCurrentProcessId() & ".log")
   removeFile(log)
   putEnv(walkUnitsLogEnv, log)
-  let res = try: symexFind(fn, tLabel("hit"), pinSettingsConst)
+  let res = try: pinFind(fn, tLabel("hit"), pinSettingsConst)
             finally: delEnv(walkUnitsLogEnv)
   let tails = if fileExists(log): tailUnitLines(log) else: @[]
   removeFile(log)

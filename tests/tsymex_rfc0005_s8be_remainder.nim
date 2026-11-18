@@ -12,6 +12,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8be_remainder")
@@ -28,7 +29,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tgt)
+    let r = pinFind(fn, tgt)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check decidedOrNotMarshallable(r, want)
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -36,7 +37,7 @@ template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
 template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
                   s: SymexSettings) =
   block:
-    let r = symexFind(fn, tgt, s)
+    let r = pinFind(fn, tgt, s)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check decidedOrNotMarshallable(r, want)
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -244,7 +245,7 @@ suite "RFC-0005 S8be (1): an opaque routine's implicit Defects":
 
 suite "RFC-0005 S8be (2): a replay that does not end":
   test "is ended at its bound, never confirmed":
-    let r = symexFind(sutSpin, tLabel("big"),
+    let r = pinFind(sutSpin, tLabel("big"),
                       SymexSettings(replayTimeoutMs: 300))
     checkpoint $r.status & " " & show(r.errors)
     check r.status != sxSat
@@ -252,7 +253,7 @@ suite "RFC-0005 S8be (2): a replay that does not end":
   test "a replay that ends is confirmed as before":
     # RFC-0005 S8ct: the replay above was killed at its bound, so nothing of it
     # runs on.
-    let r = symexFind(sutSpinOk, tLabel("three"),
+    let r = pinFind(sutSpinOk, tLabel("three"),
                       SymexSettings(replayTimeoutMs: 300))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
@@ -264,7 +265,7 @@ suite "RFC-0005 S8be (2): a replay that does not end":
 suite "RFC-0005 S8be (3): `{.global.}` in a routine":
   test "is initialised once and kept across calls":
     verdict(sutGlobalPragma, tLabel("second"), sxSat)
-    let r = symexFind(sutGlobalPragma, tLabel("reset"))
+    let r = pinFind(sutGlobalPragma, tLabel("reset"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status != sxSat
     check r.errors.hasKind(feGlobalHavoc)
@@ -272,7 +273,7 @@ suite "RFC-0005 S8be (3): `{.global.}` in a routine":
 suite "RFC-0005 S8be (4): an opaque raise of a subtype":
   test "an except of the subtype is entered":
     verdict(sutSub, tLabel("sub"), sxSat)
-    let r = symexFind(sutSub, tLabel("base"))
+    let r = pinFind(sutSub, tLabel("base"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(feReplayRefuted)
@@ -290,7 +291,7 @@ suite "RFC-0005 S8be (6): a recursive frame's return":
   test "a declined frame's return is bounded by its type, and fast":
     const s = SymexSettings(budget: ResourceBudget(maxCallDepth: 3,
                                                  maxRecursionDepth: 0))
-    let r = symexFind(sutSumToNo, tLabel("st_dead"), s)
+    let r = pinFind(sutSumToNo, tLabel("st_dead"), s)
     checkpoint $r.status & " " & show(r.errors)
     check r.status in {sxUnsat, sxUnknown}
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -301,7 +302,7 @@ suite "RFC-0005 S8be (7): a lazy read's check":
   test "a container a later operand shrinks":
     verdict(sutSeqShrink, tLabel("read"), sxSat)
   test "a read the early check no longer covers declines":
-    let r = symexFind(sutSeqShrinkStale, tLabel("stale"))
+    let r = pinFind(sutSeqShrinkStale, tLabel("stale"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
     check not r.errors.hasKind(weInternalWalkerFault)

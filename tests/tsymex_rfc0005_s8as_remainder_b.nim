@@ -13,6 +13,7 @@ import std/[unittest, strutils, math]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8as_remainder_b")
@@ -29,7 +30,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -213,7 +214,7 @@ suite "RFC-0005 S8as (4): a closure's writes reach the caller":
   test "a capture written by a closure applied outside its frame is kept":
     # RFC-0005 S8ax: the capture lives in an env cell the walk threads to
     # every frame (was the scoped `ceCaptureByRefUnmodelled` decline).
-    let r = symexFind(sutOutOfFrame, tLabel("of"))
+    let r = pinFind(sutOutOfFrame, tLabel("of"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check not r.errors.hasKind(ceCaptureByRefUnmodelled)

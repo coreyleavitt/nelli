@@ -31,6 +31,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/nativestack
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -82,7 +83,7 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     check left < high(int)
 
   test "maxCallDepth past what the stack holds declines in-band, named":
-    let r = symexFind(s8caForeverSut, tLabel("s8ca_forever_never"), deep)
+    let r = pinFind(s8caForeverSut, tLabel("s8ca_forever_never"), deep)
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)
@@ -98,13 +99,13 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     # On Windows each solve has a fiber of its own; a bound cached from
     # the first (or from the main thread, above) declined every call.
     for i in 0 ..< 3:
-      let r = symexFind(s8caShallow, tLabel("s8ca_shallow"))
+      let r = pinFind(s8caShallow, tLabel("s8ca_shallow"))
       checkpoint show(r.errors)
       check r.status == sxSat
       check rdNativeStack notin r.soundness.runDependence
 
   test "a run the stack does not cut is not flagged":
-    let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"),
+    let r = pinFind(s8caRunawaySut, tLabel("s8ca_runaway_never"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 5)))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)
@@ -132,9 +133,9 @@ proc analyse(which: int) =
                             cut: rdNativeStack in r.soundness.runDependence,
                             left: nativeStackLeft())
   case which
-  of 0, 2: take(symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never")))
-  of 1: take(symexFind(s8caForeverSut, tLabel("s8ca_forever_never"), deep))
-  else: take(symexFind(s8caShallow, tLabel("s8ca_shallow")))
+  of 0, 2: take(pinFind(s8caRunawaySut, tLabel("s8ca_runaway_never")))
+  of 1: take(pinFind(s8caForeverSut, tLabel("s8ca_forever_never"), deep))
+  else: take(pinFind(s8caShallow, tLabel("s8ca_shallow")))
 
 proc underFiller(which: int) {.noinline.} =
   ## About 1 MB of this 2 MB thread's stack held by this frame: the walk

@@ -19,6 +19,7 @@ import nelli/symex
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
+import ./s8cu_helpers
 
 proc lit_p6r6_nat() =
   let s = "acab"
@@ -120,7 +121,7 @@ proc pin_p6r5_bad(s: string) =
     symexTarget("pin_p6r5_bad")
 
 template verdict(f: untyped; l: string): untyped =
-  let res = symexFind(f, tLabel(l))
+  let res = pinFind(f, tLabel(l))
   echo "  ", l, ": ", res.status
   res.status
 

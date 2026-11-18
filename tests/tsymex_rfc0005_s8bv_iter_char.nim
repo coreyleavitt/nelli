@@ -14,6 +14,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/engine/markers
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -21,7 +22,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
   "[" & parts.join(", ") & "]"
 
 template verdict(sut: untyped; label: string): SymexResult =
-  let r = symexFind(sut, tLabel(label))
+  let r = pinFind(sut, tLabel(label))
   checkpoint label & ": " & $r.status & " " & show(r.errors) & " witness=" &
              (if r.status == sxSat: $r.witness else: "-")
   r

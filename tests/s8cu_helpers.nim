@@ -1476,11 +1476,26 @@ proc fnParamTypes(fn: NimNode): seq[NimNode] =
         u = nnkBracketExpr.newTree(ident"seq", u[1])
       result.add u
 
+proc namesQuit(n: NimNode): bool =
+  ## the routine body calls `quit` (system's): it ends the process that runs it
+  if n.kind == nnkSym and n.strVal == "quit" and n.symKind == nskProc and
+     n.owner.strVal == "system":
+    return true
+  for c in n:
+    if namesQuit(c): return true
+
 macro pinFind*(fn: typed; target: untyped;
                rest: varargs[untyped]): untyped =
   ## `symexFind(fn, target, rest...)`, its result returned as is, with a
   ## definite verdict pinned natively (`pinFindJudge`). The cell is
-  ## `family:generic:k9d/<file>/<fn>/<target>`.
+  ## `family:generic:k9d/<file>/<fn>/<target>`. A SUT whose own body calls
+  ## `quit` is refused at compile time: its native runs are in this process,
+  ## which the first one would end (a routine it calls is not inspected).
+  let impl = (if fn.kind == nnkSym: fn.getImpl else: fn)
+  if impl.kind in RoutineNodes and namesQuit(impl.body):
+    error("pinFind: " & fn.repr & " calls quit, which would end the process " &
+          "its native runs share; pin it in a child (pinCrash) or leave it " &
+          "unpinned", fn)
   let types = fnParamTypes(fn)
   let file = lineInfoObj(fn).filename.splitFile.name
   let key = "k9d/" & file & "/" & fn.repr & "/" & target.repr

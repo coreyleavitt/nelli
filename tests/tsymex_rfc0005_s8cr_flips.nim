@@ -16,26 +16,27 @@ import std/[unittest, math, sequtils, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs:
     result.add $e.kind & "/" & $e.severity & " "
 
 template justify(sut: untyped; tgt: untyped) =
-  let r = symexFind(sut, tgt)
+  let r = pinFind(sut, tgt)
   checkpoint $r.status & " " & show(r.errors)
   checkUnsatOverTaintOnly(r)
 
 template justifyOver(sut: untyped; tgt: untyped; drained: SymexErrorKind) =
   ## The run drains `drained`, so the helper is what separates this from a run
   ## that lost executions: the entry is present and carries no `scIncomplete`.
-  let r = symexFind(sut, tgt)
+  let r = pinFind(sut, tgt)
   checkpoint $r.status & " " & show(r.errors)
   check r.errors.anyIt(it.kind == drained)
   checkUnsatOverTaintOnly(r)
 
 template justifyWith(sut: untyped; tgt: untyped; settings: untyped) =
-  let r = symexFind(sut, tgt, settings)
+  let r = pinFind(sut, tgt, settings)
   checkpoint $r.status & " " & show(r.errors)
   checkUnsatOverTaintOnly(r)
 

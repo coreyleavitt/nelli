@@ -18,6 +18,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -27,7 +28,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 template clean(fn: typed, lbl: string, want: SymexStatusKind,
                st: SymexSettings = SymexSettings()): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl), st)
+    let r = pinFind(fn, tLabel(lbl), st)
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
@@ -162,11 +163,11 @@ suite "S8bd (4): more lvalues and callees are passed by reference":
     ## S8bd made it decline (`heUnsafeCast`). RFC-0005 batch 3: S8ax's
     ## address cells model it -- `addr x` is a `ptr` cell holding `x` for
     ## the frame's lifetime, so the kept pointer writes `x`, as Nim does.
-    let rd = symexFind(sutGenericEscape, tLabel("ge_dead"))
+    let rd = pinFind(sutGenericEscape, tLabel("ge_dead"))
     checkpoint "ge_dead " & $rd.status & " " & show(rd.errors)
     check rd.status == sxUnsat
     for e in rd.errors: check e.severity != sevError
-    let rl = symexFind(sutGenericEscape, tLabel("ge"))
+    let rl = pinFind(sutGenericEscape, tLabel("ge"))
     checkpoint "ge " & $rl.status & " " & show(rl.errors)
     check rl.status == sxSat
     for e in rl.errors: check e.severity != sevError

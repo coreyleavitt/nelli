@@ -12,6 +12,7 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl, runtime]
 import nelli/engine/types
+import ./s8cu_helpers
 
 # --- a typed SUT containing an unconditional raise --------------------------
 proc raiseSut(x: int) =
@@ -28,7 +29,7 @@ suite "symex Phase 15 E2a — structural sxRaised cascade + multi-finding cache"
     # `symexFind` returns SymexResult whose `status` is SymexStatusKind. After
     # E2a the structural `isRaise` arm emits sxRaised (was eeRaiseUnimplemented
     # in E1). No witness, no semantics — purely structural.
-    let res = symexFind(raiseSut, tAssertionViolation())
+    let res = pinFind(raiseSut, tAssertionViolation())
     check res.status == sxRaised
 
   test "E2a: multi-sxRaised DB round-trip — both findings reload without Z3":

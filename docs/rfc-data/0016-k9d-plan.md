@@ -391,20 +391,75 @@ Not converted (reverted, still unpinned), with the owner:
   `rfc0005_s8aa_remainder`, `rfc0005_s8ac_remainder`,
   `rfc0005_s8ac_remainder_b`, `tot1_totality_corpus` (also float/cstring);
 - float (K9d-8): `phase15_g10_smoke`, `rfc0005_s8ba_remainder`;
-- needs a decision (the pin failed natively, not triaged; NOT yet filed as a
-  worklist row): `163rev_table_elem` (a sat witness over a `Table` raises
-  KeyError natively: either the walker's witness for a Table is not
-  materialised into the replayed value, or a walker/native disagreement);
-  `163rev_seqelem_promoted_int` (the sat witness is rejected by `symexAssume`
-  natively); `rfc0005_s8c_resolution` (an empty domain for a distinct int
-  parameter); `rfc0005_s8q_termination` (every generated run rejected by
-  `symexAssume`, vacuous); `phase15_M1_seq_fixedwidth` (a C compile error in
-  `seq[Widget]`/`seq[string]` instantiation inside `system.add`).
+- the five pin failures of the first pass are triaged in K9d-7b below; none
+  was a walker/native disagreement.
 
-Not yet attempted: the `symexFind` suites whose SUT is reached through `fn`/a
-lambda, the `symexForAll`/`symexFindAllWitnesses` suites (not `pinFind` shapes),
-and the remaining collection suites in the seq family list below
-(`a6`..`rfc0005_s9_vetoes`) that did not appear in this candidate pass.
+### K9d-7b (`k9d7b`): the five failures, and the `fn`/lambda pass
+
+Each failure was a harness defect, so no worklist row was filed.
+
+- `163rev_table_elem`, `163rev_seqelem_promoted_int`: the witness tuple holds
+  `Table[string, range[0..100]]` as `Table[string, int]` and
+  `seq[range[1..100]]` as `seq[int]`; `witnessAs` tried `T(x)`, which does not
+  compile for a container of a range, and fell back to `default(T)`, so the
+  replay ran the SUT on an empty table (KeyError) and an empty seq (the
+  assume rejected `i < xs.len`). `convWitness` now converts a seq, array,
+  Table, HashSet and set element by element (each element range-checked, as
+  the SUT's own conversion would be), and a value with no conversion fails the
+  pin when replayed instead of replaying a default (a tuple holding a ranged
+  container lands there: its field-wise copy does not compile in C, the
+  `seq[range]` and `seq[int]` fields sharing one `=sink` instance).
+- `rfc0005_s8c_resolution`: not the distinct conversion. The suite declares
+  `add(var seq[int], int)` (appends nothing) and `len(seq[int16])` (7) on
+  purpose; an overloaded call in a generic routine is looked up again where
+  it is instantiated, so the generated `int` domain came out empty and the
+  `seq[int16]` core was indexed past its end. The generic domain code now
+  appends and measures through closed helpers (`domPut`, `domLen`, `domHas`,
+  which reach the stdlib by qualified name), and `pinFind`'s generated code
+  binds them with `bindSym`. Self-test: `tests/k9d_hostile.nim` overloads
+  `add`/`len`/`items` and instantiates the domains under them.
+- `phase15_M1_seq_fixedwidth`: a Nim defect, plain reproducer (gcc):
+
+      var a: seq[seq[cuint]]
+      a.add @[1.cuint]
+      var b: seq[seq[uint32]]
+      b.add @[1u32]   # C: incompatible types when assigning
+
+  `cuint` and `uint32` are one Nim type but two C types, and `system.add`'s
+  instance is shared; nim-z3 declares a `seq[seq[cuint]]`, so the
+  `seq[uint32]` domain's `add` did not compile. `domPut` (setLen and an index
+  store) sidesteps it; the hostile module pins it.
+- `rfc0005_s8q_termination`: the vacuous test is `sutAssumeContradiction`,
+  whose assumption (`s[0] == 'a' and s[0] == 'b'`) has no model by design: no
+  domain can be steered into an empty one, and the refusal is right. That
+  call stays `symexFind`; the test checks that `pinFind` refuses it and that
+  no candidate passes the assume natively. The suite's other verdicts are
+  pinned.
+
+A further harness defect found in the pass: an `sxUnsat` pin runs its domain
+in this process, so a SUT that calls `quit` ended the suite
+(`rfc0005_s8cb_order`'s exit magics). `pinFind` now refuses at compile time a
+SUT whose own body calls `system.quit` (a callee is not inspected); those
+calls stay `symexFind` (`s8cb_order`'s `cq`, `w1_parity`'s `w1QuitFirst`).
+`s8bo_replay`'s "the replay's writes stay in its child" also stays
+`symexFind`: it proves the SUT never ran in this process, which a native pin
+would contradict.
+
+93 suites convert (local c runs, rc 0): the five above and 88 reached
+through `fn`/a template or lambda, the `symexForAll`/`symexFindAllWitnesses`
+suites with collection parameters (their `symexFind` calls are pinned; their
+ForAll/FindAll calls are not yet, and no counterpart was needed for the
+census since each also calls `symexFind`), `r6_b4_readcstring` and the
+remaining seq-family suites: `0016_admir`, `0016_cr1_sharedenv`, `0016_d1_narrow_opaque`, `0016_f2hot_skiplimit`, `0016_k7b_unsupported`, `0016_k9cg_unbacked`, `0016_prc02m_find`, `0016_r2b_blocksync`, `0016_s8cj_mkunique`, `0016_w4perf_demandtail`, `0016_w4perf_tailpools`, `phase15_E2a_cascade`, `phase15_l3_quote_do`, `r6_b4_readcstring`, `r6_r1_placeholder_totality`, `rfc0005_b8_integration_b`, `rfc0005_b8_integration_d`, `rfc0005_b9_integration_b`, `rfc0005_b9_integration_c`, `rfc0005_s11_surface`, `rfc0005_s1b_kinds`, `rfc0005_s5_str`, `rfc0005_s6a_budget`, `rfc0005_s8ad_remainder`, `rfc0005_s8aj_remainder_b`, `rfc0005_s8aj_remainder_c`, `rfc0005_s8aj_remainder`, `rfc0005_s8an_remainder_b`, `rfc0005_s8an_remainder_c`, `rfc0005_s8an_remainder_d`, `rfc0005_s8as_remainder_b`, `rfc0005_s8as_remainder_c`, `rfc0005_s8as_remainder`, `rfc0005_s8au_remainder_b`, `rfc0005_s8au_remainder_c`, `rfc0005_s8aw_remainder`, `rfc0005_s8ax_remainder_b`, `rfc0005_s8ax_remainder_d`, `rfc0005_s8ax_remainder_e`, `rfc0005_s8ax_remainder_f`, `rfc0005_s8ay_remainder_b`, `rfc0005_s8ay_remainder_c`, `rfc0005_s8ay_remainder_d`, `rfc0005_s8ay_remainder`, `rfc0005_s8ba_remainder_b`, `rfc0005_s8bb_captures_b`, `rfc0005_s8bb_captures_c`, `rfc0005_s8bb_captures_d`, `rfc0005_s8bb_captures`, `rfc0005_s8bb_remainder_b`, `rfc0005_s8bb_remainder`, `rfc0005_s8bb_replace_b`, `rfc0005_s8bb_replace_d`, `rfc0005_s8bd_remainder_c`, `rfc0005_s8be_remainder_b`, `rfc0005_s8be_remainder`, `rfc0005_s8bh_remainder`, `rfc0005_s8bi_remainder_b`, `rfc0005_s8bi_remainder_c`, `rfc0005_s8bi_remainder`, `rfc0005_s8bj_replace_lemmas`, `rfc0005_s8bj_walker`, `rfc0005_s8bk_argtiming_checks`, `rfc0005_s8bn_remainder_c`, `rfc0005_s8bo_cells`, `rfc0005_s8bo_replay`, `rfc0005_s8bp_isolation`, `rfc0005_s8bq_remainder_b`, `rfc0005_s8bq_remainder_c`, `rfc0005_s8bt_caps`, `rfc0005_s8bt_libversion`, `rfc0005_s8bt_replace_lemmas_b`, `rfc0005_s8bt_replace_lemmas`, `rfc0005_s8bv_iter_char_count`, `rfc0005_s8bv_iter_char`, `rfc0005_s8ca_stack`, `rfc0005_s8ca_strings_b`, `rfc0005_s8cb_order`, `rfc0005_s8ce_raiseshapes`, `rfc0005_s8cf_point_b`, `rfc0005_s8cf_point`, `rfc0005_s8cr_flips`, `rfc0005_s8cr_intro`, `rfc0005_s8cr_pins`, `rfc0005_s8m_exits_b`, `rfc0005_s8_scope`, `rfc0005_s9_vetoes`, `rfc0005_w1_parity`. The census ceiling 232 -> 139.
+
+Still deferred: ref/ptr (K9d-10) `0016_fieldref`, `rfc0005_s8ao_remainder`,
+`rfc0005_s8ax_remainder_c`, `rfc0005_s8bd_remainder_b`,
+`rfc0005_s8bh_remainder_b`, `rfc0005_s8bn_remainder_d`,
+`rfc0005_s8bn_remainder_e`, `rfc0005_s8bo_nil`, `rfc0005_s8cs_routes_b`,
+`rfc0005_s8e_scoping`, plus K9d-7's list; float (K9d-8)
+`rfc0005_s8au_remainder`. `rfc0005_s8bh_remainder_c` is red unconverted (its
+method-call test returns sxUnknown, feGlobalRouteUnproved) and was left as it
+is.
 
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 

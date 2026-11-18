@@ -8,6 +8,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8bo_cells")
@@ -24,7 +25,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tgt)
+    let r = pinFind(fn, tgt)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)

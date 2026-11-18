@@ -40,6 +40,7 @@ import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/walk_log
+import ./s8cu_helpers
 
 proc tailUnitLines(log: string): seq[int] =
   ## The units of each tail walk (`k10b-tail` lines of the K7 units log).
@@ -51,7 +52,7 @@ template tailUnits(fn: typed; lbl: static string; outStatus: var SymexStatusKind
   let log = getTempDir() / ("w4perf_" & lbl & "_" & $getCurrentProcessId() & ".log")
   removeFile(log)
   putEnv(walkUnitsLogEnv, log)
-  let r = try: symexFind(fn, tLabel(lbl))
+  let r = try: pinFind(fn, tLabel(lbl))
           finally: delEnv(walkUnitsLogEnv)
   outStatus = r.status
   let tails = if fileExists(log): tailUnitLines(log) else: @[]

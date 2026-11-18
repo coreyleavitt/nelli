@@ -13,6 +13,7 @@ import std/[unittest, strutils, math]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -26,7 +27,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -34,7 +35,7 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
 template verdictS(fn: typed, lbl: string, want: SymexStatusKind,
                   s: SymexSettings) =
   block:
-    let r = symexFind(fn, tLabel(lbl), s)
+    let r = pinFind(fn, tLabel(lbl), s)
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -165,7 +166,7 @@ suite "RFC-0005 S8as (5): more `addr` forms are modelled":
     ## RFC-0005 S8ax: `addr x` of a routine variable is its address cell,
     ## so a pointer re-pointed on one arm is exact (it declined here).
     verdict(sutAddrRepointBranch, "rb", sxSat)
-    let r = symexFind(sutAddrRepointBranch, tLabel("rb"))
+    let r = pinFind(sutAddrRepointBranch, tLabel("rb"))
     if r.status == sxSat: check r.witness[0] <= 0
 
 suite "RFC-0005 S8as (1): recursion on a symbolic argument":
@@ -208,7 +209,7 @@ suite "RFC-0005 S8as (7): the `int` heap is Int-sorted":
     verdict(sutAddrIncWide, "aw", sxSat)
     verdict(sutAddrIncWide, "aw_dead", sxUnsat)
   test "an Int cell still raises on overflow":
-    let r = symexFind(sutHeapOverflow, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sutHeapOverflow, tRaisedExn("OverflowDefect"))
     checkpoint show(r.errors)
     check r.status == sxRaised
   test "a bit-vector parameter keeps the bit-vector heap":

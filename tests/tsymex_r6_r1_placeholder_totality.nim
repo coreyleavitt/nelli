@@ -55,6 +55,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # Placeholder sources
@@ -241,7 +242,7 @@ proc sutUntouchedUnsat(n: range[0 .. 1000]) =
 suite "symex R1 — S1 (.len read) false-verdict fix":
 
   test "R1-S1a (bare call-return): `.len > 0` on a placeholder no longer silently proves sxUnsat off the forced length 0 -- declines sxUnknown/seNestedSeqUnsupported":
-    let r = symexFind(sutBareLenRead, tLabel("bare_len_read"))
+    let r = pinFind(sutBareLenRead, tLabel("bare_len_read"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -250,7 +251,7 @@ suite "symex R1 — S1 (.len read) false-verdict fix":
     check sawKind
 
   test "R1-S1b (declared field, companion): `.len` on a field-sourced placeholder was ALREADY guarded pre-v89 by the parse-time nnkDotExpr field-read interception -- unaffected by this slice, still declines":
-    let r = symexFind(sutFieldLenRead, tLabel("field_len_read"))
+    let r = pinFind(sutFieldLenRead, tLabel("field_len_read"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -261,7 +262,7 @@ suite "symex R1 — S1 (.len read) false-verdict fix":
 suite "symex R1 — N1 (slice read) false-verdict fix":
 
   test "R1-N1a (bare call-return): `ps[0 .. 0]` on a placeholder no longer forks a guaranteed-spurious IndexDefect off the forced length 0 -- declines sxUnknown/seNestedSeqUnsupported":
-    let r = symexFind(sutBareSliceRead, tLabel("bare_slice_read"))
+    let r = pinFind(sutBareSliceRead, tLabel("bare_slice_read"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -270,7 +271,7 @@ suite "symex R1 — N1 (slice read) false-verdict fix":
     check sawKind
 
   test "R1-N1b (declared field, companion): slice on a field-sourced placeholder was ALREADY guarded pre-v89 -- unaffected by this slice, still declines":
-    let r = symexFind(sutFieldSliceRead, tLabel("field_slice_read"))
+    let r = pinFind(sutFieldSliceRead, tLabel("field_slice_read"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -281,7 +282,7 @@ suite "symex R1 — N1 (slice read) false-verdict fix":
 suite "symex R1 — iteration over a placeholder (mechanically the S1 chokepoint)":
 
   test "R1-iter: `for x in ps: cnt.inc` on a placeholder no longer silently proves cnt==3 unreachable (sxUnsat) off the forced-zero-iteration loop -- declines sxUnknown/seNestedSeqUnsupported":
-    let r = symexFind(sutBareIterationCount, tLabel("bare_iteration_three"))
+    let r = pinFind(sutBareIterationCount, tLabel("bare_iteration_three"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -292,7 +293,7 @@ suite "symex R1 — iteration over a placeholder (mechanically the S1 chokepoint
 suite "symex R1 — Q1/Q2 (index read coverage + location-prefixed message)":
 
   test "R1-Q1a (bare call-return): `ps[0]` declines sxUnknown/seNestedSeqUnsupported (the v88 guard, now covered)":
-    let r = symexFind(sutBareIndexRead, tLabel("bare_index_read"))
+    let r = pinFind(sutBareIndexRead, tLabel("bare_index_read"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -301,7 +302,7 @@ suite "symex R1 — Q1/Q2 (index read coverage + location-prefixed message)":
     check sawKind
 
   test "R1-Q2: the index-read decline message now carries the `<loc>: ` site prefix (this file's own path), not just the bare reason text":
-    let r = symexFind(sutBareIndexRead, tLabel("bare_index_read"))
+    let r = pinFind(sutBareIndexRead, tLabel("bare_index_read"))
     check r.status == sxUnknown
     var sawLocPrefix = false
     for e in r.errors:
@@ -328,7 +329,7 @@ suite "symex R1 — Q1/Q2 (index read coverage + location-prefixed message)":
     ## field guard already substitutes an honest empty literal before either
     ## accessor runs -- so it is outside R1's chokepoint-audit scope; see the
     ## R1 summary's residual-gaps list).
-    let r = symexFind(sutFieldIndexRead, tLabel("field_index_read"))
+    let r = pinFind(sutFieldIndexRead, tLabel("field_index_read"))
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
     check r.errors.len > 0
@@ -336,7 +337,7 @@ suite "symex R1 — Q1/Q2 (index read coverage + location-prefixed message)":
 suite "symex R1 — equality (walker v112: eqBV/neBV/cmpBV/svLeafEq/iteSV now guard-before on a placeholder operand)":
 
   test "R1-eq: `ps == qs` over two placeholders declines sxUnknown/seNestedSeqUnsupported (never a crash, never a false sat/unsat) via the SAME R1 chokepoint S1/N1 use":
-    let r = symexFind(sutBareEquality, tLabel("bare_equality_eq"))
+    let r = pinFind(sutBareEquality, tLabel("bare_equality_eq"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -349,7 +350,7 @@ suite "symex R1 — equality (walker v112: eqBV/neBV/cmpBV/svLeafEq/iteSV now gu
 suite "symex R1 — iekSeqAdd mutation arm (N6 audit item)":
 
   test "R1-mutate: `.add` on a placeholder no longer whole-run-poisons via a bare ValueError -- declines branch-scoped sxUnknown/seNestedSeqUnsupported":
-    let r = symexFind(sutBareMutation, tLabel("bare_mutation"))
+    let r = pinFind(sutBareMutation, tLabel("bare_mutation"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -360,7 +361,7 @@ suite "symex R1 — iekSeqAdd mutation arm (N6 audit item)":
 suite "symex R1 — pass-to-callee (flag survives a call boundary)":
 
   test "R1-call: `readsLen(ps)` inside a callee still declines sxUnknown/seNestedSeqUnsupported via the SAME S1 chokepoint, reached through a call boundary":
-    let r = symexFind(sutPassToCallee, tLabel("pass_to_callee_hit"))
+    let r = pinFind(sutPassToCallee, tLabel("pass_to_callee_hit"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -371,12 +372,12 @@ suite "symex R1 — pass-to-callee (flag survives a call boundary)":
 suite "symex R1 — UNTOUCHED-path soundness companions (scoped decline never poisons an unrelated target)":
 
   test "R1-untouched-sat: a target unrelated to the placeholder param still proves real sxSat":
-    let r = symexFind(sutUntouchedSat, tLabel("untouched_sat"))
+    let r = pinFind(sutUntouchedSat, tLabel("untouched_sat"))
     check r.status == sxSat
     check r.witness[0] == 7
 
   test "R1-untouched-unsat: a genuine contradiction unrelated to the placeholder param still resolves real sxUnsat":
-    let r = symexFind(sutUntouchedUnsat, tLabel("untouched_unsat"))
+    let r = pinFind(sutUntouchedUnsat, tLabel("untouched_unsat"))
     check r.status == sxUnsat
 
 suite "symex R1 — walker version pin":

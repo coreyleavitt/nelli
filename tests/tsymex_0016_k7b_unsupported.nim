@@ -23,6 +23,7 @@ import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
 import nelli/smt/[symval]   ## R2-3: the leaves are no longer re-exported by the facade
+import ./s8cu_helpers
 
 proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   for e in errs:
@@ -103,24 +104,24 @@ suite "RFC-0016 K7b (a) -- feUnadmitted is dcOmitted and drops the path":
 suite "RFC-0016 K7b (b) -- W-16: an excluded Defect is recorded, not silent":
 
   test "an AssertionDefect excluded under a label search is sxUnknown":
-    let r = symexFind(k7bAssertF, tLabel("never_reached"), excludeAssert)
+    let r = pinFind(k7bAssertF, tLabel("never_reached"), excludeAssert)
     checkpoint($r.status)
     check r.status == sxUnknown
     check r.errors.hasKind(feDefectExcluded)
 
   test "the same search without the exclusion still surfaces the defect":
-    let r = symexFind(k7bAssertF, tLabel("never_reached"))
+    let r = pinFind(k7bAssertF, tLabel("never_reached"))
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
 
   test "the default exclusion of OutOfMemDefect is recorded too":
-    let r = symexFind(k7bOom, tLabel("never_reached"))
+    let r = pinFind(k7bOom, tLabel("never_reached"))
     checkpoint($r.status)
     check r.status == sxUnknown
     check r.errors.hasKind(feDefectExcluded)
 
   test "an excluded defect on an infeasible path records nothing":
-    let r = symexFind(k7bDeadDefect, tLabel("never_reached"), excludeAssert)
+    let r = pinFind(k7bDeadDefect, tLabel("never_reached"), excludeAssert)
     check r.status == sxUnsat
     check not r.errors.hasKind(feDefectExcluded)
 

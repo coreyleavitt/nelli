@@ -26,6 +26,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 macro progOf(fn: typed): untyped =
   ## The `SymexProgram` `symexFind` would build for `fn`.
@@ -234,7 +235,7 @@ suite "RFC-0005 S9 -- oracles":
 suite "RFC-0005 S9 (a) -- the veto companions report sat through both consumers":
 
   test "symexFind: a reached cast decline off the witness path is sxSat":
-    let r = symexFind(s9CapCompanion, tLabel("s9_cap_companion"))
+    let r = pinFind(s9CapCompanion, tLabel("s9_cap_companion"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] == 42
@@ -261,26 +262,26 @@ suite "RFC-0005 S9 (a) -- the veto companions report sat through both consumers"
 suite "RFC-0005 S9 (b) -- a closure reads its captured var at the call":
 
   test "capMutNeg: a write after construction is seen -- the label is dead, sxUnsat":
-    let r = symexFind(s9CapMutNeg, tLabel("s9_capmut_neg"))
+    let r = pinFind(s9CapMutNeg, tLabel("s9_capmut_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "capMutPos: the written value is the one read -- sxSat at x == 7":
-    let r = symexFind(s9CapMutPos, tLabel("s9_capmut_pos"))
+    let r = pinFind(s9CapMutPos, tLabel("s9_capmut_pos"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] == 7
 
   test "a write on one arm is seen on that arm -- sxUnsat":
-    let r = symexFind(s9CapBranch, tLabel("s9_capbranch"))
+    let r = pinFind(s9CapBranch, tLabel("s9_capbranch"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "applied by a callee: the variable as it stands, never the stale snapshot's sxSat":
     # RFC-0005 S8ax (was the honest `ceCaptureByRefUnmodelled` decline).
-    let r = symexFind(s9CapEscaped, tLabel("s9_capescaped"))
+    let r = pinFind(s9CapEscaped, tLabel("s9_capescaped"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
@@ -288,7 +289,7 @@ suite "RFC-0005 S9 (b) -- a closure reads its captured var at the call":
   test "a body that writes a captured var writes it back -- the label is dead, sxUnsat":
     ## RFC-0005 S8as (was the `ceCaptureByRefUnmodelled` decline, never the
     ## lost write's sxSat).
-    let r = symexFind(s9BodyWrite, tLabel("s9_bodywrite"))
+    let r = pinFind(s9BodyWrite, tLabel("s9_bodywrite"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
@@ -297,12 +298,12 @@ suite "RFC-0005 S9 (b) -- a closure reads its captured var at the call":
     check classOf(ceCaptureByRefUnmodelled) == dcSubstituted
 
   test "a let capture is exact by value, in scope or applied by a callee":
-    let r1 = symexFind(s9CapLet, tLabel("s9_caplet"))
+    let r1 = pinFind(s9CapLet, tLabel("s9_caplet"))
     checkpoint($r1.status & " " & show(r1.errors))
     check r1.status == sxSat
     check r1.witness[0] == 3
     check not r1.errors.hasKind(ceCaptureByRefUnmodelled)
-    let r2 = symexFind(s9CapLetEscaped, tLabel("s9_capletescaped"))
+    let r2 = pinFind(s9CapLetEscaped, tLabel("s9_capletescaped"))
     checkpoint($r2.status & " " & show(r2.errors))
     check not r2.errors.hasKind(ceCaptureByRefUnmodelled)
     check r2.status != sxUnsat
@@ -317,7 +318,7 @@ suite "RFC-0005 S9 (c) -- an unreached decline is a diagnostic; a reached one ta
     let prog = progOf(s9DeadHandler)
     check prog.parseErrors.len == 1
     let m = prog.parseErrors[0].scope.markerId
-    let r = symexFind(s9DeadHandler, tLabel("s9_dead_handler"))
+    let r = pinFind(s9DeadHandler, tLabel("s9_dead_handler"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)

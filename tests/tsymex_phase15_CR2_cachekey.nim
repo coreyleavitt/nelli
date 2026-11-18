@@ -1278,7 +1278,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## body's type section no longer stops the route scan): 422->423.
     ## RFC-0016 INT-65 (a `pointer` is an address with a nil; a proc value
     ## is a routine or nil; 424-433 reserved): 423->434.
-    check symexWalkerVersion == "434"
+    ## RFC-0016 INT-76 (a `c_longdouble` value declines and halts the
+    ## path): 434->435.
+    check symexWalkerVersion == "435"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

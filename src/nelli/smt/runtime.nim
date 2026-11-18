@@ -20967,7 +20967,9 @@ proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
   for p in paths:
     if not pathInfeasible(w.z3, p, w.settings): live.add p
   if live.len == 0: return exact(live)
-  if classOf(stmt.unKind) == dcOmitted:
+  # RFC-0016 INT-76: a halting marker (`unHalt`) ends the path too: its
+  # site bound no value, so a later read has nothing of the right sort.
+  if classOf(stmt.unKind) == dcOmitted or stmt.unHalt:
     return w.halted(stmt.unKind, stmt.reason,
                     scope = siteAnchored(stmt.unMarker))
   let d = w.degrade(stmt.unKind, stmt.reason,

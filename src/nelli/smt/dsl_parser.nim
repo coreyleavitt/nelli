@@ -1105,8 +1105,14 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isUndefined:
     newCall(bindSym"mkUndefined", newLit(s.udKind), newLit(s.udSite))
   of isUnsupported:
-    newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
-            newLit(s.unMarker))
+    # RFC-0016 INT-76: the halt flag is emitted only when set, so a
+    # tainting marker keeps its four-argument shape.
+    if s.unHalt:
+      newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
+              newLit(s.unMarker), newLit(true))
+    else:
+      newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
+              newLit(s.unMarker))
   of isUnsafeCast:
     newCall(bindSym"mkUnsafeCast", newLit(s.ucReason), newLit(s.ucMarker))
 
@@ -1586,6 +1592,33 @@ proc declineMarker(ctx: ParseCtx; kind: SymexErrorKind; reason: string): IRStmt 
   mkUnsupported(kind, reason, ctx.nextMarker())
 
 proc isNilPtrCast(n: NimNode): bool   ## RFC-0016 W3-z P16 (defined with unsafeCastReason)
+
+proc siteMsg*(n: NimNode, note: string): string   ## fwd decl (RFC-0016 INT-76)
+
+const longDoubleReason = "`c_longdouble` is the C target's `long double` " &
+  "(x87 80-bit extended under gcc and clang on x86-64, a 64-bit double " &
+  "under MSVC and on some ARM targets): its precision is the target's, " &
+  "which the walk does not model"
+
+proc declineLongDouble(ctx: ParseCtx; site: NimNode; what: string): IRStmt =
+  ## RFC-0016 INT-76. A `c_longdouble` value: its type classifies as the
+  ## `__unsupported:c_longdouble` placeholder (K2c STY-06, the `float128`
+  ## type-class row), so it has no sort to compute in. Every site that makes
+  ## one (a declared local, an expression of the type) declines with the
+  ## parameter site's kind, `feUnsupportedParamType`, and the marker HALTS
+  ## the path: nothing is bound, so no later comparison or arithmetic can
+  ## meet a value of the wrong sort (it was a `weInternalWalkerFault` in
+  ## `eqBV`/`cmpBV`), and no float64 stand-in computes a trusted answer the
+  ## target may not give (an initialised local was walked as an IEEE
+  ## double; Nim's arithmetic is a double's, but a conversion from an
+  ## integer stores the C value, exact in x87's 64-bit mantissa).
+  let m = ctx.nextMarker()
+  ctx.parseErrors.add SymexErrorInfo(kind: feUnsupportedParamType,
+    severity: declineSeverity,
+    msg: siteMsg(site, what & ": " & longDoubleReason & " (feUnsupportedParamType)"),
+    scope: siteAnchored(m))
+  mkUnsupported(feUnsupportedParamType, what & ": " & longDoubleReason, m,
+                halt = true)
 
 proc declineUnsafeCast(ctx: ParseCtx; msg, reason: string): IRStmt =
   ## RFC-0005 S8. `heUnsafeCast`'s `declineAtSite`: the marker is the
@@ -11775,6 +11808,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           break
   if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
     return mkVar(byRefName(n))
+  # RFC-0016 INT-76: a `c_longdouble` value declines and halts the path
+  # (`declineLongDouble`); the float stand-in returned is never evaluated.
+  if isLongDoubleTyped(n):
+    preamble.add ctx.declineLongDouble(n, "a `c_longdouble` value")
+    return mkFloatLit(0.0)
   # RFC-0005 S8bu: an `openArray` actual is the seq it views.
   if isToOpenArray(n) or
      (n.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and n.len == 2 and
@@ -22602,6 +22640,15 @@ proc parseStmtInner(n: NimNode,
             "a type pragma the object model does not represent")
           break
       let valNode = id[id.len - 1]
+      # RFC-0016 INT-76: a `c_longdouble` local, initialised or not, declines
+      # where its sort would be chosen and halts the path.
+      var longDouble = false
+      for j in 0 ..< id.len - 2:
+        if not longDouble and isLongDoubleTyped(id[j]):
+          stmts.add ctx.declineLongDouble(id[j],
+            "the local `" & id[j].strVal & "` of type `c_longdouble`")
+          longDouble = true
+      if longDouble: continue
       # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe POINTER MATERIALISATION RHS
       # (`cast[ptr T](...)`, `addr x`, `unsafeAddr x`) is unmodelable in the
       # logical-heap model — classify `heUnsafeCast` (sevError) so the verdict
@@ -24753,7 +24800,7 @@ proc collectEmittedAnchors(n: NimNode; markers: var HashSet[int];
       keys.incl n.strVal
   of nnkCall:
     let nm = callNameOf(n)
-    if nm == "mkUnsupported" and n.len == 4 and
+    if nm == "mkUnsupported" and n.len in {4, 5} and   # 5: INT-76's halt
        n[3].kind in nnkIntLit..nnkInt64Lit:
       markers.incl int(n[3].intVal)
     elif nm == "mkUnsafeCast" and n.len == 3 and n[2].kind in nnkIntLit..nnkInt64Lit:

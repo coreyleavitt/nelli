@@ -843,8 +843,17 @@ const renderAsChoicesVersion* = "12"
   ##   it is decided (`closureEq`), a call through nil declines
   ##   `ceUnsupportedHof`. Verdicts change from `sxUnknown` to exact. No key
   ##   bytes change.
+  ## - RFC-0016 INT-76 (434->435): a `c_longdouble` value (a declared local,
+  ##   initialised or not, or an expression of the type) declines
+  ##   `feUnsupportedParamType` and halts the path (`declineLongDouble`, a
+  ##   halting `isUnsupported`, `unHalt`); its reads were a
+  ##   `weInternalWalkerFault` (`eqBV`/`cmpBV`, a field's `FieldDefect`), and
+  ##   an initialised local was walked as an IEEE double, a trusted answer
+  ##   on a type whose value is the C target's. Verdicts change from a fault or a trusted
+  ##   answer to `sxUnknown`. Key bytes change for a halting marker only
+  ##   (`;halt` in its `St<Un:...>`).
 
-const symexWalkerVersion* = "434"
+const symexWalkerVersion* = "435"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7188,7 +7197,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # the reason -- once S4-S6 reclassify, the kind alone decides the node's
     # `DegradeClass` (and so the verdict), so two nodes differing only in
     # kind must never share a cache entry.
-    "St<Un:" & $s.unKind & ";" & s.reason.escape & ">"
+    "St<Un:" & $s.unKind & ";" & s.reason.escape &
+      (if s.unHalt: ";halt" else: "") & ">"   # RFC-0016 INT-76
   of isUndefined:
     "St<Ud:" & $s.udKind & ";" & s.udSite.escape & ">"
   of isUnsafeCast:

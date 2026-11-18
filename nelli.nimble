@@ -1797,6 +1797,8 @@ task test, "Run the test suite":
             "tsymex_0016_int67_borrowdot",
             "tsymex_0016_int69_undefinedaxis",
             "tsymex_0016_int70_templatetype",
+            # RFC-0016 INT-76: a `c_longdouble` value declines, never faults.
+            "tsymex_0016_int76_longdouble",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

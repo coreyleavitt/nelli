@@ -157,6 +157,20 @@ proc isBuiltinTypeHead*(head: NimNode; names: openArray[string]): bool =
     return false
   head.kind == nnkIdent or isStdlibTypeSym(head)
 
+proc isLongDoubleTyped*(n: NimNode): bool =
+  ## RFC-0016 INT-76. True iff the typed node `n` (an expression, or a
+  ## declared name) has the type `c_longdouble`: the C target's `long double`,
+  ## which the compiler aliases to `float64`, so its `typeKind` is a float's
+  ## and only the type head names it. A node with no type is not.
+  if n == nil or n.kind in {nnkEmpty, nnkIdent} or
+     n.typeKind notin {ntyFloat, ntyFloat64}:
+    return false
+  var t: NimNode
+  try: t = n.getTypeInst
+  except CatchableError: return false
+  if t != nil and t.kind == nnkVarTy and t.len == 1: t = t[0]
+  t != nil and isBuiltinTypeHead(t, ["c_longdouble", "clongdouble"])
+
 proc typeSpelling*(t: NimNode): string =
   ## RFC-0005 S8d. The spelling a name-keyed type table (the parser's
   ## `intTyNames`/`fltTyNames`, the `low`/`high` fold, `"bool"`, the

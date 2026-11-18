@@ -10,6 +10,7 @@
 ## changes — nothing with an uninitialized var could be analyzed before).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- the chapulin structural case: uninit var, assigned, then gated ----------
 proc sutAssignThenGate(n: int) =
@@ -48,21 +49,21 @@ proc sutParseValidate(s: string) =
 
 suite "symex: uninitialized var zero-init (nnkEmpty)":
   test "U1: `var bs: int` assigned then gated → sxSat":
-    let r = symexFind(sutAssignThenGate, tLabel("hit"))
+    let r = pinFind(sutAssignThenGate, tLabel("hit"))
     check r.status == sxSat
 
   test "U2: uninit int read before assign sees 0 → sxSat":
-    let r = symexFind(sutReadZeroInt, tLabel("zero"))
+    let r = pinFind(sutReadZeroInt, tLabel("zero"))
     check r.status == sxSat
 
   test "U3: SOUNDNESS — unassigned int can never be 7 → sxUnsat":
-    let r = symexFind(sutUnassignedNeverSeven, tLabel("seven"))
+    let r = pinFind(sutUnassignedNeverSeven, tLabel("seven"))
     check r.status == sxUnsat
 
   test "U4: uninit bool is false → sxSat":
-    let r = symexFind(sutReadZeroBool, tLabel("false"))
+    let r = pinFind(sutReadZeroBool, tLabel("false"))
     check r.status == sxSat
 
   test "U5: uninit var in a parseInt/try-except validator → sxSat (got 512)":
-    let r = symexFind(sutParseValidate, tLabel("got512"))
+    let r = pinFind(sutParseValidate, tLabel("got512"))
     check r.status == sxSat

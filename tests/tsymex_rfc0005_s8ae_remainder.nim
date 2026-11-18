@@ -35,6 +35,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -82,34 +83,34 @@ proc concatLong(s, t: string) =
 suite "S8ae (1): UNSAT through the theory's relations is decided":
 
   test "find > 200 and notin: sxUnsat, not a maxSeqLen decline":
-    let r = symexFind(colonPastCap, tLabel("s8ae_find_notin"))
+    let r = pinFind(colonPastCap, tLabel("s8ae_find_notin"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "startsWith and a late find of the prefix: sxUnsat":
-    let r = symexFind(prefixFoundLate, tLabel("s8ae_prefix_find"))
+    let r = pinFind(prefixFoundLate, tLabel("s8ae_prefix_find"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "a slice equal to the needle and a late find of it: sxUnsat":
-    let r = symexFind(pieceFoundLate, tLabel("s8ae_piece_find"))
+    let r = pinFind(pieceFoundLate, tLabel("s8ae_piece_find"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "a byte equal to the needle and notin: sxUnsat":
     # `s[140]` is past the 128 cap: the cap refutes it too, so before this
     # slice it was a decline.
-    let r = symexFind(byteNotContained, tLabel("s8ae_byte_notin"))
+    let r = pinFind(byteNotContained, tLabel("s8ae_byte_notin"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "companion: find > 5 and in is still sxSat":
-    let r = symexFind(colonFoundEarly, tLabel("s8ae_found_early"))
+    let r = pinFind(colonFoundEarly, tLabel("s8ae_found_early"))
     checkpoint show(r.errors)
     check r.status == sxSat
 
   test "companion: a real >128-byte witness stays a maxSeqLen decline":
-    let r = symexFind(concatLong, tLabel("s8ae_concat_long"))
+    let r = pinFind(concatLong, tLabel("s8ae_concat_long"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     var capped = false

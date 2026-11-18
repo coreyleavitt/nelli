@@ -53,6 +53,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 type ScanErrorB2Reinterpret = object of CatchableError
 
@@ -187,51 +188,51 @@ proc reinterpretBoundProof(x: int32) =
 suite "symex round-6 B2 — widening, call syntax":
 
   test "B2-1: uint16(b) shl 8 reaches the target value (SAT)":
-    let r = symexFind(widenCallSyntax, tLabel("widen_call_sat"))
+    let r = pinFind(widenCallSyntax, tLabel("widen_call_sat"))
     check r.status == sxSat
 
   test "B2-2: uint16(b) shl 8 never exceeds 0xFF00 for any b (UNSAT companion)":
-    let r = symexFind(widenCallSyntaxBoundProof, tAssertionViolation())
+    let r = pinFind(widenCallSyntaxBoundProof, tAssertionViolation())
     check r.status == sxUnsat
 
 suite "symex round-6 B2 — widening, method-call syntax":
 
   test "B2-3: b.uint16 shl 8 reaches the target value (SAT)":
-    let r = symexFind(widenMethodSyntax, tLabel("widen_method_sat"))
+    let r = pinFind(widenMethodSyntax, tLabel("widen_method_sat"))
     check r.status == sxSat
 
   test "B2-4: b.uint16 shl 8 never exceeds 0xFF00 for any b (UNSAT companion)":
-    let r = symexFind(widenMethodSyntaxBoundProof, tAssertionViolation())
+    let r = pinFind(widenMethodSyntaxBoundProof, tAssertionViolation())
     check r.status == sxUnsat
 
 suite "symex round-6 B2 — widening, byte-typed source (rider)":
 
   test "B2-11: uint16(b) shl 8 with b: byte reaches the target value (SAT — the RFC's actual protocol.nim:93 shape)":
-    let r = symexFind(widenCallSyntaxByteSource, tLabel("widen_byte_source_sat"))
+    let r = pinFind(widenCallSyntaxByteSource, tLabel("widen_byte_source_sat"))
     check r.status == sxSat
 
   test "B2-12: uint16(b) shl 8 with b: byte never exceeds 0xFF00 (UNSAT companion)":
-    let r = symexFind(widenCallSyntaxByteSourceBoundProof, tAssertionViolation())
+    let r = pinFind(widenCallSyntaxByteSourceBoundProof, tAssertionViolation())
     check r.status == sxUnsat
 
 suite "symex round-6 B2 — probeProto literal-sibling pin":
 
   test "B2-5: uint16(b) == <literal> lowers the literal at the widened width (SAT)":
-    let r = symexFind(probeProtoLiteralSibling, tLabel("proto_literal_sibling_sat"))
+    let r = pinFind(probeProtoLiteralSibling, tLabel("proto_literal_sibling_sat"))
     check r.status == sxSat
 
 suite "symex round-6 B2 — signedness keyed on the SOURCE value":
 
   test "B2-6: unsigned source zero-extends into a signed target (UNSAT companion, no false verdict)":
-    let r = symexFind(widenZeroExtendUnsignedSource, tAssertionViolation())
+    let r = pinFind(widenZeroExtendUnsignedSource, tAssertionViolation())
     check r.status == sxUnsat
 
   test "B2-7: signed source sign-extends into a signed target (UNSAT companion, no false verdict)":
-    let r = symexFind(widenSignExtendSignedSource, tAssertionViolation())
+    let r = pinFind(widenSignExtendSignedSource, tAssertionViolation())
     check r.status == sxUnsat
 
   test "B2-8: signed source sign-extends even into an UNSIGNED target (UNSAT companion)":
-    let r = symexFind(widenSignExtendToUnsignedTarget, tAssertionViolation())
+    let r = pinFind(widenSignExtendToUnsignedTarget, tAssertionViolation())
     check r.status == sxUnsat
 
 suite "symex round-6 B2 — narrowing into an unsigned target (formerly a decline, now modeled)":
@@ -242,13 +243,13 @@ suite "symex round-6 B2 — narrowing into an unsigned target (formerly a declin
   # reachable and the witness's low byte is 42.
 
   test "B2-9: uint8(x) narrowing truncates to the low byte (SAT)":
-    let r = symexFind(narrowingDecline, tLabel("narrow_decline_target"))
+    let r = pinFind(narrowingDecline, tLabel("narrow_decline_target"))
     check r.status == sxSat
     if r.status == sxSat:
       check (r.witness[0] and 0xFF'i32) == 42'i32
 
   test "B2-13: byte(x) narrowing truncates to the low byte (SAT — rider)":
-    let r = symexFind(narrowingDeclineByteTarget, tLabel("narrow_decline_byte_target"))
+    let r = pinFind(narrowingDeclineByteTarget, tLabel("narrow_decline_byte_target"))
     check r.status == sxSat
     if r.status == sxSat:
       check (r.witness[0] and 0xFF'i32) == 42'i32
@@ -256,11 +257,11 @@ suite "symex round-6 B2 — narrowing into an unsigned target (formerly a declin
 suite "symex round-6 A1 — same-width signedness reinterpret (formerly B2-10 decline, now modeled)":
 
   test "B2-14: uint32(x) from int32 reaches the reinterpreted value (SAT)":
-    let r = symexFind(reinterpretSat, tLabel("reinterpret_sat_target"))
+    let r = pinFind(reinterpretSat, tLabel("reinterpret_sat_target"))
     check r.status == sxSat
 
   test "B2-15: -1'i32 reinterprets to 0xFFFFFFFF'u32, not zero/wrap (UNSAT companion, soundness)":
-    let r = symexFind(reinterpretBoundProof, tAssertionViolation())
+    let r = pinFind(reinterpretBoundProof, tAssertionViolation())
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -310,7 +311,7 @@ suite "symex round-6 B2 fix-slice item 2 — lowerConvIntReinterpret's svInt arm
     ## non-negative `q` keeps its value), so the target is `sxSat` with no
     ## decline and a witness Nim itself reaches. Was: `sxUnknown`,
     ## `feUnsupportedOpHavoc` (S6b's scoped decline).
-    let r = symexFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
+    let r = pinFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
     check r.status == sxSat
     check not r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
     if r.status == sxSat:
@@ -320,7 +321,7 @@ suite "symex round-6 B2 fix-slice item 2 — lowerConvIntReinterpret's svInt arm
 
   test "item2-2: the modelled reinterpret never falsely reports sxUnsat":
     ## RFC-0005 S8aa re-pin: was `!= sxSat and != sxUnsat` (the decline).
-    let r = symexFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
+    let r = pinFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
     check r.status != sxUnsat
 
 suite "symex round-6 B2 — walker version pin":

@@ -16,6 +16,7 @@ import std/[unittest, strutils, macros]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/dsl_parser   ## siteMsg unit test — Layer 1 isolation (ADR-0002)
+import ./s8cu_helpers
 
 proc rLimbAboveLowInt32(rLimb: int32) =
   ## The exact v69 fault spelling. Almost every int32 (all but the single
@@ -67,24 +68,24 @@ proc zeroArgHighReached(x: int) =
 suite "symex round-6 A0 — low/high int magics fold at parse time":
 
   test "fix-slice item 1 RED->GREEN: a zero-arg user proc named `high` parses and walks normally (pre-fix: parse-time IndexDefect, whole SUT fails to compile)":
-    let r = symexFind(zeroArgHighReached, tLabel("zero_arg_high_reached"))
+    let r = pinFind(zeroArgHighReached, tLabel("zero_arg_high_reached"))
     check r.status == sxSat
     check r.witness[0] == 42
 
   test "`rLimb > low(int32)` proves reachable with a witness (sxSat)":
-    let r = symexFind(rLimbAboveLowInt32, tLabel("rLimb_above_low"))
+    let r = pinFind(rLimbAboveLowInt32, tLabel("rLimb_above_low"))
     check r.status == sxSat
 
   test "`rLimb < low(int32)` is unreachable (sxUnsat) — the fold is sound":
-    let r = symexFind(rLimbBelowLowInt32, tLabel("rLimb_below_low"))
+    let r = pinFind(rLimbBelowLowInt32, tLabel("rLimb_below_low"))
     check r.status == sxUnsat
 
   test "`rLimb > high(int32)` is unreachable (sxUnsat) — the `high` sibling":
-    let r = symexFind(rLimbAboveHighInt32, tLabel("rLimb_above_high"))
+    let r = pinFind(rLimbAboveHighInt32, tLabel("rLimb_above_high"))
     check r.status == sxUnsat
 
   test "`low(bool)` (non-int-family) stays a classified decline, not a crash":
-    let r = symexFind(lowOnBoolStaysDeclined, tLabel("low_bool_reached"))
+    let r = pinFind(lowOnBoolStaysDeclined, tLabel("low_bool_reached"))
     check r.status == sxUnknown
     var hasClassified = false
     for e in r.errors:
@@ -125,11 +126,11 @@ proc lowOnStringNeverNonzero(s: string) =
 suite "symex round-6 fix-slice item 6 — low(s) on a string folds to the constant 0":
 
   test "item6-1 SAT: low(s) == 0 holds for every string":
-    let r = symexFind(lowOnStringReachesZero, tLabel("low_string_zero_sat"))
+    let r = pinFind(lowOnStringReachesZero, tLabel("low_string_zero_sat"))
     check r.status == sxSat
 
   test "item6-2 UNSAT companion: low(s) != 0 is unreachable — the fold is the exact constant, not a placeholder":
-    let r = symexFind(lowOnStringNeverNonzero, tLabel("low_string_nonzero_unreachable"))
+    let r = pinFind(lowOnStringNeverNonzero, tLabel("low_string_nonzero_unreachable"))
     check r.status == sxUnsat
 
 # ---- siteMsg unit test (ADR-0002 Layer 1 isolation, mirrors

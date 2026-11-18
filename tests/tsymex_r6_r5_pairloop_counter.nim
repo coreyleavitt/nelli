@@ -39,6 +39,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -105,7 +106,7 @@ suite "symex round-6 R5 -- B6 pair-loop counter advance (finding S4)":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00\x00")
       readOptionsSutCounter(s, 0)
-    let r = symexFind(sut, tLabel("correct"))
+    let r = pinFind(sut, tLabel("correct"))
     check r.status == sxSat
 
   test "R5-2: the STALE (pre-loop, unadvanced) i is no longer FALSELY reachable -- sxUnsat (S8k; was an honest sxUnknown)":
@@ -138,7 +139,7 @@ suite "symex round-6 R5 -- B6 pair-loop counter advance (finding S4)":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00\x00")
       readOptionsSutCounter(s, 0)
-    let r = symexFind(sut, tLabel("stale"))
+    let r = pinFind(sut, tLabel("stale"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -152,7 +153,7 @@ suite "symex round-6 R5 -- B6 pair-loop counter advance (finding S4)":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc")
       readOptionsSutCounter(s, 0)
-    let r = symexFind(sut, tRaisedExn("ScanError"))
+    let r = pinFind(sut, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
 # ---------------------------------------------------------------------------
@@ -168,7 +169,7 @@ suite "symex round-6 R5 -- B6 pair-loop counter advance (finding S4)":
       symexAssume(s == "a1\x00b1\x00a2\x00b2\x00a3\x00b3\x00" &
                         "a4\x00b4\x00a5\x00b5\x00a6\x00b6\x00\x00")
       readOptionsSutDone(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
 suite "symex round-6 R5 -- walker version pin":

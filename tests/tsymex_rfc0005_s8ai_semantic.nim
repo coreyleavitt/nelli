@@ -27,6 +27,7 @@
 ## `tsymex_rfc0005_s8ai_semantic_c`. Split so that each part compiles and runs
 ## in under 60 s on the Windows legs (the whole file took 69 s).
 
+import ./s8cu_helpers
 include ./s8ai_helpers
 
 # ---- (1) semantic links: equal through the query's equality classes -------

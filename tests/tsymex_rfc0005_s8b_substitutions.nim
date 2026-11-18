@@ -28,6 +28,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/exn_hierarchy
 import s8ct_platform   ## RFC-0005 S8ct
+import ./s8cu_helpers
 
 proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   for e in errs:
@@ -185,21 +186,21 @@ proc s8bArithNoCatchValue(a, b: int) =
 suite "RFC-0005 S8b (a) -- a bodiless importc callee is an opaque effect, not an empty body":
 
   test "live target through the foreign result: not sxUnsat, and says why":
-    let r = symexFind(s8bImportcLive, tLabel("s8b_importc_live"))
+    let r = pinFind(s8bImportcLive, tLabel("s8b_importc_live"))
     dump(r.errors)
     check r.status != sxUnsat
     check r.status == sxUnknown
     check r.errors.hasKind(feOpaqueCallUnmodelled)
 
   test "the failure is named: the message carries the importc callee":
-    let r = symexFind(s8bImportcLive, tLabel("s8b_importc_live"))
+    let r = pinFind(s8bImportcLive, tLabel("s8b_importc_live"))
     var named = false
     for e in r.errors:
       if e.kind == feOpaqueCallUnmodelled and "s8bCAbs" in e.msg: named = true
     check named
 
   test "statement-position inert foreign call stays a no-op (clean sxSat)":
-    let r = symexFind(s8bImportcInert, tLabel("s8b_importc_inert"))
+    let r = pinFind(s8bImportcInert, tLabel("s8b_importc_inert"))
     dump(r.errors)
     # A re-executed child cannot run a foreign routine's SUT (RFC-0005 S8ct).
     check decidedOrNotMarshallable(r, sxSat)
@@ -207,14 +208,14 @@ suite "RFC-0005 S8b (a) -- a bodiless importc callee is an opaque effect, not an
       check r.witness[0] == 42
 
   test "{.symexTransparent.} importc keeps working (dropped, clean sxSat)":
-    let r = symexFind(s8bImportcTransparent, tLabel("s8b_importc_transparent"))
+    let r = pinFind(s8bImportcTransparent, tLabel("s8b_importc_transparent"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[0] == 42
     check not r.errors.hasKind(feOpaqueCallUnmodelled)
 
   test "{.symexOpaque.} importc keeps its opaque treatment":
-    let r = symexFind(s8bImportcOpaque, tLabel("s8b_importc_opaque"))
+    let r = pinFind(s8bImportcOpaque, tLabel("s8b_importc_opaque"))
     check r.status == sxUnknown
     check r.errors.hasKind(feOpaqueCallUnmodelled)
 
@@ -228,48 +229,48 @@ suite "RFC-0005 S8b (a) -- a bodiless importc callee is an opaque effect, not an
 suite "RFC-0005 S8b (b) -- parseInt follows parseutils.rawParseInt":
 
   test "\"+5\" parses to 5: the target is reachable (clean sxSat)":
-    let r = symexFind(s8bParsePlus, tLabel("s8b_parse_plus"))
+    let r = pinFind(s8bParsePlus, tLabel("s8b_parse_plus"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[0] == "+5"
 
   test "\"-0\" parses to 0":
-    let r = symexFind(s8bParseNegZero, tLabel("s8b_parse_negzero"))
+    let r = pinFind(s8bParseNegZero, tLabel("s8b_parse_negzero"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[0].len == 2
     check parseInt(r.witness[0]) == 0
 
   test "2^63 raises ValueError (out of range), a clean sxRaised":
-    let r = symexFind(s8bParseOverflow, tRaisedExn("ValueError"))
+    let r = pinFind(s8bParseOverflow, tRaisedExn("ValueError"))
     dump(r.errors)
     check r.status == sxRaised
     check r.raisedWitness[0] == "9223372036854775808"
 
   test "-2^63 is in range: parsed, reachable":
-    let r = symexFind(s8bParseLowInt, tLabel("s8b_parse_lowint"))
+    let r = pinFind(s8bParseLowInt, tLabel("s8b_parse_lowint"))
     dump(r.errors)
     check r.status == sxSat
 
   test "2^63 - 1 is in range: parsed, reachable":
-    let r = symexFind(s8bParseHighInt, tLabel("s8b_parse_highint"))
+    let r = pinFind(s8bParseHighInt, tLabel("s8b_parse_highint"))
     dump(r.errors)
     check r.status == sxSat
 
   test "a lone sign raises, clean":
-    let r = symexFind(s8bParseBareSign, tRaisedExn("ValueError"))
+    let r = pinFind(s8bParseBareSign, tRaisedExn("ValueError"))
     check r.status == sxRaised
 
   test "a double sign raises, clean":
-    let r = symexFind(s8bParseDoubleSign, tRaisedExn("ValueError"))
+    let r = pinFind(s8bParseDoubleSign, tRaisedExn("ValueError"))
     check r.status == sxRaised
 
   test "leading whitespace raises, clean":
-    let r = symexFind(s8bParseSpace, tRaisedExn("ValueError"))
+    let r = pinFind(s8bParseSpace, tRaisedExn("ValueError"))
     check r.status == sxRaised
 
   test "\"1_0\" continues (replay-gated fresh value): never a false sxUnsat":
-    let r = symexFind(s8bParseUnderscoreLive, tLabel("s8b_parse_underscore"))
+    let r = pinFind(s8bParseUnderscoreLive, tLabel("s8b_parse_underscore"))
     dump(r.errors)
     checkpoint "status: " & $r.status
     check r.status != sxUnsat
@@ -292,30 +293,30 @@ suite "RFC-0005 S8b (b) -- parseInt follows parseutils.rawParseInt":
 suite "RFC-0005 S8b (c) -- except ArithmeticDefect catches its subtypes":
 
   test "DivByZeroDefect is caught by `except ArithmeticDefect` (was a false sxRaised)":
-    let r = symexFind(s8bArithDivCaught, tLabel("s8b_arith_div_caught"))
+    let r = pinFind(s8bArithDivCaught, tLabel("s8b_arith_div_caught"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[1] == 0
 
   test "OverflowDefect is caught by `except ArithmeticDefect`":
-    let r = symexFind(s8bArithOvfCaught, tLabel("s8b_arith_ovf_caught"))
+    let r = pinFind(s8bArithOvfCaught, tLabel("s8b_arith_ovf_caught"))
     dump(r.errors)
     check r.status == sxSat
 
   test "a user alias of ArithmeticDefect catches DivByZeroDefect":
-    let r = symexFind(s8bArithUserAlias, tLabel("s8b_arith_user_alias"))
+    let r = pinFind(s8bArithUserAlias, tLabel("s8b_arith_user_alias"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[1] == 0
 
   test "system's deprecated alias (DivByZeroError) catches DivByZeroDefect":
-    let r = symexFind(s8bArithDeprecatedAlias, tLabel("s8b_arith_deprecated_alias"))
+    let r = pinFind(s8bArithDeprecatedAlias, tLabel("s8b_arith_deprecated_alias"))
     dump(r.errors)
     check r.status == sxSat
     check r.witness[1] == 0
 
   test "`except CatchableError` does not catch a DivByZeroDefect":
-    let r = symexFind(s8bArithNoCatchValue, tLabel("s8b_arith_catchable"))
+    let r = pinFind(s8bArithNoCatchValue, tLabel("s8b_arith_catchable"))
     check r.status != sxSat
 
 # ---- the audit: the table against the compiler's own source -----------------

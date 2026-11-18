@@ -57,6 +57,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -84,13 +85,13 @@ suite "S8aq (1): step 1c's path does not depend on step 1 reaching UNSAT":
     # capped solve with the full theory) is cancelled (zsUnknown), so step
     # 1c -- gated on `r1 == zsUnsat` -- was never reached, and step 3 (the
     # uncapped query) ran out too: "was not decided".
-    let r = symexFind(rfindBeforePiece, tLabel("s8aq_rfind_before_piece"), tight())
+    let r = pinFind(rfindBeforePiece, tLabel("s8aq_rfind_before_piece"), tight())
     checkpoint show(r.errors)
     check r.status == sxUnsat
     for e in r.errors: check "was not decided" notin e.msg
 
   test "end to end: ':' in s and rfind == -1 is decided though step 1 is cancelled":
-    let r = symexFind(rfindNotinButFound, tLabel("s8aq_rfind_notin_found"), tight())
+    let r = pinFind(rfindNotinButFound, tLabel("s8aq_rfind_notin_found"), tight())
     checkpoint show(r.errors)
     check r.status == sxUnsat
     for e in r.errors: check "was not decided" notin e.msg
@@ -246,13 +247,13 @@ suite "S8aq (2): the dropped link -- emitted since RFC-0005 S8aw":
     # the same link for the native `str.indexof` / `seq.last_indexof` terms
     # that remain (a query built directly, as the stepOneC test above does);
     # a SUT's find/rfind no longer produces those terms.
-    let r = symexFind(foundExceedsLast, tLabel("s8aq_found_exceeds_last"))
+    let r = pinFind(foundExceedsLast, tLabel("s8aq_found_exceeds_last"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check r.errors.len == 0
 
   test "companion: a found index at or before L is reachable":
-    let r = symexFind(foundAtOrBeforeLast, tLabel("s8aq_found_at_or_before_last"))
+    let r = pinFind(foundAtOrBeforeLast, tLabel("s8aq_found_at_or_before_last"))
     checkpoint show(r.errors)
     check r.status == sxSat
 
@@ -290,7 +291,7 @@ suite "S8aq (3): str.replace_all is reachable (this suite's -d:z3WithSeqReplaceA
   # accept either, keyed off whether `seZ3VersionMissing` actually fired.
 
   test "end to end: every occurrence is replaced (the real op, not a free symbol)":
-    let r = symexFind(replaceAllCorrect, tLabel("s8aq_replace_all_correct"))
+    let r = pinFind(replaceAllCorrect, tLabel("s8aq_replace_all_correct"))
     checkpoint show(r.errors)
     if hasKind(r.errors, seZ3VersionMissing):
       check r.status == sxSat  # declined: a free fresh symbol can equal "barbar" too
@@ -308,7 +309,7 @@ suite "S8aq (3): str.replace_all is reachable (this suite's -d:z3WithSeqReplaceA
     # yields "barbar" (never "barfoo"), and refutes the candidate
     # (`feReplayRefuted`): a confirmed model gap, `sxUnknown`, never a
     # wrong `sxSat`.
-    let r = symexFind(replaceFirstOnlyUnreachable, tLabel("s8aq_replace_first_only"))
+    let r = pinFind(replaceFirstOnlyUnreachable, tLabel("s8aq_replace_first_only"))
     checkpoint show(r.errors)
     if hasKind(r.errors, seZ3VersionMissing):
       check r.status == sxUnknown
@@ -320,7 +321,7 @@ suite "S8aq (3): str.replace_all is reachable (this suite's -d:z3WithSeqReplaceA
     # Degraded: same shape as above -- the real `strutils.replace` leaves
     # a string with no ":" unchanged, so a fresh stand-in claiming
     # inequality is replay-refuted (`sxUnknown`), never confirmed SAT.
-    let r = symexFind(replaceGrowthAndRoundtrip,
+    let r = pinFind(replaceGrowthAndRoundtrip,
                       tLabel("s8aq_replace_no_occurrence_unreachable"))
     checkpoint show(r.errors)
     if hasKind(r.errors, seZ3VersionMissing):

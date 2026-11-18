@@ -50,6 +50,7 @@ import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
 import nelli/smt/[string_lower_support]   ## R2-3: the leaves are no longer re-exported by the facade
+import ./s8cu_helpers
 
 proc show(errs: openArray[SymexErrorInfo]): string =
   for e in errs: result.add $e.kind & ": " & e.msg & "\n"
@@ -216,7 +217,7 @@ proc b4Caller(s: string) =
 suite "S8ag (2): each closed form of the idiom lowers through the split":
 
   test "Q1: the scan's find is a split; sxSat, the witness has ':' at 3":
-    let r = symexFind(q1ScanTo, tLabel("s8ag_q1"))
+    let r = pinFind(q1ScanTo, tLabel("s8ag_q1"))
     checkpoint show(r.errors)
     check indexSplits.len > 0
     check r.status == sxSat
@@ -225,7 +226,7 @@ suite "S8ag (2): each closed form of the idiom lowers through the split":
       check s.len > 5 and s.find(':') == 3
 
   test "B3: the early-return scan's find is a split; sxSat":
-    let r = symexFind(b3Caller, tLabel("s8ag_b3"))
+    let r = pinFind(b3Caller, tLabel("s8ag_b3"))
     checkpoint show(r.errors)
     check indexSplits.len > 0
     check r.status == sxSat
@@ -233,7 +234,7 @@ suite "S8ag (2): each closed form of the idiom lowers through the split":
       check r.witness[0].find(':') == 2
 
   test "B4: two chained readCStrings are splits with a chain; sxSat":
-    let r = symexFind(b4Caller, tLabel("s8ag_b4"))
+    let r = pinFind(b4Caller, tLabel("s8ag_b4"))
     checkpoint show(r.errors)
     check indexSplits.len >= 2
     check r.status == sxSat

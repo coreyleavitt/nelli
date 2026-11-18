@@ -41,6 +41,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -79,7 +80,7 @@ proc sutScanCounterOverflowReachable(s: string, start: int) =
 suite "symex round-6 R3 — tracer: promoted scan counter forks OverflowDefect":
 
   test "R3-1: q + high(int) overflows int64 for the found branch (sxRaised, not the pre-fix false sxUnsat)":
-    let r = symexFind(sutScanCounterOverflowReachable, tLabel("scan_overflow_reachable"))
+    let r = pinFind(sutScanCounterOverflowReachable, tLabel("scan_overflow_reachable"))
     check r.status == sxRaised
     check r.raisedTypeId == "OverflowDefect"
 
@@ -101,7 +102,7 @@ proc sutScanCounterNoOverflowUnsat(s: string, start: int) =
 suite "symex round-6 R3 — UNSAT companion: bounded counter cannot overflow":
 
   test "R3-2: q + 1 < q is impossible when q is bounded well within int64 (sxUnsat)":
-    let r = symexFind(sutScanCounterNoOverflowUnsat, tLabel("scan_no_overflow_impossible"))
+    let r = pinFind(sutScanCounterNoOverflowUnsat, tLabel("scan_no_overflow_impossible"))
     check r.status == sxUnsat
 
 # =============================================================================
@@ -157,13 +158,13 @@ proc sutLiteralArgNoOverflowUnsat(s: string) =
 suite "symex round-6 R3 — literal argument feeding an isIntOffset formal":
 
   test "R3-3a: q + high(int) overflows int64 via a literal `0` argument (sxRaised)":
-    let r = symexFind(sutLiteralArgOverflowReachable,
+    let r = pinFind(sutLiteralArgOverflowReachable,
                        tLabel("literal_arg_overflow_reachable"))
     check r.status == sxRaised
     check r.raisedTypeId == "OverflowDefect"
 
   test "R3-3b UNSAT companion: bounded counter via a literal argument cannot overflow (sxUnsat)":
-    let r = symexFind(sutLiteralArgNoOverflowUnsat,
+    let r = pinFind(sutLiteralArgNoOverflowUnsat,
                        tLabel("literal_arg_no_overflow_impossible"))
     check r.status == sxUnsat
 
@@ -179,7 +180,7 @@ proc wrapNeededR3(x: int8) =
 suite "symex round-6 R3 — regression: non-promoted BV overflow forking unchanged":
 
   test "R3-4: plain int8 BV overflow still forks and reports the exact witness (sxRaised)":
-    let r = symexFind(wrapNeededR3, tLabel("bv_regression_wrap"))
+    let r = pinFind(wrapNeededR3, tLabel("bv_regression_wrap"))
     check r.status == sxRaised
     check r.raisedTypeId == "OverflowDefect"
     check r.raisedWitness[0] == 127
@@ -209,13 +210,13 @@ proc sutMixedReconcileNoOverflowUnsat(s: string, start: int, m: int) =
 suite "symex round-6 R3 — mixed svInt/svBV operand overflow forking (reconcileInt)":
 
   test "R3-5a: m + q overflows int64 for m near high(int) (sxRaised)":
-    let r = symexFind(sutMixedReconcileOverflowReachable,
+    let r = pinFind(sutMixedReconcileOverflowReachable,
                        tLabel("mixed_reconcile_overflow_reachable"))
     check r.status == sxRaised
     check r.raisedTypeId == "OverflowDefect"
 
   test "R3-5b UNSAT companion: both operands bounded well within int64 (sxUnsat)":
-    let r = symexFind(sutMixedReconcileNoOverflowUnsat,
+    let r = pinFind(sutMixedReconcileNoOverflowUnsat,
                        tLabel("mixed_reconcile_no_overflow_impossible"))
     check r.status == sxUnsat
 

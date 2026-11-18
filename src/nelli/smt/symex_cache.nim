@@ -392,6 +392,15 @@ proc loadSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
     errors.add "loadSymexNotesImpl: " & $e.name & ": " & e.msg
     result = (hints: @[], diagnostics: @[], undefined: @[])
 
+func replayedUnkeyed*(prog: SymexProgram; s: Soundness): bool =
+  ## RFC-0016 INT-31 (W-18). A claim a replay settled (`rsConfirmed`,
+  ## `rsUnconfirmed`, `witnessUnsafe`) is a fact about every body the replay
+  ## ran. Where the key cannot see one of them (`SymexProgram.implOpen`: a
+  ## foreign body, a proc variable's target), a stored claim would be served
+  ## after that body changed: not stored, and the next run replays again.
+  prog.implOpen.len > 0 and
+    (s.replay in {rsConfirmed, rsUnconfirmed} or s.witnessUnsafe)
+
 proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
                            finding: SymexFinding,
@@ -417,6 +426,7 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
   # a reason of the run is not stored as unconfirmed for good. Read off the
   # finding (review R1-07), never off the thread.
   if not finding.soundness.cacheable: return false
+  if replayedUnkeyed(prog, finding.soundness): return false   # INT-31
   if not metaReady(db, "saveSymexWitnessImpl", errors): return false
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
@@ -648,6 +658,7 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   # RFC-0005 0.9.1 (WA-7, WA-9): as `saveSymexWitnessImpl`.
   for raw in found:
     if not raw.soundness.cacheable: return false
+    if replayedUnkeyed(prog, raw.soundness): return false   # INT-31
   if not metaReady(db, "saveSymexRaisedImpl", errors): return false
   let baseKey = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),

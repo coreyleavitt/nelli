@@ -1475,7 +1475,7 @@ table = "5.8c"
 title = "Cache-key coverage: `--opt`, `--cc`, `--cpu` and `--os` are not in the `\\|bf=` segment; a `{.push.}` inside `fn` itself is invisible to it (covered by the `feCheckOption` decline, worth a test) Includes W-18: the `;impl=` digest holes (importc/dynlib bodies, override callees, proc-value targets, `lib/`; `docs/migration/0.9.1.md:264-273`). The `\\|bf=` half is closed by K5a."
 class = "soundness (key coverage); not compared against `main`"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Part 2 (branch `rfc-0016-w4rvlows-b`, walker 406): the `importc` body hole is fixed: a program reaching a body the key cannot see (`implOpen`: a foreign body, a proc variable's target) stores no replay-settled claim (RED: a lossy witness confirmed against one C body was served, as safe, to a SUT whose C body exits). Pinned without a change: a `let` proc value's routine and an override's callees are keyed; the walk declines a call through a `var` proc value and a method whose overrides cannot be listed, so no claim is made; a push inside `fn` makes no stale claim (`tsymex_0016_int31_keyholes`). Left: the `lib/` hole (keyed only by `nim=`)"
 source = "0005 review R2-16, R2-20, R3-16"
 cells = []
 
@@ -1495,7 +1495,7 @@ table = "5.8c"
 title = "Liveness on the fuzzer path: `ConcolicCollectResult.annotationViolations` has no reader; `saveSecondary` is unguarded, so the new `DbError` escapes `forAll`; the concolic flip solve lacks `maxSeqLen`/`seqQueryRLimit` and the theory facts `trySolve` adds Includes PRC-25."
 class = "crash (R1-26) and precision (R1-27); not compared against `main`"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Part 2 (branch `rfc-0016-w4rvlows-b`): `saveSecondary` is guarded: its `DbError` goes to `Report.dbErrors` and ends a `strictDb` run with a report (RED: it escaped `forAll`; `tsymex_0016_int33_savesecondary`). The `annotationViolations` reader was wired by K8-0 (`5bac0a1f`, `tfuzzconcolicannotation`). Left: the flip solve's `maxSeqLen`/`seqQueryRLimit` caps and theory facts"
 source = "0005 review R1-25, R1-26, R1-27"
 cells = []
 

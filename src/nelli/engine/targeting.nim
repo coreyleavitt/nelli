@@ -172,8 +172,8 @@ proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
   ## callback. A falsification found during the climb or SA is written
   ## straight to `state.output.rawFalsification` and the phase returns
   ## `pcContinue` so `shrinkPhase` processes it, exactly like
-  ## `randomPhase` does. This phase never terminates the pipeline
-  ## itself (`pcTerminate`).
+  ## `randomPhase` does. It terminates the pipeline itself (`pcTerminate`)
+  ## only when the secondary-corpus save fails under `strictDb` (INT-33).
   ##
   ## Self-gates: skip if a prior phase already falsified.
   if state.output.rawFalsification.isSome: return pcContinue
@@ -387,7 +387,22 @@ proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
         if v > summary: summary = v
       if summary == NegInf: summary = 0.0
       batch.add (choices: entry.choices, score: summary, scores: entry.scores)
-    state.spec.db.saveSecondary(settings.testId, batch)
+    # RFC-0016 INT-33 (R1-26): guarded like every other write of `forAll`. A
+    # `DbError` (a read-only or failing backend) is reported, and with
+    # `strictDb` ends the run with a report; it never escapes `forAll`.
+    try:
+      state.spec.db.saveSecondary(settings.testId, batch)
+    except DbError as e:
+      state.acc.dbErrors.add("saveSecondary: " & e.msg)
+      if settings.strictDb:
+        state.output.finalReport = some(Report[T](
+          outcome: otFalsified, examples: state.acc.examplesDone,
+          message: "DB: saveSecondary: " & e.msg,
+          seed: settings.seed,
+          events: snapshotEvents(),
+          printEvents: settings.printEvents,
+          dbErrors: state.acc.dbErrors))
+        return pcTerminate
 
   pcContinue
 

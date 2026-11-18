@@ -819,8 +819,14 @@ const renderAsChoicesVersion* = "12"
   ##   crash; a value nested past `wireDepthLimit` declines where it was
   ##   handed over (or overflowed a stack). A cached crash or claim of those
   ##   is stale. No key bytes change.
+  ## - RFC-0016 W4 rv0005-lows part 2 (404->406; 405 is reserved): a claim a
+  ##   replay settled for a program reaching a body the key cannot see (a
+  ##   foreign `importc` body, a proc variable's target; `implOpen`) is no
+  ##   longer stored (INT-31, W-18): such a stored claim was served after
+  ##   that body changed. Entries an earlier run stored for such a program
+  ##   are stale. No key bytes change.
 
-const symexWalkerVersion* = "404"
+const symexWalkerVersion* = "406"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

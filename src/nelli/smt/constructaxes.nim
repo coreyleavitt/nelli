@@ -136,6 +136,20 @@ func constructRows(): seq[ConstructKey] =
   result.add declines(some(feOpaqueCallUnmodelled), ["signals/handler"],
     "a signal handler is registered through a foreign call the walk cannot " &
     "model")
+  # --- cache/ and db/: what the verdict cache serves and what `forAll` does
+  # with a failing database (RFC-0016 INT-31, INT-33). Not a verdict the walk
+  # gives; each stays as fixed (`pinNever`).
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/key/impl"], none(SymexErrorKind),
+    "a claim a replay settled is never served after a body the key cannot " &
+    "see changes: a foreign body or a proc variable's target keeps it out of " &
+    "the cache, and the walk declines what else it cannot read (INT-31)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["db/secondary/guard"], none(SymexErrorKind),
+    "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
+    "`strictDb` run with a report), never raised out of `forAll` (INT-33)",
+    iNever, nrByDesign)
   # --- replay/: the replay child and its wire (RFC-0016 INT-28..INT-30). Not a
   # verdict the walk gives: how the process that confirms a witness behaves.
   # Each stays as hardened (`pinNever`, the host's native fact).

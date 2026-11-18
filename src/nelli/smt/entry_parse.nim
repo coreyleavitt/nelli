@@ -136,7 +136,9 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
   let uxhExpr = p.userExnHierarchyNimNode
   let peExpr = p.parseErrorsNimNode
   let avExpr = p.annotationViolationsNimNode
-  let digest = newLit(implDigest(fn))
+  let ik = implKey(fn)
+  let digest = newLit(ik.digest)
+  let open = newLit(ik.open)
   # RFC-0016 D1 (stack): the IR is built in a proc of its own. Inline, every
   # temporary of every IR node lands in the CALLER's frame, and a module top
   # level with many entry calls is one C function (`NimMainModule`); an MSVC
@@ -157,7 +159,7 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
         SymexProgram(params: `paramsExpr`, body: `bodyExpr`, procs: `procsExpr`,
                      retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
                      parseErrors: `peExpr`, annotationViolations: `avExpr`,
-                     implDigest: `digest`)
+                     implDigest: `digest`, implOpen: `open`)
       var `progSym` = `build`()
       `progSym`.globals = `glExpr`
       `progSym`

@@ -28,7 +28,17 @@
 ##   library code behind it is not;
 ## - the overrides of a method `fn` calls, which no macro can list: those the
 ##   walk dispatches over are in the IR, their own callees are not followed;
-## - the target of a call through a proc value.
+## - the target of a call through a proc value held in a module-level `var`.
+##
+## RFC-0016 INT-31 (W-18): what is not keyed is reported (`ImplKey.open`), and
+## the cache does not store a claim a replay settled for such a program
+## (`symex_cache.replayedUnkeyed`): a replay ran a body the key cannot see, so
+## the next run, whose body may differ, replays again. The walk already
+## declines a fresh-symbol read past such a body (`feGlobalRouteUnproved`) and
+## a method whose overrides cannot be listed, so what is left is the replay of
+## a lossy witness and of a raise. A `let` proc value's routine is named by its
+## initialiser, which the program's globals key. The compiler's `lib/` tree is
+## keyed by the toolchain (`nim=`), not here.
 import std/[macros, os, strutils]
 import ./dsl_typebridge   ## `isUserRoutine`
 import ./check_options    ## `routineChecks`
@@ -76,12 +86,46 @@ proc serialiseNode*(n: NimNode): string =
   var refs: seq[NimNode]
   serialise(n, result, refs)
 
-proc implDigest*(fn: NimNode): string =
+type ImplKey* = object
+  ## RFC-0016 INT-31. `digest`: as `implDigest`. `open`: why some body `fn`
+  ## reaches natively is not in it ("" when every one is).
+  digest*, open*: string
+
+func isForeign(impl: NimNode): bool =
+  ## A routine whose body is outside Nim: `importc`, `importcpp`, `importjs`,
+  ## `importobjc`, `dynlib`. Its body slot is empty.
+  if impl.len < 7 or impl[6].kind != nnkEmpty: return false
+  for p in impl[4]:
+    let head = if p.kind in {nnkExprColonExpr, nnkCall} and p.len > 0: p[0] else: p
+    if head.kind in {nnkIdent, nnkSym} and
+       head.strVal in ["importc", "importcpp", "importjs", "importobjc",
+                       "dynlib"]:
+      return true
+  false
+
+proc procVarRead(n: NimNode): string =
+  ## The name of a module-level `var` of proc type `n` reads, or "": the
+  ## routine it holds is whatever code last stored it, which no key sees.
+  if n.kind == nnkSym and n.symKind == nskVar and
+     n.owner.kind == nnkSym and n.owner.symKind == nskModule:
+    let t = n.getTypeImpl
+    if t.kind == nnkProcTy and not isOwnRuntime(n): return n.strVal
+  ""
+
+proc implKey*(fn: NimNode): ImplKey =
   ## Empty when `fn` names no user routine outside nelli and the stdlib, so such
   ## a program keys as it did before R1-09.
-  if fn.kind != nnkSym: return ""
+  if fn.kind != nnkSym: return
   let root = fn.getImpl
-  if root.kind notin RoutineNodes or root.len < 7: return ""
+  if root.kind notin RoutineNodes or root.len < 7: return
+  proc scanOpen(n: NimNode; open: var string) =
+    if open.len > 0: return
+    let v = procVarRead(n)
+    if v.len > 0:
+      open = "a call through the proc variable `" & v & "`"
+      return
+    for c in n: scanOpen(c, open)
+  scanOpen(root[6], result.open)
   var work: seq[NimNode]
   # Review R3 (SC2): the domain tag starts the text the hash reads, so the
   # canon is never copied to be prefixed.
@@ -105,6 +149,10 @@ proc implDigest*(fn: NimNode): string =
     if isOwnRuntime(r): continue
     let impl = r.getImpl
     if impl.kind notin RoutineNodes: continue
+    if result.open.len == 0:
+      if isForeign(impl):
+        result.open = "the foreign body of `" & r.strVal & "`"
+      elif impl.len > 6: scanOpen(impl[6], result.open)
     let c = routineChecks(impl)
     canon.add "R" & $r.symKind & ":" & $r.strVal.len & ":" & r.strVal &
       "|ck=" & $c.checks & (if c.why.len > 0: "|ck?" else: "") & "|"
@@ -112,6 +160,10 @@ proc implDigest*(fn: NimNode): string =
     # routine's body slot is empty; its pragmas name what it binds to.
     serialise(impl, canon, work)
     canon.add '\n'
-  if canon.len == tag.len: return ""
+  if canon.len == tag.len: return
   # SHA-256 over the tag and the whole serialisation (`sha256.nim`).
-  "sha256-" & sha256Hex(canon)
+  result.digest = "sha256-" & sha256Hex(canon)
+
+proc implDigest*(fn: NimNode): string =
+  ## `implKey(fn).digest`.
+  implKey(fn).digest

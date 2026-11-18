@@ -1271,7 +1271,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W4 rv0005-lows (a replay's child that never took its
     ## witness, or a resource limit stopped, is no crash; a value nested
     ## past the wire's depth declines; 382-403 reserved): 381->404.
-    check symexWalkerVersion == "404"
+    ## RFC-0016 W4 rv0005-lows part 2 (a replay-settled claim of a program
+    ## whose foreign body or proc-variable target the key cannot see is not
+    ## stored; 405 reserved): 404->406.
+    check symexWalkerVersion == "406"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -810,8 +810,14 @@ const renderAsChoicesVersion* = "12"
   ##   memberships over a ground subject; a branch it left open is decided,
   ##   so a tail or a replay can fork less and name fewer kinds. No key
   ##   bytes change.
+  ## - RFC-0016 F1 hotfix (381->401; 382-400 are reserved for in-flight W4
+  ##   work): `searchDfa` reads its verifiers' `vok` after its state loop
+  ##   too. A verifier that declined while the last state was expanded left
+  ##   a built search language that is wrong (PRC-33 item 6b; an `skNoOcc`
+  ##   one could be empty); the search now declines instead. No key bytes
+  ##   change.
 
-const symexWalkerVersion* = "381"
+const symexWalkerVersion* = "401"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

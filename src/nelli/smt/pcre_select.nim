@@ -3297,6 +3297,12 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
     result.accept.add acc
     result.sink.add false
     inc i
+  if not vok:
+    # RFC-0016 S8co (PRC-33 item 6b): a verifier declined while the last
+    # state was expanded (`startHere` skips a declined verifier as empty, so
+    # no state after it reads `vok`); the search is not a language then.
+    result.ok = false
+    result.why = vwhy
 
 proc searchLangV*(n: Nfa; cacheKey: string; kind: SearchKind;
                   pc0: PrevClass; foundIgn = -1'i8): SelLang =

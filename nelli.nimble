@@ -1734,6 +1734,10 @@ task test, "Run the test suite":
             "tsymex_0016_k10ac_concolic_checksoff",
             "tsymex_0016_k8a_gen",
             "tsymex_0016_k8a_sink",
+            # RFC-0016 K8b: the fuzzer families and the pairwise figure.
+            "tsymex_0016_k8b_pairs",
+            "tsymex_0016_k8b_callshape",
+            "tsymex_0016_k8b_generic",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

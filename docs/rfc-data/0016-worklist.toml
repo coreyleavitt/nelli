@@ -1705,10 +1705,11 @@ id = "AUD-07"
 table = "5.8d"
 title = "A generic never instantiated in the scope's compilation unit gives the VM-alias guard an un-instantiated `getImpl()` tree"
 class = "test-harness"
-state = "open"
-note = ": mapped to K8b's `faGeneric` family: the un-instantiated generic is a generic-family fuzzer case (a generic never instantiated in the scope's unit), so K8b's `faGeneric` pins it and this row closes there. H1 records the mapping and leaves the implementation to K8b"
+state = "closed"
+note = ": pinned by K8b's `faGeneric` family (`tests/tsymex_0016_k8b_generic.nim`). The un-instantiated generic is the family's `uninst` dimension (a sibling generic never instantiated, or one referenced only under `when false`) and its `twUninst` relation (a second one added must leave the verdict unchanged); the generated programs cover it pairwise with every form and type argument, two fixed programs run it under every relation, and `aud07Sat`/`aud07Unsat` pin it sat and exhaustive-unsat (`family:generic:k8b/uninst/whenFalse`). Every run is exact against native"
 source = "S8al"
 cells = []
+pins = ["tsymex_0016_k8b_generic"]
 
 [[row]]
 id = "AUD-08"
@@ -2363,3 +2364,26 @@ source = "CI-B nightly, run 42804432874 (2026-11-10, sha db6c3da6), intake #179 
 evidence = "the msvc shard logs of run 42804432874 (shards 26 and 16) print the VM-iteration error and `rc=1 (compile failed)`; every later msvc gate is green; the pin `tsymex_0016_w3z_r10_nestedreplay` holds a nested replay's compile under the default limit"
 aliases = ["F-0013"]
 cells = []
+
+[[row]]
+id = "INT-55"
+table = "5.8c"
+title = "Found by K8b's `faExnMemory` family: its 24-program gate batch (seed 20261117) stops the COMPILE with `Error: unhandled exception: No such file or directory [OSError]` raised in the compile-time VM, with no frame beyond `oserrors.nim(92) raiseOSError`. Programs 0..3 compile and are exact; programs 4..13 as one batch fail; program 6 (a macro-declared `ref object` field) alone compiles and is exact, so the trigger is a combination in one module, not one program. Not a verdict disagreement: no run reaches the walker"
+class = "compile crash (test-harness reach)"
+state = "open"
+note = "reproducer: `NELLI_NIM_FLAGS='-d:k8bFirst=4 -d:k8bCount=10' scripts/dt-bounded.sh c tests/tsymex_0016_k8b_exnmemory.nim 900` on the K8b branch (`-d:k8aDump` prints the sources). Ruled out: `replay_footprint.fileDeclaresHook`'s `readFile` (a `fileExists` guard there did not change the failure). Next: bisect the 4..13 batch to the smallest failing pair, then find the VM OS call (an `os` proc that raises OSError for a missing path, reached from a macro). The `faExnMemory` suite is held back from the registered set until this is fixed; its floor line stays 0 (a family with no records is not judged)"
+source = "RFC-0016 K8b, `faExnMemory` generated programs"
+cells = []
+
+[[row]]
+id = "INT-56"
+table = "5.8c"
+title = "K8b's remainder and decisions. Shipped: the three test-side pin families (`faCallShape`, `faExnMemory`, `faGeneric`) through K8a-gen's generator, their metamorphic relations, the cells-exercised record K1 reads, and the pairwise figure with its floor. Open: fuzzer families for the admission axes other than construct (magic, typeclass, typeop, pragma, stdlib, build, readonly, defined), which iterate `cells(axis)` so that \"every exact row exercised on its build rows\" (section 12 item 4, first clause) is a figure; today only the construct axis has a family (K8a-gen's shapes)"
+class = "test-harness"
+state = "open"
+note = "K8b decisions (section 10 left them open). (1) The pairwise figure is t = 2 coverage over each family's dimension values (`tests/s0016_k8b_pairs.nim` `famDims`), counted only from `exact` runs, so it measures combinations the walker is exact on; per family covered/total, floor in `tests/0016-pairwise.floor` with the universe size, a changed universe must be re-measured. (2) The cells-exercised record is a second record kind in the same `.jsonl` files as the pins (`kind = exercised`), so `universe-join.sh` carries it unchanged and `pinRecords` skips it. (3) K1 judges each family that has records on the leg's row against the floor; a leg that ran no family is not judged. (4) A family batch runs each program with one relation, rotating by id (`familyCases`), which keeps a suite near a minute per family on c; `genBatch` still runs every relation. (5) Programs come from a greedy pairwise cover (`coverChoices`, 48 seeded draws plus one built on the first uncovered pair). (6) The section 6 neighbours are relations: `twHoist` (evaluation order), `twRoute` (a write through a `var` alias); AUD-07 is `twUninst` plus the `uninst` dimension"
+slice = "K8b"
+source = "RFC-0016 K8b"
+cells = []
+pins = ["tsymex_0016_k8b_pairs"]
+

@@ -51,7 +51,6 @@ INT-42	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 INT-43	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 AUD-02	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 AUD-05	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-AUD-07	K8b	no cell or pin names it yet; mapped to the faGeneric family K8b owns (RFC-0016 H1)
 W-14	K5b	no cell or pin names it yet; the row's home names this slice
 W-17	K5a	no cell or pin names it yet; the row's home names this slice
 W-23	W1-c1b	no cell or pin names it yet; the row's home names this slice
@@ -82,3 +81,4 @@ PRC-02b	W4-z	follow-up toolchain slice; the decline it would lift is pinned in t
 INT-48	W4-z	upstream Nim issue candidate; nelli has no cell for it
 INT-50	W4-z	intake #173-#175 ceiling regressions (F-0009): a CI-D time ratchet, no cell can name it; closes when rfc-0016-w4perf and rfc-0016-w4perfb land and a nightly ceiling step is clean
 INT-51	W4-z	intake #173-#175 new ceiling offenders (F-0010): a CI-D time ratchet, no cell can name it; closes when a Wave 4 split slice splits or speeds up the six tests
+INT-55	K8b	no cell or pin names it yet; the faExnMemory suite that reproduces it is held back until the compile crash is fixed (RFC-0016 K8b)

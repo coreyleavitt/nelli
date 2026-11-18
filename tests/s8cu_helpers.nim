@@ -237,16 +237,102 @@ proc appendPinRecordTo*(dir: string; r: PinRecord) =
   try: f.writeLine($toJson(r))
   finally: f.close()
 
-iterator pinRecords*(dir: string): PinRecord =
-  ## Every record under `dir`, file by file in name order, line by line.
-  var files: seq[string]
+proc recordFiles(dir: string): seq[string] =
   if dirExists(dir):
     for k, p in walkDir(dir):
-      if k == pcFile and p.endsWith(".jsonl"): files.add p
-  files.sort()
-  for p in files:
+      if k == pcFile and p.endsWith(".jsonl"): result.add p
+  result.sort()
+
+const exercisedKind* = "exercised"
+  ## The `kind` field of RFC-0016 K8b's cells-exercised record, the second
+  ## record kind of a run's file. A pin record has no `kind` field.
+
+iterator pinRecords*(dir: string): PinRecord =
+  ## Every pin record under `dir`, file by file in name order, line by line.
+  ## A cells-exercised record (`exercisedRecords`) is skipped.
+  for p in recordFiles(dir):
     for line in lines(p):
-      if line.len > 0: yield fromJson(parseJson(line))
+      if line.len > 0:
+        let n = parseJson(line)
+        if n{"kind"}.getStr != exercisedKind: yield fromJson(n)
+
+# --- RFC-0016 K8b: the cells-exercised record --------------------------------
+#
+# One generated program under one variant, run through `symexFind` and the
+# native differential: the family it belongs to, the family cells it
+# exercises, and how the run ended (`exact`, `declined`, `disagree`). The
+# pairwise figure (§8.2, §12 item 4) is computed from these; K1 reads them
+# from the same record files as the pins (`tests/s0016_k8b_pairs.nim`).
+
+type
+  ExercisedRecord* = object
+    runId*, testFile*, variant*, outcome*: string
+    family*: Scope
+    seed*, progId*: int
+    cells*: seq[CellKey]
+    build*, row*, date*: string
+
+func toJson(r: ExercisedRecord): JsonNode =
+  var cs = newJArray()
+  for c in r.cells: cs.add %render(c)
+  %*{"kind": exercisedKind, "runId": r.runId, "testFile": r.testFile,
+     "family": scopePrefix[r.family], "seed": r.seed, "progId": r.progId,
+     "variant": r.variant, "outcome": r.outcome, "cells": cs,
+     "build": r.build, "row": r.row, "date": r.date}
+
+proc exercisedFromJson*(n: JsonNode): ExercisedRecord =
+  ## A malformed record (an unknown family or an unparsable cell) raises
+  ## `ValueError` naming it: a typo fails instead of naming nothing.
+  let fam = n["family"].getStr
+  var found = false
+  for sc in Scope:
+    if scopePrefix[sc] == fam:
+      result.family = sc
+      found = true
+  if not found:
+    raise newException(ValueError, "exercised record: unknown family " & fam)
+  for c in n["cells"]:
+    let k = parseCellKey(c.getStr)
+    if k.isNone:
+      raise newException(ValueError,
+        "exercised record: unparsable cell " & c.getStr)
+    result.cells.add k.get
+  result.runId = n["runId"].getStr
+  result.testFile = n["testFile"].getStr
+  result.seed = n["seed"].getInt
+  result.progId = n["progId"].getInt
+  result.variant = n["variant"].getStr
+  result.outcome = n["outcome"].getStr
+  result.build = n["build"].getStr
+  result.row = n["row"].getStr
+  result.date = n["date"].getStr
+
+proc exercisedLine*(r: ExercisedRecord): string = $toJson(r)
+
+proc writeExercisedTo*(dir: string; rs: seq[ExercisedRecord]) =
+  ## Appends `rs` to `dir/<testFile stem>-exercised-<pid>.jsonl`, each stamped
+  ## with this build's segment, row and date.
+  if rs.len == 0: return
+  createDir(dir)
+  let f = open(dir / (splitFile(rs[0].testFile).name & "-exercised-" &
+                      $getCurrentProcessId() & ".jsonl"), fmAppend)
+  try:
+    for r0 in rs:
+      var r = r0
+      r.build = pinBuildSegment()
+      r.row = pinBuildRow()
+      r.date = pinDate(pinNow())
+      r.runId = splitFile(getAppFilename()).name & "-" & $getCurrentProcessId()
+      f.writeLine(exercisedLine(r))
+  finally: f.close()
+
+iterator exercisedRecords*(dir: string): ExercisedRecord =
+  ## Every cells-exercised record under `dir` (pin records are skipped).
+  for p in recordFiles(dir):
+    for line in lines(p):
+      if line.len > 0:
+        let n = parseJson(line)
+        if n{"kind"}.getStr == exercisedKind: yield exercisedFromJson(n)
 
 # --- native evaluation -----------------------------------------------------
 

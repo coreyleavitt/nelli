@@ -23,6 +23,7 @@
 ## in the same way on the same build row on many seeds is one issue.
 import std/[strutils]
 import ./s0016_k8a_gen
+import nelli/smt/admission
 
 type
   Oracle* = proc (cs: seq[Case]): seq[string] {.closure.}
@@ -60,6 +61,14 @@ func complexity(p: Prog): int =
     if p.asE: inc result
     if p.asE2: inc result
     if p.hitA and p.hitB: inc result
+  of shCallShape, shExnMem, shGeneric:
+    for v in p.fam:
+      if v != 0: inc result
+    if p.k != zeroLit(): inc result
+    if p.cmp notin ["", "=="]: inc result
+    if p.shape == shExnMem:
+      if p.lit2 != zeroLit(): inc result
+      if p.cmp2 notin ["", "=="]: inc result
 
 func measure*(c: Case): (int, int, int) =
   ((if c.tw == twNone: 0 else: 1), complexity(c.prog),
@@ -105,7 +114,16 @@ func candidates*(c: Case): seq[Case] =
         else: "div"
   if p.shape in {shDivLit, shOvf} and p.lit != simplestLit(p):
     tweak: q.lit = simplestLit(p)
-  if p.shape == shExcept:
+  if p.shape in {shCallShape, shExnMem, shGeneric}:
+    # each dimension to its first value, then the predicate and raise guard
+    for i in 0 ..< p.fam.len:
+      if p.fam[i] != 0:
+        tweak: q.fam[i] = 0
+    if p.k != zeroLit(): tweak: q.k = zeroLit()
+    if p.shape == shExnMem:
+      if p.lit2 != zeroLit(): tweak: q.lit2 = zeroLit()
+      if p.cmp2 notin ["", "=="]: tweak: q.cmp2 = "=="
+  elif p.shape == shExcept:
     if p.lit != zeroLit(): tweak: q.lit = zeroLit()
     if p.lit2 != zeroLit(): tweak: q.lit2 = zeroLit()
     if p.cmp2 notin ["", "=="]: tweak: q.cmp2 = "=="
@@ -169,7 +187,8 @@ func encodeCase*(c: Case): string =
     "k=" & enc(p.k), "predA=" & $ord(p.predA), "cmp2=" & p.cmp2,
     "lit2=" & enc(p.lit2), "asE=" & $ord(p.asE), "asE2=" & $ord(p.asE2),
     "hitA=" & $ord(p.hitA), "hitB=" & $ord(p.hitB),
-    "tw=" & $ord(c.tw), "only=" & p.only.join("~")].join(";")
+    "tw=" & $ord(c.tw), "only=" & p.only.join("~"),
+    "fam=" & p.fam.mapIt($it).join(",")].join(";")
 
 func decodeCase*(s: string): Case =
   for kv in s.split(';'):
@@ -194,14 +213,17 @@ func decodeCase*(s: string): Case =
     of "hitB": result.prog.hitB = v == "1"
     of "tw": result.tw = Twin(parseInt(v))
     of "only": result.prog.only = (if v.len == 0: @[] else: v.split('~'))
+    of "fam":
+      result.prog.fam = (if v.len == 0: @[] else: v.split(',').mapIt(parseInt(it)))
     else: discard
 
 # --- keying -------------------------------------------------------------------
 
 func cellOf*(shape: Shape): string =
-  ## The universe cell a generated shape belongs to: the construct cell the
-  ## K8a-gen pins are filed under (`pinExactImpl`'s key), `construct:k8a-gen/<shape>`.
-  "construct:k8a-gen/" & ($shape)[2 .. ^1]
+  ## The universe cell a generated shape belongs to: the cell its pins are
+  ## filed under (`pinExactImpl`'s key), `construct:k8a-gen/<shape>` for a
+  ## K8a shape and `family:<family>:k8b-gen/<shape>` for a K8b one.
+  render(shapeCell(shape))
 
 func verdictPair*(finding: string): string =
   ## The disagreeing pair, read off a `findings` entry: `<walker>|<native>`

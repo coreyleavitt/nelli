@@ -80,7 +80,7 @@ confirms per SUT before choosing a per-suite idiom.
 |---|---|---|---|
 | K9d-1 | this slice: census ratchet, `pinFind` + `boundaryOf` ordinals; int family, no `symexAssume`, the pre-RFC-0005 prefixes (phase1/2/3/6/14/15/16) | 43 | — |
 | K9d-2 | int family, no `symexAssume`, the rest (0016, 161, 163rev, CR2a, a8, configdefaults, cr22, p1, p2a, r5, r6, r8, rectify, rfc0005) | 49 → split 2a/2b at ~25 | — |
-| K9d-3 | object family, enum and distinct params (`boundaryOf` distinct via base type) | ~35 | `boundaryOf` distinct |
+| K9d-3 | object family, enum and distinct params (`boundaryOf` enum, distinct via base type): done, 8 converted (see the result section) | 8 | `boundaryOf` distinct |
 | K9d-4 | the assume gate: `symexAssume` rejects a native run under a pin (markers.nim, opt-in threadvar set by `nativeRun`; a rejected run hits nothing), then the int family with `symexAssume` (15) | 15 | src change in `engine/markers.nim` |
 | K9d-5 | object family, tuple/object params (field-product domain) | ~42 → 5a/5b | `boundaryOf` tuple/object |
 | K9d-6 | string family (`boundaryOf(string)`) | 66 → 6a/6b | |
@@ -126,6 +126,54 @@ type, so `pinFind` generated an out-of-range domain and its native call raised
 on the conversion (`assign_rangedefect`) or failed to bind (`161_overflow`).
 `pinFind` now aliases each declared parameter type and generates and replays
 through it; `tsymex_0016_k9d_pinfind` pins a wide-range SUT.
+
+## K9d-3 result
+
+`boundaryOf` gained two overloads (self-tested in `tsymex_0016_k9d_pinfind`):
+an enum generates every declared value (a holey enum's holes are not values,
+so `low .. high` would invent invalid ones; the declared values are read from
+the type), and a distinct type generates its base type's domain, each value
+converted (`showArg` prints it as the base). `boundaryOf(Cents)` is sampled
+like `int`, `boundaryOf(Tiny)` over `distinct int8` exhaustive.
+
+The slice plan's "~35" was an overestimate: the object family's 77 suites hold
+object, tuple, string, seq and float parameters far more often than enum or
+distinct ones. Of the 69 object-family suites without `symexAssume` (all tried
+through `pinFind`), **8 convert**: `tsymex_0016_cr4_enum_layout`,
+`tsymex_163rev_enum_domain`, `tsymex_163rev_enum_ordinal`,
+`tsymex_163rev_enum_valueshapes`, `tsymex_163rev_range_bounds`,
+`tsymex_phase15_CR15_enum_ordinal`, `tsymex_phase6_case`,
+`tsymex_r6_a1_variantlit`. No verdict disagreed with native. Census ceiling
+394 → 386.
+
+Soundness finding (INT-72): `tsymex_a7_rune`'s `runeOob` is `sxUnsat` because
+the walker pins a `Rune` parameter to [0, 0x10FFFF], while native `Rune` is
+`distinct int32` and `Rune(2147483646)` hits the target. The suite stays
+unconverted.
+
+The 60 that stay (a failed compile with "no generated domain" for a parameter
+type; targets are by the signatures' parameter types, so a suite with several
+shapes goes to its latest slice):
+
+- tuple, object or variant-object parameters (K9d-5): everything not listed
+  below, including the `phase14_*` variants, `phase11_walker`, `phase4_*`,
+  `rectify_*`, the `r6_*` records, `163audit_*`, `162_range_base_width`,
+  `163rev_enum_field_witness`, `163rev_enum_positions`,
+  `163rev_int_literal_width`, `163rev_nested_clamp`, `augmented_assign`,
+  `0016_cr2_h3_epochpin`, `0016_w3z_r5b_diag`, `CR2c_witnessreader_catchall`
+  (with its tuple), `rfc0005_s1c_verdict` (object and string)
+- string or Rune parameters (K9d-6): `a7_rune` (INT-72), `a7_runes_iter`,
+  `m6_probeproto_strproto`, `phase15_S10b_strconv`, `rfc0005_s8bx_extractraise`
+  and `_b`, `snd1_uncertain_taint`, `r1_draingap`, `phase15_g10_smoke`,
+  `phase15_N0_kindgate_widen`, `rfc0005_s8d_typeheads`
+- seq, set or table parameters (K9d-7): `h_containers`, `phase5_hashset`,
+  `phase5_table`, `163rev_table_elem`, `phase15_M1_seq_fixedwidth`,
+  `rectify_cardinality`, `rectify_mutation`, `rfc0005_s0_exhibit`,
+  `rfc0005_s8e_scoping`
+- distinct over float64 (K9d-8): `phase15_g4_distinct_sort`,
+  `phase15_g5_distinct_borrow`
+- ref parameters (K9d-10): `h_stepC_heapidentity`, `p2b_refobjconstr_expr`,
+  `phase15_r9_recursive`, `rectify_refs`, `rfc0005_s8ao_remainder`
 
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 

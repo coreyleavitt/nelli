@@ -19,6 +19,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/dsl   ## for conformsToStdlibConcept
+import ./s8cu_helpers
 
 # ---- Test type: a simple user-defined enum ----------------------------------
 type
@@ -42,7 +43,7 @@ suite "symex Phase 15 CR-15 — SomeOrdinal recognises user enum types":
   test "CR-15: SomeOrdinal generic at user enum reaches target (sxSat not sxUnknown)":
     ## RED: sxUnknown (geConceptViolation, Color not in static scalar list).
     ## GREEN: sxSat (enum recognised as ordinal; constraint check skipped).
-    let r = symexFind(enumOrdinalTarget, tLabel("is_blue"))
+    let r = pinFind(enumOrdinalTarget, tLabel("is_blue"))
     check r.status == sxSat
 
   test "CR-15: equality at user enum type works (no geConceptViolation)":
@@ -50,7 +51,7 @@ suite "symex Phase 15 CR-15 — SomeOrdinal recognises user enum types":
     ## without a geConceptViolation parse error. The SUT has no symexTarget label,
     ## so sxUnsat is the expected verdict (no satisfiable path reaches a label).
     ## The key invariant: NOT sxUnknown (which would indicate geConceptViolation).
-    let r = symexFind(checkColorEq, tLabel("eq"))
+    let r = pinFind(checkColorEq, tLabel("eq"))
     check r.status != sxUnknown
 
   test "CR-15: SomeOrdinal still rejects a non-ordinal type (string)":

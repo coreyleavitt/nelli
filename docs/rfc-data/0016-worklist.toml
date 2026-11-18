@@ -2385,3 +2385,17 @@ source = "CI-B nightly, run 42804432874 (2026-11-10, sha db6c3da6), intake #179 
 evidence = "the msvc shard logs of run 42804432874 (shards 26 and 16) print the VM-iteration error and `rc=1 (compile failed)`; every later msvc gate is green; the pin `tsymex_0016_w3z_r10_nestedreplay` holds a nested replay's compile under the default limit"
 aliases = ["F-0013"]
 cells = []
+
+[[row]]
+id = "INT-72"
+table = "5.8c"
+title = "K9d-3: `tsymex_a7_rune`'s `runeOob` (`r.ord > 0x10FFFF`, `r: Rune`) is `sxUnsat` in the walker, and the native run refutes it. `Rune` is `distinct int32`, so `boundaryOf(Rune)` generates the int32 boundary points through the base type and `runeOob(Rune(2147483646))` reaches the target natively (`pinExact ... walker says sxUnsat for label(\"oob\") but input (2147483646) hits it natively`). The walker pins a `Rune` parameter to [0, 0x10FFFF] (ADR-0017, Invariant 3), a model invariant that no native `Rune` constructor enforces; so the verdict is sound over valid runes and unsound over every int32 the type admits. Same class as the `symexAssume` gap (F-07): a domain the walker restricts and the native run does not. Open: either the Rune domain generator must be restricted to the invariant (a `boundaryOf(Rune)` overload of valid code points, which makes this pin legitimate) or the invariant must be recorded as an assumption with a gate. The suite stays unconverted until that is decided; `tsymex_a7_runes_iter` and `tsymex_m6_probeproto_strproto` take Rune parameters too"
+class = "soundness (walker domain restriction not mirrored natively)"
+state = "open"
+note = ": found converting the object family in K9d-3; the other seven enum and range suites converted with no disagreement"
+slice = "W4-k9d"
+home = "K9d-3 (`rfc-0016-w4k9d`)"
+source = "K9d-3 pinFind conversion"
+evidence = "reproducer: in `tests/tsymex_a7_rune.nim` change `symexFind(runeOob` to `pinFind(runeOob` (and add `import ./s8cu_helpers`), then `scripts/dt-bounded.sh c tests/tsymex_a7_rune.nim`: the test `soundness: r.ord > 0x10FFFF` fails with the PinFailure above"
+aliases = []
+cells = []

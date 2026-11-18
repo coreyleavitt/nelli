@@ -43,6 +43,7 @@ import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/smt/dsl_typebridge
+import ./s8cu_helpers
 
 ## ---------------------------------------------------------------------------
 ## Cross-check helper (same shape as tsymex_163rev_enum_ordinal.nim): reuse
@@ -109,7 +110,7 @@ suite "#163 review R18 -- tuple/string-valued enum fields get their real ordinal
     ## ordinal 0... it does not (Mixed's real domain starts at 5), so
     ## pre-fix this cast is undefined-shaped; the fixed assertion below is
     ## the meaningful one.
-    let r = symexFind(checkA, tLabel("a"))
+    let r = pinFind(checkA, tLabel("a"))
     check r.status == sxSat
     # Issue #163 item 1 (rev): the witness reader now emits a correctly-typed
     # `Mixed` value directly (see `IRType.enumName`), so `r.witness[0]` is
@@ -121,14 +122,14 @@ suite "#163 review R18 -- tuple/string-valued enum fields get their real ordinal
   test "x == mxB is reachable, and the witness genuinely satisfies it":
     ## RED (pre-fix): embedded RHS 1 (declaration-position/auto-increment
     ## off the wrong base), not 6 (mxB's real ordinal).
-    let r = symexFind(checkB, tLabel("b"))
+    let r = pinFind(checkB, tLabel("b"))
     check r.status == sxSat
     check ord(r.witness[0]) == 6
     check Mixed(r.witness[0]) == mxB
 
   test "x == mxC is reachable, and the witness genuinely satisfies it":
     ## RED (pre-fix): embedded RHS 2, not 7 (mxC's real ordinal).
-    let r = symexFind(checkC, tLabel("c"))
+    let r = pinFind(checkC, tLabel("c"))
     check r.status == sxSat
     check ord(r.witness[0]) == 7
     check Mixed(r.witness[0]) == mxC
@@ -175,11 +176,11 @@ suite "#163 review R18 -- bare string-name-only enum stays dense from 0":
     check signalInfo == (true, 0'i64, 2'i64, false)
 
   test "x == sgGreen and x == sgRed are reachable with correct witnesses":
-    let rGreen = symexFind(checkGreen, tLabel("green"))
+    let rGreen = pinFind(checkGreen, tLabel("green"))
     check rGreen.status == sxSat
     check Signal(rGreen.witness[0]) == sgGreen
 
-    let rRed = symexFind(checkRed, tLabel("red"))
+    let rRed = pinFind(checkRed, tLabel("red"))
     check rRed.status == sxSat
     check Signal(rRed.witness[0]) == sgRed
 

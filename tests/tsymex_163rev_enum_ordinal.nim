@@ -52,6 +52,7 @@ import nelli/smt/dsl_typebridge
 ## `dsl_typebridge.nim` to observe its output.
 
 import std/macros
+import ./s8cu_helpers
 
 macro classifyEnumTypedesc(T: typedesc): (bool, int64, int64, bool) =
   var inst = T.getTypeInst
@@ -106,7 +107,7 @@ suite "#163 review R15 -- enum constants embed their ordinal, not position":
     ## solver actually satisfied `x == 0`, and the returned witness casts
     ## back to roEqual, NOT roLess. A test checking only `status == sxSat`
     ## would have passed against this broken witness.
-    let r = symexFind(checkRoLess, tLabel("less"))
+    let r = pinFind(checkRoLess, tLabel("less"))
     check r.status == sxSat
     check Ordering(r.witness[0]) == roLess
 
@@ -114,7 +115,7 @@ suite "#163 review R15 -- enum constants embed their ordinal, not position":
     ## RED (pre-fix): sxSat with embedded RHS 1 (roEqual's declaration-position
     ## index, not its real ordinal 0) -- witness casts back to roGreater,
     ## NOT roEqual.
-    let r = symexFind(checkRoEqual, tLabel("equal"))
+    let r = pinFind(checkRoEqual, tLabel("equal"))
     check r.status == sxSat
     check Ordering(r.witness[0]) == roEqual
 
@@ -124,7 +125,7 @@ suite "#163 review R15 -- enum constants embed their ordinal, not position":
     ## reachable target flipped to a false NEGATIVE, not merely a wrong
     ## witness. This is the sharpest form of the defect: replaying a
     ## reported witness is moot when no witness is reported at all.
-    let r = symexFind(checkRoGreater, tLabel("greater"))
+    let r = pinFind(checkRoGreater, tLabel("greater"))
     require r.status == sxSat
     let witnessed = Ordering(r.witness[0])
     check witnessed == roGreater
@@ -166,7 +167,7 @@ suite "#163 review R15 -- sparse/holed enum, ordinal diverges without negatives"
   test "x == hoA is reachable with a genuinely correct witness":
     ## Declaration position 0 happens to equal hoA's real ordinal 0, so this
     ## arm is correct even pre-fix -- a same-position sanity check.
-    let r = symexFind(checkHoA, tLabel("a"))
+    let r = pinFind(checkHoA, tLabel("a"))
     check r.status == sxSat
     check Holed(r.witness[0]) == hoA
 
@@ -174,7 +175,7 @@ suite "#163 review R15 -- sparse/holed enum, ordinal diverges without negatives"
     ## RED (pre-fix): sxSat with embedded RHS 1 (hoB's declaration-position
     ## index), not 5 (hoB's real ordinal) -- the witness casts back to a
     ## holey non-member value, never hoB.
-    let r = symexFind(checkHoB, tLabel("b"))
+    let r = pinFind(checkHoB, tLabel("b"))
     check r.status == sxSat
     check Holed(r.witness[0]) == hoB
 
@@ -185,7 +186,7 @@ suite "#163 review R15 -- sparse/holed enum, ordinal diverges without negatives"
     ## still inside the classifier's [0, 6] domain, so this stays a
     ## false-WITNESS case, not a false-negative one -- the false-negative
     ## shape is already covered by `roGreater`.)
-    let r = symexFind(checkHoC, tLabel("c"))
+    let r = pinFind(checkHoC, tLabel("c"))
     check r.status == sxSat
     check Holed(r.witness[0]) == hoC
 
@@ -224,15 +225,15 @@ suite "#163 review R15 -- non-regression: dense enum, ordinal == position":
     check colorInfo == (true, 0'i64, 2'i64, false)
 
   test "every arm is reachable with a witness that genuinely matches":
-    let rRed = symexFind(checkRed, tLabel("red"))
+    let rRed = pinFind(checkRed, tLabel("red"))
     check rRed.status == sxSat
     check Color(rRed.witness[0]) == clRed
 
-    let rGreen = symexFind(checkGreen, tLabel("green"))
+    let rGreen = pinFind(checkGreen, tLabel("green"))
     check rGreen.status == sxSat
     check Color(rGreen.witness[0]) == clGreen
 
-    let rBlue = symexFind(checkBlue, tLabel("blue"))
+    let rBlue = pinFind(checkBlue, tLabel("blue"))
     check rBlue.status == sxSat
     check Color(rBlue.witness[0]) == clBlue
 

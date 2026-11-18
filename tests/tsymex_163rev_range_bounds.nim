@@ -27,6 +27,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 # =============================================================================
 # A positive, non-zero lower bound.
@@ -68,21 +69,21 @@ suite "#163 review R14a -- non-zero positive lower bound (range[50..60])":
     check mkRange5060(60) == 60
 
   test "the floor itself is reachable, and the witness genuinely constructs":
-    let r = symexFind(paramAtLo, tLabel("lo"))
+    let r = pinFind(paramAtLo, tLabel("lo"))
     check r.status == sxSat
     check mkRange5060(r.witness[0]) == 50
 
   test "one below the floor is NOT reachable":
-    let r = symexFind(paramBelowLo, tLabel("below"))
+    let r = pinFind(paramBelowLo, tLabel("below"))
     check r.status == sxUnsat
 
   test "the ceiling itself is reachable, and the witness genuinely constructs":
-    let r = symexFind(paramAtHiPos, tLabel("hi"))
+    let r = pinFind(paramAtHiPos, tLabel("hi"))
     check r.status == sxSat
     check mkRange5060(r.witness[0]) == 60
 
   test "one above the ceiling is NOT reachable (sanity companion)":
-    let r = symexFind(paramAboveHi, tLabel("above"))
+    let r = pinFind(paramAboveHi, tLabel("above"))
     check r.status == sxUnsat
 
 # =============================================================================
@@ -121,21 +122,21 @@ suite "#163 review R14a -- negative lower bound (range[-20..-5])":
     check mkRangeNeg(-5) == -5
 
   test "the negative floor itself is reachable, and the witness genuinely constructs":
-    let r = symexFind(paramAtLoNeg, tLabel("lo"))
+    let r = pinFind(paramAtLoNeg, tLabel("lo"))
     check r.status == sxSat
     check mkRangeNeg(r.witness[0]) == -20
 
   test "one below the negative floor is NOT reachable":
-    let r = symexFind(paramBelowLoNeg, tLabel("below"))
+    let r = pinFind(paramBelowLoNeg, tLabel("below"))
     check r.status == sxUnsat
 
   test "the negative ceiling itself is reachable, and the witness genuinely constructs":
-    let r = symexFind(paramAtHiNeg, tLabel("hi"))
+    let r = pinFind(paramAtHiNeg, tLabel("hi"))
     check r.status == sxSat
     check mkRangeNeg(r.witness[0]) == -5
 
   test "one above the negative ceiling is NOT reachable (sanity companion)":
-    let r = symexFind(paramAboveHiNeg, tLabel("above"))
+    let r = pinFind(paramAboveHiNeg, tLabel("above"))
     check r.status == sxUnsat
 
 

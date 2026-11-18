@@ -55,6 +55,7 @@ import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/smt/dsl_typebridge
+import ./s8cu_helpers
 
 ## ---------------------------------------------------------------------------
 ## Half (a) -- a negative-ordinal enum member is a real, constructible value.
@@ -107,7 +108,7 @@ suite "#163 review R2, half (a) -- negative enum ordinals are in-domain":
     ## RED (pre-fix): sxUnsat. The emitted domain was [0, 1] (maxOrd only,
     ## floored at the literal 0), so the free BV backing `x` could never
     ## equal -1's bit pattern under an UNSIGNED bound check.
-    let r = symexFind(classifyOrdering, tLabel("less"))
+    let r = pinFind(classifyOrdering, tLabel("less"))
     check r.status == sxSat
 
 ## ---------------------------------------------------------------------------
@@ -160,16 +161,16 @@ suite "#163 review R2, half (b) -- an enum's bit width must fit its ordinals":
   test "a legal value beyond a truncated 8-bit bound is still reachable":
     ## RED (pre-fix): sxUnsat -- the truncated bound (300 mod 256 = 44)
     ## wrongly excluded ordinal 100.
-    let r = symexFind(reachesHoleAbove44, tLabel("hole100"))
+    let r = pinFind(reachesHoleAbove44, tLabel("hole100"))
     check r.status == sxSat
 
   test "the declared large ordinal itself is reachable":
-    let r = symexFind(reachesDeclaredBig, tLabel("is_boc"))
+    let r = pinFind(reachesDeclaredBig, tLabel("is_boc"))
     check r.status == sxSat
 
   test "a genuinely out-of-domain ordinal is still excluded":
     ## The complement that proves the widened bound still does real work.
-    let r = symexFind(excludesGenuineOOB, tLabel("oob"))
+    let r = pinFind(excludesGenuineOOB, tLabel("oob"))
     check r.status == sxUnsat
 
 ## ---------------------------------------------------------------------------
@@ -204,7 +205,7 @@ suite "#163 review R2, half (c) -- unsigned-suffixed ordinal literals are read":
 
   test "sfC's true ordinal is reachable":
     ## NOT RED pre-fix, for the same reason as above.
-    let r = symexFind(reachesSfC, tLabel("sfc"))
+    let r = pinFind(reachesSfC, tLabel("sfc"))
     check r.status == sxSat
 
 ## ---------------------------------------------------------------------------
@@ -251,19 +252,19 @@ suite "#163 review R2 -- non-regression pins (dense + small-sparse enums)":
     check twoValInfo == (true, 0'i64, 1'i64, false)
 
   test "dense enum: an out-of-domain ordinal stays unreachable":
-    check symexFind(outOfDomainDense, tLabel("oob")).status == sxUnsat
+    check pinFind(outOfDomainDense, tLabel("oob")).status == sxUnsat
 
   test "dense enum: a legal ordinal stays reachable":
-    check symexFind(reachesTvB, tLabel("is_b")).status == sxSat
+    check pinFind(reachesTvB, tLabel("is_b")).status == sxSat
 
   test "small sparse enum: classifier range is unchanged -- [0, 3], unsigned":
     check smallSparseInfo == (true, 0'i64, 3'i64, false)
 
   test "small sparse enum: the documented hole stays sxSat (not a regression)":
-    check symexFind(sparseHole, tLabel("hole")).status == sxSat
+    check pinFind(sparseHole, tLabel("hole")).status == sxSat
 
   test "small sparse enum: a genuinely out-of-range ordinal stays excluded":
-    check symexFind(sparseBeyond, tLabel("beyond")).status == sxUnsat
+    check pinFind(sparseBeyond, tLabel("beyond")).status == sxUnsat
 
 
 suite "#163 review round 1 -- walker version pin":

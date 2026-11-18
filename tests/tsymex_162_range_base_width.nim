@@ -17,6 +17,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 const Exact = SymexSettings(integerSemantics: isExact)
 
@@ -91,7 +92,7 @@ suite "#162 — range subtypes carry their base type":
     ## The load-bearing property, and the half that proves this is not a
     ## promotion bug: `isExact` never promotes, so the only thing that can
     ## have hidden the defect is the declared width itself.
-    let r = symexFind(mul32, tRaisedExn("OverflowDefect"), Exact)
+    let r = pinFind(mul32, tRaisedExn("OverflowDefect"), Exact)
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -100,7 +101,7 @@ suite "#162 — range subtypes carry their base type":
     ## The other half. With the width corrected, #161's live obligation
     ## fires against the RIGHT window: interval arithmetic cannot discharge
     ## [0..1e10] inside int32, so the fork survives to Z3.
-    let r = symexFind(mul32, tRaisedExn("OverflowDefect"))
+    let r = pinFind(mul32, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
 
   test "the oracle — Nim wraps an unsigned range subtype silently":
@@ -112,7 +113,7 @@ suite "#162 — range subtypes carry their base type":
   test "isExact reproduces the unsigned wrap":
     ## Modelled as signed 64-bit, `a + b` could never be less than `a` and
     ## this path was unreachable. The base type is what makes it reachable.
-    let r = symexFind(addU8, tLabel("wrapped"), Exact)
+    let r = pinFind(addU8, tLabel("wrapped"), Exact)
     check r.status == sxSat
 
   test "isOptimised agrees — an unsigned range must not promote":
@@ -123,11 +124,11 @@ suite "#162 — range subtypes carry their base type":
     ## refused outright for unsigned params rather than being made
     ## conditional -- unsigned has no raise fork that could keep the
     ## obligation live instead.
-    let r = symexFind(addU8, tLabel("wrapped"))
+    let r = pinFind(addU8, tLabel("wrapped"))
     check r.status == sxSat
 
   test "an unsigned range raises no OverflowDefect":
-    let r = symexFind(addU8, tRaisedExn("OverflowDefect"))
+    let r = pinFind(addU8, tRaisedExn("OverflowDefect"))
     check r.status != sxRaised
 
   test "the oracle — a named int32 alias behaves like the inline range":
@@ -138,9 +139,9 @@ suite "#162 — range subtypes carry their base type":
   test "a named int32 range alias carries its base type too":
     ## Same defect, one `type` declaration away. `Px` resolves through
     ## `getImpl` rather than `getTypeInst`, which is a separate arm.
-    let r = symexFind(mulAlias, tRaisedExn("OverflowDefect"))
+    let r = pinFind(mulAlias, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
-    let e = symexFind(mulAlias, tRaisedExn("OverflowDefect"), Exact)
+    let e = pinFind(mulAlias, tRaisedExn("OverflowDefect"), Exact)
     check e.status == sxRaised
 
   test "a named unsigned range alias wraps":
@@ -149,7 +150,7 @@ suite "#162 — range subtypes carry their base type":
     ## SIGNED literal kinds.
     proc rt(a, b: Weight): uint16 = a + b
     check rt(60_000, 60_000) == 54_464'u16
-    let r = symexFind(addAlias, tLabel("wrapped"))
+    let r = pinFind(addAlias, tLabel("wrapped"))
     check r.status == sxSat
 
   test "int8 and int16 bases carry their widths as well":
@@ -160,8 +161,8 @@ suite "#162 — range subtypes carry their base type":
     proc rt16(a, b: range[0'i16..1000'i16]): int16 = a * b
     expect OverflowDefect:
       discard rt16(1000, 1000)
-    check symexFind(mul8, tRaisedExn("OverflowDefect")).status == sxRaised
-    check symexFind(mul16, tRaisedExn("OverflowDefect")).status == sxRaised
+    check pinFind(mul8, tRaisedExn("OverflowDefect")).status == sxRaised
+    check pinFind(mul16, tRaisedExn("OverflowDefect")).status == sxRaised
 
   test "a range over plain int bounds is untouched":
     ## The non-regression anchor. `int` bounds mean an int64 base, 1e10 fits,
@@ -170,17 +171,17 @@ suite "#162 — range subtypes carry their base type":
     ## of this change is the narrow-width cases and nothing else.
     proc rt(a, b: range[0..100_000]): int = a * b
     check rt(100_000, 100_000) == 10_000_000_000
-    let r = symexFind(mulPlain, tRaisedExn("OverflowDefect"))
+    let r = pinFind(mulPlain, tRaisedExn("OverflowDefect"))
     check r.status == sxUnsat
 
   test "declared bounds still tighten the path condition at 32 bits":
-    let r = symexFind(tight32, tLabel("impossible"))
+    let r = pinFind(tight32, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "a narrow SIGNED range still promotes — the unsigned ban is not wider":
     ## Guards slice 2 against over-reach: refusing promotion for unsigned
     ## params must not cost the signed ones their `Z3Int` encoding.
-    let r = symexFind(tight32, tLabel("impossible"))
+    let r = pinFind(tight32, tLabel("impossible"))
     check r.abstractions.len == 1
     check r.abstractions[0].interval == interval(0'i64, 100'i64)
 
@@ -241,18 +242,18 @@ suite "#162 — range subtypes constrain object fields too":
   test "a range-typed field's bounds reach the path condition":
     ## Was `sxSat`: with no constraint on the field, `b.lo > 100` was
     ## satisfiable for a field declared `range[0..100]`.
-    let r = symexFind(beyond, tLabel("impossible"))
+    let r = pinFind(beyond, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "the bounds are a refinement, not a ban — in-range targets survive":
     ## The complement, so the fix cannot be "constrain everything away".
-    let r = symexFind(withinBox, tLabel("reachable"))
+    let r = pinFind(withinBox, tLabel("reachable"))
     check r.status == sxSat
 
   test "a nested object's field is constrained too":
     ## The reason the bounds belong on `IRType` rather than on a per-field
     ## side table: `allocateSym` already recurses, so nesting is free.
-    let r = symexFind(beyondNested, tLabel("impossible"))
+    let r = pinFind(beyondNested, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "a field's witness stays inside its declared range":
@@ -263,7 +264,7 @@ suite "#162 — range subtypes constrain object fields too":
     proc rt(c: Cfg32): int32 = c.w * c.h
     expect OverflowDefect:
       discard rt(Cfg32(w: 100_000, h: 100_000))
-    let r = symexFind(area32, tRaisedExn("OverflowDefect"))
+    let r = pinFind(area32, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
 
   test "field bounds are part of the cache key":
@@ -281,8 +282,8 @@ suite "#162 — range subtypes constrain object fields too":
     proc pW(w: Wide) =
       if w.v > 10:
         symexTarget("over")
-    check symexFind(pN, tLabel("over")).status == sxUnsat
-    check symexFind(pW, tLabel("over")).status == sxSat
+    check pinFind(pN, tLabel("over")).status == sxUnsat
+    check pinFind(pW, tLabel("over")).status == sxSat
 
   test "version floor — field bounds arrived at walker 130":
     ## 129 answered `sxSat` for `b.lo > 100` over a `range[0..100]` field,

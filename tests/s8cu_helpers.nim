@@ -795,6 +795,9 @@ proc domEmit(cx: var DomCtx; items: seq[NimNode]; fields: seq[NimNode];
         for ci in 0 ..< br.len - 1: nb.add freshCond(br[ci])
         nb.add inner
         cs.add nb
+      if it[^1].kind != nnkElse:
+        # the generated case is over the discriminator's ordinal
+        cs.add nnkElse.newTree(newStmtList(nnkDiscardStmt.newTree(newEmptyNode())))
       result = newStmtList()
       result.add newLetStmt(dd, newCall(ident"boundaryOf",
         newCall(ident"typeof", selector(dname, cx.proto))))
@@ -842,6 +845,10 @@ macro objectDomain(T: typedesc): untyped =
       `gen`
       Domain[`T`](values: `vals`, exhaustive: `exh`)
 
+macro underlyingName(T: typedesc): string =
+  ## the type behind an alias, for the "no generated domain" message
+  newLit(T.getType[1].repr)
+
 proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
   ## The generated domain of one parameter type: every value of `bool`, of a
   ## one-byte ordinal and of an ordinal spanning at most 256 values (so a
@@ -883,7 +890,7 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
   elif T is tuple or (T is object and not (T is ref)):
     objectDomain(T)
   else:
-    {.error: "pinFind: no generated domain for " & $T &
+    {.error: "pinFind: no generated domain for " & $T & " (" & underlyingName(T) & ")" &
              "; pin this call with pinExact and an explicit domain".}
 
 proc pinFindJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;

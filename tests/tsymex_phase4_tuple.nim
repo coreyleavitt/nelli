@@ -5,6 +5,7 @@
 ## `t[0]`) dispatches structurally through the variant kind.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc orderedPair(t: (int, int)) =
   if t[0] > t[1]:
@@ -16,12 +17,12 @@ proc namedFields(t: tuple[a, b: int]) =
 
 suite "symex Phase 4 — tuples":
   test "anonymous (int, int) param + positional index":
-    let r = symexFind(orderedPair, tLabel("hit"))
+    let r = pinFind(orderedPair, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0][0] > r.witness[0][1]
 
   test "named-field tuple via dot-expr":
-    let r = symexFind(namedFields, tLabel("named-hit"))
+    let r = pinFind(namedFields, tLabel("named-hit"))
     check r.status == sxSat
     check r.witness[0].a > r.witness[0].b
 
@@ -29,7 +30,7 @@ suite "symex Phase 4 — tuples":
     proc mixed(t: tuple[active: bool, n: int]) =
       if t.active and t.n > 100:
         symexTarget("mix-hit")
-    let r = symexFind(mixed, tLabel("mix-hit"))
+    let r = pinFind(mixed, tLabel("mix-hit"))
     check r.status == sxSat
     check r.witness[0].active == true
     check r.witness[0].n > 100
@@ -40,7 +41,7 @@ suite "symex Phase 4 — tuples":
     proc nearAxis(p: Point) =
       if p.x == 0 and p.y > 7:
         symexTarget("axis")
-    let r = symexFind(nearAxis, tLabel("axis"))
+    let r = pinFind(nearAxis, tLabel("axis"))
     check r.status == sxSat
     check r.witness[0].x == 0
     check r.witness[0].y > 7

@@ -211,6 +211,74 @@ parameter, K9d-8); `rfc0005_s8aa_remainder`, `rfc0005_s8ac_remainder`,
 `rfc0005_s8ac_remainder_b`, `rfc0005_s8c_resolution`, `tot1_totality_corpus`
 (tuple or object parameters, K9d-5).
 
+## K9d-5 result (`k9d5`)
+
+`boundaryOf` gained tuple and plain-object (and variant-object) domains, built
+by `objectDomain` from each field's own `boundaryOf`:
+
+- a tuple or object is the product of its fields' domains, with the fields
+  that exist together crossed: `fieldRows` is the full product when it is at
+  most `fieldProductFull` (4096) values, else the all-pairs covering array
+  `pairwiseRows` (deterministic greedy: each row starts from the first
+  uncovered pair and fills the other fields with the value that covers the
+  most uncovered pairs);
+- when the product is over 4096, a field of more than 16 values (a one-byte
+  ordinal's 256) is first thinned to nine (the first three, the three about
+  the middle, the last three: `low`, `0`, `high` for an ordinal), so two
+  `int8` fields cross as 9 x 9, not 65536. A thinned or pairwise domain is
+  recorded `sampled`; an aggregate whose fields are all exhaustive and whose
+  product is under the limit stays `exhaustive`;
+- a case object is generated per discriminator value (the discriminator's own
+  domain), with that branch's fields crossed together with the common ones, the
+  discriminator assigned under `cast(uncheckedAssign)`; nested case objects
+  and inherited fields are followed; `ref` objects are skipped (K9d-10);
+- `pinFind` itself no longer truncates a parameter product at the cap: beyond
+  `pinFindCap` it runs an all-pairs array over the parameters' domains.
+
+Coverage guarantee (the oracle may be any finite subset): a sat or raised
+witness is replayed exactly, whatever the domain; for an unsat verdict, each
+pair of fields that exist together (and each pair of parameters) meets in every
+combination of their domain values, at least pairwise, with the thinned
+fields' values standing for the field's boundary. The record's `[n]` is the
+domain size. `tsymex_0016_k9d_pinfind` pins a tuple, an object, a variant
+object (with and without an `else`), a nested tuple, a sat witness outside the
+pairwise set, the size bound and the pairwise property of `pairwiseRows`.
+
+18 suites convert, every verdict reproduced natively; no soundness row.
+`tsymex_162_range_base_width`, `163audit_wave2`, `163rev_enum_field_witness`,
+`163rev_int_literal_width`, `augmented_assign`, `phase11_walker`,
+`phase14_arm_field_zero_init`, `phase14_disc_promotion`, `phase14_else_arms`,
+`phase14_multivariant_walker`, `phase14_multivariant_witness`,
+`phase14_nonenum_disc`, `phase14_symbolic_disc_reassign`, `phase4_nested`,
+`phase4_tuple`, `r6_a2_retbind_variant`, `r6_lows_blockparse`,
+`rectify_variants`. Census: the int72 merge brought the count from 366 to 365
+(the ceiling was reconciled by the same commit), the 18 conversions to 347.
+
+The other 45 of the 63 not-yet-pinned object-family suites (the plan's 77 less
+the 19 already pinned, plus the five K9d-4 deferrals) hold a parameter whose
+domain is another family's, so they stay (the compile error names the type):
+
+- string or `cstring` (K9d-6): `phase15_N0_kindgate_widen`,
+  `phase15_S10b_strconv`, `phase15_g10_smoke`, `r1_draingap`,
+  `rfc0005_s1c_verdict`, `rfc0005_s8bx_extractraise`, `snd1_uncertain_taint`,
+  `tot1_totality_corpus` (cstring)
+- seq, set, table, array of enum (K9d-7): `163audit_range_elem`,
+  `163rev_enum_positions` (array), `163rev_table_elem`, `CR2c_witnessreader_catchall`,
+  `phase15_M1_seq_fixedwidth`, `phase15_fieldcontainer`, `phase5_hashset`,
+  `phase5_table`, `r6_bug2_scopeddecline`, `r6_n13_reassign_seqarm`,
+  `r6_n27_hof_placeholder`, `r6_n49_dottedfield_mutation`,
+  `r6_r1_placeholder_totality`, `rectify_cardinality`, `rectify_mutation`,
+  `rfc0005_s8aa_remainder`, `rfc0005_s8ac_remainder_b`,
+  `rfc0005_s8bx_extractraise_b`, `rfc0005_s8c_resolution`,
+  `rfc0005_s8e_scoping`
+- float (K9d-8): `phase15_C1_canonical_kind`, `phase15_F9c_variant_float`,
+  `phase15_g4_distinct_sort`, `phase15_g5_distinct_borrow`,
+  `r6_n36_raise_degrade_b`, `r6_n36_raise_degrade_c`
+- ref (K9d-10): `0016_cr2_h3_epochpin`, `0016_w3z_r5b_diag`,
+  `163rev_nested_clamp`, `h_containers`, `h_stepC_heapidentity`,
+  `p2b_refobjconstr_expr`, `phase15_r9_recursive`, `rectify_refs`,
+  `rfc0005_s0_exhibit`, `rfc0005_s8ac_remainder`, `rfc0005_s8ao_remainder`
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

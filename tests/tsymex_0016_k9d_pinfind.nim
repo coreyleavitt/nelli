@@ -135,6 +135,15 @@ proc sutWideObj(w: Wide) =
 proc sutNested(n: Nested) =
   if n.p.x > 5 and n.p.x < 3: symexTarget("hit")
 
+type
+  Flip = object
+    case on: bool
+    of true: x: int
+    of false: y: int8
+
+proc sutFlip(f: Flip) =
+  if f.on and f.x > 5 and f.x < 3: symexTarget("hit")
+
 proc sutSix(a, b, c, d, e, f: int) =
   if a > 5 and a < 3 and (b + c + d + e + f) == 0: symexTarget("hit")
 
@@ -338,3 +347,10 @@ suite "K9d: pinFind":
     check blue.len == 81
     check blue.anyIt(it.common == low(int8) and it.c == high(int8))
     check boundaryOf(Shape).values.filterIt(it.k == cRed).len == 256 * 8
+
+  test "a variant object whose case has no else is generated branch by branch":
+    let d = boundaryOf(Flip)
+    check d.values.anyIt(it.on and it.x == 7)
+    check d.values.anyIt(not it.on and it.y == 127'i8)
+    check d.values.len == 8 + 256
+    check pinFind(sutFlip, tLabel("hit")).status == sxUnsat

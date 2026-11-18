@@ -21,6 +21,7 @@
 
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # ===========================================================================
 # SUT procs — explicit form (baseline for cross-checking)
@@ -128,8 +129,8 @@ suite "Augmented-assignment desugaring (walker v31)":
 
   # ---- 1. += gives same verdict AND witness as explicit form ------------------
   test "+= gives same verdict (sxSat) as explicit s = s + x":
-    let rExpl = symexFind(sutPlusExplicit, tLabel("sum7"))
-    let rAug  = symexFind(sutPlusAug, tLabel("sum7"))
+    let rExpl = pinFind(sutPlusExplicit, tLabel("sum7"))
+    let rAug  = pinFind(sutPlusAug, tLabel("sum7"))
     check rExpl.status == sxSat
     check rAug.status  == sxSat
 
@@ -137,26 +138,26 @@ suite "Augmented-assignment desugaring (walker v31)":
     ## Desugared IR is byte-identical to the explicit form, so Z3 should
     ## produce the same satisfying assignment.  If the two witnesses ever
     ## diverge it means the IR differs — a regression in the desugaring.
-    let rExpl = symexFind(sutPlusExplicit, tLabel("sum7"))
-    let rAug  = symexFind(sutPlusAug, tLabel("sum7"))
+    let rExpl = pinFind(sutPlusExplicit, tLabel("sum7"))
+    let rAug  = pinFind(sutPlusAug, tLabel("sum7"))
     check rAug.witness == rExpl.witness
 
   test "+= witness satisfies s + x == 7":
-    let r = symexFind(sutPlusAug, tLabel("sum7"))
+    let r = pinFind(sutPlusAug, tLabel("sum7"))
     check r.status == sxSat
     let s = r.witness[0]; let x = r.witness[1]
     check s + x == 7
 
   # ---- 2. -= gives sxSat for acc - x == 3 ------------------------------------
   test "-= gives sxSat for acc - x == 3":
-    let r = symexFind(sutMinusAug, tLabel("diff3"))
+    let r = pinFind(sutMinusAug, tLabel("diff3"))
     check r.status == sxSat
     let s = r.witness[0]; let x = r.witness[1]
     check s - x == 3
 
   # ---- 3. *= gives sxSat for acc * x == 12 -----------------------------------
   test "*= gives sxSat for acc * x == 12":
-    let r = symexFind(sutMulAug, tLabel("prod12"))
+    let r = pinFind(sutMulAug, tLabel("prod12"))
     check r.status == sxSat
     let s = r.witness[0]; let x = r.witness[1]
     check s * x == 12
@@ -165,14 +166,14 @@ suite "Augmented-assignment desugaring (walker v31)":
   test "iterator integration: sum += elem in for-body → sxSat, witness n==4":
     ## augCountUp(4) yields 0,1,2,3; sum = 0+1+2+3 = 6.
     ## Requires A3-S1 iterator inlining (v30) + += desugaring (v31) together.
-    let r = symexFind(sutIterSumAug, tLabel("sum6"))
+    let r = pinFind(sutIterSumAug, tLabel("sum6"))
     check r.status == sxSat
     check r.witness[0] == 4
 
   # ---- 5. Degradation (Invariant 3) ------------------------------------------
   test "field-LHS augmented assign on a value object is modelled (RFC-0005 S8p) → sxUnsat":
     ## Real Nim: q.x == p.x + b after the `+=`, never p.x + b + 1.
-    let r = symexFind(sutFieldAugModelled, tLabel("field_aug_dead"))
+    let r = pinFind(sutFieldAugModelled, tLabel("field_aug_dead"))
     check r.status == sxUnsat
 
   test "positional-element augmented assign on a seq is modelled (RFC-0005 S8am) → sxUnsat":
@@ -180,5 +181,5 @@ suite "Augmented-assignment desugaring (walker v31)":
     ## unwrapping hidden-deref wrappers, is nnkBracketExpr over a seq --
     ## not a value field chain, and not an array). RFC-0005 S8am closed
     ## that gap, mirroring the array path's own compound-assign arm.
-    let r = symexFind(sutSeqElemAugModelled, tLabel("seq_elem_aug_dead"))
+    let r = pinFind(sutSeqElemAugModelled, tLabel("seq_elem_aug_dead"))
     check r.status == sxUnsat

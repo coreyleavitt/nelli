@@ -9,6 +9,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # W6 — a range-typed (non-enum) variant discriminator with an `else:` arm.
@@ -50,16 +51,16 @@ suite "#163 W6 -- range-alias variant discriminator with an else arm":
     check v.e == 42
 
   test "isExact (the BV discriminator-domain builder) finds the else-arm target":
-    let r = symexFind(gatedElseArm, tLabel("else-hit"), Exact)
+    let r = pinFind(gatedElseArm, tLabel("else-hit"), Exact)
     check r.status == sxSat
 
   test "isOptimised (the promoted-Int discriminator-domain builder) finds it too":
-    let r = symexFind(gatedElseArm, tLabel("else-hit"))
+    let r = pinFind(gatedElseArm, tLabel("else-hit"))
     check r.status == sxSat
 
   test "non-regression -- an explicit `of` arm is still reachable in both modes":
-    check symexFind(gatedOfArm, tLabel("of-hit"), Exact).status == sxSat
-    check symexFind(gatedOfArm, tLabel("of-hit")).status == sxSat
+    check pinFind(gatedOfArm, tLabel("of-hit"), Exact).status == sxSat
+    check pinFind(gatedOfArm, tLabel("of-hit")).status == sxSat
 
 
 # =============================================================================

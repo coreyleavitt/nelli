@@ -11521,6 +11521,7 @@ proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
         fallback = m
     else:
       below.add (depth: mc.len, sym: m, chain: mc)
+      registerHierPointee(mp)   # RFC-0016 INT-81: a witness may need an `mp`
   if fallback == nil: return nil
   below.sort(proc (a, b: auto): int = cmp(b.depth, a.depth))
   # The receiver, read once; its tag at the first depth below the static
@@ -11625,6 +11626,7 @@ proc parseOfTest(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   let nonNil = mkBinop(bNe, mkVar(cell), mkNil(o))
   if tc.len <= sc.len:
     return nonNil
+  registerHierPointee(tp)   # RFC-0016 INT-81: a witness may need a `tp`
   let res = freshSynth(ctx, "ofRes")
   preamble.add mkLet(res, tBool(), mkBoolLit(false))
   var reads: seq[IRStmt]
@@ -12107,6 +12109,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if hier.tgtChain.len <= hier.srcChain.len:
         opIR
       else:
+        registerHierPointee(hier.tgtPointee)   # RFC-0016 INT-81
         let cell = freshSynth(ctx, "objConv")
         preamble.add mkLet(cell, hier.tgtTy, opIR)
         var reads: seq[IRStmt]

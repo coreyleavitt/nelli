@@ -368,6 +368,26 @@ proc witnessTypeSym*(ty: IRType): NimNode =
   if ty.typeKey.len == 0: nil
   else: witnessTypeSyms.getOrDefault(ty.typeKey)
 
+var hierPointees {.compileTime.}: Table[string, seq[IRType]]
+  ## RFC-0016 INT-81. Every object type of an inheritance hierarchy whose
+  ## run-type tag a walk tests (`of`, a down-conversion, a method dispatch),
+  ## by the hierarchy's root id: the dynamic types a witness cell may need
+  ## to be built as (`emitWitnessTuple` registers them with the
+  ## `RefWitness`). Never cleared: an entry is a fact about a type.
+
+proc registerHierPointee*(t: IRType) =
+  ## RFC-0016 INT-81. Record the hierarchy object type `t` (a no-op for a
+  ## type outside a hierarchy, or one already recorded).
+  let c = hierChain(t)
+  if c.len == 0: return
+  for x in hierPointees.getOrDefault(c[0]):
+    if hierChain(x) == c: return
+  hierPointees.mgetOrPut(c[0], @[]).add t
+
+proc hierFamily*(root: string): seq[IRType] =
+  ## RFC-0016 INT-81. The types `registerHierPointee` recorded under `root`.
+  hierPointees.getOrDefault(root)
+
 type
   ClassifiedType* = object
     ty*:    IRType

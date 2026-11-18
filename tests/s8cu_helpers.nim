@@ -1196,6 +1196,7 @@ proc protoOf*[T](t: typedesc[T]): ptr T = nil
 type DomCtx = object
   ty, vals, exh, proto: NimNode
   depth: int
+  refTy: NimNode   ## non-nil: each value is built as a cell of this ref type
 
 proc domLeaf(cx: DomCtx; fields: seq[NimNode];
              discs: seq[(NimNode, NimNode)]): NimNode =
@@ -1221,7 +1222,7 @@ proc domLeaf(cx: DomCtx; fields: seq[NimNode];
       if not `d`.exhaustive: `exh` = false
   let fr = genSym(nskLet, "fr")
   let row = genSym(nskForVar, "row")
-  let o = genSym(nskLet, "o")
+  let o = genSym(if cx.refTy != nil: nskVar else: nskLet, "o")
   let od = nnkDerefExpr.newTree(o)
   let ov = genSym(nskVar, "ov")
   let decl = bindSym"declarable"
@@ -1229,15 +1230,24 @@ proc domLeaf(cx: DomCtx; fields: seq[NimNode];
     let `fr` = fieldRows(@`sizes`)
     if not `fr`.full: `exh` = false
   let setup = newStmtList()
-  setup.add quote do:
-    # a type with no default (a field such as `range[1..100]`) is built in
-    # a zeroed block, every field assigned below; any other in a declared
-    # value (an inheritable object's block would lack its type header)
-    when `decl`(`ty`):
-      var `ov`: `ty`
-      let `o` = addr `ov`
-    else:
-      let `o` = cast[ptr `ty`](alloc0(sizeof(`ty`)))
+  let refTy = cx.refTy
+  if refTy != nil:
+    # INT-81: a hierarchy object is built in its cell, never copied by
+    # value (`objectRefDomain`)
+    setup.add quote do:
+      var `o`: `refTy`
+      new(`o`)
+  else:
+    setup.add quote do:
+      # a type with no default (a field such as `range[1..100]`) is built
+      # in a zeroed block, every field assigned below; any other in a
+      # declared value (an inheritable object's block would lack its type
+      # header)
+      when `decl`(`ty`):
+        var `ov`: `ty`
+        let `o` = addr `ov`
+      else:
+        let `o` = cast[ptr `ty`](alloc0(sizeof(`ty`)))
   for (dn, dv) in discs:
     let asg = newAssignment(selector(dn, od), dv)
     setup.add nnkPragmaBlock.newTree(
@@ -1249,9 +1259,13 @@ proc domLeaf(cx: DomCtx; fields: seq[NimNode];
                              nnkBracketExpr.newTree(row, newLit(i))))
   let put = bindSym"domPut"
   let free = bindSym"freeBlock"
-  setup.add quote do:
-    `put`(`vals`, `o`[])
-    when not `decl`(`ty`): `free`(`o`)
+  if refTy != nil:
+    setup.add quote do:
+      `put`(`vals`, `o`)
+  else:
+    setup.add quote do:
+      `put`(`vals`, `o`[])
+      when not `decl`(`ty`): `free`(`o`)
   body.add nnkForStmt.newTree(row, newDotExpr(fr, ident"rows"), setup)
   result = newStmtList(nnkBlockStmt.newTree(newEmptyNode(), body))
 
@@ -1355,6 +1369,27 @@ macro objectDomain(T: typedesc): untyped =
       var `exh` = true
       `gen`
       Domain[`T`](values: `vals`, exhaustive: `exh`)
+
+macro objectRefDomain(R: typedesc): untyped =
+  ## INT-81. `objectDomain` of a hierarchy object type `R`'s pointee, each
+  ## value built in a cell of `R` (in the same order). A value of such a
+  ## type is never copied whole: Nim's C backend generates a broken `=copy`
+  ## for a descendant of a case object (it assigns the case parent `Sup` an
+  ## integer), so the ref domain builds and copies its cells by reference.
+  let r = R.getType[1]
+  let pointee = newCall(ident"typeof", nnkDerefExpr.newTree(
+    newCall(ident"default", R)))
+  let vals = genSym(nskVar, "vals")
+  let exh = genSym(nskVar, "exh")
+  let proto = nnkDerefExpr.newTree(newCall(bindSym"protoOf", pointee))
+  var cx = DomCtx(ty: pointee, vals: vals, exh: exh, proto: proto, refTy: R)
+  let gen = domEmit(cx, domItemsOf(r), @[], @[])
+  result = quote do:
+    block:
+      var `vals`: seq[`R`]
+      var `exh` = true
+      `gen`
+      Domain[`R`](values: `vals`, exhaustive: `exh`)
 
 # --- the collection domains (K9d-7) -----------------------------------------
 #
@@ -1686,11 +1721,85 @@ proc registerCell(p: pointer; restore: proc () {.closure.}) =
   heapIds[p] = heapIds.len
   heapRestores.add restore
 
+macro hierObject(R: typedesc): bool =
+  ## INT-81: `R` is a ref to an object declared `of` another (`RootObj`
+  ## included), whose cells `refDomain` builds and copies by reference
+  var t = R.getType[1].getTypeImpl
+  if t.kind == nnkRefTy: t = t[0].getTypeImpl
+  newLit(t.kind == nnkObjectTy and t[1].kind == nnkOfInherit)
+
+proc levelObjType(sym: NimNode): NimNode =
+  ## the object type a level of a hierarchy names: a ref alias's pointee
+  let impl = sym.getTypeImpl
+  if impl.kind == nnkRefTy: impl[0] else: sym
+
+macro copyCellInto(R: typedesc; dst, src: typed): untyped =
+  ## INT-81. `dst[]` gets `src[]`'s value without a whole-object copy of
+  ## `R`'s pointee (see `objectRefDomain`): the plain fields of each level
+  ## one by one (by `fieldPairs`, which reaches a field another module does
+  ## not export), and the deepest level holding a `case` (with everything
+  ## above it) as that level's own object, whose copy is sound.
+  result = newStmtList()
+  var names = nnkBracket.newTree()
+  var sym = R.getType[1]
+  var caseLevel: NimNode = nil
+  while true:
+    var t = sym.getTypeImpl
+    if t.kind == nnkRefTy: t = t[0].getTypeImpl
+    if t.kind != nnkObjectTy:
+      error("copyCellInto: not an object type: " & sym.repr, sym)
+    var hasCase = false
+    var own: seq[string]
+    proc scan(n: NimNode) =
+      case n.kind
+      of nnkIdentDefs:
+        for i in 0 ..< n.len - 2:
+          var nn = n[i]
+          if nn.kind == nnkPostfix: nn = nn[1]
+          if nn.kind == nnkPragmaExpr: nn = nn[0]
+          own.add nn.strVal
+      of nnkRecCase: hasCase = true
+      of nnkRecList:
+        for c in n: scan(c)
+      else: discard
+    scan(t[2])
+    if hasCase:
+      caseLevel = levelObjType(sym)
+      break
+    for nm in own: names.add newLit(nm)
+    if t[1].kind != nnkOfInherit: break
+    let par = t[1][0]
+    if par.kind == nnkSym and par.strVal in ["RootObj", "RootRef"]: break
+    sym = par
+  if caseLevel != nil:
+    result.add quote do:
+      cast[ptr `caseLevel`](addr `dst`[])[] =
+        cast[ptr `caseLevel`](addr `src`[])[]
+  if names.len > 0:
+    let n1 = genSym(nskForVar, "n1")
+    let f1 = genSym(nskForVar, "f1")
+    let n2 = genSym(nskForVar, "n2")
+    let f2 = genSym(nskForVar, "f2")
+    result.add quote do:
+      for `n1`, `f1` in fieldPairs(`dst`[]):
+        when `n1` in `names`:
+          for `n2`, `f2` in fieldPairs(`src`[]):
+            when `n1` == `n2`: `f1` = `f2`
+
+proc cellCopy[R](v: R): R =
+  ## INT-81: a new cell holding `v[]`'s value, copied by reference
+  new(result)
+  copyCellInto(R, result, v)
+
 proc snapshotOf[R](r: R): proc () {.closure.} =
   ## restores `r[]` to what it holds now (a proc of its own per cell: a
   ## closure made in a loop would share the loop's one environment)
-  let saved = r[]
-  result = proc () = r[] = saved
+  when hierObject(R):
+    let saved = cellCopy(r)   # INT-81: by reference
+    result = proc () = copyCellInto(R, r, saved)
+  else:
+    let saved = r[]
+    result = proc () = r[] = saved
 
 proc linkSelfFields[R](x: R; to: R) =
   ## every field of `x[]` of the pool's own type `R` set to `to`
@@ -1736,13 +1845,23 @@ proc refDomain[R: ref](t: typedesc[R]): Domain[R] =
     state = 1
     epoch = heapEpoch
     type P = typeof(default(R)[])
-    # an integer pointee keeps its eight boundary points (zero, -1 and 7
-    # among them) plus the SUT's literals; any other its core
-    let core = coreOf(boundaryOf(P), when P is Ordinal: 8 else: refCoreMax)
+    when hierObject(R):
+      # INT-81: a hierarchy object's core is built in cells and copied by
+      # reference (`objectRefDomain`), the values `coreOf` keeps of
+      # `objectDomain` in the same order
+      let full = objectRefDomain(R)
+      let ci = coreIdx(domLen(full.values), refCoreMax)
+      var core: seq[R]
+      for j in 0 ..< domLen(ci): domPut(core, full.values[ci[j]])
+      proc cell(v: R): R = cellCopy(v)
+    else:
+      # an integer pointee keeps its eight boundary points (zero, -1 and 7
+      # among them) plus the SUT's literals; any other its core
+      let core = coreOf(boundaryOf(P), when P is Ordinal: 8 else: refCoreMax)
+      proc cell(v: P): R =
+        new(result)
+        result[] = v
     var cells: seq[R]
-    proc cell(v: P): R =
-      new(result)
-      result[] = v
     for i in 0 ..< domLen(core): domPut(cells, cell(core[i]))
     var linked: seq[R]
     when P is object:

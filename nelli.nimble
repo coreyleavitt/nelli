@@ -1923,6 +1923,8 @@ task test, "Run the test suite":
             "tsymex_0016_int77_floatrange",
             # RFC-0016 INT-82: an allocation is distinct from every object of the walk's entry state (parameters, what they reach, globals).
             "tsymex_0016_int82_paramfresh",
+            # RFC-0016 INT-81: a witness cell is built once per model address, as the dynamic type its run-type tags name, and shared upcast by every position holding it.
+            "tsymex_0016_int81_witnesstag",
             "tsymex_0016_k9cg_unbacked",
             "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",

@@ -8190,6 +8190,12 @@ type
     entryOf: Table[string, int]      ## cell name -> its index in `entries`
     queue:   seq[RefPos]             ## cells to render, in discovery order
     entries: seq[HeapSnapshotEntry]
+    floor:   Table[string, IRType]   ## RFC-0016 INT-81: cell name -> the
+                                     ## deepest static pointee of a position
+                                     ## holding it (`cellDynamicType`)
+    seenPos: HashSet[string]         ## RFC-0016 INT-81: positions recorded
+    renderedLvls: Table[string, seq[int64]]  ## RFC-0016 INT-81: the tags a
+                                             ## cell was rendered for
 
 proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
                  inlineNil: bool): string =
@@ -8199,10 +8205,18 @@ proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
   let sortName = "Ref_" & refPointeeTypeId(pos.pointee)
   let address = refAddrOf(m, pos.addrAst, pos.pointee)
   if address.len == 0:
-    if not inlineNil:
+    if not inlineNil and not b.seenPos.containsOrIncl(pos.name):
       b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
         value: "nil", pointsTo: none(string), aliasRef: none(string))
     return "nil"
+  # RFC-0016 INT-81: a cell rendered again (`buildHeapSnapshot`) meets its
+  # positions again; each is recorded once.
+  if b.seenPos.containsOrIncl(pos.name): return "@" & pos.name
+  # RFC-0016 INT-81: the cell's floor, the deepest static type holding it.
+  block:
+    let cname = b.cellOf.getOrDefault(address, pos.name)
+    if hierChain(pos.pointee).len > hierChain(b.floor.getOrDefault(cname)).len:
+      b.floor[cname] = pos.pointee
   let rendering = $m.eval(pos.addrAst)
   if b.cellOf.hasKey(address) and b.cellOf[address] != pos.name:
     b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
@@ -8441,10 +8455,43 @@ proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     # read of it): no leaf, the typed witness keeps the zero value.
     "<unsupported>"
 
+proc cellDynamicType(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                     cell: RefPos): seq[int64] =
+  ## RFC-0016 INT-81. The run-type tags of the hierarchy object `cell`, at
+  ## depths `1 ..`, written as the leaves `<cell>.@lvl<j>` with its floor
+  ## (`<cell>.@floor`) for the witness (`cellDynBuild`); empty outside a
+  ## hierarchy. The depths down to the floor -- the deepest static type of
+  ## a position holding the cell -- are that type's chain: Nim's static
+  ## typing, which a parameter's facts state (`allocateSym`) and a field's
+  ## do not. Each deeper depth is the model's input tag where the walk read
+  ## that level's heap (an `of`, a down-conversion, a dispatch) and is
+  ## unobserved, the sentinel, where it did not: a type no read names is
+  ## one no test of the path told apart from the deepest one it did.
+  let floorTy = b.floor.getOrDefault(cell.name, cell.pointee)
+  let fc = hierChain(floorTy)
+  if fc.len == 0: return
+  for j in 1 ..< fc.len: result.add inheritTagCode(fc[j])
+  var j = fc.len
+  while true:
+    let key = inheritTagKey(floorTy, j)
+    if not currentVariantHeaps.hasKey(key): break
+    var tmp: RawWitness
+    extractLeaf(m, tmp, "t", heapSelect(cell.addrAst.ctx, inputHeap(key),
+                                        cell.addrAst, tInt(64, signed = true)))
+    let v = tmp.intVals.getOrDefault("t", 0)
+    if v == 0: break
+    result.add v
+    inc j
+  w.intVals[cell.name & ".@floor"] = int64(fc.len - 1)
+  for i, v in result: w.intVals[cell.name & ".@lvl" & $(i + 1)] = v
+
 proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                 cell: RefPos): Option[string] =
   ## RFC-0005 S8h. Write `cell`'s leaves and return its `pointsTo`.
   let typeId = refPointeeTypeId(cell.pointee)
+  # RFC-0016 INT-81: a hierarchy object's dynamic type (its tags).
+  let lvls = cellDynamicType(b, m, w, cell)
+  b.renderedLvls[cell.name] = lvls
   # RFC-0005 S8at: an anonymous tuple pointee is held whole (`isNew`'s
   # `anonTuple`), its elements the leaves `<cell>.Field<i>`.
   var anonTuple = false
@@ -8564,6 +8611,22 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
                                             fname, nil)
     done.add fname
+  # RFC-0016 INT-81. A field a type below the root declares keys on that
+  # type (`fieldHeapKey`), outside this cell's prefix: each the walk read
+  # whose declaring type is on the cell's dynamic chain.
+  if lvls.len > 0:
+    var owned: seq[string]
+    for key, o in heapFieldOwners:
+      if o.depth >= 1 and o.depth <= lvls.len and lvls[o.depth - 1] == o.code:
+        owned.add key
+    sort(owned)
+    for key in owned:
+      let fname = key[key.rfind("__") + 2 .. ^1]
+      if fname in done: continue
+      let r = renderCellField(b, m, w, cell, key, fname, nil)
+      if r == "<unobserved>": continue
+      parts.add fname & "=" & r
+      done.add fname
   some("{" & parts.join(", ") & "}")
 
 proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
@@ -8590,11 +8653,26 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
   for pos in top:
     discard addPosition(b, m, pos, inlineNil = false)
   var i = 0
-  while i < b.queue.len:
-    let cell = b.queue[i]
-    let pointsTo = renderCell(b, m, w, cell)
-    b.entries[b.entryOf[cell.name]].pointsTo = pointsTo
-    inc i
+  while true:
+    while i < b.queue.len:
+      let cell = b.queue[i]
+      let pointsTo = renderCell(b, m, w, cell)
+      b.entries[b.entryOf[cell.name]].pointsTo = pointsTo
+      inc i
+    # RFC-0016 INT-81. A position found after its cell was rendered (a
+    # field of a later cell) may be of a deeper static type, which deepens
+    # the cell's dynamic type: such a cell is rendered again, for the fields
+    # its deeper type declares (a position is recorded once, so its ref
+    # fields add no entry twice).
+    var again = false
+    for k in 0 ..< b.queue.len:
+      let cell = b.queue[k]
+      var probe: RawWitness
+      let lvls = cellDynamicType(b, m, probe, cell)
+      if lvls != b.renderedLvls.getOrDefault(cell.name):
+        b.entries[b.entryOf[cell.name]].pointsTo = renderCell(b, m, w, cell)
+        again = true
+    if not again and i >= b.queue.len: break
   # RFC-0005 S8bh (item 2). A `ptr` cell whose input target (`sel`, see
   # `ptrTargets`) is a field of an object the snapshot holds as a cell
   # aliases that field: `aliasRef = "&<cell>.<field>"`, which the typed
@@ -28298,12 +28376,25 @@ proc readString*(w: RawWitness, name: string): string = w.strVals[name]
 # placeholder by construction).
 
 type
+  WitnessCellBuild* = proc (c: RefWitness; cell, leaves: string;
+                            dst: pointer) {.nimcall.}
+    ## RFC-0016 INT-81. Builds the cell `cell` as one Nim type (`buildCellAs`)
+    ## into the ref slot `dst`, whatever the slot's static type is: the
+    ## object is the cell's dynamic type, and a slot of an ancestor type
+    ## holds it upcast.
+  WitnessCellType = object
+    ## RFC-0016 INT-81. A dynamic type a cell may have: its run-type tag
+    ## codes at depths `1 ..` (`inheritTagCode` of each type of its chain
+    ## below the root), and its builder (nil: no witness can name it).
+    chain: seq[int64]
+    build: WitnessCellBuild
   RefWitness* = ref object
     ## RFC-0005 S8h. One per rendered witness tuple, shared by every position
     ## in it: the snapshot's position -> cell map, and the cells built so far.
     w: RawWitness
     cellOf: Table[string, string]   ## position -> its cell's name ("" = nil)
     cells: Table[string, pointer]   ## cell name -> the object built for it
+    types: seq[WitnessCellType]     ## RFC-0016 INT-81: `registerCellType`
 
 proc newRefWitness*(w: RawWitness): RefWitness =
   ## RFC-0005 S8h. A position absent from the snapshot is nil: a nil field is
@@ -28359,6 +28450,41 @@ proc cellSetMembers(c: RefWitness; path: string): seq[int64] =
   c.w.setMembers.getOrDefault(path)
 proc cellBuilt(c: RefWitness; cell: string): pointer = c.cells.getOrDefault(cell, nil)
 proc cellRecord(c: RefWitness; cell: string; p: pointer) = c.cells[cell] = p
+
+proc registerCellType*(c: RefWitness; chain: seq[int64];
+                       build: WitnessCellBuild) =
+  ## RFC-0016 INT-81. A dynamic type a cell of this witness may have (see
+  ## `cellDynBuild`); the witness tuple registers every type of the
+  ## hierarchies its positions hold (`emitWitnessTuple`).
+  c.types.add WitnessCellType(chain: chain, build: build)
+
+proc cellDynBuild(c: RefWitness; leaves: string): WitnessCellBuild =
+  ## RFC-0016 INT-81. The builder of the cell whose leaves are under
+  ## `leaves`, as the dynamic type the model chose for it, or nil (build it
+  ## as the position's static type). The snapshot writes the cell's run-type
+  ## tag at each depth (`<cell>.@lvl<j>`) and the depth of the deepest
+  ## static type among the positions that hold it (`<cell>.@floor`,
+  ## `cellDynamicType`). The type is the deepest registered one whose chain
+  ## the tags spell, no shallower than that floor: so it is a descendant of
+  ## (or is) every position's static type, and a slot of any of them holds
+  ## it. A tag the registered types do not spell is a type no test of the
+  ## path named (the walk compares tags with the codes of the types it
+  ## names), which the deepest spelled type stands for. A type the witness
+  ## cannot name (nil builder) is skipped for the deepest nameable one;
+  ## `witnessFidelity` classifies such a witness lossy.
+  var floor = 0'i64
+  if not cellInt(c, leaves & ".@floor", floor): return nil
+  var lvls: seq[int64]
+  var v: int64
+  while cellInt(c, leaves & ".@lvl" & $(lvls.len + 1), v): lvls.add v
+  var best = -1
+  for i, t in c.types:
+    if t.build == nil or int64(t.chain.len) < floor or
+       t.chain.len > lvls.len:
+      continue
+    if t.chain != lvls[0 ..< t.chain.len]: continue
+    if best < 0 or t.chain.len > c.types[best].chain.len: best = i
+  if best < 0: nil else: c.types[best].build
 
 var ptrAims {.threadvar.}: Table[pointer, string]
   ## RFC-0005 S8bn (item 2). Each `ptr` witness cell built for a position
@@ -28489,6 +28615,8 @@ proc validDefault[F](f: var F) =
   else:
     discard
 
+proc fillCell[T: ref | ptr](c: RefWitness; cell, leaves: string; x: var T)
+
 proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   ## RFC-0005 S8h. The witness value of the `ref`/`ptr` position `pos`.
   var cell = cellNameOf(c, pos)
@@ -28511,26 +28639,51 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   elif cell.startsWith(ptrAimPrefix):
     leaves = pos
   when T is ref:
-    new(result)
+    # RFC-0016 INT-81. A cell is built ONCE, as the dynamic type the model
+    # gave its address (its run-type tags), not as the static type of the
+    # position that reaches it first; every position holding it gets that
+    # one object, upcast. Built as the position's type, a descendant the
+    # verdict needs (a method override, `of`, a down-conversion) replayed as
+    # its ancestor, and a cell a base-typed position reached first was too
+    # small for a descendant-typed one.
+    let dyn = cellDynBuild(c, leaves)
+    if dyn != nil:
+      dyn(c, cell, leaves, addr result)
+      return
+  fillCell(c, cell, leaves, result)
+
+proc buildCellAs*[T: ref](c: RefWitness; cell, leaves: string; dst: pointer) =
+  ## RFC-0016 INT-81. The `WitnessCellBuild` of the type `T`: the cell built
+  ## as a `T`, stored into the ref slot `dst` (a slot of `T` or an ancestor;
+  ## it holds nil).
+  fillCell(c, cell, leaves, cast[ptr T](dst)[])
+
+proc fillCell[T: ref | ptr](c: RefWitness; cell, leaves: string; x: var T) =
+  ## RFC-0005 S8h (factored out of `resolveRef` at RFC-0016 INT-81). Allocate
+  ## the cell `cell` as a `T`, record it before its fields are read (so a
+  ## cycle back to it finds it), and fill each field from the leaves under
+  ## `leaves`.
+  when T is ref:
+    new(x)
   else:
     # A `ptr` witness cell is unmanaged memory the witness owns for the rest
     # of the process: nothing frees what a SUT is handed as a raw pointer.
-    result = cast[T](alloc0(sizeof(result[])))
-    ptrAimRecord(cell, cast[pointer](result))
-  cellRecord(c, cell, cast[pointer](result))
-  when result[] is object:
+    x = cast[T](alloc0(sizeof(x[])))
+    ptrAimRecord(cell, cast[pointer](x))
+  cellRecord(c, cell, cast[pointer](x))
+  when x[] is object:
     # A case object's discriminator is assigned in field order, before the
     # branch fields `fieldPairs` then yields for the branch it selected.
     {.cast(uncheckedAssign).}:
-      for fname, fv in fieldPairs(result[]):
+      for fname, fv in fieldPairs(x[]):
         readCellField(c, leaves & "." & fname, fv)
         # RFC-0005 S8bh (item 2): the field's address, for a pointer the
         # snapshot aims at it (`aliasRef = "&<cell>.<field>"`).
         cellRecord(c, "&" & leaves & "." & fname, cast[pointer](addr fv))
-    when compiles(cellRecordBranches(c, "&" & leaves, result[])):
-      cellRecordBranches(c, "&" & leaves, result[])
+    when compiles(cellRecordBranches(c, "&" & leaves, x[])):
+      cellRecordBranches(c, "&" & leaves, x[])
   else:
-    readCellField(c, leaves, result[])
+    readCellField(c, leaves, x[])
 
 proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
   ## RFC-0005 S8ap. A seq cell field: `seqLens[path]` elements, each the leaf

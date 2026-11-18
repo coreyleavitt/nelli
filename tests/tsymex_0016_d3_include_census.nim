@@ -796,7 +796,7 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
     for l in hm.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 19   # RFC-0016 INT-82: +4 (provenance)
+    check tvs.len == 20   # RFC-0016 INT-82: +4 (provenance); INT-81: +1 (field owners)
     for n in tvs:
       checkpoint n
       if n in hmProcessStable:

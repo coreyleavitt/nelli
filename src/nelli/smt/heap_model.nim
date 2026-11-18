@@ -322,6 +322,14 @@ func intHeapCell*(ty: IRType): bool =
   {.cast(noSideEffect).}:
     intHeapIsInt and ty != nil and ty.kind == itInt and ty.signed
 
+var heapFieldOwners* {.threadvar.}: Table[string, tuple[code: int64; depth: int]]
+  ## RFC-0016 INT-81. The field heap of a hierarchy type below the root ->
+  ## the run-type tag of the type declaring the field (`inheritTagCode`)
+  ## and its depth, written by `fieldHeapKey`. `buildHeapSnapshot` renders a
+  ## cell's fields of its DYNAMIC type from it: a field a descendant
+  ## declares keys on that descendant, outside the root's heap prefix.
+  ## Reset at `runSymexImpl` entry (`resetHeapModel`).
+
 var heapKeyShapes* {.threadvar.}: Table[string, HeapKeyShape]
   ## RFC-0005 S8h. Heap key -> `HeapKeyShape`, written by `mkHeapArrayVar`.
   ## `buildHeapSnapshot` renders a cell's fields from the heaps themselves:
@@ -1840,15 +1848,25 @@ proc fieldHeapKey*(objTy: IRType, field: string): string =
   ## heap, and siblings' same-named fields are two. A field the type does
   ## not list (a tag level, `@lvl<j>`, or a type without `of`) keeps the
   ## `refPointeeTypeId` key -- the hierarchy's root for a tag level.
+  template owned(id: string; chain: seq[string]): string =
+    let key = sanitizeTypeId(id) & "__" & field
+    # RFC-0016 INT-81: the declaring type's tag, for the witness.
+    let depth = chain.find(id)
+    when nimvm:
+      discard
+    else:
+      if depth >= 1:
+        heapFieldOwners[key] = (code: inheritTagCode(id), depth: depth)
+    key
   if objTy != nil and objTy.kind == itTuple:
     let i = objTy.ownedFieldNames.find(field)
     if i >= 0 and i < objTy.ownedFieldIds.len:
-      return sanitizeTypeId(objTy.ownedFieldIds[i]) & "__" & field
+      return owned(objTy.ownedFieldIds[i], objTy.inheritChain)
   # RFC-0005 S8bn (item 8): a case-object hierarchy's plain field likewise.
   if objTy != nil and objTy.kind == itVariant:
     let i = objTy.vOwnedFieldNames.find(field)
     if i >= 0 and i < objTy.vOwnedFieldIds.len:
-      return sanitizeTypeId(objTy.vOwnedFieldIds[i]) & "__" & field
+      return owned(objTy.vOwnedFieldIds[i], objTy.vInheritChain)
   refPointeeTypeId(objTy) & "__" & field
 
 proc inheritTagKey*(objTy: IRType, level: int): string =
@@ -2175,6 +2193,7 @@ proc resetHeapModel*() =
   globalEntryFacts = @[]
   currentBorrowReboxCounter = 0
   heapKeyShapes = initTable[string, HeapKeyShape]()
+  heapFieldOwners = initTable[string, tuple[code: int64; depth: int]]()   ## RFC-0016 INT-81
   intHeapIsInt = false
   intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()
   intCellFactSeen = initHashSet[uint]()

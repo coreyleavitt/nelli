@@ -187,6 +187,30 @@ and `tsymex_m6_probeproto_strproto` (`hexEqFF`, `runeEqA`, `hexNeGG`). The
 new `tsymex_0016_int72_runedomain` pins the domain and each operation through
 `pinFind`. Census ceiling 386 → 383.
 
+## K9d-4 result (`k9d4`)
+
+The assume gate: `symexAssume` in `engine/markers.nim` is unchanged unless a
+pin's native replay arms the gate (`symexAssumeGateOpen`, called by
+`nativeRun`); then a false `cond` sets a sticky `rejected` flag and raises
+`SymexAssumeRejected`, a `Defect`, so a SUT's `except CatchableError` does not
+see it. A SUT that catches `Exception` or Defect still has its run rejected,
+because `nativeRun` reads the flag, not the exception: a rejected `NativeRun`
+clears its hits and raised type, so it hits nothing and raises nothing. The
+walker's semantics are unchanged, so no walker bump. `pinFind` counts rejected
+runs; a trusted `sxUnsat` whose generated domain is entirely rejected fails
+the pin as vacuous, and a sat or raised witness that violates the assumption
+fails as "rejected by symexAssume". `tsymex_0016_k9d_pinfind` pins an
+assume-guarded unsat, a sat witness, the vacuous domain, a swallowing SUT, and
+the unarmed behaviour.
+
+17 suites convert, all passing with every verdict reproduced natively; no
+verdict disagreed, so no soundness row. The 15 int suites with `symexAssume`
+and two object-family ones (`phase15_A1_arithmetic`, `phase15_A1_comparison`).
+Census ceiling 383 -> 366. Deferred: `phase15_C1_canonical_kind` (float
+parameter, K9d-8); `rfc0005_s8aa_remainder`, `rfc0005_s8ac_remainder`,
+`rfc0005_s8ac_remainder_b`, `rfc0005_s8c_resolution`, `tot1_totality_corpus`
+(tuple or object parameters, K9d-5).
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

@@ -20,6 +20,7 @@
 ## `int` overflow.
 import std/[unittest]
 import nelli/symex
+import ./s8cu_helpers
 
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
@@ -133,34 +134,34 @@ proc borrowNestedArithHoisted(m1, m2: Meters) =
 suite "symex A1 — arithmetic operand-shape characterization corpus":
 
   test "cell 1 (atomic +, coverage): reachable, sxSat":
-    let r = symexFind(arithAtomicAdd, tLabel("hit"))
+    let r = pinFind(arithAtomicAdd, tLabel("hit"))
     check r.status == sxSat
 
   test "cell 2 (div/mod identity, inline-arith): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(arithDivModIdentity, tAssertionViolation())
-    let rHoisted = symexFind(arithDivModIdentityHoisted, tAssertionViolation())
+    let rInline  = pinFind(arithDivModIdentity, tAssertionViolation())
+    let rHoisted = pinFind(arithDivModIdentityHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 3a (div, guarded y != 0): sxUnsat — no violation reachable":
-    let r = symexFind(arithDivGuarded, tAssertionViolation())
+    let r = pinFind(arithDivGuarded, tAssertionViolation())
     check r.status == sxUnsat
 
   test "cell 3b (div, UNGUARDED): sxRaised(DivByZeroDefect) dominates (fork-ordering pin)":
-    let r = symexFind(arithDivUnguarded, tAssertionViolation())
+    let r = pinFind(arithDivUnguarded, tAssertionViolation())
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
 
   test "cell 4 (call-result operand, depth 1): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(arithCallResultD1, tAssertionViolation())
-    let rHoisted = symexFind(arithCallResultD1Hoisted, tAssertionViolation())
+    let rInline  = pinFind(arithCallResultD1, tAssertionViolation())
+    let rHoisted = pinFind(arithCallResultD1Hoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 5 (borrow-op bypass site, nested borrowed +): twin-identical baseline":
-    let rInline  = symexFind(borrowNestedArith, tLabel("hit"))
-    let rHoisted = symexFind(borrowNestedArithHoisted, tLabel("hit"))
+    let rInline  = pinFind(borrowNestedArith, tLabel("hit"))
+    let rHoisted = pinFind(borrowNestedArithHoisted, tLabel("hit"))
     checkTwins(rInline, rHoisted)
     check rInline.status in {sxSat, sxUnsat, sxRaised, sxUnknown}
     if rInline.status == sxUnknown:

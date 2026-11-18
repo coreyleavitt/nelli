@@ -31,6 +31,7 @@
 ## cell last; run via `scripts/dt-bounded.sh <c|cpp> tests/tsymex_phase15_A1_bitwise.nim 300`.
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # Twin-equality helper (verdict AND witness/raised-witness). Duplicated per
@@ -157,42 +158,42 @@ suite "symex A1 — bitwise operand-shape characterization corpus":
     check parseInt(symexWalkerVersion) >= 71
 
   test "cell 1 (atomic AND, coverage): reachable, sxSat":
-    let r = symexFind(bitAtomicAnd, tLabel("hit"))
+    let r = pinFind(bitAtomicAnd, tLabel("hit"))
     check r.status == sxSat
 
   test "cell 2 (#149 inline-arith AND): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(bitAndInlineArith, tAssertionViolation())
-    let rHoisted = symexFind(bitAndInlineArithHoisted, tAssertionViolation())
+    let rInline  = pinFind(bitAndInlineArith, tAssertionViolation())
+    let rHoisted = pinFind(bitAndInlineArithHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 3 (inline-arith OR): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(bitOrInlineArith, tAssertionViolation())
-    let rHoisted = symexFind(bitOrInlineArithHoisted, tAssertionViolation())
+    let rInline  = pinFind(bitOrInlineArith, tAssertionViolation())
+    let rHoisted = pinFind(bitOrInlineArithHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 4 (inline-arith XOR): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(bitXorInlineArith, tAssertionViolation())
-    let rHoisted = symexFind(bitXorInlineArithHoisted, tAssertionViolation())
+    let rInline  = pinFind(bitXorInlineArith, tAssertionViolation())
+    let rHoisted = pinFind(bitXorInlineArithHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 5 (call-result AND, depth 1): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(bitAndCallResultD1, tAssertionViolation())
-    let rHoisted = symexFind(bitAndCallResultD1Hoisted, tAssertionViolation())
+    let rInline  = pinFind(bitAndCallResultD1, tAssertionViolation())
+    let rHoisted = pinFind(bitAndCallResultD1Hoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 6 (call-result AND, depth 2, chronos slotIndex/capMask): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(bitAndCallResultD2, tAssertionViolation())
-    let rHoisted = symexFind(bitAndCallResultD2Hoisted, tAssertionViolation())
+    let rInline  = pinFind(bitAndCallResultD2, tAssertionViolation())
+    let rHoisted = pinFind(bitAndCallResultD2Hoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 7 (nested-mixed, AND/OR/SHR): twin-identical baseline (whatever HEAD proves)":
-    let rInline  = symexFind(bitNestedMixed, tAssertionViolation())
-    let rHoisted = symexFind(bitNestedMixedHoisted, tAssertionViolation())
+    let rInline  = pinFind(bitNestedMixed, tAssertionViolation())
+    let rHoisted = pinFind(bitNestedMixedHoisted, tAssertionViolation())
     checkTwins(rInline, rHoisted)
     # Baseline recorded empirically: no crash, no un-classified degrade.
     check rInline.status in {sxSat, sxUnsat, sxRaised, sxUnknown}

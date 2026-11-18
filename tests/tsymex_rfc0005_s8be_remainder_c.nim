@@ -12,6 +12,7 @@ import std/[unittest, strutils, os]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8be_remainder_c")
@@ -28,7 +29,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tgt)
+    let r = pinFind(fn, tgt)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -36,7 +37,7 @@ template verdict(fn: typed, tgt: SymexTarget, want: SymexStatusKind) =
 template verdictS(fn: typed, tgt: SymexTarget, want: SymexStatusKind,
                   s: SymexSettings) =
   block:
-    let r = symexFind(fn, tgt, s)
+    let r = pinFind(fn, tgt, s)
     checkpoint $tgt & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -203,7 +204,7 @@ suite "RFC-0005 S8be (12): a case object's address":
 
 suite "RFC-0005 S8be (13): the call-depth decline":
   test "names the budget":
-    let r = symexFind(sutDownFree, tLabel("dd"))
+    let r = pinFind(sutDownFree, tLabel("dd"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)

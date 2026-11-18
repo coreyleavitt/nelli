@@ -10,6 +10,7 @@
 ## skip a naive "hoist in the general infix arm" chokepoint.
 import std/[unittest, unicode]
 import nelli/symex
+import ./s8cu_helpers
 
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
@@ -104,30 +105,30 @@ proc runeCompareCallResultHoisted(r1, r2: Rune) =
 suite "symex A1 — comparison operand-shape characterization corpus":
 
   test "cell 1 (atomic <, coverage): reachable, sxSat":
-    let r = symexFind(cmpAtomicLt, tLabel("hit"))
+    let r = pinFind(cmpAtomicLt, tLabel("hit"))
     check r.status == sxSat
 
   test "cell 2 (inline-arith both sides): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(cmpInlineArithBothSides, tAssertionViolation())
-    let rHoisted = symexFind(cmpInlineArithBothSidesHoisted, tAssertionViolation())
+    let rInline  = pinFind(cmpInlineArithBothSides, tAssertionViolation())
+    let rHoisted = pinFind(cmpInlineArithBothSidesHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 3 (call-result operand, depth 1): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(cmpCallResultD1, tAssertionViolation())
-    let rHoisted = symexFind(cmpCallResultD1Hoisted, tAssertionViolation())
+    let rInline  = pinFind(cmpCallResultD1, tAssertionViolation())
+    let rHoisted = pinFind(cmpCallResultD1Hoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 4 (call-result operand, depth 2): sxUnsat baseline, twin-identical":
-    let rInline  = symexFind(cmpCallResultD2, tAssertionViolation())
-    let rHoisted = symexFind(cmpCallResultD2Hoisted, tAssertionViolation())
+    let rInline  = pinFind(cmpCallResultD2, tAssertionViolation())
+    let rHoisted = pinFind(cmpCallResultD2Hoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 5 (rune-compare bypass site, call-result operand): twin-identical baseline":
-    let rInline  = symexFind(runeCompareCallResult, tLabel("hit"))
-    let rHoisted = symexFind(runeCompareCallResultHoisted, tLabel("hit"))
+    let rInline  = pinFind(runeCompareCallResult, tLabel("hit"))
+    let rHoisted = pinFind(runeCompareCallResultHoisted, tLabel("hit"))
     checkTwins(rInline, rHoisted)
     check rInline.status in {sxSat, sxUnsat, sxRaised, sxUnknown}
     if rInline.status == sxUnknown:

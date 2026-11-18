@@ -12,6 +12,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 # --- Shape A: chained nested int32 callees threading a carry ---------------
 
@@ -84,42 +85,42 @@ proc maskReachable(bFlag: bool, rLimb: int32) =
 suite "symex round-5 sello#1 — chained int32 callees (shape A)":
 
   test "carry chained across 3 int32 calls: clean sxUnsat, no walker fault":
-    let r = symexFind(chainedCarry, tAssertionViolation())
+    let r = pinFind(chainedCarry, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "digit-range invariant proves through the chain (non-vacuous UNSAT)":
-    let r = symexFind(chainedCarryDigitRange, tAssertionViolation())
+    let r = pinFind(chainedCarryDigitRange, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "carry propagation is reachable (non-vacuous SAT)":
-    let r = symexFind(chainedCarryReachable, tLabel("carry-propagates"))
+    let r = pinFind(chainedCarryReachable, tLabel("carry-propagates"))
     check r.status == sxSat
 
 suite "symex round-5 sello#1 — branch-merged int32 mask (shape B)":
 
   test "`rLimb and mask` with branch-merged mask: clean, no walker fault":
-    let r = symexFind(maskAnd, tAssertionViolation())
+    let r = pinFind(maskAnd, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "`rLimb + mask` unbounded: the REAL OverflowDefect is found (honesty)":
     ## Was FieldDefect 'bv32' on svBV64 inside overflowCond — the width bug
     ## crashed before the genuine underflow corner could be reported.
-    let r = symexFind(maskAdd, tRaisedExn("OverflowDefect"))
+    let r = pinFind(maskAdd, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "`rLimb + mask` bounded above int32.low: clean, no walker fault":
-    let r = symexFind(maskAddBounded, tRaisedExn("OverflowDefect"))
+    let r = pinFind(maskAddBounded, tRaisedExn("OverflowDefect"))
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "mask identity `x and -1 == x` reachable through the merge (SAT)":
-    let r = symexFind(maskReachable, tLabel("mask-identity"))
+    let r = pinFind(maskReachable, tLabel("mask-identity"))
     check r.status == sxSat
 
 suite "symex round-5 sello — walker version pin":

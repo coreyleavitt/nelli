@@ -16,6 +16,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -30,7 +31,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 template clean(fn: typed, lbl: string, want: SymexStatusKind) =
   ## The verdict, with nothing recorded at all.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
@@ -51,7 +52,7 @@ suite "RFC-0005 S8ax (3): the call depth adapts to the frontier":
     clean(sutDownBounded, "db", sxSat)
   test "past the hard budget it still declines, and names both budgets":
     ## `s8axDown(30)` needs 31 frames, past the default hard budget.
-    let r = symexFind(sutDownDeep, tLabel("dd"))
+    let r = pinFind(sutDownDeep, tLabel("dd"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(beBudgetExhaustedUnmodelled)

@@ -74,6 +74,28 @@ proc sutDistinct(c: Cents) =
 proc sutTiny(t: Tiny) =
   if int(t) > 100 and int(t) < 101: symexTarget("hit")
 
+# symexAssume: the walker restricts to the assumption; the native replay must
+# reject a run that violates it.
+proc sutAssumeUnsat(x: int) =
+  symexAssume(x < 5)
+  if x == 7: symexTarget("hit")
+
+proc sutAssumeSat(x: int) =
+  symexAssume(x > 5)
+  if x == 7: symexTarget("hit")
+
+proc sutAssumeAll(x: int) =
+  symexAssume(x == 1000)
+  if x == 7: symexTarget("hit")
+
+
+proc sutAssumeSwallow(x: int) =
+  try:
+    symexAssume(x < 5)
+  except Exception:
+    discard
+  if x == 7: symexTarget("hit")
+
 suite "K9d: pinFind":
   test "boundaryOf: exhaustive for bool and a small ordinal, sampled for int":
     check boundaryOf(bool).exhaustive
@@ -163,3 +185,30 @@ suite "K9d: pinFind":
     check recordsWith("/sutHoley/").len == 1
     let t = recordsWith("/sutTiny/")
     check t.len == 1 and t[0].exhaustive and "[256]" in t[0].domain
+
+  test "symexAssume: an unsat verdict that holds only under the assumption is pinned":
+    check pinFind(sutAssumeUnsat, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutAssumeUnsat/").len == 1
+
+  test "symexAssume: a sat witness satisfies the assumption and hits":
+    let r = pinFind(sutAssumeSat, tLabel("hit"))
+    check r.status == sxSat
+    check recordsWith("/sutAssumeSat/").len == 1
+
+  test "symexAssume: a domain every run of which is rejected fails the pin":
+    ## the assumption holds only at 1000, outside the boundary sample
+    check symexFind(sutAssumeAll, tLabel("hit")).status == sxUnsat
+    expect PinFailure:
+      discard pinFind(sutAssumeAll, tLabel("hit"))
+
+  test "symexAssume: a SUT that catches every exception stays rejected":
+    check pinFind(sutAssumeSwallow, tLabel("hit")).status == sxUnsat
+
+  test "symexAssume: outside a pin it is unchanged (no raise, no state)":
+    sutAssumeUnsat(7)
+    symexAssume(false)
+    let nr = nativeRun(sutAssumeUnsat(7))
+    check nr.rejected
+    check nr.hits.len == 0 and nr.raised.len == 0
+    symexAssume(false)   # the gate is closed again after the run
+    check not nativeRun(sutAssumeUnsat(1)).rejected

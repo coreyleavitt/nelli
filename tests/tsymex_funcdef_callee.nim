@@ -31,6 +31,7 @@
 
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # ===========================================================================
 # SUTs
@@ -73,25 +74,25 @@ func directUnreachable(x: int) =
 suite "symex: nnkFuncDef acceptance":
 
   test "interprocedural func callee proves sxUnsat (walked, not degraded)":
-    let r = symexFind(checkMaskLow3Bound, tAssertionViolation())
+    let r = pinFind(checkMaskLow3Bound, tAssertionViolation())
     check r.status == sxUnsat
 
   test "func callee body really encoded: falsifiable variant + witness":
-    let r = symexFind(checkMaskLow3Falsifiable, tAssertionViolation())
+    let r = pinFind(checkMaskLow3Falsifiable, tAssertionViolation())
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     check (r.raisedWitness[0] and 7) == 5
 
   test "generic func callee monomorphizes (not silently non-generic)":
-    let r = symexFind(checkGenericFuncCallee, tAssertionViolation())
+    let r = pinFind(checkGenericFuncCallee, tAssertionViolation())
     check r.status == sxUnsat
 
   test "func as direct symexFind target: reachable raise found (sxRaised, not a degrade)":
-    let r = symexFind(directRaise, tAssertionViolation())
+    let r = pinFind(directRaise, tAssertionViolation())
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     check r.raisedWitness[0] == 42
 
   test "func as direct symexFind target: unreachable raise proven (sxUnsat)":
-    let r = symexFind(directUnreachable, tAssertionViolation())
+    let r = pinFind(directUnreachable, tAssertionViolation())
     check r.status == sxUnsat

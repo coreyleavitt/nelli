@@ -3,6 +3,7 @@ import std/compilesettings
 import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
             options, streams, tempfiles, typetraits]
 import nelli/symex
+from nelli/engine/markers import symexAssumeGateOpen, symexAssumeGateClose
 import nelli/db
 import nelli/choice
 import nelli/int128
@@ -94,6 +95,9 @@ type
     ## exception type name it raised ("" if it returned).
     hits*: HashSet[string]
     raised*: string
+    rejected*: bool
+      ## a false `symexAssume` ended the run: the input is outside the
+      ## walker's domain, so the run hit and raised nothing
 
   PinRecord* = object
     runId*, testFile*, entry*: string
@@ -259,6 +263,7 @@ template nativeRun*(call: untyped): NativeRun =
   ## the type name of an exception it raised.
   block:
     var nr: NativeRun
+    let gate = symexAssumeGateOpen()
     symexCaptureBegin()
     try:
       call
@@ -267,6 +272,11 @@ template nativeRun*(call: untyped): NativeRun =
     except CatchableError as e:
       nr.raised = $e.name
     nr.hits = symexCaptureEnd()
+    nr.rejected = symexAssumeGateClose(gate)
+    if nr.rejected:
+      # outside the walker's domain: nothing the run reached counts
+      nr.hits.clear()
+      nr.raised = ""
     nr
 
 func nameMatches(raised, typeId: string): bool =
@@ -284,6 +294,7 @@ proc hitsTarget*(nr: NativeRun; t: SymexTarget): bool =
   of stkUndefined: false   # a witness that reaches undefined behaviour is not run
 
 func describeNative(nr: NativeRun): string =
+  if nr.rejected: return "rejected by symexAssume (outside the assumed domain)"
   var h: seq[string]
   for x in nr.hits: h.add x
   h.sort()
@@ -676,6 +687,7 @@ macro pinFind*(fn: typed; target: untyped;
   let cap = genSym(nskParam, "cap")
   let found = genSym(nskVar, "found")
   let count = genSym(nskVar, "count")
+  let rejected = genSym(nskVar, "rejected")
   # Witness replay: each field copied into a variable, so `var` params bind.
   let wbody = newStmtList()
   let wcall = newCall(fn)
@@ -735,7 +747,9 @@ macro pinFind*(fn: typed; target: untyped;
   inner.add quote do:
     if `found`.len == 0 and `count` < `cap`:
       inc `count`
-      if `hit`(nativeRun(`dused`)): `found` = `shown`
+      let nr = nativeRun(`dused`)
+      if nr.rejected: inc `rejected`
+      elif `hit`(nr): `found` = `shown`
   var loops: NimNode = inner
   for i in countdown(types.len - 1, 0):
     loops = nnkForStmt.newTree(loopVars[i],
@@ -750,7 +764,12 @@ macro pinFind*(fn: typed; target: untyped;
         proc (`hit`: proc (n: NativeRun): bool; `cap`: int): string =
           var `found` = ""
           var `count` = 0
+          var `rejected` = 0
           `loops`
+          if `count` > 0 and `rejected` == `count`:
+            raise newException(PinFailure, "pinFind: every one of the " &
+              $`count` & " generated runs was rejected by symexAssume; " &
+              "the pin is vacuous")
           `found`,
         `combos`, `exh`, `desc`)
 

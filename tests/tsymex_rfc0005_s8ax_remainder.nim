@@ -16,6 +16,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -30,7 +31,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 template verdictS(fn: typed, lbl: string, want: SymexStatusKind,
                   s: SymexSettings) =
   block:
-    let r = symexFind(fn, tLabel(lbl), s)
+    let r = pinFind(fn, tLabel(lbl), s)
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -38,7 +39,7 @@ template verdictS(fn: typed, lbl: string, want: SymexStatusKind,
 template clean(fn: typed, lbl: string, want: SymexStatusKind) =
   ## The verdict, with nothing recorded at all.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
@@ -118,7 +119,7 @@ suite "RFC-0005 S8ax (1): the call cache":
     ## S8as left a summary walked under a pruned context uncached, so
     ## `fib` was walked at every call: `fb_dead` 25.3 s, 49 walks, no hit
     ## (Linux, Z3 5.1, `maxCallDepth = 5`); 8.2 s, 27 walks, 20 hits after.
-    let r = symexFind(sutFib, tLabel("fb_dead"), depth(5))
+    let r = pinFind(sutFib, tLabel("fb_dead"), depth(5))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     let st = r.callStats.filterIt(it.name == "s8axFib")

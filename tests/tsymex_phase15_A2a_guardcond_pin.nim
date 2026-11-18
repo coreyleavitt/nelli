@@ -56,6 +56,7 @@
 ## that adds this file.
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUT: while-guard `(i and 3) < 3` — a compound, FAULT-FREE bitwise operand
@@ -85,7 +86,7 @@ suite "symex A2a — ctx.inGuardCond carve-out behavioral pin (review finding H2
 
   test "compound bitwise guard operand + continue in body resolves to a REAL verdict":
     ## Pins the Case-4 fast path: this must be `sxSat` (never `sxUnknown`).
-    let r = symexFind(sutGuardCondCarveOut, tLabel("hit"))
+    let r = pinFind(sutGuardCondCarveOut, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 7
 

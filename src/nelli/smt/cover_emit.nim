@@ -76,7 +76,14 @@ proc assertCoveredByImpl*(self: NimNode; fn: NimNode; target: SymexTarget; testF
   # helper `symexFindAllWitnesses` uses.
   # RFC-0010 review round 2: via `parseEntryImplWarned`, so an
   # incoherent `settings` warns here too.
-  let parsed = parseEntryImplWarned(fn, "assertCoveredBy", settings)
+  # RFC-0016 PRC-45: through `entryParse`, as every walking entry parses, so
+  # the methods are registered and a type's hook probes (`dupHookProbes`) are
+  # staged here exactly as in the `symexFind` this expands to: no verdict, and
+  # no parse, depends on which entry of a build met a type first.
+  let e = entryParse(fn, "assertCoveredBy", settings,
+    newCall(self, fn, targetLit(target), testFn, newLit(settings)))
+  if e.again != nil: return e.again
+  var parsed = e.parsed  # a copy: a `let` of an object field aliases in the VM (S8x)
 
   let actualTestFn =
     if testFn.kind == nnkNilLit: fn else: testFn

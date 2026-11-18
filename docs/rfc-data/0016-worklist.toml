@@ -826,6 +826,17 @@ cells = []
 pins = ["tsymex_0016_prc35_models", "tsymex_0016_k4b_cells"]
 
 [[row]]
+id = "PRC-45"
+table = "5.2m"
+state = "closed"
+note = "closed `rfc-0016-w4prc45` (walker 418->420, 2026-11-18). The `=dup` sink positions PRC-44 left declining, each exact against native evidence (Nim 2.2.10, c and cpp, `--expandArc`). The classifier follows the compiler's `try` graph (`dfa.genTry`: a call that may raise and the body's end reach every `except` branch, no branch reaches another, `finally` after them, a `return` runs it), and a site with no reachable read and no cut path is the move. Parameters: one not `sink` (`var` too) or a `{.cursor.}` local is copied at every sink position; a `sink` one on its last read moves, and read after it is copied only when its `sink T` has a destructor (`isLastRead`/`destructiveMoveVar`), which a routine's own `sink T` has only when T's destructor is not trivial (a `string`, `seq` or `ref` in it, or a user `=destroy`): `DObj` (an `int`) is the plain copy, `DStr` (a `string`) runs the hook. A generic routine's site is classified on the compiler's instance. A value holding the hooked type runs the generated `=dup`, modelled as the copy with the hook applied per hooked field and element in order (object, tuple, nested, array); a constructor's or a call's value at a sink position is consumed. `let b = a`: the compiler's cursor inference (`varpartitions.computeCursors`) is reproduced for the shape (the B rule on `computeLiveRanges`'s clock, no reassignment, `addr`, `var` argument or constructor of either, no write that may mutate the graph within b's life): a cursor runs the hook at every sink position, else `b` owns a's value. The order of entries no longer decides a verdict (`assertCoveredBy` parses through `entryParse`, `symexForAll` through `symexFindAllWitnesses`). Still declined, pinned: a `seq` of the hooked type (its `=dup` loops over the elements; natively once per element, never for an empty seq); a `sink` parameter of a generic routine read after the site (natively an instance's `sink T` takes `tfHasAsgn` from T, so `q[T](a: sink T)` on `DObj` runs the hook where the same non-generic routine does not; the scan of an instance does not see the formal's spelling); a copy of a local whose two last reads have no node of both trees between them (`dTake2(b, a)`: natively a cursor, but the macro's typed tree and the compiler's transformed one may order them otherwise); a loop, a nested routine or a `defer` around a copy of a local (their own clocks)"
+home = "W4"
+source = "PRC-44 remainder; `tests/tsymex_0016_prc35_models.nim` (`dEarlyReturn`)"
+moves = "the PRC-44 declines become exact where the compiler's rule is deterministic: an `except`/`finally` read, an early `return`, a parameter (`var`, `sink`, plain), a generic routine's site, a value holding the hooked type, a constructor argument, `let b = a`, and the entries' order"
+cells = []
+pins = ["tsymex_0016_prc45_dupmore", "tsymex_0016_prc35_models"]
+
+[[row]]
 id = "PRC-39"
 table = "5.2m"
 state = "open"

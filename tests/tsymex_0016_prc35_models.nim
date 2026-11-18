@@ -180,7 +180,7 @@ proc dArrayReadAfter(k: int) =
   let arr = [a]
   if arr[0].v * 1000 + a.v == 2001: symexTarget("hit")
 proc dEarlyReturn(k: int) =
-  # No path from the sink to the later read: natively the move.
+  # No path from the sink to the later read: natively the move (PRC-45).
   let a = DupObj(v: k)
   if k > 0:
     if dupTake(a) == 1: symexTarget("hit")
@@ -304,8 +304,9 @@ suite "PRC-35":
     check native(dEarlyReturn(1)) == "hit"
     check native(dOnceLoop(1)) == "hit"
     check native(dTupleTemp(1)) == "hit"
-    pinDecline(dEarlyReturn, dCell, feGlobalRouteUnproved,
-               needle = "`a` is read after it")
+    # PRC-45: no read is reachable from the site on a path the scan follows
+    # to its end: the move, exact.
+    check pinExact(dEarlyReturn, dCell, domain = idom).status == sxSat
     pinDecline(dOnceLoop, dCell, feGlobalRouteUnproved, needle = "(in a loop")
     pinDecline(dTupleTemp, dCell, feGlobalRouteUnproved,
                needle = "`a` is read after it")

@@ -1904,6 +1904,8 @@ task test, "Run the test suite":
             "tsymex_0016_prc35_models",
             # RFC-0016 PRC-43: a build that overrides --lib: keeps the stdlib models.
             "tsymex_0016_prc43_libpath",
+            # RFC-0016 PRC-45: the =dup sink positions PRC-44 left declining (except/finally, parameters, containers, cursor inference).
+            "tsymex_0016_prc45_dupmore",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

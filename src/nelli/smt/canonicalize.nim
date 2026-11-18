@@ -832,8 +832,16 @@ const renderAsChoicesVersion* = "12"
   ##   sink position a read of its source is surely reachable from runs the
   ##   type's user `=dup` (the parse walks the hook there, staged behind the
   ##   hook probes), where it declined. No key bytes change.
+  ## - RFC-0016 PRC-45 (418->420; 419 is S8co's): a sink position whose source
+  ##   is read in an `except` branch or a `finally`, a parameter that is not
+  ##   `sink`, and a generic routine's site run the user `=dup` as the
+  ##   compiler's graph has them; a source no read is reachable from moves;
+  ##   a `sink` parameter read after the site is copied only when its type's
+  ##   destructor is not trivial; a value holding the hooked type runs the
+  ##   hook per hooked field and element; a copy of a local is a cursor as
+  ##   the compiler's inference has it. No key bytes change.
 
-const symexWalkerVersion* = "418"
+const symexWalkerVersion* = "420"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

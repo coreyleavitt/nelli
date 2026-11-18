@@ -7,7 +7,8 @@
 ## memo tables (`routineFootprints`, `fileHookMemo`, `typeHookMemo`) and the
 ## `CacheTable` for runtime files live here and nowhere else.
 
-import std/[macros, sets, tables, strutils, macrocache]
+import std/[macros, sets, tables, strutils, macrocache, compilesettings]
+from ./check_scan import libRelPath
 import ./dsl
 import ./scan_kinds
 from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
@@ -485,7 +486,10 @@ proc isRuntimeFile(path: string): bool =
   while i >= 0 and not inSystem:
     inSystem = f.continuesWith("/lib/system/", i)
     i = f.find('/', i + 1)
+  # RFC-0016 PRC-43: also under the configured lib path, whatever its name.
+  let rel = libRelPath(f, querySetting(libPath))
   result = inSystem or f.endsWith("/lib/system.nim") or
+    rel == "system.nim" or rel.startsWith("system/") or
     f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
   runtimeFileMemo[path] = newLit(ord(result))
 

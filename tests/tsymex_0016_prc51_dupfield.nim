@@ -33,6 +33,12 @@
 ##   y3k  0
 ##   y3m  0
 ##   y3n  2
+##   f10  0    (`w.n` written in the loop body: rule A)
+##   t6   1    (`t[0]` moved, `t[1]` read after its sink: copied)
+##   s10  2    (an array read after the loop: rule B makes it a cursor)
+##   s11  2    (an array read in the body after the sink)
+##   s12  2    (`pairs` over an array read after the loop)
+##   y4   0    (`yield x.d` then a made value: owns)
 ##
 ## The macro sees everything the compiler uses for each (`varpartitions`
 ## at 2.2.10, `injectdestructors`' last-read analysis), so each is pinned
@@ -42,8 +48,15 @@
 ## last read moves); otherwise `b` owns and `w.d` is moved at its last read.
 ## `t[0]` of an owning tuple local is moved at its last read, path by path
 ## (t5: reading `t[1]` after does not copy it). `system.items` over a seq
-## yields `lent T` (a cursor: copied at each sink); over an array it
-## yields `a[i]`, which the loop variable owns (`=copy`, then moved).
+## yields `lent T` (a cursor: copied at each sink), and `pairs` over a seq
+## reads the seq again after the body (`assert(len(a) == L)`), so its
+## element variable is a cursor by rule B; over an array both yield
+## `a[i]`, a borrow of the array decided by rule B like `let b = w.d`: the
+## loop variable owns (`=copy`, then moved) unless the array is read after
+## its last read (s10-s12). A loop variable a `yield x.d` assigns borrows
+## from `w` (f1, f2, f6, f7, f10: rule A on a write in the body); a
+## `yield` of a value made there makes it own whatever the others yield
+## (y3h, y3k, y4).
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -75,6 +88,9 @@ iterator freshLoop(n: int): DObj =
     inc i
 iterator mixed(x: DObj; n: int): DObj =
   yield x
+  yield DObj(v: n)
+iterator mixF(x: W; n: int): DObj =
+  yield x.d
   yield DObj(v: n)
 iterator mixed2(x: DObj; n: int): DObj =
   yield DObj(v: n)
@@ -195,6 +211,30 @@ proc y3m(k: int): int =
 proc y3n(k: int): int =
   let a = DObj(v: k)
   for o in mixed(a, k): result += dTake(o) * 100 + o.v
+proc f10(k: int): int =
+  var w = W(d: DObj(v: k), n: 1)
+  for o in fld(w):
+    w.n = 5
+    result += dTake(o) * 100
+  result += w.d.v
+proc t6(k: int): int =
+  var t = (DObj(v: k), DObj(v: k + 1))
+  result += dTake(t[0]) * 100 + dTake(t[1]) * 10 + t[1].v
+proc s10(k: int): int =
+  let s = [DObj(v: k), DObj(v: k + 1)]
+  for o in s: result += dTake(o) * 100
+  result += s[0].v
+proc s11(k: int): int =
+  let s = [DObj(v: k), DObj(v: k + 1)]
+  for o in s: result += dTake(o) * 100 + s[1].v
+proc s12(k: int): int =
+  let s = [DObj(v: k), DObj(v: k + 1)]
+  for i, o in s: result += dTake(o) * 100 + i
+  result += s[1].v
+proc y4(k: int): int =
+  let w = W(d: DObj(v: k), n: 1)
+  for o in mixF(w, k): result += dTake(o) * 100
+  result += w.d.v
 
 # Each entry: `hit` holds the native value, `Never` another classification's.
 template pair(name, neverName: untyped; call, hitV, neverV: untyped) =
@@ -235,6 +275,12 @@ pair(eY3h, eY3hNever, y3h(k), 200 * k + 0, 200 * k + 100)
 pair(eY3k, eY3kNever, y3k(k), 200 * k + 0, 200 * k + 100)
 pair(eY3m, eY3mNever, y3m(k), 200 * k + 0, 200 * k + 100)
 pair(eY3n, eY3nNever, y3n(k), 202 * k + 200, 202 * k + 100)
+pair(eF10, eF10Never, f10(k), 201 * k + 0, 201 * k + 200)
+pair(eT6, eT6Never, t6(k), 111 * k + 21, 111 * k + 11)
+pair(eS10, eS10Never, s10(k), 201 * k + 300, 201 * k + 100)
+pair(eS11, eS11Never, s11(k), 202 * k + 302, 202 * k + 102)
+pair(eS12, eS12Never, s12(k), 201 * k + 302, 201 * k + 102)
+pair(eY4, eY4Never, y4(k), 201 * k + 0, 201 * k + 100)
 
 const idom = sampled([0, 1, 2, 3, 4, 5, -42, 42])
 let dCell = cellKey(axMagic, "Dup")
@@ -248,7 +294,8 @@ suite "PRC-51":
   test "native truth":
     for e in [eF1, eF2, eF3, eF4, eF5, eF6, eF7, eF8, eF9, eT1, eT2, eT3, eT4,
               eT5, eS1, eS2, eS3, eS4, eS5, eS6, eS7, eS8, eS9, eY3f, eY3g,
-              eY3j, eY3l, eY3h, eY3k, eY3m, eY3n]:
+              eY3j, eY3l, eY3h, eY3k, eY3m, eY3n, eF10, eT6, eS10, eS11,
+              eS12, eY4]:
       for k in [-42, 0, 1, 2, 3]:
         check native(e(k)) == "hit"
   test "field paths (rule B on the root, rule A on any path)":
@@ -261,12 +308,14 @@ suite "PRC-51":
     exact(eF7, eF7Never)
     exact(eF8, eF8Never)
     exact(eF9, eF9Never)
+    exact(eF10, eF10Never)
   test "a field of a local at a sink position":
     exact(eT1, eT1Never)
     exact(eT2, eT2Never)
     exact(eT3, eT3Never)
     exact(eT4, eT4Never)
     exact(eT5, eT5Never)
+    exact(eT6, eT6Never)
   test "listed `system` iterators":
     exact(eS1, eS1Never)
     exact(eS2, eS2Never)
@@ -277,6 +326,9 @@ suite "PRC-51":
     exact(eS7, eS7Never)
     exact(eS8, eS8Never)
     exact(eS9, eS9Never)
+    exact(eS10, eS10Never)
+    exact(eS11, eS11Never)
+    exact(eS12, eS12Never)
   test "a local declared in a loop":
     exact(eY3f, eY3fNever)
     exact(eY3g, eY3gNever)
@@ -287,3 +339,4 @@ suite "PRC-51":
     exact(eY3k, eY3kNever)
     exact(eY3m, eY3mNever)
     exact(eY3n, eY3nNever)
+    exact(eY4, eY4Never)

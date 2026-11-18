@@ -49,18 +49,24 @@ proc n1(k: int): int =
   for i, (a, b) in pairs(st): result += i * 100 + a + b
 proc c1(k: int): int =
   for (a, b) in itc(k): result += a + b * 10
-# The C++ backend rejects a destructured `mitems`/`mpairs` (Nim 2.2.10:
-# `(NI&)0` for each `var` view), so these three are read on C only.
+proc m1(k: int): int =
+  var st = @[(k, 2), (3, 4)]
+  for (a, b) in mitems(st): result += a + b * 10
+proc m2(k: int): int =
+  var st = @[(k, 2), (3, 4)]
+  for (a, b) in mitems(st):
+    a += 5
+    b = a
+  result = st[0][1] + st[1][1] * 10
+# A native compiler defect, not nelli's: Nim 2.2.10's C++ backend rejects a
+# destructured `mpairs` (plain Nim, no nelli import:
+#   var st = @[(k, 2), (3, 4)]
+#   for i, (a, b) in mpairs(st): b = a + i
+# compiles on c and fails on cpp with "'a_1' declared as reference but not
+# initialized" and "invalid cast of a prvalue expression of type 'int' to
+# type 'NI&'"; the `mitems` forms m1 and m2 compile on both), so m3 is read
+# on C only.
 when not defined(cpp):
-  proc m1(k: int): int =
-    var st = @[(k, 2), (3, 4)]
-    for (a, b) in mitems(st): result += a + b * 10
-  proc m2(k: int): int =
-    var st = @[(k, 2), (3, 4)]
-    for (a, b) in mitems(st):
-      a += 5
-      b = a
-    result = st[0][1] + st[1][1] * 10
   proc m3(k: int): int =
     var st = @[(k, 2), (3, 4)]
     for i, (a, b) in mpairs(st):
@@ -91,9 +97,9 @@ pair(eI1, eI1Never, i1(k), 5 * k, 5 * k + 1)
 pair(eI2, eI2Never, i2(k), k + 63, k + 36)
 pair(eN1, eN1Never, n1(k), k + 109, k + 9)
 pair(eC1, eC1Never, c1(k), 3 * k + 70, 3 * k)
+pair(eM1, eM1Never, m1(k), k + 63, k + 36)
+pair(eM2, eM2Never, m2(k), k + 85, k + 42)
 when not defined(cpp):
-  pair(eM1, eM1Never, m1(k), k + 63, k + 36)
-  pair(eM2, eM2Never, m2(k), k + 85, k + 42)
   pair(eM3, eM3Never, m3(k), k + 40, k + 42)
 pair(eW1, eW1Never, w1(k), 2 * k + 102, 2 * k + 9)
 pair(eS1, eS1Never, s1(k), k + 195, k + 196)
@@ -108,11 +114,12 @@ suite "INT-75":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 433
   test "native truth":
-    for e in [eU1, eU2, eU3, eP1, eP2, eI1, eI2, eN1, eC1, eW1, eS1]:
+    for e in [eU1, eU2, eU3, eP1, eP2, eI1, eI2, eN1, eC1, eW1, eS1, eM1,
+              eM2]:
       for k in [-42, 0, 1, 2, 3]:
         check native(e(k)) == "hit"
     when not defined(cpp):
-      for e in [eM1, eM2, eM3]:
+      for e in [eM3]:
         for k in [-42, 0, 1, 2, 3]:
           check native(e(k)) == "hit"
   test "a user iterator's tuple, destructured":
@@ -133,9 +140,9 @@ suite "INT-75":
     # Each name is a `var` view of its component (native: a write through
     # it is the element's); the walk spells the loop variable as the
     # element's typed lvalue, and a component has none.
+    pinDecline(eM1, tCell, feUnsupportedStmtKind, needle = "mitems")
+    pinDecline(eM2, tCell, feUnsupportedStmtKind, needle = "mitems")
     when not defined(cpp):
-      pinDecline(eM1, tCell, feUnsupportedStmtKind, needle = "mitems")
-      pinDecline(eM2, tCell, feUnsupportedStmtKind, needle = "mitems")
       pinDecline(eM3, tCell, feUnsupportedStmtKind, needle = "destructuring")
   test "the element is read at each step":
     exact(eW1, eW1Never)

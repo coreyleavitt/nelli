@@ -18,7 +18,7 @@
 ##   oa3 a `for` over `0 ..< x.len` in the iterator, `let b = a`       0
 ##   oa4 the same with a `while`                                       0
 ##   oa5 oa3 sinking `a` itself                                        2
-## Still declined (sound, pinned, not modelled):
+## Declined here, exact since PRC-51 (`tsymex_0016_prc51_dupfield`):
 ##   f1  `yield x.d` (a field of a formal), `w` not read after          0
 ##   f2  the same, `w.d` read after the loop                           2
 ##   t1  `yield (x, 1)`, `dTake(t[0])`                                 1
@@ -37,12 +37,11 @@
 ## (rule C). A magic call (`len(x)` of an `openArray`) mutates no argument
 ## through a pointer (`varpartitions.traverse`: `m == mNone`).
 ## f1/f2: whether `o` is a cursor follows `w`'s live range against `o`'s
-## (rule B) on a field path, which the scan reads for a symbol only (as in
-## straight-line code: `let b = w.d` declines). t1: a field of a local at a
-## sink position is not followed. s1-s4: the loop variable of a listed
-## `system` iterator of the hooked type is not an event the scan keys.
-## y3f: a local declared in a loop owns afresh each pass (not followed).
-## y3h: a mixed iterator (a cursor `yield` and an owning one).
+## (rule B) on a field path. t1: a field of a local at a sink position,
+## moved at its last read path by path. s1-s4: `items`/`pairs` over a seq
+## yield a view (a cursor), over an array a borrow the loop variable owns.
+## y3f: a local declared in a loop owns afresh each pass. y3h: a mixed
+## iterator's loop variable owns, a copy in at each `yield`.
 ## (`for (o, i) in` an iterator yielding a tuple is not parsed by the walker:
 ## a compile-time `expectKind`, outside the `=dup` route; not pinned here.)
 import std/[unittest, strutils]
@@ -259,9 +258,6 @@ template exact(hitP, neverP: untyped) =
   check pinExact(hitP, dCell, domain = idom).status == sxSat
   check pinExact(neverP, dCell, domain = idom).status == sxUnsat
 
-template declined(p: untyped) =
-  pinDecline(p, dCell, feGlobalRouteUnproved, needle = "=dup")
-
 suite "PRC-50":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 432
@@ -292,13 +288,13 @@ suite "PRC-50":
     exact(eY5g, eY5gNever)
     exact(eY3i, eY3iNever)
 
-  test "still declined":
-    declined(eF1)
-    declined(eF2)
-    declined(eT1)
-    declined(eS1)
-    declined(eS2)
-    declined(eS3)
-    declined(eS4)
-    declined(eY3f)
-    declined(eY3h)
+  test "exact since PRC-51":
+    exact(eF1, eF1Never)
+    exact(eF2, eF2Never)
+    exact(eT1, eT1Never)
+    exact(eS1, eS1Never)
+    exact(eS2, eS2Never)
+    exact(eS3, eS3Never)
+    exact(eS4, eS4Never)
+    exact(eY3f, eY3fNever)
+    exact(eY3h, eY3hNever)

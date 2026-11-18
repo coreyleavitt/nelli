@@ -18662,7 +18662,7 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
         # own comment just above for the full rationale. Review R11: routed
         # through `rangeCondsIfNeeded`. RFC-0005 S8ar: a string value is a
         # string of bytes (`seqStrElemConds`, a free string's fact).
-        let tblRangeConds = rangeCondsIfNeeded(tableVal, arrSV.tabValTy) &
+        let tblRangeConds = readRangeConds(tableVal, arrSV.tabValTy) &
                             seqStrElemConds(tableVal)
         survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
       continue
@@ -18788,8 +18788,9 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
           else:
             raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassign's discriminator is always BV/Z3Int-allocated)]
               "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
-          # Review R11: routed through `rangeCondsIfNeeded`.
-          rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)
+          # Review R11: routed through `rangeCondsIfNeeded`; RFC-0016
+          # INT-85: a slot the program zeroed is not bounded (`readRangeConds`).
+          rangeConds = readRangeConds(indexed, arrSV.seqElemTy)
         of itBool:
           let typed = wrap[Z3Array[Z3Int, Z3Bool]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]

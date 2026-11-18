@@ -1928,6 +1928,8 @@ task test, "Run the test suite":
             "tsymex_0016_int83_pointerparam",
             # RFC-0016 INT-84: a holey enum input ranges over its declared ordinals; a hole the program makes stays a value.
             "tsymex_0016_int84_holeyenum",
+            # RFC-0016 INT-85: a zero-initialised slot of an enum or range without 0 holds 0; a caller's value stays in the declared domain.
+            "tsymex_0016_int85_zeroinit",
             "tsymex_0016_k9cg_unbacked",
             "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",

@@ -1645,6 +1645,122 @@ proc intCellRangeFacts*(ctx: Z3Context; arr, idx: RawZ3Ast; ty: IRType) =
       todo.add Z3_get_app_arg(ctx.raw, app, 1)
       todo.add Z3_get_app_arg(ctx.raw, app, 2)
 
+var madeKinds {.threadvar.}:
+    tuple[ready: bool, select, store, ite, constArr: int]
+  ## RFC-0016 INT-85. The linked Z3's decl kinds `madeValueCond` reads, off
+  ## probe terms (`heapChainKinds`' discipline). Process-stable.
+
+proc madeValueCond*(ctx: Z3Context; t: RawZ3Ast):
+    tuple[known: bool; holds: bool; cond: Z3Bool] =
+  ## RFC-0016 INT-85. When the scalar term `t` is a value the program
+  ## itself made, exactly: a numeral (a zeroed slot's 0 from `newSeq`,
+  ## `setLen` growth, `new` or a default, or a literal the walk stored),
+  ## read through the `store`, `ite`, constant-array and `lambda` views the
+  ## walk builds over a container's backing. A Boolean term over the path's
+  ## symbols that holds exactly when the value `t` denotes is such a
+  ## numeral; `known` with `holds` when it is a constant. Any other leaf (a
+  ## free backing array, an input's constant, an arithmetic term) is no
+  ## made value: the declared domain is its read-site fact.
+  ##
+  ## A read site asserts its type's declared domain only where this does
+  ## not hold (`readRangeConds`): a zero-initialised slot of a type whose
+  ## declared values exclude 0 holds 0 natively, which the domain refutes,
+  ## while a value a caller passed lies in it. Past `termWalkMaxDepth` a
+  ## subterm is no made value (the domain is asserted on it, as before).
+  if not madeKinds.ready:
+    let pc = probeContext()
+    let b = mkBoolVar(pc, "__int85_kind_probe_b")
+    let x = mkIntVar(pc, "__int85_kind_probe_x")
+    let arr = mkArrayVar[Z3Int, Z3Int](pc, "__int85_kind_probe_arr")
+    proc kindOf(a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(pc.raw, Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, a))))
+    # Each probe term is wrapped (ref-counted) before the next Z3 call.
+    let ka = wrap[Z3AnyAst](pc, pc.checkErr Z3_mk_const_array(pc.raw,
+      pc.checkErr(Z3_get_sort(pc.raw, x.raw)), x.raw))
+    let kc = kindOf(ka.raw)
+    let st = wrap[Z3AnyAst](pc, checkedStore(pc, arr.raw, x.raw, x.raw))
+    let ks = kindOf(st.raw)
+    madeKinds = (ready: true, select: kindOf(select(arr, x).raw), store: ks,
+                 ite: kindOf(ite(b, x, x + mkInt(pc, 1)).raw), constArr: kc)
+  let kinds = madeKinds
+  type M = tuple[known: bool; holds: bool; cond: Z3Bool]
+  let no = (known: true, holds: false, cond: default(Z3Bool))
+  let yes = (known: true, holds: true, cond: default(Z3Bool))
+  proc asBool(m: M): Z3Bool =
+    if not m.known: m.cond else: mkBool(ctx, m.holds)
+  proc iteM(c: RawZ3Ast; a, b: M): M =
+    if a.known and b.known and a.holds == b.holds: return a
+    (known: false, holds: false,
+     cond: wrap[Z3Bool](ctx, checkedIte(ctx, c, asBool(a).raw, asBool(b).raw)))
+  var memoV: Table[int, M]
+  var memoA: Table[(int, int), M]
+  # One walk for both shapes, so it recurses without a forward declaration:
+  # `arr` set, the element of array `a` at `i`; else, the value `a`.
+  proc walk(a, i: Z3AnyAst; arr: bool; level: int): M =
+    if level > termWalkMaxDepth: return no
+    if not arr:
+      if isNumeralAst(ctx, a.raw): return yes
+      if getAstKind(a) != akApp: return no
+      let id = astId(ctx, a.raw)
+      if id in memoV: return memoV[id]
+      result = no
+      let (decl, args) = unpackApp(a)
+      let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+      if k == kinds.select and args.len == 2:
+        result = walk(args[0], args[1], true, level + 1)
+      elif k == kinds.ite and args.len == 3:
+        result = iteM(args[0].raw, walk(args[1], i, false, level + 1),
+                      walk(args[2], i, false, level + 1))
+      memoV[id] = result
+      return
+    let key = (astId(ctx, a.raw), astId(ctx, i.raw))
+    if key in memoA: return memoA[key]
+    result = no
+    case getAstKind(a)
+    of akQuantifier:
+      if Z3_is_lambda(ctx.raw, a.raw) and
+         Z3_get_quantifier_num_bound(ctx.raw, a.raw) == 1:
+        var sub = i.raw
+        let body = Z3_get_quantifier_body(ctx.raw, a.raw)
+        let inst = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute_vars(ctx.raw,
+          body, 1'u32, cast[ptr UncheckedArray[RawZ3Ast]](addr sub)))
+        result = walk(inst, i, false, level + 1)
+    of akApp:
+      let (decl, args) = unpackApp(a)
+      let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+      if k == kinds.store and args.len == 3:
+        let hit = wrap[Z3Bool](ctx, checkedEq(ctx, i.raw, args[1].raw))
+        result = iteM(hit.raw, walk(args[2], i, false, level + 1),
+                      walk(args[0], i, true, level + 1))
+      elif k == kinds.ite and args.len == 3:
+        result = iteM(args[0].raw, walk(args[1], i, true, level + 1),
+                      walk(args[2], i, true, level + 1))
+      elif k == kinds.constArr and args.len == 1:
+        result = walk(args[0], i, false, level + 1)
+    else: discard
+    memoA[key] = result
+  let root = wrap[Z3AnyAst](ctx, t)
+  walk(root, root, false, 0)
+
+proc readRangeConds*(v: SymVal; ty: IRType): seq[Z3Bool] =
+  ## RFC-0016 INT-85. The declared-domain facts of a value read out of a
+  ## container (a seq element, a heap cell, a table value): the type's
+  ## domain (`rangeCondsIfNeeded`) unless the slot holds a value the program
+  ## made (`madeValueCond`). A slot the program created starts at 0, an
+  ## exact value the walk already models; only a value from a caller (an
+  ## input's backing, a havoc) is bounded to the declared values.
+  result = rangeCondsIfNeeded(v, ty)
+  if result.len == 0 or v.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
+    return
+  let ctx = requireCurrentContext()
+  let m = madeValueCond(ctx, rawAstOf(v))
+  if m.known:
+    if m.holds: result = @[]
+    return
+  var dom = result[0]
+  for i in 1 ..< result.len: dom = dom and result[i]
+  result = @[dom or m.cond]
+
 proc heapSelect*(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
                 pointeeTy: IRType): SymVal =
   ## Phase 15 R1 (ADR-0010). The GROUND heap read `select(heap, p)` — a single
@@ -1746,7 +1862,7 @@ proc svCellWf*(sv: SymVal; ty: IRType; nested: bool; bounded = true): seq[Z3Bool
         domainClause(sv.mvAxes[xi].disc[], axisDiscriminatorDomain(ax)[2])
     r
   else:
-    if nested: rangeCondsIfNeeded(sv, ty) else: @[]
+    if nested: readRangeConds(sv, ty) else: @[]   # RFC-0016 INT-85
 
 proc heapCellWfConds*(ctx: Z3Context; key: string; refSort: RawZ3Sort;
                      valTy: IRType; refAst: Z3AnyAst): seq[Z3Bool] =
@@ -4372,6 +4488,14 @@ func containerZeroBacked(t: IRType): bool =
   of itSet:   isBackedSetElemTy(t.setElemTy)            # RFC-0005 S8z
   else: false
 
+func discHoldsZero(t: IRType): bool =
+  ## RFC-0016 INT-85. A discriminator's type holds 0: no `range` excluding
+  ## it (an enum's ordinal 0 is checked against its tags by the caller). A
+  ## `range` excluding 0 is `defaultZeroTotal` as a value, but its zero is
+  ## no discriminator value (as before INT-85).
+  t == nil or t.kind != itInt or not t.hasRange or t.enumName.len > 0 or
+    (t.rangeLo <= 0 and 0 <= t.rangeHi)
+
 func variantZeroTotal(t: IRType): bool =
   ## RFC-0005 S8n: true when the all-zero memory of variant `t` is a value
   ## of the type -- the discriminator's type holds 0 and 0 is a legal tag
@@ -4380,7 +4504,8 @@ func variantZeroTotal(t: IRType): bool =
   ## discriminator's own range is the domain) -- and every field has a zero
   ## value. An enum whose first ordinal is not 0 fails the first test.
   doAssert t.kind == itVariant
-  if not defaultZeroTotal(t.vDiscTy): return false
+  if not defaultZeroTotal(t.vDiscTy) or not discHoldsZero(t.vDiscTy):
+    return false
   let (_, _, ordSet) = discriminatorDomain(t)
   if ordSet.len > 0 and 0 notin ordSet: return false
   for ft in t.vPlainFieldTypes:
@@ -4400,7 +4525,8 @@ func multiVariantZeroTotal(t: IRType): bool =
   ## admitted).
   doAssert t.kind == itMultiVariant
   for ax in t.mvAxes:
-    if not defaultZeroTotal(ax.discTy): return false
+    if not defaultZeroTotal(ax.discTy) or not discHoldsZero(ax.discTy):
+      return false
     let (_, _, ordSet) = axisDiscriminatorDomain(ax)
     if ordSet.len > 0 and 0 notin ordSet: return false
     for arm in ax.arms:
@@ -4424,12 +4550,15 @@ func defaultZeroTotal*(t: IRType): bool =
     # result field, result and local all read `ord == 0`). It was not total,
     # so the untouched result became a free `retSym` constrained to the
     # enum's ordinals -- excluding the value Nim returns (a false `sxUnsat`
-    # for a label reading it). A `range` excluding 0 stays non-total: Nim
-    # rejects its implicit zero at compile time ("requires explicit
-    # initialization"), and a variant discriminator must start at 0.
-    t.width in {8, 16, 32, 64} and
-      (not t.hasRange or (t.rangeLo <= 0 and 0 <= t.rangeHi) or
-       t.enumName.len > 0)
+    # for a label reading it). RFC-0016 INT-85: a `range` excluding 0 is
+    # total too. Nim rejects its implicit zero only for an untouched
+    # `result` and an object constructor that leaves the field out
+    # ("requires explicit initialization"); `newSeq`, `setLen` growth,
+    # `new`, `default(T)`, a local and an array of one compile (warnings
+    # `UnsafeDefault`, `UnsafeSetLen`, `ProveInit`) and hold 0 (probed). The
+    # zero is the value the program made, which a read site leaves
+    # unbounded (`readRangeConds`).
+    t.width in {8, 16, 32, 64}
   of itTuple:
     for ft in t.fields:
       if not defaultZeroTotal(ft): return false

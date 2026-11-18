@@ -822,6 +822,15 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 INT-85 (444->445, provisional): a zero-initialised slot of
+  ##   an enum or `range` whose declared values exclude 0 (`newSeq`,
+  ##   `setLen` growth, `new`'s cells, a read through a container) holds 0:
+  ##   a read site bounds a value to the declared domain only where it is
+  ##   not a value the program made (`readRangeConds`, `madeValueCond`,
+  ##   heap_model.nim), and a `range` excluding 0 has a zero
+  ##   (`defaultZeroTotal`; `newSeq` of one declined). "It holds 0" was a
+  ##   false `sxUnsat`; a caller's value still lies in the domain. No key
+  ##   bytes change.
   ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
   ##   parameter, its fields, elements, table values, set members, a ref
   ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:
@@ -864,7 +873,7 @@ const renderAsChoicesVersion* = "12"
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "444"
+const symexWalkerVersion* = "445"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -117,6 +117,14 @@ iterator mitemsSince[T](ch: var ExitChannel[T]; m: ExitMark): var T =
     for e in ch.entries.mitems:
       if e.serial > m.serial: yield e.item
 
+iterator itemsSince*[T](ch: ExitChannel[T]; m: ExitMark): T =
+  ## The items of the entries parked after `m`, in parking order, read-only:
+  ## the exported reading of what `mitemsSince` changes in place (R5-08).
+  if ch.entries.len > 0:
+    checkMark(ch.clock, m)
+    for e in ch.entries:
+      if e.serial > m.serial: yield e.item
+
 # ---- Groups ------------------------------------------------------------------
 # Each walk below recurses through nested groups and visits the channels in
 # declaration order. A field that is neither a channel nor a group is a

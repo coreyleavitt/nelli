@@ -302,8 +302,8 @@ suite "R4: exit channels (nelli/smt/exits)":
     check clock.parkedSince(m1)
     # Since m1: b1 and a2, not a1.
     var since: seq[string]
-    for e in g.a.mitemsSince(m1): since.add e.v
-    for e in g.b.mitemsSince(m1): since.add e.v
+    for e in g.a.itemsSince(m1): since.add e.v
+    for e in g.b.itemsSince(m1): since.add e.v
     check since == @["a2", "b1"]
     check g.a.contents.vs == @["a1", "a2"]
     check g.a.len == 2 and g.b.len == 1
@@ -338,7 +338,7 @@ suite "R4: exit channels (nelli/smt/exits)":
     g.ch.park((0, "innerOwn"))
     check g.ch.claimAt(inner, 0).vs == @["innerOwn"]
     var seen: seq[string]
-    for e in g.ch.mitemsSince(outer): seen.add e.v
+    for e in g.ch.itemsSince(outer): seen.add e.v
     check seen == @["outerOwn"]
     # Re-reading after the claim: the earlier entry is still not "since".
     check g.ch.claimAt(outer, 0).vs == @["outerOwn"]
@@ -350,7 +350,7 @@ suite "R4: exit channels (nelli/smt/exits)":
     g.ch.park((0, "before"))
     let m = clock.mark
     g.ch.park((0, "after"))
-    for e in g.ch.mitemsSince(m): e.v = e.v & "*"
+    g.visitSince(m, proc (p: var string) = p = p & "*")
     check g.ch.contents.vs == @["before", "after*"]
     # The stamped entry is still parked after `m`.
     check g.ch.claimAt(m, 0).vs == @["after*"]
@@ -364,7 +364,7 @@ suite "R4: exit channels (nelli/smt/exits)":
     g.ch.park(shared)
     # Parking the same ref again did not move the first entry past `m`.
     var n = 0
-    for e in g.ch.mitemsSince(m): inc n
+    for e in g.ch.itemsSince(m): inc n
     check n == 1
     check g.ch.claimAt(m, 0).len == 1
     check g.ch.len == 1
@@ -407,7 +407,7 @@ suite "R5: channels bound to their clock, grouped by owner":
     expect AssertionDefect:
       discard g.ch.claimAt(default(ExitMark), 0)
     expect AssertionDefect:
-      for e in g.ch.mitemsSince(default(ExitMark)): discard
+      for e in g.ch.itemsSince(default(ExitMark)): discard
     expect AssertionDefect:
       discard clock.parkedSince(default(ExitMark))
     check g.ch.contents.vs == @["a"]
@@ -421,7 +421,7 @@ suite "R5: channels bound to their clock, grouped by owner":
     expect AssertionDefect:
       discard g.ch.claimAt(foreign, 0)
     expect AssertionDefect:
-      for e in g.ch.mitemsSince(foreign): discard
+      for e in g.ch.itemsSince(foreign): discard
     expect AssertionDefect:
       discard clock.parkedSince(foreign)
     check g.ch.contents.vs == @["a"]
@@ -434,9 +434,9 @@ suite "R5: channels bound to their clock, grouped by owner":
     g.loose.park((0, "l"))
     g.held.b.park((0, "b"))
     var seen: seq[string]
-    for e in g.held.a.mitemsSince(m): seen.add e.v
-    for e in g.held.b.mitemsSince(m): seen.add e.v
-    for e in g.loose.mitemsSince(m): seen.add e.v
+    for e in g.held.a.itemsSince(m): seen.add e.v
+    for e in g.held.b.itemsSince(m): seen.add e.v
+    for e in g.loose.itemsSince(m): seen.add e.v
     check seen == @["a", "b", "l"]
 
   test "a group holds only channels and groups":

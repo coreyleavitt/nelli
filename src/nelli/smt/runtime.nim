@@ -13604,6 +13604,29 @@ func depthOf(e: HeldPath): int = e.depth
 func depthOf(e: HeldRaise): int = e.depth
 func depthOf(e: HeldJump): int = e.depth
 
+proc initLoopFrame(clock: ExitClock; hsDepth = 0;
+                   label = ""): LoopFrame {.inline.} =
+  ## RFC-0016 INT-35 (R6-04). The one way to make a loop (or labelled block)
+  ## frame: its exit group is bound to the walk's clock here, so no frame can
+  ## carry a zero-valued group that fails only at its first `park`.
+  LoopFrame(exits: clock.newExits(LoopExits), hsDepth: hsDepth, label: label)
+
+proc initCallFrame(clock: ExitClock; callee = ""; retSym = default(SymVal);
+                   retName = ""; retTy: IRType = nil;
+                   ptrRiskFormals: seq[IRParam] = @[];
+                   ptrSafeFormals: seq[string] = @[];
+                   sp: uint = 0): CallFrame {.inline.} =
+  ## RFC-0016 INT-35 (R6-04). The one way to make an inline-call frame, its
+  ## exit group bound to the walk's clock.
+  CallFrame(exits: clock.newExits(CallExits), callee: callee, retSym: retSym,
+            retName: retName, retTy: retTy, ptrRiskFormals: ptrRiskFormals,
+            ptrSafeFormals: ptrSafeFormals, sp: sp)
+
+proc initCallFrameCtx(clock: ExitClock; frameId = 0): CallFrameCtx {.inline.} =
+  ## RFC-0016 INT-35 (R6-04). The one way to make a call descent's exception
+  ## context, its exit group bound to the walk's clock.
+  CallFrameCtx(frameId: frameId, exits: clock.newExits(FrameExits))
+
 proc pushFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Save the current call frame's exception context and install a
   ## fresh, empty one for the callee being descended into. The handler stack is
@@ -13613,8 +13636,7 @@ proc pushFrame(w: var WalkCtx) {.inline.} =
   ## wired now so E3/E5 need not re-audit the call-descent arms.
   w.frameStack.add w.frame
   inc w.frameIdCounter                        ## RFC-0005 S9
-  w.frame = CallFrameCtx(frameId: w.frameIdCounter,
-                         exits: w.exitClock.newExits(FrameExits))
+  w.frame = initCallFrameCtx(w.exitClock, frameId = w.frameIdCounter)
 
 proc popFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Restore the caller's call frame saved by `pushFrame`.
@@ -17826,8 +17848,8 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Su
   ## early `return` on an ambiguous guard.
   var survivors: seq[Path] = @[]
   var active = paths
-  w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits),
-                            hsDepth: w.frame.handlerStack.len)   # RFC-0005 S8m
+  w.loopStack.add initLoopFrame(w.exitClock,
+                                hsDepth = w.frame.handlerStack.len)   # RFC-0005 S8m
   let frameIx = w.loopStack.high
   defer: discard w.loopStack.pop()
   # RFC-0010 B4: unlike every other ResourceBudget field, `unwind = 0` here
@@ -20569,14 +20591,13 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         inc w.depthWalks[w.callStack.len]
         let ptrRisk = varFormalPtrRisk(w, sig.params, stmt.cargs,
                                        stmt.cVarPtrSafe)   ## RFC-0005 S8bn
-        w.callStack.add CallFrame(
-          exits: w.exitClock.newExits(CallExits),
-          callee: stmt.callee, retSym: retSym,
-          retName: stmt.retName,
-          retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
-          ptrRiskFormals: ptrRisk.risk,
-          ptrSafeFormals: ptrRisk.safe,
-          sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
+        w.callStack.add initCallFrame(w.exitClock,
+          callee = stmt.callee, retSym = retSym,
+          retName = stmt.retName,
+          retTy = (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
+          ptrRiskFormals = ptrRisk.risk,
+          ptrSafeFormals = ptrRisk.safe,
+          sp = nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
         w.callStats[stmt.callee] = CallStat(
           name: stmt.callee,
           walked: w.callStats[stmt.callee].walked + 1,
@@ -20968,9 +20989,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
     # RFC-0005 S8m: a labelled block is a break target (a source `block` a
     # `break` names, or a desugared loop body a `continue` leaves). Paths
     # that `break` it resume after it, beside its fall-through.
-    w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits),
-                              label: stmt.blkLabel,
-                              hsDepth: w.frame.handlerStack.len)
+    w.loopStack.add initLoopFrame(w.exitClock,
+                                  hsDepth = w.frame.handlerStack.len,
+                                  label = stmt.blkLabel)
     let frameIx = w.loopStack.high
     var survivors = walkBlock(stmt.stmts, paths, w)
     # The parked exits were reconciled at the leaves and guards they passed
@@ -21147,8 +21168,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
     # Phase 6: k-unroll. Each iteration forks on the guard.
     var survivors: seq[Path] = @[]
     var active = paths
-    w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits),
-                              hsDepth: w.frame.handlerStack.len)   # RFC-0005 S8m
+    w.loopStack.add initLoopFrame(w.exitClock,
+                                  hsDepth = w.frame.handlerStack.len)   # RFC-0005 S8m
     let frameIx = w.loopStack.high
     # RFC-0005 S8y: the loop's identity for `Path.loopIters` -- the IR
     # statement itself, the same object on every execution in this walk.
@@ -23158,9 +23179,9 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
   proc probeCtx(): WalkCtx =
     result.exitClock = newExitClock()
     result.topExits = result.exitClock.newExits(CallExits)
-    result.frame = CallFrameCtx(exits: result.exitClock.newExits(FrameExits))
+    result.frame = initCallFrameCtx(result.exitClock)
   var w = probeCtx()
-  w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits))
+  w.loopStack.add initLoopFrame(w.exitClock)
   loweringPendingTaint = spur
   let r = walk(mkBreak(), @[np()], w)
   result.resultLen = r.len
@@ -23169,8 +23190,8 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
     result.breakTaint = w.loopStack[0].exits.breakPaths.contents[0].taint
   loweringPendingTaint = savedPending
   var w2 = probeCtx()
-  w2.loopStack.add LoopFrame(exits: w2.exitClock.newExits(LoopExits))
-  w2.callStack.add CallFrame(exits: w2.exitClock.newExits(CallExits))
+  w2.loopStack.add initLoopFrame(w2.exitClock)
+  w2.callStack.add initCallFrame(w2.exitClock)
   w2.loopStack[0].exits.breakPaths.park(np())
   let since = w2.exitClock.mark
   var parked = 0
@@ -23214,7 +23235,7 @@ proc strayFindingProbe*(): StrayFindingProbe =
   proc staged(m: var StmtMark): WalkCtx =
     result.exitClock = newExitClock()
     result.topExits = result.exitClock.newExits(CallExits)
-    result.frame = CallFrameCtx(exits: result.exitClock.newExits(FrameExits))
+    result.frame = initCallFrameCtx(result.exitClock)
     result.found.add RawResult(status: sxRaised, raisedTypeId: "before")
     m = result.stmtMark
     result.admitSolvedHit(RawResult(status: sxSat,
@@ -24326,21 +24347,20 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # Push a call frame whose retSym IS the funcApp: `walk(isReturn)` binds each
   # returning path's value to it as `funcApp == v_i` on that path's pc delta.
   let ptrRisk = varFormalPtrRisk(w, cb.params, ptrArgs, ptrCodes)
-  w.callStack.add CallFrame(
-    exits: w.exitClock.newExits(CallExits),
-    callee: "closure@" & $clo.closureSite.siteHash & "/" &
+  w.callStack.add initCallFrame(w.exitClock,
+    callee = "closure@" & $clo.closureSite.siteHash & "/" &
             $clo.closureSite.declOrder,
-    retSym: funcApp, retName: "__closureRet",
+    retSym = funcApp, retName = "__closureRet",
     # RFC-0005 S8m: a bare `return` that never assigned `result` binds the
     # zero value, as the fall-through twin below does. With no `retTy` the
     # path joined `returnedPaths` unbound, and the explicit-return loop
     # below took its LAST BRANCH CONDITION for the value binding: `if y > 0:
     # return` asserted `y > 0` as a ground axiom of the whole run.
-    retTy: cb.retTy,
+    retTy = cb.retTy,
     # RFC-0005 S8bn (item 3): the lambda's `var` formals a pointer may
     # address (all of them for a call that carries no codes).
-    ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe,
-        sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
+    ptrRiskFormals = ptrRisk.risk, ptrSafeFormals = ptrRisk.safe,
+        sp = nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
   let frameIx = w.callStack.high
   # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
   # to them below.
@@ -26558,7 +26578,7 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
   var w = WalkCtx(
     extHardMark: -1,
     exitClock: exitClock, topExits: exitClock.newExits(CallExits),
-    frame: CallFrameCtx(exits: exitClock.newExits(FrameExits)),
+    frame: initCallFrameCtx(exitClock),
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_k10b_tail_unreached__"),
     params: prog.params, mode: wmFollowConcrete, tailGate: true,
@@ -26975,7 +26995,7 @@ proc runSymexImpl(prog: SymexProgram,
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     exitClock: exitClock, topExits: exitClock.newExits(CallExits),
-    frame: CallFrameCtx(exits: exitClock.newExits(FrameExits)),
+    frame: initCallFrameCtx(exitClock),
     z3: ctx, target: target, params: prog.params,
     mode: wmExplore,   ## RFC-fuzzer-nextgen G1a: explicit for clarity — this
                        ## is also the zero-value, so pre-G1a callers already
@@ -27953,7 +27973,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     exitClock: exitClock, topExits: exitClock.newExits(CallExits),
-    frame: CallFrameCtx(exits: exitClock.newExits(FrameExits)),
+    frame: initCallFrameCtx(exitClock),
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_concolic_unreached__"),
     params: prog.params, mode: wmFollowConcrete,

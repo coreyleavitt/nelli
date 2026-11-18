@@ -15,13 +15,24 @@
 ##     thread's exit, and it runs exactly once there;
 ##   * a release does not break a later run on the same thread, the main
 ##     thread or a Nim thread: the second run finds the same witness.
+##
+## Every run is a K9 `pinExact` on `typeclass:int` (its witness replayed
+## natively, on the thread that found it), so each writes a pin record: the
+## records are INF-04's evidence in the work list, and they show a verdict
+## found on a Nim thread, or after a release, is as exact as any other.
 import std/[unittest, atomics]
 import nelli/symex
+import nelli/smt/admission
 import nelli/thread_state
+import ./s8cu_helpers
 
 proc sut(x, y: int) =
   if x > 1 and y > 1 and x < 2000 and y < 2000 and x * y == 1022117:
     symexTarget("s8ckr_ts")
+
+proc pinned(): SymexStatusKind =
+  ## One run of `sut`, judged and recorded by `pinExact`.
+  pinExact(sut, cellKey(axTypeClass, "int"), tLabel("s8ckr_ts")).status
 
 var releases: Atomic[int]
 
@@ -35,15 +46,15 @@ var probe: Probe
 
 proc runTwiceOnThread() {.thread.} =
   {.cast(gcsafe).}:
-    probe.first = symexFind(sut, tLabel("s8ckr_ts")).status
+    probe.first = pinned()
     let before = releases.load
     releaseSymexThreadState()
     probe.armedRuns = releases.load - before
-    probe.second = symexFind(sut, tLabel("s8ckr_ts")).status
+    probe.second = pinned()
 
 proc runOnceOnThread() {.thread.} =
   {.cast(gcsafe).}:
-    probe.first = symexFind(sut, tLabel("s8ckr_ts")).status
+    probe.first = pinned()
 
 suite "S8ck-r: per-thread state release":
 
@@ -53,9 +64,9 @@ suite "S8ck-r: per-thread state release":
     check releases.load == before + 1
 
   test "a release does not break a later run on the main thread":
-    check symexFind(sut, tLabel("s8ckr_ts")).status == sxSat
+    check pinned() == sxSat
     releaseSymexThreadState()
-    check symexFind(sut, tLabel("s8ckr_ts")).status == sxSat
+    check pinned() == sxSat
     releaseSymexThreadState()
 
   test "a symex run on a Nim thread releases its state when the thread exits":

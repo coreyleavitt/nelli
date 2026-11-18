@@ -25218,8 +25218,18 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       closureDegrade(ceUnsupportedHof,
         "map over a symbolic-length seq maps an unconstrained function symbol " &
              "(the closure body is not applied per element)")
-      let fd = Z3FuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
-        raw: cloSV.closureRawFD, ctx: ctx)
+      # `wrapFuncDecl` takes the wrapper's own reference. The decl is the
+      # closure's run-lifetime decl (`buildClosure` holds one reference for
+      # the run), and the wrapper dec_refs on destroy: built from a bare
+      # object constructor it gave back a reference it never took, the
+      # decl was freed while the closure still named it, and a later
+      # translate into an own context read the freed node (RFC-0016 S8ck-r:
+      # heap-use-after-free under the ASan libz3; Z3 4.13.4's
+      # `ast_translation.cpp` UNREACHABLE on Windows). Masked until nim-z3
+      # d86efda bound the Z3Int/Z3Bool hooks: terms never released kept the
+      # decl alive through the map decl that names it.
+      let fd = wrapFuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
+        ctx, cloSV.closureRawFD)
       let srcArr = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
         seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       let mappedArr = mapArray[Z3Int, Z3BitVec[64], Z3BitVec[64]](fd, srcArr)

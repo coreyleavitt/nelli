@@ -2481,3 +2481,19 @@ evidence = "red at b275700f (before 3605e3b5): the reproducer's parameter, betwe
 aliases = []
 cells = []
 pins = ["tsymex_0016_int84_holeyenum", "tsymex_163audit_range_domain", "tsymex_163rev_enum_domain", "tsymex_163rev_enum_field_witness"]
+
+[[row]]
+id = "INT-85"
+table = "5.8c"
+title = "K9d-11a: a zero-initialised slot of an enum or range without ordinal 0 is refuted at 0. `newSeq[Wide](1)[0]`, a `setLen` growth slot and `new(WRef).w` for `Wide = enum wA = 2, wB = 5` or `range[3..9]` hold 0 natively, but every read out of a container bounded the value to `[low, high]` (`rangeCondsIfNeeded` at the read site), so \"it holds 0\" was a false `sxUnsat`; `newSeq` and `setLen` of such a range declined (`defaultZeroTotal`)"
+class = "soundness"
+state = "closed"
+note = "fixed in the walker (445, provisional; a3400c47): a read site (a seq element, a heap cell's field or pointee, a case object's arm field, a table value, a nested part of a compound element) asserts the declared domain only where the slot does not hold a value the program made (`readRangeConds`, heap_model.nim). `madeValueCond` reads the value term through the views the walk builds over a backing (`store`, `ite`, the constant array of `newSeq`'s zero, `setLen`'s `lambda`) to a Boolean that holds exactly when the value is a numeral: a created slot is modelled exactly as 0 already (`seqNewZeroArrs`, `new`'s zero store), so only a caller's value (a free backing, an input's constant) keeps its domain, and a caller's seq grown by `setLen` keeps it on its old slots. A `range` excluding 0 has a zero (`defaultZeroTotal`), except as a discriminator (`discHoldsZero`). The INT-82 provenance marker (`@pre_<T>`) was not needed: the value term itself tells a made slot from a caller's. Native evidence (pinned toolchain): `newSeq`, `setLen`, `new`, `default(T)`, `default` of an object, a local and an array of `Wide` and of `range[3..9]` all hold 0, and an object constructor leaving a `Wide` field out and an untouched `result` of `Wide` hold 0; for `range[3..9]` those two do not compile (\"requires explicit initialization\"), the others compile with `UnsafeDefault`, `UnsafeSetLen` or `ProveInit` warnings. Predates INT-84 (the reproducer is red alike at 50edafcd). Left: a float range excluding 0.0 (`readRangeConds` reads integer kinds only); `tsymex_r11_range_invariant_audit` is red on the branch from INT-84's direct `bvRangeConds` in `enumHoleConds` (not this row)"
+sha = "a3400c47"
+slice = "K9d"
+home = "K9d-11a (`wip/k9d11`)"
+source = "INT-84 (left)"
+evidence = "red at ae1dc667 and at 50edafcd (before INT-84): the reproducer's `newSeq`, `setLen` and `new` targets for the enum were `sxUnsat` with a native hit, the range's `newSeq` and `setLen` `sxUnknown`, its `new` `sxUnsat`, and a caller's seq grown by `setLen` `sxUnsat` at its grown slot; green after the fix, `tsymex_0016_int85_zeroinit` 25 OK on c and cpp, every zeroed slot `sxSat` replayed, every caller's value `sxUnsat` pinned natively; `0016_int84_holeyenum`, `163rev_enum_domain`, `163rev_enum_field_witness`, `163rev_enum_ordinal`, `163rev_enum_positions`, `163rev_enum_valueshapes`, `0016_cr4_enum_layout`, `k9d_pinfind`, `0016_universe`, `163audit_range_domain`, `163audit_range_elem`, `rfc0005_s8bv_subrange`, `163rev_range_bounds`, CR2 green on c"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int85_zeroinit"]

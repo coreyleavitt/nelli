@@ -848,6 +848,17 @@ cells = []
 pins = ["tsymex_0016_prc46_dupfinal", "tsymex_0016_prc45_dupmore"]
 
 [[row]]
+id = "PRC-47"
+table = "5.2m"
+state = "closed"
+note = "closed `rfc-0016-w4prc47` (walker 424->427, 2026-11-18). The `=dup` shapes PRC-46 left declining, each against native evidence (Nim 2.2.10, c and cpp). A `seq` of a length the walk does not know: the compiler's generated `=dup` is a loop running the element's hook in index order, never for an empty seq, written into the preamble as that loop (`dupSeqValue`), also for a type holding a hooked field. A hook writing a global runs once per element, in index order: its writes are folded in that order, and opened to the route proof only if a sink site stays unmodelled. A hook or a field declared in another module is bound before the main module's code (`dupBefore` by module). A `sink` parameter of a tuple or an array type read after the site: such a type takes `tfHasAsgn` from its components where it is made, and the compiler shares one type among the structurally equal ones written. An alias (`type TE = (D, int)`, `array[1, D]`) is made at its declaration: written before D's hook it moves, after it it runs the hook, in a generic routine's instance (whose T is the first instantiation's, read on the instance: an anonymous `(D, int)` instantiated after an early alias moves) and in a non-generic `sink` tuple alike (a `sink` tuple has no `sink` of its own: `getTypeInst` drops it, the formals keep it, `dupParamSink`); a non-generic `sink` array moves as an object does. Before, a `sink` tuple was read as a non-`sink` parameter, copied at every sink position: right for an anonymous tuple after the hook by accident, a false verdict for an alias before it (`gTE`, `gTL`). A conversion of a value made there (`TE((D(v: k), 5))`) is that value. `except E as e`: the binding is a `let` of the branch, and `newException`'s `(ref E)(...)` type node takes no time in the cursor inference (it declined both locals declared in the branch). Iterators and templates: a nested template is expanded where it is used, a nested iterator naming a local captures it as a nested routine does, and a `for` naming no `b` over any iterator is followed. Still declined, pinned with native evidence: an anonymous tuple or array type holding a hooked component (`n6t(a: sink (D, int))` written after D's hook moves when an equal `(D, int)` formal was written before the hook, runs it otherwise; a generic instance over `array[1, D]` likewise; over `(D, int)` with such a formal the compiler itself fails `injectdestructors.nim(429, 5)`, no native truth); `b` in an unlisted iterator's body, or the header naming `a` with `b` in the body (each inlined copy is classified on its own: two `yield`s give 1 copy of 2, a looping body none; the walk inlines at each `yield`, but a site's classification is keyed by where it is written). Not modelled: the walk does not bind `e` itself (the pins do not read it)"
+home = "W4"
+source = "PRC-46 remainder; `tests/tsymex_0016_prc46_dupfinal.nim` (`sSeqLen`, `sGlob`)"
+moves = "the PRC-46 declines become exact: a `seq` of unknown length, a global-writing hook, another module's hook or field, a `sink` tuple or array alias, `except E as e`, a nested iterator or template, a `for` naming no `b` over any iterator"
+cells = []
+pins = ["tsymex_0016_prc47_dupclose", "tsymex_0016_prc46_dupfinal"]
+
+[[row]]
 id = "PRC-39"
 table = "5.2m"
 state = "open"
@@ -2419,3 +2430,15 @@ source = "CI-B nightly, run 42804432874 (2026-11-10, sha db6c3da6), intake #179 
 evidence = "the msvc shard logs of run 42804432874 (shards 26 and 16) print the VM-iteration error and `rc=1 (compile failed)`; every later msvc gate is green; the pin `tsymex_0016_w3z_r10_nestedreplay` holds a nested replay's compile under the default limit"
 aliases = ["F-0013"]
 cells = []
+
+[[row]]
+id = "INT-73"
+table = "5.8c"
+title = "A conversion to an alias of an anonymous tuple type (`type TE = (D, int)`, then `TE((D(v: k), 5))`) aborted the compile with `mkTupleLit: not an itTuple: itUninterp` (`types.nim(2870)`): `classifyType` read a named tuple alias (`tuple[x, y: int]`) as the tuple but not an anonymous one's, which classified `__unsupported:TE`, and the tuple constructor's `mkTupleLit` asserted an `itTuple`. Reproduced on main 7f6dca28 with no hook (a plain alias and its conversion). Found while modelling PRC-47's `sink` tuple aliases"
+class = "robustness (a compile abort); no verdict change elsewhere"
+state = "closed"
+note = "the alias classifies as the tuple (`dsl_typebridge.classifyType`); a tuple constructor whose type is not read as a tuple of its arity now declines at the site (`feUnsupportedExprKind`) instead of asserting"
+source = "PRC-47 (`rfc-0016-w4prc47`), 2026-11-18"
+evidence = "`tests/tsymex_0016_int73_tuplealias.nim` aborted the compile before the fix (c), green after: a conversion to the alias and an alias holding another tuple, exact against native"
+cells = []
+pins = ["tsymex_0016_int73_tuplealias"]

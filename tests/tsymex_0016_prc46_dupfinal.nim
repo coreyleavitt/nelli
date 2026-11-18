@@ -31,9 +31,8 @@ proc sSeqNever(k: int) =
   let t = @[DObj(v: k), DObj(v: 2 * k)]
   if dTakeSeq(t) * 1000 + t[0].v == 12001: symexTarget("hit")
 proc sSeqLen(k: int) =
-  # One element for k > 0, none otherwise: the hook runs once or never. A
-  # seq of a length the walk does not know maps on the walker's axiom path,
-  # which takes only an `int -> int` closure: declined there, in-band.
+  # One element for k > 0, none otherwise: the hook runs once or never.
+  # PRC-47: exact (the compiler's loop over the elements).
   if k > 100 or k < -100: return
   let t = mkSeq(k)
   if dTakeFirst(t) * 1000 + t.len == (k + 1) * 1000 + 1 and k > 0:
@@ -47,7 +46,8 @@ proc sSeqTup(k: int) =
   let t = (@[DObj(v: k), DObj(v: 2 * k)], 5)
   if dTakeTS(t) * 1000 + t[1] == 23005: symexTarget("hit")
 
-# A hook with an effect beyond its result (a global): declined.
+# A hook with an effect beyond its result (a global). PRC-47: exact, its
+# runs folded in index order.
 var dupCount = 0
 type DGlob = object
   v: int
@@ -61,6 +61,11 @@ proc sGlob(k: int) =
   dupCount = 0
   let t = @[DGlob(v: k), DGlob(v: k)]
   if dTakeGSeq(t) + t.len + dupCount == 2 * k + 6: symexTarget("hit")
+proc sGlobNever(k: int) =
+  if k > 100 or k < -100: return
+  dupCount = 0
+  let t = @[DGlob(v: k), DGlob(v: k)]
+  if dTakeGSeq(t) + t.len + dupCount == 2 * k + 5: symexTarget("hit")
 
 # 2. A generic routine's `sink` parameter read after the site. Natively an
 # instance's `sink T` has a destructor whenever T has `tfHasAsgn` (a user
@@ -403,12 +408,11 @@ suite "PRC-46":
     check native(sSeqTup(1)) == "hit"
     exact(sSeq, sSeqNever)
     check pinExact(sSeqTup, dCell, domain = idom).status == sxSat
-    pinDecline(sSeqLen, dCell, ceUnsupportedHof, needle = "map axiom path")
-    pinDecline(sSeqLenNever, dCell, ceUnsupportedHof, needle = "map axiom path")
+    exact(sSeqLen, sSeqLenNever)
 
-  test "a hook with an effect beyond its result declines over a seq":
+  test "a hook with an effect beyond its result over a seq (PRC-47: exact)":
     check native(sGlob(1)) == "hit"
-    pinDecline(sGlob, dCell, feGlobalRouteUnproved, needle = "=dup")
+    exact(sGlob, sGlobNever)
 
   test "a generic routine's sink parameter read after the site":
     check native(gObj(1)) == "hit"

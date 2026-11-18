@@ -845,8 +845,15 @@ const renderAsChoicesVersion* = "12"
   ##   parameter read after the site is copied when its instance's type has
   ##   `tfHasAsgn`, and the cursor inference follows tied last reads, loops,
   ##   `try`, `defer` and nested routines. No key bytes change.
+  ## - RFC-0016 PRC-47 (424->427; 425-426 are taken): a `seq` of a length the
+  ##   walk does not know runs the hook per element as the compiler's loop,
+  ##   a hook writing a global is folded in index order, a hook or field in
+  ##   another module is bound before the main module, a `sink` tuple or
+  ##   array alias has its flag where it is declared, `except E as e` and
+  ##   iterators and templates are followed by the cursor inference. No key
+  ##   bytes change.
 
-const symexWalkerVersion* = "424"
+const symexWalkerVersion* = "427"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

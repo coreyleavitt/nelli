@@ -26020,7 +26020,7 @@ proc dupDeclares(n: NimNode): seq[NimNode] =
       let x = n[i]
       if x.kind == nnkInfix and x.len == 3 and x[2].kind == nnkSym:
         result.add x[2]
-  else: discard  # k2: n/a: a node of any other kind declares no local itself
+  else: return  # k2: n/a: a node of any other kind declares no local itself (the empty result)
 
 proc dupPlainType(t: NimNode): bool =
   ## PRC-48: a scalar: no hook, no pointer, nothing a sink position copies.

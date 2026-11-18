@@ -14,6 +14,7 @@
 ## forwarded to a second callee, and `addr` actuals.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/types
 import nelli/smt/canonicalize
 
@@ -25,7 +26,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 template clean(fn: typed, lbl: string, want: SymexStatusKind,
                st: SymexSettings = SymexSettings()): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl), st)
+    let r = pinFind(fn, tLabel(lbl), st)
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
@@ -234,7 +235,7 @@ suite "S8bf: two var heap actuals through different refs to one cell":
     discard clean(sutElems, "el", sxSat)
 
   test "an actual that cannot be passed by reference declines":
-    let r = symexFind(sutPtrBox, tLabel("pb_dead"))
+    let r = pinFind(sutPtrBox, tLabel("pb_dead"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
     var named = false

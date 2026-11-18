@@ -35,6 +35,7 @@
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # --- DoD 1: transitive alias chain p == q == r --------------------------------
 # `let q = p; let r = q` makes all three names hold the SAME Ref_T const. A write
@@ -129,37 +130,37 @@ suite "symex Phase 15 R7 — ref equality + alias chain (let-alias + reassignmen
   test "R7: alias chain p == q == r consistent under sat":
     # RFC §R7 named test: write through r visible through p (all three share the
     # refAst via sequential let-aliasing).
-    let res = symexFind(transitive, tLabel("transitive"))
+    let res = pinFind(transitive, tLabel("transitive"))
     check res.status == sxSat
 
   test "R7 test 1b: read-back through r after r[]=5 sees the overwrite → sxSat":
-    let res = symexFind(transitiveReadBack, tLabel("readback"))
+    let res = pinFind(transitiveReadBack, tLabel("readback"))
     check res.status == sxSat
 
   test "R7 test 1c: chain pins p[]=5, so p[]==6 through p is sxUnsat (write reaches p)":
-    let res = symexFind(transitiveContradiction, tLabel("nope"))
+    let res = pinFind(transitiveContradiction, tLabel("nope"))
     check res.status == sxUnsat
 
   test "R7 test 2a: reassignment q=r breaks alias — p[]!=9 still sat after q[]=9 → sxSat":
-    let res = symexFind(reassignBreaksAlias, tLabel("broke"))
+    let res = pinFind(reassignBreaksAlias, tLabel("broke"))
     check res.status == sxSat
 
   test "R7 test 2b: control — before reassignment q aliases p, so p[]!=9 after q[]=9 is sxUnsat":
-    let res = symexFind(beforeReassignAliasLive, tLabel("impossible"))
+    let res = pinFind(beforeReassignAliasLive, tLabel("impossible"))
     check res.status == sxUnsat
 
   test "R7 test 2c: after q=r, read-back q[]==9 through the rebound name → sxSat":
-    let res = symexFind(reassignReadBack, tLabel("qreadback"))
+    let res = pinFind(reassignReadBack, tLabel("qreadback"))
     check res.status == sxSat
 
   test "R7 test 3a: let-alias q=p makes p==q a tautology → sxSat":
-    let res = symexFind(refEqTrue, tLabel("eq"))
+    let res = pinFind(refEqTrue, tLabel("eq"))
     check res.status == sxSat
 
   test "R7 test 3b: let-alias q=p makes p!=q unsatisfiable → sxUnsat":
-    let res = symexFind(refNeqFalse, tLabel("neq"))
+    let res = pinFind(refNeqFalse, tLabel("neq"))
     check res.status == sxUnsat
 
   test "R7 test 3c: two distinct params may differ — p!=r is sat → sxSat":
-    let res = symexFind(distinctRefsMayDiffer, tLabel("maydiffer"))
+    let res = pinFind(distinctRefsMayDiffer, tLabel("maydiffer"))
     check res.status == sxSat

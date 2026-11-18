@@ -109,7 +109,7 @@ suite "symex Phase 15 E5 — finally semantics (finally-raises-replaces)":
             raise newException(ValueError, "finally-raised")
 
   test "E5: finally heap-write visibility (un-deferred at R13: ptr-deref)":
-    let r = symexFind(finallyHeapWrites, tRaisedExn("ValueError"))
+    let r = pinFind(finallyHeapWrites, tRaisedExn("ValueError"))
     # The finally raises after writing q[] = 99, so ValueError propagates out.
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"

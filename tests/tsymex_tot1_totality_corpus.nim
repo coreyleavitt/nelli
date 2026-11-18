@@ -69,6 +69,7 @@
 
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 
@@ -380,26 +381,26 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
   false
 
 let
-  rCast          = symexFind(corpusCastSubExpr,          tLabel("cast_subexpr"))
-  rLowHighNonInt = symexFind(corpusLowHighNonIntFamily,  tLabel("low_high_non_int_family"))
-  rMultiVariant  = symexFind(corpusMultiVariantConstr,   tLabel("multivariant_constr"))
-  rVariantConstructBudget = symexFind(corpusVariantConstructBudgetExceeded,
+  rCast          = pinFind(corpusCastSubExpr,          tLabel("cast_subexpr"))
+  rLowHighNonInt = pinFind(corpusLowHighNonIntFamily,  tLabel("low_high_non_int_family"))
+  rMultiVariant  = pinFind(corpusMultiVariantConstr,   tLabel("multivariant_constr"))
+  rVariantConstructBudget = pinFind(corpusVariantConstructBudgetExceeded,
                                        tLabel("variant_construct_budget_exceeded"))
-  rNarrowIntConv      = symexFind(corpusNarrowIntConv,      tLabel("narrow_int_conv"))
-  rReinterpretIntConv = symexFind(corpusReinterpretIntConv, tLabel("reinterpret_int_conv"))
-  rReinterpretIntConvSoundness = symexFind(corpusReinterpretIntConvSoundness,
+  rNarrowIntConv      = pinFind(corpusNarrowIntConv,      tLabel("narrow_int_conv"))
+  rReinterpretIntConv = pinFind(corpusReinterpretIntConv, tLabel("reinterpret_int_conv"))
+  rReinterpretIntConvSoundness = pinFind(corpusReinterpretIntConvSoundness,
                                             tLabel("reinterpret_int_conv_soundness"))
-  rCstring       = symexFind(corpusCstringParam,         tLabel("cstring_param"))
-  rSeqObject     = symexFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
-  rHashSetString = symexFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
-  rNestedTuple   = symexFind(corpusNestedTupleWitness,   tLabel("nested_tuple_witness"))
-  rDivAssign     = symexFind(corpusDivAssignTaint,       tLabel("div_assign_taint"))
-  rClosureBody   = symexFind(corpusClosureBodyTaint,     tLabel("closure_body_taint"))
-  rClosureDepth  = symexFind(corpusClosureDepthBail,     tLabel("closure_depth_bail"))
-  rInternalFault = symexFind(corpusInternalFaultInjector, tLabel("__inject_walker_fault__"))
-  rUnsupportedFieldRead = symexFind(corpusUnsupportedFieldRead, tLabel("unsupported_field_read"))
-  rBareLenRead   = symexFind(corpusBareLenRead,          tLabel("bare_len_read"))
-  rCompositeFallthrough = symexFind(corpusCompositeImplicitFallthrough,
+  rCstring       = pinFind(corpusCstringParam,         tLabel("cstring_param"))
+  rSeqObject     = pinFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
+  rHashSetString = pinFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
+  rNestedTuple   = pinFind(corpusNestedTupleWitness,   tLabel("nested_tuple_witness"))
+  rDivAssign     = pinFind(corpusDivAssignTaint,       tLabel("div_assign_taint"))
+  rClosureBody   = pinFind(corpusClosureBodyTaint,     tLabel("closure_body_taint"))
+  rClosureDepth  = pinFind(corpusClosureDepthBail,     tLabel("closure_depth_bail"))
+  rInternalFault = pinFind(corpusInternalFaultInjector, tLabel("__inject_walker_fault__"))
+  rUnsupportedFieldRead = pinFind(corpusUnsupportedFieldRead, tLabel("unsupported_field_read"))
+  rBareLenRead   = pinFind(corpusBareLenRead,          tLabel("bare_len_read"))
+  rCompositeFallthrough = pinFind(corpusCompositeImplicitFallthrough,
                                      tLabel("composite_implicit_fallthrough"))
   uCompositeFallthrough = rfc0005RawStatus   ## captured before the next run
 
@@ -585,7 +586,7 @@ suite "symex TOT-1 — A6-rider: an assigned composite result on an implicit fal
     check rCompositeFallthrough.errors.len == 0
 
   test "its dead twin is sxUnsat, never a free retSym's sxSat (RFC-0005 S8u)":
-    let r = symexFind(corpusCompositeImplicitFallthroughDead,
+    let r = pinFind(corpusCompositeImplicitFallthroughDead,
                       tLabel("composite_implicit_fallthrough_dead"))
     checkpoint($r.status & " " & $r.errors)
     check r.status == sxUnsat

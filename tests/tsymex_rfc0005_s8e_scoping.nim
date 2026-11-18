@@ -21,7 +21,7 @@
 ##       in the CALLER's scope, where they may be undeclared or name a
 ##       different symbol (S8d's dropped non-generic user `OrderedTable`).
 ##   (d) the walker version floor.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -196,93 +196,93 @@ proc s8eNarrowShadow(a, b: ShK) =
 
 suite "S8e (a) scoping: one env slot per symbol":
   test "block: the inner write does not reach the outer k -- sxUnsat":
-    let r = symexFind(s8eBlockNeg, tLabel("s8e_block_neg"))
+    let r = pinFind(s8eBlockNeg, tLabel("s8e_block_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "block: the inner k does not hide the outer k -- sxSat at 7":
-    let r = symexFind(s8eBlockPos, tLabel("s8e_block_pos"))
+    let r = pinFind(s8eBlockPos, tLabel("s8e_block_pos"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] == 7
 
   test "if arm: sxUnsat":
-    let r = symexFind(s8eIfNeg, tLabel("s8e_if_neg"))
+    let r = pinFind(s8eIfNeg, tLabel("s8e_if_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "loop body: never the conflated sxSat; the loop's own decline":
-    let ctl = symexFind(s8eLoopCtl, tLabel("s8e_loop_ctl"))
+    let ctl = pinFind(s8eLoopCtl, tLabel("s8e_loop_ctl"))
     checkpoint("ctl " & $ctl.status & " " & show(ctl.errors))
-    let r = symexFind(s8eLoopNeg, tLabel("s8e_loop_neg"))
+    let r = pinFind(s8eLoopNeg, tLabel("s8e_loop_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status != sxSat
     check r.status == ctl.status
 
   test "while body: never the conflated sxSat":
-    let r = symexFind(s8eWhileNeg, tLabel("s8e_while_neg"))
+    let r = pinFind(s8eWhileNeg, tLabel("s8e_while_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status != sxSat
 
   test "for-variable: never the conflated sxSat":
-    let r = symexFind(s8eForVarNeg, tLabel("s8e_forvar_neg"))
+    let r = pinFind(s8eForVarNeg, tLabel("s8e_forvar_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status != sxSat
 
   test "param shadowed in a block: sxSat at 9":
-    let r = symexFind(s8eParamPos, tLabel("s8e_param_pos"))
+    let r = pinFind(s8eParamPos, tLabel("s8e_param_pos"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] == 9
 
   test "closure body local (control): sxUnsat both ways":
-    let r1 = symexFind(s8eClosureBody, tLabel("s8e_closurebody_neg"))
+    let r1 = pinFind(s8eClosureBody, tLabel("s8e_closurebody_neg"))
     checkpoint($r1.status & " " & show(r1.errors))
     check r1.status == sxUnsat
     checkUnsatOverTaintOnly(r1)
-    let r2 = symexFind(s8eClosureBody, tLabel("s8e_closurebody_outer"))
+    let r2 = pinFind(s8eClosureBody, tLabel("s8e_closurebody_outer"))
     checkpoint($r2.status & " " & show(r2.errors))
     check r2.status == sxUnsat
     checkUnsatOverTaintOnly(r2)
 
   test "a lambda that captures k and declares its own k: sxUnsat":
-    let r = symexFind(s8eLambdaBoth, tLabel("s8e_lambdaboth_neg"))
+    let r = pinFind(s8eLambdaBoth, tLabel("s8e_lambdaboth_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "captured outer k, inner shadow written: sxUnsat":
-    let r = symexFind(s8eCapOuterNeg, tLabel("s8e_capouter_neg"))
+    let r = pinFind(s8eCapOuterNeg, tLabel("s8e_capouter_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "captured outer k mutated, then an inner shadow written: sxUnsat":
-    let r = symexFind(s8eCapOuterMut, tLabel("s8e_capoutermut_neg"))
+    let r = pinFind(s8eCapOuterMut, tLabel("s8e_capoutermut_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "captured inner k: sxUnsat; the outer k stays the param's":
-    let r1 = symexFind(s8eCapInner, tLabel("s8e_capinner_neg"))
+    let r1 = pinFind(s8eCapInner, tLabel("s8e_capinner_neg"))
     checkpoint($r1.status & " " & show(r1.errors))
     check r1.status == sxUnsat
     checkUnsatOverTaintOnly(r1)
-    let r2 = symexFind(s8eCapInner, tLabel("s8e_capinner_pos"))
+    let r2 = pinFind(s8eCapInner, tLabel("s8e_capinner_pos"))
     checkpoint($r2.status & " " & show(r2.errors))
     check r2.status == sxSat
     check r2.witness[0] div 2 == 5
 
   test "an inlined iterator's local is not the caller's: sxUnsat":
-    let r = symexFind(s8eIterNeg, tLabel("s8e_iter_neg"))
+    let r = pinFind(s8eIterNeg, tLabel("s8e_iter_neg"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
   test "case narrowing keys the scrutinee by symbol: sxSat at (shA, shB)":
-    let r = symexFind(s8eNarrowShadow, tLabel("s8e_narrow_pos"))
+    let r = pinFind(s8eNarrowShadow, tLabel("s8e_narrow_pos"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] == shA
@@ -330,20 +330,20 @@ proc s8eGen3(s: seq[int]) =
 suite "S8e (b) generic callees keep their types":
   # Before S8e none of these compiled: the file aborted at macro expansion.
   test "a user alias of seq as a param: the S8d user-alias decline":
-    let r = symexFind(s8eAliasParamIn, tLabel("s8e_alias_param_in"))
+    let r = pinFind(s8eAliasParamIn, tLabel("s8e_alias_param_in"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedParamType)
 
   test "`x in s` over a local alias: a recorded decline":
-    let r = symexFind(s8eAliasLocalIn, tLabel("s8e_alias_local_in"))
+    let r = pinFind(s8eAliasLocalIn, tLabel("s8e_alias_local_in"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOp)
     check r.errors.len > 0
 
   test "`s.add x` over a local alias: a recorded decline":
-    let r = symexFind(s8eAliasLocalAdd, tLabel("s8e_alias_local_add"))
+    let r = pinFind(s8eAliasLocalAdd, tLabel("s8e_alias_local_add"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedExprKind)
@@ -351,19 +351,19 @@ suite "S8e (b) generic callees keep their types":
     check r.errors.len > 0
 
   test "a user generic over seq[T]: modelled, sxSat":
-    let r = symexFind(s8eGen1, tLabel("s8e_gen1"))
+    let r = pinFind(s8eGen1, tLabel("s8e_gen1"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0].len > 0 and r.witness[0][0] == r.witness[1]
 
   test "a user generic whose body calls a helper: modelled, sxSat at 3":
-    let r = symexFind(s8eGen2, tLabel("s8e_gen2"))
+    let r = pinFind(s8eGen2, tLabel("s8e_gen2"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] == 3
 
   test "a user generic over seq[T] that calls a helper: sxSat at len 3":
-    let r = symexFind(s8eGen3, tLabel("s8e_gen3"))
+    let r = pinFind(s8eGen3, tLabel("s8e_gen3"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0].len == 3
@@ -380,84 +380,84 @@ suite "S8e (c) the witness emitter names types by symbol":
   # This module imports only the SUT procs from `s8e_user_types`, and not
   # `std/tables` or `std/sets` directly. Before S8e it did not compile.
   test "seq[int]":
-    let r = symexFind(s8eSeq, tLabel("s8e_w_seq"))
+    let r = pinFind(s8eSeq, tLabel("s8e_w_seq"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0].len == 2 and r.witness[0][0] == 5
 
   test "Table[string, int]":
-    let r = symexFind(s8eTable, tLabel("s8e_w_table"))
+    let r = pinFind(s8eTable, tLabel("s8e_w_table"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check $r.witness[0] == """{"a": 3}"""
 
   test "HashSet[int]":
-    let r = symexFind(s8eSet, tLabel("s8e_w_set"))
+    let r = pinFind(s8eSet, tLabel("s8e_w_set"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check 4 in r.witness[0]
 
   test "a non-generic user OrderedTable beside std/tables.OrderedTable":
-    let r = symexFind(s8eOrdered, tLabel("s8e_w_ordered"))
+    let r = pinFind(s8eOrdered, tLabel("s8e_w_ordered"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0].a == 7
 
   test "a user enum, beside a local enum of the same spelling":
-    let r = symexFind(s8eEnum, tLabel("s8e_w_enum"))
+    let r = pinFind(s8eEnum, tLabel("s8e_w_enum"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check $r.witness[0] == "cBlue"
 
   test "a user distinct":
-    let r = symexFind(s8eDistinct, tLabel("s8e_w_distinct"))
+    let r = pinFind(s8eDistinct, tLabel("s8e_w_distinct"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
 
   test "a user variant: the tag is written through the disc type":
-    let r = symexFind(s8eVariant, tLabel("s8e_w_variant"))
+    let r = pinFind(s8eVariant, tLabel("s8e_w_variant"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check $r.witness[0] == "(kind: skSquare, side: 4)"
 
   test "a user variant with an else arm":
-    let r = symexFind(s8eVariantElse, tLabel("s8e_w_variant_else"))
+    let r = pinFind(s8eVariantElse, tLabel("s8e_w_variant_else"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check $r.witness[0] == "(tk: tkC, rest: 6)"
 
   test "a user object whose fields are a user enum and distinct":
-    let r = symexFind(s8eHolder, tLabel("s8e_w_holder"))
+    let r = pinFind(s8eHolder, tLabel("s8e_w_holder"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check $r.witness[0].c == "cGreen"
 
   test "a user multi-variant":
-    let r = symexFind(s8eDual, tLabel("s8e_w_dual"))
+    let r = pinFind(s8eDual, tLabel("s8e_w_dual"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check $r.witness[0] == "(ax: axP, pv: 2, ay: ayS, sv: 8)"
 
   test "a user ref object with a recursive field":
-    let r = symexFind(s8eNode, tLabel("s8e_w_node"))
+    let r = pinFind(s8eNode, tLabel("s8e_w_node"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] != nil and r.witness[0].v == 2
 
   test "a ref to a user object: the cell is allocated through its symbol":
-    let r = symexFind(s8eRefPlain, tLabel("s8e_w_refplain"))
+    let r = pinFind(s8eRefPlain, tLabel("s8e_w_refplain"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] != nil and r.witness[0].w == 6
 
   test "seq of a user ref-object alias":
-    let r = symexFind(s8eSeqNode, tLabel("s8e_w_seqnode"))
+    let r = pinFind(s8eSeqNode, tLabel("s8e_w_seqnode"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0].len == 2
 
   test "seq of ref to a user object":
-    let r = symexFind(s8eSeqRefPlain, tLabel("s8e_w_seqrefplain"))
+    let r = pinFind(s8eSeqRefPlain, tLabel("s8e_w_seqrefplain"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0].len == 3

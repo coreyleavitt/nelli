@@ -32,6 +32,7 @@
 
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -223,7 +224,7 @@ suite "S8ac (1): writes through a var parameter":
 
   template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
     block:
-      let r = symexFind(fn, tLabel(lbl))
+      let r = pinFind(fn, tLabel(lbl))
       checkpoint lbl & " " & show(r.errors)
       check r.status == want
       check not r.errors.hasKind(weInternalWalkerFault)
@@ -273,7 +274,7 @@ suite "S8ac (1): writes through a var parameter":
     ## declined it. RFC-0005 S8bs passes a heap lvalue by reference in
     ## general (S8ba's `byRefSub`): both writes land on the one cell in the
     ## callee's order, as in Nim (`h.n = 5` last, so the label is reached).
-    let r = symexFind(sutAlias, tLabel("al"))
+    let r = pinFind(sutAlias, tLabel("al"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check not r.errors.hasKind(feUnsupportedOp)
@@ -336,7 +337,7 @@ suite "S8ac (2): an exact unchecked div of an offset stays linear":
                    maxSteps: int) =
     block:
       symexQueryStats = @[]
-      let r = symexFind(fn, tLabel(lbl), exactUnchecked)
+      let r = pinFind(fn, tLabel(lbl), exactUnchecked)
       checkpoint lbl & " " & show(r.errors)
       checkpoint symexQueryStatsSummary()
       check r.status == want
@@ -358,7 +359,7 @@ suite "S8ac (2): an exact unchecked div of an offset stays linear":
     ## `rlimit` is the context's cumulative counter: it never decreases
     ## within a walk, and the per-query deltas sum to no more than the last.
     symexQueryStats = @[]
-    discard symexFind(sutDivS, tLabel("ds"), exactUnchecked)
+    discard pinFind(sutDivS, tLabel("ds"), exactUnchecked)
     check symexQueryStats.len >= 2
     var prev = 0
     for q in symexQueryStats:
@@ -380,10 +381,10 @@ suite "S8ac (2): an exact unchecked div of an offset stays linear":
     ## runs) and recorded must return the same model, on any Z3 and any
     ## walker.
     symexQueryStatsPaused = true
-    let plain = symexFind(sutDivY, tLabel("dy_hit"), exactUnchecked)
+    let plain = pinFind(sutDivY, tLabel("dy_hit"), exactUnchecked)
     symexQueryStatsPaused = false
     symexQueryStats = @[]
-    let measured = symexFind(sutDivY, tLabel("dy_hit"), exactUnchecked)
+    let measured = pinFind(sutDivY, tLabel("dy_hit"), exactUnchecked)
     check symexQueryStats.len >= 2
     check plain.status == sxSat
     check measured.status == sxSat

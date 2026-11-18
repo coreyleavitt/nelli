@@ -29,6 +29,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # =============================================================================
 # Site 1 -- a plain OBJECT FIELD write through a ref
@@ -83,33 +84,33 @@ suite "#163 review R22 site 1 -- the oracle (ref object field write)":
 suite "#163 review R22 site 1 -- an out-of-range ref field write raises instead of vanishing":
 
   test "a genuinely out-of-range field write is found as sxRaised(RangeDefect)":
-    let r = symexFind(writeFieldOutOfRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeFieldOutOfRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(writeFieldOutOfRange, tLabel("t"))
+    let r = pinFind(writeFieldOutOfRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 1 -- a provably-in-range field write does not fork":
 
   test "no RangeDefect is found when the sum cannot leave the declared range":
-    let r = symexFind(writeFieldProvablyInRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeFieldProvablyInRange, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached normally":
-    let r = symexFind(writeFieldProvablyInRange, tLabel("t"))
+    let r = pinFind(writeFieldProvablyInRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 1 non-regression -- an ordinary unranged ref field is unaffected":
 
   test "no RangeDefect fork on a plain int ref field":
-    let r = symexFind(writeFieldPlainInt, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeFieldPlainInt, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached":
-    let r = symexFind(writeFieldPlainInt, tLabel("t"))
+    let r = pinFind(writeFieldPlainInt, tLabel("t"))
     check r.status == sxSat
 
 
@@ -177,33 +178,33 @@ suite "#163 review R22 site 2 -- the oracle (variant arm field write)":
 suite "#163 review R22 site 2 -- an out-of-range arm field write raises instead of vanishing":
 
   test "a genuinely out-of-range arm field write is found as sxRaised(RangeDefect)":
-    let r = symexFind(writeArmFieldOutOfRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeArmFieldOutOfRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(writeArmFieldOutOfRange, tLabel("t"))
+    let r = pinFind(writeArmFieldOutOfRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 2 -- a provably-in-range arm field write does not fork":
 
   test "no RangeDefect is found when the sum cannot leave the declared range":
-    let r = symexFind(writeArmFieldProvablyInRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeArmFieldProvablyInRange, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached normally":
-    let r = symexFind(writeArmFieldProvablyInRange, tLabel("t"))
+    let r = pinFind(writeArmFieldProvablyInRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 2 non-regression -- an ordinary unranged arm field is unaffected":
 
   test "no RangeDefect fork on a plain int arm field":
-    let r = symexFind(writeArmFieldPlainInt, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeArmFieldPlainInt, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached":
-    let r = symexFind(writeArmFieldPlainInt, tLabel("t"))
+    let r = pinFind(writeArmFieldPlainInt, tLabel("t"))
     check r.status == sxSat
 
 
@@ -261,33 +262,33 @@ suite "#163 review R22 site 3 -- the oracle (seq element write)":
 suite "#163 review R22 site 3 -- an out-of-range seq element write raises instead of vanishing":
 
   test "a genuinely out-of-range seq element write is found as sxRaised(RangeDefect)":
-    let r = symexFind(writeSeqElemOutOfRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeSeqElemOutOfRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(writeSeqElemOutOfRange, tLabel("t"))
+    let r = pinFind(writeSeqElemOutOfRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 3 -- a provably-in-range seq element write does not fork":
 
   test "no RangeDefect is found when the sum cannot leave the declared range":
-    let r = symexFind(writeSeqElemProvablyInRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeSeqElemProvablyInRange, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached normally":
-    let r = symexFind(writeSeqElemProvablyInRange, tLabel("t"))
+    let r = pinFind(writeSeqElemProvablyInRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 3 non-regression -- an ordinary unranged seq element is unaffected":
 
   test "no RangeDefect fork on a plain int seq element":
-    let r = symexFind(writeSeqElemPlainInt, tRaisedExn("RangeDefect"))
+    let r = pinFind(writeSeqElemPlainInt, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached":
-    let r = symexFind(writeSeqElemPlainInt, tLabel("t"))
+    let r = pinFind(writeSeqElemPlainInt, tLabel("t"))
     check r.status == sxSat
 
 
@@ -349,33 +350,33 @@ suite "#163 review R22 site 4 -- the oracle (var param reassignment inside its c
 suite "#163 review R22 site 4 -- an out-of-range var param reassignment raises instead of vanishing":
 
   test "a genuinely out-of-range var param reassignment is found as sxRaised(RangeDefect)":
-    let r = symexFind(calleeReassignsRangedVarParam, tRaisedExn("RangeDefect"))
+    let r = pinFind(calleeReassignsRangedVarParam, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(calleeReassignsRangedVarParam, tLabel("t"))
+    let r = pinFind(calleeReassignsRangedVarParam, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 4 -- a provably-in-range var param reassignment does not fork":
 
   test "no RangeDefect is found when the sum cannot leave the declared range":
-    let r = symexFind(calleeReassignsRangedVarParamInRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(calleeReassignsRangedVarParamInRange, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached normally":
-    let r = symexFind(calleeReassignsRangedVarParamInRange, tLabel("t"))
+    let r = pinFind(calleeReassignsRangedVarParamInRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 site 4 non-regression -- an ordinary unranged var param is unaffected":
 
   test "no RangeDefect fork on a plain int var param":
-    let r = symexFind(calleeReassignsPlainVarParam, tRaisedExn("RangeDefect"))
+    let r = pinFind(calleeReassignsPlainVarParam, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached":
-    let r = symexFind(calleeReassignsPlainVarParam, tLabel("t"))
+    let r = pinFind(calleeReassignsPlainVarParam, tLabel("t"))
     check r.status == sxSat
 
 

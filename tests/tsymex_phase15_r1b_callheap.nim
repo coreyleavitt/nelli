@@ -32,6 +32,7 @@
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # ── POSITIVE: caller and callee deref the SAME ref into the SAME threaded heap,
 #    both expecting 7 → consistent → sxSat. ────────────────────────────────────
@@ -57,7 +58,7 @@ suite "symex Phase 15 R1b — inter-procedural heap threading":
   test "R1b: caller deref-constraint observed by callee reading the SAME threaded ref":
     # Threaded heap: heap[p] == 7 set in the caller, read again as 7 in `inner` —
     # consistent. Reaches the target → sxSat.
-    let r = symexFind(f, tLabel("hit"))
+    let r = pinFind(f, tLabel("hit"))
     check r.status == sxSat
 
   test "R1b: contradictory caller/callee derefs on the threaded heap are unsat (THREADING PROOF)":
@@ -65,5 +66,5 @@ suite "symex Phase 15 R1b — inter-procedural heap threading":
     # threaded heap is unsatisfiable. WITHOUT R1b threading the callee would see
     # a fresh empty heap and this would be sxSat — so sxUnsat PROVES the heap is
     # threaded across the call boundary.
-    let r = symexFind(g, tLabel("clash"))
+    let r = pinFind(g, tLabel("clash"))
     check r.status == sxUnsat

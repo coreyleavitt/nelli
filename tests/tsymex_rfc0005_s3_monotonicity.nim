@@ -88,6 +88,7 @@
 ## `tsymex_rfc0005_s4_alloc.nim`).
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
@@ -253,12 +254,12 @@ proc s3w1F2After(x: int, y: int64, poisonOn: bool) =
 suite "RFC-0005 S3 -- W1 (sxSat, plain), witness monotonicity":
 
   test "baseline: x == 42 -> sxSat":
-    let r = symexFind(s3w1Base, tLabel("s3_w1_base"))
+    let r = pinFind(s3w1Base, tLabel("s3_w1_base"))
     check r.status == sxSat
 
   test "F1 before (shouldStop pin): graft does not change sxSat; heUnsupportedPointeeRead fired":
-    let base = symexFind(s3w1Base, tLabel("s3_w1_base"))
-    let r = symexFind(s3w1F1Before, tLabel("s3_w1_f1_before"))
+    let base = pinFind(s3w1Base, tLabel("s3_w1_base"))
+    let r = pinFind(s3w1F1Before, tLabel("s3_w1_f1_before"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
@@ -273,24 +274,24 @@ suite "RFC-0005 S3 -- W1 (sxSat, plain), witness monotonicity":
     ## confirmation that `shouldStop`'s eager halt is safe -- code sequenced
     ## strictly after an eagerly-discovered clean witness cannot contribute
     ## taint that would ever reach a verdict.
-    let base = symexFind(s3w1Base, tLabel("s3_w1_base"))
-    let r = symexFind(s3w1F1After, tLabel("s3_w1_f1_after"))
+    let base = pinFind(s3w1Base, tLabel("s3_w1_base"))
+    let r = pinFind(s3w1F1After, tLabel("s3_w1_f1_after"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
     check not r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F2 before (shouldStop pin): graft does not change sxSat; seUnsupportedStringOp fired":
-    let base = symexFind(s3w1Base, tLabel("s3_w1_base"))
-    let r = symexFind(s3w1F2Before, tLabel("s3_w1_f2_before"))
+    let base = pinFind(s3w1Base, tLabel("s3_w1_base"))
+    let r = pinFind(s3w1F2Before, tLabel("s3_w1_f2_before"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
     check r.errors.hasKind(seUnsupportedStringOp)
 
   test "F2 after (shouldStop eager-halt): graft does not change sxSat; the poison NEVER fires":
-    let base = symexFind(s3w1Base, tLabel("s3_w1_base"))
-    let r = symexFind(s3w1F2After, tLabel("s3_w1_f2_after"))
+    let base = pinFind(s3w1Base, tLabel("s3_w1_base"))
+    let r = pinFind(s3w1F2After, tLabel("s3_w1_f2_after"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
@@ -335,12 +336,12 @@ proc s3w2F4After(p: ref S3F4Obj, b: int, poisonOn: bool) =
 suite "RFC-0005 S3 -- W2 (sxRaised), witness monotonicity":
 
   test "baseline: x == 7 raises ValueError -> sxRaised":
-    let r = symexFind(s3w2Base, tRaisedExn())
+    let r = pinFind(s3w2Base, tRaisedExn())
     check r.status == sxRaised
 
   test "F3 before (shouldStop pin): graft does not change sxRaised; feUnsupportedStmtKind fired":
-    let base = symexFind(s3w2Base, tRaisedExn())
-    let r = symexFind(s3w2F3Before, tRaisedExn())
+    let base = pinFind(s3w2Base, tRaisedExn())
+    let r = pinFind(s3w2F3Before, tRaisedExn())
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxRaised
@@ -350,24 +351,24 @@ suite "RFC-0005 S3 -- W2 (sxRaised), witness monotonicity":
     ## `shouldStop` also halts on a clean `sxRaised` for a non-label target
     ## (`w.target.kind != stkLabel`, `runtime.nim:8445`) -- same eager-halt
     ## as W1/W3's `sxSat` case, verified here for the raise-flavoured rule.
-    let base = symexFind(s3w2Base, tRaisedExn())
-    let r = symexFind(s3w2F3After, tRaisedExn())
+    let base = pinFind(s3w2Base, tRaisedExn())
+    let r = pinFind(s3w2F3After, tRaisedExn())
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxRaised
     check not r.errors.hasKind(feUnsupportedStmtKind)
 
   test "F4 before (shouldStop pin): graft does not change sxRaised (the F4 arm is modelled since RFC-0005 S8l)":
-    let base = symexFind(s3w2Base, tRaisedExn())
-    let r = symexFind(s3w2F4Before, tRaisedExn())
+    let base = pinFind(s3w2Base, tRaisedExn())
+    let r = pinFind(s3w2F4Before, tRaisedExn())
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxRaised
     check not r.errors.hasKind(weInternalWalkerFault)   # S8m: heRefVariantUnsupported retired
 
   test "F4 after (shouldStop eager-halt): graft does not change sxRaised; the poison NEVER fires":
-    let base = symexFind(s3w2Base, tRaisedExn())
-    let r = symexFind(s3w2F4After, tRaisedExn())
+    let base = pinFind(s3w2Base, tRaisedExn())
+    let r = pinFind(s3w2F4After, tRaisedExn())
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxRaised
@@ -425,36 +426,36 @@ proc s3w3F3After(p: S3F3Point, b, n: int, poisonOn: bool) =
 suite "RFC-0005 S3 -- W3 (sxSat behind a loop + a call), witness monotonicity":
 
   test "baseline: sum(0..<4) == 6 via a helper call over a bounded loop -> sxSat":
-    let r = symexFind(s3w3Base, tLabel("s3_w3_base"))
+    let r = pinFind(s3w3Base, tLabel("s3_w3_base"))
     check r.status == sxSat
 
   test "F1 before (shouldStop pin): graft does not change sxSat; heUnsupportedPointeeRead fired":
-    let base = symexFind(s3w3Base, tLabel("s3_w3_base"))
-    let r = symexFind(s3w3F1Before, tLabel("s3_w3_f1_before"))
+    let base = pinFind(s3w3Base, tLabel("s3_w3_base"))
+    let r = pinFind(s3w3F1Before, tLabel("s3_w3_f1_before"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
     check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F1 after (shouldStop eager-halt): graft does not change sxSat; the poison NEVER fires":
-    let base = symexFind(s3w3Base, tLabel("s3_w3_base"))
-    let r = symexFind(s3w3F1After, tLabel("s3_w3_f1_after"))
+    let base = pinFind(s3w3Base, tLabel("s3_w3_base"))
+    let r = pinFind(s3w3F1After, tLabel("s3_w3_f1_after"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
     check not r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F3 before (shouldStop pin): graft does not change sxSat; feUnsupportedStmtKind fired":
-    let base = symexFind(s3w3Base, tLabel("s3_w3_base"))
-    let r = symexFind(s3w3F3Before, tLabel("s3_w3_f3_before"))
+    let base = pinFind(s3w3Base, tLabel("s3_w3_base"))
+    let r = pinFind(s3w3F3Before, tLabel("s3_w3_f3_before"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
     check r.errors.hasKind(feUnsupportedStmtKind)
 
   test "F3 after (shouldStop eager-halt): graft does not change sxSat; the poison NEVER fires":
-    let base = symexFind(s3w3Base, tLabel("s3_w3_base"))
-    let r = symexFind(s3w3F3After, tLabel("s3_w3_f3_after"))
+    let base = pinFind(s3w3Base, tLabel("s3_w3_base"))
+    let r = pinFind(s3w3F3After, tLabel("s3_w3_f3_after"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
@@ -501,7 +502,7 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
     ## (the ref witness is lossy: it may confirm, never refute) -> sxSat.
     ## Family 2a's invariant still holds: the TAINTED path alone never
     ## reports sxSat -- rules 1-2 decide sxUnknown, pinned below.
-    let r = symexFind(s3ClassifyF1, tLabel("s3_classify_f1"))
+    let r = pinFind(s3ClassifyF1, tLabel("s3_classify_f1"))
     checkpoint($kindNames(r.errors))
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown
@@ -509,21 +510,21 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
     check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F2: seUnsupportedStringOp sits before every path's target check -> sxUnknown, never sxSat":
-    let r = symexFind(s3ClassifyF2, tLabel("s3_classify_f2"))
+    let r = pinFind(s3ClassifyF2, tLabel("s3_classify_f2"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.errors.hasKind(seUnsupportedStringOp)
 
   test "F3: feUnsupportedStmtKind sits before every path's target check -> sxUnknown, never sxSat":
-    let r = symexFind(s3ClassifyF3, tLabel("s3_classify_f3"))
+    let r = pinFind(s3ClassifyF3, tLabel("s3_classify_f3"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.errors.hasKind(feUnsupportedStmtKind)
 
   test "F4: the multi-variant read before the target is modelled since RFC-0005 S8l -> sxSat (was sxUnknown)":
-    let r = symexFind(s3ClassifyF4, tLabel("s3_classify_f4"))
+    let r = pinFind(s3ClassifyF4, tLabel("s3_classify_f4"))
     checkpoint($kindNames(r.errors))
     check r.status == sxSat
     check not r.errors.hasKind(weInternalWalkerFault)   # S8m: heRefVariantUnsupported retired
@@ -571,7 +572,7 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
   test "F1: sxUnsat, over-taint-only -- flipped at S4":
     # RFC-0005 S4: was sxUnknown at S3; the site now records the split
     # dcFreshSymbol kind, whose runTaint lacks scIncomplete (§2.3 -> sxUnsat).
-    let r = symexFind(s3OverTaintF1, tLabel("s3_overtaint_f1"))
+    let r = pinFind(s3OverTaintF1, tLabel("s3_overtaint_f1"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     var sevErrorKinds: seq[SymexErrorKind]
@@ -583,7 +584,7 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
     check classOf(seUnsupportedStringOp) == dcNoAnswer
 
   test "F2: sxUnknown, over-taint-only -- stays ⊤ (S5 audit: substituting sites; no RFC-0005 slice flips it)":
-    let r = symexFind(s3OverTaintF2, tLabel("s3_overtaint_f2"))
+    let r = pinFind(s3OverTaintF2, tLabel("s3_overtaint_f2"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.status != sxSat
@@ -600,7 +601,7 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
   test "F4: no taint since RFC-0005 S8l -- the SUT's own FieldDefect is the verdict (was sxUnknown, ⊤)":
     # `p.a1` with `kindA == s3f4KindA2` raises FieldDefect in real Nim; the
     # modelled read finds it, and the dead target adds nothing.
-    let r = symexFind(s3OverTaintF4, tLabel("s3_overtaint_f4"))
+    let r = pinFind(s3OverTaintF4, tLabel("s3_overtaint_f4"))
     checkpoint($kindNames(r.errors))
     check r.status == sxRaised
     check "FieldDefect" in r.raisedTypeId

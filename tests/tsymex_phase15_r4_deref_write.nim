@@ -28,6 +28,7 @@
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # --- DoD 1: real read-after-write ---------------------------------------------
 # After `p[] = 99` the store fixes the heap value at `p` to 99. Reading 99 back
@@ -95,35 +96,35 @@ proc isoWrittenContradiction(p: ref int, c: bool) =
 suite "symex Phase 15 R4 — p[] = v heap store (alias-observable writes)":
 
   test "R4 test 1a: read-after-write p[]=99; p[]==99 is sxSat (via the store)":
-    let r = symexFind(rawHit, tLabel("hit"))
+    let r = pinFind(rawHit, tLabel("hit"))
     check r.status == sxSat
 
   test "R4 test 1b: p[]=99; p[]==7 is sxUnsat — the store FIXES the value (PROVES write propagates)":
     # This is the proof R3 could NOT give: under R3's no-op write the read picks
     # from the free heap and 7 is sat. Under R4's store the value is pinned to 99,
     # so 7 is UNSAT. The unsat verdict is what proves real read-after-write.
-    let r = symexFind(rawContradiction, tLabel("no"))
+    let r = pinFind(rawContradiction, tLabel("no"))
     check r.status == sxUnsat
 
   test "R4 test 2a: alias write q=p; p[]=5; q[]==5 is sxSat (write through p seen through q)":
-    let r = symexFind(aliasObserve, tLabel("alias"))
+    let r = pinFind(aliasObserve, tLabel("alias"))
     check r.status == sxSat
 
   test "R4 test 2b: alias contradiction q=p; p[]=5; q[]==6 is sxUnsat (same index, fixed value)":
-    let r = symexFind(aliasContradiction, tLabel("noalias"))
+    let r = pinFind(aliasContradiction, tLabel("noalias"))
     check r.status == sxUnsat
 
   test "R4 test 3a: c-true branch read sees the store (p[]==5) → sxSat":
-    let r = symexFind(isoWritten, tLabel("hitWritten"))
+    let r = pinFind(isoWritten, tLabel("hitWritten"))
     check r.status == sxSat
 
   test "R4 test 3b: c-false (unwritten) branch reads the free heap → sxSat (isolated)":
     # The unwritten branch never had the store applied; its heap is the pre-write
     # free array, so any value (99) is satisfiable — independent of the c-true
     # branch's store. Proves per-path isolation of the write.
-    let r = symexFind(isoUnwritten, tLabel("hitUnwritten"))
+    let r = pinFind(isoUnwritten, tLabel("hitUnwritten"))
     check r.status == sxSat
 
   test "R4 test 3c: c-true store fixes p[]=5, so p[]==6 there is sxUnsat (write landed on that branch)":
-    let r = symexFind(isoWrittenContradiction, tLabel("noWritten"))
+    let r = pinFind(isoWrittenContradiction, tLabel("noWritten"))
     check r.status == sxUnsat

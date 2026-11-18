@@ -33,6 +33,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   Color = enum cRed, cGreen, cBlue
@@ -85,11 +86,11 @@ suite "#163 review R3 Part A -- ref-to-variant arm field reaches the path condit
     ## arm value, `p.g > 10` was satisfiable for a field declared
     ## `range[0..10]` -- the model was free to pick 11 (already a
     ## `RangeDefect` waiting to happen, per the oracle suite above).
-    let r = symexFind(readGreenOutOfRange, tLabel("outOfRange"))
+    let r = pinFind(readGreenOutOfRange, tLabel("outOfRange"))
     check r.status == sxUnsat
 
   test "the bound is a refinement, not a ban -- an in-range arm-field target survives":
-    let r = symexFind(readGreenInRange, tLabel("inRange"))
+    let r = pinFind(readGreenInRange, tLabel("inRange"))
     check r.status == sxSat
     check not r.witness[0].isNil
     let node = r.witness[0][]
@@ -104,7 +105,7 @@ suite "#163 review R3 Part B -- an unread arm field's witness stays inside its d
     ## before and after the fix; only the WITNESS's `g` field was ever wrong
     ## (a disconnected, unclamped proto default that can fall outside
     ## `range[0..10]`, per Part B).
-    let r = symexFind(onlyDisc, tLabel("disc"))
+    let r = pinFind(onlyDisc, tLabel("disc"))
     check r.status == sxSat
     check not r.witness[0].isNil
     let node = r.witness[0][]
@@ -115,7 +116,7 @@ suite "#163 review R3 Part B -- an unread arm field's witness stays inside its d
 suite "#163 review R3 non-regression -- A2 plain-field/discriminator routes":
 
   test "a plain (non-ranged) arm-field read is still sound (A2 Slice 2 shape)":
-    let r = symexFind(readGreenInRange, tLabel("inRange"))
+    let r = pinFind(readGreenInRange, tLabel("inRange"))
     check r.status == sxSat
 
 

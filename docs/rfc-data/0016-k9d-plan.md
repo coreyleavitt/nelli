@@ -677,6 +677,101 @@ disagreement in these suites, so no soundness row: the PCRE/Z3 differences it
 probes (`$` before a final newline, `.` and newline, case, byte versus UTF-8
 under `(*UTF)`) all reproduced natively.
 
+## K9d-10 result (`k9d10`)
+
+The ref family. `boundaryOf` generates a domain for `ref T`, `ptr T` and
+`pointer`, so `pinFind` pins a SUT whose parameters (or the fields and
+elements of its by-value parameters) hold them.
+
+The domain (`tests/s8cu_helpers.nim`, `refDomain`, `ptrDomain`,
+`pointerDomain`). A `ref T` ranges over one pool of cells per type: nil
+first, then fresh cells built from the pointee's domain core (`refCoreMax` =
+4 values; 8 for an ordinal pointee), recursively and depth-bounded (a pool
+asked for while it is being built is `[nil]`). When the pointee holds a field
+of its own ref type it adds a node whose field points back at itself (a
+cycle), a chain to the first cell and a chain of three; last comes a twin, a
+second cell equal in value to the first. Every parameter and field of one
+ref type draws from the same pool, so the product holds same-object and
+distinct pairs, a field aiming at a sibling parameter, and the cycle back to
+an owner. A parameter of an ancestor ref type also ranges over a
+descendant's cells (`absorbSubtype`). `ptr T` is nil plus the addresses of
+the `ref T` pool's cells (so two `ptr` parameters share addresses);
+`pointer` is the `ptr int` domain. Cells are snapshotted when built and
+restored before and after every native run (`restoreHeapDomain`), so a SUT's
+write does not leak into the next run; a hint epoch (`setStringHints`)
+rebuilds the pools. A product of two ref parameters crosses within the cap
+and is recorded `sampled` beyond it. Sat replay uses the walker's witness
+tuple, whose `RefWitness` builds one Nim object per model cell, so aliasing
+in a witness replays as one object.
+
+Harness fixes found by the conversions, each with a self-test: a pointee
+type with no default value (a `range` field or `requiresInit`) is built in
+an `alloc0` block (`declarable`); an inheritable pointee is built in a
+declared variable (an `alloc0` block lacks its type header); a sequence
+domain thinned to cross with another parameter keeps one sequence of every
+literal length the SUT names (`s8ac_remainder_b`'s `symexAssume(data.len ==
+12)` rejected every run); an ancestor named through its ref type
+(`ref object of Base`, `Base` a ref) is walked for its fields. A walker
+verdict `sxRaised` with `NilAccessDefect` is returned unpinned: natively a
+nil dereference is a SIGSEGV no `except` catches (S8cu), so it is pinned
+only in a child process (`tsymex_rfc0005_s8cu_nil`).
+
+Self-tests (`tsymex_0016_k9d_pinfind`): nil first and one pool with a twin;
+nil and fresh-cell witnesses replay; a ref unsat is pinned; planted unsats
+that only an aliased input or the twin refutes are refused; an alias
+witness is one cell at both positions; a write does not leak into the next
+run; a recursive ref object gets a cycle and chains, and planted cycle and
+sibling claims are refused; witness identity (`a.next == b`); a ref field
+of a by-value parameter shares the pool; `ptr` shared addresses (a planted
+shared-address unsat is refused) and the `pointer` domain; two ref
+parameters cross within 2048 and are recorded `sampled`; a nil-access raise
+returns unpinned; a pointee with no default and an inheritable pointee; a
+thinned sequence domain keeps each literal length; an ancestor ref domain
+absorbs a descendant's cells.
+
+Converted (47 census suites): `0016_cr2_h3_epochpin`, `0016_fieldref`,
+`0016_w3z_r5b_diag`, `163audit_range_elem`, `163rev_armfield_write`,
+`163rev_assign_sites`, `163rev_nested_clamp`, `163rev_variant_armfield`,
+`CR2c_witnessreader_catchall`, `a2_refvariant_fields`, `h_containers`,
+`h_stepC_heapidentity`, `h_verification`, `p2b_refobjconstr_expr`,
+`phase15_CR1_CR5_closure_heap`, `phase15_R1a_ir`, `phase15_r11b_smoke`,
+`phase15_r12_bumps`, `phase15_r13_ptr_finally`, `phase15_r1_refsort`,
+`phase15_r1b_callheap`, `phase15_r3_deref_read`, `phase15_r4_deref_write`,
+`phase15_r5_nil`, `phase15_r6_refobj`, `phase15_r7_alias_chain`,
+`phase15_r8_ptr`, `phase15_r9_recursive`, `phase16_D1c_shortcircuit`,
+`r6_heap_raise_totality`, `r6_n42_deref_taint`, `rectify_refs`,
+`rfc0005_s0_exhibit`, `rfc0005_s3_monotonicity`, `rfc0005_s8aa_remainder`,
+`rfc0005_s8ac_remainder`, `rfc0005_s8ac_remainder_b`,
+`rfc0005_s8ao_remainder`, `rfc0005_s8ax_remainder_c`,
+`rfc0005_s8bd_remainder_b`, `rfc0005_s8bf_alias`,
+`rfc0005_s8bh_remainder_b`, `rfc0005_s8bo_nil`, `rfc0005_s8cs_routes_b`,
+`rfc0005_s8e_scoping`, `rfc0005_s8k_bounds`, `tot1_totality_corpus`. The
+calls K9d-9 deferred here are pinned too: `phase15_rereview_drains`' twelve
+`ref int` SUTs, `r6_n43_parity`'s `ref N43Outer` SUTs, `phase15_E5_finally`'s
+`finallyHeapWrites`. The census ceiling 84 -> 37.
+
+Calls left as `symexFind`: `h_verification`'s `param_ctor_eq_hit` and
+`param_ctor_write_hit` (INT-79, a false sxSat); `h_containers`'
+`setNodeGuard` (a `HashSet` of a ref with no `hash` has no native value).
+Suites not converted: `rfc0005_s8bn_remainder_d` and `_e` (INT-81; `_e`'s
+`CMid8`, a descendant of a case object, also fails to compile when copied by
+value in the C backend, which the ref domain does), `0016_wa_runtime` (its
+calls write no pin record).
+
+Rows filed:
+- INT-79, soundness: a ref parameter compared with a node the SUT allocates
+  is a false sxSat (`assertFreshness` keeps a fresh address apart from the
+  path's live refs only). `h_verification` asserted it as intended. Red
+  reproducer `tsymex_0016_int79_paramfresh`.
+- INT-81, witness fidelity (the verdict is sound): the witness builds a ref
+  cell as its position's static type, not its run-type tag, so a sat verdict
+  on a method override, `of` or a down-conversion misses natively. Red
+  reproducer `tsymex_0016_int81_witnesstag`.
+- INT-80, precision: a `pointer` parameter or field is declined
+  (`feUnsupportedParamType`); the non-nil cross-sort compare (INT-65, on
+  `rfc-0016-w4int65`) is the same gap one step on. Red reproducer
+  `tsymex_0016_int80_pointerparam`.
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

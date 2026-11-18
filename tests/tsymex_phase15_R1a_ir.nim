@@ -16,6 +16,7 @@ import nelli/smt/dsl_typebridge
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # --- SUTs ------------------------------------------------------------------
 
@@ -98,13 +99,13 @@ suite "symex Phase 15 R1a — ref/ptr IR (itRef/itPtr/isDeref/isNew) + svRef/svP
     # R1a STUBBED this to sxUnknown + heUnresolvedRef. R1 (ADR-0010) promotes
     # `allocateSym(itRef)` to a real `Ref_T`-sorted const, so the param allocates
     # cleanly and the target is reachable — sxSat, no classified ref halt.
-    let res = symexFind(refParamSut, tLabel("after"))
+    let res = pinFind(refParamSut, tLabel("after"))
     check res.status == sxSat
     for e in res.errors:
       check e.kind != heUnresolvedRef
 
   test "R1: a SUT with a `ptr int` param (no deref) now allocates the ptr sort and reaches the target (R1 promoted the R1a stub)":
-    let res = symexFind(ptrParamSut, tLabel("after"))
+    let res = pinFind(ptrParamSut, tLabel("after"))
     check res.status == sxSat
     for e in res.errors:
       check e.kind != heUnresolvedRef

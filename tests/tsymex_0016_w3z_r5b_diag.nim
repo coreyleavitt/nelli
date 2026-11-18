@@ -11,6 +11,7 @@
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/[types, soundness]
 
 type Node = ref object
@@ -33,7 +34,7 @@ proc crashThenLabel(p: Node, m: int) =
 
 suite "W3-z R5b: the soundness a diagnostic carries":
   test "a non-winning clean raise is host-runnable":
-    let r = symexFind(cleanThenRaise, tLabel("hit"))
+    let r = pinFind(cleanThenRaise, tLabel("hit"))
     check r.status == sxSat
     check r.diagnostics.len == 1
     check r.diagnostics[0].witnessUndefined == {}
@@ -41,7 +42,7 @@ suite "W3-z R5b: the soundness a diagnostic carries":
     check hostRunnable(allRaiseFindings(r)[0])
 
   test "a non-winning crash raise is not host-runnable":
-    let r = symexFind(crashThenLabel, tLabel("hit"))
+    let r = pinFind(crashThenLabel, tLabel("hit"))
     checkpoint $r.status & " " & $r.diagnostics.len
     check r.status == sxSat
     check r.diagnostics.len == 1
@@ -50,7 +51,7 @@ suite "W3-z R5b: the soundness a diagnostic carries":
     check not hostRunnable(allRaiseFindings(r)[0])
 
   test "a raise past an undefined read is a candidate, not a diagnostic":
-    let r = symexFind(undefThenRaise, tLabel("hit"))
+    let r = pinFind(undefThenRaise, tLabel("hit"))
     checkpoint $r.status & " " & $r.diagnostics.len
     for d in r.diagnostics:
       check d.witnessUndefined == {}

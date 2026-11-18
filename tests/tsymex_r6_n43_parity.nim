@@ -286,7 +286,7 @@ proc n43HeapOwnershipBlock(p: ref N43Outer) =
 suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded allocateSym reach)":
 
   test "N43-H0: an untouched sibling GOOD field stays sxSat, zero errors (no over-degrade from bad siblings on the same object)":
-    let r = symexFind(n43HeapGoodBlock, tLabel("n43_heap_good"))
+    let r = pinFind(n43HeapGoodBlock, tLabel("n43_heap_good"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -294,7 +294,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
 
   test "N43-H1: Table bad-KEY field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, seUnsupportedTableKeyType, no crash":
     check unallocatableFieldIssue(tTable(tTuple(@[tInt(), tInt()]), tString())).isSome
-    let r = symexFind(n43HeapTableKeyBlock, tLabel("n43_heap_table_key"))
+    let r = pinFind(n43HeapTableKeyBlock, tLabel("n43_heap_table_key"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -315,7 +315,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     ## itInt value type now reaches the SAME `allocDegrade` path as every
     ## other unsupported value type. Predicate and allocator agree.
     check unallocatableFieldIssue(tTable(tString(), tDistinct("S8bzDistinctTup", tTuple(@[tInt(), tInt()])))).isSome
-    let r = symexFind(n43HeapTableValBlock, tLabel("n43_heap_table_val"))
+    let r = pinFind(n43HeapTableValBlock, tLabel("n43_heap_table_val"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -323,7 +323,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
 
   test "N43-H3: HashSet bad-elem field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, seUnsupportedSetCharInterop, no crash":
     check unallocatableFieldIssue(tSet(tString())).isSome
-    let r = symexFind(n43HeapSetBlock, tLabel("n43_heap_set"))
+    let r = pinFind(n43HeapSetBlock, tLabel("n43_heap_set"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -331,7 +331,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
 
   test "N43-H4: ownership-wrapped field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, heUnsupportedOwnership, no crash":
     check unallocatableFieldIssue(tUninterp("__ownership:Atomic")).isSome
-    let r = symexFind(n43HeapOwnershipBlock, tLabel("n43_heap_ownership"))
+    let r = pinFind(n43HeapOwnershipBlock, tLabel("n43_heap_ownership"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -418,7 +418,7 @@ suite "symex N43 -- companion: param-boundary confirmation for the two structura
     check feUnsupportedParamType in errorKinds(r)
 
   test "N43-P2: an unrenderable witness shape (__unsupported_witness:, a plain-object seq element) -- predicted unallocatable (Part 1), raiseParamAllocIssue confirms: whole-run sxUnknown, feUnsupportedWitnessType":
-    let r = symexFind(n43ParamUnsupportedWitness, tLabel("n43_param_unsupported_witness"))
+    let r = pinFind(n43ParamUnsupportedWitness, tLabel("n43_param_unsupported_witness"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown

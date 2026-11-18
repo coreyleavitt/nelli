@@ -15,6 +15,7 @@
 ## and the FieldDefect tests were `sxUnknown`, not `sxRaised`). GREEN at v28.
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # ---- bool-discriminant variant: read an ARM field through a ref --------------
 type
@@ -80,7 +81,7 @@ proc twoNodeNoArm(p: ref CNode, q: ref CNode) =
 suite "A2 Slice 2 — ref-to-variant arm-field read + FieldDefect + witness (v28)":
 
   test "arm-field read SAT — witness consistent (tag arm, val == 42)":
-    let r = symexFind(readArmField, tLabel("hit"))
+    let r = pinFind(readArmField, tLabel("hit"))
     check r.status == sxSat
     check not r.witness[0].isNil
     # The in-arm path: the disc selects the `true` arm and the arm field is 42.
@@ -88,14 +89,14 @@ suite "A2 Slice 2 — ref-to-variant arm-field read + FieldDefect + witness (v28
     check r.witness[0][].val == 42     ## D5: active-arm field observed value
 
   test "wrong-arm read — FieldDefect found (disc selects the other arm)":
-    let r = symexFind(wrongArmRead, tFieldDefect())
+    let r = pinFind(wrongArmRead, tFieldDefect())
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
     # Z3 chose the OUT-of-arm side: the disc is NOT the `val`-bearing arm.
     check r.raisedWitness[0][].tag == false
 
   test "enum-disc arm-field read SAT — witness disc is a LEGAL ordinal (D4.5)":
-    let r = symexFind(readGreenArm, tLabel("green"))
+    let r = pinFind(readGreenArm, tLabel("green"))
     check r.status == sxSat
     check not r.witness[0].isNil
     let node = r.witness[0][]
@@ -107,7 +108,7 @@ suite "A2 Slice 2 — ref-to-variant arm-field read + FieldDefect + witness (v28
     check node.g == 7                  ## D5: active-arm field observed value
 
   test "enum-disc wrong-arm read — FieldDefect witness disc is a LEGAL non-matching ordinal (D4.5)":
-    let r = symexFind(enumWrongArm, tFieldDefect())
+    let r = pinFind(enumWrongArm, tFieldDefect())
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
     let node = r.raisedWitness[0][]
@@ -123,7 +124,7 @@ suite "A2 Slice 2 — ref-to-variant arm-field read + FieldDefect + witness (v28
     # With the per-address disc-range clause that is UNSAT; without it (range
     # gated on first-materialisation) `q`'s disc is free and the label is a
     # spurious `sxSat` — an Invariant-3 violation.
-    let r = symexFind(twoNodeNoArm, tLabel("impossible"))
+    let r = pinFind(twoNodeNoArm, tLabel("impossible"))
     check r.status == sxUnsat
 
 # ---- A2 Slice 3: arm-field WRITE + aliasing ----------------------------------
@@ -164,7 +165,7 @@ suite "A2 Slice 3 — ref-to-variant arm-field WRITE + aliasing (v29)":
   test "read-after-write — stored value observed on same ref (sxSat)":
     # Write p.g = 99 (in-arm); read p.g back → must equal 99.
     # Verifies Z3 read-after-write for the arm-specific heap.
-    let r = symexFind(writeReadSameRef, tLabel("written"))
+    let r = pinFind(writeReadSameRef, tLabel("written"))
     check r.status == sxSat
     check not r.witness[0].isNil
     let node = r.witness[0][]
@@ -178,7 +179,7 @@ suite "A2 Slice 3 — ref-to-variant arm-field WRITE + aliasing (v29)":
   test "wrong-arm write — FieldDefect raised; witness disc is a legal ordinal (D4.5)":
     # Write p.g when col != cGreen → FieldDefect. D4.5: the defect witness's
     # disc must be a legal Color ordinal (not an impossible one outside {0,1,2}).
-    let r = symexFind(wrongArmWrite, tFieldDefect())
+    let r = pinFind(wrongArmWrite, tFieldDefect())
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
     let node = r.raisedWitness[0][]
@@ -189,7 +190,7 @@ suite "A2 Slice 3 — ref-to-variant arm-field WRITE + aliasing (v29)":
   test "aliasing — write through p observed by q when p == q (sxSat)":
     # Two distinct ref params forced equal by the guard p == q.  A write
     # through p must be observed by a subsequent read through q (Z3 array theory).
-    let r = symexFind(aliasWriteRead, tLabel("aliased"))
+    let r = pinFind(aliasWriteRead, tLabel("aliased"))
     check r.status == sxSat
 
   test "D4.5 two-address write — FieldDefect witness for second ref is a legal ordinal":
@@ -198,7 +199,7 @@ suite "A2 Slice 3 — ref-to-variant arm-field WRITE + aliasing (v29)":
     # would be unconstrained and the FieldDefect witness could carry ordinal 3
     # (impossible for Color) — an Invariant-3 false positive.
     # With per-address D4.5 in the write path, the witness disc must be legal.
-    let r = symexFind(twoNodeWrongArmWrite, tFieldDefect())
+    let r = pinFind(twoNodeWrongArmWrite, tFieldDefect())
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
     # At least one of the two params' FieldDefect witness disc must be legal.

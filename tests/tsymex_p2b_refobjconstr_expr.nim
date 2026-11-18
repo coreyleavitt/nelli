@@ -19,6 +19,7 @@
 ## the version-pin suite below).
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
@@ -174,39 +175,39 @@ proc sutPlainArithRegression(x: int) =
 suite "symex RFC-chapulin-hardening P2b — ref-object construction as expression":
 
   test "P2b-1: let p=Node(val:x,next:nil); p.val==3 -> sxSat, exact witness x==3":
-    let r = symexFind(sutBasicHit, tLabel("basic_hit"))
+    let r = pinFind(sutBasicHit, tLabel("basic_hit"))
     check r.status == sxSat
     check r.witness[0] == 3
 
   test "P2b-2: UNSAT soundness — p.val == x is impossible (p.val is always x+1)":
-    let r = symexFind(sutBasicUnsat, tLabel("basic_unsat"))
+    let r = pinFind(sutBasicUnsat, tLabel("basic_unsat"))
     check r.status == sxUnsat
 
   test "P2b-3: nil field reads back as genuine nil — exact witness x==7":
-    let r = symexFind(sutNilFieldHit, tLabel("nil_field_hit"))
+    let r = pinFind(sutNilFieldHit, tLabel("nil_field_hit"))
     check r.status == sxSat
     check r.witness[0] == 7
 
   test "P2b-4: multi-field, out-of-order, heterogeneous widths — exact witness x==9":
-    let r = symexFind(sutMultiFieldHit, tLabel("multi_hit"))
+    let r = pinFind(sutMultiFieldHit, tLabel("multi_hit"))
     check r.status == sxSat
     check r.witness[0] == 9
 
   test "P2b-5: multi-field UNSAT soundness — r.c == r.a+3 is impossible (always +2)":
-    let r = symexFind(sutMultiFieldUnsat, tLabel("multi_unsat"))
+    let r = pinFind(sutMultiFieldUnsat, tLabel("multi_unsat"))
     check r.status == sxUnsat
 
   test "P2b-6: omitted ref field defaults to nil — exact witness x==5":
-    let r = symexFind(sutOmittedFieldHit, tLabel("omitted_hit"))
+    let r = pinFind(sutOmittedFieldHit, tLabel("omitted_hit"))
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "P2b-7: omitted-field UNSAT soundness — p.next != nil is impossible (never set)":
-    let r = symexFind(sutOmittedFieldUnsat, tLabel("omitted_unsat"))
+    let r = pinFind(sutOmittedFieldUnsat, tLabel("omitted_unsat"))
     check r.status == sxUnsat
 
   test "P2b-8: recursive field from a derived (non-bare) ref expr resolves cleanly — witness x==3":
-    let r = symexFind(sutRecursiveFromDerivedRefHit, tLabel("recursive_derived_hit"))
+    let r = pinFind(sutRecursiveFromDerivedRefHit, tLabel("recursive_derived_hit"))
     check r.status == sxSat
     check r.witness[1] == 3
 
@@ -219,24 +220,24 @@ suite "symex Cluster H Step C — recursive-from-bare-node now REAL (was ADR-002
   ## reachable for any `a` by choosing `x == 3`.
 
   test "P2b-9: `next: a` (bare Node param) now yields a REAL sxSat verdict — exact witness x==3":
-    let r = symexFind(sutRecursiveFromBareNode, tLabel("recursive_bare_hit"))
+    let r = pinFind(sutRecursiveFromBareNode, tLabel("recursive_bare_hit"))
     check r.status == sxSat
     check r.witness[1] == 3   ## params are (a, x); x is witness[1]
 
   test "P2b-10: aliasing is REAL — p.next == a always holds (sxSat, any a/x)":
-    let r = symexFind(sutRecursiveFromBareNodeAliasHit,
+    let r = pinFind(sutRecursiveFromBareNodeAliasHit,
                        tLabel("recursive_bare_alias_hit"))
     check r.status == sxSat
 
   test "P2b-10b: aliasing UNSAT soundness — p.next != a is impossible (proves REAL identity, not a free/unconstrained value)":
-    let r = symexFind(sutRecursiveFromBareNodeAliasUnsat,
+    let r = pinFind(sutRecursiveFromBareNodeAliasUnsat,
                        tLabel("recursive_bare_alias_unsat"))
     check r.status == sxUnsat
 
 suite "symex RFC-chapulin-hardening P2b — SND-1 soundness (unsupported field)":
 
   test "P2b-11: ref-object with cast[int32](x) field compiles and degrades to sxUnknown + feUnsupportedExprKind":
-    let r = symexFind(sutUnsupportedField, tLabel("dummy_would_sat"))
+    let r = pinFind(sutUnsupportedField, tLabel("dummy_would_sat"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -245,7 +246,7 @@ suite "symex RFC-chapulin-hardening P2b — SND-1 soundness (unsupported field)"
     check sawKind
 
   test "P2b-12: the dummy field value never produces a false sxSat (SND-1 taint)":
-    let r = symexFind(sutUnsupportedField, tLabel("dummy_would_sat"))
+    let r = pinFind(sutUnsupportedField, tLabel("dummy_would_sat"))
     check r.status != sxSat
 
 suite "symex RFC-chapulin-hardening P2b — variant ref-object negative (round-2 exclusion)":
@@ -257,7 +258,7 @@ suite "symex RFC-chapulin-hardening P2b — variant ref-object negative (round-2
     ## (the `bool` discriminator's constant arrives folded to `1` in the
     ## typed AST and is stored as a Bool). `v.a == x`: `x == 3` is the
     ## witness.
-    let r = symexFind(sutVariantConstr, tLabel("variant_hit"))
+    let r = pinFind(sutVariantConstr, tLabel("variant_hit"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 3
@@ -265,12 +266,12 @@ suite "symex RFC-chapulin-hardening P2b — variant ref-object negative (round-2
 suite "symex RFC-chapulin-hardening P2b — regressions":
 
   test "P2b-14: `let p = new(Point2); p.x = x` (R1a/R2 let-statement path) still works":
-    let r = symexFind(sutNewStmtRegression, tLabel("new_regression"))
+    let r = pinFind(sutNewStmtRegression, tLabel("new_regression"))
     check r.status == sxSat
     check r.witness[0] == 8
 
   test "P2b-15: plain (non-object) arithmetic unaffected — exact witness x==4":
-    let r = symexFind(sutPlainArithRegression, tLabel("plain_arith"))
+    let r = pinFind(sutPlainArithRegression, tLabel("plain_arith"))
     check r.status == sxSat
     check r.witness[0] == 4
 

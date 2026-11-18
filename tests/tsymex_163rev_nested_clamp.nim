@@ -30,6 +30,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   InnerCfg = object
@@ -86,7 +87,7 @@ suite "#163 review R8 -- a ranged subfield two levels deep in an unread ref-obje
     ## unconstrained, `inner.r` extracts as the model's bare default, which
     ## `range[10..20]` need not contain. Reconstructing it into the SUT's
     ## own declared range type raised `RangeDefect` before this fix.
-    let r = symexFind(twoOuterRefs, tLabel("hit"))
+    let r = pinFind(twoOuterRefs, tLabel("hit"))
     check r.status == sxSat  ## did not crash constructing this result
     ## RFC-0005 S8h: `c2` is never dereferenced, so the model may leave it
     ## nil, and a nil witness is faithful. Only a live cell has a subfield
@@ -99,7 +100,7 @@ suite "#163 review R8 -- a ranged subfield two levels deep in an unread ref-obje
 suite "#163 review R8 non-regression -- W4's original one-level-deep field still clamps":
 
   test "an unread sibling ref's direct field witness still stays inside its declared range":
-    let r = symexFind(twoFlatRefs, tLabel("hit"))
+    let r = pinFind(twoFlatRefs, tLabel("hit"))
     check r.status == sxSat
     if r.status == sxSat and r.witness[1] != nil:  ## RFC-0005 S8h: nil is faithful
       let c2 = r.witness[1][]

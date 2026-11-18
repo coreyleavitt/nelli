@@ -71,7 +71,7 @@
 ## float value, so this file's poison tables (`Table[int, string]`,
 ## `Table[string, string]`) became modelled. Each was swapped for a shape
 ## still unbacked: a `float` key and a `seq[int]` value.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils, tables, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -208,12 +208,12 @@ proc n42TableAfterNested(p: ref N42OuterTable) =
 suite "symex N42 -- itUninterp (ownership) heap-deref read":
 
   test "N42-1: sanity -- target reachable before the ownership-field deref (untainted baseline)":
-    let r = symexFind(n42OwnBefore, tLabel("n42_own_before"))
+    let r = pinFind(n42OwnBefore, tLabel("n42_own_before"))
     check r.status == sxSat
     check r.errors.len == 0
 
   test "N42-2: heap-deref READ of an ownership-wrapped field -- honest sxUnknown carrying heUnsupportedOwnership, no crash residue, never a false sxSat":
-    let r = symexFind(n42OwnAfter, tLabel("n42_own_after"))
+    let r = pinFind(n42OwnAfter, tLabel("n42_own_after"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -224,7 +224,7 @@ suite "symex N42 -- itUninterp (ownership) heap-deref read":
     check saw
 
   test "N42-3: nested-block first-touch (ADR-0023 depth) -- same honest decline, not misattributed under nesting":
-    let r = symexFind(n42OwnAfterNested, tLabel("n42_own_after_nested"))
+    let r = pinFind(n42OwnAfterNested, tLabel("n42_own_after_nested"))
     check r.status == sxUnknown
     var saw = false
     for e in r.errors:
@@ -234,12 +234,12 @@ suite "symex N42 -- itUninterp (ownership) heap-deref read":
 suite "symex N42 -- itTable heap-deref read (N41 crash stays masked-sound, taint-only decision)":
 
   test "N42-4: sanity -- target reachable before the table-field deref (untainted baseline)":
-    let r = symexFind(n42TableBefore, tLabel("n42_table_before"))
+    let r = pinFind(n42TableBefore, tLabel("n42_table_before"))
     check r.status == sxSat
     check r.errors.len == 0
 
   test "N42-5: heap-deref READ of a non-string-key Table field -- still sxUnknown (N41's rawAnyAstOf gap is UNTOUCHED this slice, masked-sound via crash exactly as before)":
-    let r = symexFind(n42TableAfter, tLabel("n42_table_after"))
+    let r = pinFind(n42TableAfter, tLabel("n42_table_after"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -248,7 +248,7 @@ suite "symex N42 -- itTable heap-deref read (N41 crash stays masked-sound, taint
     check r.errors.named(seUnsupportedTableKeyType)
 
   test "N42-6: nested-block first-touch (ADR-0023 depth) -- same masked-sound sxUnknown, not misattributed under nesting":
-    let r = symexFind(n42TableAfterNested, tLabel("n42_table_after_nested"))
+    let r = pinFind(n42TableAfterNested, tLabel("n42_table_after_nested"))
     check r.status == sxUnknown
     check r.errors.named(heUnsupportedPointeeRead)
     check r.errors.named(seUnsupportedCompoundSortLeaf)
@@ -257,20 +257,20 @@ suite "symex N42 -- itTable heap-deref read (N41 crash stays masked-sound, taint
 suite "symex N42 -- sound-path companions (no over-taint, verdicts unchanged)":
 
   test "N42-7: an ordinary, fully-backed deref read is sxSat with a replaying witness (no over-taint)":
-    let r = symexFind(n42GoodReadSat, tLabel("n42_good_read_sat"))
+    let r = pinFind(n42GoodReadSat, tLabel("n42_good_read_sat"))
     check r.status == sxSat
     check r.errors.len == 0
 
   test "N42-8: an ordinary, fully-backed deref read UNSAT companion (no over-taint)":
-    let r = symexFind(n42GoodReadUnsat, tLabel("n42_good_read_unsat"))
+    let r = pinFind(n42GoodReadUnsat, tLabel("n42_good_read_unsat"))
     check r.status == sxUnsat
 
   test "N42-9: derefwrite with a good field -- unaffected (verdict unchanged by this slice)":
-    let r = symexFind(n42GoodDerefWrite, tLabel("n42_good_derefwrite"))
+    let r = pinFind(n42GoodDerefWrite, tLabel("n42_good_derefwrite"))
     check r.status == sxSat
 
   test "N42-10: isNew with a good field -- unaffected (verdict unchanged by this slice)":
-    let r = symexFind(n42IsNewGoodField, tLabel("n42_isnew_good_field"))
+    let r = pinFind(n42IsNewGoodField, tLabel("n42_isnew_good_field"))
     check r.status == sxSat
 
 suite "symex N42 -- walker version pin":
@@ -329,7 +329,7 @@ proc n44TableBareAssert(p: ref N42OuterTable) =
 suite "symex N44 -- shape-independent adversarial taint probes (deref-mechanism-present, not shape-coincidence)":
 
   test "N44-1: heap deref inside a WHILE-GUARD condition -- honest sxUnknown, never sxSat":
-    let r = symexFind(n44TableWhileGuard, tLabel("n44_table_while_guard"))
+    let r = pinFind(n44TableWhileGuard, tLabel("n44_table_while_guard"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -340,7 +340,7 @@ suite "symex N44 -- shape-independent adversarial taint probes (deref-mechanism-
     check r.status != sxSat
 
   test "N44-2: heap deref as a BARE CALL ARGUMENT (no intervening let-binding) -- honest sxUnknown, never sxSat":
-    let r = symexFind(n44TableCallArg, tLabel("n44_table_call_arg"))
+    let r = pinFind(n44TableCallArg, tLabel("n44_table_call_arg"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -350,7 +350,7 @@ suite "symex N44 -- shape-independent adversarial taint probes (deref-mechanism-
     check r.status != sxSat
 
   test "N44-3: heap deref inside a BARE symexAssert condition (no intervening binding) -- honest sxUnknown, never sxSat":
-    let r = symexFind(n44TableBareAssert, tLabel("n44_table_bare_assert"))
+    let r = pinFind(n44TableBareAssert, tLabel("n44_table_bare_assert"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown

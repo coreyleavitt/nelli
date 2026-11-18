@@ -28,6 +28,7 @@
 ## "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   Point = object
@@ -104,11 +105,11 @@ proc variantRef(p: ref VNode) =
 suite "symex Phase 15 R6 — ref object field access (heap field-split + alias-observable)":
 
   test "R6 test 1: aliased field write p.x=42; q.x==42 is sxSat with witness p==q (headline)":
-    let r = symexFind(f, tLabel("alias_field"))
+    let r = pinFind(f, tLabel("alias_field"))
     check r.status == sxSat
 
   test "R6 test 2: field read p.x==7 is sxSat":
-    let r = symexFind(gRead, tLabel("field_read"))
+    let r = pinFind(gRead, tLabel("field_read"))
     check r.status == sxSat
 
   test "R6 test 3: non-alias — write through p NOT observable through DISTINCT fresh q (sxUnsat)":
@@ -116,13 +117,13 @@ suite "symex Phase 15 R6 — ref object field access (heap field-split + alias-o
     ## (Nim-faithful), so the distinct fresh q never sees p's write — `q.x == 42`
     ## is unsatisfiable. Pre-Step-C this modelled q.x as free and asserted
     ## `q.x == 7` reachability (sxSat), a false-SAT the zero-write removes.
-    let r = symexFind(nonAlias, tLabel("nonalias"))
+    let r = pinFind(nonAlias, tLabel("nonalias"))
     check r.status == sxUnsat
 
   test "R6 test 4 (inherited, flat layout): p.bx (base) and p.cy (own) both resolve → sxSat":
-    let r = symexFind(inheritedRead, tLabel("inherited"))
+    let r = pinFind(inheritedRead, tLabel("inherited"))
     check r.status == sxSat
 
   test "R6 test 5 (variant ref object disc read): discriminant read through ref → sxSat (ADR-0013 Slice 1)":
-    let r = symexFind(variantRef, tLabel("variant"))
+    let r = pinFind(variantRef, tLabel("variant"))
     check r.status == sxSat

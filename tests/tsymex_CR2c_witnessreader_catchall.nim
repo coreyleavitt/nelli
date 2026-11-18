@@ -46,6 +46,7 @@
 
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
@@ -201,7 +202,7 @@ proc sutRenderNestedVariantArm(s: ShapeOk, y: int) =
 suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
 
   test "CR-2c-1: seq[Widget] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutSeqObject, tLabel("seq_object_target"))
+    let r = pinFind(sutSeqObject, tLabel("seq_object_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -212,7 +213,7 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
     check sawKind
 
   test "CR-2c-2: seq[seq[int]] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutSeqSeqInt, tLabel("seq_seq_int_target"))
+    let r = pinFind(sutSeqSeqInt, tLabel("seq_seq_int_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -223,7 +224,7 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
     check sawKind
 
   test "CR-2c-3: Table[string, distinct tuple] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutTableStrStr, tLabel("table_strstr_target"))
+    let r = pinFind(sutTableStrStr, tLabel("table_strstr_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -234,7 +235,7 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
     check sawKind
 
   test "CR-2c-4: Table[int, int] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutTableIntInt, tLabel("table_intint_target"))
+    let r = pinFind(sutTableIntInt, tLabel("table_intint_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -245,7 +246,7 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
     check sawKind
 
   test "CR-2c-5: HashSet[string] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutHashSetString, tLabel("hashset_string_target"))
+    let r = pinFind(sutHashSetString, tLabel("hashset_string_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -258,7 +259,7 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
 suite "symex RFC-chapulin-hardening CR-2c — NESTED-aggregate degrade (completeness gap)":
 
   test "CR-2c-N1: tuple[a: seq[Widget], n: int] compiles and degrades to sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutNestedTupleSeqObject, tLabel("nested_tuple_seqobj_target"))
+    let r = pinFind(sutNestedTupleSeqObject, tLabel("nested_tuple_seqobj_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -269,7 +270,7 @@ suite "symex RFC-chapulin-hardening CR-2c — NESTED-aggregate degrade (complete
     check sawKind
 
   test "CR-2c-N2: array[2, HashSet[string]] compiles and degrades to sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutNestedArrayHashSetString, tLabel("nested_array_hashset_target"))
+    let r = pinFind(sutNestedArrayHashSetString, tLabel("nested_array_hashset_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -297,12 +298,12 @@ suite "symex RFC-chapulin-hardening CR-2c — NESTED-aggregate degrade (complete
     ## already establish elsewhere in this RFC). A DIRECT read of `widgets`
     ## still degrades classified — see `tsymex_r6_bug2_scopeddecline.nim`'s
     ## HONEST DEGRADE pins — this test's SUT simply never performs one.
-    let r = symexFind(sutNestedVariantArm, tLabel("nested_variant_arm_target"))
+    let r = pinFind(sutNestedVariantArm, tLabel("nested_variant_arm_target"))
     check r.status == sxSat
     check r.witness[1] == 42
 
   test "CR-2c-N4: seq[tuple[w: seq[Widget], n: int]] (double nesting) degrades to sxUnknown + feUnsupportedWitnessType":
-    let r = symexFind(sutNestedSeqTupleSeqObject, tLabel("nested_seq_tuple_target"))
+    let r = pinFind(sutNestedSeqTupleSeqObject, tLabel("nested_seq_tuple_target"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
@@ -315,23 +316,23 @@ suite "symex RFC-chapulin-hardening CR-2c — NESTED-aggregate degrade (complete
 suite "symex RFC-chapulin-hardening CR-2c — regression guard (supported shapes unaffected)":
 
   test "CR-2c-6: seq[int] still resolves sxSat with exact witness":
-    let r = symexFind(sutPlainSeqInt, tLabel("plain_seq_int"))
+    let r = pinFind(sutPlainSeqInt, tLabel("plain_seq_int"))
     check r.status == sxSat
     check r.witness[0] == @[7]
     check r.witness[1] == 7
 
   test "CR-2c-7: Table[string, int] still resolves sxSat":
-    let r = symexFind(sutPlainTable, tLabel("plain_table"))
+    let r = pinFind(sutPlainTable, tLabel("plain_table"))
     check r.status == sxSat
     check r.witness[1] == 9
 
   test "CR-2c-8: HashSet[int] still resolves sxSat":
-    let r = symexFind(sutPlainHashSet, tLabel("plain_hashset"))
+    let r = pinFind(sutPlainHashSet, tLabel("plain_hashset"))
     check r.status == sxSat
     check r.witness[1] == 11
 
   test "CR-2c-9: plain scalars still resolve sxSat":
-    let r = symexFind(sutPlainScalar, tLabel("plain_scalar"))
+    let r = pinFind(sutPlainScalar, tLabel("plain_scalar"))
     check r.status == sxSat
     check r.witness[0] == 13
     check r.witness[1] == true
@@ -340,21 +341,21 @@ suite "symex RFC-chapulin-hardening CR-2c — regression guard (supported shapes
     ## Proves the recursion demotes ONLY when a leaf is genuinely unrenderable:
     ## every leaf here (seq[int], int) is renderable, so the whole param must
     ## keep its real itTuple classification and resolve normally.
-    let r = symexFind(sutRenderNestedTupleSeqInt, tLabel("render_nested_tuple_seqint"))
+    let r = pinFind(sutRenderNestedTupleSeqInt, tLabel("render_nested_tuple_seqint"))
     check r.status == sxSat
     check r.status != sxUnknown
     for e in r.errors:
       check e.kind != feUnsupportedWitnessType
 
   test "CR-2c-11: RENDERABLE nested array[2, HashSet[int]] NOT over-demoted — stays sxSat":
-    let r = symexFind(sutRenderNestedArrayHashSetInt, tLabel("render_nested_array_hashset_int"))
+    let r = pinFind(sutRenderNestedArrayHashSetInt, tLabel("render_nested_array_hashset_int"))
     check r.status == sxSat
     check r.status != sxUnknown
     for e in r.errors:
       check e.kind != feUnsupportedWitnessType
 
   test "CR-2c-12: RENDERABLE nested variant (seq[int] arm) NOT over-demoted — stays sxSat":
-    let r = symexFind(sutRenderNestedVariantArm, tLabel("render_nested_variant_arm"))
+    let r = pinFind(sutRenderNestedVariantArm, tLabel("render_nested_variant_arm"))
     check r.status == sxSat
     check r.status != sxUnknown
     for e in r.errors:

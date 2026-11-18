@@ -324,6 +324,27 @@ type
     tag: bool
     cell: ref int
 
+  RRanged = ref object
+    v: range[1..100]
+  RBase = object of RootObj
+    bx: int
+  RChild = object of RBase
+    cy: int
+
+  RB = ref object of RootObj
+    x: int
+  RM = ref object of RB
+    y: int
+
+proc sutNilRaise(p: ref int) =
+  if p[] == 1: symexTarget("hit")
+
+proc sutRanged(r: RRanged) =
+  if r != nil and r.v == 0: symexTarget("hit")
+
+proc sutInherited(p: ref RChild) =
+  if p != nil and p.bx == 5 and p.cy == 9: symexTarget("hit")
+
 proc sutRefNil(p: ref int) =
   if p == nil: symexTarget("hit")
 
@@ -1302,3 +1323,38 @@ suite "K9d: pinFind":
     let n = parseInt(r[^1].domain[at + 1 ..< r[^1].domain.find(']')])
     check n > 1 and n <= 2048
     check "sampled[" in r[^1].domain
+
+  test "a nil-access raise is returned unpinned: its witness ends the process":
+    let r = pinFind(sutNilRaise, tNilAccess())
+    check r.status == sxRaised
+    check recordsWith("/sutNilRaise/").len == 0
+
+  test "a pointee with no default value and an inheritable pointee":
+    let d = boundaryOf(RRanged)
+    check d.values.len > 1
+    check d.values.allIt(it == nil or (it.v >= 1 and it.v <= 100))
+    check pinFind(sutRanged, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutRanged/").len == 1
+    let c = boundaryOf(ref RChild)
+    check c.values.anyIt(it != nil and it.bx != 0)
+    check pinFind(sutInherited, tLabel("hit")).status == sxSat
+    check recordsWith("/sutInherited/").len == 1
+
+  test "a seq domain thinned to cross keeps a sequence of each literal length":
+    ## (K9d-10: S8ac's `symexAssume(data.len == 12)` beside a table rejected
+    ## every run once the seq domain was cut to its prefix)
+    setStringHints(StringHints(strs: @[], ints: @[12, 0, 1, 2, 3, 4, 5, 6]))
+    var d = boundaryOf(seq[byte])
+    clearStringHints()
+    thinDomain(d)
+    check d.values.len <= stringCore
+    check d.values.anyIt(it.len == 12)
+
+  test "an ancestor ref parameter also ranges over a descendant's cells":
+    var b = boundaryOf(RB)
+    let m = boundaryOf(RM)
+    check not b.values.anyIt(it != nil and it of RM)
+    absorbSubtype(b, m)
+    check b.values.anyIt(it != nil and it of RM and RB(m.values[1]) == it)
+    # (the walker's witness for `sutSubAlias` builds the shared cell as an
+    # `RB`, not the `RM` its run-type tag says: INT-81, pinned there)

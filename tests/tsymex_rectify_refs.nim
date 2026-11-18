@@ -8,6 +8,7 @@
 ## a consumer needs it.
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type Counter = ref object
   count: int
@@ -18,5 +19,5 @@ proc atZero(c: Counter) =
 
 suite "symex refs #136":
   test "ref-typed param accessed by field":
-    let r = symexFind(atZero, tLabel("zero"))
+    let r = pinFind(atZero, tLabel("zero"))
     check r.status == sxSat

@@ -11,6 +11,7 @@
 ## comment documents the ACTUAL classifyType/heap routing, not a guess.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   Node = ref object
@@ -242,77 +243,79 @@ proc deepChainWriteUnsat(p: Node) =
 suite "Cluster H verification — identity transitivity / composition":
 
   test "transitive: p==q and q==r; write through p is observed through r (sxSat)":
-    let r = symexFind(transitiveWriteHit, tLabel("transitive_hit"))
+    let r = pinFind(transitiveWriteHit, tLabel("transitive_hit"))
     check r.status == sxSat
 
   test "transitive UNSAT soundness: r.val != 42 is impossible under the same chain":
-    let r = symexFind(transitiveWriteUnsat, tLabel("transitive_unsat"))
+    let r = pinFind(transitiveWriteUnsat, tLabel("transitive_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — mixed param<->constructed-node aliasing":
 
   test "p == n (param vs freshly-constructed node) is reachable (sxSat)":
+    # symexFind: a false sxSat, INT-79 (a fresh node is never a caller ref)
     let r = symexFind(paramConstructedEqHit, tLabel("param_ctor_eq_hit"))
     check r.status == sxSat
 
   test "p != n is ALSO reachable (freshness only excludes nil/prior live refs, not free params)":
-    let r = symexFind(paramConstructedNeqHit, tLabel("param_ctor_neq_hit"))
+    let r = pinFind(paramConstructedNeqHit, tLabel("param_ctor_neq_hit"))
     check r.status == sxSat
 
   test "forced p == n: a write through n is observed through p (sxSat)":
+    # symexFind: a false sxSat, INT-79 (a fresh node is never a caller ref)
     let r = symexFind(paramConstructedForcedWriteHit, tLabel("param_ctor_write_hit"))
     check r.status == sxSat
 
   test "forced p == n UNSAT soundness: p.val != 99 after the write is impossible":
-    let r = symexFind(paramConstructedForcedWriteUnsat, tLabel("param_ctor_write_unsat"))
+    let r = pinFind(paramConstructedForcedWriteUnsat, tLabel("param_ctor_write_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — nil edge cases":
 
   test "p == nil is reachable (sxSat)":
-    let r = symexFind(pNilReachable, tLabel("p_nil_hit"))
+    let r = pinFind(pNilReachable, tLabel("p_nil_hit"))
     check r.status == sxSat
 
   test "p != nil is reachable (sxSat)":
-    let r = symexFind(pNonNilReachable, tLabel("p_nonnil_hit"))
+    let r = pinFind(pNonNilReachable, tLabel("p_nonnil_hit"))
     check r.status == sxSat
 
   test "proven non-nil p: p == nil is UNSAT inside the guard":
-    let r = symexFind(provenNonNilThenNilUnsat, tLabel("proven_nonnil_then_nil_unsat"))
+    let r = pinFind(provenNonNilThenNilUnsat, tLabel("proven_nonnil_then_nil_unsat"))
     check r.status == sxUnsat
 
   test "two independent nil refs compare equal (sxSat)":
-    let r = symexFind(twoNilRefsEqReachable, tLabel("two_nil_eq_hit"))
+    let r = pinFind(twoNilRefsEqReachable, tLabel("two_nil_eq_hit"))
     check r.status == sxSat
 
   test "two independent nil refs UNSAT soundness: they can never compare unequal":
-    let r = symexFind(twoNilRefsNeqUnsat, tLabel("two_nil_neq_unsat"))
+    let r = pinFind(twoNilRefsNeqUnsat, tLabel("two_nil_neq_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — variant ref-object FIELD ACCESS (supported vs excluded)":
 
   test "SUPPORTED since RFC-0005 S8l: inline ref to a MULTI-axis variant — disc read is sxSat (was sxUnknown, heRefVariantUnsupported)":
-    let r = symexFind(inlineMultiVariantDiscRead, tLabel("inline_multivariant_disc_hit"))
+    let r = pinFind(inlineMultiVariantDiscRead, tLabel("inline_multivariant_disc_hit"))
     check r.status == sxSat
     for e in r.errors:
       check e.kind != weInternalWalkerFault   # RFC-0005 S8m: heRefVariantUnsupported retired
 
   test "SUPPORTED (contrast): inline ref to a SINGLE-axis variant — arm-field read is sxSat":
-    let r = symexFind(inlineSingleVariantArmFieldRead, tLabel("inline_singlevariant_armfield_hit"))
+    let r = pinFind(inlineSingleVariantArmFieldRead, tLabel("inline_singlevariant_armfield_hit"))
     check r.status == sxSat
 
   test "SUPPORTED (contrast): NAMED alias to a ref-to-variant — field read is sxSat (heap-modelled since RFC-0005 S8l)":
-    let r = symexFind(namedAliasVariantDiscRead, tLabel("named_alias_variant_disc_hit"))
+    let r = pinFind(namedAliasVariantDiscRead, tLabel("named_alias_variant_disc_hit"))
     check r.status == sxSat
 
 suite "Cluster H verification — deep aliasing chain VERDICT (3+ hops)":
 
   test "a field 3 hops deep can be written and re-read for a real sxSat verdict":
-    let r = symexFind(deepChainWriteHit, tLabel("deep_chain_hit"))
+    let r = pinFind(deepChainWriteHit, tLabel("deep_chain_hit"))
     check r.status == sxSat
 
   test "UNSAT soundness: the 3-hop-deep field cannot be anything other than the written value":
-    let r = symexFind(deepChainWriteUnsat, tLabel("deep_chain_unsat"))
+    let r = pinFind(deepChainWriteUnsat, tLabel("deep_chain_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — version pins (no bump expected)":

@@ -15,6 +15,7 @@
 ## lowers to a single `mkBinop(bAnd, a, b)`.
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # ---- Type fixtures -----------------------------------------------------------
 
@@ -104,39 +105,39 @@ suite "symex Phase 16 D1c — and/or short-circuit modeling":
 
   test "and-guarded variant field: no spurious FieldDefect, target reachable":
     ## The tracer. Pre-D1c: sxRaised{FieldDefect}. Post-D1c: sxSat.
-    let r = symexFind(guardedAndField, tLabel("guarded-and-field"))
+    let r = pinFind(guardedAndField, tLabel("guarded-and-field"))
     check r.status == sxSat
     check r.witness[0].inner.k == true
     check r.witness[0].inner.x > 0
 
   test "and-guarded nil deref: no spurious NilAccessDefect":
-    let r = symexFind(guardedNilDeref, tLabel("guarded-nil-deref"))
+    let r = pinFind(guardedNilDeref, tLabel("guarded-nil-deref"))
     check r.status == sxSat
 
   test "and-guarded index: no spurious IndexDefect when guards precede access":
-    let r = symexFind(guardedIndex, tLabel("guarded-index"))
+    let r = pinFind(guardedIndex, tLabel("guarded-index"))
     check r.status == sxSat
     check r.witness[1] >= 0
     check r.witness[1] < 5
 
   test "or short-circuit: no spurious FieldDefect when LHS true guards RHS":
-    let r = symexFind(orShortCircuit, tLabel("or-hit"))
+    let r = pinFind(orShortCircuit, tLabel("or-hit"))
     check r.status == sxSat
 
   test "value-position: and desugar works outside condition position":
-    let r = symexFind(valuePosAnd, tLabel("value-pos"))
+    let r = pinFind(valuePosAnd, tLabel("value-pos"))
     check r.status == sxSat
     check r.witness[0].inner.k == true
     check r.witness[0].inner.x > 0
 
   test "real defect still found: unguarded arm-field access still raises FieldDefect":
     ## D1c must NOT suppress real defects — only false positives from guarded RHS.
-    let r = symexFind(bareFieldAccess, tFieldDefect())
+    let r = pinFind(bareFieldAccess, tFieldDefect())
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
 
   test "pure-bool fast path: plain `a and b` still reaches label target":
-    let r = symexFind(pureBoolAnd, tLabel("pure-bool"))
+    let r = pinFind(pureBoolAnd, tLabel("pure-bool"))
     check r.status == sxSat
     check r.witness[0] == true
     check r.witness[1] == true

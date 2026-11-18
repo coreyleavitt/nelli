@@ -18,6 +18,7 @@
 ## GREEN under Step C: every test below now yields a REAL, sound verdict.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # ---------------------------------------------------------------------------
 # Aliasing: q = p; q.val = 99; assert p.val == 99 — the core new capability.
@@ -111,37 +112,37 @@ proc tokenProvenNonNil(t: Token) =
 suite "symex Cluster H Step C — flagship heap-identity tests (ADR-0022)":
 
   test "aliasing: q = p; q.val = 99; p.val == 99 is REAL sxSat (was sxUnknown)":
-    let r = symexFind(aliasWriteHit, tLabel("alias_write_hit"))
+    let r = pinFind(aliasWriteHit, tLabel("alias_write_hit"))
     check r.status == sxSat
 
   test "aliasing UNSAT soundness: p.val != 99 after the alias write is impossible":
-    let r = symexFind(aliasWriteUnsat, tLabel("alias_write_unsat"))
+    let r = pinFind(aliasWriteUnsat, tLabel("alias_write_unsat"))
     check r.status == sxUnsat
 
   test "identity: p == q is reachable (real verdict, was sxUnknown)":
-    let r = symexFind(identityEqReachable, tLabel("identity_eq_hit"))
+    let r = pinFind(identityEqReachable, tLabel("identity_eq_hit"))
     check r.status == sxSat
 
   test "identity: p != q is ALSO reachable (two independent params can differ)":
-    let r = symexFind(identityNeqReachable, tLabel("identity_neq_hit"))
+    let r = pinFind(identityNeqReachable, tLabel("identity_neq_hit"))
     check r.status == sxSat
 
   test "identity composes with aliasing: p == q forces a shared write to be observed":
-    let r = symexFind(identityImpliesSharedWrite,
+    let r = pinFind(identityImpliesSharedWrite,
                        tLabel("identity_shared_write_hit"))
     check r.status == sxSat
 
   test "sym-indirection nil: `type NodeRef = ref Obj`; p == nil is reachable (real verdict)":
-    let r = symexFind(symIndirectNilReachable, tLabel("sym_indirect_nil_hit"))
+    let r = pinFind(symIndirectNilReachable, tLabel("sym_indirect_nil_hit"))
     check r.status == sxSat
 
   test "sym-indirection field-write: p.val = x; p.val == x round-trips through the heap":
-    let r = symexFind(symIndirectNonNilFieldWrite,
+    let r = pinFind(symIndirectNonNilFieldWrite,
                        tLabel("sym_indirect_write_hit"))
     check r.status == sxSat
 
   test "zero-field witness provenance: proven non-nil `t: Token` renders NON-nil (not the old fields.len==0 mis-render)":
-    let r = symexFind(tokenProvenNonNil, tLabel("token_nonnil_hit"))
+    let r = pinFind(tokenProvenNonNil, tLabel("token_nonnil_hit"))
     check r.status == sxSat
     check not r.witness[0].isNil
 

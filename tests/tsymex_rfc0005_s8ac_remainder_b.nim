@@ -32,6 +32,7 @@
 
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -83,13 +84,13 @@ suite "S8ac (3): a shift count is masked to the operand width":
   test "x shl 64 is x, not 0":
     ## RED: `shl64_dead` `sxSat` with witness (5, 64), which does not
     ## replay (probe: `5 shl 64 == 5`); `shl_mask` `sxUnsat`.
-    let d = symexFind(sutShl64, tLabel("shl64_dead"))
+    let d = pinFind(sutShl64, tLabel("shl64_dead"))
     checkpoint show(d.errors)
     check d.status == sxUnsat
     var x0 = 5
     var n0 = 64
     check (x0 shl n0) == 5
-    let r = symexFind(sutShl64, tLabel("shl_mask"))
+    let r = pinFind(sutShl64, tLabel("shl_mask"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -99,19 +100,19 @@ suite "S8ac (3): a shift count is masked to the operand width":
   test "a signed shr by 65 is a shr by 1":
     ## RED: `shr_mask`'s witness was (-1, 65) only (Z3's all-sign-bits);
     ## `shr_dead` `sxSat` (probe: `-4 shr 65 == -2`).
-    let r = symexFind(sutShr65, tLabel("shr_mask"))
+    let r = pinFind(sutShr65, tLabel("shr_mask"))
     check r.status == sxSat
     if r.status == sxSat:
       let (x, n) = r.witness
       check (x shr n) == x div 2 - (if x mod 2 != 0: 1 else: 0)
-    let d = symexFind(sutShr65, tLabel("shr_dead"))
+    let d = pinFind(sutShr65, tLabel("shr_dead"))
     checkpoint show(d.errors)
     check d.status == sxUnsat
 
   test "an int8 shifted by an int count masks by 7":
     ## RED: `weInternalWalkerFault` (`binBV: width mismatch`). Probe:
     ## `5'i8 shl -1 == -128`.
-    let r = symexFind(sutShl8, tLabel("shl8"))
+    let r = pinFind(sutShl8, tLabel("shl8"))
     checkpoint show(r.errors)
     check r.status == sxSat
     var x0 = 5'i8
@@ -120,7 +121,7 @@ suite "S8ac (3): a shift count is masked to the operand width":
 
   test "a uint32 shl by 33 is a shl by 1":
     ## RED: `sxUnsat` (Z3's `bvshl` by 33 is 0). Probe: `3'u32 shl 33 == 6`.
-    let r = symexFind(sutShlU, tLabel("shlu"))
+    let r = pinFind(sutShlU, tLabel("shlu"))
     checkpoint show(r.errors)
     check r.status == sxSat
     var x0 = 3'u32
@@ -220,7 +221,7 @@ suite "S8ac (4): the short-circuit join covers allocation and containers":
                   want: SymexStatusKind, maxCalls: int) =
     block:
       symexZ3CallCount = 0
-      let r = symexFind(fn, tLabel(lbl), st)
+      let r = pinFind(fn, tLabel(lbl), st)
       checkpoint lbl & " " & show(r.errors)
       checkpoint "z3 calls: " & $symexZ3CallCount
       check r.status == want
@@ -244,7 +245,7 @@ suite "S8ac (4): the short-circuit join covers allocation and containers":
   test "an operand that writes a set joins (6 pairs)":
     ## RED: 150 Z3 calls. `{2, 5}`: operands 2 and 5 take their right side.
     symexZ3CallCount = 0
-    let r = symexFind(sutSet, tLabel("set"))
+    let r = pinFind(sutSet, tLabel("set"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -257,7 +258,7 @@ suite "S8ac (4): the short-circuit join covers allocation and containers":
   test "an operand that rebinds a distinct value joins (6 pairs)":
     ## RED: 229 Z3 calls. `20 == 4 + 16`: operands 3 and 5.
     symexZ3CallCount = 0
-    let r = symexFind(sutDist, tLabel("dist"))
+    let r = pinFind(sutDist, tLabel("dist"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat

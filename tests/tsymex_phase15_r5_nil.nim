@@ -36,6 +36,7 @@
 ## R5 is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # --- DoD 1: deref of a possibly-nil ref forks --------------------------------
 proc f(p: ref int) =
@@ -76,24 +77,24 @@ suite "symex Phase 15 R5 — nil handling (nil-access defect)":
     ## The unguarded `f` surfaces NilAccessDefect before the label under D1a
     ## (unconditional fork, first-found wins). `fGuarded` wraps the deref
     ## in `if p != nil:` so the nil fork is SHORT-CIRCUITED by pcImpliesNonNil.
-    let r = symexFind(fGuarded, tLabel("hit"))
+    let r = pinFind(fGuarded, tLabel("hit"))
     check r.status == sxSat
 
   test "R5 test 1b: deref nil path is the defect → tNilAccess sxRaised (D1a)":
     ## Phase 16 D1a: tNilAccess now returns sxRaised (unconditional fork via
     ## routeRaise), not sxSat. The status changed from sxSat to sxRaised.
-    let r = symexFind(f, tNilAccess())
+    let r = pinFind(f, tNilAccess())
     check r.status == sxRaised
     check r.raisedTypeId == "NilAccessDefect"
 
   test "R5 test 2: SHORT-CIRCUIT — freshly new-allocated ref does NOT fork a nil path → tNilAccess sxUnsat":
-    let r = symexFind(g, tNilAccess())
+    let r = pinFind(g, tNilAccess())
     check r.status == sxUnsat
 
   test "R5 test 3a: `p == nil` observable — p can be nil → sxSat":
-    let r = symexFind(h, tLabel("isNil"))
+    let r = pinFind(h, tLabel("isNil"))
     check r.status == sxSat
 
   test "R5 test 3b: `p == nil` on a fresh `new` ref is unreachable → sxUnsat":
-    let r = symexFind(hFresh, tLabel("isNil"))
+    let r = pinFind(hFresh, tLabel("isNil"))
     check r.status == sxUnsat

@@ -26,6 +26,7 @@
 ## Test naming mirrors the ledger: CR-1-* and CR-5-*.
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # ---------------------------------------------------------------------------
 # CR-1 SUTs
@@ -121,21 +122,21 @@ suite "symex Phase 15 CR-1 + CR-5 — closure heap write merge + liveRefs seedin
 
   test "CR-1 test 1: closure write p[]=99 is visible to caller after m() (sxSat)":
     # After the fix the merged caller heap has p[]→99; the target is reachable.
-    let r = symexFind(cr1WriteObserve, tLabel("hit"))
+    let r = pinFind(cr1WriteObserve, tLabel("hit"))
     check r.status == sxSat
 
   test "CR-1 test 2: after m() sets p[]=99, p[]==7 is sxUnsat (write merged — PROOF)":
     # This is the proof that the write propagated: the store pins p[] to 99, so
     # p[]==7 is UNSAT.  Without the merge the caller heap is free and 7 is SAT.
-    let r = symexFind(cr1WriteContradiction, tLabel("no"))
+    let r = pinFind(cr1WriteContradiction, tLabel("no"))
     check r.status == sxUnsat
 
   test "CR-1 test 3: closure overwrite wins — caller reads 99 after p[]=5 then m() sets p[]=99":
-    let r = symexFind(cr1OverwriteObserve, tLabel("hit"))
+    let r = pinFind(cr1OverwriteObserve, tLabel("hit"))
     check r.status == sxSat
 
   test "CR-1 test 4: after overwrite the old value 5 is gone — p[]==5 sxUnsat (PROOF)":
-    let r = symexFind(cr1OverwriteContradiction, tLabel("no"))
+    let r = pinFind(cr1OverwriteContradiction, tLabel("no"))
     check r.status == sxUnsat
 
   # ---- CR-5: closure-body new T distinct from caller refs ----
@@ -144,5 +145,5 @@ suite "symex Phase 15 CR-1 + CR-5 — closure heap write merge + liveRefs seedin
     # p is minted by the caller's new int (liveRefs-tracked); q is minted
     # inside the lambda body.  With the liveRefs seed fix, assertFreshness for
     # q sees p in the seeded liveRefs and emits q != p → sxUnsat.
-    let r = symexFind(cr5ClosureNewDistinct, tLabel("alias"))
+    let r = pinFind(cr5ClosureNewDistinct, tLabel("alias"))
     check r.status == sxUnsat

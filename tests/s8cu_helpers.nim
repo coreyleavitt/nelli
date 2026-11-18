@@ -1179,6 +1179,20 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T]
   ## forward: the generated domain code binds it here (open, so a suite's
   ## own overload still applies) and does not name it in the suite's scope
 
+proc freeBlock*[T](p: ptr T) =
+  ## a zeroed block an aggregate's value was built in (`domLeaf`), released
+  `=destroy`(p[])
+  dealloc(p)
+
+template declarable*(T: typedesc): bool =
+  ## `var x: T` compiles (a field such as `range[1..100]` has no default;
+  ## `compiles(default(T))` does not see it)
+  compiles((block:
+    var x {.used.}: T))
+
+proc protoOf*[T](t: typedesc[T]): ptr T = nil
+  ## read only under `typeof` (`objectDomain`'s field types), never run
+
 type DomCtx = object
   ty, vals, exh, proto: NimNode
   depth: int
@@ -1207,25 +1221,37 @@ proc domLeaf(cx: DomCtx; fields: seq[NimNode];
       if not `d`.exhaustive: `exh` = false
   let fr = genSym(nskLet, "fr")
   let row = genSym(nskForVar, "row")
-  let o = genSym(nskVar, "o")
+  let o = genSym(nskLet, "o")
+  let od = nnkDerefExpr.newTree(o)
+  let ov = genSym(nskVar, "ov")
+  let decl = bindSym"declarable"
   body.add quote do:
     let `fr` = fieldRows(@`sizes`)
     if not `fr`.full: `exh` = false
   let setup = newStmtList()
   setup.add quote do:
-    var `o`: `ty`
+    # a type with no default (a field such as `range[1..100]`) is built in
+    # a zeroed block, every field assigned below; any other in a declared
+    # value (an inheritable object's block would lack its type header)
+    when `decl`(`ty`):
+      var `ov`: `ty`
+      let `o` = addr `ov`
+    else:
+      let `o` = cast[ptr `ty`](alloc0(sizeof(`ty`)))
   for (dn, dv) in discs:
-    let asg = newAssignment(selector(dn, o), dv)
+    let asg = newAssignment(selector(dn, od), dv)
     setup.add nnkPragmaBlock.newTree(
       nnkPragma.newTree(nnkCast.newTree(newEmptyNode(), ident"uncheckedAssign")),
       newStmtList(asg))
   for i, f in fields:
-    setup.add newAssignment(selector(f, o),
+    setup.add newAssignment(selector(f, od),
       nnkBracketExpr.newTree(newDotExpr(ds[i], ident"values"),
                              nnkBracketExpr.newTree(row, newLit(i))))
   let put = bindSym"domPut"
+  let free = bindSym"freeBlock"
   setup.add quote do:
-    `put`(`vals`, `o`)
+    `put`(`vals`, `o`[])
+    when not `decl`(`ty`): `free`(`o`)
   body.add nnkForStmt.newTree(row, newDotExpr(fr, ident"rows"), setup)
   result = newStmtList(nnkBlockStmt.newTree(newEmptyNode(), body))
 
@@ -1295,7 +1321,9 @@ proc domEmit(cx: var DomCtx; items: seq[NimNode]; fields: seq[NimNode];
   domLeaf(cx, fields, discs)
 
 proc domItemsOf(t: NimNode): seq[NimNode] =
-  let impl = t.getTypeImpl
+  var impl = t.getTypeImpl
+  # an ancestor named by its ref type (`ref object of Base`, Base a ref)
+  if impl.kind == nnkRefTy: impl = impl[0].getTypeImpl
   if impl.kind != nnkObjectTy:
     error("pinFind: no generated domain for " & t.repr &
           "; pin this call with pinExact and an explicit domain", t)
@@ -1310,7 +1338,9 @@ macro objectDomain(T: typedesc): untyped =
   let ty = T.getType[1]
   let vals = genSym(nskVar, "vals")
   let exh = genSym(nskVar, "exh")
-  let proto = genSym(nskVar, "proto")
+  # the field types are read off a typed nil (no value of the type is
+  # declared: a field such as `range[1..100]` has no default)
+  let proto = nnkDerefExpr.newTree(newCall(bindSym"protoOf", T))
   var cx = DomCtx(ty: T, vals: vals, exh: exh, proto: proto)
   var gen: NimNode
   if ty.kind == nnkBracketExpr and ty[0].eqIdent("tuple"):
@@ -1323,7 +1353,6 @@ macro objectDomain(T: typedesc): untyped =
     block:
       var `vals`: seq[`T`]
       var `exh` = true
-      var `proto`: `T`
       `gen`
       Domain[`T`](values: `vals`, exhaustive: `exh`)
 
@@ -1449,6 +1478,23 @@ proc seqShapes*(m: int; thresholds: seq[int]; spread = -1): seq[seq[int]] =
         result.add vv
   put newSeq[int](0)
   if m == 0: return
+  var lens: seq[int]
+  for k in thresholds:
+    if k in 1 .. 256:
+      for n in [k - 1, k, k + 1]:
+        if n >= 1 and n notin lens: lens.add n
+  for n in seqFixedLens:
+    if n notin lens: lens.add n
+  # one sequence of each literal length first (K9d-10): a domain thinned to
+  # its prefix to cross with another parameter keeps every length the SUT
+  # names (a `symexAssume(data.len == 12)` otherwise rejects every run)
+  var early = 0
+  for n in lens:
+    if n > 3 and early < 16:
+      let ps = lengthPatterns(sp, n)
+      if ps.len > 0:
+        put ps[0]
+        inc early
   for a in 0 ..< m: put @[a]
   let q = min(m, 4)
   for a in 0 ..< q:
@@ -1457,13 +1503,6 @@ proc seqShapes*(m: int; thresholds: seq[int]; spread = -1): seq[seq[int]] =
   for a in 0 ..< q3:
     for b in 0 ..< q3:
       for c in 0 ..< q3: put @[a, b, c]
-  var lens: seq[int]
-  for k in thresholds:
-    if k in 1 .. 256:
-      for n in [k - 1, k, k + 1]:
-        if n >= 1 and n notin lens: lens.add n
-  for n in seqFixedLens:
-    if n notin lens: lens.add n
   for n in lens:
     for p in lengthPatterns(sp, n): put p
   for a in 0 ..< m:
@@ -1658,14 +1697,32 @@ proc linkSelfFields[R](x: R; to: R) =
   for _, f in fieldPairs(x[]):
     when f is R: f = to
 
-template selfLinked(R: typedesc): bool =
-  ## the pointee holds a field of type `R` (a recursive type)
-  block:
-    var found = false
-    var probe: typeof(default(R)[])
-    for _, f in fieldPairs(probe):
-      when f is R: found = true
-    found
+proc fieldOfType(n, r: NimNode): bool =
+  case n.kind
+  of nnkIdentDefs: sameType(n[^2], r)
+  of nnkRecCase:
+    if fieldOfType(n[0], r): return true
+    for i in 1 ..< n.len:
+      if fieldOfType(n[i][^1], r): return true
+    false
+  else:
+    for c in n:
+      if fieldOfType(c, r): return true
+    false
+
+macro selfLinked(R: typedesc): bool =
+  ## the pointee, an object, holds a field of type `R` in some branch or
+  ## ancestor (a recursive type)
+  let r = R.getType[1]
+  var t = r.getTypeImpl
+  if t.kind != nnkRefTy: return newLit(false)
+  t = t[0].getTypeImpl
+  while t.kind == nnkObjectTy:
+    if fieldOfType(t[2], r): return newLit(true)
+    if t[1].kind != nnkOfInherit: break
+    t = t[1][0].getTypeImpl
+    if t.kind == nnkRefTy: t = t[0].getTypeImpl
+  newLit(false)
 
 proc refDomain[R: ref](t: typedesc[R]): Domain[R] =
   var pool {.global.}: seq[R]
@@ -1726,6 +1783,14 @@ proc pointerDomain[T: pointer](t: typedesc[T]): Domain[pointer] =
   let ps = ptrDomain(ptr int)
   for i in 0 ..< domLen(ps.values): domPut(result.values, cast[pointer](ps.values[i]))
   result.exhaustive = false
+
+proc absorbSubtype*[A, B](da: var Domain[A]; db: Domain[B]) =
+  ## `da` gains `db`'s non-nil cells as `A` when `B` is a proper descendant
+  ## ref type of `A` (one object, two static types); otherwise nothing
+  when A is ref and B is ref and B is A and not (A is B):
+    for i in 0 ..< domLen(db.values):
+      let x = db.values[i]
+      if x != nil and not domHas(da.values, A(x)): domPut(da.values, A(x))
 
 macro underlyingName(T: typedesc): string =
   ## the type behind an alias, for the "no generated domain" message
@@ -1823,6 +1888,11 @@ proc pinFindJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
   if res.status == sxUnknown or not res.trusted or
      tgt.kind == stkUndefined or
      (res.status == sxSat and res.soundness.witnessUnsafe):
+    return res
+  # A nil dereference is a SIGSEGV natively, which no `except` sees
+  # (RFC-0005 S8cu): its witness would end this process. It is pinned in a
+  # child (`tsymex_rfc0005_s8cu_nil`), never replayed here (K9d-10).
+  if res.status == sxRaised and res.raisedTypeId.endsWith("NilAccessDefect"):
     return res
   let n = min(combos, pinFindCap)
   var idx = newSeq[int](n)
@@ -1982,6 +2052,13 @@ macro pinFind*(fn: typed; target: untyped;
   # leading rows would otherwise leave the last parameters unvaried).
   let rows = genSym(nskLet, "rows")
   let rowv = genSym(nskForVar, "row")
+  # A ref parameter whose type is an ancestor of another's (`b: Base`,
+  # `d: Mid`) also ranges over the other's cells, converted: its dynamic type
+  # may be the descendant, and the two may be one object (K9d-10).
+  for i in 0 ..< types.len:
+    for j in 0 ..< types.len:
+      if i != j:
+        doms.add newCall(bindSym("absorbSubtype", brOpen), domSyms[i], domSyms[j])
   # Two string parameters would cross to more runs than the cap: each is cut
   # to its core first (a string domain is in priority order).
   let thin = newStmtList()

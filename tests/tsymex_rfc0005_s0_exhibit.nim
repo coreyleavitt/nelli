@@ -66,6 +66,7 @@ import std/[unittest, sequtils, strutils]
 import nelli/smt/canonicalize
 import nelli/smt/types
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   S0Dist = object
@@ -211,12 +212,12 @@ suite "RFC-0005 S0 pin 1 -- over-taint-only UNSAT exhibit (flipped sxUnsat at S4
     # RFC-0005 S4: was sxUnknown through S3; the drained taint is
     # {heUnsupportedPointeeRead} (dcFreshSymbol, runTaint {scSpurious}), so
     # §2.3's verdict rule proves the target unreachable.
-    let r = symexFind(s0DeadFreshSymbol, tLabel("s0_dead_fresh_symbol"))
+    let r = pinFind(s0DeadFreshSymbol, tLabel("s0_dead_fresh_symbol"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
     checkUnsatOverTaintOnly(r)
 
   test "the drained sevError kind set is EXACTLY {heUnsupportedPointeeRead} -- over-taint-only, asserted not assumed":
-    let r = symexFind(s0DeadFreshSymbol, tLabel("s0_dead_fresh_symbol"))
+    let r = pinFind(s0DeadFreshSymbol, tLabel("s0_dead_fresh_symbol"))
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
       if e.severity == sevError:
@@ -235,13 +236,13 @@ suite "RFC-0005 S0 pin 2 -- cap-veto companion (flipped sxSat at S9)":
     # the clean witness because a `sevError` sat in `prog.parseErrors`. The
     # veto is deleted; the decline's walk-time reach record taints only the
     # (infeasible) path through the cast, so the `x == 42` hit is clean.
-    let r = symexFind(s0CapVetoCompanion, tLabel("s0_cap_veto_companion"))
+    let r = pinFind(s0CapVetoCompanion, tLabel("s0_cap_veto_companion"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
     check r.status == sxSat
     check r.witness[0] == 42
 
   test "the drained sevError kind set is EMPTY: the decline sits on an infeasible branch (RFC-0005 S8bc)":
-    let r = symexFind(s0CapVetoCompanion, tLabel("s0_cap_veto_companion"))
+    let r = pinFind(s0CapVetoCompanion, tLabel("s0_cap_veto_companion"))
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
       if e.severity == sevError:
@@ -263,13 +264,13 @@ suite "RFC-0005 S0 pin 3 -- closure-veto companion (flipped sxSat at S9)":
     # discarded the clean witness because a closure `sevError` was drained.
     # The veto is deleted; S7's `closureDegrade` taints only the `x == 7`
     # path that lowered the `filter`, so the `x == 42` hit is clean.
-    let r = symexFind(s0ClosureVetoCompanion, tLabel("s0_closure_veto_companion"))
+    let r = pinFind(s0ClosureVetoCompanion, tLabel("s0_closure_veto_companion"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
     check r.status == sxSat
     check r.witness[1] == 42
 
   test "the drained sevError kind set is EXACTLY {ceUnsupportedHof}, from a branch disjoint from the witness":
-    let r = symexFind(s0ClosureVetoCompanion, tLabel("s0_closure_veto_companion"))
+    let r = pinFind(s0ClosureVetoCompanion, tLabel("s0_closure_veto_companion"))
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
       if e.severity == sevError:

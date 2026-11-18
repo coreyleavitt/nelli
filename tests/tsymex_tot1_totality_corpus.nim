@@ -224,24 +224,36 @@ proc corpusNestedTupleWitness(x: tuple[a: seq[Widget], n: int], y: int) =
 
 # ---- Surface 3: internal-fault / uncertain-taint (SND-1 / SND-1b / CR-1c) -
 
-# `q[0][0] *= 2.0` is a bare Class-B `mkUnsupported` statement (no accompanying
-# `sevError` parseError) — SND-1's `isUnsupported` taint-and-continue must
-# demote the downstream target to sxUnknown, never let the walk falsely
-# "solve" against the stale (un-divided) value.
+# A discriminator written through a ref under `{.cast(uncheckedAssign).}` is
+# a bare Class-B `mkUnsupported` statement (no accompanying `sevError`
+# parseError; PRC-37 owns modelling it) -- SND-1's `isUnsupported`
+# taint-and-continue must demote the downstream target to sxUnknown, never
+# let the walk falsely "solve" past the dropped write. RFC-0016 S8cp-r: a
+# nested seq element's `q[0][0] *= 2.0` was this exhibit until walker 400
+# stored through the inner seq.
+type
+  Tot1Disc = object
+    case k: bool
+    of true: a: float
+    of false: b: float
+  Tot1DiscRef = ref Tot1Disc
+
 proc corpusDivAssignTaint(acc: var float) =
-  var q = @[@[acc]]
-  q[0][0] *= 2.0  # a nested seq element LHS (float `/=` is modelled, PRC-07)
-  if q[0][0] == 10.0:
+  let q = Tot1DiscRef(k: true, a: acc)
+  {.cast(uncheckedAssign).}:
+    q.k = false
+  if acc == 10.0:
     symexTarget("div_assign_taint")
 
-# A closure body that drops a mutation via the same still-unsupported nested element `*=`.
+# A closure body that drops a mutation via the same still-unsupported statement.
 # `applyClosureGround` must skip axiomatizing an uncertain sub-path (SND-1b)
 # rather than assert a possibly-wrong ground fact for the rest of the run.
 proc corpusClosureBodyTaint(t: var float) =
   let f = proc(s: float): int =
-    var r = @[@[s]]
-    r[0][0] *= 2.0
-    if r[0][0] == 10.0:
+    let r = Tot1DiscRef(k: true, a: s)
+    {.cast(uncheckedAssign).}:
+      r.k = false
+    if s == 10.0:
       return 1
     return 0
   if f(t) == 1:
@@ -283,7 +295,7 @@ type
   Tot1Packet = object
     tag: int
     case kind: Tot1PKind
-    of tot1pRrq: options: seq[seq[string]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+    of tot1pRrq: options: seq[Table[int, int]]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
     of tot1pData: blockNum: int
 
 proc corpusUnsupportedFieldRead(p: Tot1Packet) =
@@ -306,7 +318,7 @@ proc corpusUnsupportedFieldRead(p: Tot1Packet) =
 ## interception) — R1 landed `placeholderReadDeclineMsg`/
 ## `declinePlaceholderInLower` (`runtime.nim`, just above `freshRetSym`) as
 ## the shared chokepoint every `svSeq`-consuming `lower()` arm now calls.
-proc corpusMakeUnsupportedPairs(n: int): seq[seq[string]] =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+proc corpusMakeUnsupportedPairs(n: int): seq[Table[int, int]] =  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   discard
 
 proc corpusBareLenRead(n: int) =
@@ -459,13 +471,13 @@ let corpus = @[
              status: rNestedTuple.status, errors: rNestedTuple.errors,
              expectedKind: feUnsupportedWitnessType, hasKindCheck: true),
 
-  CorpusItem(label: "SND-1: nested-seq element `*=` dropped-mutation taint",
+  CorpusItem(label: "SND-1: unchecked ref discriminator write dropped-mutation taint",
              surface: "3. internal-fault / uncertain-taint",
              backstops: "SND-1 (isUnsupported taints Path.uncertain)",
              status: rDivAssign.status, errors: rDivAssign.errors,
              expectedKind: feUnsupportedOp, hasKindCheck: false),
 
-  CorpusItem(label: "SND-1b: closure body drops a nested-seq `*=` mutation",
+  CorpusItem(label: "SND-1b: closure body drops an unchecked ref discriminator write",
              surface: "3. internal-fault / uncertain-taint",
              backstops: "SND-1b (applyClosureGround skips uncertain sub-paths)",
              status: rClosureBody.status, errors: rClosureBody.errors,

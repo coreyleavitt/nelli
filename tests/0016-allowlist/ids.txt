@@ -18,7 +18,6 @@ PRC-18	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 PRC-19	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-20	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-21	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-PRC-23	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-26	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-28	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-36	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do

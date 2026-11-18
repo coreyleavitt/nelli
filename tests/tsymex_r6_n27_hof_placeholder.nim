@@ -120,7 +120,7 @@
 ## is already covered by `tsymex_r6_r1_placeholder_totality.nim`'s
 ## S1/iteration suite (the SAME `.len`-gated chokepoint any `for`-loop
 ## bound check goes through).
-import std/[unittest, sequtils, strutils]
+import std/[unittest, sequtils, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -136,18 +136,18 @@ import nelli/smt/canonicalize
 # against; call-return avoids it.)
 # =============================================================================
 
-proc makePairsN27(n: int): seq[seq[string]] =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+proc makePairsN27(n: int): seq[Table[int, int]] =  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   discard
 
 proc sutMapPlaceholder(n: int) =
   let ps = makePairsN27(n)
-  let mapped = ps.map(proc(p: seq[string]): bool = true)  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  let mapped = ps.map(proc(p: Table[int, int]): bool = true)  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   if mapped.len > 0:
     symexTarget("map_placeholder")
 
 proc sutFilterPlaceholder(n: int) =
   let ps = makePairsN27(n)
-  let kept = ps.filter(proc(p: seq[string]): bool = true)  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  let kept = ps.filter(proc(p: Table[int, int]): bool = true)  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   if kept.len > 0:
     symexTarget("filter_placeholder")
 
@@ -161,12 +161,12 @@ type
   RecN27 = object
     tag: int
     case kind: bool
-    of true: options: seq[seq[string]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+    of true: options: seq[Table[int, int]]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
     of false: plain: int
 
 proc sutFieldMapPlaceholder(p: RecN27) =
   if p.kind:
-    let mapped = p.options.map(proc(x: seq[string]): bool = true)  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+    let mapped = p.options.map(proc(x: Table[int, int]): bool = true)  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
     if mapped.len > 0:
       symexTarget("field_map_placeholder")
 

@@ -88,11 +88,13 @@
 ##    probe before writing this suite). RFC-0016 PRC-34 (walker 392) models
 ##    it over an atom element (`seqEqZ3`: the pointwise conjunction); since
 ##    walker 394 it is quantifier free (the G4 hang lesson), unrolled over a
-##    sound length bound read off the length term, and two free parameters
-##    have none, so the pin below is that decline, beside the compiled
-##    program's verdicts.
+##    sound length bound read off the length term; since walker 399 two
+##    seqs with no bound compare as equal lengths and equal masked data
+##    arrays (`seqEqMasked`: a lambda over the in-range indexes, still no
+##    quantifier), so two free parameters decide. The pin below is that
+##    verdict, beside the compiled program's.
 from ./s8cu_helpers import named, nativeHits
-import std/[unittest, strutils, sequtils, sets]
+import std/[unittest, strutils, sequtils, sets, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -399,14 +401,17 @@ proc seqEquality(xs: seq[int], ys: seq[int]) =
   if xs == ys:
     symexTarget("eq_reached")
 
-suite "N14 — seq `==` (RFC-0016 PRC-34: unbounded lengths decline)":
-  test "two free parameters decline, no quantifier":
+suite "N14 — seq `==` (RFC-0016 PRC-34: unbounded lengths decide)":
+  test "two free parameters decide, no quantifier":
+    ## Walker 399 (`seqEqMasked`): was the `feUnsupportedOp` decline. The
+    ## native run above the verdict reaches the target on equal seqs.
     check "eq_reached" in nativeHits(seqEquality(@[1, 2], @[1, 2]))
     check "eq_reached" notin nativeHits(seqEquality(@[1, 2], @[1]))
     let r = symexFind(seqEquality, tLabel("eq_reached"))
     checkpoint $r.errors
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
+    check r.status == sxSat
+    check r.trusted
+    check not r.errors.named(feUnsupportedOp)
 
 # =============================================================================
 # 7. Item 1 audit pin (round-6 fix round 3) -- element-assign/pop/del reaching
@@ -426,6 +431,9 @@ suite "N14 — seq `==` (RFC-0016 PRC-34: unbounded lengths decline)":
 #    `storeSeqElem`) or `seqElemAt`'s fallback, filed `weInternalWalkerFault`.
 #    The unbacked-element access now drops its unreachable in-bounds side
 #    (section 8), and the read's own `seNestedSeqUnsupported` is the decline.
+#    RFC-0016 S8cp-r: a seq of seqs is backed since walker 400 (its
+#    mutations decide), so sections 7 and 8 use `seq[Table[int, int]]`, the
+#    shared unbacked carrier.
 # =============================================================================
 
 type
@@ -434,7 +442,7 @@ type
     case kind: MKind
     of mkA: a: int
     of mkB:
-      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
+      opts: seq[Table[int, int]]   ## unbacked elem (a table; RFC-0016 S8cp-r: a seq of seqs is backed since walker 400) -> placeholder
 
 proc mkPlaceholderRec(v: var MRec) =
   ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
@@ -448,7 +456,7 @@ proc mutIndexAssignOnPlaceholder(v: var MRec, i: int) =
   mkPlaceholderRec(v)
   if v.kind == mkB:
     var o = v.opts
-    o[i] = @["k", "v"]   # RFC-0005 S8bc: a seq stand-in element
+    o[i] = initTable[int, int]()   # a table stand-in element
     symexTarget("mut_indexassign_placeholder")
 
 proc mutPopOnPlaceholder(v: var MRec) =
@@ -504,7 +512,7 @@ suite "N14 — mutation on a placeholder-ized seq (item 1 audit pin, round-6 fix
 # =============================================================================
 
 proc emptyNestedPop(k: int) =
-  var o: seq[seq[int]] = @[]
+  var o: seq[Table[int, int]] = @[]
   try:
     discard o.pop()
     symexTarget("enp_in")
@@ -512,7 +520,7 @@ proc emptyNestedPop(k: int) =
     if k == 3: symexTarget("enp_oob")
 
 proc emptyNestedDel(k: int) =
-  var o: seq[seq[int]] = @[]
+  var o: seq[Table[int, int]] = @[]
   try:
     o.del(k)
     symexTarget("end_in")
@@ -520,15 +528,15 @@ proc emptyNestedDel(k: int) =
     if k == 3: symexTarget("end_oob")
 
 proc emptyNestedAssign(k: int) =
-  var o: seq[seq[int]] = @[]
+  var o: seq[Table[int, int]] = @[]
   try:
-    o[k] = @[1]
+    o[k] = initTable[int, int]()
     symexTarget("ena_in")
   except IndexDefect:
     if k == 3: symexTarget("ena_oob")
 
 proc emptyNestedRead(k: int) =
-  var o: seq[seq[int]] = @[]
+  var o: seq[Table[int, int]] = @[]
   try:
     let x = o[k]
     if x.len == 0: symexTarget("enr_in")

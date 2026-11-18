@@ -57,7 +57,7 @@
 ## Walker: v112 -> v113 (see `symexWalkerVersion`'s own doc comment for the
 ## full writeup). CR-2 `==` pin 112 -> 113
 ## (`tests/tsymex_phase15_CR2_cachekey.nim`).
-import std/[unittest, strutils]
+import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -71,9 +71,11 @@ type
     ## heap cell holds (a seq of tuples is backed nowhere, a stated
     ## decline). The by-value case object this was (S8ar) is a cell
     ## value since S8at. RFC-0005 S8bc: a seq of tuples is backed now, so
-    ## the part is a `seq[seq[int]]`.
+    ## the part was a `seq[seq[int]]`. RFC-0016 S8cp-r: walker 400 backs a
+    ## seq of seqs, so the part is a `seq[Table[int, int]]` (the shared
+    ## unbacked carrier).
     x: int
-    ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+    ys: seq[Table[int, int]]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   HeapStrNode = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models;
     ## a `distinct` field still reaches `liftHeapValue`'s unsupported-pointee

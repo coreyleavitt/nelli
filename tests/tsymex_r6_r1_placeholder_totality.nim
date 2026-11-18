@@ -52,7 +52,7 @@
 ## demonstrate genuine RED; the field SUTs are regression companions
 ## confirming the pre-existing guard is undisturbed.
 from ./s8cu_helpers import named
-import std/[unittest, strutils]
+import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -64,10 +64,10 @@ import nelli/smt/canonicalize
 # unbacked-element seq allocates a FRESH placeholder-flagged `retSym`
 # (`allocateSym`'s `itSeq` arm, via `freshRetSym`) regardless of what this
 # body itself does — the B7r2-1c call-boundary mechanism.
-proc makePairs(n: int): seq[seq[string]] =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+proc makePairs(n: int): seq[Table[int, int]] =  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   discard
 
-proc readsLen(ps: seq[seq[string]]): int =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+proc readsLen(ps: seq[Table[int, int]]): int =  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   ## Callee for the pass-to-callee form below. Its OWN formal binding is a
   ## direct value-copy of the caller's already-lowered actual (`isCall`'s
   ## `calleeEnv[formal.name] = argVals[i]`, runtime.nim ~7269) — the
@@ -82,7 +82,7 @@ type
   Rec = object
     tag: int
     case kind: RKind
-    of rkOpts: options: seq[seq[string]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+    of rkOpts: options: seq[Table[int, int]]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
     of rkPlain: plain: int
 
 # =============================================================================
@@ -147,34 +147,14 @@ proc sutFieldIndexRead(p: Rec) =
     symexTarget("field_index_read")
 
 # =============================================================================
-# Equality — `ps == qs`. Round-6 re-review (walker v112): `lowerCmp` routes a
-# non-int/bool/float/string comparison to `eqBV`/`neBV`/`cmpBV`, which now
-# GUARD-BEFORE (B7r2 precedent) on an `isUnsupportedFieldPlaceholder` operand
-# — routed through the SAME `declinePlaceholderInLower`/
-# `placeholderReadDeclineMsg` chokepoint S1/N1/iekSeqAdd use, classified
-# `seNestedSeqUnsupported`, BEFORE ever reaching the generic non-placeholder
-# catch-all. (General, non-placeholder seq equality remains unmodeled — that
-# capability-addition gap is still out of this chokepoint slice's scope.)
-#
-# `n` is deliberately `range[0 .. 1000]`, not a bare `int` — mirroring
-# `sutUntouchedUnsat`'s own precedent below. Root-caused during this slice's
-# regression hunt: a bare `int n` makes `makePairs(n + 1)`'s own `n + 1`
-# GENUINELY overflow-reachable (`n == high(int)`), an accidental defect
-# entirely unrelated to the placeholder-equality decline this test names. Per
-# E6, a reachable `Defect` always surfaces in the verdict regardless of the
-# search target and regardless of what any comparison-site guard does
-# downstream — so with a bare `int`, this test's own helper arithmetic wins
-# the verdict as `sxRaised(OverflowDefect)`, independent of (and masking) the
-# eqBV placeholder decline this test intends to exercise. Bounding `n` makes
-# `n + 1` provably in-range, closing that accidental hole.
-# =============================================================================
-
-proc sutBareEquality(n: range[0 .. 1000]) =
-  let ps = makePairs(n)
-  let qs = makePairs(n + 1)
-  if ps == qs:
-    symexTarget("bare_equality_eq")
-
+# Equality — removed by RFC-0016 S8cp-r (PRC-34 / PRC-23). R1-eq pinned
+# `ps == qs` over two placeholders reaching the `eqBV` guard. Since PRC-34 the
+# parser declines `==` on two seqs of any non-atom element at the site
+# (`feUnsupportedOp`), before the runtime sees a placeholder, and every
+# unbacked element left (a table, a `set`) is non-atom, so no program reaches
+# that guard through a seq `==`. The site decline is pinned in
+# `tsymex_0016_s8cpr_shapes` ("a nested seq declines", "an enum element with a
+# user `==` declines").
 # =============================================================================
 # Mutation (`iekSeqAdd`) — N6 audit item, not in the prompt's explicit access-
 # form list but explicitly named ("iekSeqAdd/iekSeqDel/iekSeqSetLen/any
@@ -189,7 +169,7 @@ proc sutBareEquality(n: range[0 .. 1000]) =
 
 proc sutBareMutation(n: int) =
   var ps = makePairs(n)
-  ps.add(@["a", "b"])  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  ps.add(initTable[int, int]())  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   if n == 5:
     symexTarget("bare_mutation")
 
@@ -332,19 +312,6 @@ suite "symex R1 — Q1/Q2 (index read coverage + location-prefixed message)":
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
     check r.errors.len > 0
-
-suite "symex R1 — equality (walker v112: eqBV/neBV/cmpBV/svLeafEq/iteSV now guard-before on a placeholder operand)":
-
-  test "R1-eq: `ps == qs` over two placeholders declines sxUnknown/seNestedSeqUnsupported (never a crash, never a false sat/unsat) via the SAME R1 chokepoint S1/N1 use":
-    let r = symexFind(sutBareEquality, tLabel("bare_equality_eq"))
-    check r.status == sxUnknown
-    check r.status != sxSat
-    check r.status != sxUnsat
-    var sawKind = false
-    for e in r.errors:
-      if e.kind == seNestedSeqUnsupported and e.severity == sevError:
-        sawKind = true
-    check sawKind
 
 suite "symex R1 — iekSeqAdd mutation arm (N6 audit item)":
 

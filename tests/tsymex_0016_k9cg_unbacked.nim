@@ -3,6 +3,13 @@
 ## decline `seNestedSeqUnsupported`. None may record `weInternalWalkerFault`,
 ## which is the label for a walker bug, not for a known modelling gap.
 ##
+## RFC-0016 S8cp-r (walker 400): a `seq[seq[int]]` is backed now (held
+## leaf-split, `isTreeSeqElemTy`), so its probes below are a totality check
+## over that backed path (each must still be exact or classified, never
+## `weInternalWalkerFault`), and the decline pin that needs an element the
+## model does not back uses `seq[Table[int, int]]`, the shared unbacked
+## carrier of the suites that pinned a seq of seqs as unbacked.
+##
 ## The probes live in `k9cg_probes.nim`. This file runs the `seq[seq[int]]`
 ## probes over an empty literal (E) and a non-empty literal (L);
 ## `tsymex_0016_k9cg_unbacked_np.nim` runs them over `newSeq` (N) and a
@@ -16,12 +23,18 @@ import nelli/smt/canonicalize
 
 genProbes("s", "b", "seq[int]", "@[1]", "@[2]", seqNames, "EL")
 
+proc tabInsertE(k: int) =
+  ## The `sInsertE` probe over the unbacked carrier (`seq[Table[int, int]]`).
+  var o: seq[Table[int, int]] = @[]
+  o.insert(initTable[int, int](), 0)
+  symexTarget("t")
+
 suite "K9c-g unbacked element paths (seq[seq[int]], literal sources)":
   test "seq[seq[int]] literal paths never record weInternalWalkerFault":
     checkProbes("s", seqNames, "EL")
 
   test "insert into an empty seq of an unbacked element declines as a gap":
-    let r = symexFind(sInsertE, tLabel("t"))
+    let r = symexFind(tabInsertE, tLabel("t"))
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
     check not r.errors.named(weInternalWalkerFault)

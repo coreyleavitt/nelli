@@ -127,8 +127,16 @@ const
   ## returns none on a placeholder operand first (one marked guard), then
   ## reads both lengths to fold them, equates them, and bounds its index by
   ## one (four).
-  markerPins = [("runtime.nim", 109), ("runtime_strings.nim", 4),
-                ("heap_model.nim", 21), ("runtime_heap.nim", 11)]
+  ## RFC-0016 S8cp-r (walker 399): runtime.nim 109 -> 115. `seqEqMasked`
+  ## (the unbounded whole-seq `==`) reads both seqs' lengths and data
+  ## arrays (six lines); its one caller is `seqEqZ3`, past that proc's own
+  ## placeholder guard, so a placeholder never reaches it.
+  ## RFC-0016 S8cp-r (walker 400): heap_model.nim 21 -> 23. `seqElemAt`'s
+  ## clamp of an inner seq's length at 0 reads and rewrites the length of
+  ## the seq `svWithLeaves` has just built from the outer seq's selects
+  ## (two lines): a fresh value, never a placeholder.
+  markerPins = [("runtime.nim", 115), ("runtime_strings.nim", 4),
+                ("heap_model.nim", 23), ("runtime_heap.nim", 11)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"
@@ -376,8 +384,10 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## seq's length once, in the arm that has no array (heap_model.nim 20 ->
     ## 21): 137 + 1 = 138. RFC-0016 S8cg: `isTabKeys`'s literal-key spelling
     ## (runtime.nim 102 -> 104, `markerPins`): 138 + 2 = 140. RFC-0016
-    ## S8cp-r: `seqEqZ3` (runtime.nim 104 -> 109): 140 + 5 = 145.
-    check pinnedTotal == 145
+    ## S8cp-r: `seqEqZ3` (runtime.nim 104 -> 109): 140 + 5 = 145; then
+    ## `seqEqMasked` (runtime.nim 109 -> 115) and `seqElemAt`'s inner-length
+    ## clamp (heap_model.nim 21 -> 23): 145 + 6 + 2 = 153.
+    check pinnedTotal == 153
     check total == pinnedTotal
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

@@ -136,6 +136,16 @@ func constructRows(): seq[ConstructKey] =
   result.add declines(some(feOpaqueCallUnmodelled), ["signals/handler"],
     "a signal handler is registered through a foreign call the walk cannot " &
     "model")
+  result.add decided(
+    ["seq/nested/store", "seq/nested/read", "seq/nested/param"],
+    "a seq of seqs (RFC-0016 PRC-23 / PRC-34): held leaf-split, `s[i][j] = " &
+    "v` stores through the inner seq with the outer index checked first, a " &
+    "symbolic outer index reads an inner seq, and a parameter has a witness " &
+    "reader")
+  result.add decided(["seq/eq/whole"],
+    "system's `==` on two seqs of an atom element (RFC-0016 PRC-34): equal " &
+    "lengths and element-wise `==`, quantifier free (an unrolled bound, or " &
+    "masked data arrays)")
   result.add declines(some(feUncheckedDiscBytes), ["uncheckedAssign/diff"],
     "a discriminator written under an unchecked assignment reinterprets the " &
     "object's bytes")

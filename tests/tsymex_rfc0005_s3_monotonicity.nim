@@ -86,7 +86,7 @@
 ## witness wins by rule 1 regardless of taint). Walker version floor: 141
 ## (S1c) at S3; S4 bumped the walker to 142 (pinned in
 ## `tsymex_rfc0005_s4_alloc.nim`).
-import std/[unittest, strutils]
+import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/runtime
@@ -155,9 +155,11 @@ type S3F1Dist = object
   ## heap cell holds (a seq of tuples is backed nowhere, a stated
   ## decline). The by-value case object this was (S8ar) is a cell
   ## value since S8at. RFC-0005 S8bc: a seq of tuples is backed now, so
-  ## the part is a `seq[seq[int]]`.
+  ## the part was a `seq[seq[int]]`. RFC-0016 S8cp-r: walker 400 backs a
+  ## seq of seqs, so the part is a `seq[Table[int, int]]` (the shared
+  ## unbacked carrier).
   x: int
-  ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  ys: seq[Table[int, int]]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
 type S3F1Node = ref object
   s: S3F1Dist
 
@@ -171,14 +173,21 @@ type S3F1Node = ref object
 # models. The trigger was then a POSITIONAL tuple-element augmented
 # assignment, which RFC-0005 S8s models, then an ARRAY element's at a
 # constant index, which S8u models, then at a SYMBOLIC index, which S8z
-# models, then a single-level SEQ element's, which S8am models. It is now
-# a NESTED seq element's (`qq[0][b and 1] += b` on `@[@[p.x, p.y]]`;
-# `b and 1` is 0 or 1, always in bounds): `unwrapHidden(lhs[0])` is itself
-# an `nnkBracketExpr` (`qq[0]`), not an `nnkSym`, so it never matches the
-# seq-element arm -- a Class-B `isUnsupported` statement the parser still
-# has no arm for.
+# models, then a single-level SEQ element's, which S8am models, then a
+# NESTED seq element's (`qq[0][b and 1] += b` on `@[@[p.x, p.y]]`), which
+# RFC-0016 S8cp-r (walker 400) models. It is now a discriminator written
+# through a ref under `{.cast(uncheckedAssign).}` (`parseAsgn`'s marker;
+# PRC-37 owns modelling it): a Class-B `isUnsupported` statement the
+# parser still has no arm for, the one `tsymex_rfc0005_s8_scope.nim`'s
+# Class B exhibit uses.
 type S3F3Point = object
   x, y: int
+type
+  S3F3Disc = object
+    case k: bool
+    of true: a: int
+    of false: b: int
+  S3F3DiscRef = ref S3F3Disc
 
 # ---- F4: heap-arm degrade / heRefVariantUnsupported ------------------------
 # Identical shape to `tsymex_r6_heap_raise_totality.nim`'s
@@ -304,16 +313,18 @@ proc s3w2Base(x: int) =
 
 proc s3w2F3Before(p: S3F3Point, b: int, poisonOn: bool) =
   withPoisonedArm(paBefore, poisonOn):
-    var qq = @[@[p.x, p.y]]
-    qq[0][b and 1] += b
+    let q = S3F3DiscRef(k: true, a: p.x)
+    {.cast(uncheckedAssign).}:
+      q.k = false
   do:
     if b == 7:
       raise newException(ValueError, "s3 w2 f3 before")
 
 proc s3w2F3After(p: S3F3Point, b: int, poisonOn: bool) =
   withPoisonedArm(paAfter, poisonOn):
-    var qq = @[@[p.x, p.y]]
-    qq[0][b and 1] += b
+    let q = S3F3DiscRef(k: true, a: p.x)
+    {.cast(uncheckedAssign).}:
+      q.k = false
   do:
     if b == 7:
       raise newException(ValueError, "s3 w2 f3 after")
@@ -406,8 +417,9 @@ proc s3w3F1After(p: S3F1Node, n: int, poisonOn: bool) =
 
 proc s3w3F3Before(p: S3F3Point, b, n: int, poisonOn: bool) =
   withPoisonedArm(paBefore, poisonOn):
-    var qq = @[@[p.x, p.y]]
-    qq[0][b and 1] += b
+    let q = S3F3DiscRef(k: true, a: p.x)
+    {.cast(uncheckedAssign).}:
+      q.k = false
   do:
     let r = s3w3Helper(n)
     if r == 6:
@@ -415,8 +427,9 @@ proc s3w3F3Before(p: S3F3Point, b, n: int, poisonOn: bool) =
 
 proc s3w3F3After(p: S3F3Point, b, n: int, poisonOn: bool) =
   withPoisonedArm(paAfter, poisonOn):
-    var qq = @[@[p.x, p.y]]
-    qq[0][b and 1] += b
+    let q = S3F3DiscRef(k: true, a: p.x)
+    {.cast(uncheckedAssign).}:
+      q.k = false
   do:
     let r = s3w3Helper(n)
     if r == 6:
@@ -481,8 +494,9 @@ proc s3ClassifyF2(x: int64) =
     symexTarget("s3_classify_f2")
 
 proc s3ClassifyF3(p: S3F3Point, b: int) =
-  var qq = @[@[p.x, p.y]]
-  qq[0][b and 1] += b
+  let q = S3F3DiscRef(k: true, a: p.x)
+  {.cast(uncheckedAssign).}:
+    q.k = false
   if b == 42:
     symexTarget("s3_classify_f3")
 

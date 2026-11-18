@@ -4,7 +4,12 @@
 ## Split from `tsymex_0016_k9cg_unbacked.nim` so each file fits the bounded
 ## runner's default cap.
 ##
-## The termination pin. The costliest probe of the set is `sFilterItN`: a
+## RFC-0016 S8cp-r (walker 400): a `seq[seq[int]]` is backed now, so these
+## probes are a totality check over the backed path, and `sFilterItN` decides.
+## The termination pin keeps its subject, the costliest unbacked probe, over
+## `seq[Table[int, int]]` (the shared unbacked carrier): `tabFilterItN`.
+##
+## The termination pin. The costliest probe of the set was `sFilterItN`: a
 ## `filterIt` over a `newSeq` whose element reads decline, unrolled to
 ## `maxLoopUnwind` over a length the solver does not fix, then a tail walk.
 ## It spent 1.69M walk units plus 4.70M tail units when measured
@@ -15,6 +20,13 @@ import std/[os, strutils]
 import ./k9cg_probes
 
 genProbes("s", "b", "seq[int]", "@[1]", "@[2]", seqNames, "NP")
+
+proc tabFilterItN(k: int) =
+  ## `sFilterItN` over the unbacked carrier (`seq[Table[int, int]]`).
+  symexAssume(k >= 0 and k <= 3)
+  var o = newSeq[Table[int, int]](k)
+  let m = o.filterIt(it.len > 0)
+  if m.len >= 0: symexTarget("t")
 
 suite "K9c-g unbacked element paths (seq[seq[int]], newSeq and parameter)":
   test "seq[seq[int]] newSeq and parameter paths never record weInternalWalkerFault":
@@ -27,7 +39,7 @@ suite "K9c-g unbacked element paths (seq[seq[int]], newSeq and parameter)":
     defer:
       delEnv("NELLI_WALK_UNITS_LOG")
       removeFile(log)
-    let r = symexFind(sFilterItN, tLabel("t"))
+    let r = symexFind(tabFilterItN, tLabel("t"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)

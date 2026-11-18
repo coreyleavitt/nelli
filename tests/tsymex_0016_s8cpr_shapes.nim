@@ -500,6 +500,30 @@ suite "RFC-0016 PRC-34 / PRC-23: a seq of seqs":
   test "pop of a seq of seqs parameter: no negative inner length":
     decides(ssPopDead, sxUnsat)
 
+suite "RFC-0016 PRC-23 / PRC-34: the K9 pin records":
+  ## The rows' evidence (section 8.2): each verdict judged against the
+  ## compiled program, a witness run for `sxSat`, every domain input for
+  ## `sxUnsat`.
+  test "seq/nested/store":
+    discard pinExact(nestStore, cellKey(axConstruct, "seq/nested/store"))
+    discard pinExact(nestStoreDead, cellKey(axConstruct, "seq/nested/store"))
+  test "seq/nested/read":
+    discard pinExact(nestRead, cellKey(axConstruct, "seq/nested/read"))
+    discard pinExact(nestReadDead, cellKey(axConstruct, "seq/nested/read"))
+  test "seq/nested/param":
+    discard pinExact(ssParam, cellKey(axConstruct, "seq/nested/param"),
+      domain = sampled([@[@[7]]]))
+    discard pinExact(ssParamDead, cellKey(axConstruct, "seq/nested/param"),
+      domain = sampled([newSeq[seq[int]](), @[newSeq[int]()], @[@[7]],
+                        @[@[1, 2], @[3]]]))
+  test "seq/eq/whole":
+    discard pinExact(seqEqLit, cellKey(axConstruct, "seq/eq/whole"))
+    discard pinExact(seqEqLenDead, cellKey(axConstruct, "seq/eq/whole"))
+    discard pinExact(seqEqSym, cellKey(axConstruct, "seq/eq/whole"),
+      domain = sampled([@[1, 5]]))
+    discard pinExact(seqEqSymDead, cellKey(axConstruct, "seq/eq/whole"),
+      domain = sampled([newSeq[int](), @[1], @[1, 5], @[1, 6], @[0, 5, 2]]))
+
 suite "RFC-0016 PRC-34: record ==":
   test "native":
     check native(tupEq(3, 3)) == "hit"

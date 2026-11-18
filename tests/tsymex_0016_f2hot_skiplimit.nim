@@ -12,11 +12,13 @@
 ## wrong verdict": the native value is never refuted (`!= sxUnsat`) and the
 ## value main computed is never reached (`!= sxSat`); the walker answers
 ## unknown. Under `(*LIMIT_MATCH=n)` (p10m8) the call stays modelled and
-## must still agree exactly.
+## must still agree exactly; so must every case on the 8.37 JIT, which
+## ignores LIMIT_RECURSION.
 import std/[unittest, re, strutils]
 import nelli/symex
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
+import nelli/smt/pcre_engine
 
 proc lit_p6r6_nat() =
   let s = "acab"
@@ -143,40 +145,56 @@ suite "hotfix: SKIP:NAME under a limit on a concrete subject":
     check pcreExec(nc, "aca", 0, false)[0] == 1
     check pcreExec(nc, "aca", 0, false)[1] == 0
 
-  test "native":
-    check "acab".find(re"(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+") == -1
+  # The cases: subject, pattern, the interpreter's native value, the value
+  # main computed. An unanchored `find` runs on std/re's library engine: on
+  # the 8.37 JIT (`pcre-8.37-jit` image) LIMIT_RECURSION has no effect, the
+  # call stays modelled, and the walker must agree with that native value
+  # exactly.
+  let jit = pcreSearchEngine() == peJit837
+
+  template rcase(nat, bad, pnat, pbad: untyped; subj, pat: string;
+                 vNat, vBad: int) =
+    let v = subj.find(re(pat))
+    if jit:
+      check verdict(nat, astToStr(nat)) ==
+        (if v == vNat: sxSat else: sxUnsat)
+      check verdict(bad, astToStr(bad)) ==
+        (if v == vBad: sxSat else: sxUnsat)
+      check verdict(pnat, astToStr(pnat)) ==
+        (if v == vNat: sxSat else: sxUnsat)
+      check verdict(pbad, astToStr(pbad)) ==
+        (if v == vBad: sxSat else: sxUnsat)
+    else:
+      check v == vNat
+      # Declined: never a wrong verdict.
+      check verdict(nat, astToStr(nat)) != sxUnsat
+      check verdict(bad, astToStr(bad)) != sxSat
+      check verdict(pnat, astToStr(pnat)) != sxUnsat
+      check verdict(pbad, astToStr(pbad)) != sxSat
+
+  test "LIMIT_MATCH stays exact (p10m8)":
     check "aca".find(re"(*LIMIT_MATCH=8)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?") == 0
-    check "acaa".find(re"(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d") == 0
-    check "abxa".find(re"(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d") == -21
-    check "a".find(re"(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?") == -21
-    check "a".find(re"(*LIMIT_RECURSION=2)a(*SKIP:N)(*SKIP:M)c|ab(*SKIP)d|.") == -21
-    check "aca".find(re"(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+") == -21
-  test "the walker agrees with native":
-    check verdict(lit_p6r6_nat, "lit_p6r6_nat") != sxUnsat
-    check verdict(lit_p6r6_bad, "lit_p6r6_bad") != sxSat
-    check verdict(pin_p6r6_nat, "pin_p6r6_nat") != sxUnsat
-    check verdict(pin_p6r6_bad, "pin_p6r6_bad") != sxSat
     check verdict(lit_p10m8_nat, "lit_p10m8_nat") == sxSat
     check verdict(lit_p10m8_bad, "lit_p10m8_bad") == sxUnsat
     check verdict(pin_p10m8_nat, "pin_p10m8_nat") == sxSat
     check verdict(pin_p10m8_bad, "pin_p10m8_bad") == sxUnsat
-    check verdict(lit_p11r7a_nat, "lit_p11r7a_nat") != sxUnsat
-    check verdict(lit_p11r7a_bad, "lit_p11r7a_bad") != sxSat
-    check verdict(pin_p11r7a_nat, "pin_p11r7a_nat") != sxUnsat
-    check verdict(pin_p11r7a_bad, "pin_p11r7a_bad") != sxSat
-    check verdict(lit_p11r7b_nat, "lit_p11r7b_nat") != sxUnsat
-    check verdict(lit_p11r7b_bad, "lit_p11r7b_bad") != sxSat
-    check verdict(pin_p11r7b_nat, "pin_p11r7b_nat") != sxUnsat
-    check verdict(pin_p11r7b_bad, "pin_p11r7b_bad") != sxSat
-    check verdict(lit_p10r2_nat, "lit_p10r2_nat") != sxUnsat
-    check verdict(lit_p10r2_bad, "lit_p10r2_bad") != sxSat
-    check verdict(pin_p10r2_nat, "pin_p10r2_nat") != sxUnsat
-    check verdict(pin_p10r2_bad, "pin_p10r2_bad") != sxSat
-    check verdict(lit_p5r2_nat, "lit_p5r2_nat") != sxUnsat
-    check verdict(lit_p5r2_bad, "lit_p5r2_bad") != sxSat
-    check verdict(pin_p5r2_nat, "pin_p5r2_nat") != sxUnsat
-    check verdict(pin_p5r2_bad, "pin_p5r2_bad") != sxSat
-    check verdict(lit_p6r5_nat, "lit_p6r5_nat") != sxUnsat
-    check verdict(lit_p6r5_bad, "lit_p6r5_bad") != sxSat
-    check verdict(pin_p6r5_nat, "pin_p6r5_nat") != sxUnsat
-    check verdict(pin_p6r5_bad, "pin_p6r5_bad") != sxSat
+
+  test "LIMIT_RECURSION: native first, then no wrong verdict":
+    rcase(lit_p6r6_nat, lit_p6r6_bad, pin_p6r6_nat, pin_p6r6_bad, "acab",
+          "(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+",
+          -1, -21)
+    rcase(lit_p11r7a_nat, lit_p11r7a_bad, pin_p11r7a_nat, pin_p11r7a_bad,
+          "acaa",
+          "(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d",
+          0, -21)
+    rcase(lit_p11r7b_nat, lit_p11r7b_bad, pin_p11r7b_nat, pin_p11r7b_bad,
+          "abxa",
+          "(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d",
+          -21, 0)
+    rcase(lit_p10r2_nat, lit_p10r2_bad, pin_p10r2_nat, pin_p10r2_bad, "a",
+          "(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?", -21, -1)
+    rcase(lit_p5r2_nat, lit_p5r2_bad, pin_p5r2_nat, pin_p5r2_bad, "a",
+          "(*LIMIT_RECURSION=2)a(*SKIP:N)(*SKIP:M)c|ab(*SKIP)d|.", -21, 0)
+    rcase(lit_p6r5_nat, lit_p6r5_bad, pin_p6r5_nat, pin_p6r5_bad, "aca",
+          "(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+",
+          -21, 0)

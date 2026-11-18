@@ -872,8 +872,14 @@ const renderAsChoicesVersion* = "12"
   ## - RFC-0016 INT-78 (433->437; 434-436 are taken): an `int` part of a seq's
   ##   tuple or object element is held as the bit-vector of its width, as a
   ##   `seq[int]` element is, not as an Int. No key bytes change.
+  ## - RFC-0016 INT-79 (437->438): a seq operand of a `for` that is not a
+  ##   variable or a field chain over one (a seq literal) is bound to a
+  ##   temporary once and the loop indexes it; an inline iterator's formal
+  ##   bound as a copy is a local of the expansion to the S8cn `lent` check;
+  ##   `mgetOrPut` with a computed key evaluates it once in the model. No key
+  ##   bytes change.
 
-const symexWalkerVersion* = "437"
+const symexWalkerVersion* = "438"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

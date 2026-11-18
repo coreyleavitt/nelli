@@ -1502,6 +1502,18 @@ type
                                    ## statement the body-walker does not
                                    ## recurse into (a nested `for`) answers to
                                    ## the top entry.
+    copiedIterFormals*: seq[tuple[formal, body: NimNode]]
+                                   ## RFC-0016 INT-79. The by-value formals of
+                                   ## the inline iterators being expanded that
+                                   ## are bound as a copy (`bindIterArg` false:
+                                   ## a literal, a computed actual), each the
+                                   ## symbol the iterator's body uses, with
+                                   ## that body. Nim's
+                                   ## expansion binds one to a fresh local
+                                   ## (`transf.putArgInto`'s paFastAsgn), so
+                                   ## no caller's pointer reaches its memory:
+                                   ## `rootReachedByPointer` reads it as a
+                                   ## local of the iterator, not a formal.
     activeIterators*: HashSet[string]
                                    ## A3 (ADR-0014 D2-0d). Iterator sym names
                                    ## currently being inlined. Guards against
@@ -10442,7 +10454,7 @@ proc parseGetOrDefault(n, calleeSym: NimNode; preamble: var seq[IRStmt];
     mkLet(synth, valTy, defIR))
   mkVar(synth)
 
-proc mgetOrPutCall(n: NimNode): NimNode =
+proc mgetOrPutCall(n: NimNode; anyKey = false): NimNode =
   ## RFC-0005 S8bc (item 7). The stdlib's `mgetOrPut(t, key, default)` /
   ## `mgetOrPut(t, key)` call on a modelled `Table` under `n`'s hidden
   ## wrappers (its `var B` result reaches every use as an `nnkHiddenDeref`),
@@ -10452,13 +10464,16 @@ proc mgetOrPutCall(n: NimNode): NimNode =
   ## must be evaluating it once -- the S8at element arms' own gate
   ## (`arrayElemLvalue`). Any other key keeps the stdlib body walk (a
   ## decline, as before).
+  ## RFC-0016 INT-79: `anyKey` admits any key, for the value read
+  ## (`parseMGetOrPut`), which evaluates a computed key once itself.
   let c = unwrapHidden(n)
   if c.kind notin {nnkCall, nnkCommand} or c.len notin [3, 4] or
      c[0].kind != nnkSym or c[0].strVal != "mgetOrPut" or
      not isStdlibDecl(c[0]):
     return nil
   if classifyType(unwrapHidden(c[1])).ty.kind != itTable: return nil
-  if unwrapHidden(c[2]).kind notin {nnkSym, nnkCharLit .. nnkUInt64Lit,
+  if not anyKey and
+     unwrapHidden(c[2]).kind notin {nnkSym, nnkCharLit .. nnkUInt64Lit,
                                     nnkFloatLit .. nnkFloat64Lit,
                                     nnkStrLit .. nnkTripleStrLit}:
     return nil
@@ -10483,12 +10498,30 @@ proc parseMGetOrPut(n: NimNode; preamble: var seq[IRStmt];
   ## `hashes.Hash` locals classify as no modelled type (a decline), and the
   ## `+=` / `inc` forms on its result declined or, for `inc`, dropped the
   ## write (see the `inc`/`dec` arm).
-  let c = mgetOrPutCall(n)
+  ##
+  ## RFC-0016 INT-79: a key that is not a literal or a variable
+  ## (`t.mgetOrPut(key(), 0)`) is evaluated once, after the receiver's
+  ## address and before the default, as Nim evaluates the argument, into a
+  ## `let` its mark names (S8br's `hoistIndexCalls` mark); every read of the
+  ## cell below addresses it through that value. It walked the stdlib body
+  ## before, whose hash and probe internals decline (`s8cq_twice11` q10).
+  var c = mgetOrPutCall(n, anyKey = true)
   if c == nil: return nil
   let recvCls = classifyType(unwrapHidden(c[1]))
   let valTy = recvCls.ty.tabValTy
   let zero = if c.len == 3: zeroValueForType(valTy) else: nil
   if c.len == 3 and zero == nil: return nil
+  if mgetOrPutCall(n) == nil:
+    let ty = c[2].getTypeInst
+    if ty.kind != nnkSym: return nil
+    # A receiver with a call keeps the stdlib walk, as before.
+    if lvalueHasCall(c[1]): return nil
+    let mk = markByRef(ty)
+    if mk.isNil: return nil
+    preamble.add mkLet(byRefName(mk), classifyType(c[2]).ty,
+                       parseExpr(c[2], preamble, ctx))
+    c = copyNimTree(c)
+    c[2] = mk
   # RFC-0005 S8cq: the receiver is lowered three times below and the key twice.
   for part in [c[1], c[2]]:
     let d = lvalueCallDecline(part, n, ctx)
@@ -18874,19 +18907,29 @@ proc mayWriteWhy(n: NimNode; route: ReadOnlyRoute): string =
   if not w and st.cycle: w = st.decide(wsRecursivePure)
   if w: st.declineReason else: ""
 
-proc rootReachedByPointer(root: NimNode; heapSteps: seq[NimNode]): bool =
+proc rootReachedByPointer(root: NimNode; heapSteps: seq[NimNode];
+                          copied: seq[tuple[formal, body: NimNode]] = @[]):
+    bool =
   ## RFC-0005 S8cn. A pointer may reach the memory of `root`: the location is
   ## behind one already, or `root` is a global or a formal (who knows what its
   ## caller holds), or its routine takes its address.
+  ## RFC-0016 INT-79: a formal in `copied` (`ParseCtx.copiedIterFormals`) is
+  ## an inline iterator's copy, a local of its expansion: only the
+  ## iterator's own `addr` reaches it. (`resolveRoutineImpl` of its owner,
+  ## the iterator, is nil, the reading for any other local of one.)
   # RFC-0016 K6b: a `const` is static read-only data; no pointer writes it, so
   # a stdlib call given a `Regex` (a pointer inside) cannot reach `let s = k`.
   if symKind(root) == nskConst and heapSteps.len == 0: return false
+  if heapSteps.len == 0 and symKind(root) == nskParam:
+    for c in copied:
+      if sameSym(c.formal, root): return addrTakenIn(c.body, root)
   if heapSteps.len > 0 or isModuleGlobal(root) or symKind(root) == nskParam:
     return true
   let impl = resolveRoutineImpl(root.owner)
   impl == nil or impl.len < 7 or addrTakenIn(body(impl), root)
 
-proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
+proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode];
+                  copied: seq[tuple[formal, body: NimNode]] = @[]): string =
   ## RFC-0005 S8cn. How `n`, run while a `lent` loop variable or a `let` holds
   ## the memory of a container rooted at `root`, may write that memory, or "":
   ## by name, as a `var` actual, through `addr`, by a callee that reaches
@@ -18945,7 +18988,7 @@ proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
       if w.len > 0: return w
     ""
   result = scan(n)
-  if result.len == 0 and rootReachedByPointer(root, heapSteps):
+  if result.len == 0 and rootReachedByPointer(root, heapSteps, copied):
     let why = mayWriteWhy(n, rrLent)
     if why.len > 0:
       result = "written through a pointer or a ref (" & why & ")"
@@ -18964,7 +19007,7 @@ proc lentLoopDecline(n, container, loopVar, bodyNode: NimNode; ctx: ParseCtx;
   let root = lvalueRoot(unwrapHidden(container), steps)
   if root == nil or root.kind != nnkSym: return nil
   if countSymUses(bodyNode, loopVar) == 0: return nil
-  let why = mayWriteRoot(bodyNode, root, steps)
+  let why = mayWriteRoot(bodyNode, root, steps, ctx.copiedIterFormals)
   if why.len == 0: return nil
   ctx.declineAtSite(feUnsupportedOp,
     siteMsg(n, "the variable of this `for` over `" & what & "` holds the " &
@@ -19165,7 +19208,7 @@ proc letCursorDecline(c: NimNode; rest: seq[NimNode]; ctx: ParseCtx): IRStmt =
   if root == nil or root.kind != nnkSym: return nil
   let tail = newTree(nnkStmtList, rest)
   if countSymUses(tail, c[0][0]) == 0: return nil
-  let why = mayWriteRoot(tail, root, steps)
+  let why = mayWriteRoot(tail, root, steps, ctx.copiedIterFormals)
   if why.len == 0: return nil
   ctx.declineAtSite(feUnsupportedOp,
     siteMsg(c, "`let " & c[0][0].strVal & " = " & v.repr & "` shares the " &
@@ -22319,7 +22362,12 @@ proc parseStmtInner(n: NimNode,
         # RFC-0005 S8cd: a call's result is computed once, where the loop
         # starts; the loop's reads are of the temporary, which `lower` can
         # read as a container. The call is not re-run per iteration.
-        if irHasCall(seqIR):
+        # RFC-0016 INT-79: so is any operand that is not a variable or a
+        # field chain over one (`for p in items(@[("a", x)])`): the literal
+        # is bound once, as `let s = @[...]` binds it, and the loop indexes
+        # the temporary (the index statement's container met `iekSeqLit`,
+        # `lowerLeafInExpr`'s assert: a walker fault).
+        if irHasCall(seqIR) or not isPureContainer(seqIR):
           let seqTmp = freshSynth(ctx, "fseq")
           preamble3.add mkLet(seqTmp, recvCls.ty, seqIR)
           seqIR = mkVar(seqTmp)
@@ -22565,6 +22613,7 @@ proc parseStmtInner(n: NimNode,
         var preambleStmts: seq[IRStmt]
         var iterBody = implBody   ## RFC-0005 S8bs: formals bound by name
         var argIdx2 = 0
+        let copiedMark = ctx.copiedIterFormals.len   # RFC-0016 INT-79
         for fi in 1 ..< formal.len:
           let paramDef = formal[fi]
           if paramDef.kind != nnkIdentDefs: continue
@@ -22595,6 +22644,10 @@ proc parseStmtInner(n: NimNode,
             let argIR = parseExpr(argNode, argPre, ctx)
             for s in argPre: preambleStmts.add s
             preambleStmts.add mkLet(bindName, cls.ty, argIR)
+            # RFC-0016 INT-79: the formal is now a copy, a local of the
+            # expansion (`ParseCtx.copiedIterFormals`).
+            let fb = formalInBody(impl, paramDef[pj])
+            if not fb.isNil: ctx.copiedIterFormals.add (fb, implBody)
             inc argIdx2
         # D2 step 3+4: substitute params in body, rewrite yields, parse.
         # Compute the iterator element type from its DECLARED return type in
@@ -22612,11 +22665,13 @@ proc parseStmtInner(n: NimNode,
           # Require itTuple return type with matching arity — degrade otherwise.
           if yieldElemTyTop.kind != itTuple:
             ctx.activeIterators.excl itSymName
+            ctx.copiedIterFormals.setLen copiedMark
             return ctx.declineMarker(feUnsupportedStmtKind, "A3-S2a: multi-var for requires itTuple iterator " &
               "return type; got " & $yieldElemTyTop.kind &
               " (ADR-0014 S2, Invariant 3)")
           if yieldElemTyTop.fields.len != loopVarNames.len:
             ctx.activeIterators.excl itSymName
+            ctx.copiedIterFormals.setLen copiedMark
             return ctx.declineMarker(feUnsupportedStmtKind, "A3-S2a: arity mismatch — iterator tuple has " &
               $yieldElemTyTop.fields.len & " fields, for-loop has " &
               $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
@@ -22650,6 +22705,7 @@ proc parseStmtInner(n: NimNode,
             bodyIR = mkBlock(@[bodyIR]).withCheckScope(pushedOn(iterChecks))
         discard ctx.iterBodies.pop()
         ctx.activeIterators.excl itSymName
+        ctx.copiedIterFormals.setLen copiedMark
         # Combine preamble + inlined body
         if preambleStmts.len > 0:
           preambleStmts.add bodyIR

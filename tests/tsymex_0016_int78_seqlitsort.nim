@@ -181,7 +181,7 @@ suite "INT-78":
     var st: SymexStatusKind
     let u = unitsOf(q10, "q10_once", st)
     checkpoint "q10 " & $u
-    # Native hits `q10_once`; the table's internals still decline, as in
-    # the `initTable` form (`s8cq_twice11`).
-    check st == sxUnknown
+    # Native hits `q10_once`; decided since INT-79 (walker 438), which
+    # models `mgetOrPut` with a computed key (the stdlib body declined).
+    check st == sxSat
     check u <= 3 * 6_067_999

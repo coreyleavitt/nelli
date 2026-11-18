@@ -2401,3 +2401,18 @@ evidence = "reproducer: in `tests/tsymex_a7_rune.nim` change `symexFind(runeOob`
 aliases = []
 cells = []
 pins = ["tsymex_0016_int72_runedomain", "tsymex_a7_rune", "tsymex_a7_runes_iter", "tsymex_m6_probeproto_strproto"]
+
+[[row]]
+id = "INT-77"
+table = "5.8c"
+title = "K9d-8: a float `range` parameter (`range[0.0 .. 1.0]`, `range[-1.5'f32 .. 2.5'f32]`, anonymous or named) does not compile in the walker: `parseRangeBracket` (`src/nelli/smt/dsl_typebridge.nim`) reads both bounds with `intVal` (`Error: node lacks field: intVal`), so any suite whose SUT takes one fails at macro time instead of declining. The value set Nim admits is `lo <= x and x <= hi` in the base width: the closed IEEE interval, NaN excluded, -0.0 admitted with 0.0. The bar is to model that exactly wherever the type lands (a parameter, an object field, a seq element)"
+class = "precision"
+state = "open"
+note = "found converting the float family (K9d-8); the domain generator (`boundaryOf` over a float range) is already in `tests/s8cu_helpers.nim`"
+slice = "K9d"
+home = "INT-77 (`wip/k9d8`)"
+source = "K9d-8 pinFind conversion"
+evidence = "reproducer: `scripts/dt-bounded.sh c tests/tsymex_0016_int77_floatrange.nim` fails to compile (`node lacks field: intVal` in `parseRangeBracket`)"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int77_floatrange"]

@@ -1919,6 +1919,8 @@ task test, "Run the test suite":
             "tsymex_0016_k9d_pinfind",
             # RFC-0016 INT-72: a free Rune ranges over int32; $r, toUTF8, size and Rune(n) follow std/unicode out of range; decoded runes are the decoder's.
             "tsymex_0016_int72_runedomain",
+            # RFC-0016 INT-77: a float range is the closed IEEE interval in its width, NaN excluded.
+            "tsymex_0016_int77_floatrange",
             "tsymex_0016_k9cg_unbacked",
             "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",

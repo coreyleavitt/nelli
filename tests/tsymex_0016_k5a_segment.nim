@@ -128,9 +128,14 @@ suite "K5a-2: buildSegment, by fieldPairs":
                         "w", "r", replayMode = "fork")
 
 suite "K5a-2: SymexSettings is keyed by fieldPairs":
-  test "the neutral const is exactly the two fields the hand list omitted":
+  test "the neutral const is the two fields the hand list omitted, and replayConcurrency":
+    # RFC-0016 INT-32 (item 8): `replayConcurrency` only sets how many replay
+    # children run at once. `replayInOrder` picks the first candidate in order
+    # that confirmed, once every earlier one finished without confirming, and
+    # counts the same candidates at every cap, so no verdict depends on it.
     check symexSettingsNeutral.toHashSet ==
-          ["acceptUnknownAsCovered", "budget.maxInstantiationsPerProc"].toHashSet
+          ["acceptUnknownAsCovered", "budget.maxInstantiationsPerProc",
+           "replayConcurrency"].toHashSet
 
   test "every field is keyed unless named neutral; a neutral one is not":
     # A new field is classified here by what it does to the key: if it is not

@@ -96,6 +96,48 @@ proc sutAssumeSwallow(x: int) =
     discard
   if x == 7: symexTarget("hit")
 
+# K9d-5: tuple, object and variant-object parameters (field-product domain).
+type
+  Pt = object
+    x: int
+    flag: bool
+    c: Color
+  Shape = object
+    common: int8
+    case k: Color
+    of cRed: a: int
+    of cGreen: b: bool
+    else: c: int8
+  Wide = object
+    f0, f1, f2, f3, f4, f5: int
+  Nested = tuple[p: Pt, n: int8]
+  BoolColor = (bool, Color)
+  IntBool = (int, bool)
+
+proc sutTuple(t: (int, bool)) =
+  if t[0] > 5 and t[0] < 3: symexTarget("hit")
+
+proc sutTupleSat(t: (int, bool)) =
+  if t[0] == 123_456 and t[1]: symexTarget("hit")
+
+proc sutObject(p: Pt) =
+  if p.x > 5 and p.x < 3 and p.flag: symexTarget("hit")
+
+proc sutObjectSat(p: Pt) =
+  if p.x == 4242 and p.c == cBlue: symexTarget("hit")
+
+proc sutVariant(s: Shape) =
+  if s.k == cRed and s.a > 5 and s.a < 3: symexTarget("hit")
+
+proc sutWideObj(w: Wide) =
+  if w.f0 > 5 and w.f0 < 3: symexTarget("hit")
+
+proc sutNested(n: Nested) =
+  if n.p.x > 5 and n.p.x < 3: symexTarget("hit")
+
+proc sutSix(a, b, c, d, e, f: int) =
+  if a > 5 and a < 3 and (b + c + d + e + f) == 0: symexTarget("hit")
+
 suite "K9d: pinFind":
   test "boundaryOf: exhaustive for bool and a small ordinal, sampled for int":
     check boundaryOf(bool).exhaustive
@@ -212,3 +254,87 @@ suite "K9d: pinFind":
     check nr.hits.len == 0 and nr.raised.len == 0
     symexAssume(false)   # the gate is closed again after the run
     check not nativeRun(sutAssumeUnsat(1)).rejected
+
+  test "pairwiseRows: every pair of values across two fields is in some row":
+    for sizes in [@[2, 3], @[8, 8, 8, 8, 8, 8], @[3, 1, 5, 2], @[4], @[]]:
+      let rows = pairwiseRows(sizes)
+      check rows.len >= 1
+      for i in 0 ..< sizes.len:
+        for j in i + 1 ..< sizes.len:
+          for a in 0 ..< sizes[i]:
+            for b in 0 ..< sizes[j]:
+              check rows.anyIt(it[i] == a and it[j] == b)
+    check pairwiseRows(@[8, 8, 8, 8, 8, 8]).len < 1000
+    check pairwiseRows(@[8, 8, 8, 8, 8, 8]) == pairwiseRows(@[8, 8, 8, 8, 8, 8])
+
+  test "boundaryOf a tuple: the field product, exhaustive when its fields are":
+    let d = boundaryOf(BoolColor)
+    check d.exhaustive and d.values.len == 6
+    check (true, cBlue) in d.values
+    let m = boundaryOf(IntBool)
+    check not m.exhaustive and m.values.len == 16
+
+  test "boundaryOf an object: the field product, each field its own domain":
+    let d = boundaryOf(Pt)
+    check not d.exhaustive and d.values.len == 8 * 2 * 3
+    check Pt(x: high(int), flag: true, c: cBlue) in d.values
+
+  test "boundaryOf a variant object: each branch with its discriminator":
+    let d = boundaryOf(Shape)
+    check d.values.anyIt(it.k == cRed and it.a == 7)
+    check d.values.anyIt(it.k == cGreen and it.b)
+    check d.values.anyIt(it.k == cBlue and it.c == 127'i8)
+    check d.values.anyIt(it.k == cBlue and it.common == -128'i8)
+    # branch fields pair with the common field: 3 branches, 256 x ... capped
+    check d.values.len > 0
+
+  test "boundaryOf a large object is pairwise, bounded, and records its size":
+    let d = boundaryOf(Wide)
+    check not d.exhaustive
+    check d.values.len < fieldProductFull
+    check d.values.len >= 64
+    for i in 0 ..< 8:
+      for j in 0 ..< 8:
+        let a = boundaryInts.values[i]
+        let b = boundaryInts.values[j]
+        check d.values.anyIt(it.f0 == a and it.f5 == b)
+        check d.values.anyIt(it.f2 == a and it.f3 == b)
+
+  test "tuple and object parameters are pinned over the field product":
+    check pinFind(sutTuple, tLabel("hit")).status == sxUnsat
+    check pinFind(sutObject, tLabel("hit")).status == sxUnsat
+    check pinFind(sutVariant, tLabel("hit")).status == sxUnsat
+    check pinFind(sutWideObj, tLabel("hit")).status == sxUnsat
+    check pinFind(sutNested, tLabel("hit")).status == sxUnsat
+    let t = recordsWith("/sutTuple/")
+    check t.len == 1 and not t[0].exhaustive and "sampled[16]" in t[0].domain
+    let o = recordsWith("/sutObject/")
+    check o.len == 1 and "[48]" in o[0].domain
+    check recordsWith("/sutVariant/").len == 1
+    check recordsWith("/sutNested/").len == 1
+    let w = recordsWith("/sutWideObj/")
+    check w.len == 1 and not w[0].exhaustive
+
+  test "a sat witness outside the pairwise set is still replayed exactly":
+    let t = pinFind(sutTupleSat, tLabel("hit"))
+    check t.status == sxSat
+    check t.witness[0][0] == 123_456
+    check not boundaryOf(IntBool).values.anyIt(it[0] == 123_456)
+    let r = pinFind(sutObjectSat, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[0].x == 4242
+    check recordsWith("/sutTupleSat/").len == 1
+    check recordsWith("/sutObjectSat/").len == 1
+
+  test "a parameter product beyond the cap is an all-pairs array over the parameters":
+    check pinFind(sutSix, tLabel("hit")).status == sxUnsat
+    let r = recordsWith("/sutSix/")
+    check r.len == 1 and not r[0].exhaustive
+    check "sampled[" in r[0].domain and "sampled[65536]" notin r[0].domain
+
+  test "a large exhaustive field is thinned only when the product is too large":
+    check boundaryOf(Shape).values.len > 0
+    let blue = boundaryOf(Shape).values.filterIt(it.k == cBlue)
+    check blue.len == 81
+    check blue.anyIt(it.common == low(int8) and it.c == high(int8))
+    check boundaryOf(Shape).values.filterIt(it.k == cRed).len == 256 * 8

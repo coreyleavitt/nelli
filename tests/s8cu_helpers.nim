@@ -592,6 +592,256 @@ macro declaredValues(T: typedesc): untyped =
   ## not in its type, so `low .. high` would invent invalid values)
   result = newNimNode(nnkBracket).add(T.getType[1].getTypeImpl[1..^1])
 
+const fieldProductFull* = 4096
+  ## A tuple or object whose field domains multiply to at most this many
+  ## values is generated as the full product; a larger one as an all-pairs
+  ## covering array (`pairwiseRows`).
+
+proc productRows(sizes: seq[int]): seq[seq[int]] =
+  ## every index combination, the last position varying fastest
+  var row = newSeq[int](sizes.len)
+  for s in sizes:
+    if s == 0: return @[]
+  while true:
+    result.add row
+    var i = sizes.len - 1
+    while i >= 0:
+      inc row[i]
+      if row[i] < sizes[i]: break
+      row[i] = 0
+      dec i
+    if i < 0: break
+
+proc pairwiseRows*(sizes: seq[int]): seq[seq[int]] =
+  ## A deterministic all-pairs covering array over fields with `sizes[i]`
+  ## values each: for every two fields i < j and every value a of i and b of
+  ## j, some row has a at i and b at j. Greedy: each row starts from the first
+  ## uncovered pair and fills the other fields with the value covering the
+  ## most uncovered pairs (ties to the lowest index).
+  let k = sizes.len
+  if k == 0: return @[newSeq[int](0)]
+  for s in sizes:
+    if s == 0: return @[]
+  if k == 1:
+    for v in 0 ..< sizes[0]: result.add @[v]
+    return
+  var unc = newSeq[seq[bool]](k * k)
+  var left = 0
+  for i in 0 ..< k:
+    for j in i + 1 ..< k:
+      unc[i * k + j] = newSeq[bool](sizes[i] * sizes[j])
+      for x in 0 ..< unc[i * k + j].len: unc[i * k + j][x] = true
+      left += unc[i * k + j].len
+  while left > 0:
+    var row = newSeq[int](k)
+    for f in 0 ..< k: row[f] = -1
+    block seed:
+      for i in 0 ..< k:
+        for j in i + 1 ..< k:
+          for x in 0 ..< unc[i * k + j].len:
+            if unc[i * k + j][x]:
+              row[i] = x div sizes[j]
+              row[j] = x mod sizes[j]
+              break seed
+    for f in 0 ..< k:
+      if row[f] >= 0: continue
+      var best = 0
+      var bestGain = -1
+      for v in 0 ..< sizes[f]:
+        var gain = 0
+        for g in 0 ..< k:
+          if g == f or row[g] < 0: continue
+          let ix = if g < f: unc[g * k + f][row[g] * sizes[f] + v]
+                   else: unc[f * k + g][v * sizes[g] + row[g]]
+          if ix: inc gain
+        if gain > bestGain:
+          bestGain = gain
+          best = v
+      row[f] = best
+    for i in 0 ..< k:
+      for j in i + 1 ..< k:
+        let x = row[i] * sizes[j] + row[j]
+        if unc[i * k + j][x]:
+          unc[i * k + j][x] = false
+          dec left
+    result.add row
+
+proc exceeds*(sizes: seq[int]; limit: int): bool =
+  ## whether the product of `sizes` is above `limit` (without overflowing)
+  var prod = 1
+  for s in sizes:
+    if s > 0:
+      if prod > limit div s: return true
+      prod *= s
+  prod > limit
+
+proc fieldRows*(sizes: seq[int]; limit = fieldProductFull):
+    tuple[rows: seq[seq[int]], full: bool] =
+  ## the index rows over fields of these domain sizes: the full product when it
+  ## is at most `limit`, else the all-pairs covering array
+  if exceeds(sizes, limit): (pairwiseRows(sizes), false)
+  else: (productRows(sizes), true)
+
+proc thinDomain*[T](d: var Domain[T]) =
+  ## A field of an aggregate too large to cross in full keeps its extremes and
+  ## its middle (an ordinal's low end, zero and high end): at most nine values.
+  let n = d.values.len
+  if n <= 16: return
+  var keep: seq[int]
+  for i in [0, 1, 2, n div 2 - 1, n div 2, n div 2 + 1, n - 3, n - 2, n - 1]:
+    if i notin keep: keep.add i
+  var vs: seq[T]
+  for i in keep: vs.add d.values[i]
+  d.values = vs
+  d.exhaustive = false
+
+proc selector(f: NimNode; o: NimNode): NimNode =
+  if f.kind == nnkIntLit: nnkBracketExpr.newTree(o, f) else: newDotExpr(o, f)
+
+type DomCtx = object
+  ty, vals, exh, proto: NimNode
+  depth: int
+
+proc domLeaf(cx: DomCtx; fields: seq[NimNode];
+             discs: seq[(NimNode, NimNode)]): NimNode =
+  let body = newStmtList()
+  var ds: seq[NimNode]
+  var sizes = nnkBracket.newTree()
+  let exh = cx.exh
+  let vals = cx.vals
+  let ty = cx.ty
+  for i, f in fields:
+    let d = genSym(nskVar, "fd" & $i)
+    ds.add d
+    body.add newVarStmt(d, newCall(ident"boundaryOf",
+      newCall(ident"typeof", selector(f, cx.proto))))
+  let thin = newStmtList()
+  for d in ds:
+    sizes.add newDotExpr(newDotExpr(d, ident"values"), ident"len")
+    thin.add newCall(ident"thinDomain", d)
+  body.add quote do:
+    if exceeds(@`sizes`, fieldProductFull): `thin`
+  for d in ds:
+    body.add quote do:
+      if not `d`.exhaustive: `exh` = false
+  let fr = genSym(nskLet, "fr")
+  let row = genSym(nskForVar, "row")
+  let o = genSym(nskVar, "o")
+  body.add quote do:
+    let `fr` = fieldRows(@`sizes`)
+    if not `fr`.full: `exh` = false
+  let setup = newStmtList()
+  setup.add quote do:
+    var `o`: `ty`
+  for (dn, dv) in discs:
+    let asg = newAssignment(selector(dn, o), dv)
+    setup.add nnkPragmaBlock.newTree(
+      nnkPragma.newTree(nnkCast.newTree(newEmptyNode(), ident"uncheckedAssign")),
+      newStmtList(asg))
+  for i, f in fields:
+    setup.add newAssignment(selector(f, o),
+      nnkBracketExpr.newTree(newDotExpr(ds[i], ident"values"),
+                             nnkBracketExpr.newTree(row, newLit(i))))
+  setup.add quote do:
+    `vals`.add `o`
+  body.add nnkForStmt.newTree(row, newDotExpr(fr, ident"rows"), setup)
+  result = newStmtList(nnkBlockStmt.newTree(newEmptyNode(), body))
+
+proc freshCond(c: NimNode): NimNode =
+  ## a branch condition as an untyped literal (the typed one is of the
+  ## discriminator's type; the generated case is over its ordinal)
+  case c.kind
+  of nnkIntLit .. nnkInt64Lit: newIntLitNode(c.intVal)
+  of nnkRange, nnkInfix:
+    let r = newNimNode(nnkRange)
+    for i in (if c.kind == nnkInfix: 1 else: 0) ..< c.len:
+      r.add freshCond(c[i])
+    r
+  else:
+    error("pinFind: unsupported variant branch condition " & $c.kind, c)
+    c
+
+proc domEmit(cx: var DomCtx; items: seq[NimNode]; fields: seq[NimNode];
+             discs: seq[(NimNode, NimNode)]): NimNode =
+  var items = items
+  var fields = fields
+  while items.len > 0:
+    let it = items[0]
+    items.delete(0)
+    case it.kind
+    of nnkIdentDefs:
+      for i in 0 ..< it.len - 2: fields.add it[i]
+    of nnkRecList:
+      var pre: seq[NimNode]
+      for c in it: pre.add c
+      items = pre & items
+    of nnkRecCase:
+      inc cx.depth
+      let exh = cx.exh
+      let dname = it[0][0]
+      let dd = genSym(nskLet, "dd" & $cx.depth)
+      let dv = genSym(nskForVar, "dv" & $cx.depth)
+      let cs = nnkCaseStmt.newTree(newCall(ident"ord", dv))
+      for bi in 1 ..< it.len:
+        let br = it[bi]
+        var bodyItems: seq[NimNode]
+        let b = br[^1]
+        if b.kind == nnkRecList:
+          for c in b: bodyItems.add c
+        else: bodyItems.add b
+        let inner = domEmit(cx, bodyItems & items, fields,
+                            discs & (dname, dv))
+        let nb = br.kind.newTree()
+        for ci in 0 ..< br.len - 1: nb.add freshCond(br[ci])
+        nb.add inner
+        cs.add nb
+      result = newStmtList()
+      result.add newLetStmt(dd, newCall(ident"boundaryOf",
+        newCall(ident"typeof", selector(dname, cx.proto))))
+      result.add quote do:
+        if not `dd`.exhaustive: `exh` = false
+      result.add nnkForStmt.newTree(dv, newDotExpr(dd, ident"values"),
+                                    newStmtList(cs))
+      return
+    of nnkNilLit, nnkEmpty: discard
+    else:
+      error("pinFind: cannot generate a domain for record item " &
+            $it.kind, it)
+  domLeaf(cx, fields, discs)
+
+proc domItemsOf(t: NimNode): seq[NimNode] =
+  let impl = t.getTypeImpl
+  if impl.kind != nnkObjectTy:
+    error("pinFind: no generated domain for " & t.repr &
+          "; pin this call with pinExact and an explicit domain", t)
+  if impl[1].kind == nnkOfInherit: result = domItemsOf(impl[1][0])
+  result.add impl[2]
+
+macro objectDomain(T: typedesc): untyped =
+  ## The domain of a tuple or plain object type as code: for each case-object
+  ## branch (each value of each discriminator's domain) the fields that exist
+  ## together are crossed by `fieldRows`; a variant object is the union of its
+  ## branches, each built with its discriminator set.
+  let ty = T.getType[1]
+  let vals = genSym(nskVar, "vals")
+  let exh = genSym(nskVar, "exh")
+  let proto = genSym(nskVar, "proto")
+  var cx = DomCtx(ty: T, vals: vals, exh: exh, proto: proto)
+  var gen: NimNode
+  if ty.kind == nnkBracketExpr and ty[0].eqIdent("tuple"):
+    var fs: seq[NimNode]
+    for i in 1 ..< ty.len: fs.add newLit(i - 1)
+    gen = domLeaf(cx, fs, @[])
+  else:
+    gen = domEmit(cx, domItemsOf(ty), @[], @[])
+  result = quote do:
+    block:
+      var `vals`: seq[`T`]
+      var `exh` = true
+      var `proto`: `T`
+      `gen`
+      Domain[`T`](values: `vals`, exhaustive: `exh`)
+
 proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
   ## The generated domain of one parameter type: every value of `bool`, of a
   ## one-byte ordinal and of an ordinal spanning at most 256 values (so a
@@ -630,6 +880,8 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
     for x in [lo, lo + 1, -1, 0, 1, 7, hi - 1, hi]:
       if x >= lo and x <= hi and T(x) notin vs: vs.add T(x)
     sampled(vs)
+  elif T is tuple or (T is object and not (T is ref)):
+    objectDomain(T)
   else:
     {.error: "pinFind: no generated domain for " & $T &
              "; pin this call with pinExact and an explicit domain".}
@@ -714,7 +966,7 @@ macro pinFind*(fn: typed; target: untyped;
   # The domain: one generated domain per parameter, nested loops, capped.
   let doms = newStmtList()
   var domSyms: seq[NimNode]
-  var combos: NimNode = newLit(1)
+  var sizesLit = nnkBracket.newTree()
   var exh: NimNode = newLit(true)
   var desc: NimNode = newLit("")
   for i in 0 ..< types.len:
@@ -723,17 +975,29 @@ macro pinFind*(fn: typed; target: untyped;
     # The parameter's type as the witness tuple holds it (a type symbol
     # spliced from `getTypeInst` does not bind as a `typedesc` argument).
     doms.add newLetStmt(d, newCall(ident"boundaryOf", tsyms[i]))
-    combos = infix(combos, "*", newDotExpr(newDotExpr(d, ident"values"), ident"len"))
+    sizesLit.add newDotExpr(newDotExpr(d, ident"values"), ident"len")
     exh = infix(exh, "and", newDotExpr(d, ident"exhaustive"))
     let part = newCall(ident"describe", d)
     desc = if i == 0: part else: infix(infix(desc, "&", newLit(" x ")), "&", part)
   if types.len == 0: desc = newLit("no parameters")
+  # The parameter product is run in full up to the cap; beyond it, an
+  # all-pairs covering array over the parameters' domains (the product's
+  # leading rows would otherwise leave the last parameters unvaried).
+  let rows = genSym(nskLet, "rows")
+  let rowv = genSym(nskForVar, "row")
+  doms.add quote do:
+    let `rows` = fieldRows(@`sizesLit`, pinFindCap)
+  let combos = newDotExpr(newDotExpr(rows, ident"rows"), ident"len")
+  exh = infix(exh, "and", newDotExpr(rows, ident"full"))
   let inner = newStmtList()
   var callVars: seq[NimNode]
   var loopVars: seq[NimNode]
   for i in 0 ..< types.len:
-    loopVars.add genSym(nskForVar, "v" & $i)
+    loopVars.add genSym(nskLet, "v" & $i)
     let a = genSym(nskVar, "x" & $i)
+    inner.add newLetStmt(loopVars[i], nnkBracketExpr.newTree(
+      newDotExpr(domSyms[i], ident"values"),
+      nnkBracketExpr.newTree(rowv, newLit(i))))
     inner.add newVarStmt(a, loopVars[i])
     callVars.add a
   let dcall = newCall(fn)
@@ -750,10 +1014,8 @@ macro pinFind*(fn: typed; target: untyped;
       let nr = nativeRun(`dused`)
       if nr.rejected: inc `rejected`
       elif `hit`(nr): `found` = `shown`
-  var loops: NimNode = inner
-  for i in countdown(types.len - 1, 0):
-    loops = nnkForStmt.newTree(loopVars[i],
-      newDotExpr(domSyms[i], ident"values"), newStmtList(loops))
+  let loops = nnkForStmt.newTree(rowv, newDotExpr(rows, ident"rows"),
+                                 newStmtList(inner))
   quote do:
     block:
       let `res` = `find`

@@ -31,7 +31,18 @@
 #        NELLI_HOST=1  no podman: run scripts/run-one.sh directly on the host
 #        under the same hard-kill timeout (`sweep.sh --host`). The compile
 #        command is scripts/run-one.sh either way.
+#        NELLI_TOOLCHAIN_CHECKED  the image tag a caller already held to the
+#        toolchain pin (sweep.sh sets it once per sweep); when it names the
+#        image this run uses, the per-run parity check is skipped.
+#        NELLI_TOOLCHAIN_DRIFT_OK=1  run on an image that drifts from the pin
+#        (a trial toolchain, deliberately); the drift is still printed.
+# Toolchain parity: a podman run first holds the image to scripts/nim-toolchain.pin
+# (scripts/check-toolchain-parity.sh), as dt.sh does. An image built before the
+# pin moved runs another Nim than CI, and the walker reads the compiler's
+# capabilities (e.g. `nimHasMethodDispatchTable`, patch 0008): such a run fails
+# pins CI passes, or passes pins CI fails. A drifted image exits 2.
 # Exit:  0 = passed/ran to completion; 137 = HUNG (killed at timeout);
+#        2 = the image drifts from the toolchain pin;
 #        other = compile/test failure.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -63,6 +74,16 @@ timeout_secs="${1:-180}"; [ $# -gt 0 ] && shift
 img="localhost/nelli-dev:$image"
 host="${NELLI_HOST:-}"
 [ -n "$host" ] || podman image exists "$img" || scripts/build-dev-image.sh "$image" >&2
+if [ -z "$host" ] && [ "${NELLI_TOOLCHAIN_CHECKED:-}" != "$image" ]; then
+  if ! bash scripts/check-toolchain-parity.sh --image "$image" >&2; then
+    if [ "${NELLI_TOOLCHAIN_DRIFT_OK:-}" = 1 ]; then
+      echo "dt-bounded.sh: $img drifts from scripts/nim-toolchain.pin; running anyway (NELLI_TOOLCHAIN_DRIFT_OK=1)" >&2
+    else
+      echo "dt-bounded.sh: $img drifts from scripts/nim-toolchain.pin; rebuild it (scripts/build-dev-image.sh $image) or set NELLI_TOOLCHAIN_DRIFT_OK=1 for a deliberate trial toolchain" >&2
+      exit 2
+    fi
+  fi
+fi
 
 # NELLI_PIN_DIR forwarding (see header).
 pin_args=()

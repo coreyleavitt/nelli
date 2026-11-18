@@ -3554,10 +3554,11 @@ proc seqWitnessReader*(ty: IRType): SeqWitnessReader =
     elif cell.kind in {itFloat32, itFloat64}: swrDistinct
     else: swrNone
   else:
-    # RFC-0016 PRC-23: a seq element (`seq[seq[T]]`) is backed but has no
-    # reader: a free one's inner lengths come from the model's length array,
-    # which `readSeqAs` does not render.
-    if isTreeSeqElemTy(e) and seqCellTy(e).kind != itSeq: swrTree else: swrNone
+    # RFC-0016 PRC-23: a seq element (`seq[seq[T]]`) too. It is extracted
+    # as a tree element is (`extractTreeValue`'s `itSeq` arm: each inner
+    # length is the model's, read through `seqElemAt`'s clamp at 0) and read
+    # back by `readSeqAs`'s seq arm (`readCellSeq`).
+    if isTreeSeqElemTy(e): swrTree else: swrNone
 
 func isContainerIntLeaf*(t: IRType): bool =
   ## RFC-0005 S8z. A `Table` value / `HashSet` element type the container

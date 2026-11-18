@@ -832,8 +832,13 @@ const renderAsChoicesVersion* = "12"
   ##   equal lengths and equal masked data arrays (`lambda i. ite(0 <= i <
   ##   len, data[i], default)`, an array term, no quantifier); it declined.
   ##   A float element still declines there (IEEE `==` is not term equality).
+  ## - RFC-0016 W4 S8cp-r (399->400), PRC-34 / PRC-23: a seq of seqs is held
+  ##   leaf-split (a length array and a data array) and `s[i][j] = v` stores
+  ##   through its inner seq, the outer index checked first; a seq of seqs
+  ##   parameter, or a field of one, has a witness reader (`swrTree`), so its
+  ##   verdicts decide (was `feUnsupportedWitnessType`, declined).
 
-const symexWalkerVersion* = "399"
+const symexWalkerVersion* = "400"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

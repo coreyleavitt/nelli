@@ -28993,9 +28993,11 @@ proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
     elif T is char or T is enum:
       if w.uintVals.hasKey(p): result[i] = T(w.uintVals[p])
       elif w.intVals.hasKey(p): result[i] = T(w.intVals[p])
-    elif T is object or T is tuple or T is array or T is distinct:
+    elif T is object or T is tuple or T is array or T is distinct or T is seq:
       # RFC-0005 S8bc (item 3): a tree element, written in the heap's cell
       # layout (`extractTreeValue`), read as a by-value cell field is.
+      # RFC-0016 PRC-23: and a seq element of a seq of seqs, whose length
+      # is `seqLens[<path>.<i>]` (`readCellSeq`).
       readCellField(newRefWitness(w), p, result[i])
     else:
       if w.uintVals.hasKey(p): result[i] = cast[T](w.uintVals[p])

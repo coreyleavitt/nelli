@@ -52,6 +52,9 @@ type
     ## tuple type is structural, so it would bind for every such tuple.
   HasPair = object
     t: Pair
+  HasSS = object
+    ss: seq[seq[int]]
+    k: int
 
 proc `==`(a, b: Meters): bool = int(a) div 10 == int(b) div 10
 proc `==`(a, b: Hue): bool = ord(a) + ord(b) >= 0
@@ -265,12 +268,24 @@ proc nestStoreDead(x: int) =
 proc nestOuterOob(i: int) =
   var s = @[@[1, 2], @[3, 4]]
   s[i][0] = 5
-  if s[i][0] == 5: symexTarget("hit")
+  symexTarget("hit")
 
 proc nestInnerOob(j: int) =
   var s = @[@[1, 2], @[3]]
   s[1][j] = 5
-  if s[1][j] == 5: symexTarget("hit")
+  symexTarget("hit")
+
+proc nestOuterOobDead(i: int) =
+  # Past the store only an in-bounds outer index survives.
+  var s = @[@[1, 2], @[3, 4]]
+  s[i][0] = 5
+  if i < 0 or i > 1: symexTarget("hit")
+
+proc nestInnerOobDead(j: int) =
+  # Past the store only an in-bounds inner index survives.
+  var s = @[@[1, 2], @[3]]
+  s[1][j] = 5
+  if j != 0: symexTarget("hit")
 
 proc nestInBounds(i, j: int) =
   # Both indexes in bounds: no IndexDefect.
@@ -295,6 +310,60 @@ proc nestAliasDead(x: int) =
   var u = s[1]
   s[1][0] = x
   if t[1][0] != 3 or u[0] != 3: symexTarget("hit")
+
+proc nestLet(x: int) =
+  var s = @[@[1, 2], @[3, 4]]
+  let t = s
+  s[1][0] = x
+  if t[1][0] == 3 and s[1][0] == x and x == 9: symexTarget("hit")
+
+proc flatLet(x: int) =
+  var s = @[1, 2]
+  let t = s
+  s[0] = x
+  if t[0] == 1 and s[0] == x and x == 9: symexTarget("hit")
+
+proc ssField(h: HasSS) =
+  if h.ss.len == 2 and h.ss[1].len == 1 and h.ss[1][0] == 7: symexTarget("hit")
+
+proc ssFieldLenDead(h: HasSS) =
+  if h.ss.len > 0 and h.ss[0].len < 0: symexTarget("hit")
+
+proc ssFieldOob(h: HasSS) =
+  if h.ss.len == 1 and h.ss[0][0] == 3: symexTarget("hit")
+
+proc ssFieldCopy(h: HasSS; x: int) =
+  var s = h.ss
+  if s.len == 1 and s[0].len == 1:
+    s[0][0] = x
+    if s[0][0] == 5 and h.ss[0][0] != 5: symexTarget("hit")
+
+proc ssFieldCopyDead(h: HasSS; x: int) =
+  var s = h.ss
+  if s.len == 1 and s[0].len == 1:
+    let old = h.ss[0][0]
+    s[0][0] = x
+    if h.ss[0][0] != old or s[0][0] != x: symexTarget("hit")
+
+proc ssParam(s: seq[seq[int]]) =
+  if s.len == 1 and s[0].len == 1 and s[0][0] == 7: symexTarget("hit")
+
+proc ssParamDead(s: seq[seq[int]]) =
+  if s.len > 0 and s[0].len < 0: symexTarget("hit")
+
+proc ssPop(s: seq[seq[int]]) =
+  var t = s
+  if t.len > 0:
+    let x = t.pop()
+    if x.len == 2: symexTarget("hit")
+
+proc ssPopDead(s: seq[seq[int]]) =
+  # `pop` reads the last inner seq with no element read's well-formedness
+  # facts: its length is non-negative only through `seqElemAt`'s clamp.
+  var t = s
+  if t.len > 0:
+    let x = t.pop()
+    if x.len < 0: symexTarget("hit")
 
 proc nestRead(i: int) =
   let s = @[@[1, 2], @[3]]
@@ -324,6 +393,9 @@ suite "RFC-0016 PRC-34 / PRC-23: a seq of seqs":
     check native(nestOuterOob(-1)) == "IndexDefect"
     check native(nestInnerOob(0)) == "hit"
     check native(nestInnerOob(1)) == "IndexDefect"
+    for v in [low(int), -1, 0, 1, 2, high(int)]:
+      check native(nestOuterOobDead(v)) in ["ran", "IndexDefect"]
+      check native(nestInnerOobDead(v)) in ["ran", "IndexDefect"]
     for i in -1 .. 2:
       for j in -1 .. 2:
         check native(nestInBounds(i, j)) in ["hit", "ran"]
@@ -336,6 +408,19 @@ suite "RFC-0016 PRC-34 / PRC-23: a seq of seqs":
     check native(nestNewSeqDead(0)) == "ran"
     for i in -1 .. 2:
       check native(nestReadDead(i)) == "ran"
+    check native(nestLet(9)) == "hit"
+    check native(flatLet(9)) == "hit"
+    check native(ssField(HasSS(ss: @[newSeq[int](), @[7]]))) == "hit"
+    check native(ssField(HasSS(ss: @[newSeq[int](), @[8]]))) == "ran"
+    check native(ssFieldLenDead(HasSS(ss: @[newSeq[int]()]))) == "ran"
+    check native(ssFieldOob(HasSS(ss: @[@[3]]))) == "hit"
+    check native(ssFieldOob(HasSS(ss: @[newSeq[int]()]))) == "IndexDefect"
+    check native(ssFieldCopy(HasSS(ss: @[@[1]]), 5)) == "hit"
+    check native(ssFieldCopyDead(HasSS(ss: @[@[1]]), 5)) == "ran"
+    check native(ssParam(@[@[7]])) == "hit"
+    check native(ssParamDead(@[newSeq[int]()])) == "ran"
+    check native(ssPop(@[@[1, 2]])) == "hit"
+    check native(ssPopDead(@[newSeq[int]()])) == "ran"
   test "an in-bounds store: reached":
     decides(nestStore, sxSat)
   test "an in-bounds store: unreachable":
@@ -350,6 +435,22 @@ suite "RFC-0016 PRC-34 / PRC-23: a seq of seqs":
     check r.status == sxRaised
   test "the in-bounds outer index reaches the store":
     decides(nestOuterOob, sxSat)
+  test "the store itself checks the outer index":
+    # No path passes the store with the index out of bounds: the label is
+    # unreached (an unchecked store would make it `sxSat`), and what is left
+    # is the store's own `IndexDefect`.
+    let r = symexFind(nestOuterOobDead, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxRaised
+  test "the in-bounds inner index reaches the store":
+    decides(nestInnerOob, sxSat)
+  test "the store itself checks the inner index":
+    # No path passes the store with the index out of bounds: the label is
+    # unreached (an unchecked store would make it `sxSat`), and what is left
+    # is the store's own `IndexDefect`.
+    let r = symexFind(nestInnerOobDead, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxRaised
   test "indexes checked in bounds raise nothing":
     let r = symexFind(nestInBounds, tRaisedExn("IndexDefect"))
     checkpoint show(r.errors)
@@ -367,6 +468,37 @@ suite "RFC-0016 PRC-34 / PRC-23: a seq of seqs":
     decides(nestNewSeq, sxSat)
   test "newSeq of seqs holds empty inner seqs":
     decides(nestNewSeqDead, sxUnsat)
+  test "a `let` of a seq of seqs written later declines (PRC-05)":
+    # `let t = s` shares the memory under `--mm:refc`, and under orc and arc
+    # when cursor inference proves it; a copy otherwise (this build: a copy,
+    # the native run). The decline is `letCursorDecline`'s, general to any
+    # seq (`flatLet`), and PRC-05 owns it.
+    for f in [symexFind(nestLet, tLabel("hit")), symexFind(flatLet, tLabel("hit"))]:
+      checkpoint show(f.errors)
+      check f.status == sxUnknown
+      check f.errors.named(feUnsupportedOp)
+  test "a seq of seqs field of a parameter: reached":
+    decides(ssField, sxSat)
+  test "a seq of seqs field of a parameter: no negative inner length":
+    decides(ssFieldLenDead, sxUnsat)
+  test "a seq of seqs field of a parameter: an empty inner seq raises":
+    let r = symexFind(ssFieldOob, tRaisedExn("IndexDefect"))
+    checkpoint show(r.errors)
+    check r.status == sxRaised
+  test "a seq of seqs field of a parameter: in bounds reached":
+    decides(ssFieldOob, sxSat)
+  test "a store into a copy of a parameter's seq of seqs: reached":
+    decides(ssFieldCopy, sxSat)
+  test "a store into a copy leaves the parameter: unreachable":
+    decides(ssFieldCopyDead, sxUnsat)
+  test "a seq of seqs parameter: reached":
+    decides(ssParam, sxSat)
+  test "a seq of seqs parameter: no negative inner length":
+    decides(ssParamDead, sxUnsat)
+  test "pop of a seq of seqs parameter: reached":
+    decides(ssPop, sxSat)
+  test "pop of a seq of seqs parameter: no negative inner length":
+    decides(ssPopDead, sxUnsat)
 
 suite "RFC-0016 PRC-34: record ==":
   test "native":
@@ -549,5 +681,5 @@ suite "RFC-0016 PRC-34: shapes later slices modelled":
     decides(seqFieldWrite, sxSat)
 
 suite "RFC-0016 S8cp-r: walker version":
-  test "symexWalkerVersion is at least 399":
-    check parseInt(symexWalkerVersion) >= 399
+  test "symexWalkerVersion is at least 400":
+    check parseInt(symexWalkerVersion) >= 400

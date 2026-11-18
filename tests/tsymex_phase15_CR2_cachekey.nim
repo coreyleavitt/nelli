@@ -1277,7 +1277,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## 392->394.
     ## RFC-0016 W4 S8cp-r (PRC-34: whole-seq `==` with no length bound over
     ## masked data arrays; 395-398 reserved): 394->399.
-    check symexWalkerVersion == "399"
+    ## RFC-0016 W4 S8cp-r (PRC-34 / PRC-23: a store through a seq of
+    ## seqs; a seq of seqs parameter's witness reader): 399->400.
+    check symexWalkerVersion == "400"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

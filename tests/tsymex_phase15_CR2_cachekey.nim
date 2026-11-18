@@ -1268,7 +1268,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## walked): 377->378.
     ## RFC-0016 W4 perf (a pinned regex call's value is folded into the
     ## branch asks; 379-380 reserved): 378->381.
-    check symexWalkerVersion == "381"
+    ## RFC-0016 INT-58 / INT-60 (an undecided undefined side is asked again
+    ## under `queryRLimit`; `len` of an array folds; 382-416 reserved):
+    ## 381->417.
+    check symexWalkerVersion == "417"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

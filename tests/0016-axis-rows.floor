@@ -6,7 +6,7 @@ typeclass	36	37
 typeop	30	33
 pragma	50	153
 magic	128	141
-stdlib	26	29
+stdlib	28	29
 build	11	13
 readonly	13	13
 defined	18	21

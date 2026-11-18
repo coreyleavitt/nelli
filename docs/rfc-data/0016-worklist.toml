@@ -2406,12 +2406,12 @@ id = "INT-58"
 table = "5.8c"
 title = "Found by K8b's stdlib axis suite (INT-56): `int(round(float(a) / 4.0)) == 103` and the same over `floor`, `a: int8`, are unsat (the rounding lies in [-32, 32]) but the walk ends the path at the conversion with `ubFloatToIntRange` and returns an untrusted `sxUnknown` in about 2 s. A reachable target over the same conversion (`<= 3`) is exact."
 class = "precision"
-state = "open"
-note = "Two modelled exact stdlib rows, `math.round` and `math.floor`. Not yet probed: whether a plain `int(float(a) / 4.0) == 103` declines the same way (the conversion's range query rather than the rounding). Pinned red by `tests/tsymex_0016_int58_roundunsat.nim`, not registered while red."
+state = "closed"
+note = "Two modelled exact stdlib rows, `math.round` and `math.floor`. Not yet probed: whether a plain `int(float(a) / 4.0) == 103` declines the same way (the conversion's range query rather than the rounding). Pinned red by `tests/tsymex_0016_int58_roundunsat.nim`, not registered while red. Closed (2026-11-18, walker 417). Probed first: the plain conversion `int(float(a) / 4.0) == 103` was already exact (`sxUnsat`, trusted), so the conversion's range query was not the defect and an FP operand is not declined as such. Root cause: the out-of-range side is decided at the op by `decideUndefined` (as every undefined op is: provably unreachable is pruned, anything else halts through `haltUndefined`, which lists a reachable side as a finding), and that check ran under the pruning budget alone (`loopPruneRLimit`, 250k units). A rounding (`roundToIntegral`) bit-blasts past it, so the side came back `zsUnknown` and the path halted untrusted, whatever the target. Fix: a side the pruning budget leaves undecided is asked again under the target query's own budget (`queryRLimit`), so unsat continues exact, sat halts with the finding, and only a side that budget also leaves open declines; this holds for every undefined kind, not only the conversion. The axis stream readmits `math.round` and `math.floor` (stdlib floor 26 -> 28 of 29, measured on c). Pinned by `tests/tsymex_0016_int58_roundunsat.nim` (the plain conversion as a control, round, floor, the version floor)."
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
 cells = []
-pins = []
+pins = ["tsymex_0016_int58_roundunsat", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib"]
 
 [[row]]
 id = "INT-59"
@@ -2430,12 +2430,12 @@ id = "INT-60"
 table = "5.8c"
 title = "Found by K8b's magic axis suite (INT-56): `len` of an array (magic `LengthArray`, a modelled exact row) declines when its value is an arithmetic operand. `len([int(a), 2]) + int(a) == 6` (sat at `a = 4`) and `let arr = [t, int(b), 1]; arr.len + t == 3` each return an untrusted `sxUnknown`: the compiler magic `len` (`LengthArray`) has no symbolic model (`feUnsupportedOp`). The same `len` in a comparison (`len([int(a), 2]) == 2 and a == 4`) is exact, as is the row's pin (`tsymex_0016_k4a_dispatch` `sLenArr`)."
 class = "precision"
-state = "open"
-note = "The row's table entry claims exact at every site, but the walker admits `len` of an array only where the parser reaches its comparison arm; an operand position falls through to the unregistered-callee decline. Pinned red by `tests/tsymex_0016_int60_lenarrarith.nim` (a comparison control is green), not registered while red. The axis stream blocks `magic:LengthArray` against this row (`s0016_k8b_snippets.blockedRows`) until it closes."
+state = "closed"
+note = "The row's table entry claims exact at every site, but the walker admits `len` of an array only where the parser reaches its comparison arm; an operand position falls through to the unregistered-callee decline. Pinned red by `tests/tsymex_0016_int60_lenarrarith.nim` (a comparison control is green), not registered while red. The axis stream blocks `magic:LengthArray` against this row (`s0016_k8b_snippets.blockedRows`) until it closes. Closed (2026-11-18, walker 417). Root cause: the call-form `len` arm in `dsl_parser` reached a model only for a seq, table or set receiver, so `len` of an array fell through to callee registration and the magic's stub-body decline (`feUnsupportedOp`) wherever it was read. Fix: `len(a)` of an array value folds to its type's element count, beside the `low`/`high` fold; as Nim's code generator (`genArrayLen`, the constant `lengthOrd`), the argument is not evaluated. The axis stream readmits `magic:LengthArray` (magic floor 116 -> 117 of 141, measured on c). Pinned by `tests/tsymex_0016_int60_lenarrarith.nim` (the comparison control, a literal and a `let`-bound array, the version floor)."
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
 cells = []
-pins = []
+pins = ["tsymex_0016_int60_lenarrarith", "tsymex_0016_k8b_axes"]
 
 [[row]]
 id = "INT-61"

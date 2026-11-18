@@ -1,20 +1,31 @@
-## RFC-0016 INT-71 (red, registered nowhere): a `seq` local declared by a
-## template inside the walked routine, in a module that imports `z3`,
-## declines every read with `feGlobalRouteUnproved`.
+## RFC-0016 INT-71: a `seq` local declared by a template inside the walked
+## routine, in a module that imports `z3`, declined every read with
+## `feGlobalRouteUnproved`.
 ##
 ## Found by INT-62: its six type x memory-op rows, defined in the test
 ## module (which imports `z3` for the fact tests), declined; moved to a
-## module of their own (`tests/int62_rows.nim`) they are exact. The
-## route scan opens `routeAnyValue` there: it reaches the `z3` library's
-## module-level state (`currentZ3Ctx`, softlink's function pointers) and
-## its owning types' `=destroy` hooks, one of which holds a `while` loop
-## and "cannot be summarised", so a read of ANY variable ('a', 't',
-## 'acc', ...) declines. The same body written inline (no template), or
-## the template over a `string` instead of a `seq`, is exact.
+## module of their own (`tests/int62_rows.nim`) they were exact.
 ##
-## Closes when `gensymSeq` below is exact; then register this file in
-## `nelli.nimble` and name it as the row's pin.
-import std/unittest
+## Cause: the route scan (S8cs `routeScan`) read the type slot of the
+## template's `var x {.gensym.}: seq[int]` as code. A template body is
+## bound where the template is defined, so its `seq[int]` stays in the
+## expanded routine as `[](seq, int)` over the open choice of every `[]` in
+## scope there; the scan took each of those 29 routines (`z3`'s `[]`
+## overloads among them) as a callee, walked into `z3`, and read its
+## types' `=destroy` hooks, one of which holds a `while` loop and cannot be
+## summarised, so a read of any variable declined (`routeAnyValue`). The
+## same body inline writes `seq[int]` as a bracket over the type symbol,
+## and a template's `let s = "ab"` has no type slot. A type slot runs
+## nothing: the declared name's symbol carries the resolved type, and the
+## scan routes that.
+##
+##   (1) the template's `seq` local, the same body inline, and a template's
+##       `string` local are exact (K9 records);
+##   (2) the route proof still sees a hook through the name: a template's
+##       local of a type whose `=destroy` writes a global the walk reads
+##       declines `feGlobalRouteUnproved`;
+##   (3) the version floor.
+import std/[unittest, strutils, sequtils]
 import z3
 import nelli
 import nelli/symex
@@ -49,17 +60,57 @@ proc gensymStr(a, b: int8) =
   strRow(acc)
   if acc == 5: symexTarget("hit")
 
-suite "INT-71: a template's seq local beside an imported z3":
-  template exact(fn: untyped) =
-    let r = symexFind(fn, tLabel("hit"), pinSettingsConst)
+suite "INT-71 (1): a template's seq local beside an imported z3 is exact":
+  template exact(fn: untyped; key: CellKey) =
+    let all = exhaustive(toSeq(low(int8) .. high(int8)))
+    let r = pinExact(fn, key, tLabel("hit"), all)
     checkpoint $r.status & " trusted=" & $r.trusted & " errors " &
       ($r.errors)[0 ..< min(400, ($r.errors).len)]
     check r.status == sxSat
     check r.trusted
 
-  test "control: the same body inline is exact":
-    exact(inlineSeq)
-  test "control: a template's string local is exact":
-    exact(gensymStr)
-  test "RED: a template's seq local is exact":
-    exact(gensymSeq)
+  test "control: the same body inline":
+    exact(inlineSeq, cellKey(axTypeOp, "letCursor/seq"))
+  test "control: a template's string local":
+    exact(gensymStr, cellKey(axTypeOp, "letCursor/string"))
+  test "a template's seq local":
+    exact(gensymSeq, cellKey(axTypeOp, "letCursor/seq"))
+
+# ---- (2) a hook the declared name's type has is still read --------------------
+
+var int71Dropped = 0
+
+type Int71Tracked = object
+  v: int
+
+proc `=destroy`(x: Int71Tracked) =
+  int71Dropped = int71Dropped + 1
+
+template trackedRow(acc) =
+  var y {.gensym.}: Int71Tracked = Int71Tracked(v: t)
+  acc = acc + y.v
+
+proc gensymTracked(a: int8) =
+  let t {.used.} = int(a)
+  var acc = 0
+  trackedRow(acc)
+  if int71Dropped == 7: symexTarget("hit")
+  if acc == 3: symexTarget("hit")
+
+suite "INT-71 (2): the route proof still reads the declared type's hook":
+  test "a template's local whose =destroy writes a read global declines":
+    let r = symexFind(gensymTracked, tLabel("hit"), pinSettingsConst)
+    checkpoint $r.status & " trusted=" & $r.trusted & " errors " &
+      ($r.errors)[0 ..< min(400, ($r.errors).len)]
+    check not r.trusted
+    var routed = false
+    for e in r.errors:
+      if e.kind == feGlobalRouteUnproved and "int71Dropped" in e.msg:
+        routed = true
+    check routed
+
+# ---- (3) the version floor ---------------------------------------------------
+
+suite "INT-71 (3)":
+  test "symexWalkerVersion >= 425":
+    check parseInt(symexWalkerVersion) >= 425

@@ -835,8 +835,16 @@ const renderAsChoicesVersion* = "12"
   ##   `sxUnknown` to exact. Key bytes change: the default
   ##   `queryTimeoutMs` is `1_200_000` (was `600_000`), which the default
   ##   settings' canonical form names.
+  ## - RFC-0016 INT-71 (421->425; 422-424 are reserved for other W4 work):
+  ##   the global-route scan reads an `IdentDefs`' type slot as the type its
+  ##   names' symbols carry, not as code. A template's `var x {.gensym.}:
+  ##   seq[int]` keeps `seq[int]` as `[]` over the open choice of every `[]`
+  ##   in scope at the template; the scan took each as a callee, walked into
+  ##   an imported library's hooks and declined every read
+  ##   (`feGlobalRouteUnproved`). Verdicts change from `sxUnknown` to exact.
+  ##   No key bytes change.
 
-const symexWalkerVersion* = "421"
+const symexWalkerVersion* = "425"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

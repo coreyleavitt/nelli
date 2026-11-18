@@ -1767,6 +1767,9 @@ task test, "Run the test suite":
             "tsymex_0016_int59_fpinterval",
             "tsymex_0016_int61_strlenbound",
             "tsymex_0016_int62_packcost",
+            # RFC-0016 INT-71: a template's declaration type slot is no code
+            # to the global-route scan.
+            "tsymex_0016_int71_gensymseqroute",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

@@ -274,6 +274,13 @@ type
       ## or a failure. Empty when symex wasn't used. Phase 7. Review R1-10:
       ## nothing from another run leaks in; the collector is the run's own
       ## engine frame (`recordSymexFinding`).
+    droppedSymexFindings*: int
+      ## RFC-0016 INT-36 (0005 review R5-07). How far the process's count of
+      ## dropped findings (`droppedSymexFindings()`) moved while this run
+      ## ran: findings `assertCoveredBy` made with no engine frame open on
+      ## its thread (a thread the property started), so on no report. Every
+      ## renderer shows it when non-zero. Process-wide, so a run concurrent
+      ## with this one on another thread counts here too.
     crash*: Option[CrashInfo]
       ## RFC-fuzzer-nextgen U0: typed crash identity when the falsifying
       ## example was a caught property `Defect` (failed `doAssert`,

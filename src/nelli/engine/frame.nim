@@ -16,7 +16,7 @@
 ## phase imports it. No dependencies on engine internals (only `types.nim`
 ## for `ScoreMap` / `EventStats` / `NumericSummary`).
 
-import std/[tables, algorithm]
+import std/[tables, algorithm, atomics]
 import ../choice
 import ./types
 
@@ -33,6 +33,12 @@ type EngineFrame* = object
     ## R4 (U1): one entry per `findingKey` (the `fn`, its call site and the
     ## target), in the order each was first made, holding the most severe
     ## finding made under that key (`severity`).
+  claimOf: Table[string, string]
+    ## RFC-0016 INT-36 (0005 review R4-09). Each `symexFindings` key's claim:
+    ## its `fn` and target, without the call site (`claimKey`).
+  firstOfClaim: Table[string, string]
+    ## The first `symexFindings` key made for each claim, the entry a nested
+    ## run's finding of that claim under another call site merges into.
 
 var engineStack* {.threadvar.}: seq[EngineFrame]
 
@@ -85,15 +91,48 @@ proc record(fr: var EngineFrame; key: string; f: SymexFinding) =
     return
   fr.symexFindings[key] = f
 
+proc recordKeyed(fr: var EngineFrame; key, claim: string; f: SymexFinding) =
+  if key notin fr.symexFindings:
+    fr.claimOf[key] = claim
+    if claim notin fr.firstOfClaim: fr.firstOfClaim[claim] = key
+  record(fr, key, f)
+
+func stronger(f, g: SymexFinding): bool =
+  ## RFC-0016 INT-36 (0005 review R4-09). Whether `f` should stand for a
+  ## claim `g` already stands for: it is more severe, or as severe and the
+  ## stronger claim (`claimRank`); a full tie keeps the later `f`, as
+  ## `record` does.
+  let sf = severity(f)
+  let sg = severity(g)
+  sf > sg or (sf == sg and claimRank(f.soundness) >= claimRank(g.soundness))
+
 proc popEngineFrame*() =
   ## Pops the top frame. Review R3 (E3): its symex findings also reach the
-  ## frame it was opened in, under the same keys, so a nested `forAll`'s
-  ## findings are on the enclosing run's report whatever its caller does with
-  ## the inner one (`laws` keeps only the outcome).
+  ## frame it was opened in, so a nested `forAll`'s findings are on the
+  ## enclosing run's report whatever its caller does with the inner one
+  ## (`laws` keeps only the outcome).
+  ##
+  ## RFC-0016 INT-36 (0005 review R4-09). They merge on the claim (the `fn`
+  ## and the target), not the call site: a nested run that re-finds the
+  ## enclosing run's claim at its own call site joins the entry the
+  ## enclosing frame already holds for it (the one under the same key, else
+  ## the first made for that claim) instead of adding a second. The entry
+  ## kept is the more severe, then the stronger claim (`claimRank`). Two
+  ## call sites in ONE run stay two entries (review R3 E2): only `record`
+  ## sees those, and it keys on the site.
   var fr = engineStack.pop()
   if engineStack.len > 0:
+    template parent: untyped = engineStack[^1]
     for k, f in fr.symexFindings:
-      record(engineStack[^1], k, f)
+      let claim = fr.claimOf.getOrDefault(k)
+      let into =
+        if k in parent.symexFindings: k
+        else: parent.firstOfClaim.getOrDefault(claim)
+      if into.len > 0 and into in parent.symexFindings:
+        if stronger(f, parent.symexFindings[into]):
+          parent.symexFindings[into] = f
+      else:
+        recordKeyed(parent, k, claim, f)
 
 proc pushEngineFrame*() =
   ## Opens a fresh frame. Review R4 (X3): the one way a frame is opened;
@@ -113,19 +152,25 @@ proc currentFrame*: var EngineFrame {.inline.} =
       "note/target/event called outside any forAll — there's no example to attach to")
   engineStack[^1]
 
-var droppedFindings {.threadvar.}: int
+var droppedFindings: Atomic[int]
+  ## RFC-0016 INT-36 (0005 review R5-07). One count for the process, not per
+  ## thread: a drop on a thread the property started is a drop of the run
+  ## that started it, and that run reads the count's change
+  ## (`Report.droppedSymexFindings`).
 
 proc resetDroppedSymexFindings*() =
-  ## Review R5 (3c). Zeroes this thread's drop count (`droppedSymexFindings`).
-  ## The count is per thread and only ever grows, so a test that reads it
-  ## resets it first, or compares against a reading taken before.
-  droppedFindings = 0
+  ## Review R5 (3c). Zeroes the process's drop count (`droppedSymexFindings`).
+  ## A run reports how far the count moved while it ran, so a reset while a
+  ## run is in progress makes that run's figure wrong: compare against a
+  ## reading taken before instead, where you can.
+  droppedFindings.store(0)
 
 proc droppedSymexFindings*(): int =
-  ## Review R4 (X8). How many findings `recordSymexFinding` dropped on this
-  ## thread because no engine frame was open. A nonzero count in a test that
-  ## expected its finding on a `Report` means the call ran outside `forAll`.
-  droppedFindings
+  ## Review R4 (X8), RFC-0016 INT-36 (R5-07). How many findings
+  ## `recordSymexFinding` dropped in this process, on any thread, because no
+  ## engine frame was open on the thread that made them. A run's change in it
+  ## is on its report (`Report.droppedSymexFindings`) and every renderer.
+  droppedFindings.load()
 
 type FindingOrigin* = object
   ## Review R5 (3b). Where a finding came from: the call site that made it
@@ -141,6 +186,11 @@ func findingKey(o: FindingOrigin; f: SymexFinding): string =
   ## target (one multi-target call makes one per target).
   $o.fnId.len & ':' & o.fnId & $o.site.len & ':' & o.site & f.targetDesc
 
+func claimKey(o: FindingOrigin; f: SymexFinding): string =
+  ## RFC-0016 INT-36 (0005 review R4-09). `findingKey` without the call site:
+  ## what a nested run's finding merges into its enclosing run's on.
+  $o.fnId.len & ':' & o.fnId & f.targetDesc
+
 proc recordSymexFinding*(origin: FindingOrigin; f: SymexFinding) =
   ## Review R2 (DD3), R3 (E2, E3), R4 (U1, X8). Records a finding
   ## `assertCoveredBy` made at `origin.site` (its call site, `file(line, col)`) on
@@ -155,9 +205,9 @@ proc recordSymexFinding*(origin: FindingOrigin; f: SymexFinding) =
   ## finding's only channel is the call itself: `assertCoveredBy` returns it,
   ## and its `SymexCoverageDefect` carries it.
   if engineStack.len == 0:
-    inc droppedFindings
+    droppedFindings.atomicInc()
     return
-  record(engineStack[^1], findingKey(origin, f), f)
+  recordKeyed(engineStack[^1], findingKey(origin, f), claimKey(origin, f), f)
 
 # --- user-facing accumulator APIs --------------------------------------------
 

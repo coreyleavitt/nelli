@@ -48,6 +48,8 @@ suite "INT-36 R5-07: a drop on a worker thread reaches the report":
     check j.hasKey("droppedSymexFindings")
     if j.hasKey("droppedSymexFindings"):
       check j["droppedSymexFindings"].getInt == 2
+    check "2 symex findings were dropped" in renderReport(rep, ofJunit)
+    check "symex findings dropped" in renderReport(rep, ofGithubAnnotation)
     pinNever(cellKey(axConstruct, "report/findings/dropped"),
       rep.droppedSymexFindings == 2 and "dropped" in text,
       "a finding recorded outside any engine frame, on any thread, is " &
@@ -59,6 +61,17 @@ suite "INT-36 R5-07: a drop on a worker thread reaches the report":
     check rep.droppedSymexFindings == 0
     check "dropped" notin renderReport(rep, ofText)
     check not parseJson(renderReport(rep, ofJson)).hasKey("droppedSymexFindings")
+    check "dropped" notin renderReport(rep, ofJunit)
+    check "dropped" notin renderReport(rep, ofGithubAnnotation)
+
+  test "one drop is singular":
+    let rep = forAll(integers(0, 3), proc (x: int) =
+      var th: Thread[void]
+      createThread(th, dropOne)
+      joinThread(th),
+      Settings(maxExamples: 1))
+    check rep.droppedSymexFindings == 1
+    check "1 symex finding was dropped" in renderReport(rep, ofText)
 
 proc sameClaim(x: int) =
   ## One call site for the enclosing run and the nested one.
@@ -135,3 +148,21 @@ suite "INT-36 R4-09: a nested run's re-found finding is reported once":
       let got = toSeq(engineStack[^1].symexFindings.values)
       check got.len == 1
       if got.len == 1: check not got[0].soundness.witnessUnsafe
+    # The other way round: the nested run's stronger claim replaces the
+    # enclosing run's weaker one of equal severity.
+    withEngineFrame:
+      recordSymexFinding(FindingOrigin(site: "p.nim(1, 1)", fnId: "fn"), unsafe)
+      withEngineFrame:
+        recordSymexFinding(FindingOrigin(site: "p.nim(2, 1)", fnId: "fn"), hostSafe)
+      let got = toSeq(engineStack[^1].symexFindings.values)
+      check got.len == 1
+      if got.len == 1: check not got[0].soundness.witnessUnsafe
+    # Another fn or another target is another claim: no merge.
+    withEngineFrame:
+      recordSymexFinding(FindingOrigin(site: "p.nim(1, 1)", fnId: "fn"), weak)
+      withEngineFrame:
+        recordSymexFinding(FindingOrigin(site: "p.nim(2, 1)", fnId: "fn2"), weak)
+        var other = weak
+        other.targetDesc = "label(\"b\")"
+        recordSymexFinding(FindingOrigin(site: "p.nim(2, 1)", fnId: "fn"), other)
+      check engineStack[^1].symexFindings.len == 3

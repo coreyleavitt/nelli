@@ -68,6 +68,18 @@ proc crashTypeLabel[T](r: Report[T]): string =
 # crash names its input, a declined replay says why) and its non-winning
 # raises (`diagnostics`); a finding with neither renders as before.
 
+func droppedLine(n: int): string =
+  ## RFC-0016 INT-36 (0005 review R5-07). The line every renderer shows for
+  ## `Report.droppedSymexFindings`; empty when it is zero, so a report with
+  ## no drop renders as before.
+  if n == 0: ""
+  elif n == 1:
+    "1 symex finding was dropped (recorded outside any engine frame, " &
+      "e.g. on a thread the property started)\n"
+  else:
+    $n & " symex findings were dropped (recorded outside any engine " &
+      "frame, e.g. on a thread the property started)\n"
+
 func taintText(t: Taint): string =
   ## `{}` / `{scSpurious}` / `{scSpurious, scIncomplete}`, as Nim prints a set.
   $t
@@ -209,6 +221,7 @@ proc repro*[T](r: Report[T]): string =
                 " max=" & s.mx.formatFloat(ffDecimal, 3) & "\n"
   if r.symexFindings.len > 0:
     result &= symexSection(r.symexFindings)   # RFC-0005 S11
+  result &= droppedLine(r.droppedSymexFindings)
 
 proc xmlEscape(s: string): string =
   result = newStringOfCap(s.len)
@@ -364,6 +377,8 @@ proc renderJson[T](r: Report[T]): string =
       if i > 0: result &= ","
       result &= symexFindingJson(f)
     result &= "]"
+  if r.droppedSymexFindings != 0:   # RFC-0016 INT-36 (R5-07)
+    result &= ",\"droppedSymexFindings\":" & $r.droppedSymexFindings
   result &= "}"
 
 proc renderJunit[T](r: Report[T], testName: string,
@@ -385,11 +400,12 @@ proc renderJunit[T](r: Report[T], testName: string,
     result &= ">"
     result &= xmlEscape(body)
     result &= "</failure>\n"
-  if r.symexFindings.len > 0:
+  if r.symexFindings.len > 0 or r.droppedSymexFindings != 0:
     # RFC-0005 S11: JUnit's own slot for captured output; the same text the
-    # `[symex]` section of `ofText` carries.
-    result &= "    <system-out>" & xmlEscape(symexSection(r.symexFindings)) &
-              "</system-out>\n"
+    # `[symex]` section of `ofText` carries, and its dropped-findings line.
+    let body = (if r.symexFindings.len > 0: symexSection(r.symexFindings)
+                else: "") & droppedLine(r.droppedSymexFindings)
+    result &= "    <system-out>" & xmlEscape(body) & "</system-out>\n"
   result &= "  </testcase>\n"
   result &= "</testsuite>\n"
 
@@ -411,6 +427,11 @@ proc renderGithub[T](r: Report[T], testName: string): string =
   let crashSuffix = if r.crash.isSome: "; crash=" & $r.crash.get.kind else: ""
   result = "::" & level & params & "::" & testName & " — " & $r.outcome &
            " (counterexample: " & cx & "; seed=" & $r.seed & crashSuffix & ")"
+  # RFC-0016 INT-36 (R5-07): findings no report carries are a `::warning`.
+  if r.droppedSymexFindings != 0:
+    result &= "\n::warning title=symex findings dropped::" &
+              ghEscape(testName & " — " &
+                       droppedLine(r.droppedSymexFindings).strip)
   # RFC-0005 S11: one more workflow command per symex fact worth a reader's
   # attention, after the report's own line. An annotation violation is the
   # user's code carrying a false promise -- an `::error`. A verdict that is

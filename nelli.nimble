@@ -1972,6 +1972,7 @@ task test, "Run the test suite":
             "tsymex_0016_int33_savesecondary",
             "tsymex_0016_int35_exitgroups",
             "tsymex_0016_int36_collector",
+            "tsymex_0016_int36_report",
             "tsymex_0016_int37_probes",
             "tsymex_0016_int38_notes",
             "tsymex_0016_int30_refcfiber",

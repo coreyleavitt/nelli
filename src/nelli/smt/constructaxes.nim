@@ -186,6 +186,16 @@ func constructRows(): seq[ConstructKey] =
     "walk stops on one, a release walk keeps it for the statement (INT-37)",
     iNever, nrByDesign)
   result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["report/findings/dropped"], none(SymexErrorKind),
+    "a finding recorded outside any engine frame, on any thread, is counted " &
+    "on the report of the run it happened during, and every renderer shows " &
+    "it (INT-36)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["report/findings/nested-merge"], none(SymexErrorKind),
+    "a nested run that re-finds its enclosing run's claim at its own call " &
+    "site adds no second entry to the enclosing report; the more severe, " &
+    "then the stronger claim, is kept (INT-36)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
     ["db/secondary/guard"], none(SymexErrorKind),
     "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
     "`strictDb` run with a report), never raised out of `forAll` (INT-33)",

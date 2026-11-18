@@ -160,6 +160,10 @@ type
                        ## literal (OP_PROP), or (`clistNot`) a negated
                        ## class of it (OP_NOTPROP)
     clistNot*: bool
+    pname*: string     ## RFC-0016 S8co: aoProp (not `clist`): the property
+                       ## name pcre_compile.c reads (`\d` under `(*UCP)`
+                       ## is `Nd`), and (`pnot`) OP_NOTPROP
+    pnot*: bool
     negType*: bool     ## RFC-0005 S8bj: aoType: `\D \S \W`
     xNot*, xMap*, xProp*: bool
       ## RFC-0005 S8bj: aoXClass: negated, with a bitmap, with a property
@@ -670,6 +674,8 @@ type Esc = object
   n: int
   op: AtomOp    ## RFC-0005 S8bj: ekSet: the opcode
   neg: bool     ## RFC-0005 S8bj: ekSet: a negated type (`\D \S \W`)
+  pname: string ## RFC-0016 S8co: aoProp: the property (`Rx.pname`)
+  pnot: bool    ## RFC-0016 S8co: aoProp: OP_NOTPROP
 
 proc escSet(r: var Reader; s: set[char]; negated: bool): Esc =
   ## RFC-0005 S8bj. An ASCII escape class: in UTF mode its complement takes
@@ -713,15 +719,24 @@ proc readEscape(r: var Reader; inClass: bool): Esc =
                   of 's', 'S': "Xsp"
                   else: "Xwd")
       let us = ucdSet(name)[1]
-      return Esc(kind: ekSet, op: aoProp,
+      return Esc(kind: ekSet, op: aoProp, pname: name,
+                 pnot: c in {'D', 'S', 'W'},
                  s: (if c in {'D', 'S', 'W'}: cpComplement(us, maxCp) else: us))
     let (u, us) = (if r.ucp: pcreUcpSet("\\" & c) else: (false, {}))
-    if u: Esc(kind: ekSet, s: cpOfBytes(us), op: aoProp)
+    if u:
+      Esc(kind: ekSet, s: cpOfBytes(us), op: aoProp,
+          pname: (case c
+                  of 'd', 'D': "Nd"
+                  of 's', 'S': "Xsp"
+                  else: "Xwd"),
+          pnot: c in {'D', 'S', 'W'})
     elif r.ucp and c in {'d', 'D'}:
       # RFC-0005 S8bj: `\p{Nd}` / `\P{Nd}` (OP_PROP): below 0x100 the
       # ASCII digits.
       var e = r.escSet(pcreDigit, c == 'D')
       e.op = aoProp
+      e.pname = "Nd"
+      e.pnot = c == 'D'
       e
     else:
       case c
@@ -753,10 +768,10 @@ proc readEscape(r: var Reader; inClass: bool): Esc =
     if r.utf:
       # RFC-0005 S8bt: a property of every code point (PCRE 8.45's tables).
       let (_, us) = ucdSet(name)
-      return Esc(kind: ekSet, op: aoProp,
+      return Esc(kind: ekSet, op: aoProp, pname: name, pnot: neg,
                  s: (if neg: cpComplement(us, maxCp) else: us))
     Esc(kind: ekSet, s: cpOfBytes(if neg: pcreAnyByte - ps else: ps),
-        op: aoProp)
+        op: aoProp, pname: name, pnot: neg)
   of 'h', 'H', 'v', 'V':
     let list = (if c in {'h', 'H'}: (if r.utf: uHSpace else: cpOfBytes(pcreHSpace))
                 else: (if r.utf: uVSpace else: cpOfBytes(pcreVSpace)))
@@ -1557,6 +1572,8 @@ proc readCat(r: var Reader; depth: int): Rx =
       of ekSet:
         let a = r.mkAtom(e.s, e.op)
         a.negType = e.neg
+        a.pname = e.pname
+        a.pnot = e.pnot
         items.add a
         r.grow(r.atomCost(a))
         atomDone(len0)

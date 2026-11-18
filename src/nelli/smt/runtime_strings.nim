@@ -398,17 +398,29 @@ proc regexReach(sp: RegexSpec; pr: PcreParse): LimitReach =
 
 proc regexLimitSite[T](sp: RegexSpec; pr: PcreParse; subject: Z3String;
                        exact, err: T; errConds: seq[Z3Bool] = @[];
-                       guarded: seq[int] = @[]) =
+                       guarded: seq[int] = @[]; missOnly = false) =
   ## RFC-0005 S8cf. Records a call that can reach a limit (`checkCapped`).
+  ## RFC-0016 S8co (item 10): `missOnly`, the call's error value is its miss
+  ## value (`contains`, `startsWith`): where it makes one attempt, the site
+  ## starts only where that attempt can stop at a limit and still match.
   if foldedLiteral(exact): return
   let reach = regexReach(sp, pr)
   if reach.never: return
+  var safe = reach.safe
+  if missOnly and pr.limitMatch < 0 and pr.limitRecursion < 0:
+    let anchoredCall = sp.entry == "startsWith"
+    if anchoredCall or reach.anchored:
+      # An anchored call runs on the interpreter (`pcreExec`).
+      let m = missBound(reach,
+        not anchoredCall and pcreSearchEngine() == peJit837)
+      if m.never: return
+      safe = m.safe
   let lenS = simplify(len(subject))
   if isNumeralAst(lenS.ctx, lenS.raw) and
-     parseBiggestInt(getNumeralString(lenS)) <= reach.safe:
+     parseBiggestInt(getNumeralString(lenS)) <= safe:
     return
   regexLimitSites.add RegexLimitSite(exact: toAnyAst(exact), err: toAnyAst(err),
-    errConds: errConds, subject: subject, safe: reach.safe, guarded: guarded,
+    errConds: errConds, subject: subject, safe: safe, guarded: guarded,
     what: sp.entry & "(s, " & sp.flag & "\"" & sp.pattern & "\")")
 
 proc regexPointSite[T](sp: RegexSpec; pr: PcreParse; subject, by: Z3String;
@@ -456,7 +468,7 @@ proc regexLimitOfCall(sp: RegexSpec; pr: PcreParse; subject: Z3String;
   of svBool:
     case sp.entry
     of "contains", "startsWith":
-      regexLimitSite(sp, pr, subject, r.b, mkBool(false))
+      regexLimitSite(sp, pr, subject, r.b, mkBool(false), missOnly = true)
     of "match":
       regexLimitSite(sp, pr, subject, r.b, mkBool(true))
     else:
@@ -489,7 +501,7 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
     else: svInt
   let recv = lowerStrOperand(env, e.strArgs[0])   # RFC-0005 S8bc
   requireStr(recv, $e.kind)
-  let pr = parseSpec(sp)
+  let pr = walkerSpec(sp)
   if pr.status == psRejected:
     return regexRejected(pr.errMsg, kind)
   var start = mkInt(0)
@@ -585,7 +597,7 @@ proc lowerRegexDecline(env: Env, e: IRExpr): SymVal =
   let sp = decodeRegexSpec(e.strOp[6 .. ^1])
   let recv = lowerStrOperand(env, e.strArgs[0])   # RFC-0005 S8bc
   requireStr(recv, "regex " & sp.entry)
-  let pr = parseSpec(sp)
+  let pr = walkerSpec(sp)
   if pr.status == psRejected:
     regexRaiseMsgs.add pr.errMsg
     syncRegexRaiseMsg(pr.errMsg)
@@ -870,22 +882,61 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
   of iekStrCount:
     # RFC-0005 S8cf (item 11). `strutils.count(s, sub)`, non-overlapping: a
     # recursive definition (`fuel` as S8bi's) with the facts Z3's unfolding
-    # does not reach.
+    # does not reach. RFC-0016 S8co (PRC-33 item 9): `count:over`, the
+    # overlapping count, steps past the occurrence's first byte instead of
+    # its end; `count:set:<chars>` counts the receiver's bytes in the set,
+    # one byte per step. strutils' loops, read off `lib/pure/strutils.nim`
+    # (2.2.10): `i = s.find(sub, i)`, then `inc i` or `i += sub.len`; and
+    # `for c in s: if c in subs: inc result`.
     let recv = lowerStrOperand(env, e.strArgs[0])
     requireStr(recv, "iekStrCount")
-    let sub = needleAsStr(lowerStrOperand(env, e.strArgs[1]), "iekStrCount")
     let ctx = recv.str.ctx
+    if e.strOp.startsWith("count:set:"):
+      var cs: set[char]
+      for c in e.strOp["count:set:".len .. ^1]: cs.incl c
+      let member = byteSetRe(cs)
+      let f = defineRecFun[Z3String, Z3Int, Z3Int](ctx,
+        regexFreshName("__strCountSet"),
+        proc (self: Z3FuncDecl[(Z3String, Z3Int), Z3Int]; u: Z3String;
+              fuel: Z3Int): Z3Int =
+          ite(fuel <= mkInt(0) or len(u) <= mkInt(0), mkInt(0),
+            ite(matches(substr(u, mkInt(0), mkInt(1)), member), mkInt(1),
+                mkInt(0)) +
+              self(substr(u, mkInt(1), len(u) - mkInt(1)), fuel - mkInt(1))))
+      let s = recv.str
+      let v = f(s, len(s) + mkInt(1))
+      # The bounds; none counted exactly when no byte of `s` is in the set
+      # (as `contains` facts for a small set, as `replaceLemmas` states
+      # `first`), all of them exactly when every byte is.
+      let anyB = star(byteSetRe(pcreAnyByte))
+      var some = matches(s, concat(@[anyB, member, anyB]))
+      if cs.card <= 32:
+        var first = true
+        for c in cs:
+          let hit = contains(s, simplify(fromCode(mkInt(ord(c)))))
+          some = (if first: hit else: some or hit)
+          first = false
+      regexRecFactConds.add (v >= mkInt(0)) and (v <= len(s)) and
+        (some == (v >= mkInt(1))) and (matches(s, star(member)) == (v == len(s)))
+      return SymVal(kind: svInt, zi: v)
+    let sub = needleAsStr(lowerStrOperand(env, e.strArgs[1]), "iekStrCount")
+    let over = e.strOp == "count:over"
     let f = defineRecFun[Z3String, Z3Int, Z3Int](ctx,
       regexFreshName("__strCount"),
       proc (self: Z3FuncDecl[(Z3String, Z3Int), Z3Int]; u: Z3String;
             fuel: Z3Int): Z3Int =
         let at0 = indexOf(u, sub, mkInt(0))
-        let past = at0 + len(sub)
+        let past = at0 + (if over: mkInt(1) else: len(sub))
         ite(fuel <= mkInt(0), mkInt(0),
           ite(at0 < mkInt(0), mkInt(0),
               mkInt(1) + self(substr(u, past, len(u) - past), fuel - mkInt(1)))))
     let v = f(recv.str, len(recv.str) + mkInt(1))
-    regexRecFactConds.add (v >= mkInt(0)) and (v * len(sub) <= len(recv.str)) and
+    # Occurrences start at distinct positions, at most `len(s) - len(sub) +
+    # 1` of them; without overlap they are disjoint as well.
+    let bound = (if over: implies(v >= mkInt(1),
+                                  v + len(sub) <= len(recv.str) + mkInt(1))
+                 else: v * len(sub) <= len(recv.str))
+    regexRecFactConds.add (v >= mkInt(0)) and bound and
       implies(contains(recv.str, sub), v >= mkInt(1)) and
       implies(v >= mkInt(1), contains(recv.str, sub))
     SymVal(kind: svInt, zi: v)
@@ -1016,7 +1067,7 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     let sp = decodeRegexSpec(e.strOp)
     let recv = lowerStrOperand(env, e.strArgs[0])
     requireStr(recv, "iekStrReplaceRe")
-    let pr = parseSpec(sp)
+    let pr = walkerSpec(sp)
     if pr.status == psRejected:
       return regexRejected(pr.errMsg, svString)
     let repl = lowerStrOperand(env, e.strArgs[1])

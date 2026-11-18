@@ -1,8 +1,8 @@
 ## RFC-0005 S8cf (item 4) -- limit accounting the automata do not hold: a
 ## possessive (*CRLF) dot run and a possessive non-ASCII UTF run. A concrete
 ## call reads them, each compared with native PCRE's interpreter. A kept
-## `ignore_skip_arg` under a limit stays unread (`costStaleWhy`): counted, the
-## model and native differ on `abab` at LIMIT_MATCH=5.
+## `ignore_skip_arg` under a limit is read too (RFC-0016 S8co,
+## `tsymex_0016_s8co_skiplimit`).
 import std/[unittest, re, strutils]
 import nelli/symex
 import nelli/smt/pcre_syntax

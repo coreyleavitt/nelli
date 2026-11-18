@@ -2,8 +2,8 @@
 ## at a continuation byte, and in UTF mode it runs only where the first items
 ## are literals and `\d \s \w`, which fail there: the U+0080..U+00BF first
 ## characters read as any other. Under (*ANY) a concrete call reads an attempt
-## that starts inside a multi-byte newline; the search's languages decline it
-## and the walker reads the call at points. Each is compared with the library,
+## that starts inside a multi-byte newline; the search's languages read it
+## from the newline's progress (RFC-0016 S8co). Each is compared with the library,
 ## and each language with the concrete reference. Parts 1 to 5 (the `_b` to `_f`
 ## files) split both comparisons by head so each file runs under 60 s on the
 ## Windows legs; part 0 holds the walker.
@@ -141,10 +141,12 @@ when s8cfJuPart != 0:
 
 else:
   suite "S8cf: UTF mode under the JIT's scan":
-    test "the language declines (*ANY) under the scan":
+    test "the language reads (*ANY) under the scan":
+      # RFC-0016 S8co (PRC-33 item 7): an attempt that starts inside a
+      # multi-byte newline has its own verifier (`tsymex_0016_s8co_jitany`).
       let an = buildNfa(parsePcre("(*UTF)(*ANY)\\sb(*SKIP)"), peJit837)
       let al = searchLangV(an, "cfju:any", skFirst, pcOther)
-      check not al.ok and "multi-byte newline" in al.why
+      check al.ok
 
     test "the walker reads them":
       check "\xe2\x80\xa9b".find(re"(*UTF)\x{a9}b") == -1

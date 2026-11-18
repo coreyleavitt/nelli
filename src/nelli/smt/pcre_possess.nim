@@ -6,9 +6,10 @@
 ## call accounting is not (a possessive repeat does not backtrack), so the
 ## automaton reads it when it counts the calls (`pcre_select.nim`).
 ##
-## Character properties and extended classes (`\p`, OP_XCLASS) are not
-## ported: a comparison that reads one leaves `unknown` set (the caller
-## declines).
+## RFC-0016 S8co (PRC-33 item 3): character properties and extended
+## classes (`\p`, OP_XCLASS) are ported too (`propposstab`, `catposstab`,
+## `posspropstab`, `check_char_prop`, the XCLASS bitmap). Every property
+## name the reader accepts is typed (`propType`, PRC-33 item 4b).
 ##
 ## Pure Nim.
 
@@ -29,11 +30,16 @@ type
     empty: bool        ## list[1]: the item can match nothing (a base
                        ## repeat: it is greedy)
     chars: seq[int32]  ## pkChar / pkNot: the character, its other case
-    bits: set[char]    ## pkClass / pkNClass: the bitmap
+    bits: set[char]    ## pkClass / pkNClass: the bitmap; pkXClass: its
+                       ## bitmap (XCL_MAP, inverted when negated)
+    cps: CpSet         ## RFC-0016 S8co: pkProp / pkXClass: the characters
+                       ## it matches (`check_char_prop`, `PRIV(xclass)`)
+    ptype, pdata: int  ## RFC-0016 S8co: pkProp: PT_* and its data
+    pnot: bool         ## RFC-0016 S8co: pkProp: OP_NOTPROP
+    xNot, xMap, xProp: bool  ## RFC-0016 S8co: pkXClass: its flags
 
   Possess* = object
     addrs*: HashSet[int]   ## the possessive repeats (`Code.address`)
-    unknown*: bool         ## a comparison read an unported item
 
 const
   digitBits = {'0'..'9'}
@@ -60,6 +66,123 @@ const autoposstab: array[17, array[21, uint8]] = [
   [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0],  # \V
   [0'u8, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0],  # \v
   [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]]  # \X
+
+# RFC-0016 S8co: pcre_compile.c's tables for two properties (PCRE 8.45).
+const
+  ptAny = 0
+  ptLamp = 1
+  ptGc = 2
+  ptPc = 3
+  ptSc = 4
+  ptAlnum = 5
+  ptSpace = 6
+  ptPxSpace = 7
+  ptWord = 8
+  ptUcnc = 10
+  gcNames = ["C", "L", "M", "N", "P", "S", "Z"]   # ucp_C .. ucp_Z
+  pcNames = ["Cc", "Cf", "Cn", "Co", "Cs", "Ll", "Lm", "Lo", "Lt", "Lu",
+             "Mc", "Me", "Mn", "Nd", "Nl", "No", "Pc", "Pd", "Pe", "Pf",
+             "Pi", "Po", "Ps", "Sc", "Sk", "Sm", "So", "Zl", "Zp", "Zs"]
+  ucpC = 0
+  ucpL = 1
+  ucpN = 3
+  ucpP = 4
+  ucpZ = 6
+  ucpCc = 0
+  ucpNl = 14
+  ucpPo = 21
+  # PT_ANY .. PT_UCNC, rows the repeated item, columns the next one.
+  propposstab: array[11, array[11, uint8]] = [
+    [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],      # PT_ANY
+    [0'u8, 3, 0, 0, 0, 3, 1, 1, 0, 0, 0],      # PT_LAMP
+    [0'u8, 0, 2, 4, 0, 9, 10, 10, 11, 0, 0],   # PT_GC
+    [0'u8, 0, 5, 2, 0, 15, 16, 16, 17, 0, 0],  # PT_PC
+    [0'u8, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0],      # PT_SC
+    [0'u8, 3, 6, 12, 0, 3, 1, 1, 0, 0, 0],     # PT_ALNUM
+    [0'u8, 1, 7, 13, 0, 1, 3, 3, 1, 0, 0],     # PT_SPACE
+    [0'u8, 1, 7, 13, 0, 1, 3, 3, 1, 0, 0],     # PT_PXSPACE
+    [0'u8, 0, 8, 14, 0, 0, 1, 1, 3, 0, 0],     # PT_WORD
+    [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],      # PT_CLIST
+    [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]]      # PT_UCNC
+  # 1: the particular category (column) is not in the general one (row).
+  catposstab: array[7, array[30, uint8]] = [
+    [0'u8, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 1, 1, 1],  # C
+    [1'u8, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 1, 1, 1],  # L
+    [1'u8, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 1, 1, 1],  # M
+    [1'u8, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 1, 1, 1],  # N
+    [1'u8, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+     0, 1, 1, 1, 1, 1, 1, 1],  # P
+    [1'u8, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+     1, 0, 0, 0, 0, 1, 1, 1],  # S
+    [1'u8, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+     1, 1, 1, 1, 1, 0, 0, 0]]  # Z
+  # ALNUM, SPACE / PXSPACE, WORD: two general categories always in, a
+  # general and a particular category partly in.
+  posspropstab: array[3, array[4, int]] = [
+    [ucpL, ucpN, ucpN, ucpNl], [ucpZ, ucpZ, ucpC, ucpCc],
+    [ucpL, ucpN, ucpP, ucpPo]]
+
+proc propType(name: string): (int, int) =
+  ## RFC-0016 S8co. pcre_compile.c's `utt` entry for `\p{name}`: its PT_*
+  ## and data (a script: its index in `ucdProps`; only equality is read).
+  ## Total over the names the reader accepts (`pcre_props.pcrePropSet`):
+  ## every one is a general or particular category or a script (RFC-0016
+  ## S8co, PRC-33 item 4b), so another name is a defect.
+  case name
+  of "Any": return (ptAny, 0)
+  of "L&": return (ptLamp, 0)
+  of "Xan": return (ptAlnum, 0)
+  of "Xsp": return (ptSpace, 0)
+  of "Xps": return (ptPxSpace, 0)
+  of "Xwd": return (ptWord, 0)
+  of "Xuc": return (ptUcnc, 0)
+  else: discard
+  for i, n in gcNames:
+    if n == name: return (ptGc, i)
+  for i, n in pcNames:
+    if n == name: return (ptPc, i)
+  for i, (n, _) in ucdProps:
+    if n == name: return (ptSc, i)
+  raiseAssert "pcre_possess.propType: `\\p{" & name & "}` has no PT_* type"
+
+proc propPossess(base, list: PList): bool =
+  ## RFC-0016 S8co. `compare_opcodes` for two OP_PROP / OP_NOTPROP items:
+  ## true when no character matches both.
+  let same = base.pnot == list.pnot
+  let lisprop = not base.pnot
+  let risprop = not list.pnot
+  let b3 = base.pdata
+  let l3 = list.pdata
+  let n = int(propposstab[base.ptype][list.ptype])
+  case n
+  of 1: lisprop and risprop
+  of 2: (b3 == l3) != same
+  of 3: not same
+  of 4: risprop and (catposstab[b3][l3] == 1) == same
+  of 5: lisprop and (catposstab[l3][b3] == 1) == same
+  of 6, 7, 8:
+    let p = posspropstab[n - 6]
+    risprop and lisprop == (l3 != p[0] and l3 != p[1] and
+                            (l3 != p[2] or not lisprop))
+  of 9, 10, 11:
+    let p = posspropstab[n - 9]
+    lisprop and risprop == (b3 != p[0] and b3 != p[1] and
+                            (b3 != p[2] or not risprop))
+  of 12, 13, 14:
+    let p = posspropstab[n - 12]
+    risprop and lisprop == (catposstab[p[0]][l3] == 1 and
+                            catposstab[p[1]][l3] == 1 and
+                            (l3 != p[3] or not lisprop))
+  of 15, 16, 17:
+    let p = posspropstab[n - 15]
+    lisprop and risprop == (catposstab[p[0]][b3] == 1 and
+                            catposstab[p[1]][b3] == 1 and
+                            (b3 != p[3] or not risprop))
+  else: false
 
 proc column(k: PKind): int =
   case k
@@ -92,6 +215,10 @@ proc classBits(x: Rx): set[char] =
   if x.kind == rxSet: return x.bytes
   for (lo, hi) in x.cps:
     for c in max(lo, 0) .. min(hi, 255): result.incl char(c)
+
+proc atomCps(x: Rx): CpSet =
+  ## RFC-0016 S8co: the characters an atom matches, as code points.
+  if x.kind == rxSet: cpOfBytes(x.bytes) else: x.cps
 
 proc anyKind(x: Rx; utf: bool): PKind =
   ## `.` / `\N` (OP_ANY) or a dot-all `.` (OP_ALLANY).
@@ -129,7 +256,13 @@ proc atomList(x: Rx; utf: bool; l: var PList): bool =
   of aoNClass:
     l.kind = pkNClass
     l.bits = classBits(x)
-  of aoXClass: l.kind = pkXClass
+  of aoXClass:
+    l.kind = pkXClass
+    l.bits = classBits(x)
+    l.cps = atomCps(x)
+    l.xNot = x.xNot
+    l.xMap = x.xMap
+    l.xProp = x.xProp
   of aoType: l.kind = typeKind(x)
   of aoHSpace: l.kind = pkHSpace
   of aoVSpace: l.kind = pkVSpace
@@ -142,7 +275,11 @@ proc atomList(x: Rx; utf: bool; l: var PList): bool =
       # RFC-0005 S8bt: PT_CLIST becomes its caseless set's characters.
       l.kind = (if x.clistNot: pkNot else: pkChar)
       l.chars = ucdCaseSets[ucdCaseSet(x.ch)]
-    else: l.kind = pkProp
+    else:
+      l.kind = pkProp
+      l.cps = atomCps(x)
+      (l.ptype, l.pdata) = propType(x.pname)
+      l.pnot = x.pnot
   of aoFail: return false
   true
 
@@ -224,9 +361,6 @@ proc compareOpcodes(code: seq[Code]; i0: int; utf: bool; base: PList;
     let after = propertyList(code, i, utf, list)
     if after < 0: return false
     i = after
-    if base.kind in {pkProp, pkXClass} or list.kind in {pkProp, pkXClass}:
-      p.unknown = true
-      return false
     var chrSide, other: PList
     var charCase = true
     if base.kind == pkChar:
@@ -258,6 +392,14 @@ proc compareOpcodes(code: seq[Code]; i0: int; utf: bool; base: PList;
         invert = true
         set2 = wordBits
       of pkWord: set2 = wordBits
+      of pkXClass:
+        # RFC-0016 S8co: a property in it declines; without a bitmap, no
+        # character below 256 is in it (unless it is negated).
+        if o.xProp: return false
+        if not o.xMap:
+          if not list.empty: return not o.xNot
+          continue
+        set2 = o.bits
       else: return false
       if invert:
         if (set1 - set2).card != 0: return false
@@ -267,9 +409,15 @@ proc compareOpcodes(code: seq[Code]; i0: int; utf: bool; base: PList;
       continue
     else:
       charCase = false
-      let l = column(base.kind)
-      let r = column(list.kind)
-      if l < 0 or l > 16 or r < 0 or autoposstab[l][r] == 0: return false
+      if base.kind == pkProp:
+        # RFC-0016 S8co: a property before `\z`, or before a property.
+        let accepted = list.kind == pkEod or
+                       (list.kind == pkProp and propPossess(base, list))
+        if not accepted: return false
+      else:
+        let l = column(base.kind)
+        let r = column(list.kind)
+        if l < 0 or l > 16 or r < 0 or autoposstab[l][r] == 0: return false
       if not list.empty: return true
       continue
     if charCase:
@@ -314,6 +462,9 @@ proc compareOpcodes(code: seq[Code]; i0: int; utf: bool; base: PList;
           if char(chr) in other.bits: return false
         of pkClass:
           if chr <= 255 and char(chr) in other.bits: return false
+        of pkProp, pkXClass:
+          # RFC-0016 S8co: `check_char_prop`, `PRIV(xclass)`.
+          if cpHas(other.cps, chr): return false
         else: return false
       if not list.empty: return true
 
@@ -337,8 +488,8 @@ proc autoPossess*(code: seq[Code]; utf: bool): Possess =
       base.empty = code[i + 1].rep in {rpStar, rpPlus, rpQuery, rpUpto}
       cand = after >= 0
     if not cand: continue
-    # RFC-0005 S8cf: `compareOpcodes` sets `unknown` where a comparison reads
-    # one; the pattern's end reads neither (`[\\x{e9}\\x{100}]*` possesses).
+    # RFC-0005 S8cf: the pattern's end reads no item (`[\\x{e9}\\x{100}]*`
+    # possesses).
     var recLimit = 1000
     if compareOpcodes(code, after, utf, base, recLimit, result):
       result.addrs.incl c.address

@@ -153,7 +153,7 @@ suite "S8bt: mixed (*SKIP:NAME), symbolically":
             let f = searchLangV(n, key, skFirst, pc, foundIgn = ig)
             check f.ok
             if f.ok and member(f.re, w): found.add ig
-          if found != @[ign]:
+          if found != @[int8(ign)]:
             bad.add "foundIgn " & escape(p) & " " & escape(u) & " " &
                     $found & ", reference " & $ign
             continue
@@ -166,8 +166,8 @@ suite "S8bt: mixed (*SKIP:NAME), symbolically":
           for g in 1 .. pr.groups:
             inc caps
             let pcA = classAt(subj, a)
-            let setL = captureLangV(n, key, g, pcA, false, false, elig, ign)
-            let capL = captureLangV(n, key, g, pcA, true, false, elig, ign)
+            let setL = captureLangV(n, key, g, pcA, false, false, elig, int8(ign))
+            let capL = captureLangV(n, key, g, pcA, true, false, elig, int8(ign))
             check setL.ok and capL.ok
             if not (setL.ok and capL.ok): continue
             let isSet = cs[g - 1][0] >= 0

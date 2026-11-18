@@ -5,8 +5,8 @@
 typeclass	35	37
 typeop	26	33
 pragma	50	153
-magic	116	141
-stdlib	26	29
+magic	117	141
+stdlib	28	29
 build	0	13
 readonly	0	13
 defined	18	21

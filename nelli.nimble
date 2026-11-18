@@ -1758,6 +1758,10 @@ task test, "Run the test suite":
             "tsymex_0016_k8b_axes_defined",
             # RFC-0016 INT-55: a by-reference base in a parsed routine.
             "tsymex_0016_int55_parsedbyref",
+            # RFC-0016 INT-58 / INT-60: an unsat target past a float rounding;
+            # `len` of an array as an arithmetic operand.
+            "tsymex_0016_int58_roundunsat",
+            "tsymex_0016_int60_lenarrarith",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

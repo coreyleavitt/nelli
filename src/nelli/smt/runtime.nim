@@ -15187,9 +15187,22 @@ proc decideUndefined(cur: Path; ub: UbKind; cond: Z3Bool; site: string;
     # RFC-0016 K10a-concolic: the flip solve must keep this op defined.
     w.definedFacts.add ConcolicDefinedFact(
       cond: cond, kind: ub, site: site, at: w.branchTrace.len)
-  let unsat = guardLiteral(cond) != glTrue and
-    checkCapped(w.z3, pathRoots(cur, [cond]), w.settings,
-                loopPruneRLimit(w.settings)).status == zsUnsat
+  # RFC-0016 INT-58: the side is decided first under the pruning budget,
+  # and a side that budget leaves undecided is asked again under the
+  # target query's own (`queryRLimit`), as the halt's own solve would be.
+  # The side's query is the path's plus one condition, as hard as the
+  # target's, and an undecided side ends the path untrusted: under the
+  # pruning budget alone a floating-point rounding (`int(round(float(a) /
+  # 4.0))`) ran out on every conversion and no unsat past one was trusted.
+  var unsat = false
+  if guardLiteral(cond) != glTrue:
+    let roots = pathRoots(cur, [cond])
+    let pruneLimit = loopPruneRLimit(w.settings)
+    var st = checkCapped(w.z3, roots, w.settings, pruneLimit).status
+    let q = w.settings.budget.queryRLimit
+    if st == zsUnknown and (q == 0 or q > pruneLimit):
+      st = checkCapped(w.z3, roots, w.settings, q).status
+    unsat = st == zsUnsat
   if unsat:
     logPrune(cur, [cond])
   else:

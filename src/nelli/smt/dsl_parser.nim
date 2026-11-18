@@ -13353,6 +13353,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let arrTy = classifyType(n[1]).ty
       return mkIntLit(if calleeSym.strVal == "low": arrTy.lo
                        else: arrTy.lo + int64(arrTy.size) - 1)
+    # RFC-0016 INT-60: `len(a)` of an array VALUE (magic `LengthArray`) is
+    # its type's element count, folded like `low`/`high` above. Before, only
+    # the call-form `len` arm for seqs, tables and sets reached a model, and
+    # an array fell through to the magic's stub-body decline
+    # (`feUnsupportedOp`) wherever its value was used. As Nim's code
+    # generator (`genArrayLen`, `tyArray`: the constant `lengthOrd`), the
+    # argument is not evaluated.
+    if n.len == 2 and isBuiltinNamed(calleeSym, ["len"]) and
+       n[1].typeKind != ntyNone and classifyType(n[1]).ty.kind == itArray:
+      return mkIntLit(int64(classifyType(n[1]).ty.size))
     # RFC-0005 S8at: `zeroDefault(T)` -- what the compiler fills an omitted
     # field of an object constructor with (Nim 2, e.g. the injected
     # `bv: BV(kind: 0, a: zeroDefault(int))` of `BVH(n: n)`) -- and

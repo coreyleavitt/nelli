@@ -65,7 +65,10 @@ suite "symex Phase 2 — ADR-0001 soundness validation":
   test "isLoose misses the overflow-only path (false negative)":
     ## Rule (b): Z3Int still says x+1 > x always -- the documented false
     ## negative is preserved.
-    let r = pinFind(wrapNeededU, tLabel("wrap-needed"), looseAgreeSettings())
+    ## Not pinned (RFC-0016 K9d): `isLoose` is opt-in unsound by design
+    ## (ADR-0001, AUD-01), so a native run refutes this sxUnsat at 255; the
+    ## pin would only restate the documented false negative.
+    let r = symexFind(wrapNeededU, tLabel("wrap-needed"), looseAgreeSettings())
     check r.status == sxUnsat   ## ← UNSOUND: Int says x+1 > x always
 
   test "overflow-on default: the wrap now RAISES (R16-4)":

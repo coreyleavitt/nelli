@@ -105,6 +105,11 @@ Census ceiling 484 → 441. Two suites first failed to compile because their
 SUT returns a value (`phase15_C1_ir`, `phase15_CR14_exn_missing`); `pinFind`
 now discards a SUT's result natively (pinned by `tsymex_0016_k9d_pinfind`).
 
+One call stays `symexFind`: `phase2_overflow`'s `isLoose` test. `isLoose` is
+opt-in unsound by design (ADR-0001, AUD-01), and the native run refutes its
+`sxUnsat` at 255, which is the false negative that test documents. `pinFind`
+reports it as a pin failure, as it should; the call carries a comment instead.
+
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 
 ### int (107)

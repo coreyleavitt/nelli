@@ -17,6 +17,7 @@ import nelli
 import nelli/symex
 import nelli/smt/pcre_syntax
 import nelli/smt/canonicalize
+import nelli/smt/runtime
 from nelli/smt/admission import cellKey, axConstruct
 import ./s8cu_helpers
 
@@ -85,3 +86,27 @@ suite "INT-37 R6-09: a bodiless routine is keyed at compile time":
     pinNever(cellKey(axConstruct, "cache/key/bodiless"), fs.len == 1,
       "a SUT calling an importc routine and a forward-declared one compiles: " &
       "`routineKey` keys both")
+
+# ---- R2-08: no lowering leaves taint for another to find --------------------
+#
+# `claimStrayPendingTaint` found taint a lowering had left queued with no
+# owner and, not knowing whose it was, put it on every path and finding of the
+# statement: one path's decline tainted its siblings. Every raw `lower` now
+# drains its own queue onto its own path, so a stray is a walker fault: a
+# debug build stops on it, and a release build keeps the sound fallback.
+
+suite "INT-37 R2-08: stray pending taint is a fault, not a statement's":
+
+  test "a stray found at a lowering's entry stops a debug build":
+    let r = strayClaimProbe()
+    checkpoint $r
+    when defined(release):
+      check not r.tripped
+      check r.strayKept == {scSpurious}
+    else:
+      check r.tripped
+    check r.pendingAfter == {}
+    pinNever(cellKey(axConstruct, "walk/stmt/stray-claim"),
+      r.tripped or defined(release),
+      "no lowering leaves pending taint for another lowering to claim: a " &
+      "debug walk stops on one, a release walk keeps it for the statement")

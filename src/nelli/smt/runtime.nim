@@ -16079,6 +16079,15 @@ proc claimStrayPendingTaint() =
   ## here, so the taint is kept for the statement (`stmtStrayTaint`), and
   ## `walk` puts it on every path the statement yields; it still lands on
   ## this path through the drain as before.
+  ##
+  ## RFC-0016 INT-37 (R2-08): every raw `lower` now drains its own queue onto
+  ## its own path, so a stray here is a walker fault. The fallback put one
+  ## path's decline on its siblings too (an over-taint, never an unsound
+  ## verdict), so a debug build stops on it and a release build keeps it.
+  when not defined(release):
+    doAssert loweringPendingTaint == {},
+      "claimStrayPendingTaint: a lowering left pending taint " &
+      $loweringPendingTaint & " with no drain of its own (RFC-0016 R2-08)"
   if loweringPendingTaint != {} and currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].stmtStrayTaint = wp[].stmtStrayTaint + loweringPendingTaint
@@ -22204,6 +22213,9 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
             e2[tabTmp] = tabV
             let t2 = lower(e2, mkTableSet(mkVar(tabTmp),
               mkVar(addrSnapPrefix & "key"), mkVar(c.local)))
+            # RFC-0016 INT-37 (R2-08): this raw `lower` drains its own queue
+            # onto the path it lowered for, so no later lowering claims it.
+            taintInPlace(q, takeLoweringPendingDegrade())
             let holder = locSet(env2[c.slot], c.path, @[], t2)
             if holder.isNone:
               viewWhy = "the walk does not find the Table in its holder"
@@ -23256,6 +23268,43 @@ proc strayFindingProbe*(): StrayFindingProbe =
   if w.candidates.len == 2:
     result.stmtCandidateTaint = w.candidates[0].soundness.pathTaint
     result.movedTaint = w.candidates[1].soundness.pathTaint
+
+type
+  StrayClaimProbe* = object
+    ## Observations `strayClaimProbe` reports (see its doc).
+    tripped*: bool       ## the entry check stopped on the stray
+    strayKept*: Taint    ## what the statement kept for its paths
+    pendingAfter*: Taint ## the queue once the probe drained it
+
+proc strayClaimProbe*(): StrayClaimProbe =
+  ## RFC-0016 INT-37 (R2-08). A lowering's entry check
+  ## (`claimStrayPendingTaint`) on a walk context with `{scSpurious}` left
+  ## queued by no lowering of its own: a debug build stops on it, a release
+  ## build keeps it for the statement. Restores every threadvar it touches.
+  ## For `tests/tsymex_0016_int37_probes.nim` only.
+  let savedPending = loweringPendingTaint
+  let savedPendingUb = loweringPendingUb
+  let savedCtx = currentWalkCtxPtr
+  let savedSinks = currentLowerSinks
+  var w: WalkCtx
+  w.exitClock = newExitClock()
+  w.topExits = w.exitClock.newExits(CallExits)
+  w.frame = initCallFrameCtx(w.exitClock)
+  currentWalkCtxPtr = addr w
+  currentLowerSinks = addr w.sinks
+  loweringPendingTaint = {scSpurious}
+  loweringPendingUb = {}
+  try:
+    claimStrayPendingTaint()
+  except AssertionDefect:
+    result.tripped = true
+  result.strayKept = w.stmtStrayTaint
+  discard takeLoweringPendingDegrade()
+  result.pendingAfter = loweringPendingTaint
+  currentWalkCtxPtr = savedCtx
+  currentLowerSinks = savedSinks
+  loweringPendingTaint = savedPending
+  loweringPendingUb = savedPendingUb
 
 proc haltExcludedDefect(p: Path, typeId: string, w: var WalkCtx) =
   ## RFC-0016 K7b (W-16). A `Defect` raise that reaches the SUT boundary

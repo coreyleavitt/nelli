@@ -78,7 +78,15 @@ template rst(x: int) =
   gX = x
 proc q10(x: int) =
   rst(x)
-  gTb = {"a": x}.toTable
+  # The table is built by `initTable` and `[]=`, not `{"a": x}.toTable`:
+  # since INT-75 the walk runs through `toTable` (its destructuring `for`
+  # used to decline), and a table built from a tuple literal costs about
+  # 200 s a target (the literal's int component is an Int-sorted array read
+  # back as a bit-vector, a mixed-theory query Z3 rarely decides in its
+  # cap), the same as a user's non-destructuring `toTable`. The cell is
+  # `mgetOrPut` evaluating its key once; the table it starts from is not.
+  gTb = initTable[string, int]()
+  gTb["a"] = x
   discard gTb.mgetOrPut(key(), 0)
   if gN == 1: symexTarget("q10_once") else: symexTarget("q10_ne")
 proc q11(x: int) =

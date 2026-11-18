@@ -9,6 +9,7 @@
 import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
+import ./s8cu_helpers except show
 
 var natHits: HashSet[string]
 
@@ -147,5 +148,17 @@ suite "tsymex_rfc0005_s8cq_twice10":
     pin(q07, "q07_ne", false, sxRaised)
     pin(q08, "q08_once", true, sxUnknown)
     pin(q08, "q08_ne", false, sxUnknown)
-    pin(q09, "q09_once", true, sxUnknown)
-    pin(q09, "q09_ne", false, sxUnknown)
+    # `gTb[key()] = 3` evaluates `key` once (`[]=` takes its key as a value),
+    # so gN is 1 on every input. It declined while `{"a": x}.toTable` did (its
+    # `for key, val in items(pairs)`); INT-75 reads that destructuring as the
+    # flat form, the walk runs through `toTable`, and the verdict is Nim's.
+    # The `initTable` size hint left in the errors is a sevHint on an arm no
+    # path takes: the size is `pairs.len`, 1, and the arm needs it above
+    # 1048576. The verdicts are trusted (pinExact refuses any other) and
+    # match native: the witness hits `q09_once`, no domain value hits `q09_ne`.
+    # Unchanged with the PRC-51 parser removed (ade7658a): this is INT-75's.
+    check (("q09_once" in natHits) and ("q09_ne" notin natHits))
+    check pinExact(q09, cellKey(faCallShape, "twice/tableStoreCallKey"),
+                   tLabel("q09_once")).status == sxSat
+    check pinExact(q09, cellKey(faCallShape, "twice/tableStoreCallKey"),
+                   tLabel("q09_ne")).status == sxUnsat

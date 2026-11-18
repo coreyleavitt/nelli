@@ -17,10 +17,11 @@
 ## `tsymex_rfc0005_s8cn_lent_d`, `tsymex_rfc0005_s8cn_lent_f`. Split so that
 ## each part compiles and runs in under 60 s on the Windows legs (the whole
 ## file took 95 s).
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinDecline
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/admission
 
 proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs:
@@ -122,7 +123,19 @@ suite "S8cn: `let` over a container with a write in its life":
     declined(lLocal, "ll_a", {feUnsupportedOp}); declined(lLocal, "ll_b", {feUnsupportedOp})
     declined(lVarCallee, "lv_a", {feUnsupportedOp}); declined(lVarCallee, "lv_b", {feUnsupportedOp})
     declined(lPtr, "lp_a", {feUnsupportedOp}); declined(lPtr, "lp_b", {feUnsupportedOp})
-    declined(lTable, "lt_a", {feUnsupportedOp, feUnsupportedStmtKind}); declined(lTable, "lt_b", {feUnsupportedOp, feUnsupportedStmtKind})
+    # `{"a": n}.toTable` used to decline as well, with feUnsupportedStmtKind
+    # on its `for key, val in items(pairs)` (two loop variables over a tuple
+    # element). INT-75 reads that destructuring as the flat form, so the walk
+    # now runs through `toTable` and the one decline left is the accurate one:
+    # whether `let c = gt` shares the Table or copies it depends on the memory
+    # manager (`tsymex_rfc0005_s8cn_lentnative`), and `wt` writes it by name.
+    # The excluded kind keeps the ratchet: the loop decline may not return.
+    pinDecline(lTable, cellKey(faCallShape, "letShared/globalTableWrittenByCallee"),
+      feUnsupportedOp, tLabel("lt_a"), needle = "written by `wt`, which reaches it by name",
+      excluding = {feUnsupportedStmtKind})
+    pinDecline(lTable, cellKey(faCallShape, "letShared/globalTableWrittenByCallee"),
+      feUnsupportedOp, tLabel("lt_b"), needle = "written by `wt`, which reaches it by name",
+      excluding = {feUnsupportedStmtKind})
     declined(lField, "lf_a", {feUnsupportedOp}); declined(lField, "lf_b", {feUnsupportedOp})
     declined(lString, "ls_a", {feUnsupportedOp}); declined(lString, "ls_b", {feUnsupportedOp})
     declined(lObject, "lo_a", {feUnsupportedOp}); declined(lObject, "lo_b", {feUnsupportedOp})

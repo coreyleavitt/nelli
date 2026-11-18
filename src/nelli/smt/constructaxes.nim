@@ -176,6 +176,16 @@ func constructRows(): seq[ConstructKey] =
     "the claim, or the build fails; an entry's handler depth cannot change " &
     "once parked (INT-35)", iNever, nrByDesign)
   result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["walk/exits/frames"], none(SymexErrorKind),
+    "every walker frame is made by its constructor, which binds its exit " &
+    "group to the walk's clock; none is built field by field (INT-35)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["walk/stmt/stray-claim"], none(SymexErrorKind),
+    "no lowering leaves pending taint for another lowering to claim: a debug " &
+    "walk stops on one, a release walk keeps it for the statement (INT-37)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
     ["db/secondary/guard"], none(SymexErrorKind),
     "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
     "`strictDb` run with a report), never raised out of `forAll` (INT-33)",

@@ -6386,6 +6386,16 @@ proc intConvSrcName(operand: NimNode, src: string): string =
   ## representation is its base type's (the bounds are bookkeeping), so the
   ## base's width and signedness are the source's. Every other spelling is
   ## returned unchanged.
+  ## RFC-0016 INT-72: a `Rune` operand (`uint32(r)`, `int8(r)`) spells as
+  ## `int64`, its carrier (`classifyType`: `tInt(64)` over int32). Every
+  ## int conversion is decided by the VALUE (a signed target checks it, an
+  ## unsigned one keeps its low bits of the sign-extended value), and an
+  ## int32 value is the same int64 value, so the result is the int32
+  ## source's. It was the identity pass-through: `uint32(Rune(-1))` stayed
+  ## -1 under an unsigned compare, a false `sxUnsat` once a Rune may be
+  ## negative.
+  if not isIntLiteralNode(operand) and isRuneTyped(operand):
+    return "int64"
   if isIntFamilyName(src) or isIntLiteralNode(operand) or
      operand.typeKind != ntyRange:
     return src
@@ -8542,6 +8552,30 @@ proc enumDisplayNames(opnd: NimNode): seq[(string, int64)] =
       return
     ty = impl[2]
     inc hops
+
+proc parseRuneSize(opnd: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
+  ## RFC-0016 INT-72. `unicode.size(r)` (unicode.nim:932), by its thresholds:
+  ## `v = r.uint32`, then 1/2/3/4/5/6 bytes up to 0x7F/0x7FF/0xFFFF/0x1FFFFF/
+  ## 0x3FFFFFF/0x7FFFFFFF, else 1. Over the int32 value that is: a negative
+  ## Rune (`v` > 0x7FFFFFFF) is 1, and every other value meets a threshold.
+  ## Its body was declined (`feUnadmitted`, no stdlib row); a Rune parameter
+  ## is any int32, so every arm is reachable.
+  let i64 = tInt(64, signed = true)
+  let rv = freshSynth(ctx, "runeSizeArg")
+  let rIR = parseExpr(opnd, preamble, ctx)
+  preamble.add mkLet(rv, i64, rIR)
+  let tmp = freshSynth(ctx, "runeSize")
+  var arms: seq[CondArm]
+  arms.add (newSeq[IRStmt](), mkBranch(mkBinop(bLt, mkVar(rv), mkIntLit(0)),
+                                        mkLet(tmp, i64, mkIntLit(1))))
+  for (bound, bytes) in [(0x7F'i64, 1'i64), (0x7FF'i64, 2'i64),
+                         (0xFFFF'i64, 3'i64), (0x1FFFFF'i64, 4'i64),
+                         (0x3FFFFFF'i64, 5'i64)]:
+    arms.add (newSeq[IRStmt](), mkBranch(mkBinop(bLe, mkVar(rv), mkIntLit(bound)),
+                                          mkLet(tmp, i64, mkIntLit(bytes))))
+  preamble.add lowerCondChain(arms, mkLet(tmp, i64, mkIntLit(6)), preamble)
+  mkVar(tmp)
 
 proc parseToStr(opnd, n: NimNode; preamble: var seq[IRStmt];
                 ctx: ParseCtx): IRExpr =
@@ -12112,7 +12146,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                        cls.ty.width, cls.ty.signed,
                        true, cls.range.lo, cls.range.hi, srcSite(n))
     elif not isIntLiteralNode(operand) and
-         n.typeKind in {ntyRange, ntyEnum} and
+         (n.typeKind in {ntyRange, ntyEnum} or isRuneTyped(n)) and
          operand.typeKind in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
                               ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32,
                               ntyUInt64, ntyRange, ntyEnum} and
@@ -12123,6 +12157,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # the operand's value (`RangeDefect`), then converts at the target's
       # width. This was the identity pass-through below: an out-of-range
       # value flowed on as the target type, the check never modelled.
+      # RFC-0016 INT-72: `Rune(x)` too -- a conversion to `distinct int32`,
+      # checked against int32 (`classifyType`'s Rune range), which the
+      # pass-through let through as a false `sxSat` past the `RangeDefect`.
       let tcls = classifyType(n)
       let scls = classifyType(operand)
       mkConvIntWidth(parseExpr(operand, preamble, ctx),
@@ -13618,6 +13655,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       else:
         # Non-int operand (float, bool, …) → sound degrade.
         return mkStrOp(iekStrUnsupported, calleeSym.strVal & "_non_int", @[])
+    # RFC-0016 INT-72: `toUTF8(r)` is the encoder `$r` calls (unicode.nim:
+    # 290), so it is `$r`'s `iekRuneToStr`; `size(r)` is its byte count
+    # (`parseRuneSize`). Both bodies were walked or declined by name before:
+    # `toUTF8`'s `fastToUTF8Copy` declined, `size` had no stdlib row.
+    if calleeSym.strVal in ["toUTF8", "size"] and n.len == 2 and
+       calleeSym.owner.kind == nnkSym and
+       calleeSym.owner.strVal == "unicode" and isRuneTyped(n[1]):
+      if calleeSym.strVal == "toUTF8":
+        return mkStrOp(iekRuneToStr, "$rune", @[parseExpr(n[1], preamble, ctx)])
+      return parseRuneSize(n[1], preamble, ctx)
     # Phase 16 A7-S3: `runeLen(s)` / `s.runeLen` — UFCS or direct call.
     # Intercept BEFORE the string-receiver guard so the std/unicode body is never
     # walked. Origin guard (owner == "unicode") prevents hijacking a user-defined

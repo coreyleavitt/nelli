@@ -172,7 +172,7 @@ proc typeSpelling*(t: NimNode): string =
 
 proc isStdlibRuneSym*(sym: NimNode): bool =
   ## RFC-0005 S8d. True iff `sym` is `std/unicode.Rune` itself. The A7
-  ## intercept (a Rune is an int pinned to [0, 0x10FFFF]) matched the name
+  ## intercept (a Rune is an int over int32, RFC-0016 INT-72) matched the name
   ## pair `Rune`/`RuneImpl`, so a user `type RuneImpl = int32; Rune =
   ## distinct RuneImpl` -- any int32, negatives included -- was pinned too.
   ## Shared by `classifyType` and the parser's `isRuneTyped`, so the two
@@ -1559,15 +1559,18 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         return unranged(tBitSet(ety))
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkDistinctTy and impl[2].len == 1:
-      # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt pinned [0, 0x10FFFF].
+      # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt over int32.
       # Rune = distinct RuneImpl = distinct int32. RFC-0005 S8d: intercepted
-      # by SYMBOL (`isStdlibRuneSym`); the old `Rune`/`RuneImpl` name pair
-      # also matched a user's own pair, pinning any-int32 values into
-      # [0, 0x10FFFF] (a false `sxUnsat` for a negative). A user `Rune` falls
-      # through to the ordinary distinct arm below.
+      # by SYMBOL (`isStdlibRuneSym`); a user `Rune` falls through to the
+      # ordinary distinct arm below.
+      # RFC-0016 INT-72: the range is int32, Rune's native domain. It was
+      # [0, 0x10FFFF], and no Rune constructor checks a code point: a caller
+      # passes any int32, so a free Rune pinned to code points made
+      # `r.ord > 0x10FFFF` (and `r.ord < 0`) a false `sxUnsat`.
       # Path B is ADDITIVE: the byte-faithful string model (ADR-0006 S-cluster) is untouched.
       if isStdlibRuneSym(resolved):
-        return ranged(tInt(64, signed = true), 0'i64, 0x10FFFF'i64)
+        return ranged(tInt(64, signed = true), int64(low(int32)),
+                      int64(high(int32)))
       let baseCls = classifyType(impl[2][0])
       return unranged(tDistinct(s, baseCls.ty).keyedBySym(resolved))
     # Phase 14 cycle A3. Named-alias for `range[lo..hi]` with int

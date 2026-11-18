@@ -822,8 +822,17 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 INT-72 (412->426; 413-425 are reserved for in-flight W4
+  ##   work): a free `Rune` ranges over int32, its native domain, not
+  ##   [0, 0x10FFFF]: `r.ord > 0x10FFFF` and `r.ord < 0` on a Rune parameter
+  ##   were a false `sxUnsat`. `$r` and `toUTF8(r)` encode as std/unicode
+  ##   does out of range (4/5/6 bytes up to 0x1FFFFF/0x3FFFFFF/0x7FFFFFFF, a
+  ##   negative Rune ""); `size(r)` is modelled (it declined); `Rune(n)`
+  ##   checks int32 (`RangeDefect`, it was a false `sxSat`); an int
+  ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
+  ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "412"
+const symexWalkerVersion* = "426"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

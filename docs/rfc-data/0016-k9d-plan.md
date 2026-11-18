@@ -162,8 +162,8 @@ shapes goes to its latest slice):
   `163rev_int_literal_width`, `163rev_nested_clamp`, `augmented_assign`,
   `0016_cr2_h3_epochpin`, `0016_w3z_r5b_diag`, `CR2c_witnessreader_catchall`
   (with its tuple), `rfc0005_s1c_verdict` (object and string)
-- string or Rune parameters (K9d-6): `a7_rune` (INT-72), `a7_runes_iter`,
-  `m6_probeproto_strproto`, `phase15_S10b_strconv`, `rfc0005_s8bx_extractraise`
+- string or Rune parameters (K9d-6): `a7_rune`, `a7_runes_iter` and
+  `m6_probeproto_strproto` (converted by INT-72, below), `phase15_S10b_strconv`, `rfc0005_s8bx_extractraise`
   and `_b`, `snd1_uncertain_taint`, `r1_draingap`, `phase15_g10_smoke`,
   `phase15_N0_kindgate_widen`, `rfc0005_s8d_typeheads`
 - seq, set or table parameters (K9d-7): `h_containers`, `phase5_hashset`,
@@ -174,6 +174,18 @@ shapes goes to its latest slice):
   `phase15_g5_distinct_borrow`
 - ref parameters (K9d-10): `h_stepC_heapidentity`, `p2b_refobjconstr_expr`,
   `phase15_r9_recursive`, `rectify_refs`, `rfc0005_s8ao_remainder`
+
+## INT-72 result (`rfc-0016-w4int72`)
+
+INT-72 is fixed in the walker (426): a free `Rune` ranges over int32, `$r`,
+`toUTF8` and `size` follow std/unicode out of range, `Rune(n)` checks int32
+and an int conversion of a Rune converts its value. With that, the three
+Rune-parameter suites the K9d-3 note held back convert: `tsymex_a7_rune`
+(every call; `runeOob` is now `sxSat` and replays natively, its pin was the
+red), `tsymex_a7_runes_iter` (the three calls without a `string` parameter)
+and `tsymex_m6_probeproto_strproto` (`hexEqFF`, `runeEqA`, `hexNeGG`). The
+new `tsymex_0016_int72_runedomain` pins the domain and each operation through
+`pinFind`. Census ceiling 386 → 383.
 
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 

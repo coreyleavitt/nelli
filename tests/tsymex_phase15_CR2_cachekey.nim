@@ -1272,7 +1272,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## 382-400 reserved): 381->401.
     ## RFC-0016 F2 hotfix (a SKIP:NAME without its MARK under
     ## LIMIT_RECURSION declines; 402-411 reserved): 401->412.
-    check symexWalkerVersion == "412"
+    ## RFC-0016 INT-72 (a free Rune is any int32; 413-425 reserved):
+    ## 412->426.
+    check symexWalkerVersion == "426"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

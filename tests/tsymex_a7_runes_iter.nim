@@ -21,6 +21,7 @@ import std/[unittest, unicode, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -73,13 +74,13 @@ suite "symex Phase 16 A7-S3 — concrete runes / runeLen (Part A)":
   test "A7-S3-1: runeLen(literal) decoded to concrete numeral → sxSat (condition always true)":
     ## runeLen("A€") is decoded at parse time → int literal 2.
     ## Condition `2 == 2` is concrete-true; any valid Rune witness satisfies it.
-    let r = symexFind(sutRuneLenLiteral, tLabel("runelen2"))
+    let r = pinFind(sutRuneLenLiteral, tLabel("runelen2"))
     check r.status == sxSat
 
   test "A7-S3-2: for r in literal.runes unrolls → sxSat on specific codepoint gate":
     ## "A€" has 2 runes: 0x41 ('A'), 0x20AC ('€').
     ## Second iteration: r.ord == 0x20AC → true → target reached → sxSat.
-    let r = symexFind(sutRunesIterLiteral, tLabel("euro_iter"))
+    let r = pinFind(sutRunesIterLiteral, tLabel("euro_iter"))
     check r.status == sxSat
 
 suite "symex Phase 16 A7-S3 — symbolic DEGRADE (Part B, MANDATORY)":
@@ -117,7 +118,7 @@ suite "symex Phase 16 A7-S3 — regression guard":
     ## n*2 == 6 → n == 3 → sxSat, witness == 3.
     ## If the guard is wrong, this would degrade to seRuneDecodeSymbolic
     ## (seZ3StringIncomplete before RFC-0005 S5's split) -- a regression.
-    let r = symexFind(sutUserRuneLen, tLabel("userRuneLen"))
+    let r = pinFind(sutUserRuneLen, tLabel("userRuneLen"))
     check r.status == sxSat
     check r.witness[0] == 3
     for e in r.errors:

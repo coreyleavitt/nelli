@@ -2065,11 +2065,55 @@ proc convWitness*[T, W](t: typedesc[T]; x: W): T =
     raise newException(PinFailure, "pinFind: the witness's " & $W &
       " has no conversion to the parameter type " & $T)
 
+proc holeOf*[T](x: T): string =
+  ## "" when no holey enum inside `x` holds a hole; else the hole, named. A
+  ## hole is no value of its type (no caller can pass one), and converting
+  ## to a holey enum does not check holes, so a witness holding one would
+  ## replay an input that does not exist (K9d-11a, INT-84). Read through
+  ## fields, elements, keys and values; not through a ref or ptr.
+  when T is enum:
+    when T isnot Ordinal:
+      if x notin declaredValues(T):
+        return $T & " ordinal " & $ord(x)
+  elif T is seq:
+    for i in 0 ..< system.len(x):
+      let h = holeOf(x[i])
+      if h.len > 0: return h
+  elif T is array:
+    for i in low(x) .. high(x):
+      let h = holeOf(x[i])
+      if h.len > 0: return h
+  elif T is set:
+    for e in system.items(x):
+      let h = holeOf(e)
+      if h.len > 0: return h
+  elif T is Table:
+    for k, v in tables.pairs(x):
+      let h = holeOf(k) & holeOf(v)
+      if h.len > 0: return h
+  elif T is HashSet:
+    for e in sets.items(x):
+      let h = holeOf(e)
+      if h.len > 0: return h
+  elif (T is object or T is tuple) and compiles(block:
+                                                  for f in fields(x): discard):
+    for f in fields(x):
+      let h = holeOf(f)
+      if h.len > 0: return h
+
+proc holeChecked*[T](x: sink T): T =
+  let h = holeOf(x)
+  if h.len > 0:
+    raise newException(PinFailure, "pinFind: the witness holds " & h &
+      ", a hole: not a value of the type, so no native input reproduces it")
+  x
+
 template witnessAs*(T: typedesc; x: untyped): untyped =
   ## the witness element as the declared parameter type (`convWitness`); a
   ## type the walker does not model (`cstring`: the SUT declines) is never
-  ## replayed, and a replay of one fails the pin
-  convWitness(T, x)
+  ## replayed, and a replay of one fails the pin; a holey enum's hole fails
+  ## the pin (`holeOf`)
+  holeChecked(convWitness(T, x))
 
 proc fnParamTypes(fn: NimNode): seq[NimNode] =
   let ty = fn.getTypeInst

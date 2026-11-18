@@ -29,6 +29,7 @@ import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/coverage
+import ./s8cu_helpers
 
 const Magic = 0x5A4D
 
@@ -58,7 +59,7 @@ suite "#163 review R10 -- a transparent result used in expression position names
     ## RFC-0005 S8 (§13.3, i3): the finding rides the annotation-violation
     ## channel (`r.annotationViolations`), not `r.errors` -- it is not a
     ## decline. The generic opaque-call degrade still taints the path.
-    let r = symexFind(usesProbeR, tLabel("hit_r"))
+    let r = pinFind(usesProbeR, tLabel("hit_r"))
     var generic = false
     var internalFault = false
     var retiredKind = false
@@ -104,7 +105,7 @@ suite "#163 review R10 -- a transparent result used in expression position names
       announceR()
       if x == Magic:
         symexTarget("hit_announce")
-    let r = symexFind(withAnnounceR, tLabel("hit_announce"))
+    let r = pinFind(withAnnounceR, tLabel("hit_announce"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat

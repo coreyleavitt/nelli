@@ -44,6 +44,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 const Magic = 0x5A4D
 
@@ -73,7 +74,7 @@ suite "#163 rev (1) -- echo(intExpr) parses":
     withEchoIntThenRaise(0)
 
   test "a raise BEHIND echo(int) is found, not degraded to sxUnknown":
-    let r = symexFind(withEchoIntThenRaise, tRaisedExn("ValueError"))
+    let r = pinFind(withEchoIntThenRaise, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
@@ -81,7 +82,7 @@ suite "#163 rev (1) -- echo(intExpr) parses":
       check r.raisedTypeId == "ValueError"
 
   test "a label BEHIND the same echo, on the non-raise path, is reachable":
-    let r = symexFind(withEchoIntThenRaise, tLabel("t_echoint"))
+    let r = pinFind(withEchoIntThenRaise, tLabel("t_echoint"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -96,7 +97,7 @@ suite "#163 rev (1) -- echo(intExpr) parses":
     ## containing it degraded to sxUnknown at parse time) -- this is a
     ## stronger claim than "parses": the div-by-zero fork inside the
     ## echoed operand must survive the fix, not just the outer call.
-    let r = symexFind(echoedDivRaises, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(echoedDivRaises, tRaisedExn("DivByZeroDefect"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
@@ -131,7 +132,7 @@ suite "#163 rev (2) -- a char RANGE compared against a char literal parses":
     checkLetter('a')
 
   test "a raise from a direct char-range comparison is found, not degraded":
-    let r = symexFind(checkLetter, tRaisedExn("ValueError"))
+    let r = pinFind(checkLetter, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
@@ -139,7 +140,7 @@ suite "#163 rev (2) -- a char RANGE compared against a char literal parses":
       check r.raisedTypeId == "ValueError"
 
   test "the upper-half target is reachable through the direct comparison":
-    let r = symexFind(letterUpperHalf, tLabel("upperhalf"))
+    let r = pinFind(letterUpperHalf, tLabel("upperhalf"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -153,7 +154,7 @@ suite "#163 rev (2) -- a char RANGE compared against a char literal parses":
     ## already proves unreachable. If the new `nnkHiddenSubConv` unwrap
     ## somehow bypassed the type's range constraint (e.g. by reclassifying
     ## through the wrong node), this would go sxSat instead.
-    let r = symexFind(letterOutOfBounds, tLabel("outofbounds"))
+    let r = pinFind(letterOutOfBounds, tLabel("outofbounds"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnsat

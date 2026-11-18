@@ -488,6 +488,17 @@ suite "K9d: pinFind":
     check e.len == 1 and not e[0].exhaustive and "[24]" in e[0].domain
     check "exhaustive[3]{cRed,cGreen,cBlue}" in e[0].domain
     check recordsWith("/sutHoley/").len == 1
+    # a hole is no value of the type: a witness holding one is refused
+    # (K9d-11a, INT-84), a declared value replays
+    # (in a field, an element, a set, a table: replay reads through them)
+    check witnessAs(Holey, hB) == hB
+    check holeOf((h: hC, n: 3)) == "" and holeOf(@[hA, hC]) == ""
+    expect PinFailure:
+      discard witnessAs(Holey, cast[Holey](3))
+    check holeOf((h: cast[Holey](3), n: 3)).len > 0
+    check holeOf(@[hA, cast[Holey](4)]).len > 0
+    check holeOf([cast[Holey](2)]).len > 0
+    check holeOf({"k": cast[Holey](2)}.toTable).len > 0
     let t = recordsWith("/sutTiny/")
     check t.len == 1 and t[0].exhaustive and "[256]" in t[0].domain
 

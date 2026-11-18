@@ -50,7 +50,7 @@ suite "CR2 H2: the tail walk keeps ubIndeterminateRead":
     check parseInt(symexWalkerVersion) >= 355
 
   test "the finding's trigger: a witness that reads `a` unwritten is not trusted":
-    let r = symexFind(noinitTail, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(noinitTail, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -61,7 +61,7 @@ suite "CR2 H2: the tail walk keeps ubIndeterminateRead":
       check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
 
   test "every witness reads `a` unwritten: ubIndeterminateRead, untrusted":
-    let r = symexFind(noinitTailForced, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(noinitTailForced, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -70,7 +70,7 @@ suite "CR2 H2: the tail walk keeps ubIndeterminateRead":
     check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
 
   test "the read feeds a branch: ubIndeterminateRead, untrusted":
-    let r = symexFind(noinitTailBranch, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(noinitTailBranch, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -79,7 +79,7 @@ suite "CR2 H2: the tail walk keeps ubIndeterminateRead":
     check UbKind(ubIndeterminateRead) in r.soundness.undefinedKinds
 
   test "control: a written `a` keeps the verdict trusted":
-    let r = symexFind(noinitTailWritten, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(noinitTailWritten, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat

@@ -88,7 +88,7 @@ confirms per SUT before choosing a per-suite idiom.
 | K9d-8 | float family | 17 | |
 | K9d-9 | regex family (string domain, per-row records): done, 23 converted, 38 already pinned, 2 to K9d-10 (see the result section) | 63 → 25 left | regex members and near-misses (`k9d_regex.nim`) |
 | K9d-10 | ref family (sat replay; unsat explicit domain) | 22 | |
-| K9d-11 | impure family, per suite (state reset, `pinExact`) | 58 → 11a/11b | |
+| K9d-11 | impure family, per suite (state reset, `pinExact`): split by name (see the K9d-11a result section); 11a done | 58 → 11a (29, 15 unpinned) / 11b (29, 5 unpinned) | |
 | K9d-12 | triage: unresolved, meta, non-`symexFind` path, nullary | 37 | |
 
 After each slice the census ceiling falls by the suites pinned; K9e measures
@@ -771,6 +771,82 @@ Rows filed:
   (`feUnsupportedParamType`); the non-nil cross-sort compare (INT-65, on
   `rfc-0016-w4int65`) is the same gap one step on. Red reproducer
   `tsymex_0016_int83_pointerparam`.
+
+## K9d-11a result (`k9d11`)
+
+The split. The impure family's 58 suites (listed below) sorted by name in
+byte order (`LC_ALL=C sort`): K9d-11a takes the first 29, through
+`tsymex_rfc0005_s8_scope`; K9d-11b takes the other 29, from
+`tsymex_rfc0005_s8an_remainder_c` to `tsymex_rfc0005_w1_parity`. Earlier
+slices had already pinned most of them through their other families, so at
+954662c2 (census 35) 15 of 11a's are unpinned and 5 of 11b's:
+`rfc0005_s8az_remainder`, `rfc0005_s8bh_remainder_c`, `rfc0005_s8cb_cells`,
+`rfc0005_s8cb_replay`, `rfc0005_s8ct_b19`.
+
+No new reset mechanism was needed. Confirmed per SUT: none of 11a's pinned
+SUTs writes state that it or a later run reads. The state the family is named
+for is a write-only sink (`cr2_h2_noinit_tail`'s `sink`), a global that
+is only read and never written (`w3z_r2_candtail`'s `freshGlobal`,
+`163rev_transparent_result`'s `probeRState`, `163_opaque_transparent`'s
+`probeState`), a global read only behind the target (`w3z_r9_tailbudget`'s
+`gA`, written only by the test body, which puts it back), output
+(`echo`), coverage counters (`{.cover.}`), or file reads in a test body
+rather than a SUT (`k7c_arms`, `s4_alloc`). So each conversion is the
+suite's own call through `pinFind` (the ref domain's `restoreHeapDomain` is
+the only reset the runs need). 11b reopens the question per SUT.
+
+The harness fix: a witness holding a holey enum's hole (an ordinal that is
+no declared value of the type) fails the pin with `PinFailure`. `witnessAs`
+now goes through `holeChecked`, and `holeOf` reads through fields,
+elements, set members and table keys and values, but not through a ref. A
+conversion to a holey enum does not check holes, so before the fix
+`163audit_range_domain`'s `sparseHole` sxSat replayed its hole witness,
+hit, and was pinned `pvExact`. That was a vacuous pin and is now INT-84.
+The reproducer's first run showed a hole in a field or a seq element
+replaying the same way, so the check is structural, not only at the
+parameter. Self-test in `tsymex_0016_k9d_pinfind`: a declared value
+replays, and a hole is found at the top level, in a tuple field, a seq, an
+array and a table.
+
+Converted (13 census suites): `0016_cr2_h2_noinit_tail`, `0016_fieldhooks`
+(c only: cpp holds no union image, so its call stays `symexFind`),
+`0016_k7c_arms`, `0016_s8cj_runctx` (pinned on its own thread),
+`0016_w3z_r2_candtail`, `0016_w3z_r9_tailbudget`,
+`163_opaque_transparent`, `163audit_range_domain`,
+`163rev_degrade_classification_b`, `163rev_parser_gaps`,
+`163rev_transparent_result`, `rectify_effects`, `rfc0005_s4_alloc`. The
+census ceiling 35 -> 22. Calls that `pinFind` returns unpinned, because the
+verdict is untrusted or `sxUnknown` and writes no record: `cr2_h2`'s three
+undefined-read SUTs, `w3z_r2`'s three untrusted-tail SUTs, `w3z_r9`'s
+`(a)` and `(d)`, `163_opaque`'s `usesSensor` and `usesProbe`,
+`rectify_effects`' `usesResult` and `passesVar`, and `s4_alloc`'s
+`sxUnknown` shapes and `s4MultiVariantDead`'s `sxRaised(FieldDefect)`.
+
+Left on `symexFind`:
+- `0016_wa_runtime_panics` (whole suite): built `--panics:on`, so a Defect
+  witness ends the process (`witnessUnsafe`) and its third call is
+  `sxUnknown`. No call has a native truth this process can establish. A
+  child-process pin (`pinCrash`) is the route.
+- `163rev_degrade_classification_c` (whole suite): its one SUT reads a
+  module global that the walker havocs (`feGlobalHavoc`), and the verdict is
+  never a definite trusted one, so `pinFind` writes no record. Converting it
+  would only move the census, as with `0016_wa_runtime` in K9d-10.
+- `163audit_range_domain`'s `sparseHole`: INT-84, a false trusted sxSat
+  (pinned `sxUnsat` once INT-84 closes).
+- `0016_fieldhooks`' `sutHooked`: asserts no verdict, only the havoc
+  decline.
+
+Row filed:
+- INT-84, soundness: a holey enum parameter's hole is a trusted sxSat
+  witness (the enum bound is `[0, maxOrd]`, which keeps the holes). Red
+  reproducer `tsymex_0016_int84_holeyenum` (a parameter, an ordinal between
+  declared values, a field, a seq element; a declared-value control). It is
+  unregistered while red, so the row names no pin and carries an
+  `ids.txt` allowlist entry.
+- INT-83 (data fix): its row named the unregistered red reproducer as a
+  pin while also carrying an allowlist entry, which turned
+  `tsymex_0016_universe` red at 954662c2. It now names no pin, as INT-84
+  does.
 
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 

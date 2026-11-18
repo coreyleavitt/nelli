@@ -31,6 +31,7 @@
 ## Ordering, not soundness, is what changed.
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 var effectSink = 0   ## module-level: the walker binds no global, by design
 
@@ -44,7 +45,7 @@ suite "symex effects #137, as narrowed by #163":
       if x > 5:
         echo "diagnostic"
         symexTarget("reach")
-    let r = symexFind(withSideEffect, tLabel("reach"))
+    let r = pinFind(withSideEffect, tLabel("reach"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -57,7 +58,7 @@ suite "symex effects #137, as narrowed by #163":
       if x > 5:
         innerEffect(x)
         symexTarget("reach")
-    let r = symexFind(outer, tLabel("reach"))
+    let r = pinFind(outer, tLabel("reach"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -66,7 +67,7 @@ suite "symex effects #137, as narrowed by #163":
     proc pure(x: int) =
       if x > 5:
         symexTarget("clean")
-    let r = symexFind(pure, tLabel("clean"))
+    let r = pinFind(pure, tLabel("clean"))
     check r.status == sxSat
     check r.witness[0] > 5
 
@@ -75,7 +76,7 @@ suite "symex effects #137, as narrowed by #163":
       let v = readsBack()
       if x + v > 5:
         symexTarget("reach")
-    let r = symexFind(usesResult, tLabel("reach"))
+    let r = pinFind(usesResult, tLabel("reach"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -90,7 +91,7 @@ suite "symex effects #137, as narrowed by #163":
       mutates(local)
       if local > 5:
         symexTarget("reach")
-    let r = symexFind(passesVar, tLabel("reach"))
+    let r = pinFind(passesVar, tLabel("reach"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)

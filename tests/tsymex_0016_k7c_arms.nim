@@ -95,7 +95,7 @@ proc k7cTry(x: int) =
 suite "RFC-0016 K7c -- arms still produce the same verdicts":
 
   test "if/while arms reach a satisfiable target":
-    check symexFind(k7cBranchLoop, tLabel("k7c_branch_loop")).status == sxSat
+    check pinFind(k7cBranchLoop, tLabel("k7c_branch_loop")).status == sxSat
 
   test "try/raise arms reach the handler":
-    check symexFind(k7cTry, tLabel("k7c_try")).status == sxSat
+    check pinFind(k7cTry, tLabel("k7c_try")).status == sxSat

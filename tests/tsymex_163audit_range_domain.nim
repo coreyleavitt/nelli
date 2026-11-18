@@ -14,6 +14,7 @@ import std/[unittest, macros, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/smt/dsl_typebridge
+import ./s8cu_helpers
 
 ## ---------------------------------------------------------------------------
 ## W3 -- a char-bounded range ALIAS degrades the whole run
@@ -61,14 +62,14 @@ suite "#163 W3 -- a char-range ALIAS reaches the same verdict as inline":
     check rt('a') == false
 
   test "the inline spelling reaches a real verdict":
-    let r = symexFind(fInline, tLabel("upperhalf"))
+    let r = pinFind(fInline, tLabel("upperhalf"))
     check r.status == sxSat
 
   test "the alias spelling used to degrade to sxUnknown -- now matches inline":
     ## RED (pre-fix): sxUnknown (feUnsupportedParamType) -- the alias route
     ## fell through the literal-kind guard into the `__unsupported:` catch-all
     ## before ever reaching `rangeBaseType`.
-    let r = symexFind(fAlias, tLabel("upperhalf"))
+    let r = pinFind(fAlias, tLabel("upperhalf"))
     check r.status == sxSat
 
   test "both spellings classify identically -- declared bounds still tighten":
@@ -76,8 +77,8 @@ suite "#163 W3 -- a char-range ALIAS reaches the same verdict as inline":
     ## route (e.g. a different width or signedness), the two would not agree
     ## on whether a value past the declared upper bound is reachable. Both
     ## must answer sxUnsat here: `range['a'..'z']` cannot exceed 'z'.
-    check symexFind(boundInline, tLabel("outofbounds")).status == sxUnsat
-    check symexFind(boundAlias, tLabel("outofbounds")).status == sxUnsat
+    check pinFind(boundInline, tLabel("outofbounds")).status == sxUnsat
+    check pinFind(boundAlias, tLabel("outofbounds")).status == sxUnsat
 
   # NOTE: no version-floor test here. Per the control loop this fix does NOT
   # bump `symexWalkerVersion` -- that lands in a single shared bump covering
@@ -187,12 +188,12 @@ suite "#163 W7 -- plain enum params carry a domain constraint":
   test "an out-of-domain enum ordinal is no longer model-reachable":
     ## RED (pre-fix): sxSat -- the free BV8 backing `e` could take any value
     ## in [0, 255], not just {0, 1}.
-    let r = symexFind(outOfDomain, tLabel("oob"))
+    let r = pinFind(outOfDomain, tLabel("oob"))
     check r.status == sxUnsat
 
   test "a legal ordinal is still reachable -- not an over-constraint":
     ## The complement: the fix must not ban legal values either.
-    let r = symexFind(reachesB, tLabel("is_b"))
+    let r = pinFind(reachesB, tLabel("is_b"))
     check r.status == sxSat
 
   test "the classifier attaches [0, maxOrd] to a bare TwoVal param":
@@ -219,6 +220,9 @@ suite "#163 W7 -- plain enum params carry a domain constraint":
     ## 1 and 2 are holes: illegal enum values that the sound-refinement
     ## range does not exclude. This must stay sxSat both before and after
     ## the fix -- it is not a regression, it is the documented limitation.
+    ## Left on `symexFind` (K9d-11a): the verdict is a trusted sxSat whose
+    ## witness is a hole, which no native input is; INT-84
+    ## (`tsymex_0016_int84_holeyenum`) pins it sxUnsat once fixed.
     let r = symexFind(sparseHole, tLabel("hole"))
     check r.status == sxSat
 
@@ -226,7 +230,7 @@ suite "#163 W7 -- plain enum params carry a domain constraint":
     ## The complement that proves the refinement still does real work: an
     ## ordinal beyond maxOrd (here, past 3) is excluded even though the enum
     ## is sparse. RED (pre-fix): sxSat (fully free BV8, e.g. ord 200).
-    let r = symexFind(sparseBeyond, tLabel("beyond"))
+    let r = pinFind(sparseBeyond, tLabel("beyond"))
     check r.status == sxUnsat
 
   # NOTE: no version-floor test here -- see the matching note in the W3

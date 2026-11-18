@@ -2465,3 +2465,18 @@ evidence = "red at 0692c8e0: seven of the reproducer's eight tests fail (a metho
 aliases = []
 cells = []
 pins = ["tsymex_0016_int81_witnesstag"]
+
+[[row]]
+id = "INT-84"
+table = "5.8c"
+title = "K9d-11a: a holey enum parameter's hole is a trusted `sxSat` witness. The walker bounds an enum by `[0, maxOrd]` (#163 W7), which for a holey enum keeps its holes as model values, so a target only a hole reaches (`e != sA and e != sB` over `Sparse = enum sA = 0, sB = 3`) is a trusted `sxSat` at ordinal 1 or 2. Natively a hole is no value of the type and no caller can pass one: no input reaches the target. `tsymex_163audit_range_domain` asserted the false verdict as a documented imprecision (`sparseHole`), and pinFind replayed the hole witness (a conversion to a holey enum does not check holes), so the pin passed vacuously until `convWitness` refused a hole"
+class = "soundness"
+state = "open"
+note = ": open. The bar: an enum parameter, field or element ranges over its declared values only (a disjunction of the declared ordinals for a holey enum), so a target only a hole reaches is `sxUnsat`, pinned natively over every declared value. `tsymex_163audit_range_domain`'s `sparseHole` stays on `symexFind` until then and is re-pinned `sxUnsat`. Found converting the impure family (K9d-11a)"
+slice = "K9d"
+home = "K9d-11a (`wip/k9d11`)"
+source = "K9d-11a pinFind conversion"
+evidence = "red reproducer `tests/tsymex_0016_int84_holeyenum.nim`: a parameter, an ordinal between two declared values, an object field and a seq element that only a hole reaches are each `sxSat`, and pinFind refuses each witness (a hole); the declared-value control is `sxSat` and replays"
+aliases = []
+cells = []
+pins = []

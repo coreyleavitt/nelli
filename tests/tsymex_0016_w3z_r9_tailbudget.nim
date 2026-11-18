@@ -131,7 +131,7 @@ suite "W3-z R9: the tail walk's own budget":
   test "(a) capped open branches in a nested loop: the tail stops at its budget, untrusted":
     var r: typeof(symexFind(sutNestedCapped, tLabel("hit"), r9Settings))
     let tail = withUnitsLog("a"):
-      r = symexFind(sutNestedCapped, tLabel("hit"), r9Settings)
+      r = pinFind(sutNestedCapped, tLabel("hit"), r9Settings)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     checkpoint "tail units: " & $tail & " (budget " & $r9Budget & ")"
@@ -147,7 +147,7 @@ suite "W3-z R9: the tail walk's own budget":
   test "(b) an open branch the checks decide, in the same loop: trusted within budget":
     var r: typeof(symexFind(sutNestedCheap, tLabel("hit"), r9Settings))
     let tail = withUnitsLog("b"):
-      r = symexFind(sutNestedCheap, tLabel("hit"), r9Settings)
+      r = pinFind(sutNestedCheap, tLabel("hit"), r9Settings)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     checkpoint "tail units: " & $tail
@@ -169,7 +169,7 @@ suite "W3-z R9: the tail walk's own budget":
     # budget (a capped check asked once per open branch, R9's shortcut).
     var r: typeof(symexFind(sutNestedCapped, tLabel("hit"), r9Unbounded))
     let tail = withUnitsLog("c"):
-      r = symexFind(sutNestedCapped, tLabel("hit"), r9Unbounded)
+      r = pinFind(sutNestedCapped, tLabel("hit"), r9Unbounded)
     checkpoint show(r.errors)
     checkpoint "tail units: " & $tail
     check r.status == sxSat
@@ -187,7 +187,7 @@ suite "W3-z R9: the tail walk's own budget":
     putEnv("NELLI_WALK_UNITS_LOG", log)
     var r: typeof(symexFind(sutCandidatesCapped, tLabel("hit"), r9Settings))
     try:
-      r = symexFind(sutCandidatesCapped, tLabel("hit"), r9Settings)
+      r = pinFind(sutCandidatesCapped, tLabel("hit"), r9Settings)
     finally:
       delEnv("NELLI_WALK_UNITS_LOG")
     let tails = tailUnitLines(log)

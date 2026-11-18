@@ -64,6 +64,11 @@
 ## pairwise figure, section 12 item 4; `tests/s0016_k8b_pairs.nim`), over
 ## the union of the family's two suites (`familyFiles`); a family with one
 ## suite's records and not the other's fails, unless the run is partial.
+## The admission-axis suites (INT-56) write the same record kind with the
+## axis as its family and exact rows as its cells; each axis whose suites all
+## ran on the leg must exercise at least `tests/0016-axis-rows.floor` of its
+## exact rows (`s0016_k8b_axes.axisJoinProblems`, section 12 item 4's first
+## clause).
 ##
 ## The allowlists are `tests/0016-allowlist/<scope>.txt` for scope magic,
 ## build, errorkind and capkind. A line is `cell<TAB>slice<TAB>reason`; the
@@ -94,6 +99,7 @@ import ./s8cu_helpers
 import ./worklist_toml
 import ./rfc0016_ids
 import ./s0016_k8b_pairs
+import ./s0016_k8b_axes
 
 const
   root = currentSourcePath().parentDir() / ".."
@@ -1210,6 +1216,12 @@ suite "RFC-0016 K1a-cells: the join over this run's records":
       check exFails.len == 0
       echo "universe: " & $ex.len & " cells-exercised records, " &
            $pairwiseFigure(ex, legRowEnv)
+      let axFails = axisJoinProblems(ex, legRowEnv,
+                                     loadAxisFloor(root / axisFloorFile),
+                                     partialEnv)
+      checkpoint axFails.join("\n")
+      check axFails.len == 0
+      echo "universe: " & $axisFigure(ex, legRowEnv)
       let orphans = orphanCells(universe, recs)
       echo "universe: " & $universe.len & " cells, " & $recs.len &
            " records, " & $orphans.len & " cells that records name and no " &

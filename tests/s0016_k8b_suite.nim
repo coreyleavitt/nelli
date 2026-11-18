@@ -5,7 +5,7 @@
 ## figure is judged against the floor by K1 (`tsymex_0016_universe`), over
 ## the union of the family's halves (`exercisedJoinProblems`); a half reports
 ## its own share.
-import std/[os, unittest]
+import std/[os, unittest, sets]
 import nelli/smt/admission
 import ./s8cu_helpers
 import ./s0016_k8a_gen
@@ -114,3 +114,72 @@ template familyHalf*(family: static FamilyScope; tag: static string;
       echo report(family, seed, count, r, outs)
       check r.findings.len == 0
       check r.exact > 0
+
+# --- RFC-0016 K8b (INT-56): the admission-axis suites -------------------------
+
+proc axisExercisedOf*(progs: seq[Prog]; outs: seq[GenOutcome]; seed: int;
+                      file: string): seq[ExercisedRecord] =
+  ## One record per run: the axis, the rows the program packs, and how it
+  ## ended (a metamorphic difference is a disagreement, as for a family).
+  for o in outs:
+    var p: Prog
+    for q in progs:
+      if q.id == o.progId: p = q
+    var outcome = outcomeName(o.kind)
+    if o.variant != "orig" and o.kind == okExact:
+      for q in outs:
+        if q.progId == o.progId and q.variant == "orig" and q.trusted and
+           (q.status != o.status or q.raised != o.raised):
+          outcome = "disagree"
+    var cells: seq[CellKey]
+    for k in p.rows: cells.add CellKey(scope: p.axis, key: k)
+    result.add ExercisedRecord(testFile: file, variant: o.variant,
+      outcome: outcome, family: p.axis, seed: seed, progId: o.progId,
+      cells: cells)
+
+template axisBatch*(axis: static AxisScope; tag: static string;
+                    runBatch: untyped; file: static string;
+                    seed, first, count, per: static int) =
+  ## Programs `[first, first + count)` of the axis's stream (`genAxis`), each
+  ## packing `per` rows, with one rotating relation, through `symexFind` and
+  ## the native differential; the cells-exercised records go to the leg's
+  ## record directory, where K1 judges the axis figure (`axisJoinProblems`).
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  const progs = genAxis(axis, seed, count, per, first)
+  genFamilyBatch(progs, tag)
+
+  suite "K8b axis " & scopePrefix[axis] & " programs " & $first & ".." &
+        $(first + count - 1):
+    test "the axis stream is deterministic and every relation is a new source":
+      check genAxis(axis, 7, 3, per) == genAxis(axis, 7, 5, per)[0 ..< 3]
+      for p in progs:
+        check p.rows.len == min(per, axisSnippets[axis].len)
+        let o = render(p, "g", twNone)
+        for tw in applicable(p):
+          check render(p, "g", tw) != o
+
+    test "generated programs and their relations agree with native":
+      let outs = runBatch()
+      let fs = findings(progs, outs, seed)
+      let recs = axisExercisedOf(progs, outs, seed, file)
+      writeExercisedTo(realPins, recs)
+      var exact, declined, disagree: int
+      var rowsOk: HashSet[string]
+      for r in recs:
+        case r.outcome
+        of "exact":
+          inc exact
+          for c in r.cells: rowsOk.incl c.key
+        of "declined": inc declined
+        else: inc disagree
+      echo "k8b axis ", scopePrefix[axis], " seed=", seed, " programs=", count,
+        " runs=", outs.len, " exact=", exact, " declined=", declined,
+        " disagree=", disagree, " rows exercised here=", rowsOk.len, "\n",
+        "k8b declines:\n", declineSummary(outs)
+      for f in fs: echo "FINDING ", f
+      check fs.len == 0
+      check exact > 0

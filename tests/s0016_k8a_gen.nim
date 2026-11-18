@@ -22,7 +22,8 @@ import nelli
 import nelli/symex
 import ./s8cu_helpers
 import ./s0016_k8b_pairs
-export sequtils, s0016_k8b_pairs
+import ./s0016_k8b_snippets
+export sequtils, s0016_k8b_pairs, s0016_k8b_snippets
 
 type
   Shape* = enum
@@ -37,6 +38,9 @@ type
     shCallShape ## faCallShape: callee kind x parameter mode x call site
     shExnMem    ## faExnMemory: memory location x write point x handler x raise route
     shGeneric   ## faGeneric: generic form x type argument x un-instantiated sibling
+    # RFC-0016 K8b (INT-56): an admission axis's exact rows, several per
+    # program, each through its fragment (tests/s0016_k8b_snippets.nim).
+    shAxis      ## `axis` and `rows` name the axis and its rows
 
   LitKind* = enum lkNum, lkLow, lkHigh
   Lit* = object
@@ -69,6 +73,8 @@ type
     only*: seq[string]  ## K8a-sink: narrows the native domain to these element
                         ## expressions (empty = the type's own domain)
     fam*: seq[int]      ## K8b: one value index per family dimension
+    axis*: Scope        ## shAxis: the admission axis
+    rows*: seq[string]  ## shAxis: the axis rows (keys) the program exercises
 
   Case* = object
     ## One program under one variant: the unit the sink's reducer shrinks.
@@ -169,7 +175,7 @@ func core(p: Prog; swap: bool): string =
     if p.op == "neg": "(-a)" else: "abs(a)"
   of shF32:
     "float64(float32(a))"
-  of shExcept, shCallShape, shExnMem, shGeneric: ""
+  of shExcept, shCallShape, shExnMem, shGeneric, shAxis: ""
 
 func pred(p: Prog; swap: bool): string =
   let rhs =
@@ -221,9 +227,16 @@ func shapeCell*(sh: Shape): CellKey =
     CellKey(scope: familyOf(sh), key: "k8b-gen/" & k)
   else: CellKey(scope: axConstruct, key: "k8a-gen/" & k)
 
-func shapeCellSrc(sh: Shape): string =
-  "CellKey(scope: " & $shapeCell(sh).scope & ", key: \"" & shapeCell(sh).key &
-    "\")"
+func pinCellOf*(p: Prog): CellKey =
+  ## The cell a generated program's pin record names: `shapeCell`, or for an
+  ## axis program `<axis>:k8b-gen/Axis`, a cell no table derives (an orphan K1
+  ## lists and does not judge), so a packed program never stands as one
+  ## row's pin.
+  if p.shape == shAxis: CellKey(scope: p.axis, key: "k8b-gen/Axis")
+  else: shapeCell(p.shape)
+
+func cellSrc(c: CellKey): string =
+  "CellKey(scope: " & $c.scope & ", key: \"" & c.key & "\")"
 
 func indent(s, ind: string): string =
   for l in s.splitLines:
@@ -394,8 +407,46 @@ func renderGeneric(p: Prog; name: string; tw: Twin): string =
   body.add famPred(p, "r")
   bodyProc(name, "(a, b: int8)", body, tw, top)
 
+# shAxis: each row's fragment in turn, its value added to an accumulator the
+# predicate reads. `twComm` reverses the fragments' order (they share no
+# state), which only a program with no raising fragment may do.
+func axisFrag(s, name: string; i: int): string =
+  s.replace("N_", name & "_" & $i & "_").replace("V_", "v" & $i & "_")
+
+func renderAxis(p: Prog; name: string; tw: Twin): string =
+  var top = ""
+  var frags: seq[string]
+  for i, key in p.rows:
+    let sn = snippetOf(AxisScope(p.axis), key)
+    if sn.top.len > 0: top.add axisFrag(sn.top, name, i) & "\n"
+    var f = ""
+    if sn.pre.len > 0: f.add "  " & axisFrag(sn.pre, name, i) & "\n"
+    f.add "  acc = acc + (" & axisFrag(sn.expr, name, i) & ")\n"
+    frags.add f
+  if tw == twComm:
+    var r: seq[string]
+    for i in countdown(frags.high, 0): r.add frags[i]
+    frags = r
+  var inner = "  var acc = 0\n"
+  for f in frags: inner.add f
+  inner.add deadLine(tw)
+  inner.add famPred(p, "acc")
+  var body = "  let t = int(a)\n  let u = int(b)\n"
+  if tw == twTemplate:
+    body.add "  template w() =\n" & indent(inner, "  ") & "  w()\n"
+  else:
+    body.add inner
+  bodyProc(name, "(a, b: int8)", body, tw, top)
+
+func axisRaises*(p: Prog): bool =
+  for key in p.rows:
+    if snippetOf(AxisScope(p.axis), key).raises: return true
+
 func applicable*(p: Prog): seq[Twin] =
   case p.shape
+  of shAxis:
+    return (if axisRaises(p): @[twDead, twExtract, twTemplate]
+            else: @[twDead, twExtract, twTemplate, twComm])
   of shCallShape:
     # `let r` -> `var r` needs a `let` (the assign site already has a `var`)
     return (if p.fam[2] == 4: @[twDead, twExtract, twTemplate, twHoist]
@@ -424,6 +475,7 @@ func render*(p: Prog; name: string; tw: Twin): string =
   of shCallShape: return renderCallShape(p, name, tw)
   of shExnMem: return renderExnMem(p, name, tw)
   of shGeneric: return renderGeneric(p, name, tw)
+  of shAxis: return renderAxis(p, name, tw)
   else: discard
   if p.shape == shExcept:
     case tw
@@ -519,8 +571,8 @@ proc genProg*(r: var Rand; id: int): Prog =
     result.hitA = r.rand(2) != 0
     result.hitB = r.rand(2) == 0
     if not (result.hitA or result.hitB): result.hitA = true
-  of shCallShape, shExnMem, shGeneric:
-    doAssert false, "a family shape comes from genFamily"
+  of shCallShape, shExnMem, shGeneric, shAxis:
+    doAssert false, "a family or axis shape comes from genFamily or genAxis"
   result.predA = result.shape in {shOvf, shF32} and r.rand(2) == 0
 
 proc genPrograms*(seed, count: int; first = 0): seq[Prog] =
@@ -551,6 +603,30 @@ proc genFamily*(fam: FamilyScope; seed, count: int; first = 0): seq[Prog] =
     p.k = Lit(kind: lkNum, n: r.pick(famK))
     p.cmp2 = r.pick(cmps)
     p.lit2 = Lit(kind: lkNum, n: r.pick(smallNums))
+    if i >= first: result.add p
+
+proc axisOrder*(axis: AxisScope; seed: int): seq[string] =
+  ## The axis's fragment keys in a seeded order: which rows share a program.
+  for s in axisSnippets[axis]: result.add s.key
+  var r = initRand(seed)
+  r.shuffle(result)
+
+proc genAxis*(axis: AxisScope; seed, count, per: int; first = 0): seq[Prog] =
+  ## Programs `[first, first + count)` of the axis's seeded stream: program
+  ## `i` exercises the `per` rows at `i * per` of `axisOrder` (wrapping, so
+  ## a stream longer than the rows gives each row a second program). A
+  ## fragment that raises gets a program of its own rows only when `per` is
+  ## 1; otherwise it shares one, and the program takes no reordering relation.
+  ## Ids are absolute.
+  let order = axisOrder(axis, seed)
+  doAssert order.len > 0, "an axis with no fragment has no stream"
+  var r = initRand(seed xor 0xA815)
+  for i in 0 ..< first + count:
+    var p = Prog(id: i, shape: shAxis, ty: "int8", axis: axis)
+    for j in 0 ..< min(per, order.len):
+      p.rows.add order[(i * per + j) mod order.len]
+    p.cmp = r.pick(cmps)
+    p.k = Lit(kind: lkNum, n: r.pick(famK))
     if i >= first: result.add p
 
 func anchorPrograms*(): seq[Prog] =
@@ -604,7 +680,7 @@ proc emitCases*(cases: seq[Case]; plant: bool; tag: string): NimNode =
       "    discard pinExactImpl(" & name &
       ", claimed(captureRes(symexFind(" & name & ", tLabel(\"hit\"), " &
       "pinSettingsConst), o, " & $plant & "), \"symexFind\"), " &
-      shapeCellSrc(p.shape) & ", " &
+      cellSrc(pinCellOf(p)) & ", " &
       "tLabel(\"hit\"), " & dom & ", \"tsymex_0016_k8a_gen.nim\")\n" &
       "    o.kind = okExact\n" &
       "  except PinFailure as e:\n" &

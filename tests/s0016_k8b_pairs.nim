@@ -156,6 +156,8 @@ proc exercisedProblems*(recs: seq[ExercisedRecord]): seq[string] =
   ## A record naming a family that is not a pin family, or a cell that is not
   ## one of its family's dimension values.
   for r in recs:
+    if r.family in {axTypeClass .. axDefinedness}:
+      continue   # an axis record: `s0016_k8b_axes.axisRecordProblems` judges it
     if r.family notin {faCallShape .. faGeneric}:
       result.add "exercised record " & r.testFile & " prog=" & $r.progId &
         ": " & $r.family & " is not a fuzzer family"

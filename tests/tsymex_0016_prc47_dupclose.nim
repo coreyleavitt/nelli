@@ -608,13 +608,13 @@ suite "PRC-47":
     exact(eI16, eI16Never)
     exact(eI17, eI17Never)
 
-  test "b in an unlisted iterator's body declines":
+  test "b in an inline iterator's body: each inlined copy (PRC-48)":
     # Natively each inlined copy of the body is classified on its own: two
     # `yield`s give `b`'s first copy a cursor (copied) and its second an
-    # owner (moved), one written site with two classifications; the same
-    # with the header naming `a` (`h1`). The walk inlines the body at each
-    # `yield`, but a site's classification is keyed by where it is written.
+    # owner (moved); the same with the header naming `a` (`h1`); a looping
+    # body's one copy moves. PRC-48 keys each copy's site by the copies it
+    # is in (`tsymex_0016_prc48_dupiter`).
     check native(eH1(1)) == "hit"
-    declined(eI1)
-    declined(eI2)
-    declined(eH1)
+    exact(eI1, eI1Never)
+    exact(eI2, eI2Never)
+    exact(eH1, eH1Never)

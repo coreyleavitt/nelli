@@ -1909,6 +1909,8 @@ task test, "Run the test suite":
             "tsymex_0016_prc46_dupfinal",
             # RFC-0016 PRC-47: the =dup shapes PRC-46 left declining (seq of unknown length, a global, another module, except-as, iterators).
             "tsymex_0016_prc47_dupclose",
+            # RFC-0016 PRC-48: =dup sinks in an inline iterator's body, classified per inlined copy.
+            "tsymex_0016_prc48_dupiter",
             # RFC-0016 INT-73: a conversion to an anonymous tuple's alias aborted the compile.
             "tsymex_0016_int73_tuplealias",
             "tsymex_0016_wa_undefined_e2e",

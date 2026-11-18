@@ -111,21 +111,24 @@ proc sZeroDefault(a: int) =
   if zeroDefault(int) == 0 and a == 3: symexTarget("hit")
 # Repr and Dup are partial rows (PRC-35): each is pinned on the shape that
 # declines. `repr` of a seq declines at the call; a user `=dup` at a sink
-# position in a `for` over an iterator that yields once (natively the move:
-# no loop once inlined) declines in the route proof, since no path to a later
-# read is proved and the site is in a loop (PRC-44).
+# position on the loop variable of a `for` over an iterator yielding the
+# hooked type (natively copied at each sink: `a` + 1, twice) declines in the
+# route proof (PRC-48: an iterator yielding a scalar is inlined, each copy of
+# the loop body classified on its own, and a once-yielding one is exact).
 proc sRepr(a: int) =
   if repr(@[a]) == "@[5]": symexTarget("hit")
 type K4Dup = object
   v: int
 proc `=dup`(x: K4Dup): K4Dup = K4Dup(v: x.v + 1)
 proc k4DupTake(x: sink K4Dup): int = x.v
-iterator k4Once(): int = yield 0
+iterator k4Objs(x: K4Dup): K4Dup =
+  yield x
+  yield x
 proc sDup(a: int) =
   let d = K4Dup(v: a)
   var r = 0
-  for i in k4Once(): r = k4DupTake(d)
-  if r == 5: symexTarget("hit")
+  for o in k4Objs(d): r += k4DupTake(o)
+  if r == 12: symexTarget("hit")
 proc sSlice(a: int) =
   let s = @[1, 2, 3]
   if a >= 0 and a < 3 and k4LenOA(toOpenArray(s, 0, a)) == 2:

@@ -194,6 +194,13 @@ proc dOnceLoop(k: int) =
   for i in dupOnce():
     r = dupTake(a)
   if r == 1: symexTarget("hit")
+proc dOnceLoopNever(k: int) =
+  # PRC-48: the hook would have run there (`r` would not be `k`).
+  let a = DupObj(v: k)
+  var r = 0
+  for i in dupOnce():
+    r = dupTake(a)
+  if r != k: symexTarget("hit")
 proc dTupleTemp(k: int) =
   # A constructor passed to a non-`sink` formal is no sink position.
   let a = DupObj(v: k)
@@ -307,7 +314,9 @@ suite "PRC-35":
     # PRC-45: no read is reachable from the site on a path the scan follows
     # to its end: the move, exact.
     check pinExact(dEarlyReturn, dCell, domain = idom).status == sxSat
-    pinDecline(dOnceLoop, dCell, feGlobalRouteUnproved, needle = "(in a loop")
+    # PRC-48: the iterator is inlined, its one copy of the body no loop.
+    check pinExact(dOnceLoop, dCell, domain = idom).status == sxSat
+    check pinExact(dOnceLoopNever, dCell, domain = idom).status == sxUnsat
     pinDecline(dTupleTemp, dCell, feGlobalRouteUnproved,
                needle = "`a` is read after it")
 

@@ -1921,6 +1921,8 @@ task test, "Run the test suite":
             "tsymex_0016_int73_tuplealias",
             # RFC-0016 INT-75: a `for` destructuring its variable in parentheses failed the parse.
             "tsymex_0016_int75_fortuple",
+            # RFC-0016 INT-78: an `int` component of a seq's tuple element was an Int, a `seq[int]` element a bit-vector (F5 cost).
+            "tsymex_0016_int78_seqlitsort",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

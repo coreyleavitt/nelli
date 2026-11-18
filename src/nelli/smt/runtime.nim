@@ -1554,7 +1554,7 @@ proc constSeqArrs(elemTy: IRType; elem: SymVal): seq[Z3AnyAst] =
   let idxHold = mkZ3IntLit(0)
   let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
   let leaves =
-    if isTreeSeqElemTy(elemTy): svLeafTerms(elem, elemTy)
+    if isTreeSeqElemTy(elemTy): svLeafTerms(elem, elemTy, seqCell = true)
     else: @[wrap[Z3AnyAst](ctx, svLeafAsts(elem, elemTy)[0])]
   for leaf in leaves:
     result.add wrap[Z3AnyAst](ctx,
@@ -2043,7 +2043,7 @@ proc conformSV(sv: SymVal; ty: IRType): Option[SymVal] =
     let c = conformSV(seqElemAt(sv, iVar), cellTy)
     if c.isNone or not svFitsHeapTy(c.get, cellTy): return none(SymVal)
     var arrs: seq[Z3AnyAst]
-    for leaf in svLeafTerms(c.get, cellTy):
+    for leaf in svLeafTerms(c.get, cellTy, seqCell = true):
       arrs.add lambdaOver(ctx, iVar, leaf)
     var r = mkSeqSV(sv.seqLen, arrs, cellTy) # [placeholder-audited]
     r.seqSteps = sv.seqSteps
@@ -2081,7 +2081,7 @@ proc seqStoreArrs(seqSV: SymVal; idx: Z3Int; val: SymVal): Option[seq[Z3AnyAst]]
   if c.isNone or not svFitsHeapTy(c.get, elemTy): return none(seq[Z3AnyAst])
   let ctx = requireCurrentContext()
   let arrs = seqArrs(seqSV)
-  let leaves = svLeafTerms(c.get, elemTy)
+  let leaves = svLeafTerms(c.get, elemTy, seqCell = true)   # RFC-0016 INT-78
   if leaves.len != arrs.len: return none(seq[Z3AnyAst])
   for i in 0 ..< arrs.len:
     let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, arrs[i].raw)

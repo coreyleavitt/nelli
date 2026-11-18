@@ -2499,3 +2499,15 @@ source = "PRC-50 (`rfc-0016-w4prc50`), 2026-11-18"
 evidence = "`tests/tsymex_0016_int75_fortuple.nim` aborted the compile on c at d977c2f2 (`Expected a node of kind nnkSym, got nnkVarTuple`), green after on c and cpp: a user inline and closure iterator, `pairs` over a seq and an array, `items` over a seq and an array of tuples, `for i, (a, b) in pairs(st)`, a write to a later element read at its step, exact against native"
 cells = []
 pins = ["tsymex_0016_int75_fortuple"]
+
+[[row]]
+id = "INT-78"
+table = "5.8c"
+title = "An `int` component of a seq's tuple or object element was held as a Z3 Int (`heapLeafTerm`/`liftHeapValue` under `intHeapCell`, S8as/S8ax), while a `seq[int]` element, a table's 64-bit cell and a bit-vector local hold the same `int` as a bit-vector: a literal's bit-vector component went into its leaf array through `bv2int` and back into the bit-vector world through `int2bv`, the F5 shape. `{\"a\": x}.toTable` (walked since INT-75) made `s8cq_twice11` q10 cost 393,184,773 units (98-214 s) against 6,067,999 at d977c2f2, and `@[(1, x), (x, 2)]` with one component moved through a `seq[int]` ended `sxUnknown` (`beSolverUndef`) after 250,007,127 units (491 s) where native never hits. Found by PRC-51's twice11 reshape"
+class = "performance and precision (an undecided verdict Nim decides); no wrong verdict"
+state = "closed"
+note = "closed `rfc-0016-w4prc51` (walker 433->437; 434-436 are taken, 2026-11-18). A seq's data array holds an `int` leaf as the bit-vector of its width, the sort `allocateSeqDataRaw` gives a `seq[int]` element, for every element type: `seqCell` on `heapLeafTerm`/`svLeafTerms`/`svWithLeaves`/`liftHeapValue`, passed by every builder and reader of a seq's leaf arrays (`allocateSeqArrs`, `seqElemAt`, `seqStoreArrs`, `constSeqArrs`, `conformSV`'s seq arm). Heaps and a table's container value keep S8as's Int cells (`tvTree`, unchanged here). The other direction moved too: a parameter the run promotes to an Int (`x: range[0..1000]`, `@[(1, int(x))]`, read back and compared) went from 936 to 209,813 units, decided both ways, which is what the same value costs through a `seq[int]` (`@[1, int(x)]`: 210,177). `s8cq_twice11` carries q10's `toTable` form (`q10t`) beside the `initTable` one. Not fixed here, seen while probing: `for p in items(@[(\"a\", x)])` (a seq literal as the `items` operand) is a `weInternalWalkerFault` (`lowerLeafInExpr` asserts `iekVar`/`iekField`, got `iekSeqLit`), at 081b39c4 and after"
+source = "PRC-51 (`rfc-0016-w4prc51`), the `s8cq_twice11` q10 reshape, 2026-11-18"
+evidence = "`tests/tsymex_0016_int78_seqlitsort.nim` at 081b39c4 (c): red; at walker 437 green on c and cpp: `toTable` from a tuple literal, a seq-of-tuples literal into a table and into a `seq[int]`, a nested tuple, an object, an `int32` component, an array literal, a bounded parameter, exact against native; units within 4x/2x of the `seq[int]` twins (2.9x, 0.9x) and q10 within 3x of d977c2f2 (10,068,896)"
+cells = []
+pins = ["tsymex_0016_int78_seqlitsort"]

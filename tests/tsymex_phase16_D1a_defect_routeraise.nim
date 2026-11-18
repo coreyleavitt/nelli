@@ -13,6 +13,7 @@
 ##   • A wrong-type handler does NOT catch the defect → sxRaised.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # ---- SUT fixtures -------------------------------------------------------
 
@@ -51,18 +52,18 @@ suite "symex Phase 16 D1a — defect fork routed through routeRaise":
   test "IndexDefect fully caught by handler → sxUnsat (no finding)":
     ## Core D1a capability: the fork is unconditional so routeRaise sees the
     ## handler and CONSUMES the raise. No finding → sxUnsat.
-    let r = symexFind(caughtIndexed, tIndexError())
+    let r = pinFind(caughtIndexed, tIndexError())
     check r.status == sxUnsat
 
   # ---------- uncaught OOB now returns sxRaised ----------------------------
 
   test "uncaught OOB → sxRaised with raisedTypeId=IndexDefect":
-    let r = symexFind(uncaughtIndexed, tIndexError())
+    let r = pinFind(uncaughtIndexed, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
 
   test "uncaught OOB witness is in raisedWitness, not witness":
-    let r = symexFind(uncaughtIndexed, tIndexError())
+    let r = pinFind(uncaughtIndexed, tIndexError())
     check r.status == sxRaised
     let i = r.raisedWitness[1]
     check (i < 0 or i >= 5)
@@ -71,6 +72,6 @@ suite "symex Phase 16 D1a — defect fork routed through routeRaise":
 
   test "wrong-type handler (except ValueError) does not catch IndexDefect":
     ## The defect escapes past the ValueError handler → sxRaised.
-    let r = symexFind(wrongHandlerIndexed, tIndexError())
+    let r = pinFind(wrongHandlerIndexed, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"

@@ -37,6 +37,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 type
   Ordering = enum
@@ -70,12 +71,12 @@ suite "#163 review R21a -- enum ARRAY element carries the same domain":
       check ord(e) >= -1 and ord(e) <= 1
 
   test "a negative-ordinal element is reachable, with a genuine witness":
-    let r = symexFind(arrNegReachable, tLabel("neg"))
+    let r = pinFind(arrNegReachable, tLabel("neg"))
     check r.status == sxSat
     check Ordering(r.witness[0][0]) == roLess
 
   test "an out-of-domain element ordinal stays excluded":
-    let r = symexFind(arrOOB, tLabel("oob"))
+    let r = pinFind(arrOOB, tLabel("oob"))
     check r.status == sxUnsat
 
 # =============================================================================
@@ -101,17 +102,17 @@ proc seqOnlyLen(s: seq[Ordering]) =
 suite "#163 review R21b -- enum SEQ element carries the same domain":
 
   test "a negative-ordinal element is reachable, with a genuine witness":
-    let r = symexFind(seqNegReachable, tLabel("neg"))
+    let r = pinFind(seqNegReachable, tLabel("neg"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check Ordering(r.witness[0][0]) == roLess
 
   test "an out-of-domain element ordinal stays excluded":
-    let r = symexFind(seqOOB, tLabel("oob"))
+    let r = pinFind(seqOOB, tLabel("oob"))
     check r.status == sxUnsat
 
   test "an unread element's witness is still a legal Ordering value":
-    let r = symexFind(seqOnlyLen, tLabel("hit"))
+    let r = pinFind(seqOnlyLen, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len == 1
     let v = ord(r.witness[0][0])
@@ -168,12 +169,12 @@ suite "#163 review R21c -- enum-typed variant discriminator, both int modes":
     check vc.kind == dkC and vc.c == 42
 
   test "the zero-ordinal `of` arm is reachable in both modes":
-    check symexFind(gatedAArm, tLabel("a-hit"), ExactMode).status == sxSat
-    check symexFind(gatedAArm, tLabel("a-hit"), OptMode).status == sxSat
+    check pinFind(gatedAArm, tLabel("a-hit"), ExactMode).status == sxSat
+    check pinFind(gatedAArm, tLabel("a-hit"), OptMode).status == sxSat
 
   test "the else arm (covering the declared dkC and the domain holes) is reachable in both modes":
-    check symexFind(gatedElseArm, tLabel("else-hit"), ExactMode).status == sxSat
-    check symexFind(gatedElseArm, tLabel("else-hit"), OptMode).status == sxSat
+    check pinFind(gatedElseArm, tLabel("else-hit"), ExactMode).status == sxSat
+    check pinFind(gatedElseArm, tLabel("else-hit"), OptMode).status == sxSat
 
 # =============================================================================
 # R20 (test half) -- a negative-ordinal enum PARAM under isExact vs isOptimised.
@@ -201,16 +202,16 @@ suite "#163 review R20 -- negative-ordinal enum param: isExact and isOptimised a
     check ord(roLess) == -1
 
   test "both modes find the negative ordinal, with a genuine matching witness":
-    let rExact = symexFind(checkNegOrdinal, tLabel("neg"), ExactMode)
-    let rOpt = symexFind(checkNegOrdinal, tLabel("neg"), OptMode)
+    let rExact = pinFind(checkNegOrdinal, tLabel("neg"), ExactMode)
+    let rOpt = pinFind(checkNegOrdinal, tLabel("neg"), OptMode)
     check rExact.status == sxSat
     check rOpt.status == sxSat
     check Ordering(rExact.witness[0]) == roLess
     check Ordering(rOpt.witness[0]) == roLess
 
   test "both modes agree an out-of-domain ordinal stays excluded":
-    check symexFind(checkOOB, tLabel("oob"), ExactMode).status == sxUnsat
-    check symexFind(checkOOB, tLabel("oob"), OptMode).status == sxUnsat
+    check pinFind(checkOOB, tLabel("oob"), ExactMode).status == sxUnsat
+    check pinFind(checkOOB, tLabel("oob"), OptMode).status == sxUnsat
 
 
 suite "#163 review round 1 -- walker version pin":

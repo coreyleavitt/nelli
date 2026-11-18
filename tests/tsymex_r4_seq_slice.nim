@@ -13,6 +13,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc sliceLenOk(data: seq[int]) =
   ## chapulin decode DATA-arm shape: payload = data[4 .. ^1]; its length
@@ -78,49 +79,49 @@ proc sliceOobGuarded(data: seq[int]) =
 suite "symex round-4 — seq-slice values as array-lambda views":
 
   test "payload.len == data.len - 4 is SAT with a consistent witness (was a compile abort)":
-    let r = symexFind(sliceLenOk, tLabel("len-ok"))
+    let r = pinFind(sliceLenOk, tLabel("len-ok"))
     check r.status == sxSat
     let w = r.witness[0]
     check w.len > 4 and w[4 .. ^1].len == w.len - 4
 
   test "payload.len == data.len - 3 is UNSAT (view-length soundness)":
-    let r = symexFind(sliceLenImpossible, tLabel("len-impossible"))
+    let r = pinFind(sliceLenImpossible, tLabel("len-impossible"))
     check r.status == sxUnsat
 
   test "payload[0] != data[4] is UNSAT (view-element soundness)":
-    let r = symexFind(sliceElemImpossible, tLabel("elem-impossible"))
+    let r = pinFind(sliceElemImpossible, tLabel("elem-impossible"))
     check r.status == sxUnsat
 
   test "payload[0] == 7 is SAT with a consistent witness":
-    let r = symexFind(sliceElemOk, tLabel("elem-seven"))
+    let r = pinFind(sliceElemOk, tLabel("elem-seven"))
     check r.status == sxSat
     let w = r.witness[0]
     check w.len > 5 and w[4] == 7
 
   test "two-endpoint form: payload.len == data.len - 4 is SAT (chapulin P3)":
-    let r = symexFind(sliceTwoEndpointLenOk, tLabel("p3-len-ok"))
+    let r = pinFind(sliceTwoEndpointLenOk, tLabel("p3-len-ok"))
     check r.status == sxSat
     let w = r.witness[0]
     check w.len > 4 and w[4 .. w.len - 1].len == w.len - 4
 
   test "two-endpoint form: payload.len == data.len - 3 is UNSAT":
-    let r = symexFind(sliceTwoEndpointImpossible, tLabel("p3-len-impossible"))
+    let r = pinFind(sliceTwoEndpointImpossible, tLabel("p3-len-impossible"))
     check r.status == sxUnsat
 
   test "half-open `..<` form: payload[0] != data[4] is UNSAT":
-    let r = symexFind(sliceHalfOpenElemImpossible,
+    let r = pinFind(sliceHalfOpenElemImpossible,
                       tLabel("halfopen-elem-impossible"))
     check r.status == sxUnsat
 
   test "unguarded slice: the RangeDefect is FOUND (defect-fork honesty)":
     ## The only reachable defect is RangeDefect (S8g); a reachable defect
     ## preempts the IndexDefect search, which therefore reports it.
-    let r = symexFind(sliceOobUnguarded, tIndexError())
+    let r = pinFind(sliceOobUnguarded, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "RangeDefect"
 
   test "guarded slice: no IndexError path (sxUnsat)":
-    let r = symexFind(sliceOobGuarded, tIndexError())
+    let r = pinFind(sliceOobGuarded, tIndexError())
     check r.status == sxUnsat
 
 suite "symex round-4 seq-slice — walker version pin":

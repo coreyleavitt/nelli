@@ -13,6 +13,7 @@
 ## cells stand alone with no twin.
 import std/[unittest]
 import nelli/symex
+import ./s8cu_helpers
 
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
@@ -92,27 +93,27 @@ proc boolNestedAndUnderOrHoisted(x, y, z: int) =
 suite "symex A1 — boolean (short-circuit and/or) operand-shape characterization corpus":
 
   test "cell 1 (atomic AND, coverage): reachable, sxSat":
-    let r = symexFind(boolAtomicAnd, tLabel("hit"))
+    let r = pinFind(boolAtomicAnd, tLabel("hit"))
     check r.status == sxSat
 
   test "cell 2 (compound LHS under AND, fault-bearing RHS untouched): twin-identical, sxSat":
-    let rInline  = symexFind(boolAndLhsCompoundRhsFault, tLabel("hit"))
-    let rHoisted = symexFind(boolAndLhsCompoundRhsFaultHoisted, tLabel("hit"))
+    let rInline  = pinFind(boolAndLhsCompoundRhsFault, tLabel("hit"))
+    let rHoisted = pinFind(boolAndLhsCompoundRhsFaultHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 3 (RHS defect fork, D1c fast-path baseline, no twin): sxSat, in-bounds witness":
-    let r = symexFind(boolAndRhsFaultPin, tLabel("hit"))
+    let r = pinFind(boolAndRhsFaultPin, tLabel("hit"))
     check r.status == sxSat
 
   test "cell 4 (OR guard-then-fault idiom): twin-identical, sxSat":
-    let rInline  = symexFind(boolOrGuardThenFault, tLabel("hit"))
-    let rHoisted = symexFind(boolOrGuardThenFaultHoisted, tLabel("hit"))
+    let rInline  = pinFind(boolOrGuardThenFault, tLabel("hit"))
+    let rHoisted = pinFind(boolOrGuardThenFaultHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 5 (nested AND-under-OR, fault-free): twin-identical, sxSat":
-    let rInline  = symexFind(boolNestedAndUnderOr, tLabel("hit"))
-    let rHoisted = symexFind(boolNestedAndUnderOrHoisted, tLabel("hit"))
+    let rInline  = pinFind(boolNestedAndUnderOr, tLabel("hit"))
+    let rHoisted = pinFind(boolNestedAndUnderOrHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)

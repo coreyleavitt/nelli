@@ -31,6 +31,7 @@
 
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # isWhile — loop guard lowering
@@ -74,20 +75,20 @@ suite "symex R1 — isWhile guard drains scalar-raise forks":
     ## RED (pre-fix): sxUnsat — the OOB predicate from lowering the guard is
     ## discarded every iteration; no raise fork is ever opened.
     ## GREEN (post-fix): sxRaised(IndexDefect) — e.g. witness s == "".
-    let r = symexFind(whileStrOob, tRaisedExn("IndexDefect"))
+    let r = pinFind(whileStrOob, tRaisedExn("IndexDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "IndexDefect"
 
   test "R1-while-2 (precision companion): in-bounds loop target stays real sxSat":
-    let r = symexFind(whileStrGuardedInBounds, tLabel("foundX"))
+    let r = pinFind(whileStrGuardedInBounds, tLabel("foundX"))
     check r.status == sxSat
     check r.witness[0].len > 3
 
   test "R1-while-3: (a div b) > i guard on unconstrained b -> sxRaised(DivByZeroDefect)":
     ## RED (pre-fix): sxUnsat — same drain gap, div-by-zero family.
     ## GREEN (post-fix): sxRaised(DivByZeroDefect).
-    let r = symexFind(whileDivZero, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(whileDivZero, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
@@ -134,17 +135,17 @@ suite "symex R1 — isReturn retExpr drains scalar-raise forks":
     ## `sxUnsat`) — confirmed directly via `tRaisedExn` in R1-return-1b below.
     ## The soundness-relevant assertion here is simply that "hitOob" is never
     ## reported reachable.
-    let r = symexFind(retOobUnreachable, tLabel("hitOob"))
+    let r = pinFind(retOobUnreachable, tLabel("hitOob"))
     check r.status != sxSat
 
   test "R1-return-1b: return s[i] with i forced OOB -> sxRaised(IndexDefect)":
-    let r = symexFind(retOobUnreachable, tRaisedExn("IndexDefect"))
+    let r = pinFind(retOobUnreachable, tRaisedExn("IndexDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "IndexDefect"
 
   test "R1-return-2 (in-bounds companion): real sxSat with a valid in-bounds witness":
-    let r = symexFind(retInBoundsReachable, tLabel("hitInBounds"))
+    let r = pinFind(retInBoundsReachable, tLabel("hitInBounds"))
     check r.status == sxSat
     check r.witness[1] >= 0
     check r.witness[1] < r.witness[0].len
@@ -175,7 +176,7 @@ suite "symex R1 — isIndex (dynamic seq) drains scalar-raise forks":
     ## RED (pre-fix): sxUnsat (no raise ever forked; the div-by-zero
     ## predicate deposited by `stmt.ixIdx`'s lowering is silently discarded).
     ## GREEN (post-fix): sxRaised(DivByZeroDefect).
-    let r = symexFind(seqIdxDivZero, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(seqIdxDivZero, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
@@ -196,7 +197,7 @@ suite "symex R1 — isIndex (static array) drains scalar-raise forks":
 
   test "R1-arridx-1: xs[0 div b] with unconstrained b -> sxRaised(DivByZeroDefect)":
     ## RED (pre-fix): sxUnsat. GREEN (post-fix): sxRaised(DivByZeroDefect).
-    let r = symexFind(arrIdxDivZero, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(arrIdxDivZero, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
@@ -222,7 +223,7 @@ suite "symex R1 — isVariantReassignSymbolic drains scalar-raise forks":
 
   test "R1-vrs-1: box.kind = K(a div b) with unconstrained b -> sxRaised(DivByZeroDefect)":
     ## RED (pre-fix): sxUnsat. GREEN (post-fix): sxRaised.
-    let r = symexFind(reassignDivZero, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(reassignDivZero, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"

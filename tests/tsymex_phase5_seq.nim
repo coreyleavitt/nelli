@@ -5,6 +5,7 @@
 ## are observable through index access.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc longEnough(s: seq[int]) =
   if s.len > 3:
@@ -12,7 +13,7 @@ proc longEnough(s: seq[int]) =
 
 suite "symex Phase 5 — seq":
   test "branch on seq length":
-    let r = symexFind(longEnough, tLabel("long"))
+    let r = pinFind(longEnough, tLabel("long"))
     check r.status == sxSat
     check r.witness[0].len > 3
 
@@ -21,7 +22,7 @@ suite "symex Phase 5 — seq":
       if s.len > 0:
         if s[0] == 42:
           symexTarget("hd")
-    let r = symexFind(headIs42, tLabel("hd"))
+    let r = pinFind(headIs42, tLabel("hd"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check r.witness[0][0] == 42
@@ -31,7 +32,7 @@ suite "symex Phase 5 — seq":
       if i >= 0 and i < s.len:
         if s[i] == 42:
           symexTarget("hit")
-    let r = symexFind(someIs42, tLabel("hit"))
+    let r = pinFind(someIs42, tLabel("hit"))
     check r.status == sxSat
     let i = r.witness[1]
     let s = r.witness[0]

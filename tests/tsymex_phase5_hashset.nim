@@ -2,6 +2,7 @@
 import std/unittest
 import std/sets
 import nelli/symex
+import ./s8cu_helpers
 
 proc setHas42(s: HashSet[int]) =
   if 42 in s:
@@ -9,6 +10,6 @@ proc setHas42(s: HashSet[int]) =
 
 suite "symex Phase 5 — HashSet":
   test "`in` membership test on HashSet":
-    let r = symexFind(setHas42, tLabel("has42"))
+    let r = pinFind(setHas42, tLabel("has42"))
     check r.status == sxSat
     check 42 in r.witness[0]

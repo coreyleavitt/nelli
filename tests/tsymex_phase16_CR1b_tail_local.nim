@@ -37,6 +37,7 @@ import std/unittest
 import std/strutils
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc tailLocal(data: seq[int], o: int): int =
   let hi = data[o] mod 256
@@ -64,7 +65,7 @@ proc gateUnsat(data: seq[int], o: int) =
 suite "symex Phase 16 CR-1b — tail-return-of-local fixed at lowering":
 
   test "let hi = data[o] mod 256; hi + 1 — implicit tail return no longer KeyErrors":
-    let r = symexFind(gateSat, tLabel("hit"))
+    let r = pinFind(gateSat, tLabel("hit"))
     check r.status == sxSat
     # Load-bearing: the witness must actually satisfy the tail-expression
     # relation through the callee's local `hi`, not just reach the call site.
@@ -74,7 +75,7 @@ suite "symex Phase 16 CR-1b — tail-return-of-local fixed at lowering":
     check tailLocal(data, o) == 5
 
   test "hi + 1 == 300 is UNSAT — the mod-256 local is genuinely bound, not a free stub":
-    let r = symexFind(gateUnsat, tLabel("impossible"))
+    let r = pinFind(gateUnsat, tLabel("impossible"))
     check r.status == sxUnsat
 
 suite "symex Phase 16 CR-1b — walker version pin":

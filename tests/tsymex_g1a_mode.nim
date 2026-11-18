@@ -15,6 +15,7 @@
 ## primary characterization; this file is the focused arm-spread pin.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # ---- isIf / isCall -----------------------------------------------------
 proc g1aIsPositive(x: int): bool = x > 0
@@ -63,33 +64,33 @@ proc g1aSeqIndex(xs: seq[int], i: int): int =
 suite "RFC-fuzzer-nextgen G1a — mode threaded through dispatch, wmExplore unchanged":
 
   test "isIf/isCall arm: target still reachable (byte-identical to pre-G1a)":
-    let r = symexFind(g1aBranchCall, tLabel("g1a_pos"))
+    let r = pinFind(g1aBranchCall, tLabel("g1a_pos"))
     check r.status == sxSat
     check r.witness[0] > 0
 
   test "isWhile arm: k-unroll target still reached":
-    let r = symexFind(g1aWhileSum, tLabel("g1a_sum3"))
+    let r = pinFind(g1aWhileSum, tLabel("g1a_sum3"))
     check r.status == sxSat
     check r.witness[0] >= 3
 
   test "isAssert arm: assertion violation still raises AssertionDefect":
-    let r = symexFind(g1aAssertPositive, tRaisedExn("AssertionDefect"))
+    let r = pinFind(g1aAssertPositive, tRaisedExn("AssertionDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     check r.raisedWitness[0] <= 0
 
   test "isRaise arm: explicit raise still found":
-    let r = symexFind(g1aExplicitRaise, tRaisedExn("ValueError"))
+    let r = pinFind(g1aExplicitRaise, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] == 42
 
   test "isTry arm: except-body target still reachable (raise caught, not propagated)":
-    let r = symexFind(g1aTryExcept, tLabel("g1a_caught"))
+    let r = pinFind(g1aTryExcept, tLabel("g1a_caught"))
     check r.status == sxSat
     check r.witness[0] == 0
 
   test "isIndex arm: out-of-bounds seq access still raises IndexDefect":
-    let r = symexFind(g1aSeqIndex, tRaisedExn("IndexDefect"))
+    let r = pinFind(g1aSeqIndex, tRaisedExn("IndexDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"

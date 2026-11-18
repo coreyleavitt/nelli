@@ -4,6 +4,7 @@
 ## handles the resulting while via k-unrolling.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 6 — for":
   test "for i in 0..n — range loop reaches target":
@@ -13,7 +14,7 @@ suite "symex Phase 6 — for":
         s = s + 1
       if s == 4:
         symexTarget("hit")
-    let r = symexFind(sumToFive, tLabel("hit"))
+    let r = pinFind(sumToFive, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 3
 
@@ -24,7 +25,7 @@ suite "symex Phase 6 — for":
         s = s + x
       if s == 6:
         symexTarget("hit")
-    let r = symexFind(sumArr, tLabel("hit"))
+    let r = pinFind(sumArr, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0][0] + r.witness[0][1] + r.witness[0][2] == 6
 
@@ -35,7 +36,7 @@ suite "symex Phase 6 — for":
         sum = sum + x
       if sum == 10 and s.len == 2:
         symexTarget("hit")
-    let r = symexFind(sumSeq, tLabel("hit"))
+    let r = pinFind(sumSeq, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len == 2
     check r.witness[0][0] + r.witness[0][1] == 10

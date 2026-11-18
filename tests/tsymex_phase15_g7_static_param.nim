@@ -32,6 +32,7 @@
 ## formal fails to size) → wrong/unknown; post-G7 → distinct + correct.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Canonical static-param use: `array[N, int]`. `x[N-1]` is the LAST element, so
 # the witnessed index DIFFERS per instantiation (x[2] for N=3, x[4] for N=5) —
@@ -58,7 +59,7 @@ proc twoBools(p: int, q: int) =
 
 suite "symex Phase 15 G7 — static[T] params in the instantiation key":
   test "two static[int] array instantiations dispatch to distinct bodies":
-    let r = symexFind(twoArrays, tLabel("both"))
+    let r = pinFind(twoArrays, tLabel("both"))
     check r.status == sxSat
     # N=3 ⇒ x[2] is the gated element; N=5 ⇒ x[4]. The witnessed indices differ,
     # proving per-instantiation substitution of N.
@@ -66,7 +67,7 @@ suite "symex Phase 15 G7 — static[T] params in the instantiation key":
     check r.witness[1][4] > 0    ## a5[N-1] = a5[4]
 
   test "static[bool] instantiations dispatch per-value (true vs false)":
-    let r = symexFind(twoBools, tLabel("polar"))
+    let r = pinFind(twoBools, tLabel("polar"))
     check r.status == sxSat
     check r.witness[0] > 0        ## gate[true]:  p > 0
     check r.witness[1] <= 0       ## gate[false]: q <= 0

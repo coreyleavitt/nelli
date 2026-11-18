@@ -74,41 +74,41 @@ suite "W3-z P5: the right operand of and/or is lowered under the left guard":
   else:
     test "and: a dead right-hand read carries no UB":
       scrub()
-      let r = symexFind(andDeadRead, tLabel("clean"))
+      let r = pinFind(andDeadRead, tLabel("clean"))
       check r.status == sxSat
       check r.soundness.undefinedKinds == {}
     test "and: a dead right-hand read carries no UB (left known false)":
       scrub()
-      let r = symexFind(andDeadRead2, tLabel("clean"))
+      let r = pinFind(andDeadRead2, tLabel("clean"))
       check r.status == sxSat
       check r.soundness.undefinedKinds == {}
     test "or: a dead right-hand read carries no UB":
       scrub()
-      let r = symexFind(orDeadRead, tLabel("clean"))
+      let r = pinFind(orDeadRead, tLabel("clean"))
       check r.status == sxSat
       check r.soundness.undefinedKinds == {}
     test "and: a live right-hand read is still UB":
       scrub()
-      let r = symexFind(andLiveRead, tLabel("live"))
+      let r = pinFind(andLiveRead, tLabel("live"))
       check r.status == sxSat
       check r.soundness.undefinedKinds == ind
     test "or: a live right-hand read is still UB":
       scrub()
-      let r = symexFind(orLiveRead, tLabel("live"))
+      let r = pinFind(orLiveRead, tLabel("live"))
       check r.status == sxSat
       check r.soundness.undefinedKinds == ind
 
   test "and: a dead index is never an IndexDefect":
-    check symexFind(andDeadIndex, tRaisedExn("IndexDefect")).status != sxRaised
+    check pinFind(andDeadIndex, tRaisedExn("IndexDefect")).status != sxRaised
   test "or: a dead index is never an IndexDefect":
-    check symexFind(orDeadIndex, tRaisedExn("IndexDefect")).status != sxRaised
+    check pinFind(orDeadIndex, tRaisedExn("IndexDefect")).status != sxRaised
   test "a bounds-guarded index never raises and the target is reachable":
-    check symexFind(andGuardedIndex, tRaisedExn("IndexDefect")).status != sxRaised
-    check symexFind(andGuardedIndex, tLabel("hit")).status == sxSat
+    check pinFind(andGuardedIndex, tRaisedExn("IndexDefect")).status != sxRaised
+    check pinFind(andGuardedIndex, tLabel("hit")).status == sxSat
   test "and: a live unguarded index still raises":
-    check symexFind(andLiveIndex, tRaisedExn("IndexDefect")).status == sxRaised
+    check pinFind(andLiveIndex, tRaisedExn("IndexDefect")).status == sxRaised
   test "or: a live unguarded index still raises":
-    check symexFind(orLiveIndex, tRaisedExn("IndexDefect")).status == sxRaised
+    check pinFind(orLiveIndex, tRaisedExn("IndexDefect")).status == sxRaised
 
 # ---- a degrade that is not a `{.noinit.}` read: an unwritten module global ----
 var p5g = 0
@@ -136,18 +136,18 @@ suite "W3-z P5b: any lowering-time degrade in a dead right operand":
   ## names it, because the live branch is walked. Not a `{.noinit.}` read, so the parser
   ## cannot name it by a local's pragma.
   test "and: a dead global read taints nothing":
-    let r = symexFind(andDeadGlobal, tLabel("clean"))
+    let r = pinFind(andDeadGlobal, tLabel("clean"))
     check r.status == sxSat
     check r.soundness.pathTaint == {}
   test "or: a dead global read taints nothing":
-    let r = symexFind(orDeadGlobal, tLabel("clean"))
+    let r = pinFind(orDeadGlobal, tLabel("clean"))
     check r.status == sxSat
     check r.soundness.pathTaint == {}
   test "and: a dead global array element read taints nothing":
-    let r = symexFind(andDeadGlobalElem, tLabel("clean"))
+    let r = pinFind(andDeadGlobalElem, tLabel("clean"))
     check r.status == sxSat
     check r.soundness.pathTaint == {}
   test "and: a live global read still taints the path":
-    let r = symexFind(andLiveGlobal, tLabel("live"))
+    let r = pinFind(andLiveGlobal, tLabel("live"))
     check r.status == sxSat
     check scSpurious in r.soundness.pathTaint

@@ -19,6 +19,7 @@
 ## C4 is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/[unittest, sequtils]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- Sub-test 1 (INLINE): filter over a CONCRETE-length seq. -----------------
 #
@@ -91,19 +92,19 @@ suite "symex Phase 15 C4 — DSL HOFs filter/map/fold over seq[T]":
   # Sub-test 1 (inline) runs FIRST — confirm no path explosion / hang before
   # the axiom sub-tests.
   test "C4-1: filter over bounded seq with predicate closure produces sat with predicate body realized":
-    let r = symexFind(sutFilterInline, tLabel("nonempty"))
+    let r = pinFind(sutFilterInline, tLabel("nonempty"))
     check r.status == sxSat
     # At least one of a,b,c must be positive for the filtered result to be
     # non-empty (the inline predicate `x > 0` was realized per element).
     check (r.witness[0] > 0) or (r.witness[1] > 0) or (r.witness[2] > 0)
 
   test "C4-1b: map over bounded seq applies mapper per element (ys[0] == a+1)":
-    let r = symexFind(sutMapInline, tLabel("mapped"))
+    let r = pinFind(sutMapInline, tLabel("mapped"))
     check r.status == sxSat
     check r.witness[0] == 9    ## a+1 == 10 ⇒ a == 9
 
   test "C4-2: symbolic-length filter emits ceUnsupportedHof (sevError), sxUnknown":
-    let r = symexFind(sutFilterSymbolic, tLabel("symfilter"))
+    let r = pinFind(sutFilterSymbolic, tLabel("symfilter"))
     check r.status == sxUnknown
     var sawHof = false
     for e in r.errors:
@@ -112,12 +113,12 @@ suite "symex Phase 15 C4 — DSL HOFs filter/map/fold over seq[T]":
     check sawHof
 
   test "C4-3: symbolic-length map axiom path TERMINATES (no Z3Error / hang)":
-    let r = symexFind(sutMapSymbolic, tLabel("symmap"))
+    let r = pinFind(sutMapSymbolic, tLabel("symmap"))
     # Verdict may be sxSat or sxUnknown; the DoD is termination without crash.
     check r.status in {sxSat, sxUnknown}
 
   test "C4-4: user-defined `filter` (non-sequtils) is NOT hijacked by HOF dispatch":
-    let r = symexFind(sutUserFilter, tLabel("userfilter"))
+    let r = pinFind(sutUserFilter, tLabel("userfilter"))
     # Falls through to the standard isCall descent — NOT an incorrect HOF
     # dispatch. The result is allowed to be any status, but if it degrades it
     # must NOT be via a ceUnsupportedHof (that would mean wrong dispatch).

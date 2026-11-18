@@ -2,6 +2,7 @@
 import std/unittest
 import std/tables
 import nelli/symex
+import ./s8cu_helpers
 
 proc adultByAge(t: Table[string, int]) =
   if t["age"] >= 18:
@@ -9,7 +10,7 @@ proc adultByAge(t: Table[string, int]) =
 
 suite "symex Phase 5 — Table read":
   test "read int value from a Table[string, int]":
-    let r = symexFind(adultByAge, tLabel("adult"))
+    let r = pinFind(adultByAge, tLabel("adult"))
     check r.status == sxSat
     check r.witness[0]["age"] >= 18
 
@@ -17,7 +18,7 @@ suite "symex Phase 5 — Table read":
     proc requireKey(t: Table[string, int]) =
       if "age" in t and t["age"] >= 21:
         symexTarget("legal")
-    let r = symexFind(requireKey, tLabel("legal"))
+    let r = pinFind(requireKey, tLabel("legal"))
     check r.status == sxSat
     check "age" in r.witness[0]
     check r.witness[0]["age"] >= 21

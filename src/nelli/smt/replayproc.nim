@@ -35,6 +35,10 @@ const
   replayForks* = defined(posix) and not defined(nelliReplayReexec)
   replayReexecs* = defined(windows) or
                    (defined(posix) and defined(nelliReplayReexec))
+  replayExecs* = replayReexecs and defined(posix)
+    ## RFC-0016 INT-29. The re-executed child is started by `fork` and
+    ## `execve`, so it can fail to start after the fork (`execve` refused) and
+    ## inherits the host's descriptors unless it closes them.
   hasMethodTable* = defined(nimHasMethodDispatchTable) and
                     buildIsExecutable
     ## RFC-0016 PRC-02b. The toolchain's method dispatch table exists, and this
@@ -763,6 +767,16 @@ when defined(posix):
        r.rlim_max < top:
       top = r.rlim_max
     for fd in low ..< cint(top): discard close(fd)
+
+proc replayLimitSignals*(): seq[tuple[signal: int, limit: string]] =
+  ## RFC-0016 INT-28. The signals a replay child's resource limits stop it
+  ## with, and the word for the limit each names in `ReplayChild.why`: a run
+  ## one stops is undecided (`reTimedOut`). None on Windows, where the job's
+  ## limits end the process and the replay's deadline bounds its time.
+  when defined(posix):
+    @[(int(SIGXCPU), "CPU"), (int(SIGXFSZ), "file-size")]
+  else:
+    @[]
 
 # ---- fork ---------------------------------------------------------------------
 

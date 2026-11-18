@@ -20,7 +20,11 @@ from nelli/smt/canonicalize import symexWalkerVersion
 when replayReexecs:
   import std/streams
 
-when defined(posix):
+const posixChild = replayForks or replayExecs
+  ## The child is a POSIX process: its descriptors and signals are the host's
+  ## to arrange.
+
+when posixChild:
   import std/posix
   proc fdOpen(fd: int): bool = fcntl(cint(fd), F_GETFD) != -1
   proc raiseSignal(n: int) =
@@ -277,29 +281,28 @@ when replayReexecs:
       else:
         check getFilePermissions(d) == {fpUserRead, fpUserWrite, fpUserExec}
 
-when defined(posix):
-  suite "INT-28: a run a limit stops is undecided":
-    test "SIGXCPU reads as stopped at the CPU limit":
-      let c = runChild("sig:" & $SIGXCPU, 30_000)
-      checkpoint describe(c)
+suite "INT-28: a run a limit stops is undecided":
+  test "each limit's signal reads as stopped at that limit":
+    # Every signal the platform's limits stop a child with; none on Windows.
+    for (sig, limit) in replayLimitSignals():
+      let c = runChild("sig:" & $sig, 30_000)
+      checkpoint limit & ": " & describe(c)
       check c.ending == reTimedOut
-      check "CPU" in c.why
+      check limit in c.why
 
-    test "SIGXFSZ reads as stopped at the file-size limit":
-      let c = runChild("sig:" & $SIGXFSZ, 30_000)
-      checkpoint describe(c)
-      check c.ending == reTimedOut
-      check "file-size" in c.why
+  test "CPU and file size are limited where a signal enforces them":
+    let path = scratch("limits")
+    defer: removeFile(path)
+    let c = runChild("limits:" & path, 30_000)
+    check c.ending == reFinished
+    let f = readFile(path).splitWhitespace()
+    var limits: seq[string]
+    for (_, limit) in replayLimitSignals(): limits.add limit
+    check (parseBiggestInt(f[1]) > 0) == ("CPU" in limits)
+    check parseBiggestInt(f[2]) ==
+      (if "file-size" in limits: replayFileSizeLimit else: -1'i64)
 
-    test "CPU and file size are limited":
-      let path = scratch("limits")
-      defer: removeFile(path)
-      let c = runChild("limits:" & path, 30_000)
-      check c.ending == reFinished
-      let f = readFile(path).splitWhitespace()
-      check parseBiggestInt(f[1]) > 0
-      check parseBiggestInt(f[2]) == replayFileSizeLimit
-
+when posixChild:
   suite "INT-29: a host with fd 0-2 closed":
     test "its report still arrives":
       let saved = [dup(0), dup(1), dup(2)]
@@ -312,7 +315,7 @@ when defined(posix):
       check c.ending == reFinished
       check c.bound
 
-  when replayReexecs:
+  when replayExecs:
     suite "INT-29: the re-executed child's start":
       test "it inherits no descriptor the host left open":
         let null = posix.open("/dev/null", O_RDONLY)   # no O_CLOEXEC

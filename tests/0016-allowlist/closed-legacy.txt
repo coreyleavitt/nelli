@@ -36,3 +36,6 @@ AUD-06	a CI design note (the sampled vm-alias job); no engine behaviour, so no c
 INT-19	a local one-off run against a PCRE 8.37 no-JIT build, recorded in the row; no cell and no pin record
 INT-53	a CI-intake tooling defect (scripts/rfc0016-intake.sh, pinned by its --self-test); no engine behaviour, so no cell and no pin record
 INT-54	a compile-time VM budget observation on the msvc nightly leg (the suites it names write no record; tsymex_0016_w3z_r10_nestedreplay pins the budget); no engine cell
+INT-28	replay-child process hardening (group kill, limits, pipe and exec plumbing); no engine verdict, so no cell; its pins are process suites that call no K9 verb
+INT-29	replay-child start-up hardening (witness-taken protocol, private-dir ACL, fd hygiene); no engine verdict, so no cell; its pins are process suites that call no K9 verb
+INT-30	replay wire-codec hardening (zero-size elements, allocation, depth) and the refc fiber guard; no engine verdict, so no cell; its pins are codec and process suites that call no K9 verb

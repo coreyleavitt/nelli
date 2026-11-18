@@ -192,8 +192,10 @@ const stdlibSnippets = @[
   sn("math.sgn", "sgn(t)"),
   sn("math.signbit", "ord(signbit(float(t)))"),
   sn("math.sqrt", "int(sqrt(float(t + 128)))"),
-  sn("math.toFloat32", "int(float32(t) * 0.5'f32)"),
-  sn("math.toFloat64", "int(toFloat(t) * 0.5)"),
+  # the lowering's names for a float width change (`convertFloatWidth`):
+  # float64 -> float32 narrows, float32 -> float64 widens
+  sn("math.toFloat32", "int(float32(float(t) * 0.5))"),
+  sn("math.toFloat64", "int(float64(float32(t)) * 0.5)"),
   sn("math.trunc", "int(trunc(float(t) / 3.0))"),
   sn("system.%%", "t %% 5"),
   sn("system.*%", "t *% u"),
@@ -284,8 +286,13 @@ const typeClassSnippets = @[
   sn("string", "N_f($t)", top = "proc N_f(s: string): int = s.len"),
   sn("tuple", "N_f((t, u))", top = "proc N_f(x: (int, int)): int = x[0] * x[1]"),
   sn("var", "V_x", "var V_x = t\n  N_f(V_x)", top = "proc N_f(x: var int) = x = x + 3"),
-  sn("cstring", "N_f(cstring(if t > 0: \"ab\" else: \"c\"))",
-     top = "proc N_f(s: cstring): int = len(s)"),
+  # the row is the by-value formal site only (a cstring parameter of the
+  # SUT, a `len` of one or a conversion to one declines): the shape
+  # tsymex_0016_k2c_typeclass pins, a global built from literals and handed
+  # to a callee that compares it
+  sn("cstring", "N_f(N_g)", "N_g = (if t > 3: \"abc\" else: \"x\")",
+     top = "var N_g: cstring\n" &
+           "proc N_f(c: cstring): int = (if c == \"abc\": 3 else: 1)"),
   sn("variant/omittedField/array", "V_v.n + V_v.w[1]",
      "let V_v = N_V(k: true, n: t)",
      top = "type N_V = object\n  case k: bool\n  of true:\n    n: int\n" &

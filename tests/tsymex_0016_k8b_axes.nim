@@ -58,6 +58,12 @@ suite "K8b axes: the fragments and the denominator":
     for p in ps:
       check axisRaises(p) == (twComm notin applicable(p))
 
+  test "a one-row program takes no reordering relation (reversing is a no-op)":
+    for p in genAxis(axMagic, 1, 3, 1):
+      check twComm notin applicable(p)
+      for tw in applicable(p):
+        check render(p, "g", tw) != render(p, "g", twNone)
+
 suite "K8b axes: the figure":
   test "a row is exercised only by an exact record":
     let f = axisFigure(@[rec(axMagic, @["AddI", "SubI"]),

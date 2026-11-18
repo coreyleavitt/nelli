@@ -445,7 +445,9 @@ func axisRaises*(p: Prog): bool =
 func applicable*(p: Prog): seq[Twin] =
   case p.shape
   of shAxis:
-    return (if axisRaises(p): @[twDead, twExtract, twTemplate]
+    # reversing one fragment is no new program; reversing raising ones
+    # changes which raise is observed
+    return (if axisRaises(p) or p.rows.len < 2: @[twDead, twExtract, twTemplate]
             else: @[twDead, twExtract, twTemplate, twComm])
   of shCallShape:
     # `let r` -> `var r` needs a `let` (the assign site already has a `var`)
@@ -676,6 +678,9 @@ proc emitCases*(cases: seq[Case]; plant: bool; tag: string): NimNode =
     runs.add "  o = GenOutcome(progId: " & $p.id & ", variant: \"" &
       twinName(tw) & "\", shape: " & $p.shape & ", exhaustive: " & $ex &
       ")\n" &
+      "  when defined(k8aTrace):\n" &
+      "    stderr.writeLine \"K8ATRACE " & name & "\"\n" &
+      "    let t0_" & name & " = epochTime()\n" &
       "  try:\n" &
       "    discard pinExactImpl(" & name &
       ", claimed(captureRes(symexFind(" & name & ", tLabel(\"hit\"), " &
@@ -687,6 +692,10 @@ proc emitCases*(cases: seq[Case]; plant: bool; tag: string): NimNode =
       "    o.msg = e.msg\n" &
       "    o.kind = if o.trusted and o.status != \"sxUnknown\": okDisagree " &
       "else: okDecline\n" &
+      "  when defined(k8aTrace):\n" &
+      "    stderr.writeLine \"K8ATIME " & name & " \", " &
+      "int((epochTime() - t0_" & name & ") * 1000), \"ms \", o.kind, \" \", o.status, " &
+      "\" \", o.msg.splitLines()[0]\n" &
       "  result.add o\n"
   src.add "proc runBatch_" & tag & "*(): seq[GenOutcome] =\n  var o: GenOutcome\n"
   src.add runs

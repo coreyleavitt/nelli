@@ -29,6 +29,10 @@
 ## know; a `ref` to an inheritable object, whose dynamic type the encoding does
 ## not carry). A case object crosses: the discriminator, then the active
 ## branch (RFC-0016 PRC-01).
+##
+## RFC-0016 INT-30: the reader trusts no count. Every seq element is backed by
+## at least one byte (`wirePad`), elements are allocated as they are read, and
+## both ends refuse a value nested deeper than `wireDepthLimit`.
 
 import std/[macros, tables]
 import std/typetraits
@@ -74,6 +78,9 @@ type
       ## RFC-0016 W3-z R11. The settle's check that every proc value names a
       ## routine of the table (`symex.emitProcValueLift`): nothing is handed
       ## to a child, so an `envBenign` environment is not written.
+    depth: int
+      ## RFC-0016 INT-30. How many `wirePut` calls deep the value being
+      ## written is (`wireDepthLimit`).
   WireReader* = object
     data*: string
     pos: int
@@ -83,6 +90,23 @@ type
     procs*: seq[pointer]
     envGet*: seq[EnvGet]
       ## RFC-0016 W3-z R11. Per slot of `procs`, `WireWriter.envPut`'s reader.
+    depth: int
+      ## RFC-0016 INT-30. As `WireWriter.depth`, for the value being read.
+
+const
+  wireDepthLimit* = 1000
+    ## RFC-0016 INT-30. The most `wirePut` (or `wireGet`) calls one inside
+    ## another a value may take to be written (or read): one per level of
+    ## nesting, so a `ref` chain takes two per cell (the cell, its object).
+    ## Past it the value is refused with `WireError` (the replay declines)
+    ## instead of overflowing the stack: the host's on the way out, the
+    ## child's on the way in. 1000 frames stay well inside a 1 MiB Windows
+    ## thread stack, and inside a debug build's `nimCallDepthLimit` (2000)
+    ## with room for the caller's.
+  wirePad = '\xA5'
+    ## RFC-0016 INT-30. The byte written for each element of a seq whose
+    ## elements otherwise take none (`wireEmpty`), so that every element of
+    ## every seq is backed by at least one byte of the witness.
 
 proc initWireReader*(data: string; procs: seq[pointer] = @[]): WireReader =
   WireReader(data: data, procs: procs)
@@ -111,7 +135,45 @@ proc putLen(w: var WireWriter; n: int) =
 proc getLen(r: var WireReader): int =
   var v: int64
   r.getRaw(addr v, 8)
+  # RFC-0016 INT-28 (R1-32, the wire length overflow): on a 32-bit target an
+  # `int64` past `int` is a witness the host did not write, not a defect.
+  when sizeof(int) < 8:
+    if v < int64(low(int)) or v > int64(high(int)):
+      raise newException(WireError, "the replay's witness is malformed")
   int(v)
+
+template deeper(x: var (WireWriter | WireReader); body: untyped) =
+  ## RFC-0016 INT-30. `body` one call deeper, refused past `wireDepthLimit`.
+  if x.depth >= wireDepthLimit:
+    raise newException(WireError, "a value nested more than " &
+                       $wireDepthLimit & " levels deep (a long chain of " &
+                       "references), which the child cannot be given")
+  inc x.depth
+  body
+  dec x.depth
+
+proc wireEmpty[T](t: typedesc[T]): bool =
+  ## RFC-0016 INT-30. A value of `T` takes no bytes on the wire: an object,
+  ## tuple or array of nothing but such values, or a nil `ptr` (the only one
+  ## that is written). Evaluated at compile time.
+  when T is distinct:
+    wireEmpty(distinctBase(T))
+  elif T is (ptr | pointer | cstring):
+    true
+  elif T is array:
+    when high(T) < low(T):
+      true
+    else:
+      var a: T
+      wireEmpty(typeof(a[low(a)]))
+  elif T is (tuple | object):
+    var v: T
+    var empty = true
+    for _, f in fieldPairs(v):
+      if not wireEmpty(typeof(f)): empty = false
+    empty
+  else:
+    false
 
 proc getCount(r: var WireReader): int =
   ## A string's or seq's length (RFC-0005 0.9.1, review R1-20): never
@@ -257,178 +319,198 @@ proc getEnv(r: var WireReader; code: pointer; at: int): pointer =
   p
 
 proc wirePut*[T](w: var WireWriter; x: T) =
-  when T is distinct:
-    w.wirePut(distinctBase(T)(x))
-  elif T is (SomeNumber | bool | char | enum | set | range):
-    var v = x
-    w.putRaw(addr v, sizeof(T))
-  elif T is string:
-    w.putLen(x.len)
-    if x.len > 0: w.putRaw(unsafeAddr x[0], x.len)
-  elif T is seq:
-    w.putLen(x.len)
-    for e in x: w.wirePut(e)
-  elif T is array:
-    for e in x: w.wirePut(e)
-  elif T is ref:
-    if x == nil:
-      w.putLen(-1)
-    else:
-      let key = cast[pointer](x)
-      if key in w.cells:
-        let id = w.cells[key]
-        if w.envCells[id]:
-          raise newException(WireError, "a `ref` at the address of a " &
-                             "closure environment, which the child cannot be given")
-        w.putLen(id)
+  w.deeper:
+    when T is distinct:
+      w.wirePut(distinctBase(T)(x))
+    elif T is (SomeNumber | bool | char | enum | set | range):
+      var v = x
+      w.putRaw(addr v, sizeof(T))
+    elif T is string:
+      w.putLen(x.len)
+      if x.len > 0: w.putRaw(unsafeAddr x[0], x.len)
+    elif T is seq:
+      # RFC-0016 INT-30: an element that takes no bytes takes `wirePad`'s one.
+      const pad = wireEmpty(typeof(x[0]))
+      w.putLen(x.len)
+      for e in x:
+        when pad: w.data.add wirePad
+        w.wirePut(e)
+    elif T is array:
+      for e in x: w.wirePut(e)
+    elif T is ref:
+      if x == nil:
+        w.putLen(-1)
       else:
-        let id = w.envCells.len
-        w.cells[key] = id
-        w.envCells.add false
-        w.putLen(id)
-        w.wirePut(x[])
-  elif T is (tuple | object):
-    for _, v in fieldPairs(x):
-      w.wirePut(v)
-  elif T is ptr:
-    # RFC-0016 PRC-01. What a non-nil `ptr` addresses is unknown memory (a
-    # variable, a field of another object, a C allocation): the child cannot
-    # be given that address, and a fresh cell would silently drop the aliasing.
-    # A `ptr` the solver's model puts in a witness is rebuilt by the child from
-    # the model (`ChildWitness`), not carried here.
-    if not x.isNil:
-      raise newException(WireError, "a non-nil `ptr`, whose target the child cannot be given")
-  elif T is (pointer | cstring):
-    if not x.isNil:
-      raise newException(WireError, "a non-nil `" & (when T is pointer: "pointer" else: "cstring") & "`, whose target the child cannot be given")
-  elif (T is proc):
-    # RFC-0016 PRC-02. By identity: the index of the routine in `procs`. A
-    # closure type is a code pointer and an environment; one with an
-    # environment holds the host's heap, which has no routine to name.
-    # RFC-0016 W3-z R10: one with an environment crosses when its routine is
-    # a slot allowed one (`envOk`) and the environment is its bytes alone
-    # (`envRefusal`); the child rebuilds it (`getEnv`).
-    if x.isNil:
-      w.putLen(-1)
-    else:
-      when sizeof(T) > sizeof(pointer):
-        let env = rawEnv(x)
-        let code = rawProc(x)
-      else:
-        let env: pointer = nil
-        let code = cast[pointer](x)
-      var at = -1
-      for i, p in w.procs:
-        if p == code:
-          at = i
-          break
-      # RFC-0016 W3-z R11: an environment whose destructor runs no user code
-      # (`envBenign`) is named by the settle's scratch wire (a forked child
-      # copies it) and written by its one value's codec (`envPut`) to a
-      # re-executed child.
-      var put: EnvPut = nil
-      var skip = false
-      if env != nil:
-        if at < 0:
-          raise newException(WireError, "a closure with a captured environment, whose routine the replayed code does not name (or names only inside a routine, where its address cannot be taken), which the child cannot be given")
-        let plain = at < w.envOk.len and w.envOk[at]
-        let benign = at < w.envBenign.len and w.envBenign[at]
-        let why = envRefusal(env)
-        if plain and why.len == 0:
-          discard
-        elif benign:
-          let typed = envTypedRefusal(env)
-          if typed.len > 0:
-            raise newException(WireError, typed & ", which the child cannot be given")
-          if w.scratch:
-            skip = true
-          elif at < w.envPut.len and w.envPut[at] != nil:
-            put = w.envPut[at]
-          elif at < w.envWhy.len and w.envWhy[at].len > 0:
-            raise newException(WireError, w.envWhy[at])
-          else:
-            raise newException(WireError, "a closure whose captured environment has no codec, which the child cannot be given")
-        elif not plain:
-          raise newException(WireError, "a closure with a captured environment holding a value that is not its bytes alone (an address, a buffer or a type header), which the child cannot be given")
+        let key = cast[pointer](x)
+        if key in w.cells:
+          let id = w.cells[key]
+          if w.envCells[id]:
+            raise newException(WireError, "a `ref` at the address of a " &
+                               "closure environment, which the child cannot be given")
+          w.putLen(id)
         else:
-          raise newException(WireError, why & ", which the child cannot be given")
-      if at < 0:
-        raise newException(WireError, "a proc value naming no routine the replayed code names, so the child could not run it")
-      w.putLen(at)
-      when sizeof(T) > sizeof(pointer):
-        if env == nil or skip: w.putLen(-1)
-        else: w.putEnv(code, env, put)
-  else:
-    raise newException(WireError, "a value of an unmarshallable type")
+          let id = w.envCells.len
+          w.cells[key] = id
+          w.envCells.add false
+          w.putLen(id)
+          w.wirePut(x[])
+    elif T is (tuple | object):
+      for _, v in fieldPairs(x):
+        w.wirePut(v)
+    elif T is ptr:
+      # RFC-0016 PRC-01. What a non-nil `ptr` addresses is unknown memory (a
+      # variable, a field of another object, a C allocation): the child cannot
+      # be given that address, and a fresh cell would silently drop the aliasing.
+      # A `ptr` the solver's model puts in a witness is rebuilt by the child from
+      # the model (`ChildWitness`), not carried here.
+      if not x.isNil:
+        raise newException(WireError, "a non-nil `ptr`, whose target the child cannot be given")
+    elif T is (pointer | cstring):
+      if not x.isNil:
+        raise newException(WireError, "a non-nil `" & (when T is pointer: "pointer" else: "cstring") & "`, whose target the child cannot be given")
+    elif (T is proc):
+      # RFC-0016 PRC-02. By identity: the index of the routine in `procs`. A
+      # closure type is a code pointer and an environment; one with an
+      # environment holds the host's heap, which has no routine to name.
+      # RFC-0016 W3-z R10: one with an environment crosses when its routine is
+      # a slot allowed one (`envOk`) and the environment is its bytes alone
+      # (`envRefusal`); the child rebuilds it (`getEnv`).
+      if x.isNil:
+        w.putLen(-1)
+      else:
+        when sizeof(T) > sizeof(pointer):
+          let env = rawEnv(x)
+          let code = rawProc(x)
+        else:
+          let env: pointer = nil
+          let code = cast[pointer](x)
+        var at = -1
+        for i, p in w.procs:
+          if p == code:
+            at = i
+            break
+        # RFC-0016 W3-z R11: an environment whose destructor runs no user code
+        # (`envBenign`) is named by the settle's scratch wire (a forked child
+        # copies it) and written by its one value's codec (`envPut`) to a
+        # re-executed child.
+        var put: EnvPut = nil
+        var skip = false
+        if env != nil:
+          if at < 0:
+            raise newException(WireError, "a closure with a captured environment, whose routine the replayed code does not name (or names only inside a routine, where its address cannot be taken), which the child cannot be given")
+          let plain = at < w.envOk.len and w.envOk[at]
+          let benign = at < w.envBenign.len and w.envBenign[at]
+          let why = envRefusal(env)
+          if plain and why.len == 0:
+            discard
+          elif benign:
+            let typed = envTypedRefusal(env)
+            if typed.len > 0:
+              raise newException(WireError, typed & ", which the child cannot be given")
+            if w.scratch:
+              skip = true
+            elif at < w.envPut.len and w.envPut[at] != nil:
+              put = w.envPut[at]
+            elif at < w.envWhy.len and w.envWhy[at].len > 0:
+              raise newException(WireError, w.envWhy[at])
+            else:
+              raise newException(WireError, "a closure whose captured environment has no codec, which the child cannot be given")
+          elif not plain:
+            raise newException(WireError, "a closure with a captured environment holding a value that is not its bytes alone (an address, a buffer or a type header), which the child cannot be given")
+          else:
+            raise newException(WireError, why & ", which the child cannot be given")
+        if at < 0:
+          raise newException(WireError, "a proc value naming no routine the replayed code names, so the child could not run it")
+        w.putLen(at)
+        when sizeof(T) > sizeof(pointer):
+          if env == nil or skip: w.putLen(-1)
+          else: w.putEnv(code, env, put)
+    else:
+      raise newException(WireError, "a value of an unmarshallable type")
 
 proc wireGet*[T](r: var WireReader; x: var T) =
-  when T is distinct:
-    var b: distinctBase(T)
-    r.wireGet(b)
-    x = T(b)
-  elif T is (SomeNumber | bool | char | enum | set | range):
-    r.getRaw(addr x, sizeof(T))
-  elif T is string:
-    let n = r.getCount()
-    x = newString(n)
-    if n > 0: r.getRaw(addr x[0], n)
-  elif T is seq:
-    let n = r.getCount()
-    x.setLen(n)
-    for i in 0 ..< n: r.wireGet(x[i])
-  elif T is array:
-    for i in low(x) .. high(x): r.wireGet(x[i])
-  elif T is ref:
-    let id = r.getLen()
-    if id < 0:
-      x = nil
-    elif id < r.cells.len:
-      if r.envCells[id]:
+  r.deeper:
+    when T is distinct:
+      var b: distinctBase(T)
+      r.wireGet(b)
+      x = T(b)
+    elif T is (SomeNumber | bool | char | enum | set | range):
+      r.getRaw(addr x, sizeof(T))
+    elif T is string:
+      let n = r.getCount()
+      x = newString(n)
+      if n > 0: r.getRaw(addr x[0], n)
+    elif T is seq:
+      # RFC-0016 INT-30. Each element is backed by at least one byte (`wirePad`
+      # for one that takes none), so `getCount` bounds the count by the bytes
+      # left. The elements are added as they are read, never allocated ahead
+      # of the bytes that back them: a count of 4 KiB elements backed by a byte
+      # each must not allocate 4 KiB per byte before the witness runs out.
+      const pad = wireEmpty(typeof(x[0]))
+      let n = r.getCount()
+      x.setLen(0)
+      for i in 0 ..< n:
+        when pad:
+          var b: char
+          r.getRaw(addr b, 1)
+          if b != wirePad:
+            raise newException(WireError, "the replay's witness is malformed")
+        var e: typeof(x[0])
+        r.wireGet(e)
+        x.add move(e)
+    elif T is array:
+      for i in low(x) .. high(x): r.wireGet(x[i])
+    elif T is ref:
+      let id = r.getLen()
+      if id < 0:
+        x = nil
+      elif id < r.cells.len:
+        if r.envCells[id]:
+          raise newException(WireError, "the replay's witness is malformed")
+        x = cast[T](r.cells[id])
+      elif id == r.cells.len:
+        new(x)
+        GC_ref(x)       # the graph may hold it only through a later cycle
+        r.cells.add cast[pointer](x)
+        r.envCells.add false
+        r.wireGet(x[])
+      else:
         raise newException(WireError, "the replay's witness is malformed")
-      x = cast[T](r.cells[id])
-    elif id == r.cells.len:
-      new(x)
-      GC_ref(x)       # the graph may hold it only through a later cycle
-      r.cells.add cast[pointer](x)
-      r.envCells.add false
-      r.wireGet(x[])
-    else:
-      raise newException(WireError, "the replay's witness is malformed")
-  elif T is object:
-    # RFC-0016 PRC-01. A case object: `fieldPairs` yields the discriminator and
-    # then the fields of the branch it selects, so the writer's order (the
-    # discriminator first, then the active branch) is read back by assigning
-    # the discriminator before the branch is visited. `reset` first: the target
-    # may hold another branch (a global), whose fields the assignment would
-    # otherwise leave unreleased.
-    reset(x)
-    {.cast(uncheckedAssign).}:
+    elif T is object:
+      # RFC-0016 PRC-01. A case object: `fieldPairs` yields the discriminator and
+      # then the fields of the branch it selects, so the writer's order (the
+      # discriminator first, then the active branch) is read back by assigning
+      # the discriminator before the branch is visited. `reset` first: the target
+      # may hold another branch (a global), whose fields the assignment would
+      # otherwise leave unreleased.
+      reset(x)
+      {.cast(uncheckedAssign).}:
+        for _, v in fieldPairs(x):
+          r.wireGet(v)
+    elif T is tuple:
       for _, v in fieldPairs(x):
         r.wireGet(v)
-  elif T is tuple:
-    for _, v in fieldPairs(x):
-      r.wireGet(v)
-  elif T is (ptr | pointer | cstring):
-    x = nil
-  elif (T is proc):
-    let at = r.getLen()
-    if at < 0:
+    elif T is (ptr | pointer | cstring):
       x = nil
-    elif at < r.procs.len:
-      when sizeof(T) > sizeof(pointer):
-        # A code pointer and its environment (RFC-0016 W3-z R10), or none.
-        var c: array[2, pointer]
-        c[0] = r.procs[at]
-        if c[0] == nil:
-          raise newException(WireError, "the replay's witness is malformed")
-        c[1] = r.getEnv(c[0], at)
-        copyMem(addr x, addr c[0], sizeof(T))
+    elif (T is proc):
+      let at = r.getLen()
+      if at < 0:
+        x = nil
+      elif at < r.procs.len:
+        when sizeof(T) > sizeof(pointer):
+          # A code pointer and its environment (RFC-0016 W3-z R10), or none.
+          var c: array[2, pointer]
+          c[0] = r.procs[at]
+          if c[0] == nil:
+            raise newException(WireError, "the replay's witness is malformed")
+          c[1] = r.getEnv(c[0], at)
+          copyMem(addr x, addr c[0], sizeof(T))
+        else:
+          x = cast[T](r.procs[at])
       else:
-        x = cast[T](r.procs[at])
+        raise newException(WireError, "the replay's witness is malformed")
     else:
-      raise newException(WireError, "the replay's witness is malformed")
-  else:
-    raise newException(WireError, "a value of an unmarshallable type")
+      raise newException(WireError, "a value of an unmarshallable type")
 
 proc wireableRef(t: NimNode; seen: var seq[NimNode]): bool
 proc wireableCase(c: NimNode; seen: var seq[NimNode]): bool

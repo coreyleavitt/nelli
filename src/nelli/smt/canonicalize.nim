@@ -810,8 +810,17 @@ const renderAsChoicesVersion* = "12"
   ##   memberships over a ground subject; a branch it left open is decided,
   ##   so a tail or a replay can fork less and name fewer kinds. No key
   ##   bytes change.
+  ## - RFC-0016 W4 rv0005-lows (381->404; 382-403 are reserved for other W4
+  ##   work): a replay's child ends otherwise for a few SUTs. A re-executed
+  ##   child that never took its witness (a failed `execve`, a report it
+  ##   could not open) is no run (`reRefused`, run-dependent) where it was a
+  ##   crash; a child stopped by `SIGXCPU` or `SIGXFSZ` at the replay's new
+  ##   CPU or file-size limit is undecided (`reTimedOut`) where it was a
+  ##   crash; a value nested past `wireDepthLimit` declines where it was
+  ##   handed over (or overflowed a stack). A cached crash or claim of those
+  ##   is stale. No key bytes change.
 
-const symexWalkerVersion* = "381"
+const symexWalkerVersion* = "404"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

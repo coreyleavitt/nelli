@@ -1441,30 +1441,36 @@ id = "INT-28"
 table = "5.8c"
 title = "Replay child lifecycle and limits: SUT-started grandchildren survive when the child ends by itself; no memory cap on macOS/BSD and no CPU/FSIZE/NPROC limits or Windows `ActiveProcessLimit`; `pipe2`, the `PDEATHSIG` thread, `WaitForSingleObject` wrap, `resumeThread`, wire length overflow, \"(deleted)\" exe, non-atomic counter; ~~`waitpid(-1)` elsewhere~~ (only `waitpid(pid, …)` at `:480,1115,1140`) and no `setpgid` off Linux"
 class = "crash (hardening); not compared against `main`"
-state = "moved"
-note = ": slice `rv0005-lows`"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-a`). An ended child is left unwaited (`waitid` with `WNOWAIT`) until its group is killed, so what the SUT started dies however the child ends, on the fork and the POSIX re-exec paths alike (RED: `crash` on fork, all three endings on re-exec); `setpgid` and the group kill on every POSIX system; Windows already killed its job, now with `ActiveProcessLimit`. Limits: memory relative to the mapped address space by a portable probe (`memoryInUse`; macOS enforces none), CPU (`cpuBound`), file size (`replayFileSizeLimit`), and on Linux processes (`processBound`); `SIGXCPU`/`SIGXFSZ` read as `reTimedOut`, not a crash (RED: signalled). `pipe2` where it exists, `PDEATHSIG` checked against the host's pid after `prctl` and set on the re-exec child too (RED: the re-exec child outlived a killed host), `ResumeThread` checked, the re-exec target `/proc/self/exe` on Linux (RED: a deleted program could not replay), the replay count atomic. Already fixed by `c2e7751f`: the `WaitForSingleObject` bound (slices) and the `r.pos + n` wire overflow; `getLen` now also range-checks on a 32-bit target. Not observable here, so code only: the `pipe2` race, the `PDEATHSIG` race, `ResumeThread` failure, the counter race (its test passes on both sides). Windows evidence: the `symex-mingw` run of the pins"
+slice = "rv0005-lows"
 source = "0005 review R1-24, R1-31, R1-32, R2-25, R2-27"
 cells = []
+pins = ["tsymex_0016_int28_child", "tsymex_0016_int28_child_reexec"]
 
 [[row]]
 id = "INT-29"
 table = "5.8c"
 title = "Replay child start-up robustness: a POSIX re-exec `execve` failure does `_exit(127)` and reads as a SUT crash; a child that cannot open its out file writes to nil and segfaults; the Windows private dir inherits the parent's ACL; the re-exec child inherits non-CLOEXEC fds; with fd 0-2 closed in the host the report fd is clobbered"
 class = "crash (hardening); not compared against `main`"
-state = "moved"
-note = ": slice `rv0005-lows`"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-a`). A re-executed child takes its witness (removes `in`) only once its report is open; the host reads an empty report beside an untaken witness as no run (`reRefused`, run-dependent), which covers a failed `execve` (RED: exit 127, a crash) and a report the child cannot open (RED: signal 11 from a write to nil). The Windows private directory is created with a protected DACL naming the user alone (`replayPrivateDir`; pinned through `icacls` on Windows, mode 0700 on POSIX). The re-exec child closes every fd from 3 before `execve` (`close_range`; RED: a non-CLOEXEC fd reached it). The report pipe is moved above fd 2 (RED: a host with fd 0-2 closed read `exited 0`)"
+slice = "rv0005-lows"
 source = "0005 review R2-21 to R2-24, R2-26"
 cells = []
+pins = ["tsymex_0016_int28_child", "tsymex_0016_int28_child_reexec"]
 
 [[row]]
 id = "INT-30"
 table = "5.8c"
 title = "The wire reader accepts a zero-size seq, amplifies allocation and does not bound recursion depth; unverified: the Windows fiber stack under refc"
 class = "crash (hardening); the fiber half is unverified"
-state = "moved"
-note = ": slice `rv0005-lows`"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-a`). An element that takes no bytes is written with a pad byte, so every seq count is backed by its bytes (RED: a crafted count read the next value's bytes, and a real seq of empty objects at the end was refused); elements are added as read, never allocated ahead (RED: 4 KiB per claimed element); `wireDepthLimit` bounds nesting at both ends with `WireError` (RED: the writer overran the call depth). The Windows fiber under refc was not run here: by construction a tracing collector scans from the fiber's stack to the thread's recorded bottom, so the SUT now runs on a fiber only under ARC/ORC (`fiberSafe`); `tsymex_0016_int30_refcfiber` (`--mm:refc`) runs the fiber path on Windows, whose evidence is the `symex-mingw` run of this branch; no RED was observed for it"
+slice = "rv0005-lows"
 source = "0005 review R2-28, R2-29"
 cells = []
+pins = ["tsymex_0016_int30_wire", "tsymex_0016_int30_refcfiber"]
 
 [[row]]
 id = "INT-31"

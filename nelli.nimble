@@ -1960,6 +1960,12 @@ task test, "Run the test suite":
             "tsymex_rfc0005_r1_findingapi",
             "tsymex_rfc0005_r1_replaychild",
             "tsymex_rfc0005_r1_replaychild_reexec",
+            # RFC-0016 INT-28 to INT-30: the replay child's lifecycle,
+            # limits and start-up, and the wire reader's bounds.
+            "tsymex_0016_int28_child",
+            "tsymex_0016_int28_child_reexec",
+            "tsymex_0016_int30_wire",
+            "tsymex_0016_int30_refcfiber",
             "tsymex_rfc0005_r1_keyflags",
             "tsymex_rfc0005_r1_keyimpl",
             "tsymex_rfc0005_r1_keymethod",

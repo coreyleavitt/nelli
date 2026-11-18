@@ -136,8 +136,16 @@ proc domPut*[T](s: var seq[T]; v: sink T) {.inline.} =
 proc domLen*[T](s: seq[T]): int {.inline.} = system.len(s)
 
 proc domHas*[T](s: seq[T]; v: T): bool =
+  ## membership; a float compares by its bits (NaN is a member of a domain
+  ## that holds it, and -0.0 is not 0.0)
   for i in 0 ..< system.len(s):
-    if s[i] == v: return true
+    when T is SomeFloat:
+      when sizeof(T) == 4:
+        if cast[uint32](s[i]) == cast[uint32](v): return true
+      else:
+        if cast[uint64](s[i]) == cast[uint64](v): return true
+    else:
+      if s[i] == v: return true
 
 func exhaustive*[T](v: openArray[T]): Domain[T] =
   Domain[T](values: @v, exhaustive: true)
@@ -739,6 +747,7 @@ type
   StringHints* = object
     strs*: seq[string]   ## string and char literals of the SUT, in source order
     ints*: seq[int]      ## its small integer literals (length thresholds)
+    nums*: seq[float64]  ## its float literals and integer literals, as floats
 
 const
   stringDomainCap* = 2048
@@ -837,6 +846,125 @@ proc pairsExceed*(sizes: seq[int]; limit: int): bool =
     elif s > b: b = s
   a > 0 and b > 0 and a > limit div b
 
+# --- the float domain (K9d-8) ----------------------------------------------
+#
+# `boundaryOf(float64)` and `boundaryOf(float32)` (and `cfloat`, `cdouble`, a
+# float `range`, a distinct float through its base) are a deterministic finite
+# set in the parameter's own width, never the whole type, at most
+# `seqDomainCap` values, in priority order, each value once by its bits (so
+# -0.0 and 0.0 are two values and NaN is one):
+#
+# - the specials: +-0, +-1, NaN (quiet), +-Inf, 0.5, +-the smallest
+#   subnormal, +-the smallest normal, +-the largest finite, the two
+#   neighbours of 1;
+# - the SUT's own float and integer literals (`StringHints.nums`, at most
+#   `floatMaxLiterals`, in source order), each in the parameter's width with
+#   its neighbour either way (a float32 neighbour is one float32 step, not a
+#   float64 step rounded back), then each negated with its neighbours;
+# - the tail: +-the largest subnormal, the step above the smallest normal,
+#   -0.5, the neighbours of -1, +-2, the rounding ties 1.5 and 2.5, 0.1, 3,
+#   10, 100, 1e10, 1e-10, the step below the largest finite, and 2^e - 1,
+#   2^e and both its neighbours, negated too, at the integer-exactness and
+#   integer-width edges (e in 7, 8, 15, 16, 24, 31, 32, 53, 63, 64); a
+#   float64 domain also holds float32's largest finite and the step above it,
+#   float32's smallest subnormal and half of it (a narrowing conversion's
+#   overflow and underflow edges).
+#
+# A float `range` keeps the values inside it (NaN is never inside). A float
+# thinned to cross with other fields keeps its first `stringCore` values:
+# the specials and the leading literals with their neighbours.
+
+const
+  floatMaxLiterals* = 32
+    ## the SUT's float and integer literals a float domain takes
+  floatCoreLiterals = 16
+    ## the leading literals placed before the negations and the fixed tail
+
+proc floatsOfBits*(bs: openArray[uint64]): seq[float64] =
+  ## the harvested literals, carried as their bits (`hintsExpr`)
+  for b in bs: domPut(result, cast[float64](b))
+
+proc fStep[F: float32 | float64](x: F; up: bool): F =
+  when F is float32:
+    type U = uint32
+  else:
+    type U = uint64
+  if x != x: return x
+  if x == F(0.0):
+    let m = cast[F](U(1))
+    return (if up: m else: -m)
+  if (up and x == F(Inf)) or (not up and x == F(-Inf)): return x
+  let b = cast[U](x)
+  if (x > F(0.0)) == up: cast[F](b + 1) else: cast[F](b - 1)
+
+proc fNextUp*[F: float32 | float64](x: F): F =
+  ## the next float of `x`'s width above it (IEEE-754 nextUp; NaN stays)
+  fStep(x, true)
+
+proc fNextDown*[F: float32 | float64](x: F): F =
+  ## the next float of `x`'s width below it
+  fStep(x, false)
+
+proc floatKey[F: float32 | float64](x: F): uint64 {.inline.} =
+  when F is float32: uint64(cast[uint32](x)) else: cast[uint64](x)
+
+proc floatDomainValues*[F: float32 | float64](nums: seq[float64]): seq[F] =
+  ## The float domain of one width for these literals (see above).
+  var seen = initHashSet[uint64]()
+  template put(v: F) =
+    block:
+      let x = v
+      if system.len(result) < seqDomainCap and
+         not seen.containsOrIncl(floatKey(x)):
+        domPut(result, x)
+  template nb(v: F) =
+    block:
+      let y = v
+      put y
+      put fNextUp(y)
+      put fNextDown(y)
+  when F is float32:
+    let negZero = cast[float32](0x8000_0000'u32)
+    let minNormal = cast[float32](0x0080_0000'u32)
+  else:
+    let negZero = cast[float64](0x8000_0000_0000_0000'u64)
+    let minNormal = cast[float64](0x0010_0000_0000_0000'u64)
+  let one = F(1.0)
+  let minSub = fNextUp(F(0.0))
+  let maxSub = fNextDown(minNormal)
+  let maxFin = fNextDown(F(Inf))
+  for x in [F(0.0), negZero, one, -one, F(NaN), F(Inf), F(-Inf), F(0.5),
+            minSub, -minSub, minNormal, -minNormal, maxFin, -maxFin,
+            fNextUp(one), fNextDown(one)]:
+    put x
+  var lits: seq[F]
+  for f in nums:
+    if domLen(lits) >= floatMaxLiterals: break
+    if f == f and f - f == 0.0: domPut(lits, F(f))
+  let lead = min(domLen(lits), floatCoreLiterals)
+  for i in 0 ..< lead: nb lits[i]
+  for i in 0 ..< lead: nb -lits[i]
+  for x in [maxSub, -maxSub, fNextUp(minNormal), F(-0.5), fNextUp(-one),
+            fNextDown(-one), F(2.0), F(-2.0), F(1.5), F(-1.5), F(2.5),
+            F(-2.5), F(0.1), F(-0.1), F(3.0), F(10.0), F(100.0), F(1e10),
+            F(-1e10), F(1e-10), fNextDown(maxFin), -fNextDown(maxFin)]:
+    put x
+  for e in [7, 8, 15, 16, 24, 31, 32, 53, 63, 64]:
+    let t = if e == 64: 18446744073709551616.0 else: float64(1'u64 shl e)
+    for s in [1.0, -1.0]:
+      put F(s * (t - 1.0))
+      nb F(s * t)
+      put F(s * (t + 1.0))
+  when F is float64:
+    let f32max = float64(fNextDown(float32(Inf)))
+    let f32sub = float64(fNextUp(float32(0.0)))
+    for x in [f32max, fNextUp(f32max), -f32max, -fNextUp(f32max), f32sub,
+              f32sub / 2.0, -f32sub]:
+      put x
+  for i in lead ..< domLen(lits):
+    nb lits[i]
+    nb -lits[i]
+
 proc harvestInto(n: NimNode; dir: string; h: var StringHints;
                  seen: var HashSet[string]) =
   const skipCalls = ["symexTarget", "newException", "echo", "symexLabel"]
@@ -849,6 +977,14 @@ proc harvestInto(n: NimNode; dir: string; h: var StringHints;
   of nnkIntLit .. nnkInt64Lit, nnkUIntLit .. nnkUInt64Lit:
     if n.intVal in 1 .. 256 and int(n.intVal) notin h.ints:
       h.ints.add int(n.intVal)
+    let f = if n.kind in nnkUIntLit .. nnkUInt64Lit: float64(cast[uint64](n.intVal))
+            else: float64(n.intVal)
+    if f notin h.nums and h.nums.len < floatMaxLiterals: h.nums.add f
+  of nnkFloatLit .. nnkFloat128Lit:
+    let f = n.floatVal
+    if f == f and f - f == 0.0 and h.nums.len < floatMaxLiterals and
+       not h.nums.anyIt(cast[uint64](it) == cast[uint64](f)):
+      h.nums.add f
   of nnkSym:
     if n.symKind in {nskProc, nskFunc, nskMethod, nskIterator, nskConverter,
                      nskConst}:
@@ -874,9 +1010,15 @@ proc hintsExpr(h: StringHints): NimNode =
   for s in h.strs: ss.add newLit(s)
   var ii = newNimNode(nnkBracket)
   for i in h.ints: ii.add newLit(i)
+  # a float literal as its bits: a decimal rendering of -0.0 or of a value
+  # at the edge of the type would not be the same float read back
+  var nn = newNimNode(nnkBracket)
+  for f in h.nums: nn.add newLit(cast[uint64](f))
+  let nums = newCall(bindSym"floatsOfBits", nn)
   nnkObjConstr.newTree(ident"StringHints",
     nnkExprColonExpr.newTree(ident"strs", nnkPrefix.newTree(ident"@", ss)),
-    nnkExprColonExpr.newTree(ident"ints", nnkPrefix.newTree(ident"@", ii)))
+    nnkExprColonExpr.newTree(ident"ints", nnkPrefix.newTree(ident"@", ii)),
+    nnkExprColonExpr.newTree(ident"nums", nums))
 
 macro harvestLiterals*(fn: typed): untyped =
   ## the SUT's string, char and small integer literals as `StringHints`
@@ -885,7 +1027,7 @@ macro harvestLiterals*(fn: typed): untyped =
 template prefixDomain*(T: typedesc): bool =
   ## a type whose generated domain is in priority order (its prefix is its core)
   T is string or T is cstring or T is seq or T is array or T is set or
-    T is Table or T is HashSet
+    T is Table or T is HashSet or T is SomeFloat
 
 proc thinDomain*[T](d: var Domain[T]) =
   ## A field of an aggregate too large to cross in full keeps its extremes and
@@ -1110,6 +1252,24 @@ proc coreOf*[E](d: Domain[E]; limit: int; spread: var int): seq[E] =
       if s.len > 0 and not domHas(result, s) and domHas(d.values, s):
         domPut(result, s)
     spread = domLen(result)
+  elif E is SomeFloat:
+    # the specials, then the SUT's first two literals with their neighbours
+    # (the domain holds them; a float range only those inside it)
+    for i in 0 ..< min(n, limit): domPut(result, d.values[i])
+    spread = domLen(result)
+    when sizeof(E) == 4:
+      type B = float32
+    else:
+      type B = float64
+    var added = 0
+    for li in 0 ..< min(domLen(stringHintsCur.nums), 2):
+      let y = B(stringHintsCur.nums[li])
+      for c in [y, fNextUp(y), fNextDown(y)]:
+        for i in 0 ..< n:
+          if added < collExtraMax and floatKey(B(d.values[i])) == floatKey(c) and
+             not domHas(result, d.values[i]):
+            domPut(result, d.values[i])
+            inc added
   elif prefixDomain(E):
     for i in 0 ..< min(n, limit): domPut(result, d.values[i])
     spread = domLen(result)
@@ -1368,6 +1528,23 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
     for x in [lo, lo + 1, -1, 0, 1, 7, hi - 1, hi]:
       if x >= lo and x <= hi and not domHas(vs, T(x)): domPut(vs, T(x))
     sampled(vs)
+  elif T is SomeFloat:
+    # in the parameter's own width; a float range keeps what lies inside it
+    when sizeof(T) == 4:
+      let base = floatDomainValues[float32](stringHintsCur.nums)
+    else:
+      let base = floatDomainValues[float64](stringHintsCur.nums)
+    # appended to the result's own field (a local `seq[T]` would not do:
+    # `cfloat` and `float32` are one Nim type but two C types, and the
+    # instances they share do not compile in C, as in K9d-7b)
+    for i in 0 ..< domLen(base):
+      let x = base[i]
+      when T is range:
+        if float64(x) >= float64(low(T)) and float64(x) <= float64(high(T)):
+          domPut(result.values, T(x))
+      else:
+        domPut(result.values, T(x))
+    result.exhaustive = false
   elif T is string:
     sampled(stringDomainValues(stringHintsCur))
   elif T is cstring:

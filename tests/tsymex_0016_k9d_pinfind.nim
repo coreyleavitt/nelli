@@ -11,7 +11,7 @@
 ## ordinal of at most 256 values, the boundary sample otherwise. The cell is
 ## `family:generic:k9d/<file>/<fn>/<target>`, so the record says which suite
 ## and which call it evidences.
-import std/[unittest, os, strutils, sequtils, tables, sets, algorithm]
+import std/[unittest, os, strutils, sequtils, tables, sets, algorithm, math]
 import nelli/symex
 import ./s8cu_helpers
 import ./k9d_hostile
@@ -230,6 +230,70 @@ proc sutRangedSeq(xs: seq[range[1..100]]; i: int) =
 
 proc sutRangedArr(a: array[3, range[10..20]]) =
   if a[1] == 13: symexTarget("hit")
+
+# ---- the float family (K9d-8) ----
+type
+  Meters = distinct float
+  UnitF = range[0.0 .. 1.0]
+  FObj = object
+    w: float32
+    n: int8
+
+proc sutFloatNever(x: float) =
+  if x > 2.0 and x < 1.0: symexTarget("hit")
+
+proc sutF32Never(x: float32) =
+  if x > 2.0'f32 and x < 1.0'f32: symexTarget("hit")
+
+proc sutCdoubleNever(x: cdouble; y: cfloat) =
+  if x > 2.0 and x < 1.0 and y == y: symexTarget("hit")
+
+proc sutMetersNever(m: Meters) =
+  if float(m) > 2.0 and float(m) < 1.0: symexTarget("hit")
+
+proc sutNaN(x: float) =
+  if x != x: symexTarget("hit")
+
+proc sutNaN32(x: float32) =
+  if x != x: symexTarget("hit")
+
+proc sutNegZero(x: float) =
+  if x == 0.0 and 1.0 / x < 0.0: symexTarget("hit")
+
+proc sutNegZero32(x: float32) =
+  if x == 0.0'f32 and 1.0'f32 / x < 0.0'f32: symexTarget("hit")
+
+proc sutFloatNeighbour(x: float) =
+  ## hits on exactly one value: the float64 after 0.1
+  if x > 0.1 and x <= 0.10000000000000002: symexTarget("hit")
+
+proc sutF32Neighbour(x: float32) =
+  ## hits on exactly one value: the float32 after 0.1'f32
+  if x > 0.1'f32 and x <= 0.10000001'f32: symexTarget("hit")
+
+proc sutFloatLits(x: float; k: int) =
+  if x > 0.75 and x < 0.25 and k == 1000: symexTarget("hit")
+
+proc sutFloatSeq(xs: seq[float]) =
+  if xs.len > 0 and xs[0] > 2.0 and xs[0] < 1.0: symexTarget("hit")
+
+proc sutFloatArr(a: array[2, float32]) =
+  if a[0] > 2.0'f32 and a[0] < 1.0'f32: symexTarget("hit")
+
+proc sutFloatTuple(t: (float, int)) =
+  if t[0] > 2.0 and t[0] < 1.0: symexTarget("hit")
+
+proc sutFloatObj(o: FObj) =
+  if o.w > 2.0'f32 and o.w < 1.0'f32: symexTarget("hit")
+
+proc sutFloatPair(x: float; y: float32) =
+  if x > 2.0 and x < 1.0 and y == y: symexTarget("hit")
+
+proc bitsOf(x: float64): uint64 = cast[uint64](x)
+proc bitsOf(x: float32): uint32 = cast[uint32](x)
+
+proc hasBits[F](vs: seq[F]; x: F): bool =
+  vs.anyIt(bitsOf(it) == bitsOf(x))
 
 
 suite "K9d: pinFind":
@@ -741,3 +805,176 @@ suite "K9d: pinFind":
     ## its unsat domain run would end this process at the first x > 100
     check not compiles(pinFind(sutQuits, tLabel("hit")))
     check symexFind(sutQuits, tLabel("hit")).status in {sxUnsat, sxUnknown}
+
+  # ---- the float family (K9d-8) ----
+
+  test "fNextUp and fNextDown step one ulp, across zero and to the infinities":
+    check bitsOf(fNextUp(1.0)) == bitsOf(1.0) + 1
+    check bitsOf(fNextDown(1.0)) == bitsOf(1.0) - 1
+    check fNextUp(0.0) == 5e-324 and fNextDown(0.0) == -5e-324
+    check fNextUp(-0.0) == 5e-324
+    check bitsOf(fNextUp(-5e-324)) == bitsOf(-0.0)
+    check fNextUp(fNextDown(Inf)) == Inf
+    check fNextUp(Inf) == Inf and fNextDown(-Inf) == -Inf
+    check fNextDown(Inf) == fNextDown(Inf)
+    check fNextUp(NaN).isNaN
+    check bitsOf(fNextUp(1.0'f32)) == bitsOf(1.0'f32) + 1
+    check fNextUp(16777216'f32) == 16777218'f32
+
+  test "boundaryOf float: the IEEE-754 edges, deterministic, bounded, no repeat":
+    for pass in 0 .. 1:
+      let d = boundaryOf(float)
+      check not d.exhaustive
+      check d.values.len <= seqDomainCap
+      for x in [0.0, -0.0, 1.0, -1.0, 0.5, 5e-324, -5e-324,
+                2.2250738585072009e-308, -2.2250738585072009e-308,
+                2.2250738585072014e-308, -2.2250738585072014e-308,
+                fNextDown(Inf), -fNextDown(Inf),
+                Inf, -Inf, fNextUp(1.0), fNextDown(1.0),
+                9007199254740992.0, fNextUp(9007199254740992.0), 9007199254740991.0,
+                16777216.0, 16777217.0, 9.223372036854775807e18,
+                fNextDown(9.223372036854775807e18), 2147483648.0, 2147483647.0]:
+        check d.values.hasBits(x)
+      check d.values.anyIt(it.isNaN)
+      check d.values.countIt(it.isNaN) == 1
+      var seen = initHashSet[uint64]()
+      for v in d.values: check not seen.containsOrIncl(bitsOf(v))
+      check d.values.mapIt(bitsOf(it)) == boundaryOf(float).values.mapIt(bitsOf(it))
+
+  test "boundaryOf float32: every value a float32, its edges in float32 steps":
+    let d = boundaryOf(float32)
+    check d.values.len <= seqDomainCap
+    for x in [0.0'f32, -0.0'f32, 1.0'f32, -1.0'f32, 1e-45'f32, -1e-45'f32,
+              1.1754942e-38'f32, 1.17549435e-38'f32,
+              fNextDown(float32(Inf)), -fNextDown(float32(Inf)),
+              Inf.float32, -Inf.float32, 16777216'f32, 16777218'f32,
+              16777215'f32]:
+      check d.values.hasBits(x)
+    check d.values.anyIt(it.isNaN)
+    check d.values.hasBits(fNextUp(1.0'f32)) and d.values.hasBits(fNextDown(1.0'f32))
+    var seen = initHashSet[uint32]()
+    for v in d.values: check not seen.containsOrIncl(bitsOf(v))
+    # the float64 domain names the float32 overflow edge (a narrowing bug)
+    check boundaryOf(float).values.hasBits(float64(fNextDown(float32(Inf))))
+    check boundaryOf(float).values.hasBits(fNextUp(float64(fNextDown(float32(Inf)))))
+
+  test "float and integer literals of the SUT are harvested as numbers":
+    let h = harvestLiterals(sutFloatLits)
+    check 0.75 in h.nums and 0.25 in h.nums and 1000.0 in h.nums
+    check harvestLiterals(sutF32Neighbour).nums.anyIt(float32(it) == 0.10000001'f32)
+
+  test "boundaryOf float with hints: each literal, both neighbours, negated":
+    setStringHints(StringHints(nums: @[0.1, 1000.0]))
+    let d = boundaryOf(float)
+    let d32 = boundaryOf(float32)
+    clearStringHints()
+    for x in [0.1, fNextUp(0.1), fNextDown(0.1), -0.1, fNextUp(-0.1),
+              fNextDown(-0.1), 1000.0, fNextUp(1000.0), fNextDown(1000.0),
+              -1000.0]:
+      check d.values.hasBits(x)
+    let t = 0.1'f32
+    for x in [t, fNextUp(t), fNextDown(t), -t]:
+      check d32.values.hasBits(x)
+    # the float32 neighbours are float32 steps, not float64 ones rounded back
+    check bitsOf(fNextUp(t)) == bitsOf(t) + 1
+    check not boundaryOf(float).values.hasBits(fNextUp(0.1))
+
+  test "the float domain is bounded however many literals the SUT holds":
+    var ns: seq[float]
+    for i in 0 ..< 500: ns.add float(i) * 0.37 + 0.01
+    setStringHints(StringHints(nums: ns))
+    let d = boundaryOf(float)
+    clearStringHints()
+    check d.values.len <= seqDomainCap and d.values.len > 50
+
+  test "boundaryOf a float range, a distinct float, cfloat and cdouble":
+    let r = boundaryOf(UnitF)
+    check r.values.allIt(float(it) >= 0.0 and float(it) <= 1.0)
+    check not r.values.anyIt(float(it).isNaN)
+    check r.values.anyIt(float(it) == 1.0) and r.values.anyIt(float(it) == 5e-324)
+    check r.values.anyIt(bitsOf(float(it)) == bitsOf(fNextDown(1.0)))
+    let m = boundaryOf(Meters)
+    check m.values.len == boundaryOf(float).values.len
+    check boundaryOf(cfloat).values.len == boundaryOf(float32).values.len
+    check boundaryOf(cdouble).values.len == boundaryOf(float).values.len
+
+  test "a float unsat verdict is pinned over the generated domain":
+    check pinFind(sutFloatNever, tLabel("hit")).status == sxUnsat
+    check pinFind(sutF32Never, tLabel("hit")).status == sxUnsat
+    check pinFind(sutCdoubleNever, tLabel("hit")).status == sxUnsat
+    # (a float `range` parameter does not compile in the walker's parser,
+    # `parseRangeBracket` reads its bounds as integers: its domain is
+    # generated above, its pin waits on the walker)
+    check pinFind(sutMetersNever, tLabel("hit")).status == sxUnsat
+    for n in ["/sutFloatNever/", "/sutF32Never/", "/sutCdoubleNever/",
+              "/sutMetersNever/"]:
+      let r = recordsWith(n)
+      check r.len == 1 and not r[0].exhaustive
+
+  test "a NaN and a negative-zero witness replay bit-faithfully":
+    let a = pinFind(sutNaN, tLabel("hit"))
+    check a.status == sxSat and a.witness[0].isNaN
+    let b = pinFind(sutNaN32, tLabel("hit"))
+    check b.status == sxSat and b.witness[0].isNaN
+    let c = pinFind(sutNegZero, tLabel("hit"))
+    check c.status == sxSat and bitsOf(c.witness[0]) == bitsOf(-0.0)
+    let e = pinFind(sutNegZero32, tLabel("hit"))
+    check e.status == sxSat and bitsOf(e.witness[0]) == bitsOf(-0.0'f32)
+    for n in ["/sutNaN/", "/sutNaN32/", "/sutNegZero/", "/sutNegZero32/"]:
+      check recordsWith(n).len == 1
+
+  test "a literal's neighbour as a sat witness is replayed exactly":
+    let r = pinFind(sutFloatNeighbour, tLabel("hit"))
+    check r.status == sxSat and bitsOf(r.witness[0]) == bitsOf(fNextUp(0.1))
+    let s = pinFind(sutF32Neighbour, tLabel("hit"))
+    check s.status == sxSat and bitsOf(s.witness[0]) == bitsOf(fNextUp(0.1'f32))
+    check recordsWith("/sutFloatNeighbour/").len == 1
+    check recordsWith("/sutF32Neighbour/").len == 1
+
+  test "a planted unsat claim over a harvested float neighbour is refused":
+    ## sutFloatNeighbour hits on the one float64 after 0.1: in the domain only
+    ## as the harvested literal's neighbour
+    let settled = Soundness(replay: rsNotNeeded)
+    setStringHints(harvestLiterals(sutFloatNeighbour))
+    let dom = boundaryOf(float)
+    clearStringHints()
+    check dom.values.hasBits(fNextUp(0.1))
+    expect PinFailure:
+      discard pinExactOn(sutFloatNeighbour,
+        SymexResult[tuple[x: float]](status: sxUnsat, soundness: settled),
+        cellKey(faGeneric, "k9d8/neighbour"), domain = dom)
+    setStringHints(harvestLiterals(sutF32Neighbour))
+    let dom32 = boundaryOf(float32)
+    clearStringHints()
+    expect PinFailure:
+      discard pinExactOn(sutF32Neighbour,
+        SymexResult[tuple[x: float32]](status: sxUnsat, soundness: settled),
+        cellKey(faGeneric, "k9d8/neighbour32"), domain = dom32)
+    # and a planted unsat over a NaN-only or a -0.0-only hit is refused
+    expect PinFailure:
+      discard pinExactOn(sutNaN,
+        SymexResult[tuple[x: float]](status: sxUnsat, soundness: settled),
+        cellKey(faGeneric, "k9d8/nan"), domain = boundaryOf(float))
+    expect PinFailure:
+      discard pinExactOn(sutNegZero,
+        SymexResult[tuple[x: float]](status: sxUnsat, soundness: settled),
+        cellKey(faGeneric, "k9d8/negzero"), domain = boundaryOf(float))
+
+  test "floats inside a seq, an array, a tuple and an object":
+    let sd = boundaryOf(seq[float])
+    check sd.values.anyIt(it.len == 1 and it[0].isNaN)
+    check sd.values.anyIt(it.len == 1 and bitsOf(it[0]) == bitsOf(-0.0))
+    check pinFind(sutFloatSeq, tLabel("hit")).status == sxUnsat
+    check pinFind(sutFloatArr, tLabel("hit")).status == sxUnsat
+    check pinFind(sutFloatTuple, tLabel("hit")).status == sxUnsat
+    check pinFind(sutFloatObj, tLabel("hit")).status == sxUnsat
+    for n in ["/sutFloatSeq/", "/sutFloatArr/", "/sutFloatTuple/", "/sutFloatObj/"]:
+      check recordsWith(n).len == 1
+
+  test "two float parameters cross within the cap":
+    check pinFind(sutFloatPair, tLabel("hit")).status == sxUnsat
+    let r = recordsWith("/sutFloatPair/")
+    check r.len == 1
+    let at = r[0].domain.find('[')
+    let n = parseInt(r[0].domain[at + 1 ..< r[0].domain.find(']')])
+    check n <= pinFindCap and n > 1000

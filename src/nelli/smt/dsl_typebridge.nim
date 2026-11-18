@@ -1549,6 +1549,18 @@ proc classifyType*(ty: NimNode): ClassifiedType =
           fields.add fty
           names.add id[j].strVal
       return unranged(tTuple(fields, names))
+    # RFC-0016 INT-73: an alias of an anonymous tuple (`type TE = (D,
+    # int)`) is the tuple too. It classified `__unsupported:TE`, and a
+    # conversion to it (`TE((D(v: k), 5))`) aborted the compile in
+    # `mkTupleLit`.
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkTupleConstr:
+      var fields: seq[IRType]
+      var names: seq[string]
+      for child in impl[2]:
+        fields.add classifyType(child).ty
+        names.add ""
+      return unranged(tTuple(fields, names))
     # RFC-0005 S8bq: a set type alias (`type CharSet = set[char]`) is the
     # set, as an array alias is the array.
     if impl.kind == nnkTypeDef and impl.len >= 3 and

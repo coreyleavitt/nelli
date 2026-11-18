@@ -14723,6 +14723,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # A named tuple constructor `(x: a, y: b)` presents each field as an
     # `nnkExprColonExpr[name, valueExpr]` child; unwrap to the value.
     let tupleTy = classifyType(n).ty
+    # RFC-0016 INT-73: a constructor whose type the bridge does not read as
+    # a tuple of its arity declines here; it aborted the compile in
+    # `mkTupleLit`'s assertion.
+    if tupleTy.kind != itTuple or tupleTy.fields.len != n.len:
+      preamble.add ctx.declineAtSite(
+        feUnsupportedExprKind,
+        "the tuple constructor `" & n.repr & "` has the type `" &
+          n.getTypeInst.repr & "`, which is not read as a tuple of " &
+          $n.len & " fields (feUnsupportedExprKind)",
+        "a tuple constructor of an unread type (feUnsupportedExprKind)")
+      return mkIntLit(0)
     # RFC-0005 S8ax: elements filled in order (`orderOperands`).
     let elems = parseOrderedArgs(n, 0, preamble, ctx, omElements)
     mkTupleLit(elems, tupleTy)

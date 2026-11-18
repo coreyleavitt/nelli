@@ -1736,8 +1736,15 @@ task test, "Run the test suite":
             "tsymex_0016_k8a_sink",
             # RFC-0016 K8b: the fuzzer families and the pairwise figure.
             "tsymex_0016_k8b_pairs",
-            "tsymex_0016_k8b_callshape",
-            "tsymex_0016_k8b_generic",
+            # each family in two halves (s0016_k8b_pairs `familyFiles`)
+            "tsymex_0016_k8b_callshape_a",
+            "tsymex_0016_k8b_callshape_b",
+            "tsymex_0016_k8b_exnmemory_a",
+            "tsymex_0016_k8b_exnmemory_b",
+            "tsymex_0016_k8b_generic_a",
+            "tsymex_0016_k8b_generic_b",
+            # RFC-0016 INT-55: a by-reference base in a parsed routine.
+            "tsymex_0016_int55_parsedbyref",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

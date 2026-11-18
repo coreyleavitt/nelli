@@ -1,8 +1,11 @@
-## RFC-0016 K8b: what the three family suites (`tsymex_0016_k8b_<family>`)
-## share after their batch has run: the findings (native differential and
-## metamorphic, K8a-gen's `findings`), the cells-exercised records, and the
-## pairwise figure read back from those records against the floor.
-import std/os
+## RFC-0016 K8b: what the family suites (`tsymex_0016_k8b_<family>_<half>`,
+## `familyFiles`) share: each runs one slice of its family's seeded stream
+## (`familyHalf`), reports the findings (native differential and metamorphic,
+## K8a-gen's `findings`), and writes the cells-exercised records. The pairwise
+## figure is judged against the floor by K1 (`tsymex_0016_universe`), over
+## the union of the family's halves (`exercisedJoinProblems`); a half reports
+## its own share.
+import std/[os, unittest]
 import nelli/smt/admission
 import ./s8cu_helpers
 import ./s0016_k8a_gen
@@ -34,8 +37,7 @@ proc exercisedOf*(progs: seq[Prog]; outs: seq[GenOutcome]; seed: int;
 
 type FamilyRun* = object
   findings*: seq[string]
-  figure*: PairFigure
-  floorProblems*: seq[string]
+  figure*: PairFigure   ## this half's share; the floor is on the union (K1)
   exact*, declined*, disagree*: int
 
 proc runFamily*(fam: FamilyScope; progs: seq[Prog]; outs: seq[GenOutcome];
@@ -58,7 +60,6 @@ proc runFamily*(fam: FamilyScope; progs: seq[Prog]; outs: seq[GenOutcome];
   removeDir(priv)
   doAssert back.len == recs.len, "the records read back are the records written"
   result.figure = pairwiseFigure(back)
-  result.floorProblems = floorProblems(result.figure, loadFloor(), {fam})
 
 proc report*(fam: FamilyScope; seed, count: int; r: FamilyRun;
              outs: seq[GenOutcome]): string =
@@ -68,3 +69,48 @@ proc report*(fam: FamilyScope; seed, count: int; r: FamilyRun;
     $r.figure[fam].covered & "/" & $r.figure[fam].total & "\n" &
     "k8b declines:\n" & declineSummary(outs)
   for f in r.findings: result.add "FINDING " & f & "\n"
+
+template familyHalf*(family: static FamilyScope; tag: static string;
+                     runBatch: untyped; file: static string;
+                     seed, first, count, streamLen: static int) =
+  ## One half of a family's batch: programs `[first, first + count)` of the
+  ## family's stream (seed `seed`), each with one rotating relation, through
+  ## `symexFind` and the native differential. `streamLen` is the whole
+  ## stream both halves cover at the gate's counts. `runBatch` is
+  ## `runBatch_<tag>`, the proc `genFamilyBatch` emits.
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  const progs = genFamily(family, seed, count, first)
+  genFamilyBatch(progs, tag)
+
+  suite "K8b " & scopePrefix[family] & " programs " & $first & ".." &
+        $(first + count - 1):
+    test "the stream is deterministic, prefix-stable, one value per dimension":
+      check genFamily(family, 7, 5) == genFamily(family, 7, 9)[0 ..< 5]
+      check genFamily(family, 7, 3, 4) == genFamily(family, 7, 7)[4 ..< 7]
+      check progs == genFamily(family, seed, first + count)[first ..< first + count]
+      for p in progs:
+        check familyOf(p.shape) == family
+        check p.fam.len == famDims[family].len
+
+    test "every relation is a different source, and the halves run each one":
+      for p in progs:
+        let o = render(p, "g", twNone)
+        for tw in applicable(p):
+          check render(p, "g", tw) != o
+      let whole = genFamily(family, seed, streamLen)
+      var ran, all: set[Twin]
+      for p in whole:
+        for tw in applicable(p): all.incl tw
+      for c in familyCases(whole): ran.incl c.tw
+      check ran == all + {twNone}
+
+    test "generated programs and their relations agree with native":
+      let outs = runBatch()
+      let r = runFamily(family, progs, outs, seed, file, realPins)
+      echo report(family, seed, count, r, outs)
+      check r.findings.len == 0
+      check r.exact > 0

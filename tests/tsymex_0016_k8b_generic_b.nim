@@ -7,8 +7,12 @@
 ## relations: dead code under a false guard, extract-to-proc, `let` -> `var`,
 ## the call monomorphised by hand, and an un-instantiated generic added.
 ## AUD-07 (a generic never instantiated in the scope's unit) is the `uninst`
-## dimension and the `twUninst` relation, pinned by the AUD-07 test below.
-##   -d:k8bSeed=N -d:k8bCount=N -d:k8bFirst=N   (as K8a-gen's k8a* defines)
+## dimension and the `twUninst` relation, pinned in the second half.
+##
+## The family's batch is 26 programs in two suites (`familyFiles`), so
+## each fits the per-test time ceiling: this one runs programs 13..25.
+## K1 judges the pairwise floor on the union of both halves' records.
+##   -d:k8bSeed=N -d:k8bFirst=N -d:k8bCount=N   (this half's slice)
 import std/[unittest, os, strutils, sets]
 import nelli
 import nelli/symex
@@ -19,49 +23,11 @@ import ./s0016_k8b_suite
 
 const
   k8bSeed {.intdefine.} = 20261117
-  k8bCount {.intdefine.} = 26
-  gateCount = 26  ## the count the floor is measured at
-  k8bFirst {.intdefine.} = 0
+  k8bFirst {.intdefine.} = 13
+  k8bCount {.intdefine.} = 13
 
-let realPins = pinDir()
-let pinTmp = getTempDir() / ("k8b_generic_" & $getCurrentProcessId())
-createDir(pinTmp)
-putEnv("NELLI_PIN_DIR", pinTmp)
-
-const progs = genFamily(faGeneric, k8bSeed, k8bCount, k8bFirst)
-genFamilyBatch(progs, "ge")
-
-suite "K8b faGeneric":
-  test "the stream is deterministic, prefix-stable, one value per dimension":
-    check genFamily(faGeneric, 7, 5) == genFamily(faGeneric, 7, 9)[0 ..< 5]
-    check genFamily(faGeneric, 7, 3, 4) == genFamily(faGeneric, 7, 7)[4 ..< 7]
-    for p in progs:
-      check p.shape == shGeneric
-      check p.fam.len == famDims[faGeneric].len
-
-  test "every relation is a different source, and the batch runs each one":
-    var ran: set[Twin]
-    var all: set[Twin]
-    for p in progs:
-      let o = render(p, "g", twNone)
-      for tw in applicable(p):
-        check render(p, "g", tw) != o
-        all.incl tw
-    for c in familyCases(progs): ran.incl c.tw
-    if k8bCount == gateCount: check ran == all + {twNone}
-
-  test "generated programs and their relations agree with native, figure at its floor":
-    let outs = runBatch_ge()
-    let r = runFamily(faGeneric, progs, outs, k8bSeed,
-                      "tsymex_0016_k8b_generic.nim", realPins)
-    echo report(faGeneric, k8bSeed, k8bCount, r, outs)
-    check r.findings.len == 0
-    check r.exact > 0
-    # the ratchet: at the gate's count the figure is at or above the floor
-    # (a nightly's larger or shifted batch is not compared)
-    if k8bFirst == 0 and k8bCount == gateCount:
-      checkpoint r.floorProblems.join("\n")
-      check r.floorProblems.len == 0
+familyHalf(faGeneric, "geb", runBatch_geb, "tsymex_0016_k8b_generic_b.nim",
+           k8bSeed, k8bFirst, k8bCount, 26)
 
 # AUD-07: a generic never instantiated in the SUT's compilation unit. Two
 # fixed programs, one per `uninst` value (a sibling never instantiated, one

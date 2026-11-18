@@ -72,6 +72,10 @@ const byRefMarkColumn = -32123
   ## RFC-0005 S8ba. The column a by-reference base carries (`markByRef`):
   ## no source position has a negative column.
 
+const byRefMarkFile = currentSourcePath()
+  ## RFC-0016 INT-55. The file a by-reference mark carries: one that exists
+  ## whenever the walker compiles (`markByRef`).
+
 const claimableSymKinds = {nskVar, nskLet, nskForVar, nskParam, nskTemp}
   ## The runtime value bindings an env slot holds. A local `const` is folded
   ## by the compiler at every use, and `result` is never declared by an
@@ -145,8 +149,13 @@ proc markByRef*(base: NimNode): NimNode =
   ## node's type, and names nothing of the caller's.
   if byRefCounter >= 65000: return nil
   inc byRefCounter
+  ## RFC-0016 INT-55: the mark's file is this module, not the base's. Only the
+  ## line and column are read (`byRefName`), and the compile-time VM expands
+  ## the file it is given with `expandFilename`, whose OSError escapes the VM
+  ## and stops the compiler when the name is no file on disk: a node built by
+  ## `parseStmt` (a macro-emitted routine) carries such a pseudo path.
   result = copyNimNode(base)
-  result.setLineInfo(base.lineInfoObj.filename, byRefCounter, byRefMarkColumn)
+  result.setLineInfo(byRefMarkFile, byRefCounter, byRefMarkColumn)
 
 proc strVal*(n: NimNode): string =
   ## `std/macros.strVal`, except that a symbol renamed by a claim reads as

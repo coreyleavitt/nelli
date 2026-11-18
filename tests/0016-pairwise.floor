@@ -1,7 +1,8 @@
 # RFC-0016 K8b (section 12 item 4): the pairwise figure's floor.
-# family<TAB>covered pairs<TAB>pair universe. Measured by the K8b family
-# suites (tsymex_0016_k8b_*); it only rises. A changed universe size
-# (a dimension changed) must be re-measured.
-family:callshape	52	55
-family:exnmemory	0	61
+# family<TAB>covered pairs<TAB>pair universe. Measured over the union of
+# each family's two suites (tsymex_0016_k8b_<family>_a/_b, familyFiles);
+# K1 judges it. It only rises. A changed universe size (a dimension
+# changed) must be re-measured.
+family:callshape	55	55
+family:exnmemory	61	61
 family:generic	47	47

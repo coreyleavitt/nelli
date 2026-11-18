@@ -1,6 +1,6 @@
 ## RFC-0016 K8b -- the cells-exercised record, the pairwise figure and its
 ## floor (§8.2, §12 item 4), over fixtures: no walk runs here. The family
-## suites (`tsymex_0016_k8b_<family>`) write the real records; K1
+## suites (`tsymex_0016_k8b_<family>_a`/`_b`) write the real records; K1
 ## (`tsymex_0016_universe`) reads them.
 import std/[unittest, os, strutils, sets, json, options]
 import nelli/smt/admission
@@ -158,5 +158,51 @@ suite "K8b: the floor":
       "family:callshape\t1\t55\nfamily:callshape\t1\t55\n" &
       "family:exnmemory\t1\t61\nfamily:generic\t1\t47\n")
     expect ValueError: discard parseFloor("family:callshape 1 55\n")
+
+suite "K8b: a family split into halves is judged on their union":
+  # A family's batch runs as two suites (`familyFiles`), each a slice of one
+  # seeded stream (`k8bFirst`), so each fits the per-test time ceiling. The
+  # floor is the family's figure over the union of its halves' records: a
+  # pair one half covers and the other does not is covered.
+  proc halfRec(fam: FamilyScope; half: int; choice: seq[int]): ExercisedRecord =
+    result = rec(fam, choice)
+    result.testFile = familyFiles[fam][half]
+
+  test "every family names its halves, each a suite on disk":
+    for fam in FamilyScope:
+      check familyFiles[fam].len == 2
+      for f in familyFiles[fam]:
+        check f.startsWith("tsymex_0016_k8b_")
+        check fileExists(currentSourcePath().parentDir / f)
+
+  test "the union of the halves meets a floor neither half meets alone":
+    var floor: PairFigure
+    for fam in FamilyScope: floor[fam] = FamFigure(total: pairUniverse(fam).len)
+    floor[faGeneric].covered = 6
+    let a = halfRec(faGeneric, 0, @[0, 0, 0])
+    let b = halfRec(faGeneric, 1, @[1, 1, 1])
+    check exercisedJoinProblems(@[a, b], "linux-c", floor).len == 0
+    check pairwiseFigure(@[a])[faGeneric].covered == 3
+    check pairwiseFigure(@[b])[faGeneric].covered == 3
+
+  test "RED: a family with a half missing fails naming the half, unless partial":
+    var floor: PairFigure
+    for fam in FamilyScope: floor[fam] = FamFigure(total: pairUniverse(fam).len)
+    let a = halfRec(faCallShape, 0, @[0, 0, 0])
+    let p = exercisedJoinProblems(@[a], "linux-c", floor)
+    check p.len == 1
+    check familyFiles[faCallShape][1] in p[0]
+    # a narrowed run (a slice of the suites) evidences no union: not judged
+    check exercisedJoinProblems(@[a], "linux-c", floor, partial = true).len == 0
+
+  test "RED: a partial run still judges a family whose halves both ran":
+    var floor: PairFigure
+    for fam in FamilyScope: floor[fam] = FamFigure(total: pairUniverse(fam).len)
+    floor[faGeneric].covered = 7
+    let a = halfRec(faGeneric, 0, @[0, 0, 0])
+    let b = halfRec(faGeneric, 1, @[1, 1, 1])
+    let p = exercisedJoinProblems(@[a, b], "linux-c", floor, partial = true)
+    check p.len == 1
+    check "below the floor" in p[0]
 
 removeDir(tmp)

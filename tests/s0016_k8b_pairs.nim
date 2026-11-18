@@ -54,6 +54,18 @@ const famDims*: array[FamilyScope, seq[FamDim]] = [
 
 const floorFile* = "tests" / "0016-pairwise.floor"
 
+const familyFiles*: array[FamilyScope, seq[string]] = [
+  faCallShape: @["tsymex_0016_k8b_callshape_a.nim",
+                 "tsymex_0016_k8b_callshape_b.nim"],
+  faExnMemory: @["tsymex_0016_k8b_exnmemory_a.nim",
+                 "tsymex_0016_k8b_exnmemory_b.nim"],
+  faGeneric: @["tsymex_0016_k8b_generic_a.nim",
+               "tsymex_0016_k8b_generic_b.nim"]]
+  ## Each family's batch runs as two suites, consecutive slices of one seeded
+  ## stream (`k8bFirst`), so each fits the per-test time ceiling. The record's
+  ## `testFile` names its half; the floor is judged on the union of both
+  ## (`exercisedJoinProblems`), so splitting a batch never lowers its figure.
+
 func valueCell*(fam: FamilyScope; dim, value: string): CellKey =
   CellKey(scope: fam, key: "k8b/" & dim & "/" & value)
 
@@ -214,9 +226,10 @@ proc parseFloor*(text: string): PairFigure =
 
 proc renderFloor*(f: PairFigure): string =
   result = "# RFC-0016 K8b (section 12 item 4): the pairwise figure's floor.\n" &
-    "# family<TAB>covered pairs<TAB>pair universe. Measured by the K8b family\n" &
-    "# suites (tsymex_0016_k8b_*); it only rises. A changed universe size\n" &
-    "# (a dimension changed) must be re-measured.\n"
+    "# family<TAB>covered pairs<TAB>pair universe. Measured over the union of\n" &
+    "# each family's two suites (tsymex_0016_k8b_<family>_a/_b, familyFiles);\n" &
+    "# K1 judges it. It only rises. A changed universe size (a dimension\n" &
+    "# changed) must be re-measured.\n"
   for fam in FamilyScope:
     result.add scopePrefix[fam] & "\t" & $f[fam].covered & "\t" &
       $f[fam].total & "\n"
@@ -242,13 +255,31 @@ proc loadExercised*(dir: string): seq[ExercisedRecord] =
 
 
 proc exercisedJoinProblems*(ex: seq[ExercisedRecord]; legRow: string;
-                            floor: PairFigure): seq[string] =
+                            floor: PairFigure; partial = false): seq[string] =
   ## K1's reading of the second record kind: every record well formed, and
   ## each family that has records (on the leg's row, when one is given) at or
-  ## above its floor.
+  ## above its floor. A family runs as two suites (`familyFiles`), and its
+  ## figure is the union of their records: a family with records from one
+  ## half and none from the other fails, naming the missing half, since half
+  ## a batch evidences half a figure. A partial run (a narrowed dispatch,
+  ## `$NELLI_UNIVERSE_PARTIAL`) does not judge such a family.
   result = exercisedProblems(ex)
   var mine: seq[ExercisedRecord]
   for r in ex:
     if legRow.len == 0 or r.row == legRow: mine.add r
-  if mine.len > 0:
-    result.add floorProblems(pairwiseFigure(mine), floor, familiesIn(mine))
+  var whole: set[FamilyScope]
+  for fam in familiesIn(mine):
+    var missing: seq[string]
+    for f in familyFiles[fam]:
+      var ran = false
+      for r in mine:
+        if r.family == fam and r.testFile == f: ran = true
+      if not ran: missing.add f
+    if missing.len == 0: whole.incl fam
+    elif not partial:
+      result.add scopePrefix[fam] & ": no cells-exercised records from " &
+        missing.join(", ") & (if legRow.len > 0: " on row " & legRow else: "") &
+        "; the floor is judged on the union of the family's suites " &
+        familyFiles[fam].join(", ")
+  if whole.card > 0:
+    result.add floorProblems(pairwiseFigure(mine), floor, whole)

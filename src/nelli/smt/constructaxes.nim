@@ -136,6 +136,29 @@ func constructRows(): seq[ConstructKey] =
   result.add declines(some(feOpaqueCallUnmodelled), ["signals/handler"],
     "a signal handler is registered through a foreign call the walk cannot " &
     "model")
+  # --- replay/: the replay child and its wire (RFC-0016 INT-28..INT-30). Not a
+  # verdict the walk gives: how the process that confirms a witness behaves.
+  # Each stays as hardened (`pinNever`, the host's native fact).
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/child/lifecycle"], none(SymexErrorKind),
+    "a replay child's lifecycle: what the SUT starts dies with the child " &
+    "however it ends and with the host, and the replay count is exact under " &
+    "threads (INT-28)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/child/limits"], none(SymexErrorKind),
+    "a replay child runs under memory, process, CPU and file-size limits, " &
+    "and a run a limit stops is undecided, not a crash (INT-28)", iNever,
+    nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/child/startup"], none(SymexErrorKind),
+    "a replay child's start-up: a child that never took its witness is no " &
+    "run, the private directory admits its owner alone, no descriptor leaks " &
+    "into the re-executed child (INT-29)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/wire/codec"], none(SymexErrorKind),
+    "the replay wire codec reads a zero-size element, allocates and nests " &
+    "only as its bytes and `wireDepthLimit` allow (INT-30)", iNever,
+    nrByDesign)
   result.add declines(some(feUncheckedDiscBytes), ["uncheckedAssign/diff"],
     "a discriminator written under an unchecked assignment reinterprets the " &
     "object's bytes")

@@ -17,6 +17,8 @@
 import std/[unittest, os, osproc, strutils, strtabs, monotimes, times]
 import nelli/smt/replayproc
 from nelli/smt/canonicalize import symexWalkerVersion
+from nelli/smt/admission import cellKey, axConstruct
+from ./s8cu_helpers import pinNever
 when replayReexecs:
   import std/streams
 
@@ -197,8 +199,13 @@ suite "INT-28: what the SUT starts dies with the child":
       defer: removeFile(path)
       let c = runChild("spawn-" & ending & ":" & path, 30_000)
       checkpoint describe(c)
-      check beats(path) > 0
-      check not stillBeating(path)
+      let ran = beats(path) > 0
+      let dead = not stillBeating(path)
+      check ran
+      check dead
+      pinNever(cellKey(axConstruct, "replay/child/lifecycle"), ran and dead,
+        "the SUT's grandchild beat, and stopped beating once its child ended (" &
+        ending & ")")
 
   test "a host that dies takes its replay's child with it":
     let path = scratch("host")
@@ -228,6 +235,10 @@ suite "INT-28: the child's limits":
     check host.memory < 0 or mem < host.memory
     check procs > 0
     check host.processes < 0 or procs < host.processes
+    pinNever(cellKey(axConstruct, "replay/child/limits"),
+      mem > 0 and (host.memory < 0 or mem < host.memory) and procs > 0 and
+        (host.processes < 0 or procs < host.processes),
+      "the child's limits " & f.join(" ") & " sit below the host's " & $host)
 
   test "the replay count is exact when threads replay at once":
     let before = replayExecutions()
@@ -278,8 +289,15 @@ when replayReexecs:
         for line in o.splitLines:
           if ":(" in line: inc aces
         check aces == 1
+        pinNever(cellKey(axConstruct, "replay/child/startup"),
+          code == 0 and "(I)" notin o and aces == 1,
+          "icacls: the private directory names one ACE and inherits none")
       else:
-        check getFilePermissions(d) == {fpUserRead, fpUserWrite, fpUserExec}
+        let perms = getFilePermissions(d)
+        check perms == {fpUserRead, fpUserWrite, fpUserExec}
+        pinNever(cellKey(axConstruct, "replay/child/startup"),
+          perms == {fpUserRead, fpUserWrite, fpUserExec},
+          "the private directory's mode is 0700")
 
 suite "INT-28: a run a limit stops is undecided":
   test "each limit's signal reads as stopped at that limit":
@@ -314,6 +332,9 @@ when posixChild:
       checkpoint describe(c)
       check c.ending == reFinished
       check c.bound
+      pinNever(cellKey(axConstruct, "replay/child/startup"),
+        c.ending == reFinished and c.bound,
+        "a host with fd 0-2 closed read the child's report: " & describe(c))
 
   when replayExecs:
     suite "INT-29: the re-executed child's start":

@@ -13,6 +13,8 @@
 ## Runs everywhere: the wire is the same encoding on every platform.
 import std/unittest
 import nelli/smt/replaywire
+from nelli/smt/admission import cellKey, axConstruct
+from ./s8cu_helpers import pinNever
 
 type
   Empty = object
@@ -43,6 +45,8 @@ suite "INT-30: zero-size elements":
     var got: seq[Empty]
     r.wireGet(got)
     check got.len == 3
+    pinNever(cellKey(axConstruct, "replay/wire/codec"), got.len == 3,
+      "a seq of three empty objects written with pad bytes reads back as three")
 
   test "a count of empty objects no byte backs is refused":
     var r = initWireReader(lenBytes(1_000_000_000))
@@ -85,6 +89,9 @@ suite "INT-30: recursion depth":
     var y: Node
     r.wireGet(y)
     check depthOf(y) == wireDepthLimit div 4
+    pinNever(cellKey(axConstruct, "replay/wire/codec"),
+      depthOf(y) == wireDepthLimit div 4,
+      "a ref chain of " & $(wireDepthLimit div 4) & " cells round-trips")
 
   test "the writer refuses a chain past the limit":
     let x = chain(5_000)

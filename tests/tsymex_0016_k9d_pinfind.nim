@@ -147,6 +147,46 @@ proc sutFlip(f: Flip) =
 proc sutSix(a, b, c, d, e, f: int) =
   if a > 5 and a < 3 and (b + c + d + e + f) == 0: symexTarget("hit")
 
+# K9d-6: string and cstring parameters (literal-mined domain).
+proc strHelper(s: string): bool =
+  s == "helper-lit"
+
+proc sutStrLit(s: string; n: int) =
+  if s == "foo" and n > 5 and n < 3: symexTarget("hit")
+  if s.len > 0 and s[0] == 'q' and s.len == 17: discard
+  if strHelper(s): discard
+  case s
+  of "alpha": discard
+  else: discard
+
+proc sutStrUnsat(s: string) =
+  if s.startsWith("config") and s.len > 9 and s.len < 3: symexTarget("hit")
+
+proc sutStrSat(s: string) =
+  if s.len == 4 and s[1] == '\x9C' and s[3] == 'k': symexTarget("hit")
+
+proc sutStrTuple(t: (string, bool)) =
+  if t[0] == "needle" and t[1] and not t[1]: symexTarget("hit")
+
+type StrObj = object
+  name: string
+  n: int8
+
+proc sutStrObj(o: StrObj) =
+  if o.name == "obj-lit" and o.n > 5 and o.n < 3: symexTarget("hit")
+
+proc sutStrTwo(a, b: string) =
+  if a == "one" and b == "two" and a == "x": symexTarget("hit")
+
+proc sutCstr(s: cstring) =
+  if s == "cs-lit" and s == "other": symexTarget("hit")
+
+# The bug sits at a literal's neighbour: it fires on "config" with its last
+# byte removed, which only a neighbour-aware domain reaches.
+proc sutNeighbour(s: string) =
+  if s == "confi": symexTarget("hit")
+
+
 suite "K9d: pinFind":
   test "boundaryOf: exhaustive for bool and a small ordinal, sampled for int":
     check boundaryOf(bool).exhaustive
@@ -354,3 +394,108 @@ suite "K9d: pinFind":
     check d.values.anyIt(not it.on and it.y == 127'i8)
     check d.values.len == 8 + 256
     check pinFind(sutFlip, tLabel("hit")).status == sxUnsat
+
+
+  test "string literals and char literals of the SUT are harvested":
+    let h = harvestLiterals(sutStrLit)
+    check "foo" in h.strs and "alpha" in h.strs
+    check "q" in h.strs                    # a char literal
+    check "helper-lit" in h.strs           # followed into a helper
+    check "hit" notin h.strs               # a symexTarget label is not data
+    check 17 in h.ints and 5 in h.ints
+
+  test "boundaryOf string: the fixed core, bounded and deterministic":
+    clearStringHints()
+    let d = boundaryOf(string)
+    check not d.exhaustive
+    check "" in d.values
+    for c in ['\0', 'a', 'z', '0', '9', ' ', '-', '\x7F', '\x80', '\xFF']:
+      check $c in d.values
+    check "\xC3\xA9" in d.values and "\xE2\x82\xAC" in d.values
+    check d.values.anyIt(it.len == 3 and it[0] == '\0')
+    check d.values.len <= stringDomainCap
+    check boundaryOf(string).values == d.values
+    check d.values.deduplicate.len == d.values.len
+
+  test "boundaryOf string with hints: each literal, its neighbours and its thresholds":
+    setStringHints(harvestLiterals(sutStrUnsat))
+    let d = boundaryOf(string)
+    clearStringHints()
+    check "config" in d.values
+    check "confi" in d.values and "onfig" in d.values        # prefix, suffix
+    check "configa" in d.values and "config\0" in d.values   # one byte appended
+    check "confg" in d.values                                # one byte removed
+    check "confih" in d.values                               # one byte changed
+    check "CONFIG" in d.values
+    check d.values.anyIt(it.len == 9) and d.values.anyIt(it.len == 10)
+    check d.values.anyIt(it.len == 8)
+    check d.values.len <= stringDomainCap
+
+  test "the string domain is bounded however many literals the SUT holds":
+    var strs: seq[string]
+    for i in 0 ..< 200: strs.add "literal-number-" & $i
+    setStringHints(StringHints(strs: strs, ints: @[3, 64, 1000]))
+    let d = boundaryOf(string)
+    clearStringHints()
+    check d.values.len <= stringDomainCap
+    check "literal-number-0" in d.values
+    check "" in d.values
+
+  test "boundaryOf cstring: the string set without an embedded NUL":
+    setStringHints(StringHints(strs: @["cs-lit", "a\0b"], ints: @[]))
+    let d = boundaryOf(cstring)
+    clearStringHints()
+    check not d.exhaustive
+    check d.values.len > 100
+    check d.values.allIt(it.len == ($it).len)   # no NUL cut a value short
+    check "cs-lit" in d.values.mapIt($it)
+    check "cs-lit".cstring in d.values
+
+  test "a string sat witness outside the domain is still replayed exactly":
+    let r = pinFind(sutStrSat, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[0].len == 4
+    check not boundaryOf(string).values.anyIt(it == r.witness[0])
+    check recordsWith("/sutStrSat/").len == 1
+
+  test "a string unsat verdict is pinned over the literal-mined domain":
+    check pinFind(sutStrUnsat, tLabel("hit")).status == sxUnsat
+    let r = recordsWith("/sutStrUnsat/")
+    check r.len == 1 and not r[0].exhaustive
+    check "sampled[" in r[0].domain
+    check pinFind(sutStrLit, tLabel("hit")).status == sxUnsat
+    # the walker declines a cstring parameter: returned as it came, no record
+    check pinFind(sutCstr, tLabel("hit")).status == sxUnknown
+    check recordsWith("/sutCstr/").len == 0
+
+  test "a planted unsat claim over a literal's neighbour is refused":
+    ## sutNeighbour hits on "confi", reachable only as "config" minus a byte;
+    ## the harvested neighbour finds it where the fixed core cannot
+    type W = tuple[s: string]
+    let key = cellKey(faGeneric, "k9d6/neighbour")
+    let settled = Soundness(replay: rsNotNeeded)
+    let lie = SymexResult[W](status: sxUnsat, soundness: settled)
+    setStringHints(StringHints(strs: @["config"], ints: @[]))
+    let dom = boundaryOf(string)
+    clearStringHints()
+    check "confi" in dom.values
+    expect PinFailure:
+      discard pinExactOn(sutNeighbour, lie, key, domain = dom)
+    check "confi" notin boundaryOf(string).values
+
+  test "strings inside a tuple, an object and beside another string":
+    check pinFind(sutStrTuple, tLabel("hit")).status == sxUnsat
+    check pinFind(sutStrObj, tLabel("hit")).status == sxUnsat
+    check pinFind(sutStrTwo, tLabel("hit")).status == sxUnsat
+    let t = recordsWith("/sutStrTuple/")
+    check t.len == 1 and not t[0].exhaustive
+    let o = recordsWith("/sutStrObj/")
+    check o.len == 1
+    let w = recordsWith("/sutStrTwo/")
+    check w.len == 1
+    # the pair of strings stays inside the run cap, thinned not truncated
+    check "sampled[" in w[0].domain and "sampled[65536]" notin w[0].domain
+
+  test "the hints do not outlive a pinFind call":
+    discard pinFind(sutStrUnsat, tLabel("hit"))
+    check "config" notin boundaryOf(string).values

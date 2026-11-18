@@ -1,7 +1,7 @@
 ## RFC-0005 S8cu. What the suites share: the native check and the decline check.
 import std/compilesettings
 import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
-            options, streams, tempfiles, typetraits]
+            options, streams, tempfiles, typetraits, sequtils]
 import nelli/symex
 from nelli/engine/markers import symexAssumeGateOpen, symexAssumeGateClose
 import nelli/db
@@ -682,11 +682,175 @@ proc fieldRows*(sizes: seq[int]; limit = fieldProductFull):
   if exceeds(sizes, limit): (pairwiseRows(sizes), false)
   else: (productRows(sizes), true)
 
+# --- the string domain (K9d-6) ---------------------------------------------
+#
+# `boundaryOf(string)` is a deterministic finite set, never the whole type:
+# the fixed core (empty, every byte of a byte alphabet that holds the control,
+# ASCII, high and UTF-8 lead/continuation bytes, all pairs over a smaller one,
+# all triples over a smaller one, whole multi-byte sequences) plus what the
+# SUT's own source says: its string and char literals, and each literal's
+# neighbours (prefixes, suffixes, one byte appended, removed or changed, case
+# variants), and strings at its integer literals' lengths +/- 1. A pinFind
+# call harvests those literals at macro time and sets them as the hints for
+# the domains it generates; no hints is the fixed core alone.
+
+type
+  StringHints* = object
+    strs*: seq[string]   ## string and char literals of the SUT, in source order
+    ints*: seq[int]      ## its small integer literals (length thresholds)
+
+const
+  stringDomainCap* = 2048
+    ## the most values `boundaryOf(string)` holds, whatever the hints
+  stringCore* = 64
+    ## a string field thinned to cross with other fields keeps this prefix of
+    ## its domain: the empty string, the single bytes, then the literals
+  strMaxLiterals = 32
+  strNeighbourMaxLen = 64
+  strBytes = ['\0', 'a', 'z', '0', '9', ' ', '-', '\x7F', '\x80', '\xFF',
+              'A', 'Z', '_', '.', '/', '\n', '\xC3', '\xA9', '\xE2', '\x82',
+              '\xAC', '\xF0', '\x9F', '\x98', '\xBF']
+  strPairBytes = ['\0', 'a', '0', ' ', '-', '\x7F', '\x80', '\xFF', '\xC3',
+                  '\xA9']
+  strTripleBytes = ['\0', 'a', '0', '\x80', '\xFF']
+  strAppendBytes = ['\0', 'a', '0', ' ', '\xFF']
+  strUtf8 = ["\xC3\xA9", "\xE2\x82\xAC", "\xF0\x9F\x98\x80", "\xC0\x80",
+             "\xE2\x82", "\xF0\x9F\x98", "\xED\xA0\x80", "\xF4\x90\x80\x80"]
+  strFixedLens = [5, 8, 16, 33, 64, 100]
+
+var stringHintsCur {.threadvar.}: StringHints
+
+proc setStringHints*(h: StringHints) =
+  stringHintsCur = h
+
+proc clearStringHints*() =
+  stringHintsCur = StringHints()
+
+proc stringDomainValues*(h: StringHints): seq[string] =
+  ## The string domain for these hints (see above), at most `stringDomainCap`
+  ## values, in priority order, deterministic.
+  var seen = initHashSet[string]()
+  template put(s: string) =
+    if result.len < stringDomainCap and not seen.containsOrIncl(s):
+      result.add s
+  var lits: seq[string]
+  for s in h.strs:
+    if lits.len < strMaxLiterals and s notin lits: lits.add s
+  put ""
+  for c in strBytes: put $c
+  for l in lits:
+    for i in 0 ..< min(l.len, strNeighbourMaxLen): put $l[i]
+  for l in lits: put l
+  for u in strUtf8: put u
+  var ks: seq[int]
+  for k in h.ints:
+    if k in 1 .. 256 and k notin ks and ks.len < 16: ks.add k
+  for k in ks:
+    for n in [k - 1, k, k + 1]: put 'a'.repeat(n)
+  for n in strFixedLens: put 'a'.repeat(n)
+  let near = lits.filterIt(it.len in 1 .. strNeighbourMaxLen)
+  for l in near:                       # prefixes, suffixes
+    for i in 1 ..< l.len:
+      put l[0 ..< i]
+      put l[i .. ^1]
+  for l in near:                       # one byte appended or prepended
+    for b in strAppendBytes:
+      put l & $b
+      put $b & l
+  for l in near:                       # one byte removed
+    for i in 0 ..< l.len: put l[0 ..< i] & l[i + 1 .. ^1]
+  for l in near:                       # one byte changed
+    for i in 0 ..< l.len:
+      for b in [char((ord(l[i]) + 1) and 255), char((ord(l[i]) + 255) and 255), 'a', '\0']:
+        var m = l
+        m[i] = b
+        put m
+  for l in near:                       # case, padding
+    put l.toUpperAscii
+    put l.toLowerAscii
+    put " " & l
+    put l & " "
+  for a in strPairBytes:
+    for b in strPairBytes: put $a & $b
+  for a in strTripleBytes:
+    for b in strTripleBytes:
+      for c in strTripleBytes: put $a & $b & $c
+
+var cstringArena {.threadvar.}: seq[string]
+  ## the storage behind generated `cstring` values; kept for the process so a
+  ## domain's values never dangle
+
+proc cstringDomain(h: StringHints): Domain[cstring] =
+  var vs: seq[cstring]
+  for s in stringDomainValues(h):
+    if '\0' notin s:
+      cstringArena.add s
+      vs.add cstring(cstringArena[^1])
+  Domain[cstring](values: vs, exhaustive: false)
+
+proc pairsExceed*(sizes: seq[int]; limit: int): bool =
+  ## whether the two largest of `sizes` multiply to more than `limit`
+  var a, b = 0
+  for s in sizes:
+    if s > a: b = a; a = s
+    elif s > b: b = s
+  a > 0 and b > 0 and a > limit div b
+
+proc harvestInto(n: NimNode; dir: string; h: var StringHints;
+                 seen: var HashSet[string]) =
+  const skipCalls = ["symexTarget", "newException", "echo", "symexLabel"]
+  case n.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    if n.strVal notin h.strs: h.strs.add n.strVal
+  of nnkCharLit:
+    let s = $char(n.intVal)
+    if s notin h.strs: h.strs.add s
+  of nnkIntLit .. nnkInt64Lit, nnkUIntLit .. nnkUInt64Lit:
+    if n.intVal in 1 .. 256 and int(n.intVal) notin h.ints:
+      h.ints.add int(n.intVal)
+  of nnkSym:
+    if n.symKind in {nskProc, nskFunc, nskMethod, nskIterator, nskConverter,
+                     nskConst}:
+      let li = n.lineInfoObj
+      let key = n.strVal & "@" & li.filename & ":" & $li.line
+      if li.filename.parentDir == dir and not seen.containsOrIncl(key):
+        harvestInto(n.getImpl, dir, h, seen)
+  of nnkCall, nnkCommand:
+    if n[0].kind == nnkSym and n[0].strVal in skipCalls: return
+    for c in n: harvestInto(c, dir, h, seen)
+  else:
+    for c in n: harvestInto(c, dir, h, seen)
+
+proc harvest(fn: NimNode): StringHints =
+  ## the string and char literals and small integer literals of the SUT's
+  ## body and of the routines and consts it names that live beside it
+  var seen = initHashSet[string]()
+  let li = fn.lineInfoObj
+  harvestInto(fn, li.filename.parentDir, result, seen)
+
+proc hintsExpr(h: StringHints): NimNode =
+  var ss = newNimNode(nnkBracket)
+  for s in h.strs: ss.add newLit(s)
+  var ii = newNimNode(nnkBracket)
+  for i in h.ints: ii.add newLit(i)
+  nnkObjConstr.newTree(ident"StringHints",
+    nnkExprColonExpr.newTree(ident"strs", nnkPrefix.newTree(ident"@", ss)),
+    nnkExprColonExpr.newTree(ident"ints", nnkPrefix.newTree(ident"@", ii)))
+
+macro harvestLiterals*(fn: typed): untyped =
+  ## the SUT's string, char and small integer literals as `StringHints`
+  hintsExpr(harvest(fn))
+
 proc thinDomain*[T](d: var Domain[T]) =
   ## A field of an aggregate too large to cross in full keeps its extremes and
   ## its middle (an ordinal's low end, zero and high end): at most nine values.
   let n = d.values.len
   if n <= 16: return
+  when T is string or T is cstring:
+    # the domain is in priority order: its prefix is the core
+    d.values.setLen(min(n, stringCore))
+    d.exhaustive = false
+    return
   var keep: seq[int]
   for i in [0, 1, 2, n div 2 - 1, n div 2, n div 2 + 1, n - 3, n - 2, n - 1]:
     if i notin keep: keep.add i
@@ -694,6 +858,11 @@ proc thinDomain*[T](d: var Domain[T]) =
   for i in keep: vs.add d.values[i]
   d.values = vs
   d.exhaustive = false
+
+proc thinForPairs*[T](d: var Domain[T]) =
+  ## a string domain too large to cross with another string parameter is cut
+  ## to its core; other types are left whole
+  when T is string or T is cstring: thinDomain(d)
 
 proc selector(f: NimNode; o: NimNode): NimNode =
   if f.kind == nnkIntLit: nnkBracketExpr.newTree(o, f) else: newDotExpr(o, f)
@@ -887,6 +1056,10 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
     for x in [lo, lo + 1, -1, 0, 1, 7, hi - 1, hi]:
       if x >= lo and x <= hi and T(x) notin vs: vs.add T(x)
     sampled(vs)
+  elif T is string:
+    sampled(stringDomainValues(stringHintsCur))
+  elif T is cstring:
+    cstringDomain(stringHintsCur)
   elif T is tuple or (T is object and not (T is ref)):
     objectDomain(T)
   else:
@@ -915,6 +1088,11 @@ proc pinFindJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
            proc (vals: seq[int]; hit: proc (n: NativeRun): bool): string =
              runD(hit, vals.len),
            "symexFind", d)
+
+template witnessAs*(T: typedesc; x: untyped): untyped =
+  ## the witness element as the declared parameter type; a type the walker
+  ## does not model (`cstring`: the SUT declines) has no witness to convert
+  when compiles(T(x)): T(x) else: default(T)
 
 proc fnParamTypes(fn: NimNode): seq[NimNode] =
   let ty = fn.getTypeInst
@@ -962,7 +1140,7 @@ macro pinFind*(fn: typed; target: untyped;
   for i in 0 ..< types.len:
     let a = genSym(nskVar, "a" & $i)
     wbody.add nnkVarSection.newTree(nnkIdentDefs.newTree(a, tsyms[i],
-      newCall(tsyms[i], nnkBracketExpr.newTree(w, newLit(i)))))
+      newCall(ident"witnessAs", tsyms[i], nnkBracketExpr.newTree(w, newLit(i)))))
     wcall.add a
   # A SUT with a result: the native run discards it.
   let rty = fn.getTypeInst[0][0]
@@ -972,16 +1150,17 @@ macro pinFind*(fn: typed; target: untyped;
   wbody.add newCall(ident"nativeRun", used(wcall))
   # The domain: one generated domain per parameter, nested loops, capped.
   let doms = newStmtList()
+  doms.add newCall(ident"setStringHints", hintsExpr(harvest(fn)))
   var domSyms: seq[NimNode]
   var sizesLit = nnkBracket.newTree()
   var exh: NimNode = newLit(true)
   var desc: NimNode = newLit("")
   for i in 0 ..< types.len:
-    let d = genSym(nskLet, "d" & $i)
+    let d = genSym(nskVar, "d" & $i)
     domSyms.add d
     # The parameter's type as the witness tuple holds it (a type symbol
     # spliced from `getTypeInst` does not bind as a `typedesc` argument).
-    doms.add newLetStmt(d, newCall(ident"boundaryOf", tsyms[i]))
+    doms.add newVarStmt(d, newCall(ident"boundaryOf", tsyms[i]))
     sizesLit.add newDotExpr(newDotExpr(d, ident"values"), ident"len")
     exh = infix(exh, "and", newDotExpr(d, ident"exhaustive"))
     let part = newCall(ident"describe", d)
@@ -992,8 +1171,17 @@ macro pinFind*(fn: typed; target: untyped;
   # leading rows would otherwise leave the last parameters unvaried).
   let rows = genSym(nskLet, "rows")
   let rowv = genSym(nskForVar, "row")
+  # Two string parameters would cross to more runs than the cap: each is cut
+  # to its core first (a string domain is in priority order).
+  let thin = newStmtList()
+  for d in domSyms: thin.add newCall(ident"thinForPairs", d)
   doms.add quote do:
-    let `rows` = fieldRows(@`sizesLit`, pinFindCap)
+    if pairsExceed(@`sizesLit`, pinFindCap): `thin`
+  let sizesNow = nnkBracket.newTree()
+  for d in domSyms: sizesNow.add newDotExpr(newDotExpr(d, ident"values"), ident"len")
+  doms.add quote do:
+    let `rows` = fieldRows(@`sizesNow`, pinFindCap)
+    clearStringHints()
   let combos = newDotExpr(newDotExpr(rows, ident"rows"), ident"len")
   exh = infix(exh, "and", newDotExpr(rows, ident"full"))
   let inner = newStmtList()

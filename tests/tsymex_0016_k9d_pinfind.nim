@@ -11,7 +11,7 @@
 ## ordinal of at most 256 values, the boundary sample otherwise. The cell is
 ## `family:generic:k9d/<file>/<fn>/<target>`, so the record says which suite
 ## and which call it evidences.
-import std/[unittest, os, strutils, sequtils]
+import std/[unittest, os, strutils, sequtils, tables, sets, algorithm]
 import nelli/symex
 import ./s8cu_helpers
 
@@ -185,6 +185,36 @@ proc sutCstr(s: cstring) =
 # byte removed, which only a neighbour-aware domain reaches.
 proc sutNeighbour(s: string) =
   if s == "confi": symexTarget("hit")
+
+# K9d-7: collection parameters (seq, array, set, openArray, Table, HashSet).
+type Quad = enum qA, qB, qC, qD
+
+proc sutSeqUnsat(s: seq[int]) =
+  if s.len > 5 and s.len < 3: symexTarget("hit")
+
+proc sutSeqSat(s: seq[int]) =
+  if s.len == 3 and s[0] == 4242 and s[2] == 99: symexTarget("hit")
+
+proc sutSeqThresh(s: seq[int]) =
+  if s.len == 37: symexTarget("hit")
+
+proc sutOpen(a: openArray[int]) =
+  if a.len > 5 and a.len < 3: symexTarget("hit")
+
+proc sutArr(a: array[4, int8]) =
+  if a[0] > 5 and a[0] < 3: symexTarget("hit")
+
+proc sutSet(s: set[char]) =
+  if 'a' in s and 'a' notin s: symexTarget("hit")
+
+proc sutTable(t: Table[string, int]) =
+  if t.len > 5 and t.len < 3: symexTarget("hit")
+
+proc sutHashSet(t: HashSet[int]) =
+  if t.len > 5 and t.len < 3: symexTarget("hit")
+
+proc sutSeqTuple(t: (seq[int], bool)) =
+  if t[0].len > 5 and t[0].len < 3: symexTarget("hit")
 
 
 suite "K9d: pinFind":
@@ -501,3 +531,147 @@ suite "K9d: pinFind":
   test "the hints do not outlive a pinFind call":
     discard pinFind(sutStrUnsat, tLabel("hit"))
     check "config" notin boundaryOf(string).values
+
+  test "boundaryOf seq: empty, short sequences over the core, bounded and deterministic":
+    clearStringHints()
+    let d = boundaryOf(seq[int])
+    let core = boundaryInts.values
+    check not d.exhaustive
+    check d.values[0].len == 0
+    for a in core:
+      check @[a] in d.values
+      for b in core: check @[a, b] in d.values
+    check d.values.anyIt(it.len == 3 and it[0] == 0 and it[1] == -1 and it[2] == 7)
+    check d.values.len <= seqDomainCap
+    check boundaryOf(seq[int]).values == d.values
+    check d.values.deduplicate.len == d.values.len
+    check boundaryOf(seq[bool]).values.countIt(it.len == 3) == 8
+
+  test "boundaryOf seq: lengths at the SUT's integer literals, filled with patterns":
+    check 37 in harvestLiterals(sutSeqThresh).ints
+    setStringHints(StringHints(strs: @[], ints: @[37]))
+    let d = boundaryOf(seq[int])
+    clearStringHints()
+    for n in [36, 37, 38]:
+      check d.values.anyIt(it.len == n and it.allIt(it == low(int)))      # all equal
+      check d.values.anyIt(it.len == n and it.allIt(it == high(int)))
+      check d.values.anyIt(it.len == n and it[0] == low(int) and it[^1] == high(int) and
+                           it.isSorted)                                    # ascending
+      check d.values.anyIt(it.len == n and it[0] == high(int) and it[^1] == low(int))
+      check d.values.anyIt(it.len == n and it[0] == high(int) and
+                           it[1 .. ^1].allIt(it == low(int)))              # outlier first
+      check d.values.anyIt(it.len == n and it[^1] == high(int) and
+                           it[0 ..< ^1].allIt(it == low(int)))             # outlier last
+      check d.values.anyIt(it.len == n and it[0] == it[1] and it[0] != it[^1])  # duplicates
+    check d.values.len <= seqDomainCap
+    check boundaryOf(seq[int]).values.allIt(it.len != 37)    # the hints do not outlive the call
+
+  test "boundaryOf seq is bounded however many literals the SUT holds":
+    var ks: seq[int]
+    for i in 1 .. 200: ks.add i
+    setStringHints(StringHints(strs: @[], ints: ks))
+    let d = boundaryOf(seq[byte])
+    clearStringHints()
+    check d.values.len <= seqDomainCap
+    check @[byte(0)] in d.values and d.values[0].len == 0
+
+  test "boundaryOf array: fixed length, all pairs over positions, plus patterns":
+    let b = boundaryOf(array[3, bool])
+    check b.exhaustive and b.values.len == 8
+    let d = boundaryOf(array[5, int])
+    let core = boundaryInts.values
+    check not d.exhaustive
+    check d.values.allIt(it.len == 5)
+    for i in 0 ..< 5:
+      for j in i + 1 ..< 5:
+        for a in core:
+          for c in core:
+            check d.values.anyIt(it[i] == a and it[j] == c)
+    for a in core: check d.values.anyIt(it.allIt(it == a))
+    check d.values.anyIt(it.isSorted and it[0] != it[^1])
+    check d.values.anyIt(it.reversed.isSorted and it[0] != it[^1])
+    check d.values.len <= seqDomainCap
+    check boundaryOf(array[3, int8]).values.len <= seqDomainCap
+
+  test "boundaryOf set: empty, full, each singleton, each pair, each complement":
+    let q = boundaryOf(set[Quad])
+    check q.exhaustive and q.values.len == 16
+    setStringHints(StringHints(strs: @["x"], ints: @[]))
+    let d = boundaryOf(set[char])
+    clearStringHints()
+    check not d.exhaustive
+    check d.values.anyIt(it == {})
+    check d.values.anyIt(it == {'\0' .. '\255'})
+    check d.values.anyIt(it == {'x'})
+    check d.values.anyIt(it == {'x', '\0'})
+    check d.values.anyIt(it == {'\0' .. '\255'} - {'x'})
+    check d.values.len <= seqDomainCap
+    check d.values.deduplicate.len == d.values.len
+
+  test "boundaryOf Table and HashSet: empty, one to three entries over the core":
+    setStringHints(StringHints(strs: @["key-lit"], ints: @[]))
+    let t = boundaryOf(Table[string, int])
+    clearStringHints()
+    check not t.exhaustive
+    check t.values[0].len == 0
+    for n in 1 .. 3: check t.values.anyIt(it.len == n)
+    check t.values.anyIt("key-lit" in it)
+    check t.values.anyIt(it.len == 1 and it.hasKey("key-lit") and it["key-lit"] == low(int))
+    check t.values.len <= seqDomainCap
+    let h = boundaryOf(HashSet[int])
+    check not h.exhaustive
+    check h.values[0].len == 0
+    for a in boundaryInts.values:
+      check h.values.anyIt(it.len == 1 and a in it)
+      for b in boundaryInts.values:
+        if a != b: check h.values.anyIt(it.len == 2 and a in it and b in it)
+    check h.values.anyIt(it.len == 3)
+    check h.values.len <= seqDomainCap
+
+  test "a seq unsat verdict is pinned over the generated domain":
+    check pinFind(sutSeqUnsat, tLabel("hit")).status == sxUnsat
+    let r = recordsWith("/sutSeqUnsat/")
+    check r.len == 1 and not r[0].exhaustive
+    check "sampled[" in r[0].domain
+    check pinFind(sutOpen, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutOpen/").len == 1
+    check pinFind(sutSeqTuple, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutSeqTuple/").len == 1
+
+  test "an array, a set, a table and a hash set are pinned":
+    check pinFind(sutArr, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutArr/").len == 1
+    check pinFind(sutSet, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutSet/").len == 1
+    check pinFind(sutTable, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutTable/").len == 1
+    check pinFind(sutHashSet, tLabel("hit")).status == sxUnsat
+    check recordsWith("/sutHashSet/").len == 1
+
+  test "a seq sat witness outside the domain is still replayed exactly":
+    let r = pinFind(sutSeqSat, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[0].len == 3 and r.witness[0][0] == 4242
+    check not boundaryOf(seq[int]).values.anyIt(it == r.witness[0])
+    check recordsWith("/sutSeqSat/").len == 1
+
+  test "a planted unsat claim over a harvested length is refused":
+    ## sutSeqThresh hits at length 37; the SUT's own literal puts a 37-long
+    ## sequence in the domain where the fixed core has none
+    type W = tuple[s: seq[int]]
+    let key = cellKey(faGeneric, "k9d7/threshold")
+    let lie = SymexResult[W](status: sxUnsat, soundness: Soundness(replay: rsNotNeeded))
+    setStringHints(harvestLiterals(sutSeqThresh))
+    let dom = boundaryOf(seq[int])
+    clearStringHints()
+    check dom.values.anyIt(it.len == 37)
+    expect PinFailure:
+      discard pinExactOn(sutSeqThresh, lie, key, domain = dom)
+
+  test "the size is recorded and bounded when collections cross":
+    check pinFind(sutSeqTuple, tLabel("hit")).status == sxUnsat
+    let r = recordsWith("/sutSeqTuple/")
+    check r.len >= 1
+    let at = r[0].domain.find('[')
+    let n = parseInt(r[0].domain[at + 1 ..< r[0].domain.find(']')])
+    check n <= pinFindCap and n > 1

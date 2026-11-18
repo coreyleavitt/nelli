@@ -1,6 +1,6 @@
 ## RFC-0005 S8cu. What the suites share: the native check and the decline check.
 import std/compilesettings
-import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
+import std/[sets, tables, strutils, os, osproc, json, locks, times, macros, algorithm,
             options, streams, tempfiles, typetraits, sequtils]
 import nelli/symex
 from nelli/engine/markers import symexAssumeGateOpen, symexAssumeGateClose
@@ -131,6 +131,18 @@ func showArg*[T](v: T): string =
   when T is distinct: showArg(distinctBase(T)(v))
   elif T is string: escape(v)
   elif T is cstring: escape($v)
+  elif T is seq or T is array:
+    var parts: seq[string]
+    for e in v: parts.add showArg(e)
+    (when T is seq: "@" else: "") & "[" & parts.join(", ") & "]"
+  elif T is Table:
+    var parts: seq[string]
+    for k, x in v: parts.add showArg(k) & ": " & showArg(x)
+    "{" & parts.join(", ") & "}"
+  elif T is HashSet:
+    var parts: seq[string]
+    for e in v: parts.add showArg(e)
+    "{" & parts.join(", ") & "}"
   else: $v
 
 func describe*[T](d: Domain[T]): string =
@@ -846,12 +858,17 @@ macro harvestLiterals*(fn: typed): untyped =
   ## the SUT's string, char and small integer literals as `StringHints`
   hintsExpr(harvest(fn))
 
+template prefixDomain*(T: typedesc): bool =
+  ## a type whose generated domain is in priority order (its prefix is its core)
+  T is string or T is cstring or T is seq or T is array or T is set or
+    T is Table or T is HashSet
+
 proc thinDomain*[T](d: var Domain[T]) =
   ## A field of an aggregate too large to cross in full keeps its extremes and
   ## its middle (an ordinal's low end, zero and high end): at most nine values.
   let n = d.values.len
   if n <= 16: return
-  when T is string or T is cstring:
+  when prefixDomain(T):
     # the domain is in priority order: its prefix is the core
     d.values.setLen(min(n, stringCore))
     d.exhaustive = false
@@ -865,9 +882,9 @@ proc thinDomain*[T](d: var Domain[T]) =
   d.exhaustive = false
 
 proc thinForPairs*[T](d: var Domain[T]) =
-  ## a string domain too large to cross with another string parameter is cut
-  ## to its core; other types are left whole
-  when T is string or T is cstring: thinDomain(d)
+  ## a string or collection domain too large to cross with another such
+  ## parameter is cut to its core; other types are left whole
+  when prefixDomain(T): thinDomain(d)
 
 proc selector(f: NimNode; o: NimNode): NimNode =
   if f.kind == nnkIntLit: nnkBracketExpr.newTree(o, f) else: newDotExpr(o, f)
@@ -1019,6 +1036,267 @@ macro objectDomain(T: typedesc): untyped =
       `gen`
       Domain[`T`](values: `vals`, exhaustive: `exh`)
 
+# --- the collection domains (K9d-7) -----------------------------------------
+#
+# A `seq`, `array`, `set`, `Table` or `HashSet` domain is a deterministic
+# finite set, never the type. Each is built from the element type's own
+# domain cut to a CORE of at most `collCoreMax` values (`coreOf`: the extremes
+# and the middle of an ordinal's range, a string's first values and the SUT's
+# literals, a char or integer the SUT names with its neighbours) and listed
+# in priority order, at most `seqDomainCap` values (the prefix a nested
+# collection is cut to is the first `stringCore`).
+
+const
+  seqDomainCap* = 2048
+    ## the most values a collection domain holds, whatever the hints
+  collCoreMax* = 8
+    ## the element core: up to this many spread values of the element domain
+  collExtraMax = 6
+    ## and up to this many more an ordinal gets from the SUT's own literals
+  seqFixedLens = [4, 5, 8]
+  seqTripleFull = 512
+    ## length-3 sequences are the full product of the core up to this many,
+    ## else an all-pairs array
+
+proc boundaryOf*[T](t: typedesc[T]): Domain[T]
+
+proc coreIdx*(n, limit: int): seq[int] =
+  ## the indices of an `n`-value domain kept in its core: all of them when
+  ## `n <= limit`, else the low end, the middle and the high end
+  if n <= limit:
+    for i in 0 ..< n: result.add i
+    return
+  let want = if limit >= 8: @[0, 1, 2, n div 2 - 1, n div 2, n - 3, n - 2, n - 1]
+             elif limit >= 4: @[0, 1, n div 2, n - 1]
+             else: @[0, n - 1, n div 2]
+  for i in want:
+    if i >= 0 and i < n and i notin result and result.len < limit: result.add i
+
+proc coreOf*[E](d: Domain[E]; limit: int; spread: var int): seq[E] =
+  ## `spread` is how many leading values are the domain's own (the rest are
+  ## the SUT's literals); `d` cut to at most `limit` values, plus (for an ordinal other than a
+  ## boolean or enum) the integer or char literals of the SUT and each one's
+  ## neighbours, at most `collExtraMax` more
+  let n = d.values.len
+  when E is string:
+    for i in 0 ..< min(n, 3): result.add d.values[i]
+    for s in stringHintsCur.strs:
+      if result.len >= limit: break
+      if s.len > 0 and s notin result and s in d.values: result.add s
+    spread = result.len
+  elif prefixDomain(E):
+    for i in 0 ..< min(n, limit): result.add d.values[i]
+    spread = result.len
+  else:
+    for i in coreIdx(n, limit): result.add d.values[i]
+    spread = result.len
+    when not (E is distinct) and (E is char or
+         (E is Ordinal and not (E is enum) and not (E is bool))):
+      var seeds: seq[int]
+      when E is char:
+        for s in stringHintsCur.strs:
+          if s.len == 1 and ord(s[0]) notin seeds and seeds.len < 2:
+            seeds.add ord(s[0])
+      else:
+        for k in stringHintsCur.ints:
+          if k notin seeds and seeds.len < 2: seeds.add k
+      var added = 0
+      for k in seeds:
+        for x in [k, k - 1, k + 1]:
+          let inRange =
+            when E is SomeUnsignedInt: x >= 0 and uint64(x) <= uint64(high(E))
+            else: x >= ord(low(E)) and x <= ord(high(E))
+          if inRange and added < collExtraMax and E(x) notin result:
+            result.add E(x)
+            inc added
+
+proc coreOf*[E](d: Domain[E]; limit: int): seq[E] =
+  var spread = 0
+  coreOf(d, limit, spread)
+
+proc lengthPatterns*(m, n: int): seq[seq[int]] =
+  ## index vectors of length `n` over a core of `m` values: all-equal (low,
+  ## high, middle), ascending, descending, one outlier at each end (of either
+  ## kind), and adjacent duplicates ascending
+  if m <= 0 or n <= 0: return
+  let hi = m - 1
+  let idx = toSeq(0 ..< n)
+  result.add idx.mapIt(0)
+  result.add idx.mapIt(hi)
+  result.add idx.mapIt(hi div 2)
+  result.add idx.mapIt(it * m div n)
+  result.add idx.mapIt(hi - it * m div n)
+  result.add idx.mapIt(if it == 0: hi else: 0)
+  result.add idx.mapIt(if it == n - 1: hi else: 0)
+  result.add idx.mapIt(if it == 0: 0 else: hi)
+  result.add idx.mapIt(if it == n - 1: 0 else: hi)
+  result.add idx.mapIt((it div 2) * m div ((n + 1) div 2))
+
+proc seqShapes*(m: int; thresholds: seq[int]; spread = -1): seq[seq[int]] =
+  ## The sequences over a core of `m` values, as index vectors in priority
+  ## order: empty; each single; the leading pairs and triples; at each of the
+  ## SUT's integer literals `k` (and 4, 5, 8) the lengths k-1, k and k+1 filled
+  ## with `lengthPatterns`; every pair; every triple (all pairs of positions
+  ## when the product is large). The patterns' high end is the last of the
+  ## `spread` leading core values (the SUT's own literals follow them).
+  let sp = if spread < 0: m else: min(spread, m)
+  var seen = initHashSet[seq[int]]()
+  template put(v: seq[int]) =
+    block:
+      let vv = v
+      if result.len < seqDomainCap and not seen.containsOrIncl(vv):
+        result.add vv
+  put newSeq[int](0)
+  if m == 0: return
+  for a in 0 ..< m: put @[a]
+  let q = min(m, 4)
+  for a in 0 ..< q:
+    for b in 0 ..< q: put @[a, b]
+  let q3 = min(m, 3)
+  for a in 0 ..< q3:
+    for b in 0 ..< q3:
+      for c in 0 ..< q3: put @[a, b, c]
+  var lens: seq[int]
+  for k in thresholds:
+    if k in 1 .. 256:
+      for n in [k - 1, k, k + 1]:
+        if n >= 1 and n notin lens: lens.add n
+  for n in seqFixedLens:
+    if n notin lens: lens.add n
+  for n in lens:
+    for p in lengthPatterns(sp, n): put p
+  for a in 0 ..< m:
+    for b in 0 ..< m: put @[a, b]
+  for r in fieldRows(@[m, m, m], seqTripleFull).rows: put r
+
+proc arrayShapes*(n, m: int; spread = -1): tuple[rows: seq[seq[int]], full: bool] =
+  ## The fixed-length-`n` arrays over a core of `m` values: all pairs of
+  ## positions (the full product when it is small), every all-equal array, plus
+  ## `lengthPatterns`
+  if n == 0: return (@[newSeq[int](0)], true)
+  if m == 0: return (@[], true)
+  var seen = initHashSet[seq[int]]()
+  var full = false
+  template put(v: seq[int]) =
+    block:
+      let vv = v
+      if result.rows.len < seqDomainCap and not seen.containsOrIncl(vv):
+        result.rows.add vv
+  if n <= 32:
+    let fr = fieldRows(newSeqWith(n, m), fieldProductFull)
+    for r in fr.rows: put r
+    full = fr.full
+  for v in 0 ..< m: put newSeqWith(n, v)
+  for p in lengthPatterns(if spread < 0: m else: min(spread, m), n): put p
+  result.full = full and result.rows.len < seqDomainCap
+
+proc orderShapes*(m: int): seq[seq[int]] =
+  ## The key insertion sequences (index vectors, no repeats) over a core of
+  ## `m` keys: empty, each single, every ordered pair of the first eight, every
+  ## ascending and descending triple of the first five, all keys either way
+  var seen = initHashSet[seq[int]]()
+  template put(v: seq[int]) =
+    block:
+      let vv = v
+      if not seen.containsOrIncl(vv): result.add vv
+  put newSeq[int](0)
+  for a in 0 ..< m: put @[a]
+  let q = min(m, 8)
+  for a in 0 ..< q:
+    for b in 0 ..< q:
+      if a != b: put @[a, b]
+  let q3 = min(m, 5)
+  for a in 0 ..< q3:
+    for b in a + 1 ..< q3:
+      for c in b + 1 ..< q3:
+        put @[a, b, c]
+        put @[c, b, a]
+  if m > 3:
+    put toSeq(0 ..< m)
+    put toSeq(0 ..< m).reversed
+
+proc valueShapes*(l, vc: int): seq[seq[int]] =
+  ## the value index vectors for `l` entries over `vc` core values: each
+  ## single; else all-equal, ascending, descending and an outlier at each end
+  if vc <= 0: return
+  if l == 0: return @[newSeq[int](0)]
+  var seen = initHashSet[seq[int]]()
+  template put(v: seq[int]) =
+    block:
+      let vv = v
+      if not seen.containsOrIncl(vv): result.add vv
+  if l == 1:
+    for v in 0 ..< vc: put @[v]
+    return
+  let idx = toSeq(0 ..< l)
+  for v in 0 ..< vc: put idx.mapIt(v)
+  put idx.mapIt(it mod vc)
+  put idx.mapIt(vc - 1 - it mod vc)
+  if vc >= 2:
+    put idx.mapIt(if it == 0: vc - 1 else: 0)
+    put idx.mapIt(if it == l - 1: vc - 1 else: 0)
+
+proc seqDomain[E](t: typedesc[seq[E]]): Domain[seq[E]] =
+  var spread = 0
+  let cv = coreOf(boundaryOf(E), collCoreMax, spread)
+  for row in seqShapes(cv.len, stringHintsCur.ints, spread):
+    var s = newSeq[E](row.len)
+    for i, ix in row: s[i] = cv[ix]
+    result.values.add s
+
+proc arrayDomain[I, E](t: typedesc[array[I, E]]): Domain[array[I, E]] =
+  let ed = boundaryOf(E)
+  var spread = 0
+  let cv = coreOf(ed, collCoreMax, spread)
+  var probe: array[I, E]
+  let (rows, full) = arrayShapes(probe.len, cv.len, spread)
+  for row in rows:
+    var a: array[I, E]
+    var j = 0
+    for ix in low(I) .. high(I):
+      a[ix] = cv[row[j]]
+      inc j
+    result.values.add a
+  result.exhaustive = full and ed.exhaustive and cv.len == ed.values.len
+
+proc setDomain[E](t: typedesc[set[E]]): Domain[set[E]] =
+  let ed = boundaryOf(E)
+  let cv = coreOf(ed, collCoreMax)
+  let full = {low(E) .. high(E)}
+  var seen = initHashSet[set[E]]()
+  template put(v: set[E]) =
+    block:
+      let vv = v
+      if not seen.containsOrIncl(vv): result.values.add vv
+  put default(set[E])
+  put full
+  for x in cv: put {x}
+  for i in 0 ..< cv.len:
+    for j in i + 1 ..< cv.len: put {cv[i], cv[j]}
+  for x in cv: put full - {x}
+  var all: set[E]
+  for x in cv: all.incl x
+  put all
+  result.exhaustive = ed.exhaustive and ed.values.len <= 4 and
+                      cv.len == ed.values.len
+
+proc tableDomain[K, V](t: typedesc[Table[K, V]]): Domain[Table[K, V]] =
+  let kc = coreOf(boundaryOf(K), collCoreMax)
+  let vc = coreOf(boundaryOf(V), 3)
+  for ko in orderShapes(kc.len):
+    for vs in valueShapes(ko.len, vc.len):
+      if result.values.len >= seqDomainCap: return
+      var tb = initTable[K, V]()
+      for i, ki in ko: tb[kc[ki]] = vc[vs[i]]
+      result.values.add tb
+
+proc hashSetDomain[E](t: typedesc[HashSet[E]]): Domain[HashSet[E]] =
+  let cv = coreOf(boundaryOf(E), collCoreMax)
+  for ko in orderShapes(cv.len):
+    var hs = initHashSet[E]()
+    for ki in ko: hs.incl cv[ki]
+    result.values.add hs
+
 macro underlyingName(T: typedesc): string =
   ## the type behind an alias, for the "no generated domain" message
   newLit(T.getType[1].repr)
@@ -1065,6 +1343,16 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
     sampled(stringDomainValues(stringHintsCur))
   elif T is cstring:
     cstringDomain(stringHintsCur)
+  elif T is seq:
+    seqDomain(T)
+  elif T is array:
+    arrayDomain(T)
+  elif T is set:
+    setDomain(T)
+  elif T is Table:
+    tableDomain(T)
+  elif T is HashSet:
+    hashSetDomain(T)
   elif T is tuple or (T is object and not (T is ref)):
     objectDomain(T)
   else:
@@ -1111,6 +1399,10 @@ proc fnParamTypes(fn: NimNode): seq[NimNode] =
       # `sink T` / `lent T` are ownership annotations, not part of the type
       if u.kind == nnkBracketExpr and u.len == 2 and
          (u[0].eqIdent("sink") or u[0].eqIdent("lent")): u = u[1]
+      # an `openArray[T]` / `varargs[T]` parameter is passed a `seq[T]`
+      if u.kind == nnkBracketExpr and u.len == 2 and
+         (u[0].eqIdent("openArray") or u[0].eqIdent("varargs")):
+        u = nnkBracketExpr.newTree(ident"seq", u[1])
       result.add u
 
 macro pinFind*(fn: typed; target: untyped;

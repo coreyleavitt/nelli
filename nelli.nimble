@@ -1970,6 +1970,8 @@ task test, "Run the test suite":
             "tsymex_0016_int31_keyholes",
             "tsymex_0016_int32_settle",
             "tsymex_0016_int33_savesecondary",
+            "tsymex_0016_int34_cleanups",
+            "tsymex_0016_int34_dberrors",
             "tsymex_0016_int35_exitgroups",
             "tsymex_0016_int36_collector",
             "tsymex_0016_int36_report",

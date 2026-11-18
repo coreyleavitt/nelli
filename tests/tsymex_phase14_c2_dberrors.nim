@@ -6,15 +6,15 @@
 ## failures into a dead-end local; the engine's `Report.dbErrors`
 ## (a user-visible surface) never saw them.
 ##
-## Post-C2: a thread-local `engineSymexDbErrors` is the bridge.
-## Layer 1 drains its local accumulator into the threadvar at the
-## end of its emitted block; `finalizePhase` consumes the threadvar
-## and concatenates onto `state.acc.dbErrors` when building the
-## terminal Report.
+## Post-C2: Layer 1 records each error with `recordSymexDbError`. RFC-0016
+## INT-34: inside a run it is that run's (its frame's, then its report's);
+## outside any run it is held for the caller, who reads it with
+## `consumeSymexDbErrors` (this suite; `tsymex_0016_int34_dberrors` has the
+## run-owned side).
 import std/unittest
-import nelli/engine/types
+import nelli/engine/frame
 
-suite "symex Phase 14 cycle C2 — engineSymexDbErrors sink":
+suite "symex Phase 14 cycle C2 — DB errors made outside any run":
   test "recordSymexDbError appends and consumeSymexDbErrors drains":
     discard consumeSymexDbErrors()  # baseline clear
     recordSymexDbError("io-error: disk full")

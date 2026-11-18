@@ -205,6 +205,11 @@ type
     loadCorpusImpl*:     proc(testId: string): seq[seq[ChoiceNode]] {.closure.}
     saveSchedImpl*:      proc(testId: string, data: seq[byte]) {.closure.}
     loadSchedImpl*:      proc(testId: string): seq[byte] {.closure.}
+    primaryKeysImpl*:    proc(): seq[string] {.closure.}
+      ## RFC-0016 INT-38 (0005 review R8-04). Every test id this backend
+      ## holds primary entries under (it may list one whose entries are all
+      ## gone). Optional: a maintenance sweep (`pruneForeignSymexRecords`)
+      ## needs it, and refuses a backend without it.
 
   ExampleDB* = ExampleDatabase
     ## Legacy alias — `ExampleDB` predates the closure-record refactor.
@@ -265,6 +270,16 @@ proc removeMany*(db: ExampleDatabase, testId: string,
   ## Wrapper converts `openArray` callers to the closure's `seq` param —
   ## closures can't take `openArray`, so the wrapper layer pays the copy.
   db.removeManyImpl(testId, @staleChoices)
+
+proc primaryKeys*(db: ExampleDatabase): seq[string] =
+  ## RFC-0016 INT-38 (0005 review R8-04). The test ids `db` holds primary
+  ## entries under (`primaryKeysImpl`), in no set order. Raises `DbError`
+  ## for a backend that cannot list them.
+  if db.primaryKeysImpl.isNil:
+    raise newException(DbError,
+      "primaryKeys: this ExampleDatabase backend has no primaryKeysImpl " &
+      "(it cannot list the test ids it holds)")
+  db.primaryKeysImpl()
 
 proc saveSecondary*(db: ExampleDatabase, testId: string,
                     entries: openArray[ScoredEntry], maxEntries = 16) =
@@ -580,6 +595,20 @@ proc safeKey(testId: string): string =
       result.add '%'
       result.add hex[(ord(c) shr 4) and 0xf]
       result.add hex[ord(c) and 0xf]
+
+proc unsafeKey(name: string): string =
+  ## RFC-0016 INT-38. The inverse of `safeKey`: the test id a file name
+  ## stands for. A `%` not followed by two hex digits is kept as written.
+  result = newStringOfCap(name.len)
+  var i = 0
+  while i < name.len:
+    if name[i] == '%' and i + 2 < name.len and
+       name[i + 1] in HexDigits and name[i + 2] in HexDigits:
+      result.add chr(parseHexInt(name[i + 1 .. i + 2]))
+      i += 3
+    else:
+      result.add name[i]
+      inc i
 
 # --- corpus delta log (E3b, RFC-fuzzer-nextgen) ------------------------------
 #
@@ -1408,6 +1437,12 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     if not fileExists(p): return @[]
     try: strToBytes(readFile(p))
     except IOError: @[]   # unreadable checkpoint: treated as none (cold start)
+  result.primaryKeysImpl = proc(): seq[string] =
+    # RFC-0016 INT-38: one `<safeKey>.bin` per test id with primary entries.
+    if not dirExists(path): return
+    for kind, p in walkDir(path, relative = true):
+      if kind == pcFile and p.endsWith(".bin") and ".tmp." notin p:
+        result.add unsafeKey(p[0 ..< p.len - ".bin".len])
 
 proc newExampleDB*(path: string): ExampleDatabase =
   ## Legacy constructor — delegates to `directoryBasedDatabase(path)`.
@@ -1469,6 +1504,9 @@ proc inMemoryDatabase*(): ExampleDatabase =
     sched[testId] = data
   result.loadSchedImpl = proc(testId: string): seq[byte] =
     sched.getOrDefault(testId)
+  result.primaryKeysImpl = proc(): seq[string] =
+    for k, entries in primary:
+      if entries.len > 0: result.add k
 
 # --- multiplexed backend -----------------------------------------------------
 
@@ -1530,6 +1568,8 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
     ## has none.
     result = p.loadSchedImpl(testId)
     if result.len == 0: result = s.loadSchedImpl(testId)
+  result.primaryKeysImpl = p.primaryKeysImpl
+    # RFC-0016 INT-38: the writable side's, the only one a sweep can change.
 
 # --- read-only wrapper -------------------------------------------------------
 
@@ -1555,6 +1595,7 @@ proc readOnlyDatabase*(inner: ExampleDatabase): ExampleDatabase =
   result.loadSecondaryImpl = i.loadSecondaryImpl
   result.loadCorpusImpl = i.loadCorpusImpl
   result.loadSchedImpl = i.loadSchedImpl
+  result.primaryKeysImpl = i.primaryKeysImpl
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
     rejectReadOnlyWrite("to", "save")
   result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],

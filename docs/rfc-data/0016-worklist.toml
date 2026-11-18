@@ -1506,7 +1506,7 @@ table = "5.8c"
 title = "Design cleanups: `FindingHint`/`FindingGap` kinds are strings; include-split `runtime_*` modules and a `symex.nim` that mixes codegen, cache codecs and settle; the `engineSymexDbErrors` threadvar sink; `loweringPendingTaint` still a threadvar with `walk`/`walkCapSynced` as two shallow layers; the `sx2:` prefix is redundant with the walker version"
 class = "design debt; no wrong verdict described"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Parts 1 and 2 done (branch `rfc-0016-w4rvlows-d`, part 6, walker 416): `FindingGap.kind`, `FindingHint.kind` and `FindingHint.severity` are the `SymexErrorKind`/`SymexErrorSeverity` enums, stored by name as before so the text and an older record read the same (R1-28); a symex DB error rides the engine frame of the run that made it, and that run's report shows it, passed or failed, in place of the `engineSymexDbErrors` threadvar the next failing run drained (R2-10; RED: a passing run reported none of its errors, and a nested run took its enclosing run's); a key starts with the walker version that wrote it (`w416:`), not the fixed `sx2:` (R4-08). Left, scheduled with the runtime split on the integration branch: the `runtime_*` include-split and the `symex.nim` split (R1-29), and the `loweringPendingTaint` threadvar with `walk`/`walkCapSynced` as two shallow layers (R2-14)"
 source = "0005 review R1-28, R1-29, R2-10, R2-14, R4-08"
 cells = []
 
@@ -1548,11 +1548,11 @@ id = "INT-38"
 table = "5.8c"
 title = "Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up"
 class = "performance; no wrong verdict"
-state = "moved"
-note = ": slice `rv0005-lows`. Part 5 (branch `rfc-0016-w4rvlows-d`): a notes re-save first writes a head the loader refuses, so a failure part-way reads back as the old record, the new one or nothing (R6-07; RED: the new run's first diagnostics under the old head). Left (a fork): R8-04's `:raised` slots were written under walker versions no current key reaches, and the base key is a hash, so they can be cleaned only by a general sweep of records of other walker versions"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-d`). Part 5: a notes re-save first writes a head the loader refuses, so a failure part-way reads back as the old record, the new one or nothing (R6-07; RED: the new run's first diagnostics under the old head). Part 6 (walker 416), the fork settled: a key now starts with the walker version that wrote it (INT-34), so a record's version is read off its key, and `pruneForeignSymexRecords` is the general sweep, explicit and opt-in: it empties every record of another walker version (the `sx:`/`sx2:` keys before 416, their `:raised` indexes and slots among them) and reports how many; a test id and this walker's records stay, and no run calls it, so a walker bump still only misses (R8-04; a backend lists its keys through the new optional `primaryKeysImpl`)"
 source = "0005 review R6-07, R8-04"
 cells = ["construct:cache/record/notes"]
-pins = ["tsymex_0016_int38_notes"]
+pins = ["tsymex_0016_int38_notes", "tsymex_0016_int34_cleanups"]
 
 [[row]]
 id = "INT-39"

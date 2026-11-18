@@ -29,7 +29,7 @@ proc undefs(tag: string): seq[FindingUndefined] =
     FindingUndefined(kind: "ukB", site: tag & "1")]
 
 proc hints(tag: string): seq[FindingHint] =
-  @[FindingHint(kind: "seUnsupportedRegex", severity: "sevHint",
+  @[FindingHint(kind: seUnsupportedRegex, severity: sevHint,
                 msg: tag & "-hint")]
 
 proc tagOf(n: CachedNotes): seq[string] =

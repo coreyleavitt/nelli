@@ -142,12 +142,12 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
   if f.soundness.buildSegment.len > 0:
     result.add "  " & buildSummary(f.soundness)
   for g in f.gaps:
-    result.add "  gap " & $g.class & " " & g.kind & ": " & g.msg
+    result.add "  gap " & $g.class & " " & $g.kind & ": " & g.msg
   for av in f.annotationViolations:
     result.add "  annotation violation " & $av.kind & " {." & $av.pragma &
                ".} " & av.callee & " at " & av.site & ": " & av.msg
   for h in f.hints:
-    result.add "  hint " & h.kind & ": " & h.msg
+    result.add "  hint " & $h.kind & ": " & h.msg
   for u in f.undefined:   # RFC-0016 W3-z R5 (U6)
     result.add "  undefined " & u.kind & " at " & u.site &
                " witness=" & $u.witnessChoices.len & " choices"
@@ -291,7 +291,7 @@ proc symexFindingJson(f: SymexFinding): string =
   for i, g in f.gaps:
     if i > 0: result &= ","
     result &= "{\"class\":\"" & $g.class & "\",\"kind\":\"" &
-              jsonEscape(g.kind) & "\",\"msg\":\"" & jsonEscape(g.msg) &
+              jsonEscape($g.kind) & "\",\"msg\":\"" & jsonEscape(g.msg) &
               "\"}"
   result &= "]"
   result &= ",\"annotationViolations\":["
@@ -305,8 +305,8 @@ proc symexFindingJson(f: SymexFinding): string =
   result &= ",\"hints\":["   # RFC-0005 W1
   for i, h in f.hints:
     if i > 0: result &= ","
-    result &= "{\"kind\":\"" & jsonEscape(h.kind) & "\",\"severity\":\"" &
-              jsonEscape(h.severity) & "\",\"msg\":\"" & jsonEscape(h.msg) &
+    result &= "{\"kind\":\"" & jsonEscape($h.kind) & "\",\"severity\":\"" &
+              jsonEscape($h.severity) & "\",\"msg\":\"" & jsonEscape(h.msg) &
               "\"}"
   result &= "]"
   result &= ",\"undefined\":["   # RFC-0016 W3-z R5 (U6)
@@ -446,7 +446,7 @@ proc renderGithub[T](r: Report[T], testName: string): string =
       var gapText = ""
       for i, g in f.gaps:
         if i > 0: gapText &= "; "
-        gapText &= g.kind & " (" & $g.class & ")"
+        gapText &= $g.kind & " (" & $g.class & ")"
       result &= "\n::warning title=symex untrusted::" &
                 ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
                          " runTaint=" & taintText(f.soundness.runTaint) &
@@ -475,7 +475,7 @@ proc renderGithub[T](r: Report[T], testName: string): string =
     # or did not run says so, with its message, where the CI reader looks.
     for h in f.hints:
       result &= "\n::notice title=symex hint::" &
-                ghEscape(testName & " — " & f.targetDesc & " " & h.kind &
+                ghEscape(testName & " — " & f.targetDesc & " " & $h.kind &
                          ": " & h.msg)
 
 proc renderReport*[T](r: Report[T], format = ofText,

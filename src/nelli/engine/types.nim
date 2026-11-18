@@ -15,6 +15,8 @@ import ../smt/soundness   ## RFC-0005 S11: Z3-free and IR-free (a leaf)
 export soundness
 import ../smt/budget      ## review R1-17: Z3-free and IR-free (a leaf)
 export budget
+import ../smt/errorkind   ## RFC-0016 INT-34: Z3-free and IR-free (a leaf)
+export errorkind
 
 type
   SymexFindingStatus* = enum
@@ -126,9 +128,11 @@ type
 
   FindingHint* = object
     ## RFC-0005 W1. One entry of `SymexFinding.hints`: a recorded diagnostic
-    ## that decided nothing, projected to strings like `FindingGap`.
-    kind*:     string   ## the `SymexErrorKind`, by name (e.g. "feReplayCrashed")
-    severity*: string   ## the `SymexErrorSeverity`, by name ("sevHint", "sevWarning")
+    ## that decided nothing, projected onto the Z3-free leaf types like
+    ## `FindingGap`. RFC-0016 INT-34: `kind` and `severity` are the enums, not
+    ## their names; every renderer prints `$kind`, so the text is unchanged.
+    kind*:     SymexErrorKind      ## e.g. `feReplayCrashed`
+    severity*: SymexErrorSeverity  ## `sevHint` or `sevWarning`
     msg*:      string
 
   FindingDiagnostic* = object
@@ -149,7 +153,7 @@ type
     ## the run coordinate, with the `DegradeClass` that names its lever (see
     ## `gaps()` in `smt/types.nim` for the class -> lever table).
     class*: DegradeClass
-    kind*:  string   ## the `SymexErrorKind`, by name (e.g. "beBudgetExhausted")
+    kind*:  SymexErrorKind   ## e.g. `beBudgetExhausted`
     msg*:   string   ## the decline's message, naming the budget or call
 
   FalsifiedError* = object of CatchableError
@@ -306,20 +310,3 @@ func defaultSettings*(): Settings =
   ## release that already changes the behaviour of every partial literal.
   Settings()
 
-# ---- engineSymexDbErrors sink (Phase 14 cycle C2) ---------------------------
-#
-# Layer 1's `symexFindAllWitnesses` macro currently routes DB save/
-# load errors into a local `errors` accumulator, but the engine
-# layer's `Report.dbErrors` (the user-visible surface) never
-# receives them. C2 adds a thread-local sink: Layer 1 deposits,
-# `finalizePhase` drains via `consumeSymexDbErrors()` and appends to
-# `Report.dbErrors`.
-
-var engineSymexDbErrors* {.threadvar.}: seq[string]
-
-proc recordSymexDbError*(msg: string) =
-  engineSymexDbErrors.add msg
-
-proc consumeSymexDbErrors*(): seq[string] =
-  result = engineSymexDbErrors
-  engineSymexDbErrors.setLen(0)

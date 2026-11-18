@@ -205,7 +205,7 @@ suite "RFC-0005 S8cr (b) -- symexForAll's veto companions":
     check f.get.status == sfSat
     check f.get.soundness.pathTaint == {}
     check f.get.soundness.replay == rsNotNeeded
-    check f.get.gaps.anyIt(it.kind == "feUnsupportedExprKind")
+    check f.get.gaps.anyIt(it.kind == feUnsupportedExprKind)
 
   test "grouped parameters count one by one (`x, a, b: int` was a compile error)":
     ## `faCap` above declares three parameters in one group. `symexForAll`
@@ -227,7 +227,7 @@ suite "RFC-0005 S8cr (b) -- symexForAll's veto companions":
     check f.get.status == sfSat
     check f.get.soundness.pathTaint == {}
     check f.get.soundness.replay == rsNotNeeded
-    check f.get.gaps.anyIt(it.kind == "ceUnsupportedHof")
+    check f.get.gaps.anyIt(it.kind == ceUnsupportedHof)
 
 suite "RFC-0005 S8cr (pins): walker version":
   test "symexWalkerVersion >= 245 (no walker change: this slice adds pins)":

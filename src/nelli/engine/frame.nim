@@ -39,6 +39,12 @@ type EngineFrame* = object
   firstOfClaim: Table[string, string]
     ## The first `symexFindings` key made for each claim, the entry a nested
     ## run's finding of that claim under another call site merges into.
+  dbErrors*: seq[string]                       ## cross-example
+    ## RFC-0016 INT-34 (0005 review R2-10). The errors the symex cache's reads
+    ## and writes hit inside this run's property (`recordSymexDbError`), in
+    ## order. The engine adds them to the run's `Report.dbErrors` when the run
+    ## ends, whatever its outcome. They were a thread-local list the next run
+    ## to fail drained, so a run could report another's errors and lose its own.
 
 var engineStack* {.threadvar.}: seq[EngineFrame]
 
@@ -133,6 +139,8 @@ proc popEngineFrame*() =
           parent.symexFindings[into] = f
       else:
         recordKeyed(parent, k, claim, f)
+    # RFC-0016 INT-34: a nested run's DB errors are its enclosing run's too.
+    parent.dbErrors.add fr.dbErrors
 
 proc pushEngineFrame*() =
   ## Opens a fresh frame. Review R4 (X3): the one way a frame is opened;
@@ -208,6 +216,27 @@ proc recordSymexFinding*(origin: FindingOrigin; f: SymexFinding) =
     droppedFindings.atomicInc()
     return
   recordKeyed(engineStack[^1], findingKey(origin, f), claimKey(origin, f), f)
+
+var unownedDbErrors {.threadvar.}: seq[string]
+  ## RFC-0016 INT-34. The symex DB errors made on this thread outside any run
+  ## (a standalone `saveSymexWitness`, say). No report reads them: they are
+  ## the caller's, through `consumeSymexDbErrors`.
+
+proc recordSymexDbError*(msg: string) =
+  ## Phase 14 C2, RFC-0016 INT-34 (0005 review R2-10). Records an error a
+  ## symex cache read or write hit. Inside a run (an engine frame is open on
+  ## this thread) it is that run's, and its report shows it
+  ## (`EngineFrame.dbErrors`); outside any run it is held for the caller
+  ## (`consumeSymexDbErrors`).
+  if engineStack.len > 0: engineStack[^1].dbErrors.add msg
+  else: unownedDbErrors.add msg
+
+proc consumeSymexDbErrors*(): seq[string] =
+  ## The symex DB errors made on this thread outside any run since the last
+  ## call, oldest first, and forgets them. A run's own errors are on its
+  ## report, never here.
+  result = move unownedDbErrors
+  unownedDbErrors = @[]
 
 # --- user-facing accumulator APIs --------------------------------------------
 

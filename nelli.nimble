@@ -1913,6 +1913,8 @@ task test, "Run the test suite":
             "tsymex_0016_prc48_dupiter",
             # RFC-0016 PRC-49: the =dup shapes PRC-48 left declining (a hooked loop variable, a sink in the iterator, try, openArray).
             "tsymex_0016_prc49_dupfinal2",
+            # RFC-0016 PRC-50: the =dup shapes PRC-49 left declining (an owning loop variable, an alias of one, a listed inner loop).
+            "tsymex_0016_prc50_dupresid",
             # RFC-0016 INT-73: a conversion to an anonymous tuple's alias aborted the compile.
             "tsymex_0016_int73_tuplealias",
             "tsymex_0016_wa_undefined_e2e",

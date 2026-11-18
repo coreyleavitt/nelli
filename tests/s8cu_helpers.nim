@@ -1,7 +1,7 @@
 ## RFC-0005 S8cu. What the suites share: the native check and the decline check.
 import std/compilesettings
 import std/[sets, strutils, os, osproc, json, locks, times, macros, algorithm,
-            options, streams, tempfiles]
+            options, streams, tempfiles, typetraits]
 import nelli/symex
 import nelli/db
 import nelli/choice
@@ -120,11 +120,15 @@ func sampled*[T](v: openArray[T]): Domain[T] =
 const boundaryInts* = sampled([low(int), low(int) + 1, -1, 0, 1, 7,
                                high(int) - 1, high(int)])
 
+func showArg*[T](v: T): string =
+  ## `$` of a generated input; a distinct type shows as its base type
+  when T is distinct: showArg(distinctBase(T)(v)) else: $v
+
 func describe*[T](d: Domain[T]): string =
   var vs: seq[string]
   for i, v in d.values:
     if i == 12: vs.add "..."; break
-    vs.add $v
+    vs.add showArg(v)
   (if d.exhaustive: "exhaustive" else: "sampled") & "[" & $d.values.len & "]{" &
     vs.join(",") & "}"
 
@@ -517,7 +521,7 @@ macro pinExactImpl*(fn: typed; claim, key, target, domain,
   for v in loopVars: dcall.add v
   var shown = newLit("input (")
   for i, v in loopVars:
-    shown = infix(shown, "&", newCall(ident"$", v))
+    shown = infix(shown, "&", newCall(ident"showArg", v))
     if i < loopVars.high: shown = infix(shown, "&", newLit(","))
   shown = infix(shown, "&", newLit(")"))
   var loops = quote do:
@@ -572,20 +576,30 @@ const pinFindCap* = 65_536
   ## The most input combinations an `sxUnsat` pin runs natively; a larger
   ## product is run up to the cap and recorded as sampled.
 
+macro declaredValues(T: typedesc): untyped =
+  ## the enum's declared values as an array literal (a holey enum's holes are
+  ## not in its type, so `low .. high` would invent invalid values)
+  result = newNimNode(nnkBracket).add(T.getType[1].getTypeImpl[1..^1])
+
 proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
   ## The generated domain of one parameter type: every value of `bool`, of a
   ## one-byte ordinal and of an ordinal spanning at most 256 values (so a
-  ## `range` is exhaustive when small); otherwise the boundary sample
-  ## (`boundaryInts`' points that lie in the type).
+  ## `range` is exhaustive when small); every declared value of an enum
+  ## (holes excluded); a distinct type's base domain, converted; otherwise the
+  ## boundary sample (`boundaryInts`' points that lie in the type).
   when T is bool:
     exhaustive([false, true])
   elif T is enum:
-    when T is Ordinal:
-      var vs: seq[T]
-      for v in low(T) .. high(T): vs.add v
-      exhaustive(vs)
-    else:
-      {.error: "pinFind: a holey enum has no generated domain; use pinExact".}
+    # every declared value; a holey enum's holes are not values of the type
+    var vs: seq[T]
+    for v in declaredValues(T): vs.add v
+    exhaustive(vs)
+  elif T is distinct:
+    # the base type's domain, each value converted
+    let base = boundaryOf(distinctBase(T))
+    var vs: seq[T]
+    for v in base.values: vs.add T(v)
+    Domain[T](values: vs, exhaustive: base.exhaustive)
   elif sizeof(T) == 1 and T is Ordinal:
     var vs: seq[T]
     for v in low(T) .. high(T): vs.add v
@@ -714,7 +728,7 @@ macro pinFind*(fn: typed; target: untyped;
   for a in callVars: dcall.add a
   var shown = newLit("input (")
   for i, v in loopVars:
-    shown = infix(shown, "&", newCall(ident"$", v))
+    shown = infix(shown, "&", newCall(ident"showArg", v))
     if i < loopVars.high: shown = infix(shown, "&", newLit(","))
   shown = infix(shown, "&", newLit(")"))
   let dused = used(dcall)

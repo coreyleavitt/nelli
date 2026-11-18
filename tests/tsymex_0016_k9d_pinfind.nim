@@ -55,6 +55,25 @@ proc sutRet(x: int): int =
 proc sutRaise(x: int) =
   if x == 3: raise newException(ValueError, "three")
 
+type
+  Color = enum cRed, cGreen, cBlue
+  Holey = enum hA = 1, hB = 5, hC = 9
+  Cents = distinct int
+  Tiny = distinct int8
+  Flag = distinct bool
+
+proc sutEnum(c: Color; n: int) =
+  if c == cBlue and n == 2 and c == cRed: symexTarget("hit")
+
+proc sutHoley(h: Holey) =
+  if ord(h) == 5: symexTarget("hit")
+
+proc sutDistinct(c: Cents) =
+  if int(c) > 5 and int(c) < 3: symexTarget("hit")
+
+proc sutTiny(t: Tiny) =
+  if int(t) > 100 and int(t) < 101: symexTarget("hit")
+
 suite "K9d: pinFind":
   test "boundaryOf: exhaustive for bool and a small ordinal, sampled for int":
     check boundaryOf(bool).exhaustive
@@ -119,3 +138,28 @@ suite "K9d: pinFind":
     ## come from the declared type or a native call would raise on conversion
     check pinFind(sutWide, tLabel("hit")).status == sxUnsat
     check recordsWith("/sutWide/").len == 1
+
+  test "boundaryOf an enum: every declared value, holes excluded":
+    check boundaryOf(Color).exhaustive
+    check boundaryOf(Color).values == @[cRed, cGreen, cBlue]
+    check boundaryOf(Holey).exhaustive
+    check boundaryOf(Holey).values == @[hA, hB, hC]
+
+  test "boundaryOf a distinct type: its base type's domain, converted":
+    check boundaryOf(Tiny).exhaustive
+    check boundaryOf(Tiny).values.len == 256
+    check boundaryOf(Flag).values.len == 2
+    check not boundaryOf(Cents).exhaustive
+    check boundaryOf(Cents).values.mapIt(int(it)) == boundaryInts.values
+
+  test "enum, holey enum and distinct parameters are pinned":
+    check pinFind(sutEnum, tLabel("hit")).status == sxUnsat
+    check pinFind(sutHoley, tLabel("hit")).status == sxSat
+    check pinFind(sutDistinct, tLabel("hit")).status == sxUnsat
+    check pinFind(sutTiny, tLabel("hit")).status == sxUnsat
+    let e = recordsWith("/sutEnum/")
+    check e.len == 1 and not e[0].exhaustive and "[24]" in e[0].domain
+    check "exhaustive[3]{cRed,cGreen,cBlue}" in e[0].domain
+    check recordsWith("/sutHoley/").len == 1
+    let t = recordsWith("/sutTiny/")
+    check t.len == 1 and t[0].exhaustive and "[256]" in t[0].domain

@@ -126,7 +126,12 @@ const boundaryInts* = sampled([low(int), low(int) + 1, -1, 0, 1, 7,
 
 func showArg*[T](v: T): string =
   ## `$` of a generated input; a distinct type shows as its base type
-  when T is distinct: showArg(distinctBase(T)(v)) else: $v
+  ## (a string shows quoted and escaped: a record is text, and a generated
+  ## string holds NUL and bytes above 0x7F)
+  when T is distinct: showArg(distinctBase(T)(v))
+  elif T is string: escape(v)
+  elif T is cstring: escape($v)
+  else: $v
 
 func describe*[T](d: Domain[T]): string =
   var vs: seq[string]

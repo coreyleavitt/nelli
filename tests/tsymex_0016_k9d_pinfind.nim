@@ -463,6 +463,8 @@ suite "K9d: pinFind":
     let r = recordsWith("/sutStrUnsat/")
     check r.len == 1 and not r[0].exhaustive
     check "sampled[" in r[0].domain
+    # the record is text: a NUL or a high byte in the domain shows escaped
+    check r[0].domain.allIt(it in {' ' .. '~'})
     check pinFind(sutStrLit, tLabel("hit")).status == sxUnsat
     # the walker declines a cstring parameter: returned as it came, no record
     check pinFind(sutCstr, tLabel("hit")).status == sxUnknown

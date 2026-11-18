@@ -5,7 +5,7 @@
 # axis typeop: 34 cells
 # axis pragma: 198 cells
 # axis magic: 244 cells
-# axis stdlib: 90 cells
+# axis stdlib: 93 cells
 # axis build: 31 cells (pcre libs and build cells; rows below)
 # axis readonly: 33 cells
 # axis defined: 25 cells
@@ -475,7 +475,7 @@ magic:PrivateAccess	never	-
 magic:ProcCall	declined	-
 magic:QuoteAst	never	-
 magic:Range	never	-
-magic:Repr	declined	-
+magic:Repr	modelled	-
 magic:RunnableExamples	modelled	-
 magic:SameNodeType	never	-
 magic:Seq	never	-
@@ -820,12 +820,15 @@ stdlib:math.splitDecimal	declined	-
 stdlib:math.sqrt	modelled	-
 stdlib:math.tan	declined	-
 stdlib:math.tanh	declined	-
+stdlib:math.toBiggestInt	modelled	-
 stdlib:math.toFloat32	modelled	-
 stdlib:math.toFloat64	modelled	-
+stdlib:math.toInt	modelled	-
 stdlib:math.trunc	modelled	-
 stdlib:options.Option	declined	-
 stdlib:sets.HashSet/iterationOrder	never	-
 stdlib:strutils.rfind/indexofLink	never	-
+stdlib:system.$/float	modelled	-
 stdlib:system.%%	modelled	-
 stdlib:system.*%	modelled	-
 stdlib:system.+%	modelled	-

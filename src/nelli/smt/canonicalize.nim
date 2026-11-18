@@ -816,8 +816,20 @@ const renderAsChoicesVersion* = "12"
   ##   a built search language that is wrong (PRC-33 item 6b; an `skNoOcc`
   ##   one could be empty); the search now declines instead. No key bytes
   ##   change.
+  ## - RFC-0016 PRC-35 (401->414; 402-413 are reserved for in-flight W4
+  ##   work): `toInt`/`toBiggestInt`, `$` of a float on its faithful
+  ##   sub-domain, `repr` of an integer, float, char and string, and `$` of an
+  ##   enum hole ("") are modelled where they declined. No key bytes change.
+  ## - RFC-0016 PRC-35 (414->416; 415 is reserved for in-flight W4 work):
+  ##   `repr` of a string is exact only where no byte is escaped and declines
+  ##   elsewhere (the `str.replace_all` form was `unknown` for every escape);
+  ##   a user `=dup` that is not the plain copy no longer declines every read
+  ##   when no sink position runs it: an explicit call walks the hook, a copy
+  ##   is the plain copy, and a sink position on its source's provable last
+  ##   read is the move. Any other sink position declines (PRC-44). No key
+  ##   bytes change.
 
-const symexWalkerVersion* = "401"
+const symexWalkerVersion* = "416"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -58,6 +58,7 @@ import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
 import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejected `re"..."` is a raise site
 import ./arith_regime    ## RFC-0016 review D1 S3: the one owner of the arithmetic regime
 import ./check_options   ## RFC-0005 S8cu: a routine compiled with other checks
+from ./check_scan import libRelPath   ## RFC-0016 PRC-43
 from ./replayproc import hasMethodTable, hasSubtypeTable   ## RFC-0016 PRC-02m
 from ./replayproc import closureEnvRefusal, closureRouteGuard   ## RFC-0016 W3-z R8
 from ./replayproc import nestedRoutineAddrs, benignEnvCodes   ## RFC-0016 W3-z R11
@@ -5439,8 +5440,11 @@ proc isStdMathProc(calleeSym: NimNode): bool =
   if impl == nil:
     return false
   let fn = impl.lineInfoObj.filename.replace('\\', '/')
+  # RFC-0016 PRC-43: also under the configured lib path, whatever its name.
+  let rel = libRelPath(fn, configuredLibDir)
   result = ("/pure/math" in fn) or ("/lib/system" in fn) or
-           fn.endsWith("system.nim") or ("/system/" in fn)
+           fn.endsWith("system.nim") or ("/system/" in fn) or
+           rel.startsWith("pure/math") or rel.startsWith("system")
 
 proc isRuneTyped(node: NimNode): bool =
   ## True iff `node`'s Nim type is `std/unicode.Rune` (= `distinct int32` via
@@ -8543,6 +8547,167 @@ proc enumDisplayNames(opnd: NimNode): seq[(string, int64)] =
     ty = impl[2]
     inc hops
 
+proc fpCall(op: string; args: seq[IRExpr]): IRExpr =
+  ## A modelled float-first `std/math` call, with its row's proof.
+  mkMathCall(admitFloatCall(op, args.len), op, args)
+
+proc strCat(parts: seq[IRExpr]; preamble: var seq[IRStmt];
+            ctx: ParseCtx): IRExpr =
+  ## `parts[0] & parts[1] & ...`, each step bound to a `let`.
+  result = parts[0]
+  for i in 1 ..< parts.len:
+    let t = freshSynth(ctx, "cat")
+    preamble.add mkLet(t, IRType(kind: itString),
+                       mkStrOp(iekStrConcat, "&", @[result, parts[i]]))
+    result = mkVar(t)
+
+proc parseFloatToStr(opnd, n: NimNode; fty: IRType;
+                     preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0016 PRC-35. `$x` of a float (`addFloat`: Dragonbox's shortest
+  ## round-trip digits, `formatDigits` with `forceTrailingDotZero`), exact on
+  ## the values whose shortest round trip is fixed by the value alone:
+  ##   * NaN, +-Inf and +-0.0 (`nan`, `inf`, `-inf`, `0.0`, `-0.0`);
+  ##   * an integral x with |x| <= 2^53 (2^24 for float32): `N.0`, every
+  ##     shorter decimal is at least 1 away and the interval is narrower;
+  ## Any other finite value declines at the call (its shortest digits need a
+  ## search over decimal lengths that has no quantifier-free form here).
+  ##
+  ## Measured boundary (2026-11-18, eos): a dyadic x = m/2^k is exact in
+  ## principle for |x| < 2^(54-4k) (half an ulp is below 2^-4k < 10^-k, so
+  ## its k-digit decimal is the unique shortest one), but the cheapest form
+  ## found -- one shared exact scaling, three conversions and the fraction's
+  ## digits through `str.from_int` -- took 53 s for one `$x == "-0.0"` pin at
+  ## k <= 1 alone (5.2 s for `-42.0`), against 2.3 s and 0.7 s without it, and
+  ## did not finish at k <= 13. Every pin walks every arm, so the budget of
+  ## 10 s a check admits no dyadic: specials and integral values are the
+  ## modelled domain.
+  let strTy = IRType(kind: itString)
+  let w32 = fty.kind == itFloat32
+  let lit = proc (v: float64): IRExpr =
+    if w32: mkFloat32Lit(float32(v)) else: mkFloatLit(v)
+  let intTy = IRType(kind: itInt)
+  let v = freshSynth(ctx, "fltStr")
+  preamble.add mkLet(v, fty, parseExpr(opnd, preamble, ctx))
+  let x = mkVar(v)
+  let res = freshSynth(ctx, "fltStrRes")
+  let ax = freshSynth(ctx, "fltAbs")
+  preamble.add mkLet(ax, fty, fpCall("abs", @[x]))
+  let sign = freshSynth(ctx, "fltSign")
+  preamble.add mkLet(sign, strTy, bindBoolChoice(mkBinop(bLt, x, lit(0.0)),
+    strTy, mkStrLit("-"), mkStrLit(""), preamble, ctx))
+  var arms: seq[IRBranch]
+  arms.add mkBranch(fpCall("isNaN", @[x]), mkLet(res, strTy, mkStrLit("nan")))
+  arms.add mkBranch(mkBinop(bEq, x, lit(Inf)), mkLet(res, strTy, mkStrLit("inf")))
+  arms.add mkBranch(mkBinop(bEq, x, lit(NegInf)),
+                    mkLet(res, strTy, mkStrLit("-inf")))
+  arms.add mkBranch(mkBinop(bEq, x, lit(0.0)),
+    mkIf(@[mkBranch(fpCall("signbit", @[x]), mkLet(res, strTy, mkStrLit("-0.0")))],
+         mkLet(res, strTy, mkStrLit("0.0"))))
+  block integral:
+    let bound = if w32: 16777216.0 else: 9007199254740992.0
+    var body: seq[IRStmt]
+    let t = freshSynth(ctx, "fltTrunc")
+    let isInt = freshSynth(ctx, "fltIsInt")
+    preamble.add mkLet(t, fty, fpCall("trunc", @[mkVar(ax)]))
+    preamble.add mkLet(isInt, IRType(kind: itBool),
+      mkBinop(bAnd, mkBinop(bEq, mkVar(t), mkVar(ax)),
+                    mkBinop(bLe, mkVar(ax), lit(bound))))
+    let iv = freshSynth(ctx, "fltInt")
+    body.add mkLet(iv, intTy, mkConvFloatToInt(mkVar(ax), 64, true))
+    var pre: seq[IRStmt]
+    let s = strCat(@[mkVar(sign), mkStrOp(iekIntToStr, "$", @[mkVar(iv)]),
+                     mkStrLit(".0")], pre, ctx)
+    body.add pre
+    body.add mkLet(res, strTy, s)
+    arms.add mkBranch(mkVar(isInt), mkBlock(body))
+  let declined = ctx.declineAtSite(feUnsupportedOp,
+    siteMsg(n, "`$` of a float outside the modelled domain (not NaN, an " &
+            "infinity, a zero or an integral value) is not " &
+            "modelled (feUnsupportedOp): " & render(admitNameCall("system.$/float").cell)),
+    "`$` of a float outside the modelled domain (feUnsupportedOp)")
+  preamble.add mkIf(arms, mkBlock(@[declined, mkLet(res, strTy, mkStrLit(""))]))
+  mkVar(res)
+
+proc parseReprChar(opnd, n: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
+  ## RFC-0016 PRC-35. `repr(c)` (repr_v2.nim:42): `'\\'` for a backslash,
+  ## `'\` & the decimal ordinal & `'` for a byte in 0..31 or 127..255, else
+  ## the char between quotes (a quote itself is not escaped).
+  let strTy = IRType(kind: itString)
+  let v = freshSynth(ctx, "reprChr")
+  preamble.add mkLet(v, classifyType(opnd).ty, parseExpr(opnd, preamble, ctx))
+  let res = freshSynth(ctx, "reprChrRes")
+  var pre1, pre2: seq[IRStmt]
+  let esc = strCat(@[mkStrLit("'\\"), mkStrOp(iekIntToStr, "$", @[mkVar(v)]),
+                     mkStrLit("'")], pre1, ctx)
+  let plain = strCat(@[mkStrLit("'"),
+                       mkStrOp(iekStrConcat, "$char", @[mkStrLit(""), mkVar(v)]),
+                       mkStrLit("'")], pre2, ctx)
+  preamble.add mkIf(@[
+    mkBranch(mkBinop(bEq, mkVar(v), mkIntLit(92)),
+             mkLet(res, strTy, mkStrLit("'\\\\'"))),
+    mkBranch(mkBinop(bOr, mkBinop(bLe, mkVar(v), mkIntLit(31)),
+                          mkBinop(bGe, mkVar(v), mkIntLit(127))),
+             mkBlock(pre1 & @[mkLet(res, strTy, esc)]))],
+    mkBlock(pre2 & @[mkLet(res, strTy, plain)]))
+  mkVar(res)
+
+proc parseReprString(opnd, n: NimNode; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): IRExpr =
+  ## RFC-0016 PRC-35. `repr(s)` of a string (repr_v2.nim:61): between double
+  ## quotes, `"` and `\` escaped by a backslash, a newline as `\n` and a line
+  ## break, any other byte in 0..31 or 127..255 as `\` and its decimal. Exact
+  ## for a string no byte of which is escaped (32..126 but `"` and `\`): the
+  ## string between quotes. A string holding any other byte declines at the
+  ## call. The escapes are not modelled: under `str.replace_all` even a
+  ## one-byte query was `unknown` ("incomplete (theory seq)"), and a joined
+  ## guard per byte position took 285 s for one.
+  let strTy = IRType(kind: itString)
+  let v = freshSynth(ctx, "reprStr")
+  preamble.add mkLet(v, strTy, parseExpr(opnd, preamble, ctx))
+  let res = freshSynth(ctx, "reprStrRes")
+  let inDomain = freshSynth(ctx, "reprStrPlain")
+  preamble.add mkLet(inDomain, IRType(kind: itBool),
+    mkStrOp(iekStrMatch, encodeRegexSpec("match", "re",
+                                         "[\\x20\\x21\\x23-\\x5b\\x5d-\\x7e]*\\z"),
+            @[mkVar(v), mkIntLit(0)], IRType(kind: itBool)))
+  var body: seq[IRStmt]
+  let quoted = strCat(@[mkStrLit("\""), mkVar(v), mkStrLit("\"")], body, ctx)
+  body.add mkLet(res, strTy, quoted)
+  let declined = ctx.declineAtSite(feUnsupportedOp,
+    siteMsg(n, "`repr` of a string holding a byte it escapes (outside " &
+            "32..126, or `\"` or `\\`) is not modelled (feUnsupportedOp)"),
+    "`repr` of a string holding a byte it escapes (feUnsupportedOp)")
+  preamble.add mkIf(@[mkBranch(mkVar(inDomain), mkBlock(body))],
+                    mkBlock(@[declined, mkLet(res, strTy, mkStrLit(""))]))
+  mkVar(res)
+
+proc parseToIntCall(n, calleeSym: NimNode; preamble: var seq[IRStmt];
+                    ctx: ParseCtx): IRExpr =
+  ## RFC-0016 PRC-35. system's `toInt(f)` / `toBiggestInt(f)`
+  ## (system.nim:1320): `if f >= 0: int(f+0.5) else: int(f-0.5)`. The add
+  ## rounds to nearest even (`toInt(0.49999999999999994) == 1`), under the
+  ## float checks system's body is compiled with; the conversion is
+  ## `iekConvFloatToInt`'s, undefined outside int's range.
+  let fty = classifyType(n[1]).ty
+  let ity = classifyType(n).ty
+  let impl = resolveRoutineImpl(calleeSym)
+  let fc = if impl != nil: floatOn(routineChecks(impl)) else: {}
+  let v = freshSynth(ctx, "toIntArg")
+  preamble.add mkLet(v, fty, parseExpr(n[1], preamble, ctx))
+  let half = if fty.kind == itFloat32: mkFloat32Lit(0.5'f32) else: mkFloatLit(0.5)
+  let zero = if fty.kind == itFloat32: mkFloat32Lit(0'f32) else: mkFloatLit(0.0)
+  let res = freshSynth(ctx, "toIntRes")
+  proc arm(op: IRBinop): IRStmt =
+    let s = freshSynth(ctx, "toIntSum")
+    mkBlock(@[mkLet(s, fty, withFloatChecks(withSite(
+                mkBinop(op, mkVar(v), half), srcSite(n)), fc)),
+              mkLet(res, ity, mkConvFloatToInt(mkVar(s), 64, true,
+                                               site = srcSite(n)))])
+  preamble.add mkIf(@[mkBranch(mkBinop(bGe, mkVar(v), zero), arm(bAdd))],
+                    arm(bSub))
+  mkVar(res)
+
 proc parseToStr(opnd, n: NimNode; preamble: var seq[IRStmt];
                 ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8cb (item 5). system's `$` (and `repr`, the same magics for a
@@ -8569,12 +8734,11 @@ proc parseToStr(opnd, n: NimNode; preamble: var seq[IRStmt];
       for (shown, ord) in names:
         arms.add mkBranch(mkBinop(bEq, mkVar(v), mkIntLit(ord)),
                           mkLet(res, strTy, mkStrLit(shown)))
-      let holeStmt = ctx.declineAtSite(feUnsupportedOp,
-        siteMsg(n, "`$` of an enum value no member has is not modelled " &
-                "(feUnsupportedOp)"),
-        "`$` of an enum hole (feUnsupportedOp)")
-      preamble.add mkIf(arms, mkBlock(@[holeStmt,
-                                        mkLet(res, strTy, mkStrLit(""))]))
+      # PRC-35: a value no member has (a hole of a holey enum, or past the
+      # last member) is "": the compiler's generated `$` is a `case` over
+      # the members whose fall-through leaves `result` empty (native, c and
+      # cpp).
+      preamble.add mkIf(arms, mkLet(res, strTy, mkStrLit("")))
       return mkVar(res)
   elif tk == ntyChar:
     return mkStrOp(iekStrConcat, "$char",
@@ -8587,10 +8751,12 @@ proc parseToStr(opnd, n: NimNode; preamble: var seq[IRStmt];
   elif ty.kind == itInt:
     return mkStrOp(iekIntToStr, "$", @[parseExpr(opnd, preamble, ctx)])
   elif ty.kind in {itFloat32, itFloat64}:
-    # Phase 15 S10b: Z3 String theory has NO float<->string conversion, so `$f`
-    # routes to a classified `seUnsupportedStringOp` -> `sxUnknown` (the S9
-    # `iekStrUnsupported` mechanism, Invariant 3). The operand is dropped.
-    return mkStrOp(iekStrUnsupported, "$float", @[])
+    # PRC-35: the faithful sub-domain of `addFloat` (`parseFloatToStr`). Under
+    # -d:nimLegacySprintf `$` is `%.16g`, which stays unmodelled.
+    when defined(nimLegacySprintf):
+      return mkStrOp(iekStrUnsupported, "$float", @[])
+    else:
+      return parseFloatToStr(opnd, n, ty, preamble, ctx)
   preamble.add ctx.declineAtSite(feUnsupportedOp,
     siteMsg(n, "`$` of a " & $ty.kind & " operand (`" & opnd.repr &
             "`) is not modelled (feUnsupportedOp)"),
@@ -13482,13 +13648,29 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if calleeSym.strVal == "$" and
          (isRuneTyped(n[1]) or
           classifyType(n[1]).ty.kind in {itInt, itBool, itString} or
-          n[1].typeKind in {ntyEnum, ntyChar}):
+          n[1].typeKind in {ntyEnum, ntyChar, ntyFloat, ntyFloat32,
+                            ntyFloat64}):
         return parseToStr(n[1], n, preamble, ctx)
       if calleeSym.strVal == "repr":
         # ADM-IR: the `repr` magics are read from the table.
         whenMagicIn(routineMagic(calleeSym),
                     @["BoolToStr", "EnumToStr", "IntToStr", "Int64ToStr"]):
           return parseToStr(n[1], n, preamble, ctx)
+        # RFC-0016 PRC-35: repr_v2's other overloads. An integer's and a
+        # float's `repr` is its `$` (`dollarAlias`); a char's and a string's
+        # are the escaping bodies, modelled by `parseReprChar` and
+        # `parseReprString`.
+        if isStdlibDecl(calleeSym) and not isRuneTyped(n[1]):
+          case n[1].typeKind
+          of ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64, ntyUInt,
+             ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64, ntyFloat,
+             ntyFloat32, ntyFloat64:
+            return parseToStr(n[1], n, preamble, ctx)
+          of ntyChar:
+            return parseReprChar(n[1], n, preamble, ctx)
+          of ntyString:
+            return parseReprString(n[1], n, preamble, ctx)
+          else: discard
     # RFC-0005 S8cb (item 5). Any other `repr` is an escaping pretty-printer
     # the model has no form for: it declines at the call. (`repr(s)` of a string
     # first failed the compile, and with that fixed its stdlib body's loops
@@ -14273,6 +14455,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           # is an unmodeled std/math op — also route it so the runtime emits
           # `feUnsupportedOp` rather than failing `getImpl` resolution or
           # walking a transcendental's body (Invariant 3 — never silent UNSAT).
+          # RFC-0016 PRC-35: system's `toInt`/`toBiggestInt`, admitted by
+          # their float rows and lowered as their body (`parseToIntCall`).
+          if cn in ["toInt", "toBiggestInt"] and n.len == 2 and
+             isStdlibDecl(calleeSym) and admitFloatCall(cn, 1).admitted:
+            return parseToIntCall(n, calleeSym, preamble, ctx)
           if cn in mathFpModeledOps or cn in mathFpDeferredOps or
              isStdMathProc(calleeSym):
             var mArgs: seq[IRExpr]
@@ -24900,6 +25087,8 @@ type
     siteModule: NimNode    ## the module the probes are semchecked in (`symexHookMayHide`)
     closureGlobals: seq[NimNode]  ## W3-z R8: read at run time (`closureRouteGuard`)
     nested: seq[NimNode]   ## W3-z R11: the nested routines of the routines read
+    routines: seq[NimNode]  ## PRC-35: every routine read (`dupSinkSites`)
+    dupHooks: seq[tuple[key, why: string]]  ## PRC-35: a `=dup` not the plain copy
 
 var routeBodies {.compileTime.}: Table[string, RouteBody]
   ## Per routine, so a file's entry macros read each routine once.
@@ -25269,6 +25458,7 @@ proc routeWalk(run: var RouteRun; root: NimNode) =
     let key = routeRoutineKey(r)
     if key in run.seenRoutines: continue
     run.seenRoutines.add key
+    run.routines.add r
     let b = routeBodyOf(r)
     if symKind(r) == nskMethod: run.methods.add r
     for d in b.dispatched: run.dispatched.add d
@@ -25454,6 +25644,220 @@ proc routeHookCopies(h: NimNode): string =
     if f notin copied: return unread()
   ""
 
+# ---- RFC-0016 PRC-35: where a user `=dup` runs -------------------------------
+#
+# The compiler runs a type's `=dup` where a value is copied into a sink
+# position: a `sink` formal (a user routine's, `seq.add`'s), a field of an
+# object constructor, an element of a tuple, array or seq literal. Probed
+# natively (c and cpp): a `let`/`var` copy and an assignment run `=copy`,
+# never `=dup`; a `return` and `result =` run neither; an explicit
+# `` `=dup`(a) `` runs it. At a sink position the hook runs when the source
+# is read again afterwards and not when that position is its last use, which
+# is the compiler's flow analysis. The walk models the explicit call (the hook
+# is a user call, walked) and the copy (the plain copy), and passes a sink
+# argument through, which is the move. So a user `=dup` that is not the plain
+# copy keeps a value proof only when every sink position a value of its type
+# reaches is provably the source's last use (`dupSinkSites`); any other is a
+# hook the walk does not run, and every read declines (RFC-0016 PRC-44 is
+# the model of the hook there).
+
+proc dupMayHold(t: NimNode; key: string; depth = 0): bool =
+  ## A value of type `t` may hold one of the nominal type `key`
+  ## (`routeTypeKey`), so copying it may run that type's `=dup`. A `ref`, a
+  ## `ptr` and a closure share what they point at; a copy runs no `=dup` of
+  ## it. Fail-closed: a shape not read here may hold it.
+  if t.isNil or depth > 16: return true
+  case t.kind
+  of nnkSym:
+    if symKind(t) == nskType and routeTypeKey(t) == key: return true
+    case t.typeKind
+    of ntyBool, ntyChar, ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
+       ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64, ntyFloat,
+       ntyFloat32, ntyFloat64, ntyString, ntyCString, ntyPointer, ntyEnum,
+       ntyRange, ntySet, ntyRef, ntyPtr, ntyProc, ntyNil:
+      false
+    of ntyObject, ntyTuple, ntyDistinct, ntyArray, ntySequence, ntyOpenArray,
+       ntyVarargs, ntyGenericInst, ntyAlias:
+      let impl = t.getTypeImpl
+      impl.kind != nnkSym and dupMayHold(impl, key, depth + 1)
+    else: true  # k2: fail-closed: true: a generic parameter, an unread kind
+  of nnkBracketExpr:
+    if routeTypeKey(t) == key: return true
+    if t.len >= 2 and t[0].kind == nnkSym and
+       macros.strVal(t[0]) in ["seq", "array", "openArray", "varargs",
+                               "UncheckedArray", "sink", "lent", "var"]:
+      return dupMayHold(t[^1], key, depth + 1)
+    let impl = t.getTypeImpl
+    impl.kind notin {nnkBracketExpr, nnkSym} and dupMayHold(impl, key, depth + 1)
+  of nnkObjectTy:
+    if t.len >= 2 and t[1].kind == nnkOfInherit and t[1].len > 0 and
+       dupMayHold(t[1][0], key, depth + 1):
+      return true
+    proc fields(rec: NimNode): bool =
+      case rec.kind
+      of nnkIdentDefs: dupMayHold(rec[^2], key, depth + 1)
+      of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse:
+        for c in rec:
+          if c.kind in {nnkIdentDefs, nnkRecList, nnkRecCase, nnkOfBranch,
+                        nnkElse} and fields(c):
+            return true
+        false
+      of nnkEmpty: false
+      else: true  # k2: fail-closed: true: an unread field shape
+    t.len < 3 or fields(t[2])
+  of nnkTupleTy:
+    for d in t:
+      if d.kind != nnkIdentDefs or dupMayHold(d[^2], key, depth + 1): return true
+    false
+  of nnkTupleConstr:
+    for c in t:
+      if dupMayHold(c, key, depth + 1): return true
+    false
+  of nnkRefTy, nnkPtrTy, nnkProcTy, nnkEnumTy, nnkRange: false
+  of nnkVarTy, nnkOutTy, nnkDistinctTy:
+    t.len < 1 or dupMayHold(t[0], key, depth + 1)
+  else: true  # k2: fail-closed: true: an unread type shape
+
+type
+  DupEvent = object
+    sym: NimNode
+    stmt: int        ## the innermost statement it is read in
+    site: int        ## the sink site it is the argument of, or -1
+    unsafe: bool     ## under `addr`, assigned, in a nested routine, a `defer`
+                     ## or a `finally`: not a plain read
+  DupSite = object
+    call: NimNode
+    arg: NimNode
+    event: int       ## its own event, or -1 (not a local symbol)
+    inLoop: bool
+  DupScan = object
+    key: string
+    events: seq[DupEvent]
+    sites: seq[DupSite]
+    fresh: seq[NimNode]   ## locals declared here with a fresh value
+
+proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
+             nextStmt: var int) =
+  ## Pre-order: every read of a local, and every sink position a value of
+  ## the hook's type reaches.
+  proc site(s: var DupScan; call, arg: NimNode; loop: bool) =
+    if not dupMayHold(arg.getTypeInst, s.key): return
+    s.sites.add DupSite(call: call, arg: arg, event: -1, inLoop: loop)
+  case n.kind
+  of nnkSym:
+    if symKind(n) in {nskVar, nskLet}:
+      s.events.add DupEvent(sym: n, stmt: stmt, site: -1, unsafe: unsafe)
+    return
+  of RoutineNodes:
+    # A nested routine may run any number of times, whenever it is called: a
+    # sink position in it is as one in a loop, and a read of a local in it
+    # is not a plain read.
+    for c in n: dupScan(c, s, stmt, true, true, nextStmt)
+    return
+  of nnkStmtList, nnkStmtListExpr:
+    for c in n:
+      inc nextStmt
+      dupScan(c, s, nextStmt, loop, unsafe, nextStmt)
+    return
+  of nnkWhileStmt, nnkForStmt:
+    for c in n: dupScan(c, s, stmt, true, unsafe, nextStmt)
+    return
+  of nnkDefer, nnkFinally, nnkAddr, nnkHiddenAddr:
+    for c in n: dupScan(c, s, stmt, loop, true, nextStmt)
+    return
+  of nnkAsgn, nnkFastAsgn, nnkSinkAsgn:
+    dupScan(n[0], s, stmt, loop, true, nextStmt)
+    dupScan(n[1], s, stmt, loop, unsafe, nextStmt)
+    return
+  of nnkIdentDefs:
+    if n.len == 3 and n[0].kind == nnkSym and not loop:
+      let init = n[2]
+      if init.kind in {nnkObjConstr, nnkTupleConstr} or
+         (init.kind == nnkCall and init.len > 0 and init[0].kind == nnkSym and
+          symKind(init[0]) in {nskProc, nskFunc} and
+          init.typeKind notin {ntyVar, ntyNone}):
+        s.fresh.add n[0]
+    if n.len == 3: dupScan(n[2], s, stmt, loop, unsafe, nextStmt)
+    return
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit:
+    if n.len > 0:
+      let ty = n[0].getTypeInst
+      if ty.kind == nnkProcTy and ty.len > 0 and ty[0].kind == nnkFormalParams:
+        var formals: seq[NimNode]
+        for i in 1 ..< ty[0].len:
+          for _ in 0 ..< ty[0][i].len - 2: formals.add ty[0][i][^2]
+        for i in 1 ..< n.len:
+          let f = if i - 1 < formals.len: formals[i - 1] else: nil
+          if f.isNil or cgIsSink(f): s.site(n, n[i], loop)
+      else:
+        # k2: fail-closed: a callee whose formals cannot be read may sink
+        # any argument.
+        for i in 1 ..< n.len: s.site(n, n[i], loop)
+  of nnkObjConstr:
+    for i in 1 ..< n.len:
+      if n[i].kind == nnkExprColonExpr: s.site(n, n[i][1], loop)
+  of nnkYieldStmt:
+    # Not probed: a `yield` is taken as a sink position.
+    if n.len > 0 and n[0].kind != nnkEmpty: s.site(n, n[0], loop)
+  of nnkTupleConstr, nnkBracket, nnkTableConstr:
+    for c in n:
+      if c.kind == nnkExprColonExpr: s.site(n, c[1], loop)
+      else: s.site(n, c, loop)
+  else: discard
+  # The children, each sink argument's own read marked as its site's. A field
+  # of an object constructor or a named tuple is the value of its `f: a`.
+  for c in n:
+    let before = s.events.len
+    dupScan(c, s, stmt, loop, unsafe, nextStmt)
+    let a = if c.kind == nnkExprColonExpr and c.len == 2: c[1] else: c
+    if a.kind == nnkSym and s.events.len == before + 1 and
+       s.events[before].sym == a:
+      for k in countdown(s.sites.high, 0):
+        if s.sites[k].arg == a and s.sites[k].event < 0 and
+           s.sites[k].call == n:
+          s.sites[k].event = before
+          s.events[before].site = k
+          break
+
+proc dupHookKey(h: NimNode): string =
+  ## The `routeTypeKey` of the type a user `=dup` hook `h` copies, or "".
+  if macros.strVal(h) != "=dup": return ""
+  let ty = h.getTypeInst
+  if ty.kind != nnkProcTy or ty.len < 1 or ty[0].len < 2: return ""
+  let t = ty[0][1][^2]
+  if t.kind != nnkSym or symKind(t) != nskType: return ""
+  routeTypeKey(t)
+
+proc dupSinkSites(r: NimNode; key: string): string =
+  ## "" when every sink position of the routine `r` that a value of the type
+  ## `key` reaches is provably its source's last use (a local, declared here
+  ## with a fresh value, never read again in the routine, in no loop, its
+  ## site's only read in its statement, never under `addr`, reassigned, in
+  ## a closure, a `defer` or a `finally`), else the first that is not.
+  let impl = r.getImpl
+  if impl.kind notin RoutineNodes or impl.len <= 6: return ""
+  var s = DupScan(key: key)
+  var nextStmt = 0
+  dupScan(impl[6], s, 0, false, false, nextStmt)
+  for st in s.sites:
+    let where = "`" & st.call.repr & "` in `" & macros.strVal(r) & "`"
+    if st.event < 0:
+      return where & " (its argument is not a local the walk can follow)"
+    var ev = s.events[st.event]   # a copy: the VM aliases a let (S8ab)
+    var fresh = false
+    for f in s.fresh:
+      if f == ev.sym: fresh = true
+    if not fresh or isModuleGlobal(ev.sym):
+      return where & " (`" & macros.strVal(ev.sym) & "` is not a local " &
+             "declared there with a fresh value)"
+    if st.inLoop:
+      return where & " (in a loop or a nested routine)"
+    for j, e in s.events:
+      if j == st.event or e.sym != ev.sym: continue
+      if e.unsafe or j > st.event or e.stmt == ev.stmt:
+        return where & " (`" & macros.strVal(ev.sym) & "` is read after it)"
+  ""
+
 proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
   ## What `hooks` may write has no proof; and whatever they run is reachable too.
   ## A store no global's row can stand for declines every read (`routeAnyValue`):
@@ -25477,7 +25881,11 @@ proc readHooks(run: var RouteRun; hooks: seq[NimNode]) =
                  " may store through a `ref` or a `ptr`, at a call the compiler " &
                  "inserts (" & why & ")")
     let copyWhy = routeHookCopies(h)
-    if copyWhy.len > 0:
+    let dupKey = dupHookKey(h)
+    if copyWhy.len > 0 and dupKey.len > 0:
+      # RFC-0016 PRC-35: decided once every routine is read (`routeContinue`).
+      run.dupHooks.add (dupKey, copyWhy)
+    elif copyWhy.len > 0:
       addRoute(run, routeOpenValue, "the lifetime hook " & name &
                " does not make the plain copy an assignment is modelled by (" &
                copyWhy & ")")
@@ -25791,6 +26199,18 @@ proc envBenignExpr*(r: NimNode): NimNode =
 proc routeContinue(id: int; resume: NimNode): NimNode =
   ## The next stage: the literal, or the probes the run is waiting for.
   if routeRuns[id].waiting.len == 0:
+    # RFC-0016 PRC-35: a user `=dup` that is not the plain copy keeps the value
+    # proof only when no sink position runs it (`dupSinkSites`).
+    var dups = routeRuns[id].dupHooks    # a copy: the VM aliases a let (S8ab)
+    var routines = routeRuns[id].routines    # a copy (S8ab)
+    for (key, why) in dups:
+      for r in routines:
+        let site = dupSinkSites(r, key)
+        if site.len > 0:
+          addRoute(routeRuns[id], routeOpenValue, "the lifetime hook `=dup` " &
+                   "is not the plain copy (" & why & ") and may run at a sink " &
+                   "position the walk does not model: " & site)
+          break
     var lit = newTree(nnkBracket)
     for r in routeRuns[id].routes: lit.add newLit(r)
     var routes =

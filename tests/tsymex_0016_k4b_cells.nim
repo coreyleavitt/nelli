@@ -109,12 +109,19 @@ proc sNeg64(a: int64) =
   if -a == 5'i64: symexTarget("hit")
 proc sZeroDefault(a: int) =
   if zeroDefault(int) == 0 and a == 3: symexTarget("hit")
+# Repr and Dup are partial rows (PRC-35): each is pinned on the shape that
+# declines. `repr` of a seq declines at the call; a user `=dup` at a sink
+# position whose source is read afterwards declines in the route proof (its
+# model there is PRC-44).
 proc sRepr(a: int) =
-  if repr(a) == "5": symexTarget("hit")
+  if repr(@[a]) == "@[5]": symexTarget("hit")
+type K4Dup = object
+  v: int
+proc `=dup`(x: K4Dup): K4Dup = K4Dup(v: x.v + 1)
+proc k4DupTake(x: sink K4Dup): int = x.v
 proc sDup(a: int) =
-  var x = a
-  let y = `=dup`(x)
-  if y == 5: symexTarget("hit")
+  let d = K4Dup(v: a)
+  if k4DupTake(d) * 1000 + d.v == 6005: symexTarget("hit")
 proc sSlice(a: int) =
   let s = @[1, 2, 3]
   if a >= 0 and a < 3 and k4LenOA(toOpenArray(s, 0, a)) == 2:
@@ -241,7 +248,7 @@ suite "K4b: the reachable magic cells, through symexFind":
   exactCell(sNeg64, "UnaryMinusI64", k4I64Dom)
   exactCell(sZeroDefault, "ZeroDefault")
   declineCell(sRepr, "Repr", feUnsupportedOp)
-  exactCell(sDup, "Dup")
+  declineCell(sDup, "Dup", feGlobalRouteUnproved)
   exactCell(sSlice, "Slice")
   exactCell(sSetLenUninit, "SetLengthSeqUninit")
   exactCell(sEqProc, "EqProc")

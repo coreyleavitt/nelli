@@ -36,7 +36,11 @@ proc parseNeg(s: string) =
 
 # --- $float → seUnsupportedStringOp -----------------------------------------
 proc dollarFloat(f: float) =
-  if $f == "1.5":
+  if $f == "-3.0":
+    symexTarget("df")
+
+proc dollarFloatOut(f: float) =
+  if f == 0.1 and $f == "0.1":
     symexTarget("df")
 
 # --- parseFloat → seUnsupportedStringOp -------------------------------------
@@ -58,11 +62,16 @@ suite "symex Phase 15 S10b — parseInt raises-path + $float/parseFloat":
     check r.status == sxSat
     check r.witness[0] == "-42"
 
-  test "$float: `$f` is classified seUnsupportedStringOp → sxUnknown":
+  test "$float: an integral value is modelled (RFC-0016 PRC-35)":
     let r = symexFind(dollarFloat, tLabel("df"))
+    check r.status == sxSat
+    check r.witness[0] == -3.0
+
+  test "$float: a value outside PRC-35's domain declines (sxUnknown)":
+    let r = symexFind(dollarFloatOut, tLabel("df"))
     check r.status == sxUnknown
     check r.errors.len > 0
-    check r.errors[0].kind == seUnsupportedStringOp
+    check r.errors[0].kind == feUnsupportedOp
 
   test "parseFloat: `parseFloat(s)` is classified seUnsupportedStringOp → sxUnknown":
     let r = symexFind(pf, tLabel("pf"))

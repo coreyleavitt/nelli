@@ -1270,7 +1270,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## branch asks; 379-380 reserved): 378->381.
     ## RFC-0016 F1 hotfix (`searchDfa` reads `vok` after its state loop;
     ## 382-400 reserved): 381->401.
-    check symexWalkerVersion == "401"
+    ## RFC-0016 PRC-35 (stdlib precision models; 402-413 reserved):
+    ## 401->414.
+    ## RFC-0016 PRC-35 (`repr` of a string, `=dup` through a user hook;
+    ## 415 reserved): 414->416.
+    check symexWalkerVersion == "416"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

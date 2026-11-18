@@ -383,6 +383,17 @@ evidence = "owned by RFC-0014; this RFC carries no work"
 cells = []
 
 [[row]]
+id = "SND-15"
+table = "5.1"
+title = "`searchDfa` missed a verifier declining while its last state was expanded: the search ended `ok=true` with a wrong language (`skNoOcc` for `(?:a(*SKIP:x))+z|a+c(*SKIP)z|(*MARK:y)(?:b(*SKIP:y))+d|b*e` was empty, rejecting `x`, which native `std/re` finds no occurrence in), read by `find(...) == -1`"
+state = "open"
+note = ": fixed, pending landing on main. `rfc-0016-w4f1hot` reads `vok` after the state loop too (the S8co check, PRC-33 item 6b, taken alone), walker 381 -> 401. The row closes when the branch lands"
+source = "S8co (`rfc-0016-w4s8co`, `7c63099e..8003591b`), reproduced on main 316b086e"
+evidence = "`tests/tsymex_0016_f1_searchdfa_vok.nim`: a built `skNoOcc` language must agree with native `std/re` on a 16-subject corpus (red on main: empty language, 9 subjects disagree; red again with the check removed). No wrong walker verdict was found on main: `find(...) == -1` / `not contains` over a symbolic one- and two-byte subject pinned to `x` / `xx` answer `sxSat` before and after the fix (pinned `!= sxUnsat`)"
+cells = []
+pins = ["tsymex_0016_f1_searchdfa_vok"]
+
+[[row]]
 id = "PRC-01"
 table = "5.2a"
 title = "**First precision item.** Windows re-exec replay: marshal case-object and `ptr`/`ref` witnesses instead of declining. Windows is a consumer's main platform, so a decline there is a decline in daily use Includes INT-01 and INT-14: batch 11 (`7b2ab1e5`) widened the footprint to type symbols, result types and routine signatures, so more SUTs decline on Windows."

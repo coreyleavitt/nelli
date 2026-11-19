@@ -82,9 +82,11 @@ proc lossyThenQuit(p: ref W2Box) =
     symexTarget("lq")
     quit(4)
 
-proc lossyNil(p: ref W2Box) =
+proc lossyNil(p: ref W2Box): int =
+  # The read is kept (`result`): a discarded one is not loaded natively
+  # (RFC-0016 INT-86), so it is no nil access.
   if p == nil or p.n == 5:
-    discard p.n
+    result = p.n
 
 proc w2Spin(v: int) {.symexOpaque.} =
   if v > 5: sleep(3000)

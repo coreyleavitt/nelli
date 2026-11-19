@@ -1539,6 +1539,13 @@ type
                                    ## (above, beside its type declaration) for
                                    ## the full rationale and the per-field doc
                                    ## comments preserved there.
+    deadLocals*: seq[NimNode]
+                                   ## RFC-0016 INT-86. The `let`/`var`
+                                   ## symbols no later statement of their
+                                   ## own list names (`parseDeferList`): a
+                                   ## value bound to one lands in a dead C
+                                   ## variable, whose load is the C
+                                   ## optimiser's to keep (`deadReadOf`).
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ## `procScoped`'s fields (`ProcScopedCollectors`, round-6 R4: `seq[NimNode]`
@@ -4638,6 +4645,166 @@ func intConvExact(dst, src: NimTypeKind): bool =
                                  ntyBool, ntyUInt, ntyUInt64}
   of ntyFloat, ntyFloat32, ntyFloat64: true
   else: false
+
+# ---- RFC-0016 INT-86: a read whose value nothing uses -----------------------
+#
+# Nim emits a discarded expression as `(void)(E);` and never elides a read
+# itself. What the C compiler then does with it (pinned toolchain, gcc and
+# g++, c and cpp, `-O0` through `-d:danger`; `tsymex_0016_int86_discardnil`):
+#   * `E` with no check and no call (a path through `.` and `[]`, a literal
+#     array index, a comparison, an unchecked conversion or arithmetic): the
+#     statement is dropped at every optimisation level, so no load happens
+#     and a nil `ref`/`ptr` on the path does not fault. `drElided`.
+#   * `E` whose value a check or a call consumes, or a value that is used:
+#     loaded under every build; the ordinary lowering (`drPlain`).
+#   * the value bound to a dead C variable (an unused `let`, `let _ =`, a
+#     discarded tuple or `len`): loaded at `-O0`, dropped at `-O2`. The C
+#     compiler's level is not a fact the walker has (`OptLevel` is only
+#     `optUnknown`), so a nil on the path is claimed neither way: it
+#     declines (`drOptimiser`).
+
+type DeadRead = enum
+  drPlain      ## no `ref`/`ptr` dereference, or the value is consumed
+  drElided     ## the C compiler drops `(void)(E)`: no load
+  drOptimiser  ## a dead C variable holds the value: the optimiser's
+
+const
+  pureCompareMagics = ["EqI", "LeI", "LtI", "EqI64", "LeI64", "LtI64",
+    "EqU", "LeU", "LtU", "LeU64", "LtU64", "EqF64", "LeF64", "LtF64",
+    "EqB", "LeB", "LtB", "EqCh", "LeCh", "LtCh", "EqEnum", "LeEnum",
+    "LtEnum", "EqRef", "EqProc", "LePtr", "LtPtr", "Not", "And", "Or", "Xor",
+    "BitandI", "BitorI", "BitxorI", "BitnotI", "ShrI", "AshrI",
+    "AddU", "SubU", "MulU", "UnaryPlusI", "UnaryPlusF64"]
+    ## C operators Nim emits with no check under every build.
+  signedArithMagics = ["AddI", "SubI", "MulI", "UnaryMinusI", "UnaryMinusI64",
+    "AddI64", "SubI64", "MulI64"]
+    ## Checked (`OverflowDefect`) unless the routine is compiled without.
+  floatArithMagics = ["AddF64", "SubF64", "MulF64", "DivF64", "UnaryMinusF64"]
+    ## Checked only under `nanChecks`/`infChecks`.
+  divModMagics = ["DivI", "ModI", "DivI64", "ModI64"]
+  lengthMagics = ["LengthSeq", "LengthStr", "LengthOpenArray"]
+
+proc cPure(n: NimNode; ctx: ParseCtx; derefs: var seq[NimNode]): bool =
+  ## RFC-0016 INT-86. Whether `n` is emitted as a C expression with no check
+  ## and no call, collecting the `ref`/`ptr` operands it dereferences, in
+  ## evaluation order (`p` before `p.q` in `p.q.n`).
+  case n.kind
+  of nnkSym:
+    symKind(n) in {nskLet, nskVar, nskParam, nskResult, nskConst, nskForVar,
+                   nskTemp}
+  of nnkCharLit .. nnkFloat128Lit, nnkStrLit .. nnkTripleStrLit, nnkNilLit:
+    true
+  of nnkDerefExpr, nnkHiddenDeref:
+    if n.len != 1 or not cPure(n[0], ctx, derefs): return false
+    if n[0].typeKind in {ntyRef, ntyPtr}: derefs.add n[0]
+    true
+  of nnkDotExpr:
+    n.len == 2 and n[1].kind == nnkSym and cPure(n[0], ctx, derefs)
+  of nnkCheckedFieldExpr:
+    # A variant field: its field check reads the discriminant.
+    n.len >= 1 and not ctx.checkedHere(coField) and cPure(n[0], ctx, derefs)
+  of nnkBracketExpr:
+    if n.len != 2: return false
+    let k = n[0].typeKind
+    let tk = if k == ntyVar: n[0].getTypeInst[0].typeKind else: k
+    var ix = n[1]
+    while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+          ix.len >= 1:
+      ix = ix[^1]
+    # An array's literal index is checked by the compiler; any other index
+    # check reads its operand (a seq's or string's reads its length).
+    let unchecked = tk == ntyArray and ix.kind in {nnkCharLit .. nnkUInt64Lit} or
+      tk in {ntyArray, ntySequence, ntyString} and not ctx.checkedHere(coBound)
+    unchecked and cPure(n[0], ctx, derefs) and cPure(ix, ctx, derefs)
+  of nnkPar:
+    n.len == 1 and cPure(n[0], ctx, derefs)
+  of nnkConv, nnkHiddenStdConv, nnkHiddenSubConv:
+    if n.len < 1: return false
+    let src = n[^1]
+    let dst = n.typeKind
+    const scalar = {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange, ntyBool,
+                    ntyFloat .. ntyFloat128}
+    if dst notin scalar or src.typeKind notin scalar: return false
+    let checked = dst in {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange,
+                          ntyBool} and
+      src.typeKind notin {ntyFloat .. ntyFloat128} and
+      not intConvExact(dst, src.typeKind) and ctx.checkedHere(coRange)
+    not checked and cPure(src, ctx, derefs)
+  of nnkInfix, nnkPrefix, nnkCall:
+    if n.len < 2: return false
+    let m = routineMagic(n[0])
+    let pure =
+      if m in pureCompareMagics: true
+      elif m in signedArithMagics: not ctx.overflowChecked
+      elif m in floatArithMagics: ctx.floatCheckedHere == {}
+      elif m in divModMagics:
+        # A literal divisor other than 0 and -1 is emitted with no check.
+        var d = n[^1]
+        while d.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and d.len >= 1:
+          d = d[^1]
+        d.kind in {nnkCharLit .. nnkUInt64Lit} and d.intVal notin [0'i64, -1]
+      else: false
+    if not pure: return false
+    for i in 1 ..< n.len:
+      if not cPure(n[i], ctx, derefs): return false
+    true
+  else: false
+
+proc deadReadOf(n: NimNode; ctx: ParseCtx; discarded: bool):
+    tuple[kind: DeadRead; derefs: seq[NimNode]] =
+  ## RFC-0016 INT-86. What a value nothing uses costs natively: `n` is the
+  ## operand of a `discard` (`discarded`) or a dead local's initialiser.
+  var derefs: seq[NimNode]
+  if cPure(n, ctx, derefs):
+    if derefs.len == 0: return (drPlain, @[])
+    return ((if discarded: drElided else: drOptimiser), derefs)
+  # A tuple, an array literal or a `len` of pure parts is built into a C
+  # temporary: a dead variable either way.
+  var parts: seq[NimNode]
+  case n.kind
+  of nnkTupleConstr, nnkBracket:
+    for c in n:
+      parts.add(if c.kind == nnkExprColonExpr: c[1] else: c)
+  of nnkPar:
+    if n.len > 1:
+      for c in n: parts.add c
+  of nnkCall, nnkPrefix:
+    if n.len == 2 and routineMagic(n[0]) in lengthMagics: parts.add n[1]
+  else: discard
+  if parts.len == 0: return (drPlain, @[])
+  for c in parts:
+    if not cPure(c, ctx, derefs): return (drPlain, @[])
+  if derefs.len == 0: (drPlain, @[]) else: (drOptimiser, derefs)
+
+proc mkNilGuard(ctx: ParseCtx; bases: seq[NimNode]; i: int): seq[IRStmt]
+
+proc deadReadDecline(ctx: ParseCtx; derefs: seq[NimNode]): IRStmt =
+  ## RFC-0016 INT-86. The lowering of a `drOptimiser` read: each pointer it
+  ## dereferences is tested in turn, and a nil one declines (the path goes
+  ## on, tainted); the value itself is dead, so nothing is read.
+  mkBlock(ctx.mkNilGuard(derefs, 0))
+
+proc mkNilGuard(ctx: ParseCtx; bases: seq[NimNode]; i: int): seq[IRStmt] =
+  if i >= bases.len: return @[]
+  let ty = classifyType(bases[i]).ty
+  let v = parseExpr(bases[i], result, ctx)
+  if v == nil or ty.kind notin {itRef, itPtr}:
+    result.add ctx.declineMarker(feUnsupportedOp,
+      "a dead read through a `ref`/`ptr` the walker cannot test for nil " &
+      "(RFC-0016 INT-86; feUnsupportedOp)")
+    return
+  let c = freshSynth(ctx, "deadBase")
+  result.add mkLet(c, ty, v)
+  result.add mkIf(@[mkBranch(mkBinop(bEq, mkVar(c), mkNil(ty)),
+      ctx.declineMarker(feUnsupportedOp,
+        "a dead read through a nil `ref`/`ptr`: whether it faults is the " &
+        "C compiler's optimisation level (RFC-0016 INT-86; feUnsupportedOp)"))],
+    mkBlock(ctx.mkNilGuard(bases, i + 1)))
+
+proc namesSym(n, sym: NimNode): bool =
+  if n == sym: return true
+  for c in n:
+    if namesSym(c, sym): return true
 
 func isRoutineDefNode(n: NimNode): bool =
   n.kind in RoutineNodes
@@ -19027,6 +19194,17 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
   var stmts: seq[IRStmt]
   for k in start ..< items.len:
     let c = items[k]
+    # RFC-0016 INT-86: a local no later statement of this list names is dead
+    # (its scope is the rest of the list): `deadReadOf`'s `drOptimiser`.
+    if c.kind in {nnkLetSection, nnkVarSection} and c.len == 1 and
+       c[0].kind == nnkIdentDefs and c[0].len == 3 and
+       (c[0][0].kind == nnkSym or c[0][0].kind == nnkIdent and
+        c[0][0].strVal == "_"):
+      var named = false
+      if c[0][0].kind == nnkSym:
+        for j in k + 1 ..< items.len:
+          if namesSym(items[j], c[0][0]): named = true; break
+      if not named: ctx.deadLocals.add c[0][0]
     if c.kind == nnkDefer:
       let fin = parseStmt(c[c.len - 1], ctx)   # lexically first
       stmts.add mkTry(parseDeferList(items, k + 1, ctx), @[], fin)
@@ -22457,6 +22635,14 @@ proc parseStmtInner(n: NimNode,
     else:
       mkReturnVal(parseExpr(inner, preamble, ctx))
   of nnkLetSection, nnkVarSection:
+    # RFC-0016 INT-86: a local no later statement names (`parseDeferList`)
+    # binds its value to a dead C variable: a read through a `ref`/`ptr` into
+    # it is loaded at `-O0` and dropped at `-O2`, so a nil there declines.
+    if n.len == 1 and n[0].kind == nnkIdentDefs and n[0].len == 3 and
+       n[0][2].kind != nnkEmpty and n[0][0] in ctx.deadLocals:
+      let dead = deadReadOf(n[0][2], ctx, discarded = false)
+      if dead.kind == drOptimiser:
+        return ctx.deadReadDecline(dead.derefs)
     var stmts: seq[IRStmt]
     for id0 in n:
       id0.expectKind nnkIdentDefs
@@ -23108,6 +23294,15 @@ proc parseStmtInner(n: NimNode,
       # value IR (lambda/closure) binds under the let-section arm's
       # placeholder-type precedent. `discard` of a `void` expression cannot
       # occur (Nim rejects it), so the node has a type.
+      # RFC-0016 INT-86: a discarded read the C compiler does not load (a
+      # pure path through a `ref`/`ptr`) is not a dereference: nothing is
+      # walked, as nothing runs. One whose value lands in a dead temporary
+      # (a tuple, a `len`) is the optimiser's: a nil on its path declines.
+      let dead = deadReadOf(n[0], ctx, discarded = true)
+      case dead.kind
+      of drElided: return mkBlock(@[])
+      of drOptimiser: return ctx.deadReadDecline(dead.derefs)
+      of drPlain: discard
       let sinkIR = parseExpr(n[0], preamble, ctx)
       if sinkIR == nil:
         mkBlock(@[])

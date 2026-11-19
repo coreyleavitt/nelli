@@ -33,7 +33,7 @@
 import std/[unittest, os, strutils, algorithm]
 
 const
-  ceiling = 1
+  ceiling = 0
   exempt = [
     ("tsymex_0016_d3b_walklog.nim",
      "its verdict words are the walk-units log's text (`renderWalkUnits`): " &

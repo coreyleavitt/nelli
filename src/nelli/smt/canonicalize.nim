@@ -863,8 +863,17 @@ const renderAsChoicesVersion* = "12"
   ##   checks int32 (`RangeDefect`, it was a false `sxSat`); an int
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
+  ## - RFC-0016 INT-86 (444->447, provisional; 445-446 are reserved for
+  ##   in-flight work): a discarded read the C compiler does not load (a
+  ##   path through `.`/`[]`, a comparison, an unchecked conversion or
+  ##   arithmetic: `discard p.n`, `discard p[]`) is not a dereference; a
+  ##   nil `ref`/`ptr` there was a false `sxRaised(NilAccessDefect)` and the
+  ##   label behind it a false refutation. A read into a dead C variable (an
+  ##   unused `let`, `let _ =`, a discarded tuple or `len`) faults at `-O0`
+  ##   and not at `-O2`: a nil on its path declines (`feUnsupportedOp`). A
+  ##   read whose value is used or checked still faults. No key bytes change.
 
-const symexWalkerVersion* = "444"
+const symexWalkerVersion* = "447"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

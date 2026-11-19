@@ -12,6 +12,8 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+from ./s8cu_helpers import crashForms, crashForm, pinCrashSelf, cellKey,
+  faGeneric, ceSegv
 
 type
   WaDist = object
@@ -23,11 +25,19 @@ type
     n: int
     s: WaDist
 
-proc lossyNil(p: ref WaBox) =
+proc lossyNil(p: ref WaBox): int =
   ## A clean path to a nil dereference; the witness renders lossily and the
-  ## replay does not run for the target (`replayInScope`).
+  ## replay does not run for the target (`replayInScope`). The read is kept
+  ## (`result`): a discarded one is not loaded natively (RFC-0016 INT-86).
   if p == nil or p.n == 5:
-    discard p.n
+    result = p.n
+
+# RFC-0016 K9d-12 / INT-86: a crash claim is established natively in a child,
+# this binary, on the claim's only nil input.
+crashForms:
+  case crashForm()
+  of "lossyNil": discard lossyNil(nil)
+  else: discard
 
 proc report(fs: seq[SymexFinding]): Report[int] =
   Report[int](outcome: otPassed, examples: 1, symexFindings: fs)
@@ -42,6 +52,8 @@ suite "WA-B S4: a crash claim stays witnessUnsafe":
     check r.status == sxRaised
     check r.soundness.witnessUnsafe
     check not hostRunnable(r.soundness)
+    pinCrashSelf(cellKey(faGeneric, "k9d/tsymex_0016_wa_runtime/lossyNil/tNilAccess()"),
+                 "lossyNil", ceSegv)
 
 suite "WA-B P4: witnessUndefined is rendered":
   let f = SymexFinding(targetDesc: "label(\"u\")", status: sfSat,

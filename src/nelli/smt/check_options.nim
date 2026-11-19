@@ -893,7 +893,8 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   ##
   ## RFC-0016 int6-a5: a routine declared inside a body that pushes is
   ## unreadable here: its position is that push's; RFC-0016 int6-u: that body
-  ## is read typed as well as by text (`typedPushingHost`). (A push among the
+  ## is read typed as well as by text (`typedPushingHost`); RFC-0016 int6-w2:
+  ## the typed read holds for a stdlib routine too. (A push among the
   ## routine's own statements is the parser's: it walks each pair as a
   ## region, and the opaque defect scan finds it in the typed body, int6-t.)
   let off = scopedChecks - buildSemantics.checks
@@ -913,10 +914,16 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
         return "it is declared inside " & host & ", whose body pushes " &
                "check options: it takes that push's where it stands, which " &
                "the scan of the module's statements does not read"
-    # RFC-0016 int6-u: the host found in the typed body, where a template's
-    # or a macro's push is (the text above holds the written ones alone).
-    let typed = typedPushingHost(impl)
-    if typed.len > 0: return typed
+  # RFC-0016 int6-u: the host found in the typed body, where a template's or a
+  # macro's push is (the text above holds the written ones alone). RFC-0016
+  # int6-w2: for a stdlib routine too. The typed body keeps every push as a
+  # pragma statement, the written ones included, so this alone places a stdlib
+  # routine declared inside a pushing stdlib body, sound by construction and
+  # not by a census of the toolchain (none on 2.2.10, by its text). A routine
+  # declared at its module's level, every stdlib one on 2.2.10, has a module
+  # owner and costs one step.
+  let typed = typedPushingHost(impl)
+  if typed.len > 0: return typed
 
 proc stdlibDefClean(impl: NimNode; file: string; line: int;
                     m: ModuleScan): bool =

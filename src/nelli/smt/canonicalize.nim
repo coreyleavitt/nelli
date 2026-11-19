@@ -1535,7 +1535,10 @@ const renderAsChoicesVersion* = "12"
   ##   step's shape admits the routine's `result` as well as a local `var`
   ##   (`check_options.loopIncRegion`), so `sequtils.count` is read through.
   ##   Verdicts move (an opaque `toSeq(s.items)` builds; a callee reaching
-  ##   `count` has its pre-int6-t verdict again). No key bytes change.
+  ##   `count` has its pre-int6-t verdict again). A stdlib routine declared
+  ##   inside a stdlib body that pushes is placed under that push
+  ##   (`typedPushingHost`, no longer skipped for the stdlib; none on 2.2.10).
+  ##   No key bytes change.
 
 const symexWalkerVersion* = "483"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

@@ -2111,6 +2111,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6w2_opaquetoseq",
             # RFC-0016 int6-w2: sequtils' templates stay unreadable (unCheckedInc is reachable through an {.all.} import).
             "tsymex_0016_int6w2_seqtpl",
+            # RFC-0016 int6-w2: a stdlib routine declared inside a pushing stdlib body is placed under the push.
+            "tsymex_0016_int6w2_stdnest",
             # RFC-0016 int6-f: fieldChecks belongs to its region (push off in a checked build reads the union as the off build does; a checked caller keeps FieldDefect).
             "tsymex_0016_int6f_fieldscope",
             # RFC-0016 int6-o: overflowChecks belongs to its region too (push off in a checked build is walked unchecked; system *= keeps the build's).

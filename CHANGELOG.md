@@ -165,6 +165,13 @@ where that note does not yet cover it.
   and is stepped at most once per item, so it stays below `len(s)`. The
   step is read through, and a callee reaching `count` has its verdict from
   before int6-t again.
+- **A stdlib routine declared inside a pushing stdlib body** (int6-w2;
+  walker 483). The placement of a routine declared inside a body that pushes
+  check options (int6-a5, int6-u) skipped the stdlib, which was then read
+  under its module's checks alone. The typed read (`typedPushingHost`) now
+  holds for a stdlib routine too, sound by construction: no such routine
+  exists on 2.2.10 (by a scan of its `lib/` text), and the pin is a module
+  classified as the stdlib by its path.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

@@ -18,8 +18,11 @@
 ##     under a push is read as reaching every stdlib module, which would
 ##     taint the stdlib rows here);
 ##   * float: a routine under `when defined(int6aPushed): {.push nanChecks:
-##     on.}` raises `FloatInvalidOpDefect` on `inf - inf`; decided as class 1
-##     is (int6-a2), it is walked checked.
+##     on.}` raises `FloatInvalidOpDefect` on `inf - inf`, and one under
+##     `when defined(int6aNotDefined)` reaches the label with a NaN; under
+##     `when defined(int6aPushed) and not defined(int6aNotDefined): {.push
+##     infChecks: on.}`, `1e308 * 2.0` raises `FloatOverflowDefect`. Decided
+##     as the ambiguous positions are (int6-a2), each is walked as compiled.
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -86,6 +89,22 @@ proc ambNan(a: float) =
 when defined(int6aPushed):
   {.pop.}
 
+when defined(int6aNotDefined):
+  {.push nanChecks: on.}
+proc ambNanNot(a: float) =
+  let d = a - a
+  if d != d: symexTarget("hit")
+when defined(int6aNotDefined):
+  {.pop.}
+
+when defined(int6aPushed) and not defined(int6aNotDefined):
+  {.push infChecks: on.}
+proc ambInf(a: float) =
+  let d = a * 2.0
+  if d > 1e308 and d == d + 1.0: symexTarget("hit")
+when defined(int6aPushed) and not defined(int6aNotDefined):
+  {.pop.}
+
 suite "int6-a stdlib positions: a stdlib body under its module's push":
   test "system.delete under checks: off is walked, its own raise kept":
     check native(delAt(1)) == "hit"
@@ -138,6 +157,22 @@ suite "int6-a float positions":
   test "nanChecks pushed on under a defined name is walked checked":
     check native(ambNan(Inf)) == "FloatInvalidOpDefect"
     let x = pinFind(ambNan, tRaisedExn("FloatInvalidOpDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+    check not x.errors.named(feCheckOption)
+  test "nanChecks pushed on under an undefined name is walked unchecked":
+    check native(ambNanNot(Inf)) == "hit"
+    let r = pinFind(ambNanNot, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check not r.errors.named(feCheckOption)
+    let x = pinFind(ambNanNot, tRaisedExn("FloatInvalidOpDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxUnsat
+  test "infChecks pushed on under a compound defined condition is walked checked":
+    check native(ambInf(1e308)) == "FloatOverflowDefect"
+    check native(ambInf(1.0)) == "ran"
+    let x = pinFind(ambInf, tRaisedExn("FloatOverflowDefect"))
     checkpoint show(x.errors)
     check x.status == sxRaised
     check not x.errors.named(feCheckOption)

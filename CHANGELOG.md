@@ -93,8 +93,10 @@ where that note does not yet cover it.
   474). A check pragma under `when defined(x)` (or `not`, `and`, `or` of such)
   at a position the walk reads is decided as it was compiled: the entry macro
   has its call site evaluate each `x` and expands once more, where the
-  position was read both ways and declined `feCheckOption`. This covers the
-  float checks as well (`nanChecks`, `infChecks`). A `when` on a `const`,
+  position was read both ways and declined `feCheckOption`. The float checks
+  follow (`nanChecks`, `infChecks` pushed on under such a `when` raise
+  `FloatInvalidOpDefect` / `FloatOverflowDefect` as compiled, or not, where
+  the name is undefined). A `when` on a `const`,
   `declared(...)` or any other name still declines, as does an entry whose
   `fn` is a lambda rather than a named routine.
 - **Scanner text guard** (migration 1, int6-w, walker 468). The region reads

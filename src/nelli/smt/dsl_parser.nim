@@ -28655,6 +28655,13 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
       s.alive = keep
     return
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit:
+    # A callee the typed tree leaves unresolved (an identifier or a symbol
+    # choice) makes no call that runs: it is a type expression the scan
+    # meets in a declaration (`var s: set[T]` written in a template), and
+    # it and its operands carry no type to read ("node has no type").
+    if n.len > 0 and n[0].kind in {nnkIdent, nnkOpenSymChoice,
+                                   nnkClosedSymChoice, nnkAccQuoted}:
+      return
     if n.len > 0:
       let ty = n[0].getTypeInst
       # PRC-46: an iterator's formals too (`for e in x`: `items(x)`).

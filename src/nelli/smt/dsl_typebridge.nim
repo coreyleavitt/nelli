@@ -164,12 +164,40 @@ proc isLongDoubleTyped*(n: NimNode): bool =
   ## declared name) has the type `c_longdouble`: the C target's `long double`,
   ## which the compiler aliases to `float64`, so its `typeKind` is a float's
   ## and only the type head names it. A node with no type is not.
-  if n == nil or n.kind in {nnkEmpty, nnkIdent} or
-     n.typeKind notin {ntyFloat, ntyFloat64}:
-    return false
+  ##
+  ## Read off symbols only: a value's own symbol, a field's, a conversion's
+  ## head, a call's callee signature. The node itself may carry no type (the
+  ## isolation parser's untyped input, a node the parser builds such as a
+  ## `nnkHiddenAddr`, a `case` branch's range), and `getTypeInst` on such a
+  ## node stops the whole compile ("node has no type") while its `typeKind`
+  ## is not reliable either (`isResolvedBoolAndOr`). A symbol always has its
+  ## type.
+  if n == nil: return false
   var t: NimNode
-  try: t = n.getTypeInst
-  except CatchableError: return false
+  case n.kind
+  of nnkSym:
+    if n.symKind notin {nskVar, nskLet, nskParam, nskConst, nskResult,
+                        nskForVar, nskField, nskTemp}:
+      return false
+    t = n.getTypeInst
+  of nnkPragmaExpr, nnkCheckedFieldExpr:
+    return n.len > 0 and isLongDoubleTyped(n[0])
+  of nnkDotExpr:
+    return n.len == 2 and n[1].kind == nnkSym and isLongDoubleTyped(n[1])
+  of nnkConv:
+    if n.len != 2: return false
+    t = n[0]
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
+    if n.len == 0 or n[0].kind != nnkSym or
+       n[0].symKind notin {nskProc, nskFunc, nskMethod, nskConverter}:
+      return false
+    let sig = n[0].getTypeInst
+    if sig.kind != nnkProcTy or sig.len == 0 or
+       sig[0].kind != nnkFormalParams or sig[0].len == 0:
+      return false
+    t = sig[0][0]
+  else:
+    return false
   if t != nil and t.kind == nnkVarTy and t.len == 1: t = t[0]
   t != nil and isBuiltinTypeHead(t, ["c_longdouble", "clongdouble"])
 

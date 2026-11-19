@@ -40,6 +40,12 @@
 ## No new ADR: CR-2b reuses CR-1c's `SymexClassifiedDegradeError` carrier and
 ## the existing `__ownership:`-style `itUninterp` placeholder idiom at a new
 ## site; it introduces no new mechanism (per RFC judgment call, round-2).
+##
+## RFC-0016 INT-87 (walker 448) models a `cstring` parameter, so the SUT's
+## unsupported parameter is now a `c_longdouble` (float128, refused by its
+## type-class row, STY-06). `classifyType` declines it by name to the same
+## `"__unsupported:"` placeholder, so `allocateSym` raises the same classified
+## degrade at parameter allocation; what this file asserts is unchanged.
 
 from ./s8cu_helpers import named
 import std/[unittest, strutils]
@@ -51,13 +57,13 @@ import ./s8cu_helpers
 # SUTs
 # ---------------------------------------------------------------------------
 
-# SUT 1 (RED repro / strong-form): a `cstring` parameter hits classifyType's
-# text-match catch-all. Params are allocated before the body is walked, so
-# this degrades the WHOLE RUN to sxUnknown regardless of the body — even
-# though `y == 42` is trivially reachable, it must never be reported sxSat.
-proc sutCstringParam(s: cstring, y: int) =
+# SUT 1 (RED repro / strong-form): an unsupported parameter (a `cstring`
+# until INT-87, now a `c_longdouble`) classifies to the `__unsupported:`
+# placeholder. Params are allocated before the body is walked, so this
+# degrades the WHOLE RUN to sxUnknown regardless of the body — even though `y == 42` is trivially reachable, it must never be reported sxSat.
+proc sutUnsupportedParam(s: c_longdouble, y: int) =
   if y == 42:
-    symexTarget("cstring_target")
+    symexTarget("unsupported_target")
 
 # SUT 2 (genuine regression guard): ordinary supported scalar param types —
 # no unsupported type anywhere — must still resolve exactly as before.
@@ -71,9 +77,9 @@ proc sutPlainSupported(x: int, y: uint8) =
 
 suite "symex RFC-chapulin-hardening CR-2b — param-type catch-all degrade":
 
-  test "CR-2b-1: cstring param compiles and degrades to whole-run sxUnknown + feUnsupportedParamType":
+  test "CR-2b-1: an unsupported param compiles and degrades to whole-run sxUnknown + feUnsupportedParamType":
     ## Strong form: assert the classified KIND, not just the verdict.
-    let r = pinFind(sutCstringParam, tLabel("cstring_target"))
+    let r = pinFind(sutUnsupportedParam, tLabel("unsupported_target"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -89,7 +95,7 @@ suite "symex RFC-chapulin-hardening CR-2b — param-type catch-all degrade":
     ## `nim c`/`nim cpp` process would abort natively. Reaching this
     ## assertion at all is part of the proof; the status must never be a
     ## silently-wrong verdict.
-    let r = pinFind(sutCstringParam, tLabel("cstring_target"))
+    let r = pinFind(sutUnsupportedParam, tLabel("unsupported_target"))
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedParamType)
     check r.status != sxSat

@@ -93,6 +93,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import nativeRun, hitsTarget
 
 # =============================================================================
 # Item 1 -- module-level global read classification
@@ -125,6 +126,13 @@ suite "#161/#163 handoff -- module-level global read names itself, not weInterna
     check r.status in {sxSat, sxUnknown}
     if r.status == sxSat:
       check r.witness[0] > gLimit163rev
+      # RFC-0016 K9d-12: and the witness, replayed natively, hits
+      check nativeRun(readsGlobal163(r.witness[0])).hitsTarget(
+        tLabel("overLimit"))
+    # the target is reachable natively (the global holds 10 here), which is
+    # why the verdict may not be sxUnsat
+    check nativeRun(readsGlobal163(gLimit163rev + 1)).hitsTarget(
+      tLabel("overLimit"))
 
   test "the global read is classified feGlobalHavoc, names the global, and is never weInternalWalkerFault":
     ## RFC-0005 S8as: was `feGlobalReadUnmodelled` (a decline).

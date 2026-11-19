@@ -5,7 +5,7 @@
 ## of deepterm's 186 s on the Windows leg, against a 240 s kill. The deep-term
 ## pins stay there; `arrayAccessTooWide`'s decline is pinned there too.
 
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind, nativeRun, hitsTarget
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
@@ -29,10 +29,14 @@ suite "S8ct: row B19's exact SUT":
     # It walked for seven minutes before the bound, and ended the process
     # before S8ct. Natively, input `high(int)` raises OverflowDefect at
     # `n + 1`, and input 0 overflows the stack.
-    let r = symexFind(sutB19, tLabel("t"))
+    let r = pinFind(sutB19, tLabel("t"))
     for e in r.errors: checkpoint $e.kind & ": " & e.msg
     if r.status == sxRaised:
       check r.soundness.replay == rsConfirmed
+      # The child confirmed it; natively, here, the witness raises the same
+      # type (a raise at `n + 1` is within a few frames of the call).
+      check nativeRun(sutB19(r.raisedWitness[0])).hitsTarget(
+        tRaisedExn(r.raisedTypeId))
     else:
       check r.status == sxUnknown
       check r.errors.named(beBudgetExhaustedUnmodelled)
@@ -43,6 +47,10 @@ suite "S8ct: row B19's exact SUT":
       for e in r.errors:
         if "termWalkMaxDepth" in e.msg: named = true
       check named
+
+  test "natively, input high(int) raises OverflowDefect at the first frame":
+    # The raise the first test admits as a verdict exists on this build.
+    check nativeRun(sutB19(high(int))).hitsTarget(tRaisedExn("OverflowDefect"))
 
   test "the walker's version floor":
     check parseInt(symexWalkerVersion) >= 262

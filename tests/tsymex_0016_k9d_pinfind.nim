@@ -29,6 +29,22 @@ proc records(): seq[PinRecord] =
 proc recordsWith(part: string): seq[PinRecord] =
   records().filterIt(part in it.cell.key)
 
+# K9d-12: `pinCrashSelf`'s child is this binary; its forms run here, before
+# any suite, and the child exits.
+proc crashSelfDefect(x: int) =
+  doAssert x != 3, "crash form"
+
+proc crashSelfNil(p: ref int): int =
+  # a kept nil read: SIGSEGV natively (a discarded one is not loaded, INT-86)
+  if p == nil: result = p[]
+
+crashForms:
+  case crashForm()
+  of "defect": crashSelfDefect(3)
+  of "nil": discard crashSelfNil(nil)
+  of "returns": crashSelfDefect(4)
+  else: discard
+
 proc sutHit(x: int) =
   if x == 7: symexTarget("hit")
 
@@ -1369,3 +1385,26 @@ suite "K9d: pinFind":
     check b.values.anyIt(it != nil and it of RM and RB(m.values[1]) == it)
     # (the walker's witness for `sutSubAlias` builds the shared cell as an
     # `RB`, not the `RM` its run-type tag says: INT-81, pinned there)
+
+suite "K9d-12: pinCrashSelf runs the suite's own SUT in a child":
+  test "a Defect form crashes as a Defect, and is recorded":
+    let k = cellKey(faGeneric, "k9d/selftest/crashSelf")
+    pinCrashSelf(k, "defect", ceDefect)
+    let rs = records().filterIt(it.cell == k)
+    check rs.len == 1
+    check rs[0].verdict == pvCrashed and rs[0].entry == "pinCrash"
+    check rs[0].domain == "form:defect"
+
+  test "a nil dereference form crashes as a segfault":
+    pinCrashSelf(cellKey(faGeneric, "k9d/selftest/crashSelfNil"), "nil",
+                 ceSegv)
+
+  test "a form that returns fails the pin, and so does the wrong class":
+    let k = cellKey(faGeneric, "k9d/selftest/crashSelfBad")
+    expect PinFailure:
+      pinCrashSelf(k, "returns", ceDefect)
+    expect PinFailure:
+      pinCrashSelf(k, "no-such-form", ceAbnormal)
+    expect PinFailure:
+      pinCrashSelf(k, "defect", ceSegv)
+    check records().filterIt(it.cell == k).len == 0

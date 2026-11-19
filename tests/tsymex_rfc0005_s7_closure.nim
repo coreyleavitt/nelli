@@ -22,6 +22,7 @@ import nelli/smt/runtime
 import nelli/smt/dsl_parser
 import nelli/smt/canonicalize
 import audit_scan_utils
+from ./s8cu_helpers import pinFind
 
 macro progOf(fn: typed): untyped =
   ## The `SymexProgram` `symexFind` would build for `fn`, so a test can read
@@ -273,6 +274,9 @@ suite "RFC-0005 S7 (b) -- closure descent and cross-path sinks":
   test "a raise inside a closure body reaches the caller (was a false sxUnsat)":
     let r = runSymex(progOf(s7CloRaise), anyRaise)
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7CloRaise, anyRaise).status == r.status
     check r.status == sxRaised
     if r.status == sxRaised: check r.raisedTypeId == "DivByZeroDefect"
 
@@ -285,24 +289,36 @@ suite "RFC-0005 S7 (b) -- closure descent and cross-path sinks":
   test "two applications of one closure are not correlated through a shared result term (was a false sxUnsat)":
     let r = runSymex(progOf(s7CloHeap), tLabel("s7_clo_heap"))
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7CloHeap, tLabel("s7_clo_heap")).status == r.status
     check r.status == sxSat
     check r.candidates.len == 0
 
   test "a raise predicate deposited before a closure call survives the descent (was a false sxUnsat)":
     let r = runSymex(progOf(s7Isolation), tRaisedExn("DivByZeroDefect"))
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7Isolation, tRaisedExn("DivByZeroDefect")).status == r.status
     check r.status == sxRaised
     if r.status == sxRaised: check r.raisedTypeId == "DivByZeroDefect"
 
   test "parseInt(\"-x\") raises (the digits gate no longer prunes it globally)":
     let r = runSymex(progOf(s7ParseNeg), anyRaise)
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7ParseNeg, anyRaise).status == r.status
     check r.status == sxRaised
     if r.status == sxRaised: check r.raisedTypeId == "ValueError"
 
   test "a parseInt on one arm does not constrain a sibling arm (was a false sxUnsat)":
     let r = runSymex(progOf(s7ParseCross), tLabel("s7_parse_cross"))
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7ParseCross, tLabel("s7_parse_cross")).status == r.status
     check r.status == sxSat
     check r.candidates.len == 0
 
@@ -315,22 +331,34 @@ suite "RFC-0005 S7 (c) -- clean closures stay exact":
   test "a clean closure's reachable label is a clean sxSat":
     let r = runSymex(progOf(s7CleanLive), tLabel("s7_clean_live"))
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7CleanLive, tLabel("s7_clean_live")).status == r.status
     check r.status == sxSat
     check r.candidates.len == 0
 
   test "a clean closure's dead label is sxUnsat":
     let r = runSymex(progOf(s7CleanDead), tLabel("s7_clean_dead"))
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7CleanDead, tLabel("s7_clean_dead")).status == r.status
     check r.status == sxUnsat
 
   test "two occurrences with equal arguments agree: the label is sxUnsat":
     let r = runSymex(progOf(s7CleanTwice), tLabel("s7_clean_twice"))
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7CleanTwice, tLabel("s7_clean_twice")).status == r.status
     check r.status == sxUnsat
 
   test "control: the named-callee twin of s7CloRaise is sxRaised":
     let r = runSymex(progOf(s7NamedRaise), anyRaise)
     checkpoint(show(r))
+    # RFC-0016 K9d-12: the same SUT and target through the public entry,
+    # pinned natively, agree with the raw verdict
+    check pinFind(s7NamedRaise, anyRaise).status == r.status
     check r.status == sxRaised
 
 # =============================================================================

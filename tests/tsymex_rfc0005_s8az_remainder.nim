@@ -28,6 +28,7 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl, runtime, canonicalize]
 import nelli/engine/types
+import ./s8cu_helpers
 
 # =============================================================================
 # (1) the :sat witness cache slot also serves gaps()
@@ -99,6 +100,13 @@ suite "RFC-0005 S8az (1) -- :sat witness cache hit also serves gaps()":
     check warm.fromCache
     check warm.gaps == cold.gaps
     check warm.gaps.len > 0
+    # RFC-0016 K9d-11b: the claim is untrusted (its gaps), so no pin judges
+    # it; its witness, cold and warm, is still replayed natively and must
+    # hit.
+    for f in [cold, warm]:
+      let w = decodeWitness[witnessTypeOf(s8azSatConfirm)](f.witnessChoices)
+      check nativeRun(s8azSatConfirm(w[0], w[1])).hitsTarget(
+        tLabel("s8az_sat_confirm"))
 
 # =============================================================================
 # (2) the :raised:<type> cache slot also serves gaps()
@@ -176,6 +184,12 @@ suite "RFC-0005 S8az (2) -- :raised:<type> cache hit also serves gaps()":
     check warm.fromCache
     check warm.gaps == cold.gaps
     check warm.gaps.len > 0
+    # RFC-0016 K9d-11b: the claim is untrusted (its gaps), so no pin judges
+    # it; its witness, cold and warm, is still replayed natively and must
+    # raise the assertion.
+    for f in [cold, warm]:
+      let w = decodeWitness[witnessTypeOf(s8azRaisedConfirm)](f.witnessChoices)
+      check nativeRun(s8azRaisedConfirm(w[0])).hitsTarget(tAssertionViolation())
 
 # =============================================================================
 suite "RFC-0005 S8az walker version":

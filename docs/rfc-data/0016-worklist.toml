@@ -2481,3 +2481,48 @@ evidence = "red at b275700f (before 3605e3b5): the reproducer's parameter, betwe
 aliases = []
 cells = []
 pins = ["tsymex_0016_int84_holeyenum", "tsymex_163audit_range_domain", "tsymex_163rev_enum_domain", "tsymex_163rev_enum_field_witness"]
+
+[[row]]
+id = "INT-86"
+table = "5.8c"
+title = "K9d-12: a discarded read through a nil reference (`discard p.n`, `discard p[]` of a nil `ref` or `ptr`) is a `sxRaised(NilAccessDefect)` claim, and a label behind it is refuted, but natively it does not fault: Nim lowers it to `(void)((*p).n);`, which the C compiler does not load, so the call returns and the label is reached. A kept read (`result = p.n`) faults natively, as the walker says. Found converting `tsymex_0016_wa_runtime`: its `lossyNil` claim, run in a child on its only nil input (`pinCrashSelf`), exited 0"
+class = "soundness"
+state = "open"
+note = ": open. The bar: a discarded read the build does not load is not a dereference, so the label behind it is `sxSat` (pinned) and no nil access is claimed there; a kept read stays a nil-access claim. Native evidence (pinned toolchain, c and cpp): `discard p.n` and `discard p[]` of nil return; `let v = p.n` faults with SIGSEGV. A related native observation, not this row: in a `try` at module level, a raise from a called routine was not caught on c (the run printed past it). `tsymex_0016_wa_runtime` stays on the K9d census (ceiling 1) until this closes; its `lossyNil` SUT then needs a kept read, or its claim inverts"
+slice = "K9d"
+home = "K9d-12 (`wip/k9d12`)"
+source = "K9d-12 pinCrashSelf conversion"
+evidence = "red reproducer `tests/tsymex_0016_int86_discardnil.nim`: natively both discarded reads return and reach the label and the kept read crashes (`pinCrashSelf`, ceSegv); the walker says `sxRaised` for the label behind each discarded read and for `tNilAccess()`; the kept read's `sxRaised` control agrees"
+aliases = []
+cells = []
+pins = []
+
+[[row]]
+id = "INT-87"
+table = "5.8c"
+title = "K9d-12: the walker declines a `cstring` parameter (`feUnsupportedParamType`), where a `string` one is modelled, so every `cstring` call is `sxUnknown` and pinned by nothing. `pinFind` has had a `cstring` domain since K9d-6 (the string domain minus the values with a NUL) for the day the walker takes one"
+class = "precision"
+state = "open"
+note = ": open. The bar: a `cstring` parameter is an input (nil, or the bytes up to its first NUL), so a byte test, a nil test and a refutation over it are definite verdicts, each pinned natively by `pinFind`. Recorded because the K9d plan asked K9d-12 to file it if the decline was still present on its base (it is, at walker 444)"
+slice = "K9d"
+home = "K9d-12 (`wip/k9d12`)"
+source = "K9d-12 triage (the plan's walker-decline list)"
+evidence = "red reproducer `tests/tsymex_0016_int87_cstringparam.nim`: a first-byte target, a nil target and a negative-length refutation are each `sxUnknown` (`feUnsupportedParamType`); natively the first two are reached"
+aliases = []
+cells = []
+pins = []
+
+[[row]]
+id = "INT-88"
+table = "5.8c"
+title = "K9d-12: two `ptr` parameters of different pointee types that the target needs at one address (`cast[pointer](a) == cast[pointer](b)` over `ptr int` and `ptr float`) are a trusted `sxSat`, which is right natively (`addr x` and `cast[ptr float](addr x)`), but the walker's witness builds one cell for each, at two addresses, so it replays without reaching the target and the pin fails. Found verifying the plan's entry for a non-nil pointer compare across types, thought closed under INT-83 (which made `pointer` an address of its own sort)"
+class = "witness fidelity (the verdict is sound)"
+state = "open"
+note = ": open. The bar: a witness whose model puts two typed `ptr` positions at one address materialises one cell for both, so `pinFind` replays it and hits. Two refs of different types never alias (`sxUnsat`, pinned over the ref domains): the control"
+slice = "K9d"
+home = "K9d-12 (`wip/k9d12`)"
+source = "K9d-12 triage (the plan's walker-decline list)"
+evidence = "red reproducer `tests/tsymex_0016_int88_crossptralias.nim`: the walker's witness for `crossPtr` holds two distinct addresses (16 bytes apart) and replays with no hit; natively one address passed as both hits; the ref control is `sxUnsat`, pinned"
+aliases = []
+cells = []
+pins = []

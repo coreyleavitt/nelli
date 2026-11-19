@@ -38,7 +38,7 @@
 ## Bumps `symexWalkerVersion` 84->85: verdict-surface change (previously
 ## `sxUnknown` verdicts for procs allocating — but not reading — a poisoned
 ## field now honestly TIGHTEN to their real `sxSat`/`sxUnsat`).
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -165,30 +165,30 @@ proc sutLocalSeqTouchDegrades(n: int) =
 suite "symex round-6 Bug #2 — POISON-GONE (bare parameter)":
 
   test "Bug2-1a: proc taking a Packet param, touching only the pkData arm, proves sxSat (options never allocated-poisoned)":
-    let r = symexFind(sutParamOtherArmHit, tLabel("param_other_arm_hit"))
+    let r = pinFind(sutParamOtherArmHit, tLabel("param_other_arm_hit"))
     check r.status == sxSat
     check r.witness[0].kind == pkData
     check r.witness[0].blockNum == 7
 
   test "Bug2-1b: UNSAT companion — a genuine contradiction on the same untouched-options-arm fields still resolves sxUnsat":
-    let r = symexFind(sutParamOtherArmUnsat, tLabel("param_other_arm_unsat"))
+    let r = pinFind(sutParamOtherArmUnsat, tLabel("param_other_arm_unsat"))
     check r.status == sxUnsat
 
 suite "symex round-6 Bug #2 — POISON-GONE (return-binding twin)":
 
   test "Bug2-2a: proc RETURNING a Packet built on the pkData arm proves sxSat, witness n==7":
-    let r = symexFind(sutReturnDataHit, tLabel("return_data_blocknum_7"))
+    let r = pinFind(sutReturnDataHit, tLabel("return_data_blocknum_7"))
     check r.status == sxSat
     check r.witness[0] == 7
 
   test "Bug2-2b: UNSAT companion — the callee's returned blockNum is always n+1, blockNum==n is impossible":
-    let r = symexFind(sutReturnDataUnsat, tLabel("return_data_blocknum_unsat"))
+    let r = pinFind(sutReturnDataUnsat, tLabel("return_data_blocknum_unsat"))
     check r.status == sxUnsat
 
 suite "symex round-6 Bug #2 — HONEST DEGRADE":
 
   test "Bug2-3: reading the placeholder field classifies to sxUnknown with the decline reason surfaced":
-    let r = symexFind(sutReadOptionsField, tLabel("read_options_field"))
+    let r = pinFind(sutReadOptionsField, tLabel("read_options_field"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -200,35 +200,35 @@ suite "symex round-6 Bug #2 — HONEST DEGRADE":
 suite "symex round-6 Bug #2 — retBindEq skips eq on the placeholder field":
 
   test "Bug2-4a: call-return binding proves a property over the SUPPORTED fields (kind, blockNum, tag) -> sxSat":
-    let r = symexFind(sutRetBindSupportedFieldsHit, tLabel("retbind_supported_fields_hit"))
+    let r = pinFind(sutRetBindSupportedFieldsHit, tLabel("retbind_supported_fields_hit"))
     check r.status == sxSat
     check r.witness[0] == 7
 
   test "Bug2-4b: UNSAT companion — soundness over the same supported fields":
-    let r = symexFind(sutRetBindSupportedFieldsUnsat, tLabel("retbind_supported_fields_unsat"))
+    let r = pinFind(sutRetBindSupportedFieldsUnsat, tLabel("retbind_supported_fields_unsat"))
     check r.status == sxUnsat
 
 suite "symex round-6 Bug #2 — variant construction (A3 fork-per-tag) with a placeholder-carrying arm":
 
   test "Bug2-5a: the untouched (symData) fork's query is unaffected -> sxSat, witness tag==42":
-    let r = symexFind(sutSymConstructUntouchedTag, tLabel("sym_construct_data_tag42"))
+    let r = pinFind(sutSymConstructUntouchedTag, tLabel("sym_construct_data_tag42"))
     check r.status == sxSat
     check r.witness[1] == 42
 
   test "Bug2-5b: the touched (symRrq) fork's own options READ still degrades classified, not a crash":
-    let r = symexFind(sutSymConstructTouchedArmDegrades, tLabel("sym_construct_rrq_touch_degrades"))
+    let r = pinFind(sutSymConstructTouchedArmDegrades, tLabel("sym_construct_rrq_touch_degrades"))
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
 
 suite "symex round-6 Bug #2 — local seq[(string,string)] composition (regression, not new capability)":
 
   test "Bug2-6a: an untouched local seq[(string,string)] (empty literal) still proves sxSat":
-    let r = symexFind(sutLocalEmptySeqNoCrash, tLabel("local_empty_seq_no_crash"))
+    let r = pinFind(sutLocalEmptySeqNoCrash, tLabel("local_empty_seq_no_crash"))
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "Bug2-6b: a MUTATED local seq[(string,string)] still degrades classified, never a crash":
-    let r = symexFind(sutLocalSeqTouchDegrades, tLabel("local_seq_touch_degrades"))
+    let r = pinFind(sutLocalSeqTouchDegrades, tLabel("local_seq_touch_degrades"))
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
 

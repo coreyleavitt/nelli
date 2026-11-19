@@ -4,7 +4,8 @@
 ## (`replayNotRun`, `endsChild` false) and used to overwrite the claim's own
 ## `witnessUnsafe`: `hostRunnable` was true and `assertCoveredBy` ran it in the
 ## host, which killed the process.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, crashForms, crashForm, pinCrashSelf,
+  cellKey, faGeneric, ceDefect
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -22,18 +23,6 @@ proc lossyOverflow(p: ref WpBox) =
   if p != nil and p.n == high(int):
     discard p.n + 1
 
-suite "WA-B S4: a lossy Defect claim under --panics:on":
-  test "the build is a panics build":
-    check defined(nimPanics)
-    check parseInt(symexWalkerVersion) >= 286
-
-  test "the verdict is unsafe and not host-runnable":
-    let r = symexFind(lossyOverflow, tRaisedExn("OverflowDefect"))
-    checkpoint $r.status & " " & $r.soundness
-    check r.status == sxRaised
-    check r.soundness.witnessUnsafe
-    check not hostRunnable(r.soundness)
-
 proc lossyAssert(p: ref WpBox) =
   ## An auto-discovered `AssertionDefect` target (`symexFindAllWitnesses`),
   ## with a witness no heap cell holds.
@@ -49,6 +38,30 @@ proc candidateOverflow(a: bool; x: int) =
   let o = wpFreshFalse(a)
   if not o and x == high(int):
     discard x + 1
+
+# RFC-0016 K9d-12: under `--panics:on` a Defect ends the process, so every
+# claim here (and the candidate's overflow) is established natively in a
+# child: this binary, on an input the claim's path condition names.
+crashForms:
+  case crashForm()
+  of "lossyOverflow": lossyOverflow((ref WpBox)(n: high(int)))
+  of "lossyAssert": lossyAssert((ref WpBox)(n: 5))
+  of "candidateOverflow": candidateOverflow(false, high(int))
+  else: discard
+
+suite "WA-B S4: a lossy Defect claim under --panics:on":
+  test "the build is a panics build":
+    check defined(nimPanics)
+    check parseInt(symexWalkerVersion) >= 286
+
+  test "the verdict is unsafe and not host-runnable":
+    let r = symexFind(lossyOverflow, tRaisedExn("OverflowDefect"))
+    checkpoint $r.status & " " & $r.soundness
+    check r.status == sxRaised
+    check r.soundness.witnessUnsafe
+    check not hostRunnable(r.soundness)
+    pinCrashSelf(cellKey(faGeneric, "k9d/tsymex_0016_wa_runtime_panics/lossyOverflow/tRaisedExn(\"OverflowDefect\")"),
+                 "lossyOverflow", ceDefect)
 
 suite "WA-B S4: the cached crash claim":
   test "a cold and a warm finding both stay witnessUnsafe":
@@ -66,6 +79,8 @@ suite "WA-B S4: the cached crash claim":
     check warm[0].fromCache
     check warm[0].soundness.witnessUnsafe
     check not hostRunnable(warm[0].soundness)
+    pinCrashSelf(cellKey(faGeneric, "k9d/tsymex_0016_wa_runtime_panics/lossyAssert/tAssertionViolation()"),
+                 "lossyAssert", ceDefect)
 
 suite "WA-B S4: a crash candidate is never settled into a claim":
   ## `settleCandidate` ORs the claim's own `witnessUnsafe` into the replay's
@@ -86,3 +101,6 @@ suite "WA-B S4: a crash candidate is never settled into a claim":
     check r.errors.named(feGlobalHavoc)
     check scSpurious in r.soundness.runTaint
     check r.soundness.replay == rsNotNeeded
+    # The candidate is real natively: the decline is not a refutation.
+    pinCrashSelf(cellKey(faGeneric, "k9d/tsymex_0016_wa_runtime_panics/candidateOverflow/tRaisedExn(\"OverflowDefect\")"),
+                 "candidateOverflow", ceDefect)

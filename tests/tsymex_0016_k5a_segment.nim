@@ -13,6 +13,7 @@ import nelli/smt/canonicalize
 import nelli/smt/buildprofile
 import nelli/smt/soundness
 import nelli/coverage
+from ./s8cu_helpers import pinFind
 
 # ---- generic "change this field" for the structural tests -------------------
 
@@ -179,7 +180,7 @@ suite "K5a-2: a host the profile does not admit declines the run":
 
   test "the same call on a verified host runs":
     overrideHostForTest(readHost(z3FullVersion()))
-    let r = symexFind(sutHost, tLabel("hit"))
+    let r = pinFind(sutHost, tLabel("hit"))
     check r.status == sxSat
     for e in r.errors: check e.kind != feHostUnadmitted
 

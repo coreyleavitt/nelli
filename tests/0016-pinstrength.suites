@@ -30,3 +30,7 @@ tsymex_162_range_base_width
 tsymex_161_overflow_obligation
 # K9e: pins that kill the division/modulo survivors
 tsymex_0016_k9e_kill_div
+# K9e kill pins: Int-sorted compare/arith, width bounds, unsigned wrap, BV compare (cmp cluster)
+tsymex_0016_k9e_kill_cmp
+# K9e kill pins, -fwrapv build: signed wrap and 8-bit div wrap of an Int-sorted value
+tsymex_0016_k9e_kill_cmp_fwrapv

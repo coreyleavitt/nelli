@@ -2517,12 +2517,13 @@ id = "INT-88"
 table = "5.8c"
 title = "K9d-12: two `ptr` parameters of different pointee types that the target needs at one address (`cast[pointer](a) == cast[pointer](b)` over `ptr int` and `ptr float`) are a trusted `sxSat`, which is right natively (`addr x` and `cast[ptr float](addr x)`), but the walker's witness builds one cell for each, at two addresses, so it replays without reaching the target and the pin fails. Found verifying the plan's entry for a non-nil pointer compare across types, thought closed under INT-83 (which made `pointer` an address of its own sort)"
 class = "witness fidelity (the verdict is sound)"
-state = "open"
-note = ": open. The bar: a witness whose model puts two typed `ptr` positions at one address materialises one cell for both, so `pinFind` replays it and hits. Two refs of different types never alias (`sxUnsat`, pinned over the ref domains): the control"
+state = "closed"
+note = "fixed in the witness builder (the walk is unchanged, so no walker version bump; 6ea48e98): addresses are global across pointee sorts. The snapshot keys a typed address the run cast into the `pointer` space by its `pointer` address (`addrSpaceKey`, through INT-83's `pointerViews`), so two typed positions the model puts at one `pointer` address are one cell, owned by a `ref`, else by a position of a sort the walk read or wrote (`heapSortObserved`), else by name. The witness builds that cell once, as its owner's type, sized for the largest pointee any position holding it has (`registerPtrSize`, emitted per `ptr` sort by `emitWitnessTuple`; `cellAlloc`), and every position at another sort is a typed view of the one allocation (`cellForeignView`, `cast[ptr T](base)`), whichever is built first. Where the shared bytes cannot be rendered as the model's, the witness is recorded lossy (`feExtractionFailed`, `crossSortCellFidelity`) and the replay settles it: a `ref` holding the cell at another sort (its object is sized by its own type), the walk constraining two of its sorts (each sort's heap is a separate array, so one location may hold two values no bytes do), or a constrained sort that is not the owner's. Left: `crossPtrBoth` (`a[] == 5 and b[] > 1.0` at one address, natively unreachable) is an untrusted `sxSat`, not `sxUnsat`: the walk does not relate two sorts' heaps at one address (INT-83 declines a location read at two types only through a `pointer` cast)"
+sha = "6ea48e98"
 slice = "K9d"
 home = "K9d-12 (`wip/k9d12`)"
 source = "K9d-12 triage (the plan's walker-decline list)"
-evidence = "red reproducer `tests/tsymex_0016_int88_crossptralias.nim`: the walker's witness for `crossPtr` holds two distinct addresses (16 bytes apart) and replays with no hit; natively one address passed as both hits; the ref control is `sxUnsat`, pinned"
+evidence = "red at e4c0ae7a (before 6ea48e98): the walker's witness for `crossPtr` held two distinct addresses (16 bytes apart) and replayed with no hit (`pinExact`: the witness does not hit natively); natively one address passed as both hits (`addr x`, `cast[ptr float](addr x)`). Green after the fix: `tsymex_0016_int88_crossptralias` 8 OK on c and cpp, each `sxSat` replayed by pinFind (the bare alias, one constrained sort, the view first in parameter order, an `int8` owner under an `int64` view), the doubly constrained cell never a trusted `sxSat` (lossy, untrusted after replay), the ref control `sxUnsat` pinned; `int83_pointerparam`, `int81_witnesstag` green on c"
 aliases = []
 cells = []
-pins = []
+pins = ["tsymex_0016_int88_crossptralias"]

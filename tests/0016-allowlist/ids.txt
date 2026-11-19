@@ -84,4 +84,3 @@ INT-50	W4-z	intake #173-#175 ceiling regressions (F-0009): a CI-D time ratchet, 
 INT-51	W4-z	intake #173-#175 new ceiling offenders (F-0010): a CI-D time ratchet, no cell can name it; closes when a Wave 4 split slice splits or speeds up the six tests
 INT-86	K9d	soundness: a discarded nil read is claimed a crash, natively it returns; red reproducer tsymex_0016_int86_discardnil (registered when it is green)
 INT-87	K9d	precision: a cstring parameter declines; red reproducer tsymex_0016_int87_cstringparam (registered when it is green)
-INT-88	K9d	witness fidelity: a cross-type ptr alias witness builds two cells; red reproducer tsymex_0016_int88_crossptralias (registered when it is green)

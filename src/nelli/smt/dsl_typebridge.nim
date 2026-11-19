@@ -197,7 +197,7 @@ proc isLongDoubleTyped*(n: NimNode): bool =
       return false
     t = sig[0][0]
   else:
-    return false
+    return false  # k2: n/a: a node kind that carries no c_longdouble type to read; a value of that type from another kind meets the placeholder sort and declines downstream
   if t != nil and t.kind == nnkVarTy and t.len == 1: t = t[0]
   t != nil and isBuiltinTypeHead(t, ["c_longdouble", "clongdouble"])
 
@@ -475,7 +475,7 @@ proc floatBound(n: NimNode): Option[tuple[v: float64, f32: bool]] =
     none(tuple[v: float64, f32: bool])
   of nnkHiddenStdConv, nnkConv, nnkPar, nnkStmtListExpr:
     if n.len > 0: floatBound(n[^1]) else: none(tuple[v: float64, f32: bool])
-  else: none(tuple[v: float64, f32: bool])
+  else: none(tuple[v: float64, f32: bool])  # k2: fail-closed: none: classifyFloatRange returns none and the range is read as an integer one, which declines a float bound
 
 proc classifyFloatRange(rangeNode: NimNode): Option[ClassifiedType] =
   ## RFC-0016 INT-77. `range[lo .. hi]` over a float: the base float type

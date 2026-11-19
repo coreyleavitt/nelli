@@ -4988,7 +4988,7 @@ proc cPure(n: NimNode; ctx: ParseCtx; derefs, checks: var seq[NimNode]): bool =
     for i in 1 ..< n.len:
       if not cPure(n[i], ctx, derefs, checks): return false
     true
-  else: false
+  else: false  # k2: fail-closed: false: not a pure C expression; every caller keeps the ordinary read (deadReadOf: drPlain, viewAddrLower: false)
 
 proc deadReadOf(n: NimNode; ctx: ParseCtx; discarded: bool):
     tuple[kind: DeadRead; derefs, checks: seq[NimNode]] =
@@ -5012,7 +5012,7 @@ proc deadReadOf(n: NimNode; ctx: ParseCtx; discarded: bool):
       for c in n: parts.add c
   of nnkCall, nnkPrefix:
     if n.len == 2 and routineMagic(n[0]) in lengthMagics: parts.add n[1]
-  else: discard
+  else: return  # k2: fail-closed: drPlain, the zero result: no dead read is claimed and the ordinary read stands
   if parts.len == 0: return (drPlain, @[], @[])
   for c in parts:
     if not cPure(c, ctx, derefs, checks): return (drPlain, @[], @[])
@@ -5170,7 +5170,7 @@ proc viewAddrLower(lv: NimNode; preamble: var seq[IRStmt];
             derefs.delete(i)
             break
       break
-    else: break
+    else: break  # k2: fail-closed: the walk to the location's top ends; the derefs it has not removed stay and decline through deadReadDecline
   ctx.indexCheckLower(checks, preamble)
   if derefs.len > 0: preamble.add ctx.deadReadDecline(derefs)
   true
@@ -5244,17 +5244,17 @@ proc resultReadIn(n: NimNode; live: seq[string] = @[]): bool =
   ## `result` this does not tell apart): anything but the left-hand side of
   ## an assignment to it or to a field path of it (`result.a = E`), and a
   ## read of a field path whose field the caller reads (`live`), counts.
-  case n.kind
-  of nnkSym, nnkIdent:
+  # Every other kind is read through its children (the conservative answer:
+  # a read of `result` anywhere below it counts).
+  if n.kind in {nnkSym, nnkIdent}:
     return n.strVal == "result"
-  of nnkAsgn, nnkFastAsgn:
+  if n.kind in {nnkAsgn, nnkFastAsgn}:
     if n.len == 2 and (isResultName(n[0]) or resultFieldTop(n[0]).len > 0):
       return resultReadIn(n[1], live)
-  of nnkDotExpr:
+  elif n.kind == nnkDotExpr:
     if live.len > 0 and resultFieldTop(n) in live: return false
-  of RoutineNodes:
+  elif n.kind in RoutineNodes:
     return true
-  else: discard
   for c in n:
     if resultReadIn(c, live): return true
   false
@@ -5427,20 +5427,20 @@ proc onlyDeadUses(n: NimNode; name: string; ru: ResultUse; depth = 3): bool =
   ## its list; `result = name` (or `result.f = name`) where the caller does
   ## not read that part (`ru`); a by-value actual whose formal its callee
   ## uses only so (`formalDeadIn`, `depth` calls deep). Any other occurrence,
-  ## one in a nested routine included, is live.
-  case n.kind
-  of nnkSym, nnkIdent:
+  ## one in a nested routine included, is live. Every other kind is read
+  ## through its children, each of which must be dead.
+  if n.kind in {nnkSym, nnkIdent}:
     return not eqIdent(n, name)
-  of RoutineNodes:
+  elif n.kind in RoutineNodes:
     return not namesName(n, name)
-  of nnkDiscardStmt:
+  elif n.kind == nnkDiscardStmt:
     if n.len == 1 and isNameOf(n[0], name): return true
-  of nnkAsgn, nnkFastAsgn:
+  elif n.kind in {nnkAsgn, nnkFastAsgn}:
     if n.len == 2 and isNameOf(n[1], name) and ru.dead:
       if isResultName(n[0]) and ru.live.len == 0: return true
       let top = resultFieldTop(n[0])
       if top.len > 0 and top notin ru.live: return true
-  of nnkStmtList, nnkStmtListExpr:
+  elif n.kind in {nnkStmtList, nnkStmtListExpr}:
     for k in 0 ..< n.len:
       let c = n[k]
       if c.kind in {nnkLetSection, nnkVarSection} and c.len == 1 and
@@ -5454,12 +5454,12 @@ proc onlyDeadUses(n: NimNode; name: string; ru: ResultUse; depth = 3): bool =
         continue
       if not onlyDeadUses(c, name, ru, depth): return false
     return true
-  of nnkLetSection, nnkVarSection:
+  elif n.kind in {nnkLetSection, nnkVarSection}:
     # A lone one: nothing after it names the local.
     if n.len == 1 and n[0].kind == nnkIdentDefs and n[0].len == 3 and
        n[0][0].kind in {nnkSym, nnkIdent} and isNameOf(n[0][2], name):
       return true
-  of nnkCall, nnkCommand:
+  elif n.kind in {nnkCall, nnkCommand}:
     if depth > 0 and userRoutineCall(n) and not isViewCall(n):
       for i in 1 ..< n.len:
         if isNameOf(n[i], name):
@@ -5468,7 +5468,6 @@ proc onlyDeadUses(n: NimNode; name: string; ru: ResultUse; depth = 3): bool =
         elif not onlyDeadUses(n[i], name, ru, depth):
           return false
       return true
-  else: discard
   for c in n:
     if not onlyDeadUses(c, name, ru, depth): return false
   true
@@ -13138,7 +13137,7 @@ proc parseCStringExpr(n: NimNode; preamble: var seq[IRStmt];
       let b = cstringOperand(n[2], preamble, ctx)
       return mkBinop(bAnd, mkBinop(bEq, cstrNonNil(a), cstrNonNil(b)),
                            mkBinop(bEq, cstrBytes(a), cstrBytes(b)))
-  else: discard
+  else: return nil  # k2: fail-closed: nil: the node is no cstring operation and the caller parses it as any expression
   nil
 
 proc cstringWriteDecline(n: NimNode; ctx: ParseCtx): IRStmt =

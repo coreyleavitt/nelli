@@ -39,14 +39,16 @@ proc builds*(): seq[Cfg] =
     ("checks-off+fwrapv", withBuild(false, true))]     # w3z_p2_fwrapv
 
 iterator allFacts*(): RoutineArithFacts =
-  ## readable x overflowOn x deviates x {"" , a row} x inherit
+  ## readable x overflowOn x deviates x {"" , a row} x overflowOff x inherit
   for readable in [false, true]:
     for on in [false, true]:
       for dev in [false, true]:
         for key in ["", rowKey]:
-          for inh in [false, true]:
-            yield RoutineArithFacts(readable: readable, overflowOn: on,
-              overflowDeviates: dev, overflowRowKey: key, inherit: inh)
+          for off in [false, true]:
+            for inh in [false, true]:
+              yield RoutineArithFacts(readable: readable, overflowOn: on,
+                overflowDeviates: dev, overflowRowKey: key, overflowOff: off,
+                inherit: inh)
 
 # ---- oracles: the current rules, transcribed -------------------------------
 
@@ -68,7 +70,15 @@ func refScope(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
   ## dsl_parser.nim:1598 `arithScopeFor(c, caller, inherit = false)`.
   if refWraps(b) and f.overflowOn and f.readable: asChecked
   elif f.overflowRowKey.len > 0 and not refWraps(b): asUnchecked
+  elif f.overflowOff and f.readable and not refWraps(b): asPushedOff  # int6-o
   else: asBuild
+
+func refRegimeOf(sc: ArithScope; b: BuildSemantics): Regime =
+  ## The regime a non-inherit scope walks under.
+  case sc
+  of asChecked: rgChecked
+  of asUnchecked, asPushedOff: rgUnchecked
+  else: (if refWraps(b): rgUnchecked else: rgChecked)
 
 func refStamp(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
   ## D1-F2: every routine body claims, and none by an inherit routine.
@@ -84,8 +94,7 @@ func refDecline(f: RoutineArithFacts; b: BuildSemantics): bool =
 func refParseChecked(f: RoutineArithFacts; b: BuildSemantics): bool =
   ## dsl_parser.nim:1662 `pushArithScope` (non-inherit) then :1614
   ## `overflowChecked`.
-  let sc = refScope(f, b)
-  (not refWraps(b) and sc != asUnchecked) or sc == asChecked
+  refRegimeOf(refScope(f, b), b) == rgChecked
 
 func refDefProfile(wraps: bool; b: BuildSemantics): DefProfile =
   ## runtime.nim:9372 `defProfile`.
@@ -138,6 +147,13 @@ proc checkLiterals*() =
   check stampFor(fx(true, false, true, rowKey), on).provenance == asUnchecked
   check stampFor(fx(true, false, true, rowKey, true), on).provenance == asInherit
   check decide(fx(true, false, true, ""), on).declineOverflow
+  # int6-o: a user routine read pushed off on every reading is no deviation
+  # (`overflowDeviates` false) and walks unchecked; unread, it is the build's
+  let po = RoutineArithFacts(readable: true, overflowOff: true)
+  check stampFor(po, on).provenance == asPushedOff
+  check not decide(po, on).declineOverflow
+  check stampFor(po, off).provenance == asBuild
+  check stampFor(RoutineArithFacts(overflowOff: true), on).provenance == asBuild
   check not decide(fx(true, false, true, rowKey), on).declineOverflow  # :1821 `not c.overflowModelled`
   check not decide(fx(false, false, true, ""), on).declineOverflow     # :1820 `c.why.len == 0`
   check not decide(fx(true, false, false, ""), on).declineOverflow     # an own-runtime routine: checks == {} (check_options.nim:955)
@@ -145,6 +161,7 @@ proc checkLiterals*() =
   check ord(asInherit) == 0
   check $asBuild == "asBuild" and $asChecked == "asChecked" and
         $asUnchecked == "asUnchecked" and $asInherit == "asInherit"
+  check $asPushedOff == "asPushedOff" and ord(asPushedOff) == ord(asUnchecked) + 1
 
 proc checkProfiles*() =
   for (nm, b) in builds():
@@ -183,7 +200,7 @@ proc checkFrames*() =
       check enterBody(w, s, b)
       let wraps = (case s.provenance
                    of asChecked: false
-                   of asUnchecked: true
+                   of asUnchecked, asPushedOff: true
                    else: refWraps(b))                    # runtime.nim:2189
       check (w.regime == rgUnchecked) == wraps
       for ac in ArithCheck:
@@ -211,12 +228,12 @@ proc checkFrames*() =
         p.leave
         check p.regime == buildRegime(b)
     # P2 (dsl_parser.nim:21807): the iterator is compiled under the caller's
-    # scope or declines, in a build that wraps; agrees (:21801) needs the
-    # overflow checks to be the build's
+    # scope or declines, in either build (int6-o: a build that checks holds
+    # unchecked regions too); agrees (:21801) needs the overflow checks to be
+    # the build's
     for f in allFacts():
       for caller in [rgChecked, rgUnchecked]:
-        let sameScope = (not refWraps(b)) or
-          ((if refScope(f, b) == asChecked: rgChecked else: rgUnchecked) == caller)
+        let sameScope = refRegimeOf(refScope(f, b), b) == caller
         let agrees = f.readable and (not f.overflowDeviates or refWraps(b))
         check inlinableIterator(f, caller, b) == (agrees and sameScope)
 

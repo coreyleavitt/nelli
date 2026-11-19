@@ -1381,8 +1381,22 @@ const renderAsChoicesVersion* = "12"
   ##   takes the build's, and its operand the caller's. Key bytes change:
   ##   every routine body carries `@on{...}:` in every build, and those
   ##   stores gain a block (their operand a `let`).
+  ## - RFC-0016 int6-o overflow regions (465->467; 466 is reserved by a
+  ##   sibling branch): `overflowChecks` belongs to the code region it was
+  ##   compiled under, as the four checks above do. A user routine whose
+  ##   position turns the build's overflow checks off on every reading
+  ##   (`push overflowChecks: off`, `checks: off`) is walked unchecked, as a
+  ##   `--overflowChecks:off` build is (`asPushedOff`: an `ubSignedOverflow`
+  ##   halt, a defined wrap at 8 and 16 bits or under `-fwrapv`), instead of
+  ##   declining `feOverflowCheckOption`; its caller and its callees keep
+  ##   their own. An overflow pragma inside a routine's own definition, or a
+  ##   position both pushed on and off in a build with overflow checks off,
+  ##   declines `feCheckOption`. System's integer `*=` is walked as system's
+  ##   routine (the build's arithmetic), as its range store was. Key bytes
+  ##   change: such a body renders `@asPushedOff:`, and an integer `*=`
+  ##   gains a block (its operand a `let`).
 
-const symexWalkerVersion* = "465"
+const symexWalkerVersion* = "467"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

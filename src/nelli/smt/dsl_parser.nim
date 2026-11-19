@@ -930,6 +930,7 @@ proc emitArithFacts(f: RoutineArithFacts): NimNode =
     newTree(nnkExprColonExpr, ident"overflowOn", newLit(f.overflowOn)),
     newTree(nnkExprColonExpr, ident"overflowDeviates", newLit(f.overflowDeviates)),
     newTree(nnkExprColonExpr, ident"overflowRowKey", newLit(f.overflowRowKey)),
+    newTree(nnkExprColonExpr, ident"overflowOff", newLit(f.overflowOff)),
     newTree(nnkExprColonExpr, ident"inherit", newLit(f.inherit)))
 
 proc emitStmt*(s: IRStmt): NimNode =
@@ -1774,6 +1775,7 @@ func arithFacts(c: RoutineChecks; inherit = false): RoutineArithFacts =
     overflowDeviates: coOverflow in c.checks,
     overflowRowKey: (if c.overflowModelled: c.overflowRow.cell.key
                      else: noRowKey),
+    overflowOff: coOverflow in c.offModelled,
     inherit: inherit)
 
 func overflowChecked(ctx: ParseCtx): bool =
@@ -7353,9 +7355,18 @@ proc augFloatRangeStore(n: NimNode; ty: IRType; v: IRExpr): IRExpr =
   else: mkFloatRangeCheck(v, fr)
 
 proc augIsSystemStore(n: NimNode; ty: IRType): bool =
-  ## RFC-0016 int6. Whether `n` (`x op= y`) stores into a float range of type
-  ## `ty` through system's routine (`augFloatRangeStore` converts there).
-  floatRangeOf(ty) != nil and augStoresThroughRange(n[0])
+  ## RFC-0016 int6. Whether `n` (`x op= y`) is walked as system's routine
+  ## (`systemStoreScope`): a store into a float range of type `ty` through
+  ## system's routine (`augFloatRangeStore` converts there), or, int6-o, an
+  ## integer `*=`. System's integer `*=` is an `inline` routine, `x = x * y`,
+  ## compiled under the build's options, so its product overflows as the
+  ## build's arithmetic does, whatever the caller pushed (probed: under `push
+  ## overflowChecks: off` in a checked build, `x *= 2` at `high(int)` raises
+  ## `OverflowDefect`). `+=` and `-=` are the `Inc` and `Dec` magics, expanded
+  ## at the call under the caller's options (probed: the same push wraps
+  ## `x += 1`), and are not routed here.
+  (floatRangeOf(ty) != nil and augStoresThroughRange(n[0])) or
+    (ty.kind == itInt and n[0].kind == nnkSym and n[0].strVal == "*=")
 
 proc hoistAugOperand(n: NimNode; rhsIR: IRExpr; preamble: var seq[IRStmt];
                      ctx: ParseCtx): IRExpr =

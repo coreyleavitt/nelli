@@ -2678,6 +2678,14 @@ proc pinCrashSelf*(key: CellKey; form: string; expect: CrashExpect;
     native: "rc=" & $rc & " expected=" & $expect,
     flags: @["self"]))
 
+proc runCrashForm*(form: string): tuple[rc: int, output: string,
+                                       timedOut: bool] =
+  ## Runs this test binary as a child on `form` (`crashForms`), as
+  ## `pinCrashSelf` does, and returns its exit, for a probe whose answer is
+  ## either way (RFC-0016 INT-89's MSVC `/Od` probe). A form that returns
+  ## exits 0 and prints `NELLI_CRASH_FORM_RETURNED`.
+  runCrashChild(getAppFilename(), [crashFormArg & form])
+
 proc skipCell*(key: CellKey; why: string) =
   ## Not run on this build, and why. K2a's census fails a bare `skip(`.
   writePinRecord(PinRecord(testFile: appTestFile(),

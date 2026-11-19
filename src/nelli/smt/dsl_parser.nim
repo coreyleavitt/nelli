@@ -1558,6 +1558,16 @@ type
                                    ## parsed is such a callee: `result =
                                    ## <location>` reads nothing the address
                                    ## does not (`viewAddrLower`).
+    viewDeadCall*: bool
+                                   ## RFC-0016 INT-89. `viewAddrCall`'s value
+                                   ## is copied into a dead local: the read
+                                   ## of the location is the C optimiser's
+                                   ## (`-O0` loads it, `-O2` drops it).
+    resultDead*: bool
+                                   ## RFC-0016 INT-89. The routine being
+                                   ## parsed is such a callee (`#viewdead`):
+                                   ## a nil pointer the location is offset
+                                   ## from declines as well.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ## `procScoped`'s fields (`ProcScopedCollectors`, round-6 R4: `seq[NimNode]`
@@ -4883,14 +4893,25 @@ proc isViewCall(n: NimNode): bool =
   n.kind in {nnkCall, nnkCommand} and n.len > 0 and
     (n.typeKind == ntyVar or typeIsLent(n.getTypeInst))
 
-proc viewCallLower(ctx: ParseCtx; deref: NimNode; preamble: var seq[IRStmt]) =
-  ## RFC-0016 INT-89. `deref` is `HiddenDeref(<view call>)` whose value
-  ## nothing reads: the call, its callee computing only the address.
-  let call = deref[0]
+proc viewAddrExpr(ctx: ParseCtx; call: NimNode; preamble: var seq[IRStmt];
+                  dead = false): IRExpr =
+  ## RFC-0016 INT-89. The view call `call`, its callee computing only the
+  ## address it returns (`#viewaddr`), or, `dead`, an address whose
+  ## location a dead C local then loads (`#viewdead`). The value is a zero
+  ## nothing reads.
   let saved = ctx.viewAddrCall
+  let savedDead = ctx.viewDeadCall
   ctx.viewAddrCall = call
-  let v = parseExpr(call, preamble, ctx)
+  ctx.viewDeadCall = dead
+  result = parseExpr(call, preamble, ctx)
   ctx.viewAddrCall = saved
+  ctx.viewDeadCall = savedDead
+
+proc viewCallLower(ctx: ParseCtx; deref: NimNode; preamble: var seq[IRStmt];
+                   dead = false) =
+  ## RFC-0016 INT-89. `deref` is `HiddenDeref(<view call>)` whose value
+  ## nothing reads (or, `dead`, a dead local's: `viewAddrExpr`).
+  let v = ctx.viewAddrExpr(deref[0], preamble, dead)
   if v != nil:
     preamble.add mkLet(freshSynth(ctx, "viewSink"), classifyType(deref).ty, v)
 
@@ -4899,11 +4920,12 @@ proc viewAddrLower(lv: NimNode; preamble: var seq[IRStmt];
   ## RFC-0016 INT-89. The address of the location `lv` (`result = lv` of a
   ## view callee under `resultAddrOnly`): its index checks, and a nil guard
   ## on each pointer it loads, but not the location's own pointer, which is
-  ## only addressed. False for a shape this does not read (the ordinary read
-  ## stands).
+  ## only addressed (under `resultDead` that one too: the dead local's load
+  ## of it is the optimiser's). False for a shape this does not read (the
+  ## ordinary read stands).
   if lv.kind in {nnkHiddenDeref, nnkDerefExpr} and lv.len == 1 and
      isViewCall(lv[0]):
-    ctx.viewCallLower(lv, preamble)
+    ctx.viewCallLower(lv, preamble, ctx.resultDead)
     return true
   var derefs, checks: seq[NimNode]
   if not cPure(lv, ctx, derefs, checks): return false
@@ -4918,7 +4940,7 @@ proc viewAddrLower(lv: NimNode; preamble: var seq[IRStmt];
       if tk != ntyArray: break
       top = top[0]
     of nnkDerefExpr, nnkHiddenDeref:
-      if top[0].typeKind in {ntyRef, ntyPtr}:
+      if top[0].typeKind in {ntyRef, ntyPtr} and not ctx.resultDead:
         for i in 0 ..< derefs.len:
           if derefs[i] == top[0]:
             derefs.delete(i)
@@ -9769,7 +9791,7 @@ proc arrayFormalActualDecline(n: NimNode; i: int): string =
   "`" & bare.repr & "` is a part of a location the walk passes as a copy"
 
 proc byValueWritten(n, a, calleeSym: NimNode; k: int;
-                    outer: seq[NimNode]): string =
+                    outer: seq[NimNode]; addrOnly = false): string =
   ## RFC-0005 S8cq. Why the call `n` is not known to leave alone the memory its
   ## by-value actual `a` (the `k`th) shares, or "" when the walk's copy is right.
   ## The rule is inverted from naming what can go wrong (batch 9's list of types,
@@ -9814,7 +9836,9 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
   # as the actual's location (`addrTakenArrayFormal`), not a copy; an actual
   # it cannot be passed so declines at the call (`arrayFormalActualDecline`).
   if addrTakenArrayFormal(impl, k): return ""
-  if typeIsLent(impl[3][0]): return "a `lent` result"
+  # RFC-0016 INT-89: the address of a view call nothing reads through
+  # (`addrOnly`, `#viewaddr`) holds no memory past the call.
+  if not addrOnly and typeIsLent(impl[3][0]): return "a `lent` result"
   var acc = OpaqueEffects(inert: true, writesOnly: true)
   var seen, stack: seq[NimNode]
   scanOpaqueEffects(calleeSym, acc, seen, stack)
@@ -9847,7 +9871,10 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
     # RFC-0016 S8ch: an array formal whose address the callee takes is the
     # actual's location (`addrTakenArrayFormal`): not a copy that address
     # could escape from.
-    if formalAddressTaken(impl, addrTakenArrayFormalNames(impl)):
+    # RFC-0016 INT-89: a `ref`/`ptr` formal is the callee's own copy of
+    # the pointer, and a view call's address (`addrOnly`) is read by no one.
+    if formalAddressTaken(impl, addrTakenArrayFormalNames(impl)) and
+       not (addrOnly and bare.typeKind in {ntyRef, ntyPtr}):
       return "a formal whose address the callee takes"
     for j in 1 ..< n.len:
       if n[j].typeKind == ntyProc: return "a routine passed in the same call"
@@ -9939,6 +9966,21 @@ proc seqViewElems(n: NimNode; i: int): seq[int] =
     if lvalueRoot(lv, hs) != nil and seqViewPeer(n, j, lv, hs).arg == i:
       result.add j
 
+proc bareViewActuals(n0, calleeSym: NimNode): NimNode =
+  ## RFC-0016 INT-89. `n0` with each `var` formal's actual of the shape
+  ## `HiddenAddr(HiddenDeref(<view call>))` replaced by the call, or `n0`
+  ## itself when there is none. Shallow: every other node is `n0`'s.
+  result = n0
+  for i in 1 ..< n0.len:
+    let a = n0[i]
+    if a.kind == nnkHiddenAddr and a.len == 1 and
+       a[0].kind in {nnkHiddenDeref, nnkDerefExpr} and a[0].len == 1 and
+       isViewCall(a[0][0]) and formalIsVar(calleeSym, i - 1):
+      if result == n0:
+        result = copyNimNode(n0)
+        for c in n0: result.add c
+      result[i] = a[0][0]
+
 proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
@@ -9989,7 +10031,10 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
   ## written back over the viewed elements of the storage in the same
   ## `finally` (an openArray's length never changes), under the gates of a
   ## `var` actual's write-back.
-  var n = varSeqViews(n0)   # RFC-0005 S8br: and its hoisted index calls
+  # RFC-0016 INT-89: a view call handed to a `var` formal is the address it
+  # returns; the C++ backend spells it `HiddenAddr(HiddenDeref(<call>))`,
+  # the C one the bare call: one shape for both (`viewAddrExpr` below).
+  var n = varSeqViews(bareViewActuals(n0, calleeSym))
   var argIRs: seq[IRExpr]
   var byRefs: seq[ByRefSub]   ## RFC-0005 S8ba
   var writeBacks: seq[IRStmt]
@@ -10068,7 +10113,9 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                     "feUnsupportedOp)"),
             "array argument whose formal's address the callee takes " &
             "(feUnsupportedOp)")
-      let why = byValueWritten(n, n[i], calleeSym, i - 1, outerOf())
+      let why = byValueWritten(n, n[i], calleeSym, i - 1, outerOf(),
+                               addrOnly = ctx.viewAddrCall != nil and
+                                          n0 == ctx.viewAddrCall)
       if why.len > 0:
         # Before the call: a target in the body would otherwise be reached
         # on the copy, ahead of a marker placed after it.
@@ -10353,7 +10400,13 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       argIRs.add(if dummy != nil: dummy else: mkIntLit(0))
       continue
     let irLo = preamble.len
-    var ir = parseExpr(n[i], preamble, ctx)
+    # RFC-0016 INT-89: a view call handed straight to a `var` formal passes
+    # the address it returns, not the location's value (`noRead(varN(nil))`
+    # loads nothing natively); the write-back decline below follows.
+    let viewActual = n[i].kind in {nnkCall, nnkCommand} and
+                     isViewCall(n[i]) and formalIsVar(calleeSym, i - 1)
+    var ir = if viewActual: ctx.viewAddrExpr(n[i], preamble)
+             else: parseExpr(n[i], preamble, ctx)
     let irHi = preamble.len
     # RFC-0005 S8bz (item 3): a `var` actual's copy-in observes nothing; the
     # callee's read of its formal does (`glWatched`).
@@ -22813,6 +22866,16 @@ proc parseStmtInner(n: NimNode,
         # RFC-0016 INT-89: its index checks run first, under every build.
         ctx.indexCheckLower(dead.checks, preamble)
         return ctx.deadReadDecline(dead.derefs)
+      # RFC-0016 INT-89: a view call's location copied into it is loaded at
+      # `-O0` and dropped at `-O2`: the callee computes the address, and a
+      # nil pointer on it declines (`#viewdead`).
+      let ini = n[0][2]
+      if ini.kind in {nnkHiddenDeref, nnkDerefExpr} and ini.len == 1 and
+         isViewCall(ini[0]):
+        var pre: seq[IRStmt]
+        ctx.viewCallLower(ini, pre, dead = true)
+        preamble.add pre
+        return mkBlock(@[])
     var stmts: seq[IRStmt]
     for id0 in n:
       id0.expectKind nnkIdentDefs
@@ -24477,7 +24540,8 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # address it returns (`viewResultLower`), under a key of its own.
   let viewAddr = ctx.viewAddrCall != nil and callSite != nil and
                  callSite == ctx.viewAddrCall
-  if viewAddr: key.add "#viewaddr"
+  let viewDead = viewAddr and ctx.viewDeadCall
+  if viewAddr: key.add(if viewDead: "#viewdead" else: "#viewaddr")
   if key in ctx.procs or key in ctx.parsing:
     return key  ## already known, or actively being parsed (mutual-recursion)
   # Phase 15 G6 / RFC-0005 S8 (§2.5 point 3). A stdlib-concept violation is
@@ -24591,13 +24655,19 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   swap(savedViews, borrowBaseViews)
   let savedViewCall = ctx.viewAddrCall
   let savedAddrOnly = ctx.resultAddrOnly
+  let savedDead = ctx.resultDead
+  let savedDeadCall = ctx.viewDeadCall
   ctx.viewAddrCall = nil
+  ctx.viewDeadCall = false
   ctx.resultAddrOnly = viewAddr
+  ctx.resultDead = viewDead
   var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil, byRef)
   ctx.viewAddrCall = savedViewCall
   ctx.resultAddrOnly = savedAddrOnly
+  ctx.resultDead = savedDead
+  ctx.viewDeadCall = savedDeadCall
   swap(savedViews, borrowBaseViews)
   sig.captures = captures
   # RFC-0005 S8ba: each by-reference formal's slot holds the ref its lvalue

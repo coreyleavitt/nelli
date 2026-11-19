@@ -28,6 +28,32 @@
 ##    optimiser's (`-O0` faults, `-O2` returns): out of range raises, in range
 ##    declines.
 ## Found probing INT-86's class (K9d-12).
+##
+## 3. (INT-89's remnants, walker 450) A view handed on WITHOUT the hidden
+##    address wrapper. `lent` is emitted as `var` is (`NI* lentN(...)`
+##    returns `&(*p).n`; a 64-word object's `lent` too: an address, never a
+##    copy). Natively, through a nil `ref` (gcc and g++, c and cpp; the
+##    default build, `-d:release`, `-d:danger`):
+##      * returns at every level: `discard fwdV(nil)` and `discard
+##        fwdL(nil)` (a view of a view), `discard lentN(nil)`,
+##        `noRead(varN(nil))` and `discard noReadRet(varN(nil))` (a `var`
+##        formal takes the address), `let a = addr varN(nil)`, `discard
+##        addr varN(nil)`, `discard unsafeAddr lentN(nil)`;
+##      * faults at every level: `varN(nil).inc`, `varN(nil) = 3`,
+##        `swap(varN(nil), y)`, a used `doRead(varN(nil))`, a used
+##        `lentN(nil)`;
+##      * the optimiser's (faults at `-O0`, returns at `-O2`): an unused
+##        `let x = varN(nil)` / `lentN(nil)`, `discard doRead(varN(nil))`
+##        (the callee's read is dead once inlined), `noReadL(lentN(nil))`.
+##    The walker: a view of a view and a discarded `lent` are the address
+##    (`#viewaddr`); a dead local's copy is the optimiser's (`#viewdead`, a
+##    nil on the location declines); a view handed to a `var` formal is its
+##    address, then the call declines (the write-back is not modelled), so
+##    the callee's read or not is never claimed; the rest decline by name.
+## 4. MSVC: whether `cl` at `/Od` (Nim's default build under `--cc:vcc`)
+##    also drops `(void)((*p).n);` and `(void)(*T1_);` is asked of this
+##    binary on the `fuzzer-msvc` walker leg (a form run in a child that must
+##    return); no local route runs `cl`.
 import std/[unittest, strutils]
 import nelli/symex
 import ./s8cu_helpers
@@ -43,6 +69,12 @@ proc varN(p: ref B): var int = p.n
 proc lentN(p: ref B): lent int = p.n
 proc varQ(p: ref B): var int = p.q.n
 proc varA(p: ref A; i: int): var int = p.arr[i]
+proc fwdV(p: ref B): var int = varN(p)
+proc fwdL(p: ref B): lent int = lentN(p)
+proc noRead(x: var int) = discard
+proc doRead(x: var int): int = x
+proc noReadRet(x: var int): var int = x
+proc noReadL(x: int) = discard
 
 proc discardVar(p: ref B) =
   if p == nil:
@@ -84,11 +116,102 @@ proc deadArrIdxIn(p: ref A; i: int) =
     let x = p.arr[i]
     symexTarget("after")
 
+proc discardFwd(p: ref B) =
+  if p == nil:
+    discard fwdV(p)
+    symexTarget("after")
+
+proc discardFwdL(p: ref B) =
+  if p == nil:
+    discard fwdL(p)
+    symexTarget("after")
+
+proc varArgNoRead(p: ref B) =
+  if p == nil:
+    noRead(varN(p))
+    symexTarget("after")
+
+proc varArgNoReadRet(p: ref B) =
+  if p == nil:
+    discard noReadRet(varN(p))
+    symexTarget("after")
+
+proc varArgRead(p: ref B) =
+  if p == nil:
+    if doRead(varN(p)) == 7: symexTarget("seven")
+    symexTarget("after")
+
+proc varArgReadDiscard(p: ref B) =
+  if p == nil:
+    discard doRead(varN(p))
+    symexTarget("after")
+
+proc addrOfVar(p: ref B) =
+  if p == nil:
+    let a = addr varN(p)
+    symexTarget("after")
+
+proc incVar(p: ref B) =
+  if p == nil:
+    varN(p).inc
+    symexTarget("after")
+
+proc storeVar(p: ref B) =
+  if p == nil:
+    varN(p) = 3
+    symexTarget("after")
+
+proc usedLent(p: ref B) =
+  if p == nil:
+    if lentN(p) == 7: symexTarget("seven")
+    symexTarget("after")
+
+proc lentByValue(p: ref B) =
+  if p == nil:
+    noReadL(lentN(p))
+    symexTarget("after")
+
+proc deadVar(p: ref B) =
+  if p == nil:
+    let x = varN(p)
+    symexTarget("after")
+
+proc deadLent(p: ref B) =
+  if p == nil:
+    let x = lentN(p)
+    symexTarget("after")
+
+proc deadVarSome(p: ref B) =
+  if p != nil:
+    let x = varN(p)
+    symexTarget("after")
+
+proc discardLentSome(p: ref B) =
+  if p != nil:
+    discard lentN(p)
+    symexTarget("after")
+
+# MSVC `/Od` probe forms (every one returns on gcc and g++ at every level).
+proc msvcField(p: ref B) = discard p.n
+proc msvcDeref(p: ref B) = discard p[]
+
 crashForms:
   case crashForm()
   of "keptVar": discard keptVar(nil)
   of "discardVarLoad": discardVarLoad(nil)
   of "deadArrIdx": deadArrIdx(nil, 1)
+  of "varArgRead": varArgRead(nil)
+  of "varArgReadDiscard": varArgReadDiscard(nil)
+  of "incVar": incVar(nil)
+  of "storeVar": storeVar(nil)
+  of "usedLent": usedLent(nil)
+  of "lentByValue": lentByValue(nil)
+  of "deadVar": deadVar(nil)
+  of "deadLent": deadLent(nil)
+  of "msvcField": msvcField(nil)
+  of "msvcDeref": msvcDeref(nil)
+  of "msvcVar": discardVar(nil)
+  of "msvcLent": discardLent(nil)
   else: discard
 
 template keyOf(form: static string): CellKey =
@@ -107,11 +230,10 @@ suite "INT-89: a `var` result through nil is an address":
     check pinFind(discardVar, tLabel("after")).status == sxSat
     check pinFind(discardVar, tNilAccess()).status == sxUnsat
 
-  test "a `lent` result of the same shape still declines (the by-value rule)":
-    let a = symexFind(discardLent, tLabel("after"))
-    checkpoint $a.status
-    check a.status == sxUnknown
-    check a.errors.named(feUnsupportedOp)
+  test "a `lent` result of the same shape is an address too":
+    check pinFind(discardLent, tLabel("after")).status == sxSat
+    check pinFind(discardLent, tNilAccess()).status == sxUnsat
+    check pinFind(discardLentSome, tLabel("after")).status == sxSat
 
   test "the copied result is still a nil-access claim":
     check symexFind(keptVar, tNilAccess()).status == sxRaised
@@ -170,6 +292,81 @@ suite "INT-89: a discarded array element at a variable index through nil":
       check r.status == sxUnknown
       check r.errors.named(feUnsupportedOp)
 
+template declinesOn(f: untyped; t: static SymexTarget) =
+  block:
+    let r = symexFind(f, t)
+    checkpoint astToStr(f) & " " & $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.named(feUnsupportedOp)
+
+template declines(f: untyped) =
+  ## Both the label and the nil access: a named decline.
+  declinesOn(f, tLabel("after"))
+  declinesOn(f, tNilAccess())
+
+suite "INT-89: a view handed on without the address wrapper":
+  test "natively: an address handed on reads nothing":
+    check nativeRun(discardFwd(nil)).hitsTarget(tLabel("after"))
+    check nativeRun(discardFwdL(nil)).hitsTarget(tLabel("after"))
+    check nativeRun(varArgNoRead(nil)).hitsTarget(tLabel("after"))
+    check nativeRun(varArgNoReadRet(nil)).hitsTarget(tLabel("after"))
+    check nativeRun(addrOfVar(nil)).hitsTarget(tLabel("after"))
+
+  test "a view of a view is the address":
+    check pinFind(discardFwd, tLabel("after")).status == sxSat
+    check pinFind(discardFwd, tNilAccess()).status == sxUnsat
+    check pinFind(discardFwdL, tLabel("after")).status == sxSat
+    check pinFind(discardFwdL, tNilAccess()).status == sxUnsat
+
+  test "a view handed to a `var` formal is its address; the call declines":
+    # Natively the callee's own read decides: none returns at every level, a
+    # used one faults at every level, a discarded one is the optimiser's.
+    pinCrashSelf(keyOf("varArgRead"), "varArgRead", ceSegv)
+    pinCrashSelf(keyOf("varArgReadDiscard"), "varArgReadDiscard", ceSegv)
+    declines(varArgNoRead)
+    declines(varArgNoReadRet)
+    declines(varArgRead)
+    declines(varArgReadDiscard)
+
+  test "a dead local's copy of a view is the optimiser's: nil declines":
+    pinCrashSelf(keyOf("deadVar"), "deadVar", ceSegv)
+    pinCrashSelf(keyOf("deadLent"), "deadLent", ceSegv)
+    declines(deadVar)
+    declines(deadLent)
+    check pinFind(deadVarSome, tLabel("after")).status == sxSat
+
+  test "a write, a used `lent` and the rest decline or claim, never falsely":
+    pinCrashSelf(keyOf("incVar"), "incVar", ceSegv)
+    pinCrashSelf(keyOf("storeVar"), "storeVar", ceSegv)
+    pinCrashSelf(keyOf("usedLent"), "usedLent", ceSegv)
+    pinCrashSelf(keyOf("lentByValue"), "lentByValue", ceSegv)
+    declines(incVar)
+    declines(usedLent)
+    declines(lentByValue)
+    let s = symexFind(storeVar, tNilAccess())
+    checkpoint $s.status & " " & show(s.errors)
+    # A store through a view call is not modelled: a named decline.
+    check s.status == sxUnknown
+    check s.errors.named(feUnsupportedStmtKind)
+    let a = symexFind(addrOfVar, tLabel("after"))
+    checkpoint $a.status & " " & show(a.errors)
+    check a.status == sxUnknown
+
+suite "INT-89: the C compiler drops a discarded read at the build's level":
+  # The INT-86 table's never-read class rests on the C compiler dropping
+  # `(void)((*p).n);` and `(void)(*T1_);`. Established on gcc and g++; on the
+  # `fuzzer-msvc` walker leg this asks `cl` at `/Od` (Nim's default build
+  # under `--cc:vcc` passes no `/O`). A fault there makes the class
+  # compiler-dependent.
+  test "each discarded read through nil returns in a child":
+    for form in ["msvcField", "msvcDeref", "msvcVar", "msvcLent"]:
+      let r = runCrashForm(form)
+      checkpoint form & ": rc=" & $r.rc & " timedOut=" & $r.timedOut &
+                 "\n" & r.output
+      check not r.timedOut
+      check r.rc == 0
+      check "NELLI_CRASH_FORM_RETURNED" in r.output
+
 suite "INT-89: the walker's version":
   test "floor":
-    check parseInt(symexWalkerVersion) >= 449
+    check parseInt(symexWalkerVersion) >= 450

@@ -1290,7 +1290,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## wrapper, a discarded `lent`; provisional): 449->450.
     ## RFC-0016 INT-92 (a nil read a call leaves dead is the optimiser's; 451
     ## reserved; provisional): 450->452.
-    check symexWalkerVersion == "452"
+    ## RFC-0016 INT-92 remaining shapes (a dead value through a local, a
+    ## forwarded call, a formal, a field; provisional): 452->453.
+    check symexWalkerVersion == "453"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

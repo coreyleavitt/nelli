@@ -899,8 +899,15 @@ const renderAsChoicesVersion* = "12"
   ##   was a false `sxRaised(NilAccessDefect)`: `-O0` faults, `-O2`
   ##   returns). A by-value actual whose formal the callee never names is
   ##   dead the same way (`noReadL(p.n)`). No key bytes change.
+  ## - RFC-0016 INT-92 remaining shapes (452->453, provisional): a value is
+  ##   dead when every place it reaches is (`onlyDeadUses`): a `discard`, a
+  ##   local whose own uses are dead, a by-value formal its callee uses only
+  ##   so, a part of `result` the caller does not read (the whole, or an
+  ##   object's other fields: `#resultdead:<f>`), and a call forwarded into
+  ##   such a result. Each was a false `sxRaised(NilAccessDefect)` (`-O0`
+  ##   faults, `-O2` returns); a nil there now declines. No key bytes change.
 
-const symexWalkerVersion* = "452"
+const symexWalkerVersion* = "453"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

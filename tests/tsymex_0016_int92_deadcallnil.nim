@@ -35,6 +35,44 @@
 ## never reads `result`, a `result = E` (or `return E`, or the expression
 ## body) of a pure `E` through a `ref`/`ptr` is that dead read. A by-value
 ## actual whose formal the callee never names is one too.
+##
+## The remaining shapes (second table; same toolchains and builds): a dead
+## value through a local, a dead result forwarded through a further call, a
+## formal the callee uses only in a dead way, a field of an object `result`.
+##
+## ==========================================  =========  ===========
+## form                                        default    -d:release
+## ==========================================  =========  ===========
+## `discard rdLocal(p)` (`let v = p.n;         SIGSEGV    returns
+## result = v`)
+## `discard rdLocalRet(p)` (`let v = p.n; v`)  SIGSEGV    returns
+## `localUnused(p)` (`let v = p.n` unused)     SIGSEGV    returns
+## `discard outerRd(p)` (`= rd(p)`)            SIGSEGV    returns
+## `discard outerRdAsgn(p)` (`result =         SIGSEGV    returns
+## rd(p)`)
+## `discard outerLocal(p)` (`let v = rd(p);    SIGSEGV    returns
+## result = v`)
+## unused `let x = outerRd(p)`                 SIGSEGV    returns
+## `discFormal(p.n)` (`discard x`)             SIGSEGV    returns
+## `letFormal(p.n)` (`let y = x` unused)       SIGSEGV    returns
+## `discard mkR(p)` (`result.a = p.n`)         SIGSEGV    returns
+## `mkR2(p).b == 1` (`result.a = p.n;          SIGSEGV    returns
+## result.b = 1`)
+## `outerRd(p) > 0` (used)                     SIGSEGV    SIGSEGV
+## `rdLocal(p) > 0` (used)                     SIGSEGV    SIGSEGV
+## `discard rdLocalUse(p)` (branches on `v`)   SIGSEGV    SIGSEGV
+## `letFormalUse(p.n)` (`y` is stored)         SIGSEGV    SIGSEGV
+## `discard mkRUse(p)` (branches on            SIGSEGV    SIGSEGV
+## `result.a`)
+## `mkR(p).a == 1` (the field read)            SIGSEGV    SIGSEGV
+## ==========================================  =========  ===========
+##
+## One summary covers them (`onlyDeadUses`): a value is dead when every
+## place it reaches is: a `discard`, a local whose own uses are dead, a
+## by-value formal its callee uses only so, or a part of `result` the caller
+## does not read (the whole, or the other fields of an object result:
+## `#resultdead:<fields read>`); a call forwarded into such a result is a
+## call of whose value the same part is read.
 import std/[unittest, strutils]
 import nelli/symex
 import ./s8cu_helpers

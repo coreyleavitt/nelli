@@ -26,6 +26,12 @@ type
       ## RFC-0016 PRC-43. The compiler's `lib/` (`querySetting(libPath)`),
       ## which a `--lib:` override may put under any name; "" leaves only the
       ## spelled `/lib/...` patterns.
+    defines*: Table[string, bool]
+      ## RFC-0016 int6-a2. `defined(x)` as the compiler evaluated it at an
+      ## entry macro's call site (`check_options.symexResolveDefine`), by the
+      ## name as written. A name absent is undecided. A conditional symbol is
+      ## the same at every site of one compile, so the value read there is
+      ## the value the scanned module was compiled with.
 
 # Path text, with no file system behind it. Both separators, as the compiler
 # reports either on Windows.
@@ -91,6 +97,10 @@ type
     imports*: seq[string]     ## user modules it imports, as found on disk
     hiddenPops: seq[tuple[file: string, line: int]]
       ## a `{.pop.}` with no push the scan read: something unseen pushed
+    undecidedDefines*: seq[string]
+      ## RFC-0016 int6-a2. The names `x` of the `defined(x)` the scan could not
+      ## decide (absent from `SourceEnv.defines`) in a `when` that moves the
+      ## check state: deciding them may make a position exact.
 
   Scanner = object
     res: ModuleScan
@@ -222,26 +232,37 @@ proc applyPragma(sc: var Scanner; n: NimNode; depth = 0) =
       elif name in sc.users and depth < 16:
         applyPragma(sc, newTree(nnkPragma, sc.users[name]), depth + 1)
 
-proc decide(c: NimNode): int =
+proc decide(c: NimNode; defines: Table[string, bool];
+            atoms: var seq[string]): int =
   ## 1 true, 0 false, -1 undecided. A macro cannot evaluate `defined(x)` for a
-  ## name it only holds as text, so that is undecided.
+  ## name it only holds as text: it is decided where the call site evaluated
+  ## it (`defines`, RFC-0016 int6-a2), and otherwise undecided, its name added
+  ## to `atoms`. Only `defined` of a bare name, `not`, `and`, `or`, `true`,
+  ## `false` and the host comparisons below are decided: any other name (a
+  ## `const`, `declared(...)`) may resolve differently at another site.
   case c.kind
+  of nnkCall, nnkCommand:
+    if c.len == 2 and nameOf(c[0]) == "defined" and c[1].kind == nnkIdent:
+      let name = c[1].strVal
+      if name in defines: return (if defines[name]: 1 else: 0)
+      if name notin atoms: atoms.add name
+    -1
   of nnkIdent, nnkSym:
     case nameOf(c).toLowerAscii
     of "true": 1
     of "false": 0
     else: -1
   of nnkPar:
-    if c.len == 1: decide(c[0]) else: -1
+    if c.len == 1: decide(c[0], defines, atoms) else: -1
   of nnkPrefix:
     if c.len == 2 and nameOf(c[0]) == "not":
-      let d = decide(c[1])
+      let d = decide(c[1], defines, atoms)
       if d < 0: -1 else: 1 - d
     else: -1
   of nnkInfix:
     if c.len != 3: return -1
-    let a = decide(c[1])
-    let b = decide(c[2])
+    let a = decide(c[1], defines, atoms)
+    let b = decide(c[2], defines, atoms)
     case nameOf(c[0])
     of "and":
       if a == 0 or b == 0: 0 elif a == 1 and b == 1: 1 else: -1
@@ -562,10 +583,11 @@ proc recordImports(sc: var Scanner; n: NimNode) =
 proc walkWhen(sc: var Scanner; n: NimNode) =
   var alts: seq[NimNode]
   var exhaustive = false
+  var atoms: seq[string]
   for br in n:
     if br.kind in {nnkElifBranch, nnkElifExpr}:
       let text = br[0].repr
-      var d = decide(br[0])
+      var d = decide(br[0], sc.env.defines, atoms)
       if d < 0 and text in sc.assume:
         d = if sc.assume[text]: 1 else: 0
       elif d < 0 and movesState(br[1]) and text notin sc.forkConds:
@@ -578,6 +600,11 @@ proc walkWhen(sc: var Scanner; n: NimNode) =
     elif br.kind in {nnkElse, nnkElseExpr}:
       alts.add br[0]
       exhaustive = true
+  # RFC-0016 int6-a2: a name undecided where the `when` moves the check
+  # state, for the call site to decide (`undecidedDefines`).
+  if atoms.len > 0 and movesState(n):
+    for a in atoms:
+      if a notin sc.res.undecidedDefines: sc.res.undecidedDefines.add a
   if exhaustive and alts.len == 1:
     walk(sc, alts[0])
     return
@@ -721,6 +748,8 @@ proc scanModuleText*(path, text: string; env: SourceEnv): ModuleScan =
     result.visits.add w.res.visits
     result.everything = merge(result.everything, w.res.everything)
     result.importLeak.add w.res.importLeak
+    for a in w.res.undecidedDefines:
+      if a notin result.undecidedDefines: result.undecidedDefines.add a
     for i in w.res.imports:
       if i notin result.imports: result.imports.add i
     if result.unknown.len == 0: result.unknown = w.res.unknown

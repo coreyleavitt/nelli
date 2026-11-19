@@ -1442,7 +1442,8 @@ const renderAsChoicesVersion* = "12"
   ##   re-measured at 20,000. A walk the budget cut before spends less and
   ##   may now decide (the k9cg FilterIt shape's unroll 4: 141.4M units to
   ##   86.0M), so verdicts move. No key bytes change.
-  ## - RFC-0016 int6 l1 (472->475; 473-474 are reserved by wip/int6-a): a
+  ## - RFC-0016 int6 l1 (472->475; 473-474 were held for wip/int6-a, which
+  ##   integration renumbered to 476-477): a
   ##   routine a template or macro body spells is placed by the compiler
   ##   where the body is expanded, not on the line its name is written, so
   ##   int6-w's text guard read every such routine (a `{.dirty.}` template's,
@@ -1451,8 +1452,30 @@ const renderAsChoicesVersion* = "12"
   ##   position apart (`expandedAt`), as it already did not for a name a
   ##   macro made; a text that ends before the position still disagrees.
   ##   Verdicts move (`feCheckOption` to a walk). No key bytes change.
+  ## - RFC-0016 int6-a (475->476; bumped 472->473 on its branch): a stdlib
+  ##   routine whose module pushes
+  ##   `rangeChecks`, `boundChecks`, `fieldChecks` or `objChecks` off at its
+  ##   position on every reading (`system.nim`'s and `strutils.nim`'s
+  ##   `checks: off`), with no check pragma inside its definition, is walked
+  ##   under that scope, as a user routine is, instead of declining
+  ##   `feCheckOption`; its `overflowChecks` turned off so and modelled by no
+  ##   stdlib row are walked `asPushedOff`. Key bytes change: such a body's
+  ##   `@on{...}` scope and stamp, and its digest's `om=`.
+  ## - RFC-0016 int6-a2 (476->477; 473->474 on its branch): a check pragma
+  ##   under `when defined(x)`
+  ##   (`not`, `and`, `or` of such) at a position the walk reads is decided
+  ##   as compiled: the entry macro has its call site evaluate each `x` and
+  ##   expands again, where the position was read both ways and declined
+  ##   `feCheckOption` (float checks included). Key bytes change: such a
+  ##   body's scope, stamp and digest.
+  ##   RFC-0016 int6-a5 (also 477): a check push and pop inside a routine
+  ##   body is modelled as a region of its own, its statements walked under
+  ##   its check scope and arithmetic, where the routine declined
+  ##   `feCheckOption`; unbalanced shapes still decline, and the opaque
+  ##   defect scan reads such a body as unreadable. Key bytes change: such a
+  ##   body's region blocks, their scope and stamp.
 
-const symexWalkerVersion* = "475"
+const symexWalkerVersion* = "477"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

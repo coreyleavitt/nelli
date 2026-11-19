@@ -9,7 +9,8 @@
 ## exact and judged against the native run. Under `checks: off`
 ## the overflow push is modelled off too (int6-o), so the routine whose
 ## inner push turns the four back on raises as native does. A value that
-## is no literal and an undecided `when` still decline `feCheckOption`.
+## is no literal still declines `feCheckOption`; a `when` on `defined(x)` is
+## decided at the entry's call site (int6-a2).
 import std/[unittest, sets]
 import nelli
 import nelli/symex
@@ -205,11 +206,13 @@ suite "S8cu: when":
     check native(whenFalse(4)) == "FieldDefect"
     decides(whenFalse, sxRaised)
 
-  test "an undecided condition declines, whichever way it went":
+  test "a defined() condition is decided at the entry's call site":
+    # RFC-0016 int6-a2: the entry macro has its call site evaluate each
+    # `defined(x)` and expands again, so the push is read as compiled.
     check native(whenTaken(4)) == "hit"
-    pinDecline(whenTaken, declKey, feCheckOption)
+    writesExact(whenTaken)
     check native(whenNotTaken(4)) == "FieldDefect"
-    pinDecline(whenNotTaken, declKey, feCheckOption)
+    decides(whenNotTaken, sxRaised)
 
 suite "S8cu: not checks":
 

@@ -21,8 +21,10 @@
 ##     still raises `OverflowDefect`; `+=` is the `Inc` magic, expanded under
 ##     the caller's options, and wraps (`low(int)`);
 ##   * a push inside a routine body leaves it unchecked at some positions only
-##     (`innerOff(high(int))` is `-1`, no raise): neither setting, so it
-##     declines `feCheckOption` (it was walked checked).
+##     (`sutInnerOff(high(int))` raises nothing; `v + 1 > v` there is the
+##     undefined C comparison, folded to true by gcc): RFC-0016 int6-a5 walks
+##     that region unchecked, so its signed overflow halts as undefined (it
+##     declined `feCheckOption`, and before that was walked checked).
 ## Each was a whole-routine `feOverflowCheckOption` decline before (but the
 ## last, walked checked).
 
@@ -83,11 +85,10 @@ proc sutCallsUnder(v: int) =
   else: symexTarget("hit")
 
 proc sutInnerOff(v: int) =
-  var r: int
   {.push overflowChecks: off.}
-  r = v + 1
+  if v + 1 > v: discard
+  else: symexTarget("hit")
   {.pop.}
-  if r + v == -1: symexTarget("hit")
 
 proc nativeRaises(f: proc (v: int) {.nimcall.}; v: int): string =
   try:
@@ -169,10 +170,15 @@ suite "int6-o: an overflow-off region in a checked build":
     checkpoint show(x.errors)
     check x.status != sxRaised
 
-  test "a push inside a routine body declines, it is not read as checked":
-    check native(sutInnerOff(id(high(int)))) == "hit"
-    pinDecline(sutInnerOff, cellKey(faGeneric, "int6o_overflow/inner"),
-               feCheckOption)
+  test "a push inside a routine body is walked unchecked there (int6-a5)":
+    # Whether "hit" is reached is the C compiler's choice (gcc folds the
+    # comparison to true, MSVC wraps); both are legal for undefined
+    # behaviour, so only the absence of a raise is pinned.
+    let n = nativeRun(sutInnerOff(high(int)))
+    check n.raised == ""
+    pinDecline(sutInnerOff, cellKey(axDefinedness, "add/signed/pushOff/inner"),
+               ubSignedOverflow, excluding = {feOverflowCheckOption,
+                                              feCheckOption})
 
 suite "int6-o: walker version":
   test "walker version floor >= 467":

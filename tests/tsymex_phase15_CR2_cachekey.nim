@@ -1444,9 +1444,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 int6 D1d (a pruning check a kept model satisfies is not
     ## searched): 471->472.
     ## RFC-0016 int6 l1 (a routine a template or macro body spells is placed
-    ## where the body is expanded, not declined as moved; 473-474 reserved by
-    ## wip/int6-a): 472->475.
-    check symexWalkerVersion == "475"
+    ## where the body is expanded, not declined as moved): 472->475 (473 and
+    ## 474 were held for wip/int6-a, which integration renumbered to 476-477).
+    ## RFC-0016 int6-a (a stdlib routine under its module's push of range,
+    ## bound, field, object or overflow checks is walked under that scope
+    ## instead of declining `feCheckOption`): 475->476.
+    ## RFC-0016 int6-a2 (a check pragma under `when defined(x)` is decided at
+    ## the entry's call site): 476->477. RFC-0016 int6-a5 (also 477): a
+    ## check push and pop inside a routine body is modelled as a region of
+    ## its own (scope and arithmetic), where it declined `feCheckOption`.
+    check symexWalkerVersion == "477"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

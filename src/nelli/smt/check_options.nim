@@ -80,12 +80,47 @@ proc diskRead(p: string): string = staticRead(p)
 const configuredLibDir* = querySetting(libPath)
   ## RFC-0016 PRC-43. The compiler's `lib/`, under whatever name `--lib:` gave it.
 
+var resolvedDefines {.compileTime.}: Table[string, bool]
+  ## RFC-0016 int6-a2. `defined(x)` by name, as an entry macro's call site
+  ## evaluated it (`symexResolveDefine`): the scan's `SourceEnv.defines`.
+var askedDefines {.compileTime.}: seq[string]
+  ## Names a position the walk read was undecided on (`noteUndecided`), for
+  ## the entry macro to have its call site decide (`undecidedDefines`).
+var emittedDefines {.compileTime.}: seq[string]
+  ## Names an entry macro has already asked its call site for: never twice, so
+  ## a name the re-expansion did not resolve cannot re-enter forever.
+
 proc compileTimeEnv(): SourceEnv =
   ## The compiler's own view: the project's directories and search paths, and
   ## the compiler's file reader.
   SourceEnv(exists: diskExists, read: diskRead, anchor: anchored,
             searchPaths: querySettingSeq(searchPaths),
-            libDir: configuredLibDir)
+            libDir: configuredLibDir, defines: resolvedDefines)
+
+macro symexResolveDefine*(name: static string; value: static bool): untyped =
+  ## RFC-0016 int6-a2. Records `defined(name)` as the call site evaluated it
+  ## (`value`), before an entry macro expands again (`entry_parse`). The
+  ## scan reads a `when defined(name)` around a check pragma by it.
+  resolvedDefines[name] = value
+  newEmptyNode()
+
+proc undecidedDefines*(): seq[string] =
+  ## RFC-0016 int6-a2. The names an entry macro asks its call site to decide
+  ## before it expands again: undecided at a position the walk read, and not
+  ## asked before. Each is marked asked.
+  for a in askedDefines:
+    if a notin resolvedDefines and a notin emittedDefines:
+      result.add a
+      emittedDefines.add a
+
+proc noteUndecided(m: ModuleScan) =
+  for a in m.undecidedDefines:
+    if a notin resolvedDefines and a notin askedDefines: askedDefines.add a
+
+proc stale(m: ModuleScan): bool =
+  ## A scan read before a name it was undecided on was resolved.
+  for a in m.undecidedDefines:
+    if a in resolvedDefines: return true
 
 proc scanModuleText*(path, text: string): ModuleScan =
   ## The scan of a module whose text is at hand; an `include` is read from disk.
@@ -186,6 +221,13 @@ proc touchesFloat(n: NimNode): bool =
   touchesFloat(n, seen)
 
 var moduleScans {.compileTime.}: Table[string, ModuleScan]
+
+proc scanOf(key, raw: string): ModuleScan =
+  ## The scan of the module at `key`, read once, and again once a `defined`
+  ## it was undecided on is resolved (RFC-0016 int6-a2).
+  if key notin moduleScans or stale(moduleScans[key]):
+    moduleScans[key] = scanModule(raw)
+  moduleScans[key]
 var runLeaks {.compileTime.}: seq[tuple[root, name: string; opts: set[CheckOption]]]
 var runReach {.compileTime.}: Table[string, seq[string]]
   ## Per user importer and name: the modules the named one reaches by import,
@@ -208,8 +250,7 @@ proc reachOf(start: string): seq[string] =
     let key = normalPath(raw)
     if key in result: continue
     result.add key
-    if key notin moduleScans: moduleScans[key] = scanModule(raw)
-    for i in moduleScans[key].imports: queue.add i
+    for i in scanOf(key, raw).imports: queue.add i
 
 proc enterGraph(startRaw: string) =
   ## Every user module the import graph from `startRaw` reaches hands on what it
@@ -221,8 +262,7 @@ proc enterGraph(startRaw: string) =
     let key = normalPath(raw)
     if key in runSeen or isOwnRuntime(key) or isOwnSource(key): continue
     runSeen.add key
-    if key notin moduleScans: moduleScans[key] = scanModule(raw)
-    let m = moduleScans[key]
+    let m = scanOf(key, raw)
     if m.unknown.len > 0:
       if runUnknown.len == 0:
         runUnknown = "`" & raw.extractFilename & "`, which the program imports: " & m.unknown
@@ -288,8 +328,17 @@ type RoutineChecks* = object
     ## `coOverflow` its body is stamped `asPushedOff`), as the
     ## build route walks a build that has them off. They are not in `checks`.
     ## A position that may be either way keeps the option in `checks` and
-    ## declines; so does a stdlib module's push (the K4c delta, no row models
-    ## it).
+    ## declines. RFC-0016 int6-a: a stdlib module's push of the four checks
+    ## is modelled the same way (its body is walked under its own scope, as a
+    ## user routine's is), where its definition holds no check pragma of its
+    ## own; its `overflowChecks` stay the K4c delta's until
+    ## `applyStdlibDelta` finds no row models them (`overflowOffExact`).
+  overflowOffExact*: bool
+    ## RFC-0016 int6-a. A stdlib routine whose position turns the build's
+    ## `overflowChecks` off on every reading, with no importer's push reaching
+    ## it and no check pragma inside its definition. `coOverflow` stays in
+    ## `checks` here: the parser moves it to `offModelled` (`asPushedOff`)
+    ## only where no stdlib row models it (`overflowModelled`, `asUnchecked`).
   nanOn*, infOn*: bool
     ## RFC-0016 PRC-07 (float half). The routine's position was read and
     ## `nanChecks` (`infChecks`) is on there on every reading, from the build
@@ -302,6 +351,17 @@ type RoutineChecks* = object
     ## is on there on every reading (no `coOverflow` deviation): in a build
     ## whose own checks are off, a `push overflowChecks: on`. False wherever
     ## the position was not read (own runtime, `why`) or may be off.
+  bodyRegions*: bool
+    ## RFC-0016 int6-a5. The routine is a user module's: a `{.push ...}` /
+    ## `{.pop.}` pair of check options among its body's statements is walked
+    ## as a region of its own (the parser's `nnkPragma` arm, grouped by
+    ## `withCheckDeclines`). A stdlib or own-runtime routine's in-body push
+    ## stays the unsupported statement it was.
+  bodyPragmas*: bool
+    ## RFC-0016 int6-a5. The routine's definition, in the text the scan read,
+    ## holds a check pragma inside it: its body is not one scope. The walker
+    ## models it per region; a reader of the routine as one scope (the opaque
+    ## defect scan) reads it unreadable instead.
 
 const fourChecks = {coRange, coBound, coField, coObj}
 const scopedChecks = fourChecks + {coOverflow}
@@ -342,8 +402,54 @@ proc inRoutineChecks(n: NimNode; off, on: set[CheckOption]): string =
     let r = inRoutineChecks(c, off, on)
     if r.len > 0: return r
 
+proc lastLine(n: NimNode): int =
+  result = n.lineInfoObj.line
+  for c in n: result = max(result, lastLine(c))
+
+const hostKinds = {nnkProcDef, nnkFuncDef, nnkMethodDef, nnkIteratorDef,
+                   nnkConverterDef, nnkLambda, nnkDo}
+  ## RFC-0016 int6-a5. What a routine can be declared inside.
+
+proc pushesInBody(n: NimNode; root = true): bool =
+  ## A check pragma among `n`'s statements, a routine declared in it aside
+  ## (its pushes are its own).
+  if not root and n.kind in hostKinds: return false
+  if n.kind == nnkPragma and inRoutineChecks(n, allChecks, allChecks).len > 0:
+    return true
+  for c in n:
+    if pushesInBody(c, false): return true
+
+type PushHost = tuple[first, last: int; node: NimNode; name: string]
+
+var pushHosts {.compileTime.}: Table[string, seq[PushHost]]
+  ## RFC-0016 int6-a5. Per file read, the routines whose body pushes a check
+  ## option, with their line spans: computed once per file.
+
+proc collectHosts(n: NimNode; acc: var seq[PushHost]) =
+  if n.kind in hostKinds and n.len > 6 and pushesInBody(n[6]):
+    let name = if n.kind in {nnkLambda, nnkDo}: "an anonymous routine"
+               else: "`" & routineNameOf(n[0]) & "`"
+    acc.add (first: n.lineInfoObj.line, last: lastLine(n), node: n, name: name)
+  for c in n: collectHosts(c, acc)
+
+proc pushingHost(file: string; ast, def: NimNode; line: int): string =
+  ## RFC-0016 int6-a5. "" or the routine whose body pushes a check option and
+  ## holds the routine written at `line` (`def`, nil for a lambda). A routine
+  ## declared inside such a body takes the push's options where it stands,
+  ## which the scan of the module's statements never sees.
+  if file notin pushHosts:
+    var acc: seq[PushHost]
+    collectHosts(ast, acc)
+    pushHosts[file] = acc
+  for h in pushHosts[file]:
+    if h.node == def: continue
+    if h.node.kind in {nnkLambda, nnkDo} and h.first == line: continue
+    if h.first <= line and line <= h.last:
+      return h.name & " (line " & $h.first & ")"
+
 proc positionUnreadable(impl: NimNode; file: string; line: int;
-                        st: CheckState; m: ModuleScan): string =
+                        st: CheckState; m: ModuleScan;
+                        bodyPragmas: var bool): string =
   ## RFC-0016 PRC-07. Why the routine's check state at the four checks cannot be
   ## taken as one answer: "" when it can. The walker models a routine compiled
   ## with such an option off as unchecked and one compiled with it on as
@@ -351,10 +457,14 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   ## routine that is checked at some positions only, or whose position is
   ## ambiguous, is neither, and is never assumed to be the build's setting.
   ## In a build with the option on, an ambiguous position is a deviation
-  ## already (`checks` keeps it, and the routine declines); a pragma inside the
-  ## routine's own definition is not, and is caught here.
+  ## already (`checks` keeps it, and the routine declines).
+  ##
+  ## RFC-0016 int6-a5: a check pragma inside the routine's own definition is a
+  ## push among its statements (one on the definition does not compile): it
+  ## sets `bodyPragmas`, and the parser walks each pair as a region. A routine
+  ## declared inside a body that pushes is unreadable here: its position is
+  ## that push's.
   let off = scopedChecks - buildSemantics.checks
-  let on = scopedChecks * buildSemantics.checks
   let both = off * st.maybeOn * st.maybeOff
   if both != {}:
     return "its position is both pushed on and off for " & $both
@@ -373,11 +483,26 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
       bodyAsts[file] = ast
     if ast != nil:
       let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
-      if def != nil:
-        let hit = inRoutineChecks(def, off, on)
-        if hit.len > 0:
-          return "it carries " & hit & " inside its own definition, so it is " &
-                 "checked at some positions and not others"
+      if def != nil and inRoutineChecks(def, allChecks, allChecks).len > 0:
+        bodyPragmas = true
+      let host = pushingHost(file, ast, def, line)
+      if host.len > 0:
+        return "it is declared inside " & host & ", whose body pushes " &
+               "check options: it takes that push's where it stands, which " &
+               "the scan of the module's statements does not read"
+
+proc stdlibDefClean(impl: NimNode; file: string; line: int;
+                    m: ModuleScan): bool =
+  ## RFC-0016 int6-a. A stdlib routine's definition, in the text the scan read,
+  ## holds no pragma naming any of the scoped checks, whatever its value: its
+  ## position's state then holds for its whole body. False where the text or
+  ## the definition cannot be found (fail closed: the push stays a deviation).
+  let ast = scannedAst(m, file)
+  if ast == nil: return false
+  let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
+  if def == nil: return false
+  # Every value of a named check is a hit with `off` and `on` both the set.
+  inRoutineChecks(def, scopedChecks, scopedChecks).len == 0
 
 proc routinePlace*(impl: NimNode): string =
   ## For a message: the routine, its file and line.
@@ -411,7 +536,7 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   let rootRaw = if rootAt.len > 0: rootAt else: moduleFileOf(impl[0], li.filename)
   let root = normalPath(rootRaw)
   if isOwnRuntime(root): return
-  if root notin moduleScans: moduleScans[root] = scanModule(rootRaw)
+  discard scanOf(root, rootRaw)
   if moduleScans[root].unknown.len > 0:
     return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
                          why: moduleScans[root].unknown)
@@ -427,6 +552,10 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
         why: "the module's text on disk is not the text the compiler parsed: " &
              stale)
   let st = stateAt(moduleScans[root], file, li.line, li.column)
+  # RFC-0016 int6-a2: a position read both ways may be decided by a
+  # `defined(x)` the scan could not evaluate; the entry macro asks its call
+  # site (`undecidedDefines`) and expands again.
+  if st.maybeOn * st.maybeOff != {}: noteUndecided(moduleScans[root])
   result.checks = deviation(st)
   result.assertsMaybeOff = coAssert in st.maybeOff or
     coAssert in moduleScans[root].everything.maybeOff
@@ -470,7 +599,9 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
     result.infOn = true
     result.checks.excl coInf
   result.overflowOn = coOverflow notin result.checks
-  let unreadable = positionUnreadable(impl, file, li.line, st, moduleScans[root])
+  result.bodyRegions = not isStdlibFile(file)
+  let unreadable = positionUnreadable(impl, file, li.line, st, moduleScans[root],
+                                      result.bodyPragmas)
   if unreadable.len > 0:
     result.why = "the routine's range, bound, field, object or overflow checks differ " &
       "within it, not modelled as one setting: " & unreadable
@@ -480,12 +611,22 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   # RFC-0016 int6-o: `overflowChecks` likewise; its body is walked unchecked
   # (`asPushedOff`), as the build route walks a `--overflowChecks:off` build.
   # `overflowOn` above was read before the move, so it stays false for it.
-  if result.why.len == 0 and not rootStdlib:
+  # RFC-0016 int6-a: a stdlib routine likewise, now that a body is walked
+  # under its own scope: the K4c delta was the only model of a stdlib push
+  # when a routine could only be walked under the build's checks. Its file's
+  # text is the scan's (`stdlibDefClean`), so a pragma inside its definition
+  # is seen; one that names any of the checks leaves them deviations.
+  let stdlibClean = rootStdlib and result.why.len == 0 and
+                    stdlibDefClean(impl, file, li.line, moduleScans[root])
+  if result.why.len == 0 and (not rootStdlib or stdlibClean):
     for co in scopedChecks * buildSemantics.checks:
       if co in result.checks and co in st.maybeOff and co notin st.maybeOn and
          co notin leaked:
-        result.checks.excl co
-        result.offModelled.incl co
+        if rootStdlib and co == coOverflow:
+          result.overflowOffExact = true
+        else:
+          result.checks.excl co
+          result.offModelled.incl co
   if coRange notin buildSemantics.checks:
     result.rangeOn = coRange notin result.checks
     result.checks = result.checks - {coRange}

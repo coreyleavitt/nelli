@@ -11,7 +11,9 @@
 ##     `v *= k` stores 30 into a `range[0..10]` without a raise;
 ##   * a routine declared outside the push keeps the build's (unchecked) when
 ##     called from inside it, and one declared under it keeps the push when
-##     called from outside.
+##     called from outside;
+##   * a `push boundChecks: on` inside a routine body checks its region:
+##     `s[5]` there raises `IndexDefect` (RFC-0016 int6-a5).
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -47,6 +49,30 @@ proc idxOn(v: int) =
   if s[v] == 30: symexTarget("hit")
 {.pop.}
 
+proc innerBoundOn(v: int) =
+  ## RFC-0016 int6-a5: a push inside the body, its region checked.
+  let s = @[10, 20, 30]
+  {.push boundChecks: on.}
+  let x = s[v]
+  {.pop.}
+  if x == 30: symexTarget("hit")
+
+proc opBoundOn(v: int) {.symexOpaque.} =
+  ## RFC-0016 int6-a5: an opaque callee whose body checks one region. The
+  ## opaque defect scan read the body under its declaration's options (the
+  ## build's, unchecked): `s[v]` was undefined out of the seq, never an
+  ## `IndexDefect`, so a handler around the call was unreachable.
+  let s = @[10, 20, 30]
+  {.push boundChecks: on.}
+  discard s[v]
+  {.pop.}
+
+proc sutOpaqueBoundOn(v: int) =
+  try:
+    opBoundOn(v)
+  except IndexDefect:
+    symexTarget("hit")
+
 template keeps(fn: untyped) =
   let r = pinFind(fn, tLabel("hit"))
   checkpoint show(r.errors)
@@ -77,6 +103,21 @@ suite "int6 check scopes: a pushed-on region in an unchecked build":
     let r = pinFind(idxOn, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
+
+  test "a push boundChecks: on inside a body raises there (int6-a5)":
+    check native(innerBoundOn(5)) == "IndexDefect"
+    check native(innerBoundOn(2)) == "hit"
+    raises(innerBoundOn, "IndexDefect")
+    let r = pinFind(innerBoundOn, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+
+  test "an opaque callee's in-body push is not read as one scope (int6-a5)":
+    check native(sutOpaqueBoundOn(5)) == "hit"
+    check native(sutOpaqueBoundOn(2)) == "ran"
+    let r = symexFind(sutOpaqueBoundOn, tLabel("hit"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status != sxUnsat
 
 suite "int6 check scopes (off build): walker version":
   test "walker version floor >= 465":

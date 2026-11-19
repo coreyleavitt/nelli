@@ -1428,7 +1428,25 @@ type
                                    ## classification one loop too often, never
                                    ## a wrong sat/unsat/raised verdict.
 
+  RegionFrame* = object
+    ## RFC-0016 int6-a5. One routine being parsed (`pushArithScope`): may its
+    ## body's check pushes be regions (`allowed`), how many iterators were
+    ## being inlined when it opened (`iterMark`: a push past it is in an
+    ## inlined iterator's expansion), and the regions now open in it.
+    allowed*: bool
+    iterMark*: int
+    open*: seq[int]
+
   ParseCtx* = ref object
+    regionFrames*: seq[RegionFrame]
+                                   ## RFC-0016 int6-a5. Per routine being
+                                   ## parsed, innermost last (`RegionFrame`).
+    regionFacts*: Table[int, tuple[facts: RoutineArithFacts,
+                                   on: set[CheckOption]]]
+                                   ## RFC-0016 int6-a5. Per region id, the
+                                   ## arithmetic and the check scope its push
+                                   ## opened: read when `withCheckDeclines`
+                                   ## groups the region's statements.
     iterBodies*: seq[tuple[own: bool, caller: set[CheckOption]]]
                                    ## RFC-0016 W3-z P2. Per iterator being
                                    ## inlined, innermost last: `own` where it
@@ -1861,10 +1879,104 @@ proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
   ctx.arith.enterParse arithFacts(c, inherit)
   ctx.openCheckScope(if inherit and ctx.checkScopes.len > 0: ctx.checkScopes[^1]
                      else: checkedIn(c) + floatOn(c))
+  ctx.regionFrames.add RegionFrame(allowed: not inherit and c.bodyRegions,
+                                   iterMark: ctx.iterBodies.len)
 
-proc popArithScope(ctx: ParseCtx) =
+proc closeRegion(ctx: ParseCtx) =
+  ## RFC-0016 int6-a5. Leaves the innermost region of the routine being parsed.
+  discard ctx.regionFrames[^1].open.pop()
   ctx.arith.leave()
   discard ctx.checkScopes.pop()
+
+proc popArithScope(ctx: ParseCtx) =
+  # RFC-0016 int6-a5: a region left open (a push its body never pops) is
+  # unbalanced and declines (`withCheckDeclines`); its scopes go first.
+  while ctx.regionFrames[^1].open.len > 0: ctx.closeRegion()
+  discard ctx.regionFrames.pop()
+  ctx.arith.leave()
+  discard ctx.checkScopes.pop()
+
+const regionPush = "\x01cs+"
+const regionPop = "\x01cs-"
+  ## RFC-0016 int6-a5. The label prefixes of the marker statements a body's
+  ## check push and pop parse to (an empty `isBlock`, the region's id after
+  ## the prefix). `withCheckDeclines` replaces each pair by the region's block;
+  ## one left is a decline.
+
+proc pragmaWord(n: NimNode): string =
+  if n.kind in {nnkIdent, nnkSym}: n.strVal.toLowerAscii else: ""
+
+proc isPushPragma(n: NimNode): bool =
+  n.kind == nnkPragma and n.len >= 1 and pragmaWord(n[0]) == "push"
+
+proc isPopPragma(n: NimNode): bool =
+  n.kind == nnkPragma and n.len == 1 and pragmaWord(n[0]) == "pop"
+
+proc namesCheck(n: NimNode): bool =
+  ## A push item naming a check option (`rangeChecks: off`, `checks: on`).
+  let h = if n.kind == nnkExprColonExpr and n.len == 2: n[0] else: n
+  checksNamed(nameOf(h)) != {}
+
+proc isCheckPush(n: NimNode): bool =
+  ## RFC-0016 int6-a5. `{.push ...}` naming at least one check option.
+  if not isPushPragma(n): return false
+  for i in 1 ..< n.len:
+    if namesCheck(n[i]): return true
+
+proc literalOn(v: NimNode): int =
+  ## 1 on, 0 off, -1 otherwise. The typed body folds `off` and a `const` to
+  ## an integer literal.
+  case v.kind
+  of nnkIntLit .. nnkUInt64Lit: (if v.intVal == 0: 0 elif v.intVal == 1: 1
+                                 else: -1)
+  of nnkIdent, nnkSym: turnsOn(v)
+  else: -1  # k2: fail-closed: -1: parseCheckPragma declines feCheckOption on a value it cannot read
+
+proc parseCheckPragma(ctx: ParseCtx; n: NimNode): IRStmt =
+  ## RFC-0016 int6-a5. A check `push` or a `pop` among a routine's statements:
+  ## the marker of the region it opens or closes, applied to the parse (its
+  ## check scope and its arithmetic frame) as the code generator applies it,
+  ## in textual order. nil for a pragma statement this does not model (the
+  ## caller's catch-all declines it, as before).
+  if ctx.regionFrames.len == 0: return nil
+  let frame = ctx.regionFrames[^1]
+  if isPopPragma(n):
+    if not frame.allowed or frame.open.len == 0 or
+       ctx.iterBodies.len > frame.iterMark: return nil
+    let id = frame.open[^1]
+    ctx.closeRegion()
+    return mkLabelledBlock(regionPop & $id, @[])
+  if not isCheckPush(n): return nil
+  if ctx.iterBodies.len > frame.iterMark:
+    return ctx.declineMarker(feCheckOption, "a check push at line " &
+      $n.lineInfoObj.line & " inside an inlined iterator's expansion is " &
+      "not modelled (where it lands is not verified natively) -- path " &
+      "degraded to sxUnknown")
+  if not frame.allowed: return nil
+  var top = if ctx.checkScopes.len > 0: ctx.checkScopes[^1]
+            else: buildSemantics.checks * (scopeChecks + {coNan, coInf})
+  var ovfOn = ctx.overflowChecked
+  for i in 1 ..< n.len:
+    let it = n[i]
+    let t = if it.kind == nnkExprColonExpr and it.len == 2: literalOn(it[1])
+            else: -1
+    if not namesCheck(it) or t < 0:
+      return ctx.declineMarker(feCheckOption, "the check push at line " &
+        $n.lineInfoObj.line & " has `" & it.repr & "`, not a check option " &
+        "with a literal value -- path degraded to sxUnknown")
+    let named = checksNamed(nameOf(it[0]))
+    let scoped = named * (scopeChecks + {coNan, coInf})
+    if t == 1: top = top + scoped
+    else: top = top - scoped
+    if coOverflow in named: ovfOn = t == 1
+  let facts = RoutineArithFacts(readable: true, overflowOn: ovfOn,
+    overflowOff: not ovfOn and coOverflow in buildSemantics.checks)
+  let id = ctx.regionFacts.len + 1
+  ctx.regionFacts[id] = (facts: facts, on: top)
+  ctx.openCheckScope(top)
+  ctx.arith.enterParse(facts)
+  ctx.regionFrames[^1].open.add id
+  mkLabelledBlock(regionPush & $id, @[])
 
 const nelliStdlibLedger {.strdefine.} = ""
   ## RFC-0016 K4c. With `-d:nelliStdlibLedger=<file>`, the parser appends the
@@ -1893,6 +2005,13 @@ proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
   ## body trips is modelled (`overflowModelled`: the body is walked under
   ## `asUnchecked`). Anything else stays a deviation and declines
   ## (`withCheckDeclines`), as does a ledger row, whose delta is unknown.
+  ##
+  ## RFC-0016 int6-a: the four other checks a stdlib push turns off are no
+  ## deviation where its position was read off on every reading
+  ## (`routineChecks` moved them to `offModelled`): the body is walked under
+  ## its own scope, as a user routine's. Its `overflowChecks` turned off so
+  ## (`overflowOffExact`) and modelled by no row are walked `asPushedOff`,
+  ## as a user routine's are; a row's `asUnchecked` comes first.
   let key = stdlibRoutineKey(impl)
   if key.len == 0: return
   ledgerNote(key)
@@ -1903,12 +2022,15 @@ proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
     c.unadmitted = why
     c.unadmittedKind = kind.get(feUnadmitted)
     return
-  if not adm.admitted: return
-  if c.why.len > 0 or c.checks == {} or not adm.payload.deltaKnown: return
-  var ex = adm.payload.exercises
-  c.checks = (c.checks * ex) + (c.checks * defaultOff)
-  c.overflowModelled = coOverflow in c.checks
-  if c.overflowModelled: c.overflowRow = adm   # ADM-IR: the stamp's proof
+  if c.why.len > 0 or c.checks == {}: return
+  if adm.payload.deltaKnown:
+    var ex = adm.payload.exercises
+    c.checks = (c.checks * ex) + (c.checks * defaultOff)
+    c.overflowModelled = coOverflow in c.checks
+    if c.overflowModelled: c.overflowRow = adm   # ADM-IR: the stamp's proof
+  if coOverflow in c.checks and not c.overflowModelled and c.overflowOffExact:
+    c.checks.excl coOverflow
+    c.offModelled.incl coOverflow
 proc noaliasWithPeers(impl: NimNode): seq[string] =
   ## RFC-0016 K10a-axis. The names of the `{.noalias.}` parameters of the
   ## routine `impl` when another parameter is pointer-like too (`ptr`, `ref`,
@@ -1952,6 +2074,198 @@ proc uncheckedTypedIndex(checkedRange: bool; idx: NimNode): bool =
   if idx.kind in {nnkHiddenStdConv, nnkHiddenSubConv}: return false
   idx.typeKind in {ntyRange, ntyEnum}
 
+proc strayPopError(n: NimNode): string =
+  ## RFC-0016 int6-a5. "" when no `{.pop.}` among the statements of the typed
+  ## body `n` closes a push its own statement list did not make; else where.
+  ## Such a pop is the cause of the shape, so it is named before the push it
+  ## closes, which `regionShapeError` would otherwise report as left open.
+  if n.kind in RoutineNodes: return
+  if n.kind in {nnkStmtList, nnkStmtListExpr}:
+    var open = 0
+    for c in n:
+      if isPushPragma(c): inc open
+      elif isPopPragma(c):
+        if open == 0:
+          return "the `{.pop.}` at line " & $c.lineInfoObj.line &
+            " closes a push made in another statement list (a `when` " &
+            "branch): the region spans the boundary unevenly"
+        dec open
+      else:
+        let e = strayPopError(c)
+        if e.len > 0: return e
+    return
+  for c in n:
+    let e = strayPopError(c)
+    if e.len > 0: return e
+
+proc regionShapeError(n: NimNode): string =
+  ## RFC-0016 int6-a5. "" when every check push among the statements of the
+  ## typed body `n` is popped in its own statement list, with no `defer`
+  ## between them; else why not. A routine declared in the body is its own.
+  ## Natively (the pinned toolchain) the code generator applies a push in
+  ## textual order whatever the statement list: one in an `if` branch or a
+  ## `block` with no pop there holds for the rest of the routine, whether the
+  ## branch runs or not (it is never read as branch-scoped); one inside a
+  ## `when` branch is popped after it (`strayPopError`, checked first); a
+  ## `defer`'s body runs at the end of its list, past the pop. Each is
+  ## declined.
+  if n.kind in RoutineNodes: return
+  if n.kind in {nnkStmtList, nnkStmtListExpr}:
+    var open: seq[NimNode]
+    for c in n:
+      if isPushPragma(c): open.add c
+      elif isPopPragma(c):
+        if open.len == 0:
+          return "the `{.pop.}` at line " & $c.lineInfoObj.line &
+            " closes a push made in another statement list (a `when` " &
+            "branch): the region spans the boundary unevenly"
+        discard open.pop()
+      elif c.kind == nnkDefer and open.len > 0:
+        return "a `defer` at line " & $c.lineInfoObj.line & " inside a " &
+          "pushed region runs its body at the end of its list, past the pop"
+      else:
+        let e = regionShapeError(c)
+        if e.len > 0: return e
+    for o in open:
+      if isCheckPush(o):
+        return "the check push at line " & $o.lineInfoObj.line & " is not " &
+          "popped in its own statement list: it holds for the rest of the " &
+          "routine (past a branch it sits in, run or not)"
+    return
+  if isPushPragma(n) or isPopPragma(n):
+    return "the push or pop at line " & $n.lineInfoObj.line & " is not a " &
+      "statement of a statement list"
+  for c in n:
+    let e = regionShapeError(c)
+    if e.len > 0: return e
+
+proc regionMarker(s: IRStmt): tuple[push: bool; id: int] =
+  ## RFC-0016 int6-a5. `id` > 0 for a region marker (`parseCheckPragma`).
+  if s == nil or s.kind != isBlock or s.stmts.len > 0 or s.blkLabel.len < 5:
+    return
+  let push = s.blkLabel.startsWith(regionPush)
+  if not push and not s.blkLabel.startsWith(regionPop): return
+  try: (push: push, id: parseInt(s.blkLabel[regionPush.len .. ^1]))
+  except ValueError: (push: false, id: 0)
+
+proc plainBlock(s: IRStmt): bool =
+  s != nil and s.kind == isBlock and s.blkLabel.len == 0 and
+    not s.blkScoped and not s.blkArith.claims
+
+proc holdsMarker(s: IRStmt): bool =
+  ## A region marker among `s`'s statements, through plain blocks only.
+  if regionMarker(s).id > 0: return true
+  if plainBlock(s):
+    for x in s.stmts:
+      if holdsMarker(x): return true
+
+proc flattenMarked(stmts: seq[IRStmt]): seq[IRStmt] =
+  ## The plain blocks holding a marker spliced into the sequence: the parse
+  ## nests the rest of a statement list in one (`parseDeferList`'s alias and
+  ## cursor rewrites), and a plain block is walk-transparent (`walkBlock`
+  ## opens no scope), so splicing it changes nothing but where a region may
+  ## end. The typed body was held to one statement list per region first
+  ## (`regionShapeError`).
+  for s in stmts:
+    if plainBlock(s) and holdsMarker(s): result.add flattenMarked(s.stmts)
+    else: result.add s
+
+proc groupRegions(ctx: ParseCtx; s: IRStmt; seen: var seq[int];
+                  err: var string)
+
+proc groupSeq(ctx: ParseCtx; stmts: seq[IRStmt]; seen: var seq[int];
+              err: var string): seq[IRStmt] =
+  ## RFC-0016 int6-a5. `stmts` with each push/pop marker pair replaced by the
+  ## region's block: the statements between them walked under the region's
+  ## arithmetic (`mkRoutineBlock`) and check scope (`withCheckScope`), whose
+  ## walk restores both when it leaves the block, however the paths leave.
+  var stack: seq[tuple[id: int; stmts: seq[IRStmt]]]
+  for s in flattenMarked(stmts):
+    let m = regionMarker(s)
+    if m.id == 0:
+      ctx.groupRegions(s, seen, err)
+      if stack.len > 0: stack[^1].stmts.add s
+      else: result.add s
+    elif m.push:
+      if m.id in seen:
+        err = "a region's statements were copied by the parse"
+        return stmts
+      seen.add m.id
+      stack.add (id: m.id, stmts: newSeq[IRStmt]())
+    else:
+      if stack.len == 0 or stack[^1].id != m.id or m.id notin ctx.regionFacts:
+        err = "a region's pop was parsed apart from its push"
+        return stmts
+      let fr = stack.pop()
+      let r = ctx.regionFacts[m.id]
+      let blk = mkRoutineBlock(r.facts, fr.stmts).withCheckScope(
+        r.on * scopeChecks)
+      if stack.len > 0: stack[^1].stmts.add blk
+      else: result.add blk
+  if stack.len > 0:
+    err = "a region's push was parsed apart from its pop"
+    return stmts
+
+proc groupRegions(ctx: ParseCtx; s: IRStmt; seen: var seq[int];
+                  err: var string) =
+  ## Groups the regions of every statement sequence under `s`, in place. A
+  ## marker standing alone where a sequence is not is unbalanced.
+  template slot(x: IRStmt) =
+    if x != nil:
+      if regionMarker(x).id > 0:
+        err = "a region's push or pop stands alone in a branch"
+      else: ctx.groupRegions(x, seen, err)
+  if s == nil or err.len > 0: return
+  case s.kind
+  of isBlock:
+    if regionMarker(s).id == 0: s.stmts = ctx.groupSeq(s.stmts, seen, err)
+  of isIf:
+    for br in s.branches: slot(br.body)
+    slot(s.elseBody)
+  of isWhile: slot(s.wbody)
+  of isTry:
+    slot(s.tryBody)
+    for h in s.tryHandlers: slot(h.body)
+    slot(s.tryFinally)
+  else: discard
+
+proc countMarkers(s: IRStmt): int =
+  ## The markers left anywhere a statement sequence holds them.
+  if s == nil: return
+  if regionMarker(s).id > 0: return 1
+  case s.kind
+  of isBlock:
+    for x in s.stmts: result += countMarkers(x)
+  of isIf:
+    for br in s.branches: result += countMarkers(br.body)
+    result += countMarkers(s.elseBody)
+  of isWhile: result += countMarkers(s.wbody)
+  of isTry:
+    result += countMarkers(s.tryBody)
+    for h in s.tryHandlers: result += countMarkers(h.body)
+    result += countMarkers(s.tryFinally)
+  else: discard
+
+proc bodyRegionDecline(ctx: ParseCtx; impl: NimNode; body: var IRStmt): string =
+  ## RFC-0016 int6-a5. Groups the check regions of the routine body `body`
+  ## (`groupSeq`), or says why it cannot: "" when it has none or all grouped.
+  ## The typed body is the ground truth for the shape (`regionShapeError`);
+  ## the IR is held to it, and any marker left over (one the parse dropped
+  ## or put where no sequence reaches) declines.
+  if ctx.regionFacts.len == 0 or body == nil: return
+  if countMarkers(body) == 0: return
+  let shape = if impl == nil or impl.len <= 6: "its body is not at hand"
+              elif (let e = strayPopError(impl[6]); e.len > 0): e
+              else: regionShapeError(impl[6])
+  if shape.len > 0: return shape
+  var seen: seq[int]
+  var err = ""
+  if regionMarker(body).id > 0: err = "a region's push or pop is its whole body"
+  else: ctx.groupRegions(body, seen, err)
+  if err.len == 0 and countMarkers(body) > 0:
+    err = "a region's marker was left where no statement sequence holds it"
+  err
+
 proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
                        body: IRStmt; inherit = false): IRStmt =
   ## RFC-0005 S8cu. `body` behind the markers for what `c` says of the routine
@@ -1991,6 +2305,13 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
       "alias, which is not modelled (" & naWhy & ")",
       "a `noalias` parameter beside another pointer-like parameter")
   let others = c.checks - {coOverflow}
+  # RFC-0016 int6-a5: the body's check pushes, each pair a region of its own.
+  var body = body
+  let regions = ctx.bodyRegionDecline(impl, body)
+  if regions.len > 0:
+    decl.add ctx.declineMarker(feCheckOption, where &
+      ": its body's check push and pop are not modelled as regions: " &
+      regions & " -- path degraded to sxUnknown")
   if c.why.len > 0:
     decl.add ctx.declineMarker(feCheckOption, where &
       ": its check options cannot be read (" & c.why & ") -- path degraded to sxUnknown")
@@ -5749,6 +6070,10 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # A converter's or iterator's body is scanned like a proc's.
         if fDef.len > 6 and fDef[6].kind != nnkEmpty:
           if depth >= maxDefectScanDepth: addUnreadable()
+          elif routineChecks(fDef).bodyPragmas:
+            # RFC-0016 int6-a5: its body pushes check options, so it is not
+            # one scope; this scan reads a body under its owner's options.
+            addUnreadable()
           else: scanOpaqueDefects(fDef[6], scan, seen, depth + 1, ctx,
                                   fDef, memo)
         else:
@@ -5824,6 +6149,15 @@ proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
   var memo: FloatCheckMemo
   let impl = resolveRoutineOrLambdaImpl(calleeSym)   # RFC-0016 W3-z R8
   if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty:
+    result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
+    return
+  if routineChecks(impl).bodyPragmas:
+    # RFC-0016 int6-a5: a body that pushes check options is not one scope,
+    # and the scan reads each node under its owner's options (`ownerChecked`):
+    # a region checked against the build's reading lost its Defect (a handler
+    # around the call was a false sxUnsat), one unchecked lost its undefined
+    # behaviour. Unreadable, as a closure or a method is.
+    result.noteDefect anyDefect
     result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
     return
   scanOpaqueDefects(impl[6], result, seen, 0, ctx, impl, memo)
@@ -25578,6 +25912,14 @@ proc parseStmtInner(n: NimNode,
     # reads, hooks by type); it runs nothing where it stands. It was
     # `feUnsupportedStmtKind`, which tainted every path past it.
     mkBlock(@[])
+  of nnkPragma:
+    # RFC-0016 int6-a5: a check `push`/`pop` among the routine's statements
+    # opens or closes a region (`parseCheckPragma`). Any other pragma
+    # statement is the catch-all's, as before.
+    let r = ctx.parseCheckPragma(n)
+    if r != nil: r
+    else: ctx.declineMarker(feUnsupportedStmtKind,
+                            &"statement kind {n.kind} not in supported fragment")
   else:
     ctx.declineMarker(feUnsupportedStmtKind, &"statement kind {n.kind} not in supported fragment")
 

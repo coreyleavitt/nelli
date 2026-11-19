@@ -128,36 +128,65 @@ proc sutUncheckedPart(v: int) =
   {.pop.}
   if int(r) == 300: symexTarget("hit")
 
+proc opPushOn(v: int) {.symexOpaque.} =
+  ## An opaque callee whose body checks one region: natively `R(300)` raises
+  ## `RangeDefect` out of it. The opaque scan lists a conversion's
+  ## `RangeDefect` whatever the owner's options, so this held before int6-a5;
+  ## it is the direction-of-build control for the int6-a5 suite's overflow row.
+  {.push rangeChecks: on.}
+  discard R(v)
+  {.pop.}
+
+proc sutOpaquePushOn(v: int) =
+  try:
+    opPushOn(v)
+  except RangeDefect:
+    symexTarget("hit")
+
 when defined(rangeoffPushed):
   {.push rangeChecks: on.}
 proc sutAmbiguous(v: int) =
   ## `rangeoffPushed` is set by this file's `.cfg`, so natively the routine is
-  ## checked and `R(v)` raises at 300. The scan cannot decide `defined(...)`:
-  ## the position reads as both pushed on and off, and was taken as the
-  ## build's setting (unchecked), which keeps 300 and never raises.
+  ## checked and `R(v)` raises at 300. The scan cannot decide `defined(...)`
+  ## from text: the entry macro has its call site evaluate it and expands
+  ## again (RFC-0016 int6-a2). It was read both ways and declined, and before
+  ## that taken as the build's setting (unchecked), which never raises.
   discard R(v)
   if v == 300: symexTarget("hit")
 when defined(rangeoffPushed):
   {.pop.}
 
 suite "PRC-07: range checks that differ within a routine (never the build's)":
-  test "a push around part of a body declines, it is not read as unchecked":
-    let r = symexFind(sutPartlyChecked, tRaisedExn("RangeDefect"), pinSettingsConst)
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feCheckOption)
-    check not r.trusted
-  test "a position that is both pushed on and off declines, it is not read as unchecked":
-    let r = symexFind(sutAmbiguous, tRaisedExn("RangeDefect"), pinSettingsConst)
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feCheckOption)
-    check not r.trusted
-  test "an unchecked head before a checked tail declines whole":
-    let r = symexFind(sutUncheckedPart, tLabel("hit"), pinSettingsConst)
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feCheckOption)
+  # RFC-0016 int6-a5: re-pinned against native. A push inside a routine body
+  # is a region of its own (its typed pragma statements, in textual order),
+  # walked under its scope; it declined `feCheckOption` before.
+  test "a push around part of a body is walked checked there":
+    check native(sutPartlyChecked(300)) == "RangeDefect"
+    check native(sutPartlyChecked(5)) == "ran"
+    let x = pinFind(sutPartlyChecked, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+    check not x.errors.named(feCheckOption)
+  test "an opaque callee's in-body push is not read as one scope (int6-a5)":
+    check native(sutOpaquePushOn(300)) == "hit"
+    check native(sutOpaquePushOn(5)) == "ran"
+    let x = symexFind(sutOpaquePushOn, tLabel("hit"))
+    checkpoint $x.status & " " & show(x.errors)
+    check x.status != sxUnsat
+  test "a push under a defined() condition is walked as compiled (int6-a2)":
+    check native(sutAmbiguous(300)) == "RangeDefect"
+    check native(sutAmbiguous(5)) == "ran"
+    let x = pinFind(sutAmbiguous, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+    check not x.errors.named(feCheckOption)
+  test "an unchecked head before a checked tail raises in the tail":
+    check native(sutUncheckedPart(300)) == "RangeDefect"
+    check native(sutUncheckedPart(5)) == "ran"
+    let x = pinFind(sutUncheckedPart, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+    check not x.errors.named(feCheckOption)
 
 suite "PRC-07: range conversions with --rangeChecks:off":
   test "version floor":

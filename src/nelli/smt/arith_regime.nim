@@ -103,6 +103,7 @@ type
                             ## none (`RoutineChecks.overflowRow.cell.key`)
     overflowOff*: bool      ## RFC-0016 int6-o. `coOverflow in
                             ## RoutineChecks.offModelled`: a user routine's
+                            ## (int6-a: or a stdlib routine's no row models)
                             ## position turns the build's overflow checks off
                             ## on every reading, with no importer's push
                             ## reaching it. Not a deviation (`overflowDeviates`

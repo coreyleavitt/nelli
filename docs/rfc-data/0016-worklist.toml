@@ -3005,3 +3005,19 @@ evidence = "red at 6ba0de89: the target over `a: ptr int`, `b: ptr float` at one
 aliases = []
 cells = []
 pins = ["tsymex_0016_int90_crosssortheap", "tsymex_0016_int90_heapput_audit"]
+
+[[row]]
+id = "INT-93"
+table = "5.8c"
+title = "int6 integration: `pointer(addr x) == pointer(addr y)` with `x: int` and `y: float` locals was a trusted false `sxSat` (INT-65's `i65PointerCrossSort`, once INT-83's pointer model met it). INT-83 tags a `ref`'s whole object by its type, but an address cell (`addr x`) carried no tag and no provenance, so two sorts' cells were unrelated in the `pointer` space, and a caller's pointer could equal a callee local's address. INT-90 deliberately lets two `ptr` parameters of different sorts share an address, so a decline of cross-sort pairs is wrong (it turned INT-88 and INT-90 red)"
+class = "soundness"
+state = "closed"
+note = "fixed in the walker (455): the address of a `var` or `let` of the routine (not a parameter, `result`, a global, a `{.global.}` or a `for` variable: `frameSlotLocal`), and of a field of a plain object or tuple one, is an address into the local's own frame slot (`isNew.nFrame`, `nFrameOff`: 0 for the local, the compiler's `cFieldOffsets` for an object's field, the index for an anonymous tuple of non-zero-sized fields, else unknown). Its typed cell is minted under a name of its own (`frameCellName`: one name is one slot on every path, so facts about it hold run-wide): it is no object of the walk's entry state (INT-82's `allocatedNames`, `not @pre`), and converted to `pointer` (`pointerAddrOf`, `pointerFrameFacts`) its address has the frame kind (`@addrKind`, a code no `ref` whole object has), its object's number (`@addrObj`, one per local per frame descent) and its offset (`@addrOff`); two images of one object at one offset are asserted equal. So two locals' addresses differ whatever their types, a parameter's pointer never addresses a callee local, a local is no `new` object, and two addresses into one local are equal exactly at one offset (the first field is the local's own address). INT-90's cross-sort parameter aliasing is unchanged. An array element's address (`addr a[i]` of an array local) has no cell in the walk and declines by name (`feUnsupportedExprKind`, a precision gap)"
+sha = "84441eda"
+slice = "K9d"
+home = "int6 integration (`wip/int6b`)"
+source = "int6 merge of INT-65 and INT-83 (`tsymex_0016_int65_ptrnil`)"
+evidence = "red at 30ccbeae (the new suite on the int6 tip): `lCrossType` (int and float locals as pointers), `lVsPtrParam` (a `ptr float` parameter's pointer equal to an int local's), `lVsRef` (a float local's address equal to a `new int`'s) and `lFirstFieldNotApart` (`pointer(addr o.a) != pointer(addr o)`) were trusted `sxSat` whose witnesses do not hit natively; `lSecondFieldIsNot` was one too before the field offsets; `int65_ptrnil`'s CrossSort the same. Green at 84441eda (c, dt-bounded 900): `tsymex_0016_int93_localaddr` 8/8 (every definite verdict pinned by pinFind: same-type, cross-type and `let`-held locals unsat; `ptr float`, `ptr int` (as pointer and typed) and `pointer` parameters against a local unsat; a local against `new` unsat; two fields, the second field against the object, a field read twice, two tuple fields, mixed-type fields and a field against another local unsat; the first field at the object's address sat; `addr x == addr x` sat as pointer and typed; array elements decline `feUnsupportedExprKind`); `int65_ptrnil` 10/10 (CrossSort `pinExact` unsat); `int83_pointerparam` 19/19; `int88_crossptralias` 8/8; CR2 12/12 (455); `universe` 106/106; `d3_include_census` 51/51; `rfc0005_s7_closure` 37/37; `s8ckr_threadstate_audit` 2/2. `int90_crosssortheap` run alone: rc=137 at the 900 s bound (916 s wall) with 12 OK and 0 failed, as at 30ccbeae (not a regression; its runtime is open)"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int93_localaddr", "tsymex_0016_int65_ptrnil"]

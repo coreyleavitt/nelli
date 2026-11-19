@@ -107,7 +107,10 @@ suite "S8bt: replace on PCRE 8.37's JIT (part " & $s8btReplacePart & ")":
         inc checked
         let sol = newSolver(ctx)
         let prm = newParams(ctx)
-        prm.set("timeout", 10000)
+        # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
+        # the host's load. Worst check measured 3,677 units (Z3 5.1; part b), budget 40k.
+        prm.set("rlimit", 40_000'u)
+        prm.set("random_seed", 0'u)
         sol.setParams(prm)
         sol.add sv == mkString(subj)
         sol.add r != mkString(pcreReplace(n, subj, "-"))

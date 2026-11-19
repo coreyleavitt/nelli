@@ -149,7 +149,10 @@ suite "S8bb (6): the Z3 term is Nim's replace":
         # substitute the subject and took minutes for the same queries.
         let sol = newSolver(ctx)
         let prm = newParams(ctx)
-        prm.set("timeout", 10000)
+        # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
+        # the host's load. Worst check measured 1,961 units (Z3 5.1), budget 20k.
+        prm.set("rlimit", 20_000'u)
+        prm.set("random_seed", 0'u)
         sol.setParams(prm)
         sol.add sv == mkString(subj)
         sol.add r != mkString(subj.replace(rx, "-"))

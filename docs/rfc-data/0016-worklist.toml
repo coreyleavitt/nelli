@@ -673,7 +673,6 @@ cells = ["construct:seq/nested/store", "construct:seq/nested/read", "construct:s
 pins = ["tsymex_0016_s8cpr_shapes"]
 source = "S8cl remainder"
 evidence = "declines"
-cells = []
 
 [[row]]
 id = "PRC-24"

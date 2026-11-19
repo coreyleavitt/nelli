@@ -2,6 +2,12 @@
 ## the float checks.
 ##
 ## Each row runs the routine natively on this build beside the walker's verdict.
+##
+## RFC-0016 int6: a routine whose position reads `fieldChecks: off` on every
+## reading is walked unchecked (`RoutineChecks.offModelled`) instead of
+## declining whole with `feCheckOption`; its wrong-branch write declines on
+## its own path (`inactiveFieldSide`, `feUnsupportedOp`). Natively it reaches
+## the label, so the decline is sound.
 import std/[unittest, sets, options]
 import nelli
 import nelli/symex
@@ -168,7 +174,7 @@ suite "S8cu: a forward declaration":
     check native(fwdUnder(4)) == "FieldDefect"
     decides(fwdUnder, sxRaised)
     check native(fwdClean(4)) == "hit"
-    pinDecline(fwdClean, declKey, feCheckOption)
+    pinDecline(fwdClean, declKey, feUnsupportedOp, excluding = {feCheckOption})
 
 suite "S8cu: routines of other kinds":
 
@@ -218,7 +224,7 @@ suite "S8cu: a callee":
 
   test "a callee under a push":
     check native(viaCallee(4)) == "hit"
-    pinDecline(viaCallee, declKey, feCheckOption)
+    pinDecline(viaCallee, declKey, feUnsupportedOp, excluding = {feCheckOption})
 
   test "one no input reaches does not decline the rest":
     check native(calleeNotReached(7)) == "hit"

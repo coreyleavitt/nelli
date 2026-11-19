@@ -1,6 +1,15 @@
 ## RFC-0005 S8cu -- the forms a check pragma comes in, in the routine's own file.
 ##
 ## Each row runs the routine natively on this build beside the walker's verdict.
+##
+## RFC-0016 int6: a position read as `fieldChecks: off` on every reading is
+## walked unchecked (`RoutineChecks.offModelled`), no longer declined whole
+## with `feCheckOption`. The wrong-branch write then declines on its own path
+## (`inactiveFieldSide`, `feUnsupportedOp`): the union image and the
+## active-member state follow the build's bit, which checks. Natively the
+## routine reaches the label, so the decline is sound. Under `checks: off`
+## the overflow push still declines (`feOverflowCheckOption`). A value that
+## is no literal and an undecided `when` still decline `feCheckOption`.
 import std/[unittest, sets]
 import nelli
 import nelli/symex
@@ -121,13 +130,13 @@ suite "S8cu: statements":
 
   test "a bare statement under a push, and the pop":
     check native(bareOff(4)) == "hit"
-    pinDecline(bareOff, declKey, feCheckOption)
+    pinDecline(bareOff, declKey, feUnsupportedOp, excluding = {feCheckOption})
     check native(barePopped(4)) == "FieldDefect"
     decides(barePopped, sxRaised)
 
   test "a bare statement with no push, and turned back on":
     check native(bareNoPush(4)) == "hit"
-    pinDecline(bareNoPush, declKey, feCheckOption)
+    pinDecline(bareNoPush, declKey, feUnsupportedOp, excluding = {feCheckOption})
     check native(bareBackOn(4)) == "FieldDefect"
     decides(bareBackOn, sxRaised)
 
@@ -135,9 +144,9 @@ suite "S8cu: user pragmas":
 
   test "a user pragma as a statement, with and without its own push":
     check native(userStmt(4)) == "hit"
-    pinDecline(userStmt, declKey, feCheckOption)
+    pinDecline(userStmt, declKey, feUnsupportedOp, excluding = {feCheckOption})
     check native(userPush(4)) == "hit"
-    pinDecline(userPush, declKey, feCheckOption)
+    pinDecline(userPush, declKey, feUnsupportedOp, excluding = {feCheckOption})
     check native(afterUser(4)) == "FieldDefect"
     decides(afterUser, sxRaised)
 
@@ -152,19 +161,20 @@ suite "S8cu: nesting":
     check native(innerOn(4)) == "FieldDefect"
     decides(innerOn, sxRaised)
     check native(innerPopped(4)) == "hit"
-    pinDecline(innerPopped, declKey, feCheckOption)
+    pinDecline(innerPopped, declKey, feUnsupportedOp, excluding = {feCheckOption})
 
   test "under `checks: off` the others stay off":
     check native(umbrellaInnerOn(4)) == "FieldDefect"
-    pinDecline(umbrellaInnerOn, declKey, feCheckOption)
+    pinDecline(umbrellaInnerOn, declKey, feOverflowCheckOption,
+               excluding = {feCheckOption})
 
 suite "S8cu: spelling":
 
   test "`false` and an underscore":
     check native(litFalse(4)) == "hit"
-    pinDecline(litFalse, declKey, feCheckOption)
+    pinDecline(litFalse, declKey, feUnsupportedOp, excluding = {feCheckOption})
     check native(underscored(4)) == "hit"
-    pinDecline(underscored, declKey, feCheckOption)
+    pinDecline(underscored, declKey, feUnsupportedOp, excluding = {feCheckOption})
 
   test "a value that is no literal is not read, either way":
     check native(constOff(4)) == "hit"
@@ -176,7 +186,7 @@ suite "S8cu: when":
 
   test "decided branches":
     check native(whenTrue(4)) == "hit"
-    pinDecline(whenTrue, declKey, feCheckOption)
+    pinDecline(whenTrue, declKey, feUnsupportedOp, excluding = {feCheckOption})
     check native(whenFalse(4)) == "FieldDefect"
     decides(whenFalse, sxRaised)
 

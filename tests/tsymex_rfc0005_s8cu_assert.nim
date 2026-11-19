@@ -50,7 +50,10 @@ suite "S8cu: assertions":
 
   test "`push checks: off` drops assert too, and the routine declines":
     check native(aChecksOff(4)) == "hit"
-    pinDecline(aChecksOff, declKey, feCheckOption)
+    # RFC-0016 int6: the range, bound, field and object checks it pushes off
+    # are modelled; its `overflowChecks: off` in a checked build declines.
+    pinDecline(aChecksOff, declKey, feOverflowCheckOption,
+               excluding = {feCheckOption})
 
   test "an iterator's first instantiation under the push: no assert, declines":
     # Was a false sxRaised: the walker modelled the length check.

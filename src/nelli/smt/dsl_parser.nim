@@ -1121,7 +1121,9 @@ proc emitStmt*(s: IRStmt): NimNode =
       newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
               newLit(s.nAddrOf), newNilLit(), newLit(""),
               newLit(s.nUninit),   # RFC-0005 S8ax; RFC-0016 PRC-07 `uninit`
-              newLit(s.nFrame), newLit(s.nFrameOff))   # RFC-0016 INT-93
+              newLit(s.nFrame), newLit(s.nFrameOff),   # RFC-0016 INT-93
+              (if s.nAddrVarTy != nil: emitIRType(s.nAddrVarTy)
+               else: newNilLit()))
   of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
     if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
       newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
@@ -8546,7 +8548,8 @@ proc lowerAddrCell(e, x: NimNode; preamble: var seq[IRStmt];
   let name = strVal(x)
   let frame = frameSlotLocal(x)
   preamble.add mkNewT(addrCellName(name), classifyType(e).ty, addrOf = name,
-                      frame = frame, frameOff = (if frame: 0 else: -1))
+                      frame = frame, frameOff = (if frame: 0 else: -1),
+                      addrVarTy = classifyType(x).ty)
   mkVar(addrCellName(name))
 
 proc isSymOf(n, sym: NimNode): bool =

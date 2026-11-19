@@ -1025,7 +1025,10 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     # (`variantSlots`), as a `ref` to one is.
     if ty.kind notin {itInt, itBool, itFloat32, itFloat64, itString, itTuple,
                       itSeq, itVariant, itMultiVariant}:
-      why = "of a variable of type " & $ty
+      # The variable's own type: `ty` is where the address converts to
+      # (`pointer` for a `pointer` formal).
+      why = "of a variable of type " &
+            $(if stmt.nAddrVarTy != nil: stmt.nAddrVarTy else: ty)
     elif local in w.frame.outerNames or
          (isGlobalEnvName(local) and not isModuleGlobalEnvName(local)):
       # RFC-0016 S8ch: a module-level variable's cell is threaded as the

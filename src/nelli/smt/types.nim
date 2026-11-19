@@ -1866,6 +1866,11 @@ type
                              ## offset of the address within the slot (0 for
                              ## the local itself, a field's C offset); -1
                              ## where the parser does not know it.
+      nAddrVarTy*: IRType    ## `addr x`'s variable's own type, for the
+                             ## decline text alone (`nRefTy` is the type the
+                             ## expression converts to, `pointer` for a
+                             ## `pointer` formal): not canonicalised, not in
+                             ## the verdict. nil where the parser has not set it.
     of isDerefWrite:
       dwPtr*:      IRExpr    ## Phase 15 R3: the ref/ptr expr being written through.
       dwValue*:    IRExpr    ## the RHS value stored into `dwPtr[]`.
@@ -4855,7 +4860,8 @@ proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType,
 
 proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
              addrIdx: IRExpr = nil; addrField = ""; uninit = false;
-             frame = false; frameOff = -1): IRStmt =
+             frame = false; frameOff = -1;
+             addrVarTy: IRType = nil): IRStmt =
   ## Phase 15 R1a (ADR-0010). `let retName = new(T)` allocation binding a fresh
   ## ref. `refTy` is the allocated `itRef`/`itPtr` type.
   ## RFC-0005 S8ax: `addrOf` names a local whose address cell this is.
@@ -4867,7 +4873,7 @@ proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
   ## frame slot at that offset (`isNew.nFrame`, `isNew.nFrameOff`).
   IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy, nAddrOf: addrOf,
          nAddrIdx: addrIdx, nAddrField: addrField, nUninit: uninit,
-         nFrame: frame, nFrameOff: frameOff)
+         nFrame: frame, nFrameOff: frameOff, nAddrVarTy: addrVarTy)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
                    ptrFamily = false, cell = false, inPlace = false): IRStmt =

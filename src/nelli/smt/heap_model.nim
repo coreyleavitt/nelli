@@ -3958,7 +3958,7 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         let arr = mkHeapArrayVar(ctx, refSort, tagTy, "heap_" & key)
         # Each raw term is wrapped (ref-counted) before the next Z3 call:
         # an unwrapped one may be collected under it.
-        let tag = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, refRaw))
+        let tag = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, refAny.raw))
         let code = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw,
           inheritTagCode(chain[lvl]), sortOfRaw(ctx, tag.raw)))
         pcOut.add(isNil or wrap[Z3Bool](ctx, checkedEq(ctx, tag.raw, code.raw)))

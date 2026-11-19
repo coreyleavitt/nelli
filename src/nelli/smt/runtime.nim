@@ -3661,14 +3661,16 @@ proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
   ## RFC-0005 S8at: a container value is rebuilt from its leaves' selects
   ## (`svWithLeaves` over its type's zero, whose leaves are all replaced).
   let valTy = sv.tabValTy
-  let raw0 = checkedSelect(ctx, sv.tabDataRaw.raw, keyRaw)
+  # owned at once (RFC-0016 int6-z): every arm below makes terms, and a raw
+  # select result lives only until the next call that makes one
+  let sel0 = wrap[Z3AnyAst](ctx, checkedSelect(ctx, sv.tabDataRaw.raw, keyRaw))
   case tabValLeaf(valTy)
-  of tvStr: SymVal(kind: svString, str: wrap[Z3String](ctx, raw0))
-  of tvF32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw0))
-  of tvF64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw0))
-  of tvCell: cellValue(wrap[Z3BitVec[64]](ctx, raw0), valTy)
+  of tvStr: SymVal(kind: svString, str: wrap[Z3String](ctx, sel0.raw))
+  of tvF32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, sel0.raw))
+  of tvF64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, sel0.raw))
+  of tvCell: cellValue(wrap[Z3BitVec[64]](ctx, sel0.raw), valTy)
   of tvTree:
-    var leaves = @[wrap[Z3AnyAst](ctx, raw0)]
+    var leaves = @[sel0]
     for m in sv.tabDataMore:
       leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, m.raw, keyRaw))
     svWithLeaves(ctx, defaultZero(valTy, "__tabValProto"), leaves, valTy)

@@ -1079,7 +1079,7 @@ proc witnessCellTypes*(params: seq[IRParam]): seq[IRType] =
   for p in params: collectHierPointees(p.ty, direct, seen)
   var roots: seq[string]
   for t in direct:
-    let r = hierChain(t)[0]
+    var r = hierChain(t)[0]   # a copy: the VM aliases a let (S8ab)
     if r notin roots: roots.add r
   result = direct
   for r in roots:
